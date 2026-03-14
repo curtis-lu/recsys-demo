@@ -1,0 +1,19 @@
+# Dataset Building Pipeline
+feature_table:
+  type: ParquetDataset
+  filepath: data/feature_table.parquet
+  backend: pandas
+
+label_table:
+  type: ParquetDataset
+  filepath: data/label_table.parquet
+  backend: pandas
+
+# Training Pipeline
+model:
+  type: PickleDataset
+  filepath: data/models/model.pkl
+
+preprocessor:
+  type: PickleDataset
+  filepath: data/models/preprocessor.pkl

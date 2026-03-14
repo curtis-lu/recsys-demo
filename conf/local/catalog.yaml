@@ -1,0 +1,18 @@
+# Local dev overrides - paths relative to project root
+feature_table:
+  type: ParquetDataset
+  filepath: data/feature_table.parquet
+  backend: pandas
+
+label_table:
+  type: ParquetDataset
+  filepath: data/label_table.parquet
+  backend: pandas
+
+model:
+  type: PickleDataset
+  filepath: data/models/model.pkl
+
+preprocessor:
+  type: PickleDataset
+  filepath: data/models/preprocessor.pkl
