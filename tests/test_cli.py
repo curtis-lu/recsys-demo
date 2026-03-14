@@ -44,7 +44,7 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            result = runner.invoke(app, ["--pipeline", "dataset"])
+            result = runner.invoke(app, ["--pipeline", "training"])
             assert result.exit_code == 0
         finally:
             os.chdir(old_cwd)

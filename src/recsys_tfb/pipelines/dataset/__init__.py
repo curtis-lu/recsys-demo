@@ -1,6 +1,3 @@
-from recsys_tfb.core.pipeline import Pipeline
+from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
 
-
-def create_pipeline() -> Pipeline:
-    """Create the dataset building pipeline."""
-    return Pipeline([])
+__all__ = ["create_pipeline"]
