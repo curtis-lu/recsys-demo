@@ -1,0 +1,9 @@
+inference:
+  snap_dates:
+    - "2024-03-31"
+  products:
+    - "bond"
+    - "fx"
+    - "mix"
+    - "stock"
+    - "usd"

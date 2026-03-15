@@ -89,3 +89,14 @@ preprocessor:
 category_mappings:
   type: JSONDataset
   filepath: data/models/category_mappings.json
+
+# Inference Pipeline
+scoring_dataset:
+  type: ParquetDataset
+  filepath: data/inference/scoring_dataset.parquet
+  backend: pandas
+
+ranked_predictions:
+  type: ParquetDataset
+  filepath: data/inference/ranked_predictions.parquet
+  backend: pandas
