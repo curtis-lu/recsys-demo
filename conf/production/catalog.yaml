@@ -1,0 +1,85 @@
+# Production overrides - Spark backend, HDFS paths
+
+# Dataset Building Pipeline - Source Tables
+feature_table:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/feature_table.parquet
+  backend: spark
+
+label_table:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/label_table.parquet
+  backend: spark
+
+# Dataset Building Pipeline - Intermediate Outputs
+sample_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/sample_keys.parquet
+  backend: spark
+
+train_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/train_keys.parquet
+  backend: spark
+
+train_dev_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/train_dev_keys.parquet
+  backend: spark
+
+val_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/val_keys.parquet
+  backend: spark
+
+train_set:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/train_set.parquet
+  backend: spark
+
+train_dev_set:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/train_dev_set.parquet
+  backend: spark
+
+val_set:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/val_set.parquet
+  backend: spark
+
+X_train:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/X_train.pkl
+
+y_train:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/y_train.pkl
+
+X_train_dev:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/X_train_dev.pkl
+
+y_train_dev:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/y_train_dev.pkl
+
+X_val:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/X_val.pkl
+
+y_val:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/dataset/y_val.pkl
+
+# Training Pipeline
+model:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/models/model.pkl
+
+preprocessor:
+  type: PickleDataset
+  filepath: hdfs:///data/recsys/models/preprocessor.pkl
+
+category_mappings:
+  type: JSONDataset
+  filepath: hdfs:///data/recsys/models/category_mappings.json

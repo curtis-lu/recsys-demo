@@ -1,0 +1,330 @@
+ ▐▛███▜▌   Claude Code v2.1.76
+▝▜█████▛▘  Sonnet 4.6 · Claude Pro
+  ▘▘ ▝▝    ~/projects/recsys_tfb
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Plan to implement                                                            │
+│                                                                              │
+│ Plan: Dataset Pipeline 中間資料持久化                                        │
+│                                                                              │
+│ Context                                                                      │
+│                                                                              │
+│ Dataset pipeline 目前的中間產出（sample_keys、train/dev/val                  │
+│ keys、train/dev/val sets、X/y arrays）都存在 MemoryDataset 中，pipeline      │
+│ 結束就消失。需要將這些資料持久化，方便開發除錯與正式環境復用。               │
+│                                                                              │
+│ 現有架構已完整支援：DataCatalog 會對未註冊的 dataset name 自動建立           │
+│ MemoryDataset，只要在 catalog.yaml 中註冊，就會自動使用對應的 I/O adapter    │
+│ 寫入磁碟。因此這個需求幾乎只需要設定檔變更。                                 │
+│                                                                              │
+│ 要持久化的 Datasets                                                          │
+│                                                                              │
+│ ┌────────────────┬────────────┬─────────────────────┬─────────────────────┐  │
+│ │  Dataset Name  │  資料型態  │   儲存格式 (dev)    │   儲存格式 (prod)   │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ sample_keys    │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ train_keys     │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ train_dev_keys │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ val_keys       │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ train_set      │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ train_dev_set  │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ val_set        │ DataFrame  │ ParquetDataset      │ ParquetDataset      │  │
+│ │                │            │ (pandas)            │ (spark)             │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ X_train        │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ y_train        │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ X_train_dev    │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ y_train_dev    │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ X_val          │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ ├────────────────┼────────────┼─────────────────────┼─────────────────────┤  │
+│ │ y_val          │ numpy      │ PickleDataset       │ PickleDataset       │  │
+│ │                │ array      │                     │                     │  │
+│ └────────────────┴────────────┴─────────────────────┴─────────────────────┘  │
+│                                                                              │
+│ ▎ preprocessor 和 category_mappings 已在 catalog.yaml 中註冊。               │
+│                                                                              │
+│ 實作步驟                                                                     │
+│                                                                              │
+│ Step 1: 更新 conf/base/catalog.yaml                                          │
+│                                                                              │
+│ 新增所有中間 dataset 的定義。DataFrame 類型使用 ParquetDataset (預設 pandas  │
+│ backend)，numpy array 使用 PickleDataset。                                   │
+│                                                                              │
+│ 路徑規劃：                                                                   │
+│ - data/dataset/sample_keys.parquet                                           │
+│ - data/dataset/train_keys.parquet / train_dev_keys.parquet /                 │
+│ val_keys.parquet                                                             │
+│ - data/dataset/train_set.parquet / train_dev_set.parquet / val_set.parquet   │
+│ - data/dataset/X_train.pkl / y_train.pkl / etc.                              │
+│                                                                              │
+│ Step 2: 同步更新 conf/local/catalog.yaml                                     │
+│                                                                              │
+│ local 環境的覆寫設定（與 base 相同，pandas backend）。                       │
+│                                                                              │
+│ Step 3: 建立 conf/production/catalog.yaml                                    │
+│                                                                              │
+│ 建立正式環境設定檔，DataFrame datasets 改用 spark backend，filepath 指向     │
+│ HDFS 路徑。                                                                  │
+│                                                                              │
+│ Step 4: 測試驗證                                                             │
+│                                                                              │
+│ - 執行既有測試確認不破壞現有功能                                             │
+│ - 手動執行 dataset pipeline (python -m recsys_tfb run -p dataset -e local)   │
+│ 確認中間檔案產出正確                                                         │
+│                                                                              │
+│ 不需要修改的部分                                                             │
+│                                                                              │
+│ - pipeline 程式碼 — 不動，nodes.py / pipeline.py 保持原樣                    │
+│ - framework 核心 — Runner、DataCatalog、ParquetDataset 已支援                │
+│ - 測試 — 既有測試使用 MemoryDataset mock，不受 catalog 設定影響              │
+│                                                                              │
+│ Verification                                                                 │
+│                                                                              │
+│ 1. pytest — 全部通過                                                         │
+│ 2. python -m recsys_tfb run -p dataset -e local — 確認 data/dataset/         │
+│ 下產出所有中間檔案                                                           │
+│ 3. 確認檔案可被重新讀取（pd.read_parquet() / pickle.load()）                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+⏺ Let me read the relevant files first.
+
+⏺ Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+⏺ Now let me implement the three steps. The plan is clear and mostly config-only
+   changes.
+
+  Step 1: Update conf/base/catalog.yaml
+
+⏺ Update(conf/base/catalog.yaml)
+  ⎿  Added 60 lines
+       9    filepath: data/label_table.parquet
+      10    backend: pandas
+      11  
+      12 +# Dataset Building Pipeline - Intermediate Outputs             
+      13 +sample_keys:                                                   
+      14 +  type: ParquetDataset                                         
+      15 +  filepath: data/dataset/sample_keys.parquet                   
+      16 +  backend: pandas                                              
+      17 +                                                               
+      18 +train_keys:                                                    
+      19 +  type: ParquetDataset                                         
+      20 +  filepath: data/dataset/train_keys.parquet                    
+      21 +  backend: pandas                                              
+      22 +                                                               
+      23 +train_dev_keys:                                                
+      24 +  type: ParquetDataset                                         
+      25 +  filepath: data/dataset/train_dev_keys.parquet                
+      26 +  backend: pandas                                              
+      27 +                                                               
+      28 +val_keys:                                                      
+      29 +  type: ParquetDataset                                         
+      30 +  filepath: data/dataset/val_keys.parquet                      
+      31 +  backend: pandas                                              
+      32 +                                                               
+      33 +train_set:                                                     
+      34 +  type: ParquetDataset                                         
+      35 +  filepath: data/dataset/train_set.parquet                     
+      36 +  backend: pandas                                              
+      37 +                                                               
+      38 +train_dev_set:                                                 
+      39 +  type: ParquetDataset                                         
+      40 +  filepath: data/dataset/train_dev_set.parquet                 
+      41 +  backend: pandas                                              
+      42 +                                                               
+      43 +val_set:                                                       
+      44 +  type: ParquetDataset                                         
+      45 +  filepath: data/dataset/val_set.parquet                       
+      46 +  backend: pandas                                              
+      47 +                                                               
+      48 +X_train:                                                       
+      49 +  type: PickleDataset                                          
+      50 +  filepath: data/dataset/X_train.pkl                           
+      51 +                                                               
+      52 +y_train:                                                       
+      53 +  type: PickleDataset                                          
+      54 +  filepath: data/dataset/y_train.pkl                           
+      55 +                                                               
+      56 +X_train_dev:                                                   
+      57 +  type: PickleDataset                                          
+      58 +  filepath: data/dataset/X_train_dev.pkl                       
+      59 +                                                               
+      60 +y_train_dev:                                                   
+      61 +  type: PickleDataset                                          
+      62 +  filepath: data/dataset/y_train_dev.pkl                       
+      63 +                                                               
+      64 +X_val:                                                         
+      65 +  type: PickleDataset                                          
+      66 +  filepath: data/dataset/X_val.pkl                             
+      67 +                                                               
+      68 +y_val:                                                         
+      69 +  type: PickleDataset                                          
+      70 +  filepath: data/dataset/y_val.pkl                             
+      71 +                                                               
+      72  # Training Pipeline
+      73  model:
+      74    type: PickleDataset
+
+⏺ Step 2: Update conf/local/catalog.yaml
+
+⏺ Update(conf/local/catalog.yaml)
+  ⎿  Added 60 lines
+       9    filepath: data/label_table.parquet
+      10    backend: pandas
+      11  
+      12 +# Dataset Building Pipeline - Intermediate Outputs             
+      13 +sample_keys:                                                   
+      14 +  type: ParquetDataset                                         
+      15 +  filepath: data/dataset/sample_keys.parquet                   
+      16 +  backend: pandas                                              
+      17 +                                                               
+      18 +train_keys:                                                    
+      19 +  type: ParquetDataset                                         
+      20 +  filepath: data/dataset/train_keys.parquet                    
+      21 +  backend: pandas                                              
+      22 +                                                               
+      23 +train_dev_keys:                                                
+      24 +  type: ParquetDataset                                         
+      25 +  filepath: data/dataset/train_dev_keys.parquet                
+      26 +  backend: pandas                                              
+      27 +                                                               
+      28 +val_keys:                                                      
+      29 +  type: ParquetDataset                                         
+      30 +  filepath: data/dataset/val_keys.parquet                      
+      31 +  backend: pandas                                              
+      32 +                                                               
+      33 +train_set:                                                     
+      34 +  type: ParquetDataset                                         
+      35 +  filepath: data/dataset/train_set.parquet                     
+      36 +  backend: pandas                                              
+      37 +                                                               
+      38 +train_dev_set:                                                 
+      39 +  type: ParquetDataset                                         
+      40 +  filepath: data/dataset/train_dev_set.parquet                 
+      41 +  backend: pandas                                              
+      42 +                                                               
+      43 +val_set:                                                       
+      44 +  type: ParquetDataset                                         
+      45 +  filepath: data/dataset/val_set.parquet                       
+      46 +  backend: pandas                                              
+      47 +                                                               
+      48 +X_train:                                                       
+      49 +  type: PickleDataset                                          
+      50 +  filepath: data/dataset/X_train.pkl                           
+      51 +                                                               
+      52 +y_train:                                                       
+      53 +  type: PickleDataset                                          
+      54 +  filepath: data/dataset/y_train.pkl                           
+      55 +                                                               
+      56 +X_train_dev:                                                   
+      57 +  type: PickleDataset                                          
+      58 +  filepath: data/dataset/X_train_dev.pkl                       
+      59 +                                                               
+      60 +y_train_dev:                                                   
+      61 +  type: PickleDataset                                          
+      62 +  filepath: data/dataset/y_train_dev.pkl                       
+      63 +                                                               
+      64 +X_val:                                                         
+      65 +  type: PickleDataset                                          
+      66 +  filepath: data/dataset/X_val.pkl                             
+      67 +                                                               
+      68 +y_val:                                                         
+      69 +  type: PickleDataset                                          
+      70 +  filepath: data/dataset/y_val.pkl                             
+      71 +                                                               
+      72  model:
+      73    type: PickleDataset
+      74    filepath: data/models/model.pkl
+
+⏺ Step 3: Create conf/production/catalog.yaml
+
+⏺ Read 2 files (ctrl+o to expand)
+
+⏺ Write(conf/production/catalog.yaml)
+  ⎿  Wrote 85 lines to conf/production/catalog.yaml
+       1 # Production overrides - Spark backend, HDFS paths
+       2 
+       3 # Dataset Building Pipeline - Source Tables
+       4 feature_table:
+       5   type: ParquetDataset
+       6   filepath: hdfs:///data/recsys/feature_table.parquet
+       7   backend: spark
+       8 
+       9 label_table:
+      10   type: ParquetDataset
+     … +75 lines (ctrl+o to expand)
+
+⏺ Step 4: Run tests
+
+⏺ Bash(python -m pytest --tb=short -q 2>&1)
+  ⎿  ============================= test session starts ====================
+     ==========
+     platform darwin -- Python 3.12.1, pytest-9.0.2, pluggy-1.6.0
+     … +25 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ 73 tests all pass. Now run the dataset pipeline to verify files are persisted.
+
+⏺ Bash(python -m recsys_tfb run -p dataset -e local 2>&1)
+  ⎿  Error: Exit code 2
+     Usage: python -m recsys_tfb [OPTIONS]
+     Try 'python -m recsys_tfb --help' for help.
+     ╭─ Error 
+     ──────────────────────────────────────────────────────────────────────╮
+     │ Got unexpected extra argument (run)                                      
+         │
+     ╰──────────────────────────────────────────────────────────────────────────
+     ────╯
+
+⏺ Bash(python -m recsys_tfb --help 2>&1)
+  ⎿   Usage: python -m recsys_tfb [OPTIONS]
+     … +18 lines (ctrl+o to expand)
+
+⏺ Bash(python -m recsys_tfb -p dataset -e local 2>&1)
+  ⎿  2026-03-15 14:49:57,518 __main__ INFO Running pipeline 'dataset' (env=
+     local)
+     2026-03-15 14:49:57,518 recsys_tfb.core.runner INFO Running node: sele
+     … +26 lines (ctrl+o to expand)
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ All 13 intermediate files are persisted under data/dataset/. Let me also add
+  data/dataset/ to .gitignore if it's not already there.
+
+⏺ Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Already covered by data/* in .gitignore.
+
+  All done. Here's what was changed:
+
+  1. conf/base/catalog.yaml — Added 13 dataset entries (7 ParquetDataset with
+  pandas backend, 6 PickleDataset)
+  2. conf/local/catalog.yaml — Same 13 entries for local dev environment
+  3. conf/production/catalog.yaml — Created with all datasets using spark
+  backend and HDFS paths, plus production overrides for existing entries
+
+  Verification:
+  - 73 tests pass
+  - Pipeline runs successfully, producing all 13 files in data/dataset/
+
+✻ Cogitated for 1m 15s
