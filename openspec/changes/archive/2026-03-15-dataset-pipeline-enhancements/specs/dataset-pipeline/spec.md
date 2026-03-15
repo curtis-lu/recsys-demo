@@ -1,11 +1,11 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Dataset pipeline definition
 The system SHALL define a Pipeline that chains dataset building nodes in the correct dependency order: select_sample_keys → split_keys → build_train_dataset / build_train_dev_dataset / build_val_dataset → prepare_model_input.
 
 #### Scenario: Pipeline node order
 - **WHEN** the dataset pipeline is created via `create_pipeline()`
-- **THEN** it SHALL contain 6 nodes in topologically valid order with correct input/output wiring
+- **THEN** it SHALL contain 7 nodes in topologically valid order with correct input/output wiring
 
 #### Scenario: Pipeline inputs
 - **WHEN** the dataset pipeline is inspected

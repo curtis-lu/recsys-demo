@@ -45,7 +45,8 @@ label_dedup AS (
 cust_snap AS (
     SELECT DISTINCT
         snap_date,
-        cust_id
+        cust_id,
+        cust_segment_typ
     FROM feature_store.dim_all_customer
     WHERE snap_date = '${snap_date}'
 )
@@ -53,6 +54,7 @@ cust_snap AS (
 SELECT
     c.snap_date,
     c.cust_id,
+    c.cust_segment_typ,
     l.apply_start_date,
     l.apply_end_date,
     COALESCE(l.label, 0) AS label,

@@ -1,4 +1,8 @@
 dataset:
   sample_ratio: 1.0
+  sample_group_keys:
+    - "snap_date"
+  train_dev_snap_dates:
+    - "2024-02-29"
   val_snap_dates:
     - "2024-03-31"

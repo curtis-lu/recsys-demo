@@ -16,3 +16,7 @@ model:
 preprocessor:
   type: PickleDataset
   filepath: data/models/preprocessor.pkl
+
+category_mappings:
+  type: JSONDataset
+  filepath: data/models/category_mappings.json

@@ -20,8 +20,8 @@ def create_pipeline() -> Pipeline:
             ),
             Node(
                 split_keys,
-                inputs=["sample_keys", "parameters"],
-                outputs=["train_keys", "val_keys"],
+                inputs=["sample_keys", "label_table", "parameters"],
+                outputs=["train_keys", "train_dev_keys", "val_keys"],
             ),
             Node(
                 build_dataset,
@@ -31,14 +31,25 @@ def create_pipeline() -> Pipeline:
             ),
             Node(
                 build_dataset,
+                inputs=["train_dev_keys", "feature_table", "label_table"],
+                outputs="train_dev_set",
+                name="build_train_dev_dataset",
+            ),
+            Node(
+                build_dataset,
                 inputs=["val_keys", "feature_table", "label_table"],
                 outputs="val_set",
                 name="build_val_dataset",
             ),
             Node(
                 prepare_model_input,
-                inputs=["train_set", "val_set", "parameters"],
-                outputs=["X_train", "y_train", "X_val", "y_val", "preprocessor"],
+                inputs=["train_set", "train_dev_set", "val_set", "parameters"],
+                outputs=[
+                    "X_train", "y_train",
+                    "X_train_dev", "y_train_dev",
+                    "X_val", "y_val",
+                    "preprocessor", "category_mappings",
+                ],
             ),
         ]
     )

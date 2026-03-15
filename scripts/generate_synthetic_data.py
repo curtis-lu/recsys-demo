@@ -7,6 +7,7 @@ RANDOM_SEED = 42
 NUM_CUSTOMERS = 200
 SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31"]
 PRODUCTS = ["fx", "usd", "stock", "bond", "mix"]
+SEGMENTS = ["mass", "affluent", "hnw"]
 POSITIVE_LABEL_RATE = 0.10
 
 
@@ -49,13 +50,15 @@ def generate_label_table(rng: np.random.Generator) -> pd.DataFrame:
         apply_end = snap_dt + pd.Timedelta(days=30)
         cust_ids = [f"C{i:06d}" for i in range(1, NUM_CUSTOMERS + 1)]
 
-        for cid in cust_ids:
+        for i, cid in enumerate(cust_ids):
+            segment = SEGMENTS[i % len(SEGMENTS)]
             for prod in PRODUCTS:
                 label = int(rng.random() < POSITIVE_LABEL_RATE)
                 rows.append(
                     {
                         "snap_date": snap_dt,
                         "cust_id": cid,
+                        "cust_segment_typ": segment,
                         "apply_start_date": apply_start,
                         "apply_end_date": apply_end,
                         "label": label,

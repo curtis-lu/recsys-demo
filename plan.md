@@ -123,22 +123,25 @@ recsys_tfb/
 
 **Step 2.1 - 假資料準備**
 - `data/` 下建立最小樣本 Parquet 檔（feature_table, label_table）
-- 資料規格待使用者提供 SQL 後確認，先用簡易格式
+- label_table 欄位：snap_date, cust_id, cust_segment_typ, apply_start_date, apply_end_date, label, prod_name
 
 **Step 2.2 - Dataset Building Nodes**
-- `select_sample_keys(label_table, params) → sample_keys`：從 label table 取 key 欄位做分層抽樣
-- `split_keys(sample_keys, params) → train_keys, val_keys`：依時間切分
-- `build_train_dataset(train_keys, feature_table, label_table) → train_set`：join 完整特徵
-- `build_val_dataset(val_keys, feature_table, label_table) → val_set`：join 完整特徵
-- `prepare_model_input(train_set, val_set, params) → X_train, y_train, X_val, y_val, preprocessor`
+- `select_sample_keys(label_table, params) → sample_keys`：從 label table 取 key 欄位做分層抽樣，group by 欄位由 YAML `sample_group_keys` 設定
+- `split_keys(sample_keys, label_table, params) → train_keys, train_dev_keys, val_keys`：依時間切分為三組（互不重疊），train_dev 有抽樣，val 為全量
+- `build_dataset(keys, feature_table, label_table) → dataset`：join 完整特徵（共用函數，分別建立 train_set, train_dev_set, val_set）
+- `prepare_model_input(train_set, train_dev_set, val_set, params) → X_train, y_train, X_train_dev, y_train_dev, X_val, y_val, preprocessor, category_mappings`
 
 **Step 2.3 - Pipeline 定義**
-- `src/recsys_tfb/pipelines/dataset/pipeline.py`：組裝 nodes 為 Pipeline
+- `src/recsys_tfb/pipelines/dataset/pipeline.py`：組裝 nodes 為 Pipeline（7 nodes）
 
 **Step 2.4 - Config**
-- `conf/base/parameters_dataset.yaml`：抽樣欄位、比例、切分時間
+- `conf/base/parameters_dataset.yaml`：sample_group_keys、sample_ratio、train_dev_snap_dates、val_snap_dates
 
-**Step 2.5 - 測試**
+**Step 2.5 - I/O 擴充**
+- `src/recsys_tfb/io/json_dataset.py`：JSONDataset，用於儲存 category_mappings
+- `conf/base/catalog.yaml`：新增 category_mappings 條目
+
+**Step 2.6 - 測試**
 - `tests/test_pipelines/test_dataset/`：每個 node 的單元測試
 
 ### Phase 3：Training Pipeline

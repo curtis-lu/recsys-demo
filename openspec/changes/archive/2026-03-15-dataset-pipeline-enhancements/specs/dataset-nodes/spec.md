@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: select_sample_keys node
 The system SHALL provide a pure function `select_sample_keys(label_table: DataFrame, parameters: dict) -> DataFrame` that performs stratified sampling on the label table by configurable group keys (from `parameters["dataset"]["sample_group_keys"]`), returning a DataFrame of unique (snap_date, cust_id) keys.
@@ -37,21 +37,6 @@ The system SHALL provide a pure function `split_keys(sample_keys: DataFrame, lab
 #### Scenario: No date overlap
 - **WHEN** split_keys is called
 - **THEN** the snap_dates in train_keys, train_dev_keys, and val_keys SHALL be mutually exclusive
-
-### Requirement: build_dataset node
-The system SHALL provide a pure function `build_dataset(keys: DataFrame, feature_table: DataFrame, label_table: DataFrame) -> DataFrame` that joins keys with features and labels.
-
-#### Scenario: Inner join on keys
-- **WHEN** build_dataset is called with keys containing 100 (snap_date, cust_id) pairs
-- **THEN** output SHALL contain only rows matching those keys, joined with corresponding features and labels
-
-#### Scenario: Output schema
-- **WHEN** build_dataset is called
-- **THEN** output SHALL contain all feature columns, label column, prod_name column, snap_date column, and cust_id column
-
-#### Scenario: Handle missing features
-- **WHEN** a key exists in label_table but not in feature_table
-- **THEN** feature columns SHALL be filled with NaN (left join behavior from keys+labels to features)
 
 ### Requirement: prepare_model_input node
 The system SHALL provide a pure function `prepare_model_input(train_set: DataFrame, train_dev_set: DataFrame, val_set: DataFrame, parameters: dict) -> tuple` that converts three DataFrames to model-ready arrays.
