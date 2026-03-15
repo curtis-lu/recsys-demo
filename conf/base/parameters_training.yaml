@@ -1,0 +1,27 @@
+training:
+  n_trials: 20
+  num_iterations: 500
+  early_stopping_rounds: 50
+  search_space:
+    learning_rate:
+      low: 0.01
+      high: 0.3
+    num_leaves:
+      low: 16
+      high: 128
+    max_depth:
+      low: 3
+      high: 8
+    min_child_samples:
+      low: 5
+      high: 100
+    subsample:
+      low: 0.6
+      high: 1.0
+    colsample_bytree:
+      low: 0.6
+      high: 1.0
+
+mlflow:
+  experiment_name: recsys_tfb
+  tracking_uri: mlruns

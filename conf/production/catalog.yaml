@@ -76,6 +76,14 @@ model:
   type: PickleDataset
   filepath: hdfs:///data/recsys/models/model.pkl
 
+best_params:
+  type: JSONDataset
+  filepath: hdfs:///data/recsys/models/best_params.json
+
+evaluation_results:
+  type: JSONDataset
+  filepath: hdfs:///data/recsys/models/evaluation_results.json
+
 preprocessor:
   type: PickleDataset
   filepath: hdfs:///data/recsys/models/preprocessor.pkl

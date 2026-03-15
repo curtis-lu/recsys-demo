@@ -33,7 +33,7 @@ class TestCLI:
         finally:
             os.chdir(old_cwd)
 
-    def test_successful_run_empty_pipeline(self, tmp_path):
+    def test_training_pipeline_fails_without_inputs(self, tmp_path):
         base_dir = tmp_path / "conf" / "base"
         base_dir.mkdir(parents=True)
         local_dir = tmp_path / "conf" / "local"
@@ -45,6 +45,6 @@ class TestCLI:
         os.chdir(tmp_path)
         try:
             result = runner.invoke(app, ["--pipeline", "training"])
-            assert result.exit_code == 0
+            assert result.exit_code == 1
         finally:
             os.chdir(old_cwd)

@@ -74,6 +74,14 @@ model:
   type: PickleDataset
   filepath: data/models/model.pkl
 
+best_params:
+  type: JSONDataset
+  filepath: data/models/best_params.json
+
+evaluation_results:
+  type: JSONDataset
+  filepath: data/models/evaluation_results.json
+
 preprocessor:
   type: PickleDataset
   filepath: data/models/preprocessor.pkl
