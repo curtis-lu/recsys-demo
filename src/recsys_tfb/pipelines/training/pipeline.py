@@ -10,7 +10,7 @@ from recsys_tfb.pipelines.training.nodes import (
 )
 
 
-def create_pipeline() -> Pipeline:
+def create_pipeline(backend: str = "pandas") -> Pipeline:
     return Pipeline(
         [
             Node(

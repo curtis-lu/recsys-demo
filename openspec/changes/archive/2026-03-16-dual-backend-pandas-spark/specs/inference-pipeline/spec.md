@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: Inference pipeline definition
 The inference module SHALL expose a `create_pipeline(backend: str = "pandas") -> Pipeline` function that accepts a `backend` parameter and returns a Pipeline with 4 nodes wired in sequence: build_scoring_dataset -> apply_preprocessor -> predict_scores -> rank_predictions. Node functions SHALL be imported from `nodes_pandas.py` or `nodes_spark.py` based on the backend parameter.
 
@@ -16,14 +18,3 @@ The inference module SHALL expose a `create_pipeline(backend: str = "pandas") ->
 #### Scenario: Backend parameter selects node source
 - **WHEN** `create_pipeline(backend="spark")` is called
 - **THEN** all node functions SHALL be imported from `nodes_spark.py`
-
-### Requirement: End-to-end inference execution
-The inference pipeline SHALL be executable via `python -m recsys_tfb -p inference -e local` after the training pipeline has produced model and preprocessor artifacts.
-
-#### Scenario: Successful batch scoring
-- **WHEN** model.pkl and preprocessor.pkl exist from a prior training run, and feature_table.parquet contains data for the configured snap_dates
-- **THEN** the pipeline SHALL produce a ranked_predictions Parquet file with all customers scored across all configured products
-
-#### Scenario: Missing model artifact
-- **WHEN** model.pkl does not exist and inference pipeline is executed
-- **THEN** the pipeline SHALL fail with a clear error indicating the model is not found

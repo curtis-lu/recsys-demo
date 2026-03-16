@@ -28,9 +28,18 @@ class ParquetDataset(AbstractDataset):
 
     def save(self, data) -> None:
         if self._backend == "pandas":
+            if hasattr(data, "toPandas"):
+                data = data.toPandas()
             os.makedirs(os.path.dirname(self._filepath) or ".", exist_ok=True)
             data.to_parquet(self._filepath, index=False)
         else:
+            import pandas as pd
+
+            if isinstance(data, pd.DataFrame):
+                from pyspark.sql import SparkSession
+
+                spark = SparkSession.builder.getOrCreate()
+                data = spark.createDataFrame(data)
             data.write.mode("overwrite").parquet(self._filepath)
 
     def exists(self) -> bool:

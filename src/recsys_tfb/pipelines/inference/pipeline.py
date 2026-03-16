@@ -2,15 +2,24 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.pipelines.inference.nodes import (
-    apply_preprocessor,
-    build_scoring_dataset,
-    predict_scores,
-    rank_predictions,
-)
 
 
-def create_pipeline() -> Pipeline:
+def create_pipeline(backend: str = "pandas") -> Pipeline:
+    if backend == "spark":
+        from recsys_tfb.pipelines.inference.nodes_spark import (
+            apply_preprocessor,
+            build_scoring_dataset,
+            predict_scores,
+            rank_predictions,
+        )
+    else:
+        from recsys_tfb.pipelines.inference.nodes_pandas import (
+            apply_preprocessor,
+            build_scoring_dataset,
+            predict_scores,
+            rank_predictions,
+        )
+
     return Pipeline(
         [
             Node(

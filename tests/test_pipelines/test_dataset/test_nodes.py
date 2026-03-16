@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.pipelines.dataset.nodes import (
+from recsys_tfb.pipelines.dataset.nodes_pandas import (
     build_dataset,
     prepare_model_input,
     select_sample_keys,
@@ -117,9 +117,9 @@ class TestSplitKeys:
         keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
         train, train_dev, val = split_keys(keys, label_table, parameters)
 
-        train_dates = set(train["snap_date"].unique())
-        train_dev_dates = set(train_dev["snap_date"].unique())
-        val_dates = set(val["snap_date"].unique())
+        train_dates = set(pd.to_datetime(train["snap_date"].unique()))
+        train_dev_dates = set(pd.to_datetime(train_dev["snap_date"].unique()))
+        val_dates = set(pd.to_datetime(val["snap_date"].unique()))
 
         assert pd.Timestamp("2024-01-31") in train_dates
         assert pd.Timestamp("2024-02-29") in train_dev_dates
@@ -129,9 +129,9 @@ class TestSplitKeys:
         keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
         train, train_dev, val = split_keys(keys, label_table, parameters)
 
-        train_dates = set(train["snap_date"].unique())
-        train_dev_dates = set(train_dev["snap_date"].unique())
-        val_dates = set(val["snap_date"].unique())
+        train_dates = set(pd.to_datetime(train["snap_date"].unique()))
+        train_dev_dates = set(pd.to_datetime(train_dev["snap_date"].unique()))
+        val_dates = set(pd.to_datetime(val["snap_date"].unique()))
 
         assert len(train_dates & train_dev_dates) == 0
         assert len(train_dates & val_dates) == 0

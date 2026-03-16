@@ -29,23 +29,24 @@ def run(
     from recsys_tfb.core.runner import Runner
     from recsys_tfb.pipelines import get_pipeline, list_pipelines
 
-    # Look up pipeline
+    # Load config first to extract backend
+    conf_dir = _find_conf_dir()
+    config = ConfigLoader(str(conf_dir), env=env)
+    params = config.get_parameters()
+    backend = params.get("backend", "pandas")
+
+    # Look up pipeline with backend
     try:
-        pipe = get_pipeline(pipeline)
+        pipe = get_pipeline(pipeline, backend=backend)
     except KeyError:
         available = ", ".join(list_pipelines())
         logger.error("Unknown pipeline '%s'. Available: %s", pipeline, available)
         raise typer.Exit(code=1)
 
-    # Load config
-    conf_dir = _find_conf_dir()
-    config = ConfigLoader(str(conf_dir), env=env)
-
     # Build catalog
     catalog = DataCatalog(config.get_catalog_config())
 
     # Inject parameters
-    params = config.get_parameters()
     catalog.add("parameters", MemoryDataset(data=params))
 
     # Run

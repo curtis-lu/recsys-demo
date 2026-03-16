@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: Dataset pipeline definition
 The system SHALL define a Pipeline that chains dataset building nodes in the correct dependency order: select_sample_keys → split_keys → build_train_dataset / build_train_dev_dataset / build_val_dataset → prepare_model_input. The `create_pipeline` function SHALL accept a `backend` parameter (`"pandas"` or `"spark"`, default `"pandas"`) and import node functions from the corresponding module (`nodes_pandas.py` or `nodes_spark.py`).
 
@@ -20,14 +22,3 @@ The system SHALL define a Pipeline that chains dataset building nodes in the cor
 #### Scenario: Default backend is pandas
 - **WHEN** `create_pipeline()` is called without backend argument
 - **THEN** node functions SHALL be imported from `nodes_pandas.py`
-
-### Requirement: Dataset parameters configuration
-The system SHALL support dataset-specific parameters via `conf/base/parameters_dataset.yaml`.
-
-#### Scenario: Required parameters
-- **WHEN** parameters_dataset.yaml is loaded
-- **THEN** it SHALL contain at minimum: sample_ratio (float), sample_group_keys (list of strings), train_dev_snap_dates (list of date strings), val_snap_dates (list of date strings)
-
-#### Scenario: Parameters merged into global
-- **WHEN** ConfigLoader loads parameters
-- **THEN** dataset parameters SHALL be accessible under the `dataset` key in the merged parameters dict

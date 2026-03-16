@@ -45,3 +45,23 @@ class TestParquetDatasetSpark:
         df = spark.createDataFrame([(1,)], ["a"])
         ds.save(df)
         assert ds.exists() is True
+
+    def test_save_pandas_to_spark_backend(self, spark, tmp_path):
+        """Saving a pandas DataFrame with spark backend should auto-convert."""
+        filepath = str(tmp_path / "auto_convert.parquet")
+        ds = ParquetDataset(filepath=filepath, backend="spark")
+        pdf = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        ds.save(pdf)
+        loaded = ds.load()
+        assert loaded.count() == 3
+        assert set(loaded.columns) == {"a", "b"}
+
+    def test_save_spark_to_pandas_backend(self, spark, tmp_path):
+        """Saving a Spark DataFrame with pandas backend should auto-convert."""
+        filepath = str(tmp_path / "auto_convert.parquet")
+        ds = ParquetDataset(filepath=filepath, backend="pandas")
+        sdf = spark.createDataFrame([(1, "x"), (2, "y")], ["a", "b"])
+        ds.save(sdf)
+        loaded = ds.load()
+        assert isinstance(loaded, pd.DataFrame)
+        assert len(loaded) == 2

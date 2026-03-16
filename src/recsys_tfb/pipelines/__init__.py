@@ -7,7 +7,7 @@ _REGISTRY: dict[str, str] = {
 }
 
 
-def get_pipeline(name: str) -> Pipeline:
+def get_pipeline(name: str, backend: str = "pandas") -> Pipeline:
     """Look up a pipeline by name and return it via the module's create_pipeline()."""
     if name not in _REGISTRY:
         available = ", ".join(sorted(_REGISTRY))
@@ -17,7 +17,7 @@ def get_pipeline(name: str) -> Pipeline:
     import importlib
 
     module = importlib.import_module(_REGISTRY[name])
-    return module.create_pipeline()
+    return module.create_pipeline(backend=backend)
 
 
 def list_pipelines() -> list[str]:

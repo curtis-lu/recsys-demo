@@ -2,15 +2,24 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.pipelines.dataset.nodes import (
-    build_dataset,
-    prepare_model_input,
-    select_sample_keys,
-    split_keys,
-)
 
 
-def create_pipeline() -> Pipeline:
+def create_pipeline(backend: str = "pandas") -> Pipeline:
+    if backend == "spark":
+        from recsys_tfb.pipelines.dataset.nodes_spark import (
+            build_dataset,
+            prepare_model_input,
+            select_sample_keys,
+            split_keys,
+        )
+    else:
+        from recsys_tfb.pipelines.dataset.nodes_pandas import (
+            build_dataset,
+            prepare_model_input,
+            select_sample_keys,
+            split_keys,
+        )
+
     return Pipeline(
         [
             Node(
