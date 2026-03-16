@@ -111,3 +111,37 @@ class TestConfigLoader:
         (tmp_path / "base" / "empty.yaml").write_text("")
         loader = ConfigLoader(str(tmp_path), env="local")
         assert loader.get_catalog_config() == {}
+
+
+class TestGetParametersByName:
+    def _write_yaml(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            yaml.dump(data, f)
+
+    def test_returns_specific_parameters_file(self, tmp_path):
+        self._write_yaml(tmp_path / "base" / "parameters_dataset.yaml", {"sample_ratio": 0.1, "seed": 42})
+        self._write_yaml(tmp_path / "base" / "parameters_training.yaml", {"lr": 0.01})
+        loader = ConfigLoader(str(tmp_path), env="local")
+
+        ds_params = loader.get_parameters_by_name("parameters_dataset")
+        assert ds_params == {"sample_ratio": 0.1, "seed": 42}
+
+        tr_params = loader.get_parameters_by_name("parameters_training")
+        assert tr_params == {"lr": 0.01}
+
+    def test_merges_base_and_env(self, tmp_path):
+        self._write_yaml(tmp_path / "base" / "parameters_dataset.yaml", {"sample_ratio": 0.1, "seed": 42})
+        self._write_yaml(tmp_path / "local" / "parameters_dataset.yaml", {"sample_ratio": 0.05})
+        loader = ConfigLoader(str(tmp_path), env="local")
+
+        params = loader.get_parameters_by_name("parameters_dataset")
+        assert params["sample_ratio"] == 0.05
+        assert params["seed"] == 42
+
+    def test_raises_for_unknown_name(self, tmp_path):
+        (tmp_path / "base").mkdir(parents=True)
+        loader = ConfigLoader(str(tmp_path), env="local")
+        import pytest
+        with pytest.raises(KeyError, match="parameters_nonexistent"):
+            loader.get_parameters_by_name("parameters_nonexistent")

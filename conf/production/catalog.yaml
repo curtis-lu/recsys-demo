@@ -14,62 +14,62 @@ label_table:
 # Dataset Building Pipeline - Intermediate Outputs
 sample_keys:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/sample_keys.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/sample_keys.parquet
   backend: spark
 
 train_keys:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/train_keys.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/train_keys.parquet
   backend: spark
 
 train_dev_keys:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/train_dev_keys.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/train_dev_keys.parquet
   backend: spark
 
 val_keys:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/val_keys.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/val_keys.parquet
   backend: spark
 
 train_set:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/train_set.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/train_set.parquet
   backend: spark
 
 train_dev_set:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/train_dev_set.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/train_dev_set.parquet
   backend: spark
 
 val_set:
   type: ParquetDataset
-  filepath: hdfs:///data/recsys/dataset/val_set.parquet
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/val_set.parquet
   backend: spark
 
 X_train:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/X_train.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train.pkl
 
 y_train:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/y_train.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train.pkl
 
 X_train_dev:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/X_train_dev.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train_dev.pkl
 
 y_train_dev:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/y_train_dev.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train_dev.pkl
 
 X_val:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/X_val.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_val.pkl
 
 y_val:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/y_val.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_val.pkl
 
 # Training Pipeline
 model:
@@ -86,8 +86,8 @@ evaluation_results:
 
 preprocessor:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/models/${model_version}/preprocessor.pkl
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/preprocessor.pkl
 
 category_mappings:
   type: JSONDataset
-  filepath: hdfs:///data/recsys/models/${model_version}/category_mappings.json
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/category_mappings.json

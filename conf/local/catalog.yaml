@@ -12,62 +12,62 @@ label_table:
 # Dataset Building Pipeline - Intermediate Outputs
 sample_keys:
   type: ParquetDataset
-  filepath: data/dataset/sample_keys.parquet
+  filepath: data/dataset/${dataset_version}/sample_keys.parquet
   backend: pandas
 
 train_keys:
   type: ParquetDataset
-  filepath: data/dataset/train_keys.parquet
+  filepath: data/dataset/${dataset_version}/train_keys.parquet
   backend: pandas
 
 train_dev_keys:
   type: ParquetDataset
-  filepath: data/dataset/train_dev_keys.parquet
+  filepath: data/dataset/${dataset_version}/train_dev_keys.parquet
   backend: pandas
 
 val_keys:
   type: ParquetDataset
-  filepath: data/dataset/val_keys.parquet
+  filepath: data/dataset/${dataset_version}/val_keys.parquet
   backend: pandas
 
 train_set:
   type: ParquetDataset
-  filepath: data/dataset/train_set.parquet
+  filepath: data/dataset/${dataset_version}/train_set.parquet
   backend: pandas
 
 train_dev_set:
   type: ParquetDataset
-  filepath: data/dataset/train_dev_set.parquet
+  filepath: data/dataset/${dataset_version}/train_dev_set.parquet
   backend: pandas
 
 val_set:
   type: ParquetDataset
-  filepath: data/dataset/val_set.parquet
+  filepath: data/dataset/${dataset_version}/val_set.parquet
   backend: pandas
 
 X_train:
   type: PickleDataset
-  filepath: data/dataset/X_train.pkl
+  filepath: data/dataset/${dataset_version}/X_train.pkl
 
 y_train:
   type: PickleDataset
-  filepath: data/dataset/y_train.pkl
+  filepath: data/dataset/${dataset_version}/y_train.pkl
 
 X_train_dev:
   type: PickleDataset
-  filepath: data/dataset/X_train_dev.pkl
+  filepath: data/dataset/${dataset_version}/X_train_dev.pkl
 
 y_train_dev:
   type: PickleDataset
-  filepath: data/dataset/y_train_dev.pkl
+  filepath: data/dataset/${dataset_version}/y_train_dev.pkl
 
 X_val:
   type: PickleDataset
-  filepath: data/dataset/X_val.pkl
+  filepath: data/dataset/${dataset_version}/X_val.pkl
 
 y_val:
   type: PickleDataset
-  filepath: data/dataset/y_val.pkl
+  filepath: data/dataset/${dataset_version}/y_val.pkl
 
 model:
   type: PickleDataset
@@ -83,8 +83,8 @@ evaluation_results:
 
 preprocessor:
   type: PickleDataset
-  filepath: data/models/${model_version}/preprocessor.pkl
+  filepath: data/dataset/${dataset_version}/preprocessor.pkl
 
 category_mappings:
   type: JSONDataset
-  filepath: data/models/${model_version}/category_mappings.json
+  filepath: data/dataset/${dataset_version}/category_mappings.json

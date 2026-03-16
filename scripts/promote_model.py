@@ -1,7 +1,8 @@
 """Promote a versioned model to best/ for inference use.
 
 Usage:
-    python scripts/promote_model.py 20260316_153000           # specific version
+    python scripts/promote_model.py a1b2c3d4                  # specific version (hash)
+    python scripts/promote_model.py 20260316_153000           # specific version (timestamp)
     python scripts/promote_model.py                            # auto-select best mAP
     python scripts/promote_model.py --models-dir /custom/path  # custom directory
 """
@@ -19,12 +20,13 @@ REQUIRED_ARTIFACTS = [
     "evaluation_results.json",
 ]
 
-OPTIONAL_ARTIFACTS = [
-    "preprocessor.pkl",
-    "category_mappings.json",
-]
+_VERSION_TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
+_VERSION_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
 
-_VERSION_RE = re.compile(r"^\d{8}_\d{6}$")
+
+def _is_version_dir(name: str) -> bool:
+    """Check if a directory name matches a known version format."""
+    return bool(_VERSION_TIMESTAMP_RE.match(name) or _VERSION_HASH_RE.match(name))
 
 
 def find_best_version(models_dir: Path) -> str | None:
@@ -33,7 +35,7 @@ def find_best_version(models_dir: Path) -> str | None:
     best_map = -1.0
 
     for d in models_dir.iterdir():
-        if not d.is_dir() or not _VERSION_RE.match(d.name):
+        if not d.is_dir() or d.is_symlink() or not _is_version_dir(d.name):
             continue
         eval_path = d / "evaluation_results.json"
         if not eval_path.exists():
@@ -54,7 +56,7 @@ def validate_version(version_dir: Path) -> list[str]:
 
 
 def promote(models_dir: Path, version: str) -> dict:
-    """Copy version artifacts to best/. Returns summary dict."""
+    """Create a symlink best/ -> version/. Returns summary dict."""
     version_dir = models_dir / version
     if not version_dir.is_dir():
         print(f"Error: version directory not found: {version_dir}", file=sys.stderr)
@@ -66,14 +68,14 @@ def promote(models_dir: Path, version: str) -> dict:
         sys.exit(1)
 
     best_dir = models_dir / "best"
-    if best_dir.exists():
+    # Remove existing best (symlink or directory)
+    if best_dir.is_symlink():
+        best_dir.unlink()
+    elif best_dir.is_dir():
         shutil.rmtree(best_dir)
-    best_dir.mkdir(parents=True)
 
-    for artifact in REQUIRED_ARTIFACTS + OPTIONAL_ARTIFACTS:
-        src = version_dir / artifact
-        if src.exists():
-            shutil.copy2(src, best_dir / artifact)
+    # Create symlink
+    best_dir.symlink_to(version_dir.resolve())
 
     # Read evaluation for summary
     with open(version_dir / "evaluation_results.json") as f:
@@ -83,13 +85,14 @@ def promote(models_dir: Path, version: str) -> dict:
         "promoted_version": version,
         "overall_map": eval_results.get("overall_map"),
         "per_product_ap": eval_results.get("per_product_ap", {}),
+        "target_path": str(best_dir),
     }
     return summary
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Promote a model version to best/")
-    parser.add_argument("version", nargs="?", default=None, help="Version timestamp (auto-select if omitted)")
+    parser.add_argument("version", nargs="?", default=None, help="Version ID (auto-select if omitted)")
     parser.add_argument("--models-dir", default="data/models", help="Models directory")
     args = parser.parse_args()
 

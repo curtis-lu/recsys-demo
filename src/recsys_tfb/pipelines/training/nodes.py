@@ -259,18 +259,24 @@ def log_experiment(
     logger.info("MLflow experiment logged: %s", experiment_name)
 
 
-_VERSION_RE = re.compile(r"^\d{8}_\d{6}$")
+_VERSION_TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
+_VERSION_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _is_version_dir(name: str) -> bool:
+    """Check if a directory name matches a known version format."""
+    return bool(_VERSION_TIMESTAMP_RE.match(name) or _VERSION_HASH_RE.match(name))
 
 
 def compare_model_versions(evaluation_results: dict, parameters: dict) -> dict:
     """Scan versioned model directories and produce a cross-version mAP comparison report."""
     models_dir = Path(parameters.get("models_dir", "data/models"))
 
-    # Find version directories matching YYYYMMDD_HHMMSS
+    # Find version directories matching hash or timestamp formats
     versions = []
     if models_dir.is_dir():
         for d in sorted(models_dir.iterdir(), reverse=True):
-            if d.is_dir() and _VERSION_RE.match(d.name):
+            if d.is_dir() and not d.is_symlink() and _is_version_dir(d.name):
                 eval_path = d / "evaluation_results.json"
                 if eval_path.exists():
                     with open(eval_path) as f:
@@ -287,16 +293,21 @@ def compare_model_versions(evaluation_results: dict, parameters: dict) -> dict:
     # Detect current best version
     best_dir = models_dir / "best"
     current_best_version = None
-    if best_dir.is_dir():
-        best_eval = best_dir / "evaluation_results.json"
-        if best_eval.exists():
-            with open(best_eval) as f:
-                best_results = json.load(f)
-            best_map = best_results.get("overall_map")
-            for v in versions:
-                if v["overall_map"] == best_map:
-                    current_best_version = v["version"]
-                    break
+    if best_dir.exists():
+        # If best is a symlink, resolve to get the version name directly
+        if best_dir.is_symlink():
+            current_best_version = best_dir.resolve().name
+        else:
+            # Old format: best is a directory, match by mAP
+            best_eval = best_dir / "evaluation_results.json"
+            if best_eval.exists():
+                with open(best_eval) as f:
+                    best_results = json.load(f)
+                best_map = best_results.get("overall_map")
+                for v in versions:
+                    if v["overall_map"] == best_map:
+                        current_best_version = v["version"]
+                        break
 
     # Log comparison table
     logger.info("=== Model Version Comparison ===")

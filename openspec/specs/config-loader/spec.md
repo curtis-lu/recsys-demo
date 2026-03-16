@@ -46,6 +46,10 @@ ConfigLoader SHALL provide `get_catalog_config(runtime_params=None)` returning t
 - **WHEN** catalog.yaml contains `filepath: data/models/${model_version}/model.pkl` and `get_catalog_config(runtime_params={"model_version": "20260316_120000"})` is called
 - **THEN** the returned dict SHALL have `filepath: data/models/20260316_120000/model.pkl`
 
+#### Scenario: 多個 template variables 同時替換
+- **WHEN** runtime_params 包含 `{"model_version": "best", "dataset_version": "a1b2c3d4", "snap_date": "20240331"}`
+- **THEN** catalog 中所有 filepath 的 `${model_version}`、`${dataset_version}`、`${snap_date}` SHALL 被替換為對應值
+
 #### Scenario: Get catalog config without runtime_params
 - **WHEN** `get_catalog_config()` is called without runtime_params
 - **THEN** `${model_version}` placeholders SHALL be preserved as-is in the returned dict
@@ -53,3 +57,14 @@ ConfigLoader SHALL provide `get_catalog_config(runtime_params=None)` returning t
 #### Scenario: Unknown template variable preserved
 - **WHEN** catalog contains `${unknown}` and runtime_params does not include `unknown`
 - **THEN** `${unknown}` SHALL remain in the filepath unchanged
+
+### Requirement: 取得特定參數檔內容
+ConfigLoader SHALL 提供 `get_parameters_by_name(name: str) -> dict` 方法，回傳指定 parameters 檔的合併後內容（base + env overlay）。
+
+#### Scenario: 取得 dataset 參數
+- **WHEN** 呼叫 `get_parameters_by_name("parameters_dataset")`
+- **THEN** SHALL 回傳 parameters_dataset.yaml 的合併後完整內容（用於 hash 計算）
+
+#### Scenario: 取得 training 參數
+- **WHEN** 呼叫 `get_parameters_by_name("parameters_training")`
+- **THEN** SHALL 回傳 parameters_training.yaml 的合併後完整內容

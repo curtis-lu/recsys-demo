@@ -78,3 +78,22 @@ class ConfigLoader:
             if stem == "parameters" or stem.startswith("parameters_"):
                 result = _deep_merge(result, data)
         return result
+
+    def get_parameters_by_name(self, name: str) -> dict:
+        """Return the merged content of a specific parameters file.
+
+        Args:
+            name: The stem name of the parameters file,
+                  e.g. ``"parameters_dataset"`` for ``parameters_dataset.yaml``.
+
+        Returns:
+            The merged (base + env overlay) dict for that file.
+
+        Raises:
+            KeyError: If no file with that stem name was loaded.
+        """
+        if name not in self._config:
+            raise KeyError(
+                f"No config file '{name}.yaml' found in base or {self._env} directories."
+            )
+        return self._config[name]

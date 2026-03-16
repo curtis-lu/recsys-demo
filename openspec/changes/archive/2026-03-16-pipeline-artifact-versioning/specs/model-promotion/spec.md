@@ -1,4 +1,4 @@
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: promote_model CLI script
 系統 SHALL 提供 `scripts/promote_model.py` CLI script，將指定版本的 model artifacts 以 symlink 方式設為 `data/models/best`。
