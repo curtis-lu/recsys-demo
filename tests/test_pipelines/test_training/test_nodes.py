@@ -1,5 +1,7 @@
 """Tests for training pipeline nodes."""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from recsys_tfb.pipelines.training.nodes import (
     _compute_ap,
     _compute_map,
+    compare_model_versions,
     evaluate_model,
     log_experiment,
     train_model,
@@ -339,3 +342,65 @@ class TestLogExperiment:
         runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
         assert len(runs) == 1
         assert runs.iloc[0]["metrics.overall_map"] == 0.75
+
+
+# ---- Tests: compare_model_versions ----
+
+
+def _create_version_dir(base_dir, version_name, overall_map, per_product_ap=None):
+    """Helper to create a version directory with evaluation_results.json."""
+    version_dir = base_dir / version_name
+    version_dir.mkdir(parents=True)
+    results = {"overall_map": overall_map, "per_product_ap": per_product_ap or {}}
+    (version_dir / "evaluation_results.json").write_text(json.dumps(results))
+    return version_dir
+
+
+class TestCompareModelVersions:
+    def test_multiple_versions_ranked_by_map(self, tmp_path):
+        models_dir = tmp_path / "models"
+        _create_version_dir(models_dir, "20260315_100000", 0.65, {"fx": 0.7})
+        _create_version_dir(models_dir, "20260316_100000", 0.80, {"fx": 0.85})
+        _create_version_dir(models_dir, "20260317_100000", 0.72, {"fx": 0.75})
+
+        result = compare_model_versions({}, {"models_dir": str(models_dir)})
+        assert len(result["versions"]) == 3
+        assert result["versions"][0]["version"] == "20260316_100000"
+        assert result["recommended_version"] == "20260316_100000"
+
+    def test_single_version(self, tmp_path):
+        models_dir = tmp_path / "models"
+        _create_version_dir(models_dir, "20260316_100000", 0.75)
+
+        result = compare_model_versions({}, {"models_dir": str(models_dir)})
+        assert len(result["versions"]) == 1
+        assert result["recommended_version"] == "20260316_100000"
+
+    def test_ignores_non_version_dirs(self, tmp_path):
+        models_dir = tmp_path / "models"
+        _create_version_dir(models_dir, "20260316_100000", 0.75)
+        # These should be ignored
+        (models_dir / "best").mkdir()
+        (models_dir / "some_random_dir").mkdir()
+
+        result = compare_model_versions({}, {"models_dir": str(models_dir)})
+        assert len(result["versions"]) == 1
+
+    def test_detects_current_best(self, tmp_path):
+        models_dir = tmp_path / "models"
+        _create_version_dir(models_dir, "20260316_100000", 0.75)
+        _create_version_dir(models_dir, "20260317_100000", 0.80)
+        # Create best/ with same mAP as 20260316
+        _create_version_dir(models_dir, "best", 0.75)
+
+        result = compare_model_versions({}, {"models_dir": str(models_dir)})
+        assert result["current_best_version"] == "20260316_100000"
+
+    def test_empty_models_dir(self, tmp_path):
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+
+        result = compare_model_versions({}, {"models_dir": str(models_dir)})
+        assert result["versions"] == []
+        assert result["recommended_version"] is None
+        assert result["current_best_version"] is None

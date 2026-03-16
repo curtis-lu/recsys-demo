@@ -1,6 +1,9 @@
 """Pure functions for the training pipeline."""
 
+import json
 import logging
+import re
+from pathlib import Path
 
 import lightgbm as lgb
 import mlflow
@@ -254,3 +257,59 @@ def log_experiment(
         mlflow.lightgbm.log_model(model, artifact_path="model")
 
     logger.info("MLflow experiment logged: %s", experiment_name)
+
+
+_VERSION_RE = re.compile(r"^\d{8}_\d{6}$")
+
+
+def compare_model_versions(evaluation_results: dict, parameters: dict) -> dict:
+    """Scan versioned model directories and produce a cross-version mAP comparison report."""
+    models_dir = Path(parameters.get("models_dir", "data/models"))
+
+    # Find version directories matching YYYYMMDD_HHMMSS
+    versions = []
+    if models_dir.is_dir():
+        for d in sorted(models_dir.iterdir(), reverse=True):
+            if d.is_dir() and _VERSION_RE.match(d.name):
+                eval_path = d / "evaluation_results.json"
+                if eval_path.exists():
+                    with open(eval_path) as f:
+                        results = json.load(f)
+                    versions.append({
+                        "version": d.name,
+                        "overall_map": results.get("overall_map", 0.0),
+                        "per_product_ap": results.get("per_product_ap", {}),
+                    })
+
+    # Sort by mAP descending
+    versions.sort(key=lambda v: v["overall_map"], reverse=True)
+
+    # Detect current best version
+    best_dir = models_dir / "best"
+    current_best_version = None
+    if best_dir.is_dir():
+        best_eval = best_dir / "evaluation_results.json"
+        if best_eval.exists():
+            with open(best_eval) as f:
+                best_results = json.load(f)
+            best_map = best_results.get("overall_map")
+            for v in versions:
+                if v["overall_map"] == best_map:
+                    current_best_version = v["version"]
+                    break
+
+    # Log comparison table
+    logger.info("=== Model Version Comparison ===")
+    for v in versions:
+        marker = " (current best)" if v["version"] == current_best_version else ""
+        logger.info("  %s  mAP=%.4f%s", v["version"], v["overall_map"], marker)
+
+    recommended = versions[0]["version"] if versions else None
+    if recommended:
+        logger.info("Recommended version: %s (mAP=%.4f)", recommended, versions[0]["overall_map"])
+
+    return {
+        "versions": versions,
+        "recommended_version": recommended,
+        "current_best_version": current_best_version,
+    }

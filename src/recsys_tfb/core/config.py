@@ -50,9 +50,26 @@ class ConfigLoader:
             env = env_config.get(stem, {})
             self._config[stem] = _deep_merge(base, env)
 
-    def get_catalog_config(self) -> dict:
-        """Return catalog configuration dict."""
-        return self._config.get("catalog", {})
+    def get_catalog_config(
+        self, runtime_params: dict[str, str] | None = None
+    ) -> dict:
+        """Return catalog configuration dict.
+
+        If runtime_params is provided, substitute ``${key}`` placeholders
+        in all ``filepath`` values with the corresponding value.
+        """
+        catalog = self._config.get("catalog", {})
+        if not runtime_params:
+            return catalog
+        for entry in catalog.values():
+            if not isinstance(entry, dict):
+                continue
+            fp = entry.get("filepath")
+            if isinstance(fp, str):
+                for key, value in runtime_params.items():
+                    fp = fp.replace(f"${{{key}}}", value)
+                entry["filepath"] = fp
+        return catalog
 
     def get_parameters(self) -> dict:
         """Return merged dict of all parameters*.yaml files."""

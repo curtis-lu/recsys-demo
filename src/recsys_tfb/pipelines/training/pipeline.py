@@ -3,6 +3,7 @@
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 from recsys_tfb.pipelines.training.nodes import (
+    compare_model_versions,
     evaluate_model,
     log_experiment,
     train_model,
@@ -32,6 +33,11 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
                 log_experiment,
                 inputs=["model", "best_params", "evaluation_results", "parameters"],
                 outputs=None,
+            ),
+            Node(
+                compare_model_versions,
+                inputs=["evaluation_results", "parameters"],
+                outputs="version_comparison",
             ),
         ]
     )

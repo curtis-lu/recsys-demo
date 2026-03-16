@@ -72,23 +72,23 @@ y_val:
 # Training Pipeline
 model:
   type: PickleDataset
-  filepath: data/models/model.pkl
+  filepath: data/models/${model_version}/model.pkl
 
 best_params:
   type: JSONDataset
-  filepath: data/models/best_params.json
+  filepath: data/models/${model_version}/best_params.json
 
 evaluation_results:
   type: JSONDataset
-  filepath: data/models/evaluation_results.json
+  filepath: data/models/${model_version}/evaluation_results.json
 
 preprocessor:
   type: PickleDataset
-  filepath: data/models/preprocessor.pkl
+  filepath: data/models/${model_version}/preprocessor.pkl
 
 category_mappings:
   type: JSONDataset
-  filepath: data/models/category_mappings.json
+  filepath: data/models/${model_version}/category_mappings.json
 
 # Inference Pipeline
 scoring_dataset:

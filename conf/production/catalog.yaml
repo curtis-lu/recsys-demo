@@ -74,20 +74,20 @@ y_val:
 # Training Pipeline
 model:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/models/model.pkl
+  filepath: hdfs:///data/recsys/models/${model_version}/model.pkl
 
 best_params:
   type: JSONDataset
-  filepath: hdfs:///data/recsys/models/best_params.json
+  filepath: hdfs:///data/recsys/models/${model_version}/best_params.json
 
 evaluation_results:
   type: JSONDataset
-  filepath: hdfs:///data/recsys/models/evaluation_results.json
+  filepath: hdfs:///data/recsys/models/${model_version}/evaluation_results.json
 
 preprocessor:
   type: PickleDataset
-  filepath: hdfs:///data/recsys/models/preprocessor.pkl
+  filepath: hdfs:///data/recsys/models/${model_version}/preprocessor.pkl
 
 category_mappings:
   type: JSONDataset
-  filepath: hdfs:///data/recsys/models/category_mappings.json
+  filepath: hdfs:///data/recsys/models/${model_version}/category_mappings.json

@@ -1,5 +1,6 @@
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -43,8 +44,17 @@ def run(
         logger.error("Unknown pipeline '%s'. Available: %s", pipeline, available)
         raise typer.Exit(code=1)
 
-    # Build catalog
-    catalog = DataCatalog(config.get_catalog_config())
+    # Build catalog — for training, redirect model artifacts to versioned directory
+    if pipeline == "training":
+        model_version = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logger.info("Training version: %s", model_version)
+    else:
+        model_version = "best"
+    catalog_config = config.get_catalog_config(
+        runtime_params={"model_version": model_version}
+    )
+
+    catalog = DataCatalog(catalog_config)
 
     # Inject parameters
     catalog.add("parameters", MemoryDataset(data=params))
