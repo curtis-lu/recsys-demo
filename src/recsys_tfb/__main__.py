@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 from pathlib import Path
@@ -132,10 +133,10 @@ def run(
         snap_dates = inf_config.get("snap_dates", [])
         snap_date = snap_dates[0].replace("-", "") if snap_dates else "unknown"
 
-        runtime_params["model_version"] = "best"
+        runtime_params["model_version"] = mv
         runtime_params["dataset_version"] = ds_version
         runtime_params["snap_date"] = snap_date
-        logger.info("Model version: best")
+        logger.info("Model version: %s (best)", mv)
         logger.info("Dataset version: %s", ds_version)
 
     else:
@@ -146,6 +147,16 @@ def run(
 
     # Build catalog with resolved runtime params
     catalog_config = config.get_catalog_config(runtime_params=runtime_params)
+
+    # For inference: model and preprocessor must read via "best" symlink,
+    # while output paths use the actual model hash.
+    if pipeline == "inference":
+        for entry_name in ("model", "preprocessor"):
+            if entry_name in catalog_config:
+                catalog_config[entry_name]["filepath"] = catalog_config[entry_name][
+                    "filepath"
+                ].replace(mv, "best")
+
     catalog = DataCatalog(catalog_config)
 
     # Inject parameters
@@ -179,6 +190,8 @@ def run(
         )
         write_manifest(version_dir, metadata)
         update_symlink(version_dir, data_dir / "dataset" / "latest")
+        with open(version_dir / "parameters_dataset.json", "w") as f:
+            json.dump(params_dataset, f, indent=2, ensure_ascii=False, default=str)
 
     elif pipeline == "training":
         mv = runtime_params["model_version"]
@@ -199,6 +212,8 @@ def run(
             artifacts=sorted(artifacts),
         )
         write_manifest(version_dir, metadata)
+        with open(version_dir / "parameters_training.json", "w") as f:
+            json.dump(params_training, f, indent=2, ensure_ascii=False, default=str)
 
     elif pipeline == "inference":
         mv = runtime_params["model_version"]
@@ -217,6 +232,9 @@ def run(
             dataset_version=ds_version,
         )
         write_manifest(version_dir, metadata)
+        update_symlink(version_dir, data_dir / "inference" / "latest")
+        with open(version_dir / "parameters_inference.json", "w") as f:
+            json.dump(params_inference, f, indent=2, ensure_ascii=False, default=str)
 
     logger.info("Pipeline '%s' completed successfully", pipeline)
 

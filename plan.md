@@ -2,7 +2,7 @@
 
 ## Context
 
-商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、以及 pandas/PySpark 雙後端支援。
+商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、pandas/PySpark 雙後端支援、以及 Phase 1 修正（inference 版本修正 + 欄位彈性化）。
 
 ## 已確認的關鍵決策
 
@@ -124,6 +124,14 @@ recsys_tfb/
 - **Step 4.3** ✅ 模型晉升腳本 — `scripts/promote_model.py`
 - **Step 4.4** ✅ Catalog 模板變數 — `${dataset_version}`、`${model_version}`、`${snap_date}` 路徑替換
 - **Step 4.5** ✅ 測試 — test_pipelines/test_inference/、test_core/test_versioning.py、scripts/test_promote_model.py
+
+### Phase 4.5：修正已知問題 + 欄位彈性化 ✅
+
+- **Step 4.5.1** ✅ README `--env` 文件修正
+- **Step 4.5.2** ✅ Inference output 改用實際 model hash（非 `"best"`）
+- **Step 4.5.3** ✅ Inference latest symlink 自動更新
+- **Step 4.5.4** ✅ `prepare_model_input` 欄位設定彈性化（drop_columns / categorical_columns 移至 YAML）
+- **Step 4.5.5** ✅ 測試驗證
 
 ## 待完成階段
 

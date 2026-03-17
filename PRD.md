@@ -70,7 +70,7 @@
   - CPU 4 core, RAM 128GB。
 - 正式環境依賴相關
   - 正式環境依賴於HIVE資料庫，開發環境將以假資料代替。
-  - 假資料的資料規格請檢視@XXXX.md。
+  - 假資料的資料規格請參考 `scripts/generate_synthetic_data.py` 中的欄位定義。
 - 資料規模：
   - 訓練：行內約1000萬名客戶，共計22類產品，特徵數量預計在500個左右，且希望取12個月的月底資料作為訓練資料。
   - 推論：行內約1000萬名客戶，共計22類產品，特徵數量預計在500個左右。希望每週執行推論時不超過3小時就能推論完畢。
@@ -100,6 +100,11 @@
       - 特徵工程的 category_mappings 需另存為 JSON 檔案供檢視，提升可觀測性。
       - 原則上在正式環境，這階段資料都儲存為HIVE table，並以pyspark實作。開發環境則以pandas處理本地Parquet檔案。
       - 部分程式組件以及產物會需要在其他情境複用，例如推論管線中，資料轉換的邏輯需相同且不能造成資料洩漏問題。
+      - 盡可能避免hard-coded資料欄位，而是盡可能透過設定檔設定，讓上游(SOURCE DATA ETL PIPELINE)的產出可以盡可能彈性化。
+        - 可以新增特徵，無論是數值型或類別型
+        - 可以新增產品別
+        - 同樣的架構，亦可將「產品別」抽換成「通路類型」、「接觸時間」等。
+      - 為避免設定檔的參數之間造成程式錯誤，希望有簡單的檢核機制(preflight checks)，確保使用者的設定檔有設定正確。
   - **TRAINING PIPELINE**
     - 主要目的：
       - 讓我能快速執行各種模型實驗，找出較好的模型。利用超參數搜尋找到最佳超參數組合產出模型。對模型推論結果（可能有推論結果後處理）進行評估，並且比較多種模型，選出最好的模型註冊。當中包含人工以notebook進行的錯誤分析。
@@ -113,8 +118,24 @@
     - 注意事項：
       - 資料產出過程基本上會復用 **SOURCE DATA ETL PIPELINE & DATASET BUILDING PIPELINE** 的部分功能。
       - 推論結果寫回HIVE table，會依snap_date & prod_code 建立partition。
+      - 推論後簡單的 sanity check。
       - 監控指標包含各產品機率值分布是否正常、資料筆數是否正確（例如因為客戶數理論上只會越來越多，所以資料筆數應該要比上一次推論還多）
       - 監控指標一樣需寫HIVE table，雖不用分partition，但若監控指標有異動需保留歷史紀錄。
+
+### 輔助功能描述
+
+  - 結構化的日誌功能，增加可觀測性，讓除錯更容易與穩定。
+    - Pipeline-level log：run_id、pipeline 名稱、env、dataset_version、model_version、開始時間、結束時間、總耗時、執行狀態（success / failed）、觸發方式（manual / scheduled）、主要參數摘要
+    - Node-level log：run_id、node 名稱、所屬 pipeline、開始時間、結束時間、耗時、input 名稱、output 名稱、輸入/輸出資料筆數或 shape、是否成功、錯誤訊息、exception stack trace
+    - Data-quality log：訓練/驗證/推論資料筆數、正負樣本比例、各 snap_date 筆數、缺失值比例、類別欄位新值或未知值比例、特徵統計摘要、推論分數分布、top-K 產品分布、異常值或分布漂移訊號
+    - Artifact log / lineage log：artifact 名稱、artifact 類型（parquet / pickle / json）、輸出 path、檔案寫入時間、對應 dataset_version、model_version、上游輸入版本、manifest 路徑、是否更新 latest / best、寫入是否成功
+
+  - 版本紀錄與管理機制，確保資料集版本、模型版本可被追蹤，推論時明確知道使用的上游依賴版本。
+    - 這個 dataset 是用哪些參數做的？上游資料的schema長怎樣？
+    - 這個模型是用哪個 dataset 訓練的？
+    - 這次 inference 用的是哪個 model？對應到的 dataset 版本是什麼？
+    - 這個結果能不能被完整重現？
+    - 如果這版有問題，要退回哪一版？要怎麼退回？
 
 ## 設計原則
 
@@ -148,6 +169,8 @@
 | CLI | Typer 入口，支援 --pipeline、--env、--dataset-version |
 | Strategy 1 | 單一二分類器 + mAP 評估 |
 | 測試 | 完整單元測試覆蓋 |
+| 欄位設定彈性化 | `prepare_model_input` 的 drop_columns/categorical_columns 可透過 YAML 設定 |
+| Inference 版本修正 | output 使用實際 model hash、inference latest symlink 自動更新 |
 
 ### 待完成 ⬚
 

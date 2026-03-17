@@ -46,32 +46,38 @@ val_set:
   backend: pandas
 
 X_train:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/X_train.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/X_train.parquet
+  backend: pandas
 
 y_train:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/y_train.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/y_train.parquet
+  backend: pandas
 
 X_train_dev:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/X_train_dev.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/X_train_dev.parquet
+  backend: pandas
 
 y_train_dev:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/y_train_dev.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/y_train_dev.parquet
+  backend: pandas
 
 X_val:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/X_val.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/X_val.parquet
+  backend: pandas
 
 y_val:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/y_val.pkl
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/y_val.parquet
+  backend: pandas
 
 model:
-  type: PickleDataset
-  filepath: data/models/${model_version}/model.pkl
+  type: LightGBMDataset
+  filepath: data/models/${model_version}/model.txt
 
 best_params:
   type: JSONDataset

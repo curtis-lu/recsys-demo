@@ -228,9 +228,13 @@ class TestPrepareModelInput:
         X_train, y_train, X_train_dev, y_train_dev, X_val, y_val, preprocessor, cat_mappings = result
 
         assert isinstance(X_train, pd.DataFrame)
-        assert isinstance(y_train, np.ndarray)
+        assert isinstance(y_train, pd.DataFrame)
+        assert list(y_train.columns) == ["label"]
         assert isinstance(X_train_dev, pd.DataFrame)
-        assert isinstance(y_train_dev, np.ndarray)
+        assert isinstance(y_train_dev, pd.DataFrame)
+        assert list(y_train_dev.columns) == ["label"]
+        assert isinstance(y_val, pd.DataFrame)
+        assert list(y_val.columns) == ["label"]
         assert len(y_train) == len(X_train)
         assert len(y_train_dev) == len(X_train_dev)
         assert len(y_val) == len(X_val)

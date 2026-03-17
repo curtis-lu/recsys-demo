@@ -48,33 +48,39 @@ val_set:
   backend: spark
 
 X_train:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train.parquet
+  backend: pandas
 
 y_train:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train.parquet
+  backend: pandas
 
 X_train_dev:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train_dev.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train_dev.parquet
+  backend: pandas
 
 y_train_dev:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train_dev.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_train_dev.parquet
+  backend: pandas
 
 X_val:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_val.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_val.parquet
+  backend: pandas
 
 y_val:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_val.pkl
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_val.parquet
+  backend: pandas
 
 # Training Pipeline
 model:
-  type: PickleDataset
-  filepath: hdfs:///data/recsys/models/${model_version}/model.pkl
+  type: LightGBMDataset
+  filepath: hdfs:///data/recsys/models/${model_version}/model.txt
 
 best_params:
   type: JSONDataset

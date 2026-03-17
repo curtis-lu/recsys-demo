@@ -102,18 +102,19 @@ def prepare_model_input(
     train_dev_set: DataFrame,
     val_set: DataFrame,
     parameters: dict,
-) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, dict, dict]:
-    """Convert Spark DataFrames to model-ready pandas arrays with categorical encoding."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
+    """Convert Spark DataFrames to model-ready pandas DataFrames with categorical encoding."""
     # Convert to pandas — data has been sampled and split, should fit in memory
     train_pdf = train_set.toPandas()
     train_dev_pdf = train_dev_set.toPandas()
     val_pdf = val_set.toPandas()
 
-    drop_cols = [
+    pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
+    drop_cols = pmi_config.get("drop_columns", [
         "snap_date", "cust_id", "label",
         "apply_start_date", "apply_end_date", "cust_segment_typ",
-    ]
-    categorical_cols = ["prod_name"]
+    ])
+    categorical_cols = pmi_config.get("categorical_columns", ["prod_name"])
 
     # Build category mapping from train set only
     category_mappings = {}
@@ -129,11 +130,11 @@ def prepare_model_input(
         return result
 
     X_train = _transform(train_pdf)
-    y_train = train_pdf["label"].values
+    y_train = train_pdf[["label"]].reset_index(drop=True)
     X_train_dev = _transform(train_dev_pdf)
-    y_train_dev = train_dev_pdf["label"].values
+    y_train_dev = train_dev_pdf[["label"]].reset_index(drop=True)
     X_val = _transform(val_pdf)
-    y_val = val_pdf["label"].values
+    y_val = val_pdf[["label"]].reset_index(drop=True)
 
     feature_columns = list(X_train.columns)
 

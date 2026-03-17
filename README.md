@@ -15,6 +15,8 @@
 - ✅ Hash-based 版本管理（manifest、symlink latest/best）
 - ✅ pandas/PySpark 雙後端支援
 - ✅ Strategy 1 MVP（單一二分類器 + mAP）
+- ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
+- ✅ Inference output 使用實際 model hash + latest symlink
 - ⬚ Source Data ETL Pipeline
 - ⬚ 進階指標（precision@K、nDCG、MRR 等）
 - ⬚ Strategy 2-4
@@ -91,7 +93,8 @@ parameters_training.yaml + dataset_version    Inference 路徑：
 
 - Dataset pipeline 的產出存放在 `data/dataset/${dataset_version}/`
 - Training pipeline 的產出存放在 `data/models/${model_version}/`
-- Inference pipeline 的產出存放在 `data/inference/${model_version}/${snap_date}/`
+- Inference pipeline 的產出存放在 `data/inference/${model_version}/${snap_date}/`，其中 `${model_version}` 為實際 hash 值。Model 與 preprocessor 讀取仍透過 `best` symlink 解析
+- Inference pipeline 完成後自動更新 `data/inference/latest` symlink
 - `model_version` 依賴 `dataset_version`，確保模型可追溯到其訓練資料
 
 **關鍵不變量（跨 pipeline 必須一致）：**
@@ -132,8 +135,8 @@ parameters_training.yaml + dataset_version    Inference 路徑：
 | 分類 | 欄位 | 說明 |
 |------|------|------|
 | **Join key** | `snap_date`, `cust_id` | 所有 pipeline 的合併 / 分群基礎 |
-| **必須 drop 的欄位** | `snap_date`, `cust_id`, `label`, `apply_start_date`, `apply_end_date`, `cust_segment_typ` | 在 `prepare_model_input` 中移除（`dataset/nodes_pandas.py:92-95`、`dataset/nodes_spark.py:112-115`） |
-| **唯一 categorical 欄位** | `prod_name` | hard-coded 做 integer encoding（`dataset/nodes_pandas.py:96`、`dataset/nodes_spark.py:116`） |
+| **可設定 drop 的欄位（預設）** | `snap_date`, `cust_id`, `label`, `apply_start_date`, `apply_end_date`, `cust_segment_typ` | 在 `prepare_model_input` 中移除。可透過 `parameters_dataset.yaml` 的 `prepare_model_input.drop_columns` 覆蓋 |
+| **可設定 categorical 欄位（預設）** | `prod_name` | integer encoding。可透過 `parameters_dataset.yaml` 的 `prepare_model_input.categorical_columns` 覆蓋 |
 
 #### 日期格式與資料型別
 
@@ -232,7 +235,7 @@ conf/
 - `base/` 存放跨環境共享的預設值，`local/` 和 `production/` 可覆蓋同名 key
 - 合併語義：nested dict 遞迴合併（deep merge），scalar 值直接替換
 - 透過 `--env` 參數切換環境：`python -m recsys_tfb run -p dataset -e local`
-- 未指定 `--env` 時，僅載入 `base/` 配置
+- `--env` 預設值為 `local`，即未指定時載入 `base/` 再合併 `local/` 配置
 
 #### 全域參數 (`parameters.yaml`)
 
@@ -249,6 +252,8 @@ conf/
 | `dataset.sample_group_keys` | list[str] | `["snap_date"]` | 分層抽樣的分組欄位 | feature_table 中存在的欄位名 |
 | `dataset.train_dev_snap_dates` | list[str] | `["2024-02-29"]` | 訓練集 + 開發集使用的快照日期 | feature_table 中存在的日期 |
 | `dataset.val_snap_dates` | list[str] | `["2024-03-31"]` | 驗證集使用的快照日期 | feature_table 中存在的日期 |
+| `prepare_model_input.drop_columns` | list[str] | `["snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"]` | `prepare_model_input` 時要移除的欄位 | label_table 中存在的欄位名 |
+| `prepare_model_input.categorical_columns` | list[str] | `["prod_name"]` | 需做 integer encoding 的類別欄位 | label_table 中存在的欄位名 |
 
 #### Training 參數 (`parameters_training.yaml`)
 

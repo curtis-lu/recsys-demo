@@ -87,13 +87,14 @@ def prepare_model_input(
     train_dev_set: pd.DataFrame,
     val_set: pd.DataFrame,
     parameters: dict,
-) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, dict, dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
     """Convert DataFrames to model-ready arrays with categorical encoding."""
-    drop_cols = [
+    pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
+    drop_cols = pmi_config.get("drop_columns", [
         "snap_date", "cust_id", "label",
         "apply_start_date", "apply_end_date", "cust_segment_typ",
-    ]
-    categorical_cols = ["prod_name"]
+    ])
+    categorical_cols = pmi_config.get("categorical_columns", ["prod_name"])
 
     # Build category mapping from train set only
     category_mappings = {}
@@ -109,11 +110,11 @@ def prepare_model_input(
         return result
 
     X_train = _transform(train_set)
-    y_train = train_set["label"].values
+    y_train = train_set[["label"]].reset_index(drop=True)
     X_train_dev = _transform(train_dev_set)
-    y_train_dev = train_dev_set["label"].values
+    y_train_dev = train_dev_set[["label"]].reset_index(drop=True)
     X_val = _transform(val_set)
-    y_val = val_set["label"].values
+    y_val = val_set[["label"]].reset_index(drop=True)
 
     feature_columns = list(X_train.columns)
 

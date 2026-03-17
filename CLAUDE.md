@@ -20,7 +20,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ I/O adapters: ParquetDataset, PickleDataset, JSONDataset (with pandas/spark dual backend)
 - ✅ Dataset Building Pipeline (stratified sampling, train/train-dev/val splits, feature engineering)
 - ✅ Training Pipeline (Optuna hyperparameter tuning, LightGBM training, mAP evaluation, MLflow logging, model version comparison)
-- ✅ Inference Pipeline (batch scoring, preprocessor reuse, ranking)
+- ✅ Inference Pipeline (batch scoring, preprocessor reuse, ranking, actual model hash for output paths)
 - ✅ Hash-based artifact versioning with manifests and symlinks (latest/best)
 - ✅ Dual backend support: pandas (dev) / PySpark (production)
 - ✅ CLI entry point with `--pipeline`, `--env`, `--dataset-version` options
@@ -32,6 +32,9 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ⬚ Probability calibration and rule-based reranking
 - ⬚ Strategy 2-4
 - ⬚ Monthly monitoring pipeline
+- ⬚ 結構化日誌（Pipeline-level, Node-level, Data-quality, Artifact/lineage）
+- ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
+- ✅ Inference output 使用實際 model hash + latest symlink
 
 ## Architecture: 4 Pipelines
 
@@ -143,6 +146,16 @@ Build incrementally per the PRD:
 2. Add features one at a time
 3. Test after each addition
 4. Skip error analysis notebooks initially
+
+## Development Roadmap
+
+| Phase | 名稱 | 內容 |
+|-------|------|------|
+| 1 | 修正已知問題 + 欄位彈性化 ✅ | README `--env` 文件修正、inference output 改用實際 model hash、dataset pipeline hard-coded 欄位抽取到 YAML |
+| 2 | 結構化日誌框架 | run_id 產生、Pipeline-level + Node-level 結構化日誌 |
+| 3 | Data-quality + Artifact log | Data-quality log、Artifact/lineage log |
+| 4 | 版本管理增強 | manifest 擴充、版本查詢 CLI、rollback 機制 |
+| 5 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
 
 ## Production Constraints
 

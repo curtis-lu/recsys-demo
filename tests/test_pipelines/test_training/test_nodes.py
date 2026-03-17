@@ -60,7 +60,7 @@ def synthetic_data():
         })
 
     def make_labels(n):
-        return rng.binomial(1, 0.15, n).astype(float)
+        return pd.DataFrame({"label": rng.binomial(1, 0.15, n).astype(float)})
 
     X_train = make_features(n_train)
     y_train = make_labels(n_train)
@@ -283,11 +283,11 @@ class TestEvaluateModel:
             "out_amt_sum_l1m": rng.uniform(0, 30, n_per_prod * len(products)),
         })
         # Labels: fx and usd have some positives, zero has none
-        y_val_extended = np.array(
+        y_val_extended = pd.DataFrame({"label": np.array(
             [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # fx: 3 positives
             + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # usd: 2 positives
             + [0] * n_per_prod  # zero: no positives
-        ).astype(float)
+        ).astype(float)})
 
         results = evaluate_model(model, X_val_extended, y_val_extended, val_set, training_parameters)
         per_product_ap = results["per_product_ap"]
@@ -303,7 +303,7 @@ class TestEvaluateModel:
         y_score = model.predict(X_val_extended)
         for prod in ["fx", "usd"]:
             idx = val_set.index[val_set["prod_name"] == prod].values
-            expected_ap = _compute_ap(y_val_extended[idx], y_score[idx])
+            expected_ap = _compute_ap(y_val_extended["label"].values[idx], y_score[idx])
             assert per_product_ap[prod] == pytest.approx(expected_ap)
 
 

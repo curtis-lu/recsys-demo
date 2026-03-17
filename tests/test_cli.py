@@ -20,8 +20,8 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
 
     catalog = {
         "model": {
-            "type": "PickleDataset",
-            "filepath": "data/models/${model_version}/model.pkl",
+            "type": "LightGBMDataset",
+            "filepath": "data/models/${model_version}/model.txt",
         },
         "preprocessor": {
             "type": "PickleDataset",
@@ -153,8 +153,8 @@ class TestCLI:
         finally:
             os.chdir(old_cwd)
 
-    def test_inference_uses_best_model_version(self, tmp_path):
-        """Inference pipeline resolves model_version to 'best'."""
+    def test_inference_uses_actual_model_hash(self, tmp_path):
+        """Inference pipeline uses actual model hash for output, best symlink for model read."""
         _setup_conf(
             tmp_path,
             params_inference={"snap_dates": ["2024-03-31"]},
@@ -177,13 +177,15 @@ class TestCLI:
                 with patch("recsys_tfb.core.runner.Runner"):
                     runner.invoke(app, ["--pipeline", "inference"])
                     call_args = mock_catalog_cls.call_args[0][0]
+                    # model and preprocessor still read via "best" symlink
                     fp = call_args["model"]["filepath"]
-                    assert fp == "data/models/best/model.pkl"
-                    # dataset_version from manifest
+                    assert fp == "data/models/best/model.txt"
                     pp = call_args["preprocessor"]["filepath"]
                     assert "deadbeef" in pp
-                    # snap_date resolved
+                    # scoring_dataset output uses actual model hash
                     sd = call_args["scoring_dataset"]["filepath"]
+                    assert "a1b2c3d4" in sd
+                    assert "best" not in sd
                     assert "20240331" in sd
         finally:
             os.chdir(old_cwd)

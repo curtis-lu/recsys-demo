@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: CLI run command
 The system SHALL provide a `run` command via `python -m recsys_tfb run` that executes a named pipeline in a specified environment. The CLI SHALL load config BEFORE building the pipeline, extract the `backend` parameter from parameters, and pass it to `get_pipeline`. `python -m recsys_tfb run --pipeline <name>` SHALL 根據 pipeline 類型計算版本 ID 並注入 runtime_params。
 
@@ -28,54 +30,3 @@ The system SHALL provide a `run` command via `python -m recsys_tfb run` that exe
 #### Scenario: Pipeline execution failure
 - **WHEN** a pipeline node raises an exception during execution
 - **THEN** the CLI SHALL log the error and exit with a non-zero exit code
-
-### Requirement: CLI help
-The system SHALL display usage information when invoked with `--help`.
-
-#### Scenario: Show help
-- **WHEN** user executes `python -m recsys_tfb --help`
-- **THEN** the system SHALL display available commands and options
-
-### Requirement: Parameters injection
-The CLI SHALL load parameters from ConfigLoader and inject them into the DataCatalog as a MemoryDataset named `parameters` before pipeline execution.
-
-#### Scenario: Parameters available to nodes
-- **WHEN** a pipeline is executed via CLI
-- **THEN** nodes that declare `parameters` as an input SHALL receive the merged parameters dict from all `parameters*.yaml` files
-
-### Requirement: Conf directory resolution
-The CLI SHALL resolve the `conf/` directory relative to the project root (the directory containing `pyproject.toml` or the current working directory).
-
-#### Scenario: Default conf directory
-- **WHEN** the CLI is run from the project root
-- **THEN** it SHALL look for config files in `./conf/`
-
-### Requirement: Dataset version CLI 選項
-CLI SHALL 支援 `--dataset-version` 選項，允許手動指定要使用的 dataset 版本。
-
-#### Scenario: 指定 dataset 版本執行 training
-- **WHEN** 執行 `python -m recsys_tfb run -p training --dataset-version a1b2c3d4`
-- **THEN** 系統 SHALL 使用 `a1b2c3d4` 作為 dataset_version 而非 latest
-
-#### Scenario: 未指定時使用 latest
-- **WHEN** 執行 `python -m recsys_tfb run -p training`（不帶 --dataset-version）
-- **THEN** 系統 SHALL 解析 `data/dataset/latest` symlink 取得 dataset_version
-
-#### Scenario: 指定的版本不存在
-- **WHEN** 執行 `python -m recsys_tfb run -p training --dataset-version nonexistent`
-- **THEN** 系統 SHALL 輸出錯誤訊息指出版本目錄不存在，以非零 exit code 結束
-
-### Requirement: 版本 log 輸出
-CLI SHALL 在每個 pipeline 啟動時 log 輸出所有相關的版本 ID。
-
-#### Scenario: Dataset pipeline 版本 log
-- **WHEN** dataset pipeline 啟動
-- **THEN** 系統 SHALL log 輸出 `Dataset version: {dataset_version}`
-
-#### Scenario: Training pipeline 版本 log
-- **WHEN** training pipeline 啟動
-- **THEN** 系統 SHALL log 輸出 `Model version: {model_version}` 和 `Dataset version: {dataset_version}`
-
-#### Scenario: Inference pipeline 版本 log
-- **WHEN** inference pipeline 啟動
-- **THEN** 系統 SHALL log 輸出 `Model version: {actual_model_hash}`、`Dataset version: {dataset_version}`

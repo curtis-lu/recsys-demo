@@ -61,9 +61,9 @@ def _compute_map(
 
 def tune_hyperparameters(
     X_train: pd.DataFrame,
-    y_train: np.ndarray,
+    y_train: pd.DataFrame,
     X_train_dev: pd.DataFrame,
-    y_train_dev: np.ndarray,
+    y_train_dev: pd.DataFrame,
     parameters: dict,
 ) -> dict:
     """Search for optimal LightGBM hyperparameters using Optuna."""
@@ -74,8 +74,8 @@ def tune_hyperparameters(
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
 
-    train_data = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
-    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev, reference=train_data, free_raw_data=False)
+    train_data = lgb.Dataset(X_train, label=y_train["label"].values, free_raw_data=False)
+    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev["label"].values, reference=train_data, free_raw_data=False)
 
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -132,7 +132,7 @@ def tune_hyperparameters(
 
         y_pred = booster.predict(X_train_dev)
         # Use a simple mAP: treat entire dev set as one query for tuning speed
-        ap = _compute_ap(y_train_dev, y_pred)
+        ap = _compute_ap(y_train_dev["label"].values, y_pred)
         return ap if ap is not None else 0.0
 
     sampler = optuna.samplers.TPESampler(seed=seed)
@@ -147,9 +147,9 @@ def tune_hyperparameters(
 
 def train_model(
     X_train: pd.DataFrame,
-    y_train: np.ndarray,
+    y_train: pd.DataFrame,
     X_train_dev: pd.DataFrame,
-    y_train_dev: np.ndarray,
+    y_train_dev: pd.DataFrame,
     best_params: dict,
     parameters: dict,
 ) -> lgb.Booster:
@@ -167,8 +167,8 @@ def train_model(
         **best_params,
     }
 
-    train_data = lgb.Dataset(X_train, label=y_train)
-    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev, reference=train_data)
+    train_data = lgb.Dataset(X_train, label=y_train["label"].values)
+    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev["label"].values, reference=train_data)
 
     callbacks = [
         lgb.early_stopping(stopping_rounds=early_stopping_rounds),
@@ -194,21 +194,22 @@ def train_model(
 def evaluate_model(
     model: lgb.Booster,
     X_val: pd.DataFrame,
-    y_val: np.ndarray,
+    y_val: pd.DataFrame,
     val_set: pd.DataFrame,
     parameters: dict,
 ) -> dict:
     """Compute ranking-aware mAP with (snap_date, cust_id) as query groups."""
     y_score = model.predict(X_val)
 
+    y_val_arr = y_val["label"].values
     groups = val_set[["snap_date", "cust_id"]].reset_index(drop=True)
-    overall_map, n_excluded = _compute_map(y_val, y_score, groups)
+    overall_map, n_excluded = _compute_map(y_val_arr, y_score, groups)
 
     # Per-product AP
     per_product_ap = {}
     for prod_name, idx in val_set.groupby("prod_name").groups.items():
         idx_arr = idx.values if hasattr(idx, "values") else np.array(idx)
-        y_true_prod = y_val[idx_arr]
+        y_true_prod = y_val_arr[idx_arr]
         y_score_prod = y_score[idx_arr]
         ap = _compute_ap(y_true_prod, y_score_prod)
         if ap is not None:
