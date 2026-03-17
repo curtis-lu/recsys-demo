@@ -2,7 +2,7 @@
 
 ## Context
 
-這是一個全新的產品推薦排序模型專案（recsys_tfb），目前僅有 PRD 和設計原則文件，尚無任何程式碼。需要建立 Kedro-inspired 自建輕量框架作為基礎，然後實作 MVP（Dataset Building + Training Pipeline，Strategy 1 + mAP）。
+商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、以及 pandas/PySpark 雙後端支援。
 
 ## 已確認的關鍵決策
 
@@ -29,30 +29,37 @@
 recsys_tfb/
 ├─ src/recsys_tfb/
 │   ├─ __init__.py
-│   ├─ __main__.py              # CLI 進入點 (typer)
+│   ├─ __main__.py              # CLI 進入點 (Typer)
 │   ├─ core/
 │   │   ├─ __init__.py
 │   │   ├─ config.py            # ConfigLoader
 │   │   ├─ catalog.py           # DataCatalog
 │   │   ├─ node.py              # Node
 │   │   ├─ pipeline.py          # Pipeline
-│   │   └─ runner.py            # Runner
+│   │   ├─ runner.py            # Runner
+│   │   └─ versioning.py        # Hash-based 版本管理、manifest、symlink
 │   ├─ io/
 │   │   ├─ __init__.py
 │   │   ├─ base.py              # AbstractDataset
 │   │   ├─ parquet_dataset.py   # ParquetDataset（支援 pandas & PySpark）
-│   │   ├─ hive_dataset.py      # HiveDataset
-│   │   └─ pickle_dataset.py    # PickleDataset（模型檔等）
+│   │   ├─ pickle_dataset.py    # PickleDataset（模型檔等）
+│   │   └─ json_dataset.py      # JSONDataset（category_mappings 等）
 │   ├─ pipelines/
-│   │   ├─ __init__.py
+│   │   ├─ __init__.py          # Pipeline registry (get_pipeline, list_pipelines)
 │   │   ├─ dataset/
 │   │   │   ├─ __init__.py
-│   │   │   ├─ nodes.py         # 純函數：抽樣、切分、prepare
+│   │   │   ├─ nodes_pandas.py  # pandas 後端節點函數
+│   │   │   ├─ nodes_spark.py   # PySpark 後端節點函數
+│   │   │   └─ pipeline.py      # Pipeline 定義（backend 切換）
+│   │   ├─ training/
+│   │   │   ├─ __init__.py
+│   │   │   ├─ nodes.py         # 純函數：調參、訓練、評估、記錄
 │   │   │   └─ pipeline.py      # Pipeline 定義
-│   │   └─ training/
+│   │   └─ inference/
 │   │       ├─ __init__.py
-│   │       ├─ nodes.py         # 純函數：訓練、評估、記錄
-│   │       └─ pipeline.py      # Pipeline 定義
+│   │       ├─ nodes_pandas.py  # pandas 後端節點函數
+│   │       ├─ nodes_spark.py   # PySpark 後端節點函數
+│   │       └─ pipeline.py      # Pipeline 定義（backend 切換）
 │   └─ utils/
 │       ├─ __init__.py
 │       └─ spark.py             # SparkSession 建立等工具
@@ -61,138 +68,88 @@ recsys_tfb/
 │   │   ├─ catalog.yaml
 │   │   ├─ parameters.yaml
 │   │   ├─ parameters_dataset.yaml
-│   │   └─ parameters_training.yaml
+│   │   ├─ parameters_training.yaml
+│   │   └─ parameters_inference.yaml
 │   ├─ local/
 │   │   └─ catalog.yaml
 │   └─ production/
 │       └─ catalog.yaml
-├─ sql/                         # ETL SQL 檔案（後續開發）
+├─ scripts/
+│   ├─ generate_synthetic_data.py   # 合成假資料產生
+│   └─ promote_model.py             # 模型版本晉升（手動觸發）
 ├─ tests/
-│   ├─ conftest.py              # SparkSession fixture
+│   ├─ conftest.py
+│   ├─ test_cli.py
 │   ├─ test_core/
 │   ├─ test_io/
-│   └─ test_pipelines/
-├─ data/                        # 本地假資料（後續由使用者提供 SQL 產出）
-├─ docs/
-├─ pyproject.toml               # 專案定義與依賴
+│   ├─ test_pipelines/
+│   └─ scripts/
+├─ data/                        # 本地假資料
+├─ pyproject.toml
 └─ CLAUDE.md
 ```
 
-## 實作計畫
+## 已完成階段
 
-### Phase 1：專案骨架
+### Phase 1：專案骨架 ✅
 
-**Step 1.1 - 專案初始化**
+- **Step 1.1** ✅ 專案初始化 — `pyproject.toml`、目錄結構
+- **Step 1.2** ✅ ConfigLoader — YAML base + env 深度合併
+- **Step 1.3** ✅ I/O 抽象層 — AbstractDataset、ParquetDataset、PickleDataset
+- **Step 1.4** ✅ DataCatalog — 根據 catalog.yaml 實例化 Dataset 物件
+- **Step 1.5** ✅ Node / Pipeline / Runner — 拓撲排序（Kahn's algorithm）+ 依序執行
+- **Step 1.6** ✅ CLI — Typer，`python -m recsys_tfb run --pipeline <name> --env <env>`
+- **Step 1.7** ✅ Config YAML — catalog.yaml、parameters*.yaml
 
-- 建立 `pyproject.toml`（定義套件、依賴、pytest 設定）
-- 建立目錄結構和 `__init__.py`
+### Phase 2：Dataset Building Pipeline ✅
 
-**Step 1.2 - ConfigLoader**
+- **Step 2.1** ✅ 假資料準備 — `scripts/generate_synthetic_data.py`
+- **Step 2.2** ✅ Dataset Building Nodes — select_sample_keys、split_keys、build_dataset（×3）、prepare_model_input
+- **Step 2.3** ✅ Pipeline 定義 — 支援 pandas/spark 雙後端切換
+- **Step 2.4** ✅ Config — parameters_dataset.yaml
+- **Step 2.5** ✅ I/O 擴充 — JSONDataset（category_mappings）
+- **Step 2.6** ✅ 測試 — test_pipelines/test_dataset/
 
-- `src/recsys_tfb/core/config.py`
-- 載入 `conf/{env}/` 下所有 YAML 檔
-- base 設定 + env 設定深度合併（env 覆寫 base）
-- 提供 `get_catalog_config()`, `get_parameters()` 方法
-- 測試：`tests/test_core/test_config.py`
+### Phase 3：Training Pipeline ✅
 
-**Step 1.3 - I/O 抽象層**
+- **Step 3.1** ✅ Training Nodes — tune_hyperparameters（Optuna）、train_model、evaluate_model（mAP）、log_experiment（MLflow）、compare_model_versions
+- **Step 3.2** ✅ Pipeline 定義
+- **Step 3.3** ✅ Config — parameters_training.yaml
+- **Step 3.4** ✅ 測試 — test_pipelines/test_training/
 
-- `src/recsys_tfb/io/base.py`：`AbstractDataset` 抽象類別，定義 `load()` / `save()` / `exists()`
-- `src/recsys_tfb/io/parquet_dataset.py`：`ParquetDataset`，支援 pandas 和 PySpark 讀寫
-- `src/recsys_tfb/io/pickle_dataset.py`：`PickleDataset`，用於模型檔和 preprocessor
-- 測試：`tests/test_io/`
+### Phase 4：Inference Pipeline + 版本管理 ✅
 
-**Step 1.4 - DataCatalog**
+- **Step 4.1** ✅ Inference Pipeline — build_scoring_dataset、apply_preprocessor、predict_scores、rank_predictions，支援 pandas/spark 雙後端
+- **Step 4.2** ✅ Hash-based 版本管理 — SHA-256 hash 產生 dataset_version / model_version，manifest JSON、symlink（latest/best）
+- **Step 4.3** ✅ 模型晉升腳本 — `scripts/promote_model.py`
+- **Step 4.4** ✅ Catalog 模板變數 — `${dataset_version}`、`${model_version}`、`${snap_date}` 路徑替換
+- **Step 4.5** ✅ 測試 — test_pipelines/test_inference/、test_core/test_versioning.py、scripts/test_promote_model.py
 
-- `src/recsys_tfb/core/catalog.py`
-- 根據 catalog.yaml 的定義實例化對應的 Dataset 物件
-- 提供 `load(name)` / `save(name, data)` / `exists(name)` 方法
-- 測試：`tests/test_core/test_catalog.py`
+## 待完成階段
 
-**Step 1.5 - Node / Pipeline / Runner**
+### Phase 5：Source Data ETL Pipeline
 
-- `Node`：封裝函數 + 輸入/輸出名稱
-- `Pipeline`：Node 集合，拓撲排序解析執行順序
-- `Runner`：從 DataCatalog 取資料 → 執行 Node → 存回 DataCatalog，附帶日誌和計時
-- 測試：`tests/test_core/`
+- SQL-based 資料轉換（PySpark），產出 feature table 與 label table
+- SQL 檔案數量與執行順序由 YAML 設定
+- 來源資料表新鮮度檢查
+- 資料品質驗證（空值、重複、分佈等）
+- 整合 Hive table 讀寫
 
-**Step 1.6 - CLI**
+### Phase 6：進階功能
 
-- `src/recsys_tfb/__main__.py`：使用 Typer
-- `python -m recsys_tfb run --pipeline <name> --env <env>`
-- 測試：手動驗證 CLI help
+- 進階評估指標：precision@K、recall@K、nDCG、MRR
+- 指標切面：依整體、產品個別、自定義客群分群
+- 機率校準（probability calibration）
+- 規則化重新排序（rule-based reranking）
+- 月度監控 pipeline（機率值分佈監控、資料筆數檢查）
+- Safe rerun 檢查點機制
 
-**Step 1.7 - Config YAML 檔案**
+### Phase 7：進階策略
 
-- `conf/base/catalog.yaml`：定義所有資料集
-- `conf/base/parameters.yaml`：全域參數
-- `conf/local/catalog.yaml`：開發環境覆寫（Parquet 路徑）
-
-### Phase 2：Dataset Building Pipeline
-
-**Step 2.1 - 假資料準備**
-
-- `data/` 下建立最小樣本 Parquet 檔（feature_table, label_table）
-- label_table 欄位：snap_date, cust_id, cust_segment_typ, apply_start_date, apply_end_date, label, prod_name
-
-**Step 2.2 - Dataset Building Nodes**
-
-- `select_sample_keys(label_table, params) → sample_keys`：從 label table 取 key 欄位做分層抽樣，group by 欄位由 YAML `sample_group_keys` 設定
-- `split_keys(sample_keys, label_table, params) → train_keys, train_dev_keys, val_keys`：依時間切分為三組（互不重疊），train_dev 有抽樣，val 為全量
-- `build_dataset(keys, feature_table, label_table) → dataset`：join 完整特徵（共用函數，分別建立 train_set, train_dev_set, val_set）
-- `prepare_model_input(train_set, train_dev_set, val_set, params) → X_train, y_train, X_train_dev, y_train_dev, X_val, y_val, preprocessor, category_mappings`
-
-**Step 2.3 - Pipeline 定義**
-
-- `src/recsys_tfb/pipelines/dataset/pipeline.py`：組裝 nodes 為 Pipeline（7 nodes）
-
-**Step 2.4 - Config**
-
-- `conf/base/parameters_dataset.yaml`：sample_group_keys、sample_ratio、train_dev_snap_dates、val_snap_dates
-
-**Step 2.5 - I/O 擴充**
-
-- `src/recsys_tfb/io/json_dataset.py`：JSONDataset，用於儲存 category_mappings
-- `conf/base/catalog.yaml`：新增 category_mappings 條目
-
-**Step 2.6 - 測試**
-
-- `tests/test_pipelines/test_dataset/`：每個 node 的單元測試
-
-### Phase 3：Training Pipeline
-
-**Step 3.1 - Training Nodes**
-
-- `train_model(X_train, y_train, params) → model`：LightGBM 二元分類
-- `tune_hyperparameters(X_train, y_train, X_val, y_val, params) → best_params, tuning_results`：Optuna 搜尋
-- `train_final_model(X_train, y_train, best_params) → final_model`
-- `predict(model, X_train, X_val) → train_preds, val_preds`
-- `evaluate(train_preds, val_preds, y_train, y_val, params) → metrics`：mAP（MVP 先做此指標）
-- `log_experiment(model, params, metrics) → run_id`：MLflow 記錄
-- `register_model(run_id, params) → model_version`
-
-**Step 3.2 - Pipeline 定義**
-
-- `src/recsys_tfb/pipelines/training/pipeline.py`
-
-**Step 3.3 - Config**
-
-- `conf/base/parameters_training.yaml`：模型參數、調參設定、評估設定
-
-**Step 3.4 - 測試**
-
-- `tests/test_pipelines/test_training/`
-
-### Phase 4：端到端驗證
-
-**Step 4.1 - 整合測試**
-
-- 用假資料跑完 dataset → training 完整流程
-- 確認 MLflow 記錄正確、模型檔可載入、metrics 有輸出
-
-**Step 4.2 - 更新 CLAUDE.md**
-
-- 加入 build/test/run 指令
+- Strategy 2：One-vs-Rest 多模型
+- Strategy 3：Strategy 1/2 + 單層排序（LambdaRank）
+- Strategy 4：Strategy 1/2 + 雙層排序（大類 → 中類）
+- 錯誤分析 notebook template
 
 ## 驗證方式
 
@@ -206,11 +163,11 @@ pytest tests/ -v
 # 執行特定測試
 pytest tests/test_core/test_config.py -v
 
-# 跑完整 MVP pipeline
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
+# 跑完整 pipeline
+python -m recsys_tfb run --pipeline dataset --env local
+python -m recsys_tfb run --pipeline training --env local
+python -m recsys_tfb run --pipeline inference --env local
 
-# 檢查 MLflow 記錄
-mlflow ui  # 開啟 MLflow UI 查看實驗結果
+# 模型晉升（手動觸發）
+python scripts/promote_model.py
 ```
-

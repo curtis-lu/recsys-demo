@@ -12,23 +12,116 @@ Product recommendation ranking model for a commercial bank. Predicts customer in
 
 ## Tech Stack & Versions
 
-Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.0 | Optuna 4.5.0 | Ploomber 0.23.3 | pandas 1.5.3 | numpy 1.25.0 | pyarrow 14.0.1 | pytest 7.3.1 | SHAP 0.42.1
+Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.0 | Optuna 4.5.0 | Ploomber 0.23.3 | pandas 1.5.3 | numpy 1.25.0 | pyarrow 14.0.1 | pytest 7.3.1 | SHAP 0.42.1 | Typer 0.20.1
+
+## Current Implementation Status
+
+- ✅ Kedro-inspired core framework (Node, Pipeline, Runner, Catalog, ConfigLoader)
+- ✅ I/O adapters: ParquetDataset, PickleDataset, JSONDataset (with pandas/spark dual backend)
+- ✅ Dataset Building Pipeline (stratified sampling, train/train-dev/val splits, feature engineering)
+- ✅ Training Pipeline (Optuna hyperparameter tuning, LightGBM training, mAP evaluation, MLflow logging, model version comparison)
+- ✅ Inference Pipeline (batch scoring, preprocessor reuse, ranking)
+- ✅ Hash-based artifact versioning with manifests and symlinks (latest/best)
+- ✅ Dual backend support: pandas (dev) / PySpark (production)
+- ✅ CLI entry point with `--pipeline`, `--env`, `--dataset-version` options
+- ✅ Model promotion script (`scripts/promote_model.py`)
+- ✅ Synthetic data generator (`scripts/generate_synthetic_data.py`)
+- ✅ Comprehensive test suite
+- ⬚ Source Data ETL Pipeline (not yet implemented)
+- ⬚ Advanced metrics (precision@K, recall@K, nDCG, MRR)
+- ⬚ Probability calibration and rule-based reranking
+- ⬚ Strategy 2-4
+- ⬚ Monthly monitoring pipeline
 
 ## Architecture: 4 Pipelines
 
-1. **Source Data ETL** - SQL-based transforms (PySpark) producing feature and label Hive tables. SQL files defined and ordered via YAML config. Includes source freshness checks and data quality validation (nulls, duplicates, distributions).
-2. **Dataset Building** - Stratified sampling, train/validation splits, feature engineering. Outputs Hive tables. Components must be reusable in inference without data leakage.
-3. **Training** - Model experiments with hyperparameter search (Optuna), experiment tracking (MLflow). Evaluation metrics: mAP, precision@K, recall@K, nDCG, MRR - sliced by overall, per-product, and custom segments. Supports probability calibration and rule-based reranking.
-4. **Inference** - Weekly batch scoring, monthly monitoring. Reuses ETL and dataset building components. Results partitioned by snap_date & prod_code.
+1. **Source Data ETL** _(not yet implemented)_ - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
+2. **Dataset Building** ✅ - Stratified sampling, train/train-dev/val splits, feature engineering. Outputs versioned Parquet files. Preprocessing logic reused in inference without data leakage. Dual pandas/spark backend.
+3. **Training** ✅ - Optuna hyperparameter search, LightGBM binary classification (Strategy 1), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts.
+4. **Inference** ✅ - Weekly batch scoring reusing dataset building preprocessing. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
+
+## Project Structure
+
+```
+src/recsys_tfb/
+  __main__.py           — CLI entry point (Typer)
+  core/
+    config.py           — ConfigLoader (YAML base + env merge)
+    catalog.py          — DataCatalog (dataset registry & resolution)
+    node.py             — Node (function wrapper with named I/O)
+    pipeline.py         — Pipeline (topological sort via Kahn's algorithm)
+    runner.py           — Runner (sequential execution)
+    versioning.py       — Hash-based versioning, manifests, symlinks
+  io/
+    base.py             — AbstractDataset interface
+    parquet_dataset.py  — ParquetDataset (pandas/spark dual backend)
+    pickle_dataset.py   — PickleDataset
+    json_dataset.py     — JSONDataset
+  pipelines/
+    __init__.py         — Pipeline registry (get_pipeline, list_pipelines)
+    dataset/            — Dataset building (nodes_pandas.py, nodes_spark.py, pipeline.py)
+    training/           — Training (nodes.py, pipeline.py)
+    inference/          — Inference (nodes_pandas.py, nodes_spark.py, pipeline.py)
+  utils/
+    spark.py            — Spark utilities
+
+conf/
+  base/                 — Shared config (catalog.yaml, parameters*.yaml)
+  local/                — Local dev overrides
+  production/           — Production overrides
+  sql/                  — ETL SQL files (future)
+
+scripts/
+  generate_synthetic_data.py  — Generate dev test data
+  promote_model.py            — Promote model version (manual trigger)
+
+tests/                  — pytest test suite
+data/                   — Local synthetic data (Parquet)
+```
+
+## Build / Test / Run Commands
+
+```bash
+# Install (with dev dependencies)
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Run specific pipeline
+python -m recsys_tfb run --pipeline dataset --env local
+python -m recsys_tfb run --pipeline training --env local
+python -m recsys_tfb run --pipeline inference --env local
+
+# Promote a model version to "best" symlink (manual trigger, do not run automatically)
+python scripts/promote_model.py
+```
+
+## Versioning
+
+Artifact versioning uses deterministic SHA-256 hashes of pipeline parameters:
+
+- **Dataset version**: `hash(parameters_dataset.yaml)` → first 8 hex chars
+- **Model version**: `hash(parameters_training.yaml + dataset_version)` → first 8 hex chars
+- Each version produces a JSON **manifest** recording pipeline metadata
+- **Symlinks**: `latest` points to most recent run, `best` points to promoted version
+- Catalog paths use template variables: `${dataset_version}`, `${model_version}`, `${snap_date}`
+
+## Dual Backend
+
+Pipeline nodes have separate implementations for pandas and PySpark:
+
+- `nodes_pandas.py` — used in local dev (`backend: pandas` in catalog)
+- `nodes_spark.py` — used in production (`backend: spark` in catalog)
+- Backend is selected per-dataset in `catalog.yaml` and per-pipeline via `create_pipeline(backend=...)` in pipeline registry
+- Dataset and Inference pipelines support dual backend; Training pipeline runs on pandas only (receives prepared numpy arrays)
 
 ## Model Strategies
 
-- **Strategy 1** (MVP): Single binary classifier, product name as feature
-- **Strategy 2**: One-vs-rest per product
-- **Strategy 3**: Strategy 1/2 + single ranking layer (e.g., LambdaRank)
-- **Strategy 4**: Strategy 1/2 + two-tier ranking (category then subcategory)
-
-Start with Strategy 1 and mAP evaluation only.
+- **Strategy 1** (MVP) ✅: Single binary classifier, product name as feature. Evaluation: mAP only.
+- **Strategy 2** _(planned)_: One-vs-rest per product
+- **Strategy 3** _(planned)_: Strategy 1/2 + single ranking layer (e.g., LambdaRank)
+- **Strategy 4** _(planned)_: Strategy 1/2 + two-tier ranking (category then subcategory)
 
 ## Design Philosophy (Kedro-inspired)
 
@@ -46,7 +139,7 @@ Follow the principles in `kedro_design_philosophy.md`. Key rules:
 
 Build incrementally per the PRD:
 
-1. Minimal working version first (Strategy 1 + mAP)
+1. ~~Minimal working version first (Strategy 1 + mAP)~~ ✅ Done
 2. Add features one at a time
 3. Test after each addition
 4. Skip error analysis notebooks initially
@@ -57,5 +150,4 @@ Build incrementally per the PRD:
 - No network access
 - No additional package installation
 - Dev environment uses synthetic data in place of Hive tables (see data spec docs)
-- Storage format: Parquet on HDFS
-
+- Storage format: Parquet (local dev) / Parquet on HDFS (production)

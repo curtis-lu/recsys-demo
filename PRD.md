@@ -77,7 +77,7 @@
 
 ### 核心功能描述
 
-- 預計區分4大pipeline，如附圖(PRD-pipeline-image.png)所示：  
+- 預計區分4大pipeline，如附圖(PRD-pipeline-image.png)所示：
   - **SOURCE DATA ETL PIPELINE：**
     - 主要目的：
       - 對來源資料表進行資料轉換，最終會產出一張儲存所有feature的HIVE table，以及一張儲存所有label的HIVE table。
@@ -127,8 +127,40 @@
 ## 開發規劃指引
 
 - 不要一次要求做完所有功能。建議：
-  - **先跑起來** — 最小可用版本（MVP）
-  - **逐步加功能** — 一次一個功能點
-  - **邊做邊測** — 每加完一個功能就測試確認
+  - **先跑起來** — 最小可用版本（MVP）
+  - **逐步加功能** — 一次一個功能點
+  - **邊做邊測** — 每加完一個功能就測試確認
   - 模型架構先以策略1優先開發、模型評估先算mAP就好、錯誤分析的template notebook先跳過。
 
+## 開發進度追蹤
+
+### 已完成 ✅
+
+| 功能 | 說明 |
+|------|------|
+| Kedro-inspired 框架 | Node、Pipeline、Runner、Catalog、ConfigLoader |
+| I/O 抽象層 | ParquetDataset（雙後端）、PickleDataset、JSONDataset |
+| Dataset Building Pipeline | 分層抽樣、train/train-dev/val 切分、特徵工程、雙後端 |
+| Training Pipeline | Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤、版本比較 |
+| Inference Pipeline | 批次打分、preprocessor 複用、排序、雙後端 |
+| 版本管理 | Hash-based dataset/model versioning、manifest JSON、symlink（latest/best） |
+| 模型晉升 | `scripts/promote_model.py`（手動觸發） |
+| CLI | Typer 入口，支援 --pipeline、--env、--dataset-version |
+| Strategy 1 | 單一二分類器 + mAP 評估 |
+| 測試 | 完整單元測試覆蓋 |
+
+### 待完成 ⬚
+
+| 功能 | 說明 |
+|------|------|
+| Source Data ETL Pipeline | SQL 轉換、Hive 整合、資料驗證 |
+| 進階評估指標 | precision@K、recall@K、nDCG、MRR |
+| 指標切面 | 依整體、產品個別、自定義客群分群 |
+| 機率校準 | probability calibration |
+| 規則化重新排序 | rule-based reranking |
+| 月度監控 | 機率值分佈監控、資料筆數檢查 |
+| Safe rerun 檢查點 | 跳過已完成步驟 |
+| Strategy 2 | One-vs-Rest 多模型 |
+| Strategy 3 | 疊加單層排序（LambdaRank） |
+| Strategy 4 | 疊加雙層排序（大類 → 中類） |
+| 錯誤分析 notebook | template notebook |

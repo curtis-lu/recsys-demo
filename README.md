@@ -6,6 +6,19 @@
 - **訓練**：月度快照（12 個月），按需執行
 - **目標環境**：PySpark 3.3.2 on Hadoop/HDFS/Hive，Ploomber DAG 編排，無網路，CPU-only
 
+## 目前狀態
+
+- ✅ Kedro-inspired 核心框架（Node, Pipeline, Runner, Catalog, ConfigLoader）
+- ✅ Dataset Building Pipeline（分層抽樣、train/train-dev/val 切分、特徵工程）
+- ✅ Training Pipeline（Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤）
+- ✅ Inference Pipeline（批次打分、preprocessor 複用、排序）
+- ✅ Hash-based 版本管理（manifest、symlink latest/best）
+- ✅ pandas/PySpark 雙後端支援
+- ✅ Strategy 1 MVP（單一二分類器 + mAP）
+- ⬚ Source Data ETL Pipeline
+- ⬚ 進階指標（precision@K、nDCG、MRR 等）
+- ⬚ Strategy 2-4
+
 ## 架構
 
 採用 Kedro 風格的框架設計：
@@ -15,18 +28,189 @@ Node → Pipeline → Runner → Catalog
 ```
 
 - **Node**：封裝純函數的計算單元，宣告輸入/輸出
-- **Pipeline**：節點的有向無環圖（DAG）
-- **Runner**：拓撲排序後依序執行節點
+- **Pipeline**：節點的有向無環圖（DAG），拓撲排序（Kahn's algorithm）
+- **Runner**：依序執行節點
 - **Catalog**：資料 I/O 抽象層，支援 Parquet、Pickle、JSON 等適配器
 
 ### 4 條流水線
 
-| 流水線 | 說明 |
-|--------|------|
-| Source Data ETL | SQL 驅動的特徵和標籤表建構（PySpark） |
-| Dataset Building | 分層抽樣、訓練/驗證/測試集切分、特徵工程 |
-| Training | Optuna 超參搜尋、MLflow 實驗追蹤、多維度評估 |
-| Inference | 每週批量打分、月度監控，複用 ETL 和 Dataset 元件 |
+| 流水線 | 狀態 | 說明 |
+|--------|------|------|
+| Source Data ETL | ⬚ | SQL 驅動的特徵和標籤表建構（PySpark） |
+| Dataset Building | ✅ | 分層抽樣、train/train-dev/val 切分、特徵工程。雙後端。輸出版本化 Parquet |
+| Training | ✅ | Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤、版本比較 |
+| Inference | ✅ | 每週批量打分，複用 Dataset Building 前處理邏輯。雙後端。結果依版本/日期分區 |
+
+### 流水線相依關係
+
+三條 pipeline 必須依序執行，後者依賴前者的產出：
+
+```
+feature_table ──┐                                              feature_table ──┐
+label_table ────┤                                              preprocessor ───┤
+                ▼                                              model ──────────┤
+        ┌───────────────┐      ┌──────────────┐               ▼
+        │    Dataset     │      │   Training   │      ┌──────────────┐
+        │   Building     │─────▶│              │─────▶│  Inference   │
+        └───────────────┘      └──────────────┘      └──────────────┘
+              │                       │                       │
+              ▼                       ▼                       ▼
+     X/y_train, X/y_val       model, best_params      ranked_predictions
+     preprocessor              evaluation_results
+     category_mappings
+```
+
+**跨 pipeline 共享的 catalog dataset：**
+
+| 共享 Dataset | 產出 Pipeline | 消費 Pipeline | 說明 |
+|--------------|---------------|---------------|------|
+| `feature_table` | （外部輸入） | Dataset, Inference | 客戶特徵表，~500 欄位 |
+| `label_table` | （外部輸入） | Dataset | 客戶標籤表 |
+| `X_train`, `y_train` | Dataset | Training | 訓練集特徵矩陣與標籤 |
+| `X_train_dev`, `y_train_dev` | Dataset | Training | 開發集（用於 early stopping） |
+| `X_val`, `y_val` | Dataset | Training | 驗證集特徵矩陣與標籤 |
+| `val_set` | Dataset | Training | 驗證集原始 DataFrame（mAP 分組計算用） |
+| `preprocessor` | Dataset | Inference | 特徵編碼器（categorical mapping、欄位清單等） |
+| `category_mappings` | Dataset | （參考用） | 產品類別對照表 |
+| `model` | Training | Inference | LightGBM Booster 模型 |
+
+**版本串接機制：**
+
+```
+parameters_dataset.yaml
+        │
+        ▼ SHA-256 前 8 碼
+  dataset_version ──────────────────────────────────┐
+        │                                           │
+        ▼                                           ▼
+parameters_training.yaml + dataset_version    Inference 路徑：
+        │                                    data/inference/${model_version}/${snap_date}/
+        ▼ SHA-256 前 8 碼
+  model_version
+```
+
+- Dataset pipeline 的產出存放在 `data/dataset/${dataset_version}/`
+- Training pipeline 的產出存放在 `data/models/${model_version}/`
+- Inference pipeline 的產出存放在 `data/inference/${model_version}/${snap_date}/`
+- `model_version` 依賴 `dataset_version`，確保模型可追溯到其訓練資料
+
+**關鍵不變量（跨 pipeline 必須一致）：**
+
+- `preprocessor` 必須一致：Inference 使用的 preprocessor 必須與 Training 所用的 Dataset pipeline 產出相同，否則特徵編碼不一致會導致預測錯誤
+- 產品清單必須一致：`inference.products` 必須是訓練時 `category_mappings` 中出現過的產品子集
+- `feature_table` schema 必須一致：Inference 時的 feature_table 欄位必須與 Dataset Building 時一致
+
+### 資料契約
+
+以下說明各 pipeline 對輸入資料的 schema 要求與 hard-coded 欄位依賴。接手或修改 pipeline 前，請確認輸入資料符合這些約束。
+
+#### feature_table schema
+
+| 欄位 | 型別 | 說明 | 程式碼依賴 |
+|------|------|------|-----------|
+| `snap_date` | datetime | 快照日期 | join key、日期過濾、分群（hard-coded） |
+| `cust_id` | string | 客戶 ID | join key（hard-coded） |
+| 其餘數值欄位 | float | 特徵 | 動態偵測（非 join key / 非 drop 清單的欄位都會成為模型特徵） |
+
+- join key `["snap_date", "cust_id"]` 是 hard-coded（`dataset/nodes_pandas.py:74,78`、`dataset/nodes_spark.py:89,92`、`inference/nodes_pandas.py:30`）
+- 數值特徵欄位名稱不是 hard-coded，程式碼透過排除法（drop 掉 join key + label 相關欄位後，剩餘皆為特徵）
+
+#### label_table schema
+
+| 欄位 | 型別 | 說明 | 程式碼依賴 |
+|------|------|------|-----------|
+| `snap_date` | datetime | 快照日期 | join key（hard-coded） |
+| `cust_id` | string | 客戶 ID | join key（hard-coded） |
+| `prod_name` | string | 產品名稱 | 唯一 categorical 欄位，integer encoding（hard-coded） |
+| `label` | int (0/1) | 二分類標籤 | 目標變數（hard-coded） |
+| `apply_start_date` | datetime | 申請起始日 | `prepare_model_input` 時 drop（hard-coded） |
+| `apply_end_date` | datetime | 申請結束日 | `prepare_model_input` 時 drop（hard-coded） |
+| `cust_segment_typ` | string | 客戶分群 | `prepare_model_input` 時 drop（hard-coded） |
+
+#### Hard-coded 欄位依賴總結
+
+| 分類 | 欄位 | 說明 |
+|------|------|------|
+| **Join key** | `snap_date`, `cust_id` | 所有 pipeline 的合併 / 分群基礎 |
+| **必須 drop 的欄位** | `snap_date`, `cust_id`, `label`, `apply_start_date`, `apply_end_date`, `cust_segment_typ` | 在 `prepare_model_input` 中移除（`dataset/nodes_pandas.py:92-95`、`dataset/nodes_spark.py:112-115`） |
+| **唯一 categorical 欄位** | `prod_name` | hard-coded 做 integer encoding（`dataset/nodes_pandas.py:96`、`dataset/nodes_spark.py:116`） |
+
+#### 日期格式與資料型別
+
+- 所有日期欄位須為 `datetime64[ns]`（pandas Timestamp），字串形式 `"YYYY-MM-DD"` 會自動轉換
+- `label` 必須為 0 或 1 的整數
+- 數值特徵欄位為 float
+
+#### 其他隱含約束
+
+- **Inference cross-join**：推論時會將 `feature_table` 的客戶與 `inference.products` 清單做笛卡兒積（`inference/nodes_pandas.py:24-27`）
+- **未知類別處理**：推論時遇到訓練集沒見過的 `prod_name` 值，會編碼為 `-1`
+- **mAP 分群**：評估時依 `(snap_date, cust_id)` 分群計算 AP，每個 group 有多個 `prod_name`（`training/nodes.py:50,204`）
+- **特徵欄位順序**：preprocessor 記錄了訓練時的欄位順序，推論時必須一致
+
+### 客製化指引
+
+#### 設定檔調整（不需改程式碼）
+
+修改 `conf/base/parameters_*.yaml` 即可調整行為，改完重跑 pipeline 就會生效：
+
+| 檔案 | 可調內容 | 範例 |
+|------|----------|------|
+| `parameters_dataset.yaml` | 抽樣率、分組欄位、train/val 日期切分 | 把 `sample_ratio` 從 1.0 改為 0.1 進行快速驗證 |
+| `parameters_training.yaml` | Optuna 試驗次數、LightGBM 迭代數/早停、超參搜尋範圍 | 增加 `n_trials` 到 100 做更充分的超參搜尋 |
+| `parameters_inference.yaml` | 推論日期、產品清單 | 新增產品代碼到 `inference.products` |
+| `parameters.yaml` | 專案名稱、隨機種子 | 換 `random_seed` 測試穩定性 |
+| `catalog.yaml` | 資料路徑、後端（pandas/spark）、存儲格式 | 把 `backend` 從 `pandas` 改為 `spark` |
+| `conf/local/` 或 `conf/production/` | 環境覆蓋 | 在 `production/catalog.yaml` 中指定 HDFS 路徑 |
+
+> 注意：修改 `parameters_dataset.yaml` 會產生新的 `dataset_version`，後續 training 和 inference 都需重跑。修改 `parameters_training.yaml` 會產生新的 `model_version`，inference 需重跑。
+
+#### 節點邏輯修改（改 nodes 檔案）
+
+Pipeline 節點都是純函數，可直接修改或替換：
+
+| 要改的邏輯 | 修改檔案 | 函數 |
+|-----------|----------|------|
+| 特徵工程（新增/刪除特徵） | `pipelines/dataset/nodes_pandas.py`（及 `nodes_spark.py`） | `prepare_model_input` |
+| 抽樣策略 | `pipelines/dataset/nodes_pandas.py` | `select_sample_keys` |
+| 資料切分方式 | `pipelines/dataset/nodes_pandas.py` | `split_keys` |
+| 超參搜尋空間/策略 | `pipelines/training/nodes.py` | `tune_hyperparameters` |
+| 模型訓練邏輯 | `pipelines/training/nodes.py` | `train_model` |
+| 評估指標 | `pipelines/training/nodes.py` | `evaluate_model` |
+| 打分前處理 | `pipelines/inference/nodes_pandas.py` | `apply_preprocessor` |
+| 排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` | `rank_predictions` |
+
+> 如果同時支援雙後端，`nodes_pandas.py` 和 `nodes_spark.py` 需保持同步修改。
+
+#### 框架層（不建議改動）
+
+以下模組構成 pipeline 執行的基礎設施，修改前請確認完全理解其影響：
+
+| 模組 | 路徑 | 說明 |
+|------|------|------|
+| 核心框架 | `core/node.py`, `core/pipeline.py`, `core/runner.py` | Node/Pipeline/Runner 執行引擎 |
+| 設定載入 | `core/config.py` | YAML 合併策略 |
+| Catalog | `core/catalog.py` | 資料集註冊與模板變數解析 |
+| 版本管理 | `core/versioning.py` | hash 計算、manifest 寫入、symlink 管理 |
+| I/O 適配器 | `io/` | Parquet/Pickle/JSON 讀寫 |
+| CLI | `__main__.py` | Typer 命令列入口 |
+
+### 版本管理
+
+- **Dataset version**：`SHA-256(parameters_dataset.yaml)` 前 8 碼
+- **Model version**：`SHA-256(parameters_training.yaml + dataset_version)` 前 8 碼
+- 每次執行產出 JSON **manifest**（記錄 pipeline metadata）
+- **Symlink**：`latest`（最近執行）、`best`（晉升版本）
+- Catalog 路徑使用模板變數：`${dataset_version}`、`${model_version}`、`${snap_date}`
+
+### 雙後端支援
+
+| 後端 | 使用場景 | 節點檔案 |
+|------|----------|----------|
+| pandas | 本地開發、中小資料量 | `nodes_pandas.py` |
+| PySpark | 正式環境、大規模資料 | `nodes_spark.py` |
+
+Dataset 和 Inference Pipeline 支援雙後端；Training Pipeline 僅使用 pandas（接收準備好的 numpy array）。
 
 ### 配置管理
 
@@ -47,7 +231,7 @@ conf/
 
 - `base/` 存放跨環境共享的預設值，`local/` 和 `production/` 可覆蓋同名 key
 - 合併語義：nested dict 遞迴合併（deep merge），scalar 值直接替換
-- 透過 `--env` 參數切換環境：`python -m recsys_tfb -p dataset -e local`
+- 透過 `--env` 參數切換環境：`python -m recsys_tfb run -p dataset -e local`
 - 未指定 `--env` 時，僅載入 `base/` 配置
 
 #### 全域參數 (`parameters.yaml`)
@@ -96,13 +280,10 @@ conf/
 | 欄位 | 必填 | 說明 |
 |------|------|------|
 | `type` | 是 | 資料集型別：`ParquetDataset`、`PickleDataset`、`JSONDataset` |
-| `filepath` | 是 | 檔案路徑（本地相對路徑或 `hdfs:///` 絕對路徑） |
+| `filepath` | 是 | 檔案路徑（本地相對路徑或 `hdfs:///` 絕對路徑），支援模板變數 |
 | `backend` | 否 | 僅 `ParquetDataset` 適用：`pandas`（預設）或 `spark` |
 
-`backend` 差異：
-
-- `pandas`：使用 pyarrow 讀寫，適合本地開發與中小資料量
-- `spark`：使用 PySpark DataFrame 讀寫，適合生產環境大規模資料
+Catalog 路徑支援模板變數替換：`${dataset_version}`、`${model_version}`、`${snap_date}`
 
 環境覆蓋範例：
 
@@ -137,16 +318,33 @@ feature_table:
 
 ```
 src/recsys_tfb/
-  __main__.py       — CLI 入口（Typer）
-  core/             — 框架核心（node, pipeline, runner, catalog, config）
-  io/               — 資料集適配器（parquet, pickle, json）
-  pipelines/        — 流水線模組（dataset, training）
-  utils/            — 工具函數（Spark 等）
+  __main__.py           — CLI 入口（Typer）
+  core/
+    config.py           — ConfigLoader（YAML base + env 合併）
+    catalog.py          — DataCatalog（dataset registry & 路徑解析）
+    node.py             — Node（函數封裝 + 命名 I/O）
+    pipeline.py         — Pipeline（Kahn's algorithm 拓撲排序）
+    runner.py           — Runner（依序執行）
+    versioning.py       — Hash-based 版本管理、manifest、symlink
+  io/
+    base.py             — AbstractDataset 介面
+    parquet_dataset.py  — ParquetDataset（pandas/spark 雙後端）
+    pickle_dataset.py   — PickleDataset
+    json_dataset.py     — JSONDataset
+  pipelines/
+    __init__.py         — Pipeline registry（get_pipeline, list_pipelines）
+    dataset/            — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
+    training/           — Training（nodes.py, pipeline.py）
+    inference/          — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py）
+  utils/
+    spark.py            — Spark 工具函數
 
-conf/               — YAML 配置 + SQL
-tests/              — pytest 測試
-data/               — 開發用合成資料
-scripts/            — 輔助腳本
+conf/                   — YAML 配置 + SQL
+scripts/
+  generate_synthetic_data.py  — 產生合成假資料
+  promote_model.py            — 模型版本晉升（手動觸發）
+tests/                  — pytest 測試
+data/                   — 開發用合成資料
 ```
 
 ## 快速開始
@@ -164,14 +362,24 @@ pip install -e ".[dev]"
 ### 執行流水線
 
 ```bash
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb -p dataset -e local  # 簡寫
+python -m recsys_tfb run --pipeline dataset --env local
+python -m recsys_tfb run --pipeline training --env local
+python -m recsys_tfb run --pipeline inference --env local
+python -m recsys_tfb run -p dataset -e local  # 簡寫
+```
+
+### 模型晉升
+
+```bash
+python scripts/promote_model.py
 ```
 
 ### 執行測試
 
 ```bash
 pytest
+pytest tests/ -v
+pytest tests/test_core/test_config.py -v  # 單一測試
 ```
 
 ## 技術棧
@@ -193,11 +401,9 @@ pytest
 
 ## 模型策略
 
-| 策略 | 說明 |
-|------|------|
-| Strategy 1（MVP） | 單一二分類器，產品名稱作為特徵 |
-| Strategy 2 | 每個產品獨立的 One-vs-Rest 分類器 |
-| Strategy 3 | Strategy 1/2 + 排序層（如 LambdaRank） |
-| Strategy 4 | Strategy 1/2 + 兩級排序（品類 → 子品類） |
-
-目前從 Strategy 1 + mAP 評估開始。
+| 策略 | 狀態 | 說明 |
+|------|------|------|
+| Strategy 1（MVP） | ✅ | 單一二分類器，產品名稱作為特徵，mAP 評估 |
+| Strategy 2 | ⬚ | 每個產品獨立的 One-vs-Rest 分類器 |
+| Strategy 3 | ⬚ | Strategy 1/2 + 排序層（如 LambdaRank） |
+| Strategy 4 | ⬚ | Strategy 1/2 + 兩級排序（品類 → 子品類） |
