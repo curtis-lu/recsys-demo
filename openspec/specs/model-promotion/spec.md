@@ -24,15 +24,15 @@
 - **THEN** 系統 SHALL 將 `/custom/path/best` 建立為指向 `/custom/path/a1b2c3d4/` 的 symlink
 
 ### Requirement: promote 前驗證 artifacts 完整性
-promote script SHALL 在操作前驗證版本目錄中包含所有必要的 artifacts。
+promote script SHALL 在操作前驗證版本目錄中包含所有必要的 artifacts。`REQUIRED_ARTIFACTS` 清單 MUST 包含 `model.txt`（而非 `model.pkl`），以對應 LightGBMDataset 的實際輸出格式。
 
-#### Scenario: artifacts 不完整
-- **WHEN** 版本目錄中缺少 model.pkl
-- **THEN** 系統 SHALL 輸出錯誤訊息列出缺少的檔案，並以非零 exit code 結束
+#### Scenario: 新格式模型通過驗證
+- **WHEN** 模型目錄含 `model.txt`、`best_params.json`、`evaluation_results.json`
+- **THEN** `validate_version()` 回傳空清單（無缺失 artifacts）
 
-#### Scenario: artifacts 完整
-- **WHEN** 版本目錄中包含 model.pkl、best_params.json、evaluation_results.json
-- **THEN** 系統 SHALL 執行 promote 並輸出成功訊息
+#### Scenario: 舊格式 model.pkl 不再作為必要檢查項
+- **WHEN** 模型目錄含 `model.txt` 但不含 `model.pkl`
+- **THEN** `validate_version()` 回傳空清單（通過驗證）
 
 ### Requirement: promote 輸出摘要
 promote script SHALL 在完成後輸出 promote 結果摘要。

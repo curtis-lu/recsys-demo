@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 REQUIRED_ARTIFACTS = [
-    "model.pkl",
+    "model.txt",
     "best_params.json",
     "evaluation_results.json",
 ]

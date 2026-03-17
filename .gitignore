@@ -16,3 +16,4 @@ data/*
 .env
 *.log
 .venv/
+tests/scenarios/output/
