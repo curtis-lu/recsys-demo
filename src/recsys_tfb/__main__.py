@@ -128,7 +128,8 @@ def run(
             params_inference = config.get_parameters_by_name("parameters_inference")
         except KeyError:
             params_inference = {}
-        snap_dates = params_inference.get("snap_dates", [])
+        inf_config = params_inference.get("inference", params_inference)
+        snap_dates = inf_config.get("snap_dates", [])
         snap_date = snap_dates[0].replace("-", "") if snap_dates else "unknown"
 
         runtime_params["model_version"] = "best"
