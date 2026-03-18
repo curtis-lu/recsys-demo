@@ -18,7 +18,7 @@
 - ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
 - ✅ Inference output 使用實際 model hash + latest symlink
 - ⬚ Source Data ETL Pipeline
-- ⬚ 進階指標（precision@K、nDCG、MRR 等）
+- ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + macro/micro avg + baselines + Plotly HTML 報告 + 模型比較 CLI）
 - ⬚ Strategy 2-4
 
 ## 架構
@@ -262,8 +262,8 @@ conf/
 | `training.n_trials` | int | `20` | Optuna 超參搜尋試驗次數 | ≥ 1 |
 | `training.num_iterations` | int | `500` | LightGBM boosting 迭代輪數 | ≥ 1 |
 | `training.early_stopping_rounds` | int | `50` | 早停耐心值（驗證指標無改善的容忍輪數） | ≥ 1，且應 < `num_iterations` |
-| `training.search_space.learning_rate` | {low, high} | `{0.01, 0.3}` | 學習率搜尋範圍 | 0.001 ~ 1.0 |
-| `training.search_space.num_leaves` | {low, high} | `{16, 128}` | 葉節點數搜尋範圍 | 2 ~ 256 |
+| `training.search_space.learning_rate` | {low, high} | `{0.001, 0.1}` | 學習率搜尋範圍 | 0.001 ~ 1.0 |
+| `training.search_space.num_leaves` | {low, high} | `{4, 64}` | 葉節點數搜尋範圍 | 2 ~ 256 |
 | `training.search_space.max_depth` | {low, high} | `{3, 8}` | 最大樹深搜尋範圍 | 1 ~ 16 |
 | `training.search_space.min_child_samples` | {low, high} | `{5, 100}` | 葉節點最小樣本數搜尋範圍 | 1 ~ 1000 |
 | `training.search_space.subsample` | {low, high} | `{0.6, 1.0}` | 行抽樣比例搜尋範圍 | 0.1 ~ 1.0 |
@@ -341,6 +341,14 @@ src/recsys_tfb/
     dataset/            — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
     training/           — Training（nodes.py, pipeline.py）
     inference/          — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py）
+  evaluation/
+    metrics.py          — 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
+    distributions.py    — 分數/排名分布圖表
+    calibration.py      — 校準曲線
+    segments.py         — 客群/持有產品組合分析
+    baselines.py        — 全域/客群熱門度 baseline
+    report.py           — HTML 報告產生（Plotly 離線內嵌）
+    compare.py          — 模型比較邏輯與視覺化
   utils/
     spark.py            — Spark 工具函數
 
@@ -348,7 +356,10 @@ conf/                   — YAML 配置 + SQL
 scripts/
   generate_synthetic_data.py  — 產生合成假資料
   promote_model.py            — 模型版本晉升（手動觸發）
-tests/                  — pytest 測試
+  evaluate_model.py           — 模型評估 CLI（analyze/compare）
+tests/
+  test_evaluation/      — 評估模組測試
+  scripts/              — 腳本測試
 data/                   — 開發用合成資料
 ```
 
@@ -371,6 +382,16 @@ python -m recsys_tfb run --pipeline dataset --env local
 python -m recsys_tfb run --pipeline training --env local
 python -m recsys_tfb run --pipeline inference --env local
 python -m recsys_tfb run -p dataset -e local  # 簡寫
+```
+
+### 模型評估
+
+```bash
+# 單一模型分析（產出 Plotly HTML 報告）
+python scripts/evaluate_model.py analyze <model_version> --snap-date 2024-03-31
+
+# 模型比較（與 baseline 或其他模型比較）
+python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2024-03-31
 ```
 
 ### 模型晉升
