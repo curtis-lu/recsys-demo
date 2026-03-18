@@ -234,7 +234,7 @@ conf/
 
 - `base/` 存放跨環境共享的預設值，`local/` 和 `production/` 可覆蓋同名 key
 - 合併語義：nested dict 遞迴合併（deep merge），scalar 值直接替換
-- 透過 `--env` 參數切換環境：`python -m recsys_tfb run -p dataset -e local`
+- 透過 `--env` 參數切換環境：`python -m recsys_tfb -p dataset -e local`
 - `--env` 預設值為 `local`，即未指定時載入 `base/` 再合併 `local/` 配置
 
 #### 全域參數 (`parameters.yaml`)
@@ -378,21 +378,29 @@ pip install -e ".[dev]"
 ### 執行流水線
 
 ```bash
-python -m recsys_tfb run --pipeline dataset --env local
-python -m recsys_tfb run --pipeline training --env local
-python -m recsys_tfb run --pipeline inference --env local
-python -m recsys_tfb run -p dataset -e local  # 簡寫
+python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb --pipeline inference --env local
+python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34  # 指定模型版本
+python -m recsys_tfb -p dataset -e local  # 簡寫
 ```
 
 ### 模型評估
 
 ```bash
-# 單一模型分析（產出 Plotly HTML 報告）
+# 單一模型分析（產出 Plotly HTML 報告 + metrics.json）
 python scripts/evaluate_model.py analyze <model_version> --snap-date 2024-03-31
 
-# 模型比較（與 baseline 或其他模型比較）
+# 兩個模型版本比較（指標差異 + 分數分布比較）
+python scripts/evaluate_model.py compare <model_a> <model_b> --snap-date 2024-03-31
+
+# 模型 vs baseline 比較（global_popularity 或 segment_popularity）
 python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2024-03-31
 ```
+
+- model_version 可使用版本 hash、`latest` 或 `best`
+- `--k-values 3,5,10` 可自訂 K 值（預設 5, all）
+- 報告輸出至 `data/evaluation/` 下對應版本目錄
 
 ### 模型晉升
 

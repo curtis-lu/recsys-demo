@@ -23,7 +23,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ Inference Pipeline (batch scoring, preprocessor reuse, ranking, actual model hash for output paths)
 - ✅ Hash-based artifact versioning with manifests and symlinks (latest/best)
 - ✅ Dual backend support: pandas (dev) / PySpark (production)
-- ✅ CLI entry point with `--pipeline`, `--env`, `--dataset-version` options
+- ✅ CLI entry point with `--pipeline`, `--env`, `--dataset-version`, `--model-version` options
 - ✅ Model promotion script (`scripts/promote_model.py`)
 - ✅ Synthetic data generator (`scripts/generate_synthetic_data.py`)
 - ✅ Comprehensive test suite
@@ -85,7 +85,7 @@ conf/
 scripts/
   generate_synthetic_data.py  — Generate dev test data
   promote_model.py            — Promote model version (manual trigger)
-  evaluate_model.py           — Model evaluation CLI (analyze/compare)
+  evaluate_model.py           — 模型評估 CLI（analyze 單一模型分析 / compare 模型間或 vs baseline 比較）
 
 tests/                  — pytest test suite
 data/                   — Local synthetic data (Parquet)
@@ -104,6 +104,7 @@ pytest tests/ -v
 python -m recsys_tfb --pipeline dataset --env local
 python -m recsys_tfb --pipeline training --env local
 python -m recsys_tfb --pipeline inference --env local
+python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34  # 指定模型版本
 
 # Promote a model version to "best" symlink (manual trigger, do not run automatically)
 python scripts/promote_model.py

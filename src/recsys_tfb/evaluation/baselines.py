@@ -31,7 +31,9 @@ def generate_global_popularity_baseline(
     Returns:
         DataFrame with columns [snap_date, cust_id, prod_code, score, rank].
     """
-    historical = label_table[label_table["snap_date"] < snap_date]
+    snap_date = pd.Timestamp(snap_date)
+    label_snap = pd.to_datetime(label_table["snap_date"])
+    historical = label_table[label_snap < snap_date]
 
     if len(historical) == 0:
         logger.warning(
@@ -93,7 +95,9 @@ def generate_segment_popularity_baseline(
     Returns:
         DataFrame with columns [snap_date, cust_id, prod_code, score, rank].
     """
-    historical = label_table[label_table["snap_date"] < snap_date]
+    snap_date = pd.Timestamp(snap_date)
+    label_snap = pd.to_datetime(label_table["snap_date"])
+    historical = label_table[label_snap < snap_date]
 
     if len(historical) == 0:
         logger.warning(

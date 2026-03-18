@@ -26,6 +26,9 @@ def run(
     dataset_version: Optional[str] = typer.Option(
         None, "--dataset-version", help="Dataset version to use (default: computed or latest)"
     ),
+    model_version: Optional[str] = typer.Option(
+        None, "--model-version", help="Model version to use for inference (default: best symlink)"
+    ),
 ) -> None:
     """Run a named pipeline with the specified environment config."""
     logging.basicConfig(
@@ -107,15 +110,22 @@ def run(
         logger.info("Dataset version: %s", ds_version)
 
     elif pipeline == "inference":
-        # Resolve model version (best symlink)
+        # Resolve model version (from --model-version or best symlink)
         models_dir = data_dir / "models"
-        mv = resolve_model_version(models_dir, None)
+        mv = resolve_model_version(models_dir, model_version)
+
+        # Validate explicitly specified model version directory exists
+        if model_version is not None:
+            mv_dir = models_dir / mv
+            if not mv_dir.is_dir():
+                logger.error("Model version directory not found: %s", mv_dir)
+                raise typer.Exit(code=1)
 
         # Read dataset_version from model manifest, fallback to latest
         dataset_dir = data_dir / "dataset"
-        best_dir = models_dir / "best"
+        model_dir = models_dir / mv
         try:
-            model_manifest = read_manifest(best_dir)
+            model_manifest = read_manifest(model_dir)
             ds_version = model_manifest["dataset_version"]
         except (FileNotFoundError, KeyError):
             logger.warning(
@@ -136,7 +146,8 @@ def run(
         runtime_params["model_version"] = mv
         runtime_params["dataset_version"] = ds_version
         runtime_params["snap_date"] = snap_date
-        logger.info("Model version: %s (best)", mv)
+        source = model_version if model_version else "best"
+        logger.info("Model version: %s (%s)", mv, source)
         logger.info("Dataset version: %s", ds_version)
 
     else:
@@ -148,9 +159,9 @@ def run(
     # Build catalog with resolved runtime params
     catalog_config = config.get_catalog_config(runtime_params=runtime_params)
 
-    # For inference: model and preprocessor must read via "best" symlink,
-    # while output paths use the actual model hash.
-    if pipeline == "inference":
+    # For inference: when no explicit --model-version is given, model and
+    # preprocessor read via "best" symlink while output paths use the actual hash.
+    if pipeline == "inference" and model_version is None:
         for entry_name in ("model", "preprocessor"):
             if entry_name in catalog_config:
                 catalog_config[entry_name]["filepath"] = catalog_config[entry_name][

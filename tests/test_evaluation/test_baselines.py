@@ -122,4 +122,4 @@ class TestSegmentPopularityBaseline:
             label_table, "20240331", customer_ids
         )
         assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score", "rank"}
-        assert result["snap_date"].unique().tolist() == ["20240331"]
+        assert (result["snap_date"].unique() == pd.Timestamp("20240331")).all()
