@@ -1,10 +1,167 @@
 # recsys_tfb
 
-商業銀行產品推薦排序模型。預測客戶對 22 個金融產品類別（信用卡、貸款、存款、基金、保險等）的興趣評分，幫助行銷 PM 確定觸達優先級。
+批次排序推薦框架——為每位用戶對多個候選項目打分並排序。預設範例為商業銀行金融產品推薦（22 類產品 × ~1000 萬客戶 × ~500 特徵），但適用於任何「用戶 × 候選項目 × 二分類標籤 → 排序」的場景。
 
-- **推論**：每週批量評分，~1000 萬客戶 × 22 產品 × ~500 特徵
-- **訓練**：月度快照（12 個月），按需執行
-- **目標環境**：PySpark 3.3.2 on Hadoop/HDFS/Hive，Ploomber DAG 編排，無網路，CPU-only
+---
+
+## 這個框架適合你嗎？
+
+**解決的問題**：你有一群用戶、一組候選項目，以及歷史上「用戶是否對項目感興趣」的二分類標籤（0/1）。你想為每位用戶預測各候選項目的興趣分數，排序後輸出推薦清單。
+
+**適用情境**：
+
+- 金融產品推薦（信用卡、貸款、基金、保險）
+- 電商商品推薦
+- 內容推薦（文章、影片、課程）
+- 廣告排序
+
+**框架假設與限制**：
+
+| 假設 | 說明 |
+|------|------|
+| 批次推論 | 週期性（如每週）產出全量排序結果，非即時服務 |
+| 表格特徵 | 用戶特徵為結構化數值欄位，非序列、圖、文字 |
+| 二分類轉排序 | 以二分類預測機率作為排序分數（Strategy 1） |
+| LightGBM | 預設模型為 LightGBM，可替換但需改程式碼 |
+
+> 只要你的問題可以抽象為「多個候選項 × 用戶 × 二分類標籤 → 排序」，就能套用此框架。
+
+---
+
+## 5 分鐘快速上手
+
+### 環境需求
+
+- Python 3.10+
+
+### 安裝
+
+```bash
+pip install -e ".[dev]"
+```
+
+### 產生合成假資料
+
+```bash
+python scripts/generate_synthetic_data.py
+```
+
+執行後 `data/` 目錄下會產生：
+
+```
+data/
+├── feature_table.parquet   # 客戶特徵表（合成）
+└── label_table.parquet     # 客戶標籤表（合成）
+```
+
+### 依序執行 3 條 pipeline
+
+```bash
+# Step 1: Dataset Building — 分層抽樣、切分、特徵工程
+python -m recsys_tfb --pipeline dataset --env local
+
+# Step 2: Training — Optuna 超參搜尋 + LightGBM 訓練
+python -m recsys_tfb --pipeline training --env local
+
+# Step 3: Inference — 批次打分 + 排序
+python -m recsys_tfb --pipeline inference --env local
+```
+
+每步完成後 `data/` 下會新增對應產出：
+
+```
+data/
+├── feature_table.parquet
+├── label_table.parquet
+├── dataset/<dataset_version>/       # Step 1 產出
+│   ├── X_train.parquet
+│   ├── y_train.parquet
+│   ├── X_val.parquet
+│   ├── y_val.parquet
+│   ├── preprocessor.pkl
+│   └── manifest.json
+├── models/<model_version>/          # Step 2 產出
+│   ├── model.lgb
+│   ├── best_params.json
+│   ├── evaluation_results.json
+│   └── manifest.json
+└── inference/<model_version>/<snap_date>/  # Step 3 產出
+    └── ranked_predictions.parquet
+```
+
+其中 `<dataset_version>` 和 `<model_version>` 是根據參數自動計算的 8 碼 hash。
+
+---
+
+## 你的資料要長什麼樣
+
+框架需要 **2 張表**作為輸入。數值特徵的數量和名稱不限，框架會自動偵測。
+
+### feature_table（用戶特徵表）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|
+| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
+| `cust_id` | string | 是 | 用戶唯一識別碼 |
+| *其餘欄位* | float | 是（至少 1 個） | 任意數值特徵，名稱不限 |
+
+### label_table（標籤表）
+
+| 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|
+| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
+| `cust_id` | string | 是 | 用戶唯一識別碼 |
+| `prod_name` | string | 是 | 候選項目名稱 |
+| `label` | int (0/1) | 是 | 二分類標籤：1 表示感興趣 |
+| `apply_start_date` | datetime | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
+| `apply_end_date` | datetime | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
+| `cust_segment_typ` | string | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
+
+> **彈性**：數值特徵欄位數量和名稱完全自由。框架透過排除法（移除 join key + drop 清單後，剩餘皆為特徵）自動偵測。日期欄位接受 `datetime64[ns]` 或 `"YYYY-MM-DD"` 字串（自動轉換）。
+
+---
+
+## 套用到你的資料：改什麼、怎麼改
+
+### Step 1: 準備你的 feature_table 和 label_table
+
+按照上一節的 schema 準備 2 張 Parquet 表，放入 `data/` 目錄（或任意路徑）。
+
+### Step 2: 修改設定檔
+
+需要修改的檔案和對應的 key：
+
+| 檔案 | 要改的 key | 說明 |
+|------|-----------|------|
+| `conf/base/catalog.yaml` | `feature_table.filepath`、`label_table.filepath` | 指向你的資料路徑 |
+| `conf/base/parameters_dataset.yaml` | `dataset.train_dev_snap_dates`、`dataset.val_snap_dates` | 改為你的資料中實際存在的日期 |
+| `conf/base/parameters_dataset.yaml` | `prepare_model_input.drop_columns` | 如果你的 label_table 沒有 `apply_start_date` 等輔助欄位，從 drop 清單中移除 |
+| `conf/base/parameters_dataset.yaml` | `prepare_model_input.categorical_columns` | 如果你的候選項目欄位不叫 `prod_name`，改為對應名稱 |
+| `conf/base/parameters_inference.yaml` | `inference.products` | 改為你要打分的候選項目清單 |
+| `conf/base/parameters_inference.yaml` | `inference.snap_dates` | 改為推論日期 |
+
+### Step 3: 執行 pipeline
+
+```bash
+python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb --pipeline inference --env local
+```
+
+### 什麼情況需要改程式碼？
+
+| 需求 | 修改檔案 |
+|------|----------|
+| 自訂特徵工程（新增/刪除特徵） | `pipelines/dataset/nodes_pandas.py` → `prepare_model_input` |
+| 更換模型（如 XGBoost） | `pipelines/training/nodes.py` → `train_model` |
+| 調整評估指標 | `pipelines/training/nodes.py` → `evaluate_model` |
+| 修改排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` → `rank_predictions` |
+
+### 不要動的部分
+
+`core/`、`io/`、`__main__.py` 構成框架基礎設施，除非你完全理解其影響，否則不建議修改。
+
+---
 
 ## 目前狀態
 
@@ -17,8 +174,8 @@
 - ✅ Strategy 1 MVP（單一二分類器 + mAP）
 - ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
 - ✅ Inference output 使用實際 model hash + latest symlink
-- ⬚ Source Data ETL Pipeline
 - ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + macro/micro avg + baselines + Plotly HTML 報告 + 模型比較 CLI）
+- ⬚ Source Data ETL Pipeline
 - ⬚ Strategy 2-4
 
 ## 架構
@@ -103,7 +260,7 @@ parameters_training.yaml + dataset_version    Inference 路徑：
 - 產品清單必須一致：`inference.products` 必須是訓練時 `category_mappings` 中出現過的產品子集
 - `feature_table` schema 必須一致：Inference 時的 feature_table 欄位必須與 Dataset Building 時一致
 
-### 資料契約
+## 資料契約
 
 以下說明各 pipeline 對輸入資料的 schema 要求與 hard-coded 欄位依賴。接手或修改 pipeline 前，請確認輸入資料符合這些約束。
 
@@ -151,9 +308,9 @@ parameters_training.yaml + dataset_version    Inference 路徑：
 - **mAP 分群**：評估時依 `(snap_date, cust_id)` 分群計算 AP，每個 group 有多個 `prod_name`（`training/nodes.py:50,204`）
 - **特徵欄位順序**：preprocessor 記錄了訓練時的欄位順序，推論時必須一致
 
-### 客製化指引
+## 客製化指引
 
-#### 設定檔調整（不需改程式碼）
+### 設定檔調整（不需改程式碼）
 
 修改 `conf/base/parameters_*.yaml` 即可調整行為，改完重跑 pipeline 就會生效：
 
@@ -168,7 +325,7 @@ parameters_training.yaml + dataset_version    Inference 路徑：
 
 > 注意：修改 `parameters_dataset.yaml` 會產生新的 `dataset_version`，後續 training 和 inference 都需重跑。修改 `parameters_training.yaml` 會產生新的 `model_version`，inference 需重跑。
 
-#### 節點邏輯修改（改 nodes 檔案）
+### 節點邏輯修改（改 nodes 檔案）
 
 Pipeline 節點都是純函數，可直接修改或替換：
 
@@ -185,7 +342,7 @@ Pipeline 節點都是純函數，可直接修改或替換：
 
 > 如果同時支援雙後端，`nodes_pandas.py` 和 `nodes_spark.py` 需保持同步修改。
 
-#### 框架層（不建議改動）
+### 框架層（不建議改動）
 
 以下模組構成 pipeline 執行的基礎設施，修改前請確認完全理解其影響：
 
@@ -197,6 +354,8 @@ Pipeline 節點都是純函數，可直接修改或替換：
 | 版本管理 | `core/versioning.py` | hash 計算、manifest 寫入、symlink 管理 |
 | I/O 適配器 | `io/` | Parquet/Pickle/JSON 讀寫 |
 | CLI | `__main__.py` | Typer 命令列入口 |
+
+## 設定檔參考
 
 ### 版本管理
 
@@ -363,19 +522,9 @@ tests/
 data/                   — 開發用合成資料
 ```
 
-## 快速開始
+## 執行指令參考
 
-### 環境需求
-
-- Python 3.10+
-
-### 安裝
-
-```bash
-pip install -e ".[dev]"
-```
-
-### 執行流水線
+### Pipeline 執行
 
 ```bash
 python -m recsys_tfb --pipeline dataset --env local
@@ -433,7 +582,7 @@ pytest tests/test_core/test_config.py -v  # 單一測試
 | Typer | 0.20.1 |
 | pytest | 7.3.1 |
 
-## 模型策略
+## 模型策略路線圖
 
 | 策略 | 狀態 | 說明 |
 |------|------|------|
