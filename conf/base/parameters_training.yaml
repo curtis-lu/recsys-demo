@@ -4,11 +4,11 @@ training:
   early_stopping_rounds: 50
   search_space:
     learning_rate:
-      low: 0.01
-      high: 0.3
+      low: 0.001
+      high: 0.1
     num_leaves:
-      low: 16
-      high: 128
+      low: 4
+      high: 64
     max_depth:
       low: 3
       high: 8

@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.evaluation.metrics import compute_ap
 from recsys_tfb.pipelines.training.nodes import (
-    _compute_ap,
     _compute_map,
     compare_model_versions,
     evaluate_model,
@@ -96,29 +96,29 @@ class TestComputeAP:
     def test_perfect_ranking(self):
         y_true = np.array([1, 1, 0, 0, 0])
         y_score = np.array([0.9, 0.8, 0.3, 0.2, 0.1])
-        assert _compute_ap(y_true, y_score) == 1.0
+        assert compute_ap(y_true, y_score) == 1.0
 
     def test_worst_ranking(self):
         y_true = np.array([0, 0, 0, 1, 1])
         y_score = np.array([0.9, 0.8, 0.7, 0.2, 0.1])
-        ap = _compute_ap(y_true, y_score)
+        ap = compute_ap(y_true, y_score)
         assert ap < 0.5
 
     def test_all_zero_labels(self):
         y_true = np.array([0, 0, 0])
         y_score = np.array([0.5, 0.3, 0.1])
-        assert _compute_ap(y_true, y_score) is None
+        assert compute_ap(y_true, y_score) is None
 
     def test_single_positive(self):
         y_true = np.array([0, 0, 1, 0])
         y_score = np.array([0.1, 0.2, 0.9, 0.3])
         # Positive is ranked first → AP = 1.0
-        assert _compute_ap(y_true, y_score) == 1.0
+        assert compute_ap(y_true, y_score) == 1.0
 
     def test_all_positive(self):
         y_true = np.array([1, 1, 1])
         y_score = np.array([0.9, 0.5, 0.1])
-        assert _compute_ap(y_true, y_score) == 1.0
+        assert compute_ap(y_true, y_score) == 1.0
 
 
 # ---- Tests: _compute_map ----
@@ -303,7 +303,7 @@ class TestEvaluateModel:
         y_score = model.predict(X_val_extended)
         for prod in ["fx", "usd"]:
             idx = val_set.index[val_set["prod_name"] == prod].values
-            expected_ap = _compute_ap(y_val_extended["label"].values[idx], y_score[idx])
+            expected_ap = compute_ap(y_val_extended["label"].values[idx], y_score[idx])
             assert per_product_ap[prod] == pytest.approx(expected_ap)
 
 

@@ -1,0 +1,19 @@
+evaluation:
+  # K values for @K metrics. "all" is resolved at runtime to the total product count N.
+  k_values: [5, "all"]
+
+  # Segment columns already present in the labels DataFrame.
+  segment_columns:
+    - cust_segment_typ
+
+  # External segment data sources — each a separate Parquet file
+  # joined to labels on key_columns.
+  segment_sources:
+    holding_combo:
+      filepath: data/holding_combo.parquet
+      key_columns: [cust_id, snap_date]
+      segment_column: holding_combo
+
+  # Holding combo specific settings
+  holding_combo:
+    top_n: 10

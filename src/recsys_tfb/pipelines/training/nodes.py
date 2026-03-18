@@ -14,25 +14,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def _compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> float | None:
-    """Compute Average Precision for a single query.
-
-    Returns None if there are no positive labels (AP is undefined).
-    """
-    if np.sum(y_true) == 0:
-        return None
-
-    # Sort by descending score
-    order = np.argsort(-y_score)
-    y_sorted = y_true[order]
-
-    # Compute precision at each positive position
-    cumsum = np.cumsum(y_sorted)
-    positions = np.arange(1, len(y_sorted) + 1)
-    precisions = cumsum / positions
-
-    ap = np.sum(precisions * y_sorted) / np.sum(y_true)
-    return float(ap)
+from recsys_tfb.evaluation.metrics import compute_ap
 
 
 def _compute_map(
@@ -49,7 +31,7 @@ def _compute_map(
 
     for _, idx in groups.groupby(["snap_date", "cust_id"]).groups.items():
         idx_arr = idx.values if hasattr(idx, "values") else np.array(idx)
-        ap = _compute_ap(y_true[idx_arr], y_score[idx_arr])
+        ap = compute_ap(y_true[idx_arr], y_score[idx_arr])
         if ap is None:
             n_excluded += 1
         else:
@@ -132,7 +114,7 @@ def tune_hyperparameters(
 
         y_pred = booster.predict(X_train_dev)
         # Use a simple mAP: treat entire dev set as one query for tuning speed
-        ap = _compute_ap(y_train_dev["label"].values, y_pred)
+        ap = compute_ap(y_train_dev["label"].values, y_pred)
         return ap if ap is not None else 0.0
 
     sampler = optuna.samplers.TPESampler(seed=seed)
@@ -211,7 +193,7 @@ def evaluate_model(
         idx_arr = idx.values if hasattr(idx, "values") else np.array(idx)
         y_true_prod = y_val_arr[idx_arr]
         y_score_prod = y_score[idx_arr]
-        ap = _compute_ap(y_true_prod, y_score_prod)
+        ap = compute_ap(y_true_prod, y_score_prod)
         if ap is not None:
             per_product_ap[prod_name] = ap
 

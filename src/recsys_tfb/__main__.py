@@ -19,7 +19,7 @@ def _find_data_dir() -> Path:
     return Path.cwd() / "data"
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def run(
     pipeline: str = typer.Option(..., "--pipeline", "-p", help="Pipeline name to run"),
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),

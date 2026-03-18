@@ -27,8 +27,8 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ Model promotion script (`scripts/promote_model.py`)
 - ✅ Synthetic data generator (`scripts/generate_synthetic_data.py`)
 - ✅ Comprehensive test suite
+- ✅ Evaluation module (mAP, nDCG, precision@K, recall@K, MRR + macro/micro avg + baselines + Plotly HTML reports + model comparison CLI)
 - ⬚ Source Data ETL Pipeline (not yet implemented)
-- ⬚ Advanced metrics (precision@K, recall@K, nDCG, MRR)
 - ⬚ Probability calibration and rule-based reranking
 - ⬚ Strategy 2-4
 - ⬚ Monthly monitoring pipeline
@@ -38,7 +38,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 ## Architecture: 4 Pipelines
 
-1. **Source Data ETL** _(not yet implemented)_ - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
+1. **Source Data ETL** *(not yet implemented)* - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
 2. **Dataset Building** ✅ - Stratified sampling, train/train-dev/val splits, feature engineering. Outputs versioned Parquet files. Preprocessing logic reused in inference without data leakage. Dual pandas/spark backend.
 3. **Training** ✅ - Optuna hyperparameter search, LightGBM binary classification (Strategy 1), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts.
 4. **Inference** ✅ - Weekly batch scoring reusing dataset building preprocessing. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
@@ -65,6 +65,14 @@ src/recsys_tfb/
     dataset/            — Dataset building (nodes_pandas.py, nodes_spark.py, pipeline.py)
     training/           — Training (nodes.py, pipeline.py)
     inference/          — Inference (nodes_pandas.py, nodes_spark.py, pipeline.py)
+  evaluation/
+    metrics.py          — Ranking metrics (mAP, nDCG, precision@K, recall@K, MRR)
+    distributions.py    — Score/rank distribution plots
+    calibration.py      — Calibration curves
+    segments.py         — Segment/holding-combo analysis
+    baselines.py        — Global/segment popularity baselines
+    report.py           — HTML report generation (Plotly, offline-capable)
+    compare.py          — Model comparison logic and visualizations
   utils/
     spark.py            — Spark utilities
 
@@ -77,6 +85,7 @@ conf/
 scripts/
   generate_synthetic_data.py  — Generate dev test data
   promote_model.py            — Promote model version (manual trigger)
+  evaluate_model.py           — Model evaluation CLI (analyze/compare)
 
 tests/                  — pytest test suite
 data/                   — Local synthetic data (Parquet)
@@ -92,9 +101,9 @@ pip install -e ".[dev]"
 pytest tests/ -v
 
 # Run specific pipeline
-python -m recsys_tfb run --pipeline dataset --env local
-python -m recsys_tfb run --pipeline training --env local
-python -m recsys_tfb run --pipeline inference --env local
+python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb --pipeline inference --env local
 
 # Promote a model version to "best" symlink (manual trigger, do not run automatically)
 python scripts/promote_model.py
@@ -122,9 +131,9 @@ Pipeline nodes have separate implementations for pandas and PySpark:
 ## Model Strategies
 
 - **Strategy 1** (MVP) ✅: Single binary classifier, product name as feature. Evaluation: mAP only.
-- **Strategy 2** _(planned)_: One-vs-rest per product
-- **Strategy 3** _(planned)_: Strategy 1/2 + single ranking layer (e.g., LambdaRank)
-- **Strategy 4** _(planned)_: Strategy 1/2 + two-tier ranking (category then subcategory)
+- **Strategy 2** *(planned)*: One-vs-rest per product
+- **Strategy 3** *(planned)*: Strategy 1/2 + single ranking layer (e.g., LambdaRank)
+- **Strategy 4** *(planned)*: Strategy 1/2 + two-tier ranking (category then subcategory)
 
 ## Design Philosophy (Kedro-inspired)
 
@@ -149,13 +158,15 @@ Build incrementally per the PRD:
 
 ## Development Roadmap
 
-| Phase | 名稱 | 內容 |
-|-------|------|------|
-| 1 | 修正已知問題 + 欄位彈性化 ✅ | README `--env` 文件修正、inference output 改用實際 model hash、dataset pipeline hard-coded 欄位抽取到 YAML |
-| 2 | 結構化日誌框架 | run_id 產生、Pipeline-level + Node-level 結構化日誌 |
-| 3 | Data-quality + Artifact log | Data-quality log、Artifact/lineage log |
-| 4 | 版本管理增強 | manifest 擴充、版本查詢 CLI、rollback 機制 |
-| 5 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
+
+| Phase | 名稱                          | 內容                                                                                          |
+| ----- | --------------------------- | ------------------------------------------------------------------------------------------- |
+| 1     | 修正已知問題 + 欄位彈性化 ✅            | README `--env` 文件修正、inference output 改用實際 model hash、dataset pipeline hard-coded 欄位抽取到 YAML |
+| 2     | 結構化日誌框架                     | run_id 產生、Pipeline-level + Node-level 結構化日誌                                                 |
+| 3     | Data-quality + Artifact log | Data-quality log、Artifact/lineage log                                                       |
+| 4     | 版本管理增強                      | manifest 擴充、版本查詢 CLI、rollback 機制                                                            |
+| 5     | Safe rerun 檢查點              | 跳過已完成步驟，從失敗步驟接續執行                                                                           |
+
 
 ## Production Constraints
 
@@ -164,3 +175,4 @@ Build incrementally per the PRD:
 - No additional package installation
 - Dev environment uses synthetic data in place of Hive tables (see data spec docs)
 - Storage format: Parquet (local dev) / Parquet on HDFS (production)
+

@@ -1,0 +1,214 @@
+ ▐▛███▜▌   Claude Code v2.1.77
+▝▜█████▛▘  Sonnet 4.6 · Claude Pro
+  ▘▘ ▝▝    ~/projects/recsys_tfb
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Plan to implement                                                            │
+│                                                                              │
+│ 在 README.md 補充「資料契約」段落                                            │
+│                                                                              │
+│ Context                                                                      │
+│                                                                              │
+│ 上一輪已新增「流水線相依關係」和「客製化指引」兩個段落。使用者希望進一步說明 │
+│ 專案對輸入資料的具體依賴——schema、欄位名稱、格式、hard-coded                 │
+│ 假設等，讓其他人接手時知道資料必須長什麼樣子。                               │
+│                                                                              │
+│ 變更內容                                                                     │
+│                                                                              │
+│ 在 README.md                                                                 │
+│ 的「流水線相依關係」段落之後、「客製化指引」段落之前，新增一個「###          │
+│ 資料契約」段落，包含：                                                       │
+│                                                                              │
+│ 1. feature_table schema                                                      │
+│                                                                              │
+│ ┌──────────────┬──────────┬──────────┬─────────────────────────────────────┐ │
+│ │     欄位     │   型別   │   說明   │             程式碼依賴              │ │
+│ ├──────────────┼──────────┼──────────┼─────────────────────────────────────┤ │
+│ │ snap_date    │ datetime │ 快照日期 │ join key、日期過濾、分群            │ │
+│ │              │          │          │ (hard-coded)                        │ │
+│ ├──────────────┼──────────┼──────────┼─────────────────────────────────────┤ │
+│ │ cust_id      │ string   │ 客戶 ID  │ join key (hard-coded)               │ │
+│ ├──────────────┼──────────┼──────────┼─────────────────────────────────────┤ │
+│ │ 其餘數值欄位 │ float    │ 特徵     │ 動態偵測（非 join key / 非 drop     │ │
+│ │              │          │          │ 清單的欄位都會成為模型特徵）        │ │
+│ └──────────────┴──────────┴──────────┴─────────────────────────────────────┘ │
+│                                                                              │
+│ 要點：                                                                       │
+│ - join key ["snap_date", "cust_id"] 是 hard-coded（nodes_pandas.py:78,       │
+│ nodes_spark.py:92, inference/nodes_pandas.py:30）                            │
+│ - 數值特徵欄位名稱不是 hard-coded，程式碼透過排除法（drop 掉 join key +      │
+│ label 相關欄位後，剩餘皆為特徵）                                             │
+│                                                                              │
+│ 2. label_table schema                                                        │
+│                                                                              │
+│ ┌──────────────────┬──────────┬────────────┬──────────────────────────────┐  │
+│ │       欄位       │   型別   │    說明    │          程式碼依賴          │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ snap_date        │ datetime │ 快照日期   │ join key (hard-coded)        │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ cust_id          │ string   │ 客戶 ID    │ join key (hard-coded)        │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │                  │          │            │ 唯一 categorical             │  │
+│ │ prod_name        │ string   │ 產品名稱   │ 欄位，one-hot encode         │  │
+│ │                  │          │            │ (hard-coded)                 │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ label            │ int      │ 二分類標籤 │ 目標變數 (hard-coded)        │  │
+│ │                  │ (0/1)    │            │                              │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ apply_start_date │ datetime │ 申請起始日 │ prepare_model_input 時 drop  │  │
+│ │                  │          │            │ (hard-coded)                 │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ apply_end_date   │ datetime │ 申請結束日 │ prepare_model_input 時 drop  │  │
+│ │                  │          │            │ (hard-coded)                 │  │
+│ ├──────────────────┼──────────┼────────────┼──────────────────────────────┤  │
+│ │ cust_segment_typ │ string   │ 客戶分群   │ prepare_model_input 時 drop  │  │
+│ │                  │          │            │ (hard-coded)                 │  │
+│ └──────────────────┴──────────┴────────────┴──────────────────────────────┘  │
+│                                                                              │
+│ 3. Hard-coded 欄位依賴總結                                                   │
+│                                                                              │
+│ 分為三類：                                                                   │
+│ - Join key：snap_date, cust_id — 所有 pipeline 的合併/分群基礎               │
+│ - 必須 drop 的欄位：snap_date, cust_id, label, apply_start_date,             │
+│ apply_end_date, cust_segment_typ — 在 prepare_model_input 中移除             │
+│ - 唯一 categorical 欄位：prod_name — hard-coded 做 integer encoding          │
+│                                                                              │
+│ 4. 日期格式與資料型別                                                        │
+│                                                                              │
+│ - 所有日期欄位須為 datetime64[ns]（pandas Timestamp），字串形式 "YYYY-MM-DD" │
+│  會自動轉換                                                                  │
+│ - label 必須為 0 或 1 的整數                                                 │
+│ - 數值特徵欄位為 float                                                       │
+│                                                                              │
+│ 5. 其他隱含約束                                                              │
+│                                                                              │
+│ - Inference cross-join：推論時會將 feature_table 的客戶與 inference.products │
+│  清單做笛卡兒積                                                              │
+│ - 未知類別處理：推論時遇到訓練集沒見過的 prod_name 值，會編碼為 -1           │
+│ - mAP 分群：評估時依 (snap_date, cust_id) 分群計算 AP，每個 group 有多個     │
+│ prod_name                                                                    │
+│ - 特徵欄位順序：preprocessor 記錄了訓練時的欄位順序，推論時必須一致          │
+│                                                                              │
+│ 修改檔案                                                                     │
+│                                                                              │
+│ - README.md —                                                                │
+│ 在「流水線相依關係」之後、「客製化指引」之前插入「資料契約」段落             │
+│                                                                              │
+│ 插入位置                                                                     │
+│                                                                              │
+│ 在現有 README.md 中，找到「關鍵不變量」段落結束後、「###                     │
+│ 客製化指引」之前插入。                                                       │
+│                                                                              │
+│ 驗證方式                                                                     │
+│                                                                              │
+│ - 比對 scripts/generate_synthetic_data.py 確認 schema 描述正確               │
+│ - 比對 nodes_pandas.py 中的 hard-coded 欄位名稱確認無遺漏                    │
+│ - 確認 join key、drop 清單、categorical 欄位與程式碼一致                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+⏺ Let me read the current README.md to find the insertion point.
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Now let me verify the hard-coded fields against the actual source code.
+
+⏺ Explore(Verify hard-coded field names)
+  ⎿  Done (4 tool uses · 27.8k tokens · 18s)
+  (ctrl+o to expand)
+
+⏺ Now I have all the verification data. Let me insert the new section.
+
+⏺ Update(README.md)
+  ⎿  Added 48 lines
+      100  - 產品清單必須一致：`inference.products` 必須是訓練時 `categor
+           y_mappings` 中出現過的產品子集
+      101  - `feature_table` schema 必須一致：Inference 時的 feature_tabl
+           e 欄位必須與 Dataset Building 時一致
+      102  
+      103 +### 資料契約                                                  
+      104 +                                                              
+      105 +以下說明各 pipeline 對輸入資料的 schema 要求與 hard-coded 欄位
+          +依賴。接手或修改 pipeline 前，請確認輸入資料符合這些約束。    
+      106 +                                                              
+      107 +#### feature_table schema                                     
+      108 +                                                              
+      109 +| 欄位 | 型別 | 說明 | 程式碼依賴 |                           
+      110 +|------|------|------|-----------|                            
+      111 +| `snap_date` | datetime | 快照日期 | join key、日期過濾、分群
+          +（hard-coded） |                                              
+      112 +| `cust_id` | string | 客戶 ID | join key（hard-coded） |     
+      113 +| 其餘數值欄位 | float | 特徵 | 動態偵測（非 join key / 非 dro
+          +p 清單的欄位都會成為模型特徵） |                              
+      114 +                                                              
+      115 +- join key `["snap_date", "cust_id"]` 是 hard-coded（`dataset/
+          +nodes_pandas.py:74,78`、`dataset/nodes_spark.py:89,92`、`infer
+          +ence/nodes_pandas.py:30`）                                    
+      116 +- 數值特徵欄位名稱不是 hard-coded，程式碼透過排除法（drop 掉 j
+          +oin key + label 相關欄位後，剩餘皆為特徵）                    
+      117 +                                                              
+      118 +#### label_table schema                                       
+      119 +                                                              
+      120 +| 欄位 | 型別 | 說明 | 程式碼依賴 |                           
+      121 +|------|------|------|-----------|                            
+      122 +| `snap_date` | datetime | 快照日期 | join key（hard-coded） |
+      123 +| `cust_id` | string | 客戶 ID | join key（hard-coded） |     
+      124 +| `prod_name` | string | 產品名稱 | 唯一 categorical 欄位，int
+          +eger encoding（hard-coded） |                                 
+      125 +| `label` | int (0/1) | 二分類標籤 | 目標變數（hard-coded） | 
+      126 +| `apply_start_date` | datetime | 申請起始日 | `prepare_model_
+          +input` 時 drop（hard-coded） |                                
+      127 +| `apply_end_date` | datetime | 申請結束日 | `prepare_model_in
+          +put` 時 drop（hard-coded） |                                  
+      128 +| `cust_segment_typ` | string | 客戶分群 | `prepare_model_inpu
+          +t` 時 drop（hard-coded） |                                    
+      129 +                                                              
+      130 +#### Hard-coded 欄位依賴總結                                  
+      131 +                                                              
+      132 +| 分類 | 欄位 | 說明 |                                        
+      133 +|------|------|------|                                        
+      134 +| **Join key** | `snap_date`, `cust_id` | 所有 pipeline 的合併
+          + / 分群基礎 |                                                 
+      135 +| **必須 drop 的欄位** | `snap_date`, `cust_id`, `label`, `app
+          +ly_start_date`, `apply_end_date`, `cust_segment_typ` | 在 `pre
+          +pare_model_input` 中移除（`dataset/nodes_pandas.py:92-95`、`da
+          +taset/nodes_spark.py:112-115`） |                             
+      136 +| **唯一 categorical 欄位** | `prod_name` | hard-coded 做 inte
+          +ger encoding（`dataset/nodes_pandas.py:96`、`dataset/nodes_spa
+          +rk.py:116`） |                                                
+      137 +                                                              
+      138 +#### 日期格式與資料型別                                       
+      139 +                                                              
+      140 +- 所有日期欄位須為 `datetime64[ns]`（pandas Timestamp），字串 
+          +形式 `"YYYY-MM-DD"` 會自動轉換                                
+      141 +- `label` 必須為 0 或 1 的整數                                
+      142 +- 數值特徵欄位為 float                                        
+      143 +                                                              
+      144 +#### 其他隱含約束                                             
+      145 +                                                              
+      146 +- **Inference cross-join**：推論時會將 `feature_table` 的客戶 
+          +與 `inference.products` 清單做笛卡兒積（`inference/nodes_panda
+          +s.py:24-27`）                                                 
+      147 +- **未知類別處理**：推論時遇到訓練集沒見過的 `prod_name` 值， 
+          +會編碼為 `-1`                                                 
+      148 +- **mAP 分群**：評估時依 `(snap_date, cust_id)` 分群計算 AP， 
+          +每個 group 有多個 `prod_name`（`training/nodes.py:50,204`）   
+      149 +- **特徵欄位順序**：preprocessor 記錄了訓練時的欄位順序，推論 
+          +時必須一致                                                    
+      150 +                                                              
+      151  ### 客製化指引
+      152  
+      153  #### 設定檔調整（不需改程式碼）
+
+⏺ 已在「關鍵不變量」段落之後、「客製化指引」之前插入「資料契約」段落。內容涵蓋：
+
+  1. feature_table schema — join key、動態偵測的數值特徵
+  2. label_table schema — 7 個欄位及各自的程式碼依賴
+  3. Hard-coded 欄位依賴總結 — join key / drop 清單 / categorical 欄位，附行號
+  4. 日期格式與資料型別 — datetime、label、float 的要求
+  5. 其他隱含約束 — cross-join、未知類別、mAP 分群、特徵欄位順序
+
+  所有欄位名稱和行號已與
+  nodes_pandas.py、nodes_spark.py、inference/nodes_pandas.py、training/nodes.py
+  交叉驗證。
+
+✻ Cooked for 1m 16s

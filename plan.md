@@ -60,6 +60,15 @@ recsys_tfb/
 │   │       ├─ nodes_pandas.py  # pandas 後端節點函數
 │   │       ├─ nodes_spark.py   # PySpark 後端節點函數
 │   │       └─ pipeline.py      # Pipeline 定義（backend 切換）
+│   ├─ evaluation/
+│   │   ├─ __init__.py
+│   │   ├─ metrics.py          # 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
+│   │   ├─ distributions.py    # 分數/排名分布圖表
+│   │   ├─ calibration.py      # 校準曲線
+│   │   ├─ segments.py         # 客群/持有產品組合分析
+│   │   ├─ baselines.py        # 全域/客群熱門度 baseline
+│   │   ├─ report.py           # HTML 報告產生（Plotly 離線內嵌）
+│   │   └─ compare.py          # 模型比較邏輯與視覺化
 │   └─ utils/
 │       ├─ __init__.py
 │       └─ spark.py             # SparkSession 建立等工具
@@ -76,12 +85,14 @@ recsys_tfb/
 │       └─ catalog.yaml
 ├─ scripts/
 │   ├─ generate_synthetic_data.py   # 合成假資料產生
-│   └─ promote_model.py             # 模型版本晉升（手動觸發）
+│   ├─ promote_model.py             # 模型版本晉升（手動觸發）
+│   └─ evaluate_model.py            # 模型評估 CLI（analyze/compare）
 ├─ tests/
 │   ├─ conftest.py
 │   ├─ test_cli.py
 │   ├─ test_core/
 │   ├─ test_io/
+│   ├─ test_evaluation/
 │   ├─ test_pipelines/
 │   └─ scripts/
 ├─ data/                        # 本地假資料
@@ -145,12 +156,16 @@ recsys_tfb/
 
 ### Phase 6：進階功能
 
-- 進階評估指標：precision@K、recall@K、nDCG、MRR
-- 指標切面：依整體、產品個別、自定義客群分群
-- 機率校準（probability calibration）
-- 規則化重新排序（rule-based reranking）
-- 月度監控 pipeline（機率值分佈監控、資料筆數檢查）
-- Safe rerun 檢查點機制
+- ✅ 進階評估指標：precision@K、recall@K、nDCG、MRR（evaluation/metrics.py）
+- ✅ 指標切面：依整體、產品個別、自定義客群分群（evaluation/segments.py）
+- ✅ Macro/micro average：分產品、分客群、分產品×客群
+- ✅ Baseline 比較：全域/客群熱門度排序（evaluation/baselines.py）
+- ✅ 模型比較 CLI：analyze + compare 子命令（scripts/evaluate_model.py）
+- ✅ Plotly HTML 互動報告：離線可用、自包含（evaluation/report.py）
+- ✅ 分數分布 + 排名分布 + 校準曲線視覺化（evaluation/distributions.py, calibration.py）
+- ⬚ 規則化重新排序（rule-based reranking）
+- ⬚ 月度監控 pipeline（機率值分佈監控、資料筆數檢查）
+- ⬚ Safe rerun 檢查點機制
 
 ### Phase 7：進階策略
 
@@ -172,10 +187,14 @@ pytest tests/ -v
 pytest tests/test_core/test_config.py -v
 
 # 跑完整 pipeline
-python -m recsys_tfb run --pipeline dataset --env local
-python -m recsys_tfb run --pipeline training --env local
-python -m recsys_tfb run --pipeline inference --env local
+python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb --pipeline inference --env local
 
 # 模型晉升（手動觸發）
 python scripts/promote_model.py
+
+# 模型評估
+python scripts/evaluate_model.py analyze <model_version> --snap-date 2024-03-31
+python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2024-03-31
 ```

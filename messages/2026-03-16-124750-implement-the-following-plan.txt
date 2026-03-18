@@ -1,0 +1,1023 @@
+ ▐▛███▜▌   Claude Code v2.1.76
+▝▜█████▛▘  Sonnet 4.6 · Claude Pro
+  ▘▘ ▝▝    ~/projects/recsys_tfb
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Plan to implement                                                            │
+│                                                                              │
+│ Plan: 將 catalog 路徑覆寫改為模板變數                                        │
+│                                                                              │
+│ Context                                                                      │
+│                                                                              │
+│ 目前 model artifacts 的版本化路徑覆寫邏輯藏在 __main__.py 的                 │
+│ _override_model_paths() 中，catalog.yaml 寫 data/models/best/，CLI           │
+│ 偷偷替換為 data/models/{timestamp}/。讀 catalog.yaml 的人不會知道 training   │
+│ 其實寫到別的地方，不夠直觀。                                                 │
+│                                                                              │
+│ 改用 ConfigLoader 模板變數 ${model_version}，讓版本化意圖在 catalog.yaml     │
+│ 中一目瞭然。                                                                 │
+│                                                                              │
+│ 實作步驟                                                                     │
+│                                                                              │
+│ Step 1: ConfigLoader 新增 runtime 參數替換                                   │
+│                                                                              │
+│ 檔案: src/recsys_tfb/core/config.py                                          │
+│                                                                              │
+│ - get_catalog_config() 新增 runtime_params: dict[str, str] | None = None     │
+│ 參數                                                                         │
+│ - 遍歷 config dict 中所有 filepath 字串值，用 string.Template 或簡單         │
+│ str.replace 替換 ${key} 為 value                                             │
+│ - 未提供的變數保持原樣（不報錯）                                             │
+│                                                                              │
+│ Step 2: 更新所有 catalog.yaml                                                │
+│                                                                              │
+│ 檔案: conf/base/catalog.yaml, conf/local/catalog.yaml,                       │
+│ conf/production/catalog.yaml                                                 │
+│                                                                              │
+│ 將 5 個 model artifacts 的 filepath 中 best 改為 ${model_version}：          │
+│ - data/models/best/model.pkl → data/models/${model_version}/model.pkl        │
+│ - 同理 preprocessor, best_params, evaluation_results, category_mappings      │
+│ - production: hdfs:///data/recsys/models/best/ →                             │
+│ hdfs:///data/recsys/models/${model_version}/                                 │
+│                                                                              │
+│ Step 3: 更新 main.py                                                         │
+│                                                                              │
+│ 檔案: src/recsys_tfb/__main__.py                                             │
+│                                                                              │
+│ - 刪除 _override_model_paths() 函式                                          │
+│ - 在 run() 中：training 時 model_version = timestamp，否則 model_version =   │
+│ "best"                                                                       │
+│ - 呼叫 config.get_catalog_config(runtime_params={"model_version":            │
+│ model_version})                                                              │
+│                                                                              │
+│ Step 4: 更新測試                                                             │
+│                                                                              │
+│ - tests/test_core/test_config.py — 測試                                      │
+│ get_catalog_config(runtime_params=...) 替換邏輯                              │
+│ - tests/test_cli.py — 移除 _override_model_paths 測試，改測新的              │
+│ runtime_params 傳遞                                                          │
+│ - scripts/promote_model.py — 不需改動（直接操作檔案系統）                    │
+│                                                                              │
+│ 關鍵檔案                                                                     │
+│                                                                              │
+│ ┌────────────────────────────────┬──────────────────────────┐                │
+│ │              檔案              │           動作           │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ src/recsys_tfb/core/config.py  │ 新增 runtime_params 替換 │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ conf/base/catalog.yaml         │ best → ${model_version}  │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ conf/local/catalog.yaml        │ 同上                     │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ conf/production/catalog.yaml   │ 同上                     │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ src/recsys_tfb/__main__.py     │ 簡化覆寫邏輯             │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ tests/test_core/test_config.py │ 新增 runtime_params 測試 │                │
+│ ├────────────────────────────────┼──────────────────────────┤                │
+│ │ tests/test_cli.py              │ 更新測試                 │                │
+│ └────────────────────────────────┴──────────────────────────┘                │
+│                                                                              │
+│ 驗證                                                                         │
+│                                                                              │
+│ 1. pytest tests/ 全部通過                                                    │
+│ 2. Training pipeline 寫入 data/models/{timestamp}/                           │
+│ 3. Inference 從 data/models/best/ 讀取                                       │
+│ 4. Promote script 不受影響                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+⏺ I'll start by reading the key files to understand the current code.
+
+⏺ Read 5 files (ctrl+o to expand)
+
+⏺ Now let me read the test files.
+
+⏺ Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+⏺ I have all the context. Let me implement all changes now.
+
+  Step 1: Update config.py — add runtime_params to get_catalog_config()
+
+⏺ Update(src/recsys_tfb/core/config.py)
+  ⎿  Added 20 lines, removed 3 lines
+      50              env = env_config.get(stem, {})
+      51              self._config[stem] = _deep_merge(base, env)
+      52  
+      53 -    def get_catalog_config(self) -> dict:                      
+      54 -        """Return catalog configuration dict."""               
+      55 -        return self._config.get("catalog", {})                 
+      53 +    def get_catalog_config(                                    
+      54 +        self, runtime_params: dict[str, str] | None = None     
+      55 +    ) -> dict:                                                 
+      56 +        """Return catalog configuration dict.                  
+      57  
+      58 +        If runtime_params is provided, substitute ``${key}`` pl
+         +aceholders                                                     
+      59 +        in all ``filepath`` values with the corresponding value
+         +.                                                              
+      60 +        """                                                    
+      61 +        catalog = self._config.get("catalog", {})              
+      62 +        if not runtime_params:                                 
+      63 +            return catalog                                     
+      64 +        for entry in catalog.values():                         
+      65 +            if not isinstance(entry, dict):                    
+      66 +                continue                                       
+      67 +            fp = entry.get("filepath")                         
+      68 +            if isinstance(fp, str):                            
+      69 +                for key, value in runtime_params.items():      
+      70 +                    fp = fp.replace(f"${{{key}}}", value)      
+      71 +                entry["filepath"] = fp                         
+      72 +        return catalog                                         
+      73 +                                                               
+      74      def get_parameters(self) -> dict:
+      75          """Return merged dict of all parameters*.yaml files."""
+      76          result = {}
+
+⏺ Step 2: Update all catalog.yaml files — best → ${model_version}
+
+⏺ Update(conf/base/catalog.yaml)
+  ⎿  Added 5 lines, removed 5 lines
+      72  # Training Pipeline
+      73  model:
+      74    type: PickleDataset
+      75 -  filepath: data/models/best/model.pkl                         
+      75 +  filepath: data/models/${model_version}/model.pkl             
+      76  
+      77  best_params:
+      78    type: JSONDataset
+      79 -  filepath: data/models/best/best_params.json                  
+      79 +  filepath: data/models/${model_version}/best_params.json      
+      80  
+      81  evaluation_results:
+      82    type: JSONDataset
+      83 -  filepath: data/models/best/evaluation_results.json           
+      83 +  filepath: data/models/${model_version}/evaluation_results.jso
+         +n                                                              
+      84  
+      85  preprocessor:
+      86    type: PickleDataset
+      87 -  filepath: data/models/best/preprocessor.pkl                  
+      87 +  filepath: data/models/${model_version}/preprocessor.pkl      
+      88  
+      89  category_mappings:
+      90    type: JSONDataset
+      91 -  filepath: data/models/best/category_mappings.json            
+      91 +  filepath: data/models/${model_version}/category_mappings.json
+      92  
+      93  # Inference Pipeline
+      94  scoring_dataset:
+
+⏺ Update(conf/local/catalog.yaml)
+  ⎿  Added 5 lines, removed 5 lines
+      71  
+      72  model:
+      73    type: PickleDataset
+      74 -  filepath: data/models/best/model.pkl                         
+      74 +  filepath: data/models/${model_version}/model.pkl             
+      75  
+      76  best_params:
+      77    type: JSONDataset
+      78 -  filepath: data/models/best/best_params.json                  
+      78 +  filepath: data/models/${model_version}/best_params.json      
+      79  
+      80  evaluation_results:
+      81    type: JSONDataset
+      82 -  filepath: data/models/best/evaluation_results.json           
+      82 +  filepath: data/models/${model_version}/evaluation_results.jso
+         +n                                                              
+      83  
+      84  preprocessor:
+      85    type: PickleDataset
+      86 -  filepath: data/models/best/preprocessor.pkl                  
+      86 +  filepath: data/models/${model_version}/preprocessor.pkl      
+      87  
+      88  category_mappings:
+      89    type: JSONDataset
+      90 -  filepath: data/models/best/category_mappings.json            
+      90 +  filepath: data/models/${model_version}/category_mappings.json
+
+⏺ Update(conf/production/catalog.yaml)
+  ⎿  Added 5 lines, removed 5 lines
+      74  # Training Pipeline
+      75  model:
+      76    type: PickleDataset
+      77 -  filepath: hdfs:///data/recsys/models/best/model.pkl          
+      77 +  filepath: hdfs:///data/recsys/models/${model_version}/model.p
+         +kl                                                             
+      78  
+      79  best_params:
+      80    type: JSONDataset
+      81 -  filepath: hdfs:///data/recsys/models/best/best_params.json   
+      81 +  filepath: hdfs:///data/recsys/models/${model_version}/best_pa
+         +rams.json                                                      
+      82  
+      83  evaluation_results:
+      84    type: JSONDataset
+      85 -  filepath: hdfs:///data/recsys/models/best/evaluation_results.
+         -json                                                           
+      85 +  filepath: hdfs:///data/recsys/models/${model_version}/evaluat
+         +ion_results.json                                               
+      86  
+      87  preprocessor:
+      88    type: PickleDataset
+      89 -  filepath: hdfs:///data/recsys/models/best/preprocessor.pkl   
+      89 +  filepath: hdfs:///data/recsys/models/${model_version}/preproc
+         +essor.pkl                                                      
+      90  
+      91  category_mappings:
+      92    type: JSONDataset
+      93 -  filepath: hdfs:///data/recsys/models/best/category_mappings.j
+         -son                                                            
+      93 +  filepath: hdfs:///data/recsys/models/${model_version}/categor
+         +y_mappings.json                                                
+
+⏺ Step 3: Update __main__.py — remove _override_model_paths, use runtime_params
+
+⏺ Update(src/recsys_tfb/__main__.py)
+  ⎿  Removed 8 lines
+       8  app = typer.Typer(help="recsys_tfb: Product recommendation rank
+          ing model CLI")
+       9  
+      10  
+      11 -def _override_model_paths(catalog_config: dict, timestamp: str)
+         - -> None:                                                      
+      12 -    """Replace 'models/best/' with 'models/{timestamp}/' in cat
+         -alog filepath entries."""                                      
+      13 -    for entry in catalog_config.values():                      
+      14 -        fp = entry.get("filepath", "")                         
+      15 -        if "models/best/" in fp:                               
+      16 -            entry["filepath"] = fp.replace("models/best/", f"mo
+         -dels/{timestamp}/")                                            
+      17 -                                                               
+      18 -                                                               
+      11  def _find_conf_dir() -> Path:
+      12      """Resolve conf/ directory relative to the current working 
+          directory."""
+      13      return Path.cwd() / "conf"
+
+⏺ Update(src/recsys_tfb/__main__.py)
+  ⎿  Added 7 lines, removed 4 lines
+      45          raise typer.Exit(code=1)
+      46  
+      47      # Build catalog — for training, redirect model artifacts to
+           versioned directory
+      48 -    catalog_config = config.get_catalog_config()               
+      48      if pipeline == "training":
+      50 -        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")   
+      51 -        _override_model_paths(catalog_config, timestamp)       
+      52 -        logger.info("Training version: %s", timestamp)         
+      49 +        model_version = datetime.now().strftime("%Y%m%d_%H%M%S"
+         +)                                                              
+      50 +        logger.info("Training version: %s", model_version)     
+      51 +    else:                                                      
+      52 +        model_version = "best"                                 
+      53 +    catalog_config = config.get_catalog_config(                
+      54 +        runtime_params={"model_version": model_version}        
+      55 +    )                                                          
+      56  
+      57      catalog = DataCatalog(catalog_config)
+      58  
+
+⏺ Step 4: Update tests
+
+⏺ Write(tests/test_cli.py)
+  ⎿  Added 71 lines, removed 18 lines
+      1 +from unittest.mock import patch                                 
+      2 +                                                                
+      3  from typer.testing import CliRunner
+      4  
+      3 -from recsys_tfb.__main__ import _override_model_paths, app      
+      5 +from recsys_tfb.__main__ import app                             
+      6  
+      7  runner = CliRunner()
+      8  
+     ...
+       35          finally:
+       36              os.chdir(old_cwd)
+       37  
+       36 -    def test_training_overrides_model_paths(self):            
+       37 -        catalog_config = {                                    
+       38 -            "model": {"type": "PickleDataset", "filepath": "da
+          -ta/models/best/model.pkl"},                                   
+       39 -            "preprocessor": {"type": "PickleDataset", "filepat
+          -h": "data/models/best/preprocessor.pkl"},                     
+       40 -            "feature_table": {"type": "ParquetDataset", "filep
+          -ath": "data/feature_table.parquet"},                          
+       38 +    def test_training_uses_timestamp_model_version(self, tmp_p
+          +ath):                                                         
+       39 +        """Training pipeline passes timestamp as model_version
+          + runtime param."""                                            
+       40 +        import os                                             
+       41 +                                                              
+       42 +        import yaml                                           
+       43 +                                                              
+       44 +        # Set up minimal conf                                 
+       45 +        base_dir = tmp_path / "conf" / "base"                 
+       46 +        base_dir.mkdir(parents=True)                          
+       47 +        local_dir = tmp_path / "conf" / "local"               
+       48 +        local_dir.mkdir(parents=True)                         
+       49 +        catalog = {                                           
+       50 +            "model": {                                        
+       51 +                "type": "PickleDataset",                      
+       52 +                "filepath": "data/models/${model_version}/mode
+          +l.pkl",                                                       
+       53 +            },                                                
+       54          }
+       42 -        _override_model_paths(catalog_config, "20260316_153000
+          -")                                                            
+       43 -        assert catalog_config["model"]["filepath"] == "data/mo
+          -dels/20260316_153000/model.pkl"                               
+       44 -        assert catalog_config["preprocessor"]["filepath"] == "
+          -data/models/20260316_153000/preprocessor.pkl"                 
+       45 -        # Non-model entries unchanged                         
+       46 -        assert catalog_config["feature_table"]["filepath"] == 
+          -"data/feature_table.parquet"                                  
+       55 +        with open(base_dir / "catalog.yaml", "w") as f:       
+       56 +            yaml.dump(catalog, f)                             
+       57  
+       48 -    def test_inference_does_not_override_model_paths(self):   
+       49 -        catalog_config = {                                    
+       50 -            "model": {"type": "PickleDataset", "filepath": "da
+          -ta/models/best/model.pkl"},                                   
+       58 +        old_cwd = os.getcwd()                                 
+       59 +        os.chdir(tmp_path)                                    
+       60 +        try:                                                  
+       61 +            # Pipeline will fail (no input data), but we can c
+          +heck catalog was built                                        
+       62 +            # with a timestamped path by patching DataCatalog 
+       63 +            with patch("recsys_tfb.__main__.DataCatalog") as m
+          +ock_catalog_cls:                                              
+       64 +                mock_catalog_cls.return_value = mock_catalog_c
+          +ls                                                            
+       65 +                mock_catalog_cls.add = lambda *a, **kw: None  
+       66 +                with patch("recsys_tfb.__main__.Runner") as mo
+          +ck_runner:                                                    
+       67 +                    runner.invoke(app, ["--pipeline", "trainin
+          +g"])                                                          
+       68 +                    # Check that DataCatalog was called with r
+          +esolved filepath                                              
+       69 +                    call_args = mock_catalog_cls.call_args[0][
+          +0]                                                            
+       70 +                    fp = call_args["model"]["filepath"]       
+       71 +                    assert "${model_version}" not in fp       
+       72 +                    assert "models/best/" not in fp           
+       73 +                    assert "models/20" in fp  # starts with ye
+          +ar                                                            
+       74 +        finally:                                              
+       75 +            os.chdir(old_cwd)                                 
+       76 +                                                              
+       77 +    def test_inference_uses_best_model_version(self, tmp_path)
+          +:                                                             
+       78 +        """Non-training pipelines resolve model_version to 'be
+          +st'."""                                                       
+       79 +        import os                                             
+       80 +                                                              
+       81 +        import yaml                                           
+       82 +                                                              
+       83 +        base_dir = tmp_path / "conf" / "base"                 
+       84 +        base_dir.mkdir(parents=True)                          
+       85 +        local_dir = tmp_path / "conf" / "local"               
+       86 +        local_dir.mkdir(parents=True)                         
+       87 +        catalog = {                                           
+       88 +            "model": {                                        
+       89 +                "type": "PickleDataset",                      
+       90 +                "filepath": "data/models/${model_version}/mode
+          +l.pkl",                                                       
+       91 +            },                                                
+       92          }
+       52 -        # _override_model_paths is only called for training pi
+          -peline,                                                       
+       53 -        # so for inference the config stays as-is             
+       54 -        original_fp = catalog_config["model"]["filepath"]     
+       55 -        assert original_fp == "data/models/best/model.pkl"    
+       93 +        with open(base_dir / "catalog.yaml", "w") as f:       
+       94 +            yaml.dump(catalog, f)                             
+       95  
+       96 +        old_cwd = os.getcwd()                                 
+       97 +        os.chdir(tmp_path)                                    
+       98 +        try:                                                  
+       99 +            with patch("recsys_tfb.__main__.DataCatalog") as m
+          +ock_catalog_cls:                                              
+      100 +                mock_catalog_cls.return_value = mock_catalog_c
+          +ls                                                            
+      101 +                mock_catalog_cls.add = lambda *a, **kw: None  
+      102 +                with patch("recsys_tfb.__main__.Runner") as mo
+          +ck_runner:                                                    
+      103 +                    runner.invoke(app, ["--pipeline", "inferen
+          +ce"])                                                         
+      104 +                    call_args = mock_catalog_cls.call_args[0][
+          +0]                                                            
+      105 +                    fp = call_args["model"]["filepath"]       
+      106 +                    assert fp == "data/models/best/model.pkl" 
+      107 +        finally:                                              
+      108 +            os.chdir(old_cwd)                                 
+      109 +                                                              
+      110      def test_training_pipeline_fails_without_inputs(self, tmp_
+           path):
+      111          base_dir = tmp_path / "conf" / "base"
+      112          base_dir.mkdir(parents=True)
+
+⏺ Now add the runtime_params test to test_config.py:
+
+⏺ Update(tests/test_core/test_config.py)
+  ⎿  Added 52 lines
+       54          assert params["lr"] == 0.01
+       55          assert params["sample_ratio"] == 0.1
+       56  
+       57 +    def test_runtime_params_substitution(self, tmp_path):     
+       58 +        self._write_yaml(                                     
+       59 +            tmp_path / "base" / "catalog.yaml",               
+       60 +            {                                                 
+       61 +                "model": {                                    
+       62 +                    "type": "PickleDataset",                  
+       63 +                    "filepath": "data/models/${model_version}/
+          +model.pkl",                                                   
+       64 +                },                                            
+       65 +                "feature_table": {                            
+       66 +                    "type": "ParquetDataset",                 
+       67 +                    "filepath": "data/feature_table.parquet", 
+       68 +                },                                            
+       69 +            },                                                
+       70 +        )                                                     
+       71 +        loader = ConfigLoader(str(tmp_path), env="local")     
+       72 +        catalog = loader.get_catalog_config(                  
+       73 +            runtime_params={"model_version": "20260316_120000"
+          +}                                                             
+       74 +        )                                                     
+       75 +        assert catalog["model"]["filepath"] == "data/models/20
+          +260316_120000/model.pkl"                                      
+       76 +        # Non-template paths unchanged                        
+       77 +        assert catalog["feature_table"]["filepath"] == "data/f
+          +eature_table.parquet"                                         
+       78 +                                                              
+       79 +    def test_runtime_params_none_preserves_template(self, tmp_
+          +path):                                                        
+       80 +        self._write_yaml(                                     
+       81 +            tmp_path / "base" / "catalog.yaml",               
+       82 +            {                                                 
+       83 +                "model": {                                    
+       84 +                    "type": "PickleDataset",                  
+       85 +                    "filepath": "data/models/${model_version}/
+          +model.pkl",                                                   
+       86 +                },                                            
+       87 +            },                                                
+       88 +        )                                                     
+       89 +        loader = ConfigLoader(str(tmp_path), env="local")     
+       90 +        catalog = loader.get_catalog_config()                 
+       91 +        assert catalog["model"]["filepath"] == "data/models/${
+          +model_version}/model.pkl"                                     
+       92 +                                                              
+       93 +    def test_runtime_params_unknown_var_preserved(self, tmp_pa
+          +th):                                                          
+       94 +        self._write_yaml(                                     
+       95 +            tmp_path / "base" / "catalog.yaml",               
+       96 +            {                                                 
+       97 +                "model": {                                    
+       98 +                    "type": "PickleDataset",                  
+       99 +                    "filepath": "data/${unknown}/model.pkl",  
+      100 +                },                                            
+      101 +            },                                                
+      102 +        )                                                     
+      103 +        loader = ConfigLoader(str(tmp_path), env="local")     
+      104 +        catalog = loader.get_catalog_config(                  
+      105 +            runtime_params={"model_version": "v1"}            
+      106 +        )                                                     
+      107 +        assert catalog["model"]["filepath"] == "data/${unknown
+          +}/model.pkl"                                                  
+      108 +                                                              
+      109      def test_empty_yaml_file(self, tmp_path):
+      110          (tmp_path / "base").mkdir(parents=True)
+      111          (tmp_path / "base" / "empty.yaml").write_text("")
+
+⏺ Now I need to check that __main__.py imports are correct — the patched names
+  need to match:
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ The imports are inside run(), so the test patches need to target the
+  module-level names. Since the imports are local, patching
+  recsys_tfb.__main__.DataCatalog won't work — they need to be patched where
+  they're defined. Let me fix the test to patch the right locations:
+
+⏺ Update(tests/test_cli.py)
+  ⎿  Added 2 lines, removed 2 lines
+      60          try:
+      61              # Pipeline will fail (no input data), but we can ch
+          eck catalog was built
+      62              # with a timestamped path by patching DataCatalog
+      63 -            with patch("recsys_tfb.__main__.DataCatalog") as mo
+         -ck_catalog_cls:                                                
+      63 +            with patch("recsys_tfb.core.catalog.DataCatalog") a
+         +s mock_catalog_cls:                                            
+      64                  mock_catalog_cls.return_value = mock_catalog_cl
+          s
+      65                  mock_catalog_cls.add = lambda *a, **kw: None
+      66 -                with patch("recsys_tfb.__main__.Runner") as moc
+         -k_runner:                                                      
+      66 +                with patch("recsys_tfb.core.runner.Runner") as 
+         +mock_runner:                                                   
+      67                      runner.invoke(app, ["--pipeline", "training
+          "])
+      68                      # Check that DataCatalog was called with re
+          solved filepath
+      69                      call_args = mock_catalog_cls.call_args[0][0
+          ]
+
+⏺ Update(tests/test_cli.py)
+  ⎿  Added 2 lines, removed 2 lines
+       96          old_cwd = os.getcwd()
+       97          os.chdir(tmp_path)
+       98          try:
+       99 -            with patch("recsys_tfb.__main__.DataCatalog") as m
+          -ock_catalog_cls:                                              
+       99 +            with patch("recsys_tfb.core.catalog.DataCatalog") 
+          +as mock_catalog_cls:                                          
+      100                  mock_catalog_cls.return_value = mock_catalog_c
+           ls
+      101                  mock_catalog_cls.add = lambda *a, **kw: None
+      102 -                with patch("recsys_tfb.__main__.Runner") as mo
+          -ck_runner:                                                    
+      102 +                with patch("recsys_tfb.core.runner.Runner") as
+          + mock_runner:                                                 
+      103                      runner.invoke(app, ["--pipeline", "inferen
+           ce"])
+      104                      call_args = mock_catalog_cls.call_args[0][
+           0]
+      105                      fp = call_args["model"]["filepath"]
+
+⏺ Wait — since the imports are local (inside run()), patching the source module
+  might not intercept the import. Let me check how other tests handle this or
+  just run the tests to see.
+
+⏺ Bash(python -m pytest tests/test_core/test_config.py tests/test_cli.py -v 2>&1
+       | tail -40)
+  ⎿  ============================= test session starts ====================
+     ==========
+     platform darwin -- Python 3.12.1, pytest-9.0.2, pluggy-1.6.0 -- /Users
+     … +27 lines (ctrl+o to expand)
+
+⏺ All 17 tests pass. Let me also run the full test suite to make sure nothing
+  else broke.
+
+⏺ Bash(python -m pytest tests/ -v 2>&1 | tail -50)
+  ⎿  tests/test_pipelines/test_inference/test_pipeline.py::TestInferencePip
+     eline::test_pipeline_inputs PASSED [ 77%]
+     tests/test_pipelines/test_inference/test_pipeline.py::TestInferencePip
+     … +72 lines (ctrl+o to expand)
+
+⏺ All 160 tests pass. Here's a summary of the changes:
+
+  src/recsys_tfb/core/config.py — get_catalog_config() now accepts
+  runtime_params and substitutes ${key} placeholders in filepath values.
+
+  conf/base/catalog.yaml, conf/local/catalog.yaml, conf/production/catalog.yaml
+  — All 5 model artifact paths changed from models/best/ to
+  models/${model_version}/.
+
+  src/recsys_tfb/__main__.py — Removed _override_model_paths(). Training sets
+  model_version to a timestamp, everything else defaults to "best", passed via
+  runtime_params.
+
+  tests/test_core/test_config.py — Added 3 tests: substitution works, None
+  preserves template, unknown vars preserved.
+
+  tests/test_cli.py — Replaced _override_model_paths unit tests with integration
+   tests verifying training uses timestamp and inference resolves to "best".
+
+✻ Cooked for 2m 14s
+
+❯ /openspec-archive-change  我中途有再提供一些意見請claude                      
+code修改，好像沒有反映在spec上，可以幫我整理後再archive起來嗎？                 
+
+⏺ 好的，讓我先看看有哪些可用的 change。
+
+⏺ Bash(python -m openspec list --json 2>&1)
+  ⎿  Error: Exit code 1
+     /Users/curtislu/.pyenv/versions/3.12.1/bin/python: No module named 
+     openspec.__main__; 'openspec' is a package and cannot be directly executed
+
+⏺ Bash(openspec list --json 2>&1 || npx openspec list --json 2>&1 || ls
+      openspec/changes/ 2>&1)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ 使用以下openspec skill: /openspec-archive-change                              
+我中途有再提供一些意見請claude                                                  
+code修改，好像沒有反映在spec上，可以幫我整理後再archive起來嗎？                 
+
+⏺ Skill(openspec-archive-change)
+  ⎿  Successfully loaded skill
+
+⏺ Let me first check what changes are available.
+
+⏺ Read 2 files (ctrl+o to expand)
+
+⏺ 只有一個活躍的 change: model-versioning-and-selection (schema: spec-driven)。
+
+⏺ User answered Claude's questions:
+  ⎿  · 要 archive 的是 model-versioning-and-selection (spec-driven) 這個 change 
+     嗎？ → model-versioning-and-selection
+
+⏺ 好，確認 archive model-versioning-and-selection。接下來讓我先檢查 artifact 與
+  task 完成狀態，以及你提到的 spec 內容是否需要更新。
+
+⏺ Read 3 files (ctrl+o to expand)
+
+⏺ 現在讓我讀取 delta specs 來了解目前 spec 內容，並對比實際實作的差異。
+
+⏺ Bash(for f in openspec/changes/model-versioning-and-selection/specs/*/spec.md;
+       do echo "=== $f ==="; cat "$f"; echo; done)
+  ⎿  === openspec/changes/model-versioning-and-selection/specs/data-catalog
+     /spec.md ===
+     ## MODIFIED Requirements
+     … +88 lines (ctrl+o to expand)
+
+⏺ Read 4 files (ctrl+o to expand)
+
+⏺ 我看到了。實際實作跟原始 spec 的主要差異是：
+
+  1. 原始設計：CLI 用 str.replace("models/best/", ...) 覆寫 catalog 路徑
+  2. 實際實作：catalog.yaml 用 ${model_version} 模板變數，ConfigLoader 新增
+  runtime_params 支援替換
+
+  讓我更新 delta specs 和 design.md 來反映實際實作。
+
+⏺ Write(openspec/changes/model-versioning-and-selection/specs/model-versioning/s
+       pec.md)
+  ⎿  Error writing file
+
+⏺ I already read this file via the bash cat command earlier. Let me re-read it
+  via the Read tool.
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Update(openspec/changes/model-versioning-and-selection/specs/model-versioning/
+        spec.md)
+  ⎿  Added 5 lines, removed 5 lines
+       1  ## ADDED Requirements
+       2  
+       3 -### Requirement: CLI 覆寫 training catalog 路徑                
+       4 -系統 SHALL 在 CLI 執行 training pipeline 時，自動產生時間戳（`Y
+         -YYYMMDD_HHMMSS`），並將 catalog config 中所有路徑包含 `models/b
+         -est/` 的 entries 覆寫為 `models/{timestamp}/`，使 training arti
+         -facts 直接寫入版本化目錄。                                     
+       3 +### Requirement: Catalog 模板變數解析版本化路徑                
+       4 +系統 SHALL 在 catalog.yaml 中使用 `${model_version}` 模板變數定
+         +義 model artifacts 路徑（如 `data/models/${model_version}/model
+         +.pkl`）。CLI 執行時透過 ConfigLoader 的 `runtime_params` 機制解
+         +析此變數：training 時替換為時間戳（`YYYYMMDD_HHMMSS`），其他 pi
+         +peline 替換為 `"best"`。                                       
+       5  
+       6  #### Scenario: 訓練完成後建立版本目錄
+       7  - **WHEN** 執行 `python -m recsys_tfb run -p training`
+       8 -- **THEN** 系統 SHALL 在 `data/models/` 下建立一個以訓練時間戳 
+         -命名的子目錄（格式 `YYYYMMDD_HHMMSS`），包含所有 5 個 artifacts
+         -（model.pkl、preprocessor.pkl、best_params.json、evaluation_res
+         -ults.json、category_mappings.json）                            
+       8 +- **THEN** 系統 SHALL 將 `${model_version}` 解析為訓練時間戳， 
+         +在 `data/models/{timestamp}/` 下建立所有 5 個 artifacts（model.
+         +pkl、preprocessor.pkl、best_params.json、evaluation_results.jso
+         +n、category_mappings.json）                                    
+       9  
+      10  #### Scenario: Training 不寫入 best 目錄
+      11  - **WHEN** training pipeline 執行完成
+     ...
+      15  - **WHEN** training pipeline 執行兩次（不同時間）
+      16  - **THEN** 兩個版本目錄 SHALL 同時存在，互不覆蓋
+      17  
+      18 -#### Scenario: Inference 不受路徑覆寫影響                      
+      18 +#### Scenario: Inference 解析為 best                           
+      19  - **WHEN** 執行 `python -m recsys_tfb run -p inference`
+      20 -- **THEN** catalog 路徑 SHALL 保持 `data/models/best/`，不被覆 
+         -寫                                                             
+      20 +- **THEN** `${model_version}` SHALL 被解析為 `"best"`，catalog 
+         +路徑為 `data/models/best/`                                     
+      21  
+      22  #### Scenario: 版本 ID 記錄在 log 中
+      23  - **WHEN** training pipeline 啟動
+
+⏺ Now update the data-catalog delta spec to reflect ${model_version} template:
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Update(openspec/changes/model-versioning-and-selection/specs/data-catalog/spec
+        .md)
+  ⎿  Added 7 lines, removed 5 lines
+       5  - `best_params`：JSONDataset，儲存 Optuna 搜索的最佳超參數
+       6  - `evaluation_results`：JSONDataset，儲存 mAP 等評估指標
+       7  - `model`：PickleDataset，儲存訓練完成的 LightGBM Booster
+       8 +- `preprocessor`：PickleDataset，儲存資料前處理器              
+       9 +- `category_mappings`：JSONDataset，儲存類別對應表             
+      10  
+       9 -所有 training artifacts 的路徑 SHALL 位於 `data/models/best/`  
+         -子目錄下，作為 inference pipeline 的讀取路徑。                 
+      11 +所有 training artifacts 的路徑 SHALL 使用 `${model_version}` 模
+         +板變數（如 `data/models/${model_version}/model.pkl`），由 Confi
+         +gLoader 的 `runtime_params` 在執行時解析為實際版本目錄。       
+      12  
+      13  #### Scenario: best_params 持久化
+      14  - **WHEN** tune_hyperparameters 節點執行完畢
+      13 -- **THEN** best_params SHALL 以 JSON 格式存入 data/models/best/
+         -best_params.json                                               
+      15 +- **THEN** best_params SHALL 以 JSON 格式存入 `data/models/${mo
+         +del_version}/best_params.json`                                 
+      16  
+      17  #### Scenario: evaluation_results 持久化
+      18  - **WHEN** evaluate_model 節點執行完畢
+      17 -- **THEN** evaluation_results SHALL 以 JSON 格式存入 data/model
+         -s/best/evaluation_results.json                                 
+      19 +- **THEN** evaluation_results SHALL 以 JSON 格式存入 `data/mode
+         +ls/${model_version}/evaluation_results.json`                   
+      20  
+      21  #### Scenario: model 持久化
+      22  - **WHEN** train_model 節點執行完畢
+      21 -- **THEN** model SHALL 以 pickle 格式存入 data/models/best/mode
+         -l.pkl                                                          
+      23 +- **THEN** model SHALL 以 pickle 格式存入 `data/models/${model_
+         +version}/model.pkl`                                            
+      24  
+      25  #### Scenario: 各環境路徑可設定
+      26  - **WHEN** 使用 production 環境設定
+      25 -- **THEN** 所有 training artifact 的路徑 SHALL 切換至 HDFS 路徑
+         -（`hdfs:///data/recsys/models/best/`）                         
+      27 +- **THEN** 所有 training artifact 的路徑 SHALL 切換至 HDFS 路徑
+         +（如 `hdfs:///data/recsys/models/${model_version}/model.pkl`） 
+      28  
+      29  ### Requirement: Inference pipeline catalog entries
+      30  DataCatalog SHALL include entries for inference pipeline datase
+          ts:
+
+⏺ Update(openspec/changes/model-versioning-and-selection/specs/data-catalog/spec
+        .md)
+  ⎿  Added 1 line, removed 1 line
+      41  
+      42  #### Scenario: Inference reads training artifacts from best
+      43  - **WHEN** inference pipeline loads model and preprocessor
+      44 -- **THEN** it SHALL use the catalog entries pointing to `data/m
+         -odels/best/` directory                                         
+      44 +- **THEN** `${model_version}` SHALL 被解析為 `"best"`，從 `data
+         +/models/best/` 目錄讀取                                        
+
+⏺ Now update the training-pipeline delta spec:
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Update(openspec/changes/model-versioning-and-selection/specs/training-pipeline
+        /spec.md)
+  ⎿  Added 1 line, removed 1 line
+      13  
+      14  #### Scenario: 中間產出持久化至版本目錄
+      15  - **WHEN** Pipeline 執行完畢
+      16 -- **THEN** best_params、model、evaluation_results、preprocessor
+         -、category_mappings SHALL 通過 catalog 持久化至版本化時間戳目錄
+         -（由 CLI 覆寫 catalog 路徑）                                   
+      16 +- **THEN** best_params、model、evaluation_results、preprocessor
+         +、category_mappings SHALL 通過 catalog 持久化至版本化時間戳目錄
+         +（由 `${model_version}` 模板變數透過 ConfigLoader `runtime_para
+         +ms` 解析）                                                     
+
+⏺ Now add a config-loader delta spec for the new runtime_params feature:
+
+⏺ Bash(mkdir -p
+      openspec/changes/model-versioning-and-selection/specs/config-loader)
+  ⎿  Done
+
+⏺ Write(openspec/changes/model-versioning-and-selection/specs/config-loader/spec
+       .md)
+  ⎿  Wrote 18 lines to openspec/changes/model-versioning-and-selection/spec
+     s/config-loader/spec.md
+       1 ## MODIFIED Requirements
+       2 
+       3 ### Requirement: Provide typed access methods for catalog and pa
+         rameters
+       4 ConfigLoader SHALL provide `get_catalog_config(runtime_params=No
+         ne)` returning the catalog configuration dict, and `get_paramete
+         rs()` returning a merged dict of all `parameters*.yaml` files.
+       5 
+       6 `get_catalog_config()` SHALL accept an optional `runtime_params:
+          dict[str, str]` parameter. When provided, all `${key}` placehol
+         ders in `filepath` values SHALL be replaced with the correspondi
+         ng value. Unmatched placeholders SHALL be preserved as-is (no er
+         ror).
+       7 
+       8 #### Scenario: Get catalog config with runtime_params
+       9 - **WHEN** catalog.yaml contains `filepath: data/models/${model_
+         version}/model.pkl` and `get_catalog_config(runtime_params={"mod
+         el_version": "20260316_120000"})` is called
+      10 - **THEN** the returned dict SHALL have `filepath: data/models/2
+         0260316_120000/model.pkl`
+     … +8 lines (ctrl+o to expand)
+
+⏺ Now update the design.md to reflect the template variable approach:
+
+⏺ Update(openspec/changes/model-versioning-and-selection/design.md)
+  ⎿  Added 5 lines, removed 3 lines
+      29  
+      30  **替代方案**：遞增編號 → 需要讀取現有最大編號，在並行訓練時可能
+          衝突。
+      31  
+      32 -### 2. Training 與 Inference 分離 catalog 路徑                 
+      32 +### 2. Training 與 Inference 分離 catalog 路徑：模板變數       
+      33  
+      34 -Catalog.yaml 中 model artifacts 路徑設為 `data/models/best/`（ 
+         -供 inference 讀取）。CLI (`__main__.py`) 執行 training pipeline
+         - 時，自動產生時間戳並覆寫 catalog config 中 model artifacts 的 
+         -路徑，將 `best` 替換為時間戳。                                 
+      34 +Catalog.yaml 中 model artifacts 路徑使用 `${model_version}` 模 
+         +板變數（如 `data/models/${model_version}/model.pkl`）。ConfigLo
+         +ader 的 `get_catalog_config()` 新增 `runtime_params` 參數，CLI 
+         +執行時傳入 `{"model_version": timestamp}` (training) 或 `{"mode
+         +l_version": "best"}` (其他)。                                  
+      35  
+      36 -**效果**：Training 透過 catalog 直接寫入版本目錄 `data/models/{
+         -timestamp}/`，不接觸 `best/`。Inference 從 `data/models/best/` 
+         -讀取。不需要額外的 `save_versioned_artifacts` node。           
+      36 +**效果**：版本化意圖在 catalog.yaml 中一目瞭然，不需要讀 CLI 原
+         +始碼才知道實際寫入路徑。Training 透過 catalog 直接寫入版本目錄 
+         +`data/models/{timestamp}/`，不接觸 `best/`。Inference 從 `data/
+         +models/best/` 讀取。                                           
+      37  
+      38 +**替代方案（已放棄）**：CLI 用 `str.replace("models/best/", ...
+         +)` 覆寫 → 讀 catalog.yaml 的人不知道 training 實際寫到別處，不 
+         +直觀。                                                         
+      39 +                                                               
+      40  **替代方案**：在 training pipeline 加 node 手動寫檔 → 繞過 cata
+          log 系統，不夠乾淨。
+      41  
+      42  **替代方案**：Training 用不同名稱的 output（如 `_trained_model`
+          ）→ 破壞 pipeline 語義清晰度。
+
+⏺ Now update the proposal.md:
+
+⏺ Update(openspec/changes/model-versioning-and-selection/proposal.md)
+  ⎿  Added 1 line, removed 1 line
+       7  - 每次訓練自動將所有 artifacts 存入帶時間戳的版本化目錄（如 `da
+          ta/models/20260316_153000/`）
+       8  - 新增 `compare_model_versions` node，在訓練完成後輸出所有版本
+          的 mAP 比較報告
+       9  - 新增獨立的 `promote_model.py` script，人工確認後將指定版本複
+          製到 `data/models/best/` 供 inference 使用
+      10 -- Catalog 中 model artifacts 的路徑從 `data/models/` 改為 `data
+         -/models/best/`，inference pipeline 不需改動                    
+      10 +- Catalog 中 model artifacts 的路徑改為使用 `${model_version}` 
+         +模板變數，由 ConfigLoader `runtime_params` 在執行時解析（traini
+         +ng → 時間戳，inference → `"best"`）                            
+      11  
+      12  ## Capabilities
+      13  
+
+⏺ Update(openspec/changes/model-versioning-and-selection/proposal.md)
+  ⎿  Added 2 lines, removed 1 line
+      17  
+      18  ### Modified Capabilities
+      19  - `training-pipeline`: 新增 `save_versioned_artifacts` 和 `comp
+          are_model_versions` 兩個 node
+      20 -- `data-catalog`: model artifacts 路徑從 `data/models/` 改為 `d
+         -ata/models/best/`                                              
+      20 +- `data-catalog`: model artifacts 路徑改用 `${model_version}`  
+         +模板變數                                                       
+      21 +- `config-loader`: `get_catalog_config()` 新增 `runtime_params`
+         + 支援模板變數替換                                              
+      22  
+      23  ## Impact
+      24  
+
+⏺ Update(openspec/changes/model-versioning-and-selection/proposal.md)
+  ⎿  Added 1 line, removed 1 line
+      16  - `model-promotion`: 獨立 CLI script 將指定模型版本（或自動選 m
+          AP 最高）promote 到 best/ 目錄供 inference 使用
+      17  
+      18  ### Modified Capabilities
+      19 -- `training-pipeline`: 新增 `save_versioned_artifacts` 和 `comp
+         -are_model_versions` 兩個 node                                  
+      19 +- `training-pipeline`: 新增 `compare_model_versions` node（版本
+         +化儲存透過 catalog 模板變數實現，不需額外 node）               
+      20  - `data-catalog`: model artifacts 路徑改用 `${model_version}` 
+          模板變數
+      21  - `config-loader`: `get_catalog_config()` 新增 `runtime_params`
+           支援模板變數替換
+      22  
+
+⏺ Update(openspec/changes/model-versioning-and-selection/proposal.md)
+  ⎿  Added 2 lines, removed 2 lines
+      22  
+      23  ## Impact
+      24  
+      25 -- **程式碼**: `training/nodes.py`（新增 2 個函式）、`training/p
+         -ipeline.py`（新增 2 個 node）、新增 `scripts/promote_model.py` 
+      26 -- **設定檔**: `conf/base/catalog.yaml` 和 `conf/production/cata
+         -log.yaml` 中 model artifacts 路徑更新                          
+      25 +- **程式碼**: `training/nodes.py`（新增 1 個函式）、`training/p
+         +ipeline.py`（新增 1 個 node）、`core/config.py`（新增 `runtime_
+         +params` 支援）、`__main__.py`（簡化版本化邏輯）、新增 `scripts/
+         +promote_model.py`                                              
+      26 +- **設定檔**: `conf/*/catalog.yaml` 中 model artifacts 路徑改用
+         + `${model_version}` 模板變數                                   
+      27  - **儲存**: `data/models/` 目錄結構改變，每次訓練會新增一個版本
+          子目錄
+      28  - **Inference**: 無程式碼改動，但首次使用前需先執行 promote scr
+          ipt 建立 `best/` 目錄
+
+⏺ Spec 已更新完畢。現在進行 Step 4: Delta spec sync 評估。
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ 讓我對比各 delta spec 與 main spec 的差異：
+
+  config-loader: Delta spec 修改 get_catalog_config() 的描述，新增
+  runtime_params 支援。Main spec 目前沒有提到 runtime_params。
+
+  data-catalog: Delta spec 修改 training artifacts 路徑為 ${model_version}
+  模板，新增 inference 讀取 best 的 scenario。Main spec 路徑仍是舊的
+  data/models/。
+
+  model-promotion: 全新 capability，main spec 不存在。
+
+  model-versioning: 全新 capability，main spec 不存在。
+
+  training-pipeline: Delta spec 將 DAG 從 4 節點改為 5 節點，新增
+  compare_model_versions。
+
+⏺ User answered Claude's questions:
+  ⎿  · Delta specs 需要同步到 main specs。要現在同步嗎？ → Sync now 
+     (Recommended)
+
+⏺ Agent(Sync delta specs to main specs)
+  ⎿  Done (22 tool uses · 30.4k tokens · 2m 14s)
+  (ctrl+o to expand)
+
+⏺ Spec sync 完成。現在執行 archive。
+
+⏺ Bash(mkdir -p openspec/changes/archive && ls openspec/changes/archive/ | grep
+      model-versioning-and-selection || echo "no conflict")
+  ⎿  no conflict
+
+⏺ Bash(mv openspec/changes/model-versioning-and-selection
+      openspec/changes/archive/2026-03-16-model-versioning-and-selection)
+  ⎿  Done
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ Archive Complete
+
+  Change: model-versioning-and-selection
+  Schema: spec-driven
+  Archived to:
+  openspec/changes/archive/2026-03-16-model-versioning-and-selection/
+  Specs: Synced to main specs (5 delta specs → 3 modified + 2 new canonical
+  specs)
+
+  Spec 更新摘要（反映實作過程中的調整）：
+  - config-loader — 新增 runtime_params 模板變數替換功能
+  - data-catalog — model artifacts 路徑從硬編碼改為 ${model_version} 模板變數
+  - model-versioning — 從「CLI 字串替換覆寫」改為「catalog 模板變數 +
+  ConfigLoader runtime_params」
+  - training-pipeline — 更新持久化描述引用模板變數機制
+  - model-promotion — 新增（無變動）
+
+  All tasks complete (12/12). All artifacts complete.
+
+✻ Cogitated for 6m 37s
+
+❯ commit並push                                                                  
+
+⏺ Bash(git status)
+  ⎿  On branch main
+     Your branch is up to date with 'origin/main'.
+     … +19 lines (ctrl+o to expand)
+
+⏺ Bash(git diff)
+  ⎿  diff --git a/conf/base/catalog.yaml b/conf/base/catalog.yaml
+     index e0fb119..7a456e9 100644
+     --- a/conf/base/catalog.yaml
+     … +421 lines (ctrl+o to expand)
+
+⏺ Bash(git log --oneline -5)
+  ⎿  386ee08 feat: add dual pandas/spark backend support for dataset and in
+     ference pipelines
+     e7ad925 feat: add inference pipeline with batch scoring, preprocessing
+     … +7 lines (ctrl+o to expand)
+
+⏺ Changes span the entire model-versioning-and-selection feature. Let me stage
+  everything except .DS_Store and messages/.
+
+⏺ Bash(git add conf/base/catalog.yaml conf/local/catalog.yaml
+      conf/production/catalog.yaml src/recsys_tfb/__main__.py
+      src/recsys_tfb/core/config.py src/recsys_tfb/pipe…)
+  ⎿  (No output)
+
+⏺ Bash(git commit -m "$(cat <<'EOF'
+      feat: add model versioning with template-based catalog paths and promote
+      script…)
+  ⎿  [main d643d1b] feat: add model versioning with template-based catalog
+     paths and promote script
+      30 files changed, 2392 insertions(+), 115 deletions(-)
+     … +17 lines (ctrl+o to expand)
+
+⏺ Bash(git push)
+  ⎿  To https://github.com/curtis-lu/recsys-demo.git
+        386ee08..d643d1b  main -> main
+
+⏺ 已 commit 並 push 完成。d643d1b — 30 files changed, 2392 insertions, 115
+  deletions。
+
+✻ Crunched for 34s
