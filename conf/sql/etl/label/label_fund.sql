@@ -2,11 +2,11 @@
 --partition by: prod_name, snap_date
 
 WITH candidate_prod AS (
-    SELECT 'stock' AS prod_name
+    SELECT 'fund_stock' AS prod_name
     UNION ALL
-    SELECT 'bond'  AS prod_name
+    SELECT 'fund_bond'  AS prod_name
     UNION ALL
-    SELECT 'mix'   AS prod_name
+    SELECT 'fund_mix'   AS prod_name
 ),
 label_event AS (
     SELECT
@@ -15,9 +15,9 @@ label_event AS (
         date_add('${snap_date}', 30) AS apply_end_date,
         cust_id,
         CASE
-            WHEN prod_name IN ('stock') THEN 'stock'
-            WHEN prod_name IN ('bond')  THEN 'bond'
-            WHEN prod_name IN ('mix')   THEN 'mix'
+            WHEN prod_name IN ('stock') THEN 'fund_stock'
+            WHEN prod_name IN ('bond')  THEN 'fund_bond'
+            WHEN prod_name IN ('mix')   THEN 'fund_mix'
             ELSE NULL
         END AS prod_name,
         1 AS label

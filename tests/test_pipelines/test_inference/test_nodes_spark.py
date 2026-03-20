@@ -36,7 +36,7 @@ def parameters():
     return {
         "inference": {
             "snap_dates": ["2024-03-31"],
-            "products": ["fx", "stock", "bond"],
+            "products": ["exchange_fx", "fund_stock", "fund_bond"],
         },
     }
 
@@ -49,7 +49,7 @@ def preprocessor():
             "apply_start_date", "apply_end_date", "cust_segment_typ",
         ],
         "categorical_columns": ["prod_name"],
-        "category_mappings": {"prod_name": ["bond", "fx", "stock"]},
+        "category_mappings": {"prod_name": ["fund_bond", "exchange_fx", "fund_stock"]},
         "feature_columns": [
             "prod_name", "total_aum", "fund_aum",
             "in_amt_sum_l1m", "out_amt_sum_l1m",
@@ -127,7 +127,7 @@ class TestPredictScores:
                 return np.full(len(X), 0.5)
 
         result = predict_scores(MockModel(), X_score, scoring)
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score"}
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
     def test_row_count_matches(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
@@ -146,7 +146,7 @@ class TestRankPredictions:
         score_pdf = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3,
-            "prod_code": ["fx", "stock", "bond"],
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
         score_table = spark.createDataFrame(score_pdf)
@@ -157,15 +157,15 @@ class TestRankPredictions:
         score_pdf = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3,
-            "prod_code": ["fx", "stock", "bond"],
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
         score_table = spark.createDataFrame(score_pdf)
         result = rank_predictions(score_table, parameters)
         pdf = result.toPandas()
-        fx_rank = pdf.loc[pdf["prod_code"] == "fx", "rank"].iloc[0]
-        bond_rank = pdf.loc[pdf["prod_code"] == "bond", "rank"].iloc[0]
-        stock_rank = pdf.loc[pdf["prod_code"] == "stock", "rank"].iloc[0]
+        fx_rank = pdf.loc[pdf["prod_name"] == "exchange_fx", "rank"].iloc[0]
+        bond_rank = pdf.loc[pdf["prod_name"] == "fund_bond", "rank"].iloc[0]
+        stock_rank = pdf.loc[pdf["prod_name"] == "fund_stock", "rank"].iloc[0]
         assert fx_rank == 1
         assert bond_rank == 2
         assert stock_rank == 3
@@ -174,7 +174,7 @@ class TestRankPredictions:
         score_pdf = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3 + ["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3 + ["C002"] * 3,
-            "prod_code": ["fx", "stock", "bond"] * 2,
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"] * 2,
             "score": [0.9, 0.3, 0.6, 0.1, 0.8, 0.5],
         })
         score_table = spark.createDataFrame(score_pdf)

@@ -35,7 +35,7 @@ def parameters():
     return {
         "inference": {
             "snap_dates": ["2024-03-31"],
-            "products": ["fx", "stock", "bond"],
+            "products": ["exchange_fx", "fund_stock", "fund_bond"],
         },
     }
 
@@ -48,7 +48,7 @@ def preprocessor():
             "apply_start_date", "apply_end_date", "cust_segment_typ",
         ],
         "categorical_columns": ["prod_name"],
-        "category_mappings": {"prod_name": ["bond", "fx", "stock"]},
+        "category_mappings": {"prod_name": ["fund_bond", "exchange_fx", "fund_stock"]},
         "feature_columns": [
             "prod_name", "total_aum", "fund_aum",
             "in_amt_sum_l1m", "out_amt_sum_l1m",
@@ -81,7 +81,7 @@ class TestBuildScoringDataset:
         params = {
             "inference": {
                 "snap_dates": ["2024-01-31", "2024-03-31"],
-                "products": ["fx", "stock"],
+                "products": ["exchange_fx", "fund_stock"],
             },
         }
         result = build_scoring_dataset(feature_table, params)
@@ -132,7 +132,7 @@ class TestPredictScores:
                 return np.random.rand(len(X))
 
         result = predict_scores(MockModel(), X_score, scoring)
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score"}
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
     def test_row_count_matches(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
@@ -145,7 +145,7 @@ class TestPredictScores:
         result = predict_scores(MockModel(), X_score, scoring)
         assert len(result) == len(scoring)
 
-    def test_prod_code_from_prod_name(self, feature_table, parameters, preprocessor):
+    def test_prod_name_from_prod_name(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor)
 
@@ -154,7 +154,7 @@ class TestPredictScores:
                 return np.full(len(X), 0.5)
 
         result = predict_scores(MockModel(), X_score, scoring)
-        assert set(result["prod_code"].unique()) == set(parameters["inference"]["products"])
+        assert set(result["prod_name"].unique()) == set(parameters["inference"]["products"])
 
 
 class TestRankPredictions:
@@ -162,7 +162,7 @@ class TestRankPredictions:
         score_table = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3,
-            "prod_code": ["fx", "stock", "bond"],
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
         result = rank_predictions(score_table, parameters)
@@ -172,14 +172,14 @@ class TestRankPredictions:
         score_table = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3,
-            "prod_code": ["fx", "stock", "bond"],
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
         result = rank_predictions(score_table, parameters)
-        # fx has highest score -> rank 1
-        fx_rank = result.loc[result["prod_code"] == "fx", "rank"].iloc[0]
-        bond_rank = result.loc[result["prod_code"] == "bond", "rank"].iloc[0]
-        stock_rank = result.loc[result["prod_code"] == "stock", "rank"].iloc[0]
+        # exchange_fx has highest score -> rank 1
+        fx_rank = result.loc[result["prod_name"] == "exchange_fx", "rank"].iloc[0]
+        bond_rank = result.loc[result["prod_name"] == "fund_bond", "rank"].iloc[0]
+        stock_rank = result.loc[result["prod_name"] == "fund_stock", "rank"].iloc[0]
         assert fx_rank == 1
         assert bond_rank == 2
         assert stock_rank == 3
@@ -188,7 +188,7 @@ class TestRankPredictions:
         score_table = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 3 + ["2024-03-31"] * 3),
             "cust_id": ["C001"] * 3 + ["C002"] * 3,
-            "prod_code": ["fx", "stock", "bond"] * 2,
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"] * 2,
             "score": [0.9, 0.3, 0.6, 0.1, 0.8, 0.5],
         })
         result = rank_predictions(score_table, parameters)
@@ -201,8 +201,8 @@ class TestRankPredictions:
         score_table = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * 2),
             "cust_id": ["C001"] * 2,
-            "prod_code": ["fx", "stock"],
+            "prod_name": ["exchange_fx", "fund_stock"],
             "score": [0.9, 0.3],
         })
         result = rank_predictions(score_table, parameters)
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score", "rank"}
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}

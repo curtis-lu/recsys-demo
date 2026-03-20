@@ -70,8 +70,7 @@ def compute_segment_metrics(
     if k_values is None:
         k_values = [5, "all"]
 
-    labels_renamed = labels.rename(columns={"prod_name": "prod_code"})
-    seg_map = labels_renamed[["cust_id", segment_column]].drop_duplicates("cust_id")
+    seg_map = labels[["cust_id", segment_column]].drop_duplicates("cust_id")
 
     # Join segment info to predictions
     pred_with_seg = predictions.merge(seg_map, on="cust_id", how="left")
@@ -91,6 +90,24 @@ def compute_segment_metrics(
         result[seg] = compute_all_metrics(seg_preds, seg_labels, k_values=k_values)
 
     return result
+
+
+def build_segment_metrics_table(segment_metrics: dict) -> pd.DataFrame:
+    """Convert compute_segment_metrics result to a DataFrame.
+
+    Args:
+        segment_metrics: Dict keyed by segment value, each containing
+            the full metrics result from compute_all_metrics.
+
+    Returns:
+        DataFrame with rows=segments, columns=metric names (from overall).
+    """
+    rows = {
+        seg: metrics["overall"]
+        for seg, metrics in segment_metrics.items()
+        if "overall" in metrics
+    }
+    return pd.DataFrame.from_dict(rows, orient="index")
 
 
 def plot_segment_charts(

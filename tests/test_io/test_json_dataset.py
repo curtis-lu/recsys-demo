@@ -5,7 +5,7 @@ class TestJSONDataset:
     def test_save_and_load_dict(self, tmp_path):
         filepath = str(tmp_path / "test.json")
         ds = JSONDataset(filepath=filepath)
-        data = {"prod_name": ["fx", "usd", "stock"]}
+        data = {"prod_name": ["exchange_fx", "exchange_usd", "fund_stock"]}
         ds.save(data)
         loaded = ds.load()
         assert loaded == data

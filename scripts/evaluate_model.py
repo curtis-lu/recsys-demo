@@ -24,8 +24,11 @@ from recsys_tfb.evaluation.compare import (
     plot_comparison_score_distributions,
 )
 from recsys_tfb.evaluation.distributions import (
+    plot_positive_rank_heatmap,
+    plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
     plot_score_distributions,
+    plot_score_distributions_by_label,
 )
 from recsys_tfb.evaluation.metrics import compute_all_metrics
 from recsys_tfb.evaluation.report import (
@@ -35,9 +38,13 @@ from recsys_tfb.evaluation.report import (
     save_report,
 )
 from recsys_tfb.evaluation.segments import (
+    build_segment_metrics_table,
     compute_segment_metrics,
     load_and_join_segment_sources,
-    plot_segment_charts,
+)
+from recsys_tfb.evaluation.statistics import (
+    compute_product_statistics,
+    compute_segment_statistics,
 )
 
 app = typer.Typer(help="Model evaluation CLI")
@@ -130,8 +137,12 @@ def _run_analysis(
     if segment_columns is None:
         segment_columns = []
 
+    # 過濾 labels 到 predictions 涵蓋的 snap_date
+    pred_snap_dates = predictions["snap_date"].unique()
+    eval_labels = labels[labels["snap_date"].isin(pred_snap_dates)]
+
     # 1. Metrics
-    metrics = compute_all_metrics(predictions, labels, k_values=k_values)
+    metrics = compute_all_metrics(predictions, eval_labels, k_values=k_values)
 
     sections = []
 
@@ -161,42 +172,56 @@ def _run_analysis(
                 "and micro average (query-count-weighted mean)."
             ),
             tables=summary_tables,
+            table_titles=["Overall", "Macro Average", "Micro Average"],
         )
     )
 
-    # Per-product metrics table
+    # Per-product metrics table + product statistics
     if metrics["per_product"]:
         prod_df = pd.DataFrame(metrics["per_product"]).T
+        product_stats_df = compute_product_statistics(eval_labels)
         sections.append(
             ReportSection(
                 title="Per-Product Metrics",
-                description="Metrics broken down by product.",
-                tables=[prod_df],
+                description="Metrics and dataset statistics broken down by product.",
+                tables=[prod_df, product_stats_df],
+                table_titles=["Ranking Metrics", "Dataset Statistics"],
             )
         )
 
-    # 2. Score distributions
+    # 2. Score distributions (existing + positive/negative split)
     dist_figs = plot_score_distributions(predictions, title_prefix=title_prefix)
+    label_dist_figs = plot_score_distributions_by_label(
+        predictions, eval_labels, title_prefix=title_prefix
+    )
     sections.append(
         ReportSection(
             title="Score Distributions",
-            description="Histogram and boxplot of prediction scores per product.",
-            figures=dist_figs,
+            description="Histogram and boxplot of prediction scores per product, "
+            "plus positive/negative label split.",
+            figures=dist_figs + label_dist_figs,
         )
     )
 
-    # 3. Rank distribution
+    # 3. Rank distribution (existing + positive count + positive rate)
     rank_fig = plot_rank_heatmap(predictions, title_prefix=title_prefix)
+    pos_rank_fig = plot_positive_rank_heatmap(
+        predictions, eval_labels, title_prefix=title_prefix
+    )
+    pos_rate_rank_fig = plot_positive_rate_rank_heatmap(
+        predictions, eval_labels, title_prefix=title_prefix
+    )
     sections.append(
         ReportSection(
             title="Rank Distribution",
-            description="Heatmap showing how often each product appears at each rank position.",
-            figures=[rank_fig],
+            description="Heatmap showing rank distribution: all samples, "
+            "positive label counts, and positive rate by rank position.",
+            figures=[rank_fig, pos_rank_fig, pos_rate_rank_fig],
         )
     )
 
     # 4. Calibration
-    cal_fig = plot_calibration_curves(predictions, labels, title_prefix=title_prefix)
+    cal_fig = plot_calibration_curves(predictions, eval_labels, title_prefix=title_prefix)
     sections.append(
         ReportSection(
             title="Calibration Curves",
@@ -207,20 +232,22 @@ def _run_analysis(
 
     # 5. Segment analysis — unified loop over all configured segment columns
     for seg_col in segment_columns:
-        if seg_col not in labels.columns:
+        if seg_col not in eval_labels.columns:
             continue
 
         seg_metrics = compute_segment_metrics(
-            predictions, labels, segment_column=seg_col, k_values=k_values
+            predictions, eval_labels, segment_column=seg_col, k_values=k_values
         )
-        seg_figs = plot_segment_charts(seg_metrics, title_prefix=title_prefix)
+        seg_metrics_table = build_segment_metrics_table(seg_metrics)
+        segment_stats_df = compute_segment_statistics(eval_labels, segment_column=seg_col)
 
         display_name = seg_col.replace("_", " ").title()
         sections.append(
             ReportSection(
                 title=f"Segment Analysis: {display_name}",
-                description=f"Metrics by {seg_col}.",
-                figures=seg_figs,
+                description=f"Metrics and dataset statistics by {seg_col}.",
+                tables=[seg_metrics_table, segment_stats_df],
+                table_titles=["Ranking Metrics", "Dataset Statistics"],
             )
         )
 
@@ -351,7 +378,7 @@ def compare(
     else:
         # Generate baseline
         customer_ids = predictions_a["cust_id"].unique().tolist()
-        products = sorted(predictions_a["prod_code"].unique().tolist())
+        products = sorted(predictions_a["prod_name"].unique().tolist())
 
         if baseline == "global_popularity":
             typer.echo("Baseline: Global Popularity")

@@ -58,7 +58,7 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
 
         # -- Synthetic source tables --
-        products = ["fx", "usd", "stock"]
+        products = ["exchange_fx", "exchange_usd", "fund_stock"]
         customers = ["C001", "C002", "C003", "C004"]
         snaps = ["2024-01-31", "2024-02-29", "2024-03-31"]
         rng = np.random.RandomState(42)

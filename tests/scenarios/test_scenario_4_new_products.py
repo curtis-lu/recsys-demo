@@ -28,7 +28,7 @@ from tests.scenarios.data_generator import (
 )
 
 SCENARIO_NAME = "scenario_4"
-EXPECTED_NUM_PRODUCTS = len(EXTENDED_PRODUCTS)  # 7
+EXPECTED_NUM_PRODUCTS = len(EXTENDED_PRODUCTS)  # 10
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +41,24 @@ def work_dir():
     )
 
     config_overrides = {
+        "parameters_dataset": {
+            "dataset": {
+                "sample_ratio": 1.0,
+                "sample_group_keys": ["snap_date"],
+                "train_dev_snap_dates": ["2025-04-30"],
+                "val_snap_dates": ["2025-05-31"],
+                "prepare_model_input": {
+                    "drop_columns": [
+                        "snap_date", "cust_id", "label",
+                        "apply_start_date", "apply_end_date", "cust_segment_typ",
+                    ],
+                    "categorical_columns": [
+                        "prod_name", "gender", "risk_attr",
+                        "education_level", "marital_status", "channel_preference",
+                    ],
+                },
+            },
+        },
         "parameters_training": {
             "training": {
                 "n_trials": 3,
@@ -50,7 +68,7 @@ def work_dir():
         },
         "parameters_inference": {
             "inference": {
-                "snap_dates": ["2024-03-31"],
+                "snap_dates": ["2025-05-31"],
                 "products": sorted(EXTENDED_PRODUCTS),
             },
         },
@@ -100,7 +118,7 @@ def test_category_mappings_include_new_products(dataset_version_dir):
 
 
 def test_train_set_has_all_products(dataset_version_dir):
-    """train_set 的 prod_name 唯一值應為 7 個。"""
+    """train_set 的 prod_name 唯一值應為 10 個。"""
     train_set = pd.read_parquet(dataset_version_dir / "train_set.parquet")
     unique_products = train_set["prod_name"].nunique()
     assert unique_products == EXPECTED_NUM_PRODUCTS, (
@@ -109,24 +127,24 @@ def test_train_set_has_all_products(dataset_version_dir):
 
 
 def test_products_per_customer(ranked_predictions):
-    """每位客戶應有 7 個產品排名。"""
-    prods_per_cust = ranked_predictions.groupby("cust_id")["prod_code"].nunique()
+    """每位客戶應有 10 個產品排名。"""
+    prods_per_cust = ranked_predictions.groupby("cust_id")["prod_name"].nunique()
     assert (prods_per_cust == EXPECTED_NUM_PRODUCTS).all(), (
         f"部分客戶產品數不為 {EXPECTED_NUM_PRODUCTS}: {prods_per_cust.value_counts().to_dict()}"
     )
 
 
 def test_rank_continuous(ranked_predictions):
-    """每位客戶的排名應為 1~7 連續整數。"""
+    """每位客戶的排名應為 1~10 連續整數。"""
     expected_ranks = list(range(1, EXPECTED_NUM_PRODUCTS + 1))
     for cust_id, group in ranked_predictions.groupby("cust_id"):
         ranks = sorted(group["rank"].tolist())
         assert ranks == expected_ranks, f"客戶 {cust_id} 排名不連續: {ranks}"
 
 
-def test_unique_prod_codes(ranked_predictions):
-    """ranked_predictions 的唯一 prod_code 應為 7 個。"""
-    unique_prods = ranked_predictions["prod_code"].nunique()
+def test_unique_prod_names(ranked_predictions):
+    """ranked_predictions 的唯一 prod_name 應為 10 個。"""
+    unique_prods = ranked_predictions["prod_name"].nunique()
     assert unique_prods == EXPECTED_NUM_PRODUCTS, (
         f"預期 {EXPECTED_NUM_PRODUCTS} 唯一產品，實際: {unique_prods}"
     )

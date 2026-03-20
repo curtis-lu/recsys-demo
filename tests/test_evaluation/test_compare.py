@@ -15,7 +15,7 @@ from recsys_tfb.evaluation.metrics import compute_all_metrics
 def _make_test_data(n_customers=10, products=None, seed=42):
     rng = np.random.RandomState(seed)
     if products is None:
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
 
     pred_rows = []
     label_rows = []
@@ -28,7 +28,7 @@ def _make_test_data(n_customers=10, products=None, seed=42):
             pred_rows.append({
                 "snap_date": snap_date,
                 "cust_id": cust_id,
-                "prod_code": prod,
+                "prod_name": prod,
                 "score": scores[j],
                 "rank": 0,
             })
@@ -117,7 +117,7 @@ class TestPlotComparisonScoreDistributions:
         assert all(isinstance(f, go.Figure) for f in figs)
 
     def test_per_product_histograms(self):
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
         preds_a, _ = _make_test_data(seed=42, products=products)
         preds_b, _ = _make_test_data(seed=99, products=products)
         figs = plot_comparison_score_distributions(preds_a, preds_b)

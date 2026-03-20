@@ -10,7 +10,7 @@ from recsys_tfb.evaluation.calibration import plot_calibration_curves
 def _make_data(n_customers=100, products=None, seed=42):
     rng = np.random.RandomState(seed)
     if products is None:
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
 
     pred_rows = []
     label_rows = []
@@ -22,7 +22,7 @@ def _make_data(n_customers=100, products=None, seed=42):
             pred_rows.append({
                 "snap_date": "20240331",
                 "cust_id": f"C{i:04d}",
-                "prod_code": prod,
+                "prod_name": prod,
                 "score": score,
                 "rank": 0,
             })
@@ -49,7 +49,7 @@ class TestPlotCalibrationCurves:
         assert fig.data[0].name == "Perfect Calibration"
 
     def test_all_products_on_one_figure(self):
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
         preds, labels = _make_data(products=products)
         fig = plot_calibration_curves(preds, labels)
         # 1 reference line + 3 product traces

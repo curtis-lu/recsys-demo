@@ -1,9 +1,12 @@
 inference:
   snap_dates:
-    - "2024-03-31"
+    - "2026-01-31"
   products:
-    - "bond"
-    - "fx"
-    - "mix"
-    - "stock"
-    - "usd"
+    - "exchange_usd"
+    - "exchange_fx"
+    - "fund_stock"
+    - "fund_bond"
+    - "fund_mix"
+    - "ccard_ins"
+    - "ccard_bill"
+    - "ccard_cash"

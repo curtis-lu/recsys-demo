@@ -14,7 +14,7 @@ from recsys_tfb.evaluation.baselines import (
 def label_table():
     """Create a sample label_table for testing."""
     rows = []
-    products = ["fx", "bond", "stock"]
+    products = ["exchange_fx", "fund_bond", "fund_stock"]
     segments = ["mass", "affluent"]
 
     # Historical data (snap_date < target)
@@ -24,9 +24,9 @@ def label_table():
             seg = segments[i % 2]
             for prod in products:
                 # fx is most popular, stock least
-                if prod == "fx":
+                if prod == "exchange_fx":
                     label = 1 if i < 7 else 0
-                elif prod == "bond":
+                elif prod == "fund_bond":
                     label = 1 if i < 4 else 0
                 else:
                     label = 1 if i < 2 else 0
@@ -51,14 +51,14 @@ class TestGlobalPopularityBaseline:
         result = generate_global_popularity_baseline(
             label_table, "20240331", customer_ids
         )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score", "rank"}
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
 
     def test_same_ranking_for_all_customers(self, label_table, customer_ids):
         result = generate_global_popularity_baseline(
             label_table, "20240331", customer_ids
         )
         # All customers should have the same product order
-        rankings = result.pivot(index="cust_id", columns="prod_code", values="rank")
+        rankings = result.pivot(index="cust_id", columns="prod_name", values="rank")
         for col in rankings.columns:
             assert rankings[col].nunique() == 1
 
@@ -66,18 +66,18 @@ class TestGlobalPopularityBaseline:
         result = generate_global_popularity_baseline(
             label_table, "20240331", customer_ids
         )
-        # fx has 70% positive rate
-        fx_score = result[result["prod_code"] == "fx"]["score"].iloc[0]
+        # exchange_fx has 70% positive rate
+        fx_score = result[result["prod_name"] == "exchange_fx"]["score"].iloc[0]
         assert fx_score == pytest.approx(0.7)
 
     def test_ranking_order_correct(self, label_table, customer_ids):
         result = generate_global_popularity_baseline(
             label_table, "20240331", customer_ids
         )
-        # fx (0.7) > bond (0.4) > stock (0.2) → ranks 1, 2, 3
-        c0 = result[result["cust_id"] == "C0000"].set_index("prod_code")
-        assert c0.loc["fx", "rank"] < c0.loc["bond", "rank"]
-        assert c0.loc["bond", "rank"] < c0.loc["stock", "rank"]
+        # exchange_fx (0.7) > fund_bond (0.4) > fund_stock (0.2) → ranks 1, 2, 3
+        c0 = result[result["cust_id"] == "C0000"].set_index("prod_name")
+        assert c0.loc["exchange_fx", "rank"] < c0.loc["fund_bond", "rank"]
+        assert c0.loc["fund_bond", "rank"] < c0.loc["fund_stock", "rank"]
 
     def test_leakage_prevention(self, label_table, customer_ids):
         """Only historical data before snap_date should be used."""
@@ -103,7 +103,7 @@ class TestSegmentPopularityBaseline:
         result = generate_segment_popularity_baseline(
             label_table, "20240331", customer_ids
         )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score", "rank"}
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
 
     def test_different_rankings_per_segment(self, label_table):
         """Different segments should potentially have different rankings."""
@@ -112,8 +112,8 @@ class TestSegmentPopularityBaseline:
             label_table, "20240331", cust_ids
         )
         # Mass customers (even indices) vs affluent (odd indices)
-        mass_ranks = result[result["cust_id"] == "C0000"].set_index("prod_code")["rank"]
-        affluent_ranks = result[result["cust_id"] == "C0001"].set_index("prod_code")["rank"]
+        mass_ranks = result[result["cust_id"] == "C0000"].set_index("prod_name")["rank"]
+        affluent_ranks = result[result["cust_id"] == "C0001"].set_index("prod_name")["rank"]
         # Rankings may differ between segments
         assert len(result) == 10 * 3
 
@@ -121,5 +121,5 @@ class TestSegmentPopularityBaseline:
         result = generate_segment_popularity_baseline(
             label_table, "20240331", customer_ids
         )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_code", "score", "rank"}
-        assert (result["snap_date"].unique() == pd.Timestamp("20240331")).all()
+        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
+        assert (result["snap_date"].unique() == "20240331").all()

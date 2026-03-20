@@ -1,6 +1,6 @@
-"""情境 3：新增特徵欄位。
+"""情境 3：驗證新增特徵欄位能被 pipeline 正確處理。
 
-驗證在 feature_table 新增 txn_count_l1m 和 avg_txn_amt_l1m 後，
+驗證 feature_table 包含信用卡特徵欄位（ccard_txn_cnt_l1m 等）後，
 dataset → training → inference 全 pipeline 能正確處理。
 """
 
@@ -27,19 +27,35 @@ from tests.scenarios.data_generator import (
 )
 
 SCENARIO_NAME = "scenario_3"
-NEW_FEATURE_COLUMNS = ["txn_count_l1m", "avg_txn_amt_l1m"]
+NEW_FEATURE_COLUMNS = ["ccard_txn_cnt_l1m", "ccard_txn_amt_l1m"]
 
 
 @pytest.fixture(scope="module")
 def work_dir():
     """建立情境 3 工作目錄並執行全 pipeline。"""
     rng = np.random.default_rng(42)
-    feature_table = generate_feature_table(
-        rng, snap_dates=BASE_SNAP_DATES, extra_columns=True
-    )
+    feature_table = generate_feature_table(rng, snap_dates=BASE_SNAP_DATES)
     label_table = generate_label_table(rng, snap_dates=BASE_SNAP_DATES)
 
     config_overrides = {
+        "parameters_dataset": {
+            "dataset": {
+                "sample_ratio": 1.0,
+                "sample_group_keys": ["snap_date"],
+                "train_dev_snap_dates": ["2025-04-30"],
+                "val_snap_dates": ["2025-05-31"],
+                "prepare_model_input": {
+                    "drop_columns": [
+                        "snap_date", "cust_id", "label",
+                        "apply_start_date", "apply_end_date", "cust_segment_typ",
+                    ],
+                    "categorical_columns": [
+                        "prod_name", "gender", "risk_attr",
+                        "education_level", "marital_status", "channel_preference",
+                    ],
+                },
+            },
+        },
         "parameters_training": {
             "training": {
                 "n_trials": 3,
@@ -49,7 +65,7 @@ def work_dir():
         },
         "parameters_inference": {
             "inference": {
-                "snap_dates": ["2024-03-31"],
+                "snap_dates": ["2025-05-31"],
                 "products": sorted(BASE_PRODUCTS),
             },
         },
@@ -81,14 +97,14 @@ def dataset_version_dir(work_dir):
 
 
 def test_x_train_has_new_columns(dataset_version_dir):
-    """X_train 應包含新增的特徵欄位。"""
+    """X_train 應包含信用卡特徵欄位。"""
     X_train = pd.read_parquet(dataset_version_dir / "X_train.parquet")
     for col in NEW_FEATURE_COLUMNS:
         assert col in X_train.columns, f"X_train 缺少欄位: {col}"
 
 
 def test_preprocessor_includes_new_columns(dataset_version_dir):
-    """preprocessor 的 feature_columns 應包含新欄位。"""
+    """preprocessor 的 feature_columns 應包含信用卡特徵欄位。"""
     with open(dataset_version_dir / "preprocessor.pkl", "rb") as f:
         preprocessor = pickle.load(f)
     for col in NEW_FEATURE_COLUMNS:
@@ -98,7 +114,7 @@ def test_preprocessor_includes_new_columns(dataset_version_dir):
 
 
 def test_scoring_dataset_has_new_columns(work_dir):
-    """inference 的 scoring_dataset 應包含新欄位。"""
+    """inference 的 scoring_dataset 應包含信用卡特徵欄位。"""
     sd_files = list((work_dir / "data" / "inference").rglob("scoring_dataset.parquet"))
     assert len(sd_files) >= 1
     sd = pd.read_parquet(sd_files[0])
@@ -112,7 +128,7 @@ def test_ranked_predictions_correct(work_dir):
     assert len(rp_files) == 1
     rp = pd.read_parquet(rp_files[0])
     assert rp["cust_id"].nunique() == NUM_CUSTOMERS
-    assert rp["prod_code"].nunique() == len(BASE_PRODUCTS)
+    assert rp["prod_name"].nunique() == len(BASE_PRODUCTS)
 
 
 def test_generate_report(work_dir):

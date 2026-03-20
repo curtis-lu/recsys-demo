@@ -1,11 +1,11 @@
 dataset:
   sample_ratio: 1.0
   sample_group_keys:
-    - "snap_date"
+    - "cust_segment_typ"
   train_dev_snap_dates:
-    - "2024-02-29"
+    - "2025-11-30"
   val_snap_dates:
-    - "2024-03-31"
+    - "2025-12-31"
   prepare_model_input:
     drop_columns:
       - "snap_date"
@@ -16,3 +16,8 @@ dataset:
       - "cust_segment_typ"
     categorical_columns:
       - "prod_name"
+      - "gender"
+      - "risk_attr"
+      - "education_level"
+      - "marital_status"
+      - "channel_preference"

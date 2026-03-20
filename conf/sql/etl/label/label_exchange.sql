@@ -1,9 +1,9 @@
 --partition by: prod_name, snap_date
 
 WITH candidate_prod AS (
-    SELECT 'fx'  AS prod_name
+    SELECT 'exchange_fx'  AS prod_name
     UNION ALL
-    SELECT 'usd' AS prod_name
+    SELECT 'exchange_usd' AS prod_name
 ),
 label_event AS (
     SELECT
@@ -12,8 +12,8 @@ label_event AS (
         date_add('${snap_date}', 30) AS apply_end_date,
         cust_id,
         CASE
-            WHEN currency_code NOT IN ('USD', 'TWD') THEN 'fx'
-            WHEN currency_code IN ('USD') THEN 'usd'
+            WHEN currency_code NOT IN ('USD', 'TWD') THEN 'exchange_fx'
+            WHEN currency_code IN ('USD') THEN 'exchange_usd'
             ELSE NULL
         END AS prod_name,
         1 AS label

@@ -32,7 +32,7 @@ def feature_table():
 
 @pytest.fixture
 def label_table():
-    products = ["fx", "usd", "stock"]
+    products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
     rows = []
     for snap in ["2024-01-31", "2024-02-29", "2024-03-31"]:
@@ -46,7 +46,7 @@ def label_table():
                         "cust_segment_typ": segments[cid],
                         "apply_start_date": snap_dt + pd.Timedelta(days=1),
                         "apply_end_date": snap_dt + pd.Timedelta(days=30),
-                        "label": 1 if cid == "C001" and prod == "fx" else 0,
+                        "label": 1 if cid == "C001" and prod == "exchange_fx" else 0,
                         "prod_name": prod,
                     }
                 )
@@ -193,7 +193,7 @@ class TestBuildDataset:
                 "apply_start_date": [pd.Timestamp("2024-02-01")],
                 "apply_end_date": [pd.Timestamp("2024-03-01")],
                 "label": [0],
-                "prod_name": ["fx"],
+                "prod_name": ["exchange_fx"],
             }
         )
         labels = pd.concat([label_table, extra_label], ignore_index=True)

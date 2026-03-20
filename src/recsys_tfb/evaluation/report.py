@@ -17,6 +17,7 @@ class ReportSection:
     description: str
     figures: list[go.Figure] = field(default_factory=list)
     tables: list[pd.DataFrame] = field(default_factory=list)
+    table_titles: list[str] = field(default_factory=list)
 
 
 def generate_html_report(
@@ -89,7 +90,9 @@ def generate_html_report(
             html_parts.append(fig_html)
 
         # Tables
-        for table in section.tables:
+        for ti, table in enumerate(section.tables):
+            if ti < len(section.table_titles) and section.table_titles[ti]:
+                html_parts.append(f"<h3>{section.table_titles[ti]}</h3>")
             html_parts.append(table.to_html(classes="metrics-table", index=True))
 
         html_parts.append("</div>")

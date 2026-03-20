@@ -131,16 +131,16 @@ def plot_comparison_score_distributions(
     """
     products = sorted(
         set(
-            predictions_a["prod_code"].unique().tolist()
-            + predictions_b["prod_code"].unique().tolist()
+            predictions_a["prod_name"].unique().tolist()
+            + predictions_b["prod_name"].unique().tolist()
         )
     )
 
     figures = []
 
     for prod in products:
-        scores_a = predictions_a[predictions_a["prod_code"] == prod]["score"]
-        scores_b = predictions_b[predictions_b["prod_code"] == prod]["score"]
+        scores_a = predictions_a[predictions_a["prod_name"] == prod]["score"]
+        scores_b = predictions_b[predictions_b["prod_name"] == prod]["score"]
 
         # Overlay histogram
         fig_hist = go.Figure()

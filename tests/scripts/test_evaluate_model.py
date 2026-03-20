@@ -24,7 +24,7 @@ def test_data_dir():
     with tempfile.TemporaryDirectory() as tmpdir:
         data_dir = Path(tmpdir)
         rng = np.random.RandomState(42)
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
         segments = ["mass", "affluent"]
         snap_date = "20240331"
         model_version = "abc12345"
@@ -52,7 +52,7 @@ def test_data_dir():
                 pred_rows.append({
                     "snap_date": snap_date,
                     "cust_id": f"C{i:04d}",
-                    "prod_code": prod,
+                    "prod_name": prod,
                     "score": scores[j],
                     "rank": 0,
                 })
@@ -76,7 +76,7 @@ class TestAnalyze:
             ["analyze", model_version, "--snap-date", snap_date, "--data-dir", str(data_dir)],
         )
         assert result.exit_code == 0
-        assert "mAP" in result.output or "map" in result.output
+        assert "map@" in result.output
 
         # Check output files exist
         eval_dir = data_dir / "evaluation" / model_version / snap_date
@@ -108,7 +108,7 @@ class TestAnalyze:
         metrics_path = data_dir / "evaluation" / model_version / snap_date / "metrics.json"
         metrics = json.loads(metrics_path.read_text())
         assert "overall" in metrics
-        assert "map" in metrics["overall"]
+        assert any(k.startswith("map@") for k in metrics["overall"])
 
     def test_k_values_cli_override(self, test_data_dir):
         data_dir, model_version, snap_date = test_data_dir
@@ -141,7 +141,7 @@ class TestCompare:
             ],
         )
         assert result.exit_code == 0
-        assert "map" in result.output
+        assert "map@" in result.output
 
     def test_compare_vs_segment_baseline(self, test_data_dir):
         data_dir, model_version, snap_date = test_data_dir
@@ -211,7 +211,7 @@ class TestRunAnalysisMetricsSummary:
     def test_metrics_summary_has_three_tables(self):
         """Metrics Summary section should contain Overall + Macro + Micro tables."""
         rng = np.random.RandomState(42)
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
         snap_date = "20240331"
         n_customers = 20
 
@@ -224,7 +224,7 @@ class TestRunAnalysisMetricsSummary:
                 pred_rows.append({
                     "snap_date": snap_date,
                     "cust_id": f"C{i:04d}",
-                    "prod_code": prod,
+                    "prod_name": prod,
                     "score": scores[j],
                     "rank": 0,
                 })
@@ -268,7 +268,7 @@ class TestRunAnalysisMetricsSummary:
     def test_segment_analysis_sections(self):
         """Each segment column should get its own Segment Analysis section."""
         rng = np.random.RandomState(42)
-        products = ["fx", "bond"]
+        products = ["exchange_fx", "fund_bond"]
         snap_date = "20240331"
         n_customers = 10
 
@@ -280,7 +280,7 @@ class TestRunAnalysisMetricsSummary:
                 pred_rows.append({
                     "snap_date": snap_date,
                     "cust_id": f"C{i:04d}",
-                    "prod_code": prod,
+                    "prod_name": prod,
                     "score": scores[j],
                     "rank": 0,
                 })
@@ -309,3 +309,7 @@ class TestRunAnalysisMetricsSummary:
         titles = [s.title for s in seg_sections]
         assert "Segment Analysis: Cust Segment Typ" in titles
         assert "Segment Analysis: Holding Combo" in titles
+        # Segment sections now use tables instead of figures
+        for seg_sec in seg_sections:
+            assert len(seg_sec.tables) == 2
+            assert seg_sec.table_titles == ["Ranking Metrics", "Dataset Statistics"]

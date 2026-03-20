@@ -1,4 +1,4 @@
-"""擴展合成資料產生器，支援多 snap_dates、額外欄位、額外產品。"""
+"""擴展合成資料產生器，支援多 snap_dates、額外欄位、8 類產品。"""
 
 import numpy as np
 import pandas as pd
@@ -6,17 +6,20 @@ import pandas as pd
 # --- 常數 ---
 
 BASE_SNAP_DATES = [
-    "2024-01-31",
-    "2024-02-29",
-    "2024-03-31",
-    "2024-04-30",
-    "2024-05-31",
-    "2024-06-30",
+    "2025-01-31",
+    "2025-02-28",
+    "2025-03-31",
+    "2025-04-30",
+    "2025-05-31",
+    "2025-06-30",
 ]
 
-BASE_PRODUCTS = ["fx", "usd", "stock", "bond", "mix"]
+BASE_PRODUCTS = [
+    "exchange_usd", "exchange_fx", "ccard_ins", "fund_stock",
+    "ccard_bill", "fund_bond", "ccard_cash", "fund_mix",
+]
 
-EXTENDED_PRODUCTS = ["fx", "usd", "stock", "bond", "mix", "ploan", "mloan"]
+EXTENDED_PRODUCTS = BASE_PRODUCTS + ["ploan", "mloan"]
 
 SEGMENTS = ["mass", "affluent", "hnw"]
 
@@ -29,15 +32,13 @@ def generate_feature_table(
     rng: np.random.Generator,
     snap_dates: list[str] | None = None,
     num_customers: int = NUM_CUSTOMERS,
-    extra_columns: bool = False,
 ) -> pd.DataFrame:
-    """產生合成特徵資料表。
+    """產生合成特徵資料表（22 欄位）。
 
     Args:
         rng: numpy 隨機數產生器（確保可重複性）。
         snap_dates: 快照日期清單，預設為 BASE_SNAP_DATES。
         num_customers: 客戶數量。
-        extra_columns: 若為 True，額外產生 txn_count_l1m 和 avg_txn_amt_l1m。
     """
     if snap_dates is None:
         snap_dates = BASE_SNAP_DATES
@@ -45,31 +46,59 @@ def generate_feature_table(
     rows = []
     for snap_date in snap_dates:
         cust_ids = [f"C{i:06d}" for i in range(1, num_customers + 1)]
-        total_aum = rng.exponential(scale=500_000, size=num_customers)
-        fund_aum = total_aum * rng.uniform(0.0, 0.5, size=num_customers)
-        in_amt = rng.exponential(scale=50_000, size=num_customers)
-        out_amt = rng.exponential(scale=40_000, size=num_customers)
+        n = num_customers
+        total_aum = rng.exponential(scale=500_000, size=n)
+        fund_aum = total_aum * rng.uniform(0.0, 0.5, size=n)
+        in_amt = rng.exponential(scale=50_000, size=n)
+        out_amt = rng.exponential(scale=40_000, size=n)
+        safe_aum = np.where(total_aum > 0, total_aum, 1.0)
 
-        if extra_columns:
-            txn_count = rng.poisson(lam=15, size=num_customers)
-            avg_txn_amt = rng.exponential(scale=10_000, size=num_customers)
+        ccard_txn_cnt = rng.poisson(lam=12, size=n)
+        ccard_txn_amt = rng.exponential(scale=20_000, size=n)
+        ccard_revolving = rng.binomial(1, 0.15, size=n)
+        ccard_overseas = rng.binomial(1, 0.2, size=n) * rng.exponential(15_000, size=n)
+        ccard_installment = rng.binomial(1, 0.2, size=n) * rng.exponential(30_000, size=n)
+        ccard_limit = rng.uniform(50_000, 500_000, size=n)
+        ccard_util = np.clip(ccard_txn_amt / np.where(ccard_limit > 0, ccard_limit, 1.0), 0, 1)
+        ccard_active = rng.poisson(lam=2, size=n)
+
+        age = np.clip(rng.normal(42, 12, size=n), 20, 80).astype(int)
+        gender = rng.choice(["M", "F"], size=n)
+        tenure = np.clip(rng.exponential(48, size=n), 1, 360).astype(int)
+        income_level = rng.choice([1, 2, 3, 4, 5], size=n)
+        risk_attr = rng.choice(["C1", "C2", "C3", "C4", "C5"], size=n)
+        education = rng.choice(["high_school", "bachelor", "master", "phd"], size=n)
+        marital = rng.choice(["single", "married", "divorced"], size=n)
+        channel = rng.choice(["branch", "digital", "both"], size=n)
 
         for i, cid in enumerate(cust_ids):
             ta = total_aum[i]
-            row = {
+            rows.append({
                 "snap_date": pd.Timestamp(snap_date),
                 "cust_id": cid,
                 "total_aum": round(ta, 2),
                 "fund_aum": round(fund_aum[i], 2),
                 "in_amt_sum_l1m": round(in_amt[i], 2),
                 "out_amt_sum_l1m": round(out_amt[i], 2),
-                "in_amt_ratio_l1m": round(in_amt[i] / ta, 6) if ta > 0 else 0.0,
-                "out_amt_ratio_l1m": round(out_amt[i] / ta, 6) if ta > 0 else 0.0,
-            }
-            if extra_columns:
-                row["txn_count_l1m"] = int(txn_count[i])
-                row["avg_txn_amt_l1m"] = round(avg_txn_amt[i], 2)
-            rows.append(row)
+                "in_amt_ratio_l1m": round(in_amt[i] / safe_aum[i], 6),
+                "out_amt_ratio_l1m": round(out_amt[i] / safe_aum[i], 6),
+                "ccard_txn_cnt_l1m": int(ccard_txn_cnt[i]),
+                "ccard_txn_amt_l1m": round(ccard_txn_amt[i], 2),
+                "ccard_revolving_flag": int(ccard_revolving[i]),
+                "ccard_overseas_amt_l1m": round(ccard_overseas[i], 2),
+                "ccard_installment_amt_l1m": round(ccard_installment[i], 2),
+                "ccard_limit": round(ccard_limit[i], 2),
+                "ccard_util_ratio": round(ccard_util[i], 6),
+                "ccard_active_cnt": int(ccard_active[i]),
+                "age": int(age[i]),
+                "gender": gender[i],
+                "tenure_months": int(tenure[i]),
+                "income_level": int(income_level[i]),
+                "risk_attr": risk_attr[i],
+                "education_level": education[i],
+                "marital_status": marital[i],
+                "channel_preference": channel[i],
+            })
 
     df = pd.DataFrame(rows)
     df["snap_date"] = pd.to_datetime(df["snap_date"])

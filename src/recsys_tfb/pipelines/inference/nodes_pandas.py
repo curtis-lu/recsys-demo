@@ -78,7 +78,7 @@ def predict_scores(
     score_table = pd.DataFrame({
         "snap_date": scoring_dataset["snap_date"].values,
         "cust_id": scoring_dataset["cust_id"].values,
-        "prod_code": scoring_dataset["prod_name"].values,
+        "prod_name": scoring_dataset["prod_name"].values,
         "score": scores,
     })
 

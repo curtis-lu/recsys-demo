@@ -116,6 +116,49 @@ def compute_mrr(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float(1.0 / (first_pos + 1))
 
 
+def compute_ap_at_k(
+    y_true: np.ndarray, y_score: np.ndarray, k: int
+) -> Optional[float]:
+    """Compute Average Precision at K for a single query.
+
+    Only considers the top-K ranked items. Returns None if no positives exist.
+    """
+    if np.sum(y_true) == 0:
+        return None
+
+    order = np.argsort(-y_score)
+    y_sorted = y_true[order][:k]
+
+    cumsum = np.cumsum(y_sorted)
+    positions = np.arange(1, len(y_sorted) + 1)
+    precisions = cumsum / positions
+
+    hits_in_k = np.sum(y_sorted)
+    if hits_in_k == 0:
+        return 0.0
+
+    ap = np.sum(precisions * y_sorted) / np.sum(y_true)
+    return float(ap)
+
+
+def compute_mrr_at_k(
+    y_true: np.ndarray, y_score: np.ndarray, k: int
+) -> float:
+    """Compute Reciprocal Rank at K for a single query.
+
+    Returns 0.0 if the first positive is beyond rank K or no positives exist.
+    """
+    order = np.argsort(-y_score)
+    y_sorted = y_true[order][:k]
+
+    positive_positions = np.where(y_sorted > 0)[0]
+    if len(positive_positions) == 0:
+        return 0.0
+
+    first_pos = positive_positions[0]
+    return float(1.0 / (first_pos + 1))
+
+
 # ---------------------------------------------------------------------------
 # Helpers for per-query aggregation
 # ---------------------------------------------------------------------------
@@ -125,17 +168,14 @@ def _compute_query_metrics(
     y_true: np.ndarray, y_score: np.ndarray, k_values: list[int]
 ) -> Optional[dict]:
     """Compute all metrics for a single query. Returns None if no positives."""
-    ap = compute_ap(y_true, y_score)
-    if ap is None:
+    if np.sum(y_true) == 0:
         return None
 
-    metrics: dict = {
-        "map": ap,
-        "ndcg": compute_ndcg(y_true, y_score),
-        "mrr": compute_mrr(y_true, y_score),
-    }
+    metrics: dict = {}
     for k in k_values:
+        metrics[f"map@{k}"] = compute_ap_at_k(y_true, y_score, k)
         metrics[f"ndcg@{k}"] = compute_ndcg(y_true, y_score, k=k)
+        metrics[f"mrr@{k}"] = compute_mrr_at_k(y_true, y_score, k)
         metrics[f"precision@{k}"] = compute_precision_at_k(y_true, y_score, k)
         metrics[f"recall@{k}"] = compute_recall_at_k(y_true, y_score, k)
 
@@ -178,6 +218,130 @@ def _resolve_k_values(
     return sorted(set(resolved))
 
 
+def _enrich_with_contributions(
+    merged: pd.DataFrame, k_values: list[int]
+) -> pd.DataFrame:
+    """Add per-row metric contribution columns to the merged DataFrame.
+
+    Sorts by (snap_date, cust_id, score desc), then computes positional columns
+    within each query group. Only rows with label=1 contribute to metrics.
+
+    Returns a copy with added columns: pos, cum_rel, precision,
+    and per-K columns: hit@K, map_contrib@K, mrr_contrib@K, ndcg_k_contrib@K.
+    """
+    df = merged.copy()
+    df = df.sort_values(
+        ["snap_date", "cust_id", "score"], ascending=[True, True, False]
+    ).reset_index(drop=True)
+
+    grp = df.groupby(["snap_date", "cust_id"], sort=False)
+
+    # Position within query (1-based)
+    df["pos"] = grp.cumcount() + 1
+    # Cumulative relevant count
+    df["cum_rel"] = grp["label"].cumsum()
+
+    # --- iDCG lookup per query ---
+    # R = total relevant items per query
+    r_per_query = grp["label"].transform("sum")
+    # Build iDCG: sum_{i=1}^{R} 1/log2(i+1)
+    max_r = int(r_per_query.max()) if len(r_per_query) > 0 else 0
+    idcg_table = np.zeros(max_r + 1)
+    for i in range(1, max_r + 1):
+        idcg_table[i] = idcg_table[i - 1] + 1.0 / np.log2(i + 1)
+    df["idcg"] = idcg_table[r_per_query.astype(int).values]
+
+    # Precision at position (for AP contribution): cum_rel / pos
+    df["precision"] = df["cum_rel"] / df["pos"]
+
+    # nDCG discount factor (reused per K)
+    discount = 1.0 / np.log2(df["pos"].values + 1)
+
+    # --- First relevant position per query (for MRR contribution) ---
+    # For each query, find the minimum pos where label=1
+    first_rel_pos = df[df["label"] == 1].groupby(
+        ["snap_date", "cust_id"], sort=False
+    )["pos"].transform("min")
+    df["first_rel_pos"] = np.nan
+    df.loc[df["label"] == 1, "first_rel_pos"] = first_rel_pos
+    # Forward-fill within group isn't needed; we only use this on label=1 rows
+
+    # Per-K columns
+    r_vals = r_per_query.astype(int).values
+    for k in k_values:
+        in_top_k = (df["pos"] <= k).astype(float)
+        df[f"hit@{k}"] = in_top_k
+
+        # map_contrib@K: precision * label * (pos <= K) / total_positives
+        # (averaged over relevant rows per dimension gives per-product AP@K)
+        df[f"map_contrib@{k}"] = df["precision"] * in_top_k
+
+        # mrr_contrib@K: 1/pos if this is the first relevant AND pos <= K
+        is_first_rel = (df["pos"] == df["first_rel_pos"]).astype(float)
+        df[f"mrr_contrib@{k}"] = (1.0 / df["pos"]) * is_first_rel * in_top_k
+
+        # nDCG@K: need iDCG@K per query
+        k_cap = np.minimum(r_vals, k)
+        max_k_cap = int(k_cap.max()) if len(k_cap) > 0 else 0
+        idcg_k_table = np.zeros(max_k_cap + 1)
+        for i in range(1, max_k_cap + 1):
+            idcg_k_table[i] = idcg_k_table[i - 1] + 1.0 / np.log2(i + 1)
+        idcg_at_k = idcg_k_table[k_cap]
+        df[f"ndcg_k_contrib@{k}"] = np.where(
+            (idcg_at_k > 0) & (df["pos"] <= k), discount / idcg_at_k, 0.0
+        )
+
+    return df
+
+
+def _aggregate_per_dimension(
+    enriched_rel: pd.DataFrame,
+    groupby_cols: list[str],
+    k_values: list[int],
+) -> tuple[dict, dict]:
+    """Aggregate per-row metric contributions by groupby_cols.
+
+    Args:
+        enriched_rel: Rows with label=1 from the enriched DataFrame.
+        groupby_cols: Columns to group by (e.g. ["prod_name"]).
+        k_values: K values used to locate hit@K and ndcg_k_contrib@K columns.
+
+    Returns:
+        (per_dim_dict, query_counts_dict) matching the existing return structure.
+    """
+    metric_cols = []
+    for k in k_values:
+        metric_cols.extend([
+            f"map_contrib@{k}",
+            f"ndcg_k_contrib@{k}",
+            f"mrr_contrib@{k}",
+            f"hit@{k}",
+        ])
+
+    grouped = enriched_rel.groupby(groupby_cols, sort=True)[metric_cols].mean()
+
+    # Count of relevant rows per dimension (used as query count proxy)
+    counts = enriched_rel.groupby(groupby_cols, sort=True).size()
+
+    per_dim: dict = {}
+    query_counts: dict = {}
+
+    for idx in grouped.index:
+        key = idx if isinstance(idx, str) else "_".join(str(x) for x in idx)
+        row = grouped.loc[idx]
+        metrics: dict = {}
+        for k in k_values:
+            metrics[f"map@{k}"] = float(row[f"map_contrib@{k}"])
+            metrics[f"ndcg@{k}"] = float(row[f"ndcg_k_contrib@{k}"])
+            metrics[f"mrr@{k}"] = float(row[f"mrr_contrib@{k}"])
+            metrics[f"precision@{k}"] = float(row[f"hit@{k}"])
+            metrics[f"recall@{k}"] = float(row[f"hit@{k}"])
+        per_dim[key] = metrics
+        query_counts[key] = int(counts.loc[idx])
+
+    return per_dim, query_counts
+
+
 def compute_all_metrics(
     predictions: pd.DataFrame,
     labels: pd.DataFrame,
@@ -186,7 +350,7 @@ def compute_all_metrics(
     """Compute ranking metrics across multiple dimensions.
 
     Args:
-        predictions: DataFrame with columns [snap_date, cust_id, prod_code, score, rank].
+        predictions: DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
         labels: DataFrame with columns [snap_date, cust_id, prod_name, label].
             Optionally includes cust_segment_typ for segment-level metrics.
         k_values: K values for precision@K, recall@K, nDCG@K.
@@ -200,30 +364,26 @@ def compute_all_metrics(
     if k_values is None:
         k_values = [5, "all"]
 
-    # Rename prod_name → prod_code in labels for join
-    labels_renamed = labels.rename(columns={"prod_name": "prod_code"})
-
     # Join predictions with labels
     merged = predictions.merge(
-        labels_renamed[["snap_date", "cust_id", "prod_code", "label"]],
-        on=["snap_date", "cust_id", "prod_code"],
+        labels[["snap_date", "cust_id", "prod_name", "label"]],
+        on=["snap_date", "cust_id", "prod_name"],
         how="inner",
     )
 
     # Resolve "all" in k_values to actual product count
-    n_products = merged["prod_code"].nunique()
+    n_products = merged["prod_name"].nunique()
     k_values = _resolve_k_values(k_values, n_products)
 
     # Carry segment column if present
     has_segment = "cust_segment_typ" in labels.columns
     if has_segment:
-        seg_map = labels_renamed[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates()
+        seg_map = labels[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates()
         merged = merged.merge(seg_map, on=["snap_date", "cust_id"], how="left")
 
-    # Group by query
+    # --- Overall: per-customer loop (standard mAP definition) ---
     query_groups = merged.groupby(["snap_date", "cust_id"])
 
-    # Collect per-query metrics, also tagged with product/segment info
     all_query_metrics: list[dict] = []
     n_excluded = 0
 
@@ -238,7 +398,6 @@ def compute_all_metrics(
 
         qm["_snap_date"] = snap_date
         qm["_cust_id"] = cust_id
-        qm["_products"] = list(group["prod_code"].values)
 
         if has_segment:
             qm["_segment"] = group["cust_segment_typ"].iloc[0]
@@ -246,33 +405,43 @@ def compute_all_metrics(
         all_query_metrics.append(qm)
 
     n_queries = len(query_groups)
-
-    # Overall
     overall = _aggregate_metric_lists(all_query_metrics)
 
-    # Per-product: filter queries that include each product, recompute
-    products = sorted(merged["prod_code"].unique())
-    per_product, product_query_counts = _compute_per_dimension(
-        merged, "prod_code", products, k_values
-    )
+    # --- Enrich with per-row contributions for vectorized per-product metrics ---
+    enriched = _enrich_with_contributions(merged, k_values)
+    rel = enriched[enriched["label"] == 1]
 
-    # Per-segment
-    per_segment: dict = {}
-    segment_query_counts: dict = {}
-    if has_segment:
-        segments = sorted(merged["cust_segment_typ"].dropna().unique())
-        per_segment, segment_query_counts = _compute_per_dimension_by_query_filter(
-            merged, "cust_segment_typ", segments, k_values
+    # Per-product: vectorized decomposition
+    per_product: dict = {}
+    product_query_counts: dict = {}
+    if len(rel) > 0:
+        per_product, product_query_counts = _aggregate_per_dimension(
+            rel, ["prod_name"], k_values
         )
 
-    # Per-product-segment
+    # Per-segment: per-customer metrics → groupby segment → mean (equal customer weight)
+    per_segment: dict = {}
+    segment_query_counts: dict = {}
+    if has_segment and all_query_metrics:
+        seg_records = [
+            {k: v for k, v in qm.items() if not k.startswith("_") or k == "_segment"}
+            for qm in all_query_metrics
+        ]
+        seg_df = pd.DataFrame(seg_records)
+        metric_keys = [k for k in all_query_metrics[0].keys() if not k.startswith("_")]
+
+        for seg_val, seg_group in seg_df.groupby("_segment", sort=True):
+            per_segment[seg_val] = {
+                k: float(seg_group[k].mean()) for k in metric_keys
+            }
+            segment_query_counts[seg_val] = len(seg_group)
+
+    # Per-product-segment: vectorized decomposition with both dimensions
     per_product_segment: dict = {}
     product_segment_query_counts: dict = {}
-    if has_segment:
-        merged["_prod_seg"] = merged["prod_code"] + "_" + merged["cust_segment_typ"]
-        prod_seg_keys = sorted(merged["_prod_seg"].dropna().unique())
-        per_product_segment, product_segment_query_counts = _compute_per_dimension(
-            merged, "_prod_seg", prod_seg_keys, k_values
+    if has_segment and len(rel) > 0:
+        per_product_segment, product_segment_query_counts = _aggregate_per_dimension(
+            rel, ["prod_name", "cust_segment_typ"], k_values
         )
 
     # Macro and micro averages
@@ -300,70 +469,6 @@ def compute_all_metrics(
         "n_queries": n_queries,
         "n_excluded_queries": n_excluded,
     }
-
-
-def _compute_per_dimension(
-    merged: pd.DataFrame,
-    dim_col: str,
-    dim_values: list,
-    k_values: list[int],
-) -> tuple[dict, dict]:
-    """Compute metrics separately for each value of dim_col.
-
-    For per-product analysis: groups the merged data by dim_col, then within each
-    group computes per-query metrics using (snap_date, cust_id) as query groups.
-    """
-    per_dim: dict = {}
-    query_counts: dict = {}
-
-    for val in dim_values:
-        subset = merged[merged[dim_col] == val]
-        query_groups = subset.groupby(["snap_date", "cust_id"])
-
-        metrics_list = []
-        for _, group in query_groups:
-            y_true = group["label"].values.astype(float)
-            y_score = group["score"].values.astype(float)
-            qm = _compute_query_metrics(y_true, y_score, k_values)
-            if qm is not None:
-                metrics_list.append(qm)
-
-        per_dim[val] = _aggregate_metric_lists(metrics_list)
-        query_counts[val] = len(metrics_list)
-
-    return per_dim, query_counts
-
-
-def _compute_per_dimension_by_query_filter(
-    merged: pd.DataFrame,
-    dim_col: str,
-    dim_values: list,
-    k_values: list[int],
-) -> tuple[dict, dict]:
-    """Compute metrics by filtering queries based on a customer-level attribute.
-
-    For segment analysis: first identify which queries belong to each segment,
-    then compute metrics over all products for those queries.
-    """
-    per_dim: dict = {}
-    query_counts: dict = {}
-
-    for val in dim_values:
-        subset = merged[merged[dim_col] == val]
-        query_groups = subset.groupby(["snap_date", "cust_id"])
-
-        metrics_list = []
-        for _, group in query_groups:
-            y_true = group["label"].values.astype(float)
-            y_score = group["score"].values.astype(float)
-            qm = _compute_query_metrics(y_true, y_score, k_values)
-            if qm is not None:
-                metrics_list.append(qm)
-
-        per_dim[val] = _aggregate_metric_lists(metrics_list)
-        query_counts[val] = len(metrics_list)
-
-    return per_dim, query_counts
 
 
 def _macro_average(per_dim: dict) -> dict:

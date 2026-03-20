@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.segments import (
+    build_segment_metrics_table,
     compute_segment_metrics,
     load_and_join_segment_sources,
     plot_segment_charts,
@@ -14,7 +15,7 @@ from recsys_tfb.evaluation.segments import (
 def _make_data(n_customers=30, products=None, segments=None, seed=42):
     rng = np.random.RandomState(seed)
     if products is None:
-        products = ["fx", "bond", "stock"]
+        products = ["exchange_fx", "fund_bond", "fund_stock"]
     if segments is None:
         segments = ["mass", "affluent", "hnw"]
 
@@ -31,7 +32,7 @@ def _make_data(n_customers=30, products=None, segments=None, seed=42):
             pred_rows.append({
                 "snap_date": snap_date,
                 "cust_id": cust_id,
-                "prod_code": prod,
+                "prod_name": prod,
                 "score": scores[j],
                 "rank": 0,
             })
@@ -148,7 +149,7 @@ class TestComputeSegmentMetrics:
         result = compute_segment_metrics(preds, labels, k_values=[3])
         for seg, metrics in result.items():
             assert "overall" in metrics
-            assert "map" in metrics["overall"]
+            assert "map@3" in metrics["overall"]
 
 
 class TestHoldingComboAsSegment:
@@ -178,7 +179,7 @@ class TestHoldingComboAsSegment:
         assert len(result) == 3  # combo_0, combo_1, combo_2
         for seg_metrics in result.values():
             assert "overall" in seg_metrics
-            assert "map" in seg_metrics["overall"]
+            assert "map@3" in seg_metrics["overall"]
 
     def test_holding_combo_plots(self, tmp_path):
         """plot_segment_charts works with holding combo segment metrics."""
@@ -203,6 +204,27 @@ class TestHoldingComboAsSegment:
         )
         figs = plot_segment_charts(seg_metrics)
         assert len(figs) > 0
+
+
+class TestBuildSegmentMetricsTable:
+    def test_returns_dataframe(self):
+        preds, labels = _make_data()
+        seg_metrics = compute_segment_metrics(preds, labels, k_values=[3])
+        table = build_segment_metrics_table(seg_metrics)
+        assert isinstance(table, pd.DataFrame)
+
+    def test_rows_are_segments(self):
+        preds, labels = _make_data()
+        seg_metrics = compute_segment_metrics(preds, labels, k_values=[3])
+        table = build_segment_metrics_table(seg_metrics)
+        assert set(table.index) == {"mass", "affluent", "hnw"}
+
+    def test_columns_are_metrics(self):
+        preds, labels = _make_data()
+        seg_metrics = compute_segment_metrics(preds, labels, k_values=[3])
+        table = build_segment_metrics_table(seg_metrics)
+        assert "map@3" in table.columns
+        assert "ndcg@3" in table.columns
 
 
 class TestPlotSegmentCharts:

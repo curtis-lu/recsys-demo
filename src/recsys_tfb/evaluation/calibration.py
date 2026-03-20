@@ -14,7 +14,7 @@ def plot_calibration_curves(
     """Plot calibration curves per product.
 
     Args:
-        predictions: DataFrame with [snap_date, cust_id, prod_code, score].
+        predictions: DataFrame with [snap_date, cust_id, prod_name, score].
         labels: DataFrame with [snap_date, cust_id, prod_name, label].
         n_bins: Number of bins for calibration curve.
         title_prefix: Optional prefix for the chart title.
@@ -22,14 +22,13 @@ def plot_calibration_curves(
     Returns:
         A single Figure with one trace per product plus a diagonal reference line.
     """
-    labels_renamed = labels.rename(columns={"prod_name": "prod_code"})
     merged = predictions.merge(
-        labels_renamed[["snap_date", "cust_id", "prod_code", "label"]],
-        on=["snap_date", "cust_id", "prod_code"],
+        labels[["snap_date", "cust_id", "prod_name", "label"]],
+        on=["snap_date", "cust_id", "prod_name"],
         how="inner",
     )
 
-    products = sorted(merged["prod_code"].unique())
+    products = sorted(merged["prod_name"].unique())
 
     fig = go.Figure()
 
@@ -46,7 +45,7 @@ def plot_calibration_curves(
     )
 
     for prod in products:
-        subset = merged[merged["prod_code"] == prod]
+        subset = merged[merged["prod_name"] == prod]
         y_true = subset["label"].values
         y_prob = subset["score"].values
 

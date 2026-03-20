@@ -101,9 +101,10 @@ def predict_scores(
         X_chunk = chunk[feature_columns]
         scores = model.predict(X_chunk)
 
-        chunk_result = chunk[["snap_date", "cust_id", "prod_name"]].copy()
+        chunk_dedup = chunk.loc[:, ~chunk.columns.duplicated()]
+        chunk_result = chunk_dedup[["snap_date", "cust_id", "prod_name"]].copy()
         chunk_result["score"] = scores
-        chunk_result = chunk_result.rename(columns={"prod_name": "prod_code"})
+
         all_results.append(chunk_result)
 
     result_pdf = pd.concat(all_results, ignore_index=True)

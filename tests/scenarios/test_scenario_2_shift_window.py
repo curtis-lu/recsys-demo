@@ -1,6 +1,6 @@
 """情境 2：訓練期間往前挪移一個月。
 
-驗證將 train_dev_snap_dates 改為 ["2024-03-31"]、val_snap_dates 改為 ["2024-04-30"] 後，
+驗證將 train_dev_snap_dates 改為 ["2025-05-31"]、val_snap_dates 改為 ["2025-06-30"] 後，
 data split 和模型訓練的正確性。
 """
 
@@ -38,14 +38,17 @@ def work_dir():
             "dataset": {
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["snap_date"],
-                "train_dev_snap_dates": ["2024-03-31"],
-                "val_snap_dates": ["2024-04-30"],
+                "train_dev_snap_dates": ["2025-05-31"],
+                "val_snap_dates": ["2025-06-30"],
                 "prepare_model_input": {
                     "drop_columns": [
                         "snap_date", "cust_id", "label",
                         "apply_start_date", "apply_end_date", "cust_segment_typ",
                     ],
-                    "categorical_columns": ["prod_name"],
+                    "categorical_columns": [
+                        "prod_name", "gender", "risk_attr",
+                        "education_level", "marital_status", "channel_preference",
+                    ],
                 },
             },
         },
@@ -98,22 +101,22 @@ def val_set(dataset_version_dir):
 
 
 def test_train_set_excludes_shifted_dates(train_set):
-    """train_set 的 snap_dates 不應包含 2024-03-31 和 2024-04-30。"""
+    """train_set 的 snap_dates 不應包含 2025-05-31 和 2025-06-30。"""
     snap_dates = set(train_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
-    assert "2024-03-31" not in snap_dates, f"train_set 不應含 2024-03-31，實際: {snap_dates}"
-    assert "2024-04-30" not in snap_dates, f"train_set 不應含 2024-04-30，實際: {snap_dates}"
+    assert "2025-05-31" not in snap_dates, f"train_set 不應含 2025-05-31，實際: {snap_dates}"
+    assert "2025-06-30" not in snap_dates, f"train_set 不應含 2025-06-30，實際: {snap_dates}"
 
 
 def test_train_dev_snap_dates(train_dev_set):
-    """train_dev_set 的 snap_dates 應恰為 [2024-03-31]。"""
+    """train_dev_set 的 snap_dates 應恰為 [2025-05-31]。"""
     snap_dates = sorted(train_dev_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
-    assert snap_dates == ["2024-03-31"], f"預期 ['2024-03-31']，實際: {snap_dates}"
+    assert snap_dates == ["2025-05-31"], f"預期 ['2025-05-31']，實際: {snap_dates}"
 
 
 def test_val_snap_dates(val_set):
-    """val_set 的 snap_dates 應恰為 [2024-04-30]。"""
+    """val_set 的 snap_dates 應恰為 [2025-06-30]。"""
     snap_dates = sorted(val_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
-    assert snap_dates == ["2024-04-30"], f"預期 ['2024-04-30']，實際: {snap_dates}"
+    assert snap_dates == ["2025-06-30"], f"預期 ['2025-06-30']，實際: {snap_dates}"
 
 
 def test_all_splits_nonempty(train_set, train_dev_set, val_set):
@@ -136,9 +139,7 @@ def test_model_exists(work_dir):
 
 
 def test_dataset_version_differs_from_base(dataset_version_dir):
-    """dataset_version 應與基礎設定（train_dev=02-29, val=03-31）不同。"""
-    # 基礎設定的 dataset_version 為 2271defb（從 git status 觀察得知）
-    # 修改 parameters_dataset.yaml 後 hash 應不同
+    """dataset_version 應與基礎設定不同。"""
     version = dataset_version_dir.name
     assert len(version) == 8, f"版本格式不正確: {version}"
 

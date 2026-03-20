@@ -75,7 +75,7 @@ def synthetic_data():
 @pytest.fixture
 def val_set():
     """Create val_set DataFrame with query group columns."""
-    products = ["fx", "usd", "stock", "fund"]
+    products = ["exchange_fx", "exchange_usd", "fund_stock", "fund_bond"]
     rows = []
     for snap in ["2024-02-29", "2024-03-31"]:
         snap_dt = pd.Timestamp(snap)
@@ -265,7 +265,7 @@ class TestEvaluateModel:
         _, _, _, _, X_val, y_val = synthetic_data
 
         # Build val_set with controlled labels: product "zero" has all-0 labels
-        products = ["fx", "usd", "zero"]
+        products = ["exchange_fx", "exchange_usd", "zero"]
         n_per_prod = 10
         rng = np.random.RandomState(99)
 
@@ -282,10 +282,10 @@ class TestEvaluateModel:
             "in_amt_sum_l1m": rng.uniform(0, 50, n_per_prod * len(products)),
             "out_amt_sum_l1m": rng.uniform(0, 30, n_per_prod * len(products)),
         })
-        # Labels: fx and usd have some positives, zero has none
+        # Labels: exchange_fx and exchange_usd have some positives, zero has none
         y_val_extended = pd.DataFrame({"label": np.array(
-            [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # fx: 3 positives
-            + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # usd: 2 positives
+            [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # exchange_fx: 3 positives
+            + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # exchange_usd: 2 positives
             + [0] * n_per_prod  # zero: no positives
         ).astype(float)})
 
@@ -296,12 +296,12 @@ class TestEvaluateModel:
         assert "zero" not in per_product_ap
 
         # Each product with positives must have its own AP entry
-        assert "fx" in per_product_ap
-        assert "usd" in per_product_ap
+        assert "exchange_fx" in per_product_ap
+        assert "exchange_usd" in per_product_ap
 
         # Values must match manual _compute_ap calculation
         y_score = model.predict(X_val_extended)
-        for prod in ["fx", "usd"]:
+        for prod in ["exchange_fx", "exchange_usd"]:
             idx = val_set.index[val_set["prod_name"] == prod].values
             expected_ap = compute_ap(y_val_extended["label"].values[idx], y_score[idx])
             assert per_product_ap[prod] == pytest.approx(expected_ap)
@@ -321,7 +321,7 @@ class TestLogExperiment:
 
         evaluation_results = {
             "overall_map": 0.75,
-            "per_product_ap": {"fx": 0.8, "usd": 0.7},
+            "per_product_ap": {"exchange_fx": 0.8, "exchange_usd": 0.7},
             "n_queries": 10,
             "n_excluded_queries": 2,
         }
@@ -359,9 +359,9 @@ def _create_version_dir(base_dir, version_name, overall_map, per_product_ap=None
 class TestCompareModelVersions:
     def test_multiple_versions_ranked_by_map(self, tmp_path):
         models_dir = tmp_path / "models"
-        _create_version_dir(models_dir, "20260315_100000", 0.65, {"fx": 0.7})
-        _create_version_dir(models_dir, "20260316_100000", 0.80, {"fx": 0.85})
-        _create_version_dir(models_dir, "20260317_100000", 0.72, {"fx": 0.75})
+        _create_version_dir(models_dir, "20260315_100000", 0.65, {"exchange_fx": 0.7})
+        _create_version_dir(models_dir, "20260316_100000", 0.80, {"exchange_fx": 0.85})
+        _create_version_dir(models_dir, "20260317_100000", 0.72, {"exchange_fx": 0.75})
 
         result = compare_model_versions({}, {"models_dir": str(models_dir)})
         assert len(result["versions"]) == 3

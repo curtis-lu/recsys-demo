@@ -54,7 +54,7 @@ class TestGenerateHtmlReport:
 
     def test_figures_and_tables(self):
         fig = _make_figure()
-        table = pd.DataFrame({"product": ["fx", "bond"], "map": [0.5, 0.3]})
+        table = pd.DataFrame({"product": ["exchange_fx", "fund_bond"], "map": [0.5, 0.3]})
         sections = [
             ReportSection(
                 title="Mixed",
@@ -64,8 +64,37 @@ class TestGenerateHtmlReport:
             )
         ]
         html = generate_html_report(sections)
-        assert "fx" in html
-        assert "bond" in html
+        assert "exchange_fx" in html
+        assert "fund_bond" in html
+
+    def test_table_titles_rendered(self):
+        t1 = pd.DataFrame({"metric": ["map"], "value": [0.5]})
+        t2 = pd.DataFrame({"metric": ["ndcg"], "value": [0.6]})
+        t3 = pd.DataFrame({"metric": ["mrr"], "value": [0.7]})
+        sections = [
+            ReportSection(
+                title="Summary",
+                description="With subtitles",
+                tables=[t1, t2, t3],
+                table_titles=["Overall", "Macro Average", "Micro Average"],
+            )
+        ]
+        html = generate_html_report(sections)
+        assert "<h3>Overall</h3>" in html
+        assert "<h3>Macro Average</h3>" in html
+        assert "<h3>Micro Average</h3>" in html
+
+    def test_table_titles_empty_by_default(self):
+        t1 = pd.DataFrame({"metric": ["map"], "value": [0.5]})
+        sections = [
+            ReportSection(
+                title="No Titles",
+                description="No table_titles provided",
+                tables=[t1],
+            )
+        ]
+        html = generate_html_report(sections)
+        assert "<h3>" not in html
 
 
 class TestSaveReport:
@@ -87,7 +116,7 @@ class TestSaveMetricsJson:
     def test_json_roundtrip(self):
         metrics = {
             "overall": {"map": 0.5, "ndcg": 0.6},
-            "per_product": {"fx": {"map": 0.7}},
+            "per_product": {"exchange_fx": {"map": 0.7}},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = save_metrics_json(metrics, tmpdir)

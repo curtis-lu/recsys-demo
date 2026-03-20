@@ -222,7 +222,7 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
                     df = pd.read_parquet(rp_path)
                     lines.append(f"  ranked_predictions: 行數={len(df)}")
                     lines.append(f"  唯一客戶數: {df['cust_id'].nunique()}")
-                    lines.append(f"  唯一產品數: {df['prod_code'].nunique()}")
+                    lines.append(f"  唯一產品數: {df['prod_name'].nunique()}")
                     if "snap_date" in df.columns:
                         snap_dates = sorted(df["snap_date"].astype(str).unique())
                         lines.append(f"  snap_dates: {snap_dates}")
@@ -234,7 +234,7 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
                     )
 
                     # 每位客戶的產品數
-                    prods_per_cust = df.groupby("cust_id")["prod_code"].nunique()
+                    prods_per_cust = df.groupby("cust_id")["prod_name"].nunique()
                     lines.append(
                         f"  每位客戶產品數: min={prods_per_cust.min()}, max={prods_per_cust.max()}"
                     )
@@ -242,10 +242,10 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
                     # 前 10 筆樣本
                     lines.append("")
                     lines.append("  前 10 筆樣本:")
-                    lines.append(f"  {'cust_id':<12} {'prod_code':<12} {'score':<12} {'rank'}")
+                    lines.append(f"  {'cust_id':<12} {'prod_name':<12} {'score':<12} {'rank'}")
                     for _, row in df.head(10).iterrows():
                         lines.append(
-                            f"  {row['cust_id']:<12} {row['prod_code']:<12} "
+                            f"  {row['cust_id']:<12} {row['prod_name']:<12} "
                             f"{row['score']:<12.6f} {int(row['rank'])}"
                         )
 

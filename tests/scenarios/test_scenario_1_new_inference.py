@@ -1,6 +1,6 @@
 """情境 1：推論新一週的資料。
 
-驗證以新的 snap_date（2024-04-30）執行 inference pipeline 時，
+驗證以新的 snap_date（2025-06-30）執行 inference pipeline 時，
 產出 ranked_predictions 的正確性。
 """
 
@@ -37,6 +37,24 @@ def work_dir():
     label_table = generate_label_table(rng, snap_dates=BASE_SNAP_DATES)
 
     config_overrides = {
+        "parameters_dataset": {
+            "dataset": {
+                "sample_ratio": 1.0,
+                "sample_group_keys": ["snap_date"],
+                "train_dev_snap_dates": ["2025-04-30"],
+                "val_snap_dates": ["2025-05-31"],
+                "prepare_model_input": {
+                    "drop_columns": [
+                        "snap_date", "cust_id", "label",
+                        "apply_start_date", "apply_end_date", "cust_segment_typ",
+                    ],
+                    "categorical_columns": [
+                        "prod_name", "gender", "risk_attr",
+                        "education_level", "marital_status", "channel_preference",
+                    ],
+                },
+            },
+        },
         "parameters_training": {
             "training": {
                 "n_trials": 3,
@@ -46,7 +64,7 @@ def work_dir():
         },
         "parameters_inference": {
             "inference": {
-                "snap_dates": ["2024-04-30"],
+                "snap_dates": ["2025-06-30"],
                 "products": sorted(BASE_PRODUCTS),
             },
         },
@@ -74,27 +92,32 @@ def ranked_predictions(work_dir):
 
 
 def test_snap_date_is_new(ranked_predictions):
-    """推論結果的 snap_date 應為 2024-04-30。"""
+    """推論結果的 snap_date 應為 2025-06-30。"""
     snap_dates = ranked_predictions["snap_date"].unique()
     assert len(snap_dates) == 1
-    assert pd.Timestamp(snap_dates[0]) == pd.Timestamp("2024-04-30")
+    assert pd.Timestamp(snap_dates[0]) == pd.Timestamp("2025-06-30")
 
 
 def test_products_per_customer(ranked_predictions):
-    """每位客戶應有 5 個產品排名。"""
-    prods_per_cust = ranked_predictions.groupby("cust_id")["prod_code"].nunique()
-    assert (prods_per_cust == 5).all(), f"部分客戶產品數不為 5: {prods_per_cust.value_counts().to_dict()}"
+    """每位客戶應有 8 個產品排名。"""
+    n_products = len(BASE_PRODUCTS)
+    prods_per_cust = ranked_predictions.groupby("cust_id")["prod_name"].nunique()
+    assert (prods_per_cust == n_products).all(), (
+        f"部分客戶產品數不為 {n_products}: {prods_per_cust.value_counts().to_dict()}"
+    )
 
 
 def test_rank_continuous(ranked_predictions):
-    """每位客戶的排名應為 1~5 連續整數。"""
+    """每位客戶的排名應為 1~8 連續整數。"""
+    n_products = len(BASE_PRODUCTS)
+    expected_ranks = list(range(1, n_products + 1))
     for cust_id, group in ranked_predictions.groupby("cust_id"):
         ranks = sorted(group["rank"].tolist())
-        assert ranks == [1, 2, 3, 4, 5], f"客戶 {cust_id} 排名不連續: {ranks}"
+        assert ranks == expected_ranks, f"客戶 {cust_id} 排名不連續: {ranks}"
 
 
 def test_customer_count(ranked_predictions):
-    """唯一客戶數應等於 feature_table 在 2024-04-30 的客戶數。"""
+    """唯一客戶數應等於 feature_table 在 2025-06-30 的客戶數。"""
     assert ranked_predictions["cust_id"].nunique() == NUM_CUSTOMERS
 
 

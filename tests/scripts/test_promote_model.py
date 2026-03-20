@@ -19,7 +19,7 @@ def _create_full_version(models_dir, version, overall_map=0.75, per_product_ap=N
 
     eval_results = {
         "overall_map": overall_map,
-        "per_product_ap": per_product_ap or {"fx": 0.8},
+        "per_product_ap": per_product_ap or {"exchange_fx": 0.8},
     }
     (version_dir / "evaluation_results.json").write_text(json.dumps(eval_results))
     (version_dir / "best_params.json").write_text(json.dumps({"lr": 0.1}))
@@ -82,7 +82,7 @@ class TestValidateVersion:
 class TestPromote:
     def test_promote_creates_symlink(self, tmp_path):
         models_dir = tmp_path / "models"
-        _create_full_version(models_dir, "a1b2c3d4", 0.80, {"fx": 0.85, "usd": 0.75})
+        _create_full_version(models_dir, "a1b2c3d4", 0.80, {"exchange_fx": 0.85, "exchange_usd": 0.75})
 
         summary = promote(models_dir, "a1b2c3d4")
         assert summary["promoted_version"] == "a1b2c3d4"

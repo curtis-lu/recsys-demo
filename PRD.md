@@ -117,7 +117,7 @@
       - 每週定期執行推論，產出資料表供下游使用。每月初則依據上個月模型的實際結果，計算相關監控指標。
     - 注意事項：
       - 資料產出過程基本上會復用 **SOURCE DATA ETL PIPELINE & DATASET BUILDING PIPELINE** 的部分功能。
-      - 推論結果寫回HIVE table，會依snap_date & prod_code 建立partition。
+      - 推論結果寫回HIVE table，會依snap_date & prod_name 建立partition。
       - 推論後簡單的 sanity check。
       - 監控指標包含各產品機率值分布是否正常、資料筆數是否正確（例如因為客戶數理論上只會越來越多，所以資料筆數應該要比上一次推論還多）
       - 監控指標一樣需寫HIVE table，雖不用分partition，但若監控指標有異動需保留歷史紀錄。
