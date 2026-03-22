@@ -1,9 +1,6 @@
 """Pure functions for the training pipeline."""
 
-import json
 import logging
-import re
-from pathlib import Path
 
 import lightgbm as lgb
 import mlflow
@@ -14,31 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-from recsys_tfb.evaluation.metrics import compute_ap
-
-
-def _compute_map(
-    y_true: np.ndarray,
-    y_score: np.ndarray,
-    groups: pd.DataFrame,
-) -> tuple[float, int]:
-    """Compute mAP over query groups defined by (snap_date, cust_id).
-
-    Returns (mAP, num_excluded_queries).
-    """
-    aps = []
-    n_excluded = 0
-
-    for _, idx in groups.groupby(["snap_date", "cust_id"]).groups.items():
-        idx_arr = idx.values if hasattr(idx, "values") else np.array(idx)
-        ap = compute_ap(y_true[idx_arr], y_score[idx_arr])
-        if ap is None:
-            n_excluded += 1
-        else:
-            aps.append(ap)
-
-    mean_ap = float(np.mean(aps)) if aps else 0.0
-    return mean_ap, n_excluded
+from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 
 
 def tune_hyperparameters(
@@ -180,35 +153,49 @@ def evaluate_model(
     val_set: pd.DataFrame,
     parameters: dict,
 ) -> dict:
-    """Compute ranking-aware mAP with (snap_date, cust_id) as query groups."""
+    """Compute ranking-aware mAP with (snap_date, cust_id) as query groups.
+
+    Delegates metric computation to evaluation.metrics.compute_all_metrics,
+    ensuring per-product AP uses correct per-customer ranking semantics.
+    """
     y_score = model.predict(X_val)
 
-    y_val_arr = y_val["label"].values
-    groups = val_set[["snap_date", "cust_id"]].reset_index(drop=True)
-    overall_map, n_excluded = _compute_map(y_val_arr, y_score, groups)
+    # Build DataFrames expected by compute_all_metrics
+    predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+    predictions["score"] = y_score
+    predictions["rank"] = (
+        predictions.groupby(["snap_date", "cust_id"])["score"]
+        .rank(method="first", ascending=False)
+        .astype(int)
+    )
 
-    # Per-product AP
-    per_product_ap = {}
-    for prod_name, idx in val_set.groupby("prod_name").groups.items():
-        idx_arr = idx.values if hasattr(idx, "values") else np.array(idx)
-        y_true_prod = y_val_arr[idx_arr]
-        y_score_prod = y_score[idx_arr]
-        ap = compute_ap(y_true_prod, y_score_prod)
-        if ap is not None:
-            per_product_ap[prod_name] = ap
+    labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+    labels["label"] = y_val["label"].values
+
+    metrics = compute_all_metrics(predictions, labels, k_values=["all"])
+
+    # Extract map@N where N = number of unique products
+    n_products = predictions["prod_name"].nunique()
+    map_key = f"map@{n_products}"
+
+    overall_map = metrics["overall"].get(map_key, 0.0)
+    per_product_ap = {
+        prod: vals.get(map_key, 0.0)
+        for prod, vals in metrics["per_product"].items()
+    }
 
     evaluation_results = {
         "overall_map": overall_map,
         "per_product_ap": per_product_ap,
-        "n_queries": len(groups.drop_duplicates()),
-        "n_excluded_queries": n_excluded,
+        "n_queries": metrics["n_queries"],
+        "n_excluded_queries": metrics["n_excluded_queries"],
     }
 
     logger.info(
         "Evaluation: mAP=%.4f, products=%d, excluded_queries=%d",
         overall_map,
         len(per_product_ap),
-        n_excluded,
+        metrics["n_excluded_queries"],
     )
     return evaluation_results
 
@@ -240,70 +227,3 @@ def log_experiment(
         mlflow.lightgbm.log_model(model, artifact_path="model")
 
     logger.info("MLflow experiment logged: %s", experiment_name)
-
-
-_VERSION_TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
-_VERSION_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
-
-
-def _is_version_dir(name: str) -> bool:
-    """Check if a directory name matches a known version format."""
-    return bool(_VERSION_TIMESTAMP_RE.match(name) or _VERSION_HASH_RE.match(name))
-
-
-def compare_model_versions(evaluation_results: dict, parameters: dict) -> dict:
-    """Scan versioned model directories and produce a cross-version mAP comparison report."""
-    models_dir = Path(parameters.get("models_dir", "data/models"))
-
-    # Find version directories matching hash or timestamp formats
-    versions = []
-    if models_dir.is_dir():
-        for d in sorted(models_dir.iterdir(), reverse=True):
-            if d.is_dir() and not d.is_symlink() and _is_version_dir(d.name):
-                eval_path = d / "evaluation_results.json"
-                if eval_path.exists():
-                    with open(eval_path) as f:
-                        results = json.load(f)
-                    versions.append({
-                        "version": d.name,
-                        "overall_map": results.get("overall_map", 0.0),
-                        "per_product_ap": results.get("per_product_ap", {}),
-                    })
-
-    # Sort by mAP descending
-    versions.sort(key=lambda v: v["overall_map"], reverse=True)
-
-    # Detect current best version
-    best_dir = models_dir / "best"
-    current_best_version = None
-    if best_dir.exists():
-        # If best is a symlink, resolve to get the version name directly
-        if best_dir.is_symlink():
-            current_best_version = best_dir.resolve().name
-        else:
-            # Old format: best is a directory, match by mAP
-            best_eval = best_dir / "evaluation_results.json"
-            if best_eval.exists():
-                with open(best_eval) as f:
-                    best_results = json.load(f)
-                best_map = best_results.get("overall_map")
-                for v in versions:
-                    if v["overall_map"] == best_map:
-                        current_best_version = v["version"]
-                        break
-
-    # Log comparison table
-    logger.info("=== Model Version Comparison ===")
-    for v in versions:
-        marker = " (current best)" if v["version"] == current_best_version else ""
-        logger.info("  %s  mAP=%.4f%s", v["version"], v["overall_map"], marker)
-
-    recommended = versions[0]["version"] if versions else None
-    if recommended:
-        logger.info("Recommended version: %s (mAP=%.4f)", recommended, versions[0]["overall_map"])
-
-    return {
-        "versions": versions,
-        "recommended_version": recommended,
-        "current_best_version": current_best_version,
-    }

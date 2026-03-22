@@ -1,15 +1,11 @@
 """Tests for training pipeline nodes."""
 
-import json
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.evaluation.metrics import compute_ap
+from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 from recsys_tfb.pipelines.training.nodes import (
-    _compute_map,
-    compare_model_versions,
     evaluate_model,
     log_experiment,
     train_model,
@@ -121,34 +117,6 @@ class TestComputeAP:
         assert compute_ap(y_true, y_score) == 1.0
 
 
-# ---- Tests: _compute_map ----
-
-
-class TestComputeMAP:
-    def test_excludes_all_zero_queries(self):
-        y_true = np.array([1, 0, 0, 0, 0, 0])
-        y_score = np.array([0.9, 0.1, 0.5, 0.3, 0.2, 0.1])
-        groups = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-01-31"] * 3 + ["2024-01-31"] * 3),
-            "cust_id": ["C001"] * 3 + ["C002"] * 3,
-        })
-        # C001 has 1 positive, C002 has 0 → C002 excluded
-        mean_ap, n_excluded = _compute_map(y_true, y_score, groups)
-        assert n_excluded == 1
-        assert mean_ap > 0
-
-    def test_perfect_map(self):
-        # Two queries, both perfectly ranked
-        y_true = np.array([1, 0, 0, 1, 0, 0])
-        y_score = np.array([0.9, 0.2, 0.1, 0.8, 0.3, 0.1])
-        groups = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-01-31"] * 3 + ["2024-01-31"] * 3),
-            "cust_id": ["C001"] * 3 + ["C002"] * 3,
-        })
-        mean_ap, _ = _compute_map(y_true, y_score, groups)
-        assert mean_ap == 1.0
-
-
 # ---- Tests: tune_hyperparameters ----
 
 
@@ -232,32 +200,57 @@ class TestEvaluateModel:
         assert isinstance(results["overall_map"], float)
         assert isinstance(results["per_product_ap"], dict)
 
-    def test_perfect_model_high_map(self):
-        """A mock model with perfect scores should yield mAP=1.0."""
-        import lightgbm as lgb
+    def test_overall_map_matches_compute_all_metrics(self, synthetic_data, val_set, training_parameters):
+        """evaluate_model overall_map matches direct compute_all_metrics call."""
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        _, _, _, _, X_val, y_val = synthetic_data
 
-        # Create simple data where we can control predictions
-        y_true = np.array([1, 0, 0, 1, 0, 0])
-        y_score = np.array([0.9, 0.2, 0.1, 0.8, 0.3, 0.1])
+        results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
 
-        groups = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-01-31"] * 3 + ["2024-01-31"] * 3),
-            "cust_id": ["C001"] * 3 + ["C002"] * 3,
-        })
+        # Reproduce via compute_all_metrics directly
+        y_score = model.predict(X_val)
+        predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        predictions["score"] = y_score
+        predictions["rank"] = (
+            predictions.groupby(["snap_date", "cust_id"])["score"]
+            .rank(method="first", ascending=False).astype(int)
+        )
+        labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        labels["label"] = y_val["label"].values
 
-        mean_ap, _ = _compute_map(y_true, y_score, groups)
-        assert mean_ap == 1.0
+        metrics = compute_all_metrics(predictions, labels, k_values=["all"])
+        n_products = predictions["prod_name"].nunique()
+        map_key = f"map@{n_products}"
 
-    def test_all_zero_query_excluded(self):
-        """Queries with no positive labels are excluded from mAP."""
-        y_true = np.array([0, 0, 0])
-        y_score = np.array([0.5, 0.3, 0.1])
-        groups = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-01-31"] * 3),
-            "cust_id": ["C001"] * 3,
-        })
-        _, n_excluded = _compute_map(y_true, y_score, groups)
-        assert n_excluded == 1
+        assert results["overall_map"] == pytest.approx(metrics["overall"][map_key])
+        assert results["n_queries"] == metrics["n_queries"]
+        assert results["n_excluded_queries"] == metrics["n_excluded_queries"]
+
+    def test_per_product_ap_matches_compute_all_metrics(self, synthetic_data, val_set, training_parameters):
+        """evaluate_model per_product_ap matches compute_all_metrics per_product."""
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        _, _, _, _, X_val, y_val = synthetic_data
+
+        results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
+
+        y_score = model.predict(X_val)
+        predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        predictions["score"] = y_score
+        predictions["rank"] = (
+            predictions.groupby(["snap_date", "cust_id"])["score"]
+            .rank(method="first", ascending=False).astype(int)
+        )
+        labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        labels["label"] = y_val["label"].values
+
+        metrics = compute_all_metrics(predictions, labels, k_values=["all"])
+        n_products = predictions["prod_name"].nunique()
+        map_key = f"map@{n_products}"
+
+        expected_per_product = {
+            prod: vals[map_key] for prod, vals in metrics["per_product"].items()
+        }
+        assert results["per_product_ap"] == pytest.approx(expected_per_product)
 
     def test_per_product_ap_values(self, synthetic_data, training_parameters):
         """Per-product AP values match manual _compute_ap and exclude all-0-label products."""
@@ -299,12 +292,9 @@ class TestEvaluateModel:
         assert "exchange_fx" in per_product_ap
         assert "exchange_usd" in per_product_ap
 
-        # Values must match manual _compute_ap calculation
-        y_score = model.predict(X_val_extended)
+        # Values must be valid AP scores
         for prod in ["exchange_fx", "exchange_usd"]:
-            idx = val_set.index[val_set["prod_name"] == prod].values
-            expected_ap = compute_ap(y_val_extended["label"].values[idx], y_score[idx])
-            assert per_product_ap[prod] == pytest.approx(expected_ap)
+            assert 0.0 <= per_product_ap[prod] <= 1.0
 
 
 # ---- Tests: log_experiment ----
@@ -342,65 +332,3 @@ class TestLogExperiment:
         runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
         assert len(runs) == 1
         assert runs.iloc[0]["metrics.overall_map"] == 0.75
-
-
-# ---- Tests: compare_model_versions ----
-
-
-def _create_version_dir(base_dir, version_name, overall_map, per_product_ap=None):
-    """Helper to create a version directory with evaluation_results.json."""
-    version_dir = base_dir / version_name
-    version_dir.mkdir(parents=True)
-    results = {"overall_map": overall_map, "per_product_ap": per_product_ap or {}}
-    (version_dir / "evaluation_results.json").write_text(json.dumps(results))
-    return version_dir
-
-
-class TestCompareModelVersions:
-    def test_multiple_versions_ranked_by_map(self, tmp_path):
-        models_dir = tmp_path / "models"
-        _create_version_dir(models_dir, "20260315_100000", 0.65, {"exchange_fx": 0.7})
-        _create_version_dir(models_dir, "20260316_100000", 0.80, {"exchange_fx": 0.85})
-        _create_version_dir(models_dir, "20260317_100000", 0.72, {"exchange_fx": 0.75})
-
-        result = compare_model_versions({}, {"models_dir": str(models_dir)})
-        assert len(result["versions"]) == 3
-        assert result["versions"][0]["version"] == "20260316_100000"
-        assert result["recommended_version"] == "20260316_100000"
-
-    def test_single_version(self, tmp_path):
-        models_dir = tmp_path / "models"
-        _create_version_dir(models_dir, "20260316_100000", 0.75)
-
-        result = compare_model_versions({}, {"models_dir": str(models_dir)})
-        assert len(result["versions"]) == 1
-        assert result["recommended_version"] == "20260316_100000"
-
-    def test_ignores_non_version_dirs(self, tmp_path):
-        models_dir = tmp_path / "models"
-        _create_version_dir(models_dir, "20260316_100000", 0.75)
-        # These should be ignored
-        (models_dir / "best").mkdir()
-        (models_dir / "some_random_dir").mkdir()
-
-        result = compare_model_versions({}, {"models_dir": str(models_dir)})
-        assert len(result["versions"]) == 1
-
-    def test_detects_current_best(self, tmp_path):
-        models_dir = tmp_path / "models"
-        _create_version_dir(models_dir, "20260316_100000", 0.75)
-        _create_version_dir(models_dir, "20260317_100000", 0.80)
-        # Create best/ with same mAP as 20260316
-        _create_version_dir(models_dir, "best", 0.75)
-
-        result = compare_model_versions({}, {"models_dir": str(models_dir)})
-        assert result["current_best_version"] == "20260316_100000"
-
-    def test_empty_models_dir(self, tmp_path):
-        models_dir = tmp_path / "models"
-        models_dir.mkdir()
-
-        result = compare_model_versions({}, {"models_dir": str(models_dir)})
-        assert result["versions"] == []
-        assert result["recommended_version"] is None
-        assert result["current_best_version"] is None

@@ -8,9 +8,9 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_five_nodes(self):
+    def test_pipeline_has_four_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 5
+        assert len(pipeline.nodes) == 4
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -22,7 +22,7 @@ class TestTrainingPipeline:
 
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
-        expected = {"best_params", "model", "evaluation_results", "version_comparison"}
+        expected = {"best_params", "model", "evaluation_results"}
         assert pipeline.outputs == expected
 
     def test_node_names(self):
@@ -32,7 +32,6 @@ class TestTrainingPipeline:
         assert "train_model" in names
         assert "evaluate_model" in names
         assert "log_experiment" in names
-        assert "compare_model_versions" in names
 
     def test_topological_order(self):
         pipeline = create_pipeline()
@@ -43,8 +42,6 @@ class TestTrainingPipeline:
         assert names.index("train_model") < names.index("evaluate_model")
         # evaluate must come before log (log depends on evaluation_results)
         assert names.index("evaluate_model") < names.index("log_experiment")
-        # log must come before compare
-        assert names.index("log_experiment") < names.index("compare_model_versions")
 
 
 class TestTrainingPipelineE2E:

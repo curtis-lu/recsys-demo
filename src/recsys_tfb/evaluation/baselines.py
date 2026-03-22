@@ -49,13 +49,16 @@ def generate_global_popularity_baseline(
     if products is None:
         products = sorted(rates.index.tolist())
 
+    # Match snap_date dtype to label_table for downstream merge compatibility
+    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table["snap_date"]) else snap_date
+
     # Build baseline: same score for all customers
     rows = []
     for cust_id in customer_ids:
         for prod in products:
             score = float(rates.get(prod, 0.0))
             rows.append({
-                "snap_date": snap_date,
+                "snap_date": snap_value,
                 "cust_id": cust_id,
                 "prod_name": prod,
                 "score": score,
@@ -113,6 +116,9 @@ def generate_segment_popularity_baseline(
     if products is None:
         products = sorted(historical["prod_name"].unique().tolist())
 
+    # Match snap_date dtype to label_table for downstream merge compatibility
+    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table["snap_date"]) else snap_date
+
     # Build customer → segment mapping
     if customer_segments is None:
         seg_map = label_table.drop_duplicates("cust_id").set_index("cust_id")[segment_column]
@@ -128,7 +134,7 @@ def generate_segment_popularity_baseline(
             else:
                 score = 0.0
             rows.append({
-                "snap_date": snap_date,
+                "snap_date": snap_value,
                 "cust_id": cust_id,
                 "prod_name": prod,
                 "score": score,

@@ -1,6 +1,6 @@
 inference:
   snap_dates:
-    - "2026-01-31"
+    - "2025-12-31"
   products:
     - "exchange_usd"
     - "exchange_fx"
