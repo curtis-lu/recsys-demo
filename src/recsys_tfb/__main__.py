@@ -31,14 +31,9 @@ def run(
     ),
 ) -> None:
     """Run a named pipeline with the specified environment config."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-    logger = logging.getLogger(__name__)
-
     from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
     from recsys_tfb.core.config import ConfigLoader
+    from recsys_tfb.core.logging import RunContext, setup_logging
     from recsys_tfb.core.runner import Runner
     from recsys_tfb.core.versioning import (
         build_manifest_metadata,
@@ -58,6 +53,11 @@ def run(
     config = ConfigLoader(str(conf_dir), env=env)
     params = config.get_parameters()
     backend = params.get("backend", "pandas")
+
+    # Setup structured logging
+    run_context = RunContext(pipeline=pipeline, env=env, backend=backend)
+    setup_logging(params, run_context)
+    logger = logging.getLogger(__name__)
 
     # Look up pipeline with backend
     try:
@@ -199,6 +199,7 @@ def run(
             parameters=params_dataset,
             artifacts=sorted(artifacts),
         )
+        metadata["run_id"] = run_context.run_id
         write_manifest(version_dir, metadata)
         update_symlink(version_dir, data_dir / "dataset" / "latest")
         with open(version_dir / "parameters_dataset.json", "w") as f:
@@ -222,6 +223,7 @@ def run(
             dataset_version=ds_version,
             artifacts=sorted(artifacts),
         )
+        metadata["run_id"] = run_context.run_id
         write_manifest(version_dir, metadata)
         with open(version_dir / "parameters_training.json", "w") as f:
             json.dump(params_training, f, indent=2, ensure_ascii=False, default=str)
@@ -242,6 +244,7 @@ def run(
             model_version=mv,
             dataset_version=ds_version,
         )
+        metadata["run_id"] = run_context.run_id
         write_manifest(version_dir, metadata)
         update_symlink(version_dir, data_dir / "inference" / "latest")
         with open(version_dir / "parameters_inference.json", "w") as f:

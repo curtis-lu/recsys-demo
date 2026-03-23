@@ -7,21 +7,28 @@ import pandas as pd
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.schema import get_schema
+
 logger = logging.getLogger(__name__)
 
 
 def select_sample_keys(label_table: DataFrame, parameters: dict) -> DataFrame:
-    """Stratified sampling by configurable group keys, returning unique (snap_date, cust_id) keys."""
+    """Stratified sampling by configurable group keys, returning unique identity keys."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+
     sample_ratio = parameters["dataset"]["sample_ratio"]
     seed = parameters.get("random_seed", 42)
-    group_keys = parameters["dataset"].get("sample_group_keys", ["snap_date"])
+    group_keys = parameters["dataset"].get("sample_group_keys", [time_col])
 
-    # Extract unique (snap_date, cust_id) keys with group columns
-    extract_cols = list(dict.fromkeys(group_keys + ["snap_date", "cust_id"]))
-    keys = label_table.select(*extract_cols).dropDuplicates(["snap_date", "cust_id"])
+    # Extract unique identity keys with group columns
+    extract_cols = list(dict.fromkeys(group_keys + identity_key))
+    keys = label_table.select(*extract_cols).dropDuplicates(identity_key)
 
     if sample_ratio >= 1.0:
-        sampled = keys.select("snap_date", "cust_id")
+        sampled = keys.select(*identity_key)
         total = sampled.count()
         logger.info("Sampled %d keys (ratio=1.0, no sampling)", total)
         return sampled
@@ -34,7 +41,7 @@ def select_sample_keys(label_table: DataFrame, parameters: dict) -> DataFrame:
     )
     sampled = keys_counted.filter(
         F.col("_rn") <= F.round(F.col("_cnt") * F.lit(sample_ratio))
-    ).select("snap_date", "cust_id")
+    ).select(*identity_key)
 
     total_before = keys.count()
     total_after = sampled.count()
@@ -54,6 +61,11 @@ def split_keys(
     parameters: dict,
 ) -> tuple[DataFrame, DataFrame, DataFrame]:
     """Split keys into train (in-time sampled), train_dev (out-of-time sampled), val (out-of-time full)."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+
     train_dev_dates = [
         pd.Timestamp(d) for d in parameters["dataset"]["train_dev_snap_dates"]
     ]
@@ -61,14 +73,14 @@ def split_keys(
     excluded_dates = train_dev_dates + val_dates
 
     # Train: sampled keys not in train_dev or val dates
-    train_keys = sample_keys.filter(~F.col("snap_date").isin(excluded_dates))
+    train_keys = sample_keys.filter(~F.col(time_col).isin(excluded_dates))
 
     # Train-dev: sampled keys in train_dev dates
-    train_dev_keys = sample_keys.filter(F.col("snap_date").isin(train_dev_dates))
+    train_dev_keys = sample_keys.filter(F.col(time_col).isin(train_dev_dates))
 
     # Val: full (unsampled) population for val dates
-    all_keys = label_table.select("snap_date", "cust_id").dropDuplicates()
-    val_keys = all_keys.filter(F.col("snap_date").isin(val_dates))
+    all_keys = label_table.select(*identity_key).dropDuplicates()
+    val_keys = all_keys.filter(F.col(time_col).isin(val_dates))
 
     logger.info(
         "Split: train=%d, train_dev=%d (sampled), val=%d (full)",
@@ -83,13 +95,19 @@ def build_dataset(
     keys: DataFrame,
     feature_table: DataFrame,
     label_table: DataFrame,
+    parameters: dict,
 ) -> DataFrame:
     """Join keys with labels and features to build a complete dataset."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    join_key = [time_col] + entity_cols
+
     # First join keys with label_table to get all product rows for sampled customers
-    dataset = keys.join(label_table, on=["snap_date", "cust_id"], how="inner")
+    dataset = keys.join(label_table, on=join_key, how="inner")
 
     # Then join with features
-    dataset = dataset.join(feature_table, on=["snap_date", "cust_id"], how="left")
+    dataset = dataset.join(feature_table, on=join_key, how="left")
 
     logger.info(
         "Built dataset: %d rows, %d columns", dataset.count(), len(dataset.columns)
@@ -104,6 +122,9 @@ def prepare_model_input(
     parameters: dict,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
     """Convert Spark DataFrames to model-ready pandas DataFrames with categorical encoding."""
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+
     # Convert to pandas — data has been sampled and split, should fit in memory
     train_pdf = train_set.toPandas()
     train_dev_pdf = train_dev_set.toPandas()
@@ -111,10 +132,10 @@ def prepare_model_input(
 
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
     drop_cols = pmi_config.get("drop_columns", [
-        "snap_date", "cust_id", "label",
+        schema["time"], *schema["entity"], label_col,
         "apply_start_date", "apply_end_date", "cust_segment_typ",
     ])
-    categorical_cols = pmi_config.get("categorical_columns", ["prod_name"])
+    categorical_cols = pmi_config.get("categorical_columns", [schema["item"]])
 
     # Build category mapping from train set only
     category_mappings = {}
@@ -130,11 +151,11 @@ def prepare_model_input(
         return result
 
     X_train = _transform(train_pdf)
-    y_train = train_pdf[["label"]].reset_index(drop=True)
+    y_train = train_pdf[[label_col]].reset_index(drop=True)
     X_train_dev = _transform(train_dev_pdf)
-    y_train_dev = train_dev_pdf[["label"]].reset_index(drop=True)
+    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
     X_val = _transform(val_pdf)
-    y_val = val_pdf[["label"]].reset_index(drop=True)
+    y_val = val_pdf[[label_col]].reset_index(drop=True)
 
     feature_columns = list(X_train.columns)
 

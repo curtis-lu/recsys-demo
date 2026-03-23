@@ -39,3 +39,13 @@ Inference pipeline 成功完成後 SHALL 在 `data/inference/` 下維護 `latest
 #### Scenario: 更新 latest symlink
 - **WHEN** inference pipeline 成功完成，output 寫入 `data/inference/a1b2c3d4/20240331/`
 - **THEN** `data/inference/latest` symlink SHALL 指向 `data/inference/a1b2c3d4/20240331/`
+
+
+## MODIFIED Requirements
+
+### Requirement: Inference manifest includes run_id
+The inference pipeline manifest.json SHALL include a `run_id` field.
+
+#### Scenario: run_id in inference manifest
+- **WHEN** the inference pipeline completes and writes manifest.json
+- **THEN** the manifest SHALL include `"run_id": "<run_id>"` matching the current execution's run_id

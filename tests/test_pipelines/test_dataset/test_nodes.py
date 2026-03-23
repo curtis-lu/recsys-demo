@@ -169,21 +169,21 @@ class TestSplitKeys:
 
 
 class TestBuildDataset:
-    def test_joins_features_and_labels(self, feature_table, label_table):
+    def test_joins_features_and_labels(self, feature_table, label_table, parameters):
         keys = pd.DataFrame(
             {
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
                 "cust_id": ["C001", "C002"],
             }
         )
-        result = build_dataset(keys, feature_table, label_table)
+        result = build_dataset(keys, feature_table, label_table, parameters)
         # 2 customers x 3 products = 6 rows
         assert len(result) == 6
         assert "total_aum" in result.columns
         assert "label" in result.columns
         assert "prod_name" in result.columns
 
-    def test_missing_features_filled_nan(self, feature_table, label_table):
+    def test_missing_features_filled_nan(self, feature_table, label_table, parameters):
         # Add a customer that exists in labels but not features
         extra_label = pd.DataFrame(
             {
@@ -203,7 +203,7 @@ class TestBuildDataset:
                 "cust_id": ["C999"],
             }
         )
-        result = build_dataset(keys, feature_table, labels)
+        result = build_dataset(keys, feature_table, labels, parameters)
         assert result["total_aum"].isna().any()
 
 
@@ -214,9 +214,9 @@ class TestPrepareModelInput:
         train_keys = keys[keys["snap_date"] == pd.Timestamp("2024-01-31")]
         train_dev_keys = keys[keys["snap_date"] == pd.Timestamp("2024-02-29")]
         val_keys = keys[keys["snap_date"] == pd.Timestamp("2024-03-31")]
-        train_set = build_dataset(train_keys, feature_table, label_table)
-        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table)
-        val_set = build_dataset(val_keys, feature_table, label_table)
+        train_set = build_dataset(train_keys, feature_table, label_table, parameters)
+        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
+        val_set = build_dataset(val_keys, feature_table, label_table, parameters)
         return train_set, train_dev_set, val_set
 
     def test_output_format(self, feature_table, label_table, parameters):

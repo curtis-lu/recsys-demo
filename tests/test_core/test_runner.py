@@ -81,3 +81,45 @@ class TestRunner:
             runner.run(pipe, catalog)
 
         assert "completed in" in caplog.text
+
+    def test_pipeline_started_log(self, caplog):
+        catalog = DataCatalog()
+        catalog.add("x", MemoryDataset(data=1))
+
+        node = Node(func=double, inputs=["x"], outputs=["result"])
+        pipe = Pipeline([node])
+
+        runner = Runner()
+        with caplog.at_level(logging.INFO):
+            runner.run(pipe, catalog)
+
+        assert "Pipeline started" in caplog.text
+        assert "Pipeline completed" in caplog.text
+
+    def test_node_completed_log(self, caplog):
+        catalog = DataCatalog()
+        catalog.add("x", MemoryDataset(data=1))
+
+        node = Node(func=double, inputs=["x"], outputs=["result"], name="double_node")
+        pipe = Pipeline([node])
+
+        runner = Runner()
+        with caplog.at_level(logging.INFO):
+            runner.run(pipe, catalog)
+
+        assert "double_node completed" in caplog.text
+
+    def test_node_failed_log(self, caplog):
+        catalog = DataCatalog()
+        catalog.add("x", MemoryDataset(data=1))
+
+        node = Node(func=failing_func, inputs=["x"], outputs=["result"], name="fail_node")
+        pipe = Pipeline([node])
+
+        runner = Runner()
+        with pytest.raises(RuntimeError):
+            with caplog.at_level(logging.ERROR):
+                runner.run(pipe, catalog)
+
+        assert "fail_node" in caplog.text
+        assert "Pipeline failed" in caplog.text

@@ -171,19 +171,32 @@
 | 測試 | 完整單元測試覆蓋 |
 | 欄位設定彈性化 | `prepare_model_input` 的 drop_columns/categorical_columns 可透過 YAML 設定 |
 | Inference 版本修正 | output 使用實際 model hash、inference latest symlink 自動更新 |
+| 進階評估指標 | mAP、precision@K、recall@K、nDCG、MRR + macro/micro 平均 |
+| 指標切面 | 依整體、產品個別、自定義客群分群、holding combo |
+| 評估報告 | Plotly HTML 互動式報告、模型比較 CLI |
+| Config-driven column schema | 所有 hard-coded 欄位名稱改由 `parameters.yaml` 的 `schema` section 設定，entity 支援多欄位組合，`get_schema()` 純函數 |
+| Structured logging 框架 | JSON structured log（pipeline-level / node-level），console 可讀 + file JSON 雙輸出，run_id 追蹤 |
 
 ### 待完成 ⬚
 
-| 功能 | 說明 |
-|------|------|
-| Source Data ETL Pipeline | SQL 轉換、Hive 整合、資料驗證 |
-| 進階評估指標 | precision@K、recall@K、nDCG、MRR |
-| 指標切面 | 依整體、產品個別、自定義客群分群 |
-| 機率校準 | probability calibration |
-| 規則化重新排序 | rule-based reranking |
-| 月度監控 | 機率值分佈監控、資料筆數檢查 |
-| Safe rerun 檢查點 | 跳過已完成步驟 |
-| Strategy 2 | One-vs-Rest 多模型 |
-| Strategy 3 | 疊加單層排序（LambdaRank） |
-| Strategy 4 | 疊加雙層排序（大類 → 中類） |
-| 錯誤分析 notebook | template notebook |
+| 功能 | Phase | 說明 |
+|------|-------|------|
+| Catalog memory release | Phase 2 | Runner 自動釋放已消費的 MemoryDataset，降低大資料場景記憶體風險 |
+| Sample pool table 分離 | Phase 2 | sample_pool_table 與 label_table 解耦，sample_pool_table 為獨立 Hive 表 |
+| Group-specific sampling | Phase 2 | sample_ratio 支援依 product + cust_segment_typ 分組設定不同抽樣比例 |
+| 演算法抽象（LightGBM + XGBoost） | Phase 2 | ModelAdapter protocol，統一 trainer/predictor/artifact 介面 |
+| Probability calibration | Phase 2 | 可選的 isotonic/sigmoid 校準層，config 控制開關 |
+| Spark 優化 | Phase 2 | dataset building / inference 的 toPandas 延後到最後一步；inference output 寫 Hive table |
+| Inference sanity checks | Phase 2 | row count、score 分布、top-K 偏斜檢查，輸出可機器讀取的 JSON |
+| Val sampling | Phase 2 | val 太大時支援抽樣，evaluation_results 標記 full/sampled |
+| Evaluation pipeline 化 | Phase 3 | 將 evaluation 整理成獨立 pipeline（load → validate → metrics → segment → report） |
+| Data quality logging | Phase 3 | DataFrame profiling（null rates、cardinality、value ranges） |
+| Artifact / lineage logging | Phase 3 | 記錄上下游版本關係、artifact hashes |
+| Source Data ETL Pipeline | — | SQL 轉換、Hive 整合、資料驗證 |
+| 規則化重新排序 | — | rule-based reranking |
+| 月度監控 | — | 機率值分佈監控、資料筆數檢查 |
+| Safe rerun 檢查點 | — | 跳過已完成步驟 |
+| Strategy 2 | — | One-vs-Rest 多模型 |
+| Strategy 3 | — | 疊加單層排序（LambdaRank） |
+| Strategy 4 | — | 疊加雙層排序（大類 → 中類） |
+| 錯誤分析 notebook | — | template notebook |

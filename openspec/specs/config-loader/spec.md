@@ -68,3 +68,17 @@ ConfigLoader SHALL 提供 `get_parameters_by_name(name: str) -> dict` 方法，�
 #### Scenario: 取得 training 參數
 - **WHEN** 呼叫 `get_parameters_by_name("parameters_training")`
 - **THEN** SHALL 回傳 parameters_training.yaml 的合併後完整內容
+
+
+## MODIFIED Requirements
+
+### Requirement: parameters.yaml supports schema and logging sections
+The ConfigLoader SHALL pass through `schema` and `logging` sections from `parameters.yaml` without modification. No special handling is required — these are consumed by `get_schema()` and `setup_logging()` respectively.
+
+#### Scenario: Schema section loaded
+- **WHEN** `parameters.yaml` contains a `schema` section
+- **THEN** `get_parameters()` SHALL include it in the returned dict
+
+#### Scenario: Logging section loaded
+- **WHEN** `parameters.yaml` contains a `logging` section
+- **THEN** `get_parameters()` SHALL include it in the returned dict

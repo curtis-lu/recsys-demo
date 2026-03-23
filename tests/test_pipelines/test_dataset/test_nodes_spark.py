@@ -128,14 +128,14 @@ class TestSplitKeys:
 
 
 class TestBuildDataset:
-    def test_joins_features_and_labels(self, spark, feature_table, label_table):
+    def test_joins_features_and_labels(self, spark, feature_table, label_table, parameters):
         keys = spark.createDataFrame(
             pd.DataFrame({
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
                 "cust_id": ["C001", "C002"],
             })
         )
-        result = build_dataset(keys, feature_table, label_table)
+        result = build_dataset(keys, feature_table, label_table, parameters)
         # 2 customers x 3 products = 6 rows
         assert result.count() == 6
         assert "total_aum" in result.columns
@@ -151,9 +151,9 @@ class TestPrepareModelInput:
         train_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-01-31"))
         train_dev_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-02-29"))
         val_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-03-31"))
-        train_set = build_dataset(train_keys, feature_table, label_table)
-        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table)
-        val_set = build_dataset(val_keys, feature_table, label_table)
+        train_set = build_dataset(train_keys, feature_table, label_table, parameters)
+        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
+        val_set = build_dataset(val_keys, feature_table, label_table, parameters)
         return train_set, train_dev_set, val_set
 
     def test_output_format(self, spark, feature_table, label_table, parameters):

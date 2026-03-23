@@ -29,12 +29,12 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
             ),
             Node(
                 apply_preprocessor,
-                inputs=["scoring_dataset", "preprocessor"],
+                inputs=["scoring_dataset", "preprocessor", "parameters"],
                 outputs="X_score",
             ),
             Node(
                 predict_scores,
-                inputs=["model", "X_score", "scoring_dataset"],
+                inputs=["model", "X_score", "scoring_dataset", "parameters"],
                 outputs="score_table",
             ),
             Node(

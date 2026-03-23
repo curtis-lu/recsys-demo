@@ -8,6 +8,8 @@ import logging
 
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,6 +18,7 @@ def generate_global_popularity_baseline(
     snap_date: str,
     customer_ids: list[str],
     products: list[str] | None = None,
+    parameters: dict | None = None,
 ) -> pd.DataFrame:
     """Generate a global popularity baseline.
 
@@ -31,8 +34,17 @@ def generate_global_popularity_baseline(
     Returns:
         DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
     """
+    schema = get_schema(parameters or {})
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    rank_col = schema["rank"]
+    group_cols = [time_col] + entity_cols
+
     snap_ts = pd.Timestamp(snap_date)
-    label_snap = pd.to_datetime(label_table["snap_date"])
+    label_snap = pd.to_datetime(label_table[time_col])
     historical = label_table[label_snap < snap_ts]
 
     if len(historical) == 0:
@@ -44,30 +56,32 @@ def generate_global_popularity_baseline(
         historical = label_table
 
     # Compute positive rate per product
-    rates = historical.groupby("prod_name")["label"].mean()
+    rates = historical.groupby(item_col)[label_col].mean()
 
     if products is None:
         products = sorted(rates.index.tolist())
 
     # Match snap_date dtype to label_table for downstream merge compatibility
-    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table["snap_date"]) else snap_date
+    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table[time_col]) else snap_date
 
     # Build baseline: same score for all customers
     rows = []
     for cust_id in customer_ids:
         for prod in products:
             score = float(rates.get(prod, 0.0))
-            rows.append({
-                "snap_date": snap_value,
-                "cust_id": cust_id,
-                "prod_name": prod,
-                "score": score,
-            })
+            row = {
+                time_col: snap_value,
+                item_col: prod,
+                score_col: score,
+            }
+            # For single entity, use the first entity column
+            row[entity_cols[0]] = cust_id
+            rows.append(row)
 
     baseline = pd.DataFrame(rows)
 
     # Rank by descending score within each customer
-    baseline["rank"] = baseline.groupby(["snap_date", "cust_id"])["score"].rank(
+    baseline[rank_col] = baseline.groupby(group_cols)[score_col].rank(
         method="first", ascending=False
     ).astype(int)
 
@@ -81,6 +95,7 @@ def generate_segment_popularity_baseline(
     segment_column: str = "cust_segment_typ",
     customer_segments: pd.Series | None = None,
     products: list[str] | None = None,
+    parameters: dict | None = None,
 ) -> pd.DataFrame:
     """Generate a segment-level popularity baseline.
 
@@ -98,8 +113,17 @@ def generate_segment_popularity_baseline(
     Returns:
         DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
     """
+    schema = get_schema(parameters or {})
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    rank_col = schema["rank"]
+    group_cols = [time_col] + entity_cols
+
     snap_ts = pd.Timestamp(snap_date)
-    label_snap = pd.to_datetime(label_table["snap_date"])
+    label_snap = pd.to_datetime(label_table[time_col])
     historical = label_table[label_snap < snap_ts]
 
     if len(historical) == 0:
@@ -111,17 +135,17 @@ def generate_segment_popularity_baseline(
         historical = label_table
 
     # Compute positive rate per (segment, product)
-    rates = historical.groupby([segment_column, "prod_name"])["label"].mean()
+    rates = historical.groupby([segment_column, item_col])[label_col].mean()
 
     if products is None:
-        products = sorted(historical["prod_name"].unique().tolist())
+        products = sorted(historical[item_col].unique().tolist())
 
     # Match snap_date dtype to label_table for downstream merge compatibility
-    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table["snap_date"]) else snap_date
+    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table[time_col]) else snap_date
 
     # Build customer → segment mapping
     if customer_segments is None:
-        seg_map = label_table.drop_duplicates("cust_id").set_index("cust_id")[segment_column]
+        seg_map = label_table.drop_duplicates(entity_cols[0]).set_index(entity_cols[0])[segment_column]
     else:
         seg_map = customer_segments
 
@@ -133,15 +157,16 @@ def generate_segment_popularity_baseline(
                 score = float(rates.loc[(segment, prod)])
             else:
                 score = 0.0
-            rows.append({
-                "snap_date": snap_value,
-                "cust_id": cust_id,
-                "prod_name": prod,
-                "score": score,
-            })
+            row = {
+                time_col: snap_value,
+                item_col: prod,
+                score_col: score,
+            }
+            row[entity_cols[0]] = cust_id
+            rows.append(row)
 
     baseline = pd.DataFrame(rows)
-    baseline["rank"] = baseline.groupby(["snap_date", "cust_id"])["score"].rank(
+    baseline[rank_col] = baseline.groupby(group_cols)[score_col].rank(
         method="first", ascending=False
     ).astype(int)
 

@@ -1,3 +1,20 @@
 project_name: recsys_tfb
 random_seed: 42
 backend: pandas
+
+schema:
+  columns:
+    time: snap_date
+    entity: [cust_id]
+    item: prod_name
+    label: label
+    score: score
+    rank: rank
+
+logging:
+  level: INFO
+  console: true
+  file:
+    enabled: true
+    path: logs/
+    format: json

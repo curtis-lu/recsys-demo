@@ -9,6 +9,8 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
+
 logger = logging.getLogger(__name__)
 
 
@@ -219,31 +221,38 @@ def _resolve_k_values(
 
 
 def _enrich_with_contributions(
-    merged: pd.DataFrame, k_values: list[int]
+    merged: pd.DataFrame,
+    k_values: list[int],
+    group_cols: list[str] | None = None,
+    score_col: str = "score",
+    label_col: str = "label",
 ) -> pd.DataFrame:
     """Add per-row metric contribution columns to the merged DataFrame.
 
-    Sorts by (snap_date, cust_id, score desc), then computes positional columns
+    Sorts by (group_cols, score desc), then computes positional columns
     within each query group. Only rows with label=1 contribute to metrics.
 
     Returns a copy with added columns: pos, cum_rel, precision,
     and per-K columns: hit@K, map_contrib@K, mrr_contrib@K, ndcg_k_contrib@K.
     """
-    df = merged.copy()
-    df = df.sort_values(
-        ["snap_date", "cust_id", "score"], ascending=[True, True, False]
-    ).reset_index(drop=True)
+    if group_cols is None:
+        group_cols = ["snap_date", "cust_id"]
 
-    grp = df.groupby(["snap_date", "cust_id"], sort=False)
+    df = merged.copy()
+    sort_cols = group_cols + [score_col]
+    ascending = [True] * len(group_cols) + [False]
+    df = df.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+
+    grp = df.groupby(group_cols, sort=False)
 
     # Position within query (1-based)
     df["pos"] = grp.cumcount() + 1
     # Cumulative relevant count
-    df["cum_rel"] = grp["label"].cumsum()
+    df["cum_rel"] = grp[label_col].cumsum()
 
     # --- iDCG lookup per query ---
     # R = total relevant items per query
-    r_per_query = grp["label"].transform("sum")
+    r_per_query = grp[label_col].transform("sum")
     # Build iDCG: sum_{i=1}^{R} 1/log2(i+1)
     max_r = int(r_per_query.max()) if len(r_per_query) > 0 else 0
     idcg_table = np.zeros(max_r + 1)
@@ -259,11 +268,11 @@ def _enrich_with_contributions(
 
     # --- First relevant position per query (for MRR contribution) ---
     # For each query, find the minimum pos where label=1
-    first_rel_pos = df[df["label"] == 1].groupby(
-        ["snap_date", "cust_id"], sort=False
+    first_rel_pos = df[df[label_col] == 1].groupby(
+        group_cols, sort=False
     )["pos"].transform("min")
     df["first_rel_pos"] = np.nan
-    df.loc[df["label"] == 1, "first_rel_pos"] = first_rel_pos
+    df.loc[df[label_col] == 1, "first_rel_pos"] = first_rel_pos
     # Forward-fill within group isn't needed; we only use this on label=1 rows
 
     # Per-K columns
@@ -346,58 +355,74 @@ def compute_all_metrics(
     predictions: pd.DataFrame,
     labels: pd.DataFrame,
     k_values: list[Union[int, str]] | None = None,
+    parameters: dict | None = None,
 ) -> dict:
     """Compute ranking metrics across multiple dimensions.
 
     Args:
-        predictions: DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
-        labels: DataFrame with columns [snap_date, cust_id, prod_name, label].
+        predictions: DataFrame with columns [time, entity..., item, score, rank].
+        labels: DataFrame with columns [time, entity..., item, label].
             Optionally includes cust_segment_typ for segment-level metrics.
         k_values: K values for precision@K, recall@K, nDCG@K.
             Supports "all" which resolves to total product count N.
             Defaults to [5, "all"].
+        parameters: Optional parameters dict for schema resolution.
+            If None, uses default schema.
 
     Returns:
         Dict with keys: overall, per_product, per_segment, per_product_segment,
         macro_avg, micro_avg, n_queries, n_excluded_queries.
     """
+    schema = get_schema(parameters or {})
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    identity_cols = schema["identity_columns"]
+    group_cols = [time_col] + entity_cols
+
     if k_values is None:
         k_values = [5, "all"]
 
     # Join predictions with labels
     merged = predictions.merge(
-        labels[["snap_date", "cust_id", "prod_name", "label"]],
-        on=["snap_date", "cust_id", "prod_name"],
+        labels[identity_cols + [label_col]],
+        on=identity_cols,
         how="inner",
     )
 
     # Resolve "all" in k_values to actual product count
-    n_products = merged["prod_name"].nunique()
+    n_products = merged[item_col].nunique()
     k_values = _resolve_k_values(k_values, n_products)
 
     # Carry segment column if present
     has_segment = "cust_segment_typ" in labels.columns
     if has_segment:
-        seg_map = labels[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates()
-        merged = merged.merge(seg_map, on=["snap_date", "cust_id"], how="left")
+        seg_map = labels[group_cols + ["cust_segment_typ"]].drop_duplicates()
+        merged = merged.merge(seg_map, on=group_cols, how="left")
 
     # --- Overall: per-customer loop (standard mAP definition) ---
-    query_groups = merged.groupby(["snap_date", "cust_id"])
+    query_groups = merged.groupby(group_cols)
 
     all_query_metrics: list[dict] = []
     n_excluded = 0
 
-    for (snap_date, cust_id), group in query_groups:
-        y_true = group["label"].values.astype(float)
-        y_score = group["score"].values.astype(float)
+    for group_key, group in query_groups:
+        y_true = group[label_col].values.astype(float)
+        y_score = group[score_col].values.astype(float)
 
         qm = _compute_query_metrics(y_true, y_score, k_values)
         if qm is None:
             n_excluded += 1
             continue
 
-        qm["_snap_date"] = snap_date
-        qm["_cust_id"] = cust_id
+        # Store group key columns for downstream use
+        if isinstance(group_key, tuple):
+            for col_name, val in zip(group_cols, group_key):
+                qm[f"_{col_name}"] = val
+        else:
+            qm[f"_{group_cols[0]}"] = group_key
 
         if has_segment:
             qm["_segment"] = group["cust_segment_typ"].iloc[0]
@@ -408,15 +433,15 @@ def compute_all_metrics(
     overall = _aggregate_metric_lists(all_query_metrics)
 
     # --- Enrich with per-row contributions for vectorized per-product metrics ---
-    enriched = _enrich_with_contributions(merged, k_values)
-    rel = enriched[enriched["label"] == 1]
+    enriched = _enrich_with_contributions(merged, k_values, group_cols=group_cols, score_col=score_col, label_col=label_col)
+    rel = enriched[enriched[label_col] == 1]
 
     # Per-product: vectorized decomposition
     per_product: dict = {}
     product_query_counts: dict = {}
     if len(rel) > 0:
         per_product, product_query_counts = _aggregate_per_dimension(
-            rel, ["prod_name"], k_values
+            rel, [item_col], k_values
         )
 
     # Per-segment: per-customer metrics → groupby segment → mean (equal customer weight)
@@ -441,7 +466,7 @@ def compute_all_metrics(
     product_segment_query_counts: dict = {}
     if has_segment and len(rel) > 0:
         per_product_segment, product_segment_query_counts = _aggregate_per_dimension(
-            rel, ["prod_name", "cust_segment_typ"], k_values
+            rel, [item_col, "cust_segment_typ"], k_values
         )
 
     # Macro and micro averages

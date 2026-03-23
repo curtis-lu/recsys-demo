@@ -2,7 +2,7 @@
 
 ## Context
 
-商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、pandas/PySpark 雙後端支援、以及 Phase 1 修正（inference 版本修正 + 欄位彈性化）。
+商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、pandas/PySpark 雙後端支援、Phase 1 修正（inference 版本修正 + 欄位彈性化）、config-driven column schema、以及 structured logging 框架。
 
 ## 已確認的關鍵決策
 
@@ -36,7 +36,9 @@ recsys_tfb/
 │   │   ├─ catalog.py           # DataCatalog
 │   │   ├─ node.py              # Node
 │   │   ├─ pipeline.py          # Pipeline
-│   │   ├─ runner.py            # Runner
+│   │   ├─ runner.py            # Runner（含結構化日誌事件）
+│   │   ├─ schema.py            # get_schema() — config-driven 欄位名稱
+│   │   ├─ logging.py           # RunContext、JsonFormatter、ConsoleFormatter、setup_logging
 │   │   └─ versioning.py        # Hash-based 版本管理、manifest、symlink
 │   ├─ io/
 │   │   ├─ __init__.py
@@ -143,6 +145,19 @@ recsys_tfb/
 - **Step 4.5.3** ✅ Inference latest symlink 自動更新
 - **Step 4.5.4** ✅ `prepare_model_input` 欄位設定彈性化（drop_columns / categorical_columns 移至 YAML）
 - **Step 4.5.5** ✅ 測試驗證
+
+### Phase 5：Config-driven Column Schema + Structured Logging ✅
+
+- **Step 5.1** ✅ `core/schema.py` — `get_schema(parameters)` 純函數，從 `parameters.yaml` 的 `schema.columns` 讀取欄位名稱，預設值向後相容
+- **Step 5.2** ✅ Dataset Building Pipeline 欄位替換 — `nodes_pandas.py`、`nodes_spark.py`、`pipeline.py` 所有 hard-coded 欄位改用 `get_schema()`
+- **Step 5.3** ✅ Training Pipeline 欄位替換 — `training/nodes.py` 的 `evaluate_model` 改用 schema
+- **Step 5.4** ✅ Inference Pipeline 欄位替換 — `nodes_pandas.py`、`nodes_spark.py`、`pipeline.py` 改用 schema
+- **Step 5.5** ✅ Evaluation 模組欄位替換 — `metrics.py`、`baselines.py` 改用 schema（optional parameters 參數）
+- **Step 5.6** ✅ `core/logging.py` — RunContext（含 run_id 產生）、JsonFormatter（JSON lines）、ConsoleFormatter（人類可讀）、setup_logging（從 config 設定）
+- **Step 5.7** ✅ Runner 結構化日誌 — pipeline_started/completed/failed、node_started/completed/failed 事件，含 duration_seconds、status 等 extra 欄位
+- **Step 5.8** ✅ CLI 整合 — `__main__.py` 改用 RunContext + setup_logging，run_id 寫入 manifest
+- **Step 5.9** ✅ `conf/base/parameters.yaml` — 新增 `schema.columns` 與 `logging` section
+- **Step 5.10** ✅ 測試 — `test_core/test_schema.py`（11 tests）、`test_core/test_logging.py`（10 tests）、既有測試全數通過
 
 ## 待完成階段
 

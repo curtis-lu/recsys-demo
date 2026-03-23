@@ -5,23 +5,30 @@ import logging
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
+
 logger = logging.getLogger(__name__)
 
 
 def select_sample_keys(label_table: pd.DataFrame, parameters: dict) -> pd.DataFrame:
-    """Stratified sampling by configurable group keys, returning unique (snap_date, cust_id) keys."""
+    """Stratified sampling by configurable group keys, returning unique identity keys."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+
     sample_ratio = parameters["dataset"]["sample_ratio"]
     seed = parameters.get("random_seed", 42)
-    group_keys = parameters["dataset"].get("sample_group_keys", ["snap_date"])
+    group_keys = parameters["dataset"].get("sample_group_keys", [time_col])
 
     # Extract group keys + identity keys, dedup on identity
-    extract_cols = list(dict.fromkeys(group_keys + ["snap_date", "cust_id"]))
-    keys = label_table[extract_cols].drop_duplicates(subset=["snap_date", "cust_id"])
+    extract_cols = list(dict.fromkeys(group_keys + identity_key))
+    keys = label_table[extract_cols].drop_duplicates(subset=identity_key)
 
     sampled = keys.groupby(group_keys, group_keys=False).sample(
         frac=sample_ratio, random_state=seed
     )
-    sampled = sampled[["snap_date", "cust_id"]].reset_index(drop=True)
+    sampled = sampled[identity_key].reset_index(drop=True)
 
     logger.info(
         "Sampled %d keys from %d (ratio=%.2f, group_keys=%s)",
@@ -39,21 +46,26 @@ def split_keys(
     parameters: dict,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split keys into train (in-time sampled), train_dev (out-of-time sampled), val (out-of-time full)."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+
     train_dev_dates = set(pd.to_datetime(parameters["dataset"]["train_dev_snap_dates"]))
     val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
 
     # Train: sampled keys not in train_dev or val dates
     excluded_dates = train_dev_dates | val_dates
-    train_mask = ~sample_keys["snap_date"].isin(excluded_dates)
+    train_mask = ~sample_keys[time_col].isin(excluded_dates)
     train_keys = sample_keys[train_mask].reset_index(drop=True)
 
     # Train-dev: sampled keys in train_dev dates
-    train_dev_mask = sample_keys["snap_date"].isin(train_dev_dates)
+    train_dev_mask = sample_keys[time_col].isin(train_dev_dates)
     train_dev_keys = sample_keys[train_dev_mask].reset_index(drop=True)
 
     # Val: full (unsampled) population for val dates
-    all_keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
-    val_keys = all_keys[all_keys["snap_date"].isin(val_dates)].reset_index(drop=True)
+    all_keys = label_table[identity_key].drop_duplicates()
+    val_keys = all_keys[all_keys[time_col].isin(val_dates)].reset_index(drop=True)
 
     logger.info(
         "Split: train=%d, train_dev=%d (sampled), val=%d (full)",
@@ -68,14 +80,20 @@ def build_dataset(
     keys: pd.DataFrame,
     feature_table: pd.DataFrame,
     label_table: pd.DataFrame,
+    parameters: dict,
 ) -> pd.DataFrame:
     """Join keys with labels and features to build a complete dataset."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    join_key = [time_col] + entity_cols
+
     # First join keys with label_table to get all product rows for sampled customers
-    dataset = keys.merge(label_table, on=["snap_date", "cust_id"], how="inner")
+    dataset = keys.merge(label_table, on=join_key, how="inner")
 
     # Then join with features
     dataset = dataset.merge(
-        feature_table, on=["snap_date", "cust_id"], how="left"
+        feature_table, on=join_key, how="left"
     )
 
     logger.info("Built dataset: %d rows, %d columns", len(dataset), len(dataset.columns))
@@ -89,12 +107,15 @@ def prepare_model_input(
     parameters: dict,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
     """Convert DataFrames to model-ready arrays with categorical encoding."""
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
     drop_cols = pmi_config.get("drop_columns", [
-        "snap_date", "cust_id", "label",
+        schema["time"], *schema["entity"], label_col,
         "apply_start_date", "apply_end_date", "cust_segment_typ",
     ])
-    categorical_cols = pmi_config.get("categorical_columns", ["prod_name"])
+    categorical_cols = pmi_config.get("categorical_columns", [schema["item"]])
 
     # Build category mapping from train set only
     category_mappings = {}
@@ -110,11 +131,11 @@ def prepare_model_input(
         return result
 
     X_train = _transform(train_set)
-    y_train = train_set[["label"]].reset_index(drop=True)
+    y_train = train_set[[label_col]].reset_index(drop=True)
     X_train_dev = _transform(train_dev_set)
-    y_train_dev = train_dev_set[["label"]].reset_index(drop=True)
+    y_train_dev = train_dev_set[[label_col]].reset_index(drop=True)
     X_val = _transform(val_set)
-    y_val = val_set[["label"]].reset_index(drop=True)
+    y_val = val_set[[label_col]].reset_index(drop=True)
 
     feature_columns = list(X_train.columns)
 

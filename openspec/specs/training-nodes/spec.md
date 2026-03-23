@@ -82,3 +82,17 @@ The `evaluate_model` function's behavior SHALL remain unchanged — same inputs,
 #### Scenario: Import from evaluation module
 - **WHEN** training/nodes.py is inspected
 - **THEN** it contains `from recsys_tfb.evaluation.metrics import compute_ap` (no local `_compute_ap` definition)
+
+
+## MODIFIED Requirements
+
+### Requirement: evaluate_model uses schema for identity columns
+The `evaluate_model` function SHALL obtain identity columns from `get_schema(parameters)` instead of hard-coding `["snap_date", "cust_id", "prod_name"]`.
+
+#### Scenario: Default identity columns
+- **WHEN** called with parameters without `schema` section
+- **THEN** SHALL use `["snap_date", "cust_id", "prod_name"]` (identical to current behavior)
+
+#### Scenario: Custom identity columns
+- **WHEN** called with `schema.columns.entity: ["branch_id", "cust_id"]`
+- **THEN** SHALL use `["snap_date", "branch_id", "cust_id", "prod_name"]` for groupby and ranking

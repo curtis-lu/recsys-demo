@@ -32,7 +32,9 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ⬚ Probability calibration and rule-based reranking
 - ⬚ Strategy 2-4
 - ⬚ Monthly monitoring pipeline
-- ⬚ 結構化日誌（Pipeline-level, Node-level, Data-quality, Artifact/lineage）
+- ✅ Config-driven column schema (`get_schema()` from `parameters.yaml`, all pipelines use dynamic column names)
+- ✅ Structured logging (Pipeline-level, Node-level JSON structured events, RunContext with run_id, dual console+file output)
+- ⬚ Data-quality logging, Artifact/lineage logging
 - ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
 - ✅ Inference output 使用實際 model hash + latest symlink
 
@@ -53,8 +55,10 @@ src/recsys_tfb/
     catalog.py          — DataCatalog (dataset registry & resolution)
     node.py             — Node (function wrapper with named I/O)
     pipeline.py         — Pipeline (topological sort via Kahn's algorithm)
-    runner.py           — Runner (sequential execution)
+    runner.py           — Runner (sequential execution, structured log events)
     versioning.py       — Hash-based versioning, manifests, symlinks
+    schema.py           — get_schema() config-driven column names
+    logging.py          — RunContext, JsonFormatter, ConsoleFormatter, setup_logging
   io/
     base.py             — AbstractDataset interface
     parquet_dataset.py  — ParquetDataset (pandas/spark dual backend)
@@ -163,7 +167,7 @@ Build incrementally per the PRD:
 | Phase | 名稱                          | 內容                                                                                          |
 | ----- | --------------------------- | ------------------------------------------------------------------------------------------- |
 | 1     | 修正已知問題 + 欄位彈性化 ✅            | README `--env` 文件修正、inference output 改用實際 model hash、dataset pipeline hard-coded 欄位抽取到 YAML |
-| 2     | 結構化日誌框架                     | run_id 產生、Pipeline-level + Node-level 結構化日誌                                                 |
+| 2     | Config-driven schema + Structured logging ✅ | `get_schema()` 取代所有 hard-coded 欄位、RunContext + JsonFormatter/ConsoleFormatter 雙輸出、Runner 結構化事件 |
 | 3     | Data-quality + Artifact log | Data-quality log、Artifact/lineage log                                                       |
 | 4     | 版本管理增強                      | manifest 擴充、版本查詢 CLI、rollback 機制                                                            |
 | 5     | Safe rerun 檢查點              | 跳過已完成步驟，從失敗步驟接續執行                                                                           |

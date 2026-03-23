@@ -34,19 +34,19 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
             ),
             Node(
                 build_dataset,
-                inputs=["train_keys", "feature_table", "label_table"],
+                inputs=["train_keys", "feature_table", "label_table", "parameters"],
                 outputs="train_set",
                 name="build_train_dataset",
             ),
             Node(
                 build_dataset,
-                inputs=["train_dev_keys", "feature_table", "label_table"],
+                inputs=["train_dev_keys", "feature_table", "label_table", "parameters"],
                 outputs="train_dev_set",
                 name="build_train_dev_dataset",
             ),
             Node(
                 build_dataset,
-                inputs=["val_keys", "feature_table", "label_table"],
+                inputs=["val_keys", "feature_table", "label_table", "parameters"],
                 outputs="val_set",
                 name="build_val_dataset",
             ),

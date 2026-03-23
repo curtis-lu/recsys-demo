@@ -36,3 +36,13 @@ Dataset pipeline 成功完成後 SHALL 在版本目錄中寫入 manifest.json。
 #### Scenario: pipeline 失敗不寫入 manifest
 - **WHEN** dataset pipeline 執行失敗
 - **THEN** SHALL 不寫入 manifest.json
+
+
+## MODIFIED Requirements
+
+### Requirement: Dataset manifest includes run_id
+The dataset pipeline manifest.json SHALL include a `run_id` field recording the execution run identifier.
+
+#### Scenario: run_id in dataset manifest
+- **WHEN** the dataset pipeline completes and writes manifest.json
+- **THEN** the manifest SHALL include `"run_id": "<run_id>"` matching the current execution's run_id

@@ -51,3 +51,17 @@ The system SHALL provide a function `prepare_model_input(train_set, train_dev_se
 #### Scenario: Output format identical to pandas version
 - **WHEN** prepare_model_input completes
 - **THEN** it SHALL return (X_train: pd.DataFrame, y_train: np.ndarray, X_train_dev: pd.DataFrame, y_train_dev: np.ndarray, X_val: pd.DataFrame, y_val: np.ndarray, preprocessor: dict, category_mappings: dict)
+
+
+## MODIFIED Requirements
+
+### Requirement: Column names are configurable (Spark backend)
+All Spark dataset pipeline nodes SHALL obtain column names from `get_schema(parameters)` instead of hard-coded strings. Changes SHALL mirror the pandas backend modifications exactly.
+
+#### Scenario: Default column names match current behavior
+- **WHEN** nodes are called with parameters that have no `schema` section
+- **THEN** behavior SHALL be identical to the current hard-coded implementation
+
+#### Scenario: Custom entity columns in Spark joins
+- **WHEN** `schema.columns.entity` is `["branch_id", "cust_id"]`
+- **THEN** Spark join conditions SHALL use both columns

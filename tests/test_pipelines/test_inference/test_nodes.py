@@ -92,17 +92,17 @@ class TestBuildScoringDataset:
 class TestApplyPreprocessor:
     def test_output_columns_match_training(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         assert list(result.columns) == preprocessor["feature_columns"]
 
     def test_prod_name_encoded(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         assert result["prod_name"].dtype in [np.int8, np.int16, np.int32, np.int64]
 
     def test_drops_non_feature_columns(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         forbidden = {"snap_date", "cust_id", "label"}
         assert forbidden.isdisjoint(set(result.columns))
 
@@ -110,50 +110,50 @@ class TestApplyPreprocessor:
         scoring = build_scoring_dataset(feature_table, parameters)
         preprocessor["feature_columns"] = preprocessor["feature_columns"] + ["nonexistent_col"]
         with pytest.raises(ValueError, match="Missing feature columns"):
-            apply_preprocessor(scoring, preprocessor)
+            apply_preprocessor(scoring, preprocessor, parameters)
 
     def test_label_column_ignored(self, feature_table, parameters, preprocessor):
         """Inference data has no label column; drop_columns should use errors='ignore'."""
         scoring = build_scoring_dataset(feature_table, parameters)
         assert "label" not in scoring.columns
         # Should not raise
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         assert len(result) == len(scoring)
 
 
 class TestPredictScores:
     def test_output_columns(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         # Create a mock booster-like object
         class MockModel:
             def predict(self, X):
                 return np.random.rand(len(X))
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
     def test_row_count_matches(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert len(result) == len(scoring)
 
     def test_prod_name_from_prod_name(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert set(result["prod_name"].unique()) == set(parameters["inference"]["products"])
 
 

@@ -83,7 +83,7 @@ class TestBuildScoringDataset:
 class TestApplyPreprocessor:
     def test_output_has_identity_and_features(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         # Should have identity cols + feature cols
         assert "snap_date" in result.columns
         assert "cust_id" in result.columns
@@ -93,7 +93,7 @@ class TestApplyPreprocessor:
 
     def test_feature_column_order(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        result = apply_preprocessor(scoring, preprocessor)
+        result = apply_preprocessor(scoring, preprocessor, parameters)
         identity_cols = ["snap_date", "cust_id", "prod_name"]
         expected = identity_cols + preprocessor["feature_columns"]
         assert result.columns == expected
@@ -102,42 +102,42 @@ class TestApplyPreprocessor:
         scoring = build_scoring_dataset(feature_table, parameters)
         preprocessor["feature_columns"] = preprocessor["feature_columns"] + ["nonexistent_col"]
         with pytest.raises(ValueError, match="Missing feature columns"):
-            apply_preprocessor(scoring, preprocessor)
+            apply_preprocessor(scoring, preprocessor, parameters)
 
 
 class TestPredictScores:
     def test_output_is_spark_df(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
             def predict(self, X):
                 return np.random.rand(len(X))
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         from pyspark.sql import DataFrame
         assert isinstance(result, DataFrame)
 
     def test_output_columns(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
     def test_row_count_matches(self, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(feature_table, parameters)
-        X_score = apply_preprocessor(scoring, preprocessor)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring)
+        result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert result.count() == 9  # 3 customers x 3 products
 
 

@@ -24,10 +24,24 @@ class Runner:
                         f"which is not in the catalog and not produced by any prior node"
                     )
 
+        node_count = len(pipeline.nodes)
         pipeline_start = time.time()
 
+        logger.info(
+            "Pipeline started (%d nodes)", node_count,
+            extra={"event": "pipeline_started", "node_count": node_count},
+        )
+
         for node in pipeline.nodes:
-            logger.info("Running node: %s", node.name)
+            logger.info(
+                "Running node: %s", node.name,
+                extra={
+                    "event": "node_started",
+                    "node": node.name,
+                    "input_names": list(node.inputs),
+                    "output_names": list(node.outputs),
+                },
+            )
             node_start = time.time()
 
             try:
@@ -44,12 +58,58 @@ class Runner:
                     for name, value in zip(node.outputs, result):
                         catalog.save(name, value)
 
-            except Exception:
-                logger.error("Node '%s' failed", node.name)
+            except Exception as exc:
+                duration = time.time() - node_start
+                logger.error(
+                    "Node '%s' failed after %.2fs: %s",
+                    node.name, duration, exc,
+                    extra={
+                        "event": "node_failed",
+                        "node": node.name,
+                        "duration_seconds": round(duration, 3),
+                        "status": "failed",
+                        "error_message": str(exc),
+                        "exception_type": type(exc).__name__,
+                        "input_names": list(node.inputs),
+                        "output_names": list(node.outputs),
+                    },
+                )
+
+                # Emit pipeline failed
+                total = time.time() - pipeline_start
+                logger.error(
+                    "Pipeline failed after %.2fs", total,
+                    extra={
+                        "event": "pipeline_failed",
+                        "duration_seconds": round(total, 3),
+                        "status": "failed",
+                        "node_count": node_count,
+                        "error_message": str(exc),
+                        "exception_type": type(exc).__name__,
+                    },
+                )
                 raise
 
             duration = time.time() - node_start
-            logger.info("Node %s completed in %.2fs", node.name, duration)
+            logger.info(
+                "Node %s completed in %.2fs", node.name, duration,
+                extra={
+                    "event": "node_completed",
+                    "node": node.name,
+                    "duration_seconds": round(duration, 3),
+                    "status": "success",
+                    "input_names": list(node.inputs),
+                    "output_names": list(node.outputs),
+                },
+            )
 
         total = time.time() - pipeline_start
-        logger.info("Pipeline completed in %.2fs", total)
+        logger.info(
+            "Pipeline completed in %.2fs", total,
+            extra={
+                "event": "pipeline_completed",
+                "duration_seconds": round(total, 3),
+                "status": "success",
+                "node_count": node_count,
+            },
+        )

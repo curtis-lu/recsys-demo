@@ -8,10 +8,10 @@ import numpy as np
 import optuna
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-
-
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+
+logger = logging.getLogger(__name__)
 
 
 def tune_hyperparameters(
@@ -158,24 +158,33 @@ def evaluate_model(
     Delegates metric computation to evaluation.metrics.compute_all_metrics,
     ensuring per-product AP uses correct per-customer ranking semantics.
     """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    identity_cols = schema["identity_columns"]
+    group_cols = [time_col] + entity_cols
+
     y_score = model.predict(X_val)
 
     # Build DataFrames expected by compute_all_metrics
-    predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-    predictions["score"] = y_score
-    predictions["rank"] = (
-        predictions.groupby(["snap_date", "cust_id"])["score"]
+    predictions = val_set[identity_cols].reset_index(drop=True).copy()
+    predictions[score_col] = y_score
+    predictions[schema["rank"]] = (
+        predictions.groupby(group_cols)[score_col]
         .rank(method="first", ascending=False)
         .astype(int)
     )
 
-    labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-    labels["label"] = y_val["label"].values
+    labels = val_set[identity_cols].reset_index(drop=True).copy()
+    labels[label_col] = y_val[label_col].values
 
     metrics = compute_all_metrics(predictions, labels, k_values=["all"])
 
     # Extract map@N where N = number of unique products
-    n_products = predictions["prod_name"].nunique()
+    n_products = predictions[item_col].nunique()
     map_key = f"map@{n_products}"
 
     overall_map = metrics["overall"].get(map_key, 0.0)
