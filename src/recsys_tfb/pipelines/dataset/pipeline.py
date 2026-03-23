@@ -24,7 +24,7 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
         [
             Node(
                 select_sample_keys,
-                inputs=["label_table", "parameters"],
+                inputs=["sample_pool", "parameters"],
                 outputs="sample_keys",
             ),
             Node(

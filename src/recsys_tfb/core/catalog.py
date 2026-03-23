@@ -29,12 +29,17 @@ class MemoryDataset(AbstractDataset):
     def exists(self) -> bool:
         return self._data is not None
 
+    def release(self) -> None:
+        """Release the in-memory data to free memory."""
+        self._data = None
+
 
 class DataCatalog:
     """Manage dataset instances, providing unified load/save/exists interface."""
 
     def __init__(self, config: dict | None = None):
         self._datasets: dict[str, AbstractDataset] = {}
+        self._auto_created: set[str] = set()
         if config:
             self._init_from_config(config)
 
@@ -61,6 +66,7 @@ class DataCatalog:
         if name not in self._datasets:
             # Auto-create MemoryDataset for intermediate results
             self._datasets[name] = MemoryDataset()
+            self._auto_created.add(name)
         self._datasets[name].save(data)
 
     def exists(self, name: str) -> bool:
@@ -71,6 +77,10 @@ class DataCatalog:
     def add(self, name: str, dataset: AbstractDataset) -> None:
         """Register a dataset programmatically."""
         self._datasets[name] = dataset
+
+    def get_dataset(self, name: str):
+        """Return the dataset instance by name, or None if not registered."""
+        return self._datasets.get(name)
 
     def list(self) -> list[str]:
         """Return all registered dataset names."""

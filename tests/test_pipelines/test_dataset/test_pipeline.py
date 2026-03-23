@@ -10,7 +10,7 @@ class TestDatasetPipeline:
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
-        assert pipeline.inputs == {"feature_table", "label_table", "parameters"}
+        assert pipeline.inputs == {"feature_table", "label_table", "sample_pool", "parameters"}
 
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()

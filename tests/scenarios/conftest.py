@@ -59,6 +59,10 @@ def setup_workdir(
     feature_table.to_parquet(data_dir / "feature_table.parquet", index=False)
     label_table.to_parquet(data_dir / "label_table.parquet", index=False)
 
+    # 產生 sample_pool（unique customer-month with segment）
+    sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates().reset_index(drop=True)
+    sample_pool.to_parquet(data_dir / "sample_pool.parquet", index=False)
+
     return work_dir
 
 

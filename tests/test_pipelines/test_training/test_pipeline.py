@@ -117,11 +117,26 @@ class TestTrainingPipelineE2E:
             },
         }
 
+        # -- Build sample_pool from label_table (unique customer-month with segment) --
+        sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates().reset_index(drop=True)
+
         # -- Build catalog with MemoryDatasets for source data --
+        # Pre-register all datasets used across both pipelines so they won't
+        # be auto-created (and thus won't be released by memory management).
+        # In production, these are ParquetDataset/etc. in catalog.yaml.
         catalog = DataCatalog()
         catalog.add("feature_table", MemoryDataset(feature_table))
         catalog.add("label_table", MemoryDataset(label_table))
+        catalog.add("sample_pool", MemoryDataset(sample_pool))
         catalog.add("parameters", MemoryDataset(parameters))
+        for name in (
+            "sample_keys", "train_keys", "train_dev_keys", "val_keys",
+            "train_set", "train_dev_set", "val_set",
+            "X_train", "y_train", "X_train_dev", "y_train_dev",
+            "X_val", "y_val", "preprocessor", "category_mappings",
+            "best_params", "model", "evaluation_results",
+        ):
+            catalog.add(name, MemoryDataset())
 
         runner = Runner()
 

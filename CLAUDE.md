@@ -10,6 +10,12 @@ Product recommendation ranking model for a commercial bank. Predicts customer in
 - **Training**: monthly snapshots (12 months), run on-demand
 - **Target environment**: PySpark 3.3.2 on Hadoop/HDFS/Hive, Ploomber DAG orchestration, no internet, no extra packages, CPU-only (4 core, 128GB RAM)
 
+## Related Documents
+
+- **[PRD.md](PRD.md)** — 產品需求文件：專案目標、產品清單、4大 pipeline 功能需求、技術要求、設計原則
+- **[plan.md](plan.md)** — 實作歷程記錄：關鍵決策、各 Phase 的具體實作步驟（Step breakdown）
+- **[kedro_design_philosophy.md](kedro_design_philosophy.md)** — 設計哲學：Kedro-inspired 架構原則與最佳實踐
+
 ## Tech Stack & Versions
 
 Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.0 | Optuna 4.5.0 | Ploomber 0.23.3 | pandas 1.5.3 | numpy 1.25.0 | pyarrow 14.0.1 | pytest 7.3.1 | SHAP 0.42.1 | Typer 0.20.1
@@ -28,15 +34,17 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ Synthetic data generator (`scripts/generate_synthetic_data.py`)
 - ✅ Comprehensive test suite
 - ✅ Evaluation module (mAP, nDCG, precision@K, recall@K, MRR + macro/micro avg + baselines + Plotly HTML reports + model comparison CLI)
-- ⬚ Source Data ETL Pipeline (not yet implemented)
-- ⬚ Probability calibration and rule-based reranking
-- ⬚ Strategy 2-4
-- ⬚ Monthly monitoring pipeline
 - ✅ Config-driven column schema (`get_schema()` from `parameters.yaml`, all pipelines use dynamic column names)
 - ✅ Structured logging (Pipeline-level, Node-level JSON structured events, RunContext with run_id, dual console+file output)
-- ⬚ Data-quality logging, Artifact/lineage logging
 - ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
 - ✅ Inference output 使用實際 model hash + latest symlink
+- ✅ 框架增強（Catalog memory release、Sample pool 分離、Val sampling）
+- ⬚ 演算法與推論增強（ModelAdapter 抽象、Probability calibration、Spark 優化、Inference sanity checks）
+- ⬚ 可觀測性增強（Data-quality logging、Artifact/lineage logging、Evaluation pipeline 化）
+- ⬚ 版本管理增強（manifest 擴充、版本查詢 CLI、rollback）
+- ⬚ Safe rerun 檢查點
+- ⬚ Source Data ETL Pipeline
+- ⬚ Strategy 2-4、規則化重新排序、月度監控、錯誤分析 notebook
 
 ## Architecture: 4 Pipelines
 
@@ -163,14 +171,31 @@ Build incrementally per the PRD:
 
 ## Development Roadmap
 
+### 已完成
 
-| Phase | 名稱                          | 內容                                                                                          |
-| ----- | --------------------------- | ------------------------------------------------------------------------------------------- |
-| 1     | 修正已知問題 + 欄位彈性化 ✅            | README `--env` 文件修正、inference output 改用實際 model hash、dataset pipeline hard-coded 欄位抽取到 YAML |
-| 2     | Config-driven schema + Structured logging ✅ | `get_schema()` 取代所有 hard-coded 欄位、RunContext + JsonFormatter/ConsoleFormatter 雙輸出、Runner 結構化事件 |
-| 3     | Data-quality + Artifact log | Data-quality log、Artifact/lineage log                                                       |
-| 4     | 版本管理增強                      | manifest 擴充、版本查詢 CLI、rollback 機制                                                            |
-| 5     | Safe rerun 檢查點              | 跳過已完成步驟，從失敗步驟接續執行                                                                           |
+| Phase | 名稱 | 內容 |
+|-------|------|------|
+| 1 | 專案骨架 ✅ | pyproject.toml、ConfigLoader、I/O 抽象層、DataCatalog、Node/Pipeline/Runner、CLI、Config YAML |
+| 2 | Dataset Building Pipeline ✅ | 假資料、nodes（pandas/spark）、Pipeline 定義、parameters_dataset.yaml、JSONDataset、測試 |
+| 3 | Training Pipeline ✅ | Optuna 調參、LightGBM 訓練、mAP 評估、MLflow 記錄、Pipeline 定義、測試 |
+| 4 | Inference Pipeline + 版本管理 ✅ | 推論 nodes（pandas/spark）、Hash-based 版本管理、模型晉升、Catalog 模板變數、測試 |
+| 4.5 | 修正已知問題 + 欄位彈性化 ✅ | README 修正、inference output 改用實際 model hash、欄位抽取到 YAML |
+| 5 | Config-driven schema + Structured logging ✅ | `get_schema()` 取代 hard-coded 欄位、RunContext + 雙輸出、Runner 結構化事件 |
+| 6 | 框架增強 ✅ | Catalog memory release、Sample pool 分離、Val sampling |
+
+### 待完成
+
+| Phase | 名稱 | 內容 |
+|-------|------|------|
+| 7 | 演算法與推論增強 | 演算法抽象（LightGBM + XGBoost ModelAdapter）、Probability calibration、Spark 優化（toPandas 延後）、Inference sanity checks |
+| 8 | 可觀測性增強 | Data-quality logging（DataFrame profiling）、Artifact/lineage logging、Evaluation pipeline 化 |
+| 9 | 版本管理增強 | manifest 擴充、版本查詢 CLI、rollback 機制 |
+| 10 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
+| — | Source Data ETL Pipeline | SQL 轉換、Hive 整合、資料驗證 |
+| — | 規則化重新排序 | rule-based reranking |
+| — | 月度監控 | 機率值分佈監控、資料筆數檢查 |
+| — | Strategy 2-4 | OVR 多模型、LambdaRank 排序、雙層排序 |
+| — | 錯誤分析 notebook | template notebook |
 
 
 ## Production Constraints

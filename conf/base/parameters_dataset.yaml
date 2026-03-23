@@ -1,5 +1,6 @@
 dataset:
   sample_ratio: 1.0
+  val_sample_ratio: 1.0
   sample_group_keys:
     - "cust_segment_typ"
   train_dev_snap_dates:

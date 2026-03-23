@@ -10,7 +10,7 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-def select_sample_keys(label_table: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+def select_sample_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.DataFrame:
     """Stratified sampling by configurable group keys, returning unique identity keys."""
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -23,7 +23,7 @@ def select_sample_keys(label_table: pd.DataFrame, parameters: dict) -> pd.DataFr
 
     # Extract group keys + identity keys, dedup on identity
     extract_cols = list(dict.fromkeys(group_keys + identity_key))
-    keys = label_table[extract_cols].drop_duplicates(subset=identity_key)
+    keys = sample_pool[extract_cols].drop_duplicates(subset=identity_key)
 
     sampled = keys.groupby(group_keys, group_keys=False).sample(
         frac=sample_ratio, random_state=seed
@@ -109,6 +109,22 @@ def prepare_model_input(
     """Convert DataFrames to model-ready arrays with categorical encoding."""
     schema = get_schema(parameters)
     label_col = schema["label"]
+
+    # Optional val set sampling to reduce memory during training
+    val_sample_ratio = parameters.get("dataset", {}).get("val_sample_ratio", 1.0)
+    if val_sample_ratio < 1.0:
+        seed = parameters.get("random_seed", 42)
+        group_keys = parameters.get("dataset", {}).get("sample_group_keys", [schema["time"]])
+        available_group_keys = [k for k in group_keys if k in val_set.columns]
+        if available_group_keys:
+            val_set = val_set.groupby(available_group_keys, group_keys=False).sample(
+                frac=val_sample_ratio, random_state=seed
+            ).reset_index(drop=True)
+        else:
+            val_set = val_set.sample(frac=val_sample_ratio, random_state=seed).reset_index(drop=True)
+        logger.info(
+            "Val set sampled to %d rows (ratio=%.2f)", len(val_set), val_sample_ratio
+        )
 
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
     drop_cols = pmi_config.get("drop_columns", [

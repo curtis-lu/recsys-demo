@@ -12,7 +12,7 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-def select_sample_keys(label_table: DataFrame, parameters: dict) -> DataFrame:
+def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     """Stratified sampling by configurable group keys, returning unique identity keys."""
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -25,7 +25,7 @@ def select_sample_keys(label_table: DataFrame, parameters: dict) -> DataFrame:
 
     # Extract unique identity keys with group columns
     extract_cols = list(dict.fromkeys(group_keys + identity_key))
-    keys = label_table.select(*extract_cols).dropDuplicates(identity_key)
+    keys = sample_pool.select(*extract_cols).dropDuplicates(identity_key)
 
     if sample_ratio >= 1.0:
         sampled = keys.select(*identity_key)
@@ -129,6 +129,22 @@ def prepare_model_input(
     train_pdf = train_set.toPandas()
     train_dev_pdf = train_dev_set.toPandas()
     val_pdf = val_set.toPandas()
+
+    # Optional val set sampling to reduce memory during training
+    val_sample_ratio = parameters.get("dataset", {}).get("val_sample_ratio", 1.0)
+    if val_sample_ratio < 1.0:
+        seed = parameters.get("random_seed", 42)
+        group_keys = parameters.get("dataset", {}).get("sample_group_keys", [schema["time"]])
+        available_group_keys = [k for k in group_keys if k in val_pdf.columns]
+        if available_group_keys:
+            val_pdf = val_pdf.groupby(available_group_keys, group_keys=False).sample(
+                frac=val_sample_ratio, random_state=seed
+            ).reset_index(drop=True)
+        else:
+            val_pdf = val_pdf.sample(frac=val_sample_ratio, random_state=seed).reset_index(drop=True)
+        logger.info(
+            "Val set sampled to %d rows (ratio=%.2f)", len(val_pdf), val_sample_ratio
+        )
 
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
     drop_cols = pmi_config.get("drop_columns", [

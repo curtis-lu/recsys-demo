@@ -1,4 +1,4 @@
-# Dataset Building Pipeline
+# Source Tables
 feature_table:
   type: ParquetDataset
   filepath: data/feature_table.parquet
@@ -7,6 +7,11 @@ feature_table:
 label_table:
   type: ParquetDataset
   filepath: data/label_table.parquet
+  backend: pandas
+
+sample_pool:
+  type: ParquetDataset
+  filepath: data/sample_pool.parquet
   backend: pandas
 
 # Dataset Building Pipeline - Intermediate Outputs

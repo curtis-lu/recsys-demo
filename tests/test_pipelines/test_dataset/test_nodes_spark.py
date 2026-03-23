@@ -55,6 +55,21 @@ def label_table(spark):
 
 
 @pytest.fixture
+def sample_pool(spark):
+    segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
+    rows = []
+    for snap in ["2024-01-31", "2024-02-29", "2024-03-31"]:
+        snap_dt = pd.Timestamp(snap)
+        for cid in ["C001", "C002", "C003", "C004"]:
+            rows.append({
+                "snap_date": snap_dt,
+                "cust_id": cid,
+                "cust_segment_typ": segments[cid],
+            })
+    return spark.createDataFrame(pd.DataFrame(rows))
+
+
+@pytest.fixture
 def parameters():
     return {
         "random_seed": 42,
@@ -68,25 +83,25 @@ def parameters():
 
 
 class TestSelectSampleKeys:
-    def test_returns_correct_columns(self, label_table, parameters):
-        result = select_sample_keys(label_table, parameters)
+    def test_returns_correct_columns(self, sample_pool, parameters):
+        result = select_sample_keys(sample_pool, parameters)
         assert sorted(result.columns) == ["cust_id", "snap_date"]
 
-    def test_stratified_by_snap_date(self, label_table, parameters):
-        result = select_sample_keys(label_table, parameters)
+    def test_stratified_by_snap_date(self, sample_pool, parameters):
+        result = select_sample_keys(sample_pool, parameters)
         pdf = result.toPandas()
         counts = pdf.groupby("snap_date").size()
         # 4 customers per snap_date, sample_ratio=0.5 → 2 each
         assert all(counts == 2)
 
-    def test_full_ratio_returns_all(self, label_table, parameters):
+    def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        result = select_sample_keys(label_table, params)
+        result = select_sample_keys(sample_pool, params)
         # 4 customers x 3 snap_dates = 12
         assert result.count() == 12
 
-    def test_no_duplicates(self, label_table, parameters):
-        result = select_sample_keys(label_table, parameters)
+    def test_no_duplicates(self, sample_pool, parameters):
+        result = select_sample_keys(sample_pool, parameters)
         assert result.count() == result.dropDuplicates(["snap_date", "cust_id"]).count()
 
 
@@ -119,9 +134,9 @@ class TestSplitKeys:
         assert len(train_dates & val_dates) == 0
         assert len(td_dates & val_dates) == 0
 
-    def test_val_is_full_population(self, label_table, parameters):
+    def test_val_is_full_population(self, sample_pool, label_table, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 0.5}}
-        sample_keys = select_sample_keys(label_table, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         _, _, val = split_keys(sample_keys, label_table, params)
         # Val should have all 4 customers for 2024-03-31
         assert val.count() == 4

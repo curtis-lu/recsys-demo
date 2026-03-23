@@ -334,14 +334,43 @@ def generate_label_table(
     return df
 
 
+def generate_sample_pool(feature_table: pd.DataFrame) -> pd.DataFrame:
+    """Generate sample pool table with unique customer-month rows and segment."""
+    # Use the same segment assignment as feature_table generation
+    rng_seg = np.random.default_rng(RANDOM_SEED)
+    max_customers = int(INITIAL_CUSTOMERS * (1 + MONTHLY_GROWTH_RATE) ** (len(SNAP_DATES) - 1)) + 10
+    all_segments = rng_seg.choice(SEGMENTS, size=max_customers, p=SEGMENT_PROBS)
+
+    rows_list = []
+    for snap_date in SNAP_DATES:
+        snap_dt = pd.Timestamp(snap_date)
+        snap_features = feature_table[feature_table["snap_date"] == snap_dt]
+        n_cust = len(snap_features)
+        cust_ids = snap_features["cust_id"].values
+        segments = all_segments[:n_cust]
+
+        pool_df = pd.DataFrame({
+            "snap_date": snap_dt,
+            "cust_id": cust_ids,
+            "cust_segment_typ": segments,
+        })
+        rows_list.append(pool_df)
+
+    df = pd.concat(rows_list, ignore_index=True)
+    df["snap_date"] = pd.to_datetime(df["snap_date"])
+    return df
+
+
 def main():
     rng = np.random.default_rng(RANDOM_SEED)
 
     feature_table = generate_feature_table(rng)
     label_table = generate_label_table(rng, feature_table)
+    sample_pool = generate_sample_pool(feature_table)
 
     feature_table.to_parquet("data/feature_table.parquet", index=False)
     label_table.to_parquet("data/label_table.parquet", index=False)
+    sample_pool.to_parquet("data/sample_pool.parquet", index=False)
 
     # Summary
     print("=" * 60)
@@ -363,6 +392,10 @@ def main():
         rate = label_table[label_table["prod_name"] == prod]["label"].mean()
         target = LABEL_RATES[prod]
         print(f"    {prod}: {rate:.3f} (target: {target:.3f})")
+
+    print(f"\nSample pool: {sample_pool.shape}")
+    print(f"  Columns: {list(sample_pool.columns)}")
+    print(f"  Segments: {sample_pool['cust_segment_typ'].value_counts().to_dict()}")
 
     print(f"\nFeature statistics:")
     numeric_cols = feature_table.select_dtypes(include="number").columns

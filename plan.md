@@ -1,8 +1,10 @@
-# 專案骨架 + MVP Pipeline 實作計畫
+# 實作歷程記錄
 
 ## Context
 
-商業銀行產品推薦排序模型專案（recsys_tfb），採用 Kedro-inspired 自建輕量框架。已完成 MVP（Strategy 1 + mAP）、Inference Pipeline、hash-based 版本管理、pandas/PySpark 雙後端支援、Phase 1 修正（inference 版本修正 + 欄位彈性化）、config-driven column schema、以及 structured logging 框架。
+商業銀行產品推薦排序模型專案（recsys_tfb）的實作歷程記錄。記錄各階段的關鍵決策與具體實作步驟。
+
+> **注意**：待完成項目與開發路線圖請參閱 [CLAUDE.md](CLAUDE.md) 的 Development Roadmap。
 
 ## 已確認的關鍵決策
 
@@ -159,57 +161,10 @@ recsys_tfb/
 - **Step 5.9** ✅ `conf/base/parameters.yaml` — 新增 `schema.columns` 與 `logging` section
 - **Step 5.10** ✅ 測試 — `test_core/test_schema.py`（11 tests）、`test_core/test_logging.py`（10 tests）、既有測試全數通過
 
-## 待完成階段
+### Phase 6：框架增強 ✅
 
-### Phase 5：Source Data ETL Pipeline
+- **Step 6.1** ✅ Catalog Memory Release — `MemoryDataset.release()` 方法、`DataCatalog.get_dataset()` 存取器、`DataCatalog._auto_created` 追蹤集合、Runner `_build_last_consumer_map()` 靜態方法 + 自動釋放邏輯（僅釋放 auto-created 的 pipeline 中間產物）、`dataset_released` structured log event
+- **Step 6.2** ✅ Sample Pool 分離 — `conf/base/catalog.yaml` 新增 `sample_pool` ParquetDataset、`select_sample_keys` 輸入從 `label_table` 改為 `sample_pool`（pandas/spark 雙後端）、`pipeline.py` 接線更新、假資料產生 `data/sample_pool.parquet`
+- **Step 6.3** ✅ Val Sampling — `parameters_dataset.yaml` 新增 `val_sample_ratio: 1.0`、`prepare_model_input` 加入 val set 可選分層抽樣（pandas/spark 雙後端）、group keys fallback 機制
+- **Step 6.4** ✅ 整合驗證 — 假資料重新產生、全部測試通過（351 passed）、dataset pipeline 端到端驗證、training pipeline 端到端驗證
 
-- SQL-based 資料轉換（PySpark），產出 feature table 與 label table
-- SQL 檔案數量與執行順序由 YAML 設定
-- 來源資料表新鮮度檢查
-- 資料品質驗證（空值、重複、分佈等）
-- 整合 Hive table 讀寫
-
-### Phase 6：進階功能
-
-- ✅ 進階評估指標：precision@K、recall@K、nDCG、MRR（evaluation/metrics.py）
-- ✅ 指標切面：依整體、產品個別、自定義客群分群（evaluation/segments.py）
-- ✅ Macro/micro average：分產品、分客群、分產品×客群
-- ✅ Baseline 比較：全域/客群熱門度排序（evaluation/baselines.py）
-- ✅ 模型比較 CLI：analyze + compare 子命令（scripts/evaluate_model.py）
-- ✅ Plotly HTML 互動報告：離線可用、自包含（evaluation/report.py）
-- ✅ 分數分布 + 排名分布 + 校準曲線視覺化（evaluation/distributions.py, calibration.py）
-- ⬚ 規則化重新排序（rule-based reranking）
-- ⬚ 月度監控 pipeline（機率值分佈監控、資料筆數檢查）
-- ⬚ Safe rerun 檢查點機制
-
-### Phase 7：進階策略
-
-- Strategy 2：One-vs-Rest 多模型
-- Strategy 3：Strategy 1/2 + 單層排序（LambdaRank）
-- Strategy 4：Strategy 1/2 + 雙層排序（大類 → 中類）
-- 錯誤分析 notebook template
-
-## 驗證方式
-
-```bash
-# 安裝專案
-pip install -e ".[dev]"
-
-# 執行單元測試
-pytest tests/ -v
-
-# 執行特定測試
-pytest tests/test_core/test_config.py -v
-
-# 跑完整 pipeline
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
-python -m recsys_tfb --pipeline inference --env local
-
-# 模型晉升（手動觸發）
-python scripts/promote_model.py
-
-# 模型評估
-python scripts/evaluate_model.py analyze <model_version> --snap-date 2024-03-31
-python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2024-03-31
-```

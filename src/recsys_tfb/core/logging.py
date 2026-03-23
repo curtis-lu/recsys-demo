@@ -70,7 +70,7 @@ class JsonFormatter(logging.Formatter):
         # Merge extra fields attached by callers (e.g. event, node, duration)
         for key in ("event", "node", "duration_seconds", "input_names",
                      "output_names", "status", "error_message",
-                     "exception_type", "node_count"):
+                     "exception_type", "node_count", "dataset_name"):
             val = getattr(record, key, None)
             if val is not None:
                 log_entry[key] = val

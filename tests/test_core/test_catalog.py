@@ -55,3 +55,25 @@ class TestDataCatalog:
         assert catalog.exists("missing") is False
         catalog.save("present", 42)
         assert catalog.exists("present") is True
+
+    def test_memory_dataset_release(self):
+        ds = MemoryDataset(data=[1, 2, 3])
+        assert ds.exists() is True
+        ds.release()
+        assert ds._data is None
+        assert ds.exists() is False
+
+    def test_memory_dataset_release_on_empty(self):
+        ds = MemoryDataset()
+        ds.release()  # should not raise
+        assert ds.exists() is False
+
+    def test_get_dataset(self):
+        catalog = DataCatalog()
+        ds = MemoryDataset(data=42)
+        catalog.add("answer", ds)
+        assert catalog.get_dataset("answer") is ds
+
+    def test_get_dataset_unregistered(self):
+        catalog = DataCatalog()
+        assert catalog.get_dataset("nonexistent") is None

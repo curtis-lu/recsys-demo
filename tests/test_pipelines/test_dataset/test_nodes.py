@@ -54,6 +54,22 @@ def label_table():
 
 
 @pytest.fixture
+def sample_pool():
+    """Independent sample pool table with customer-month rows and segment."""
+    rows = []
+    segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
+    for snap in ["2024-01-31", "2024-02-29", "2024-03-31"]:
+        snap_dt = pd.Timestamp(snap)
+        for cid in ["C001", "C002", "C003", "C004"]:
+            rows.append({
+                "snap_date": snap_dt,
+                "cust_id": cid,
+                "cust_segment_typ": segments[cid],
+            })
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
 def parameters():
     return {
         "random_seed": 42,
@@ -67,23 +83,23 @@ def parameters():
 
 
 class TestSelectSampleKeys:
-    def test_returns_unique_keys(self, label_table, parameters):
-        result = select_sample_keys(label_table, parameters)
+    def test_returns_unique_keys(self, sample_pool, parameters):
+        result = select_sample_keys(sample_pool, parameters)
         assert list(result.columns) == ["snap_date", "cust_id"]
         assert result.duplicated().sum() == 0
 
-    def test_stratified_by_snap_date(self, label_table, parameters):
-        result = select_sample_keys(label_table, parameters)
+    def test_stratified_by_snap_date(self, sample_pool, parameters):
+        result = select_sample_keys(sample_pool, parameters)
         counts = result.groupby("snap_date").size()
         # 4 customers per snap_date, sample_ratio=0.5 → 2 each
         assert all(counts == 2)
 
-    def test_deterministic(self, label_table, parameters):
-        r1 = select_sample_keys(label_table, parameters)
-        r2 = select_sample_keys(label_table, parameters)
+    def test_deterministic(self, sample_pool, parameters):
+        r1 = select_sample_keys(sample_pool, parameters)
+        r2 = select_sample_keys(sample_pool, parameters)
         pd.testing.assert_frame_equal(r1, r2)
 
-    def test_stratified_by_multiple_keys(self, label_table, parameters):
+    def test_stratified_by_multiple_keys(self, sample_pool, parameters):
         """Test sampling stratified by snap_date and cust_segment_typ."""
         params = {
             **parameters,
@@ -93,13 +109,13 @@ class TestSelectSampleKeys:
                 "sample_ratio": 0.5,
             },
         }
-        result = select_sample_keys(label_table, params)
+        result = select_sample_keys(sample_pool, params)
         assert list(result.columns) == ["snap_date", "cust_id"]
         assert result.duplicated().sum() == 0
         # Should still produce valid keys
         assert len(result) > 0
 
-    def test_output_excludes_group_columns(self, label_table, parameters):
+    def test_output_excludes_group_columns(self, sample_pool, parameters):
         """Even with extra group keys, output only has snap_date and cust_id."""
         params = {
             **parameters,
@@ -108,8 +124,19 @@ class TestSelectSampleKeys:
                 "sample_group_keys": ["snap_date", "cust_segment_typ"],
             },
         }
-        result = select_sample_keys(label_table, params)
+        result = select_sample_keys(sample_pool, params)
         assert list(result.columns) == ["snap_date", "cust_id"]
+
+    def test_sample_pool_minimal_columns(self, parameters):
+        """select_sample_keys works with minimal sample_pool columns."""
+        pool = pd.DataFrame({
+            "snap_date": pd.to_datetime(["2024-01-31"] * 3),
+            "cust_id": ["C001", "C002", "C003"],
+            "cust_segment_typ": ["mass", "affluent", "hnw"],
+        })
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        result = select_sample_keys(pool, params)
+        assert len(result) == 3
 
 
 class TestSplitKeys:
@@ -137,7 +164,7 @@ class TestSplitKeys:
         assert len(train_dates & val_dates) == 0
         assert len(train_dev_dates & val_dates) == 0
 
-    def test_val_is_full_population(self, label_table, parameters):
+    def test_val_is_full_population(self, sample_pool, label_table, parameters):
         """Val should contain all customers for val dates, regardless of sampling."""
         params = {
             **parameters,
@@ -146,13 +173,13 @@ class TestSplitKeys:
                 "sample_ratio": 0.5,
             },
         }
-        sample_keys = select_sample_keys(label_table, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         _, _, val = split_keys(sample_keys, label_table, params)
 
         # Val should have all 4 customers for 2024-03-31
         assert len(val) == 4
 
-    def test_train_dev_is_sampled(self, label_table, parameters):
+    def test_train_dev_is_sampled(self, sample_pool, label_table, parameters):
         """Train-dev should reflect the sampled keys, not full population."""
         params = {
             **parameters,
@@ -161,7 +188,7 @@ class TestSplitKeys:
                 "sample_ratio": 0.5,
             },
         }
-        sample_keys = select_sample_keys(label_table, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         _, train_dev, _ = split_keys(sample_keys, label_table, params)
 
         # Train-dev should have ~2 customers (50% of 4)
@@ -281,3 +308,59 @@ class TestPrepareModelInput:
         X_train = result[0]
 
         assert X_train["prod_name"].dtype in [np.int8, np.int16, np.int32, np.int64]
+
+    def test_val_sample_ratio_default_keeps_all(self, feature_table, label_table, parameters):
+        """With val_sample_ratio absent or 1.0, X_val has same row count as full val_set."""
+        train_set, train_dev_set, val_set = self._build_three_sets(
+            feature_table, label_table, parameters
+        )
+        full_val_rows = len(val_set)
+        result = prepare_model_input(train_set, train_dev_set, val_set, parameters)
+        X_val = result[4]
+        assert len(X_val) == full_val_rows
+
+    def test_val_sample_ratio_reduces_val(self, feature_table, label_table, parameters):
+        """With val_sample_ratio=0.5, X_val should have approximately 50% of rows."""
+        train_set, train_dev_set, val_set = self._build_three_sets(
+            feature_table, label_table, parameters
+        )
+        full_val_rows = len(val_set)
+        params = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5},
+        }
+        result = prepare_model_input(train_set, train_dev_set, val_set, params)
+        X_val = result[4]
+        y_val = result[5]
+        assert len(X_val) < full_val_rows
+        assert len(X_val) == len(y_val)
+
+    def test_val_sample_ratio_deterministic(self, feature_table, label_table, parameters):
+        """Same seed produces same val sampling results."""
+        train_set, train_dev_set, val_set = self._build_three_sets(
+            feature_table, label_table, parameters
+        )
+        params = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5},
+        }
+        r1 = prepare_model_input(train_set, train_dev_set, val_set.copy(), params)
+        r2 = prepare_model_input(train_set, train_dev_set, val_set.copy(), params)
+        pd.testing.assert_frame_equal(r1[4], r2[4])
+
+    def test_val_sample_ratio_group_keys_fallback(self, feature_table, label_table, parameters):
+        """When group keys are missing from val_set, falls back to simple random sampling."""
+        train_set, train_dev_set, val_set = self._build_three_sets(
+            feature_table, label_table, parameters
+        )
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "val_sample_ratio": 0.5,
+                "sample_group_keys": ["nonexistent_column"],
+            },
+        }
+        result = prepare_model_input(train_set, train_dev_set, val_set, params)
+        X_val = result[4]
+        assert len(X_val) < len(val_set)

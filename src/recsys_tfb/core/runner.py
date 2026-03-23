@@ -1,11 +1,26 @@
 import logging
 import time
 
+from recsys_tfb.core.catalog import MemoryDataset
+
 logger = logging.getLogger(__name__)
 
 
 class Runner:
     """Execute pipeline nodes sequentially using a DataCatalog."""
+
+    @staticmethod
+    def _build_last_consumer_map(nodes: list) -> dict[str, object]:
+        """Map each dataset name to the last node that uses it as input.
+
+        Since *nodes* are in topological order, iterating forward means
+        the last assignment wins — which is exactly the last consumer.
+        """
+        last_consumer: dict[str, object] = {}
+        for node in nodes:
+            for inp in node.inputs:
+                last_consumer[inp] = node
+        return last_consumer
 
     def run(self, pipeline, catalog) -> None:
         """Execute all nodes in the pipeline in topological order."""
@@ -26,6 +41,16 @@ class Runner:
 
         node_count = len(pipeline.nodes)
         pipeline_start = time.time()
+        last_consumer = self._build_last_consumer_map(pipeline.nodes)
+
+        # Identify true intermediates: produced AND consumed within this pipeline
+        # Terminal outputs (produced but not consumed) are kept for cross-pipeline use
+        produced = set()
+        consumed = set()
+        for node in pipeline.nodes:
+            produced.update(node.outputs)
+            consumed.update(node.inputs)
+        intermediates = produced & consumed
 
         logger.info(
             "Pipeline started (%d nodes)", node_count,
@@ -102,6 +127,26 @@ class Runner:
                     "output_names": list(node.outputs),
                 },
             )
+
+            # Release MemoryDatasets no longer needed by downstream nodes
+            # Only release true intermediates (produced AND consumed within this
+            # pipeline) that were auto-created. External inputs and terminal outputs
+            # are preserved for cross-pipeline use.
+            for inp in node.inputs:
+                if (last_consumer.get(inp) is node
+                        and inp in intermediates
+                        and inp in catalog._auto_created):
+                    ds = catalog.get_dataset(inp)
+                    if ds is not None and isinstance(ds, MemoryDataset):
+                        ds.release()
+                        logger.info(
+                            "Released dataset: %s", inp,
+                            extra={
+                                "event": "dataset_released",
+                                "dataset_name": inp,
+                                "node": node.name,
+                            },
+                        )
 
         total = time.time() - pipeline_start
         logger.info(
