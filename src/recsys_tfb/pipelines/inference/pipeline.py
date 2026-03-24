@@ -11,6 +11,7 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
             build_scoring_dataset,
             predict_scores,
             rank_predictions,
+            validate_predictions,
         )
     else:
         from recsys_tfb.pipelines.inference.nodes_pandas import (
@@ -18,6 +19,7 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
             build_scoring_dataset,
             predict_scores,
             rank_predictions,
+            validate_predictions,
         )
 
     return Pipeline(
@@ -41,6 +43,11 @@ def create_pipeline(backend: str = "pandas") -> Pipeline:
                 rank_predictions,
                 inputs=["score_table", "parameters"],
                 outputs="ranked_predictions",
+            ),
+            Node(
+                validate_predictions,
+                inputs=["ranked_predictions", "scoring_dataset", "parameters"],
+                outputs="validated_predictions",
             ),
         ]
     )

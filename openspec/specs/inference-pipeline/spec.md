@@ -1,9 +1,9 @@
 ### Requirement: Inference pipeline definition
-The inference module SHALL expose a `create_pipeline(backend: str = "pandas") -> Pipeline` function that accepts a `backend` parameter and returns a Pipeline with 4 nodes wired in sequence: build_scoring_dataset -> apply_preprocessor -> predict_scores -> rank_predictions. Node functions SHALL be imported from `nodes_pandas.py` or `nodes_spark.py` based on the backend parameter.
+The inference module SHALL expose a `create_pipeline(backend: str = "pandas") -> Pipeline` function that accepts a `backend` parameter and returns a Pipeline with 5 nodes wired in sequence: build_scoring_dataset -> apply_preprocessor -> predict_scores -> rank_predictions -> validate_predictions. Node functions SHALL be imported from `nodes_pandas.py` or `nodes_spark.py` based on the backend parameter.
 
 #### Scenario: Pipeline node count and order
 - **WHEN** `create_pipeline()` is called with any backend value
-- **THEN** the returned Pipeline SHALL contain exactly 4 nodes in the correct dependency order, identical regardless of backend
+- **THEN** the returned Pipeline SHALL contain exactly 5 nodes in the correct dependency order, identical regardless of backend
 
 #### Scenario: Pipeline inputs from catalog
 - **WHEN** the inference pipeline executes
@@ -49,3 +49,18 @@ The inference pipeline SHALL be executable via `python -m recsys_tfb -p inferenc
 #### Scenario: Missing model artifact
 - **WHEN** model.pkl does not exist and inference pipeline is executed
 - **THEN** the pipeline SHALL fail with a clear error indicating the model is not found
+
+### Requirement: Inference pipeline includes validation node
+The inference pipeline SHALL include a `validate_predictions` node as the final step, after `rank_predictions`.
+
+#### Scenario: Pipeline node count
+- **WHEN** creating the inference pipeline
+- **THEN** the pipeline contains 5 nodes: build_scoring_dataset, apply_preprocessor, predict_scores, rank_predictions, validate_predictions
+
+#### Scenario: Validation node inputs and outputs
+- **WHEN** the validate_predictions node is defined
+- **THEN** it takes inputs ["ranked_predictions", "scoring_dataset", "parameters"] and outputs "validated_predictions"
+
+#### Scenario: Both backends include validation
+- **WHEN** creating the pipeline with backend "pandas" or "spark"
+- **THEN** both backends import and register the validate_predictions function

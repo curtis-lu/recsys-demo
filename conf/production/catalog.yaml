@@ -97,3 +97,16 @@ preprocessor:
 category_mappings:
   type: JSONDataset
   filepath: hdfs:///data/recsys/dataset/${dataset_version}/category_mappings.json
+
+# Inference Pipeline - Partitioned Outputs
+score_table:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/inference/score_table
+  backend: spark
+  partition_cols: [snap_date, prod_name, model_version]
+
+validated_predictions:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/inference/ranked_predictions
+  backend: spark
+  partition_cols: [snap_date, prod_name, model_version]

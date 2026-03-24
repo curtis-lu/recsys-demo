@@ -29,8 +29,7 @@ def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
 
     if sample_ratio >= 1.0:
         sampled = keys.select(*identity_key)
-        total = sampled.count()
-        logger.info("Sampled %d keys (ratio=1.0, no sampling)", total)
+        logger.info("Sampled keys (ratio=1.0, no sampling)")
         return sampled
 
     # Stratified sampling via Window functions
@@ -43,12 +42,8 @@ def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
         F.col("_rn") <= F.round(F.col("_cnt") * F.lit(sample_ratio))
     ).select(*identity_key)
 
-    total_before = keys.count()
-    total_after = sampled.count()
     logger.info(
-        "Sampled %d keys from %d (ratio=%.2f, group_keys=%s)",
-        total_after,
-        total_before,
+        "Sampled keys (ratio=%.2f, group_keys=%s)",
         sample_ratio,
         group_keys,
     )
@@ -83,10 +78,9 @@ def split_keys(
     val_keys = all_keys.filter(F.col(time_col).isin(val_dates))
 
     logger.info(
-        "Split: train=%d, train_dev=%d (sampled), val=%d (full)",
-        train_keys.count(),
-        train_dev_keys.count(),
-        val_keys.count(),
+        "Split keys: train_dev_dates=%s, val_dates=%s",
+        train_dev_dates,
+        val_dates,
     )
     return train_keys, train_dev_keys, val_keys
 
@@ -109,9 +103,7 @@ def build_dataset(
     # Then join with features
     dataset = dataset.join(feature_table, on=join_key, how="left")
 
-    logger.info(
-        "Built dataset: %d rows, %d columns", dataset.count(), len(dataset.columns)
-    )
+    logger.info("Built dataset: %d columns", len(dataset.columns))
     return dataset
 
 

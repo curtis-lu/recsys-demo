@@ -15,6 +15,17 @@ class TestParquetDatasetPandas:
         loaded = ds.load()
         pd.testing.assert_frame_equal(df, loaded)
 
+    def test_save_and_load_partitioned(self, tmp_path):
+        filepath = str(tmp_path / "partitioned")
+        ds = ParquetDataset(filepath=filepath, backend="pandas", partition_cols=["b"])
+        df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "x"]})
+        ds.save(df)
+        loaded = ds.load()
+        # pyarrow reads partition cols as categorical, compare values
+        assert set(loaded.columns) == {"a", "b"}
+        assert len(loaded) == 3
+        assert set(loaded["b"]) == {"x", "y"}
+
     def test_exists(self, tmp_path):
         filepath = str(tmp_path / "test.parquet")
         ds = ParquetDataset(filepath=filepath, backend="pandas")
@@ -65,3 +76,12 @@ class TestParquetDatasetSpark:
         loaded = ds.load()
         assert isinstance(loaded, pd.DataFrame)
         assert len(loaded) == 2
+
+    def test_save_and_load_partitioned(self, spark, tmp_path):
+        filepath = str(tmp_path / "partitioned")
+        ds = ParquetDataset(filepath=filepath, backend="spark", partition_cols=["b"])
+        sdf = spark.createDataFrame([(1, "x"), (2, "y"), (3, "x")], ["a", "b"])
+        ds.save(sdf)
+        loaded = ds.load()
+        assert set(loaded.columns) == {"a", "b"}
+        assert loaded.count() == 3

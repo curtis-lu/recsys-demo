@@ -39,7 +39,8 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
 - ✅ Inference output 使用實際 model hash + latest symlink
 - ✅ 框架增強（Catalog memory release、Sample pool 分離、Val sampling）
-- ⬚ 演算法與推論增強（ModelAdapter 抽象、Probability calibration、Spark 優化、Inference sanity checks）
+- ✅ Inference sanity checks（6 項驗證 + ValidationError）、Spark 優化（移除不必要 .count()、分片粒度細化）、ParquetDataset 分區寫入
+- ⬚ 演算法與推論增強（ModelAdapter 抽象、Probability calibration）
 - ⬚ 可觀測性增強（Data-quality logging、Artifact/lineage logging、Evaluation pipeline 化）
 - ⬚ 版本管理增強（manifest 擴充、版本查詢 CLI、rollback）
 - ⬚ Safe rerun 檢查點
@@ -182,12 +183,13 @@ Build incrementally per the PRD:
 | 4.5 | 修正已知問題 + 欄位彈性化 ✅ | README 修正、inference output 改用實際 model hash、欄位抽取到 YAML |
 | 5 | Config-driven schema + Structured logging ✅ | `get_schema()` 取代 hard-coded 欄位、RunContext + 雙輸出、Runner 結構化事件 |
 | 6 | 框架增強 ✅ | Catalog memory release、Sample pool 分離、Val sampling |
+| 7a | Inference Sanity Checks + Spark 優化 ✅ | 6 項 sanity checks（ValidationError）、Spark .count() 移除、predict_scores 按 (snap_date, prod_name) 分片、ParquetDataset partition_cols 支援 |
 
 ### 待完成
 
 | Phase | 名稱 | 內容 |
 |-------|------|------|
-| 7 | 演算法與推論增強 | 演算法抽象（LightGBM + XGBoost ModelAdapter）、Probability calibration、Spark 優化（toPandas 延後）、Inference sanity checks |
+| 7b | 演算法抽象 + Calibration | 演算法抽象（LightGBM + XGBoost ModelAdapter）、Probability calibration |
 | 8 | 可觀測性增強 | Data-quality logging（DataFrame profiling）、Artifact/lineage logging、Evaluation pipeline 化 |
 | 9 | 版本管理增強 | manifest 擴充、版本查詢 CLI、rollback 機制 |
 | 10 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |

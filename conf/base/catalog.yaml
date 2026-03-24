@@ -107,7 +107,17 @@ scoring_dataset:
   filepath: data/inference/${model_version}/${snap_date}/scoring_dataset.parquet
   backend: pandas
 
+score_table:
+  type: ParquetDataset
+  filepath: data/inference/${model_version}/${snap_date}/score_table.parquet
+  backend: pandas
+
 ranked_predictions:
   type: ParquetDataset
   filepath: data/inference/${model_version}/${snap_date}/ranked_predictions.parquet
+  backend: pandas
+
+validated_predictions:
+  type: ParquetDataset
+  filepath: data/inference/${model_version}/${snap_date}/validated_predictions.parquet
   backend: pandas
