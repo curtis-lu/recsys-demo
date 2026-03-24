@@ -3,10 +3,10 @@
 import logging
 
 import numpy as np
-import lightgbm as lgb
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def apply_preprocessor(
 
 
 def predict_scores(
-    model: lgb.Booster,
+    model: ModelAdapter,
     X_score: pd.DataFrame,
     scoring_dataset: pd.DataFrame,
     parameters: dict,

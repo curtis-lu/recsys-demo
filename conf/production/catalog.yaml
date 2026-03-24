@@ -79,7 +79,7 @@ y_val:
 
 # Training Pipeline
 model:
-  type: LightGBMDataset
+  type: ModelAdapterDataset
   filepath: hdfs:///data/recsys/models/${model_version}/model.txt
 
 best_params:

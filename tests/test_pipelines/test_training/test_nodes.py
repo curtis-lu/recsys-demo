@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
     evaluate_model,
     log_experiment,
@@ -21,6 +22,12 @@ def training_parameters():
     return {
         "random_seed": 42,
         "training": {
+            "algorithm": "lightgbm",
+            "algorithm_params": {
+                "objective": "binary",
+                "metric": "binary_logloss",
+                "verbosity": -1,
+            },
             "n_trials": 3,
             "num_iterations": 50,
             "early_stopping_rounds": 10,
@@ -149,31 +156,32 @@ class TestTuneHyperparameters:
 
 
 class TestTrainModel:
-    def test_returns_booster(self, synthetic_data, training_parameters):
-        import lightgbm as lgb
-
+    def test_returns_adapter(self, synthetic_data, training_parameters):
         X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
         model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
-        assert isinstance(model, lgb.Booster)
+        assert isinstance(model, ModelAdapter)
 
     def test_predictions_are_probabilities(self, synthetic_data, training_parameters):
         X_train, y_train, X_dev, y_dev, X_val, _ = synthetic_data
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
         model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
-        preds = model.predict(X_val)
+        preds = model.predict(X_val.values)
         assert np.all(preds >= 0) and np.all(preds <= 1)
 
     def test_early_stopping(self, synthetic_data, training_parameters):
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
         X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
         params = {**training_parameters, "training": {**training_parameters["training"], "num_iterations": 500, "early_stopping_rounds": 5}}
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
         model = train_model(X_train, y_train, X_dev, y_dev, best_params, params)
         # With small data and early_stopping_rounds=5, should stop before 500
-        assert model.current_iteration() < 500
+        assert isinstance(model, LightGBMAdapter)
+        assert model.booster.current_iteration() < 500
 
 
 # ---- Tests: evaluate_model ----
@@ -181,8 +189,6 @@ class TestTrainModel:
 
 class TestEvaluateModel:
     def _train_quick_model(self, synthetic_data, training_parameters):
-        import lightgbm as lgb
-
         X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
@@ -208,7 +214,7 @@ class TestEvaluateModel:
         results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
 
         # Reproduce via compute_all_metrics directly
-        y_score = model.predict(X_val)
+        y_score = model.predict(X_val.values)
         predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
@@ -233,7 +239,7 @@ class TestEvaluateModel:
 
         results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
 
-        y_score = model.predict(X_val)
+        y_score = model.predict(X_val.values)
         predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
@@ -302,8 +308,6 @@ class TestEvaluateModel:
 
 class TestLogExperiment:
     def test_logs_to_mlflow(self, synthetic_data, training_parameters, tmp_path):
-        import lightgbm as lgb
-
         X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
@@ -332,3 +336,4 @@ class TestLogExperiment:
         runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
         assert len(runs) == 1
         assert runs.iloc[0]["metrics.overall_map"] == 0.75
+        assert runs.iloc[0]["params.algorithm"] == "lightgbm"

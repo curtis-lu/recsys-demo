@@ -40,19 +40,24 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ Inference output 使用實際 model hash + latest symlink
 - ✅ 框架增強（Catalog memory release、Sample pool 分離、Val sampling）
 - ✅ Inference sanity checks（6 項驗證 + ValidationError）、Spark 優化（移除不必要 .count()、分片粒度細化）、ParquetDataset 分區寫入
-- ⬚ 演算法與推論增強（ModelAdapter 抽象、Probability calibration）
-- ⬚ 可觀測性增強（Data-quality logging、Artifact/lineage logging、Evaluation pipeline 化）
-- ⬚ 版本管理增強（manifest 擴充、版本查詢 CLI、rollback）
+- ✅ 演算法抽象（ModelAdapter ABC + LightGBMAdapter + ModelAdapterDataset I/O + training/inference nodes 重構為 adapter 介面）
+- ⬚ Probability calibration layer（可選 isotonic/sigmoid，CalibratedModelAdapter wrapper）
+- ⬚ Evaluation pipeline 化（獨立 pipeline：generate_predictions → compute_metrics → compute_baselines → generate_report）
+- ⬚ Data-quality profiling（core/profiling.py + Runner 自動呼叫 + config 控制）
+- ⬚ Artifact/lineage logging（Catalog.save 自動記錄 structured log event）
+- ⬚ 版本管理增強（manifest 擴充 git_commit_hash/library_versions/artifact_sizes、版本查詢 CLI list/show/diff、rollback 機制）
+- ⬚ Inference validation thresholds 參數化
 - ⬚ Safe rerun 檢查點
 - ⬚ Source Data ETL Pipeline
 - ⬚ Strategy 2-4、規則化重新排序、月度監控、錯誤分析 notebook
 
-## Architecture: 4 Pipelines
+## Architecture: 5 Pipelines
 
 1. **Source Data ETL** *(not yet implemented)* - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
 2. **Dataset Building** ✅ - Stratified sampling, train/train-dev/val splits, feature engineering. Outputs versioned Parquet files. Preprocessing logic reused in inference without data leakage. Dual pandas/spark backend.
-3. **Training** ✅ - Optuna hyperparameter search, LightGBM binary classification (Strategy 1), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts.
+3. **Training** ✅ - Optuna hyperparameter search, ModelAdapter-based training (config-driven algorithm selection), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts. *(planned: probability calibration)*
 4. **Inference** ✅ - Weekly batch scoring reusing dataset building preprocessing. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
+5. **Evaluation** *(planned)* - 獨立的模型評估 pipeline，針對指定 model_version 進行完整分析（metrics、baselines、calibration comparison、HTML report）。
 
 ## Project Structure
 
@@ -73,11 +78,17 @@ src/recsys_tfb/
     parquet_dataset.py  — ParquetDataset (pandas/spark dual backend)
     pickle_dataset.py   — PickleDataset
     json_dataset.py     — JSONDataset
+    model_adapter_dataset.py — ModelAdapterDataset (model + model_meta.json sidecar)
   pipelines/
     __init__.py         — Pipeline registry (get_pipeline, list_pipelines)
     dataset/            — Dataset building (nodes_pandas.py, nodes_spark.py, pipeline.py)
     training/           — Training (nodes.py, pipeline.py)
     inference/          — Inference (nodes_pandas.py, nodes_spark.py, pipeline.py)
+    evaluation/         — Evaluation pipeline (planned: nodes.py, pipeline.py)
+  models/
+    __init__.py         — Exports ModelAdapter, get_adapter, ADAPTER_REGISTRY, LightGBMAdapter
+    base.py             — ModelAdapter ABC, ADAPTER_REGISTRY, get_adapter() factory
+    lightgbm_adapter.py — LightGBMAdapter (train/predict/save/load/feature_importance/log_to_mlflow)
   evaluation/
     metrics.py          — Ranking metrics (mAP, nDCG, precision@K, recall@K, MRR)
     distributions.py    — Score/rank distribution plots
@@ -184,20 +195,35 @@ Build incrementally per the PRD:
 | 5 | Config-driven schema + Structured logging ✅ | `get_schema()` 取代 hard-coded 欄位、RunContext + 雙輸出、Runner 結構化事件 |
 | 6 | 框架增強 ✅ | Catalog memory release、Sample pool 分離、Val sampling |
 | 7a | Inference Sanity Checks + Spark 優化 ✅ | 6 項 sanity checks（ValidationError）、Spark .count() 移除、predict_scores 按 (snap_date, prod_name) 分片、ParquetDataset partition_cols 支援 |
+| 7b | 演算法抽象 ✅ | ModelAdapter ABC + LightGBMAdapter + ModelAdapterDataset I/O（model_meta.json sidecar、向後相容）+ training/inference nodes 重構為 adapter 介面 + config 擴充（algorithm, algorithm_params） |
 
 ### 待完成
 
 | Phase | 名稱 | 內容 |
 |-------|------|------|
-| 7b | 演算法抽象 + Calibration | 演算法抽象（LightGBM + XGBoost ModelAdapter）、Probability calibration |
-| 8 | 可觀測性增強 | Data-quality logging（DataFrame profiling）、Artifact/lineage logging、Evaluation pipeline 化 |
-| 9 | 版本管理增強 | manifest 擴充、版本查詢 CLI、rollback 機制 |
-| 10 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
+| 7c | Probability Calibration | CalibratedModelAdapter wrapper（可選 isotonic/sigmoid）+ `parameters_training.yaml` calibration section + MLflow 條件式 log_model |
+| 8 | Evaluation Pipeline 化 | 獨立 evaluation pipeline（generate_predictions → compute_metrics → compute_baselines → generate_report）+ pipeline registry 註冊 + CLI 支援 `--pipeline evaluation` + catalog 新增 eval_predictions / eval_metrics / eval_report + Training pipeline evaluate_model node 保留（輕量 mAP 供 MLflow） |
+| 9 | 可觀測性增強 | Data-quality profiling（`core/profiling.py` profile_dataframe() + Runner 自動呼叫 + `logging.profile_outputs` config 控制）+ Artifact/lineage logging（Catalog.save() 自動 emit `artifact_written` structured log event：filepath, dataset_type, upstream versions） |
+| 10 | 版本管理增強 | manifest 擴充（git_commit_hash, library_versions, artifact_sizes, metrics_summary）+ 版本查詢 CLI（`versions list/show/diff` subcommand）+ rollback 機制（`promote_model.py --rollback`） |
+| 11 | 去 hard-code 補完 + Tests | inference validation thresholds 參數化 + 剩餘 hard-coded 項盤點 + 新增 tests（test_models/, test_evaluation pipeline, test_profiling, test_model_adapter_dataset） |
+| 12 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
 | — | Source Data ETL Pipeline | SQL 轉換、Hive 整合、資料驗證 |
+| — | 記憶體優化 | 盤點 MemoryDataset 使用、大型中間產物改用 file-backed（目前實作已合理，僅在資料量大幅增加時需要） |
 | — | 規則化重新排序 | rule-based reranking |
 | — | 月度監控 | 機率值分佈監控、資料筆數檢查 |
 | — | Strategy 2-4 | OVR 多模型、LambdaRank 排序、雙層排序 |
 | — | 錯誤分析 notebook | template notebook |
+
+### Phase 依賴關係
+
+```
+Phase 7b (演算法抽象) ✅
+  ├── Phase 7c (Calibration) — 依賴 ModelAdapter 介面
+  └── Phase 8 (Evaluation Pipeline) — 依賴 ModelAdapter 介面
+      └── Phase 11 (Tests) — 覆蓋上述所有新功能
+Phase 9 (可觀測性) — 獨立
+Phase 10 (版本管理) — 獨立，可與 8 平行
+```
 
 
 ## Production Constraints

@@ -48,9 +48,8 @@ class TestTrainingPipelineE2E:
     """End-to-end: dataset pipeline → training pipeline → artifact validation."""
 
     def test_dataset_then_training(self, tmp_path):
-        import lightgbm as lgb
-
         from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
+        from recsys_tfb.models.base import ModelAdapter
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
 
@@ -99,6 +98,12 @@ class TestTrainingPipelineE2E:
                 "val_snap_dates": ["2024-03-31"],
             },
             "training": {
+                "algorithm": "lightgbm",
+                "algorithm_params": {
+                    "objective": "binary",
+                    "metric": "binary_logloss",
+                    "verbosity": -1,
+                },
                 "n_trials": 2,
                 "num_iterations": 30,
                 "early_stopping_rounds": 10,
@@ -150,11 +155,11 @@ class TestTrainingPipelineE2E:
 
         # -- Validate artifacts --
         model = catalog.load("model")
-        assert isinstance(model, lgb.Booster)
+        assert isinstance(model, ModelAdapter)
 
         # Model predictions are probabilities in [0, 1]
         X_val = catalog.load("X_val")
-        preds = model.predict(X_val)
+        preds = model.predict(X_val.values)
         assert np.all(preds >= 0) and np.all(preds <= 1)
 
         best_params = catalog.load("best_params")

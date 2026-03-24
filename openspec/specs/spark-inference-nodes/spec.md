@@ -27,19 +27,23 @@ The system SHALL provide a function `apply_preprocessor(scoring_dataset: pyspark
 - **THEN** the output SHALL contain all preprocessor["feature_columns"] in the exact same order as training
 
 ### Requirement: Spark predict_scores node with chunked conversion
-The system SHALL provide a function `predict_scores(model, X_score: pyspark.sql.DataFrame, scoring_dataset: pyspark.sql.DataFrame) -> pyspark.sql.DataFrame` in `nodes_spark.py` that predicts scores by chunking data through pandas for LightGBM.
+The system SHALL provide a function `predict_scores(model: ModelAdapter, X_score: pyspark.sql.DataFrame, scoring_dataset: pyspark.sql.DataFrame) -> pyspark.sql.DataFrame` in `nodes_spark.py` that predicts scores by chunking data through pandas for model prediction.
 
-#### Scenario: Chunked prediction by snap_date
-- **WHEN** X_score contains data for multiple snap_dates
-- **THEN** the function SHALL process each snap_date as a separate chunk: filter → `.toPandas()` → `model.predict()` → collect results
+#### Scenario: Chunked prediction by snap_date and product
+- **WHEN** X_score contains multiple snap_dates and products
+- **THEN** the function iterates over each (snap_date, prod_name) pair, converting only one pair at a time to pandas, calling `model.predict()` for prediction
 
-#### Scenario: Hash bucketing for large single snap_date
-- **WHEN** a single snap_date chunk exceeds a manageable size for `.toPandas()`
-- **THEN** the function SHALL further partition by `F.abs(F.hash("cust_id")) % n_buckets`
+#### Scenario: model 參數型別
+- **WHEN** 查看 predict_scores 函數簽名
+- **THEN** model 參數型別 SHALL 為 ModelAdapter（非 lgb.Booster）
 
 #### Scenario: Output is Spark DataFrame
 - **WHEN** predict_scores completes
 - **THEN** the output SHALL be a Spark DataFrame with columns [snap_date, cust_id, prod_code, score]
+
+#### Scenario: Model version injection for partitioned output
+- **WHEN** parameters contains a "model_version" key
+- **THEN** the function adds a "model_version" column with the version string to the result DataFrame
 
 ### Requirement: Spark rank_predictions node
 The system SHALL provide a function `rank_predictions(score_table: pyspark.sql.DataFrame, parameters: dict) -> pyspark.sql.DataFrame` in `nodes_spark.py` that ranks products using PySpark Window functions.

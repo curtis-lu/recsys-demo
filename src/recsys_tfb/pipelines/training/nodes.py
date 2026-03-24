@@ -2,7 +2,6 @@
 
 import logging
 
-import lightgbm as lgb
 import mlflow
 import numpy as np
 import optuna
@@ -10,6 +9,7 @@ import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.models.base import ModelAdapter, get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -21,24 +21,23 @@ def tune_hyperparameters(
     y_train_dev: pd.DataFrame,
     parameters: dict,
 ) -> dict:
-    """Search for optimal LightGBM hyperparameters using Optuna."""
+    """Search for optimal hyperparameters using Optuna."""
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
     search_space = training_params["search_space"]
     seed = parameters.get("random_seed", 42)
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
+    algorithm = training_params.get("algorithm", "lightgbm")
+    algorithm_params = training_params.get("algorithm_params", {})
 
-    train_data = lgb.Dataset(X_train, label=y_train["label"].values, free_raw_data=False)
-    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev["label"].values, reference=train_data, free_raw_data=False)
+    X_tr = X_train.values if hasattr(X_train, "values") else X_train
+    y_tr = y_train["label"].values if isinstance(y_train, pd.DataFrame) else y_train
+    X_dev = X_train_dev.values if hasattr(X_train_dev, "values") else X_train_dev
+    y_dev = y_train_dev["label"].values if isinstance(y_train_dev, pd.DataFrame) else y_train_dev
 
     def objective(trial: optuna.Trial) -> float:
-        params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
-            "verbosity": -1,
-            "seed": seed,
-            "feature_pre_filter": False,
+        trial_params = {
             "learning_rate": trial.suggest_float(
                 "learning_rate",
                 search_space["learning_rate"]["low"],
@@ -72,22 +71,20 @@ def tune_hyperparameters(
             ),
         }
 
-        callbacks = [
-            lgb.early_stopping(stopping_rounds=early_stopping_rounds),
-            lgb.log_evaluation(period=0),
-        ]
-        booster = lgb.train(
-            params,
-            train_data,
-            num_boost_round=num_iterations,
-            valid_sets=[dev_data],
-            valid_names=["train_dev"],
-            callbacks=callbacks,
-        )
+        params = {
+            **algorithm_params,
+            "seed": seed,
+            "feature_pre_filter": False,
+            **trial_params,
+            "num_iterations": num_iterations,
+            "early_stopping_rounds": early_stopping_rounds,
+        }
 
-        y_pred = booster.predict(X_train_dev)
-        # Use a simple mAP: treat entire dev set as one query for tuning speed
-        ap = compute_ap(y_train_dev["label"].values, y_pred)
+        adapter = get_adapter(algorithm)
+        adapter.train(X_tr, y_tr, X_dev, y_dev, params)
+        y_pred = adapter.predict(X_dev)
+
+        ap = compute_ap(y_dev, y_pred)
         return ap if ap is not None else 0.0
 
     sampler = optuna.samplers.TPESampler(seed=seed)
@@ -107,47 +104,37 @@ def train_model(
     y_train_dev: pd.DataFrame,
     best_params: dict,
     parameters: dict,
-) -> lgb.Booster:
-    """Train a LightGBM binary classifier with early stopping."""
+) -> ModelAdapter:
+    """Train a model using ModelAdapter with early stopping."""
     training_params = parameters["training"]
     seed = parameters.get("random_seed", 42)
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
+    algorithm = training_params.get("algorithm", "lightgbm")
+    algorithm_params = training_params.get("algorithm_params", {})
 
     params = {
-        "objective": "binary",
-        "metric": "binary_logloss",
-        "verbosity": -1,
+        **algorithm_params,
         "seed": seed,
         **best_params,
+        "num_iterations": num_iterations,
+        "early_stopping_rounds": early_stopping_rounds,
     }
 
-    train_data = lgb.Dataset(X_train, label=y_train["label"].values)
-    dev_data = lgb.Dataset(X_train_dev, label=y_train_dev["label"].values, reference=train_data)
+    X_tr = X_train.values if hasattr(X_train, "values") else X_train
+    y_tr = y_train["label"].values if isinstance(y_train, pd.DataFrame) else y_train
+    X_dev = X_train_dev.values if hasattr(X_train_dev, "values") else X_train_dev
+    y_dev = y_train_dev["label"].values if isinstance(y_train_dev, pd.DataFrame) else y_train_dev
 
-    callbacks = [
-        lgb.early_stopping(stopping_rounds=early_stopping_rounds),
-        lgb.log_evaluation(period=50),
-    ]
-    booster = lgb.train(
-        params,
-        train_data,
-        num_boost_round=num_iterations,
-        valid_sets=[dev_data],
-        valid_names=["train_dev"],
-        callbacks=callbacks,
-    )
+    adapter = get_adapter(algorithm)
+    adapter.train(X_tr, y_tr, X_dev, y_dev, params)
 
-    logger.info(
-        "Model trained: %d iterations (best: %d)",
-        booster.current_iteration(),
-        booster.best_iteration,
-    )
-    return booster
+    logger.info("Model trained with algorithm=%s", algorithm)
+    return adapter
 
 
 def evaluate_model(
-    model: lgb.Booster,
+    model: ModelAdapter,
     X_val: pd.DataFrame,
     y_val: pd.DataFrame,
     val_set: pd.DataFrame,
@@ -167,7 +154,8 @@ def evaluate_model(
     identity_cols = schema["identity_columns"]
     group_cols = [time_col] + entity_cols
 
-    y_score = model.predict(X_val)
+    X = X_val.values if hasattr(X_val, "values") else X_val
+    y_score = model.predict(X)
 
     # Build DataFrames expected by compute_all_metrics
     predictions = val_set[identity_cols].reset_index(drop=True).copy()
@@ -210,7 +198,7 @@ def evaluate_model(
 
 
 def log_experiment(
-    model: lgb.Booster,
+    model: ModelAdapter,
     best_params: dict,
     evaluation_results: dict,
     parameters: dict,
@@ -219,12 +207,14 @@ def log_experiment(
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
+    algorithm = parameters.get("training", {}).get("algorithm", "lightgbm")
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
     with mlflow.start_run():
         mlflow.log_params(best_params)
+        mlflow.log_param("algorithm", algorithm)
         mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
         for prod, ap in evaluation_results.get("per_product_ap", {}).items():
@@ -233,6 +223,6 @@ def log_experiment(
         mlflow.log_metric("n_queries", evaluation_results["n_queries"])
         mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
 
-        mlflow.lightgbm.log_model(model, artifact_path="model")
+        model.log_to_mlflow()
 
     logger.info("MLflow experiment logged: %s", experiment_name)

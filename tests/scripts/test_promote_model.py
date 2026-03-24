@@ -23,7 +23,7 @@ def _create_full_version(models_dir, version, overall_map=0.75, per_product_ap=N
     }
     (version_dir / "evaluation_results.json").write_text(json.dumps(eval_results))
     (version_dir / "best_params.json").write_text(json.dumps({"lr": 0.1}))
-    (version_dir / "model.pkl").write_bytes(b"fake_model")
+    (version_dir / "model.txt").write_text("fake_model")
 
 
 class TestFindBestVersion:
@@ -73,10 +73,10 @@ class TestValidateVersion:
         models_dir = tmp_path / "models"
         version_dir = models_dir / "a1b2c3d4"
         version_dir.mkdir(parents=True)
-        (version_dir / "model.pkl").write_bytes(b"fake")
+        (version_dir / "some_other_file.txt").write_text("fake")
 
         missing = validate_version(version_dir)
-        assert len(missing) == 2  # missing best_params.json, evaluation_results.json
+        assert len(missing) == 3  # missing model.txt, best_params.json, evaluation_results.json
 
 
 class TestPromote:

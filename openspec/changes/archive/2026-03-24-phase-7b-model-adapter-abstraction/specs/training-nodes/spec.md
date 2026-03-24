@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Optuna 超參數搜索
 系統 SHALL 提供 `tune_hyperparameters` 純函數，接收 X_train、y_train、X_train_dev、y_train_dev 與 parameters，使用 Optuna 搜索最佳超參數。SHALL 根據 `parameters.training.algorithm` 建立對應的 ModelAdapter 實例進行訓練與評估。優化目標為 train_dev 上的 mAP。搜索空間與 trial 數量 SHALL 由 parameters 設定。函數 SHALL 回傳 best_params dict。
@@ -20,7 +20,7 @@
 - **THEN** 所有 trial 的 num_leaves SHALL 在 [16, 64] 範圍內
 
 ### Requirement: 模型訓練
-系統 SHALL 提供 `train_model` 純函數，接收 X_train、y_train、X_train_dev、y_train_dev、best_params 與 parameters，使用 ModelAdapter 訓練模型。SHALL 根據 `parameters.training.yaml` 的 `training.algorithm` 建立對應 adapter，呼叫 `adapter.train()`。函數 SHALL 回傳訓練完成的 ModelAdapter 實例。
+系統 SHALL 提供 `train_model` 純函數，接收 X_train、y_train、X_train_dev、y_train_dev、best_params 與 parameters，使用 ModelAdapter 訓練模型。SHALL 根據 `parameters.training.algorithm` 建立對應 adapter，呼叫 `adapter.train()`。函數 SHALL 回傳訓練完成的 ModelAdapter 實例。
 
 #### Scenario: 基本模型訓練
 - **WHEN** 提供合成資料與有效的 best_params，algorithm="lightgbm"
@@ -86,35 +86,3 @@
 #### Scenario: algorithm_params 與 search_space 合併
 - **WHEN** best_params 來自 Optuna 搜索，algorithm_params 來自 config
 - **THEN** train_model SHALL 將兩者合併（best_params 優先），傳給 adapter.train()
-
-
-## MODIFIED Requirements
-
-### Requirement: Metric computation delegation
-training/nodes.py SHALL import `compute_ap` and `compute_map` (previously `_compute_ap` and `_compute_map`) from `recsys_tfb.evaluation.metrics` instead of defining them locally.
-
-The `evaluate_model` function's behavior SHALL remain unchanged — same inputs, same outputs, same metric values.
-
-#### Scenario: Backward compatible evaluation
-- **WHEN** training pipeline runs evaluate_model node
-- **THEN** output dict has same structure: overall_map, per_product_ap, n_queries, n_excluded_queries
-
-#### Scenario: Identical metric values
-- **WHEN** same data is evaluated before and after refactoring
-- **THEN** all metric values are numerically identical
-
-#### Scenario: Import from evaluation module
-- **WHEN** training/nodes.py is inspected
-- **THEN** it contains `from recsys_tfb.evaluation.metrics import compute_ap` (no local `_compute_ap` definition)
-
-
-### Requirement: evaluate_model uses schema for identity columns
-The `evaluate_model` function SHALL obtain identity columns from `get_schema(parameters)` instead of hard-coding `["snap_date", "cust_id", "prod_name"]`.
-
-#### Scenario: Default identity columns
-- **WHEN** called with parameters without `schema` section
-- **THEN** SHALL use `["snap_date", "cust_id", "prod_name"]` (identical to current behavior)
-
-#### Scenario: Custom identity columns
-- **WHEN** called with `schema.columns.entity: ["branch_id", "cust_id"]`
-- **THEN** SHALL use `["snap_date", "branch_id", "cust_id", "prod_name"]` for groupby and ranking

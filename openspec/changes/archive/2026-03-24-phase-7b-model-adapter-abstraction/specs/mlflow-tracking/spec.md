@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: MLflow 本地追蹤
 系統 SHALL 預設使用本地 file store（`mlruns/` 目錄）作為 MLflow tracking backend，無需網路連線。模型 artifact 的記錄 SHALL 透過 `adapter.log_to_mlflow()` 完成，而非直接呼叫 `mlflow.lightgbm.log_model()`。

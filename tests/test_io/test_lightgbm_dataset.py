@@ -1,64 +1,90 @@
-"""Tests for LightGBMDataset I/O adapter."""
+"""Tests for ModelAdapterDataset I/O adapter."""
+
+import json
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.io.lightgbm_dataset import LightGBMDataset
+from recsys_tfb.io.model_adapter_dataset import ModelAdapterDataset
+from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
 
 @pytest.fixture
-def tiny_booster():
-    """Train a minimal LightGBM Booster for testing."""
-    import lightgbm as lgb
-
+def trained_adapter():
+    """Train a minimal LightGBMAdapter for testing."""
     rng = np.random.RandomState(42)
-    X = pd.DataFrame({"a": rng.randn(20), "b": rng.randn(20)})
+    X = rng.randn(20, 2)
     y = rng.binomial(1, 0.5, 20).astype(float)
-    ds = lgb.Dataset(X, label=y, free_raw_data=False)
-    booster = lgb.train(
-        {"objective": "binary", "verbosity": -1, "num_leaves": 4},
-        ds,
-        num_boost_round=5,
-    )
-    return booster, X
+
+    adapter = LightGBMAdapter()
+    adapter.train(X, y, X, y, {
+        "objective": "binary",
+        "verbosity": -1,
+        "num_leaves": 4,
+        "num_iterations": 5,
+        "early_stopping_rounds": 5,
+    })
+    return adapter, X
 
 
-class TestLightGBMDataset:
-    def test_save_load_roundtrip(self, tmp_path, tiny_booster):
-        booster, X = tiny_booster
+class TestModelAdapterDataset:
+    def test_save_load_roundtrip(self, tmp_path, trained_adapter):
+        adapter, X = trained_adapter
         filepath = str(tmp_path / "model.txt")
-        ds = LightGBMDataset(filepath=filepath)
+        ds = ModelAdapterDataset(filepath=filepath)
 
-        ds.save(booster)
+        ds.save(adapter)
         loaded = ds.load()
 
+        assert isinstance(loaded, LightGBMAdapter)
         np.testing.assert_array_almost_equal(
-            booster.predict(X), loaded.predict(X)
+            adapter.predict(X), loaded.predict(X)
         )
 
-    def test_exists_before_and_after_save(self, tmp_path, tiny_booster):
-        booster, _ = tiny_booster
+    def test_meta_sidecar_created(self, tmp_path, trained_adapter):
+        adapter, _ = trained_adapter
         filepath = str(tmp_path / "model.txt")
-        ds = LightGBMDataset(filepath=filepath)
+        ds = ModelAdapterDataset(filepath=filepath)
+        ds.save(adapter)
+
+        meta_path = tmp_path / "model_meta.json"
+        assert meta_path.exists()
+
+        with open(meta_path) as f:
+            meta = json.load(f)
+        assert meta["algorithm"] == "lightgbm"
+        assert "LightGBMAdapter" in meta["adapter_class"]
+        assert "saved_at" in meta
+
+    def test_exists_before_and_after_save(self, tmp_path, trained_adapter):
+        adapter, _ = trained_adapter
+        filepath = str(tmp_path / "model.txt")
+        ds = ModelAdapterDataset(filepath=filepath)
 
         assert not ds.exists()
-        ds.save(booster)
+        ds.save(adapter)
         assert ds.exists()
 
-    def test_saved_file_is_text(self, tmp_path, tiny_booster):
-        booster, _ = tiny_booster
-        filepath = str(tmp_path / "model.txt")
-        ds = LightGBMDataset(filepath=filepath)
-        ds.save(booster)
-
-        with open(filepath) as f:
-            content = f.read()
-        assert "tree" in content or "num_trees" in content
-
-    def test_creates_parent_directory(self, tmp_path, tiny_booster):
-        booster, _ = tiny_booster
+    def test_creates_parent_directory(self, tmp_path, trained_adapter):
+        adapter, _ = trained_adapter
         filepath = str(tmp_path / "subdir" / "deep" / "model.txt")
-        ds = LightGBMDataset(filepath=filepath)
-        ds.save(booster)
+        ds = ModelAdapterDataset(filepath=filepath)
+        ds.save(adapter)
         assert ds.exists()
+
+    def test_fallback_without_meta(self, tmp_path, trained_adapter):
+        """Load without model_meta.json should fallback to LightGBM."""
+        adapter, X = trained_adapter
+        filepath = str(tmp_path / "model.txt")
+
+        # Save model directly (no sidecar)
+        adapter.save(filepath)
+
+        ds = ModelAdapterDataset(filepath=filepath)
+        loaded = ds.load()
+
+        assert isinstance(loaded, LightGBMAdapter)
+        np.testing.assert_array_almost_equal(
+            adapter.predict(X), loaded.predict(X)
+        )

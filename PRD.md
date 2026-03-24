@@ -60,6 +60,7 @@
   - ploomber == 0.23.3
   - PyYAML == 6.0
   - joblib == 1.2.0
+  - xgboost（optional，正式環境需確認已安裝）
 - 目前是開發環境，將移轉到正式環境，正式環境條件如下：
   - Spark 版本：3.3.2.3.3.7191000.10-1
   - Hive 版本：3.1.3000.7.1.9.1042-1
@@ -112,6 +113,10 @@
       - 需要有實驗紀錄功能，實驗紀錄需包含模型檔、設定檔、特徵清單等資料，也必須包含特徵重要性清單、 模型衡量指標結果、相關圖表等。
       - 推論結果後處理包含：機率校準，或是規則化的重新排序機制。
       - 模型評估使用的模型衡量指標：mAP(mean average precision)、precision@K、recall@K、nDCG、MRR，且依據整體、產品個別、依自定義客群區分。評估的資料來源包含train資料集，與validation資料集（時間外的全量資料）。
+      - **演算法抽象（ModelAdapter）**：訓練流程透過 `ModelAdapter` 抽象介面支援多種演算法（LightGBM、XGBoost），不直接依賴特定 library API。每個 adapter 封裝 train / predict / save / load / feature_importance / suggest_hyperparameters 方法。
+      - **Dataset conversion layer**：新增中介轉換層，將 Parquet / Spark DataFrame / pandas DataFrame 轉換為各演算法所需格式（lgb.Dataset、xgb.DMatrix），與上下游解耦。
+      - **Probability calibration**：可選的校準層，在模型訓練完成後疊加 isotonic / sigmoid regression。由設定檔控制啟用與否（`training.calibration.enabled`）。校準前後結果皆保留以供比較。
+      - 演算法選擇（`training.algorithm`）、固定參數（`training.algorithm_params` 含 objective / metric）、搜尋空間（`training.search_space`）、calibration 設定皆由 YAML 控制，不可 hard-code 於程式碼中。
   - **INFERENCE PIPELINE**
     - 主要目的：
       - 每週定期執行推論，產出資料表供下游使用。每月初則依據上個月模型的實際結果，計算相關監控指標。
@@ -121,6 +126,19 @@
       - 推論後簡單的 sanity check。
       - 監控指標包含各產品機率值分布是否正常、資料筆數是否正確（例如因為客戶數理論上只會越來越多，所以資料筆數應該要比上一次推論還多）
       - 監控指標一樣需寫HIVE table，雖不用分partition，但若監控指標有異動需保留歷史紀錄。
+  - **EVALUATION PIPELINE**
+    - 主要目的：
+      - 將模型評估整理成獨立 pipeline，可獨立於訓練流程執行，針對指定 model_version 與 dataset_version 進行完整的模型分析。
+    - 注意事項：
+      - 節點切分為明確的輸入 / 輸出：
+        1. generate_predictions — 載入模型 + 驗證資料，產出預測結果 DataFrame
+        2. compute_metrics — 計算排序指標（mAP, nDCG, precision@K, recall@K, MRR），含整體 / per-product / per-segment
+        3. compute_baselines — 產生 popularity baseline 比較
+        4. calibration_comparison — 比較校準前後結果（若啟用 calibration）
+        5. generate_report — 產出 HTML 報告（Plotly 離線內嵌）
+        6. persist_artifacts — 儲存 evaluation JSON + HTML
+      - 每個 output 需能回答：用哪個 model_version、dataset_version、是 full 還是 sampled val。
+      - Training pipeline 的 `evaluate_model` node 保留（輕量 mAP 供 MLflow 記錄），Evaluation pipeline 是完整詳細分析，獨立執行。
 
 ### 輔助功能描述
 
@@ -129,6 +147,8 @@
     - Node-level log：run_id、node 名稱、所屬 pipeline、開始時間、結束時間、耗時、input 名稱、output 名稱、輸入/輸出資料筆數或 shape、是否成功、錯誤訊息、exception stack trace
     - Data-quality log：訓練/驗證/推論資料筆數、正負樣本比例、各 snap_date 筆數、缺失值比例、類別欄位新值或未知值比例、特徵統計摘要、推論分數分布、top-K 產品分布、異常值或分布漂移訊號
     - Artifact log / lineage log：artifact 名稱、artifact 類型（parquet / pickle / json）、輸出 path、檔案寫入時間、對應 dataset_version、model_version、上游輸入版本、manifest 路徑、是否更新 latest / best、寫入是否成功
+    - Data-quality profiling（增強版）：每個 node 輸出自動 profiling（row_count, column_count, null_ratio, numeric_summary, categorical_cardinality），可由 `logging.profile_outputs: true/false` 控制。Spark DataFrame 使用 `.dtypes` + `.summary()` 避免不必要的 `.count()`。
+    - Artifact/lineage 自動記錄：每次 artifact 寫入時在 Catalog.save() 層面自動 emit structured log event（dataset_name, filepath, write_time, upstream versions, manifest_path），不需各 node 自行處理。
 
   - 版本紀錄與管理機制，確保資料集版本、模型版本可被追蹤，推論時明確知道使用的上游依賴版本。
     - 這個 dataset 是用哪些參數做的？上游資料的schema長怎樣？
@@ -144,6 +164,9 @@
   - safe rerun：當執行管線意外中斷，要能夠可以safe rerun。若可行的話，盡量要可跳過已經做過的步驟，從失敗的步驟接續執行。
   - 可觀測性：包含解析後的SQL檔、資料量追蹤、設定檔snapshot、執行日誌、步驟計時、推論結果摘要(分產品機率值的 min / max / mean / std / 四分位數)、Spark 設定記錄等。
   - 單元測試：以小樣本資料測試各模組的各功能是否正常運作。
+  - 演算法可替換：透過 ModelAdapter 抽象，pipeline 邏輯不依賴特定 ML library，新增演算法只需實作新的 adapter。
+  - 校準可選：calibration 是 decorator/wrapper，對下游透明，不改變 pipeline 拓撲。
+  - Profiling 非 node：資料品質 profiling 在 Runner 層自動執行，不是 pipeline 的顯式節點，避免污染 pipeline DAG。
 
 ## 開發規劃指引
 

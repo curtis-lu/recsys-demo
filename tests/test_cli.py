@@ -20,7 +20,7 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
 
     catalog = {
         "model": {
-            "type": "LightGBMDataset",
+            "type": "ModelAdapterDataset",
             "filepath": "data/models/${model_version}/model.txt",
         },
         "preprocessor": {
