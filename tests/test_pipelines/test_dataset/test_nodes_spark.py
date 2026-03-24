@@ -8,7 +8,9 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     build_dataset,
     prepare_model_input,
     select_sample_keys,
-    split_keys,
+    select_test_keys,
+    select_val_keys,
+    split_train_keys,
 )
 
 
@@ -17,15 +19,19 @@ def feature_table(spark):
     pdf = pd.DataFrame(
         {
             "snap_date": pd.to_datetime(
-                ["2024-01-31"] * 4 + ["2024-02-29"] * 4 + ["2024-03-31"] * 4
+                ["2024-01-31"] * 4
+                + ["2024-02-29"] * 4
+                + ["2024-03-31"] * 4
+                + ["2024-04-30"] * 4
+                + ["2024-05-31"] * 4
             ),
-            "cust_id": ["C001", "C002", "C003", "C004"] * 3,
-            "total_aum": [100.0, 200.0, 300.0, 400.0] * 3,
-            "fund_aum": [10.0, 20.0, 30.0, 40.0] * 3,
-            "in_amt_sum_l1m": [5.0] * 12,
-            "out_amt_sum_l1m": [3.0] * 12,
-            "in_amt_ratio_l1m": [0.05] * 12,
-            "out_amt_ratio_l1m": [0.03] * 12,
+            "cust_id": ["C001", "C002", "C003", "C004"] * 5,
+            "total_aum": [100.0, 200.0, 300.0, 400.0] * 5,
+            "fund_aum": [10.0, 20.0, 30.0, 40.0] * 5,
+            "in_amt_sum_l1m": [5.0] * 20,
+            "out_amt_sum_l1m": [3.0] * 20,
+            "in_amt_ratio_l1m": [0.05] * 20,
+            "out_amt_ratio_l1m": [0.03] * 20,
         }
     )
     return spark.createDataFrame(pdf)
@@ -36,7 +42,7 @@ def label_table(spark):
     products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
     rows = []
-    for snap in ["2024-01-31", "2024-02-29", "2024-03-31"]:
+    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
         for cid in ["C001", "C002", "C003", "C004"]:
             for prod in products:
@@ -58,7 +64,7 @@ def label_table(spark):
 def sample_pool(spark):
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
     rows = []
-    for snap in ["2024-01-31", "2024-02-29", "2024-03-31"]:
+    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
         for cid in ["C001", "C002", "C003", "C004"]:
             rows.append({
@@ -76,8 +82,14 @@ def parameters():
         "dataset": {
             "sample_ratio": 0.5,
             "sample_group_keys": ["snap_date"],
-            "train_dev_snap_dates": ["2024-02-29"],
-            "val_snap_dates": ["2024-03-31"],
+            "sample_ratio_overrides": {},
+            "train_dev_ratio": 0.2,
+            "enable_calibration": False,
+            "calibration_snap_dates": [],
+            "calibration_sample_ratio": 1.0,
+            "val_snap_dates": ["2024-04-30"],
+            "val_sample_ratio": 1.0,
+            "test_snap_dates": ["2024-05-31"],
         },
     }
 
@@ -87,17 +99,18 @@ class TestSelectSampleKeys:
         result = select_sample_keys(sample_pool, parameters)
         assert sorted(result.columns) == ["cust_id", "snap_date"]
 
-    def test_stratified_by_snap_date(self, sample_pool, parameters):
+    def test_filters_to_train_dates(self, sample_pool, parameters):
         result = select_sample_keys(sample_pool, parameters)
         pdf = result.toPandas()
-        counts = pdf.groupby("snap_date").size()
-        # 4 customers per snap_date, sample_ratio=0.5 → 2 each
-        assert all(counts == 2)
+        val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
+        test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
+        excluded = val_dates | test_dates
+        assert not pdf["snap_date"].isin(excluded).any()
 
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         result = select_sample_keys(sample_pool, params)
-        # 4 customers x 3 snap_dates = 12
+        # 4 customers x 3 train dates = 12
         assert result.count() == 12
 
     def test_no_duplicates(self, sample_pool, parameters):
@@ -105,41 +118,33 @@ class TestSelectSampleKeys:
         assert result.count() == result.dropDuplicates(["snap_date", "cust_id"]).count()
 
 
-class TestSplitKeys:
-    def test_three_way_split(self, label_table, parameters):
-        keys = label_table.select("snap_date", "cust_id").dropDuplicates()
-        train, train_dev, val = split_keys(keys, label_table, parameters)
-
-        train_pdf = train.toPandas()
-        train_dev_pdf = train_dev.toPandas()
-        val_pdf = val.toPandas()
-
-        train_dates = set(pd.to_datetime(train_pdf["snap_date"].unique()))
-        train_dev_dates = set(pd.to_datetime(train_dev_pdf["snap_date"].unique()))
-        val_dates = set(pd.to_datetime(val_pdf["snap_date"].unique()))
-
-        assert pd.Timestamp("2024-01-31") in train_dates
-        assert pd.Timestamp("2024-02-29") in train_dev_dates
-        assert pd.Timestamp("2024-03-31") in val_dates
-
-    def test_no_date_overlap(self, label_table, parameters):
-        keys = label_table.select("snap_date", "cust_id").dropDuplicates()
-        train, train_dev, val = split_keys(keys, label_table, parameters)
-
-        train_dates = set(train.select("snap_date").distinct().toPandas()["snap_date"])
-        td_dates = set(train_dev.select("snap_date").distinct().toPandas()["snap_date"])
-        val_dates = set(val.select("snap_date").distinct().toPandas()["snap_date"])
-
-        assert len(train_dates & td_dates) == 0
-        assert len(train_dates & val_dates) == 0
-        assert len(td_dates & val_dates) == 0
-
-    def test_val_is_full_population(self, sample_pool, label_table, parameters):
-        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 0.5}}
+class TestSplitTrainKeys:
+    def test_no_cust_overlap(self, sample_pool, parameters):
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         sample_keys = select_sample_keys(sample_pool, params)
-        _, _, val = split_keys(sample_keys, label_table, params)
-        # Val should have all 4 customers for 2024-03-31
-        assert val.count() == 4
+        train, train_dev = split_train_keys(sample_keys, params)
+
+        train_custs = set(train.select("cust_id").distinct().toPandas()["cust_id"])
+        dev_custs = set(train_dev.select("cust_id").distinct().toPandas()["cust_id"])
+        assert len(train_custs & dev_custs) == 0
+
+    def test_all_keys_preserved(self, sample_pool, parameters):
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        sample_keys = select_sample_keys(sample_pool, params)
+        train, train_dev = split_train_keys(sample_keys, params)
+        assert train.count() + train_dev.count() == sample_keys.count()
+
+
+class TestSelectValKeys:
+    def test_full_population(self, label_table, parameters):
+        result = select_val_keys(label_table, parameters)
+        assert result.count() == 4  # 4 unique cust_ids for val date
+
+
+class TestSelectTestKeys:
+    def test_full_population(self, label_table, parameters):
+        result = select_test_keys(label_table, parameters)
+        assert result.count() == 4  # 4 unique cust_ids for test date
 
 
 class TestBuildDataset:
@@ -159,24 +164,31 @@ class TestBuildDataset:
 
 
 class TestPrepareModelInput:
-    def _build_three_sets(self, spark, feature_table, label_table, parameters):
+    def _build_four_sets(self, spark, feature_table, label_table, parameters):
         all_keys = label_table.select("snap_date", "cust_id").dropDuplicates()
         from pyspark.sql import functions as F
 
         train_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-01-31"))
         train_dev_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-02-29"))
-        val_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-03-31"))
+        val_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-04-30"))
+        test_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-05-31"))
         train_set = build_dataset(train_keys, feature_table, label_table, parameters)
         train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
         val_set = build_dataset(val_keys, feature_table, label_table, parameters)
-        return train_set, train_dev_set, val_set
+        test_set = build_dataset(test_keys, feature_table, label_table, parameters)
+        return train_set, train_dev_set, val_set, test_set
 
     def test_output_format(self, spark, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set = self._build_three_sets(
+        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, parameters)
-        X_train, y_train, X_train_dev, y_train_dev, X_val, y_val, preprocessor, cat_mappings = result
+        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
+        assert len(result) == 10
+        (
+            X_train, y_train, X_train_dev, y_train_dev,
+            X_val, y_val, X_test, y_test,
+            preprocessor, cat_mappings,
+        ) = result
 
         assert isinstance(X_train, pd.DataFrame)
         assert isinstance(y_train, pd.DataFrame)
@@ -184,21 +196,22 @@ class TestPrepareModelInput:
         assert len(y_train) == len(X_train)
         assert len(y_train_dev) == len(X_train_dev)
         assert len(y_val) == len(X_val)
+        assert len(y_test) == len(X_test)
 
     def test_excludes_non_feature_columns(self, spark, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set = self._build_three_sets(
+        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, parameters)
+        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
         X_train = result[0]
 
         forbidden = {"snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"}
         assert forbidden.isdisjoint(set(X_train.columns))
 
     def test_prod_name_encoded_as_int(self, spark, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set = self._build_three_sets(
+        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, parameters)
+        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
         X_train = result[0]
         assert X_train["prod_name"].dtype in [np.int8, np.int16, np.int32, np.int64]

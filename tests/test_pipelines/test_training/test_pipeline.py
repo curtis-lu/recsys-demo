@@ -56,7 +56,7 @@ class TestTrainingPipelineE2E:
         # -- Synthetic source tables --
         products = ["exchange_fx", "exchange_usd", "fund_stock"]
         customers = ["C001", "C002", "C003", "C004"]
-        snaps = ["2024-01-31", "2024-02-29", "2024-03-31"]
+        snaps = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
         rng = np.random.RandomState(42)
 
         feature_rows = []
@@ -94,8 +94,14 @@ class TestTrainingPipelineE2E:
             "dataset": {
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["snap_date"],
-                "train_dev_snap_dates": ["2024-02-29"],
-                "val_snap_dates": ["2024-03-31"],
+                "sample_ratio_overrides": {},
+                "train_dev_ratio": 0.2,
+                "enable_calibration": False,
+                "calibration_snap_dates": [],
+                "calibration_sample_ratio": 1.0,
+                "val_snap_dates": ["2024-04-30"],
+                "val_sample_ratio": 1.0,
+                "test_snap_dates": ["2024-05-31"],
             },
             "training": {
                 "algorithm": "lightgbm",
@@ -135,10 +141,11 @@ class TestTrainingPipelineE2E:
         catalog.add("sample_pool", MemoryDataset(sample_pool))
         catalog.add("parameters", MemoryDataset(parameters))
         for name in (
-            "sample_keys", "train_keys", "train_dev_keys", "val_keys",
-            "train_set", "train_dev_set", "val_set",
+            "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
+            "train_set", "train_dev_set", "val_set", "test_set",
             "X_train", "y_train", "X_train_dev", "y_train_dev",
-            "X_val", "y_val", "preprocessor", "category_mappings",
+            "X_val", "y_val", "X_test", "y_test",
+            "preprocessor", "category_mappings",
             "best_params", "model", "evaluation_results",
         ):
             catalog.add(name, MemoryDataset())

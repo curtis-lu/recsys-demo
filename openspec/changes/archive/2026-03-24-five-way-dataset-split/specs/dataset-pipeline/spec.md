@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: Dataset pipeline definition
 The system SHALL define a Pipeline that chains dataset building nodes. The `create_pipeline` function SHALL accept `backend` (str, default `"pandas"`) and `enable_calibration` (bool, default `False`) parameters. When `enable_calibration` is False, the pipeline SHALL contain nodes: select_sample_keys → split_train_keys → select_val_keys → select_test_keys → build_train_dataset / build_train_dev_dataset / build_val_dataset / build_test_dataset → prepare_model_input. When `enable_calibration` is True, additional nodes SHALL be included: select_calibration_keys → build_calibration_dataset, and `prepare_model_input_with_calibration` SHALL replace `prepare_model_input`.
 
@@ -29,17 +31,6 @@ The system SHALL define a Pipeline that chains dataset building nodes. The `crea
 - **WHEN** `create_pipeline()` is called without arguments
 - **THEN** backend SHALL default to `"pandas"` and enable_calibration SHALL default to `False`
 
-### Requirement: Pipeline outputs 版本化路徑
-Dataset pipeline 的 `preprocessor` 和 `category_mappings` 產出 SHALL 儲存在 dataset 版本目錄（`data/dataset/${dataset_version}/`）中，而非 model 目錄。
-
-#### Scenario: preprocessor 寫入 dataset 版本目錄
-- **WHEN** dataset pipeline 的 prepare_model_input node 完成
-- **THEN** preprocessor.pkl SHALL 寫入 `data/dataset/{dataset_version}/preprocessor.pkl`
-
-#### Scenario: category_mappings 寫入 dataset 版本目錄
-- **WHEN** dataset pipeline 的 prepare_model_input node 完成
-- **THEN** category_mappings.json SHALL 寫入 `data/dataset/{dataset_version}/category_mappings.json`
-
 ### Requirement: Dataset parameters configuration
 The system SHALL support dataset-specific parameters via `conf/base/parameters_dataset.yaml`.
 
@@ -50,7 +41,3 @@ The system SHALL support dataset-specific parameters via `conf/base/parameters_d
 #### Scenario: Removed parameter
 - **WHEN** parameters_dataset.yaml is loaded
 - **THEN** it SHALL NOT contain `train_dev_snap_dates` (replaced by `train_dev_ratio`)
-
-#### Scenario: Parameters merged into global
-- **WHEN** ConfigLoader loads parameters
-- **THEN** dataset parameters SHALL be accessible under the `dataset` key in the merged parameters dict

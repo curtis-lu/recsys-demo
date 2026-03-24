@@ -1,4 +1,14 @@
-## ADDED Requirements
+## REMOVED Requirements
+
+### Requirement: Val set sampling in prepare_model_input
+**Reason**: val_sample_ratio logic moved upstream to `select_val_keys` node. Sampling now happens at key selection time, not at prepare_model_input time.
+**Migration**: Use `select_val_keys` which applies `val_sample_ratio` at the cust_id level before building the dataset.
+
+### Requirement: Graceful fallback when group keys unavailable
+**Reason**: No longer applicable since val sampling is now pure random (non-stratified) in `select_val_keys`, not stratified by sample_group_keys.
+**Migration**: `select_val_keys` performs random cust_id sampling without group keys.
+
+## MODIFIED Requirements
 
 ### Requirement: val_sample_ratio parameter
 The system SHALL support a `val_sample_ratio` parameter in `parameters_dataset.yaml` under the `dataset` section, with a default value of `1.0`. This parameter is consumed by `select_val_keys` (not `prepare_model_input`).

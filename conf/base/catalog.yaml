@@ -50,6 +50,26 @@ val_set:
   filepath: data/dataset/${dataset_version}/val_set.parquet
   backend: pandas
 
+calibration_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/calibration_keys.parquet
+  backend: pandas
+
+test_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/test_keys.parquet
+  backend: pandas
+
+calibration_set:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/calibration_set.parquet
+  backend: pandas
+
+test_set:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/test_set.parquet
+  backend: pandas
+
 X_train:
   type: ParquetDataset
   filepath: data/dataset/${dataset_version}/X_train.parquet
@@ -78,6 +98,26 @@ X_val:
 y_val:
   type: ParquetDataset
   filepath: data/dataset/${dataset_version}/y_val.parquet
+  backend: pandas
+
+X_calibration:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/X_calibration.parquet
+  backend: pandas
+
+y_calibration:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/y_calibration.parquet
+  backend: pandas
+
+X_test:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/X_test.parquet
+  backend: pandas
+
+y_test:
+  type: ParquetDataset
+  filepath: data/dataset/${dataset_version}/y_test.parquet
   backend: pandas
 
 # Training Pipeline

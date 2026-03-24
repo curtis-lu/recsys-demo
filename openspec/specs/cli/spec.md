@@ -1,5 +1,5 @@
 ### Requirement: CLI run command
-The system SHALL provide a `run` command via `python -m recsys_tfb run` that executes a named pipeline in a specified environment. The CLI SHALL load config BEFORE building the pipeline, extract the `backend` parameter from parameters, and pass it to `get_pipeline`. `python -m recsys_tfb run --pipeline <name>` SHALL 根據 pipeline 類型計算版本 ID 並注入 runtime_params。
+The system SHALL provide a `run` command via `python -m recsys_tfb run` that executes a named pipeline in a specified environment. The CLI SHALL load config BEFORE building the pipeline, extract the `backend` parameter from parameters, and pass it to `get_pipeline`. `python -m recsys_tfb run --pipeline <name>` SHALL 根據 pipeline 類型計算版本 ID 並注入 runtime_params。The CLI SHALL read `enable_calibration` from the dataset parameters and pass it to `get_pipeline` when running the dataset pipeline.
 
 #### Scenario: Run a pipeline with default environment
 - **WHEN** user executes `python -m recsys_tfb run --pipeline dataset`
@@ -8,6 +8,18 @@ The system SHALL provide a `run` command via `python -m recsys_tfb run` that exe
 #### Scenario: Run with production environment (spark backend)
 - **WHEN** user executes `python -m recsys_tfb run --pipeline dataset --env production`
 - **THEN** the system loads config with `conf/production/parameters.yaml` overriding `backend: spark`, builds the pipeline with Spark nodes, and executes
+
+#### Scenario: Dataset pipeline with calibration enabled
+- **WHEN** `parameters_dataset.yaml` has `enable_calibration: true` and user executes `python -m recsys_tfb --pipeline dataset --env local`
+- **THEN** the CLI SHALL pass `enable_calibration=True` to `get_pipeline`, resulting in a pipeline that includes calibration nodes
+
+#### Scenario: Dataset pipeline with calibration disabled
+- **WHEN** `parameters_dataset.yaml` has `enable_calibration: false` and user executes `python -m recsys_tfb --pipeline dataset --env local`
+- **THEN** the CLI SHALL pass `enable_calibration=False` to `get_pipeline`, resulting in a pipeline without calibration nodes
+
+#### Scenario: Non-dataset pipelines unaffected
+- **WHEN** user executes `python -m recsys_tfb --pipeline training --env local`
+- **THEN** the CLI SHALL NOT pass `enable_calibration` to `get_pipeline`
 
 #### Scenario: 執行 dataset pipeline
 - **WHEN** 執行 `python -m recsys_tfb run -p dataset`

@@ -45,8 +45,14 @@ def work_dir():
             "dataset": {
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["snap_date"],
-                "train_dev_snap_dates": ["2025-04-30"],
+                "sample_ratio_overrides": {},
+                "train_dev_ratio": 0.2,
+                "enable_calibration": False,
+                "calibration_snap_dates": [],
+                "calibration_sample_ratio": 1.0,
                 "val_snap_dates": ["2025-05-31"],
+                "val_sample_ratio": 1.0,
+                "test_snap_dates": ["2025-06-30"],
                 "prepare_model_input": {
                     "drop_columns": [
                         "snap_date", "cust_id", "label",

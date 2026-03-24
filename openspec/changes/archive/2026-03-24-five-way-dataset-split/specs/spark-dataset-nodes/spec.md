@@ -1,19 +1,10 @@
+## REMOVED Requirements
+
+### Requirement: Spark split_keys node
+**Reason**: Replaced by `split_train_keys` (train-dev-cust-split), `select_calibration_keys` (calibration-split), `select_val_keys`, and `select_test_keys` (test-split).
+**Migration**: Use new node functions that mirror the pandas implementations.
+
 ## ADDED Requirements
-
-### Requirement: Spark select_sample_keys node
-The system SHALL provide a function `select_sample_keys(sample_pool: pyspark.sql.DataFrame, parameters: dict) -> pyspark.sql.DataFrame` in `nodes_spark.py` that performs stratified sampling using PySpark Window functions. The function SHALL filter sample_pool to train dates only (excluding calibration/val/test dates) and support `sample_ratio_overrides`.
-
-#### Scenario: Filter to train dates in Spark
-- **WHEN** sample_pool has 12 months and val_snap_dates + test_snap_dates cover 2 months
-- **THEN** only the remaining 10 months SHALL be considered for sampling
-
-#### Scenario: Per-group overrides in Spark
-- **WHEN** `sample_ratio_overrides` has `{"VIP": 1.0}` and `sample_ratio` is 0.5
-- **THEN** VIP rows SHALL use ratio 1.0, others SHALL use 0.5
-
-#### Scenario: No unnecessary actions
-- **WHEN** select_sample_keys completes
-- **THEN** no `.count()` action SHALL be triggered for logging
 
 ### Requirement: Spark split_train_keys node
 The system SHALL provide a function `split_train_keys(sample_keys: pyspark.sql.DataFrame, parameters: dict) -> tuple[DataFrame, DataFrame]` in `nodes_spark.py` that splits sampled keys into train and train-dev by cust_id ratio, mirroring the pandas implementation.
@@ -51,16 +42,22 @@ The system SHALL provide a function `select_test_keys(label_table: pyspark.sql.D
 - **WHEN** select_test_keys is called
 - **THEN** output SHALL contain ALL unique identity keys for test_snap_dates
 
-### Requirement: Spark build_dataset node
-The system SHALL provide a function `build_dataset(keys, feature_table, label_table) -> pyspark.sql.DataFrame` in `nodes_spark.py` that joins Spark DataFrames using `.join()`.
+## MODIFIED Requirements
 
-#### Scenario: Join operations
-- **WHEN** build_dataset is called with Spark DataFrames
-- **THEN** it SHALL perform `.join(label_table, on=["snap_date", "cust_id"], how="inner")` then `.join(feature_table, on=["snap_date", "cust_id"], how="left")`
+### Requirement: Spark select_sample_keys node
+The system SHALL provide a function `select_sample_keys(sample_pool: pyspark.sql.DataFrame, parameters: dict) -> pyspark.sql.DataFrame` in `nodes_spark.py` that performs stratified sampling using PySpark Window functions. The function SHALL filter sample_pool to train dates only (excluding calibration/val/test dates) and support `sample_ratio_overrides`.
 
-#### Scenario: Output contains all expected columns
-- **WHEN** build_dataset completes
-- **THEN** the output SHALL contain feature columns, label, prod_name, snap_date, cust_id
+#### Scenario: Filter to train dates in Spark
+- **WHEN** sample_pool has 12 months and val_snap_dates + test_snap_dates cover 2 months
+- **THEN** only the remaining 10 months SHALL be considered for sampling
+
+#### Scenario: Per-group overrides in Spark
+- **WHEN** `sample_ratio_overrides` has `{"VIP": 1.0}` and `sample_ratio` is 0.5
+- **THEN** VIP rows SHALL use ratio 1.0, others SHALL use 0.5
+
+#### Scenario: No unnecessary actions
+- **WHEN** select_sample_keys completes
+- **THEN** no `.count()` action SHALL be triggered for logging
 
 ### Requirement: Spark prepare_model_input node
 The system SHALL provide functions `prepare_model_input` (4-set) and `prepare_model_input_with_calibration` (5-set) in `nodes_spark.py` that convert Spark DataFrames to pandas/numpy for model training.
@@ -72,24 +69,3 @@ The system SHALL provide functions `prepare_model_input` (4-set) and `prepare_mo
 #### Scenario: Output format with calibration
 - **WHEN** `prepare_model_input_with_calibration` is called with 5 Spark DataFrames
 - **THEN** it SHALL return 12 outputs: X/y for each set + preprocessor + category_mappings
-
-
-## MODIFIED Requirements
-
-### Requirement: Column names are configurable (Spark backend)
-All Spark dataset pipeline nodes SHALL obtain column names from `get_schema(parameters)` instead of hard-coded strings. Changes SHALL mirror the pandas backend modifications exactly.
-
-#### Scenario: Default column names match current behavior
-- **WHEN** nodes are called with parameters that have no `schema` section
-- **THEN** behavior SHALL be identical to the current hard-coded implementation
-
-#### Scenario: Custom entity columns in Spark joins
-- **WHEN** `schema.columns.entity` is `["branch_id", "cust_id"]`
-- **THEN** Spark join conditions SHALL use both columns
-
-### Requirement: build_dataset does not trigger unnecessary actions
-The `build_dataset` function SHALL NOT call `.count()` on the result DataFrame for logging purposes.
-
-#### Scenario: No count actions in dataset building
-- **WHEN** build_dataset completes
-- **THEN** no `.count()` action is triggered; log message uses only column count

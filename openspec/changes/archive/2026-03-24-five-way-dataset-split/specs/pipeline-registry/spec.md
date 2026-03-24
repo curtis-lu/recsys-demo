@@ -1,3 +1,5 @@
+## MODIFIED Requirements
+
 ### Requirement: Pipeline registry lookup
 The system SHALL provide a registry that maps pipeline names to Pipeline factory functions. The `get_pipeline` function SHALL accept `backend` parameter and additional `**kwargs`, passing all to the pipeline module's `create_pipeline(backend=backend, **kwargs)`.
 
@@ -12,17 +14,3 @@ The system SHALL provide a registry that maps pipeline names to Pipeline factory
 #### Scenario: Look up non-existent pipeline
 - **WHEN** a caller requests a pipeline name that is not registered
 - **THEN** the registry SHALL raise a KeyError with a message listing available pipeline names
-
-### Requirement: Pipeline factory convention
-Each pipeline module SHALL expose a `create_pipeline(backend: str = "pandas") -> Pipeline` function that constructs and returns the Pipeline for that domain. The `backend` parameter SHALL determine which node implementation module to use.
-
-#### Scenario: Pipeline module structure
-- **WHEN** a new pipeline is added at `src/recsys_tfb/pipelines/<name>/`
-- **THEN** its `pipeline.py` SHALL export a `create_pipeline(backend)` function
-
-### Requirement: List available pipelines
-The registry SHALL provide a way to list all registered pipeline names.
-
-#### Scenario: List pipelines
-- **WHEN** a caller requests the list of available pipelines
-- **THEN** the registry SHALL return a list of all registered pipeline name strings

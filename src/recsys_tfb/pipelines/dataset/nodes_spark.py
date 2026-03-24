@@ -12,77 +12,238 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
+def _validate_date_splits(parameters: dict) -> None:
+    """Validate that calibration, val, and test snap_dates are mutually non-overlapping."""
+    ds = parameters.get("dataset", {})
+    calibration_dates = set(str(d) for d in ds.get("calibration_snap_dates", []))
+    val_dates = set(str(d) for d in ds.get("val_snap_dates", []))
+    test_dates = set(str(d) for d in ds.get("test_snap_dates", []))
+
+    overlaps = []
+    cal_val = calibration_dates & val_dates
+    if cal_val:
+        overlaps.append(f"calibration & val: {sorted(cal_val)}")
+    cal_test = calibration_dates & test_dates
+    if cal_test:
+        overlaps.append(f"calibration & test: {sorted(cal_test)}")
+    val_test = val_dates & test_dates
+    if val_test:
+        overlaps.append(f"val & test: {sorted(val_test)}")
+
+    if overlaps:
+        raise ValueError(f"Date splits overlap: {'; '.join(overlaps)}")
+
+
 def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
-    """Stratified sampling by configurable group keys, returning unique identity keys."""
+    """Stratified sampling by configurable group keys, returning unique identity keys.
+
+    Filters to train dates (excludes calibration/val/test dates) and supports
+    sample_ratio_overrides for per-group custom ratios.
+    """
+    _validate_date_splits(parameters)
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
     identity_key = [time_col] + entity_cols
 
-    sample_ratio = parameters["dataset"]["sample_ratio"]
+    ds = parameters["dataset"]
+    sample_ratio = ds["sample_ratio"]
     seed = parameters.get("random_seed", 42)
-    group_keys = parameters["dataset"].get("sample_group_keys", [time_col])
+    group_keys = ds.get("sample_group_keys", [time_col])
+    sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
+
+    # Filter to train dates (exclude calibration/val/test)
+    excluded_dates = []
+    for key in ("calibration_snap_dates", "val_snap_dates", "test_snap_dates"):
+        excluded_dates.extend(pd.Timestamp(d) for d in ds.get(key, []))
+    if excluded_dates:
+        pool = sample_pool.filter(~F.col(time_col).isin(excluded_dates))
+    else:
+        pool = sample_pool
 
     # Extract unique identity keys with group columns
     extract_cols = list(dict.fromkeys(group_keys + identity_key))
-    keys = sample_pool.select(*extract_cols).dropDuplicates(identity_key)
+    keys = pool.select(*extract_cols).dropDuplicates(identity_key)
 
-    if sample_ratio >= 1.0:
+    if sample_ratio >= 1.0 and not sample_ratio_overrides:
         sampled = keys.select(*identity_key)
         logger.info("Sampled keys (ratio=1.0, no sampling)")
         return sampled
 
-    # Stratified sampling via Window functions
-    w = Window.partitionBy(*group_keys).orderBy(F.rand(seed))
-    keys_ranked = keys.withColumn("_rn", F.row_number().over(w))
-    keys_counted = keys_ranked.withColumn(
-        "_cnt", F.count("*").over(Window.partitionBy(*group_keys))
-    )
-    sampled = keys_counted.filter(
-        F.col("_rn") <= F.round(F.col("_cnt") * F.lit(sample_ratio))
+    # Build override mapping as a UDF-free approach using when/otherwise
+    if sample_ratio_overrides:
+        # Construct group key column by concatenating with "|"
+        if len(group_keys) == 1:
+            group_key_col = F.col(group_keys[0]).cast("string")
+        else:
+            group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
+
+        # Build CASE expression for effective ratio
+        ratio_expr = F.lit(sample_ratio)
+        for gk_val, override_ratio in sample_ratio_overrides.items():
+            ratio_expr = F.when(group_key_col == F.lit(str(gk_val)), F.lit(override_ratio)).otherwise(ratio_expr)
+
+        keys = keys.withColumn("_effective_ratio", ratio_expr)
+    else:
+        keys = keys.withColumn("_effective_ratio", F.lit(sample_ratio))
+
+    # Probabilistic sampling: rand(seed) < effective_ratio
+    sampled = keys.filter(
+        F.rand(seed) < F.col("_effective_ratio")
     ).select(*identity_key)
 
     logger.info(
-        "Sampled keys (ratio=%.2f, group_keys=%s)",
+        "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s)",
         sample_ratio,
         group_keys,
+        sample_ratio_overrides,
     )
     return sampled
 
 
-def split_keys(
+def split_train_keys(
     sample_keys: DataFrame,
+    parameters: dict,
+) -> tuple[DataFrame, DataFrame]:
+    """Split sampled keys into train and train-dev by cust_id ratio.
+
+    All rows for a given cust_id are assigned to the same split.
+    No .count() action triggered for logging.
+    """
+    schema = get_schema(parameters)
+    entity_cols = schema["entity"]
+    cust_col = entity_cols[0]
+
+    train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
+    seed = parameters.get("random_seed", 42)
+
+    # Assign random value per cust_id, split by threshold
+    cust_df = sample_keys.select(cust_col).distinct()
+    cust_df = cust_df.withColumn("_rand", F.rand(seed))
+
+    # cust_ids with _rand < train_dev_ratio → train-dev
+    dev_custs = cust_df.filter(F.col("_rand") < F.lit(train_dev_ratio)).select(cust_col)
+    train_custs = cust_df.filter(F.col("_rand") >= F.lit(train_dev_ratio)).select(cust_col)
+
+    train_keys = sample_keys.join(train_custs, on=cust_col, how="inner")
+    train_dev_keys = sample_keys.join(dev_custs, on=cust_col, how="inner")
+
+    logger.info(
+        "Split train keys (ratio=%.2f)",
+        train_dev_ratio,
+    )
+    return train_keys, train_dev_keys
+
+
+def select_calibration_keys(
+    sample_pool: DataFrame,
     label_table: DataFrame,
     parameters: dict,
-) -> tuple[DataFrame, DataFrame, DataFrame]:
-    """Split keys into train (in-time sampled), train_dev (out-of-time sampled), val (out-of-time full)."""
+) -> DataFrame:
+    """Select calibration identity keys with stratified sampling."""
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
     identity_key = [time_col] + entity_cols
 
-    train_dev_dates = [
-        pd.Timestamp(d) for d in parameters["dataset"]["train_dev_snap_dates"]
-    ]
-    val_dates = [pd.Timestamp(d) for d in parameters["dataset"]["val_snap_dates"]]
-    excluded_dates = train_dev_dates + val_dates
+    ds = parameters["dataset"]
+    calibration_dates = [pd.Timestamp(d) for d in ds.get("calibration_snap_dates", [])]
+    calibration_ratio = ds.get("calibration_sample_ratio", 1.0)
+    seed = parameters.get("random_seed", 42)
+    group_keys = ds.get("sample_group_keys", [time_col])
+    sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
 
-    # Train: sampled keys not in train_dev or val dates
-    train_keys = sample_keys.filter(~F.col(time_col).isin(excluded_dates))
+    # Filter label_table to calibration dates
+    cal_labels = label_table.filter(F.col(time_col).isin(calibration_dates))
+    all_keys = cal_labels.select(*identity_key).dropDuplicates()
 
-    # Train-dev: sampled keys in train_dev dates
-    train_dev_keys = sample_keys.filter(F.col(time_col).isin(train_dev_dates))
+    if calibration_ratio >= 1.0 and not sample_ratio_overrides:
+        logger.info("Calibration keys (full population)")
+        return all_keys
 
-    # Val: full (unsampled) population for val dates
-    all_keys = label_table.select(*identity_key).dropDuplicates()
-    val_keys = all_keys.filter(F.col(time_col).isin(val_dates))
+    # Get group info from sample_pool
+    extract_cols = list(dict.fromkeys(group_keys + identity_key))
+    pool_filtered = sample_pool.filter(F.col(time_col).isin(calibration_dates))
+    keys_with_groups = pool_filtered.select(*extract_cols).dropDuplicates(identity_key)
 
-    logger.info(
-        "Split keys: train_dev_dates=%s, val_dates=%s",
-        train_dev_dates,
-        val_dates,
-    )
-    return train_keys, train_dev_keys, val_keys
+    # Join to get group info
+    keys = all_keys.join(keys_with_groups, on=identity_key, how="left")
+
+    # Build override mapping
+    if sample_ratio_overrides:
+        if len(group_keys) == 1:
+            group_key_col = F.col(group_keys[0]).cast("string")
+        else:
+            group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
+
+        ratio_expr = F.lit(calibration_ratio)
+        for gk_val, override_ratio in sample_ratio_overrides.items():
+            ratio_expr = F.when(group_key_col == F.lit(str(gk_val)), F.lit(override_ratio)).otherwise(ratio_expr)
+        keys = keys.withColumn("_effective_ratio", ratio_expr)
+    else:
+        keys = keys.withColumn("_effective_ratio", F.lit(calibration_ratio))
+
+    sampled = keys.filter(
+        F.rand(seed) < F.col("_effective_ratio")
+    ).select(*identity_key)
+
+    logger.info("Calibration keys (ratio=%.2f)", calibration_ratio)
+    return sampled
+
+
+def select_val_keys(
+    label_table: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Select validation identity keys (full population, optional random cust_id sampling)."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+    cust_col = entity_cols[0]
+
+    ds = parameters["dataset"]
+    val_dates = [pd.Timestamp(d) for d in ds.get("val_snap_dates", [])]
+    val_sample_ratio = ds.get("val_sample_ratio", 1.0)
+    seed = parameters.get("random_seed", 42)
+
+    val_labels = label_table.filter(F.col(time_col).isin(val_dates))
+    all_keys = val_labels.select(*identity_key).dropDuplicates()
+
+    if val_sample_ratio >= 1.0:
+        logger.info("Val keys (full population)")
+        return all_keys
+
+    # Pure random cust_id sampling
+    custs = all_keys.select(cust_col).distinct()
+    sampled_custs = custs.withColumn("_rand", F.rand(seed)).filter(
+        F.col("_rand") < F.lit(val_sample_ratio)
+    ).select(cust_col)
+
+    sampled = all_keys.join(sampled_custs, on=cust_col, how="inner")
+    logger.info("Val keys (ratio=%.2f)", val_sample_ratio)
+    return sampled
+
+
+def select_test_keys(
+    label_table: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Select test identity keys (full population, no sampling)."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_key = [time_col] + entity_cols
+
+    ds = parameters["dataset"]
+    test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]
+
+    test_labels = label_table.filter(F.col(time_col).isin(test_dates))
+    all_keys = test_labels.select(*identity_key).dropDuplicates()
+
+    logger.info("Test keys (full population)")
+    return all_keys
 
 
 def build_dataset(
@@ -107,36 +268,10 @@ def build_dataset(
     return dataset
 
 
-def prepare_model_input(
-    train_set: DataFrame,
-    train_dev_set: DataFrame,
-    val_set: DataFrame,
-    parameters: dict,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
-    """Convert Spark DataFrames to model-ready pandas DataFrames with categorical encoding."""
+def _prepare_transform_spark(train_pdf: pd.DataFrame, parameters: dict):
+    """Build category_mappings and _transform helper from train pandas DataFrame."""
     schema = get_schema(parameters)
     label_col = schema["label"]
-
-    # Convert to pandas — data has been sampled and split, should fit in memory
-    train_pdf = train_set.toPandas()
-    train_dev_pdf = train_dev_set.toPandas()
-    val_pdf = val_set.toPandas()
-
-    # Optional val set sampling to reduce memory during training
-    val_sample_ratio = parameters.get("dataset", {}).get("val_sample_ratio", 1.0)
-    if val_sample_ratio < 1.0:
-        seed = parameters.get("random_seed", 42)
-        group_keys = parameters.get("dataset", {}).get("sample_group_keys", [schema["time"]])
-        available_group_keys = [k for k in group_keys if k in val_pdf.columns]
-        if available_group_keys:
-            val_pdf = val_pdf.groupby(available_group_keys, group_keys=False).sample(
-                frac=val_sample_ratio, random_state=seed
-            ).reset_index(drop=True)
-        else:
-            val_pdf = val_pdf.sample(frac=val_sample_ratio, random_state=seed).reset_index(drop=True)
-        logger.info(
-            "Val set sampled to %d rows (ratio=%.2f)", len(val_pdf), val_sample_ratio
-        )
 
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
     drop_cols = pmi_config.get("drop_columns", [
@@ -158,14 +293,7 @@ def prepare_model_input(
             result[col] = pd.Categorical(result[col], categories=known).codes
         return result
 
-    X_train = _transform(train_pdf)
-    y_train = train_pdf[[label_col]].reset_index(drop=True)
-    X_train_dev = _transform(train_dev_pdf)
-    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
-    X_val = _transform(val_pdf)
-    y_val = val_pdf[[label_col]].reset_index(drop=True)
-
-    feature_columns = list(X_train.columns)
+    feature_columns = list(_transform(train_pdf).columns)
 
     preprocessor = {
         "feature_columns": feature_columns,
@@ -174,11 +302,104 @@ def prepare_model_input(
         "drop_columns": drop_cols,
     }
 
+    return preprocessor, category_mappings, _transform
+
+
+def prepare_model_input(
+    train_set: DataFrame,
+    train_dev_set: DataFrame,
+    val_set: DataFrame,
+    test_set: DataFrame,
+    parameters: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
+    """Convert 4 Spark DataFrames to model-ready pandas DataFrames (without calibration).
+
+    Returns: X_train, y_train, X_train_dev, y_train_dev, X_val, y_val,
+             X_test, y_test, preprocessor, category_mappings (10 outputs).
+    """
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+
+    # Convert to pandas
+    train_pdf = train_set.toPandas()
+    train_dev_pdf = train_dev_set.toPandas()
+    val_pdf = val_set.toPandas()
+    test_pdf = test_set.toPandas()
+
+    preprocessor, category_mappings, _transform = _prepare_transform_spark(train_pdf, parameters)
+
+    X_train = _transform(train_pdf)
+    y_train = train_pdf[[label_col]].reset_index(drop=True)
+    X_train_dev = _transform(train_dev_pdf)
+    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
+    X_val = _transform(val_pdf)
+    y_val = val_pdf[[label_col]].reset_index(drop=True)
+    X_test = _transform(test_pdf)
+    y_test = test_pdf[[label_col]].reset_index(drop=True)
+
     logger.info(
-        "Model input: X_train=%s, X_train_dev=%s, X_val=%s, features=%d",
+        "Model input: X_train=%s, X_train_dev=%s, X_val=%s, X_test=%s, features=%d",
         X_train.shape,
         X_train_dev.shape,
         X_val.shape,
-        len(feature_columns),
+        X_test.shape,
+        len(preprocessor["feature_columns"]),
     )
-    return X_train, y_train, X_train_dev, y_train_dev, X_val, y_val, preprocessor, category_mappings
+    return (
+        X_train, y_train, X_train_dev, y_train_dev,
+        X_val, y_val, X_test, y_test,
+        preprocessor, category_mappings,
+    )
+
+
+def prepare_model_input_with_calibration(
+    train_set: DataFrame,
+    train_dev_set: DataFrame,
+    calibration_set: DataFrame,
+    val_set: DataFrame,
+    test_set: DataFrame,
+    parameters: dict,
+) -> tuple:
+    """Convert 5 Spark DataFrames to model-ready pandas DataFrames (with calibration).
+
+    Returns: X_train, y_train, X_train_dev, y_train_dev,
+             X_calibration, y_calibration, X_val, y_val,
+             X_test, y_test, preprocessor, category_mappings (12 outputs).
+    """
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+
+    # Convert to pandas
+    train_pdf = train_set.toPandas()
+    train_dev_pdf = train_dev_set.toPandas()
+    calibration_pdf = calibration_set.toPandas()
+    val_pdf = val_set.toPandas()
+    test_pdf = test_set.toPandas()
+
+    preprocessor, category_mappings, _transform = _prepare_transform_spark(train_pdf, parameters)
+
+    X_train = _transform(train_pdf)
+    y_train = train_pdf[[label_col]].reset_index(drop=True)
+    X_train_dev = _transform(train_dev_pdf)
+    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
+    X_calibration = _transform(calibration_pdf)
+    y_calibration = calibration_pdf[[label_col]].reset_index(drop=True)
+    X_val = _transform(val_pdf)
+    y_val = val_pdf[[label_col]].reset_index(drop=True)
+    X_test = _transform(test_pdf)
+    y_test = test_pdf[[label_col]].reset_index(drop=True)
+
+    logger.info(
+        "Model input (with calibration): X_train=%s, X_train_dev=%s, X_cal=%s, X_val=%s, X_test=%s, features=%d",
+        X_train.shape,
+        X_train_dev.shape,
+        X_calibration.shape,
+        X_val.shape,
+        X_test.shape,
+        len(preprocessor["feature_columns"]),
+    )
+    return (
+        X_train, y_train, X_train_dev, y_train_dev,
+        X_calibration, y_calibration, X_val, y_val,
+        X_test, y_test, preprocessor, category_mappings,
+    )

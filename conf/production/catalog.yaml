@@ -47,6 +47,26 @@ val_set:
   filepath: hdfs:///data/recsys/dataset/${dataset_version}/val_set.parquet
   backend: spark
 
+calibration_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/calibration_keys.parquet
+  backend: spark
+
+test_keys:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/test_keys.parquet
+  backend: spark
+
+calibration_set:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/calibration_set.parquet
+  backend: spark
+
+test_set:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/test_set.parquet
+  backend: spark
+
 X_train:
   type: ParquetDataset
   filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_train.parquet
@@ -75,6 +95,26 @@ X_val:
 y_val:
   type: ParquetDataset
   filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_val.parquet
+  backend: pandas
+
+X_calibration:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_calibration.parquet
+  backend: pandas
+
+y_calibration:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_calibration.parquet
+  backend: pandas
+
+X_test:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/X_test.parquet
+  backend: pandas
+
+y_test:
+  type: ParquetDataset
+  filepath: hdfs:///data/recsys/dataset/${dataset_version}/y_test.parquet
   backend: pandas
 
 # Training Pipeline

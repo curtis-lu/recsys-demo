@@ -1,6 +1,6 @@
 """情境 2：訓練期間往前挪移一個月。
 
-驗證將 train_dev_snap_dates 改為 ["2025-05-31"]、val_snap_dates 改為 ["2025-06-30"] 後，
+驗證將 val_snap_dates 改為 ["2025-06-30"]、test_snap_dates 改為 ["2025-07-31"] 後，
 data split 和模型訓練的正確性。
 """
 
@@ -38,8 +38,14 @@ def work_dir():
             "dataset": {
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["snap_date"],
-                "train_dev_snap_dates": ["2025-05-31"],
+                "sample_ratio_overrides": {},
+                "train_dev_ratio": 0.2,
+                "enable_calibration": False,
+                "calibration_snap_dates": [],
+                "calibration_sample_ratio": 1.0,
                 "val_snap_dates": ["2025-06-30"],
+                "val_sample_ratio": 1.0,
+                "test_snap_dates": ["2025-07-31"],
                 "prepare_model_input": {
                     "drop_columns": [
                         "snap_date", "cust_id", "label",
@@ -100,17 +106,20 @@ def val_set(dataset_version_dir):
     return pd.read_parquet(dataset_version_dir / "val_set.parquet")
 
 
-def test_train_set_excludes_shifted_dates(train_set):
-    """train_set 的 snap_dates 不應包含 2025-05-31 和 2025-06-30。"""
+def test_train_set_excludes_val_and_test_dates(train_set):
+    """train_set 的 snap_dates 不應包含 val (2025-06-30) 和 test (2025-07-31)。"""
     snap_dates = set(train_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
-    assert "2025-05-31" not in snap_dates, f"train_set 不應含 2025-05-31，實際: {snap_dates}"
     assert "2025-06-30" not in snap_dates, f"train_set 不應含 2025-06-30，實際: {snap_dates}"
+    assert "2025-07-31" not in snap_dates, f"train_set 不應含 2025-07-31，實際: {snap_dates}"
 
 
-def test_train_dev_snap_dates(train_dev_set):
-    """train_dev_set 的 snap_dates 應恰為 [2025-05-31]。"""
-    snap_dates = sorted(train_dev_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
-    assert snap_dates == ["2025-05-31"], f"預期 ['2025-05-31']，實際: {snap_dates}"
+def test_train_dev_shares_dates_with_train(train_set, train_dev_set):
+    """train_dev_set 的 snap_dates 應與 train_set 一致（共用日期，按 cust_id 切分）。"""
+    train_dates = set(train_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
+    dev_dates = set(train_dev_set["snap_date"].dt.strftime("%Y-%m-%d").unique())
+    assert dev_dates.issubset(train_dates), (
+        f"train_dev_set 日期 {dev_dates} 應為 train_set 日期 {train_dates} 的子集"
+    )
 
 
 def test_val_snap_dates(val_set):

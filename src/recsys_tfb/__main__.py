@@ -59,9 +59,18 @@ def run(
     setup_logging(params, run_context)
     logger = logging.getLogger(__name__)
 
-    # Look up pipeline with backend
+    # Look up pipeline with backend (+ enable_calibration for dataset pipeline)
+    pipeline_kwargs = {}
+    if pipeline == "dataset":
+        try:
+            params_dataset = config.get_parameters_by_name("parameters_dataset")
+        except KeyError:
+            params_dataset = {}
+        pipeline_kwargs["enable_calibration"] = params_dataset.get("dataset", {}).get(
+            "enable_calibration", False
+        )
     try:
-        pipe = get_pipeline(pipeline, backend=backend)
+        pipe = get_pipeline(pipeline, backend=backend, **pipeline_kwargs)
     except KeyError:
         available = ", ".join(list_pipelines())
         logger.error("Unknown pipeline '%s'. Available: %s", pipeline, available)
