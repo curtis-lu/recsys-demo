@@ -36,8 +36,10 @@ def work_dir():
     config_overrides = {
         "parameters_dataset": {
             "dataset": {
+                "train_snap_date_start": "2025-01-31",
+                "train_snap_date_end": "2025-05-31",
                 "sample_ratio": 1.0,
-                "sample_group_keys": ["snap_date"],
+                "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio_overrides": {},
                 "train_dev_ratio": 0.2,
                 "enable_calibration": False,

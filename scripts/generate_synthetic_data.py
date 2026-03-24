@@ -335,7 +335,11 @@ def generate_label_table(
 
 
 def generate_sample_pool(feature_table: pd.DataFrame) -> pd.DataFrame:
-    """Generate sample pool table with unique customer-month rows and segment."""
+    """Generate sample pool table at customer-month-product granularity.
+
+    Each customer-month is cross-joined with all products, producing
+    (snap_date, cust_id, cust_segment_typ, prod_name) rows.
+    """
     # Use the same segment assignment as feature_table generation
     rng_seg = np.random.default_rng(RANDOM_SEED)
     max_customers = int(INITIAL_CUSTOMERS * (1 + MONTHLY_GROWTH_RATE) ** (len(SNAP_DATES) - 1)) + 10
@@ -349,12 +353,15 @@ def generate_sample_pool(feature_table: pd.DataFrame) -> pd.DataFrame:
         cust_ids = snap_features["cust_id"].values
         segments = all_segments[:n_cust]
 
-        pool_df = pd.DataFrame({
-            "snap_date": snap_dt,
-            "cust_id": cust_ids,
-            "cust_segment_typ": segments,
-        })
-        rows_list.append(pool_df)
+        # Cross join each customer with all products
+        for prod in PRODUCTS:
+            pool_df = pd.DataFrame({
+                "snap_date": snap_dt,
+                "cust_id": cust_ids,
+                "cust_segment_typ": segments,
+                "prod_name": prod,
+            })
+            rows_list.append(pool_df)
 
     df = pd.concat(rows_list, ignore_index=True)
     df["snap_date"] = pd.to_datetime(df["snap_date"])

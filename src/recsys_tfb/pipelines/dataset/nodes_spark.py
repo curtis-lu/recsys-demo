@@ -13,8 +13,20 @@ logger = logging.getLogger(__name__)
 
 
 def _validate_date_splits(parameters: dict) -> None:
-    """Validate that calibration, val, and test snap_dates are mutually non-overlapping."""
+    """Validate that train, calibration, val, and test snap_dates are mutually non-overlapping."""
     ds = parameters.get("dataset", {})
+
+    # Build train date set from start/end range
+    train_start = ds.get("train_snap_date_start")
+    train_end = ds.get("train_snap_date_end")
+    if train_start and train_end:
+        train_start_ts = pd.Timestamp(train_start)
+        train_end_ts = pd.Timestamp(train_end)
+        if train_start_ts > train_end_ts:
+            raise ValueError(
+                f"train_snap_date_start ({train_start}) > train_snap_date_end ({train_end})"
+            )
+
     calibration_dates = set(str(d) for d in ds.get("calibration_snap_dates", []))
     val_dates = set(str(d) for d in ds.get("val_snap_dates", []))
     test_dates = set(str(d) for d in ds.get("test_snap_dates", []))
@@ -30,35 +42,50 @@ def _validate_date_splits(parameters: dict) -> None:
     if val_test:
         overlaps.append(f"val & test: {sorted(val_test)}")
 
+    # Validate train range doesn't overlap with cal/val/test
+    if train_start and train_end:
+        train_start_ts = pd.Timestamp(train_start)
+        train_end_ts = pd.Timestamp(train_end)
+        for name, date_set in [("calibration", calibration_dates), ("val", val_dates), ("test", test_dates)]:
+            for d in date_set:
+                d_ts = pd.Timestamp(d)
+                if train_start_ts <= d_ts <= train_end_ts:
+                    overlaps.append(f"train & {name}: [{d}]")
+
     if overlaps:
         raise ValueError(f"Date splits overlap: {'; '.join(overlaps)}")
 
 
-def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
+def select_keys(
+    sample_pool: DataFrame,
+    parameters: dict,
+    snap_dates: list,
+    sample_ratio: float,
+) -> DataFrame:
     """Stratified sampling by configurable group keys, returning unique identity keys.
 
-    Filters to train dates (excludes calibration/val/test dates) and supports
-    sample_ratio_overrides for per-group custom ratios.
-    """
-    _validate_date_splits(parameters)
+    Filters sample_pool to the given snap_dates and applies stratified sampling
+    with per-group ratio overrides. Identity key is (snap_date, cust_id, prod_name).
 
+    Args:
+        sample_pool: Full sample pool at customer-month-product granularity.
+        parameters: Full parameters dict.
+        snap_dates: List of snap_dates to filter to.
+        sample_ratio: Default sampling ratio for this split.
+    """
     schema = get_schema(parameters)
+    identity_key = schema["identity_columns"]  # [snap_date, cust_id, prod_name]
     time_col = schema["time"]
-    entity_cols = schema["entity"]
-    identity_key = [time_col] + entity_cols
 
     ds = parameters["dataset"]
-    sample_ratio = ds["sample_ratio"]
     seed = parameters.get("random_seed", 42)
     group_keys = ds.get("sample_group_keys", [time_col])
     sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
 
-    # Filter to train dates (exclude calibration/val/test)
-    excluded_dates = []
-    for key in ("calibration_snap_dates", "val_snap_dates", "test_snap_dates"):
-        excluded_dates.extend(pd.Timestamp(d) for d in ds.get(key, []))
-    if excluded_dates:
-        pool = sample_pool.filter(~F.col(time_col).isin(excluded_dates))
+    # Filter to specified snap_dates
+    target_dates = [pd.Timestamp(d) for d in snap_dates]
+    if target_dates:
+        pool = sample_pool.filter(F.col(time_col).isin(target_dates))
     else:
         pool = sample_pool
 
@@ -102,6 +129,36 @@ def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     return sampled
 
 
+def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
+    """Select train identity keys using date range from parameters."""
+    _validate_date_splits(parameters)
+
+    ds = parameters["dataset"]
+    time_col = get_schema(parameters)["time"]
+    start = pd.Timestamp(ds["train_snap_date_start"])
+    end = pd.Timestamp(ds["train_snap_date_end"])
+
+    # Filter sample_pool to train date range directly
+    pool = sample_pool.filter(
+        (F.col(time_col) >= F.lit(start)) & (F.col(time_col) <= F.lit(end))
+    )
+
+    # Collect unique dates for passing to select_keys
+    train_dates_rows = pool.select(time_col).distinct().collect()
+    train_dates = [row[time_col] for row in train_dates_rows]
+
+    return select_keys(sample_pool, parameters, train_dates, ds["sample_ratio"])
+
+
+def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
+    """Select calibration identity keys using calibration_snap_dates from parameters."""
+    ds = parameters["dataset"]
+    cal_dates = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
+    cal_ratio = ds.get("calibration_sample_ratio", 1.0)
+
+    return select_keys(sample_pool, parameters, cal_dates, cal_ratio)
+
+
 def split_train_keys(
     sample_keys: DataFrame,
     parameters: dict,
@@ -134,62 +191,6 @@ def split_train_keys(
         train_dev_ratio,
     )
     return train_keys, train_dev_keys
-
-
-def select_calibration_keys(
-    sample_pool: DataFrame,
-    label_table: DataFrame,
-    parameters: dict,
-) -> DataFrame:
-    """Select calibration identity keys with stratified sampling."""
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    identity_key = [time_col] + entity_cols
-
-    ds = parameters["dataset"]
-    calibration_dates = [pd.Timestamp(d) for d in ds.get("calibration_snap_dates", [])]
-    calibration_ratio = ds.get("calibration_sample_ratio", 1.0)
-    seed = parameters.get("random_seed", 42)
-    group_keys = ds.get("sample_group_keys", [time_col])
-    sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
-
-    # Filter label_table to calibration dates
-    cal_labels = label_table.filter(F.col(time_col).isin(calibration_dates))
-    all_keys = cal_labels.select(*identity_key).dropDuplicates()
-
-    if calibration_ratio >= 1.0 and not sample_ratio_overrides:
-        logger.info("Calibration keys (full population)")
-        return all_keys
-
-    # Get group info from sample_pool
-    extract_cols = list(dict.fromkeys(group_keys + identity_key))
-    pool_filtered = sample_pool.filter(F.col(time_col).isin(calibration_dates))
-    keys_with_groups = pool_filtered.select(*extract_cols).dropDuplicates(identity_key)
-
-    # Join to get group info
-    keys = all_keys.join(keys_with_groups, on=identity_key, how="left")
-
-    # Build override mapping
-    if sample_ratio_overrides:
-        if len(group_keys) == 1:
-            group_key_col = F.col(group_keys[0]).cast("string")
-        else:
-            group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
-
-        ratio_expr = F.lit(calibration_ratio)
-        for gk_val, override_ratio in sample_ratio_overrides.items():
-            ratio_expr = F.when(group_key_col == F.lit(str(gk_val)), F.lit(override_ratio)).otherwise(ratio_expr)
-        keys = keys.withColumn("_effective_ratio", ratio_expr)
-    else:
-        keys = keys.withColumn("_effective_ratio", F.lit(calibration_ratio))
-
-    sampled = keys.filter(
-        F.rand(seed) < F.col("_effective_ratio")
-    ).select(*identity_key)
-
-    logger.info("Calibration keys (ratio=%.2f)", calibration_ratio)
-    return sampled
 
 
 def select_val_keys(
@@ -252,17 +253,26 @@ def build_dataset(
     label_table: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Join keys with labels and features to build a complete dataset."""
+    """Join keys with labels and features to build a complete dataset.
+
+    Dynamically determines the label_table join key based on whether keys
+    contains the item column (prod_name). Feature_table join always uses
+    (time_col + entity_cols).
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
-    join_key = [time_col] + entity_cols
+    item_col = schema["item"]
+    base_key = [time_col] + entity_cols
 
-    # First join keys with label_table to get all product rows for sampled customers
-    dataset = keys.join(label_table, on=join_key, how="inner")
+    # Dynamic label join key: include item_col if present in keys
+    label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
 
-    # Then join with features
-    dataset = dataset.join(feature_table, on=join_key, how="left")
+    # Join keys with label_table
+    dataset = keys.join(label_table, on=label_join_key, how="inner")
+
+    # Join with features on base key (snap_date, cust_id)
+    dataset = dataset.join(feature_table, on=base_key, how="left")
 
     logger.info("Built dataset: %d columns", len(dataset.columns))
     return dataset

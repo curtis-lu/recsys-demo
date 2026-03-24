@@ -93,13 +93,16 @@
     - 主要目的：
       - 對上一步產出的feature table以及label table，進行模型訓練相關的資料處理過程，包含抽樣、資料集切分、特徵工程處理，最終產出模型訓練及評估需要用到的所有資料集。
     - 注意事項：
-      - 抽樣方式會需要彈性依據多個欄位做分層抽樣（例如 snap_date、cust_segment_typ），分層抽樣的 group by 欄位由 YAML 設定檔定義（`sample_group_keys`），抽樣比例可以客製化設定（`sample_ratio_overrides`，多欄位時以 `"|"` 組合為 key）。
+      - **sample_pool**：customer-month-product 粒度（`snap_date, cust_id, cust_segment_typ, prod_name`），由 ETL SQL（`conf/sql/etl/sample_pool/generate_sample_pool.sql`）從 feature_table 與 label_table cross join 所有產品產生。
+      - **Train 日期範圍**：由 `train_snap_date_start` / `train_snap_date_end` 明確指定，不再隱性推導。
+      - **抽樣**：依 `sample_group_keys`（預設 `[cust_segment_typ, prod_name]`）做分層抽樣，支援 `sample_ratio_overrides`（多欄位以 `"|"` 組合為 key，例如 `"mass|信用卡": 0.8`）。透過 per-product 抽樣可平衡冷熱門產品。train 與 calibration 使用同一個通用 `select_keys` 函數（只差日期與比例參數）。
       - 資料集切分為五組，各組的 snap_dates 完全互不重疊：
-        - **train**：依 sample_group_keys 分層抽 cust_id 後，取 `1 - train_dev_ratio` 比例。用於模型訓練。
-        - **train-dev**：與 train 共用日期，取 `train_dev_ratio` 比例的 cust_id（同一客戶在所有 snap_dates 都屬於同一 split）。用於 early stopping / overfitting 偵測。
-        - **calibration**（optional）：獨立 snap_dates，依 sample_group_keys 分層抽 cust_id，獨立 `calibration_sample_ratio`。由 `enable_calibration` flag 控制。用於機率校準模型。
-        - **validation**：獨立 snap_dates，原則上全量；可選 `val_sample_ratio` 純隨機抽 cust_id（因超參搜尋的記憶體壓力）。用於超參數搜尋與 evaluation。
-        - **test**：獨立 snap_dates，全量不抽樣。用於最終模型評估。
+        - **train**：sample_pool 過濾 train date range，依 sample_group_keys 分層抽樣後，取 `1 - train_dev_ratio` 比例的 cust_id。Keys 為 `(snap_date, cust_id, prod_name)` 粒度。用於模型訓練。
+        - **train-dev**：與 train 共用日期與抽樣結果，取 `train_dev_ratio` 比例的 cust_id（同一客戶在所有 snap_dates 都屬於同一 split）。用於 early stopping / overfitting 偵測。
+        - **calibration**（optional）：獨立 snap_dates，依 sample_group_keys 分層抽樣，獨立 `calibration_sample_ratio`。由 `enable_calibration` flag 控制。Keys 為 `(snap_date, cust_id, prod_name)` 粒度。用於機率校準模型。
+        - **validation**：獨立 snap_dates，原則上全量；可選 `val_sample_ratio` 純隨機抽 cust_id（不走 per-product 抽樣）。Keys 為 `(snap_date, cust_id)` 粒度，build_dataset 時展開所有產品。用於超參數搜尋與 evaluation。
+        - **test**：獨立 snap_dates，全量不抽樣。Keys 為 `(snap_date, cust_id)` 粒度。用於最終模型評估。
+      - **build_dataset**：動態 join key — 若 keys 包含 `prod_name`（train/calibration），與 label_table 按 `(snap_date, cust_id, prod_name)` join（只取被抽樣的產品）；若不含（val/test），按 `(snap_date, cust_id)` join（展開所有產品）。Feature_table join 永遠使用 `(snap_date, cust_id)`。
       - 特徵工程的 category_mappings 需另存為 JSON 檔案供檢視，提升可觀測性。
       - 原則上在正式環境，這階段資料都儲存為HIVE table，並以pyspark實作。開發環境則以pandas處理本地Parquet檔案。
       - 部分程式組件以及產物會需要在其他情境複用，例如推論管線中，資料轉換的邏輯需相同且不能造成資料洩漏問題。

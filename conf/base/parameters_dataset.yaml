@@ -1,21 +1,23 @@
 dataset:
+  # --- Train 日期範圍 ---
+  train_snap_date_start: "2025-01-31"
+  train_snap_date_end: "2025-10-31"
+
   # --- 抽樣 ---
-  sample_ratio: 1.0
+  sample_ratio: 0.8
   sample_group_keys:
     - "cust_segment_typ"
-  sample_ratio_overrides: {}
+    - "prod_name"
+  sample_ratio_overrides:
   # 多欄位 sample_group_keys 時，用 "|" 組合序列化為 key
-  # 範例（單欄位 sample_group_keys: [cust_segment_typ]）：
-  #   "VIP": 1.0
-  #   "Regular": 0.3
-  # 範例（多欄位 sample_group_keys: [cust_segment_typ, label]）：
-  #   "VIP|1": 1.0
-  #   "VIP|0": 0.5
-  #   "Regular|1": 0.8
+  # 範例（sample_group_keys: [cust_segment_typ, prod_name]）：
+    "mass|信用卡": 0.8
+    "affluent|基金": 0.3
+    "hnw|保險": 0.2
   # 未指定的組合用預設 sample_ratio
 
   # --- Train / Train-dev（共用日期，按 cust_id ratio 切分）---
-  train_dev_ratio: 0.2
+  train_dev_ratio: 0.1
 
   # --- Calibration（optional）---
   enable_calibration: false

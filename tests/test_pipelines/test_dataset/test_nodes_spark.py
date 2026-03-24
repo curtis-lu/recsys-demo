@@ -7,8 +7,8 @@ import pytest
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     build_dataset,
     prepare_model_input,
-    select_sample_keys,
     select_test_keys,
+    select_train_keys,
     select_val_keys,
     split_train_keys,
 )
@@ -62,16 +62,19 @@ def label_table(spark):
 
 @pytest.fixture
 def sample_pool(spark):
+    products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
     rows = []
     for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
         for cid in ["C001", "C002", "C003", "C004"]:
-            rows.append({
-                "snap_date": snap_dt,
-                "cust_id": cid,
-                "cust_segment_typ": segments[cid],
-            })
+            for prod in products:
+                rows.append({
+                    "snap_date": snap_dt,
+                    "cust_id": cid,
+                    "cust_segment_typ": segments[cid],
+                    "prod_name": prod,
+                })
     return spark.createDataFrame(pd.DataFrame(rows))
 
 
@@ -80,8 +83,10 @@ def parameters():
     return {
         "random_seed": 42,
         "dataset": {
+            "train_snap_date_start": "2024-01-31",
+            "train_snap_date_end": "2024-03-31",
             "sample_ratio": 0.5,
-            "sample_group_keys": ["snap_date"],
+            "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
             "train_dev_ratio": 0.2,
             "enable_calibration": False,
@@ -94,34 +99,39 @@ def parameters():
     }
 
 
-class TestSelectSampleKeys:
+class TestSelectTrainKeys:
     def test_returns_correct_columns(self, sample_pool, parameters):
-        result = select_sample_keys(sample_pool, parameters)
-        assert sorted(result.columns) == ["cust_id", "snap_date"]
+        result = select_train_keys(sample_pool, parameters)
+        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
 
     def test_filters_to_train_dates(self, sample_pool, parameters):
-        result = select_sample_keys(sample_pool, parameters)
+        result = select_train_keys(sample_pool, parameters)
         pdf = result.toPandas()
         val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
         test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
         excluded = val_dates | test_dates
         assert not pdf["snap_date"].isin(excluded).any()
+        # All dates within train range
+        start = pd.Timestamp(parameters["dataset"]["train_snap_date_start"])
+        end = pd.Timestamp(parameters["dataset"]["train_snap_date_end"])
+        assert all(pdf["snap_date"] >= start)
+        assert all(pdf["snap_date"] <= end)
 
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        result = select_sample_keys(sample_pool, params)
-        # 4 customers x 3 train dates = 12
-        assert result.count() == 12
+        result = select_train_keys(sample_pool, params)
+        # 4 customers x 3 train dates x 3 products = 36
+        assert result.count() == 36
 
     def test_no_duplicates(self, sample_pool, parameters):
-        result = select_sample_keys(sample_pool, parameters)
-        assert result.count() == result.dropDuplicates(["snap_date", "cust_id"]).count()
+        result = select_train_keys(sample_pool, parameters)
+        assert result.count() == result.dropDuplicates(["snap_date", "cust_id", "prod_name"]).count()
 
 
 class TestSplitTrainKeys:
     def test_no_cust_overlap(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         train_custs = set(train.select("cust_id").distinct().toPandas()["cust_id"])
@@ -130,7 +140,7 @@ class TestSplitTrainKeys:
 
     def test_all_keys_preserved(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
         assert train.count() + train_dev.count() == sample_keys.count()
 
@@ -148,7 +158,23 @@ class TestSelectTestKeys:
 
 
 class TestBuildDataset:
-    def test_joins_features_and_labels(self, spark, feature_table, label_table, parameters):
+    def test_joins_with_product_keys(self, spark, feature_table, label_table, parameters):
+        """When keys include prod_name, join label_table on full identity key."""
+        keys = spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
+                "cust_id": ["C001", "C002"],
+                "prod_name": ["exchange_fx", "exchange_fx"],
+            })
+        )
+        result = build_dataset(keys, feature_table, label_table, parameters)
+        # 2 rows: one per key (specific product)
+        assert result.count() == 2
+        assert "total_aum" in result.columns
+        assert "label" in result.columns
+
+    def test_joins_without_product_keys(self, spark, feature_table, label_table, parameters):
+        """When keys don't include prod_name, expand to all products."""
         keys = spark.createDataFrame(
             pd.DataFrame({
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),

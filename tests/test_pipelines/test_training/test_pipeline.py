@@ -92,8 +92,10 @@ class TestTrainingPipelineE2E:
         parameters = {
             "random_seed": 42,
             "dataset": {
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-03-31",
                 "sample_ratio": 1.0,
-                "sample_group_keys": ["snap_date"],
+                "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio_overrides": {},
                 "train_dev_ratio": 0.2,
                 "enable_calibration": False,
@@ -128,8 +130,8 @@ class TestTrainingPipelineE2E:
             },
         }
 
-        # -- Build sample_pool from label_table (unique customer-month with segment) --
-        sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ"]].drop_duplicates().reset_index(drop=True)
+        # -- Build sample_pool from label_table (customer-month-product granularity) --
+        sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ", "prod_name"]].drop_duplicates().reset_index(drop=True)
 
         # -- Build catalog with MemoryDatasets for source data --
         # Pre-register all datasets used across both pipelines so they won't

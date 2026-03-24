@@ -10,8 +10,9 @@ from recsys_tfb.pipelines.dataset.nodes_pandas import (
     prepare_model_input,
     prepare_model_input_with_calibration,
     select_calibration_keys,
-    select_sample_keys,
+    select_keys,
     select_test_keys,
+    select_train_keys,
     select_val_keys,
     split_train_keys,
 )
@@ -64,17 +65,20 @@ def label_table():
 
 @pytest.fixture
 def sample_pool():
-    """Independent sample pool table with customer-month rows and segment."""
-    rows = []
+    """Sample pool at customer-month-product granularity."""
+    products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
+    rows = []
     for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
         for cid in ["C001", "C002", "C003", "C004"]:
-            rows.append({
-                "snap_date": snap_dt,
-                "cust_id": cid,
-                "cust_segment_typ": segments[cid],
-            })
+            for prod in products:
+                rows.append({
+                    "snap_date": snap_dt,
+                    "cust_id": cid,
+                    "cust_segment_typ": segments[cid],
+                    "prod_name": prod,
+                })
     return pd.DataFrame(rows)
 
 
@@ -83,8 +87,10 @@ def parameters():
     return {
         "random_seed": 42,
         "dataset": {
+            "train_snap_date_start": "2024-01-31",
+            "train_snap_date_end": "2024-03-31",
             "sample_ratio": 0.5,
-            "sample_group_keys": ["snap_date"],
+            "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
             "train_dev_ratio": 0.2,
             "enable_calibration": False,
@@ -101,6 +107,8 @@ class TestDateValidation:
     def test_non_overlapping_dates_pass(self):
         params = {
             "dataset": {
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-09-30",
                 "calibration_snap_dates": ["2024-10-31"],
                 "val_snap_dates": ["2024-11-30"],
                 "test_snap_dates": ["2024-12-31"],
@@ -151,63 +159,80 @@ class TestDateValidation:
         }
         _validate_date_splits(params)  # should not raise
 
+    def test_train_start_after_end_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_date_start": "2024-06-30",
+                "train_snap_date_end": "2024-01-31",
+                "calibration_snap_dates": [],
+                "val_snap_dates": ["2024-11-30"],
+                "test_snap_dates": ["2024-12-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="train_snap_date_start"):
+            _validate_date_splits(params)
 
-class TestSelectSampleKeys:
-    def test_returns_unique_keys(self, sample_pool, parameters):
-        result = select_sample_keys(sample_pool, parameters)
-        assert list(result.columns) == ["snap_date", "cust_id"]
+    def test_train_overlaps_val_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-11-30",
+                "calibration_snap_dates": [],
+                "val_snap_dates": ["2024-11-30"],
+                "test_snap_dates": ["2024-12-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="train & val"):
+            _validate_date_splits(params)
+
+
+class TestSelectTrainKeys:
+    def test_returns_identity_columns(self, sample_pool, parameters):
+        result = select_train_keys(sample_pool, parameters)
+        assert list(result.columns) == ["snap_date", "cust_id", "prod_name"]
         assert result.duplicated().sum() == 0
 
     def test_filters_to_train_dates(self, sample_pool, parameters):
-        """Should exclude val and test dates."""
-        result = select_sample_keys(sample_pool, parameters)
+        """Should only include dates within train_snap_date_start ~ end."""
+        result = select_train_keys(sample_pool, parameters)
         val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
         test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
         excluded = val_dates | test_dates
         assert not result["snap_date"].isin(excluded).any()
-
-    def test_stratified_by_snap_date(self, sample_pool, parameters):
-        result = select_sample_keys(sample_pool, parameters)
-        counts = result.groupby("snap_date").size()
-        # 4 customers per snap_date, sample_ratio=0.5 → ~2 each
-        assert all(counts <= 4)
-        assert all(counts >= 1)
+        # All dates should be within start~end range
+        start = pd.Timestamp(parameters["dataset"]["train_snap_date_start"])
+        end = pd.Timestamp(parameters["dataset"]["train_snap_date_end"])
+        assert all(result["snap_date"] >= start)
+        assert all(result["snap_date"] <= end)
 
     def test_deterministic(self, sample_pool, parameters):
-        r1 = select_sample_keys(sample_pool, parameters)
-        r2 = select_sample_keys(sample_pool, parameters)
+        r1 = select_train_keys(sample_pool, parameters)
+        r2 = select_train_keys(sample_pool, parameters)
         pd.testing.assert_frame_equal(r1, r2)
-
-    def test_stratified_by_multiple_keys(self, sample_pool, parameters):
-        params = {
-            **parameters,
-            "dataset": {
-                **parameters["dataset"],
-                "sample_group_keys": ["snap_date", "cust_segment_typ"],
-                "sample_ratio": 0.5,
-            },
-        }
-        result = select_sample_keys(sample_pool, params)
-        assert list(result.columns) == ["snap_date", "cust_id"]
-        assert result.duplicated().sum() == 0
-        assert len(result) > 0
-
-    def test_output_excludes_group_columns(self, sample_pool, parameters):
-        params = {
-            **parameters,
-            "dataset": {
-                **parameters["dataset"],
-                "sample_group_keys": ["snap_date", "cust_segment_typ"],
-            },
-        }
-        result = select_sample_keys(sample_pool, params)
-        assert list(result.columns) == ["snap_date", "cust_id"]
 
     def test_full_ratio_no_overrides(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        result = select_sample_keys(sample_pool, params)
-        # 3 train dates x 4 customers = 12
-        assert len(result) == 12
+        result = select_train_keys(sample_pool, params)
+        # 3 train dates x 4 customers x 3 products = 36
+        assert len(result) == 36
+
+
+class TestSelectKeys:
+    def test_filters_to_specified_dates(self, sample_pool, parameters):
+        snap_dates = [pd.Timestamp("2024-01-31")]
+        result = select_keys(sample_pool, parameters, snap_dates, 1.0)
+        assert all(result["snap_date"] == pd.Timestamp("2024-01-31"))
+
+    def test_stratified_sampling(self, sample_pool, parameters):
+        snap_dates = [pd.Timestamp("2024-01-31"), pd.Timestamp("2024-02-29")]
+        result = select_keys(sample_pool, parameters, snap_dates, 0.5)
+        assert len(result) > 0
+        assert len(result) < 24  # 2 dates x 4 custs x 3 products
+
+    def test_output_columns(self, sample_pool, parameters):
+        snap_dates = [pd.Timestamp("2024-01-31")]
+        result = select_keys(sample_pool, parameters, snap_dates, 1.0)
+        assert list(result.columns) == ["snap_date", "cust_id", "prod_name"]
 
 
 class TestSampleRatioOverrides:
@@ -222,31 +247,32 @@ class TestSampleRatioOverrides:
                 "sample_ratio_overrides": {"mass": 1.0},  # except mass: keep all
             },
         }
-        result = select_sample_keys(sample_pool, params)
-        # Only mass customers (C001, C004) should be kept across 3 train dates
+        result = select_train_keys(sample_pool, params)
+        # Only mass customers (C001, C004) should be kept
         assert len(result) > 0
-        # All results should be mass customers
-        pool = sample_pool.set_index(["snap_date", "cust_id"])
+        pool = sample_pool.set_index(["snap_date", "cust_id", "prod_name"])
         for _, row in result.iterrows():
-            key = (row["snap_date"], row["cust_id"])
+            key = (row["snap_date"], row["cust_id"], row["prod_name"])
             assert pool.loc[key, "cust_segment_typ"] == "mass"
 
-    def test_multi_column_override(self, sample_pool, label_table, parameters):
+    def test_multi_column_override(self, sample_pool, parameters):
         """Override with multi-column group keys using '|' separator."""
         params = {
             **parameters,
             "dataset": {
                 **parameters["dataset"],
-                "sample_group_keys": ["cust_segment_typ", "snap_date"],
+                "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio": 0.0,
                 "sample_ratio_overrides": {
-                    f"mass|{pd.Timestamp('2024-01-31')}": 1.0,
+                    "mass|exchange_fx": 1.0,
                 },
             },
         }
-        result = select_sample_keys(sample_pool, params)
-        # Should only get mass customers on 2024-01-31
+        result = select_train_keys(sample_pool, params)
+        # Should only get mass customers with exchange_fx
         assert len(result) > 0
+        for _, row in result.iterrows():
+            assert row["prod_name"] == "exchange_fx"
 
     def test_fallback_to_default(self, sample_pool, parameters):
         """Groups not in overrides use the default sample_ratio."""
@@ -259,7 +285,7 @@ class TestSampleRatioOverrides:
                 "sample_ratio_overrides": {"affluent": 0.0},
             },
         }
-        result = select_sample_keys(sample_pool, params)
+        result = select_train_keys(sample_pool, params)
         # affluent (C002) should be excluded, others kept
         assert "C002" not in result["cust_id"].values
 
@@ -267,7 +293,7 @@ class TestSampleRatioOverrides:
 class TestSplitTrainKeys:
     def test_cust_id_split(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         # No overlap in cust_ids
@@ -277,7 +303,7 @@ class TestSplitTrainKeys:
 
     def test_all_keys_preserved(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         total = len(train) + len(train_dev)
@@ -285,18 +311,17 @@ class TestSplitTrainKeys:
 
     def test_same_snap_dates(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         train_dates = set(train["snap_date"].unique())
         dev_dates = set(train_dev["snap_date"].unique())
-        # Both should have the same dates (train dates only)
         expected_dates = set(sample_keys["snap_date"].unique())
         assert train_dates | dev_dates == expected_dates
 
     def test_deterministic(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         t1, d1 = split_train_keys(sample_keys, params)
         t2, d2 = split_train_keys(sample_keys, params)
         pd.testing.assert_frame_equal(t1, t2)
@@ -305,29 +330,30 @@ class TestSplitTrainKeys:
     def test_ratio_approximate(self, sample_pool, parameters):
         """train_dev_ratio=0.2 with 4 cust_ids → 1 in dev (at least 1)."""
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_sample_keys(sample_pool, params)
+        sample_keys = select_train_keys(sample_pool, params)
         _, train_dev = split_train_keys(sample_keys, params)
         dev_custs = train_dev["cust_id"].nunique()
-        # With 4 custs and ratio 0.2, we get at least 1
         assert dev_custs >= 1
 
 
 class TestSelectCalibrationKeys:
-    def test_filter_to_calibration_dates(self, sample_pool, label_table, parameters):
+    def test_filter_to_calibration_dates(self, sample_pool, parameters):
         params = {
             **parameters,
             "dataset": {
                 **parameters["dataset"],
                 "enable_calibration": True,
                 "calibration_snap_dates": ["2024-03-31"],
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
                 "val_snap_dates": ["2024-04-30"],
                 "test_snap_dates": ["2024-05-31"],
             },
         }
-        result = select_calibration_keys(sample_pool, label_table, params)
+        result = select_calibration_keys(sample_pool, params)
         assert all(result["snap_date"] == pd.Timestamp("2024-03-31"))
 
-    def test_full_population(self, sample_pool, label_table, parameters):
+    def test_full_population(self, sample_pool, parameters):
         params = {
             **parameters,
             "dataset": {
@@ -335,14 +361,16 @@ class TestSelectCalibrationKeys:
                 "enable_calibration": True,
                 "calibration_snap_dates": ["2024-03-31"],
                 "calibration_sample_ratio": 1.0,
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
                 "val_snap_dates": ["2024-04-30"],
                 "test_snap_dates": ["2024-05-31"],
             },
         }
-        result = select_calibration_keys(sample_pool, label_table, params)
+        result = select_calibration_keys(sample_pool, params)
         assert result["cust_id"].nunique() == 4  # all 4 customers
 
-    def test_deterministic(self, sample_pool, label_table, parameters):
+    def test_deterministic(self, sample_pool, parameters):
         params = {
             **parameters,
             "dataset": {
@@ -350,27 +378,31 @@ class TestSelectCalibrationKeys:
                 "enable_calibration": True,
                 "calibration_snap_dates": ["2024-03-31"],
                 "calibration_sample_ratio": 0.5,
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
                 "val_snap_dates": ["2024-04-30"],
                 "test_snap_dates": ["2024-05-31"],
             },
         }
-        r1 = select_calibration_keys(sample_pool, label_table, params)
-        r2 = select_calibration_keys(sample_pool, label_table, params)
+        r1 = select_calibration_keys(sample_pool, params)
+        r2 = select_calibration_keys(sample_pool, params)
         pd.testing.assert_frame_equal(r1, r2)
 
-    def test_output_identity_columns_only(self, sample_pool, label_table, parameters):
+    def test_output_identity_columns(self, sample_pool, parameters):
         params = {
             **parameters,
             "dataset": {
                 **parameters["dataset"],
                 "enable_calibration": True,
                 "calibration_snap_dates": ["2024-03-31"],
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
                 "val_snap_dates": ["2024-04-30"],
                 "test_snap_dates": ["2024-05-31"],
             },
         }
-        result = select_calibration_keys(sample_pool, label_table, params)
-        assert list(result.columns) == ["snap_date", "cust_id"]
+        result = select_calibration_keys(sample_pool, params)
+        assert list(result.columns) == ["snap_date", "cust_id", "prod_name"]
 
 
 class TestSelectValKeys:
@@ -432,7 +464,24 @@ class TestSelectTestKeys:
 
 
 class TestBuildDataset:
-    def test_joins_features_and_labels(self, feature_table, label_table, parameters):
+    def test_joins_with_product_keys(self, feature_table, label_table, parameters):
+        """When keys include prod_name, join label_table on full identity key."""
+        keys = pd.DataFrame(
+            {
+                "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
+                "cust_id": ["C001", "C002"],
+                "prod_name": ["exchange_fx", "exchange_fx"],
+            }
+        )
+        result = build_dataset(keys, feature_table, label_table, parameters)
+        # 2 rows: one per key (specific product)
+        assert len(result) == 2
+        assert "total_aum" in result.columns
+        assert "label" in result.columns
+        assert all(result["prod_name"] == "exchange_fx")
+
+    def test_joins_without_product_keys(self, feature_table, label_table, parameters):
+        """When keys don't include prod_name, expand to all products via label_table."""
         keys = pd.DataFrame(
             {
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),

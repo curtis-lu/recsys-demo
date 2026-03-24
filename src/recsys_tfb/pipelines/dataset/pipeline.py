@@ -11,8 +11,8 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             prepare_model_input,
             prepare_model_input_with_calibration,
             select_calibration_keys,
-            select_sample_keys,
             select_test_keys,
+            select_train_keys,
             select_val_keys,
             split_train_keys,
         )
@@ -22,17 +22,18 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             prepare_model_input,
             prepare_model_input_with_calibration,
             select_calibration_keys,
-            select_sample_keys,
             select_test_keys,
+            select_train_keys,
             select_val_keys,
             split_train_keys,
         )
 
     nodes = [
         Node(
-            select_sample_keys,
+            select_train_keys,
             inputs=["sample_pool", "parameters"],
             outputs="sample_keys",
+            name="select_sample_keys",
         ),
         Node(
             split_train_keys,
@@ -79,7 +80,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
         nodes.append(
             Node(
                 select_calibration_keys,
-                inputs=["sample_pool", "label_table", "parameters"],
+                inputs=["sample_pool", "parameters"],
                 outputs="calibration_keys",
             ),
         )
