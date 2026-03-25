@@ -43,6 +43,39 @@ class TestTrainingPipeline:
         # evaluate must come before log (log depends on evaluation_results)
         assert names.index("evaluate_model") < names.index("log_experiment")
 
+    # -- Calibration-enabled pipeline tests --
+
+    def test_calibration_pipeline_has_five_nodes(self):
+        pipeline = create_pipeline(enable_calibration=True)
+        assert len(pipeline.nodes) == 5
+
+    def test_calibration_pipeline_has_calibrate_node(self):
+        pipeline = create_pipeline(enable_calibration=True)
+        names = [n.name for n in pipeline.nodes]
+        assert "calibrate_model" in names
+
+    def test_calibration_pipeline_inputs(self):
+        pipeline = create_pipeline(enable_calibration=True)
+        # Should include calibration data in addition to normal inputs
+        assert "X_calibration" in pipeline.inputs
+        assert "y_calibration" in pipeline.inputs
+
+    def test_calibration_pipeline_trained_model_intermediate(self):
+        """trained_model should be intermediate: produced by train_model, consumed by calibrate_model."""
+        pipeline = create_pipeline(enable_calibration=True)
+        # trained_model is produced internally and consumed internally,
+        # so it should NOT appear in pipeline.inputs (external inputs)
+        assert "trained_model" not in pipeline.inputs
+        # It should be in the set of all node outputs
+        assert "trained_model" in pipeline.outputs
+
+    def test_calibration_pipeline_topological_order(self):
+        pipeline = create_pipeline(enable_calibration=True)
+        names = [n.name for n in pipeline.nodes]
+        # calibrate_model must come after train_model and before evaluate_model
+        assert names.index("train_model") < names.index("calibrate_model")
+        assert names.index("calibrate_model") < names.index("evaluate_model")
+
 
 class TestTrainingPipelineE2E:
     """End-to-end: dataset pipeline → training pipeline → artifact validation."""
