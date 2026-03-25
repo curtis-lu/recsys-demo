@@ -4,30 +4,44 @@
 
 ---
 
-## 這個框架適合你嗎？
+## 導覽
+
+| 你想做什麼 | 看這裡 |
+|-----------|--------|
+| 快速跑起來看看效果 | [快速開始](#快速開始) |
+| 用自己的資料跑 pipeline | [使用自己的資料](#使用自己的資料) |
+| 調整參數或設定 | [設定檔說明](#設定檔說明) / [修改需求對照表](#修改需求對照表) |
+| 修改特徵工程、模型、排序邏輯 | [修改需求對照表](#修改需求對照表) / [客製化邊界](#客製化邊界) |
+| 接手維運或後續開發 | [維運重點](#維運重點) / [常見錯誤與排查](#常見錯誤與排查) |
+| 了解整體架構與設計 | [專案全貌](#專案全貌) |
+
+---
+
+## 適用情境
 
 **解決的問題**：你有一群用戶、一組候選項目，以及歷史上「用戶是否對項目感興趣」的二分類標籤（0/1）。你想為每位用戶預測各候選項目的興趣分數，排序後輸出推薦清單。
 
-**適用情境**：
+**適用場景**：
 
 - 金融產品推薦（信用卡、貸款、基金、保險）
 - 溝通通路偏好
 - 廣告文案類型排序
+- 任何「多個候選項 × 用戶 × 二分類標籤 → 排序」的場景
 
 **框架假設與限制**：
 
 | 假設 | 說明 |
 |------|------|
 | 批次推論 | 週期性（如每週）產出全量排序結果，非即時服務 |
-| 表格特徵 | 用戶特徵為結構化數值欄位，非序列、圖、文字 |
+| 表格特徵 | 用戶特徵為結構化數值/類別欄位，非序列、圖、文字 |
 | 二分類轉排序 | 以二分類預測機率作為排序分數（Strategy 1） |
-| LightGBM | 預設模型為 LightGBM，可替換但需改程式碼 |
-
-> 只要你的問題可以抽象為「多個候選項 × 用戶 × 二分類標籤 → 排序」，就能套用此框架。
+| LightGBM | 預設模型為 LightGBM；可透過 ModelAdapter 抽象替換，但需實作新 adapter |
+| CPU-only | 目標環境為 4 core / 128GB RAM，無 GPU |
+| 離線環境 | 無網路存取、不可安裝額外套件 |
 
 ---
 
-## 5 分鐘快速上手
+## 快速開始
 
 ### 環境需求
 
@@ -50,19 +64,20 @@ python scripts/generate_synthetic_data.py
 ```
 data/
 ├── feature_table.parquet   # 客戶特徵表（合成）
-└── label_table.parquet     # 客戶標籤表（合成）
+├── label_table.parquet     # 客戶標籤表（合成）
+└── sample_pool.parquet     # 抽樣池（合成）
 ```
 
 ### 依序執行 3 條 pipeline
 
 ```bash
-# Step 1: Dataset Building — 分層抽樣、切分、特徵工程
+# Step 1: Dataset Building — 抽樣、5-way 切分、特徵工程
 python -m recsys_tfb --pipeline dataset --env local
 
-# Step 2: Training — Optuna 超參搜尋 + LightGBM 訓練
+# Step 2: Training — Optuna 超參搜尋 + LightGBM 訓練 + 機率校準
 python -m recsys_tfb --pipeline training --env local
 
-# Step 3: Inference — 批次打分 + 排序
+# Step 3: Inference — 批次打分 + 排序 + 驗證
 python -m recsys_tfb --pipeline inference --env local
 ```
 
@@ -72,149 +87,74 @@ python -m recsys_tfb --pipeline inference --env local
 data/
 ├── feature_table.parquet
 ├── label_table.parquet
-├── dataset/<dataset_version>/       # Step 1 產出
-│   ├── X_train.parquet
-│   ├── y_train.parquet
-│   ├── X_val.parquet
-│   ├── y_val.parquet
+├── sample_pool.parquet
+├── dataset/<dataset_version>/              # Step 1 產出
+│   ├── train_model_input.parquet
+│   ├── train_dev_model_input.parquet
+│   ├── calibration_model_input.parquet     # enable_calibration=true 時
+│   ├── val_model_input.parquet
+│   ├── test_model_input.parquet
 │   ├── preprocessor.pkl
+│   ├── category_mappings.json
 │   └── manifest.json
-├── models/<model_version>/          # Step 2 產出
-│   ├── model.lgb
+├── models/<model_version>/                 # Step 2 產出
+│   ├── model.txt
+│   ├── model_meta.json
 │   ├── best_params.json
 │   ├── evaluation_results.json
 │   └── manifest.json
 └── inference/<model_version>/<snap_date>/  # Step 3 產出
-    └── ranked_predictions.parquet
+    ├── scoring_dataset.parquet
+    ├── score_table.parquet
+    ├── ranked_predictions.parquet
+    └── validated_predictions.parquet
 ```
 
-其中 `<dataset_version>` 和 `<model_version>` 是根據參數自動計算的 8 碼 hash。
+其中 `<dataset_version>` 和 `<model_version>` 是根據參數自動計算的 8 碼 SHA-256 hash。
 
 ---
 
-## 你的資料要長什麼樣
+## 專案全貌
 
-框架需要 **2 張表**作為輸入。數值特徵的數量和名稱不限，框架會自動偵測。
+### 架構概覽
 
-### feature_table（用戶特徵表）
-
-| 欄位 | 型別 | 必填 | 說明 |
-|------|------|------|------|
-| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
-| `cust_id` | string | 是 | 用戶唯一識別碼 |
-| *其餘欄位* | float | 是（至少 1 個） | 任意數值特徵，名稱不限 |
-
-### label_table（標籤表）
-
-| 欄位 | 型別 | 必填 | 說明 |
-|------|------|------|------|
-| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
-| `cust_id` | string | 是 | 用戶唯一識別碼 |
-| `prod_name` | string | 是 | 候選項目名稱 |
-| `label` | int (0/1) | 是 | 二分類標籤：1 表示感興趣 |
-| `apply_start_date` | datetime | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
-| `apply_end_date` | datetime | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
-| `cust_segment_typ` | string | 否 | 輔助欄位（pipeline 執行時會自動 drop） |
-
-> **彈性**：數值特徵欄位數量和名稱完全自由。框架透過排除法（移除 join key + drop 清單後，剩餘皆為特徵）自動偵測。日期欄位接受 `datetime64[ns]` 或 `"YYYY-MM-DD"` 字串（自動轉換）。
-
----
-
-## 套用到你的資料：改什麼、怎麼改
-
-### Step 1: 準備你的 feature_table 和 label_table
-
-按照上一節的 schema 準備 2 張 Parquet 表，放入 `data/` 目錄（或任意路徑）。
-
-### Step 2: 修改設定檔
-
-需要修改的檔案和對應的 key：
-
-| 檔案 | 要改的 key | 說明 |
-|------|-----------|------|
-| `conf/base/catalog.yaml` | `feature_table.filepath`、`label_table.filepath` | 指向你的資料路徑 |
-| `conf/base/parameters_dataset.yaml` | `dataset.train_dev_snap_dates`、`dataset.val_snap_dates` | 改為你的資料中實際存在的日期 |
-| `conf/base/parameters_dataset.yaml` | `prepare_model_input.drop_columns` | 如果你的 label_table 沒有 `apply_start_date` 等輔助欄位，從 drop 清單中移除 |
-| `conf/base/parameters_dataset.yaml` | `prepare_model_input.categorical_columns` | 如果你的候選項目欄位不叫 `prod_name`，改為對應名稱 |
-| `conf/base/parameters_inference.yaml` | `inference.products` | 改為你要打分的候選項目清單 |
-| `conf/base/parameters_inference.yaml` | `inference.snap_dates` | 改為推論日期 |
-
-### Step 3: 執行 pipeline
-
-```bash
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
-python -m recsys_tfb --pipeline inference --env local
-```
-
-### 什麼情況需要改程式碼？
-
-| 需求 | 修改檔案 |
-|------|----------|
-| 自訂特徵工程（新增/刪除特徵） | `pipelines/dataset/nodes_pandas.py` → `prepare_model_input` |
-| 更換模型（如 XGBoost） | `pipelines/training/nodes.py` → `train_model` |
-| 調整評估指標 | `pipelines/training/nodes.py` → `evaluate_model` |
-| 修改排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` → `rank_predictions` |
-
-### 不要動的部分
-
-`core/`、`io/`、`__main__.py` 構成框架基礎設施，除非你完全理解其影響，否則不建議修改。
-
----
-
-## 目前狀態
-
-- ✅ Kedro-inspired 核心框架（Node, Pipeline, Runner, Catalog, ConfigLoader）
-- ✅ Dataset Building Pipeline（分層抽樣、train/train-dev/val 切分、特徵工程）
-- ✅ Training Pipeline（Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤）
-- ✅ Inference Pipeline（批次打分、preprocessor 複用、排序）
-- ✅ Hash-based 版本管理（manifest、symlink latest/best）
-- ✅ pandas/PySpark 雙後端支援
-- ✅ Strategy 1 MVP（單一二分類器 + mAP）
-- ✅ 欄位設定彈性化（drop_columns/categorical_columns 可透過 YAML 設定）
-- ✅ Inference output 使用實際 model hash + latest symlink
-- ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + macro/micro avg + baselines + Plotly HTML 報告 + 模型比較 CLI）
-- ⬚ Source Data ETL Pipeline
-- ⬚ Strategy 2-4
-
-## 架構
-
-採用 Kedro 風格的框架設計：
+採用 Kedro 風格的輕量框架（無 Kedro 依賴）：
 
 ```
 Node → Pipeline → Runner → Catalog
 ```
 
 - **Node**：封裝純函數的計算單元，宣告輸入/輸出
-- **Pipeline**：節點的有向無環圖（DAG），拓撲排序（Kahn's algorithm）
-- **Runner**：依序執行節點
-- **Catalog**：資料 I/O 抽象層，支援 Parquet、Pickle、JSON 等適配器
+- **Pipeline**：節點的有向無環圖（DAG），Kahn's algorithm 拓撲排序
+- **Runner**：依序執行節點，附帶結構化日誌
+- **Catalog**：資料 I/O 抽象層，支援 Parquet、Pickle、JSON、ModelAdapter 等格式
+- **ConfigLoader**：YAML base + env 覆蓋，deep merge 語義
 
-### 4 條流水線
+### 流水線與相依關係
 
 | 流水線 | 狀態 | 說明 |
 |--------|------|------|
-| Source Data ETL | ⬚ | SQL 驅動的特徵和標籤表建構（PySpark） |
-| Dataset Building | ✅ | 分層抽樣、train/train-dev/val 切分、特徵工程。雙後端。輸出版本化 Parquet |
-| Training | ✅ | Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤、版本比較 |
-| Inference | ✅ | 每週批量打分，複用 Dataset Building 前處理邏輯。雙後端。結果依版本/日期分區 |
-
-### 流水線相依關係
+| Source Data ETL | 未實作 | SQL 驅動的特徵和標籤表建構（PySpark） |
+| Dataset Building | ✅ | 分層抽樣、5-way 切分（train/train-dev/calibration/val/test）、特徵工程。雙後端 |
+| Training | ✅ | Optuna 超參搜尋、LightGBM 訓練、機率校準（isotonic/sigmoid）、mAP 評估、MLflow 追蹤 |
+| Inference | ✅ | 批量打分、preprocessor 複用、排序、6 項 sanity check 驗證。雙後端 |
 
 三條 pipeline 必須依序執行，後者依賴前者的產出：
 
 ```
-feature_table ──┐                                              feature_table ──┐
-label_table ────┤                                              preprocessor ───┤
-                ▼                                              model ──────────┤
-        ┌───────────────┐      ┌──────────────┐               ▼
-        │    Dataset     │      │   Training   │      ┌──────────────┐
-        │   Building     │─────▶│              │─────▶│  Inference   │
-        └───────────────┘      └──────────────┘      └──────────────┘
-              │                       │                       │
-              ▼                       ▼                       ▼
-     X/y_train, X/y_val       model, best_params      ranked_predictions
-     preprocessor              evaluation_results
+sample_pool ────┐                                              feature_table ──┐
+feature_table ──┤                                              preprocessor ───┤
+label_table ────┤                                              model ──────────┤
+                ▼                                                              ▼
+        ┌───────────────┐      ┌──────────────┐               ┌──────────────┐
+        │    Dataset     │      │   Training   │               │  Inference   │
+        │   Building     │─────▶│              │──────────────▶│              │
+        └───────────────┘      └──────────────┘               └──────────────┘
+              │                       │                               │
+              ▼                       ▼                               ▼
+     train/train-dev/cal/      model, best_params              ranked_predictions
+     val/test model_input      evaluation_results              validated_predictions
+     preprocessor              calibrator (optional)
      category_mappings
 ```
 
@@ -222,17 +162,19 @@ label_table ────┤                                              preproc
 
 | 共享 Dataset | 產出 Pipeline | 消費 Pipeline | 說明 |
 |--------------|---------------|---------------|------|
-| `feature_table` | （外部輸入） | Dataset, Inference | 客戶特徵表，~500 欄位 |
+| `feature_table` | （外部輸入） | Dataset, Inference | 客戶特徵表 |
 | `label_table` | （外部輸入） | Dataset | 客戶標籤表 |
-| `X_train`, `y_train` | Dataset | Training | 訓練集特徵矩陣與標籤 |
-| `X_train_dev`, `y_train_dev` | Dataset | Training | 開發集（用於 early stopping） |
-| `X_val`, `y_val` | Dataset | Training | 驗證集特徵矩陣與標籤 |
-| `val_set` | Dataset | Training | 驗證集原始 DataFrame（mAP 分組計算用） |
+| `sample_pool` | （外部輸入） | Dataset | 抽樣池（定義候選客戶 × 產品組合） |
+| `train_model_input` | Dataset | Training | 訓練集（特徵 + 標籤，已前處理） |
+| `train_dev_model_input` | Dataset | Training | 開發集（用於 early stopping） |
+| `calibration_model_input` | Dataset | Training | 校準集（用於機率校準，optional） |
+| `val_model_input` | Dataset | Training | 驗證集（用於 mAP 評估） |
+| `test_model_input` | Dataset | Training | 測試集（用於最終評估） |
 | `preprocessor` | Dataset | Inference | 特徵編碼器（categorical mapping、欄位清單等） |
 | `category_mappings` | Dataset | （參考用） | 產品類別對照表 |
-| `model` | Training | Inference | LightGBM Booster 模型 |
+| `model` | Training | Inference | ModelAdapter（含模型權重 + metadata + 選配 calibrator） |
 
-**版本串接機制：**
+### 版本管理機制
 
 ```
 parameters_dataset.yaml
@@ -247,206 +189,242 @@ parameters_training.yaml + dataset_version    Inference 路徑：
   model_version
 ```
 
-- Dataset pipeline 的產出存放在 `data/dataset/${dataset_version}/`
-- Training pipeline 的產出存放在 `data/models/${model_version}/`
-- Inference pipeline 的產出存放在 `data/inference/${model_version}/${snap_date}/`，其中 `${model_version}` 為實際 hash 值。Model 與 preprocessor 讀取仍透過 `best` symlink 解析
-- Inference pipeline 完成後自動更新 `data/inference/latest` symlink
+- Dataset pipeline 產出存放在 `data/dataset/${dataset_version}/`
+- Training pipeline 產出存放在 `data/models/${model_version}/`
+- Inference pipeline 產出存放在 `data/inference/${model_version}/${snap_date}/`
+- **Symlink**：每次執行自動更新 `latest`；手動 promote 後建立 `best`
 - `model_version` 依賴 `dataset_version`，確保模型可追溯到其訓練資料
+- 每次 pipeline 執行產出 JSON **manifest**，記錄版本、時間戳、git commit、參數快照
 
-**關鍵不變量（跨 pipeline 必須一致）：**
+### 專案結構
 
-- `preprocessor` 必須一致：Inference 使用的 preprocessor 必須與 Training 所用的 Dataset pipeline 產出相同，否則特徵編碼不一致會導致預測錯誤
-- 產品清單必須一致：`inference.products` 必須是訓練時 `category_mappings` 中出現過的產品子集
-- `feature_table` schema 必須一致：Inference 時的 feature_table 欄位必須與 Dataset Building 時一致
+```
+src/recsys_tfb/
+  __main__.py               — CLI 入口（Typer）
+  core/
+    config.py               — ConfigLoader（YAML base + env 合併）
+    catalog.py              — DataCatalog（dataset registry & 路徑解析）
+    node.py                 — Node（函數封裝 + 命名 I/O）
+    pipeline.py             — Pipeline（Kahn's algorithm 拓撲排序）
+    runner.py               — Runner（依序執行 + 結構化日誌）
+    versioning.py           — Hash-based 版本管理、manifest、symlink
+    schema.py               — Config-driven 欄位名稱解析
+    logging.py              — RunContext、JSON/Console formatter
+  io/
+    base.py                 — AbstractDataset 介面
+    parquet_dataset.py      — ParquetDataset（pandas/spark 雙後端）
+    pickle_dataset.py       — PickleDataset
+    json_dataset.py         — JSONDataset
+    model_adapter_dataset.py — ModelAdapterDataset（model.txt + metadata + calibrator）
+  models/
+    base.py                 — ModelAdapter ABC、ADAPTER_REGISTRY、get_adapter()
+    lightgbm_adapter.py     — LightGBMAdapter
+    calibrated_adapter.py   — CalibratedModelAdapter（isotonic/sigmoid 包裝）
+  pipelines/
+    __init__.py             — Pipeline registry（get_pipeline, list_pipelines）
+    preprocessing.py        — 統一前處理邏輯（dataset/training/inference 共用）
+    dataset/                — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
+    training/               — Training（nodes.py, pipeline.py）
+    inference/              — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py, validation.py）
+  evaluation/
+    metrics.py              — 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
+    distributions.py        — 分數/排名分布圖表
+    calibration.py          — 校準曲線
+    segments.py             — 客群/持有產品組合分析
+    baselines.py            — 全域/客群熱門度 baseline
+    report.py               — HTML 報告產生（Plotly 離線內嵌）
+    compare.py              — 模型比較邏輯與視覺化
+    statistics.py           — 統計摘要
+  utils/
+    spark.py                — Spark 工具函數
 
-## 資料契約
+conf/                       — YAML 配置 + SQL
+scripts/
+  generate_synthetic_data.py  — 產生合成假資料
+  promote_model.py            — 模型版本晉升（手動觸發）
+  evaluate_model.py           — 模型評估 CLI（analyze/compare）
+tests/                        — 測試套件
+data/                         — 開發用合成資料 & pipeline 產出
+```
 
-以下說明各 pipeline 對輸入資料的 schema 要求與 hard-coded 欄位依賴。接手或修改 pipeline 前，請確認輸入資料符合這些約束。
+---
 
-#### feature_table schema
+## 使用自己的資料
 
-| 欄位 | 型別 | 說明 | 程式碼依賴 |
-|------|------|------|-----------|
-| `snap_date` | datetime | 快照日期 | join key、日期過濾、分群（hard-coded） |
-| `cust_id` | string | 客戶 ID | join key（hard-coded） |
-| 其餘數值欄位 | float | 特徵 | 動態偵測（非 join key / 非 drop 清單的欄位都會成為模型特徵） |
+### 輸入資料 schema
 
-- join key `["snap_date", "cust_id"]` 是 hard-coded（`dataset/nodes_pandas.py:74,78`、`dataset/nodes_spark.py:89,92`、`inference/nodes_pandas.py:30`）
-- 數值特徵欄位名稱不是 hard-coded，程式碼透過排除法（drop 掉 join key + label 相關欄位後，剩餘皆為特徵）
+框架需要 **3 張表**作為輸入：
 
-#### label_table schema
+#### feature_table（用戶特徵表）
 
-| 欄位 | 型別 | 說明 | 程式碼依賴 |
-|------|------|------|-----------|
-| `snap_date` | datetime | 快照日期 | join key（hard-coded） |
-| `cust_id` | string | 客戶 ID | join key（hard-coded） |
-| `prod_name` | string | 產品名稱 | 唯一 categorical 欄位，integer encoding（hard-coded） |
-| `label` | int (0/1) | 二分類標籤 | 目標變數（hard-coded） |
-| `apply_start_date` | datetime | 申請起始日 | `prepare_model_input` 時 drop（hard-coded） |
-| `apply_end_date` | datetime | 申請結束日 | `prepare_model_input` 時 drop（hard-coded） |
-| `cust_segment_typ` | string | 客戶分群 | `prepare_model_input` 時 drop（hard-coded） |
+| 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|
+| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
+| `cust_id` | string | 是 | 用戶唯一識別碼 |
+| *其餘欄位* | float 或 categorical | 是（至少 1 個） | 數值或類別特徵，名稱不限 |
 
-#### Hard-coded 欄位依賴總結
+#### label_table（標籤表）
 
-| 分類 | 欄位 | 說明 |
-|------|------|------|
-| **Join key** | `snap_date`, `cust_id` | 所有 pipeline 的合併 / 分群基礎 |
-| **可設定 drop 的欄位（預設）** | `snap_date`, `cust_id`, `label`, `apply_start_date`, `apply_end_date`, `cust_segment_typ` | 在 `prepare_model_input` 中移除。可透過 `parameters_dataset.yaml` 的 `prepare_model_input.drop_columns` 覆蓋 |
-| **可設定 categorical 欄位（預設）** | `prod_name` | integer encoding。可透過 `parameters_dataset.yaml` 的 `prepare_model_input.categorical_columns` 覆蓋 |
+| 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|
+| `snap_date` | datetime (`YYYY-MM-DD`) | 是 | 快照日期 |
+| `cust_id` | string | 是 | 用戶唯一識別碼 |
+| `prod_name` | string | 是 | 候選項目名稱 |
+| `label` | int (0/1) | 是 | 二分類標籤：1 表示感興趣 |
+| `apply_start_date` | datetime | 否 | 輔助欄位（pipeline 會自動 drop） |
+| `apply_end_date` | datetime | 否 | 輔助欄位（pipeline 會自動 drop） |
+| `cust_segment_typ` | string | 否 | 客戶分群（可用於分層抽樣） |
 
-#### 日期格式與資料型別
+#### sample_pool（抽樣池）
 
-- 所有日期欄位須為 `datetime64[ns]`（pandas Timestamp），字串形式 `"YYYY-MM-DD"` 會自動轉換
-- `label` 必須為 0 或 1 的整數
-- 數值特徵欄位為 float
+定義哪些 `(snap_date, cust_id, prod_name)` 組合是候選樣本。Dataset pipeline 從這張表抽樣，而非直接從 label_table 抽樣。
 
-#### 其他隱含約束
+> **彈性**：數值特徵欄位數量和名稱完全自由。框架透過排除法（移除 join key + drop 清單後，剩餘皆為特徵）自動偵測。日期欄位接受 `datetime64[ns]` 或 `"YYYY-MM-DD"` 字串（自動轉換）。
 
-- **Inference cross-join**：推論時會將 `feature_table` 的客戶與 `inference.products` 清單做笛卡兒積（`inference/nodes_pandas.py:24-27`）
-- **未知類別處理**：推論時遇到訓練集沒見過的 `prod_name` 值，會編碼為 `-1`
-- **mAP 分群**：評估時依 `(snap_date, cust_id)` 分群計算 AP，每個 group 有多個 `prod_name`（`training/nodes.py:50,204`）
-- **特徵欄位順序**：preprocessor 記錄了訓練時的欄位順序，推論時必須一致
+### Step-by-step 操作流程
 
-## 客製化指引
+**Step 1**：準備你的 feature_table、label_table、sample_pool，放入 `data/` 目錄（或任意路徑）。
 
-### 設定檔調整（不需改程式碼）
+**Step 2**：修改設定檔：
 
-修改 `conf/base/parameters_*.yaml` 即可調整行為，改完重跑 pipeline 就會生效：
+| 檔案 | 要改的 key | 說明 |
+|------|-----------|------|
+| `conf/base/catalog.yaml` | `feature_table.filepath`、`label_table.filepath`、`sample_pool.filepath` | 指向你的資料路徑 |
+| `conf/base/parameters_dataset.yaml` | `dataset.train_snap_date_start`、`dataset.train_snap_date_end` | 訓練集日期範圍 |
+| `conf/base/parameters_dataset.yaml` | `dataset.val_snap_dates`、`dataset.test_snap_dates` | 驗證/測試日期 |
+| `conf/base/parameters_dataset.yaml` | `dataset.calibration_snap_dates` | 校準集日期（若啟用） |
+| `conf/base/parameters_dataset.yaml` | `prepare_model_input.drop_columns` | 若你的 label_table 沒有 `apply_start_date` 等輔助欄位，從 drop 清單中移除 |
+| `conf/base/parameters_dataset.yaml` | `prepare_model_input.categorical_columns` | 改為你資料中的類別欄位名稱 |
+| `conf/base/parameters_dataset.yaml` | `dataset.sample_group_keys` | 改為你要分層抽樣的欄位 |
+| `conf/base/parameters_inference.yaml` | `inference.products` | 改為你要打分的候選項目清單 |
+| `conf/base/parameters_inference.yaml` | `inference.snap_dates` | 改為推論日期 |
 
-| 檔案 | 可調內容 | 範例 |
-|------|----------|------|
-| `parameters_dataset.yaml` | 抽樣率、分組欄位、train/val 日期切分 | 把 `sample_ratio` 從 1.0 改為 0.1 進行快速驗證 |
-| `parameters_training.yaml` | Optuna 試驗次數、LightGBM 迭代數/早停、超參搜尋範圍 | 增加 `n_trials` 到 100 做更充分的超參搜尋 |
-| `parameters_inference.yaml` | 推論日期、產品清單 | 新增產品代碼到 `inference.products` |
-| `parameters.yaml` | 專案名稱、隨機種子 | 換 `random_seed` 測試穩定性 |
-| `catalog.yaml` | 資料路徑、後端（pandas/spark）、存儲格式 | 把 `backend` 從 `pandas` 改為 `spark` |
-| `conf/local/` 或 `conf/production/` | 環境覆蓋 | 在 `production/catalog.yaml` 中指定 HDFS 路徑 |
+**Step 3**：執行 pipeline：
 
-> 注意：修改 `parameters_dataset.yaml` 會產生新的 `dataset_version`，後續 training 和 inference 都需重跑。修改 `parameters_training.yaml` 會產生新的 `model_version`，inference 需重跑。
+```bash
+python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb --pipeline inference --env local
+```
 
-### 節點邏輯修改（改 nodes 檔案）
+---
 
-Pipeline 節點都是純函數，可直接修改或替換：
+## 設定檔說明
 
-| 要改的邏輯 | 修改檔案 | 函數 |
-|-----------|----------|------|
-| 特徵工程（新增/刪除特徵） | `pipelines/dataset/nodes_pandas.py`（及 `nodes_spark.py`） | `prepare_model_input` |
-| 抽樣策略 | `pipelines/dataset/nodes_pandas.py` | `select_sample_keys` |
-| 資料切分方式 | `pipelines/dataset/nodes_pandas.py` | `split_keys` |
-| 超參搜尋空間/策略 | `pipelines/training/nodes.py` | `tune_hyperparameters` |
-| 模型訓練邏輯 | `pipelines/training/nodes.py` | `train_model` |
-| 評估指標 | `pipelines/training/nodes.py` | `evaluate_model` |
-| 打分前處理 | `pipelines/inference/nodes_pandas.py` | `apply_preprocessor` |
-| 排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` | `rank_predictions` |
-
-> 如果同時支援雙後端，`nodes_pandas.py` 和 `nodes_spark.py` 需保持同步修改。
-
-### 框架層（不建議改動）
-
-以下模組構成 pipeline 執行的基礎設施，修改前請確認完全理解其影響：
-
-| 模組 | 路徑 | 說明 |
-|------|------|------|
-| 核心框架 | `core/node.py`, `core/pipeline.py`, `core/runner.py` | Node/Pipeline/Runner 執行引擎 |
-| 設定載入 | `core/config.py` | YAML 合併策略 |
-| Catalog | `core/catalog.py` | 資料集註冊與模板變數解析 |
-| 版本管理 | `core/versioning.py` | hash 計算、manifest 寫入、symlink 管理 |
-| I/O 適配器 | `io/` | Parquet/Pickle/JSON 讀寫 |
-| CLI | `__main__.py` | Typer 命令列入口 |
-
-## 設定檔參考
-
-### 版本管理
-
-- **Dataset version**：`SHA-256(parameters_dataset.yaml)` 前 8 碼
-- **Model version**：`SHA-256(parameters_training.yaml + dataset_version)` 前 8 碼
-- 每次執行產出 JSON **manifest**（記錄 pipeline metadata）
-- **Symlink**：`latest`（最近執行）、`best`（晉升版本）
-- Catalog 路徑使用模板變數：`${dataset_version}`、`${model_version}`、`${snap_date}`
-
-### 雙後端支援
-
-| 後端 | 使用場景 | 節點檔案 |
-|------|----------|----------|
-| pandas | 本地開發、中小資料量 | `nodes_pandas.py` |
-| PySpark | 正式環境、大規模資料 | `nodes_spark.py` |
-
-Dataset 和 Inference Pipeline 支援雙後端；Training Pipeline 僅使用 pandas（接收準備好的 numpy array）。
-
-### 配置管理
+### 配置管理架構
 
 ```
 conf/
-├── base/           # 基礎配置（跨環境共享）
+├── base/                   # 基礎配置（跨環境共享）
 │   ├── catalog.yaml
 │   ├── parameters.yaml
 │   ├── parameters_dataset.yaml
 │   ├── parameters_training.yaml
-│   └── parameters_inference.yaml
-├── local/          # 本地開發環境覆蓋
-├── production/     # 生產環境配置
-└── sql/            # ETL SQL 檔案
+│   ├── parameters_inference.yaml
+│   └── parameters_evaluation.yaml
+├── local/                  # 本地開發環境覆蓋
+│   └── catalog.yaml
+├── production/             # 生產環境配置
+│   ├── catalog.yaml
+│   └── parameters.yaml
+└── sql/                    # ETL SQL 檔案（未啟用）
 ```
 
-#### 環境覆蓋機制
+- `base/` 存放跨環境共享的預設值
+- `local/` 和 `production/` 可覆蓋同名 key（deep merge：nested dict 遞迴合併，scalar 值直接替換）
+- 透過 `--env` 參數切換環境：`python -m recsys_tfb -p dataset -e production`
+- `--env` 預設值為 `local`
 
-- `base/` 存放跨環境共享的預設值，`local/` 和 `production/` 可覆蓋同名 key
-- 合併語義：nested dict 遞迴合併（deep merge），scalar 值直接替換
-- 透過 `--env` 參數切換環境：`python -m recsys_tfb -p dataset -e local`
-- `--env` 預設值為 `local`，即未指定時載入 `base/` 再合併 `local/` 配置
-
-#### 全域參數 (`parameters.yaml`)
+### 全域參數 (`parameters.yaml`)
 
 | 參數 | 型別 | 預設值 | 說明 |
 |------|------|--------|------|
-| `project_name` | str | `recsys_tfb` | 專案名稱標識，用於 MLflow 實驗命名等 |
-| `random_seed` | int | `42` | 全域隨機種子，影響抽樣、Optuna sampler、LightGBM 訓練 |
+| `project_name` | str | `recsys_tfb` | 專案名稱，用於 MLflow 實驗命名 |
+| `random_seed` | int | `42` | 全域隨機種子，影響抽樣、Optuna、LightGBM |
+| `backend` | str | `pandas` | 預設後端（`pandas` 或 `spark`） |
+| `schema.columns.time` | str | `snap_date` | 時間欄位名稱 |
+| `schema.columns.entity` | list | `[cust_id]` | 實體欄位名稱 |
+| `schema.columns.item` | str | `prod_name` | 項目欄位名稱 |
+| `schema.columns.label` | str | `label` | 標籤欄位名稱 |
+| `schema.columns.score` | str | `score` | 預測分數欄位名稱 |
+| `schema.columns.rank` | str | `rank` | 排名欄位名稱 |
+| `logging.level` | str | `INFO` | 日誌等級 |
+| `logging.console` | bool | `true` | 是否輸出到 console |
+| `logging.file.enabled` | bool | `true` | 是否寫入日誌檔 |
+| `logging.file.path` | str | `logs/` | 日誌檔目錄 |
+| `logging.file.format` | str | `json` | 日誌檔格式（`json`） |
 
-#### Dataset 參數 (`parameters_dataset.yaml`)
+### Dataset 參數 (`parameters_dataset.yaml`)
 
-| 參數 | 型別 | 預設值 | 說明 | 可調範圍 |
-|------|------|--------|------|----------|
-| `dataset.sample_ratio` | float | `1.0` | 分層抽樣率，1.0 表示全量 | 0.0 ~ 1.0 |
-| `dataset.sample_group_keys` | list[str] | `["snap_date"]` | 分層抽樣的分組欄位 | feature_table 中存在的欄位名 |
-| `dataset.train_dev_snap_dates` | list[str] | `["2024-02-29"]` | 訓練集 + 開發集使用的快照日期 | feature_table 中存在的日期 |
-| `dataset.val_snap_dates` | list[str] | `["2024-03-31"]` | 驗證集使用的快照日期 | feature_table 中存在的日期 |
-| `prepare_model_input.drop_columns` | list[str] | `["snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"]` | `prepare_model_input` 時要移除的欄位 | label_table 中存在的欄位名 |
-| `prepare_model_input.categorical_columns` | list[str] | `["prod_name"]` | 需做 integer encoding 的類別欄位 | label_table 中存在的欄位名 |
+| 參數 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `dataset.train_snap_date_start` | str | `"2025-01-31"` | 訓練集日期範圍起始 |
+| `dataset.train_snap_date_end` | str | `"2025-10-31"` | 訓練集日期範圍結束 |
+| `dataset.sample_ratio` | float | `1.0` | 分層抽樣率，1.0 表示全量 |
+| `dataset.sample_group_keys` | list[str] | `["cust_segment_typ", "prod_name"]` | 分層抽樣的分組欄位 |
+| `dataset.sample_ratio_overrides` | dict | `{}` | 特定分組的抽樣率覆蓋，key 以 `\|` 連接（如 `"mass\|fund_mix": 0.5`） |
+| `dataset.train_dev_ratio` | float | `0.1` | Train-dev 佔 train 日期資料的比例（按 `cust_id` 切分） |
+| `dataset.enable_calibration` | bool | `true` | 是否啟用校準集切分 |
+| `dataset.calibration_snap_dates` | list[str] | `["2025-11-30"]` | 校準集使用的快照日期 |
+| `dataset.calibration_sample_ratio` | float | `1.0` | 校準集抽樣率 |
+| `dataset.val_snap_dates` | list[str] | `["2025-12-31"]` | 驗證集使用的快照日期 |
+| `dataset.val_sample_ratio` | float | `1.0` | 驗證集抽樣率 |
+| `dataset.test_snap_dates` | list[str] | `["2026-01-31"]` | 測試集使用的快照日期 |
+| `prepare_model_input.drop_columns` | list[str] | 見下方 | `prepare_model_input` 時要移除的欄位 |
+| `prepare_model_input.categorical_columns` | list[str] | 見下方 | 需做 integer encoding 的類別欄位 |
 
-#### Training 參數 (`parameters_training.yaml`)
+`drop_columns` 預設值：`["snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"]`
 
-| 參數 | 型別 | 預設值 | 說明 | 可調範圍 |
-|------|------|--------|------|----------|
-| `training.n_trials` | int | `20` | Optuna 超參搜尋試驗次數 | ≥ 1 |
-| `training.num_iterations` | int | `500` | LightGBM boosting 迭代輪數 | ≥ 1 |
-| `training.early_stopping_rounds` | int | `50` | 早停耐心值（驗證指標無改善的容忍輪數） | ≥ 1，且應 < `num_iterations` |
-| `training.search_space.learning_rate` | {low, high} | `{0.001, 0.1}` | 學習率搜尋範圍 | 0.001 ~ 1.0 |
-| `training.search_space.num_leaves` | {low, high} | `{4, 64}` | 葉節點數搜尋範圍 | 2 ~ 256 |
-| `training.search_space.max_depth` | {low, high} | `{3, 8}` | 最大樹深搜尋範圍 | 1 ~ 16 |
-| `training.search_space.min_child_samples` | {low, high} | `{5, 100}` | 葉節點最小樣本數搜尋範圍 | 1 ~ 1000 |
-| `training.search_space.subsample` | {low, high} | `{0.6, 1.0}` | 行抽樣比例搜尋範圍 | 0.1 ~ 1.0 |
-| `training.search_space.colsample_bytree` | {low, high} | `{0.6, 1.0}` | 列抽樣比例搜尋範圍 | 0.1 ~ 1.0 |
-| `mlflow.experiment_name` | str | `recsys_tfb` | MLflow 實驗名稱 | 任意字串 |
-| `mlflow.tracking_uri` | str | `mlruns` | MLflow tracking 儲存路徑 | 本地路徑或 MLflow server URI |
+`categorical_columns` 預設值：`["prod_name", "gender", "risk_attr", "education_level", "marital_status", "channel_preference"]`
 
-#### Inference 參數 (`parameters_inference.yaml`)
+### Training 參數 (`parameters_training.yaml`)
 
-| 參數 | 型別 | 預設值 | 說明 | 可調範圍 |
-|------|------|--------|------|----------|
-| `inference.snap_dates` | list[str] | `["2024-03-31"]` | 推論使用的快照日期 | feature_table 中存在的日期 |
-| `inference.products` | list[str] | `["bond", "fx", ...]` | 要打分的產品代碼列表 | 訓練時 category_mappings 中出現過的產品 |
+| 參數 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `training.algorithm` | str | `lightgbm` | 模型演算法（對應 ADAPTER_REGISTRY） |
+| `training.algorithm_params.objective` | str | `binary` | LightGBM 目標函數 |
+| `training.algorithm_params.metric` | str | `binary_logloss` | LightGBM 評估指標 |
+| `training.calibration.enabled` | bool | `true` | 是否執行機率校準 |
+| `training.calibration.method` | str | `isotonic` | 校準方法（`isotonic` 或 `sigmoid`） |
+| `training.n_trials` | int | `20` | Optuna 超參搜尋試驗次數 |
+| `training.num_iterations` | int | `500` | LightGBM boosting 迭代輪數 |
+| `training.early_stopping_rounds` | int | `50` | 早停耐心值 |
+| `training.search_space.learning_rate` | {low, high} | `{0.001, 0.1}` | 學習率搜尋範圍（log-scale） |
+| `training.search_space.num_leaves` | {low, high} | `{4, 64}` | 葉節點數搜尋範圍 |
+| `training.search_space.max_depth` | {low, high} | `{3, 8}` | 最大樹深搜尋範圍 |
+| `training.search_space.min_child_samples` | {low, high} | `{5, 100}` | 葉節點最小樣本數搜尋範圍 |
+| `training.search_space.subsample` | {low, high} | `{0.6, 1.0}` | 行抽樣比例搜尋範圍 |
+| `training.search_space.colsample_bytree` | {low, high} | `{0.6, 1.0}` | 列抽樣比例搜尋範圍 |
+| `mlflow.experiment_name` | str | `recsys_tfb` | MLflow 實驗名稱 |
+| `mlflow.tracking_uri` | str | `mlruns` | MLflow tracking 儲存路徑 |
 
-#### Catalog 配置 (`catalog.yaml`)
+### Inference 參數 (`parameters_inference.yaml`)
 
-每個 catalog entry 包含以下欄位：
+| 參數 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `inference.use_calibration` | bool | `true` | 是否使用校準後的機率。若 `false` 且模型有 calibrator，則使用原始預測 |
+| `inference.snap_dates` | list[str] | `["2025-12-31"]` | 推論使用的快照日期 |
+| `inference.products` | list[str] | 見下方 | 要打分的產品代碼列表 |
+
+`products` 預設值：`["exchange_usd", "exchange_fx", "fund_stock", "fund_bond", "fund_mix", "ccard_ins", "ccard_bill", "ccard_cash"]`
+
+### Evaluation 參數 (`parameters_evaluation.yaml`)
+
+| 參數 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `evaluation.k_values` | list | `[5, "all"]` | @K 指標的 K 值，`"all"` 在執行時解析為產品總數 |
+| `evaluation.segment_columns` | list[str] | `["cust_segment_typ"]` | 分群分析用的欄位 |
+| `evaluation.segment_sources` | dict | 見設定檔 | 外部分群資料來源（Parquet 檔，join 到標籤表） |
+
+### Catalog 配置 (`catalog.yaml`)
+
+每個 catalog entry 包含：
 
 | 欄位 | 必填 | 說明 |
 |------|------|------|
-| `type` | 是 | 資料集型別：`ParquetDataset`、`PickleDataset`、`JSONDataset` |
-| `filepath` | 是 | 檔案路徑（本地相對路徑或 `hdfs:///` 絕對路徑），支援模板變數 |
-| `backend` | 否 | 僅 `ParquetDataset` 適用：`pandas`（預設）或 `spark` |
-
-Catalog 路徑支援模板變數替換：`${dataset_version}`、`${model_version}`、`${snap_date}`
+| `type` | 是 | 資料集型別：`ParquetDataset`、`PickleDataset`、`JSONDataset`、`ModelAdapterDataset` |
+| `filepath` | 是 | 檔案路徑，支援模板變數 `${dataset_version}`、`${model_version}`、`${snap_date}` |
+| `backend` | 否 | 僅 `ParquetDataset`：`pandas`（預設）或 `spark` |
 
 環境覆蓋範例：
 
@@ -464,64 +442,49 @@ feature_table:
   backend: spark
 ```
 
-#### 參數相依關係
+### 參數相依關係
 
 | 約束條件 | 說明 |
 |----------|------|
-| `train_dev_snap_dates` ∩ `val_snap_dates` = ∅ | 訓練集與驗證集日期不可重疊，否則會造成資料洩漏 |
-| `train_dev_snap_dates` ∪ `val_snap_dates` ⊆ feature_table 日期 | 所有指定日期必須存在於 feature_table 中 |
-| `sample_ratio` < 1.0 時 | 各 split（train / train_dev / val）的資料量會等比縮小 |
-| `random_seed` | 同時影響 `sample_ratio` 抽樣結果、Optuna sampler 初始化、LightGBM 訓練 seed |
-| `inference.products` ⊆ category_mappings 的產品集合 | 推論產品必須是訓練時出現過的產品，否則模型無法產出有效預測 |
+| train 日期 ∩ calibration/val/test 日期 = ∅ | 各 split 日期不可重疊，否則資料洩漏。程式碼會在執行前檢查並 raise `ValueError` |
+| 所有指定日期 ⊆ sample_pool 日期 | 指定日期必須存在於 sample_pool 中 |
+| `train_snap_date_start` ≤ `train_snap_date_end` | 否則立即報錯 |
+| `inference.products` ⊆ category_mappings 的產品集合 | 推論產品必須是訓練時出現過的產品 |
 | `inference.snap_dates` ⊆ feature_table 日期 | 推論日期必須存在於 feature_table 中 |
-| `early_stopping_rounds` < `num_iterations` | 否則早停永遠不會被觸發（訓練會跑完全部迭代） |
-| `search_space.*.low` < `search_space.*.high` | 每個超參的搜尋下界必須嚴格小於上界 |
+| `early_stopping_rounds` < `num_iterations` | 否則早停永遠不會觸發 |
+| `search_space.*.low` < `search_space.*.high` | 搜尋下界必須小於上界 |
+| `random_seed` 影響範圍 | 同時影響抽樣、Optuna sampler、LightGBM 訓練 |
+| 修改 `parameters_dataset.yaml` | 產生新的 `dataset_version`，training 和 inference 都需重跑 |
+| 修改 `parameters_training.yaml` | 產生新的 `model_version`，inference 需重跑 |
 
-## 專案結構
+---
 
-```
-src/recsys_tfb/
-  __main__.py           — CLI 入口（Typer）
-  core/
-    config.py           — ConfigLoader（YAML base + env 合併）
-    catalog.py          — DataCatalog（dataset registry & 路徑解析）
-    node.py             — Node（函數封裝 + 命名 I/O）
-    pipeline.py         — Pipeline（Kahn's algorithm 拓撲排序）
-    runner.py           — Runner（依序執行）
-    versioning.py       — Hash-based 版本管理、manifest、symlink
-  io/
-    base.py             — AbstractDataset 介面
-    parquet_dataset.py  — ParquetDataset（pandas/spark 雙後端）
-    pickle_dataset.py   — PickleDataset
-    json_dataset.py     — JSONDataset
-  pipelines/
-    __init__.py         — Pipeline registry（get_pipeline, list_pipelines）
-    dataset/            — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
-    training/           — Training（nodes.py, pipeline.py）
-    inference/          — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py）
-  evaluation/
-    metrics.py          — 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
-    distributions.py    — 分數/排名分布圖表
-    calibration.py      — 校準曲線
-    segments.py         — 客群/持有產品組合分析
-    baselines.py        — 全域/客群熱門度 baseline
-    report.py           — HTML 報告產生（Plotly 離線內嵌）
-    compare.py          — 模型比較邏輯與視覺化
-  utils/
-    spark.py            — Spark 工具函數
+## 修改需求對照表
 
-conf/                   — YAML 配置 + SQL
-scripts/
-  generate_synthetic_data.py  — 產生合成假資料
-  promote_model.py            — 模型版本晉升（手動觸發）
-  evaluate_model.py           — 模型評估 CLI（analyze/compare）
-tests/
-  test_evaluation/      — 評估模組測試
-  scripts/              — 腳本測試
-data/                   — 開發用合成資料
-```
+| 想做什麼 | 改哪裡 | 具體位置 |
+|----------|--------|----------|
+| 換資料來源路徑 | 設定檔 | `conf/base/catalog.yaml` → `feature_table.filepath`、`label_table.filepath`、`sample_pool.filepath` |
+| 改訓練/驗證/測試日期 | 設定檔 | `parameters_dataset.yaml` → `train_snap_date_start/end`、`val_snap_dates`、`test_snap_dates` |
+| 改推論日期 | 設定檔 | `parameters_inference.yaml` → `inference.snap_dates` |
+| 改候選產品清單 | 設定檔 | `parameters_inference.yaml` → `inference.products` |
+| 改抽樣率 | 設定檔 | `parameters_dataset.yaml` → `dataset.sample_ratio`、`sample_ratio_overrides` |
+| 改超參搜尋範圍/次數 | 設定檔 | `parameters_training.yaml` → `training.search_space.*`、`training.n_trials` |
+| 開關機率校準 | 設定檔 | `parameters_dataset.yaml` → `enable_calibration`；`parameters_training.yaml` → `calibration.enabled`；`parameters_inference.yaml` → `use_calibration` |
+| 改要 drop 的欄位 | 設定檔 | `parameters_dataset.yaml` → `prepare_model_input.drop_columns` |
+| 改類別欄位 | 設定檔 | `parameters_dataset.yaml` → `prepare_model_input.categorical_columns` |
+| 改特徵工程邏輯 | 程式碼 | `pipelines/dataset/nodes_pandas.py`（及 `nodes_spark.py`）→ `build_dataset` |
+| 改前處理邏輯 | 程式碼 | `pipelines/preprocessing.py` |
+| 改抽樣策略 | 程式碼 | `pipelines/dataset/nodes_pandas.py` → `select_keys` |
+| 改模型演算法 | 程式碼 | 實作新的 `ModelAdapter`（參考 `models/lightgbm_adapter.py`），註冊到 `ADAPTER_REGISTRY` |
+| 改超參搜尋策略 | 程式碼 | `pipelines/training/nodes.py` → `tune_hyperparameters` |
+| 改評估指標 | 程式碼 | `pipelines/training/nodes.py` → `evaluate_model` |
+| 改排序/過濾邏輯 | 程式碼 | `pipelines/inference/nodes_pandas.py` → `rank_predictions` |
+| 改推論驗證規則 | 程式碼 | `pipelines/inference/validation.py` → `validate_predictions` |
+| 切換 pandas/spark 後端 | 設定檔 | `catalog.yaml` 的 `backend` 欄位；或 `conf/production/parameters.yaml` → `backend: spark` |
 
-## 執行指令參考
+---
+
+## 執行方式與輸出
 
 ### Pipeline 執行
 
@@ -533,36 +496,213 @@ python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34  
 python -m recsys_tfb -p dataset -e local  # 簡寫
 ```
 
+**版本解析邏輯：**
+
+| Pipeline | dataset_version | model_version |
+|----------|----------------|---------------|
+| dataset | 自動計算（hash of parameters_dataset.yaml） | — |
+| training | 讀取 `latest` symlink（或 `--dataset-version`） | 自動計算（hash of params + dataset_version） |
+| inference | 從 model manifest 讀取（fallback: `latest`） | 讀取 `best` symlink（或 `--model-version`） |
+
 ### 模型評估
 
 ```bash
 # 單一模型分析（產出 Plotly HTML 報告 + metrics.json）
-python scripts/evaluate_model.py analyze <model_version> --snap-date 2024-03-31
+python scripts/evaluate_model.py analyze <model_version> --snap-date 2025-12-31
 
-# 兩個模型版本比較（指標差異 + 分數分布比較）
-python scripts/evaluate_model.py compare <model_a> <model_b> --snap-date 2024-03-31
+# 兩個模型版本比較
+python scripts/evaluate_model.py compare <model_a> <model_b> --snap-date 2025-12-31
 
-# 模型 vs baseline 比較（global_popularity 或 segment_popularity）
-python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2024-03-31
+# 模型 vs baseline 比較
+python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2025-12-31
 ```
 
-- model_version 可使用版本 hash、`latest` 或 `best`
+- `model_version` 可使用版本 hash、`latest` 或 `best`
 - `--k-values 3,5,10` 可自訂 K 值（預設 5, all）
 - 報告輸出至 `data/evaluation/` 下對應版本目錄
 
 ### 模型晉升
 
 ```bash
-python scripts/promote_model.py
+python scripts/promote_model.py              # 自動選擇 mAP 最高版本
+python scripts/promote_model.py <version>    # 指定版本
+python scripts/promote_model.py --dry-run    # 預覽不執行
 ```
 
-### 執行測試
+建立 `data/models/best` symlink，Inference pipeline 預設讀取此版本。
+
+> **注意**：promote 為手動操作，請勿在自動化流程中執行。
+
+### 測試
 
 ```bash
-pytest
-pytest tests/ -v
-pytest tests/test_core/test_config.py -v  # 單一測試
+pytest                                        # 全部測試
+pytest tests/ -v                              # verbose 輸出
+pytest tests/test_core/test_config.py -v      # 單一測試檔
+pytest tests/scenarios/ -v                    # 情境測試
 ```
+
+---
+
+## 客製化邊界
+
+### 設定檔調整（不需改程式碼）
+
+修改 `conf/base/parameters_*.yaml` 即可調整行為，改完重跑對應 pipeline 生效：
+
+| 調整項目 | 設定檔 | 範例 |
+|---------|--------|------|
+| 抽樣率、分組、日期切分 | `parameters_dataset.yaml` | `sample_ratio: 0.1` 做快速驗證 |
+| Optuna 試驗次數、迭代數、早停 | `parameters_training.yaml` | `n_trials: 100` 做更充分搜尋 |
+| 推論日期、產品清單 | `parameters_inference.yaml` | 新增產品代碼到 `products` |
+| 校準開關 | 三個 `parameters_*.yaml` | 各自獨立控制 |
+| 隨機種子 | `parameters.yaml` | 換 `random_seed` 測試穩定性 |
+| 資料路徑、後端 | `catalog.yaml` | 從 `pandas` 改為 `spark` |
+| 環境覆蓋 | `conf/local/` 或 `conf/production/` | 生產環境指定 HDFS 路徑 |
+
+### 節點邏輯修改（改 nodes）
+
+Pipeline 節點都是純函數，可直接修改或替換：
+
+| 要改的邏輯 | 修改檔案 | 函數 |
+|-----------|----------|------|
+| 特徵工程 | `pipelines/dataset/nodes_pandas.py`（及 `nodes_spark.py`） | `build_dataset` |
+| 前處理（編碼、欄位篩選） | `pipelines/preprocessing.py` | `fit_preprocessor_metadata`、`transform_to_model_input` |
+| 抽樣策略 | `pipelines/dataset/nodes_pandas.py` | `select_keys` |
+| 超參搜尋空間/策略 | `pipelines/training/nodes.py` | `tune_hyperparameters` |
+| 模型訓練邏輯 | `pipelines/training/nodes.py` | `train_model` |
+| 機率校準 | `pipelines/training/nodes.py` | `calibrate_model` |
+| 評估指標 | `pipelines/training/nodes.py` | `evaluate_model` |
+| 排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` | `rank_predictions` |
+| 推論驗證規則 | `pipelines/inference/validation.py` | `validate_predictions` |
+
+> 如果同時支援雙後端，`nodes_pandas.py` 和 `nodes_spark.py` 需保持同步修改。
+
+### 框架層（不建議改動）
+
+以下模組構成 pipeline 執行的基礎設施。修改前請確認完全理解其影響：
+
+| 模組 | 路徑 | 設計理由 |
+|------|------|----------|
+| 核心框架 | `core/node.py`, `pipeline.py`, `runner.py` | 提供聲明式 DAG 定義與執行，讓 pipeline 邏輯與執行順序解耦 |
+| 設定載入 | `core/config.py` | 統一 YAML 合併語義，避免各處重複解析設定 |
+| Catalog | `core/catalog.py` | 資料 I/O 與 pipeline 邏輯解耦，同一節點不需知道資料來源是本地還是 HDFS |
+| 版本管理 | `core/versioning.py` | Hash-based 版本確保可追溯性——改參數就換版本，不會意外覆蓋舊結果 |
+| Schema | `core/schema.py` | 集中管理欄位名稱，避免 hard-code 散落各處 |
+| I/O 適配器 | `io/` | 隔離序列化格式差異，新增格式只需實作 `AbstractDataset` |
+| 模型抽象 | `models/` | `ModelAdapter` ABC 讓訓練/推論邏輯不綁定特定模型框架 |
+| CLI | `__main__.py` | 統一入口，處理版本解析、symlink 更新、manifest 寫入 |
+
+---
+
+## 維運重點
+
+### 關鍵不變量
+
+這些一致性假設如果被破壞，會導致預測結果無效：
+
+| 不變量 | 說明 | 後果 |
+|--------|------|------|
+| Preprocessor 一致 | Inference 使用的 preprocessor 必須與 Training 所用的 Dataset pipeline 產出相同 | 特徵編碼不一致 → 預測錯誤 |
+| 產品清單一致 | `inference.products` 必須是 `category_mappings` 中出現過的產品子集 | 未知產品編碼為 -1 → 模型行為未定義 |
+| Feature schema 一致 | Inference 時的 feature_table 欄位必須與 Dataset Building 時一致 | 缺欄位 → `ValueError`；多欄位 → 被忽略但應排查 |
+| 特徵欄位順序 | Preprocessor 記錄了訓練時的欄位順序，推論時必須一致 | 順序不一致 → 特徵值被送到錯誤的模型節點 |
+
+### 資料契約
+
+#### Hard-coded 欄位依賴
+
+| 分類 | 欄位 | 說明 |
+|------|------|------|
+| **Join key** | `snap_date`, `cust_id` | 所有 pipeline 的合併/分群基礎（hard-coded） |
+| **可設定 drop 欄位** | 見 `drop_columns` 預設值 | 在 `prepare_model_input` 中移除，可透過 YAML 覆蓋 |
+| **可設定 categorical 欄位** | 見 `categorical_columns` 預設值 | Integer encoding，可透過 YAML 覆蓋 |
+| **Label** | `label` | 目標變數，0/1 整數 |
+
+#### 日期格式
+
+- 所有日期欄位須為 `datetime64[ns]`，字串 `"YYYY-MM-DD"` 會自動轉換
+- `label` 必須為 0 或 1 的整數
+- 數值特徵為 float
+
+#### 隱含行為
+
+- **Inference cross-join**：推論時將 `feature_table` 的客戶與 `inference.products` 做笛卡兒積
+- **未知類別處理**：推論時遇到訓練未見過的類別值，編碼為 `-1`（log warning，不報錯）
+- **mAP 分群**：評估時依 `(snap_date, cust_id)` 分群計算 AP
+- **Train-dev 切分**：按 `cust_id` 切分（非 row-level），同一客戶的所有資料在同一 partition
+- **Spark → pandas 轉換**：Training pipeline 內部統一轉 pandas，需要足夠的 driver memory
+
+### 設計決策與理由
+
+| 決策 | 理由 |
+|------|------|
+| Pipeline 分三段而非一段到底 | 允許獨立重跑——改參數不必重新建 dataset，改推論日期不必重新訓練 |
+| 設定放 YAML、邏輯留 code | YAML 適合調參頻率高且無副作用的值；邏輯變更需要 code review 和測試 |
+| Hash-based 版本管理 | 改參數 = 新版本 hash → 不會意外覆蓋舊版本；manifest 保留完整 metadata |
+| 雙後端（pandas/spark） | 本地開發用 pandas 快速迭代；生產環境用 Spark 處理 ~10M 客戶規模 |
+| 統一前處理（`preprocessing.py`） | 確保 dataset/training/inference 三條 pipeline 的前處理邏輯完全一致，避免 train-serve skew |
+| ModelAdapter 抽象 | 目前只有 LightGBM，但預留替換模型的擴充點，不需改動 training/inference pipeline 邏輯 |
+| Inference 後驗證（6 項 sanity check） | 在寫出結果前攔截異常——缺 row、NaN、分數超出範圍、rank 不連續等 |
+| Symlink（latest/best）而非資料庫 | 離線環境無資料庫服務，symlink 是最輕量的「指向目前版本」機制 |
+
+---
+
+## 常見錯誤與排查
+
+| 症狀 | 可能原因 | 排查方向 |
+|------|---------|---------|
+| `ValueError: Date split overlap detected` | `parameters_dataset.yaml` 中 train/calibration/val/test 日期有重疊 | 檢查 `train_snap_date_start/end`、`calibration_snap_dates`、`val_snap_dates`、`test_snap_dates` 是否互不重疊 |
+| `ValueError: train_snap_date_start > train_snap_date_end` | 訓練日期範圍反轉 | 確認 start ≤ end |
+| `ValueError: Missing feature columns in scoring dataset: [...]` | Inference 的 feature_table 缺少訓練時存在的欄位 | 比對 `preprocessor.pkl` 中的 `feature_columns` 與目前 feature_table 的欄位。通常是 feature_table schema 演進後未重建 dataset |
+| `FileNotFoundError: ...best... Run training and promote a model first` | 未執行 promote 就跑 inference | 先執行 `python scripts/promote_model.py` 建立 `best` symlink |
+| `FileNotFoundError: ...latest... Run the dataset pipeline first` | 未執行 dataset pipeline 就跑 training | 確認 `data/dataset/latest` symlink 存在 |
+| WARNING: `Unknown categories found` | 推論資料出現訓練未見過的類別值 | 這些值會被編碼為 `-1`。若影響預測品質，考慮重新訓練或擴充訓練資料 |
+| `ValidationError` (inference) | 推論結果未通過 sanity check | 檢視錯誤訊息中列出的失敗項目。常見：row count 不符（feature_table 缺客戶）、score 超出 [0,1]、rank 不連續 |
+| LightGBM 訓練錯誤 | 訓練集可能為空（日期範圍內無資料）或特徵全為 NaN | 檢查指定日期在 sample_pool 和 feature_table 中是否有資料 |
+| Model manifest 讀取 warning | Manifest 損壞或缺少 `dataset_version` key | Inference 會 fallback 到 `latest` dataset symlink（靜默降級）。建議修復 manifest 或重新訓練 |
+| `category_mappings` 與 `inference.products` 不匹配 | 推論產品不在訓練時的產品集合中 | 比對 `data/dataset/<version>/category_mappings.json` 與 `parameters_inference.yaml` 的 `products` 清單 |
+
+---
+
+## 目前狀態與路線圖
+
+### 已完成
+
+- ✅ Kedro-inspired 核心框架（Node, Pipeline, Runner, Catalog, ConfigLoader）
+- ✅ Config-driven 欄位 schema + 結構化日誌
+- ✅ Dataset Building Pipeline（分層抽樣、5-way 切分、特徵工程、雙後端）
+- ✅ Training Pipeline（Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤）
+- ✅ Inference Pipeline（批次打分、preprocessor 複用、排序、6 項 sanity check 驗證、雙後端）
+- ✅ Hash-based 版本管理（manifest、symlink latest/best）
+- ✅ ModelAdapter 抽象（LightGBM adapter + adapter registry）
+- ✅ 機率校準（CalibratedModelAdapter，isotonic/sigmoid）
+- ✅ 5-way dataset split（train / train-dev / calibration / val / test）
+- ✅ 統一前處理（dataset/training/inference 共用 `preprocessing.py`）
+- ✅ 參數化日期範圍 + per-product 抽樣覆蓋
+- ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + baselines + Plotly 報告 + 模型比較 CLI）
+- ✅ pandas/PySpark 雙後端支援
+- ✅ Strategy 1 MVP（單一二分類器 + mAP）
+
+### 待完成
+
+- ⬚ Source Data ETL Pipeline（SQL 驅動的特徵/標籤建構）
+- ⬚ Evaluation Pipeline（獨立 pipeline 化）
+- ⬚ 觀測性增強（data-quality profiling、artifact lineage）
+- ⬚ 版本管理增強（manifest 擴充、版本 CLI、rollback）
+- ⬚ Safe rerun checkpointing
+- ⬚ Strategy 2-4（OVR、LambdaRank、兩級排序）
+
+### 模型策略路線圖
+
+| 策略 | 狀態 | 說明 |
+|------|------|------|
+| Strategy 1（MVP） | ✅ | 單一二分類器，產品名稱作為特徵，mAP 評估 |
+| Strategy 2 | ⬚ | 每個產品獨立的 One-vs-Rest 分類器 |
+| Strategy 3 | ⬚ | Strategy 1/2 + 排序層（如 LambdaRank） |
+| Strategy 4 | ⬚ | Strategy 1/2 + 兩級排序（品類 → 子品類） |
+
+---
 
 ## 技術棧
 
@@ -577,15 +717,9 @@ pytest tests/test_core/test_config.py -v  # 單一測試
 | pandas | 1.5.3 |
 | numpy | 1.25.0 |
 | pyarrow | 14.0.1 |
+| Plotly | 5.17.0 |
 | SHAP | 0.42.1 |
 | Typer | 0.20.1 |
+| joblib | 1.2.0 |
+| Ploomber | 0.23.3 |
 | pytest | 7.3.1 |
-
-## 模型策略路線圖
-
-| 策略 | 狀態 | 說明 |
-|------|------|------|
-| Strategy 1（MVP） | ✅ | 單一二分類器，產品名稱作為特徵，mAP 評估 |
-| Strategy 2 | ⬚ | 每個產品獨立的 One-vs-Rest 分類器 |
-| Strategy 3 | ⬚ | Strategy 1/2 + 排序層（如 LambdaRank） |
-| Strategy 4 | ⬚ | Strategy 1/2 + 兩級排序（品類 → 子品類） |
