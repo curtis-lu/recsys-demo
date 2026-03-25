@@ -7,6 +7,7 @@ import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
+from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,13 @@ def predict_scores(
     score_col = schema["score"]
     identity_cols = schema["identity_columns"]
 
-    scores = model.predict(X_score)
+    use_calibration = parameters.get("inference", {}).get("use_calibration", True)
+
+    if not use_calibration and isinstance(model, CalibratedModelAdapter):
+        scores = model.predict_uncalibrated(X_score)
+        logger.info("Calibration disabled by config, using uncalibrated scores")
+    else:
+        scores = model.predict(X_score)
 
     score_table = pd.DataFrame({
         col: scoring_dataset[col].values for col in identity_cols

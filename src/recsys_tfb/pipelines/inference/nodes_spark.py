@@ -8,6 +8,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
+from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,12 @@ def predict_scores(
     ]
     spark = X_score.sparkSession
 
+    use_calibration = parameters.get("inference", {}).get("use_calibration", True)
+    use_uncalibrated = not use_calibration and isinstance(model, CalibratedModelAdapter)
+
+    if use_uncalibrated:
+        logger.info("Calibration disabled by config, using uncalibrated scores")
+
     # Process by (snap_date, prod_name) to minimize per-chunk memory
     chunks = X_score.select(time_col, item_col).distinct().collect()
 
@@ -119,7 +126,10 @@ def predict_scores(
         )
         features_pdf = chunk.select(*feature_columns).toPandas()
         identity_pdf = chunk.select(*identity_cols).toPandas()
-        scores = model.predict(features_pdf)
+        if use_uncalibrated:
+            scores = model.predict_uncalibrated(features_pdf)
+        else:
+            scores = model.predict(features_pdf)
         identity_pdf[score_col] = scores
         all_results.append(identity_pdf)
 

@@ -1,4 +1,5 @@
 inference:
+  use_calibration: true
   snap_dates:
     - "2025-11-30"
   products:
