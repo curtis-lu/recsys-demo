@@ -6,7 +6,9 @@ import pytest
 
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 from recsys_tfb.models.base import ModelAdapter
+from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
+    calibrate_model,
     evaluate_model,
     log_experiment,
     train_model,
@@ -129,8 +131,8 @@ class TestComputeAP:
 
 class TestTuneHyperparameters:
     def test_returns_valid_params(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
-        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, training_parameters)
+        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
+        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
 
         assert isinstance(best_params, dict)
         assert "learning_rate" in best_params
@@ -138,17 +140,17 @@ class TestTuneHyperparameters:
         assert "max_depth" in best_params
 
     def test_params_in_search_space(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
         space = training_parameters["training"]["search_space"]
-        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, training_parameters)
+        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
 
         assert space["num_leaves"]["low"] <= best_params["num_leaves"] <= space["num_leaves"]["high"]
         assert space["max_depth"]["low"] <= best_params["max_depth"] <= space["max_depth"]["high"]
 
     def test_reproducible(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
-        r1 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, training_parameters)
-        r2 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, training_parameters)
+        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
+        r1 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
+        r2 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
         assert r1 == r2
 
 
@@ -337,3 +339,110 @@ class TestLogExperiment:
         assert len(runs) == 1
         assert runs.iloc[0]["metrics.overall_map"] == 0.75
         assert runs.iloc[0]["params.algorithm"] == "lightgbm"
+        assert runs.iloc[0]["params.calibrated"] == "False"
+
+    def test_logs_calibration_info(self, synthetic_data, training_parameters, tmp_path):
+        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
+                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
+        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+
+        evaluation_results = {
+            "overall_map": 0.76,
+            "per_product_ap": {"exchange_fx": 0.8, "exchange_usd": 0.7},
+            "n_queries": 10,
+            "n_excluded_queries": 2,
+            "uncalibrated": {
+                "overall_map": 0.75,
+                "per_product_ap": {"exchange_fx": 0.78, "exchange_usd": 0.69},
+            },
+            "calibration_method": "isotonic",
+        }
+
+        params = {**training_parameters, "mlflow": {
+            "experiment_name": "test_calibrated",
+            "tracking_uri": str(tmp_path / "mlruns"),
+        }}
+
+        log_experiment(model, best_params, evaluation_results, params)
+
+        import mlflow
+        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
+        experiment = mlflow.get_experiment_by_name("test_calibrated")
+        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+        assert len(runs) == 1
+        assert runs.iloc[0]["params.calibrated"] == "True"
+        assert runs.iloc[0]["params.calibration_method"] == "isotonic"
+        assert runs.iloc[0]["metrics.uncalibrated_overall_map"] == 0.75
+
+
+# ---- Tests: calibrate_model ----
+
+
+class TestCalibrateModel:
+    def _train_quick_model(self, synthetic_data, training_parameters):
+        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
+                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
+        return train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+
+    def test_returns_calibrated_adapter(self, synthetic_data, training_parameters):
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        X_train, y_train, _, _, _, _ = synthetic_data
+        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
+        assert isinstance(calibrated, CalibratedModelAdapter)
+
+    def test_default_method_isotonic(self, synthetic_data, training_parameters):
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        X_train, y_train, _, _, _, _ = synthetic_data
+        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
+        assert calibrated.method == "isotonic"
+
+    def test_sigmoid_method(self, synthetic_data, training_parameters):
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        X_train, y_train, _, _, _, _ = synthetic_data
+        params = {**training_parameters, "training": {
+            **training_parameters["training"],
+            "calibration": {"method": "sigmoid"},
+        }}
+        calibrated = calibrate_model(model, X_train, y_train, params)
+        assert calibrated.method == "sigmoid"
+
+    def test_calibrated_predict_returns_valid_scores(self, synthetic_data, training_parameters):
+        model = self._train_quick_model(synthetic_data, training_parameters)
+        X_train, y_train, _, _, X_val, _ = synthetic_data
+        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
+        preds = calibrated.predict(X_val.values)
+        assert len(preds) == len(X_val)
+        assert np.all(np.isfinite(preds))
+
+
+# ---- Tests: evaluate_model with calibrated model ----
+
+
+class TestEvaluateModelCalibrated:
+    def _train_and_calibrate(self, synthetic_data, training_parameters):
+        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
+                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
+        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        return calibrate_model(model, X_train, y_train, training_parameters)
+
+    def test_includes_uncalibrated_metrics(self, synthetic_data, val_set, training_parameters):
+        calibrated = self._train_and_calibrate(synthetic_data, training_parameters)
+        _, _, _, _, X_val, y_val = synthetic_data
+        results = evaluate_model(calibrated, X_val, y_val, val_set, training_parameters)
+
+        assert "uncalibrated" in results
+        assert "overall_map" in results["uncalibrated"]
+        assert "per_product_ap" in results["uncalibrated"]
+        assert "calibration_method" in results
+        assert results["calibration_method"] == "isotonic"
+
+    def test_uncalibrated_map_is_float(self, synthetic_data, val_set, training_parameters):
+        calibrated = self._train_and_calibrate(synthetic_data, training_parameters)
+        _, _, _, _, X_val, y_val = synthetic_data
+        results = evaluate_model(calibrated, X_val, y_val, val_set, training_parameters)
+
+        assert isinstance(results["uncalibrated"]["overall_map"], float)
+        assert isinstance(results["overall_map"], float)
