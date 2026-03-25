@@ -45,19 +45,37 @@ class ModelAdapterDataset(AbstractDataset):
                 meta_path,
             )
             adapter = get_adapter("lightgbm")
+            meta = {}
 
         adapter.load(self._filepath)
+
+        # Wrap with CalibratedModelAdapter if model was saved with calibration
+        if meta.get("calibrated", False):
+            from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+
+            wrapper = CalibratedModelAdapter(
+                adapter, method=meta["calibration_method"]
+            )
+            wrapper._load_calibrator(self._filepath)
+            return wrapper
+
         return adapter
 
     def save(self, data: ModelAdapter) -> None:
         os.makedirs(os.path.dirname(self._filepath) or ".", exist_ok=True)
         data.save(self._filepath)
 
-        # Determine algorithm name from registry
+        # Detect calibration wrapper
+        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+
+        calibrated = isinstance(data, CalibratedModelAdapter)
+        base_adapter = data.base if calibrated else data
+
+        # Determine algorithm name from registry (using base adapter)
         from recsys_tfb.models.base import ADAPTER_REGISTRY
 
         algorithm = "unknown"
-        adapter_class = type(data)
+        adapter_class = type(base_adapter)
         for name, cls in ADAPTER_REGISTRY.items():
             if cls is adapter_class:
                 algorithm = name
@@ -67,7 +85,11 @@ class ModelAdapterDataset(AbstractDataset):
             "algorithm": algorithm,
             "adapter_class": f"{adapter_class.__module__}.{adapter_class.__qualname__}",
             "saved_at": datetime.now(timezone.utc).isoformat(),
+            "calibrated": calibrated,
         }
+        if calibrated:
+            meta["calibration_method"] = data.method
+
         with open(self._meta_filepath, "w") as f:
             json.dump(meta, f, indent=2)
 
