@@ -15,13 +15,61 @@ from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _to_pandas(df):
+    """Convert Spark DataFrame to pandas if needed (production backend)."""
+    if hasattr(df, "toPandas"):
+        return df.toPandas()
+    return df
+
+
+def _extract_Xy(
+    model_input,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract feature matrix X and label vector y from model_input.
+
+    Handles both pandas DataFrame and Spark DataFrame inputs.
+    Encodes categorical identity columns (e.g., prod_name) that were
+    deferred from the dataset pipeline's transform step.
+
+    Returns:
+        (X, y) as numpy arrays.
+    """
+    pdf = _to_pandas(model_input)
+    feature_cols = preprocessor_metadata["feature_columns"]
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    identity_cols = schema["identity_columns"]
+
+    X_df = pdf[feature_cols].copy()
+
+    # Encode categorical identity columns that were kept as original values
+    categorical_cols = preprocessor_metadata["categorical_columns"]
+    category_mappings = preprocessor_metadata["category_mappings"]
+    deferred_cats = [c for c in categorical_cols if c in identity_cols and c in X_df.columns]
+    for col in deferred_cats:
+        known = category_mappings[col]
+        X_df[col] = pd.Categorical(X_df[col], categories=known).codes
+
+    X = X_df.values
+    y = pdf[label_col].values
+    return X, y
+
+
+# ---------------------------------------------------------------------------
+# Pipeline nodes
+# ---------------------------------------------------------------------------
+
 def tune_hyperparameters(
-    X_train: pd.DataFrame,
-    y_train: pd.DataFrame,
-    X_train_dev: pd.DataFrame,
-    y_train_dev: pd.DataFrame,
-    X_val: pd.DataFrame,
-    y_val: pd.DataFrame,
+    train_model_input,
+    train_dev_model_input,
+    val_model_input,
+    preprocessor_metadata: dict,
     parameters: dict,
 ) -> dict:
     """Search for optimal hyperparameters using Optuna."""
@@ -34,12 +82,9 @@ def tune_hyperparameters(
     algorithm = training_params.get("algorithm", "lightgbm")
     algorithm_params = training_params.get("algorithm_params", {})
 
-    X_tr = X_train.values if hasattr(X_train, "values") else X_train
-    y_tr = y_train["label"].values if isinstance(y_train, pd.DataFrame) else y_train
-    X_dev = X_train_dev.values if hasattr(X_train_dev, "values") else X_train_dev
-    y_dev = y_train_dev["label"].values if isinstance(y_train_dev, pd.DataFrame) else y_train_dev
-    X_v = X_val.values if hasattr(X_val, "values") else X_val
-    y_v = y_val["label"].values if isinstance(y_val, pd.DataFrame) else y_val
+    X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
+    X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
+    X_v, y_v = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
 
     def objective(trial: optuna.Trial) -> float:
         trial_params = {
@@ -103,11 +148,10 @@ def tune_hyperparameters(
 
 
 def train_model(
-    X_train: pd.DataFrame,
-    y_train: pd.DataFrame,
-    X_train_dev: pd.DataFrame,
-    y_train_dev: pd.DataFrame,
+    train_model_input,
+    train_dev_model_input,
     best_params: dict,
+    preprocessor_metadata: dict,
     parameters: dict,
 ) -> ModelAdapter:
     """Train a model using ModelAdapter with early stopping."""
@@ -126,10 +170,8 @@ def train_model(
         "early_stopping_rounds": early_stopping_rounds,
     }
 
-    X_tr = X_train.values if hasattr(X_train, "values") else X_train
-    y_tr = y_train["label"].values if isinstance(y_train, pd.DataFrame) else y_train
-    X_dev = X_train_dev.values if hasattr(X_train_dev, "values") else X_train_dev
-    y_dev = y_train_dev["label"].values if isinstance(y_train_dev, pd.DataFrame) else y_train_dev
+    X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
+    X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
 
     adapter = get_adapter(algorithm)
     adapter.train(X_tr, y_tr, X_dev, y_dev, params)
@@ -140,8 +182,8 @@ def train_model(
 
 def calibrate_model(
     model: ModelAdapter,
-    X_calibration: pd.DataFrame,
-    y_calibration: pd.DataFrame,
+    calibration_model_input,
+    preprocessor_metadata: dict,
     parameters: dict,
 ) -> ModelAdapter:
     """Wrap model with probability calibration."""
@@ -151,12 +193,7 @@ def calibrate_model(
         .get("method", "isotonic")
     )
 
-    X_cal = X_calibration.values if hasattr(X_calibration, "values") else X_calibration
-    y_cal = (
-        y_calibration["label"].values
-        if isinstance(y_calibration, pd.DataFrame)
-        else y_calibration
-    )
+    X_cal, y_cal = _extract_Xy(calibration_model_input, preprocessor_metadata, parameters)
 
     calibrated = CalibratedModelAdapter(model, method=method)
     calibrated.fit_calibrator(X_cal, y_cal)
@@ -169,11 +206,15 @@ def calibrate_model(
 
 def _compute_ranking_metrics(
     y_score: np.ndarray,
-    val_set: pd.DataFrame,
-    labels: pd.DataFrame,
+    val_pdf: pd.DataFrame,
     schema: dict,
 ) -> tuple[float, dict[str, float], int, int]:
     """Compute ranking metrics from raw scores.
+
+    Args:
+        y_score: Predicted scores array.
+        val_pdf: Pandas DataFrame containing identity columns and label.
+        schema: Column schema dict.
 
     Returns (overall_map, per_product_ap, n_queries, n_excluded_queries).
     """
@@ -181,16 +222,19 @@ def _compute_ranking_metrics(
     entity_cols = schema["entity"]
     item_col = schema["item"]
     score_col = schema["score"]
+    label_col = schema["label"]
     identity_cols = schema["identity_columns"]
     group_cols = [time_col] + entity_cols
 
-    predictions = val_set[identity_cols].reset_index(drop=True).copy()
+    predictions = val_pdf[identity_cols].reset_index(drop=True).copy()
     predictions[score_col] = y_score
     predictions[schema["rank"]] = (
         predictions.groupby(group_cols)[score_col]
         .rank(method="first", ascending=False)
         .astype(int)
     )
+
+    labels = val_pdf[identity_cols + [label_col]].reset_index(drop=True)
 
     metrics = compute_all_metrics(predictions, labels, k_values=["all"])
 
@@ -208,31 +252,29 @@ def _compute_ranking_metrics(
 
 def evaluate_model(
     model: ModelAdapter,
-    X_val: pd.DataFrame,
-    y_val: pd.DataFrame,
-    val_set: pd.DataFrame,
+    val_model_input,
+    preprocessor_metadata: dict,
     parameters: dict,
 ) -> dict:
     """Compute ranking-aware mAP with (snap_date, cust_id) as query groups.
 
-    Delegates metric computation to evaluation.metrics.compute_all_metrics,
-    ensuring per-product AP uses correct per-customer ranking semantics.
+    val_model_input contains identity columns, label, and encoded features,
+    so no separate val_set is needed.
 
     When the model is a CalibratedModelAdapter, also computes uncalibrated
     metrics for comparison.
     """
     schema = get_schema(parameters)
-    label_col = schema["label"]
+    feature_cols = preprocessor_metadata["feature_columns"]
 
-    X = X_val.values if hasattr(X_val, "values") else X_val
+    val_pdf = _to_pandas(val_model_input)
+
+    # Use _extract_Xy to handle deferred categorical encoding (e.g., prod_name)
+    X, _ = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
     y_score = model.predict(X)
 
-    # Build labels DataFrame expected by _compute_ranking_metrics
-    labels = val_set[schema["identity_columns"]].reset_index(drop=True).copy()
-    labels[label_col] = y_val[label_col].values
-
     overall_map, per_product_ap, n_queries, n_excluded_queries = (
-        _compute_ranking_metrics(y_score, val_set, labels, schema)
+        _compute_ranking_metrics(y_score, val_pdf, schema)
     )
 
     evaluation_results = {
@@ -246,7 +288,7 @@ def evaluate_model(
     if isinstance(model, CalibratedModelAdapter):
         y_score_uncal = model.predict_uncalibrated(X)
         uncal_map, uncal_per_product, _, _ = _compute_ranking_metrics(
-            y_score_uncal, val_set, labels, schema
+            y_score_uncal, val_pdf, schema
         )
         evaluation_results["uncalibrated"] = {
             "overall_map": uncal_map,

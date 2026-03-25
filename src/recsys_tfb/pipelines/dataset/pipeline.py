@@ -8,27 +8,28 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
     if backend == "spark":
         from recsys_tfb.pipelines.dataset.nodes_spark import (
             build_dataset,
-            prepare_model_input,
-            prepare_model_input_with_calibration,
+            fit_preprocessor_metadata,
             select_calibration_keys,
             select_test_keys,
             select_train_keys,
             select_val_keys,
             split_train_keys,
+            transform_to_model_input,
         )
     else:
         from recsys_tfb.pipelines.dataset.nodes_pandas import (
             build_dataset,
-            prepare_model_input,
-            prepare_model_input_with_calibration,
+            fit_preprocessor_metadata,
             select_calibration_keys,
             select_test_keys,
             select_train_keys,
             select_val_keys,
             split_train_keys,
+            transform_to_model_input,
         )
 
     nodes = [
+        # --- Key selection ---
         Node(
             select_train_keys,
             inputs=["sample_pool", "parameters"],
@@ -50,6 +51,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             inputs=["label_table", "parameters"],
             outputs="test_keys",
         ),
+        # --- Build split datasets ---
         Node(
             build_dataset,
             inputs=["train_keys", "feature_table", "label_table", "parameters"],
@@ -74,54 +76,59 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             outputs="test_set",
             name="build_test_dataset",
         ),
+        # --- Fit preprocessor from train only ---
+        Node(
+            fit_preprocessor_metadata,
+            inputs=["train_set", "parameters"],
+            outputs=["preprocessor", "category_mappings"],
+            name="fit_preprocessor_metadata",
+        ),
+        # --- Transform each split to model_input ---
+        Node(
+            transform_to_model_input,
+            inputs=["train_set", "preprocessor", "parameters"],
+            outputs="train_model_input",
+            name="transform_train_to_model_input",
+        ),
+        Node(
+            transform_to_model_input,
+            inputs=["train_dev_set", "preprocessor", "parameters"],
+            outputs="train_dev_model_input",
+            name="transform_train_dev_to_model_input",
+        ),
+        Node(
+            transform_to_model_input,
+            inputs=["val_set", "preprocessor", "parameters"],
+            outputs="val_model_input",
+            name="transform_val_to_model_input",
+        ),
+        Node(
+            transform_to_model_input,
+            inputs=["test_set", "preprocessor", "parameters"],
+            outputs="test_model_input",
+            name="transform_test_to_model_input",
+        ),
     ]
 
     if enable_calibration:
-        nodes.append(
+        nodes.extend([
             Node(
                 select_calibration_keys,
                 inputs=["sample_pool", "parameters"],
                 outputs="calibration_keys",
             ),
-        )
-        nodes.append(
             Node(
                 build_dataset,
                 inputs=["calibration_keys", "feature_table", "label_table", "parameters"],
                 outputs="calibration_set",
                 name="build_calibration_dataset",
             ),
-        )
-        nodes.append(
             Node(
-                prepare_model_input_with_calibration,
-                inputs=[
-                    "train_set", "train_dev_set", "calibration_set",
-                    "val_set", "test_set", "parameters",
-                ],
-                outputs=[
-                    "X_train", "y_train",
-                    "X_train_dev", "y_train_dev",
-                    "X_calibration", "y_calibration",
-                    "X_val", "y_val",
-                    "X_test", "y_test",
-                    "preprocessor", "category_mappings",
-                ],
+                transform_to_model_input,
+                inputs=["calibration_set", "preprocessor", "parameters"],
+                outputs="calibration_model_input",
+                name="transform_calibration_to_model_input",
             ),
-        )
-    else:
-        nodes.append(
-            Node(
-                prepare_model_input,
-                inputs=["train_set", "train_dev_set", "val_set", "test_set", "parameters"],
-                outputs=[
-                    "X_train", "y_train",
-                    "X_train_dev", "y_train_dev",
-                    "X_val", "y_val",
-                    "X_test", "y_test",
-                    "preprocessor", "category_mappings",
-                ],
-            ),
-        )
+        ])
 
     return Pipeline(nodes)

@@ -24,9 +24,10 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 - ✅ Kedro-inspired core framework (Node, Pipeline, Runner, Catalog, ConfigLoader)
 - ✅ I/O adapters: ParquetDataset, PickleDataset, JSONDataset (with pandas/spark dual backend)
-- ✅ Dataset Building Pipeline (stratified sampling, 5-way split: train/train-dev/calibration(optional)/validation/test, per-group sample ratio overrides, train date range params, customer-month-product sample_pool with per-product sampling, feature engineering)
-- ✅ Training Pipeline (Optuna hyperparameter tuning, LightGBM training, mAP evaluation, MLflow logging, model version comparison)
-- ✅ Inference Pipeline (batch scoring, preprocessor reuse, ranking, actual model hash for output paths)
+- ✅ Dataset Building Pipeline (stratified sampling, 5-way split, per-group sample ratio overrides, fit/transform preprocessing outputting *_model_input Parquet files)
+- ✅ Training Pipeline (Optuna hyperparameter tuning, LightGBM training, mAP evaluation, MLflow logging, accepts model_input + preprocessor_metadata)
+- ✅ Inference Pipeline (batch scoring, shared preprocessing module reuse, ranking, actual model hash for output paths)
+- ✅ Shared preprocessing module (`pipelines/preprocessing.py`：fit/transform/apply for pandas & Spark, no data leakage, deferred categorical encoding for identity columns)
 - ✅ Hash-based artifact versioning with manifests and symlinks (latest/best)
 - ✅ Dual backend support: pandas (dev) / PySpark (production)
 - ✅ CLI entry point with `--pipeline`, `--env`, `--dataset-version`, `--model-version` options
@@ -54,9 +55,9 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 ## Architecture: 5 Pipelines
 
 1. **Source Data ETL** *(not yet implemented)* - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
-2. **Dataset Building** ✅ - Sample pool at customer-month-product granularity. Train dates specified via `train_snap_date_start/end` range. Stratified sampling with per-group ratio overrides (by segment x product). Unified `select_keys` function for train/calibration key selection. 5-way split (train/train-dev/calibration/validation/test). Train & train-dev share dates, split by cust_id ratio. Calibration is optional (enable_calibration flag). Val/test use independent dates (val samples by cust_id, test full population). Dynamic `build_dataset` join: includes product key when present in keys. Outputs versioned Parquet files. Preprocessing logic reused in inference without data leakage. Dual pandas/spark backend. ETL SQL for sample_pool generation (`conf/sql/etl/sample_pool/`).
-3. **Training** ✅ - Optuna hyperparameter search, ModelAdapter-based training (config-driven algorithm selection), optional probability calibration (CalibratedModelAdapter, isotonic/sigmoid), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts.
-4. **Inference** ✅ - Weekly batch scoring reusing dataset building preprocessing. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
+2. **Dataset Building** ✅ - Sample pool at customer-month-product granularity. Train dates specified via `train_snap_date_start/end` range. Stratified sampling with per-group ratio overrides. 5-way split (train/train-dev/calibration/validation/test). Fit preprocessor on train_set → transform each split to `*_model_input` (identity + label + encoded features as Parquet). Shared preprocessing module (`preprocessing.py`) for both dataset and inference. Dual pandas/spark backend.
+3. **Training** ✅ - Accepts `*_model_input` + `preprocessor_metadata` (no more X_*/y_* arrays). `_extract_Xy` handles toPandas() and deferred categorical encoding internally. Optuna hyperparameter search, ModelAdapter training, optional calibration, mAP evaluation, MLflow logging. Outputs versioned model artifacts.
+4. **Inference** ✅ - Weekly batch scoring reusing shared `apply_preprocessor_{pandas,spark}` from `preprocessing.py`. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
 5. **Evaluation** *(planned)* - 獨立的模型評估 pipeline，針對指定 model_version 進行完整分析（metrics、baselines、calibration comparison、HTML report）。
 
 ## Project Structure
@@ -81,6 +82,7 @@ src/recsys_tfb/
     model_adapter_dataset.py — ModelAdapterDataset (model + model_meta.json sidecar)
   pipelines/
     __init__.py         — Pipeline registry (get_pipeline, list_pipelines)
+    preprocessing.py    — Shared fit/transform/apply preprocessing (pandas & Spark backends)
     dataset/            — Dataset building (nodes_pandas.py, nodes_spark.py, pipeline.py)
     training/           — Training (nodes.py, pipeline.py)
     inference/          — Inference (nodes_pandas.py, nodes_spark.py, pipeline.py)
@@ -152,7 +154,7 @@ Pipeline nodes have separate implementations for pandas and PySpark:
 - `nodes_pandas.py` — used in local dev (`backend: pandas` in catalog)
 - `nodes_spark.py` — used in production (`backend: spark` in catalog)
 - Backend is selected per-dataset in `catalog.yaml` and per-pipeline via `create_pipeline(backend=...)` in pipeline registry
-- Dataset and Inference pipelines support dual backend; Training pipeline runs on pandas only (receives prepared numpy arrays)
+- Dataset and Inference pipelines support dual backend; Training pipeline accepts model_input (pandas or Spark) and converts to pandas internally via `_to_pandas()`
 
 ## Model Strategies
 
@@ -192,6 +194,7 @@ Follow the principles in `kedro_design_philosophy.md`. Key rules:
 | 7.5 | 5-Way Dataset Split 重構 ✅ | 資料切割從 3-way 改為 5-way（train/train-dev/calibration/validation/test）。train & train-dev 共用日期按 cust_id ratio 切分；calibration optional（enable_calibration flag）；validation 可選抽樣；test 全量不抽樣。支援 sample_ratio_overrides（per-group 自訂比例，多欄位以 `\|` 組合）。Pipeline 條件式建構。 |
 | 7.6 | Dataset Pipeline 重構 ✅ | Train 日期參數化（train_snap_date_start/end）。sample_pool 改為 customer-month-product 粒度（加入 prod_name）。整併 select_sample_keys & select_calibration_keys 為通用 select_keys 函數。sample_group_keys 支援 (cust_segment_typ, prod_name) 組合做 per-product 抽樣。build_dataset 動態 join key（含 prod_name 時按產品 join label_table）。ETL SQL for sample_pool（conf/sql/etl/sample_pool/）。 |
 | 7c | Probability Calibration ✅ | CalibratedModelAdapter wrapper（isotonic/sigmoid）+ ModelAdapterDataset calibrator.pkl sidecar I/O + training pipeline conditional calibrate_model node + evaluate_model uncalibrated comparison + log_experiment calibration info + inference use_calibration flag（pandas/spark）+ MLflow calibration logging + 完整測試 |
+| 7d | Pipeline 重構（preprocessing 統一）✅ | 共用 `preprocessing.py`（fit/transform/apply，pandas & Spark）。Dataset pipeline 改為 fit_preprocessor_metadata → transform_to_model_input 產出 `*_model_input` Parquet（identity + label + features）。Training pipeline 改為接收 model_input + preprocessor_metadata，`_extract_Xy` 內部處理 toPandas() 與 deferred categorical encoding。Inference pipeline 改用共用 `apply_preprocessor_{pandas,spark}`。移除舊有 X_*/y_* catalog entries。 |
 
 ### 待完成
 
@@ -216,6 +219,7 @@ Phase 7b (演算法抽象) ✅
   ├── Phase 7.5 (5-Way Split) ✅
   │     └── Phase 7.6 (Dataset Pipeline 重構) ✅
   │           └── Phase 7c (Calibration) ✅
+  │                 └── Phase 7d (Pipeline 重構：preprocessing 統一) ✅
   └── Phase 8 (Evaluation Pipeline) — 依賴 test split + ModelAdapter 介面
       └── Phase 11 (Tests) — 覆蓋上述所有新功能
 Phase 9 (可觀測性) — 獨立

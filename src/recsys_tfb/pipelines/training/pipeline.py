@@ -18,12 +18,18 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
     nodes = [
         Node(
             tune_hyperparameters,
-            inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "X_val", "y_val", "parameters"],
+            inputs=[
+                "train_model_input", "train_dev_model_input", "val_model_input",
+                "preprocessor", "parameters",
+            ],
             outputs="best_params",
         ),
         Node(
             train_model,
-            inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "best_params", "parameters"],
+            inputs=[
+                "train_model_input", "train_dev_model_input",
+                "best_params", "preprocessor", "parameters",
+            ],
             outputs=train_model_output,
         ),
     ]
@@ -32,7 +38,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
         nodes.append(
             Node(
                 calibrate_model,
-                inputs=["trained_model", "X_calibration", "y_calibration", "parameters"],
+                inputs=["trained_model", "calibration_model_input", "preprocessor", "parameters"],
                 outputs="model",
             ),
         )
@@ -40,7 +46,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
     nodes.extend([
         Node(
             evaluate_model,
-            inputs=["model", "X_val", "y_val", "val_set", "parameters"],
+            inputs=["model", "val_model_input", "preprocessor", "parameters"],
             outputs="evaluation_results",
         ),
         Node(

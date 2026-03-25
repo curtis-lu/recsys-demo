@@ -1,4 +1,4 @@
-"""Pure functions for the inference pipeline."""
+"""Pure functions for the inference pipeline (pandas backend)."""
 
 import logging
 
@@ -9,6 +9,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
+from recsys_tfb.pipelines.preprocessing import apply_preprocessor_pandas
 
 logger = logging.getLogger(__name__)
 
@@ -56,27 +57,7 @@ def apply_preprocessor(
     parameters: dict,
 ) -> pd.DataFrame:
     """Apply training preprocessor to scoring dataset."""
-    drop_cols = preprocessor["drop_columns"]
-    category_mappings = preprocessor["category_mappings"]
-    categorical_cols = preprocessor["categorical_columns"]
-    feature_columns = preprocessor["feature_columns"]
-
-    result = scoring_dataset.drop(columns=drop_cols, errors="ignore").copy()
-
-    for col in categorical_cols:
-        known = category_mappings[col]
-        result[col] = pd.Categorical(result[col], categories=known).codes
-
-    # Validate all expected features are present
-    missing = set(feature_columns) - set(result.columns)
-    if missing:
-        raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
-
-    # Ensure column order matches training
-    result = result[feature_columns]
-
-    logger.info("Preprocessed scoring data: %s", result.shape)
-    return result
+    return apply_preprocessor_pandas(scoring_dataset, preprocessor, parameters)
 
 
 def predict_scores(

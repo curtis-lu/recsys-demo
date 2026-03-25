@@ -1,4 +1,4 @@
-"""Pure functions for the dataset building pipeline."""
+"""Pure functions for the dataset building pipeline (pandas backend)."""
 
 import logging
 
@@ -6,6 +6,10 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.preprocessing import (
+    fit_preprocessor_metadata_pandas,
+    transform_to_model_input_pandas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -289,125 +293,18 @@ def build_dataset(
     return dataset
 
 
-def _prepare_transform(train_set: pd.DataFrame, parameters: dict):
-    """Build category_mappings and _transform helper from train_set. Returns (preprocessor, category_mappings, _transform)."""
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
-    drop_cols = pmi_config.get("drop_columns", [
-        schema["time"], *schema["entity"], label_col,
-        "apply_start_date", "apply_end_date", "cust_segment_typ",
-    ])
-    categorical_cols = pmi_config.get("categorical_columns", [schema["item"]])
-
-    # Build category mapping from train set only
-    category_mappings = {}
-    for col in categorical_cols:
-        cat = pd.CategoricalDtype(categories=sorted(train_set[col].unique()))
-        category_mappings[col] = list(cat.categories)
-
-    def _transform(df: pd.DataFrame) -> pd.DataFrame:
-        result = df.drop(columns=drop_cols, errors="ignore").copy()
-        for col in categorical_cols:
-            known = category_mappings[col]
-            result[col] = pd.Categorical(result[col], categories=known).codes
-        return result
-
-    feature_columns = list(_transform(train_set).columns)
-
-    preprocessor = {
-        "feature_columns": feature_columns,
-        "categorical_columns": categorical_cols,
-        "category_mappings": category_mappings,
-        "drop_columns": drop_cols,
-    }
-
-    return preprocessor, category_mappings, _transform
-
-
-def prepare_model_input(
+def fit_preprocessor_metadata(
     train_set: pd.DataFrame,
-    train_dev_set: pd.DataFrame,
-    val_set: pd.DataFrame,
-    test_set: pd.DataFrame,
     parameters: dict,
-) -> tuple:
-    """Convert 4 DataFrames to model-ready arrays (without calibration).
-
-    Returns: X_train, y_train, X_train_dev, y_train_dev, X_val, y_val,
-             X_test, y_test, preprocessor, category_mappings (10 outputs).
-    """
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    preprocessor, category_mappings, _transform = _prepare_transform(train_set, parameters)
-
-    X_train = _transform(train_set)
-    y_train = train_set[[label_col]].reset_index(drop=True)
-    X_train_dev = _transform(train_dev_set)
-    y_train_dev = train_dev_set[[label_col]].reset_index(drop=True)
-    X_val = _transform(val_set)
-    y_val = val_set[[label_col]].reset_index(drop=True)
-    X_test = _transform(test_set)
-    y_test = test_set[[label_col]].reset_index(drop=True)
-
-    logger.info(
-        "Model input: X_train=%s, X_train_dev=%s, X_val=%s, X_test=%s, features=%d",
-        X_train.shape,
-        X_train_dev.shape,
-        X_val.shape,
-        X_test.shape,
-        len(preprocessor["feature_columns"]),
-    )
-    return (
-        X_train, y_train, X_train_dev, y_train_dev,
-        X_val, y_val, X_test, y_test,
-        preprocessor, category_mappings,
-    )
+) -> tuple[dict, dict]:
+    """Build preprocessor metadata and category mappings from train_set only."""
+    return fit_preprocessor_metadata_pandas(train_set, parameters)
 
 
-def prepare_model_input_with_calibration(
-    train_set: pd.DataFrame,
-    train_dev_set: pd.DataFrame,
-    calibration_set: pd.DataFrame,
-    val_set: pd.DataFrame,
-    test_set: pd.DataFrame,
+def transform_to_model_input(
+    split_set: pd.DataFrame,
+    preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple:
-    """Convert 5 DataFrames to model-ready arrays (with calibration).
-
-    Returns: X_train, y_train, X_train_dev, y_train_dev,
-             X_calibration, y_calibration, X_val, y_val,
-             X_test, y_test, preprocessor, category_mappings (12 outputs).
-    """
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    preprocessor, category_mappings, _transform = _prepare_transform(train_set, parameters)
-
-    X_train = _transform(train_set)
-    y_train = train_set[[label_col]].reset_index(drop=True)
-    X_train_dev = _transform(train_dev_set)
-    y_train_dev = train_dev_set[[label_col]].reset_index(drop=True)
-    X_calibration = _transform(calibration_set)
-    y_calibration = calibration_set[[label_col]].reset_index(drop=True)
-    X_val = _transform(val_set)
-    y_val = val_set[[label_col]].reset_index(drop=True)
-    X_test = _transform(test_set)
-    y_test = test_set[[label_col]].reset_index(drop=True)
-
-    logger.info(
-        "Model input (with calibration): X_train=%s, X_train_dev=%s, X_cal=%s, X_val=%s, X_test=%s, features=%d",
-        X_train.shape,
-        X_train_dev.shape,
-        X_calibration.shape,
-        X_val.shape,
-        X_test.shape,
-        len(preprocessor["feature_columns"]),
-    )
-    return (
-        X_train, y_train, X_train_dev, y_train_dev,
-        X_calibration, y_calibration, X_val, y_val,
-        X_test, y_test, preprocessor, category_mappings,
-    )
+) -> pd.DataFrame:
+    """Transform a single split to model_input (identity + label + encoded features)."""
+    return transform_to_model_input_pandas(split_set, preprocessor_metadata, parameters)

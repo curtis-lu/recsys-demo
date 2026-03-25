@@ -8,6 +8,10 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.preprocessing import (
+    fit_preprocessor_metadata_spark,
+    transform_to_model_input_spark,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -284,138 +288,24 @@ def build_dataset(
     return dataset
 
 
-def _prepare_transform_spark(train_pdf: pd.DataFrame, parameters: dict):
-    """Build category_mappings and _transform helper from train pandas DataFrame."""
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
-    drop_cols = pmi_config.get("drop_columns", [
-        schema["time"], *schema["entity"], label_col,
-        "apply_start_date", "apply_end_date", "cust_segment_typ",
-    ])
-    categorical_cols = pmi_config.get("categorical_columns", [schema["item"]])
-
-    # Build category mapping from train set only
-    category_mappings = {}
-    for col in categorical_cols:
-        cat = pd.CategoricalDtype(categories=sorted(train_pdf[col].unique()))
-        category_mappings[col] = list(cat.categories)
-
-    def _transform(df: pd.DataFrame) -> pd.DataFrame:
-        result = df.drop(columns=drop_cols, errors="ignore").copy()
-        for col in categorical_cols:
-            known = category_mappings[col]
-            result[col] = pd.Categorical(result[col], categories=known).codes
-        return result
-
-    feature_columns = list(_transform(train_pdf).columns)
-
-    preprocessor = {
-        "feature_columns": feature_columns,
-        "categorical_columns": categorical_cols,
-        "category_mappings": category_mappings,
-        "drop_columns": drop_cols,
-    }
-
-    return preprocessor, category_mappings, _transform
-
-
-def prepare_model_input(
+def fit_preprocessor_metadata(
     train_set: DataFrame,
-    train_dev_set: DataFrame,
-    val_set: DataFrame,
-    test_set: DataFrame,
     parameters: dict,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
-    """Convert 4 Spark DataFrames to model-ready pandas DataFrames (without calibration).
+) -> tuple[dict, dict]:
+    """Build preprocessor metadata and category mappings from Spark train_set.
 
-    Returns: X_train, y_train, X_train_dev, y_train_dev, X_val, y_val,
-             X_test, y_test, preprocessor, category_mappings (10 outputs).
+    Only collects small metadata to driver. No toPandas() on full data.
     """
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    # Convert to pandas
-    train_pdf = train_set.toPandas()
-    train_dev_pdf = train_dev_set.toPandas()
-    val_pdf = val_set.toPandas()
-    test_pdf = test_set.toPandas()
-
-    preprocessor, category_mappings, _transform = _prepare_transform_spark(train_pdf, parameters)
-
-    X_train = _transform(train_pdf)
-    y_train = train_pdf[[label_col]].reset_index(drop=True)
-    X_train_dev = _transform(train_dev_pdf)
-    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
-    X_val = _transform(val_pdf)
-    y_val = val_pdf[[label_col]].reset_index(drop=True)
-    X_test = _transform(test_pdf)
-    y_test = test_pdf[[label_col]].reset_index(drop=True)
-
-    logger.info(
-        "Model input: X_train=%s, X_train_dev=%s, X_val=%s, X_test=%s, features=%d",
-        X_train.shape,
-        X_train_dev.shape,
-        X_val.shape,
-        X_test.shape,
-        len(preprocessor["feature_columns"]),
-    )
-    return (
-        X_train, y_train, X_train_dev, y_train_dev,
-        X_val, y_val, X_test, y_test,
-        preprocessor, category_mappings,
-    )
+    return fit_preprocessor_metadata_spark(train_set, parameters)
 
 
-def prepare_model_input_with_calibration(
-    train_set: DataFrame,
-    train_dev_set: DataFrame,
-    calibration_set: DataFrame,
-    val_set: DataFrame,
-    test_set: DataFrame,
+def transform_to_model_input(
+    split_set: DataFrame,
+    preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple:
-    """Convert 5 Spark DataFrames to model-ready pandas DataFrames (with calibration).
+) -> DataFrame:
+    """Transform a single Spark split to model_input (identity + label + encoded features).
 
-    Returns: X_train, y_train, X_train_dev, y_train_dev,
-             X_calibration, y_calibration, X_val, y_val,
-             X_test, y_test, preprocessor, category_mappings (12 outputs).
+    All processing stays in Spark. No toPandas().
     """
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-
-    # Convert to pandas
-    train_pdf = train_set.toPandas()
-    train_dev_pdf = train_dev_set.toPandas()
-    calibration_pdf = calibration_set.toPandas()
-    val_pdf = val_set.toPandas()
-    test_pdf = test_set.toPandas()
-
-    preprocessor, category_mappings, _transform = _prepare_transform_spark(train_pdf, parameters)
-
-    X_train = _transform(train_pdf)
-    y_train = train_pdf[[label_col]].reset_index(drop=True)
-    X_train_dev = _transform(train_dev_pdf)
-    y_train_dev = train_dev_pdf[[label_col]].reset_index(drop=True)
-    X_calibration = _transform(calibration_pdf)
-    y_calibration = calibration_pdf[[label_col]].reset_index(drop=True)
-    X_val = _transform(val_pdf)
-    y_val = val_pdf[[label_col]].reset_index(drop=True)
-    X_test = _transform(test_pdf)
-    y_test = test_pdf[[label_col]].reset_index(drop=True)
-
-    logger.info(
-        "Model input (with calibration): X_train=%s, X_train_dev=%s, X_cal=%s, X_val=%s, X_test=%s, features=%d",
-        X_train.shape,
-        X_train_dev.shape,
-        X_calibration.shape,
-        X_val.shape,
-        X_test.shape,
-        len(preprocessor["feature_columns"]),
-    )
-    return (
-        X_train, y_train, X_train_dev, y_train_dev,
-        X_calibration, y_calibration, X_val, y_val,
-        X_test, y_test, preprocessor, category_mappings,
-    )
+    return transform_to_model_input_spark(split_set, preprocessor_metadata, parameters)

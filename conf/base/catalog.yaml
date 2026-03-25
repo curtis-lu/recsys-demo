@@ -70,54 +70,30 @@ test_set:
   filepath: data/dataset/${dataset_version}/test_set.parquet
   backend: pandas
 
-X_train:
+# Dataset Building Pipeline - Model Inputs
+train_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/X_train.parquet
+  filepath: data/dataset/${dataset_version}/train_model_input.parquet
   backend: pandas
 
-y_train:
+train_dev_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/y_train.parquet
+  filepath: data/dataset/${dataset_version}/train_dev_model_input.parquet
   backend: pandas
 
-X_train_dev:
+val_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/X_train_dev.parquet
+  filepath: data/dataset/${dataset_version}/val_model_input.parquet
   backend: pandas
 
-y_train_dev:
+test_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/y_train_dev.parquet
+  filepath: data/dataset/${dataset_version}/test_model_input.parquet
   backend: pandas
 
-X_val:
+calibration_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/X_val.parquet
-  backend: pandas
-
-y_val:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/y_val.parquet
-  backend: pandas
-
-X_calibration:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/X_calibration.parquet
-  backend: pandas
-
-y_calibration:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/y_calibration.parquet
-  backend: pandas
-
-X_test:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/X_test.parquet
-  backend: pandas
-
-y_test:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/y_test.parquet
+  filepath: data/dataset/${dataset_version}/calibration_model_input.parquet
   backend: pandas
 
 # Training Pipeline

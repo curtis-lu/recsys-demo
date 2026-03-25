@@ -10,6 +10,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
+from recsys_tfb.pipelines.preprocessing import apply_preprocessor_spark
 
 logger = logging.getLogger(__name__)
 
@@ -57,38 +58,7 @@ def apply_preprocessor(
     parameters: dict,
 ) -> DataFrame:
     """Apply training preprocessor to scoring dataset, preserving identity columns."""
-    schema = get_schema(parameters)
-    identity_cols = schema["identity_columns"]
-
-    drop_cols = preprocessor["drop_columns"]
-    category_mappings = preprocessor["category_mappings"]
-    categorical_cols = preprocessor["categorical_columns"]
-    feature_columns = preprocessor["feature_columns"]
-
-    spark = scoring_dataset.sparkSession
-
-    # Drop non-feature columns (except identity and categorical)
-    cols_to_drop = [c for c in drop_cols if c in scoring_dataset.columns and c not in identity_cols]
-    result = scoring_dataset.drop(*cols_to_drop)
-
-    # Encode categoricals via broadcast join
-    for col in categorical_cols:
-        categories = category_mappings[col]
-        mapping_rows = [(cat, idx) for idx, cat in enumerate(categories)]
-        mapping_df = spark.createDataFrame(mapping_rows, [col, f"{col}_code"])
-        result = result.join(F.broadcast(mapping_df), on=col, how="left")
-        result = result.drop(col).withColumnRenamed(f"{col}_code", col)
-
-    # Validate all expected features are present
-    missing = set(feature_columns) - set(result.columns)
-    if missing:
-        raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
-
-    # Select identity + feature columns in correct order
-    result = result.select(*identity_cols, *feature_columns)
-
-    logger.info("Preprocessed scoring data: %d columns", len(result.columns))
-    return result
+    return apply_preprocessor_spark(scoring_dataset, preprocessor, parameters)
 
 
 def predict_scores(
