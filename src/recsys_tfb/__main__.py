@@ -59,7 +59,7 @@ def run(
     setup_logging(params, run_context)
     logger = logging.getLogger(__name__)
 
-    # Look up pipeline with backend (+ enable_calibration for dataset pipeline)
+    # Look up pipeline with backend (+ enable_calibration for dataset/training pipelines)
     pipeline_kwargs = {}
     if pipeline == "dataset":
         try:
@@ -68,6 +68,16 @@ def run(
             params_dataset = {}
         pipeline_kwargs["enable_calibration"] = params_dataset.get("dataset", {}).get(
             "enable_calibration", False
+        )
+    elif pipeline == "training":
+        try:
+            params_training = config.get_parameters_by_name("parameters_training")
+        except KeyError:
+            params_training = {}
+        pipeline_kwargs["enable_calibration"] = (
+            params_training.get("training", {})
+            .get("calibration", {})
+            .get("enabled", False)
         )
     try:
         pipe = get_pipeline(pipeline, backend=backend, **pipeline_kwargs)

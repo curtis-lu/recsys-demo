@@ -4,6 +4,9 @@ training:
     objective: binary
     metric: binary_logloss
     verbosity: -1
+  calibration:
+    enabled: false
+    method: isotonic
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50

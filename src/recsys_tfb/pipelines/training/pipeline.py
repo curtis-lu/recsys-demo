@@ -3,6 +3,7 @@
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 from recsys_tfb.pipelines.training.nodes import (
+    calibrate_model,
     evaluate_model,
     log_experiment,
     train_model,
@@ -10,28 +11,43 @@ from recsys_tfb.pipelines.training.nodes import (
 )
 
 
-def create_pipeline(backend: str = "pandas") -> Pipeline:
-    return Pipeline(
-        [
+def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -> Pipeline:
+    # Determine train_model output name based on whether calibration is enabled
+    train_model_output = "trained_model" if enable_calibration else "model"
+
+    nodes = [
+        Node(
+            tune_hyperparameters,
+            inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "X_val", "y_val", "parameters"],
+            outputs="best_params",
+        ),
+        Node(
+            train_model,
+            inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "best_params", "parameters"],
+            outputs=train_model_output,
+        ),
+    ]
+
+    if enable_calibration:
+        nodes.append(
             Node(
-                tune_hyperparameters,
-                inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "parameters"],
-                outputs="best_params",
-            ),
-            Node(
-                train_model,
-                inputs=["X_train", "y_train", "X_train_dev", "y_train_dev", "best_params", "parameters"],
+                calibrate_model,
+                inputs=["trained_model", "X_calibration", "y_calibration", "parameters"],
                 outputs="model",
             ),
-            Node(
-                evaluate_model,
-                inputs=["model", "X_val", "y_val", "val_set", "parameters"],
-                outputs="evaluation_results",
-            ),
-            Node(
-                log_experiment,
-                inputs=["model", "best_params", "evaluation_results", "parameters"],
-                outputs=None,
-            ),
-        ]
-    )
+        )
+
+    nodes.extend([
+        Node(
+            evaluate_model,
+            inputs=["model", "X_val", "y_val", "val_set", "parameters"],
+            outputs="evaluation_results",
+        ),
+        Node(
+            log_experiment,
+            inputs=["model", "best_params", "evaluation_results", "parameters"],
+            outputs=None,
+        ),
+    ])
+
+    return Pipeline(nodes)
