@@ -68,6 +68,7 @@ def select_keys(
     parameters: dict,
     snap_dates: list,
     sample_ratio: float,
+    sample_ratio_overrides: dict | None = None,
 ) -> pd.DataFrame:
     """Stratified sampling by configurable group keys, returning unique identity keys.
 
@@ -79,6 +80,8 @@ def select_keys(
         parameters: Full parameters dict.
         snap_dates: List of snap_dates to filter to.
         sample_ratio: Default sampling ratio for this split.
+        sample_ratio_overrides: Per-group ratio overrides. If None, falls back to
+            parameters["dataset"]["sample_ratio_overrides"].
     """
     schema = get_schema(parameters)
     identity_key = schema["identity_columns"]  # [snap_date, cust_id, prod_name]
@@ -87,7 +90,8 @@ def select_keys(
     ds = parameters["dataset"]
     seed = parameters.get("random_seed", 42)
     group_keys = ds.get("sample_group_keys", [time_col])
-    sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
+    if sample_ratio_overrides is None:
+        sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
 
     # Filter to specified snap_dates
     target_dates = set(pd.to_datetime(snap_dates))
@@ -140,7 +144,8 @@ def select_train_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.DataFra
     all_dates = sample_pool[time_col].unique()
     train_dates = [d for d in all_dates if start <= pd.Timestamp(d) <= end]
 
-    return select_keys(sample_pool, parameters, train_dates, ds["sample_ratio"])
+    overrides = ds.get("sample_ratio_overrides", {})
+    return select_keys(sample_pool, parameters, train_dates, ds["sample_ratio"], overrides)
 
 
 def select_calibration_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.DataFrame:
@@ -148,8 +153,9 @@ def select_calibration_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.D
     ds = parameters["dataset"]
     cal_dates = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
     cal_ratio = ds.get("calibration_sample_ratio", 1.0)
+    cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
 
-    return select_keys(sample_pool, parameters, cal_dates, cal_ratio)
+    return select_keys(sample_pool, parameters, cal_dates, cal_ratio, cal_overrides)
 
 
 def split_train_keys(

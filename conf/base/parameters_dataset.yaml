@@ -4,34 +4,38 @@ dataset:
   train_snap_date_end: "2025-10-31"
 
   # --- 抽樣 ---
-  sample_ratio: 0.8
+  sample_ratio: 1.0
   sample_group_keys:
     - "cust_segment_typ"
     - "prod_name"
   sample_ratio_overrides:
   # 多欄位 sample_group_keys 時，用 "|" 組合序列化為 key
   # 範例（sample_group_keys: [cust_segment_typ, prod_name]）：
-    "mass|信用卡": 0.8
-    "affluent|基金": 0.3
-    "hnw|保險": 0.2
+    "mass|fund_mix": 0.5
+    "affluent|exchanfe_usd": 0.9
+    "hnw|exchange_fx": 0.8
   # 未指定的組合用預設 sample_ratio
 
   # --- Train / Train-dev（共用日期，按 cust_id ratio 切分）---
   train_dev_ratio: 0.1
 
   # --- Calibration（optional）---
-  enable_calibration: false
-  calibration_snap_dates: []
+  enable_calibration: true
+  calibration_snap_dates: ["2025-11-30"]
   calibration_sample_ratio: 1.0
+  calibration_sample_ratio_overrides: {}
+  # 格式同 sample_ratio_overrides，用 "|" 組合序列化為 key
+  # 範例：{"mass|fund_mix": 0.8}
+  # 未指定時 calibration 使用 calibration_sample_ratio 作為預設
 
   # --- Validation ---
   val_snap_dates:
-    - "2025-11-30"
+    - "2025-12-31"
   val_sample_ratio: 1.0
 
   # --- Test ---
   test_snap_dates:
-    - "2025-12-31"
+    - "2026-01-31"
 
   prepare_model_input:
     drop_columns:

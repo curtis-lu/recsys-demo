@@ -64,6 +64,8 @@ def label_table(spark):
 def sample_pool(spark):
     products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
+    tenure = {"C001": 12, "C002": 36, "C003": 60, "C004": 24}
+    channel = {"C001": "digital", "C002": "branch", "C003": "both", "C004": "digital"}
     rows = []
     for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
@@ -74,6 +76,9 @@ def sample_pool(spark):
                     "cust_id": cid,
                     "cust_segment_typ": segments[cid],
                     "prod_name": prod,
+                    "label": 1 if cid == "C001" and prod == "exchange_fx" else 0,
+                    "tenure_months": tenure[cid],
+                    "channel_preference": channel[cid],
                 })
     return spark.createDataFrame(pd.DataFrame(rows))
 

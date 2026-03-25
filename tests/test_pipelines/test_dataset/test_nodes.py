@@ -65,9 +65,11 @@ def label_table():
 
 @pytest.fixture
 def sample_pool():
-    """Sample pool at customer-month-product granularity."""
+    """Sample pool at customer-month-product granularity (matches SQL schema)."""
     products = ["exchange_fx", "exchange_usd", "fund_stock"]
     segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
+    tenure = {"C001": 12, "C002": 36, "C003": 60, "C004": 24}
+    channel = {"C001": "digital", "C002": "branch", "C003": "both", "C004": "digital"}
     rows = []
     for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
         snap_dt = pd.Timestamp(snap)
@@ -78,6 +80,9 @@ def sample_pool():
                     "cust_id": cid,
                     "cust_segment_typ": segments[cid],
                     "prod_name": prod,
+                    "label": 1 if cid == "C001" and prod == "exchange_fx" else 0,
+                    "tenure_months": tenure[cid],
+                    "channel_preference": channel[cid],
                 })
     return pd.DataFrame(rows)
 
@@ -403,6 +408,62 @@ class TestSelectCalibrationKeys:
         }
         result = select_calibration_keys(sample_pool, params)
         assert list(result.columns) == ["snap_date", "cust_id", "prod_name"]
+
+    def test_independent_overrides(self, sample_pool, parameters):
+        """Calibration overrides should be independent from train overrides."""
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "enable_calibration": True,
+                "calibration_snap_dates": ["2024-03-31"],
+                "calibration_sample_ratio": 0.0,
+                "calibration_sample_ratio_overrides": {"mass|exchange_fx": 1.0},
+                "sample_ratio": 0.0,
+                "sample_ratio_overrides": {"affluent|exchange_usd": 1.0},
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
+                "val_snap_dates": ["2024-04-30"],
+                "test_snap_dates": ["2024-05-31"],
+            },
+        }
+        cal_result = select_calibration_keys(sample_pool, params)
+        # Calibration should only have mass|exchange_fx rows
+        assert len(cal_result) > 0
+        pool = sample_pool.set_index(["snap_date", "cust_id", "prod_name"])
+        for _, row in cal_result.iterrows():
+            key = (row["snap_date"], row["cust_id"], row["prod_name"])
+            assert pool.loc[key, "cust_segment_typ"] == "mass"
+            assert row["prod_name"] == "exchange_fx"
+
+        # Train should only have affluent|exchange_usd rows
+        train_result = select_train_keys(sample_pool, params)
+        assert len(train_result) > 0
+        for _, row in train_result.iterrows():
+            key = (row["snap_date"], row["cust_id"], row["prod_name"])
+            assert pool.loc[key, "cust_segment_typ"] == "affluent"
+            assert row["prod_name"] == "exchange_usd"
+
+    def test_empty_calibration_overrides_uses_default_ratio(self, sample_pool, parameters):
+        """When calibration_sample_ratio_overrides is empty, all groups use calibration_sample_ratio."""
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "enable_calibration": True,
+                "calibration_snap_dates": ["2024-03-31"],
+                "calibration_sample_ratio": 1.0,
+                "calibration_sample_ratio_overrides": {},
+                "sample_ratio_overrides": {"mass|exchange_fx": 0.0},
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
+                "val_snap_dates": ["2024-04-30"],
+                "test_snap_dates": ["2024-05-31"],
+            },
+        }
+        result = select_calibration_keys(sample_pool, params)
+        # Should have all 4 custs x 3 products = 12 rows (train overrides NOT applied)
+        assert len(result) == 12
 
 
 class TestSelectValKeys:

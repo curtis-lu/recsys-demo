@@ -1,7 +1,7 @@
 inference:
   use_calibration: true
   snap_dates:
-    - "2025-11-30"
+    - "2025-12-31"
   products:
     - "exchange_usd"
     - "exchange_fx"

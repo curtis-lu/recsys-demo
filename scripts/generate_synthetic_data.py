@@ -334,11 +334,15 @@ def generate_label_table(
     return df
 
 
-def generate_sample_pool(feature_table: pd.DataFrame) -> pd.DataFrame:
+def generate_sample_pool(
+    feature_table: pd.DataFrame, label_table: pd.DataFrame
+) -> pd.DataFrame:
     """Generate sample pool table at customer-month-product granularity.
 
-    Each customer-month is cross-joined with all products, producing
-    (snap_date, cust_id, cust_segment_typ, prod_name) rows.
+    Each customer-month is cross-joined with all products, then LEFT JOINed
+    with label_table (for label) and feature_table (for tenure_months,
+    channel_preference) to match the SQL schema:
+    (snap_date, cust_id, cust_segment_typ, prod_name, label, tenure_months, channel_preference)
     """
     # Use the same segment assignment as feature_table generation
     rng_seg = np.random.default_rng(RANDOM_SEED)
@@ -365,6 +369,16 @@ def generate_sample_pool(feature_table: pd.DataFrame) -> pd.DataFrame:
 
     df = pd.concat(rows_list, ignore_index=True)
     df["snap_date"] = pd.to_datetime(df["snap_date"])
+
+    # LEFT JOIN label_table for label column
+    label_cols = label_table[["snap_date", "cust_id", "prod_name", "label"]].copy()
+    df = df.merge(label_cols, on=["snap_date", "cust_id", "prod_name"], how="left")
+    df["label"] = df["label"].fillna(0).astype(int)
+
+    # LEFT JOIN feature_table for tenure_months, channel_preference
+    feat_cols = feature_table[["snap_date", "cust_id", "tenure_months", "channel_preference"]].copy()
+    df = df.merge(feat_cols, on=["snap_date", "cust_id"], how="left")
+
     return df
 
 
@@ -373,7 +387,7 @@ def main():
 
     feature_table = generate_feature_table(rng)
     label_table = generate_label_table(rng, feature_table)
-    sample_pool = generate_sample_pool(feature_table)
+    sample_pool = generate_sample_pool(feature_table, label_table)
 
     feature_table.to_parquet("data/feature_table.parquet", index=False)
     label_table.to_parquet("data/label_table.parquet", index=False)

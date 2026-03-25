@@ -59,8 +59,11 @@ def setup_workdir(
     feature_table.to_parquet(data_dir / "feature_table.parquet", index=False)
     label_table.to_parquet(data_dir / "label_table.parquet", index=False)
 
-    # 產生 sample_pool（customer-month-product 粒度）
-    sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ", "prod_name"]].drop_duplicates().reset_index(drop=True)
+    # 產生 sample_pool（customer-month-product 粒度，對齊 SQL schema）
+    sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ", "prod_name", "label"]].drop_duplicates().reset_index(drop=True)
+    # LEFT JOIN feature_table for tenure_months, channel_preference
+    feat_cols = feature_table[["snap_date", "cust_id", "tenure_months", "channel_preference"]].drop_duplicates()
+    sample_pool = sample_pool.merge(feat_cols, on=["snap_date", "cust_id"], how="left")
     sample_pool.to_parquet(data_dir / "sample_pool.parquet", index=False)
 
     return work_dir
