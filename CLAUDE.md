@@ -41,7 +41,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - ✅ 框架增強（Catalog memory release、Sample pool 分離、Val sampling）
 - ✅ Inference sanity checks（6 項驗證 + ValidationError）、Spark 優化（移除不必要 .count()、分片粒度細化）、ParquetDataset 分區寫入
 - ✅ 演算法抽象（ModelAdapter ABC + LightGBMAdapter + ModelAdapterDataset I/O + training/inference nodes 重構為 adapter 介面）
-- ⬚ Probability calibration layer（可選 isotonic/sigmoid，CalibratedModelAdapter wrapper）
+- ✅ Probability calibration（CalibratedModelAdapter wrapper：isotonic/sigmoid、ModelAdapterDataset calibrator.pkl sidecar、training pipeline conditional calibrate_model node、inference use_calibration flag、MLflow calibration logging、evaluate_model uncalibrated comparison）
 - ⬚ Evaluation pipeline 化（獨立 pipeline：generate_predictions → compute_metrics → compute_baselines → generate_report）
 - ⬚ Data-quality profiling（core/profiling.py + Runner 自動呼叫 + config 控制）
 - ⬚ Artifact/lineage logging（Catalog.save 自動記錄 structured log event）
@@ -55,7 +55,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 1. **Source Data ETL** *(not yet implemented)* - SQL-based transforms (PySpark) producing feature and label tables. SQL files defined and ordered via YAML config.
 2. **Dataset Building** ✅ - Sample pool at customer-month-product granularity. Train dates specified via `train_snap_date_start/end` range. Stratified sampling with per-group ratio overrides (by segment x product). Unified `select_keys` function for train/calibration key selection. 5-way split (train/train-dev/calibration/validation/test). Train & train-dev share dates, split by cust_id ratio. Calibration is optional (enable_calibration flag). Val/test use independent dates (val samples by cust_id, test full population). Dynamic `build_dataset` join: includes product key when present in keys. Outputs versioned Parquet files. Preprocessing logic reused in inference without data leakage. Dual pandas/spark backend. ETL SQL for sample_pool generation (`conf/sql/etl/sample_pool/`).
-3. **Training** ✅ - Optuna hyperparameter search, ModelAdapter-based training (config-driven algorithm selection), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts. *(planned: probability calibration)*
+3. **Training** ✅ - Optuna hyperparameter search, ModelAdapter-based training (config-driven algorithm selection), optional probability calibration (CalibratedModelAdapter, isotonic/sigmoid), mAP evaluation, MLflow experiment tracking, model version comparison. Outputs versioned model artifacts.
 4. **Inference** ✅ - Weekly batch scoring reusing dataset building preprocessing. Results partitioned by `${model_version}/${snap_date}`. Dual pandas/spark backend.
 5. **Evaluation** *(planned)* - 獨立的模型評估 pipeline，針對指定 model_version 進行完整分析（metrics、baselines、calibration comparison、HTML report）。
 
@@ -86,9 +86,10 @@ src/recsys_tfb/
     inference/          — Inference (nodes_pandas.py, nodes_spark.py, pipeline.py)
     evaluation/         — Evaluation pipeline (planned: nodes.py, pipeline.py)
   models/
-    __init__.py         — Exports ModelAdapter, get_adapter, ADAPTER_REGISTRY, LightGBMAdapter
+    __init__.py         — Exports ModelAdapter, get_adapter, ADAPTER_REGISTRY, LightGBMAdapter, CalibratedModelAdapter
     base.py             — ModelAdapter ABC, ADAPTER_REGISTRY, get_adapter() factory
     lightgbm_adapter.py — LightGBMAdapter (train/predict/save/load/feature_importance/log_to_mlflow)
+    calibrated_adapter.py — CalibratedModelAdapter (isotonic/sigmoid post-hoc calibration wrapper)
   evaluation/
     metrics.py          — Ranking metrics (mAP, nDCG, precision@K, recall@K, MRR)
     distributions.py    — Score/rank distribution plots
@@ -172,14 +173,6 @@ Follow the principles in `kedro_design_philosophy.md`. Key rules:
 - **Observability** - structured logging, step timing, data volume tracking, Spark config recording
 - **No data leakage** - shared preprocessing logic between training and inference, but keep training-only and inference-only concerns separate
 
-## Development Approach
-
-Build incrementally per the PRD:
-
-1. ~~Minimal working version first (Strategy 1 + mAP)~~ ✅ Done
-2. Add features one at a time
-3. Test after each addition
-4. Skip error analysis notebooks initially
 
 ## Development Roadmap
 
@@ -198,12 +191,12 @@ Build incrementally per the PRD:
 | 7b | 演算法抽象 ✅ | ModelAdapter ABC + LightGBMAdapter + ModelAdapterDataset I/O（model_meta.json sidecar、向後相容）+ training/inference nodes 重構為 adapter 介面 + config 擴充（algorithm, algorithm_params） |
 | 7.5 | 5-Way Dataset Split 重構 ✅ | 資料切割從 3-way 改為 5-way（train/train-dev/calibration/validation/test）。train & train-dev 共用日期按 cust_id ratio 切分；calibration optional（enable_calibration flag）；validation 可選抽樣；test 全量不抽樣。支援 sample_ratio_overrides（per-group 自訂比例，多欄位以 `\|` 組合）。Pipeline 條件式建構。 |
 | 7.6 | Dataset Pipeline 重構 ✅ | Train 日期參數化（train_snap_date_start/end）。sample_pool 改為 customer-month-product 粒度（加入 prod_name）。整併 select_sample_keys & select_calibration_keys 為通用 select_keys 函數。sample_group_keys 支援 (cust_segment_typ, prod_name) 組合做 per-product 抽樣。build_dataset 動態 join key（含 prod_name 時按產品 join label_table）。ETL SQL for sample_pool（conf/sql/etl/sample_pool/）。 |
+| 7c | Probability Calibration ✅ | CalibratedModelAdapter wrapper（isotonic/sigmoid）+ ModelAdapterDataset calibrator.pkl sidecar I/O + training pipeline conditional calibrate_model node + evaluate_model uncalibrated comparison + log_experiment calibration info + inference use_calibration flag（pandas/spark）+ MLflow calibration logging + 完整測試 |
 
 ### 待完成
 
 | Phase | 名稱 | 內容 |
 |-------|------|------|
-| 7c | Probability Calibration | CalibratedModelAdapter wrapper（可選 isotonic/sigmoid）+ `parameters_training.yaml` calibration section + MLflow 條件式 log_model |
 | 8 | Evaluation Pipeline 化 | 獨立 evaluation pipeline（generate_predictions → compute_metrics → compute_baselines → generate_report）+ pipeline registry 註冊 + CLI 支援 `--pipeline evaluation` + catalog 新增 eval_predictions / eval_metrics / eval_report + Training pipeline evaluate_model node 保留（輕量 mAP 供 MLflow） |
 | 9 | 可觀測性增強 | Data-quality profiling（`core/profiling.py` profile_dataframe() + Runner 自動呼叫 + `logging.profile_outputs` config 控制）+ Artifact/lineage logging（Catalog.save() 自動 emit `artifact_written` structured log event：filepath, dataset_type, upstream versions） |
 | 10 | 版本管理增強 | manifest 擴充（git_commit_hash, library_versions, artifact_sizes, metrics_summary）+ 版本查詢 CLI（`versions list/show/diff` subcommand）+ rollback 機制（`promote_model.py --rollback`） |
@@ -222,7 +215,7 @@ Build incrementally per the PRD:
 Phase 7b (演算法抽象) ✅
   ├── Phase 7.5 (5-Way Split) ✅
   │     └── Phase 7.6 (Dataset Pipeline 重構) ✅
-  │           └── Phase 7c (Calibration) — 依賴 calibration split + ModelAdapter 介面
+  │           └── Phase 7c (Calibration) ✅
   └── Phase 8 (Evaluation Pipeline) — 依賴 test split + ModelAdapter 介面
       └── Phase 11 (Tests) — 覆蓋上述所有新功能
 Phase 9 (可觀測性) — 獨立

@@ -147,20 +147,19 @@
 
 ### 輔助功能描述
 
-  - 結構化的日誌功能，增加可觀測性，讓除錯更容易與穩定。
-    - Pipeline-level log：run_id、pipeline 名稱、env、dataset_version、model_version、開始時間、結束時間、總耗時、執行狀態（success / failed）、觸發方式（manual / scheduled）、主要參數摘要
-    - Node-level log：run_id、node 名稱、所屬 pipeline、開始時間、結束時間、耗時、input 名稱、output 名稱、輸入/輸出資料筆數或 shape、是否成功、錯誤訊息、exception stack trace
-    - Data-quality log：訓練/驗證/推論資料筆數、正負樣本比例、各 snap_date 筆數、缺失值比例、類別欄位新值或未知值比例、特徵統計摘要、推論分數分布、top-K 產品分布、異常值或分布漂移訊號
-    - Artifact log / lineage log：artifact 名稱、artifact 類型（parquet / pickle / json）、輸出 path、檔案寫入時間、對應 dataset_version、model_version、上游輸入版本、manifest 路徑、是否更新 latest / best、寫入是否成功
-    - Data-quality profiling（增強版）：每個 node 輸出自動 profiling（row_count, column_count, null_ratio, numeric_summary, categorical_cardinality），可由 `logging.profile_outputs: true/false` 控制。Spark DataFrame 使用 `.dtypes` + `.summary()` 避免不必要的 `.count()`。
-    - Artifact/lineage 自動記錄：每次 artifact 寫入時在 Catalog.save() 層面自動 emit structured log event（dataset_name, filepath, write_time, upstream versions, manifest_path），不需各 node 自行處理。
-
-  - 版本紀錄與管理機制，確保資料集版本、模型版本可被追蹤，推論時明確知道使用的上游依賴版本。
-    - 這個 dataset 是用哪些參數做的？上游資料的schema長怎樣？
-    - 這個模型是用哪個 dataset 訓練的？
-    - 這次 inference 用的是哪個 model？對應到的 dataset 版本是什麼？
-    - 這個結果能不能被完整重現？
-    - 如果這版有問題，要退回哪一版？要怎麼退回？
+- 結構化的日誌功能，增加可觀測性，讓除錯更容易與穩定。
+  - Pipeline-level log：run_id、pipeline 名稱、env、dataset_version、model_version、開始時間、結束時間、總耗時、執行狀態（success / failed）、觸發方式（manual / scheduled）、主要參數摘要
+  - Node-level log：run_id、node 名稱、所屬 pipeline、開始時間、結束時間、耗時、input 名稱、output 名稱、輸入/輸出資料筆數或 shape、是否成功、錯誤訊息、exception stack trace
+  - Data-quality log：訓練/驗證/推論資料筆數、正負樣本比例、各 snap_date 筆數、缺失值比例、類別欄位新值或未知值比例、特徵統計摘要、推論分數分布、top-K 產品分布、異常值或分布漂移訊號
+  - Artifact log / lineage log：artifact 名稱、artifact 類型（parquet / pickle / json）、輸出 path、檔案寫入時間、對應 dataset_version、model_version、上游輸入版本、manifest 路徑、是否更新 latest / best、寫入是否成功
+  - Data-quality profiling（增強版）：每個 node 輸出自動 profiling（row_count, column_count, null_ratio, numeric_summary, categorical_cardinality），可由 `logging.profile_outputs: true/false` 控制。Spark DataFrame 使用 `.dtypes` + `.summary()` 避免不必要的 `.count()`。
+  - Artifact/lineage 自動記錄：每次 artifact 寫入時在 Catalog.save() 層面自動 emit structured log event（dataset_name, filepath, write_time, upstream versions, manifest_path），不需各 node 自行處理。
+- 版本紀錄與管理機制，確保資料集版本、模型版本可被追蹤，推論時明確知道使用的上游依賴版本。
+  - 這個 dataset 是用哪些參數做的？上游資料的schema長怎樣？
+  - 這個模型是用哪個 dataset 訓練的？
+  - 這次 inference 用的是哪個 model？對應到的 dataset 版本是什麼？
+  - 這個結果能不能被完整重現？
+  - 如果這版有問題，要退回哪一版？要怎麼退回？
 
 ## 設計原則
 

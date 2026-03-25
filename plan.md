@@ -47,7 +47,8 @@ recsys_tfb/
 │   │   ├─ base.py              # AbstractDataset
 │   │   ├─ parquet_dataset.py   # ParquetDataset（支援 pandas & PySpark）
 │   │   ├─ pickle_dataset.py    # PickleDataset（模型檔等）
-│   │   └─ json_dataset.py      # JSONDataset（category_mappings 等）
+│   │   ├─ json_dataset.py      # JSONDataset（category_mappings 等）
+│   │   └─ model_adapter_dataset.py  # ModelAdapterDataset（model + model_meta.json sidecar + calibrator.pkl）
 │   ├─ pipelines/
 │   │   ├─ __init__.py          # Pipeline registry (get_pipeline, list_pipelines)
 │   │   ├─ dataset/
@@ -64,6 +65,11 @@ recsys_tfb/
 │   │       ├─ nodes_pandas.py  # pandas 後端節點函數
 │   │       ├─ nodes_spark.py   # PySpark 後端節點函數
 │   │       └─ pipeline.py      # Pipeline 定義（backend 切換）
+│   ├─ models/
+│   │   ├─ __init__.py              # Exports ModelAdapter, get_adapter, ADAPTER_REGISTRY, LightGBMAdapter, CalibratedModelAdapter
+│   │   ├─ base.py                  # ModelAdapter ABC, ADAPTER_REGISTRY, get_adapter() factory
+│   │   ├─ lightgbm_adapter.py     # LightGBMAdapter
+│   │   └─ calibrated_adapter.py   # CalibratedModelAdapter（isotonic/sigmoid 校準 wrapper）
 │   ├─ evaluation/
 │   │   ├─ __init__.py
 │   │   ├─ metrics.py          # 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
@@ -167,4 +173,44 @@ recsys_tfb/
 - **Step 6.2** ✅ Sample Pool 分離 — `conf/base/catalog.yaml` 新增 `sample_pool` ParquetDataset、`select_sample_keys` 輸入從 `label_table` 改為 `sample_pool`（pandas/spark 雙後端）、`pipeline.py` 接線更新、假資料產生 `data/sample_pool.parquet`
 - **Step 6.3** ✅ Val Sampling — `parameters_dataset.yaml` 新增 `val_sample_ratio: 1.0`、`prepare_model_input` 加入 val set 可選分層抽樣（pandas/spark 雙後端）、group keys fallback 機制
 - **Step 6.4** ✅ 整合驗證 — 假資料重新產生、全部測試通過（351 passed）、dataset pipeline 端到端驗證、training pipeline 端到端驗證
+
+### Phase 7a：Inference Sanity Checks + Spark 優化 ✅
+
+- **Step 7a.1** ✅ Inference sanity checks — 6 項驗證（row count、null score、score range、duplicate、product coverage、score variance）+ ValidationError
+- **Step 7a.2** ✅ Spark 優化 — 移除不必要 `.count()` 呼叫、predict_scores 按 `(snap_date, prod_name)` 分片
+- **Step 7a.3** ✅ ParquetDataset 分區寫入 — `partition_cols` 支援
+
+### Phase 7b：演算法抽象 ✅
+
+- **Step 7b.1** ✅ ModelAdapter ABC — `base.py`：train / predict / save / load / feature_importance / suggest_hyperparameters / log_to_mlflow 抽象方法、ADAPTER_REGISTRY、get_adapter() factory
+- **Step 7b.2** ✅ LightGBMAdapter — 封裝 LightGBM API，實作所有 ModelAdapter 方法
+- **Step 7b.3** ✅ ModelAdapterDataset — `model_meta.json` sidecar（adapter_class、algorithm、saved_at）、自動 registry lookup、向後相容舊 pickle 檔
+- **Step 7b.4** ✅ Training/Inference nodes 重構 — 改用 adapter 介面，不直接依賴 LightGBM API
+- **Step 7b.5** ✅ Config 擴充 — `training.algorithm`、`training.algorithm_params`（含 objective/metric）、`training.search_space`
+
+### Phase 7.5：5-Way Dataset Split 重構 ✅
+
+- **Step 7.5.1** ✅ 資料切割改為 5-way — train / train-dev / calibration（optional）/ validation / test
+- **Step 7.5.2** ✅ train & train-dev 共用日期按 cust_id ratio 切分
+- **Step 7.5.3** ✅ calibration optional — `enable_calibration` flag 控制
+- **Step 7.5.4** ✅ sample_ratio_overrides — per-group 自訂比例（多欄位以 `|` 組合）
+- **Step 7.5.5** ✅ Pipeline 條件式建構
+
+### Phase 7.6：Dataset Pipeline 重構 ✅
+
+- **Step 7.6.1** ✅ Train 日期參數化 — `train_snap_date_start` / `train_snap_date_end`
+- **Step 7.6.2** ✅ sample_pool 改為 customer-month-product 粒度（加入 prod_name）
+- **Step 7.6.3** ✅ 整併 select_sample_keys & select_calibration_keys 為通用 `select_keys` 函數
+- **Step 7.6.4** ✅ sample_group_keys 支援 `(cust_segment_typ, prod_name)` 組合做 per-product 抽樣
+- **Step 7.6.5** ✅ build_dataset 動態 join key — 含 prod_name 時按產品 join label_table
+- **Step 7.6.6** ✅ ETL SQL for sample_pool — `conf/sql/etl/sample_pool/`
+
+### Phase 7c：Probability Calibration ✅
+
+- **Step 7c.1** ✅ CalibratedModelAdapter — `models/calibrated_adapter.py`：isotonic/sigmoid post-hoc calibration wrapper。實作 `fit_calibrator()`、`predict()`、`predict_uncalibrated()`、`save()`/`load()` with calibrator.pkl sidecar。不註冊 ADAPTER_REGISTRY（wrapper pattern）。測試：`test_calibrated_adapter.py`（8 tests）
+- **Step 7c.2** ✅ ModelAdapterDataset calibration sidecar — `save()` 偵測 CalibratedModelAdapter 並寫入 `calibrated`/`calibration_method` 到 `model_meta.json`。`load()` 自動偵測 meta 中的 calibrated flag 並 wrap base adapter。向後相容舊 meta 檔案
+- **Step 7c.3** ✅ Training nodes — `calibrate_model()` 節點 wrap model with CalibratedModelAdapter。`evaluate_model()` 增加 uncalibrated metrics comparison（偵測 CalibratedModelAdapter 時自動比較）。`log_experiment()` 記錄 calibration params + `uncalibrated_overall_map` metric 到 MLflow。Extract `_compute_ranking_metrics()` helper 避免重複程式碼
+- **Step 7c.4** ✅ Training pipeline conditional node — `create_pipeline()` 接受 `enable_calibration` kwarg，條件式插入 `calibrate_model` node。`trained_model` 為中間產物，`model` 為最終輸出。`__main__.py` 從 `parameters_training.yaml` 讀取 `calibration.enabled`
+- **Step 7c.5** ✅ Inference use_calibration flag — `predict_scores()` pandas/spark 雙後端支援 `use_calibration` config（預設 true）。當 flag=false 且 model 為 CalibratedModelAdapter 時呼叫 `predict_uncalibrated()`
+- **Step 7c.6** ✅ Pipeline structure tests — 5 個測試驗證 `enable_calibration=True` 時 pipeline 結構（node count、calibrate_model presence、inputs、topological ordering）
 
