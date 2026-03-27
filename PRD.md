@@ -85,10 +85,16 @@
     - 注意事項：
       - 資料轉換過程會有多個SQL file，一個SQL檔案對應一張table。
       - 每張table，原則上都會有partition，一般情況下會是snap_date。
-      - SQL的檔案數及執行順序需要可依使用者設定，目前想法是使用者定義在.yaml檔中。
       - 原則上在這階段資料都儲存為HIVE table，並以pyspark實作。
       - 來源資料驗證基本上是資料表新鮮度檢視，若有來源資料表未更新的情況（依該表的資料日、資料鍵值，或是資料筆數判斷）。
       - 一般的資料驗證則會檢視是否有資料重複問題、空值佔比、0值佔比、最大最小值檢視、類別數檢視等。
+      - 獨立 SQLRunner，不走 Node/Pipeline/Runner DAG
+      - YAML 定義表執行順序（`parameters_source_etl.yaml`）
+      - SQL 模板變數：`${snap_date}` + `${target_db}`（來源 DB hardcode 在 SQL）
+      - Dry-run 模式（local env）：render SQL + 印出，不實際執行
+      - `--snap-dates` 支援多日期 backfill；`--restart-from` 從指定表重跑
+      - Source checks（partition/row count/schema drift）+ Output checks（row count/duplicate/null ratio）
+      - Audit：Hive audit table + structured logging
   - **DATASET BUILDING PIPELINE**
     - 主要目的：
       - 對上一步產出的feature table以及label table，進行模型訓練相關的資料處理過程，包含抽樣、資料集切分、特徵工程處理，最終產出模型訓練及評估需要用到的所有資料集。

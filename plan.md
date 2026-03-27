@@ -1,10 +1,10 @@
-# 實作歷程記錄
+# 實作歷程與路線圖
+
+本文件是實作狀態與開發路線圖的 source of truth。需求與範圍請參閱 [PRD.md](PRD.md)。
 
 ## Context
 
 商業銀行產品推薦排序模型專案（recsys_tfb）的實作歷程記錄。記錄各階段的關鍵決策與具體實作步驟。
-
-> **注意**：待完成項目與開發路線圖請參閱 [CLAUDE.md](CLAUDE.md) 的 Development Roadmap。
 
 ## 已確認的關鍵決策
 
@@ -51,6 +51,13 @@ recsys_tfb/
 │   │   └─ model_adapter_dataset.py  # ModelAdapterDataset（model + model_meta.json sidecar + calibrator.pkl）
 │   ├─ pipelines/
 │   │   ├─ __init__.py          # Pipeline registry (get_pipeline, list_pipelines)
+│   │   ├─ source_etl/
+│   │   │   ├─ __init__.py
+│   │   │   ├─ models.py        # dataclass：TableConfig, SourceCheckConfig, AuditRecord
+│   │   │   ├─ sql_renderer.py  # SQL 讀取 + 模板替換 + INSERT OVERWRITE 組裝
+│   │   │   ├─ checks.py        # SourceChecker + OutputChecker
+│   │   │   ├─ audit.py         # AuditWriter（Hive audit table + structured logging）
+│   │   │   └─ sql_runner.py    # SQLRunner 核心類別
 │   │   ├─ dataset/
 │   │   │   ├─ __init__.py
 │   │   │   ├─ nodes_pandas.py  # pandas 後端節點函數
@@ -88,11 +95,18 @@ recsys_tfb/
 │   │   ├─ parameters.yaml
 │   │   ├─ parameters_dataset.yaml
 │   │   ├─ parameters_training.yaml
-│   │   └─ parameters_inference.yaml
+│   │   ├─ parameters_inference.yaml
+│   │   └─ parameters_source_etl.yaml
 │   ├─ local/
-│   │   └─ catalog.yaml
-│   └─ production/
-│       └─ catalog.yaml
+│   │   ├─ catalog.yaml
+│   │   └─ parameters_source_etl.yaml
+│   ├─ production/
+│   │   ├─ catalog.yaml
+│   │   └─ parameters_source_etl.yaml
+│   └─ sql/etl/                    # Source ETL SQL 檔案
+│       ├─ feature/                # 特徵表 SQL
+│       ├─ label/                  # 標籤表 SQL
+│       └─ sample_pool/            # 抽樣池 SQL
 ├─ scripts/
 │   ├─ generate_synthetic_data.py   # 合成假資料產生
 │   ├─ promote_model.py             # 模型版本晉升（手動觸發）
@@ -214,3 +228,49 @@ recsys_tfb/
 - **Step 7c.5** ✅ Inference use_calibration flag — `predict_scores()` pandas/spark 雙後端支援 `use_calibration` config（預設 true）。當 flag=false 且 model 為 CalibratedModelAdapter 時呼叫 `predict_uncalibrated()`
 - **Step 7c.6** ✅ Pipeline structure tests — 5 個測試驗證 `enable_calibration=True` 時 pipeline 結構（node count、calibrate_model presence、inputs、topological ordering）
 
+### Phase 7d：Pipeline 重構：preprocessing 統一 ✅
+
+（已合併於 Phase 7c 之後，細節見 git history）
+
+### Phase 8a：Source ETL Pipeline ✅
+
+- **Step 8a.1** ✅ models.py — `TableConfig`、`SourceCheckConfig`、`AuditRecord` dataclass + `from_dict()` factory
+- **Step 8a.2** ✅ sql_renderer.py — SQL 讀取、`${var}` 模板替換、未解析變數偵測、`strip_header_comments()`、`build_insert_overwrite()` 組裝
+- **Step 8a.3** ✅ checks.py — `SourceChecker`（partition exists / row count / schema drift）+ `OutputChecker`（row count / duplicate key ratio / null ratio）+ `CheckResult` dataclass
+- **Step 8a.4** ✅ audit.py — `AuditWriter`（CREATE TABLE IF NOT EXISTS + INSERT INTO + structured logging + summary record）
+- **Step 8a.5** ✅ sql_runner.py — `SQLRunner` 核心（config 解析、`_validate_order()` depends_on 驗證、主迴圈、dry-run 模式、restart_from 支援）
+- **Step 8a.6** ✅ CLI 整合 — `__main__.py` 新增 `--snap-dates`、`--restart-from` 參數 + `source_etl` 分支（獨立執行器，不走 get_pipeline/Runner）
+- **Step 8a.7** ✅ YAML 設定檔 — `parameters_source_etl.yaml`（base / local / production）
+- **Step 8a.8** ✅ SQL 修改 — `feature_concat.sql`、`sample_pool.sql` 中繼表引用加 `${target_db}.` prefix
+- **Step 8a.9** ✅ 測試 — 46 個單元/整合測試（models / sql_renderer / checks / audit / sql_runner）
+
+## 待完成階段
+
+| Phase | 名稱 | 內容 |
+|-------|------|------|
+| 8 | Evaluation Pipeline 化 | 獨立 evaluation pipeline（generate_predictions → compute_metrics → compute_baselines → generate_report）+ pipeline registry 註冊 + CLI 支援 `--pipeline evaluation` + catalog 新增 eval_predictions / eval_metrics / eval_report + Training pipeline evaluate_model node 保留（輕量 mAP 供 MLflow） |
+| 9 | 可觀測性增強 | Data-quality profiling（`core/profiling.py` profile_dataframe() + Runner 自動呼叫 + `logging.profile_outputs` config 控制）+ Artifact/lineage logging（Catalog.save() 自動 emit `artifact_written` structured log event：filepath, dataset_type, upstream versions） |
+| 10 | 版本管理增強 | manifest 擴充（git_commit_hash, library_versions, artifact_sizes, metrics_summary）+ 版本查詢 CLI（`versions list/show/diff` subcommand）+ rollback 機制（`promote_model.py --rollback`） |
+| 11 | 去 hard-code 補完 + Tests | inference validation thresholds 參數化 + 剩餘 hard-coded 項盤點 + 新增 tests（test_models/, test_evaluation pipeline, test_profiling, test_model_adapter_dataset） |
+| 12 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
+| — | Source ETL Phase 2 | Per-column data quality rules、automatic failure resume、更多 freshness checks、通知機制 |
+| — | 記憶體優化 | 盤點 MemoryDataset 使用、大型中間產物改用 file-backed（目前實作已合理，僅在資料量大幅增加時需要） |
+| — | 規則化重新排序 | rule-based reranking |
+| — | 月度監控 | 機率值分佈監控、資料筆數檢查 |
+| — | Strategy 2-4 | OVR 多模型、LambdaRank 排序、雙層排序 |
+| — | 錯誤分析 notebook | template notebook |
+
+## Phase 依賴關係
+
+```
+Phase 7b (演算法抽象) ✅
+  ├── Phase 7.5 (5-Way Split) ✅
+  │     └── Phase 7.6 (Dataset Pipeline 重構) ✅
+  │           └── Phase 7c (Calibration) ✅
+  │                 └── Phase 7d (Pipeline 重構：preprocessing 統一) ✅
+  └── Phase 8 (Evaluation Pipeline) — 依賴 test split + ModelAdapter 介面
+      └── Phase 11 (Tests) — 覆蓋上述所有新功能
+Phase 8a (Source ETL) ✅ — 獨立，不依賴 Node/Pipeline/Runner
+Phase 9 (可觀測性) — 獨立
+Phase 10 (版本管理) — 獨立，可與 8 平行
+```

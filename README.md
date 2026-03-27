@@ -9,6 +9,7 @@
 | 你想做什麼 | 看這裡 |
 |-----------|--------|
 | 快速跑起來看看效果 | [快速開始](#快速開始) |
+| 從原始 Hive 表產出特徵/標籤表 | [Source ETL 參數](#source-etl-參數-parameters_source_etlyaml) / [執行方式](#pipeline-執行) |
 | 用自己的資料跑 pipeline | [使用自己的資料](#使用自己的資料) |
 | 調整參數或設定 | [設定檔說明](#設定檔說明) / [修改需求對照表](#修改需求對照表) |
 | 修改特徵工程、模型、排序邏輯 | [修改需求對照表](#修改需求對照表) / [客製化邊界](#客製化邊界) |
@@ -68,9 +69,13 @@ data/
 └── sample_pool.parquet     # 抽樣池（合成）
 ```
 
-### 依序執行 3 條 pipeline
+### 依序執行 pipeline
 
 ```bash
+# Step 0（Production only）: Source ETL — 從原始 Hive 表產出 feature/label/sample_pool
+# Local 環境使用合成假資料，不需執行此步驟
+python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31,2024-02-29
+
 # Step 1: Dataset Building — 抽樣、5-way 切分、特徵工程
 python -m recsys_tfb --pipeline dataset --env local
 
@@ -134,14 +139,21 @@ Node → Pipeline → Runner → Catalog
 
 | 流水線 | 狀態 | 說明 |
 |--------|------|------|
-| Source Data ETL | 未實作 | SQL 驅動的特徵和標籤表建構（PySpark） |
+| Source ETL | ✅ | SQL 驅動的特徵/標籤/抽樣池表建構（PySpark）。獨立 SQLRunner，YAML 定義執行順序，支援 dry-run / backfill / restart-from |
 | Dataset Building | ✅ | 分層抽樣、5-way 切分（train/train-dev/calibration/val/test）、特徵工程。雙後端 |
 | Training | ✅ | Optuna 超參搜尋、LightGBM 訓練、機率校準（isotonic/sigmoid）、mAP 評估、MLflow 追蹤 |
 | Inference | ✅ | 批量打分、preprocessor 複用、排序、6 項 sanity check 驗證。雙後端 |
 
-三條 pipeline 必須依序執行，後者依賴前者的產出：
+四條 pipeline 依序執行，後者依賴前者的產出：
 
 ```
+原始 Hive 表 ──┐
+               ▼
+        ┌──────────────┐
+        │  Source ETL   │  ← 獨立 SQLRunner（非 DAG 框架）
+        └──────────────┘
+              │
+              ▼
 sample_pool ────┐                                              feature_table ──┐
 feature_table ──┤                                              preprocessor ───┤
 label_table ────┤                                              model ──────────┤
@@ -223,6 +235,7 @@ src/recsys_tfb/
   pipelines/
     __init__.py             — Pipeline registry（get_pipeline, list_pipelines）
     preprocessing.py        — 統一前處理邏輯（dataset/training/inference 共用）
+    source_etl/             — Source ETL（models.py, sql_renderer.py, checks.py, audit.py, sql_runner.py）
     dataset/                — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
     training/               — Training（nodes.py, pipeline.py）
     inference/              — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py, validation.py）
@@ -321,13 +334,19 @@ conf/
 │   ├── parameters_dataset.yaml
 │   ├── parameters_training.yaml
 │   ├── parameters_inference.yaml
-│   └── parameters_evaluation.yaml
+│   ├── parameters_evaluation.yaml
+│   └── parameters_source_etl.yaml
 ├── local/                  # 本地開發環境覆蓋
-│   └── catalog.yaml
+│   ├── catalog.yaml
+│   └── parameters_source_etl.yaml   # dry_run: true
 ├── production/             # 生產環境配置
 │   ├── catalog.yaml
-│   └── parameters.yaml
-└── sql/                    # ETL SQL 檔案（未啟用）
+│   ├── parameters.yaml
+│   └── parameters_source_etl.yaml   # dry_run: false
+└── sql/etl/                # Source ETL SQL 檔案
+    ├── feature/            # 特徵表 SQL（feature_aum, feature_sav, ...）
+    ├── label/              # 標籤表 SQL（label_ccard, label_exchange, ...）
+    └── sample_pool/        # 抽樣池 SQL
 ```
 
 - `base/` 存放跨環境共享的預設值
@@ -398,6 +417,26 @@ conf/
 | `mlflow.experiment_name` | str | `recsys_tfb` | MLflow 實驗名稱 |
 | `mlflow.tracking_uri` | str | `mlruns` | MLflow tracking 儲存路徑 |
 
+### Source ETL 參數 (`parameters_source_etl.yaml`)
+
+| 參數 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `source_etl.dry_run` | bool | `true`（local）/ `false`（production） | Dry-run 模式只 render SQL 不執行 |
+| `source_etl.variables.target_db` | str | `dev_ml_feature` / `ml_feature` | 產出表的 Hive database |
+| `source_etl.source_checks.<table>` | dict | — | 來源表新鮮度/schema 檢查設定 |
+| `source_etl.source_checks.<table>.partition_key` | str | — | 來源表的 partition 欄位 |
+| `source_etl.source_checks.<table>.min_row_count` | int | `0` | 最小 row count 門檻 |
+| `source_etl.source_checks.<table>.expected_columns` | dict | — | 預期欄位名稱→型別對照（schema drift 檢查） |
+| `source_etl.source_checks.<table>.allow_new_columns` | bool | `true` | 是否允許來源表新增欄位 |
+| `source_etl.tables[].name` | str | — | 產出表名稱 |
+| `source_etl.tables[].sql_file` | str | — | SQL 檔案路徑（相對於 `conf/sql/etl/`） |
+| `source_etl.tables[].partition_by` | list[str] | — | Partition 欄位 |
+| `source_etl.tables[].primary_key` | list[str] | `[]` | 主鍵欄位（用於 duplicate check） |
+| `source_etl.tables[].depends_on` | list[str] | `[]` | 依賴的上游表（用於順序驗證） |
+| `source_etl.tables[].quality_checks` | dict | `{}` | Output 品質檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`） |
+| `source_etl.audit.database` | str | `${target_db}` | Audit table 所在 database |
+| `source_etl.audit.table` | str | `etl_audit_log` | Audit table 名稱 |
+
 ### Inference 參數 (`parameters_inference.yaml`)
 
 | 參數 | 型別 | 預設值 | 說明 |
@@ -463,6 +502,9 @@ feature_table:
 
 | 想做什麼 | 改哪裡 | 具體位置 |
 |----------|--------|----------|
+| 新增/修改 ETL SQL 轉換 | SQL + 設定檔 | `conf/sql/etl/` 新增 SQL 檔案 + `parameters_source_etl.yaml` 的 `tables` 清單 |
+| 新增 ETL 來源表驗證 | 設定檔 | `parameters_source_etl.yaml` → `source_checks` |
+| 改 ETL 產出 database | 設定檔 | `parameters_source_etl.yaml` → `variables.target_db` |
 | 換資料來源路徑 | 設定檔 | `conf/base/catalog.yaml` → `feature_table.filepath`、`label_table.filepath`、`sample_pool.filepath` |
 | 改訓練/驗證/測試日期 | 設定檔 | `parameters_dataset.yaml` → `train_snap_date_start/end`、`val_snap_dates`、`test_snap_dates` |
 | 改推論日期 | 設定檔 | `parameters_inference.yaml` → `inference.snap_dates` |
@@ -489,6 +531,11 @@ feature_table:
 ### Pipeline 執行
 
 ```bash
+# Source ETL（獨立執行器，僅 production 環境需要）
+python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31,2024-02-29
+python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31 --restart-from feature_concat
+
+# Dataset / Training / Inference（走 Node/Pipeline/Runner DAG 框架）
 python -m recsys_tfb --pipeline dataset --env local
 python -m recsys_tfb --pipeline training --env local
 python -m recsys_tfb --pipeline inference --env local
@@ -496,10 +543,18 @@ python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34  
 python -m recsys_tfb -p dataset -e local  # 簡寫
 ```
 
+**Source ETL 專用參數：**
+
+| 參數 | 說明 |
+|------|------|
+| `--snap-dates` | 逗號分隔日期清單，指定要處理的快照日期（如 `2024-01-31,2024-02-29`） |
+| `--restart-from` | 從指定表名重新開始（跳過之前的表） |
+
 **版本解析邏輯：**
 
 | Pipeline | dataset_version | model_version |
 |----------|----------------|---------------|
+| source_etl | —（不使用版本管理） | — |
 | dataset | 自動計算（hash of parameters_dataset.yaml） | — |
 | training | 讀取 `latest` symlink（或 `--dataset-version`） | 自動計算（hash of params + dataset_version） |
 | inference | 從 model manifest 讀取（fallback: `latest`） | 讀取 `best` symlink（或 `--model-version`） |
@@ -591,6 +646,7 @@ Pipeline 節點都是純函數，可直接修改或替換：
 | Schema | `core/schema.py` | 集中管理欄位名稱，避免 hard-code 散落各處 |
 | I/O 適配器 | `io/` | 隔離序列化格式差異，新增格式只需實作 `AbstractDataset` |
 | 模型抽象 | `models/` | `ModelAdapter` ABC 讓訓練/推論邏輯不綁定特定模型框架 |
+| Source ETL | `pipelines/source_etl/` | 獨立 SQLRunner，不走 Node/Pipeline/Runner DAG。負責從原始 Hive 表產出 feature/label/sample_pool |
 | CLI | `__main__.py` | 統一入口，處理版本解析、symlink 更新、manifest 寫入 |
 
 ---
@@ -671,6 +727,7 @@ Pipeline 節點都是純函數，可直接修改或替換：
 
 - ✅ Kedro-inspired 核心框架（Node, Pipeline, Runner, Catalog, ConfigLoader）
 - ✅ Config-driven 欄位 schema + 結構化日誌
+- ✅ Source ETL Pipeline（獨立 SQLRunner、YAML 設定、dry-run、backfill、restart-from、source/output checks、Hive audit）
 - ✅ Dataset Building Pipeline（分層抽樣、5-way 切分、特徵工程、雙後端）
 - ✅ Training Pipeline（Optuna 超參搜尋、LightGBM 訓練、mAP 評估、MLflow 追蹤）
 - ✅ Inference Pipeline（批次打分、preprocessor 複用、排序、6 項 sanity check 驗證、雙後端）
@@ -686,7 +743,7 @@ Pipeline 節點都是純函數，可直接修改或替換：
 
 ### 待完成
 
-- ⬚ Source Data ETL Pipeline（SQL 驅動的特徵/標籤建構）
+- ⬚ Source ETL Phase 2（per-column data quality rules、automatic failure resume、通知機制）
 - ⬚ Evaluation Pipeline（獨立 pipeline 化）
 - ⬚ 觀測性增強（data-quality profiling、artifact lineage）
 - ⬚ 版本管理增強（manifest 擴充、版本 CLI、rollback）
