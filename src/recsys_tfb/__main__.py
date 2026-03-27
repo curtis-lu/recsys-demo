@@ -29,6 +29,12 @@ def run(
     model_version: Optional[str] = typer.Option(
         None, "--model-version", help="Model version to use for inference (default: best symlink)"
     ),
+    snap_dates: Optional[str] = typer.Option(
+        None, "--snap-dates", help="Comma-separated snap dates for source_etl (e.g. 2024-01-31,2024-02-29)"
+    ),
+    restart_from: Optional[str] = typer.Option(
+        None, "--restart-from", help="Restart source_etl from this table name (skip earlier tables)"
+    ),
 ) -> None:
     """Run a named pipeline with the specified environment config."""
     from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
@@ -58,6 +64,33 @@ def run(
     run_context = RunContext(pipeline=pipeline, env=env, backend=backend)
     setup_logging(params, run_context)
     logger = logging.getLogger(__name__)
+
+    # --- Source ETL pipeline (independent executor) ---
+    if pipeline == "source_etl":
+        from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
+
+        params_etl = config.get_parameters_by_name("parameters_source_etl")
+        etl_config = params_etl.get("source_etl", params_etl)
+        sql_dir = conf_dir / "sql" / "etl"
+        dry_run = etl_config.get("dry_run", env == "local")
+
+        # Parse snap_dates from CLI
+        if snap_dates:
+            date_list = [d.strip() for d in snap_dates.split(",")]
+        else:
+            date_list = etl_config.get("snap_dates", [])
+        if not date_list:
+            logger.error("No snap_dates provided. Use --snap-dates or set in config.")
+            raise typer.Exit(code=1)
+
+        runner = SQLRunner(config=etl_config, sql_dir=sql_dir, dry_run=dry_run)
+        try:
+            runner.run(snap_dates=date_list, restart_from=restart_from)
+        except Exception:
+            logger.exception("Source ETL pipeline failed")
+            raise typer.Exit(code=1)
+        logger.info("Pipeline 'source_etl' completed successfully")
+        raise typer.Exit(code=0)
 
     # Look up pipeline with backend (+ enable_calibration for dataset/training pipelines)
     pipeline_kwargs = {}

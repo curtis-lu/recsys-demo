@@ -1,0 +1,72 @@
+# Source ETL Pipeline Configuration
+# Tables are executed in list order. depends_on is for documentation and order validation only.
+
+source_etl:
+  variables:
+    target_db: "ml_feature"
+
+  # Source table freshness and schema checks (run before ETL execution)
+  source_checks: {}
+    # Example:
+    # feature_store.feat_aum:
+    #   partition_key: snap_date
+    #   min_row_count: 1000000
+    #   expected_columns:
+    #     cust_id: string
+    #     snap_date: string
+    #     total_aum_amt: double
+    #   allow_new_columns: true
+
+  # Output tables — execution order = list order
+  tables:
+    - name: feature_aum
+      sql_file: feature/feature_aum.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id]
+
+    - name: feature_sav
+      sql_file: feature/feature_sav.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id]
+
+    - name: feature_ccard
+      sql_file: feature/feature_ccard.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id]
+
+    - name: feature_info
+      sql_file: feature/feature_info.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id]
+
+    - name: feature_concat
+      sql_file: feature/feature_concat.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id]
+      depends_on: [feature_aum, feature_sav, feature_ccard, feature_info]
+
+    - name: label_ccard
+      sql_file: label/label_ccard.sql
+      partition_by: [prod_name, snap_date]
+      primary_key: [snap_date, cust_id, prod_name]
+
+    - name: label_exchange
+      sql_file: label/label_exchange.sql
+      partition_by: [prod_name, snap_date]
+      primary_key: [snap_date, cust_id, prod_name]
+
+    - name: label_fund
+      sql_file: label/label_fund.sql
+      partition_by: [prod_name, snap_date]
+      primary_key: [snap_date, cust_id, prod_name]
+
+    - name: sample_pool
+      sql_file: sample_pool/sample_pool.sql
+      partition_by: [snap_date]
+      primary_key: [snap_date, cust_id, prod_name]
+      depends_on: [feature_concat, label_ccard, label_exchange, label_fund]
+
+  # Audit Hive table
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log

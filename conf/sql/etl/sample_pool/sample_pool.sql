@@ -24,5 +24,5 @@ SELECT
     f.tenure_months,
     f.channel_preference
 FROM cust_snap p
-    LEFT JOIN label_table l ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id
-    LEFT JOIN feature_table f ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id
+    LEFT JOIN ${target_db}.label_table l ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id
+    LEFT JOIN ${target_db}.feature_table f ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id

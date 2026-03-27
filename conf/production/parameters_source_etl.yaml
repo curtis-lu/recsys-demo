@@ -1,0 +1,5 @@
+# Production: execute SQL against Hive
+source_etl:
+  dry_run: false
+  variables:
+    target_db: "ml_feature"
