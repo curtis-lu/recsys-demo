@@ -137,3 +137,27 @@ validated_predictions:
   type: ParquetDataset
   filepath: data/inference/${model_version}/${snap_date}/validated_predictions.parquet
   backend: pandas
+
+# Evaluation Pipeline
+eval_predictions:
+  type: ParquetDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/eval_predictions.parquet
+  backend: pandas
+
+evaluation_metrics:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/metrics.json
+
+evaluation_report:
+  type: TextDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/report.html
+
+# Baselines Pipeline
+baseline_predictions:
+  type: ParquetDataset
+  filepath: data/baselines/${snap_date}/baseline_predictions.parquet
+  backend: pandas
+
+baseline_metrics:
+  type: JSONDataset
+  filepath: data/baselines/${snap_date}/baseline_metrics.json

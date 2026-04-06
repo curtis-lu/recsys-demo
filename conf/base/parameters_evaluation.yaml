@@ -1,4 +1,7 @@
 evaluation:
+  # Snap date for evaluation (YYYYMMDD or YYYY-MM-DD).
+  snap_date: "20240131"
+
   # K values for @K metrics. "all" is resolved at runtime to the total product count N.
   k_values: [5, "all"]
 
@@ -14,3 +17,18 @@ evaluation:
       key_columns: [cust_id, snap_date]
       segment_column: holding_combo
 
+  # Baseline configuration
+  baseline:
+    # Baseline type: global_popularity or segment_popularity
+    type: global_popularity
+    # Segment column for segment_popularity baseline
+    segment_column: cust_segment_typ
+    # Number of months of historical data to use for baseline calculation
+    lookback_months: 12
+
+  # Report generation options
+  report:
+    include_baseline_comparison: true
+    include_calibration: true
+    include_distributions: true
+    n_calibration_bins: 10

@@ -202,6 +202,59 @@ def run(
         logger.info("Model version: %s (%s)", mv, source)
         logger.info("Dataset version: %s", ds_version)
 
+    elif pipeline == "evaluation":
+        # Resolve model version (from --model-version or best symlink)
+        models_dir = data_dir / "models"
+        mv = resolve_model_version(models_dir, model_version)
+
+        if model_version is not None:
+            mv_dir = models_dir / mv
+            if not mv_dir.is_dir():
+                logger.error("Model version directory not found: %s", mv_dir)
+                raise typer.Exit(code=1)
+
+        # Read dataset_version from model manifest, fallback to latest
+        dataset_dir = data_dir / "dataset"
+        model_dir = models_dir / mv
+        try:
+            model_manifest = read_manifest(model_dir)
+            ds_version = model_manifest["dataset_version"]
+        except (FileNotFoundError, KeyError):
+            logger.warning(
+                "Model manifest not found or missing dataset_version. "
+                "Falling back to dataset latest."
+            )
+            ds_version = resolve_dataset_version(dataset_dir, dataset_version)
+
+        # Get snap_date from evaluation parameters
+        try:
+            params_eval = config.get_parameters_by_name("parameters_evaluation")
+        except KeyError:
+            params_eval = {}
+        eval_config = params_eval.get("evaluation", params_eval)
+        snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
+
+        runtime_params["model_version"] = mv
+        runtime_params["dataset_version"] = ds_version
+        runtime_params["snap_date"] = snap_date
+        source = model_version if model_version else "best"
+        logger.info("Evaluation — model_version: %s (%s)", mv, source)
+        logger.info("Evaluation — snap_date: %s", snap_date)
+
+    elif pipeline == "baselines":
+        # Baselines only need snap_date, no model_version dependency
+        try:
+            params_eval = config.get_parameters_by_name("parameters_evaluation")
+        except KeyError:
+            params_eval = {}
+        eval_config = params_eval.get("evaluation", params_eval)
+        snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
+
+        runtime_params["model_version"] = "__none__"
+        runtime_params["dataset_version"] = "__none__"
+        runtime_params["snap_date"] = snap_date
+        logger.info("Baselines — snap_date: %s", snap_date)
+
     else:
         # Generic pipeline — provide defaults
         runtime_params["model_version"] = "best"
@@ -224,6 +277,12 @@ def run(
 
     # Inject parameters
     catalog.add("parameters", MemoryDataset(data=params))
+
+    # For evaluation pipeline: inject baseline_metrics as None if not available
+    if pipeline == "evaluation":
+        if not catalog.exists("baseline_metrics"):
+            catalog.add("baseline_metrics", MemoryDataset(data=None))
+            logger.info("No baseline_metrics found — report will skip baseline comparison")
 
     # Run
     logger.info("Running pipeline '%s' (env=%s)", pipeline, env)
@@ -301,6 +360,42 @@ def run(
         update_symlink(version_dir, data_dir / "inference" / "latest")
         with open(version_dir / "parameters_inference.json", "w") as f:
             json.dump(params_inference, f, indent=2, ensure_ascii=False, default=str)
+
+    elif pipeline == "evaluation":
+        mv = runtime_params["model_version"]
+        snap_date = runtime_params["snap_date"]
+        version_dir = data_dir / "evaluation" / mv / snap_date
+        try:
+            params_eval = config.get_parameters_by_name("parameters_evaluation")
+        except KeyError:
+            params_eval = {}
+        metadata = build_manifest_metadata(
+            version=mv,
+            pipeline="evaluation",
+            parameters=params_eval,
+            model_version=mv,
+        )
+        metadata["snap_date"] = snap_date
+        metadata["run_id"] = run_context.run_id
+        write_manifest(version_dir, metadata)
+        update_symlink(version_dir, data_dir / "evaluation" / "latest")
+
+    elif pipeline == "baselines":
+        snap_date = runtime_params["snap_date"]
+        version_dir = data_dir / "baselines" / snap_date
+        try:
+            params_eval = config.get_parameters_by_name("parameters_evaluation")
+        except KeyError:
+            params_eval = {}
+        metadata = build_manifest_metadata(
+            version=snap_date,
+            pipeline="baselines",
+            parameters=params_eval,
+        )
+        metadata["snap_date"] = snap_date
+        metadata["run_id"] = run_context.run_id
+        write_manifest(version_dir, metadata)
+        update_symlink(version_dir, data_dir / "baselines" / "latest")
 
     logger.info("Pipeline '%s' completed successfully", pipeline)
 

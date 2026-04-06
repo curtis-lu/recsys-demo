@@ -48,6 +48,7 @@ recsys_tfb/
 │   │   ├─ parquet_dataset.py   # ParquetDataset（支援 pandas & PySpark）
 │   │   ├─ pickle_dataset.py    # PickleDataset（模型檔等）
 │   │   ├─ json_dataset.py      # JSONDataset（category_mappings 等）
+│   │   ├─ text_dataset.py      # TextDataset（HTML 報告等純文字檔案）
 │   │   └─ model_adapter_dataset.py  # ModelAdapterDataset（model + model_meta.json sidecar + calibrator.pkl）
 │   ├─ pipelines/
 │   │   ├─ __init__.py          # Pipeline registry (get_pipeline, list_pipelines)
@@ -67,10 +68,20 @@ recsys_tfb/
 │   │   │   ├─ __init__.py
 │   │   │   ├─ nodes.py         # 純函數：調參、訓練、評估、記錄
 │   │   │   └─ pipeline.py      # Pipeline 定義
-│   │   └─ inference/
+│   │   ├─ inference/
+│   │   │   ├─ __init__.py
+│   │   │   ├─ nodes_pandas.py  # pandas 後端節點函數
+│   │   │   ├─ nodes_spark.py   # PySpark 後端節點函數
+│   │   │   └─ pipeline.py      # Pipeline 定義（backend 切換）
+│   │   ├─ evaluation/
+│   │   │   ├─ __init__.py
+│   │   │   ├─ nodes_pandas.py  # pandas 後端：prepare_eval_data、compute_metrics、generate_report
+│   │   │   ├─ nodes_spark.py   # Spark 後端：Spark SQL 指標計算 + pandas 報告產出
+│   │   │   └─ pipeline.py      # Pipeline 定義（backend 切換）
+│   │   └─ baselines/
 │   │       ├─ __init__.py
-│   │       ├─ nodes_pandas.py  # pandas 後端節點函數
-│   │       ├─ nodes_spark.py   # PySpark 後端節點函數
+│   │       ├─ nodes_pandas.py  # pandas 後端：重用 evaluation/baselines.py
+│   │       ├─ nodes_spark.py   # Spark 後端：Spark SQL popularity rate 計算
 │   │       └─ pipeline.py      # Pipeline 定義（backend 切換）
 │   ├─ models/
 │   │   ├─ __init__.py              # Exports ModelAdapter, get_adapter, ADAPTER_REGISTRY, LightGBMAdapter, CalibratedModelAdapter
@@ -96,6 +107,7 @@ recsys_tfb/
 │   │   ├─ parameters_dataset.yaml
 │   │   ├─ parameters_training.yaml
 │   │   ├─ parameters_inference.yaml
+│   │   ├─ parameters_evaluation.yaml
 │   │   └─ parameters_source_etl.yaml
 │   ├─ local/
 │   │   ├─ catalog.yaml
@@ -109,8 +121,7 @@ recsys_tfb/
 │       └─ sample_pool/            # 抽樣池 SQL
 ├─ scripts/
 │   ├─ generate_synthetic_data.py   # 合成假資料產生
-│   ├─ promote_model.py             # 模型版本晉升（手動觸發）
-│   └─ evaluate_model.py            # 模型評估 CLI（analyze/compare）
+│   └─ promote_model.py             # 模型版本晉升（手動觸發）
 ├─ tests/
 │   ├─ conftest.py
 │   ├─ test_cli.py
@@ -244,21 +255,35 @@ recsys_tfb/
 - **Step 8a.8** ✅ SQL 修改 — `feature_concat.sql`、`sample_pool.sql` 中繼表引用加 `${target_db}.` prefix
 - **Step 8a.9** ✅ 測試 — 46 個單元/整合測試（models / sql_renderer / checks / audit / sql_runner）
 
+### Phase 8：Evaluation Pipeline 化 ✅
+
+- **Step 8.1** ✅ `conf/base/parameters_evaluation.yaml` — snap_date、k_values、segment_columns、segment_sources、baseline config、report options
+- **Step 8.2** ✅ Catalog entries — eval_predictions、evaluation_metrics、evaluation_report（TextDataset）、baseline_predictions、baseline_metrics
+- **Step 8.3** ✅ Baselines pipeline — `pipelines/baselines/`：nodes_pandas（重用 evaluation/baselines.py）、nodes_spark（Spark SQL popularity rate）、pipeline.py
+- **Step 8.4** ✅ Evaluation pipeline pandas — `pipelines/evaluation/nodes_pandas.py`：prepare_eval_data、compute_metrics、generate_report
+- **Step 8.5** ✅ Evaluation pipeline spark — `pipelines/evaluation/nodes_spark.py`：Spark SQL 指標計算（AP、nDCG、MRR、P@K、R@K）、pandas 報告產出
+- **Step 8.6** ✅ Pipeline 定義與註冊 — `evaluation/pipeline.py`、`baselines/pipeline.py`、registry 新增、CLI 分支（版本解析、runtime params、manifest、symlink）
+- **Step 8.7** ✅ TextDataset — `io/text_dataset.py` 供 HTML 報告寫入、catalog registry 註冊
+- **Step 8.8** ✅ 刪除 `scripts/evaluate_model.py` — 功能由 pipeline 取代
+- **Step 8.9** ✅ 測試 — evaluation pipeline 端對端（12 tests）、baselines pipeline 端對端（8 tests）、pipeline 定義（10 tests）、Spark vs pandas cross-validation（3 tests）
+- **Step 8.10** ⏳ 手動 CLI 驗證 — `python -m recsys_tfb --pipeline evaluation --env local` / `--pipeline baselines --env local`
+
 ## 待完成階段
 
 | Phase | 名稱 | 內容 |
 |-------|------|------|
-| 8 | Evaluation Pipeline 化 | 獨立 evaluation pipeline（generate_predictions → compute_metrics → compute_baselines → generate_report）+ pipeline registry 註冊 + CLI 支援 `--pipeline evaluation` + catalog 新增 eval_predictions / eval_metrics / eval_report + Training pipeline evaluate_model node 保留（輕量 mAP 供 MLflow） |
-| 9 | 可觀測性增強 | Data-quality profiling（`core/profiling.py` profile_dataframe() + Runner 自動呼叫 + `logging.profile_outputs` config 控制）+ Artifact/lineage logging（Catalog.save() 自動 emit `artifact_written` structured log event：filepath, dataset_type, upstream versions） |
-| 10 | 版本管理增強 | manifest 擴充（git_commit_hash, library_versions, artifact_sizes, metrics_summary）+ 版本查詢 CLI（`versions list/show/diff` subcommand）+ rollback 機制（`promote_model.py --rollback`） |
-| 11 | 去 hard-code 補完 + Tests | inference validation thresholds 參數化 + 剩餘 hard-coded 項盤點 + 新增 tests（test_models/, test_evaluation pipeline, test_profiling, test_model_adapter_dataset） |
-| 12 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
-| — | Source ETL Phase 2 | Per-column data quality rules、automatic failure resume、更多 freshness checks、通知機制 |
-| — | 記憶體優化 | 盤點 MemoryDataset 使用、大型中間產物改用 file-backed（目前實作已合理，僅在資料量大幅增加時需要） |
+| 9 | Strategy 2-4 | OVR 多模型、LambdaRank 排序、雙層排序 |
+| 10 | 錯誤分析 notebook | template notebook |
+| 11 | 記憶體優化 | 盤點 MemoryDataset 使用、大型中間產物改用 file-backed（目前實作已合理，僅在資料量大幅增加時需要）、記憶體生命週期重疊問題 |
+| 12 | 可觀測性增強 | Data-quality profiling（`core/profiling.py` profile_dataframe() + Runner 自動呼叫 + `logging.profile_outputs` config 控制）+ Artifact/lineage logging（Catalog.save() 自動 emit `artifact_written` structured log event：filepath, dataset_type, upstream versions） |
+| 13 | 版本管理增強 | manifest 擴充（git_commit_hash, library_versions, artifact_sizes, metrics_summary）+ 版本查詢 CLI（`versions list/show/diff` subcommand）+ rollback 機制（`promote_model.py --rollback`） |
+| 14 | 去 hard-code 補完 + Tests | inference validation thresholds 參數化 + 剩餘 hard-coded 項盤點 + 新增 tests（test_models/, test_evaluation pipeline, test_profiling, test_model_adapter_dataset） |
+| 15 | Safe rerun 檢查點 | 跳過已完成步驟，從失敗步驟接續執行 |
+| 16 | Source ETL Phase 2 | Per-column data quality rules、automatic failure resume、更多 freshness checks、通知機制 |
 | — | 規則化重新排序 | rule-based reranking |
 | — | 月度監控 | 機率值分佈監控、資料筆數檢查 |
-| — | Strategy 2-4 | OVR 多模型、LambdaRank 排序、雙層排序 |
-| — | 錯誤分析 notebook | template notebook |
+
+
 
 ## Phase 依賴關係
 
@@ -268,7 +293,7 @@ Phase 7b (演算法抽象) ✅
   │     └── Phase 7.6 (Dataset Pipeline 重構) ✅
   │           └── Phase 7c (Calibration) ✅
   │                 └── Phase 7d (Pipeline 重構：preprocessing 統一) ✅
-  └── Phase 8 (Evaluation Pipeline) — 依賴 test split + ModelAdapter 介面
+  └── Phase 8 (Evaluation Pipeline) ✅
       └── Phase 11 (Tests) — 覆蓋上述所有新功能
 Phase 8a (Source ETL) ✅ — 獨立，不依賴 Node/Pipeline/Runner
 Phase 9 (可觀測性) — 獨立

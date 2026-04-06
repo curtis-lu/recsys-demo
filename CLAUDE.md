@@ -40,6 +40,9 @@ python -m recsys_tfb --pipeline dataset --env local
 python -m recsys_tfb --pipeline training --env local
 python -m recsys_tfb --pipeline inference --env local
 python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34
+python -m recsys_tfb --pipeline baselines --env local
+python -m recsys_tfb --pipeline evaluation --env local
+python -m recsys_tfb --pipeline evaluation --env local --model-version ab12cd34
 
 # Promote model (manual trigger, do not run automatically)
 python scripts/promote_model.py

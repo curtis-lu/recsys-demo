@@ -4,6 +4,8 @@ _REGISTRY: dict[str, str] = {
     "dataset": "recsys_tfb.pipelines.dataset",
     "training": "recsys_tfb.pipelines.training",
     "inference": "recsys_tfb.pipelines.inference",
+    "evaluation": "recsys_tfb.pipelines.evaluation",
+    "baselines": "recsys_tfb.pipelines.baselines",
 }
 
 
