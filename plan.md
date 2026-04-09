@@ -283,19 +283,3 @@ recsys_tfb/
 | — | 規則化重新排序 | rule-based reranking |
 | — | 月度監控 | 機率值分佈監控、資料筆數檢查 |
 
-
-
-## Phase 依賴關係
-
-```
-Phase 7b (演算法抽象) ✅
-  ├── Phase 7.5 (5-Way Split) ✅
-  │     └── Phase 7.6 (Dataset Pipeline 重構) ✅
-  │           └── Phase 7c (Calibration) ✅
-  │                 └── Phase 7d (Pipeline 重構：preprocessing 統一) ✅
-  └── Phase 8 (Evaluation Pipeline) ✅
-      └── Phase 11 (Tests) — 覆蓋上述所有新功能
-Phase 8a (Source ETL) ✅ — 獨立，不依賴 Node/Pipeline/Runner
-Phase 9 (可觀測性) — 獨立
-Phase 10 (版本管理) — 獨立，可與 8 平行
-```

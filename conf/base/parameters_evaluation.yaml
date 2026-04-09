@@ -1,6 +1,6 @@
 evaluation:
   # Snap date for evaluation (YYYYMMDD or YYYY-MM-DD).
-  snap_date: "20240131"
+  snap_date: "20251231"
 
   # K values for @K metrics. "all" is resolved at runtime to the total product count N.
   k_values: [5, "all"]
