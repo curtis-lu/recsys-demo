@@ -37,5 +37,5 @@
 - [x] 6.2 撰寫測試：evaluation pipeline pandas backend 端對端測試（用合成資料）
 - [x] 6.3 撰寫測試：baselines pipeline pandas backend 端對端測試
 - [x] 6.4 撰寫測試：Spark SQL 指標計算與 pandas 版 cross-validation（同一份資料，結果在浮點誤差內一致）
-- [ ] 6.5 手動驗證 CLI 執行：`python -m recsys_tfb --pipeline evaluation --env local` 和 `--pipeline baselines --env local`
+- [ ] 6.5 手動驗證 CLI 執行：`python -m recsys_tfb evaluation --env local` 和 `--pipeline baselines --env local`
 - [x] 6.6 更新 plan.md 與 CLAUDE.md 反映新增的 pipeline

@@ -83,7 +83,7 @@ def run_pipeline(work_dir: Path, pipeline_name: str, env_name: str) -> None:
     result = subprocess.run(
         [
             sys.executable, "-m", "recsys_tfb",
-            "--pipeline", pipeline_name,
+            pipeline_name,
             "--env", env_name,
         ],
         cwd=work_dir,
@@ -162,7 +162,7 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
                         f"snap_dates={snap_dates}"
                     )
 
-            for x_name in ["X_train", "X_val"]:
+            for x_name in ["train_model_input", "val_model_input"]:
                 pq_path = vdir / f"{x_name}.parquet"
                 if pq_path.exists():
                     df = pd.read_parquet(pq_path)

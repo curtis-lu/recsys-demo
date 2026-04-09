@@ -34,15 +34,15 @@ pip install -e ".[dev]"
 pytest tests/ -v
 
 # Run pipelines
-python -m recsys_tfb --pipeline source_etl --env local --snap-dates 2024-01-31,2024-02-29
-python -m recsys_tfb --pipeline source_etl --env local --snap-dates 2024-01-31 --restart-from feature_concat
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
-python -m recsys_tfb --pipeline inference --env local
-python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34
-python -m recsys_tfb --pipeline baselines --env local
-python -m recsys_tfb --pipeline evaluation --env local
-python -m recsys_tfb --pipeline evaluation --env local --model-version ab12cd34
+python -m recsys_tfb source_etl --env local --snap-dates 2024-01-31,2024-02-29
+python -m recsys_tfb source_etl --env local --snap-dates 2024-01-31 --restart-from feature_concat
+python -m recsys_tfb dataset --env local
+python -m recsys_tfb training --env local
+python -m recsys_tfb inference --env local
+python -m recsys_tfb inference --env local --model-version ab12cd34
+python -m recsys_tfb baselines --env local
+python -m recsys_tfb evaluation --env local
+python -m recsys_tfb evaluation --env local --model-version ab12cd34
 
 # Promote model (manual trigger, do not run automatically)
 python scripts/promote_model.py

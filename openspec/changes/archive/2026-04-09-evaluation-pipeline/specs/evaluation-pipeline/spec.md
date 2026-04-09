@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
 ### Requirement: Evaluation pipeline 註冊與 CLI 執行
-系統 SHALL 在 pipeline registry 中註冊 `evaluation` pipeline，並支援透過 CLI 執行 `python -m recsys_tfb --pipeline evaluation --env <env>`。
+系統 SHALL 在 pipeline registry 中註冊 `evaluation` pipeline，並支援透過 CLI 執行 `python -m recsys_tfb evaluation --env <env>`。
 
 #### Scenario: 執行 evaluation pipeline
-- **WHEN** 使用者執行 `python -m recsys_tfb --pipeline evaluation --env local`
+- **WHEN** 使用者執行 `python -m recsys_tfb evaluation --env local`
 - **THEN** 系統 SHALL 解析 model_version（預設跟隨 `data/models/best` symlink）、從 `parameters_evaluation.yaml` 讀取 snap_date，執行 evaluation pipeline 並產出 metrics.json 與 report.html
 
 #### Scenario: 指定 model_version 執行
-- **WHEN** 使用者執行 `python -m recsys_tfb --pipeline evaluation --env local --model-version abc12345`
+- **WHEN** 使用者執行 `python -m recsys_tfb evaluation --env local --model-version abc12345`
 - **THEN** 系統 SHALL 使用指定的 model_version 讀取對應 inference 產出並評估
 
 ### Requirement: 重用 inference 產出

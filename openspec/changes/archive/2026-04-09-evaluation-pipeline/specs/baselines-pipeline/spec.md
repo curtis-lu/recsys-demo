@@ -1,10 +1,10 @@
 ## ADDED Requirements
 
 ### Requirement: Baselines pipeline 註冊與 CLI 執行
-系統 SHALL 在 pipeline registry 中註冊 `baselines` pipeline，並支援透過 CLI 執行 `python -m recsys_tfb --pipeline baselines --env <env>`。
+系統 SHALL 在 pipeline registry 中註冊 `baselines` pipeline，並支援透過 CLI 執行 `python -m recsys_tfb baselines --env <env>`。
 
 #### Scenario: 執行 baselines pipeline
-- **WHEN** 使用者執行 `python -m recsys_tfb --pipeline baselines --env local`
+- **WHEN** 使用者執行 `python -m recsys_tfb baselines --env local`
 - **THEN** 系統 SHALL 從 `parameters_evaluation.yaml` 讀取 snap_date，計算 popularity baseline 並產出 baseline_predictions 與 baseline_metrics
 
 ### Requirement: Baselines 不綁定 model_version

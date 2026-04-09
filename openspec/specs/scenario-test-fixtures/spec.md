@@ -18,7 +18,7 @@
 
 #### Scenario: 執行 dataset pipeline
 - **WHEN** 呼叫 `run_pipeline(work_dir, "dataset", "scenario_1")`
-- **THEN** 以 `subprocess.run(cwd=work_dir)` 執行 `python -m recsys_tfb run --pipeline dataset --env scenario_1`，失敗時拋出 CalledProcessError
+- **THEN** 以 `subprocess.run(cwd=work_dir)` 執行 `python -m recsys_tfb dataset --env scenario_1`，失敗時拋出 CalledProcessError
 
 ### Requirement: Model Promote 封裝
 `conftest.py` SHALL 提供 `promote_model(work_dir)` helper，在情境工作目錄下執行 model promote。

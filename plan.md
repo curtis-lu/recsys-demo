@@ -144,7 +144,7 @@ recsys_tfb/
 - **Step 1.3** ✅ I/O 抽象層 — AbstractDataset、ParquetDataset、PickleDataset
 - **Step 1.4** ✅ DataCatalog — 根據 catalog.yaml 實例化 Dataset 物件
 - **Step 1.5** ✅ Node / Pipeline / Runner — 拓撲排序（Kahn's algorithm）+ 依序執行
-- **Step 1.6** ✅ CLI — Typer，`python -m recsys_tfb run --pipeline <name> --env <env>`
+- **Step 1.6** ✅ CLI — Typer，`python -m recsys_tfb <name> --env <env>`
 - **Step 1.7** ✅ Config YAML — catalog.yaml、parameters*.yaml
 
 ### Phase 2：Dataset Building Pipeline ✅
@@ -266,7 +266,7 @@ recsys_tfb/
 - **Step 8.7** ✅ TextDataset — `io/text_dataset.py` 供 HTML 報告寫入、catalog registry 註冊
 - **Step 8.8** ✅ 刪除 `scripts/evaluate_model.py` — 功能由 pipeline 取代
 - **Step 8.9** ✅ 測試 — evaluation pipeline 端對端（12 tests）、baselines pipeline 端對端（8 tests）、pipeline 定義（10 tests）、Spark vs pandas cross-validation（3 tests）
-- **Step 8.10** ⏳ 手動 CLI 驗證 — `python -m recsys_tfb --pipeline evaluation --env local` / `--pipeline baselines --env local`
+- **Step 8.10** ⏳ 手動 CLI 驗證 — `python -m recsys_tfb evaluation --env local` / `--pipeline baselines --env local`
 
 ## 待完成階段
 

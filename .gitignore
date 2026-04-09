@@ -20,3 +20,4 @@ tests/scenarios/output/
 .DS_Store
 logs/*
 .worktrees/
+.untouch/

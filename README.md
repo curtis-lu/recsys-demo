@@ -74,16 +74,16 @@ data/
 ```bash
 # Step 0（Production only）: Source ETL — 從原始 Hive 表產出 feature/label/sample_pool
 # Local 環境使用合成假資料，不需執行此步驟
-python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31,2024-02-29
+python -m recsys_tfb source_etl --env production --snap-dates 2024-01-31,2024-02-29
 
 # Step 1: Dataset Building — 抽樣、5-way 切分、特徵工程
-python -m recsys_tfb --pipeline dataset --env local
+python -m recsys_tfb dataset --env local
 
 # Step 2: Training — Optuna 超參搜尋 + LightGBM 訓練 + 機率校準
-python -m recsys_tfb --pipeline training --env local
+python -m recsys_tfb training --env local
 
 # Step 3: Inference — 批次打分 + 排序 + 驗證
-python -m recsys_tfb --pipeline inference --env local
+python -m recsys_tfb inference --env local
 ```
 
 每步完成後 `data/` 下會新增對應產出：
@@ -315,9 +315,9 @@ data/                         — 開發用合成資料 & pipeline 產出
 **Step 3**：執行 pipeline：
 
 ```bash
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
-python -m recsys_tfb --pipeline inference --env local
+python -m recsys_tfb dataset --env local
+python -m recsys_tfb training --env local
+python -m recsys_tfb inference --env local
 ```
 
 ---
@@ -351,7 +351,7 @@ conf/
 
 - `base/` 存放跨環境共享的預設值
 - `local/` 和 `production/` 可覆蓋同名 key（deep merge：nested dict 遞迴合併，scalar 值直接替換）
-- 透過 `--env` 參數切換環境：`python -m recsys_tfb -p dataset -e production`
+- 透過 `--env` 參數切換環境：`python -m recsys_tfb dataset -e production`
 - `--env` 預設值為 `local`
 
 ### 全域參數 (`parameters.yaml`)
@@ -532,15 +532,15 @@ feature_table:
 
 ```bash
 # Source ETL（獨立執行器，僅 production 環境需要）
-python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31,2024-02-29
-python -m recsys_tfb --pipeline source_etl --env production --snap-dates 2024-01-31 --restart-from feature_concat
+python -m recsys_tfb source_etl --env production --snap-dates 2024-01-31,2024-02-29
+python -m recsys_tfb source_etl --env production --snap-dates 2024-01-31 --restart-from feature_concat
 
 # Dataset / Training / Inference（走 Node/Pipeline/Runner DAG 框架）
-python -m recsys_tfb --pipeline dataset --env local
-python -m recsys_tfb --pipeline training --env local
-python -m recsys_tfb --pipeline inference --env local
-python -m recsys_tfb --pipeline inference --env local --model-version ab12cd34  # 指定模型版本
-python -m recsys_tfb -p dataset -e local  # 簡寫
+python -m recsys_tfb dataset --env local
+python -m recsys_tfb training --env local
+python -m recsys_tfb inference --env local
+python -m recsys_tfb inference --env local --model-version ab12cd34  # 指定模型版本
+python -m recsys_tfb dataset -e local  # 簡寫
 ```
 
 **Source ETL 專用參數：**

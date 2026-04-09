@@ -69,6 +69,7 @@ def work_dir():
                 "n_trials": 3,
                 "num_iterations": 100,
                 "early_stopping_rounds": 20,
+                "calibration": {"enabled": False},
             },
         },
         "parameters_inference": {
@@ -105,10 +106,10 @@ def dataset_version_dir(work_dir):
 
 
 def test_x_train_has_new_columns(dataset_version_dir):
-    """X_train 應包含信用卡特徵欄位。"""
-    X_train = pd.read_parquet(dataset_version_dir / "X_train.parquet")
+    """train_model_input 應包含信用卡特徵欄位。"""
+    X_train = pd.read_parquet(dataset_version_dir / "train_model_input.parquet")
     for col in NEW_FEATURE_COLUMNS:
-        assert col in X_train.columns, f"X_train 缺少欄位: {col}"
+        assert col in X_train.columns, f"train_model_input 缺少欄位: {col}"
 
 
 def test_preprocessor_includes_new_columns(dataset_version_dir):

@@ -54,22 +54,22 @@ class TestCLI:
     def test_help(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "--pipeline" in result.output
-        assert "--env" in result.output
-        assert "--dataset-version" in result.output
+        assert "dataset" in result.output
+        assert "training" in result.output
+        
 
     def test_help_shows_options(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "Pipeline name to run" in result.output
+        assert "source_etl" in result.output
 
     def test_unknown_pipeline(self, tmp_path):
         _setup_conf(tmp_path)
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            result = runner.invoke(app, ["--pipeline", "nonexistent"])
-            assert result.exit_code == 1
+            result = runner.invoke(app, ["nonexistent"])
+            assert result.exit_code == 2
         finally:
             os.chdir(old_cwd)
 
@@ -80,11 +80,11 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch("recsys_tfb.core.catalog.DataCatalog") as mock_catalog_cls:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
-                with patch("recsys_tfb.core.runner.Runner"):
-                    result = runner.invoke(app, ["--pipeline", "dataset"])
+                with patch("recsys_tfb.__main__.Runner"):
+                    result = runner.invoke(app, ["dataset"])
                     call_args = mock_catalog_cls.call_args[0][0]
                     fp = call_args["sample_keys"]["filepath"]
                     assert "${dataset_version}" not in fp
@@ -109,11 +109,11 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch("recsys_tfb.core.catalog.DataCatalog") as mock_catalog_cls:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
-                with patch("recsys_tfb.core.runner.Runner"):
-                    result = runner.invoke(app, ["--pipeline", "training"])
+                with patch("recsys_tfb.__main__.Runner"):
+                    result = runner.invoke(app, ["training"])
                     call_args = mock_catalog_cls.call_args[0][0]
                     fp = call_args["model"]["filepath"]
                     assert "${model_version}" not in fp
@@ -140,12 +140,12 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch("recsys_tfb.core.catalog.DataCatalog") as mock_catalog_cls:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
-                with patch("recsys_tfb.core.runner.Runner"):
+                with patch("recsys_tfb.__main__.Runner"):
                     result = runner.invoke(
-                        app, ["--pipeline", "training", "--dataset-version", "deadbeef"]
+                        app, ["training", "--dataset-version", "deadbeef"]
                     )
                     call_args = mock_catalog_cls.call_args[0][0]
                     pp = call_args["preprocessor"]["filepath"]
@@ -171,11 +171,11 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch("recsys_tfb.core.catalog.DataCatalog") as mock_catalog_cls:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
-                with patch("recsys_tfb.core.runner.Runner"):
-                    runner.invoke(app, ["--pipeline", "inference"])
+                with patch("recsys_tfb.__main__.Runner"):
+                    runner.invoke(app, ["inference"])
                     call_args = mock_catalog_cls.call_args[0][0]
                     # model and preprocessor still read via "best" symlink
                     fp = call_args["model"]["filepath"]
@@ -201,7 +201,7 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            result = runner.invoke(app, ["--pipeline", "training"])
+            result = runner.invoke(app, ["training"])
             assert result.exit_code == 1
         finally:
             os.chdir(old_cwd)

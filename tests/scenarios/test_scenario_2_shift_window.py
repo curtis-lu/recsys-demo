@@ -65,6 +65,7 @@ def work_dir():
                 "n_trials": 3,
                 "num_iterations": 100,
                 "early_stopping_rounds": 20,
+                "calibration": {"enabled": False},
             },
         },
     }

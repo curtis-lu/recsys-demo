@@ -7,7 +7,7 @@
 - 新增 `evaluation` pipeline：讀取 inference 已產出的 `ranked_predictions`，join label_table，計算排名指標，產出 metrics.json 與 report.html
 - 新增 `baselines` pipeline：獨立計算 popularity baseline，只依賴 snap_date，不綁 model_version
 - 兩條 pipeline 都支援 pandas/spark 雙 backend
-- 註冊到 pipeline registry，支援 `python -m recsys_tfb --pipeline evaluation` 和 `--pipeline baselines` CLI 執行
+- 註冊到 pipeline registry，支援 `python -m recsys_tfb evaluation` 和 `--pipeline baselines` CLI 執行
 - Evaluation report 內建可選的 baseline 比較（有 baseline artifact 就納入，沒有就只產模型報告）
 - 新增 `conf/base/parameters_evaluation.yaml` 集中管理評估參數
 - 新增 catalog entries，evaluation 產出路徑為 `data/evaluation/${model_version}/${snap_date}/`，baselines 為 `data/baselines/${snap_date}/`
