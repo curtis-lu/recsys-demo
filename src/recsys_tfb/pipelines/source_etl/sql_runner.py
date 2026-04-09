@@ -90,27 +90,8 @@ class SQLRunner:
             self._dry_run,
         )
 
-        if restart_from:
-            table_names = [t.name for t in self._tables]
-            if restart_from not in table_names:
-                raise ValueError(
-                    f"restart_from='{restart_from}' not found in tables: {table_names}"
-                )
-
-        spark = None
-        audit = None
-        if not self._dry_run:
-            from pyspark.sql import SparkSession
-
-            spark = SparkSession.builder.getOrCreate()
-            if self._audit_config:
-                resolved_audit = {
-                    "database": self._audit_config["database"].replace(
-                        "${target_db}", self._target_db
-                    ),
-                    "table": self._audit_config["table"],
-                }
-                audit = AuditWriter(spark, resolved_audit)
+        spark, audit = self._initialize_context()
+        tables_to_run = self._get_tables_to_run(restart_from)
 
         for snap_date in snap_dates:
             logger.info("Processing snap_date=%s", snap_date)
@@ -123,60 +104,9 @@ class SQLRunner:
 
             # Execute tables
             snap_status = "success"
-            found_restart = restart_from is None
-            for table in self._tables:
-                if not found_restart:
-                    if table.name == restart_from:
-                        found_restart = True
-                    else:
-                        logger.info("Skipping %s (restart mode)", table.name)
-                        continue
-
-                variables = {**self._variables, "snap_date": snap_date}
-                select_sql = self._renderer.render(table.sql_file, variables)
-                full_sql = SQLRenderer.build_insert_overwrite(
-                    table, select_sql, self._target_db
-                )
-
-                if self._dry_run:
-                    logger.info(
-                        "DRY RUN [%s]:\n%s", table.name, full_sql
-                    )
-                    continue
-
-                # Execute
-                table_start = time.monotonic()
-                try:
-                    logger.info("Executing %s ...", table.name)
-                    spark.sql(full_sql)
-                    duration = time.monotonic() - table_start
-                    logger.info(
-                        "Completed %s in %.1fs", table.name, duration
-                    )
-                except Exception as exc:
-                    duration = time.monotonic() - table_start
-                    logger.error(
-                        "Failed %s after %.1fs: %s", table.name, duration, exc
-                    )
-                    if audit:
-                        audit.write_record(
-                            AuditRecord(
-                                run_id=run_id,
-                                snap_date=snap_date,
-                                table_name=table.name,
-                                status="failed",
-                                duration_seconds=duration,
-                                error_message=str(exc),
-                            )
-                        )
-                    snap_status = "failed"
-                    break
-
-                # Output quality checks
-                row_count = self._run_output_checks(
-                    spark, table, snap_date, run_id, audit, duration
-                )
-                if row_count < 0:
+            for table in tables_to_run:
+                success = self._process_single_table(spark, table, snap_date, run_id, audit)
+                if not success:
                     snap_status = "failed"
                     break
 
@@ -190,6 +120,99 @@ class SQLRunner:
                 snap_status,
                 total_duration,
             )
+
+    def _initialize_context(self) -> tuple:
+        """Initialize and return the Spark context and AuditWriter."""
+        if self._dry_run:
+            return None, None
+            
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.getOrCreate()
+        audit = None
+        if self._audit_config:
+            resolved_audit = {
+                "database": self._audit_config["database"].replace(
+                    "${target_db}", self._target_db
+                ),
+                "table": self._audit_config["table"],
+            }
+            audit = AuditWriter(spark, resolved_audit)
+        return spark, audit
+
+    def _get_tables_to_run(self, restart_from: str | None) -> list[TableConfig]:
+        """Filter the tables list based on restart_from parameter."""
+        if not restart_from:
+            return self._tables
+            
+        table_names = [t.name for t in self._tables]
+        if restart_from not in table_names:
+            raise ValueError(
+                f"restart_from='{restart_from}' not found in tables: {table_names}"
+            )
+            
+        start_idx = next(i for i, t in enumerate(self._tables) if t.name == restart_from)
+        for table in self._tables[:start_idx]:
+            logger.info("Skipping %s (restart mode)", table.name)
+            
+        return self._tables[start_idx:]
+
+    def _process_single_table(
+        self,
+        spark,
+        table: TableConfig,
+        snap_date: str,
+        run_id: str,
+        audit: AuditWriter | None
+    ) -> bool:
+        """Execute a single table rendering, Spark SQL processing, and output quality check."""
+        variables = {**self._variables, "snap_date": snap_date}
+        select_sql = self._renderer.render(table.sql_file, variables)
+        full_sql = SQLRenderer.build_insert_overwrite(
+            table, select_sql, self._target_db
+        )
+
+        if self._dry_run:
+            logger.info(
+                "DRY RUN [%s]:\n%s", table.name, full_sql
+            )
+            return True
+
+        # Execute
+        table_start = time.monotonic()
+        try:
+            logger.info("Executing %s ...", table.name)
+            spark.sql(full_sql)
+            duration = time.monotonic() - table_start
+            logger.info(
+                "Completed %s in %.1fs", table.name, duration
+            )
+        except Exception as exc:
+            duration = time.monotonic() - table_start
+            logger.error(
+                "Failed %s after %.1fs: %s", table.name, duration, exc
+            )
+            if audit:
+                audit.write_record(
+                    AuditRecord(
+                        run_id=run_id,
+                        snap_date=snap_date,
+                        table_name=table.name,
+                        status="failed",
+                        duration_seconds=duration,
+                        error_message=str(exc),
+                    )
+                )
+            return False
+
+        # Output quality checks
+        row_count = self._run_output_checks(
+            spark, table, snap_date, run_id, audit, duration
+        )
+        if row_count < 0:
+            return False
+            
+        return True
 
     def _run_source_checks(
         self,
