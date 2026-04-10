@@ -78,7 +78,7 @@
 
 ### 核心功能描述
 
-- 預計區分4大pipeline，如附圖(PRD-pipeline-image.png)所示：
+- 預計區分5大pipeline，如附圖(PRD-pipeline-image.png)所示（SOURCE DATA ETL / DATASET BUILDING / TRAINING / INFERENCE / EVALUATION）：
   - **SOURCE DATA ETL PIPELINE：**
     - 主要目的：
       - 對來源資料表進行資料轉換，最終會產出一張儲存所有feature的HIVE table，以及一張儲存所有label的HIVE table。
@@ -116,6 +116,7 @@
         - 可以新增特徵，無論是數值型或類別型
         - 可以新增產品別
         - 同樣的架構，亦可將「產品別」抽換成「通路類型」、「接觸時間」等。
+      - 可利用 `scripts/suggest_categorical_cols.py` 從 parquet/Hive 表自動推斷候選類別欄位，作為維護 `parameters_dataset.yaml` 的輔助工具（human-in-the-loop，腳本不自動改 config）。
       - 為避免設定檔的參數之間造成程式錯誤，希望有簡單的檢核機制(preflight checks)，確保使用者的設定檔有設定正確。
   - **TRAINING PIPELINE**
     - 主要目的：

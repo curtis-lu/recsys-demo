@@ -84,6 +84,12 @@ python -m recsys_tfb training --env local
 
 # Step 3: Inference — 批次打分 + 排序 + 驗證
 python -m recsys_tfb inference --env local
+
+# Step 4（optional）: Baselines — 產出 popularity baseline 供 Evaluation 比較
+python -m recsys_tfb baselines --env local
+
+# Step 5（optional）: Evaluation — 指定 model_version 進行完整排序指標分析與 HTML 報告
+python -m recsys_tfb evaluation --env local
 ```
 
 每步完成後 `data/` 下會新增對應產出：
@@ -108,11 +114,19 @@ data/
 │   ├── best_params.json
 │   ├── evaluation_results.json
 │   └── manifest.json
-└── inference/<model_version>/<snap_date>/  # Step 3 產出
-    ├── scoring_dataset.parquet
-    ├── score_table.parquet
-    ├── ranked_predictions.parquet
-    └── validated_predictions.parquet
+├── inference/<model_version>/<snap_date>/  # Step 3 產出
+│   ├── scoring_dataset.parquet
+│   ├── score_table.parquet
+│   ├── ranked_predictions.parquet
+│   └── validated_predictions.parquet
+├── baselines/<snap_date>/                   # Step 4 產出
+│   ├── baseline_predictions.parquet
+│   ├── baseline_metrics.json
+│   └── manifest.json
+└── evaluation/<model_version>/<snap_date>/  # Step 5 產出
+    ├── evaluation_metrics.json
+    ├── evaluation_report.html
+    └── manifest.json
 ```
 
 其中 `<dataset_version>` 和 `<model_version>` 是根據參數自動計算的 8 碼 SHA-256 hash。
@@ -143,8 +157,10 @@ Node → Pipeline → Runner → Catalog
 | Dataset Building | ✅ | 分層抽樣、5-way 切分（train/train-dev/calibration/val/test）、特徵工程。雙後端 |
 | Training | ✅ | Optuna 超參搜尋、LightGBM 訓練、機率校準（isotonic/sigmoid）、mAP 評估、MLflow 追蹤 |
 | Inference | ✅ | 批量打分、preprocessor 複用、排序、6 項 sanity check 驗證。雙後端 |
+| Evaluation | ✅ | 獨立 pipeline：排序指標（mAP, nDCG, P@K, R@K, MRR）、分群分析、Plotly HTML 報告。雙後端 |
+| Baselines | ✅ | 全域/分群 popularity baseline 計算，供 Evaluation 比較用。雙後端 |
 
-四條 pipeline 依序執行，後者依賴前者的產出：
+六條 pipeline 依序執行，後者依賴前者的產出（Evaluation / Baselines 為可獨立重跑的分析類 pipeline，於 Training 完成後針對指定 `model_version` 執行）：
 
 ```
 原始 Hive 表 ──┐
@@ -239,6 +255,8 @@ src/recsys_tfb/
     dataset/                — Dataset building（nodes_pandas.py, nodes_spark.py, pipeline.py）
     training/               — Training（nodes.py, pipeline.py）
     inference/              — Inference（nodes_pandas.py, nodes_spark.py, pipeline.py, validation.py）
+    evaluation/             — Evaluation pipeline（nodes_pandas.py, nodes_spark.py, pipeline.py）
+    baselines/              — Baselines pipeline（nodes_pandas.py, nodes_spark.py, pipeline.py）
   evaluation/
     metrics.py              — 排序指標（mAP, nDCG, precision@K, recall@K, MRR）
     distributions.py        — 分數/排名分布圖表
@@ -253,9 +271,9 @@ src/recsys_tfb/
 
 conf/                       — YAML 配置 + SQL
 scripts/
-  generate_synthetic_data.py  — 產生合成假資料
-  promote_model.py            — 模型版本晉升（手動觸發）
-  evaluate_model.py           — 模型評估 CLI（analyze/compare）
+  generate_synthetic_data.py   — 產生合成假資料
+  promote_model.py             — 模型版本晉升（手動觸發）
+  suggest_categorical_cols.py  — 從 parquet/Hive 表推斷候選類別欄位（helper）
 tests/                        — 測試套件
 data/                         — 開發用合成資料 & pipeline 產出
 ```
@@ -519,7 +537,9 @@ feature_table:
 | 改抽樣策略 | 程式碼 | `pipelines/dataset/nodes_pandas.py` → `select_keys` |
 | 改模型演算法 | 程式碼 | 實作新的 `ModelAdapter`（參考 `models/lightgbm_adapter.py`），註冊到 `ADAPTER_REGISTRY` |
 | 改超參搜尋策略 | 程式碼 | `pipelines/training/nodes.py` → `tune_hyperparameters` |
-| 改評估指標 | 程式碼 | `pipelines/training/nodes.py` → `evaluate_model` |
+| 改評估指標（完整版） | 程式碼 | `pipelines/evaluation/nodes_pandas.py`（及 `nodes_spark.py`）→ `compute_metrics` |
+| 改評估指標（training 內輕量版） | 程式碼 | `pipelines/training/nodes.py` → `evaluate_model`（僅用於 MLflow 記錄） |
+| 自動推斷類別欄位 | 輔助腳本 | `python scripts/suggest_categorical_cols.py <parquet>` 產出 YAML 草案供人工審閱 |
 | 改排序/過濾邏輯 | 程式碼 | `pipelines/inference/nodes_pandas.py` → `rank_predictions` |
 | 改推論驗證規則 | 程式碼 | `pipelines/inference/validation.py` → `validate_predictions` |
 | 切換 pandas/spark 後端 | 設定檔 | `catalog.yaml` 的 `backend` 欄位；或 `conf/production/parameters.yaml` → `backend: spark` |
@@ -535,11 +555,14 @@ feature_table:
 python -m recsys_tfb source_etl --env production --snap-dates 2024-01-31,2024-02-29
 python -m recsys_tfb source_etl --env production --snap-dates 2024-01-31 --restart-from feature_concat
 
-# Dataset / Training / Inference（走 Node/Pipeline/Runner DAG 框架）
+# Dataset / Training / Inference / Evaluation / Baselines（走 Node/Pipeline/Runner DAG 框架）
 python -m recsys_tfb dataset --env local
 python -m recsys_tfb training --env local
 python -m recsys_tfb inference --env local
 python -m recsys_tfb inference --env local --model-version ab12cd34  # 指定模型版本
+python -m recsys_tfb baselines --env local
+python -m recsys_tfb evaluation --env local
+python -m recsys_tfb evaluation --env local --model-version ab12cd34
 python -m recsys_tfb dataset -e local  # 簡寫
 ```
 
@@ -558,23 +581,33 @@ python -m recsys_tfb dataset -e local  # 簡寫
 | dataset | 自動計算（hash of parameters_dataset.yaml） | — |
 | training | 讀取 `latest` symlink（或 `--dataset-version`） | 自動計算（hash of params + dataset_version） |
 | inference | 從 model manifest 讀取（fallback: `latest`） | 讀取 `best` symlink（或 `--model-version`） |
+| evaluation | 從 model manifest 讀取（fallback: `--dataset-version` 或 `latest`） | 讀取 `best` symlink（或 `--model-version`） |
+| baselines | —（不依賴模型） | —（不依賴模型） |
 
 ### 模型評估
 
+模型評估整合於獨立的 **Evaluation Pipeline**，針對指定 `model_version` 計算排序指標（mAP / nDCG / P@K / R@K / MRR）、分群分析與 Plotly HTML 報告。Baselines Pipeline 負責產出 popularity baseline 供 Evaluation 比較。
+
 ```bash
-# 單一模型分析（產出 Plotly HTML 報告 + metrics.json）
-python scripts/evaluate_model.py analyze <model_version> --snap-date 2025-12-31
+# 產出 popularity baseline（Evaluation 會自動讀取）
+python -m recsys_tfb baselines --env local
 
-# 兩個模型版本比較
-python scripts/evaluate_model.py compare <model_a> <model_b> --snap-date 2025-12-31
+# 評估 best model（預設讀取 data/models/best symlink）
+python -m recsys_tfb evaluation --env local
 
-# 模型 vs baseline 比較
-python scripts/evaluate_model.py compare <model_version> --baseline global_popularity --snap-date 2025-12-31
+# 評估指定 model_version
+python -m recsys_tfb evaluation --env local --model-version ab12cd34
+
+# 評估時以 --dataset-version 指定 fallback（當 model manifest 缺少 dataset_version）
+python -m recsys_tfb evaluation --env local --dataset-version ef56gh78
 ```
 
-- `model_version` 可使用版本 hash、`latest` 或 `best`
-- `--k-values 3,5,10` 可自訂 K 值（預設 5, all）
-- 報告輸出至 `data/evaluation/` 下對應版本目錄
+- 評估 snap_date、K 值、分群欄位、baseline 啟用與否皆由 `conf/base/parameters_evaluation.yaml` 控制
+- 若未先跑 baselines，evaluation 會略過 baseline 比較並於 log 提示
+- 產出路徑：
+  - Evaluation：`data/evaluation/<model_version>/<snap_date>/`（metrics JSON + HTML 報告 + manifest）
+  - Baselines：`data/baselines/<snap_date>/`（baseline metrics + manifest）
+- `latest` symlink 會自動更新至最近一次 evaluation / baselines 的產出目錄
 
 ### 模型晉升
 
@@ -627,7 +660,8 @@ Pipeline 節點都是純函數，可直接修改或替換：
 | 超參搜尋空間/策略 | `pipelines/training/nodes.py` | `tune_hyperparameters` |
 | 模型訓練邏輯 | `pipelines/training/nodes.py` | `train_model` |
 | 機率校準 | `pipelines/training/nodes.py` | `calibrate_model` |
-| 評估指標 | `pipelines/training/nodes.py` | `evaluate_model` |
+| 評估指標（完整版） | `pipelines/evaluation/nodes_pandas.py`（及 `nodes_spark.py`） | `compute_metrics` |
+| 評估指標（training 輕量版） | `pipelines/training/nodes.py` | `evaluate_model`（MLflow 記錄用） |
 | 排序/過濾邏輯 | `pipelines/inference/nodes_pandas.py` | `rank_predictions` |
 | 推論驗證規則 | `pipelines/inference/validation.py` | `validate_predictions` |
 
@@ -737,14 +771,15 @@ Pipeline 節點都是純函數，可直接修改或替換：
 - ✅ 5-way dataset split（train / train-dev / calibration / val / test）
 - ✅ 統一前處理（dataset/training/inference 共用 `preprocessing.py`）
 - ✅ 參數化日期範圍 + per-product 抽樣覆蓋
-- ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + baselines + Plotly 報告 + 模型比較 CLI）
+- ✅ 評估模組（mAP, nDCG, precision@K, recall@K, MRR + baselines + Plotly 報告）
+- ✅ Evaluation Pipeline（獨立 pipeline、pandas/spark 雙後端、HTML 報告、指定 `model_version` 執行）
+- ✅ Baselines Pipeline（popularity baseline、pandas/spark 雙後端，供 Evaluation 比較）
 - ✅ pandas/PySpark 雙後端支援
 - ✅ Strategy 1 MVP（單一二分類器 + mAP）
 
 ### 待完成
 
 - ⬚ Source ETL Phase 2（per-column data quality rules、automatic failure resume、通知機制）
-- ⬚ Evaluation Pipeline（獨立 pipeline 化）
 - ⬚ 觀測性增強（data-quality profiling、artifact lineage）
 - ⬚ 版本管理增強（manifest 擴充、版本 CLI、rollback）
 - ⬚ Safe rerun checkpointing

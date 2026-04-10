@@ -44,6 +44,9 @@ python -m recsys_tfb baselines --env local
 python -m recsys_tfb evaluation --env local
 python -m recsys_tfb evaluation --env local --model-version ab12cd34
 
+# Suggest categorical columns from a parquet/Hive table (helper)
+python scripts/suggest_categorical_cols.py data/feature_table.parquet
+
 # Promote model (manual trigger, do not run automatically)
 python scripts/promote_model.py
 ```
