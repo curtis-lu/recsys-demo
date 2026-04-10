@@ -15,8 +15,8 @@ class TestTrainingPipeline:
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
         expected = {
-            "X_train", "y_train", "X_train_dev", "y_train_dev",
-            "X_val", "y_val", "val_set", "parameters",
+            "train_model_input", "train_dev_model_input",
+            "val_model_input", "preprocessor", "parameters",
         }
         assert pipeline.inputs == expected
 
@@ -57,8 +57,7 @@ class TestTrainingPipeline:
     def test_calibration_pipeline_inputs(self):
         pipeline = create_pipeline(enable_calibration=True)
         # Should include calibration data in addition to normal inputs
-        assert "X_calibration" in pipeline.inputs
-        assert "y_calibration" in pipeline.inputs
+        assert "calibration_model_input" in pipeline.inputs
 
     def test_calibration_pipeline_trained_model_intermediate(self):
         """trained_model should be intermediate: produced by train_model, consumed by calibrate_model."""
@@ -85,6 +84,7 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.models.base import ModelAdapter
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
+        from recsys_tfb.pipelines.training.nodes import _extract_Xy
 
         # -- Synthetic source tables --
         products = ["exchange_fx", "exchange_usd", "fund_stock"]
@@ -167,9 +167,6 @@ class TestTrainingPipelineE2E:
         sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ", "prod_name"]].drop_duplicates().reset_index(drop=True)
 
         # -- Build catalog with MemoryDatasets for source data --
-        # Pre-register all datasets used across both pipelines so they won't
-        # be auto-created (and thus won't be released by memory management).
-        # In production, these are ParquetDataset/etc. in catalog.yaml.
         catalog = DataCatalog()
         catalog.add("feature_table", MemoryDataset(feature_table))
         catalog.add("label_table", MemoryDataset(label_table))
@@ -178,8 +175,8 @@ class TestTrainingPipelineE2E:
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",
-            "X_train", "y_train", "X_train_dev", "y_train_dev",
-            "X_val", "y_val", "X_test", "y_test",
+            "train_model_input", "train_dev_model_input",
+            "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
             "best_params", "model", "evaluation_results",
         ):
@@ -200,8 +197,10 @@ class TestTrainingPipelineE2E:
         assert isinstance(model, ModelAdapter)
 
         # Model predictions are probabilities in [0, 1]
-        X_val = catalog.load("X_val")
-        preds = model.predict(X_val.values)
+        val_mi = catalog.load("val_model_input")
+        preprocessor = catalog.load("preprocessor")
+        X_val, _ = _extract_Xy(val_mi, preprocessor, parameters)
+        preds = model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
 
         best_params = catalog.load("best_params")

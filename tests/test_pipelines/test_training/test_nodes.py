@@ -8,6 +8,7 @@ from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
+    _extract_Xy,
     calibrate_model,
     evaluate_model,
     log_experiment,
@@ -50,48 +51,49 @@ def training_parameters():
 
 
 @pytest.fixture
-def synthetic_data():
-    """Create synthetic train/dev/val data mimicking dataset pipeline output."""
-    rng = np.random.RandomState(42)
-    n_train, n_dev, n_val = 120, 40, 40  # 10/3/3 customers x 4 products
-
-    def make_features(n):
-        return pd.DataFrame({
-            "prod_name": np.tile([0, 1, 2, 3], n // 4),
-            "total_aum": rng.uniform(100, 1000, n),
-            "fund_aum": rng.uniform(10, 100, n),
-            "in_amt_sum_l1m": rng.uniform(0, 50, n),
-            "out_amt_sum_l1m": rng.uniform(0, 30, n),
-        })
-
-    def make_labels(n):
-        return pd.DataFrame({"label": rng.binomial(1, 0.15, n).astype(float)})
-
-    X_train = make_features(n_train)
-    y_train = make_labels(n_train)
-    X_dev = make_features(n_dev)
-    y_dev = make_labels(n_dev)
-    X_val = make_features(n_val)
-    y_val = make_labels(n_val)
-
-    return X_train, y_train, X_dev, y_dev, X_val, y_val
+def preprocessor_metadata():
+    return {
+        "feature_columns": [
+            "prod_name", "total_aum", "fund_aum", "in_amt_sum_l1m", "out_amt_sum_l1m",
+        ],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {
+            "prod_name": ["exchange_fx", "exchange_usd", "fund_bond", "fund_stock"],
+        },
+        "drop_columns": [
+            "snap_date", "cust_id", "label",
+            "apply_start_date", "apply_end_date", "cust_segment_typ",
+        ],
+    }
 
 
 @pytest.fixture
-def val_set():
-    """Create val_set DataFrame with query group columns."""
-    products = ["exchange_fx", "exchange_usd", "fund_stock", "fund_bond"]
-    rows = []
-    for snap in ["2024-02-29", "2024-03-31"]:
-        snap_dt = pd.Timestamp(snap)
-        for cid in ["C001", "C002", "C003", "C004", "C005"]:
+def synthetic_model_inputs():
+    """Create synthetic model_input DataFrames mimicking dataset pipeline output."""
+    rng = np.random.RandomState(42)
+    products = ["exchange_fx", "exchange_usd", "fund_bond", "fund_stock"]
+
+    def make_model_input(snap_date, n_customers):
+        rows = []
+        for i in range(n_customers):
             for prod in products:
                 rows.append({
-                    "snap_date": snap_dt,
-                    "cust_id": cid,
+                    "snap_date": pd.Timestamp(snap_date),
+                    "cust_id": f"C{i:03d}",
                     "prod_name": prod,
+                    "label": float(rng.binomial(1, 0.15)),
+                    "total_aum": rng.uniform(100, 1000),
+                    "fund_aum": rng.uniform(10, 100),
+                    "in_amt_sum_l1m": rng.uniform(0, 50),
+                    "out_amt_sum_l1m": rng.uniform(0, 30),
                 })
-    return pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    train_mi = make_model_input("2024-01-31", 30)      # 120 rows
+    train_dev_mi = make_model_input("2024-02-29", 10)   # 40 rows
+    val_mi = make_model_input("2024-04-30", 10)          # 40 rows
+
+    return train_mi, train_dev_mi, val_mi
 
 
 # ---- Tests: _compute_ap ----
@@ -130,27 +132,31 @@ class TestComputeAP:
 
 
 class TestTuneHyperparameters:
-    def test_returns_valid_params(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
-        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
+    def test_returns_valid_params(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
+        best_params = tune_hyperparameters(
+            train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters,
+        )
 
         assert isinstance(best_params, dict)
         assert "learning_rate" in best_params
         assert "num_leaves" in best_params
         assert "max_depth" in best_params
 
-    def test_params_in_search_space(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
+    def test_params_in_search_space(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
         space = training_parameters["training"]["search_space"]
-        best_params = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
+        best_params = tune_hyperparameters(
+            train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters,
+        )
 
         assert space["num_leaves"]["low"] <= best_params["num_leaves"] <= space["num_leaves"]["high"]
         assert space["max_depth"]["low"] <= best_params["max_depth"] <= space["max_depth"]["high"]
 
-    def test_reproducible(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, X_val, y_val = synthetic_data
-        r1 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
-        r2 = tune_hyperparameters(X_train, y_train, X_dev, y_dev, X_val, y_val, training_parameters)
+    def test_reproducible(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
+        r1 = tune_hyperparameters(train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters)
+        r2 = tune_hyperparameters(train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters)
         assert r1 == r2
 
 
@@ -158,29 +164,30 @@ class TestTuneHyperparameters:
 
 
 class TestTrainModel:
-    def test_returns_adapter(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def test_returns_adapter(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
         assert isinstance(model, ModelAdapter)
 
-    def test_predictions_are_probabilities(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, X_val, _ = synthetic_data
+    def test_predictions_are_probabilities(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
-        preds = model.predict(X_val.values)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        X_val, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        preds = model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
 
-    def test_early_stopping(self, synthetic_data, training_parameters):
+    def test_early_stopping(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
         from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         params = {**training_parameters, "training": {**training_parameters["training"], "num_iterations": 500, "early_stopping_rounds": 5}}
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, params)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, params)
         # With small data and early_stopping_rounds=5, should stop before 500
         assert isinstance(model, LightGBMAdapter)
         assert model.booster.current_iteration() < 500
@@ -190,16 +197,16 @@ class TestTrainModel:
 
 
 class TestEvaluateModel:
-    def _train_quick_model(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def _train_quick_model(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        return train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
 
-    def test_returns_evaluation_dict(self, synthetic_data, val_set, training_parameters):
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
-        results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
+    def test_returns_evaluation_dict(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_mi = synthetic_model_inputs
+        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
 
         assert "overall_map" in results
         assert "per_product_ap" in results
@@ -208,23 +215,23 @@ class TestEvaluateModel:
         assert isinstance(results["overall_map"], float)
         assert isinstance(results["per_product_ap"], dict)
 
-    def test_overall_map_matches_compute_all_metrics(self, synthetic_data, val_set, training_parameters):
+    def test_overall_map_matches_compute_all_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
         """evaluate_model overall_map matches direct compute_all_metrics call."""
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_mi = synthetic_model_inputs
 
-        results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
+        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
 
         # Reproduce via compute_all_metrics directly
-        y_score = model.predict(X_val.values)
-        predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        X, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        y_score = model.predict(X)
+        predictions = val_mi[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
             predictions.groupby(["snap_date", "cust_id"])["score"]
             .rank(method="first", ascending=False).astype(int)
         )
-        labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-        labels["label"] = y_val["label"].values
+        labels = val_mi[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
 
         metrics = compute_all_metrics(predictions, labels, k_values=["all"])
         n_products = predictions["prod_name"].nunique()
@@ -234,22 +241,22 @@ class TestEvaluateModel:
         assert results["n_queries"] == metrics["n_queries"]
         assert results["n_excluded_queries"] == metrics["n_excluded_queries"]
 
-    def test_per_product_ap_matches_compute_all_metrics(self, synthetic_data, val_set, training_parameters):
+    def test_per_product_ap_matches_compute_all_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
         """evaluate_model per_product_ap matches compute_all_metrics per_product."""
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_mi = synthetic_model_inputs
 
-        results = evaluate_model(model, X_val, y_val, val_set, training_parameters)
+        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
 
-        y_score = model.predict(X_val.values)
-        predictions = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        X, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        y_score = model.predict(X)
+        predictions = val_mi[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
             predictions.groupby(["snap_date", "cust_id"])["score"]
             .rank(method="first", ascending=False).astype(int)
         )
-        labels = val_set[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-        labels["label"] = y_val["label"].values
+        labels = val_mi[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
 
         metrics = compute_all_metrics(predictions, labels, k_values=["all"])
         n_products = predictions["prod_name"].nunique()
@@ -260,37 +267,31 @@ class TestEvaluateModel:
         }
         assert results["per_product_ap"] == pytest.approx(expected_per_product)
 
-    def test_per_product_ap_values(self, synthetic_data, training_parameters):
+    def test_per_product_ap_values(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
         """Per-product AP values match manual _compute_ap and exclude all-0-label products."""
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
 
-        # Build val_set with controlled labels: product "zero" has all-0 labels
+        # Build val_model_input with controlled labels: product "zero" has all-0 labels
         products = ["exchange_fx", "exchange_usd", "zero"]
         n_per_prod = 10
         rng = np.random.RandomState(99)
 
-        val_set = pd.DataFrame({
+        val_mi = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * n_per_prod * len(products)),
             "cust_id": [f"C{i:03d}" for i in range(n_per_prod)] * len(products),
             "prod_name": np.repeat(products, n_per_prod),
-        })
-        # Match X_val shape to val_set length
-        X_val_extended = pd.DataFrame({
-            "prod_name": np.repeat([0, 1, 2], n_per_prod),
+            "label": np.array(
+                [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # exchange_fx: 3 positives
+                + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # exchange_usd: 2 positives
+                + [0] * n_per_prod  # zero: no positives
+            ).astype(float),
             "total_aum": rng.uniform(100, 1000, n_per_prod * len(products)),
             "fund_aum": rng.uniform(10, 100, n_per_prod * len(products)),
             "in_amt_sum_l1m": rng.uniform(0, 50, n_per_prod * len(products)),
             "out_amt_sum_l1m": rng.uniform(0, 30, n_per_prod * len(products)),
         })
-        # Labels: exchange_fx and exchange_usd have some positives, zero has none
-        y_val_extended = pd.DataFrame({"label": np.array(
-            [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # exchange_fx: 3 positives
-            + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # exchange_usd: 2 positives
-            + [0] * n_per_prod  # zero: no positives
-        ).astype(float)})
 
-        results = evaluate_model(model, X_val_extended, y_val_extended, val_set, training_parameters)
+        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
         per_product_ap = results["per_product_ap"]
 
         # All-0-label product must be excluded
@@ -309,11 +310,11 @@ class TestEvaluateModel:
 
 
 class TestLogExperiment:
-    def test_logs_to_mlflow(self, synthetic_data, training_parameters, tmp_path):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def test_logs_to_mlflow(self, synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.75,
@@ -341,11 +342,11 @@ class TestLogExperiment:
         assert runs.iloc[0]["params.algorithm"] == "lightgbm"
         assert runs.iloc[0]["params.calibrated"] == "False"
 
-    def test_logs_calibration_info(self, synthetic_data, training_parameters, tmp_path):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def test_logs_calibration_info(self, synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.76,
@@ -380,40 +381,41 @@ class TestLogExperiment:
 
 
 class TestCalibrateModel:
-    def _train_quick_model(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def _train_quick_model(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
+        return train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
 
-    def test_returns_calibrated_adapter(self, synthetic_data, training_parameters):
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        X_train, y_train, _, _, _, _ = synthetic_data
-        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
+    def test_returns_calibrated_adapter(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        train_mi, _, _ = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
         assert isinstance(calibrated, CalibratedModelAdapter)
 
-    def test_default_method_isotonic(self, synthetic_data, training_parameters):
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        X_train, y_train, _, _, _, _ = synthetic_data
-        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
+    def test_default_method_isotonic(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        train_mi, _, _ = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
         assert calibrated.method == "isotonic"
 
-    def test_sigmoid_method(self, synthetic_data, training_parameters):
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        X_train, y_train, _, _, _, _ = synthetic_data
+    def test_sigmoid_method(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        train_mi, _, _ = synthetic_model_inputs
         params = {**training_parameters, "training": {
             **training_parameters["training"],
             "calibration": {"method": "sigmoid"},
         }}
-        calibrated = calibrate_model(model, X_train, y_train, params)
+        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, params)
         assert calibrated.method == "sigmoid"
 
-    def test_calibrated_predict_returns_valid_scores(self, synthetic_data, training_parameters):
-        model = self._train_quick_model(synthetic_data, training_parameters)
-        X_train, y_train, _, _, X_val, _ = synthetic_data
-        calibrated = calibrate_model(model, X_train, y_train, training_parameters)
-        preds = calibrated.predict(X_val.values)
-        assert len(preds) == len(X_val)
+    def test_calibrated_predict_returns_valid_scores(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        train_mi, _, val_mi = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
+        X_val, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        preds = calibrated.predict(X_val)
+        assert len(preds) == len(val_mi)
         assert np.all(np.isfinite(preds))
 
 
@@ -421,17 +423,17 @@ class TestCalibrateModel:
 
 
 class TestEvaluateModelCalibrated:
-    def _train_and_calibrate(self, synthetic_data, training_parameters):
-        X_train, y_train, X_dev, y_dev, _, _ = synthetic_data
+    def _train_and_calibrate(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_mi, train_dev_mi, _ = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(X_train, y_train, X_dev, y_dev, best_params, training_parameters)
-        return calibrate_model(model, X_train, y_train, training_parameters)
+        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        return calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
 
-    def test_includes_uncalibrated_metrics(self, synthetic_data, val_set, training_parameters):
-        calibrated = self._train_and_calibrate(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
-        results = evaluate_model(calibrated, X_val, y_val, val_set, training_parameters)
+    def test_includes_uncalibrated_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        calibrated = self._train_and_calibrate(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_mi = synthetic_model_inputs
+        results = evaluate_model(calibrated, val_mi, preprocessor_metadata, training_parameters)
 
         assert "uncalibrated" in results
         assert "overall_map" in results["uncalibrated"]
@@ -439,10 +441,10 @@ class TestEvaluateModelCalibrated:
         assert "calibration_method" in results
         assert results["calibration_method"] == "isotonic"
 
-    def test_uncalibrated_map_is_float(self, synthetic_data, val_set, training_parameters):
-        calibrated = self._train_and_calibrate(synthetic_data, training_parameters)
-        _, _, _, _, X_val, y_val = synthetic_data
-        results = evaluate_model(calibrated, X_val, y_val, val_set, training_parameters)
+    def test_uncalibrated_map_is_float(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        calibrated = self._train_and_calibrate(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_mi = synthetic_model_inputs
+        results = evaluate_model(calibrated, val_mi, preprocessor_metadata, training_parameters)
 
         assert isinstance(results["uncalibrated"]["overall_map"], float)
         assert isinstance(results["overall_map"], float)

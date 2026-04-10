@@ -1,16 +1,16 @@
 """Tests for dataset building pipeline Spark nodes."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     build_dataset,
-    prepare_model_input,
+    fit_preprocessor_metadata,
     select_test_keys,
     select_train_keys,
     select_val_keys,
     split_train_keys,
+    transform_to_model_input,
 )
 
 
@@ -194,7 +194,7 @@ class TestBuildDataset:
         assert "prod_name" in result.columns
 
 
-class TestPrepareModelInput:
+class TestFitAndTransform:
     def _build_four_sets(self, spark, feature_table, label_table, parameters):
         all_keys = label_table.select("snap_date", "cust_id").dropDuplicates()
         from pyspark.sql import functions as F
@@ -213,36 +213,36 @@ class TestPrepareModelInput:
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        assert len(result) == 10
-        (
-            X_train, y_train, X_train_dev, y_train_dev,
-            X_val, y_val, X_test, y_test,
-            preprocessor, cat_mappings,
-        ) = result
+        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
+        from pyspark.sql import DataFrame
 
-        assert isinstance(X_train, pd.DataFrame)
-        assert isinstance(y_train, pd.DataFrame)
-        assert list(y_train.columns) == ["label"]
-        assert len(y_train) == len(X_train)
-        assert len(y_train_dev) == len(X_train_dev)
-        assert len(y_val) == len(X_val)
-        assert len(y_test) == len(X_test)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+        val_mi = transform_to_model_input(val_set, preprocessor, parameters)
+        test_mi = transform_to_model_input(test_set, preprocessor, parameters)
 
-    def test_excludes_non_feature_columns(self, spark, feature_table, label_table, parameters):
+        assert isinstance(train_mi, DataFrame)
+        assert "label" in train_mi.columns
+        assert train_mi.count() == train_set.count()
+        assert val_mi.count() == val_set.count()
+        assert test_mi.count() == test_set.count()
+
+    def test_excludes_drop_columns(self, spark, feature_table, label_table, parameters):
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        X_train = result[0]
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
 
-        forbidden = {"snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"}
-        assert forbidden.isdisjoint(set(X_train.columns))
+        forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
+        assert forbidden.isdisjoint(set(train_mi.columns))
 
-    def test_prod_name_encoded_as_int(self, spark, feature_table, label_table, parameters):
+    def test_prod_name_preserved_as_identity(self, spark, feature_table, label_table, parameters):
+        """prod_name is an identity column — encoding is deferred to training."""
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             spark, feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        X_train = result[0]
-        assert X_train["prod_name"].dtype in [np.int8, np.int16, np.int32, np.int64]
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+        train_pdf = train_mi.toPandas()
+
+        assert train_pdf["prod_name"].dtype == object

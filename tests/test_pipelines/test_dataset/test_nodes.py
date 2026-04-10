@@ -7,14 +7,14 @@ import pytest
 from recsys_tfb.pipelines.dataset.nodes_pandas import (
     _validate_date_splits,
     build_dataset,
-    prepare_model_input,
-    prepare_model_input_with_calibration,
+    fit_preprocessor_metadata,
     select_calibration_keys,
     select_keys,
     select_test_keys,
     select_train_keys,
     select_val_keys,
     split_train_keys,
+    transform_to_model_input,
 )
 
 
@@ -579,7 +579,7 @@ class TestBuildDataset:
         assert result["total_aum"].isna().any()
 
 
-class TestPrepareModelInput:
+class TestFitAndTransform:
     def _build_four_sets(self, feature_table, label_table, parameters):
         """Helper to build train, train_dev, val, test sets."""
         keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
@@ -597,39 +597,31 @@ class TestPrepareModelInput:
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+        val_mi = transform_to_model_input(val_set, preprocessor, parameters)
+        test_mi = transform_to_model_input(test_set, preprocessor, parameters)
 
-        assert len(result) == 10
-        (
-            X_train, y_train, X_train_dev, y_train_dev,
-            X_val, y_val, X_test, y_test,
-            preprocessor, cat_mappings,
-        ) = result
+        assert isinstance(train_mi, pd.DataFrame)
+        assert "label" in train_mi.columns
+        assert len(train_mi) == len(train_set)
+        assert len(val_mi) == len(val_set)
+        assert len(test_mi) == len(test_set)
 
-        assert isinstance(X_train, pd.DataFrame)
-        assert isinstance(y_train, pd.DataFrame)
-        assert list(y_train.columns) == ["label"]
-        assert len(y_train) == len(X_train)
-        assert len(y_train_dev) == len(X_train_dev)
-        assert len(y_val) == len(X_val)
-        assert len(y_test) == len(X_test)
-
-    def test_excludes_non_feature_columns(self, feature_table, label_table, parameters):
+    def test_excludes_drop_columns(self, feature_table, label_table, parameters):
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        X_train = result[0]
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
 
-        forbidden = {"snap_date", "cust_id", "label", "apply_start_date", "apply_end_date", "cust_segment_typ"}
-        assert forbidden.isdisjoint(set(X_train.columns))
+        # model_input retains identity columns but excludes drop-only columns
+        forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
+        assert forbidden.isdisjoint(set(train_mi.columns))
 
     def test_preprocessor_contents(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
-        )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        preprocessor = result[8]
+        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
 
         assert "feature_columns" in preprocessor
         assert "categorical_columns" in preprocessor
@@ -638,27 +630,22 @@ class TestPrepareModelInput:
         assert "prod_name" in preprocessor["category_mappings"]
 
     def test_category_mappings_returned_separately(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
-        )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        preprocessor = result[8]
-        cat_mappings = result[9]
+        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
 
         assert cat_mappings == preprocessor["category_mappings"]
         assert "prod_name" in cat_mappings
 
-    def test_prod_name_encoded_as_int(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
-        )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        X_train = result[0]
+    def test_prod_name_preserved_as_identity(self, feature_table, label_table, parameters):
+        """prod_name is an identity column — encoding is deferred to training."""
+        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
 
-        assert X_train["prod_name"].dtype in [np.int8, np.int16, np.int32, np.int64]
+        assert train_mi["prod_name"].dtype == object
 
     def test_no_val_sample_ratio_logic(self, feature_table, label_table, parameters):
-        """prepare_model_input should NOT apply val_sample_ratio (moved to select_val_keys)."""
+        """transform_to_model_input should NOT apply val_sample_ratio."""
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             feature_table, label_table, parameters
         )
@@ -667,24 +654,25 @@ class TestPrepareModelInput:
             **parameters,
             "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5},
         }
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, params)
-        X_val = result[4]
+        preprocessor, _ = fit_preprocessor_metadata(train_set, params)
+        val_mi = transform_to_model_input(val_set, preprocessor, params)
         # Should still have all rows — sampling is NOT done here
-        assert len(X_val) == full_val_rows
+        assert len(val_mi) == full_val_rows
 
-    def test_test_set_included(self, feature_table, label_table, parameters):
-        """Verify X_test and y_test are produced."""
+    def test_all_splits_transformed(self, feature_table, label_table, parameters):
+        """Verify all four splits can be transformed."""
         train_set, train_dev_set, val_set, test_set = self._build_four_sets(
             feature_table, label_table, parameters
         )
-        result = prepare_model_input(train_set, train_dev_set, val_set, test_set, parameters)
-        X_test = result[6]
-        y_test = result[7]
-        assert len(X_test) == len(test_set)
-        assert len(y_test) == len(test_set)
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+
+        for split_set in [train_set, train_dev_set, val_set, test_set]:
+            mi = transform_to_model_input(split_set, preprocessor, parameters)
+            assert len(mi) == len(split_set)
+            assert "label" in mi.columns
 
 
-class TestPrepareModelInputWithCalibration:
+class TestFitAndTransformWithCalibration:
     def _build_five_sets(self, feature_table, label_table, parameters):
         """Helper to build train, train_dev, calibration, val, test sets."""
         keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
@@ -704,32 +692,20 @@ class TestPrepareModelInputWithCalibration:
         train_set, train_dev_set, cal_set, val_set, test_set = self._build_five_sets(
             feature_table, label_table, parameters
         )
-        result = prepare_model_input_with_calibration(
-            train_set, train_dev_set, cal_set, val_set, test_set, parameters
-        )
+        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
 
-        assert len(result) == 12
-        (
-            X_train, y_train, X_train_dev, y_train_dev,
-            X_cal, y_cal, X_val, y_val,
-            X_test, y_test, preprocessor, cat_mappings,
-        ) = result
+        for split_set in [train_set, train_dev_set, cal_set, val_set, test_set]:
+            mi = transform_to_model_input(split_set, preprocessor, parameters)
+            assert len(mi) == len(split_set)
+            assert "label" in mi.columns
 
-        assert len(y_train) == len(X_train)
-        assert len(y_train_dev) == len(X_train_dev)
-        assert len(y_cal) == len(X_cal)
-        assert len(y_val) == len(X_val)
-        assert len(y_test) == len(X_test)
         assert "prod_name" in cat_mappings
 
     def test_category_from_train_only(self, feature_table, label_table, parameters):
         train_set, train_dev_set, cal_set, val_set, test_set = self._build_five_sets(
             feature_table, label_table, parameters
         )
-        result = prepare_model_input_with_calibration(
-            train_set, train_dev_set, cal_set, val_set, test_set, parameters
-        )
-        preprocessor = result[10]
+        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
         # category_mappings should match train_set products
         expected_prods = sorted(train_set["prod_name"].unique())
         assert preprocessor["category_mappings"]["prod_name"] == expected_prods
