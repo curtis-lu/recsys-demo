@@ -75,14 +75,17 @@ class SQLRunner:
         self,
         snap_dates: list[str],
         restart_from: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         """Execute the ETL pipeline for the given snap dates.
 
         Args:
             snap_dates: List of snap_date strings to process.
             restart_from: If specified, skip tables before this one.
+            run_id: External run ID to use. If None, generates a new one.
         """
-        run_id = generate_run_id()
+        if run_id is None:
+            run_id = generate_run_id()
         logger.info(
             "Source ETL run started: run_id=%s, snap_dates=%s, dry_run=%s",
             run_id,

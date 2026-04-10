@@ -146,7 +146,7 @@ def source_etl(
 
     runner = SQLRunner(config=etl_config, sql_dir=sql_dir, dry_run=dry_run)
     try:
-        runner.run(snap_dates=date_list, restart_from=restart_from)
+        runner.run(snap_dates=date_list, restart_from=restart_from, run_id=run_context.run_id)
     except Exception:
         logger.exception("Source ETL pipeline failed")
         raise typer.Exit(code=1)
