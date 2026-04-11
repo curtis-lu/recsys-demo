@@ -4,18 +4,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.pipelines.dataset.helpers_pandas import select_keys
 from recsys_tfb.pipelines.dataset.nodes_pandas import (
-    _validate_date_splits,
     build_dataset,
     fit_preprocessor_metadata,
     select_calibration_keys,
-    select_keys,
     select_test_keys,
     select_train_keys,
     select_val_keys,
     split_train_keys,
     transform_to_model_input,
 )
+from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 
 
 @pytest.fixture
@@ -119,7 +119,7 @@ class TestDateValidation:
                 "test_snap_dates": ["2024-12-31"],
             }
         }
-        _validate_date_splits(params)  # should not raise
+        validate_date_splits(params)  # should not raise
 
     def test_overlapping_val_test_raises(self):
         params = {
@@ -130,7 +130,7 @@ class TestDateValidation:
             }
         }
         with pytest.raises(ValueError, match="val & test"):
-            _validate_date_splits(params)
+            validate_date_splits(params)
 
     def test_overlapping_cal_val_raises(self):
         params = {
@@ -141,7 +141,7 @@ class TestDateValidation:
             }
         }
         with pytest.raises(ValueError, match="calibration & val"):
-            _validate_date_splits(params)
+            validate_date_splits(params)
 
     def test_overlapping_cal_test_raises(self):
         params = {
@@ -152,7 +152,7 @@ class TestDateValidation:
             }
         }
         with pytest.raises(ValueError, match="calibration & test"):
-            _validate_date_splits(params)
+            validate_date_splits(params)
 
     def test_empty_calibration_dates_ok(self):
         params = {
@@ -162,7 +162,7 @@ class TestDateValidation:
                 "test_snap_dates": ["2024-12-31"],
             }
         }
-        _validate_date_splits(params)  # should not raise
+        validate_date_splits(params)  # should not raise
 
     def test_train_start_after_end_raises(self):
         params = {
@@ -175,7 +175,7 @@ class TestDateValidation:
             }
         }
         with pytest.raises(ValueError, match="train_snap_date_start"):
-            _validate_date_splits(params)
+            validate_date_splits(params)
 
     def test_train_overlaps_val_raises(self):
         params = {
@@ -188,7 +188,7 @@ class TestDateValidation:
             }
         }
         with pytest.raises(ValueError, match="train & val"):
-            _validate_date_splits(params)
+            validate_date_splits(params)
 
 
 class TestSelectTrainKeys:
