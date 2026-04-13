@@ -249,6 +249,61 @@ class TestOutputCheckerNullRatio:
         assert result.metric_value == pytest.approx(0.005)
 
 
+class TestOutputCheckerSchemaContract:
+    @staticmethod
+    def _describe_df(columns: list[str]):
+        rows = []
+        for col in columns:
+            r = MagicMock()
+            r.__getitem__ = lambda self, k, c=col: c if k == "col_name" else "string"
+            rows.append(r)
+        df = MagicMock()
+        df.collect.return_value = rows
+        return df
+
+    def test_all_required_present_passes(self):
+        spark = MagicMock()
+        spark.sql.return_value = self._describe_df(["snap_date", "cust_id", "amt"])
+        checker = OutputChecker(spark)
+        result = checker.check_schema_contract(
+            "ml_feature", "feature_aum", ["snap_date", "cust_id"]
+        )
+        assert result.passed is True
+
+    def test_missing_column_fails(self):
+        spark = MagicMock()
+        spark.sql.return_value = self._describe_df(["snap_date", "amt"])
+        checker = OutputChecker(spark)
+        result = checker.check_schema_contract(
+            "ml_feature", "feature_aum", ["snap_date", "cust_id"]
+        )
+        assert result.passed is False
+        assert "cust_id" in result.message
+
+    def test_skips_partition_header(self):
+        # Rows beginning with '#' (partition info section) should be ignored.
+        rows = []
+        for col in ["snap_date", "cust_id", "# Partition Information", "# col_name"]:
+            r = MagicMock()
+            r.__getitem__ = lambda self, k, c=col: c if k == "col_name" else "string"
+            rows.append(r)
+        df = MagicMock()
+        df.collect.return_value = rows
+        spark = MagicMock()
+        spark.sql.return_value = df
+        checker = OutputChecker(spark)
+        result = checker.check_schema_contract(
+            "ml_feature", "feature_aum", ["snap_date", "cust_id"]
+        )
+        assert result.passed is True
+
+    def test_empty_required_passes(self):
+        spark = MagicMock()
+        checker = OutputChecker(spark)
+        result = checker.check_schema_contract("ml_feature", "feature_aum", [])
+        assert result.passed is True
+
+
 class TestOutputCheckerRunAll:
     def test_runs_configured_checks(self):
         cfg = TableConfig(
@@ -259,7 +314,16 @@ class TestOutputCheckerRunAll:
             quality_checks={"min_row_count": 100, "max_duplicate_key_ratio": 0.0},
         )
 
-        # Mock both queries
+        # Mock three queries: DESCRIBE (schema contract), COUNT (row count),
+        # COUNT DISTINCT (dup keys)
+        desc_rows = []
+        for col in ["snap_date", "cust_id", "amt"]:
+            r = MagicMock()
+            r.__getitem__ = lambda self, k, c=col: c if k == "col_name" else "string"
+            desc_rows.append(r)
+        desc_df = MagicMock()
+        desc_df.collect.return_value = desc_rows
+
         count_row = MagicMock()
         count_row.__getitem__ = lambda self, k: 200
         dup_row = MagicMock()
@@ -270,14 +334,38 @@ class TestOutputCheckerRunAll:
         count_df.collect.return_value = [count_row]
         dup_df = MagicMock()
         dup_df.collect.return_value = [dup_row]
-        spark.sql.side_effect = [count_df, dup_df]
+        spark.sql.side_effect = [desc_df, count_df, dup_df]
 
         checker = OutputChecker(spark)
         results = checker.run_all(cfg, "ml_feature", "2024-01-31")
-        assert len(results) == 2
+        assert len(results) == 3
         assert all(r.passed for r in results)
 
+    def test_schema_contract_runs_even_without_quality_checks(self):
+        # Only primary_key declared, no quality_checks → schema contract still runs.
+        cfg = TableConfig(
+            name="feature_aum",
+            sql_file="feature/feature_aum.sql",
+            partition_by=["snap_date"],
+            primary_key=["snap_date", "cust_id"],
+        )
+        desc_rows = []
+        for col in ["snap_date", "cust_id"]:
+            r = MagicMock()
+            r.__getitem__ = lambda self, k, c=col: c if k == "col_name" else "string"
+            desc_rows.append(r)
+        desc_df = MagicMock()
+        desc_df.collect.return_value = desc_rows
+        spark = MagicMock()
+        spark.sql.return_value = desc_df
+
+        checker = OutputChecker(spark)
+        results = checker.run_all(cfg, "ml_feature", "2024-01-31")
+        assert len(results) == 1
+        assert results[0].passed is True
+
     def test_skips_checks_not_configured(self):
+        # No primary_key and no quality_checks → nothing runs.
         cfg = TableConfig(
             name="feature_sav",
             sql_file="feature/feature_sav.sql",

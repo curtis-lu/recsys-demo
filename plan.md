@@ -268,6 +268,17 @@ recsys_tfb/
 - **Step 8.9** ✅ 測試 — evaluation pipeline 端對端（12 tests）、baselines pipeline 端對端（8 tests）、pipeline 定義（10 tests）、Spark vs pandas cross-validation（3 tests）
 - **Step 8.10** ⏳ 手動 CLI 驗證 — `python -m recsys_tfb evaluation --env local` / `--pipeline baselines --env local`
 
+### Phase 8b：Schema 啟動驗證 + Schema 納入 Dataset Version Hash ✅
+
+- **Step 8b.1** ✅ `core/schema.py` — 新增 `validate_schema_config()`（型別檢查 + identity_columns 唯一性）、`get_schema_for_hash()`（canonical 6-key dict，排除衍生的 identity_columns）
+- **Step 8b.2** ✅ `core/versioning.py` — `compute_dataset_version(params, schema=None)` 將 schema 納入 canonical YAML payload `{"dataset": params, "schema": schema}`；model_version 透過 dataset_version 字串自動傳遞
+- **Step 8b.3** ✅ CLI 接線 — `_load_config_and_setup()` 呼叫 `validate_schema_config()`；`dataset` 子指令傳入 `get_schema_for_hash(params)`
+- **Step 8b.4** ✅ `pipelines/source_etl/checks.py::OutputChecker` — 新增 `check_schema_contract()`（DESCRIBE 比對 primary_key 欄位存在性）；`run_all()` 在 `primary_key` 非空時無條件執行，不依賴 `quality_checks` 開關
+- **Step 8b.5** ✅ 測試 — `test_schema_validation.py`（22 tests）、`test_versioning.py` 擴充 4 個 schema-hash 案例、`test_checks.py` 擴充 `OutputCheckerSchemaContract` 4 個案例，全 584 tests 通過
+- **Step 8b.6** ✅ README 更新 — 版本管理機制、全域參數、資料契約（兩層防護）、關鍵不變量、常見錯誤五段
+- **Step 8b.7** ⚠️ Breaking change — 升級後所有既有 `dataset_version` hash 會失效，需重跑 `dataset` 與 `training` pipeline
+- **Step 8b.8** ✅ 後續 refactor — 移除 `validate_source_etl_schema_consistency()`。原因：source_etl 架構不區分 intermediate/final table（`TableConfig` 無 `is_final`/`layer` 欄位），此啟動檢查會誤報未來 staging 表；runtime 的 `OutputChecker.check_schema_contract()` 已覆蓋「PK 欄位須實際存在」這層實際風險
+
 ## 待完成階段
 
 | Phase | 名稱 | 內容 |

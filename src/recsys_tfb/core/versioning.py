@@ -17,13 +17,20 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def compute_dataset_version(params: dict) -> str:
-    """Compute dataset version ID from parameters_dataset content.
+def compute_dataset_version(params: dict, schema: dict | None = None) -> str:
+    """Compute dataset version ID from parameters_dataset + schema.
 
-    Returns the first 8 hex characters of the SHA-256 hash of the
-    canonical YAML representation of the parameters dict.
+    Returns the first 8 hex characters of the SHA-256 hash of the canonical
+    YAML representation of ``{"dataset": params, "schema": schema}``.
+
+    ``schema`` is the canonical schema dict (see :func:`core.schema.get_schema_for_hash`);
+    when None, only ``params`` is hashed to preserve backward-compatibility with
+    callers that have not yet migrated.  The CLI always passes a schema.
     """
-    canonical = yaml.dump(params, sort_keys=True, default_flow_style=False)
+    payload: dict = {"dataset": params}
+    if schema is not None:
+        payload["schema"] = schema
+    canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 

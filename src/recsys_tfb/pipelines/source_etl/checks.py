@@ -222,12 +222,52 @@ class OutputChecker:
             metric_value=ratio,
         )
 
+    def check_schema_contract(
+        self,
+        db: str,
+        table: str,
+        required_columns: list[str],
+    ) -> CheckResult:
+        """Verify the output table contains all required schema columns.
+
+        This enforces the schema contract at the source_etl output boundary:
+        every column declared in ``TableConfig.primary_key`` (which must be a
+        subset of ``schema.columns`` identity columns) must physically exist in
+        the output table. Type checks are intentionally delegated to
+        ``SourceChecker.check_schema_drift`` on the input side.
+        """
+        if not required_columns:
+            return CheckResult(True, f"No required columns declared for {db}.{table}")
+
+        desc_df = self._spark.sql(f"DESCRIBE {db}.{table}")
+        actual = {
+            row["col_name"]
+            for row in desc_df.collect()
+            if not row["col_name"].startswith("#")
+        }
+
+        missing = [col for col in required_columns if col not in actual]
+        if missing:
+            return CheckResult(
+                False,
+                f"Schema contract failed for {db}.{table}: missing columns {missing}",
+            )
+        return CheckResult(True, f"Schema contract OK for {db}.{table}")
+
     def run_all(
         self, table_config: TableConfig, target_db: str, snap_date: str
     ) -> list[CheckResult]:
         """Run all configured quality checks for one output table."""
         results: list[CheckResult] = []
         qc = table_config.quality_checks
+
+        # Schema contract check — unconditional when primary_key is declared.
+        if table_config.primary_key:
+            result = self.check_schema_contract(
+                target_db, table_config.name, table_config.primary_key
+            )
+            results.append(result)
+            logger.info(result.message, extra={"event": "output_check", "passed": result.passed})
 
         if "min_row_count" in qc:
             result = self.check_row_count(

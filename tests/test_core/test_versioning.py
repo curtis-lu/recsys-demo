@@ -41,6 +41,38 @@ class TestComputeDatasetVersion:
         b = compute_dataset_version({"b": 2, "a": 1})
         assert a == b
 
+    def test_schema_included_changes_hash(self):
+        params = {"sample_ratio": 0.1}
+        schema_a = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+        schema_b = {"time": "month_end", "entity": ["cust_id"], "item": "prod_name"}
+        assert compute_dataset_version(params, schema_a) != compute_dataset_version(
+            params, schema_b
+        )
+
+    def test_same_schema_same_hash(self):
+        params = {"sample_ratio": 0.1}
+        schema = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+        assert compute_dataset_version(params, schema) == compute_dataset_version(
+            params, schema
+        )
+
+    def test_schema_key_order_does_not_matter(self):
+        params = {"sample_ratio": 0.1}
+        schema_a = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+        schema_b = {"item": "prod_name", "time": "snap_date", "entity": ["cust_id"]}
+        assert compute_dataset_version(params, schema_a) == compute_dataset_version(
+            params, schema_b
+        )
+
+    def test_schema_none_differs_from_schema_passed(self):
+        # Passing schema vs not passing schema produces different hashes
+        # (this codifies the one-time break on CLI upgrade).
+        params = {"sample_ratio": 0.1}
+        schema = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+        assert compute_dataset_version(params) != compute_dataset_version(
+            params, schema
+        )
+
 
 class TestComputeModelVersion:
     def test_returns_8_char_hex(self):

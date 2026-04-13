@@ -2,11 +2,14 @@ project_name: recsys_tfb
 random_seed: 42
 backend: pandas
 
+# [SCHEMA SPECIFICATION]
+# All input tables (feature, label, sample_pool) provided to the dataset pipeline
+# MUST adhere to the following column naming convention for core identity fields.
 schema:
   columns:
-    time: snap_date
-    entity: [cust_id]
-    item: prod_name
+    time: snap_date # Date for partitioning and point-in-time joins
+    entity: [cust_id] # List of primary entity keys
+    item: prod_name # Primary item identifier
     label: label
     score: score
     rank: rank

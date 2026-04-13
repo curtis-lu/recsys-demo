@@ -10,6 +10,10 @@ from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.logging import RunContext, setup_logging
 from recsys_tfb.core.runner import Runner
+from recsys_tfb.core.schema import (
+    get_schema_for_hash,
+    validate_schema_config,
+)
 from recsys_tfb.core.versioning import (
     build_manifest_metadata,
     compute_dataset_version,
@@ -45,7 +49,13 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
 
     run_context = RunContext(pipeline=pipeline, env=env, backend=backend)
     setup_logging(params, run_context)
-    
+
+    try:
+        validate_schema_config(params)
+    except ValueError as exc:
+        logger.error("Schema config validation failed: %s", exc)
+        raise typer.Exit(code=1)
+
     return config, params, backend, run_context
 
 
@@ -170,7 +180,7 @@ def dataset(
     except KeyError:
         params_dataset = {}
         
-    ds_version = compute_dataset_version(params_dataset)
+    ds_version = compute_dataset_version(params_dataset, get_schema_for_hash(params))
     logger.info("Dataset version: %s", ds_version)
     
     runtime_params = {
