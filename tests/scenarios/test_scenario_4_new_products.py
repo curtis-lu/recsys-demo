@@ -127,8 +127,8 @@ def test_category_mappings_include_new_products(dataset_version_dir):
 
 
 def test_train_set_has_all_products(dataset_version_dir):
-    """train_set 的 prod_name 唯一值應為 10 個。"""
-    train_set = pd.read_parquet(dataset_version_dir / "train_set.parquet")
+    """train_model_input 的 prod_name 唯一值應為 10 個。"""
+    train_set = pd.read_parquet(dataset_version_dir / "train_model_input.parquet")
     unique_products = train_set["prod_name"].nunique()
     assert unique_products == EXPECTED_NUM_PRODUCTS, (
         f"預期 {EXPECTED_NUM_PRODUCTS} 產品，實際: {unique_products}"

@@ -7,25 +7,25 @@ from recsys_tfb.core.pipeline import Pipeline
 def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -> Pipeline:
     if backend == "spark":
         from recsys_tfb.pipelines.dataset.nodes_spark import (
-            build_dataset,
+            apply_preprocessor_to_features,
+            build_model_input,
             fit_preprocessor_metadata,
             select_calibration_keys,
             select_test_keys,
             select_train_keys,
             select_val_keys,
             split_train_keys,
-            transform_to_model_input,
         )
     else:
         from recsys_tfb.pipelines.dataset.nodes_pandas import (
-            build_dataset,
+            apply_preprocessor_to_features,
+            build_model_input,
             fit_preprocessor_metadata,
             select_calibration_keys,
             select_test_keys,
             select_train_keys,
             select_val_keys,
             split_train_keys,
-            transform_to_model_input,
         )
 
     nodes = [
@@ -51,62 +51,56 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             inputs=["label_table", "parameters"],
             outputs="test_keys",
         ),
-        # --- Build split datasets ---
-        Node(
-            build_dataset,
-            inputs=["train_keys", "feature_table", "label_table", "parameters"],
-            outputs="train_set",
-            name="build_train_dataset",
-        ),
-        Node(
-            build_dataset,
-            inputs=["train_dev_keys", "feature_table", "label_table", "parameters"],
-            outputs="train_dev_set",
-            name="build_train_dev_dataset",
-        ),
-        Node(
-            build_dataset,
-            inputs=["val_keys", "feature_table", "label_table", "parameters"],
-            outputs="val_set",
-            name="build_val_dataset",
-        ),
-        Node(
-            build_dataset,
-            inputs=["test_keys", "feature_table", "label_table", "parameters"],
-            outputs="test_set",
-            name="build_test_dataset",
-        ),
-        # --- Fit preprocessor from train only ---
+        # --- Fit preprocessor on train customer-months, before product fan-out ---
         Node(
             fit_preprocessor_metadata,
-            inputs=["train_set", "parameters"],
+            inputs=["feature_table", "train_keys", "parameters"],
             outputs=["preprocessor", "category_mappings"],
             name="fit_preprocessor_metadata",
         ),
-        # --- Transform each split to model_input ---
+        # --- Encode non-identity categoricals once; all splits reuse this ---
         Node(
-            transform_to_model_input,
-            inputs=["train_set", "preprocessor", "parameters"],
+            apply_preprocessor_to_features,
+            inputs=["feature_table", "preprocessor", "parameters"],
+            outputs="preprocessed_feature_table",
+            name="apply_preprocessor_to_features",
+        ),
+        # --- Build model_input per split (join keys + labels + encoded features) ---
+        Node(
+            build_model_input,
+            inputs=[
+                "train_keys", "preprocessed_feature_table", "label_table",
+                "preprocessor", "parameters",
+            ],
             outputs="train_model_input",
-            name="transform_train_to_model_input",
+            name="build_train_model_input",
         ),
         Node(
-            transform_to_model_input,
-            inputs=["train_dev_set", "preprocessor", "parameters"],
+            build_model_input,
+            inputs=[
+                "train_dev_keys", "preprocessed_feature_table", "label_table",
+                "preprocessor", "parameters",
+            ],
             outputs="train_dev_model_input",
-            name="transform_train_dev_to_model_input",
+            name="build_train_dev_model_input",
         ),
         Node(
-            transform_to_model_input,
-            inputs=["val_set", "preprocessor", "parameters"],
+            build_model_input,
+            inputs=[
+                "val_keys", "preprocessed_feature_table", "label_table",
+                "preprocessor", "parameters",
+            ],
             outputs="val_model_input",
-            name="transform_val_to_model_input",
+            name="build_val_model_input",
         ),
         Node(
-            transform_to_model_input,
-            inputs=["test_set", "preprocessor", "parameters"],
+            build_model_input,
+            inputs=[
+                "test_keys", "preprocessed_feature_table", "label_table",
+                "preprocessor", "parameters",
+            ],
             outputs="test_model_input",
-            name="transform_test_to_model_input",
+            name="build_test_model_input",
         ),
     ]
 
@@ -118,16 +112,13 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
                 outputs="calibration_keys",
             ),
             Node(
-                build_dataset,
-                inputs=["calibration_keys", "feature_table", "label_table", "parameters"],
-                outputs="calibration_set",
-                name="build_calibration_dataset",
-            ),
-            Node(
-                transform_to_model_input,
-                inputs=["calibration_set", "preprocessor", "parameters"],
+                build_model_input,
+                inputs=[
+                    "calibration_keys", "preprocessed_feature_table", "label_table",
+                    "preprocessor", "parameters",
+                ],
                 outputs="calibration_model_input",
-                name="transform_calibration_to_model_input",
+                name="build_calibration_model_input",
             ),
         ])
 

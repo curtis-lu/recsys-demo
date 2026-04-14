@@ -35,21 +35,6 @@ val_keys:
   filepath: data/dataset/${dataset_version}/val_keys.parquet
   backend: pandas
 
-train_set:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_set.parquet
-  backend: pandas
-
-train_dev_set:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_dev_set.parquet
-  backend: pandas
-
-val_set:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/val_set.parquet
-  backend: pandas
-
 calibration_keys:
   type: ParquetDataset
   filepath: data/dataset/${dataset_version}/calibration_keys.parquet
@@ -60,14 +45,9 @@ test_keys:
   filepath: data/dataset/${dataset_version}/test_keys.parquet
   backend: pandas
 
-calibration_set:
+preprocessed_feature_table:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/calibration_set.parquet
-  backend: pandas
-
-test_set:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/test_set.parquet
+  filepath: data/dataset/${dataset_version}/preprocessed_feature_table.parquet
   backend: pandas
 
 # Dataset Building Pipeline - Model Inputs

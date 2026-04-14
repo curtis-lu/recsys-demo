@@ -6,14 +6,14 @@ import pytest
 
 from recsys_tfb.pipelines.dataset.helpers_pandas import select_keys
 from recsys_tfb.pipelines.dataset.nodes_pandas import (
-    build_dataset,
+    apply_preprocessor_to_features,
+    build_model_input,
     fit_preprocessor_metadata,
     select_calibration_keys,
     select_test_keys,
     select_train_keys,
     select_val_keys,
     split_train_keys,
-    transform_to_model_input,
 )
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 
@@ -524,9 +524,17 @@ class TestSelectTestKeys:
         assert list(result.columns) == ["snap_date", "cust_id"]
 
 
-class TestBuildDataset:
+class TestBuildModelInput:
+    def _split_keys(self, label_table, snap):
+        keys = label_table[["snap_date", "cust_id", "prod_name"]].drop_duplicates()
+        return keys[keys["snap_date"] == pd.Timestamp(snap)].reset_index(drop=True)
+
     def test_joins_with_product_keys(self, feature_table, label_table, parameters):
         """When keys include prod_name, join label_table on full identity key."""
+        train_keys = self._split_keys(label_table, "2024-01-31")
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
         keys = pd.DataFrame(
             {
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
@@ -534,7 +542,7 @@ class TestBuildDataset:
                 "prod_name": ["exchange_fx", "exchange_fx"],
             }
         )
-        result = build_dataset(keys, feature_table, label_table, parameters)
+        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
         # 2 rows: one per key (specific product)
         assert len(result) == 2
         assert "total_aum" in result.columns
@@ -543,13 +551,17 @@ class TestBuildDataset:
 
     def test_joins_without_product_keys(self, feature_table, label_table, parameters):
         """When keys don't include prod_name, expand to all products via label_table."""
+        train_keys = self._split_keys(label_table, "2024-01-31")
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
         keys = pd.DataFrame(
             {
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
                 "cust_id": ["C001", "C002"],
             }
         )
-        result = build_dataset(keys, feature_table, label_table, parameters)
+        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
         # 2 customers x 3 products = 6 rows
         assert len(result) == 6
         assert "total_aum" in result.columns
@@ -557,6 +569,10 @@ class TestBuildDataset:
         assert "prod_name" in result.columns
 
     def test_missing_features_filled_nan(self, feature_table, label_table, parameters):
+        train_keys = self._split_keys(label_table, "2024-01-31")
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
         extra_label = pd.DataFrame(
             {
                 "snap_date": [pd.Timestamp("2024-01-31")],
@@ -575,53 +591,53 @@ class TestBuildDataset:
                 "cust_id": ["C999"],
             }
         )
-        result = build_dataset(keys, feature_table, labels, parameters)
+        result = build_model_input(keys, pft, labels, preprocessor, parameters)
         assert result["total_aum"].isna().any()
 
 
-class TestFitAndTransform:
-    def _build_four_sets(self, feature_table, label_table, parameters):
-        """Helper to build train, train_dev, val, test sets."""
-        keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
-        train_keys = keys[keys["snap_date"] == pd.Timestamp("2024-01-31")]
-        train_dev_keys = keys[keys["snap_date"] == pd.Timestamp("2024-02-29")]
-        val_keys = keys[keys["snap_date"] == pd.Timestamp("2024-04-30")]
-        test_keys = keys[keys["snap_date"] == pd.Timestamp("2024-05-31")]
-        train_set = build_dataset(train_keys, feature_table, label_table, parameters)
-        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
-        val_set = build_dataset(val_keys, feature_table, label_table, parameters)
-        test_set = build_dataset(test_keys, feature_table, label_table, parameters)
-        return train_set, train_dev_set, val_set, test_set
+class TestFitAndBuild:
+    def _train_keys(self, sample_pool, parameters):
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        return select_train_keys(sample_pool, params)
 
-    def test_output_format(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
+    def _label_only_keys(self, label_table, snap):
+        return label_table[label_table["snap_date"] == pd.Timestamp(snap)][
+            ["snap_date", "cust_id"]
+        ].drop_duplicates().reset_index(drop=True)
+
+    def test_output_format(self, feature_table, label_table, sample_pool, parameters):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(
+            feature_table, train_keys, parameters
         )
-        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
-        val_mi = transform_to_model_input(val_set, preprocessor, parameters)
-        test_mi = transform_to_model_input(test_set, preprocessor, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+        val_keys = self._label_only_keys(label_table, "2024-04-30")
+        test_keys = self._label_only_keys(label_table, "2024-05-31")
+        val_mi = build_model_input(val_keys, pft, label_table, preprocessor, parameters)
+        test_mi = build_model_input(test_keys, pft, label_table, preprocessor, parameters)
 
         assert isinstance(train_mi, pd.DataFrame)
         assert "label" in train_mi.columns
-        assert len(train_mi) == len(train_set)
-        assert len(val_mi) == len(val_set)
-        assert len(test_mi) == len(test_set)
+        assert len(train_mi) == len(train_keys)
+        # val/test expand to all products (inner-join with label_table)
+        assert len(val_mi) > 0
+        assert len(test_mi) > 0
 
-    def test_excludes_drop_columns(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
-        )
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+    def test_excludes_drop_columns(self, feature_table, label_table, sample_pool, parameters):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
         # model_input retains identity columns but excludes drop-only columns
         forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
         assert forbidden.isdisjoint(set(train_mi.columns))
 
-    def test_preprocessor_contents(self, feature_table, label_table, parameters):
-        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+    def test_preprocessor_contents(self, feature_table, label_table, sample_pool, parameters):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
 
         assert "feature_columns" in preprocessor
         assert "categorical_columns" in preprocessor
@@ -629,83 +645,93 @@ class TestFitAndTransform:
         assert "drop_columns" in preprocessor
         assert "prod_name" in preprocessor["category_mappings"]
 
-    def test_category_mappings_returned_separately(self, feature_table, label_table, parameters):
-        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
-        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
+    def test_category_mappings_returned_separately(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(
+            feature_table, train_keys, parameters
+        )
 
         assert cat_mappings == preprocessor["category_mappings"]
         assert "prod_name" in cat_mappings
 
-    def test_prod_name_preserved_as_identity(self, feature_table, label_table, parameters):
+    def test_prod_name_preserved_as_identity(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
         """prod_name is an identity column — encoding is deferred to training."""
-        train_set, *_ = self._build_four_sets(feature_table, label_table, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
         assert train_mi["prod_name"].dtype == object
 
-    def test_no_val_sample_ratio_logic(self, feature_table, label_table, parameters):
-        """transform_to_model_input should NOT apply val_sample_ratio."""
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
-        )
-        full_val_rows = len(val_set)
-        params = {
-            **parameters,
-            "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5},
-        }
-        preprocessor, _ = fit_preprocessor_metadata(train_set, params)
-        val_mi = transform_to_model_input(val_set, preprocessor, params)
-        # Should still have all rows — sampling is NOT done here
-        assert len(val_mi) == full_val_rows
+    def test_val_sample_ratio_only_affects_select_val_keys(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        """build_model_input does NOT re-apply val sampling."""
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
-    def test_all_splits_transformed(self, feature_table, label_table, parameters):
-        """Verify all four splits can be transformed."""
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            feature_table, label_table, parameters
+        val_keys = self._label_only_keys(label_table, "2024-04-30")
+        val_mi = build_model_input(val_keys, pft, label_table, preprocessor, parameters)
+        # For 4 customers × 3 products, expected rows are 12
+        expected_rows = len(
+            label_table[label_table["snap_date"] == pd.Timestamp("2024-04-30")]
         )
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
+        assert len(val_mi) == expected_rows
 
-        for split_set in [train_set, train_dev_set, val_set, test_set]:
-            mi = transform_to_model_input(split_set, preprocessor, parameters)
-            assert len(mi) == len(split_set)
+    def test_all_splits_built(self, feature_table, label_table, sample_pool, parameters):
+        """Verify model_input can be built for all splits from shared preprocessed features."""
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        val_keys = self._label_only_keys(label_table, "2024-04-30")
+        test_keys = self._label_only_keys(label_table, "2024-05-31")
+
+        for keys in [train_keys, val_keys, test_keys]:
+            mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
+            assert len(mi) > 0
             assert "label" in mi.columns
 
 
-class TestFitAndTransformWithCalibration:
-    def _build_five_sets(self, feature_table, label_table, parameters):
-        """Helper to build train, train_dev, calibration, val, test sets."""
-        keys = label_table[["snap_date", "cust_id"]].drop_duplicates()
-        train_keys = keys[keys["snap_date"] == pd.Timestamp("2024-01-31")]
-        train_dev_keys = keys[keys["snap_date"] == pd.Timestamp("2024-02-29")]
-        cal_keys = keys[keys["snap_date"] == pd.Timestamp("2024-03-31")]
-        val_keys = keys[keys["snap_date"] == pd.Timestamp("2024-04-30")]
-        test_keys = keys[keys["snap_date"] == pd.Timestamp("2024-05-31")]
-        train_set = build_dataset(train_keys, feature_table, label_table, parameters)
-        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
-        cal_set = build_dataset(cal_keys, feature_table, label_table, parameters)
-        val_set = build_dataset(val_keys, feature_table, label_table, parameters)
-        test_set = build_dataset(test_keys, feature_table, label_table, parameters)
-        return train_set, train_dev_set, cal_set, val_set, test_set
+class TestFitAndBuildWithCalibration:
+    def _train_keys(self, sample_pool, parameters):
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "sample_ratio": 1.0,
+                "train_snap_date_start": "2024-01-31",
+                "train_snap_date_end": "2024-02-29",
+            },
+        }
+        return select_train_keys(sample_pool, params)
 
-    def test_output_format(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, cal_set, val_set, test_set = self._build_five_sets(
-            feature_table, label_table, parameters
+    def test_output_format(self, feature_table, label_table, sample_pool, parameters):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(
+            feature_table, train_keys, parameters
         )
-        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
-        for split_set in [train_set, train_dev_set, cal_set, val_set, test_set]:
-            mi = transform_to_model_input(split_set, preprocessor, parameters)
-            assert len(mi) == len(split_set)
+        for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
+            keys = label_table[label_table["snap_date"] == pd.Timestamp(snap)][
+                ["snap_date", "cust_id"]
+            ].drop_duplicates()
+            mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
+            assert len(mi) > 0
             assert "label" in mi.columns
 
         assert "prod_name" in cat_mappings
 
-    def test_category_from_train_only(self, feature_table, label_table, parameters):
-        train_set, train_dev_set, cal_set, val_set, test_set = self._build_five_sets(
-            feature_table, label_table, parameters
-        )
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
-        # category_mappings should match train_set products
-        expected_prods = sorted(train_set["prod_name"].unique())
+    def test_category_from_train_only(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        # category_mappings for prod_name should match train_keys products
+        expected_prods = sorted(train_keys["prod_name"].unique().tolist())
         assert preprocessor["category_mappings"]["prod_name"] == expected_prods

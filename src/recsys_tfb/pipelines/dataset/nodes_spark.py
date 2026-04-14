@@ -11,8 +11,9 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._spark import (
+    apply_preprocessor_to_features as _apply_preprocessor_to_features,
+    build_model_input as _build_model_input,
     fit_preprocessor_metadata as _fit_preprocessor_metadata,
-    transform_to_model_input as _transform_to_model_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,55 +140,35 @@ def select_test_keys(
     return all_keys
 
 
-def build_dataset(
-    keys: DataFrame,
-    feature_table: DataFrame,
-    label_table: DataFrame,
-    parameters: dict,
-) -> DataFrame:
-    """Join keys with labels and features to build a complete dataset.
-
-    Dynamically determines the label_table join key based on whether keys
-    contains the item column (prod_name). Feature_table join always uses
-    (time_col + entity_cols).
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
-    base_key = [time_col] + entity_cols
-
-    # Dynamic label join key: include item_col if present in keys
-    label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
-
-    # Join keys with label_table
-    dataset = keys.join(label_table, on=label_join_key, how="inner")
-
-    # Join with features on base key (snap_date, cust_id)
-    dataset = dataset.join(feature_table, on=base_key, how="left")
-
-    logger.info("Built dataset: %d columns", len(dataset.columns))
-    return dataset
-
-
 def fit_preprocessor_metadata(
-    train_set: DataFrame,
+    feature_table: DataFrame,
+    train_keys: DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Build preprocessor metadata and category mappings from Spark train_set.
+    """Fit preprocessor on Spark feature_table restricted to train customer-months.
 
-    Only collects small metadata to driver. No toPandas() on full data.
+    Only collects small metadata (distinct category values) to driver.
     """
-    return _fit_preprocessor_metadata(train_set, parameters)
+    return _fit_preprocessor_metadata(feature_table, train_keys, parameters)
 
 
-def transform_to_model_input(
-    split_set: DataFrame,
+def apply_preprocessor_to_features(
+    feature_table: DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> DataFrame:
-    """Transform a single Spark split to model_input (identity + label + encoded features).
+    """Encode non-identity categoricals in Spark feature_table once for all splits."""
+    return _apply_preprocessor_to_features(feature_table, preprocessor_metadata, parameters)
 
-    All processing stays in Spark. No toPandas().
-    """
-    return _transform_to_model_input(split_set, preprocessor_metadata, parameters)
+
+def build_model_input(
+    keys: DataFrame,
+    preprocessed_feature_table: DataFrame,
+    label_table: DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> DataFrame:
+    """Merge Spark keys + labels + encoded features into model_input for a split."""
+    return _build_model_input(
+        keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
+    )

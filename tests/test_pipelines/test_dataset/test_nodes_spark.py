@@ -4,13 +4,13 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.pipelines.dataset.nodes_spark import (
-    build_dataset,
+    apply_preprocessor_to_features,
+    build_model_input,
     fit_preprocessor_metadata,
     select_test_keys,
     select_train_keys,
     select_val_keys,
     split_train_keys,
-    transform_to_model_input,
 )
 
 
@@ -162,9 +162,23 @@ class TestSelectTestKeys:
         assert result.count() == 4  # 4 unique cust_ids for test date
 
 
-class TestBuildDataset:
-    def test_joins_with_product_keys(self, spark, feature_table, label_table, parameters):
+class TestBuildModelInput:
+    def _train_keys(self, sample_pool, parameters):
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        return select_train_keys(sample_pool, params)
+
+    def _pft(self, feature_table, sample_pool, parameters):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        return train_keys, preprocessor, pft
+
+    def test_joins_with_product_keys(
+        self, spark, feature_table, label_table, sample_pool, parameters
+    ):
         """When keys include prod_name, join label_table on full identity key."""
+        _, preprocessor, pft = self._pft(feature_table, sample_pool, parameters)
+
         keys = spark.createDataFrame(
             pd.DataFrame({
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
@@ -172,77 +186,84 @@ class TestBuildDataset:
                 "prod_name": ["exchange_fx", "exchange_fx"],
             })
         )
-        result = build_dataset(keys, feature_table, label_table, parameters)
-        # 2 rows: one per key (specific product)
+        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
         assert result.count() == 2
         assert "total_aum" in result.columns
         assert "label" in result.columns
 
-    def test_joins_without_product_keys(self, spark, feature_table, label_table, parameters):
+    def test_joins_without_product_keys(
+        self, spark, feature_table, label_table, sample_pool, parameters
+    ):
         """When keys don't include prod_name, expand to all products."""
+        _, preprocessor, pft = self._pft(feature_table, sample_pool, parameters)
+
         keys = spark.createDataFrame(
             pd.DataFrame({
                 "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
                 "cust_id": ["C001", "C002"],
             })
         )
-        result = build_dataset(keys, feature_table, label_table, parameters)
-        # 2 customers x 3 products = 6 rows
+        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
         assert result.count() == 6
         assert "total_aum" in result.columns
         assert "label" in result.columns
         assert "prod_name" in result.columns
 
 
-class TestFitAndTransform:
-    def _build_four_sets(self, spark, feature_table, label_table, parameters):
-        all_keys = label_table.select("snap_date", "cust_id").dropDuplicates()
+class TestFitAndBuild:
+    def _train_keys(self, sample_pool, parameters):
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        return select_train_keys(sample_pool, params)
+
+    def _label_only_keys(self, spark, label_table, snap):
         from pyspark.sql import functions as F
 
-        train_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-01-31"))
-        train_dev_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-02-29"))
-        val_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-04-30"))
-        test_keys = all_keys.filter(F.col("snap_date") == pd.Timestamp("2024-05-31"))
-        train_set = build_dataset(train_keys, feature_table, label_table, parameters)
-        train_dev_set = build_dataset(train_dev_keys, feature_table, label_table, parameters)
-        val_set = build_dataset(val_keys, feature_table, label_table, parameters)
-        test_set = build_dataset(test_keys, feature_table, label_table, parameters)
-        return train_set, train_dev_set, val_set, test_set
-
-    def test_output_format(self, spark, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            spark, feature_table, label_table, parameters
+        return (
+            label_table.filter(F.col("snap_date") == pd.Timestamp(snap))
+            .select("snap_date", "cust_id")
+            .dropDuplicates()
         )
-        preprocessor, cat_mappings = fit_preprocessor_metadata(train_set, parameters)
+
+    def test_output_format(self, spark, feature_table, label_table, sample_pool, parameters):
         from pyspark.sql import DataFrame
 
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
-        val_mi = transform_to_model_input(val_set, preprocessor, parameters)
-        test_mi = transform_to_model_input(test_set, preprocessor, parameters)
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, cat_mappings = fit_preprocessor_metadata(
+            feature_table, train_keys, parameters
+        )
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+        val_keys = self._label_only_keys(spark, label_table, "2024-04-30")
+        test_keys = self._label_only_keys(spark, label_table, "2024-05-31")
+        val_mi = build_model_input(val_keys, pft, label_table, preprocessor, parameters)
+        test_mi = build_model_input(test_keys, pft, label_table, preprocessor, parameters)
 
         assert isinstance(train_mi, DataFrame)
         assert "label" in train_mi.columns
-        assert train_mi.count() == train_set.count()
-        assert val_mi.count() == val_set.count()
-        assert test_mi.count() == test_set.count()
+        assert train_mi.count() > 0
+        assert val_mi.count() > 0
+        assert test_mi.count() > 0
 
-    def test_excludes_drop_columns(self, spark, feature_table, label_table, parameters):
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            spark, feature_table, label_table, parameters
-        )
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+    def test_excludes_drop_columns(
+        self, spark, feature_table, label_table, sample_pool, parameters
+    ):
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
         forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
         assert forbidden.isdisjoint(set(train_mi.columns))
 
-    def test_prod_name_preserved_as_identity(self, spark, feature_table, label_table, parameters):
+    def test_prod_name_preserved_as_identity(
+        self, spark, feature_table, label_table, sample_pool, parameters
+    ):
         """prod_name is an identity column — encoding is deferred to training."""
-        train_set, train_dev_set, val_set, test_set = self._build_four_sets(
-            spark, feature_table, label_table, parameters
-        )
-        preprocessor, _ = fit_preprocessor_metadata(train_set, parameters)
-        train_mi = transform_to_model_input(train_set, preprocessor, parameters)
+        train_keys = self._train_keys(sample_pool, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
         train_pdf = train_mi.toPandas()
 
         assert train_pdf["prod_name"].dtype == object

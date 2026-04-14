@@ -1,4 +1,4 @@
-"""Pandas backend for preprocessing: fit, transform, and apply."""
+"""Pandas backend for preprocessing: fit, apply-to-features, build-model-input, apply."""
 
 from __future__ import annotations
 
@@ -28,13 +28,45 @@ def _encode_categoricals(
     return df
 
 
+def _compute_feature_columns(
+    feature_table_cols: list[str],
+    identity_cols: list[str],
+    categorical_cols: list[str],
+    drop_cols: list[str],
+    label_col: str,
+) -> list[str]:
+    """Compute feature_columns list preserving original post-join column order.
+
+    Order: identity categoricals first (in identity_cols order),
+    then feature_table columns minus drops / non-categorical identity / label.
+    """
+    non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {label_col}
+    feature_columns: list[str] = []
+    for c in identity_cols:
+        if c in categorical_cols and c not in feature_columns:
+            feature_columns.append(c)
+    for c in feature_table_cols:
+        if c in non_feature or c in feature_columns:
+            continue
+        feature_columns.append(c)
+    return feature_columns
+
+
 def fit_preprocessor_metadata(
-    train_set: pd.DataFrame,
+    feature_table: pd.DataFrame,
+    train_keys: pd.DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Build preprocessor metadata and category mappings from train_set.
+    """Build preprocessor metadata from feature_table restricted to train customer-months.
 
-    Only small metadata is extracted; no large data copies are made.
+    Fit runs at customer-month granularity — *before* the customer-month-product
+    fan-out done by ``build_model_input`` — so that future statistical transforms
+    (mean/std/quantile) will not be distorted by product duplication.
+
+    Categorical distinct values are collected from the correct source:
+    - columns that live in ``feature_table``: from train-restricted feature rows
+    - identity categoricals (e.g., ``prod_name``) that live only in ``train_keys``:
+      from ``train_keys`` directly
 
     Returns:
         (preprocessor_metadata, category_mappings)
@@ -42,22 +74,37 @@ def fit_preprocessor_metadata(
     schema = get_schema(parameters)
     drop_cols, categorical_cols = _get_preprocessing_config(parameters)
     identity_cols = schema["identity_columns"]
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
     label_col = schema["label"]
 
-    # Validate categorical columns exist in train_set
-    _validate_columns(train_set.columns.tolist(), categorical_cols, "train_set (categorical)")
+    cm_key = [time_col] + entity_cols
+    train_cm = train_keys[cm_key].drop_duplicates()
+    train_features = feature_table.merge(train_cm, on=cm_key, how="inner")
 
-    # Build category mapping from train set only
-    category_mappings = {}
-    for col in categorical_cols:
-        category_mappings[col] = sorted(train_set[col].dropna().unique().tolist())
+    ft_cols = set(feature_table.columns)
+    feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
+    identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
+    missing_cats = [c for c in identity_cat_cols if c not in train_keys.columns]
+    if missing_cats:
+        raise ValueError(
+            "Categorical columns not found in feature_table or train_keys: "
+            f"{missing_cats}"
+        )
 
-    # Determine feature columns: all columns except drop_cols, label, and
-    # identity columns that are NOT categorical features.
-    # Categorical identity columns (e.g., prod_name) ARE features.
-    all_cols = train_set.columns.tolist()
-    non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {label_col}
-    feature_columns = [c for c in all_cols if c not in non_feature]
+    category_mappings: dict[str, list] = {}
+    for col in feature_cat_cols:
+        category_mappings[col] = sorted(train_features[col].dropna().unique().tolist())
+    for col in identity_cat_cols:
+        category_mappings[col] = sorted(train_keys[col].dropna().unique().tolist())
+
+    feature_columns = _compute_feature_columns(
+        feature_table.columns.tolist(),
+        identity_cols,
+        categorical_cols,
+        drop_cols,
+        label_col,
+    )
 
     preprocessor_metadata = {
         "feature_columns": feature_columns,
@@ -67,62 +114,102 @@ def fit_preprocessor_metadata(
     }
 
     logger.info(
-        "Fit preprocessor: %d features, %d categorical, %d drop",
-        len(feature_columns), len(categorical_cols), len(drop_cols),
+        "Fit preprocessor: %d features, %d categorical, %d drop (train cust-months=%d)",
+        len(feature_columns), len(categorical_cols), len(drop_cols), len(train_cm),
     )
     return preprocessor_metadata, category_mappings
 
 
-def transform_to_model_input(
-    split_set: pd.DataFrame,
+def apply_preprocessor_to_features(
+    feature_table: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> pd.DataFrame:
-    """Transform a split dataset into model_input (identity + label + features).
+    """Encode non-identity categoricals in feature_table at customer-month granularity.
 
-    The output contains identity columns, label column, and feature columns.
-    Categorical features that are NOT identity columns are encoded to int codes.
-    Categorical features that ARE identity columns (e.g., prod_name) are kept
-    as original values — encoding is deferred to the training pipeline's
-    _extract_Xy so that evaluate_model can use original values for metrics.
+    Returns (time + entity) + feature_columns that live in feature_table, with
+    non-identity categoricals encoded to int codes. Identity categoricals
+    (e.g., ``prod_name``) are not in feature_table and stay raw until
+    ``build_model_input`` / training.
     """
     schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
     identity_cols = schema["identity_columns"]
-    label_col = schema["label"]
 
     feature_columns = preprocessor_metadata["feature_columns"]
     categorical_cols = preprocessor_metadata["categorical_columns"]
     category_mappings = preprocessor_metadata["category_mappings"]
     drop_cols = preprocessor_metadata["drop_columns"]
 
-    # Validate required columns
-    required = list(set(identity_cols + [label_col] + feature_columns))
-    _validate_columns(split_set.columns.tolist(), required, "split_set")
-    _warn_missing_drop_columns(split_set.columns.tolist(), drop_cols, "split_set")
+    base_key = [time_col] + entity_cols
+    ft_feature_cols = [c for c in feature_columns if c in feature_table.columns]
+    keep_cols = list(dict.fromkeys(base_key + ft_feature_cols))
+    missing_base = [c for c in base_key if c not in feature_table.columns]
+    if missing_base:
+        raise ValueError(f"feature_table missing base-key columns: {missing_base}")
+    _warn_missing_drop_columns(feature_table.columns.tolist(), drop_cols, "feature_table")
 
-    # Select only the columns we need: identity + label + features
-    # Use dict.fromkeys to deduplicate while preserving order
-    keep_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
-    result = split_set[keep_cols].copy()
+    result = feature_table[keep_cols].copy()
 
-    # Encode categoricals EXCEPT identity columns (deferred to training)
-    encode_cols = [c for c in categorical_cols if c not in identity_cols]
+    encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
     if encode_cols:
         result = _encode_categoricals(result, encode_cols, category_mappings)
-
-        # Check for unknown categorical values (encoded as -1)
         for col in encode_cols:
             n_unknown = (result[col] == -1).sum()
             if n_unknown > 0:
                 logger.warning(
-                    "transform: %d unknown values in column '%s' (encoded as -1)",
+                    "apply_preprocessor_to_features: %d unknowns in column '%s'",
                     n_unknown, col,
                 )
 
-    # Log stats
+    logger.info(
+        "Preprocessed feature_table: %d rows, %d cols (encoded=%d)",
+        len(result), len(result.columns), len(encode_cols),
+    )
+    return result
+
+
+def build_model_input(
+    keys: pd.DataFrame,
+    preprocessed_feature_table: pd.DataFrame,
+    label_table: pd.DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> pd.DataFrame:
+    """Merge keys, labels, and pre-encoded features into model_input.
+
+    Equivalent to the old (build_dataset + transform_to_model_input) pair, but
+    sources feature values from the already-encoded ``preprocessed_feature_table``
+    so encoding work is not duplicated across splits.
+
+    Identity-categorical columns (e.g., ``prod_name``) stay raw here — encoding
+    is deferred to the training pipeline's ``_extract_Xy`` so that evaluation
+    can use original values for metrics.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    identity_cols = schema["identity_columns"]
+    base_key = [time_col] + entity_cols
+
+    feature_columns = preprocessor_metadata["feature_columns"]
+
+    label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
+    dataset = keys.merge(label_table, on=label_join_key, how="inner")
+    dataset = dataset.merge(preprocessed_feature_table, on=base_key, how="left")
+
+    required = list(set(identity_cols + [label_col] + feature_columns))
+    _validate_columns(dataset.columns.tolist(), required, "build_model_input")
+
+    keep_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
+    result = dataset[keep_cols].copy()
+
     n_label_null = result[label_col].isnull().sum()
     if n_label_null > 0:
-        logger.warning("transform: %d null labels in split", n_label_null)
+        logger.warning("build_model_input: %d null labels", n_label_null)
 
     logger.info(
         "Model input: %d rows, %d features, label_nulls=%d",

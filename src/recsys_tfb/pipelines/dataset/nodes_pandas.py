@@ -9,8 +9,9 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.helpers_pandas import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._pandas import (
+    apply_preprocessor_to_features as _apply_preprocessor_to_features,
+    build_model_input as _build_model_input,
     fit_preprocessor_metadata as _fit_preprocessor_metadata,
-    transform_to_model_input as _transform_to_model_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,49 +145,32 @@ def select_test_keys(
     return all_keys
 
 
-def build_dataset(
-    keys: pd.DataFrame,
-    feature_table: pd.DataFrame,
-    label_table: pd.DataFrame,
-    parameters: dict,
-) -> pd.DataFrame:
-    """Join keys with labels and features to build a complete dataset.
-
-    Dynamically determines the label_table join key based on whether keys
-    contains the item column (prod_name). Feature_table join always uses
-    (time_col + entity_cols).
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
-    base_key = [time_col] + entity_cols
-
-    # Dynamic label join key: include item_col if present in keys
-    label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
-
-    # Join keys with label_table
-    dataset = keys.merge(label_table, on=label_join_key, how="inner")
-
-    # Join with features on base key (snap_date, cust_id)
-    dataset = dataset.merge(feature_table, on=base_key, how="left")
-
-    logger.info("Built dataset: %d rows, %d columns", len(dataset), len(dataset.columns))
-    return dataset
-
-
 def fit_preprocessor_metadata(
-    train_set: pd.DataFrame,
+    feature_table: pd.DataFrame,
+    train_keys: pd.DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Build preprocessor metadata and category mappings from train_set only."""
-    return _fit_preprocessor_metadata(train_set, parameters)
+    """Fit preprocessor on feature_table restricted to train customer-months."""
+    return _fit_preprocessor_metadata(feature_table, train_keys, parameters)
 
 
-def transform_to_model_input(
-    split_set: pd.DataFrame,
+def apply_preprocessor_to_features(
+    feature_table: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> pd.DataFrame:
-    """Transform a single split to model_input (identity + label + encoded features)."""
-    return _transform_to_model_input(split_set, preprocessor_metadata, parameters)
+    """Encode non-identity categoricals in feature_table once for all splits."""
+    return _apply_preprocessor_to_features(feature_table, preprocessor_metadata, parameters)
+
+
+def build_model_input(
+    keys: pd.DataFrame,
+    preprocessed_feature_table: pd.DataFrame,
+    label_table: pd.DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> pd.DataFrame:
+    """Merge keys + labels + encoded features into model_input for a split."""
+    return _build_model_input(
+        keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
+    )
