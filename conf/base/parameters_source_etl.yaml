@@ -49,22 +49,30 @@ source_etl:
       sql_file: label/label_ccard.sql
       partition_by: [prod_name, snap_date]
       primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
 
     - name: label_exchange
       sql_file: label/label_exchange.sql
       partition_by: [prod_name, snap_date]
       primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
 
     - name: label_fund
       sql_file: label/label_fund.sql
       partition_by: [prod_name, snap_date]
       primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
 
     - name: sample_pool
       sql_file: sample_pool/sample_pool.sql
       partition_by: [snap_date]
       primary_key: [snap_date, cust_id, prod_name]
       depends_on: [feature_concat, label_ccard, label_exchange, label_fund]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
 
   # Audit Hive table
   audit:

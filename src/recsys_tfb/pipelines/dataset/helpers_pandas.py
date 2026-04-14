@@ -53,9 +53,10 @@ def select_keys(
     target_dates = set(pd.to_datetime(snap_dates))
     pool = sample_pool[sample_pool[time_col].isin(target_dates)]
 
-    # Extract group keys + identity keys, dedup on identity
+    # Extract identity + group columns. sample_pool PK = identity_key is enforced
+    # by source_etl's max_duplicate_key_ratio check, so no dedup needed here.
     extract_cols = list(dict.fromkeys(group_keys + identity_key))
-    keys = pool[extract_cols].drop_duplicates(subset=identity_key)
+    keys = pool[extract_cols]
 
     if sample_ratio >= 1.0 and not sample_ratio_overrides:
         sampled = keys[identity_key].reset_index(drop=True)
