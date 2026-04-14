@@ -9,7 +9,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
-from recsys_tfb.pipelines.preprocessing import apply_preprocessor_pandas
+from recsys_tfb.preprocessing._pandas import apply_preprocessor as _apply_preprocessor
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def apply_preprocessor(
     parameters: dict,
 ) -> pd.DataFrame:
     """Apply training preprocessor to scoring dataset."""
-    return apply_preprocessor_pandas(scoring_dataset, preprocessor, parameters)
+    return _apply_preprocessor(scoring_dataset, preprocessor, parameters)
 
 
 def predict_scores(

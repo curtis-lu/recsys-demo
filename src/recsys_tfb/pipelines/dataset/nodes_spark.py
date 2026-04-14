@@ -10,9 +10,9 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
-from recsys_tfb.pipelines.preprocessing import (
-    fit_preprocessor_metadata_spark,
-    transform_to_model_input_spark,
+from recsys_tfb.preprocessing._spark import (
+    fit_preprocessor_metadata as _fit_preprocessor_metadata,
+    transform_to_model_input as _transform_to_model_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,7 +178,7 @@ def fit_preprocessor_metadata(
 
     Only collects small metadata to driver. No toPandas() on full data.
     """
-    return fit_preprocessor_metadata_spark(train_set, parameters)
+    return _fit_preprocessor_metadata(train_set, parameters)
 
 
 def transform_to_model_input(
@@ -190,4 +190,4 @@ def transform_to_model_input(
 
     All processing stays in Spark. No toPandas().
     """
-    return transform_to_model_input_spark(split_set, preprocessor_metadata, parameters)
+    return _transform_to_model_input(split_set, preprocessor_metadata, parameters)

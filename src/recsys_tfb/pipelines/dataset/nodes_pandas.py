@@ -8,9 +8,9 @@ import pandas as pd
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.helpers_pandas import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
-from recsys_tfb.pipelines.preprocessing import (
-    fit_preprocessor_metadata_pandas,
-    transform_to_model_input_pandas,
+from recsys_tfb.preprocessing._pandas import (
+    fit_preprocessor_metadata as _fit_preprocessor_metadata,
+    transform_to_model_input as _transform_to_model_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,7 +180,7 @@ def fit_preprocessor_metadata(
     parameters: dict,
 ) -> tuple[dict, dict]:
     """Build preprocessor metadata and category mappings from train_set only."""
-    return fit_preprocessor_metadata_pandas(train_set, parameters)
+    return _fit_preprocessor_metadata(train_set, parameters)
 
 
 def transform_to_model_input(
@@ -189,4 +189,4 @@ def transform_to_model_input(
     parameters: dict,
 ) -> pd.DataFrame:
     """Transform a single split to model_input (identity + label + encoded features)."""
-    return transform_to_model_input_pandas(split_set, preprocessor_metadata, parameters)
+    return _transform_to_model_input(split_set, preprocessor_metadata, parameters)
