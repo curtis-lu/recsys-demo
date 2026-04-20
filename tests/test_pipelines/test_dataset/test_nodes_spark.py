@@ -87,6 +87,11 @@ def sample_pool(spark):
 def parameters():
     return {
         "random_seed": 42,
+        "schema": {
+            "categorical_values": {
+                "prod_name": ["exchange_fx", "exchange_usd", "fund_stock"],
+            },
+        },
         "dataset": {
             "train_snap_date_start": "2024-01-31",
             "train_snap_date_end": "2024-03-31",
@@ -169,7 +174,7 @@ class TestBuildModelInput:
 
     def _pft(self, feature_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         return train_keys, preprocessor, pft
 
@@ -229,7 +234,7 @@ class TestFitAndBuild:
 
         train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, cat_mappings = fit_preprocessor_metadata(
-            feature_table, train_keys, parameters
+            feature_table, parameters
         )
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
@@ -249,7 +254,7 @@ class TestFitAndBuild:
         self, spark, feature_table, label_table, sample_pool, parameters
     ):
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
@@ -261,7 +266,7 @@ class TestFitAndBuild:
     ):
         """prod_name is an identity column — encoding is deferred to training."""
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
         train_pdf = train_mi.toPandas()

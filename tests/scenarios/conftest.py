@@ -150,25 +150,15 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
             if d.is_dir() and not d.is_symlink()
         ]
         for vdir in sorted(version_dirs):
-            lines.append(f"  Dataset 版本: {vdir.name}")
+            lines.append(f"  Base 版本: {vdir.name}")
 
-            for split_name in ["train_set", "train_dev_set", "val_set"]:
-                pq_path = vdir / f"{split_name}.parquet"
-                if pq_path.exists():
-                    df = pd.read_parquet(pq_path)
-                    snap_dates = sorted(df["snap_date"].dt.strftime("%Y-%m-%d").unique())
-                    lines.append(
-                        f"  {split_name}: 行數={len(df)}, 欄位數={len(df.columns)}, "
-                        f"snap_dates={snap_dates}"
-                    )
-
-            for x_name in ["train_model_input", "val_model_input"]:
+            # Base-layer artifacts
+            for x_name in ["val_model_input", "test_model_input"]:
                 pq_path = vdir / f"{x_name}.parquet"
                 if pq_path.exists():
                     df = pd.read_parquet(pq_path)
                     lines.append(f"  {x_name}: 形狀={df.shape}, 欄位={list(df.columns)}")
 
-            # preprocessor
             prep_path = vdir / "preprocessor.pkl"
             if prep_path.exists():
                 with open(prep_path, "rb") as f:
@@ -179,12 +169,40 @@ def generate_report(scenario_name: str, work_dir: Path, output_path: Path | None
                 )
                 lines.append(f"  feature_columns: {preprocessor['feature_columns']}")
 
-            # category_mappings
             cm_path = vdir / "category_mappings.json"
             if cm_path.exists():
                 with open(cm_path) as f:
                     cm = json.load(f)
                 lines.append(f"  category_mappings: {cm}")
+
+            # Train variant artifacts
+            tv_root = vdir / "train_variants"
+            if tv_root.exists():
+                for tv_dir in sorted(
+                    d for d in tv_root.iterdir() if d.is_dir() and not d.is_symlink()
+                ):
+                    lines.append(f"  Train Variant: {tv_dir.name}")
+                    for x_name in ["train_model_input", "train_dev_model_input"]:
+                        pq_path = tv_dir / f"{x_name}.parquet"
+                        if pq_path.exists():
+                            df = pd.read_parquet(pq_path)
+                            lines.append(
+                                f"    {x_name}: 形狀={df.shape}, 欄位={list(df.columns)}"
+                            )
+
+            # Calibration variant artifacts
+            cv_root = vdir / "calibration_variants"
+            if cv_root.exists():
+                for cv_dir in sorted(
+                    d for d in cv_root.iterdir() if d.is_dir() and not d.is_symlink()
+                ):
+                    lines.append(f"  Calibration Variant: {cv_dir.name}")
+                    pq_path = cv_dir / "calibration_model_input.parquet"
+                    if pq_path.exists():
+                        df = pd.read_parquet(pq_path)
+                        lines.append(
+                            f"    calibration_model_input: 形狀={df.shape}"
+                        )
 
     # --- 訓練 Pipeline ---
     models_dir = data_dir / "models"

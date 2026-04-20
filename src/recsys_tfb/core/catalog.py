@@ -1,4 +1,5 @@
 from recsys_tfb.io.base import AbstractDataset
+from recsys_tfb.io.hive_table_dataset import HiveTableDataset
 from recsys_tfb.io.json_dataset import JSONDataset
 from recsys_tfb.io.model_adapter_dataset import ModelAdapterDataset
 from recsys_tfb.io.parquet_dataset import ParquetDataset
@@ -13,6 +14,7 @@ _DATASET_REGISTRY: dict[str, type[AbstractDataset]] = {
     "JSONDataset": JSONDataset,
     "ModelAdapterDataset": ModelAdapterDataset,
     "TextDataset": TextDataset,
+    "HiveTableDataset": HiveTableDataset,
 }
 
 

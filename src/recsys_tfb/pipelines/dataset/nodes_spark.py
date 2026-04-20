@@ -142,14 +142,13 @@ def select_test_keys(
 
 def fit_preprocessor_metadata(
     feature_table: DataFrame,
-    train_keys: DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Fit preprocessor on Spark feature_table restricted to train customer-months.
+    """Fit Spark preprocessor at customer-month granularity, decoupled from sampling.
 
     Only collects small metadata (distinct category values) to driver.
     """
-    return _fit_preprocessor_metadata(feature_table, train_keys, parameters)
+    return _fit_preprocessor_metadata(feature_table, parameters)
 
 
 def apply_preprocessor_to_features(

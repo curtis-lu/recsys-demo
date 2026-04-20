@@ -1,20 +1,25 @@
-"""Tests for recsys_tfb.core.versioning module."""
+"""Tests for recsys_tfb.core.versioning module (three-layer versioning)."""
 
 import json
 import re
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from recsys_tfb.core.versioning import (
+    ALL_SAMPLING_KEYS,
+    CALIBRATION_SAMPLING_KEYS,
+    TRAIN_SAMPLING_KEYS,
     build_manifest_metadata,
-    compute_dataset_version,
+    compute_base_dataset_version,
+    compute_calibration_variant_id,
     compute_model_version,
+    compute_train_variant_id,
     get_git_commit,
     read_manifest,
-    resolve_dataset_version,
+    resolve_base_dataset_version,
     resolve_model_version,
+    resolve_variant_id,
     update_symlink,
     write_manifest,
 )
@@ -22,79 +27,184 @@ from recsys_tfb.core.versioning import (
 _HEX8_RE = re.compile(r"^[0-9a-f]{8}$")
 
 
-class TestComputeDatasetVersion:
+def _sample_schema() -> dict:
+    return {
+        "time": "snap_date",
+        "entity": ["cust_id"],
+        "item": "prod_name",
+        "label": "target",
+        "identity_columns": ["snap_date", "cust_id", "prod_name"],
+        "categorical_values": {"prod_name": ["a", "b", "c"]},
+    }
+
+
+def _base_params() -> dict:
+    return {
+        "dataset": {
+            "train_snap_date_start": "2023-01-31",
+            "train_snap_date_end": "2023-12-31",
+            "val_snap_dates": ["2024-01-31"],
+            "test_snap_dates": ["2024-02-29"],
+            "sample_ratio": 0.1,
+            "sample_ratio_overrides": {},
+            "sample_group_keys": ["cust_segment_typ"],
+            "train_dev_ratio": 0.1,
+            "calibration_snap_dates": ["2024-02-29"],
+            "calibration_sample_ratio": 1.0,
+            "calibration_sample_ratio_overrides": {},
+        },
+    }
+
+
+class TestSamplingKeySets:
+    def test_train_and_calibration_share_group_keys(self):
+        assert "sample_group_keys" in TRAIN_SAMPLING_KEYS
+        assert "sample_group_keys" in CALIBRATION_SAMPLING_KEYS
+
+    def test_all_sampling_keys_is_union(self):
+        assert ALL_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
+
+
+class TestComputeBaseDatasetVersion:
     def test_returns_8_char_hex(self):
-        result = compute_dataset_version({"sample_ratio": 0.1})
-        assert _HEX8_RE.match(result)
+        assert _HEX8_RE.match(
+            compute_base_dataset_version(_base_params(), _sample_schema())
+        )
 
-    def test_same_params_same_hash(self):
-        params = {"sample_ratio": 0.1, "seed": 42}
-        assert compute_dataset_version(params) == compute_dataset_version(params)
-
-    def test_different_params_different_hash(self):
-        a = compute_dataset_version({"sample_ratio": 0.1})
-        b = compute_dataset_version({"sample_ratio": 0.2})
-        assert a != b
-
-    def test_key_order_does_not_matter(self):
-        a = compute_dataset_version({"a": 1, "b": 2})
-        b = compute_dataset_version({"b": 2, "a": 1})
+    def test_deterministic(self):
+        a = compute_base_dataset_version(_base_params(), _sample_schema())
+        b = compute_base_dataset_version(_base_params(), _sample_schema())
         assert a == b
 
-    def test_schema_included_changes_hash(self):
-        params = {"sample_ratio": 0.1}
-        schema_a = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
-        schema_b = {"time": "month_end", "entity": ["cust_id"], "item": "prod_name"}
-        assert compute_dataset_version(params, schema_a) != compute_dataset_version(
-            params, schema_b
-        )
+    def test_sample_ratio_does_not_affect_base(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_ratio"] = 0.5
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
 
-    def test_same_schema_same_hash(self):
-        params = {"sample_ratio": 0.1}
-        schema = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
-        assert compute_dataset_version(params, schema) == compute_dataset_version(
-            params, schema
-        )
+    def test_calibration_sample_ratio_overrides_does_not_affect_base(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["calibration_sample_ratio_overrides"] = {"prod_x": 0.3}
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
 
-    def test_schema_key_order_does_not_matter(self):
-        params = {"sample_ratio": 0.1}
-        schema_a = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
-        schema_b = {"item": "prod_name", "time": "snap_date", "entity": ["cust_id"]}
-        assert compute_dataset_version(params, schema_a) == compute_dataset_version(
-            params, schema_b
-        )
+    def test_sample_group_keys_does_not_affect_base(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_group_keys"] = ["cust_segment_typ", "prod_name"]
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
 
-    def test_schema_none_differs_from_schema_passed(self):
-        # Passing schema vs not passing schema produces different hashes
-        # (this codifies the one-time break on CLI upgrade).
-        params = {"sample_ratio": 0.1}
-        schema = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
-        assert compute_dataset_version(params) != compute_dataset_version(
-            params, schema
-        )
+    def test_train_snap_date_start_affects_base(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["train_snap_date_start"] = "2022-01-31"
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_schema_categorical_values_affects_base(self):
+        s1 = _sample_schema()
+        s2 = _sample_schema()
+        s2["categorical_values"]["prod_name"] = ["a", "b", "c", "d"]
+        assert compute_base_dataset_version(_base_params(), s1) != \
+            compute_base_dataset_version(_base_params(), s2)
+
+    def test_schema_order_independent(self):
+        schema_a = {"time": "t", "entity": ["e"], "item": "i"}
+        schema_b = {"item": "i", "entity": ["e"], "time": "t"}
+        assert compute_base_dataset_version(_base_params(), schema_a) == \
+            compute_base_dataset_version(_base_params(), schema_b)
+
+
+class TestComputeTrainVariantId:
+    def test_returns_8_char_hex(self):
+        assert _HEX8_RE.match(compute_train_variant_id(_base_params()))
+
+    def test_sample_ratio_affects_train_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_ratio"] = 0.5
+        assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
+
+    def test_calibration_sample_ratio_does_not_affect_train_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["calibration_sample_ratio"] = 0.5
+        p2["dataset"]["calibration_sample_ratio_overrides"] = {"x": 0.3}
+        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
+    def test_sample_group_keys_affects_train_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_group_keys"] = ["cust_segment_typ", "prod_name"]
+        assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
+
+    def test_train_snap_date_does_not_affect_train_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["train_snap_date_start"] = "2022-01-31"
+        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
+
+class TestComputeCalibrationVariantId:
+    def test_returns_8_char_hex(self):
+        assert _HEX8_RE.match(compute_calibration_variant_id(_base_params()))
+
+    def test_calibration_sample_ratio_overrides_affects_calibration_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["calibration_sample_ratio_overrides"] = {"prod_x": 0.3}
+        assert compute_calibration_variant_id(p1) != compute_calibration_variant_id(p2)
+
+    def test_sample_ratio_does_not_affect_calibration_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_ratio"] = 0.5
+        assert compute_calibration_variant_id(p1) == compute_calibration_variant_id(p2)
+
+    def test_sample_group_keys_affects_calibration_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["sample_group_keys"] = ["cust_segment_typ", "prod_name"]
+        assert compute_calibration_variant_id(p1) != compute_calibration_variant_id(p2)
 
 
 class TestComputeModelVersion:
     def test_returns_8_char_hex(self):
-        result = compute_model_version({"lr": 0.01}, "abc12345")
+        result = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
         assert _HEX8_RE.match(result)
 
-    def test_same_params_same_dataset_same_hash(self):
-        params = {"lr": 0.01}
-        a = compute_model_version(params, "abc12345")
-        b = compute_model_version(params, "abc12345")
+    def test_same_inputs_same_hash(self):
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
         assert a == b
 
-    def test_different_dataset_different_hash(self):
-        params = {"lr": 0.01}
-        a = compute_model_version(params, "abc12345")
-        b = compute_model_version(params, "def67890")
+    def test_different_base_different_hash(self):
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.01}, "baseABCD", "trai1234")
+        assert a != b
+
+    def test_different_train_variant_different_hash(self):
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.01}, "base1234", "traiABCD")
         assert a != b
 
     def test_different_params_different_hash(self):
-        a = compute_model_version({"lr": 0.01}, "abc12345")
-        b = compute_model_version({"lr": 0.05}, "abc12345")
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.05}, "base1234", "trai1234")
         assert a != b
+
+    def test_calibration_variant_affects_hash(self):
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", "cal12345")
+        assert a != b
+
+    def test_calibration_none_equivalent_to_omitted(self):
+        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
+        b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", None)
+        assert a == b
 
 
 class TestWriteManifest:
@@ -172,9 +282,9 @@ class TestUpdateSymlink:
         assert old_dir.resolve() == target.resolve()
 
 
-class TestResolveDatasetVersion:
+class TestResolveBaseDatasetVersion:
     def test_returns_specified_version(self, tmp_path):
-        assert resolve_dataset_version(tmp_path, "abc12345") == "abc12345"
+        assert resolve_base_dataset_version(tmp_path, "abc12345") == "abc12345"
 
     def test_follows_latest_symlink(self, tmp_path):
         dataset_dir = tmp_path / "dataset"
@@ -184,13 +294,51 @@ class TestResolveDatasetVersion:
         latest = dataset_dir / "latest"
         latest.symlink_to(v1.resolve())
 
-        assert resolve_dataset_version(dataset_dir, None) == "abc12345"
+        assert resolve_base_dataset_version(dataset_dir, None) == "abc12345"
 
     def test_raises_when_no_latest(self, tmp_path):
         dataset_dir = tmp_path / "dataset"
         dataset_dir.mkdir()
         with pytest.raises(FileNotFoundError, match="latest"):
-            resolve_dataset_version(dataset_dir, None)
+            resolve_base_dataset_version(dataset_dir, None)
+
+
+class TestResolveVariantId:
+    def test_returns_specified_variant(self, tmp_path):
+        assert resolve_variant_id(tmp_path, "train", "abcd1234") == "abcd1234"
+        assert resolve_variant_id(tmp_path, "calibration", "abcd1234") == "abcd1234"
+
+    def test_follows_latest_symlink_for_train(self, tmp_path):
+        base_dir = tmp_path / "base1234"
+        train_root = base_dir / "train_variants"
+        train_root.mkdir(parents=True)
+        v1 = train_root / "trai1234"
+        v1.mkdir()
+        latest = train_root / "latest"
+        latest.symlink_to(v1.resolve())
+
+        assert resolve_variant_id(base_dir, "train", None) == "trai1234"
+
+    def test_follows_latest_symlink_for_calibration(self, tmp_path):
+        base_dir = tmp_path / "base1234"
+        cal_root = base_dir / "calibration_variants"
+        cal_root.mkdir(parents=True)
+        v1 = cal_root / "cal12345"
+        v1.mkdir()
+        latest = cal_root / "latest"
+        latest.symlink_to(v1.resolve())
+
+        assert resolve_variant_id(base_dir, "calibration", None) == "cal12345"
+
+    def test_raises_when_no_latest(self, tmp_path):
+        base_dir = tmp_path / "base1234"
+        (base_dir / "train_variants").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError, match="latest"):
+            resolve_variant_id(base_dir, "train", None)
+
+    def test_raises_on_bad_variant_kind(self, tmp_path):
+        with pytest.raises(ValueError, match="variant_kind"):
+            resolve_variant_id(tmp_path, "bogus", None)
 
 
 class TestResolveModelVersion:
@@ -235,32 +383,60 @@ class TestGetGitCommit:
 
 
 class TestBuildManifestMetadata:
-    def test_dataset_manifest(self):
+    def test_dataset_base_manifest(self):
         meta = build_manifest_metadata(
             version="abc12345",
             pipeline="dataset",
             parameters={"sample_ratio": 0.1},
-            artifacts=["train_set.parquet"],
+            base_dataset_version="abc12345",
+            artifacts=["val_keys.parquet"],
         )
         assert meta["version"] == "abc12345"
         assert meta["pipeline"] == "dataset"
         assert "created_at" in meta
         assert "git_commit" in meta
         assert meta["parameters"] == {"sample_ratio": 0.1}
-        assert meta["artifacts"] == ["train_set.parquet"]
-        assert "dataset_version" not in meta
+        assert meta["artifacts"] == ["val_keys.parquet"]
+        assert meta["base_dataset_version"] == "abc12345"
         assert "model_version" not in meta
+        assert "parent_version" not in meta
+
+    def test_variant_manifest_records_parent(self):
+        meta = build_manifest_metadata(
+            version="trai1234",
+            pipeline="dataset",
+            parameters={"sample_ratio": 0.1},
+            parent_version="base1234",
+            variant_kind="train",
+            artifacts=["train_model_input.parquet"],
+        )
+        assert meta["parent_version"] == "base1234"
+        assert meta["variant_kind"] == "train"
 
     def test_training_manifest(self):
         meta = build_manifest_metadata(
             version="def67890",
             pipeline="training",
             parameters={"lr": 0.01},
-            dataset_version="abc12345",
+            base_dataset_version="abc12345",
+            train_variant_id="trai1234",
             artifacts=["model.pkl"],
         )
-        assert meta["dataset_version"] == "abc12345"
+        assert meta["base_dataset_version"] == "abc12345"
+        assert meta["train_variant_id"] == "trai1234"
+        assert "calibration_variant_id" not in meta
         assert "model_version" not in meta
+
+    def test_training_manifest_with_calibration(self):
+        meta = build_manifest_metadata(
+            version="def67890",
+            pipeline="training",
+            parameters={"lr": 0.01},
+            base_dataset_version="abc12345",
+            train_variant_id="trai1234",
+            calibration_variant_id="cal12345",
+        )
+        assert meta["calibration_variant_id"] == "cal12345"
 
     def test_inference_manifest(self):
         meta = build_manifest_metadata(
@@ -268,7 +444,9 @@ class TestBuildManifestMetadata:
             pipeline="inference",
             parameters={"snap_dates": ["2024-03-31"]},
             model_version="def67890",
-            dataset_version="abc12345",
+            base_dataset_version="abc12345",
+            train_variant_id="trai1234",
         )
         assert meta["model_version"] == "def67890"
-        assert meta["dataset_version"] == "abc12345"
+        assert meta["base_dataset_version"] == "abc12345"
+        assert meta["train_variant_id"] == "trai1234"

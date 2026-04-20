@@ -124,6 +124,11 @@ class TestTrainingPipelineE2E:
 
         parameters = {
             "random_seed": 42,
+            "schema": {
+                "categorical_values": {
+                    "prod_name": sorted(products),
+                },
+            },
             "dataset": {
                 "train_snap_date_start": "2024-01-31",
                 "train_snap_date_end": "2024-03-31",

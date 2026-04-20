@@ -28,6 +28,10 @@ def get_schema(parameters: dict) -> dict:
 
     The ``entity`` field is always normalised to a list.  An automatically
     derived ``identity_columns`` field is appended as ``[time] + entity + [item]``.
+    ``categorical_values`` is sourced from ``parameters["schema"]["categorical_values"]``
+    (default ``{}``) and provides explicit category declarations for columns
+    whose distinct values cannot be discovered from ``feature_table`` alone
+    (e.g. ``prod_name``, which only appears in keys tables).
 
     Args:
         parameters: The full parameters dict (may or may not contain a
@@ -35,11 +39,10 @@ def get_schema(parameters: dict) -> dict:
 
     Returns:
         A new dict with keys: time, entity, item, label, score, rank,
-        identity_columns.
+        identity_columns, categorical_values.
     """
-    columns = (
-        parameters.get("schema", {}).get("columns", {})
-    )
+    schema_section = parameters.get("schema", {}) or {}
+    columns = schema_section.get("columns", {}) or {}
 
     schema = copy.deepcopy(_DEFAULTS)
     schema.update({k: v for k, v in columns.items() if k in _DEFAULTS})
@@ -53,6 +56,10 @@ def get_schema(parameters: dict) -> dict:
         [schema["time"]] + schema["entity"] + [schema["item"]]
     )
 
+    schema["categorical_values"] = copy.deepcopy(
+        schema_section.get("categorical_values", {}) or {}
+    )
+
     return schema
 
 
@@ -60,22 +67,17 @@ def get_schema_for_hash(parameters: dict) -> dict:
     """Return canonical schema dict intended for version hashing.
 
     Same resolution logic as :func:`get_schema` but excludes the derived
-    ``identity_columns`` field, because including a derivation of other
-    fields would inflate the hash input without adding information.
-
-    Args:
-        parameters: The full parameters dict.
-
-    Returns:
-        A dict containing only the canonical schema keys:
-        time, entity, item, label, score, rank.
+    ``identity_columns`` field. ``categorical_values`` IS included so
+    changes to declared category lists (e.g. adding a new product) bust
+    the base dataset version.
     """
     schema = get_schema(parameters)
-    return {k: schema[k] for k in _DEFAULTS}
+    keys = list(_DEFAULTS) + ["categorical_values"]
+    return {k: schema[k] for k in keys}
 
 
 def validate_schema_config(parameters: dict) -> None:
-    """Validate the shape of ``parameters["schema"]["columns"]``.
+    """Validate the shape of ``parameters["schema"]``.
 
     Enforces:
     - Scalar keys (time, item, label, score, rank) must be non-empty strings.
@@ -83,8 +85,14 @@ def validate_schema_config(parameters: dict) -> None:
       strings.
     - ``identity_columns`` ([time] + entity + [item]) must not contain
       duplicates.
+    - ``categorical_values`` must be a mapping of non-empty str -> list.
+    - Any identity categorical column (i.e. declared in
+      ``dataset.prepare_model_input.categorical_columns`` AND also an identity
+      column) must have a non-empty entry in ``schema.categorical_values``.
+      This catches the case where ``prod_name`` categories would otherwise
+      be silently discovered from sampled train data.
     - Missing keys are allowed (they fall back to :data:`_DEFAULTS` in
-      :func:`get_schema`), preserving backward-compatibility.
+      :func:`get_schema`).
 
     Args:
         parameters: The full parameters dict.
@@ -92,7 +100,8 @@ def validate_schema_config(parameters: dict) -> None:
     Raises:
         ValueError: If the schema config is malformed.
     """
-    raw_columns = parameters.get("schema", {}).get("columns", {})
+    schema_section = parameters.get("schema", {}) or {}
+    raw_columns = schema_section.get("columns", {})
     if not isinstance(raw_columns, dict):
         raise ValueError(
             "Invalid schema.columns in parameters.yaml: expected mapping, got "
@@ -146,3 +155,36 @@ def validate_schema_config(parameters: dict) -> None:
             "Invalid schema.columns in parameters.yaml: identity_columns "
             f"contain duplicates: {identity}"
         )
+
+    # categorical_values shape
+    raw_cat_values = schema_section.get("categorical_values", {})
+    if not isinstance(raw_cat_values, dict):
+        raise ValueError(
+            "Invalid schema.categorical_values in parameters.yaml: expected "
+            f"mapping, got {type(raw_cat_values).__name__}"
+        )
+    for col, values in raw_cat_values.items():
+        if not isinstance(col, str) or not col.strip():
+            raise ValueError(
+                "Invalid schema.categorical_values in parameters.yaml: keys "
+                f"must be non-empty strings, got {col!r}"
+            )
+        if not isinstance(values, list) or not values:
+            raise ValueError(
+                "Invalid schema.categorical_values in parameters.yaml: values "
+                f"for '{col}' must be a non-empty list, got {values!r}"
+            )
+
+    # Identity categorical columns must be declared in categorical_values.
+    pmi = parameters.get("dataset", {}).get("prepare_model_input", {}) or {}
+    declared_cat_cols = pmi.get("categorical_columns")
+    if declared_cat_cols:
+        identity_set = set(identity)
+        identity_cat_cols = [c for c in declared_cat_cols if c in identity_set]
+        cat_values = schema["categorical_values"]
+        missing = [c for c in identity_cat_cols if c not in cat_values]
+        if missing:
+            raise ValueError(
+                "Identity categorical columns must declare their category "
+                f"lists in schema.categorical_values: {missing}"
+            )

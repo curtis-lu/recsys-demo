@@ -17,7 +17,6 @@ from tests.scenarios.conftest import (
     setup_workdir,
 )
 from tests.scenarios.data_generator import (
-    BASE_PRODUCTS,
     BASE_SNAP_DATES,
     generate_feature_table,
     generate_label_table,
@@ -78,35 +77,50 @@ def work_dir():
     return wdir
 
 
-def _find_dataset_version_dir(work_dir: Path) -> Path:
-    """找到 dataset 版本目錄。"""
+def _find_base_dir(work_dir: Path) -> Path:
+    """找到 base dataset 版本目錄。"""
     dataset_dir = work_dir / "data" / "dataset"
     version_dirs = [
         d for d in dataset_dir.iterdir()
         if d.is_dir() and not d.is_symlink()
     ]
-    assert len(version_dirs) == 1, f"預期 1 個版本目錄，找到 {len(version_dirs)}"
+    assert len(version_dirs) == 1, f"預期 1 個 base 版本目錄，找到 {len(version_dirs)}"
     return version_dirs[0]
 
 
-@pytest.fixture(scope="module")
-def dataset_version_dir(work_dir):
-    return _find_dataset_version_dir(work_dir)
+def _find_train_variant_dir(base_dir: Path) -> Path:
+    variants_root = base_dir / "train_variants"
+    variant_dirs = [
+        d for d in variants_root.iterdir()
+        if d.is_dir() and not d.is_symlink()
+    ]
+    assert len(variant_dirs) == 1, f"預期 1 個 train_variant，找到 {len(variant_dirs)}"
+    return variant_dirs[0]
 
 
 @pytest.fixture(scope="module")
-def train_set(dataset_version_dir):
-    return pd.read_parquet(dataset_version_dir / "train_model_input.parquet")
+def base_dir(work_dir):
+    return _find_base_dir(work_dir)
 
 
 @pytest.fixture(scope="module")
-def train_dev_set(dataset_version_dir):
-    return pd.read_parquet(dataset_version_dir / "train_dev_model_input.parquet")
+def train_variant_dir(base_dir):
+    return _find_train_variant_dir(base_dir)
 
 
 @pytest.fixture(scope="module")
-def val_set(dataset_version_dir):
-    return pd.read_parquet(dataset_version_dir / "val_model_input.parquet")
+def train_set(train_variant_dir):
+    return pd.read_parquet(train_variant_dir / "train_model_input.parquet")
+
+
+@pytest.fixture(scope="module")
+def train_dev_set(train_variant_dir):
+    return pd.read_parquet(train_variant_dir / "train_dev_model_input.parquet")
+
+
+@pytest.fixture(scope="module")
+def val_set(base_dir):
+    return pd.read_parquet(base_dir / "val_model_input.parquet")
 
 
 def test_train_set_excludes_val_and_test_dates(train_set):
@@ -150,9 +164,9 @@ def test_model_exists(work_dir):
     assert model_path.exists(), f"model.txt 不存在: {model_path}"
 
 
-def test_dataset_version_differs_from_base(dataset_version_dir):
-    """dataset_version 應與基礎設定不同。"""
-    version = dataset_version_dir.name
+def test_base_dataset_version_format(base_dir):
+    """base_dataset_version 應為 8 字元 hash。"""
+    version = base_dir.name
     assert len(version) == 8, f"版本格式不正確: {version}"
 
 

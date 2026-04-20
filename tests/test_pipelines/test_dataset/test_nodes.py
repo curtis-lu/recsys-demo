@@ -91,6 +91,11 @@ def sample_pool():
 def parameters():
     return {
         "random_seed": 42,
+        "schema": {
+            "categorical_values": {
+                "prod_name": ["exchange_fx", "exchange_usd", "fund_stock"],
+            },
+        },
         "dataset": {
             "train_snap_date_start": "2024-01-31",
             "train_snap_date_end": "2024-03-31",
@@ -531,8 +536,7 @@ class TestBuildModelInput:
 
     def test_joins_with_product_keys(self, feature_table, label_table, parameters):
         """When keys include prod_name, join label_table on full identity key."""
-        train_keys = self._split_keys(label_table, "2024-01-31")
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
         keys = pd.DataFrame(
@@ -551,8 +555,7 @@ class TestBuildModelInput:
 
     def test_joins_without_product_keys(self, feature_table, label_table, parameters):
         """When keys don't include prod_name, expand to all products via label_table."""
-        train_keys = self._split_keys(label_table, "2024-01-31")
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
         keys = pd.DataFrame(
@@ -569,8 +572,7 @@ class TestBuildModelInput:
         assert "prod_name" in result.columns
 
     def test_missing_features_filled_nan(self, feature_table, label_table, parameters):
-        train_keys = self._split_keys(label_table, "2024-01-31")
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
         extra_label = pd.DataFrame(
@@ -608,7 +610,7 @@ class TestFitAndBuild:
     def test_output_format(self, feature_table, label_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, cat_mappings = fit_preprocessor_metadata(
-            feature_table, train_keys, parameters
+            feature_table, parameters
         )
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
@@ -627,7 +629,7 @@ class TestFitAndBuild:
 
     def test_excludes_drop_columns(self, feature_table, label_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
@@ -636,8 +638,7 @@ class TestFitAndBuild:
         assert forbidden.isdisjoint(set(train_mi.columns))
 
     def test_preprocessor_contents(self, feature_table, label_table, sample_pool, parameters):
-        train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
 
         assert "feature_columns" in preprocessor
         assert "categorical_columns" in preprocessor
@@ -648,9 +649,8 @@ class TestFitAndBuild:
     def test_category_mappings_returned_separately(
         self, feature_table, label_table, sample_pool, parameters
     ):
-        train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, cat_mappings = fit_preprocessor_metadata(
-            feature_table, train_keys, parameters
+            feature_table, parameters
         )
 
         assert cat_mappings == preprocessor["category_mappings"]
@@ -661,7 +661,7 @@ class TestFitAndBuild:
     ):
         """prod_name is an identity column — encoding is deferred to training."""
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
@@ -671,8 +671,7 @@ class TestFitAndBuild:
         self, feature_table, label_table, sample_pool, parameters
     ):
         """build_model_input does NOT re-apply val sampling."""
-        train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
         val_keys = self._label_only_keys(label_table, "2024-04-30")
@@ -686,7 +685,7 @@ class TestFitAndBuild:
     def test_all_splits_built(self, feature_table, label_table, sample_pool, parameters):
         """Verify model_input can be built for all splits from shared preprocessed features."""
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
         val_keys = self._label_only_keys(label_table, "2024-04-30")
         test_keys = self._label_only_keys(label_table, "2024-05-31")
@@ -711,9 +710,8 @@ class TestFitAndBuildWithCalibration:
         return select_train_keys(sample_pool, params)
 
     def test_output_format(self, feature_table, label_table, sample_pool, parameters):
-        train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, cat_mappings = fit_preprocessor_metadata(
-            feature_table, train_keys, parameters
+            feature_table, parameters
         )
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
@@ -727,11 +725,38 @@ class TestFitAndBuildWithCalibration:
 
         assert "prod_name" in cat_mappings
 
-    def test_category_from_train_only(
+    def test_prod_name_category_from_config(
         self, feature_table, label_table, sample_pool, parameters
     ):
-        train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, train_keys, parameters)
-        # category_mappings for prod_name should match train_keys products
-        expected_prods = sorted(train_keys["prod_name"].unique().tolist())
-        assert preprocessor["category_mappings"]["prod_name"] == expected_prods
+        """prod_name mapping comes from schema.categorical_values, not sampled data."""
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        declared = parameters["schema"]["categorical_values"]["prod_name"]
+        # order must match config exactly (determinism)
+        assert preprocessor["category_mappings"]["prod_name"] == list(declared)
+
+    def test_sample_ratio_does_not_affect_preprocessor(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        """Changing sample_ratio must NOT change category_mappings or preprocessor."""
+        p_lo = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "sample_ratio": 0.1},
+        }
+        p_hi = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "sample_ratio": 1.0},
+        }
+        pre_lo, cm_lo = fit_preprocessor_metadata(feature_table, p_lo)
+        pre_hi, cm_hi = fit_preprocessor_metadata(feature_table, p_hi)
+        assert cm_lo == cm_hi
+        assert pre_lo == pre_hi
+
+    def test_missing_identity_cat_declaration_raises(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        params_missing = {
+            **parameters,
+            "schema": {"categorical_values": {}},
+        }
+        with pytest.raises(ValueError, match="categorical_values"):
+            fit_preprocessor_metadata(feature_table, params_missing)

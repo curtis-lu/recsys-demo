@@ -147,11 +147,10 @@ def select_test_keys(
 
 def fit_preprocessor_metadata(
     feature_table: pd.DataFrame,
-    train_keys: pd.DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Fit preprocessor on feature_table restricted to train customer-months."""
-    return _fit_preprocessor_metadata(feature_table, train_keys, parameters)
+    """Fit preprocessor at customer-month granularity, decoupled from sampling."""
+    return _fit_preprocessor_metadata(feature_table, parameters)
 
 
 def apply_preprocessor_to_features(

@@ -13,6 +13,19 @@ schema:
     label: label
     score: score
     rank: rank
+  # Explicit category declarations for identity categorical columns whose
+  # distinct values cannot be discovered from feature_table (e.g. prod_name).
+  # Changing this list busts base_dataset_version.
+  categorical_values:
+    prod_name:
+      - ccard_bill
+      - ccard_cash
+      - ccard_ins
+      - exchange_fx
+      - exchange_usd
+      - fund_bond
+      - fund_mix
+      - fund_stock
 
 logging:
   level: INFO

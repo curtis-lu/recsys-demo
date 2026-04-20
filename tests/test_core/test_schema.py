@@ -103,3 +103,25 @@ class TestPureFunction:
         r1 = get_schema(params)
         r2 = get_schema(params)
         assert r1 == r2
+
+
+class TestCategoricalValues:
+    def test_default_empty_when_absent(self):
+        result = get_schema({})
+        assert result["categorical_values"] == {}
+
+    def test_returned_from_schema_section(self):
+        params = {
+            "schema": {
+                "categorical_values": {"prod_name": ["a", "b", "c"]},
+            }
+        }
+        result = get_schema(params)
+        assert result["categorical_values"] == {"prod_name": ["a", "b", "c"]}
+
+    def test_deep_copied(self):
+        values = ["a", "b"]
+        params = {"schema": {"categorical_values": {"prod_name": values}}}
+        result = get_schema(params)
+        result["categorical_values"]["prod_name"].append("c")
+        assert values == ["a", "b"]

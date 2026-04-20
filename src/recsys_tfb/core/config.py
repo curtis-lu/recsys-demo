@@ -15,6 +15,36 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _flatten_params(params: dict, prefix: str = "") -> dict[str, str]:
+    """Flatten nested dict into dotted keys, e.g. {'hive': {'db': 'x'}} → {'hive.db': 'x'}."""
+    result: dict[str, str] = {}
+    for key, value in params.items():
+        full = f"{prefix}{key}"
+        if isinstance(value, dict):
+            result.update(_flatten_params(value, prefix=f"{full}."))
+        else:
+            result[full] = str(value)
+    return result
+
+
+def _substitute(obj, params: dict[str, str]):
+    flat = _flatten_params(params)
+    return _apply(obj, flat)
+
+
+def _apply(obj, flat: dict[str, str]):
+    if isinstance(obj, dict):
+        return {k: _apply(v, flat) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_apply(v, flat) for v in obj]
+    if isinstance(obj, str):
+        out = obj
+        for key, value in flat.items():
+            out = out.replace(f"${{{key}}}", value)
+        return out
+    return obj
+
+
 class ConfigLoader:
     """Load and merge YAML config files from base and environment directories."""
 
@@ -56,20 +86,13 @@ class ConfigLoader:
         """Return catalog configuration dict.
 
         If runtime_params is provided, substitute ``${key}`` placeholders
-        in all ``filepath`` values with the corresponding value.
+        recursively in every string value (supports nested keys like
+        ``${hive.db}`` resolved from nested dicts in parameters).
         """
         catalog = self._config.get("catalog", {})
         if not runtime_params:
             return catalog
-        for entry in catalog.values():
-            if not isinstance(entry, dict):
-                continue
-            fp = entry.get("filepath")
-            if isinstance(fp, str):
-                for key, value in runtime_params.items():
-                    fp = fp.replace(f"${{{key}}}", value)
-                entry["filepath"] = fp
-        return catalog
+        return _substitute(catalog, runtime_params)
 
     def get_parameters(self) -> dict:
         """Return merged dict of all parameters*.yaml files."""

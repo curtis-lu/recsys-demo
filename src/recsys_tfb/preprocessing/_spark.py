@@ -69,37 +69,47 @@ def _compute_feature_columns(
 
 def fit_preprocessor_metadata(
     feature_table: DataFrame,
-    train_keys: DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Build preprocessor metadata from Spark feature_table restricted to train custmers-months.
+    """Build preprocessor metadata at customer-month granularity, decoupled from sampling.
 
-    Only small metadata (distinct category values) is collected to driver; no
-    ``toPandas()`` on full data. Fit happens at customer-month granularity so
-    future statistical transforms are not distorted by product fan-out.
+    Feature-categorical distinct values come from feature_table rows whose
+    ``time`` falls in ``[train_snap_date_start, train_snap_date_end]``.
+    Identity categoricals (not present in feature_table) come from
+    ``parameters["schema"]["categorical_values"][col]``; missing declarations
+    raise ``ValueError``.
+
+    Only small metadata (distinct category values) is collected to driver.
 
     Returns:
         (preprocessor_metadata, category_mappings)
     """
+    import pandas as pd
+
     schema = get_schema(parameters)
     drop_cols, categorical_cols = _get_preprocessing_config(parameters)
     identity_cols = schema["identity_columns"]
     time_col = schema["time"]
-    entity_cols = schema["entity"]
     label_col = schema["label"]
 
-    cm_key = [time_col] + entity_cols
-    train_cm = train_keys.select(*cm_key).dropDuplicates()
-    train_features = feature_table.join(F.broadcast(train_cm), on=cm_key, how="inner")
+    ds = parameters.get("dataset", {})
+    start = pd.Timestamp(ds["train_snap_date_start"])
+    end = pd.Timestamp(ds["train_snap_date_end"])
+    train_features = feature_table.filter(
+        (F.col(time_col) >= F.lit(start)) & (F.col(time_col) <= F.lit(end))
+    )
 
     ft_cols = set(feature_table.columns)
     feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
     identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
-    missing_cats = [c for c in identity_cat_cols if c not in train_keys.columns]
+
+    cat_values = schema.get("categorical_values", {})
+    missing_cats = [c for c in identity_cat_cols if c not in cat_values]
     if missing_cats:
         raise ValueError(
-            "Categorical columns not found in feature_table or train_keys: "
-            f"{missing_cats}"
+            "Identity categorical columns missing declarations in "
+            f"schema.categorical_values: {missing_cats}. Add them to "
+            "parameters.yaml under schema.categorical_values."
         )
 
     category_mappings: dict[str, list] = {}
@@ -113,14 +123,7 @@ def fit_preprocessor_metadata(
         )
         category_mappings[col] = [row[col] for row in distinct_rows]
     for col in identity_cat_cols:
-        distinct_rows = (
-            train_keys.select(col)
-            .filter(F.col(col).isNotNull())
-            .distinct()
-            .orderBy(col)
-            .collect()
-        )
-        category_mappings[col] = [row[col] for row in distinct_rows]
+        category_mappings[col] = list(cat_values[col])
 
     feature_columns = _compute_feature_columns(
         feature_table.columns,

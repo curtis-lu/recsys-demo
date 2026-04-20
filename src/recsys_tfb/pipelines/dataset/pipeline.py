@@ -51,10 +51,10 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             inputs=["label_table", "parameters"],
             outputs="test_keys",
         ),
-        # --- Fit preprocessor on train customer-months, before product fan-out ---
+        # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
         Node(
             fit_preprocessor_metadata,
-            inputs=["feature_table", "train_keys", "parameters"],
+            inputs=["feature_table", "parameters"],
             outputs=["preprocessor", "category_mappings"],
             name="fit_preprocessor_metadata",
         ),

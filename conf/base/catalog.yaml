@@ -14,66 +14,76 @@ sample_pool:
   filepath: data/sample_pool.parquet
   backend: pandas
 
-# Dataset Building Pipeline - Intermediate Outputs
-sample_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/sample_keys.parquet
-  backend: pandas
-
-train_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_keys.parquet
-  backend: pandas
-
-train_dev_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_dev_keys.parquet
-  backend: pandas
-
+# --- Dataset Building Pipeline ---
+# Base layer: artifacts invariant under train/calibration sampling changes.
 val_keys:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/val_keys.parquet
-  backend: pandas
-
-calibration_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/calibration_keys.parquet
+  filepath: data/dataset/${base_dataset_version}/val_keys.parquet
   backend: pandas
 
 test_keys:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/test_keys.parquet
+  filepath: data/dataset/${base_dataset_version}/test_keys.parquet
   backend: pandas
 
 preprocessed_feature_table:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/preprocessed_feature_table.parquet
-  backend: pandas
-
-# Dataset Building Pipeline - Model Inputs
-train_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_model_input.parquet
-  backend: pandas
-
-train_dev_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/train_dev_model_input.parquet
+  filepath: data/dataset/${base_dataset_version}/preprocessed_feature_table.parquet
   backend: pandas
 
 val_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/val_model_input.parquet
+  filepath: data/dataset/${base_dataset_version}/val_model_input.parquet
   backend: pandas
 
 test_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/test_model_input.parquet
+  filepath: data/dataset/${base_dataset_version}/test_model_input.parquet
+  backend: pandas
+
+preprocessor:
+  type: PickleDataset
+  filepath: data/dataset/${base_dataset_version}/preprocessor.pkl
+
+category_mappings:
+  type: JSONDataset
+  filepath: data/dataset/${base_dataset_version}/category_mappings.json
+
+# Train variant layer: keyed by (base, train_variant).
+sample_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/sample_keys.parquet
+  backend: pandas
+
+train_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_keys.parquet
+  backend: pandas
+
+train_dev_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_keys.parquet
+  backend: pandas
+
+train_model_input:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
+  backend: pandas
+
+train_dev_model_input:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
+  backend: pandas
+
+# Calibration variant layer: keyed by (base, calibration_variant).
+calibration_keys:
+  type: ParquetDataset
+  filepath: data/dataset/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_keys.parquet
   backend: pandas
 
 calibration_model_input:
   type: ParquetDataset
-  filepath: data/dataset/${dataset_version}/calibration_model_input.parquet
+  filepath: data/dataset/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
   backend: pandas
 
 # Training Pipeline
@@ -88,14 +98,6 @@ best_params:
 evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
-
-preprocessor:
-  type: PickleDataset
-  filepath: data/dataset/${dataset_version}/preprocessor.pkl
-
-category_mappings:
-  type: JSONDataset
-  filepath: data/dataset/${dataset_version}/category_mappings.json
 
 # Inference Pipeline
 scoring_dataset:

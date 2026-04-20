@@ -90,7 +90,7 @@ def work_dir():
     return wdir
 
 
-def _find_dataset_version_dir(work_dir: Path) -> Path:
+def _find_base_dir(work_dir: Path) -> Path:
     dataset_dir = work_dir / "data" / "dataset"
     version_dirs = [
         d for d in dataset_dir.iterdir()
@@ -100,21 +100,36 @@ def _find_dataset_version_dir(work_dir: Path) -> Path:
     return version_dirs[0]
 
 
+def _find_train_variant_dir(base_dir: Path) -> Path:
+    variants_root = base_dir / "train_variants"
+    variant_dirs = [
+        d for d in variants_root.iterdir()
+        if d.is_dir() and not d.is_symlink()
+    ]
+    assert len(variant_dirs) == 1
+    return variant_dirs[0]
+
+
 @pytest.fixture(scope="module")
-def dataset_version_dir(work_dir):
-    return _find_dataset_version_dir(work_dir)
+def base_dir(work_dir):
+    return _find_base_dir(work_dir)
 
 
-def test_x_train_has_new_columns(dataset_version_dir):
+@pytest.fixture(scope="module")
+def train_variant_dir(base_dir):
+    return _find_train_variant_dir(base_dir)
+
+
+def test_x_train_has_new_columns(train_variant_dir):
     """train_model_input 應包含信用卡特徵欄位。"""
-    X_train = pd.read_parquet(dataset_version_dir / "train_model_input.parquet")
+    X_train = pd.read_parquet(train_variant_dir / "train_model_input.parquet")
     for col in NEW_FEATURE_COLUMNS:
         assert col in X_train.columns, f"train_model_input 缺少欄位: {col}"
 
 
-def test_preprocessor_includes_new_columns(dataset_version_dir):
+def test_preprocessor_includes_new_columns(base_dir):
     """preprocessor 的 feature_columns 應包含信用卡特徵欄位。"""
-    with open(dataset_version_dir / "preprocessor.pkl", "rb") as f:
+    with open(base_dir / "preprocessor.pkl", "rb") as f:
         preprocessor = pickle.load(f)
     for col in NEW_FEATURE_COLUMNS:
         assert col in preprocessor["feature_columns"], (

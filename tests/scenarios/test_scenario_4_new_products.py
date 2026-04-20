@@ -5,7 +5,6 @@ category_mappings 和推論結果的正確性。
 """
 
 import json
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +21,6 @@ from tests.scenarios.conftest import (
 from tests.scenarios.data_generator import (
     BASE_SNAP_DATES,
     EXTENDED_PRODUCTS,
-    NUM_CUSTOMERS,
     generate_feature_table,
     generate_label_table,
 )
@@ -41,6 +39,13 @@ def work_dir():
     )
 
     config_overrides = {
+        "parameters": {
+            "schema": {
+                "categorical_values": {
+                    "prod_name": sorted(EXTENDED_PRODUCTS),
+                },
+            },
+        },
         "parameters_dataset": {
             "dataset": {
                 "train_snap_date_start": "2025-01-31",
@@ -93,7 +98,7 @@ def work_dir():
     return wdir
 
 
-def _find_dataset_version_dir(work_dir: Path) -> Path:
+def _find_base_dir(work_dir: Path) -> Path:
     dataset_dir = work_dir / "data" / "dataset"
     version_dirs = [
         d for d in dataset_dir.iterdir()
@@ -103,9 +108,24 @@ def _find_dataset_version_dir(work_dir: Path) -> Path:
     return version_dirs[0]
 
 
+def _find_train_variant_dir(base_dir: Path) -> Path:
+    variants_root = base_dir / "train_variants"
+    variant_dirs = [
+        d for d in variants_root.iterdir()
+        if d.is_dir() and not d.is_symlink()
+    ]
+    assert len(variant_dirs) == 1
+    return variant_dirs[0]
+
+
 @pytest.fixture(scope="module")
-def dataset_version_dir(work_dir):
-    return _find_dataset_version_dir(work_dir)
+def base_dir(work_dir):
+    return _find_base_dir(work_dir)
+
+
+@pytest.fixture(scope="module")
+def train_variant_dir(base_dir):
+    return _find_train_variant_dir(base_dir)
 
 
 @pytest.fixture(scope="module")
@@ -115,9 +135,9 @@ def ranked_predictions(work_dir):
     return pd.read_parquet(rp_files[0])
 
 
-def test_category_mappings_include_new_products(dataset_version_dir):
+def test_category_mappings_include_new_products(base_dir):
     """category_mappings 應包含 ploan 和 mloan。"""
-    cm_path = dataset_version_dir / "category_mappings.json"
+    cm_path = base_dir / "category_mappings.json"
     with open(cm_path) as f:
         cm = json.load(f)
     prod_categories = cm["prod_name"]
@@ -126,9 +146,9 @@ def test_category_mappings_include_new_products(dataset_version_dir):
     assert len(prod_categories) == EXPECTED_NUM_PRODUCTS
 
 
-def test_train_set_has_all_products(dataset_version_dir):
+def test_train_set_has_all_products(train_variant_dir):
     """train_model_input 的 prod_name 唯一值應為 10 個。"""
-    train_set = pd.read_parquet(dataset_version_dir / "train_model_input.parquet")
+    train_set = pd.read_parquet(train_variant_dir / "train_model_input.parquet")
     unique_products = train_set["prod_name"].nunique()
     assert unique_products == EXPECTED_NUM_PRODUCTS, (
         f"預期 {EXPECTED_NUM_PRODUCTS} 產品，實際: {unique_products}"

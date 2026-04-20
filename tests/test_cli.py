@@ -25,11 +25,15 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
         },
         "preprocessor": {
             "type": "PickleDataset",
-            "filepath": "data/dataset/${dataset_version}/preprocessor.pkl",
+            "filepath": "data/dataset/${base_dataset_version}/preprocessor.pkl",
         },
         "sample_keys": {
             "type": "ParquetDataset",
-            "filepath": "data/dataset/${dataset_version}/sample_keys.parquet",
+            "filepath": "data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/sample_keys.parquet",
+        },
+        "train_model_input": {
+            "type": "ParquetDataset",
+            "filepath": "data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet",
         },
         "scoring_dataset": {
             "type": "ParquetDataset",
@@ -50,13 +54,23 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
             yaml.dump(params_inference, f)
 
 
+def _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111"):
+    """Create base dataset dir with one train_variant and corresponding latest symlinks."""
+    dataset_dir = tmp_path / "data" / "dataset"
+    base_dir = dataset_dir / base_v
+    train_variant_dir = base_dir / "train_variants" / train_v
+    train_variant_dir.mkdir(parents=True)
+    (dataset_dir / "latest").symlink_to(base_dir.resolve())
+    (base_dir / "train_variants" / "latest").symlink_to(train_variant_dir.resolve())
+    return base_dir, train_variant_dir
+
+
 class TestCLI:
     def test_help(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "dataset" in result.output
         assert "training" in result.output
-        
 
     def test_help_shows_options(self):
         result = runner.invoke(app, ["--help"])
@@ -74,8 +88,11 @@ class TestCLI:
             os.chdir(old_cwd)
 
     def test_dataset_pipeline_uses_hash_version(self, tmp_path):
-        """Dataset pipeline computes hash-based dataset_version."""
-        _setup_conf(tmp_path, params_dataset={"sample_ratio": 0.1, "seed": 42})
+        """Dataset pipeline computes hash-based base_dataset_version and train_variant_id."""
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {"sample_ratio": 0.1, "train_dev_ratio": 0.2}},
+        )
 
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -84,27 +101,29 @@ class TestCLI:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
-                    result = runner.invoke(app, ["dataset"])
+                    runner.invoke(app, ["dataset"])
                     call_args = mock_catalog_cls.call_args[0][0]
-                    fp = call_args["sample_keys"]["filepath"]
-                    assert "${dataset_version}" not in fp
-                    # Hash is 8 hex chars
-                    assert re.search(r"data/dataset/[0-9a-f]{8}/", fp)
+                    fp_pp = call_args["preprocessor"]["filepath"]
+                    fp_sk = call_args["sample_keys"]["filepath"]
+                    assert "${base_dataset_version}" not in fp_pp
+                    assert "${train_variant_id}" not in fp_sk
+                    assert re.search(r"data/dataset/[0-9a-f]{8}/preprocessor.pkl", fp_pp)
+                    assert re.search(
+                        r"data/dataset/[0-9a-f]{8}/train_variants/[0-9a-f]{8}/sample_keys",
+                        fp_sk,
+                    )
         finally:
             os.chdir(old_cwd)
 
     def test_training_uses_hash_model_version(self, tmp_path):
-        """Training pipeline uses hash-based model_version."""
+        """Training pipeline resolves base + train_variant via latest symlinks."""
         _setup_conf(
             tmp_path,
-            params_dataset={"sample_ratio": 0.1},
+            params_dataset={"dataset": {"sample_ratio": 0.1}},
             params_training={"lr": 0.01},
         )
 
-        # Create dataset latest symlink
-        dataset_dir = tmp_path / "data" / "dataset" / "abc12345"
-        dataset_dir.mkdir(parents=True)
-        (tmp_path / "data" / "dataset" / "latest").symlink_to(dataset_dir.resolve())
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
 
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -113,29 +132,34 @@ class TestCLI:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
-                    result = runner.invoke(app, ["training"])
+                    runner.invoke(app, ["training"])
                     call_args = mock_catalog_cls.call_args[0][0]
                     fp = call_args["model"]["filepath"]
                     assert "${model_version}" not in fp
                     assert "models/best/" not in fp
-                    # Model version should be 8 hex chars
                     assert re.search(r"models/[0-9a-f]{8}/", fp)
-                    # dataset_version should be resolved
+                    # preprocessor uses base only
                     pp = call_args["preprocessor"]["filepath"]
                     assert "abc12345" in pp
+                    # train_model_input uses base + train_variant
+                    tmi = call_args["train_model_input"]["filepath"]
+                    assert "abc12345" in tmi
+                    assert "11111111" in tmi
         finally:
             os.chdir(old_cwd)
 
-    def test_training_with_explicit_dataset_version(self, tmp_path):
-        """Training pipeline accepts --dataset-version."""
+    def test_training_with_explicit_base_dataset_version(self, tmp_path):
+        """Training pipeline accepts --base-dataset-version and --train-variant."""
         _setup_conf(
             tmp_path,
-            params_dataset={"sample_ratio": 0.1},
+            params_dataset={"dataset": {"sample_ratio": 0.1}},
             params_training={"lr": 0.01},
         )
 
-        # Create the specified dataset version directory
-        (tmp_path / "data" / "dataset" / "deadbeef").mkdir(parents=True)
+        dataset_dir = tmp_path / "data" / "dataset"
+        base_dir = dataset_dir / "deadbeef"
+        tv_dir = base_dir / "train_variants" / "cafef00d"
+        tv_dir.mkdir(parents=True)
 
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -144,27 +168,38 @@ class TestCLI:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
-                    result = runner.invoke(
-                        app, ["training", "--dataset-version", "deadbeef"]
+                    runner.invoke(
+                        app,
+                        [
+                            "training",
+                            "--base-dataset-version", "deadbeef",
+                            "--train-variant", "cafef00d",
+                        ],
                     )
                     call_args = mock_catalog_cls.call_args[0][0]
                     pp = call_args["preprocessor"]["filepath"]
                     assert "deadbeef" in pp
+                    tmi = call_args["train_model_input"]["filepath"]
+                    assert "deadbeef" in tmi
+                    assert "cafef00d" in tmi
         finally:
             os.chdir(old_cwd)
 
     def test_inference_uses_actual_model_hash(self, tmp_path):
-        """Inference pipeline uses actual model hash for output, best symlink for model read."""
+        """Inference reads base/train_variant from model manifest; outputs under model hash."""
         _setup_conf(
             tmp_path,
-            params_inference={"snap_dates": ["2024-03-31"]},
+            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
         )
 
-        # Create best symlink pointing to a model with manifest
         models_dir = tmp_path / "data" / "models"
         version_dir = models_dir / "a1b2c3d4"
         version_dir.mkdir(parents=True)
-        manifest = {"version": "a1b2c3d4", "dataset_version": "deadbeef"}
+        manifest = {
+            "version": "a1b2c3d4",
+            "base_dataset_version": "deadbeef",
+            "train_variant_id": "cafef00d",
+        }
         (version_dir / "manifest.json").write_text(json.dumps(manifest))
         (models_dir / "best").symlink_to(version_dir.resolve())
 
@@ -177,9 +212,10 @@ class TestCLI:
                 with patch("recsys_tfb.__main__.Runner"):
                     runner.invoke(app, ["inference"])
                     call_args = mock_catalog_cls.call_args[0][0]
-                    # model and preprocessor still read via "best" symlink
+                    # model read via "best" symlink
                     fp = call_args["model"]["filepath"]
                     assert fp == "data/models/best/model.txt"
+                    # preprocessor read via base hash
                     pp = call_args["preprocessor"]["filepath"]
                     assert "deadbeef" in pp
                     # scoring_dataset output uses actual model hash
@@ -193,10 +229,7 @@ class TestCLI:
     def test_training_pipeline_fails_without_inputs(self, tmp_path):
         _setup_conf(tmp_path)
 
-        # Create dataset latest symlink so version resolves
-        dataset_dir = tmp_path / "data" / "dataset" / "abc12345"
-        dataset_dir.mkdir(parents=True)
-        (tmp_path / "data" / "dataset" / "latest").symlink_to(dataset_dir.resolve())
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
 
         old_cwd = os.getcwd()
         os.chdir(tmp_path)

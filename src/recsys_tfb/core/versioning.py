@@ -1,9 +1,20 @@
 """Version management for pipeline artifacts.
 
-Provides hash-based version IDs, manifest generation, symlink management,
-and version resolution for dataset, training, and inference pipelines.
+Provides three-layer hash-based version IDs for dataset pipeline:
+
+- ``base_dataset_version``: derived from non-sampling dataset params + full
+  schema. Keys outputs that are invariant under sampling changes (preprocessor,
+  category_mappings, preprocessed_feature_table, val/test model_input).
+- ``train_variant_id``: derived from train-sampling params only. Keys
+  train/train_dev model_input under the base dataset directory.
+- ``calibration_variant_id``: derived from calibration-sampling params only.
+  Keys calibration model_input under the base dataset directory.
+
+Also provides manifest generation, symlink management, and version resolution
+for dataset, training, and inference pipelines.
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -17,31 +28,68 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-def compute_dataset_version(params: dict, schema: dict | None = None) -> str:
-    """Compute dataset version ID from parameters_dataset + schema.
+TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
+    "sample_ratio",
+    "sample_ratio_overrides",
+    "sample_group_keys",
+    "train_dev_ratio",
+})
+CALIBRATION_SAMPLING_KEYS: frozenset[str] = frozenset({
+    "calibration_sample_ratio",
+    "calibration_sample_ratio_overrides",
+    "sample_group_keys",
+})
+ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
 
-    Returns the first 8 hex characters of the SHA-256 hash of the canonical
-    YAML representation of ``{"dataset": params, "schema": schema}``.
 
-    ``schema`` is the canonical schema dict (see :func:`core.schema.get_schema_for_hash`);
-    when None, only ``params`` is hashed to preserve backward-compatibility with
-    callers that have not yet migrated.  The CLI always passes a schema.
-    """
-    payload: dict = {"dataset": params}
-    if schema is not None:
-        payload["schema"] = schema
+def _hash8(payload: dict) -> str:
     canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 
-def compute_model_version(params: dict, dataset_version: str) -> str:
-    """Compute model version ID from training parameters and dataset version.
+def compute_base_dataset_version(params: dict, schema: dict) -> str:
+    """Hash non-sampling dataset params together with the canonical schema.
 
-    Returns the first 8 hex characters of the SHA-256 hash of the
-    canonical YAML representation concatenated with the dataset_version.
+    The resulting ID keys pipeline outputs that are invariant under sampling
+    changes. ``params`` is the ``parameters_dataset`` dict; any keys in
+    ``ALL_SAMPLING_KEYS`` under ``params["dataset"]`` are stripped before
+    hashing so train/calibration sampling experiments do not invalidate
+    val/test/preprocessor artifacts.
     """
+    stripped = copy.deepcopy(params)
+    ds = stripped.get("dataset")
+    if isinstance(ds, dict):
+        for key in ALL_SAMPLING_KEYS:
+            ds.pop(key, None)
+    return _hash8({"dataset": stripped, "schema": schema})
+
+
+def compute_train_variant_id(params: dict) -> str:
+    """Hash only the train-sampling subset of dataset params."""
+    ds = params.get("dataset", {}) if isinstance(params, dict) else {}
+    subset = {k: ds[k] for k in TRAIN_SAMPLING_KEYS if k in ds}
+    return _hash8({"train_sampling": subset})
+
+
+def compute_calibration_variant_id(params: dict) -> str:
+    """Hash only the calibration-sampling subset of dataset params."""
+    ds = params.get("dataset", {}) if isinstance(params, dict) else {}
+    subset = {k: ds[k] for k in CALIBRATION_SAMPLING_KEYS if k in ds}
+    return _hash8({"calibration_sampling": subset})
+
+
+def compute_model_version(
+    params: dict,
+    base_dataset_version: str,
+    train_variant_id: str,
+    calibration_variant_id: str | None = None,
+) -> str:
+    """Compute model version ID from training params and dataset variant IDs."""
     canonical = yaml.dump(params, sort_keys=True, default_flow_style=False)
-    combined = canonical + dataset_version
+    parts = [canonical, base_dataset_version, train_variant_id]
+    if calibration_variant_id is not None:
+        parts.append(calibration_variant_id)
+    combined = "".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:8]
 
 
@@ -80,13 +128,11 @@ def update_symlink(target: Path, link: Path) -> None:
     logger.info("Symlink %s -> %s", link, target)
 
 
-def resolve_dataset_version(dataset_dir: Path, version: str | None) -> str:
-    """Resolve which dataset version to use.
+def resolve_base_dataset_version(dataset_dir: Path, version: str | None) -> str:
+    """Resolve which base dataset version to use.
 
-    If *version* is provided, return it directly.
-    If None, follow the ``latest`` symlink under *dataset_dir*.
-
-    Raises FileNotFoundError if latest symlink does not exist.
+    If *version* is provided, return it directly. Otherwise follow the
+    ``latest`` symlink under *dataset_dir*.
     """
     if version is not None:
         return version
@@ -95,7 +141,32 @@ def resolve_dataset_version(dataset_dir: Path, version: str | None) -> str:
     if not latest.exists():
         raise FileNotFoundError(
             f"No 'latest' symlink found in {dataset_dir}. "
-            "Run the dataset pipeline first or specify --dataset-version."
+            "Run the dataset pipeline first or specify --base-dataset-version."
+        )
+    return latest.resolve().name
+
+
+def resolve_variant_id(base_dir: Path, variant_kind: str, variant: str | None) -> str:
+    """Resolve a train/calibration variant ID under a base dataset directory.
+
+    ``variant_kind`` must be ``"train"`` or ``"calibration"``. If *variant* is
+    provided, return it directly. Otherwise follow the ``latest`` symlink
+    inside ``{base_dir}/{variant_kind}_variants``.
+    """
+    if variant_kind not in ("train", "calibration"):
+        raise ValueError(
+            f"variant_kind must be 'train' or 'calibration', got {variant_kind!r}"
+        )
+
+    if variant is not None:
+        return variant
+
+    variants_root = base_dir / f"{variant_kind}_variants"
+    latest = variants_root / "latest"
+    if not latest.exists():
+        raise FileNotFoundError(
+            f"No 'latest' symlink found in {variants_root}. "
+            f"Run the dataset pipeline first or specify --{variant_kind}-variant."
         )
     return latest.resolve().name
 
@@ -145,11 +216,19 @@ def build_manifest_metadata(
     version: str,
     pipeline: str,
     parameters: dict,
-    dataset_version: str | None = None,
+    base_dataset_version: str | None = None,
+    train_variant_id: str | None = None,
+    calibration_variant_id: str | None = None,
     model_version: str | None = None,
+    parent_version: str | None = None,
+    variant_kind: str | None = None,
     artifacts: list[str] | None = None,
 ) -> dict:
-    """Build a manifest metadata dict with standard fields."""
+    """Build a manifest metadata dict with standard fields.
+
+    ``parent_version`` and ``variant_kind`` are written on variant sub-directory
+    manifests to link them back to their base dataset manifest.
+    """
     metadata: dict = {
         "version": version,
         "pipeline": pipeline,
@@ -157,10 +236,18 @@ def build_manifest_metadata(
         "git_commit": get_git_commit(),
         "parameters": parameters,
     }
-    if dataset_version is not None:
-        metadata["dataset_version"] = dataset_version
+    if base_dataset_version is not None:
+        metadata["base_dataset_version"] = base_dataset_version
+    if train_variant_id is not None:
+        metadata["train_variant_id"] = train_variant_id
+    if calibration_variant_id is not None:
+        metadata["calibration_variant_id"] = calibration_variant_id
     if model_version is not None:
         metadata["model_version"] = model_version
+    if parent_version is not None:
+        metadata["parent_version"] = parent_version
+    if variant_kind is not None:
+        metadata["variant_kind"] = variant_kind
     if artifacts is not None:
         metadata["artifacts"] = artifacts
     return metadata
