@@ -88,6 +88,7 @@ class Runner:
                 logger.error(
                     "Node '%s' failed after %.2fs: %s",
                     node.name, duration, exc,
+                    exc_info=True,
                     extra={
                         "event": "node_failed",
                         "node": node.name,

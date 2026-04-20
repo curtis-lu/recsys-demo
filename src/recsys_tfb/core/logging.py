@@ -75,6 +75,11 @@ class JsonFormatter(logging.Formatter):
             if val is not None:
                 log_entry[key] = val
 
+        if record.exc_info:
+            log_entry["traceback"] = self.formatException(record.exc_info)
+        elif record.exc_text:
+            log_entry["traceback"] = record.exc_text
+
         return json.dumps(log_entry, ensure_ascii=False, default=str)
 
 
@@ -96,7 +101,10 @@ class ConsoleFormatter(logging.Formatter):
         else:
             label = record.name
 
-        return f"[{ts}] {level} [{label}] {record.getMessage()}"
+        msg = f"[{ts}] {level} [{label}] {record.getMessage()}"
+        if record.exc_info:
+            msg += "\n" + self.formatException(record.exc_info)
+        return msg
 
 
 def setup_logging(
