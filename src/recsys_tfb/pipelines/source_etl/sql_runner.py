@@ -132,6 +132,7 @@ class SQLRunner:
         from pyspark.sql import SparkSession
 
         spark = SparkSession.builder.getOrCreate()
+        spark.sql(f"CREATE DATABASE IF NOT EXISTS {self._target_db}")
         audit = None
         if self._audit_config:
             resolved_audit = {
@@ -185,7 +186,12 @@ class SQLRunner:
         table_start = time.monotonic()
         try:
             logger.info("Executing %s ...", table.name)
-            spark.sql(full_sql)
+            if not spark.catalog.tableExists(f"{self._target_db}.{table.name}"):
+                logger.info("Table %s.%s not found, creating via CTAS", self._target_db, table.name)
+                ctas_sql = SQLRenderer.build_ctas(table, select_sql, self._target_db)
+                spark.sql(ctas_sql)
+            else:
+                spark.sql(full_sql)
             duration = time.monotonic() - table_start
             logger.info(
                 "Completed %s in %.1fs", table.name, duration

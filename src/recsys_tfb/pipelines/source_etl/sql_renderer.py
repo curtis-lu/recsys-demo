@@ -55,3 +55,19 @@ class SQLRenderer:
             f"PARTITION ({partition_spec})\n"
             f"{select_body}"
         )
+
+    @staticmethod
+    def build_ctas(
+        table_config: TableConfig,
+        select_sql: str,
+        target_db: str,
+    ) -> str:
+        """Assemble a CREATE TABLE ... AS SELECT for first-time table creation."""
+        select_body = SQLRenderer.strip_header_comments(select_sql)
+        partition_spec = ", ".join(table_config.partition_by)
+        return (
+            f"CREATE TABLE {target_db}.{table_config.name} "
+            f"USING PARQUET "
+            f"PARTITIONED BY ({partition_spec})\n"
+            f"AS\n{select_body}"
+        )
