@@ -162,7 +162,15 @@ def source_etl(
         logger.error("No snap_dates provided. Use --snap-dates or set in config.")
         raise typer.Exit(code=1)
 
-    runner = SQLRunner(config=etl_config, sql_dir=sql_dir, dry_run=dry_run)
+    rendered_sql_dir_str = etl_config.get("rendered_sql_dir")
+    rendered_sql_dir = Path(rendered_sql_dir_str) if rendered_sql_dir_str else None
+
+    runner = SQLRunner(
+        config=etl_config,
+        sql_dir=sql_dir,
+        dry_run=dry_run,
+        rendered_sql_dir=rendered_sql_dir,
+    )
     try:
         runner.run(snap_dates=date_list, restart_from=restart_from, run_id=run_context.run_id)
     except Exception:

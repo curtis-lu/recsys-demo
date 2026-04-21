@@ -38,6 +38,7 @@ class SQLRunner:
         config: dict,
         sql_dir: Path,
         dry_run: bool = False,
+        rendered_sql_dir: Path | None = None,
     ) -> None:
         self._tables = [TableConfig.from_dict(t) for t in config["tables"]]
         self._source_checks = [
@@ -48,11 +49,22 @@ class SQLRunner:
         self._audit_config = config.get("audit", {})
         self._sql_dir = sql_dir
         self._dry_run = dry_run
+        self._rendered_sql_dir = rendered_sql_dir
         self._renderer = SQLRenderer(sql_dir)
         self._target_db = self._variables.get("target_db", "default")
 
         # Validate depends_on consistency at init time
         self._validate_order()
+
+    def _write_rendered_sql(
+        self, run_id: str, snap_date: str, table_name: str, sql: str
+    ) -> None:
+        out_dir = self._rendered_sql_dir / run_id / snap_date
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{table_name}.sql").write_text(sql, encoding="utf-8")
+        logger.debug(
+            "Rendered SQL written: %s/%s/%s.sql", run_id, snap_date, table_name
+        )
 
     def _validate_order(self) -> None:
         """Verify that depends_on declarations are consistent with list order.
@@ -176,6 +188,9 @@ class SQLRunner:
             table, select_sql, self._target_db
         )
 
+        if self._rendered_sql_dir:
+            self._write_rendered_sql(run_id, snap_date, table.name, full_sql)
+
         if self._dry_run:
             logger.info(
                 "DRY RUN [%s]:\n%s", table.name, full_sql
@@ -186,10 +201,22 @@ class SQLRunner:
         table_start = time.monotonic()
         try:
             logger.info("Executing %s ...", table.name)
-            if not spark.catalog.tableExists(f"{self._target_db}.{table.name}"):
+            if not spark.catalog.tableExists(table.name, self._target_db):
                 logger.info("Table %s.%s not found, creating via CTAS", self._target_db, table.name)
                 ctas_sql = SQLRenderer.build_ctas(table, select_sql, self._target_db)
-                spark.sql(ctas_sql)
+                try:
+                    spark.sql(ctas_sql)
+                except Exception as ctas_exc:
+                    if "already exists" in str(ctas_exc).lower():
+                        logger.warning(
+                            "CTAS failed with 'already exists' for %s.%s - "
+                            "catalog inconsistency detected, falling back to INSERT OVERWRITE",
+                            self._target_db,
+                            table.name,
+                        )
+                        spark.sql(full_sql)
+                    else:
+                        raise
             else:
                 spark.sql(full_sql)
             duration = time.monotonic() - table_start

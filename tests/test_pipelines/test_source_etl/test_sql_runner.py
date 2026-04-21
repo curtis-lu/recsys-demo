@@ -119,6 +119,43 @@ class TestRestartFromValidation:
             runner.run(snap_dates=["2024-01-31"], restart_from="nonexistent")
 
 
+class TestRenderedSqlDir:
+    def test_files_written_in_dry_run(self, sql_dir, tmp_path):
+        """rendered_sql_dir writes one .sql file per table per snap_date."""
+        out_dir = tmp_path / "rendered_sql"
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True, rendered_sql_dir=out_dir)
+        runner.run(snap_dates=["2024-01-31"], run_id="test_run")
+
+        snap_dir = out_dir / "test_run" / "2024-01-31"
+        assert snap_dir.is_dir()
+        written = {f.name for f in snap_dir.iterdir()}
+        assert written == {"feature_aum.sql", "feature_sav.sql", "feature_concat.sql"}
+
+        content = (snap_dir / "feature_aum.sql").read_text()
+        assert "INSERT OVERWRITE TABLE" in content
+        assert "PARTITION" in content
+        assert "2024-01-31" in content
+
+    def test_no_files_without_rendered_sql_dir(self, sql_dir, tmp_path):
+        """Without rendered_sql_dir, no files should be written."""
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        runner.run(snap_dates=["2024-01-31"], run_id="test_run")
+        # No rendered_sql directory should be created anywhere
+        assert not any((tmp_path / p).exists() for p in ["rendered_sql"])
+
+    def test_multiple_snap_dates_separate_dirs(self, sql_dir, tmp_path):
+        """Each snap_date gets its own subdirectory."""
+        out_dir = tmp_path / "rendered_sql"
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True, rendered_sql_dir=out_dir)
+        runner.run(snap_dates=["2024-01-31", "2024-02-29"], run_id="test_run")
+
+        assert (out_dir / "test_run" / "2024-01-31").is_dir()
+        assert (out_dir / "test_run" / "2024-02-29").is_dir()
+
+
 class TestSourceChecksConfig:
     def test_source_checks_parsed(self, sql_dir):
         """Source checks from config should be parsed into SourceCheckConfig."""
