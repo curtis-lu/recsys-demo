@@ -65,26 +65,89 @@ class TestStripHeaderComments:
 
 
 class TestBuildInsertOverwrite:
-    def test_single_partition(self):
+    def test_partition_names_only_no_types(self):
         cfg = TableConfig(
             name="feature_aum",
             sql_file="feature/feature_aum.sql",
-            partition_by=["snap_date"],
+            partition_by={"snap_date": "DATE"},
         )
-        result = SQLRenderer.build_insert_overwrite(
-            cfg, "--partition by: snap_date\n\nSELECT 1", "ml_feature"
-        )
+        result = SQLRenderer.build_insert_overwrite(cfg, "SELECT 1", "ml_feature")
         assert result.startswith(
             "INSERT OVERWRITE TABLE ml_feature.feature_aum PARTITION (snap_date)"
         )
-        assert "SELECT 1" in result
-        assert "--partition by" not in result
+        assert "PARTITION (snap_date DATE)" not in result
 
     def test_multiple_partitions(self):
         cfg = TableConfig(
             name="label_ccard",
             sql_file="label/label_ccard.sql",
-            partition_by=["prod_name", "snap_date"],
+            partition_by={"prod_name": "STRING", "snap_date": "DATE"},
         )
         result = SQLRenderer.build_insert_overwrite(cfg, "SELECT 1", "ml_feature")
         assert "PARTITION (prod_name, snap_date)" in result
+
+
+class TestBuildAlignedSelect:
+    def test_single_partition_cast_and_order(self):
+        result = SQLRenderer.build_aligned_select(
+            select_sql="SELECT cust_id, amt, snap_date FROM t",
+            select_columns=["cust_id", "amt", "snap_date"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert "CAST(snap_date AS DATE) AS snap_date" in result
+        assert result.index("cust_id") < result.index("CAST(snap_date")
+
+    def test_multi_partition_in_config_order(self):
+        result = SQLRenderer.build_aligned_select(
+            select_sql="SELECT cust_id, prod_name, snap_date FROM t",
+            select_columns=["cust_id", "prod_name", "snap_date"],
+            partition_by={"prod_name": "STRING", "snap_date": "DATE"},
+        )
+        assert result.index("CAST(prod_name") < result.index("CAST(snap_date")
+
+    def test_case_insensitive(self):
+        result = SQLRenderer.build_aligned_select(
+            select_sql="SELECT CUST_ID, Snap_Date FROM t",
+            select_columns=["CUST_ID", "Snap_Date"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert "CAST(Snap_Date AS DATE) AS snap_date" in result
+
+    def test_missing_partition_raises(self):
+        with pytest.raises(ValueError, match="missing from SELECT output"):
+            SQLRenderer.build_aligned_select(
+                select_sql="SELECT cust_id FROM t",
+                select_columns=["cust_id"],
+                partition_by={"snap_date": "DATE"},
+            )
+
+    def test_strips_header_comments(self):
+        result = SQLRenderer.build_aligned_select(
+            select_sql="--partition by: snap_date\nSELECT snap_date FROM t",
+            select_columns=["snap_date"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert "--partition by" not in result
+
+
+class TestBuildHiveCtas:
+    def test_emits_stored_as_parquet_not_using(self):
+        cfg = TableConfig(
+            name="feature_aum",
+            sql_file="feature/feature_aum.sql",
+            partition_by={"snap_date": "DATE"},
+        )
+        result = SQLRenderer.build_hive_ctas(cfg, "SELECT 1", "ml_feature")
+        assert "STORED AS PARQUET" in result
+        assert "USING PARQUET" not in result
+        assert "PARTITIONED BY (snap_date DATE)" in result
+        assert "CREATE TABLE ml_feature.feature_aum" in result
+
+    def test_multi_partition_types(self):
+        cfg = TableConfig(
+            name="label_ccard",
+            sql_file="label/label_ccard.sql",
+            partition_by={"prod_name": "STRING", "snap_date": "DATE"},
+        )
+        result = SQLRenderer.build_hive_ctas(cfg, "SELECT 1", "ml_feature")
+        assert "PARTITIONED BY (prod_name STRING, snap_date DATE)" in result

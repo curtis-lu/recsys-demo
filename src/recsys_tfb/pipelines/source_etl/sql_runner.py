@@ -179,49 +179,59 @@ class SQLRunner:
         table: TableConfig,
         snap_date: str,
         run_id: str,
-        audit: AuditWriter | None
+        audit: AuditWriter | None,
     ) -> bool:
         """Execute a single table rendering, Spark SQL processing, and output quality check."""
         variables = {**self._variables, "snap_date": snap_date}
         select_sql = self._renderer.render(table.sql_file, variables)
-        full_sql = SQLRenderer.build_insert_overwrite(
-            table, select_sql, self._target_db
-        )
-
-        if self._rendered_sql_dir:
-            self._write_rendered_sql(run_id, snap_date, table.name, full_sql)
 
         if self._dry_run:
-            logger.info(
-                "DRY RUN [%s]:\n%s", table.name, full_sql
+            dry_sql = (
+                "-- DRY RUN: table existence not checked; partition CAST skipped.\n"
+                + SQLRenderer.build_insert_overwrite(
+                    table,
+                    SQLRenderer.strip_header_comments(select_sql),
+                    self._target_db,
+                )
             )
+            if self._rendered_sql_dir:
+                self._write_rendered_sql(run_id, snap_date, table.name, dry_sql)
+            logger.info("DRY RUN [%s]:\n%s", table.name, dry_sql)
             return True
 
-        # Execute
+        # Real run: infer SELECT columns, build aligned SELECT, choose CTAS vs INSERT.
         table_start = time.monotonic()
         try:
-            logger.info("Executing %s ...", table.name)
+            body = SQLRenderer.strip_header_comments(select_sql)
+            columns = spark.sql(
+                f"SELECT * FROM (\n{body}\n) _cols LIMIT 0"
+            ).columns
+            aligned_select = SQLRenderer.build_aligned_select(
+                select_sql, columns, table.partition_by
+            )
             if not spark.catalog.tableExists(table.name, self._target_db):
                 logger.info(
-                    "Table %s.%s not found, inferring schema and creating via Hive DDL",
+                    "Table %s.%s not found, creating via Hive CTAS",
                     self._target_db, table.name,
                 )
-                select_body = SQLRenderer.strip_header_comments(select_sql)
-                schema_df = spark.sql(f"SELECT * FROM ({select_body}) _schema_infer LIMIT 0")
-                create_ddl = SQLRenderer.build_create_table_ddl(
-                    table, schema_df.schema, self._target_db
+                final_sql = SQLRenderer.build_hive_ctas(
+                    table, aligned_select, self._target_db
                 )
-                spark.sql(create_ddl)
-            spark.sql(full_sql)
+            else:
+                final_sql = SQLRenderer.build_insert_overwrite(
+                    table, aligned_select, self._target_db
+                )
+
+            if self._rendered_sql_dir:
+                self._write_rendered_sql(run_id, snap_date, table.name, final_sql)
+
+            logger.info("Executing %s ...", table.name)
+            spark.sql(final_sql)
             duration = time.monotonic() - table_start
-            logger.info(
-                "Completed %s in %.1fs", table.name, duration
-            )
+            logger.info("Completed %s in %.1fs", table.name, duration)
         except Exception as exc:
             duration = time.monotonic() - table_start
-            logger.error(
-                "Failed %s after %.1fs: %s", table.name, duration, exc
-            )
+            logger.error("Failed %s after %.1fs: %s", table.name, duration, exc)
             if audit:
                 audit.write_record(
                     AuditRecord(
@@ -235,14 +245,10 @@ class SQLRunner:
                 )
             return False
 
-        # Output quality checks
         row_count = self._run_output_checks(
             spark, table, snap_date, run_id, audit, duration
         )
-        if row_count < 0:
-            return False
-            
-        return True
+        return row_count >= 0
 
     def _run_source_checks(
         self,

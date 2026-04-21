@@ -14,7 +14,7 @@ class TestTableConfig:
         data = {
             "name": "feature_aum",
             "sql_file": "feature/feature_aum.sql",
-            "partition_by": ["snap_date"],
+            "partition_by": {"snap_date": "DATE"},
             "primary_key": ["snap_date", "cust_id"],
             "depends_on": ["feature_info"],
             "quality_checks": {"min_row_count": 1000, "max_null_ratio": 0.05},
@@ -22,7 +22,7 @@ class TestTableConfig:
         cfg = TableConfig.from_dict(data)
         assert cfg.name == "feature_aum"
         assert cfg.sql_file == "feature/feature_aum.sql"
-        assert cfg.partition_by == ["snap_date"]
+        assert cfg.partition_by == {"snap_date": "DATE"}
         assert cfg.primary_key == ["snap_date", "cust_id"]
         assert cfg.depends_on == ["feature_info"]
         assert cfg.quality_checks["min_row_count"] == 1000
@@ -31,7 +31,7 @@ class TestTableConfig:
         data = {
             "name": "feature_sav",
             "sql_file": "feature/feature_sav.sql",
-            "partition_by": ["snap_date"],
+            "partition_by": {"snap_date": "DATE"},
         }
         cfg = TableConfig.from_dict(data)
         assert cfg.name == "feature_sav"
@@ -42,6 +42,30 @@ class TestTableConfig:
     def test_from_dict_missing_required_raises(self):
         with pytest.raises(KeyError):
             TableConfig.from_dict({"name": "x", "sql_file": "x.sql"})
+
+    def test_partition_by_dict(self):
+        cfg = TableConfig.from_dict({
+            "name": "feature_aum",
+            "sql_file": "feature/feature_aum.sql",
+            "partition_by": {"snap_date": "DATE"},
+        })
+        assert cfg.partition_by == {"snap_date": "DATE"}
+
+    def test_partition_by_list_raises_with_migration_hint(self):
+        with pytest.raises(ValueError, match="Migrate"):
+            TableConfig.from_dict({
+                "name": "feature_aum",
+                "sql_file": "feature/feature_aum.sql",
+                "partition_by": ["snap_date"],
+            })
+
+    def test_multi_partition_order_preserved(self):
+        cfg = TableConfig.from_dict({
+            "name": "label_ccard",
+            "sql_file": "label/label_ccard.sql",
+            "partition_by": {"prod_name": "STRING", "snap_date": "DATE"},
+        })
+        assert list(cfg.partition_by.keys()) == ["prod_name", "snap_date"]
 
 
 class TestSourceCheckConfig:

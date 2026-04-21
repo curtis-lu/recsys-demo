@@ -11,17 +11,28 @@ class TableConfig:
 
     name: str
     sql_file: str
-    partition_by: list[str]
+    partition_by: dict[str, str]  # ordered: {col_name: data_type}, e.g. {"snap_date": "DATE"}
     primary_key: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     quality_checks: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> TableConfig:
+        raw_pb = data["partition_by"]
+        if isinstance(raw_pb, list):
+            raise ValueError(
+                f"Table '{data['name']}': partition_by must be a mapping "
+                f"{{col_name: data_type}}, not a list. "
+                f"Migrate '[col]' to '{{col: TYPE}}' (e.g. snap_date: DATE)."
+            )
+        if not isinstance(raw_pb, dict) or not raw_pb:
+            raise ValueError(
+                f"Table '{data['name']}': partition_by must be a non-empty mapping."
+            )
         return cls(
             name=data["name"],
             sql_file=data["sql_file"],
-            partition_by=data["partition_by"],
+            partition_by=dict(raw_pb),
             primary_key=data.get("primary_key", []),
             depends_on=data.get("depends_on", []),
             quality_checks=data.get("quality_checks", {}),

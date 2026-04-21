@@ -1,5 +1,7 @@
 """Tests for SQLRunner."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
@@ -39,22 +41,39 @@ def _base_config():
             {
                 "name": "feature_aum",
                 "sql_file": "feature/feature_aum.sql",
-                "partition_by": ["snap_date"],
+                "partition_by": {"snap_date": "DATE"},
                 "primary_key": ["snap_date", "cust_id"],
             },
             {
                 "name": "feature_sav",
                 "sql_file": "feature/feature_sav.sql",
-                "partition_by": ["snap_date"],
+                "partition_by": {"snap_date": "DATE"},
             },
             {
                 "name": "feature_concat",
                 "sql_file": "feature/feature_concat.sql",
-                "partition_by": ["snap_date"],
+                "partition_by": {"snap_date": "DATE"},
                 "depends_on": ["feature_aum", "feature_sav"],
             },
         ],
     }
+
+
+def _make_spark_mock(columns=None, table_exists=False):
+    spark = MagicMock()
+    spark.catalog.tableExists.return_value = table_exists
+    limit0_df = MagicMock()
+    limit0_df.columns = columns or ["cust_id", "total_aum", "snap_date"]
+    _call_count = [0]
+
+    def _side_effect(*args, **kwargs):
+        _call_count[0] += 1
+        if _call_count[0] == 1:
+            return limit0_df
+        return MagicMock()
+
+    spark.sql.side_effect = _side_effect
+    return spark
 
 
 class TestValidateOrder:
@@ -171,3 +190,75 @@ class TestSourceChecksConfig:
         assert len(runner._source_checks) == 1
         assert runner._source_checks[0].table_name == "feature_store.feat_aum"
         assert runner._source_checks[0].min_row_count == 1000000
+
+
+class TestProcessSingleTableFirstRun:
+    def test_emits_ctas_and_writes_rendered_sql(self, tmp_path, sql_dir):
+        """First run (table absent) should emit Hive CTAS and write it to rendered_sql."""
+        spark = _make_spark_mock(table_exists=False)
+        config = {
+            "variables": {"target_db": "ml_feature"},
+            "tables": [
+                {
+                    "name": "feature_aum",
+                    "sql_file": "feature/feature_aum.sql",
+                    "partition_by": {"snap_date": "DATE"},
+                    "primary_key": ["snap_date", "cust_id"],
+                }
+            ],
+        }
+        runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+        files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
+        assert files, "rendered SQL not written"
+        content = files[0].read_text()
+        assert "STORED AS PARQUET" in content
+        assert "INSERT OVERWRITE" not in content
+
+
+class TestProcessSingleTableExistingRun:
+    def test_emits_insert_overwrite(self, tmp_path, sql_dir):
+        """Subsequent run (table present) should emit INSERT OVERWRITE with CAST."""
+        spark = _make_spark_mock(table_exists=True)
+        config = {
+            "variables": {"target_db": "ml_feature"},
+            "tables": [
+                {
+                    "name": "feature_aum",
+                    "sql_file": "feature/feature_aum.sql",
+                    "partition_by": {"snap_date": "DATE"},
+                    "primary_key": ["snap_date", "cust_id"],
+                }
+            ],
+        }
+        runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+        files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
+        assert files
+        content = files[0].read_text()
+        assert "INSERT OVERWRITE" in content
+        assert "CAST(snap_date AS DATE)" in content
+
+
+class TestProcessSingleTableMissingPartition:
+    def test_no_insert_when_partition_col_absent(self, tmp_path, sql_dir):
+        """If SELECT output lacks a partition column, no INSERT OVERWRITE is executed."""
+        spark = _make_spark_mock(columns=["cust_id", "total_aum"], table_exists=True)
+        config = {
+            "variables": {"target_db": "ml_feature"},
+            "tables": [
+                {
+                    "name": "feature_aum",
+                    "sql_file": "feature/feature_aum.sql",
+                    "partition_by": {"snap_date": "DATE"},
+                    "primary_key": ["snap_date", "cust_id"],
+                }
+            ],
+        }
+        runner = SQLRunner(config, sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        assert not any("INSERT OVERWRITE" in s for s in executed)
