@@ -202,23 +202,17 @@ class SQLRunner:
         try:
             logger.info("Executing %s ...", table.name)
             if not spark.catalog.tableExists(table.name, self._target_db):
-                logger.info("Table %s.%s not found, creating via CTAS", self._target_db, table.name)
-                ctas_sql = SQLRenderer.build_ctas(table, select_sql, self._target_db)
-                try:
-                    spark.sql(ctas_sql)
-                except Exception as ctas_exc:
-                    if "already exists" in str(ctas_exc).lower():
-                        logger.warning(
-                            "CTAS failed with 'already exists' for %s.%s - "
-                            "catalog inconsistency detected, falling back to INSERT OVERWRITE",
-                            self._target_db,
-                            table.name,
-                        )
-                        spark.sql(full_sql)
-                    else:
-                        raise
-            else:
-                spark.sql(full_sql)
+                logger.info(
+                    "Table %s.%s not found, inferring schema and creating via Hive DDL",
+                    self._target_db, table.name,
+                )
+                select_body = SQLRenderer.strip_header_comments(select_sql)
+                schema_df = spark.sql(f"SELECT * FROM ({select_body}) _schema_infer LIMIT 0")
+                create_ddl = SQLRenderer.build_create_table_ddl(
+                    table, schema_df.schema, self._target_db
+                )
+                spark.sql(create_ddl)
+            spark.sql(full_sql)
             duration = time.monotonic() - table_start
             logger.info(
                 "Completed %s in %.1fs", table.name, duration

@@ -57,17 +57,33 @@ class SQLRenderer:
         )
 
     @staticmethod
-    def build_ctas(
+    def build_create_table_ddl(
         table_config: TableConfig,
-        select_sql: str,
+        schema,
         target_db: str,
     ) -> str:
-        """Assemble a CREATE TABLE ... AS SELECT for first-time table creation."""
-        select_body = SQLRenderer.strip_header_comments(select_sql)
-        partition_spec = ", ".join(table_config.partition_by)
+        """Assemble a Hive-style CREATE TABLE DDL from an inferred Spark schema.
+
+        Uses STORED AS PARQUET (Hive SerDe) instead of USING PARQUET (DataSource)
+        so that type resolution is consistent with INSERT OVERWRITE.
+        """
+        part_names = set(table_config.partition_by)
+        data_cols = [
+            f"{f.name} {f.dataType.simpleString().upper()}"
+            for f in schema.fields
+            if f.name not in part_names
+        ]
+        part_cols = [
+            f"{f.name} {f.dataType.simpleString().upper()}"
+            for f in schema.fields
+            if f.name in part_names
+        ]
+        col_defs = ",\n    ".join(data_cols)
+        part_defs = ", ".join(part_cols)
         return (
-            f"CREATE TABLE {target_db}.{table_config.name} "
-            f"USING PARQUET "
-            f"PARTITIONED BY ({partition_spec})\n"
-            f"AS\n{select_body}"
+            f"CREATE TABLE IF NOT EXISTS {target_db}.{table_config.name} (\n"
+            f"    {col_defs}\n"
+            f")\n"
+            f"PARTITIONED BY ({part_defs})\n"
+            f"STORED AS PARQUET"
         )
