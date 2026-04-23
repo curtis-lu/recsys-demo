@@ -82,17 +82,16 @@ def suggest_categorical_columns_pandas(
 def suggest_categorical_columns_spark(
     df: "SparkDataFrame",
     max_numerical_cardinality: int = 20,
-) -> tuple[list[str], list[tuple[str, int]]]:
+) -> tuple[list[str], list[tuple[str, int]], int]:
     """Infer categorical columns from a Spark DataFrame.
 
     String and boolean columns are classified directly from the schema.
-    Numeric columns are evaluated via a single approx_count_distinct
-    aggregation across all numeric columns at once (one Spark action),
-    avoiding N independent scans of the DataFrame.
+    Numeric columns are evaluated via a single aggregation that also
+    computes count(*), so the caller needs no additional Spark action
+    to obtain the row count.
 
     Returns:
-        (categorical_columns, implicit_numeric_info). Same contract as
-        the pandas version. Columns are returned in original schema order.
+        (categorical_columns, implicit_numeric_info, n_rows)
     """
     from pyspark.sql import functions as F
     from pyspark.sql.types import BooleanType, NumericType, StringType
@@ -111,17 +110,19 @@ def suggest_categorical_columns_spark(
     implicit: list[tuple[str, int]] = []
     numeric_categorical: set[str] = set()
 
-    if numeric_cols:
-        agg_exprs = [
-            F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
-            for c in numeric_cols
-        ]
-        row = df.agg(*agg_exprs).collect()[0]
-        for col in numeric_cols:
-            n_distinct = int(row[col])
-            if n_distinct <= max_numerical_cardinality:
-                numeric_categorical.add(col)
-                implicit.append((col, n_distinct))
+    # Always include count(*) to avoid a separate sdf.count() action in the caller.
+    agg_exprs = [F.count("*").alias("__n_rows__")] + [
+        F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
+        for c in numeric_cols
+    ]
+    row = df.agg(*agg_exprs).collect()[0]
+    n_rows = int(row["__n_rows__"])
+
+    for col in numeric_cols:
+        n_distinct = int(row[col])
+        if n_distinct <= max_numerical_cardinality:
+            numeric_categorical.add(col)
+            implicit.append((col, n_distinct))
 
     categorical: list[str] = []
     string_bool_set = set(string_bool_cols)
@@ -129,7 +130,7 @@ def suggest_categorical_columns_spark(
         if field.name in string_bool_set or field.name in numeric_categorical:
             categorical.append(field.name)
 
-    return categorical, implicit
+    return categorical, implicit, n_rows
 
 
 def format_yaml_output(categorical: list[str]) -> str:
@@ -257,10 +258,9 @@ def main(
         )
         try:
             sdf, stem = _load_spark(source, spark)
-            categorical, implicit = suggest_categorical_columns_spark(
+            categorical, implicit, n_rows = suggest_categorical_columns_spark(
                 sdf, max_cardinality
             )
-            n_rows = sdf.count()
             n_cols = len(sdf.schema.fields)
         finally:
             spark.stop()
