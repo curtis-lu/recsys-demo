@@ -85,30 +85,32 @@ class SQLRunner:
 
     def run(
         self,
-        snap_dates: list[str],
+        target_dates: list[str],
         restart_from: str | None = None,
         run_id: str | None = None,
     ) -> None:
-        """Execute the ETL pipeline for the given snap dates.
+        """Execute the ETL pipeline for the given target dates.
 
         Args:
-            snap_dates: List of snap_date strings to process.
+            target_dates: List of target date strings (YYYY-MM-DD) to process.
+                Each value is bound to the SQL variable ``${snap_date}`` and to
+                the Hive partition column ``snap_date`` for one iteration.
             restart_from: If specified, skip tables before this one.
             run_id: External run ID to use. If None, generates a new one.
         """
         if run_id is None:
             run_id = generate_run_id()
         logger.info(
-            "Source ETL run started: run_id=%s, snap_dates=%s, dry_run=%s",
+            "Source ETL run started: run_id=%s, target_dates=%s, dry_run=%s",
             run_id,
-            snap_dates,
+            target_dates,
             self._dry_run,
         )
 
         spark, audit = self._initialize_context()
         tables_to_run = self._get_tables_to_run(restart_from)
 
-        for snap_date in snap_dates:
+        for snap_date in target_dates:
             logger.info("Processing snap_date=%s", snap_date)
             run_start = time.monotonic()
 
@@ -144,6 +146,7 @@ class SQLRunner:
         from pyspark.sql import SparkSession
 
         spark = SparkSession.builder.getOrCreate()
+        spark.conf.set("hive.exec.dynamic.partition.mode", "nonstrict")
         spark.sql(f"CREATE DATABASE IF NOT EXISTS {self._target_db}")
         audit = None
         if self._audit_config:

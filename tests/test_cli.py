@@ -75,7 +75,15 @@ class TestCLI:
     def test_help_shows_options(self):
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "source_etl" in result.output
+        assert "feature_etl" in result.output
+        assert "label_etl" in result.output
+        assert "sample_pool_etl" in result.output
+
+    def test_etl_subcommands_advertise_target_dates(self):
+        for cmd in ("feature_etl", "label_etl", "sample_pool_etl"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0, result.output
+            assert "--target-dates" in result.output
 
     def test_unknown_pipeline(self, tmp_path):
         _setup_conf(tmp_path)

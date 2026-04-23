@@ -1,0 +1,53 @@
+# Label ETL Pipeline Configuration
+# Tables are executed in list order. depends_on is for documentation and order validation only.
+
+label_etl:
+  variables:
+    target_db: "ml_feature"
+
+  # Source table freshness and schema checks (run before ETL execution)
+  source_checks: {}
+
+  # Output tables — execution order = list order
+  tables:
+    - name: label_ccard
+      sql_file: label/label_ccard.sql
+      partition_by:
+        prod_name: STRING
+        snap_date: DATE
+      primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
+
+    - name: label_exchange
+      sql_file: label/label_exchange.sql
+      partition_by:
+        prod_name: STRING
+        snap_date: DATE
+      primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
+
+    - name: label_fund
+      sql_file: label/label_fund.sql
+      partition_by:
+        prod_name: STRING
+        snap_date: DATE
+      primary_key: [snap_date, cust_id, prod_name]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
+
+    - name: label_table
+      sql_file: label/label_table.sql
+      partition_by:
+        prod_name: STRING
+        snap_date: DATE
+      primary_key: [snap_date, cust_id, prod_name]
+      depends_on: [label_ccard, label_exchange, label_fund]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
+
+  # Audit Hive table (shared across feature/label/sample_pool ETL)
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log

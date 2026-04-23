@@ -140,14 +140,16 @@ class TestBuildHiveCtas:
         result = SQLRenderer.build_hive_ctas(cfg, "SELECT 1", "ml_feature")
         assert "STORED AS PARQUET" in result
         assert "USING PARQUET" not in result
-        assert "PARTITIONED BY (snap_date DATE)" in result
+        # Hive CTAS: PARTITIONED BY takes names only; types are inferred from SELECT.
+        assert "PARTITIONED BY (snap_date)" in result
         assert "CREATE TABLE ml_feature.feature_aum" in result
 
-    def test_multi_partition_types(self):
+    def test_multi_partition_names(self):
         cfg = TableConfig(
             name="label_ccard",
             sql_file="label/label_ccard.sql",
             partition_by={"prod_name": "STRING", "snap_date": "DATE"},
         )
         result = SQLRenderer.build_hive_ctas(cfg, "SELECT 1", "ml_feature")
-        assert "PARTITIONED BY (prod_name STRING, snap_date DATE)" in result
+        # Hive CTAS: names only, preserving config order.
+        assert "PARTITIONED BY (prod_name, snap_date)" in result

@@ -89,13 +89,15 @@ class SQLRenderer:
 
         Uses STORED AS PARQUET (Hive writer) so subsequent INSERT OVERWRITE shares
         the same type resolver (fixes the bug from commit 12824e7).
+
+        Hive CTAS ``PARTITIONED BY`` takes column NAMES only; types are inferred
+        from the SELECT output (unlike a regular CREATE TABLE which requires
+        ``(col TYPE, ...)``).
         """
-        part_defs = ", ".join(
-            f"{name} {dtype}" for name, dtype in table_config.partition_by.items()
-        )
+        part_names = ", ".join(table_config.partition_by.keys())
         return (
             f"CREATE TABLE {target_db}.{table_config.name}\n"
-            f"PARTITIONED BY ({part_defs})\n"
+            f"PARTITIONED BY ({part_names})\n"
             f"STORED AS PARQUET\n"
             f"AS\n{aligned_select}"
         )

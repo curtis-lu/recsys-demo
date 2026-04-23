@@ -104,7 +104,7 @@ class TestDryRun:
         """Dry run should render SQL without executing."""
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True)
-        runner.run(snap_dates=["2024-01-31"])
+        runner.run(target_dates=["2024-01-31"])
         # No SparkSession created, no errors
 
     def test_dry_run_restart_from(self, sql_dir, caplog):
@@ -112,7 +112,7 @@ class TestDryRun:
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True)
         with caplog.at_level("INFO"):
-            runner.run(snap_dates=["2024-01-31"], restart_from="feature_concat")
+            runner.run(target_dates=["2024-01-31"], restart_from="feature_concat")
         # feature_aum and feature_sav should be skipped
         assert any("Skipping feature_aum" in m for m in caplog.messages)
         assert any("Skipping feature_sav" in m for m in caplog.messages)
@@ -123,7 +123,7 @@ class TestDryRun:
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True)
         with caplog.at_level("INFO"):
-            runner.run(snap_dates=["2024-01-31", "2024-02-29"])
+            runner.run(target_dates=["2024-01-31", "2024-02-29"])
         # Both dates should be processed
         assert any("2024-01-31" in m for m in caplog.messages)
         assert any("2024-02-29" in m for m in caplog.messages)
@@ -135,7 +135,7 @@ class TestRestartFromValidation:
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True)
         with pytest.raises(ValueError, match="not found in tables"):
-            runner.run(snap_dates=["2024-01-31"], restart_from="nonexistent")
+            runner.run(target_dates=["2024-01-31"], restart_from="nonexistent")
 
 
 class TestRenderedSqlDir:
@@ -144,7 +144,7 @@ class TestRenderedSqlDir:
         out_dir = tmp_path / "rendered_sql"
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True, rendered_sql_dir=out_dir)
-        runner.run(snap_dates=["2024-01-31"], run_id="test_run")
+        runner.run(target_dates=["2024-01-31"], run_id="test_run")
 
         snap_dir = out_dir / "test_run" / "2024-01-31"
         assert snap_dir.is_dir()
@@ -160,16 +160,16 @@ class TestRenderedSqlDir:
         """Without rendered_sql_dir, no files should be written."""
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True)
-        runner.run(snap_dates=["2024-01-31"], run_id="test_run")
+        runner.run(target_dates=["2024-01-31"], run_id="test_run")
         # No rendered_sql directory should be created anywhere
         assert not any((tmp_path / p).exists() for p in ["rendered_sql"])
 
-    def test_multiple_snap_dates_separate_dirs(self, sql_dir, tmp_path):
-        """Each snap_date gets its own subdirectory."""
+    def test_multiple_target_dates_separate_dirs(self, sql_dir, tmp_path):
+        """Each target_date gets its own subdirectory."""
         out_dir = tmp_path / "rendered_sql"
         config = _base_config()
         runner = SQLRunner(config, sql_dir, dry_run=True, rendered_sql_dir=out_dir)
-        runner.run(snap_dates=["2024-01-31", "2024-02-29"], run_id="test_run")
+        runner.run(target_dates=["2024-01-31", "2024-02-29"], run_id="test_run")
 
         assert (out_dir / "test_run" / "2024-01-31").is_dir()
         assert (out_dir / "test_run" / "2024-02-29").is_dir()

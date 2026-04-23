@@ -133,33 +133,34 @@ def _dir_artifacts(d: Path) -> list[str]:
     return sorted(f.name for f in d.iterdir() if f.is_file()) if d.is_dir() else []
 
 
-@app.command(name="source_etl")
-def source_etl(
-    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
-    snap_dates: Optional[str] = typer.Option(
-        None, "--snap-dates", help="Comma-separated snap dates for source_etl (e.g. 2024-01-31,2024-02-29)"
-    ),
-    restart_from: Optional[str] = typer.Option(
-        None, "--restart-from", help="Restart source_etl from this table name (skip earlier tables)"
-    )
-):
-    """Run the source_etl pipeline."""
+def _run_etl(
+    stage: str,
+    env: str,
+    target_dates: Optional[str],
+    restart_from: Optional[str],
+) -> None:
+    """Shared executor for the feature/label/sample_pool ETL sub-commands.
+
+    ``stage`` is one of ``feature_etl``, ``label_etl``, ``sample_pool_etl``
+    and is used both as the pipeline name (for logging/config lookup) and as
+    the top-level YAML key of its parameters file.
+    """
     from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
 
-    config, params, backend, run_context = _load_config_and_setup("source_etl", env)
+    config, params, backend, run_context = _load_config_and_setup(stage, env)
     conf_dir = _find_conf_dir()
 
-    params_etl = config.get_parameters_by_name("parameters_source_etl")
-    etl_config = params_etl.get("source_etl", params_etl)
+    params_etl = config.get_parameters_by_name(f"parameters_{stage}")
+    etl_config = params_etl.get(stage, params_etl)
     sql_dir = conf_dir / "sql" / "etl"
     dry_run = etl_config.get("dry_run", env == "local")
 
-    if snap_dates:
-        date_list = [d.strip() for d in snap_dates.split(",")]
+    if target_dates:
+        date_list = [d.strip() for d in target_dates.split(",")]
     else:
-        date_list = etl_config.get("snap_dates", [])
+        date_list = etl_config.get("target_dates", [])
     if not date_list:
-        logger.error("No snap_dates provided. Use --snap-dates or set in config.")
+        logger.error("No target_dates provided. Use --target-dates or set in config.")
         raise typer.Exit(code=1)
 
     rendered_sql_dir_str = etl_config.get("rendered_sql_dir")
@@ -172,12 +173,70 @@ def source_etl(
         rendered_sql_dir=rendered_sql_dir,
     )
     try:
-        runner.run(snap_dates=date_list, restart_from=restart_from, run_id=run_context.run_id)
+        runner.run(
+            target_dates=date_list,
+            restart_from=restart_from,
+            run_id=run_context.run_id,
+        )
     except Exception:
-        logger.exception("Source ETL pipeline failed")
+        logger.exception("%s pipeline failed", stage)
         raise typer.Exit(code=1)
 
-    logger.info("Pipeline 'source_etl' completed successfully")
+    logger.info("Pipeline '%s' completed successfully", stage)
+
+
+@app.command(name="feature_etl")
+def feature_etl(
+    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    target_dates: Optional[str] = typer.Option(
+        None,
+        "--target-dates",
+        help="Comma-separated target dates, e.g. 2024-01-31,2024-02-29",
+    ),
+    restart_from: Optional[str] = typer.Option(
+        None,
+        "--restart-from",
+        help="Restart from this table name (skip earlier tables in the list)",
+    ),
+):
+    """Run the feature ETL pipeline (feature_aum/sav/ccard/info/concat/table)."""
+    _run_etl("feature_etl", env, target_dates, restart_from)
+
+
+@app.command(name="label_etl")
+def label_etl(
+    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    target_dates: Optional[str] = typer.Option(
+        None,
+        "--target-dates",
+        help="Comma-separated target dates, e.g. 2024-01-31,2024-02-29",
+    ),
+    restart_from: Optional[str] = typer.Option(
+        None,
+        "--restart-from",
+        help="Restart from this table name (skip earlier tables in the list)",
+    ),
+):
+    """Run the label ETL pipeline (label_ccard/exchange/fund/table)."""
+    _run_etl("label_etl", env, target_dates, restart_from)
+
+
+@app.command(name="sample_pool_etl")
+def sample_pool_etl(
+    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    target_dates: Optional[str] = typer.Option(
+        None,
+        "--target-dates",
+        help="Comma-separated target dates, e.g. 2024-01-31,2024-02-29",
+    ),
+    restart_from: Optional[str] = typer.Option(
+        None,
+        "--restart-from",
+        help="Restart from this table name (skip earlier tables in the list)",
+    ),
+):
+    """Run the sample_pool ETL pipeline. Requires feature_etl and label_etl outputs."""
+    _run_etl("sample_pool_etl", env, target_dates, restart_from)
 
 
 @app.command(name="dataset")
