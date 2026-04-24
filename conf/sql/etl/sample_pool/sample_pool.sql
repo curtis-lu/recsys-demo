@@ -12,7 +12,7 @@ WITH cust_snap AS (
         cust_id,
         cust_segment_typ
     FROM feature_store.dim_all_customer
-    WHERE snap_date = '${snap_date}'
+    WHERE snap_date = '${target_date}'
 )
 
 SELECT

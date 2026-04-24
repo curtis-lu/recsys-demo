@@ -1,7 +1,7 @@
 --partition by: snap_date
 
 SELECT
-    '${snap_date}' AS snap_date,
+    '${target_date}' AS snap_date,
     t.cust_id,
     COUNT(t.txn_id) AS ccard_txn_cnt_l1m,
     COALESCE(SUM(t.txn_amt), 0) AS ccard_txn_amt_l1m,
@@ -19,7 +19,7 @@ FROM feature_store.fact_ccard_txn t
 LEFT JOIN feature_store.dim_ccard_info i
   ON t.cust_id = i.cust_id
  AND t.card_id = i.card_id
- AND i.snap_date = '${snap_date}'
-WHERE t.txn_date > date_add('${snap_date}', -30)
-  AND t.txn_date <= '${snap_date}'
+ AND i.snap_date = '${target_date}'
+WHERE t.txn_date > date_add('${target_date}', -30)
+  AND t.txn_date <= '${target_date}'
 GROUP BY t.cust_id

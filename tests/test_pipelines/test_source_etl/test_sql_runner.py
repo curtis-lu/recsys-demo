@@ -16,20 +16,20 @@ def sql_dir(tmp_path):
         "--partition by: snap_date\n\n"
         "SELECT cust_id, total_aum\n"
         "FROM feature_store.feat_aum\n"
-        "WHERE snap_date = '${snap_date}'\n"
+        "WHERE snap_date = '${target_date}'\n"
     )
     (feat / "feature_sav.sql").write_text(
         "--partition by: snap_date\n\n"
         "SELECT cust_id, sav_amt\n"
         "FROM feature_store.feat_sav\n"
-        "WHERE snap_date = '${snap_date}'\n"
+        "WHERE snap_date = '${target_date}'\n"
     )
     (feat / "feature_concat.sql").write_text(
         "--partition by: snap_date\n\n"
         "SELECT a.cust_id, a.total_aum, b.sav_amt\n"
         "FROM ${target_db}.feature_aum a\n"
         "JOIN ${target_db}.feature_sav b ON a.cust_id = b.cust_id\n"
-        "WHERE a.snap_date = '${snap_date}'\n"
+        "WHERE a.snap_date = '${target_date}'\n"
     )
     return tmp_path
 

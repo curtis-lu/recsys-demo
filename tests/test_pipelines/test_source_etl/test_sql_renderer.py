@@ -15,13 +15,13 @@ def tmp_sql_dir(tmp_path):
         "--partition by: snap_date\n\n"
         "SELECT cust_id, total_aum\n"
         "FROM feature_store.feat_aum\n"
-        "WHERE snap_date = '${snap_date}'\n"
+        "WHERE snap_date = '${target_date}'\n"
     )
     (sql / "feature_concat.sql").write_text(
         "--partition by: snap_date\n\n"
         "SELECT *\n"
         "FROM ${target_db}.feature_aum\n"
-        "WHERE snap_date = '${snap_date}'\n"
+        "WHERE snap_date = '${target_date}'\n"
     )
     return tmp_path
 
@@ -30,16 +30,16 @@ class TestRender:
     def test_substitutes_variables(self, tmp_sql_dir):
         renderer = SQLRenderer(tmp_sql_dir)
         result = renderer.render(
-            "feature/feature_aum.sql", {"snap_date": "2024-01-31"}
+            "feature/feature_aum.sql", {"target_date": "2024-01-31"}
         )
         assert "'2024-01-31'" in result
-        assert "${snap_date}" not in result
+        assert "${target_date}" not in result
 
     def test_multiple_variables(self, tmp_sql_dir):
         renderer = SQLRenderer(tmp_sql_dir)
         result = renderer.render(
             "feature/feature_concat.sql",
-            {"snap_date": "2024-01-31", "target_db": "ml_feature"},
+            {"target_date": "2024-01-31", "target_db": "ml_feature"},
         )
         assert "ml_feature.feature_aum" in result
         assert "'2024-01-31'" in result
@@ -47,7 +47,7 @@ class TestRender:
     def test_unresolved_variable_raises(self, tmp_sql_dir):
         renderer = SQLRenderer(tmp_sql_dir)
         with pytest.raises(ValueError, match="Unresolved template variables"):
-            renderer.render("feature/feature_concat.sql", {"snap_date": "2024-01-31"})
+            renderer.render("feature/feature_concat.sql", {"target_date": "2024-01-31"})
 
 
 class TestStripHeaderComments:

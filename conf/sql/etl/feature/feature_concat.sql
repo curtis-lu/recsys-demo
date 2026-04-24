@@ -2,19 +2,19 @@
 
 with feature_aum as (
 
-    select * from ${target_db}.feature_aum where snap_date = '${snap_date}'
+    select * from ${target_db}.feature_aum where snap_date = '${target_date}'
 ),
 feature_sav as (
 
-    select * from ${target_db}.feature_sav where snap_date = '${snap_date}'
+    select * from ${target_db}.feature_sav where snap_date = '${target_date}'
 ),
 feature_ccard as (
 
-    select * from ${target_db}.feature_ccard where snap_date = '${snap_date}'
+    select * from ${target_db}.feature_ccard where snap_date = '${target_date}'
 ),
 feature_info as (
 
-    select * from ${target_db}.feature_info where snap_date = '${snap_date}'
+    select * from ${target_db}.feature_info where snap_date = '${target_date}'
 ),
 pool_cust as (
     select distinct cust_id

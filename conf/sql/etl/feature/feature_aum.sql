@@ -7,7 +7,7 @@ WITH base AS (
         COALESCE(total_aum_amt, 0) AS total_aum,
         COALESCE(fund_aum_amt, 0)  AS fund_aum
     FROM feature_store.feat_aum
-    WHERE snap_date = '${snap_date}'
+    WHERE snap_date = '${target_date}'
 )
 
 SELECT

@@ -1,7 +1,7 @@
 --partition by: snap_date
 
 SELECT
-    '${snap_date}' AS snap_date,
+    '${target_date}' AS snap_date,
     cust_id,
     age,
     gender,
@@ -12,4 +12,4 @@ SELECT
     marital_status,
     channel_preference
 FROM feature_store.dim_customer_info
-WHERE snap_date = '${snap_date}'
+WHERE snap_date = '${target_date}'

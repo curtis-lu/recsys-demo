@@ -93,7 +93,7 @@ class SQLRunner:
 
         Args:
             target_dates: List of target date strings (YYYY-MM-DD) to process.
-                Each value is bound to the SQL variable ``${snap_date}`` and to
+                Each value is bound to the SQL variable ``${target_date}`` and to
                 the Hive partition column ``snap_date`` for one iteration.
             restart_from: If specified, skip tables before this one.
             run_id: External run ID to use. If None, generates a new one.
@@ -185,7 +185,7 @@ class SQLRunner:
         audit: AuditWriter | None,
     ) -> bool:
         """Execute a single table rendering, Spark SQL processing, and output quality check."""
-        variables = {**self._variables, "snap_date": snap_date}
+        variables = {**self._variables, "target_date": snap_date}
         select_sql = self._renderer.render(table.sql_file, variables)
 
         if self._dry_run:

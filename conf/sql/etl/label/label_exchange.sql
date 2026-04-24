@@ -7,9 +7,9 @@ WITH candidate_prod AS (
 ),
 label_event AS (
     SELECT
-        to_date('${snap_date}') AS snap_date,
-        date_add('${snap_date}', 1) AS apply_start_date,
-        date_add('${snap_date}', 30) AS apply_end_date,
+        to_date('${target_date}') AS snap_date,
+        date_add('${target_date}', 1) AS apply_start_date,
+        date_add('${target_date}', 30) AS apply_end_date,
         cust_id,
         CASE
             WHEN currency_code NOT IN ('USD', 'TWD') THEN 'exchange_fx'
@@ -18,8 +18,8 @@ label_event AS (
         END AS prod_name,
         1 AS label
     FROM feature_store.fact_exchange_txn
-    WHERE txn_date > '${snap_date}'
-    AND txn_date <=  date_add('${snap_date}', 30)
+    WHERE txn_date > '${target_date}'
+    AND txn_date <=  date_add('${target_date}', 30)
 ),
 label_dedup AS (
     SELECT
@@ -44,7 +44,7 @@ cust_snap AS (
         cust_id,
         cust_segment_typ
     FROM feature_store.dim_all_customer
-    WHERE snap_date = '${snap_date}'
+    WHERE snap_date = '${target_date}'
 )
 
 SELECT
