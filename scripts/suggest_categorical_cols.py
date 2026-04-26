@@ -248,14 +248,9 @@ def main(
         n_rows = len(df)
         n_cols = len(df.columns)
     elif backend == "spark":
-        from pyspark.sql import SparkSession
+        from recsys_tfb.utils.spark import get_or_create_spark_session
 
-        spark = (
-            SparkSession.builder.master("local[*]")
-            .appName("suggest_categorical_cols")
-            .config("spark.ui.enabled", "false")
-            .getOrCreate()
-        )
+        spark = get_or_create_spark_session()
         try:
             sdf, stem = _load_spark(source, spark)
             categorical, implicit, n_rows = suggest_categorical_columns_spark(
