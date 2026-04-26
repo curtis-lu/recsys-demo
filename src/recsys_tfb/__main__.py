@@ -45,6 +45,22 @@ def _find_data_dir() -> Path:
     return Path.cwd() / "data"
 
 
+def _load_spark_config(config: ConfigLoader, pipeline: str) -> dict:
+    """Return base + pipeline-specific spark config, merged (pipeline wins)."""
+    try:
+        base_params = config.get_parameters_by_name("parameters")
+    except KeyError:
+        base_params = {}
+    try:
+        pipe_params = config.get_parameters_by_name(f"parameters_{pipeline}")
+    except KeyError:
+        pipe_params = {}
+    base_spark = dict(base_params.get("spark", {}))
+    pipe_spark = pipe_params.get("spark", {})
+    base_spark.update(pipe_spark)
+    return base_spark
+
+
 def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict, str, RunContext]:
     conf_dir = _find_conf_dir()
     config = ConfigLoader(str(conf_dir), env=env)
@@ -146,8 +162,13 @@ def _run_etl(
     the top-level YAML key of its parameters file.
     """
     from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
+    from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, backend, run_context = _load_config_and_setup(stage, env)
+
+    spark_configs = _load_spark_config(config, stage)
+    get_or_create_spark_session(spark_configs)
+
     conf_dir = _find_conf_dir()
 
     params_etl = config.get_parameters_by_name(f"parameters_{stage}")
@@ -244,7 +265,10 @@ def dataset(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
 ):
     """Run the dataset pipeline (always recomputes versions from parameters)."""
+    from recsys_tfb.utils.spark import get_or_create_spark_session
+
     config, params, backend, run_context = _load_config_and_setup("dataset", env)
+    get_or_create_spark_session(_load_spark_config(config, "dataset"))
     data_dir = _find_data_dir()
 
     try:
@@ -350,7 +374,10 @@ def training(
     ),
 ):
     """Run the training pipeline."""
+    from recsys_tfb.utils.spark import get_or_create_spark_session
+
     config, params, backend, run_context = _load_config_and_setup("training", env)
+    get_or_create_spark_session(_load_spark_config(config, "training"))
     data_dir = _find_data_dir()
 
     dataset_dir = data_dir / "dataset"
@@ -457,7 +484,10 @@ def inference(
     ),
 ):
     """Run the inference pipeline."""
+    from recsys_tfb.utils.spark import get_or_create_spark_session
+
     config, params, backend, run_context = _load_config_and_setup("inference", env)
+    get_or_create_spark_session(_load_spark_config(config, "inference"))
     data_dir = _find_data_dir()
 
     models_dir = data_dir / "models"
@@ -527,7 +557,10 @@ def evaluation(
     model_version: Optional[str] = typer.Option(None, "--model-version", help="Model version to use"),
 ):
     """Run the evaluation pipeline."""
+    from recsys_tfb.utils.spark import get_or_create_spark_session
+
     config, params, backend, run_context = _load_config_and_setup("evaluation", env)
+    get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
 
     models_dir = data_dir / "models"
@@ -584,7 +617,10 @@ def baselines(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
 ):
     """Run the baselines pipeline."""
+    from recsys_tfb.utils.spark import get_or_create_spark_session
+
     config, params, backend, run_context = _load_config_and_setup("baselines", env)
+    get_or_create_spark_session(_load_spark_config(config, "baselines"))
     data_dir = _find_data_dir()
 
     try:
