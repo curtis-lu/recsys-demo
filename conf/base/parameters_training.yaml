@@ -1,3 +1,9 @@
+spark:
+  app_name: recsys_tfb-training
+  spark.executor.memory: 16g
+  spark.executor.cores: 4
+  spark.driver.memory: 8g
+
 training:
   algorithm: lightgbm
   algorithm_params:

@@ -2,6 +2,14 @@ project_name: recsys_tfb
 random_seed: 42
 backend: pandas
 
+spark:
+  app_name: recsys_tfb
+  spark.serializer: org.apache.spark.serializer.KryoSerializer
+  spark.sql.session.timeZone: Asia/Taipei
+  spark.sql.catalogImplementation: hive
+  spark.executor.memory: 4g
+  spark.executor.cores: 2
+
 # [SCHEMA SPECIFICATION]
 # All input tables (feature, label, sample_pool) provided to the dataset pipeline
 # MUST adhere to the following column naming convention for core identity fields.

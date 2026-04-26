@@ -19,7 +19,8 @@ def _make_spark_mock() -> MagicMock:
 
 def _patch_spark(spark: MagicMock):
     return patch(
-        "pyspark.sql.SparkSession.builder.getOrCreate", return_value=spark
+        "recsys_tfb.utils.spark.get_or_create_spark_session",
+        return_value=spark,
     )
 
 

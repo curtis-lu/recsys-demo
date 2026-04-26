@@ -1,3 +1,9 @@
+spark:
+  app_name: recsys_tfb-inference
+  spark.executor.memory: 24g
+  spark.executor.cores: 4
+  spark.sql.shuffle.partitions: 400
+
 inference:
   use_calibration: true
   snap_dates:

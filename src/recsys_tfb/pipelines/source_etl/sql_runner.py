@@ -143,9 +143,9 @@ class SQLRunner:
         if self._dry_run:
             return None, None
             
-        from pyspark.sql import SparkSession
+        from recsys_tfb.utils.spark import get_or_create_spark_session
 
-        spark = SparkSession.builder.getOrCreate()
+        spark = get_or_create_spark_session()
         spark.conf.set("hive.exec.dynamic.partition.mode", "nonstrict")
         spark.sql(f"CREATE DATABASE IF NOT EXISTS {self._target_db}")
         audit = None

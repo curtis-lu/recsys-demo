@@ -151,9 +151,9 @@ class HiveTableDataset(AbstractDataset):
         return f"{self._database}.{self._table}"
 
     def _get_spark(self):
-        from pyspark.sql import SparkSession
+        from recsys_tfb.utils.spark import get_or_create_spark_session
 
-        return SparkSession.builder.getOrCreate()
+        return get_or_create_spark_session()
 
     @staticmethod
     def _to_spark(spark, data):
