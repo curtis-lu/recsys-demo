@@ -28,9 +28,9 @@ class ParquetDataset(AbstractDataset):
 
             return pd.read_parquet(self._filepath)
         else:
-            from pyspark.sql import SparkSession
+            from recsys_tfb.utils.spark import get_or_create_spark_session
 
-            spark = SparkSession.builder.getOrCreate()
+            spark = get_or_create_spark_session()
             return spark.read.parquet(self._filepath)
 
     def save(self, data) -> None:
@@ -52,9 +52,9 @@ class ParquetDataset(AbstractDataset):
             import pandas as pd
 
             if isinstance(data, pd.DataFrame):
-                from pyspark.sql import SparkSession
+                from recsys_tfb.utils.spark import get_or_create_spark_session
 
-                spark = SparkSession.builder.getOrCreate()
+                spark = get_or_create_spark_session()
                 data = spark.createDataFrame(data)
             writer = data.write.mode("overwrite")
             if self._partition_cols:
