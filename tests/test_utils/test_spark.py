@@ -74,3 +74,36 @@ class TestValidation:
             get_or_create_spark_session(
                 {"app_name": "x", "bad_key": [1, 2, 3]}
             )
+
+
+class TestFallback:
+    def test_no_configs_returns_active_session(self):
+        first = get_or_create_spark_session(_minimal_configs())
+        try:
+            second = get_or_create_spark_session(None)
+            assert second is first
+        finally:
+            first.stop()
+
+    def test_no_configs_no_active_falls_back_to_loader(
+        self, monkeypatch, tmp_path
+    ):
+        # Build a fake conf/ dir with parameters.yaml that has spark: block
+        conf = tmp_path / "conf"
+        (conf / "base").mkdir(parents=True)
+        (conf / "base" / "parameters.yaml").write_text(
+            "spark:\n"
+            "  app_name: from-fallback\n"
+            "  spark.master: local[1]\n"
+            "  spark.sql.shuffle.partitions: '1'\n"
+            "  spark.default.parallelism: '1'\n"
+            "  spark.ui.enabled: 'false'\n"
+            "  spark.driver.memory: 512m\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        spark = get_or_create_spark_session(None)
+        try:
+            assert spark.sparkContext.appName == "from-fallback"
+        finally:
+            spark.stop()

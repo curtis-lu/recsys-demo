@@ -69,11 +69,37 @@ def _validate_values(spark_configs: dict[str, Any]) -> None:
 
 
 def _fallback_create() -> SparkSession:
-    """Stub for Task 2 — returns active session or raises."""
+    """Return active session, or build one from base parameters.yaml."""
     active = SparkSession.getActiveSession()
     if active is not None:
         return active
-    raise RuntimeError(
-        "No active SparkSession and no spark_configs provided. "
-        "Fallback to ConfigLoader is implemented in Task 2."
+
+    import os
+    from pathlib import Path
+
+    from recsys_tfb.core.config import ConfigLoader
+
+    env = os.environ.get("CONF_ENV", "local")
+    conf_dir = Path.cwd() / "conf"
+    if not conf_dir.is_dir():
+        raise RuntimeError(
+            f"No active SparkSession and conf/ not found at {conf_dir}. "
+            "Cannot build fallback session."
+        )
+    loader = ConfigLoader(str(conf_dir), env=env)
+    try:
+        base_params = loader.get_parameters_by_name("parameters")
+    except KeyError as exc:
+        raise RuntimeError(
+            "No active SparkSession and parameters.yaml not found in conf/."
+        ) from exc
+    spark_configs = base_params.get("spark", {})
+    if not spark_configs:
+        raise RuntimeError(
+            "No active SparkSession and parameters.yaml has no 'spark:' "
+            "block. Add one or pass spark_configs explicitly."
+        )
+    logger.info(
+        "Fallback: building SparkSession from conf/%s/parameters.yaml", env
     )
+    return get_or_create_spark_session(spark_configs)
