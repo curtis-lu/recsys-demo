@@ -7,6 +7,7 @@ import numpy as np
 import optuna
 import pandas as pd
 
+from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 from recsys_tfb.models.base import ModelAdapter, get_adapter
@@ -82,9 +83,10 @@ def tune_hyperparameters(
     algorithm = training_params.get("algorithm", "lightgbm")
     algorithm_params = training_params.get("algorithm_params", {})
 
-    X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
-    X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
-    X_v, y_v = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
+    with log_step(logger, "extract_features"):
+        X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
+        X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
+        X_v, y_v = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
 
     def objective(trial: optuna.Trial) -> float:
         trial_params = {
@@ -140,7 +142,8 @@ def tune_hyperparameters(
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study.optimize(objective, n_trials=n_trials)
+    with log_step(logger, "optuna_optimize"):
+        study.optimize(objective, n_trials=n_trials)
 
     best_params = study.best_params
     logger.info("Best trial mAP: %.4f, params: %s", study.best_value, best_params)
@@ -170,11 +173,13 @@ def train_model(
         "early_stopping_rounds": early_stopping_rounds,
     }
 
-    X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
-    X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
+    with log_step(logger, "extract_features"):
+        X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
+        X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
 
-    adapter = get_adapter(algorithm)
-    adapter.train(X_tr, y_tr, X_dev, y_dev, params)
+    with log_step(logger, "model_train"):
+        adapter = get_adapter(algorithm)
+        adapter.train(X_tr, y_tr, X_dev, y_dev, params)
 
     logger.info("Model trained with algorithm=%s", algorithm)
     return adapter
@@ -193,10 +198,12 @@ def calibrate_model(
         .get("method", "isotonic")
     )
 
-    X_cal, y_cal = _extract_Xy(calibration_model_input, preprocessor_metadata, parameters)
+    with log_step(logger, "extract_features"):
+        X_cal, y_cal = _extract_Xy(calibration_model_input, preprocessor_metadata, parameters)
 
-    calibrated = CalibratedModelAdapter(model, method=method)
-    calibrated.fit_calibrator(X_cal, y_cal)
+    with log_step(logger, "fit_calibrator"):
+        calibrated = CalibratedModelAdapter(model, method=method)
+        calibrated.fit_calibrator(X_cal, y_cal)
 
     logger.info(
         "Model calibrated: method=%s, n_samples=%d", method, len(y_cal)
@@ -269,13 +276,14 @@ def evaluate_model(
 
     val_pdf = _to_pandas(val_model_input)
 
-    # Use _extract_Xy to handle deferred categorical encoding (e.g., prod_name)
-    X, _ = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
-    y_score = model.predict(X)
-
-    overall_map, per_product_ap, n_queries, n_excluded_queries = (
-        _compute_ranking_metrics(y_score, val_pdf, schema)
-    )
+    with log_step(logger, "extract_features"):
+        X, _ = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
+    with log_step(logger, "predict"):
+        y_score = model.predict(X)
+    with log_step(logger, "compute_metrics"):
+        overall_map, per_product_ap, n_queries, n_excluded_queries = (
+            _compute_ranking_metrics(y_score, val_pdf, schema)
+        )
 
     evaluation_results = {
         "overall_map": overall_map,
@@ -325,28 +333,29 @@ def log_experiment(
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    with mlflow.start_run():
-        mlflow.log_params(best_params)
-        mlflow.log_param("algorithm", algorithm)
-        mlflow.log_metric("overall_map", evaluation_results["overall_map"])
+    with log_step(logger, "mlflow_log"):
+        with mlflow.start_run():
+            mlflow.log_params(best_params)
+            mlflow.log_param("algorithm", algorithm)
+            mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
-        for prod, ap in evaluation_results.get("per_product_ap", {}).items():
-            mlflow.log_metric(f"ap_{prod}", ap)
+            for prod, ap in evaluation_results.get("per_product_ap", {}).items():
+                mlflow.log_metric(f"ap_{prod}", ap)
 
-        mlflow.log_metric("n_queries", evaluation_results["n_queries"])
-        mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
+            mlflow.log_metric("n_queries", evaluation_results["n_queries"])
+            mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
 
-        # Calibration info
-        if "uncalibrated" in evaluation_results:
-            mlflow.log_param("calibrated", True)
-            mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
-            mlflow.log_metric(
-                "uncalibrated_overall_map",
-                evaluation_results["uncalibrated"]["overall_map"],
-            )
-        else:
-            mlflow.log_param("calibrated", False)
+            # Calibration info
+            if "uncalibrated" in evaluation_results:
+                mlflow.log_param("calibrated", True)
+                mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
+                mlflow.log_metric(
+                    "uncalibrated_overall_map",
+                    evaluation_results["uncalibrated"]["overall_map"],
+                )
+            else:
+                mlflow.log_param("calibrated", False)
 
-        model.log_to_mlflow()
+            model.log_to_mlflow()
 
     logger.info("MLflow experiment logged: %s", experiment_name)

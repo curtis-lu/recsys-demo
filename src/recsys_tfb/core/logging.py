@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import secrets
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ class RunContext:
     dataset_version: str = ""
     model_version: str = ""
     backend: str = ""
+    current_node: str = ""
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -67,8 +70,8 @@ class JsonFormatter(logging.Formatter):
             log_entry["run_id"] = ctx.run_id
             log_entry["pipeline"] = ctx.pipeline
 
-        # Merge extra fields attached by callers (e.g. event, node, duration)
-        for key in ("event", "node", "duration_seconds", "input_names",
+        # Merge extra fields attached by callers (e.g. event, node, step, duration)
+        for key in ("event", "node", "step", "duration_seconds", "input_names",
                      "output_names", "status", "error_message",
                      "exception_type", "node_count", "dataset_name"):
             val = getattr(record, key, None)
@@ -93,7 +96,7 @@ class ConsoleFormatter(logging.Formatter):
         # Build context label
         ctx = _current_context
         pipeline = ctx.pipeline if ctx else ""
-        node = getattr(record, "node", None)
+        node = getattr(record, "node", None) or (ctx.current_node if ctx else "")
         if pipeline and node:
             label = f"{pipeline}:{node}"
         elif pipeline:
@@ -151,3 +154,45 @@ def setup_logging(
         file_handler.setFormatter(JsonFormatter())
         file_handler.setLevel(level)
         root.addHandler(file_handler)
+
+
+@contextmanager
+def log_step(step_logger: logging.Logger, step_name: str):
+    """Emit step_started / step_completed events with wall-clock timing.
+
+    Usage::
+
+        with log_step(logger, "merge_features"):
+            result = df.merge(other, on=key)
+    """
+    ctx = _current_context
+    node_name = ctx.current_node if ctx else ""
+    step_logger.info(
+        "Step started: %s", step_name,
+        extra={"event": "step_started", "step": step_name, "node": node_name},
+    )
+    t0 = time.monotonic()
+    try:
+        yield
+        duration = time.monotonic() - t0
+        step_logger.info(
+            "Step completed: %s (%.2fs)", step_name, duration,
+            extra={
+                "event": "step_completed",
+                "step": step_name,
+                "node": node_name,
+                "duration_seconds": round(duration, 3),
+            },
+        )
+    except Exception:
+        duration = time.monotonic() - t0
+        step_logger.info(
+            "Step failed: %s after %.2fs", step_name, duration,
+            extra={
+                "event": "step_failed",
+                "step": step_name,
+                "node": node_name,
+                "duration_seconds": round(duration, 3),
+            },
+        )
+        raise

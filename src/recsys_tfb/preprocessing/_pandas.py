@@ -6,6 +6,7 @@ import logging
 
 import pandas as pd
 
+from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.preprocessing._common import (
     _get_preprocessing_config,
@@ -81,9 +82,11 @@ def fit_preprocessor_metadata(
     ds = parameters.get("dataset", {})
     start = pd.Timestamp(ds["train_snap_date_start"])
     end = pd.Timestamp(ds["train_snap_date_end"])
-    train_features = feature_table[
-        (feature_table[time_col] >= start) & (feature_table[time_col] <= end)
-    ]
+
+    with log_step(logger, "filter_train_window"):
+        train_features = feature_table[
+            (feature_table[time_col] >= start) & (feature_table[time_col] <= end)
+        ]
 
     ft_cols = set(feature_table.columns)
     feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
@@ -98,19 +101,21 @@ def fit_preprocessor_metadata(
             "parameters.yaml under schema.categorical_values."
         )
 
-    category_mappings: dict[str, list] = {}
-    for col in feature_cat_cols:
-        category_mappings[col] = sorted(train_features[col].dropna().unique().tolist())
-    for col in identity_cat_cols:
-        category_mappings[col] = list(cat_values[col])
+    with log_step(logger, "collect_category_mappings"):
+        category_mappings: dict[str, list] = {}
+        for col in feature_cat_cols:
+            category_mappings[col] = sorted(train_features[col].dropna().unique().tolist())
+        for col in identity_cat_cols:
+            category_mappings[col] = list(cat_values[col])
 
-    feature_columns = _compute_feature_columns(
-        feature_table.columns.tolist(),
-        identity_cols,
-        categorical_cols,
-        drop_cols,
-        label_col,
-    )
+    with log_step(logger, "compute_feature_columns"):
+        feature_columns = _compute_feature_columns(
+            feature_table.columns.tolist(),
+            identity_cols,
+            categorical_cols,
+            drop_cols,
+            label_col,
+        )
 
     preprocessor_metadata = {
         "feature_columns": feature_columns,
@@ -156,18 +161,20 @@ def apply_preprocessor_to_features(
         raise ValueError(f"feature_table missing base-key columns: {missing_base}")
     _warn_missing_drop_columns(feature_table.columns.tolist(), drop_cols, "feature_table")
 
-    result = feature_table[keep_cols].copy()
+    with log_step(logger, "select_columns"):
+        result = feature_table[keep_cols].copy()
 
     encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
-    if encode_cols:
-        result = _encode_categoricals(result, encode_cols, category_mappings)
-        for col in encode_cols:
-            n_unknown = (result[col] == -1).sum()
-            if n_unknown > 0:
-                logger.warning(
-                    "apply_preprocessor_to_features: %d unknowns in column '%s'",
-                    n_unknown, col,
-                )
+    with log_step(logger, "encode_categoricals"):
+        if encode_cols:
+            result = _encode_categoricals(result, encode_cols, category_mappings)
+            for col in encode_cols:
+                n_unknown = (result[col] == -1).sum()
+                if n_unknown > 0:
+                    logger.warning(
+                        "apply_preprocessor_to_features: %d unknowns in column '%s'",
+                        n_unknown, col,
+                    )
 
     logger.info(
         "Preprocessed feature_table: %d rows, %d cols (encoded=%d)",
@@ -204,14 +211,17 @@ def build_model_input(
     feature_columns = preprocessor_metadata["feature_columns"]
 
     label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
-    dataset = keys.merge(label_table, on=label_join_key, how="inner")
-    dataset = dataset.merge(preprocessed_feature_table, on=base_key, how="left")
+    with log_step(logger, "merge_labels"):
+        dataset = keys.merge(label_table, on=label_join_key, how="inner")
+    with log_step(logger, "merge_features"):
+        dataset = dataset.merge(preprocessed_feature_table, on=base_key, how="left")
 
-    required = list(set(identity_cols + [label_col] + feature_columns))
-    _validate_columns(dataset.columns.tolist(), required, "build_model_input")
+    with log_step(logger, "select_output_columns"):
+        required = list(set(identity_cols + [label_col] + feature_columns))
+        _validate_columns(dataset.columns.tolist(), required, "build_model_input")
 
-    keep_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
-    result = dataset[keep_cols].copy()
+        keep_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
+        result = dataset[keep_cols].copy()
 
     n_label_null = result[label_col].isnull().sum()
     if n_label_null > 0:
@@ -240,16 +250,14 @@ def apply_preprocessor(
 
     result = scoring_dataset.drop(columns=drop_cols, errors="ignore").copy()
 
-    # Encode categoricals
-    result = _encode_categoricals(result, categorical_cols, category_mappings)
+    with log_step(logger, "encode_categoricals"):
+        result = _encode_categoricals(result, categorical_cols, category_mappings)
 
-    # Validate all expected features are present
-    missing = set(feature_columns) - set(result.columns)
-    if missing:
-        raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
-
-    # Select only feature columns in correct order
-    result = result[feature_columns]
+    with log_step(logger, "select_feature_columns"):
+        missing = set(feature_columns) - set(result.columns)
+        if missing:
+            raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
+        result = result[feature_columns]
 
     logger.info("Preprocessed scoring data: %s", result.shape)
     return result

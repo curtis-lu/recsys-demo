@@ -2,6 +2,7 @@ import logging
 import time
 
 from recsys_tfb.core.catalog import MemoryDataset
+from recsys_tfb.core.logging import get_current_context
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,15 @@ class Runner:
                 },
             )
             node_start = time.time()
+            _ctx = get_current_context()
 
             try:
                 # Load inputs
                 inputs = [catalog.load(name) for name in node.inputs]
 
                 # Execute
+                if _ctx is not None:
+                    _ctx.current_node = node.name
                 result = node.func(*inputs)
 
                 # Save outputs
@@ -84,6 +88,8 @@ class Runner:
                         catalog.save(name, value)
 
             except Exception as exc:
+                if _ctx is not None:
+                    _ctx.current_node = ""
                 duration = time.time() - node_start
                 logger.error(
                     "Node '%s' failed after %.2fs: %s",
@@ -116,6 +122,8 @@ class Runner:
                 )
                 raise
 
+            if _ctx is not None:
+                _ctx.current_node = ""
             duration = time.time() - node_start
             logger.info(
                 "Node %s completed in %.2fs", node.name, duration,
