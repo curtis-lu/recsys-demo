@@ -10,22 +10,21 @@ from recsys_tfb.utils.vdclient_resolver import (
 )
 
 
-def _install_fake_vdclient(monkeypatch, **getters):
-    """Install a fake vdclient module exposing get_<name> for each kwarg."""
-    fake = types.ModuleType("vdclient")
-    for name, value in getters.items():
-        setattr(fake, f"get_{name}", lambda v=value: v)
-    monkeypatch.setitem(sys.modules, "vdclient", fake)
+def _install_fake_vdclient_magic(monkeypatch, ports_by_cluster: dict):
+    """Install a fake vdclient_magic module with spark_ports(cluster) -> tuple."""
+    fake = types.ModuleType("vdclient_magic")
+    fake.spark_ports = lambda cluster: ports_by_cluster[cluster]
+    monkeypatch.setitem(sys.modules, "vdclient_magic", fake)
 
 
-def _block_vdclient_import(monkeypatch):
-    """Make ``import vdclient`` raise ImportError."""
-    monkeypatch.setitem(sys.modules, "vdclient", None)
+def _block_vdclient_magic_import(monkeypatch):
+    """Make ``import vdclient_magic`` raise ImportError."""
+    monkeypatch.setitem(sys.modules, "vdclient_magic", None)
 
 
 class TestResolve:
     def test_no_placeholders_passthrough(self, monkeypatch):
-        _install_fake_vdclient(monkeypatch)
+        _install_fake_vdclient_magic(monkeypatch, {})
         out = resolve_vdclient_placeholders(
             {"spark.executor.memory": "16g", "spark.executor.cores": 4}
         )
@@ -34,60 +33,86 @@ class TestResolve:
             "spark.executor.cores": 4,
         }
 
-    def test_substitutes_when_vdclient_available(self, monkeypatch):
-        _install_fake_vdclient(monkeypatch, metastore_port=9083)
+    def test_substitutes_driver_port(self, monkeypatch):
+        _install_fake_vdclient_magic(monkeypatch, {"cdp": (40001, 40002)})
         out = resolve_vdclient_placeholders(
             {
-                "spark.hadoop.hive.metastore.uris":
-                    "thrift://host:${vdclient.metastore_port}",
+                "spark.driver.port": "${vdclient.cdp.driver_port}",
                 "spark.executor.cores": 4,
             }
         )
-        assert out["spark.hadoop.hive.metastore.uris"] == "thrift://host:9083"
+        assert out["spark.driver.port"] == "40001"
         assert out["spark.executor.cores"] == 4
 
-    def test_drops_keys_when_vdclient_missing(self, monkeypatch, caplog):
-        _block_vdclient_import(monkeypatch)
+    def test_substitutes_block_manager_port(self, monkeypatch):
+        _install_fake_vdclient_magic(monkeypatch, {"cdp": (40001, 40002)})
+        out = resolve_vdclient_placeholders(
+            {"spark.blockManager.port": "${vdclient.cdp.blockManager_port}"}
+        )
+        assert out["spark.blockManager.port"] == "40002"
+
+    def test_drops_keys_when_vdclient_magic_missing(self, monkeypatch, caplog):
+        _block_vdclient_magic_import(monkeypatch)
         with caplog.at_level(logging.WARNING):
             out = resolve_vdclient_placeholders(
                 {
-                    "spark.hadoop.hive.metastore.uris":
-                        "thrift://host:${vdclient.metastore_port}",
+                    "spark.driver.port": "${vdclient.cdp.driver_port}",
                     "spark.executor.memory": "4g",
                 }
             )
-        assert "spark.hadoop.hive.metastore.uris" not in out
+        assert "spark.driver.port" not in out
         assert out["spark.executor.memory"] == "4g"
         assert any(
-            "vdclient not importable" in r.message for r in caplog.records
+            "vdclient_magic not importable" in r.message for r in caplog.records
         )
 
-    def test_drops_key_when_getter_missing(self, monkeypatch, caplog):
-        _install_fake_vdclient(monkeypatch, other_thing=1)
+    def test_drops_key_when_spark_ports_raises(self, monkeypatch, caplog):
+        fake = types.ModuleType("vdclient_magic")
+        fake.spark_ports = lambda cluster: (_ for _ in ()).throw(
+            RuntimeError("cluster not found")
+        )
+        monkeypatch.setitem(sys.modules, "vdclient_magic", fake)
         with caplog.at_level(logging.WARNING):
             out = resolve_vdclient_placeholders(
-                {"x": "${vdclient.metastore_port}", "y": "static"}
+                {"spark.driver.port": "${vdclient.cdp.driver_port}", "y": "static"}
+            )
+        assert "spark.driver.port" not in out
+        assert out["y"] == "static"
+
+    def test_drops_key_when_field_unknown(self, monkeypatch, caplog):
+        _install_fake_vdclient_magic(monkeypatch, {"cdp": (40001, 40002)})
+        with caplog.at_level(logging.WARNING):
+            out = resolve_vdclient_placeholders(
+                {"x": "${vdclient.cdp.unknown_field}", "y": "static"}
             )
         assert "x" not in out
         assert out["y"] == "static"
-        assert any(
-            "get_metastore_port" in r.message for r in caplog.records
-        )
+        assert any("unknown_field" in r.message for r in caplog.records)
 
-    def test_multiple_placeholders_in_one_value(self, monkeypatch):
-        _install_fake_vdclient(
-            monkeypatch, metastore_host="hivehost", metastore_port=9083
-        )
+    def test_multiple_clusters_cached(self, monkeypatch):
+        call_counts: dict = {"cdp": 0, "hue": 0}
+
+        def spark_ports(cluster):
+            call_counts[cluster] += 1
+            return {"cdp": (40001, 40002), "hue": (50001, 50002)}[cluster]
+
+        fake = types.ModuleType("vdclient_magic")
+        fake.spark_ports = spark_ports
+        monkeypatch.setitem(sys.modules, "vdclient_magic", fake)
+
         out = resolve_vdclient_placeholders(
             {
-                "x": "thrift://${vdclient.metastore_host}:"
-                     "${vdclient.metastore_port}",
+                "a": "${vdclient.cdp.driver_port}",
+                "b": "${vdclient.cdp.blockManager_port}",
+                "c": "${vdclient.hue.driver_port}",
             }
         )
-        assert out["x"] == "thrift://hivehost:9083"
+        assert out == {"a": "40001", "b": "40002", "c": "50001"}
+        assert call_counts["cdp"] == 1
+        assert call_counts["hue"] == 1
 
     def test_non_string_values_pass_through(self, monkeypatch):
-        _install_fake_vdclient(monkeypatch)
+        _install_fake_vdclient_magic(monkeypatch, {})
         out = resolve_vdclient_placeholders(
             {"spark.executor.cores": 4, "spark.ui.enabled": False}
         )
@@ -105,33 +130,28 @@ class TestResolveEnv:
         }
 
     def test_substitutes_when_env_var_set(self, monkeypatch):
-        monkeypatch.setenv("HIVE_HOST", "hivehost.internal")
+        monkeypatch.setenv("NODE_IP", "10.0.0.1")
         out = resolve_env_placeholders(
             {
-                "spark.hadoop.hive.metastore.uris":
-                    "thrift://${env.HIVE_HOST}:9083",
+                "spark.driver.host": "${env.NODE_IP}",
                 "spark.executor.cores": 4,
             }
         )
-        assert (
-            out["spark.hadoop.hive.metastore.uris"]
-            == "thrift://hivehost.internal:9083"
-        )
+        assert out["spark.driver.host"] == "10.0.0.1"
         assert out["spark.executor.cores"] == 4
 
     def test_drops_key_when_env_var_missing(self, monkeypatch, caplog):
-        monkeypatch.delenv("HIVE_HOST", raising=False)
+        monkeypatch.delenv("NODE_IP", raising=False)
         with caplog.at_level(logging.WARNING):
             out = resolve_env_placeholders(
                 {
-                    "spark.hadoop.hive.metastore.uris":
-                        "thrift://${env.HIVE_HOST}:9083",
+                    "spark.driver.host": "${env.NODE_IP}",
                     "spark.executor.memory": "4g",
                 }
             )
-        assert "spark.hadoop.hive.metastore.uris" not in out
+        assert "spark.driver.host" not in out
         assert out["spark.executor.memory"] == "4g"
-        assert any("HIVE_HOST" in r.message for r in caplog.records)
+        assert any("NODE_IP" in r.message for r in caplog.records)
 
     def test_multiple_env_placeholders(self, monkeypatch):
         monkeypatch.setenv("HIVE_HOST", "hivehost")

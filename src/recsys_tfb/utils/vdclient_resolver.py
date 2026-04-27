@@ -2,9 +2,11 @@
 
 Two placeholder forms are supported:
 
-  ``${vdclient.<name>}`` → ``vdclient.get_<name>()``
-      ``vdclient`` is an environment-provided package not always available
-      (laptops, CI). Lazy-imported once per call.
+  ``${vdclient.<cluster>.<field>}`` → ``vdclient_magic.spark_ports("<cluster>")``
+      Returns the named field from the port tuple. Supported fields:
+      ``driver_port`` (index 0), ``blockManager_port`` (index 1).
+      ``vdclient_magic`` is production-only; unavailable on laptops / CI.
+      Lazy-imported once; result cached per cluster per call.
 
   ``${env.<NAME>}`` → ``os.environ["<NAME>"]``
       Reads the process environment.
@@ -20,19 +22,22 @@ import os
 import re
 
 logger = logging.getLogger(__name__)
-_VDCLIENT_PATTERN = re.compile(r"\$\{vdclient\.(\w+)\}")
+_VDCLIENT_PATTERN = re.compile(r"\$\{vdclient\.(\w+)\.(\w+)\}")
 _ENV_PATTERN = re.compile(r"\$\{env\.(\w+)\}")
+
+# Fields returned positionally by spark_ports(cluster).
+_SPARK_PORTS_FIELDS = ("driver_port", "blockManager_port")
 
 
 def resolve_vdclient_placeholders(spark_configs: dict) -> dict:
-    """Resolve ${vdclient.<name>} placeholders by calling vdclient.get_<name>().
+    """Resolve ${vdclient.<cluster>.<field>} placeholders via vdclient_magic.spark_ports().
 
     For each value containing one or more placeholders:
-      1. Lazy-import ``vdclient`` (once per call). Import failure → drop the
-         key + warn.
-      2. For each ``<name>``, look up ``get_<name>`` on the module. Missing
-         getter → drop the key + warn.
-      3. Otherwise call the getter and substitute the placeholder text.
+      1. Lazy-import ``vdclient_magic`` (once per call). Import failure → drop
+         the key + warn.
+      2. Call ``spark_ports(cluster)`` and cache the (driver_port,
+         blockManager_port) tuple. Unknown field name → drop the key + warn.
+      3. Otherwise substitute the placeholder text.
 
     Values without placeholders pass through unchanged. Non-string values pass
     through unchanged.
@@ -40,52 +45,70 @@ def resolve_vdclient_placeholders(spark_configs: dict) -> dict:
     resolved: dict = {}
     vdclient_mod = None
     vdclient_import_attempted = False
+    spark_ports_cache: dict = {}
 
     for key, value in spark_configs.items():
         if not isinstance(value, str):
             resolved[key] = value
             continue
-        names = _VDCLIENT_PATTERN.findall(value)
-        if not names:
+        matches = _VDCLIENT_PATTERN.findall(value)
+        if not matches:
             resolved[key] = value
             continue
 
         if not vdclient_import_attempted:
             vdclient_import_attempted = True
             try:
-                import vdclient as _vdclient_mod  # type: ignore[import]
+                import vdclient_magic as _vdclient_mod  # type: ignore[import]
 
                 vdclient_mod = _vdclient_mod
             except ImportError:
                 vdclient_mod = None
                 logger.warning(
-                    "vdclient not importable; spark config keys with "
-                    "${vdclient.*} placeholders will be dropped."
+                    "vdclient_magic not importable; spark config keys with "
+                    "${vdclient.*.*} placeholders will be dropped."
                 )
 
         if vdclient_mod is None:
             logger.warning(
                 "Dropping spark config key '%s' (placeholders %s): "
-                "vdclient unavailable",
+                "vdclient_magic unavailable",
                 key,
-                names,
+                matches,
             )
             continue
 
         new_value = value
         drop_this_key = False
-        for name in names:
-            getter = getattr(vdclient_mod, f"get_{name}", None)
-            if getter is None:
+        for cluster, field in matches:
+            if cluster not in spark_ports_cache:
+                try:
+                    ports = vdclient_mod.spark_ports(cluster)
+                    spark_ports_cache[cluster] = dict(
+                        zip(_SPARK_PORTS_FIELDS, (str(p) for p in ports))
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Dropping spark config key '%s': spark_ports(%r) failed: %s",
+                        key,
+                        cluster,
+                        exc,
+                    )
+                    drop_this_key = True
+                    break
+            port_val = spark_ports_cache[cluster].get(field)
+            if port_val is None:
                 logger.warning(
-                    "Dropping spark config key '%s': vdclient has no get_%s",
+                    "Dropping spark config key '%s': unknown vdclient field '%s' "
+                    "(supported: %s)",
                     key,
-                    name,
+                    field,
+                    ", ".join(_SPARK_PORTS_FIELDS),
                 )
                 drop_this_key = True
                 break
             new_value = new_value.replace(
-                f"${{vdclient.{name}}}", str(getter())
+                f"${{vdclient.{cluster}.{field}}}", port_val
             )
         if drop_this_key:
             continue

@@ -1,9 +1,13 @@
 project_name: recsys_tfb
 random_seed: 42
-backend: pandas
+backend: spark
 
 spark:
   app_name: recsys_tfb
+  spark.master: yarn
+  spark.driver.host: ${env.NODE_IP}
+  spark.driver.port: ${vdclient.cdp.driver_port}
+  spark.blockManager.port: ${vdclient.cdp.blockManager_port}
   spark.serializer: org.apache.spark.serializer.KryoSerializer
   spark.sql.session.timeZone: Asia/Taipei
   spark.sql.catalogImplementation: hive
