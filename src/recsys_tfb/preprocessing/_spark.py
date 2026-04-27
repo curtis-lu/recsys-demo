@@ -26,21 +26,25 @@ def _encode_categoricals(
     categorical_cols: list[str],
     category_mappings: dict[str, list],
 ) -> DataFrame:
-    """Encode categorical columns via broadcast join. Unknown values -> -1."""
-    spark = df.sparkSession
-    result = df
+    """Encode categorical columns via Spark SQL map literal. Unknown values -> -1.
 
+    Uses F.create_map (JVM-side) instead of createDataFrame(list) + broadcast join
+    to avoid sc.parallelize(), which would pickle data with the driver's protocol
+    (5 on Python 3.10) and fail on Python 3.6 workers.
+    """
+    result = df
     for col in categorical_cols:
         categories = category_mappings[col]
-        mapping_rows = [(cat, idx) for idx, cat in enumerate(categories)]
-        mapping_df = spark.createDataFrame(mapping_rows, [col, f"{col}_code"])
-        result = result.join(F.broadcast(mapping_df), on=col, how="left")
+        if not categories:
+            result = result.withColumn(col, F.lit(-1).cast("integer"))
+            continue
+        pairs: list = []
+        for idx, cat in enumerate(categories):
+            pairs.extend([F.lit(cat), F.lit(idx)])
+        map_col = F.create_map(*pairs)
         result = result.withColumn(
-            f"{col}_code",
-            F.coalesce(F.col(f"{col}_code"), F.lit(-1)),
+            col, F.coalesce(map_col[F.col(col)], F.lit(-1)).cast("integer")
         )
-        result = result.drop(col).withColumnRenamed(f"{col}_code", col)
-
     return result
 
 

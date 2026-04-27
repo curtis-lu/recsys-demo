@@ -42,8 +42,8 @@ test_model_input:
   backend: pandas
 
 preprocessor:
-  type: PickleDataset
-  filepath: data/dataset/${base_dataset_version}/preprocessor.pkl
+  type: JSONDataset
+  filepath: data/dataset/${base_dataset_version}/preprocessor.json
 
 category_mappings:
   type: JSONDataset
