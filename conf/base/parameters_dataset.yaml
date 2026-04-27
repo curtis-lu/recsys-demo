@@ -11,9 +11,9 @@ dataset:
   sample_ratio_overrides:
   # 多欄位 sample_group_keys 時，用 "|" 組合序列化為 key
   # 範例（sample_group_keys: [cust_segment_typ, prod_name]）：
-    "mass|fund_mix": 0.5
-    "affluent|exchanfe_usd": 0.9
-    "hnw|exchange_fx": 0.8
+    "mass|negative": 0.5
+    "affluent|negative": 0.9
+    "hnw|negative": 0.8
   # 未指定的組合用預設 sample_ratio
 
   # --- Train / Train-dev（共用日期，按 cust_id ratio 切分）---

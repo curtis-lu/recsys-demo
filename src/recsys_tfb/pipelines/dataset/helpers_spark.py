@@ -7,6 +7,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset._hashing import HASH_BUCKETS, spark_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,16 @@ def select_keys(
     snap_dates: list,
     sample_ratio: float,
     sample_ratio_overrides: dict | None = None,
+    *,
+    site: str = "sample_keys",
 ) -> DataFrame:
     """Stratified sampling by configurable group keys, returning unique identity keys.
 
     Filters sample_pool to the given snap_dates and applies stratified sampling
     with per-group ratio overrides. Identity key is (snap_date, cust_id, prod_name).
+
+    Sampling is deterministic: a row is kept when
+    ``crc32(identity_key | site | seed) % HASH_BUCKETS < ratio * HASH_BUCKETS``.
 
     Args:
         sample_pool: Full sample pool at customer-month-product granularity.
@@ -30,6 +36,9 @@ def select_keys(
         sample_ratio: Default sampling ratio for this split.
         sample_ratio_overrides: Per-group ratio overrides. If None, falls back to
             parameters["dataset"]["sample_ratio_overrides"].
+        site: Stable label that namespaces this sampling site so two callers
+            sharing the same seed (e.g. train vs calibration) draw independent
+            buckets.
     """
     schema = get_schema(parameters)
     identity_key = schema["identity_columns"]  # [snap_date, cust_id, prod_name]
@@ -75,15 +84,16 @@ def select_keys(
     else:
         keys = keys.withColumn("_effective_ratio", F.lit(sample_ratio))
 
-    # Probabilistic sampling: rand(seed) < effective_ratio
-    sampled = keys.filter(
-        F.rand(seed) < F.col("_effective_ratio")
-    ).select(*identity_key)
+    # Deterministic sampling: bucket(identity_key | site | seed) < threshold
+    keys = keys.withColumn("_bucket", spark_bucket(keys, identity_key, seed, site=site))
+    threshold_expr = (F.col("_effective_ratio") * F.lit(HASH_BUCKETS)).cast("int")
+    sampled = keys.filter(F.col("_bucket") < threshold_expr).select(*identity_key)
 
     logger.info(
-        "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s)",
+        "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
         sample_ratio,
         group_keys,
         sample_ratio_overrides,
+        site,
     )
     return sampled

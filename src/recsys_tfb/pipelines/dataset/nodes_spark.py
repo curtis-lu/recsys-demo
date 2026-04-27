@@ -8,6 +8,7 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset._hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._spark import (
@@ -39,7 +40,10 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     train_dates = [row[time_col] for row in train_dates_rows]
 
     overrides = ds.get("sample_ratio_overrides", {})
-    return select_keys(sample_pool, parameters, train_dates, ds["sample_ratio"], overrides)
+    return select_keys(
+        sample_pool, parameters, train_dates, ds["sample_ratio"], overrides,
+        site="sample_keys",
+    )
 
 
 def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
@@ -49,7 +53,10 @@ def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFra
     cal_ratio = ds.get("calibration_sample_ratio", 1.0)
     cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
 
-    return select_keys(sample_pool, parameters, cal_dates, cal_ratio, cal_overrides)
+    return select_keys(
+        sample_pool, parameters, cal_dates, cal_ratio, cal_overrides,
+        site="calibration_keys",
+    )
 
 
 def split_train_keys(
@@ -68,13 +75,17 @@ def split_train_keys(
     train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
     seed = parameters.get("random_seed", 42)
 
-    # Assign random value per cust_id, split by threshold
+    # Deterministic per-cust_id bucket; threshold is computed once so the two
+    # filters are guaranteed to be a complete and disjoint partition regardless
+    # of how many actions Spark runs against this plan.
     cust_df = sample_keys.select(cust_col).distinct()
-    cust_df = cust_df.withColumn("_rand", F.rand(seed))
+    cust_df = cust_df.withColumn(
+        "_bucket", spark_bucket(cust_df, [cust_col], seed, site="split_train_dev"),
+    )
+    threshold = ratio_to_threshold(train_dev_ratio)
 
-    # cust_ids with _rand < train_dev_ratio → train-dev
-    dev_custs = cust_df.filter(F.col("_rand") < F.lit(train_dev_ratio)).select(cust_col)
-    train_custs = cust_df.filter(F.col("_rand") >= F.lit(train_dev_ratio)).select(cust_col)
+    dev_custs = cust_df.filter(F.col("_bucket") < F.lit(threshold)).select(cust_col)
+    train_custs = cust_df.filter(F.col("_bucket") >= F.lit(threshold)).select(cust_col)
 
     train_keys = sample_keys.join(train_custs, on=cust_col, how="inner")
     train_dev_keys = sample_keys.join(dev_custs, on=cust_col, how="inner")
@@ -109,10 +120,12 @@ def select_val_keys(
         logger.info("Val keys (full population)")
         return all_keys
 
-    # Pure random cust_id sampling
+    # Deterministic cust_id sampling
     custs = all_keys.select(cust_col).distinct()
-    sampled_custs = custs.withColumn("_rand", F.rand(seed)).filter(
-        F.col("_rand") < F.lit(val_sample_ratio)
+    sampled_custs = custs.withColumn(
+        "_bucket", spark_bucket(custs, [cust_col], seed, site="val_keys"),
+    ).filter(
+        F.col("_bucket") < F.lit(ratio_to_threshold(val_sample_ratio))
     ).select(cust_col)
 
     sampled = all_keys.join(sampled_custs, on=cust_col, how="inner")

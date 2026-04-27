@@ -87,8 +87,11 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.pipelines.training.nodes import _extract_Xy
 
         # -- Synthetic source tables --
+        # Use ≥20 customers so that hash-based train/train_dev split (ratio=0.2)
+        # reliably produces at least one dev customer; small N exposes the
+        # statistical reality of any deterministic-hash sampler.
         products = ["exchange_fx", "exchange_usd", "fund_stock"]
-        customers = ["C001", "C002", "C003", "C004"]
+        customers = [f"C{i:03d}" for i in range(1, 21)]
         snaps = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
         rng = np.random.RandomState(42)
 

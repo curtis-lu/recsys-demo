@@ -149,10 +149,51 @@ class TestSplitTrainKeys:
         assert len(train_custs & dev_custs) == 0
 
     def test_all_keys_preserved(self, sample_pool, parameters):
+        """train_keys ∪ train_dev_keys must be exactly sample_keys, even after
+        repartition (which is the production scenario that broke F.rand-based splitting)."""
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        sample_keys = select_train_keys(sample_pool, params).repartition(8)
+        train, train_dev = split_train_keys(sample_keys, params)
+
+        identity = ["snap_date", "cust_id", "prod_name"]
+        sample_set = {tuple(r) for r in sample_keys.select(*identity).toPandas().itertuples(index=False)}
+        train_set = {tuple(r) for r in train.select(*identity).toPandas().itertuples(index=False)}
+        dev_set = {tuple(r) for r in train_dev.select(*identity).toPandas().itertuples(index=False)}
+
+        assert train_set | dev_set == sample_set
+        assert train_set & dev_set == set()
+
+    def test_deterministic_across_runs(self, sample_pool, parameters):
+        """Two independent invocations with the same seed must yield identical splits."""
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         sample_keys = select_train_keys(sample_pool, params)
-        train, train_dev = split_train_keys(sample_keys, params)
-        assert train.count() + train_dev.count() == sample_keys.count()
+
+        t1, d1 = split_train_keys(sample_keys, params)
+        t2, d2 = split_train_keys(sample_keys, params)
+
+        t1_custs = set(t1.select("cust_id").distinct().toPandas()["cust_id"])
+        t2_custs = set(t2.select("cust_id").distinct().toPandas()["cust_id"])
+        d1_custs = set(d1.select("cust_id").distinct().toPandas()["cust_id"])
+        d2_custs = set(d2.select("cust_id").distinct().toPandas()["cust_id"])
+        assert t1_custs == t2_custs
+        assert d1_custs == d2_custs
+
+    def test_cross_backend_consistency(self, sample_pool, parameters):
+        """Spark and pandas backends must produce identical cust_id assignments."""
+        from recsys_tfb.pipelines.dataset.nodes_pandas import (
+            split_train_keys as split_pandas,
+        )
+
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        sample_keys_spark = select_train_keys(sample_pool, params)
+        sample_keys_pandas = sample_keys_spark.toPandas()
+
+        t_spark, d_spark = split_train_keys(sample_keys_spark, params)
+        t_pandas, d_pandas = split_pandas(sample_keys_pandas, params)
+
+        spark_dev = set(d_spark.select("cust_id").distinct().toPandas()["cust_id"])
+        pandas_dev = set(d_pandas["cust_id"])
+        assert spark_dev == pandas_dev
 
 
 class TestSelectValKeys:

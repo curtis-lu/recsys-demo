@@ -2,10 +2,10 @@
 
 import logging
 
-import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset._hashing import pandas_bucket, ratio_to_threshold
 from recsys_tfb.pipelines.dataset.helpers_pandas import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._pandas import (
@@ -32,7 +32,10 @@ def select_train_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.DataFra
     train_dates = [d for d in all_dates if start <= pd.Timestamp(d) <= end]
 
     overrides = ds.get("sample_ratio_overrides", {})
-    return select_keys(sample_pool, parameters, train_dates, ds["sample_ratio"], overrides)
+    return select_keys(
+        sample_pool, parameters, train_dates, ds["sample_ratio"], overrides,
+        site="sample_keys",
+    )
 
 
 def select_calibration_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.DataFrame:
@@ -42,7 +45,10 @@ def select_calibration_keys(sample_pool: pd.DataFrame, parameters: dict) -> pd.D
     cal_ratio = ds.get("calibration_sample_ratio", 1.0)
     cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
 
-    return select_keys(sample_pool, parameters, cal_dates, cal_ratio, cal_overrides)
+    return select_keys(
+        sample_pool, parameters, cal_dates, cal_ratio, cal_overrides,
+        site="calibration_keys",
+    )
 
 
 def split_train_keys(
@@ -61,12 +67,13 @@ def split_train_keys(
     train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
     seed = parameters.get("random_seed", 42)
 
-    # Get unique cust_ids and split
-    unique_custs = sample_keys[cust_col].unique()
-    rng = np.random.RandomState(seed)
-    rng.shuffle(unique_custs)
-    n_dev = max(1, int(len(unique_custs) * train_dev_ratio))
-    dev_custs = set(unique_custs[:n_dev])
+    # Deterministic per-cust_id bucket; shared with the Spark backend.
+    unique_custs_df = pd.DataFrame({cust_col: sample_keys[cust_col].unique()})
+    unique_custs_df["_bucket"] = pandas_bucket(
+        unique_custs_df, [cust_col], seed, site="split_train_dev",
+    )
+    threshold = ratio_to_threshold(train_dev_ratio)
+    dev_custs = set(unique_custs_df.loc[unique_custs_df["_bucket"] < threshold, cust_col])
 
     train_dev_mask = sample_keys[cust_col].isin(dev_custs)
     train_keys = sample_keys[~train_dev_mask].reset_index(drop=True)
@@ -78,7 +85,7 @@ def split_train_keys(
         len(train_dev_keys),
         train_dev_ratio,
         len(dev_custs),
-        len(unique_custs),
+        len(unique_custs_df),
     )
     return train_keys, train_dev_keys
 
@@ -107,11 +114,13 @@ def select_val_keys(
         logger.info("Val keys: %d (full population)", len(all_keys))
         return all_keys.reset_index(drop=True)
 
-    # Pure random cust_id sampling (not stratified)
-    unique_custs = all_keys[cust_col].unique()
-    rng = np.random.RandomState(seed)
-    n_sample = max(1, int(len(unique_custs) * val_sample_ratio))
-    sampled_custs = set(rng.choice(unique_custs, size=n_sample, replace=False))
+    # Deterministic cust_id sampling; shared with the Spark backend.
+    unique_custs_df = pd.DataFrame({cust_col: all_keys[cust_col].unique()})
+    unique_custs_df["_bucket"] = pandas_bucket(
+        unique_custs_df, [cust_col], seed, site="val_keys",
+    )
+    threshold = ratio_to_threshold(val_sample_ratio)
+    sampled_custs = set(unique_custs_df.loc[unique_custs_df["_bucket"] < threshold, cust_col])
 
     sampled = all_keys[all_keys[cust_col].isin(sampled_custs)].reset_index(drop=True)
     logger.info(
@@ -119,8 +128,8 @@ def select_val_keys(
         len(sampled),
         len(all_keys),
         val_sample_ratio,
-        n_sample,
-        len(unique_custs),
+        len(sampled_custs),
+        len(unique_custs_df),
     )
     return sampled
 
