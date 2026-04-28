@@ -43,12 +43,12 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
         ),
         Node(
             select_val_keys,
-            inputs=["label_table", "parameters"],
+            inputs=["sample_pool", "parameters"],
             outputs="val_keys",
         ),
         Node(
             select_test_keys,
-            inputs=["label_table", "parameters"],
+            inputs=["sample_pool", "parameters"],
             outputs="test_keys",
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---

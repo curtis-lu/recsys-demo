@@ -228,7 +228,7 @@ def build_model_input(
 
     label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
     with log_step(logger, "merge_labels"):
-        dataset = keys.join(label_table, on=label_join_key, how="inner")
+        dataset = keys.join(label_table, on=label_join_key, how="left")
     with log_step(logger, "merge_features"):
         dataset = dataset.join(preprocessed_feature_table, on=base_key, how="left")
 

@@ -98,7 +98,7 @@ def split_train_keys(
 
 
 def select_val_keys(
-    label_table: DataFrame,
+    sample_pool: DataFrame,
     parameters: dict,
 ) -> DataFrame:
     """Select validation identity keys (full population, optional random cust_id sampling)."""
@@ -113,7 +113,7 @@ def select_val_keys(
     val_sample_ratio = ds.get("val_sample_ratio", 1.0)
     seed = parameters.get("random_seed", 42)
 
-    val_labels = label_table.filter(F.col(time_col).isin(val_dates))
+    val_labels = sample_pool.filter(F.col(time_col).isin(val_dates))
     all_keys = val_labels.select(*identity_key).dropDuplicates()
 
     if val_sample_ratio >= 1.0:
@@ -134,7 +134,7 @@ def select_val_keys(
 
 
 def select_test_keys(
-    label_table: DataFrame,
+    sample_pool: DataFrame,
     parameters: dict,
 ) -> DataFrame:
     """Select test identity keys (full population, no sampling)."""
@@ -146,7 +146,7 @@ def select_test_keys(
     ds = parameters["dataset"]
     test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]
 
-    test_labels = label_table.filter(F.col(time_col).isin(test_dates))
+    test_labels = sample_pool.filter(F.col(time_col).isin(test_dates))
     all_keys = test_labels.select(*identity_key).dropDuplicates()
 
     logger.info("Test keys (full population)")
