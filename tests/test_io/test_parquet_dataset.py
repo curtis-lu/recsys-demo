@@ -85,3 +85,35 @@ class TestParquetDatasetSpark:
         loaded = ds.load()
         assert set(loaded.columns) == {"a", "b"}
         assert loaded.count() == 3
+
+    def test_write_mode_ignore_skips_existing(self, spark, tmp_path):
+        """write_mode=ignore must not overwrite an existing parquet directory."""
+        filepath = str(tmp_path / "ignore_target.parquet")
+        ds = ParquetDataset(filepath=filepath, backend="spark", write_mode="ignore")
+
+        # First write seeds the directory
+        first = spark.createDataFrame([(1, "a")], ["id", "tag"])
+        ds.save(first)
+        assert ds.exists()
+
+        # Second save with different data must be a no-op under mode=ignore
+        second = spark.createDataFrame([(2, "b"), (3, "c")], ["id", "tag"])
+        ds.save(second)
+
+        loaded = ds.load()
+        rows = sorted([(r["id"], r["tag"]) for r in loaded.collect()])
+        assert rows == [(1, "a")]
+
+    def test_write_mode_default_overwrite_replaces(self, spark, tmp_path):
+        """Default write_mode='overwrite' must replace existing data."""
+        filepath = str(tmp_path / "overwrite_target.parquet")
+        ds = ParquetDataset(filepath=filepath, backend="spark")  # default
+        ds.save(spark.createDataFrame([(1, "a")], ["id", "tag"]))
+        ds.save(spark.createDataFrame([(2, "b")], ["id", "tag"]))
+        loaded = ds.load()
+        rows = sorted([(r["id"], r["tag"]) for r in loaded.collect()])
+        assert rows == [(2, "b")]
+
+    def test_write_mode_invalid_raises(self):
+        with pytest.raises(ValueError, match="write_mode must be"):
+            ParquetDataset(filepath="/tmp/x.parquet", backend="spark", write_mode="merge")
