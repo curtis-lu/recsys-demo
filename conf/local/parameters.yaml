@@ -1,5 +1,2 @@
 spark:
   spark.master: local[*]
-
-cache:
-  enabled: false
