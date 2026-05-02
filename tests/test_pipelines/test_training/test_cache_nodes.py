@@ -89,3 +89,81 @@ class TestIsSparkDataframe:
     def test_none_is_not_spark(self):
         from recsys_tfb.pipelines.training.nodes import _is_spark_df
         assert _is_spark_df(None) is False
+
+
+class _FakeReader:
+    def __init__(self, marker: object):
+        self.marker = marker
+        self.read_paths: list[str] = []
+
+    def parquet(self, path: str):
+        self.read_paths.append(path)
+        return f"reread_from::{path}"
+
+
+class _FakeSparkSession:
+    def __init__(self, marker: object):
+        self.read = _FakeReader(marker)
+
+
+class _FakeSparkDF:
+    def __init__(self):
+        self.sql_ctx = type("SqlCtx", (), {})()
+        self.sql_ctx.sparkSession = _FakeSparkSession(marker=self)
+
+
+# ---- _cache_or_passthrough ----
+
+class TestCacheOrPassthroughDev:
+    def test_cache_disabled_returns_input_unchanged(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
+        params = _params_with_versions(str(tmp_path), enabled=False)
+        df = pd.DataFrame({"a": [1]})
+        out = _cache_or_passthrough(df, "train_model_input", params)
+        assert out is df
+
+    def test_pandas_input_with_cache_enabled_passthrough_with_warning(self, tmp_path, caplog):
+        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        df = pd.DataFrame({"a": [1]})
+        out = _cache_or_passthrough(df, "train_model_input", params)
+        assert out is df
+
+
+class TestCacheOrPassthroughProd:
+    def test_cache_miss_returns_input_unchanged(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        df = _FakeSparkDF()
+        out = _cache_or_passthrough(df, "train_model_input", params)
+        assert out is df
+
+    def test_cache_hit_returns_local_reread(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            _cache_or_passthrough,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("train_model_input", params))
+        target.mkdir(parents=True)
+        (target / "_SUCCESS").touch()
+
+        df = _FakeSparkDF()
+        out = _cache_or_passthrough(df, "train_model_input", params)
+        assert out == f"reread_from::file://{target}"
+
+    def test_partial_cache_is_cleared_and_treated_as_miss(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            _cache_or_passthrough,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("train_model_input", params))
+        target.mkdir(parents=True)
+        # NOTE: no _SUCCESS file -> partial
+        (target / "garbage.parquet").write_text("partial")
+
+        df = _FakeSparkDF()
+        out = _cache_or_passthrough(df, "train_model_input", params)
+        assert out is df
+        assert not target.exists(), "partial cache must be removed"

@@ -75,6 +75,55 @@ def _is_spark_df(df) -> bool:
     return df is not None and hasattr(df, "sql_ctx")
 
 
+def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
+    """Skip-if-exists local-parquet cache for a single model_input.
+
+    Behaviour:
+      - cache.enabled = False  -> return df unchanged (dev no-op)
+      - df is not a Spark DataFrame and cache.enabled = True
+            -> warn, return df unchanged (defensive in dev)
+      - target path has _SUCCESS
+            -> return spark.read.parquet(file://<path>) (cache hit)
+      - target path exists but no _SUCCESS
+            -> rmtree and treat as cache miss
+      - cache miss
+            -> return df unchanged; framework's catalog.save() persists it
+    """
+    cache_cfg = parameters.get("cache", {})
+    if not cache_cfg.get("enabled", False):
+        return df
+
+    if not _is_spark_df(df):
+        logger.warning(
+            "cache.enabled=true but %s input is not a Spark DataFrame; passthrough",
+            dataset_name,
+        )
+        return df
+
+    local_path = _resolve_cache_path(dataset_name, parameters)
+    success_marker = Path(local_path) / "_SUCCESS"
+
+    if Path(local_path).exists() and not success_marker.exists():
+        logger.info(
+            "Partial cache detected at %s, clearing before retry", local_path
+        )
+        shutil.rmtree(local_path)
+
+    if success_marker.exists():
+        logger.info(
+            "cache_hit name=%s path=%s", dataset_name, local_path
+        )
+        spark = df.sql_ctx.sparkSession
+        return spark.read.parquet(f"file://{local_path}")
+
+    logger.info(
+        "cache_miss name=%s path=%s (Spark write will be triggered by catalog.save)",
+        dataset_name,
+        local_path,
+    )
+    return df
+
+
 def _extract_Xy(
     model_input,
     preprocessor_metadata: dict,
