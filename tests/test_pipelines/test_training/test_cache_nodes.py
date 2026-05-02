@@ -228,3 +228,68 @@ class TestCacheNodes:
         params = _params_with_versions(str(tmp_path), enabled=False)
         df = pd.DataFrame({"a": [1]})
         assert cache_train_model_input(df, params) is df
+
+
+class TestCacheRunnerIntegration:
+    """Integration: cache node short-circuits Hive read on second Runner run."""
+
+    def test_second_run_uses_local_cache(self, tmp_path):
+        from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
+        from recsys_tfb.core.node import Node
+        from recsys_tfb.core.pipeline import Pipeline
+        from recsys_tfb.core.runner import Runner
+        from recsys_tfb.io.base import AbstractDataset
+        from recsys_tfb.pipelines.training.nodes import (
+            _resolve_cache_path,
+            cache_train_model_input,
+        )
+
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        cache_path = _resolve_cache_path("train_model_input", params)
+
+        load_calls: list[int] = []
+
+        class FakeHiveDataset(AbstractDataset):
+            def __init__(self):
+                self._df = _FakeSparkDF()
+
+            def load(self):
+                load_calls.append(1)
+                return self._df
+
+            def save(self, data):  # not exercised in this test
+                pass
+
+            def exists(self):
+                return True
+
+        catalog = DataCatalog()
+        catalog.add("train_model_input", FakeHiveDataset())
+        catalog.add("parameters", MemoryDataset(data=params))
+
+        pipeline = Pipeline([
+            Node(
+                cache_train_model_input,
+                inputs=["train_model_input", "parameters"],
+                outputs="cached_train_model_input",
+            ),
+        ])
+
+        # First run: cache miss; cache node returns the input df unchanged.
+        Runner().run(pipeline, catalog)
+        assert len(load_calls) == 1
+        first_run_cached = catalog.load("cached_train_model_input")
+        # Cache miss: the cache node returned the original df.
+        assert first_run_cached is not None
+
+        # Simulate framework's parquet write by populating _SUCCESS marker.
+        # In production, ParquetDataset(write_mode=ignore) does this via Spark.
+        Path(cache_path).mkdir(parents=True, exist_ok=True)
+        (Path(cache_path) / "_SUCCESS").touch()
+
+        # Second run: cache hit; cache node short-circuits and returns
+        # spark.read.parquet(<uri>) (a string sentinel from _FakeReader).
+        Runner().run(pipeline, catalog)
+        assert len(load_calls) == 2
+        second_run_cached = catalog.load("cached_train_model_input")
+        assert second_run_cached == f"reread_from::{Path(cache_path).as_uri()}"
