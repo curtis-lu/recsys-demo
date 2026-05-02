@@ -104,17 +104,17 @@ def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
     success_marker = Path(local_path) / "_SUCCESS"
 
     if Path(local_path).exists() and not success_marker.exists():
-        logger.info(
+        logger.warning(
             "Partial cache detected at %s, clearing before retry", local_path
         )
-        shutil.rmtree(local_path)
+        shutil.rmtree(local_path, ignore_errors=True)
 
     if success_marker.exists():
         logger.info(
             "cache_hit name=%s path=%s", dataset_name, local_path
         )
         spark = df.sql_ctx.sparkSession
-        return spark.read.parquet(f"file://{local_path}")
+        return spark.read.parquet(Path(local_path).as_uri())
 
     logger.info(
         "cache_miss name=%s path=%s (Spark write will be triggered by catalog.save)",

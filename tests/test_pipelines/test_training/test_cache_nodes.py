@@ -123,11 +123,14 @@ class TestCacheOrPassthroughDev:
         assert out is df
 
     def test_pandas_input_with_cache_enabled_passthrough_with_warning(self, tmp_path, caplog):
+        import logging
         from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
         params = _params_with_versions(str(tmp_path), enabled=True)
         df = pd.DataFrame({"a": [1]})
-        out = _cache_or_passthrough(df, "train_model_input", params)
+        with caplog.at_level(logging.WARNING, logger="recsys_tfb.pipelines.training.nodes"):
+            out = _cache_or_passthrough(df, "train_model_input", params)
         assert out is df
+        assert any("not a Spark DataFrame" in rec.message for rec in caplog.records)
 
 
 class TestCacheOrPassthroughProd:
