@@ -116,7 +116,7 @@ def _execute_pipeline(
             ].replace(mv, "best")
 
     catalog = DataCatalog(catalog_config)
-    catalog.add("parameters", MemoryDataset(data=params))
+    catalog.add("parameters", MemoryDataset(data=substitution_params))
 
     if pipeline_name == "evaluation":
         if not catalog.exists("baseline_metrics"):

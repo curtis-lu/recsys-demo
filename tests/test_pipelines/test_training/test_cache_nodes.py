@@ -153,7 +153,7 @@ class TestCacheOrPassthroughProd:
 
         df = _FakeSparkDF()
         out = _cache_or_passthrough(df, "train_model_input", params)
-        assert out == f"reread_from::file://{target}"
+        assert out == f"reread_from::{target.as_uri()}"
 
     def test_partial_cache_is_cleared_and_treated_as_miss(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
@@ -296,3 +296,42 @@ class TestCacheRunnerIntegration:
         assert len(load_calls) == 2
         second_run_cached = catalog.load("cached_train_model_input")
         assert second_run_cached == f"reread_from::{Path(cache_path).as_uri()}"
+
+
+class TestParametersWiringRegression:
+    """Regression: cache nodes need version IDs in parameters dict, not just runtime_params."""
+
+    def test_cache_node_raises_clear_error_when_versions_missing(self, tmp_path):
+        """Without the __main__.py fix, this test catches the KeyError early."""
+        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
+
+        # Simulate a params dict that has cache enabled but lacks version IDs
+        # (i.e., what `__main__.py:119` would inject if the fix were missing).
+        params_no_versions = {
+            "cache": {"enabled": True, "root": str(tmp_path)},
+        }
+        df = _FakeSparkDF()
+
+        # The current behavior: KeyError naming the missing key.
+        # This test documents the expected failure mode for ops debugging.
+        import pytest as _pytest
+        with _pytest.raises(KeyError, match="base_dataset_version"):
+            _cache_or_passthrough(df, "train_model_input", params_no_versions)
+
+    def test_cache_node_runs_when_versions_present(self, tmp_path):
+        """Mirrors the post-fix __main__.py behavior: substitution_params injected
+        into parameters MemoryDataset, so cache helpers find the version IDs."""
+        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
+
+        # Simulate substitution_params = {**yaml_params, **runtime_params}
+        params_with_versions = {
+            "cache": {"enabled": True, "root": str(tmp_path)},
+            "base_dataset_version": "base_v1",
+            "train_variant_id": "train_v1",
+            "calibration_variant_id": "calib_v1",
+        }
+        df = _FakeSparkDF()
+
+        # Cache miss path; should return df unchanged without raising.
+        out = _cache_or_passthrough(df, "train_model_input", params_with_versions)
+        assert out is df
