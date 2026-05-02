@@ -257,8 +257,8 @@ class TestCacheRunnerIntegration:
                 load_calls.append(1)
                 return self._df
 
-            def save(self, data):  # not exercised in this test
-                pass
+            def save(self, data):
+                raise AssertionError("FakeHiveDataset.save should never be called by Runner")
 
             def exists(self):
                 return True
@@ -278,9 +278,10 @@ class TestCacheRunnerIntegration:
         # First run: cache miss; cache node returns the input df unchanged.
         Runner().run(pipeline, catalog)
         assert len(load_calls) == 1
+        fake_source = catalog.get_dataset("train_model_input")
         first_run_cached = catalog.load("cached_train_model_input")
-        # Cache miss: the cache node returned the original df.
-        assert first_run_cached is not None
+        # Cache miss: the cache node returned the original df unchanged.
+        assert first_run_cached is fake_source._df
 
         # Simulate framework's parquet write by populating _SUCCESS marker.
         # In production, ParquetDataset(write_mode=ignore) does this via Spark.
@@ -290,6 +291,8 @@ class TestCacheRunnerIntegration:
         # Second run: cache hit; cache node short-circuits and returns
         # spark.read.parquet(<uri>) (a string sentinel from _FakeReader).
         Runner().run(pipeline, catalog)
+        # Runner.load is per-run; HiveTableDataset.load() returns a lazy plan
+        # so this is cheap. The real cache-hit proof is the next assertion.
         assert len(load_calls) == 2
         second_run_cached = catalog.load("cached_train_model_input")
         assert second_run_cached == f"reread_from::{Path(cache_path).as_uri()}"
