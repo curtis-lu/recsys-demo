@@ -8,9 +8,10 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_four_nodes(self):
+    def test_pipeline_has_seven_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 4
+        # 3 cache nodes (train, train_dev, val) + tune + train + evaluate + log
+        assert len(pipeline.nodes) == 7
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -22,12 +23,19 @@ class TestTrainingPipeline:
 
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
-        expected = {"best_params", "model", "evaluation_results"}
+        expected = {
+            "best_params", "model", "evaluation_results",
+            "cached_train_model_input", "cached_train_dev_model_input",
+            "cached_val_model_input",
+        }
         assert pipeline.outputs == expected
 
     def test_node_names(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
+        assert "cache_train_model_input" in names
+        assert "cache_train_dev_model_input" in names
+        assert "cache_val_model_input" in names
         assert "tune_hyperparameters" in names
         assert "train_model" in names
         assert "evaluate_model" in names
@@ -36,42 +44,43 @@ class TestTrainingPipeline:
     def test_topological_order(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
-        # tune must come before train (train depends on best_params)
+        # cache nodes must come before tune
+        for cache_name in (
+            "cache_train_model_input",
+            "cache_train_dev_model_input",
+            "cache_val_model_input",
+        ):
+            assert names.index(cache_name) < names.index("tune_hyperparameters")
         assert names.index("tune_hyperparameters") < names.index("train_model")
-        # train must come before evaluate (evaluate depends on model)
         assert names.index("train_model") < names.index("evaluate_model")
-        # evaluate must come before log (log depends on evaluation_results)
         assert names.index("evaluate_model") < names.index("log_experiment")
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_five_nodes(self):
+    def test_calibration_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
-        assert len(pipeline.nodes) == 5
+        # 4 cache nodes + tune + train + calibrate + evaluate + log
+        assert len(pipeline.nodes) == 9
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
         names = [n.name for n in pipeline.nodes]
         assert "calibrate_model" in names
+        assert "cache_calibration_model_input" in names
 
     def test_calibration_pipeline_inputs(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # Should include calibration data in addition to normal inputs
         assert "calibration_model_input" in pipeline.inputs
 
     def test_calibration_pipeline_trained_model_intermediate(self):
-        """trained_model should be intermediate: produced by train_model, consumed by calibrate_model."""
         pipeline = create_pipeline(enable_calibration=True)
-        # trained_model is produced internally and consumed internally,
-        # so it should NOT appear in pipeline.inputs (external inputs)
         assert "trained_model" not in pipeline.inputs
-        # It should be in the set of all node outputs
         assert "trained_model" in pipeline.outputs
 
     def test_calibration_pipeline_topological_order(self):
         pipeline = create_pipeline(enable_calibration=True)
         names = [n.name for n in pipeline.nodes]
-        # calibrate_model must come after train_model and before evaluate_model
+        assert names.index("cache_calibration_model_input") < names.index("calibrate_model")
         assert names.index("train_model") < names.index("calibrate_model")
         assert names.index("calibrate_model") < names.index("evaluate_model")
 
