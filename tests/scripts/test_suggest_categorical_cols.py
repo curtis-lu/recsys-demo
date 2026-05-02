@@ -137,13 +137,13 @@ class TestSuggestCategoricalColumnsPandas:
 class TestSuggestCategoricalColumnsSpark:
     def test_string_type_is_categorical(self, spark):
         df = spark.createDataFrame([("a",), ("b",), ("c",)], ["s"])
-        cats, implicit = suggest_categorical_columns_spark(df)
+        cats, implicit, n_rows = suggest_categorical_columns_spark(df)
         assert cats == ["s"]
         assert implicit == []
 
     def test_boolean_type_is_categorical(self, spark):
         df = spark.createDataFrame([(True,), (False,), (True,)], ["b"])
-        cats, implicit = suggest_categorical_columns_spark(df)
+        cats, implicit, n_rows = suggest_categorical_columns_spark(df)
         assert cats == ["b"]
         assert implicit == []
 
@@ -165,7 +165,7 @@ class TestSuggestCategoricalColumnsSpark:
         )
         rows = [(1, 10, 1.5), (2, 20, 2.5), (1, 10, 1.5), (2, 20, 2.5)]
         df = spark.createDataFrame(rows, schema)
-        cats, implicit = suggest_categorical_columns_spark(
+        cats, implicit, n_rows = suggest_categorical_columns_spark(
             df, max_numerical_cardinality=5
         )
         assert set(cats) == {"i", "l", "d"}
@@ -176,7 +176,7 @@ class TestSuggestCategoricalColumnsSpark:
     def test_high_cardinality_numeric_excluded(self, spark):
         rows = [(i,) for i in range(200)]
         df = spark.createDataFrame(rows, ["x"])
-        cats, implicit = suggest_categorical_columns_spark(
+        cats, implicit, n_rows = suggest_categorical_columns_spark(
             df, max_numerical_cardinality=20
         )
         assert cats == []
@@ -184,7 +184,7 @@ class TestSuggestCategoricalColumnsSpark:
 
     def test_no_numeric_columns_does_not_crash(self, spark):
         df = spark.createDataFrame([("a", True), ("b", False)], ["s", "b"])
-        cats, implicit = suggest_categorical_columns_spark(df)
+        cats, implicit, n_rows = suggest_categorical_columns_spark(df)
         assert cats == ["s", "b"]
         assert implicit == []
 
@@ -198,7 +198,7 @@ class TestSuggestCategoricalColumnsSpark:
         """
         rows = [(i, i % 3) for i in range(50)]
         df = spark.createDataFrame(rows, ["high", "low"])
-        cats, implicit = suggest_categorical_columns_spark(
+        cats, implicit, n_rows = suggest_categorical_columns_spark(
             df, max_numerical_cardinality=10
         )
         assert cats == ["low"]
@@ -226,7 +226,7 @@ class TestSuggestCategoricalColumnsSpark:
         )
         rows = [(1, "x", True), (2, "y", False), (1, "x", True)]
         df = spark.createDataFrame(rows, schema)
-        cats, _ = suggest_categorical_columns_spark(
+        cats, _, n_rows = suggest_categorical_columns_spark(
             df, max_numerical_cardinality=10
         )
         assert cats == ["z_int", "a_str", "m_bool"]
