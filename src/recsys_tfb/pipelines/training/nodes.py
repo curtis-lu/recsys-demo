@@ -1,6 +1,8 @@
 """Pure functions for the training pipeline."""
 
 import logging
+import shutil
+from pathlib import Path
 
 import mlflow
 import numpy as np
@@ -25,6 +27,52 @@ def _to_pandas(df):
     if hasattr(df, "toPandas"):
         return df.toPandas()
     return df
+
+
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+_CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
+    "val_model_input": ("base_dataset_version",),
+    "test_model_input": ("base_dataset_version",),
+    "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
+    "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
+    "calibration_model_input": (
+        "base_dataset_version",
+        "calibration_variants",
+        "calibration_variant_id",
+    ),
+}
+
+
+def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
+    """Compose the local-cache parquet directory path for a model_input dataset.
+
+    Mirrors the layered structure used by production catalog filepaths:
+      <root>/<base_dataset_version>/[train_variants/<train_variant_id>/]<name>.parquet
+    """
+    if dataset_name not in _CACHE_PATH_LAYOUT:
+        raise ValueError(f"unknown dataset for cache path: {dataset_name!r}")
+    cache_cfg = parameters.get("cache", {})
+    root = Path(cache_cfg.get("root", "/tmp/recsys_cache"))
+    parts = [root]
+    for token in _CACHE_PATH_LAYOUT[dataset_name]:
+        if token in ("train_variants", "calibration_variants"):
+            parts.append(Path(token))
+        else:
+            value = parameters[token]
+            parts.append(Path(value))
+    parts.append(Path(f"{dataset_name}.parquet"))
+    full = parts[0]
+    for p in parts[1:]:
+        full = full / p
+    return str(full)
+
+
+def _is_spark_df(df) -> bool:
+    """Return True if df looks like a PySpark DataFrame (has sql_ctx attr)."""
+    return df is not None and hasattr(df, "sql_ctx")
 
 
 def _extract_Xy(
