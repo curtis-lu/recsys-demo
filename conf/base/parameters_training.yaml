@@ -39,3 +39,7 @@ training:
 mlflow:
   experiment_name: recsys_tfb
   tracking_uri: mlruns
+
+cache:
+  enabled: true
+  root: /tmp/recsys_cache
