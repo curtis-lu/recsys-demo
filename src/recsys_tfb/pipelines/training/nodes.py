@@ -124,6 +124,32 @@ def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
     return df
 
 
+# ---------------------------------------------------------------------------
+# Cache nodes
+# ---------------------------------------------------------------------------
+
+def cache_train_model_input(train_model_input, parameters: dict):
+    """skip-if-exists local-parquet cache for train_model_input."""
+    return _cache_or_passthrough(train_model_input, "train_model_input", parameters)
+
+
+def cache_train_dev_model_input(train_dev_model_input, parameters: dict):
+    """skip-if-exists local-parquet cache for train_dev_model_input."""
+    return _cache_or_passthrough(train_dev_model_input, "train_dev_model_input", parameters)
+
+
+def cache_val_model_input(val_model_input, parameters: dict):
+    """skip-if-exists local-parquet cache for val_model_input."""
+    return _cache_or_passthrough(val_model_input, "val_model_input", parameters)
+
+
+def cache_calibration_model_input(calibration_model_input, parameters: dict):
+    """skip-if-exists local-parquet cache for calibration_model_input."""
+    return _cache_or_passthrough(
+        calibration_model_input, "calibration_model_input", parameters
+    )
+
+
 def _extract_Xy(
     model_input,
     preprocessor_metadata: dict,

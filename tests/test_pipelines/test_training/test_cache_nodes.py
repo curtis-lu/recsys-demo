@@ -170,3 +170,61 @@ class TestCacheOrPassthroughProd:
         out = _cache_or_passthrough(df, "train_model_input", params)
         assert out is df
         assert not target.exists(), "partial cache must be removed"
+
+
+# ---- Cache nodes ----
+
+class TestCacheNodes:
+    def test_cache_train_model_input_passes_dataset_name(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            cache_train_model_input,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("train_model_input", params))
+        target.mkdir(parents=True)
+        (target / "_SUCCESS").touch()
+        out = cache_train_model_input(_FakeSparkDF(), params)
+        assert out == f"reread_from::{target.as_uri()}"
+
+    def test_cache_train_dev_model_input_passes_dataset_name(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            cache_train_dev_model_input,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("train_dev_model_input", params))
+        target.mkdir(parents=True)
+        (target / "_SUCCESS").touch()
+        out = cache_train_dev_model_input(_FakeSparkDF(), params)
+        assert out == f"reread_from::{target.as_uri()}"
+
+    def test_cache_val_model_input_passes_dataset_name(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            cache_val_model_input,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("val_model_input", params))
+        target.mkdir(parents=True)
+        (target / "_SUCCESS").touch()
+        out = cache_val_model_input(_FakeSparkDF(), params)
+        assert out == f"reread_from::{target.as_uri()}"
+
+    def test_cache_calibration_model_input_passes_dataset_name(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            cache_calibration_model_input,
+            _resolve_cache_path,
+        )
+        params = _params_with_versions(str(tmp_path), enabled=True)
+        target = Path(_resolve_cache_path("calibration_model_input", params))
+        target.mkdir(parents=True)
+        (target / "_SUCCESS").touch()
+        out = cache_calibration_model_input(_FakeSparkDF(), params)
+        assert out == f"reread_from::{target.as_uri()}"
+
+    def test_cache_node_dev_passthrough(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+        params = _params_with_versions(str(tmp_path), enabled=False)
+        df = pd.DataFrame({"a": [1]})
+        assert cache_train_model_input(df, params) is df
