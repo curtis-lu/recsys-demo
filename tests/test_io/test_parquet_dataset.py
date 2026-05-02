@@ -33,6 +33,13 @@ class TestParquetDatasetPandas:
         ds.save(pd.DataFrame({"a": [1]}))
         assert ds.exists() is True
 
+    def test_pandas_write_mode_ignore_skips_existing(self, tmp_path):
+        filepath = str(tmp_path / "ignore.parquet")
+        ds = ParquetDataset(filepath=filepath, backend="pandas", write_mode="ignore")
+        ds.save(pd.DataFrame({"a": [1]}))
+        ds.save(pd.DataFrame({"a": [2, 3]}))  # must be no-op
+        pd.testing.assert_frame_equal(ds.load(), pd.DataFrame({"a": [1]}))
+
     def test_invalid_backend(self):
         with pytest.raises(ValueError, match="backend must be"):
             ParquetDataset(filepath="/tmp/x.parquet", backend="invalid")

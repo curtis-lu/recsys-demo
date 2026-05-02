@@ -44,6 +44,8 @@ class ParquetDataset(AbstractDataset):
 
     def save(self, data) -> None:
         if self._backend == "pandas":
+            # pandas-mode ignore short-circuits on directory existence only;
+            # the production cache layer enforces _SUCCESS-based correctness via _cache_or_passthrough.
             if self._write_mode == "ignore" and self.exists():
                 return
             if hasattr(data, "toPandas"):
