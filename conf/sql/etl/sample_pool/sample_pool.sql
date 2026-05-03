@@ -19,7 +19,7 @@ SELECT
     p.snap_date,
     p.cust_id,
     p.cust_segment_typ,
-    l.prod_name,
+    coalesce(l.prod_name, 'negative') as prod_name,
     l.label,
     f.tenure_months,
     f.channel_preference

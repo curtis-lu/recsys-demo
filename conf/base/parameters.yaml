@@ -1,6 +1,6 @@
 project_name: recsys_tfb
 random_seed: 42
-backend: spark
+backend: pandas
 
 spark:
   app_name: recsys_tfb

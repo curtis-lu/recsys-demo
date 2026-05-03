@@ -185,8 +185,8 @@ def apply_preprocessor_to_features(
     with log_step(logger, "select_columns"):
         result = feature_table.select(*keep_cols)
 
-    encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
     with log_step(logger, "encode_categoricals"):
+        encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
         if encode_cols:
             result = _encode_categoricals(result, encode_cols, category_mappings)
             for col in encode_cols:
