@@ -23,6 +23,14 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - Dev 環境使用合成假資料取代 Hive tables
 - Storage：Parquet（local dev）/ Parquet on HDFS（production）
 
+## Local Spark backend testing
+
+互動測試 backend=spark 的 pipeline：
+
+- **本機環境**：`~/dev-cluster/`（Docker Spark+HDFS+Hive Metastore），詳見其 README。
+- **Hive 來源表 setup**：`scripts/setup_hive_dev.py` 把 `data/{feature_table,label_table,sample_pool}.parquet` 寫成 `ml_recsys.<table>` Hive managed table。**跳過 source_etl**（合成資料已是 feature/label 粒度，沒有上游 `feature_concat`/`label_ccard` 等表）。
+- **跑 pipeline**：`source ~/dev-cluster/scripts/client-env.sh && .venv/bin/python -m recsys_tfb <pipeline> --env production`。host 端讀 Hive 資料前需 `/etc/hosts` 加 `127.0.0.1 namenode datanode hive-metastore spark-master`，否則 `hdfs://namenode:9000/...` resolve 不到（dev-cluster README §「已知限制」第 3 點）。
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
