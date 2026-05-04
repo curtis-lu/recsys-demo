@@ -1,145 +1,190 @@
-# Source Tables
+# Production overrides - Spark backend, Hive tables on HDFS.
+# Three-layer versioning: base_dataset_version keys invariant artifacts;
+# train_variant_id keys per-train-sampling artifacts; calibration_variant_id
+# keys per-calibration-sampling artifacts. Each layer lives under a different
+# HDFS path (base / train_variants / calibration_variants) and table names
+# carry the corresponding version suffixes.
+
+# --- Source tables (read-only, managed by source_etl) ---
 feature_table:
-  type: ParquetDataset
-  filepath: data/feature_table.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: feature_table
+  read_only: true
 
 label_table:
-  type: ParquetDataset
-  filepath: data/label_table.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: label_table
+  read_only: true
 
 sample_pool:
-  type: ParquetDataset
-  filepath: data/sample_pool.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: sample_pool
+  read_only: true
 
-# --- Dataset Building Pipeline ---
-# Base layer: artifacts invariant under train/calibration sampling changes.
+# --- Dataset base layer (per base_dataset_version) ---
 val_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/val_keys.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: val_keys_${base_dataset_version}
+  external: false
+  columns: "auto"
 
 test_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/test_keys.parquet
-  backend: pandas
-
-preprocessed_feature_table:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/preprocessed_feature_table.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: test_keys_${base_dataset_version}
+  external: false
+  columns: "auto"
 
 val_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/val_model_input.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: val_model_input_${base_dataset_version}
+  external: false
+  columns: "auto"
 
 test_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/test_model_input.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: test_model_input_${base_dataset_version}
+  external: false
+  columns: "auto"
 
 preprocessor:
   type: JSONDataset
-  filepath: data/dataset/${base_dataset_version}/preprocessor.json
+  filepath: data/recsys/dataset/${base_dataset_version}/preprocessor.json
 
 category_mappings:
   type: JSONDataset
-  filepath: data/dataset/${base_dataset_version}/category_mappings.json
+  filepath: data/recsys/dataset/${base_dataset_version}/category_mappings.json
 
-# Train variant layer: keyed by (base, train_variant).
+# --- Dataset train-variant layer (per base + train_variant) ---
 sample_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/sample_keys.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: sample_keys_${base_dataset_version}_${train_variant_id}
+  external: false
+  columns: "auto"
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 train_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_keys.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: train_keys_${base_dataset_version}_${train_variant_id}
+  external: false
+  columns: "auto"
 
 train_dev_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_keys.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: train_dev_keys_${base_dataset_version}_${train_variant_id}
+  external: false
+  columns: "auto"
 
 train_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: train_model_input_${base_dataset_version}_${train_variant_id}
+  external: false
+  columns: "auto"
 
 train_dev_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: train_dev_model_input_${base_dataset_version}_${train_variant_id}
+  external: false
+  columns: "auto"
 
-# Calibration variant layer: keyed by (base, calibration_variant).
+# --- Dataset calibration-variant layer (per base + calibration_variant) ---
 calibration_keys:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_keys.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: calibration_keys_${base_dataset_version}_${calibration_variant_id}
+  external: false
+  columns: "auto"
 
 calibration_model_input:
-  type: ParquetDataset
-  filepath: data/dataset/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: calibration_model_input_${base_dataset_version}_${calibration_variant_id}
+  external: false
+  columns: "auto"
 
-# Training Pipeline
+# --- Training Pipeline - Binary / non-DataFrame artifacts (not Hive) ---
 model:
   type: ModelAdapterDataset
-  filepath: data/models/${model_version}/model.txt
+  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/model.txt
 
 best_params:
   type: JSONDataset
-  filepath: data/models/${model_version}/best_params.json
+  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/best_params.json
 
 evaluation_results:
   type: JSONDataset
-  filepath: data/models/${model_version}/evaluation_results.json
+  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/evaluation_results.json
 
-# Inference Pipeline
-scoring_dataset:
+# --- Training Pipeline - Local cache layer (per base + variant) ---
+# These mirror the dataset-layer paths but live on driver-local disk so that
+# rerunning the training pipeline (e.g. with new hyperparameters) does not
+# rescan Hive. Skip-if-exists is enforced both by the cache node and by
+# write_mode=ignore on the ParquetDataset.
+cached_val_model_input:
   type: ParquetDataset
-  filepath: data/inference/${model_version}/${snap_date}/scoring_dataset.parquet
-  backend: pandas
+  filepath: data/recsys_cache/${base_dataset_version}/val_model_input.parquet
+  backend: spark
+  partition_cols: [snap_date, prod_name]
+  write_mode: ignore
 
+cached_train_model_input:
+  type: ParquetDataset
+  filepath: data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
+  backend: spark
+  partition_cols: [snap_date, prod_name]
+  write_mode: ignore
+
+cached_train_dev_model_input:
+  type: ParquetDataset
+  filepath: data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
+  backend: spark
+  partition_cols: [snap_date, prod_name]
+  write_mode: ignore
+
+cached_calibration_model_input:
+  type: ParquetDataset
+  filepath: data/recsys_cache/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
+  backend: spark
+  partition_cols: [snap_date, prod_name]
+  write_mode: ignore
+
+# --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---
+# Each run only overwrites partitions present in the DataFrame (snap_date x prod_name x model_version).
 score_table:
-  type: ParquetDataset
-  filepath: data/inference/${model_version}/${snap_date}/score_table.parquet
-  backend: pandas
-
-ranked_predictions:
-  type: ParquetDataset
-  filepath: data/inference/${model_version}/${snap_date}/ranked_predictions.parquet
-  backend: pandas
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: score_table
+  external: false
+  columns:
+    - {name: cust_id, type: STRING}
+    - {name: score, type: DOUBLE}
+  partition_cols:
+    - {name: snap_date, type: STRING}
+    - {name: prod_name, type: STRING}
+    - {name: model_version, type: STRING}
 
 validated_predictions:
-  type: ParquetDataset
-  filepath: data/inference/${model_version}/${snap_date}/validated_predictions.parquet
-  backend: pandas
-
-# Evaluation Pipeline
-eval_predictions:
-  type: ParquetDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/eval_predictions.parquet
-  backend: pandas
-
-evaluation_metrics:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/metrics.json
-
-evaluation_report:
-  type: TextDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/report.html
-
-# Baselines Pipeline
-baseline_predictions:
-  type: ParquetDataset
-  filepath: data/baselines/${snap_date}/baseline_predictions.parquet
-  backend: pandas
-
-baseline_metrics:
-  type: JSONDataset
-  filepath: data/baselines/${snap_date}/baseline_metrics.json
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: ranked_predictions
+  external: false
+  columns:
+    - {name: cust_id, type: STRING}
+    - {name: score, type: DOUBLE}
+    - {name: rank, type: BIGINT}
+  partition_cols:
+    - {name: snap_date, type: STRING}
+    - {name: prod_name, type: STRING}
+    - {name: model_version, type: STRING}
