@@ -94,12 +94,9 @@ def _fallback_create() -> SparkSession:
             "No active SparkSession and parameters.yaml not found in conf/."
         ) from exc
     spark_configs = base_params.get("spark", {})
-    if not spark_configs:
-        raise RuntimeError(
-            "No active SparkSession and parameters.yaml has no 'spark:' "
-            "block. Add one or pass spark_configs explicitly."
-        )
     logger.info(
-        "Fallback: building SparkSession from conf/%s/parameters.yaml", env
+        "Fallback: building SparkSession (yaml=conf/%s/parameters.yaml, "
+        "connection settings from SPARK_CONF_DIR)",
+        env,
     )
-    return get_or_create_spark_session(spark_configs)
+    return get_or_create_spark_session(spark_configs or {"app_name": "recsys_tfb"})

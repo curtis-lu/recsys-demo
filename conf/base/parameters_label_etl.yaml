@@ -3,7 +3,7 @@
 
 label_etl:
   variables:
-    target_db: "ml_feature"
+    target_db: "ml_recsys"
 
   # Source table freshness and schema checks (run before ETL execution)
   source_checks: {}

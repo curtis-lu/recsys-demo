@@ -1,18 +1,25 @@
 project_name: recsys_tfb
 random_seed: 42
-backend: pandas
+backend: spark
 
+hive:
+  db: ml_recsys
+
+# Dev-cluster (Docker Spark Standalone) 覆蓋：base 的 spark.master=yarn 是給
+# 真實 CDP/YARN 用，本機 dev-cluster 走 Standalone。其餘 driver.host/port、
+# vdclient placeholder 等在 dev 端會由 resolve_*_placeholders 自動 drop，
+# 由 ~/dev-cluster/client-template/spark/spark-defaults.conf 補齊。
 spark:
   app_name: recsys_tfb
-  spark.master: yarn
-  spark.driver.host: ${env.NODE_IP}
-  spark.driver.port: ${vdclient.cdp.driver_port}
-  spark.blockManager.port: ${vdclient.cdp.blockManager_port}
-  spark.serializer: org.apache.spark.serializer.KryoSerializer
-  spark.sql.session.timeZone: Asia/Taipei
-  spark.sql.catalogImplementation: hive
-  spark.executor.memory: 4g
-  spark.executor.cores: 2
+  # spark.master: yarn
+  # spark.driver.host: ${env.NODE_IP}
+  # spark.driver.port: ${vdclient.cdp.driver_port}
+  # spark.blockManager.port: ${vdclient.cdp.blockManager_port}
+  # spark.serializer: org.apache.spark.serializer.KryoSerializer
+  # spark.sql.session.timeZone: Asia/Taipei
+  # spark.sql.catalogImplementation: hive
+  # spark.executor.memory: 4g
+  # spark.executor.cores: 2
 
 # [SCHEMA SPECIFICATION]
 # All input tables (feature, label, sample_pool) provided to the dataset pipeline

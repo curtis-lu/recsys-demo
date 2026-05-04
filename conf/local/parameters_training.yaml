@@ -1,3 +1,0 @@
-# Dev override: disable cache so each test run rebuilds from synthetic data.
-cache:
-  enabled: false

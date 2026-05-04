@@ -1,4 +1,0 @@
-backend: spark
-
-hive:
-  db: ml_recsys

@@ -1,5 +1,0 @@
-# Local dev: dry-run mode (render SQL only, no execution)
-feature_etl:
-  dry_run: true
-  variables:
-    target_db: "dev_ml_feature"

@@ -4,8 +4,9 @@
 # source_checks on ${target_db}.feature_concat and the three label tables.
 
 sample_pool_etl:
+  dry_run: false
   variables:
-    target_db: "ml_feature"
+    target_db: "ml_recsys"
 
   # Source table freshness and schema checks (run before ETL execution)
   source_checks: {}

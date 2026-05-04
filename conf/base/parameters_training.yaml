@@ -1,8 +1,8 @@
 spark:
   app_name: recsys_tfb-training
-  spark.executor.memory: 16g
-  spark.executor.cores: 4
-  spark.driver.memory: 8g
+  # spark.executor.memory: 16g
+  # spark.executor.cores: 4
+  # spark.driver.memory: 8g
 
 training:
   algorithm: lightgbm
@@ -45,4 +45,4 @@ mlflow:
 # /tmp is the driver-local default — confirm tmpfs durability with ops if relevant.
 cache:
   enabled: true
-  root: /tmp/recsys_cache
+  root: /data/recsys_cache
