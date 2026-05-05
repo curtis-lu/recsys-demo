@@ -11176,7 +11176,7 @@
       "label": "main()",
       "file_type": "code",
       "source_file": "scripts/setup_hive_dev.py",
-      "source_location": "L17",
+      "source_location": "L19",
       "id": "setup_hive_dev_main",
       "community": 8,
       "norm_label": "main()"
@@ -53565,7 +53565,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/setup_hive_dev.py",
-      "source_location": "L17",
+      "source_location": "L19",
       "weight": 1.0,
       "_src": "scripts_setup_hive_dev_py",
       "_tgt": "setup_hive_dev_main",
