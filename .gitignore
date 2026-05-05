@@ -21,3 +21,7 @@ tests/scenarios/output/
 logs/*
 .worktrees/
 .untouch/
+
+# Spark/Hive driver-side detritus (Derby fallback metastore + warehouse)
+metastore_db/
+spark-warehouse/
