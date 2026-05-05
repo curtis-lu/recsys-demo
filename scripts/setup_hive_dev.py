@@ -5,6 +5,8 @@ the host project root.
 """
 
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import to_date
+from pyspark.sql.types import TimestampType
 
 DB = "ml_recsys"
 TABLES = {
@@ -26,6 +28,10 @@ def main() -> None:
 
     for table, path in TABLES.items():
         df = spark.read.parquet(f"file://{path}")
+        if "snap_date" in df.columns and isinstance(
+            df.schema["snap_date"].dataType, TimestampType
+        ):
+            df = df.withColumn("snap_date", to_date("snap_date"))
         full = f"{DB}.{table}"
         df.write.mode("overwrite").saveAsTable(full)
         n = spark.table(full).count()

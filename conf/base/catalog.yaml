@@ -55,11 +55,11 @@ test_model_input:
 
 preprocessor:
   type: JSONDataset
-  filepath: data/recsys/dataset/${base_dataset_version}/preprocessor.json
+  filepath: data/dataset/${base_dataset_version}/preprocessor.json
 
 category_mappings:
   type: JSONDataset
-  filepath: data/recsys/dataset/${base_dataset_version}/category_mappings.json
+  filepath: data/dataset/${base_dataset_version}/category_mappings.json
 
 # --- Dataset train-variant layer (per base + train_variant) ---
 sample_keys:
@@ -114,48 +114,51 @@ calibration_model_input:
   external: false
   columns: "auto"
 
-# --- Training Pipeline - Binary / non-DataFrame artifacts (not Hive) ---
+# --- Training Pipeline - Binary / non-DataFrame artifacts (driver-local) ---
+# ModelAdapterDataset / JSONDataset 用 Python 內建 open() 寫檔，不認 hdfs:// scheme，
+# 因此寫到本機 host fs（與 cached_* 同一原則）。
 model:
   type: ModelAdapterDataset
-  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/model.txt
+  filepath: data/models/${model_version}/model.txt
 
 best_params:
   type: JSONDataset
-  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/best_params.json
+  filepath: data/models/${model_version}/best_params.json
 
 evaluation_results:
   type: JSONDataset
-  filepath: hdfs://namenode:9000/data/recsys/models/${model_version}/evaluation_results.json
+  filepath: data/models/${model_version}/evaluation_results.json
 
-# --- Training Pipeline - Local cache layer (per base + variant) ---
+# --- Training Pipeline - Driver-local parquet cache (per base + variant) ---
 # These mirror the dataset-layer paths but live on driver-local disk so that
 # rerunning the training pipeline (e.g. with new hyperparameters) does not
-# rescan Hive. Skip-if-exists is enforced both by the cache node and by
-# write_mode=ignore on the ParquetDataset.
+# rescan Hive. Requires spark.master=local[*] (driver=executor 同 JVM)，否則
+# distributed worker container 看不到 host fs。Skip-if-exists 由 cache node
+# 與 ParquetDataset 的 write_mode=ignore 雙重保證。
 cached_val_model_input:
   type: ParquetDataset
-  filepath: data/recsys_cache/${base_dataset_version}/val_model_input.parquet
+  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/val_model_input.parquet
   backend: spark
   partition_cols: [snap_date, prod_name]
   write_mode: ignore
 
 cached_train_model_input:
   type: ParquetDataset
-  filepath: data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
+  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
   backend: spark
   partition_cols: [snap_date, prod_name]
   write_mode: ignore
 
 cached_train_dev_model_input:
   type: ParquetDataset
-  filepath: data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
+  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
   backend: spark
   partition_cols: [snap_date, prod_name]
   write_mode: ignore
 
 cached_calibration_model_input:
   type: ParquetDataset
-  filepath: data/recsys_cache/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
+  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
   backend: spark
   partition_cols: [snap_date, prod_name]
   write_mode: ignore

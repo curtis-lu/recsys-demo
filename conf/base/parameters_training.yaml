@@ -40,9 +40,10 @@ mlflow:
   experiment_name: recsys_tfb
   tracking_uri: mlruns
 
-# Local parquet cache for materialized model inputs (skips Hive scans on re-runs).
-# Keyed by base_dataset_version / train_variant_id / calibration_variant_id;
-# /tmp is the driver-local default — confirm tmpfs durability with ops if relevant.
+# Driver-local parquet cache for materialized model inputs (skips Hive scans on
+# re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
+# 路徑必須與 catalog.yaml 中 cached_*_model_input.filepath（去掉 file:// scheme）
+# 一致 —— cache node 用 root 做 existence check、catalog 用 filepath 做 Spark write。
 cache:
   enabled: true
-  root: /data/recsys_cache
+  root: /Users/curtislu/projects/recsys_tfb/data/recsys_cache
