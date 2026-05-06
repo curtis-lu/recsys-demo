@@ -85,6 +85,57 @@ class TestValidation:
             )
         assert any("managed" in r.message.lower() for r in caplog.records)
 
+    def test_partition_filter_overlaps_columns(self):
+        with pytest.raises(ValueError, match="partition_filter.*overlap"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[
+                    {"name": "a", "type": "STRING"},
+                    {"name": "ver", "type": "STRING"},
+                ],
+                partition_filter={"ver": "abc12345"},
+                external=False,
+            )
+
+    def test_partition_filter_overlaps_partition_cols(self):
+        with pytest.raises(ValueError, match="partition_filter.*overlap"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_cols=[{"name": "ver", "type": "STRING"}],
+                partition_filter={"ver": "abc12345"},
+                external=False,
+            )
+
+    def test_partition_filter_value_must_be_non_empty_string(self):
+        with pytest.raises(ValueError, match="partition_filter.*value"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_filter={"ver": ""},
+                external=False,
+            )
+        with pytest.raises(ValueError, match="partition_filter.*value"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_filter={"ver": 123},
+                external=False,
+            )
+
+    def test_partition_filter_allowed_on_read_only(self):
+        ds = HiveTableDataset(
+            database="db",
+            table="t",
+            partition_filter={"ver": "abc"},
+            read_only=True,
+        )
+        assert ds._partition_filter == {"ver": "abc"}
+
 
 class TestDDLExternalPartitioned:
     def _make_ds(self) -> HiveTableDataset:
@@ -178,6 +229,55 @@ class TestDDLColumnComment:
         )
         ddl = ds._build_create_ddl()
         assert "Alice\\'s note" in ddl
+
+
+class TestDDLPartitionFilter:
+    def test_filter_only_no_dynamic_partition(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_keys",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "snap_date", "type": "STRING"},
+            ],
+            partition_filter={"base_dataset_version": "abc12345"},
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert "PARTITIONED BY (base_dataset_version STRING)" in ddl
+
+    def test_filter_outer_dynamic_inner(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_model_input",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_filter={"base_dataset_version": "abc12345"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert (
+            "PARTITIONED BY (base_dataset_version STRING, snap_date STRING)"
+            in ddl
+        )
+
+    def test_filter_multiple_keys_preserve_order(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_filter={
+                "base_dataset_version": "abc12345",
+                "train_variant_id": "def67890",
+            },
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert (
+            "PARTITIONED BY (base_dataset_version STRING, "
+            "train_variant_id STRING, snap_date STRING)"
+        ) in ddl
 
 
 class TestSaveExternalPartitioned:
@@ -279,6 +379,107 @@ class TestSaveAppendMode:
         writer.insertInto.assert_called_once_with("db.t")
 
 
+class TestSaveWithPartitionFilter:
+    def _make_ds(self, **kw):
+        defaults = dict(
+            database="ml_recsys",
+            table="val_model_input",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "score", "type": "DOUBLE"},
+            ],
+            partition_filter={"base_dataset_version": "abc12345"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        defaults.update(kw)
+        return HiveTableDataset(**defaults)
+
+    def test_save_adds_static_col_when_missing(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "snap_date"]
+        df.withColumn.return_value = df
+        df.select.return_value = df
+        df.select.return_value.distinct.return_value.collect.return_value = []
+        writer = MagicMock()
+        df.write.mode.return_value = writer
+
+        with _patch_spark(spark), \
+             patch("pyspark.sql.functions.lit") as mock_lit:
+            mock_lit.return_value = "LIT_abc12345"
+            ds.save(df)
+
+        df.withColumn.assert_any_call("base_dataset_version", "LIT_abc12345")
+
+        df.select.assert_any_call(
+            "cust_id", "score", "base_dataset_version", "snap_date"
+        )
+
+        spark.conf.set.assert_any_call(
+            "spark.sql.sources.partitionOverwriteMode", "dynamic"
+        )
+
+        writer.insertInto.assert_called_once_with("ml_recsys.val_model_input")
+
+    def test_save_keeps_static_col_when_value_matches(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        distinct_row = MagicMock()
+        distinct_row.__getitem__.return_value = "abc12345"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            distinct_row
+        ]
+        df.select.return_value.distinct.return_value.collect.return_value = []
+        writer = MagicMock()
+        df.write.mode.return_value = writer
+
+        with _patch_spark(spark):
+            ds.save(df)
+
+        for call in df.withColumn.call_args_list:
+            assert call[0][0] != "base_dataset_version"
+
+        writer.insertInto.assert_called_once_with("ml_recsys.val_model_input")
+
+    def test_save_raises_on_static_col_value_mismatch(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        bad_row = MagicMock()
+        bad_row.__getitem__.return_value = "XXBADXX"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            bad_row
+        ]
+
+        with _patch_spark(spark), \
+             pytest.raises(ValueError, match="partition_filter.*mismatch"):
+            ds.save(df)
+
+    def test_save_raises_on_multiple_static_values(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        r1, r2 = MagicMock(), MagicMock()
+        r1.__getitem__.return_value = "abc12345"
+        r2.__getitem__.return_value = "OTHERVER"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            r1, r2
+        ]
+
+        with _patch_spark(spark), \
+             pytest.raises(ValueError, match="partition_filter.*mismatch"):
+            ds.save(df)
+
+
 class TestReadOnly:
     def test_save_raises_on_read_only(self):
         ds = HiveTableDataset(
@@ -377,3 +578,66 @@ class TestExists:
         with _patch_spark(spark):
             assert ds.exists() is True
         spark.catalog.tableExists.assert_called_once_with("ml_recsys.foo")
+
+
+class TestLoadWithPartitionFilter:
+    def test_load_without_filter_uses_spark_table(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="feature_table",
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.table.assert_called_once_with("ml_recsys.feature_table")
+        spark.sql.assert_not_called()
+
+    def test_load_single_filter_injects_where(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_model_input",
+            partition_filter={"base_dataset_version": "abc12345"},
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.val_model_input "
+            "WHERE base_dataset_version = 'abc12345'"
+        )
+        spark.table.assert_not_called()
+
+    def test_load_multi_filter_joins_with_and(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            partition_filter={
+                "base_dataset_version": "abc12345",
+                "train_variant_id": "def67890",
+            },
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.train_model_input "
+            "WHERE base_dataset_version = 'abc12345' "
+            "AND train_variant_id = 'def67890'"
+        )
+
+    def test_load_escapes_single_quote_in_value(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="t",
+            partition_filter={"k": "ab'cd"},
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.t WHERE k = 'ab''cd'"
+        )

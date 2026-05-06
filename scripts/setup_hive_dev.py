@@ -1,7 +1,12 @@
 """Bootstrap dev Hive: write synthetic parquet as ml_recsys.{feature,label,sample_pool}_table.
 
-Run inside dev-cluster spark container via spark-submit, with /workspace mounted to
-the host project root.
+Run via the dev-cluster admin wrapper (transient devcluster/pyspark container,
+local[N] master, no executor pool). See dev-cluster-spark skill SOP-6.
+
+    scripts/dev_admin.sh scripts/setup_hive_dev.py
+
+Do NOT run from host venv (.venv/bin/python ...): host driver + spark-worker
+container fs mismatch makes file:///workspace not resolvable on the worker side.
 """
 
 from pyspark.sql import SparkSession
@@ -9,6 +14,11 @@ from pyspark.sql.functions import to_date
 from pyspark.sql.types import TimestampType
 
 DB = "ml_recsys"
+# FQ URI required: see dev-cluster-spark skill SOP-4 (CREATE DATABASE without
+# LOCATION crashes if metastore container's fs.defaultFS resolves to itself).
+DB_LOCATION = f"hdfs://namenode:9000/user/hive/warehouse/{DB}.db"
+
+# Paths inside the transient container — project root is bind-mounted at /workspace.
 TABLES = {
     "feature_table": "/workspace/data/feature_table.parquet",
     "label_table": "/workspace/data/label_table.parquet",
@@ -23,8 +33,10 @@ def main() -> None:
         .getOrCreate()
     )
 
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {DB}")
-    print(f"[ok] database ready: {DB}")
+    spark.sql(
+        f"CREATE DATABASE IF NOT EXISTS {DB} LOCATION '{DB_LOCATION}'"
+    )
+    print(f"[ok] database ready: {DB} at {DB_LOCATION}")
 
     for table, path in TABLES.items():
         df = spark.read.parquet(f"file://{path}")
