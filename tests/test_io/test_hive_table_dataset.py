@@ -85,6 +85,57 @@ class TestValidation:
             )
         assert any("managed" in r.message.lower() for r in caplog.records)
 
+    def test_partition_filter_overlaps_columns(self):
+        with pytest.raises(ValueError, match="partition_filter.*overlap"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[
+                    {"name": "a", "type": "STRING"},
+                    {"name": "ver", "type": "STRING"},
+                ],
+                partition_filter={"ver": "abc12345"},
+                external=False,
+            )
+
+    def test_partition_filter_overlaps_partition_cols(self):
+        with pytest.raises(ValueError, match="partition_filter.*overlap"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_cols=[{"name": "ver", "type": "STRING"}],
+                partition_filter={"ver": "abc12345"},
+                external=False,
+            )
+
+    def test_partition_filter_value_must_be_non_empty_string(self):
+        with pytest.raises(ValueError, match="partition_filter.*value"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_filter={"ver": ""},
+                external=False,
+            )
+        with pytest.raises(ValueError, match="partition_filter.*value"):
+            HiveTableDataset(
+                database="db",
+                table="t",
+                columns=[{"name": "a", "type": "STRING"}],
+                partition_filter={"ver": 123},
+                external=False,
+            )
+
+    def test_partition_filter_allowed_on_read_only(self):
+        ds = HiveTableDataset(
+            database="db",
+            table="t",
+            partition_filter={"ver": "abc"},
+            read_only=True,
+        )
+        assert ds._partition_filter == {"ver": "abc"}
+
 
 class TestDDLExternalPartitioned:
     def _make_ds(self) -> HiveTableDataset:

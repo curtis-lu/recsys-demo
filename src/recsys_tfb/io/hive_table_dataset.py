@@ -35,6 +35,7 @@ class HiveTableDataset(AbstractDataset):
         table: str,
         columns: list[dict] | str | None = None,
         partition_cols: list[dict] | None = None,
+        partition_filter: dict | None = None,
         external: bool = True,
         location: str | None = None,
         stored_as: str = "PARQUET",
@@ -47,6 +48,7 @@ class HiveTableDataset(AbstractDataset):
         self._infer_columns = columns == "auto"
         self._columns: list[dict] = [] if self._infer_columns else (columns or [])
         self._partition_cols = partition_cols or []
+        self._partition_filter = dict(partition_filter or {})
         self._external = external
         self._location = location
         self._stored_as = stored_as
@@ -64,6 +66,26 @@ class HiveTableDataset(AbstractDataset):
                 f"write_mode must be one of {_VALID_WRITE_MODES}, "
                 f"got '{self._write_mode}'"
             )
+
+        col_names = {c["name"] for c in self._columns}
+        part_names = {c["name"] for c in self._partition_cols}
+
+        if self._partition_filter:
+            for k, v in self._partition_filter.items():
+                if not isinstance(v, str) or not v:
+                    raise ValueError(
+                        f"partition_filter value for '{k}' must be a non-empty "
+                        f"string for Hive table '{self._database}.{self._table}', "
+                        f"got {v!r}"
+                    )
+            filter_names = set(self._partition_filter.keys())
+            overlap_filter = filter_names & (col_names | part_names)
+            if overlap_filter:
+                raise ValueError(
+                    f"partition_filter keys overlap with columns/partition_cols "
+                    f"on {sorted(overlap_filter)} for Hive table "
+                    f"'{self._database}.{self._table}'"
+                )
 
         if self._read_only:
             return
@@ -89,8 +111,6 @@ class HiveTableDataset(AbstractDataset):
                 self._location,
             )
 
-        col_names = {c["name"] for c in self._columns}
-        part_names = {c["name"] for c in self._partition_cols}
         overlap = col_names & part_names
         if overlap:
             raise ValueError(
