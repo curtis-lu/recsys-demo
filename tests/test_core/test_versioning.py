@@ -158,6 +158,40 @@ class TestComputeBaseDatasetVersion:
         assert compute_base_dataset_version(_base_params(), schema_a) == \
             compute_base_dataset_version(_base_params(), schema_b)
 
+    def test_fingerprint_default_none_matches_legacy(self):
+        # fingerprint=None 必須與不傳該參數時 hash 完全一致（向後相容）
+        legacy = compute_base_dataset_version(_base_params(), _sample_schema())
+        with_none = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint=None
+        )
+        assert legacy == with_none
+
+    def test_different_fingerprints_yield_different_hashes(self):
+        a = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="aaaaaaaa"
+        )
+        b = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="bbbbbbbb"
+        )
+        assert a != b
+
+    def test_same_fingerprint_yields_same_hash(self):
+        a = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        b = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        assert a == b
+
+    def test_fingerprint_set_differs_from_unset(self):
+        # 一旦 caller 開始傳 fingerprint，hash 應該與「沒傳」分流
+        legacy = compute_base_dataset_version(_base_params(), _sample_schema())
+        with_fp = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        assert legacy != with_fp
+
 
 class TestComputeTrainVariantId:
     def test_returns_8_char_hex(self):

@@ -59,21 +59,34 @@ def compute_feature_table_fingerprint(columns) -> str:
     return _hash8(payload)
 
 
-def compute_base_dataset_version(params: dict, schema: dict) -> str:
-    """Hash non-sampling dataset params together with the canonical schema.
+def compute_base_dataset_version(
+    params: dict,
+    schema: dict,
+    feature_table_fingerprint: str | None = None,
+) -> str:
+    """Hash non-sampling dataset params, canonical schema, and feature_table fingerprint.
 
     The resulting ID keys pipeline outputs that are invariant under sampling
     changes. ``params`` is the ``parameters_dataset`` dict; any keys in
     ``ALL_SAMPLING_KEYS`` under ``params["dataset"]`` are stripped before
     hashing so train/calibration sampling experiments do not invalidate
     val/test/preprocessor artifacts.
+
+    ``feature_table_fingerprint`` (optional) reflects the actual
+    ``feature_table`` schema (column name + dtype, ordered). When provided it
+    busts the version on schema changes so the dataset cache cannot collide
+    with a different physical input. ``None`` preserves legacy hashing for
+    backward compatibility.
     """
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
     if isinstance(ds, dict):
         for key in ALL_SAMPLING_KEYS:
             ds.pop(key, None)
-    return _hash8({"dataset": stripped, "schema": schema})
+    payload: dict = {"dataset": stripped, "schema": schema}
+    if feature_table_fingerprint is not None:
+        payload["feature_table_fingerprint"] = feature_table_fingerprint
+    return _hash8(payload)
 
 
 def compute_train_variant_id(params: dict) -> str:
