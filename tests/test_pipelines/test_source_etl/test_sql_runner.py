@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
+from recsys_tfb.pipelines.source_etl.sql_runner import SourceETLError, SQLRunner
 
 
 @pytest.fixture()
@@ -242,6 +242,49 @@ class TestProcessSingleTableExistingRun:
         assert "CAST(snap_date AS DATE)" in content
 
 
+class TestFailFast:
+    def test_sql_error_aborts_remaining_snap_dates(self, sql_dir):
+        """An SQL execution failure must raise SourceETLError and prevent
+        subsequent snap_dates from being processed."""
+        spark = MagicMock()
+        spark.catalog.tableExists.return_value = False
+        limit0_df = MagicMock()
+        limit0_df.columns = ["cust_id", "total_aum", "snap_date"]
+
+        call_count = [0]
+
+        def _side_effect(sql, *args, **kwargs):
+            call_count[0] += 1
+            # First call = column probe (LIMIT 0); succeed.
+            if call_count[0] == 1:
+                return limit0_df
+            # Second call = the real INSERT/CTAS; simulate Spark ParseException.
+            raise RuntimeError("ParseException: syntax error near 'foo'")
+
+        spark.sql.side_effect = _side_effect
+
+        config = {
+            "variables": {"target_db": "ml_feature"},
+            "tables": [
+                {
+                    "name": "feature_aum",
+                    "sql_file": "feature/feature_aum.sql",
+                    "partition_by": {"snap_date": "DATE"},
+                    "primary_key": ["snap_date", "cust_id"],
+                }
+            ],
+        }
+        runner = SQLRunner(config, sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            with pytest.raises(SourceETLError, match="feature_aum"):
+                runner.run(["2026-03-31", "2026-04-30"])
+
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        assert not any("2026-04-30" in s for s in executed), (
+            "second snap_date was processed despite first failing"
+        )
+
+
 class TestProcessSingleTableMissingPartition:
     def test_no_insert_when_partition_col_absent(self, tmp_path, sql_dir):
         """If SELECT output lacks a partition column, no INSERT OVERWRITE is executed."""
@@ -259,6 +302,7 @@ class TestProcessSingleTableMissingPartition:
         }
         runner = SQLRunner(config, sql_dir)
         with patch.object(runner, "_initialize_context", return_value=(spark, None)):
-            runner.run(["2026-03-31"])
+            with pytest.raises(SourceETLError, match="Partition columns missing"):
+                runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("INSERT OVERWRITE" in s for s in executed)

@@ -113,30 +113,40 @@ class SQLRunner:
         for snap_date in target_dates:
             logger.info("Processing snap_date=%s", snap_date)
             run_start = time.monotonic()
-
-            # Source freshness checks (skip in dry-run)
-            if not self._dry_run and self._source_checks:
-                if not self._run_source_checks(spark, snap_date, run_id, audit):
-                    continue  # skip this snap_date
-
-            # Execute tables
             snap_status = "success"
-            for table in tables_to_run:
-                success = self._process_single_table(spark, table, snap_date, run_id, audit)
-                if not success:
-                    snap_status = "failed"
-                    break
+            try:
+                # Source freshness checks (skip in dry-run)
+                if not self._dry_run and self._source_checks:
+                    if not self._run_source_checks(spark, snap_date, run_id, audit):
+                        snap_status = "skipped_source_check"
+                        continue  # skip this snap_date but keep processing the rest
 
-            # Summary
-            total_duration = time.monotonic() - run_start
-            if not self._dry_run and audit:
-                audit.write_summary(run_id, snap_date, snap_status, total_duration)
-            logger.info(
-                "snap_date=%s finished: status=%s, duration=%.1fs",
-                snap_date,
-                snap_status,
-                total_duration,
-            )
+                # Execute tables
+                for table in tables_to_run:
+                    success = self._process_single_table(
+                        spark, table, snap_date, run_id, audit
+                    )
+                    if not success:
+                        # Output-quality failure: record and stop this snap_date.
+                        snap_status = "failed"
+                        break
+            except SourceETLError:
+                # SQL/Spark execution error: abort the whole run after this iteration's
+                # audit summary is written.
+                snap_status = "failed"
+                raise
+            finally:
+                total_duration = time.monotonic() - run_start
+                if not self._dry_run and audit:
+                    audit.write_summary(
+                        run_id, snap_date, snap_status, total_duration
+                    )
+                logger.info(
+                    "snap_date=%s finished: status=%s, duration=%.1fs",
+                    snap_date,
+                    snap_status,
+                    total_duration,
+                )
 
     def _initialize_context(self) -> tuple:
         """Initialize and return the Spark context and AuditWriter."""
@@ -246,7 +256,9 @@ class SQLRunner:
                         error_message=str(exc),
                     )
                 )
-            return False
+            raise SourceETLError(
+                f"{table.name} @ {snap_date}: {exc}"
+            ) from exc
 
         row_count = self._run_output_checks(
             spark, table, snap_date, run_id, audit, duration
