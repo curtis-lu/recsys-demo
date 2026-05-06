@@ -7,15 +7,23 @@ that container is JVM-only, no python3). See dev-cluster-spark skill SOP-6.
     .venv/bin/python scripts/setup_hive_dev.py
 """
 
+from pathlib import Path
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import to_date
 from pyspark.sql.types import TimestampType
 
 DB = "ml_recsys"
+# FQ URI required: see dev-cluster-spark skill SOP-4 (CREATE DATABASE without
+# LOCATION crashes if metastore container's fs.defaultFS resolves to itself).
+DB_LOCATION = f"hdfs://namenode:9000/user/hive/warehouse/{DB}.db"
+
+# Resolve to absolute host paths from this file's location (project root = scripts/..).
+ROOT = Path(__file__).resolve().parent.parent
 TABLES = {
-    "feature_table": "/workspace/data/feature_table.parquet",
-    "label_table": "/workspace/data/label_table.parquet",
-    "sample_pool": "/workspace/data/sample_pool.parquet",
+    "feature_table": str(ROOT / "data" / "feature_table.parquet"),
+    "label_table": str(ROOT / "data" / "label_table.parquet"),
+    "sample_pool": str(ROOT / "data" / "sample_pool.parquet"),
 }
 
 
@@ -26,8 +34,10 @@ def main() -> None:
         .getOrCreate()
     )
 
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {DB}")
-    print(f"[ok] database ready: {DB}")
+    spark.sql(
+        f"CREATE DATABASE IF NOT EXISTS {DB} LOCATION '{DB_LOCATION}'"
+    )
+    print(f"[ok] database ready: {DB} at {DB_LOCATION}")
 
     for table, path in TABLES.items():
         df = spark.read.parquet(f"file://{path}")
