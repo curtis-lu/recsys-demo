@@ -7199,9 +7199,9 @@
       "file_type": "rationale",
       "source_file": "tests/test_pipelines/test_source_etl/test_sql_runner.py",
       "source_location": "L290",
-      "id": "test_sql_runner_rationale_290",
       "community": 1,
-      "norm_label": "if select output lacks a partition column, no insert overwrite is executed."
+      "norm_label": "if select output lacks a partition column, no insert overwrite is executed.",
+      "id": "test_sql_runner_rationale_290"
     },
     {
       "label": "test_audit.py",
@@ -14012,45 +14012,45 @@
       "file_type": "rationale",
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L152",
-      "id": "sql_runner_rationale_152",
       "community": 1,
-      "norm_label": "initialize and return the spark context and auditwriter."
+      "norm_label": "initialize and return the spark context and auditwriter.",
+      "id": "sql_runner_rationale_152"
     },
     {
       "label": "Filter the tables list based on restart_from parameter.",
       "file_type": "rationale",
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L173",
-      "id": "sql_runner_rationale_173",
       "community": 1,
-      "norm_label": "filter the tables list based on restart_from parameter."
+      "norm_label": "filter the tables list based on restart_from parameter.",
+      "id": "sql_runner_rationale_173"
     },
     {
       "label": "Execute a single table rendering, Spark SQL processing, and output quality check",
       "file_type": "rationale",
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L197",
-      "id": "sql_runner_rationale_197",
       "community": 1,
-      "norm_label": "execute a single table rendering, spark sql processing, and output quality check"
+      "norm_label": "execute a single table rendering, spark sql processing, and output quality check",
+      "id": "sql_runner_rationale_197"
     },
     {
       "label": "Run source freshness and schema checks. Returns True if all pass.",
       "file_type": "rationale",
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L275",
-      "id": "sql_runner_rationale_275",
       "community": 1,
-      "norm_label": "run source freshness and schema checks. returns true if all pass."
+      "norm_label": "run source freshness and schema checks. returns true if all pass.",
+      "id": "sql_runner_rationale_275"
     },
     {
       "label": "Run output quality checks. Returns row_count or -1 on failure.",
       "file_type": "rationale",
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L307",
-      "id": "sql_runner_rationale_307",
       "community": 1,
-      "norm_label": "run output quality checks. returns row_count or -1 on failure."
+      "norm_label": "run output quality checks. returns row_count or -1 on failure.",
+      "id": "sql_runner_rationale_307"
     },
     {
       "label": "checks.py",
@@ -38893,9 +38893,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testvalidateorder",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testvalidateorder",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39025,9 +39025,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testdryrun",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testdryrun",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39169,9 +39169,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testrestartfromvalidation",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testrestartfromvalidation",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39265,9 +39265,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testrenderedsqldir",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testrenderedsqldir",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39421,9 +39421,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testsourcechecksconfig",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testsourcechecksconfig",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39481,9 +39481,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testprocesssingletablefirstrun",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testprocesssingletablefirstrun",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39565,9 +39565,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testprocesssingletableexistingrun",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testprocesssingletableexistingrun",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39649,9 +39649,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testfailfast",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testfailfast",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39661,9 +39661,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testfailfast",
       "_tgt": "sql_runner_sqlrunner",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testfailfast",
-      "target": "sql_runner_sqlrunner",
-      "confidence_score": 0.5
+      "target": "sql_runner_sqlrunner"
     },
     {
       "relation": "rationale_for",
@@ -39721,9 +39721,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_testprocesssingletablemissingpartition",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_testprocesssingletablemissingpartition",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39781,9 +39781,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_12",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_12",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39805,9 +39805,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_81",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_81",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39829,9 +39829,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_87",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_87",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39853,9 +39853,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_95",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_95",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39877,9 +39877,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_104",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_104",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39901,9 +39901,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_111",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_111",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39925,9 +39925,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_122",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_122",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39949,9 +39949,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_134",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_134",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39973,9 +39973,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_143",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_143",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -39997,9 +39997,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_160",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_160",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40021,9 +40021,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_168",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_168",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40045,9 +40045,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_180",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_180",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40069,9 +40069,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_197",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_197",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40093,9 +40093,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_222",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_222",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40117,9 +40117,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_247",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_247",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40141,9 +40141,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_290",
       "_tgt": "sql_runner_sourceetlerror",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_290",
-      "target": "sql_runner_sourceetlerror",
-      "confidence_score": 0.5
+      "target": "sql_runner_sourceetlerror"
     },
     {
       "relation": "uses",
@@ -40153,9 +40153,9 @@
       "weight": 0.8,
       "_src": "test_sql_runner_rationale_290",
       "_tgt": "sql_runner_sqlrunner",
+      "confidence_score": 0.5,
       "source": "test_sql_runner_rationale_290",
-      "target": "sql_runner_sqlrunner",
-      "confidence_score": 0.5
+      "target": "sql_runner_sqlrunner"
     },
     {
       "relation": "contains",
@@ -62603,11 +62603,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L14",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_152",
-      "_tgt": "audit_auditwriter",
+      "_src": "audit_auditwriter",
+      "_tgt": "sql_runner_rationale_152",
+      "confidence_score": 0.5,
       "source": "audit_auditwriter",
-      "target": "sql_runner_rationale_152",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_152"
     },
     {
       "relation": "uses",
@@ -62615,11 +62615,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L14",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_173",
-      "_tgt": "audit_auditwriter",
+      "_src": "audit_auditwriter",
+      "_tgt": "sql_runner_rationale_173",
+      "confidence_score": 0.5,
       "source": "audit_auditwriter",
-      "target": "sql_runner_rationale_173",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_173"
     },
     {
       "relation": "uses",
@@ -62627,11 +62627,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L14",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_197",
-      "_tgt": "audit_auditwriter",
+      "_src": "audit_auditwriter",
+      "_tgt": "sql_runner_rationale_197",
+      "confidence_score": 0.5,
       "source": "audit_auditwriter",
-      "target": "sql_runner_rationale_197",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_197"
     },
     {
       "relation": "uses",
@@ -62639,11 +62639,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L14",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_275",
-      "_tgt": "audit_auditwriter",
+      "_src": "audit_auditwriter",
+      "_tgt": "sql_runner_rationale_275",
+      "confidence_score": 0.5,
       "source": "audit_auditwriter",
-      "target": "sql_runner_rationale_275",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_275"
     },
     {
       "relation": "uses",
@@ -62651,11 +62651,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L14",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_307",
-      "_tgt": "audit_auditwriter",
+      "_src": "audit_auditwriter",
+      "_tgt": "sql_runner_rationale_307",
+      "confidence_score": 0.5,
       "source": "audit_auditwriter",
-      "target": "sql_runner_rationale_307",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_307"
     },
     {
       "relation": "calls",
@@ -63083,11 +63083,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_152",
-      "_tgt": "models_tableconfig",
+      "_src": "models_tableconfig",
+      "_tgt": "sql_runner_rationale_152",
+      "confidence_score": 0.5,
       "source": "models_tableconfig",
-      "target": "sql_runner_rationale_152",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_152"
     },
     {
       "relation": "uses",
@@ -63095,11 +63095,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_173",
-      "_tgt": "models_tableconfig",
+      "_src": "models_tableconfig",
+      "_tgt": "sql_runner_rationale_173",
+      "confidence_score": 0.5,
       "source": "models_tableconfig",
-      "target": "sql_runner_rationale_173",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_173"
     },
     {
       "relation": "uses",
@@ -63107,11 +63107,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_197",
-      "_tgt": "models_tableconfig",
+      "_src": "models_tableconfig",
+      "_tgt": "sql_runner_rationale_197",
+      "confidence_score": 0.5,
       "source": "models_tableconfig",
-      "target": "sql_runner_rationale_197",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_197"
     },
     {
       "relation": "uses",
@@ -63119,11 +63119,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_275",
-      "_tgt": "models_tableconfig",
+      "_src": "models_tableconfig",
+      "_tgt": "sql_runner_rationale_275",
+      "confidence_score": 0.5,
       "source": "models_tableconfig",
-      "target": "sql_runner_rationale_275",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_275"
     },
     {
       "relation": "uses",
@@ -63131,11 +63131,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_307",
-      "_tgt": "models_tableconfig",
+      "_src": "models_tableconfig",
+      "_tgt": "sql_runner_rationale_307",
+      "confidence_score": 0.5,
       "source": "models_tableconfig",
-      "target": "sql_runner_rationale_307",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_307"
     },
     {
       "relation": "uses",
@@ -63611,11 +63611,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_152",
-      "_tgt": "models_sourcecheckconfig",
+      "_src": "models_sourcecheckconfig",
+      "_tgt": "sql_runner_rationale_152",
+      "confidence_score": 0.5,
       "source": "models_sourcecheckconfig",
-      "target": "sql_runner_rationale_152",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_152"
     },
     {
       "relation": "uses",
@@ -63623,11 +63623,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_173",
-      "_tgt": "models_sourcecheckconfig",
+      "_src": "models_sourcecheckconfig",
+      "_tgt": "sql_runner_rationale_173",
+      "confidence_score": 0.5,
       "source": "models_sourcecheckconfig",
-      "target": "sql_runner_rationale_173",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_173"
     },
     {
       "relation": "uses",
@@ -63635,11 +63635,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_197",
-      "_tgt": "models_sourcecheckconfig",
+      "_src": "models_sourcecheckconfig",
+      "_tgt": "sql_runner_rationale_197",
+      "confidence_score": 0.5,
       "source": "models_sourcecheckconfig",
-      "target": "sql_runner_rationale_197",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_197"
     },
     {
       "relation": "uses",
@@ -63647,11 +63647,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_275",
-      "_tgt": "models_sourcecheckconfig",
+      "_src": "models_sourcecheckconfig",
+      "_tgt": "sql_runner_rationale_275",
+      "confidence_score": 0.5,
       "source": "models_sourcecheckconfig",
-      "target": "sql_runner_rationale_275",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_275"
     },
     {
       "relation": "uses",
@@ -63659,11 +63659,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_307",
-      "_tgt": "models_sourcecheckconfig",
+      "_src": "models_sourcecheckconfig",
+      "_tgt": "sql_runner_rationale_307",
+      "confidence_score": 0.5,
       "source": "models_sourcecheckconfig",
-      "target": "sql_runner_rationale_307",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_307"
     },
     {
       "relation": "uses",
@@ -64019,11 +64019,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_152",
-      "_tgt": "models_auditrecord",
+      "_src": "models_auditrecord",
+      "_tgt": "sql_runner_rationale_152",
+      "confidence_score": 0.5,
       "source": "models_auditrecord",
-      "target": "sql_runner_rationale_152",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_152"
     },
     {
       "relation": "uses",
@@ -64031,11 +64031,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_173",
-      "_tgt": "models_auditrecord",
+      "_src": "models_auditrecord",
+      "_tgt": "sql_runner_rationale_173",
+      "confidence_score": 0.5,
       "source": "models_auditrecord",
-      "target": "sql_runner_rationale_173",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_173"
     },
     {
       "relation": "uses",
@@ -64043,11 +64043,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_197",
-      "_tgt": "models_auditrecord",
+      "_src": "models_auditrecord",
+      "_tgt": "sql_runner_rationale_197",
+      "confidence_score": 0.5,
       "source": "models_auditrecord",
-      "target": "sql_runner_rationale_197",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_197"
     },
     {
       "relation": "uses",
@@ -64055,11 +64055,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_275",
-      "_tgt": "models_auditrecord",
+      "_src": "models_auditrecord",
+      "_tgt": "sql_runner_rationale_275",
+      "confidence_score": 0.5,
       "source": "models_auditrecord",
-      "target": "sql_runner_rationale_275",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_275"
     },
     {
       "relation": "uses",
@@ -64067,11 +64067,11 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L19",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_307",
-      "_tgt": "models_auditrecord",
+      "_src": "models_auditrecord",
+      "_tgt": "sql_runner_rationale_307",
+      "confidence_score": 0.5,
       "source": "models_auditrecord",
-      "target": "sql_runner_rationale_307",
-      "confidence_score": 0.5
+      "target": "sql_runner_rationale_307"
     },
     {
       "relation": "calls",
@@ -64933,9 +64933,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_152",
       "_tgt": "checks_outputchecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_152",
-      "target": "checks_outputchecker",
-      "confidence_score": 0.5
+      "target": "checks_outputchecker"
     },
     {
       "relation": "uses",
@@ -64945,9 +64945,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_152",
       "_tgt": "checks_sourcechecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_152",
-      "target": "checks_sourcechecker",
-      "confidence_score": 0.5
+      "target": "checks_sourcechecker"
     },
     {
       "relation": "uses",
@@ -64957,9 +64957,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_152",
       "_tgt": "sql_renderer_sqlrenderer",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_152",
-      "target": "sql_renderer_sqlrenderer",
-      "confidence_score": 0.5
+      "target": "sql_renderer_sqlrenderer"
     },
     {
       "relation": "uses",
@@ -64969,9 +64969,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_173",
       "_tgt": "checks_outputchecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_173",
-      "target": "checks_outputchecker",
-      "confidence_score": 0.5
+      "target": "checks_outputchecker"
     },
     {
       "relation": "uses",
@@ -64981,9 +64981,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_173",
       "_tgt": "checks_sourcechecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_173",
-      "target": "checks_sourcechecker",
-      "confidence_score": 0.5
+      "target": "checks_sourcechecker"
     },
     {
       "relation": "uses",
@@ -64993,9 +64993,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_173",
       "_tgt": "sql_renderer_sqlrenderer",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_173",
-      "target": "sql_renderer_sqlrenderer",
-      "confidence_score": 0.5
+      "target": "sql_renderer_sqlrenderer"
     },
     {
       "relation": "uses",
@@ -65005,9 +65005,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_197",
       "_tgt": "checks_outputchecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_197",
-      "target": "checks_outputchecker",
-      "confidence_score": 0.5
+      "target": "checks_outputchecker"
     },
     {
       "relation": "uses",
@@ -65017,9 +65017,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_197",
       "_tgt": "checks_sourcechecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_197",
-      "target": "checks_sourcechecker",
-      "confidence_score": 0.5
+      "target": "checks_sourcechecker"
     },
     {
       "relation": "uses",
@@ -65029,9 +65029,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_197",
       "_tgt": "sql_renderer_sqlrenderer",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_197",
-      "target": "sql_renderer_sqlrenderer",
-      "confidence_score": 0.5
+      "target": "sql_renderer_sqlrenderer"
     },
     {
       "relation": "uses",
@@ -65041,9 +65041,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_275",
       "_tgt": "checks_outputchecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_275",
-      "target": "checks_outputchecker",
-      "confidence_score": 0.5
+      "target": "checks_outputchecker"
     },
     {
       "relation": "uses",
@@ -65053,9 +65053,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_275",
       "_tgt": "checks_sourcechecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_275",
-      "target": "checks_sourcechecker",
-      "confidence_score": 0.5
+      "target": "checks_sourcechecker"
     },
     {
       "relation": "uses",
@@ -65065,9 +65065,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_275",
       "_tgt": "sql_renderer_sqlrenderer",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_275",
-      "target": "sql_renderer_sqlrenderer",
-      "confidence_score": 0.5
+      "target": "sql_renderer_sqlrenderer"
     },
     {
       "relation": "uses",
@@ -65077,9 +65077,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_307",
       "_tgt": "checks_outputchecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_307",
-      "target": "checks_outputchecker",
-      "confidence_score": 0.5
+      "target": "checks_outputchecker"
     },
     {
       "relation": "uses",
@@ -65089,9 +65089,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_307",
       "_tgt": "checks_sourcechecker",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_307",
-      "target": "checks_sourcechecker",
-      "confidence_score": 0.5
+      "target": "checks_sourcechecker"
     },
     {
       "relation": "uses",
@@ -65101,9 +65101,9 @@
       "weight": 0.8,
       "_src": "sql_runner_rationale_307",
       "_tgt": "sql_renderer_sqlrenderer",
+      "confidence_score": 0.5,
       "source": "sql_runner_rationale_307",
-      "target": "sql_renderer_sqlrenderer",
-      "confidence_score": 0.5
+      "target": "sql_renderer_sqlrenderer"
     },
     {
       "relation": "contains",
@@ -65327,8 +65327,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_142",
-      "_tgt": "checks_sourcechecker",
+      "_src": "checks_sourcechecker",
+      "_tgt": "sql_runner_rationale_142",
       "confidence_score": 0.5,
       "source": "checks_sourcechecker",
       "target": "sql_runner_rationale_142"
@@ -65339,8 +65339,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_163",
-      "_tgt": "checks_sourcechecker",
+      "_src": "checks_sourcechecker",
+      "_tgt": "sql_runner_rationale_163",
       "confidence_score": 0.5,
       "source": "checks_sourcechecker",
       "target": "sql_runner_rationale_163"
@@ -65351,8 +65351,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_187",
-      "_tgt": "checks_sourcechecker",
+      "_src": "checks_sourcechecker",
+      "_tgt": "sql_runner_rationale_187",
       "confidence_score": 0.5,
       "source": "checks_sourcechecker",
       "target": "sql_runner_rationale_187"
@@ -65363,8 +65363,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_263",
-      "_tgt": "checks_sourcechecker",
+      "_src": "checks_sourcechecker",
+      "_tgt": "sql_runner_rationale_263",
       "confidence_score": 0.5,
       "source": "checks_sourcechecker",
       "target": "sql_runner_rationale_263"
@@ -65375,8 +65375,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_295",
-      "_tgt": "checks_sourcechecker",
+      "_src": "checks_sourcechecker",
+      "_tgt": "sql_runner_rationale_295",
       "confidence_score": 0.5,
       "source": "checks_sourcechecker",
       "target": "sql_runner_rationale_295"
@@ -65555,8 +65555,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_142",
-      "_tgt": "checks_outputchecker",
+      "_src": "checks_outputchecker",
+      "_tgt": "sql_runner_rationale_142",
       "confidence_score": 0.5,
       "source": "checks_outputchecker",
       "target": "sql_runner_rationale_142"
@@ -65567,8 +65567,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_163",
-      "_tgt": "checks_outputchecker",
+      "_src": "checks_outputchecker",
+      "_tgt": "sql_runner_rationale_163",
       "confidence_score": 0.5,
       "source": "checks_outputchecker",
       "target": "sql_runner_rationale_163"
@@ -65579,8 +65579,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_187",
-      "_tgt": "checks_outputchecker",
+      "_src": "checks_outputchecker",
+      "_tgt": "sql_runner_rationale_187",
       "confidence_score": 0.5,
       "source": "checks_outputchecker",
       "target": "sql_runner_rationale_187"
@@ -65591,8 +65591,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_263",
-      "_tgt": "checks_outputchecker",
+      "_src": "checks_outputchecker",
+      "_tgt": "sql_runner_rationale_263",
       "confidence_score": 0.5,
       "source": "checks_outputchecker",
       "target": "sql_runner_rationale_263"
@@ -65603,8 +65603,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L15",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_295",
-      "_tgt": "checks_outputchecker",
+      "_src": "checks_outputchecker",
+      "_tgt": "sql_runner_rationale_295",
       "confidence_score": 0.5,
       "source": "checks_outputchecker",
       "target": "sql_runner_rationale_295"
@@ -65831,8 +65831,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L24",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_142",
-      "_tgt": "sql_renderer_sqlrenderer",
+      "_src": "sql_renderer_sqlrenderer",
+      "_tgt": "sql_runner_rationale_142",
       "confidence_score": 0.5,
       "source": "sql_renderer_sqlrenderer",
       "target": "sql_runner_rationale_142"
@@ -65843,8 +65843,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L24",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_163",
-      "_tgt": "sql_renderer_sqlrenderer",
+      "_src": "sql_renderer_sqlrenderer",
+      "_tgt": "sql_runner_rationale_163",
       "confidence_score": 0.5,
       "source": "sql_renderer_sqlrenderer",
       "target": "sql_runner_rationale_163"
@@ -65855,8 +65855,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L24",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_187",
-      "_tgt": "sql_renderer_sqlrenderer",
+      "_src": "sql_renderer_sqlrenderer",
+      "_tgt": "sql_runner_rationale_187",
       "confidence_score": 0.5,
       "source": "sql_renderer_sqlrenderer",
       "target": "sql_runner_rationale_187"
@@ -65867,8 +65867,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L24",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_263",
-      "_tgt": "sql_renderer_sqlrenderer",
+      "_src": "sql_renderer_sqlrenderer",
+      "_tgt": "sql_runner_rationale_263",
       "confidence_score": 0.5,
       "source": "sql_renderer_sqlrenderer",
       "target": "sql_runner_rationale_263"
@@ -65879,8 +65879,8 @@
       "source_file": "src/recsys_tfb/pipelines/source_etl/sql_runner.py",
       "source_location": "L24",
       "weight": 0.8,
-      "_src": "sql_runner_rationale_295",
-      "_tgt": "sql_renderer_sqlrenderer",
+      "_src": "sql_renderer_sqlrenderer",
+      "_tgt": "sql_runner_rationale_295",
       "confidence_score": 0.5,
       "source": "sql_renderer_sqlrenderer",
       "target": "sql_runner_rationale_295"

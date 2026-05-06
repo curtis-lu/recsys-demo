@@ -1,7 +1,7 @@
 # Graph Report - recsys_tfb  (2026-05-06)
 
 ## Corpus Check
-- 147 files · ~248,014 words
+- 147 files · ~249,830 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
