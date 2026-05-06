@@ -379,6 +379,107 @@ class TestSaveAppendMode:
         writer.insertInto.assert_called_once_with("db.t")
 
 
+class TestSaveWithPartitionFilter:
+    def _make_ds(self, **kw):
+        defaults = dict(
+            database="ml_recsys",
+            table="val_model_input",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "score", "type": "DOUBLE"},
+            ],
+            partition_filter={"base_dataset_version": "abc12345"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        defaults.update(kw)
+        return HiveTableDataset(**defaults)
+
+    def test_save_adds_static_col_when_missing(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "snap_date"]
+        df.withColumn.return_value = df
+        df.select.return_value = df
+        df.select.return_value.distinct.return_value.collect.return_value = []
+        writer = MagicMock()
+        df.write.mode.return_value = writer
+
+        with _patch_spark(spark), \
+             patch("pyspark.sql.functions.lit") as mock_lit:
+            mock_lit.return_value = "LIT_abc12345"
+            ds.save(df)
+
+        df.withColumn.assert_any_call("base_dataset_version", "LIT_abc12345")
+
+        df.select.assert_any_call(
+            "cust_id", "score", "base_dataset_version", "snap_date"
+        )
+
+        spark.conf.set.assert_any_call(
+            "spark.sql.sources.partitionOverwriteMode", "dynamic"
+        )
+
+        writer.insertInto.assert_called_once_with("ml_recsys.val_model_input")
+
+    def test_save_keeps_static_col_when_value_matches(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        distinct_row = MagicMock()
+        distinct_row.__getitem__.return_value = "abc12345"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            distinct_row
+        ]
+        df.select.return_value.distinct.return_value.collect.return_value = []
+        writer = MagicMock()
+        df.write.mode.return_value = writer
+
+        with _patch_spark(spark):
+            ds.save(df)
+
+        for call in df.withColumn.call_args_list:
+            assert call[0][0] != "base_dataset_version"
+
+        writer.insertInto.assert_called_once_with("ml_recsys.val_model_input")
+
+    def test_save_raises_on_static_col_value_mismatch(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        bad_row = MagicMock()
+        bad_row.__getitem__.return_value = "XXBADXX"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            bad_row
+        ]
+
+        with _patch_spark(spark), \
+             pytest.raises(ValueError, match="partition_filter.*mismatch"):
+            ds.save(df)
+
+    def test_save_raises_on_multiple_static_values(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "score", "base_dataset_version", "snap_date"]
+        df.select.return_value = df
+        r1, r2 = MagicMock(), MagicMock()
+        r1.__getitem__.return_value = "abc12345"
+        r2.__getitem__.return_value = "OTHERVER"
+        df.select.return_value.distinct.return_value.limit.return_value.collect.return_value = [
+            r1, r2
+        ]
+
+        with _patch_spark(spark), \
+             pytest.raises(ValueError, match="partition_filter.*mismatch"):
+            ds.save(df)
+
+
 class TestReadOnly:
     def test_save_raises_on_read_only(self):
         ds = HiveTableDataset(

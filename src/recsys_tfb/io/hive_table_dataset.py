@@ -141,14 +141,19 @@ class HiveTableDataset(AbstractDataset):
         spark = self._get_spark()
         df = self._to_spark(spark, data)
 
+        if self._partition_filter:
+            df = self._apply_partition_filter_cols(df)
+
         if self._infer_columns and not self._columns:
             self._columns = _infer_columns_from_spark(
-                df, exclude={c["name"] for c in self._partition_cols}
+                df,
+                exclude={c["name"] for c in self._partition_cols}
+                | set(self._partition_filter.keys()),
             )
 
         self._ensure_table_exists(spark)
 
-        if self._partition_cols:
+        if self._partition_cols or self._partition_filter:
             spark.conf.set(
                 "spark.sql.sources.partitionOverwriteMode", "dynamic"
             )
@@ -156,8 +161,13 @@ class HiveTableDataset(AbstractDataset):
         df = df.select(*self._insert_column_order())
         df.write.mode(self._write_mode).insertInto(self._qualified_name)
 
-        if self._partition_cols and self._write_mode == "overwrite":
-            part_cols = [c["name"] for c in self._partition_cols]
+        if (
+            (self._partition_cols or self._partition_filter)
+            and self._write_mode == "overwrite"
+        ):
+            part_cols = list(self._partition_filter.keys()) + [
+                c["name"] for c in self._partition_cols
+            ]
             written = (
                 df.select(*part_cols).distinct().collect()
             )
@@ -192,9 +202,34 @@ class HiveTableDataset(AbstractDataset):
         return data
 
     def _insert_column_order(self) -> list[str]:
-        return [c["name"] for c in self._columns] + [
-            c["name"] for c in self._partition_cols
-        ]
+        return (
+            [c["name"] for c in self._columns]
+            + list(self._partition_filter.keys())
+            + [c["name"] for c in self._partition_cols]
+        )
+
+    def _apply_partition_filter_cols(self, df):
+        """Ensure DataFrame has static partition columns with the filter values.
+
+        - Missing column: add via withColumn(lit(value)).
+        - Present with matching value: keep as-is.
+        - Present with non-matching or multiple distinct values: raise.
+        """
+        from pyspark.sql.functions import lit
+
+        for k, v in self._partition_filter.items():
+            if k not in df.columns:
+                df = df.withColumn(k, lit(v))
+                continue
+            distinct = df.select(k).distinct().limit(2).collect()
+            distinct_vals = {row[k] for row in distinct}
+            if distinct_vals != {v}:
+                raise ValueError(
+                    f"partition_filter mismatch for column '{k}' on "
+                    f"'{self._qualified_name}': expected {{'{v}'}}, "
+                    f"DataFrame has {distinct_vals}"
+                )
+        return df
 
     def _ensure_table_exists(self, spark) -> None:
         sql = self._build_create_ddl()
