@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 from typer.testing import CliRunner
@@ -9,6 +9,27 @@ from typer.testing import CliRunner
 from recsys_tfb.__main__ import app
 
 runner = CliRunner()
+
+
+def _mock_spark_with_feature_table_schema(columns=None):
+    """Build a SparkSession-like mock whose ``table(fqn).schema.fields``
+    returns the given (name, dtype) sequence as ``Mock`` field objects.
+
+    Used by tests that mock out DataCatalog/Runner — the CLI now reads
+    feature_table schema before reaching the catalog, so we need a
+    spark-shaped stand-in.
+    """
+    if columns is None:
+        columns = [("snap_date", "date"), ("cust_id", "string"), ("aum", "double")]
+    fields = []
+    for name, dtype in columns:
+        f = MagicMock()
+        f.name = name
+        f.dataType.simpleString.return_value = dtype
+        fields.append(f)
+    spark = MagicMock()
+    spark.table.return_value.schema.fields = fields
+    return spark
 
 
 def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_inference=None):
@@ -105,7 +126,11 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch(
+                        "recsys_tfb.utils.spark.get_or_create_spark_session",
+                        return_value=_mock_spark_with_feature_table_schema(),
+                    ):
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
