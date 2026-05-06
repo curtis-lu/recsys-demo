@@ -13,6 +13,10 @@ This is intended for dev-cluster only. DO NOT run against production.
 from pyspark.sql import SparkSession
 
 DB = "ml_recsys"
+# FQ URI required: metastore container's fs.defaultFS resolves localhost to itself,
+# so a relative or localhost-keyed warehouse path crashes CREATE DATABASE.
+# See dev-cluster-spark skill SOP-4.
+DB_LOCATION = f"hdfs://namenode:9000/user/hive/warehouse/{DB}.db"
 
 
 def main() -> None:
@@ -29,8 +33,10 @@ def main() -> None:
     else:
         print(f"[skip] database does not exist: {DB}")
 
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {DB}")
-    print(f"[ok] created empty database: {DB}")
+    spark.sql(
+        f"CREATE DATABASE IF NOT EXISTS {DB} LOCATION '{DB_LOCATION}'"
+    )
+    print(f"[ok] created empty database: {DB} at {DB_LOCATION}")
 
     spark.sql(f"SHOW TABLES IN {DB}").show(truncate=False)
     spark.stop()
