@@ -29,10 +29,10 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 - **本機環境**：`~/dev-cluster/`（Docker Spark+HDFS+Hive Metastore），詳見其 README。
 - **Hive 來源表 setup**：`scripts/setup_hive_dev.py` 把 `data/{feature_table,label_table,sample_pool}.parquet` 寫成 `ml_recsys.<table>` Hive managed table。**跳過 source_etl**（合成資料已是 feature/label 粒度，沒有上游 `feature_concat`/`label_ccard` 等表）。腳本內**必須把 `snap_date` cast 成 DATE**（合成 parquet 是 timestamp[us]，不轉的話 Spark 對 `'YYYY-MM-DD'` 字串 filter 會 0 row，val/test/calibration 全空）。
-- **Ad-hoc PySpark 腳本（setup_hive_dev / nuke_ml_recsys / `SHOW PARTITIONS` 等）**：跟 pipeline 一樣從 host venv 跑，**不要 docker exec 進 spark-master/worker container**（apache/spark image 是 JVM-only，沒有 python3）。詳見 `dev-cluster-spark` skill SOP-6。
+- **Ad-hoc / admin PySpark 腳本（setup_hive_dev / nuke_ml_recsys / `SHOW PARTITIONS` 等）**：用 `scripts/dev_admin.sh` wrapper，跑在 transient `devcluster/pyspark` container 內 + `--master local[N]`（README §line 77-91 推薦的 admin pattern）。**不要 host venv**（standalone init 3+ min、`file://<host>` 派給 worker container 找不到）；**也不要 docker exec spark-master**（無 python3）。腳本內 path 寫 `/workspace/...` 不是 host 絕對路徑。詳見 `dev-cluster-spark` skill SOP-6。
   ```bash
-  source ~/dev-cluster/scripts/client-env.sh
-  .venv/bin/python scripts/<your_script>.py
+  scripts/dev_admin.sh scripts/nuke_ml_recsys.py
+  scripts/dev_admin.sh scripts/setup_hive_dev.py
   ```
 - **/etc/hosts**：host 端讀 Hive 資料前需加 `127.0.0.1 namenode datanode hive-metastore spark-master`，否則 `hdfs://namenode:9000/...` resolve 不到（dev-cluster README §「已知限制」第 3 點）。
 

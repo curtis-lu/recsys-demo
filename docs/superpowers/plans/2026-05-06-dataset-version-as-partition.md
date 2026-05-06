@@ -1024,19 +1024,14 @@ git commit -m "feat(scripts): nuke_ml_recsys - drop ml_recsys CASCADE for clean 
 
 - [ ] **Step 1: Nuke + 重灌 source tables**
 
-在 dev-cluster 容器內：
+走 admin wrapper（dev-cluster-spark skill SOP-6 / README admin pattern）：
 
 ```bash
-docker exec -it dev-cluster-spark-master-1 spark-submit \
-    --master spark://spark-master:7077 \
-    /workspace/scripts/nuke_ml_recsys.py
-
-docker exec -it dev-cluster-spark-master-1 spark-submit \
-    --master spark://spark-master:7077 \
-    /workspace/scripts/setup_hive_dev.py
+scripts/dev_admin.sh scripts/nuke_ml_recsys.py
+scripts/dev_admin.sh scripts/setup_hive_dev.py
 ```
 
-Expected: nuke 印出 `[ok] dropped database`、setup 印出 `feature_table / label_table / sample_pool` 三張表 row count。
+Expected: nuke 印出 `[ok] dropped database` + `[ok] created empty database: ml_recsys at hdfs://namenode:9000/...`；setup 印出 `feature_table / label_table / sample_pool` 三張表 row count。整體幾秒到 1 分鐘內。
 
 - [ ] **Step 2: 跑 dataset pipeline**
 
@@ -1073,9 +1068,7 @@ spark.stop()
 然後：
 
 ```bash
-docker exec -it dev-cluster-spark-master-1 spark-submit \
-    --master spark://spark-master:7077 \
-    /workspace/scripts/_dev_inspect_partitions.py
+scripts/dev_admin.sh scripts/_dev_inspect_partitions.py
 ```
 
 Expected:
@@ -1123,9 +1116,7 @@ spark.stop()
 跑：
 
 ```bash
-docker exec -it dev-cluster-spark-master-1 spark-submit \
-    --master spark://spark-master:7077 \
-    /workspace/scripts/_dev_inspect_partitions.py
+scripts/dev_admin.sh scripts/_dev_inspect_partitions.py
 ```
 
 Expected: 兩列，兩個不同 `base_dataset_version` hash，舊 partition 仍存在。

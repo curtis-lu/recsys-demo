@@ -1,13 +1,13 @@
 """Bootstrap dev Hive: write synthetic parquet as ml_recsys.{feature,label,sample_pool}_table.
 
-Run from host venv with client-env.sh sourced (NOT docker exec into spark-master —
-that container is JVM-only, no python3). See dev-cluster-spark skill SOP-6.
+Run via the dev-cluster admin wrapper (transient devcluster/pyspark container,
+local[N] master, no executor pool). See dev-cluster-spark skill SOP-6.
 
-    source ~/dev-cluster/scripts/client-env.sh
-    .venv/bin/python scripts/setup_hive_dev.py
+    scripts/dev_admin.sh scripts/setup_hive_dev.py
+
+Do NOT run from host venv (.venv/bin/python ...): host driver + spark-worker
+container fs mismatch makes file:///workspace not resolvable on the worker side.
 """
-
-from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import to_date
@@ -18,12 +18,11 @@ DB = "ml_recsys"
 # LOCATION crashes if metastore container's fs.defaultFS resolves to itself).
 DB_LOCATION = f"hdfs://namenode:9000/user/hive/warehouse/{DB}.db"
 
-# Resolve to absolute host paths from this file's location (project root = scripts/..).
-ROOT = Path(__file__).resolve().parent.parent
+# Paths inside the transient container — project root is bind-mounted at /workspace.
 TABLES = {
-    "feature_table": str(ROOT / "data" / "feature_table.parquet"),
-    "label_table": str(ROOT / "data" / "label_table.parquet"),
-    "sample_pool": str(ROOT / "data" / "sample_pool.parquet"),
+    "feature_table": "/workspace/data/feature_table.parquet",
+    "label_table": "/workspace/data/label_table.parquet",
+    "sample_pool": "/workspace/data/sample_pool.parquet",
 }
 
 
