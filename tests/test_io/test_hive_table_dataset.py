@@ -231,6 +231,55 @@ class TestDDLColumnComment:
         assert "Alice\\'s note" in ddl
 
 
+class TestDDLPartitionFilter:
+    def test_filter_only_no_dynamic_partition(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_keys",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "snap_date", "type": "STRING"},
+            ],
+            partition_filter={"base_dataset_version": "abc12345"},
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert "PARTITIONED BY (base_dataset_version STRING)" in ddl
+
+    def test_filter_outer_dynamic_inner(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_model_input",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_filter={"base_dataset_version": "abc12345"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert (
+            "PARTITIONED BY (base_dataset_version STRING, snap_date STRING)"
+            in ddl
+        )
+
+    def test_filter_multiple_keys_preserve_order(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_filter={
+                "base_dataset_version": "abc12345",
+                "train_variant_id": "def67890",
+            },
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ddl = ds._build_create_ddl()
+        assert (
+            "PARTITIONED BY (base_dataset_version STRING, "
+            "train_variant_id STRING, snap_date STRING)"
+        ) in ddl
+
+
 class TestSaveExternalPartitioned:
     def _make_ds(self) -> HiveTableDataset:
         return HiveTableDataset(

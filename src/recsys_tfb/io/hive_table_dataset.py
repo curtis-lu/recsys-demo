@@ -202,10 +202,11 @@ class HiveTableDataset(AbstractDataset):
             f"    {col_defs}",
             ")",
         ]
-        if self._partition_cols:
-            part_defs = ", ".join(
-                _format_col(c) for c in self._partition_cols
-            )
+        all_part_cols = [
+            {"name": k, "type": "STRING"} for k in self._partition_filter.keys()
+        ] + list(self._partition_cols)
+        if all_part_cols:
+            part_defs = ", ".join(_format_col(c) for c in all_part_cols)
             parts.append(f"PARTITIONED BY ({part_defs})")
         parts.append(f"STORED AS {self._stored_as}")
         if self._location:
