@@ -477,3 +477,66 @@ class TestExists:
         with _patch_spark(spark):
             assert ds.exists() is True
         spark.catalog.tableExists.assert_called_once_with("ml_recsys.foo")
+
+
+class TestLoadWithPartitionFilter:
+    def test_load_without_filter_uses_spark_table(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="feature_table",
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.table.assert_called_once_with("ml_recsys.feature_table")
+        spark.sql.assert_not_called()
+
+    def test_load_single_filter_injects_where(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_model_input",
+            partition_filter={"base_dataset_version": "abc12345"},
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.val_model_input "
+            "WHERE base_dataset_version = 'abc12345'"
+        )
+        spark.table.assert_not_called()
+
+    def test_load_multi_filter_joins_with_and(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            partition_filter={
+                "base_dataset_version": "abc12345",
+                "train_variant_id": "def67890",
+            },
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.train_model_input "
+            "WHERE base_dataset_version = 'abc12345' "
+            "AND train_variant_id = 'def67890'"
+        )
+
+    def test_load_escapes_single_quote_in_value(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="t",
+            partition_filter={"k": "ab'cd"},
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        with _patch_spark(spark):
+            ds.load()
+        spark.sql.assert_called_once_with(
+            "SELECT * FROM ml_recsys.t WHERE k = 'ab''cd'"
+        )

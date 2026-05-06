@@ -122,7 +122,15 @@ class HiveTableDataset(AbstractDataset):
 
     def load(self):
         spark = self._get_spark()
-        return spark.table(self._qualified_name)
+        if not self._partition_filter:
+            return spark.table(self._qualified_name)
+        where = " AND ".join(
+            f"{k} = '{self._escape_sql_value(v)}'"
+            for k, v in self._partition_filter.items()
+        )
+        return spark.sql(
+            f"SELECT * FROM {self._qualified_name} WHERE {where}"
+        )
 
     def save(self, data) -> None:
         if self._read_only:
@@ -217,6 +225,11 @@ class HiveTableDataset(AbstractDataset):
             )
             parts.append(f"TBLPROPERTIES ({tblprops})")
         return "\n".join(parts)
+
+
+    @staticmethod
+    def _escape_sql_value(v: str) -> str:
+        return v.replace("'", "''")
 
 
 def _format_col(col: dict) -> str:
