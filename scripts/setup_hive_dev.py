@@ -1,7 +1,10 @@
 """Bootstrap dev Hive: write synthetic parquet as ml_recsys.{feature,label,sample_pool}_table.
 
-Run inside dev-cluster spark container via spark-submit, with /workspace mounted to
-the host project root.
+Run from host venv with client-env.sh sourced (NOT docker exec into spark-master —
+that container is JVM-only, no python3). See dev-cluster-spark skill SOP-6.
+
+    source ~/dev-cluster/scripts/client-env.sh
+    .venv/bin/python scripts/setup_hive_dev.py
 """
 
 from pyspark.sql import SparkSession

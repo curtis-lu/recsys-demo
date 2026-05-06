@@ -1,7 +1,11 @@
 """Drop the ml_recsys database (CASCADE) for a clean dev-cluster reset.
 
-Run inside dev-cluster spark container via spark-submit, with /workspace mounted
-to the host project root. Pair with setup_hive_dev.py to rebuild source tables.
+Run from host venv with client-env.sh sourced (NOT docker exec into spark-master —
+that container is JVM-only, no python3). See dev-cluster-spark skill SOP-6.
+
+    source ~/dev-cluster/scripts/client-env.sh
+    .venv/bin/python scripts/nuke_ml_recsys.py
+    .venv/bin/python scripts/setup_hive_dev.py    # rebuild source tables
 
 This is intended for dev-cluster only. DO NOT run against production.
 """
