@@ -17,6 +17,7 @@ from recsys_tfb.core.versioning import (
     build_manifest_metadata,
     compute_base_dataset_version,
     compute_calibration_variant_id,
+    compute_feature_table_fingerprint,
     compute_model_version,
     compute_train_variant_id,
     read_manifest,
@@ -288,13 +289,26 @@ def dataset(
         params_dataset.get("dataset", {}).get("enable_calibration", False)
     )
 
+    spark = get_or_create_spark_session()
+    hive_db = params.get("hive", {}).get("db", "ml_recsys")
+    feature_table_fqn = f"{hive_db}.feature_table"
+    feature_table_columns = [
+        (f.name, f.dataType.simpleString())
+        for f in spark.table(feature_table_fqn).schema.fields
+    ]
+    feature_table_fp = compute_feature_table_fingerprint(feature_table_columns)
+
     schema_hash = get_schema_for_hash(params)
-    base_v = compute_base_dataset_version(params_dataset, schema_hash)
+    base_v = compute_base_dataset_version(
+        params_dataset, schema_hash, feature_table_fingerprint=feature_table_fp,
+    )
     train_v = compute_train_variant_id(params_dataset)
     cal_v = (
         compute_calibration_variant_id(params_dataset) if enable_calibration else None
     )
 
+    logger.info("feature_table_fingerprint: %s (%d cols)",
+                feature_table_fp, len(feature_table_columns))
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
     if cal_v is not None:
@@ -322,6 +336,7 @@ def dataset(
             "pipeline": "dataset",
             "parameters": params_dataset,
             "base_dataset_version": base_v,
+            "feature_table_fingerprint": feature_table_fp,
             "artifacts": _dir_artifacts(base_dir),
         },
         run_id=run_context.run_id,
