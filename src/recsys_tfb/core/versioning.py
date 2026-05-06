@@ -47,6 +47,18 @@ def _hash8(payload: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 
+def compute_feature_table_fingerprint(columns) -> str:
+    """Hash an ordered (name, dtype) sequence describing feature_table schema.
+
+    Order matters: feature_table column order propagates into ``feature_columns``
+    in :mod:`recsys_tfb.preprocessing`, which determines the LightGBM feature
+    ordering. Reordering columns changes downstream model inputs, so it must
+    bust the version.
+    """
+    payload = {"feature_table_columns": [list(item) for item in columns]}
+    return _hash8(payload)
+
+
 def compute_base_dataset_version(params: dict, schema: dict) -> str:
     """Hash non-sampling dataset params together with the canonical schema.
 
