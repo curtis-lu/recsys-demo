@@ -25,33 +25,51 @@ sample_pool:
   read_only: true
 
 # --- Dataset base layer (per base_dataset_version) ---
+# Single Hive table per logical artifact; base_dataset_version is the outer
+# partition column. snap_date is the inner dynamic partition.
 val_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: val_keys_${base_dataset_version}
+  table: val_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 test_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: test_keys_${base_dataset_version}
+  table: test_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 val_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: val_model_input_${base_dataset_version}
+  table: val_model_input
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 test_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: test_model_input_${base_dataset_version}
+  table: test_model_input
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 preprocessor:
   type: JSONDataset
@@ -65,54 +83,87 @@ category_mappings:
 sample_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: sample_keys_${base_dataset_version}_${train_variant_id}
+  table: sample_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    train_variant_id: ${train_variant_id}
   partition_cols:
     - {name: snap_date, type: STRING}
 
 train_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_keys_${base_dataset_version}_${train_variant_id}
+  table: train_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    train_variant_id: ${train_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 train_dev_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_dev_keys_${base_dataset_version}_${train_variant_id}
+  table: train_dev_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    train_variant_id: ${train_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 train_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_model_input_${base_dataset_version}_${train_variant_id}
+  table: train_model_input
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    train_variant_id: ${train_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 train_dev_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_dev_model_input_${base_dataset_version}_${train_variant_id}
+  table: train_dev_model_input
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    train_variant_id: ${train_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 # --- Dataset calibration-variant layer (per base + calibration_variant) ---
 calibration_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: calibration_keys_${base_dataset_version}_${calibration_variant_id}
+  table: calibration_keys
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    calibration_variant_id: ${calibration_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 calibration_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: calibration_model_input_${base_dataset_version}_${calibration_variant_id}
+  table: calibration_model_input
   external: false
   columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+    calibration_variant_id: ${calibration_variant_id}
+  partition_cols:
+    - {name: snap_date, type: STRING}
 
 # --- Training Pipeline - Binary / non-DataFrame artifacts (driver-local) ---
 # ModelAdapterDataset / JSONDataset 用 Python 內建 open() 寫檔，不認 hdfs:// scheme，
