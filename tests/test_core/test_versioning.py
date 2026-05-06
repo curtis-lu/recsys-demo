@@ -13,6 +13,7 @@ from recsys_tfb.core.versioning import (
     build_manifest_metadata,
     compute_base_dataset_version,
     compute_calibration_variant_id,
+    compute_feature_table_fingerprint,
     compute_model_version,
     compute_train_variant_id,
     get_git_commit,
@@ -63,6 +64,46 @@ class TestSamplingKeySets:
 
     def test_all_sampling_keys_is_union(self):
         assert ALL_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
+
+
+class TestComputeFeatureTableFingerprint:
+    def test_returns_8_char_hex(self):
+        cols = [("snap_date", "date"), ("cust_id", "string"), ("aum_total", "double")]
+        fp = compute_feature_table_fingerprint(cols)
+        assert _HEX8_RE.match(fp)
+
+    def test_deterministic(self):
+        cols = [("snap_date", "date"), ("cust_id", "string")]
+        assert compute_feature_table_fingerprint(cols) == \
+            compute_feature_table_fingerprint(cols)
+
+    def test_order_sensitive(self):
+        a = [("snap_date", "date"), ("cust_id", "string")]
+        b = [("cust_id", "string"), ("snap_date", "date")]
+        assert compute_feature_table_fingerprint(a) != \
+            compute_feature_table_fingerprint(b)
+
+    def test_dtype_sensitive(self):
+        a = [("aum_total", "double")]
+        b = [("aum_total", "float")]
+        assert compute_feature_table_fingerprint(a) != \
+            compute_feature_table_fingerprint(b)
+
+    def test_added_column_changes_fingerprint(self):
+        base = [("snap_date", "date"), ("cust_id", "string")]
+        extended = base + [("new_feat", "double")]
+        assert compute_feature_table_fingerprint(base) != \
+            compute_feature_table_fingerprint(extended)
+
+    def test_empty_columns_returns_hex(self):
+        assert _HEX8_RE.match(compute_feature_table_fingerprint([]))
+
+    def test_accepts_iterable(self):
+        # tuple of tuples 應該與 list of tuples 等價
+        cols_list = [("snap_date", "date"), ("cust_id", "string")]
+        cols_tuple = (("snap_date", "date"), ("cust_id", "string"))
+        assert compute_feature_table_fingerprint(cols_list) == \
+            compute_feature_table_fingerprint(cols_tuple)
 
 
 class TestComputeBaseDatasetVersion:
@@ -116,6 +157,40 @@ class TestComputeBaseDatasetVersion:
         schema_b = {"item": "i", "entity": ["e"], "time": "t"}
         assert compute_base_dataset_version(_base_params(), schema_a) == \
             compute_base_dataset_version(_base_params(), schema_b)
+
+    def test_fingerprint_default_none_matches_legacy(self):
+        # fingerprint=None 必須與不傳該參數時 hash 完全一致（向後相容）
+        legacy = compute_base_dataset_version(_base_params(), _sample_schema())
+        with_none = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint=None
+        )
+        assert legacy == with_none
+
+    def test_different_fingerprints_yield_different_hashes(self):
+        a = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="aaaaaaaa"
+        )
+        b = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="bbbbbbbb"
+        )
+        assert a != b
+
+    def test_same_fingerprint_yields_same_hash(self):
+        a = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        b = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        assert a == b
+
+    def test_fingerprint_set_differs_from_unset(self):
+        # 一旦 caller 開始傳 fingerprint，hash 應該與「沒傳」分流
+        legacy = compute_base_dataset_version(_base_params(), _sample_schema())
+        with_fp = compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"
+        )
+        assert legacy != with_fp
 
 
 class TestComputeTrainVariantId:
@@ -450,3 +525,22 @@ class TestBuildManifestMetadata:
         assert meta["model_version"] == "def67890"
         assert meta["base_dataset_version"] == "abc12345"
         assert meta["train_variant_id"] == "trai1234"
+
+    def test_dataset_manifest_records_feature_table_fingerprint(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="dataset",
+            parameters={"sample_ratio": 0.1},
+            base_dataset_version="abc12345",
+            feature_table_fingerprint="cafeb0ba",
+        )
+        assert meta["feature_table_fingerprint"] == "cafeb0ba"
+
+    def test_manifest_omits_fingerprint_when_not_provided(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="dataset",
+            parameters={"sample_ratio": 0.1},
+            base_dataset_version="abc12345",
+        )
+        assert "feature_table_fingerprint" not in meta
