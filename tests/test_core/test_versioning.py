@@ -525,3 +525,22 @@ class TestBuildManifestMetadata:
         assert meta["model_version"] == "def67890"
         assert meta["base_dataset_version"] == "abc12345"
         assert meta["train_variant_id"] == "trai1234"
+
+    def test_dataset_manifest_records_feature_table_fingerprint(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="dataset",
+            parameters={"sample_ratio": 0.1},
+            base_dataset_version="abc12345",
+            feature_table_fingerprint="cafeb0ba",
+        )
+        assert meta["feature_table_fingerprint"] == "cafeb0ba"
+
+    def test_manifest_omits_fingerprint_when_not_provided(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="dataset",
+            parameters={"sample_ratio": 0.1},
+            base_dataset_version="abc12345",
+        )
+        assert "feature_table_fingerprint" not in meta

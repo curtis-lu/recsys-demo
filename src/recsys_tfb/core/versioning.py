@@ -247,12 +247,15 @@ def build_manifest_metadata(
     model_version: str | None = None,
     parent_version: str | None = None,
     variant_kind: str | None = None,
+    feature_table_fingerprint: str | None = None,
     artifacts: list[str] | None = None,
 ) -> dict:
     """Build a manifest metadata dict with standard fields.
 
     ``parent_version`` and ``variant_kind`` are written on variant sub-directory
     manifests to link them back to their base dataset manifest.
+    ``feature_table_fingerprint`` is written on dataset base manifests so the
+    physical feature_table schema at run time is recoverable from manifest.
     """
     metadata: dict = {
         "version": version,
@@ -273,6 +276,8 @@ def build_manifest_metadata(
         metadata["parent_version"] = parent_version
     if variant_kind is not None:
         metadata["variant_kind"] = variant_kind
+    if feature_table_fingerprint is not None:
+        metadata["feature_table_fingerprint"] = feature_table_fingerprint
     if artifacts is not None:
         metadata["artifacts"] = artifacts
     return metadata
