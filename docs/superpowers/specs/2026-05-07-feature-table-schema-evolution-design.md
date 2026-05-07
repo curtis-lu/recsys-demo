@@ -6,13 +6,13 @@
 
 ## Goal
 
-在 user 對 `feature_table` 上游加新欄位時，提供一條明確、有意識的路徑同步下游 5 張 Hive output table 的物理 schema，讓 dataset pipeline 不會被「table 28 cols vs DataFrame 29 cols」這類 Hive 全域 schema 限制卡住，同時不引入 silent 的 ALTER 行為。
+在 user 對 `feature_table` 上游加新欄位時，提供一條明確、有意識的路徑同步下游 6 張 Hive output table 的物理 schema，讓 dataset pipeline 不會被「table 28 cols vs DataFrame 29 cols」這類 Hive 全域 schema 限制卡住，同時不引入 silent 的 ALTER 行為。
 
 ## Motivation
 
-PR #2（`feature_table_fingerprint`）合進 main 後，邏輯版本層解決了：feature_table schema 改了 → fingerprint 改了 → `base_dataset_version` 改了 → cache / partition 不再撞 hash。但**物理層**沒解決：`train_model_input` 等 5 張 Hive managed table 第一次建表後 schema 鎖死，新欄位沒辦法用 `df.write.insertInto()` 寫進去（Spark 會 raise `target table has 28 column(s) but the inserted data has 29 column(s)`）。
+PR #2（`feature_table_fingerprint`）合進 main 後，邏輯版本層解決了：feature_table schema 改了 → fingerprint 改了 → `base_dataset_version` 改了 → cache / partition 不再撞 hash。但**物理層**沒解決：`train_model_input` 等 6 張 Hive managed table 第一次建表後 schema 鎖死，新欄位沒辦法用 `df.write.insertInto()` 寫進去（Spark 會 raise `target table has 28 column(s) but the inserted data has 29 column(s)`）。
 
-目前 user 唯一手段是手動 `DROP TABLE`，但 managed table 的 DROP 會一併刪 HDFS 資料 → 舊 base_v partition 全失。對 ML 場景而言「加新特徵」是常規操作，不應每次都付出歷史資料代價，也不應仰賴 user 記得 6 個（其實 5 個）表的清單。
+目前 user 唯一手段是手動 `DROP TABLE`，但 managed table 的 DROP 會一併刪 HDFS 資料 → 舊 base_v partition 全失。對 ML 場景而言「加新特徵」是常規操作，不應每次都付出歷史資料代價，也不應仰賴 user 記得這 6 張表的清單。
 
 ## Non-Goals
 
@@ -107,7 +107,7 @@ def apply_migrations(diffs: list[SchemaDiff], spark) -> None:
 
 ### Catalog metadata 標註
 
-`conf/base/catalog.yaml` 對 5 張受影響表加 `tracks_feature_table_schema: true`：
+`conf/base/catalog.yaml` 對 6 張受影響表加 `tracks_feature_table_schema: true`：
 
 ```yaml
 train_model_input:
@@ -119,9 +119,9 @@ train_model_input:
   ...
 ```
 
-5 張：`train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`、`calibration_model_input`。
+6 張：`preprocessed_feature_table`、`train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`、`calibration_model_input`。
 
-`preprocessed_feature_table` 不在範圍 —— 它只是 dataset pipeline 內部 catalog name，沒寫進 `catalog.yaml`，預設走 MemoryDataset 不持久化。
+`preprocessed_feature_table` 是 dataset pipeline 把 feature_table 套 preprocessor 後的中間結果（identity_columns + encoded feature_columns），catalog.yaml 寫成 `HiveTableDataset` 並有 `partition_filter: base_dataset_version` —— 跟其他 5 張 model_input 一樣會因 feature_columns 寬度而 widen，要納入 migration 範圍。
 
 ### `HiveTableDataset` 小幅擴充
 
@@ -256,7 +256,7 @@ ALTER 序貫執行，失敗某張就 raise，**不 rollback**。理由：
 
 ### User 改了又改回去
 
-feature_table 加欄 → migrate → 又拿掉 → fingerprint 變回舊值，5 張表多出來的欄位閒置但無害（任何 base_v 的訓練/推論都不會 reference）。如要清理需手動 DROP 重建。
+feature_table 加欄 → migrate → 又拿掉 → fingerprint 變回舊值，6 張表多出來的欄位閒置但無害（任何 base_v 的訓練/推論都不會 reference）。如要清理需手動 DROP 重建。
 
 ## Testing
 
@@ -287,7 +287,7 @@ Spark 全 mock，不依賴 dev-cluster。
 
 **`tests/pipelines/dataset/test_pipeline_verify.py`**（新檔）
 
-- `test_create_pipeline_collects_tracked_tables`：給含標註的 catalog dict → 第一個 Node 是 `verify_feature_table_schema` 且 closure 含正確 5 張 fqn。
+- `test_create_pipeline_collects_tracked_tables`：給含標註的 catalog dict → 第一個 Node 是 `verify_feature_table_schema` 且 closure 含正確 6 張 fqn。
 - `test_verify_node_passes_when_aligned`：mock spark + feature_table，無 diff → return passthrough。
 - `test_verify_node_raises_with_actionable_message`：mock 出 diff → raise + 訊息含 `migrate_schema`。
 
@@ -305,10 +305,10 @@ Spark 全 mock，不依賴 dev-cluster。
 不寫進自動化 CI（dev-cluster 啟停慢），但列為**完工驗收 checklist**：
 
 1. `scripts/setup_hive_dev.py` 重建 dev 表
-2. 跑 `python -m recsys_tfb dataset --env production` → 5 張 model_input 表生成
+2. 跑 `python -m recsys_tfb dataset --env production` → 6 張下游表生成（preprocessed + 5 張 model_input）
 3. 在 setup 腳本加 `test_extra_feat DOUBLE` 重灌 feature_table
 4. 重跑 `dataset` → verify Node fail，訊息提示 `migrate_schema`
-5. `python -m recsys_tfb migrate_schema --env production` → 印出 5 張表 ADD COLUMNS plan
+5. `python -m recsys_tfb migrate_schema --env production` → 印出 6 張表 ADD COLUMNS plan
 6. `python -m recsys_tfb migrate_schema --env production --apply` → 執行
 7. 重跑 `dataset` → 通過、新 base_v partition 正確寫入
 8. `SELECT * FROM ml_recsys.train_model_input WHERE base_dataset_version='<舊>' LIMIT 1` → `test_extra_feat` 顯示 NULL
