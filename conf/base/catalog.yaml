@@ -180,39 +180,11 @@ evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
 
-# --- Training Pipeline - Driver-local parquet cache (per base + variant) ---
-# These mirror the dataset-layer paths but live on driver-local disk so that
-# rerunning the training pipeline (e.g. with new hyperparameters) does not
-# rescan Hive. Requires spark.master=local[*] (driver=executor 同 JVM)，否則
-# distributed worker container 看不到 host fs。Skip-if-exists 由 cache node
-# 與 ParquetDataset 的 write_mode=ignore 雙重保證。
-cached_val_model_input:
-  type: ParquetDataset
-  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/val_model_input.parquet
-  backend: spark
-  partition_cols: [snap_date, prod_name]
-  write_mode: ignore
-
-cached_train_model_input:
-  type: ParquetDataset
-  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet
-  backend: spark
-  partition_cols: [snap_date, prod_name]
-  write_mode: ignore
-
-cached_train_dev_model_input:
-  type: ParquetDataset
-  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/train_variants/${train_variant_id}/train_dev_model_input.parquet
-  backend: spark
-  partition_cols: [snap_date, prod_name]
-  write_mode: ignore
-
-cached_calibration_model_input:
-  type: ParquetDataset
-  filepath: file:///Users/curtislu/projects/recsys_tfb/data/recsys_cache/${base_dataset_version}/calibration_variants/${calibration_variant_id}/calibration_model_input.parquet
-  backend: spark
-  partition_cols: [snap_date, prod_name]
-  write_mode: ignore
+# Note: cached_*_model_input are intentionally not registered here.
+# Persistence is owned by training/nodes.py::_cache_or_passthrough
+# (driver-local parquet via hadoop fs copyToLocal); catalog auto-creates
+# MemoryDataset for these names for in-memory passthrough between nodes.
+# See docs/superpowers/specs/2026-05-07-training-cache-hdfs-copy-design.md
 
 # --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---
 # Each run only overwrites partitions present in the DataFrame (snap_date x prod_name x model_version).
