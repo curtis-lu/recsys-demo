@@ -48,3 +48,14 @@ class TestGetHiveTableLocation:
 
         with pytest.raises(RuntimeError, match="Location not found"):
             get_hive_table_location(spark, "db", "foo")
+
+    def test_raises_when_location_data_type_is_none(self):
+        from recsys_tfb.utils.hdfs import get_hive_table_location
+
+        spark = MagicMock()
+        spark.sql.return_value.collect.return_value = [
+            FakeRow("Location", None),
+        ]
+
+        with pytest.raises(RuntimeError, match="Location not found"):
+            get_hive_table_location(spark, "db", "foo")

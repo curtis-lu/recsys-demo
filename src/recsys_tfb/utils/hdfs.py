@@ -25,7 +25,10 @@ def get_hive_table_location(spark, database: str, table: str) -> str:
     for row in rows:
         col_name = row.col_name.strip() if row.col_name else ""
         if col_name == "Location":
-            return row.data_type.strip()
+            location = (row.data_type or "").strip()
+            if location:
+                return location
+            # fall through: treat empty/None data_type as missing
     raise RuntimeError(
         f"Location not found in DESCRIBE FORMATTED for {database}.{table}"
     )
