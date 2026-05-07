@@ -63,8 +63,16 @@ def copy_hdfs_to_local(
     src_path = jvm.org.apache.hadoop.fs.Path(src)
 
     if glob:
-        # Implemented in Task 3
-        raise NotImplementedError("glob mode added in Task 3")
+        statuses = fs.globStatus(src_path)
+        if statuses is None or len(statuses) == 0:
+            raise FileNotFoundError(f"No HDFS paths matched: {src}")
+        for status in statuses:
+            sub_src = status.getPath()
+            basename = sub_src.getName()
+            sub_dst_path = jvm.org.apache.hadoop.fs.Path(
+                os.path.join(dst, basename)
+            )
+            fs.copyToLocalFile(False, sub_src, sub_dst_path, False)
     else:
         dst_path = jvm.org.apache.hadoop.fs.Path(dst)
         # copyToLocalFile(deleteSource, src, dst, useRawLocalFileSystem)

@@ -100,3 +100,53 @@ class TestCopyHdfsToLocal:
 
         # FileSystem.get is called with the hadoop config we built above
         spark._jvm.org.apache.hadoop.fs.FileSystem.get.assert_called_once()
+
+    def test_glob_iterates_over_globStatus_results(self, tmp_path):
+        from recsys_tfb.utils.hdfs import copy_hdfs_to_local
+
+        spark, fs = _make_fake_spark()
+
+        # Build two FileStatus mocks with different basenames
+        def make_status(basename):
+            status = MagicMock(name=f"FileStatus({basename})")
+            inner_path = MagicMock(name=f"Path({basename})")
+            inner_path.getName.return_value = basename
+            status.getPath.return_value = inner_path
+            return status
+
+        fs.globStatus.return_value = [
+            make_status("snap_date=2025-10-31"),
+            make_status("snap_date=2025-09-30"),
+        ]
+
+        dst = str(tmp_path / "cache")
+        copy_hdfs_to_local(
+            spark, "hdfs://nn/foo/snap_date=*", dst, glob=True
+        )
+
+        # globStatus called once with src pattern
+        fs.globStatus.assert_called_once()
+        # copyToLocalFile called twice, one per match
+        assert fs.copyToLocalFile.call_count == 2
+
+    def test_glob_raises_when_no_matches(self, tmp_path):
+        from recsys_tfb.utils.hdfs import copy_hdfs_to_local
+
+        spark, fs = _make_fake_spark()
+        fs.globStatus.return_value = None  # Hadoop returns null on no match
+
+        with pytest.raises(FileNotFoundError, match="No HDFS paths matched"):
+            copy_hdfs_to_local(
+                spark, "hdfs://nn/empty/*", str(tmp_path), glob=True
+            )
+
+    def test_glob_raises_when_empty_match_array(self, tmp_path):
+        from recsys_tfb.utils.hdfs import copy_hdfs_to_local
+
+        spark, fs = _make_fake_spark()
+        fs.globStatus.return_value = []
+
+        with pytest.raises(FileNotFoundError, match="No HDFS paths matched"):
+            copy_hdfs_to_local(
+                spark, "hdfs://nn/empty/*", str(tmp_path), glob=True
+            )
