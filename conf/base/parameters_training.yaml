@@ -42,8 +42,10 @@ mlflow:
 
 # Driver-local parquet cache for materialized model inputs (skips Hive scans on
 # re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
-# 路徑必須與 catalog.yaml 中 cached_*_model_input.filepath（去掉 file:// scheme）
-# 一致 —— cache node 用 root 做 existence check、catalog 用 filepath 做 Spark write。
+# `cache.root` is the single source of truth for the cache path: both
+# _resolve_cache_path() (existence check) and _populate_cache_from_hive()
+# (hadoop fs copyToLocal destination) read from here. catalog.yaml does NOT
+# register cached_*_model_input — see catalog.yaml inline note.
 cache:
   enabled: true
   root: /Users/curtislu/projects/recsys_tfb/data/recsys_cache
