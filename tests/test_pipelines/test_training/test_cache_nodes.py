@@ -1,5 +1,6 @@
 """Tests for training pipeline cache nodes."""
 from pathlib import Path
+from unittest.mock import ANY, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -335,3 +336,80 @@ class TestParametersWiringRegression:
         # Cache miss path; should return df unchanged without raising.
         out = _cache_or_passthrough(df, "train_model_input", params_with_versions)
         assert out is df
+
+
+class TestPopulateCacheFromHive:
+    def _params(self, tmp_path):
+        return {
+            "hive": {"db": "ml_recsys"},
+            "base_dataset_version": "base_v1",
+            "train_variant_id": "train_v1",
+            "calibration_variant_id": "calib_v1",
+            "cache": {"enabled": True, "root": str(tmp_path)},
+        }
+
+    def test_train_model_input_constructs_correct_src_glob(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import _populate_cache_from_hive
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+            return_value="hdfs://nn/warehouse/ml_recsys.db/train_model_input",
+        ), patch(
+            "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local"
+        ) as mock_copy:
+            _populate_cache_from_hive(
+                MagicMock(), "train_model_input", self._params(tmp_path), "/tmp/dst"
+            )
+
+        mock_copy.assert_called_once_with(
+            ANY,
+            "hdfs://nn/warehouse/ml_recsys.db/train_model_input"
+            "/base_dataset_version=base_v1/train_variant_id=train_v1/snap_date=*",
+            "/tmp/dst",
+            glob=True,
+        )
+
+    def test_val_model_input_does_not_include_train_variant(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import _populate_cache_from_hive
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+            return_value="hdfs://nn/warehouse/ml_recsys.db/val_model_input",
+        ), patch(
+            "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local"
+        ) as mock_copy:
+            _populate_cache_from_hive(
+                MagicMock(), "val_model_input", self._params(tmp_path), "/tmp/dst"
+            )
+
+        mock_copy.assert_called_once_with(
+            ANY,
+            "hdfs://nn/warehouse/ml_recsys.db/val_model_input"
+            "/base_dataset_version=base_v1/snap_date=*",
+            "/tmp/dst",
+            glob=True,
+        )
+
+    def test_calibration_model_input_uses_calibration_variant(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import _populate_cache_from_hive
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+            return_value="hdfs://nn/warehouse/ml_recsys.db/calibration_model_input",
+        ), patch(
+            "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local"
+        ) as mock_copy:
+            _populate_cache_from_hive(
+                MagicMock(),
+                "calibration_model_input",
+                self._params(tmp_path),
+                "/tmp/dst",
+            )
+
+        mock_copy.assert_called_once_with(
+            ANY,
+            "hdfs://nn/warehouse/ml_recsys.db/calibration_model_input"
+            "/base_dataset_version=base_v1/calibration_variant_id=calib_v1/snap_date=*",
+            "/tmp/dst",
+            glob=True,
+        )

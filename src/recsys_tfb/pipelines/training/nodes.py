@@ -14,6 +14,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,46 @@ _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
         "calibration_variant_id",
     ),
 }
+
+
+# cache name → source Hive table (under parameters["hive"]["db"])
+_CACHE_SOURCE_TABLE: dict[str, str] = {
+    "val_model_input": "val_model_input",
+    "test_model_input": "test_model_input",
+    "train_model_input": "train_model_input",
+    "train_dev_model_input": "train_dev_model_input",
+    "calibration_model_input": "calibration_model_input",
+}
+
+# Outer (string) Hive partitions encoding the variant boundaries.
+# Mirrors catalog.yaml's `partition_filter` keys; copy these as the
+# subtree root, then `snap_date=*` is the inner glob pattern.
+_CACHE_OUTER_PARTITIONS: dict[str, tuple[str, ...]] = {
+    "val_model_input": ("base_dataset_version",),
+    "test_model_input": ("base_dataset_version",),
+    "train_model_input": ("base_dataset_version", "train_variant_id"),
+    "train_dev_model_input": ("base_dataset_version", "train_variant_id"),
+    "calibration_model_input": ("base_dataset_version", "calibration_variant_id"),
+}
+
+
+def _populate_cache_from_hive(
+    spark, dataset_name: str, parameters: dict, local_dst: str
+) -> None:
+    """Copy the relevant Hive partition subtree to driver-local fs.
+
+    Local layout after copy:
+        <local_dst>/snap_date=.../prod_name=.../*.parquet
+    """
+    db = parameters["hive"]["db"]
+    table = _CACHE_SOURCE_TABLE[dataset_name]
+    location = get_hive_table_location(spark, db, table)
+    outer = "/".join(
+        f"{tok}={parameters[tok]}"
+        for tok in _CACHE_OUTER_PARTITIONS[dataset_name]
+    )
+    src_glob = f"{location.rstrip('/')}/{outer}/snap_date=*"
+    copy_hdfs_to_local(spark, src_glob, local_dst, glob=True)
 
 
 def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
