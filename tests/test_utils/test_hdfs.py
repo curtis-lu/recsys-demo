@@ -59,3 +59,44 @@ class TestGetHiveTableLocation:
 
         with pytest.raises(RuntimeError, match="Location not found"):
             get_hive_table_location(spark, "db", "foo")
+
+
+def _make_fake_spark():
+    """Build a MagicMock spark simulating the JVM bridge surface we use."""
+    spark = MagicMock()
+    spark._jsc.hadoopConfiguration.return_value = MagicMock(name="hadoop_conf")
+
+    fs = MagicMock(name="FileSystem")
+    spark._jvm.org.apache.hadoop.fs.FileSystem.get.return_value = fs
+
+    def make_path(s):
+        p = MagicMock(name=f"Path({s})")
+        p.__str__ = lambda self: s
+        # getName() returns the basename — needed for glob path computation
+        p.getName.return_value = s.rstrip("/").split("/")[-1] or "/"
+        return p
+
+    spark._jvm.org.apache.hadoop.fs.Path.side_effect = make_path
+    return spark, fs
+
+
+class TestCopyHdfsToLocal:
+    def test_non_glob_calls_copyToLocalFile_once(self, tmp_path):
+        from recsys_tfb.utils.hdfs import copy_hdfs_to_local
+
+        spark, fs = _make_fake_spark()
+        dst = str(tmp_path / "out")
+
+        copy_hdfs_to_local(spark, "hdfs://nn/foo/bar", dst)
+
+        assert fs.copyToLocalFile.call_count == 1
+        assert (tmp_path / "out").exists()  # mkdir done
+
+    def test_non_glob_uses_filesystem_from_src_path(self, tmp_path):
+        from recsys_tfb.utils.hdfs import copy_hdfs_to_local
+
+        spark, fs = _make_fake_spark()
+        copy_hdfs_to_local(spark, "hdfs://nn/x", str(tmp_path / "y"))
+
+        # FileSystem.get is called with the hadoop config we built above
+        spark._jvm.org.apache.hadoop.fs.FileSystem.get.assert_called_once()
