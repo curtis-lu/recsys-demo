@@ -116,6 +116,17 @@ train_dev_keys:
   partition_cols:
     - {name: snap_date, type: STRING}
 
+preprocessed_feature_table:
+    type: HiveTableDataset
+    database: ${hive.db}
+    table: preprocessed_feature_table
+    external: false
+    columns: "auto"
+    partition_filter:
+      base_dataset_version: ${base_dataset_version}
+    partition_cols:
+      - {name: snap_date, type: STRING}
+
 train_model_input:
   type: HiveTableDataset
   database: ${hive.db}
