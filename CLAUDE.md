@@ -38,12 +38,12 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 ### Pipeline 與 SPARK_CONF_DIR 的對應
 
-`--env production` 的 catalog `cached_*_model_input` 與 model artifact (`model.txt` / `calibrator.pkl` / `*.json`) 都用 host-local `file://` 路徑（cache 跨 run 重用、artifact 用 Python `open()` 寫不認 hdfs scheme）。因此 pipeline 必須照下表選對 `SPARK_CONF_DIR`：
+`--env production` 的 training cache 跟 model artifact (`model.txt` / `calibrator.pkl` / `*.json`) 都駐留在 driver-local fs：cache 由 `_cache_or_passthrough` 自己從 HDFS `copyToLocal` 拉下來（不經 catalog `ParquetDataset`、不依賴 `spark.master` 模式；catalog 上 `cached_*_model_input` 已不再登記，由 framework auto-MemoryDataset 做 in-memory 中介）；artifact 走 Python `open()` 寫不認 `hdfs://` scheme。Pipeline 依下表選對 `SPARK_CONF_DIR`：
 
 | Pipeline | `SPARK_CONF_DIR` | spark.master | 為什麼 |
 |---|---|---|---|
 | `dataset` / `inference` / `evaluation` / `baselines` / `*_etl` | `~/dev-cluster/client-template/spark`（client-env.sh 預設） | `spark://localhost:7077` | 寫 Hive managed table 走 HDFS，需要 worker container |
-| `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | cached_* 跟 model artifact 都寫 host fs；distributed worker 看不到 host fs |
+| `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | LightGBM 是 driver 單機訓練，distributed cluster 沒幫助；model artifact 駐留 driver-local；cache 由 cache node 自己從 HDFS 拉，不需要 cluster |
 
 執行：
 ```bash
@@ -56,8 +56,7 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 ```
 
 走錯 conf 的典型 trap（深入排查見 `dev-cluster-spark` skill）：
-- training 用 `spark://` → `cached_*` 在 host 端只剩 `_SUCCESS`、tune_hyperparameters 報 `Unable to infer schema for Parquet`
-- training 用 `spark://` 又把 catalog filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
+- 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
 - `client-template-local` 缺 hive-site.xml symlink → `Table or view not found: ml_recsys.<table>`
 
 ## graphify
