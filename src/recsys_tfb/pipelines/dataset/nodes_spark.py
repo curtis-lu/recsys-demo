@@ -105,7 +105,7 @@ def select_val_keys(
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
-    identity_key = [time_col] + entity_cols
+    identity_key = schema["identity_columns"]
     cust_col = entity_cols[0]
 
     ds = parameters["dataset"]
@@ -141,7 +141,7 @@ def select_test_keys(
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
-    identity_key = [time_col] + entity_cols
+    identity_key = schema["identity_columns"]
 
     ds = parameters["dataset"]
     test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]

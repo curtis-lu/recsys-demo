@@ -199,13 +199,17 @@ class TestSplitTrainKeys:
 class TestSelectValKeys:
     def test_full_population(self, label_table, parameters):
         result = select_val_keys(label_table, parameters)
-        assert result.count() == 4  # 4 unique cust_ids for val date
+        # identity_columns 含 prod_name → 4 cust × 3 prod for val date
+        assert result.count() == 12
+        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
 
 
 class TestSelectTestKeys:
     def test_full_population(self, label_table, parameters):
         result = select_test_keys(label_table, parameters)
-        assert result.count() == 4  # 4 unique cust_ids for test date
+        # identity_columns 含 prod_name → 4 cust × 3 prod for test date
+        assert result.count() == 12
+        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
 
 
 class TestBuildModelInput:

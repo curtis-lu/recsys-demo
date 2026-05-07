@@ -229,6 +229,9 @@ def build_model_input(
     label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
     with log_step(logger, "merge_labels"):
         dataset = keys.join(label_table, on=label_join_key, how="left")
+        # sample_pool 是 dense (cust × prod 全展開)，label_table 是 sparse
+        # (只含有大類交易的 cust)。join miss 的 row 視為 negative。
+        dataset = dataset.withColumn(label_col, F.coalesce(F.col(label_col), F.lit(0)))
     with log_step(logger, "merge_features"):
         dataset = dataset.join(preprocessed_feature_table, on=base_key, how="left")
 
@@ -239,14 +242,7 @@ def build_model_input(
         output_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
         result = dataset.select(*output_cols)
 
-    n_label_null = result.filter(F.col(label_col).isNull()).count()
-    if n_label_null > 0:
-        logger.warning("build_model_input: %d null labels", n_label_null)
-
-    logger.info(
-        "Model input (Spark): %d features, label_nulls=%d",
-        len(feature_columns), n_label_null,
-    )
+    logger.info("Model input (Spark): %d features", len(feature_columns))
     return result
 
 

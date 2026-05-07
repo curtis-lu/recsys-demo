@@ -22,7 +22,7 @@ label_event AS (
         1 AS label
     FROM feature_store.fact_ccard_apply
     WHERE apply_date > '${target_date}'
-      AND apply_date <= date_add('${target_date}', 30)
+    AND apply_date <= date_add('${target_date}', 30)
 ),
 label_dedup AS (
     SELECT
@@ -40,25 +40,24 @@ label_dedup AS (
         apply_end_date,
         cust_id,
         prod_name
-),
-cust_snap AS (
-    SELECT DISTINCT
-        snap_date,
-        cust_id,
-        cust_segment_typ
-    FROM feature_store.dim_all_customer
-    WHERE snap_date = '${target_date}'
+)
+
+, cust_pool as (
+
+    select to_date('${target_date}') AS snap_date, cust_id
+    from label_dedup
+    group by to_date('${target_date}'), cust_id
+
 )
 
 SELECT
     c.snap_date,
     c.cust_id,
-    c.cust_segment_typ,
     l.apply_start_date,
     l.apply_end_date,
     COALESCE(l.label, 0) AS label,
     p.prod_name
-FROM cust_snap c
+FROM cust_pool c
 CROSS JOIN candidate_prod p
 LEFT JOIN label_dedup l
   ON c.snap_date = l.snap_date

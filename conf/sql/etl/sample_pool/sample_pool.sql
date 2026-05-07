@@ -14,15 +14,46 @@ WITH cust_snap AS (
     FROM feature_store.dim_all_customer
     WHERE snap_date = '${target_date}'
 )
+, prod as (
+
+    select 'ccard_bill' as prod_name
+    union all
+    select 'ccard_cash' as prod_name
+    union all
+    select 'ccard_ins' as prod_name
+    union all
+    select 'exchange_fx' as prod_name
+    union all
+    select 'exchange_usd' as prod_name
+    union all
+    select 'fund_bond' as prod_name
+    union all
+    select 'fund_mix' as prod_name
+    union all
+    select 'fund_stock' as prod_name
+
+)
+
+, cross_pop AS (
+
+    select
+        pop.snap_date,
+        pop.cust_id,
+        pop.cust_segment_typ,
+        pop.prod_name
+    from cust_snap pop
+    left join prod on 1=1
+
+)
 
 SELECT
     p.snap_date,
     p.cust_id,
     p.cust_segment_typ,
-    coalesce(l.prod_name, 'negative') as prod_name,
-    l.label,
+    p.prod_name,
+    COALESCE(l.label, 0) AS label, 
     f.tenure_months,
     f.channel_preference
-FROM cust_snap p
-    LEFT JOIN ${target_db}.label_table l ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id
-    LEFT JOIN ${target_db}.feature_table f ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id
+FROM cross_pop p
+    LEFT JOIN ${target_db}.label_table l ON p.snap_date = l.snap_date AND p.cust_id = l.cust_id and p.prod_name = l.prod_name
+    LEFT JOIN ${target_db}.feature_table f ON p.snap_date = f.snap_date AND p.cust_id = f.cust_id
