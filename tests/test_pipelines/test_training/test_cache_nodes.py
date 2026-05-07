@@ -505,3 +505,38 @@ class TestPopulateCacheFromHive:
             "/tmp/dst",
             glob=True,
         )
+
+    def test_source_table_override_from_parameters(self, tmp_path):
+        """parameters['cache']['source_tables'] overrides _CACHE_SOURCE_TABLE.
+
+        Real-world use: company prod env that prefixes Hive table names
+        (e.g. recsys_prod_train_model_input). Override aligns the cache
+        lookup with catalog.yaml's HiveTableDataset.table field.
+        """
+        from recsys_tfb.pipelines.training.nodes import _populate_cache_from_hive
+
+        params = self._params(tmp_path)
+        params["cache"]["source_tables"] = {
+            "train_model_input": "recsys_prod_train_model_input"
+        }
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+            return_value="hdfs://nn/warehouse/ml_recsys.db/recsys_prod_train_model_input",
+        ) as mock_loc, patch(
+            "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local"
+        ) as mock_copy:
+            _populate_cache_from_hive(
+                MagicMock(), "train_model_input", params, "/tmp/dst"
+            )
+
+        # Override flows into get_hive_table_location's `table` arg
+        mock_loc.assert_called_once_with(ANY, "ml_recsys", "recsys_prod_train_model_input")
+        # And the resolved location is used for the glob pattern
+        mock_copy.assert_called_once_with(
+            ANY,
+            "hdfs://nn/warehouse/ml_recsys.db/recsys_prod_train_model_input"
+            "/base_dataset_version=base_v1/train_variant_id=train_v1/snap_date=*",
+            "/tmp/dst",
+            glob=True,
+        )

@@ -75,9 +75,17 @@ def _populate_cache_from_hive(
 
     Local layout after copy:
         <local_dst>/snap_date=.../prod_name=.../*.parquet
+
+    Source-table resolution: defaults to _CACHE_SOURCE_TABLE[dataset_name]
+    (cache logical name == Hive table name). Per-env overrides via
+    parameters['cache']['source_tables'] for envs that prefix table names
+    (e.g. company prod uses 'recsys_prod_train_model_input'). Catalog.yaml's
+    HiveTableDataset `table` field is the real source of truth — keep the
+    override aligned with it.
     """
     db = parameters["hive"]["db"]
-    table = _CACHE_SOURCE_TABLE[dataset_name]
+    overrides = parameters.get("cache", {}).get("source_tables", {})
+    table = overrides.get(dataset_name, _CACHE_SOURCE_TABLE[dataset_name])
     location = get_hive_table_location(spark, db, table)
     outer = "/".join(
         f"{tok}={parameters[tok]}"
