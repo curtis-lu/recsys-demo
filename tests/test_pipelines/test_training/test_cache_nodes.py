@@ -92,25 +92,12 @@ class TestIsSparkDataframe:
         assert _is_spark_df(None) is False
 
 
-class _FakeReader:
-    def __init__(self, marker: object):
-        self.marker = marker
-        self.read_paths: list[str] = []
-
-    def parquet(self, path: str):
-        self.read_paths.append(path)
-        return f"reread_from::{path}"
-
-
-class _FakeSparkSession:
-    def __init__(self, marker: object):
-        self.read = _FakeReader(marker)
-
-
 class _FakeSparkDF:
+    """Minimal spark-df stand-in: only carries sql_ctx.sparkSession."""
+
     def __init__(self):
         self.sql_ctx = type("SqlCtx", (), {})()
-        self.sql_ctx.sparkSession = _FakeSparkSession(marker=self)
+        self.sql_ctx.sparkSession = MagicMock(name="spark")
 
 
 # ---- _cache_or_passthrough ----
@@ -135,104 +122,188 @@ class TestCacheOrPassthroughDev:
 
 
 class TestCacheOrPassthroughProd:
-    def test_cache_miss_returns_input_unchanged(self, tmp_path):
-        from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        df = _FakeSparkDF()
-        out = _cache_or_passthrough(df, "train_model_input", params)
-        assert out is df
+    def _params(self, tmp_path):
+        return {
+            "hive": {"db": "ml_recsys"},
+            "base_dataset_version": "base_v1",
+            "train_variant_id": "train_v1",
+            "calibration_variant_id": "calib_v1",
+            "cache": {"enabled": True, "root": str(tmp_path)},
+        }
 
-    def test_cache_hit_returns_local_reread(self, tmp_path):
+    def _seed_local_cache(self, local_path: Path):
+        """Write a minimal valid hive-partitioned parquet so pd.read_parquet works."""
+        part = local_path / "snap_date=2025-10-31" / "prod_name=fund"
+        part.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"a": [1, 2], "label": [0, 1]}).to_parquet(
+            part / "data.parquet"
+        )
+
+    def test_cache_miss_triggers_populate_and_returns_pandas(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             _cache_or_passthrough,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("train_model_input", params))
-        target.mkdir(parents=True)
-        (target / "_SUCCESS").touch()
 
-        df = _FakeSparkDF()
-        out = _cache_or_passthrough(df, "train_model_input", params)
-        assert out == f"reread_from::{target.as_uri()}"
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("train_model_input", params))
 
-    def test_partial_cache_is_cleared_and_treated_as_miss(self, tmp_path):
+        # Mock _populate_cache_from_hive to materialize a fake parquet locally
+        def fake_populate(spark, name, params_arg, dst):
+            self._seed_local_cache(Path(dst))
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes._populate_cache_from_hive",
+            side_effect=fake_populate,
+        ) as mock_populate:
+            out = _cache_or_passthrough(
+                _FakeSparkDF(), "train_model_input", params
+            )
+
+        # Assertions
+        assert isinstance(out, pd.DataFrame)
+        assert "a" in out.columns
+        assert "snap_date" in out.columns  # partition col restored by pyarrow
+        assert "prod_name" in out.columns
+        mock_populate.assert_called_once()
+        assert (local / "_SUCCESS").exists()
+
+    def test_cache_hit_skips_populate_and_returns_pandas(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             _cache_or_passthrough,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("train_model_input", params))
-        target.mkdir(parents=True)
-        # NOTE: no _SUCCESS file -> partial
-        (target / "garbage.parquet").write_text("partial")
 
-        df = _FakeSparkDF()
-        out = _cache_or_passthrough(df, "train_model_input", params)
-        assert out is df
-        assert not target.exists(), "partial cache must be removed"
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("train_model_input", params))
+        local.mkdir(parents=True)
+        self._seed_local_cache(local)
+        (local / "_SUCCESS").touch()
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes._populate_cache_from_hive"
+        ) as mock_populate:
+            out = _cache_or_passthrough(
+                _FakeSparkDF(), "train_model_input", params
+            )
+
+        assert isinstance(out, pd.DataFrame)
+        assert "a" in out.columns
+        mock_populate.assert_not_called()
+
+    def test_partial_cache_clears_and_repopulates(self, tmp_path):
+        from recsys_tfb.pipelines.training.nodes import (
+            _cache_or_passthrough,
+            _resolve_cache_path,
+        )
+
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("train_model_input", params))
+        local.mkdir(parents=True)
+        # No _SUCCESS — partial state
+        (local / "garbage").write_text("partial")
+
+        def fake_populate(spark, name, params_arg, dst):
+            self._seed_local_cache(Path(dst))
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes._populate_cache_from_hive",
+            side_effect=fake_populate,
+        ) as mock_populate:
+            out = _cache_or_passthrough(
+                _FakeSparkDF(), "train_model_input", params
+            )
+
+        assert isinstance(out, pd.DataFrame)
+        mock_populate.assert_called_once()
+        assert not (local / "garbage").exists()  # partial cleared
+        assert (local / "_SUCCESS").exists()
 
 
 # ---- Cache nodes ----
 
 class TestCacheNodes:
+    def _params(self, tmp_path):
+        return {
+            "hive": {"db": "ml_recsys"},
+            "base_dataset_version": "base_v1",
+            "train_variant_id": "train_v1",
+            "calibration_variant_id": "calib_v1",
+            "cache": {"enabled": True, "root": str(tmp_path)},
+        }
+
+    def _seed_cache(self, local_path: Path):
+        part = local_path / "snap_date=2025-10-31" / "prod_name=fund"
+        part.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"a": [1]}).to_parquet(part / "data.parquet")
+        (local_path / "_SUCCESS").touch()
+
     def test_cache_train_model_input_passes_dataset_name(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             cache_train_model_input,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("train_model_input", params))
-        target.mkdir(parents=True)
-        (target / "_SUCCESS").touch()
+
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("train_model_input", params))
+        local.mkdir(parents=True)
+        self._seed_cache(local)
+
         out = cache_train_model_input(_FakeSparkDF(), params)
-        assert out == f"reread_from::{target.as_uri()}"
+        assert isinstance(out, pd.DataFrame)
 
     def test_cache_train_dev_model_input_passes_dataset_name(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             cache_train_dev_model_input,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("train_dev_model_input", params))
-        target.mkdir(parents=True)
-        (target / "_SUCCESS").touch()
+
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("train_dev_model_input", params))
+        local.mkdir(parents=True)
+        self._seed_cache(local)
+
         out = cache_train_dev_model_input(_FakeSparkDF(), params)
-        assert out == f"reread_from::{target.as_uri()}"
+        assert isinstance(out, pd.DataFrame)
 
     def test_cache_val_model_input_passes_dataset_name(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             cache_val_model_input,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("val_model_input", params))
-        target.mkdir(parents=True)
-        (target / "_SUCCESS").touch()
+
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("val_model_input", params))
+        local.mkdir(parents=True)
+        self._seed_cache(local)
+
         out = cache_val_model_input(_FakeSparkDF(), params)
-        assert out == f"reread_from::{target.as_uri()}"
+        assert isinstance(out, pd.DataFrame)
 
     def test_cache_calibration_model_input_passes_dataset_name(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import (
             cache_calibration_model_input,
             _resolve_cache_path,
         )
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        target = Path(_resolve_cache_path("calibration_model_input", params))
-        target.mkdir(parents=True)
-        (target / "_SUCCESS").touch()
+
+        params = self._params(tmp_path)
+        local = Path(_resolve_cache_path("calibration_model_input", params))
+        local.mkdir(parents=True)
+        self._seed_cache(local)
+
         out = cache_calibration_model_input(_FakeSparkDF(), params)
-        assert out == f"reread_from::{target.as_uri()}"
+        assert isinstance(out, pd.DataFrame)
 
     def test_cache_node_dev_passthrough(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import cache_train_model_input
-        params = _params_with_versions(str(tmp_path), enabled=False)
+        params = self._params(tmp_path)
+        params["cache"]["enabled"] = False
         df = pd.DataFrame({"a": [1]})
         assert cache_train_model_input(df, params) is df
 
 
 class TestCacheRunnerIntegration:
-    """Integration: cache node short-circuits Hive read on second Runner run."""
+    """Integration: cache node short-circuits HDFS copy on second Runner run."""
 
     def test_second_run_uses_local_cache(self, tmp_path):
         from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
@@ -241,12 +312,26 @@ class TestCacheRunnerIntegration:
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.io.base import AbstractDataset
         from recsys_tfb.pipelines.training.nodes import (
-            _resolve_cache_path,
             cache_train_model_input,
+            _resolve_cache_path,
         )
 
-        params = _params_with_versions(str(tmp_path), enabled=True)
-        cache_path = _resolve_cache_path("train_model_input", params)
+        params = {
+            "hive": {"db": "ml_recsys"},
+            "base_dataset_version": "base_v1",
+            "train_variant_id": "train_v1",
+            "calibration_variant_id": "calib_v1",
+            "cache": {"enabled": True, "root": str(tmp_path)},
+        }
+        cache_path = Path(_resolve_cache_path("train_model_input", params))
+
+        populate_calls: list[str] = []
+
+        def fake_populate(spark, name, params_arg, dst):
+            populate_calls.append(name)
+            part = Path(dst) / "snap_date=2025-10-31" / "prod_name=fund"
+            part.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"a": [1]}).to_parquet(part / "data.parquet")
 
         load_calls: list[int] = []
 
@@ -276,27 +361,22 @@ class TestCacheRunnerIntegration:
             ),
         ])
 
-        # First run: cache miss; cache node returns the input df unchanged.
-        Runner().run(pipeline, catalog)
-        assert len(load_calls) == 1
-        fake_source = catalog.get_dataset("train_model_input")
-        first_run_cached = catalog.load("cached_train_model_input")
-        # Cache miss: the cache node returned the original df unchanged.
-        assert first_run_cached is fake_source._df
+        with patch(
+            "recsys_tfb.pipelines.training.nodes._populate_cache_from_hive",
+            side_effect=fake_populate,
+        ):
+            # First run: cache miss; populate called once
+            Runner().run(pipeline, catalog)
+            assert populate_calls == ["train_model_input"]
+            assert (cache_path / "_SUCCESS").exists()
+            first_cached = catalog.load("cached_train_model_input")
+            assert isinstance(first_cached, pd.DataFrame)
 
-        # Simulate framework's parquet write by populating _SUCCESS marker.
-        # In production, ParquetDataset(write_mode=ignore) does this via Spark.
-        Path(cache_path).mkdir(parents=True, exist_ok=True)
-        (Path(cache_path) / "_SUCCESS").touch()
-
-        # Second run: cache hit; cache node short-circuits and returns
-        # spark.read.parquet(<uri>) (a string sentinel from _FakeReader).
-        Runner().run(pipeline, catalog)
-        # Runner.load is per-run; HiveTableDataset.load() returns a lazy plan
-        # so this is cheap. The real cache-hit proof is the next assertion.
-        assert len(load_calls) == 2
-        second_run_cached = catalog.load("cached_train_model_input")
-        assert second_run_cached == f"reread_from::{Path(cache_path).as_uri()}"
+            # Second run: cache hit; populate NOT called again
+            Runner().run(pipeline, catalog)
+            assert populate_calls == ["train_model_input"]  # still 1, not 2
+            second_cached = catalog.load("cached_train_model_input")
+            assert isinstance(second_cached, pd.DataFrame)
 
 
 class TestParametersWiringRegression:
@@ -324,18 +404,30 @@ class TestParametersWiringRegression:
         into parameters MemoryDataset, so cache helpers find the version IDs."""
         from recsys_tfb.pipelines.training.nodes import _cache_or_passthrough
 
-        # Simulate substitution_params = {**yaml_params, **runtime_params}
         params_with_versions = {
+            "hive": {"db": "ml_recsys"},
             "cache": {"enabled": True, "root": str(tmp_path)},
             "base_dataset_version": "base_v1",
             "train_variant_id": "train_v1",
             "calibration_variant_id": "calib_v1",
         }
-        df = _FakeSparkDF()
 
-        # Cache miss path; should return df unchanged without raising.
-        out = _cache_or_passthrough(df, "train_model_input", params_with_versions)
-        assert out is df
+        # Mock populate so we don't actually try HDFS
+        def fake_populate(spark, name, params_arg, dst):
+            part = Path(dst) / "snap_date=A" / "prod_name=B"
+            part.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"a": [1]}).to_parquet(part / "data.parquet")
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes._populate_cache_from_hive",
+            side_effect=fake_populate,
+        ):
+            df = _FakeSparkDF()
+            out = _cache_or_passthrough(
+                df, "train_model_input", params_with_versions
+            )
+
+        assert isinstance(out, pd.DataFrame)
 
 
 class TestPopulateCacheFromHive:

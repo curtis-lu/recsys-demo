@@ -124,12 +124,15 @@ def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
       - df is not a Spark DataFrame and cache.enabled = True
             -> warn, return df unchanged (defensive in dev)
       - target path has _SUCCESS
-            -> return spark.read.parquet(file://<path>) (cache hit)
+            -> read locally via pd.read_parquet (cache hit)
       - target path exists but no _SUCCESS
             -> rmtree and treat as cache miss
       - cache miss
-            -> return df unchanged; framework's catalog.save() persists it
+            -> hadoop fs copyToLocal HDFS subtree to driver-local;
+               touch _SUCCESS; read locally via pd.read_parquet
     """
+    import pandas as pd  # local import: keep nodes.py top-level light
+
     cache_cfg = parameters.get("cache", {})
     if not cache_cfg.get("enabled", False):
         return df
@@ -150,19 +153,15 @@ def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
         )
         shutil.rmtree(local_path, ignore_errors=True)
 
-    if success_marker.exists():
-        logger.info(
-            "cache_hit name=%s path=%s", dataset_name, local_path
-        )
+    if not success_marker.exists():
         spark = df.sql_ctx.sparkSession
-        return spark.read.parquet(Path(local_path).as_uri())
+        logger.info("cache_miss name=%s path=%s", dataset_name, local_path)
+        _populate_cache_from_hive(spark, dataset_name, parameters, local_path)
+        success_marker.touch()
+    else:
+        logger.info("cache_hit name=%s path=%s", dataset_name, local_path)
 
-    logger.info(
-        "cache_miss name=%s path=%s (Spark write will be triggered by catalog.save)",
-        dataset_name,
-        local_path,
-    )
-    return df
+    return pd.read_parquet(local_path, engine="pyarrow")
 
 
 # ---------------------------------------------------------------------------
