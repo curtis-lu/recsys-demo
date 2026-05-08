@@ -27,6 +27,7 @@ Range 表示法本身也不貼合 ML lineage 慣例 ——「dataset = 顯式 ro
 - **不**重構 `validate_date_splits` 之外的其他 validation 邏輯。
 - **不**自動清除既有 orphan cache（`cached_*_model_input` 因 hash 跳號變孤兒檔案）—— 不在 spec 範圍。
 - **不**改 `train_variant_id` / `calibration_variant_id` / `model_version_id` 的 hash 計算邏輯 —— 它們會因 `base_dataset_version` 變號而連帶變，這是預期行為。
+- **不**動 `backend=pandas` 相關的 nodes / preprocessing / 測試 —— pandas backend 規劃移除中，新邏輯只實作於 spark backend；pandas 既存程式可選擇留作 stale 或一併刪除（依 pandas 移除主任務進度決定）。
 
 ## Architecture
 
@@ -36,7 +37,7 @@ Range 表示法本身也不貼合 ML lineage 慣例 ——「dataset = 顯式 ro
 2. **Fit / Apply filter 範圍刻意不同**：`fit_preprocessor_metadata` 只看 `train_snap_dates`（保留現有「不洩漏 val/test categorical 值」的設計）；`apply_preprocessor_to_features` 看 union（涵蓋所有下游 split 需要的 snap_date）。
 3. **缺值嚴格 raise**：feature_table 缺任何被 dataset 用到的 snap_date 都 raise，不論 split。`feature_table` 必須能可重現 dataset。
 4. **顯式優先**：`train_snap_dates` 是必填 list；range 完全移除。`calibration/val/test_snap_dates` 維持既有的 list 表示法。
-5. **零跨 backend 邏輯漂移**：helper 純 datetime 邏輯，pandas / spark 兩 backend 共用同一個函式。
+5. **Backend scope**：本 spec 只涵蓋 `backend=spark`；`backend=pandas` 規劃移除中，不在範圍內。
 
 ### 資料流變更
 
@@ -119,7 +120,7 @@ def collect_dataset_snap_dates(parameters: dict) -> list[pd.Timestamp]:
 語意：
 - `train_snap_dates` 必填（缺則 KeyError）
 - `cal/val/test_snap_dates` 用 `.get(..., [])`（calibration disabled 情境）
-- 回傳 `pd.Timestamp` list 而非 string，呼叫端直接餵 `.isin()` / Spark `F.lit()`
+- 回傳 `pd.Timestamp` list 而非 string，呼叫端直接餵 Spark `F.col(...).isin(...)` / `F.lit()`
 
 ### 3. `validate_date_splits` 簡化
 
@@ -143,29 +144,32 @@ def validate_date_splits(parameters: dict) -> None:
         raise ValueError(f"Date splits overlap: {'; '.join(overlaps)}")
 ```
 
-### 4. `select_train_keys` 改動（pandas + spark）
+### 4. `select_train_keys` 改動
 
 ```python
-# Before (pandas)
+# Before (nodes_spark.py)
 start = pd.Timestamp(ds["train_snap_date_start"])
 end = pd.Timestamp(ds["train_snap_date_end"])
-all_dates = sample_pool[time_col].unique()
-train_dates = [d for d in all_dates if start <= pd.Timestamp(d) <= end]
+pool = sample_pool.filter(
+    (F.col(time_col) >= F.lit(start)) & (F.col(time_col) <= F.lit(end))
+)
+train_dates_rows = pool.select(time_col).distinct().collect()
+train_dates = [row[time_col] for row in train_dates_rows]
 
-# After (pandas + spark 共用語意)
+# After
 train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 ```
 
-`select_keys()` 內部已有 `isin(target_dates)` 過濾，所以即使 sample_pool 沒有某個 train_snap_date 也只會少 row、不會壞 —— 真正的缺值偵測由 `fit_preprocessor_metadata` 負責（有意義的錯誤點）。
+不再從 sample_pool 反推 distinct snap_dates；直接用 config list。`select_keys()` 內部仍有 `isin(target_dates)` 過濾，sample_pool 缺某個 train_snap_date 只會少 row、不會壞 —— 真正的缺值偵測由 `fit_preprocessor_metadata` 負責（有意義的錯誤點）。
 
-### 5. `fit_preprocessor_metadata` 改動（pandas + spark）
+### 5. `fit_preprocessor_metadata` 改動（`preprocessing/_spark.py`）
 
 ```python
-# After (pandas)
+# After
 train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 
-# 缺值 raise
-ft_dates = set(feature_table[time_col].unique())
+# 缺值 raise（feature_table.select.distinct.collect 對 ~12-52 個 date 而言 cost 可忽略）
+ft_dates = {row[time_col] for row in feature_table.select(time_col).distinct().collect()}
 missing = sorted(set(train_dates) - ft_dates)
 if missing:
     raise ValueError(
@@ -173,22 +177,16 @@ if missing:
         f"{[d.strftime('%Y-%m-%d') for d in missing]}"
     )
 
-train_features = feature_table[feature_table[time_col].isin(train_dates)]
+train_features = feature_table.filter(F.col(time_col).isin(train_dates))
 ```
 
-Spark 對應改 `F.col(time_col).isin(train_dates)`；缺值偵測：
-```python
-ft_dates = {row[time_col] for row in feature_table.select(time_col).distinct().collect()}
-```
-（cardinality 小，~12-52 個 date，cost 可忽略）
-
-### 6. `apply_preprocessor_to_features` 改動（pandas + spark）
+### 6. `apply_preprocessor_to_features` 改動（`preprocessing/_spark.py`）
 
 ```python
-# After (pandas)
+# After
 needed_dates = collect_dataset_snap_dates(parameters)
 
-ft_dates = set(feature_table[time_col].unique())
+ft_dates = {row[time_col] for row in feature_table.select(time_col).distinct().collect()}
 missing = sorted(set(needed_dates) - ft_dates)
 if missing:
     raise ValueError(
@@ -196,12 +194,9 @@ if missing:
         f"{[d.strftime('%Y-%m-%d') for d in missing]}"
     )
 
-result = feature_table[feature_table[time_col].isin(needed_dates)]
-result = result[keep_cols].copy()
+result = feature_table.filter(F.col(time_col).isin(needed_dates)).select(*keep_cols)
 # ... 後續 encode_categoricals 不變
 ```
-
-Spark 對應改 `feature_table.filter(F.col(time_col).isin(needed_dates)).select(*keep_cols)`，缺值偵測同 fit。
 
 ## Hash & Cache 影響
 
@@ -233,24 +228,25 @@ Spark 對應改 `feature_table.filter(F.col(time_col).isin(needed_dates)).select
 
 ### 既有測試的 fixture 機械替換
 
-把 `train_snap_date_start/end` 換成 `train_snap_dates: [...]`：
+把 `train_snap_date_start/end` 換成 `train_snap_dates: [...]`，僅針對 spark backend 測試：
 
 | 測試檔範圍 | 影響 |
 |---|---|
-| `tests/pipelines/dataset/test_*.py`（pandas + spark） | parameters fixture |
+| `tests/pipelines/dataset/test_*spark*.py` | parameters fixture |
 | `tests/pipelines/dataset/test_validate_date_splits.py` | 移除 range case；新增 list overlap case |
-| `tests/preprocessing/test_*.py` | fit/apply 的 parameters fixture |
+| `tests/preprocessing/test_*spark*.py` | fit/apply 的 parameters fixture |
 | `tests/pipelines/test_pipeline_versioning.py` | dataset variant hash assertion 值會變 |
-| dev-cluster 合成資料 12 個月底 fixture | 對應 12 entries 的 list |
+| dev-cluster 合成資料 fixture | 對應月底 entries 的 list |
+
+pandas backend 測試（`test_*pandas*.py`）由於 backend 規劃移除，**不在更新範圍**；可選擇一併刪除或留作 stale（依 pandas 移除主任務的進度決定，不在此 spec 範圍）。
 
 絕大多數是機械式替換，邏輯不變。
 
-### 新增 test cases
+### 新增 test cases（spark backend only）
 
 **A. 上游有週中 row 時，filter 正確排除**
 - Fixture：feature_table 同時含 `2025-01-31`（月底）與 `2025-01-15`（週中）
 - 期待：`apply_preprocessor_to_features` 輸出只有月底 row
-- pandas + spark 各一份
 
 **B. fit 與 apply 的 filter 範圍不同**
 - Fixture：feature_table 含 train + val + test 各一個月底
@@ -259,7 +255,7 @@ Spark 對應改 `feature_table.filter(F.col(time_col).isin(needed_dates)).select
 
 **C. `collect_dataset_snap_dates` 單元測試**
 - 純函數測試：去重、sorted、空 cal/val/test 處理、calibration disabled 情境
-- 不需 spark/pandas，純 dict in / list out
+- 純 dict in / list out，不需 spark session
 
 **D. `validate_date_splits` 純 list overlap**
 - train ∩ cal、train ∩ val、cal ∩ val、val ∩ test 各一個 case
@@ -269,11 +265,9 @@ Spark 對應改 `feature_table.filter(F.col(time_col).isin(needed_dates)).select
 **E. 缺值 raise**
 - E1: feature_table 缺某個 train_snap_date → `fit_preprocessor_metadata` raise（具名列出缺失日期）
 - E2: feature_table 缺某個 cal/val/test snap_date → `apply_preprocessor_to_features` raise
-- pandas + spark 各一份
 
 ### 不需新增
 
-- Cross-backend cross-validation（`test_spark_pandas_cross_validation.py`）—— filter 改動後仍應通過，跑一次確認即可
 - Integration test —— `tests/scenarios/` 自動覆蓋 filter 行為
 
 ## 一次性升級 Runbook
