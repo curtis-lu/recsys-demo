@@ -8,9 +8,13 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 
-from recsys_tfb.io.extract import extract_Xy
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
+
+# extract_Xy is imported lazily inside prepare_train_inputs (see method body).
+# Importing it at module top creates a circular chain at io/__init__-load
+# time: io → model_adapter_dataset → models → this file → io.extract →
+# core.catalog → io.model_adapter_dataset (still mid-init).
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,9 @@ class LightGBMAdapter(ModelAdapter):
         # PR1: categorical_feature stays None (byte-equal vs main branch).
         # PR2 will set this from preprocessor_metadata.
         cat_idx = None
+
+        # Lazy import: see module-top comment about circular-import chain.
+        from recsys_tfb.io.extract import extract_Xy
 
         # Extract → build → save train, then free raw arrays before dev is read.
         # Keeps the constructed ds_train alive (it's small) for dev's reference.
