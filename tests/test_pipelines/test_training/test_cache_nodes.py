@@ -122,3 +122,52 @@ class TestRejectsNonSparkInput:
 
         with pytest.raises(TypeError, match="Spark DataFrame"):
             cache_train_model_input(df, params)
+
+
+class TestPrepareLgbTrainInputs:
+    def test_prepare_node_returns_two_lgb_handles(self, tmp_path):
+        import pandas as pd
+        from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
+        from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+
+        df = pd.DataFrame(
+            {
+                "cust_id": ["c1", "c2", "c3", "c4"],
+                "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+                "prod_name": ["fund", "ccard", "fund", "ccard"],
+                "feat_a": [1.0, 2.0, 3.0, 4.0],
+                "label": [0, 1, 0, 1],
+            }
+        )
+        train_dir = tmp_path / "tr.parquet"
+        dev_dir = tmp_path / "dev.parquet"
+        df.to_parquet(train_dir)
+        df.to_parquet(dev_dir)
+
+        prep_meta = {
+            "feature_columns": ["feat_a", "prod_name"],
+            "categorical_columns": ["prod_name"],
+            "category_mappings": {"prod_name": ["fund", "ccard"]},
+        }
+        parameters = {
+            "cache": {"root": str(tmp_path / "cache")},
+            "base_dataset_version": "v1",
+            "train_variant_id": "tv1",
+            "schema": {
+                "label": "label",
+                "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            },
+            "training": {"algorithm": "lightgbm"},
+        }
+
+        train_h, dev_h = prepare_lgb_train_inputs(
+            ParquetHandle(str(train_dir)),
+            ParquetHandle(str(dev_dir)),
+            prep_meta,
+            parameters,
+        )
+
+        assert isinstance(train_h, LgbDatasetHandle)
+        assert isinstance(dev_h, LgbDatasetHandle)
+        assert train_h.role == "train"
+        assert dev_h.role == "train_dev"

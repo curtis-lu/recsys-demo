@@ -219,6 +219,35 @@ def cache_calibration_model_input(calibration_model_input, parameters: dict) -> 
     )
 
 
+def prepare_lgb_train_inputs(
+    train_parquet_handle: ParquetHandle,
+    train_dev_parquet_handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+):
+    """Materialize lgb.Dataset binaries for train + train_dev.
+
+    Delegates to the configured ModelAdapter's prepare_train_inputs. The
+    cache_dir uses the same train_variant directory as the parquet cache,
+    placing 'lgb/' as a sibling of the parquets.
+    """
+    algorithm = parameters["training"].get("algorithm", "lightgbm")
+    adapter = get_adapter(algorithm)
+
+    cache_root = parameters["cache"]["root"]
+    base_v = parameters["base_dataset_version"]
+    train_v = parameters["train_variant_id"]
+    cache_dir = Path(cache_root) / base_v / "train_variants" / train_v
+
+    return adapter.prepare_train_inputs(
+        train_parquet_handle,
+        train_dev_parquet_handle,
+        preprocessor_metadata,
+        parameters,
+        str(cache_dir),
+    )
+
+
 def _extract_Xy(
     model_input,
     preprocessor_metadata: dict,
