@@ -125,3 +125,10 @@ class CalibratedModelAdapter(ModelAdapter):
     def log_to_mlflow(self) -> None:
         """Delegate to the base adapter."""
         self._base.log_to_mlflow()
+
+    def prepare_train_inputs(self, *args, **kwargs):
+        raise NotImplementedError(
+            "CalibratedModelAdapter wraps a trained adapter; "
+            "prepare_train_inputs must be called on the underlying adapter "
+            "(e.g. LightGBMAdapter) before calibration is applied."
+        )
