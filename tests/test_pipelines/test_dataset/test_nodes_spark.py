@@ -93,8 +93,7 @@ def parameters():
             },
         },
         "dataset": {
-            "train_snap_date_start": "2024-01-31",
-            "train_snap_date_end": "2024-03-31",
+            "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-03-31"],
             "sample_ratio": 0.5,
             "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
@@ -117,15 +116,13 @@ class TestSelectTrainKeys:
     def test_filters_to_train_dates(self, sample_pool, parameters):
         result = select_train_keys(sample_pool, parameters)
         pdf = result.toPandas()
+        train_dates = set(pd.to_datetime(parameters["dataset"]["train_snap_dates"]))
         val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
         test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
         excluded = val_dates | test_dates
         assert not pdf["snap_date"].isin(excluded).any()
-        # All dates within train range
-        start = pd.Timestamp(parameters["dataset"]["train_snap_date_start"])
-        end = pd.Timestamp(parameters["dataset"]["train_snap_date_end"])
-        assert all(pdf["snap_date"] >= start)
-        assert all(pdf["snap_date"] <= end)
+        # All dates must be in train_snap_dates
+        assert pdf["snap_date"].isin(train_dates).all()
 
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}

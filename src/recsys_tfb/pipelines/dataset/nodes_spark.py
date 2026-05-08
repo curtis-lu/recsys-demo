@@ -22,22 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
-    """Select train identity keys using date range from parameters."""
+    """Select train identity keys using explicit train_snap_dates list."""
     validate_date_splits(parameters)
 
     ds = parameters["dataset"]
-    time_col = get_schema(parameters)["time"]
-    start = pd.Timestamp(ds["train_snap_date_start"])
-    end = pd.Timestamp(ds["train_snap_date_end"])
-
-    # Filter sample_pool to train date range directly
-    pool = sample_pool.filter(
-        (F.col(time_col) >= F.lit(start)) & (F.col(time_col) <= F.lit(end))
-    )
-
-    # Collect unique dates for passing to select_keys
-    train_dates_rows = pool.select(time_col).distinct().collect()
-    train_dates = [row[time_col] for row in train_dates_rows]
+    train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 
     overrides = ds.get("sample_ratio_overrides", {})
     return select_keys(
