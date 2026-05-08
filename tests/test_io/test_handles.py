@@ -41,7 +41,7 @@ def test_lgb_dataset_handle_load_roundtrip(tmp_path: Path) -> None:
 
     handle = LgbDatasetHandle(bin_path=str(bin_path), role="train")
     loaded = handle.load()
-
+    loaded.construct()
     assert loaded.num_data() == 3
 
 
@@ -70,6 +70,7 @@ def test_lgb_dataset_handle_load_with_reference(tmp_path: Path) -> None:
     dev_handle = LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev")
 
     loaded_tr = train_handle.load()
+    loaded_tr.construct()  # train must be constructed for dev's reference to be usable
     loaded_dev = dev_handle.load(reference=loaded_tr)
-
+    loaded_dev.construct()
     assert loaded_dev.num_data() == 2

@@ -35,4 +35,4 @@ class LgbDatasetHandle:
     def load(self, reference=None) -> "lgb.Dataset":  # type: ignore[name-defined]
         import lightgbm as lgb
 
-        return lgb.Dataset(self.bin_path, reference=reference).construct()
+        return lgb.Dataset(self.bin_path, reference=reference)
