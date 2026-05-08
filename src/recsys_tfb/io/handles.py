@@ -7,6 +7,7 @@ between pipeline nodes.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,9 @@ class LgbDatasetHandle:
     """
 
     bin_path: str
-    role: str  # "train" | "train_dev"
+    role: Literal["train", "train_dev"]
 
-    def load(self, reference=None) -> "lgb.Dataset":  # type: ignore[name-defined]
+    def load(self, reference: "lgb.Dataset | None" = None) -> "lgb.Dataset":  # type: ignore[name-defined]
         import lightgbm as lgb
 
         return lgb.Dataset(self.bin_path, reference=reference)
