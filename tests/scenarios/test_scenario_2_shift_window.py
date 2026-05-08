@@ -29,14 +29,15 @@ SCENARIO_NAME = "scenario_2"
 def work_dir():
     """建立情境 2 工作目錄並執行 dataset + training。"""
     rng = np.random.default_rng(42)
-    feature_table = generate_feature_table(rng, snap_dates=BASE_SNAP_DATES)
-    label_table = generate_label_table(rng, snap_dates=BASE_SNAP_DATES)
+    # 情境 2 的 test_snap_dates 是 2025-07-31，需要把資料範圍延伸到 BASE_SNAP_DATES 之外
+    extended_dates = BASE_SNAP_DATES + ["2025-07-31"]
+    feature_table = generate_feature_table(rng, snap_dates=extended_dates)
+    label_table = generate_label_table(rng, snap_dates=extended_dates)
 
     config_overrides = {
         "parameters_dataset": {
             "dataset": {
-                "train_snap_date_start": "2025-01-31",
-                "train_snap_date_end": "2025-05-31",
+                "train_snap_dates": ["2025-01-31", "2025-02-28", "2025-03-31", "2025-04-30", "2025-05-31"],
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio_overrides": {},

@@ -48,8 +48,7 @@ def work_dir():
         },
         "parameters_dataset": {
             "dataset": {
-                "train_snap_date_start": "2025-01-31",
-                "train_snap_date_end": "2025-04-30",
+                "train_snap_dates": ["2025-01-31", "2025-02-28", "2025-03-31", "2025-04-30"],
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio_overrides": {},
