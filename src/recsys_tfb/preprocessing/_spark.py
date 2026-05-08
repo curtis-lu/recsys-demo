@@ -9,6 +9,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset.nodes_shared import collect_dataset_snap_dates
 from recsys_tfb.preprocessing._common import (
     _get_preprocessing_config,
     _validate_columns,
@@ -176,8 +177,13 @@ def apply_preprocessor_to_features(
 ) -> DataFrame:
     """Encode non-identity categoricals in Spark feature_table at customer-month granularity.
 
+    Filters feature_table to the union of all dataset snap_dates (train ∪ cal ∪ val ∪ test).
+    Raises ``ValueError`` if any required snap_date is missing from feature_table.
+
     Output: (time + entity) + feature_columns that live in feature_table.
     """
+    import pandas as pd
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
@@ -196,8 +202,26 @@ def apply_preprocessor_to_features(
         raise ValueError(f"feature_table missing base-key columns: {missing_base}")
     _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
 
+    needed_dates = collect_dataset_snap_dates(parameters)
+
+    # Fail-loud if feature_table is missing any required snap_date.
+    ft_dates = {
+        row[time_col]
+        for row in feature_table.select(time_col).distinct().collect()
+    }
+    ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
+    missing = sorted(set(needed_dates) - ft_dates)
+    if missing:
+        raise ValueError(
+            "feature_table missing required snap_dates: "
+            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
+        )
+
     with log_step(logger, "select_columns"):
-        result = feature_table.select(*keep_cols)
+        result = (
+            feature_table.filter(F.col(time_col).isin(needed_dates))
+            .select(*keep_cols)
+        )
 
     with log_step(logger, "encode_categoricals"):
         encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
