@@ -109,3 +109,78 @@ class TestAdapterRegistry:
     def test_unknown_raises(self):
         with pytest.raises(ValueError, match="Unknown algorithm"):
             get_adapter("unknown_algo")
+
+
+def test_model_adapter_prepare_train_inputs_is_abstract():
+    """Any concrete subclass of ModelAdapter must implement prepare_train_inputs."""
+    import pytest
+    from recsys_tfb.models.base import ModelAdapter
+
+    class DummyAdapter(ModelAdapter):
+        def train(self, X_train, y_train, X_val, y_val, params): ...
+        def predict(self, X): ...
+        def save(self, filepath): ...
+        def load(self, filepath): ...
+        def feature_importance(self): ...
+        def log_to_mlflow(self): ...
+
+    with pytest.raises(TypeError, match="prepare_train_inputs"):
+        DummyAdapter()
+
+
+def test_lightgbm_prepare_train_inputs_writes_bins(tmp_path):
+    """prepare_train_inputs writes train.bin, train_dev.bin, _SUCCESS."""
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c2", "c3", "c4"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+            "prod_name": ["fund", "ccard", "fund", "ccard"],
+            "feat_a": [1.0, 2.0, 3.0, 4.0],
+            "label": [0, 1, 0, 1],
+        }
+    )
+    df_dev = pd.DataFrame(
+        {
+            "cust_id": ["c5", "c6"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "prod_name": ["fund", "ccard"],
+            "feat_a": [1.5, 2.5],
+            "label": [1, 0],
+        }
+    )
+    train_dir = tmp_path / "train.parquet"
+    dev_dir = tmp_path / "dev.parquet"
+    df_tr.to_parquet(train_dir, engine="pyarrow")
+    df_dev.to_parquet(dev_dir, engine="pyarrow")
+
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }
+    }
+
+    adapter = LightGBMAdapter()
+    cache_dir = tmp_path / "variant"
+    train_h, dev_h = adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)),
+        ParquetHandle(str(dev_dir)),
+        prep_meta,
+        parameters,
+        str(cache_dir),
+    )
+
+    assert (cache_dir / "lgb" / "train.bin").exists()
+    assert (cache_dir / "lgb" / "train_dev.bin").exists()
+    assert (cache_dir / "lgb" / "_SUCCESS").exists()
+    assert train_h.role == "train"
+    assert dev_h.role == "train_dev"

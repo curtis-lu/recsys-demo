@@ -1,11 +1,15 @@
 """LightGBM implementation of ModelAdapter."""
 
 import logging
+import shutil
+from pathlib import Path
 
 import lightgbm as lgb
 import mlflow
 import numpy as np
 
+from recsys_tfb.io.extract import extract_Xy
+from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
 logger = logging.getLogger(__name__)
@@ -68,6 +72,68 @@ class LightGBMAdapter(ModelAdapter):
         if self._booster is None:
             raise RuntimeError("No model to log.")
         mlflow.lightgbm.log_model(self._booster, artifact_path="model")
+
+    def prepare_train_inputs(
+        self,
+        train_handle: ParquetHandle,
+        train_dev_handle: ParquetHandle,
+        preprocessor_metadata: dict,
+        parameters: dict,
+        cache_dir: str,
+    ) -> tuple[LgbDatasetHandle, LgbDatasetHandle]:
+        """Materialize lgb.Dataset binaries for train + train_dev.
+
+        Skip-if-exists: returns handles without rebuilding when cache_dir/lgb/_SUCCESS
+        already exists. On miss, builds train first (with binning), saves binary,
+        then builds train_dev with reference=train so dev binning aligns to train.
+        """
+        lgb_dir = Path(cache_dir) / "lgb"
+        success = lgb_dir / "_SUCCESS"
+        train_bin = lgb_dir / "train.bin"
+        dev_bin = lgb_dir / "train_dev.bin"
+
+        if success.exists():
+            return (
+                LgbDatasetHandle(bin_path=str(train_bin), role="train"),
+                LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev"),
+            )
+
+        if lgb_dir.exists():
+            logger.warning(
+                "Partial lgb cache at %s, clearing before rebuild", lgb_dir
+            )
+            shutil.rmtree(lgb_dir)
+        lgb_dir.mkdir(parents=True, exist_ok=True)
+
+        X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
+        X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
+
+        # PR1: categorical_feature stays None (byte-equal vs main branch).
+        # PR2 will set this from preprocessor_metadata.
+        cat_idx = None
+
+        ds_train = lgb.Dataset(
+            X_tr, label=y_tr, categorical_feature=cat_idx, free_raw_data=True
+        ).construct()
+        ds_train.save_binary(str(train_bin))
+        del X_tr, y_tr
+
+        ds_dev = lgb.Dataset(
+            X_dev,
+            label=y_dev,
+            reference=ds_train,
+            categorical_feature=cat_idx,
+            free_raw_data=True,
+        ).construct()
+        ds_dev.save_binary(str(dev_bin))
+        del X_dev, y_dev, ds_train, ds_dev
+
+        success.touch()
+
+        return (
+            LgbDatasetHandle(bin_path=str(train_bin), role="train"),
+            LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev"),
+        )
 
     @property
     def booster(self) -> lgb.Booster | None:
