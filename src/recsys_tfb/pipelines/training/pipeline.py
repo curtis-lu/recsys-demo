@@ -10,6 +10,7 @@ from recsys_tfb.pipelines.training.nodes import (
     calibrate_model,
     evaluate_model,
     log_experiment,
+    prepare_lgb_train_inputs,
     train_model,
     tune_hyperparameters,
 )
@@ -22,17 +23,17 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
         Node(
             cache_train_model_input,
             inputs=["train_model_input", "parameters"],
-            outputs="cached_train_model_input",
+            outputs="train_parquet_handle",
         ),
         Node(
             cache_train_dev_model_input,
             inputs=["train_dev_model_input", "parameters"],
-            outputs="cached_train_dev_model_input",
+            outputs="train_dev_parquet_handle",
         ),
         Node(
             cache_val_model_input,
             inputs=["val_model_input", "parameters"],
-            outputs="cached_val_model_input",
+            outputs="val_parquet_handle",
         ),
     ]
 
@@ -41,23 +42,34 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             Node(
                 cache_calibration_model_input,
                 inputs=["calibration_model_input", "parameters"],
-                outputs="cached_calibration_model_input",
+                outputs="calibration_parquet_handle",
             ),
         )
+
+    nodes.append(
+        Node(
+            prepare_lgb_train_inputs,
+            inputs=[
+                "train_parquet_handle", "train_dev_parquet_handle",
+                "preprocessor", "parameters",
+            ],
+            outputs=["train_lgb_handle", "train_dev_lgb_handle"],
+        ),
+    )
 
     nodes.extend([
         Node(
             tune_hyperparameters,
             inputs=[
-                "cached_train_model_input", "cached_train_dev_model_input",
-                "cached_val_model_input", "preprocessor", "parameters",
+                "train_lgb_handle", "train_dev_lgb_handle",
+                "val_parquet_handle", "preprocessor", "parameters",
             ],
             outputs="best_params",
         ),
         Node(
             train_model,
             inputs=[
-                "cached_train_model_input", "cached_train_dev_model_input",
+                "train_lgb_handle", "train_dev_lgb_handle",
                 "best_params", "preprocessor", "parameters",
             ],
             outputs=train_model_output,
@@ -69,7 +81,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
             Node(
                 calibrate_model,
                 inputs=[
-                    "trained_model", "cached_calibration_model_input",
+                    "trained_model", "calibration_parquet_handle",
                     "preprocessor", "parameters",
                 ],
                 outputs="model",
@@ -79,7 +91,7 @@ def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -
     nodes.extend([
         Node(
             evaluate_model,
-            inputs=["model", "cached_val_model_input", "preprocessor", "parameters"],
+            inputs=["model", "val_parquet_handle", "preprocessor", "parameters"],
             outputs="evaluation_results",
         ),
         Node(
