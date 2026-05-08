@@ -1,7 +1,18 @@
 dataset:
-  # --- Train 日期範圍 ---
-  train_snap_date_start: "2025-01-31"
-  train_snap_date_end: "2025-10-31"
+  # --- Train 月底 snap_date list ---
+  # 顯式列出（避免上游 cadence 變動時 silently 吞下，符合 ML lineage 慣例）
+  # 產生：pd.date_range(start, end, freq="ME").strftime("%Y-%m-%d").tolist()
+  train_snap_dates:
+    - "2025-01-31"
+    - "2025-02-28"
+    - "2025-03-31"
+    - "2025-04-30"
+    - "2025-05-31"
+    - "2025-06-30"
+    - "2025-07-31"
+    - "2025-08-31"
+    - "2025-09-30"
+    - "2025-10-31"
 
   # --- 抽樣 ---
   sample_ratio: 1.0
