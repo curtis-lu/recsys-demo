@@ -314,3 +314,32 @@ class TestFitAndBuild:
         train_pdf = train_mi.toPandas()
 
         assert train_pdf["prod_name"].dtype == object
+
+
+class TestFitPreprocessorMissingDates:
+    def test_missing_train_snap_date_raises(self, spark, feature_table, parameters):
+        # parameters has train_snap_dates including 2024-02-29; feature_table has it.
+        # Override to require a date that's not in feature_table.
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-12-31"],
+            },
+        }
+        with pytest.raises(ValueError, match="missing required train_snap_dates"):
+            fit_preprocessor_metadata(feature_table, params)
+
+    def test_error_lists_missing_dates(self, spark, feature_table, parameters):
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "train_snap_dates": ["2024-01-31", "2024-12-31", "2024-11-30"],
+            },
+        }
+        with pytest.raises(ValueError) as exc_info:
+            fit_preprocessor_metadata(feature_table, params)
+        msg = str(exc_info.value)
+        assert "2024-11-30" in msg
+        assert "2024-12-31" in msg

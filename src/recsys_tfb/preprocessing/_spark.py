@@ -79,10 +79,12 @@ def fit_preprocessor_metadata(
     """Build preprocessor metadata at customer-month granularity, decoupled from sampling.
 
     Feature-categorical distinct values come from feature_table rows whose
-    ``time`` falls in ``[train_snap_date_start, train_snap_date_end]``.
-    Identity categoricals (not present in feature_table) come from
-    ``parameters["schema"]["categorical_values"][col]``; missing declarations
-    raise ``ValueError``.
+    ``time`` falls in ``train_snap_dates``. Identity categoricals (not present
+    in feature_table) come from ``parameters["schema"]["categorical_values"][col]``;
+    missing declarations raise ``ValueError``.
+
+    Raises ``ValueError`` if feature_table is missing any required train_snap_date
+    (fail-loud principle: dataset must be reproducible from feature_table).
 
     Only small metadata (distinct category values) is collected to driver.
 
@@ -98,12 +100,24 @@ def fit_preprocessor_metadata(
     label_col = schema["label"]
 
     ds = parameters.get("dataset", {})
-    start = pd.Timestamp(ds["train_snap_date_start"])
-    end = pd.Timestamp(ds["train_snap_date_end"])
-    with log_step(logger, "filter_train_window"):
-        train_features = feature_table.filter(
-            (F.col(time_col) >= F.lit(start)) & (F.col(time_col) <= F.lit(end))
+    train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+
+    # Fail-loud if feature_table is missing any required train_snap_date.
+    # Cardinality is small (typically 12-52 dates); .distinct().collect() is cheap.
+    ft_dates = {
+        row[time_col]
+        for row in feature_table.select(time_col).distinct().collect()
+    }
+    ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
+    missing = sorted(set(train_dates) - ft_dates)
+    if missing:
+        raise ValueError(
+            "feature_table missing required train_snap_dates: "
+            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
         )
+
+    with log_step(logger, "filter_train_window"):
+        train_features = feature_table.filter(F.col(time_col).isin(train_dates))
 
     ft_cols = set(feature_table.columns)
     feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
