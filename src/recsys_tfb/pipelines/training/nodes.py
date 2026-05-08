@@ -24,13 +24,6 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_pandas(df):
-    """Convert Spark DataFrame to pandas if needed (production backend)."""
-    if hasattr(df, "toPandas"):
-        return df.toPandas()
-    return df
-
-
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
@@ -248,53 +241,25 @@ def prepare_lgb_train_inputs(
     )
 
 
-def _extract_Xy(
-    model_input,
-    preprocessor_metadata: dict,
-    parameters: dict,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extract feature matrix X and label vector y from model_input.
-
-    Handles both pandas DataFrame and Spark DataFrame inputs.
-    Encodes categorical identity columns (e.g., prod_name) that were
-    deferred from the dataset pipeline's transform step.
-
-    Returns:
-        (X, y) as numpy arrays.
-    """
-    pdf = _to_pandas(model_input)
-    feature_cols = preprocessor_metadata["feature_columns"]
-    schema = get_schema(parameters)
-    label_col = schema["label"]
-    identity_cols = schema["identity_columns"]
-
-    X_df = pdf[feature_cols].copy()
-
-    # Encode categorical identity columns that were kept as original values
-    categorical_cols = preprocessor_metadata["categorical_columns"]
-    category_mappings = preprocessor_metadata["category_mappings"]
-    deferred_cats = [c for c in categorical_cols if c in identity_cols and c in X_df.columns]
-    for col in deferred_cats:
-        known = category_mappings[col]
-        X_df[col] = pd.Categorical(X_df[col], categories=known).codes
-
-    X = X_df.values
-    y = pdf[label_col].values
-    return X, y
-
-
 # ---------------------------------------------------------------------------
 # Pipeline nodes
 # ---------------------------------------------------------------------------
 
 def tune_hyperparameters(
-    train_model_input,
-    train_dev_model_input,
-    val_model_input,
+    train_lgb_handle,
+    train_dev_lgb_handle,
+    val_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> dict:
-    """Search for optimal hyperparameters using Optuna."""
+    """Search for optimal hyperparameters using Optuna.
+
+    train + train_dev consumed as pre-built lgb.Dataset binaries (no rebinning
+    across trials). val read fresh from parquet inside this scope so its pandas
+    DataFrame is freed when the function returns.
+    """
+    from recsys_tfb.io.extract import extract_Xy
+
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
     search_space = training_params["search_space"]
@@ -305,9 +270,7 @@ def tune_hyperparameters(
     algorithm_params = training_params.get("algorithm_params", {})
 
     with log_step(logger, "extract_features"):
-        X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
-        X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
-        X_v, y_v = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
+        X_v, y_v = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
 
     def objective(trial: optuna.Trial) -> float:
         trial_params = {
@@ -354,7 +317,13 @@ def tune_hyperparameters(
         }
 
         adapter = get_adapter(algorithm)
-        adapter.train(X_tr, y_tr, X_dev, y_dev, params)
+        ds_train = train_lgb_handle.load()
+        ds_dev = train_dev_lgb_handle.load(reference=ds_train)
+        adapter.train(
+            X_train=None, y_train=None, X_val=None, y_val=None,
+            params=params,
+            train_dataset=ds_train, val_dataset=ds_dev,
+        )
         y_pred = adapter.predict(X_v)
 
         ap = compute_ap(y_v, y_pred)
@@ -372,13 +341,16 @@ def tune_hyperparameters(
 
 
 def train_model(
-    train_model_input,
-    train_dev_model_input,
+    train_lgb_handle,
+    train_dev_lgb_handle,
     best_params: dict,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> ModelAdapter:
-    """Train a model using ModelAdapter with early stopping."""
+    """Train a model using ModelAdapter with early stopping.
+
+    Consumes pre-built lgb.Dataset binaries; no parquet read in this scope.
+    """
     training_params = parameters["training"]
     seed = parameters.get("random_seed", 42)
     num_iterations = training_params.get("num_iterations", 500)
@@ -394,13 +366,15 @@ def train_model(
         "early_stopping_rounds": early_stopping_rounds,
     }
 
-    with log_step(logger, "extract_features"):
-        X_tr, y_tr = _extract_Xy(train_model_input, preprocessor_metadata, parameters)
-        X_dev, y_dev = _extract_Xy(train_dev_model_input, preprocessor_metadata, parameters)
-
     with log_step(logger, "model_train"):
         adapter = get_adapter(algorithm)
-        adapter.train(X_tr, y_tr, X_dev, y_dev, params)
+        ds_train = train_lgb_handle.load()
+        ds_dev = train_dev_lgb_handle.load(reference=ds_train)
+        adapter.train(
+            X_train=None, y_train=None, X_val=None, y_val=None,
+            params=params,
+            train_dataset=ds_train, val_dataset=ds_dev,
+        )
 
     logger.info("Model trained with algorithm=%s", algorithm)
     return adapter
@@ -408,11 +382,13 @@ def train_model(
 
 def calibrate_model(
     model: ModelAdapter,
-    calibration_model_input,
+    calibration_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> ModelAdapter:
     """Wrap model with probability calibration."""
+    from recsys_tfb.io.extract import extract_Xy
+
     method = (
         parameters.get("training", {})
         .get("calibration", {})
@@ -420,7 +396,9 @@ def calibrate_model(
     )
 
     with log_step(logger, "extract_features"):
-        X_cal, y_cal = _extract_Xy(calibration_model_input, preprocessor_metadata, parameters)
+        X_cal, y_cal = extract_Xy(
+            calibration_parquet_handle, preprocessor_metadata, parameters
+        )
 
     with log_step(logger, "fit_calibrator"):
         calibrated = CalibratedModelAdapter(model, method=method)
@@ -480,25 +458,28 @@ def _compute_ranking_metrics(
 
 def evaluate_model(
     model: ModelAdapter,
-    val_model_input,
+    val_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> dict:
     """Compute ranking-aware mAP with (snap_date, cust_id) as query groups.
 
-    val_model_input contains identity columns, label, and encoded features,
-    so no separate val_set is needed.
+    val_parquet_handle points to a local parquet directory; we read it once
+    here and use the resulting pandas DataFrame for both feature extraction
+    and ranking-metric grouping.
 
     When the model is a CalibratedModelAdapter, also computes uncalibrated
     metrics for comparison.
     """
+    from recsys_tfb.io.extract import extract_Xy
+
     schema = get_schema(parameters)
     feature_cols = preprocessor_metadata["feature_columns"]
 
-    val_pdf = _to_pandas(val_model_input)
+    val_pdf = val_parquet_handle.to_pandas()
 
     with log_step(logger, "extract_features"):
-        X, _ = _extract_Xy(val_model_input, preprocessor_metadata, parameters)
+        X, _ = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
     with log_step(logger, "predict"):
         y_score = model.predict(X)
     with log_step(logger, "compute_metrics"):
@@ -513,7 +494,6 @@ def evaluate_model(
         "n_excluded_queries": n_excluded_queries,
     }
 
-    # Uncalibrated comparison when model is calibrated
     if isinstance(model, CalibratedModelAdapter):
         y_score_uncal = model.predict_uncalibrated(X)
         uncal_map, uncal_per_product, _, _ = _compute_ranking_metrics(

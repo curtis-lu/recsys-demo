@@ -5,10 +5,11 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.io.extract import extract_Xy
+from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
-    _extract_Xy,
     calibrate_model,
     evaluate_model,
     log_experiment,
@@ -68,8 +69,12 @@ def preprocessor_metadata():
 
 
 @pytest.fixture
-def synthetic_model_inputs():
-    """Create synthetic model_input DataFrames mimicking dataset pipeline output."""
+def synthetic_model_inputs(tmp_path):
+    """Create synthetic model_input DataFrames mimicking dataset pipeline output.
+
+    Returns (train_handle, train_dev_handle, val_handle, train_df, train_dev_df, val_df)
+    so tests can use both handles (for node calls) and raw DataFrames (for metrics checks).
+    """
     rng = np.random.RandomState(42)
     products = ["exchange_fx", "exchange_usd", "fund_bond", "fund_stock"]
 
@@ -89,11 +94,45 @@ def synthetic_model_inputs():
                 })
         return pd.DataFrame(rows)
 
-    train_mi = make_model_input("2024-01-31", 30)      # 120 rows
-    train_dev_mi = make_model_input("2024-02-29", 10)   # 40 rows
-    val_mi = make_model_input("2024-04-30", 10)          # 40 rows
+    train_df = make_model_input("2024-01-31", 30)      # 120 rows
+    train_dev_df = make_model_input("2024-02-29", 10)   # 40 rows
+    val_df = make_model_input("2024-04-30", 10)          # 40 rows
 
-    return train_mi, train_dev_mi, val_mi
+    train_path = tmp_path / "train_mi.parquet"
+    train_dev_path = tmp_path / "train_dev_mi.parquet"
+    val_path = tmp_path / "val_mi.parquet"
+
+    train_df.to_parquet(train_path)
+    train_dev_df.to_parquet(train_dev_path)
+    val_df.to_parquet(val_path)
+
+    train_h = ParquetHandle(str(train_path))
+    train_dev_h = ParquetHandle(str(train_dev_path))
+    val_h = ParquetHandle(str(val_path))
+
+    return train_h, train_dev_h, val_h, train_df, train_dev_df, val_df
+
+
+@pytest.fixture
+def lgb_handles(synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
+    """Build LgbDatasetHandle pair from train/train_dev parquet handles."""
+    from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+
+    train_h, train_dev_h, val_h, *_ = synthetic_model_inputs
+    params = {
+        **training_parameters,
+        "cache": {"root": str(tmp_path / "cache")},
+        "base_dataset_version": "v1",
+        "train_variant_id": "tv1",
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        },
+    }
+    train_lgb_h, train_dev_lgb_h = prepare_lgb_train_inputs(
+        train_h, train_dev_h, preprocessor_metadata, params
+    )
+    return train_lgb_h, train_dev_lgb_h
 
 
 # ---- Tests: _compute_ap ----
@@ -132,10 +171,13 @@ class TestComputeAP:
 
 
 class TestTuneHyperparameters:
-    def test_returns_valid_params(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
+    def test_returns_valid_params(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
         best_params = tune_hyperparameters(
-            train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters,
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
         assert isinstance(best_params, dict)
@@ -143,20 +185,26 @@ class TestTuneHyperparameters:
         assert "num_leaves" in best_params
         assert "max_depth" in best_params
 
-    def test_params_in_search_space(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
+    def test_params_in_search_space(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
         space = training_parameters["training"]["search_space"]
         best_params = tune_hyperparameters(
-            train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters,
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
         assert space["num_leaves"]["low"] <= best_params["num_leaves"] <= space["num_leaves"]["high"]
         assert space["max_depth"]["low"] <= best_params["max_depth"] <= space["max_depth"]["high"]
 
-    def test_reproducible(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
-        r1 = tune_hyperparameters(train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters)
-        r2 = tune_hyperparameters(train_mi, train_dev_mi, val_mi, preprocessor_metadata, training_parameters)
+    def test_reproducible(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        r1 = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        r2 = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
         assert r1 == r2
 
 
@@ -164,30 +212,37 @@ class TestTuneHyperparameters:
 
 
 class TestTrainModel:
-    def test_returns_adapter(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def test_returns_adapter(
+        self, lgb_handles, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
         assert isinstance(model, ModelAdapter)
 
-    def test_predictions_are_probabilities(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, val_mi = synthetic_model_inputs
+    def test_predictions_are_probabilities(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, _, _, val_df = synthetic_model_inputs
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
-        X_val, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         preds = model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
 
-    def test_early_stopping(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+    def test_early_stopping(
+        self, lgb_handles, preprocessor_metadata, training_parameters
+    ):
         from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         params = {**training_parameters, "training": {**training_parameters["training"], "num_iterations": 500, "early_stopping_rounds": 5}}
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, params)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, params)
         # With small data and early_stopping_rounds=5, should stop before 500
         assert isinstance(model, LightGBMAdapter)
         assert model.booster.current_iteration() < 500
@@ -197,16 +252,18 @@ class TestTrainModel:
 
 
 class TestEvaluateModel:
-    def _train_quick_model(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        return train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
 
-    def test_returns_evaluation_dict(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_mi = synthetic_model_inputs
-        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
+    def test_returns_evaluation_dict(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        _, _, val_h, *_ = synthetic_model_inputs
+        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
 
         assert "overall_map" in results
         assert "per_product_ap" in results
@@ -215,23 +272,25 @@ class TestEvaluateModel:
         assert isinstance(results["overall_map"], float)
         assert isinstance(results["per_product_ap"], dict)
 
-    def test_overall_map_matches_compute_all_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+    def test_overall_map_matches_compute_all_metrics(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
         """evaluate_model overall_map matches direct compute_all_metrics call."""
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_mi = synthetic_model_inputs
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        _, _, val_h, _, _, val_df = synthetic_model_inputs
 
-        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
+        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
 
         # Reproduce via compute_all_metrics directly
-        X, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        X, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         y_score = model.predict(X)
-        predictions = val_mi[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        predictions = val_df[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
             predictions.groupby(["snap_date", "cust_id"])["score"]
             .rank(method="first", ascending=False).astype(int)
         )
-        labels = val_mi[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
+        labels = val_df[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
 
         metrics = compute_all_metrics(predictions, labels, k_values=["all"])
         n_products = predictions["prod_name"].nunique()
@@ -241,22 +300,24 @@ class TestEvaluateModel:
         assert results["n_queries"] == metrics["n_queries"]
         assert results["n_excluded_queries"] == metrics["n_excluded_queries"]
 
-    def test_per_product_ap_matches_compute_all_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+    def test_per_product_ap_matches_compute_all_metrics(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
         """evaluate_model per_product_ap matches compute_all_metrics per_product."""
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_mi = synthetic_model_inputs
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        _, _, val_h, _, _, val_df = synthetic_model_inputs
 
-        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
+        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
 
-        X, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+        X, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         y_score = model.predict(X)
-        predictions = val_mi[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
+        predictions = val_df[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
         predictions["score"] = y_score
         predictions["rank"] = (
             predictions.groupby(["snap_date", "cust_id"])["score"]
             .rank(method="first", ascending=False).astype(int)
         )
-        labels = val_mi[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
+        labels = val_df[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
 
         metrics = compute_all_metrics(predictions, labels, k_values=["all"])
         n_products = predictions["prod_name"].nunique()
@@ -267,23 +328,26 @@ class TestEvaluateModel:
         }
         assert results["per_product_ap"] == pytest.approx(expected_per_product)
 
-    def test_per_product_ap_values(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+    def test_per_product_ap_values(
+        self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
+    ):
         """Per-product AP values match manual _compute_ap and exclude all-0-label products."""
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
 
         # Build val_model_input with controlled labels: product "zero" has all-0 labels
-        products = ["exchange_fx", "exchange_usd", "zero"]
+        # Note: preprocessor_metadata only maps known products, so we use products it knows
+        products = ["exchange_fx", "exchange_usd", "fund_bond"]
         n_per_prod = 10
         rng = np.random.RandomState(99)
 
-        val_mi = pd.DataFrame({
+        val_df = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-03-31"] * n_per_prod * len(products)),
             "cust_id": [f"C{i:03d}" for i in range(n_per_prod)] * len(products),
             "prod_name": np.repeat(products, n_per_prod),
             "label": np.array(
                 [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # exchange_fx: 3 positives
                 + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # exchange_usd: 2 positives
-                + [0] * n_per_prod  # zero: no positives
+                + [0] * n_per_prod  # fund_bond: no positives
             ).astype(float),
             "total_aum": rng.uniform(100, 1000, n_per_prod * len(products)),
             "fund_aum": rng.uniform(10, 100, n_per_prod * len(products)),
@@ -291,11 +355,15 @@ class TestEvaluateModel:
             "out_amt_sum_l1m": rng.uniform(0, 30, n_per_prod * len(products)),
         })
 
-        results = evaluate_model(model, val_mi, preprocessor_metadata, training_parameters)
+        val_path = tmp_path / "val_per_product.parquet"
+        val_df.to_parquet(val_path)
+        val_h = ParquetHandle(str(val_path))
+
+        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
         per_product_ap = results["per_product_ap"]
 
         # All-0-label product must be excluded
-        assert "zero" not in per_product_ap
+        assert "fund_bond" not in per_product_ap
 
         # Each product with positives must have its own AP entry
         assert "exchange_fx" in per_product_ap
@@ -310,11 +378,13 @@ class TestEvaluateModel:
 
 
 class TestLogExperiment:
-    def test_logs_to_mlflow(self, synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def test_logs_to_mlflow(
+        self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.75,
@@ -342,11 +412,13 @@ class TestLogExperiment:
         assert runs.iloc[0]["params.algorithm"] == "lightgbm"
         assert runs.iloc[0]["params.calibrated"] == "False"
 
-    def test_logs_calibration_info(self, synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def test_logs_calibration_info(
+        self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.76,
@@ -381,41 +453,49 @@ class TestLogExperiment:
 
 
 class TestCalibrateModel:
-    def _train_quick_model(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
+        return train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
 
-    def test_returns_calibrated_adapter(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        train_mi, _, _ = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
+    def test_returns_calibrated_adapter(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        train_h, *_ = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
         assert isinstance(calibrated, CalibratedModelAdapter)
 
-    def test_default_method_isotonic(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        train_mi, _, _ = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
+    def test_default_method_isotonic(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        train_h, *_ = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
         assert calibrated.method == "isotonic"
 
-    def test_sigmoid_method(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        train_mi, _, _ = synthetic_model_inputs
+    def test_sigmoid_method(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        train_h, *_ = synthetic_model_inputs
         params = {**training_parameters, "training": {
             **training_parameters["training"],
             "calibration": {"method": "sigmoid"},
         }}
-        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, params)
+        calibrated = calibrate_model(model, train_h, preprocessor_metadata, params)
         assert calibrated.method == "sigmoid"
 
-    def test_calibrated_predict_returns_valid_scores(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = self._train_quick_model(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        train_mi, _, val_mi = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
-        X_val, _ = _extract_Xy(val_mi, preprocessor_metadata, training_parameters)
+    def test_calibrated_predict_returns_valid_scores(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
+        train_h, _, val_h, train_df, _, val_df = synthetic_model_inputs
+        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
+        X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         preds = calibrated.predict(X_val)
-        assert len(preds) == len(val_mi)
+        assert len(preds) == len(val_df)
         assert np.all(np.isfinite(preds))
 
 
@@ -423,17 +503,20 @@ class TestCalibrateModel:
 
 
 class TestEvaluateModelCalibrated:
-    def _train_and_calibrate(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_mi, train_dev_mi, _ = synthetic_model_inputs
+    def _train_and_calibrate(self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_mi, train_dev_mi, best_params, preprocessor_metadata, training_parameters)
-        return calibrate_model(model, train_mi, preprocessor_metadata, training_parameters)
+        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        train_h, *_ = synthetic_model_inputs
+        return calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
 
-    def test_includes_uncalibrated_metrics(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        calibrated = self._train_and_calibrate(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_mi = synthetic_model_inputs
-        results = evaluate_model(calibrated, val_mi, preprocessor_metadata, training_parameters)
+    def test_includes_uncalibrated_metrics(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        calibrated = self._train_and_calibrate(lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_h, *_ = synthetic_model_inputs
+        results = evaluate_model(calibrated, val_h, preprocessor_metadata, training_parameters)
 
         assert "uncalibrated" in results
         assert "overall_map" in results["uncalibrated"]
@@ -441,10 +524,12 @@ class TestEvaluateModelCalibrated:
         assert "calibration_method" in results
         assert results["calibration_method"] == "isotonic"
 
-    def test_uncalibrated_map_is_float(self, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        calibrated = self._train_and_calibrate(synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_mi = synthetic_model_inputs
-        results = evaluate_model(calibrated, val_mi, preprocessor_metadata, training_parameters)
+    def test_uncalibrated_map_is_float(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        calibrated = self._train_and_calibrate(lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters)
+        _, _, val_h, *_ = synthetic_model_inputs
+        results = evaluate_model(calibrated, val_h, preprocessor_metadata, training_parameters)
 
         assert isinstance(results["uncalibrated"]["overall_map"], float)
         assert isinstance(results["overall_map"], float)
