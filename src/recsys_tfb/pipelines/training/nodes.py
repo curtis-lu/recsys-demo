@@ -76,16 +76,17 @@ def _populate_cache_from_hive(
     Local layout after copy:
         <local_dst>/snap_date=.../prod_name=.../*.parquet
 
-    Source-table resolution: defaults to _CACHE_SOURCE_TABLE[dataset_name]
-    (cache logical name == Hive table name). Per-env overrides via
-    parameters['cache']['source_tables'] for envs that prefix table names
-    (e.g. company prod uses 'recsys_prod_train_model_input'). Catalog.yaml's
-    HiveTableDataset `table` field is the real source of truth — keep the
-    override aligned with it.
+    Source-table resolution:
+      1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
+         __main__.py:_run_pipeline from catalog_config (HiveTableDataset.table).
+         This is the production path and works across envs that prefix table
+         names (e.g. company prod 'recsys_prod_train_model_input').
+      2. _CACHE_SOURCE_TABLE[dataset_name] — fallback used by unit tests that
+         don't go through __main__.py and therefore have no auto-injection.
     """
     db = parameters["hive"]["db"]
-    overrides = parameters.get("cache", {}).get("source_tables", {})
-    table = overrides.get(dataset_name, _CACHE_SOURCE_TABLE[dataset_name])
+    source_tables = parameters.get("_cache_source_tables", {})
+    table = source_tables.get(dataset_name, _CACHE_SOURCE_TABLE[dataset_name])
     location = get_hive_table_location(spark, db, table)
     outer = "/".join(
         f"{tok}={parameters[tok]}"

@@ -506,17 +506,16 @@ class TestPopulateCacheFromHive:
             glob=True,
         )
 
-    def test_source_table_override_from_parameters(self, tmp_path):
-        """parameters['cache']['source_tables'] overrides _CACHE_SOURCE_TABLE.
-
-        Real-world use: company prod env that prefixes Hive table names
-        (e.g. recsys_prod_train_model_input). Override aligns the cache
-        lookup with catalog.yaml's HiveTableDataset.table field.
+    def test_auto_injected_source_tables_flow_to_get_hive_table_location(self, tmp_path):
+        """parameters['_cache_source_tables'] (auto-injected by __main__.py from
+        catalog config) is what _populate_cache_from_hive reads to resolve the
+        actual Hive table name. This test pins the read path; the injection
+        path is covered separately in TestInjectCacheSourceTables.
         """
         from recsys_tfb.pipelines.training.nodes import _populate_cache_from_hive
 
         params = self._params(tmp_path)
-        params["cache"]["source_tables"] = {
+        params["_cache_source_tables"] = {
             "train_model_input": "recsys_prod_train_model_input"
         }
 
@@ -530,9 +529,7 @@ class TestPopulateCacheFromHive:
                 MagicMock(), "train_model_input", params, "/tmp/dst"
             )
 
-        # Override flows into get_hive_table_location's `table` arg
         mock_loc.assert_called_once_with(ANY, "ml_recsys", "recsys_prod_train_model_input")
-        # And the resolved location is used for the glob pattern
         mock_copy.assert_called_once_with(
             ANY,
             "hdfs://nn/warehouse/ml_recsys.db/recsys_prod_train_model_input"
