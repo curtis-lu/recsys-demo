@@ -70,3 +70,96 @@ class TestCollectDatasetSnapDates:
         params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
         result = collect_dataset_snap_dates(params)
         assert result == [pd.Timestamp("2025-01-31")]
+
+
+class TestValidateDateSplits:
+    def test_non_overlapping_passes(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31", "2025-02-28"],
+                "calibration_snap_dates": ["2025-03-31"],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        validate_date_splits(params)  # should not raise
+
+    def test_train_cal_overlap_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31", "2025-02-28"],
+                "calibration_snap_dates": ["2025-02-28"],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="train & calibration"):
+            validate_date_splits(params)
+
+    def test_train_val_overlap_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31", "2025-04-30"],
+                "calibration_snap_dates": [],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="train & val"):
+            validate_date_splits(params)
+
+    def test_cal_val_overlap_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31"],
+                "calibration_snap_dates": ["2025-04-30"],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="calibration & val"):
+            validate_date_splits(params)
+
+    def test_val_test_overlap_raises(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31"],
+                "calibration_snap_dates": [],
+                "val_snap_dates": ["2025-05-31"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        with pytest.raises(ValueError, match="val & test"):
+            validate_date_splits(params)
+
+    def test_three_way_overlap_reports_all_pairs(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-04-30"],
+                "calibration_snap_dates": ["2025-04-30"],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        with pytest.raises(ValueError) as exc_info:
+            validate_date_splits(params)
+        msg = str(exc_info.value)
+        assert "train & calibration" in msg
+        assert "train & val" in msg
+        assert "calibration & val" in msg
+
+    def test_empty_calibration_passes(self):
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31"],
+                "calibration_snap_dates": [],
+                "val_snap_dates": ["2025-04-30"],
+                "test_snap_dates": ["2025-05-31"],
+            }
+        }
+        validate_date_splits(params)  # should not raise
+
+    def test_missing_optional_keys_pass(self):
+        # cal/val/test 完全沒提供時也應通過（用 .get(..., [])）
+        params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
+        validate_date_splits(params)  # should not raise
