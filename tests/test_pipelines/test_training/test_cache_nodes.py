@@ -537,3 +537,92 @@ class TestPopulateCacheFromHive:
             "/tmp/dst",
             glob=True,
         )
+
+
+class TestInjectCacheSourceTables:
+    """Auto-derivation of parameters['_cache_source_tables'] from raw catalog config.
+
+    Operates on YAML-loaded catalog config dict (not DataCatalog instances),
+    so we don't reach into HiveTableDataset's private attrs or do isinstance
+    checks. The catalog yaml schema is already a public contract.
+    """
+
+    def test_extracts_table_for_known_cache_names(self):
+        from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
+
+        params = {"hive": {"db": "ml_recsys"}}
+        catalog_config = {
+            "train_model_input": {
+                "type": "HiveTableDataset",
+                "table": "recsys_prod_train_model_input",
+            },
+            "val_model_input": {
+                "type": "HiveTableDataset",
+                "table": "recsys_prod_val_model_input",
+            },
+        }
+
+        inject_cache_source_tables(params, catalog_config)
+
+        assert params["_cache_source_tables"] == {
+            "train_model_input": "recsys_prod_train_model_input",
+            "val_model_input": "recsys_prod_val_model_input",
+        }
+
+    def test_skips_non_hive_table_datasets(self):
+        from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
+
+        params = {}
+        catalog_config = {
+            "train_model_input": {
+                "type": "HiveTableDataset",
+                "table": "recsys_prod_train_model_input",
+            },
+            "preprocessor": {
+                "type": "JSONDataset",
+                "filepath": "data/preprocessor.json",
+            },
+        }
+
+        inject_cache_source_tables(params, catalog_config)
+
+        assert params["_cache_source_tables"] == {
+            "train_model_input": "recsys_prod_train_model_input",
+        }
+
+    def test_skips_cache_names_missing_from_catalog(self):
+        from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
+
+        params = {}
+        # catalog_config only has train_model_input — val/cal/test missing
+        catalog_config = {
+            "train_model_input": {
+                "type": "HiveTableDataset",
+                "table": "recsys_prod_train_model_input",
+            },
+        }
+
+        inject_cache_source_tables(params, catalog_config)
+
+        # Only train_model_input is included; absent entries are silently skipped
+        assert params["_cache_source_tables"] == {
+            "train_model_input": "recsys_prod_train_model_input",
+        }
+
+    def test_no_op_when_no_cache_entries_in_catalog(self):
+        from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
+
+        params = {"hive": {"db": "ml_recsys"}}
+        catalog_config = {
+            "feature_table": {
+                "type": "HiveTableDataset",
+                "table": "recsys_prod_feature_table",
+            },
+        }
+
+        inject_cache_source_tables(params, catalog_config)
+
+        # No cache-relevant entries → don't write the key at all
+        assert "_cache_source_tables" not in params
+        # params dict otherwise untouched
+        assert params == {"hive": {"db": "ml_recsys"}}

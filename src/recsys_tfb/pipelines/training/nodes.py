@@ -96,6 +96,36 @@ def _populate_cache_from_hive(
     copy_hdfs_to_local(spark, src_glob, local_dst, glob=True)
 
 
+def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
+    """Auto-derive cache source_tables from catalog_config and write into parameters.
+
+    Mutates `parameters` to add `_cache_source_tables` mapping (cache logical
+    name → actual Hive table name). Cache nodes read this in
+    _populate_cache_from_hive.
+
+    For each known cache name in _CACHE_SOURCE_TABLE, look up the catalog entry.
+    If present and `type: HiveTableDataset`, take its `table` field. Skips
+    entries that aren't HiveTableDataset and missing entries.
+
+    Operates on raw catalog_config dict (not DataCatalog instance) — the yaml
+    schema is the public contract; we don't access dataset instance internals.
+
+    No-op (does not write the key) when no cache entries match.
+
+    Called by __main__.py:_run_pipeline before DataCatalog construction so the
+    cache nodes see the auto-derived mapping at runtime.
+    """
+    auto: dict[str, str] = {}
+    for cache_name in _CACHE_SOURCE_TABLE:
+        entry = catalog_config.get(cache_name)
+        if entry and entry.get("type") == "HiveTableDataset":
+            table = entry.get("table")
+            if table:
+                auto[cache_name] = table
+    if auto:
+        parameters["_cache_source_tables"] = auto
+
+
 def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     """Compose the local-cache parquet directory path for a model_input dataset.
 
