@@ -12,6 +12,7 @@ import pandas as pd
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
@@ -150,38 +151,25 @@ def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     return str(full)
 
 
-def _is_spark_df(df) -> bool:
-    """Return True if df looks like a PySpark DataFrame (has sql_ctx attr)."""
-    return df is not None and hasattr(df, "sql_ctx")
-
-
-def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
+def _materialize_parquet_handle(
+    df, dataset_name: str, parameters: dict
+) -> ParquetHandle:
     """Skip-if-exists local-parquet cache for a single model_input.
 
     Behaviour:
-      - cache.enabled = False  -> return df unchanged (dev no-op)
-      - df is not a Spark DataFrame and cache.enabled = True
-            -> warn, return df unchanged (defensive in dev)
-      - target path has _SUCCESS
-            -> read locally via pd.read_parquet (cache hit)
-      - target path exists but no _SUCCESS
-            -> rmtree and treat as cache miss
-      - cache miss
-            -> hadoop fs copyToLocal HDFS subtree to driver-local;
-               touch _SUCCESS; read locally via pd.read_parquet
+      - df is not a Spark DataFrame  → TypeError (pandas-passthrough removed)
+      - target path has _SUCCESS  → return ParquetHandle pointing at it
+      - target path exists but no _SUCCESS  → rmtree and rebuild
+      - cache miss  → hadoop fs copyToLocal HDFS subtree to driver-local;
+                      touch _SUCCESS; return ParquetHandle
     """
-    import pandas as pd  # local import: keep nodes.py top-level light
-
-    cache_cfg = parameters.get("cache", {})
-    if not cache_cfg.get("enabled", False):
-        return df
-
-    if not _is_spark_df(df):
-        logger.warning(
-            "cache.enabled=true but %s input is not a Spark DataFrame; passthrough",
-            dataset_name,
+    if not hasattr(df, "sql_ctx"):
+        raise TypeError(
+            f"{dataset_name} input must be a Spark DataFrame; got "
+            f"{type(df).__name__}. cache.enabled=false passthrough has been "
+            "removed; all environments (including dev/test) must use a "
+            "writable cache.root."
         )
-        return df
 
     local_path = _resolve_cache_path(dataset_name, parameters)
     success_marker = Path(local_path) / "_SUCCESS"
@@ -200,31 +188,33 @@ def _cache_or_passthrough(df, dataset_name: str, parameters: dict):
     else:
         logger.info("cache_hit name=%s path=%s", dataset_name, local_path)
 
-    return pd.read_parquet(local_path, engine="pyarrow")
+    return ParquetHandle(path=local_path)
 
 
 # ---------------------------------------------------------------------------
 # Cache nodes
 # ---------------------------------------------------------------------------
 
-def cache_train_model_input(train_model_input, parameters: dict):
-    """skip-if-exists local-parquet cache for train_model_input."""
-    return _cache_or_passthrough(train_model_input, "train_model_input", parameters)
+def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandle:
+    """Skip-if-exists local-parquet cache for train_model_input."""
+    return _materialize_parquet_handle(train_model_input, "train_model_input", parameters)
 
 
-def cache_train_dev_model_input(train_dev_model_input, parameters: dict):
-    """skip-if-exists local-parquet cache for train_dev_model_input."""
-    return _cache_or_passthrough(train_dev_model_input, "train_dev_model_input", parameters)
+def cache_train_dev_model_input(train_dev_model_input, parameters: dict) -> ParquetHandle:
+    """Skip-if-exists local-parquet cache for train_dev_model_input."""
+    return _materialize_parquet_handle(
+        train_dev_model_input, "train_dev_model_input", parameters
+    )
 
 
-def cache_val_model_input(val_model_input, parameters: dict):
-    """skip-if-exists local-parquet cache for val_model_input."""
-    return _cache_or_passthrough(val_model_input, "val_model_input", parameters)
+def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
+    """Skip-if-exists local-parquet cache for val_model_input."""
+    return _materialize_parquet_handle(val_model_input, "val_model_input", parameters)
 
 
-def cache_calibration_model_input(calibration_model_input, parameters: dict):
-    """skip-if-exists local-parquet cache for calibration_model_input."""
-    return _cache_or_passthrough(
+def cache_calibration_model_input(calibration_model_input, parameters: dict) -> ParquetHandle:
+    """Skip-if-exists local-parquet cache for calibration_model_input."""
+    return _materialize_parquet_handle(
         calibration_model_input, "calibration_model_input", parameters
     )
 
