@@ -243,3 +243,53 @@ def test_lightgbm_prepare_train_inputs_cache_hit(tmp_path, monkeypatch):
     )
 
     assert construct_calls == [], "cache hit should not call lgb.Dataset.construct"
+
+
+def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
+    """If lgb/ exists but _SUCCESS is missing, rmtree and rebuild."""
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c2"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "prod_name": ["fund", "ccard"],
+            "feat_a": [1.0, 2.0],
+            "label": [0, 1],
+        }
+    )
+    train_dir = tmp_path / "tr.parquet"
+    dev_dir = tmp_path / "dev.parquet"
+    df.to_parquet(train_dir)
+    df.to_parquet(dev_dir)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }
+    }
+    adapter = LightGBMAdapter()
+    cache_dir = tmp_path / "variant"
+
+    adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
+        prep_meta, parameters, str(cache_dir),
+    )
+
+    # Simulate crash: remove _SUCCESS but leave bins
+    (cache_dir / "lgb" / "_SUCCESS").unlink()
+
+    adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
+        prep_meta, parameters, str(cache_dir),
+    )
+
+    assert (cache_dir / "lgb" / "_SUCCESS").exists()
+    assert (cache_dir / "lgb" / "train.bin").exists()
