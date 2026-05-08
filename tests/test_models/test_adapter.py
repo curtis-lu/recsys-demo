@@ -184,3 +184,62 @@ def test_lightgbm_prepare_train_inputs_writes_bins(tmp_path):
     assert (cache_dir / "lgb" / "_SUCCESS").exists()
     assert train_h.role == "train"
     assert dev_h.role == "train_dev"
+
+
+def test_lightgbm_prepare_train_inputs_cache_hit(tmp_path, monkeypatch):
+    """Second call with valid _SUCCESS marker skips lgb.Dataset.construct."""
+    import pandas as pd
+    import lightgbm as lgb
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c2"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "prod_name": ["fund", "ccard"],
+            "feat_a": [1.0, 2.0],
+            "label": [0, 1],
+        }
+    )
+    df_dev = df_tr.copy()
+    train_dir = tmp_path / "tr.parquet"
+    dev_dir = tmp_path / "dev.parquet"
+    df_tr.to_parquet(train_dir)
+    df_dev.to_parquet(dev_dir)
+
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }
+    }
+    adapter = LightGBMAdapter()
+    cache_dir = tmp_path / "variant"
+
+    adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
+        prep_meta, parameters, str(cache_dir),
+    )
+    assert (cache_dir / "lgb" / "_SUCCESS").exists()
+
+    construct_calls = []
+    real_construct = lgb.Dataset.construct
+
+    def spy_construct(self):
+        construct_calls.append(1)
+        return real_construct(self)
+
+    monkeypatch.setattr(lgb.Dataset, "construct", spy_construct)
+
+    adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
+        prep_meta, parameters, str(cache_dir),
+    )
+
+    assert construct_calls == [], "cache hit should not call lgb.Dataset.construct"
