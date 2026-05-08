@@ -93,6 +93,7 @@ class LightGBMAdapter(ModelAdapter):
         dev_bin = lgb_dir / "train_dev.bin"
 
         if success.exists():
+            logger.info("lgb binary cache hit at %s", lgb_dir)
             return (
                 LgbDatasetHandle(bin_path=str(train_bin), role="train"),
                 LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev"),
@@ -105,19 +106,20 @@ class LightGBMAdapter(ModelAdapter):
             shutil.rmtree(lgb_dir)
         lgb_dir.mkdir(parents=True, exist_ok=True)
 
-        X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
-        X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
-
         # PR1: categorical_feature stays None (byte-equal vs main branch).
         # PR2 will set this from preprocessor_metadata.
         cat_idx = None
 
+        # Extract → build → save train, then free raw arrays before dev is read.
+        # Keeps the constructed ds_train alive (it's small) for dev's reference.
+        X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
         ds_train = lgb.Dataset(
             X_tr, label=y_tr, categorical_feature=cat_idx, free_raw_data=True
         ).construct()
         ds_train.save_binary(str(train_bin))
         del X_tr, y_tr
 
+        X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
         ds_dev = lgb.Dataset(
             X_dev,
             label=y_dev,
@@ -129,6 +131,10 @@ class LightGBMAdapter(ModelAdapter):
         del X_dev, y_dev, ds_train, ds_dev
 
         success.touch()
+        logger.info(
+            "lgb binary cache written: train=%s, train_dev=%s",
+            train_bin, dev_bin,
+        )
 
         return (
             LgbDatasetHandle(bin_path=str(train_bin), role="train"),

@@ -5,6 +5,10 @@ import os
 import pickle
 
 import numpy as np
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 
 from recsys_tfb.models.base import ModelAdapter
 
@@ -126,7 +130,14 @@ class CalibratedModelAdapter(ModelAdapter):
         """Delegate to the base adapter."""
         self._base.log_to_mlflow()
 
-    def prepare_train_inputs(self, *args, **kwargs):
+    def prepare_train_inputs(
+        self,
+        train_handle: "ParquetHandle",
+        train_dev_handle: "ParquetHandle",
+        preprocessor_metadata: dict,
+        parameters: dict,
+        cache_dir: str,
+    ) -> "tuple[LgbDatasetHandle, LgbDatasetHandle]":
         raise NotImplementedError(
             "CalibratedModelAdapter wraps a trained adapter; "
             "prepare_train_inputs must be called on the underlying adapter "
