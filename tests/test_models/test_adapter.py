@@ -293,3 +293,44 @@ def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
 
     assert (cache_dir / "lgb" / "_SUCCESS").exists()
     assert (cache_dir / "lgb" / "train.bin").exists()
+
+
+def test_lightgbm_train_accepts_prebuilt_datasets(tmp_path):
+    """train() with train_dataset= / val_dataset= kwargs uses pre-built Datasets."""
+    import numpy as np
+    import lightgbm as lgb
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    rng = np.random.default_rng(42)
+    X_tr = rng.normal(size=(50, 3))
+    y_tr = (rng.uniform(size=50) > 0.5).astype(int)
+    X_dev = rng.normal(size=(20, 3))
+    y_dev = (rng.uniform(size=20) > 0.5).astype(int)
+
+    train_bin = tmp_path / "tr.bin"
+    dev_bin = tmp_path / "dev.bin"
+    ds_tr = lgb.Dataset(X_tr, label=y_tr, free_raw_data=False).construct()
+    ds_tr.save_binary(str(train_bin))
+    ds_dev = lgb.Dataset(
+        X_dev, label=y_dev, reference=ds_tr, free_raw_data=False
+    ).construct()
+    ds_dev.save_binary(str(dev_bin))
+
+    loaded_tr = lgb.Dataset(str(train_bin))
+    loaded_dev = lgb.Dataset(str(dev_bin), reference=loaded_tr)
+
+    adapter = LightGBMAdapter()
+    adapter.train(
+        X_train=None, y_train=None, X_val=None, y_val=None,
+        params={
+            "objective": "binary",
+            "verbose": -1,
+            "num_iterations": 5,
+            "early_stopping_rounds": 3,
+        },
+        train_dataset=loaded_tr,
+        val_dataset=loaded_dev,
+    )
+
+    assert adapter.booster is not None
+    assert adapter.booster.num_trees() > 0

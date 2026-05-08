@@ -28,12 +28,21 @@ class LightGBMAdapter(ModelAdapter):
         X_val: np.ndarray,
         y_val: np.ndarray,
         params: dict,
+        *,
+        train_dataset: "lgb.Dataset | None" = None,
+        val_dataset: "lgb.Dataset | None" = None,
     ) -> None:
         num_iterations = params.pop("num_iterations", 500)
         early_stopping_rounds = params.pop("early_stopping_rounds", 50)
 
-        train_data = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
-        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data, free_raw_data=False)
+        if train_dataset is None:
+            train_dataset = lgb.Dataset(
+                X_train, label=y_train, free_raw_data=False
+            )
+        if val_dataset is None:
+            val_dataset = lgb.Dataset(
+                X_val, label=y_val, reference=train_dataset, free_raw_data=False
+            )
 
         callbacks = [
             lgb.early_stopping(stopping_rounds=early_stopping_rounds),
@@ -41,9 +50,9 @@ class LightGBMAdapter(ModelAdapter):
         ]
         self._booster = lgb.train(
             params,
-            train_data,
+            train_dataset,
             num_boost_round=num_iterations,
-            valid_sets=[val_data],
+            valid_sets=[val_dataset],
             valid_names=["val"],
             callbacks=callbacks,
         )
