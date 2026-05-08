@@ -936,6 +936,24 @@ New:
                 "train_snap_dates": ["2025-01-31", "2025-02-28", "2025-03-31", "2025-04-30", "2025-05-31"],
 ```
 
+**Also extend the synthetic data range** — scenario 2's `test_snap_dates: ["2025-07-31"]` is outside `BASE_SNAP_DATES` (which ends at 2025-06-30). After Task 6's strict-mode raise, feature_table must contain 2025-07-31. Replace lines 31-33:
+
+Old:
+```python
+    rng = np.random.default_rng(42)
+    feature_table = generate_feature_table(rng, snap_dates=BASE_SNAP_DATES)
+    label_table = generate_label_table(rng, snap_dates=BASE_SNAP_DATES)
+```
+
+New:
+```python
+    rng = np.random.default_rng(42)
+    # 情境 2 的 test_snap_dates 是 2025-07-31，需要把資料範圍延伸到 BASE_SNAP_DATES 之外
+    extended_dates = BASE_SNAP_DATES + ["2025-07-31"]
+    feature_table = generate_feature_table(rng, snap_dates=extended_dates)
+    label_table = generate_label_table(rng, snap_dates=extended_dates)
+```
+
 - [ ] **Step 8.4: Update `test_scenario_3_new_features.py`**
 
 Edit `tests/scenarios/test_scenario_3_new_features.py` — replace lines 43-44:

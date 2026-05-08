@@ -42,8 +42,11 @@ def _sample_schema() -> dict:
 def _base_params() -> dict:
     return {
         "dataset": {
-            "train_snap_date_start": "2023-01-31",
-            "train_snap_date_end": "2023-12-31",
+            "train_snap_dates": [
+                "2023-01-31", "2023-02-28", "2023-03-31", "2023-04-30",
+                "2023-05-31", "2023-06-30", "2023-07-31", "2023-08-31",
+                "2023-09-30", "2023-10-31", "2023-11-30", "2023-12-31",
+            ],
             "val_snap_dates": ["2024-01-31"],
             "test_snap_dates": ["2024-02-29"],
             "sample_ratio": 0.1,
@@ -138,10 +141,10 @@ class TestComputeBaseDatasetVersion:
         assert compute_base_dataset_version(p1, _sample_schema()) == \
             compute_base_dataset_version(p2, _sample_schema())
 
-    def test_train_snap_date_start_affects_base(self):
+    def test_train_snap_dates_affects_base(self):
         p1 = _base_params()
         p2 = _base_params()
-        p2["dataset"]["train_snap_date_start"] = "2022-01-31"
+        p2["dataset"]["train_snap_dates"] = ["2022-01-31"]
         assert compute_base_dataset_version(p1, _sample_schema()) != \
             compute_base_dataset_version(p2, _sample_schema())
 
@@ -216,10 +219,10 @@ class TestComputeTrainVariantId:
         p2["dataset"]["sample_group_keys"] = ["cust_segment_typ", "prod_name"]
         assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
 
-    def test_train_snap_date_does_not_affect_train_variant(self):
+    def test_train_snap_dates_does_not_affect_train_variant(self):
         p1 = _base_params()
         p2 = _base_params()
-        p2["dataset"]["train_snap_date_start"] = "2022-01-31"
+        p2["dataset"]["train_snap_dates"] = ["2022-01-31"]
         assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
 
 

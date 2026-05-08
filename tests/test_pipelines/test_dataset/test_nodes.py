@@ -15,7 +15,6 @@ from recsys_tfb.pipelines.dataset.nodes_pandas import (
     select_val_keys,
     split_train_keys,
 )
-from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 
 
 @pytest.fixture
@@ -111,89 +110,6 @@ def parameters():
             "test_snap_dates": ["2024-05-31"],
         },
     }
-
-
-class TestDateValidation:
-    def test_non_overlapping_dates_pass(self):
-        params = {
-            "dataset": {
-                "train_snap_date_start": "2024-01-31",
-                "train_snap_date_end": "2024-09-30",
-                "calibration_snap_dates": ["2024-10-31"],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        validate_date_splits(params)  # should not raise
-
-    def test_overlapping_val_test_raises(self):
-        params = {
-            "dataset": {
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2024-12-31"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="val & test"):
-            validate_date_splits(params)
-
-    def test_overlapping_cal_val_raises(self):
-        params = {
-            "dataset": {
-                "calibration_snap_dates": ["2024-11-30"],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="calibration & val"):
-            validate_date_splits(params)
-
-    def test_overlapping_cal_test_raises(self):
-        params = {
-            "dataset": {
-                "calibration_snap_dates": ["2024-12-31"],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="calibration & test"):
-            validate_date_splits(params)
-
-    def test_empty_calibration_dates_ok(self):
-        params = {
-            "dataset": {
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        validate_date_splits(params)  # should not raise
-
-    def test_train_start_after_end_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_date_start": "2024-06-30",
-                "train_snap_date_end": "2024-01-31",
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="train_snap_date_start"):
-            validate_date_splits(params)
-
-    def test_train_overlaps_val_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_date_start": "2024-01-31",
-                "train_snap_date_end": "2024-11-30",
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2024-11-30"],
-                "test_snap_dates": ["2024-12-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="train & val"):
-            validate_date_splits(params)
 
 
 class TestSelectTrainKeys:

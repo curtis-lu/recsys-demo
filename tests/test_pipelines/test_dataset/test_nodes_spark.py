@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+from pyspark.sql import functions as F
 
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     apply_preprocessor_to_features,
@@ -93,8 +94,7 @@ def parameters():
             },
         },
         "dataset": {
-            "train_snap_date_start": "2024-01-31",
-            "train_snap_date_end": "2024-03-31",
+            "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-03-31"],
             "sample_ratio": 0.5,
             "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
@@ -117,15 +117,13 @@ class TestSelectTrainKeys:
     def test_filters_to_train_dates(self, sample_pool, parameters):
         result = select_train_keys(sample_pool, parameters)
         pdf = result.toPandas()
+        train_dates = set(pd.to_datetime(parameters["dataset"]["train_snap_dates"]))
         val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
         test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
         excluded = val_dates | test_dates
         assert not pdf["snap_date"].isin(excluded).any()
-        # All dates within train range
-        start = pd.Timestamp(parameters["dataset"]["train_snap_date_start"])
-        end = pd.Timestamp(parameters["dataset"]["train_snap_date_end"])
-        assert all(pdf["snap_date"] >= start)
-        assert all(pdf["snap_date"] <= end)
+        # All dates must be in train_snap_dates
+        assert pdf["snap_date"].isin(train_dates).all()
 
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
@@ -317,3 +315,90 @@ class TestFitAndBuild:
         train_pdf = train_mi.toPandas()
 
         assert train_pdf["prod_name"].dtype == object
+
+
+class TestFitPreprocessorMissingDates:
+    def test_missing_train_snap_date_raises(self, spark, feature_table, parameters):
+        # parameters has train_snap_dates including 2024-02-29; feature_table has it.
+        # Override to require a date that's not in feature_table.
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-12-31"],
+            },
+        }
+        with pytest.raises(ValueError, match="missing required train_snap_dates"):
+            fit_preprocessor_metadata(feature_table, params)
+
+    def test_error_lists_missing_dates(self, spark, feature_table, parameters):
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "train_snap_dates": ["2024-01-31", "2024-12-31", "2024-11-30"],
+            },
+        }
+        with pytest.raises(ValueError) as exc_info:
+            fit_preprocessor_metadata(feature_table, params)
+        msg = str(exc_info.value)
+        assert "2024-11-30" in msg
+        assert "2024-12-31" in msg
+
+
+class TestApplyPreprocessorFilter:
+    def test_filters_out_dates_outside_dataset_set(
+        self, spark, feature_table, parameters
+    ):
+        """Test A: feature_table 含週中 row 時，filter 必須排除。"""
+        # Add a "mid-week" row that isn't in any split's snap_dates
+        midweek_pdf = pd.DataFrame({
+            "snap_date": pd.to_datetime(["2024-01-15"] * 4),
+            "cust_id": ["C001", "C002", "C003", "C004"],
+            "total_aum": [999.0] * 4,
+            "fund_aum": [99.0] * 4,
+            "in_amt_sum_l1m": [9.0] * 4,
+            "out_amt_sum_l1m": [9.0] * 4,
+            "in_amt_ratio_l1m": [0.99] * 4,
+            "out_amt_ratio_l1m": [0.99] * 4,
+        })
+        ft_with_midweek = feature_table.unionByName(spark.createDataFrame(midweek_pdf))
+
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        result = apply_preprocessor_to_features(ft_with_midweek, preprocessor, parameters)
+        result_dates = {
+            row.snap_date for row in result.select("snap_date").distinct().collect()
+        }
+        assert pd.Timestamp("2024-01-15") not in result_dates
+
+    def test_missing_required_snap_date_raises(
+        self, spark, feature_table, parameters
+    ):
+        """Test E2: feature_table 缺 cal/val/test 任一 snap_date 應 raise."""
+        # parameters val_snap_dates is 2024-04-30; remove 04-30 rows from feature_table
+        ft_short = feature_table.filter(F.col("snap_date") != F.lit(pd.Timestamp("2024-04-30")))
+
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        with pytest.raises(ValueError, match="missing required snap_dates"):
+            apply_preprocessor_to_features(ft_short, preprocessor, parameters)
+
+
+class TestFitApplyFilterScopes:
+    def test_apply_includes_all_splits_fit_only_train(
+        self, spark, feature_table, parameters
+    ):
+        """Test B: fit 看 train，apply 看 train ∪ cal ∪ val ∪ test."""
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        result = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+
+        result_dates = {
+            row.snap_date for row in result.select("snap_date").distinct().collect()
+        }
+        train_dates = set(pd.to_datetime(parameters["dataset"]["train_snap_dates"]))
+        val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
+        test_dates = set(pd.to_datetime(parameters["dataset"]["test_snap_dates"]))
+
+        # Apply must cover all splits
+        assert train_dates.issubset(result_dates)
+        assert val_dates.issubset(result_dates)
+        assert test_dates.issubset(result_dates)
