@@ -7,7 +7,7 @@ Claude Code 在此 repo 工作時的最小規範。
 商業銀行產品推薦排序模型。預測客戶對 22 類金融產品的興趣分數，供行銷 PM 排序推薦優先順序。
 
 - **Inference**：每週批次推論，~10M 客戶 × 22 產品 × ~1500 特徵
-- **Training**：12 個月月底快照，不定期手動執行
+- **Training**：N 個月底 snapshot（顯式 `train_snap_dates` list 配置），不定期手動執行
 - **Target environment**：PySpark 3.3.2 on Hadoop/HDFS/Hive, Ploomber DAG, no internet, no extra packages, CPU-only (4 core, 128GB RAM)
 
 ## Tech Stack
