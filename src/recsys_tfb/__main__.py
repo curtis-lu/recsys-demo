@@ -28,6 +28,7 @@ from recsys_tfb.core.versioning import (
     write_manifest,
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
+from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
 
@@ -106,6 +107,11 @@ def _execute_pipeline(
     source_model_version = runtime_params.pop("source_model_version", None)
     substitution_params = {**params, **runtime_params}
     catalog_config = config.get_catalog_config(runtime_params=substitution_params)
+
+    # Auto-inject cache source_tables from catalog config so cache nodes don't
+    # need a parallel parameters yaml mapping. Catalog.yaml's HiveTableDataset
+    # `table` field is the single source of truth for cache table resolution.
+    inject_cache_source_tables(substitution_params, catalog_config)
 
     # For inference: when no explicit --model-version is given, the model
     # artifact should be read via the "best" symlink; swap the model filepath.

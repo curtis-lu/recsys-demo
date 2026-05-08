@@ -181,6 +181,42 @@ class TestCLI:
         finally:
             os.chdir(old_cwd)
 
+    def test_training_auto_injects_cache_source_tables_from_catalog(self, tmp_path):
+        """_run_pipeline calls inject_cache_source_tables with substitution_params
+        and catalog_config before constructing DataCatalog. Helper itself is
+        unit-tested in TestInjectCacheSourceTables; this test only pins the wiring.
+        """
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {"sample_ratio": 0.1}},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch(
+                        "recsys_tfb.__main__.inject_cache_source_tables"
+                    ) as mock_inject:
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda *a, **kw: None
+                with patch("recsys_tfb.__main__.Runner"):
+                    runner.invoke(app, ["training"])
+
+                # Helper called once before DataCatalog instantiation
+                assert mock_inject.call_count == 1
+                args, kwargs = mock_inject.call_args
+                injected_params, injected_catalog = args
+                # Both args are dicts
+                assert isinstance(injected_params, dict)
+                assert isinstance(injected_catalog, dict)
+                # injected_catalog has the catalog entries (e.g. train_model_input)
+                assert "train_model_input" in injected_catalog
+        finally:
+            os.chdir(old_cwd)
+
     def test_training_with_explicit_base_dataset_version(self, tmp_path):
         """Training pipeline accepts --base-dataset-version and --train-variant."""
         _setup_conf(
