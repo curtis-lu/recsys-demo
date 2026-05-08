@@ -19,3 +19,20 @@ class ParquetHandle:
         import pandas as pd
 
         return pd.read_parquet(self.path, engine="pyarrow")
+
+
+@dataclass(frozen=True)
+class LgbDatasetHandle:
+    """Reference to a saved ``lgb.Dataset`` binary on disk.
+
+    ``role`` distinguishes "train" from "train_dev" so callers can build the
+    correct reference linkage when reloading.
+    """
+
+    bin_path: str
+    role: str  # "train" | "train_dev"
+
+    def load(self, reference=None) -> "lgb.Dataset":  # type: ignore[name-defined]
+        import lightgbm as lgb
+
+        return lgb.Dataset(self.bin_path, reference=reference).construct()
