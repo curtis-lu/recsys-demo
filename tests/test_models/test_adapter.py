@@ -334,3 +334,72 @@ def test_lightgbm_train_accepts_prebuilt_datasets(tmp_path):
 
     assert adapter.booster is not None
     assert adapter.booster.num_trees() > 0
+
+
+def test_lightgbm_prepare_passes_categorical_feature(tmp_path, monkeypatch):
+    """prepare_train_inputs sets categorical_feature on lgb.Dataset."""
+    import lightgbm as lgb
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c2", "c3", "c4"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+            "prod_name": ["fund", "ccard", "fund", "ccard"],
+            "feat_a": [1.0, 2.0, 3.0, 4.0],
+            "label": [0, 1, 0, 1],
+        }
+    )
+    train_dir = tmp_path / "tr.parquet"
+    dev_dir = tmp_path / "dev.parquet"
+    df.to_parquet(train_dir)
+    df.to_parquet(dev_dir)
+
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],  # prod_name index = 1
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }
+    }
+
+    # Spy on lgb.Dataset.__init__ to capture categorical_feature args passed
+    # during construction. lgb binary format does not persist categorical_feature,
+    # so we must verify the argument at build time rather than after loading.
+    captured_cat_features = []
+    real_init = lgb.Dataset.__init__
+
+    def spy_init(self, data, *args, **kwargs):
+        cf = kwargs.get("categorical_feature", "auto")
+        if cf != "auto" and not isinstance(data, str):
+            # Only record non-binary-load calls (binary load passes a file path str)
+            captured_cat_features.append(cf)
+        real_init(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(lgb.Dataset, "__init__", spy_init)
+
+    adapter = LightGBMAdapter()
+    adapter.prepare_train_inputs(
+        ParquetHandle(str(train_dir)),
+        ParquetHandle(str(dev_dir)),
+        prep_meta,
+        parameters,
+        str(tmp_path / "cache"),
+    )
+
+    # Both train and dev datasets should have been built with categorical_feature=[1]
+    # (prod_name is at index 1 in feature_columns=["feat_a", "prod_name"])
+    assert len(captured_cat_features) == 2, (
+        f"Expected 2 lgb.Dataset builds with categorical_feature, got: {captured_cat_features}"
+    )
+    for cat_attr in captured_cat_features:
+        # lgb may store as list[int] (indexes) or list[str] (column names like "Column_1")
+        assert cat_attr in ([1], ["prod_name"], ["Column_1"]), (
+            f"Unexpected categorical_feature value: {cat_attr}"
+        )
