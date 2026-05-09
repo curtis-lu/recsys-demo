@@ -144,3 +144,21 @@ class TestCalibratedModelAdapter:
         preds = base.predict(X_val)
         assert isinstance(preds, np.ndarray)
         assert preds.shape == (len(X_val),)
+
+
+def test_calibrated_adapter_prepare_train_inputs_raises():
+    """CalibratedModelAdapter does not own training-data preparation."""
+    import pytest
+    from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    adapter = CalibratedModelAdapter(base=LightGBMAdapter())
+
+    with pytest.raises(NotImplementedError, match="prepare_train_inputs"):
+        adapter.prepare_train_inputs(
+            train_handle=None,
+            train_dev_handle=None,
+            preprocessor_metadata={},
+            parameters={},
+            cache_dir="/tmp",
+        )
