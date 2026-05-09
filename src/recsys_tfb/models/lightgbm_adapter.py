@@ -123,6 +123,13 @@ class LightGBMAdapter(ModelAdapter):
         # PR2 will set this from preprocessor_metadata.
         cat_idx = None
 
+        # feature_pre_filter=False at construct time: features with
+        # <min_data_in_leaf samples per bin are NOT silently dropped from the
+        # binned dataset. The pre-cache training path (numpy → lgb.Dataset built
+        # by lgb.train at trial time) inherits feature_pre_filter=False from
+        # trial params; the cached binary path must opt out explicitly to match.
+        construct_params = {"feature_pre_filter": False}
+
         # Lazy import: see module-top comment about circular-import chain.
         from recsys_tfb.io.extract import extract_Xy
 
@@ -130,7 +137,11 @@ class LightGBMAdapter(ModelAdapter):
         # Keeps the constructed ds_train alive (it's small) for dev's reference.
         X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
         ds_train = lgb.Dataset(
-            X_tr, label=y_tr, categorical_feature=cat_idx, free_raw_data=True
+            X_tr,
+            label=y_tr,
+            categorical_feature=cat_idx,
+            params=construct_params,
+            free_raw_data=True,
         ).construct()
         ds_train.save_binary(str(train_bin))
         del X_tr, y_tr
@@ -141,6 +152,7 @@ class LightGBMAdapter(ModelAdapter):
             label=y_dev,
             reference=ds_train,
             categorical_feature=cat_idx,
+            params=construct_params,
             free_raw_data=True,
         ).construct()
         ds_dev.save_binary(str(dev_bin))
