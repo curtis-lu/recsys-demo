@@ -86,6 +86,17 @@ class LightGBMAdapter(ModelAdapter):
             raise RuntimeError("No model to log.")
         mlflow.lightgbm.log_model(self._booster, artifact_path="model")
 
+    @staticmethod
+    def _categorical_indices(preprocessor_metadata: dict):
+        """Index positions of categorical columns within feature_columns.
+
+        Returns None if no categoricals are present (lgb.Dataset accepts None).
+        """
+        feat_cols = preprocessor_metadata["feature_columns"]
+        cat_cols = preprocessor_metadata.get("categorical_columns", [])
+        idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols]
+        return idx or None
+
     def prepare_train_inputs(
         self,
         train_handle: ParquetHandle,
@@ -119,9 +130,10 @@ class LightGBMAdapter(ModelAdapter):
             shutil.rmtree(lgb_dir)
         lgb_dir.mkdir(parents=True, exist_ok=True)
 
-        # PR1: categorical_feature stays None (byte-equal vs main branch).
-        # PR2 will set this from preprocessor_metadata.
-        cat_idx = None
+        # PR2: enable native LightGBM categorical handling.
+        # categorical_feature names columns by index; lgb uses Fisher / one-vs-rest
+        # splits instead of treating int codes as ordered numerics.
+        cat_idx = self._categorical_indices(preprocessor_metadata)
 
         # feature_pre_filter=False at construct time: features with
         # <min_data_in_leaf samples per bin are NOT silently dropped from the
