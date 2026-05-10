@@ -1,4 +1,4 @@
-# Production overrides - Spark backend, Hive tables on HDFS.
+# Production overrides - Hive tables on HDFS.
 # Three-layer versioning: base_dataset_version keys invariant artifacts;
 # train_variant_id keys per-train-sampling artifacts; calibration_variant_id
 # keys per-calibration-sampling artifacts. Each layer lives under a different
@@ -191,10 +191,10 @@ evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
 
-# Note: cached_*_model_input are intentionally not registered here.
-# Persistence is owned by training/nodes.py::_cache_or_passthrough
-# (driver-local parquet via hadoop fs copyToLocal); catalog auto-creates
-# MemoryDataset for these names for in-memory passthrough between nodes.
+# Note: training cache 由 training/nodes.py::_materialize_parquet_handle
+# 直接從 Hive table location `copyToLocal` 搬到 driver-local parquet，不經
+# catalog 持久化；cache node outputs（ParquetHandle）走 framework
+# auto-MemoryDataset 在 DAG 中銜接。
 # See docs/superpowers/specs/2026-05-07-training-cache-hdfs-copy-design.md
 
 # --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---

@@ -11,6 +11,8 @@ from recsys_tfb.pipelines.inference.nodes_spark import (
     rank_predictions,
 )
 
+pytestmark = pytest.mark.spark
+
 
 @pytest.fixture
 def feature_table(spark):

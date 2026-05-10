@@ -4,6 +4,8 @@ import pytest
 
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
+pytestmark = pytest.mark.spark
+
 
 @pytest.fixture(autouse=True)
 def _stop_session_between_tests():

@@ -40,3 +40,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-v --tb=short"
+markers = [
+    "spark: tests that require a SparkSession (slow, ~1-4s each); run with `pytest -m 'not spark'` for fast dev iteration",
+]
