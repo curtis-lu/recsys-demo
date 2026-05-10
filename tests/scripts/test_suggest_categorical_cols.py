@@ -1,5 +1,6 @@
 """Tests for suggest_categorical_cols script."""
 
+import pytest
 import yaml
 
 from scripts.suggest_categorical_cols import (
@@ -13,6 +14,7 @@ from scripts.suggest_categorical_cols import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 class TestSuggestCategoricalColumnsSpark:
     def test_string_type_is_categorical(self, spark):
         df = spark.createDataFrame([("a",), ("b",), ("c",)], ["s"])

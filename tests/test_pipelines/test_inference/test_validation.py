@@ -9,6 +9,8 @@ from pyspark.sql.window import Window
 from recsys_tfb.pipelines.inference.nodes_spark import validate_predictions
 from recsys_tfb.pipelines.inference.validation import ValidationError
 
+pytestmark = pytest.mark.spark
+
 
 @pytest.fixture
 def parameters():

@@ -89,6 +89,7 @@ class TestTrainingPipeline:
         assert names.index("calibrate_model") < names.index("evaluate_model")
 
 
+@pytest.mark.spark
 class TestTrainingPipelineE2E:
     """End-to-end: dataset pipeline → training pipeline → artifact validation."""
 

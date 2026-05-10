@@ -14,6 +14,8 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     split_train_keys,
 )
 
+pytestmark = pytest.mark.spark
+
 
 @pytest.fixture
 def feature_table(spark):
