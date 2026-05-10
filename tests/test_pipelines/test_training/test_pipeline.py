@@ -8,16 +8,17 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_eight_nodes(self):
+    def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline()
-        # 3 cache nodes (train, train_dev, val) + prepare_lgb + tune + train + evaluate + log
-        assert len(pipeline.nodes) == 8
+        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune + train + evaluate + log
+        assert len(pipeline.nodes) == 9
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
         expected = {
             "train_model_input", "train_dev_model_input",
-            "val_model_input", "preprocessor", "parameters",
+            "val_model_input", "test_model_input",
+            "preprocessor", "parameters",
         }
         assert pipeline.inputs == expected
 
@@ -25,7 +26,8 @@ class TestTrainingPipeline:
         pipeline = create_pipeline()
         expected = {
             "best_params", "model", "evaluation_results",
-            "train_parquet_handle", "train_dev_parquet_handle", "val_parquet_handle",
+            "train_parquet_handle", "train_dev_parquet_handle",
+            "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
         }
         assert pipeline.outputs == expected
@@ -36,11 +38,19 @@ class TestTrainingPipeline:
         assert "cache_train_model_input" in names
         assert "cache_train_dev_model_input" in names
         assert "cache_val_model_input" in names
+        assert "cache_test_model_input" in names
         assert "prepare_lgb_train_inputs" in names
         assert "tune_hyperparameters" in names
         assert "train_model" in names
         assert "evaluate_model" in names
         assert "log_experiment" in names
+
+    def test_evaluate_uses_test_parquet_handle(self):
+        """Held-out evaluation must read test_parquet_handle, not val (HPO selection set)."""
+        pipeline = create_pipeline()
+        eval_node = next(n for n in pipeline.nodes if n.name == "evaluate_model")
+        assert "test_parquet_handle" in eval_node.inputs
+        assert "val_parquet_handle" not in eval_node.inputs
 
     def test_topological_order(self):
         pipeline = create_pipeline()
@@ -53,6 +63,8 @@ class TestTrainingPipeline:
             assert names.index(cache_name) < names.index("prepare_lgb_train_inputs")
         # val cache must come before tune (val_parquet_handle flows into tune)
         assert names.index("cache_val_model_input") < names.index("tune_hyperparameters")
+        # test cache must come before evaluate (test_parquet_handle flows into evaluate)
+        assert names.index("cache_test_model_input") < names.index("evaluate_model")
         # prepare must come before tune and train
         assert names.index("prepare_lgb_train_inputs") < names.index("tune_hyperparameters")
         assert names.index("tune_hyperparameters") < names.index("train_model")
@@ -61,10 +73,10 @@ class TestTrainingPipeline:
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_ten_nodes(self):
+    def test_calibration_pipeline_has_eleven_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 4 cache nodes + prepare_lgb + tune + train + calibrate + evaluate + log
-        assert len(pipeline.nodes) == 10
+        # 5 cache nodes + prepare_lgb + tune + train + calibrate + evaluate + log
+        assert len(pipeline.nodes) == 11
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -225,6 +237,7 @@ class TestTrainingPipelineE2E:
             ("train_model_input", "train_parquet_handle"),
             ("train_dev_model_input", "train_dev_parquet_handle"),
             ("val_model_input", "val_parquet_handle"),
+            ("test_model_input", "test_parquet_handle"),
         ):
             mi_sdf = catalog.load(mi_name)
             parquet_path = tmp_path / f"{mi_name}.parquet"
@@ -245,6 +258,7 @@ class TestTrainingPipelineE2E:
             "cache_train_model_input",
             "cache_train_dev_model_input",
             "cache_val_model_input",
+            "cache_test_model_input",
         }
         training_nodes = [
             n for n in full_training_pipeline.nodes

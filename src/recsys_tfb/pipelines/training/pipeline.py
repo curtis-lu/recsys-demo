@@ -4,6 +4,7 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 from recsys_tfb.pipelines.training.nodes import (
     cache_calibration_model_input,
+    cache_test_model_input,
     cache_train_dev_model_input,
     cache_train_model_input,
     cache_val_model_input,
@@ -34,6 +35,11 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             cache_val_model_input,
             inputs=["val_model_input", "parameters"],
             outputs="val_parquet_handle",
+        ),
+        Node(
+            cache_test_model_input,
+            inputs=["test_model_input", "parameters"],
+            outputs="test_parquet_handle",
         ),
     ]
 
@@ -91,7 +97,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     nodes.extend([
         Node(
             evaluate_model,
-            inputs=["model", "val_parquet_handle", "preprocessor", "parameters"],
+            inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
             outputs="evaluation_results",
         ),
         Node(

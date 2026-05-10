@@ -205,6 +205,11 @@ def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
     return _materialize_parquet_handle(val_model_input, "val_model_input", parameters)
 
 
+def cache_test_model_input(test_model_input, parameters: dict) -> ParquetHandle:
+    """Skip-if-exists local-parquet cache for test_model_input."""
+    return _materialize_parquet_handle(test_model_input, "test_model_input", parameters)
+
+
 def cache_calibration_model_input(calibration_model_input, parameters: dict) -> ParquetHandle:
     """Skip-if-exists local-parquet cache for calibration_model_input."""
     return _materialize_parquet_handle(
@@ -458,15 +463,15 @@ def _compute_ranking_metrics(
 
 def evaluate_model(
     model: ModelAdapter,
-    val_parquet_handle,
+    eval_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> dict:
     """Compute ranking-aware mAP with (snap_date, cust_id) as query groups.
 
-    val_parquet_handle points to a local parquet directory; we read it once
-    here and use the resulting pandas DataFrame for both feature extraction
-    and ranking-metric grouping.
+    eval_parquet_handle points to a local parquet directory (test set in the
+    standard wiring); we read it once here and use the resulting pandas
+    DataFrame for both feature extraction and ranking-metric grouping.
 
     When the model is a CalibratedModelAdapter, also computes uncalibrated
     metrics for comparison.
@@ -476,15 +481,15 @@ def evaluate_model(
     schema = get_schema(parameters)
     feature_cols = preprocessor_metadata["feature_columns"]
 
-    val_pdf = val_parquet_handle.to_pandas()
+    eval_pdf = eval_parquet_handle.to_pandas()
 
     with log_step(logger, "extract_features"):
-        X, _ = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
+        X, _ = extract_Xy(eval_parquet_handle, preprocessor_metadata, parameters)
     with log_step(logger, "predict"):
         y_score = model.predict(X)
     with log_step(logger, "compute_metrics"):
         overall_map, per_product_ap, n_queries, n_excluded_queries = (
-            _compute_ranking_metrics(y_score, val_pdf, schema)
+            _compute_ranking_metrics(y_score, eval_pdf, schema)
         )
 
     evaluation_results = {
@@ -497,7 +502,7 @@ def evaluate_model(
     if isinstance(model, CalibratedModelAdapter):
         y_score_uncal = model.predict_uncalibrated(X)
         uncal_map, uncal_per_product, _, _ = _compute_ranking_metrics(
-            y_score_uncal, val_pdf, schema
+            y_score_uncal, eval_pdf, schema
         )
         evaluation_results["uncalibrated"] = {
             "overall_map": uncal_map,
