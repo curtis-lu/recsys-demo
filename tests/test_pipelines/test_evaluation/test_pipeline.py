@@ -30,5 +30,5 @@ class TestEvaluationPipeline:
         assert "generate_report" in names
 
     def test_spark_backend(self):
-        pipeline = create_pipeline(backend="spark")
+        pipeline = create_pipeline()
         assert len(pipeline.nodes) == 3

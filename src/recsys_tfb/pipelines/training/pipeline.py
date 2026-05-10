@@ -16,7 +16,7 @@ from recsys_tfb.pipelines.training.nodes import (
 )
 
 
-def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -> Pipeline:
+def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     train_model_output = "trained_model" if enable_calibration else "model"
 
     nodes = [
