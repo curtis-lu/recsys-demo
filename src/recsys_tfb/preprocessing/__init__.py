@@ -1,6 +1,5 @@
-"""Preprocessing module: fit/transform/apply logic for the Spark pipeline.
+"""Preprocessing: fit/transform/apply logic for Spark pipelines.
 
-- ``._spark``   — Spark backend  (imports pyspark at module level, safe
-                  because only ``nodes_spark`` files import it)
-- ``._common``  — backend-agnostic helpers
+- ``._spark``   — Spark implementation (imports pyspark)
+- ``._common``  — pure-Python helpers (no pyspark dependency)
 """
