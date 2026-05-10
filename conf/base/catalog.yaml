@@ -30,7 +30,7 @@ sample_pool:
 val_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: val_keys
+  table: recsys_prod_val_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -41,7 +41,7 @@ val_keys:
 test_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: test_keys
+  table: recsys_prod_test_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -52,7 +52,7 @@ test_keys:
 val_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: val_model_input
+  table: recsys_prod_val_model_input
   external: false
   columns: "auto"
   partition_filter:
@@ -63,7 +63,7 @@ val_model_input:
 test_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: test_model_input
+  table: recsys_prod_test_model_input
   external: false
   columns: "auto"
   partition_filter:
@@ -83,7 +83,7 @@ category_mappings:
 sample_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: sample_keys
+  table: recsys_prod_sample_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -95,7 +95,7 @@ sample_keys:
 train_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_keys
+  table: recsys_prod_train_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -107,7 +107,7 @@ train_keys:
 train_dev_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_dev_keys
+  table: recsys_prod_train_dev_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -119,7 +119,7 @@ train_dev_keys:
 preprocessed_feature_table:
     type: HiveTableDataset
     database: ${hive.db}
-    table: preprocessed_feature_table
+    table: recsys_prod_preprocessed_feature_table
     external: false
     columns: "auto"
     partition_filter:
@@ -130,7 +130,7 @@ preprocessed_feature_table:
 train_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_model_input
+  table: recsys_prod_train_model_input
   external: false
   columns: "auto"
   partition_filter:
@@ -142,7 +142,7 @@ train_model_input:
 train_dev_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: train_dev_model_input
+  table: recsys_prod_train_dev_model_input
   external: false
   columns: "auto"
   partition_filter:
@@ -155,7 +155,7 @@ train_dev_model_input:
 calibration_keys:
   type: HiveTableDataset
   database: ${hive.db}
-  table: calibration_keys
+  table: recsys_prod_calibration_keys
   external: false
   columns: "auto"
   partition_filter:
@@ -167,7 +167,7 @@ calibration_keys:
 calibration_model_input:
   type: HiveTableDataset
   database: ${hive.db}
-  table: calibration_model_input
+  table: recsys_prod_calibration_model_input
   external: false
   columns: "auto"
   partition_filter:
