@@ -4,29 +4,17 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 
-def create_pipeline(backend: str = "pandas", enable_calibration: bool = False) -> Pipeline:
-    if backend == "spark":
-        from recsys_tfb.pipelines.dataset.nodes_spark import (
-            apply_preprocessor_to_features,
-            build_model_input,
-            fit_preprocessor_metadata,
-            select_calibration_keys,
-            select_test_keys,
-            select_train_keys,
-            select_val_keys,
-            split_train_keys,
-        )
-    else:
-        from recsys_tfb.pipelines.dataset.nodes_pandas import (
-            apply_preprocessor_to_features,
-            build_model_input,
-            fit_preprocessor_metadata,
-            select_calibration_keys,
-            select_test_keys,
-            select_train_keys,
-            select_val_keys,
-            split_train_keys,
-        )
+def create_pipeline(enable_calibration: bool = False) -> Pipeline:
+    from recsys_tfb.pipelines.dataset.nodes_spark import (
+        apply_preprocessor_to_features,
+        build_model_input,
+        fit_preprocessor_metadata,
+        select_calibration_keys,
+        select_test_keys,
+        select_train_keys,
+        select_val_keys,
+        split_train_keys,
+    )
 
     nodes = [
         # --- Key selection ---

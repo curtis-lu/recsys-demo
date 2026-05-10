@@ -1,11 +1,18 @@
 """Generate synthetic feature_table and label_table Parquet files for local dev.
 
-Produces ~15K feature rows (14 months × ~1000-1150 customers × 22 columns)
-and ~123K label rows (14 months × customers × 8 products).
+Produces ~15K feature rows (14 months × ~1000-1150 customers × 22 columns).
+
+label_table mirrors `conf/sql/etl/label/label_{ccard,exchange,fund}.sql` semantics:
+each product group's `cust_pool` is the set of customers with at least one
+apply event in that group's window; only those customers get rows for the
+group's sub-products (including label=0 rows for unsubscribed sub-products).
+Customers with no event in a group do not appear in that group at all.
 """
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from scipy.special import expit, logit
 
 RANDOM_SEED = 42
@@ -23,6 +30,15 @@ PRODUCTS = [
     "exchange_usd", "exchange_fx", "ccard_ins", "fund_stock",
     "ccard_bill", "fund_bond", "ccard_cash", "fund_mix",
 ]
+
+# Mirrors the per-category label SQL files: each group has its own cust_pool
+# (customers with >=1 event in the group during the apply window). Sub-products
+# within a group share that cust_pool via CROSS JOIN.
+PRODUCT_GROUPS = {
+    "exchange": ["exchange_usd", "exchange_fx"],
+    "ccard": ["ccard_ins", "ccard_bill", "ccard_cash"],
+    "fund": ["fund_stock", "fund_bond", "fund_mix"],
+}
 
 LABEL_RATES = {
     "exchange_usd": 0.15, "exchange_fx": 0.10,
@@ -281,12 +297,15 @@ def generate_feature_table(rng: np.random.Generator) -> pd.DataFrame:
 def generate_label_table(
     rng: np.random.Generator, feature_table: pd.DataFrame
 ) -> pd.DataFrame:
-    """Generate label table with feature-conditioned probabilities."""
-    # Build segment lookup from first snap
-    first_snap = feature_table[feature_table["snap_date"] == feature_table["snap_date"].min()]
-    max_cust_id = feature_table["cust_id"].nunique()
-    all_cust_ids = sorted(feature_table["cust_id"].unique())
+    """Generate label table with per-group cust_pool semantics.
 
+    For each (snap_date, product_group), we first sample a label per
+    (customer, sub_product) using feature-conditioned probabilities, then
+    keep only customers who have >= 1 positive label in the group. Those
+    customers contribute one row per sub-product in the group (label may be
+    0 or 1). Customers with no event in the group do not appear in that
+    group, mirroring the LEFT JOIN onto `cust_pool` in the SQL.
+    """
     # Pre-compute segments: use customer index modulo (consistent with generation)
     max_customers = int(INITIAL_CUSTOMERS * (1 + MONTHLY_GROWTH_RATE) ** (len(SNAP_DATES) - 1)) + 10
     all_segments_rng = np.random.default_rng(RANDOM_SEED)
@@ -311,21 +330,37 @@ def generate_label_table(
             ]
         }
 
-        for prod in PRODUCTS:
-            base_rate = LABEL_RATES[prod]
-            probs = _compute_label_prob(base_rate, prod, feat_dict)
-            labels = (rng.random(n_cust) < probs).astype(int)
+        for group_prods in PRODUCT_GROUPS.values():
+            group_labels = {
+                prod: (
+                    rng.random(n_cust)
+                    < _compute_label_prob(LABEL_RATES[prod], prod, feat_dict)
+                ).astype(int)
+                for prod in group_prods
+            }
 
-            prod_df = pd.DataFrame({
-                "snap_date": snap_dt,
-                "cust_id": cust_ids,
-                "cust_segment_typ": segments,
-                "apply_start_date": apply_start,
-                "apply_end_date": apply_end,
-                "label": labels,
-                "prod_name": prod,
-            })
-            rows_list.append(prod_df)
+            any_event = np.zeros(n_cust, dtype=bool)
+            for labels in group_labels.values():
+                any_event |= labels.astype(bool)
+
+            if not any_event.any():
+                continue
+
+            kept_idx = np.where(any_event)[0]
+            kept_cust_ids = cust_ids[kept_idx]
+            kept_segments = segments[kept_idx]
+
+            for prod in group_prods:
+                prod_df = pd.DataFrame({
+                    "snap_date": snap_dt,
+                    "cust_id": kept_cust_ids,
+                    "cust_segment_typ": kept_segments,
+                    "apply_start_date": apply_start,
+                    "apply_end_date": apply_end,
+                    "label": group_labels[prod][kept_idx],
+                    "prod_name": prod,
+                })
+                rows_list.append(prod_df)
 
     df = pd.concat(rows_list, ignore_index=True)
     df["snap_date"] = pd.to_datetime(df["snap_date"])
@@ -389,9 +424,20 @@ def main():
     label_table = generate_label_table(rng, feature_table)
     sample_pool = generate_sample_pool(feature_table, label_table)
 
-    feature_table.to_parquet("data/feature_table.parquet", index=False)
-    label_table.to_parquet("data/label_table.parquet", index=False)
-    sample_pool.to_parquet("data/sample_pool.parquet", index=False)
+    # Spark 3.3.2 only supports timestamp(us); pandas defaults to ns and breaks
+    # `Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))` on read. Write via
+    # pyarrow with coerce_timestamps='us' (dev-cluster-spark skill SOP-2).
+    for path, df in [
+        ("data/feature_table.parquet", feature_table),
+        ("data/label_table.parquet", label_table),
+        ("data/sample_pool.parquet", sample_pool),
+    ]:
+        pq.write_table(
+            pa.Table.from_pandas(df, preserve_index=False),
+            path,
+            coerce_timestamps="us",
+            allow_truncated_timestamps=True,
+        )
 
     # Summary
     print("=" * 60)
@@ -408,11 +454,19 @@ def main():
 
     print(f"\nLabel table: {label_table.shape}")
     print(f"  Products: {sorted(label_table['prod_name'].unique())}")
-    print(f"  Label rates per product:")
+    total_cust_snaps = len(feature_table)
+    print(f"  Label rates per product (positives / total cust-snaps={total_cust_snaps}):")
     for prod in PRODUCTS:
-        rate = label_table[label_table["prod_name"] == prod]["label"].mean()
+        positives = int(label_table.loc[label_table["prod_name"] == prod, "label"].sum())
+        rate = positives / total_cust_snaps if total_cust_snaps else 0.0
         target = LABEL_RATES[prod]
         print(f"    {prod}: {rate:.3f} (target: {target:.3f})")
+    print(f"  Per-group cust_pool sizes (rows per snap × group):")
+    for group_name, group_prods in PRODUCT_GROUPS.items():
+        # All sub-products of a group share the same cust_pool, so use any
+        sub = label_table[label_table["prod_name"] == group_prods[0]]
+        per_snap = sub.groupby("snap_date").size()
+        print(f"    {group_name}: avg={per_snap.mean():.1f}, min={per_snap.min()}, max={per_snap.max()}")
 
     print(f"\nSample pool: {sample_pool.shape}")
     print(f"  Columns: {list(sample_pool.columns)}")

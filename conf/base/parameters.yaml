@@ -1,6 +1,5 @@
 project_name: recsys_tfb
 random_seed: 42
-backend: spark
 
 hive:
   db: ml_recsys

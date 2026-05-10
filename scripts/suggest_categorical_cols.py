@@ -1,18 +1,12 @@
 """Suggest categorical columns from a dataset.
 
-Given a parquet file or Hive table, infer which columns are likely categorical
-and write the result as a YAML snippet ready to copy into
+Given a Hive table or HDFS parquet path, infer which columns are likely
+categorical and write the result as a YAML snippet ready to copy into
 conf/base/parameters_dataset.yaml.
 
-Local (pandas backend):
-    python scripts/suggest_categorical_cols.py data/feature_table.parquet
-    python scripts/suggest_categorical_cols.py data/feature_table.parquet -k 30
-
-Production (Spark backend, Hive table):
-    python scripts/suggest_categorical_cols.py edw.cust_profile --backend spark
-
-Production (Spark backend, HDFS parquet path):
-    python scripts/suggest_categorical_cols.py /user/hive/.../customer --backend spark
+Usage:
+    python scripts/suggest_categorical_cols.py edw.cust_profile
+    python scripts/suggest_categorical_cols.py /user/hive/.../customer
 
 The output YAML is written to data/profiling/<stem>_categorical.yaml
 (directory auto-created). The stem is derived from Path(input).stem for
@@ -27,7 +21,6 @@ from typing import TYPE_CHECKING
 import typer
 
 if TYPE_CHECKING:
-    import pandas as pd
     from pyspark.sql import DataFrame as SparkDataFrame
     from pyspark.sql import SparkSession
 
@@ -37,46 +30,6 @@ app = typer.Typer(
     help="Suggest categorical columns for parameters_dataset.yaml",
     add_completion=False,
 )
-
-
-def suggest_categorical_columns_pandas(
-    df: "pd.DataFrame",
-    max_numerical_cardinality: int = 20,
-) -> tuple[list[str], list[tuple[str, int]]]:
-    """Infer categorical columns from a pandas DataFrame.
-
-    Rules:
-      - string / object / bool / pd.CategoricalDtype -> always categorical
-      - numeric with nunique(dropna=True) <= max_numerical_cardinality
-        -> implicit categorical
-
-    Returns:
-        (categorical_columns, implicit_numeric_info)
-        - categorical_columns: inferred column names, preserving original order
-        - implicit_numeric_info: list of (column, nunique) tuples for numeric
-          columns classified as categorical due to low cardinality
-    """
-    import pandas as pd
-
-    categorical: list[str] = []
-    implicit: list[tuple[str, int]] = []
-
-    for col in df.columns:
-        dtype = df[col].dtype
-        if (
-            isinstance(dtype, pd.CategoricalDtype)
-            or pd.api.types.is_bool_dtype(dtype)
-            or pd.api.types.is_string_dtype(dtype)
-            or dtype == object
-        ):
-            categorical.append(col)
-        elif pd.api.types.is_numeric_dtype(dtype):
-            nunique = int(df[col].nunique(dropna=True))
-            if nunique <= max_numerical_cardinality:
-                categorical.append(col)
-                implicit.append((col, nunique))
-
-    return categorical, implicit
 
 
 def suggest_categorical_columns_spark(
@@ -105,12 +58,10 @@ def suggest_categorical_columns_spark(
             string_bool_cols.append(field.name)
         elif isinstance(dt, NumericType):
             numeric_cols.append(field.name)
-        # Other types (timestamp, array, struct, ...) are ignored.
 
     implicit: list[tuple[str, int]] = []
     numeric_categorical: set[str] = set()
 
-    # Always include count(*) to avoid a separate sdf.count() action in the caller.
     agg_exprs = [F.count("*").alias("__n_rows__")] + [
         F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
         for c in numeric_cols
@@ -147,17 +98,6 @@ def format_yaml_output(categorical: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _load_pandas(source: str) -> tuple["pd.DataFrame", str]:
-    import pandas as pd
-
-    path = Path(source)
-    if not path.exists():
-        typer.echo(f"Error: parquet path not found: {source}", err=True)
-        raise typer.Exit(code=1)
-    df = pd.read_parquet(path)
-    return df, path.stem
-
-
 def _load_spark(
     source: str, spark: "SparkSession"
 ) -> tuple["SparkDataFrame", str]:
@@ -165,7 +105,6 @@ def _load_spark(
     if path.exists():
         df = spark.read.parquet(str(path))
         return df, path.stem
-    # Fall through to Hive table
     try:
         df = spark.table(source)
     except Exception as exc:
@@ -188,7 +127,6 @@ def _write_output(stem: str, content: str) -> Path:
 
 def _print_summary(
     source: str,
-    backend: str,
     max_cardinality: int,
     n_rows: int,
     n_cols: int,
@@ -200,7 +138,7 @@ def _print_summary(
         f"Scanned {n_rows:,} rows × {n_cols} columns from {source}", err=True
     )
     typer.echo(
-        f"Backend: {backend} | max_numerical_cardinality: {max_cardinality}",
+        f"max_numerical_cardinality: {max_cardinality}",
         err=True,
     )
     typer.echo("", err=True)
@@ -232,45 +170,24 @@ def main(
         "-k",
         help="Numeric columns with nunique <= this are considered implicit categoricals",
     ),
-    backend: str = typer.Option(
-        "pandas",
-        "--backend",
-        "-b",
-        help="Backend: 'pandas' (parquet path only) or 'spark' (parquet path or Hive table)",
-    ),
 ) -> None:
     """Suggest categorical columns from a dataset and write a YAML snippet."""
-    if backend == "pandas":
-        df, stem = _load_pandas(source)
-        categorical, implicit = suggest_categorical_columns_pandas(
-            df, max_cardinality
-        )
-        n_rows = len(df)
-        n_cols = len(df.columns)
-    elif backend == "spark":
-        from recsys_tfb.utils.spark import get_or_create_spark_session
+    from recsys_tfb.utils.spark import get_or_create_spark_session
 
-        spark = get_or_create_spark_session()
-        try:
-            sdf, stem = _load_spark(source, spark)
-            categorical, implicit, n_rows = suggest_categorical_columns_spark(
-                sdf, max_cardinality
-            )
-            n_cols = len(sdf.schema.fields)
-        finally:
-            spark.stop()
-    else:
-        typer.echo(
-            f"Error: unknown backend '{backend}'. Use 'pandas' or 'spark'.",
-            err=True,
+    spark = get_or_create_spark_session()
+    try:
+        sdf, stem = _load_spark(source, spark)
+        categorical, implicit, n_rows = suggest_categorical_columns_spark(
+            sdf, max_cardinality
         )
-        raise typer.Exit(code=1)
+        n_cols = len(sdf.schema.fields)
+    finally:
+        spark.stop()
 
     yaml_content = format_yaml_output(categorical)
     output_path = _write_output(stem, yaml_content)
     _print_summary(
         source=source,
-        backend=backend,
         max_cardinality=max_cardinality,
         n_rows=n_rows,
         n_cols=n_cols,

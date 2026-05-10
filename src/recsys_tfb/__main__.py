@@ -71,13 +71,12 @@ def _load_spark_config(config: ConfigLoader, pipeline: str) -> dict:
     return resolve_vdclient_placeholders(base_spark)
 
 
-def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict, str, RunContext]:
+def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict, RunContext]:
     conf_dir = _find_conf_dir()
     config = ConfigLoader(str(conf_dir), env=env)
     params = config.get_parameters()
-    backend = params.get("backend", "pandas")
 
-    run_context = RunContext(pipeline=pipeline, env=env, backend=backend)
+    run_context = RunContext(pipeline=pipeline, env=env)
     setup_logging(params, run_context)
 
     try:
@@ -86,7 +85,7 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
         logger.error("Schema config validation failed: %s", exc)
         raise typer.Exit(code=1)
 
-    return config, params, backend, run_context
+    return config, params, run_context
 
 
 def _execute_pipeline(
@@ -98,7 +97,7 @@ def _execute_pipeline(
     env: str
 ):
     try:
-        pipe = get_pipeline(pipeline_name, backend=runtime_params.get("backend", "pandas"), **pipeline_kwargs)
+        pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
     except KeyError:
         available = ", ".join(list_pipelines())
         logger.error("Unknown pipeline '%s'. Available: %s", pipeline_name, available)
@@ -179,7 +178,7 @@ def _run_etl(
     from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup(stage, env)
+    config, params, run_context = _load_config_and_setup(stage, env)
 
     spark_configs = _load_spark_config(config, stage)
     get_or_create_spark_session(spark_configs)
@@ -282,7 +281,7 @@ def dataset(
     """Run the dataset pipeline (always recomputes versions from parameters)."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup("dataset", env)
+    config, params, run_context = _load_config_and_setup("dataset", env)
     get_or_create_spark_session(_load_spark_config(config, "dataset"))
     data_dir = _find_data_dir()
 
@@ -326,7 +325,6 @@ def dataset(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
-        "backend": backend,
     }
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
@@ -405,7 +403,7 @@ def training(
     """Run the training pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup("training", env)
+    config, params, run_context = _load_config_and_setup("training", env)
     get_or_create_spark_session(_load_spark_config(config, "training"))
     data_dir = _find_data_dir()
 
@@ -445,7 +443,6 @@ def training(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": _NONE_PLACEHOLDER,
-        "backend": backend,
     }
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
@@ -515,7 +512,7 @@ def inference(
     """Run the inference pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup("inference", env)
+    config, params, run_context = _load_config_and_setup("inference", env)
     get_or_create_spark_session(_load_spark_config(config, "inference"))
     data_dir = _find_data_dir()
 
@@ -550,7 +547,6 @@ def inference(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": snap_date,
-        "backend": backend,
         "source_model_version": model_version,
     }
 
@@ -588,7 +584,7 @@ def evaluation(
     """Run the evaluation pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup("evaluation", env)
+    config, params, run_context = _load_config_and_setup("evaluation", env)
     get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
 
@@ -619,7 +615,6 @@ def evaluation(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": snap_date,
-        "backend": backend,
     }
 
     _execute_pipeline("evaluation", {}, runtime_params, config, params, env)
@@ -648,7 +643,7 @@ def baselines(
     """Run the baselines pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
-    config, params, backend, run_context = _load_config_and_setup("baselines", env)
+    config, params, run_context = _load_config_and_setup("baselines", env)
     get_or_create_spark_session(_load_spark_config(config, "baselines"))
     data_dir = _find_data_dir()
 
@@ -668,7 +663,6 @@ def baselines(
         "calibration_variant_id": _NONE_PLACEHOLDER,
         "model_version": _NONE_PLACEHOLDER,
         "snap_date": snap_date,
-        "backend": backend,
     }
 
     _execute_pipeline("baselines", {}, runtime_params, config, params, env)

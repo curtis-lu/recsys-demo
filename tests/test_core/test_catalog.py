@@ -10,7 +10,7 @@ class TestDataCatalog:
             "my_data": {
                 "type": "ParquetDataset",
                 "filepath": str(tmp_path / "test.parquet"),
-                "backend": "pandas",
+                "backend": "spark",
             }
         }
         catalog = DataCatalog(config)

@@ -22,7 +22,3 @@ class TestBaselinesPipeline:
         names = [n.name for n in pipeline.nodes]
         assert "compute_baselines" in names
         assert "compute_baseline_metrics" in names
-
-    def test_spark_backend(self):
-        pipeline = create_pipeline(backend="spark")
-        assert len(pipeline.nodes) == 2

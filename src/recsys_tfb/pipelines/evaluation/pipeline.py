@@ -4,19 +4,12 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 
-def create_pipeline(backend: str = "pandas") -> Pipeline:
-    if backend == "spark":
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
-            compute_metrics,
-            generate_report,
-            prepare_eval_data,
-        )
-    else:
-        from recsys_tfb.pipelines.evaluation.nodes_pandas import (
-            compute_metrics,
-            generate_report,
-            prepare_eval_data,
-        )
+def create_pipeline() -> Pipeline:
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_metrics,
+        generate_report,
+        prepare_eval_data,
+    )
 
     return Pipeline(
         [
