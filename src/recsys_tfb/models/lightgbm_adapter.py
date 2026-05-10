@@ -36,6 +36,9 @@ class LightGBMAdapter(ModelAdapter):
         train_dataset: "lgb.Dataset | None" = None,
         val_dataset: "lgb.Dataset | None" = None,
     ) -> None:
+        # `early_stopping_rounds <= 0` (or no val provided) → run the full
+        # num_iterations with no early-stopping callback. Used by the
+        # `refit_on_full` final-model strategy where best_iteration is fixed.
         num_iterations = params.pop("num_iterations", 500)
         early_stopping_rounds = params.pop("early_stopping_rounds", 50)
 
@@ -43,21 +46,30 @@ class LightGBMAdapter(ModelAdapter):
             train_dataset = lgb.Dataset(
                 X_train, label=y_train, free_raw_data=False
             )
-        if val_dataset is None:
-            val_dataset = lgb.Dataset(
-                X_val, label=y_val, reference=train_dataset, free_raw_data=False
-            )
 
-        callbacks = [
-            lgb.early_stopping(stopping_rounds=early_stopping_rounds),
-            lgb.log_evaluation(period=0),
-        ]
+        has_val = val_dataset is not None or X_val is not None
+        valid_sets: list[lgb.Dataset] = []
+        valid_names: list[str] = []
+        callbacks = [lgb.log_evaluation(period=0)]
+
+        if has_val:
+            if val_dataset is None:
+                val_dataset = lgb.Dataset(
+                    X_val, label=y_val, reference=train_dataset, free_raw_data=False
+                )
+            valid_sets = [val_dataset]
+            valid_names = ["val"]
+            if early_stopping_rounds and early_stopping_rounds > 0:
+                callbacks.insert(
+                    0, lgb.early_stopping(stopping_rounds=early_stopping_rounds)
+                )
+
         self._booster = lgb.train(
             params,
             train_dataset,
             num_boost_round=num_iterations,
-            valid_sets=[val_dataset],
-            valid_names=["val"],
+            valid_sets=valid_sets,
+            valid_names=valid_names,
             callbacks=callbacks,
         )
 

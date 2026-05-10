@@ -256,19 +256,18 @@ def tune_hyperparameters(
     val_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple[dict, ModelAdapter]:
+) -> tuple[dict, int, ModelAdapter]:
     """Search for optimal hyperparameters using Optuna and return best trial's model.
 
     train + train_dev consumed as pre-built lgb.Dataset binaries (no rebinning
     across trials). val read fresh from parquet inside this scope so its pandas
     DataFrame is freed when the function returns.
 
-    Returns (best_params, best_model). best_model is the adapter from the trial
-    that achieved the highest val mAP — kept in-memory via a closure-tracked
-    state so no separate retrain step is needed. Each trial's training is
-    deterministic given (params, seed, num_iterations, early_stopping_rounds,
-    train_lgb, train_dev_lgb), so this is byte-equivalent to the legacy
-    "tune → train_model" two-step flow.
+    Returns (best_params, best_iteration, best_model). best_iteration is the
+    booster's best_iteration on the winning trial (the early-stopping pick when
+    triggered, otherwise the iteration with the lowest val loss within
+    num_iterations). It is consumed by `finalize_model` under the
+    `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
     from recsys_tfb.io.extract import extract_Xy
 
@@ -284,7 +283,7 @@ def tune_hyperparameters(
     with log_step(logger, "extract_features"):
         X_v, y_v = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
 
-    best_state: dict = {"ap": -1.0, "model": None}
+    best_state: dict = {"ap": -1.0, "model": None, "iteration": 0}
 
     def objective(trial: optuna.Trial) -> float:
         trial_params = {
@@ -346,6 +345,9 @@ def tune_hyperparameters(
         if ap > best_state["ap"]:
             best_state["ap"] = ap
             best_state["model"] = adapter
+            # `best_iteration` is set by the early_stopping callback on the
+            # underlying Booster regardless of whether early stopping fired.
+            best_state["iteration"] = adapter.booster.best_iteration
 
         return ap
 
@@ -357,8 +359,104 @@ def tune_hyperparameters(
 
     best_params = study.best_params
     best_model = best_state["model"]
-    logger.info("Best trial mAP: %.4f, params: %s", study.best_value, best_params)
-    return best_params, best_model
+    best_iteration = best_state["iteration"]
+    logger.info(
+        "Best trial mAP: %.4f, best_iteration: %d, params: %s",
+        study.best_value, best_iteration, best_params,
+    )
+    return best_params, best_iteration, best_model
+
+
+def finalize_model(
+    train_parquet_handle,
+    train_dev_parquet_handle,
+    hpo_best_model: ModelAdapter,
+    best_params: dict,
+    best_iteration: int,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> ModelAdapter:
+    """Produce the final model based on `training.final_model_strategy`.
+
+    Strategies:
+      hpo_best (default): pass the HPO best-trial adapter through unchanged.
+        Cheapest path; identical to Phase 1 behavior. Best-iteration value is
+        whatever the early-stopping callback selected during HPO.
+
+      refit_on_full: retrain on train + train_dev concatenated, with
+        num_iterations = best_iteration (HPO winner's stopping point) and no
+        early-stopping. Trades the HPO val signal for ~25% more training data
+        (train_dev_ratio=0.2 default). Same hyperparameters; deterministic
+        given (best_params, best_iteration, seed).
+    """
+    strategy = parameters.get("training", {}).get("final_model_strategy", "hpo_best")
+
+    if strategy == "hpo_best":
+        logger.info("final_model_strategy=hpo_best (passthrough; best_iteration=%d)", best_iteration)
+        return hpo_best_model
+
+    if strategy != "refit_on_full":
+        raise ValueError(
+            f"Unknown training.final_model_strategy={strategy!r}. "
+            "Expected 'hpo_best' or 'refit_on_full'."
+        )
+
+    import lightgbm as lgb
+    from recsys_tfb.io.extract import extract_Xy
+
+    training_params = parameters["training"]
+    seed = parameters.get("random_seed", 42)
+    algorithm = training_params.get("algorithm", "lightgbm")
+    algorithm_params = training_params.get("algorithm_params", {})
+
+    logger.info(
+        "final_model_strategy=refit_on_full (num_iterations=%d, no early stopping)",
+        best_iteration,
+    )
+
+    with log_step(logger, "extract_features"):
+        X_tr, y_tr = extract_Xy(train_parquet_handle, preprocessor_metadata, parameters)
+        X_dv, y_dv = extract_Xy(train_dev_parquet_handle, preprocessor_metadata, parameters)
+    X_full = np.concatenate([X_tr, X_dv], axis=0)
+    y_full = np.concatenate([y_tr, y_dv], axis=0)
+    del X_tr, y_tr, X_dv, y_dv
+
+    feat_cols = preprocessor_metadata["feature_columns"]
+    cat_cols = preprocessor_metadata.get("categorical_columns", [])
+    cat_idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols] or None
+
+    # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned with
+    # the same construct param) so refit's tree splits use the same feature set.
+    ds_full = lgb.Dataset(
+        X_full,
+        label=y_full,
+        categorical_feature=cat_idx,
+        params={"feature_pre_filter": False},
+        free_raw_data=True,
+    )
+
+    params = {
+        **algorithm_params,
+        "seed": seed,
+        "feature_pre_filter": False,
+        **best_params,
+        "num_iterations": best_iteration,
+        "early_stopping_rounds": 0,
+    }
+
+    with log_step(logger, "model_refit"):
+        adapter = get_adapter(algorithm)
+        adapter.train(
+            X_train=None, y_train=None, X_val=None, y_val=None,
+            params=params,
+            train_dataset=ds_full,
+        )
+
+    logger.info(
+        "Refitted on full train+train_dev (n=%d, iterations=%d)",
+        len(y_full), best_iteration,
+    )
+    return adapter
 
 
 def calibrate_model(
@@ -503,6 +601,7 @@ def evaluate_model(
 def log_experiment(
     model: ModelAdapter,
     best_params: dict,
+    best_iteration: int,
     evaluation_results: dict,
     parameters: dict,
 ) -> None:
@@ -510,7 +609,9 @@ def log_experiment(
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
-    algorithm = parameters.get("training", {}).get("algorithm", "lightgbm")
+    training_cfg = parameters.get("training", {})
+    algorithm = training_cfg.get("algorithm", "lightgbm")
+    final_model_strategy = training_cfg.get("final_model_strategy", "hpo_best")
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
@@ -519,6 +620,8 @@ def log_experiment(
         with mlflow.start_run():
             mlflow.log_params(best_params)
             mlflow.log_param("algorithm", algorithm)
+            mlflow.log_param("final_model_strategy", final_model_strategy)
+            mlflow.log_metric("best_iteration", best_iteration)
             mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
             for prod, ap in evaluation_results.get("per_product_ap", {}).items():

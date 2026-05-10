@@ -12,6 +12,7 @@ from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
     calibrate_model,
     evaluate_model,
+    finalize_model,
     log_experiment,
     tune_hyperparameters,
 )
@@ -209,7 +210,7 @@ class TestTuneHyperparameters:
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        best_params, best_model = tune_hyperparameters(
+        best_params, best_iteration, best_model = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
@@ -218,6 +219,7 @@ class TestTuneHyperparameters:
         assert "num_leaves" in best_params
         assert "max_depth" in best_params
         assert isinstance(best_model, ModelAdapter)
+        assert isinstance(best_iteration, int) and best_iteration > 0
 
     def test_params_in_search_space(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -225,7 +227,7 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
         space = training_parameters["training"]["search_space"]
-        best_params, _ = tune_hyperparameters(
+        best_params, _, _ = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
@@ -237,9 +239,10 @@ class TestTuneHyperparameters:
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        p1, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
-        p2, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        p1, i1, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        p2, i2, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
         assert p1 == p2
+        assert i1 == i2
 
     def test_best_model_predictions_are_probabilities(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -247,12 +250,119 @@ class TestTuneHyperparameters:
         """Best-trial model returned by HPO produces valid probability scores."""
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        _, best_model = tune_hyperparameters(
+        _, _, best_model = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
         X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         preds = best_model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
+
+
+# ---- Tests: finalize_model ----
+
+
+class TestFinalizeModel:
+    def _hpo_outputs(self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        return tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
+        )
+
+    def test_hpo_best_passthrough(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """Default strategy returns the HPO best-trial adapter unchanged (identity)."""
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        params = {**training_parameters,
+                  "training": {**training_parameters["training"],
+                               "final_model_strategy": "hpo_best"}}
+
+        final = finalize_model(
+            train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+            preprocessor_metadata, params,
+        )
+        assert final is hpo_best_model
+
+    def test_default_strategy_is_hpo_best(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """When `final_model_strategy` key is absent, default to hpo_best."""
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        # training_parameters has no `final_model_strategy` set
+        final = finalize_model(
+            train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+            preprocessor_metadata, training_parameters,
+        )
+        assert final is hpo_best_model
+
+    def test_refit_on_full_returns_new_adapter(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """refit_on_full produces a fresh adapter (not the HPO best one)."""
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        params = {**training_parameters,
+                  "training": {**training_parameters["training"],
+                               "final_model_strategy": "refit_on_full"}}
+
+        final = finalize_model(
+            train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+            preprocessor_metadata, params,
+        )
+        assert isinstance(final, ModelAdapter)
+        assert final is not hpo_best_model
+
+    def test_refit_on_full_uses_best_iteration(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """Refitted booster runs exactly best_iteration rounds (no early stopping)."""
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        params = {**training_parameters,
+                  "training": {**training_parameters["training"],
+                               "final_model_strategy": "refit_on_full"}}
+
+        final = finalize_model(
+            train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+            preprocessor_metadata, params,
+        )
+        assert isinstance(final, LightGBMAdapter)
+        assert final.booster.current_iteration() == best_iteration
+
+    def test_unknown_strategy_raises(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        params = {**training_parameters,
+                  "training": {**training_parameters["training"],
+                               "final_model_strategy": "bogus"}}
+
+        with pytest.raises(ValueError, match="final_model_strategy"):
+            finalize_model(
+                train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+                preprocessor_metadata, params,
+            )
 
 
 # ---- Tests: evaluate_model ----
@@ -401,7 +511,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, best_params, evaluation_results, params)
+        log_experiment(model, best_params, 123, evaluation_results, params)
 
         # Verify run was created
         import mlflow
@@ -412,7 +522,9 @@ class TestLogExperiment:
         runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
         assert len(runs) == 1
         assert runs.iloc[0]["metrics.overall_map"] == 0.75
+        assert runs.iloc[0]["metrics.best_iteration"] == 123
         assert runs.iloc[0]["params.algorithm"] == "lightgbm"
+        assert runs.iloc[0]["params.final_model_strategy"] == "hpo_best"
         assert runs.iloc[0]["params.calibrated"] == "False"
 
     def test_logs_calibration_info(
@@ -439,7 +551,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, best_params, evaluation_results, params)
+        log_experiment(model, best_params, 123, evaluation_results, params)
 
         import mlflow
         mlflow.set_tracking_uri(str(tmp_path / "mlruns"))

@@ -10,6 +10,7 @@ from recsys_tfb.pipelines.training.nodes import (
     cache_val_model_input,
     calibrate_model,
     evaluate_model,
+    finalize_model,
     log_experiment,
     prepare_lgb_train_inputs,
     tune_hyperparameters,
@@ -17,9 +18,11 @@ from recsys_tfb.pipelines.training.nodes import (
 
 
 def create_pipeline(enable_calibration: bool = False) -> Pipeline:
-    # Best-trial model from HPO is the final model (no separate retrain step).
-    # Under calibration it lands in `trained_model` so calibrate_model can wrap it.
-    hpo_model_output = "trained_model" if enable_calibration else "model"
+    # finalize_model produces the trained model; under calibration it lands in
+    # `trained_model` so calibrate_model can wrap it. Strategy
+    # (hpo_best / refit_on_full) is read from parameters at runtime — not a
+    # DAG-shape concern.
+    final_model_output = "trained_model" if enable_calibration else "model"
 
     nodes = [
         Node(
@@ -71,7 +74,19 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "train_lgb_handle", "train_dev_lgb_handle",
                 "val_parquet_handle", "preprocessor", "parameters",
             ],
-            outputs=["best_params", hpo_model_output],
+            outputs=["best_params", "best_iteration", "hpo_best_model"],
+        ),
+    )
+
+    nodes.append(
+        Node(
+            finalize_model,
+            inputs=[
+                "train_parquet_handle", "train_dev_parquet_handle",
+                "hpo_best_model", "best_params", "best_iteration",
+                "preprocessor", "parameters",
+            ],
+            outputs=final_model_output,
         ),
     )
 
@@ -95,7 +110,10 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             log_experiment,
-            inputs=["model", "best_params", "evaluation_results", "parameters"],
+            inputs=[
+                "model", "best_params", "best_iteration",
+                "evaluation_results", "parameters",
+            ],
             outputs=None,
         ),
     ])

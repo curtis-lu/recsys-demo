@@ -16,6 +16,11 @@ training:
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
+  # Final-model strategy after HPO:
+  #   hpo_best       — pass the HPO best-trial adapter through unchanged (default).
+  #   refit_on_full  — retrain on train + train_dev concatenated, with
+  #                    num_iterations = best_iteration and no early stopping.
+  final_model_strategy: hpo_best
   search_space:
     learning_rate:
       low: 0.001
