@@ -26,7 +26,6 @@ class RunContext:
     env: str = ""
     dataset_version: str = ""
     model_version: str = ""
-    backend: str = ""
     current_node: str = ""
 
     def __post_init__(self) -> None:
