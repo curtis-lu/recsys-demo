@@ -47,7 +47,7 @@ def _make_valid_data(spark, n_customers=3):
     return ranked, scoring
 
 
-class TestValidatePredicationsPass:
+class TestValidatePredictionsPass:
     def test_valid_data_passes(self, spark, parameters):
         ranked, scoring = _make_valid_data(spark)
         result = validate_predictions(ranked, scoring, parameters)
