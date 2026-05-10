@@ -92,7 +92,7 @@ class TestTrainingPipeline:
 class TestTrainingPipelineE2E:
     """End-to-end: dataset pipeline → training pipeline → artifact validation."""
 
-    def test_dataset_then_training(self, tmp_path):
+    def test_dataset_then_training(self, tmp_path, spark):
         from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
         from recsys_tfb.io.extract import extract_Xy
         from recsys_tfb.io.handles import ParquetHandle
@@ -147,8 +147,7 @@ class TestTrainingPipelineE2E:
                 },
             },
             "dataset": {
-                "train_snap_date_start": "2024-01-31",
-                "train_snap_date_end": "2024-03-31",
+                "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-03-31"],
                 "sample_ratio": 1.0,
                 "sample_group_keys": ["cust_segment_typ", "prod_name"],
                 "sample_ratio_overrides": {},
@@ -191,11 +190,15 @@ class TestTrainingPipelineE2E:
         # -- Build sample_pool from label_table (customer-month-product granularity) --
         sample_pool = label_table[["snap_date", "cust_id", "cust_segment_typ", "prod_name"]].drop_duplicates().reset_index(drop=True)
 
+        feature_table_sdf = spark.createDataFrame(feature_table)
+        label_table_sdf = spark.createDataFrame(label_table)
+        sample_pool_sdf = spark.createDataFrame(sample_pool)
+
         # -- Build catalog with MemoryDatasets for source data --
         catalog = DataCatalog()
-        catalog.add("feature_table", MemoryDataset(feature_table))
-        catalog.add("label_table", MemoryDataset(label_table))
-        catalog.add("sample_pool", MemoryDataset(sample_pool))
+        catalog.add("feature_table", MemoryDataset(feature_table_sdf))
+        catalog.add("label_table", MemoryDataset(label_table_sdf))
+        catalog.add("sample_pool", MemoryDataset(sample_pool_sdf))
         catalog.add("parameters", MemoryDataset(parameters))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
@@ -222,9 +225,9 @@ class TestTrainingPipelineE2E:
             ("train_dev_model_input", "train_dev_parquet_handle"),
             ("val_model_input", "val_parquet_handle"),
         ):
-            mi_df = catalog.load(mi_name)
+            mi_sdf = catalog.load(mi_name)
             parquet_path = tmp_path / f"{mi_name}.parquet"
-            mi_df.to_parquet(parquet_path)
+            mi_sdf.toPandas().to_parquet(parquet_path)
             catalog.add(handle_name, MemoryDataset(ParquetHandle(str(parquet_path))))
 
         # Also register the lgb handle slots and intermediate names the pipeline produces.
