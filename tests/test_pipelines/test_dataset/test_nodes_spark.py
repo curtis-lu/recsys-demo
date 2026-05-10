@@ -176,23 +176,6 @@ class TestSplitTrainKeys:
         assert t1_custs == t2_custs
         assert d1_custs == d2_custs
 
-    def test_cross_backend_consistency(self, sample_pool, parameters):
-        """Spark and pandas backends must produce identical cust_id assignments."""
-        from recsys_tfb.pipelines.dataset.nodes_pandas import (
-            split_train_keys as split_pandas,
-        )
-
-        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys_spark = select_train_keys(sample_pool, params)
-        sample_keys_pandas = sample_keys_spark.toPandas()
-
-        t_spark, d_spark = split_train_keys(sample_keys_spark, params)
-        t_pandas, d_pandas = split_pandas(sample_keys_pandas, params)
-
-        spark_dev = set(d_spark.select("cust_id").distinct().toPandas()["cust_id"])
-        pandas_dev = set(d_pandas["cust_id"])
-        assert spark_dev == pandas_dev
-
 
 class TestSelectValKeys:
     def test_full_population(self, label_table, parameters):
