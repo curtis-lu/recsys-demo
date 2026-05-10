@@ -44,9 +44,9 @@ mlflow:
 # re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
 # `cache.root` is the single source of truth for the cache path: both
 # _resolve_cache_path() (existence check) and _populate_cache_from_hive()
-# (hadoop fs copyToLocal destination) read from here. catalog.yaml does NOT
-# register cached_*_model_input — see catalog.yaml inline note.
-# cache.enabled was removed; all environments now write parquet to disk and
-# pass ParquetHandle through the DAG. dev/test use a tmp cache.root.
+# (hadoop fs copyToLocal destination) read from here. Persistence is owned by
+# training/nodes.py::_materialize_parquet_handle, not by catalog datasets.
+# All environments write parquet to disk and pass ParquetHandle through the
+# DAG; dev/test use a tmp cache.root.
 cache:
   root: /Users/curtislu/projects/recsys_tfb/data/recsys_cache

@@ -20,12 +20,10 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - No UDFs in Spark
 - No network access
 - No additional package installation
-- Dev 環境使用合成假資料取代 Hive tables
-- Storage：Parquet（local dev）/ Parquet on HDFS（production）
 
-## Local Spark backend testing
+## Local dev-cluster testing
 
-互動測試 backend=spark 的 pipeline：
+在本機 dev-cluster 互動測試 pipeline：
 
 - **本機環境**：`~/dev-cluster/`（Docker Spark+HDFS+Hive Metastore），詳見其 README。
 - **Hive 來源表 setup**：`scripts/setup_hive_dev.py` 把 `data/{feature_table,label_table,sample_pool}.parquet` 寫成 `ml_recsys.<table>` Hive managed table。**跳過 source_etl**（合成資料已是 feature/label 粒度，沒有上游 `feature_concat`/`label_ccard` 等表）。腳本內**必須把 `snap_date` cast 成 DATE**（合成 parquet 是 timestamp[us]，不轉的話 Spark 對 `'YYYY-MM-DD'` 字串 filter 會 0 row，val/test/calibration 全空）。
@@ -38,7 +36,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 ### Pipeline 與 SPARK_CONF_DIR 的對應
 
-`--env production` 的 training cache 跟 model artifact (`model.txt` / `calibrator.pkl` / `*.json`) 都駐留在 driver-local fs：cache 由 `_cache_or_passthrough` 自己從 HDFS `copyToLocal` 拉下來（不經 catalog `ParquetDataset`、不依賴 `spark.master` 模式；catalog 上 `cached_*_model_input` 已不再登記，由 framework auto-MemoryDataset 做 in-memory 中介）；artifact 走 Python `open()` 寫不認 `hdfs://` scheme。Pipeline 依下表選對 `SPARK_CONF_DIR`：
+`--env production` 的 training cache 跟 model artifact (`model.txt` / `calibrator.pkl` / `*.json`) 都駐留在 driver-local fs：cache 由 `_materialize_parquet_handle`（`src/recsys_tfb/pipelines/training/nodes.py`）自己從 HDFS `copyToLocal` 拉下來（不經 catalog `ParquetDataset`、不依賴 `spark.master` 模式；cache node output 是 `ParquetHandle`，由 framework auto-MemoryDataset 在 DAG 中銜接；dev/test 也必須走 `cache.root`，不再有 `enabled=false` 繞行路徑）；artifact 走 Python `open()` 寫不認 `hdfs://` scheme。Pipeline 依下表選對 `SPARK_CONF_DIR`：
 
 | Pipeline | `SPARK_CONF_DIR` | spark.master | 為什麼 |
 |---|---|---|---|
