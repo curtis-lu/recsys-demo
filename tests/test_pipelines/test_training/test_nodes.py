@@ -13,9 +13,42 @@ from recsys_tfb.pipelines.training.nodes import (
     calibrate_model,
     evaluate_model,
     log_experiment,
-    train_model,
     tune_hyperparameters,
 )
+
+
+def _quick_train_adapter(lgb_handles, training_parameters):
+    """Build a quick-trained LightGBMAdapter for downstream-node tests.
+
+    Replaces the legacy `train_model` node helper; mirrors its lgb.Dataset
+    wiring (train + train_dev as val) so tests get the same model artefact.
+    """
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    train_lgb_h, train_dev_lgb_h = lgb_handles
+    best_params = {
+        "learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
+        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8,
+    }
+    seed = training_parameters.get("random_seed", 42)
+    tp = training_parameters["training"]
+    params = {
+        **tp.get("algorithm_params", {}),
+        "seed": seed,
+        **best_params,
+        "num_iterations": tp.get("num_iterations", 50),
+        "early_stopping_rounds": tp.get("early_stopping_rounds", 10),
+    }
+
+    adapter = LightGBMAdapter()
+    ds_train = train_lgb_h.load()
+    ds_dev = train_dev_lgb_h.load(reference=ds_train)
+    adapter.train(
+        X_train=None, y_train=None, X_val=None, y_val=None,
+        params=params,
+        train_dataset=ds_train, val_dataset=ds_dev,
+    )
+    return adapter
 
 
 # ---- Fixtures ----
@@ -171,12 +204,12 @@ class TestComputeAP:
 
 
 class TestTuneHyperparameters:
-    def test_returns_valid_params(
+    def test_returns_valid_params_and_model(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        best_params = tune_hyperparameters(
+        best_params, best_model = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
@@ -184,6 +217,7 @@ class TestTuneHyperparameters:
         assert "learning_rate" in best_params
         assert "num_leaves" in best_params
         assert "max_depth" in best_params
+        assert isinstance(best_model, ModelAdapter)
 
     def test_params_in_search_space(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -191,7 +225,7 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
         space = training_parameters["training"]["search_space"]
-        best_params = tune_hyperparameters(
+        best_params, _ = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
 
@@ -203,49 +237,22 @@ class TestTuneHyperparameters:
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        r1 = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
-        r2 = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
-        assert r1 == r2
+        p1, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        p2, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        assert p1 == p2
 
-
-# ---- Tests: train_model ----
-
-
-class TestTrainModel:
-    def test_returns_adapter(
-        self, lgb_handles, preprocessor_metadata, training_parameters
-    ):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
-        assert isinstance(model, ModelAdapter)
-
-    def test_predictions_are_probabilities(
+    def test_best_model_predictions_are_probabilities(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
     ):
+        """Best-trial model returned by HPO produces valid probability scores."""
         train_lgb_h, train_dev_lgb_h = lgb_handles
-        _, _, val_h, _, _, val_df = synthetic_model_inputs
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        _, _, val_h, *_ = synthetic_model_inputs
+        _, best_model = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
+        )
         X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
-        preds = model.predict(X_val)
+        preds = best_model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
-
-    def test_early_stopping(
-        self, lgb_handles, preprocessor_metadata, training_parameters
-    ):
-        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-
-        train_lgb_h, train_dev_lgb_h = lgb_handles
-        params = {**training_parameters, "training": {**training_parameters["training"], "num_iterations": 500, "early_stopping_rounds": 5}}
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, params)
-        # With small data and early_stopping_rounds=5, should stop before 500
-        assert isinstance(model, LightGBMAdapter)
-        assert model.booster.current_iteration() < 500
 
 
 # ---- Tests: evaluate_model ----
@@ -253,10 +260,7 @@ class TestTrainModel:
 
 class TestEvaluateModel:
     def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        return _quick_train_adapter(lgb_handles, training_parameters)
 
     def test_returns_evaluation_dict(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -381,10 +385,9 @@ class TestLogExperiment:
     def test_logs_to_mlflow(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
     ):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        model = _quick_train_adapter(lgb_handles, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.75,
@@ -415,10 +418,9 @@ class TestLogExperiment:
     def test_logs_calibration_info(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
     ):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
         best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
                        "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        model = _quick_train_adapter(lgb_handles, training_parameters)
 
         evaluation_results = {
             "overall_map": 0.76,
@@ -454,10 +456,7 @@ class TestLogExperiment:
 
 class TestCalibrateModel:
     def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        return train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        return _quick_train_adapter(lgb_handles, training_parameters)
 
     def test_returns_calibrated_adapter(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -504,10 +503,7 @@ class TestCalibrateModel:
 
 class TestEvaluateModelCalibrated:
     def _train_and_calibrate(self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        train_lgb_h, train_dev_lgb_h = lgb_handles
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = train_model(train_lgb_h, train_dev_lgb_h, best_params, preprocessor_metadata, training_parameters)
+        model = _quick_train_adapter(lgb_handles, training_parameters)
         train_h, *_ = synthetic_model_inputs
         return calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
 

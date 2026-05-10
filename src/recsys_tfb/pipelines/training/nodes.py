@@ -256,12 +256,19 @@ def tune_hyperparameters(
     val_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> dict:
-    """Search for optimal hyperparameters using Optuna.
+) -> tuple[dict, ModelAdapter]:
+    """Search for optimal hyperparameters using Optuna and return best trial's model.
 
     train + train_dev consumed as pre-built lgb.Dataset binaries (no rebinning
     across trials). val read fresh from parquet inside this scope so its pandas
     DataFrame is freed when the function returns.
+
+    Returns (best_params, best_model). best_model is the adapter from the trial
+    that achieved the highest val mAP — kept in-memory via a closure-tracked
+    state so no separate retrain step is needed. Each trial's training is
+    deterministic given (params, seed, num_iterations, early_stopping_rounds,
+    train_lgb, train_dev_lgb), so this is byte-equivalent to the legacy
+    "tune → train_model" two-step flow.
     """
     from recsys_tfb.io.extract import extract_Xy
 
@@ -276,6 +283,8 @@ def tune_hyperparameters(
 
     with log_step(logger, "extract_features"):
         X_v, y_v = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
+
+    best_state: dict = {"ap": -1.0, "model": None}
 
     def objective(trial: optuna.Trial) -> float:
         trial_params = {
@@ -332,7 +341,13 @@ def tune_hyperparameters(
         y_pred = adapter.predict(X_v)
 
         ap = compute_ap(y_v, y_pred)
-        return ap if ap is not None else 0.0
+        ap = ap if ap is not None else 0.0
+
+        if ap > best_state["ap"]:
+            best_state["ap"] = ap
+            best_state["model"] = adapter
+
+        return ap
 
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
@@ -341,48 +356,9 @@ def tune_hyperparameters(
         study.optimize(objective, n_trials=n_trials)
 
     best_params = study.best_params
+    best_model = best_state["model"]
     logger.info("Best trial mAP: %.4f, params: %s", study.best_value, best_params)
-    return best_params
-
-
-def train_model(
-    train_lgb_handle,
-    train_dev_lgb_handle,
-    best_params: dict,
-    preprocessor_metadata: dict,
-    parameters: dict,
-) -> ModelAdapter:
-    """Train a model using ModelAdapter with early stopping.
-
-    Consumes pre-built lgb.Dataset binaries; no parquet read in this scope.
-    """
-    training_params = parameters["training"]
-    seed = parameters.get("random_seed", 42)
-    num_iterations = training_params.get("num_iterations", 500)
-    early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
-    algorithm = training_params.get("algorithm", "lightgbm")
-    algorithm_params = training_params.get("algorithm_params", {})
-
-    params = {
-        **algorithm_params,
-        "seed": seed,
-        **best_params,
-        "num_iterations": num_iterations,
-        "early_stopping_rounds": early_stopping_rounds,
-    }
-
-    with log_step(logger, "model_train"):
-        adapter = get_adapter(algorithm)
-        ds_train = train_lgb_handle.load()
-        ds_dev = train_dev_lgb_handle.load(reference=ds_train)
-        adapter.train(
-            X_train=None, y_train=None, X_val=None, y_val=None,
-            params=params,
-            train_dataset=ds_train, val_dataset=ds_dev,
-        )
-
-    logger.info("Model trained with algorithm=%s", algorithm)
-    return adapter
+    return best_params, best_model
 
 
 def calibrate_model(

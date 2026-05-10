@@ -12,13 +12,14 @@ from recsys_tfb.pipelines.training.nodes import (
     evaluate_model,
     log_experiment,
     prepare_lgb_train_inputs,
-    train_model,
     tune_hyperparameters,
 )
 
 
 def create_pipeline(enable_calibration: bool = False) -> Pipeline:
-    train_model_output = "trained_model" if enable_calibration else "model"
+    # Best-trial model from HPO is the final model (no separate retrain step).
+    # Under calibration it lands in `trained_model` so calibrate_model can wrap it.
+    hpo_model_output = "trained_model" if enable_calibration else "model"
 
     nodes = [
         Node(
@@ -63,24 +64,16 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
     )
 
-    nodes.extend([
+    nodes.append(
         Node(
             tune_hyperparameters,
             inputs=[
                 "train_lgb_handle", "train_dev_lgb_handle",
                 "val_parquet_handle", "preprocessor", "parameters",
             ],
-            outputs="best_params",
+            outputs=["best_params", hpo_model_output],
         ),
-        Node(
-            train_model,
-            inputs=[
-                "train_lgb_handle", "train_dev_lgb_handle",
-                "best_params", "preprocessor", "parameters",
-            ],
-            outputs=train_model_output,
-        ),
-    ])
+    )
 
     if enable_calibration:
         nodes.append(

@@ -8,10 +8,11 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_nine_nodes(self):
+    def test_pipeline_has_eight_nodes(self):
         pipeline = create_pipeline()
-        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune + train + evaluate + log
-        assert len(pipeline.nodes) == 9
+        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune + evaluate + log
+        # tune_hyperparameters now also outputs the best-trial model (no separate train_model node).
+        assert len(pipeline.nodes) == 8
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -41,7 +42,7 @@ class TestTrainingPipeline:
         assert "cache_test_model_input" in names
         assert "prepare_lgb_train_inputs" in names
         assert "tune_hyperparameters" in names
-        assert "train_model" in names
+        assert "train_model" not in names
         assert "evaluate_model" in names
         assert "log_experiment" in names
 
@@ -65,18 +66,19 @@ class TestTrainingPipeline:
         assert names.index("cache_val_model_input") < names.index("tune_hyperparameters")
         # test cache must come before evaluate (test_parquet_handle flows into evaluate)
         assert names.index("cache_test_model_input") < names.index("evaluate_model")
-        # prepare must come before tune and train
+        # prepare must come before tune
         assert names.index("prepare_lgb_train_inputs") < names.index("tune_hyperparameters")
-        assert names.index("tune_hyperparameters") < names.index("train_model")
-        assert names.index("train_model") < names.index("evaluate_model")
+        # tune produces both best_params and the final model — flows directly into evaluate
+        assert names.index("tune_hyperparameters") < names.index("evaluate_model")
         assert names.index("evaluate_model") < names.index("log_experiment")
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_eleven_nodes(self):
+    def test_calibration_pipeline_has_ten_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 5 cache nodes + prepare_lgb + tune + train + calibrate + evaluate + log
-        assert len(pipeline.nodes) == 11
+        # 5 cache nodes + prepare_lgb + tune + calibrate + evaluate + log
+        # tune_hyperparameters now also outputs the best-trial model.
+        assert len(pipeline.nodes) == 10
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -97,7 +99,7 @@ class TestTrainingPipeline:
         pipeline = create_pipeline(enable_calibration=True)
         names = [n.name for n in pipeline.nodes]
         assert names.index("cache_calibration_model_input") < names.index("calibrate_model")
-        assert names.index("train_model") < names.index("calibrate_model")
+        assert names.index("tune_hyperparameters") < names.index("calibrate_model")
         assert names.index("calibrate_model") < names.index("evaluate_model")
 
 
