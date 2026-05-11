@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pandas as pd
 import pytest
 
 
@@ -45,8 +44,10 @@ class TestPrepareEvalDataModelVersionFilter:
 
         assert predictions.filter.call_count == 1
         filter_arg = predictions.filter.call_args[0][0]
-        # Spark Column repr will include the literal model_version value
-        assert "20260511_153000" in str(filter_arg)
+        # Spark Column repr includes both column name and literal value
+        filter_repr = str(filter_arg)
+        assert "model_version" in filter_repr
+        assert "20260511_153000" in filter_repr
 
     def test_raises_when_model_version_missing(self, parameters):
         from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
