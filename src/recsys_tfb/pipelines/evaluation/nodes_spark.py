@@ -77,6 +77,17 @@ def prepare_eval_data(
                     filepath,
                 )
 
+    # Filter predictions to the resolved model_version (resolved upstream by
+    # __main__.py via core.versioning.resolve_model_version).
+    model_version = parameters.get("model_version")
+    if model_version is None:
+        raise RuntimeError(
+            "parameters['model_version'] missing. CLI should resolve via "
+            "core.versioning.resolve_model_version before pipeline run."
+        )
+    logger.info("Filtering predictions to model_version=%s", model_version)
+    ranked_predictions = ranked_predictions.filter(F.col("model_version") == model_version)
+
     # Filter labels to snap_dates in predictions
     pred_snap_dates = ranked_predictions.select(time_col).distinct()
     labels = labels.join(pred_snap_dates, on=time_col, how="inner")

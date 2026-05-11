@@ -307,3 +307,16 @@ class TestCLI:
             assert result.exit_code == 1
         finally:
             os.chdir(old_cwd)
+
+
+class TestEvaluationCLIFlags:
+    """evaluation subcommand exposes --post-training flag."""
+
+    def test_post_training_flag_in_help(self):
+        from typer.testing import CliRunner
+        from recsys_tfb.__main__ import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["evaluation", "--help"])
+        assert result.exit_code == 0
+        assert "--post-training" in result.output

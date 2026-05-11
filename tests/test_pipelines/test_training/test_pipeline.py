@@ -8,11 +8,17 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_nine_nodes(self):
+    def test_pipeline_has_eleven_nodes(self):
         pipeline = create_pipeline()
         # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune
-        # + finalize + evaluate + log
-        assert len(pipeline.nodes) == 9
+        # + finalize + evaluate + write_test_predictions + compute_test_mAP + log
+        assert len(pipeline.nodes) == 11
+
+    def test_pipeline_has_write_test_predictions_node(self):
+        pipeline = create_pipeline()
+        names = [n.name for n in pipeline.nodes]
+        assert "write_test_predictions" in names
+        assert "compute_test_mAP" in names
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -28,6 +34,7 @@ class TestTrainingPipeline:
         expected = {
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
+            "test_predictions_pdf", "test_labels_pdf",
             "train_parquet_handle", "train_dev_parquet_handle",
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
@@ -73,14 +80,18 @@ class TestTrainingPipeline:
         # tune produces best_params/best_iteration/hpo_best_model → finalize → evaluate
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
         assert names.index("finalize_model") < names.index("evaluate_model")
-        assert names.index("evaluate_model") < names.index("log_experiment")
+        # evaluate_model → (write_test_predictions, compute_test_mAP) → log_experiment
+        assert names.index("evaluate_model") < names.index("write_test_predictions")
+        assert names.index("evaluate_model") < names.index("compute_test_mAP")
+        assert names.index("compute_test_mAP") < names.index("log_experiment")
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_eleven_nodes(self):
+    def test_calibration_pipeline_has_thirteen_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 5 cache nodes + prepare_lgb + tune + finalize + calibrate + evaluate + log
-        assert len(pipeline.nodes) == 11
+        # 5 cache nodes + prepare_lgb + tune + finalize + calibrate + evaluate
+        # + write_test_predictions + compute_test_mAP + log
+        assert len(pipeline.nodes) == 13
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -226,6 +237,7 @@ class TestTrainingPipelineE2E:
             "preprocessor", "category_mappings",
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
+            "test_predictions_pdf", "test_labels_pdf",
         ):
             catalog.add(name, MemoryDataset())
 
@@ -260,15 +272,19 @@ class TestTrainingPipelineE2E:
 
         full_training_pipeline = _create_training_pipeline()
         # Drop cache nodes — their outputs are already populated in catalog.
-        cache_node_names = {
+        # Also drop write_test_predictions: it writes to a Hive table via a
+        # real metastore which the local Spark fixture doesn't provide. The
+        # write path has dedicated unit-test coverage in TestWriteTestPredictions.
+        skipped_node_names = {
             "cache_train_model_input",
             "cache_train_dev_model_input",
             "cache_val_model_input",
             "cache_test_model_input",
+            "write_test_predictions",
         }
         training_nodes = [
             n for n in full_training_pipeline.nodes
-            if n.name not in cache_node_names
+            if n.name not in skipped_node_names
         ]
         training_pipeline = Pipeline(training_nodes)
         runner.run(training_pipeline, catalog)
