@@ -118,6 +118,7 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
+    - {name: score_uncalibrated, type: DOUBLE}  # nullable: only populated for calibrated models
     - {name: rank, type: BIGINT}
   partition_cols:
     - {name: snap_date, type: STRING}
@@ -213,6 +214,26 @@ class TestEvaluateModel:
         group_cols = [schema["time"]] + schema["entity"]
         min_ranks = predictions_pdf.groupby(group_cols)[schema["rank"]].min()
         assert (min_ranks == 1).all()
+
+    def test_non_calibrated_model_no_uncalibrated_column(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        model = trained_model_after_finalize
+        predictions_pdf, _ = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        assert "score_uncalibrated" not in predictions_pdf.columns
+
+    def test_calibrated_model_includes_uncalibrated_column(
+        self, calibrated_model, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+        if not isinstance(calibrated_model, CalibratedModelAdapter):
+            import pytest
+            pytest.skip("fixture didn't yield a CalibratedModelAdapter")
+        predictions_pdf, _ = evaluate_model(
+            calibrated_model, val_h, preprocessor_metadata, training_parameters
+        )
+        assert "score_uncalibrated" in predictions_pdf.columns
+        assert predictions_pdf["score_uncalibrated"].notna().all()
 ```
 
 - [ ] **Step 2: Run tests — verify they fail**
@@ -273,12 +294,20 @@ def evaluate_model(
         .astype(int)
     )
 
+    # For calibrated models, also persist the uncalibrated scores. Downstream
+    # compute_test_mAP adds an uncalibrated comparison sub-dict; write_test_predictions
+    # writes the column to Hive (null for non-calibrated runs).
+    if isinstance(model, CalibratedModelAdapter):
+        with log_step(logger, "predict_uncalibrated"):
+            predictions_pdf["score_uncalibrated"] = model.predict_uncalibrated(X)
+
     labels_pdf = eval_pdf[identity_cols + [label_col]].reset_index(drop=True).copy()
 
     logger.info(
-        "evaluate_model: predicted %d rows, %d queries",
+        "evaluate_model: predicted %d rows, %d queries, calibrated=%s",
         len(predictions_pdf),
         predictions_pdf[group_cols].drop_duplicates().shape[0],
+        isinstance(model, CalibratedModelAdapter),
     )
     return predictions_pdf, labels_pdf
 ```
@@ -360,6 +389,17 @@ class TestComputeTestMAP:
         assert "uncalibrated" in result
         assert "overall_map" in result["uncalibrated"]
         assert "per_product_ap" in result["uncalibrated"]
+
+    def test_non_calibrated_model_no_uncalibrated_subdict(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training.nodes import compute_test_mAP
+        model = trained_model_after_finalize
+        predictions_pdf, labels_pdf = evaluate_model(
+            model, val_h, preprocessor_metadata, training_parameters
+        )
+        result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
+        assert "uncalibrated" not in result
 ```
 
 If `calibrated_model` fixture doesn't exist, mark that test with `@pytest.mark.skipif` instead of relying on fixture absence — adjust based on existing conftest.py.
@@ -395,55 +435,53 @@ def compute_test_mAP(
     identity_cols = schema_cfg["identity_columns"]
 
     merged = test_predictions_pdf.merge(test_labels_pdf, on=identity_cols, how="inner")
-    predictions_for_metrics = merged[identity_cols + [score_col]].copy()
-    labels_for_metrics = merged[identity_cols + [label_col]].copy()
 
-    metrics = compute_all_metrics(
-        predictions_for_metrics, labels_for_metrics, k_values=["all"]
-    )
+    def _calc_metrics(score_column_name: str) -> dict:
+        preds = merged[identity_cols + [score_column_name]].rename(
+            columns={score_column_name: score_col}
+        )
+        labs = merged[identity_cols + [label_col]]
+        m = compute_all_metrics(preds, labs, k_values=["all"])
+        n_products = preds[item_col].nunique()
+        map_key = f"map@{n_products}"
+        return {
+            "overall_map": m["overall"].get(map_key, 0.0),
+            "per_product_ap": {
+                p: v.get(map_key, 0.0) for p, v in m["per_product"].items()
+            },
+            "n_queries": m["n_queries"],
+            "n_excluded_queries": m["n_excluded_queries"],
+        }
 
-    n_products = predictions_for_metrics[item_col].nunique()
-    map_key = f"map@{n_products}"
-
-    overall_map = metrics["overall"].get(map_key, 0.0)
-    per_product_ap = {
-        prod: vals.get(map_key, 0.0)
-        for prod, vals in metrics["per_product"].items()
-    }
-
+    cal = _calc_metrics(score_col)
     evaluation_results = {
-        "overall_map": overall_map,
-        "per_product_ap": per_product_ap,
-        "n_queries": metrics["n_queries"],
-        "n_excluded_queries": metrics["n_excluded_queries"],
+        "overall_map": cal["overall_map"],
+        "per_product_ap": cal["per_product_ap"],
+        "n_queries": cal["n_queries"],
+        "n_excluded_queries": cal["n_excluded_queries"],
     }
+
+    if (
+        "score_uncalibrated" in test_predictions_pdf.columns
+        and test_predictions_pdf["score_uncalibrated"].notna().any()
+    ):
+        uncal = _calc_metrics("score_uncalibrated")
+        evaluation_results["uncalibrated"] = {
+            "overall_map": uncal["overall_map"],
+            "per_product_ap": uncal["per_product_ap"],
+        }
+        logger.info(
+            "compute_test_mAP: uncalibrated mAP=%.4f vs calibrated mAP=%.4f",
+            uncal["overall_map"], cal["overall_map"],
+        )
 
     logger.info(
         "compute_test_mAP: mAP=%.4f, products=%d, excluded_queries=%d",
-        overall_map,
-        len(per_product_ap),
-        metrics["n_excluded_queries"],
+        cal["overall_map"],
+        len(cal["per_product_ap"]),
+        cal["n_excluded_queries"],
     )
     return evaluation_results
-```
-
-Note: the calibrated-model `uncalibrated` sub-dict logic from old `evaluate_model` is now MISSING in this function because we no longer have direct access to the model here. **Resolution:** Add a separate path — `compute_test_mAP` accepts an optional third argument for uncalibrated scores, or accept that uncalibrated comparison moves out of training pipeline (rely on evaluation pipeline running both versions).
-
-For this plan: **scope decision** — drop the uncalibrated comparison from `compute_test_mAP`. Evaluation pipeline already handles calibration analysis separately (it's a richer report). Mark this as a small behavior delta in the PR description. Update the third test in step 1 to instead assert that **no** `uncalibrated` key is present:
-
-Replace `test_calibrated_model_includes_uncalibrated_subdict` with:
-
-```python
-def test_calibrated_model_no_uncalibrated_subdict(
-    self, calibrated_model, val_h, preprocessor_metadata, training_parameters
-):
-    """After refactor, uncalibrated comparison moves to evaluation pipeline."""
-    from recsys_tfb.pipelines.training.nodes import compute_test_mAP
-    predictions_pdf, labels_pdf = evaluate_model(
-        calibrated_model, val_h, preprocessor_metadata, training_parameters
-    )
-    result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
-    assert "uncalibrated" not in result
 ```
 
 - [ ] **Step 4: Run tests — verify they pass**
@@ -571,6 +609,68 @@ class TestWriteTestPredictions:
         ]
         assert len(ddl_calls) == 1, f"expected 1 CREATE TABLE call, got {len(ddl_calls)}"
         assert "training_eval_predictions" in str(ddl_calls[0])
+        # DDL must include score_uncalibrated column
+        assert "score_uncalibrated" in str(ddl_calls[0])
+
+    def test_non_calibrated_run_fills_score_uncalibrated_null(
+        self, predictions_pdf, parameters_with_model_version
+    ):
+        """Non-calibrated input pdf lacks score_uncalibrated; node fills NaN."""
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        mock_spark = MagicMock(name="SparkSession")
+        captured_chunks = []
+
+        def capture_create_df(pdf):
+            captured_chunks.append(pdf.copy())
+            return MagicMock()
+        mock_spark.createDataFrame.side_effect = capture_create_df
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        for chunk in captured_chunks:
+            assert "score_uncalibrated" in chunk.columns
+            assert chunk["score_uncalibrated"].isna().all()
+
+    def test_calibrated_run_preserves_score_uncalibrated(
+        self, parameters_with_model_version
+    ):
+        """Calibrated input pdf has score_uncalibrated; node passes values through."""
+        import pandas as pd
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        predictions_pdf = pd.DataFrame({
+            "cust_id": ["c1", "c2"],
+            "snap_date": ["2025-12-31", "2025-12-31"],
+            "prod_name": ["fund_stock", "fund_stock"],
+            "score": [0.9, 0.7],
+            "score_uncalibrated": [0.85, 0.65],
+            "rank": [1, 2],
+        })
+
+        mock_spark = MagicMock(name="SparkSession")
+        captured_chunks = []
+
+        def capture_create_df(pdf):
+            captured_chunks.append(pdf.copy())
+            return MagicMock()
+        mock_spark.createDataFrame.side_effect = capture_create_df
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        assert len(captured_chunks) == 1
+        chunk = captured_chunks[0]
+        assert list(chunk["score_uncalibrated"]) == [0.85, 0.65]
 ```
 
 - [ ] **Step 2: Run tests — verify they fail (function doesn't exist)**
@@ -588,11 +688,15 @@ Add after `compute_test_mAP`:
 
 ```python
 def _build_training_eval_predictions_ddl(table_fqn: str) -> str:
-    """CREATE TABLE IF NOT EXISTS DDL — schema matches catalog declaration."""
+    """CREATE TABLE IF NOT EXISTS DDL — schema matches catalog declaration.
+
+    score_uncalibrated is nullable: populated only for CalibratedModelAdapter runs.
+    """
     return f"""
     CREATE TABLE IF NOT EXISTS {table_fqn} (
         cust_id STRING,
         score DOUBLE,
+        score_uncalibrated DOUBLE,
         `rank` BIGINT
     )
     PARTITIONED BY (snap_date STRING, prod_name STRING, model_version STRING)
@@ -610,29 +714,43 @@ def write_test_predictions(
     `training_eval_predictions` declares the table for downstream evaluation reads;
     this function owns the writes (DDL bootstrap + per-prod insertInto).
     """
+    import numpy as np
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
+    score_col = schema_cfg["score"]
+    rank_col = schema_cfg["rank"]
+    identity_cols = schema_cfg["identity_columns"]
     spark = get_or_create_spark_session()
     model_version = parameters["model_version"]
     hive_db = parameters["hive"]["db"]
     table_fqn = f"{hive_db}.training_eval_predictions"
 
+    pdf = test_predictions_pdf.copy()
+    if "score_uncalibrated" not in pdf.columns:
+        pdf["score_uncalibrated"] = np.nan  # ensure column present so schema matches Hive
+    pdf["score_uncalibrated"] = pdf["score_uncalibrated"].astype("float64")
+
+    # Order columns to match Hive table column order (excluding partition cols).
+    cust_id_col = next(c for c in identity_cols if c not in {item_col, schema_cfg["time"]})
+    write_cols = [cust_id_col, score_col, "score_uncalibrated", rank_col, schema_cfg["time"], item_col]
+    pdf = pdf[write_cols]
+
     spark.sql(_build_training_eval_predictions_ddl(table_fqn))
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
-    distinct_prods = sorted(test_predictions_pdf[item_col].unique())
+    distinct_prods = sorted(pdf[item_col].unique())
     logger.info(
         "write_test_predictions: %d prods × ~%d rows = %d total → %s",
         len(distinct_prods),
-        len(test_predictions_pdf) // max(len(distinct_prods), 1),
-        len(test_predictions_pdf),
+        len(pdf) // max(len(distinct_prods), 1),
+        len(pdf),
         table_fqn,
     )
 
     for prod in distinct_prods:
-        chunk_pdf = test_predictions_pdf[test_predictions_pdf[item_col] == prod]
+        chunk_pdf = pdf[pdf[item_col] == prod]
         chunk_sdf = (
             spark.createDataFrame(chunk_pdf)
                  .withColumn("model_version", F.lit(model_version))
@@ -1404,8 +1522,8 @@ The commits within each Phase tell a coherent story; PR review should be by phas
 - §2.6 (usage examples) → Verified in Task 2.6 smoke ✓
 - Phase 3 → out of scope, Task 2.6 confirms monitoring still works ✓
 
-**Behavior delta from spec:**
-- Spec §1.6 implied `compute_test_mAP` keeps the uncalibrated comparison sub-dict from old `evaluate_model`. Task 1.3 documents the **drop** (model handle no longer reaches the metric node post-refactor); evaluation pipeline owns richer calibration analysis. Surface this in PR description.
+**Catalog schema additions beyond spec:**
+- `training_eval_predictions` Hive table includes a nullable `score_uncalibrated` DOUBLE column. Calibrated runs populate it; non-calibrated runs fill NaN. Preserves the old `evaluate_model` uncalibrated-comparison behavior end-to-end (in-memory through `compute_test_mAP` for MLflow, persisted to Hive for future ad-hoc analysis).
 
 **Placeholder scan:** None found.
 
