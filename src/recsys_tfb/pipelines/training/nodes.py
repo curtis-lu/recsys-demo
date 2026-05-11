@@ -671,10 +671,11 @@ def write_test_predictions(
     rank_col = schema_cfg["rank"]
     time_col = schema_cfg["time"]
     entity_cols = schema_cfg["entity"]
-    assert len(entity_cols) == 1, (
-        f"write_test_predictions expects a single entity column; "
-        f"got {entity_cols}. Hive DDL hard-codes 'cust_id'."
-    )
+    if len(entity_cols) != 1:
+        raise ValueError(
+            f"write_test_predictions expects a single entity column; "
+            f"got {entity_cols}. Hive DDL hard-codes 'cust_id'."
+        )
     cust_id_col = entity_cols[0]
     spark = get_or_create_spark_session()
     model_version = parameters["model_version"]
@@ -686,7 +687,6 @@ def write_test_predictions(
             "test_predictions_pdf missing 'score_uncalibrated' column. "
             "evaluate_model must populate it (= score for non-calibrated runs)."
         )
-
 
     # Column order matches Hive table: non-partition cols first, then partition
     # cols (snap_date, prod_name) and finally model_version. Dynamic-partition
