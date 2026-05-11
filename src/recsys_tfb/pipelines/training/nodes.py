@@ -540,62 +540,64 @@ def evaluate_model(
     eval_parquet_handle,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> dict:
-    """Compute ranking-aware mAP with (snap_date, cust_id) as query groups.
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Predict on the test set and rank within each query group.
 
-    eval_parquet_handle points to a local parquet directory (test set in the
-    standard wiring); we read it once here and use the resulting pandas
-    DataFrame for both feature extraction and ranking-metric grouping.
+    Returns:
+        (predictions_pdf, labels_pdf):
+          predictions_pdf — identity_columns + [score, score_uncalibrated, rank]
+          labels_pdf      — identity_columns + [label]
 
-    When the model is a CalibratedModelAdapter, also computes uncalibrated
-    metrics for comparison.
+    Downstream nodes consume the predictions/labels separately:
+      - write_test_predictions persists predictions to Hive
+      - compute_test_mAP computes the dict consumed by MLflow
+
+    score_uncalibrated semantics: always the raw model output. For calibrated
+    runs it differs from score; for non-calibrated runs it equals score.
     """
     from recsys_tfb.io.extract import extract_Xy
 
-    schema = get_schema(parameters)
-    feature_cols = preprocessor_metadata["feature_columns"]
+    schema_cfg = get_schema(parameters)
+    score_col = schema_cfg["score"]
+    rank_col = schema_cfg["rank"]
+    label_col = schema_cfg["label"]
+    identity_cols = schema_cfg["identity_columns"]
+    time_col = schema_cfg["time"]
+    entity_cols = schema_cfg["entity"]
+    group_cols = [time_col] + entity_cols
 
     eval_pdf = eval_parquet_handle.to_pandas()
 
     with log_step(logger, "extract_features"):
         X, _ = extract_Xy(eval_parquet_handle, preprocessor_metadata, parameters)
+
     with log_step(logger, "predict"):
         y_score = model.predict(X)
-    with log_step(logger, "compute_metrics"):
-        overall_map, per_product_ap, n_queries, n_excluded_queries = (
-            _compute_ranking_metrics(y_score, eval_pdf, schema)
-        )
 
-    evaluation_results = {
-        "overall_map": overall_map,
-        "per_product_ap": per_product_ap,
-        "n_queries": n_queries,
-        "n_excluded_queries": n_excluded_queries,
-    }
+    predictions_pdf = eval_pdf[identity_cols].reset_index(drop=True).copy()
+    predictions_pdf[score_col] = y_score
+    predictions_pdf[rank_col] = (
+        predictions_pdf.groupby(group_cols)[score_col]
+        .rank(method="first", ascending=False)
+        .astype(int)
+    )
 
+    # score_uncalibrated: always the raw model output, regardless of calibration.
     if isinstance(model, CalibratedModelAdapter):
-        y_score_uncal = model.predict_uncalibrated(X)
-        uncal_map, uncal_per_product, _, _ = _compute_ranking_metrics(
-            y_score_uncal, eval_pdf, schema
-        )
-        evaluation_results["uncalibrated"] = {
-            "overall_map": uncal_map,
-            "per_product_ap": uncal_per_product,
-        }
-        evaluation_results["calibration_method"] = model.method
-        logger.info(
-            "Uncalibrated mAP=%.4f vs Calibrated mAP=%.4f",
-            uncal_map,
-            overall_map,
-        )
+        with log_step(logger, "predict_uncalibrated"):
+            predictions_pdf["score_uncalibrated"] = model.predict_uncalibrated(X)
+    else:
+        predictions_pdf["score_uncalibrated"] = y_score
+
+    labels_pdf = eval_pdf[identity_cols + [label_col]].reset_index(drop=True).copy()
 
     logger.info(
-        "Evaluation: mAP=%.4f, products=%d, excluded_queries=%d",
-        overall_map,
-        len(per_product_ap),
-        n_excluded_queries,
+        "evaluate_model: predicted %d rows, %d queries, calibrated=%s",
+        len(predictions_pdf),
+        predictions_pdf[group_cols].drop_duplicates().shape[0],
+        isinstance(model, CalibratedModelAdapter),
     )
-    return evaluation_results
+    return predictions_pdf, labels_pdf
 
 
 def log_experiment(

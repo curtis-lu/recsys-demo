@@ -368,124 +368,97 @@ class TestFinalizeModel:
 # ---- Tests: evaluate_model ----
 
 
+@pytest.fixture
+def trained_model_after_finalize(lgb_handles, preprocessor_metadata, training_parameters):
+    """Quick-trained LightGBMAdapter used as the post-finalize model under test."""
+    return _quick_train_adapter(lgb_handles, training_parameters)
+
+
+@pytest.fixture
+def val_h(synthetic_model_inputs):
+    """ParquetHandle pointing at the synthetic validation/eval split."""
+    _, _, _val_h, *_ = synthetic_model_inputs
+    return _val_h
+
+
 class TestEvaluateModel:
-    def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
-        return _quick_train_adapter(lgb_handles, training_parameters)
+    """evaluate_model returns (predictions_pdf, labels_pdf) tuple after refactor."""
 
-    def test_returns_evaluation_dict(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    def test_returns_tuple_of_two_dataframes(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
     ):
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        _, _, val_h, *_ = synthetic_model_inputs
-        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        model = trained_model_after_finalize
+        result = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        predictions_pdf, labels_pdf = result
+        import pandas as pd
+        assert isinstance(predictions_pdf, pd.DataFrame)
+        assert isinstance(labels_pdf, pd.DataFrame)
 
-        assert "overall_map" in results
-        assert "per_product_ap" in results
-        assert "n_queries" in results
-        assert "n_excluded_queries" in results
-        assert isinstance(results["overall_map"], float)
-        assert isinstance(results["per_product_ap"], dict)
-
-    def test_overall_map_matches_compute_all_metrics(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    def test_predictions_has_required_columns(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
     ):
-        """evaluate_model overall_map matches direct compute_all_metrics call."""
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        _, _, val_h, _, _, val_df = synthetic_model_inputs
+        from recsys_tfb.core.schema import get_schema
+        schema = get_schema(training_parameters)
+        model = trained_model_after_finalize
+        predictions_pdf, _ = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        for col in schema["identity_columns"]:
+            assert col in predictions_pdf.columns
+        assert schema["score"] in predictions_pdf.columns
+        assert schema["rank"] in predictions_pdf.columns
 
-        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+    def test_labels_has_required_columns(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.core.schema import get_schema
+        schema = get_schema(training_parameters)
+        model = trained_model_after_finalize
+        _, labels_pdf = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        for col in schema["identity_columns"]:
+            assert col in labels_pdf.columns
+        assert schema["label"] in labels_pdf.columns
 
-        # Reproduce via compute_all_metrics directly
-        X, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
-        y_score = model.predict(X)
-        predictions = val_df[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-        predictions["score"] = y_score
-        predictions["rank"] = (
-            predictions.groupby(["snap_date", "cust_id"])["score"]
-            .rank(method="first", ascending=False).astype(int)
+    def test_rank_starts_from_one_per_query(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.core.schema import get_schema
+        schema = get_schema(training_parameters)
+        model = trained_model_after_finalize
+        predictions_pdf, _ = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        group_cols = [schema["time"]] + schema["entity"]
+        min_ranks = predictions_pdf.groupby(group_cols)[schema["rank"]].min()
+        assert (min_ranks == 1).all()
+
+    def test_non_calibrated_model_score_uncalibrated_equals_score(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.core.schema import get_schema
+        schema = get_schema(training_parameters)
+        model = trained_model_after_finalize
+        predictions_pdf, _ = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
+        assert "score_uncalibrated" in predictions_pdf.columns
+        assert (predictions_pdf[schema["score"]] == predictions_pdf["score_uncalibrated"]).all()
+
+    @pytest.mark.skipif(True, reason="calibrated_model fixture not available")
+    def test_calibrated_model_score_uncalibrated_differs_from_score(
+        self, calibrated_model, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.core.schema import get_schema
+        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+        if not isinstance(calibrated_model, CalibratedModelAdapter):
+            import pytest
+            pytest.skip("fixture didn't yield a CalibratedModelAdapter")
+        schema = get_schema(training_parameters)
+        predictions_pdf, _ = evaluate_model(
+            calibrated_model, val_h, preprocessor_metadata, training_parameters
         )
-        labels = val_df[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
-
-        metrics = compute_all_metrics(predictions, labels, k_values=["all"])
-        n_products = predictions["prod_name"].nunique()
-        map_key = f"map@{n_products}"
-
-        assert results["overall_map"] == pytest.approx(metrics["overall"][map_key])
-        assert results["n_queries"] == metrics["n_queries"]
-        assert results["n_excluded_queries"] == metrics["n_excluded_queries"]
-
-    def test_per_product_ap_matches_compute_all_metrics(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        """evaluate_model per_product_ap matches compute_all_metrics per_product."""
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        _, _, val_h, _, _, val_df = synthetic_model_inputs
-
-        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
-
-        X, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
-        y_score = model.predict(X)
-        predictions = val_df[["snap_date", "cust_id", "prod_name"]].reset_index(drop=True).copy()
-        predictions["score"] = y_score
-        predictions["rank"] = (
-            predictions.groupby(["snap_date", "cust_id"])["score"]
-            .rank(method="first", ascending=False).astype(int)
-        )
-        labels = val_df[["snap_date", "cust_id", "prod_name", "label"]].reset_index(drop=True)
-
-        metrics = compute_all_metrics(predictions, labels, k_values=["all"])
-        n_products = predictions["prod_name"].nunique()
-        map_key = f"map@{n_products}"
-
-        expected_per_product = {
-            prod: vals[map_key] for prod, vals in metrics["per_product"].items()
-        }
-        assert results["per_product_ap"] == pytest.approx(expected_per_product)
-
-    def test_per_product_ap_values(
-        self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
-    ):
-        """Per-product AP values match manual _compute_ap and exclude all-0-label products."""
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-
-        # Build val_model_input with controlled labels: product "zero" has all-0 labels
-        # Note: preprocessor_metadata only maps known products, so we use products it knows
-        products = ["exchange_fx", "exchange_usd", "fund_bond"]
-        n_per_prod = 10
-        rng = np.random.RandomState(99)
-
-        val_df = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-03-31"] * n_per_prod * len(products)),
-            "cust_id": [f"C{i:03d}" for i in range(n_per_prod)] * len(products),
-            "prod_name": np.repeat(products, n_per_prod),
-            "label": np.array(
-                [1, 0, 1, 0, 0, 0, 1, 0, 0, 0]  # exchange_fx: 3 positives
-                + [0, 1, 0, 0, 1, 0, 0, 0, 0, 0]  # exchange_usd: 2 positives
-                + [0] * n_per_prod  # fund_bond: no positives
-            ).astype(float),
-            "total_aum": rng.uniform(100, 1000, n_per_prod * len(products)),
-            "fund_aum": rng.uniform(10, 100, n_per_prod * len(products)),
-            "in_amt_sum_l1m": rng.uniform(0, 50, n_per_prod * len(products)),
-            "out_amt_sum_l1m": rng.uniform(0, 30, n_per_prod * len(products)),
-        })
-
-        val_path = tmp_path / "val_per_product.parquet"
-        val_df.to_parquet(val_path)
-        val_h = ParquetHandle(str(val_path))
-
-        results = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
-        per_product_ap = results["per_product_ap"]
-
-        # All-0-label product must be excluded
-        assert "fund_bond" not in per_product_ap
-
-        # Each product with positives must have its own AP entry
-        assert "exchange_fx" in per_product_ap
-        assert "exchange_usd" in per_product_ap
-
-        # Values must be valid AP scores
-        for prod in ["exchange_fx", "exchange_usd"]:
-            assert 0.0 <= per_product_ap[prod] <= 1.0
+        assert "score_uncalibrated" in predictions_pdf.columns
+        assert predictions_pdf["score_uncalibrated"].notna().all()
+        # Calibration changes values; at least one row should differ
+        assert (
+            predictions_pdf[schema["score"]] != predictions_pdf["score_uncalibrated"]
+        ).any()
 
 
 # ---- Tests: log_experiment ----
