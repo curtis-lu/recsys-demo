@@ -597,40 +597,9 @@ class TestCalibrateModel:
         assert np.all(np.isfinite(preds))
 
 
-# ---- Tests: evaluate_model with calibrated model ----
-
-
-class TestEvaluateModelCalibrated:
-    def _train_and_calibrate(self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters):
-        model = _quick_train_adapter(lgb_handles, training_parameters)
-        train_h, *_ = synthetic_model_inputs
-        return calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
-
-    def test_includes_uncalibrated_metrics(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        calibrated = self._train_and_calibrate(lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_h, *_ = synthetic_model_inputs
-        results = evaluate_model(calibrated, val_h, preprocessor_metadata, training_parameters)
-
-        assert "uncalibrated" in results
-        assert "overall_map" in results["uncalibrated"]
-        assert "per_product_ap" in results["uncalibrated"]
-        assert "calibration_method" in results
-        assert results["calibration_method"] == "isotonic"
-
-    def test_uncalibrated_map_is_float(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        calibrated = self._train_and_calibrate(lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters)
-        _, _, val_h, *_ = synthetic_model_inputs
-        results = evaluate_model(calibrated, val_h, preprocessor_metadata, training_parameters)
-
-        assert isinstance(results["uncalibrated"]["overall_map"], float)
-        assert isinstance(results["overall_map"], float)
-
-
 # ---- Tests: compute_test_mAP ----
+# Calibration-aware ranking metrics moved here from the old evaluate_model
+# (now returns predictions/labels tuple). See TestComputeTestMAP below.
 
 
 class TestComputeTestMAP:
@@ -673,6 +642,8 @@ class TestComputeTestMAP:
         assert "uncalibrated" in result
         assert "overall_map" in result["uncalibrated"]
         assert "per_product_ap" in result["uncalibrated"]
+        # log_experiment expects calibration_method when "uncalibrated" present.
+        assert "calibration_method" in result
 
     def test_non_calibrated_model_no_uncalibrated_subdict(
         self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
@@ -684,6 +655,7 @@ class TestComputeTestMAP:
         )
         result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
         assert "uncalibrated" not in result
+        assert "calibration_method" not in result
 
 
 # ---- Tests: write_test_predictions ----

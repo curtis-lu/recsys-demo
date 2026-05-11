@@ -617,6 +617,12 @@ def compute_test_mAP(
             "overall_map": uncal["overall_map"],
             "per_product_ap": uncal["per_product_ap"],
         }
+        # log_experiment expects this when "uncalibrated" is present.
+        evaluation_results["calibration_method"] = (
+            parameters.get("training", {})
+            .get("calibration", {})
+            .get("method", "isotonic")
+        )
         logger.info(
             "compute_test_mAP: uncalibrated mAP=%.4f vs calibrated mAP=%.4f",
             uncal["overall_map"], cal["overall_map"],

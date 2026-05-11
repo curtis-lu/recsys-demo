@@ -9,11 +9,13 @@ from recsys_tfb.pipelines.training.nodes import (
     cache_train_model_input,
     cache_val_model_input,
     calibrate_model,
+    compute_test_mAP,
     evaluate_model,
     finalize_model,
     log_experiment,
     prepare_lgb_train_inputs,
     tune_hyperparameters,
+    write_test_predictions,
 )
 
 
@@ -106,6 +108,16 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         Node(
             evaluate_model,
             inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
+            outputs=["test_predictions_pdf", "test_labels_pdf"],
+        ),
+        Node(
+            write_test_predictions,
+            inputs=["test_predictions_pdf", "parameters"],
+            outputs=None,
+        ),
+        Node(
+            compute_test_mAP,
+            inputs=["test_predictions_pdf", "test_labels_pdf", "parameters"],
             outputs="evaluation_results",
         ),
         Node(
