@@ -226,6 +226,25 @@ validated_predictions:
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
 
+# --- Inference Pipeline (cont.) - Evaluation read-side entry ---
+# Same Hive table as validated_predictions; declared separately so evaluation
+# pipeline can run standalone (without inference in same session).
+# core/catalog.py:71 auto-fallbacks unknown names to MemoryDataset, which
+# silently breaks standalone evaluation reads — this entry fixes that.
+ranked_predictions:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: ranked_predictions
+  external: false
+  columns:
+    - {name: cust_id, type: STRING}
+    - {name: score, type: DOUBLE}
+    - {name: rank, type: BIGINT}
+  partition_cols:
+    - {name: snap_date, type: STRING}
+    - {name: prod_name, type: STRING}
+    - {name: model_version, type: STRING}
+
 # --- Training Pipeline - Test-set predictions for downstream evaluation reuse ---
 # Written by training/nodes.py::write_test_predictions per prod_name (bypasses catalog
 # auto-save for memory control). Read by evaluation pipeline when --post-training.
