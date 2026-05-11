@@ -16,6 +16,7 @@ from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
+from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
 
@@ -628,6 +629,89 @@ def compute_test_mAP(
         cal["n_excluded_queries"],
     )
     return evaluation_results
+
+
+def _build_training_eval_predictions_ddl(table_fqn: str) -> str:
+    """CREATE TABLE IF NOT EXISTS DDL — schema matches catalog declaration.
+
+    score_uncalibrated semantics: always raw model output. For calibrated runs
+    it differs from score; for non-calibrated runs it equals score.
+    """
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table_fqn} (
+        cust_id STRING,
+        score DOUBLE,
+        score_uncalibrated DOUBLE,
+        `rank` BIGINT
+    )
+    PARTITIONED BY (snap_date STRING, prod_name STRING, model_version STRING)
+    STORED AS PARQUET
+    """.strip()
+
+
+def write_test_predictions(
+    test_predictions_pdf: pd.DataFrame,
+    parameters: dict,
+) -> None:
+    """Write test-set predictions to Hive, iterating per prod_name for memory control.
+
+    Bypasses catalog auto-save: outputs=None at DAG level. The catalog entry
+    `training_eval_predictions` declares the table for downstream evaluation reads;
+    this function owns the writes (DDL bootstrap + per-prod insertInto).
+    """
+    schema_cfg = get_schema(parameters)
+    item_col = schema_cfg["item"]
+    score_col = schema_cfg["score"]
+    rank_col = schema_cfg["rank"]
+    time_col = schema_cfg["time"]
+    identity_cols = schema_cfg["identity_columns"]
+    spark = get_or_create_spark_session()
+    model_version = parameters["model_version"]
+    hive_db = parameters["hive"]["db"]
+    table_fqn = f"{hive_db}.training_eval_predictions"
+
+    if "score_uncalibrated" not in test_predictions_pdf.columns:
+        raise RuntimeError(
+            "test_predictions_pdf missing 'score_uncalibrated' column. "
+            "evaluate_model must populate it (= score for non-calibrated runs)."
+        )
+
+    # Extract cust_id (entity col) from identity_cols = [time, *entity, item].
+    cust_id_col = next(c for c in identity_cols if c not in {item_col, time_col})
+    # Column order matches Hive table: non-partition cols first, then partition
+    # cols (snap_date, prod_name) and finally model_version. Dynamic-partition
+    # insertInto uses positional column mapping.
+    write_cols = [
+        cust_id_col,
+        score_col,
+        "score_uncalibrated",
+        rank_col,
+        time_col,
+        item_col,
+    ]
+    pdf = test_predictions_pdf[write_cols].copy()
+
+    spark.sql(_build_training_eval_predictions_ddl(table_fqn))
+    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
+    distinct_prods = sorted(pdf[item_col].unique())
+    logger.info(
+        "write_test_predictions: %d prods x ~%d rows = %d total -> %s",
+        len(distinct_prods),
+        len(pdf) // max(len(distinct_prods), 1),
+        len(pdf),
+        table_fqn,
+    )
+
+    for prod in distinct_prods:
+        chunk_pdf = pdf[pdf[item_col] == prod].assign(model_version=model_version)
+        chunk_sdf = spark.createDataFrame(chunk_pdf)
+        chunk_sdf.write.insertInto(table_fqn, overwrite=True)
+        logger.info(
+            "write_test_predictions: wrote prod=%s rows=%d",
+            prod,
+            len(chunk_pdf),
+        )
 
 
 def log_experiment(

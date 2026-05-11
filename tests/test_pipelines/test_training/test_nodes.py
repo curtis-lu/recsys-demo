@@ -684,3 +684,182 @@ class TestComputeTestMAP:
         )
         result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
         assert "uncalibrated" not in result
+
+
+# ---- Tests: write_test_predictions ----
+
+class TestWriteTestPredictions:
+    """write_test_predictions iterates per prod_name and writes to Hive."""
+
+    @pytest.fixture
+    def predictions_pdf(self):
+        """Non-calibrated run: score_uncalibrated equals score (evaluate_model contract)."""
+        import pandas as pd
+        return pd.DataFrame({
+            "cust_id": ["c1", "c2", "c1", "c2"],
+            "snap_date": ["2025-12-31"] * 4,
+            "prod_name": ["fund_stock", "fund_stock", "ccard_ins", "ccard_ins"],
+            "score": [0.9, 0.7, 0.6, 0.4],
+            "score_uncalibrated": [0.9, 0.7, 0.6, 0.4],
+            "rank": [1, 2, 1, 2],
+        })
+
+    @pytest.fixture
+    def parameters_with_model_version(self):
+        return {
+            "schema": {
+                "time_col": "snap_date",
+                "entity_cols": ["cust_id"],
+                "item_col": "prod_name",
+                "label_col": "label",
+                "score_col": "score",
+                "rank_col": "rank",
+            },
+            "hive": {"db": "ml_recsys"},
+            "model_version": "20260511_153000",
+        }
+
+    def test_calls_insertInto_once_per_prod_name(
+        self, predictions_pdf, parameters_with_model_version
+    ):
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        mock_spark = MagicMock(name="SparkSession")
+        mock_write = MagicMock()
+        mock_spark.createDataFrame.return_value.write = mock_write
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        # 2 distinct prod_names -> 2 insertInto calls
+        assert mock_write.insertInto.call_count == 2
+
+    def test_each_chunk_filtered_to_one_prod(
+        self, predictions_pdf, parameters_with_model_version
+    ):
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        mock_spark = MagicMock(name="SparkSession")
+        captured_chunks = []
+
+        def capture_create_df(pdf):
+            captured_chunks.append(pdf.copy())
+            return MagicMock()
+        mock_spark.createDataFrame.side_effect = capture_create_df
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        assert len(captured_chunks) == 2
+        for chunk in captured_chunks:
+            assert chunk["prod_name"].nunique() == 1
+
+    def test_ensures_table_via_create_if_not_exists(
+        self, predictions_pdf, parameters_with_model_version
+    ):
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        mock_spark = MagicMock(name="SparkSession")
+        mock_spark.createDataFrame.return_value.write = MagicMock()
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        ddl_calls = [
+            call_args
+            for call_args in mock_spark.sql.call_args_list
+            if "CREATE TABLE IF NOT EXISTS" in str(call_args)
+        ]
+        assert len(ddl_calls) == 1, f"expected 1 CREATE TABLE call, got {len(ddl_calls)}"
+        assert "training_eval_predictions" in str(ddl_calls[0])
+        # DDL must include score_uncalibrated column
+        assert "score_uncalibrated" in str(ddl_calls[0])
+
+    def test_raises_when_score_uncalibrated_column_missing(
+        self, parameters_with_model_version
+    ):
+        """Contract violation: evaluate_model must always populate score_uncalibrated."""
+        import pandas as pd
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        bad_pdf = pd.DataFrame({
+            "cust_id": ["c1"],
+            "snap_date": ["2025-12-31"],
+            "prod_name": ["fund_stock"],
+            "score": [0.9],
+            "rank": [1],
+        })
+        with pytest.raises(RuntimeError, match="score_uncalibrated"):
+            write_test_predictions(bad_pdf, parameters_with_model_version)
+
+    def test_non_calibrated_run_preserves_equal_scores(
+        self, predictions_pdf, parameters_with_model_version
+    ):
+        """Non-calibrated input has score == score_uncalibrated; pass through unchanged."""
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        mock_spark = MagicMock(name="SparkSession")
+        captured_chunks = []
+
+        def capture_create_df(pdf):
+            captured_chunks.append(pdf.copy())
+            return MagicMock()
+        mock_spark.createDataFrame.side_effect = capture_create_df
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        for chunk in captured_chunks:
+            assert "score_uncalibrated" in chunk.columns
+            assert (chunk["score"] == chunk["score_uncalibrated"]).all()
+
+    def test_calibrated_run_preserves_score_uncalibrated(
+        self, parameters_with_model_version
+    ):
+        """Calibrated input pdf has score_uncalibrated differing from score; pass through."""
+        import pandas as pd
+        from unittest.mock import MagicMock, patch
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        predictions_pdf = pd.DataFrame({
+            "cust_id": ["c1", "c2"],
+            "snap_date": ["2025-12-31", "2025-12-31"],
+            "prod_name": ["fund_stock", "fund_stock"],
+            "score": [0.9, 0.7],
+            "score_uncalibrated": [0.85, 0.65],
+            "rank": [1, 2],
+        })
+
+        mock_spark = MagicMock(name="SparkSession")
+        captured_chunks = []
+
+        def capture_create_df(pdf):
+            captured_chunks.append(pdf.copy())
+            return MagicMock()
+        mock_spark.createDataFrame.side_effect = capture_create_df
+
+        with patch(
+            "recsys_tfb.pipelines.training.nodes.get_or_create_spark_session",
+            return_value=mock_spark,
+        ):
+            write_test_predictions(predictions_pdf, parameters_with_model_version)
+
+        assert len(captured_chunks) == 1
+        chunk = captured_chunks[0]
+        assert list(chunk["score_uncalibrated"]) == [0.85, 0.65]
