@@ -580,6 +580,10 @@ def inference(
 def evaluation(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
     model_version: Optional[str] = typer.Option(None, "--model-version", help="Model version to use"),
+    post_training: bool = typer.Option(
+        False, "--post-training",
+        help="Read predictions from training_eval_predictions (default: ranked_predictions for monitoring)",
+    ),
 ):
     """Run the evaluation pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -606,7 +610,10 @@ def evaluation(
     eval_config = params_eval.get("evaluation", params_eval)
     snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
 
-    logger.info("Evaluation — model_version: %s (%s)", mv, model_version if model_version else "best")
+    logger.info(
+        "Evaluation — model_version: %s (%s), post_training: %s",
+        mv, model_version if model_version else "best", post_training,
+    )
     logger.info("Evaluation — snap_date: %s", snap_date)
 
     runtime_params = {
@@ -617,7 +624,8 @@ def evaluation(
         "snap_date": snap_date,
     }
 
-    _execute_pipeline("evaluation", {}, runtime_params, config, params, env)
+    pipeline_kwargs = {"post_training": post_training}
+    _execute_pipeline("evaluation", pipeline_kwargs, runtime_params, config, params, env)
 
     # Post run
     version_dir = data_dir / "evaluation" / mv / snap_date
@@ -630,7 +638,7 @@ def evaluation(
             "model_version": mv,
         },
         run_id=run_context.run_id,
-        extra_metadata={"snap_date": snap_date},
+        extra_metadata={"snap_date": snap_date, "post_training": post_training},
         symlink_target=data_dir / "evaluation" / "latest"
     )
     logger.info("Pipeline 'evaluation' completed successfully")
