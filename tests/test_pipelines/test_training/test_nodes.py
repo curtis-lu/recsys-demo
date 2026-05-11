@@ -694,7 +694,6 @@ class TestWriteTestPredictions:
     @pytest.fixture
     def predictions_pdf(self):
         """Non-calibrated run: score_uncalibrated equals score (evaluate_model contract)."""
-        import pandas as pd
         return pd.DataFrame({
             "cust_id": ["c1", "c2", "c1", "c2"],
             "snap_date": ["2025-12-31"] * 4,
@@ -706,15 +705,10 @@ class TestWriteTestPredictions:
 
     @pytest.fixture
     def parameters_with_model_version(self):
+        # Schema block omitted: get_schema() falls back to _DEFAULTS which
+        # already matches the test fixture columns (snap_date, cust_id,
+        # prod_name, score, rank).
         return {
-            "schema": {
-                "time_col": "snap_date",
-                "entity_cols": ["cust_id"],
-                "item_col": "prod_name",
-                "label_col": "label",
-                "score_col": "score",
-                "rank_col": "rank",
-            },
             "hive": {"db": "ml_recsys"},
             "model_version": "20260511_153000",
         }
@@ -791,7 +785,6 @@ class TestWriteTestPredictions:
         self, parameters_with_model_version
     ):
         """Contract violation: evaluate_model must always populate score_uncalibrated."""
-        import pandas as pd
         from recsys_tfb.pipelines.training.nodes import write_test_predictions
 
         bad_pdf = pd.DataFrame({
@@ -833,7 +826,6 @@ class TestWriteTestPredictions:
         self, parameters_with_model_version
     ):
         """Calibrated input pdf has score_uncalibrated differing from score; pass through."""
-        import pandas as pd
         from unittest.mock import MagicMock, patch
         from recsys_tfb.pipelines.training.nodes import write_test_predictions
 

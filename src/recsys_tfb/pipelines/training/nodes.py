@@ -664,7 +664,12 @@ def write_test_predictions(
     score_col = schema_cfg["score"]
     rank_col = schema_cfg["rank"]
     time_col = schema_cfg["time"]
-    identity_cols = schema_cfg["identity_columns"]
+    entity_cols = schema_cfg["entity"]
+    assert len(entity_cols) == 1, (
+        f"write_test_predictions expects a single entity column; "
+        f"got {entity_cols}. Hive DDL hard-codes 'cust_id'."
+    )
+    cust_id_col = entity_cols[0]
     spark = get_or_create_spark_session()
     model_version = parameters["model_version"]
     hive_db = parameters["hive"]["db"]
@@ -676,8 +681,7 @@ def write_test_predictions(
             "evaluate_model must populate it (= score for non-calibrated runs)."
         )
 
-    # Extract cust_id (entity col) from identity_cols = [time, *entity, item].
-    cust_id_col = next(c for c in identity_cols if c not in {item_col, time_col})
+
     # Column order matches Hive table: non-partition cols first, then partition
     # cols (snap_date, prod_name) and finally model_version. Dynamic-partition
     # insertInto uses positional column mapping.
