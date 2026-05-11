@@ -118,7 +118,7 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # nullable: only populated for calibrated models
+    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration is off
     - {name: rank, type: BIGINT}
   partition_cols:
     - {name: snap_date, type: STRING}
@@ -215,25 +215,34 @@ class TestEvaluateModel:
         min_ranks = predictions_pdf.groupby(group_cols)[schema["rank"]].min()
         assert (min_ranks == 1).all()
 
-    def test_non_calibrated_model_no_uncalibrated_column(
+    def test_non_calibrated_model_score_uncalibrated_equals_score(
         self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
     ):
+        from recsys_tfb.core.schema import get_schema
+        schema = get_schema(training_parameters)
         model = trained_model_after_finalize
         predictions_pdf, _ = evaluate_model(model, val_h, preprocessor_metadata, training_parameters)
-        assert "score_uncalibrated" not in predictions_pdf.columns
+        assert "score_uncalibrated" in predictions_pdf.columns
+        assert (predictions_pdf[schema["score"]] == predictions_pdf["score_uncalibrated"]).all()
 
-    def test_calibrated_model_includes_uncalibrated_column(
+    def test_calibrated_model_score_uncalibrated_differs_from_score(
         self, calibrated_model, val_h, preprocessor_metadata, training_parameters
     ):
+        from recsys_tfb.core.schema import get_schema
         from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
         if not isinstance(calibrated_model, CalibratedModelAdapter):
             import pytest
             pytest.skip("fixture didn't yield a CalibratedModelAdapter")
+        schema = get_schema(training_parameters)
         predictions_pdf, _ = evaluate_model(
             calibrated_model, val_h, preprocessor_metadata, training_parameters
         )
         assert "score_uncalibrated" in predictions_pdf.columns
         assert predictions_pdf["score_uncalibrated"].notna().all()
+        # Calibration changes values; at least one row should differ
+        assert (
+            predictions_pdf[schema["score"]] != predictions_pdf["score_uncalibrated"]
+        ).any()
 ```
 
 - [ ] **Step 2: Run tests — verify they fail**
@@ -294,12 +303,15 @@ def evaluate_model(
         .astype(int)
     )
 
-    # For calibrated models, also persist the uncalibrated scores. Downstream
-    # compute_test_mAP adds an uncalibrated comparison sub-dict; write_test_predictions
-    # writes the column to Hive (null for non-calibrated runs).
+    # score_uncalibrated semantics: always the raw model output, regardless of
+    # whether calibration is applied. For calibrated runs it differs from score;
+    # for non-calibrated runs it equals score. This keeps the Hive schema /
+    # downstream queries consistent.
     if isinstance(model, CalibratedModelAdapter):
         with log_step(logger, "predict_uncalibrated"):
             predictions_pdf["score_uncalibrated"] = model.predict_uncalibrated(X)
+    else:
+        predictions_pdf["score_uncalibrated"] = y_score
 
     labels_pdf = eval_pdf[identity_cols + [label_col]].reset_index(drop=True).copy()
 
@@ -461,10 +473,17 @@ def compute_test_mAP(
         "n_excluded_queries": cal["n_excluded_queries"],
     }
 
-    if (
+    # score_uncalibrated is always present (per evaluate_model contract).
+    # Only emit the uncalibrated comparison subdict when calibration was actually
+    # applied, i.e. when the two columns differ — otherwise the metrics are identical.
+    calibration_applied = (
         "score_uncalibrated" in test_predictions_pdf.columns
-        and test_predictions_pdf["score_uncalibrated"].notna().any()
-    ):
+        and not (
+            test_predictions_pdf[score_col]
+            == test_predictions_pdf["score_uncalibrated"]
+        ).all()
+    )
+    if calibration_applied:
         uncal = _calc_metrics("score_uncalibrated")
         evaluation_results["uncalibrated"] = {
             "overall_map": uncal["overall_map"],
@@ -520,12 +539,14 @@ class TestWriteTestPredictions:
 
     @pytest.fixture
     def predictions_pdf(self):
+        """Non-calibrated run: score_uncalibrated equals score (evaluate_model contract)."""
         import pandas as pd
         return pd.DataFrame({
             "cust_id": ["c1", "c2", "c1", "c2"],
             "snap_date": ["2025-12-31"] * 4,
             "prod_name": ["fund_stock", "fund_stock", "ccard_ins", "ccard_ins"],
             "score": [0.9, 0.7, 0.6, 0.4],
+            "score_uncalibrated": [0.9, 0.7, 0.6, 0.4],
             "rank": [1, 2, 1, 2],
         })
 
@@ -612,10 +633,28 @@ class TestWriteTestPredictions:
         # DDL must include score_uncalibrated column
         assert "score_uncalibrated" in str(ddl_calls[0])
 
-    def test_non_calibrated_run_fills_score_uncalibrated_null(
+    def test_raises_when_score_uncalibrated_column_missing(
+        self, parameters_with_model_version
+    ):
+        """Contract violation: evaluate_model must always populate score_uncalibrated."""
+        import pandas as pd
+        from recsys_tfb.pipelines.training.nodes import write_test_predictions
+
+        bad_pdf = pd.DataFrame({
+            "cust_id": ["c1"],
+            "snap_date": ["2025-12-31"],
+            "prod_name": ["fund_stock"],
+            "score": [0.9],
+            "rank": [1],
+        })
+        import pytest
+        with pytest.raises(RuntimeError, match="score_uncalibrated"):
+            write_test_predictions(bad_pdf, parameters_with_model_version)
+
+    def test_non_calibrated_run_preserves_equal_scores(
         self, predictions_pdf, parameters_with_model_version
     ):
-        """Non-calibrated input pdf lacks score_uncalibrated; node fills NaN."""
+        """Non-calibrated input has score == score_uncalibrated; pass through unchanged."""
         from unittest.mock import MagicMock, patch
         from recsys_tfb.pipelines.training.nodes import write_test_predictions
 
@@ -635,7 +674,7 @@ class TestWriteTestPredictions:
 
         for chunk in captured_chunks:
             assert "score_uncalibrated" in chunk.columns
-            assert chunk["score_uncalibrated"].isna().all()
+            assert (chunk["score"] == chunk["score_uncalibrated"]).all()
 
     def test_calibrated_run_preserves_score_uncalibrated(
         self, parameters_with_model_version
@@ -714,7 +753,6 @@ def write_test_predictions(
     `training_eval_predictions` declares the table for downstream evaluation reads;
     this function owns the writes (DDL bootstrap + per-prod insertInto).
     """
-    import numpy as np
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     schema_cfg = get_schema(parameters)
@@ -727,15 +765,16 @@ def write_test_predictions(
     hive_db = parameters["hive"]["db"]
     table_fqn = f"{hive_db}.training_eval_predictions"
 
-    pdf = test_predictions_pdf.copy()
-    if "score_uncalibrated" not in pdf.columns:
-        pdf["score_uncalibrated"] = np.nan  # ensure column present so schema matches Hive
-    pdf["score_uncalibrated"] = pdf["score_uncalibrated"].astype("float64")
+    if "score_uncalibrated" not in test_predictions_pdf.columns:
+        raise RuntimeError(
+            "test_predictions_pdf missing 'score_uncalibrated' column. "
+            "evaluate_model must populate it (= score for non-calibrated runs)."
+        )
 
     # Order columns to match Hive table column order (excluding partition cols).
     cust_id_col = next(c for c in identity_cols if c not in {item_col, schema_cfg["time"]})
     write_cols = [cust_id_col, score_col, "score_uncalibrated", rank_col, schema_cfg["time"], item_col]
-    pdf = pdf[write_cols]
+    pdf = test_predictions_pdf[write_cols].copy()
 
     spark.sql(_build_training_eval_predictions_ddl(table_fqn))
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
@@ -1523,7 +1562,7 @@ The commits within each Phase tell a coherent story; PR review should be by phas
 - Phase 3 → out of scope, Task 2.6 confirms monitoring still works ✓
 
 **Catalog schema additions beyond spec:**
-- `training_eval_predictions` Hive table includes a nullable `score_uncalibrated` DOUBLE column. Calibrated runs populate it; non-calibrated runs fill NaN. Preserves the old `evaluate_model` uncalibrated-comparison behavior end-to-end (in-memory through `compute_test_mAP` for MLflow, persisted to Hive for future ad-hoc analysis).
+- `training_eval_predictions` Hive table includes a `score_uncalibrated` DOUBLE column with stable semantics: **always the raw model output**. For calibrated runs it differs from `score`; for non-calibrated runs it equals `score`. Preserves the old `evaluate_model` uncalibrated-comparison behavior end-to-end (in-memory through `compute_test_mAP` for MLflow, persisted to Hive for future ad-hoc analysis). `compute_test_mAP` only emits the `uncalibrated` subdict when the two columns actually differ — non-calibrated runs skip the redundant second metric pass.
 
 **Placeholder scan:** None found.
 
