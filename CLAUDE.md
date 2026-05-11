@@ -41,7 +41,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 | Pipeline | `SPARK_CONF_DIR` | spark.master | 為什麼 |
 |---|---|---|---|
 | `dataset` / `inference` / `evaluation` / `baselines` / `*_etl` | `~/dev-cluster/client-template/spark`（client-env.sh 預設） | `spark://localhost:7077` | 寫 Hive managed table 走 HDFS，需要 worker container |
-| `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | LightGBM 是 driver 單機訓練，distributed cluster 沒幫助；model artifact 駐留 driver-local；cache 由 cache node 自己從 HDFS 拉，不需要 cluster |
+| `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | LightGBM 是 driver 單機訓練，distributed cluster 沒幫助；model artifact 駐留 driver-local；cache 由 cache node 自己從 HDFS 拉；evaluate_model 將 test-set 預測寫入 Hive `ml_recsys.training_eval_predictions`（hive-site.xml 已 symlink 進 `client-template-local/spark/`） |
 
 執行：
 ```bash
@@ -55,7 +55,7 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 
 走錯 conf 的典型 trap（深入排查見 `dev-cluster-spark` skill）：
 - 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
-- `client-template-local` 缺 hive-site.xml symlink → `Table or view not found: ml_recsys.<table>`
+- 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
 
 ## graphify
 
