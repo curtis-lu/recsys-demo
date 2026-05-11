@@ -489,52 +489,6 @@ def calibrate_model(
     return calibrated
 
 
-def _compute_ranking_metrics(
-    y_score: np.ndarray,
-    val_pdf: pd.DataFrame,
-    schema: dict,
-) -> tuple[float, dict[str, float], int, int]:
-    """Compute ranking metrics from raw scores.
-
-    Args:
-        y_score: Predicted scores array.
-        val_pdf: Pandas DataFrame containing identity columns and label.
-        schema: Column schema dict.
-
-    Returns (overall_map, per_product_ap, n_queries, n_excluded_queries).
-    """
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
-    score_col = schema["score"]
-    label_col = schema["label"]
-    identity_cols = schema["identity_columns"]
-    group_cols = [time_col] + entity_cols
-
-    predictions = val_pdf[identity_cols].reset_index(drop=True).copy()
-    predictions[score_col] = y_score
-    predictions[schema["rank"]] = (
-        predictions.groupby(group_cols)[score_col]
-        .rank(method="first", ascending=False)
-        .astype(int)
-    )
-
-    labels = val_pdf[identity_cols + [label_col]].reset_index(drop=True)
-
-    metrics = compute_all_metrics(predictions, labels, k_values=["all"])
-
-    n_products = predictions[item_col].nunique()
-    map_key = f"map@{n_products}"
-
-    overall_map = metrics["overall"].get(map_key, 0.0)
-    per_product_ap = {
-        prod: vals.get(map_key, 0.0)
-        for prod, vals in metrics["per_product"].items()
-    }
-
-    return overall_map, per_product_ap, metrics["n_queries"], metrics["n_excluded_queries"]
-
-
 def evaluate_model(
     model: ModelAdapter,
     eval_parquet_handle,
@@ -598,6 +552,82 @@ def evaluate_model(
         isinstance(model, CalibratedModelAdapter),
     )
     return predictions_pdf, labels_pdf
+
+
+def compute_test_mAP(
+    test_predictions_pdf: pd.DataFrame,
+    test_labels_pdf: pd.DataFrame,
+    parameters: dict,
+) -> dict:
+    """Compute ranking-aware mAP from test-set predictions; feed log_experiment.
+
+    test_predictions_pdf must contain identity_columns + [score, score_uncalibrated, rank].
+    test_labels_pdf must contain identity_columns + [label].
+
+    When score and score_uncalibrated differ (i.e., calibration applied), emits
+    an additional ``uncalibrated`` sub-dict for MLflow comparison.
+    """
+    schema_cfg = get_schema(parameters)
+    score_col = schema_cfg["score"]
+    label_col = schema_cfg["label"]
+    item_col = schema_cfg["item"]
+    identity_cols = schema_cfg["identity_columns"]
+
+    merged = test_predictions_pdf.merge(test_labels_pdf, on=identity_cols, how="inner")
+
+    def _calc_metrics(score_column_name: str) -> dict:
+        preds = merged[identity_cols + [score_column_name]].rename(
+            columns={score_column_name: score_col}
+        )
+        labs = merged[identity_cols + [label_col]]
+        m = compute_all_metrics(preds, labs, k_values=["all"])
+        n_products = preds[item_col].nunique()
+        map_key = f"map@{n_products}"
+        return {
+            "overall_map": m["overall"].get(map_key, 0.0),
+            "per_product_ap": {
+                p: v.get(map_key, 0.0) for p, v in m["per_product"].items()
+            },
+            "n_queries": m["n_queries"],
+            "n_excluded_queries": m["n_excluded_queries"],
+        }
+
+    cal = _calc_metrics(score_col)
+    evaluation_results = {
+        "overall_map": cal["overall_map"],
+        "per_product_ap": cal["per_product_ap"],
+        "n_queries": cal["n_queries"],
+        "n_excluded_queries": cal["n_excluded_queries"],
+    }
+
+    # score_uncalibrated is always present (per evaluate_model contract).
+    # Only emit the uncalibrated comparison subdict when calibration was
+    # actually applied — i.e. when the two columns differ.
+    calibration_applied = (
+        "score_uncalibrated" in test_predictions_pdf.columns
+        and not (
+            test_predictions_pdf[score_col]
+            == test_predictions_pdf["score_uncalibrated"]
+        ).all()
+    )
+    if calibration_applied:
+        uncal = _calc_metrics("score_uncalibrated")
+        evaluation_results["uncalibrated"] = {
+            "overall_map": uncal["overall_map"],
+            "per_product_ap": uncal["per_product_ap"],
+        }
+        logger.info(
+            "compute_test_mAP: uncalibrated mAP=%.4f vs calibrated mAP=%.4f",
+            uncal["overall_map"], cal["overall_map"],
+        )
+
+    logger.info(
+        "compute_test_mAP: mAP=%.4f, products=%d, excluded_queries=%d",
+        cal["overall_map"],
+        len(cal["per_product_ap"]),
+        cal["n_excluded_queries"],
+    )
+    return evaluation_results
 
 
 def log_experiment(

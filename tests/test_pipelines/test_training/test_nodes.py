@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.evaluation.metrics import compute_ap
 from recsys_tfb.io.extract import extract_Xy
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ModelAdapter
@@ -381,6 +381,25 @@ def val_h(synthetic_model_inputs):
     return _val_h
 
 
+@pytest.fixture
+def calibrated_model(
+    trained_model_after_finalize,
+    synthetic_model_inputs,
+    preprocessor_metadata,
+    training_parameters,
+):
+    """A CalibratedModelAdapter wrapping the post-finalize quick-trained model.
+
+    Uses the train parquet split as the calibration set (mirrors
+    `TestCalibrateModel` usage). Available for tests that need to compare
+    calibrated vs raw predictions / metrics.
+    """
+    train_h, *_ = synthetic_model_inputs
+    return calibrate_model(
+        trained_model_after_finalize, train_h, preprocessor_metadata, training_parameters,
+    )
+
+
 class TestEvaluateModel:
     """evaluate_model returns (predictions_pdf, labels_pdf) tuple after refactor."""
 
@@ -392,7 +411,6 @@ class TestEvaluateModel:
         assert isinstance(result, tuple)
         assert len(result) == 2
         predictions_pdf, labels_pdf = result
-        import pandas as pd
         assert isinstance(predictions_pdf, pd.DataFrame)
         assert isinstance(labels_pdf, pd.DataFrame)
 
@@ -440,15 +458,11 @@ class TestEvaluateModel:
         assert "score_uncalibrated" in predictions_pdf.columns
         assert (predictions_pdf[schema["score"]] == predictions_pdf["score_uncalibrated"]).all()
 
-    @pytest.mark.skipif(True, reason="calibrated_model fixture not available")
     def test_calibrated_model_score_uncalibrated_differs_from_score(
         self, calibrated_model, val_h, preprocessor_metadata, training_parameters
     ):
         from recsys_tfb.core.schema import get_schema
-        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-        if not isinstance(calibrated_model, CalibratedModelAdapter):
-            import pytest
-            pytest.skip("fixture didn't yield a CalibratedModelAdapter")
+        assert isinstance(calibrated_model, CalibratedModelAdapter)
         schema = get_schema(training_parameters)
         predictions_pdf, _ = evaluate_model(
             calibrated_model, val_h, preprocessor_metadata, training_parameters
@@ -614,3 +628,59 @@ class TestEvaluateModelCalibrated:
 
         assert isinstance(results["uncalibrated"]["overall_map"], float)
         assert isinstance(results["overall_map"], float)
+
+
+# ---- Tests: compute_test_mAP ----
+
+
+class TestComputeTestMAP:
+    """compute_test_mAP computes ranking metrics from (predictions_pdf, labels_pdf)."""
+
+    def test_returns_dict_with_required_keys(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training.nodes import compute_test_mAP
+        model = trained_model_after_finalize
+        predictions_pdf, labels_pdf = evaluate_model(
+            model, val_h, preprocessor_metadata, training_parameters
+        )
+        result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
+        assert isinstance(result, dict)
+        assert "overall_map" in result
+        assert "per_product_ap" in result
+        assert "n_queries" in result
+        assert "n_excluded_queries" in result
+
+    def test_overall_map_in_valid_range(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training.nodes import compute_test_mAP
+        model = trained_model_after_finalize
+        predictions_pdf, labels_pdf = evaluate_model(
+            model, val_h, preprocessor_metadata, training_parameters
+        )
+        result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
+        assert 0.0 <= result["overall_map"] <= 1.0
+
+    def test_calibrated_model_includes_uncalibrated_subdict(
+        self, calibrated_model, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training.nodes import compute_test_mAP
+        predictions_pdf, labels_pdf = evaluate_model(
+            calibrated_model, val_h, preprocessor_metadata, training_parameters
+        )
+        result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
+        assert "uncalibrated" in result
+        assert "overall_map" in result["uncalibrated"]
+        assert "per_product_ap" in result["uncalibrated"]
+
+    def test_non_calibrated_model_no_uncalibrated_subdict(
+        self, trained_model_after_finalize, val_h, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training.nodes import compute_test_mAP
+        model = trained_model_after_finalize
+        predictions_pdf, labels_pdf = evaluate_model(
+            model, val_h, preprocessor_metadata, training_parameters
+        )
+        result = compute_test_mAP(predictions_pdf, labels_pdf, training_parameters)
+        assert "uncalibrated" not in result
