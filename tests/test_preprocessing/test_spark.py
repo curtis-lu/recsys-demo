@@ -1,6 +1,5 @@
 """Tests for preprocessing._spark private helpers."""
 
-import pandas as pd
 import pytest
 from decimal import Decimal
 from pyspark.sql import types as T
