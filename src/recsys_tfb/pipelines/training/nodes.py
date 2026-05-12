@@ -339,17 +339,24 @@ def tune_hyperparameters(
         t0 = time.monotonic()
 
         adapter = get_adapter(algorithm)
-        ds_train = train_lgb_handle.load()
-        ds_dev = train_dev_lgb_handle.load(reference=ds_train)
-        adapter.train(
-            X_train=None, y_train=None, X_val=None, y_val=None,
-            params=params,
-            train_dataset=ds_train, val_dataset=ds_dev,
-        )
-        y_pred = adapter.predict(X_v)
 
-        ap = compute_ap(y_v, y_pred)
-        ap = ap if ap is not None else 0.0
+        with log_step(logger, "prepare_datasets"):
+            ds_train = train_lgb_handle.load()
+            ds_dev = train_dev_lgb_handle.load(reference=ds_train)
+
+        with log_step(logger, "train"):
+            adapter.train(
+                X_train=None, y_train=None, X_val=None, y_val=None,
+                params=params,
+                train_dataset=ds_train, val_dataset=ds_dev,
+            )
+
+        with log_step(logger, "predict"):
+            y_pred = adapter.predict(X_v)
+
+        with log_step(logger, "score"):
+            ap = compute_ap(y_v, y_pred)
+            ap = ap if ap is not None else 0.0
 
         if ap > best_state["ap"]:
             best_state["ap"] = ap

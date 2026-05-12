@@ -376,6 +376,50 @@ class TestTuneHyperparameters:
             assert "'metric'" not in m
             assert "'verbosity'" not in m
 
+    def test_emits_inner_step_events_per_trial(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
+    ):
+        """Each trial emits 4 inner log_step events: prepare_datasets, train,
+        predict, score. Both step_started and step_completed fire for each.
+        """
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        n_trials = training_parameters["training"]["n_trials"]
+        expected_steps = {"prepare_datasets", "train", "predict", "score"}
+
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+        ):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h,
+                preprocessor_metadata, training_parameters,
+            )
+
+        started = [
+            r.step
+            for r in caplog.records
+            if getattr(r, "event", None) == "step_started"
+            and getattr(r, "step", None) in expected_steps
+        ]
+        completed = [
+            r.step
+            for r in caplog.records
+            if getattr(r, "event", None) == "step_completed"
+            and getattr(r, "step", None) in expected_steps
+        ]
+
+        # Each inner step fires once per trial → n_trials times total
+        for step_name in expected_steps:
+            assert started.count(step_name) == n_trials, (
+                f"step_started count for {step_name!r} = "
+                f"{started.count(step_name)}, expected {n_trials}"
+            )
+            assert completed.count(step_name) == n_trials, (
+                f"step_completed count for {step_name!r} = "
+                f"{completed.count(step_name)}, expected {n_trials}"
+            )
+
 
 # ---- Tests: finalize_model ----
 
