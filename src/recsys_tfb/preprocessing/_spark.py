@@ -350,5 +350,12 @@ def apply_preprocessor(
             raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
         result = result.select(*identity_cols, *feature_columns)
 
-    logger.info("Preprocessed scoring data (Spark): %d columns", len(result.columns))
+    with log_step(logger, "cast_decimals_to_double"):
+        result, casted = _cast_feature_decimals_to_double(result, feature_columns)
+    logger.info(
+        "apply_preprocessor: %d columns, cast %d decimal feature columns to double",
+        len(result.columns), len(casted),
+    )
+    if casted:
+        logger.debug("apply_preprocessor: casted columns = %s", casted)
     return result
