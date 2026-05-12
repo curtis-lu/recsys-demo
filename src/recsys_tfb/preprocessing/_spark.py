@@ -306,7 +306,14 @@ def build_model_input(
         output_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
         result = dataset.select(*output_cols)
 
-    logger.info("Model input (Spark): %d features", len(feature_columns))
+    with log_step(logger, "cast_decimals_to_double"):
+        result, casted = _cast_feature_decimals_to_double(result, feature_columns)
+    logger.info(
+        "build_model_input: %d features, cast %d decimal feature columns to double",
+        len(feature_columns), len(casted),
+    )
+    if casted:
+        logger.debug("build_model_input: casted columns = %s", casted)
     return result
 
 

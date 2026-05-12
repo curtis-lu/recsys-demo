@@ -387,3 +387,70 @@ class TestFitApplyFilterScopes:
         assert train_dates.issubset(result_dates)
         assert val_dates.issubset(result_dates)
         assert test_dates.issubset(result_dates)
+
+
+def test_build_model_input_casts_decimal_features_to_double(
+    spark, label_table, parameters
+):
+    """Decimal feature columns must be cast to double inside build_model_input.
+
+    pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
+    (~10x peak-memory blow-up when extract_Xy reads the parquet cache via
+    pd.read_parquet). LightGBM consumes float anyway, so we bake the smaller
+    representation into model_input at write time.
+    """
+    from decimal import Decimal
+
+    from pyspark.sql import types as T
+
+    schema = T.StructType([
+        T.StructField("snap_date", T.TimestampType()),
+        T.StructField("cust_id", T.StringType()),
+        T.StructField("total_aum", T.DecimalType(38, 6)),
+        T.StructField("fund_aum", T.DoubleType()),
+        T.StructField("in_amt_sum_l1m", T.DecimalType(29, 0)),
+        T.StructField("out_amt_sum_l1m", T.DoubleType()),
+        T.StructField("in_amt_ratio_l1m", T.DoubleType()),
+        T.StructField("out_amt_ratio_l1m", T.DoubleType()),
+    ])
+    rows = []
+    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
+        snap_ts = pd.Timestamp(snap).to_pydatetime()
+        for cid, aum in [
+            ("C001", "100.0"),
+            ("C002", "200.0"),
+            ("C003", "300.0"),
+            ("C004", "400.0"),
+        ]:
+            rows.append((
+                snap_ts, cid, Decimal(aum), 10.0, Decimal("5"),
+                3.0, 0.05, 0.03,
+            ))
+    feature_table_decimal = spark.createDataFrame(rows, schema=schema)
+
+    preprocessor, _ = fit_preprocessor_metadata(feature_table_decimal, parameters)
+    pft = apply_preprocessor_to_features(feature_table_decimal, preprocessor, parameters)
+
+    # Build train keys directly (cust × prod × train_snap_dates) — independent of
+    # sample_pool fixture; the test is about dtype, not sampling.
+    train_keys = spark.createDataFrame(
+        pd.DataFrame({
+            "snap_date": pd.to_datetime(
+                ["2024-01-31"] * 4 + ["2024-02-29"] * 4 + ["2024-03-31"] * 4
+            ),
+            "cust_id": ["C001", "C002", "C003", "C004"] * 3,
+            "prod_name": ["exchange_fx"] * 12,
+        })
+    )
+
+    result = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+
+    feature_cols = preprocessor["feature_columns"]
+    out_dtypes = dict(result.dtypes)
+    decimal_feature_cols = [c for c in feature_cols if "decimal" in out_dtypes[c]]
+    assert decimal_feature_cols == [], (
+        f"feature_columns still contain decimal types: {decimal_feature_cols}"
+    )
+    # And the ones that WERE decimal in the input are now double.
+    assert out_dtypes["total_aum"] == "double"
+    assert out_dtypes["in_amt_sum_l1m"] == "double"
