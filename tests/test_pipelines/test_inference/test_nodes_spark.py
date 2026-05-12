@@ -106,6 +106,58 @@ class TestApplyPreprocessor:
         with pytest.raises(ValueError, match="Missing feature columns"):
             apply_preprocessor(scoring, preprocessor, parameters)
 
+    def test_casts_decimal_features_to_double(self, spark, parameters, preprocessor):
+        """Decimal feature columns in scoring data must be cast to double.
+
+        Mirror of build_model_input fix; the inference scoring parquet also gets
+        read back via pandas downstream and would face the same OOM.
+        """
+        from decimal import Decimal
+
+        from pyspark.sql import types as T
+
+        # Pick a non-categorical numeric feature column to force into DecimalType.
+        # feature_columns[0] is "prod_name" (categorical, string in scoring data),
+        # so use index 1 ("total_aum") which is a numeric feature.
+        feature_cols = preprocessor["feature_columns"]
+        categorical_cols = set(preprocessor["categorical_columns"])
+        decimal_col = next(c for c in feature_cols if c not in categorical_cols)
+
+        schema = T.StructType([
+            T.StructField("snap_date", T.TimestampType()),
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("prod_name", T.StringType()),
+            *[
+                T.StructField(
+                    c,
+                    T.DecimalType(38, 6) if c == decimal_col else T.DoubleType(),
+                )
+                for c in feature_cols
+                if c not in categorical_cols
+            ],
+        ])
+        snap_ts = pd.Timestamp("2024-03-31").to_pydatetime()
+        row_values: list = [snap_ts, "C001", "exchange_fx"]
+        for c in feature_cols:
+            if c in categorical_cols:
+                continue
+            row_values.append(Decimal("1.5") if c == decimal_col else 0.5)
+        scoring = spark.createDataFrame([tuple(row_values)], schema=schema)
+
+        result = apply_preprocessor(scoring, preprocessor, parameters)
+
+        out_dtypes = dict(result.dtypes)
+        assert out_dtypes[decimal_col] == "double", (
+            f"{decimal_col} still {out_dtypes[decimal_col]}, expected double"
+        )
+        # No feature column should remain decimal after apply_preprocessor.
+        decimal_feature_cols = [
+            c for c in feature_cols if "decimal" in out_dtypes[c]
+        ]
+        assert decimal_feature_cols == [], (
+            f"feature_columns still contain decimal types: {decimal_feature_cols}"
+        )
+
 
 class TestPredictScores:
     def test_output_is_spark_df(self, feature_table, parameters, preprocessor):
