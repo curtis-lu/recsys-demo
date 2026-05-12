@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
+from pyspark.sql import types as T
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
@@ -20,6 +21,31 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 logger = logging.getLogger(__name__)
+
+
+def _cast_feature_decimals_to_double(
+    df: DataFrame,
+    feature_cols: list[str],
+) -> tuple[DataFrame, list[str]]:
+    """Cast all DecimalType columns within feature_cols to double.
+
+    pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
+    (~70 bytes/value vs 8 bytes/float64), inflating peak memory ~10x and
+    OOM-killing extract_Xy in prod. LightGBM consumes float anyway, so cast
+    at write time and bake the smaller representation into model_input.
+
+    Identity and label columns are intentionally NOT cast - they should not
+    be decimal to begin with, and silent coercion of primary keys / label
+    dtype would mask a real schema bug.
+    """
+    feature_set = set(feature_cols)
+    decimal_feature_cols = [
+        f.name for f in df.schema.fields
+        if f.name in feature_set and isinstance(f.dataType, T.DecimalType)
+    ]
+    for col in decimal_feature_cols:
+        df = df.withColumn(col, F.col(col).cast("double"))
+    return df, decimal_feature_cols
 
 
 def _encode_categoricals(
