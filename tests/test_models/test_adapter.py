@@ -295,6 +295,65 @@ def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
     assert (cache_dir / "lgb" / "train.bin").exists()
 
 
+def test_lightgbm_train_uses_log_period_from_params(monkeypatch, tiny_data):
+    """`log_period` in params controls lgb.log_evaluation(period=...) and is
+    popped before lgb.train (LightGBM warns on unknown params otherwise)."""
+    import lightgbm as lgb
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    captured_periods: list[int] = []
+    real_log_evaluation = lgb.log_evaluation
+
+    def spy_log_evaluation(period=0, *args, **kwargs):
+        captured_periods.append(period)
+        return real_log_evaluation(period=period, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "log_evaluation", spy_log_evaluation)
+
+    X_train, y_train, X_val, y_val = tiny_data
+    params = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "verbosity": -1,
+        "num_leaves": 4,
+        "seed": 42,
+        "num_iterations": 5,
+        "early_stopping_rounds": 3,
+        "log_period": 2,
+    }
+    adapter = LightGBMAdapter()
+    adapter.train(X_train, y_train, X_val, y_val, params)
+
+    assert captured_periods == [2], (
+        f"expected log_evaluation called once with period=2, got {captured_periods}"
+    )
+    # log_period must be popped — LightGBM rejects unknown params silently but
+    # the booster's saved params would otherwise carry it.
+    assert "log_period" not in adapter.booster.params
+
+
+def test_lightgbm_train_default_log_period_silent(monkeypatch, tiny_data, train_params):
+    """Without `log_period` in params, default is 0 (silent) — preserves
+    existing behavior."""
+    import lightgbm as lgb
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    captured_periods: list[int] = []
+    real_log_evaluation = lgb.log_evaluation
+
+    def spy_log_evaluation(period=0, *args, **kwargs):
+        captured_periods.append(period)
+        return real_log_evaluation(period=period, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "log_evaluation", spy_log_evaluation)
+
+    X_train, y_train, X_val, y_val = tiny_data
+    adapter = LightGBMAdapter()
+    adapter.train(X_train, y_train, X_val, y_val, train_params.copy())
+
+    assert captured_periods == [0]
+
+
 def test_lightgbm_train_accepts_prebuilt_datasets(tmp_path):
     """train() with train_dataset= / val_dataset= kwargs uses pre-built Datasets."""
     import numpy as np

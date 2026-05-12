@@ -41,6 +41,10 @@ class LightGBMAdapter(ModelAdapter):
         # `refit_on_full` final-model strategy where best_iteration is fixed.
         num_iterations = params.pop("num_iterations", 500)
         early_stopping_rounds = params.pop("early_stopping_rounds", 50)
+        # 0 = silent (existing behavior). Positive N prints val metric every N
+        # boosting rounds. Popped before lgb.train so the booster's saved
+        # params don't carry this non-native key.
+        log_period = int(params.pop("log_period", 0))
 
         if train_dataset is None:
             train_dataset = lgb.Dataset(
@@ -50,7 +54,7 @@ class LightGBMAdapter(ModelAdapter):
         has_val = val_dataset is not None or X_val is not None
         valid_sets: list[lgb.Dataset] = []
         valid_names: list[str] = []
-        callbacks = [lgb.log_evaluation(period=0)]
+        callbacks = [lgb.log_evaluation(period=log_period)]
 
         if has_val:
             if val_dataset is None:
