@@ -23,6 +23,51 @@ from recsys_tfb.io.handles import ParquetHandle
 logger = logging.getLogger(__name__)
 
 
+def _log_parquet_metadata(handle: ParquetHandle) -> None:
+    """Log parquet shape & uncompressed size before the actual read.
+
+    Uses pyarrow.dataset so a single .parquet file *and* a multi-file
+    parquet directory both work. Metadata-only — no row data read, no
+    measurable memory cost.
+
+    Observability failures (e.g. path missing) are caught and downgraded
+    to WARNING so the probe never blocks the real read. The downstream
+    pandas read will then surface the real error itself.
+    """
+    path = getattr(handle, "path", "<unknown>")
+    try:
+        import pyarrow.dataset as pads
+
+        ds = pads.dataset(path, format="parquet")
+        n_rows = ds.count_rows()
+        n_cols = len(ds.schema)
+        total_bytes = 0
+        n_row_groups = 0
+        for frag in ds.get_fragments():
+            md = frag.metadata
+            n_row_groups += md.num_row_groups
+            for rg_i in range(md.num_row_groups):
+                rg = md.row_group(rg_i)
+                for col_i in range(rg.num_columns):
+                    total_bytes += rg.column(col_i).total_uncompressed_size
+        type_counts: dict[str, int] = {}
+        for t in ds.schema.types:
+            key = str(t)
+            type_counts[key] = type_counts.get(key, 0) + 1
+        logger.info(
+            "extract_Xy: parquet metadata num_rows=%d num_columns=%d "
+            "num_row_groups=%d total_uncompressed_mb=%.1f schema_types=%s",
+            n_rows, n_cols, n_row_groups,
+            total_bytes / 1024**2,
+            type_counts,
+        )
+    except Exception as e:
+        logger.warning(
+            "extract_Xy: parquet metadata probe failed path=%s err=%s",
+            path, e,
+        )
+
+
 def extract_Xy(
     handle: ParquetHandle,
     preprocessor_metadata: dict,
@@ -36,6 +81,8 @@ def extract_Xy(
     Emits sub-step ``log_step`` events (``read_parquet`` → ``slice_features`` →
     ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
     per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
+    A pre-read parquet metadata INFO is also emitted before ``read_parquet`` so
+    shape/uncompressed-size are visible even if the pandas read OOMs.
     """
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
@@ -51,6 +98,8 @@ def extract_Xy(
         label_col,
         identity_cols,
     )
+
+    _log_parquet_metadata(handle)
 
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()

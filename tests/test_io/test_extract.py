@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _make_handle(tmp_path: Path, df: pd.DataFrame):
@@ -179,3 +180,69 @@ def test_extract_xy_skips_encode_step_when_no_deferred_cats(
     # And there is no encode summary INFO line
     messages = [r.getMessage() for r in caplog.records]
     assert not any("deferred_cats=" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Pre-read parquet metadata observability
+# ---------------------------------------------------------------------------
+
+
+def test_extract_xy_logs_parquet_metadata_before_read(
+    tmp_path: Path, caplog
+) -> None:
+    from recsys_tfb.io.extract import extract_Xy
+
+    handle = _make_handle(tmp_path, _make_df_with_cat())
+
+    with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
+        extract_Xy(handle, _make_prep_meta_with_cat(), _make_parameters_with_cat())
+
+    messages = [r.getMessage() for r in caplog.records]
+    metadata_logs = [m for m in messages if "parquet metadata" in m]
+    assert len(metadata_logs) == 1
+    m = metadata_logs[0]
+    # _make_df_with_cat → 6 cols: cust_id, snap_date, prod_name, feat_a, feat_b, label
+    assert "num_rows=3" in m
+    assert "num_columns=6" in m
+    assert "num_row_groups=" in m
+    assert "total_uncompressed_mb=" in m
+    assert "schema_types=" in m
+
+    # Metadata log MUST come BEFORE the read_parquet step_started event,
+    # otherwise the whole feature (visible even when read_parquet OOMs) breaks.
+    records = caplog.records
+    metadata_idx = next(
+        i for i, r in enumerate(records) if "parquet metadata" in r.getMessage()
+    )
+    read_parquet_started_idx = next(
+        i
+        for i, r in enumerate(records)
+        if getattr(r, "event", None) == "step_started"
+        and getattr(r, "step", None) == "read_parquet"
+    )
+    assert metadata_idx < read_parquet_started_idx
+
+
+def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
+    tmp_path: Path, caplog
+) -> None:
+    """When the metadata probe raises (e.g. bogus path), log WARNING and
+    let extract_Xy proceed; the downstream pandas read will fail loudly on
+    its own — we don't want observability to mask or replace that error."""
+    from recsys_tfb.io.extract import extract_Xy
+    from recsys_tfb.io.handles import ParquetHandle
+
+    bogus = ParquetHandle(path=str(tmp_path / "does_not_exist.parquet"))
+
+    with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
+        with pytest.raises(Exception):
+            extract_Xy(
+                bogus, _make_prep_meta_with_cat(), _make_parameters_with_cat()
+            )
+
+    warning_messages = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert any(
+        "parquet metadata probe failed" in m for m in warning_messages
+    )
