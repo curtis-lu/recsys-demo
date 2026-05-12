@@ -295,8 +295,8 @@ def dataset(
     )
 
     spark = get_or_create_spark_session()
-    hive_db = params.get("hive", {}).get("db", "ml_recsys")
-    feature_table_fqn = f"{hive_db}.feature_table"
+    feature_table_cfg = config.get_catalog_config(runtime_params=params)["feature_table"]
+    feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
     feature_table_columns = [
         (f.name, f.dataType.simpleString())
         for f in spark.table(feature_table_fqn).schema.fields

@@ -40,6 +40,11 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
     local_dir.mkdir(parents=True)
 
     catalog = {
+        "feature_table": {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": "feature_table",
+        },
         "model": {
             "type": "ModelAdapterDataset",
             "filepath": "data/models/${model_version}/model.txt",
