@@ -1,5 +1,8 @@
 """Tests for training pipeline nodes."""
 
+import logging
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -256,6 +259,122 @@ class TestTuneHyperparameters:
         X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
         preds = best_model.predict(X_val)
         assert np.all(preds >= 0) and np.all(preds <= 1)
+
+    def test_emits_trial_start_and_completed_info_lines(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
+    ):
+        """Every trial emits a start INFO and a completed INFO with the
+        expected `trial=N/total ...` shape. trial_idx covers 0..n_trials-1.
+        """
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        n_trials = training_parameters["training"]["n_trials"]
+
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+        ):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h,
+                preprocessor_metadata, training_parameters,
+            )
+
+        messages = [r.getMessage() for r in caplog.records]
+        start_lines = [
+            m for m in messages
+            if re.match(rf"tune_hyperparameters: trial=\d+/{n_trials} start ", m)
+        ]
+        completed_lines = [
+            m for m in messages
+            if re.match(rf"tune_hyperparameters: trial=\d+/{n_trials} completed ", m)
+        ]
+        assert len(start_lines) == n_trials
+        assert len(completed_lines) == n_trials
+
+        # trial_idx covers 0..n_trials-1, in order
+        start_indices = [
+            int(re.search(r"trial=(\d+)/", m).group(1)) for m in start_lines
+        ]
+        completed_indices = [
+            int(re.search(r"trial=(\d+)/", m).group(1)) for m in completed_lines
+        ]
+        assert start_indices == list(range(n_trials))
+        assert completed_indices == list(range(n_trials))
+
+    def test_completed_line_has_correct_best_so_far(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
+    ):
+        """best_so_far in each completed INFO is monotonically non-decreasing,
+        and the final value matches the study's best_value (i.e. the maximum
+        ap actually achieved)."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+        ):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h,
+                preprocessor_metadata, training_parameters,
+            )
+
+        completed = [
+            r.getMessage()
+            for r in caplog.records
+            if "completed ap=" in r.getMessage()
+            and "tune_hyperparameters: trial=" in r.getMessage()
+        ]
+        best_so_far_values = [
+            float(re.search(r"best_so_far=([\d.]+)", m).group(1))
+            for m in completed
+        ]
+        # Monotonic non-decreasing
+        for prev, curr in zip(best_so_far_values, best_so_far_values[1:]):
+            assert curr >= prev, (
+                f"best_so_far decreased from {prev} to {curr} across trials"
+            )
+
+        ap_values = [
+            float(re.search(r"\bap=([\d.]+)", m).group(1)) for m in completed
+        ]
+        assert best_so_far_values[-1] == pytest.approx(max(ap_values))
+
+    def test_start_line_params_contains_only_search_dimensions(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
+    ):
+        """The `start` line's params={...} prints the search-space dimensions
+        (trial_params), NOT the expanded full params dict (which would also
+        contain algorithm_params keys like 'objective' / 'metric')."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+        ):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h,
+                preprocessor_metadata, training_parameters,
+            )
+
+        start_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "tune_hyperparameters: trial=" in r.getMessage()
+            and " start " in r.getMessage()
+        ]
+        assert start_lines, "no trial start lines emitted"
+
+        for m in start_lines:
+            # Must contain the search-space keys
+            assert "learning_rate" in m
+            assert "num_leaves" in m
+            assert "max_depth" in m
+            # Must NOT contain algorithm_params keys
+            assert "'objective'" not in m
+            assert "'metric'" not in m
+            assert "'verbosity'" not in m
 
 
 # ---- Tests: finalize_model ----

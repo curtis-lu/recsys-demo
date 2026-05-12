@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import time
 from pathlib import Path
 
 import mlflow
@@ -287,6 +288,7 @@ def tune_hyperparameters(
     best_state: dict = {"ap": -1.0, "model": None, "iteration": 0}
 
     def objective(trial: optuna.Trial) -> float:
+        trial_idx = trial.number
         trial_params = {
             "learning_rate": trial.suggest_float(
                 "learning_rate",
@@ -330,6 +332,12 @@ def tune_hyperparameters(
             "early_stopping_rounds": early_stopping_rounds,
         }
 
+        logger.info(
+            "tune_hyperparameters: trial=%d/%d start params=%s",
+            trial_idx, n_trials, trial_params,
+        )
+        t0 = time.monotonic()
+
         adapter = get_adapter(algorithm)
         ds_train = train_lgb_handle.load()
         ds_dev = train_dev_lgb_handle.load(reference=ds_train)
@@ -349,6 +357,14 @@ def tune_hyperparameters(
             # `best_iteration` is set by the early_stopping callback on the
             # underlying Booster regardless of whether early stopping fired.
             best_state["iteration"] = adapter.booster.best_iteration
+
+        duration = time.monotonic() - t0
+        logger.info(
+            "tune_hyperparameters: trial=%d/%d completed ap=%.4f "
+            "best_iteration=%d duration=%.1fs best_so_far=%.4f",
+            trial_idx, n_trials, ap,
+            adapter.booster.best_iteration, duration, best_state["ap"],
+        )
 
         return ap
 
