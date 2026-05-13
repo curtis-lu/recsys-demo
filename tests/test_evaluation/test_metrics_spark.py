@@ -119,3 +119,56 @@ def test_add_row_contributions_top_k_cutoff(spark):
     assert [r["top_k@2"] for r in result] == [1.0, 1.0, 0.0]
     # pos 3 was a hit (label=1) but cut off by top_k@2 → ap_contrib@2 = 0
     assert result[2]["ap_contrib@2"] == 0.0
+
+
+def test_add_row_contributions_ndcg_contrib_perfect_ranking(spark):
+    """Two positives at pos 1,2; K=3, total_rel=2.
+
+    iDCG@3 = 1/log2(2) + 1/log2(3) = 1.0 + 0.6309... = 1.6309...
+    nDCG contributions only at pos 1,2 (label=1): 1.0/iDCG and (1/log2(3))/iDCG.
+    Sum of ndcg_contrib@3 over query = iDCG/iDCG = 1.0  → perfect ranking nDCG=1.
+    """
+    import math
+    from recsys_tfb.evaluation.metrics_spark import add_row_contributions
+
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, 1, 2),
+            ("20240331", "C0", "B", 0.5, 1, 2, 2),
+            ("20240331", "C0", "C", 0.1, 0, 3, 2),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
+    )
+    result = add_row_contributions(
+        df, ["snap_date", "cust_id"], "label", k_values=[3]
+    ).orderBy("pos").collect()
+
+    idcg3 = 1.0 / math.log2(2) + 1.0 / math.log2(3)
+    assert abs(result[0]["ndcg_contrib@3"] - (1.0 / math.log2(2)) / idcg3) < 1e-9
+    assert abs(result[1]["ndcg_contrib@3"] - (1.0 / math.log2(3)) / idcg3) < 1e-9
+    assert result[2]["ndcg_contrib@3"] == 0.0  # label=0
+    total = sum(r["ndcg_contrib@3"] for r in result)
+    assert abs(total - 1.0) < 1e-9
+
+
+def test_add_row_contributions_ndcg_contrib_outside_top_k(spark):
+    """K=1: only first row contributes; positive at pos 2 is cut off."""
+    import math
+    from recsys_tfb.evaluation.metrics_spark import add_row_contributions
+
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 0, 1, 1),
+            ("20240331", "C0", "B", 0.5, 1, 2, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
+    )
+    result = add_row_contributions(
+        df, ["snap_date", "cust_id"], "label", k_values=[1]
+    ).orderBy("pos").collect()
+
+    # iDCG@1 with total_rel=1: 1/log2(2) = 1.0
+    # pos 1 (label=0): dcg_term=0, ndcg_contrib@1 = 0
+    # pos 2 (label=1): top_k@1=0 → ndcg_contrib@1 = 0
+    assert result[0]["ndcg_contrib@1"] == 0.0
+    assert result[1]["ndcg_contrib@1"] == 0.0

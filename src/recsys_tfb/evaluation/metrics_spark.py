@@ -81,4 +81,19 @@ def add_row_contributions(
             f"ap_contrib@{k}",
             F.col("prec_at_pos") * F.col(label_col) * F.col(f"top_k@{k}"),
         )
+        # iDCG@K = sum_{i=1}^{min(total_rel, K)} 1 / log2(i + 1)
+        # Computed inline via Spark's aggregate(sequence(...)) higher-order function.
+        # No UDF, no collect-and-broadcast.
+        idcg_at_k = F.aggregate(
+            F.sequence(F.lit(1), F.least(F.col("total_rel"), F.lit(k))),
+            F.lit(0.0),
+            lambda acc, i: acc + F.lit(1.0) / F.log2(i.cast("double") + F.lit(1.0)),
+        )
+        df = df.withColumn(
+            f"ndcg_contrib@{k}",
+            F.when(
+                idcg_at_k > 0,
+                F.col("dcg_term") * F.col(f"top_k@{k}") / idcg_at_k,
+            ).otherwise(F.lit(0.0)),
+        )
     return df
