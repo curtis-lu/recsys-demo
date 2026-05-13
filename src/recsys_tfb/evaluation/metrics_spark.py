@@ -253,3 +253,97 @@ def aggregate_by_row_dimension(
             metrics[f"recall@{k}"] = hit_rate
         result[key] = metrics
     return result
+
+
+def compute_all_metrics(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> dict:
+    """Spark-native orchestrator. Returns dict matching pandas compute_all_metrics shape.
+
+    Stages:
+        A1. rank_within_query
+        A2. add_query_aggregates
+        A3. add_row_contributions (after filtering total_rel > 0)
+        B1. aggregate_overall
+        B2. aggregate_by_row_dimension (per_product / per_product_segment)
+        B3. aggregate_by_query_dimension (per_segment)
+        C.  macro_average per dim
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    group_cols = [time_col] + entity_cols
+
+    eval_params = parameters.get("evaluation", {})
+    k_values_raw = eval_params.get("k_values", [5, "all"])
+    segment_columns = eval_params.get("segment_columns", [])
+
+    n_products = eval_predictions.select(item_col).distinct().count()
+    k_values = _resolve_k_values(k_values_raw, n_products)
+
+    n_queries_total = eval_predictions.select(*group_cols).distinct().count()
+
+    df = rank_within_query(eval_predictions, group_cols, score_col)
+    df = add_query_aggregates(df, group_cols, label_col)
+
+    df_with_pos = df.filter(F.col("total_rel") > 0)
+    n_queries_with_pos = df_with_pos.select(*group_cols).distinct().count()
+
+    if n_queries_with_pos == 0:
+        logger.warning("No queries with positive labels found")
+        return {
+            "overall": {},
+            "per_product": {},
+            "per_segment": {},
+            "per_product_segment": {},
+            "macro_avg": {},
+            "n_queries": n_queries_total,
+            "n_excluded_queries": n_queries_total - n_queries_with_pos,
+        }
+
+    enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
+    enriched = enriched.cache()
+
+    try:
+        overall = aggregate_overall(enriched, group_cols, label_col, k_values)
+        per_product = aggregate_by_row_dimension(
+            enriched, [item_col], label_col, k_values
+        )
+
+        per_segment: dict = {}
+        per_product_segment: dict = {}
+        active_seg_col = None
+        for seg_col in segment_columns:
+            if seg_col in enriched.columns:
+                active_seg_col = seg_col
+                break
+        if active_seg_col is not None:
+            per_segment = aggregate_by_query_dimension(
+                enriched, active_seg_col, group_cols, label_col, k_values
+            )
+            per_product_segment = aggregate_by_row_dimension(
+                enriched, [item_col, active_seg_col], label_col, k_values
+            )
+
+        macro_avg: dict = {}
+        macro_avg["by_product"] = _macro_average(per_product)
+        if per_segment:
+            macro_avg["by_segment"] = _macro_average(per_segment)
+        if per_product_segment:
+            macro_avg["by_product_segment"] = _macro_average(per_product_segment)
+
+        return {
+            "overall": overall,
+            "per_product": per_product,
+            "per_segment": per_segment,
+            "per_product_segment": per_product_segment,
+            "macro_avg": macro_avg,
+            "n_queries": n_queries_total,
+            "n_excluded_queries": n_queries_total - n_queries_with_pos,
+        }
+    finally:
+        enriched.unpersist()

@@ -318,3 +318,159 @@ def test_aggregate_by_query_dimension_equal_customer_weight(spark):
     assert abs(result["affluent"]["map@3"] - 1.0) < 1e-9
     for seg in result:
         assert set(result[seg].keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}
+
+
+def _make_parameters(k_values=(3,), segment_columns=()):
+    return {
+        "schema": {
+            "columns": {
+                "time": "snap_date",
+                "entity": ["cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
+        },
+        "evaluation": {
+            "k_values": list(k_values),
+            "segment_columns": list(segment_columns),
+        },
+    }
+
+
+def _make_eval_predictions(spark, with_segment=False):
+    rows = [
+        # C0: A(0.9, 1), B(0.5, 0), C(0.1, 1)
+        ("20240331", "C0", "A", 0.9, 1, "mass"),
+        ("20240331", "C0", "B", 0.5, 0, "mass"),
+        ("20240331", "C0", "C", 0.1, 1, "mass"),
+        # C1: B(0.8, 1), C(0.6, 0), A(0.3, 0)
+        ("20240331", "C1", "A", 0.3, 0, "affluent"),
+        ("20240331", "C1", "B", 0.8, 1, "affluent"),
+        ("20240331", "C1", "C", 0.6, 0, "affluent"),
+    ]
+    schema_cols = ["snap_date", "cust_id", "prod_name", "score", "label"]
+    if with_segment:
+        schema_cols = schema_cols + ["cust_segment_typ"]
+    else:
+        rows = [r[:5] for r in rows]
+    return spark.createDataFrame(rows, schema=schema_cols)
+
+
+def test_compute_all_metrics_returns_expected_keys(spark):
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = _make_eval_predictions(spark, with_segment=True)
+    params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
+    result = compute_all_metrics(eval_df, params)
+    assert set(result.keys()) == {
+        "overall",
+        "per_product",
+        "per_segment",
+        "per_product_segment",
+        "macro_avg",
+        "n_queries",
+        "n_excluded_queries",
+    }
+
+
+def test_compute_all_metrics_per_product_map_known_values(spark):
+    """Mirrors pandas test_per_product_map_known_values:
+        per_product["A"].map@3 == 1.0
+        per_product["B"].map@3 == 1.0
+        per_product["C"].map@3 == 2/3
+    """
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = _make_eval_predictions(spark, with_segment=False)
+    params = _make_parameters(k_values=[3])
+    result = compute_all_metrics(eval_df, params)
+    pp = result["per_product"]
+    assert abs(pp["A"]["map@3"] - 1.0) < 1e-9
+    assert abs(pp["B"]["map@3"] - 1.0) < 1e-9
+    assert abs(pp["C"]["map@3"] - 2 / 3) < 1e-9
+
+
+def test_compute_all_metrics_no_segment_column(spark):
+    """No segment column in df → per_segment / per_product_segment are empty."""
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = _make_eval_predictions(spark, with_segment=False)
+    params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
+    result = compute_all_metrics(eval_df, params)
+    assert result["per_segment"] == {}
+    assert result["per_product_segment"] == {}
+    assert "by_segment" not in result["macro_avg"]
+    assert "by_product_segment" not in result["macro_avg"]
+    assert "by_product" in result["macro_avg"]
+
+
+def test_compute_all_metrics_with_segment_column(spark):
+    """Segment column present → per_segment / per_product_segment populated."""
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = _make_eval_predictions(spark, with_segment=True)
+    params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
+    result = compute_all_metrics(eval_df, params)
+    assert set(result["per_segment"].keys()) == {"mass", "affluent"}
+    assert "by_segment" in result["macro_avg"]
+    assert "by_product_segment" in result["macro_avg"]
+
+
+def test_compute_all_metrics_excluded_queries_counted(spark):
+    """A query with no positives is excluded; n_excluded_queries reflects that."""
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    # C2 has no positives.
+    eval_df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.5, 0),
+            ("20240331", "C2", "A", 0.9, 0),
+            ("20240331", "C2", "B", 0.5, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+    params = _make_parameters(k_values=[2])
+    result = compute_all_metrics(eval_df, params)
+    assert result["n_queries"] == 2
+    assert result["n_excluded_queries"] == 1
+
+
+def test_compute_all_metrics_default_k_values_resolves_all(spark):
+    """k_values defaults to [5, 'all']; 'all' resolves to n_products."""
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = _make_eval_predictions(spark, with_segment=False)
+    params = _make_parameters()
+    params["evaluation"].pop("k_values")  # use the default
+    result = compute_all_metrics(eval_df, params)
+    # 3 products → 'all' resolves to 3; together with default 5, sorted unique = [3, 5]
+    overall_keys = set(result["overall"].keys())
+    assert "map@3" in overall_keys
+    assert "map@5" in overall_keys
+
+
+def test_compute_all_metrics_all_queries_excluded(spark):
+    """No positives anywhere → early return with empty dicts and counts."""
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    eval_df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 0),
+            ("20240331", "C0", "B", 0.5, 0),
+            ("20240331", "C1", "A", 0.9, 0),
+            ("20240331", "C1", "B", 0.5, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+    params = _make_parameters(k_values=[2])
+    result = compute_all_metrics(eval_df, params)
+    assert result["overall"] == {}
+    assert result["per_product"] == {}
+    assert result["per_segment"] == {}
+    assert result["per_product_segment"] == {}
+    assert result["macro_avg"] == {}
+    assert result["n_queries"] == 2
+    assert result["n_excluded_queries"] == 2
