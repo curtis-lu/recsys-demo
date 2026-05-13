@@ -238,3 +238,58 @@ def test_aggregate_overall_known_values(spark):
     assert abs(result["recall@3"] - 1.0) < 1e-9
     # nDCG@3 sanity: must be between 0 and 1
     assert 0 < result["ndcg@3"] <= 1.0
+
+
+def test_aggregate_by_row_dimension_keyed_by_dim_value(spark):
+    from recsys_tfb.evaluation.metrics_spark import aggregate_by_row_dimension
+
+    enriched = _full_enriched(spark, k_values=[3])
+    result = aggregate_by_row_dimension(enriched, ["prod_name"], "label", [3])
+    # 3 products, but only A, B, C had label=1 somewhere; check keys are strings.
+    assert set(result.keys()) == {"A", "B", "C"}
+    for prod, metrics in result.items():
+        assert set(metrics.keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}
+
+
+def test_aggregate_by_row_dimension_known_values(spark):
+    """Same fixture as aggregate_overall.
+
+    Per-product label=1 rows:
+      A: only C0 (label=1 at pos 1) → prec_at_pos=1.0 → map@3 = 1.0
+      B: only C1 (label=1 at pos 1) → prec_at_pos=1.0 → map@3 = 1.0
+      C: only C0 (label=1 at pos 3) → prec_at_pos=2/3 → map@3 = 2/3
+    """
+    from recsys_tfb.evaluation.metrics_spark import aggregate_by_row_dimension
+
+    enriched = _full_enriched(spark, k_values=[3])
+    result = aggregate_by_row_dimension(enriched, ["prod_name"], "label", [3])
+    assert abs(result["A"]["map@3"] - 1.0) < 1e-9
+    assert abs(result["B"]["map@3"] - 1.0) < 1e-9
+    assert abs(result["C"]["map@3"] - 2 / 3) < 1e-9
+    # precision@K == recall@K == mean(top_k@K) for matched rows (matches pandas semantic)
+    for prod in result:
+        assert result[prod]["precision@3"] == result[prod]["recall@3"]
+
+
+def test_aggregate_by_row_dimension_filters_to_label_1(spark):
+    """label=0 rows contribute nothing; A's metrics should not be diluted by C1's A (label=0)."""
+    from recsys_tfb.evaluation.metrics_spark import aggregate_by_row_dimension
+
+    enriched = _full_enriched(spark, k_values=[3])
+    result = aggregate_by_row_dimension(enriched, ["prod_name"], "label", [3])
+    # A only has label=1 at C0 pos 1, so map@3 must be exactly 1.0 (not diluted).
+    assert result["A"]["map@3"] == 1.0
+
+
+def test_aggregate_by_row_dimension_multi_column_key(spark):
+    """Multi-column dim → key is '_'.join of values."""
+    from recsys_tfb.evaluation.metrics_spark import aggregate_by_row_dimension
+
+    # Add a segment column to the input.
+    enriched = _full_enriched(spark, k_values=[3])
+    enriched = enriched.withColumn(
+        "seg", F.when(F.col("cust_id") == "C0", F.lit("mass")).otherwise(F.lit("affluent"))
+    )
+    result = aggregate_by_row_dimension(enriched, ["prod_name", "seg"], "label", [3])
+    # Only label=1 rows: (A, mass), (B, affluent), (C, mass)
+    assert set(result.keys()) == {"A_mass", "B_affluent", "C_mass"}

@@ -149,3 +149,53 @@ def aggregate_overall(
         )
     row = per_query.agg(*final_aggs).collect()[0].asDict()
     return {k: float(v) for k, v in row.items()}
+
+
+def aggregate_by_row_dimension(
+    enriched: SparkDataFrame,
+    dim_cols: list[str],
+    label_col: str,
+    k_values: list[int],
+) -> dict:
+    """Per-product / per-product-segment metrics.
+
+    Filters to label=1 rows, groupBy(dim_cols), takes mean of contribution columns.
+
+    Returns {dim_key: {metric_name: value}}.
+    dim_key is the dim column value (stringified) for single-column groupings,
+    or '_'.join(values) for multi-column groupings.
+
+    Per-dimension formulas (over label=1 rows in the dim):
+        map@K       = mean(ap_contrib@K)
+        ndcg@K      = mean(ndcg_contrib@K)
+        precision@K = mean(top_k@K)        -- same value as recall@K (matches pandas semantic)
+        recall@K    = mean(top_k@K)
+    """
+    rel = enriched.filter(F.col(label_col) == 1)
+    aggs = []
+    for k in k_values:
+        aggs.extend(
+            [
+                F.mean(f"ap_contrib@{k}").alias(f"map@{k}"),
+                F.mean(f"ndcg_contrib@{k}").alias(f"ndcg@{k}"),
+                F.mean(f"top_k@{k}").alias(f"hit_rate@{k}"),
+            ]
+        )
+    rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
+
+    result: dict = {}
+    for row in rows:
+        if len(dim_cols) == 1:
+            raw_key = row[dim_cols[0]]
+            key = raw_key if isinstance(raw_key, str) else str(raw_key)
+        else:
+            key = "_".join(str(row[c]) for c in dim_cols)
+        metrics: dict = {}
+        for k in k_values:
+            hit_rate = float(row[f"hit_rate@{k}"])
+            metrics[f"map@{k}"] = float(row[f"map@{k}"])
+            metrics[f"ndcg@{k}"] = float(row[f"ndcg@{k}"])
+            metrics[f"precision@{k}"] = hit_rate
+            metrics[f"recall@{k}"] = hit_rate
+        result[key] = metrics
+    return result
