@@ -293,3 +293,28 @@ def test_aggregate_by_row_dimension_multi_column_key(spark):
     result = aggregate_by_row_dimension(enriched, ["prod_name", "seg"], "label", [3])
     # Only label=1 rows: (A, mass), (B, affluent), (C, mass)
     assert set(result.keys()) == {"A_mass", "B_affluent", "C_mass"}
+
+
+def test_aggregate_by_query_dimension_equal_customer_weight(spark):
+    """C0 in 'mass', C1 in 'affluent'.
+
+    Per-query AP@3:  C0 = 5/6,  C1 = 1.0  (from aggregate_overall fixture).
+    Per-segment:
+        mass     → mean over {C0} = 5/6
+        affluent → mean over {C1} = 1.0
+    """
+    from recsys_tfb.evaluation.metrics_spark import aggregate_by_query_dimension
+
+    enriched = _full_enriched(spark, k_values=[3])
+    enriched = enriched.withColumn(
+        "seg",
+        F.when(F.col("cust_id") == "C0", F.lit("mass")).otherwise(F.lit("affluent")),
+    )
+    result = aggregate_by_query_dimension(
+        enriched, "seg", ["snap_date", "cust_id"], "label", [3]
+    )
+    assert set(result.keys()) == {"mass", "affluent"}
+    assert abs(result["mass"]["map@3"] - 5 / 6) < 1e-9
+    assert abs(result["affluent"]["map@3"] - 1.0) < 1e-9
+    for seg in result:
+        assert set(result[seg].keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}

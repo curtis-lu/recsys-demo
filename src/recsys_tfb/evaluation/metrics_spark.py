@@ -151,6 +151,60 @@ def aggregate_overall(
     return {k: float(v) for k, v in row.items()}
 
 
+def aggregate_by_query_dimension(
+    enriched: SparkDataFrame,
+    dim_col: str,
+    group_cols: list[str],
+    label_col: str,
+    k_values: list[int],
+) -> dict:
+    """Per-segment metrics with equal customer weighting.
+
+    Two-stage:
+        1. groupBy(group_cols).agg(per-query formulas + first(dim_col))  -- one row per query
+        2. groupBy(dim_col).mean(per-query metrics)                       -- equal customer weight
+
+    Matches the pandas per_segment semantic (equal customer weight, not row-level mean).
+    """
+    per_query_aggs = [
+        F.first("total_rel").alias("total_rel"),
+        F.first(dim_col).alias(dim_col),
+    ]
+    for k in k_values:
+        per_query_aggs.extend(
+            [
+                F.sum(f"ap_contrib@{k}").alias(f"_ap_sum_{k}"),
+                F.sum(f"ndcg_contrib@{k}").alias(f"_ndcg_sum_{k}"),
+                F.sum(F.col(label_col) * F.col(f"top_k@{k}")).alias(f"_hits_{k}"),
+            ]
+        )
+    per_query = enriched.groupBy(*group_cols).agg(*per_query_aggs)
+
+    metric_aliases = []
+    for k in k_values:
+        per_query = (
+            per_query.withColumn(
+                f"map@{k}", F.col(f"_ap_sum_{k}") / F.col("total_rel")
+            )
+            .withColumn(f"ndcg@{k}", F.col(f"_ndcg_sum_{k}"))
+            .withColumn(f"precision@{k}", F.col(f"_hits_{k}") / F.lit(k))
+            .withColumn(f"recall@{k}", F.col(f"_hits_{k}") / F.col("total_rel"))
+        )
+        metric_aliases.extend(
+            [f"map@{k}", f"ndcg@{k}", f"precision@{k}", f"recall@{k}"]
+        )
+
+    final_aggs = [F.mean(m).alias(m) for m in metric_aliases]
+    rows = per_query.groupBy(dim_col).agg(*final_aggs).collect()
+
+    result: dict = {}
+    for row in rows:
+        raw_key = row[dim_col]
+        key = raw_key if isinstance(raw_key, str) else str(raw_key)
+        result[key] = {m: float(row[m]) for m in metric_aliases}
+    return result
+
+
 def aggregate_by_row_dimension(
     enriched: SparkDataFrame,
     dim_cols: list[str],
