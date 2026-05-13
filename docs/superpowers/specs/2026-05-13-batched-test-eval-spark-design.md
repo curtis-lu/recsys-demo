@@ -227,16 +227,103 @@ nodes.extend([
 
 If framework does not support catalog-handle-as-input, fallback: inject the dataset via a thin factory inside the node body (read catalog from `parameters` or via the registry), or perform the chunked write with a direct `HiveTableDataset` instantiation. The DAG still gets `outputs="predict_manifest"` for ordering, and the catalog entry stays as the **load** declaration for compute_test_mAP_spark.
 
-### 5. `extract_Xy_with_groups` extension (if needed)
+### 5. Refactor: extract `_pdf_to_X` helper from `extract_Xy`
 
-Currently `extract_Xy_with_groups` loads the entire parquet then filters. For per-partition use, we need:
+`extract_Xy_with_groups` is **not** modified.
 
-- **(a)** A new variant that accepts a partition filter (`snap_date`, `prod_name`) and pushes it down to pyarrow. Cleanest, no over-read.
-- **(b)** Reuse current implementation by passing a *partition-specific* ParquetHandle. Requires either the ParquetHandle abstraction to support filters, or wrapping the per-partition read in the node.
+`extract_Xy` (src/recsys_tfb/io/extract.py:71-141) currently does two coupled steps:
 
-**Recommendation: (b)** — keep `extract_Xy_with_groups` narrow; do the partition slicing inside `predict_and_write_test_predictions` by reading just the partition directory directly. The training cache root (`_materialize_parquet_handle`) lays out parquets with Hive-style partitioning, so a partition path is a valid parquet input by itself.
+- **Step A** — `read_parquet`: `pdf = handle.to_pandas()`
+- **Step B** — `pdf → X numpy`: `slice_features` + `encode_categoricals` (for deferred identity cats) + `to_numpy`
 
-If that proves awkward in the plan phase, we add (a) as a deferred follow-up.
+The new `predict_and_write_test_predictions` node needs Step B only — it reads each partition's pdf itself via pyarrow (so Step A's "read whole parquet" is the wrong shape), then applies the Pass 0 positive-set filter, then needs to turn the filtered pdf into X for `model.predict`.
+
+**Refactor:**
+
+```python
+# src/recsys_tfb/io/extract.py
+
+def _pdf_to_X(
+    pdf: pd.DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> np.ndarray:
+    """Step B: already-loaded pdf → X numpy.
+
+    Encapsulates slice_features + encode_categoricals (deferred identity cats)
+    + to_numpy. Used by extract_Xy after its parquet read and by
+    predict_and_write_test_predictions after its per-partition pyarrow read
+    and positive-set filter.
+    """
+    feature_cols = preprocessor_metadata["feature_columns"]
+    schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
+    categorical_cols = preprocessor_metadata["categorical_columns"]
+    category_mappings = preprocessor_metadata["category_mappings"]
+
+    with log_step(logger, "slice_features"):
+        X_df = pdf[feature_cols].copy()
+    # ... size summary log ...
+
+    deferred_cats = [
+        c for c in categorical_cols if c in identity_cols and c in X_df.columns
+    ]
+    if deferred_cats:
+        with log_step(logger, "encode_categoricals"):
+            for col in deferred_cats:
+                known = category_mappings[col]
+                X_df[col] = pd.Categorical(X_df[col], categories=known).codes
+
+    with log_step(logger, "to_numpy"):
+        X = X_df.values
+    return X
+
+
+def extract_Xy(handle, preprocessor_metadata, parameters):
+    """Step A + Step B; Step B delegated to _pdf_to_X."""
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    _log_parquet_metadata(handle)
+    with log_step(logger, "read_parquet"):
+        pdf = handle.to_pandas()
+    X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
+    y = pdf[label_col].values
+    return X, y
+```
+
+`extract_Xy_with_groups` does NOT switch to `_pdf_to_X` in this PR — leaving it alone reduces test churn. It already works correctly for its only caller (`tune_hyperparameters`), which reads the val parquet whole.
+
+**Existing tests:**
+
+- `tests/test_io/test_extract.py` — current `extract_Xy` tests verify log events, size summaries, encoded categoricals. After refactor, the log events fire from `_pdf_to_X` (slice_features, encode_categoricals, to_numpy) instead of from `extract_Xy` directly. Tests assert by `caplog` on `recsys_tfb.io.extract` logger — same module, so existing assertions stay green. **Verify in the plan phase** that no test asserts the call-site of the `log_step` events.
+
+**Partition-directory read inside `predict_and_write_test_predictions`:**
+
+The new node reads each `(snap_date, prod_name)` partition via pyarrow directly. The training cache root (`_materialize_parquet_handle`) lays out the test parquet with Hive-style partitioning, so:
+
+```python
+import pyarrow.dataset as pads
+
+ds = pads.dataset(test_parquet_handle.path, format="parquet")
+# Pass 0: label-only scan for positive customer set per snap_date
+labels_table = ds.to_table(columns=[entity_col, time_col, label_col])
+# build positive_set[snap_date] = set(cust_id with label==1)
+
+# Pass 1: per-partition read
+for snap_date, prod_name in distinct_partitions:
+    partition_table = ds.to_table(
+        filter=(pads.field(time_col) == snap_date) & (pads.field(item_col) == prod_name)
+    )
+    partition_pdf = partition_table.to_pandas()
+    partition_pdf = partition_pdf[
+        partition_pdf[entity_col].isin(positive_set[snap_date])
+    ]
+    X = _pdf_to_X(partition_pdf, preprocessor_metadata, parameters)
+    y_score = model.predict(X)
+    # ... build spark DF + catalog.save() ...
+```
+
+**Risk:** if the cached test parquet is NOT laid out as a directory-of-partitions (just a single .parquet file with all rows interleaved), pyarrow filter still works but does not skip row groups efficiently — overhead is one full-file scan per partition. Plan phase must verify cache layout in `cache_test_model_input` / `_materialize_parquet_handle`. If layout is single-file, either (i) accept the scan overhead (still beats loading 220M rows into pandas once), or (ii) extend the cache step to write partitioned-by-`(snap_date, prod_name)`. Decision deferred to plan.
 
 ## Testing Strategy
 
@@ -265,7 +352,8 @@ If that proves awkward in the plan phase, we add (a) as a deferred follow-up.
 
 ## Open Questions for Review
 
-1. Drop `rank` from `training_eval_predictions` schema — OK?
+1. ~~Drop `rank` from `training_eval_predictions` schema~~ — **Decided: drop.**
 2. Catalog-handle-as-input vs in-node direct `HiveTableDataset` instantiation — preference?
-3. Partition slicing approach — read partition directory directly, or extend `extract_Xy_with_groups` with a filter param?
+3. ~~Partition slicing approach~~ — **Decided: don't modify `extract_Xy_with_groups`; extract `_pdf_to_X` helper from `extract_Xy`; new node reads partitions via pyarrow filter and applies positive-set filter. See §5.**
 4. Schema migration acceptance — drop+rewrite for this PR is acceptable in dev; for prod, do we need a migration script?
+5. Cache layout: is `cache_test_model_input` storing the test parquet as a directory-of-partitions or a single file? Affects whether pyarrow filter pushes down or does full-file scan per partition (§5 Risk).
