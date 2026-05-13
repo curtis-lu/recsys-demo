@@ -223,6 +223,105 @@ def test_extract_xy_logs_parquet_metadata_before_read(
     assert metadata_idx < read_parquet_started_idx
 
 
+# ---------------------------------------------------------------------------
+# extract_Xy_with_groups — tune_hyperparameters helper
+# ---------------------------------------------------------------------------
+
+
+def _make_grouped_df():
+    """Six rows across three customers; c1 + c2 have positives, c3 does not."""
+    return pd.DataFrame(
+        {
+            "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+            "prod_name": ["fund", "ccard", "fund", "ccard", "fund", "ccard"],
+            "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "label": [1, 0, 0, 1, 0, 0],
+        }
+    )
+
+
+def _make_grouped_prep_meta():
+    return {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+
+
+def test_extract_xy_with_groups_returns_groups(tmp_path: Path) -> None:
+    from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    handle = _make_handle(tmp_path, _make_grouped_df())
+
+    X, y, groups = extract_Xy_with_groups(
+        handle, _make_grouped_prep_meta(), {}
+    )
+
+    assert X.shape == (6, 2)
+    assert list(y) == [1, 0, 0, 1, 0, 0]
+    assert groups.dtype == np.int64
+    assert len(groups) == 6
+    # Same (cust_id, snap_date) → same group id
+    assert groups[0] == groups[1]  # c1
+    assert groups[2] == groups[3]  # c2
+    assert groups[4] == groups[5]  # c3
+    # Three distinct groups for three distinct customers
+    assert len(set(groups.tolist())) == 3
+
+
+def test_extract_xy_with_groups_filters_no_positive_customers(
+    tmp_path: Path,
+) -> None:
+    from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    handle = _make_handle(tmp_path, _make_grouped_df())
+
+    X, y, groups = extract_Xy_with_groups(
+        handle,
+        _make_grouped_prep_meta(),
+        {},
+        filter_groups_with_positives=True,
+    )
+
+    # c3 dropped → only c1 (rows 0,1) and c2 (rows 2,3) remain
+    assert X.shape == (4, 2)
+    assert list(y) == [1, 0, 0, 1]
+    assert len(groups) == 4
+    assert len(set(groups.tolist())) == 2
+    # Row-level alignment preserved within each group
+    assert groups[0] == groups[1]
+    assert groups[2] == groups[3]
+    assert groups[0] != groups[2]
+
+
+def test_extract_xy_with_groups_filter_all_dropped(tmp_path: Path) -> None:
+    from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c2"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "prod_name": ["fund", "ccard"],
+            "feat_a": [1.0, 2.0],
+            "label": [0, 0],
+        }
+    )
+    handle = _make_handle(tmp_path, df)
+
+    X, y, groups = extract_Xy_with_groups(
+        handle,
+        _make_grouped_prep_meta(),
+        {},
+        filter_groups_with_positives=True,
+    )
+
+    assert X.shape == (0, 2)
+    assert len(y) == 0
+    assert len(groups) == 0
+    assert groups.dtype == np.int64
+
+
 def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
     tmp_path: Path, caplog
 ) -> None:
