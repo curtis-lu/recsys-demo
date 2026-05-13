@@ -32,3 +32,11 @@ def rank_within_query(
     """Add `pos` column: 1-based rank within each query, ordered by score desc."""
     w = Window.partitionBy(*group_cols).orderBy(F.col(score_col).desc())
     return df.withColumn("pos", F.row_number().over(w))
+
+
+def add_query_aggregates(
+    df: SparkDataFrame, group_cols: list[str], label_col: str
+) -> SparkDataFrame:
+    """Add `total_rel`: sum of label per query. Caller filters total_rel > 0 later."""
+    w = Window.partitionBy(*group_cols)
+    return df.withColumn("total_rel", F.sum(F.col(label_col)).over(w))

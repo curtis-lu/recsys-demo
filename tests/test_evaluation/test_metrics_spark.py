@@ -44,3 +44,25 @@ def test_rank_within_query_independent_groups(spark):
     result = rank_within_query(df, ["snap_date", "cust_id"], "score").collect()
     # Both rows get pos=1 within their own query.
     assert all(r["pos"] == 1 for r in result)
+
+
+def test_add_query_aggregates_total_rel_per_query(spark):
+    from recsys_tfb.evaluation.metrics_spark import add_query_aggregates
+
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", 1),
+            ("20240331", "C0", 0),
+            ("20240331", "C0", 1),
+            ("20240331", "C1", 0),
+            ("20240331", "C1", 0),
+            ("20240331", "C2", 1),
+        ],
+        schema=["snap_date", "cust_id", "label"],
+    )
+    result = add_query_aggregates(df, ["snap_date", "cust_id"], "label").collect()
+    by_cust = {r["cust_id"]: r["total_rel"] for r in result}
+    # Same value should repeat across all rows of the same query.
+    assert by_cust["C0"] == 2
+    assert by_cust["C1"] == 0
+    assert by_cust["C2"] == 1
