@@ -102,22 +102,6 @@ def compute_recall_at_k(
     return float(np.sum(top_k) / total_positives)
 
 
-def compute_mrr(y_true: np.ndarray, y_score: np.ndarray) -> float:
-    """Compute Reciprocal Rank for a single query.
-
-    Returns 0.0 if there are no positive labels.
-    """
-    order = np.argsort(-y_score)
-    y_sorted = y_true[order]
-
-    positive_positions = np.where(y_sorted > 0)[0]
-    if len(positive_positions) == 0:
-        return 0.0
-
-    first_pos = positive_positions[0]
-    return float(1.0 / (first_pos + 1))
-
-
 def compute_ap_at_k(
     y_true: np.ndarray, y_score: np.ndarray, k: int
 ) -> Optional[float]:
@@ -143,24 +127,6 @@ def compute_ap_at_k(
     return float(ap)
 
 
-def compute_mrr_at_k(
-    y_true: np.ndarray, y_score: np.ndarray, k: int
-) -> float:
-    """Compute Reciprocal Rank at K for a single query.
-
-    Returns 0.0 if the first positive is beyond rank K or no positives exist.
-    """
-    order = np.argsort(-y_score)
-    y_sorted = y_true[order][:k]
-
-    positive_positions = np.where(y_sorted > 0)[0]
-    if len(positive_positions) == 0:
-        return 0.0
-
-    first_pos = positive_positions[0]
-    return float(1.0 / (first_pos + 1))
-
-
 # ---------------------------------------------------------------------------
 # Helpers for per-query aggregation
 # ---------------------------------------------------------------------------
@@ -177,7 +143,6 @@ def _compute_query_metrics(
     for k in k_values:
         metrics[f"map@{k}"] = compute_ap_at_k(y_true, y_score, k)
         metrics[f"ndcg@{k}"] = compute_ndcg(y_true, y_score, k=k)
-        metrics[f"mrr@{k}"] = compute_mrr_at_k(y_true, y_score, k)
         metrics[f"precision@{k}"] = compute_precision_at_k(y_true, y_score, k)
         metrics[f"recall@{k}"] = compute_recall_at_k(y_true, y_score, k)
 
@@ -233,7 +198,7 @@ def _enrich_with_contributions(
     within each query group. Only rows with label=1 contribute to metrics.
 
     Returns a copy with added columns: pos, cum_rel, precision,
-    and per-K columns: hit@K, map_contrib@K, mrr_contrib@K, ndcg_k_contrib@K.
+    and per-K columns: hit@K, map_contrib@K, ndcg_k_contrib@K.
     """
     if group_cols is None:
         group_cols = ["snap_date", "cust_id"]
@@ -266,15 +231,6 @@ def _enrich_with_contributions(
     # nDCG discount factor (reused per K)
     discount = 1.0 / np.log2(df["pos"].values + 1)
 
-    # --- First relevant position per query (for MRR contribution) ---
-    # For each query, find the minimum pos where label=1
-    first_rel_pos = df[df[label_col] == 1].groupby(
-        group_cols, sort=False
-    )["pos"].transform("min")
-    df["first_rel_pos"] = np.nan
-    df.loc[df[label_col] == 1, "first_rel_pos"] = first_rel_pos
-    # Forward-fill within group isn't needed; we only use this on label=1 rows
-
     # Per-K columns
     r_vals = r_per_query.astype(int).values
     for k in k_values:
@@ -284,10 +240,6 @@ def _enrich_with_contributions(
         # map_contrib@K: precision * label * (pos <= K) / total_positives
         # (averaged over relevant rows per dimension gives per-product AP@K)
         df[f"map_contrib@{k}"] = df["precision"] * in_top_k
-
-        # mrr_contrib@K: 1/pos if this is the first relevant AND pos <= K
-        is_first_rel = (df["pos"] == df["first_rel_pos"]).astype(float)
-        df[f"mrr_contrib@{k}"] = (1.0 / df["pos"]) * is_first_rel * in_top_k
 
         # nDCG@K: need iDCG@K per query
         k_cap = np.minimum(r_vals, k)
@@ -307,7 +259,7 @@ def _aggregate_per_dimension(
     enriched_rel: pd.DataFrame,
     groupby_cols: list[str],
     k_values: list[int],
-) -> tuple[dict, dict]:
+) -> dict:
     """Aggregate per-row metric contributions by groupby_cols.
 
     Args:
@@ -316,25 +268,19 @@ def _aggregate_per_dimension(
         k_values: K values used to locate hit@K and ndcg_k_contrib@K columns.
 
     Returns:
-        (per_dim_dict, query_counts_dict) matching the existing return structure.
+        Dict keyed by dimension value, each holding per-K metric dict.
     """
     metric_cols = []
     for k in k_values:
         metric_cols.extend([
             f"map_contrib@{k}",
             f"ndcg_k_contrib@{k}",
-            f"mrr_contrib@{k}",
             f"hit@{k}",
         ])
 
     grouped = enriched_rel.groupby(groupby_cols, sort=True)[metric_cols].mean()
 
-    # Count of relevant rows per dimension (used as query count proxy)
-    counts = enriched_rel.groupby(groupby_cols, sort=True).size()
-
     per_dim: dict = {}
-    query_counts: dict = {}
-
     for idx in grouped.index:
         key = idx if isinstance(idx, str) else "_".join(str(x) for x in idx)
         row = grouped.loc[idx]
@@ -342,13 +288,11 @@ def _aggregate_per_dimension(
         for k in k_values:
             metrics[f"map@{k}"] = float(row[f"map_contrib@{k}"])
             metrics[f"ndcg@{k}"] = float(row[f"ndcg_k_contrib@{k}"])
-            metrics[f"mrr@{k}"] = float(row[f"mrr_contrib@{k}"])
             metrics[f"precision@{k}"] = float(row[f"hit@{k}"])
             metrics[f"recall@{k}"] = float(row[f"hit@{k}"])
         per_dim[key] = metrics
-        query_counts[key] = int(counts.loc[idx])
 
-    return per_dim, query_counts
+    return per_dim
 
 
 def compute_all_metrics(
@@ -371,7 +315,7 @@ def compute_all_metrics(
 
     Returns:
         Dict with keys: overall, per_product, per_segment, per_product_segment,
-        macro_avg, micro_avg, n_queries, n_excluded_queries.
+        macro_avg, n_queries, n_excluded_queries.
     """
     schema = get_schema(parameters or {})
     time_col = schema["time"]
@@ -438,15 +382,11 @@ def compute_all_metrics(
 
     # Per-product: vectorized decomposition
     per_product: dict = {}
-    product_query_counts: dict = {}
     if len(rel) > 0:
-        per_product, product_query_counts = _aggregate_per_dimension(
-            rel, [item_col], k_values
-        )
+        per_product = _aggregate_per_dimension(rel, [item_col], k_values)
 
     # Per-segment: per-customer metrics → groupby segment → mean (equal customer weight)
     per_segment: dict = {}
-    segment_query_counts: dict = {}
     if has_segment and all_query_metrics:
         seg_records = [
             {k: v for k, v in qm.items() if not k.startswith("_") or k == "_segment"}
@@ -459,30 +399,21 @@ def compute_all_metrics(
             per_segment[seg_val] = {
                 k: float(seg_group[k].mean()) for k in metric_keys
             }
-            segment_query_counts[seg_val] = len(seg_group)
 
     # Per-product-segment: vectorized decomposition with both dimensions
     per_product_segment: dict = {}
-    product_segment_query_counts: dict = {}
     if has_segment and len(rel) > 0:
-        per_product_segment, product_segment_query_counts = _aggregate_per_dimension(
+        per_product_segment = _aggregate_per_dimension(
             rel, [item_col, "cust_segment_typ"], k_values
         )
 
-    # Macro and micro averages
+    # Macro averages
     macro_avg: dict = {}
-    micro_avg: dict = {}
-
     macro_avg["by_product"] = _macro_average(per_product)
-    micro_avg["by_product"] = _micro_average(per_product, product_query_counts)
 
     if has_segment:
         macro_avg["by_segment"] = _macro_average(per_segment)
-        micro_avg["by_segment"] = _micro_average(per_segment, segment_query_counts)
         macro_avg["by_product_segment"] = _macro_average(per_product_segment)
-        micro_avg["by_product_segment"] = _micro_average(
-            per_product_segment, product_segment_query_counts
-        )
 
     return {
         "overall": overall,
@@ -490,7 +421,6 @@ def compute_all_metrics(
         "per_segment": per_segment,
         "per_product_segment": per_product_segment,
         "macro_avg": macro_avg,
-        "micro_avg": micro_avg,
         "n_queries": n_queries,
         "n_excluded_queries": n_excluded,
     }
@@ -503,23 +433,3 @@ def _macro_average(per_dim: dict) -> dict:
         return {}
     keys = non_empty[0].keys()
     return {k: float(np.mean([m[k] for m in non_empty])) for k in keys}
-
-
-def _micro_average(per_dim: dict, query_counts: dict) -> dict:
-    """Query-count-weighted average of metrics across dimension values."""
-    non_empty_keys = [k for k, v in per_dim.items() if v]
-    if not non_empty_keys:
-        return {}
-
-    total_queries = sum(query_counts[k] for k in non_empty_keys)
-    if total_queries == 0:
-        return {}
-
-    metric_keys = per_dim[non_empty_keys[0]].keys()
-    result = {}
-    for mk in metric_keys:
-        weighted_sum = sum(
-            per_dim[k][mk] * query_counts[k] for k in non_empty_keys
-        )
-        result[mk] = float(weighted_sum / total_queries)
-    return result

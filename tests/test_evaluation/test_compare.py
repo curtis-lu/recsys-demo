@@ -80,7 +80,6 @@ class TestBuildComparisonResult:
         assert "per_product_delta" in comparison
         assert "per_segment_delta" in comparison
         assert "macro_avg_delta" in comparison
-        assert "micro_avg_delta" in comparison
 
 
 class TestPlotComparisonMetrics:

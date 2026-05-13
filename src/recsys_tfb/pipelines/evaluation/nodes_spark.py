@@ -105,7 +105,7 @@ def compute_metrics(
 ) -> dict:
     """Compute ranking metrics using Spark SQL.
 
-    Uses window functions to compute AP, nDCG, MRR, Precision@K, Recall@K
+    Uses window functions to compute AP, nDCG, Precision@K, Recall@K
     entirely within Spark, then collects the small aggregated result.
     """
     schema = get_schema(parameters)
@@ -155,25 +155,9 @@ def compute_metrics(
         F.col(label_col) / F.log2(F.col("pos") + F.lit(1)),
     )
 
-    # First relevant position per query
-    df = df.withColumn(
-        "first_rel_pos",
-        F.min(F.when(F.col(label_col) == 1, F.col("pos"))).over(
-            Window.partitionBy(*group_cols)
-        ),
-    )
-
-    # Step 4: Per-query aggregation for each K
-    # Exclude queries with no positives
+    # Step 4: Per-query aggregation for each K (exclude queries with no positives)
     query_aggs = []
     for k in k_values:
-        # AP@K: mean of precision_at_pos where label=1 AND pos<=K, divided by total_rel
-        ap_col = f"ap_{k}"
-        ndcg_col = f"ndcg_{k}"
-        mrr_col = f"mrr_{k}"
-        prec_col = f"precision_{k}"
-        recall_col = f"recall_{k}"
-
         query_aggs.extend([
             # AP@K: sum(precision_at_pos * label * (pos<=K)) / total_rel
             F.sum(
@@ -183,28 +167,17 @@ def compute_metrics(
                 ).otherwise(0)
             ).alias(f"_ap_num_{k}"),
             # Precision@K: sum(label where pos<=K) / K
+            # (same numerator drives Recall@K with total_rel as denominator)
             F.sum(
                 F.when(F.col("pos") <= k, F.col(label_col)).otherwise(0)
             ).alias(f"_prec_num_{k}"),
-            # Recall@K: sum(label where pos<=K) / total_rel
-            # (same numerator as precision, different denominator)
             # nDCG@K: sum(dcg_contrib where pos<=K) / iDCG@K
             F.sum(
                 F.when(F.col("pos") <= k, F.col("dcg_contrib")).otherwise(0)
             ).alias(f"_dcg_{k}"),
         ])
 
-    query_metrics = (
-        df.filter(F.col("total_rel") > 0)
-        .groupBy(*group_cols, item_col.join([]) if False else F.lit(0).alias("_dummy"))
-        # We group by query (group_cols), with additional columns carried
-    )
-    # Actually, simpler approach: aggregate per query first
-    base_aggs = [
-        F.first("total_rel").alias("total_rel"),
-        F.first("first_rel_pos").alias("first_rel_pos"),
-        F.count("*").alias("n_items"),
-    ]
+    base_aggs = [F.first("total_rel").alias("total_rel")]
 
     per_query = (
         df.filter(F.col("total_rel") > 0)
@@ -219,37 +192,20 @@ def compute_metrics(
     # --- Overall metrics ---
     overall = {}
     for k in k_values:
-        # AP@K
-        per_query_with_k = per_query.withColumn(
-            f"ap_{k}",
-            F.col(f"_ap_num_{k}") / F.col("total_rel"),
-        ).withColumn(
-            f"precision_{k}",
-            F.col(f"_prec_num_{k}") / F.lit(k),
-        ).withColumn(
-            f"recall_{k}",
-            F.col(f"_prec_num_{k}") / F.col("total_rel"),
-        ).withColumn(
-            f"mrr_{k}",
-            F.when(
-                F.col("first_rel_pos") <= k,
-                F.lit(1.0) / F.col("first_rel_pos"),
-            ).otherwise(0.0),
+        per_query = (
+            per_query.withColumn(
+                f"ap_{k}",
+                F.col(f"_ap_num_{k}") / F.col("total_rel"),
+            )
+            .withColumn(
+                f"precision_{k}",
+                F.col(f"_prec_num_{k}") / F.lit(k),
+            )
+            .withColumn(
+                f"recall_{k}",
+                F.col(f"_prec_num_{k}") / F.col("total_rel"),
+            )
         )
-
-        # iDCG@K: sum_{i=1}^{min(total_rel,K)} 1/log2(i+1)
-        # Pre-compute as UDF-free approach: use a lookup
-        # For simplicity, compute iDCG in the aggregation
-        # iDCG@K = sum of 1/log2(i+1) for i in 1..min(R,K)
-        # We'll approximate using the formula with min(total_rel, K)
-        min_rk = F.least(F.col("total_rel"), F.lit(k))
-        # Build iDCG lookup via SQL expression
-        # For efficiency, compute iDCG@K in Python from collected data
-        per_query_with_k = per_query_with_k.withColumn(
-            f"min_rk_{k}", min_rk
-        )
-
-        per_query = per_query_with_k
 
     # Collect per-query metrics (one row per query, small enough)
     collected = per_query.toPandas()
@@ -262,7 +218,6 @@ def compute_metrics(
             "per_segment": {},
             "per_product_segment": {},
             "macro_avg": {},
-            "micro_avg": {},
             "n_queries": 0,
             "n_excluded_queries": 0,
         }
@@ -293,7 +248,6 @@ def compute_metrics(
     for k in k_values:
         overall[f"map@{k}"] = float(collected[f"ap_{k}"].mean())
         overall[f"ndcg@{k}"] = float(collected[f"ndcg_{k}"].mean())
-        overall[f"mrr@{k}"] = float(collected[f"mrr_{k}"].mean())
         overall[f"precision@{k}"] = float(collected[f"precision_{k}"].mean())
         overall[f"recall@{k}"] = float(collected[f"recall_{k}"].mean())
 
@@ -307,7 +261,6 @@ def compute_metrics(
         _aggregate_per_dimension,
         _enrich_with_contributions,
         _macro_average,
-        _micro_average,
     )
 
     # Re-enrich in pandas for per-product decomposition
@@ -319,22 +272,17 @@ def compute_metrics(
     rel = enriched_contrib[enriched_contrib[label_col] == 1]
 
     per_product = {}
-    product_query_counts = {}
     if len(rel) > 0:
-        per_product, product_query_counts = _aggregate_per_dimension(
-            rel, [item_col], k_values
-        )
+        per_product = _aggregate_per_dimension(rel, [item_col], k_values)
 
     # Per-segment
     per_segment = {}
-    segment_query_counts = {}
     segment_columns = eval_params.get("segment_columns", [])
     has_segment = any(
         col in enriched_pd.columns for col in segment_columns
     )
     if has_segment and len(collected) > 0:
         # Use the first available segment column
-        import pandas as pd
         for seg_col in segment_columns:
             if seg_col not in enriched_pd.columns:
                 continue
@@ -342,44 +290,33 @@ def compute_metrics(
             query_seg = enriched_pd.groupby(group_cols).first()[[seg_col]].reset_index()
             query_metrics_df = collected.merge(query_seg, on=group_cols, how="left")
 
-            metric_keys = [c for c in collected.columns if c.startswith(("ap_", "ndcg_", "mrr_", "precision_", "recall_"))]
             for seg_val, seg_group in query_metrics_df.groupby(seg_col, sort=True):
                 seg_metrics = {}
                 for k in k_values:
                     seg_metrics[f"map@{k}"] = float(seg_group[f"ap_{k}"].mean())
                     seg_metrics[f"ndcg@{k}"] = float(seg_group[f"ndcg_{k}"].mean())
-                    seg_metrics[f"mrr@{k}"] = float(seg_group[f"mrr_{k}"].mean())
                     seg_metrics[f"precision@{k}"] = float(seg_group[f"precision_{k}"].mean())
                     seg_metrics[f"recall@{k}"] = float(seg_group[f"recall_{k}"].mean())
                 per_segment[str(seg_val)] = seg_metrics
-                segment_query_counts[str(seg_val)] = len(seg_group)
             break  # Only use first segment column for main per_segment
 
     # Per-product-segment
     per_product_segment = {}
-    product_segment_query_counts = {}
     if has_segment and len(rel) > 0:
         for seg_col in segment_columns:
             if seg_col in rel.columns:
-                per_product_segment, product_segment_query_counts = (
-                    _aggregate_per_dimension(rel, [item_col, seg_col], k_values)
+                per_product_segment = _aggregate_per_dimension(
+                    rel, [item_col, seg_col], k_values
                 )
                 break
 
-    # Macro/micro averages
+    # Macro averages
     macro_avg = {}
-    micro_avg = {}
     macro_avg["by_product"] = _macro_average(per_product)
-    micro_avg["by_product"] = _micro_average(per_product, product_query_counts)
-
     if per_segment:
         macro_avg["by_segment"] = _macro_average(per_segment)
-        micro_avg["by_segment"] = _micro_average(per_segment, segment_query_counts)
     if per_product_segment:
         macro_avg["by_product_segment"] = _macro_average(per_product_segment)
-        micro_avg["by_product_segment"] = _micro_average(
-            per_product_segment, product_segment_query_counts
-        )
 
     result = {
         "overall": overall,
@@ -387,7 +324,6 @@ def compute_metrics(
         "per_segment": per_segment,
         "per_product_segment": per_product_segment,
         "macro_avg": macro_avg,
-        "micro_avg": micro_avg,
         "n_queries": n_queries_total,
         "n_excluded_queries": n_excluded,
     }
@@ -468,16 +404,13 @@ def _render_html_report(
 
     if evaluation_metrics.get("macro_avg"):
         summary_tables.append(pd.DataFrame(evaluation_metrics["macro_avg"]))
-    if evaluation_metrics.get("micro_avg"):
-        summary_tables.append(pd.DataFrame(evaluation_metrics["micro_avg"]))
 
-    table_titles = ["Overall", "Macro Average", "Micro Average"]
+    table_titles = ["Overall", "Macro Average"]
     sections.append(
         ReportSection(
             title="Metrics Summary",
             description=(
-                "Overall ranking metrics, macro average (unweighted mean), "
-                "and micro average (query-count-weighted mean)."
+                "Overall ranking metrics and macro average (unweighted mean)."
             ),
             tables=summary_tables,
             table_titles=table_titles[:len(summary_tables)],

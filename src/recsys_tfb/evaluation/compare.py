@@ -43,19 +43,13 @@ def build_comparison_result(
         result_a.get("per_segment", {}), result_b.get("per_segment", {})
     )
 
-    # Macro/micro avg delta
+    # Macro avg delta
     comparison["macro_avg_delta"] = {}
-    comparison["micro_avg_delta"] = {}
     for dim_key in ("by_product", "by_segment", "by_product_segment"):
         macro_a = result_a.get("macro_avg", {}).get(dim_key, {})
         macro_b = result_b.get("macro_avg", {}).get(dim_key, {})
         if macro_a or macro_b:
             comparison["macro_avg_delta"][dim_key] = _compute_delta(macro_a, macro_b)
-
-        micro_a = result_a.get("micro_avg", {}).get(dim_key, {})
-        micro_b = result_b.get("micro_avg", {}).get(dim_key, {})
-        if micro_a or micro_b:
-            comparison["micro_avg_delta"][dim_key] = _compute_delta(micro_a, micro_b)
 
     return comparison
 

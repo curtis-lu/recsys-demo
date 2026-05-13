@@ -9,8 +9,6 @@ from recsys_tfb.evaluation.metrics import (
     compute_all_metrics,
     compute_ap,
     compute_ap_at_k,
-    compute_mrr,
-    compute_mrr_at_k,
     compute_ndcg,
     compute_precision_at_k,
     compute_recall_at_k,
@@ -112,23 +110,6 @@ class TestComputeRecallAtK:
         assert compute_recall_at_k(y_true, y_score, k=2) == 0.0
 
 
-class TestComputeMRR:
-    def test_first_positive_at_rank_3(self):
-        y_true = np.array([0, 0, 1, 0])
-        y_score = np.array([0.9, 0.8, 0.7, 0.6])
-        assert compute_mrr(y_true, y_score) == pytest.approx(1 / 3)
-
-    def test_first_positive_at_rank_1(self):
-        y_true = np.array([1, 0, 0])
-        y_score = np.array([0.9, 0.8, 0.7])
-        assert compute_mrr(y_true, y_score) == pytest.approx(1.0)
-
-    def test_no_positives(self):
-        y_true = np.array([0, 0, 0])
-        y_score = np.array([0.9, 0.8, 0.7])
-        assert compute_mrr(y_true, y_score) == 0.0
-
-
 class TestComputeAPAtK:
     def test_known_values(self):
         y_true = np.array([1, 0, 1, 0])
@@ -152,23 +133,6 @@ class TestComputeAPAtK:
         y_true = np.array([0, 0, 1])
         y_score = np.array([0.9, 0.8, 0.7])
         assert compute_ap_at_k(y_true, y_score, k=2) == pytest.approx(0.0)
-
-
-class TestComputeMRRAtK:
-    def test_first_positive_within_k(self):
-        y_true = np.array([0, 1, 0, 0])
-        y_score = np.array([0.9, 0.8, 0.7, 0.6])
-        assert compute_mrr_at_k(y_true, y_score, k=3) == pytest.approx(0.5)
-
-    def test_first_positive_beyond_k(self):
-        y_true = np.array([0, 0, 1, 0])
-        y_score = np.array([0.9, 0.8, 0.7, 0.6])
-        assert compute_mrr_at_k(y_true, y_score, k=2) == pytest.approx(0.0)
-
-    def test_no_positives(self):
-        y_true = np.array([0, 0, 0])
-        y_score = np.array([0.9, 0.8, 0.7])
-        assert compute_mrr_at_k(y_true, y_score, k=2) == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +192,9 @@ class TestComputeAllMetrics:
         assert "ndcg@3" in overall
         assert "precision@3" in overall
         assert "recall@3" in overall
-        assert "mrr@3" in overall
         # No non-@K keys
         assert "map" not in overall
         assert "ndcg" not in overall
-        assert "mrr" not in overall
 
     def test_per_product_metrics(self):
         predictions, labels = _make_test_data(products=["exchange_fx", "fund_bond", "fund_stock"])
@@ -310,18 +272,16 @@ class TestComputeAllMetrics:
         for key in result["per_product_segment"]:
             assert "_" in key
 
-    def test_macro_micro_avg_by_product(self):
+    def test_macro_avg_by_product(self):
         predictions, labels = _make_test_data()
         result = compute_all_metrics(predictions, labels, k_values=[3])
         assert "by_product" in result["macro_avg"]
-        assert "by_product" in result["micro_avg"]
         assert "map@3" in result["macro_avg"]["by_product"]
 
-    def test_macro_micro_avg_by_segment(self):
+    def test_macro_avg_by_segment(self):
         predictions, labels = _make_test_data()
         result = compute_all_metrics(predictions, labels, k_values=[3])
         assert "by_segment" in result["macro_avg"]
-        assert "by_segment" in result["micro_avg"]
 
     def test_n_queries_tracked(self):
         predictions, labels = _make_test_data(n_customers=10)
@@ -360,7 +320,7 @@ class TestComputeAllMetrics:
         result = compute_all_metrics(predictions, labels, k_values=[3])
         expected_keys = {
             "overall", "per_product", "per_segment", "per_product_segment",
-            "macro_avg", "micro_avg", "n_queries", "n_excluded_queries",
+            "macro_avg", "n_queries", "n_excluded_queries",
         }
         assert set(result.keys()) == expected_keys
 
