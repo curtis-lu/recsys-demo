@@ -345,3 +345,70 @@ def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
     assert any(
         "parquet metadata probe failed" in m for m in warning_messages
     )
+
+
+def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
+    """_pdf_to_X turns an already-loaded pdf into X numpy, applying the
+    same slice_features + encode_categoricals + to_numpy logic that
+    extract_Xy uses after its read_parquet step.
+    """
+    from recsys_tfb.io.extract import _pdf_to_X
+
+    pdf = pd.DataFrame({
+        "cust_id": ["c1", "c2", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 3),
+        "prod_name": ["fund", "ccard", "fund"],
+        "feat_a": [1.0, 2.0, 3.0],
+        "feat_b": [0.1, 0.2, 0.3],
+        "label": [0, 1, 0],
+    })
+    prep_meta = {
+        "feature_columns": ["feat_a", "feat_b", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }
+    }
+
+    X = _pdf_to_X(pdf, prep_meta, parameters)
+
+    assert X.shape == (3, 3)
+    # prod_name int-coded: fund=0, ccard=1, fund=0
+    assert list(X[:, 2]) == [0, 1, 0]
+    # numeric features pass through
+    assert list(X[:, 0]) == [1.0, 2.0, 3.0]
+    assert list(X[:, 1]) == [0.1, 0.2, 0.3]
+
+
+def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
+    """When no categorical_columns overlap with identity_columns, the
+    encode_categoricals step is skipped (mirrors extract_Xy behavior).
+    """
+    from recsys_tfb.io.extract import _pdf_to_X
+
+    pdf = pd.DataFrame({
+        "cust_id": ["c1", "c2"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+        "feat_a": [1.0, 2.0],
+        "label": [0, 1],
+    })
+    prep_meta = {
+        "feature_columns": ["feat_a"],
+        "categorical_columns": [],
+        "category_mappings": {},
+    }
+    parameters = {
+        "schema": {
+            "label": "label",
+            "identity_columns": ["cust_id", "snap_date"],
+        }
+    }
+
+    X = _pdf_to_X(pdf, prep_meta, parameters)
+
+    assert X.shape == (2, 1)
+    assert list(X[:, 0]) == [1.0, 2.0]

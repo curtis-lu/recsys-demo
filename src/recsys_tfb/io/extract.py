@@ -68,45 +68,24 @@ def _log_parquet_metadata(handle: ParquetHandle) -> None:
         )
 
 
-def extract_Xy(
-    handle: ParquetHandle,
+def _pdf_to_X(
+    pdf: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Read the parquet at ``handle.path`` and return (X, y) as numpy arrays.
+) -> np.ndarray:
+    """Already-loaded pdf -> X numpy.
 
-    Categorical identity columns (e.g. prod_name) are int-coded via the
-    preprocessor's ``category_mappings``.
-
-    Emits sub-step ``log_step`` events (``read_parquet`` → ``slice_features`` →
-    ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
-    per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
-    A pre-read parquet metadata INFO is also emitted before ``read_parquet`` so
-    shape/uncompressed-size are visible even if the pandas read OOMs.
+    Encapsulates slice_features + encode_categoricals (deferred identity cats)
+    + to_numpy. Used by extract_Xy after its parquet read and by
+    predict_and_write_test_predictions after a per-partition pyarrow read +
+    positive-set filter, so the latter doesn't have to re-read the parquet
+    just to reuse the feature-slicing logic.
     """
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
-    label_col = schema["label"]
     identity_cols = schema["identity_columns"]
     categorical_cols = preprocessor_metadata["categorical_columns"]
     category_mappings = preprocessor_metadata["category_mappings"]
-
-    logger.info(
-        "extract_Xy start path=%s n_feature_cols=%d label=%s identity_cols=%s",
-        getattr(handle, "path", "<unknown>"),
-        len(feature_cols),
-        label_col,
-        identity_cols,
-    )
-
-    _log_parquet_metadata(handle)
-
-    with log_step(logger, "read_parquet"):
-        pdf = handle.to_pandas()
-    logger.info(
-        "extract_Xy: parquet loaded rows=%d cols=%d",
-        len(pdf), len(pdf.columns),
-    )
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
@@ -131,7 +110,52 @@ def extract_Xy(
 
     with log_step(logger, "to_numpy"):
         X = X_df.values
-        y = pdf[label_col].values
+    return X
+
+
+def extract_Xy(
+    handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read the parquet at ``handle.path`` and return (X, y) as numpy arrays.
+
+    Categorical identity columns (e.g. prod_name) are int-coded via the
+    preprocessor's ``category_mappings``.
+
+    Emits sub-step ``log_step`` events (``read_parquet`` → ``slice_features`` →
+    ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
+    per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
+    Step A (read_parquet) lives here; Step B (pdf -> X) is delegated to
+    :func:`_pdf_to_X`. A pre-read parquet metadata INFO is emitted before
+    ``read_parquet`` so shape/uncompressed-size are visible even if the pandas
+    read OOMs.
+    """
+    feature_cols = preprocessor_metadata["feature_columns"]
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    identity_cols = schema["identity_columns"]
+
+    logger.info(
+        "extract_Xy start path=%s n_feature_cols=%d label=%s identity_cols=%s",
+        getattr(handle, "path", "<unknown>"),
+        len(feature_cols),
+        label_col,
+        identity_cols,
+    )
+
+    _log_parquet_metadata(handle)
+
+    with log_step(logger, "read_parquet"):
+        pdf = handle.to_pandas()
+    logger.info(
+        "extract_Xy: parquet loaded rows=%d cols=%d",
+        len(pdf), len(pdf.columns),
+    )
+
+    X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
+    y = pdf[label_col].values
+
     logger.info(
         "extract_Xy: X shape=%s dtype=%s nbytes=%.1fMB; y len=%d dtype=%s",
         X.shape, X.dtype, X.nbytes / 1024**2,
