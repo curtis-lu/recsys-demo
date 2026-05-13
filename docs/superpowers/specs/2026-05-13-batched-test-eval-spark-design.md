@@ -223,9 +223,7 @@ nodes.extend([
 
 `write_test_predictions` is removed. `evaluate_model` and `compute_test_mAP` (pandas versions) are removed.
 
-**Open question:** does the framework support passing a catalog handle (`training_eval_predictions`) as an *input* to a node so the function can call `.save()` directly? Or does the framework only consume catalog entries as data (auto-load)? — to be verified in the plan phase by reading `src/recsys_tfb/core/catalog.py` and runner code.
-
-If framework does not support catalog-handle-as-input, fallback: inject the dataset via a thin factory inside the node body (read catalog from `parameters` or via the registry), or perform the chunked write with a direct `HiveTableDataset` instantiation. The DAG still gets `outputs="predict_manifest"` for ordering, and the catalog entry stays as the **load** declaration for compute_test_mAP_spark.
+**Decision: catalog handle as node input (option a).** The DAG passes `training_eval_predictions` as an input parameter; `predict_and_write_test_predictions` receives the `HiveTableDataset` instance and calls `.save()` per partition. Plan phase verifies framework support by reading `src/recsys_tfb/core/catalog.py` and the runner code; if the framework does not support handle-as-input, the fallback is in-node `HiveTableDataset(...)` instantiation reading config from `parameters`, but we expect (a) to work cleanly given this project's catalog already exposes dataset objects to the runner.
 
 ### 5. Refactor: extract `_pdf_to_X` helper from `extract_Xy`
 
@@ -299,7 +297,26 @@ def extract_Xy(handle, preprocessor_metadata, parameters):
 
 **Partition-directory read inside `predict_and_write_test_predictions`:**
 
-The new node reads each `(snap_date, prod_name)` partition via pyarrow directly. The training cache root (`_materialize_parquet_handle`) lays out the test parquet with Hive-style partitioning, so:
+The new node reads each `(snap_date, prod_name)` partition via pyarrow directly. To make this an efficient partition-pruned read (not a full-file scan + in-memory filter), we add `prod_name` to the `test_model_input` catalog entry's `partition_cols` so the dataset pipeline writes the parquet partitioned by both:
+
+```yaml
+# conf/base/catalog.yaml — test_model_input
+test_model_input:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: recsys_prod_test_model_input
+  external: false
+  columns: "auto"
+  partition_filter:
+    base_dataset_version: ${base_dataset_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
+    - {name: prod_name, type: STRING}  # NEW
+```
+
+`HiveTableDataset.save()` (io/hive_table_dataset.py:135-179) already honors `partition_cols` via dynamic-partition insertInto, so the dataset pipeline write step needs no code change. The cache layer (`_populate_cache_from_hive`, nodes.py:91 glob `snap_date=*`) recursively copies the subtree, transparently preserving the new `prod_name=...` subdirectories. ParquetHandle.to_pandas() (pyarrow) reads partitioned datasets natively.
+
+**Effect on the new node:**
 
 ```python
 import pyarrow.dataset as pads
@@ -323,7 +340,12 @@ for snap_date, prod_name in distinct_partitions:
     # ... build spark DF + catalog.save() ...
 ```
 
-**Risk:** if the cached test parquet is NOT laid out as a directory-of-partitions (just a single .parquet file with all rows interleaved), pyarrow filter still works but does not skip row groups efficiently — overhead is one full-file scan per partition. Plan phase must verify cache layout in `cache_test_model_input` / `_materialize_parquet_handle`. If layout is single-file, either (i) accept the scan overhead (still beats loading 220M rows into pandas once), or (ii) extend the cache step to write partitioned-by-`(snap_date, prod_name)`. Decision deferred to plan.
+**Cache layout migration:** existing dev-cluster and prod `test_model_input` Hive table is partitioned by `snap_date` only. Adding `prod_name` to `partition_cols` requires one dataset pipeline rerun to produce the new physical layout:
+
+- dev-cluster: `scripts/dev_admin.sh scripts/nuke_ml_recsys.py` then `python -m recsys_tfb dataset --env production`
+- prod: one `dataset` pipeline rerun before the first batched training run
+
+The cache directory under `~/recsys_cache/.../test_model_input.parquet/` should also be purged once so the new partition tree gets copied down; the existing `_SUCCESS` marker would otherwise short-circuit.
 
 ## Testing Strategy
 
@@ -340,20 +362,24 @@ for snap_date, prod_name in distinct_partitions:
 ## Migration / Rollout
 
 - Single PR, single commit-or-few-commits.
-- No backwards-compat shim: `training_eval_predictions` table schema changes (drop `rank`, add `label`). Drop the dev-cluster table once before re-running:
+- **`training_eval_predictions` table schema** changes (drop `rank`, add `label`). No migration script needed because the table is rewritten on every training run for the current `model_version` — old rows for prior model_versions become schema-incompatible but are not read (we filter by `model_version` on every load). Drop the dev-cluster table once before re-running this PR to avoid Hive complaining about column mismatch:
   - `scripts/dev_admin.sh -c "DROP TABLE IF EXISTS ml_recsys.training_eval_predictions"` (or via `scripts/nuke_ml_recsys.py` if rerunning fresh).
+- **`test_model_input` partition_cols** adds `prod_name`. Requires one dataset pipeline rerun (dev: nuke + rerun; prod: a single `dataset` pipeline run before the first batched training). See §5 cache layout migration.
 - Downstream `evaluation/nodes_spark.py::prepare_eval_data`: verify it does not select `rank` from `training_eval_predictions`. If it does, drop that selection — `rank_within_query` recomputes it.
 
 ## Risks
 
-- **Framework constraint on catalog handles as node inputs** — if not supported, fallback in §4 adds complexity but doesn't block the design.
-- **Partition slicing on the parquet handle** — if `_materialize_parquet_handle` flattens partitions in cache, we can't read a single partition; would need to fall back to loading the whole parquet and filtering in pandas (still bounded since we then filter to positive customers immediately, but defeats the OOM win).
+- **Framework constraint on catalog handles as node inputs** — if Q2 (a) does not work, fallback is in-node `HiveTableDataset(...)` instantiation reading config from `parameters`. Verified in plan-phase task 1.
+- **Cache layout regeneration** — adding `prod_name` to `test_model_input.partition_cols` requires one dataset pipeline rerun; cache must be purged. Documented in Migration / Rollout.
+- **Small-file count** — `(snap_date, prod_name)` partitioning multiplies partition count by 22. For typical test windows of 1-2 snap_dates, this is 22-44 partitions per training run — well within Hive/parquet healthy ranges.
 - **Spark mAP performance** — `compute_all_metrics` already exists and is exercised by `evaluation` pipeline; reusing it carries no novel risk.
 
 ## Open Questions for Review
 
+All five questions resolved during brainstorming:
+
 1. ~~Drop `rank` from `training_eval_predictions` schema~~ — **Decided: drop.**
-2. Catalog-handle-as-input vs in-node direct `HiveTableDataset` instantiation — preference?
+2. ~~Catalog-handle-as-input vs in-node direct `HiveTableDataset`~~ — **Decided: (a) catalog-handle-as-input; verify framework support in plan-phase task 1.**
 3. ~~Partition slicing approach~~ — **Decided: don't modify `extract_Xy_with_groups`; extract `_pdf_to_X` helper from `extract_Xy`; new node reads partitions via pyarrow filter and applies positive-set filter. See §5.**
-4. Schema migration acceptance — drop+rewrite for this PR is acceptable in dev; for prod, do we need a migration script?
-5. Cache layout: is `cache_test_model_input` storing the test parquet as a directory-of-partitions or a single file? Affects whether pyarrow filter pushes down or does full-file scan per partition (§5 Risk).
+4. ~~Schema migration for `training_eval_predictions`~~ — **Decided: no migration script; rewrite-per-run + model_version-scoped reads makes old schema unread. Dev drop+rewrite documented.**
+5. ~~Cache layout~~ — **Decided: add `prod_name` to `test_model_input.partition_cols`. Requires one dataset pipeline rerun. See §5.**
