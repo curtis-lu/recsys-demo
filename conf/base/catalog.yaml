@@ -70,6 +70,7 @@ test_model_input:
     base_dataset_version: ${base_dataset_version}
   partition_cols:
     - {name: snap_date, type: STRING}
+    - {name: prod_name, type: STRING}
 
 preprocessor:
   type: JSONDataset
@@ -202,8 +203,14 @@ evaluation_report:
 # See docs/superpowers/specs/2026-05-07-training-cache-hdfs-copy-design.md
 
 # --- Training Pipeline - Test-set predictions for downstream evaluation reuse ---
-# Written by training/nodes.py::write_test_predictions per prod_name (bypasses catalog
-# auto-save for memory control). Read by evaluation pipeline when --post-training.
+# Written per (snap_date, prod_name) partition by training/nodes.py::
+# predict_and_write_test_predictions. Read by:
+#   - training/nodes.py::compute_test_mAP_spark (this pipeline)
+#   - evaluation/nodes_spark.py::prepare_eval_data (--post-training mode)
+# Semantics: only customers with >=1 positive label in the test window are
+# scored & written (the rest contribute nothing to mAP). Rows for prior
+# model_versions are not read because partition_filter pins the load to
+# the current model_version.
 training_eval_predictions:
   type: HiveTableDataset
   database: ${hive.db}
@@ -212,12 +219,14 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration is off
-    - {name: rank, type: BIGINT}
+    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration off
+    - {name: label, type: INT}
+  # rank dropped — not consumed; Spark mAP recomputes via rank_within_query
+  partition_filter:
+    model_version: ${model_version}
   partition_cols:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
-    - {name: model_version, type: STRING}
 
 # --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---
 # Each run only overwrites partitions present in the DataFrame (snap_date x prod_name x model_version).
