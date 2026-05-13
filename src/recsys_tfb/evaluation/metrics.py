@@ -102,6 +102,32 @@ def compute_recall_at_k(
     return float(np.sum(top_k) / total_positives)
 
 
+def compute_mean_ap(
+    groups: np.ndarray, y_true: np.ndarray, y_score: np.ndarray
+) -> float:
+    """Mean of per-group Average Precision.
+
+    A "group" represents one query (e.g. one ``(cust_id, snap_date)`` pair).
+    Groups with no positive labels are skipped (``compute_ap`` returns None);
+    if every group is skipped or the arrays are empty, returns 0.0.
+
+    Used by ``tune_hyperparameters`` to score val predictions as a true mAP
+    (per-customer AP averaged over customers) rather than treating the whole
+    val set as a single ranking problem.
+    """
+    if len(groups) == 0:
+        return 0.0
+    aps: list[float] = []
+    for g in np.unique(groups):
+        mask = groups == g
+        ap = compute_ap(y_true[mask], y_score[mask])
+        if ap is not None:
+            aps.append(ap)
+    if not aps:
+        return 0.0
+    return float(np.mean(aps))
+
+
 def compute_ap_at_k(
     y_true: np.ndarray, y_score: np.ndarray, k: int
 ) -> Optional[float]:

@@ -12,7 +12,7 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_ap
+from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_mean_ap
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -271,7 +271,7 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
-    from recsys_tfb.io.extract import extract_Xy
+    from recsys_tfb.io.extract import extract_Xy_with_groups
 
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
@@ -282,10 +282,18 @@ def tune_hyperparameters(
     algorithm = training_params.get("algorithm", "lightgbm")
     algorithm_params = training_params.get("algorithm_params", {})
 
+    # Val rows belonging to (cust_id, snap_date) groups with no positive
+    # labels contribute nothing to per-customer mAP and would only waste
+    # predict time, so drop them up front.
     with log_step(logger, "extract_features"):
-        X_v, y_v = extract_Xy(val_parquet_handle, preprocessor_metadata, parameters)
+        X_v, y_v, groups_v = extract_Xy_with_groups(
+            val_parquet_handle,
+            preprocessor_metadata,
+            parameters,
+            filter_groups_with_positives=True,
+        )
 
-    best_state: dict = {"ap": -1.0, "model": None, "iteration": 0}
+    best_state: dict = {"mean_ap": -1.0, "model": None, "iteration": 0}
 
     def objective(trial: optuna.Trial) -> float:
         trial_idx = trial.number
@@ -355,11 +363,10 @@ def tune_hyperparameters(
             y_pred = adapter.predict(X_v)
 
         with log_step(logger, "score"):
-            ap = compute_ap(y_v, y_pred)
-            ap = ap if ap is not None else 0.0
+            mean_ap = compute_mean_ap(groups_v, y_v, y_pred)
 
-        if ap > best_state["ap"]:
-            best_state["ap"] = ap
+        if mean_ap > best_state["mean_ap"]:
+            best_state["mean_ap"] = mean_ap
             best_state["model"] = adapter
             # `best_iteration` is set by the early_stopping callback on the
             # underlying Booster regardless of whether early stopping fired.
@@ -369,11 +376,11 @@ def tune_hyperparameters(
         logger.info(
             "tune_hyperparameters: trial=%d/%d completed ap=%.4f "
             "best_iteration=%d duration=%.1fs best_so_far=%.4f",
-            trial_idx, n_trials, ap,
-            adapter.booster.best_iteration, duration, best_state["ap"],
+            trial_idx, n_trials, mean_ap,
+            adapter.booster.best_iteration, duration, best_state["mean_ap"],
         )
 
-        return ap
+        return mean_ap
 
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
