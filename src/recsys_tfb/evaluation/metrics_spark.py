@@ -97,3 +97,55 @@ def add_row_contributions(
             ).otherwise(F.lit(0.0)),
         )
     return df
+
+
+def aggregate_overall(
+    enriched: SparkDataFrame,
+    group_cols: list[str],
+    label_col: str,
+    k_values: list[int],
+) -> dict:
+    """Per-query metrics → cross-query mean.
+
+    Per-query formulas:
+        ap@K        = sum(ap_contrib@K) / total_rel
+        ndcg@K      = sum(ndcg_contrib@K)              -- already iDCG-normalized
+        precision@K = sum(label * top_k@K) / K
+        recall@K    = sum(label * top_k@K) / total_rel
+
+    Overall metric@K = mean across queries.
+    Returns a flat dict {"map@K": ..., "ndcg@K": ..., "precision@K": ..., "recall@K": ...}.
+    """
+    per_query_aggs = [F.first("total_rel").alias("total_rel")]
+    for k in k_values:
+        per_query_aggs.extend(
+            [
+                F.sum(f"ap_contrib@{k}").alias(f"_ap_sum_{k}"),
+                F.sum(f"ndcg_contrib@{k}").alias(f"_ndcg_sum_{k}"),
+                F.sum(F.col(label_col) * F.col(f"top_k@{k}")).alias(f"_hits_{k}"),
+            ]
+        )
+    per_query = enriched.groupBy(*group_cols).agg(*per_query_aggs)
+
+    for k in k_values:
+        per_query = (
+            per_query.withColumn(
+                f"ap_{k}", F.col(f"_ap_sum_{k}") / F.col("total_rel")
+            )
+            .withColumn(f"ndcg_{k}", F.col(f"_ndcg_sum_{k}"))
+            .withColumn(f"precision_{k}", F.col(f"_hits_{k}") / F.lit(k))
+            .withColumn(f"recall_{k}", F.col(f"_hits_{k}") / F.col("total_rel"))
+        )
+
+    final_aggs = []
+    for k in k_values:
+        final_aggs.extend(
+            [
+                F.mean(f"ap_{k}").alias(f"map@{k}"),
+                F.mean(f"ndcg_{k}").alias(f"ndcg@{k}"),
+                F.mean(f"precision_{k}").alias(f"precision@{k}"),
+                F.mean(f"recall_{k}").alias(f"recall@{k}"),
+            ]
+        )
+    row = per_query.agg(*final_aggs).collect()[0].asDict()
+    return {k: float(v) for k, v in row.items()}

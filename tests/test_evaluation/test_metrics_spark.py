@@ -1,5 +1,7 @@
 """Tests for evaluation.metrics_spark module."""
 
+from pyspark.sql import functions as F  # noqa: F401
+
 
 def test_module_imports():
     """Verify the new module imports without errors."""
@@ -172,3 +174,67 @@ def test_add_row_contributions_ndcg_contrib_outside_top_k(spark):
     # pos 2 (label=1): top_k@1=0 → ndcg_contrib@1 = 0
     assert result[0]["ndcg_contrib@1"] == 0.0
     assert result[1]["ndcg_contrib@1"] == 0.0
+
+
+def _full_enriched(spark, k_values=(3,)):
+    """End-to-end enriched DF for 2 customers, 3 products, ready for aggregators."""
+    from recsys_tfb.evaluation.metrics_spark import (
+        add_query_aggregates,
+        add_row_contributions,
+        rank_within_query,
+    )
+
+    raw = spark.createDataFrame(
+        [
+            # C0: A(score 0.9, label 1), B(0.5, 0), C(0.1, 1)
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.5, 0),
+            ("20240331", "C0", "C", 0.1, 1),
+            # C1: B(0.8, 1), C(0.6, 0), A(0.3, 0)
+            ("20240331", "C1", "A", 0.3, 0),
+            ("20240331", "C1", "B", 0.8, 1),
+            ("20240331", "C1", "C", 0.6, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+    group_cols = ["snap_date", "cust_id"]
+    df = rank_within_query(raw, group_cols, "score")
+    df = add_query_aggregates(df, group_cols, "label")
+    df = df.filter(F.col("total_rel") > 0)
+    df = add_row_contributions(df, group_cols, "label", list(k_values))
+    return df
+
+
+def test_aggregate_overall_returns_expected_keys(spark):
+    from pyspark.sql import functions as F  # noqa: F401 (used inside _full_enriched)
+    from recsys_tfb.evaluation.metrics_spark import aggregate_overall
+
+    enriched = _full_enriched(spark, k_values=[3])
+    result = aggregate_overall(enriched, ["snap_date", "cust_id"], "label", [3])
+    assert set(result.keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}
+
+
+def test_aggregate_overall_known_values(spark):
+    """Hand-computed values.
+
+    C0: ranking A(1) B(2) C(3), labels [1,0,1], total_rel=2
+        AP@3 = (1/1 + 2/3) / 2 = 5/6
+        precision@3 = 2/3, recall@3 = 2/2 = 1
+    C1: ranking B(1) C(2) A(3), labels [1,0,0], total_rel=1
+        AP@3 = 1/1 / 1 = 1.0
+        precision@3 = 1/3, recall@3 = 1
+    Overall = mean over queries:
+        map@3 = (5/6 + 1.0) / 2 = 11/12
+        precision@3 = (2/3 + 1/3) / 2 = 0.5
+        recall@3 = 1.0
+    """
+    import math
+    from recsys_tfb.evaluation.metrics_spark import aggregate_overall
+
+    enriched = _full_enriched(spark, k_values=[3])
+    result = aggregate_overall(enriched, ["snap_date", "cust_id"], "label", [3])
+    assert abs(result["map@3"] - 11 / 12) < 1e-9
+    assert abs(result["precision@3"] - 0.5) < 1e-9
+    assert abs(result["recall@3"] - 1.0) < 1e-9
+    # nDCG@3 sanity: must be between 0 and 1
+    assert 0 < result["ndcg@3"] <= 1.0
