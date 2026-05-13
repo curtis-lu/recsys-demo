@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 def rank_within_query(
     df: SparkDataFrame, group_cols: list[str], score_col: str
 ) -> SparkDataFrame:
-    """Add `pos` column: 1-based rank within each query, ordered by score desc."""
+    """Add `pos` column: 1-based rank within each query, ordered by score desc.
+
+    Tie-breaking is left to Spark (undefined among rows sharing a score), matching
+    the pandas reference implementation. Do not add a secondary sort key here
+    without also adding it to pandas — the parity test will start failing.
+    """
     w = Window.partitionBy(*group_cols).orderBy(F.col(score_col).desc())
     return df.withColumn("pos", F.row_number().over(w))
 
@@ -116,6 +121,8 @@ def aggregate_overall(
     Overall metric@K = mean across queries.
     Returns a flat dict {"map@K": ..., "ndcg@K": ..., "precision@K": ..., "recall@K": ...}.
     """
+    # `total_rel` is constant within each query (Window sum in add_query_aggregates),
+    # so F.first() picks a single deterministic value per group.
     per_query_aggs = [F.first("total_rel").alias("total_rel")]
     for k in k_values:
         per_query_aggs.extend(
@@ -166,6 +173,9 @@ def aggregate_by_query_dimension(
 
     Matches the pandas per_segment semantic (equal customer weight, not row-level mean).
     """
+    # Both `total_rel` and `dim_col` are constant within each query — F.first() is
+    # deterministic. (total_rel from add_query_aggregates Window sum; dim_col is a
+    # per-customer attribute carried through the upstream join.)
     per_query_aggs = [
         F.first("total_rel").alias("total_rel"),
         F.first(dim_col).alias(dim_col),

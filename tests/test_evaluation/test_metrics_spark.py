@@ -206,7 +206,6 @@ def _full_enriched(spark, k_values=(3,)):
 
 
 def test_aggregate_overall_returns_expected_keys(spark):
-    from pyspark.sql import functions as F  # noqa: F401 (used inside _full_enriched)
     from recsys_tfb.evaluation.metrics_spark import aggregate_overall
 
     enriched = _full_enriched(spark, k_values=[3])
@@ -228,7 +227,6 @@ def test_aggregate_overall_known_values(spark):
         precision@3 = (2/3 + 1/3) / 2 = 0.5
         recall@3 = 1.0
     """
-    import math
     from recsys_tfb.evaluation.metrics_spark import aggregate_overall
 
     enriched = _full_enriched(spark, k_values=[3])
