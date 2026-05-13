@@ -255,4 +255,3 @@ def test_runner_resolves_at_prefix_input_to_dataset_handle():
     assert captured["payload"] == {"hello": "world"}
     # @sink resolves to the dataset HANDLE, not its data
     assert captured["write_ds"] is sentinel_ds
-    assert captured["write_ds"] is not "sentinel-data"
