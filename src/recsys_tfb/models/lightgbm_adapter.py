@@ -18,6 +18,12 @@ from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
 logger = logging.getLogger(__name__)
 
+# Route LightGBM's internal _log_info / _log_warning (including the
+# log_evaluation callback's per-iteration metric output) through Python
+# logging instead of the default print-to-stdout _DummyLogger. Process-wide
+# side effect; safe to set once at module import.
+lgb.register_logger(logger)
+
 
 class LightGBMAdapter(ModelAdapter):
     """ModelAdapter wrapping LightGBM Booster."""

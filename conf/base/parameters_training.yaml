@@ -10,10 +10,10 @@ training:
     objective: binary
     metric: binary_logloss
     verbosity: -1
-    # log_period: 0 = silent (default). Set to N > 0 to print val metric every
-    # N boosting rounds during training (per-trial during HPO + final refit).
-    # Popped by LightGBMAdapter before lgb.train; not a native LGB param.
-    log_period: 0
+    # log_period: 0 = silent. Set to N > 0 to print val metric every N boosting
+    # rounds during training (per-trial during HPO + final refit). Popped by
+    # LightGBMAdapter before lgb.train; not a native LGB param.
+    log_period: 100
   calibration:
     enabled: true
     method: sigmoid
