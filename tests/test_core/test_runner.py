@@ -223,3 +223,36 @@ class TestRunner:
         # "x" is external, NOT released; "mid" is pipeline-produced, released
         assert "Released dataset: x" not in caplog.text
         assert "Released dataset: mid" in caplog.text
+
+
+def test_runner_resolves_at_prefix_input_to_dataset_handle():
+    """An input name starting with '@' should be resolved to the catalog
+    dataset INSTANCE (not the loaded data), so write-target nodes can call
+    `.save()` per-batch.
+    """
+    from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
+    from recsys_tfb.core.node import Node
+    from recsys_tfb.core.pipeline import Pipeline
+    from recsys_tfb.core.runner import Runner
+
+    captured: dict = {}
+
+    def node_fn(payload, write_ds):
+        captured["payload"] = payload
+        captured["write_ds"] = write_ds
+        return {"ok": True}
+
+    catalog = DataCatalog()
+    catalog.add("payload", MemoryDataset(data={"hello": "world"}))
+    sentinel_ds = MemoryDataset(data="sentinel-data")
+    catalog.add("sink", sentinel_ds)
+
+    pipeline = Pipeline([
+        Node(node_fn, inputs=["payload", "@sink"], outputs="manifest"),
+    ])
+    Runner().run(pipeline, catalog)
+
+    assert captured["payload"] == {"hello": "world"}
+    # @sink resolves to the dataset HANDLE, not its data
+    assert captured["write_ds"] is sentinel_ds
+    assert captured["write_ds"] is not "sentinel-data"
