@@ -40,3 +40,45 @@ def add_query_aggregates(
     """Add `total_rel`: sum of label per query. Caller filters total_rel > 0 later."""
     w = Window.partitionBy(*group_cols)
     return df.withColumn("total_rel", F.sum(F.col(label_col)).over(w))
+
+
+def add_row_contributions(
+    df: SparkDataFrame,
+    group_cols: list[str],
+    label_col: str,
+    k_values: list[int],
+) -> SparkDataFrame:
+    """Add per-row contribution columns for ranking metrics.
+
+    Requires upstream columns: pos, total_rel.
+
+    Adds (always):
+        cum_rel:      cumulative positive count up to & including this position
+        prec_at_pos:  cum_rel / pos
+        dcg_term:     label / log2(pos + 1)
+
+    Adds (per K in k_values):
+        top_k@{K}:        1.0 if pos <= K else 0.0
+        ap_contrib@{K}:   prec_at_pos * label * top_k@{K}
+        ndcg_contrib@{K}: dcg_term * top_k@{K} / iDCG@{K}    (added in Task 5)
+    """
+    w_cum = (
+        Window.partitionBy(*group_cols)
+        .orderBy(F.col("pos"))
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    df = df.withColumn("cum_rel", F.sum(F.col(label_col)).over(w_cum))
+    df = df.withColumn("prec_at_pos", F.col("cum_rel") / F.col("pos"))
+    df = df.withColumn(
+        "dcg_term", F.col(label_col) / F.log2(F.col("pos") + F.lit(1))
+    )
+
+    for k in k_values:
+        df = df.withColumn(
+            f"top_k@{k}", (F.col("pos") <= F.lit(k)).cast("double")
+        )
+        df = df.withColumn(
+            f"ap_contrib@{k}",
+            F.col("prec_at_pos") * F.col(label_col) * F.col(f"top_k@{k}"),
+        )
+    return df
