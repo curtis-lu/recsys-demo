@@ -474,3 +474,88 @@ def test_compute_all_metrics_all_queries_excluded(spark):
     assert result["macro_avg"] == {}
     assert result["n_queries"] == 2
     assert result["n_excluded_queries"] == 2
+
+
+def _make_random_eval_data(n_customers=30, products=("A", "B", "C", "D"), seed=42):
+    """Random fixture for parity testing. Mirrors test_metrics.py _make_test_data."""
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.RandomState(seed)
+    pred_rows = []
+    label_rows = []
+    snap_date = "20240331"
+    for i in range(n_customers):
+        cust_id = f"C{i:04d}"
+        seg = ["mass", "affluent", "hnw"][i % 3]
+        scores = rng.rand(len(products))
+        for j, prod in enumerate(products):
+            pred_rows.append(
+                {
+                    "snap_date": snap_date,
+                    "cust_id": cust_id,
+                    "prod_name": prod,
+                    "score": float(scores[j]),
+                    "rank": 0,
+                }
+            )
+            label_rows.append(
+                {
+                    "snap_date": snap_date,
+                    "cust_id": cust_id,
+                    "prod_name": prod,
+                    "label": int(rng.rand() > 0.7),
+                    "cust_segment_typ": seg,
+                }
+            )
+    preds = pd.DataFrame(pred_rows)
+    preds["rank"] = preds.groupby(["snap_date", "cust_id"])["score"].rank(
+        method="first", ascending=False
+    ).astype(int)
+    labels = pd.DataFrame(label_rows)
+    return preds, labels
+
+
+def _assert_metrics_close(a: dict, b: dict, rtol: float = 1e-6, path: str = ""):
+    """Recursively assert two nested metric dicts are numerically close."""
+    import math
+
+    assert set(a.keys()) == set(b.keys()), (
+        f"Key mismatch at {path or '<root>'}: {set(a.keys())} vs {set(b.keys())}"
+    )
+    for k in a:
+        va, vb = a[k], b[k]
+        if isinstance(va, dict):
+            _assert_metrics_close(va, vb, rtol=rtol, path=f"{path}.{k}")
+        else:
+            assert math.isclose(va, vb, rel_tol=rtol, abs_tol=1e-12), (
+                f"Mismatch at {path}.{k}: pandas={va!r} spark={vb!r}"
+            )
+
+
+def test_spark_pandas_parity_overall_and_per_dimension(spark):
+    """Same input data, both engines should produce numerically equivalent dicts."""
+    from recsys_tfb.evaluation.metrics import compute_all_metrics as compute_pd
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics as compute_spark
+
+    preds_pd, labels_pd = _make_random_eval_data(n_customers=30, seed=42)
+    eval_pd = preds_pd.merge(
+        labels_pd, on=["snap_date", "cust_id", "prod_name"]
+    )
+    eval_spark = spark.createDataFrame(eval_pd)
+    params = _make_parameters(
+        k_values=[3, 5], segment_columns=["cust_segment_typ"]
+    )
+
+    result_pd = compute_pd(preds_pd, labels_pd, k_values=[3, 5])
+    result_spark = compute_spark(eval_spark, params)
+
+    _assert_metrics_close(result_pd["overall"], result_spark["overall"])
+    _assert_metrics_close(result_pd["per_product"], result_spark["per_product"])
+    _assert_metrics_close(result_pd["per_segment"], result_spark["per_segment"])
+    _assert_metrics_close(
+        result_pd["per_product_segment"], result_spark["per_product_segment"]
+    )
+    _assert_metrics_close(result_pd["macro_avg"], result_spark["macro_avg"])
+    assert result_pd["n_queries"] == result_spark["n_queries"]
+    assert result_pd["n_excluded_queries"] == result_spark["n_excluded_queries"]
