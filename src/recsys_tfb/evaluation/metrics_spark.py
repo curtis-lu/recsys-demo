@@ -24,3 +24,11 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import _macro_average, _resolve_k_values
 
 logger = logging.getLogger(__name__)
+
+
+def rank_within_query(
+    df: SparkDataFrame, group_cols: list[str], score_col: str
+) -> SparkDataFrame:
+    """Add `pos` column: 1-based rank within each query, ordered by score desc."""
+    w = Window.partitionBy(*group_cols).orderBy(F.col(score_col).desc())
+    return df.withColumn("pos", F.row_number().over(w))
