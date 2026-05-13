@@ -90,7 +90,7 @@ def _pdf_to_X(
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
     logger.info(
-        "extract_Xy: X_df rows=%d n_features=%d mem=%.1fMB",
+        "_pdf_to_X: X_df rows=%d n_features=%d mem=%.1fMB",
         len(X_df), X_df.shape[1],
         X_df.memory_usage(deep=False).sum() / 1024**2,
     )
@@ -104,7 +104,7 @@ def _pdf_to_X(
                 known = category_mappings[col]
                 X_df[col] = pd.Categorical(X_df[col], categories=known).codes
         logger.info(
-            "extract_Xy: encoded deferred_cats=%s count=%d",
+            "_pdf_to_X: encoded deferred_cats=%s count=%d",
             deferred_cats, len(deferred_cats),
         )
 
