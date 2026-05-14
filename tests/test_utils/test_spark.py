@@ -109,3 +109,32 @@ class TestFallback:
             assert spark.sparkContext.appName == "from-fallback"
         finally:
             spark.stop()
+
+    def test_fallback_resolves_env_placeholders(self, monkeypatch, tmp_path):
+        """Fallback path must run ${env.*} resolver before handing dict to builder.
+
+        Regression: previously, when tune_hyperparameters stopped the session
+        and a downstream node triggered fallback rebuild, yaml values like
+        ``${vdclient.cdp.driver_port}`` reached SparkConf as literal strings →
+        ``spark.driver.port should be int`` at the company. Env-based version
+        is the unit-testable surrogate.
+        """
+        monkeypatch.setenv("RECSYS_TFB_TEST_APP_NAME", "from-env-placeholder")
+        conf = tmp_path / "conf"
+        (conf / "base").mkdir(parents=True)
+        (conf / "base" / "parameters.yaml").write_text(
+            "spark:\n"
+            "  app_name: ${env.RECSYS_TFB_TEST_APP_NAME}\n"
+            "  spark.master: local[1]\n"
+            "  spark.sql.shuffle.partitions: '1'\n"
+            "  spark.default.parallelism: '1'\n"
+            "  spark.ui.enabled: 'false'\n"
+            "  spark.driver.memory: 512m\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        spark = get_or_create_spark_session(None)
+        try:
+            assert spark.sparkContext.appName == "from-env-placeholder"
+        finally:
+            spark.stop()

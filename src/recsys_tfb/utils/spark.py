@@ -110,6 +110,18 @@ def _fallback_create() -> SparkSession:
             "No active SparkSession and parameters.yaml not found in conf/."
         ) from exc
     spark_configs = base_params.get("spark", {})
+
+    # Match the entrypoint path (__main__._load_spark_config): resolve
+    # ${env.*} and ${vdclient.*.*} placeholders before handing dict to the
+    # builder. Otherwise yaml values like ${vdclient.cdp.driver_port} reach
+    # SparkConf as literal strings → "spark.driver.port should be int".
+    from recsys_tfb.utils.vdclient_resolver import (
+        resolve_env_placeholders,
+        resolve_vdclient_placeholders,
+    )
+    spark_configs = resolve_env_placeholders(spark_configs)
+    spark_configs = resolve_vdclient_placeholders(spark_configs)
+
     logger.info(
         "Fallback: building SparkSession (yaml=conf/%s/parameters.yaml, "
         "connection settings from SPARK_CONF_DIR)",
