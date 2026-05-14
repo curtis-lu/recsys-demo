@@ -271,7 +271,24 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
+    from pyspark.sql import SparkSession
+
     from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    # Free the JVM that the training entry started for cache_*_model_input
+    # (Hive→driver-local copy). From here through evaluate_model everything is
+    # driver-local pandas/LightGBM; leaving the SparkSession alive lets idle
+    # JVM/Spark worker threads steal scheduler time + L3 cache from LightGBM's
+    # histogram build (observed: ~500x per-boost-iter slowdown vs clean
+    # process). write_test_predictions later calls get_or_create_spark_session()
+    # which auto-recreates a fresh session via the parameters.yaml fallback.
+    active = SparkSession.getActiveSession()
+    if active is not None:
+        logger.info(
+            "tune_hyperparameters: stopping SparkSession to free JVM threads "
+            "before driver-local HPO loop"
+        )
+        active.stop()
 
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
@@ -348,9 +365,21 @@ def tune_hyperparameters(
 
         adapter = get_adapter(algorithm)
 
+        # feature_pre_filter=False must match the construct_params used when
+        # writing the .bin (LightGBMAdapter.prepare_train_inputs); otherwise
+        # lgb.train hits "Cannot change feature_pre_filter after constructed".
+        # Required because min_child_samples is in the HPO search space and a
+        # pre-filtered Dataset would be tied to one specific value.
+        construct_params = {"feature_pre_filter": False}
         with log_step(logger, "prepare_datasets"):
-            ds_train = train_lgb_handle.load()
-            ds_dev = train_dev_lgb_handle.load(reference=ds_train)
+            ds_train = train_lgb_handle.load(params=construct_params).construct()
+            ds_dev = train_dev_lgb_handle.load(
+                reference=ds_train, params=construct_params
+            ).construct()
+        logger.info(
+            "ds_train rows=%d features=%d; ds_dev rows=%d",
+            ds_train.num_data(), ds_train.num_feature(), ds_dev.num_data(),
+        )
 
         with log_step(logger, "train"):
             adapter.train(
