@@ -941,3 +941,84 @@ def log_experiment(
             model.log_to_mlflow()
 
     logger.info("MLflow experiment logged: %s", experiment_name)
+
+
+def compute_test_mAP_spark(
+    training_eval_predictions,  # Spark DataFrame, loaded by catalog (filtered to current model_version)
+    predict_manifest: dict,
+    parameters: dict,
+) -> dict:
+    """Spark-native mAP over training_eval_predictions; emits the dict
+    shape consumed by log_experiment today (overall_map / per_product_ap
+    / n_queries / n_excluded_queries, plus optional 'uncalibrated' sub-dict
+    + 'calibration_method' when score != score_uncalibrated).
+
+    predict_manifest is an in-DAG dependency only — its content is logged
+    for observability but the actual data is read back from
+    training_eval_predictions (Spark-loaded via the catalog).
+    """
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    schema_cfg = get_schema(parameters)
+    item_col = schema_cfg["item"]
+
+    n_prods = training_eval_predictions.select(item_col).distinct().count()
+    map_key = f"map@{n_prods}"
+
+    logger.info(
+        "compute_test_mAP_spark: starting — n_prods=%d map_key=%s manifest=%s",
+        n_prods, map_key, predict_manifest,
+    )
+
+    # Calibration detection: any row where score != score_uncalibrated
+    calibration_applied = (
+        training_eval_predictions.filter(
+            F.col("score") != F.col("score_uncalibrated")
+        )
+        .limit(1)
+        .count()
+        > 0
+    )
+
+    cal = compute_all_metrics(training_eval_predictions, parameters)
+    result = {
+        "overall_map": float(cal["overall"].get(map_key, 0.0)),
+        "per_product_ap": {
+            p: float(v.get(map_key, 0.0)) for p, v in cal["per_product"].items()
+        },
+        "n_queries": cal["n_queries"],
+        "n_excluded_queries": cal["n_excluded_queries"],
+    }
+
+    if calibration_applied:
+        # Run compute_all_metrics again with score_uncalibrated aliased as score
+        uncal_df = (
+            training_eval_predictions
+            .withColumnRenamed("score", "_score_calibrated")
+            .withColumnRenamed("score_uncalibrated", "score")
+        )
+        uncal = compute_all_metrics(uncal_df, parameters)
+        result["uncalibrated"] = {
+            "overall_map": float(uncal["overall"].get(map_key, 0.0)),
+            "per_product_ap": {
+                p: float(v.get(map_key, 0.0)) for p, v in uncal["per_product"].items()
+            },
+        }
+        result["calibration_method"] = (
+            parameters.get("training", {}).get("calibration", {}).get("method", "isotonic")
+        )
+        logger.info(
+            "compute_test_mAP_spark: calibrated=%.4f uncalibrated=%.4f",
+            result["overall_map"], result["uncalibrated"]["overall_map"],
+        )
+    else:
+        logger.info(
+            "compute_test_mAP_spark: mAP=%.4f products=%d excluded_queries=%d",
+            result["overall_map"],
+            len(result["per_product_ap"]),
+            result["n_excluded_queries"],
+        )
+
+    return result
