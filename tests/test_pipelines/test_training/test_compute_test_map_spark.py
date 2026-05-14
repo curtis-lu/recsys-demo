@@ -1,20 +1,11 @@
-"""Tests for compute_test_mAP_spark — Spark-native mAP over training_eval_predictions."""
+"""Tests for compute_test_mAP_spark — Spark-native mAP over training_eval_predictions.
+
+The `spark` fixture is the session-scoped one from tests/conftest.py — do not
+re-declare a local one (it would shadow conftest's, and an early teardown via
+`.stop()` would kill the shared session mid-suite).
+"""
 
 import pytest
-
-
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-    s = (
-        SparkSession.builder
-        .master("local[2]")
-        .appName("test_compute_test_mAP_spark")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
 
 
 def _make_parameters() -> dict:

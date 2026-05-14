@@ -964,6 +964,12 @@ def compute_test_mAP_spark(
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
 
+    # n_prods must match the value compute_all_metrics uses internally for
+    # k="all" -> map_key="map@{n_prods}". The simplest correct way is the same
+    # distinct().count() that compute_all_metrics also does (a few seconds on
+    # 22-cardinality column at 220M rows — negligible). Cannot derive from
+    # cal["per_product"] because per_product is keyed only by prods that
+    # appear in queries with positives, which can be < n_prods.
     n_prods = training_eval_predictions.select(item_col).distinct().count()
     map_key = f"map@{n_prods}"
 
@@ -972,7 +978,12 @@ def compute_test_mAP_spark(
         n_prods, map_key, predict_manifest,
     )
 
-    # Calibration detection: any row where score != score_uncalibrated
+    # Calibration detection: any row where score != score_uncalibrated.
+    # `.limit(1)` short-circuits so this never scans the full table.
+    # Note: IEEE-754 says NaN != NaN evaluates to False, so a partition where
+    # both columns are NaN would be classified as "not calibrated". This
+    # matches the old pandas path and is acceptable given the upstream's
+    # explicit assignment logic for score_uncalibrated.
     calibration_applied = (
         training_eval_predictions.filter(
             F.col("score") != F.col("score_uncalibrated")
