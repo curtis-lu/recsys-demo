@@ -12,12 +12,11 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_mean_ap
+from recsys_tfb.evaluation.metrics import compute_mean_ap
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
-from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
 
@@ -276,12 +275,13 @@ def tune_hyperparameters(
     from recsys_tfb.io.extract import extract_Xy_with_groups
 
     # Free the JVM that the training entry started for cache_*_model_input
-    # (Hive→driver-local copy). From here through evaluate_model everything is
-    # driver-local pandas/LightGBM; leaving the SparkSession alive lets idle
-    # JVM/Spark worker threads steal scheduler time + L3 cache from LightGBM's
-    # histogram build (observed: ~500x per-boost-iter slowdown vs clean
-    # process). write_test_predictions later calls get_or_create_spark_session()
-    # which auto-recreates a fresh session via the parameters.yaml fallback.
+    # (Hive→driver-local copy). From here through HPO + finalize_model
+    # everything is driver-local pandas/LightGBM; leaving the SparkSession
+    # alive lets idle JVM/Spark worker threads steal scheduler time + L3
+    # cache from LightGBM's histogram build (observed: ~500x per-boost-iter
+    # slowdown vs clean process). Downstream predict_and_write_test_predictions
+    # / compute_test_mAP_spark recreate a fresh session via HiveTableDataset
+    # when they need one.
     active = SparkSession.getActiveSession()
     if active is not None:
         logger.info(
@@ -549,239 +549,6 @@ def calibrate_model(
     return calibrated
 
 
-def evaluate_model(
-    model: ModelAdapter,
-    eval_parquet_handle,
-    preprocessor_metadata: dict,
-    parameters: dict,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Predict on the test set and rank within each query group.
-
-    Returns:
-        (predictions_pdf, labels_pdf):
-          predictions_pdf — identity_columns + [score, score_uncalibrated, rank]
-          labels_pdf      — identity_columns + [label]
-
-    Downstream nodes consume the predictions/labels separately:
-      - write_test_predictions persists predictions to Hive
-      - compute_test_mAP computes the dict consumed by MLflow
-
-    score_uncalibrated semantics: always the raw model output. For calibrated
-    runs it differs from score; for non-calibrated runs it equals score.
-    """
-    from recsys_tfb.io.extract import extract_Xy
-
-    schema_cfg = get_schema(parameters)
-    score_col = schema_cfg["score"]
-    rank_col = schema_cfg["rank"]
-    label_col = schema_cfg["label"]
-    identity_cols = schema_cfg["identity_columns"]
-    time_col = schema_cfg["time"]
-    entity_cols = schema_cfg["entity"]
-    group_cols = [time_col] + entity_cols
-
-    eval_pdf = eval_parquet_handle.to_pandas()
-
-    with log_step(logger, "extract_features"):
-        X, _ = extract_Xy(eval_parquet_handle, preprocessor_metadata, parameters)
-
-    with log_step(logger, "predict"):
-        y_score = model.predict(X)
-
-    predictions_pdf = eval_pdf[identity_cols].reset_index(drop=True).copy()
-    predictions_pdf[score_col] = y_score
-    predictions_pdf[rank_col] = (
-        predictions_pdf.groupby(group_cols)[score_col]
-        .rank(method="first", ascending=False)
-        .astype(int)
-    )
-
-    # score_uncalibrated: always the raw model output, regardless of calibration.
-    if isinstance(model, CalibratedModelAdapter):
-        with log_step(logger, "predict_uncalibrated"):
-            predictions_pdf["score_uncalibrated"] = model.predict_uncalibrated(X)
-    else:
-        predictions_pdf["score_uncalibrated"] = y_score
-
-    labels_pdf = eval_pdf[identity_cols + [label_col]].reset_index(drop=True).copy()
-
-    logger.info(
-        "evaluate_model: predicted %d rows, %d queries, calibrated=%s",
-        len(predictions_pdf),
-        predictions_pdf[group_cols].drop_duplicates().shape[0],
-        isinstance(model, CalibratedModelAdapter),
-    )
-    return predictions_pdf, labels_pdf
-
-
-def compute_test_mAP(
-    test_predictions_pdf: pd.DataFrame,
-    test_labels_pdf: pd.DataFrame,
-    parameters: dict,
-) -> dict:
-    """Compute ranking-aware mAP from test-set predictions; feed log_experiment.
-
-    test_predictions_pdf must contain identity_columns + [score, score_uncalibrated, rank].
-    test_labels_pdf must contain identity_columns + [label].
-
-    When score and score_uncalibrated differ (i.e., calibration applied), emits
-    an additional ``uncalibrated`` sub-dict for MLflow comparison.
-    """
-    schema_cfg = get_schema(parameters)
-    score_col = schema_cfg["score"]
-    label_col = schema_cfg["label"]
-    item_col = schema_cfg["item"]
-    identity_cols = schema_cfg["identity_columns"]
-
-    merged = test_predictions_pdf.merge(test_labels_pdf, on=identity_cols, how="inner")
-
-    def _calc_metrics(score_column_name: str) -> dict:
-        preds = merged[identity_cols + [score_column_name]].rename(
-            columns={score_column_name: score_col}
-        )
-        labs = merged[identity_cols + [label_col]]
-        m = compute_all_metrics(preds, labs, k_values=["all"])
-        n_products = preds[item_col].nunique()
-        map_key = f"map@{n_products}"
-        return {
-            "overall_map": m["overall"].get(map_key, 0.0),
-            "per_product_ap": {
-                p: v.get(map_key, 0.0) for p, v in m["per_product"].items()
-            },
-            "n_queries": m["n_queries"],
-            "n_excluded_queries": m["n_excluded_queries"],
-        }
-
-    cal = _calc_metrics(score_col)
-    evaluation_results = {
-        "overall_map": cal["overall_map"],
-        "per_product_ap": cal["per_product_ap"],
-        "n_queries": cal["n_queries"],
-        "n_excluded_queries": cal["n_excluded_queries"],
-    }
-
-    # score_uncalibrated is always present (per evaluate_model contract).
-    # Only emit the uncalibrated comparison subdict when calibration was
-    # actually applied — i.e. when the two columns differ.
-    calibration_applied = (
-        "score_uncalibrated" in test_predictions_pdf.columns
-        and not (
-            test_predictions_pdf[score_col]
-            == test_predictions_pdf["score_uncalibrated"]
-        ).all()
-    )
-    if calibration_applied:
-        uncal = _calc_metrics("score_uncalibrated")
-        evaluation_results["uncalibrated"] = {
-            "overall_map": uncal["overall_map"],
-            "per_product_ap": uncal["per_product_ap"],
-        }
-        # log_experiment expects this when "uncalibrated" is present.
-        evaluation_results["calibration_method"] = (
-            parameters.get("training", {})
-            .get("calibration", {})
-            .get("method", "isotonic")
-        )
-        logger.info(
-            "compute_test_mAP: uncalibrated mAP=%.4f vs calibrated mAP=%.4f",
-            uncal["overall_map"], cal["overall_map"],
-        )
-
-    logger.info(
-        "compute_test_mAP: mAP=%.4f, products=%d, excluded_queries=%d",
-        cal["overall_map"],
-        len(cal["per_product_ap"]),
-        cal["n_excluded_queries"],
-    )
-    return evaluation_results
-
-
-def _build_training_eval_predictions_ddl(table_fqn: str) -> str:
-    """CREATE TABLE IF NOT EXISTS DDL — schema matches catalog declaration.
-
-    score_uncalibrated semantics: always raw model output. For calibrated runs
-    it differs from score; for non-calibrated runs it equals score.
-    """
-    return f"""
-    CREATE TABLE IF NOT EXISTS {table_fqn} (
-        cust_id STRING,
-        score DOUBLE,
-        score_uncalibrated DOUBLE,
-        `rank` BIGINT
-    )
-    PARTITIONED BY (snap_date STRING, prod_name STRING, model_version STRING)
-    STORED AS PARQUET
-    """.strip()
-
-
-def write_test_predictions(
-    test_predictions_pdf: pd.DataFrame,
-    parameters: dict,
-) -> None:
-    """Write test-set predictions to Hive, iterating per prod_name for memory control.
-
-    Bypasses catalog auto-save: outputs=None at DAG level. The catalog entry
-    `training_eval_predictions` declares the table for downstream evaluation reads;
-    this function owns the writes (DDL bootstrap + per-prod insertInto).
-    """
-    schema_cfg = get_schema(parameters)
-    item_col = schema_cfg["item"]
-    score_col = schema_cfg["score"]
-    rank_col = schema_cfg["rank"]
-    time_col = schema_cfg["time"]
-    entity_cols = schema_cfg["entity"]
-    if len(entity_cols) != 1:
-        raise ValueError(
-            f"write_test_predictions expects a single entity column; "
-            f"got {entity_cols}. Hive DDL hard-codes 'cust_id'."
-        )
-    cust_id_col = entity_cols[0]
-    spark = get_or_create_spark_session()
-    model_version = parameters["model_version"]
-    hive_db = parameters["hive"]["db"]
-    table_fqn = f"{hive_db}.training_eval_predictions"
-
-    if "score_uncalibrated" not in test_predictions_pdf.columns:
-        raise RuntimeError(
-            "test_predictions_pdf missing 'score_uncalibrated' column. "
-            "evaluate_model must populate it (= score for non-calibrated runs)."
-        )
-
-    # Column order matches Hive table: non-partition cols first, then partition
-    # cols (snap_date, prod_name) and finally model_version. Dynamic-partition
-    # insertInto uses positional column mapping.
-    write_cols = [
-        cust_id_col,
-        score_col,
-        "score_uncalibrated",
-        rank_col,
-        time_col,
-        item_col,
-    ]
-    pdf = test_predictions_pdf[write_cols].copy()
-
-    spark.sql(_build_training_eval_predictions_ddl(table_fqn))
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-
-    distinct_prods = sorted(pdf[item_col].unique())
-    logger.info(
-        "write_test_predictions: %d prods x ~%d rows = %d total -> %s",
-        len(distinct_prods),
-        len(pdf) // max(len(distinct_prods), 1),
-        len(pdf),
-        table_fqn,
-    )
-
-    for prod in distinct_prods:
-        chunk_pdf = pdf[pdf[item_col] == prod].assign(model_version=model_version)
-        chunk_sdf = spark.createDataFrame(chunk_pdf)
-        chunk_sdf.write.insertInto(table_fqn, overwrite=True)
-        logger.info(
-            "write_test_predictions: wrote prod=%s rows=%d",
-            prod,
-            len(chunk_pdf),
-        )
-
 
 def predict_and_write_test_predictions(
     model: ModelAdapter,
@@ -993,12 +760,6 @@ def compute_test_mAP_spark(
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
 
-    # n_prods must match the value compute_all_metrics uses internally for
-    # k="all" -> map_key="map@{n_prods}". The simplest correct way is the same
-    # distinct().count() that compute_all_metrics also does (a few seconds on
-    # 22-cardinality column at 220M rows — negligible). Cannot derive from
-    # cal["per_product"] because per_product is keyed only by prods that
-    # appear in queries with positives, which can be < n_prods.
     n_prods = training_eval_predictions.select(item_col).distinct().count()
     map_key = f"map@{n_prods}"
 
@@ -1007,12 +768,7 @@ def compute_test_mAP_spark(
         n_prods, map_key, predict_manifest,
     )
 
-    # Calibration detection: any row where score != score_uncalibrated.
-    # `.limit(1)` short-circuits so this never scans the full table.
-    # Note: IEEE-754 says NaN != NaN evaluates to False, so a partition where
-    # both columns are NaN would be classified as "not calibrated". This
-    # matches the old pandas path and is acceptable given the upstream's
-    # explicit assignment logic for score_uncalibrated.
+    # Calibration detection: any row where score != score_uncalibrated
     calibration_applied = (
         training_eval_predictions.filter(
             F.col("score") != F.col("score_uncalibrated")
