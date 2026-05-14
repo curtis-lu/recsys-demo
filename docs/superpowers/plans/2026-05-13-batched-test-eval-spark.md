@@ -1122,14 +1122,189 @@ EOF
 
 ---
 
-## Task 6: Wire `training/pipeline.py` DAG + remove dead code
+## Task 6: Wire `training/pipeline.py` DAG + remove dead code + downstream rank-injection
 
-**Why:** Replace the old `evaluate_model → write_test_predictions → compute_test_mAP` chain with `predict_and_write_test_predictions → compute_test_mAP_spark`. Use the `@`-prefix from Task 1 to pass the catalog handle. Delete the now-unused old node functions and their tests.
+**Why:** Replace the old `evaluate_model → write_test_predictions → compute_test_mAP` chain with `predict_and_write_test_predictions → compute_test_mAP_spark`. Use the `@`-prefix from Task 1 to pass the catalog handle. Delete the now-unused old node functions and their tests. Plus a small evaluation-pipeline patch so `--post-training` mode still works after T3 dropped the `rank` column.
+
+**Downstream rank-injection rationale:** T3 dropped `rank` from `training_eval_predictions`. The evaluation pipeline's `_render_html_report` (called from `generate_report`) selects `rank_col` from `eval_predictions` at `src/recsys_tfb/pipelines/evaluation/nodes_spark.py:173` (`pred_cols = identity_cols + [score_col, rank_col]`). In `--post-training` mode, that DataFrame is sourced from `training_eval_predictions` — so without a fix, the post-training report would fail with KeyError on `rank`. Fix: in `prepare_eval_data`, after the inner join produces `eval_predictions`, add a `rank` column via `rank_within_query` from `evaluation/metrics_spark` if it's not already present. Non-post-training (`ranked_predictions`-sourced) already carries `rank` and the conditional is a no-op there.
 
 **Files:**
 - Modify: `src/recsys_tfb/pipelines/training/pipeline.py:5-20,107-131`
 - Modify: `src/recsys_tfb/pipelines/training/nodes.py` — delete `evaluate_model`, `compute_test_mAP`, `write_test_predictions`, `_build_training_eval_predictions_ddl`
-- Delete: any existing unit tests for those three functions inside `tests/test_pipelines/test_training/`
+- Modify: `src/recsys_tfb/pipelines/evaluation/nodes_spark.py` — add rank-injection in `prepare_eval_data`
+- Test: `tests/test_pipelines/test_evaluation/test_nodes_spark.py` (or wherever `prepare_eval_data` is tested) — add a test that rank is added when missing
+- Delete: any existing unit tests for the four to-be-removed training functions inside `tests/test_pipelines/test_training/`
+
+- [ ] **Step 0a: Add a failing test for rank-injection in `prepare_eval_data`**
+
+Find the existing test file for `prepare_eval_data` (likely `tests/test_pipelines/test_evaluation/test_nodes_spark.py` or `tests/test_pipelines/test_evaluation/test_prepare_eval_data.py`). If the test file doesn't exist, create one.
+
+Append:
+
+```python
+def test_prepare_eval_data_injects_rank_when_missing(spark):
+    """When the predictions input lacks a `rank` column (post-training mode
+    sourced from training_eval_predictions after T3 schema change),
+    prepare_eval_data must add it via rank_within_query so downstream
+    nodes (generate_report -> _render_html_report) still find `rank`.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "snap_date": ["2025-01-31"] * 4,
+        "prod_name": ["A", "B", "A", "B"],
+        "score": [0.9, 0.1, 0.2, 0.8],
+        "model_version": ["v1"] * 4,
+    })
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "snap_date": ["2025-01-31"] * 4,
+        "prod_name": ["A", "B", "A", "B"],
+        "label": [1, 0, 0, 1],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+
+    parameters = {
+        "schema": {
+            "time": "snap_date",
+            "entity": ["cust_id"],
+            "item": "prod_name",
+            "label": "label",
+            "score": "score",
+            "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        },
+        "model_version": "v1",
+        "evaluation": {},
+    }
+
+    result = prepare_eval_data(predictions, labels, parameters)
+    cols = set(result.columns)
+    assert "rank" in cols
+
+    # Verify rank is 1-based and ordered by score desc within (cust, snap)
+    result_pdf = result.toPandas().sort_values(["cust_id", "rank"])
+    c1_rows = result_pdf[result_pdf["cust_id"] == "c1"]
+    # c1 has score 0.9 on A and 0.1 on B -> A is rank 1
+    assert list(c1_rows.sort_values("rank")["prod_name"]) == ["A", "B"]
+    assert list(c1_rows.sort_values("rank")["rank"]) == [1, 2]
+
+
+def test_prepare_eval_data_preserves_existing_rank_column(spark):
+    """When the predictions input already has a `rank` column (non-post-training
+    mode sourced from ranked_predictions), prepare_eval_data must NOT re-rank
+    or overwrite — the upstream rank is authoritative.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "score": [0.9, 0.1],
+        "rank": [99, 100],  # upstream-provided rank, not recomputable from score
+        "model_version": ["v1"] * 2,
+    })
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "label": [1, 0],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+
+    parameters = {
+        "schema": {
+            "time": "snap_date",
+            "entity": ["cust_id"],
+            "item": "prod_name",
+            "label": "label",
+            "score": "score",
+            "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        },
+        "model_version": "v1",
+        "evaluation": {},
+    }
+
+    result = prepare_eval_data(predictions, labels, parameters).toPandas()
+    # rank values are preserved as-is, NOT recomputed from score
+    a_row = result[result["prod_name"] == "A"].iloc[0]
+    b_row = result[result["prod_name"] == "B"].iloc[0]
+    assert a_row["rank"] == 99
+    assert b_row["rank"] == 100
+```
+
+Find or add a `spark` fixture (module-scoped local Spark). Use the same pattern as `tests/test_pipelines/test_training/test_compute_test_map_spark.py` (Task 5).
+
+- [ ] **Step 0b: Run the new tests to verify they fail**
+
+Run: `.venv/bin/pytest tests/test_pipelines/test_evaluation/ -k "rank" -v`
+Expected: FAIL — rank is not added when missing (the first test fails on `"rank" in cols`).
+
+- [ ] **Step 0c: Patch `prepare_eval_data` to inject rank when missing**
+
+Edit `src/recsys_tfb/pipelines/evaluation/nodes_spark.py`. After the `eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="inner")` line (around line 95), add:
+
+```python
+    # Downstream report rendering (_render_html_report) selects schema["rank"]
+    # from eval_predictions. When the predictions source is
+    # training_eval_predictions (--post-training mode), `rank` is absent because
+    # the table no longer stores it (Spark mAP recomputes rank internally via
+    # rank_within_query). Add it here when missing so downstream stays uniform;
+    # when present (ranked_predictions source), trust the upstream value.
+    rank_col = schema["rank"]
+    if rank_col not in eval_predictions.columns:
+        from recsys_tfb.evaluation.metrics_spark import rank_within_query
+        group_cols = [time_col] + identity_cols
+        # rank_within_query is keyed by (time, entity), and adds "pos" 1-based
+        # rank within each (snap_date, cust_id) ordered by score desc.
+        # group_cols here is [time_col] + entity_cols (matching the spec for
+        # per-customer ranking), not identity_cols (which includes item).
+        score_col = schema["score"]
+        entity_cols = schema["entity"]
+        query_cols = [time_col] + entity_cols
+        eval_predictions = rank_within_query(eval_predictions, query_cols, score_col)
+        eval_predictions = eval_predictions.withColumnRenamed("pos", rank_col)
+        logger.info(
+            "prepare_eval_data: injected '%s' column via rank_within_query "
+            "(predictions source did not provide it)",
+            rank_col,
+        )
+```
+
+You may need to ensure `score_col` and `entity_cols` resolution happens earlier in the function — they're already available in the upstream scope (the function reads `schema` at the top). If not, hoist the lookups.
+
+- [ ] **Step 0d: Run the new tests to verify they pass**
+
+Run: `.venv/bin/pytest tests/test_pipelines/test_evaluation/ -k "rank" -v`
+Expected: PASS on both tests.
+
+- [ ] **Step 0e: Run the full evaluation test suite to ensure no regression**
+
+Run: `.venv/bin/pytest tests/test_pipelines/test_evaluation/ -v`
+Expected: all PASS.
+
+- [ ] **Step 0f: Commit the prepare_eval_data fix as a separate logical commit**
+
+```bash
+git add src/recsys_tfb/pipelines/evaluation/nodes_spark.py tests/test_pipelines/test_evaluation/
+git commit -m "$(cat <<'EOF'
+feat(eval): inject rank in prepare_eval_data when predictions lack it
+
+After training_eval_predictions dropped rank (Spark mAP recomputes), the
+post-training evaluation path's downstream report renderer would KeyError
+on the missing column. prepare_eval_data now adds rank via rank_within_query
+when absent (post-training source); preserves upstream rank when present
+(non-post-training ranked_predictions source).
+EOF
+)"
+```
 
 - [ ] **Step 1: Identify and list tests that target the to-be-deleted functions**
 
