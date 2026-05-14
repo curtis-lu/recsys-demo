@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 
 def _make_test_parquet(tmp_path: Path) -> Path:
@@ -90,9 +89,10 @@ def test_predict_and_write_passes_filters_no_positive_customers(tmp_path):
     # Mock HiveTableDataset handle — capture every save() call
     saves: list[pd.DataFrame] = []
 
-    def capture_save(spark_df):
-        # Convert Spark DF to pandas for inspection
-        saves.append(spark_df.toPandas() if hasattr(spark_df, "toPandas") else spark_df)
+    def capture_save(df):
+        # Production code passes a pandas DataFrame to HiveTableDataset.save()
+        # (the dataset's _to_spark converts internally); tests assert on it directly.
+        saves.append(df)
 
     write_ds = MagicMock()
     write_ds.save.side_effect = capture_save
@@ -146,9 +146,7 @@ def test_predict_and_write_score_uncalibrated_equals_score_when_not_calibrated(t
 
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
-    write_ds.save.side_effect = lambda df: saves.append(
-        df.toPandas() if hasattr(df, "toPandas") else df
-    )
+    write_ds.save.side_effect = lambda df: saves.append(df)
 
     predict_and_write_test_predictions(
         model=model,
@@ -182,9 +180,7 @@ def test_predict_and_write_calibrated_branch_calls_predict_uncalibrated(tmp_path
 
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
-    write_ds.save.side_effect = lambda df: saves.append(
-        df.toPandas() if hasattr(df, "toPandas") else df
-    )
+    write_ds.save.side_effect = lambda df: saves.append(df)
 
     predict_and_write_test_predictions(
         model=model,

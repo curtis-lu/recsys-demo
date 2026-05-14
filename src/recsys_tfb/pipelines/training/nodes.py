@@ -785,7 +785,6 @@ def predict_and_write_test_predictions(
     import pyarrow.dataset as pads
 
     from recsys_tfb.io.extract import _pdf_to_X
-    from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]
@@ -822,8 +821,14 @@ def predict_and_write_test_predictions(
     )
 
     # ---- Pass 1: per-partition predict + save ----
-    # Enumerate distinct (snap_date, prod_name) partition values from the dataset
-    # (pads.dataset partition discovery — no row data read).
+    # Enumerate distinct (snap_date, prod_name) values by projecting just the
+    # two partition columns and de-duplicating. Note: select-on-partition-cols
+    # in pyarrow still materializes one row per data row (the values are filled
+    # from directory names per fragment), so this is two-string-columns-wide,
+    # not zero I/O. At production scale (~220M rows × 2 short strings) the
+    # transient DataFrame fits comfortably on the 128GB driver — much cheaper
+    # than reading any feature columns — and drop_duplicates collapses it to
+    # n_snap_dates * n_prods rows immediately.
     partition_pdf = ds.to_table(columns=[time_col, item_col]).to_pandas()
     partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
 
@@ -835,8 +840,6 @@ def predict_and_write_test_predictions(
     for _, row in partition_pdf.iterrows():
         snap_date = str(row[time_col])
         prod_name = str(row[item_col])
-        snap_dates_seen.add(snap_date)
-        prods_seen.add(prod_name)
 
         with log_step(logger, f"partition_{snap_date}_{prod_name}"):
             part_table = ds.to_table(
@@ -855,6 +858,9 @@ def predict_and_write_test_predictions(
                     snap_date, prod_name,
                 )
                 continue
+
+            snap_dates_seen.add(snap_date)
+            prods_seen.add(prod_name)
 
             X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
             y_score = model.predict(X)
