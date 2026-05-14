@@ -270,25 +270,7 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
-    from pyspark.sql import SparkSession
-
     from recsys_tfb.io.extract import extract_Xy_with_groups
-
-    # Free the JVM that the training entry started for cache_*_model_input
-    # (Hive→driver-local copy). From here through HPO + finalize_model
-    # everything is driver-local pandas/LightGBM; leaving the SparkSession
-    # alive lets idle JVM/Spark worker threads steal scheduler time + L3
-    # cache from LightGBM's histogram build (observed: ~500x per-boost-iter
-    # slowdown vs clean process). Downstream predict_and_write_test_predictions
-    # / compute_test_mAP_spark recreate a fresh session via HiveTableDataset
-    # when they need one.
-    active = SparkSession.getActiveSession()
-    if active is not None:
-        logger.info(
-            "tune_hyperparameters: stopping SparkSession to free JVM threads "
-            "before driver-local HPO loop"
-        )
-        active.stop()
 
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
