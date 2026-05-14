@@ -203,14 +203,11 @@ evaluation_report:
 # See docs/superpowers/specs/2026-05-07-training-cache-hdfs-copy-design.md
 
 # --- Training Pipeline - Test-set predictions for downstream evaluation reuse ---
-# Written per (snap_date, prod_name) partition by training/nodes.py::
-# predict_and_write_test_predictions. Read by:
-#   - training/nodes.py::compute_test_mAP_spark (this pipeline)
-#   - evaluation/nodes_spark.py::prepare_eval_data (--post-training mode)
-# Semantics: only customers with >=1 positive label in the test window are
-# scored & written (the rest contribute nothing to mAP). Rows for prior
-# model_versions are not read because partition_filter pins the load to
-# the current model_version.
+# Written by training/nodes.py::predict_and_write_test_predictions; read by
+# compute_test_mAP_spark (same pipeline) and evaluation/nodes_spark.py::
+# prepare_eval_data (--post-training mode). Only customers with >=1 positive
+# label in the test window are scored & written. rank not stored — Spark mAP
+# recomputes it internally via rank_within_query.
 training_eval_predictions:
   type: HiveTableDataset
   database: ${hive.db}
@@ -219,9 +216,8 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration off
+    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration is off
     - {name: label, type: INT}
-  # rank dropped — not consumed; Spark mAP recomputes via rank_within_query
   partition_filter:
     model_version: ${model_version}
   partition_cols:
