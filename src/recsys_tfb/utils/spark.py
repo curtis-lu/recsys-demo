@@ -55,6 +55,14 @@ def get_or_create_spark_session(
     return builder.getOrCreate()
 
 
+def _is_session_alive(session: SparkSession) -> bool:
+    """True if the session's SparkContext is still attached to a live JVM."""
+    try:
+        return session.sparkContext._jsc is not None
+    except Exception:
+        return False
+
+
 def _validate_values(spark_configs: dict[str, Any]) -> None:
     bad = [
         k
@@ -69,9 +77,17 @@ def _validate_values(spark_configs: dict[str, Any]) -> None:
 
 
 def _fallback_create() -> SparkSession:
-    """Return active session, or build one from base parameters.yaml."""
+    """Return active session, or build one from base parameters.yaml.
+
+    `getActiveSession()` can return a session whose SparkContext has been
+    stopped (e.g. tune_hyperparameters explicitly calls `.stop()` to free
+    JVM threads before the driver-local HPO loop). Treat a stopped session
+    as if there were none and rebuild from yaml — otherwise downstream
+    nodes call `.parallelize()` / `.createDataFrame()` on a dead context
+    and hit AttributeError: 'NoneType' object has no attribute 'sc'.
+    """
     active = SparkSession.getActiveSession()
-    if active is not None:
+    if active is not None and _is_session_alive(active):
         return active
 
     import os

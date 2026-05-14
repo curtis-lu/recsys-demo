@@ -33,7 +33,11 @@ class LgbDatasetHandle:
     bin_path: str
     role: Literal["train", "train_dev"]
 
-    def load(self, reference: "lgb.Dataset | None" = None) -> "lgb.Dataset":  # type: ignore[name-defined]
+    def load(
+        self,
+        reference: "lgb.Dataset | None" = None,  # type: ignore[name-defined]
+        params: dict | None = None,
+    ) -> "lgb.Dataset":  # type: ignore[name-defined]
         import lightgbm as lgb
 
-        return lgb.Dataset(self.bin_path, reference=reference)
+        return lgb.Dataset(self.bin_path, reference=reference, params=params)

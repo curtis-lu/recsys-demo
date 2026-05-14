@@ -8,24 +8,28 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_eleven_nodes(self):
+    def test_pipeline_has_ten_nodes(self):
         pipeline = create_pipeline()
         # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune
-        # + finalize + evaluate + write_test_predictions + compute_test_mAP + log
-        assert len(pipeline.nodes) == 11
+        # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark + log
+        assert len(pipeline.nodes) == 10
 
-    def test_pipeline_has_write_test_predictions_node(self):
+    def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
-        assert "write_test_predictions" in names
-        assert "compute_test_mAP" in names
+        assert "predict_and_write_test_predictions" in names
+        assert "compute_test_mAP_spark" in names
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
+        # @training_eval_predictions: catalog handle for predict_and_write_test_predictions
+        # training_eval_predictions: Spark-loaded by compute_test_mAP_spark
         expected = {
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
             "preprocessor", "parameters",
+            "@training_eval_predictions",
+            "training_eval_predictions",
         }
         assert pipeline.inputs == expected
 
@@ -34,7 +38,7 @@ class TestTrainingPipeline:
         expected = {
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
-            "test_predictions_pdf", "test_labels_pdf",
+            "predict_manifest",
             "train_parquet_handle", "train_dev_parquet_handle",
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
@@ -52,15 +56,20 @@ class TestTrainingPipeline:
         assert "tune_hyperparameters" in names
         assert "finalize_model" in names
         assert "train_model" not in names
-        assert "evaluate_model" in names
+        assert "evaluate_model" not in names
+        assert "write_test_predictions" not in names
+        assert "compute_test_mAP" not in names
         assert "log_experiment" in names
 
-    def test_evaluate_uses_test_parquet_handle(self):
+    def test_predict_and_write_uses_test_parquet_handle(self):
         """Held-out evaluation must read test_parquet_handle, not val (HPO selection set)."""
         pipeline = create_pipeline()
-        eval_node = next(n for n in pipeline.nodes if n.name == "evaluate_model")
-        assert "test_parquet_handle" in eval_node.inputs
-        assert "val_parquet_handle" not in eval_node.inputs
+        node = next(
+            n for n in pipeline.nodes
+            if n.name == "predict_and_write_test_predictions"
+        )
+        assert "test_parquet_handle" in node.inputs
+        assert "val_parquet_handle" not in node.inputs
 
     def test_topological_order(self):
         pipeline = create_pipeline()
@@ -73,25 +82,23 @@ class TestTrainingPipeline:
             assert names.index(cache_name) < names.index("prepare_lgb_train_inputs")
         # val cache must come before tune (val_parquet_handle flows into tune)
         assert names.index("cache_val_model_input") < names.index("tune_hyperparameters")
-        # test cache must come before evaluate (test_parquet_handle flows into evaluate)
-        assert names.index("cache_test_model_input") < names.index("evaluate_model")
+        # test cache must come before predict_and_write
+        assert names.index("cache_test_model_input") < names.index("predict_and_write_test_predictions")
         # prepare must come before tune
         assert names.index("prepare_lgb_train_inputs") < names.index("tune_hyperparameters")
-        # tune produces best_params/best_iteration/hpo_best_model → finalize → evaluate
+        # tune -> finalize -> predict_and_write -> compute_test_mAP_spark -> log
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
-        assert names.index("finalize_model") < names.index("evaluate_model")
-        # evaluate_model → (write_test_predictions, compute_test_mAP) → log_experiment
-        assert names.index("evaluate_model") < names.index("write_test_predictions")
-        assert names.index("evaluate_model") < names.index("compute_test_mAP")
-        assert names.index("compute_test_mAP") < names.index("log_experiment")
+        assert names.index("finalize_model") < names.index("predict_and_write_test_predictions")
+        assert names.index("predict_and_write_test_predictions") < names.index("compute_test_mAP_spark")
+        assert names.index("compute_test_mAP_spark") < names.index("log_experiment")
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_thirteen_nodes(self):
+    def test_calibration_pipeline_has_twelve_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 5 cache nodes + prepare_lgb + tune + finalize + calibrate + evaluate
-        # + write_test_predictions + compute_test_mAP + log
-        assert len(pipeline.nodes) == 13
+        # 5 cache nodes + prepare_lgb + tune + finalize + calibrate
+        # + predict_and_write + compute_test_mAP_spark + log
+        assert len(pipeline.nodes) == 12
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -114,7 +121,7 @@ class TestTrainingPipeline:
         assert names.index("cache_calibration_model_input") < names.index("calibrate_model")
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
         assert names.index("finalize_model") < names.index("calibrate_model")
-        assert names.index("calibrate_model") < names.index("evaluate_model")
+        assert names.index("calibrate_model") < names.index("predict_and_write_test_predictions")
 
 
 @pytest.mark.spark
@@ -237,7 +244,7 @@ class TestTrainingPipelineE2E:
             "preprocessor", "category_mappings",
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
-            "test_predictions_pdf", "test_labels_pdf",
+            "predict_manifest",
         ):
             catalog.add(name, MemoryDataset())
 
@@ -266,22 +273,36 @@ class TestTrainingPipelineE2E:
         for name in ("train_lgb_handle", "train_dev_lgb_handle"):
             catalog.add(name, MemoryDataset())
 
-        # -- Run training pipeline (skip cache nodes whose inputs are now handles) --
+        # -- Run training pipeline (skip cache nodes and the Hive-writing node) --
         from recsys_tfb.core.pipeline import Pipeline
         from recsys_tfb.pipelines.training import create_pipeline as _create_training_pipeline
 
         full_training_pipeline = _create_training_pipeline()
         # Drop cache nodes — their outputs are already populated in catalog.
-        # Also drop write_test_predictions: it writes to a Hive table via a
-        # real metastore which the local Spark fixture doesn't provide. The
-        # write path has dedicated unit-test coverage in TestWriteTestPredictions.
+        # Drop predict_and_write_test_predictions: it writes to a Hive table via a
+        # real metastore + catalog handle which the local Spark fixture doesn't provide.
+        # Inject a stub predict_manifest so compute_test_mAP_spark also skips.
         skipped_node_names = {
             "cache_train_model_input",
             "cache_train_dev_model_input",
             "cache_val_model_input",
             "cache_test_model_input",
-            "write_test_predictions",
+            "predict_and_write_test_predictions",
+            "compute_test_mAP_spark",
         }
+        # Provide stub predict_manifest and evaluation_results so log_experiment has inputs.
+        # catalog.add overwrites any existing registration.
+        catalog.add("predict_manifest", MemoryDataset({
+            "snap_dates": [], "prods": [], "model_version": "test", "n_rows_written": 0
+        }))
+        stub_eval = {
+            "overall_map": 0.5,
+            "per_product_ap": {},
+            "n_queries": 0,
+            "n_excluded_queries": 0,
+        }
+        catalog.add("evaluation_results", MemoryDataset(stub_eval))
+
         training_nodes = [
             n for n in full_training_pipeline.nodes
             if n.name not in skipped_node_names

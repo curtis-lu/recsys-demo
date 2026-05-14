@@ -20,7 +20,8 @@ class Runner:
         last_consumer: dict[str, object] = {}
         for node in nodes:
             for inp in node.inputs:
-                last_consumer[inp] = node
+                name = inp[1:] if inp.startswith("@") else inp
+                last_consumer[name] = node
         return last_consumer
 
     def run(self, pipeline, catalog) -> None:
@@ -34,7 +35,8 @@ class Runner:
 
         for node in pipeline.nodes:
             for inp in node.inputs:
-                if inp not in available and not catalog.exists(inp):
+                name = inp[1:] if inp.startswith("@") else inp
+                if name not in available and not catalog.exists(name):
                     raise ValueError(
                         f"Node '{node.name}' requires input '{inp}' "
                         f"which is not in the catalog and not produced by any prior node"
@@ -50,7 +52,9 @@ class Runner:
         consumed = set()
         for node in pipeline.nodes:
             produced.update(node.outputs)
-            consumed.update(node.inputs)
+            consumed.update(
+                inp[1:] if inp.startswith("@") else inp for inp in node.inputs
+            )
         intermediates = produced & consumed
 
         logger.info(
@@ -72,8 +76,15 @@ class Runner:
             _ctx = get_current_context()
 
             try:
-                # Load inputs
-                inputs = [catalog.load(name) for name in node.inputs]
+                # Load inputs. An input name starting with '@' is resolved to
+                # the catalog dataset HANDLE (not loaded data), used by nodes
+                # that need to call .save() on the dataset themselves.
+                inputs = []
+                for name in node.inputs:
+                    if name.startswith("@"):
+                        inputs.append(catalog.get_dataset(name[1:]))
+                    else:
+                        inputs.append(catalog.load(name))
 
                 # Execute
                 if _ctx is not None:
@@ -142,17 +153,18 @@ class Runner:
             # pipeline) that were auto-created. External inputs and terminal outputs
             # are preserved for cross-pipeline use.
             for inp in node.inputs:
-                if (last_consumer.get(inp) is node
-                        and inp in intermediates
-                        and inp in catalog._auto_created):
-                    ds = catalog.get_dataset(inp)
+                name = inp[1:] if inp.startswith("@") else inp
+                if (last_consumer.get(name) is node
+                        and name in intermediates
+                        and name in catalog._auto_created):
+                    ds = catalog.get_dataset(name)
                     if ds is not None and isinstance(ds, MemoryDataset):
                         ds.release()
                         logger.info(
-                            "Released dataset: %s", inp,
+                            "Released dataset: %s", name,
                             extra={
                                 "event": "dataset_released",
-                                "dataset_name": inp,
+                                "dataset_name": name,
                                 "node": node.name,
                             },
                         )

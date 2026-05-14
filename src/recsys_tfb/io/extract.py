@@ -68,6 +68,51 @@ def _log_parquet_metadata(handle: ParquetHandle) -> None:
         )
 
 
+def _pdf_to_X(
+    pdf: pd.DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> np.ndarray:
+    """Already-loaded pdf -> X numpy.
+
+    Encapsulates slice_features + encode_categoricals (deferred identity cats)
+    + to_numpy. Used by extract_Xy after its parquet read and by
+    predict_and_write_test_predictions after a per-partition pyarrow read +
+    positive-set filter, so the latter doesn't have to re-read the parquet
+    just to reuse the feature-slicing logic.
+    """
+    feature_cols = preprocessor_metadata["feature_columns"]
+    schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
+    categorical_cols = preprocessor_metadata["categorical_columns"]
+    category_mappings = preprocessor_metadata["category_mappings"]
+
+    with log_step(logger, "slice_features"):
+        X_df = pdf[feature_cols].copy()
+    logger.info(
+        "_pdf_to_X: X_df rows=%d n_features=%d mem=%.1fMB",
+        len(X_df), X_df.shape[1],
+        X_df.memory_usage(deep=False).sum() / 1024**2,
+    )
+
+    deferred_cats = [
+        c for c in categorical_cols if c in identity_cols and c in X_df.columns
+    ]
+    if deferred_cats:
+        with log_step(logger, "encode_categoricals"):
+            for col in deferred_cats:
+                known = category_mappings[col]
+                X_df[col] = pd.Categorical(X_df[col], categories=known).codes
+        logger.info(
+            "_pdf_to_X: encoded deferred_cats=%s count=%d",
+            deferred_cats, len(deferred_cats),
+        )
+
+    with log_step(logger, "to_numpy"):
+        X = X_df.values
+    return X
+
+
 def extract_Xy(
     handle: ParquetHandle,
     preprocessor_metadata: dict,
@@ -81,15 +126,15 @@ def extract_Xy(
     Emits sub-step ``log_step`` events (``read_parquet`` → ``slice_features`` →
     ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
     per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
-    A pre-read parquet metadata INFO is also emitted before ``read_parquet`` so
-    shape/uncompressed-size are visible even if the pandas read OOMs.
+    Step A (read_parquet) lives here; Step B (pdf -> X) is delegated to
+    :func:`_pdf_to_X`. A pre-read parquet metadata INFO is emitted before
+    ``read_parquet`` so shape/uncompressed-size are visible even if the pandas
+    read OOMs.
     """
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
-    categorical_cols = preprocessor_metadata["categorical_columns"]
-    category_mappings = preprocessor_metadata["category_mappings"]
 
     logger.info(
         "extract_Xy start path=%s n_feature_cols=%d label=%s identity_cols=%s",
@@ -108,30 +153,9 @@ def extract_Xy(
         len(pdf), len(pdf.columns),
     )
 
-    with log_step(logger, "slice_features"):
-        X_df = pdf[feature_cols].copy()
-    logger.info(
-        "extract_Xy: X_df rows=%d n_features=%d mem=%.1fMB",
-        len(X_df), X_df.shape[1],
-        X_df.memory_usage(deep=False).sum() / 1024**2,
-    )
+    X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
+    y = pdf[label_col].values
 
-    deferred_cats = [
-        c for c in categorical_cols if c in identity_cols and c in X_df.columns
-    ]
-    if deferred_cats:
-        with log_step(logger, "encode_categoricals"):
-            for col in deferred_cats:
-                known = category_mappings[col]
-                X_df[col] = pd.Categorical(X_df[col], categories=known).codes
-        logger.info(
-            "extract_Xy: encoded deferred_cats=%s count=%d",
-            deferred_cats, len(deferred_cats),
-        )
-
-    with log_step(logger, "to_numpy"):
-        X = X_df.values
-        y = pdf[label_col].values
     logger.info(
         "extract_Xy: X shape=%s dtype=%s nbytes=%.1fMB; y len=%d dtype=%s",
         X.shape, X.dtype, X.nbytes / 1024**2,

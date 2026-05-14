@@ -94,6 +94,28 @@ def prepare_eval_data(
     # Merge predictions with labels
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="inner")
 
+    # Downstream report rendering (_render_html_report) selects schema["rank"]
+    # from eval_predictions. When the predictions source is
+    # training_eval_predictions (--post-training mode), `rank` is absent because
+    # the table no longer stores it (Spark mAP recomputes rank internally via
+    # rank_within_query). Add it here when missing so downstream stays uniform;
+    # when present (ranked_predictions source), trust the upstream value.
+    rank_col = schema["rank"]
+    if rank_col not in eval_predictions.columns:
+        from recsys_tfb.evaluation.metrics_spark import rank_within_query
+        score_col = schema["score"]
+        entity_cols = schema["entity"]
+        query_cols = [time_col] + entity_cols
+        # rank_within_query adds a "pos" 1-based rank within each
+        # (snap_date, cust_id), ordered by score desc.
+        eval_predictions = rank_within_query(eval_predictions, query_cols, score_col)
+        eval_predictions = eval_predictions.withColumnRenamed("pos", rank_col)
+        logger.info(
+            "prepare_eval_data: injected '%s' column via rank_within_query "
+            "(predictions source did not provide it)",
+            rank_col,
+        )
+
     logger.info("Eval data prepared via Spark join")
     return eval_predictions
 

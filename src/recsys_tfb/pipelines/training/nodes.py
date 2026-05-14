@@ -12,12 +12,11 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import compute_all_metrics, compute_mean_ap
+from recsys_tfb.evaluation.metrics import compute_mean_ap
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
-from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +270,25 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
+    from pyspark.sql import SparkSession
+
     from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    # Free the JVM that the training entry started for cache_*_model_input
+    # (Hive→driver-local copy). From here through HPO + finalize_model
+    # everything is driver-local pandas/LightGBM; leaving the SparkSession
+    # alive lets idle JVM/Spark worker threads steal scheduler time + L3
+    # cache from LightGBM's histogram build (observed: ~500x per-boost-iter
+    # slowdown vs clean process). Downstream predict_and_write_test_predictions
+    # / compute_test_mAP_spark recreate a fresh session via HiveTableDataset
+    # when they need one.
+    active = SparkSession.getActiveSession()
+    if active is not None:
+        logger.info(
+            "tune_hyperparameters: stopping SparkSession to free JVM threads "
+            "before driver-local HPO loop"
+        )
+        active.stop()
 
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
@@ -348,9 +365,21 @@ def tune_hyperparameters(
 
         adapter = get_adapter(algorithm)
 
+        # feature_pre_filter=False must match the construct_params used when
+        # writing the .bin (LightGBMAdapter.prepare_train_inputs); otherwise
+        # lgb.train hits "Cannot change feature_pre_filter after constructed".
+        # Required because min_child_samples is in the HPO search space and a
+        # pre-filtered Dataset would be tied to one specific value.
+        construct_params = {"feature_pre_filter": False}
         with log_step(logger, "prepare_datasets"):
-            ds_train = train_lgb_handle.load()
-            ds_dev = train_dev_lgb_handle.load(reference=ds_train)
+            ds_train = train_lgb_handle.load(params=construct_params).construct()
+            ds_dev = train_dev_lgb_handle.load(
+                reference=ds_train, params=construct_params
+            ).construct()
+        logger.info(
+            "ds_train rows=%d features=%d; ds_dev rows=%d",
+            ds_train.num_data(), ds_train.num_feature(), ds_dev.num_data(),
+        )
 
         with log_step(logger, "train"):
             adapter.train(
@@ -520,238 +549,146 @@ def calibrate_model(
     return calibrated
 
 
-def evaluate_model(
+
+def predict_and_write_test_predictions(
     model: ModelAdapter,
-    eval_parquet_handle,
+    test_parquet_handle: ParquetHandle,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Predict on the test set and rank within each query group.
+    training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
+) -> dict:
+    """Per-partition test prediction + Hive write (Pass 0 + Pass 1).
+
+    Pass 0: label-only column scan of the test parquet to build, per
+    snap_date, the set of cust_ids with >=1 positive label across any prod.
+    Customers with no positives in that snap_date contribute 0/skip to
+    mAP, so we drop them up front and avoid their predict cost.
+
+    Pass 1: for each (snap_date, prod_name) partition of the parquet:
+        - load only that partition's rows via pyarrow filter
+        - drop rows whose cust_id is not in the snap_date's positive set
+        - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
+        - build a pandas DataFrame with (cust_id, score, score_uncalibrated,
+          label) + partition cols snap_date, prod_name
+        - training_eval_predictions.save(df) — exactly one partition's
+          rows per save, so dynamic-partition overwrite cleanly overwrites
+          a single partition and successive saves don't collide
 
     Returns:
-        (predictions_pdf, labels_pdf):
-          predictions_pdf — identity_columns + [score, score_uncalibrated, rank]
-          labels_pdf      — identity_columns + [label]
-
-    Downstream nodes consume the predictions/labels separately:
-      - write_test_predictions persists predictions to Hive
-      - compute_test_mAP computes the dict consumed by MLflow
-
-    score_uncalibrated semantics: always the raw model output. For calibrated
-    runs it differs from score; for non-calibrated runs it equals score.
+        manifest dict for downstream compute_test_mAP_spark to depend on
+        (DAG ordering — the actual data is read back from Hive there).
     """
-    from recsys_tfb.io.extract import extract_Xy
+    import pyarrow.dataset as pads
+
+    from recsys_tfb.io.extract import _pdf_to_X
 
     schema_cfg = get_schema(parameters)
-    score_col = schema_cfg["score"]
-    rank_col = schema_cfg["rank"]
-    label_col = schema_cfg["label"]
-    identity_cols = schema_cfg["identity_columns"]
     time_col = schema_cfg["time"]
     entity_cols = schema_cfg["entity"]
-    group_cols = [time_col] + entity_cols
-
-    eval_pdf = eval_parquet_handle.to_pandas()
-
-    with log_step(logger, "extract_features"):
-        X, _ = extract_Xy(eval_parquet_handle, preprocessor_metadata, parameters)
-
-    with log_step(logger, "predict"):
-        y_score = model.predict(X)
-
-    predictions_pdf = eval_pdf[identity_cols].reset_index(drop=True).copy()
-    predictions_pdf[score_col] = y_score
-    predictions_pdf[rank_col] = (
-        predictions_pdf.groupby(group_cols)[score_col]
-        .rank(method="first", ascending=False)
-        .astype(int)
-    )
-
-    # score_uncalibrated: always the raw model output, regardless of calibration.
-    if isinstance(model, CalibratedModelAdapter):
-        with log_step(logger, "predict_uncalibrated"):
-            predictions_pdf["score_uncalibrated"] = model.predict_uncalibrated(X)
-    else:
-        predictions_pdf["score_uncalibrated"] = y_score
-
-    labels_pdf = eval_pdf[identity_cols + [label_col]].reset_index(drop=True).copy()
-
-    logger.info(
-        "evaluate_model: predicted %d rows, %d queries, calibrated=%s",
-        len(predictions_pdf),
-        predictions_pdf[group_cols].drop_duplicates().shape[0],
-        isinstance(model, CalibratedModelAdapter),
-    )
-    return predictions_pdf, labels_pdf
-
-
-def compute_test_mAP(
-    test_predictions_pdf: pd.DataFrame,
-    test_labels_pdf: pd.DataFrame,
-    parameters: dict,
-) -> dict:
-    """Compute ranking-aware mAP from test-set predictions; feed log_experiment.
-
-    test_predictions_pdf must contain identity_columns + [score, score_uncalibrated, rank].
-    test_labels_pdf must contain identity_columns + [label].
-
-    When score and score_uncalibrated differ (i.e., calibration applied), emits
-    an additional ``uncalibrated`` sub-dict for MLflow comparison.
-    """
-    schema_cfg = get_schema(parameters)
-    score_col = schema_cfg["score"]
+    item_col = schema_cfg["item"]
     label_col = schema_cfg["label"]
-    item_col = schema_cfg["item"]
-    identity_cols = schema_cfg["identity_columns"]
-
-    merged = test_predictions_pdf.merge(test_labels_pdf, on=identity_cols, how="inner")
-
-    def _calc_metrics(score_column_name: str) -> dict:
-        preds = merged[identity_cols + [score_column_name]].rename(
-            columns={score_column_name: score_col}
-        )
-        labs = merged[identity_cols + [label_col]]
-        m = compute_all_metrics(preds, labs, k_values=["all"])
-        n_products = preds[item_col].nunique()
-        map_key = f"map@{n_products}"
-        return {
-            "overall_map": m["overall"].get(map_key, 0.0),
-            "per_product_ap": {
-                p: v.get(map_key, 0.0) for p, v in m["per_product"].items()
-            },
-            "n_queries": m["n_queries"],
-            "n_excluded_queries": m["n_excluded_queries"],
-        }
-
-    cal = _calc_metrics(score_col)
-    evaluation_results = {
-        "overall_map": cal["overall_map"],
-        "per_product_ap": cal["per_product_ap"],
-        "n_queries": cal["n_queries"],
-        "n_excluded_queries": cal["n_excluded_queries"],
-    }
-
-    # score_uncalibrated is always present (per evaluate_model contract).
-    # Only emit the uncalibrated comparison subdict when calibration was
-    # actually applied — i.e. when the two columns differ.
-    calibration_applied = (
-        "score_uncalibrated" in test_predictions_pdf.columns
-        and not (
-            test_predictions_pdf[score_col]
-            == test_predictions_pdf["score_uncalibrated"]
-        ).all()
-    )
-    if calibration_applied:
-        uncal = _calc_metrics("score_uncalibrated")
-        evaluation_results["uncalibrated"] = {
-            "overall_map": uncal["overall_map"],
-            "per_product_ap": uncal["per_product_ap"],
-        }
-        # log_experiment expects this when "uncalibrated" is present.
-        evaluation_results["calibration_method"] = (
-            parameters.get("training", {})
-            .get("calibration", {})
-            .get("method", "isotonic")
-        )
-        logger.info(
-            "compute_test_mAP: uncalibrated mAP=%.4f vs calibrated mAP=%.4f",
-            uncal["overall_map"], cal["overall_map"],
-        )
-
-    logger.info(
-        "compute_test_mAP: mAP=%.4f, products=%d, excluded_queries=%d",
-        cal["overall_map"],
-        len(cal["per_product_ap"]),
-        cal["n_excluded_queries"],
-    )
-    return evaluation_results
-
-
-def _build_training_eval_predictions_ddl(table_fqn: str) -> str:
-    """CREATE TABLE IF NOT EXISTS DDL — schema matches catalog declaration.
-
-    score_uncalibrated semantics: always raw model output. For calibrated runs
-    it differs from score; for non-calibrated runs it equals score.
-    """
-    return f"""
-    CREATE TABLE IF NOT EXISTS {table_fqn} (
-        cust_id STRING,
-        score DOUBLE,
-        score_uncalibrated DOUBLE,
-        `rank` BIGINT
-    )
-    PARTITIONED BY (snap_date STRING, prod_name STRING, model_version STRING)
-    STORED AS PARQUET
-    """.strip()
-
-
-def write_test_predictions(
-    test_predictions_pdf: pd.DataFrame,
-    parameters: dict,
-) -> None:
-    """Write test-set predictions to Hive, iterating per prod_name for memory control.
-
-    Bypasses catalog auto-save: outputs=None at DAG level. The catalog entry
-    `training_eval_predictions` declares the table for downstream evaluation reads;
-    this function owns the writes (DDL bootstrap + per-prod insertInto).
-    """
-    schema_cfg = get_schema(parameters)
-    item_col = schema_cfg["item"]
-    score_col = schema_cfg["score"]
-    rank_col = schema_cfg["rank"]
-    time_col = schema_cfg["time"]
-    entity_cols = schema_cfg["entity"]
     if len(entity_cols) != 1:
         raise ValueError(
-            f"write_test_predictions expects a single entity column; "
-            f"got {entity_cols}. Hive DDL hard-codes 'cust_id'."
+            f"predict_and_write_test_predictions expects single entity column; "
+            f"got {entity_cols}."
         )
     cust_id_col = entity_cols[0]
-    spark = get_or_create_spark_session()
     model_version = parameters["model_version"]
-    hive_db = parameters["hive"]["db"]
-    table_fqn = f"{hive_db}.training_eval_predictions"
 
-    if "score_uncalibrated" not in test_predictions_pdf.columns:
-        raise RuntimeError(
-            "test_predictions_pdf missing 'score_uncalibrated' column. "
-            "evaluate_model must populate it (= score for non-calibrated runs)."
-        )
+    # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
+    # columns from the snap_date=*/prod_name=* directory tree produced by
+    # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
+    ds = pads.dataset(test_parquet_handle.path, format="parquet", partitioning="hive")
 
-    # Column order matches Hive table: non-partition cols first, then partition
-    # cols (snap_date, prod_name) and finally model_version. Dynamic-partition
-    # insertInto uses positional column mapping.
-    write_cols = [
-        cust_id_col,
-        score_col,
-        "score_uncalibrated",
-        rank_col,
-        time_col,
-        item_col,
-    ]
-    pdf = test_predictions_pdf[write_cols].copy()
-
-    spark.sql(_build_training_eval_predictions_ddl(table_fqn))
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-
-    distinct_prods = sorted(pdf[item_col].unique())
+    # ---- Pass 0: positive customer set per snap_date ----
+    with log_step(logger, "pass0_positive_set"):
+        labels_table = ds.to_table(columns=[cust_id_col, time_col, label_col])
+        labels_pdf = labels_table.to_pandas()
+        positives_pdf = labels_pdf[labels_pdf[label_col] == 1]
+        positive_set: dict[str, set] = {
+            str(snap): set(grp[cust_id_col].astype(str))
+            for snap, grp in positives_pdf.groupby(time_col)
+        }
     logger.info(
-        "write_test_predictions: %d prods x ~%d rows = %d total -> %s",
-        len(distinct_prods),
-        len(pdf) // max(len(distinct_prods), 1),
-        len(pdf),
-        table_fqn,
+        "predict_and_write_test_predictions: pass0 built positive sets — "
+        "snap_dates=%d total_pos_custs=%d",
+        len(positive_set),
+        sum(len(s) for s in positive_set.values()),
     )
 
-    for prod in distinct_prods:
-        chunk_pdf = pdf[pdf[item_col] == prod].assign(model_version=model_version)
-        chunk_sdf = spark.createDataFrame(chunk_pdf)
-        chunk_sdf.write.insertInto(table_fqn, overwrite=True)
-        logger.info(
-            "write_test_predictions: wrote prod=%s rows=%d",
-            prod,
-            len(chunk_pdf),
-        )
+    # ---- Pass 1: per-partition predict + save ----
+    # Enumerate distinct (snap_date, prod_name) values by projecting just the
+    # two partition columns and de-duplicating. Note: select-on-partition-cols
+    # in pyarrow still materializes one row per data row (the values are filled
+    # from directory names per fragment), so this is two-string-columns-wide,
+    # not zero I/O. At production scale (~220M rows × 2 short strings) the
+    # transient DataFrame fits comfortably on the 128GB driver — much cheaper
+    # than reading any feature columns — and drop_duplicates collapses it to
+    # n_snap_dates * n_prods rows immediately.
+    partition_pdf = ds.to_table(columns=[time_col, item_col]).to_pandas()
+    partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
+
+    snap_dates_seen: set[str] = set()
+    prods_seen: set[str] = set()
+    n_rows_written = 0
+    is_calibrated = isinstance(model, CalibratedModelAdapter)
+
+    for _, row in partition_pdf.iterrows():
+        snap_date = str(row[time_col])
+        prod_name = str(row[item_col])
+
+        with log_step(logger, f"partition_{snap_date}_{prod_name}"):
+            part_table = ds.to_table(
+                filter=(pads.field(time_col) == snap_date)
+                & (pads.field(item_col) == prod_name)
+            )
+            part_pdf = part_table.to_pandas()
+
+            keep_custs = positive_set.get(snap_date, set())
+            part_pdf = part_pdf[part_pdf[cust_id_col].astype(str).isin(keep_custs)]
+
+            if len(part_pdf) == 0:
+                logger.info(
+                    "predict_and_write_test_predictions: skipping empty "
+                    "partition snap=%s prod=%s after positive-set filter",
+                    snap_date, prod_name,
+                )
+                continue
+
+            snap_dates_seen.add(snap_date)
+            prods_seen.add(prod_name)
+
+            X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
+            y_score = model.predict(X)
+            score_uncalibrated = (
+                model.predict_uncalibrated(X) if is_calibrated else y_score
+            )
+
+            out_pdf = pd.DataFrame({
+                cust_id_col: part_pdf[cust_id_col].astype(str).values,
+                "score": y_score,
+                "score_uncalibrated": score_uncalibrated,
+                label_col: part_pdf[label_col].values,
+                time_col: snap_date,
+                item_col: prod_name,
+            })
+
+            training_eval_predictions.save(out_pdf)
+            n_rows_written += len(out_pdf)
+
+    manifest = {
+        "snap_dates": sorted(snap_dates_seen),
+        "prods": sorted(prods_seen),
+        "model_version": model_version,
+        "n_rows_written": n_rows_written,
+    }
+    logger.info(
+        "predict_and_write_test_predictions: done — "
+        "snap_dates=%d prods=%d n_rows_written=%d model_version=%s",
+        len(manifest["snap_dates"]), len(manifest["prods"]),
+        manifest["n_rows_written"], manifest["model_version"],
+    )
+    return manifest
 
 
 def log_experiment(
@@ -800,3 +737,84 @@ def log_experiment(
             model.log_to_mlflow()
 
     logger.info("MLflow experiment logged: %s", experiment_name)
+
+
+def compute_test_mAP_spark(
+    training_eval_predictions,  # Spark DataFrame, loaded by catalog (filtered to current model_version)
+    predict_manifest: dict,
+    parameters: dict,
+) -> dict:
+    """Spark-native mAP over training_eval_predictions; emits the dict
+    shape consumed by log_experiment today (overall_map / per_product_ap
+    / n_queries / n_excluded_queries, plus optional 'uncalibrated' sub-dict
+    + 'calibration_method' when score != score_uncalibrated).
+
+    predict_manifest is an in-DAG dependency only — its content is logged
+    for observability but the actual data is read back from
+    training_eval_predictions (Spark-loaded via the catalog).
+    """
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    schema_cfg = get_schema(parameters)
+    item_col = schema_cfg["item"]
+
+    n_prods = training_eval_predictions.select(item_col).distinct().count()
+    map_key = f"map@{n_prods}"
+
+    logger.info(
+        "compute_test_mAP_spark: starting — n_prods=%d map_key=%s manifest=%s",
+        n_prods, map_key, predict_manifest,
+    )
+
+    # Calibration detection: any row where score != score_uncalibrated
+    calibration_applied = (
+        training_eval_predictions.filter(
+            F.col("score") != F.col("score_uncalibrated")
+        )
+        .limit(1)
+        .count()
+        > 0
+    )
+
+    cal = compute_all_metrics(training_eval_predictions, parameters)
+    result = {
+        "overall_map": float(cal["overall"].get(map_key, 0.0)),
+        "per_product_ap": {
+            p: float(v.get(map_key, 0.0)) for p, v in cal["per_product"].items()
+        },
+        "n_queries": cal["n_queries"],
+        "n_excluded_queries": cal["n_excluded_queries"],
+    }
+
+    if calibration_applied:
+        # Run compute_all_metrics again with score_uncalibrated aliased as score
+        uncal_df = (
+            training_eval_predictions
+            .withColumnRenamed("score", "_score_calibrated")
+            .withColumnRenamed("score_uncalibrated", "score")
+        )
+        uncal = compute_all_metrics(uncal_df, parameters)
+        result["uncalibrated"] = {
+            "overall_map": float(uncal["overall"].get(map_key, 0.0)),
+            "per_product_ap": {
+                p: float(v.get(map_key, 0.0)) for p, v in uncal["per_product"].items()
+            },
+        }
+        result["calibration_method"] = (
+            parameters.get("training", {}).get("calibration", {}).get("method", "isotonic")
+        )
+        logger.info(
+            "compute_test_mAP_spark: calibrated=%.4f uncalibrated=%.4f",
+            result["overall_map"], result["uncalibrated"]["overall_map"],
+        )
+    else:
+        logger.info(
+            "compute_test_mAP_spark: mAP=%.4f products=%d excluded_queries=%d",
+            result["overall_map"],
+            len(result["per_product_ap"]),
+            result["n_excluded_queries"],
+        )
+
+    return result
