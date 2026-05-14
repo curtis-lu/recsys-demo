@@ -754,6 +754,141 @@ def write_test_predictions(
         )
 
 
+def predict_and_write_test_predictions(
+    model: ModelAdapter,
+    test_parquet_handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
+) -> dict:
+    """Per-partition test prediction + Hive write (Pass 0 + Pass 1).
+
+    Pass 0: label-only column scan of the test parquet to build, per
+    snap_date, the set of cust_ids with >=1 positive label across any prod.
+    Customers with no positives in that snap_date contribute 0/skip to
+    mAP, so we drop them up front and avoid their predict cost.
+
+    Pass 1: for each (snap_date, prod_name) partition of the parquet:
+        - load only that partition's rows via pyarrow filter
+        - drop rows whose cust_id is not in the snap_date's positive set
+        - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
+        - build a pandas DataFrame with (cust_id, score, score_uncalibrated,
+          label) + partition cols snap_date, prod_name
+        - training_eval_predictions.save(df) — exactly one partition's
+          rows per save, so dynamic-partition overwrite cleanly overwrites
+          a single partition and successive saves don't collide
+
+    Returns:
+        manifest dict for downstream compute_test_mAP_spark to depend on
+        (DAG ordering — the actual data is read back from Hive there).
+    """
+    import pyarrow.dataset as pads
+
+    from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+
+    schema_cfg = get_schema(parameters)
+    time_col = schema_cfg["time"]
+    entity_cols = schema_cfg["entity"]
+    item_col = schema_cfg["item"]
+    label_col = schema_cfg["label"]
+    if len(entity_cols) != 1:
+        raise ValueError(
+            f"predict_and_write_test_predictions expects single entity column; "
+            f"got {entity_cols}."
+        )
+    cust_id_col = entity_cols[0]
+    model_version = parameters["model_version"]
+
+    # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
+    # columns from the snap_date=*/prod_name=* directory tree produced by
+    # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
+    ds = pads.dataset(test_parquet_handle.path, format="parquet", partitioning="hive")
+
+    # ---- Pass 0: positive customer set per snap_date ----
+    with log_step(logger, "pass0_positive_set"):
+        labels_table = ds.to_table(columns=[cust_id_col, time_col, label_col])
+        labels_pdf = labels_table.to_pandas()
+        positives_pdf = labels_pdf[labels_pdf[label_col] == 1]
+        positive_set: dict[str, set] = {
+            str(snap): set(grp[cust_id_col].astype(str))
+            for snap, grp in positives_pdf.groupby(time_col)
+        }
+    logger.info(
+        "predict_and_write_test_predictions: pass0 built positive sets — "
+        "snap_dates=%d total_pos_custs=%d",
+        len(positive_set),
+        sum(len(s) for s in positive_set.values()),
+    )
+
+    # ---- Pass 1: per-partition predict + save ----
+    # Enumerate distinct (snap_date, prod_name) partition values from the dataset
+    # (pads.dataset partition discovery — no row data read).
+    partition_pdf = ds.to_table(columns=[time_col, item_col]).to_pandas()
+    partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
+
+    snap_dates_seen: set[str] = set()
+    prods_seen: set[str] = set()
+    n_rows_written = 0
+    is_calibrated = isinstance(model, CalibratedModelAdapter)
+
+    for _, row in partition_pdf.iterrows():
+        snap_date = str(row[time_col])
+        prod_name = str(row[item_col])
+        snap_dates_seen.add(snap_date)
+        prods_seen.add(prod_name)
+
+        with log_step(logger, f"partition_{snap_date}_{prod_name}"):
+            part_table = ds.to_table(
+                filter=(pads.field(time_col) == snap_date)
+                & (pads.field(item_col) == prod_name)
+            )
+            part_pdf = part_table.to_pandas()
+
+            keep_custs = positive_set.get(snap_date, set())
+            part_pdf = part_pdf[part_pdf[cust_id_col].astype(str).isin(keep_custs)]
+
+            if len(part_pdf) == 0:
+                logger.info(
+                    "predict_and_write_test_predictions: skipping empty "
+                    "partition snap=%s prod=%s after positive-set filter",
+                    snap_date, prod_name,
+                )
+                continue
+
+            X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
+            y_score = model.predict(X)
+            score_uncalibrated = (
+                model.predict_uncalibrated(X) if is_calibrated else y_score
+            )
+
+            out_pdf = pd.DataFrame({
+                cust_id_col: part_pdf[cust_id_col].astype(str).values,
+                "score": y_score,
+                "score_uncalibrated": score_uncalibrated,
+                label_col: part_pdf[label_col].values,
+                time_col: snap_date,
+                item_col: prod_name,
+            })
+
+            training_eval_predictions.save(out_pdf)
+            n_rows_written += len(out_pdf)
+
+    manifest = {
+        "snap_dates": sorted(snap_dates_seen),
+        "prods": sorted(prods_seen),
+        "model_version": model_version,
+        "n_rows_written": n_rows_written,
+    }
+    logger.info(
+        "predict_and_write_test_predictions: done — "
+        "snap_dates=%d prods=%d n_rows_written=%d model_version=%s",
+        len(manifest["snap_dates"]), len(manifest["prods"]),
+        manifest["n_rows_written"], manifest["model_version"],
+    )
+    return manifest
+
+
 def log_experiment(
     model: ModelAdapter,
     best_params: dict,
