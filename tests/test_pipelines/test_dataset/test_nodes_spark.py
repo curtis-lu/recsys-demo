@@ -331,6 +331,38 @@ class TestFitPreprocessorMissingDates:
         assert "2024-12-31" in msg
 
 
+class TestFitPreprocessorItemMissingFromFeatures:
+    """schema.item 必須出現在 feature_columns，否則 X 缺 item 維度、HPO mAP 會塌成常數。"""
+
+    def test_categorical_columns_missing_item_raises(
+        self, spark, feature_table, parameters
+    ):
+        # 模擬實際遇到的 yaml 漏列：categorical_columns 列了其他欄但漏掉 prod_name。
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "prepare_model_input": {
+                    "drop_columns": [
+                        "snap_date", "cust_id", "label",
+                        "apply_start_date", "apply_end_date", "cust_segment_typ",
+                    ],
+                    "categorical_columns": [],  # 故意漏 prod_name（也省略其他 cat 以避開既有 check）
+                },
+            },
+        }
+        with pytest.raises(ValueError, match="schema.item='prod_name' is missing"):
+            fit_preprocessor_metadata(feature_table, params)
+
+    def test_default_categorical_columns_passes(
+        self, spark, feature_table, parameters
+    ):
+        # 未提供 prepare_model_input 時，_get_preprocessing_config 預設
+        # categorical_columns=[schema.item]，prod_name 自動進 feature_columns。
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        assert "prod_name" in preprocessor["feature_columns"]
+
+
 class TestApplyPreprocessorFilter:
     def test_filters_out_dates_outside_dataset_set(
         self, spark, feature_table, parameters

@@ -182,6 +182,24 @@ def fit_preprocessor_metadata(
             label_col,
         )
 
+    # Ranking-task invariant: schema.item must end up in feature_columns. The
+    # most common way to lose it is omitting it from
+    # `dataset.prepare_model_input.categorical_columns` in yaml — silently
+    # makes X miss the item dimension, predictions collapse to constant within
+    # each query group, and HPO reports a flat mAP across every trial.
+    item_col = schema.get("item")
+    if item_col and item_col not in feature_columns:
+        raise ValueError(
+            f"schema.item='{item_col}' is missing from derived feature_columns. "
+            f"For a ranking task the item column must be a model feature; "
+            f"otherwise the booster cannot differentiate items within a query "
+            f"group and HPO mAP collapses to a constant across trials. "
+            f"Fix: add '{item_col}' to "
+            f"dataset.prepare_model_input.categorical_columns in "
+            f"parameters_dataset.yaml. "
+            f"(current categorical_columns={categorical_cols})"
+        )
+
     preprocessor_metadata = {
         "feature_columns": feature_columns,
         "categorical_columns": categorical_cols,
