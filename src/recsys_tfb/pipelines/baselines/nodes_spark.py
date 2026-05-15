@@ -119,26 +119,26 @@ def compute_baseline_metrics(
     label_table: SparkDataFrame,
     parameters: dict,
 ) -> dict:
-    """Compute ranking metrics on baseline predictions using Spark SQL.
+    """Compute ranking metrics on baseline predictions in Spark.
 
-    Collects the baseline predictions (small table: customers x products)
-    to pandas and delegates to the standard metrics computation.
+    Joins baseline predictions to labels at the configured snap_date, then
+    delegates to ``metrics_spark.compute_all_metrics``. No pandas collection.
     """
-    from recsys_tfb.evaluation.metrics import compute_all_metrics
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
 
     eval_params = parameters.get("evaluation", {})
-    k_values = eval_params.get("k_values", [5, "all"])
+    snap_date = str(eval_params["snap_date"])
 
-    # Baseline predictions and label_table at snap_date are small enough to collect
-    baseline_pd = baseline_predictions.toPandas()
-    label_pd = label_table.toPandas()
+    snap_labels = label_table.filter(F.col(time_col).cast("string") == snap_date)
+    join_keys = [time_col] + entity_cols + [item_col]
+    eval_predictions = baseline_predictions.join(snap_labels, on=join_keys, how="inner")
 
-    metrics = compute_all_metrics(
-        predictions=baseline_pd,
-        labels=label_pd,
-        k_values=k_values,
-        parameters=parameters,
-    )
+    metrics = compute_all_metrics(eval_predictions, parameters)
 
     logger.info(
         "Baseline metrics computed: n_queries=%d",

@@ -22,10 +22,6 @@ from recsys_tfb.evaluation.distributions import (
     plot_score_distributions_by_label,
 )
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
-from recsys_tfb.evaluation.segments import (
-    build_segment_metrics_table,
-    compute_segment_metrics,
-)
 from recsys_tfb.evaluation.statistics import (
     compute_product_statistics,
     compute_segment_statistics,
@@ -221,15 +217,35 @@ def _render_html_report(
         )
     )
 
-    if evaluation_metrics.get("per_product"):
-        prod_df = pd.DataFrame(evaluation_metrics["per_product"]).T
+    if evaluation_metrics.get("per_item"):
+        item_df = pd.DataFrame(evaluation_metrics["per_item"]).T
         product_stats_df = compute_product_statistics(labels)
         sections.append(
             ReportSection(
-                title="Per-Product Metrics",
-                description="Metrics and dataset statistics broken down by product.",
-                tables=[prod_df, product_stats_df],
-                table_titles=["Ranking Metrics", "Dataset Statistics"],
+                title="Per-Item Metrics",
+                description=(
+                    "Per-item attribution metrics — hit_rate@K (item-level recall), "
+                    "map_attr@K / ndcg_attr@K (per-row contributions averaged across "
+                    "queries where the item is positive), and mean_pos."
+                ),
+                tables=[item_df, product_stats_df],
+                table_titles=["Per-Item Metrics", "Dataset Statistics"],
+            )
+        )
+
+    if evaluation_metrics.get("per_segment"):
+        seg_df = pd.DataFrame(evaluation_metrics["per_segment"]).T
+        sections.append(
+            ReportSection(
+                title="Per-Segment Metrics",
+                description=(
+                    "Per-segment query-level metrics (map@K / ndcg@K / precision@K / "
+                    "recall@K averaged across queries within each segment). "
+                    "precision@K at K=n_products is base rate; recall@K at K=n_products "
+                    "is always 1.0."
+                ),
+                tables=[seg_df],
+                table_titles=["Per-Segment Metrics"],
             )
         )
 
@@ -267,22 +283,19 @@ def _render_html_report(
             )
         )
 
-    k_values = eval_params.get("k_values", [5, "all"])
+    # Segment dataset statistics (the metric numbers themselves are already in
+    # the Per-Segment Metrics section above, computed once by metrics_spark).
     for seg_col in segment_columns:
         if seg_col not in labels.columns:
             continue
-        seg_metrics = compute_segment_metrics(
-            predictions, labels, segment_column=seg_col, k_values=k_values
-        )
-        seg_table = build_segment_metrics_table(seg_metrics)
         seg_stats = compute_segment_statistics(labels, segment_column=seg_col)
         display_name = seg_col.replace("_", " ").title()
         sections.append(
             ReportSection(
-                title=f"Segment Analysis: {display_name}",
-                description=f"Metrics and statistics by {seg_col}.",
-                tables=[seg_table, seg_stats],
-                table_titles=["Ranking Metrics", "Dataset Statistics"],
+                title=f"Segment Dataset Statistics: {display_name}",
+                description=f"Customer / positive-rate breakdown by {seg_col}.",
+                tables=[seg_stats],
+                table_titles=["Dataset Statistics"],
             )
         )
 

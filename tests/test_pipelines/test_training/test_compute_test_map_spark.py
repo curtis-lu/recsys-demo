@@ -11,13 +11,14 @@ import pytest
 def _make_parameters() -> dict:
     return {
         "schema": {
-            "time": "snap_date",
-            "entity": ["cust_id"],
-            "item": "prod_name",
-            "label": "label",
-            "score": "score",
-            "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date",
+                "entity": ["cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
         },
         "evaluation": {"k_values": ["all"]},
         "training": {"calibration": {"method": "isotonic"}},
@@ -61,7 +62,7 @@ def test_compute_mAP_spark_no_calibration_returns_flat_dict(spark):
     assert "calibration_method" not in result
     # Both customers ranked their positives at top -> overall mAP == 1.0
     assert result["overall_map"] == pytest.approx(1.0, abs=1e-6)
-    assert "per_product_ap" in result
+    assert "per_item_map_attr" in result
     assert result["n_queries"] == 2
     assert result["n_excluded_queries"] == 0
 

@@ -699,8 +699,8 @@ def log_experiment(
             mlflow.log_metric("best_iteration", best_iteration)
             mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
-            for prod, ap in evaluation_results.get("per_product_ap", {}).items():
-                mlflow.log_metric(f"ap_{prod}", ap)
+            for item, attr in evaluation_results.get("per_item_map_attr", {}).items():
+                mlflow.log_metric(f"map_attr_{item}", attr)
 
             mlflow.log_metric("n_queries", evaluation_results["n_queries"])
             mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
@@ -727,9 +727,18 @@ def compute_test_mAP_spark(
     parameters: dict,
 ) -> dict:
     """Spark-native mAP over training_eval_predictions; emits the dict
-    shape consumed by log_experiment today (overall_map / per_product_ap
-    / n_queries / n_excluded_queries, plus optional 'uncalibrated' sub-dict
-    + 'calibration_method' when score != score_uncalibrated).
+    shape consumed by log_experiment.
+
+    Keys (post metrics-spark redesign):
+        overall_map        per-query mAP@n_products averaged across queries
+                           (mean of per-query AP@all)
+        per_item_map_attr  {item: mean(ap_contrib@all) over item-positive rows}
+                           — replaces the old per_product_ap; carries the same
+                           interpretation when n_products dimension is full.
+        n_queries / n_excluded_queries
+        uncalibrated       (only when score != score_uncalibrated) sub-dict with
+                           overall_map / per_item_map_attr in the same shape
+        calibration_method (only when calibration was applied)
 
     predict_manifest is an in-DAG dependency only — its content is logged
     for observability but the actual data is read back from
@@ -743,14 +752,14 @@ def compute_test_mAP_spark(
     item_col = schema_cfg["item"]
 
     n_prods = training_eval_predictions.select(item_col).distinct().count()
-    map_key = f"map@{n_prods}"
+    overall_map_key = f"map@{n_prods}"
+    item_map_attr_key = f"map_attr@{n_prods}"
 
     logger.info(
-        "compute_test_mAP_spark: starting — n_prods=%d map_key=%s manifest=%s",
-        n_prods, map_key, predict_manifest,
+        "compute_test_mAP_spark: starting — n_prods=%d overall_key=%s item_key=%s manifest=%s",
+        n_prods, overall_map_key, item_map_attr_key, predict_manifest,
     )
 
-    # Calibration detection: any row where score != score_uncalibrated
     calibration_applied = (
         training_eval_predictions.filter(
             F.col("score") != F.col("score_uncalibrated")
@@ -762,16 +771,16 @@ def compute_test_mAP_spark(
 
     cal = compute_all_metrics(training_eval_predictions, parameters)
     result = {
-        "overall_map": float(cal["overall"].get(map_key, 0.0)),
-        "per_product_ap": {
-            p: float(v.get(map_key, 0.0)) for p, v in cal["per_product"].items()
+        "overall_map": float(cal["overall"].get(overall_map_key, 0.0)),
+        "per_item_map_attr": {
+            p: float(v.get(item_map_attr_key, 0.0))
+            for p, v in cal["per_item"].items()
         },
         "n_queries": cal["n_queries"],
         "n_excluded_queries": cal["n_excluded_queries"],
     }
 
     if calibration_applied:
-        # Run compute_all_metrics again with score_uncalibrated aliased as score
         uncal_df = (
             training_eval_predictions
             .withColumnRenamed("score", "_score_calibrated")
@@ -779,9 +788,10 @@ def compute_test_mAP_spark(
         )
         uncal = compute_all_metrics(uncal_df, parameters)
         result["uncalibrated"] = {
-            "overall_map": float(uncal["overall"].get(map_key, 0.0)),
-            "per_product_ap": {
-                p: float(v.get(map_key, 0.0)) for p, v in uncal["per_product"].items()
+            "overall_map": float(uncal["overall"].get(overall_map_key, 0.0)),
+            "per_item_map_attr": {
+                p: float(v.get(item_map_attr_key, 0.0))
+                for p, v in uncal["per_item"].items()
             },
         }
         result["calibration_method"] = (
@@ -793,9 +803,9 @@ def compute_test_mAP_spark(
         )
     else:
         logger.info(
-            "compute_test_mAP_spark: mAP=%.4f products=%d excluded_queries=%d",
+            "compute_test_mAP_spark: mAP=%.4f items=%d excluded_queries=%d",
             result["overall_map"],
-            len(result["per_product_ap"]),
+            len(result["per_item_map_attr"]),
             result["n_excluded_queries"],
         )
 

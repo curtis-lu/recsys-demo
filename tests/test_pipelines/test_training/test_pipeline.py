@@ -297,7 +297,7 @@ class TestTrainingPipelineE2E:
         }))
         stub_eval = {
             "overall_map": 0.5,
-            "per_product_ap": {},
+            "per_item_map_attr": {},
             "n_queries": 0,
             "n_excluded_queries": 0,
         }
@@ -328,4 +328,4 @@ class TestTrainingPipelineE2E:
 
         evaluation_results = catalog.load("evaluation_results")
         assert isinstance(evaluation_results["overall_map"], float)
-        assert isinstance(evaluation_results["per_product_ap"], dict)
+        assert isinstance(evaluation_results["per_item_map_attr"], dict)

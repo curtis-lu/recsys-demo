@@ -44,7 +44,7 @@ def list_versions(models_dir: Path) -> list[dict]:
         versions.append({
             "version": d.name,
             "overall_map": results.get("overall_map", 0.0),
-            "per_product_ap": results.get("per_product_ap", {}),
+            "per_item_map_attr": results.get("per_item_map_attr", {}),
         })
     versions.sort(key=lambda v: v["overall_map"], reverse=True)
     return versions
@@ -110,7 +110,7 @@ def promote(models_dir: Path, version: str) -> dict:
     summary = {
         "promoted_version": version,
         "overall_map": eval_results.get("overall_map"),
-        "per_product_ap": eval_results.get("per_product_ap", {}),
+        "per_item_map_attr": eval_results.get("per_item_map_attr", {}),
         "target_path": str(best_dir),
     }
     return summary
@@ -161,8 +161,8 @@ def main() -> None:
 
     print(f"\nPromoted: {summary['promoted_version']}")
     print(f"  mAP: {summary['overall_map']:.4f}")
-    for prod, ap in sorted(summary["per_product_ap"].items()):
-        print(f"  {prod}: {ap:.4f}")
+    for item, attr in sorted(summary["per_item_map_attr"].items()):
+        print(f"  {item}: {attr:.4f}")
 
 
 if __name__ == "__main__":
