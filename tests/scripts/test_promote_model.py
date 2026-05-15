@@ -12,14 +12,14 @@ from scripts.promote_model import (
 )
 
 
-def _create_full_version(models_dir, version, overall_map=0.75, per_product_ap=None):
+def _create_full_version(models_dir, version, overall_map=0.75, per_item_map_attr=None):
     """Create a version directory with all required artifacts."""
     version_dir = models_dir / version
     version_dir.mkdir(parents=True, exist_ok=True)
 
     eval_results = {
         "overall_map": overall_map,
-        "per_product_ap": per_product_ap or {"exchange_fx": 0.8},
+        "per_item_map_attr": per_item_map_attr or {"exchange_fx": 0.8},
     }
     (version_dir / "evaluation_results.json").write_text(json.dumps(eval_results))
     (version_dir / "best_params.json").write_text(json.dumps({"lr": 0.1}))

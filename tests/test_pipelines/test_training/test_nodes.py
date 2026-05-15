@@ -540,7 +540,7 @@ class TestLogExperiment:
 
         evaluation_results = {
             "overall_map": 0.75,
-            "per_product_ap": {"exchange_fx": 0.8, "exchange_usd": 0.7},
+            "per_item_map_attr": {"exchange_fx": 0.8, "exchange_usd": 0.7},
             "n_queries": 10,
             "n_excluded_queries": 2,
         }
@@ -575,12 +575,12 @@ class TestLogExperiment:
 
         evaluation_results = {
             "overall_map": 0.76,
-            "per_product_ap": {"exchange_fx": 0.8, "exchange_usd": 0.7},
+            "per_item_map_attr": {"exchange_fx": 0.8, "exchange_usd": 0.7},
             "n_queries": 10,
             "n_excluded_queries": 2,
             "uncalibrated": {
                 "overall_map": 0.75,
-                "per_product_ap": {"exchange_fx": 0.78, "exchange_usd": 0.69},
+                "per_item_map_attr": {"exchange_fx": 0.78, "exchange_usd": 0.69},
             },
             "calibration_method": "isotonic",
         }

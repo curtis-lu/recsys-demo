@@ -33,19 +33,16 @@ def build_comparison_result(
         result_a.get("overall", {}), result_b.get("overall", {})
     )
 
-    # Per-product delta
-    comparison["per_product_delta"] = _compute_nested_delta(
-        result_a.get("per_product", {}), result_b.get("per_product", {})
+    comparison["per_item_delta"] = _compute_nested_delta(
+        result_a.get("per_item", {}), result_b.get("per_item", {})
     )
 
-    # Per-segment delta
     comparison["per_segment_delta"] = _compute_nested_delta(
         result_a.get("per_segment", {}), result_b.get("per_segment", {})
     )
 
-    # Macro avg delta
     comparison["macro_avg_delta"] = {}
-    for dim_key in ("by_product", "by_segment", "by_product_segment"):
+    for dim_key in ("by_item", "by_segment", "by_item_segment"):
         macro_a = result_a.get("macro_avg", {}).get(dim_key, {})
         macro_b = result_b.get("macro_avg", {}).get(dim_key, {})
         if macro_a or macro_b:
@@ -73,38 +70,37 @@ def _compute_nested_delta(nested_a: dict, nested_b: dict) -> dict:
 
 
 def plot_comparison_metrics(comparison: dict) -> list[go.Figure]:
-    """Create side-by-side bar charts comparing two models per product.
+    """Side-by-side bar charts of per-item metrics between two result dicts.
 
-    Returns a list of Figures, one per metric.
+    Returns one Figure per metric (hit_rate@K / map_attr@K / ndcg_attr@K /
+    mean_pos), with items on the x-axis.
     """
     result_a = comparison["result_a"]
     result_b = comparison["result_b"]
     label_a = comparison["label_a"]
     label_b = comparison["label_b"]
 
-    per_product_a = result_a.get("per_product", {})
-    per_product_b = result_b.get("per_product", {})
+    per_item_a = result_a.get("per_item", {})
+    per_item_b = result_b.get("per_item", {})
 
-    products = sorted(set(list(per_product_a.keys()) + list(per_product_b.keys())))
-
-    if not products:
+    items = sorted(set(list(per_item_a.keys()) + list(per_item_b.keys())))
+    if not items:
         return []
 
-    # Get metric keys
-    sample = per_product_a.get(products[0]) or per_product_b.get(products[0], {})
+    sample = per_item_a.get(items[0]) or per_item_b.get(items[0], {})
     metric_keys = list(sample.keys())
 
     figures = []
     for metric in metric_keys:
-        values_a = [per_product_a.get(p, {}).get(metric, 0.0) for p in products]
-        values_b = [per_product_b.get(p, {}).get(metric, 0.0) for p in products]
+        values_a = [per_item_a.get(p, {}).get(metric, 0.0) for p in items]
+        values_b = [per_item_b.get(p, {}).get(metric, 0.0) for p in items]
 
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=products, y=values_a, name=label_a, marker_color="steelblue"))
-        fig.add_trace(go.Bar(x=products, y=values_b, name=label_b, marker_color="darkorange"))
+        fig.add_trace(go.Bar(x=items, y=values_a, name=label_a, marker_color="steelblue"))
+        fig.add_trace(go.Bar(x=items, y=values_b, name=label_b, marker_color="darkorange"))
         fig.update_layout(
             title=f"{metric.upper()} Comparison",
-            xaxis_title="Product",
+            xaxis_title="Item",
             yaxis_title=metric,
             barmode="group",
         )

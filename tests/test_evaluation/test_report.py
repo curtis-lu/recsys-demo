@@ -116,7 +116,7 @@ class TestSaveMetricsJson:
     def test_json_roundtrip(self):
         metrics = {
             "overall": {"map": 0.5, "ndcg": 0.6},
-            "per_product": {"exchange_fx": {"map": 0.7}},
+            "per_item": {"exchange_fx": {"hit_rate@5": 0.7}},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             path = save_metrics_json(metrics, tmpdir)
