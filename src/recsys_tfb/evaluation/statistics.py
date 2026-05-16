@@ -3,44 +3,42 @@
 import pandas as pd
 
 
-def compute_product_statistics(labels: pd.DataFrame) -> pd.DataFrame:
-    """Per-product statistics at customer granularity.
-
-    Returns DataFrame indexed by prod_name with columns:
-        positive_customers, negative_customers, total_customers,
-        positive_rate, avg_positive_products_per_customer.
-    """
-    # Collapse to customer-product level: 1 if any label=1 for that pair
+def compute_product_statistics(
+    labels: pd.DataFrame,
+    item_col: str = "prod_name",
+    entity_col: str = "cust_id",
+    label_col: str = "label",
+) -> pd.DataFrame:
+    """Per-product statistics at customer granularity."""
     cust_prod = (
-        labels.groupby(["prod_name", "cust_id"])["label"]
-        .max()
-        .reset_index()
+        labels.groupby([item_col, entity_col])[label_col].max().reset_index()
     )
-    stats = cust_prod.groupby("prod_name").agg(
-        positive_customers=("label", "sum"),
-        total_customers=("label", "count"),
+    stats = cust_prod.groupby(item_col).agg(
+        positive_customers=(label_col, "sum"),
+        total_customers=(label_col, "count"),
     )
-    stats["negative_customers"] = stats["total_customers"] - stats["positive_customers"]
-    stats["positive_rate"] = stats["positive_customers"] / stats["total_customers"]
-
-    # avg_positive_products_per_customer: global value
-    pos_per_cust = labels[labels["label"] == 1].groupby("cust_id").size()
+    stats["negative_customers"] = (
+        stats["total_customers"] - stats["positive_customers"]
+    )
+    stats["positive_rate"] = (
+        stats["positive_customers"] / stats["total_customers"]
+    )
+    pos_per_cust = (
+        labels[labels[label_col] == 1].groupby(entity_col).size()
+    )
     avg_pos = pos_per_cust.mean() if len(pos_per_cust) > 0 else 0.0
     stats["avg_positive_products_per_customer"] = avg_pos
-
     return stats[
-        [
-            "positive_customers",
-            "negative_customers",
-            "total_customers",
-            "positive_rate",
-            "avg_positive_products_per_customer",
-        ]
+        ["positive_customers", "negative_customers", "total_customers",
+         "positive_rate", "avg_positive_products_per_customer"]
     ]
 
 
 def compute_segment_statistics(
-    labels: pd.DataFrame, segment_column: str = "cust_segment_typ"
+    labels: pd.DataFrame,
+    segment_column: str = "cust_segment_typ",
+    entity_col: str = "cust_id",
+    label_col: str = "label",
 ) -> pd.DataFrame:
     """Per-segment statistics at customer granularity.
 
@@ -61,22 +59,22 @@ def compute_segment_statistics(
 
     # Collapse to customer-segment level: 1 if any label=1 for that pair
     cust_seg = (
-        labels.groupby([segment_column, "cust_id"])["label"]
+        labels.groupby([segment_column, entity_col])[label_col]
         .max()
         .reset_index()
     )
     seg_stats = cust_seg.groupby(segment_column).agg(
-        positive_customers=("label", "sum"),
-        total_customers=("label", "count"),
+        positive_customers=(label_col, "sum"),
+        total_customers=(label_col, "count"),
     )
     seg_stats["negative_customers"] = seg_stats["total_customers"] - seg_stats["positive_customers"]
     seg_stats["positive_rate"] = seg_stats["positive_customers"] / seg_stats["total_customers"]
 
     # avg_positive_products_per_customer: per segment
-    pos_labels = labels[labels["label"] == 1]
+    pos_labels = labels[labels[label_col] == 1]
     if len(pos_labels) > 0:
         pos_per_cust_seg = (
-            pos_labels.groupby([segment_column, "cust_id"])
+            pos_labels.groupby([segment_column, entity_col])
             .size()
             .reset_index(name="pos_count")
         )
