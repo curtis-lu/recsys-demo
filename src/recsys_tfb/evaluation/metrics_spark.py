@@ -132,6 +132,57 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     return mapping
 
 
+def collapse_to_categories(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Collapse fine-grained predictions to category grain (no UDF).
+
+    For each (time, entity..., category): score = max(child score),
+    label = max(child label), segment columns via F.first. The category
+    column is emitted under the schema item_col name so the collapsed DF
+    is shape-compatible with compute_all_metrics. ``max(score)`` re-ranking
+    is equivalent to taking the best child rank (pos is score-desc derived).
+    """
+    mapping = _build_category_mapping(parameters)
+    if mapping is None:
+        raise ValueError("collapse_to_categories called with categories disabled")
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    group_cols = [time_col] + entity_cols
+
+    eval_params = parameters.get("evaluation", {}) or {}
+    segment_columns = [
+        c for c in (eval_params.get("segment_columns", []) or [])
+        if c in eval_predictions.columns
+    ]
+
+    spark = eval_predictions.sparkSession
+    map_rows = [(p, c) for p, c in mapping.items()]
+    map_df = spark.createDataFrame(map_rows, [item_col, "_category"])
+
+    joined = eval_predictions.join(F.broadcast(map_df), on=item_col, how="inner")
+
+    aggs = [
+        F.max(F.col(score_col)).alias(score_col),
+        F.max(F.col(label_col)).alias(label_col),
+    ]
+    for seg in segment_columns:
+        aggs.append(F.first(F.col(seg)).alias(seg))
+
+    collapsed = (
+        joined.groupBy(*group_cols, "_category")
+        .agg(*aggs)
+        .withColumnRenamed("_category", item_col)
+    )
+    return collapsed
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 — row-level enrichment
 # ---------------------------------------------------------------------------
