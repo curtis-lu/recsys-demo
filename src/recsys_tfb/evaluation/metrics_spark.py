@@ -564,6 +564,7 @@ def _compute_core(
     k_values = _resolve_k_values(k_values_raw, n_products)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
+    # ---- Layer 1: row-level enrichment ----
     df = rank_within_query(eval_predictions, group_cols, score_col)
     df = add_query_total_rel(df, group_cols, label_col)
 
@@ -582,17 +583,20 @@ def _compute_core(
     enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
     enriched = enriched.cache()
     try:
+        # ---- Detect active segment column ----
         active_seg_col: str | None = None
         for seg in segment_columns:
             if seg in enriched.columns:
                 active_seg_col = seg
                 break
 
+        # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, k_values, carry_cols=carry
         ).cache()
         try:
+            # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, k_values)
             per_item = aggregate_per_item(
                 enriched, [item_col], label_col, k_values
@@ -635,10 +639,47 @@ def compute_all_metrics(
 ) -> dict:
     """Full bundle: fine-grained core + dataset_overview + optional category.
 
+    Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
+    (column names resolved from parameters['schema']).
+    Optional: any column listed in ``parameters['evaluation']['segment_columns']``
+    will be used for per-segment slicing if present.
+
     Backward compatible: every pre-existing top-level key is unchanged;
-    ``dataset_overview`` is always added; ``category`` (same shape, plus its
-    own dataset_overview, never re-nested) is added only when
-    ``product_categories.enabled``.
+    ``dataset_overview`` is always added; ``category`` (same shape as the
+    top level, plus its own ``dataset_overview``, never re-nested) is added
+    only when ``product_categories.enabled``.
+
+    Returns::
+
+        {
+          "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
+          "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
+          "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "macro_avg": {
+              "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
+              "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
+              "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
+          },
+          "n_queries":          int  (total distinct queries before filtering),
+          "n_excluded_queries": int  (queries with zero positives → dropped),
+          "dataset_overview": {
+              "totals":       {n_rows, n_customers, n_products, n_snap_dates,
+                               n_positives, positive_rate,
+                               avg_positives_per_customer},
+              "by_snap_date": {snap: {n_rows, n_positives, n_customers,
+                                      positive_rate}},
+              "by_item":      {item: {n_rows, n_positives, n_customers,
+                                      positive_rate}},
+          },
+          "category":  (only when product_categories.enabled)
+              same shape as the top level (overall / per_item / per_segment /
+              per_item_segment / macro_avg / n_queries / n_excluded_queries)
+              PLUS its own "dataset_overview"; never contains "category".
+        }
+
+    Queries with zero positives are excluded from the metric computation
+    (AP and nDCG are undefined when total_rel = 0).
     """
     result = _compute_core(eval_predictions, parameters)
     result["dataset_overview"] = compute_dataset_overview(
