@@ -183,6 +183,72 @@ def collapse_to_categories(
     return collapsed
 
 
+def compute_dataset_overview(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+    item_col_override: str | None = None,
+) -> dict:
+    """Dataset profiling for the report §1. Pure Spark agg, small collect.
+
+    ``item_col_override`` lets the caller profile the collapsed
+    category-grain DF (item column still named after schema item_col, but
+    semantics = category).
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = item_col_override or schema["item"]
+    label_col = schema["label"]
+    entity_col = entity_cols[0]
+
+    n_rows = eval_predictions.count()
+    n_customers = eval_predictions.select(*entity_cols).distinct().count()
+    n_products = eval_predictions.select(item_col).distinct().count()
+    n_snap_dates = eval_predictions.select(time_col).distinct().count()
+    n_positives = int(
+        eval_predictions.agg(F.sum(F.col(label_col))).collect()[0][0] or 0
+    )
+    positive_rate = (n_positives / n_rows) if n_rows else 0.0
+    avg_pos_per_customer = (n_positives / n_customers) if n_customers else 0.0
+
+    def _group(col: str) -> dict:
+        rows = (
+            eval_predictions.groupBy(col)
+            .agg(
+                F.count(F.lit(1)).alias("n_rows"),
+                F.sum(F.col(label_col)).alias("n_positives"),
+                F.countDistinct(*entity_cols).alias("n_customers"),
+            )
+            .collect()
+        )
+        out = {}
+        for r in rows:
+            key = r[col] if isinstance(r[col], str) else str(r[col])
+            nr = int(r["n_rows"])
+            npos = int(r["n_positives"] or 0)
+            out[key] = {
+                "n_rows": nr,
+                "n_positives": npos,
+                "n_customers": int(r["n_customers"]),
+                "positive_rate": (npos / nr) if nr else 0.0,
+            }
+        return out
+
+    return {
+        "totals": {
+            "n_rows": n_rows,
+            "n_customers": n_customers,
+            "n_products": n_products,
+            "n_snap_dates": n_snap_dates,
+            "n_positives": n_positives,
+            "positive_rate": positive_rate,
+            "avg_positives_per_customer": avg_pos_per_customer,
+        },
+        "by_snap_date": _group(time_col),
+        "by_item": _group(item_col),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 — row-level enrichment
 # ---------------------------------------------------------------------------
