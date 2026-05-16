@@ -538,35 +538,15 @@ _EMPTY_RESULT = {
 }
 
 
-def compute_all_metrics(
+def _compute_core(
     eval_predictions: SparkDataFrame,
     parameters: dict,
 ) -> dict:
-    """Compute the full metric bundle on ``eval_predictions``.
+    """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
-    Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
-    (column names resolved from parameters['schema']).
-    Optional: any column listed in ``parameters['evaluation']['segment_columns']``
-    will be used for per-segment slicing if present.
-
-    Returns::
-
-        {
-          "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
-          "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
-          "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "macro_avg": {
-              "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
-              "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
-              "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
-          },
-          "n_queries":          int  (total distinct queries before filtering),
-          "n_excluded_queries": int  (queries with zero positives → dropped),
-        }
-
-    Queries with zero positives are excluded from the metric computation
-    (AP and nDCG are undefined when total_rel = 0).
+    Body identical to the pre-refactor compute_all_metrics — no category,
+    no dataset_overview. Used for both fine-grained and (on a collapsed DF)
+    category-grain passes.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -584,7 +564,6 @@ def compute_all_metrics(
     k_values = _resolve_k_values(k_values_raw, n_products)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
-    # ---- Layer 1: row-level enrichment ----
     df = rank_within_query(eval_predictions, group_cols, score_col)
     df = add_query_total_rel(df, group_cols, label_col)
 
@@ -602,23 +581,18 @@ def compute_all_metrics(
 
     enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
     enriched = enriched.cache()
-
     try:
-        # ---- Detect active segment column ----
         active_seg_col: str | None = None
         for seg in segment_columns:
             if seg in enriched.columns:
                 active_seg_col = seg
                 break
 
-        # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, k_values, carry_cols=carry
         ).cache()
-
         try:
-            # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, k_values)
             per_item = aggregate_per_item(
                 enriched, [item_col], label_col, k_values
@@ -653,3 +627,30 @@ def compute_all_metrics(
             per_query.unpersist()
     finally:
         enriched.unpersist()
+
+
+def compute_all_metrics(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> dict:
+    """Full bundle: fine-grained core + dataset_overview + optional category.
+
+    Backward compatible: every pre-existing top-level key is unchanged;
+    ``dataset_overview`` is always added; ``category`` (same shape, plus its
+    own dataset_overview, never re-nested) is added only when
+    ``product_categories.enabled``.
+    """
+    result = _compute_core(eval_predictions, parameters)
+    result["dataset_overview"] = compute_dataset_overview(
+        eval_predictions, parameters
+    )
+
+    if _build_category_mapping(parameters) is not None:
+        collapsed = collapse_to_categories(eval_predictions, parameters)
+        cat = _compute_core(collapsed, parameters)
+        cat["dataset_overview"] = compute_dataset_overview(
+            collapsed, parameters
+        )
+        result["category"] = cat
+
+    return result

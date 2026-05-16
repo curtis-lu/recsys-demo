@@ -499,7 +499,7 @@ def test_compute_all_metrics_returns_expected_keys(spark):
     result = ms.compute_all_metrics(df, params)
     assert set(result.keys()) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "n_queries", "n_excluded_queries",
+        "macro_avg", "n_queries", "n_excluded_queries", "dataset_overview",
     }
 
 
