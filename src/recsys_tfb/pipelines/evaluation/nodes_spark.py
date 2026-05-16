@@ -50,27 +50,10 @@ def prepare_eval_data(
 
     labels = label_table
 
-    # Join external segment sources
+    # Join external segment sources (single Spark impl; source seam inside).
     if segment_sources:
-        spark = label_table.sparkSession
-        for seg_name, source_config in segment_sources.items():
-            filepath = source_config["filepath"]
-            key_columns = source_config["key_columns"]
-            segment_column = source_config["segment_column"]
-            try:
-                seg_df = spark.read.parquet(filepath)
-                labels = labels.join(
-                    seg_df.select(key_columns + [segment_column]),
-                    on=key_columns,
-                    how="left",
-                )
-                logger.info("Joined segment source '%s' (%s)", seg_name, segment_column)
-            except Exception:
-                logger.warning(
-                    "Segment source '%s' not found at %s — skipping",
-                    seg_name,
-                    filepath,
-                )
+        from recsys_tfb.evaluation.segments import join_segment_sources
+        labels = join_segment_sources(labels, segment_sources)
 
     # Filter predictions to the resolved model_version (resolved upstream by
     # __main__.py via core.versioning.resolve_model_version).
