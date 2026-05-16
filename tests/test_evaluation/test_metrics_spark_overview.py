@@ -32,6 +32,7 @@ def test_dataset_overview_totals(spark):
     assert t["n_snap_dates"] == 2
     assert t["n_positives"] == 3
     assert t["positive_rate"] == pytest.approx(3 / 5)
+    assert t["avg_positives_per_customer"] == pytest.approx(1.5)
 
 
 def test_dataset_overview_by_snap_and_item(spark):

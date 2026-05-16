@@ -199,7 +199,6 @@ def compute_dataset_overview(
     entity_cols = schema["entity"]
     item_col = item_col_override or schema["item"]
     label_col = schema["label"]
-    entity_col = entity_cols[0]
 
     n_rows = eval_predictions.count()
     n_customers = eval_predictions.select(*entity_cols).distinct().count()
