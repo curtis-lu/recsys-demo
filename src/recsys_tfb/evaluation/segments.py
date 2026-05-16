@@ -7,24 +7,28 @@ logic. See spec "Out of scope / 後續工作".
 """
 
 import logging
-from pathlib import Path
 
 from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
 
 
 def _read_segment_source(
-    spark, source_config: dict
+    spark: SparkSession, source_config: dict
 ) -> SparkDataFrame | None:
     """Read one external segment source. None when the source is absent.
 
-    SEAM: only this function knows the storage backend.
+    SEAM: only this function knows the storage backend. Uses Spark's reader
+    (filesystem/scheme-agnostic — local, HDFS, etc.) and treats ANY read
+    failure as "absent" (non-fatal), preserving the pre-refactor behaviour.
+    A future Hive swap replaces only this function body
+    (``spark.table("ml_recsys.<segment_table>")``).
     """
-    filepath = source_config["filepath"]
-    if not Path(filepath).exists():
+    try:
+        return spark.read.parquet(source_config["filepath"])
+    except Exception:
         return None
-    return spark.read.parquet(filepath)
 
 
 def join_segment_sources(
