@@ -90,6 +90,48 @@ def _resolve_k_values(raw: Iterable, n_products: int) -> list[int]:
     return sorted(out)
 
 
+def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
+    """Resolve {prod_name: category}. None when categories disabled.
+
+    Fail-loud (ValueError) if a mapped product is not in
+    ``schema.categorical_values[item_col]``. Products absent from every
+    mapping list become their own singleton category when
+    ``unmapped == 'singleton'`` (the only supported mode).
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    pc = eval_params.get("product_categories", {}) or {}
+    if not pc.get("enabled"):
+        return None
+
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    known = list(
+        (parameters.get("schema", {}).get("columns", {})
+         .get("categorical_values", {}) or {}).get(item_col, [])
+    )
+    known_set = set(known)
+
+    mapping: dict[str, str] = {}
+    for category, prods in (pc.get("mapping", {}) or {}).items():
+        for prod in prods:
+            if prod not in known_set:
+                raise ValueError(
+                    f"product_categories.mapping references unknown product "
+                    f"'{prod}' (not in schema.categorical_values['{item_col}'])"
+                )
+            mapping[prod] = category
+
+    unmapped = pc.get("unmapped", "singleton")
+    if unmapped != "singleton":
+        raise ValueError(
+            f"product_categories.unmapped='{unmapped}' unsupported; "
+            f"only 'singleton' is implemented"
+        )
+    for prod in known:
+        mapping.setdefault(prod, prod)
+    return mapping
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 — row-level enrichment
 # ---------------------------------------------------------------------------
