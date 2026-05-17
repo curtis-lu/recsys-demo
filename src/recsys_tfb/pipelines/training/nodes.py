@@ -10,7 +10,7 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from recsys_tfb.core.logging import log_step
+from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import compute_mean_ap
 from recsys_tfb.io.handles import ParquetHandle
@@ -358,10 +358,8 @@ def tune_hyperparameters(
             ds_dev = train_dev_lgb_handle.load(
                 reference=ds_train, params=construct_params
             ).construct()
-        logger.info(
-            "ds_train rows=%d features=%d; ds_dev rows=%d",
-            ds_train.num_data(), ds_train.num_feature(), ds_dev.num_data(),
-        )
+        log_data_volume(logger, "tune.ds_train", ds_train)
+        log_data_volume(logger, "tune.ds_dev", ds_dev)
 
         with log_step(logger, "train"):
             adapter.train(
@@ -461,6 +459,8 @@ def finalize_model(
         X_dv, y_dv = extract_Xy(train_dev_parquet_handle, preprocessor_metadata, parameters)
     X_full = np.concatenate([X_tr, X_dv], axis=0)
     y_full = np.concatenate([y_tr, y_dv], axis=0)
+    log_data_volume(logger, "finalize.X_full", X_full)
+    log_data_volume(logger, "finalize.y_full", y_full)
     del X_tr, y_tr, X_dv, y_dv
 
     feat_cols = preprocessor_metadata["feature_columns"]
