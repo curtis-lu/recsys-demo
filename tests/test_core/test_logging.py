@@ -178,3 +178,65 @@ class TestLogDataVolume:
         assert vol["kind"] == "numpy"
         assert vol["rows"] == 7
         assert vol["cols"] == 1
+
+    def test_pyarrow_table(self, caplog):
+        import pyarrow as pa
+
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        tbl = pa.table({"a": [1, 2, 3], "b": [4, 5, 6]})
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "labels_table", tbl)
+
+        vol = self._vol_records(caplog)[0].volume
+        assert vol["kind"] == "arrow"
+        assert vol["rows"] == 3
+        assert vol["cols"] == 2
+        assert vol["bytes"] == tbl.nbytes
+
+    def test_lgb_dataset_duck_typed_stub(self, caplog):
+        from recsys_tfb.core.logging import log_data_volume
+
+        class FakeLgbDataset:
+            def num_data(self):
+                return 1000
+
+            def num_feature(self):
+                return 42
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "ds_train", FakeLgbDataset())
+
+        vol = self._vol_records(caplog)[0].volume
+        assert vol["kind"] == "lgb_dataset"
+        assert vol["rows"] == 1000
+        assert vol["cols"] == 42
+
+    def test_file_path(self, caplog, tmp_path):
+        from recsys_tfb.core.logging import log_data_volume
+
+        f = tmp_path / "train.bin"
+        f.write_bytes(b"\x00" * 2048)
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "train.bin", str(f))
+
+        vol = self._vol_records(caplog)[0].volume
+        assert vol["kind"] == "file"
+        assert vol["bytes"] == 2048
+
+    def test_dispatch_order_arrow_not_numpy(self, caplog):
+        # pyarrow.Table has BOTH .nbytes and .num_rows; must dispatch as arrow.
+        import pyarrow as pa
+
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        tbl = pa.table({"x": [1, 2]})
+        assert hasattr(tbl, "nbytes")  # would match numpy branch if mis-ordered
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "t", tbl)
+
+        assert self._vol_records(caplog)[0].volume["kind"] == "arrow"
