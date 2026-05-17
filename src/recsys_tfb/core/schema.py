@@ -175,16 +175,10 @@ def validate_schema_config(parameters: dict) -> None:
                 f"for '{col}' must be a non-empty list, got {values!r}"
             )
 
-    # Identity categorical columns must be declared in categorical_values.
-    pmi = parameters.get("dataset", {}).get("prepare_model_input", {}) or {}
-    declared_cat_cols = pmi.get("categorical_columns")
-    if declared_cat_cols:
-        identity_set = set(identity)
-        identity_cat_cols = [c for c in declared_cat_cols if c in identity_set]
-        cat_values = schema["categorical_values"]
-        missing = [c for c in identity_cat_cols if c not in cat_values]
-        if missing:
-            raise ValueError(
-                "Identity categorical columns must declare their category "
-                f"lists in schema.categorical_values: {missing}"
-            )
+    # Identity categorical columns must declare category lists (invariant A3).
+    # Single definition lives in core.consistency; call it so config-time and
+    # runtime guards never drift. Import locally to avoid an import cycle
+    # (consistency imports get_schema from this module).
+    from recsys_tfb.core.consistency import resolved_item_values
+
+    resolved_item_values(parameters)

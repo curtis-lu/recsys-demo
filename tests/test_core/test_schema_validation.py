@@ -134,6 +134,17 @@ class TestValidateSchemaConfig:
         validate_schema_config(params)
 
 
+class TestSchemaValidationDelegatesA3:
+    def test_identity_cat_missing_values_still_raises_valueerror(self):
+        # behaviour preserved after delegation to consistency.resolved_item_values
+        p = {
+            "schema": {"columns": {"item": "prod_name"}},
+            "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]}},
+        }
+        with pytest.raises(ValueError, match="categorical_values"):
+            validate_schema_config(p)
+
+
 class TestGetSchemaForHash:
     def test_returns_canonical_keys_with_categorical_values(self):
         schema = get_schema_for_hash({})
