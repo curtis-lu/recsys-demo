@@ -585,7 +585,9 @@ def predict_and_write_test_predictions(
     # ---- Pass 0: positive customer set per snap_date ----
     with log_step(logger, "pass0_positive_set"):
         labels_table = ds.to_table(columns=[cust_id_col, time_col, label_col])
+        log_data_volume(logger, "predict.labels_table", labels_table)
         labels_pdf = labels_table.to_pandas()
+        log_data_volume(logger, "predict.labels_pdf", labels_pdf, deep=True)
         positives_pdf = labels_pdf[labels_pdf[label_col] == 1]
         positive_set: dict[str, set] = {
             str(snap): set(grp[cust_id_col].astype(str))
@@ -607,8 +609,12 @@ def predict_and_write_test_predictions(
     # transient DataFrame fits comfortably on the 128GB driver — much cheaper
     # than reading any feature columns — and drop_duplicates collapses it to
     # n_snap_dates * n_prods rows immediately.
-    partition_pdf = ds.to_table(columns=[time_col, item_col]).to_pandas()
+    partition_table = ds.to_table(columns=[time_col, item_col])
+    log_data_volume(logger, "predict.partition_table", partition_table)
+    partition_pdf = partition_table.to_pandas()
+    log_data_volume(logger, "predict.partition_pdf", partition_pdf, deep=False)
     partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
+    log_data_volume(logger, "predict.partition_pdf_unique", partition_pdf, deep=False)
 
     snap_dates_seen: set[str] = set()
     prods_seen: set[str] = set()
@@ -624,7 +630,14 @@ def predict_and_write_test_predictions(
                 filter=(pads.field(time_col) == snap_date)
                 & (pads.field(item_col) == prod_name)
             )
+            log_data_volume(
+                logger, f"predict.part_table[{snap_date}/{prod_name}]", part_table
+            )
             part_pdf = part_table.to_pandas()
+            log_data_volume(
+                logger, f"predict.part_pdf[{snap_date}/{prod_name}]",
+                part_pdf, deep=True,
+            )
 
             keep_custs = positive_set.get(snap_date, set())
             part_pdf = part_pdf[part_pdf[cust_id_col].astype(str).isin(keep_custs)]
