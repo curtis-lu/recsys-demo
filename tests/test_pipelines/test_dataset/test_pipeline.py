@@ -73,6 +73,7 @@ class TestDatasetPipeline:
         first = pipeline.nodes[0]
         assert sorted(first.inputs) == ["label_table", "parameters", "sample_pool"]
         assert first.outputs == []
+
     def test_preprocessed_feature_table_feeds_all_splits(self):
         pipeline = create_pipeline(enable_calibration=True)
         build_nodes = [n for n in pipeline.nodes if n.name.startswith("build_") and n.name.endswith("_model_input")]
