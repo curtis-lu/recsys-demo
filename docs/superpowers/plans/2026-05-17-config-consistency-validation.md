@@ -880,3 +880,14 @@ Phase 3 keeps the manual boundary explicit: the `label_event` CASE-WHEN mapping 
 ## Execution Handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-05-17-config-consistency-validation.md` (in worktree `feat/config-consistency-validation`).
+
+---
+
+## Phase 1 COMPLETE (2026-05-17)
+
+All Tasks 1–10 implemented and verified. Final commit range: `e1b39da` (pre-Task-10 HEAD) → see commit `docs(consistency): document Phase 1 config-static gate`.
+
+- 88 tests pass (0 failures): `test_consistency.py`, `test_consistency_cli_wiring.py`, `test_schema_validation.py`, `test_schema.py`, `test_product_consistency.py`, `test_nodes_spark.py`.
+- CLI gate smoke-tested: valid config exits 0; A1-conflicting config raises `ConfigConsistencyError` and exits 1 with message naming `cust_segment_typ` and both resolutions.
+- `CLAUDE.md` updated with `## Config consistency gate` section.
+- graphify-out rebuilt: 2040 nodes, 4905 edges, 66 communities.
