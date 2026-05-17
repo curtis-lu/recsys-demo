@@ -36,12 +36,19 @@ Layer 1 — config-static (implemented here; aggregated by
   test_product_consistency.py`` lint (consumes ``resolved_item_values``),
   not a predicate here.
 
-Layer 2/3 — specified but DEFERRED (NOT implemented in this module yet); see
+Layer 2 — data-stage validation (B1 predicate exists; wiring deferred):
+
+* B1 — sample_pool items ↔ declared items must be equal; label items ⊆
+  declared items (unknown item values corrupt training or violate invariants).
+  Predicate: ``item_coverage_errors`` (pure, no Spark). Wiring into the
+  dataset/training/evaluation pipeline is Phase 2 work. B3 — a declared item
+  has zero positives over the train window — intentionally NOT reported by
+  ``item_coverage_errors`` (deferred).
+* B2 — label-window leakage columns reach features (specified but DEFERRED).
+
+Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
 
-* B1 — train-data item value ∉ ``categorical_values[item]`` (silent ``-1``
-  training corruption). B2 — label-window leakage columns reach features.
-  B3 — a declared item has zero positives over the train window.
 * C1 — produced sample_pool/label distinct item ≠ config (source_etl
   runtime pre-flight).
 """
