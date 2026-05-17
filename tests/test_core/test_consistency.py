@@ -74,3 +74,70 @@ class TestConfigRoleConflicts:
 
     def test_missing_keys_returns_empty(self):
         assert config_role_conflicts({}) == []
+
+
+from recsys_tfb.core.consistency import (
+    inference_products_mismatch,
+    override_unknown_items,
+    item_missing_from_categorical,
+)
+
+
+def _base(over=None):
+    p = {
+        "schema": {
+            "columns": {"item": "prod_name"},
+            "categorical_values": {"prod_name": ["a", "b"]},
+        },
+        "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]}},
+    }
+    if over:
+        p.update(over)
+    return p
+
+
+class TestInferenceProductsMismatch:
+    def test_equal_sets_returns_empty(self):
+        p = _base({"inference": {"products": ["b", "a"]}})
+        assert inference_products_mismatch(p) == {"only_in_inference": [],
+                                                  "only_in_categorical": []}
+
+    def test_reports_both_directions(self):
+        p = _base({"inference": {"products": ["a", "c"]}})
+        assert inference_products_mismatch(p) == {
+            "only_in_inference": ["c"], "only_in_categorical": ["b"]}
+
+    def test_no_inference_section_returns_empty(self):
+        assert inference_products_mismatch(_base()) == {
+            "only_in_inference": [], "only_in_categorical": []}
+
+
+class TestOverrideUnknownItems:
+    def test_unknown_item_component_detected(self):
+        p = _base({"dataset": {"prepare_model_input": {
+            "categorical_columns": ["prod_name"]},
+            "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
+            "sample_ratio_overrides": {"mass|a|0": 0.5, "mass|zzz|0": 0.9}}})
+        assert override_unknown_items(p) == ["zzz"]
+
+    def test_item_not_in_group_keys_skipped(self):
+        p = _base({"dataset": {"prepare_model_input": {
+            "categorical_columns": ["prod_name"]},
+            "sample_group_keys": ["cust_segment_typ"],
+            "sample_ratio_overrides": {"mass": 0.5}}})
+        assert override_unknown_items(p) == []
+
+
+class TestItemMissingFromCategorical:
+    def test_item_present_ok(self):
+        assert item_missing_from_categorical(_base()) is False
+
+    def test_item_absent_detected(self):
+        p = _base()
+        p["dataset"]["prepare_model_input"]["categorical_columns"] = ["gender"]
+        assert item_missing_from_categorical(p) is True
+
+    def test_key_absent_uses_default_includes_item(self):
+        p = _base()
+        del p["dataset"]["prepare_model_input"]["categorical_columns"]
+        assert item_missing_from_categorical(p) is False

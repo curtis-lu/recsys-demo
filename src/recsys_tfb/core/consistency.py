@@ -68,3 +68,55 @@ def config_role_conflicts(parameters: dict) -> list[str]:
     drop = set(pmi.get("drop_columns", []) or [])
     cat = set(pmi.get("categorical_columns", []) or [])
     return sorted(drop & cat)
+
+
+def inference_products_mismatch(parameters: dict) -> dict:
+    """Symmetric diff between inference.products and resolved_item_values (A4).
+
+    Empty 'inference' section → no mismatch (inference not configured here).
+    """
+    declared = set(resolved_item_values(parameters))
+    inf = parameters.get("inference") or {}
+    if "products" not in inf:
+        return {"only_in_inference": [], "only_in_categorical": []}
+    products = set(inf.get("products") or [])
+    return {
+        "only_in_inference": sorted(products - declared),
+        "only_in_categorical": sorted(declared - products),
+    }
+
+
+def override_unknown_items(parameters: dict) -> list[str]:
+    """sample_ratio_overrides keys whose item component ∉ resolved_item_values (A5).
+
+    Override keys are '|'-joined sample_group_keys values. If schema.item is not
+    a sample_group_key there is no item component → nothing to check.
+    """
+    schema = get_schema(parameters)
+    item = schema["item"]
+    ds = parameters.get("dataset", {}) or {}
+    group_keys = ds.get("sample_group_keys", [])
+    if item not in group_keys:
+        return []
+    idx = group_keys.index(item)
+    declared = set(resolved_item_values(parameters))
+    bad: set[str] = set()
+    for key in (ds.get("sample_ratio_overrides") or {}):
+        parts = str(key).split("|")
+        if idx < len(parts) and parts[idx] not in declared:
+            bad.add(parts[idx])
+    return sorted(bad)
+
+
+def item_missing_from_categorical(parameters: dict) -> bool:
+    """True if schema.item is absent from an explicitly-set categorical_columns (A2).
+
+    When the key is absent, the codebase default ([schema.item]) includes it,
+    so that case is OK.
+    """
+    schema = get_schema(parameters)
+    item = schema["item"]
+    declared = _prepare_model_input(parameters).get("categorical_columns")
+    if declared is None:
+        return False
+    return item not in declared
