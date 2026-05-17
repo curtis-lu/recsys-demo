@@ -6,19 +6,20 @@ import plotly.graph_objects as go
 
 
 def plot_score_distributions(
-    predictions: pd.DataFrame, title_prefix: str = ""
+    predictions: pd.DataFrame, title_prefix: str = "",
+    item_col: str = "prod_name", score_col: str = "score",
 ) -> list[go.Figure]:
     """Plot score distributions per product.
 
     Returns:
         List of two Figures: [histogram, boxplot].
     """
-    products = sorted(predictions["prod_name"].unique())
+    products = sorted(predictions[item_col].unique())
 
     # Histogram
     fig_hist = go.Figure()
     for prod in products:
-        scores = predictions[predictions["prod_name"] == prod]["score"]
+        scores = predictions[predictions[item_col] == prod][score_col]
         fig_hist.add_trace(
             go.Histogram(x=scores, name=prod, opacity=0.7, nbinsx=50)
         )
@@ -33,7 +34,7 @@ def plot_score_distributions(
     # Boxplot
     fig_box = go.Figure()
     for prod in products:
-        scores = predictions[predictions["prod_name"] == prod]["score"]
+        scores = predictions[predictions[item_col] == prod][score_col]
         fig_box.add_trace(go.Box(y=scores, name=prod))
     fig_box.update_layout(
         title=f"{title_prefix}Score Distribution (Boxplot)",
@@ -45,19 +46,20 @@ def plot_score_distributions(
 
 
 def plot_rank_heatmap(
-    predictions: pd.DataFrame, title_prefix: str = ""
+    predictions: pd.DataFrame, title_prefix: str = "",
+    item_col: str = "prod_name", rank_col: str = "rank",
 ) -> go.Figure:
     """Plot rank distribution heatmap.
 
     Rows = products, Columns = rank positions.
     Cell values = count of how many times each product appears at each rank.
     """
-    products = sorted(predictions["prod_name"].unique())
+    products = sorted(predictions[item_col].unique())
     n_products = len(products)
     ranks = list(range(1, n_products + 1))
 
     # Build count matrix
-    rank_counts = predictions.groupby(["prod_name", "rank"]).size().unstack(fill_value=0)
+    rank_counts = predictions.groupby([item_col, rank_col]).size().unstack(fill_value=0)
 
     # Ensure all rank columns are present
     for r in ranks:
@@ -89,7 +91,10 @@ def plot_rank_heatmap(
 
 
 def plot_positive_rank_heatmap(
-    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = ""
+    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = "",
+    id_cols: tuple = ("snap_date", "cust_id", "prod_name"),
+    item_col: str = "prod_name", rank_col: str = "rank",
+    label_col: str = "label",
 ) -> go.Figure:
     """Positive-label rank count heatmap.
 
@@ -97,19 +102,19 @@ def plot_positive_rank_heatmap(
     of how many positive samples appear at each (product, rank) position.
     """
     merged = predictions.merge(
-        labels[["snap_date", "cust_id", "prod_name", "label"]],
-        on=["snap_date", "cust_id", "prod_name"],
+        labels[list(id_cols) + [label_col]],
+        on=list(id_cols),
         how="left",
     )
-    merged["label"] = merged["label"].fillna(0)
-    pos = merged[merged["label"] == 1]
+    merged[label_col] = merged[label_col].fillna(0)
+    pos = merged[merged[label_col] == 1]
 
-    products = sorted(predictions["prod_name"].unique())
+    products = sorted(predictions[item_col].unique())
     n_products = len(products)
     ranks = list(range(1, n_products + 1))
 
     if len(pos) > 0:
-        rank_counts = pos.groupby(["prod_name", "rank"]).size().unstack(fill_value=0)
+        rank_counts = pos.groupby([item_col, rank_col]).size().unstack(fill_value=0)
     else:
         rank_counts = pd.DataFrame(0, index=products, columns=ranks)
 
@@ -138,27 +143,30 @@ def plot_positive_rank_heatmap(
 
 
 def plot_positive_rate_rank_heatmap(
-    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = ""
+    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = "",
+    id_cols: tuple = ("snap_date", "cust_id", "prod_name"),
+    item_col: str = "prod_name", rank_col: str = "rank",
+    label_col: str = "label",
 ) -> go.Figure:
     """Positive rate at each (product, rank) position heatmap.
 
     Cell value = count(label=1) / count(total) at each (product, rank).
     """
     merged = predictions.merge(
-        labels[["snap_date", "cust_id", "prod_name", "label"]],
-        on=["snap_date", "cust_id", "prod_name"],
+        labels[list(id_cols) + [label_col]],
+        on=list(id_cols),
         how="left",
     )
-    merged["label"] = merged["label"].fillna(0)
+    merged[label_col] = merged[label_col].fillna(0)
 
-    products = sorted(predictions["prod_name"].unique())
+    products = sorted(predictions[item_col].unique())
     n_products = len(products)
     ranks = list(range(1, n_products + 1))
 
-    total_counts = merged.groupby(["prod_name", "rank"]).size().unstack(fill_value=0)
+    total_counts = merged.groupby([item_col, rank_col]).size().unstack(fill_value=0)
     pos_counts = (
-        merged[merged["label"] == 1]
-        .groupby(["prod_name", "rank"])
+        merged[merged[label_col] == 1]
+        .groupby([item_col, rank_col])
         .size()
         .unstack(fill_value=0)
     )
@@ -194,41 +202,42 @@ def plot_positive_rate_rank_heatmap(
 
 
 def plot_score_distributions_by_label(
-    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = ""
+    predictions: pd.DataFrame, labels: pd.DataFrame, title_prefix: str = "",
+    id_cols: tuple = ("snap_date", "cust_id", "prod_name"),
+    item_col: str = "prod_name", score_col: str = "score",
+    label_col: str = "label",
 ) -> list[go.Figure]:
     """Score distributions split by positive/negative label.
 
     Returns a list with one grouped boxplot Figure.
     """
     merged = predictions.merge(
-        labels[["snap_date", "cust_id", "prod_name", "label"]],
-        on=["snap_date", "cust_id", "prod_name"],
+        labels[list(id_cols) + [label_col]],
+        on=list(id_cols),
         how="left",
     )
-    merged["label"] = merged["label"].fillna(0)
-    merged["label_str"] = merged["label"].map({1: "Positive", 0: "Negative"})
-
-    products = sorted(merged["prod_name"].unique())
+    merged[label_col] = merged[label_col].fillna(0)
+    merged["label_str"] = merged[label_col].map({1: "Positive", 0: "Negative"})
 
     fig = go.Figure()
 
     # Positive trace
-    pos = merged[merged["label"] == 1]
+    pos = merged[merged[label_col] == 1]
     fig.add_trace(
         go.Box(
-            x=pos["prod_name"],
-            y=pos["score"],
+            x=pos[item_col],
+            y=pos[score_col],
             name="Positive",
             marker_color="green",
         )
     )
 
     # Negative trace
-    neg = merged[merged["label"] == 0]
+    neg = merged[merged[label_col] == 0]
     fig.add_trace(
         go.Box(
-            x=neg["prod_name"],
-            y=neg["score"],
+            x=neg[item_col],
+            y=neg[score_col],
             name="Negative",
             marker_color="gray",
         )

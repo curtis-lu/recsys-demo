@@ -21,6 +21,21 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - No network access
 - No additional package installation
 
+## 測試效能（優先讓測試跑快，而不是少跑）
+
+整包 `tests/test_evaluation` 目前約 ~33 分鐘，主因是大量 Spark 測試逐一執行 Spark action（conftest `spark` fixture：`spark.master=local[1]`、`shuffle.partitions=1`；fixture 是 function-scoped，但 `get_or_create_spark_session` 會重用仍存活的 session，並非每測試都重啟）。**正確方向是把測試跑快，不是略過測試。** 待評估的加速手段（採用前先實測，勿臆測；先用 `pytest --durations=20` 找最慢的）：
+
+- conftest `spark` fixture 改 `local[*]` 或調並行度是否有感（小資料下未必，需量測）。
+- 全程重用單一 SparkSession（注意 `tune_hyperparameters` 會 `.stop()`，見 conftest 註解需妥善處理）。
+- pytest 程序級並行（xdist 類）的取捨：多 JVM 可能反而更慢。
+- 減少測試中非必要的 count/collect，用更小固定資料。
+
+測試尚未加速前的**臨時** controller 作法（是權宜、不是解法）：
+
+- 單次改動只跑相關測試檔；驗證優先用 `git diff <base>..<head>`（SHA-based、秒級）＋針對性 grep，不重跑 subagent 已驗過的。
+- 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
+- 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash cwd 在 skill/`cd` 後會被 reset，相對路徑可能讀到 stale 的 main tree。
+
 ## Local dev-cluster testing
 
 在本機 dev-cluster 互動測試 pipeline：

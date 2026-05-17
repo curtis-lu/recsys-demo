@@ -1,60 +1,64 @@
-"""External segment-source joining for evaluation.
+"""External segment-source joining for evaluation (Spark, single impl).
 
-After the metrics-spark redesign, per-segment metric computation lives inside
-``metrics_spark.compute_all_metrics`` (driven by
-``parameters.evaluation.segment_columns``). This module keeps only the
-external segment-source loader; the per-segment compute / table / plot
-helpers were removed along with the pandas metrics path and will be
-re-introduced in the evaluation_report rewrite (next phase).
+``_read_segment_source`` is the source seam: today it reads a Parquet
+file; a future change swaps only this function to read a Hive table
+(``spark.table("ml_recsys.<segment_table>")``) without touching the join
+logic. See spec "Out of scope / 後續工作".
 """
 
 import logging
-from pathlib import Path
 
-import pandas as pd
+from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
 
 
-def load_and_join_segment_sources(
-    labels: pd.DataFrame,
-    segment_sources: dict,
-) -> pd.DataFrame:
-    """Load external segment Parquet files and join them to labels.
+def _read_segment_source(
+    spark: SparkSession, source_config: dict
+) -> SparkDataFrame | None:
+    """Read one external segment source. None when the source is absent.
 
-    Args:
-        labels: Labels DataFrame to enrich with external segment columns.
-        segment_sources: Dict from parameters_evaluation.yaml, keyed by segment name.
-            Each value has: filepath, key_columns, segment_column.
-
-    Returns:
-        Labels DataFrame with external segment columns joined (left join).
+    SEAM: only this function knows the storage backend. Uses Spark's reader
+    (filesystem/scheme-agnostic — local, HDFS, etc.) and treats ANY read
+    failure as "absent" (non-fatal), preserving the pre-refactor behaviour.
+    A future Hive swap replaces only this function body
+    (``spark.table("ml_recsys.<segment_table>")``).
     """
+    try:
+        return spark.read.parquet(source_config["filepath"])
+    except Exception:
+        return None
+
+
+def join_segment_sources(
+    labels: SparkDataFrame,
+    segment_sources: dict,
+) -> SparkDataFrame:
+    """Left-join each external segment column onto ``labels``.
+
+    Missing sources are warned and skipped (non-fatal), preserving the
+    pre-refactor behaviour.
+    """
+    spark = labels.sparkSession
     for seg_name, source_config in segment_sources.items():
-        filepath = Path(source_config["filepath"])
         key_columns = source_config["key_columns"]
         segment_column = source_config["segment_column"]
 
-        if not filepath.exists():
+        seg_df = _read_segment_source(spark, source_config)
+        if seg_df is None:
             logger.warning(
-                "Segment source '%s' file not found: %s — skipping",
+                "Segment source '%s' not found at %s — skipping",
                 seg_name,
-                filepath,
+                source_config["filepath"],
             )
             continue
 
-        seg_df = pd.read_parquet(filepath)
-        labels = labels.merge(
-            seg_df[key_columns + [segment_column]],
+        labels = labels.join(
+            seg_df.select(key_columns + [segment_column]),
             on=key_columns,
             how="left",
         )
-        logger.info(
-            "Joined segment source '%s' (%s) — %d/%d matched",
-            seg_name,
-            segment_column,
-            labels[segment_column].notna().sum(),
-            len(labels),
-        )
+        logger.info("Joined segment source '%s' (%s)", seg_name, segment_column)
 
     return labels

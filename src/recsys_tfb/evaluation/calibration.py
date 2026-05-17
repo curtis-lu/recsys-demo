@@ -10,25 +10,33 @@ def plot_calibration_curves(
     labels: pd.DataFrame,
     n_bins: int = 10,
     title_prefix: str = "",
+    id_cols: tuple = ("snap_date", "cust_id", "prod_name"),
+    item_col: str = "prod_name",
+    score_col: str = "score",
+    label_col: str = "label",
 ) -> go.Figure:
     """Plot calibration curves per product.
 
     Args:
-        predictions: DataFrame with [snap_date, cust_id, prod_name, score].
-        labels: DataFrame with [snap_date, cust_id, prod_name, label].
+        predictions: DataFrame with id columns + score column.
+        labels: DataFrame with id columns + label column.
         n_bins: Number of bins for calibration curve.
         title_prefix: Optional prefix for the chart title.
+        id_cols: Column names that identify a unique (date, entity, item) tuple.
+        item_col: Column name for the product/item.
+        score_col: Column name for predicted scores.
+        label_col: Column name for ground-truth labels.
 
     Returns:
         A single Figure with one trace per product plus a diagonal reference line.
     """
     merged = predictions.merge(
-        labels[["snap_date", "cust_id", "prod_name", "label"]],
-        on=["snap_date", "cust_id", "prod_name"],
+        labels[list(id_cols) + [label_col]],
+        on=list(id_cols),
         how="inner",
     )
 
-    products = sorted(merged["prod_name"].unique())
+    products = sorted(merged[item_col].unique())
 
     fig = go.Figure()
 
@@ -45,9 +53,9 @@ def plot_calibration_curves(
     )
 
     for prod in products:
-        subset = merged[merged["prod_name"] == prod]
-        y_true = subset["label"].values
-        y_prob = subset["score"].values
+        subset = merged[merged[item_col] == prod]
+        y_true = subset[label_col].values
+        y_prob = subset[score_col].values
 
         if len(y_true) < n_bins or y_true.sum() == 0:
             continue

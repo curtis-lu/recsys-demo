@@ -66,7 +66,7 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     """When the predictions input lacks a `rank` column (post-training mode
     sourced from training_eval_predictions after T3 schema change),
     prepare_eval_data must add it via rank_within_query so downstream
-    nodes (generate_report -> _render_html_report) still find `rank`.
+    nodes (generate_report) still find `rank`.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd

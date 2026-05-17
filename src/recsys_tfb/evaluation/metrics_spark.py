@@ -90,6 +90,164 @@ def _resolve_k_values(raw: Iterable, n_products: int) -> list[int]:
     return sorted(out)
 
 
+def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
+    """Resolve {prod_name: category}. None when categories disabled.
+
+    Fail-loud (ValueError) if a mapped product is not in
+    ``schema.categorical_values[item_col]``. Products absent from every
+    mapping list become their own singleton category when
+    ``unmapped == 'singleton'`` (the only supported mode).
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    pc = eval_params.get("product_categories", {}) or {}
+    if not pc.get("enabled"):
+        return None
+
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    known = list(
+        (parameters.get("schema", {}).get("columns", {})
+         .get("categorical_values", {}) or {}).get(item_col, [])
+    )
+    known_set = set(known)
+
+    mapping: dict[str, str] = {}
+    for category, prods in (pc.get("mapping", {}) or {}).items():
+        for prod in prods:
+            if prod not in known_set:
+                raise ValueError(
+                    f"product_categories.mapping references unknown product "
+                    f"'{prod}' (not in schema.categorical_values['{item_col}'])"
+                )
+            mapping[prod] = category
+
+    unmapped = pc.get("unmapped", "singleton")
+    if unmapped != "singleton":
+        raise ValueError(
+            f"product_categories.unmapped='{unmapped}' unsupported; "
+            f"only 'singleton' is implemented"
+        )
+    for prod in known:
+        mapping.setdefault(prod, prod)
+    return mapping
+
+
+def collapse_to_categories(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Collapse fine-grained predictions to category grain (no UDF).
+
+    For each (time, entity..., category): score = max(child score),
+    label = max(child label), segment columns via F.first. The category
+    column is emitted under the schema item_col name so the collapsed DF
+    is shape-compatible with compute_all_metrics. ``max(score)`` re-ranking
+    is equivalent to taking the best child rank (pos is score-desc derived).
+    """
+    mapping = _build_category_mapping(parameters)
+    if mapping is None:
+        raise ValueError("collapse_to_categories called with categories disabled")
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    group_cols = [time_col] + entity_cols
+
+    eval_params = parameters.get("evaluation", {}) or {}
+    segment_columns = [
+        c for c in (eval_params.get("segment_columns", []) or [])
+        if c in eval_predictions.columns
+    ]
+
+    spark = eval_predictions.sparkSession
+    map_rows = [(p, c) for p, c in mapping.items()]
+    map_df = spark.createDataFrame(map_rows, [item_col, "_category"])
+
+    joined = eval_predictions.join(F.broadcast(map_df), on=item_col, how="inner")
+
+    aggs = [
+        F.max(F.col(score_col)).alias(score_col),
+        F.max(F.col(label_col)).alias(label_col),
+    ]
+    for seg in segment_columns:
+        aggs.append(F.first(F.col(seg)).alias(seg))
+
+    collapsed = (
+        joined.groupBy(*group_cols, "_category")
+        .agg(*aggs)
+        .withColumnRenamed("_category", item_col)
+    )
+    return collapsed
+
+
+def compute_dataset_overview(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+    item_col_override: str | None = None,
+) -> dict:
+    """Dataset profiling for the report §1. Pure Spark agg, small collect.
+
+    ``item_col_override`` lets the caller profile the collapsed
+    category-grain DF (item column still named after schema item_col, but
+    semantics = category).
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = item_col_override or schema["item"]
+    label_col = schema["label"]
+
+    n_rows = eval_predictions.count()
+    n_customers = eval_predictions.select(*entity_cols).distinct().count()
+    n_products = eval_predictions.select(item_col).distinct().count()
+    n_snap_dates = eval_predictions.select(time_col).distinct().count()
+    n_positives = int(
+        eval_predictions.agg(F.sum(F.col(label_col))).collect()[0][0] or 0
+    )
+    positive_rate = (n_positives / n_rows) if n_rows else 0.0
+    avg_pos_per_customer = (n_positives / n_customers) if n_customers else 0.0
+
+    def _group(col: str) -> dict:
+        rows = (
+            eval_predictions.groupBy(col)
+            .agg(
+                F.count(F.lit(1)).alias("n_rows"),
+                F.sum(F.col(label_col)).alias("n_positives"),
+                F.countDistinct(*entity_cols).alias("n_customers"),
+            )
+            .collect()
+        )
+        out = {}
+        for r in rows:
+            key = r[col] if isinstance(r[col], str) else str(r[col])
+            nr = int(r["n_rows"])
+            npos = int(r["n_positives"] or 0)
+            out[key] = {
+                "n_rows": nr,
+                "n_positives": npos,
+                "n_customers": int(r["n_customers"]),
+                "positive_rate": (npos / nr) if nr else 0.0,
+            }
+        return out
+
+    return {
+        "totals": {
+            "n_rows": n_rows,
+            "n_customers": n_customers,
+            "n_products": n_products,
+            "n_snap_dates": n_snap_dates,
+            "n_positives": n_positives,
+            "positive_rate": positive_rate,
+            "avg_positives_per_customer": avg_pos_per_customer,
+        },
+        "by_snap_date": _group(time_col),
+        "by_item": _group(item_col),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 — row-level enrichment
 # ---------------------------------------------------------------------------
@@ -380,35 +538,15 @@ _EMPTY_RESULT = {
 }
 
 
-def compute_all_metrics(
+def _compute_core(
     eval_predictions: SparkDataFrame,
     parameters: dict,
 ) -> dict:
-    """Compute the full metric bundle on ``eval_predictions``.
+    """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
-    Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
-    (column names resolved from parameters['schema']).
-    Optional: any column listed in ``parameters['evaluation']['segment_columns']``
-    will be used for per-segment slicing if present.
-
-    Returns::
-
-        {
-          "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
-          "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
-          "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "macro_avg": {
-              "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
-              "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
-              "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
-          },
-          "n_queries":          int  (total distinct queries before filtering),
-          "n_excluded_queries": int  (queries with zero positives → dropped),
-        }
-
-    Queries with zero positives are excluded from the metric computation
-    (AP and nDCG are undefined when total_rel = 0).
+    Body identical to the pre-refactor compute_all_metrics — no category,
+    no dataset_overview. Used for both fine-grained and (on a collapsed DF)
+    category-grain passes.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -444,7 +582,6 @@ def compute_all_metrics(
 
     enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
     enriched = enriched.cache()
-
     try:
         # ---- Detect active segment column ----
         active_seg_col: str | None = None
@@ -458,7 +595,6 @@ def compute_all_metrics(
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, k_values, carry_cols=carry
         ).cache()
-
         try:
             # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, k_values)
@@ -495,3 +631,67 @@ def compute_all_metrics(
             per_query.unpersist()
     finally:
         enriched.unpersist()
+
+
+def compute_all_metrics(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> dict:
+    """Full bundle: fine-grained core + dataset_overview + optional category.
+
+    Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
+    (column names resolved from parameters['schema']).
+    Optional: any column listed in ``parameters['evaluation']['segment_columns']``
+    will be used for per-segment slicing if present.
+
+    Backward compatible: every pre-existing top-level key is unchanged;
+    ``dataset_overview`` is always added; ``category`` (same shape as the
+    top level, plus its own ``dataset_overview``, never re-nested) is added
+    only when ``product_categories.enabled``.
+
+    Returns::
+
+        {
+          "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
+          "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
+          "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "macro_avg": {
+              "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
+              "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
+              "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
+          },
+          "n_queries":          int  (total distinct queries before filtering),
+          "n_excluded_queries": int  (queries with zero positives → dropped),
+          "dataset_overview": {
+              "totals":       {n_rows, n_customers, n_products, n_snap_dates,
+                               n_positives, positive_rate,
+                               avg_positives_per_customer},
+              "by_snap_date": {snap: {n_rows, n_positives, n_customers,
+                                      positive_rate}},
+              "by_item":      {item: {n_rows, n_positives, n_customers,
+                                      positive_rate}},
+          },
+          "category":  (only when product_categories.enabled)
+              same shape as the top level (overall / per_item / per_segment /
+              per_item_segment / macro_avg / n_queries / n_excluded_queries)
+              PLUS its own "dataset_overview"; never contains "category".
+        }
+
+    Queries with zero positives are excluded from the metric computation
+    (AP and nDCG are undefined when total_rel = 0).
+    """
+    result = _compute_core(eval_predictions, parameters)
+    result["dataset_overview"] = compute_dataset_overview(
+        eval_predictions, parameters
+    )
+
+    if _build_category_mapping(parameters) is not None:
+        collapsed = collapse_to_categories(eval_predictions, parameters)
+        cat = _compute_core(collapsed, parameters)
+        cat["dataset_overview"] = compute_dataset_overview(
+            collapsed, parameters
+        )
+        result["category"] = cat
+
+    return result
