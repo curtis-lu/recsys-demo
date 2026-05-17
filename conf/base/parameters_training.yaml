@@ -1,3 +1,8 @@
+# model_version scope: only the model-defining subset of this file is hashed
+# into model_version — the `training:` block MINUS the pure logging/threading
+# knobs `verbosity`, `log_period`, `num_threads`. The `spark:`, `mlflow:`, and
+# `cache:` blocks below do NOT affect model_version. Single source of truth:
+# src/recsys_tfb/core/versioning.py :: _model_version_payload.
 spark:
   app_name: recsys_tfb-training
   # spark.executor.memory: 16g

@@ -9,6 +9,11 @@ Provides three-layer hash-based version IDs for dataset pipeline:
   train/train_dev model_input under the base dataset directory.
 - ``calibration_variant_id``: derived from calibration-sampling params only.
   Keys calibration model_input under the base dataset directory.
+- ``model_version``: derived from the *model-defining* subset of training
+  params only — the ``training:`` block minus the pure logging/threading
+  knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS``. Ops-only config
+  (``spark`` / ``mlflow`` / ``cache``) is excluded structurally so changing
+  it does not orphan an otherwise-identical model.
 
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.
