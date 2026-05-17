@@ -119,3 +119,62 @@ class TestSetupLogging:
         setup_logging({}, ctx)
         root = logging.getLogger()
         assert len(root.handlers) >= 1  # at least console
+
+
+class TestLogDataVolume:
+    def _vol_records(self, caplog):
+        return [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "data_volume"
+        ]
+
+    def test_pandas_dataframe(self, caplog):
+        import pandas as pd
+
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "my_df", df)
+
+        recs = self._vol_records(caplog)
+        assert len(recs) == 1
+        vol = recs[0].volume
+        assert vol["name"] == "my_df"
+        assert vol["kind"] == "pandas"
+        assert vol["rows"] == 3
+        assert vol["cols"] == 2
+        assert vol["bytes"] > 0
+        assert vol["deep"] is True
+
+    def test_numpy_2d_array(self, caplog):
+        import numpy as np
+
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        arr = np.zeros((5, 4), dtype=np.float64)
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "X", arr)
+
+        vol = self._vol_records(caplog)[0].volume
+        assert vol["kind"] == "numpy"
+        assert vol["rows"] == 5
+        assert vol["cols"] == 4
+        assert vol["bytes"] == 5 * 4 * 8
+        assert vol["dtype"] == "float64"
+
+    def test_numpy_1d_array(self, caplog):
+        import numpy as np
+
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.INFO, logger="test_ldv"):
+            log_data_volume(logger, "y", np.arange(7))
+
+        vol = self._vol_records(caplog)[0].volume
+        assert vol["kind"] == "numpy"
+        assert vol["rows"] == 7
+        assert vol["cols"] == 1
