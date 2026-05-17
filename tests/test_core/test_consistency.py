@@ -51,5 +51,5 @@ class TestResolvedItemValues:
     def test_item_declared_categorical_but_no_values_raises(self):
         p = self._params()
         del p["schema"]["categorical_values"]["prod_name"]
-        with pytest.raises(ConfigConsistencyError, match="categorical_values"):
+        with pytest.raises(ConfigConsistencyError, match=r"schema\.categorical_values\.prod_name"):
             resolved_item_values(p)

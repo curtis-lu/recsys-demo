@@ -10,6 +10,8 @@ All errors subclass ValueError so existing ``except ValueError`` call sites
 
 from __future__ import annotations
 
+from recsys_tfb.core.schema import get_schema
+
 
 class ConsistencyError(ValueError):
     """Base for all consistency failures (subclasses ValueError by design)."""
@@ -23,9 +25,6 @@ class DataConsistencyError(ConsistencyError):
     """Config disagrees with the actual data (Layer 2)."""
 
 
-from recsys_tfb.core.schema import get_schema
-
-
 def _prepare_model_input(parameters: dict) -> dict:
     return (parameters.get("dataset", {}) or {}).get("prepare_model_input", {}) or {}
 
@@ -37,6 +36,12 @@ def resolved_item_values(parameters: dict) -> list[str]:
     ``ConfigConsistencyError`` when the item column is a declared categorical
     (in prepare_model_input.categorical_columns) but has no category list —
     this is invariant A3, defined here once.
+
+    Returns ``[]`` when the item column is not a declared categorical (or
+    ``categorical_columns`` is absent). Callers relying on this as the single
+    source of valid item values must ensure ``item_missing_from_categorical``
+    (invariant A2) is validated upstream — ``validate_config_consistency``
+    does this.
     """
     schema = get_schema(parameters)
     item = schema["item"]

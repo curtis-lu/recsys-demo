@@ -1,12 +1,12 @@
-# Graph Report - training-memory-observability  (2026-05-17)
+# Graph Report - config-consistency-validation  (2026-05-17)
 
 ## Corpus Check
-- 145 files · ~317,800 words
+- 155 files · ~338,715 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1886 nodes · 4465 edges · 34 communities detected
-- Extraction: 50% EXTRACTED · 50% INFERRED · 0% AMBIGUOUS · INFERRED: 2225 edges (avg confidence: 0.67)
+- 1976 nodes · 4714 edges · 34 communities detected
+- Extraction: 52% EXTRACTED · 48% INFERRED · 0% AMBIGUOUS · INFERRED: 2278 edges (avg confidence: 0.68)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -46,16 +46,16 @@
 - [[_COMMUNITY_Community 51|Community 51]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `ParquetHandle` - 136 edges
-2. `ModelAdapter` - 93 edges
-3. `CalibratedModelAdapter` - 87 edges
+1. `ParquetHandle` - 122 edges
+2. `ModelAdapter` - 85 edges
+3. `CalibratedModelAdapter` - 84 edges
 4. `SQLRunner` - 72 edges
 5. `LightGBMAdapter` - 72 edges
 6. `DataCatalog` - 69 edges
 7. `HiveTableDataset` - 69 edges
 8. `TableConfig` - 67 edges
-9. `LgbDatasetHandle` - 66 edges
-10. `MemoryDataset` - 64 edges
+9. `MemoryDataset` - 64 edges
+10. `LgbDatasetHandle` - 61 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Tests for io.extract.extract_Xy.` --uses--> `ParquetHandle`  [INFERRED]
@@ -73,99 +73,99 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (170): ABC, feature_importance(), get_adapter(), log_to_mlflow(), ModelAdapter, predict(), prepare_train_inputs(), ModelAdapter ABC and adapter registry. (+162 more)
+Nodes (163): ABC, feature_importance(), get_adapter(), log_to_mlflow(), ModelAdapter, predict(), prepare_train_inputs(), ModelAdapter ABC and adapter registry. (+155 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.03
-Nodes (58): AbstractDataset, AbstractDataset, exists(), Abstract base class for all dataset implementations., save(), In-memory dataset for intermediate pipeline results., Release the in-memory data to free memory., Manage dataset instances, providing unified load/save/exists interface. (+50 more)
+Nodes (109): AuditWriter, Audit logging for source ETL pipeline execution.  Writes audit records to a Hive, Write a summary audit record for the entire snap_date run., Write ETL audit records to Hive and Python structured logging., Create the audit table if it doesn't exist., Insert a single audit record into the Hive audit table., CheckResult, OutputChecker (+101 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.04
-Nodes (79): AuditWriter, Audit logging for source ETL pipeline execution.  Writes audit records to a Hive, Write a summary audit record for the entire snap_date run., Write ETL audit records to Hive and Python structured logging., Create the audit table if it doesn't exist., Insert a single audit record into the Hive audit table., CheckResult, OutputChecker (+71 more)
+Cohesion: 0.03
+Nodes (79): AbstractDataset, AbstractDataset, Abstract base class for all dataset implementations., DataCatalog, MemoryDataset, In-memory dataset for intermediate pipeline results., Release the in-memory data to free memory., Manage dataset instances, providing unified load/save/exists interface. (+71 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.02
-Nodes (96): _get_preprocessing_config(), Backend-agnostic helpers for preprocessing., Extract drop_columns and categorical_columns from parameters.      Returns:, Check that all required columns exist. Raises ValueError if missing., Log warning for drop_columns that don't exist in the DataFrame., _validate_columns(), _warn_missing_drop_columns(), _assign_customer_demographics() (+88 more)
+Nodes (80): _get_preprocessing_config(), Backend-agnostic helpers for preprocessing., Extract drop_columns and categorical_columns from parameters.      Returns:, Check that all required columns exist. Raises ValueError if missing., Log warning for drop_columns that don't exist in the DataFrame., _validate_columns(), _warn_missing_drop_columns(), log_step() (+72 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.05
-Nodes (50): load(), DataCatalog, MemoryDataset, Execution metadata for a pipeline run., RunContext, Shared executor for the feature/label/sample_pool ETL sub-commands.      ``stage, Run the feature ETL pipeline (feature_aum/sav/ccard/info/concat/table)., Run the label ETL pipeline (label_ccard/exchange/fund/table). (+42 more)
+Cohesion: 0.04
+Nodes (43): exists(), load(), save(), _escape_sql_value(), _format_col(), HiveTableDataset, _infer_columns_from_spark(), Hive table dataset with INSERT OVERWRITE PARTITION semantics.  Supports both ext (+35 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.03
-Nodes (45): _base_params(), Tests for recsys_tfb.core.versioning module (three-layer versioning)., _sample_schema(), TestBuildManifestMetadata, TestComputeBaseDatasetVersion, TestComputeCalibrationVariantId, TestComputeFeatureTableFingerprint, TestComputeModelVersion (+37 more)
+Nodes (122): add_query_total_rel(), add_row_contributions(), aggregate_overall(), aggregate_per_item(), aggregate_per_segment(), _build_category_mapping(), collapse_to_categories(), compute_all_metrics() (+114 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.04
-Nodes (89): add_query_total_rel(), add_row_contributions(), aggregate_overall(), aggregate_per_item(), aggregate_per_segment(), compute_all_metrics(), compute_per_query_metrics(), macro_average() (+81 more)
+Nodes (59): Return the merged content of a specific parameters file.          Args:, Per-test SparkSession resolved via get_or_create_spark_session.      Function-sc, spark(), Exception, get_pipeline(), list_pipelines(), Look up a pipeline by name and return it via the module's create_pipeline()., Return all registered pipeline names. (+51 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.05
-Nodes (50): _apply(), ConfigLoader, _deep_merge(), _flatten_params(), Return the merged content of a specific parameters file.          Args:, Flatten nested dict into dotted keys, e.g. {'hive': {'db': 'x'}} → {'hive.db': ', Load and merge YAML config files from base and environment directories., Load all YAML files from a directory, keyed by stem name. (+42 more)
+Cohesion: 0.04
+Nodes (39): _base_params(), Tests for recsys_tfb.core.versioning module (three-layer versioning)., _sample_schema(), TestBuildManifestMetadata, TestComputeBaseDatasetVersion, TestComputeCalibrationVariantId, TestComputeFeatureTableFingerprint, TestComputeModelVersion (+31 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.04
-Nodes (46): compute_test_mAP_spark(), apply_preprocessor(), build_scoring_dataset(), compute_baseline_metrics(), compute_baselines(), predict_scores(), prepare_eval_data(), rank_predictions() (+38 more)
+Cohesion: 0.08
+Nodes (53): assemble_report(), build_baseline_section(), build_category_section(), build_dataset_overview_section(), build_diagnostics_section(), build_glossary_section(), build_guardrail_recall_section(), build_headline_section() (+45 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.05
-Nodes (15): get_pipeline(), list_pipelines(), Look up a pipeline by name and return it via the module's create_pipeline()., Return all registered pipeline names., create_pipeline(), Baselines pipeline definition., post_training=True — read from training_eval_predictions., Default (post_training=False) — monitoring scenario. (+7 more)
+Cohesion: 0.06
+Nodes (41): plot_calibration_curves(), Calibration curve visualizations., Plot calibration curves per product.      Args:         predictions: DataFrame w, plot_positive_rank_heatmap(), plot_positive_rate_rank_heatmap(), plot_rank_heatmap(), plot_score_distributions(), plot_score_distributions_by_label() (+33 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.06
-Nodes (39): plot_positive_rank_heatmap(), plot_positive_rate_rank_heatmap(), plot_rank_heatmap(), plot_score_distributions(), plot_score_distributions_by_label(), Score and rank distribution visualizations., Plot score distributions per product.      Returns:         List of two Figures:, Positive rate at each (product, rank) position heatmap.      Cell value = count( (+31 more)
+Cohesion: 0.04
+Nodes (38): _join_token(), ratio_to_threshold(), Deterministic CRC32-based hashing utilities for sampling.  PySpark's F.crc32 use, Convert a [0, 1] sampling ratio into an integer bucket threshold., Build a Spark Column of bucket indices in [0, HASH_BUCKETS).      Datetime/date, spark_bucket(), Helper functions for the dataset building pipeline (Spark backend)., Stratified sampling by configurable group keys, returning unique identity keys. (+30 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.1
-Nodes (30): SourceETLError, SQLRunner, _base_config(), _make_spark_mock(), Dry run should render SQL without executing., Restart from should skip tables before the specified one., Create minimal SQL files for testing., Dry run should process multiple snap dates. (+22 more)
+Cohesion: 0.06
+Nodes (45): build_comparison_result(), _compute_delta(), _compute_nested_delta(), Comparison logic for evaluating two models or model vs baseline., Compute deltas (A - B) for all metrics at all levels.      Args:         result_, Compute metric-level delta (A - B)., Compute delta for each sub-key in a nested metrics dict., extract_Xy() (+37 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.08
-Nodes (21): ConsoleFormatter, generate_run_id(), get_current_context(), _human_bytes(), JsonFormatter, log_data_volume(), Structured logging framework for pipeline execution.  Provides RunContext for ex, Configure the root logger from config and bind the RunContext.      Args: (+13 more)
+Cohesion: 0.06
+Nodes (10): create_pipeline(), Baselines pipeline definition., post_training=True — read from training_eval_predictions., Default (post_training=False) — monitoring scenario., TestBaselinesPipeline, TestDatasetPipeline, TestEvaluationPipelineDefault, TestEvaluationPipelinePostTraining (+2 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.1
-Nodes (35): extract_Xy(), extract_Xy_with_groups(), _log_parquet_metadata(), _pdf_to_X(), Convert a ParquetHandle into algorithm-agnostic numpy (X, y) arrays.  Encapsulat, Read the parquet at ``handle.path`` and return (X, y) as numpy arrays.      Cate, Like :func:`extract_Xy` but also returns per-row query-group ids.      A query g, Log parquet shape & uncompressed size before the actual read.      Uses pyarrow. (+27 more)
+Cohesion: 0.08
+Nodes (21): ConsoleFormatter, generate_run_id(), get_current_context(), _human_bytes(), JsonFormatter, log_data_volume(), Structured logging framework for pipeline execution.  Provides RunContext for ex, Configure the root logger from config and bind the RunContext.      Args: (+13 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.09
 Nodes (23): find_best_version(), get_current_best_version(), _is_version_dir(), list_versions(), main(), print_version_table(), promote(), Promote a versioned model to best/ for inference use.  Usage:     python scripts (+15 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.13
-Nodes (17): validate_predictions(), _make_valid_data(), Tests for inference pipeline validation (Spark backend)., Re-rank by score descending within each (snap_date, cust_id) group., Build a valid ranked_predictions and matching scoring_dataset (Spark)., _rerank(), TestCompleteness, TestMultipleFailures (+9 more)
-
-### Community 16 - "Community 16"
 Cohesion: 0.1
 Nodes (8): get_schema_for_hash(), Centralized column schema for all pipelines.  Provides get_schema() to retrieve, Return canonical schema dict intended for version hashing.      Same resolution, Validate the shape of ``parameters["schema"]``.      Enforces:     - Scalar keys, validate_schema_config(), Tests for schema config validation and source_etl consistency checks., TestGetSchemaForHash, TestValidateSchemaConfig
 
+### Community 16 - "Community 16"
+Cohesion: 0.14
+Nodes (14): validate_predictions(), _make_valid_data(), Tests for inference pipeline validation (Spark backend)., Re-rank by score descending within each (snap_date, cust_id) group., Build a valid ranked_predictions and matching scoring_dataset (Spark)., _rerank(), TestCompleteness, TestMultipleFailures (+6 more)
+
 ### Community 17 - "Community 17"
-Cohesion: 0.12
-Nodes (19): build_comparison_result(), _compute_delta(), _compute_nested_delta(), plot_comparison_metrics(), plot_comparison_score_distributions(), Comparison logic for evaluating two models or model vs baseline., Create overlay histograms and side-by-side boxplots comparing two models.      R, Compute deltas (A - B) for all metrics at all levels.      Args:         result_ (+11 more)
-
-### Community 18 - "Community 18"
-Cohesion: 0.13
-Nodes (12): _block_vdclient_magic_import(), _install_fake_vdclient_magic(), Tests for resolve_vdclient_placeholders., Install a fake vdclient_magic module with spark_ports(cluster) -> tuple., Make ``import vdclient_magic`` raise ImportError., TestResolve, TestResolveEnv, Resolve ${...} placeholders in spark config values.  Two placeholder forms are s (+4 more)
-
-### Community 19 - "Community 19"
 Cohesion: 0.12
 Nodes (14): format_yaml_output(), _load_spark(), main(), _print_summary(), Suggest categorical columns from a dataset.  Given a Hive table or HDFS parquet, Suggest categorical columns from a dataset and write a YAML snippet., Infer categorical columns from a Spark DataFrame.      String and boolean column, Format categorical columns as a flat YAML snippet.      Example output: (+6 more)
 
-### Community 20 - "Community 20"
+### Community 18 - "Community 18"
 Cohesion: 0.11
 Nodes (14): _make_base_and_train_variant(), _mock_spark_with_feature_table_schema(), Dataset pipeline computes hash-based base_dataset_version and train_variant_id., Build a SparkSession-like mock whose ``table(fqn).schema.fields``     returns th, Training pipeline resolves base + train_variant via latest symlinks., _run_pipeline calls inject_cache_source_tables with substitution_params, Training pipeline accepts --base-dataset-version and --train-variant., Inference reads base/train_variant from model manifest; outputs under model hash (+6 more)
 
-### Community 21 - "Community 21"
+### Community 19 - "Community 19"
 Cohesion: 0.11
 Nodes (13): generate_global_popularity_baseline(), generate_segment_popularity_baseline(), Baseline generators for model comparison.  Provides global and segment popularit, Generate a segment-level popularity baseline.      Computes positive rate per (s, Generate a global popularity baseline.      Computes overall positive rate per p, label_table(), Tests for evaluation.baselines module., Different segments should potentially have different rankings. (+5 more)
 
-### Community 22 - "Community 22"
+### Community 20 - "Community 20"
 Cohesion: 0.13
 Nodes (9): compute_ap(), compute_mean_ap(), Single-query ranking metrics on numpy arrays.  Scope is intentionally narrow: on, Compute Average Precision for a single query.      Returns None if there are no, Mean of per-group Average Precision.      A "group" represents one query (e.g. o, Tests for evaluation.metrics — numpy-only HPO primitives.  Scope: only ``compute, TestComputeAP, TestComputeMeanAP (+1 more)
 
-### Community 23 - "Community 23"
+### Community 21 - "Community 21"
+Cohesion: 0.16
+Nodes (13): ConfigConsistencyError, ConsistencyError, DataConsistencyError, _prepare_model_input(), Single source of truth for config / data consistency invariants.  Every invarian, Base for all consistency failures (subclasses ValueError by design)., Config self-contradiction detectable without data (Layer 1)., Config disagrees with the actual data (Layer 2). (+5 more)
+
+### Community 22 - "Community 22"
 Cohesion: 0.16
 Nodes (10): copy_hdfs_to_local(), get_hive_table_location(), HDFS↔driver-local file-copy utilities.  Pure mechanics, agnostic to caller. No k, Return the HDFS Location URI of a Hive table via DESCRIBE FORMATTED.      Args:, Copy an HDFS path (file or directory) to a driver-local path.      Uses Spark's, _make_fake_spark(), Tests for recsys_tfb.utils.hdfs., Build a MagicMock spark simulating the JVM bridge surface we use. (+2 more)
+
+### Community 23 - "Community 23"
+Cohesion: 0.19
+Nodes (9): compute_product_statistics(), compute_segment_statistics(), Dataset statistics for evaluation reports., Per-product statistics at customer granularity., Per-segment statistics at customer granularity.      Returns DataFrame indexed b, _make_labels(), Tests for evaluation.statistics module., TestProductStatistics (+1 more)
 
 ### Community 24 - "Community 24"
 Cohesion: 0.15
@@ -173,15 +173,15 @@ Nodes (19): ccard_prods(), _diff_msg(), exchange_prods(), _extract_cte_body(), _
 
 ### Community 25 - "Community 25"
 Cohesion: 0.19
-Nodes (9): compute_product_statistics(), compute_segment_statistics(), Dataset statistics for evaluation reports., Per-segment statistics at customer granularity.      Returns DataFrame indexed b, Per-product statistics at customer granularity.      Returns DataFrame indexed b, _make_labels(), Tests for evaluation.statistics module., TestProductStatistics (+1 more)
+Nodes (14): _assign_customer_demographics(), _compute_label_prob(), generate_feature_table(), _generate_financial_features(), generate_label_table(), generate_sample_pool(), main(), Generate synthetic feature_table and label_table Parquet files for local dev.  P (+6 more)
 
 ### Community 26 - "Community 26"
-Cohesion: 0.24
-Nodes (7): plot_calibration_curves(), Calibration curve visualizations., Plot calibration curves per product.      Args:         predictions: DataFrame w, _make_data(), Tests for evaluation.calibration module., Products with too few samples should be skipped., TestPlotCalibrationCurves
+Cohesion: 0.26
+Nodes (12): join_segment_sources(), External segment-source joining for evaluation (Spark, single impl).  ``_read_se, Read one external segment source. None when the source is absent.      SEAM: onl, Left-join each external segment column onto ``labels``.      Missing sources are, _read_segment_source(), _labels(), Tests for evaluation.segments — single Spark segment-source join., test_join_single_source() (+4 more)
 
 ### Community 27 - "Community 27"
-Cohesion: 0.27
-Nodes (6): load_and_join_segment_sources(), External segment-source joining for evaluation.  After the metrics-spark redesig, Load external segment Parquet files and join them to labels.      Args:, _make_labels(), Tests for evaluation.segments — external segment-source loader only.  The per-se, TestLoadAndJoinSegmentSources
+Cohesion: 0.53
+Nodes (5): _load(), Regression: parameters_evaluation.yaml carries the refactor's new keys., test_k_values_is_superset(), test_product_categories_block(), test_report_display_and_sections()
 
 ### Community 28 - "Community 28"
 Cohesion: 0.33
@@ -208,7 +208,7 @@ Cohesion: 1.0
 Nodes (1): Check if the dataset exists.
 
 ## Knowledge Gaps
-- **249 isolated node(s):** `Per-test SparkSession resolved via get_or_create_spark_session.      Function-sc`, `Build a SparkSession-like mock whose ``table(fqn).schema.fields``     returns th`, `Create minimal conf dirs with catalog and optional parameter files.`, `Create base dataset dir with one train_variant and corresponding latest symlinks`, `Dataset pipeline computes hash-based base_dataset_version and train_variant_id.` (+244 more)
+- **259 isolated node(s):** `Per-test SparkSession resolved via get_or_create_spark_session.      Function-sc`, `Build a SparkSession-like mock whose ``table(fqn).schema.fields``     returns th`, `Create minimal conf dirs with catalog and optional parameter files.`, `Create base dataset dir with one train_variant and corresponding latest symlinks`, `Dataset pipeline computes hash-based base_dataset_version and train_variant_id.` (+254 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 28`** (6 nodes): `Preprocessing: fit/transform/apply logic for Spark pipelines.  - ``._spark``   —`, `__init__.py`, `__init__.py`, `__init__.py`, `__init__.py`, `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -226,17 +226,17 @@ Nodes (1): Check if the dataset exists.
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `exists()` connect `Community 1` to `Community 0`, `Community 4`, `Community 5`, `Community 7`, `Community 10`, `Community 11`, `Community 12`, `Community 14`, `Community 19`, `Community 23`, `Community 27`?**
-  _High betweenness centrality (0.134) - this node is a cross-community bridge._
-- **Why does `SQLRunner` connect `Community 11` to `Community 2`, `Community 4`, `Community 7`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
-- **Why does `DataCatalog` connect `Community 4` to `Community 1`, `Community 3`, `Community 9`, `Community 7`?**
-  _High betweenness centrality (0.105) - this node is a cross-community bridge._
-- **Are the 133 inferred relationships involving `ParquetHandle` (e.g. with `TestModelAdapterABC` and `TestLightGBMAdapter`) actually correct?**
-  _`ParquetHandle` has 133 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 90 inferred relationships involving `ModelAdapter` (e.g. with `TestModelAdapterABC` and `TestLightGBMAdapter`) actually correct?**
-  _`ModelAdapter` has 90 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 73 inferred relationships involving `CalibratedModelAdapter` (e.g. with `TestCalibratedModelAdapter` and `Tests for CalibratedModelAdapter.`) actually correct?**
-  _`CalibratedModelAdapter` has 73 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `get_schema()` connect `Community 3` to `Community 0`, `Community 5`, `Community 9`, `Community 10`, `Community 11`, `Community 15`, `Community 16`, `Community 19`, `Community 21`?**
+  _High betweenness centrality (0.130) - this node is a cross-community bridge._
+- **Why does `SQLRunner` connect `Community 1` to `Community 2`, `Community 6`?**
+  _High betweenness centrality (0.100) - this node is a cross-community bridge._
+- **Why does `DataCatalog` connect `Community 2` to `Community 11`, `Community 12`, `Community 4`, `Community 6`?**
+  _High betweenness centrality (0.093) - this node is a cross-community bridge._
+- **Are the 119 inferred relationships involving `ParquetHandle` (e.g. with `TestModelAdapterABC` and `TestLightGBMAdapter`) actually correct?**
+  _`ParquetHandle` has 119 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 82 inferred relationships involving `ModelAdapter` (e.g. with `TestModelAdapterABC` and `TestLightGBMAdapter`) actually correct?**
+  _`ModelAdapter` has 82 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 70 inferred relationships involving `CalibratedModelAdapter` (e.g. with `TestCalibratedModelAdapter` and `Tests for CalibratedModelAdapter.`) actually correct?**
+  _`CalibratedModelAdapter` has 70 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 61 inferred relationships involving `SQLRunner` (e.g. with `TestValidateOrder` and `TestDryRun`) actually correct?**
   _`SQLRunner` has 61 INFERRED edges - model-reasoned connections that need verification._
