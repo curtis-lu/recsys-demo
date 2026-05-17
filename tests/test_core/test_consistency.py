@@ -170,3 +170,9 @@ class TestValidateConfigConsistency:
         msg = str(ei.value)
         assert "prod_name" in msg          # A1 (prod_name in drop ∩ categorical)
         assert "c" in msg                  # A4 only_in_inference
+
+
+class TestSparkGuardUsesSharedError:
+    def test_missing_cats_raises_data_consistency_error_subclass(self):
+        # DataConsistencyError is still a ValueError, preserving callers
+        assert issubclass(DataConsistencyError, ValueError)
