@@ -150,10 +150,14 @@ def fit_preprocessor_metadata(
     feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
     identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
 
+    # Local import: keep this lazy to avoid an import cycle
+    # (_spark -> core.schema -> core.consistency). Do not hoist to module level.
+    from recsys_tfb.core.consistency import DataConsistencyError
+
     cat_values = schema.get("categorical_values", {})
     missing_cats = [c for c in identity_cat_cols if c not in cat_values]
     if missing_cats:
-        raise ValueError(
+        raise DataConsistencyError(
             "Identity categorical columns missing declarations in "
             f"schema.categorical_values: {missing_cats}. Add them to "
             "parameters.yaml under schema.categorical_values."

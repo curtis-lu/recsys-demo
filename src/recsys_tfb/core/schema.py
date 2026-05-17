@@ -86,11 +86,12 @@ def validate_schema_config(parameters: dict) -> None:
     - ``identity_columns`` ([time] + entity + [item]) must not contain
       duplicates.
     - ``categorical_values`` must be a mapping of non-empty str -> list.
-    - Any identity categorical column (i.e. declared in
-      ``dataset.prepare_model_input.categorical_columns`` AND also an identity
-      column) must have a non-empty entry in ``schema.categorical_values``.
-      This catches the case where ``prod_name`` categories would otherwise
-      be silently discovered from sampled train data.
+    - The item column (``schema.item``) — when declared in
+      ``dataset.prepare_model_input.categorical_columns`` — must have a
+      non-empty entry in ``schema.categorical_values``. This invariant (A3)
+      is delegated to :func:`recsys_tfb.core.consistency.resolved_item_values`
+      so config-time and runtime guards share one definition; see that
+      function for the precise rule.
     - Missing keys are allowed (they fall back to :data:`_DEFAULTS` in
       :func:`get_schema`).
 
@@ -175,16 +176,14 @@ def validate_schema_config(parameters: dict) -> None:
                 f"for '{col}' must be a non-empty list, got {values!r}"
             )
 
-    # Identity categorical columns must be declared in categorical_values.
-    pmi = parameters.get("dataset", {}).get("prepare_model_input", {}) or {}
-    declared_cat_cols = pmi.get("categorical_columns")
-    if declared_cat_cols:
-        identity_set = set(identity)
-        identity_cat_cols = [c for c in declared_cat_cols if c in identity_set]
-        cat_values = schema["categorical_values"]
-        missing = [c for c in identity_cat_cols if c not in cat_values]
-        if missing:
-            raise ValueError(
-                "Identity categorical columns must declare their category "
-                f"lists in schema.categorical_values: {missing}"
-            )
+    # Identity categorical columns must declare category lists (invariant A3).
+    # Single definition lives in core.consistency; call it so config-time and
+    # runtime guards never drift. Import locally to avoid an import cycle
+    # (consistency imports get_schema from this module).
+    from recsys_tfb.core.consistency import resolved_item_values
+
+    # NOTE: this checks only schema.item (the single identity categorical in
+    # the current schema). If entity/time columns are ever declared categorical,
+    # extend resolved_item_values to cover them; until then the broader
+    # post-feature_table case is caught by the _spark.py identity-cat guard.
+    resolved_item_values(parameters)
