@@ -151,17 +151,19 @@ def test_lint_uses_consistency_predicate_for_config_side():
     """The yaml/config arm of the lint must derive from the single predicate,
     not re-parse parameters.yaml independently (prevents definition drift)."""
     import inspect
+    import re
+    import yaml
     from recsys_tfb.core import consistency
 
     src = inspect.getsource(consistency.resolved_item_values)
     assert "categorical_values" in src  # predicate is the canonical reader
 
-    # synthetic generator PRODUCTS must equal the predicate's output
-    repo = Path(__file__).resolve().parents[3]
-    params = yaml.safe_load((repo / "conf/base/parameters.yaml").read_text())
+    params = yaml.safe_load((REPO_ROOT / "conf/base/parameters.yaml").read_text())
     declared = sorted(params["schema"]["categorical_values"]["prod_name"])
 
-    gen = (repo / "scripts/generate_synthetic_data.py").read_text()
+    # PRODUCTS is a flat single-level list literal in the generator; this regex
+    # assumes that (no nested brackets). Fine today; revisit if it ever nests.
+    gen = (REPO_ROOT / "scripts/generate_synthetic_data.py").read_text()
     m = re.search(r"PRODUCTS\s*=\s*\[(.*?)\]", gen, re.S)
     syn = sorted(re.findall(r'"([a-z_]+)"', m.group(1)))
     assert syn == declared, f"synthetic PRODUCTS {syn} != declared {declared}"
