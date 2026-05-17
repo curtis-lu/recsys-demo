@@ -218,6 +218,58 @@ def fit_preprocessor_metadata(
     return preprocessor_metadata, category_mappings
 
 
+def validate_data_consistency(
+    sample_pool: DataFrame,
+    label_table: DataFrame,
+    parameters: dict,
+) -> None:
+    """Layer-2 B1 data gate. Side-effect only: raises ``DataConsistencyError``
+    on violation, returns ``None`` on success. Wired as the first node of the
+    dataset pipeline. See
+    docs/superpowers/specs/2026-05-17-config-consistency-phase2-data-gate-design.md.
+
+    Item values are checked on sample_pool (set-equality vs declared, both
+    directions) and label_table (only data-has-unknown), restricted to the
+    configured snap_date windows the pipeline actually uses.
+    """
+    # Local import: keep lazy to avoid an import cycle
+    # (_spark -> core.schema -> core.consistency). Matches the existing
+    # local-import pattern inside fit_preprocessor_metadata.
+    from recsys_tfb.core.consistency import (
+        DataConsistencyError,
+        item_coverage_errors,
+        resolved_item_values,
+    )
+
+    schema = get_schema(parameters)
+    item = schema["item"]
+    time_col = schema["time"]
+    windows = collect_dataset_snap_dates(parameters)
+
+    def _distinct_items(df: DataFrame) -> set:
+        rows = (
+            df.filter(F.col(time_col).isin(windows))
+            .select(item)
+            .distinct()
+            .collect()
+        )
+        return {r[item] for r in rows if r[item] is not None}
+
+    errors = item_coverage_errors(
+        item,
+        resolved_item_values(parameters),
+        _distinct_items(sample_pool),
+        _distinct_items(label_table),
+    )
+    if errors:
+        raise DataConsistencyError(
+            "Data consistency check failed ("
+            + str(len(errors))
+            + " issue(s)):\n- "
+            + "\n- ".join(errors)
+        )
+
+
 def apply_preprocessor_to_features(
     feature_table: DataFrame,
     preprocessor_metadata: dict,

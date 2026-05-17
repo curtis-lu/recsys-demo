@@ -15,6 +15,7 @@ from recsys_tfb.preprocessing._spark import (
     apply_preprocessor_to_features as _apply_preprocessor_to_features,
     build_model_input as _build_model_input,
     fit_preprocessor_metadata as _fit_preprocessor_metadata,
+    validate_data_consistency as _validate_data_consistency,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,15 @@ def select_test_keys(
 
     logger.info("Test keys (full population)")
     return all_keys
+
+
+def validate_data_consistency(
+    sample_pool: DataFrame,
+    label_table: DataFrame,
+    parameters: dict,
+) -> None:
+    """Layer-2 B1 data gate; first node of the dataset pipeline."""
+    return _validate_data_consistency(sample_pool, label_table, parameters)
 
 
 def fit_preprocessor_metadata(

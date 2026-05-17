@@ -486,3 +486,48 @@ def test_build_model_input_casts_decimal_features_to_double(
     # And the ones that WERE decimal in the input are now double.
     assert out_dtypes["total_aum"] == "double"
     assert out_dtypes["in_amt_sum_l1m"] == "double"
+
+
+from recsys_tfb.pipelines.dataset.nodes_spark import validate_data_consistency
+from recsys_tfb.core.consistency import DataConsistencyError
+
+
+class TestValidateDataConsistency:
+    def test_consistent_fixtures_return_none(self, sample_pool, label_table, parameters):
+        # fixtures: prod_name in {exchange_fx,exchange_usd,fund_stock} ==
+        # schema.categorical_values.prod_name; all snaps inside windows.
+        assert validate_data_consistency(sample_pool, label_table, parameters) is None
+
+    def test_undeclared_value_raises(self, sample_pool, label_table, parameters):
+        # Shrink declared set so fund_stock (present in data) is undeclared.
+        params = {
+            **parameters,
+            "schema": {
+                **parameters["schema"],
+                "categorical_values": {"prod_name": ["exchange_fx", "exchange_usd"]},
+            },
+        }
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, params)
+        msg = str(ei.value)
+        assert "fund_stock" in msg
+        assert "sample_pool" in msg
+
+    def test_value_only_in_non_window_snap_is_ignored(
+        self, spark, sample_pool, label_table, parameters
+    ):
+        # 2024-12-31 is outside collect_dataset_snap_dates (train Jan-Mar,
+        # val Apr, test May). An undeclared 'ploan' there must be filtered out.
+        extra = spark.createDataFrame(
+            pd.DataFrame([{
+                "snap_date": pd.Timestamp("2024-12-31"),
+                "cust_id": "C001",
+                "cust_segment_typ": "mass",
+                "prod_name": "ploan",
+                "label": 0,
+                "tenure_months": 12,
+                "channel_preference": "digital",
+            }])
+        )
+        sp = sample_pool.unionByName(extra)
+        assert validate_data_consistency(sp, label_table, parameters) is None
