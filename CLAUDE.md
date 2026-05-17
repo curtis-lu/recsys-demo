@@ -36,6 +36,14 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
 - 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash cwd 在 skill/`cd` 後會被 reset，相對路徑可能讀到 stale 的 main tree。
 
+## Worktree / venv（SOP：`docs/worktree-venv-setup.md`，務必先讀）
+
+反覆踩到 env-path 問題的根因與規則整理在 `docs/worktree-venv-setup.md`。不可協商的三條：
+
+- **唯一一個真實 venv** 在 main repo root `/Users/curtislu/projects/recsys_tfb/.venv`（真實目錄，非 symlink），用 `~/.pyenv/versions/3.10.9/bin/python` 建（對齊 `.python-version`，`pyproject` 要求 `>=3.10,<3.12`）；各 worktree 的 `.venv` 是指向它的 **symlink**，不是各自獨立 venv。
+- **`.venv` 永不進版控**（`.gitignore` 已同時擋 `.venv` 與 `.venv/`）。`git status`/`ls-files` 一旦出現 `.venv` 被追蹤：停下、`git rm --cached .venv`、commit（且須進 main，否則各分支/worktree 一直繼承）。曾因 self-referential symlink 被 commit 造成 ELOOP，全 `python`/`pytest` 壞掉。
+- worktree 內跑測試/CLI 一律用**絕對 venv python + `PYTHONPATH=<worktree>/src`**：`PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest …`（裸跑會抓到 main 的 `src`，靜默測錯 code；裸 `.venv/bin/pytest` 相對路徑經 symlink 會 ELOOP）。
+
 ## Local dev-cluster testing
 
 在本機 dev-cluster 互動測試 pipeline：
