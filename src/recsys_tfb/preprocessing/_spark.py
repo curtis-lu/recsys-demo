@@ -193,7 +193,7 @@ def fit_preprocessor_metadata(
     # each query group, and HPO reports a flat mAP across every trial.
     item_col = schema.get("item")
     if item_col and item_col not in feature_columns:
-        raise ValueError(
+        raise DataConsistencyError(
             f"schema.item='{item_col}' is missing from derived feature_columns. "
             f"For a ranking task the item column must be a model feature; "
             f"otherwise the booster cannot differentiate items within a query "

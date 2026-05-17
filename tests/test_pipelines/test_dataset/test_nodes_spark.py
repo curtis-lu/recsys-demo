@@ -353,8 +353,9 @@ class TestFitPreprocessorItemMissingFromFeatures:
                 },
             },
         }
-        with pytest.raises(ValueError, match="schema.item='prod_name' is missing"):
+        with pytest.raises(DataConsistencyError, match="schema.item='prod_name' is missing") as ei:
             fit_preprocessor_metadata(feature_table, params)
+        assert isinstance(ei.value, ValueError)  # subclass: existing callers unaffected
 
     def test_default_categorical_columns_passes(
         self, spark, feature_table, parameters
