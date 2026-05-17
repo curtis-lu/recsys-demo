@@ -206,3 +206,57 @@ def validate_config_consistency(parameters: dict) -> None:
             "Config consistency check failed (" + str(len(errors))
             + " issue(s)):\n- " + "\n- ".join(errors)
         )
+
+
+def item_coverage_errors(
+    item: str,
+    declared: list[str],
+    sample_pool_items: set[str],
+    label_items: set[str],
+) -> list[str]:
+    """B1 invariant — the single definition.
+
+    sample_pool ↔ declared must be EQUAL (both directions are hard errors):
+    a value the data has but config does not encodes to -1 (same code as
+    null) and corrupts training/scoring; a value config declares but
+    sample_pool never produces can never be scored.
+
+    label_table: only ``label_items - declared`` is an error (label business
+    logic produced an unknown item). ``declared - label_items`` is B3
+    (zero-positive), deferred — intentionally NOT reported here.
+
+    Keys off the passed ``item`` only; never hardcodes 'prod_name'. Returns
+    collect-all error strings; empty list means OK.
+    """
+    declared_set = set(declared)
+    errors: list[str] = []
+
+    sp_unknown = sorted(sample_pool_items - declared_set)
+    if sp_unknown:
+        errors.append(
+            f"sample_pool has item value(s) {sp_unknown} not in "
+            f"schema.categorical_values[{item!r}] — these encode to -1 "
+            f"(same code as null) and silently corrupt training/scoring. Add "
+            f"them to schema.categorical_values.{item} in parameters.yaml, or "
+            f"fix sample_pool.sql."
+        )
+
+    sp_missing = sorted(declared_set - sample_pool_items)
+    if sp_missing:
+        errors.append(
+            f"schema.categorical_values[{item!r}] declares value(s) "
+            f"{sp_missing} that sample_pool never produces — they can never "
+            f"be scored/recommended (silent). Remove them from config, or fix "
+            f"sample_pool.sql to emit them."
+        )
+
+    lb_unknown = sorted(label_items - declared_set)
+    if lb_unknown:
+        errors.append(
+            f"label_table has item value(s) {lb_unknown} not in "
+            f"schema.categorical_values[{item!r}] — label business logic "
+            f"(label_*.sql) produced an item the model config does not know. "
+            f"Reconcile label_*.sql with schema.categorical_values.{item}."
+        )
+
+    return errors

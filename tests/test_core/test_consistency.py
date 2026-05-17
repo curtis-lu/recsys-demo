@@ -176,3 +176,47 @@ class TestSparkGuardUsesSharedError:
     def test_missing_cats_raises_data_consistency_error_subclass(self):
         # DataConsistencyError is still a ValueError, preserving callers
         assert issubclass(DataConsistencyError, ValueError)
+
+
+from recsys_tfb.core.consistency import item_coverage_errors
+
+
+class TestItemCoverageErrors:
+    DECL = ["a", "b", "c"]
+
+    def test_equal_sets_returns_empty(self):
+        assert item_coverage_errors("prod_name", self.DECL, {"a", "b", "c"}, {"a", "b"}) == []
+
+    def test_sample_pool_unknown_value_is_error(self):
+        errs = item_coverage_errors("prod_name", self.DECL, {"a", "b", "c", "ploan"}, {"a"})
+        assert len(errs) == 1
+        assert "ploan" in errs[0]
+        assert "sample_pool" in errs[0] and "-1" in errs[0]
+
+    def test_sample_pool_declared_but_absent_is_error(self):
+        errs = item_coverage_errors("prod_name", self.DECL, {"a", "b"}, {"a", "b"})
+        assert len(errs) == 1
+        assert "'c'" in errs[0] or "c" in errs[0]
+        assert "never produces" in errs[0]
+
+    def test_label_unknown_value_is_error(self):
+        errs = item_coverage_errors("prod_name", self.DECL, {"a", "b", "c"}, {"a", "mloan"})
+        assert len(errs) == 1
+        assert "mloan" in errs[0]
+        assert "label_table" in errs[0] and "label_*.sql" in errs[0]
+
+    def test_label_declared_but_absent_is_NOT_error_b3_deferred(self):
+        # label_items missing a declared value == B3 (zero-positive), deferred.
+        assert item_coverage_errors("prod_name", self.DECL, {"a", "b", "c"}, {"a"}) == []
+
+    def test_channel_name_item_is_supported(self):
+        errs = item_coverage_errors("channel_name", ["sms", "app"], {"sms", "app", "x"}, {"sms"})
+        assert len(errs) == 1
+        assert "channel_name" in errs[0] and "x" in errs[0]
+
+    def test_collects_multiple_errors(self):
+        errs = item_coverage_errors("prod_name", self.DECL, {"a", "b", "zzz"}, {"a", "qqq"})
+        # sp_unknown(zzz) + sp_missing(c) + lb_unknown(qqq) = 3
+        assert len(errs) == 3
+        joined = "\n".join(errs)
+        assert "zzz" in joined and "qqq" in joined and "c" in joined
