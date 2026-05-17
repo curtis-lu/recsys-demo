@@ -116,24 +116,37 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
         extract_Xy(handle, _make_prep_meta_with_cat(), _make_parameters_with_cat())
 
+    vol = {
+        r.volume["name"]: r.volume
+        for r in caplog.records
+        if getattr(r, "event", None) == "data_volume"
+    }
     messages = [r.getMessage() for r in caplog.records]
-    # Entry summary
+    # Entry summary（保留既有 domain log）
     assert any(
         "extract_Xy start" in m and "n_feature_cols=3" in m and "label=label" in m
         for m in messages
     )
-    # read_parquet summary: rows + cols of the loaded parquet
-    assert any("parquet loaded" in m and "rows=3" in m for m in messages)
-    # slice_features summary: rows + n_features + mem
-    assert any("X_df" in m and "n_features=3" in m and "mem=" in m for m in messages)
-    # encode_categoricals summary: deferred_cats list + count
+    # N1: full pdf sized via helper (deep=True)
+    assert vol["extract_Xy.pdf"]["kind"] == "pandas"
+    assert vol["extract_Xy.pdf"]["rows"] == 3
+    assert vol["extract_Xy.pdf"]["deep"] is True
+    # retrofit: X_df via helper, deep=True (was deep=False)
+    assert vol["_pdf_to_X.X_df"]["rows"] == 3
+    assert vol["_pdf_to_X.X_df"]["cols"] == 3
+    assert vol["_pdf_to_X.X_df"]["deep"] is True
+    # encode_categoricals summary（保留既有 domain log）
     assert any(
         "deferred_cats=" in m and "prod_name" in m and "count=1" in m for m in messages
     )
-    # to_numpy summary: X shape + dtype + nbytes; y len + dtype
-    assert any(
-        "X shape=(3, 3)" in m and "nbytes=" in m and "y len=3" in m for m in messages
-    )
+    # retrofit: X / y via helper numpy branch
+    assert vol["extract_Xy.X"]["kind"] == "numpy"
+    assert vol["extract_Xy.X"]["rows"] == 3
+    assert vol["extract_Xy.X"]["cols"] == 3
+    assert vol["extract_Xy.y"]["kind"] == "numpy"
+    assert vol["extract_Xy.y"]["rows"] == 3
+    # D1: shape-only "parquet loaded" line removed
+    assert not any("parquet loaded" in m for m in messages)
 
 
 def test_extract_xy_skips_encode_step_when_no_deferred_cats(
