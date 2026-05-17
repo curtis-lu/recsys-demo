@@ -64,6 +64,24 @@ class TestJsonFormatter:
         assert parsed["node"] == "select_sample_keys"
         assert parsed["duration_seconds"] == 1.23
 
+    def test_volume_field_included(self):
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="data_volume", args=(), exc_info=None,
+        )
+        record.event = "data_volume"
+        record.volume = {
+            "name": "extract_Xy.pdf", "kind": "pandas",
+            "rows": 100, "cols": 12, "bytes": 4096,
+            "dtype": "mixed", "deep": True,
+        }
+        parsed = json.loads(formatter.format(record))
+        assert parsed["event"] == "data_volume"
+        assert parsed["volume"]["name"] == "extract_Xy.pdf"
+        assert parsed["volume"]["rows"] == 100
+        assert parsed["volume"]["bytes"] == 4096
+
 
 class TestConsoleFormatter:
     def test_format(self):
