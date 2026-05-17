@@ -1,31 +1,20 @@
 """Evaluation pipeline nodes — Spark backend."""
 
 import logging
-from datetime import datetime
 from typing import Optional
 
-import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.calibration import plot_calibration_curves
-from recsys_tfb.evaluation.compare import (
-    build_comparison_result,
-    plot_comparison_metrics,
-)
 from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
-    plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
     plot_score_distributions,
     plot_score_distributions_by_label,
 )
-from recsys_tfb.evaluation.report import ReportSection, generate_html_report
-from recsys_tfb.evaluation.statistics import (
-    compute_product_statistics,
-    compute_segment_statistics,
-)
+from recsys_tfb.evaluation.report_builder import assemble_report
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +62,8 @@ def prepare_eval_data(
     # Merge predictions with labels
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="inner")
 
-    # Downstream report rendering (_render_html_report) selects schema["rank"]
-    # from eval_predictions. When the predictions source is
+    # Downstream report rendering selects schema["rank"] from eval_predictions.
+    # When the predictions source is
     # training_eval_predictions (--post-training mode), `rank` is absent because
     # the table no longer stores it (Spark mAP recomputes rank internally via
     # rank_within_query). Add it here when missing so downstream stays uniform;
@@ -125,197 +114,68 @@ def generate_report(
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
 ) -> str:
-    """Generate HTML report from Spark evaluation results.
-
-    Collects the eval_predictions to pandas (post-aggregation, manageable size)
-    and runs the pandas-based report rendering inline.
-    """
-    eval_pd = eval_predictions.toPandas()
-    return _render_html_report(
-        eval_pd, evaluation_metrics, parameters, baseline_metrics
-    )
-
-
-def _render_html_report(
-    eval_predictions: pd.DataFrame,
-    evaluation_metrics: dict,
-    parameters: dict,
-    baseline_metrics: Optional[dict] = None,
-) -> str:
-    """Generate HTML evaluation report.
-
-    Reuses existing visualization modules (distributions, calibration,
-    statistics, segments, compare) to build a comprehensive report.
-    Optionally includes baseline comparison if baseline_metrics is provided.
-
-    Returns:
-        HTML string of the complete report.
+    """Build the HTML report. Metrics dicts drive §0–§8; only the
+    diagnostics section (when enabled) needs row-level pandas, collected
+    here with minimal columns and an optional sample cap.
     """
     schema = get_schema(parameters)
-    identity_cols = schema["identity_columns"]
-    label_col = schema["label"]
+    id_cols = schema["identity_columns"]
     score_col = schema["score"]
     rank_col = schema["rank"]
+    label_col = schema["label"]
+    item_col = schema["item"]
 
-    eval_params = parameters.get("evaluation", {})
-    report_config = eval_params.get("report", {})
-    include_baseline = report_config.get("include_baseline_comparison", True)
-    include_calibration = report_config.get("include_calibration", True)
-    include_distributions = report_config.get("include_distributions", True)
-    n_calibration_bins = report_config.get("n_calibration_bins", 10)
+    eval_params = parameters.get("evaluation", {}) or {}
+    report_cfg = eval_params.get("report", {}) or {}
+    sections_cfg = report_cfg.get("sections", {}) or {}
+    diag_cfg = report_cfg.get("diagnostics", {}) or {}
 
-    segment_columns = list(eval_params.get("segment_columns", []))
-    segment_sources = eval_params.get("segment_sources", {})
-    for source_config in segment_sources.values():
-        seg_col = source_config["segment_column"]
-        if seg_col not in segment_columns:
-            segment_columns.append(seg_col)
-
-    pred_cols = identity_cols + [score_col, rank_col]
-    predictions = eval_predictions[pred_cols].copy()
-
-    label_cols_set = set(identity_cols + [label_col] + segment_columns)
-    label_cols = [c for c in eval_predictions.columns if c in label_cols_set]
-    labels = eval_predictions[label_cols].drop_duplicates()
-
-    sections: list[ReportSection] = []
-
-    summary_tables = []
-    overall_df = pd.DataFrame([evaluation_metrics["overall"]]).T
-    overall_df.columns = ["Overall"]
-    summary_tables.append(overall_df)
-
-    if evaluation_metrics.get("macro_avg"):
-        summary_tables.append(pd.DataFrame(evaluation_metrics["macro_avg"]))
-
-    table_titles = ["Overall", "Macro Average"]
-    sections.append(
-        ReportSection(
-            title="Metrics Summary",
-            description=(
-                "Overall ranking metrics and macro average (unweighted mean)."
-            ),
-            tables=summary_tables,
-            table_titles=table_titles[:len(summary_tables)],
+    diagnostics_frames = None
+    if sections_cfg.get("diagnostics", True):
+        sample_rows = diag_cfg.get("sample_rows")
+        sdf = eval_predictions
+        if sample_rows:
+            sdf = sdf.limit(int(sample_rows))
+        pred_cols = list(dict.fromkeys(id_cols + [score_col, rank_col]))
+        predictions = sdf.select(*pred_cols).toPandas()
+        labels = (
+            sdf.select(*list(dict.fromkeys(id_cols + [label_col])))
+            .distinct()
+            .toPandas()
         )
+        figs = []
+        if diag_cfg.get("include_distributions", True):
+            figs += plot_score_distributions(
+                predictions, item_col=item_col, score_col=score_col
+            )
+            figs += plot_score_distributions_by_label(
+                predictions, labels, id_cols=tuple(id_cols),
+                item_col=item_col, score_col=score_col, label_col=label_col
+            )
+            figs.append(
+                plot_rank_heatmap(
+                    predictions, item_col=item_col, rank_col=rank_col
+                )
+            )
+            figs.append(
+                plot_positive_rank_heatmap(
+                    predictions, labels, id_cols=tuple(id_cols),
+                    item_col=item_col, rank_col=rank_col, label_col=label_col
+                )
+            )
+        if diag_cfg.get("include_calibration", True):
+            figs.append(
+                plot_calibration_curves(
+                    predictions, labels,
+                    n_bins=diag_cfg.get("n_calibration_bins", 10),
+                    id_cols=tuple(id_cols), item_col=item_col,
+                    score_col=score_col, label_col=label_col,
+                )
+            )
+        diagnostics_frames = {"figures": figs}
+
+    return assemble_report(
+        evaluation_metrics, parameters,
+        baseline_metrics=baseline_metrics,
+        diagnostics_frames=diagnostics_frames,
     )
-
-    if evaluation_metrics.get("per_item"):
-        item_df = pd.DataFrame(evaluation_metrics["per_item"]).T
-        product_stats_df = compute_product_statistics(labels)
-        sections.append(
-            ReportSection(
-                title="Per-Item Metrics",
-                description=(
-                    "Per-item attribution metrics — hit_rate@K (item-level recall), "
-                    "map_attr@K / ndcg_attr@K (per-row contributions averaged across "
-                    "queries where the item is positive), and mean_pos."
-                ),
-                tables=[item_df, product_stats_df],
-                table_titles=["Per-Item Metrics", "Dataset Statistics"],
-            )
-        )
-
-    if evaluation_metrics.get("per_segment"):
-        seg_df = pd.DataFrame(evaluation_metrics["per_segment"]).T
-        sections.append(
-            ReportSection(
-                title="Per-Segment Metrics",
-                description=(
-                    "Per-segment query-level metrics (map@K / ndcg@K / precision@K / "
-                    "recall@K averaged across queries within each segment). "
-                    "precision@K at K=n_products is base rate; recall@K at K=n_products "
-                    "is always 1.0."
-                ),
-                tables=[seg_df],
-                table_titles=["Per-Segment Metrics"],
-            )
-        )
-
-    if include_distributions:
-        dist_figs = plot_score_distributions(predictions)
-        label_dist_figs = plot_score_distributions_by_label(predictions, labels)
-        sections.append(
-            ReportSection(
-                title="Score Distributions",
-                description="Histogram and boxplot of prediction scores per product.",
-                figures=dist_figs + label_dist_figs,
-            )
-        )
-
-        rank_fig = plot_rank_heatmap(predictions)
-        pos_rank_fig = plot_positive_rank_heatmap(predictions, labels)
-        pos_rate_fig = plot_positive_rate_rank_heatmap(predictions, labels)
-        sections.append(
-            ReportSection(
-                title="Rank Distribution",
-                description="Rank distribution heatmaps.",
-                figures=[rank_fig, pos_rank_fig, pos_rate_fig],
-            )
-        )
-
-    if include_calibration:
-        cal_fig = plot_calibration_curves(
-            predictions, labels, n_bins=n_calibration_bins
-        )
-        sections.append(
-            ReportSection(
-                title="Calibration Curves",
-                description="Predicted probability vs actual positive rate.",
-                figures=[cal_fig],
-            )
-        )
-
-    # Segment dataset statistics (the metric numbers themselves are already in
-    # the Per-Segment Metrics section above, computed once by metrics_spark).
-    for seg_col in segment_columns:
-        if seg_col not in labels.columns:
-            continue
-        seg_stats = compute_segment_statistics(labels, segment_column=seg_col)
-        display_name = seg_col.replace("_", " ").title()
-        sections.append(
-            ReportSection(
-                title=f"Segment Dataset Statistics: {display_name}",
-                description=f"Customer / positive-rate breakdown by {seg_col}.",
-                tables=[seg_stats],
-                table_titles=["Dataset Statistics"],
-            )
-        )
-
-    if include_baseline and baseline_metrics is not None:
-        comparison = build_comparison_result(
-            evaluation_metrics, baseline_metrics, "Model", "Baseline"
-        )
-        comp_figs = plot_comparison_metrics(comparison)
-
-        delta_df = pd.DataFrame([comparison["overall_delta"]]).T
-        delta_df.columns = ["Delta (Model - Baseline)"]
-        overall_model = pd.DataFrame([evaluation_metrics["overall"]]).T
-        overall_model.columns = ["Model"]
-        overall_base = pd.DataFrame([baseline_metrics.get("overall", {})]).T
-        overall_base.columns = ["Baseline"]
-        summary = pd.concat([overall_model, overall_base, delta_df], axis=1)
-
-        sections.append(
-            ReportSection(
-                title="Baseline Comparison",
-                description="Model vs baseline performance comparison.",
-                figures=comp_figs,
-                tables=[summary],
-                table_titles=["Overall Comparison"],
-            )
-        )
-
-    snap_date = eval_params.get("snap_date", "unknown")
-    metadata = {
-        "Snap Date": snap_date,
-        "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Total Queries": evaluation_metrics["n_queries"],
-        "Excluded Queries": evaluation_metrics["n_excluded_queries"],
-    }
-    html = generate_html_report(
-        sections, title="Model Evaluation Report", metadata=metadata
-    )
-
-    logger.info("Report generated: %d sections", len(sections))
-    return html
