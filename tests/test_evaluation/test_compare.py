@@ -8,11 +8,11 @@ matches what ``metrics_spark.compute_all_metrics`` produces.
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import pytest
 
 from recsys_tfb.evaluation.compare import (
     build_comparison_result,
     plot_comparison_metrics,
-    plot_comparison_score_distributions,
 )
 
 
@@ -81,18 +81,6 @@ def _make_result_dict(seed: int) -> dict:
     }
 
 
-def _make_predictions_df(seed: int, n_customers: int = 10) -> pd.DataFrame:
-    """For score-distribution plots; only needs cust_id / prod_name / score."""
-    rng = np.random.RandomState(seed)
-    items = ["exchange_fx", "fund_bond", "fund_stock"]
-    rows = []
-    for i in range(n_customers):
-        scores = rng.rand(len(items))
-        for j, prod in enumerate(items):
-            rows.append({"cust_id": f"C{i:04d}", "prod_name": prod, "score": float(scores[j])})
-    return pd.DataFrame(rows)
-
-
 class TestBuildComparisonResult:
     def test_positive_delta_equals_a_minus_b(self):
         result_a = _make_result_dict(seed=42)
@@ -115,12 +103,6 @@ class TestBuildComparisonResult:
         comparison = build_comparison_result(result_a, result_b)
         assert "overall_delta" in comparison
         assert "per_item_delta" in comparison
-        assert "per_segment_delta" in comparison
-        assert "macro_avg_delta" in comparison
-        # Macro avg delta carries by_item / by_segment / by_item_segment when populated.
-        assert "by_item" in comparison["macro_avg_delta"]
-        assert "by_segment" in comparison["macro_avg_delta"]
-        assert "by_item_segment" in comparison["macro_avg_delta"]
 
 
 class TestPlotComparisonMetrics:
@@ -143,20 +125,17 @@ class TestPlotComparisonMetrics:
             assert len(fig.data) == 2
 
 
-class TestPlotComparisonScoreDistributions:
-    def test_returns_figures(self):
-        preds_a = _make_predictions_df(seed=42)
-        preds_b = _make_predictions_df(seed=99)
-        figs = plot_comparison_score_distributions(preds_a, preds_b)
-        assert len(figs) > 0
-        assert all(isinstance(f, go.Figure) for f in figs)
+def test_build_comparison_keeps_overall_and_per_item_only():
+    from recsys_tfb.evaluation.compare import build_comparison_result
+    a = {"overall": {"map@5": 0.5}, "per_item": {"A": {"hit_rate@5": 0.4}}}
+    b = {"overall": {"map@5": 0.3}, "per_item": {"A": {"hit_rate@5": 0.1}}}
+    c = build_comparison_result(a, b, "M", "B")
+    assert c["overall_delta"]["map@5"] == pytest.approx(0.2)
+    assert c["per_item_delta"]["A"]["hit_rate@5"] == pytest.approx(0.3)
+    assert "per_segment_delta" not in c
+    assert "macro_avg_delta" not in c
 
-    def test_two_figures_per_item(self):
-        preds_a = _make_predictions_df(seed=42)
-        preds_b = _make_predictions_df(seed=99)
-        figs = plot_comparison_score_distributions(preds_a, preds_b)
-        items = sorted(
-            set(preds_a["prod_name"].unique().tolist() + preds_b["prod_name"].unique().tolist())
-        )
-        # 2 figures per item (histogram + boxplot)
-        assert len(figs) == len(items) * 2
+
+def test_plot_comparison_score_distributions_removed():
+    import recsys_tfb.evaluation.compare as cmp
+    assert not hasattr(cmp, "plot_comparison_score_distributions")

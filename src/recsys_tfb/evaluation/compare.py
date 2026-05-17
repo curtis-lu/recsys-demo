@@ -1,6 +1,5 @@
 """Comparison logic for evaluating two models or model vs baseline."""
 
-import pandas as pd
 import plotly.graph_objects as go
 
 
@@ -36,18 +35,6 @@ def build_comparison_result(
     comparison["per_item_delta"] = _compute_nested_delta(
         result_a.get("per_item", {}), result_b.get("per_item", {})
     )
-
-    comparison["per_segment_delta"] = _compute_nested_delta(
-        result_a.get("per_segment", {}), result_b.get("per_segment", {})
-    )
-
-    comparison["macro_avg_delta"] = {}
-    for dim_key in ("by_item", "by_segment", "by_item_segment"):
-        macro_a = result_a.get("macro_avg", {}).get(dim_key, {})
-        macro_b = result_b.get("macro_avg", {}).get(dim_key, {})
-        if macro_a or macro_b:
-            comparison["macro_avg_delta"][dim_key] = _compute_delta(macro_a, macro_b)
-
     return comparison
 
 
@@ -105,57 +92,5 @@ def plot_comparison_metrics(comparison: dict) -> list[go.Figure]:
             barmode="group",
         )
         figures.append(fig)
-
-    return figures
-
-
-def plot_comparison_score_distributions(
-    predictions_a: pd.DataFrame,
-    predictions_b: pd.DataFrame,
-    label_a: str = "Model A",
-    label_b: str = "Model B",
-) -> list[go.Figure]:
-    """Create overlay histograms and side-by-side boxplots comparing two models.
-
-    Returns [histogram, boxplot] per product.
-    """
-    products = sorted(
-        set(
-            predictions_a["prod_name"].unique().tolist()
-            + predictions_b["prod_name"].unique().tolist()
-        )
-    )
-
-    figures = []
-
-    for prod in products:
-        scores_a = predictions_a[predictions_a["prod_name"] == prod]["score"]
-        scores_b = predictions_b[predictions_b["prod_name"] == prod]["score"]
-
-        # Overlay histogram
-        fig_hist = go.Figure()
-        fig_hist.add_trace(
-            go.Histogram(x=scores_a, name=label_a, opacity=0.6, nbinsx=50)
-        )
-        fig_hist.add_trace(
-            go.Histogram(x=scores_b, name=label_b, opacity=0.6, nbinsx=50)
-        )
-        fig_hist.update_layout(
-            title=f"{prod}: Score Distribution Comparison",
-            xaxis_title="Score",
-            yaxis_title="Count",
-            barmode="overlay",
-        )
-        figures.append(fig_hist)
-
-        # Side-by-side boxplot
-        fig_box = go.Figure()
-        fig_box.add_trace(go.Box(y=scores_a, name=label_a))
-        fig_box.add_trace(go.Box(y=scores_b, name=label_b))
-        fig_box.update_layout(
-            title=f"{prod}: Score Distribution Comparison (Boxplot)",
-            yaxis_title="Score",
-        )
-        figures.append(fig_box)
 
     return figures
