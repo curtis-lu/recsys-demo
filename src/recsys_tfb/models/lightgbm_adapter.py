@@ -133,6 +133,12 @@ class LightGBMAdapter(ModelAdapter):
         already exists. On miss, builds train first (with binning), saves binary,
         then builds train_dev with reference=train so dev binning aligns to train.
         """
+        # Lazy import: see module-top comment about circular-import chain.
+        # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
+        # is mid-init when this file loads via io/__init__; a top-level
+        # `from recsys_tfb.core.logging import ...` here re-enters that cycle.
+        from recsys_tfb.core.logging import log_data_volume
+
         lgb_dir = Path(cache_dir) / "lgb"
         success = lgb_dir / "_SUCCESS"
         train_bin = lgb_dir / "train.bin"
@@ -140,6 +146,8 @@ class LightGBMAdapter(ModelAdapter):
 
         if success.exists():
             logger.info("lgb binary cache hit at %s", lgb_dir)
+            log_data_volume(logger, "prepare.train.bin", str(train_bin))
+            log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
             return (
                 LgbDatasetHandle(bin_path=str(train_bin), role="train"),
                 LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev"),
@@ -177,7 +185,9 @@ class LightGBMAdapter(ModelAdapter):
             params=construct_params,
             free_raw_data=True,
         ).construct()
+        log_data_volume(logger, "prepare.ds_train", ds_train)
         ds_train.save_binary(str(train_bin))
+        log_data_volume(logger, "prepare.train.bin", str(train_bin))
         del X_tr, y_tr
 
         X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
@@ -189,7 +199,9 @@ class LightGBMAdapter(ModelAdapter):
             params=construct_params,
             free_raw_data=True,
         ).construct()
+        log_data_volume(logger, "prepare.ds_dev", ds_dev)
         ds_dev.save_binary(str(dev_bin))
+        log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
         del X_dev, y_dev, ds_train, ds_dev
 
         success.touch()

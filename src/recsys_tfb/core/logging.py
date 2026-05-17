@@ -72,7 +72,7 @@ class JsonFormatter(logging.Formatter):
         # Merge extra fields attached by callers (e.g. event, node, step, duration)
         for key in ("event", "node", "step", "duration_seconds", "input_names",
                      "output_names", "status", "error_message",
-                     "exception_type", "node_count", "dataset_name"):
+                     "exception_type", "node_count", "dataset_name", "volume"):
             val = getattr(record, key, None)
             if val is not None:
                 log_entry[key] = val
@@ -195,3 +195,91 @@ def log_step(step_logger: logging.Logger, step_name: str):
             },
         )
         raise
+
+
+def _human_bytes(n: "int | None") -> str:
+    if n is None:
+        return "?"
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(v) < 1024.0:
+            return f"{v:.1f}{unit}"
+        v /= 1024.0
+    return f"{v:.1f}PB"
+
+
+def log_data_volume(logger, name, obj, *, deep: bool = True, **fields) -> None:
+    """Emit a uniform data-volume record for a memory-heavy object.
+
+    Duck-typed dispatch keeps core/logging.py free of pandas/numpy/pyarrow/
+    lightgbm imports. Observation must never break the real computation: any
+    failure downgrades to a WARNING and returns.
+    """
+    if obj is None:
+        logger.warning(
+            "log_data_volume skipped: obj is None name=%s", name,
+            extra={"event": "data_volume_skipped"},
+        )
+        return
+
+    try:
+        if hasattr(obj, "num_data"):  # lightgbm.Dataset
+            kind, rows, cols = "lgb_dataset", obj.num_data(), obj.num_feature()
+            n_bytes, dtype = None, None
+        elif hasattr(obj, "memory_usage"):  # pandas.DataFrame
+            kind = "pandas"
+            rows = len(obj)
+            cols = obj.shape[1] if obj.ndim > 1 else 1
+            n_bytes = int(obj.memory_usage(deep=deep).sum())
+            dts = {str(t) for t in getattr(obj, "dtypes", [])}
+            dtype = next(iter(dts)) if len(dts) == 1 else "mixed"
+        elif hasattr(obj, "num_rows") and hasattr(obj, "column_names"):  # pyarrow.Table
+            kind = "arrow"
+            rows, cols, n_bytes, dtype = (
+                obj.num_rows, obj.num_columns, obj.nbytes, None
+            )
+        elif hasattr(obj, "nbytes"):  # numpy.ndarray
+            kind = "numpy"
+            shape = obj.shape
+            rows = shape[0] if shape else 0
+            cols = shape[1] if len(shape) > 1 else 1
+            n_bytes, dtype = obj.nbytes, str(obj.dtype)
+        elif isinstance(obj, (str, Path)):  # file path
+            p = Path(obj)
+            if not p.exists():
+                logger.warning(
+                    "log_data_volume skipped: path missing name=%s path=%s",
+                    name, p, extra={"event": "data_volume_skipped"},
+                )
+                return
+            kind, rows, cols = "file", None, None
+            n_bytes, dtype = p.stat().st_size, None
+        else:
+            logger.warning(
+                "log_data_volume unsupported kind name=%s type=%s",
+                name, type(obj).__name__,
+                extra={"event": "data_volume_skipped"},
+            )
+            return
+    except Exception as e:  # noqa: BLE001 — observation must not raise
+        logger.warning(
+            "log_data_volume failed name=%s exc=%s: %s",
+            name, type(e).__name__, repr(e)[:200],
+            extra={
+                "event": "data_volume_skipped",
+                "exception_type": type(e).__name__,
+            },
+        )
+        return
+
+    volume = {
+        "name": name, "kind": kind, "rows": rows, "cols": cols,
+        "bytes": n_bytes, "dtype": dtype, "deep": deep, **fields,
+    }
+    logger.info(
+        "data_volume name=%s kind=%s rows=%s cols=%s bytes=%s dtype=%s",
+        name, kind,
+        f"{rows:,}" if isinstance(rows, int) else rows,
+        cols, _human_bytes(n_bytes), dtype,
+        extra={"event": "data_volume", "volume": volume},
+    )

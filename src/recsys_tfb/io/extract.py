@@ -16,7 +16,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.core.logging import log_step
+from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.handles import ParquetHandle
 
@@ -89,11 +89,7 @@ def _pdf_to_X(
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
-    logger.info(
-        "_pdf_to_X: X_df rows=%d n_features=%d mem=%.1fMB",
-        len(X_df), X_df.shape[1],
-        X_df.memory_usage(deep=False).sum() / 1024**2,
-    )
+    log_data_volume(logger, "_pdf_to_X.X_df", X_df, deep=True)
 
     deferred_cats = [
         c for c in categorical_cols if c in identity_cols and c in X_df.columns
@@ -148,19 +144,13 @@ def extract_Xy(
 
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()
-    logger.info(
-        "extract_Xy: parquet loaded rows=%d cols=%d",
-        len(pdf), len(pdf.columns),
-    )
+    log_data_volume(logger, "extract_Xy.pdf", pdf, deep=True)
 
     X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
     y = pdf[label_col].values
 
-    logger.info(
-        "extract_Xy: X shape=%s dtype=%s nbytes=%.1fMB; y len=%d dtype=%s",
-        X.shape, X.dtype, X.nbytes / 1024**2,
-        len(y), y.dtype,
-    )
+    log_data_volume(logger, "extract_Xy.X", X)
+    log_data_volume(logger, "extract_Xy.y", y)
 
     return X, y
 
@@ -206,10 +196,7 @@ def extract_Xy_with_groups(
 
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()
-    logger.info(
-        "extract_Xy_with_groups: parquet loaded rows=%d cols=%d",
-        len(pdf), len(pdf.columns),
-    )
+    log_data_volume(logger, "extract_Xy_with_groups.pdf", pdf, deep=True)
 
     if filter_groups_with_positives:
         with log_step(logger, "filter_groups_with_positives"):
@@ -223,11 +210,7 @@ def extract_Xy_with_groups(
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
-    logger.info(
-        "extract_Xy_with_groups: X_df rows=%d n_features=%d mem=%.1fMB",
-        len(X_df), X_df.shape[1],
-        X_df.memory_usage(deep=False).sum() / 1024**2,
-    )
+    log_data_volume(logger, "extract_Xy_with_groups.X_df", X_df, deep=True)
 
     deferred_cats = [
         c for c in categorical_cols if c in identity_cols and c in X_df.columns
@@ -248,11 +231,11 @@ def extract_Xy_with_groups(
         groups = (
             pdf.groupby(group_cols, sort=False).ngroup().to_numpy(dtype=np.int64)
         )
+    log_data_volume(logger, "extract_Xy_with_groups.X", X)
+    log_data_volume(logger, "extract_Xy_with_groups.y", y)
+    log_data_volume(logger, "extract_Xy_with_groups.groups", groups)
     logger.info(
-        "extract_Xy_with_groups: X shape=%s dtype=%s nbytes=%.1fMB; "
-        "y len=%d dtype=%s; n_groups=%d",
-        X.shape, X.dtype, X.nbytes / 1024**2,
-        len(y), y.dtype,
+        "extract_Xy_with_groups: n_groups=%d",
         int(groups.max()) + 1 if len(groups) else 0,
     )
 
