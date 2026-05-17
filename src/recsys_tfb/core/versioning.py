@@ -42,6 +42,19 @@ CALIBRATION_SAMPLING_KEYS: frozenset[str] = frozenset({
 ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
 
 
+# Keys under training.algorithm_params that do NOT affect the trained model
+# (pure logging / threading). Excluded from the model_version hash so changing
+# them does not orphan an otherwise-identical model. num_threads is treated as
+# irrelevant by decision: LightGBM is not guaranteed bitwise-identical across
+# thread counts, but it is pinned to the production core count and rarely
+# changes (see the design spec, Decision 1).
+MODEL_VERSION_IRRELEVANT_PARAMS: frozenset[str] = frozenset({
+    "verbosity",
+    "log_period",
+    "num_threads",
+})
+
+
 def _hash8(payload: dict) -> str:
     canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
@@ -103,14 +116,49 @@ def compute_calibration_variant_id(params: dict) -> str:
     return _hash8({"calibration_sampling": subset})
 
 
+def _model_version_payload(params: dict) -> dict:
+    """Return the model-defining view of training params for hashing.
+
+    Only the ``training:`` block defines the trained artifact; top-level
+    ``spark`` / ``mlflow`` / ``cache`` (and any future ops block) are excluded
+    structurally by narrowing here. Within ``training.algorithm_params`` the
+    pure logging/threading knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS`` are
+    dropped. A new key *under* ``training:`` defaults to being included — safe
+    over-invalidation, never a silent ``model_version`` collision.
+
+    Deep-copies so the caller's params dict is never mutated: the full,
+    unscoped params are still written to ``manifest.json`` for provenance.
+    """
+    training = params.get("training")
+    if not isinstance(training, dict):
+        return {}
+    training = copy.deepcopy(training)
+    ap = training.get("algorithm_params")
+    if isinstance(ap, dict):
+        for key in MODEL_VERSION_IRRELEVANT_PARAMS:
+            ap.pop(key, None)
+    return {"training": training}
+
+
 def compute_model_version(
     params: dict,
     base_dataset_version: str,
     train_variant_id: str,
     calibration_variant_id: str | None = None,
 ) -> str:
-    """Compute model version ID from training params and dataset variant IDs."""
-    canonical = yaml.dump(params, sort_keys=True, default_flow_style=False)
+    """Compute model version ID from model-defining training params + variants.
+
+    Only the model-defining subset of ``params`` is hashed (see
+    :func:`_model_version_payload`): the ``training:`` block minus the pure
+    logging/threading knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS``. Changing
+    ops-only config (``spark`` / ``mlflow`` / ``cache``, ``verbosity``,
+    ``log_period``, ``num_threads``) therefore does not change the version.
+    """
+    canonical = yaml.dump(
+        _model_version_payload(params),
+        sort_keys=True,
+        default_flow_style=False,
+    )
     parts = [canonical, base_dataset_version, train_variant_id]
     if calibration_variant_id is not None:
         parts.append(calibration_variant_id)
