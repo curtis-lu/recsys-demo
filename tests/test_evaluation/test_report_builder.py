@@ -138,3 +138,23 @@ def test_category_section_has_composition_table():
     assert "大類組成" in s.table_titles
     joined = " ".join(str(t.to_dict()) for t in s.tables)
     assert "fund_stock" in joined
+
+
+def test_baseline_section_no_per_item_delta_omits_table():
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}}          # no per_item -> per_item_delta empty
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    assert s.table_titles == ["overall delta"]
+    assert len(s.tables) == 1
+
+
+def test_category_section_omits_composition_when_no_mapping():
+    m = _metrics()
+    m["category"] = {"overall": {"map@1": 0.7},
+                     "per_item": {"fund": {"hit_rate@1": 0.5,
+                                           "mean_pos": 2.0}},
+                     "dataset_overview": m["dataset_overview"]}
+    p = _params()  # _params() has no product_categories.mapping
+    s = rb.build_category_section(m, p)
+    assert "大類組成" not in s.table_titles

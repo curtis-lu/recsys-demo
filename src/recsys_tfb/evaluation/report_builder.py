@@ -213,15 +213,20 @@ def build_category_section(
     rec_tbl = _per_item_recall_table(cat.get("per_item", {}), rec_ks, n_cat)
     mapping = (((parameters.get("evaluation", {}) or {})
                .get("product_categories", {}) or {}).get("mapping", {})) or {}
-    comp_tbl = pd.DataFrame(
-        [{"子產品": ", ".join(v)} for v in mapping.values()],
-        index=list(mapping.keys()),
-    )
+    tables = [map_tbl, rec_tbl]
+    table_titles = ["大類 mAP@k", "大類 per-item recall@k"]
+    if mapping:
+        comp_tbl = pd.DataFrame(
+            [{"子產品": ", ".join(v)} for v in mapping.values()],
+            index=list(mapping.keys()),
+        )
+        tables.append(comp_tbl)
+        table_titles.append("大類組成")
     return ReportSection(
         title="大類層級 Category",
         description="大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。",
-        tables=[map_tbl, rec_tbl, comp_tbl],
-        table_titles=["大類 mAP@k", "大類 per-item recall@k", "大類組成"],
+        tables=tables,
+        table_titles=table_titles,
     )
 
 
@@ -272,24 +277,30 @@ def build_baseline_section(
     delta.columns = ["Delta (Model - Baseline)"]
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
+    # _k_to_lookup handles a hypothetical "all" in guardrail_recall_k
+    # (defaults are numeric, but keep parity with the §3 guardrail).
     rec_ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
     pid = comp.get("per_item_delta", {}) or {}
-    rec_rows = {
-        item: {
-            f"recall@{k} (per-item) Δ":
-                md.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
-            for k in rec_ks
+    tables = [delta]
+    table_titles = ["overall delta"]
+    if pid and (baseline_metrics or {}).get("per_item"):
+        rec_rows = {
+            item: {
+                f"recall@{k} (per-item) Δ":
+                    md.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
+                for k in rec_ks
+            }
+            for item, md in pid.items()
         }
-        for item, md in pid.items()
-    }
-    per_item_delta_tbl = pd.DataFrame(rec_rows).T
+        tables.append(pd.DataFrame(rec_rows).T)
+        table_titles.append("per-item recall@k delta")
     return ReportSection(
         title="基準比較 Baseline",
         description="Model vs Baseline：overall mAP@k 與 per-item recall@k delta。",
-        tables=[delta, per_item_delta_tbl],
-        table_titles=["overall delta", "per-item recall@k delta"],
+        tables=tables,
+        table_titles=table_titles,
     )
 
 
