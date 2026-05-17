@@ -1,7 +1,7 @@
 # Graph Report - config-consistency-validation  (2026-05-17)
 
 ## Corpus Check
-- 156 files · ~346,906 words
+- 156 files · ~346,985 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
