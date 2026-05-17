@@ -86,11 +86,12 @@ def validate_schema_config(parameters: dict) -> None:
     - ``identity_columns`` ([time] + entity + [item]) must not contain
       duplicates.
     - ``categorical_values`` must be a mapping of non-empty str -> list.
-    - Any identity categorical column (i.e. declared in
-      ``dataset.prepare_model_input.categorical_columns`` AND also an identity
-      column) must have a non-empty entry in ``schema.categorical_values``.
-      This catches the case where ``prod_name`` categories would otherwise
-      be silently discovered from sampled train data.
+    - The item column (``schema.item``) — when declared in
+      ``dataset.prepare_model_input.categorical_columns`` — must have a
+      non-empty entry in ``schema.categorical_values``. This invariant (A3)
+      is delegated to :func:`recsys_tfb.core.consistency.resolved_item_values`
+      so config-time and runtime guards share one definition; see that
+      function for the precise rule.
     - Missing keys are allowed (they fall back to :data:`_DEFAULTS` in
       :func:`get_schema`).
 
