@@ -159,7 +159,8 @@ class TestValidateConfigConsistency:
             validate_config_consistency(p)
         msg = str(ei.value)
         assert "cust_segment_typ" in msg
-        assert "drop_columns" in msg and "categorical_columns" in msg
+        assert "remove from drop_columns" in msg
+        assert "remove from categorical_columns" in msg
 
     def test_collects_multiple_errors_in_one_raise(self):
         p = _base({"inference": {"products": ["a", "c"]}})
