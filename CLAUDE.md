@@ -21,6 +21,16 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - No network access
 - No additional package installation
 
+## 測試效能與避免長時間阻塞
+
+pytest 的 `spark` fixture 是 function-scoped（每個測試重啟 SparkSession）。**跑整包 `tests/test_evaluation` 約需 ~33 分鐘**，整包 `tests/` 更久。為避免卡住：
+
+- **永遠只跑與改動相關的特定測試檔**，不要把整包 Spark 測試當「保險再驗一次」重跑。例：改 `metrics_spark.py` → 只跑 `tests/test_evaluation/test_metrics_spark*.py`。
+- **controller / code review 驗證用 `git diff <base>..<head>`（SHA-based，秒級）＋ 針對性 grep**，不要重跑 subagent 已經驗過的測試。
+- 真要跑可能 >2 分鐘的指令，明確設短 timeout 或拆子集；**絕不讓 30+ 分鐘的 Spark 全量測試擋住流程**（曾因此空轉整晚）。
+- 全量回歸只在「最終整合驗證」做一次，並預期它很慢、用 background 執行且不阻塞其他進度。
+- 跨 worktree 驗證一律用絕對路徑或 `git -C <worktree>`；Bash cwd 會在 skill/`cd` 後被 reset，相對路徑可能讀到 stale 的 main tree。
+
 ## Local dev-cluster testing
 
 在本機 dev-cluster 互動測試 pipeline：
