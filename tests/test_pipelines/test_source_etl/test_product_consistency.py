@@ -151,8 +151,6 @@ def test_lint_uses_consistency_predicate_for_config_side():
     """The yaml/config arm of the lint must derive from the single predicate,
     not re-parse parameters.yaml independently (prevents definition drift)."""
     import inspect
-    import re
-    import yaml
     from recsys_tfb.core import consistency
 
     src = inspect.getsource(consistency.resolved_item_values)
