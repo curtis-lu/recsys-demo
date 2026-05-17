@@ -14,9 +14,18 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         select_train_keys,
         select_val_keys,
         split_train_keys,
+        validate_data_consistency,
     )
 
     nodes = [
+        # --- Layer-2 B1 data gate: runs first (insertion-order Kahn seed),
+        # side-effect only (outputs=None), fail-fast before any sampling ---
+        Node(
+            validate_data_consistency,
+            inputs=["sample_pool", "label_table", "parameters"],
+            outputs=None,
+            name="validate_data_consistency",
+        ),
         # --- Key selection ---
         Node(
             select_train_keys,
