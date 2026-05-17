@@ -6,6 +6,44 @@ all call these predicates — no duplicated definitions, no message drift.
 
 All errors subclass ValueError so existing ``except ValueError`` call sites
 (__main__._load_config_and_setup) and existing tests keep working unchanged.
+
+Invariant legend
+----------------
+Code comments across this module, ``core/schema.py`` and
+``preprocessing/_spark.py`` reference invariants by ID. This docstring is the
+canonical legend (the full design rationale lives in
+``docs/superpowers/plans/2026-05-17-config-consistency-validation.md``).
+
+Layer 1 — config-static (implemented here; aggregated by
+``validate_config_consistency``, run at CLI entry):
+
+* A1 — a column declared in BOTH ``drop_columns`` and ``categorical_columns``
+  (contradictory role). Predicate: ``config_role_conflicts``.
+* A2 — ``categorical_columns`` omits ``schema.item``. Predicate:
+  ``item_missing_from_categorical`` (runtime backstop: ``_spark.py`` item
+  guard).
+* A3 — an identity categorical (``schema.item``) is declared in
+  ``categorical_columns`` but absent from ``schema.categorical_values``.
+  Predicate: ``resolved_item_values`` (also delegated to by
+  ``schema.validate_schema_config``; runtime backstop: ``_spark.py``
+  identity-cat guard, which raises ``DataConsistencyError``).
+* A4 — ``inference.products`` ≠ ``schema.categorical_values[item]``.
+  Predicate: ``inference_products_mismatch``.
+* A5 — a ``sample_ratio_overrides`` key references an item value absent from
+  ``schema.categorical_values[item]``. Predicate: ``override_unknown_items``.
+* A6 — the hardcoded item lists across YAML/SQL/synthetic-data disagree.
+  Enforced by the ``tests/test_pipelines/test_source_etl/
+  test_product_consistency.py`` lint (consumes ``resolved_item_values``),
+  not a predicate here.
+
+Layer 2/3 — specified but DEFERRED (NOT implemented in this module yet); see
+the plan doc for the full table:
+
+* B1 — train-data item value ∉ ``categorical_values[item]`` (silent ``-1``
+  training corruption). B2 — label-window leakage columns reach features.
+  B3 — a declared item has zero positives over the train window.
+* C1 — produced sample_pool/label distinct item ≠ config (source_etl
+  runtime pre-flight).
 """
 
 from __future__ import annotations
