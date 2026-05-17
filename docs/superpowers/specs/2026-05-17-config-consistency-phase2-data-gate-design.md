@@ -272,3 +272,10 @@ affect this spec, but **the implementation/test phase cannot start until the
 venv is repaired** (recreate the editable-install venv with the pinned
 toolchain in CLAUDE.md / pyproject). To be resolved with the user before
 writing-plans → subagent-driven-development.
+
+## Phase 2 IMPLEMENTED (2026-05-17)
+
+Tasks 1–5 complete. `item_coverage_errors` predicate + `validate_data_consistency`
+Spark gate wired as the first dataset-pipeline node; `_spark.py` A2 backstop
+converted to `DataConsistencyError`. `_configured_snap_dates` superseded by reuse
+of `collect_dataset_snap_dates` (DRY). §9 venv blocker resolved before execution.
