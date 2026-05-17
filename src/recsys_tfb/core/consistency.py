@@ -120,3 +120,51 @@ def item_missing_from_categorical(parameters: dict) -> bool:
     if declared is None:
         return False
     return item not in declared
+
+
+def validate_config_consistency(parameters: dict) -> None:
+    """Layer-1 config-static gate. Collects ALL failures, raises once.
+
+    Collect-all (not fail-on-first) so a user fixes every problem in one pass.
+    """
+    errors: list[str] = []
+
+    for col in config_role_conflicts(parameters):
+        errors.append(
+            f"{col!r} is declared in BOTH "
+            f"dataset.prepare_model_input.drop_columns and categorical_columns "
+            f"— contradictory intent. Resolve by choosing one:\n"
+            f"    - want it as a feature  -> remove from drop_columns\n"
+            f"    - want it excluded      -> remove from categorical_columns"
+        )
+
+    if item_missing_from_categorical(parameters):
+        item = get_schema(parameters)["item"]
+        errors.append(
+            f"schema.item={item!r} is missing from "
+            f"dataset.prepare_model_input.categorical_columns. For a ranking "
+            f"task the item must be a model feature; add {item!r} back."
+        )
+
+    mm = inference_products_mismatch(parameters)
+    if mm["only_in_inference"] or mm["only_in_categorical"]:
+        errors.append(
+            f"inference.products disagrees with schema.categorical_values"
+            f"[item]: only_in_inference={mm['only_in_inference']}, "
+            f"only_in_categorical={mm['only_in_categorical']}. They must be "
+            f"identical sets."
+        )
+
+    unknown = override_unknown_items(parameters)
+    if unknown:
+        errors.append(
+            f"sample_ratio_overrides references item value(s) {unknown} "
+            f"absent from schema.categorical_values[item] — the override "
+            f"silently never matches. Fix the key(s) or declare the value(s)."
+        )
+
+    if errors:
+        raise ConfigConsistencyError(
+            "Config consistency check failed (" + str(len(errors))
+            + " issue(s)):\n- " + "\n- ".join(errors)
+        )

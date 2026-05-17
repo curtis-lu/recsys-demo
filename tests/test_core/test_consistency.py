@@ -141,3 +141,31 @@ class TestItemMissingFromCategorical:
         p = _base()
         del p["dataset"]["prepare_model_input"]["categorical_columns"]
         assert item_missing_from_categorical(p) is False
+
+
+from recsys_tfb.core.consistency import validate_config_consistency
+
+
+class TestValidateConfigConsistency:
+    def test_clean_config_passes(self):
+        validate_config_consistency(_base({"inference": {"products": ["a", "b"]}}))
+
+    def test_a1_conflict_message_names_both_resolutions(self):
+        p = _base()
+        p["dataset"]["prepare_model_input"]["drop_columns"] = ["cust_segment_typ"]
+        p["dataset"]["prepare_model_input"]["categorical_columns"] = [
+            "prod_name", "cust_segment_typ"]
+        with pytest.raises(ConfigConsistencyError) as ei:
+            validate_config_consistency(p)
+        msg = str(ei.value)
+        assert "cust_segment_typ" in msg
+        assert "drop_columns" in msg and "categorical_columns" in msg
+
+    def test_collects_multiple_errors_in_one_raise(self):
+        p = _base({"inference": {"products": ["a", "c"]}})
+        p["dataset"]["prepare_model_input"]["drop_columns"] = ["prod_name"]
+        with pytest.raises(ConfigConsistencyError) as ei:
+            validate_config_consistency(p)
+        msg = str(ei.value)
+        assert "prod_name" in msg          # A1 (prod_name in drop ∩ categorical)
+        assert "c" in msg                  # A4 only_in_inference
