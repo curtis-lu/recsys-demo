@@ -9,6 +9,7 @@ from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.logging import RunContext, setup_logging
 from recsys_tfb.core.runner import Runner
+from recsys_tfb.core.consistency import validate_config_consistency
 from recsys_tfb.core.schema import (
     get_schema_for_hash,
     validate_schema_config,
@@ -81,8 +82,9 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
 
     try:
         validate_schema_config(params)
+        validate_config_consistency(params)
     except ValueError as exc:
-        logger.error("Schema config validation failed: %s", exc)
+        logger.error("Config validation failed: %s", exc)
         raise typer.Exit(code=1)
 
     return config, params, run_context
