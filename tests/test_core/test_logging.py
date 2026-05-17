@@ -240,3 +240,60 @@ class TestLogDataVolume:
             log_data_volume(logger, "t", tbl)
 
         assert self._vol_records(caplog)[0].volume["kind"] == "arrow"
+
+    def test_none_obj_warns_does_not_raise(self, caplog):
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.WARNING, logger="test_ldv"):
+            log_data_volume(logger, "nothing", None)
+
+        assert not self._vol_records(caplog)
+        assert any(
+            r.levelno == logging.WARNING and "obj is None" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_unsupported_type_warns(self, caplog):
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.WARNING, logger="test_ldv"):
+            log_data_volume(logger, "weird", object())
+
+        assert not self._vol_records(caplog)
+        assert any("unsupported kind" in r.getMessage() for r in caplog.records)
+
+    def test_sizing_exception_is_swallowed(self, caplog):
+        from recsys_tfb.core.logging import log_data_volume
+
+        class Exploding:
+            def memory_usage(self, deep=True):
+                raise RuntimeError("boom")
+
+            ndim = 2
+            shape = (1, 1)
+
+            def __len__(self):
+                return 1
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.WARNING, logger="test_ldv"):
+            log_data_volume(logger, "bad", Exploding())  # must NOT raise
+
+        assert not self._vol_records(caplog)
+        assert any(
+            "log_data_volume failed" in r.getMessage()
+            and getattr(r, "exception_type", None) == "RuntimeError"
+            for r in caplog.records
+        )
+
+    def test_missing_file_path_warns(self, caplog, tmp_path):
+        from recsys_tfb.core.logging import log_data_volume
+
+        logger = logging.getLogger("test_ldv")
+        with caplog.at_level(logging.WARNING, logger="test_ldv"):
+            log_data_volume(logger, "ghost", str(tmp_path / "nope.bin"))
+
+        assert not self._vol_records(caplog)
+        assert any("path missing" in r.getMessage() for r in caplog.records)
