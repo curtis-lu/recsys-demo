@@ -10,6 +10,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.calibration import plot_calibration_curves
 from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
+    plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
     plot_score_distributions,
     plot_score_distributions_by_label,
@@ -138,6 +139,8 @@ def generate_report(
             sdf = sdf.limit(int(sample_rows))
         pred_cols = list(dict.fromkeys(id_cols + [score_col, rank_col]))
         predictions = sdf.select(*pred_cols).toPandas()
+        # NOTE: when sample_rows is set, diagnostics labels are deduped over
+        # the sampled rows only (acceptable: diagnostics are display-only).
         labels = (
             sdf.select(*list(dict.fromkeys(id_cols + [label_col])))
             .distinct()
@@ -159,6 +162,12 @@ def generate_report(
             )
             figs.append(
                 plot_positive_rank_heatmap(
+                    predictions, labels, id_cols=tuple(id_cols),
+                    item_col=item_col, rank_col=rank_col, label_col=label_col
+                )
+            )
+            figs.append(
+                plot_positive_rate_rank_heatmap(
                     predictions, labels, id_cols=tuple(id_cols),
                     item_col=item_col, rank_col=rank_col, label_col=label_col
                 )
