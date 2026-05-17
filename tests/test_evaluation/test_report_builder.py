@@ -55,3 +55,42 @@ def test_primary_map_section_slices_k():
     cols = list(s.tables[0].columns) + list(s.tables[0].index)
     joined = " ".join(map(str, cols))
     assert "map@1" in joined and "map@3" in joined
+
+
+def test_guardrail_section_renames_hitrate_and_has_heatmap():
+    s = rb.build_guardrail_recall_section(_metrics(), _params())
+    cols = " ".join(map(str, s.tables[0].columns))
+    assert "recall@1 (per-item)" in cols
+    assert "hit_rate" not in cols
+    assert len(s.figures) == 1            # plotly heatmap
+
+
+def test_category_section_none_when_absent():
+    assert rb.build_category_section(_metrics(), _params()) is None
+
+
+def test_category_section_present_when_category_key():
+    m = _metrics()
+    m["category"] = {"overall": {"map@1": 0.7},
+                     "per_item": {"fund": {"hit_rate@1": 0.5,
+                                           "mean_pos": 2.0}},
+                     "dataset_overview": m["dataset_overview"]}
+    s = rb.build_category_section(m, _params())
+    assert s is not None and s.tables
+
+
+def test_glossary_section_always_built():
+    s = rb.build_glossary_section(_params())
+    assert "recall@k (per-item)" in " ".join(
+        map(str, s.tables[0].to_dict().values()))
+
+
+def test_assemble_report_is_html():
+    html = rb.assemble_report(_metrics(), _params())
+    assert html.startswith("<!DOCTYPE html>")
+    assert "摘要 Headline" in html
+
+
+def test_primary_map_orientation_locked():
+    s = rb.build_primary_map_section(_metrics(), _params())
+    assert "map" in s.tables[0].index   # families are the row index
