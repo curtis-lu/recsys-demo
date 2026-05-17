@@ -8,6 +8,7 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 
+from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
@@ -140,6 +141,8 @@ class LightGBMAdapter(ModelAdapter):
 
         if success.exists():
             logger.info("lgb binary cache hit at %s", lgb_dir)
+            log_data_volume(logger, "prepare.train.bin", str(train_bin))
+            log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
             return (
                 LgbDatasetHandle(bin_path=str(train_bin), role="train"),
                 LgbDatasetHandle(bin_path=str(dev_bin), role="train_dev"),
@@ -177,7 +180,9 @@ class LightGBMAdapter(ModelAdapter):
             params=construct_params,
             free_raw_data=True,
         ).construct()
+        log_data_volume(logger, "prepare.ds_train", ds_train)
         ds_train.save_binary(str(train_bin))
+        log_data_volume(logger, "prepare.train.bin", str(train_bin))
         del X_tr, y_tr
 
         X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
@@ -189,7 +194,9 @@ class LightGBMAdapter(ModelAdapter):
             params=construct_params,
             free_raw_data=True,
         ).construct()
+        log_data_volume(logger, "prepare.ds_dev", ds_dev)
         ds_dev.save_binary(str(dev_bin))
+        log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
         del X_dev, y_dev, ds_train, ds_dev
 
         success.touch()
