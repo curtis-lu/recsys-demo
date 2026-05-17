@@ -337,6 +337,17 @@ class TestComputeModelVersion:
         compute_model_version(params, "b", "t")
         assert params == snapshot
 
+    def test_no_training_block_yields_stable_hash(self):
+        # No training: block -> empty model-defining payload. The hash must
+        # ignore all non-training top-level content (documented contract of
+        # _model_version_payload's isinstance guard), so these are equal.
+        a = compute_model_version({"spark": {"app_name": "x"}}, "b", "t")
+        b = compute_model_version(
+            {"mlflow": {"experiment_name": "y"}, "cache": {"root": "/p"}},
+            "b", "t",
+        )
+        assert a == b
+
 
 class TestWriteManifest:
     def test_writes_json_file(self, tmp_path):
