@@ -27,8 +27,9 @@ def prepare_eval_data(
 ) -> SparkDataFrame:
     """Join ranked predictions with labels using Spark.
 
-    For external segment sources, loads Parquet files and joins to labels
-    before merging with predictions.
+    For external segment sources, delegates to
+    ``segments.join_segment_sources`` (storage backend isolated behind its
+    source seam).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]

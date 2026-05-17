@@ -8,6 +8,8 @@ sections into the final HTML.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -57,11 +59,12 @@ def _n_products(metrics: dict) -> int:
 def build_headline_section(metrics: dict, parameters: dict) -> ReportSection:
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
     ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), _n_products(metrics)
+        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
     card = {
-        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, _n_products(metrics))}")
+        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_prod)}")
         for k in ks
     }
     meta = {
@@ -90,11 +93,19 @@ def build_dataset_overview_section(
     totals.columns = ["value"]
     by_snap = pd.DataFrame(ov.get("by_snap_date", {})).T
     by_item = pd.DataFrame(ov.get("by_item", {})).T
+    tables = [totals, by_snap, by_item]
+    titles = ["總覽", "by snap_date", "by 產品"]
+    cat = metrics.get("category")
+    if cat:
+        cat_by_item = (cat.get("dataset_overview", {}) or {}).get("by_item", {})
+        if cat_by_item:
+            tables.append(pd.DataFrame(cat_by_item).T)
+            titles.append("by 大類")
     return ReportSection(
         title="資料概況 Dataset Overview",
-        description="總覽、依 snap_date、依產品的筆數／正樣本數／客戶數。",
-        tables=[totals, by_snap, by_item],
-        table_titles=["總覽", "by snap_date", "by 產品"],
+        description="總覽、依 snap_date、依產品（及大類）的筆數／正樣本數／客戶數。",
+        tables=tables,
+        table_titles=titles,
     )
 
 
@@ -200,11 +211,17 @@ def build_category_section(
     ).T
     map_tbl.columns = ["value"]
     rec_tbl = _per_item_recall_table(cat.get("per_item", {}), rec_ks, n_cat)
+    mapping = (((parameters.get("evaluation", {}) or {})
+               .get("product_categories", {}) or {}).get("mapping", {})) or {}
+    comp_tbl = pd.DataFrame(
+        [{"子產品": ", ".join(v)} for v in mapping.values()],
+        index=list(mapping.keys()),
+    )
     return ReportSection(
         title="大類層級 Category",
         description="大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。",
-        tables=[map_tbl, rec_tbl],
-        table_titles=["大類 mAP@k", "大類 per-item recall@k"],
+        tables=[map_tbl, rec_tbl, comp_tbl],
+        table_titles=["大類 mAP@k", "大類 per-item recall@k", "大類組成"],
     )
 
 
@@ -253,11 +270,26 @@ def build_baseline_section(
     )
     delta = pd.DataFrame([comp["overall_delta"]]).T
     delta.columns = ["Delta (Model - Baseline)"]
+    disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
+    rec_ks = _resolve_display_k(
+        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
+    )
+    pid = comp.get("per_item_delta", {}) or {}
+    rec_rows = {
+        item: {
+            f"recall@{k} (per-item) Δ":
+                md.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
+            for k in rec_ks
+        }
+        for item, md in pid.items()
+    }
+    per_item_delta_tbl = pd.DataFrame(rec_rows).T
     return ReportSection(
         title="基準比較 Baseline",
-        description="Model vs Baseline：overall 指標 delta。",
-        tables=[delta],
-        table_titles=["overall delta"],
+        description="Model vs Baseline：overall mAP@k 與 per-item recall@k delta。",
+        tables=[delta, per_item_delta_tbl],
+        table_titles=["overall delta", "per-item recall@k delta"],
     )
 
 
@@ -302,7 +334,9 @@ def assemble_report(
     sections = [s for s in candidates if s is not None]
     eval_params = parameters.get("evaluation", {}) or {}
     metadata = {
+        "Model Version": parameters.get("model_version", "unknown"),
         "Snap Date": eval_params.get("snap_date", "unknown"),
+        "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Total Queries": metrics.get("n_queries"),
         "Excluded Queries": metrics.get("n_excluded_queries"),
     }

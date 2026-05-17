@@ -1,7 +1,5 @@
 """Comparison logic for evaluating two models or model vs baseline."""
 
-import plotly.graph_objects as go
-
 
 def build_comparison_result(
     result_a: dict,
@@ -56,41 +54,3 @@ def _compute_nested_delta(nested_a: dict, nested_b: dict) -> dict:
     }
 
 
-def plot_comparison_metrics(comparison: dict) -> list[go.Figure]:
-    """Side-by-side bar charts of per-item metrics between two result dicts.
-
-    Returns one Figure per metric (hit_rate@K / map_attr@K / ndcg_attr@K /
-    mean_pos), with items on the x-axis.
-    """
-    result_a = comparison["result_a"]
-    result_b = comparison["result_b"]
-    label_a = comparison["label_a"]
-    label_b = comparison["label_b"]
-
-    per_item_a = result_a.get("per_item", {})
-    per_item_b = result_b.get("per_item", {})
-
-    items = sorted(set(list(per_item_a.keys()) + list(per_item_b.keys())))
-    if not items:
-        return []
-
-    sample = per_item_a.get(items[0]) or per_item_b.get(items[0], {})
-    metric_keys = list(sample.keys())
-
-    figures = []
-    for metric in metric_keys:
-        values_a = [per_item_a.get(p, {}).get(metric, 0.0) for p in items]
-        values_b = [per_item_b.get(p, {}).get(metric, 0.0) for p in items]
-
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=items, y=values_a, name=label_a, marker_color="steelblue"))
-        fig.add_trace(go.Bar(x=items, y=values_b, name=label_b, marker_color="darkorange"))
-        fig.update_layout(
-            title=f"{metric.upper()} Comparison",
-            xaxis_title="Item",
-            yaxis_title=metric,
-            barmode="group",
-        )
-        figures.append(fig)
-
-    return figures

@@ -94,3 +94,47 @@ def test_assemble_report_is_html():
 def test_primary_map_orientation_locked():
     s = rb.build_primary_map_section(_metrics(), _params())
     assert "map" in s.tables[0].index   # families are the row index
+
+
+def test_baseline_section_has_per_item_recall_delta():
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4},
+            "per_item": {"A": {"hit_rate@1": 0.1}}}
+    p = _params()
+    p["evaluation"].setdefault("report", {}).setdefault("sections", {})
+    s = rb.build_baseline_section(m, base, p)
+    assert s is not None
+    assert len(s.tables) == 2
+    assert "per-item recall@k delta" in s.table_titles
+
+
+def test_assemble_metadata_has_model_version_and_generated_at():
+    p = _params()
+    p["model_version"] = "v_test"
+    html = rb.assemble_report(_metrics(), p)
+    assert "v_test" in html
+    assert "Generated At" in html
+
+
+def test_dataset_overview_adds_by_category_when_present():
+    m = _metrics()
+    m["category"] = {"dataset_overview": {"by_item": {
+        "fund": {"n_rows": 10, "n_positives": 3, "n_customers": 5,
+                 "positive_rate": 0.3}}}}
+    s = rb.build_dataset_overview_section(m, _params())
+    assert "by 大類" in s.table_titles
+
+
+def test_category_section_has_composition_table():
+    m = _metrics()
+    m["category"] = {"overall": {"map@1": 0.7},
+                     "per_item": {"fund": {"hit_rate@1": 0.5,
+                                           "mean_pos": 2.0}},
+                     "dataset_overview": m["dataset_overview"]}
+    p = _params()
+    p["evaluation"]["product_categories"] = {
+        "mapping": {"fund": ["fund_stock", "fund_bond"]}}
+    s = rb.build_category_section(m, p)
+    assert "大類組成" in s.table_titles
+    joined = " ".join(str(t.to_dict()) for t in s.tables)
+    assert "fund_stock" in joined

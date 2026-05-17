@@ -7,12 +7,10 @@ matches what ``metrics_spark.compute_all_metrics`` produces.
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import pytest
 
 from recsys_tfb.evaluation.compare import (
     build_comparison_result,
-    plot_comparison_metrics,
 )
 
 
@@ -105,25 +103,6 @@ class TestBuildComparisonResult:
         assert "per_item_delta" in comparison
 
 
-class TestPlotComparisonMetrics:
-    def test_returns_one_figure_per_metric_key(self):
-        result_a = _make_result_dict(seed=42)
-        result_b = _make_result_dict(seed=99)
-        comparison = build_comparison_result(result_a, result_b, "A", "B")
-        figs = plot_comparison_metrics(comparison)
-        # 4 metric keys per item: hit_rate@3, map_attr@3, ndcg_attr@3, mean_pos
-        expected_metric_count = len(next(iter(result_a["per_item"].values())))
-        assert len(figs) == expected_metric_count
-        assert all(isinstance(f, go.Figure) for f in figs)
-
-    def test_each_figure_has_two_traces(self):
-        result_a = _make_result_dict(seed=42)
-        result_b = _make_result_dict(seed=99)
-        comparison = build_comparison_result(result_a, result_b, "A", "B")
-        figs = plot_comparison_metrics(comparison)
-        for fig in figs:
-            assert len(fig.data) == 2
-
 
 def test_build_comparison_keeps_overall_and_per_item_only():
     from recsys_tfb.evaluation.compare import build_comparison_result
@@ -139,3 +118,8 @@ def test_build_comparison_keeps_overall_and_per_item_only():
 def test_plot_comparison_score_distributions_removed():
     import recsys_tfb.evaluation.compare as cmp
     assert not hasattr(cmp, "plot_comparison_score_distributions")
+
+
+def test_plot_comparison_metrics_removed():
+    import recsys_tfb.evaluation.compare as cmp
+    assert not hasattr(cmp, "plot_comparison_metrics")
