@@ -8,7 +8,6 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 
-from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
@@ -134,6 +133,12 @@ class LightGBMAdapter(ModelAdapter):
         already exists. On miss, builds train first (with binning), saves binary,
         then builds train_dev with reference=train so dev binning aligns to train.
         """
+        # Lazy import: see module-top comment about circular-import chain.
+        # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
+        # is mid-init when this file loads via io/__init__; a top-level
+        # `from recsys_tfb.core.logging import ...` here re-enters that cycle.
+        from recsys_tfb.core.logging import log_data_volume
+
         lgb_dir = Path(cache_dir) / "lgb"
         success = lgb_dir / "_SUCCESS"
         train_bin = lgb_dir / "train.bin"
