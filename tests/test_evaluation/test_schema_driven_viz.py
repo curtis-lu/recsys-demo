@@ -32,4 +32,4 @@ def test_calibration_custom_cols():
         preds, labs, n_bins=2,
         id_cols=("t", "u", "item"), item_col="item",
         score_col="sc", label_col="y")
-    assert fig is not None
+    assert len(fig.data) > 0

@@ -6,8 +6,8 @@ import plotly.graph_objects as go
 
 
 def plot_score_distributions(
-    predictions: pd.DataFrame, title_prefix: str = "",
-    item_col: str = "prod_name", score_col: str = "score",
+    predictions, title_prefix="",
+    item_col="prod_name", score_col="score",
 ) -> list[go.Figure]:
     """Plot score distributions per product.
 
@@ -46,8 +46,8 @@ def plot_score_distributions(
 
 
 def plot_rank_heatmap(
-    predictions: pd.DataFrame, title_prefix: str = "",
-    item_col: str = "prod_name", rank_col: str = "rank",
+    predictions, title_prefix="",
+    item_col="prod_name", rank_col="rank",
 ) -> go.Figure:
     """Plot rank distribution heatmap.
 
@@ -218,8 +218,6 @@ def plot_score_distributions_by_label(
     )
     merged[label_col] = merged[label_col].fillna(0)
     merged["label_str"] = merged[label_col].map({1: "Positive", 0: "Negative"})
-
-    products = sorted(merged[item_col].unique())
 
     fig = go.Figure()
 
