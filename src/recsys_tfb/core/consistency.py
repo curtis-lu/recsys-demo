@@ -55,3 +55,16 @@ def resolved_item_values(parameters: dict) -> list[str]:
             f"schema.categorical_values.{item} in parameters.yaml."
         )
     return sorted(cat_values.get(item, []))
+
+
+def config_role_conflicts(parameters: dict) -> list[str]:
+    """Columns declared in BOTH drop_columns and categorical_columns (A1).
+
+    A column in both lists is an illegal, environment-divergent config state
+    (silent 'drop wins' in prod, misleading fail-loud in dev). Returned sorted;
+    empty list means OK.
+    """
+    pmi = _prepare_model_input(parameters)
+    drop = set(pmi.get("drop_columns", []) or [])
+    cat = set(pmi.get("categorical_columns", []) or [])
+    return sorted(drop & cat)

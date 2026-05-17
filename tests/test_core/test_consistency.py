@@ -53,3 +53,24 @@ class TestResolvedItemValues:
         del p["schema"]["categorical_values"]["prod_name"]
         with pytest.raises(ConfigConsistencyError, match=r"schema\.categorical_values\.prod_name"):
             resolved_item_values(p)
+
+
+from recsys_tfb.core.consistency import config_role_conflicts
+
+
+class TestConfigRoleConflicts:
+    def _params(self, drop, cat):
+        return {"dataset": {"prepare_model_input": {
+            "drop_columns": drop, "categorical_columns": cat}}}
+
+    def test_no_overlap_returns_empty(self):
+        assert config_role_conflicts(
+            self._params(["snap_date", "label"], ["prod_name"])) == []
+
+    def test_overlap_returns_offending_columns_sorted(self):
+        assert config_role_conflicts(
+            self._params(["cust_segment_typ", "label"],
+                         ["prod_name", "cust_segment_typ"])) == ["cust_segment_typ"]
+
+    def test_missing_keys_returns_empty(self):
+        assert config_role_conflicts({}) == []
