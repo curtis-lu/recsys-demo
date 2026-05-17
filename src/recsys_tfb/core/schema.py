@@ -182,4 +182,8 @@ def validate_schema_config(parameters: dict) -> None:
     # (consistency imports get_schema from this module).
     from recsys_tfb.core.consistency import resolved_item_values
 
+    # NOTE: this checks only schema.item (the single identity categorical in
+    # the current schema). If entity/time columns are ever declared categorical,
+    # extend resolved_item_values to cover them; until then the broader
+    # post-feature_table case is caught by the _spark.py identity-cat guard.
     resolved_item_values(parameters)
