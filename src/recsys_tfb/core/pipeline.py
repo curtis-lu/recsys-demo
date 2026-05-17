@@ -54,6 +54,9 @@ class Pipeline:
                     in_degree[node] += 1
                     dependents[producer].append(node)
 
+        # Iterates `nodes` in declaration order, so independent zero-in-degree nodes
+        # are queued (and thus executed) in the order they appear in the nodes list —
+        # list position is significant for independent nodes (e.g. a guard node placed first).
         queue = deque(n for n in nodes if in_degree[n] == 0)
         sorted_nodes = []
 

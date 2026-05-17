@@ -45,6 +45,7 @@ class TestDatasetPipeline:
     def test_node_names_without_calibration(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
+        assert "validate_data_consistency" in names
         assert "select_sample_keys" in names
         assert "split_train_keys" in names
         assert "select_val_keys" in names
@@ -72,9 +73,6 @@ class TestDatasetPipeline:
         first = pipeline.nodes[0]
         assert sorted(first.inputs) == ["label_table", "parameters", "sample_pool"]
         assert first.outputs == []
-        names = [n.name for n in pipeline.nodes]
-        assert "validate_data_consistency" in names
-
     def test_preprocessed_feature_table_feeds_all_splits(self):
         pipeline = create_pipeline(enable_calibration=True)
         build_nodes = [n for n in pipeline.nodes if n.name.startswith("build_") and n.name.endswith("_model_input")]
