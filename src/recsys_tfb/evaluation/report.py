@@ -18,6 +18,7 @@ class ReportSection:
     figures: list[go.Figure] = field(default_factory=list)
     tables: list[pd.DataFrame] = field(default_factory=list)
     table_titles: list[str] = field(default_factory=list)
+    collapsible: bool = False
 
 
 def generate_html_report(
@@ -54,6 +55,7 @@ def generate_html_report(
         ".description { color: #666; margin-bottom: 16px; }",
         "nav { background: #f5f5f5; padding: 12px; border-radius: 4px; margin-bottom: 24px; }",
         "nav a { margin-right: 16px; color: #0066cc; text-decoration: none; }",
+        "details > summary { font-size: 1.5em; color: #555; cursor: pointer; margin: 24px 0 8px; }",
         "</style>",
         f"<script>{plotly_js}</script>",
         "</head><body>",
@@ -78,24 +80,25 @@ def generate_html_report(
     # Sections
     for i, section in enumerate(sections):
         section_id = f"section-{i}"
-        html_parts.append(f'<div class="section" id="{section_id}">')
-        html_parts.append(f"<h2>{section.title}</h2>")
+        if section.collapsible:
+            html_parts.append(f'<details class="section" id="{section_id}">')
+            html_parts.append(f"<summary>{section.title}</summary>")
+        else:
+            html_parts.append(f'<div class="section" id="{section_id}">')
+            html_parts.append(f"<h2>{section.title}</h2>")
         html_parts.append(f'<p class="description">{section.description}</p>')
 
-        # Figures
         for fig in section.figures:
-            fig_html = fig.to_html(
-                full_html=False, include_plotlyjs=False
+            html_parts.append(
+                fig.to_html(full_html=False, include_plotlyjs=False)
             )
-            html_parts.append(fig_html)
 
-        # Tables
         for ti, table in enumerate(section.tables):
             if ti < len(section.table_titles) and section.table_titles[ti]:
                 html_parts.append(f"<h3>{section.table_titles[ti]}</h3>")
-            html_parts.append(table.to_html(classes="metrics-table", index=True))
+            html_parts.append(table.to_html(index=True))
 
-        html_parts.append("</div>")
+        html_parts.append("</details>" if section.collapsible else "</div>")
 
     html_parts.append("</body></html>")
 

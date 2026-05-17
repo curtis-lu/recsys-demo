@@ -96,6 +96,25 @@ class TestGenerateHtmlReport:
         html = generate_html_report(sections)
         assert "<h3>" not in html
 
+    def test_collapsible_section_uses_details(self):
+        sections = [ReportSection(title="Diag", description="d",
+                                  collapsible=True)]
+        html = generate_html_report(sections)
+        assert "<details" in html
+        assert "<summary>Diag</summary>" in html
+
+    def test_non_collapsible_has_no_details(self):
+        sections = [ReportSection(title="Main", description="d")]
+        html = generate_html_report(sections)
+        assert "<details" not in html
+
+    def test_no_dead_metrics_table_class(self):
+        sections = [ReportSection(title="T", description="d",
+                                  tables=[pd.DataFrame({"a": [1]})])]
+        html = generate_html_report(sections)
+        assert 'class="metrics-table"' not in html
+        assert 'class="dataframe metrics-table"' not in html
+
 
 class TestSaveReport:
     def test_creates_file(self):
