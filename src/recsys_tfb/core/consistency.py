@@ -39,6 +39,12 @@ Layer 1 — config-static (implemented here; aggregated by
   (``lambdarank``/``rank_xendcg``) paired with a non-ranking ``metric`` or an
   undefined query group (empty ``schema.entity``). Predicate:
   ``ranking_objective_conflicts``.
+* A8 — ``training.search_space`` declarative schema validity: must be an
+  ordered list of ParamSpec maps; each needs ``name`` (unique) + ``type`` ∈
+  {int,float,categorical}; numeric ``low < high``; positive ``step``;
+  ``log: true`` ⟹ ``low > 0`` and no ``step``; categorical needs non-empty
+  ``choices``. ``when`` / string-expression bounds are rejected until
+  Phase 3. Predicate: ``search_space_errors``.
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2–B3 deferred):
 
@@ -220,6 +226,94 @@ def ranking_objective_conflicts(parameters: dict) -> list[str]:
     return errors
 
 
+_SS_TYPES = frozenset({"int", "float", "categorical"})
+
+
+def search_space_errors(parameters: dict) -> list[str]:
+    """A8 — declarative ``training.search_space`` schema validity (collect-all).
+
+    Phase 2 supports literal numeric int/float bounds and categorical
+    ``choices``. ``when`` and string (expression) bounds are parsed by the
+    search_space module but **rejected here fail-loud** until Phase 3 — never
+    silently ignored. Empty/absent search_space is OK. Returns error strings.
+    """
+    training = parameters.get("training", {}) or {}
+    if "search_space" not in training:
+        return []
+    space = training["search_space"]
+    errors: list[str] = []
+
+    if not isinstance(space, list):
+        return [
+            "training.search_space must be a list of ParamSpec maps "
+            f"(got {type(space).__name__}). Migrate the old dict form to an "
+            "ordered list: [{name, type, low, high, ...}, ...]."
+        ]
+
+    seen: set = set()
+    for i, item in enumerate(space):
+        if not isinstance(item, dict):
+            errors.append(f"search_space[{i}] must be a map, got {type(item).__name__}.")
+            continue
+        name = item.get("name")
+        ptype = item.get("type")
+        tag = f"search_space[{i}]" + (f" ({name})" if name else "")
+
+        if not name or not isinstance(name, str):
+            errors.append(f"{tag}: missing/invalid required 'name' (string).")
+        elif name in seen:
+            errors.append(f"{tag}: duplicate name {name!r}.")
+        else:
+            seen.add(name)
+
+        if ptype not in _SS_TYPES:
+            errors.append(
+                f"{tag}: type={ptype!r} invalid; must be one of "
+                f"{sorted(_SS_TYPES)}."
+            )
+
+        if "when" in item:
+            errors.append(
+                f"{tag}: 'when' (conditional search space) is implemented in "
+                f"Phase 3; not yet supported."
+            )
+
+        if ptype in ("int", "float"):
+            low, high, step = item.get("low"), item.get("high"), item.get("step")
+            for k, v in (("low", low), ("high", high)):
+                if isinstance(v, str):
+                    errors.append(
+                        f"{tag}: expression-valued '{k}' is implemented in "
+                        f"Phase 3; not yet supported (use a number)."
+                    )
+            if isinstance(step, str):
+                errors.append(
+                    f"{tag}: expression-valued 'step' is implemented in "
+                    f"Phase 3; not yet supported (use a number)."
+                )
+            num = (int, float)
+            if isinstance(low, num) and isinstance(high, num) and not (low < high):
+                errors.append(f"{tag}: low ({low}) must be < high ({high}).")
+            if isinstance(step, num) and step <= 0:
+                errors.append(f"{tag}: step must be positive (got {step}).")
+            log = bool(item.get("log", False))
+            if log and isinstance(low, num) and low <= 0:
+                errors.append(
+                    f"{tag}: log: true requires a positive low (got {low})."
+                )
+            if log and step is not None:
+                errors.append(
+                    f"{tag}: log: true and step are mutually exclusive "
+                    f"(Optuna forbids it)."
+                )
+        elif ptype == "categorical":
+            choices = item.get("choices")
+            if not isinstance(choices, list) or len(choices) == 0:
+                errors.append(f"{tag}: categorical requires a non-empty 'choices' list.")
+
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -262,6 +356,9 @@ def validate_config_consistency(parameters: dict) -> None:
         )
 
     for msg in ranking_objective_conflicts(parameters):
+        errors.append(msg)
+
+    for msg in search_space_errors(parameters):
         errors.append(msg)
 
     if errors:

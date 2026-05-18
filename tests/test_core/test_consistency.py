@@ -277,3 +277,88 @@ class TestRankingObjectiveConflicts:
         errs = ranking_objective_conflicts(
             self._params("lambdarank", "binary_logloss", entity=()))
         assert len(errs) == 2
+
+
+from recsys_tfb.core.consistency import search_space_errors
+
+
+class TestSearchSpaceErrors:
+    def _p(self, space):
+        return {"training": {"search_space": space}}
+
+    VALID = [
+        {"name": "learning_rate", "type": "float", "low": 0.001, "high": 0.1, "log": True},
+        {"name": "num_leaves", "type": "int", "low": 4, "high": 64},
+        {"name": "max_depth", "type": "int", "low": 3, "high": 8, "step": 1},
+        {"name": "kind", "type": "categorical", "choices": ["gbdt", "dart"]},
+    ]
+
+    def test_valid_space_ok(self):
+        assert search_space_errors(self._p(self.VALID)) == []
+
+    def test_absent_search_space_ok(self):
+        assert search_space_errors({"training": {}}) == []
+
+    def test_must_be_list_not_dict(self):
+        errs = search_space_errors(self._p({"learning_rate": {"low": 1, "high": 2}}))
+        assert len(errs) == 1 and "must be a list" in errs[0]
+
+    def test_missing_name_or_type(self):
+        errs = search_space_errors(self._p([{"type": "int", "low": 1, "high": 2}]))
+        assert any("name" in e for e in errs)
+
+    def test_unknown_type(self):
+        errs = search_space_errors(self._p([{"name": "x", "type": "loguniform", "low": 1, "high": 2}]))
+        assert any("type" in e and "loguniform" in e for e in errs)
+
+    def test_duplicate_names(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": 1, "high": 2},
+            {"name": "x", "type": "int", "low": 3, "high": 4},
+        ]))
+        assert any("duplicate" in e for e in errs)
+
+    def test_low_ge_high(self):
+        errs = search_space_errors(self._p([{"name": "x", "type": "int", "low": 9, "high": 4}]))
+        assert any("low" in e and "high" in e for e in errs)
+
+    def test_log_requires_positive_low(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "float", "low": 0.0, "high": 1.0, "log": True}
+        ]))
+        assert any("log" in e and "positive" in e for e in errs)
+
+    def test_log_and_step_mutually_exclusive(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "float", "low": 0.1, "high": 1.0, "log": True, "step": 0.1}
+        ]))
+        assert any("log" in e and "step" in e for e in errs)
+
+    def test_step_must_be_positive(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": 1, "high": 9, "step": 0}
+        ]))
+        assert any("step" in e and "positive" in e for e in errs)
+
+    def test_categorical_needs_nonempty_choices(self):
+        errs = search_space_errors(self._p([{"name": "x", "type": "categorical", "choices": []}]))
+        assert any("choices" in e for e in errs)
+
+    def test_when_rejected_phase3(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": 1, "high": 9, "when": "num_leaves > 8"}
+        ]))
+        assert any("Phase 3" in e for e in errs)
+
+    def test_string_expression_bound_rejected_phase3(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": 1, "high": "num_leaves"}
+        ]))
+        assert any("Phase 3" in e for e in errs)
+
+    def test_collects_all(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "bogus", "low": 1, "high": 2},
+            {"name": "x", "type": "int", "low": 5, "high": 1},
+        ]))
+        assert len(errs) >= 3  # unknown type + duplicate name + low>=high
