@@ -229,6 +229,12 @@ def ranking_objective_conflicts(parameters: dict) -> list[str]:
 _SS_TYPES = frozenset({"int", "float", "categorical"})
 
 
+def _is_number(v) -> bool:
+    """True for a real int/float bound; bool excluded (``low: true`` in YAML
+    is a typo, not the integer 1 — fail loud, never silently accept)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def search_space_errors(parameters: dict) -> list[str]:
     """A8 — declarative ``training.search_space`` schema validity (collect-all).
 
@@ -291,13 +297,23 @@ def search_space_errors(parameters: dict) -> list[str]:
                     f"{tag}: expression-valued 'step' is implemented in "
                     f"Phase 3; not yet supported (use a number)."
                 )
-            num = (int, float)
-            if isinstance(low, num) and isinstance(high, num) and not (low < high):
+            for k, v in (("low", low), ("high", high)):
+                if not isinstance(v, str) and not _is_number(v):
+                    errors.append(
+                        f"{tag}: '{k}' must be a number (got "
+                        f"{type(v).__name__}: {v!r})."
+                    )
+            if step is not None and not isinstance(step, str) and not _is_number(step):
+                errors.append(
+                    f"{tag}: 'step' must be a number (got "
+                    f"{type(step).__name__}: {step!r})."
+                )
+            if _is_number(low) and _is_number(high) and not (low < high):
                 errors.append(f"{tag}: low ({low}) must be < high ({high}).")
-            if isinstance(step, num) and step <= 0:
+            if _is_number(step) and step <= 0:
                 errors.append(f"{tag}: step must be positive (got {step}).")
             log = bool(item.get("log", False))
-            if log and isinstance(low, num) and low <= 0:
+            if log and _is_number(low) and low <= 0:
                 errors.append(
                     f"{tag}: log: true requires a positive low (got {low})."
                 )

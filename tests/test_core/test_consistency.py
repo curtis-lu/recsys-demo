@@ -362,3 +362,21 @@ class TestSearchSpaceErrors:
             {"name": "x", "type": "int", "low": 5, "high": 1},
         ]))
         assert len(errs) >= 3  # unknown type + duplicate name + low>=high
+
+    def test_bool_low_or_high_rejected(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": True, "high": 5}
+        ]))
+        assert any("number" in e for e in errs)
+
+    def test_bool_step_rejected(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "float", "low": 0.1, "high": 1.0, "step": True}
+        ]))
+        assert any("number" in e for e in errs)
+
+    def test_non_numeric_non_string_bound_rejected(self):
+        errs = search_space_errors(self._p([
+            {"name": "x", "type": "int", "low": None, "high": {}}
+        ]))
+        assert any("number" in e for e in errs)
