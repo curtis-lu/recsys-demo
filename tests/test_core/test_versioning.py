@@ -1,5 +1,6 @@
 """Tests for recsys_tfb.core.versioning module (three-layer versioning)."""
 
+import copy
 import json
 import re
 from unittest.mock import patch
@@ -270,8 +271,14 @@ class TestComputeModelVersion:
         assert a != b
 
     def test_different_params_different_hash(self):
-        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
-        b = compute_model_version({"lr": 0.05}, "base1234", "trai1234")
+        a = compute_model_version(
+            {"training": {"algorithm_params": {"learning_rate": 0.01}}},
+            "base1234", "trai1234",
+        )
+        b = compute_model_version(
+            {"training": {"algorithm_params": {"learning_rate": 0.05}}},
+            "base1234", "trai1234",
+        )
         assert a != b
 
     def test_calibration_variant_affects_hash(self):
@@ -282,6 +289,63 @@ class TestComputeModelVersion:
     def test_calibration_none_equivalent_to_omitted(self):
         a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
         b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", None)
+        assert a == b
+
+    def test_logging_threading_knobs_do_not_affect_hash(self):
+        base = {"training": {"algorithm_params": {"learning_rate": 0.01}}}
+        noisy = {
+            "training": {
+                "algorithm_params": {
+                    "learning_rate": 0.01,
+                    "verbosity": -1,
+                    "log_period": 100,
+                    "num_threads": 4,
+                }
+            }
+        }
+        assert compute_model_version(base, "b", "t") == compute_model_version(
+            noisy, "b", "t"
+        )
+
+    def test_relevant_hyperparam_changes_hash(self):
+        a = {"training": {"num_iterations": 500}}
+        b = {"training": {"num_iterations": 800}}
+        assert compute_model_version(a, "b", "t") != compute_model_version(
+            b, "b", "t"
+        )
+
+    def test_top_level_ops_blocks_do_not_affect_hash(self):
+        bare = {"training": {"algorithm_params": {"learning_rate": 0.01}}}
+        with_ops = {
+            "training": {"algorithm_params": {"learning_rate": 0.01}},
+            "spark": {"app_name": "x"},
+            "mlflow": {"experiment_name": "y", "tracking_uri": "z"},
+            "cache": {"root": "/some/local/path"},
+        }
+        assert compute_model_version(bare, "b", "t") == compute_model_version(
+            with_ops, "b", "t"
+        )
+
+    def test_caller_params_not_mutated(self):
+        params = {
+            "training": {
+                "algorithm_params": {"learning_rate": 0.01, "verbosity": -1}
+            },
+            "spark": {"app_name": "x"},
+        }
+        snapshot = copy.deepcopy(params)
+        compute_model_version(params, "b", "t")
+        assert params == snapshot
+
+    def test_no_training_block_yields_stable_hash(self):
+        # No training: block -> empty model-defining payload. The hash must
+        # ignore all non-training top-level content (documented contract of
+        # _model_version_payload's isinstance guard), so these are equal.
+        a = compute_model_version({"spark": {"app_name": "x"}}, "b", "t")
+        b = compute_model_version(
+            {"mlflow": {"experiment_name": "y"}, "cache": {"root": "/p"}},
+            "b", "t",
+        )
         assert a == b
 
 
