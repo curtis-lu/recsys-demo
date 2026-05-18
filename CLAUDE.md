@@ -36,6 +36,22 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
 - 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash cwd 在 skill/`cd` 後會被 reset，相對路徑可能讀到 stale 的 main tree。
 
+## Worktree / venv（完整 SOP：`docs/worktree-venv-setup.md`，務必先讀）
+
+### 已踩過、必須避免再發的兩個問題
+
+1. **`.venv` self-symlink ELOOP**：`.venv` 曾被誤 `git add` 進版控（`0cf79db`），其 symlink 目標指向自己 → 之後任何 checkout / `git worktree add` 都重建這個迴圈，全 `python`/`pytest` 報 `too many levels of symbolic links`。已修（`4e5af3c`：`git rm --cached .venv`、`.gitignore` 同時擋 `.venv` 與 `.venv/`、釘 `.python-version=3.10.9`）。**規則：`.venv` 永不進版控**；`git status`/`git ls-files | grep -x .venv` 一旦出現被追蹤就停下、`git rm --cached .venv`、commit 並**進 main**（否則各分支/worktree 一直繼承）。已追蹤的檔案無視 `.gitignore`。
+2. **graphify hook 擋 git checkout/merge（會靜默失敗）**：graphify 的 post-checkout/post-commit hook 會把 **tracked** `graphify-out/GRAPH_REPORT.md` 改髒，使隨後的 `git checkout` / `git merge --ff-only` 被「local changes would be overwritten」擋住；若指令用 `&&`+`set -e`+`>/dev/null` 串接，因 `set -e` 的 AND-list 例外會**靜默失敗、HEAD 沒動**而你以為成功了。**規則：切換分支/合併前先 `git -C <path> checkout -- graphify-out/GRAPH_REPORT.md`；git 串接指令不要吞 stdout/exit code，逐步檢查 HEAD。**
+
+### Worktree 開發環境啟用 SOP
+
+1. **唯一一個真實 venv**＝`/Users/curtislu/projects/recsys_tfb/.venv`（真實目錄，非 symlink），用 `~/.pyenv/versions/3.10.9/bin/python -m venv` 建（對齊 repo 根 `.python-version=3.10.9`；`pyproject` 要求 `>=3.10,<3.12`，系統 `python3` 是 3.12 **不可用**）＋ `pip install -e ".[dev]"`。各 worktree 的 `.venv` 只是指向它的 **symlink**（`ln -s /Users/curtislu/projects/recsys_tfb/.venv <wt>/.venv`），不建各自獨立 venv。
+2. **每次在 worktree 動 python 前先 pre-flight**：`readlink <wt>/.venv` 須為 `/Users/curtislu/projects/recsys_tfb/.venv`；`/Users/curtislu/projects/recsys_tfb/.venv/bin/python -V` 須為 `Python 3.10.9`；任一失敗先依 `docs/worktree-venv-setup.md` §修復再繼續。
+3. **跑測試/CLI 一律絕對 venv python + `PYTHONPATH=<wt>/src`**：
+   `PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <paths> -q`
+   （裸跑或裸 `.venv/bin/pytest` 會抓到 main 的 `src`＝editable-install target，靜默測/跑錯 code；相對路徑經 symlink 還會 ELOOP）。CLI 同理：`PYTHONPATH=<wt>/src …/.venv/bin/python -m recsys_tfb <pipeline> [--options]`。
+4. **跨 worktree git 一律 `git -C <abs-worktree>`**；Bash cwd 在 skill/`cd` 後會 reset，相對路徑可能讀到 stale main tree。
+
 ## Local dev-cluster testing
 
 在本機 dev-cluster 互動測試 pipeline：
@@ -74,7 +90,7 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 
 ## Config consistency gate
 
-`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A6；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。
+`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A6；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。Layer-2 資料閘 `validate_data_consistency`（`preprocessing/_spark.py`，dataset pipeline 第一個 side-effect 節點）在跑任何抽樣/前處理前，對 `sample_pool`（與 `resolved_item_values` 雙向集合相等）與 `label_table`（只擋資料端未知 item）做 windowed `distinct(item)` 檢查，raise `DataConsistencyError`；B1 的唯一定義 predicate 是同檔的 `item_coverage_errors`。
 
 ## graphify
 

@@ -6,13 +6,13 @@ from recsys_tfb.pipelines.dataset import create_pipeline
 class TestDatasetPipeline:
     def test_pipeline_without_calibration(self):
         pipeline = create_pipeline()
-        # 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input = 10
-        assert len(pipeline.nodes) == 10
+        # 1 validate + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input = 11
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_with_calibration(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 10 base + 1 select_calibration_keys + 1 build_calibration_model_input = 12
-        assert len(pipeline.nodes) == 12
+        # 11 base + 1 select_calibration_keys + 1 build_calibration_model_input = 13
+        assert len(pipeline.nodes) == 13
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -45,6 +45,7 @@ class TestDatasetPipeline:
     def test_node_names_without_calibration(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
+        assert "validate_data_consistency" in names
         assert "select_sample_keys" in names
         assert "split_train_keys" in names
         assert "select_val_keys" in names
@@ -64,7 +65,14 @@ class TestDatasetPipeline:
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 10
+        assert len(pipeline.nodes) == 11
+
+    def test_validate_data_consistency_runs_first(self):
+        pipeline = create_pipeline()
+        assert pipeline.nodes[0].name == "validate_data_consistency"
+        first = pipeline.nodes[0]
+        assert sorted(first.inputs) == ["label_table", "parameters", "sample_pool"]
+        assert first.outputs == []
 
     def test_preprocessed_feature_table_feeds_all_splits(self):
         pipeline = create_pipeline(enable_calibration=True)

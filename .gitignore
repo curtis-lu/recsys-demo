@@ -15,6 +15,7 @@ data/*
 !data/.gitkeep
 .env
 *.log
+.venv
 .venv/
 tests/scenarios/output/
 .DS_Store
@@ -33,3 +34,4 @@ graphify-out/graph.html
 
 # Claude Code session artifacts
 .claude/scheduled_tasks.lock
+.superpowers/

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     apply_preprocessor_to_features,
     build_model_input,
@@ -12,6 +13,7 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     select_train_keys,
     select_val_keys,
     split_train_keys,
+    validate_data_consistency,
 )
 
 pytestmark = pytest.mark.spark
@@ -351,8 +353,9 @@ class TestFitPreprocessorItemMissingFromFeatures:
                 },
             },
         }
-        with pytest.raises(ValueError, match="schema.item='prod_name' is missing"):
+        with pytest.raises(DataConsistencyError, match="schema.item='prod_name' is missing") as ei:
             fit_preprocessor_metadata(feature_table, params)
+        assert isinstance(ei.value, ValueError)  # subclass: existing callers unaffected
 
     def test_default_categorical_columns_passes(
         self, spark, feature_table, parameters
@@ -486,3 +489,67 @@ def test_build_model_input_casts_decimal_features_to_double(
     # And the ones that WERE decimal in the input are now double.
     assert out_dtypes["total_aum"] == "double"
     assert out_dtypes["in_amt_sum_l1m"] == "double"
+
+
+class TestValidateDataConsistency:
+    def test_consistent_fixtures_return_none(self, sample_pool, label_table, parameters):
+        # fixtures: prod_name in {exchange_fx,exchange_usd,fund_stock} ==
+        # schema.categorical_values.prod_name; all snaps inside windows.
+        assert validate_data_consistency(sample_pool, label_table, parameters) is None
+
+    def test_undeclared_value_raises(self, sample_pool, label_table, parameters):
+        # Shrink declared set so fund_stock (present in data) is undeclared.
+        params = {
+            **parameters,
+            "schema": {
+                **parameters["schema"],
+                "categorical_values": {"prod_name": ["exchange_fx", "exchange_usd"]},
+            },
+        }
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, params)
+        msg = str(ei.value)
+        assert "fund_stock" in msg
+        assert "sample_pool" in msg
+
+    def test_declared_value_absent_from_sample_pool_raises(
+        self, sample_pool, label_table, parameters
+    ):
+        # 'ploan' is declared but never appears in sample_pool/label data ->
+        # sp_missing direction (D3 second direction). declared-label is B3,
+        # deferred, so the only error is the sample_pool "never produces" one.
+        params = {
+            **parameters,
+            "schema": {
+                **parameters["schema"],
+                "categorical_values": {
+                    "prod_name": [
+                        "exchange_fx", "exchange_usd", "fund_stock", "ploan",
+                    ]
+                },
+            },
+        }
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, params)
+        msg = str(ei.value)
+        assert "ploan" in msg
+        assert "never produces" in msg
+
+    def test_value_only_in_non_window_snap_is_ignored(
+        self, spark, sample_pool, label_table, parameters
+    ):
+        # 2024-12-31 is outside collect_dataset_snap_dates (train Jan-Mar,
+        # val Apr, test May). An undeclared 'ploan' there must be filtered out.
+        extra = spark.createDataFrame(
+            pd.DataFrame([{
+                "snap_date": pd.Timestamp("2024-12-31"),
+                "cust_id": "C001",
+                "cust_segment_typ": "mass",
+                "prod_name": "ploan",
+                "label": 0,
+                "tenure_months": 12,
+                "channel_preference": "digital",
+            }])
+        )
+        sp = sample_pool.unionByName(extra)
+        assert validate_data_consistency(sp, label_table, parameters) is None
