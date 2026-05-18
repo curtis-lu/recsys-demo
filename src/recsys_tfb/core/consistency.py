@@ -35,6 +35,10 @@ Layer 1 — config-static (implemented here; aggregated by
   Enforced by the ``tests/test_pipelines/test_source_etl/
   test_product_consistency.py`` lint (consumes ``resolved_item_values``),
   not a predicate here.
+* A7 — a ranking ``training.algorithm_params.objective``
+  (``lambdarank``/``rank_xendcg``) paired with a non-ranking ``metric`` or an
+  undefined query group (empty ``schema.entity``). Predicate:
+  ``ranking_objective_conflicts``.
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2–B3 deferred):
 
@@ -56,6 +60,7 @@ the plan doc for the full table:
 
 from __future__ import annotations
 
+from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
 
 
@@ -168,6 +173,53 @@ def item_missing_from_categorical(parameters: dict) -> bool:
     return item not in declared
 
 
+# Eval metrics LightGBM accepts for a learning-to-rank objective. Anything
+# else (e.g. binary_logloss) makes ranking early-stopping silently
+# meaningless. Kept here (not in group_utils) because it is a config-policy
+# fact owned by the consistency layer.
+RANKING_METRICS: frozenset[str] = frozenset({"ndcg", "map", "lambdarank"})
+
+
+def ranking_objective_conflicts(parameters: dict) -> list[str]:
+    """A7 — a ranking objective requires a ranking metric and a query group.
+
+    ``lambdarank``/``rank_xendcg`` cannot early-stop on a binary metric
+    (silently meaningless) and need a per-query group. The query group is
+    ``schema['time'] + schema['entity']``; ``entity`` must be non-empty. An
+    *unset* metric is allowed — it is defaulted to ``ndcg`` at train time by
+    ``group_utils.default_metric_for_objective``. Returns collect-all error
+    strings; empty list means OK.
+    """
+    training = parameters.get("training", {}) or {}
+    ap = training.get("algorithm_params", {}) or {}
+    objective = ap.get("objective")
+    if objective not in RANKING_OBJECTIVES:
+        return []
+
+    errors: list[str] = []
+
+    metric = ap.get("metric")
+    if metric is not None and str(metric) not in RANKING_METRICS:
+        errors.append(
+            f"training.algorithm_params.objective={objective!r} is a ranking "
+            f"objective but metric={metric!r} is not a ranking metric. Set "
+            f"training.algorithm_params.metric to one of "
+            f"{sorted(RANKING_METRICS)} (e.g. 'ndcg'), or remove it to default "
+            f"to 'ndcg'."
+        )
+
+    schema = get_schema(parameters)
+    if not schema.get("entity"):
+        errors.append(
+            f"training.algorithm_params.objective={objective!r} is a ranking "
+            f"objective but the query group (schema.columns.time + entity) is "
+            f"undefined: schema 'entity' is empty. A ranking objective needs a "
+            f"per-query group."
+        )
+
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -208,6 +260,9 @@ def validate_config_consistency(parameters: dict) -> None:
             f"absent from schema.categorical_values[item] — the override "
             f"silently never matches. Fix the key(s) or declare the value(s)."
         )
+
+    for msg in ranking_objective_conflicts(parameters):
+        errors.append(msg)
 
     if errors:
         raise ConfigConsistencyError(
