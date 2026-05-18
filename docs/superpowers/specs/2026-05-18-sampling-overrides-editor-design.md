@@ -2,7 +2,7 @@
 
 - 日期：2026-05-18
 - 分支：`feat/sampling-overrides-editor`
-- 狀態：設計已與使用者逐段確認，待 spec review
+- 狀態：設計已逐段確認；plan 前資料流核實後修正 D7→D7'、新增 D9（拆兩 plan）
 
 ## 1. 問題
 
@@ -26,8 +26,9 @@
 | D4 | 範圍 = **只做 train、稀疏輸出**；calibration / val overrides 不在本輪 | ✓ |
 | D5 | 冷門上採樣機制 = **方案 C**：降採樣留資料層（機制不動）、冷門 boost 改**模型層 LightGBM `sample_weight`**（無重複列洩漏，對 GBDT 統計最乾淨） | ✓ |
 | D6 | weight 只作用於 LightGBM **train** 的 `lgb.Dataset(weight=...)`；early-stopping val、calibration、evaluation **一律不加權** | ✓ |
-| D7 | model-input 接法 = **carry `cust_segment_typ` 進 model_input parquet、於 `extract_Xy` 依訓練 config 算 weight**（不烤進 parquet，保 dataset cache 跨 weight 變更仍有效，weight 只綁 `model_version`） | ✓ |
+| D7' | model-input 接法（plan 前核實後修正）= **新增 `dataset.carry_columns` 可設定清單，從 `sample_pool` 經 `select_keys` carry 進 train/train_dev model_input parquet**；weight 於訓練讀取時依 `training.sample_weights` 算（不烤進 parquet）。carry 一組寬鬆超集、weight 只取需要子集 → 調 weight 表完全不動 dataset、免重產資料。**原 D7「經 feature_table carry」作廢**：`select_keys` 只回傳 identity_key（`helpers_spark.py:66,90`，`cust_segment_typ` 在回傳前被丟），且合成 dev `feature_table` 無 `cust_segment_typ`（記憶 `project_cust_segment_typ_devprod_schema_divergence` 地雷，dev-cluster 測不到）；`sample_pool` dev+prod 都有且為 identity 粒度 | ✓ |
 | D8 | 冷門 weight 公式採反頻率家族 + 兩安全閥；`median_pos` 母體用 **per-cell（全 (segment,product) grid）中位數** | ✓ |
+| D9 | 實作拆**兩個獨立 plan**（writing-plans scope check）：Plan A = 機制（carry_columns + 模型層加權 + A7 + config，可獨立 ship/測，用手寫 `sample_weights`）；Plan B = 工具（`sampling_overrides_editor.py`，獨立 dev script）。Plan A 先做（Plan B 依賴其 `sample_weights` config schape） | ✓ |
 
 ## 3. 兩個正交機制
 
@@ -95,21 +96,45 @@ w = clamp( (median_pos / n_pos) ** alpha, 1.0, W_max )
   - `dataset.sample_ratio_overrides` → 貼 `parameters_dataset.yaml`
   - `training.sample_weights` → 貼 `parameters_training.yaml`
 
-### 5.2 模型層加權資料流接點（風險最高，已核實）
-- `pipelines/dataset/nodes_spark.py::build_model_input`：`cust_segment_typ`
-  由 drop 改為**非特徵 carry 欄保留**（與 identity 欄同類，不入
-  `preprocessor_metadata["feature_columns"]` → 自然不入 X）。`prod_name`
-  本就保留。Spark 端無 UDF（weight 不在此算）。
-- `io/extract.py::extract_Xy`：新增回傳第三陣列 `w`（與 X/y 1:1）。在 train
-  讀 pdf 後、**`_pdf_to_X` 編碼之前**，依
-  `params["training"]["sample_weights"]` 對該 pdf 中**原始字串**值
-  `(cust_segment_typ, prod_name)` 算每列 weight（缺項 = 1.0）。weight 表
-  key 與 config/A7 一致採原始 item/segment 字串，不涉 category_mappings 編
-  碼。**不烤進 parquet**（理由見 D7）。需相容既有 2-tuple 呼叫點
-  （calibration/eval 路徑取 weight=全 1 或不取第三項）。
-- `models/lightgbm_adapter.py::train`：`lgb.Dataset(X_train, label=y_train,
-  weight=w_train, free_raw_data=False)`；`val_dataset` **不傳 weight**（D6）。
-- 預快取路徑（`lgb.Dataset` 直建於 numpy）與 cache 路徑都要帶到 weight。
+### 5.2 carry_columns 與模型層加權資料流接點（風險最高，已核實）
+
+**新 config `dataset.carry_columns`**（list，預設 `["cust_segment_typ"]`）：
+非 identity、要從 `sample_pool` 帶進 model_input 供訓練讀取的欄位。寬鬆超
+集策略——使用者可一次列足（如再加 `channel_preference`），weight 只取需要
+子集；改 weight 表不動 dataset。`carry_columns` 不在 `ALL_SAMPLING_KEYS`，
+`compute_base_dataset_version`（`versioning.py:80`）天然納入 → 改 carry 集
+會 bust `base_dataset_version`（正確：parquet schema 變了），但日常調
+weight 不會（**versioning 不需改程式碼**，已核實）。
+
+接點（只走 train 路徑，符合 D6）：
+- `pipelines/dataset/helpers_spark.py::select_keys`：回傳由 `identity_key`
+  改為 `identity_key + carry_columns`（carry 為 passthrough，**不參與抽樣
+  決定論**——`spark_bucket` 仍只 hash identity_key；早回傳路徑與 override
+  路徑都要帶 carry）。
+- `pipelines/dataset/nodes_spark.py::split_train_keys`：join 後 train /
+  train_dev keys 仍帶 carry（join key 是 `cust_col`，carry 隨 row 通過）。
+  `select_val_keys` / `select_test_keys` / `select_calibration_keys` **不改**
+  （weight train-only；它們不經 `select_keys` 或不需 carry）。
+- `preprocessing/_spark.py::build_model_input`：output 由
+  `identity + label + feature_columns` 改為 `+ carry_present`，其中
+  `carry_present = [c for c in carry_columns if c in keys.columns]`（val/
+  test/cal keys 無 carry → 條件式包含，graceful）。carry 不入
+  `feature_columns` → `_pdf_to_X` 切片自然不入 X。Spark 端無 UDF。
+- `io/extract.py`：**新增 sibling `extract_Xyw`**（不改 `extract_Xy`
+  2-tuple 簽章 → `extract_Xy_with_groups` 及任何 2-tuple 消費者零影響，
+  結構上保證 val/cal/eval 永不加權）。`extract_Xyw` 讀 pdf 後、
+  **`_pdf_to_X` 編碼前**，依 `params["training"]["sample_weights"]` 對 pdf
+  中**原始字串** `(cust_segment_typ, prod_name)` 算每列 `w`，回傳
+  `(X, y, w)`；缺項或無 carry 欄 → `w=1.0`（與稀疏語意一致，不 raise）。
+- call sites 換 `extract_Xyw`（僅這兩處，皆 train handle）：
+  `models/lightgbm_adapter.py:180,193`（cached lgb-binary 路徑，train +
+  train_dev）、`pipelines/training/nodes.py:458`（非 cached numpy→lgb.train
+  trial 路徑）。
+- `models/lightgbm_adapter.py`：cached 路徑
+  `lgb.Dataset(X_tr, label=y_tr, weight=w_tr, categorical_feature=cat_idx,
+  ...)`（train 與 train_dev 都帶；`reference=ds_train` 不變）；非 cached
+  路徑 `train()` 收 `w_train` → `lgb.Dataset(..., weight=w_train)`。
+  `val_dataset` **永不帶 weight**（D6）。
 
 ### 5.3 一致性不變量 A7（遵 CLAUDE.md 單一真實來源）
 `core/consistency.py` 新增 pure predicate `weight_unknown_items`（比照 A5
@@ -136,17 +161,34 @@ legend 增列 A7。**不得在 pipeline 散落 ad-hoc 檢查**。
 - versioning：改 `training.sample_weights` 須 bust `model_version`、不動
   `train_variant_id` 的回歸測試
 
-## 8. 變更檔案清單（預估）
-- 新增 `scripts/sampling_overrides_editor.py`
-- 新增 HTML/JS 模板（內嵌於 script 或同目錄 template）
-- 改 `src/recsys_tfb/core/consistency.py`（A7 predicate + 註冊 + legend）
-- 改 `src/recsys_tfb/pipelines/dataset/nodes_spark.py`（carry
-  `cust_segment_typ`）
-- 改 `src/recsys_tfb/io/extract.py`（`extract_Xy` 回傳/計算 weight）
-- 改 `src/recsys_tfb/models/lightgbm_adapter.py`（train 串 `weight=`）
+## 8. 變更檔案清單
+
+**Plan A（機制）：**
+- 改 `src/recsys_tfb/core/consistency.py`（A7 `weight_unknown_items` +
+  註冊 `validate_config_consistency` + docstring legend）
+- 改 `src/recsys_tfb/pipelines/dataset/helpers_spark.py::select_keys`
+  （回傳 + carry_columns，兩條回傳路徑）
+- 改 `src/recsys_tfb/pipelines/dataset/nodes_spark.py::split_train_keys`
+  （carry 隨 join 通過；val/test/cal 不改）
+- 改 `src/recsys_tfb/preprocessing/_spark.py::build_model_input`
+  （output 條件式含 carry_present）
+- 改 `src/recsys_tfb/io/extract.py`（新增 sibling `extract_Xyw`）
+- 改 `src/recsys_tfb/models/lightgbm_adapter.py`（cached/非 cached 路徑串
+  `weight=`；call sites 換 `extract_Xyw`）
+- 改 `src/recsys_tfb/pipelines/training/nodes.py:458`（換 `extract_Xyw`）
+- 改 `conf/base/parameters_dataset.yaml`（新增 `dataset.carry_columns`）
 - 改 `conf/base/parameters_training.yaml`（新增 `training.sample_weights:`
   空 dict + 註解）
-- 對應 `tests/` 擴充
+- 對應 `tests/` 擴充（含 versioning 回歸：carry_columns bust
+  base_dataset_version、sample_weights bust model_version 不動
+  train_variant_id）
+- versioning **不需改程式碼**（已核實）
+
+**Plan B（工具）：**
+- 新增 `scripts/sampling_overrides_editor.py`（Typer，`profile` /
+  `to-yaml` 子指令；純 stdlib HTML）
+- 新增內嵌 HTML/JS 模板
+- 對應 `tests/`（純函式公式/稀疏/JSON↔YAML + 單一 Spark profile 測試）
 
 ## 9. 範圍外 / deferred
 - calibration_sample_ratio_overrides、val overrides 的 editor 支援（D4）
@@ -154,3 +196,15 @@ legend 增列 A7。**不得在 pipeline 散落 ad-hoc 檢查**。
   blast radius 大）
 - editor 把建議值寫回 config 的自動化（D1：維持人工貼回）
 - segment 值的 config 宣告 / A7 對 segment 分量的驗證（config 無宣告來源）
+
+## 10. 實作拆解（D9；writing-plans scope check）
+
+兩個獨立子系統，各自可獨立 ship 且可測：
+
+- **Plan A — 機制**（`docs/superpowers/plans/2026-05-18-cold-product-weighting-mechanism.md`）：
+  carry_columns 基礎建設 + 模型層加權端到端 + A7 + config。完成後用手寫
+  `training.sample_weights` 即可訓出加權模型，獨立可驗。**先做。**
+- **Plan B — 工具**（`docs/superpowers/plans/2026-05-18-sampling-overrides-editor-tool.md`）：
+  `sampling_overrides_editor.py` profile→HTML→to-yaml。獨立 dev script，
+  邏輯上依賴 Plan A 已定的 `sample_weights` config schema（不 import 其
+  程式碼）。Plan A 之後做。
