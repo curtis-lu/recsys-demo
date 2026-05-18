@@ -179,9 +179,9 @@ def test_lightgbm_prepare_train_inputs_writes_bins(tmp_path):
         str(cache_dir),
     )
 
-    assert (cache_dir / "lgb" / "train.bin").exists()
-    assert (cache_dir / "lgb" / "train_dev.bin").exists()
-    assert (cache_dir / "lgb" / "_SUCCESS").exists()
+    assert (cache_dir / "lgb" / "binary" / "train.bin").exists()
+    assert (cache_dir / "lgb" / "binary" / "train_dev.bin").exists()
+    assert (cache_dir / "lgb" / "binary" / "_SUCCESS").exists()
     assert train_h.role == "train"
     assert dev_h.role == "train_dev"
 
@@ -226,7 +226,7 @@ def test_lightgbm_prepare_train_inputs_cache_hit(tmp_path, monkeypatch):
         ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
         prep_meta, parameters, str(cache_dir),
     )
-    assert (cache_dir / "lgb" / "_SUCCESS").exists()
+    assert (cache_dir / "lgb" / "binary" / "_SUCCESS").exists()
 
     construct_calls = []
     real_construct = lgb.Dataset.construct
@@ -284,15 +284,15 @@ def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
     )
 
     # Simulate crash: remove _SUCCESS but leave bins
-    (cache_dir / "lgb" / "_SUCCESS").unlink()
+    (cache_dir / "lgb" / "binary" / "_SUCCESS").unlink()
 
     adapter.prepare_train_inputs(
         ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir)),
         prep_meta, parameters, str(cache_dir),
     )
 
-    assert (cache_dir / "lgb" / "_SUCCESS").exists()
-    assert (cache_dir / "lgb" / "train.bin").exists()
+    assert (cache_dir / "lgb" / "binary" / "_SUCCESS").exists()
+    assert (cache_dir / "lgb" / "binary" / "train.bin").exists()
 
 
 def test_lightgbm_train_uses_log_period_from_params(monkeypatch, tiny_data):
@@ -462,3 +462,115 @@ def test_lightgbm_prepare_passes_categorical_feature(tmp_path, monkeypatch):
         assert cat_attr in ([1], ["prod_name"], ["Column_1"]), (
             f"Unexpected categorical_feature value: {cat_attr}"
         )
+
+
+def _ranking_parameters(objective):
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+        "training": {"algorithm_params": {"objective": objective}},
+    }
+
+
+def _ranking_frames():
+    import pandas as pd
+    # 3 customers x 2 products on one snap_date => 3 query groups of size 2
+    df_tr = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["fund", "ccard"] * 3,
+        "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "label": [1, 0, 0, 1, 1, 0],
+    })
+    df_dev = pd.DataFrame({
+        "cust_id": ["c4", "c4", "c5", "c5"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+        "prod_name": ["fund", "ccard"] * 2,
+        "feat_a": [1.5, 2.5, 3.5, 4.5],
+        "label": [0, 1, 1, 0],
+    })
+    return df_tr, df_dev
+
+
+def test_prepare_train_inputs_binary_family_subpath(tmp_path):
+    import lightgbm as lgb
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        prep_meta, _ranking_parameters("binary"), str(cache),
+    )
+    assert (cache / "lgb" / "binary" / "_SUCCESS").exists()
+    assert not (cache / "lgb" / "ranking").exists()
+    ds = lgb.Dataset(str(cache / "lgb" / "binary" / "train.bin")).construct()
+    assert ds.get_group() is None  # binary path: no group set
+
+
+def test_prepare_train_inputs_ranking_sets_group(tmp_path):
+    import lightgbm as lgb
+    import numpy as np
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    train_h, dev_h = LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        prep_meta, _ranking_parameters("lambdarank"), str(cache),
+    )
+    assert (cache / "lgb" / "ranking" / "_SUCCESS").exists()
+    assert "ranking" in train_h.bin_path and train_h.role == "train"
+    assert "ranking" in dev_h.bin_path and dev_h.role == "train_dev"
+
+    ds_tr = lgb.Dataset(train_h.bin_path).construct()
+    g_tr = ds_tr.get_group()
+    assert g_tr is not None
+    np.testing.assert_array_equal(np.sort(g_tr), np.array([2, 2, 2]))
+    assert int(np.sum(g_tr)) == 6  # all train rows covered
+
+    ds_dv = lgb.Dataset(dev_h.bin_path, reference=ds_tr).construct()
+    g_dv = ds_dv.get_group()
+    np.testing.assert_array_equal(np.sort(g_dv), np.array([2, 2]))
+    assert int(np.sum(g_dv)) == 4
+
+
+def test_prepare_train_inputs_both_families_coexist(tmp_path):
+    """Switching objective rebuilds in its own sub-path; never reuses the
+    other family's binary."""
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    a = LightGBMAdapter()
+    a.prepare_train_inputs(ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+                           prep_meta, _ranking_parameters("binary"), str(cache))
+    a.prepare_train_inputs(ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+                           prep_meta, _ranking_parameters("lambdarank"), str(cache))
+    assert (cache / "lgb" / "binary" / "_SUCCESS").exists()
+    assert (cache / "lgb" / "ranking" / "_SUCCESS").exists()

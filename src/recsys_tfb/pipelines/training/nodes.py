@@ -279,7 +279,17 @@ def tune_hyperparameters(
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
     algorithm = training_params.get("algorithm", "lightgbm")
-    algorithm_params = training_params.get("algorithm_params", {})
+
+    from recsys_tfb.core.group_utils import default_metric_for_objective
+
+    # Local copy: defaulting the ranking metric must not mutate the shared
+    # `parameters` dict (it is still written verbatim to manifest.json).
+    algorithm_params = dict(training_params.get("algorithm_params", {}))
+    _metric = default_metric_for_objective(
+        algorithm_params.get("objective"), algorithm_params.get("metric")
+    )
+    if _metric:
+        algorithm_params["metric"] = _metric
 
     # Val rows belonging to (cust_id, snap_date) groups with no positive
     # labels contribute nothing to per-customer mAP and would only waste
@@ -442,40 +452,93 @@ def finalize_model(
         )
 
     import lightgbm as lgb
-    from recsys_tfb.io.extract import extract_Xy
+    import numpy as np
+
+    from recsys_tfb.core.group_utils import (
+        default_metric_for_objective,
+        is_ranking_objective,
+        to_contiguous_groups,
+    )
 
     training_params = parameters["training"]
     seed = parameters.get("random_seed", 42)
     algorithm = training_params.get("algorithm", "lightgbm")
-    algorithm_params = training_params.get("algorithm_params", {})
+    algorithm_params = dict(training_params.get("algorithm_params", {}))
+    objective = algorithm_params.get("objective")
+    _metric = default_metric_for_objective(
+        objective, algorithm_params.get("metric")
+    )
+    if _metric:
+        algorithm_params["metric"] = _metric
 
     logger.info(
         "final_model_strategy=refit_on_full (num_iterations=%d, no early stopping)",
         best_iteration,
     )
 
-    with log_step(logger, "extract_features"):
-        X_tr, y_tr = extract_Xy(train_parquet_handle, preprocessor_metadata, parameters)
-        X_dv, y_dv = extract_Xy(train_dev_parquet_handle, preprocessor_metadata, parameters)
-    X_full = np.concatenate([X_tr, X_dv], axis=0)
-    y_full = np.concatenate([y_tr, y_dv], axis=0)
-    log_data_volume(logger, "finalize.X_full", X_full)
-    log_data_volume(logger, "finalize.y_full", y_full)
-    del X_tr, y_tr, X_dv, y_dv
-
     feat_cols = preprocessor_metadata["feature_columns"]
     cat_cols = preprocessor_metadata.get("categorical_columns", [])
     cat_idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols] or None
 
-    # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned with
-    # the same construct param) so refit's tree splits use the same feature set.
-    ds_full = lgb.Dataset(
-        X_full,
-        label=y_full,
-        categorical_feature=cat_idx,
-        params={"feature_pre_filter": False},
-        free_raw_data=True,
-    )
+    if is_ranking_objective(objective):
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        with log_step(logger, "extract_features"):
+            X_tr, y_tr, gid_tr = extract_Xy_with_groups(
+                train_parquet_handle, preprocessor_metadata, parameters
+            )
+            X_dv, y_dv, gid_dv = extract_Xy_with_groups(
+                train_dev_parquet_handle, preprocessor_metadata, parameters
+            )
+        # train / train_dev are customer-disjoint by sampling design, so a
+        # query group never spans both splits — offset dev ids past train's
+        # max to keep them distinct after concatenation.
+        offset = (int(gid_tr.max()) + 1) if len(gid_tr) else 0
+        X_full = np.concatenate([X_tr, X_dv], axis=0)
+        y_full = np.concatenate([y_tr, y_dv], axis=0)
+        gid_full = np.concatenate([gid_tr, gid_dv + offset])
+        log_data_volume(logger, "finalize.X_full", X_full)
+        log_data_volume(logger, "finalize.y_full", y_full)
+        del X_tr, y_tr, X_dv, y_dv, gid_tr, gid_dv
+
+        perm, grp = to_contiguous_groups(gid_full)
+        # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
+        # with the same construct param) so refit's splits use the same feature
+        # set. group= makes this a ranking refit consistent with the objective.
+        ds_full = lgb.Dataset(
+            X_full[perm],
+            label=y_full[perm],
+            group=grp,
+            categorical_feature=cat_idx,
+            params={"feature_pre_filter": False},
+            free_raw_data=True,
+        )
+    else:
+        from recsys_tfb.io.extract import extract_Xy
+
+        with log_step(logger, "extract_features"):
+            X_tr, y_tr = extract_Xy(
+                train_parquet_handle, preprocessor_metadata, parameters
+            )
+            X_dv, y_dv = extract_Xy(
+                train_dev_parquet_handle, preprocessor_metadata, parameters
+            )
+        X_full = np.concatenate([X_tr, X_dv], axis=0)
+        y_full = np.concatenate([y_tr, y_dv], axis=0)
+        log_data_volume(logger, "finalize.X_full", X_full)
+        log_data_volume(logger, "finalize.y_full", y_full)
+        del X_tr, y_tr, X_dv, y_dv
+
+        # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
+        # with the same construct param) so refit's tree splits use the same
+        # feature set.
+        ds_full = lgb.Dataset(
+            X_full,
+            label=y_full,
+            categorical_feature=cat_idx,
+            params={"feature_pre_filter": False},
+            free_raw_data=True,
+        )
 
     params = {
         **algorithm_params,

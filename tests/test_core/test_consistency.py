@@ -220,3 +220,60 @@ class TestItemCoverageErrors:
         assert len(errs) == 3
         joined = "\n".join(errs)
         assert "zzz" in joined and "qqq" in joined and "c" in joined
+
+
+from recsys_tfb.core.consistency import ranking_objective_conflicts
+
+
+class TestRankingObjectiveConflicts:
+    def _params(self, objective=None, metric=None, entity=("cust_id",)):
+        ap = {}
+        if objective is not None:
+            ap["objective"] = objective
+        if metric is not None:
+            ap["metric"] = metric
+        return {
+            "schema": {"columns": {
+                "time": "snap_date",
+                "entity": list(entity),
+                "item": "prod_name",
+                "label": "label",
+            }},
+            "training": {"algorithm_params": ap},
+        }
+
+    def test_non_ranking_objective_ok(self):
+        assert ranking_objective_conflicts(
+            self._params("binary", "binary_logloss")) == []
+
+    def test_no_training_block_ok(self):
+        assert ranking_objective_conflicts({"schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}}}) == []
+
+    def test_ranking_with_ndcg_ok(self):
+        assert ranking_objective_conflicts(
+            self._params("lambdarank", "ndcg")) == []
+
+    def test_ranking_without_metric_ok(self):
+        # unset metric is allowed — defaulted to ndcg at train time
+        assert ranking_objective_conflicts(
+            self._params("rank_xendcg", None)) == []
+
+    def test_ranking_with_binary_metric_rejected(self):
+        errs = ranking_objective_conflicts(
+            self._params("lambdarank", "binary_logloss"))
+        assert len(errs) == 1
+        assert "ranking metric" in errs[0]
+        assert "binary_logloss" in errs[0]
+
+    def test_ranking_with_empty_entity_rejected(self):
+        errs = ranking_objective_conflicts(
+            self._params("lambdarank", "ndcg", entity=()))
+        assert len(errs) == 1
+        assert "query group" in errs[0]
+
+    def test_collect_all_both_failures(self):
+        errs = ranking_objective_conflicts(
+            self._params("lambdarank", "binary_logloss", entity=()))
+        assert len(errs) == 2

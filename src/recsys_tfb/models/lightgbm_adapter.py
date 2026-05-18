@@ -129,9 +129,12 @@ class LightGBMAdapter(ModelAdapter):
     ) -> tuple[LgbDatasetHandle, LgbDatasetHandle]:
         """Materialize lgb.Dataset binaries for train + train_dev.
 
-        Skip-if-exists: returns handles without rebuilding when cache_dir/lgb/_SUCCESS
-        already exists. On miss, builds train first (with binning), saves binary,
-        then builds train_dev with reference=train so dev binning aligns to train.
+        Skip-if-exists: returns handles without rebuilding when
+        cache_dir/lgb/<family>/_SUCCESS already exists, where <family> is the
+        objective family ("binary" or "ranking"). On miss, builds train first
+        (with binning), saves binary, then builds train_dev with
+        reference=train so dev binning aligns to train. For a ranking
+        objective each Dataset also carries the per-query group.
         """
         # Lazy import: see module-top comment about circular-import chain.
         # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
@@ -139,7 +142,25 @@ class LightGBMAdapter(ModelAdapter):
         # `from recsys_tfb.core.logging import ...` here re-enters that cycle.
         from recsys_tfb.core.logging import log_data_volume
 
-        lgb_dir = Path(cache_dir) / "lgb"
+        from recsys_tfb.core.group_utils import (
+            is_ranking_objective,
+            objective_family,
+            to_contiguous_groups,
+        )
+
+        objective = (
+            parameters.get("training", {})
+            .get("algorithm_params", {})
+            .get("objective")
+        )
+        family = objective_family(objective)
+        ranking = is_ranking_objective(objective)
+
+        # Objective-family sub-path: the lgb-binary cache is NOT keyed by
+        # model_version, so a group-bearing ranking binary must never be
+        # reused for a binary objective (or vice versa). lambdarank and
+        # rank_xendcg share the "ranking" family (identical group layout).
+        lgb_dir = Path(cache_dir) / "lgb" / family
         success = lgb_dir / "_SUCCESS"
         train_bin = lgb_dir / "train.bin"
         dev_bin = lgb_dir / "train_dev.bin"
@@ -172,37 +193,81 @@ class LightGBMAdapter(ModelAdapter):
         # trial params; the cached binary path must opt out explicitly to match.
         construct_params = {"feature_pre_filter": False}
 
-        # Lazy import: see module-top comment about circular-import chain.
-        from recsys_tfb.io.extract import extract_Xy
+        if ranking:
+            # Lazy import: see module-top comment about circular-import chain.
+            from recsys_tfb.io.extract import extract_Xy_with_groups
 
-        # Extract → build → save train, then free raw arrays before dev is read.
-        # Keeps the constructed ds_train alive (it's small) for dev's reference.
-        X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
-        ds_train = lgb.Dataset(
-            X_tr,
-            label=y_tr,
-            categorical_feature=cat_idx,
-            params=construct_params,
-            free_raw_data=True,
-        ).construct()
-        log_data_volume(logger, "prepare.ds_train", ds_train)
-        ds_train.save_binary(str(train_bin))
-        log_data_volume(logger, "prepare.train.bin", str(train_bin))
-        del X_tr, y_tr
+            # Ranking objectives need a per-query group; rows must be ordered
+            # so each group is one contiguous block. Build → save train, free
+            # raw arrays, then dev with reference=train. save_binary persists
+            # the group into the .bin so the trial/early-stopping loader gets
+            # it back for free.
+            X_tr, y_tr, gid_tr = extract_Xy_with_groups(
+                train_handle, preprocessor_metadata, parameters
+            )
+            perm_tr, grp_tr = to_contiguous_groups(gid_tr)
+            ds_train = lgb.Dataset(
+                X_tr[perm_tr],
+                label=y_tr[perm_tr],
+                group=grp_tr,
+                categorical_feature=cat_idx,
+                params=construct_params,
+                free_raw_data=True,
+            ).construct()
+            log_data_volume(logger, "prepare.ds_train", ds_train)
+            ds_train.save_binary(str(train_bin))
+            log_data_volume(logger, "prepare.train.bin", str(train_bin))
+            del X_tr, y_tr, gid_tr, perm_tr
 
-        X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
-        ds_dev = lgb.Dataset(
-            X_dev,
-            label=y_dev,
-            reference=ds_train,
-            categorical_feature=cat_idx,
-            params=construct_params,
-            free_raw_data=True,
-        ).construct()
-        log_data_volume(logger, "prepare.ds_dev", ds_dev)
-        ds_dev.save_binary(str(dev_bin))
-        log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
-        del X_dev, y_dev, ds_train, ds_dev
+            X_dev, y_dev, gid_dev = extract_Xy_with_groups(
+                train_dev_handle, preprocessor_metadata, parameters
+            )
+            perm_dev, grp_dev = to_contiguous_groups(gid_dev)
+            ds_dev = lgb.Dataset(
+                X_dev[perm_dev],
+                label=y_dev[perm_dev],
+                group=grp_dev,
+                reference=ds_train,
+                categorical_feature=cat_idx,
+                params=construct_params,
+                free_raw_data=True,
+            ).construct()
+            log_data_volume(logger, "prepare.ds_dev", ds_dev)
+            ds_dev.save_binary(str(dev_bin))
+            log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
+            del X_dev, y_dev, gid_dev, perm_dev, ds_train, ds_dev
+        else:
+            # Lazy import: see module-top comment about circular-import chain.
+            from recsys_tfb.io.extract import extract_Xy
+
+            # Extract → build → save train, then free raw arrays before dev is
+            # read. Keeps ds_train alive (it's small) for dev's reference.
+            X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
+            ds_train = lgb.Dataset(
+                X_tr,
+                label=y_tr,
+                categorical_feature=cat_idx,
+                params=construct_params,
+                free_raw_data=True,
+            ).construct()
+            log_data_volume(logger, "prepare.ds_train", ds_train)
+            ds_train.save_binary(str(train_bin))
+            log_data_volume(logger, "prepare.train.bin", str(train_bin))
+            del X_tr, y_tr
+
+            X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
+            ds_dev = lgb.Dataset(
+                X_dev,
+                label=y_dev,
+                reference=ds_train,
+                categorical_feature=cat_idx,
+                params=construct_params,
+                free_raw_data=True,
+            ).construct()
+            log_data_volume(logger, "prepare.ds_dev", ds_dev)
+            ds_dev.save_binary(str(dev_bin))
+            log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
+            del X_dev, y_dev, ds_train, ds_dev
 
         success.touch()
         logger.info(
