@@ -649,3 +649,63 @@ class TestCalibrateModel:
         assert np.all(np.isfinite(preds))
 
 
+def test_tune_defaults_ranking_metric(monkeypatch):
+    """algorithm_params with a ranking objective and no metric => params
+    passed to adapter.train carry metric='ndcg'."""
+    import numpy as np
+    from recsys_tfb.pipelines.training import nodes
+
+    captured = {}
+
+    class FakeAdapter:
+        booster = type("B", (), {"best_iteration": 3})()
+
+        def train(self, **kw):
+            captured.update(kw["params"])
+
+        def predict(self, X):
+            return np.zeros(len(X))
+
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
+    monkeypatch.setattr(nodes, "compute_mean_ap", lambda g, y, p: 0.5)
+
+    def fake_extract(handle, meta, params, **kw):
+        X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])
+        g = np.array([0, 0, 1, 1], dtype=np.int64)
+        return X, y, g
+
+    monkeypatch.setattr(
+        "recsys_tfb.io.extract.extract_Xy_with_groups", fake_extract
+    )
+
+    class FakeLgbHandle:
+        def load(self, reference=None, params=None):
+            class D:
+                def construct(self_inner):
+                    return self_inner
+            return D()
+
+    parameters = {
+        "training": {
+            "n_trials": 1,
+            "num_iterations": 5,
+            "early_stopping_rounds": 2,
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": "lambdarank"},
+            "search_space": {
+                "learning_rate": {"low": 0.01, "high": 0.1},
+                "num_leaves": {"low": 4, "high": 8},
+                "max_depth": {"low": 3, "high": 5},
+                "min_child_samples": {"low": 5, "high": 10},
+                "subsample": {"low": 0.6, "high": 1.0},
+                "colsample_bytree": {"low": 0.6, "high": 1.0},
+            },
+        },
+        "random_seed": 42,
+    }
+    nodes.tune_hyperparameters(
+        FakeLgbHandle(), FakeLgbHandle(), object(), {}, parameters
+    )
+    assert captured.get("metric") == "ndcg"
+
+

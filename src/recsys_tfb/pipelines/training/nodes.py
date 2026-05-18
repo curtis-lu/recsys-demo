@@ -279,7 +279,17 @@ def tune_hyperparameters(
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
     algorithm = training_params.get("algorithm", "lightgbm")
-    algorithm_params = training_params.get("algorithm_params", {})
+
+    from recsys_tfb.core.group_utils import default_metric_for_objective
+
+    # Local copy: defaulting the ranking metric must not mutate the shared
+    # `parameters` dict (it is still written verbatim to manifest.json).
+    algorithm_params = dict(training_params.get("algorithm_params", {}))
+    _metric = default_metric_for_objective(
+        algorithm_params.get("objective"), algorithm_params.get("metric")
+    )
+    if _metric:
+        algorithm_params["metric"] = _metric
 
     # Val rows belonging to (cust_id, snap_date) groups with no positive
     # labels contribute nothing to per-customer mAP and would only waste
