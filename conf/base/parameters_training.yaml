@@ -23,6 +23,17 @@ training:
     # doesn't fall back to OMP_NUM_THREADS=1 or a cgroup-throttled cpu_count
     # default. Match company env (4-core CPU-only driver per CLAUDE.md).
     num_threads: 4
+    # --- Learning-to-rank (Phase 1) -------------------------------------
+    # To train a ranking model, set objective + a ranking metric, e.g.:
+    #   objective: lambdarank      # or rank_xendcg
+    #   metric: ndcg               # required ranking metric; omit => ndcg
+    #   ndcg_eval_at: [5, 10]      # optional NDCG truncation levels
+    # The per-query group is schema.columns.time + entity
+    # (default: snap_date + cust_id) and is plumbed automatically into the
+    # train/train_dev binaries and HPO early stopping. A ranking objective
+    # with a non-ranking metric is rejected at CLI entry (consistency A7).
+    # Evaluation stays per-customer mAP regardless of training objective.
+    # --------------------------------------------------------------------
   calibration:
     enabled: true
     method: sigmoid
