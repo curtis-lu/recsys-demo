@@ -445,3 +445,66 @@ class TestComputeRowWeights:
     def test_dtype_is_float64(self):
         w = _compute_row_weights(pd.Series(["m"]), pd.Series(["a"]), {"m|a": 2.0})
         assert w.dtype == np.float64
+
+
+from recsys_tfb.io.handles import ParquetHandle
+from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
+
+
+def _wparams(weights):
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+        "training": {"sample_weights": weights},
+    }
+
+
+def _wprep():
+    return {"feature_columns": ["prod_name", "f1"],
+            "categorical_columns": ["prod_name"],
+            "category_mappings": {"prod_name": ["a", "b"]},
+            "drop_columns": []}
+
+
+def _wparquet(tmp_path):
+    pdf = pd.DataFrame({
+        "snap_date": ["2025-01-31"] * 4,
+        "cust_id": [1, 1, 2, 2],
+        "prod_name": ["a", "b", "a", "b"],
+        "cust_segment_typ": ["mass", "mass", "hnw", "hnw"],
+        "label": [1, 0, 1, 0],
+        "f1": [0.1, 0.2, 0.3, 0.4]})
+    p = tmp_path / "mi.parquet"
+    pdf.to_parquet(p)
+    return ParquetHandle(path=str(p))
+
+
+class TestExtractWithWeights:
+    def test_extract_Xy_default_is_two_tuple(self, tmp_path):
+        out = extract_Xy(_wparquet(tmp_path), _wprep(), _wparams({}))
+        assert len(out) == 2  # back-compat: existing callers unaffected
+
+    def test_extract_Xy_with_weights_appends_aligned_w(self, tmp_path):
+        X, y, w = extract_Xy(_wparquet(tmp_path), _wprep(),
+                             _wparams({"mass|a": 5.0}), with_weights=True)
+        assert X.shape == (4, 2)
+        # rows: mass|a, mass|b, hnw|a, hnw|b
+        np.testing.assert_array_equal(w, np.array([5.0, 1.0, 1.0, 1.0]))
+
+    def test_extract_Xy_with_weights_no_table_all_ones(self, tmp_path):
+        X, y, w = extract_Xy(_wparquet(tmp_path), _wprep(),
+                             _wparams({}), with_weights=True)
+        np.testing.assert_array_equal(w, np.ones(4))
+
+    def test_extract_Xy_with_groups_default_is_three_tuple(self, tmp_path):
+        out = extract_Xy_with_groups(_wparquet(tmp_path), _wprep(), _wparams({}))
+        assert len(out) == 3  # back-compat
+
+    def test_extract_Xy_with_groups_with_weights_appends_w(self, tmp_path):
+        X, y, g, w = extract_Xy_with_groups(
+            _wparquet(tmp_path), _wprep(), _wparams({"hnw|a": 4.0}),
+            with_weights=True)
+        assert len(g) == 4
+        # rows: mass|a, mass|b, hnw|a, hnw|b
+        np.testing.assert_array_equal(w, np.array([1.0, 1.0, 4.0, 1.0]))

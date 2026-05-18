@@ -42,6 +42,20 @@ def _compute_row_weights(
     return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
 
 
+def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
+    """Resolve a per-row weight array from training.sample_weights.
+
+    All-ones when the table is absent/empty or the carry / item columns are
+    not present (graceful, never raises). Computed from the *given* pdf so it
+    is aligned to whatever filtering/ordering the caller has already done.
+    """
+    sw = (parameters.get("training", {}) or {}).get("sample_weights") or {}
+    item_col = get_schema(parameters)["item"]
+    if not sw or SEGMENT_COLUMN not in pdf.columns or item_col not in pdf.columns:
+        return np.ones(len(pdf), dtype=np.float64)
+    return _compute_row_weights(pdf[SEGMENT_COLUMN], pdf[item_col], sw)
+
+
 def _log_parquet_metadata(handle: ParquetHandle) -> None:
     """Log parquet shape & uncompressed size before the actual read.
 
@@ -132,7 +146,9 @@ def extract_Xy(
     handle: ParquetHandle,
     preprocessor_metadata: dict,
     parameters: dict,
-) -> tuple[np.ndarray, np.ndarray]:
+    *,
+    with_weights: bool = False,
+) -> tuple:
     """Read the parquet at ``handle.path`` and return (X, y) as numpy arrays.
 
     Categorical identity columns (e.g. prod_name) are int-coded via the
@@ -171,6 +187,10 @@ def extract_Xy(
     log_data_volume(logger, "extract_Xy.X", X)
     log_data_volume(logger, "extract_Xy.y", y)
 
+    if with_weights:
+        w = _row_weights_from_pdf(pdf, parameters)
+        log_data_volume(logger, "extract_Xy.w", w)
+        return X, y, w
     return X, y
 
 
@@ -180,7 +200,8 @@ def extract_Xy_with_groups(
     parameters: dict,
     *,
     filter_groups_with_positives: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    with_weights: bool = False,
+) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
 
     A query group is ``(time, *entity)`` — for the default schema, the
@@ -258,4 +279,8 @@ def extract_Xy_with_groups(
         int(groups.max()) + 1 if len(groups) else 0,
     )
 
+    if with_weights:
+        w = _row_weights_from_pdf(pdf, parameters)
+        log_data_volume(logger, "extract_Xy_with_groups.w", w)
+        return X, y, groups, w
     return X, y, groups
