@@ -32,7 +32,9 @@ def objective_family(objective: str | None) -> str:
     return "ranking" if is_ranking_objective(objective) else "binary"
 
 
-def default_metric_for_objective(objective: str | None, metric):
+def default_metric_for_objective(
+    objective: str | None, metric: str | None
+) -> str | None:
     """Default the eval metric to ``"ndcg"`` for a ranking objective with no
     metric set.
 
@@ -66,6 +68,11 @@ def to_contiguous_groups(group_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     regardless of the integer labels chosen for the groups.
     """
     group_ids = np.asarray(group_ids)
+    if group_ids.ndim != 1:
+        raise ValueError(
+            f"group_ids must be 1-D (one id per row), got shape "
+            f"{group_ids.shape}"
+        )
     if group_ids.shape[0] == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
     sort_perm = np.argsort(group_ids, kind="stable").astype(np.int64)

@@ -81,3 +81,10 @@ class TestToContiguousGroups:
         np.testing.assert_array_equal(X[perm].ravel(), np.array([20, 40, 10, 30]))
         np.testing.assert_array_equal(y[perm], np.array([0, 1, 1, 0]))
         np.testing.assert_array_equal(counts, np.array([2, 2]))
+
+    def test_rejects_non_1d_input(self):
+        # algorithm-agnostic contract (reused by Phase 4 XGBoost): a 2-D
+        # array must fail loudly, not silently mis-sort per-axis.
+        bad = np.array([[0, 1], [1, 0]], dtype=np.int64)
+        with pytest.raises(ValueError, match="1-D"):
+            to_contiguous_groups(bad)

@@ -242,6 +242,12 @@ Both forms (user chose "both"):
 4. **Prerequisite (user-owned):** add and pin `xgboost` in `pyproject.toml` and
    record the version in CLAUDE.md, and confirm the production Hadoop env has
    it. Phase 4 does not proceed until this is done.
+5. **Hardening carried from the Phase 1 CP2 review (deferred to here):** add a
+   `core.group_utils.to_contiguous_groups` test feeding a non-int64 (e.g.
+   string) group-id array, to pin the algorithm-agnostic dtype contract before
+   the XGBoost adapter relies on it. (The Phase 1 review's other two items —
+   `default_metric_for_objective` type annotation and a 1-D input guard with a
+   loud `ValueError` — were already applied in Phase 1.)
 
 ---
 
