@@ -73,3 +73,28 @@ class TestRejected:
 
     def test_error_is_valueerror(self):
         assert issubclass(SafeEvalError, ValueError)
+
+
+class TestRobustness:
+    def test_oversized_exponent_rejected(self):
+        with pytest.raises(SafeEvalError, match="exponent"):
+            safe_eval("9 ** 9 ** 9", {})
+        with pytest.raises(SafeEvalError, match="exponent"):
+            safe_eval("2 ** 100000", {})
+
+    def test_small_exponent_still_ok(self):
+        assert safe_eval("2 ** 16", {}) == 65536
+        assert safe_eval("x ** 2", {"x": 5}) == 25
+
+    def test_zero_division_wrapped(self):
+        with pytest.raises(SafeEvalError):
+            safe_eval("1 / 0", {})
+
+    def test_type_error_wrapped(self):
+        with pytest.raises(SafeEvalError):
+            safe_eval("'a' + 1", {})
+
+    def test_deep_nesting_rejected_not_recursionerror(self):
+        expr = "1" + " + 1" * 5000
+        with pytest.raises(SafeEvalError):
+            safe_eval(expr, {})

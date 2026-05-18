@@ -17,7 +17,9 @@ __all__ = ["SafeEvalError", "safe_eval"]
 
 
 class SafeEvalError(ValueError):
-    """Raised on a syntax error or any disallowed construct/name/call."""
+    """Raised when evaluation fails for any reason: syntax error, disallowed
+    construct/name/call, oversized exponent, too-deeply-nested expression, or
+    any other runtime evaluation error."""
 
 
 _BIN = {
@@ -36,18 +38,38 @@ _CALLS = {
     "int": int, "float": float, "len": len,
 }
 
+_MAX_POW_EXPONENT = 64  # HPO bound expressions never need a larger exponent;
+                        # bigger is a config typo -> fail loud, not a compute bomb
+_MAX_DEPTH = 64         # cap recursion depth; beyond this raise SafeEvalError, not RecursionError
+
 
 def safe_eval(expr: str, context: dict) -> Any:
-    """Evaluate ``expr`` against name->value ``context``. Raise SafeEvalError
-    on a syntax error or any construct outside the allowlist."""
+    """Evaluate ``expr`` against name->value ``context``.
+
+    Raises ``SafeEvalError`` on:
+    - a syntax error in the expression,
+    - any construct, name, or call outside the allowlist,
+    - an exponent exceeding ``_MAX_POW_EXPONENT``,
+    - an expression nested deeper than ``_MAX_DEPTH``, or
+    - any other runtime evaluation error (e.g. ZeroDivisionError, TypeError).
+    """
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
         raise SafeEvalError(f"syntax error in expression {expr!r}: {exc}") from exc
-    return _eval(tree.body, context)
+    try:
+        return _eval(tree.body, context)
+    except SafeEvalError:
+        raise
+    except Exception as exc:
+        raise SafeEvalError(
+            f"error evaluating expression {expr!r}: {exc}"
+        ) from exc
 
 
-def _eval(node: ast.AST, ctx: dict) -> Any:
+def _eval(node: ast.AST, ctx: dict, depth: int = 0) -> Any:
+    if depth > _MAX_DEPTH:
+        raise SafeEvalError("expression nesting too deep")
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, ast.Name):
@@ -55,47 +77,59 @@ def _eval(node: ast.AST, ctx: dict) -> Any:
             raise SafeEvalError(f"unknown name {node.id!r}")
         return ctx[node.id]
     if isinstance(node, (ast.List, ast.Tuple)):
-        return [_eval(e, ctx) for e in node.elts]
+        # Collection literals intentionally normalize to list (sufficient for membership tests;
+        # tuple identity is not needed by HPO expressions).
+        return [_eval(e, ctx, depth + 1) for e in node.elts]
     if isinstance(node, ast.UnaryOp):
         op = _UNARY.get(type(node.op))
         if op is None:
             raise SafeEvalError(f"disallowed unary op {type(node.op).__name__}")
-        return op(_eval(node.operand, ctx))
+        return op(_eval(node.operand, ctx, depth + 1))
     if isinstance(node, ast.BinOp):
         op = _BIN.get(type(node.op))
         if op is None:
             raise SafeEvalError(f"disallowed operator {type(node.op).__name__}")
-        return op(_eval(node.left, ctx), _eval(node.right, ctx))
+        left = _eval(node.left, ctx, depth + 1)
+        right = _eval(node.right, ctx, depth + 1)
+        if isinstance(node.op, ast.Pow) and isinstance(right, (int, float)) and abs(right) > _MAX_POW_EXPONENT:
+            raise SafeEvalError(
+                f"exponent {right} exceeds the maximum allowed ({_MAX_POW_EXPONENT})"
+            )
+        return op(left, right)
     if isinstance(node, ast.BoolOp):
         vals = node.values
         if isinstance(node.op, ast.And):
             result = True
             for v in vals:
-                result = _eval(v, ctx)
+                result = _eval(v, ctx, depth + 1)
                 if not result:
                     return result
             return result
         result = False
         for v in vals:
-            result = _eval(v, ctx)
+            result = _eval(v, ctx, depth + 1)
             if result:
                 return result
         return result
     if isinstance(node, ast.Compare):
-        left = _eval(node.left, ctx)
+        left = _eval(node.left, ctx, depth + 1)
         for op_node, comp in zip(node.ops, node.comparators):
             op = _CMP.get(type(op_node))
             if op is None:
                 raise SafeEvalError(
                     f"disallowed comparison {type(op_node).__name__}"
                 )
-            right = _eval(comp, ctx)
+            right = _eval(comp, ctx, depth + 1)
             if not op(left, right):
                 return False
             left = right
         return True
     if isinstance(node, ast.IfExp):
-        return _eval(node.body, ctx) if _eval(node.test, ctx) else _eval(node.orelse, ctx)
+        return (
+            _eval(node.body, ctx, depth + 1)
+            if _eval(node.test, ctx, depth + 1)
+            else _eval(node.orelse, ctx, depth + 1)
+        )
     if isinstance(node, ast.Call):
         if (
             not isinstance(node.func, ast.Name)
@@ -103,5 +137,5 @@ def _eval(node: ast.AST, ctx: dict) -> Any:
             or node.keywords
         ):
             raise SafeEvalError("disallowed call (only min/max/abs/round/int/float/len, no kwargs)")
-        return _CALLS[node.func.id](*[_eval(a, ctx) for a in node.args])
+        return _CALLS[node.func.id](*[_eval(a, ctx, depth + 1) for a in node.args])
     raise SafeEvalError(f"disallowed expression: {type(node).__name__}")
