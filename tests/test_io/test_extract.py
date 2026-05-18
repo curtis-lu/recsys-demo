@@ -425,3 +425,23 @@ def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
 
     assert X.shape == (2, 1)
     assert list(X[:, 0]) == [1.0, 2.0]
+
+
+from recsys_tfb.io.extract import _compute_row_weights
+
+
+class TestComputeRowWeights:
+    def test_known_pairs_get_weight_unknown_get_one(self):
+        seg = pd.Series(["mass", "hnw", "mass", "aff"])
+        prod = pd.Series(["a", "a", "b", "a"])
+        w = _compute_row_weights(seg, prod, {"mass|a": 3.0, "hnw|a": 2.0})
+        assert isinstance(w, np.ndarray)
+        np.testing.assert_array_equal(w, np.array([3.0, 2.0, 1.0, 1.0]))
+
+    def test_empty_weights_all_ones(self):
+        w = _compute_row_weights(pd.Series(["m", "h"]), pd.Series(["a", "b"]), {})
+        np.testing.assert_array_equal(w, np.array([1.0, 1.0]))
+
+    def test_dtype_is_float64(self):
+        w = _compute_row_weights(pd.Series(["m"]), pd.Series(["a"]), {"m|a": 2.0})
+        assert w.dtype == np.float64

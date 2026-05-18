@@ -22,6 +22,25 @@ from recsys_tfb.io.handles import ParquetHandle
 
 logger = logging.getLogger(__name__)
 
+SEGMENT_COLUMN = "cust_segment_typ"
+
+
+def _compute_row_weights(
+    seg: pd.Series,
+    prod: pd.Series,
+    sample_weights: dict,
+) -> np.ndarray:
+    """Per-row LightGBM sample weight from a ``"<segment>|<product>"`` table.
+
+    Pure: no Spark, no I/O. Rows whose ``f"{seg}|{prod}"`` key is absent get
+    weight 1.0 (sparse-emit semantics: only boosted groups are written to
+    ``training.sample_weights``).
+    """
+    if not sample_weights:
+        return np.ones(len(seg), dtype=np.float64)
+    keys = seg.astype(str).str.cat(prod.astype(str), sep="|")
+    return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
+
 
 def _log_parquet_metadata(handle: ParquetHandle) -> None:
     """Log parquet shape & uncompressed size before the actual read.
