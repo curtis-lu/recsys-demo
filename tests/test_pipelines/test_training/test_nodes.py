@@ -709,3 +709,64 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     assert captured.get("metric") == "ndcg"
 
 
+def test_finalize_refit_ranking_sets_group(monkeypatch):
+    import numpy as np
+    import lightgbm as lgb
+    from recsys_tfb.pipelines.training import nodes
+
+    captured = {}
+
+    def fake_extract_groups(handle, meta, params, **kw):
+        # train: 2 groups of 2 ; dev: 1 group of 2
+        if getattr(handle, "tag", "") == "dev":
+            X = np.ones((2, 2)); y = np.array([1, 0])
+            g = np.array([0, 0], dtype=np.int64)
+        else:
+            X = np.zeros((4, 2)); y = np.array([1, 0, 0, 1])
+            g = np.array([0, 0, 1, 1], dtype=np.int64)
+        return X, y, g
+
+    monkeypatch.setattr(
+        "recsys_tfb.io.extract.extract_Xy_with_groups", fake_extract_groups
+    )
+
+    real_dataset = lgb.Dataset
+
+    def spy_dataset(*a, **kw):
+        if "group" in kw and kw["group"] is not None:
+            captured["group"] = np.asarray(kw["group"])
+        return real_dataset(*a, **kw)
+
+    monkeypatch.setattr(lgb, "Dataset", spy_dataset)
+
+    class FakeAdapter:
+        def train(self, **kw):
+            captured["metric"] = kw["params"].get("metric")
+
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
+
+    class H:
+        def __init__(self, tag=""):
+            self.tag = tag
+
+    parameters = {
+        "training": {
+            "final_model_strategy": "refit_on_full",
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": "lambdarank"},
+        },
+        "random_seed": 42,
+    }
+    prep_meta = {"feature_columns": ["a", "b"], "categorical_columns": []}
+    nodes.finalize_model(
+        H("train"), H("dev"), object(), {"num_leaves": 4}, 3,
+        prep_meta, parameters,
+    )
+    # 3 groups total (2 from train + 1 from dev), all size 2
+    np.testing.assert_array_equal(
+        np.sort(captured["group"]), np.array([2, 2, 2])
+    )
+    assert int(captured["group"].sum()) == 6
+    assert captured["metric"] == "ndcg"
+
+
