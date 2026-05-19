@@ -91,3 +91,23 @@ class TestGridToYaml:
         export = [{"segment": "mass", "product": "zzz", "ratio": 0.5, "weight": 2.0}]
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
+
+
+import json
+
+from recsys_tfb.tooling.sampling_suggest import render_html
+
+
+class TestRenderHtml:
+    def test_html_is_self_contained_and_embeds_grid(self):
+        grid = [{"segment": "mass", "product": "a", "n_pos": 200,
+                 "n_neg": 4000, "pos_rate": 0.047,
+                 "suggested_ratio": 0.25, "suggested_weight": 1.0}]
+        html = render_html(grid, default_ratio=1.0)
+        assert html.lstrip().startswith("<!DOCTYPE html>")
+        assert "mass" in html and "0.25" in html
+        # the grid is embedded as JSON for the export button
+        assert json.dumps(grid) in html
+        # no external resource references (self-contained)
+        assert "http://" not in html and "https://" not in html
+        assert "Export JSON" in html and "Export YAML" in html

@@ -117,3 +117,78 @@ def grid_to_yaml(
             {"sample_weights": weights}, sort_keys=True,
             allow_unicode=True, default_flow_style=False),
     }
+
+
+import json as _json
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Sampling Overrides Editor</title>
+<style>
+ body{{font-family:system-ui,monospace;margin:1.5rem}}
+ table{{border-collapse:collapse}} td,th{{border:1px solid #ccc;padding:4px 8px}}
+ th{{background:#f2f2f2}} td.edit{{background:#fffbe6}}
+ .stat{{color:#666}} button{{margin:.3rem;padding:.4rem .8rem}}
+ pre{{background:#f7f7f7;padding:1rem;white-space:pre-wrap}}
+</style></head><body>
+<h2>Sampling Overrides Editor</h2>
+<p>default ratio = <b>{default_ratio}</b>. 編輯 ratio / weight 欄；
+只匯出 ≠ default 的 cell。</p>
+<table id="g"><thead><tr>
+<th>segment</th><th>product</th><th class="stat">n_pos</th>
+<th class="stat">n_neg</th><th class="stat">pos_rate</th>
+<th>ratio</th><th>weight</th></tr></thead><tbody></tbody></table>
+<button onclick="exp('json')">Export JSON</button>
+<button onclick="exp('yaml')">Export YAML snippet</button>
+<pre id="out"></pre>
+<script>
+const GRID={grid_json};
+const DR={default_ratio};
+const tb=document.querySelector('#g tbody');
+GRID.forEach((r,i)=>{{
+ const tr=document.createElement('tr');
+ tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
+  `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
+  `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
+  `<td class=edit contenteditable data-k=ratio data-i=${{i}}>`+
+  `${{r.suggested_ratio}}</td>`+
+  `<td class=edit contenteditable data-k=weight data-i=${{i}}>`+
+  `${{r.suggested_weight}}</td>`;
+ tb.appendChild(tr);
+}});
+function collect(){{
+ const o=GRID.map(r=>({{segment:r.segment,product:r.product,
+  ratio:r.suggested_ratio,weight:r.suggested_weight}}));
+ document.querySelectorAll('td.edit').forEach(td=>{{
+  o[+td.dataset.i][td.dataset.k]=parseFloat(td.textContent);}});
+ return o;
+}}
+function exp(kind){{
+ const o=collect();
+ if(kind==='json'){{
+  document.getElementById('out').textContent=JSON.stringify(o,null,2);
+  const b=new Blob([JSON.stringify(o,null,2)],{{type:'application/json'}});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download='sampling_overrides_export.json';a.click();
+ }}else{{
+  const ov={{}},sw={{}};
+  o.forEach(r=>{{ if(r.ratio!==DR) ov[r.segment+'|'+r.product+'|0']=r.ratio;
+   if(r.weight!==1.0) sw[r.segment+'|'+r.product]=r.weight; }});
+  document.getElementById('out').textContent=
+   '# -> parameters_dataset.yaml (dataset.sample_ratio_overrides)\\n'+
+   'sample_ratio_overrides:\\n'+
+   Object.entries(ov).map(([k,v])=>'  "'+k+'": '+v).join('\\n')+
+   '\\n\\n# -> parameters_training.yaml (training.sample_weights)\\n'+
+   'sample_weights:\\n'+
+   Object.entries(sw).map(([k,v])=>'  "'+k+'": '+v).join('\\n');
+ }}
+}}
+</script></body></html>"""
+
+
+def render_html(grid: list[dict], default_ratio: float) -> str:
+    """Render a self-contained HTML editor (pure stdlib, no external assets)."""
+    return _HTML_TEMPLATE.format(
+        default_ratio=default_ratio,
+        grid_json=_json.dumps(grid),
+    )
