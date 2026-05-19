@@ -281,6 +281,7 @@ def tune_hyperparameters(
     algorithm = training_params.get("algorithm", "lightgbm")
 
     from recsys_tfb.core.group_utils import default_metric_for_objective
+    from recsys_tfb.pipelines.training.search_space import build_trial_params
 
     # Local copy: defaulting the ranking metric must not mutate the shared
     # `parameters` dict (it is still written verbatim to manifest.json).
@@ -306,39 +307,7 @@ def tune_hyperparameters(
 
     def objective(trial: optuna.Trial) -> float:
         trial_idx = trial.number
-        trial_params = {
-            "learning_rate": trial.suggest_float(
-                "learning_rate",
-                search_space["learning_rate"]["low"],
-                search_space["learning_rate"]["high"],
-                log=True,
-            ),
-            "num_leaves": trial.suggest_int(
-                "num_leaves",
-                search_space["num_leaves"]["low"],
-                search_space["num_leaves"]["high"],
-            ),
-            "max_depth": trial.suggest_int(
-                "max_depth",
-                search_space["max_depth"]["low"],
-                search_space["max_depth"]["high"],
-            ),
-            "min_child_samples": trial.suggest_int(
-                "min_child_samples",
-                search_space["min_child_samples"]["low"],
-                search_space["min_child_samples"]["high"],
-            ),
-            "subsample": trial.suggest_float(
-                "subsample",
-                search_space["subsample"]["low"],
-                search_space["subsample"]["high"],
-            ),
-            "colsample_bytree": trial.suggest_float(
-                "colsample_bytree",
-                search_space["colsample_bytree"]["low"],
-                search_space["colsample_bytree"]["high"],
-            ),
-        }
+        trial_params = build_trial_params(trial, search_space)
 
         params = {
             **algorithm_params,
