@@ -50,6 +50,9 @@ def select_keys(
     if sample_ratio_overrides is None:
         sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
 
+    carry_columns = ds.get("carry_columns", []) or []
+    return_cols = identity_key + [c for c in carry_columns if c not in identity_key]
+
     # Filter to specified snap_dates
     target_dates = [pd.Timestamp(d) for d in snap_dates]
     if target_dates:
@@ -59,11 +62,11 @@ def select_keys(
 
     # Extract identity + group columns. sample_pool PK = identity_key is enforced
     # by source_etl's max_duplicate_key_ratio check, so no dedup needed here.
-    extract_cols = list(dict.fromkeys(group_keys + identity_key))
+    extract_cols = list(dict.fromkeys(group_keys + identity_key + carry_columns))
     keys = pool.select(*extract_cols)
 
     if sample_ratio >= 1.0 and not sample_ratio_overrides:
-        sampled = keys.select(*identity_key)
+        sampled = keys.select(*return_cols)
         logger.info("Sampled keys (ratio=1.0, no sampling)")
         return sampled
 
@@ -87,7 +90,7 @@ def select_keys(
     # Deterministic sampling: bucket(identity_key | site | seed) < threshold
     keys = keys.withColumn("_bucket", spark_bucket(keys, identity_key, seed, site=site))
     threshold_expr = (F.col("_effective_ratio") * F.lit(HASH_BUCKETS)).cast("int")
-    sampled = keys.filter(F.col("_bucket") < threshold_expr).select(*identity_key)
+    sampled = keys.filter(F.col("_bucket") < threshold_expr).select(*return_cols)
 
     logger.info(
         "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",

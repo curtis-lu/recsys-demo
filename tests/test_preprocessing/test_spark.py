@@ -70,3 +70,44 @@ def test_cast_feature_decimals_preserves_values(mixed_df):
     rows = out.orderBy("cust_id").collect()
     assert rows[0].feature_a == pytest.approx(1.5)
     assert rows[1].feature_a == pytest.approx(2.25)
+
+
+import pandas as pd
+from recsys_tfb.preprocessing._spark import build_model_input
+
+
+class TestBuildModelInputCarry:
+    def _prep(self):
+        return {"feature_columns": ["prod_name", "f1"],
+                "categorical_columns": ["prod_name"],
+                "category_mappings": {"prod_name": ["a", "b"]},
+                "drop_columns": []}
+
+    def _params(self):
+        return {"schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}}}
+
+    def _frames(self, spark, with_carry):
+        kcols = {"snap_date": pd.to_datetime(["2025-01-31"] * 2),
+                 "cust_id": [1, 2], "prod_name": ["a", "b"]}
+        if with_carry:
+            kcols["cust_segment_typ"] = ["mass", "hnw"]
+        keys = spark.createDataFrame(pd.DataFrame(kcols))
+        labels = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "cust_id": [1, 2], "prod_name": ["a", "b"], "label": [1, 0]}))
+        feats = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "cust_id": [1, 2], "f1": [0.1, 0.2]}))
+        return keys, feats, labels
+
+    def test_carry_in_output_when_present_in_keys(self, spark):
+        keys, feats, labels = self._frames(spark, with_carry=True)
+        out = build_model_input(keys, feats, labels, self._prep(), self._params())
+        assert "cust_segment_typ" in out.columns
+
+    def test_no_carry_when_absent_from_keys(self, spark):
+        keys, feats, labels = self._frames(spark, with_carry=False)
+        out = build_model_input(keys, feats, labels, self._prep(), self._params())
+        assert "cust_segment_typ" not in out.columns

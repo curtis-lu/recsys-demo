@@ -453,11 +453,13 @@ def finalize_model(
         from recsys_tfb.io.extract import extract_Xy_with_groups
 
         with log_step(logger, "extract_features"):
-            X_tr, y_tr, gid_tr = extract_Xy_with_groups(
-                train_parquet_handle, preprocessor_metadata, parameters
+            X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
+                train_parquet_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
-            X_dv, y_dv, gid_dv = extract_Xy_with_groups(
-                train_dev_parquet_handle, preprocessor_metadata, parameters
+            X_dv, y_dv, gid_dv, w_dv = extract_Xy_with_groups(
+                train_dev_parquet_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
         # train / train_dev are customer-disjoint by sampling design, so a
         # query group never spans both splits — offset dev ids past train's
@@ -465,10 +467,11 @@ def finalize_model(
         offset = (int(gid_tr.max()) + 1) if len(gid_tr) else 0
         X_full = np.concatenate([X_tr, X_dv], axis=0)
         y_full = np.concatenate([y_tr, y_dv], axis=0)
+        w_full = np.concatenate([w_tr, w_dv])
         gid_full = np.concatenate([gid_tr, gid_dv + offset])
         log_data_volume(logger, "finalize.X_full", X_full)
         log_data_volume(logger, "finalize.y_full", y_full)
-        del X_tr, y_tr, X_dv, y_dv, gid_tr, gid_dv
+        del X_tr, y_tr, X_dv, y_dv, gid_tr, gid_dv, w_tr, w_dv
 
         perm, grp = to_contiguous_groups(gid_full)
         # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
@@ -477,6 +480,7 @@ def finalize_model(
         ds_full = lgb.Dataset(
             X_full[perm],
             label=y_full[perm],
+            weight=w_full[perm],
             group=grp,
             categorical_feature=cat_idx,
             params={"feature_pre_filter": False},
@@ -486,17 +490,20 @@ def finalize_model(
         from recsys_tfb.io.extract import extract_Xy
 
         with log_step(logger, "extract_features"):
-            X_tr, y_tr = extract_Xy(
-                train_parquet_handle, preprocessor_metadata, parameters
+            X_tr, y_tr, w_tr = extract_Xy(
+                train_parquet_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
-            X_dv, y_dv = extract_Xy(
-                train_dev_parquet_handle, preprocessor_metadata, parameters
+            X_dv, y_dv, w_dv = extract_Xy(
+                train_dev_parquet_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
         X_full = np.concatenate([X_tr, X_dv], axis=0)
         y_full = np.concatenate([y_tr, y_dv], axis=0)
+        w_full = np.concatenate([w_tr, w_dv])
         log_data_volume(logger, "finalize.X_full", X_full)
         log_data_volume(logger, "finalize.y_full", y_full)
-        del X_tr, y_tr, X_dv, y_dv
+        del X_tr, y_tr, X_dv, y_dv, w_tr, w_dv
 
         # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
         # with the same construct param) so refit's tree splits use the same
@@ -504,6 +511,7 @@ def finalize_model(
         ds_full = lgb.Dataset(
             X_full,
             label=y_full,
+            weight=w_full,
             categorical_feature=cat_idx,
             params={"feature_pre_filter": False},
             free_raw_data=True,

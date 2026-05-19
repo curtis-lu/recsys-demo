@@ -45,6 +45,9 @@ Layer 1 — config-static (implemented here; aggregated by
   ``log: true`` ⟹ ``low > 0`` and no ``step``; categorical needs non-empty
   ``choices``. ``when`` / string-expression bounds are rejected until
   Phase 3. Predicate: ``search_space_errors``.
+* A9 — a ``training.sample_weights`` key references a product value absent
+  from ``schema.categorical_values[item]``. Predicate:
+  ``weight_unknown_items`` (product-only check, mirrors A5).
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2–B3 deferred):
 
@@ -330,6 +333,26 @@ def search_space_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def weight_unknown_items(parameters: dict) -> list[str]:
+    """training.sample_weights keys whose product component ∉ resolved_item_values (A8).
+
+    Weight-table keys are fixed-format ``"<cust_segment_typ>|<prod_name>"``
+    (2 parts, '|'-joined). Only the product component (index 1) is validated;
+    the segment component has no config-declared value list (mirrors A5's
+    item-only check in :func:`override_unknown_items`). Keys without a '|'
+    (no product component) are skipped.
+    """
+    training = parameters.get("training", {}) or {}
+    weights = training.get("sample_weights") or {}
+    declared = set(resolved_item_values(parameters))
+    bad: set[str] = set()
+    for key in weights:
+        parts = str(key).split("|")
+        if len(parts) >= 2 and parts[1] not in declared:
+            bad.add(parts[1])
+    return sorted(bad)
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -374,6 +397,14 @@ def validate_config_consistency(parameters: dict) -> None:
     for msg in ranking_objective_conflicts(parameters):
         errors.append(msg)
 
+    unknown_w = weight_unknown_items(parameters)
+    if unknown_w:
+        errors.append(
+            f"training.sample_weights references product value(s) {unknown_w} "
+            f"absent from schema.categorical_values[item] — the weight "
+            f"silently never matches. Fix the key(s) or declare the value(s)."
+        )
+        
     for msg in search_space_errors(parameters):
         errors.append(msg)
 

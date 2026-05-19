@@ -553,3 +553,18 @@ class TestValidateDataConsistency:
         )
         sp = sample_pool.unionByName(extra)
         assert validate_data_consistency(sp, label_table, parameters) is None
+
+
+class TestSplitTrainKeysCarry:
+    def test_carry_column_survives_split(self, spark):
+        keys = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+            "cust_id": [1, 2, 3, 4, 5, 6], "prod_name": ["a"] * 6,
+            "cust_segment_typ": ["mass", "hnw", "mass", "aff", "mass", "hnw"]}))
+        params = {"schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+            "dataset": {"train_dev_ratio": 0.3}, "random_seed": 42}
+        tr, dv = split_train_keys(keys, params)
+        assert "cust_segment_typ" in tr.columns
+        assert "cust_segment_typ" in dv.columns

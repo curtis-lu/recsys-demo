@@ -28,6 +28,14 @@ dataset:
     "hnw|ccard_ins|0": 0.8
   # 未指定的組合用預設 sample_ratio
 
+  # --- Carry columns ---
+  # 非 identity、要從 sample_pool 帶進 train/train_dev model_input parquet 供
+  # 訓練讀取（如 training.sample_weights 的 segment 維度）的欄位清單。寬鬆
+  # 超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
+  # 重產 dataset。改此清單會 bust base_dataset_version（parquet schema 變）。
+  carry_columns:
+    - cust_segment_typ
+
   # --- Train / Train-dev（共用日期，按 cust_id ratio 切分）---
   train_dev_ratio: 0.1
 

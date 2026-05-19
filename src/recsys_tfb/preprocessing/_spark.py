@@ -377,7 +377,14 @@ def build_model_input(
         required = list(set(identity_cols + [label_col] + feature_columns))
         _validate_columns(dataset.columns, required, "build_model_input")
 
-        output_cols = list(dict.fromkeys(identity_cols + [label_col] + feature_columns))
+        carry_present = [
+            c for c in keys.columns
+            if c not in identity_cols and c not in feature_columns
+            and c != label_col and c in dataset.columns
+        ]
+        output_cols = list(dict.fromkeys(
+            identity_cols + [label_col] + feature_columns + carry_present
+        ))
         result = dataset.select(*output_cols)
 
     with log_step(logger, "cast_decimals_to_double"):

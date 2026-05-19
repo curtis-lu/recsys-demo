@@ -574,3 +574,76 @@ def test_prepare_train_inputs_both_families_coexist(tmp_path):
                            prep_meta, _ranking_parameters("lambdarank"), str(cache))
     assert (cache / "lgb" / "binary" / "_SUCCESS").exists()
     assert (cache / "lgb" / "ranking" / "_SUCCESS").exists()
+
+
+def _weight_frames():
+    import pandas as pd
+    df_tr = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["a", "b"] * 3,
+        "cust_segment_typ": ["mass"] * 6,
+        "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "label": [1, 0, 0, 1, 1, 0],
+    })
+    df_dev = pd.DataFrame({
+        "cust_id": ["c4", "c4", "c5", "c5"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+        "prod_name": ["a", "b"] * 2,
+        "cust_segment_typ": ["mass"] * 4,
+        "feat_a": [1.5, 2.5, 3.5, 4.5],
+        "label": [0, 1, 1, 0],
+    })
+    return df_tr, df_dev
+
+
+def _weight_params(objective):
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+        "training": {
+            "algorithm_params": {"objective": objective},
+            "sample_weights": {"mass|a": 3.0}},
+    }
+
+
+class TestPrepareTrainInputsWeight:
+    def _prep(self):
+        return {
+            "feature_columns": ["feat_a", "prod_name"],
+            "categorical_columns": ["prod_name"],
+            "category_mappings": {"prod_name": ["a", "b"]},
+        }
+
+    def test_binary_branch_bakes_weight_into_binary(self, tmp_path):
+        import lightgbm as lgb
+        import numpy as np
+        from recsys_tfb.io.handles import ParquetHandle
+        df_tr, df_dev = _weight_frames()
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+        cache = tmp_path / "variant"
+        LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            self._prep(), _weight_params("binary"), str(cache))
+        ds = lgb.Dataset(str(cache / "lgb" / "binary" / "train.bin")).construct()
+        w = ds.get_weight()
+        assert w is not None
+        assert sorted(set(np.round(w, 3))) == [1.0, 3.0]
+
+    def test_ranking_branch_bakes_weight_aligned_with_perm(self, tmp_path):
+        import lightgbm as lgb
+        import numpy as np
+        from recsys_tfb.io.handles import ParquetHandle
+        df_tr, df_dev = _weight_frames()
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+        cache = tmp_path / "variant"
+        LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            self._prep(), _weight_params("lambdarank"), str(cache))
+        ds = lgb.Dataset(str(cache / "lgb" / "ranking" / "train.bin")).construct()
+        w = ds.get_weight()
+        assert w is not None
+        assert sorted(set(np.round(w, 3))) == [1.0, 3.0]

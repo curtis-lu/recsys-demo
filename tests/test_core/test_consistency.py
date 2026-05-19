@@ -171,6 +171,14 @@ class TestValidateConfigConsistency:
         assert "prod_name" in msg          # A1 (prod_name in drop ∩ categorical)
         assert "c" in msg                  # A4 only_in_inference
 
+    def test_a8_unknown_weight_product_collected(self):
+        p = _base({"inference": {"products": ["a", "b"]},
+            "dataset": {"prepare_model_input": {
+                "categorical_columns": ["prod_name"]}},
+            "training": {"sample_weights": {"mass|zzz": 2.0}}})
+        with pytest.raises(ConfigConsistencyError, match=r"training\.sample_weights"):
+            validate_config_consistency(p)
+
 
 class TestSparkGuardUsesSharedError:
     def test_missing_cats_raises_data_consistency_error_subclass(self):
@@ -279,6 +287,30 @@ class TestRankingObjectiveConflicts:
         assert len(errs) == 2
 
 
+from recsys_tfb.core.consistency import weight_unknown_items
+
+
+class TestWeightUnknownItems:
+    def test_unknown_product_component_detected(self):
+        p = _base({"dataset": {"prepare_model_input": {
+            "categorical_columns": ["prod_name"]}},
+            "training": {"sample_weights": {"mass|a": 2.0, "hnw|zzz": 3.0}}})
+        assert weight_unknown_items(p) == ["zzz"]
+
+    def test_all_known_returns_empty(self):
+        p = _base({"dataset": {"prepare_model_input": {
+            "categorical_columns": ["prod_name"]}},
+            "training": {"sample_weights": {"mass|a": 2.0, "hnw|b": 3.0}}})
+        assert weight_unknown_items(p) == []
+
+    def test_no_sample_weights_returns_empty(self):
+        assert weight_unknown_items(_base()) == []
+
+    def test_malformed_key_without_pipe_ignored(self):
+        p = _base({"dataset": {"prepare_model_input": {
+            "categorical_columns": ["prod_name"]}},
+            "training": {"sample_weights": {"massa": 2.0}}})
+        assert weight_unknown_items(p) == []
 from recsys_tfb.core.consistency import search_space_errors
 
 
