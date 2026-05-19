@@ -611,3 +611,31 @@ class TestBuildManifestMetadata:
             base_dataset_version="abc12345",
         )
         assert "feature_table_fingerprint" not in meta
+
+
+class TestWeightingVersioning:
+    def _ds(self, carry=None):
+        d = {"dataset": {"sample_ratio": 1.0, "train_snap_dates": ["2025-01-31"]}}
+        if carry is not None:
+            d["dataset"]["carry_columns"] = carry
+        return d
+
+    def test_carry_columns_busts_base_dataset_version(self):
+        v1 = compute_base_dataset_version(self._ds(carry=["cust_segment_typ"]), {})
+        v2 = compute_base_dataset_version(
+            self._ds(carry=["cust_segment_typ", "channel_preference"]), {})
+        assert v1 != v2
+
+    def test_carry_columns_does_not_bust_train_variant(self):
+        assert compute_train_variant_id(self._ds(carry=["cust_segment_typ"])) == \
+               compute_train_variant_id(self._ds(carry=["x", "y"]))
+
+    def test_sample_weights_busts_model_version_not_train_variant(self):
+        p1 = {"training": {"algorithm": "lightgbm", "sample_weights": {}},
+              "dataset": {"sample_ratio": 1.0}}
+        p2 = {"training": {"algorithm": "lightgbm",
+                           "sample_weights": {"mass|a": 3.0}},
+              "dataset": {"sample_ratio": 1.0}}
+        assert compute_model_version(p1, "base", "tv") != \
+               compute_model_version(p2, "base", "tv")
+        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)

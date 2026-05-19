@@ -37,6 +37,12 @@ training:
   calibration:
     enabled: true
     method: sigmoid
+  # --- Per-(segment,product) sample weights (模型層冷門產品 boost) ---
+  # key 固定 "<cust_segment_typ>|<prod_name>"；value = LightGBM sample_weight
+  # (>= 1.0，只 boost)。稀疏：只列 != 1.0 的組。只作用於 train/train_dev，
+  # val/calibration/evaluation 不加權。A8 一致性閘驗證 product 分量。改此表
+  # 會 bust model_version、不動 train_variant_id。
+  sample_weights: {}
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
