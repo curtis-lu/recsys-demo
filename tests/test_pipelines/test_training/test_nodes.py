@@ -724,6 +724,8 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
         else:
             X = np.zeros((4, 2)); y = np.array([1, 0, 0, 1])
             g = np.array([0, 0, 1, 1], dtype=np.int64)
+        if kw.get("with_weights"):
+            return X, y, g, np.ones(len(y), dtype=np.float64)
         return X, y, g
 
     monkeypatch.setattr(

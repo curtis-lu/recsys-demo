@@ -202,13 +202,15 @@ class LightGBMAdapter(ModelAdapter):
             # raw arrays, then dev with reference=train. save_binary persists
             # the group into the .bin so the trial/early-stopping loader gets
             # it back for free.
-            X_tr, y_tr, gid_tr = extract_Xy_with_groups(
-                train_handle, preprocessor_metadata, parameters
+            X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
+                train_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
             perm_tr, grp_tr = to_contiguous_groups(gid_tr)
             ds_train = lgb.Dataset(
                 X_tr[perm_tr],
                 label=y_tr[perm_tr],
+                weight=w_tr[perm_tr],
                 group=grp_tr,
                 categorical_feature=cat_idx,
                 params=construct_params,
@@ -217,15 +219,17 @@ class LightGBMAdapter(ModelAdapter):
             log_data_volume(logger, "prepare.ds_train", ds_train)
             ds_train.save_binary(str(train_bin))
             log_data_volume(logger, "prepare.train.bin", str(train_bin))
-            del X_tr, y_tr, gid_tr, perm_tr
+            del X_tr, y_tr, gid_tr, perm_tr, w_tr
 
-            X_dev, y_dev, gid_dev = extract_Xy_with_groups(
-                train_dev_handle, preprocessor_metadata, parameters
+            X_dev, y_dev, gid_dev, w_dev = extract_Xy_with_groups(
+                train_dev_handle, preprocessor_metadata, parameters,
+                with_weights=True,
             )
             perm_dev, grp_dev = to_contiguous_groups(gid_dev)
             ds_dev = lgb.Dataset(
                 X_dev[perm_dev],
                 label=y_dev[perm_dev],
+                weight=w_dev[perm_dev],
                 group=grp_dev,
                 reference=ds_train,
                 categorical_feature=cat_idx,
@@ -235,17 +239,21 @@ class LightGBMAdapter(ModelAdapter):
             log_data_volume(logger, "prepare.ds_dev", ds_dev)
             ds_dev.save_binary(str(dev_bin))
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
-            del X_dev, y_dev, gid_dev, perm_dev, ds_train, ds_dev
+            del X_dev, y_dev, gid_dev, perm_dev, w_dev, ds_train, ds_dev
         else:
             # Lazy import: see module-top comment about circular-import chain.
             from recsys_tfb.io.extract import extract_Xy
 
             # Extract → build → save train, then free raw arrays before dev is
             # read. Keeps ds_train alive (it's small) for dev's reference.
-            X_tr, y_tr = extract_Xy(train_handle, preprocessor_metadata, parameters)
+            X_tr, y_tr, w_tr = extract_Xy(
+                train_handle, preprocessor_metadata, parameters,
+                with_weights=True,
+            )
             ds_train = lgb.Dataset(
                 X_tr,
                 label=y_tr,
+                weight=w_tr,
                 categorical_feature=cat_idx,
                 params=construct_params,
                 free_raw_data=True,
@@ -253,12 +261,16 @@ class LightGBMAdapter(ModelAdapter):
             log_data_volume(logger, "prepare.ds_train", ds_train)
             ds_train.save_binary(str(train_bin))
             log_data_volume(logger, "prepare.train.bin", str(train_bin))
-            del X_tr, y_tr
+            del X_tr, y_tr, w_tr
 
-            X_dev, y_dev = extract_Xy(train_dev_handle, preprocessor_metadata, parameters)
+            X_dev, y_dev, w_dev = extract_Xy(
+                train_dev_handle, preprocessor_metadata, parameters,
+                with_weights=True,
+            )
             ds_dev = lgb.Dataset(
                 X_dev,
                 label=y_dev,
+                weight=w_dev,
                 reference=ds_train,
                 categorical_feature=cat_idx,
                 params=construct_params,
@@ -267,7 +279,7 @@ class LightGBMAdapter(ModelAdapter):
             log_data_volume(logger, "prepare.ds_dev", ds_dev)
             ds_dev.save_binary(str(dev_bin))
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
-            del X_dev, y_dev, ds_train, ds_dev
+            del X_dev, y_dev, w_dev, ds_train, ds_dev
 
         success.touch()
         logger.info(
