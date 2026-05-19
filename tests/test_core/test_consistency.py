@@ -171,7 +171,7 @@ class TestValidateConfigConsistency:
         assert "prod_name" in msg          # A1 (prod_name in drop ∩ categorical)
         assert "c" in msg                  # A4 only_in_inference
 
-    def test_a8_unknown_weight_product_collected(self):
+    def test_a9_unknown_weight_product_collected(self):
         p = _base({"inference": {"products": ["a", "b"]},
             "dataset": {"prepare_model_input": {
                 "categorical_columns": ["prod_name"]}},

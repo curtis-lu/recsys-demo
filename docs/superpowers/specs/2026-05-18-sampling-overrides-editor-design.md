@@ -3,6 +3,7 @@
 - 日期：2026-05-18
 - 分支：`feat/sampling-overrides-editor`
 - 狀態：設計已逐段確認；D7→D7'、D9（拆兩 plan）；branch rebase 到 origin/main 後依 PR#22（lambdarank/group plumbing）再修 D10（A7→A8、extract 改 with_weights opt-in）
+- **編號勘誤（PR#24 merge 後）**：PR#23 (`feat/hpo-phase2`) 已占用 **A8**（`search_space` schema 驗證），故本案 weight 不變量最終編號 = **A9**（`weight_unknown_items`）。本 spec 與 Plan A/B 文件內文凡標 A7/A8 指涉本案 weight 不變量處，一律以 `core/consistency.py` 的 Invariant legend（**A9**，CLAUDE.md 明定為單一真實來源）為準；PR#22 的 A7（ranking）、PR#23 的 A8（search_space）標號維持不變。
 
 ## 1. 問題
 

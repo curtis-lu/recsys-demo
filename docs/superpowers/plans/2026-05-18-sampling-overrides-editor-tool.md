@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A standalone Typer dev script `scripts/sampling_overrides_editor.py` that profiles `sample_pool`, computes data-driven suggestions for downsample ratios and cold-product weights, emits a self-contained HTML matrix editor, and converts the edited JSON export into sparse YAML snippets (validated by A5/A8) for manual paste into config.
+**Goal:** A standalone Typer dev script `scripts/sampling_overrides_editor.py` that profiles `sample_pool`, computes data-driven suggestions for downsample ratios and cold-product weights, emits a self-contained HTML matrix editor, and converts the edited JSON export into sparse YAML snippets (validated by A5/A9) for manual paste into config.
 
-**Architecture:** Two Typer subcommands. `profile` runs a Spark `groupBy(cust_segment_typ, prod_name, label)`, computes per-(segment,product) `n_pos/n_neg`, applies the D8 suggestion formulas, and writes a self-contained HTML (pure stdlib templating + embedded vanilla JS, no extra packages) to `data/profiling/`. `to-yaml` reads the browser's JSON export, runs the A5/A8 consistency predicates, and prints two sparse YAML blocks. Not part of the production DAG. Source of truth: `docs/superpowers/specs/2026-05-18-sampling-overrides-editor-design.md` (D1–D4, D8). **Depends on Plan A having defined the `training.sample_weights` config schema (key format `"<cust_segment_typ>|<prod_name>"`).**
+**Architecture:** Two Typer subcommands. `profile` runs a Spark `groupBy(cust_segment_typ, prod_name, label)`, computes per-(segment,product) `n_pos/n_neg`, applies the D8 suggestion formulas, and writes a self-contained HTML (pure stdlib templating + embedded vanilla JS, no extra packages) to `data/profiling/`. `to-yaml` reads the browser's JSON export, runs the A5/A9 consistency predicates, and prints two sparse YAML blocks. Not part of the production DAG. Source of truth: `docs/superpowers/specs/2026-05-18-sampling-overrides-editor-design.md` (D1–D4, D8). **Depends on Plan A having defined the `training.sample_weights` config schema (key format `"<cust_segment_typ>|<prod_name>"`).**
 
 **Tech Stack:** Python 3.10, Typer 0.20.1, PySpark 3.3.2, numpy, PyYAML, pytest 7.3.1. No additional packages.
 
@@ -223,7 +223,7 @@ GIT commit -m "feat(tooling): build_grid (per-cell median, suggestions)"
 
 ---
 
-## Task 3: Sparse JSON→YAML conversion with A5/A8 validation (`grid_to_yaml`)
+## Task 3: Sparse JSON→YAML conversion with A5/A9 validation (`grid_to_yaml`)
 
 **Files:**
 - Modify: `src/recsys_tfb/tooling/sampling_suggest.py` (add `grid_to_yaml`)
@@ -298,7 +298,7 @@ def grid_to_yaml(
     """Convert the browser JSON export into two sparse YAML blocks.
 
     Emits only cells deviating from defaults. Validates the resulting keys
-    via the A5 / A8 consistency predicates (collect-all) BEFORE returning, so
+    via the A5 / A9 consistency predicates (collect-all) BEFORE returning, so
     a bad product value is caught before the user pastes into config.
     """
     overrides: dict[str, float] = {}
@@ -312,7 +312,7 @@ def grid_to_yaml(
         if weight != default_weight:
             weights[f"{seg}|{prod}"] = weight
 
-    # Reuse the single-source consistency predicates (A5 + A8).
+    # Reuse the single-source consistency predicates (A5 + A9).
     probe = {**parameters}
     probe.setdefault("dataset", {})
     probe["dataset"] = {**probe["dataset"], "sample_ratio_overrides": overrides}
@@ -343,7 +343,7 @@ Expected: PASS (2 passed).
 
 ```bash
 GIT add src/recsys_tfb/tooling/sampling_suggest.py tests/test_tooling/test_sampling_suggest.py
-GIT commit -m "feat(tooling): grid_to_yaml sparse emit + A5/A8 validation"
+GIT commit -m "feat(tooling): grid_to_yaml sparse emit + A5/A9 validation"
 ```
 
 ---
@@ -597,7 +597,7 @@ class TestToYamlCli:
                   {"segment": "mass", "product": "b", "ratio": 1.0, "weight": 3.0}]
         jf = tmp_path / "e.json"
         jf.write_text(json.dumps(export))
-        # minimal params yaml the command reads for A5/A8
+        # minimal params yaml the command reads for A5/A9
         params = tmp_path / "p.yaml"
         params.write_text(
             "schema:\n  columns:\n    item: prod_name\n"
@@ -630,7 +630,7 @@ Subcommands:
   profile <table>   Spark-profile sample_pool, write a self-contained HTML
                      editor to data/profiling/.
   to-yaml <json>    Convert the browser JSON export into sparse YAML snippets
-                     (A5/A8-validated) for manual paste into config.
+                     (A5/A9-validated) for manual paste into config.
 
 Mirrors scripts/suggest_categorical_cols.py conventions. Not part of the
 production DAG.
@@ -711,7 +711,7 @@ def profile(
 def to_yaml(
     export_json: Path = typer.Argument(..., help="browser JSON export"),
     params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="params yaml for A5/A8"),
+        Path("conf/base/parameters_dataset.yaml"), help="params yaml for A5/A9"),
 ) -> None:
     cfg = yaml.safe_load(params.read_text())
     export = json.loads(export_json.read_text())
@@ -785,7 +785,7 @@ GIT commit -m "test(tooling): editor sweep fixups" || echo "nothing to commit"
 
 ## Self-review notes (author)
 
-- **Spec coverage:** D1 (YAML snippet manual paste) → Tasks 3,6 (`to-yaml` prints, never writes config). D2 (self-contained HTML, sparse export) → Task 4 (no external assets; export filters `!= default`). D3 (data-driven, item axis from schema) → Tasks 2,5 + A5/A8 reuse in Task 3. D4 (train-only, sparse) → Task 3 (`_NEG_LABEL="0"`, sparse emit). D8 formulas → Tasks 1,2. A5/A8 reuse (single source) → Task 3 imports the consistency predicates rather than re-implementing.
+- **Spec coverage:** D1 (YAML snippet manual paste) → Tasks 3,6 (`to-yaml` prints, never writes config). D2 (self-contained HTML, sparse export) → Task 4 (no external assets; export filters `!= default`). D3 (data-driven, item axis from schema) → Tasks 2,5 + A5/A9 reuse in Task 3. D4 (train-only, sparse) → Task 3 (`_NEG_LABEL="0"`, sparse emit). D8 formulas → Tasks 1,2. A5/A9 reuse (single source) → Task 3 imports the consistency predicates rather than re-implementing.
 - **Placeholder scan:** none — full code in every step, exact commands + expected output.
 - **Type/name consistency:** `build_grid`→rows with `segment/product/n_pos/n_neg/pos_rate/suggested_ratio/suggested_weight` consumed identically by `render_html` (Task 4) and the CLI (Task 6); `grid_to_yaml(export, parameters, default_ratio)` signature consistent Tasks 3,6; `profile_stats(df, snap_dates, *, segment_col, item_col, label_col, time_col)` consistent Tasks 5,6.
 - **Dependency on Plan A:** `grid_to_yaml` imports `weight_unknown_items` (created in Plan A Task 1). Plan A MUST be merged/available before Plan B Task 3 runs. The `_load_spark_df` helper assumes `recsys_tfb.utils.spark.get_or_create_spark_session` (verify exact import path against `scripts/suggest_categorical_cols.py` when implementing Task 6; adjust to match that script's loader if it differs).

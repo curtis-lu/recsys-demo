@@ -334,7 +334,7 @@ def search_space_errors(parameters: dict) -> list[str]:
 
 
 def weight_unknown_items(parameters: dict) -> list[str]:
-    """training.sample_weights keys whose product component ∉ resolved_item_values (A8).
+    """training.sample_weights keys whose product component ∉ resolved_item_values (A9).
 
     Weight-table keys are fixed-format ``"<cust_segment_typ>|<prod_name>"``
     (2 parts, '|'-joined). Only the product component (index 1) is validated;
