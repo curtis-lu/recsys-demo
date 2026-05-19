@@ -6,6 +6,8 @@ formulas from the design spec.
 
 from __future__ import annotations
 
+import statistics
+
 
 def suggest_ratio(n_pos: int, n_neg: int, target_neg_pos: float) -> float:
     """Downsample ratio for negatives: keep all positives, target neg:pos = R.
@@ -29,3 +31,32 @@ def suggest_weight(
         return w_max
     raw = (median_pos / n_pos) ** alpha
     return min(w_max, max(1.0, raw))
+
+
+def build_grid(
+    stats: list[tuple[str, str, int, int]],
+    target_neg_pos: float,
+    alpha: float,
+    w_max: float,
+) -> list[dict]:
+    """Turn per-(segment,product) (n_pos, n_neg) stats into editor grid rows.
+
+    ``median_pos`` is the per-cell median of n_pos across the whole grid
+    (D8). Each row carries the raw stats plus suggested_ratio /
+    suggested_weight starting values.
+    """
+    pos_counts = [np for (_, _, np, _) in stats]
+    median_pos = float(statistics.median(pos_counts)) if pos_counts else 1.0
+    grid: list[dict] = []
+    for seg, prod, n_pos, n_neg in stats:
+        total = n_pos + n_neg
+        grid.append({
+            "segment": seg,
+            "product": prod,
+            "n_pos": n_pos,
+            "n_neg": n_neg,
+            "pos_rate": (n_pos / total) if total else 0.0,
+            "suggested_ratio": suggest_ratio(n_pos, n_neg, target_neg_pos),
+            "suggested_weight": suggest_weight(n_pos, median_pos, alpha, w_max),
+        })
+    return grid
