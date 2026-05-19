@@ -111,18 +111,58 @@ class TestGridToYaml:
 # Self-contained HTML renderer
 # ---------------------------------------------------------------------------
 class TestRenderHtml:
+    _GRID = [{"segment": "mass", "product": "a", "n_pos": 200,
+              "n_neg": 4000, "pos_rate": 0.047,
+              "suggested_ratio": 0.25, "suggested_weight": 1.0}]
+
     def test_html_is_self_contained_and_embeds_grid(self):
-        grid = [{"segment": "mass", "product": "a", "n_pos": 200,
-                 "n_neg": 4000, "pos_rate": 0.047,
-                 "suggested_ratio": 0.25, "suggested_weight": 1.0}]
-        html = render_html(grid, default_ratio=1.0)
+        html = render_html(self._GRID, default_ratio=1.0)
         assert html.lstrip().startswith("<!DOCTYPE html>")
         assert "mass" in html and "0.25" in html
         # the grid is embedded as JSON for the export button
-        assert json.dumps(grid) in html
+        assert json.dumps(self._GRID) in html
         # no external resource references (self-contained)
         assert "http://" not in html and "https://" not in html
         assert "Export JSON" in html and "Export YAML" in html
+
+    def test_backward_compatible_two_arg_call(self):
+        # profile()'s old call site / existing callers pass only default_ratio.
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert "<!DOCTYPE html>" in html
+
+    def test_columns_are_clickable_sortable(self):
+        html = render_html(self._GRID, default_ratio=1.0)
+        # every column header wired to the sort handler
+        for col in ("segment", "product", "n_pos", "n_neg", "pos_rate"):
+            assert f"sort('{col}')" in html
+        assert "function sort(" in html
+
+    def test_has_live_filter_box(self):
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert 'id="flt"' in html or "id=flt" in html
+        assert "function flt(" in html
+
+    def test_edits_survive_sort_and_filter(self):
+        # sort/filter re-render the tbody; edits must be synced back to GRID
+        # first (and collect/export must read the synced values), else a user
+        # loses every edit the moment they sort a column.
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert "function syncEdits(" in html
+        assert "syncEdits()" in html  # called by sort/flt/collect
+
+    def test_explains_ratio_and_weight_logic_and_purpose(self):
+        html = render_html(self._GRID, default_ratio=1.0,
+                           target_neg_pos=5.0, alpha=0.5, w_max=5.0)
+        # what each column means + where it gets pasted
+        assert "負樣本下採樣" in html and "冷門" in html
+        assert "sample_ratio_overrides" in html
+        assert "sample_weights" in html
+        # the *configured* tuning values are surfaced, not hardcoded prose
+        html2 = render_html(self._GRID, default_ratio=1.0,
+                            target_neg_pos=3.0, alpha=0.7, w_max=8.0)
+        assert "3.0" in html2 and "0.7" in html2 and "8.0" in html2
+        # still self-contained even with the explanation block
+        assert "http://" not in html and "https://" not in html
 
 
 # ---------------------------------------------------------------------------

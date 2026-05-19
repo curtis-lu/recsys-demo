@@ -147,16 +147,42 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <style>
  body{{font-family:system-ui,monospace;margin:1.5rem}}
  table{{border-collapse:collapse}} td,th{{border:1px solid #ccc;padding:4px 8px}}
- th{{background:#f2f2f2}} td.edit{{background:#fffbe6}}
+ th{{background:#f2f2f2;cursor:pointer;user-select:none}}
+ td.edit{{background:#fffbe6}}
  .stat{{color:#666}} button{{margin:.3rem;padding:.4rem .8rem}}
  pre{{background:#f7f7f7;padding:1rem;white-space:pre-wrap}}
+ details{{background:#eef6ff;border:1px solid #cde;padding:.5rem 1rem;
+  margin:.6rem 0;max-width:60rem}}
+ details summary{{cursor:pointer;font-weight:bold}}
+ details code{{background:#fff;padding:0 .25rem;border:1px solid #ddd}}
+ #flt{{margin:.5rem 0;padding:.35rem;width:22rem}}
 </style></head><body>
 <h2>Sampling Overrides Editor</h2>
-<p>default ratio = <b>{default_ratio}</b>. 編輯 ratio / weight 欄；
-只匯出 ≠ default 的 cell。</p>
+<details open><summary>ratio / weight 是什麼？用途是什麼？（點此展開/收合）</summary>
+<p><b>ratio — 負樣本下採樣保留率</b>（逐 segment×product 格子）。保留<b>全部</b>
+正樣本(label=1)，把負樣本(label=0)隨機抽樣到此比例，使 neg:pos 逼近目標
+R=<code>{target_neg_pos}</code>。建議值 = clamp(R × n_pos / n_neg, 0, 1)。
+<code>ratio = {default_ratio}</code>（= default）代表不下採樣、全留。
+<b>用途</b>：壓低類別極不平衡格子的負樣本量，縮短訓練、避免模型被海量負樣本
+淹沒。匯出後貼到 <code>parameters_dataset.yaml</code> 的
+<code>dataset.sample_ratio_overrides</code>（key 格式 <code>segment|product|0</code>，
+label 固定 0 因為只下採樣負樣本）。</p>
+<p><b>weight — 冷門產品加權</b>（訓練時該格子樣本的 loss 權重）。建議值 =
+clamp((median_pos / n_pos) ^ <code>{alpha}</code>, 1.0, <code>{w_max}</code>)，
+median_pos = 全表各格 n_pos 的中位數。<code>weight = 1.0</code> 代表不加權。
+<b>用途</b>：正樣本稀少的冷門 segment×product 容易被熱門產品壓過，提高其權重
+讓模型別忽略長尾。匯出後貼到 <code>parameters_training.yaml</code> 的
+<code>training.sample_weights</code>（key 格式 <code>segment|product</code>）。</p>
+<p class=stat>只匯出與 default 不同的 cell。點欄位標題排序（再點一次反向）；
+上方輸入框即時篩選 segment / product；編輯值在排序/篩選後會保留。</p>
+</details>
+<input id="flt" placeholder="篩選 segment / product…" oninput="flt()">
 <table id="g"><thead><tr>
-<th>segment</th><th>product</th><th class="stat">n_pos</th>
-<th class="stat">n_neg</th><th class="stat">pos_rate</th>
+<th onclick="sort('segment')">segment ⇅</th>
+<th onclick="sort('product')">product ⇅</th>
+<th class="stat" onclick="sort('n_pos')">n_pos ⇅</th>
+<th class="stat" onclick="sort('n_neg')">n_neg ⇅</th>
+<th class="stat" onclick="sort('pos_rate')">pos_rate ⇅</th>
 <th>ratio</th><th>weight</th></tr></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
 <button onclick="exp('yaml')">Export YAML snippet</button>
@@ -165,23 +191,47 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 const GRID={grid_json};
 const DR={default_ratio};
 const tb=document.querySelector('#g tbody');
-GRID.forEach((r,i)=>{{
- const tr=document.createElement('tr');
- tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
-  `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
-  `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
-  `<td class=edit contenteditable data-k=ratio data-i=${{i}}>`+
-  `${{r.suggested_ratio}}</td>`+
-  `<td class=edit contenteditable data-k=weight data-i=${{i}}>`+
-  `${{r.suggested_weight}}</td>`;
- tb.appendChild(tr);
-}});
-function collect(){{
- const o=GRID.map(r=>({{segment:r.segment,product:r.product,
-  ratio:r.suggested_ratio,weight:r.suggested_weight}}));
+let sortKey=null,sortAsc=true;
+function syncEdits(){{
  document.querySelectorAll('td.edit').forEach(td=>{{
-  o[+td.dataset.i][td.dataset.k]=parseFloat(td.textContent);}});
- return o;
+  const v=parseFloat(td.textContent);
+  if(!isNaN(v)) GRID[+td.dataset.i][
+   td.dataset.k==='ratio'?'suggested_ratio':'suggested_weight']=v;
+ }});
+}}
+function render(){{
+ const q=(document.getElementById('flt').value||'').toLowerCase();
+ let idx=GRID.map((_,i)=>i);
+ if(q) idx=idx.filter(i=>
+  (GRID[i].segment+' '+GRID[i].product).toLowerCase().indexOf(q)>=0);
+ if(sortKey) idx.sort((a,b)=>{{
+  let x=GRID[a][sortKey],y=GRID[b][sortKey];
+  if(typeof x==='string'){{x=x.toLowerCase();y=y.toLowerCase();}}
+  return (x<y?-1:x>y?1:0)*(sortAsc?1:-1);
+ }});
+ tb.innerHTML='';
+ idx.forEach(i=>{{
+  const r=GRID[i],tr=document.createElement('tr');
+  tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
+   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
+   `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
+   `<td class=edit contenteditable data-k=ratio data-i=${{i}}>`+
+   `${{r.suggested_ratio}}</td>`+
+   `<td class=edit contenteditable data-k=weight data-i=${{i}}>`+
+   `${{r.suggested_weight}}</td>`;
+  tb.appendChild(tr);
+ }});
+}}
+function sort(k){{
+ syncEdits();
+ if(sortKey===k){{sortAsc=!sortAsc;}}else{{sortKey=k;sortAsc=true;}}
+ render();
+}}
+function flt(){{ syncEdits(); render(); }}
+function collect(){{
+ syncEdits();
+ return GRID.map(r=>({{segment:r.segment,product:r.product,
+  ratio:r.suggested_ratio,weight:r.suggested_weight}}));
 }}
 function exp(kind){{
  const o=collect();
@@ -203,14 +253,31 @@ function exp(kind){{
    Object.entries(sw).map(([k,v])=>'  "'+k+'": '+v).join('\\n');
  }}
 }}
+render();
 </script></body></html>"""
 
 
-def render_html(grid: list[dict], default_ratio: float) -> str:
-    """Render a self-contained HTML editor (pure stdlib, no external assets)."""
+def render_html(
+    grid: list[dict],
+    default_ratio: float,
+    *,
+    target_neg_pos: float = 5.0,
+    alpha: float = 0.5,
+    w_max: float = 5.0,
+) -> str:
+    """Render a self-contained HTML editor (pure stdlib, no external assets).
+
+    The tuning knobs (``target_neg_pos`` / ``alpha`` / ``w_max``) are surfaced
+    in the in-page explanation so the rendered help reflects the *configured*
+    values, not hardcoded prose. They default to the ``profile`` command
+    defaults so existing two-arg callers keep working.
+    """
     return _HTML_TEMPLATE.format(
         default_ratio=default_ratio,
         grid_json=json.dumps(grid),
+        target_neg_pos=target_neg_pos,
+        alpha=alpha,
+        w_max=w_max,
     )
 
 
@@ -278,17 +345,29 @@ def profile(
     cfg = yaml.safe_load(params.read_text())
     ds = cfg.get("dataset", cfg)
     snap_dates = ds["train_snap_dates"]
+    typer.echo(f"[1/4] config: {len(snap_dates)} snap date(s) from {params}")
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
 
+    typer.echo(
+        "[2/4] starting SparkSession + reading source… "
+        "(standalone client-template/spark init can take a few minutes; "
+        "client-template-local local[*] is far faster for this script)"
+    )
     df = _load_spark_df(source)
+    typer.echo("[3/4] profiling: Spark groupBy + single collect over snap dates…")
     stats = profile_stats(
         df, snaps,
         segment_col="cust_segment_typ", item_col="prod_name",
         label_col="label", time_col="snap_date",
     )
+    typer.echo(f"[3/4] {len(stats)} (segment,product) cell(s) profiled")
     grid = build_grid(stats, target_neg_pos, alpha, w_max)
-    html = render_html(grid, default_ratio=float(ds.get("sample_ratio", 1.0)))
+    typer.echo("[4/4] rendering self-contained HTML…")
+    html = render_html(
+        grid, default_ratio=float(ds.get("sample_ratio", 1.0)),
+        target_neg_pos=target_neg_pos, alpha=alpha, w_max=w_max,
+    )
     PROFILING_DIR.mkdir(parents=True, exist_ok=True)
     out = PROFILING_DIR / "sampling_overrides_editor.html"
     out.write_text(html)
