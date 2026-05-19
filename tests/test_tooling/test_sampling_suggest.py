@@ -57,3 +57,37 @@ class TestBuildGrid:
         assert by[("mass", "a")]["suggested_ratio"] == 0.25
         # every row carries pos_rate
         assert abs(by[("hnw", "a")]["pos_rate"] - 8 / 58) < 1e-9
+
+
+import yaml
+
+from recsys_tfb.tooling.sampling_suggest import grid_to_yaml
+
+
+def _params():
+    return {
+        "schema": {"columns": {"item": "prod_name"},
+                   "categorical_values": {"prod_name": ["a", "b"]}},
+        "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]},
+                    "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+    }
+
+
+class TestGridToYaml:
+    def test_sparse_emits_only_non_default(self):
+        # default ratio 1.0, default weight 1.0 -> only deviating cells emitted
+        export = [
+            {"segment": "mass", "product": "a", "ratio": 0.5, "weight": 1.0},
+            {"segment": "mass", "product": "b", "ratio": 1.0, "weight": 3.0},
+            {"segment": "hnw", "product": "a", "ratio": 1.0, "weight": 1.0},
+        ]
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        sw = yaml.safe_load(out["sample_weights_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.5}}
+        assert sw == {"sample_weights": {"mass|b": 3.0}}
+
+    def test_unknown_product_raises_with_collected_message(self):
+        export = [{"segment": "mass", "product": "zzz", "ratio": 0.5, "weight": 2.0}]
+        with pytest.raises(ValueError, match=r"zzz"):
+            grid_to_yaml(export, _params(), default_ratio=1.0)

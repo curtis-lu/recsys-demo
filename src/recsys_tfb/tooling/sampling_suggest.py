@@ -60,3 +60,60 @@ def build_grid(
             "suggested_weight": suggest_weight(n_pos, median_pos, alpha, w_max),
         })
     return grid
+
+
+import yaml
+
+from recsys_tfb.core.consistency import (
+    override_unknown_items,
+    weight_unknown_items,
+)
+
+# Override key is '|'-joined sample_group_keys; cold-product downsample
+# targets negatives, so the label component is fixed to "0".
+_NEG_LABEL = "0"
+
+
+def grid_to_yaml(
+    export: list[dict],
+    parameters: dict,
+    default_ratio: float,
+    default_weight: float = 1.0,
+) -> dict:
+    """Convert the browser JSON export into two sparse YAML blocks.
+
+    Emits only cells deviating from defaults. Validates the resulting keys
+    via the A5 / A9 consistency predicates (collect-all) BEFORE returning, so
+    a bad product value is caught before the user pastes into config.
+    """
+    overrides: dict[str, float] = {}
+    weights: dict[str, float] = {}
+    for row in export:
+        seg, prod = row["segment"], row["product"]
+        ratio = float(row.get("ratio", default_ratio))
+        weight = float(row.get("weight", default_weight))
+        if ratio != default_ratio:
+            overrides[f"{seg}|{prod}|{_NEG_LABEL}"] = ratio
+        if weight != default_weight:
+            weights[f"{seg}|{prod}"] = weight
+
+    # Reuse the single-source consistency predicates (A5 + A9).
+    probe = {**parameters}
+    probe.setdefault("dataset", {})
+    probe["dataset"] = {**probe["dataset"], "sample_ratio_overrides": overrides}
+    probe["training"] = {**probe.get("training", {}), "sample_weights": weights}
+    bad = sorted(set(override_unknown_items(probe)) | set(weight_unknown_items(probe)))
+    if bad:
+        raise ValueError(
+            f"editor export references unknown product value(s) {bad} "
+            f"absent from schema.categorical_values[item]; fix before paste."
+        )
+
+    return {
+        "sample_ratio_overrides_yaml": yaml.safe_dump(
+            {"sample_ratio_overrides": overrides}, sort_keys=True,
+            allow_unicode=True, default_flow_style=False),
+        "sample_weights_yaml": yaml.safe_dump(
+            {"sample_weights": weights}, sort_keys=True,
+            allow_unicode=True, default_flow_style=False),
+    }
