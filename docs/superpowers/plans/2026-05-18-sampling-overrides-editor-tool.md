@@ -19,10 +19,26 @@
 
 ## Module layout (decomposition)
 
-- `scripts/sampling_overrides_editor.py` — Typer app: `profile`, `to-yaml` subcommands + Spark loader + IO. Thin orchestration.
-- `src/recsys_tfb/tooling/sampling_suggest.py` — **new package module** holding the pure suggestion + sparsify + HTML-render + JSON→YAML logic (no Spark, no Typer). This is where the testable logic lives; the script imports it. Rationale: pure logic must be unit-testable without Spark/CLI, mirroring how the codebase keeps `core/` predicates pure.
+> **POST-IMPLEMENTATION ERRATUM (review correction).** The original two-file
+> split below (`scripts/` thin CLI + `src/recsys_tfb/tooling/sampling_suggest.py`
+> pure lib) was **reverted during review**. Its stated rationale — "pure logic
+> must be unit-testable without Spark/CLI, so it must live in `src/`" — was
+> based on a false premise: the repo already unit-tests `scripts/` modules
+> cleanly via `from scripts.X import ...` in `tests/scripts/` (see
+> `tests/scripts/test_promote_model.py`, `test_suggest_categorical_cols.py`),
+> with no importlib hack. The convention-consistent design (and the one
+> shipped) is a **single self-contained `scripts/sampling_overrides_editor.py`**
+> (logic + Typer CLI in one file, ~330 lines), mirroring `promote_model.py` /
+> `suggest_categorical_cols.py`, tested by
+> `tests/scripts/test_sampling_overrides_editor.py`. This also keeps dev-only
+> tooling out of the `pip install`-shipped `recsys_tfb` production package.
+> Tasks 1–6 below still describe the intermediate `src/recsys_tfb/tooling/`
+> form for provenance; the final commit consolidated them. `grid_to_yaml`
+> still imports the single-source A5/A9 predicates from
+> `recsys_tfb.core.consistency` (that import works fine from a `scripts/` file).
 
-Create `src/recsys_tfb/tooling/__init__.py` (empty) in Task 1.
+- `scripts/sampling_overrides_editor.py` — Typer app (`profile`, `to-yaml`) + Spark loader + the pure suggestion / sparsify / HTML-render / JSON→YAML logic, all in one self-contained file. Not part of the production DAG.
+- `tests/scripts/test_sampling_overrides_editor.py` — unit tests via `from scripts.sampling_overrides_editor import ...` (Spark test marked `@pytest.mark.spark`), matching the existing `tests/scripts/` convention.
 
 ---
 
