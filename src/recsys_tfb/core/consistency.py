@@ -39,7 +39,13 @@ Layer 1 — config-static (implemented here; aggregated by
   (``lambdarank``/``rank_xendcg``) paired with a non-ranking ``metric`` or an
   undefined query group (empty ``schema.entity``). Predicate:
   ``ranking_objective_conflicts``.
-* A8 — a ``training.sample_weights`` key references a product value absent
+* A8 — ``training.search_space`` declarative schema validity: must be an
+  ordered list of ParamSpec maps; each needs ``name`` (unique) + ``type`` ∈
+  {int,float,categorical}; numeric ``low < high``; positive ``step``;
+  ``log: true`` ⟹ ``low > 0`` and no ``step``; categorical needs non-empty
+  ``choices``. ``when`` / string-expression bounds are rejected until
+  Phase 3. Predicate: ``search_space_errors``.
+* A9 — a ``training.sample_weights`` key references a product value absent
   from ``schema.categorical_values[item]``. Predicate:
   ``weight_unknown_items`` (product-only check, mirrors A5).
 
@@ -223,6 +229,110 @@ def ranking_objective_conflicts(parameters: dict) -> list[str]:
     return errors
 
 
+_SS_TYPES = frozenset({"int", "float", "categorical"})
+
+
+def _is_number(v) -> bool:
+    """True for a real int/float bound; bool excluded (``low: true`` in YAML
+    is a typo, not the integer 1 — fail loud, never silently accept)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def search_space_errors(parameters: dict) -> list[str]:
+    """A8 — declarative ``training.search_space`` schema validity (collect-all).
+
+    Phase 2 supports literal numeric int/float bounds and categorical
+    ``choices``. ``when`` and string (expression) bounds are parsed by the
+    search_space module but **rejected here fail-loud** until Phase 3 — never
+    silently ignored. Empty/absent search_space is OK. Returns error strings.
+    """
+    training = parameters.get("training", {}) or {}
+    if "search_space" not in training:
+        return []
+    space = training["search_space"]
+    errors: list[str] = []
+
+    if not isinstance(space, list):
+        return [
+            "training.search_space must be a list of ParamSpec maps "
+            f"(got {type(space).__name__}). Migrate the old dict form to an "
+            "ordered list: [{name, type, low, high, ...}, ...]."
+        ]
+
+    seen: set = set()
+    for i, item in enumerate(space):
+        if not isinstance(item, dict):
+            errors.append(f"search_space[{i}] must be a map, got {type(item).__name__}.")
+            continue
+        name = item.get("name")
+        ptype = item.get("type")
+        tag = f"search_space[{i}]" + (f" ({name})" if name else "")
+
+        if not name or not isinstance(name, str):
+            errors.append(f"{tag}: missing/invalid required 'name' (string).")
+        elif name in seen:
+            errors.append(f"{tag}: duplicate name {name!r}.")
+        else:
+            seen.add(name)
+
+        if ptype not in _SS_TYPES:
+            errors.append(
+                f"{tag}: type={ptype!r} invalid; must be one of "
+                f"{sorted(_SS_TYPES)}."
+            )
+
+        if "when" in item:
+            errors.append(
+                f"{tag}: 'when' (conditional search space) is implemented in "
+                f"Phase 3; not yet supported."
+            )
+
+        if ptype in ("int", "float"):
+            low, high, step = item.get("low"), item.get("high"), item.get("step")
+            for k, v in (("low", low), ("high", high)):
+                if isinstance(v, str):
+                    errors.append(
+                        f"{tag}: expression-valued '{k}' is implemented in "
+                        f"Phase 3; not yet supported (use a number)."
+                    )
+            if isinstance(step, str):
+                errors.append(
+                    f"{tag}: expression-valued 'step' is implemented in "
+                    f"Phase 3; not yet supported (use a number)."
+                )
+            for k, v in (("low", low), ("high", high)):
+                if not isinstance(v, str) and not _is_number(v):
+                    errors.append(
+                        f"{tag}: '{k}' must be a number (got "
+                        f"{type(v).__name__}: {v!r})."
+                    )
+            if step is not None and not isinstance(step, str) and not _is_number(step):
+                errors.append(
+                    f"{tag}: 'step' must be a number (got "
+                    f"{type(step).__name__}: {step!r})."
+                )
+            if _is_number(low) and _is_number(high) and not (low < high):
+                errors.append(f"{tag}: low ({low}) must be < high ({high}).")
+            if _is_number(step) and step <= 0:
+                errors.append(f"{tag}: step must be positive (got {step}).")
+            log = bool(item.get("log", False))
+            if log and _is_number(low) and low <= 0:
+                errors.append(
+                    f"{tag}: log: true requires a positive low (got {low})."
+                )
+            if log and step is not None:
+                errors.append(
+                    f"{tag}: log: true and step are mutually exclusive "
+                    f"(Optuna forbids it)."
+                )
+        elif ptype == "categorical":
+            choices = item.get("choices")
+            if not isinstance(choices, list) or len(choices) == 0:
+                errors.append(f"{tag}: categorical requires a non-empty 'choices' list.")
+
+    return errors
+
+
 def weight_unknown_items(parameters: dict) -> list[str]:
     """training.sample_weights keys whose product component ∉ resolved_item_values (A8).
 
@@ -294,6 +404,9 @@ def validate_config_consistency(parameters: dict) -> None:
             f"absent from schema.categorical_values[item] — the weight "
             f"silently never matches. Fix the key(s) or declare the value(s)."
         )
+        
+    for msg in search_space_errors(parameters):
+        errors.append(msg)
 
     if errors:
         raise ConfigConsistencyError(

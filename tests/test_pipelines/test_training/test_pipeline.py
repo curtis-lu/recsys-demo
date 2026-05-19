@@ -205,14 +205,14 @@ class TestTrainingPipelineE2E:
                 "n_trials": 2,
                 "num_iterations": 30,
                 "early_stopping_rounds": 10,
-                "search_space": {
-                    "learning_rate": {"low": 0.05, "high": 0.2},
-                    "num_leaves": {"low": 8, "high": 32},
-                    "max_depth": {"low": 3, "high": 6},
-                    "min_child_samples": {"low": 2, "high": 10},
-                    "subsample": {"low": 0.8, "high": 1.0},
-                    "colsample_bytree": {"low": 0.8, "high": 1.0},
-                },
+                "search_space": [
+                    {"name": "learning_rate", "type": "float", "low": 0.05, "high": 0.2, "log": True},
+                    {"name": "num_leaves", "type": "int", "low": 8, "high": 32},
+                    {"name": "max_depth", "type": "int", "low": 3, "high": 6},
+                    {"name": "min_child_samples", "type": "int", "low": 2, "high": 10},
+                    {"name": "subsample", "type": "float", "low": 0.8, "high": 1.0},
+                    {"name": "colsample_bytree", "type": "float", "low": 0.8, "high": 1.0},
+                ],
             },
             "mlflow": {
                 "experiment_name": "e2e_test",

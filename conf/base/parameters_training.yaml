@@ -51,23 +51,37 @@ training:
   #   refit_on_full  — retrain on train + train_dev concatenated, with
   #                    num_iterations = best_iteration and no early stopping.
   final_model_strategy: hpo_best
+  # search_space: ordered list of ParamSpec maps (declarative HPO, Phase 2).
+  # `name` is BOTH the Optuna suggest name and the LightGBM param key.
+  # type in {int,float,categorical}. int/float: low,high (+optional step, log).
+  # categorical: choices. `when` / expression bounds are Phase 3 (rejected
+  # fail-loud until then by consistency A8). NOTE: migrating from the old
+  # dict form restructures the hashed `training:` block — this is a
+  # deliberate, accepted ONE-TIME model_version bump (see versioning.py).
   search_space:
-    learning_rate:
+    - name: learning_rate
+      type: float
       low: 0.001
       high: 0.1
-    num_leaves:
+      log: true
+    - name: num_leaves
+      type: int
       low: 4
       high: 64
-    max_depth:
+    - name: max_depth
+      type: int
       low: 3
       high: 8
-    min_child_samples:
+    - name: min_child_samples
+      type: int
       low: 5
       high: 100
-    subsample:
+    - name: subsample
+      type: float
       low: 0.6
       high: 1.0
-    colsample_bytree:
+    - name: colsample_bytree
+      type: float
       low: 0.6
       high: 1.0
 

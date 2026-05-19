@@ -71,14 +71,14 @@ def training_parameters():
             "n_trials": 3,
             "num_iterations": 50,
             "early_stopping_rounds": 10,
-            "search_space": {
-                "learning_rate": {"low": 0.01, "high": 0.3},
-                "num_leaves": {"low": 16, "high": 64},
-                "max_depth": {"low": 3, "high": 8},
-                "min_child_samples": {"low": 5, "high": 50},
-                "subsample": {"low": 0.6, "high": 1.0},
-                "colsample_bytree": {"low": 0.6, "high": 1.0},
-            },
+            "search_space": [
+                {"name": "learning_rate", "type": "float", "low": 0.01, "high": 0.3, "log": True},
+                {"name": "num_leaves", "type": "int", "low": 16, "high": 64},
+                {"name": "max_depth", "type": "int", "low": 3, "high": 8},
+                {"name": "min_child_samples", "type": "int", "low": 5, "high": 50},
+                {"name": "subsample", "type": "float", "low": 0.6, "high": 1.0},
+                {"name": "colsample_bytree", "type": "float", "low": 0.6, "high": 1.0},
+            ],
         },
         "mlflow": {
             "experiment_name": "test_recsys",
@@ -228,7 +228,7 @@ class TestTuneHyperparameters:
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
         _, _, val_h, *_ = synthetic_model_inputs
-        space = training_parameters["training"]["search_space"]
+        space = {s["name"]: s for s in training_parameters["training"]["search_space"]}
         best_params, _, _ = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters,
         )
@@ -692,14 +692,14 @@ def test_tune_defaults_ranking_metric(monkeypatch):
             "early_stopping_rounds": 2,
             "algorithm": "lightgbm",
             "algorithm_params": {"objective": "lambdarank"},
-            "search_space": {
-                "learning_rate": {"low": 0.01, "high": 0.1},
-                "num_leaves": {"low": 4, "high": 8},
-                "max_depth": {"low": 3, "high": 5},
-                "min_child_samples": {"low": 5, "high": 10},
-                "subsample": {"low": 0.6, "high": 1.0},
-                "colsample_bytree": {"low": 0.6, "high": 1.0},
-            },
+            "search_space": [
+                {"name": "learning_rate", "type": "float", "low": 0.01, "high": 0.1, "log": True},
+                {"name": "num_leaves", "type": "int", "low": 4, "high": 8},
+                {"name": "max_depth", "type": "int", "low": 3, "high": 5},
+                {"name": "min_child_samples", "type": "int", "low": 5, "high": 10},
+                {"name": "subsample", "type": "float", "low": 0.6, "high": 1.0},
+                {"name": "colsample_bytree", "type": "float", "low": 0.6, "high": 1.0},
+            ],
         },
         "random_seed": 42,
     }
