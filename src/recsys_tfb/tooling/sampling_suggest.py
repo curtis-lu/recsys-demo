@@ -192,3 +192,33 @@ def render_html(grid: list[dict], default_ratio: float) -> str:
         default_ratio=default_ratio,
         grid_json=_json.dumps(grid),
     )
+
+
+def profile_stats(
+    df,
+    snap_dates: list,
+    *,
+    segment_col: str,
+    item_col: str,
+    label_col: str,
+    time_col: str,
+) -> list[tuple[str, str, int, int]]:
+    """Spark groupBy -> per-(segment,product) (n_pos, n_neg) over snap_dates.
+
+    Single Spark action (one .collect of a tiny grouped frame). No UDF.
+    """
+    from pyspark.sql import functions as F
+
+    rows = (
+        df.filter(F.col(time_col).isin(list(snap_dates)))
+        .groupBy(segment_col, item_col)
+        .agg(
+            F.sum(F.col(label_col)).alias("n_pos"),
+            F.sum(F.lit(1) - F.col(label_col)).alias("n_neg"),
+        )
+        .collect()
+    )
+    return [
+        (r[segment_col], r[item_col], int(r["n_pos"]), int(r["n_neg"]))
+        for r in rows
+    ]
