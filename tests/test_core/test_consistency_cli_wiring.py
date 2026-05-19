@@ -30,3 +30,21 @@ def test_a7_ranking_conflict_surfaces_via_validate():
     }
     with pytest.raises(ConfigConsistencyError, match="ranking metric"):
         validate_config_consistency(params)
+
+
+def test_a8_search_space_schema_surfaces_via_validate():
+    import pytest
+
+    from recsys_tfb.core.consistency import (
+        ConfigConsistencyError,
+        validate_config_consistency,
+    )
+
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+        "training": {"search_space": {"learning_rate": {"low": 1, "high": 2}}},
+    }
+    with pytest.raises(ConfigConsistencyError, match="must be a list"):
+        validate_config_consistency(params)
