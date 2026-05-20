@@ -63,6 +63,13 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
   scripts/dev_admin.sh scripts/nuke_ml_recsys.py
   scripts/dev_admin.sh scripts/setup_hive_dev.py
   ```
+- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
+  ```bash
+  source ~/dev-cluster/scripts/client-env.sh                          # 🅔 JDK17 add-opens + HADOOP_CONF_DIR
+  export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark    # 🅑 local[*]，省 standalone init 3–5 min
+  PYTHONPATH=<root>/src .venv/bin/python scripts/<name>.py <args>
+  ```
+  順序不能反 —— `client-env.sh` 把 `SPARK_CONF_DIR` 設成 `client-template/spark`，要先 source 再 export 覆寫成 `client-template-local/spark`。**`source client-env.sh` 不是可選**：腳本對 SparkSession 只傳了 `app_name`，所有連線設定全靠環境變數 + spark-defaults.conf。跳過會踩兩種錯：(1) 沒 SPARK_CONF_DIR → 接空 in-memory catalog → `Table or view not found: ml_recsys.<table>`（表其實存在）；(2) JDK17 沒 `--add-opens` → driver 內部反射在 `sun.nio.ch` 上炸。**跑時別被 stderr 嚇到**：local mode 一定會出現一段 `ERROR Inbox: Ignoring error` + `RpcEndpointNotFoundException: CoarseGrainedScheduler@...` —— 是 Spark by-design 良性噪音（`dev-cluster-spark` skill SOP-3-C）。看 stdout 的 `[N/M]` 進度行 / `Wrote ...` 才是真實狀態。
 - **/etc/hosts**：host 端讀 Hive 資料前需加 `127.0.0.1 namenode datanode hive-metastore spark-master`，否則 `hdfs://namenode:9000/...` resolve 不到（dev-cluster README §「已知限制」第 3 點）。
 
 ### Pipeline 與 SPARK_CONF_DIR 的對應
@@ -87,6 +94,8 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 走錯 conf 的典型 trap（深入排查見 `dev-cluster-spark` skill）：
 - 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
 - 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
+
+完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
 
 ## Config consistency gate
 
