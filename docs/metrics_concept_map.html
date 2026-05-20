@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>排序推薦評估指標概念地圖</title>
+<style>
+  :root{
+    --q:#1f6feb;        /* per-query 主色 */
+    --q-bg:#eaf2ff;
+    --i:#0f766e;        /* per-item 主色 */
+    --i-bg:#e6f4f2;
+    --warn:#b45309;
+    --warn-bg:#fff4e5;
+    --ink:#1f2328;
+    --muted:#57606a;
+    --line:#d0d7de;
+    --code-bg:#f6f8fa;
+  }
+  *{box-sizing:border-box}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
+    color:var(--ink); line-height:1.7; margin:0; background:#fff;
+  }
+  .wrap{max-width:980px;margin:0 auto;padding:48px 32px 96px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:.5px}
+  .sub{color:var(--muted);margin:0 0 28px;font-size:15px}
+  h2{
+    font-size:22px;margin:52px 0 14px;padding-bottom:8px;
+    border-bottom:2px solid var(--line);
+  }
+  h3{font-size:17px;margin:28px 0 10px;color:#24292f}
+  p{margin:10px 0}
+  code{background:var(--code-bg);padding:1px 6px;border-radius:4px;
+       font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.92em}
+  .lead{background:#f6f8fa;border:1px solid var(--line);border-radius:10px;
+        padding:18px 22px;margin:24px 0;font-size:15px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:#f5f7fa;font-weight:600}
+  tbody tr:nth-child(even){background:#fafbfc}
+  .tag{display:inline-block;padding:1px 9px;border-radius:999px;
+       font-size:12px;font-weight:600;letter-spacing:.3px}
+  .tag-q{background:var(--q-bg);color:var(--q)}
+  .tag-i{background:var(--i-bg);color:var(--i)}
+  .callout{border-left:4px solid var(--q);background:var(--q-bg);
+           padding:14px 18px;border-radius:0 8px 8px 0;margin:18px 0}
+  .callout.i{border-color:var(--i);background:var(--i-bg)}
+  .callout.w{border-color:var(--warn);background:var(--warn-bg)}
+  .callout p:first-child{margin-top:0}
+  .callout p:last-child{margin-bottom:0}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+      padding:16px 18px;overflow-x:auto;font-size:13.5px;line-height:1.55;
+      font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  nav{position:sticky;top:0;background:rgba(255,255,255,.95);backdrop-filter:blur(6px);
+      border-bottom:1px solid var(--line);padding:10px 0;margin:0 0 8px;font-size:13px;z-index:10}
+  nav a{color:var(--q);text-decoration:none;margin-right:14px;white-space:nowrap}
+  nav a:hover{text-decoration:underline}
+  .grid-tbl td{text-align:center;font-family:"SF Mono",ui-monospace,monospace;font-size:13px}
+  .grid-tbl .rh{text-align:left;background:#f5f7fa;font-weight:600;font-family:inherit}
+  .cm td{text-align:center;font-size:15px}
+  .cm .tp{background:#dcf5e7}.cm .fp{background:#fde2e1}
+  .cm .fn{background:#fdeccd}.cm .tn{background:#eef1f4}
+  .cm .rh{background:#f5f7fa;font-weight:600}
+  .small{font-size:13px;color:var(--muted)}
+  .kbd{font-family:"SF Mono",monospace;background:#fff;border:1px solid var(--line);
+       border-bottom-width:2px;border-radius:5px;padding:0 6px;font-size:.85em}
+  @media print{
+    nav{display:none} .wrap{max-width:100%;padding:0}
+    h2{page-break-after:avoid} table,pre,.callout{page-break-inside:avoid}
+    body{font-size:12px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <a href="#g">①資料格</a>
+  <a href="#axis">②兩切法</a>
+  <a href="#layer">③計算三層</a>
+  <a href="#pq">④per-query</a>
+  <a href="#pi">⑤per-item＋條件軸</a>
+  <a href="#name">⑥命名陷阱</a>
+  <a href="#weight">⑦聚合權重</a>
+  <a href="#deg">⑧退化</a>
+  <a href="#cheat">⑨速查</a>
+</nav>
+
+<h1>排序推薦評估指標概念地圖</h1>
+<p class="sub">precision / recall / MAP / nDCG / hit_rate / HR · per-query 與 per-item 的語意與關係</p>
+
+<div class="lead">
+這份文件釐清排序推薦常見評估指標（<code>precision@K</code> / <code>recall@K</code> /
+<code>map@K</code> / <code>ndcg@K</code> / <code>hit_rate@K</code> / <code>HR@K</code> /
+<code>mean_pos</code> …）的精確語意，以及 <strong>per-query</strong> 與 <strong>per-item</strong>
+兩種切法的差異。讀完你能回答：哪個指標回答什麼問題、為什麼同樣叫 recall 數值卻不同、
+per-item 的 precision 到底存不存在。
+</div>
+
+<!-- ───────────────────────────── 1 ───────────────────────────── -->
+<h2 id="g">① 地基：一張二維資料格</h2>
+<p>
+評估資料的最小單位＝<code>(時間, 客戶, 產品)</code> 一格，每格有兩個值：
+<code>label</code>（客戶<strong>實際上</strong>有沒有要這產品，0/1，這是真相）與
+<code>score</code>（模型預測的興趣分數）。
+</p>
+
+<table class="grid-tbl">
+  <thead><tr><th class="rh">　</th><th>prod_A</th><th>prod_B</th><th>prod_C</th><th>…</th><th>prod_22</th></tr></thead>
+  <tbody>
+    <tr><td class="rh">客戶 c1 @ 1月</td><td>L=1, s=.9</td><td>L=0, s=.4</td><td>L=1, s=.2</td><td>…</td><td>…</td></tr>
+    <tr><td class="rh">客戶 c2 @ 1月</td><td>L=0, s=.7</td><td>L=1, s=.6</td><td>L=0, s=.1</td><td>…</td><td>…</td></tr>
+    <tr><td class="rh">…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td></tr>
+  </tbody>
+</table>
+
+<ul>
+  <li>一個 <strong>query</strong>＝一個 <strong>row（橫的一列）</strong>＝一位客戶在某時間點的「全產品排序問題」。</li>
+  <li>模型在每一列裡，把所有產品<strong>照 <code>score</code> 由高到低給名次</strong>（即 <code>pos</code>／<code>rank</code>，1＝分數最高）。</li>
+  <li><code>total_rel</code>（每 query 一個值）＝這位客戶這次總共想要幾個產品＝該列 <code>sum(label)</code>。</li>
+</ul>
+
+<!-- ───────────────────────────── 2 ───────────────────────────── -->
+<h2 id="axis">② 核心：兩個正交的切法</h2>
+<p>同一張格子，有兩個垂直方向可以收斂成指標 —— 這是所有混淆的根源：</p>
+
+<pre>           ┌───────── 產品方向 per-item ─────────┐
+           │ 挑一個 column（產品）來看            │
+           ▼
+       prod_A   prod_B   prod_C
+ c1 ─►  [.9]     .4      [.2]        ◄─┐
+ c2 ─►   .7     [.6]      .1           │ 客戶方向 per-query
+ c3 ─►  [.3]     .8      [.5]        ◄─┘ 把「整列」收斂成
+ ...                                    「這位客戶排得好不好」</pre>
+
+<table>
+  <thead><tr><th>　</th><th><span class="tag tag-q">per-query</span> 客戶方向</th><th><span class="tag tag-i">per-item</span> 產品方向</th></tr></thead>
+  <tbody>
+    <tr><td>把什麼收斂成一個數</td><td>一整列（一位客戶的全產品排序）</td><td>一個 column 裡的格子</td></tr>
+    <tr><td>回答的問題</td><td>「對一位<strong>典型客戶</strong>，這份推薦清單排得好不好？」</td><td>「對<strong>某個產品</strong>，模型把它擺對位置了嗎？」</td></tr>
+    <tr><td>誰會問</td><td>模型負責人／管理層（整體清單品質）</td><td>產品負責人（我這條產品被服務得好嗎）</td></tr>
+    <tr><td>指標字彙</td><td><code>map@K</code> <code>ndcg@K</code> <code>precision@K</code> <code>recall@K</code> <code>HR@K</code></td><td><code>hit_rate@K</code> <code>map_attr@K</code> <code>ndcg_attr@K</code> <code>mean_pos</code></td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<p><strong>一句話記法</strong></p>
+<p><span class="tag tag-q">per-query</span> ＝把格子<strong>一列一列</strong>壓扁，再對「客戶」平均 → 清單整體品質</p>
+<p><span class="tag tag-i">per-item</span> ＝挑一<strong>直行</strong>產品，看它被排到哪 → 單一產品品質</p>
+</div>
+
+<!-- ───────────────────────────── 3 ───────────────────────────── -->
+<h2 id="layer">③ 計算流程：三層</h2>
+<p>不論用什麼工具實作，這些指標的計算都可拆成「格子 → 每列 → 對客戶平均」三層：</p>
+<pre>Layer 1  每一格算貢獻值
+         pos, cum_rel, prec_at_pos, dcg_term,
+         top_k@K(=pos≤K?1:0), ap_contrib@K, ndcg_contrib@K
+                  │
+        ┌─────────┴──────────┐
+        ▼                    ▼
+Layer 2  per-query           （per-item 不經 Layer 2，
+  一列 → 一個數              直接從 Layer 1 的格子收斂）
+  map@K ndcg@K
+  precision@K recall@K
+        │                    │
+        ▼                    ▼
+Layer 3  對 query 平均        對「label=1 的格」平均
+  → per-query 指標           → per-item 指標</pre>
+<div class="callout i">
+<p>重點：<strong>per-query 一定要先把整列壓成一個數</strong>（precision@K 的分母 K、
+recall@K 的分母 total_rel 都是「一整列」的概念）；<strong>per-item 不壓列</strong>，
+直接在格子層級做平均。</p>
+</div>
+
+<!-- ───────────────────────────── 4 ───────────────────────────── -->
+<h2 id="pq">④ <span class="tag tag-q">per-query</span> 家族</h2>
+<p>先對<strong>單一一位客戶（一列）</strong>算一個數，再<strong>對所有客戶等權平均</strong>。</p>
+<table>
+  <thead><tr><th>名詞</th><th>單一 query 的定義</th><th>白話</th></tr></thead>
+  <tbody>
+    <tr><td><code>precision@K</code></td><td>(top-K 裡 label=1 的個數) / <strong>K</strong></td><td>「我推前 K 個，有幾成是命中的」</td></tr>
+    <tr><td><code>recall@K</code></td><td>(top-K 裡 label=1 的個數) / <strong>total_rel</strong></td><td>「這客戶想要的，我前 K 個撈回幾成」</td></tr>
+    <tr><td><code>map@K</code></td><td>該列的 Average Precision@K</td><td>precision 沿排名累積的加權版（越前面命中越加分）</td></tr>
+    <tr><td><code>ndcg@K</code></td><td>DCG@K / iDCG@K</td><td>有 log 折扣的排序品質（位置越前權重越高），正規化到 [0,1]</td></tr>
+    <tr><td><code>HR@K</code><br><span class="small">（經典 top-N 指標）</span></td><td>1 if (top-K 內 ≥1 個 label=1) else 0</td><td>「這位客戶的清單，至少中一個了嗎」；分子是 0/1 指示，不是個數</td></tr>
+  </tbody>
+</table>
+<p class="small">
+每位客戶各算一個 X@K，再對客戶等權平均得到該指標。恆有 <code>HR@K ≥ recall@K</code>；
+且當每位客戶恰好只想要 1 個產品時 <code>HR@K == recall@K</code>（leave-one-out 評估常見場景，
+也是文獻常把兩者混用的原因）。
+</p>
+
+<!-- ───────────────────────────── 5 ───────────────────────────── -->
+<h2 id="pi">⑤ <span class="tag tag-i">per-item</span> 家族 ＋ 條件軸</h2>
+<p>
+per-item 多了一個「<strong>對哪個邊下條件</strong>」的軸。固定產品 P、對所有客戶 row（先不限 label），
+用 <code>rank(P)≤K</code> 與 <code>label</code> 做 2×2 混淆矩陣：
+</p>
+
+<table class="cm" style="max-width:560px">
+  <thead><tr><th class="rh">產品 P @ K</th><th>label=1（想要 P）</th><th>label=0（不想要 P）</th></tr></thead>
+  <tbody>
+    <tr><td class="rh">rank(P) ≤ K（推進 top-K）</td><td class="tp">TP</td><td class="fp">FP</td></tr>
+    <tr><td class="rh">rank(P) &gt; K（沒推進）</td><td class="fn">FN</td><td class="tn">TN</td></tr>
+  </tbody>
+</table>
+
+<p><strong>條件下在不同邊 → 不同指標：</strong></p>
+<table>
+  <thead><tr><th>指標</th><th>公式</th><th>條件</th><th>白話</th></tr></thead>
+  <tbody>
+    <tr><td><code>hit_rate@K</code><br>＝per-item recall@K</td><td>TP/(TP+FN)</td><td>label=1</td><td>想要 P 的客戶，幾成被推進 top-K</td></tr>
+    <tr><td><code>mean_pos</code></td><td>E[pos｜label=1]</td><td>label=1</td><td>被想要時平均排第幾名（越小越好）</td></tr>
+    <tr><td><code>map_attr@K</code></td><td>mean(ap_contrib@K)</td><td>label=1</td><td>P 對「客戶 AP@K」的平均貢獻碎片</td></tr>
+    <tr><td><code>ndcg_attr@K</code></td><td>mean(ndcg_contrib@K)</td><td>label=1</td><td>P 對「客戶 nDCG@K」的平均貢獻碎片</td></tr>
+    <tr><td>per-item <code>precision@K</code></td><td>TP/(TP+FP)</td><td>rank≤K</td><td>把 P 推進某客戶 top-K 時，他真的想要的比例</td></tr>
+    <tr><td><code>exposure@K</code></td><td>(TP+FP)/N</td><td>無</td><td>P 被推進 top-K 的客戶佔比（純供給面，不需 label）</td></tr>
+    <tr><td>base rate</td><td>(TP+FN)/N</td><td>無</td><td>P 的母體正樣本率</td></tr>
+    <tr><td>per-item AUC</td><td>score vs label</td><td>無</td><td>把 P 當二元分類器的排序品質</td></tr>
+  </tbody>
+</table>
+
+<div class="callout i">
+<p><strong>數字範例</strong>（產品 A，K=2，4 位客戶）：</p>
+<p>c1: L=1,rank=1 → <span class="kbd">TP</span>　c2: L=1,rank=4 → <span class="kbd">FN</span>　c3: L=0,rank=2 → <span class="kbd">FP</span>　c4: L=0,rank=5 → <span class="kbd">TN</span></p>
+<p>→ TP=FP=FN=TN=1，故 <code>recall@2(A)=hit_rate@2(A)=½</code>、
+<code>precision@2(A)=½</code>、<code>exposure@2(A)=½</code>、<code>base rate(A)=½</code>。</p>
+</div>
+
+<div class="callout i">
+<p><strong>關鍵釐清</strong>：常被說「per-item 沒有 precision@K」是<strong>不精確</strong>的。
+正確說法是 —— 它<strong>不是</strong>「per-query precision@K 的可加碎片」（per-query precision 分母 K 是一列的截斷數，無法歸因到單一產品）；
+但它<strong>是</strong>乾淨的條件機率 <code>P(label=1 | rank(P)≤K)</code>。同名、不同東西，
+和 recall／hit_rate 的處境一模一樣。</p>
+</div>
+
+<p class="small"><code>_attr</code> 後綴＝「它是某個 per-query 指標的<strong>可加碎片</strong>（query 的 AP@K＝該列各正樣本格 ap_contrib@K 相加）」；
+<code>hit_rate</code> 無 <code>_attr</code>＝「它<strong>不是</strong> query recall 的碎片，是重新定義的 item-marginal recall」。</p>
+
+<!-- ───────────────────────────── 6 ───────────────────────────── -->
+<h2 id="name">⑥ 命名陷阱：兩個都叫「hit rate」</h2>
+<p>recsys 文獻裡「hit rate @ K」<strong>至少有兩個不同定義</strong>：</p>
+<table>
+  <thead><tr><th>　</th><th>(a) per-item <code>hit_rate@K</code></th><th>(b) 經典 top-N <code>HR@K</code></th></tr></thead>
+  <tbody>
+    <tr><td>切法</td><td><span class="tag tag-i">per-item</span>（挑產品 column）</td><td><span class="tag tag-q">per-query</span>（壓一整列）</td></tr>
+    <tr><td>單一單位的值</td><td>每個 label=1 格的 0/1（rank≤K?）</td><td>每個 query 的「≥1 命中?」0/1</td></tr>
+    <tr><td>分母</td><td>該產品的正樣本數</td><td>客戶（query）數</td></tr>
+    <tr><td>本質</td><td>per-item recall</td><td>per-query「至少中一個」</td></tr>
+    <tr><td>跟 precision@K 差異</td><td>—</td><td>分子是<strong>有沒有</strong>(0/1) 非個數；分母是客戶數非 K</td></tr>
+  </tbody>
+</table>
+<div class="callout w">
+<p>因為「hit rate @ K」既可能指 (a) per-item recall、又可能指 (b) 業界經典 top-N HR@K，
+看到這個詞時務必先確認指的是哪一個。文獻中 per-item recall 常被另取名
+（<code>hit_rate</code> / per-label recall）正是為了與 (b) 區別。</p>
+</div>
+
+<!-- ───────────────────────────── 7 ───────────────────────────── -->
+<h2 id="weight">⑦ 釐清：<code>hit_rate@K</code>（per-item recall）為何 ≠ per-query <code>recall@K</code></h2>
+<p>兩者都量「想要的有沒有被撈到」，但<strong>加權單位不同</strong>。最小例子（3 產品、2 客戶）：</p>
+<pre>客戶 c1 想要 {A, B}  → 模型排名 A=1, C=2, B=3
+客戶 c2 想要 {A}     → 模型排名 A=1, B=2, C=3</pre>
+
+<table>
+  <thead><tr><th>算法</th><th>明細</th><th>結果</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>per-query <code>recall@1</code><br><span class="small">per-query 等權</span></td>
+      <td>c1: top-1={A}，想要 2 個撈到 1 → 1/2 = 0.5<br>c2: top-1={A}，想要 1 個撈到 1 → 1/1 = 1.0</td>
+      <td>mean(0.5, 1.0)<br>＝ <strong>0.75</strong><br><span class="small">每位<strong>客戶</strong>一票</span></td>
+    </tr>
+    <tr>
+      <td>per-item <code>hit_rate@1</code><br><span class="small">per-positive-row 等權</span></td>
+      <td>A: 在 c1 排1 ✓、c2 排1 ✓ → mean(1,1)=1.0<br>B: 在 c1 排3 ✗ → mean(0)=0.0</td>
+      <td>macro mean(1.0, 0.0)<br>＝ <strong>0.50</strong><br><span class="small">每個<strong>命中事件</strong>一票</span></td>
+    </tr>
+  </tbody>
+</table>
+<div class="callout w">
+<p>0.75 ≠ 0.50 純粹因為：per-query 讓 c1 的兩個正樣本<strong>共用一個 recall 值</strong>再跟 c2 平均（客戶等權）；
+per-item 讓每個 label=1 格<strong>獨立計一票</strong>（命中事件等權）。兩者都是「正確的 recall」，
+只是聚合不同 —— 這也是 per-item 的 recall 常被另取名（如 <code>hit_rate</code>）以與 per-query recall 區別的原因。</p>
+</div>
+
+<!-- ───────────────────────────── 8 ───────────────────────────── -->
+<h2 id="deg">⑧ 退化情況：<code>precision@all</code> / <code>recall@all</code></h2>
+<p>當 <code>K ≥ 產品總數</code>（即 <code>"all"</code>），每一格都被算進 top-K：</p>
+<table>
+  <thead><tr><th>指標</th><th>退化成</th><th>意義</th></tr></thead>
+  <tbody>
+    <tr><td><code>precision@all</code></td><td>total_rel / 產品總數，平均後＝母體正樣本率（<strong>base rate</strong>）</td><td>標籤密度健檢，<strong>不是</strong>排序指標</td></tr>
+    <tr><td><code>recall@all</code></td><td>每個 query 都 <strong>1.0</strong>（全包一定都撈到），平均＝1.0</td><td>恆 1，無資訊量</td></tr>
+  </tbody>
+</table>
+<p class="small">
+這兩個值反映標籤密度，不是排序品質；解讀時不應與 K 較小時真正的
+<code>precision@K</code> / <code>recall@K</code> 混為一談。
+</p>
+
+<!-- ───────────────────────────── 9 ───────────────────────────── -->
+<h2 id="cheat">⑨ 一頁速查</h2>
+<pre>資料格 = (時間, 客戶, 產品) + label(真相) + score(預測)
+query     = 一位客戶一列；模型在列內把所有產品照 score 排名
+total_rel = 這列 label 總和（這客戶想要幾個產品）
+
+┌─ per-query（壓一整列 → 對客戶平均）───────────────────────────┐
+│ precision@K  命中數 / K          推 K 個有幾成準                │
+│ recall@K     命中數 / total_rel  想要的撈回幾成（客戶等權）      │
+│ map@K        AP@K                 累積精確度（前面命中更值錢）    │
+│ ndcg@K       DCG/iDCG             log 折扣排序品質，[0,1]        │
+│ HR@K         1[top-K 有 ≥1 命中]  至少中一個的客戶比例           │
+└───────────────────────────────────────────────────────────────┘
+┌─ per-item（挑一產品 column → 看條件）─────────────────────────┐
+│ 條件 label=1 ─ hit_rate@K  ＝per-item recall（命中事件等權）    │
+│              ├ mean_pos    被想要時平均排第幾（越小越好）       │
+│              ├ map_attr@K  對客戶 AP@K 的平均貢獻碎片           │
+│              └ ndcg_attr@K 對客戶 nDCG@K 的平均貢獻碎片         │
+│ 條件 rank≤K ── precision@K P 進 top-K 時真的想要的比例          │
+│ 不條件 ─────── exposure@K  P 被推進 top-K 的客戶佔比            │
+│              └ base rate   母體正樣本率                         │
+└───────────────────────────────────────────────────────────────┘
+注意：per-item「沒有 precision」是誤解 → 它不是 per-query precision
+      的可加碎片，但是乾淨的條件機率 P(label=1|rank≤K)。</pre>
+
+</div>
+</body>
+</html>
