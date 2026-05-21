@@ -128,9 +128,16 @@ class HiveTableDataset(AbstractDataset):
             f"{k} = '{self._escape_sql_value(v)}'"
             for k, v in self._partition_filter.items()
         )
-        return spark.sql(
+        df = spark.sql(
             f"SELECT * FROM {self._qualified_name} WHERE {where}"
         )
+        # partition_filter columns are constant per load (the WHERE pins each
+        # to a single value), so they carry no information as data columns.
+        # Drop them so downstream joins between two versioned tables don't hit
+        # "Reference '<col>' is ambiguous". The on-disk partitioning and
+        # partition pruning are unaffected; save() re-injects these columns
+        # from partition_filter via _apply_partition_filter_cols.
+        return df.drop(*self._partition_filter.keys())
 
     def save(self, data) -> None:
         if self._read_only:
