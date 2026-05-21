@@ -641,3 +641,47 @@ class TestLoadWithPartitionFilter:
         spark.sql.assert_called_once_with(
             "SELECT * FROM ml_recsys.t WHERE k = 'ab''cd'"
         )
+
+    def test_load_drops_partition_filter_column(self, spark):
+        """partition_filter columns are constant per load and must be dropped
+        from the returned DataFrame so downstream joins don't hit
+        ambiguous-column errors when two versioned tables are joined."""
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="val_model_input",
+            partition_filter={"base_dataset_version": "abc12345"},
+            read_only=True,
+        )
+        real_df = spark.createDataFrame(
+            [("2024-01-01", 1, 0.5, "abc12345")],
+            ["snap_date", "cust_id", "score", "base_dataset_version"],
+        )
+        mock_spark = _make_spark_mock()
+        mock_spark.sql.return_value = real_df
+        with _patch_spark(mock_spark):
+            result = ds.load()
+        assert set(result.columns) == {"snap_date", "cust_id", "score"}
+
+    def test_load_drops_all_partition_filter_columns_keeps_partition_cols(self, spark):
+        """All partition_filter keys are dropped; partition_cols (e.g.
+        snap_date) are real data dimensions and must be kept."""
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            partition_filter={
+                "base_dataset_version": "abc12345",
+                "train_variant_id": "def67890",
+            },
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            read_only=True,
+        )
+        real_df = spark.createDataFrame(
+            [("2024-01-01", 1, 0.5, "abc12345", "def67890")],
+            ["snap_date", "cust_id", "score", "base_dataset_version",
+             "train_variant_id"],
+        )
+        mock_spark = _make_spark_mock()
+        mock_spark.sql.return_value = real_df
+        with _patch_spark(mock_spark):
+            result = ds.load()
+        assert set(result.columns) == {"snap_date", "cust_id", "score"}
