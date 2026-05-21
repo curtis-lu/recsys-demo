@@ -150,6 +150,19 @@ class TestRenderHtml:
         assert "function syncEdits(" in html
         assert "syncEdits()" in html  # called by sort/flt/collect
 
+    def test_shows_live_post_downsample_preview_columns(self):
+        # kept_neg / new_pos_rate computed client-side from n_neg and the
+        # edited ratio, refreshed on every keystroke (oninput -> recalc).
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert "kept_neg" in html and "new_pos_rate" in html
+        assert "function preview(" in html and "function recalc(" in html
+        assert 'oninput="recalc(this)"' in html
+        # the JS computes kept_neg = round(n_neg*ratio) and
+        # new_pos_rate = n_pos/(n_pos+kept_neg); rows are built browser-side,
+        # so assert the formulas are embedded, not the rendered numbers.
+        assert "Math.round(r.n_neg*ratio)" in html
+        assert "r.n_pos/total" in html
+
     def test_explains_ratio_and_weight_logic_and_purpose(self):
         html = render_html(self._GRID, default_ratio=1.0,
                            target_neg_pos=5.0, alpha=0.5, w_max=5.0)
