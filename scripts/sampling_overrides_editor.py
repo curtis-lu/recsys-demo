@@ -96,6 +96,44 @@ def build_grid(
     return grid
 
 
+def resolve_columns(dataset_cfg: dict, schema_cfg: dict) -> dict:
+    """Resolve the four profiling column names from config — no hardcoding.
+
+    ``item`` / ``label`` / ``time`` come straight from ``schema.columns``;
+    ``segment`` is the ``dataset.sample_group_keys`` entry that is neither
+    (the editor's grid is segment x item, and the override keys it emits are
+    ``segment|item|0``). Fails fast unless ``sample_group_keys`` is exactly
+    one segment plus the item and label columns — the editor's 2-D grid model
+    is meaningless otherwise, and a mismatch would silently produce override
+    keys that no longer line up with the configured ``sample_group_keys``.
+
+    Returns a dict keyed segment_col / item_col / label_col / time_col, ready
+    to splat into ``profile_stats``.
+    """
+    cols = schema_cfg.get("columns", {})
+    try:
+        item_col, label_col, time_col = cols["item"], cols["label"], cols["time"]
+    except KeyError as exc:
+        raise ValueError(
+            f"schema.columns is missing {exc}; cannot resolve profiling "
+            "columns. Check the base parameters yaml."
+        ) from exc
+    group_keys = list(dataset_cfg.get("sample_group_keys", []))
+    segments = [k for k in group_keys if k not in (item_col, label_col)]
+    if len(group_keys) != 3 or len(segments) != 1:
+        raise ValueError(
+            "sampling editor expects sample_group_keys = [segment, "
+            f"{item_col!r}, {label_col!r}] (one segment + item + label); "
+            f"got {group_keys}."
+        )
+    return {
+        "segment_col": segments[0],
+        "item_col": item_col,
+        "label_col": label_col,
+        "time_col": time_col,
+    }
+
+
 def grid_to_yaml(
     export: list[dict],
     parameters: dict,
@@ -149,6 +187,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
  table{{border-collapse:collapse}} td,th{{border:1px solid #ccc;padding:4px 8px}}
  th{{background:#f2f2f2;cursor:pointer;user-select:none}}
  td.edit{{background:#fffbe6}}
+ td.calc{{background:#eaffea;color:#060}} th.calc{{cursor:default}}
  .stat{{color:#666}} button{{margin:.3rem;padding:.4rem .8rem}}
  pre{{background:#f7f7f7;padding:1rem;white-space:pre-wrap}}
  details{{background:#eef6ff;border:1px solid #cde;padding:.5rem 1rem;
@@ -173,6 +212,11 @@ median_pos = 全表各格 n_pos 的中位數。<code>weight = 1.0</code> 代表�
 <b>用途</b>：正樣本稀少的冷門 segment×product 容易被熱門產品壓過，提高其權重
 讓模型別忽略長尾。匯出後貼到 <code>parameters_training.yaml</code> 的
 <code>training.sample_weights</code>（key 格式 <code>segment|product</code>）。</p>
+<p><b>kept_neg / new_pos_rate — 下採樣後試算</b>（綠底，唯讀）。編輯某格
+<code>ratio</code> 時即時更新：<code>kept_neg</code> = round(n_neg × ratio)
+為下採樣後保留的負樣本筆數，<code>new_pos_rate</code> =
+n_pos / (n_pos + kept_neg) 為下採樣後該格的正樣本比例。<b>用途</b>：填數字前
+先看到平衡效果，不必匯出跑訓練才知道。</p>
 <p class=stat>只匯出與 default 不同的 cell。點欄位標題排序（再點一次反向）；
 上方輸入框即時篩選 segment / product；編輯值在排序/篩選後會保留。</p>
 </details>
@@ -183,7 +227,9 @@ median_pos = 全表各格 n_pos 的中位數。<code>weight = 1.0</code> 代表�
 <th class="stat" onclick="sort('n_pos')">n_pos ⇅</th>
 <th class="stat" onclick="sort('n_neg')">n_neg ⇅</th>
 <th class="stat" onclick="sort('pos_rate')">pos_rate ⇅</th>
-<th>ratio</th><th>weight</th></tr></thead><tbody></tbody></table>
+<th>ratio</th>
+<th class="calc">kept_neg</th><th class="calc">new_pos_rate</th>
+<th>weight</th></tr></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
 <button onclick="exp('yaml')">Export YAML snippet</button>
 <pre id="out"></pre>
@@ -199,6 +245,18 @@ function syncEdits(){{
    td.dataset.k==='ratio'?'suggested_ratio':'suggested_weight']=v;
  }});
 }}
+function preview(r,ratio){{
+ // post-downsample preview: keep all positives, keep n_neg*ratio negatives.
+ if(isNaN(ratio)) return {{kn:'—',pr:'—'}};
+ const keptNeg=Math.round(r.n_neg*ratio),total=r.n_pos+keptNeg;
+ return {{kn:String(keptNeg),pr:(total>0?r.n_pos/total:0).toFixed(4)}};
+}}
+function recalc(td){{
+ const r=GRID[+td.dataset.i],tr=td.closest('tr');
+ const pv=preview(r,parseFloat(td.textContent));
+ tr.querySelector('td.kn').textContent=pv.kn;
+ tr.querySelector('td.pr').textContent=pv.pr;
+}}
 function render(){{
  const q=(document.getElementById('flt').value||'').toLowerCase();
  let idx=GRID.map((_,i)=>i);
@@ -212,11 +270,13 @@ function render(){{
  tb.innerHTML='';
  idx.forEach(i=>{{
   const r=GRID[i],tr=document.createElement('tr');
+  const pv=preview(r,r.suggested_ratio);
   tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
-   `<td class=edit contenteditable data-k=ratio data-i=${{i}}>`+
-   `${{r.suggested_ratio}}</td>`+
+   `<td class=edit contenteditable data-k=ratio data-i=${{i}} `+
+   `oninput="recalc(this)">${{r.suggested_ratio}}</td>`+
+   `<td class="calc kn">${{pv.kn}}</td><td class="calc pr">${{pv.pr}}</td>`+
    `<td class=edit contenteditable data-k=weight data-i=${{i}}>`+
    `${{r.suggested_weight}}</td>`;
   tb.appendChild(tr);
@@ -338,14 +398,27 @@ def profile(
     source: str = typer.Argument(..., help="Hive table db.table or parquet path"),
     params: Path = typer.Option(
         Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
+    base_params: Path = typer.Option(
+        Path("conf/base/parameters.yaml"),
+        help="base params yaml — source of schema.columns"),
     target_neg_pos: float = typer.Option(5.0, help="downsample target neg:pos R"),
     alpha: float = typer.Option(0.5, help="cold-weight damping exponent"),
     w_max: float = typer.Option(5.0, help="cold-weight cap"),
 ) -> None:
     cfg = yaml.safe_load(params.read_text())
     ds = cfg.get("dataset", cfg)
+    schema_cfg = yaml.safe_load(base_params.read_text()).get("schema", {})
     snap_dates = ds["train_snap_dates"]
-    typer.echo(f"[1/4] config: {len(snap_dates)} snap date(s) from {params}")
+    try:
+        cols = resolve_columns(ds, schema_cfg)
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
+        f"columns segment={cols['segment_col']} item={cols['item_col']} "
+        f"label={cols['label_col']} time={cols['time_col']}"
+    )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
 
@@ -356,11 +429,7 @@ def profile(
     )
     df = _load_spark_df(source)
     typer.echo("[3/4] profiling: Spark groupBy + single collect over snap dates…")
-    stats = profile_stats(
-        df, snaps,
-        segment_col="cust_segment_typ", item_col="prod_name",
-        label_col="label", time_col="snap_date",
-    )
+    stats = profile_stats(df, snaps, **cols)
     typer.echo(f"[3/4] {len(stats)} (segment,product) cell(s) profiled")
     grid = build_grid(stats, target_neg_pos, alpha, w_max)
     typer.echo("[4/4] rendering self-contained HTML…")

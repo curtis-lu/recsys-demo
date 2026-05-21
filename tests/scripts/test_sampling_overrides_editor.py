@@ -13,6 +13,7 @@ from scripts.sampling_overrides_editor import (
     grid_to_yaml,
     profile_stats,
     render_html,
+    resolve_columns,
     suggest_ratio,
     suggest_weight,
 )
@@ -73,6 +74,41 @@ class TestBuildGrid:
         assert by[("mass", "a")]["suggested_ratio"] == 0.25
         # every row carries pos_rate
         assert abs(by[("hnw", "a")]["pos_rate"] - 8 / 58) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Config-driven column resolution (no hardcoded column names)
+# ---------------------------------------------------------------------------
+class TestResolveColumns:
+    _SCHEMA = {"columns": {"item": "prod_name", "label": "label",
+                           "time": "snap_date"}}
+
+    def test_resolves_from_schema_and_segment_by_exclusion(self):
+        cols = resolve_columns(
+            {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+            self._SCHEMA)
+        assert cols == {"segment_col": "cust_segment_typ",
+                        "item_col": "prod_name", "label_col": "label",
+                        "time_col": "snap_date"}
+
+    def test_segment_found_regardless_of_position(self):
+        # exclusion-based, not positional: a differently-named/ordered
+        # segment column still resolves.
+        cols = resolve_columns(
+            {"sample_group_keys": ["prod_name", "label", "cust_age_band"]},
+            self._SCHEMA)
+        assert cols["segment_col"] == "cust_age_band"
+
+    def test_rejects_group_keys_not_a_segment_item_label_triple(self):
+        with pytest.raises(ValueError, match="sample_group_keys"):
+            resolve_columns(
+                {"sample_group_keys": ["prod_name", "label"]}, self._SCHEMA)
+
+    def test_rejects_missing_schema_column(self):
+        with pytest.raises(ValueError, match="schema.columns"):
+            resolve_columns(
+                {"sample_group_keys": ["seg", "prod_name", "label"]},
+                {"columns": {"item": "prod_name", "label": "label"}})
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +185,19 @@ class TestRenderHtml:
         html = render_html(self._GRID, default_ratio=1.0)
         assert "function syncEdits(" in html
         assert "syncEdits()" in html  # called by sort/flt/collect
+
+    def test_shows_live_post_downsample_preview_columns(self):
+        # kept_neg / new_pos_rate computed client-side from n_neg and the
+        # edited ratio, refreshed on every keystroke (oninput -> recalc).
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert "kept_neg" in html and "new_pos_rate" in html
+        assert "function preview(" in html and "function recalc(" in html
+        assert 'oninput="recalc(this)"' in html
+        # the JS computes kept_neg = round(n_neg*ratio) and
+        # new_pos_rate = n_pos/(n_pos+kept_neg); rows are built browser-side,
+        # so assert the formulas are embedded, not the rendered numbers.
+        assert "Math.round(r.n_neg*ratio)" in html
+        assert "r.n_pos/total" in html
 
     def test_explains_ratio_and_weight_logic_and_purpose(self):
         html = render_html(self._GRID, default_ratio=1.0,
