@@ -96,6 +96,44 @@ def build_grid(
     return grid
 
 
+def resolve_columns(dataset_cfg: dict, schema_cfg: dict) -> dict:
+    """Resolve the four profiling column names from config — no hardcoding.
+
+    ``item`` / ``label`` / ``time`` come straight from ``schema.columns``;
+    ``segment`` is the ``dataset.sample_group_keys`` entry that is neither
+    (the editor's grid is segment x item, and the override keys it emits are
+    ``segment|item|0``). Fails fast unless ``sample_group_keys`` is exactly
+    one segment plus the item and label columns — the editor's 2-D grid model
+    is meaningless otherwise, and a mismatch would silently produce override
+    keys that no longer line up with the configured ``sample_group_keys``.
+
+    Returns a dict keyed segment_col / item_col / label_col / time_col, ready
+    to splat into ``profile_stats``.
+    """
+    cols = schema_cfg.get("columns", {})
+    try:
+        item_col, label_col, time_col = cols["item"], cols["label"], cols["time"]
+    except KeyError as exc:
+        raise ValueError(
+            f"schema.columns is missing {exc}; cannot resolve profiling "
+            "columns. Check the base parameters yaml."
+        ) from exc
+    group_keys = list(dataset_cfg.get("sample_group_keys", []))
+    segments = [k for k in group_keys if k not in (item_col, label_col)]
+    if len(group_keys) != 3 or len(segments) != 1:
+        raise ValueError(
+            "sampling editor expects sample_group_keys = [segment, "
+            f"{item_col!r}, {label_col!r}] (one segment + item + label); "
+            f"got {group_keys}."
+        )
+    return {
+        "segment_col": segments[0],
+        "item_col": item_col,
+        "label_col": label_col,
+        "time_col": time_col,
+    }
+
+
 def grid_to_yaml(
     export: list[dict],
     parameters: dict,
@@ -360,14 +398,27 @@ def profile(
     source: str = typer.Argument(..., help="Hive table db.table or parquet path"),
     params: Path = typer.Option(
         Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
+    base_params: Path = typer.Option(
+        Path("conf/base/parameters.yaml"),
+        help="base params yaml — source of schema.columns"),
     target_neg_pos: float = typer.Option(5.0, help="downsample target neg:pos R"),
     alpha: float = typer.Option(0.5, help="cold-weight damping exponent"),
     w_max: float = typer.Option(5.0, help="cold-weight cap"),
 ) -> None:
     cfg = yaml.safe_load(params.read_text())
     ds = cfg.get("dataset", cfg)
+    schema_cfg = yaml.safe_load(base_params.read_text()).get("schema", {})
     snap_dates = ds["train_snap_dates"]
-    typer.echo(f"[1/4] config: {len(snap_dates)} snap date(s) from {params}")
+    try:
+        cols = resolve_columns(ds, schema_cfg)
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
+        f"columns segment={cols['segment_col']} item={cols['item_col']} "
+        f"label={cols['label_col']} time={cols['time_col']}"
+    )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
 
@@ -378,11 +429,7 @@ def profile(
     )
     df = _load_spark_df(source)
     typer.echo("[3/4] profiling: Spark groupBy + single collect over snap dates…")
-    stats = profile_stats(
-        df, snaps,
-        segment_col="cust_segment_typ", item_col="prod_name",
-        label_col="label", time_col="snap_date",
-    )
+    stats = profile_stats(df, snaps, **cols)
     typer.echo(f"[3/4] {len(stats)} (segment,product) cell(s) profiled")
     grid = build_grid(stats, target_neg_pos, alpha, w_max)
     typer.echo("[4/4] rendering self-contained HTML…")
