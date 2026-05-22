@@ -1,125 +1,117 @@
-"""Tests for evaluation.baselines module."""
+"""Tests for evaluation.baselines — Spark popularity baseline."""
 
-import numpy as np
 import pandas as pd
-import pytest
-
-from recsys_tfb.evaluation.baselines import (
-    generate_global_popularity_baseline,
-    generate_segment_popularity_baseline,
-)
 
 
-@pytest.fixture
-def label_table():
-    """Create a sample label_table for testing."""
+def _parameters():
+    return {
+        "schema": {
+            "columns": {
+                "time": "snap_date",
+                "entity": ["cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
+        },
+        "evaluation": {},
+    }
+
+
+def _label_table(spark):
+    # History before 2025-01-31: A bought 3x, B 1x, C 0x.
     rows = []
-    products = ["exchange_fx", "fund_bond", "fund_stock"]
-    segments = ["mass", "affluent"]
-
-    # Historical data (snap_date < target)
-    for snap in ["20240101", "20240201"]:
-        for i in range(10):
-            cust_id = f"C{i:04d}"
-            seg = segments[i % 2]
-            for prod in products:
-                # fx is most popular, stock least
-                if prod == "exchange_fx":
-                    label = 1 if i < 7 else 0
-                elif prod == "fund_bond":
-                    label = 1 if i < 4 else 0
-                else:
-                    label = 1 if i < 2 else 0
-                rows.append({
-                    "snap_date": snap,
-                    "cust_id": cust_id,
-                    "prod_name": prod,
-                    "label": label,
-                    "cust_segment_typ": seg,
-                })
-
-    return pd.DataFrame(rows)
+    for snap, a, b, c in [("2024-06-30", 2, 1, 0), ("2024-12-31", 1, 0, 0)]:
+        for i in range(3):
+            rows.append({"snap_date": snap, "cust_id": f"h{i}",
+                         "prod_name": "A", "label": 1 if i < a else 0})
+            rows.append({"snap_date": snap, "cust_id": f"h{i}",
+                         "prod_name": "B", "label": 1 if i < b else 0})
+            rows.append({"snap_date": snap, "cust_id": f"h{i}",
+                         "prod_name": "C", "label": 1 if i < c else 0})
+    return spark.createDataFrame(pd.DataFrame(rows))
 
 
-@pytest.fixture
-def customer_ids():
-    return [f"C{i:04d}" for i in range(5)]
+def test_purchase_counts_window_excludes_snap_date_and_after(spark):
+    from recsys_tfb.evaluation.baselines import compute_purchase_counts
+
+    counts = compute_purchase_counts(
+        _label_table(spark), ["2025-01-31"], 12, _parameters()
+    )
+    by_prod = {r["prod_name"]: r["score"] for r in counts.collect()}
+    # 12-month window [2024-01-31, 2025-01-31): both history snaps included.
+    assert by_prod["A"] == 3
+    assert by_prod["B"] == 1
+    assert by_prod["C"] == 0
 
 
-class TestGlobalPopularityBaseline:
-    def test_schema_matches_predictions(self, label_table, customer_ids):
-        result = generate_global_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
+def test_purchase_counts_lookback_limits_window(spark):
+    from recsys_tfb.evaluation.baselines import compute_purchase_counts
 
-    def test_same_ranking_for_all_customers(self, label_table, customer_ids):
-        result = generate_global_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        # All customers should have the same product order
-        rankings = result.pivot(index="cust_id", columns="prod_name", values="rank")
-        for col in rankings.columns:
-            assert rankings[col].nunique() == 1
-
-    def test_scores_match_positive_rates(self, label_table, customer_ids):
-        result = generate_global_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        # exchange_fx has 70% positive rate
-        fx_score = result[result["prod_name"] == "exchange_fx"]["score"].iloc[0]
-        assert fx_score == pytest.approx(0.7)
-
-    def test_ranking_order_correct(self, label_table, customer_ids):
-        result = generate_global_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        # exchange_fx (0.7) > fund_bond (0.4) > fund_stock (0.2) → ranks 1, 2, 3
-        c0 = result[result["cust_id"] == "C0000"].set_index("prod_name")
-        assert c0.loc["exchange_fx", "rank"] < c0.loc["fund_bond", "rank"]
-        assert c0.loc["fund_bond", "rank"] < c0.loc["fund_stock", "rank"]
-
-    def test_leakage_prevention(self, label_table, customer_ids):
-        """Only historical data before snap_date should be used."""
-        result = generate_global_popularity_baseline(
-            label_table, "20240201", customer_ids
-        )
-        # Should only use data from 20240101
-        assert len(result) == 5 * 3  # 5 customers × 3 products
-
-    def test_no_historical_data_warning(self, label_table, customer_ids, caplog):
-        """When no data before snap_date, use all data with warning."""
-        import logging
-        with caplog.at_level(logging.WARNING):
-            result = generate_global_popularity_baseline(
-                label_table, "20230101", customer_ids
-            )
-        assert "No historical data" in caplog.text
-        assert len(result) > 0
+    # 3-month window [2024-10-31, 2025-01-31): only the 2024-12-31 snap.
+    counts = compute_purchase_counts(
+        _label_table(spark), ["2025-01-31"], 3, _parameters()
+    )
+    by_prod = {r["prod_name"]: r["score"] for r in counts.collect()}
+    assert by_prod["A"] == 1
+    assert by_prod["B"] == 0
 
 
-class TestSegmentPopularityBaseline:
-    def test_schema_matches_predictions(self, label_table, customer_ids):
-        result = generate_segment_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
+def test_purchase_counts_fallback_when_no_history(spark):
+    from recsys_tfb.evaluation.baselines import compute_purchase_counts
 
-    def test_different_rankings_per_segment(self, label_table):
-        """Different segments should potentially have different rankings."""
-        cust_ids = [f"C{i:04d}" for i in range(10)]
-        result = generate_segment_popularity_baseline(
-            label_table, "20240331", cust_ids
-        )
-        # Mass customers (even indices) vs affluent (odd indices)
-        mass_ranks = result[result["cust_id"] == "C0000"].set_index("prod_name")["rank"]
-        affluent_ranks = result[result["cust_id"] == "C0001"].set_index("prod_name")["rank"]
-        # Rankings may differ between segments
-        assert len(result) == 10 * 3
+    # snap_date before all history -> empty window -> fallback to full table.
+    counts = compute_purchase_counts(
+        _label_table(spark), ["2024-01-01"], 12, _parameters()
+    )
+    by_prod = {r["prod_name"]: r["score"] for r in counts.collect()}
+    assert by_prod["A"] == 3  # full table
 
-    def test_output_schema(self, label_table, customer_ids):
-        result = generate_segment_popularity_baseline(
-            label_table, "20240331", customer_ids
-        )
-        assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score", "rank"}
-        assert (result["snap_date"].unique() == "20240331").all()
+
+def test_build_baseline_frame_replaces_score_and_drops_model_cols(spark):
+    from recsys_tfb.evaluation.baselines import build_baseline_frame
+
+    eval_pred = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2025-01-31"] * 4,
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "prod_name": ["A", "B", "A", "B"],
+        "label": [1, 0, 0, 1],
+        "score": [0.9, 0.1, 0.2, 0.8],
+        "rank": [1, 2, 2, 1],
+        "model_version": ["v1"] * 4,
+    }))
+    counts = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2025-01-31", "2025-01-31"],
+        "prod_name": ["A", "B"],
+        "score": [5, 2],
+    }))
+
+    frame = build_baseline_frame(eval_pred, counts, _parameters())
+    cols = set(frame.columns)
+    assert "rank" not in cols and "model_version" not in cols
+    assert "score" in cols and "label" in cols
+
+    by_key = {(r["cust_id"], r["prod_name"]): r["score"] for r in frame.collect()}
+    # Every customer gets the same per-product popularity score.
+    assert by_key[("c1", "A")] == 5 and by_key[("c2", "A")] == 5
+    assert by_key[("c1", "B")] == 2 and by_key[("c2", "B")] == 2
+
+
+def test_build_baseline_frame_fills_missing_product_with_zero(spark):
+    from recsys_tfb.evaluation.baselines import build_baseline_frame
+
+    eval_pred = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2025-01-31"] * 2,
+        "cust_id": ["c1", "c1"],
+        "prod_name": ["A", "B"],
+        "label": [1, 0],
+        "score": [0.9, 0.1],
+    }))
+    counts = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2025-01-31"], "prod_name": ["A"], "score": [5],
+    }))
+    frame = build_baseline_frame(eval_pred, counts, _parameters())
+    by_prod = {r["prod_name"]: r["score"] for r in frame.collect()}
+    assert by_prod["A"] == 5
+    assert by_prod["B"] == 0
