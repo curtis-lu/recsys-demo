@@ -52,10 +52,7 @@ def _load_spark_config(config: ConfigLoader, pipeline: str) -> dict:
     """Return base + pipeline-specific spark config, merged (pipeline wins),
     with ${vdclient.<name>} placeholders resolved (or dropped if vdclient
     is unavailable)."""
-    from recsys_tfb.utils.vdclient_resolver import (
-        resolve_env_placeholders,
-        resolve_vdclient_placeholders,
-    )
+    from recsys_tfb.utils.vdclient_resolver import resolve_vdclient_placeholders
 
     try:
         base_params = config.get_parameters_by_name("parameters")
@@ -68,14 +65,17 @@ def _load_spark_config(config: ConfigLoader, pipeline: str) -> dict:
     base_spark = dict(base_params.get("spark", {}))
     pipe_spark = pipe_params.get("spark", {})
     base_spark.update(pipe_spark)
-    base_spark = resolve_env_placeholders(base_spark)
     return resolve_vdclient_placeholders(base_spark)
 
 
 def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict, RunContext]:
     conf_dir = _find_conf_dir()
-    config = ConfigLoader(str(conf_dir), env=env)
-    params = config.get_parameters()
+    try:
+        config = ConfigLoader(str(conf_dir), env=env)
+        params = config.get_parameters()
+    except ValueError as exc:
+        logger.error("Config loading failed: %s", exc)
+        raise typer.Exit(code=1)
 
     run_context = RunContext(pipeline=pipeline, env=env)
     setup_logging(params, run_context)

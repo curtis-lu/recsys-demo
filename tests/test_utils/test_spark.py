@@ -111,13 +111,14 @@ class TestFallback:
             spark.stop()
 
     def test_fallback_resolves_env_placeholders(self, monkeypatch, tmp_path):
-        """Fallback path must run ${env.*} resolver before handing dict to builder.
+        """Fallback path serves ${env.*}-resolved spark config to the builder.
 
         Regression: previously, when tune_hyperparameters stopped the session
         and a downstream node triggered fallback rebuild, yaml values like
         ``${vdclient.cdp.driver_port}`` reached SparkConf as literal strings →
-        ``spark.driver.port should be int`` at the company. Env-based version
-        is the unit-testable surrogate.
+        ``spark.driver.port should be int`` at the company. ${env.*} resolution
+        now happens inside ConfigLoader (not a direct resolver call in
+        _fallback_create); this env-based case is the unit-testable surrogate.
         """
         monkeypatch.setenv("RECSYS_TFB_TEST_APP_NAME", "from-env-placeholder")
         conf = tmp_path / "conf"

@@ -5,13 +5,13 @@ hive:
   db: ml_recsys
 
 # Dev-cluster (Docker Spark Standalone) 覆蓋：base 的 spark.master=yarn 是給
-# 真實 CDP/YARN 用，本機 dev-cluster 走 Standalone。其餘 driver.host/port、
-# vdclient placeholder 等在 dev 端會由 resolve_*_placeholders 自動 drop，
-# 由 ~/dev-cluster/client-template/spark/spark-defaults.conf 補齊。
+# 真實 CDP/YARN 用，本機 dev-cluster 走 Standalone。${vdclient.*} placeholder
+# 在 dev 端會由 resolve_vdclient_placeholders 自動 drop、${env.*} 由 ConfigLoader
+# 解析，由 ~/dev-cluster/client-template/spark/spark-defaults.conf 補齊。
 spark:
   app_name: recsys_tfb
   # spark.master: yarn
-  # spark.driver.host: ${env.NODE_IP}
+  # spark.driver.host: ${env.NODE_IP|}
   # spark.driver.port: ${vdclient.cdp.driver_port}
   # spark.blockManager.port: ${vdclient.cdp.blockManager_port}
   # spark.serializer: org.apache.spark.serializer.KryoSerializer

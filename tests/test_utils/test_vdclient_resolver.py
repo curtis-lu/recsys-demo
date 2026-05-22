@@ -4,10 +4,7 @@ import logging
 import sys
 import types
 
-from recsys_tfb.utils.vdclient_resolver import (
-    resolve_env_placeholders,
-    resolve_vdclient_placeholders,
-)
+from recsys_tfb.utils.vdclient_resolver import resolve_vdclient_placeholders
 
 
 def _install_fake_vdclient_magic(monkeypatch, ports_by_cluster: dict):
@@ -114,55 +111,6 @@ class TestResolve:
     def test_non_string_values_pass_through(self, monkeypatch):
         _install_fake_vdclient_magic(monkeypatch, {})
         out = resolve_vdclient_placeholders(
-            {"spark.executor.cores": 4, "spark.ui.enabled": False}
-        )
-        assert out == {"spark.executor.cores": 4, "spark.ui.enabled": False}
-
-
-class TestResolveEnv:
-    def test_no_placeholders_passthrough(self):
-        out = resolve_env_placeholders(
-            {"spark.executor.memory": "16g", "spark.executor.cores": 4}
-        )
-        assert out == {
-            "spark.executor.memory": "16g",
-            "spark.executor.cores": 4,
-        }
-
-    def test_substitutes_when_env_var_set(self, monkeypatch):
-        monkeypatch.setenv("NODE_IP", "10.0.0.1")
-        out = resolve_env_placeholders(
-            {
-                "spark.driver.host": "${env.NODE_IP}",
-                "spark.executor.cores": 4,
-            }
-        )
-        assert out["spark.driver.host"] == "10.0.0.1"
-        assert out["spark.executor.cores"] == 4
-
-    def test_drops_key_when_env_var_missing(self, monkeypatch, caplog):
-        monkeypatch.delenv("NODE_IP", raising=False)
-        with caplog.at_level(logging.WARNING):
-            out = resolve_env_placeholders(
-                {
-                    "spark.driver.host": "${env.NODE_IP}",
-                    "spark.executor.memory": "4g",
-                }
-            )
-        assert "spark.driver.host" not in out
-        assert out["spark.executor.memory"] == "4g"
-        assert any("NODE_IP" in r.message for r in caplog.records)
-
-    def test_multiple_env_placeholders(self, monkeypatch):
-        monkeypatch.setenv("HIVE_HOST", "hivehost")
-        monkeypatch.setenv("HIVE_PORT", "9083")
-        out = resolve_env_placeholders(
-            {"x": "thrift://${env.HIVE_HOST}:${env.HIVE_PORT}"}
-        )
-        assert out["x"] == "thrift://hivehost:9083"
-
-    def test_non_string_values_pass_through(self):
-        out = resolve_env_placeholders(
             {"spark.executor.cores": 4, "spark.ui.enabled": False}
         )
         assert out == {"spark.executor.cores": 4, "spark.ui.enabled": False}
