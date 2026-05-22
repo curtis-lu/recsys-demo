@@ -1,6 +1,9 @@
 evaluation:
-  # Snap date for evaluation (YYYYMMDD or YYYY-MM-DD).
-  snap_date: "20251231"
+  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the baselines
+  # pipeline compares it against the DATE-typed snap_date column cast to string
+  # (which yields YYYY-MM-DD). The evaluation output path normalises it via
+  # .replace("-", "") so it still produces a clean YYYYMMDD/ directory.
+  snap_date: "2025-12-31"
 
   # Single k superset. Every @K metric is computed at every k here, for all
   # granularities (fine product overall/per-item/per-segment AND category).
