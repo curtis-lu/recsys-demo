@@ -67,6 +67,10 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     sourced from training_eval_predictions after T3 schema change),
     prepare_eval_data must add it via rank_within_query so downstream
     nodes (generate_report) still find `rank`.
+
+    The predictions input here carries a `label` column to mirror the real
+    training_eval_predictions schema; prepare_eval_data must still produce a
+    non-ambiguous result.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
@@ -76,6 +80,7 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
         "snap_date": ["2025-01-31"] * 4,
         "prod_name": ["A", "B", "A", "B"],
         "score": [0.9, 0.1, 0.2, 0.8],
+        "label": [1, 0, 0, 1],
         "model_version": ["v1"] * 4,
     })
     labels_pdf = pd.DataFrame({
@@ -162,3 +167,67 @@ def test_prepare_eval_data_preserves_existing_rank_column(spark):
     b_row = result[result["prod_name"] == "B"].iloc[0]
     assert a_row["rank"] == 99
     assert b_row["rank"] == 100
+
+
+def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
+    """In --post-training mode the predictions source (training_eval_predictions)
+    already carries a `label` column. The merge join keys on identity_cols only,
+    so without dedup `label` survives on both sides -> AnalysisException:
+    reference 'label' is ambiguous. prepare_eval_data must drop the label_table
+    side's `label`, keep the predictions' own label, and still bring segment
+    columns across from label_table.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    # Post-training predictions: carry `label` (training_eval_predictions schema).
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "score": [0.9, 0.1],
+        "label": [1, 0],  # authoritative — scored against at training time
+        "model_version": ["v1"] * 2,
+    })
+    # label_table: has its own `label` (deliberately different values, to prove
+    # which side wins) plus a segment column the join must still deliver.
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "label": [0, 1],
+        "cust_segment_typ": ["mass", "mass"],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+
+    parameters = {
+        "schema": {
+            "columns": {
+                "time": "snap_date",
+                "entity": ["cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+                "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            },
+        },
+        "model_version": "v1",
+        "evaluation": {},
+    }
+
+    result = prepare_eval_data(predictions, labels, parameters)
+
+    # Exactly one `label` column survives -> no ambiguous reference.
+    assert result.columns.count("label") == 1
+    # Selecting `label` must resolve without AnalysisException.
+    result_pdf = result.select(
+        "prod_name", "label", "cust_segment_typ"
+    ).toPandas()
+    # Predictions' own label is kept (label_table's differing values discarded).
+    by_prod = result_pdf.set_index("prod_name")["label"]
+    assert by_prod["A"] == 1
+    assert by_prod["B"] == 0
+    # Segment column from label_table still flows through the join.
+    assert set(result_pdf["cust_segment_typ"]) == {"mass"}

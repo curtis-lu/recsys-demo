@@ -61,6 +61,24 @@ def prepare_eval_data(
     pred_snap_dates = ranked_predictions.select(time_col).distinct()
     labels = labels.join(pred_snap_dates, on=time_col, how="inner")
 
+    # In --post-training mode the predictions source is training_eval_predictions,
+    # which already stores `label` alongside `score` (written by the training
+    # `predict` node). The merge join below keys on identity_cols only, so a
+    # `label` on the label_table side would survive as a second `label` column
+    # -> AnalysisException: reference 'label' is ambiguous. Drop it from the
+    # label_table side: the predictions table's own label is exactly what the
+    # model's test mAP was scored against, keeping post-training metrics
+    # consistent with the training pipeline. The label_table join is still
+    # required for segment columns. Monitoring mode (ranked_predictions) has no
+    # `label`, so the condition is False there and behaviour is unchanged.
+    if label_col in ranked_predictions.columns and label_col in labels.columns:
+        labels = labels.drop(label_col)
+        logger.info(
+            "prepare_eval_data: predictions already carry '%s'; dropped it "
+            "from the label_table side to avoid an ambiguous join column",
+            label_col,
+        )
+
     # Merge predictions with labels
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="inner")
 
