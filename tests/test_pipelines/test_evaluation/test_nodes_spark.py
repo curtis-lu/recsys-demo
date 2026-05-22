@@ -174,8 +174,7 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
     already carries a `label` column. The merge join keys on identity_cols only,
     so without dedup `label` survives on both sides -> AnalysisException:
     reference 'label' is ambiguous. prepare_eval_data must drop the label_table
-    side's `label`, keep the predictions' own label, and still bring segment
-    columns across from label_table.
+    side's `label` and keep the predictions' own label.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
@@ -190,13 +189,12 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
         "model_version": ["v1"] * 2,
     })
     # label_table: has its own `label` (deliberately different values, to prove
-    # which side wins) plus a segment column the join must still deliver.
+    # which side wins).
     labels_pdf = pd.DataFrame({
         "cust_id": ["c1", "c1"],
         "snap_date": ["2025-01-31"] * 2,
         "prod_name": ["A", "B"],
         "label": [0, 1],
-        "cust_segment_typ": ["mass", "mass"],
     })
     predictions = spark.createDataFrame(predictions_pdf)
     labels = spark.createDataFrame(labels_pdf)
@@ -221,16 +219,59 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
 
     # Exactly one `label` column survives -> no ambiguous reference.
     assert result.columns.count("label") == 1
-    # Selecting `label` must resolve without AnalysisException.
-    result_pdf = result.select(
-        "prod_name", "label", "cust_segment_typ"
-    ).toPandas()
+    result_pdf = result.select("prod_name", "label").toPandas()
     # Predictions' own label is kept (label_table's differing values discarded).
     by_prod = result_pdf.set_index("prod_name")["label"]
     assert by_prod["A"] == 1
     assert by_prod["B"] == 0
-    # Segment column from label_table still flows through the join.
-    assert set(result_pdf["cust_segment_typ"]) == {"mass"}
+
+
+def test_prepare_eval_data_joins_segment_sources(spark):
+    """segment_sources Hive tables are left-joined onto eval_predictions (after
+    the predictions x labels join), enriching it with the segment column
+    without changing its row count."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions = spark.createDataFrame(pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "score": [0.9, 0.1],
+        "rank": [1, 2],
+        "model_version": ["v1"] * 2,
+    }))
+    labels = spark.createDataFrame(pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["A", "B"],
+        "label": [1, 0],
+    }))
+    # sample_pool-like source: finer-grained (one row per product).
+    spark.createDataFrame(pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31"] * 2,
+        "cust_segment_typ": ["mass", "mass"],
+        "prod_name": ["A", "B"],
+    })).createOrReplaceTempView("seg_pool")
+
+    parameters = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+        "model_version": "v1",
+        "evaluation": {
+            "snap_date": "2025-01-31",
+            "segment_sources": {"cust_segment_typ": {
+                "table": "seg_pool",
+                "key_columns": ["cust_id", "snap_date"],
+                "segment_column": "cust_segment_typ"}},
+        },
+    }
+    result = prepare_eval_data(predictions, labels, parameters).toPandas()
+    assert len(result) == 2  # no fan-out from the finer-grained source
+    assert set(result["cust_segment_typ"]) == {"mass"}
 
 
 def test_prepare_eval_data_filters_to_configured_snap_date(spark):

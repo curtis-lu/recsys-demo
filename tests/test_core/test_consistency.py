@@ -412,3 +412,26 @@ class TestSearchSpaceErrors:
             {"name": "x", "type": "int", "low": None, "high": {}}
         ]))
         assert any("number" in e for e in errs)
+
+
+def test_segment_columns_without_source_flags_uncovered():
+    from recsys_tfb.core.consistency import segment_columns_without_source
+    params = {"evaluation": {
+        "segment_columns": ["cust_segment_typ"],
+        "segment_sources": {"hc": {"segment_column": "holding_combo"}},
+    }}
+    assert segment_columns_without_source(params) == ["cust_segment_typ"]
+
+
+def test_segment_columns_without_source_ok_when_covered():
+    from recsys_tfb.core.consistency import segment_columns_without_source
+    params = {"evaluation": {
+        "segment_columns": ["cust_segment_typ"],
+        "segment_sources": {"cs": {"segment_column": "cust_segment_typ"}},
+    }}
+    assert segment_columns_without_source(params) == []
+
+
+def test_segment_columns_without_source_empty_when_no_segment_columns():
+    from recsys_tfb.core.consistency import segment_columns_without_source
+    assert segment_columns_without_source({"evaluation": {}}) == []
