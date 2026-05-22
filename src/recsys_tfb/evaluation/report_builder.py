@@ -39,6 +39,9 @@ def _k_to_lookup(k, n_products: int) -> int | str:
     return k
 
 
+_MACRO_LABEL = "Macro 平均"
+
+
 def _report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
 
@@ -145,22 +148,32 @@ def _per_item_metric_table(
     metric_key: str,
     col_fmt: str,
     extra_cols: dict[str, str] | None = None,
+    macro_metrics: dict | None = None,
 ) -> pd.DataFrame:
     """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
     pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, n_prod)}"]``.
 
     ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
     e.g. ``{"mean_pos": "mean_pos"}``.
+
+    ``macro_metrics``: when given and non-empty, an equal-weight-average
+    metrics dict (same key shape as a per_item value) is prepended as the
+    top row labelled ``_MACRO_LABEL``.
     """
-    data = {}
-    for item, m in per_item.items():
+    def _row(m: dict) -> dict:
         row = {
             col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
         for out_name, src_key in (extra_cols or {}).items():
             row[out_name] = m.get(src_key)
-        data[item] = row
+        return row
+
+    data: dict = {}
+    if macro_metrics:
+        data[_MACRO_LABEL] = _row(macro_metrics)
+    for item, m in per_item.items():
+        data[item] = _row(m)
     return pd.DataFrame(data).T
 
 
@@ -195,11 +208,13 @@ def _per_item_heatmap(
     return fig
 
 
-def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
+def _per_item_recall_table(
+    per_item: dict, ks: list, n_prod: int, macro_metrics: dict | None = None
+) -> pd.DataFrame:
     """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
     return _per_item_metric_table(
         per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
-        extra_cols={"mean_pos": "mean_pos"},
+        extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
     )
 
 
@@ -209,22 +224,26 @@ def build_guardrail_recall_section(
     if not _section_on(parameters, "guardrail_recall"):
         return None
     per_item = metrics.get("per_item", {})
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
     ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
-    table = _per_item_recall_table(per_item, ks, n_prod)
+    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    table_plain = _per_item_recall_table(per_item, ks, n_prod)
     cs = disp.get("recall_colorscale", {}) or {}
     fig = _per_item_heatmap(
-        table, per_item, ks, n_prod, "hit_rate", "recall@{k}",
+        table_plain, per_item, ks, n_prod, "hit_rate", "recall@{k}",
         "per-item recall@k 色階",
         zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
     )
+    table = _per_item_recall_table(per_item, ks, n_prod, macro_metrics=macro_item)
     return ReportSection(
         title="護欄 per_item recall@k（細產品）",
         description=(
             "每產品 recall@k（per-item，即 hit_rate@k 正名）＋色階。"
+            "頂列「Macro 平均」為各產品等權平均。"
             "純判讀、無 pass/fail 閾值。完整資料統計見「資料概況」。"
         ),
         figures=[fig],
@@ -239,24 +258,34 @@ def build_per_item_attr_section(
     if not _section_on(parameters, "per_item_attr"):
         return None
     per_item = metrics.get("per_item", {})
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
     ks = _resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
-    map_tbl = _per_item_metric_table(
+    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    map_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}"
     )
-    ndcg_tbl = _per_item_metric_table(
+    ndcg_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
     )
     map_fig = _per_item_heatmap(
-        map_tbl, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
         "per-item map_attr@k 色階",
     )
     ndcg_fig = _per_item_heatmap(
-        ndcg_tbl, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        ndcg_tbl_plain, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
         "per-item ndcg_attr@k 色階",
+    )
+    map_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        macro_metrics=macro_item,
+    )
+    ndcg_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        macro_metrics=macro_item,
     )
     return ReportSection(
         title="per_item 歸因 Attribution（細產品）",
@@ -268,7 +297,7 @@ def build_per_item_attr_section(
             "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
             "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
             "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
-            "換成 log 折扣的 ndcg_contrib@k。"
+            "換成 log 折扣的 ndcg_contrib@k。頂列「Macro 平均」為各產品等權平均。"
         ),
         figures=[map_fig, ndcg_fig],
         tables=[map_tbl, ndcg_tbl],
@@ -297,7 +326,10 @@ def build_category_section(
           for k in map_ks}]
     ).T
     map_tbl.columns = ["value"]
-    rec_tbl = _per_item_recall_table(cat.get("per_item", {}), rec_ks, n_cat)
+    cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
+    rec_tbl = _per_item_recall_table(
+        cat.get("per_item", {}), rec_ks, n_cat, macro_metrics=cat_macro_item
+    )
     mapping = (((parameters.get("evaluation", {}) or {})
                .get("product_categories", {}) or {}).get("mapping", {})) or {}
     tables = [map_tbl, rec_tbl]
@@ -311,7 +343,10 @@ def build_category_section(
         table_titles.append("大類組成")
     return ReportSection(
         title="大類層級 Category",
-        description="大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。",
+        description=(
+            "大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。"
+            "recall@k 表頂列「Macro 平均」為各大類等權平均。"
+        ),
         tables=tables,
         table_titles=table_titles,
     )
@@ -325,10 +360,19 @@ def build_segment_section(
     per_segment = metrics.get("per_segment", {})
     if not per_segment:
         return None
-    table = pd.DataFrame(per_segment).T
+    macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
+    rows = (
+        {_MACRO_LABEL: macro_seg, **per_segment}
+        if macro_seg
+        else dict(per_segment)
+    )
+    table = pd.DataFrame(rows).T
     return ReportSection(
         title="分群 Per-Segment",
-        description="per-query 指標依 segment 切分。",
+        description=(
+            "per-query 指標依 segment 切分。"
+            "頂列「Macro 平均」為各 segment 等權平均。"
+        ),
         tables=[table],
         table_titles=["per-segment 指標"],
     )
@@ -404,6 +448,8 @@ _GLOSSARY = [
      "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
      "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
+    ("Macro 平均",
+     "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),
     ("base rate", "母體正樣本率"),
 ]
 
