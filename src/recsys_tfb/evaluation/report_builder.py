@@ -123,7 +123,7 @@ def build_primary_map_section(
     n_prod = _n_products(metrics)
     for fam in ("map", "precision", "ndcg", "recall"):
         rows[fam] = {
-            f"{fam}@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+            f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
     table = pd.DataFrame(rows).T

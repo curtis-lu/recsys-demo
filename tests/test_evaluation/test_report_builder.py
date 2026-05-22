@@ -52,9 +52,10 @@ def test_dataset_overview_section_tables():
 
 def test_primary_map_section_slices_k():
     s = rb.build_primary_map_section(_metrics(), _params())
-    cols = list(s.tables[0].columns) + list(s.tables[0].index)
-    joined = " ".join(map(str, cols))
-    assert "map@1" in joined and "map@3" in joined
+    # families on the row index, @k slices as columns (one set shared by all)
+    assert set(s.tables[0].index) == {"map", "precision", "ndcg", "recall"}
+    cols = " ".join(map(str, s.tables[0].columns))
+    assert "@1" in cols and "@3" in cols
 
 
 def test_guardrail_section_renames_hitrate_and_has_heatmap():
