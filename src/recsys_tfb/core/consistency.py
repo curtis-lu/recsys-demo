@@ -48,6 +48,10 @@ Layer 1 — config-static (implemented here; aggregated by
 * A9 — a ``training.sample_weights`` key references a product value absent
   from ``schema.categorical_values[item]``. Predicate:
   ``weight_unknown_items`` (product-only check, mirrors A5).
+* A10 — an ``evaluation.segment_columns`` entry has no ``evaluation.
+  segment_sources`` entry providing it (matching ``segment_column``); the
+  per-segment report section would silently never render. Predicate:
+  ``segment_columns_without_source``.
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2–B3 deferred):
 
@@ -353,6 +357,22 @@ def weight_unknown_items(parameters: dict) -> list[str]:
     return sorted(bad)
 
 
+def segment_columns_without_source(parameters: dict) -> list[str]:
+    """evaluation.segment_columns entries with no providing segment_source (A10).
+
+    Every column in ``evaluation.segment_columns`` must be delivered by some
+    ``evaluation.segment_sources`` entry's ``segment_column``. Otherwise the
+    metric layer silently produces no per_segment results and the report
+    drops the per-segment section without warning. Returns sorted offending
+    columns; empty list means OK.
+    """
+    ev = parameters.get("evaluation", {}) or {}
+    seg_cols = ev.get("segment_columns", []) or []
+    sources = (ev.get("segment_sources", {}) or {}).values()
+    provided = {(cfg or {}).get("segment_column") for cfg in sources}
+    return sorted(c for c in seg_cols if c not in provided)
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -407,6 +427,17 @@ def validate_config_consistency(parameters: dict) -> None:
         
     for msg in search_space_errors(parameters):
         errors.append(msg)
+
+    seg_no_src = segment_columns_without_source(parameters)
+    if seg_no_src:
+        errors.append(
+            f"evaluation.segment_columns entries {seg_no_src} have no "
+            f"evaluation.segment_sources entry providing them (no "
+            f"segment_source has a matching segment_column). The per-segment "
+            f"report section would silently never render. Add a "
+            f"segment_sources entry for each, or remove them from "
+            f"segment_columns."
+        )
 
     if errors:
         raise ConfigConsistencyError(
