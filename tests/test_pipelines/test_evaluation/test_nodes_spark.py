@@ -331,3 +331,77 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
 
     with pytest.raises(ValueError, match="snap_date not configured"):
         prepare_eval_data(predictions, labels, parameters)
+
+
+class TestComputeBaselineMetrics:
+    """compute_baseline_metrics: slim baseline metrics from eval_predictions."""
+
+    @staticmethod
+    def _parameters(baseline_section=True):
+        return {
+            "schema": {
+                "columns": {
+                    "time": "snap_date",
+                    "entity": ["cust_id"],
+                    "item": "prod_name",
+                    "label": "label",
+                    "score": "score",
+                    "rank": "rank",
+                },
+            },
+            "evaluation": {
+                "k_values": [1, 2, 3],
+                "baseline": {"lookback_months": 12},
+                "report": {"sections": {"baseline": baseline_section}},
+            },
+        }
+
+    @staticmethod
+    def _eval_predictions(spark):
+        import pandas as pd
+        return spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 6,
+            "cust_id": ["c1", "c1", "c1", "c2", "c2", "c2"],
+            "prod_name": ["A", "B", "C", "A", "B", "C"],
+            "label": [1, 0, 1, 0, 1, 0],
+            "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3],
+            "rank": [1, 2, 3, 3, 1, 2],
+        }))
+
+    @staticmethod
+    def _label_table(spark):
+        import pandas as pd
+        rows = []
+        for i in range(3):
+            rows.append({"snap_date": "2024-06-30", "cust_id": f"h{i}",
+                         "prod_name": "A", "label": 1})
+            rows.append({"snap_date": "2024-06-30", "cust_id": f"h{i}",
+                         "prod_name": "B", "label": 1 if i < 1 else 0})
+            rows.append({"snap_date": "2024-06-30", "cust_id": f"h{i}",
+                         "prod_name": "C", "label": 0})
+        return spark.createDataFrame(pd.DataFrame(rows))
+
+    def test_returns_overall_and_per_item(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            compute_baseline_metrics,
+        )
+
+        result = compute_baseline_metrics(
+            self._eval_predictions(spark),
+            self._label_table(spark),
+            self._parameters(),
+        )
+        assert set(result.keys()) == {"overall", "per_item"}
+        assert "A" in result["per_item"]
+
+    def test_returns_none_when_section_disabled(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            compute_baseline_metrics,
+        )
+
+        result = compute_baseline_metrics(
+            self._eval_predictions(spark),
+            self._label_table(spark),
+            self._parameters(baseline_section=False),
+        )
+        assert result is None
