@@ -57,6 +57,34 @@ def prepare_eval_data(
     logger.info("Filtering predictions to model_version=%s", model_version)
     ranked_predictions = ranked_predictions.filter(F.col("model_version") == model_version)
 
+    # Filter predictions to the configured evaluation snap_date. evaluation.
+    # snap_date is an ISO date string (YYYY-MM-DD); the snap_date partition
+    # column on ranked_predictions / training_eval_predictions is STRING, so
+    # .cast("string") is a no-op here and stays correct if it is ever DATE.
+    # Applies to both pipeline modes (this node serves monitoring and
+    # --post-training). Fails loud — never silently evaluates the whole table.
+    snap_date = str(eval_params.get("snap_date") or "").strip()
+    if not snap_date:
+        raise ValueError(
+            "evaluation.snap_date not configured. Set evaluation.snap_date "
+            "(ISO YYYY-MM-DD) in conf/base/parameters_evaluation.yaml."
+        )
+    logger.info("Filtering predictions to snap_date=%s", snap_date)
+    predictions_at_snap = ranked_predictions.filter(
+        F.col(time_col).cast("string") == snap_date
+    )
+    if predictions_at_snap.isEmpty():
+        available = sorted(
+            str(r[time_col])
+            for r in ranked_predictions.select(time_col).distinct().collect()
+        )
+        raise ValueError(
+            f"No predictions found for evaluation.snap_date={snap_date!r} "
+            f"(model_version={model_version}). snap_dates present in "
+            f"predictions: {available}"
+        )
+    ranked_predictions = predictions_at_snap
+
     # Filter labels to snap_dates in predictions
     pred_snap_dates = ranked_predictions.select(time_col).distinct()
     labels = labels.join(pred_snap_dates, on=time_col, how="inner")

@@ -105,7 +105,7 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
             },
         },
         "model_version": "v1",
-        "evaluation": {},
+        "evaluation": {"snap_date": "2025-01-31"},
     }
 
     result = prepare_eval_data(predictions, labels, parameters)
@@ -158,7 +158,7 @@ def test_prepare_eval_data_preserves_existing_rank_column(spark):
             },
         },
         "model_version": "v1",
-        "evaluation": {},
+        "evaluation": {"snap_date": "2025-01-31"},
     }
 
     result = prepare_eval_data(predictions, labels, parameters).toPandas()
@@ -214,7 +214,7 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
             },
         },
         "model_version": "v1",
-        "evaluation": {},
+        "evaluation": {"snap_date": "2025-01-31"},
     }
 
     result = prepare_eval_data(predictions, labels, parameters)
@@ -231,3 +231,103 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
     assert by_prod["B"] == 0
     # Segment column from label_table still flows through the join.
     assert set(result_pdf["cust_segment_typ"]) == {"mass"}
+
+
+def test_prepare_eval_data_filters_to_configured_snap_date(spark):
+    """prepare_eval_data keeps only rows at evaluation.snap_date, dropping the
+    other snapshots that share the same model_version in the table."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "snap_date": ["2025-01-31", "2025-01-31", "2025-02-28", "2025-02-28"],
+        "prod_name": ["A", "B", "A", "B"],
+        "score": [0.9, 0.1, 0.2, 0.8],
+        "rank": [1, 2, 2, 1],
+        "model_version": ["v1"] * 4,
+    })
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "snap_date": ["2025-01-31", "2025-01-31", "2025-02-28", "2025-02-28"],
+        "prod_name": ["A", "B", "A", "B"],
+        "label": [1, 0, 0, 1],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+    parameters = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+        "model_version": "v1",
+        "evaluation": {"snap_date": "2025-01-31"},
+    }
+
+    result = prepare_eval_data(predictions, labels, parameters).toPandas()
+    assert set(result["snap_date"]) == {"2025-01-31"}
+    assert len(result) == 2
+
+
+def test_prepare_eval_data_raises_when_snap_date_absent(spark):
+    """When evaluation.snap_date matches no predictions row, prepare_eval_data
+    raises ValueError and the message names the snap_dates actually present."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31", "2025-01-31"],
+        "prod_name": ["A", "B"],
+        "score": [0.9, 0.1],
+        "rank": [1, 2],
+        "model_version": ["v1"] * 2,
+    })
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1", "c1"],
+        "snap_date": ["2025-01-31", "2025-01-31"],
+        "prod_name": ["A", "B"],
+        "label": [1, 0],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+    parameters = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+        "model_version": "v1",
+        "evaluation": {"snap_date": "2099-12-31"},
+    }
+
+    with pytest.raises(ValueError, match="2025-01-31"):
+        prepare_eval_data(predictions, labels, parameters)
+
+
+def test_prepare_eval_data_raises_when_snap_date_unset(spark):
+    """When evaluation.snap_date is not configured, prepare_eval_data raises
+    ValueError rather than silently evaluating the whole table."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    predictions_pdf = pd.DataFrame({
+        "cust_id": ["c1"], "snap_date": ["2025-01-31"], "prod_name": ["A"],
+        "score": [0.9], "rank": [1], "model_version": ["v1"],
+    })
+    labels_pdf = pd.DataFrame({
+        "cust_id": ["c1"], "snap_date": ["2025-01-31"], "prod_name": ["A"],
+        "label": [1],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+    parameters = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+        "model_version": "v1",
+        "evaluation": {},
+    }
+
+    with pytest.raises(ValueError, match="snap_date not configured"):
+        prepare_eval_data(predictions, labels, parameters)
