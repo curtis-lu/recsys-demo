@@ -18,9 +18,17 @@ def _metrics():
                     "map@10": 0.7, "precision@1": 0.4, "ndcg@1": 0.55,
                     "recall@1": 0.3},
         "per_item": {"A": {"hit_rate@1": 0.2, "hit_rate@2": 0.4,
-                           "mean_pos": 3.0},
+                           "mean_pos": 3.0,
+                           "map_attr@1": 0.5, "map_attr@3": 0.6,
+                           "map_attr@2": 0.55,
+                           "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5,
+                           "ndcg_attr@2": 0.48},
                      "B": {"hit_rate@1": 0.1, "hit_rate@2": 0.3,
-                           "mean_pos": 5.0}},
+                           "mean_pos": 5.0,
+                           "map_attr@1": 0.3, "map_attr@3": 0.35,
+                           "map_attr@2": 0.32,
+                           "ndcg_attr@1": 0.25, "ndcg_attr@3": 0.3,
+                           "ndcg_attr@2": 0.28}},
         "dataset_overview": {
             "totals": {"n_rows": 100, "n_customers": 10, "n_products": 2,
                        "n_snap_dates": 1, "n_positives": 20,
@@ -159,3 +167,28 @@ def test_category_section_omits_composition_when_no_mapping():
     p = _params()  # _params() has no product_categories.mapping
     s = rb.build_category_section(m, p)
     assert "大類組成" not in s.table_titles
+
+
+def test_per_item_attr_section_built():
+    s = rb.build_per_item_attr_section(_metrics(), _params())
+    assert s is not None
+    assert len(s.tables) == 2 and len(s.figures) == 2
+    map_tbl = s.tables[0]
+    assert set(map_tbl.index) == {"A", "B"}
+    cols = " ".join(map(str, map_tbl.columns))
+    assert "map_attr@1" in cols and "map_attr@3" in cols
+    ndcg_cols = " ".join(map(str, s.tables[1].columns))
+    assert "ndcg_attr@1" in ndcg_cols
+
+
+def test_per_item_attr_section_off():
+    p = _params()
+    p["evaluation"]["report"].setdefault("sections", {})["per_item_attr"] = False
+    assert rb.build_per_item_attr_section(_metrics(), p) is None
+
+
+def test_per_item_attr_heatmap_autoscale():
+    s = rb.build_per_item_attr_section(_metrics(), _params())
+    for fig in s.figures:
+        hm = fig.data[0]
+        assert hm.zmin is None and hm.zmax is None

@@ -233,6 +233,49 @@ def build_guardrail_recall_section(
     )
 
 
+def build_per_item_attr_section(
+    metrics: dict, parameters: dict
+) -> ReportSection | None:
+    if not _section_on(parameters, "per_item_attr"):
+        return None
+    per_item = metrics.get("per_item", {})
+    disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
+    ks = _resolve_display_k(
+        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
+    )
+    map_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "map_attr", "map_attr@{k}"
+    )
+    ndcg_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
+    )
+    map_fig = _per_item_heatmap(
+        map_tbl, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        "per-item map_attr@k 色階",
+    )
+    ndcg_fig = _per_item_heatmap(
+        ndcg_tbl, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        "per-item ndcg_attr@k 色階",
+    )
+    return ReportSection(
+        title="per_item 歸因 Attribution（細產品）",
+        description=(
+            "每個產品對主指標 mAP@k / nDCG@k 各貢獻多少。算法：對每筆"
+            "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
+            "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
+            "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
+            "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
+            "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
+            "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
+            "換成 log 折扣的 ndcg_contrib@k。"
+        ),
+        figures=[map_fig, ndcg_fig],
+        tables=[map_tbl, ndcg_tbl],
+        table_titles=["per-item map_attr@k", "per-item ndcg_attr@k"],
+    )
+
+
 def build_category_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -380,6 +423,7 @@ def assemble_report(
         build_dataset_overview_section(metrics, parameters),
         build_primary_map_section(metrics, parameters),
         build_guardrail_recall_section(metrics, parameters),
+        build_per_item_attr_section(metrics, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),
