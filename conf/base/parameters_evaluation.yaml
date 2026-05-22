@@ -1,5 +1,5 @@
 evaluation:
-  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the baselines
+  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the evaluation
   # pipeline compares it against the DATE-typed snap_date column cast to string
   # (which yields YYYY-MM-DD). The evaluation output path normalises it via
   # .replace("-", "") so it still produces a clean YYYYMMDD/ directory.
@@ -43,10 +43,8 @@ evaluation:
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]
 
-  # Baseline configuration
+  # Baseline configuration — popularity baseline lookback window (months).
   baseline:
-    type: global_popularity
-    segment_column: cust_segment_typ
     lookback_months: 12
 
   # Report generation options

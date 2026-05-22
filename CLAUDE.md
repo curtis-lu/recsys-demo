@@ -78,7 +78,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 | Pipeline | `SPARK_CONF_DIR` | spark.master | 為什麼 |
 |---|---|---|---|
-| `dataset` / `inference` / `evaluation` / `baselines` / `*_etl` | `~/dev-cluster/client-template/spark`（client-env.sh 預設） | `spark://localhost:7077` | 寫 Hive managed table 走 HDFS，需要 worker container |
+| `dataset` / `inference` / `evaluation` / `*_etl` | `~/dev-cluster/client-template/spark`（client-env.sh 預設） | `spark://localhost:7077` | 寫 Hive managed table 走 HDFS，需要 worker container |
 | `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | LightGBM 是 driver 單機訓練，distributed cluster 沒幫助；model artifact 駐留 driver-local；cache 由 cache node 自己從 HDFS 拉；evaluate_model 將 test-set 預測寫入 Hive `ml_recsys.training_eval_predictions`（hive-site.xml 已 symlink 進 `client-template-local/spark/`） |
 
 執行：

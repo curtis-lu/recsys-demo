@@ -100,7 +100,7 @@
 | `category` | `build_category_section` | product 大類平行評估（見下）；同時受 `product_categories.enabled` 控制 |
 | `per_segment` | `build_segment_section` | 依 `segment_columns` / `segment_sources` 分群 |
 | `diagnostics` | `build_diagnostics_section` | 分數分佈、校準曲線（`include_calibration`、`n_calibration_bins`）|
-| `baseline` | `build_baseline_section` | 與 `baselines` pipeline 產物的 per-item recall delta（無 baseline 時自動略過）|
+| `baseline` | `build_baseline_section` | 與 popularity baseline（evaluation pipeline 內 `compute_baseline_metrics` 計算）的 overall mAP 與 per-item recall delta（baseline section 關閉時自動略過）|
 
 另含 headline 與 glossary 段。
 
@@ -118,5 +118,5 @@
 | `segment_columns` | labels 內既有的分群欄（如 `cust_segment_typ`）|
 | `segment_sources` | 外部分群來源，依 `key_columns` left-join 進 labels（`prepare_eval_data`）|
 | `product_categories` | 大類平行評估的 mapping 與 `unmapped` 策略 |
-| `baseline` | `baselines` pipeline 的 popularity 基準型別與 lookback |
+| `baseline` | popularity baseline 的 `lookback_months` 歷史窗口（月）|
 | `report.sections` / `report.display` / `report.diagnostics` | 報表分段開關、各段顯示的 K、診斷圖選項 |

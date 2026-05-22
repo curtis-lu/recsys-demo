@@ -1,173 +1,104 @@
-"""Baseline generators for model comparison.
+"""Popularity baseline for evaluation — Spark.
 
-Provides global and segment popularity baselines that output DataFrames
-matching the ranked_predictions schema (snap_date, cust_id, prod_name, score, rank).
+Replaces each ``eval_predictions`` row's model score with the product's
+historical purchase count (sum of positive labels in a pre-snap_date
+window), yielding a global-popularity ranking aligned row-for-row with the
+model's evaluation set. See
+``docs/superpowers/specs/2026-05-22-baseline-evaluation-alignment-design.md``.
 """
 
 import logging
 
 import pandas as pd
+from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 
 logger = logging.getLogger(__name__)
 
 
-def generate_global_popularity_baseline(
-    label_table: pd.DataFrame,
-    snap_date: str,
-    customer_ids: list[str],
-    products: list[str] | None = None,
-    parameters: dict | None = None,
-) -> pd.DataFrame:
-    """Generate a global popularity baseline.
+def compute_purchase_counts(
+    label_table: SparkDataFrame,
+    snap_dates: list[str],
+    lookback_months: int,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Per ``(snap_date, prod_name)`` historical purchase count.
 
-    Computes overall positive rate per product from historical data (before snap_date)
-    and assigns these rates as scores for every customer.
+    For each ``S`` in ``snap_dates``, count ``sum(label)`` grouped by item
+    over ``label_table`` rows whose time falls in
+    ``[S - lookback_months, S)``. When a window is empty, fall back to the
+    full table (with a warning — the baseline may then have leakage).
 
-    Args:
-        label_table: DataFrame with columns [snap_date, cust_id, prod_name, label].
-        snap_date: Target snap_date (YYYYMMDD format). Only data before this date is used.
-        customer_ids: List of customer IDs to generate baseline for.
-        products: List of product codes. If None, derived from label_table.
-
-    Returns:
-        DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
+    Returns a DataFrame with columns ``(time_col, item_col, score_col)``
+    where ``score_col`` holds the count and ``time_col`` is the string ``S``.
     """
-    schema = get_schema(parameters or {})
+    if not snap_dates:
+        raise ValueError(
+            "compute_purchase_counts requires a non-empty snap_dates list"
+        )
+
+    schema = get_schema(parameters)
     time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
-    rank_col = schema["rank"]
-    group_cols = [time_col] + entity_cols
 
-    snap_ts = pd.Timestamp(snap_date)
-    label_snap = pd.to_datetime(label_table[time_col])
-    historical = label_table[label_snap < snap_ts]
-
-    if len(historical) == 0:
-        logger.warning(
-            "No historical data before snap_date=%s. Using all available data. "
-            "Baseline may have leakage.",
-            snap_date,
+    ts = F.to_date(F.col(time_col))
+    per_snap: list[SparkDataFrame] = []
+    for s in snap_dates:
+        upper = pd.Timestamp(s)
+        lower = upper - pd.DateOffset(months=lookback_months)
+        window = label_table.filter(
+            (ts >= F.lit(str(lower.date())))
+            & (ts < F.lit(str(upper.date())))
         )
-        historical = label_table
+        if window.limit(1).count() == 0:
+            logger.warning(
+                "No historical data in [%s, %s) for snap_date=%s; falling "
+                "back to full label_table — baseline may have leakage.",
+                lower.date(), upper.date(), s,
+            )
+            window = label_table
+        counts = (
+            window.groupBy(item_col)
+            .agg(F.sum(F.col(label_col)).cast("double").alias(score_col))
+            .withColumn(time_col, F.lit(str(upper.date())))
+        )
+        per_snap.append(counts.select(time_col, item_col, score_col))
 
-    # Compute positive rate per product
-    rates = historical.groupby(item_col)[label_col].mean()
-
-    if products is None:
-        products = sorted(rates.index.tolist())
-
-    # Match snap_date dtype to label_table for downstream merge compatibility
-    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table[time_col]) else snap_date
-
-    # Build baseline: same score for all customers
-    rows = []
-    for cust_id in customer_ids:
-        for prod in products:
-            score = float(rates.get(prod, 0.0))
-            row = {
-                time_col: snap_value,
-                item_col: prod,
-                score_col: score,
-            }
-            # For single entity, use the first entity column
-            row[entity_cols[0]] = cust_id
-            rows.append(row)
-
-    baseline = pd.DataFrame(rows)
-
-    # Rank by descending score within each customer
-    baseline[rank_col] = baseline.groupby(group_cols)[score_col].rank(
-        method="first", ascending=False
-    ).astype(int)
-
-    return baseline
+    result = per_snap[0]
+    for df in per_snap[1:]:
+        result = result.unionByName(df)
+    return result
 
 
-def generate_segment_popularity_baseline(
-    label_table: pd.DataFrame,
-    snap_date: str,
-    customer_ids: list[str],
-    segment_column: str = "cust_segment_typ",
-    customer_segments: pd.Series | None = None,
-    products: list[str] | None = None,
-    parameters: dict | None = None,
-) -> pd.DataFrame:
-    """Generate a segment-level popularity baseline.
+def build_baseline_frame(
+    eval_predictions: SparkDataFrame,
+    purchase_counts: SparkDataFrame,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Replace ``eval_predictions``' model score with the popularity count.
 
-    Computes positive rate per (segment, product) from historical data and
-    assigns segment-specific scores to each customer.
-
-    Args:
-        label_table: DataFrame with columns [snap_date, cust_id, prod_name, label, cust_segment_typ].
-        snap_date: Target snap_date (YYYYMMDD format).
-        customer_ids: List of customer IDs.
-        segment_column: Column name for customer segment.
-        customer_segments: Series mapping cust_id → segment. If None, derived from label_table.
-        products: List of product codes. If None, derived from label_table.
-
-    Returns:
-        DataFrame with columns [snap_date, cust_id, prod_name, score, rank].
+    Drops the model's ``score`` (and ``rank`` / ``model_version`` if present),
+    casts ``time_col`` to string for a type-safe join, then left-joins the
+    per-``(snap_date, prod_name)`` count as the new ``score``. Products with
+    no count get ``score = 0``.
     """
-    schema = get_schema(parameters or {})
+    schema = get_schema(parameters)
     time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
-    label_col = schema["label"]
     score_col = schema["score"]
     rank_col = schema["rank"]
-    group_cols = [time_col] + entity_cols
 
-    snap_ts = pd.Timestamp(snap_date)
-    label_snap = pd.to_datetime(label_table[time_col])
-    historical = label_table[label_snap < snap_ts]
-
-    if len(historical) == 0:
-        logger.warning(
-            "No historical data before snap_date=%s. Using all available data. "
-            "Baseline may have leakage.",
-            snap_date,
-        )
-        historical = label_table
-
-    # Compute positive rate per (segment, product)
-    rates = historical.groupby([segment_column, item_col])[label_col].mean()
-
-    if products is None:
-        products = sorted(historical[item_col].unique().tolist())
-
-    # Match snap_date dtype to label_table for downstream merge compatibility
-    snap_value = snap_ts if pd.api.types.is_datetime64_any_dtype(label_table[time_col]) else snap_date
-
-    # Build customer → segment mapping
-    if customer_segments is None:
-        seg_map = label_table.drop_duplicates(entity_cols[0]).set_index(entity_cols[0])[segment_column]
-    else:
-        seg_map = customer_segments
-
-    rows = []
-    for cust_id in customer_ids:
-        segment = seg_map.get(cust_id, None)
-        for prod in products:
-            if segment is not None and (segment, prod) in rates.index:
-                score = float(rates.loc[(segment, prod)])
-            else:
-                score = 0.0
-            row = {
-                time_col: snap_value,
-                item_col: prod,
-                score_col: score,
-            }
-            row[entity_cols[0]] = cust_id
-            rows.append(row)
-
-    baseline = pd.DataFrame(rows)
-    baseline[rank_col] = baseline.groupby(group_cols)[score_col].rank(
-        method="first", ascending=False
-    ).astype(int)
-
-    return baseline
+    drop_cols = [
+        c for c in (score_col, rank_col, "model_version")
+        if c in eval_predictions.columns
+    ]
+    base = eval_predictions.drop(*drop_cols).withColumn(
+        time_col, F.to_date(F.col(time_col)).cast("string")
+    )
+    return base.join(
+        F.broadcast(purchase_counts), on=[time_col, item_col], how="left"
+    ).fillna(0, subset=[score_col])

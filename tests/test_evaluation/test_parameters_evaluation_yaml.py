@@ -28,3 +28,8 @@ def test_report_display_and_sections():
     assert rep["display"]["primary_map_k"] == [1, 3, 5, "all"]
     assert rep["display"]["guardrail_recall_k"] == [1, 2, 3, 4, 5]
     assert rep["diagnostics"]["sample_rows"] is None
+
+
+def test_baseline_block_is_lookback_only():
+    cfg = _load()["baseline"]
+    assert cfg == {"lookback_months": 12}

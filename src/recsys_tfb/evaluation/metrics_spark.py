@@ -630,6 +630,54 @@ def _compute_core(
         enriched.unpersist()
 
 
+def compute_overall_per_item(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> dict:
+    """Slim metric bundle: ``overall`` + ``per_item`` only.
+
+    Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
+    skips per-segment, per-item-segment, macro_avg, category collapse, and
+    dataset_overview. Used by the popularity baseline, whose report section
+    consumes only these two keys.
+
+    Returns ``{"overall": {...}, "per_item": {...}}``; both empty when no
+    query has a positive label.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    group_cols = [time_col] + entity_cols
+
+    eval_params = parameters.get("evaluation", {}) or {}
+    k_values_raw = eval_params.get("k_values", [5, "all"])
+    n_products = eval_predictions.select(item_col).distinct().count()
+    k_values = _resolve_k_values(k_values_raw, n_products)
+
+    df = rank_within_query(eval_predictions, group_cols, score_col)
+    df = add_query_total_rel(df, group_cols, label_col)
+    df_with_pos = df.filter(F.col("total_rel") > 0)
+    if df_with_pos.limit(1).count() == 0:
+        logger.warning("No queries with positive labels found")
+        return {"overall": {}, "per_item": {}}
+
+    enriched = add_row_contributions(
+        df_with_pos, group_cols, label_col, k_values
+    ).cache()
+    try:
+        per_query = compute_per_query_metrics(
+            enriched, group_cols, label_col, k_values, carry_cols=[]
+        )
+        overall = aggregate_overall(per_query, k_values)
+        per_item = aggregate_per_item(enriched, [item_col], label_col, k_values)
+        return {"overall": overall, "per_item": per_item}
+    finally:
+        enriched.unpersist()
+
+
 def compute_all_metrics(
     eval_predictions: SparkDataFrame,
     parameters: dict,

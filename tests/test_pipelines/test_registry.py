@@ -25,3 +25,4 @@ class TestPipelineRegistry:
         names = list_pipelines()
         assert "dataset" in names
         assert "training" in names
+        assert "baselines" not in names

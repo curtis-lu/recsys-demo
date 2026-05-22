@@ -158,6 +158,54 @@ def compute_metrics(
     return result
 
 
+def compute_baseline_metrics(
+    eval_predictions: SparkDataFrame,
+    label_table: SparkDataFrame,
+    parameters: dict,
+) -> Optional[dict]:
+    """Popularity-baseline metrics, aligned row-for-row with eval_predictions.
+
+    Re-scores each eval_predictions row with the product's historical
+    purchase count, then runs the slim metrics path (overall + per_item).
+    Returns None when the baseline report section is disabled — the second
+    metrics pass is then skipped entirely.
+    """
+    from recsys_tfb.evaluation.baselines import (
+        build_baseline_frame,
+        compute_purchase_counts,
+    )
+    from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
+
+    eval_params = parameters.get("evaluation", {}) or {}
+    sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
+    if not sections.get("baseline", True):
+        logger.info(
+            "Baseline report section disabled — skipping baseline metrics"
+        )
+        return None
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    lookback_months = (eval_params.get("baseline", {}) or {}).get(
+        "lookback_months", 12
+    )
+
+    snap_dates = [
+        str(r[time_col])
+        for r in eval_predictions.select(time_col).distinct().collect()
+    ]
+    counts = compute_purchase_counts(
+        label_table, snap_dates, lookback_months, parameters
+    )
+    baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
+    metrics = compute_overall_per_item(baseline_frame, parameters)
+    logger.info(
+        "Baseline metrics computed (overall + per_item) for snap_dates=%s",
+        snap_dates,
+    )
+    return metrics
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,

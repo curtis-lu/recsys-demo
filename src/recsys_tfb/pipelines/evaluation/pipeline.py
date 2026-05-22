@@ -14,6 +14,7 @@ def create_pipeline(post_training: bool = False) -> Pipeline:
             training/pipeline.py::create_pipeline(enable_calibration=...).
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_baseline_metrics,
         compute_metrics,
         generate_report,
         prepare_eval_data,
@@ -34,6 +35,11 @@ def create_pipeline(post_training: bool = False) -> Pipeline:
                 compute_metrics,
                 inputs=["eval_predictions", "parameters"],
                 outputs="evaluation_metrics",
+            ),
+            Node(
+                compute_baseline_metrics,
+                inputs=["eval_predictions", "label_table", "parameters"],
+                outputs="baseline_metrics",
             ),
             Node(
                 generate_report,
