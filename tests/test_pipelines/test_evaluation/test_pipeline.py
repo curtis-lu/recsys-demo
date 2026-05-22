@@ -15,7 +15,7 @@ class TestEvaluationPipelineDefault:
         assert "ranked_predictions" in pipeline.inputs
         assert "training_eval_predictions" not in pipeline.inputs
 
-    def test_pipeline_outputs_unchanged(self):
+    def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
             "eval_predictions", "evaluation_metrics",
