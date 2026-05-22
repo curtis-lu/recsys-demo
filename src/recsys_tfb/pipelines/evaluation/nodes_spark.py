@@ -37,14 +37,8 @@ def prepare_eval_data(
     label_col = schema["label"]
 
     eval_params = parameters.get("evaluation", {})
-    segment_sources = eval_params.get("segment_sources", {})
 
     labels = label_table
-
-    # Join external segment sources (single Spark impl; source seam inside).
-    if segment_sources:
-        from recsys_tfb.evaluation.segments import join_segment_sources
-        labels = join_segment_sources(labels, segment_sources)
 
     # Filter predictions to the resolved model_version (resolved upstream by
     # __main__.py via core.versioning.resolve_model_version).
@@ -131,6 +125,14 @@ def prepare_eval_data(
             "(predictions source did not provide it)",
             rank_col,
         )
+
+    # Join segment sources onto the final eval table (Hive-table sources;
+    # source seam inside segments). Done here — not on label_table — so the
+    # label side stays minimal and segment columns are a pure enrichment.
+    segment_sources = eval_params.get("segment_sources", {})
+    if segment_sources:
+        from recsys_tfb.evaluation.segments import join_segment_sources
+        eval_predictions = join_segment_sources(eval_predictions, segment_sources)
 
     logger.info("Eval data prepared via Spark join")
     return eval_predictions
