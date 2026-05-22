@@ -181,7 +181,7 @@ def test_per_item_attr_section_built():
     assert s is not None
     assert len(s.tables) == 2 and len(s.figures) == 2
     map_tbl = s.tables[0]
-    assert set(map_tbl.index) == {"A", "B"}
+    assert set(map_tbl.index) == {"Macro 平均", "A", "B"}
     cols = " ".join(map(str, map_tbl.columns))
     assert "map_attr@1" in cols and "map_attr@3" in cols
     ndcg_cols = " ".join(map(str, s.tables[1].columns))
@@ -225,3 +225,17 @@ def test_guardrail_section_no_macro_when_absent():
     del m["macro_avg"]
     s = rb.build_guardrail_recall_section(m, _params())
     assert "Macro 平均" not in list(s.tables[0].index)
+
+
+def test_per_item_attr_section_has_macro_rows():
+    s = rb.build_per_item_attr_section(_metrics(), _params())
+    map_tbl, ndcg_tbl = s.tables[0], s.tables[1]
+    assert list(map_tbl.index)[0] == "Macro 平均"
+    assert list(ndcg_tbl.index)[0] == "Macro 平均"
+    # map_attr@1 各產品平均 = (0.5 + 0.3) / 2 = 0.4
+    assert map_tbl.loc["Macro 平均", "map_attr@1"] == 0.4
+    # ndcg_attr@1 各產品平均 = (0.45 + 0.25) / 2 = 0.35
+    assert ndcg_tbl.loc["Macro 平均", "ndcg_attr@1"] == 0.35
+    # heatmap 不含 macro 列
+    assert "Macro 平均" not in list(s.figures[0].data[0].y)
+    assert "Macro 平均" not in list(s.figures[1].data[0].y)

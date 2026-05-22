@@ -258,24 +258,34 @@ def build_per_item_attr_section(
     if not _section_on(parameters, "per_item_attr"):
         return None
     per_item = metrics.get("per_item", {})
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
     ks = _resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
-    map_tbl = _per_item_metric_table(
+    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    map_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}"
     )
-    ndcg_tbl = _per_item_metric_table(
+    ndcg_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
     )
     map_fig = _per_item_heatmap(
-        map_tbl, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
         "per-item map_attr@k 色階",
     )
     ndcg_fig = _per_item_heatmap(
-        ndcg_tbl, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        ndcg_tbl_plain, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
         "per-item ndcg_attr@k 色階",
+    )
+    map_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        macro_metrics=macro_item,
+    )
+    ndcg_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        macro_metrics=macro_item,
     )
     return ReportSection(
         title="per_item 歸因 Attribution（細產品）",
@@ -287,7 +297,7 @@ def build_per_item_attr_section(
             "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
             "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
             "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
-            "換成 log 折扣的 ndcg_contrib@k。"
+            "換成 log 折扣的 ndcg_contrib@k。頂列「Macro 平均」為各產品等權平均。"
         ),
         figures=[map_fig, ndcg_fig],
         tables=[map_tbl, ndcg_tbl],
