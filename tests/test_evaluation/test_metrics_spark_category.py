@@ -7,12 +7,14 @@ from recsys_tfb.evaluation import metrics_spark as ms
 
 def _params(enabled=True, unmapped="singleton"):
     return {
-        "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
+        "schema": {
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank",
+            },
             "categorical_values": {"prod_name": [
                 "fund_stock", "fund_bond", "fund_mix", "exchange_fx", "lonely"]},
-        }},
+        },
         "evaluation": {
             "product_categories": {
                 "enabled": enabled, "unmapped": unmapped,
@@ -58,7 +60,7 @@ def _raw(spark):
 
 def test_collapse_to_categories_grain(spark):
     p = _params()
-    p["schema"]["columns"]["categorical_values"]["prod_name"] = [
+    p["schema"]["categorical_values"]["prod_name"] = [
         "fund_stock", "fund_bond", "fund_mix", "exchange_fx", "lonely"]
     collapsed = ms.collapse_to_categories(_raw(spark), p)
     rows = {r["prod_name"]: r for r in collapsed.collect()}

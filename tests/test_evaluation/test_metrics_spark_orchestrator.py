@@ -5,11 +5,14 @@ from recsys_tfb.evaluation import metrics_spark as ms
 
 def _params(categories=True):
     return {
-        "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
+        "schema": {
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank",
+            },
             "categorical_values": {"prod_name": [
-                "fund_stock", "fund_bond", "exchange_fx"]}}},
+                "fund_stock", "fund_bond", "exchange_fx"]},
+        },
         "evaluation": {
             "k_values": [1, "all"],
             "product_categories": {
