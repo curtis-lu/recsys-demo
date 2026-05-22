@@ -192,3 +192,10 @@ def test_per_item_attr_heatmap_autoscale():
     for fig in s.figures:
         hm = fig.data[0]
         assert hm.zmin is None and hm.zmax is None
+
+
+def test_glossary_has_attr_entries():
+    s = rb.build_glossary_section(_params())
+    terms = set(s.tables[0]["指標"])
+    assert "map_attr@k" in terms
+    assert "ndcg_attr@k" in terms

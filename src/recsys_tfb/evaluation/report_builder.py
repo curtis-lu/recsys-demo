@@ -396,6 +396,13 @@ _GLOSSARY = [
     ("recall@k (per-item)", "P(rank(P)≤k | P 為正)，命中事件等權；護欄"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
     ("ndcg@k", "log 折扣排序品質，正規化 [0,1]"),
+    ("map_attr@k",
+     "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
+     "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
+     "是 mAP@k 拆到單一產品的貢獻"),
+    ("ndcg_attr@k",
+     "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
+     "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("base rate", "母體正樣本率"),
 ]

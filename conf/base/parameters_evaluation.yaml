@@ -43,6 +43,7 @@ evaluation:
       dataset_overview: true
       primary_map: true
       guardrail_recall: true
+      per_item_attr: true
       category: true             # also gated by product_categories.enabled
       per_segment: true
       diagnostics: true

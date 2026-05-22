@@ -24,6 +24,7 @@ def test_product_categories_block():
 def test_report_display_and_sections():
     rep = _load()["report"]
     assert rep["sections"]["category"] is True
+    assert rep["sections"]["per_item_attr"] is True
     assert rep["display"]["primary_map_k"] == [1, 3, 5, "all"]
     assert rep["display"]["guardrail_recall_k"] == [1, 2, 3, 4, 5]
     assert rep["diagnostics"]["sample_rows"] is None
