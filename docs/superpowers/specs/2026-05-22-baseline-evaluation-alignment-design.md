@@ -9,10 +9,11 @@
 現況的 baseline 是一條獨立 pipeline（`src/recsys_tfb/pipelines/baselines/`），由
 CLI `python -m recsys_tfb baselines` 觸發，行為與 evaluation pipeline 脫鉤：
 
-1. **snap_date 不對齊** — baseline 讀 `parameters_evaluation.yaml` 的
-   `evaluation.snap_date`（單一 scalar）；但 evaluation pipeline 的
-   `prepare_eval_data` 根本不讀這個值，而是從 predictions 表（post-training 下是
-   `training_eval_predictions`）的實際 snap_date(s) 推導，且可為多個。
+1. **snap_date 對齊靠人工而非結構** — baseline 與 evaluation 的 `prepare_eval_data`
+   各自獨立讀 `parameters_evaluation.yaml` 的 `evaluation.snap_date`；沒有結構性
+   機制保證 baseline 評的 snap_date 就是 evaluation 實際評的那個 —— 一旦 evaluation
+   端改動（例如 `--post-training` 改以 `training_eval_predictions` 的實際資料為準），
+   baseline 不會跟著動。
 2. **分數語意** — baseline 用 `mean(label)`（正樣本率）當分數。需求是改用
    **產品申購數**（正樣本筆數）排序。
 3. **客戶清單不對齊** — baseline 取「snap_date 當期 label 的 distinct cust_id」；

@@ -110,13 +110,7 @@
 
 ---
 
-## 5. Baselines / Evaluation
-
-### `baselines`（`python -m recsys_tfb baselines --env production`）
-
-- 用途：產生 popularity 類基準（`global_popularity` / `segment_popularity`），供 evaluation 報表與模型做比較。
-- 由 `evaluation.baseline` 設定驅動；以 `evaluation.snap_date` 之前的 `label_table` 歷史算正例率（無歷史資料則 fallback 用全部、並 warn 可能 leakage）。
-- 產出 `baseline_predictions` / `baseline_metrics`，寫 `data/baselines/<snap_date>/` 並更新 `baselines/latest`。
+## 5. Evaluation
 
 ### `evaluation`（`python -m recsys_tfb evaluation --env production [--model-version X] [--post-training]`）
 
@@ -126,7 +120,7 @@
   - `--post-training`：讀 `training_eval_predictions`（training 產出）；該表不存 `rank`，`prepare_eval_data` 會用 `rank_within_query` 即時補上 `rank` 欄。
 - `prepare_eval_data` 把預測過濾到解析出的 `model_version`，與 `label_table`（含 `evaluation.segment_sources` 外部分群來源 left join）依 identity 欄 join。
 - `compute_metrics` → `evaluation_metrics`；`generate_report` → `data/evaluation/<model_version>/<snap_date>/report.html`。
-- `baseline_metrics` 為選用：若 catalog 沒有，CLI 注入 `MemoryDataset(None)`，報表跳過 baseline 比較段。
+- `compute_baseline_metrics`：popularity baseline —— 把 `eval_predictions` 每列的 `score` 換成該產品在 `evaluation.snap_date` 之前 `evaluation.baseline.lookback_months` 窗口的申購數（`label_table` 的 `sum(label)`；無歷史則 fallback 用全部、warn 可能 leakage），再算 slim 指標（`overall` + `per_item`）餵報表 baseline 比較段；`report.sections.baseline=false` 時回傳 `None`、該段略過。
 - 指標定義、輸出格式（`overall_map` / `per_item_map_attr` / `@K` / `_attr@K`）、報表分段與設定見 [metrics.md](metrics.md)；概念語意見 [metrics_concept_map.html](metrics_concept_map.html)。
 
 ---

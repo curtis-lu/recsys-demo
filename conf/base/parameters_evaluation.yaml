@@ -1,5 +1,5 @@
 evaluation:
-  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the baselines
+  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the evaluation
   # pipeline compares it against the DATE-typed snap_date column cast to string
   # (which yields YYYY-MM-DD). The evaluation output path normalises it via
   # .replace("-", "") so it still produces a clean YYYYMMDD/ directory.

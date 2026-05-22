@@ -18,7 +18,7 @@
 
 | # | 入口 | 啟動方式 | Driver 在哪 | Executor 在哪 | 典型使用者 |
 |---|---|---|---|---|---|
-| **A** | Pipeline（standalone） | `python -m recsys_tfb <p> --env production` | host venv | dev-cluster `spark-worker` container | `dataset` / `inference` / `evaluation` / `baselines` / `*_etl` |
+| **A** | Pipeline（standalone） | `python -m recsys_tfb <p> --env production` | host venv | dev-cluster `spark-worker` container | `dataset` / `inference` / `evaluation` / `*_etl` |
 | **B** | Pipeline（local[*]） | 同上 + `export SPARK_CONF_DIR=…client-template-local/spark` | host venv | 同 driver JVM（local[*]） | `training` |
 | **C** | container 內 Spark CLI | `docker exec devcluster-spark-master /opt/spark/bin/spark-sql --master local[1] -e "..."` | container | container | metastore 健檢、ad-hoc SQL、`SHOW TABLES IN ml_recsys` |
 | **D** | 純 stdlib admin script | `scripts/dev_admin.sh scripts/<x>.py` | transient `devcluster/pyspark` container | 同 container（local[2]） | `setup_hive_dev.py`、`nuke_ml_recsys.py` |
