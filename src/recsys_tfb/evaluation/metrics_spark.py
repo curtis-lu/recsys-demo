@@ -105,10 +105,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
 
     schema = get_schema(parameters)
     item_col = schema["item"]
-    known = list(
-        (parameters.get("schema", {}).get("columns", {})
-         .get("categorical_values", {}) or {}).get(item_col, [])
-    )
+    known = list((schema.get("categorical_values", {}) or {}).get(item_col, []))
     known_set = set(known)
 
     mapping: dict[str, str] = {}
