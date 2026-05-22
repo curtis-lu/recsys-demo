@@ -1,7 +1,71 @@
 import os
+import re
 from pathlib import Path
 
 import yaml
+
+
+class ConfigEnvError(ValueError):
+    """Raised when a required ${env.NAME} placeholder has no environment variable set."""
+
+
+_ENV_PLACEHOLDER = re.compile(r"\$\{env\.([A-Za-z_]\w*)(\|([^}]*))?\}")
+
+
+def _resolve_env_string(value: str, loc: str, errors: list[str]) -> str:
+    """Resolve every ${env.NAME[|default]} placeholder in one string.
+
+    Missing required variable (no ``|default``) appends an error to ``errors``
+    and leaves the placeholder text in place; the caller raises once collected.
+    """
+
+    def repl(match: re.Match) -> str:
+        name = match.group(1)
+        has_default = match.group(2) is not None
+        default = match.group(3)
+        env_value = os.environ.get(name)
+        if env_value is not None:
+            return env_value
+        if has_default:
+            return default
+        errors.append(
+            f"  {loc} : 環境變數 '{name}' 未設定\n"
+            f"      (如需預設值請改寫 ${{env.{name}|<default>}})"
+        )
+        return match.group(0)
+
+    return _ENV_PLACEHOLDER.sub(repl, value)
+
+
+def _resolve_env(config: dict) -> dict:
+    """Resolve ${env.NAME} placeholders across the whole config tree.
+
+    Walks every parameters/catalog file. Collects all missing-required-variable
+    errors and raises ConfigEnvError once (collect-all). Non-string values pass
+    through unchanged. Only the ``env.`` prefix is touched — ``${hive.db}`` and
+    other placeholder families are left for their own resolvers.
+    """
+    errors: list[str] = []
+
+    def walk(obj, stem: str, keypath: str):
+        if isinstance(obj, dict):
+            return {
+                k: walk(v, stem, f"{keypath}.{k}" if keypath else k)
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [walk(v, stem, f"{keypath}[{i}]") for i, v in enumerate(obj)]
+        if isinstance(obj, str):
+            loc = f"{stem}.yaml -> {keypath}" if keypath else f"{stem}.yaml"
+            return _resolve_env_string(obj, loc, errors)
+        return obj
+
+    resolved = {stem: walk(data, stem, "") for stem, data in config.items()}
+    if errors:
+        raise ConfigEnvError(
+            f"{len(errors)} 個必填環境變數未設定:\n" + "\n".join(errors)
+        )
+    return resolved
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -79,6 +143,7 @@ class ConfigLoader:
             base = base_config.get(stem, {})
             env = env_config.get(stem, {})
             self._config[stem] = _deep_merge(base, env)
+        self._config = _resolve_env(self._config)
 
     def get_catalog_config(
         self, runtime_params: dict[str, str] | None = None
