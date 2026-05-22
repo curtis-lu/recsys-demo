@@ -259,3 +259,25 @@ def test_segment_section_no_macro_when_absent():
     # macro_avg 無 by_segment key
     s = rb.build_segment_section(m, _params())
     assert "Macro 平均" not in list(s.tables[0].index)
+
+
+def test_category_section_recall_table_has_macro_row():
+    m = _metrics()
+    m["category"] = {
+        "overall": {"map@1": 0.7},
+        "per_item": {
+            "fund": {"hit_rate@1": 0.5, "hit_rate@2": 0.6, "mean_pos": 2.0},
+            "loan": {"hit_rate@1": 0.3, "hit_rate@2": 0.4, "mean_pos": 4.0},
+        },
+        "macro_avg": {
+            "by_item": {
+                "hit_rate@1": 0.4, "hit_rate@2": 0.5, "mean_pos": 3.0,
+            },
+        },
+        "dataset_overview": m["dataset_overview"],
+    }
+    s = rb.build_category_section(m, _params())
+    # tables[1] 為大類 per-item recall@k 表
+    rec_tbl = s.tables[1]
+    assert list(rec_tbl.index)[0] == "Macro 平均"
+    assert rec_tbl.loc["Macro 平均", "recall@1 (per-item)"] == 0.4

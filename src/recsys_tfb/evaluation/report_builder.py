@@ -326,7 +326,10 @@ def build_category_section(
           for k in map_ks}]
     ).T
     map_tbl.columns = ["value"]
-    rec_tbl = _per_item_recall_table(cat.get("per_item", {}), rec_ks, n_cat)
+    cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
+    rec_tbl = _per_item_recall_table(
+        cat.get("per_item", {}), rec_ks, n_cat, macro_metrics=cat_macro_item
+    )
     mapping = (((parameters.get("evaluation", {}) or {})
                .get("product_categories", {}) or {}).get("mapping", {})) or {}
     tables = [map_tbl, rec_tbl]
@@ -340,7 +343,10 @@ def build_category_section(
         table_titles.append("大類組成")
     return ReportSection(
         title="大類層級 Category",
-        description="大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。",
+        description=(
+            "大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。"
+            "recall@k 表頂列「Macro 平均」為各大類等權平均。"
+        ),
         tables=tables,
         table_titles=table_titles,
     )
