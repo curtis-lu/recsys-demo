@@ -354,10 +354,19 @@ def build_segment_section(
     per_segment = metrics.get("per_segment", {})
     if not per_segment:
         return None
-    table = pd.DataFrame(per_segment).T
+    macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
+    rows = (
+        {_MACRO_LABEL: macro_seg, **per_segment}
+        if macro_seg
+        else dict(per_segment)
+    )
+    table = pd.DataFrame(rows).T
     return ReportSection(
         title="分群 Per-Segment",
-        description="per-query 指標依 segment 切分。",
+        description=(
+            "per-query 指標依 segment 切分。"
+            "頂列「Macro 平均」為各 segment 等權平均。"
+        ),
         tables=[table],
         table_titles=["per-segment 指標"],
     )

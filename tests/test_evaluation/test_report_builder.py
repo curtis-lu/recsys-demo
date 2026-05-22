@@ -239,3 +239,23 @@ def test_per_item_attr_section_has_macro_rows():
     # heatmap 不含 macro 列
     assert "Macro 平均" not in list(s.figures[0].data[0].y)
     assert "Macro 平均" not in list(s.figures[1].data[0].y)
+
+
+def test_segment_section_has_macro_row():
+    m = _metrics()
+    m["per_segment"] = {
+        "young": {"map@1": 0.6, "ndcg@1": 0.7},
+        "old": {"map@1": 0.4, "ndcg@1": 0.5},
+    }
+    m["macro_avg"]["by_segment"] = {"map@1": 0.5, "ndcg@1": 0.6}
+    s = rb.build_segment_section(m, _params())
+    assert list(s.tables[0].index)[0] == "Macro 平均"
+    assert s.tables[0].loc["Macro 平均", "map@1"] == 0.5
+
+
+def test_segment_section_no_macro_when_absent():
+    m = _metrics()
+    m["per_segment"] = {"young": {"map@1": 0.6}}
+    # macro_avg 無 by_segment key
+    s = rb.build_segment_section(m, _params())
+    assert "Macro 平均" not in list(s.tables[0].index)
