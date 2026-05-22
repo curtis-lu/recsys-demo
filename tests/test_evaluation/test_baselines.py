@@ -115,3 +115,37 @@ def test_build_baseline_frame_fills_missing_product_with_zero(spark):
     by_prod = {r["prod_name"]: r["score"] for r in frame.collect()}
     assert by_prod["A"] == 5
     assert by_prod["B"] == 0
+
+
+def test_build_baseline_frame_matches_timestamp_typed_snap_date(spark):
+    """The join key must survive a timestamp-typed snap_date on the
+    eval_predictions side (purchase_counts always emits a date string)."""
+    from recsys_tfb.evaluation.baselines import build_baseline_frame
+
+    eval_pred = spark.createDataFrame(pd.DataFrame({
+        "snap_date": pd.to_datetime(["2025-01-31", "2025-01-31"]),
+        "cust_id": ["c1", "c1"],
+        "prod_name": ["A", "B"],
+        "label": [1, 0],
+        "score": [0.9, 0.1],
+    }))
+    counts = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2025-01-31", "2025-01-31"],
+        "prod_name": ["A", "B"],
+        "score": [5.0, 2.0],
+    }))
+    frame = build_baseline_frame(eval_pred, counts, _parameters())
+    by_prod = {r["prod_name"]: r["score"] for r in frame.collect()}
+    assert by_prod["A"] == 5.0  # join matched despite timestamp input
+    assert by_prod["B"] == 2.0
+
+
+def test_compute_purchase_counts_rejects_empty_snap_dates(spark):
+    import pytest
+    from recsys_tfb.evaluation.baselines import compute_purchase_counts
+
+    empty = spark.createDataFrame(
+        [], schema="snap_date string, prod_name string, label int"
+    )
+    with pytest.raises(ValueError, match="non-empty"):
+        compute_purchase_counts(empty, [], 12, _parameters())

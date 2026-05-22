@@ -34,6 +34,11 @@ def compute_purchase_counts(
     Returns a DataFrame with columns ``(time_col, item_col, score_col)``
     where ``score_col`` holds the count and ``time_col`` is the string ``S``.
     """
+    if not snap_dates:
+        raise ValueError(
+            "compute_purchase_counts requires a non-empty snap_dates list"
+        )
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     item_col = schema["item"]
@@ -51,15 +56,15 @@ def compute_purchase_counts(
         )
         if window.limit(1).count() == 0:
             logger.warning(
-                "No historical data in [%s - %d months, %s); falling back "
-                "to full label_table — baseline may have leakage.",
-                s, lookback_months, s,
+                "No historical data in [%s, %s) for snap_date=%s; falling "
+                "back to full label_table — baseline may have leakage.",
+                lower.date(), upper.date(), s,
             )
             window = label_table
         counts = (
             window.groupBy(item_col)
-            .agg(F.sum(F.col(label_col)).alias(score_col))
-            .withColumn(time_col, F.lit(s))
+            .agg(F.sum(F.col(label_col)).cast("double").alias(score_col))
+            .withColumn(time_col, F.lit(str(upper.date())))
         )
         per_snap.append(counts.select(time_col, item_col, score_col))
 
@@ -92,7 +97,7 @@ def build_baseline_frame(
         if c in eval_predictions.columns
     ]
     base = eval_predictions.drop(*drop_cols).withColumn(
-        time_col, F.col(time_col).cast("string")
+        time_col, F.to_date(F.col(time_col)).cast("string")
     )
     return base.join(
         F.broadcast(purchase_counts), on=[time_col, item_col], how="left"
