@@ -138,17 +138,69 @@ def build_primary_map_section(
     )
 
 
-def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
-    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + base."""
+def _per_item_metric_table(
+    per_item: dict,
+    ks: list,
+    n_prod: int,
+    metric_key: str,
+    col_fmt: str,
+    extra_cols: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
+    pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, n_prod)}"]``.
+
+    ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
+    e.g. ``{"mean_pos": "mean_pos"}``.
+    """
     data = {}
     for item, m in per_item.items():
         row = {
-            f"recall@{k} (per-item)": m.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
+            col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
-        row["mean_pos"] = m.get("mean_pos")
+        for out_name, src_key in (extra_cols or {}).items():
+            row[out_name] = m.get(src_key)
         data[item] = row
     return pd.DataFrame(data).T
+
+
+def _per_item_heatmap(
+    table: pd.DataFrame,
+    per_item: dict,
+    ks: list,
+    n_prod: int,
+    metric_key: str,
+    x_fmt: str,
+    title: str,
+    zmin: float | None = None,
+    zmax: float | None = None,
+) -> go.Figure:
+    """RdYlGn heatmap; z from ``per_item[item][f"{metric_key}@{lookup(k)}"]``,
+    rows ordered by ``table.index``. ``zmin``/``zmax`` left None -> Plotly
+    autoscales the colour range.
+    """
+    z = [
+        [per_item.get(it, {}).get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
+         for k in ks]
+        for it in table.index
+    ]
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z, x=[x_fmt.format(k=k) for k in ks], y=list(table.index),
+            zmin=zmin, zmax=zmax,
+            colorscale="RdYlGn", texttemplate="%{z:.3f}",
+        )
+    )
+    fig.update_layout(title=title, yaxis_title="產品")
+    return fig
+
+
+def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
+    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
+    return _per_item_metric_table(
+        per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
+        extra_cols={"mean_pos": "mean_pos"},
+    )
 
 
 def build_guardrail_recall_section(
@@ -164,19 +216,11 @@ def build_guardrail_recall_section(
     )
     table = _per_item_recall_table(per_item, ks, n_prod)
     cs = disp.get("recall_colorscale", {}) or {}
-    z = [
-        [per_item.get(it, {}).get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
-         for k in ks]
-        for it in table.index
-    ]
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z, x=[f"recall@{k}" for k in ks], y=list(table.index),
-            zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
-            colorscale="RdYlGn", texttemplate="%{z:.3f}",
-        )
+    fig = _per_item_heatmap(
+        table, per_item, ks, n_prod, "hit_rate", "recall@{k}",
+        "per-item recall@k 色階",
+        zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
     )
-    fig.update_layout(title="per-item recall@k 色階", yaxis_title="產品")
     return ReportSection(
         title="護欄 per_item recall@k（細產品）",
         description=(
