@@ -123,7 +123,7 @@ def build_primary_map_section(
     n_prod = _n_products(metrics)
     for fam in ("map", "precision", "ndcg", "recall"):
         rows[fam] = {
-            f"{fam}@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+            f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
     table = pd.DataFrame(rows).T
@@ -138,17 +138,69 @@ def build_primary_map_section(
     )
 
 
-def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
-    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + base."""
+def _per_item_metric_table(
+    per_item: dict,
+    ks: list,
+    n_prod: int,
+    metric_key: str,
+    col_fmt: str,
+    extra_cols: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
+    pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, n_prod)}"]``.
+
+    ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
+    e.g. ``{"mean_pos": "mean_pos"}``.
+    """
     data = {}
     for item, m in per_item.items():
         row = {
-            f"recall@{k} (per-item)": m.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
+            col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
-        row["mean_pos"] = m.get("mean_pos")
+        for out_name, src_key in (extra_cols or {}).items():
+            row[out_name] = m.get(src_key)
         data[item] = row
     return pd.DataFrame(data).T
+
+
+def _per_item_heatmap(
+    table: pd.DataFrame,
+    per_item: dict,
+    ks: list,
+    n_prod: int,
+    metric_key: str,
+    x_fmt: str,
+    title: str,
+    zmin: float | None = None,
+    zmax: float | None = None,
+) -> go.Figure:
+    """RdYlGn heatmap; z from ``per_item[item][f"{metric_key}@{lookup(k)}"]``,
+    rows ordered by ``table.index``. ``zmin``/``zmax`` left None -> Plotly
+    autoscales the colour range.
+    """
+    z = [
+        [per_item.get(it, {}).get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
+         for k in ks]
+        for it in table.index
+    ]
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z, x=[x_fmt.format(k=k) for k in ks], y=list(table.index),
+            zmin=zmin, zmax=zmax,
+            colorscale="RdYlGn", texttemplate="%{z:.3f}",
+        )
+    )
+    fig.update_layout(title=title, yaxis_title="產品")
+    return fig
+
+
+def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
+    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
+    return _per_item_metric_table(
+        per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
+        extra_cols={"mean_pos": "mean_pos"},
+    )
 
 
 def build_guardrail_recall_section(
@@ -164,19 +216,11 @@ def build_guardrail_recall_section(
     )
     table = _per_item_recall_table(per_item, ks, n_prod)
     cs = disp.get("recall_colorscale", {}) or {}
-    z = [
-        [per_item.get(it, {}).get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
-         for k in ks]
-        for it in table.index
-    ]
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z, x=[f"recall@{k}" for k in ks], y=list(table.index),
-            zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
-            colorscale="RdYlGn", texttemplate="%{z:.3f}",
-        )
+    fig = _per_item_heatmap(
+        table, per_item, ks, n_prod, "hit_rate", "recall@{k}",
+        "per-item recall@k 色階",
+        zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
     )
-    fig.update_layout(title="per-item recall@k 色階", yaxis_title="產品")
     return ReportSection(
         title="護欄 per_item recall@k（細產品）",
         description=(
@@ -186,6 +230,49 @@ def build_guardrail_recall_section(
         figures=[fig],
         tables=[table],
         table_titles=["per-item recall@k"],
+    )
+
+
+def build_per_item_attr_section(
+    metrics: dict, parameters: dict
+) -> ReportSection | None:
+    if not _section_on(parameters, "per_item_attr"):
+        return None
+    per_item = metrics.get("per_item", {})
+    disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
+    ks = _resolve_display_k(
+        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
+    )
+    map_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "map_attr", "map_attr@{k}"
+    )
+    ndcg_tbl = _per_item_metric_table(
+        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
+    )
+    map_fig = _per_item_heatmap(
+        map_tbl, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
+        "per-item map_attr@k 色階",
+    )
+    ndcg_fig = _per_item_heatmap(
+        ndcg_tbl, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
+        "per-item ndcg_attr@k 色階",
+    )
+    return ReportSection(
+        title="per_item 歸因 Attribution（細產品）",
+        description=(
+            "每個產品對主指標 mAP@k / nDCG@k 各貢獻多少。算法：對每筆"
+            "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
+            "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
+            "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
+            "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
+            "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
+            "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
+            "換成 log 折扣的 ndcg_contrib@k。"
+        ),
+        figures=[map_fig, ndcg_fig],
+        tables=[map_tbl, ndcg_tbl],
+        table_titles=["per-item map_attr@k", "per-item ndcg_attr@k"],
     )
 
 
@@ -309,6 +396,13 @@ _GLOSSARY = [
     ("recall@k (per-item)", "P(rank(P)≤k | P 為正)，命中事件等權；護欄"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
     ("ndcg@k", "log 折扣排序品質，正規化 [0,1]"),
+    ("map_attr@k",
+     "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
+     "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
+     "是 mAP@k 拆到單一產品的貢獻"),
+    ("ndcg_attr@k",
+     "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
+     "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("base rate", "母體正樣本率"),
 ]
@@ -336,6 +430,7 @@ def assemble_report(
         build_dataset_overview_section(metrics, parameters),
         build_primary_map_section(metrics, parameters),
         build_guardrail_recall_section(metrics, parameters),
+        build_per_item_attr_section(metrics, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),
