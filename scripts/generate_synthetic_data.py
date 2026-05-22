@@ -306,11 +306,6 @@ def generate_label_table(
     0 or 1). Customers with no event in the group do not appear in that
     group, mirroring the LEFT JOIN onto `cust_pool` in the SQL.
     """
-    # Pre-compute segments: use customer index modulo (consistent with generation)
-    max_customers = int(INITIAL_CUSTOMERS * (1 + MONTHLY_GROWTH_RATE) ** (len(SNAP_DATES) - 1)) + 10
-    all_segments_rng = np.random.default_rng(RANDOM_SEED)
-    all_segments = all_segments_rng.choice(SEGMENTS, size=max_customers, p=SEGMENT_PROBS)
-
     rows_list = []
     for snap_date in SNAP_DATES:
         snap_dt = pd.Timestamp(snap_date)
@@ -320,7 +315,6 @@ def generate_label_table(
         snap_features = feature_table[feature_table["snap_date"] == snap_dt]
         n_cust = len(snap_features)
         cust_ids = snap_features["cust_id"].values
-        segments = all_segments[:n_cust]
 
         feat_dict = {
             col: snap_features[col].values
@@ -348,13 +342,11 @@ def generate_label_table(
 
             kept_idx = np.where(any_event)[0]
             kept_cust_ids = cust_ids[kept_idx]
-            kept_segments = segments[kept_idx]
 
             for prod in group_prods:
                 prod_df = pd.DataFrame({
                     "snap_date": snap_dt,
                     "cust_id": kept_cust_ids,
-                    "cust_segment_typ": kept_segments,
                     "apply_start_date": apply_start,
                     "apply_end_date": apply_end,
                     "label": group_labels[prod][kept_idx],
