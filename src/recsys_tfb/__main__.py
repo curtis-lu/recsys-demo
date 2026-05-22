@@ -641,52 +641,5 @@ def evaluation(
     logger.info("Pipeline 'evaluation' completed successfully")
 
 
-@app.command(name="baselines")
-def baselines(
-    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
-):
-    """Run the baselines pipeline."""
-    from recsys_tfb.utils.spark import get_or_create_spark_session
-
-    config, params, run_context = _load_config_and_setup("baselines", env)
-    get_or_create_spark_session(_load_spark_config(config, "baselines"))
-    data_dir = _find_data_dir()
-
-    try:
-        params_eval = config.get_parameters_by_name("parameters_evaluation")
-    except KeyError:
-        params_eval = {}
-
-    eval_config = params_eval.get("evaluation", params_eval)
-    snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
-
-    logger.info("Baselines — snap_date: %s", snap_date)
-
-    runtime_params = {
-        "base_dataset_version": _NONE_PLACEHOLDER,
-        "train_variant_id": _NONE_PLACEHOLDER,
-        "calibration_variant_id": _NONE_PLACEHOLDER,
-        "model_version": _NONE_PLACEHOLDER,
-        "snap_date": snap_date,
-    }
-
-    _execute_pipeline("baselines", {}, runtime_params, config, params, env)
-
-    # Post run
-    version_dir = data_dir / "baselines" / snap_date
-    _write_pipeline_manifest(
-        version_dir=version_dir,
-        metadata_kwargs={
-            "version": snap_date,
-            "pipeline": "baselines",
-            "parameters": params_eval,
-        },
-        run_id=run_context.run_id,
-        extra_metadata={"snap_date": snap_date},
-        symlink_target=data_dir / "baselines" / "latest"
-    )
-    logger.info("Pipeline 'baselines' completed successfully")
-
-
 if __name__ == "__main__":
     app()
