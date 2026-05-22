@@ -41,6 +41,13 @@ def _metrics():
                               "n_customers": 10, "positive_rate": 0.24},
                         "B": {"n_rows": 50, "n_positives": 8,
                               "n_customers": 10, "positive_rate": 0.16}}},
+        "macro_avg": {
+            "by_item": {
+                "hit_rate@1": 0.15, "hit_rate@2": 0.35, "mean_pos": 4.0,
+                "map_attr@1": 0.4, "map_attr@2": 0.435, "map_attr@3": 0.475,
+                "ndcg_attr@1": 0.35, "ndcg_attr@2": 0.38, "ndcg_attr@3": 0.4,
+            },
+        },
         "n_queries": 10, "n_excluded_queries": 0,
     }
 
@@ -199,3 +206,22 @@ def test_glossary_has_attr_entries():
     terms = set(s.tables[0]["指標"])
     assert "map_attr@k" in terms
     assert "ndcg_attr@k" in terms
+
+
+def test_guardrail_section_has_macro_row():
+    s = rb.build_guardrail_recall_section(_metrics(), _params())
+    table = s.tables[0]
+    # 頂列為 Macro 平均
+    assert list(table.index)[0] == "Macro 平均"
+    # 值為各產品等權平均：hit_rate@1 → recall@1 (per-item) 欄
+    assert table.loc["Macro 平均", "recall@1 (per-item)"] == 0.15
+    assert table.loc["Macro 平均", "mean_pos"] == 4.0
+    # heatmap 不含 macro 列
+    assert "Macro 平均" not in list(s.figures[0].data[0].y)
+
+
+def test_guardrail_section_no_macro_when_absent():
+    m = _metrics()
+    del m["macro_avg"]
+    s = rb.build_guardrail_recall_section(m, _params())
+    assert "Macro 平均" not in list(s.tables[0].index)

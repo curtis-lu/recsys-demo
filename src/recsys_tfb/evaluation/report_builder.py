@@ -39,6 +39,9 @@ def _k_to_lookup(k, n_products: int) -> int | str:
     return k
 
 
+_MACRO_LABEL = "Macro 平均"
+
+
 def _report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
 
@@ -145,22 +148,32 @@ def _per_item_metric_table(
     metric_key: str,
     col_fmt: str,
     extra_cols: dict[str, str] | None = None,
+    macro_metrics: dict | None = None,
 ) -> pd.DataFrame:
     """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
     pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, n_prod)}"]``.
 
     ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
     e.g. ``{"mean_pos": "mean_pos"}``.
+
+    ``macro_metrics``: when given and non-empty, an equal-weight-average
+    metrics dict (same key shape as a per_item value) is prepended as the
+    top row labelled ``_MACRO_LABEL``.
     """
-    data = {}
-    for item, m in per_item.items():
+    def _row(m: dict) -> dict:
         row = {
             col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
             for k in ks
         }
         for out_name, src_key in (extra_cols or {}).items():
             row[out_name] = m.get(src_key)
-        data[item] = row
+        return row
+
+    data: dict = {}
+    if macro_metrics:
+        data[_MACRO_LABEL] = _row(macro_metrics)
+    for item, m in per_item.items():
+        data[item] = _row(m)
     return pd.DataFrame(data).T
 
 
@@ -195,11 +208,13 @@ def _per_item_heatmap(
     return fig
 
 
-def _per_item_recall_table(per_item: dict, ks: list, n_prod: int) -> pd.DataFrame:
+def _per_item_recall_table(
+    per_item: dict, ks: list, n_prod: int, macro_metrics: dict | None = None
+) -> pd.DataFrame:
     """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
     return _per_item_metric_table(
         per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
-        extra_cols={"mean_pos": "mean_pos"},
+        extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
     )
 
 
@@ -209,22 +224,26 @@ def build_guardrail_recall_section(
     if not _section_on(parameters, "guardrail_recall"):
         return None
     per_item = metrics.get("per_item", {})
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
     ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
-    table = _per_item_recall_table(per_item, ks, n_prod)
+    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    table_plain = _per_item_recall_table(per_item, ks, n_prod)
     cs = disp.get("recall_colorscale", {}) or {}
     fig = _per_item_heatmap(
-        table, per_item, ks, n_prod, "hit_rate", "recall@{k}",
+        table_plain, per_item, ks, n_prod, "hit_rate", "recall@{k}",
         "per-item recall@k 色階",
         zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
     )
+    table = _per_item_recall_table(per_item, ks, n_prod, macro_metrics=macro_item)
     return ReportSection(
         title="護欄 per_item recall@k（細產品）",
         description=(
             "每產品 recall@k（per-item，即 hit_rate@k 正名）＋色階。"
+            "頂列「Macro 平均」為各產品等權平均。"
             "純判讀、無 pass/fail 閾值。完整資料統計見「資料概況」。"
         ),
         figures=[fig],
