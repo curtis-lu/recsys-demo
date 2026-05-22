@@ -87,7 +87,7 @@ training:
 
 mlflow:
   experiment_name: recsys_tfb
-  tracking_uri: mlruns
+  tracking_uri: "${env.MLFLOW_TRACKING_URI|mlruns}"
 
 # Driver-local parquet cache for materialized model inputs (skips Hive scans on
 # re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
