@@ -126,11 +126,6 @@ def _execute_pipeline(
     catalog = DataCatalog(catalog_config)
     catalog.add("parameters", MemoryDataset(data=substitution_params))
 
-    if pipeline_name == "evaluation":
-        if not catalog.exists("baseline_metrics"):
-            catalog.add("baseline_metrics", MemoryDataset(data=None))
-            logger.info("No baseline_metrics found — report will skip baseline comparison")
-
     logger.info("Running pipeline '%s' (env=%s)", pipeline_name, env)
     try:
         runner = Runner()
