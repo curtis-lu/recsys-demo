@@ -281,3 +281,9 @@ def test_category_section_recall_table_has_macro_row():
     rec_tbl = s.tables[1]
     assert list(rec_tbl.index)[0] == "Macro 平均"
     assert rec_tbl.loc["Macro 平均", "recall@1 (per-item)"] == 0.4
+
+
+def test_glossary_has_macro_average_entry():
+    s = rb.build_glossary_section(_params())
+    terms = list(s.tables[0]["指標"])
+    assert "Macro 平均" in terms

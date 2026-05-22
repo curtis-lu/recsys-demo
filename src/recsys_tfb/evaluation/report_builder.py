@@ -448,6 +448,8 @@ _GLOSSARY = [
      "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
      "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
+    ("Macro 平均",
+     "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),
     ("base rate", "母體正樣本率"),
 ]
 
