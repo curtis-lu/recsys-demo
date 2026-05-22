@@ -1,6 +1,4 @@
-"""Resolve ${...} placeholders in spark config values.
-
-Two placeholder forms are supported:
+"""Resolve ${vdclient.<cluster>.<field>} placeholders in spark config values.
 
   ``${vdclient.<cluster>.<field>}`` → ``vdclient_magic.spark_ports("<cluster>")``
       Returns the named field from the port tuple. Supported fields:
@@ -8,22 +6,19 @@ Two placeholder forms are supported:
       ``vdclient_magic`` is production-only; unavailable on laptops / CI.
       Lazy-imported once; result cached per cluster per call.
 
-  ``${env.<NAME>}`` → ``os.environ["<NAME>"]``
-      Reads the process environment.
+Drop-on-missing semantics: if the lookup fails (import error, missing getter,
+unknown field), the affected spark config key is dropped from the returned
+dict and a warning is logged, so PySpark falls back to its default.
 
-Both resolvers share the same drop-on-missing semantics: if the lookup
-fails (import error, missing getter, missing env var), the affected
-spark config key is dropped from the returned dict and a warning is
-logged, so PySpark falls back to its default.
+``${env.<NAME>}`` placeholders are resolved earlier and globally by
+``recsys_tfb.core.config.ConfigLoader`` — not here.
 """
 
 import logging
-import os
 import re
 
 logger = logging.getLogger(__name__)
 _VDCLIENT_PATTERN = re.compile(r"\$\{vdclient\.(\w+)\.(\w+)\}")
-_ENV_PATTERN = re.compile(r"\$\{env\.(\w+)\}")
 
 # Fields returned positionally by spark_ports(cluster).
 _SPARK_PORTS_FIELDS = ("driver_port", "blockManager_port")
@@ -110,44 +105,6 @@ def resolve_vdclient_placeholders(spark_configs: dict) -> dict:
             new_value = new_value.replace(
                 f"${{vdclient.{cluster}.{field}}}", port_val
             )
-        if drop_this_key:
-            continue
-        resolved[key] = new_value
-
-    return resolved
-
-
-def resolve_env_placeholders(spark_configs: dict) -> dict:
-    """Resolve ${env.<NAME>} placeholders by reading os.environ["<NAME>"].
-
-    For each value containing one or more placeholders, look up each name in
-    ``os.environ``. Missing variable → drop the key + warn. Non-string values
-    pass through unchanged.
-    """
-    resolved: dict = {}
-
-    for key, value in spark_configs.items():
-        if not isinstance(value, str):
-            resolved[key] = value
-            continue
-        names = _ENV_PATTERN.findall(value)
-        if not names:
-            resolved[key] = value
-            continue
-
-        new_value = value
-        drop_this_key = False
-        for name in names:
-            env_value = os.environ.get(name)
-            if env_value is None:
-                logger.warning(
-                    "Dropping spark config key '%s': env var '%s' not set",
-                    key,
-                    name,
-                )
-                drop_this_key = True
-                break
-            new_value = new_value.replace(f"${{env.{name}}}", env_value)
         if drop_this_key:
             continue
         resolved[key] = new_value
