@@ -17,6 +17,8 @@ def _resolve_env_string(value: str, loc: str, errors: list[str]) -> str:
 
     Missing required variable (no ``|default``) appends an error to ``errors``
     and leaves the placeholder text in place; the caller raises once collected.
+    A ``|default`` value cannot itself contain ``}`` (the regex stops at the
+    first one) — defaults are for plain strings, not nested structures.
     """
 
     def repl(match: re.Match) -> str:
@@ -47,20 +49,25 @@ def _resolve_env(config: dict) -> dict:
     """
     errors: list[str] = []
 
-    def walk(obj, stem: str, keypath: str):
-        if isinstance(obj, dict):
-            return {
-                k: walk(v, stem, f"{keypath}.{k}" if keypath else k)
-                for k, v in obj.items()
-            }
-        if isinstance(obj, list):
-            return [walk(v, stem, f"{keypath}[{i}]") for i, v in enumerate(obj)]
-        if isinstance(obj, str):
-            loc = f"{stem}.yaml -> {keypath}" if keypath else f"{stem}.yaml"
-            return _resolve_env_string(obj, loc, errors)
-        return obj
+    def walk_file(stem: str, data):
+        """Walk one config file's tree; ``stem`` is fixed for the whole descent."""
 
-    resolved = {stem: walk(data, stem, "") for stem, data in config.items()}
+        def walk(obj, keypath: str):
+            if isinstance(obj, dict):
+                return {
+                    k: walk(v, f"{keypath}.{k}" if keypath else k)
+                    for k, v in obj.items()
+                }
+            if isinstance(obj, list):
+                return [walk(v, f"{keypath}[{i}]") for i, v in enumerate(obj)]
+            if isinstance(obj, str):
+                loc = f"{stem}.yaml -> {keypath}" if keypath else f"{stem}.yaml"
+                return _resolve_env_string(obj, loc, errors)
+            return obj
+
+        return walk(data, "")
+
+    resolved = {stem: walk_file(stem, data) for stem, data in config.items()}
     if errors:
         raise ConfigEnvError(
             f"{len(errors)} 個必填環境變數未設定:\n" + "\n".join(errors)
