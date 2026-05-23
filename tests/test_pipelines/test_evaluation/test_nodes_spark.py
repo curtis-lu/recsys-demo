@@ -374,6 +374,79 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
         prepare_eval_data(predictions, labels, parameters)
 
 
+def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
+    """prepare_eval_data must LEFT JOIN predictions with labels so that
+    predictions for (cust, prod) pairs with no label_table row are kept,
+    with `label` filled as 0 ("not bought"). The previous INNER JOIN
+    silently dropped those rows, collapsing the per-customer candidate
+    set to whichever per-group cust_pool subset label_table covered.
+
+    Setup: monitoring-mode predictions (no `label` column) with 2 custs ×
+    3 prods = 6 rows. label_table only covers ccard (c1 with ccard_ins=1)
+    -> 1 row. INNER would drop 5; LEFT must keep all 6 with label=0 for
+    the unmatched ones.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    import pandas as pd
+
+    # Monitoring mode shape: predictions carry rank, no label.
+    predictions_pdf = pd.DataFrame({
+        "cust_id":       ["c1", "c1", "c1", "c2", "c2", "c2"],
+        "snap_date":     ["2025-01-31"] * 6,
+        "prod_name":     ["exchange_usd", "ccard_ins", "fund_stock",
+                          "exchange_usd", "ccard_ins", "fund_stock"],
+        "score":         [0.9, 0.7, 0.3, 0.8, 0.4, 0.2],
+        "rank":          [1, 2, 3, 1, 2, 3],
+        "model_version": ["v1"] * 6,
+    })
+    # label_table per-group cust_pool: c1 in ccard pool, c2 in nothing.
+    labels_pdf = pd.DataFrame({
+        "cust_id":   ["c1"],
+        "snap_date": ["2025-01-31"],
+        "prod_name": ["ccard_ins"],
+        "label":     [1],
+    })
+    predictions = spark.createDataFrame(predictions_pdf)
+    labels = spark.createDataFrame(labels_pdf)
+
+    parameters = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+        }},
+        "model_version": "v1",
+        "evaluation": {"snap_date": "2025-01-31"},
+    }
+
+    result = prepare_eval_data(predictions, labels, parameters)
+    result_pdf = result.select(
+        "cust_id", "prod_name", "label"
+    ).toPandas().sort_values(["cust_id", "prod_name"]).reset_index(drop=True)
+
+    # All 6 prediction rows survive (LEFT JOIN, not INNER).
+    assert len(result_pdf) == 6, (
+        f"expected 6 rows (full LEFT JOIN), got {len(result_pdf)} — "
+        f"INNER JOIN regression?\n{result_pdf}"
+    )
+
+    # Matched row keeps label=1.
+    by_key = {
+        (r.cust_id, r.prod_name): r.label
+        for r in result_pdf.itertuples()
+    }
+    assert by_key[("c1", "ccard_ins")] == 1
+
+    # All unmatched rows get label=0 (not None / not NaN).
+    for key in [
+        ("c1", "exchange_usd"), ("c1", "fund_stock"),
+        ("c2", "exchange_usd"), ("c2", "ccard_ins"), ("c2", "fund_stock"),
+    ]:
+        assert by_key[key] == 0, (
+            f"key={key} should have label=0 (LEFT JOIN miss), got {by_key[key]}"
+        )
+
+
 class TestComputeBaselineMetrics:
     """compute_baseline_metrics: slim baseline metrics from eval_predictions."""
 
@@ -432,8 +505,13 @@ class TestComputeBaselineMetrics:
             self._label_table(spark),
             self._parameters(),
         )
-        assert set(result.keys()) == {"overall", "per_item"}
+        assert set(result.keys()) == {"overall", "per_item", "purchase_counts"}
         assert "A" in result["per_item"]
+        # purchase_counts comes from _label_table fixture (snap=2024-06-30
+        # falls inside the [2024-01-31, 2025-01-31) lookback window for the
+        # 2025-01-31 eval snap). A=3 positives (h0/h1/h2 all label=1),
+        # B=1 (only h0 label=1), C=0.
+        assert result["purchase_counts"] == {"A": 3, "B": 1, "C": 0}
 
     def test_returns_none_when_section_disabled(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (

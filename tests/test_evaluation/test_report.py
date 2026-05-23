@@ -115,6 +115,41 @@ class TestGenerateHtmlReport:
         assert 'class="metrics-table"' not in html
         assert 'class="dataframe metrics-table"' not in html
 
+    def test_nav_renders_as_vertical_list(self):
+        """TOC nav should be a <ul> of <li> anchors, not inline links —
+        9+ sections need a scannable list."""
+        sections = [
+            ReportSection(title=f"S{i}", description="d") for i in range(3)
+        ]
+        html = generate_html_report(sections)
+        # nav element exists with the TOC class
+        assert '<nav class="toc">' in html
+        # each section gets a <li> entry inside the nav
+        assert html.count('<li><a href="#section-') >= 3
+
+    def test_back_to_top_button_present(self):
+        """Floating Back-to-Top button + JS visibility handler + smooth scroll."""
+        sections = [ReportSection(title="S", description="d")]
+        html = generate_html_report(sections)
+        # Button element exists
+        assert 'id="to-top"' in html
+        # JS hides button until scrolled (>300px convention)
+        assert "scrollY" in html
+        assert "300" in html
+        # JS triggers smooth scroll to top on click
+        assert "scrollTo" in html
+        assert "smooth" in html
+
+    def test_collapsible_section_opens_when_nav_clicked(self):
+        """Anchor-jumping into a closed <details> should auto-open it
+        (otherwise nav link looks broken on collapsible sections)."""
+        sections = [
+            ReportSection(title="Diag", description="d", collapsible=True),
+        ]
+        html = generate_html_report(sections)
+        # JS handler exists that sets .open = true on <details> target
+        assert ".open = true" in html or ".open=true" in html
+
 
 class TestSaveReport:
     def test_creates_file(self):
