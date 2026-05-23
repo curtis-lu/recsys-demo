@@ -161,7 +161,7 @@ def test_baseline_section_no_per_item_delta_omits_table():
     base = {"overall": {"map@1": 0.4}}          # no per_item -> per_item_delta empty
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
-    assert s.table_titles == ["overall delta"]
+    assert s.table_titles == ["overall metrics"]
     assert len(s.tables) == 1
 
 
@@ -328,3 +328,33 @@ def test_baseline_section_omits_popularity_when_purchase_counts_empty():
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
     assert "popularity 排名組成" not in s.table_titles
+
+
+def test_baseline_section_overall_table_has_model_baseline_delta_cols():
+    """overall table: rows = metric keys, cols = [Model, Baseline, Delta]."""
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.40, "ndcg@1": 0.50},
+        "per_item": {"A": {"hit_rate@1": 0.1}},
+    }
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    assert "overall metrics" in s.table_titles
+    idx = s.table_titles.index("overall metrics")
+    tbl = s.tables[idx]
+    assert list(tbl.columns) == ["Model", "Baseline", "Delta"]
+    # Model fixture has overall["map@1"]=0.5, ndcg@1=0.55 (see _metrics()).
+    assert tbl.loc["map@1", "Model"] == 0.5
+    assert tbl.loc["map@1", "Baseline"] == 0.40
+    assert abs(tbl.loc["map@1", "Delta"] - (0.5 - 0.40)) < 1e-9
+
+
+def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
+    """Keys only in Model OR Baseline still appear, missing side as NaN."""
+    m = _metrics()  # has 'precision@1', 'recall@1'
+    base = {"overall": {"map@1": 0.4, "extra_key@1": 0.9}}  # no precision/recall
+    s = rb.build_baseline_section(m, base, _params())
+    idx = s.table_titles.index("overall metrics")
+    tbl = s.tables[idx]
+    assert "extra_key@1" in tbl.index   # baseline-only key still listed
+    assert "precision@1" in tbl.index   # model-only key still listed

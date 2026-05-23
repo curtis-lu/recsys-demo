@@ -404,8 +404,18 @@ def build_baseline_section(
     comp = build_comparison_result(
         metrics, baseline_metrics, "Model", "Baseline"
     )
-    delta = pd.DataFrame([comp["overall_delta"]]).T
-    delta.columns = ["Delta (Model - Baseline)"]
+    overall_a = comp["result_a"].get("overall", {}) or {}
+    overall_b = comp["result_b"].get("overall", {}) or {}
+    overall_delta = comp["overall_delta"]
+    overall_keys = sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    overall_tbl = pd.DataFrame(
+        {
+            "Model": [overall_a.get(k) for k in overall_keys],
+            "Baseline": [overall_b.get(k) for k in overall_keys],
+            "Delta": [overall_delta.get(k) for k in overall_keys],
+        },
+        index=overall_keys,
+    )
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
     # _k_to_lookup handles a hypothetical "all" in guardrail_recall_k
@@ -435,8 +445,8 @@ def build_baseline_section(
         tables.append(pop_df)
         table_titles.append("popularity 排名組成")
 
-    tables.append(delta)
-    table_titles.append("overall delta")
+    tables.append(overall_tbl)
+    table_titles.append("overall metrics")
 
     if pid and (baseline_metrics or {}).get("per_item"):
         rec_rows = {
@@ -451,7 +461,7 @@ def build_baseline_section(
         table_titles.append("per-item recall@k delta")
     return ReportSection(
         title="基準比較 Baseline",
-        description="Model vs Baseline:popularity 排名組成 + overall mAP@k 與 per-item recall@k delta。",
+        description="Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)與 per-item recall@k delta。",
         tables=tables,
         table_titles=table_titles,
     )
