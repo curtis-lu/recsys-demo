@@ -169,6 +169,14 @@ def compute_baseline_metrics(
     purchase count, then runs the slim metrics path (overall + per_item).
     Returns None when the baseline report section is disabled — the second
     metrics pass is then skipped entirely.
+
+    Returns dict with keys:
+      - overall:        dict[str, float]   slim metrics
+      - per_item:       dict[str, dict]    per-product slim metrics
+      - purchase_counts: dict[str, int]    per-product popularity count
+            aggregated across eval snap_dates (sum). Drives the report's
+            popularity-composition table; consumers must treat absence
+            as backward-compatible (older results may omit it).
     """
     from recsys_tfb.evaluation.baselines import (
         build_baseline_frame,
@@ -186,6 +194,8 @@ def compute_baseline_metrics(
 
     schema = get_schema(parameters)
     time_col = schema["time"]
+    item_col = schema["item"]
+    score_col = schema["score"]
     lookback_months = (eval_params.get("baseline", {}) or {}).get(
         "lookback_months", 12
     )
@@ -197,11 +207,22 @@ def compute_baseline_metrics(
     counts = compute_purchase_counts(
         label_table, snap_dates, lookback_months, parameters
     )
+    # Aggregate per-product count across eval snap_dates (sum). Single-snap
+    # evaluation reduces to that snap's value. cast to int for clean JSON
+    # serialisation in manifests / reports.
+    purchase_counts = {
+        str(r[item_col]): int(r[score_col])
+        for r in counts.groupBy(item_col)
+        .agg(F.sum(F.col(score_col)).alias(score_col))
+        .collect()
+    }
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     metrics = compute_overall_per_item(baseline_frame, parameters)
+    metrics["purchase_counts"] = purchase_counts
     logger.info(
-        "Baseline metrics computed (overall + per_item) for snap_dates=%s",
-        snap_dates,
+        "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
+        "purchase_counts has %d products",
+        snap_dates, len(purchase_counts),
     )
     return metrics
 
