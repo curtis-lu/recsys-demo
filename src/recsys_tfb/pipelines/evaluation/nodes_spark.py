@@ -101,8 +101,19 @@ def prepare_eval_data(
             label_col,
         )
 
-    # Merge predictions with labels
-    eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="inner")
+    # LEFT JOIN — preserve every prediction row so per-customer ranking is over
+    # the model's full candidate set (in dev: cust × 8 prod) regardless of
+    # whether label_table covers that (cust, prod) pair. label_table's
+    # per-group cust_pool semantics (conf/sql/etl/label/label_{ccard,exchange,
+    # fund}.sql; cust must have ≥1 apply event in the group to appear) means
+    # an INNER JOIN here would silently shrink each customer's rank set to
+    # their per-group sub-products, collapsing baseline / mAP metrics to a
+    # per-group framing the business model never asked for. Missing labels are
+    # filled with 0 ("not bought"), matching the existing build_model_input
+    # convention (preprocessing/_spark.py:369-372 LEFT + COALESCE(0)).
+    eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
+    if label_col in eval_predictions.columns:
+        eval_predictions = eval_predictions.fillna({label_col: 0})
 
     # Downstream report rendering selects schema["rank"] from eval_predictions.
     # When the predictions source is
