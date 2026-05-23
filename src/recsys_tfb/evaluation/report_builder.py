@@ -414,8 +414,30 @@ def build_baseline_section(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
     pid = comp.get("per_item_delta", {}) or {}
-    tables = [delta]
-    table_titles = ["overall delta"]
+    tables: list[pd.DataFrame] = []
+    table_titles: list[str] = []
+
+    # [1] popularity composition (prepended when purchase_counts available).
+    # Backward compat: silently omit when key missing or dict empty so older
+    # baseline_metrics shapes still render.
+    pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
+    if pcounts:
+        sorted_items = sorted(
+            pcounts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        pop_df = pd.DataFrame(
+            {
+                "count": [v for _, v in sorted_items],
+                "rank": list(range(1, len(sorted_items) + 1)),
+            },
+            index=[k for k, _ in sorted_items],
+        )
+        tables.append(pop_df)
+        table_titles.append("popularity 排名組成")
+
+    tables.append(delta)
+    table_titles.append("overall delta")
+
     if pid and (baseline_metrics or {}).get("per_item"):
         rec_rows = {
             item: {
@@ -429,7 +451,7 @@ def build_baseline_section(
         table_titles.append("per-item recall@k delta")
     return ReportSection(
         title="基準比較 Baseline",
-        description="Model vs Baseline：overall mAP@k 與 per-item recall@k delta。",
+        description="Model vs Baseline:popularity 排名組成 + overall mAP@k 與 per-item recall@k delta。",
         tables=tables,
         table_titles=table_titles,
     )

@@ -287,3 +287,44 @@ def test_glossary_has_macro_average_entry():
     s = rb.build_glossary_section(_params())
     terms = list(s.tables[0]["指標"])
     assert "Macro 平均" in terms
+
+
+def test_baseline_section_renders_popularity_table():
+    """purchase_counts -> popularity composition table prepended."""
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.4},
+        "per_item": {"A": {"hit_rate@1": 0.1}},
+        "purchase_counts": {"A": 50, "B": 200, "C": 10},
+    }
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    assert "popularity 排名組成" in s.table_titles
+    idx = s.table_titles.index("popularity 排名組成")
+    tbl = s.tables[idx]
+    # Sorted desc by count, with rank starting at 1.
+    assert list(tbl.columns) == ["count", "rank"]
+    assert list(tbl.index) == ["B", "A", "C"]
+    assert list(tbl["count"]) == [200, 50, 10]
+    assert list(tbl["rank"]) == [1, 2, 3]
+
+
+def test_baseline_section_omits_popularity_when_purchase_counts_absent():
+    """Backward compat: no purchase_counts -> no popularity table, others stay."""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4},
+            "per_item": {"A": {"hit_rate@1": 0.1}}}
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    assert "popularity 排名組成" not in s.table_titles
+
+
+def test_baseline_section_omits_popularity_when_purchase_counts_empty():
+    """Empty purchase_counts dict -> no popularity table."""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4},
+            "per_item": {"A": {"hit_rate@1": 0.1}},
+            "purchase_counts": {}}
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    assert "popularity 排名組成" not in s.table_titles
