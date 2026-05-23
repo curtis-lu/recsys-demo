@@ -112,16 +112,24 @@ def test_primary_map_orientation_locked():
     assert "map" in s.tables[0].index   # families are the row index
 
 
-def test_baseline_section_has_per_item_recall_delta():
-    m = _metrics()
-    base = {"overall": {"map@1": 0.4},
-            "per_item": {"A": {"hit_rate@1": 0.1}}}
-    p = _params()
-    p["evaluation"].setdefault("report", {}).setdefault("sections", {})
-    s = rb.build_baseline_section(m, base, p)
-    assert s is not None
-    assert len(s.tables) == 2
-    assert "per-item recall@k delta" in s.table_titles
+def _baseline_metrics_full():
+    """Baseline metrics dict mirroring _metrics() per_item / macro shape."""
+    return {
+        "overall": {"map@1": 0.4, "map@3": 0.5, "ndcg@1": 0.45,
+                    "precision@1": 0.3, "recall@1": 0.25},
+        "per_item": {
+            "A": {"hit_rate@1": 0.15, "hit_rate@2": 0.30, "mean_pos": 3.5,
+                  "map_attr@1": 0.40, "map_attr@2": 0.45, "map_attr@3": 0.50,
+                  "ndcg_attr@1": 0.35, "ndcg_attr@2": 0.40, "ndcg_attr@3": 0.42},
+            "B": {"hit_rate@1": 0.08, "hit_rate@2": 0.20, "mean_pos": 5.5,
+                  "map_attr@1": 0.25, "map_attr@2": 0.28, "map_attr@3": 0.30,
+                  "ndcg_attr@1": 0.20, "ndcg_attr@2": 0.22, "ndcg_attr@3": 0.25}},
+        "macro_avg": {"by_item": {
+            "hit_rate@1": 0.115, "hit_rate@2": 0.25, "mean_pos": 4.5,
+            "map_attr@1": 0.325, "map_attr@2": 0.365, "map_attr@3": 0.40,
+            "ndcg_attr@1": 0.275, "ndcg_attr@2": 0.31, "ndcg_attr@3": 0.335,
+        }},
+    }
 
 
 def test_assemble_metadata_has_model_version_and_generated_at():
@@ -358,3 +366,75 @@ def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
     tbl = s.tables[idx]
     assert "extra_key@1" in tbl.index   # baseline-only key still listed
     assert "precision@1" in tbl.index   # model-only key still listed
+
+
+def test_baseline_section_has_three_per_item_compare_tables():
+    """recall / map_attr / ndcg_attr each get a M/B/Δ-interleaved table."""
+    m = _metrics()
+    base = _baseline_metrics_full()
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    # Old delta-only title must be gone.
+    assert "per-item recall@k delta" not in s.table_titles
+    # Three new titles present.
+    for title in (
+        "per-item recall@k (M/B/Δ)",
+        "per-item map_attr@k (M/B/Δ)",
+        "per-item ndcg_attr@k (M/B/Δ)",
+    ):
+        assert title in s.table_titles
+
+
+def test_baseline_section_per_item_recall_table_three_cols_per_k():
+    """recall table: cols = recall@1 M/B/Δ, recall@2 M/B/Δ (params has guardrail_recall_k=[1,2])."""
+    m = _metrics()
+    base = _baseline_metrics_full()
+    s = rb.build_baseline_section(m, base, _params())
+    idx = s.table_titles.index("per-item recall@k (M/B/Δ)")
+    tbl = s.tables[idx]
+    assert list(tbl.columns) == [
+        "recall@1 M", "recall@1 B", "recall@1 Δ",
+        "recall@2 M", "recall@2 B", "recall@2 Δ",
+    ]
+    # Macro row first.
+    assert list(tbl.index)[0] == "Macro 平均"
+    # Spot-check A: Model hit_rate@1=0.2, Baseline=0.15, Δ from per_item_delta.
+    assert tbl.loc["A", "recall@1 M"] == 0.2
+    assert tbl.loc["A", "recall@1 B"] == 0.15
+    assert abs(tbl.loc["A", "recall@1 Δ"] - (0.2 - 0.15)) < 1e-9
+    # Macro row Δ from macro_a − macro_b.
+    assert abs(
+        tbl.loc["Macro 平均", "recall@1 Δ"] - (0.15 - 0.115)
+    ) < 1e-9
+
+
+def test_baseline_section_per_item_attr_tables_use_primary_map_k():
+    """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
+    'all' resolves to n_products (=2 in fixture) for lookup."""
+    m = _metrics()
+    base = _baseline_metrics_full()
+    s = rb.build_baseline_section(m, base, _params())
+    idx = s.table_titles.index("per-item map_attr@k (M/B/Δ)")
+    tbl = s.tables[idx]
+    assert list(tbl.columns) == [
+        "map_attr@1 M", "map_attr@1 B", "map_attr@1 Δ",
+        "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
+        "map_attr@all M", "map_attr@all B", "map_attr@all Δ",
+    ]
+    # n_prod=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
+    assert tbl.loc["A", "map_attr@all M"] == 0.55
+    assert tbl.loc["A", "map_attr@all B"] == 0.45
+
+
+def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
+    """No baseline per_item -> per-item compare tables skipped (overall stays)."""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}}  # no per_item
+    s = rb.build_baseline_section(m, base, _params())
+    assert s is not None
+    for title in (
+        "per-item recall@k (M/B/Δ)",
+        "per-item map_attr@k (M/B/Δ)",
+        "per-item ndcg_attr@k (M/B/Δ)",
+    ):
+        assert title not in s.table_titles

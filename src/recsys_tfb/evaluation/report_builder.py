@@ -208,6 +208,63 @@ def _per_item_heatmap(
     return fig
 
 
+def _per_item_metric_compare_table(
+    per_item_a: dict,
+    per_item_b: dict,
+    per_item_delta: dict,
+    ks: list,
+    n_prod: int,
+    metric_key: str,
+    col_base_fmt: str,
+    macro_a: dict | None = None,
+    macro_b: dict | None = None,
+) -> pd.DataFrame:
+    """Per-item table with Model/Baseline/Δ interleaved per k.
+
+    Rows = items (Macro 平均 prepended when BOTH macro_a and macro_b are
+    given). Columns = ``f"{base} M"``, ``f"{base} B"``, ``f"{base} Δ"`` for
+    each ``k``, where ``base = col_base_fmt.format(k=k)``.
+
+    Δ for item rows is read from ``per_item_delta`` (already computed
+    upstream by build_comparison_result); Δ for the Macro row is computed
+    here as ``macro_a − macro_b`` since macro values aren't part of the
+    per-item delta dict.
+    """
+    def _row(m_a: dict, m_b: dict, m_d: dict | None) -> dict:
+        row: dict = {}
+        for k in ks:
+            lk = _k_to_lookup(k, n_prod)
+            key = f"{metric_key}@{lk}"
+            base = col_base_fmt.format(k=k)
+            a = m_a.get(key)
+            b = m_b.get(key)
+            if m_d is not None:
+                d = m_d.get(key)
+            else:
+                if a is None and b is None:
+                    d = None
+                else:
+                    d = (a or 0.0) - (b or 0.0)
+            row[f"{base} M"] = a
+            row[f"{base} B"] = b
+            row[f"{base} Δ"] = d
+        return row
+
+    data: dict = {}
+    if macro_a is not None and macro_b is not None:
+        data[_MACRO_LABEL] = _row(macro_a, macro_b, None)
+    all_items = list(per_item_a.keys()) + [
+        i for i in per_item_b.keys() if i not in per_item_a
+    ]
+    for item in all_items:
+        data[item] = _row(
+            per_item_a.get(item, {}),
+            per_item_b.get(item, {}),
+            per_item_delta.get(item, {}),
+        )
+    return pd.DataFrame(data).T
+
+
 def _per_item_recall_table(
     per_item: dict, ks: list, n_prod: int, macro_metrics: dict | None = None
 ) -> pd.DataFrame:
@@ -404,32 +461,19 @@ def build_baseline_section(
     comp = build_comparison_result(
         metrics, baseline_metrics, "Model", "Baseline"
     )
-    overall_a = comp["result_a"].get("overall", {}) or {}
-    overall_b = comp["result_b"].get("overall", {}) or {}
-    overall_delta = comp["overall_delta"]
-    overall_keys = sorted(set(overall_a) | set(overall_b) | set(overall_delta))
-    overall_tbl = pd.DataFrame(
-        {
-            "Model": [overall_a.get(k) for k in overall_keys],
-            "Baseline": [overall_b.get(k) for k in overall_keys],
-            "Delta": [overall_delta.get(k) for k in overall_keys],
-        },
-        index=overall_keys,
-    )
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
-    # _k_to_lookup handles a hypothetical "all" in guardrail_recall_k
-    # (defaults are numeric, but keep parity with the §3 guardrail).
     rec_ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
-    pid = comp.get("per_item_delta", {}) or {}
+    attr_ks = _resolve_display_k(
+        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
+    )
+
     tables: list[pd.DataFrame] = []
     table_titles: list[str] = []
 
-    # [1] popularity composition (prepended when purchase_counts available).
-    # Backward compat: silently omit when key missing or dict empty so older
-    # baseline_metrics shapes still render.
+    # [1] popularity composition (omitted when missing/empty for back-compat).
     pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
     if pcounts:
         sorted_items = sorted(
@@ -445,23 +489,51 @@ def build_baseline_section(
         tables.append(pop_df)
         table_titles.append("popularity 排名組成")
 
+    # [2] overall metrics: Model / Baseline / Delta.
+    overall_a = comp["result_a"].get("overall", {}) or {}
+    overall_b = comp["result_b"].get("overall", {}) or {}
+    overall_delta = comp["overall_delta"]
+    overall_keys = sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    overall_tbl = pd.DataFrame(
+        {
+            "Model": [overall_a.get(k) for k in overall_keys],
+            "Baseline": [overall_b.get(k) for k in overall_keys],
+            "Delta": [overall_delta.get(k) for k in overall_keys],
+        },
+        index=overall_keys,
+    )
     tables.append(overall_tbl)
     table_titles.append("overall metrics")
 
-    if pid and (baseline_metrics or {}).get("per_item"):
-        rec_rows = {
-            item: {
-                f"recall@{k} (per-item) Δ":
-                    md.get(f"hit_rate@{_k_to_lookup(k, n_prod)}")
-                for k in rec_ks
-            }
-            for item, md in pid.items()
-        }
-        tables.append(pd.DataFrame(rec_rows).T)
-        table_titles.append("per-item recall@k delta")
+    # [3] per-item compare tables — only when baseline has per_item.
+    per_item_a = comp["result_a"].get("per_item", {}) or {}
+    per_item_b = comp["result_b"].get("per_item", {}) or {}
+    per_item_delta = comp.get("per_item_delta", {}) or {}
+    macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
+    macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
+    if per_item_b:
+        for metric_key, col_fmt, ks, title in (
+            ("hit_rate", "recall@{k}", rec_ks,
+             "per-item recall@k (M/B/Δ)"),
+            ("map_attr", "map_attr@{k}", attr_ks,
+             "per-item map_attr@k (M/B/Δ)"),
+            ("ndcg_attr", "ndcg_attr@{k}", attr_ks,
+             "per-item ndcg_attr@k (M/B/Δ)"),
+        ):
+            tbl = _per_item_metric_compare_table(
+                per_item_a, per_item_b, per_item_delta,
+                ks, n_prod, metric_key, col_fmt,
+                macro_a=macro_a, macro_b=macro_b,
+            )
+            tables.append(tbl)
+            table_titles.append(title)
+
     return ReportSection(
         title="基準比較 Baseline",
-        description="Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)與 per-item recall@k delta。",
+        description=(
+            "Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)+ "
+            "per-item recall/map_attr/ndcg_attr(M/B/Δ)。"
+        ),
         tables=tables,
         table_titles=table_titles,
     )
