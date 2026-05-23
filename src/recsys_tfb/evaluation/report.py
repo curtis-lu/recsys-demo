@@ -53,9 +53,20 @@ def generate_html_report(
         ".metadata { background: #f0f4f8; padding: 16px; border-radius: 8px; margin-bottom: 24px; }",
         ".section { margin-bottom: 40px; }",
         ".description { color: #666; margin-bottom: 16px; }",
-        "nav { background: #f5f5f5; padding: 12px; border-radius: 4px; margin-bottom: 24px; }",
-        "nav a { margin-right: 16px; color: #0066cc; text-decoration: none; }",
+        "nav.toc { background: #f5f5f5; padding: 12px 20px; border-radius: 4px; margin-bottom: 24px; }",
+        "nav.toc strong { display: block; margin-bottom: 6px; color: #444; }",
+        "nav.toc ul { margin: 4px 0 0; padding-left: 20px; }",
+        "nav.toc li { margin: 3px 0; }",
+        "nav.toc a { color: #0066cc; text-decoration: none; }",
+        "nav.toc a:hover { text-decoration: underline; }",
         "details > summary { font-size: 1.5em; color: #555; cursor: pointer; margin: 24px 0 8px; }",
+        "#to-top { position: fixed; bottom: 24px; right: 24px; "
+        "background: rgba(0, 102, 204, 0.85); color: white; border: none; "
+        "border-radius: 50%; width: 44px; height: 44px; font-size: 20px; "
+        "cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.2); "
+        "opacity: 0; pointer-events: none; transition: opacity 0.2s; "
+        "z-index: 1000; }",
+        "#to-top.visible { opacity: 1; pointer-events: auto; }",
         "</style>",
         f"<script>{plotly_js}</script>",
         "</head><body>",
@@ -70,11 +81,16 @@ def generate_html_report(
             html_parts.append(f"<tr><th>{key}</th><td>{value}</td></tr>")
         html_parts.append("</table></div>")
 
-    # Navigation
-    html_parts.append("<nav>")
+    # Navigation (vertical TOC; 9+ sections need a scannable list)
+    html_parts.append('<nav class="toc">')
+    html_parts.append("<strong>目錄 / Sections</strong>")
+    html_parts.append("<ul>")
     for i, section in enumerate(sections):
         section_id = f"section-{i}"
-        html_parts.append(f'<a href="#{section_id}">{section.title}</a>')
+        html_parts.append(
+            f'<li><a href="#{section_id}">{section.title}</a></li>'
+        )
+    html_parts.append("</ul>")
     html_parts.append("</nav>")
 
     # Sections
@@ -100,6 +116,38 @@ def generate_html_report(
 
         html_parts.append("</details>" if section.collapsible else "</div>")
 
+    # Floating back-to-top button + JS handlers.
+    html_parts.append(
+        '<button id="to-top" title="Back to top" aria-label="Back to top">↑</button>'
+    )
+    html_parts.append("<script>")
+    html_parts.append(
+        "(function(){"
+        "var btn = document.getElementById('to-top');"
+        "window.addEventListener('scroll', function(){"
+        "btn.classList.toggle('visible', window.scrollY > 300);"
+        "});"
+        "btn.addEventListener('click', function(){"
+        "window.scrollTo({top: 0, behavior: 'smooth'});"
+        "});"
+        # Anchor jumping into a closed <details> should auto-open it,
+        # else the nav link visually 'does nothing' on collapsible sections.
+        "function openTargetDetails(){"
+        "var hash = location.hash;"
+        "if (!hash) return;"
+        "var el = document.querySelector(hash);"
+        "if (el && el.tagName === 'DETAILS') { el.open = true; }"
+        "}"
+        "document.querySelectorAll('nav.toc a').forEach(function(a){"
+        "a.addEventListener('click', function(){"
+        "setTimeout(openTargetDetails, 0);"
+        "});"
+        "});"
+        "window.addEventListener('hashchange', openTargetDetails);"
+        "openTargetDetails();"  # also runs on initial load if URL has hash
+        "})();"
+    )
+    html_parts.append("</script>")
     html_parts.append("</body></html>")
 
     return "\n".join(html_parts)
