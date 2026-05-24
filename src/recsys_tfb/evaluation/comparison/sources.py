@@ -64,4 +64,45 @@ def _load_model_version(
 def _load_external_hive(
     src: dict, snap_date: str, schema: dict, spark: SparkSession
 ) -> SparkDataFrame:
-    raise NotImplementedError("external_hive branch lands in Task 5")
+    table = src["table"]
+    cols = src["columns"]
+    time_col = schema["time"]
+    item_col = schema["item"]
+    score_col = schema["score"]
+    identity_cols = schema["identity_columns"]
+
+    raw = spark.table(table)
+    # Column rename: alias external names → our canonical schema names
+    df = raw.select(*[F.col(ext).alias(internal) for internal, ext in cols.items()])
+    df = df.filter(F.col(time_col).cast("string") == snap_date)
+    if df.isEmpty():
+        raise DataConsistencyError(
+            f"compare external_hive table={table!r} has no rows for snap_date={snap_date!r}"
+        )
+
+    mapping = src.get("prod_mapping", {}) or {}
+    policy = src.get("unmapped_policy", "fail")
+    seen_prods = {r[0] for r in df.select(item_col).distinct().collect()}
+    unmapped = seen_prods - set(mapping.keys())
+    if unmapped:
+        if policy == "fail":
+            raise DataConsistencyError(
+                f"(B2) compare external prods absent from prod_mapping: "
+                f"{sorted(unmapped)}. Either add to prod_mapping or set "
+                "unmapped_policy=drop."
+            )
+        if policy == "drop":
+            logger.warning(
+                "Dropping %d unmapped prods (unmapped_policy=drop): %s",
+                len(unmapped), sorted(unmapped),
+            )
+            df = df.filter(F.col(item_col).isin(list(mapping.keys())))
+        else:
+            raise RuntimeError(f"unknown unmapped_policy={policy!r}")
+
+    df = df.replace(mapping, subset=[item_col])
+    # N:1 collapse — multiple ext prods may map to the same internal prod;
+    # aggregate to (cust, snap, prod) with max(score) (best-rank semantic).
+    df = df.groupBy(*identity_cols).agg(F.max(score_col).alias(score_col))
+    logger.info("Loaded compare predictions: external table=%s rows=%d", table, df.count())
+    return df
