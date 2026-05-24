@@ -64,15 +64,23 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 # 2. Dataset：一致性閘 → 抽樣切分 → 前處理 → 各 split model_input（版本由參數自動推導）
 python -m recsys_tfb dataset --env production
 
-# 3. Training：LightGBM + Optuna HPO，產出 versioned model（不會自動 promote）
+# 3. Training：LightGBM + Optuna HPO，產出 versioned model + test-set 預測寫入
+#    ml_recsys.training_eval_predictions（不會自動 promote）
 python -m recsys_tfb training --env production
 
-# 4. 手動 promote：建立 / 更新 data/models/best symlink
+# 4. Evaluation（post-training）：用 training 剛產出的 test-set 預測做模型驗收
+#    讀 ml_recsys.training_eval_predictions（而非 inference 的 ranked_predictions）。
+#    產出 report.html 並把 eval_predictions 持久化到 ml_recsys.eval_predictions
+#    （後續 --compare-only 會用到）。決定要不要 promote 就看這份報表。
+python -m recsys_tfb evaluation --env production --post-training --model-version <model_version>
+
+# 5. 手動 promote：建立 / 更新 data/models/best symlink
 python scripts/promote_model.py <model_version>
 
-# 5. Inference / Baselines / Evaluation
+# 6. Inference：對線上 snap_date 打分，寫入 ranked_predictions
 python -m recsys_tfb inference  --env production
-python -m recsys_tfb baselines  --env production
+
+# 7. Evaluation（線上監控）：讀 ranked_predictions 算指標，產 report.html
 python -m recsys_tfb evaluation --env production
 ```
 
@@ -86,10 +94,48 @@ python -m recsys_tfb evaluation --env production
 | `dataset` | `--env/-e` | 每次都從參數重算版本，無版本選項 |
 | `training` | `--env/-e`、`--base-dataset-version`、`--train-variant`、`--calibration-variant` | 三個 version 選項預設為對應 `latest` symlink |
 | `inference` | `--env/-e`、`--model-version` | 未指定 `--model-version` 時讀 `models/best` |
-| `evaluation` | `--env/-e`、`--model-version`、`--post-training` | `--post-training` 讀 `training_eval_predictions`，否則讀 `ranked_predictions` |
-| `baselines` | `--env/-e` | — |
+| `evaluation` | `--env/-e`、`--model-version`、`--post-training`、`--compare <key>`、`--compare-only <key>` | `--post-training` 讀 `training_eval_predictions`（驗收新訓 model），否則讀 `ranked_predictions`（線上監控）；`--compare` / `--compare-only` 詳見下節 |
 
 `--env` 預設值為 `local`；公司環境請明確帶 `--env production`。各 pipeline 在 CLI entry 會先跑 `validate_schema_config` 與 `validate_config_consistency`，任何設定矛盾會在跑 pipeline 前一次列出並以 exit code 1 結束。操作細節（restart、promote 規則、evaluation 兩種模式）見 [docs/pipeline-runbook.md](docs/pipeline-runbook.md)。
+
+### Evaluation 模式
+
+`evaluation` 同時負責**新模型驗收**與**線上監控**，兩種來源用 `--post-training` 切換；另外可選擇性開啟**模型比較**。共有四種使用情境：
+
+| 情境 | 指令 | 讀取的預測來源 | 產出 | 何時用 |
+|---|---|---|---|---|
+| 新模型驗收（標準流程 §4 步驟） | `evaluation --post-training --model-version <mv>` | Hive `ml_recsys.training_eval_predictions`（training pipeline 寫入的 test-set 預測） | `report.html`；同時把 `eval_predictions` 寫入 Hive `ml_recsys.eval_predictions`（供之後 `--compare-only` 重用） | training 完成後、promote 之前。看完報表決定要不要 `promote_model.py` |
+| 線上監控 | `evaluation` | Hive `ml_recsys.ranked_predictions`（inference 寫入） | `report.html` + `eval_predictions` 持久化 | inference 跑完、要回頭看當期實際分數分布／recall 時 |
+| 比較（一輪內同時跑） | `evaluation [--post-training] --compare <key>` | 同上（依 `--post-training`） | `report.html` + `report_comparison.html`（兩個 model 並排） | 想在跑當期 evaluation 的同時，也看新舊／A/B 兩個 model 的差異 |
+| 比較（用既有結果） | `evaluation --compare-only <key>` | Hive `ml_recsys.eval_predictions`（**先前** evaluation 已持久化的當期結果） | 只有 `report_comparison.html` | 當期 `report.html` 已經跑過、只想多比一個 source；避免重算指標 |
+
+`<key>` 必須事先在 `conf/base/parameters_evaluation.yaml` 的 `evaluation.compare_sources` 註冊。例（檔內已附說明）：
+
+```yaml
+evaluation:
+  compare_sources:
+    v_prev:                              # CLI flag 帶這個 key
+      kind: model_version                # 比另一個我們自己的 model_version
+      model_version: "2026-01-31_abcdef12_34567890"
+      source: training_eval_predictions  # 或 eval_predictions
+      label: "v_prev (上一版)"
+    ext_proj_x:
+      kind: external_hive                # 比外部專案的預測表
+      table: other_project.predictions
+      label: "External Project X"
+      columns: {cust_id: customer_id, snap_date: as_of_date,
+                prod_name: item_code, score: pred_score}
+      prod_mapping: {ext_fund_a: fund_stock, ext_fund_b: fund_bond}
+      unmapped_policy: fail              # 或 drop
+```
+
+行為要點：
+
+- `--compare` 與 `--compare-only` 互斥；同時帶兩個會 fail-loud。
+- `--compare-only` 要求 Hive `ml_recsys.eval_predictions` 已經有對應 `(snap_date, model_version)` 分區（即同一個 `--model-version` 之前已用普通 `evaluation` 或 `evaluation --post-training` 跑過）；沒有時會 fail-loud，訊息會告訴你要先跑哪個指令。
+- 比較會把兩邊 restrict 成共同的 `(cust_id, snap_date, prod_name)` 集合再重排序；覆蓋率不滿時報表會顯示 partial-coverage 警告但不會失敗。
+- 兩個 report 都寫到 `data/evaluation/<model_version>/<snap_date>/`：`report.html` 與 `report_comparison.html`。
+- popularity baseline 是 `evaluation` pipeline 內部的一個節點（`compute_baseline_metrics`），由 `evaluation.baseline.lookback_months` 控制，與 evaluation 一起執行、寫進同一份 `report.html` 的 baseline 段。
 
 ---
 
@@ -105,7 +151,7 @@ python -m recsys_tfb evaluation --env production
 
 ### Pipeline 清單（`pipelines/__init__.py` 註冊）
 
-`dataset`、`training`、`inference`、`evaluation`、`baselines`。Source ETL 走獨立的 `SQLRunner`（不在上述 registry，由 `feature_etl` / `label_etl` / `sample_pool_etl` 指令驅動）。
+`dataset`、`training`、`inference`、`evaluation`。Source ETL 走獨立的 `SQLRunner`（不在上述 registry，由 `feature_etl` / `label_etl` / `sample_pool_etl` 指令驅動）。
 
 ### 資料流與 lineage（含 pipeline 與 scripts）
 
@@ -144,21 +190,26 @@ python -m recsys_tfb evaluation --env production
                 ▼
         scripts/promote_model.py  (手動：比對 evaluation_results.json mAP)
                 │ data/models/best -> <model_version>  (symlink)
-                ▼
-            ┌──────────────────┐        ┌──────────────────┐
-            │ inference        │        │ baselines        │
-            │ → ranked_        │        │ → baseline_      │
-            │   predictions    │        │   metrics        │
-            └──────────────────┘        └──────────────────┘
-                │ ranked_predictions            │ baseline_metrics
-                └───────────────┬───────────────┘
-                                ▼
-            ┌──────────────────────────────────────────────┐
-            │ evaluation  (prepare_eval_data → compute_     │
-            │  metrics → report.html)                       │
-            │  預設讀 ranked_predictions；--post-training    │
-            │  改讀 training_eval_predictions               │
-            └──────────────────────────────────────────────┘
+                │                                              training_eval_predictions
+                │                                              (Hive — training 寫入 test-set 預測)
+                │                                                     │
+                ▼                                                     │
+            ┌──────────────────┐                                       │
+            │ inference        │                                       │
+            │ → ranked_        │                                       │
+            │   predictions    │                                       │
+            └──────────────────┘                                       │
+                │ ranked_predictions                                   │
+                ▼                                                     ▼
+            ┌──────────────────────────────────────────────────────────────┐
+            │ evaluation                                                   │
+            │  • 預設讀 ranked_predictions（線上監控）                       │
+            │  • --post-training 讀 training_eval_predictions（新模型驗收）  │
+            │  • 內含 popularity baseline（compute_baseline_metrics）       │
+            │  • 持久化 eval_predictions 到 Hive ml_recsys.eval_predictions │
+            │  • --compare / --compare-only：產 report_comparison.html      │
+            │  prepare_eval_data → compute_metrics → report.html            │
+            └──────────────────────────────────────────────────────────────┘
 ```
 
 Lineage 對照表（artifact → 產生者 → 消費者 → 對應版本）：
@@ -167,16 +218,17 @@ Lineage 對照表（artifact → 產生者 → 消費者 → 對應版本）：
 |---|---|---|---|
 | `data/profiling/<stem>_categorical.yaml` | `scripts/suggest_categorical_cols.py` | 人工貼回 `parameters_dataset.yaml` | 無（離線輔助）|
 | `data/profiling/sampling_overrides_editor.html` / `_export.json` | `scripts/sampling_overrides_editor.py profile` / 瀏覽器 | `scripts/sampling_overrides_editor.py to-yaml` | 無（離線輔助）|
-| `feature_table` / `label_table` / `sample_pool`（Hive）| `feature_etl` / `label_etl` / `sample_pool_etl` | `dataset`、`baselines`、`evaluation` | 由上游 snap_date 分區 |
+| `feature_table` / `label_table` / `sample_pool`（Hive）| `feature_etl` / `label_etl` / `sample_pool_etl` | `dataset`、`evaluation` | 由上游 snap_date 分區 |
 | `preprocessor` / `category_mappings` / `val/test_model_input` | `dataset` | `training` | `base_dataset_version` |
 | `train/train_dev_model_input` | `dataset` | `training` | `base` + `train_variant_id` |
 | `calibration_model_input` | `dataset`（calibration 啟用）| `training` | `base` + `calibration_variant_id` |
 | `data/models/<mv>/{model.txt,best_params,evaluation_results,manifest}` | `training` | `promote_model.py`、`inference`、`evaluation` | `model_version` |
 | `training_eval_predictions`（Hive）| `training` | `evaluation --post-training`、`compute_test_mAP_spark` | `model_version` |
 | `data/models/best`（symlink）| `scripts/promote_model.py`（手動）| `inference` / `evaluation`（未指定 `--model-version` 時）| 指向某 `model_version` |
-| `ranked_predictions` / `score_table`（Hive）| `inference` | `evaluation`（預設）| `model_version` |
-| `baseline_metrics` | `baselines` | `evaluation`（報表 baseline 段）| 由 eval snap_date |
+| `ranked_predictions` / `score_table`（Hive）| `inference` | `evaluation`（預設模式）| `model_version` |
+| `ml_recsys.eval_predictions`（Hive）| `evaluation`（每次都 persist）| `evaluation --compare-only` | `(model_version, snap_date)` 分區 |
 | `data/evaluation/<mv>/<snap_date>/report.html` | `evaluation` | 人工 / 監控 | `model_version` |
+| `data/evaluation/<mv>/<snap_date>/report_comparison.html` | `evaluation --compare` / `--compare-only` | 人工（A/B 對比） | `model_version` |
 
 ---
 
