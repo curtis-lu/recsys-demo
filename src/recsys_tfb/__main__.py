@@ -9,7 +9,12 @@ from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.logging import RunContext, setup_logging
 from recsys_tfb.core.runner import Runner
-from recsys_tfb.core.consistency import validate_config_consistency
+from recsys_tfb.core.consistency import (
+    validate_config_consistency,
+    compare_mutual_exclusive_errors,
+    compare_source_key_exists,
+    ConfigConsistencyError,
+)
 from recsys_tfb.core.schema import (
     get_schema_for_hash,
     validate_schema_config,
@@ -581,6 +586,14 @@ def evaluation(
         False, "--post-training",
         help="Read predictions from training_eval_predictions (default: ranked_predictions for monitoring)",
     ),
+    compare: Optional[str] = typer.Option(
+        None, "--compare",
+        help="Compare-source key from evaluation.compare_sources (produces report_comparison.html alongside report.html)",
+    ),
+    compare_only: Optional[str] = typer.Option(
+        None, "--compare-only",
+        help="Like --compare, but skip prepare/compute/baseline/report and read eval_predictions from Hive (only produces report_comparison.html)",
+    ),
 ):
     """Run the evaluation pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -607,9 +620,23 @@ def evaluation(
     eval_config = params_eval.get("evaluation", params_eval)
     snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
 
+    # A13: mutual-exclusive
+    errs = compare_mutual_exclusive_errors(compare, compare_only)
+    if errs:
+        raise ConfigConsistencyError("\n".join(errs))
+
+    # A12: resolve key → source dict (also handles None gracefully)
+    compare_key = compare or compare_only
+    compare_source_dict = compare_source_key_exists(params_eval, compare_key)
+    if compare_source_dict is not None:
+        # Stage the dict where the pipeline nodes read it from
+        params_eval.setdefault("evaluation", {})["compare"] = compare_source_dict
+
     logger.info(
-        "Evaluation — model_version: %s (%s), post_training: %s",
+        "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
         mv, model_version if model_version else "best", post_training,
+        compare_key or "none",
+        " (compare-only)" if compare_only else "",
     )
     logger.info("Evaluation — snap_date: %s", snap_date)
 
@@ -621,7 +648,11 @@ def evaluation(
         "snap_date": snap_date,
     }
 
-    pipeline_kwargs = {"post_training": post_training}
+    pipeline_kwargs = {
+        "post_training": post_training,
+        "compare_source": compare_source_dict,
+        "compare_only": bool(compare_only),
+    }
     _execute_pipeline("evaluation", pipeline_kwargs, runtime_params, config, params, env)
 
     # Post run
