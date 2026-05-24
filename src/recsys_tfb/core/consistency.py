@@ -534,47 +534,47 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
     errs: list[str] = []
     for key, src in sources.items():
         if not isinstance(src, dict):
-            errs.append(f"compare_sources[{key!r}] must be a dict, got {type(src).__name__}")
+            errs.append(f"(A11) compare_sources[{key!r}] must be a dict, got {type(src).__name__}")
             continue
         if "kind" not in src:
-            errs.append(f"compare_sources[{key!r}] missing 'kind'")
+            errs.append(f"(A11) compare_sources[{key!r}] missing 'kind'")
             continue
         kind = src["kind"]
         if kind not in _COMPARE_KINDS:
             errs.append(
-                f"compare_sources[{key!r}].kind={kind!r} not in {sorted(_COMPARE_KINDS)}"
+                f"(A11) compare_sources[{key!r}].kind={kind!r} not in {sorted(_COMPARE_KINDS)}"
             )
             continue
         if "label" not in src:
-            errs.append(f"compare_sources[{key!r}] missing 'label'")
+            errs.append(f"(A11) compare_sources[{key!r}] missing 'label'")
         if kind == "model_version":
             if "model_version" not in src:
-                errs.append(f"compare_sources[{key!r}] kind=model_version missing 'model_version'")
+                errs.append(f"(A11) compare_sources[{key!r}] kind=model_version missing 'model_version'")
             if "columns" in src:
                 errs.append(
-                    f"compare_sources[{key!r}] kind=model_version must not declare 'columns' "
+                    f"(A11) compare_sources[{key!r}] kind=model_version must not declare 'columns' "
                     "(same-stack source uses ranked_predictions schema)"
                 )
             if "prod_mapping" in src:
                 errs.append(
-                    f"compare_sources[{key!r}] kind=model_version must not declare 'prod_mapping' "
+                    f"(A11) compare_sources[{key!r}] kind=model_version must not declare 'prod_mapping' "
                     "(same-stack source uses identical prod universe)"
                 )
         elif kind == "external_hive":
             if "table" not in src:
-                errs.append(f"compare_sources[{key!r}] kind=external_hive missing 'table'")
+                errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'table'")
             cols = src.get("columns", {}) or {}
             missing = _REQUIRED_COLUMNS - set(cols.keys())
             if missing:
                 errs.append(
-                    f"compare_sources[{key!r}].columns missing required keys: {sorted(missing)}"
+                    f"(A11) compare_sources[{key!r}].columns missing required keys: {sorted(missing)}"
                 )
             if not src.get("prod_mapping"):
-                errs.append(f"compare_sources[{key!r}] kind=external_hive missing 'prod_mapping'")
+                errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'prod_mapping'")
             policy = src.get("unmapped_policy", "fail")
             if policy not in _VALID_UNMAPPED:
                 errs.append(
-                    f"compare_sources[{key!r}].unmapped_policy={policy!r} "
+                    f"(A11) compare_sources[{key!r}].unmapped_policy={policy!r} "
                     f"not in {sorted(_VALID_UNMAPPED)}"
                 )
     return errs

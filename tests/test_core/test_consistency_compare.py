@@ -102,6 +102,12 @@ class TestA11_WellFormed:
         errs = compare_source_well_formed_errors(p)
         assert any("unmapped_policy" in e for e in errs)
 
+    def test_source_not_a_dict(self):
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["x"] = "bad-string-not-dict"
+        errs = compare_source_well_formed_errors(p)
+        assert any("must be a dict" in e for e in errs)
+
 
 class TestA12_KeyExists:
     def test_none_returns_none(self):
