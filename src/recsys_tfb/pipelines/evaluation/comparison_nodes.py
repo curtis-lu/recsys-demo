@@ -9,13 +9,12 @@ returns the next handle.
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.comparison.alignment import common_universe as _common_universe
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.comparison.restrict import restrict_to_common as _restrict
 from recsys_tfb.evaluation.comparison.sources import load_compare_predictions as _load_compare
@@ -54,11 +53,18 @@ def restrict_to_common(
     a_cust_full = eval_predictions.select(cust_col).distinct().count()
     b_cust_full = compare_predictions_raw.select(cust_col).distinct().count()
 
+    # Compute the conceptual intersection sets for coverage — these are
+    # the "common universe" sizes (cust intersection × prod intersection).
+    # Post-restrict counts may be smaller when A/B don't fully cover the
+    # cross product.
+    common_cust, common_prod = _common_universe(
+        eval_predictions, compare_predictions_raw, cust_col, item_col
+    )
+
     a_common, b_common = _restrict(
         eval_predictions, compare_predictions_raw, label_table, parameters
     )
 
-    common_prods = {r[0] for r in a_common.select(item_col).distinct().collect()}
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
     coverage_partial = {
         "kind_a": "model_version",
@@ -70,10 +76,10 @@ def restrict_to_common(
         "n_cust_B_full": b_cust_full,
         "n_prod_A_full": len(a_prods_full),
         "n_prod_B_full": len(b_prods_full),
-        "n_cust_common": a_common.select(cust_col).distinct().count(),
-        "n_prod_common": len(common_prods),
-        "dropped_prods_A": sorted(a_prods_full - common_prods),
-        "dropped_prods_B": sorted(b_prods_full - common_prods),
+        "n_cust_common": len(common_cust),
+        "n_prod_common": len(common_prod),
+        "dropped_prods_A": sorted(a_prods_full - common_prod),
+        "dropped_prods_B": sorted(b_prods_full - common_prod),
     }
     return a_common, b_common, coverage_partial
 
@@ -127,7 +133,7 @@ def persist_eval_predictions(
         # Test envs without Hive metastore — log and continue. Production
         # always has Hive; this branch never fires there.
         msg = str(e).lower()
-        if "hive" in msg or "metastore" in msg or "database" in msg:
+        if "hive" in msg or "metastore" in msg:
             logger.warning("persist_eval_predictions skipped (no Hive): %s", e)
             return f"persisted-skipped:{snap_date}:{mv}"
         raise

@@ -629,8 +629,11 @@ def evaluation(
     compare_key = compare or compare_only
     compare_source_dict = compare_source_key_exists(params_eval, compare_key)
     if compare_source_dict is not None:
-        # Stage the dict where the pipeline nodes read it from
-        params_eval.setdefault("evaluation", {})["compare"] = compare_source_dict
+        # Stage into the merged `params` dict that pipeline nodes actually read.
+        # NOTE: do NOT only mutate `params_eval` — it works today by dict-reference
+        # sharing in _deep_merge, but breaks silently if `evaluation:` ever appears
+        # in another parameters_*.yaml.
+        params.setdefault("evaluation", {})["compare"] = compare_source_dict
 
     logger.info(
         "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",

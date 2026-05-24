@@ -122,8 +122,6 @@ def test_b4_load_from_hive_returns_partition_when_present(spark):
         "model_version": "MV_X",
     }
     persist_result = persist_eval_predictions(eval_pred, params)
-    if persist_result.startswith("persisted-skipped"):
-        pytest.skip("requires Hive metastore: persist_eval_predictions skipped in this test env")
     out = load_eval_predictions_from_hive(params)
     rows = [(r["cust_id"], r["prod_name"], r["score"]) for r in out.collect()]
     assert rows == [("c1", "p1", 0.9)]
