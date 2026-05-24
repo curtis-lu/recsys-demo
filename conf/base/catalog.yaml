@@ -196,6 +196,10 @@ evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html
 
+evaluation_comparison_report:
+  type: TextDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/report_comparison.html
+
 # Note: training cache 由 training/nodes.py::_materialize_parquet_handle
 # 直接從 Hive table location `copyToLocal` 搬到 driver-local parquet，不經
 # catalog 持久化；cache node outputs（ParquetHandle）走 framework

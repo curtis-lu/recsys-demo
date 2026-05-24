@@ -67,3 +67,39 @@ evaluation:
       include_calibration: true
       n_calibration_bins: 10
       sample_rows: null          # toPandas row cap for diagnostics; null = no sampling
+
+  # Compare sources — populated entries unlock `evaluation --compare <key>` and
+  # `--compare-only <key>`. Empty by default; remove the leading `#` on the
+  # entries you actually use. Each key (`v_prev`, `ext_proj_x`, ...) is the
+  # value passed on the CLI flag.
+  #
+  # Schema (validated by core.consistency.A11):
+  #   kind:           "model_version" | "external_hive"     (required)
+  #   label:          display name in report_comparison.html (required)
+  #   model_version:  required when kind=model_version
+  #   table:          required when kind=external_hive (Hive-qualified)
+  #   columns:        required when kind=external_hive — left=our schema,
+  #                   right=external column name (cust_id/snap_date/prod_name/score)
+  #   prod_mapping:   required when kind=external_hive — N:1 map of external
+  #                   prod_name → our prod_name; A6-known values on the right
+  #   unmapped_policy: "fail" (default — raise on prod outside mapping) |
+  #                    "drop" (filter and log warning)
+  compare_sources: {}
+  #compare_sources:
+  #  v_prev:
+  #    kind: model_version
+  #    model_version: "2026-01-31_abcdef12_34567890"
+  #    label: "v_prev (上一版)"
+  #  ext_proj_x:
+  #    kind: external_hive
+  #    table: other_project.predictions
+  #    label: "External Project X"
+  #    columns:
+  #      cust_id: customer_id
+  #      snap_date: as_of_date
+  #      prod_name: item_code
+  #      score: pred_score
+  #    prod_mapping:
+  #      ext_fund_a: fund_stock
+  #      ext_fund_b: fund_bond
+  #    unmapped_policy: fail
