@@ -77,6 +77,11 @@ evaluation:
   #   kind:           "model_version" | "external_hive"     (required)
   #   label:          display name in report_comparison.html (required)
   #   model_version:  required when kind=model_version
+  #   source:         optional when kind=model_version —
+  #                   "ranked_predictions" (default; inference output) |
+  #                   "training_eval_predictions" (training pipeline's test-set
+  #                   predictions; lets `--compare` work in `--post-training`
+  #                   mode without re-running inference for either side)
   #   table:          required when kind=external_hive (Hive-qualified)
   #   columns:        required when kind=external_hive — left=our schema,
   #                   right=external column name (cust_id/snap_date/prod_name/score)

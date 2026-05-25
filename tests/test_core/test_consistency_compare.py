@@ -108,6 +108,40 @@ class TestA11_WellFormed:
         errs = compare_source_well_formed_errors(p)
         assert any("must be a dict" in e for e in errs)
 
+    def test_model_version_source_default_ok(self):
+        """Omitted `source` field defaults to ranked_predictions — no error."""
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["v_prev"] = {
+            "kind": "model_version", "model_version": "v1", "label": "X",
+        }
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_model_version_source_training_eval_ok(self):
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["v_prev"] = {
+            "kind": "model_version", "model_version": "v1", "label": "X",
+            "source": "training_eval_predictions",
+        }
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_model_version_source_ranked_predictions_ok(self):
+        """Explicit `source: ranked_predictions` (matches the default) is accepted."""
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["v_prev"] = {
+            "kind": "model_version", "model_version": "v1", "label": "X",
+            "source": "ranked_predictions",
+        }
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_model_version_source_unknown_raises(self):
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["v_prev"] = {
+            "kind": "model_version", "model_version": "v1", "label": "X",
+            "source": "score_table",
+        }
+        errs = compare_source_well_formed_errors(p)
+        assert any("source" in e and "score_table" in e for e in errs)
+
 
 class TestA12_KeyExists:
     def test_none_returns_none(self):
