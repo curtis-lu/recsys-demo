@@ -54,11 +54,13 @@ Layer 1 — config-static (implemented here; aggregated by
   ``segment_columns_without_source``.
 * A11 — every ``evaluation.compare_sources[*]`` is well-formed:
   ``kind`` ∈ {model_version, external_hive}; ``label`` required; ranked
-  by-kind required fields (``model_version`` for model_version;
-  ``table`` + ``columns`` (cust_id/snap_date/prod_name/score) +
-  ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for external_hive);
-  ``model_version`` kind must NOT declare ``columns``/``prod_mapping``
-  (config leak guard). Predicate: ``compare_source_well_formed_errors``.
+  by-kind required fields (``model_version`` for model_version, optional
+  ``source`` ∈ {ranked_predictions, training_eval_predictions} — default
+  ranked_predictions; ``table`` + ``columns`` (cust_id/snap_date/prod_name/
+  score) + ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
+  external_hive); ``model_version`` kind must NOT declare
+  ``columns``/``prod_mapping`` (config leak guard). Predicate:
+  ``compare_source_well_formed_errors``.
 * A12 — ``--compare X`` / ``--compare-only X`` resolves to a key in
   ``compare_sources``. Predicate: ``compare_source_key_exists`` (raises
   ``ConfigConsistencyError`` directly; not aggregated by validate).
@@ -521,6 +523,10 @@ def item_coverage_errors(
 _COMPARE_KINDS = {"model_version", "external_hive"}
 _REQUIRED_COLUMNS = {"cust_id", "snap_date", "prod_name", "score"}
 _VALID_UNMAPPED = {"fail", "drop"}
+# Same-stack Hive tables a model_version compare source may read from.
+# Mirror of evaluation.comparison.sources.MODEL_VERSION_SOURCES; A11 is the
+# config-static gate, the loader checks again at read time.
+_VALID_MODEL_VERSION_SOURCES = {"ranked_predictions", "training_eval_predictions"}
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:
@@ -559,6 +565,11 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
                 errs.append(
                     f"(A11) compare_sources[{key!r}] kind=model_version must not declare 'prod_mapping' "
                     "(same-stack source uses identical prod universe)"
+                )
+            if "source" in src and src["source"] not in _VALID_MODEL_VERSION_SOURCES:
+                errs.append(
+                    f"(A11) compare_sources[{key!r}].source={src['source']!r} "
+                    f"not in {sorted(_VALID_MODEL_VERSION_SOURCES)}"
                 )
         elif kind == "external_hive":
             if "table" not in src:

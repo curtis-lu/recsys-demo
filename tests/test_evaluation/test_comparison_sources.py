@@ -63,6 +63,73 @@ def test_missing_compare_key_raises(spark):
         load_compare_predictions(p, spark)
 
 
+@pytest.fixture
+def training_eval_predictions_view(spark):
+    df = spark.createDataFrame(
+        [
+            ("c1", "2026-01-31", "p1", 0.4, "MV_A"),
+            ("c1", "2026-01-31", "p2", 0.6, "MV_A"),
+            ("c2", "2026-01-31", "p1", 0.3, "MV_A"),
+        ],
+        ["cust_id", "snap_date", "prod_name", "score", "model_version"],
+    )
+    df.createOrReplaceTempView("training_eval_predictions")
+    yield
+    spark.catalog.dropTempView("training_eval_predictions")
+
+
+def test_model_version_source_training_eval(spark, training_eval_predictions_view):
+    """source: training_eval_predictions reads from TEP table, not ranked_predictions.
+
+    Catches the regression where --post-training compare incorrectly required
+    inference to populate ranked_predictions for both sides.
+    """
+    p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "training_eval_predictions"
+    out = load_compare_predictions(p, spark)
+    rows = sorted((r["cust_id"], r["prod_name"], r["score"]) for r in out.collect())
+    assert rows == [("c1", "p1", 0.4), ("c1", "p2", 0.6), ("c2", "p1", 0.3)]
+
+
+def test_model_version_source_unknown_raises(spark, ranked_predictions_view):
+    """Belt-and-braces: loader fails loud even if A11 was bypassed."""
+    p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "score_table"
+    with pytest.raises(DataConsistencyError, match="score_table"):
+        load_compare_predictions(p, spark)
+
+
+def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
+    """When hive.db is set, loader prefixes the table name (production path).
+
+    The previous bare-name code worked in tests (temp views) and on YARN-style
+    clusters with a default DB, but failed on dev-cluster local mode where no
+    default DB is configured.
+    """
+    p = _params_for_mv("MV_A")
+    p["hive"] = {"db": "ml_recsys"}
+    seen = []
+    real_table = spark.table
+
+    def spy_table(name):
+        seen.append(name)
+        # Strip the prefix so the temp view (registered as bare name) resolves.
+        return real_table(name.split(".", 1)[-1])
+
+    monkeypatch.setattr(spark, "table", spy_table)
+    # Need a view to read — register and forward via the spy.
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, "MV_A")],
+        ["cust_id", "snap_date", "prod_name", "score", "model_version"],
+    )
+    df.createOrReplaceTempView("ranked_predictions")
+    try:
+        load_compare_predictions(p, spark)
+    finally:
+        spark.catalog.dropTempView("ranked_predictions")
+    assert seen == ["ml_recsys.ranked_predictions"]
+
+
 def _params_for_ext(snap: str = "2026-01-31", policy: str = "fail") -> dict:
     return {
         "schema": {

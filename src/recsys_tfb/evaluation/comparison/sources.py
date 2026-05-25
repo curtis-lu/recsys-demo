@@ -1,8 +1,12 @@
 """Load Model B raw predictions for 2-way comparison.
 
 Two source kinds:
-  * model_version  — read ``ranked_predictions`` filtered by ``model_version``
-  * external_hive  — read external Hive table with column rename + prod_mapping
+  * model_version  — read a same-stack Hive table filtered by ``model_version``.
+    Defaults to ``ranked_predictions`` (inference output); set
+    ``source: training_eval_predictions`` to read the training pipeline's
+    test-set predictions instead — useful when comparing two versions in
+    ``--post-training`` mode without re-running inference.
+  * external_hive  — read external Hive table with column rename + prod_mapping.
 
 The full source dict is staged at ``parameters['evaluation']['compare']`` by
 the CLI dispatcher (``__main__.py``).
@@ -35,29 +39,52 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
         raise RuntimeError("evaluation.snap_date missing")
 
     schema = get_schema(parameters)
+    # Empty/missing hive.db → bare table name (the loader resolves via Spark's
+    # current database, including registered temp views — used by unit tests).
+    # Production sets hive.db=ml_recsys; dev-cluster local mode requires the
+    # qualified name because no default database is set in spark.sql.catalog.
+    hive_db = ((parameters.get("hive") or {}).get("db") or "").strip() or None
     kind = src.get("kind")
     if kind == "model_version":
-        return _load_model_version(src, snap_date, schema, spark)
+        return _load_model_version(src, snap_date, schema, spark, hive_db)
     if kind == "external_hive":
         return _load_external_hive(src, snap_date, schema, spark)
     raise RuntimeError(f"unknown compare source kind={kind!r}")
 
 
+# Hive tables allowed as model_version compare source. Both share the
+# (cust_id, snap_date, prod_name, score, model_version) projection used by
+# restrict_to_common. Kept here so the loader can fail-loud even if A11
+# validation was bypassed (e.g. in tests).
+MODEL_VERSION_SOURCES = ("ranked_predictions", "training_eval_predictions")
+
+
 def _load_model_version(
-    src: dict, snap_date: str, schema: dict, spark: SparkSession
+    src: dict, snap_date: str, schema: dict, spark: SparkSession,
+    hive_db: str | None,
 ) -> SparkDataFrame:
     mv = src["model_version"]
+    source = src.get("source", "ranked_predictions")
+    if source not in MODEL_VERSION_SOURCES:
+        raise DataConsistencyError(
+            f"compare source={source!r} not in {MODEL_VERSION_SOURCES}"
+        )
+    table_name = f"{hive_db}.{source}" if hive_db else source
     time_col = schema["time"]
     df = (
-        spark.table("ranked_predictions")
+        spark.table(table_name)
         .filter(F.col("model_version") == mv)
         .filter(F.col(time_col).cast("string") == snap_date)
     )
     if df.isEmpty():
         raise DataConsistencyError(
-            f"compare model_version={mv!r} has no rows for snap_date={snap_date!r}"
+            f"compare model_version={mv!r} has no rows for snap_date={snap_date!r} "
+            f"in source={source!r}"
         )
-    logger.info("Loaded compare predictions: model_version=%s rows=%d", mv, df.count())
+    logger.info(
+        "Loaded compare predictions: table=%s model_version=%s rows=%d",
+        table_name, mv, df.count(),
+    )
     return df
 
 
