@@ -115,33 +115,6 @@ def persist_eval_predictions(eval_predictions: SparkDataFrame) -> SparkDataFrame
     return eval_predictions
 
 
-def load_eval_predictions_from_hive(parameters: dict) -> SparkDataFrame:
-    """For --compare-only mode: read previously-persisted eval_predictions.
-
-    Raises (B4) when the matching (snap_date, model_version) partition is
-    absent — message tells the user to run evaluation first.
-    """
-    schema = get_schema(parameters)
-    eval_params = parameters.get("evaluation", {}) or {}
-    snap_date = str(eval_params.get("snap_date") or "").strip()
-    mv = parameters.get("model_version", "unknown")
-    spark = get_or_create_spark_session()
-
-    df = (
-        spark.table("ml_recsys.eval_predictions")
-        .filter(F.col(schema["time"]).cast("string") == snap_date)
-        .filter(F.col("model_version") == mv)
-    )
-    if df.isEmpty():
-        raise DataConsistencyError(
-            f"(B4) ml_recsys.eval_predictions has no partition for "
-            f"snap_date={snap_date!r} model_version={mv!r}. "
-            "Run `python -m recsys_tfb evaluation` (with or without --compare) "
-            "first to populate the partition."
-        )
-    return df.drop("model_version")
-
-
 def validate_enriched_eval_predictions_present(
     enriched_eval_predictions: SparkDataFrame,
     parameters: dict,
