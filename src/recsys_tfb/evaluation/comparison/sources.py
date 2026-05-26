@@ -2,10 +2,12 @@
 
 Two source kinds:
   * model_version  — read a same-stack Hive table filtered by ``model_version``.
-    Defaults to ``ranked_predictions`` (inference output); set
-    ``source: training_eval_predictions`` to read the training pipeline's
-    test-set predictions instead — useful when comparing two versions in
-    ``--post-training`` mode without re-running inference.
+    Defaults to ``enriched_eval_predictions`` (symmetric with Model A in
+    ``--compare-only`` mode; requires the B-side model_version to have also
+    been through ``evaluation`` previously). Other accepted values for
+    ``source``: ``ranked_predictions`` (inference output) or
+    ``training_eval_predictions`` (training pipeline's test-set predictions
+    — useful for ``--post-training`` mode without re-running inference).
   * external_hive  — read external Hive table with column rename + prod_mapping.
 
 The full source dict is staged at ``parameters['evaluation']['compare']`` by
@@ -52,11 +54,18 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
     raise RuntimeError(f"unknown compare source kind={kind!r}")
 
 
-# Hive tables allowed as model_version compare source. Both share the
+# Hive tables allowed as model_version compare source. All three share the
 # (cust_id, snap_date, prod_name, score, model_version) projection used by
-# restrict_to_common. Kept here so the loader can fail-loud even if A11
+# restrict_to_common. ``enriched_eval_predictions`` additionally carries
+# label / rank / segment columns; ``restrict_to_common`` is schema-agnostic
+# (re-ranks after the universe shrink, skips the label LEFT JOIN when
+# already present). Kept here so the loader can fail-loud even if A11
 # validation was bypassed (e.g. in tests).
-MODEL_VERSION_SOURCES = ("ranked_predictions", "training_eval_predictions")
+MODEL_VERSION_SOURCES = (
+    "enriched_eval_predictions",
+    "ranked_predictions",
+    "training_eval_predictions",
+)
 
 
 def _load_model_version(
@@ -64,7 +73,7 @@ def _load_model_version(
     hive_db: str | None,
 ) -> SparkDataFrame:
     mv = src["model_version"]
-    source = src.get("source", "ranked_predictions")
+    source = src.get("source", "enriched_eval_predictions")
     if source not in MODEL_VERSION_SOURCES:
         raise DataConsistencyError(
             f"compare source={source!r} not in {MODEL_VERSION_SOURCES}"

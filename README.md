@@ -212,7 +212,10 @@ evaluation:
     v_prev:                              # CLI flag 帶這個 key
       kind: model_version                # 比另一個我們自己的 model_version
       model_version: "2026-01-31_abcdef12_34567890"
-      source: training_eval_predictions  # 或 eval_predictions
+      # source 預設 enriched_eval_predictions（B 也跑過 evaluation 就用這個）；
+      # 其他選項：ranked_predictions（B 只跑過 inference）|
+      # training_eval_predictions（B 只跑過 training，用於 --post-training 比對）
+      # source: ranked_predictions
       label: "v_prev (上一版)"
     ext_proj_x:
       kind: external_hive                # 比外部專案的預測表
@@ -228,6 +231,7 @@ evaluation:
 
 - `--compare` 與 `--compare-only` 互斥；同時帶兩個會 fail-loud。
 - `--compare-only` 要求 Hive `ml_recsys.enriched_eval_predictions` 已經有對應 `(snap_date, model_version)` 分區（即同一個 `--model-version` 之前已用普通 `evaluation` 或 `evaluation --post-training` 跑過）；沒有時會 fail-loud（B4），訊息會告訴你要先跑哪個指令。
+- `source` 預設 `enriched_eval_predictions`（A/B 對稱，B 也必須之前跑過 evaluation）。**若是從舊版升上來且原本 omit `source:`**，預設值已從 `ranked_predictions` 改掉 — 想保留舊行為要明確寫 `source: ranked_predictions`。
 - 比較會把兩邊 restrict 成共同的 `(cust_id, snap_date, prod_name)` 集合再重排序；覆蓋率不滿時報表會顯示 partial-coverage 警告但不會失敗。
 - 兩個 report 都寫到 `data/evaluation/<model_version>/<snap_date>/`：`report.html` 與 `report_comparison.html`。
 - popularity baseline 是 `evaluation` pipeline 內部的一個節點（`compute_baseline_metrics`），由 `evaluation.baseline.lookback_months` 控制，與 evaluation 一起執行、寫進同一份 `report.html` 的 baseline 段。

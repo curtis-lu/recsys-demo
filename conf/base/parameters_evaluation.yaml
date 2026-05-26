@@ -78,7 +78,12 @@ evaluation:
   #   label:          display name in report_comparison.html (required)
   #   model_version:  required when kind=model_version
   #   source:         optional when kind=model_version —
-  #                   "ranked_predictions" (default; inference output) |
+  #                   "enriched_eval_predictions" (default; symmetric with
+  #                   Model A in --compare-only mode; requires the B-side
+  #                   model_version to have already run a full `evaluation`
+  #                   pipeline so its partition exists) |
+  #                   "ranked_predictions" (inference output; use when B has
+  #                   only been through inference, not evaluation) |
   #                   "training_eval_predictions" (training pipeline's test-set
   #                   predictions; lets `--compare` work in `--post-training`
   #                   mode without re-running inference for either side)
