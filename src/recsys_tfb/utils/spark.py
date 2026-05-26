@@ -12,6 +12,7 @@ _VALID_VALUE_TYPES = (str, int, bool)
 
 def get_or_create_spark_session(
     spark_configs: dict[str, Any] | None = None,
+    enable_hive: bool = False,
 ) -> SparkSession:
     """Create or return the SparkSession.
 
@@ -26,6 +27,13 @@ def get_or_create_spark_session(
        exists, return it directly. Otherwise fall back to loading the
        base ``parameters.yaml`` ``spark:`` block via ConfigLoader and
        create a session from that.
+
+    enable_hive (default False): when True, the builder calls
+        ``.enableHiveSupport()`` before ``getOrCreate()``. Required for
+        ``HiveTableDataset`` write paths in tests (``STORED AS PARQUET``
+        DDL needs Hive parser support). Production code paths leave this
+        False; the cluster session inherits Hive support from
+        ``SPARK_CONF_DIR``'s ``hive-site.xml`` rather than this flag.
 
     Raises:
         TypeError: ``spark_configs`` is not a dict.
@@ -52,6 +60,8 @@ def get_or_create_spark_session(
         if key == "app_name":
             continue
         builder = builder.config(key, value)
+    if enable_hive:
+        builder = builder.enableHiveSupport()
     return builder.getOrCreate()
 
 

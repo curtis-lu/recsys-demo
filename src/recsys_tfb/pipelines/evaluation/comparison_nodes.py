@@ -104,68 +104,49 @@ def generate_comparison_report(
     )
 
 
-def persist_eval_predictions(
-    eval_predictions: SparkDataFrame, parameters: dict
-) -> str:
-    """Write eval_predictions to Hive ml_recsys.eval_predictions (overwrite partition).
+def persist_eval_predictions(eval_predictions: SparkDataFrame) -> SparkDataFrame:
+    """Pass-through node that routes the in-memory eval_predictions to the
+    framework-auto-save edge for catalog entry ``enriched_eval_predictions``
+    (HiveTableDataset). All write-side machinery — dynamic-partition
+    overwrite, ``model_version`` partition column injection, CREATE TABLE
+    IF NOT EXISTS, ``${hive.db}`` qualification — lives in the catalog
+    layer. This function exists solely as the named DAG edge.
+    """
+    return eval_predictions
 
-    Returns a sentinel string for DAG edge purposes; downstream does not
-    consume the value.
+
+def validate_enriched_eval_predictions_present(
+    enriched_eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> SparkDataFrame:
+    """B4 invariant — fail loud if no partition exists for the current
+    (snap_date, model_version) in ``enriched_eval_predictions``.
+
+    Pattern: small validator node, pass-through (echoes
+    ``validate_predictions`` in inference pipeline). Catalog auto-loads the
+    table filtered by ``model_version`` via ``partition_filter`` (which
+    drops the column on the way out). This node filters by snap_date and
+    asserts at least one row remains; otherwise raises
+    ``DataConsistencyError`` with an actionable message.
+
+    Used only in ``--compare-only`` mode. In default / ``--compare`` modes
+    the same partition is freshly written by ``persist_eval_predictions``
+    earlier in the same pipeline, so B4 cannot fire.
     """
     schema = get_schema(parameters)
     eval_params = parameters.get("evaluation", {}) or {}
     snap_date = str(eval_params.get("snap_date") or "").strip()
     mv = parameters.get("model_version", "unknown")
+    hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
 
-    spark = eval_predictions.sparkSession
-    spark.sql("CREATE DATABASE IF NOT EXISTS ml_recsys")
-
-    # Add model_version as a column so it can serve as partition col
-    df = eval_predictions.withColumn("model_version", F.lit(mv))
-
-    # Tell Spark to overwrite only the matching partition
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    try:
-        (df.write.mode("overwrite")
-              .partitionBy(schema["time"], "model_version")
-              .format("parquet").saveAsTable("ml_recsys.eval_predictions"))
-    except Exception as e:
-        # Test envs without Hive metastore — log and continue. Production
-        # always has Hive; this branch never fires there.
-        msg = str(e).lower()
-        if "hive" in msg or "metastore" in msg:
-            logger.warning("persist_eval_predictions skipped (no Hive): %s", e)
-            return f"persisted-skipped:{snap_date}:{mv}"
-        raise
-    logger.info(
-        "Persisted eval_predictions to ml_recsys.eval_predictions (snap=%s, mv=%s, rows=%d)",
-        snap_date, mv, df.count(),
-    )
-    return f"persisted:{snap_date}:{mv}"
-
-
-def load_eval_predictions_from_hive(parameters: dict) -> SparkDataFrame:
-    """For --compare-only mode: read previously-persisted eval_predictions.
-
-    Raises (B4) when the matching (snap_date, model_version) partition is
-    absent — message tells the user to run evaluation first.
-    """
-    schema = get_schema(parameters)
-    eval_params = parameters.get("evaluation", {}) or {}
-    snap_date = str(eval_params.get("snap_date") or "").strip()
-    mv = parameters.get("model_version", "unknown")
-    spark = get_or_create_spark_session()
-
-    df = (
-        spark.table("ml_recsys.eval_predictions")
-        .filter(F.col(schema["time"]).cast("string") == snap_date)
-        .filter(F.col("model_version") == mv)
+    df = enriched_eval_predictions.filter(
+        F.col(schema["time"]).cast("string") == snap_date
     )
     if df.isEmpty():
         raise DataConsistencyError(
-            f"(B4) ml_recsys.eval_predictions has no partition for "
-            f"snap_date={snap_date!r} model_version={mv!r}. "
-            "Run `python -m recsys_tfb evaluation` (with or without --compare) "
-            "first to populate the partition."
+            f"(B4) {hive_db}.enriched_eval_predictions has no partition "
+            f"for snap_date={snap_date!r} model_version={mv!r}. "
+            "Run `python -m recsys_tfb evaluation` (with or without "
+            "--compare) first to populate the partition."
         )
-    return df.drop("model_version")
+    return df

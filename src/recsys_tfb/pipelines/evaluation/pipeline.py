@@ -12,10 +12,14 @@ def create_pipeline(
     """Build the evaluation pipeline.
 
     Modes:
-      * default (no flags) — 4 existing nodes + persist_eval_predictions
-      * --compare X — adds 3 compare nodes; both reports produced
-      * --compare-only X — short pipeline that reads persisted eval_predictions
-        from Hive and only produces report_comparison.html
+      * default (no flags) — 4 metrics/report nodes + persist_eval_predictions
+        (auto-saved via catalog to ``enriched_eval_predictions``
+        HiveTableDataset).
+      * --compare X — adds 3 compare nodes; both standalone and comparison
+        reports produced.
+      * --compare-only X — short pipeline that catalog-auto-loads the
+        previously-persisted ``enriched_eval_predictions``, validates the
+        partition (B4), and only produces report_comparison.html.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         compute_baseline_metrics,
@@ -26,17 +30,20 @@ def create_pipeline(
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
         generate_comparison_report,
         load_compare_predictions,
-        load_eval_predictions_from_hive,
         persist_eval_predictions,
         restrict_to_common,
+        validate_enriched_eval_predictions_present,
     )
 
     if compare_only:
-        # CLI A12 ensures compare_source is not None when compare_only is True
+        # CLI A12 ensures compare_source is not None when compare_only is True.
+        # First node consumes "enriched_eval_predictions" — catalog auto-loads
+        # via HiveTableDataset.load() with WHERE model_version=${model_version},
+        # then validator filters to current snap_date and raises B4 if empty.
         return Pipeline([
             Node(
-                load_eval_predictions_from_hive,
-                inputs=["parameters"],
+                validate_enriched_eval_predictions_present,
+                inputs=["enriched_eval_predictions", "parameters"],
                 outputs="eval_predictions",
             ),
             Node(
@@ -84,10 +91,13 @@ def create_pipeline(
                     "parameters", "baseline_metrics"],
             outputs="evaluation_report",
         ),
+        # persist returns the same DF as-is; framework auto-saves via catalog
+        # entry "enriched_eval_predictions" (HiveTableDataset). Catalog
+        # injects model_version partition column + dynamic-partition overwrite.
         Node(
             persist_eval_predictions,
-            inputs=["eval_predictions", "parameters"],
-            outputs="eval_predictions_persisted_sentinel",
+            inputs=["eval_predictions"],
+            outputs="enriched_eval_predictions",
         ),
     ]
     if compare_source is not None:

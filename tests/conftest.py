@@ -9,17 +9,16 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 @pytest.fixture
 def spark():
-    """Per-test SparkSession resolved via get_or_create_spark_session.
+    """SparkSession with local-mode test configs and Hive support.
 
-    Function-scoped on purpose: tune_hyperparameters explicitly stops the
-    SparkSession to free JVM threads before its driver-local HPO loop, and
-    a session-scoped fixture would then yield the same dead object to every
-    later test (e.g. test_dataset_then_training calls .createDataFrame() on
-    it -> AttributeError 'NoneType' has no attribute 'sc'). Function scope
-    plus get_or_create's stopped-session detection means the next test
-    after a stop() transparently gets a fresh session. No teardown — the
-    session is reused across tests when alive and cleaned up by Python at
-    process exit.
+    Session is reused across tests when alive (built once per pytest process,
+    inherited by later tests). When the session has been stopped (e.g. by
+    ``tune_hyperparameters``), ``get_or_create_spark_session`` rebuilds it
+    with the same configs.
+
+    Hive support is needed because ``HiveTableDataset._build_create_ddl``
+    emits ``STORED AS PARQUET`` (Hive DDL); the round-trip test in
+    ``test_evaluation_compare_pipeline.py`` exercises that path.
     """
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
@@ -31,4 +30,4 @@ def spark():
         "spark.ui.enabled": "false",
         "spark.driver.memory": "1g",
     }
-    return get_or_create_spark_session(test_configs)
+    return get_or_create_spark_session(test_configs, enable_hive=True)

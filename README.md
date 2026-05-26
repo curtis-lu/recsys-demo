@@ -88,7 +88,7 @@ python -m recsys_tfb evaluation --env production
 | **promote** | 把 `data/models/best` symlink 切到某個 `model_version`。**inference 預設讀 `best`，所以不 promote 就不會生效**。手動跑 `scripts/promote_model.py`。 |
 | **`data/models/best`**（線上版本指標） | symlink，指向「現在線上用的 `model_version`」。inference / evaluation 未帶 `--model-version` 時讀這個。 |
 | **`latest` symlink**（最近一次產出指標） | `data/dataset/latest`、`data/models/latest` 等等，各層版本（`base_dataset_version` / `train_variant_id` / `calibration_variant_id` / `model_version`）都有一個 `latest`，指「該層最近一次跑出來的版本」。training CLI 的 `--base-dataset-version` / `--train-variant` / `--calibration-variant` 不帶時各自吃對應的 `latest`。**`latest` ≠ `best`**：`latest` 只是方便不必每次貼 hash，不代表線上用哪個。 |
-| **`training_eval_predictions`** vs **`eval_predictions`**（兩張 Hive 表） | `training` 寫 test-set 預測到 `ml_recsys.training_eval_predictions`（供 `evaluation --post-training` 讀，做新模型驗收）；`evaluation` 跑完後把 prepared 預測持久化到 `ml_recsys.eval_predictions`（供之後 `--compare-only` 重用）。前者是 training 內部產出、後者是 evaluation 持久化的快取，兩者不互通。 |
+| **`training_eval_predictions`** vs **`enriched_eval_predictions`**（兩張 Hive 表） | `training` 寫 test-set 預測到 `ml_recsys.training_eval_predictions`（供 `evaluation --post-training` 讀，做新模型驗收）；`evaluation` 跑完後把 prepared 預測（已 join label / segment、已 rank）持久化到 `ml_recsys.enriched_eval_predictions`（供之後 `--compare-only` 重用）。前者是 training 內部產出的原始預測、後者是 evaluation 已加工過的快取，兩者不互通。 |
 | **`A1`–`A9` / `B1`**（一致性不變量代號） | 設定靜態閘 9 條規則（`A1`–`A9`）與資料閘 1 條規則（`B1`）的代號。違反時 fail-loud 訊息會引用代號，例如 `ConfigConsistencyError [A5]: ...`。一般跑流程不需記，遇到錯誤時對代號查 §6 或 [docs/config-and-versioning.md](docs/config-and-versioning.md) 即可。 |
 | **fail-loud** | 設定或資料不一致時程式立刻 raise 並 exit 1，而非帶錯偷跑。錯誤訊息會一次列出所有問題，讓你一次修完。 |
 | **HPO** / **trial** | Hyperparameter Optimization。用 Optuna 跑 N 次不同超參組合，每次叫一個 trial，最後挑指標最佳的那組。 |
@@ -158,7 +158,7 @@ python -m recsys_tfb training --env production
 
 # 4. Evaluation（post-training）：用 training 剛產出的 test-set 預測做模型驗收
 #    讀 ml_recsys.training_eval_predictions（而非 inference 的 ranked_predictions）。
-#    產出 report.html 並把 eval_predictions 持久化到 ml_recsys.eval_predictions
+#    產出 report.html 並把 eval_predictions 持久化到 ml_recsys.enriched_eval_predictions
 #    （後續 --compare-only 會用到）。決定要不要 promote 就看這份報表。
 python -m recsys_tfb evaluation --env production --post-training --model-version <model_version>
 
@@ -192,7 +192,7 @@ python -m recsys_tfb evaluation --env production
 
 | 情境 | 指令 | 讀取的預測來源 | 產出 | 何時用 |
 |---|---|---|---|---|
-| **1. 新模型驗收**（§3 標準流程的步驟 4） | `evaluation --post-training --model-version <mv>` | Hive `ml_recsys.training_eval_predictions`（training pipeline 寫入的 test-set 預測） | `report.html`；同時把 `eval_predictions` 寫入 Hive `ml_recsys.eval_predictions`（供之後 `--compare-only` 重用） | training 完成後、promote 之前。看完報表決定要不要 `promote_model.py` |
+| **1. 新模型驗收**（§3 標準流程的步驟 4） | `evaluation --post-training --model-version <mv>` | Hive `ml_recsys.training_eval_predictions`（training pipeline 寫入的 test-set 預測） | `report.html`；同時把 `eval_predictions` 寫入 Hive `ml_recsys.enriched_eval_predictions`（供之後 `--compare-only` 重用） | training 完成後、promote 之前。看完報表決定要不要 `promote_model.py` |
 | **2. 線上監控** | `evaluation` | Hive `ml_recsys.ranked_predictions`（inference 寫入） | `report.html` + `eval_predictions` 持久化 | inference 跑完、要回頭看當期實際分數分布／recall 時 |
 
 > **新人讀到這裡就夠了**：標準流程跑這兩種；下方「進階：模型比較」是想把新模型跟舊版 / A/B / 外部專案並排對比時才需要。
@@ -202,7 +202,7 @@ python -m recsys_tfb evaluation --env production
 | 情境 | 指令 | 讀取的預測來源 | 產出 | 何時用 |
 |---|---|---|---|---|
 | **3. 比較（一輪內同時跑）** | `evaluation [--post-training] --compare <key>` | 同情境 1 / 2（依 `--post-training`） | `report.html` + `report_comparison.html`（兩個 model 並排） | 想在跑當期 evaluation 的同時，也看新舊／A/B 兩個 model 的差異 |
-| **4. 比較（用既有結果）** | `evaluation --compare-only <key>` | Hive `ml_recsys.eval_predictions`（**先前** evaluation 已持久化的當期結果） | 只有 `report_comparison.html` | 當期 `report.html` 已經跑過、只想多比一個 source；避免重算指標 |
+| **4. 比較（用既有結果）** | `evaluation --compare-only <key>` | Hive `ml_recsys.enriched_eval_predictions`（**先前** evaluation 已持久化的當期結果） | 只有 `report_comparison.html` | 當期 `report.html` 已經跑過、只想多比一個 source；避免重算指標 |
 
 `<key>` 必須事先在 `conf/base/parameters_evaluation.yaml` 的 `evaluation.compare_sources` 註冊。例（檔內已附說明）：
 
@@ -227,7 +227,7 @@ evaluation:
 行為要點：
 
 - `--compare` 與 `--compare-only` 互斥；同時帶兩個會 fail-loud。
-- `--compare-only` 要求 Hive `ml_recsys.eval_predictions` 已經有對應 `(snap_date, model_version)` 分區（即同一個 `--model-version` 之前已用普通 `evaluation` 或 `evaluation --post-training` 跑過）；沒有時會 fail-loud，訊息會告訴你要先跑哪個指令。
+- `--compare-only` 要求 Hive `ml_recsys.enriched_eval_predictions` 已經有對應 `(snap_date, model_version)` 分區（即同一個 `--model-version` 之前已用普通 `evaluation` 或 `evaluation --post-training` 跑過）；沒有時會 fail-loud（B4），訊息會告訴你要先跑哪個指令。
 - 比較會把兩邊 restrict 成共同的 `(cust_id, snap_date, prod_name)` 集合再重排序；覆蓋率不滿時報表會顯示 partial-coverage 警告但不會失敗。
 - 兩個 report 都寫到 `data/evaluation/<model_version>/<snap_date>/`：`report.html` 與 `report_comparison.html`。
 - popularity baseline 是 `evaluation` pipeline 內部的一個節點（`compute_baseline_metrics`），由 `evaluation.baseline.lookback_months` 控制，與 evaluation 一起執行、寫進同一份 `report.html` 的 baseline 段。
@@ -295,7 +295,7 @@ evaluation:
             │  • 預設讀 ranked_predictions（線上監控）                       │
             │  • --post-training 讀 training_eval_predictions（新模型驗收）  │
             │  • 內含 popularity baseline（compute_baseline_metrics）       │
-            │  • 持久化 eval_predictions 到 Hive ml_recsys.eval_predictions │
+            │  • 持久化 eval_predictions 到 Hive ml_recsys.enriched_eval_predictions │
             │  • --compare / --compare-only：產 report_comparison.html      │
             │  prepare_eval_data → compute_metrics → report.html            │
             └──────────────────────────────────────────────────────────────┘
@@ -315,7 +315,7 @@ Lineage 對照表（artifact → 產生者 → 消費者 → 對應版本）：
 | `training_eval_predictions`（Hive）| `training` | `evaluation --post-training`、`compute_test_mAP_spark` | `model_version` |
 | `data/models/best`（symlink）| `scripts/promote_model.py`（手動）| `inference` / `evaluation`（未指定 `--model-version` 時）| 指向某 `model_version` |
 | `ranked_predictions` / `score_table`（Hive）| `inference` | `evaluation`（預設模式）| `model_version` |
-| `ml_recsys.eval_predictions`（Hive）| `evaluation`（每次都 persist）| `evaluation --compare-only` | `(model_version, snap_date)` 分區 |
+| `ml_recsys.enriched_eval_predictions`（Hive）| `evaluation`（每次都 persist；catalog 自動寫入）| `evaluation --compare-only` | `(model_version, snap_date)` 分區 |
 | `data/evaluation/<mv>/<snap_date>/report.html` | `evaluation` | 人工 / 監控 | `model_version` |
 | `data/evaluation/<mv>/<snap_date>/report_comparison.html` | `evaluation --compare` / `--compare-only` | 人工（A/B 對比） | `model_version` |
 
