@@ -125,3 +125,17 @@ def test_b4_load_from_hive_returns_partition_when_present(spark):
     out = load_eval_predictions_from_hive(params)
     rows = [(r["cust_id"], r["prod_name"], r["score"]) for r in out.collect()]
     assert rows == [("c1", "p1", 0.9)]
+
+
+def test_persist_eval_predictions_returns_input_df(spark):
+    """persist_eval_predictions is an identity pass-through: catalog auto-save
+    handles the actual Hive write. Function returns the same DataFrame object
+    passed in (referential identity, not just equality).
+    """
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+        persist_eval_predictions,
+    )
+
+    df = spark.createDataFrame([(1, 2)], ["a", "b"])
+    out = persist_eval_predictions(df)
+    assert out is df

@@ -104,44 +104,15 @@ def generate_comparison_report(
     )
 
 
-def persist_eval_predictions(
-    eval_predictions: SparkDataFrame, parameters: dict
-) -> str:
-    """Write eval_predictions to Hive ml_recsys.eval_predictions (overwrite partition).
-
-    Returns a sentinel string for DAG edge purposes; downstream does not
-    consume the value.
+def persist_eval_predictions(eval_predictions: SparkDataFrame) -> SparkDataFrame:
+    """Pass-through node that routes the in-memory eval_predictions to the
+    framework-auto-save edge for catalog entry ``enriched_eval_predictions``
+    (HiveTableDataset). All write-side machinery — dynamic-partition
+    overwrite, ``model_version`` partition column injection, CREATE TABLE
+    IF NOT EXISTS, ``${hive.db}`` qualification — lives in the catalog
+    layer. This function exists solely as the named DAG edge.
     """
-    schema = get_schema(parameters)
-    eval_params = parameters.get("evaluation", {}) or {}
-    snap_date = str(eval_params.get("snap_date") or "").strip()
-    mv = parameters.get("model_version", "unknown")
-
-    spark = eval_predictions.sparkSession
-    spark.sql("CREATE DATABASE IF NOT EXISTS ml_recsys")
-
-    # Add model_version as a column so it can serve as partition col
-    df = eval_predictions.withColumn("model_version", F.lit(mv))
-
-    # Tell Spark to overwrite only the matching partition
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    try:
-        (df.write.mode("overwrite")
-              .partitionBy(schema["time"], "model_version")
-              .format("parquet").saveAsTable("ml_recsys.eval_predictions"))
-    except Exception as e:
-        # Test envs without Hive metastore — log and continue. Production
-        # always has Hive; this branch never fires there.
-        msg = str(e).lower()
-        if "hive" in msg or "metastore" in msg:
-            logger.warning("persist_eval_predictions skipped (no Hive): %s", e)
-            return f"persisted-skipped:{snap_date}:{mv}"
-        raise
-    logger.info(
-        "Persisted eval_predictions to ml_recsys.eval_predictions (snap=%s, mv=%s, rows=%d)",
-        snap_date, mv, df.count(),
-    )
-    return f"persisted:{snap_date}:{mv}"
+    return eval_predictions
 
 
 def load_eval_predictions_from_hive(parameters: dict) -> SparkDataFrame:
