@@ -228,6 +228,25 @@ training_eval_predictions:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
 
+# --- Evaluation Pipeline - Cached, report-ready eval_predictions ---
+# Written by evaluation/comparison_nodes.py::persist_eval_predictions (the
+# in-memory eval_predictions from prepare_eval_data, after label join, rank,
+# and segment enrichment). Read back by --compare-only mode via catalog
+# auto-load + validate_enriched_eval_predictions_present (B4 validator).
+# columns: "auto" — schema is inferred from the DataFrame; if segment_sources
+# config changes between runs, drop the table before rerun (ALTER TABLE
+# schema evolution is a deferred follow-up).
+enriched_eval_predictions:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: enriched_eval_predictions
+  external: false
+  columns: "auto"
+  partition_filter:
+    model_version: ${model_version}
+  partition_cols:
+    - {name: snap_date, type: STRING}
+
 # --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---
 # Each run only overwrites partitions present in the DataFrame (snap_date x prod_name x model_version).
 score_table:
