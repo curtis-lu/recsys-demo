@@ -21,14 +21,27 @@ def spark():
     session is reused across tests when alive and cleaned up by Python at
     process exit.
     """
-    from recsys_tfb.utils.spark import get_or_create_spark_session
+    from pyspark.sql import SparkSession
+    from recsys_tfb.utils.spark import _is_session_alive
 
-    test_configs = {
-        "app_name": "recsys_tfb_test",
-        "spark.master": "local[1]",
-        "spark.sql.shuffle.partitions": "1",
-        "spark.default.parallelism": "1",
-        "spark.ui.enabled": "false",
-        "spark.driver.memory": "1g",
-    }
-    return get_or_create_spark_session(test_configs)
+    active = SparkSession.getActiveSession()
+    if active is None or not _is_session_alive(active):
+        # No active session or it's stopped; create a new one with Hive support.
+        test_configs = {
+            "app_name": "recsys_tfb_test",
+            "spark.master": "local[1]",
+            "spark.sql.shuffle.partitions": "1",
+            "spark.default.parallelism": "1",
+            "spark.ui.enabled": "false",
+            "spark.driver.memory": "1g",
+        }
+        builder = SparkSession.builder.appName(test_configs["app_name"])
+        for key, value in test_configs.items():
+            if key == "app_name":
+                continue
+            builder = builder.config(key, value)
+        session = builder.enableHiveSupport().getOrCreate()
+        return session
+    else:
+        # Session is alive, just return it (enableHiveSupport() would have no effect)
+        return active
