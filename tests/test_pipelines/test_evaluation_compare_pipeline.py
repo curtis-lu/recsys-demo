@@ -32,7 +32,7 @@ def test_compare_only_mode_skips_compute_nodes():
     src = {"kind": "model_version", "model_version": "v1", "label": "L"}
     pipeline = create_pipeline(post_training=False, compare_source=src, compare_only=True)
     node_names = [n.func.__name__ for n in pipeline.nodes]
-    assert "load_eval_predictions_from_hive" in node_names
+    assert "validate_enriched_eval_predictions_present" in node_names
     assert "generate_comparison_report" in node_names
     # explicitly NOT present:
     assert "compute_metrics" not in node_names

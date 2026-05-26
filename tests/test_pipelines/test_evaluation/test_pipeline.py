@@ -20,7 +20,7 @@ class TestEvaluationPipelineDefault:
         expected = {
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "eval_predictions_persisted_sentinel",
+            "enriched_eval_predictions",
         }
         assert pipeline.outputs == expected
 
@@ -51,7 +51,7 @@ class TestEvaluationPipelinePostTraining:
         expected = {
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "eval_predictions_persisted_sentinel",
+            "enriched_eval_predictions",
         }
         assert pipeline.outputs == expected
 
@@ -92,7 +92,7 @@ class TestEvaluationPipelineCompareOnly:
         pipeline = create_pipeline(compare_only=True)
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "load_eval_predictions_from_hive",
+            "validate_enriched_eval_predictions_present",
             "load_compare_predictions",
             "restrict_to_common",
             "generate_comparison_report",
