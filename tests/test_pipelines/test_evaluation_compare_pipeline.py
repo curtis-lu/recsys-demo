@@ -139,3 +139,75 @@ def test_persist_eval_predictions_returns_input_df(spark):
     df = spark.createDataFrame([(1, 2)], ["a", "b"])
     out = persist_eval_predictions(df)
     assert out is df
+
+
+def _base_params_for_validator():
+    """Minimal params dict the validator needs."""
+    return {
+        "schema": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "score": "score", "rank": "rank", "label": "label",
+            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "categorical_values": {"prod_name": ["p1"]},
+        },
+        "evaluation": {"snap_date": "2026-01-31"},
+        "model_version": "MV_X",
+        "hive": {"db": "ml_recsys"},
+    }
+
+
+def test_b4_validator_raises_when_partition_empty(spark):
+    """Empty DataFrame in (simulates catalog filter returned nothing).
+    Validator must raise DataConsistencyError tagged (B4).
+    """
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    empty = spark.createDataFrame(
+        [],
+        "cust_id STRING, snap_date STRING, prod_name STRING, "
+        "score DOUBLE, rank INT, label INT",
+    )
+    with pytest.raises(DataConsistencyError, match="B4"):
+        validate_enriched_eval_predictions_present(
+            empty, _base_params_for_validator()
+        )
+
+
+def test_b4_validator_raises_when_snap_date_filter_yields_empty(spark):
+    """DataFrame has rows but no rows match the configured evaluation.snap_date.
+    Validator filters then raises B4.
+    """
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, 1, 1)],
+        ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+    )
+    params = _base_params_for_validator()
+    params["evaluation"]["snap_date"] = "2099-01-01"  # mismatch
+    with pytest.raises(DataConsistencyError, match="B4"):
+        validate_enriched_eval_predictions_present(df, params)
+
+
+def test_b4_validator_passes_when_partition_present(spark):
+    """DataFrame has matching snap_date row → validator returns the filtered DF."""
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    df = spark.createDataFrame(
+        [
+            ("c1", "2026-01-31", "p1", 0.9, 1, 1),
+            ("c2", "2025-12-31", "p1", 0.5, 1, 0),  # different snap_date, filtered out
+        ],
+        ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+    )
+    out = validate_enriched_eval_predictions_present(
+        df, _base_params_for_validator()
+    )
+    rows = [(r["cust_id"], r["snap_date"]) for r in out.collect()]
+    assert rows == [("c1", "2026-01-31")]

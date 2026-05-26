@@ -140,3 +140,40 @@ def load_eval_predictions_from_hive(parameters: dict) -> SparkDataFrame:
             "first to populate the partition."
         )
     return df.drop("model_version")
+
+
+def validate_enriched_eval_predictions_present(
+    enriched_eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> SparkDataFrame:
+    """B4 invariant — fail loud if no partition exists for the current
+    (snap_date, model_version) in ``enriched_eval_predictions``.
+
+    Pattern: small validator node, pass-through (echoes
+    ``validate_predictions`` in inference pipeline). Catalog auto-loads the
+    table filtered by ``model_version`` via ``partition_filter`` (which
+    drops the column on the way out). This node filters by snap_date and
+    asserts at least one row remains; otherwise raises
+    ``DataConsistencyError`` with an actionable message.
+
+    Used only in ``--compare-only`` mode. In default / ``--compare`` modes
+    the same partition is freshly written by ``persist_eval_predictions``
+    earlier in the same pipeline, so B4 cannot fire.
+    """
+    schema = get_schema(parameters)
+    eval_params = parameters.get("evaluation", {}) or {}
+    snap_date = str(eval_params.get("snap_date") or "").strip()
+    mv = parameters.get("model_version", "unknown")
+    hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
+
+    df = enriched_eval_predictions.filter(
+        F.col(schema["time"]).cast("string") == snap_date
+    )
+    if df.isEmpty():
+        raise DataConsistencyError(
+            f"(B4) {hive_db}.enriched_eval_predictions has no partition "
+            f"for snap_date={snap_date!r} model_version={mv!r}. "
+            "Run `python -m recsys_tfb evaluation` (with or without "
+            "--compare) first to populate the partition."
+        )
+    return df
