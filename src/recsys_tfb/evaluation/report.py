@@ -41,6 +41,7 @@ def generate_html_report(
     html_parts = [
         "<!DOCTYPE html>",
         "<html><head>",
+        '<meta charset="utf-8">',
         f"<title>{title}</title>",
         "<style>",
         "body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px; }",
