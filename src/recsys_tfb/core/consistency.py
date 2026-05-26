@@ -55,8 +55,9 @@ Layer 1 — config-static (implemented here; aggregated by
 * A11 — every ``evaluation.compare_sources[*]`` is well-formed:
   ``kind`` ∈ {model_version, external_hive}; ``label`` required; ranked
   by-kind required fields (``model_version`` for model_version, optional
-  ``source`` ∈ {ranked_predictions, training_eval_predictions} — default
-  ranked_predictions; ``table`` + ``columns`` (cust_id/snap_date/prod_name/
+  ``source`` ∈ {enriched_eval_predictions, ranked_predictions,
+  training_eval_predictions} — default ``enriched_eval_predictions``;
+  ``table`` + ``columns`` (cust_id/snap_date/prod_name/
   score) + ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
   external_hive); ``model_version`` kind must NOT declare
   ``columns``/``prod_mapping`` (config leak guard). Predicate:
@@ -526,7 +527,11 @@ _VALID_UNMAPPED = {"fail", "drop"}
 # Same-stack Hive tables a model_version compare source may read from.
 # Mirror of evaluation.comparison.sources.MODEL_VERSION_SOURCES; A11 is the
 # config-static gate, the loader checks again at read time.
-_VALID_MODEL_VERSION_SOURCES = {"ranked_predictions", "training_eval_predictions"}
+_VALID_MODEL_VERSION_SOURCES = {
+    "enriched_eval_predictions",
+    "ranked_predictions",
+    "training_eval_predictions",
+}
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:

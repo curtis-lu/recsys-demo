@@ -38,6 +38,7 @@ def ranked_predictions_view(spark):
 
 def test_model_version_filters_correctly(spark, ranked_predictions_view):
     p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
     out = load_compare_predictions(p, spark)
     rows = sorted((r["cust_id"], r["prod_name"], r["score"]) for r in out.collect())
     assert rows == [("c1", "p1", 0.9), ("c1", "p2", 0.7)]
@@ -45,6 +46,7 @@ def test_model_version_filters_correctly(spark, ranked_predictions_view):
 
 def test_model_version_unknown_raises(spark, ranked_predictions_view):
     p = _params_for_mv("MV_GHOST")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
     with pytest.raises(DataConsistencyError, match="MV_GHOST"):
         load_compare_predictions(p, spark)
 
@@ -107,6 +109,7 @@ def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
     default DB is configured.
     """
     p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
     p["hive"] = {"db": "ml_recsys"}
     seen = []
     real_table = spark.table
@@ -128,6 +131,77 @@ def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
     finally:
         spark.catalog.dropTempView("ranked_predictions")
     assert seen == ["ml_recsys.ranked_predictions"]
+
+
+@pytest.fixture
+def enriched_eval_predictions_view(spark):
+    """Mirrors the `enriched_eval_predictions` Hive table schema written by
+    `persist_eval_predictions`: same identity + score + model_version, plus
+    the enrichment columns (label / rank). restrict_to_common is
+    schema-agnostic, so extra columns here are intentionally exercised.
+    """
+    df = spark.createDataFrame(
+        [
+            ("c1", "2026-01-31", "p1", 0.92, 1, 1, "MV_A"),
+            ("c1", "2026-01-31", "p2", 0.71, 0, 2, "MV_A"),
+            ("c2", "2026-01-31", "p1", 0.80, 1, 1, "MV_A"),
+            ("c1", "2026-01-31", "p1", 0.50, 1, 1, "MV_B"),
+            ("c1", "2025-12-31", "p1", 0.40, 1, 1, "MV_A"),  # different snap_date
+        ],
+        ["cust_id", "snap_date", "prod_name", "score", "label", "rank", "model_version"],
+    )
+    df.createOrReplaceTempView("enriched_eval_predictions")
+    yield
+    spark.catalog.dropTempView("enriched_eval_predictions")
+
+
+def test_model_version_source_default_is_enriched_eval_predictions(
+    spark, enriched_eval_predictions_view
+):
+    """Omitting `source` reads from enriched_eval_predictions (the new default).
+
+    Symmetric with Model A in --compare-only mode (also loaded from the
+    enriched table), so both sides share the same enrichment schema and
+    don't require a separate inference run.
+    """
+    p = _params_for_mv("MV_A")  # no `source` field
+    out = load_compare_predictions(p, spark)
+    rows = sorted((r["cust_id"], r["prod_name"], r["score"]) for r in out.collect())
+    assert rows == [("c1", "p1", 0.92), ("c1", "p2", 0.71), ("c2", "p1", 0.80)]
+
+
+def test_model_version_source_enriched_explicit(
+    spark, enriched_eval_predictions_view
+):
+    """Explicit `source: enriched_eval_predictions` matches the default."""
+    p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "enriched_eval_predictions"
+    out = load_compare_predictions(p, spark)
+    assert out.count() == 3  # same as default-source test
+
+
+def test_model_version_hive_db_qualifies_enriched_table_name(spark, monkeypatch):
+    """hive.db prefix applies to the new default (enriched) source too."""
+    p = _params_for_mv("MV_A")  # no `source` → default enriched
+    p["hive"] = {"db": "ml_recsys"}
+    seen = []
+    real_table = spark.table
+
+    def spy_table(name):
+        seen.append(name)
+        return real_table(name.split(".", 1)[-1])
+
+    monkeypatch.setattr(spark, "table", spy_table)
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, 1, 1, "MV_A")],
+        ["cust_id", "snap_date", "prod_name", "score", "label", "rank", "model_version"],
+    )
+    df.createOrReplaceTempView("enriched_eval_predictions")
+    try:
+        load_compare_predictions(p, spark)
+    finally:
+        spark.catalog.dropTempView("enriched_eval_predictions")
+    assert seen == ["ml_recsys.enriched_eval_predictions"]
 
 
 def _params_for_ext(snap: str = "2026-01-31", policy: str = "fail") -> dict:

@@ -109,7 +109,7 @@ class TestA11_WellFormed:
         assert any("must be a dict" in e for e in errs)
 
     def test_model_version_source_default_ok(self):
-        """Omitted `source` field defaults to ranked_predictions — no error."""
+        """Omitted `source` field defaults to enriched_eval_predictions — no error."""
         p = _base_params()
         p["evaluation"]["compare_sources"]["v_prev"] = {
             "kind": "model_version", "model_version": "v1", "label": "X",
@@ -125,11 +125,20 @@ class TestA11_WellFormed:
         assert compare_source_well_formed_errors(p) == []
 
     def test_model_version_source_ranked_predictions_ok(self):
-        """Explicit `source: ranked_predictions` (matches the default) is accepted."""
+        """Explicit `source: ranked_predictions` is accepted (non-default)."""
         p = _base_params()
         p["evaluation"]["compare_sources"]["v_prev"] = {
             "kind": "model_version", "model_version": "v1", "label": "X",
             "source": "ranked_predictions",
+        }
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_model_version_source_enriched_eval_predictions_ok(self):
+        """Explicit `source: enriched_eval_predictions` (matches the default) is accepted."""
+        p = _base_params()
+        p["evaluation"]["compare_sources"]["v_prev"] = {
+            "kind": "model_version", "model_version": "v1", "label": "X",
+            "source": "enriched_eval_predictions",
         }
         assert compare_source_well_formed_errors(p) == []
 
