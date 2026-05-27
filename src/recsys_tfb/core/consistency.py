@@ -11,8 +11,7 @@ Invariant legend
 ----------------
 Code comments across this module, ``core/schema.py`` and
 ``preprocessing/_spark.py`` reference invariants by ID. This docstring is the
-canonical legend (the full design rationale lives in
-``docs/superpowers/plans/2026-05-17-config-consistency-validation.md``).
+canonical legend.
 
 Layer 1 — config-static (implemented here; aggregated by
 ``validate_config_consistency``, run at CLI entry):

@@ -225,8 +225,7 @@ def validate_data_consistency(
 ) -> None:
     """Layer-2 B1 data gate. Side-effect only: raises ``DataConsistencyError``
     on violation, returns ``None`` on success. Wired as the first node of the
-    dataset pipeline. See
-    docs/superpowers/specs/2026-05-17-config-consistency-phase2-data-gate-design.md.
+    dataset pipeline.
 
     Item values are checked on sample_pool (set-equality vs declared, both
     directions) and label_table (only data-has-unknown), restricted to the

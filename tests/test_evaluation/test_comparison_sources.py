@@ -104,9 +104,9 @@ def test_model_version_source_unknown_raises(spark, ranked_predictions_view):
 def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
     """When hive.db is set, loader prefixes the table name (production path).
 
-    The previous bare-name code worked in tests (temp views) and on YARN-style
-    clusters with a default DB, but failed on dev-cluster local mode where no
-    default DB is configured.
+    Bare table names only resolve when a default Spark database is registered
+    (e.g. via temp views in tests, or a cluster-wide default DB). When no
+    default DB is configured the loader must qualify the table name itself.
     """
     p = _params_for_mv("MV_A")
     p["evaluation"]["compare"]["source"] = "ranked_predictions"

@@ -116,7 +116,7 @@ class TestFallback:
         Regression: previously, when tune_hyperparameters stopped the session
         and a downstream node triggered fallback rebuild, yaml values like
         ``${vdclient.cdp.driver_port}`` reached SparkConf as literal strings →
-        ``spark.driver.port should be int`` at the company. ${env.*} resolution
+        ``spark.driver.port should be int`` at runtime. ${env.*} resolution
         now happens inside ConfigLoader (not a direct resolver call in
         _fallback_create); this env-based case is the unit-testable surrogate.
         """

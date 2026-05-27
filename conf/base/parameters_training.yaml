@@ -19,9 +19,8 @@ training:
     # rounds during training (per-trial during HPO + final refit). Popped by
     # LightGBMAdapter before lgb.train; not a native LGB param.
     log_period: 100
-    # num_threads: pin to the production container's core count so LightGBM
-    # doesn't fall back to OMP_NUM_THREADS=1 or a cgroup-throttled cpu_count
-    # default. Match company env (4-core CPU-only driver per CLAUDE.md).
+    # num_threads: pin to a fixed core count so LightGBM doesn't fall back to
+    # OMP_NUM_THREADS=1 or a cgroup-throttled cpu_count default.
     num_threads: 4
     # --- Learning-to-rank (Phase 1) -------------------------------------
     # To train a ranking model, set objective + a ranking metric, e.g.:

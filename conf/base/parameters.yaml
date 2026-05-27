@@ -4,10 +4,10 @@ random_seed: 42
 hive:
   db: ml_recsys
 
-# Dev-cluster (Docker Spark Standalone) 覆蓋：base 的 spark.master=yarn 是給
-# 真實 CDP/YARN 用，本機 dev-cluster 走 Standalone。${vdclient.*} placeholder
-# 在 dev 端會由 resolve_vdclient_placeholders 自動 drop、${env.*} 由 ConfigLoader
-# 解析，由 ~/dev-cluster/client-template/spark/spark-defaults.conf 補齊。
+# 下方註解掉的 keys 是生產 CDP/YARN profile 範本。${vdclient.*} placeholder
+# 由 resolve_vdclient_placeholders 解析（找不到對應 cluster 時自動 drop），
+# ${env.*} 由 ConfigLoader 解析。實際生效值來自 SPARK_CONF_DIR 指向的
+# spark-defaults.conf。
 spark:
   app_name: recsys_tfb
   # spark.master: yarn
