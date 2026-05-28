@@ -424,16 +424,19 @@ class TestFitApplyFilterScopes:
         assert test_dates.issubset(result_dates)
 
 
-def test_build_model_input_casts_decimal_features_to_float(
+def test_build_model_input_casts_float_features_to_float32(
     spark, label_table, parameters
 ):
-    """Decimal feature columns must be cast to float (float32) inside build_model_input.
+    """Decimal AND Double feature columns must both be cast to float (float32)
+    inside build_model_input.
 
-    pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
-    (~10x peak-memory blow-up when extract_Xy reads the parquet cache via
-    pd.read_parquet). LightGBM is histogram-based (max_bin=256), so float32's
-    ~7-digit precision is far beyond what binning resolves; float64 is wasted
-    budget — we bake the smaller representation into model_input at write time.
+    Invariant: model_input's numeric feature columns are stored as float32.
+
+    LightGBM is histogram-based (max_bin=256) — float32's ~7-digit precision
+    is far beyond the 8-bit binning resolution, so decimal128 and float64 are
+    pure waste. decimal128 is the disaster case (~10x peak-memory blow-up
+    via Python decimal.Decimal objects); float64 is the silent 2x case.
+    We bake the smaller representation into model_input at write time.
     """
     from decimal import Decimal
 
@@ -483,13 +486,25 @@ def test_build_model_input_casts_decimal_features_to_float(
 
     feature_cols = preprocessor["feature_columns"]
     out_dtypes = dict(result.dtypes)
-    decimal_feature_cols = [c for c in feature_cols if "decimal" in out_dtypes[c]]
-    assert decimal_feature_cols == [], (
-        f"feature_columns still contain decimal types: {decimal_feature_cols}"
+
+    # No decimal nor double feature columns remain — every float-like feature
+    # is float32.
+    leftover = [
+        c for c in feature_cols
+        if "decimal" in out_dtypes[c] or out_dtypes[c] == "double"
+    ]
+    assert leftover == [], (
+        f"feature_columns still contain decimal/double types: {leftover}"
     )
-    # And the ones that WERE decimal in the input are now float (float32).
+
+    # DecimalType inputs are now float.
     assert out_dtypes["total_aum"] == "float"
     assert out_dtypes["in_amt_sum_l1m"] == "float"
+    # DoubleType inputs are also now float (this PR's addition).
+    assert out_dtypes["fund_aum"] == "float"
+    assert out_dtypes["out_amt_sum_l1m"] == "float"
+    assert out_dtypes["in_amt_ratio_l1m"] == "float"
+    assert out_dtypes["out_amt_ratio_l1m"] == "float"
 
 
 class TestValidateDataConsistency:
