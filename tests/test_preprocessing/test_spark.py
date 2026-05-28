@@ -4,7 +4,7 @@ import pytest
 from decimal import Decimal
 from pyspark.sql import types as T
 
-from recsys_tfb.preprocessing._spark import _cast_feature_decimals_to_double
+from recsys_tfb.preprocessing._spark import _cast_feature_decimals_to_float
 
 pytestmark = pytest.mark.spark
 
@@ -32,10 +32,10 @@ def _dtype(df, col):
 
 def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    out, _ = _cast_feature_decimals_to_double(mixed_df, feature_cols)
+    out, _ = _cast_feature_decimals_to_float(mixed_df, feature_cols)
 
-    assert _dtype(out, "feature_a") == "double"
-    assert _dtype(out, "feature_c") == "double"
+    assert _dtype(out, "feature_a") == "float"
+    assert _dtype(out, "feature_c") == "float"
     # int feature untouched
     assert _dtype(out, "feature_b") == "int"
     # non-feature decimal untouched (not in feature_cols)
@@ -47,7 +47,7 @@ def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
 
 def test_cast_feature_decimals_returns_casted_list(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    _, casted = _cast_feature_decimals_to_double(mixed_df, feature_cols)
+    _, casted = _cast_feature_decimals_to_float(mixed_df, feature_cols)
     assert sorted(casted) == ["feature_a", "feature_c"]
 
 
@@ -58,7 +58,7 @@ def test_cast_feature_decimals_noop_when_no_decimals(spark):
         T.StructField("feature_b", T.DoubleType()),
     ])
     df = spark.createDataFrame([("C001", 1, 2.5)], schema=schema)
-    out, casted = _cast_feature_decimals_to_double(df, ["feature_a", "feature_b"])
+    out, casted = _cast_feature_decimals_to_float(df, ["feature_a", "feature_b"])
 
     assert casted == []
     assert out.schema == df.schema
@@ -66,7 +66,7 @@ def test_cast_feature_decimals_noop_when_no_decimals(spark):
 
 def test_cast_feature_decimals_preserves_values(mixed_df):
     feature_cols = ["feature_a"]
-    out, _ = _cast_feature_decimals_to_double(mixed_df, feature_cols)
+    out, _ = _cast_feature_decimals_to_float(mixed_df, feature_cols)
     rows = out.orderBy("cust_id").collect()
     assert rows[0].feature_a == pytest.approx(1.5)
     assert rows[1].feature_a == pytest.approx(2.25)
