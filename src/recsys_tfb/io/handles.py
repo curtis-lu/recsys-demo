@@ -17,9 +17,10 @@ class ParquetHandle:
     path: str
 
     def to_pandas(self) -> "pd.DataFrame":  # type: ignore[name-defined]
-        import pandas as pd
+        import pyarrow.parquet as pq
 
-        return pd.read_parquet(self.path, engine="pyarrow")
+        table = pq.read_table(self.path)
+        return table.to_pandas(split_blocks=True, self_destruct=True)
 
 
 @dataclass(frozen=True)
