@@ -43,8 +43,8 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
     schema = get_schema(parameters)
     # Empty/missing hive.db → bare table name (the loader resolves via Spark's
     # current database, including registered temp views — used by unit tests).
-    # Production sets hive.db=ml_recsys; dev-cluster local mode requires the
-    # qualified name because no default database is set in spark.sql.catalog.
+    # When hive.db is set, the loader prefixes the table name; required
+    # whenever no default database is configured in spark.sql.catalog.
     hive_db = ((parameters.get("hive") or {}).get("db") or "").strip() or None
     kind = src.get("kind")
     if kind == "model_version":

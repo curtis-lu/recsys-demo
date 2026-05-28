@@ -179,7 +179,7 @@ calibration_model_input:
 
 # --- Training Pipeline - Binary / non-DataFrame artifacts (driver-local) ---
 # ModelAdapterDataset / JSONDataset 用 Python 內建 open() 寫檔，不認 hdfs:// scheme，
-# 因此寫到本機 host fs（與 cached_* 同一原則）。
+# 因此寫到 driver-local fs（與 cached_* 同一原則）。
 model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/model.txt
@@ -204,7 +204,6 @@ evaluation_comparison_report:
 # 直接從 Hive table location `copyToLocal` 搬到 driver-local parquet，不經
 # catalog 持久化；cache node outputs（ParquetHandle）走 framework
 # auto-MemoryDataset 在 DAG 中銜接。
-# See docs/superpowers/specs/2026-05-07-training-cache-hdfs-copy-design.md
 
 # --- Training Pipeline - Test-set predictions for downstream evaluation reuse ---
 # Written by training/nodes.py::predict_and_write_test_predictions; read by

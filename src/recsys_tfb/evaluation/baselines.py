@@ -3,8 +3,7 @@
 Replaces each ``eval_predictions`` row's model score with the product's
 historical purchase count (sum of positive labels in a pre-snap_date
 window), yielding a global-popularity ranking aligned row-for-row with the
-model's evaluation set. See
-``docs/superpowers/specs/2026-05-22-baseline-evaluation-alignment-design.md``.
+model's evaluation set.
 """
 
 import logging

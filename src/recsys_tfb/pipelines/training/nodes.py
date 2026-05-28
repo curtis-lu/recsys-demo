@@ -75,7 +75,7 @@ def _populate_cache_from_hive(
       1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
          __main__.py:_run_pipeline from catalog_config (HiveTableDataset.table).
          This is the production path and works across envs that prefix table
-         names (e.g. company prod 'recsys_prod_train_model_input').
+         names (e.g. 'recsys_prod_train_model_input').
       2. _CACHE_SOURCE_TABLE[dataset_name] — fallback used by unit tests that
          don't go through __main__.py and therefore have no auto-injection.
     """

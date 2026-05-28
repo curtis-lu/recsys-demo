@@ -23,16 +23,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _cast_feature_decimals_to_double(
+def _cast_feature_decimals_to_float(
     df: DataFrame,
     feature_cols: list[str],
 ) -> tuple[DataFrame, list[str]]:
-    """Cast all DecimalType columns within feature_cols to double.
+    """Cast all DecimalType columns within feature_cols to float (float32).
 
     pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
-    (~70 bytes/value vs 8 bytes/float64), inflating peak memory ~10x and
-    OOM-killing extract_Xy in prod. LightGBM consumes float anyway, so cast
-    at write time and bake the smaller representation into model_input.
+    (~70 bytes/value vs 4 bytes/float32), inflating peak memory and
+    OOM-killing extract_Xy in prod. LightGBM is histogram-based GBT (buckets
+    features into max_bin bins, default 256), so float32's ~7-digit precision
+    is far beyond what binning resolves; float64 is wasted budget.
 
     Identity and label columns are intentionally NOT cast - they should not
     be decimal to begin with, and silent coercion of primary keys / label
@@ -44,7 +45,7 @@ def _cast_feature_decimals_to_double(
         if f.name in feature_set and isinstance(f.dataType, T.DecimalType)
     ]
     for col in decimal_feature_cols:
-        df = df.withColumn(col, F.col(col).cast("double"))
+        df = df.withColumn(col, F.col(col).cast("float"))
     return df, decimal_feature_cols
 
 
@@ -225,8 +226,7 @@ def validate_data_consistency(
 ) -> None:
     """Layer-2 B1 data gate. Side-effect only: raises ``DataConsistencyError``
     on violation, returns ``None`` on success. Wired as the first node of the
-    dataset pipeline. See
-    docs/superpowers/specs/2026-05-17-config-consistency-phase2-data-gate-design.md.
+    dataset pipeline.
 
     Item values are checked on sample_pool (set-equality vs declared, both
     directions) and label_table (only data-has-unknown), restricted to the
@@ -367,8 +367,9 @@ def build_model_input(
     label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
     with log_step(logger, "merge_labels"):
         dataset = keys.join(label_table, on=label_join_key, how="left")
-        # sample_pool 是 dense (cust × prod 全展開)，label_table 是 sparse
-        # (只含有大類交易的 cust)。join miss 的 row 視為 negative。
+        # sample_pool is dense (cust × prod fully expanded); label_table is
+        # sparse (only customers with category transactions). Join misses are
+        # treated as negatives.
         dataset = dataset.withColumn(label_col, F.coalesce(F.col(label_col), F.lit(0)))
     with log_step(logger, "merge_features"):
         dataset = dataset.join(preprocessed_feature_table, on=base_key, how="left")
@@ -387,10 +388,10 @@ def build_model_input(
         ))
         result = dataset.select(*output_cols)
 
-    with log_step(logger, "cast_decimals_to_double"):
-        result, casted = _cast_feature_decimals_to_double(result, feature_columns)
+    with log_step(logger, "cast_decimals_to_float"):
+        result, casted = _cast_feature_decimals_to_float(result, feature_columns)
     logger.info(
-        "build_model_input: %d features, cast %d decimal feature columns to double",
+        "build_model_input: %d features, cast %d decimal feature columns to float",
         len(feature_columns), len(casted),
     )
     if casted:
@@ -431,10 +432,10 @@ def apply_preprocessor(
             raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
         result = result.select(*identity_cols, *feature_columns)
 
-    with log_step(logger, "cast_decimals_to_double"):
-        result, casted = _cast_feature_decimals_to_double(result, feature_columns)
+    with log_step(logger, "cast_decimals_to_float"):
+        result, casted = _cast_feature_decimals_to_float(result, feature_columns)
     logger.info(
-        "apply_preprocessor: %d columns, cast %d decimal feature columns to double",
+        "apply_preprocessor: %d columns, cast %d decimal feature columns to float",
         len(result.columns), len(casted),
     )
     if casted:

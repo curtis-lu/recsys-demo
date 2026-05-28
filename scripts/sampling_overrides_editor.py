@@ -9,8 +9,8 @@ Subcommands:
 Self-contained dev tool (logic + CLI in one file), mirroring the
 scripts/promote_model.py / scripts/suggest_categorical_cols.py convention —
 unit-tested via ``from scripts.sampling_overrides_editor import ...`` in
-tests/scripts/. Not part of the production DAG. Implements the D8 formulas
-from docs/superpowers/specs/2026-05-18-sampling-overrides-editor-design.md.
+tests/scripts/. Not part of the production DAG. Implements the D8
+sampling-overrides formulas.
 
 Usage:
   python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool
