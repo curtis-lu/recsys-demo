@@ -76,6 +76,88 @@ import pandas as pd
 from recsys_tfb.preprocessing._spark import build_model_input
 
 
+class TestFilterGroupsWithPositives:
+    """Spark-side group-positive filter for val/test_model_input.
+
+    A (time, *entity) group is dropped iff every label in that group is 0.
+    Used at dataset-write time so val_model_input / test_model_input on Hive
+    only contain customers with at least one positive label per snap_date.
+    """
+
+    def test_drops_all_zero_groups(self, spark):
+        from recsys_tfb.preprocessing._spark import filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+            "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+            "prod_name": ["a", "b"] * 3,
+            "label": [1, 0, 0, 1, 0, 0],
+            "feat": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }))
+        out = filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        rows = out.orderBy("cust_id", "prod_name").collect()
+        # c3 dropped, c1 and c2 retained entirely (2 rows each)
+        assert len(rows) == 4
+        assert {r.cust_id for r in rows} == {"c1", "c2"}
+
+    def test_keeps_all_rows_of_positive_groups(self, spark):
+        """Group with even one positive row keeps every row in that group."""
+        from recsys_tfb.preprocessing._spark import filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+            "cust_id": ["c1"] * 4,
+            "prod_name": ["a", "b", "c", "d"],
+            "label": [0, 0, 1, 0],
+        }))
+        out = filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.count() == 4
+
+    def test_groups_split_across_snap_dates(self, spark):
+        """(snap_date, cust_id) is the group key — same cust across two snaps
+        is two separate groups."""
+        from recsys_tfb.preprocessing._spark import filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(
+                ["2025-01-31", "2025-01-31", "2025-02-28", "2025-02-28"]
+            ),
+            "cust_id": ["c1", "c1", "c1", "c1"],
+            "prod_name": ["a", "b", "a", "b"],
+            "label": [1, 0, 0, 0],
+        }))
+        out = filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        rows = out.orderBy("snap_date", "prod_name").collect()
+        # 2025-01 has positive → keep both rows; 2025-02 all-zero → drop
+        assert len(rows) == 2
+        assert all(str(r.snap_date).startswith("2025-01") for r in rows)
+
+    def test_preserves_column_schema(self, spark):
+        from recsys_tfb.preprocessing._spark import filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"]),
+            "cust_id": ["c1"],
+            "prod_name": ["a"],
+            "label": [1],
+            "feat": [3.14],
+        }))
+        out = filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.columns == df.columns
+
+    def test_empty_when_no_positives(self, spark):
+        from recsys_tfb.preprocessing._spark import filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "cust_id": ["c1", "c2"],
+            "prod_name": ["a", "b"],
+            "label": [0, 0],
+        }))
+        out = filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.count() == 0
+
+
 class TestBuildModelInputCarry:
     def _prep(self):
         return {"feature_columns": ["prod_name", "f1"],

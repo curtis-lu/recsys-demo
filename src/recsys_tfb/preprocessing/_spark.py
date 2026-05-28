@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -21,6 +22,26 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 logger = logging.getLogger(__name__)
+
+
+def filter_groups_with_positives(
+    df: DataFrame,
+    group_cols: list[str],
+    label_col: str,
+) -> DataFrame:
+    """Drop rows whose ``group_cols`` partition has ``sum(label_col) == 0``.
+
+    A query group is ``(time, *entity)``; pushing this filter to Spark
+    write-time keeps val_model_input / test_model_input Hive tables tight —
+    customers with no positives in a snap_date contribute nothing to mAP
+    (metrics_spark filters them again) and only waste predict time.
+    """
+    w = Window.partitionBy(*group_cols)
+    return (
+        df.withColumn("__grp_pos", F.sum(F.col(label_col)).over(w))
+          .filter(F.col("__grp_pos") > 0)
+          .drop("__grp_pos")
+    )
 
 
 def _cast_feature_decimals_to_float(
