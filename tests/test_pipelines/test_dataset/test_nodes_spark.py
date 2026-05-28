@@ -424,15 +424,16 @@ class TestFitApplyFilterScopes:
         assert test_dates.issubset(result_dates)
 
 
-def test_build_model_input_casts_decimal_features_to_double(
+def test_build_model_input_casts_decimal_features_to_float(
     spark, label_table, parameters
 ):
-    """Decimal feature columns must be cast to double inside build_model_input.
+    """Decimal feature columns must be cast to float (float32) inside build_model_input.
 
     pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
     (~10x peak-memory blow-up when extract_Xy reads the parquet cache via
-    pd.read_parquet). LightGBM consumes float anyway, so we bake the smaller
-    representation into model_input at write time.
+    pd.read_parquet). LightGBM is histogram-based (max_bin=256), so float32's
+    ~7-digit precision is far beyond what binning resolves; float64 is wasted
+    budget — we bake the smaller representation into model_input at write time.
     """
     from decimal import Decimal
 
@@ -486,9 +487,9 @@ def test_build_model_input_casts_decimal_features_to_double(
     assert decimal_feature_cols == [], (
         f"feature_columns still contain decimal types: {decimal_feature_cols}"
     )
-    # And the ones that WERE decimal in the input are now double.
-    assert out_dtypes["total_aum"] == "double"
-    assert out_dtypes["in_amt_sum_l1m"] == "double"
+    # And the ones that WERE decimal in the input are now float (float32).
+    assert out_dtypes["total_aum"] == "float"
+    assert out_dtypes["in_amt_sum_l1m"] == "float"
 
 
 class TestValidateDataConsistency:
