@@ -292,15 +292,11 @@ def tune_hyperparameters(
     if _metric:
         algorithm_params["metric"] = _metric
 
-    # Val rows belonging to (cust_id, snap_date) groups with no positive
-    # labels contribute nothing to per-customer mAP and would only waste
-    # predict time, so drop them up front.
+    # val_model_input is already pre-filtered to positive groups by the dataset
+    # pipeline (filter_val_model_input node) — no in-pandas re-filter here.
     with log_step(logger, "extract_features"):
         X_v, y_v, groups_v = extract_Xy_with_groups(
-            val_parquet_handle,
-            preprocessor_metadata,
-            parameters,
-            filter_groups_with_positives=True,
+            val_parquet_handle, preprocessor_metadata, parameters,
         )
 
     best_state: dict = {"mean_ap": -1.0, "model": None, "iteration": 0}
@@ -579,22 +575,20 @@ def predict_and_write_test_predictions(
     parameters: dict,
     training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
 ) -> dict:
-    """Per-partition test prediction + Hive write (Pass 0 + Pass 1).
+    """Per-partition test prediction + Hive write.
 
-    Pass 0: label-only column scan of the test parquet to build, per
-    snap_date, the set of cust_ids with >=1 positive label across any prod.
-    Customers with no positives in that snap_date contribute 0/skip to
-    mAP, so we drop them up front and avoid their predict cost.
-
-    Pass 1: for each (snap_date, prod_name) partition of the parquet:
+    For each (snap_date, prod_name) partition of the parquet:
         - load only that partition's rows via pyarrow filter
-        - drop rows whose cust_id is not in the snap_date's positive set
         - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
         - build a pandas DataFrame with (cust_id, score, score_uncalibrated,
           label) + partition cols snap_date, prod_name
         - training_eval_predictions.save(df) — exactly one partition's
           rows per save, so dynamic-partition overwrite cleanly overwrites
           a single partition and successive saves don't collide
+
+    test_model_input is pre-filtered upstream (filter_test_model_input node
+    in dataset pipeline) so every (snap_date, cust_id) group already has
+    at least one positive label.
 
     Returns:
         manifest dict for downstream compute_test_mAP_spark to depend on
@@ -622,25 +616,6 @@ def predict_and_write_test_predictions(
     # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
     ds = pads.dataset(test_parquet_handle.path, format="parquet", partitioning="hive")
 
-    # ---- Pass 0: positive customer set per snap_date ----
-    with log_step(logger, "pass0_positive_set"):
-        labels_table = ds.to_table(columns=[cust_id_col, time_col, label_col])
-        log_data_volume(logger, "predict.labels_table", labels_table)
-        labels_pdf = labels_table.to_pandas()
-        log_data_volume(logger, "predict.labels_pdf", labels_pdf, deep=True)
-        positives_pdf = labels_pdf[labels_pdf[label_col] == 1]
-        positive_set: dict[str, set] = {
-            str(snap): set(grp[cust_id_col].astype(str))
-            for snap, grp in positives_pdf.groupby(time_col)
-        }
-    logger.info(
-        "predict_and_write_test_predictions: pass0 built positive sets — "
-        "snap_dates=%d total_pos_custs=%d",
-        len(positive_set),
-        sum(len(s) for s in positive_set.values()),
-    )
-
-    # ---- Pass 1: per-partition predict + save ----
     # Enumerate distinct (snap_date, prod_name) values by projecting just the
     # two partition columns and de-duplicating. Note: select-on-partition-cols
     # in pyarrow still materializes one row per data row (the values are filled
@@ -678,17 +653,6 @@ def predict_and_write_test_predictions(
                 logger, f"predict.part_pdf[{snap_date}/{prod_name}]",
                 part_pdf, deep=True,
             )
-
-            keep_custs = positive_set.get(snap_date, set())
-            part_pdf = part_pdf[part_pdf[cust_id_col].astype(str).isin(keep_custs)]
-
-            if len(part_pdf) == 0:
-                logger.info(
-                    "predict_and_write_test_predictions: skipping empty "
-                    "partition snap=%s prod=%s after positive-set filter",
-                    snap_date, prod_name,
-                )
-                continue
 
             snap_dates_seen.add(snap_date)
             prods_seen.add(prod_name)

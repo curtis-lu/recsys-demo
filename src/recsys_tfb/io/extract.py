@@ -199,7 +199,6 @@ def extract_Xy_with_groups(
     preprocessor_metadata: dict,
     parameters: dict,
     *,
-    filter_groups_with_positives: bool = False,
     with_weights: bool = False,
 ) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
@@ -207,12 +206,6 @@ def extract_Xy_with_groups(
     A query group is ``(time, *entity)`` — for the default schema, the
     ``(snap_date, cust_id)`` pair. ``groups`` is an int64 array aligned 1:1
     with rows of X / y; rows in the same group share the same id.
-
-    When ``filter_groups_with_positives=True``, rows belonging to any group
-    whose label sum is zero are dropped before feature slicing and encoding.
-    The retained groups are re-indexed densely starting from 0. Used by
-    tune_hyperparameters where val groups with no positives contribute
-    nothing to mean-AP and would only waste predict time.
     """
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
@@ -224,12 +217,11 @@ def extract_Xy_with_groups(
 
     logger.info(
         "extract_Xy_with_groups start path=%s n_feature_cols=%d label=%s "
-        "group_cols=%s filter_positive=%s",
+        "group_cols=%s",
         getattr(handle, "path", "<unknown>"),
         len(feature_cols),
         label_col,
         group_cols,
-        filter_groups_with_positives,
     )
 
     _log_parquet_metadata(handle)
@@ -237,16 +229,6 @@ def extract_Xy_with_groups(
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()
     log_data_volume(logger, "extract_Xy_with_groups.pdf", pdf, deep=True)
-
-    if filter_groups_with_positives:
-        with log_step(logger, "filter_groups_with_positives"):
-            group_pos = pdf.groupby(group_cols, sort=False)[label_col].transform("sum")
-            n_before = len(pdf)
-            pdf = pdf[group_pos > 0].reset_index(drop=True)
-        logger.info(
-            "extract_Xy_with_groups: filtered rows %d -> %d",
-            n_before, len(pdf),
-        )
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()

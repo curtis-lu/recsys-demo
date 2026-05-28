@@ -13,24 +13,20 @@ def _make_test_parquet(tmp_path: Path) -> Path:
     Layout: snap_date=*/prod_name=*/*.parquet (Hive-style, matches what the
     dataset pipeline produces after this PR's catalog change).
 
-    Customers:
-      c1 has label=1 only on prod_A (snap=2025-01) -> stays in positive set
-      c2 has label=1 only on prod_B (snap=2025-01) -> stays in positive set
-      c3 has no positives -> filtered out by Pass 0
-      c4 has label=1 on prod_A in 2025-02 only       -> separate snap positive
+    test_model_input is pre-filtered upstream by the dataset pipeline's
+    filter_test_model_input node — every (snap_date, cust_id) group present
+    here has at least one positive label across some prod_name.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     rows = [
-        # snap=2025-01-31
+        # snap=2025-01-31: c1 positive on prod_A, c2 positive on prod_B
         ("c1", "2025-01-31", "prod_A", 1.0, 1),
         ("c1", "2025-01-31", "prod_B", 1.1, 0),
         ("c2", "2025-01-31", "prod_A", 2.0, 0),
         ("c2", "2025-01-31", "prod_B", 2.1, 1),
-        ("c3", "2025-01-31", "prod_A", 3.0, 0),
-        ("c3", "2025-01-31", "prod_B", 3.1, 0),
-        # snap=2025-02-28
+        # snap=2025-02-28: c4 positive on prod_A
         ("c4", "2025-02-28", "prod_A", 4.0, 1),
         ("c4", "2025-02-28", "prod_B", 4.1, 0),
     ]
@@ -67,10 +63,11 @@ def _make_parameters() -> dict:
     }
 
 
-def test_predict_and_write_passes_filters_no_positive_customers(tmp_path):
-    """Pass 0 builds positive-customer set per snap_date; Pass 1 filters
-    rows whose cust_id is not in the set. c3 has no positives and must
-    not appear in any per-partition save call.
+def test_predict_and_write_emits_one_save_per_partition(tmp_path):
+    """One save() call per (snap_date, prod_name) partition; every row in
+    the input parquet appears in some save (no row-level filtering at this
+    layer — upstream filter_test_model_input already dropped negative-only
+    groups before this function runs).
     """
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import (
@@ -109,17 +106,18 @@ def test_predict_and_write_passes_filters_no_positive_customers(tmp_path):
     #                     (2025-02-28, prod_A), (2025-02-28, prod_B)
     assert write_ds.save.call_count == 4
 
-    # c3 must never appear in any save
     all_written = pd.concat(saves, ignore_index=True)
-    assert "c3" not in set(all_written["cust_id"])
 
-    # c1 and c2 are written for 2025-01-31 partitions (both prods)
+    # 2025-01-31 has c1 and c2 (both customers carry one positive each)
     snap_jan = all_written[all_written["snap_date"] == "2025-01-31"]
     assert set(snap_jan["cust_id"]) == {"c1", "c2"}
 
-    # c4 is the only customer in 2025-02-28
+    # 2025-02-28 has only c4
     snap_feb = all_written[all_written["snap_date"] == "2025-02-28"]
     assert set(snap_feb["cust_id"]) == {"c4"}
+
+    # Every input row is written through (no row-level filtering here).
+    assert len(all_written) == 6
 
     # Manifest reports the right shape
     assert set(manifest["snap_dates"]) == {"2025-01-31", "2025-02-28"}
