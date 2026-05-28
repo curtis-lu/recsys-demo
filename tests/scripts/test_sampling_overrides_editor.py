@@ -199,6 +199,44 @@ class TestRenderHtml:
         assert "Math.round(r.n_neg*ratio)" in html
         assert "r.n_pos/total" in html
 
+    def test_has_bulk_set_controls(self):
+        # Bulk-set toolbar: choose filter column (segment/product), value,
+        # target field (ratio/weight), new value -> overwrite every matching
+        # row. Smoke-test the wiring (real behavior is JS-only).
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert 'id="bulk"' in html
+        for ident in ('id="bk"', 'id="bv"', 'id="sk"', 'id="sv"', 'id="bm"'):
+            assert ident in html
+        assert 'onclick="bulkSet()"' in html
+        assert 'function bulkSet(' in html
+        # bulk apply must syncEdits first (don't drop in-flight typing)
+        # and recompute the footer totals afterwards.
+        assert 'syncEdits()' in html and 'recalcTotals()' in html
+
+    def test_has_totals_footer_row(self):
+        # tfoot row reflects current ratio settings -> downsampled totals.
+        # Edits to a ratio cell update it live via recalc() -> recalcTotals().
+        html = render_html(self._GRID, default_ratio=1.0)
+        assert "<tfoot>" in html
+        for ident in ('id="tnp"', 'id="tnn"', 'id="tpr"',
+                      'id="tkn"', 'id="tnpr"'):
+            assert ident in html
+        assert "function recalcTotals(" in html
+        # totals = full grid, not filter-aware (footer always reflects all
+        # cells regardless of the top filter box / sort state).
+        assert "GRID.forEach" in html
+
+    def test_has_per_dimension_stats(self):
+        # Two collapsible <details> blocks rendering raw n_pos/n_neg/pos_rate
+        # aggregated by segment / by product. Default-closed; computed once
+        # at load (do not depend on ratio/weight edits).
+        html = render_html(self._GRID, default_ratio=1.0)
+        for ident in ('id="ts"', 'id="tp"'):
+            assert ident in html
+        assert "function byDim(" in html and "function renderStat(" in html
+        assert "renderStat('ts','segment')" in html
+        assert "renderStat('tp','product')" in html
+
     def test_explains_ratio_and_weight_logic_and_purpose(self):
         html = render_html(self._GRID, default_ratio=1.0,
                            target_neg_pos=5.0, alpha=0.5, w_max=5.0)
