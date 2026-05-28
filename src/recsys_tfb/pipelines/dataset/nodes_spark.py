@@ -14,6 +14,7 @@ from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._spark import (
     apply_preprocessor_to_features as _apply_preprocessor_to_features,
     build_model_input as _build_model_input,
+    filter_groups_with_positives as _filter_groups_with_positives,
     fit_preprocessor_metadata as _fit_preprocessor_metadata,
     validate_data_consistency as _validate_data_consistency,
 )
@@ -183,3 +184,20 @@ def build_model_input(
     return _build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
     )
+
+
+def filter_groups_with_positives(
+    model_input: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Drop (time, *entity) groups whose label sum is zero.
+
+    Pipeline-node wrapper over preprocessing._spark.filter_groups_with_positives;
+    resolves group_cols / label_col from schema. Used for val / test only —
+    groups without any positive contribute nothing to mAP (metrics_spark
+    re-applies the same filter) and would only waste predict time.
+    """
+    schema = get_schema(parameters)
+    group_cols = [schema["time"]] + schema["entity"]
+    label_col = schema["label"]
+    return _filter_groups_with_positives(model_input, group_cols, label_col)

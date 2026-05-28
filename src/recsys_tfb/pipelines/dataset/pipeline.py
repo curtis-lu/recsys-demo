@@ -8,6 +8,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     from recsys_tfb.pipelines.dataset.nodes_spark import (
         apply_preprocessor_to_features,
         build_model_input,
+        filter_groups_with_positives,
         fit_preprocessor_metadata,
         select_calibration_keys,
         select_test_keys,
@@ -87,7 +88,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "val_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
             ],
-            outputs="val_model_input",
+            outputs="val_model_input_unfiltered",
             name="build_val_model_input",
         ),
         Node(
@@ -96,8 +97,25 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "test_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
             ],
-            outputs="test_model_input",
+            outputs="test_model_input_unfiltered",
             name="build_test_model_input",
+        ),
+        # --- Drop (time, *entity) groups with no positives. Applied to val/test
+        # only — these are evaluated by ranking metrics (mAP/NDCG) that exclude
+        # zero-positive groups anyway, so retaining them just wastes Hive
+        # storage and downstream predict / extract memory. train / train_dev /
+        # calibration are NOT filtered: their losses use every row. ---
+        Node(
+            filter_groups_with_positives,
+            inputs=["val_model_input_unfiltered", "parameters"],
+            outputs="val_model_input",
+            name="filter_val_model_input",
+        ),
+        Node(
+            filter_groups_with_positives,
+            inputs=["test_model_input_unfiltered", "parameters"],
+            outputs="test_model_input",
+            name="filter_test_model_input",
         ),
     ]
 

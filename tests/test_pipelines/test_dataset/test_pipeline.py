@@ -6,13 +6,15 @@ from recsys_tfb.pipelines.dataset import create_pipeline
 class TestDatasetPipeline:
     def test_pipeline_without_calibration(self):
         pipeline = create_pipeline()
-        # 1 validate + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input = 11
-        assert len(pipeline.nodes) == 11
+        # 1 validate + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input
+        # + 2 filter (val/test) = 13
+        assert len(pipeline.nodes) == 13
 
     def test_pipeline_with_calibration(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 11 base + 1 select_calibration_keys + 1 build_calibration_model_input = 13
-        assert len(pipeline.nodes) == 13
+        # 13 base + 1 select_calibration_keys + 1 build_calibration_model_input = 15
+        # (calibration is NOT filtered — keep all rows)
+        assert len(pipeline.nodes) == 15
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -22,6 +24,7 @@ class TestDatasetPipeline:
         pipeline = create_pipeline()
         expected = {
             "train_model_input", "train_dev_model_input",
+            "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
             "preprocessed_feature_table",
@@ -34,6 +37,7 @@ class TestDatasetPipeline:
         expected = {
             "train_model_input", "train_dev_model_input",
             "calibration_model_input",
+            "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
             "preprocessed_feature_table",
@@ -56,6 +60,8 @@ class TestDatasetPipeline:
         assert "build_train_dev_model_input" in names
         assert "build_val_model_input" in names
         assert "build_test_model_input" in names
+        assert "filter_val_model_input" in names
+        assert "filter_test_model_input" in names
 
     def test_node_names_with_calibration(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -65,7 +71,27 @@ class TestDatasetPipeline:
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 11
+        assert len(pipeline.nodes) == 13
+
+    def test_filter_nodes_only_for_val_and_test(self):
+        """train / train_dev / calibration go straight to *_model_input;
+        only val and test get the group-positive filter."""
+        pipeline = create_pipeline(enable_calibration=True)
+        names = [n.name for n in pipeline.nodes]
+        assert "filter_val_model_input" in names
+        assert "filter_test_model_input" in names
+        assert "filter_train_model_input" not in names
+        assert "filter_train_dev_model_input" not in names
+        assert "filter_calibration_model_input" not in names
+
+    def test_filter_consumes_unfiltered_output(self):
+        """Filter node input must be the build node's *_unfiltered output."""
+        pipeline = create_pipeline()
+        by_name = {n.name: n for n in pipeline.nodes}
+        assert "val_model_input_unfiltered" in by_name["filter_val_model_input"].inputs
+        assert by_name["filter_val_model_input"].outputs == ["val_model_input"]
+        assert "test_model_input_unfiltered" in by_name["filter_test_model_input"].inputs
+        assert by_name["filter_test_model_input"].outputs == ["test_model_input"]
 
     def test_validate_data_consistency_runs_first(self):
         pipeline = create_pipeline()
