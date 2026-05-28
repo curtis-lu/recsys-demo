@@ -106,11 +106,13 @@ class TestApplyPreprocessor:
         with pytest.raises(ValueError, match="Missing feature columns"):
             apply_preprocessor(scoring, preprocessor, parameters)
 
-    def test_casts_decimal_features_to_double(self, spark, parameters, preprocessor):
-        """Decimal feature columns in scoring data must be cast to double.
-
-        Mirror of build_model_input fix; the inference scoring parquet also gets
-        read back via pandas downstream and would face the same OOM.
+    def test_casts_float_features_to_float32(self, spark, parameters, preprocessor):
+        """Decimal AND Double feature columns in scoring data must be cast to
+        float (float32). Mirror of build_model_input behaviour — the inference
+        scoring parquet is read back via pandas downstream and would otherwise
+        face the same memory issues (Decimal → 70 B/value Python objects;
+        Double → 8 B vs 4 B float32 for no model benefit since LightGBM
+        histogram resolves at log2(max_bin)=8 bits).
         """
         from decimal import Decimal
 
@@ -147,15 +149,17 @@ class TestApplyPreprocessor:
         result = apply_preprocessor(scoring, preprocessor, parameters)
 
         out_dtypes = dict(result.dtypes)
-        assert out_dtypes[decimal_col] == "double", (
-            f"{decimal_col} still {out_dtypes[decimal_col]}, expected double"
+        # No feature column should remain decimal nor double after
+        # apply_preprocessor (all float-like → float32).
+        assert out_dtypes[decimal_col] == "float", (
+            f"{decimal_col} still {out_dtypes[decimal_col]}, expected float"
         )
-        # No feature column should remain decimal after apply_preprocessor.
-        decimal_feature_cols = [
-            c for c in feature_cols if "decimal" in out_dtypes[c]
+        leftover = [
+            c for c in feature_cols
+            if "decimal" in out_dtypes[c] or out_dtypes[c] == "double"
         ]
-        assert decimal_feature_cols == [], (
-            f"feature_columns still contain decimal types: {decimal_feature_cols}"
+        assert leftover == [], (
+            f"feature_columns still contain decimal/double types: {leftover}"
         )
 
 
