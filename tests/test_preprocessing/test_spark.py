@@ -4,7 +4,7 @@ import pytest
 from decimal import Decimal
 from pyspark.sql import types as T
 
-from recsys_tfb.preprocessing._spark import _cast_feature_decimals_to_float
+from recsys_tfb.preprocessing._spark import _cast_feature_floats_to_float32
 
 pytestmark = pytest.mark.spark
 
@@ -32,7 +32,7 @@ def _dtype(df, col):
 
 def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    out, _ = _cast_feature_decimals_to_float(mixed_df, feature_cols)
+    out, _ = _cast_feature_floats_to_float32(mixed_df, feature_cols)
 
     assert _dtype(out, "feature_a") == "float"
     assert _dtype(out, "feature_c") == "float"
@@ -47,18 +47,20 @@ def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
 
 def test_cast_feature_decimals_returns_casted_list(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    _, casted = _cast_feature_decimals_to_float(mixed_df, feature_cols)
+    _, casted = _cast_feature_floats_to_float32(mixed_df, feature_cols)
     assert sorted(casted) == ["feature_a", "feature_c"]
 
 
-def test_cast_feature_decimals_noop_when_no_decimals(spark):
+def test_cast_features_noop_when_nothing_castable(spark):
+    """No-op when feature_cols contain no Decimal/Double — IntegerType and
+    FloatType (already float32) pass through with the schema unchanged."""
     schema = T.StructType([
         T.StructField("cust_id", T.StringType()),
         T.StructField("feature_a", T.IntegerType()),
-        T.StructField("feature_b", T.DoubleType()),
+        T.StructField("feature_b", T.FloatType()),
     ])
     df = spark.createDataFrame([("C001", 1, 2.5)], schema=schema)
-    out, casted = _cast_feature_decimals_to_float(df, ["feature_a", "feature_b"])
+    out, casted = _cast_feature_floats_to_float32(df, ["feature_a", "feature_b"])
 
     assert casted == []
     assert out.schema == df.schema
@@ -66,10 +68,63 @@ def test_cast_feature_decimals_noop_when_no_decimals(spark):
 
 def test_cast_feature_decimals_preserves_values(mixed_df):
     feature_cols = ["feature_a"]
-    out, _ = _cast_feature_decimals_to_float(mixed_df, feature_cols)
+    out, _ = _cast_feature_floats_to_float32(mixed_df, feature_cols)
     rows = out.orderBy("cust_id").collect()
     assert rows[0].feature_a == pytest.approx(1.5)
     assert rows[1].feature_a == pytest.approx(2.25)
+
+
+def test_cast_feature_doubles_to_float32(spark):
+    """DoubleType feature cols must also be cast to float (float32).
+
+    LightGBM is histogram-based (max_bin=256); float32's 7-digit precision
+    is well past binning resolution, so float64/DoubleType is wasted budget.
+    """
+    schema = T.StructType([
+        T.StructField("cust_id", T.StringType()),
+        T.StructField("feature_a", T.DoubleType()),
+        T.StructField("feature_b", T.DoubleType()),
+        T.StructField("non_feature_double", T.DoubleType()),
+        T.StructField("feature_c", T.IntegerType()),
+    ])
+    df = spark.createDataFrame(
+        [("C001", 1.5, 2.5, 9.99, 10)], schema=schema
+    )
+    out, casted = _cast_feature_floats_to_float32(
+        df, ["feature_a", "feature_b", "feature_c"]
+    )
+    # DoubleType feature cols cast to float
+    assert _dtype(out, "feature_a") == "float"
+    assert _dtype(out, "feature_b") == "float"
+    # int feature untouched
+    assert _dtype(out, "feature_c") == "int"
+    # non-feature DoubleType untouched (not in feature_cols)
+    assert _dtype(out, "non_feature_double") == "double"
+    # Returned list reports the casted DoubleType cols
+    assert sorted(casted) == ["feature_a", "feature_b"]
+
+
+def test_cast_mixed_decimal_and_double(spark):
+    """Mixed feature_cols (DecimalType + DoubleType + FloatType + IntegerType):
+    Decimal and Double both → float; Float untouched (already float32);
+    Integer untouched."""
+    schema = T.StructType([
+        T.StructField("dec_col", T.DecimalType(38, 6)),
+        T.StructField("dbl_col", T.DoubleType()),
+        T.StructField("flt_col", T.FloatType()),
+        T.StructField("int_col", T.IntegerType()),
+    ])
+    df = spark.createDataFrame(
+        [(Decimal("1.23"), 4.56, 7.89, 10)], schema=schema
+    )
+    feature_cols = ["dec_col", "dbl_col", "flt_col", "int_col"]
+    out, casted = _cast_feature_floats_to_float32(df, feature_cols)
+
+    assert _dtype(out, "dec_col") == "float"
+    assert _dtype(out, "dbl_col") == "float"
+    assert _dtype(out, "flt_col") == "float"
+    assert _dtype(out, "int_col") == "int"
+    assert sorted(casted) == ["dbl_col", "dec_col"]
 
 
 import pandas as pd

@@ -44,30 +44,42 @@ def filter_groups_with_positives(
     )
 
 
-def _cast_feature_decimals_to_float(
+def _cast_feature_floats_to_float32(
     df: DataFrame,
     feature_cols: list[str],
 ) -> tuple[DataFrame, list[str]]:
-    """Cast all DecimalType columns within feature_cols to float (float32).
+    """Cast DecimalType and DoubleType columns within feature_cols to float (float32).
 
-    pandas/pyarrow materializes decimal128 as Python decimal.Decimal objects
-    (~70 bytes/value vs 4 bytes/float32), inflating peak memory and
-    OOM-killing extract_Xy in prod. LightGBM is histogram-based GBT (buckets
-    features into max_bin bins, default 256), so float32's ~7-digit precision
-    is far beyond what binning resolves; float64 is wasted budget.
+    Invariant: model_input's numeric feature columns are stored as float32.
 
-    Identity and label columns are intentionally NOT cast - they should not
-    be decimal to begin with, and silent coercion of primary keys / label
-    dtype would mask a real schema bug.
+    LightGBM is histogram-based GBT (max_bin=256, so split decisions resolve
+    at log2(256)=8-bit granularity). float32's ~7-digit decimal precision is
+    far beyond what binning can use, making float64 / decimal128 pure waste:
+
+    - decimal128 is the disaster case: pandas/pyarrow materializes it as
+      Python ``decimal.Decimal`` objects (~70 B/value vs 4 B/float32), so
+      extract_Xy peak memory explodes (originally OOM-killed the val read).
+    - DoubleType is the silent case: ~2x the memory of float32 (8 vs 4 B)
+      and ~2x slower on SIMD-vectorized pandas ops, with zero compensating
+      benefit for the model.
+
+    Identity and label columns are intentionally NOT cast — they should not
+    be a numeric float type to begin with, and silent coercion of primary
+    keys / label dtype would mask a real schema bug.
+
+    Returns:
+        (df, casted_cols) where ``casted_cols`` is the subset of
+        ``feature_cols`` that were DecimalType or DoubleType.
     """
     feature_set = set(feature_cols)
-    decimal_feature_cols = [
+    casted_feature_cols = [
         f.name for f in df.schema.fields
-        if f.name in feature_set and isinstance(f.dataType, T.DecimalType)
+        if f.name in feature_set
+        and isinstance(f.dataType, (T.DecimalType, T.DoubleType))
     ]
-    for col in decimal_feature_cols:
+    for col in casted_feature_cols:
         df = df.withColumn(col, F.col(col).cast("float"))
-    return df, decimal_feature_cols
+    return df, casted_feature_cols
 
 
 def _encode_categoricals(
@@ -409,10 +421,10 @@ def build_model_input(
         ))
         result = dataset.select(*output_cols)
 
-    with log_step(logger, "cast_decimals_to_float"):
-        result, casted = _cast_feature_decimals_to_float(result, feature_columns)
+    with log_step(logger, "cast_features_to_float32"):
+        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
     logger.info(
-        "build_model_input: %d features, cast %d decimal feature columns to float",
+        "build_model_input: %d features, cast %d float-like feature columns to float32",
         len(feature_columns), len(casted),
     )
     if casted:
@@ -453,10 +465,10 @@ def apply_preprocessor(
             raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
         result = result.select(*identity_cols, *feature_columns)
 
-    with log_step(logger, "cast_decimals_to_float"):
-        result, casted = _cast_feature_decimals_to_float(result, feature_columns)
+    with log_step(logger, "cast_features_to_float32"):
+        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
     logger.info(
-        "apply_preprocessor: %d columns, cast %d decimal feature columns to float",
+        "apply_preprocessor: %d columns, cast %d float-like feature columns to float32",
         len(result.columns), len(casted),
     )
     if casted:
