@@ -11,8 +11,10 @@ class TestTrainingPipeline:
     def test_pipeline_has_ten_nodes(self):
         pipeline = create_pipeline()
         # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune
-        # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark + log
-        assert len(pipeline.nodes) == 10
+        # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
+        # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + log
+        assert len(pipeline.nodes) == 13
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -42,6 +44,7 @@ class TestTrainingPipeline:
             "train_parquet_handle", "train_dev_parquet_handle",
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
+            "feature_statistics", "feature_importance", "shap_diagnostics",
         }
         assert pipeline.outputs == expected
 
@@ -97,8 +100,10 @@ class TestTrainingPipeline:
     def test_calibration_pipeline_has_twelve_nodes(self):
         pipeline = create_pipeline(enable_calibration=True)
         # 5 cache nodes + prepare_lgb + tune + finalize + calibrate
-        # + predict_and_write + compute_test_mAP_spark + log
-        assert len(pipeline.nodes) == 12
+        # + predict_and_write + compute_test_mAP_spark
+        # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + log
+        assert len(pipeline.nodes) == 15
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -221,6 +226,7 @@ class TestTrainingPipelineE2E:
             "cache": {"root": str(tmp_path / "cache")},
             "base_dataset_version": "v1",
             "train_variant_id": "tv1",
+            "model_version": "e2e_test_mv",
         }
 
         # -- Build sample_pool from label_table (customer-month-product granularity) --
@@ -270,7 +276,8 @@ class TestTrainingPipelineE2E:
             catalog.add(handle_name, MemoryDataset(ParquetHandle(str(parquet_path))))
 
         # Also register the lgb handle slots and intermediate names the pipeline produces.
-        for name in ("train_lgb_handle", "train_dev_lgb_handle"):
+        for name in ("train_lgb_handle", "train_dev_lgb_handle",
+                     "feature_statistics", "feature_importance", "shap_diagnostics"):
             catalog.add(name, MemoryDataset())
 
         # -- Run training pipeline (skip cache nodes and the Hive-writing node) --

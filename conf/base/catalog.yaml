@@ -194,6 +194,18 @@ evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
 
+feature_statistics:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/feature_statistics.json
+
+feature_importance:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/feature_importance.json
+
+shap_diagnostics:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/shap_diagnostics.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

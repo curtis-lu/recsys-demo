@@ -44,8 +44,8 @@ class ModelAdapter(ABC):
         ...
 
     @abstractmethod
-    def feature_importance(self) -> dict[str, float]:
-        """Return {feature_name: importance_score}."""
+    def feature_importance(self, kind: str = "split") -> dict[str, float]:
+        """Return {feature_name: importance_score}. kind in {"split","gain"}."""
         ...
 
     @abstractmethod

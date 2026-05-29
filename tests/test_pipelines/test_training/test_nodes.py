@@ -550,7 +550,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, best_params, 123, evaluation_results, params)
+        log_experiment(model, best_params, 123, evaluation_results, {}, {}, {}, params)
 
         # Verify run was created
         import mlflow
@@ -594,7 +594,7 @@ class TestLogExperiment:
 
         with caplog.at_level("WARNING"):
             # 不應 raise
-            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
+            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, {}, {}, {}, params)
 
         assert any("mlflow" in r.message.lower() for r in caplog.records)
 
@@ -621,7 +621,7 @@ class TestLogExperiment:
         monkeypatch.setattr(nodes_mod.mlflow, "start_run", _boom)
 
         with pytest.raises(RuntimeError):
-            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
+            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, {}, {}, {}, params)
 
     def test_logs_calibration_info(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
@@ -647,7 +647,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, best_params, 123, evaluation_results, params)
+        log_experiment(model, best_params, 123, evaluation_results, {}, {}, {}, params)
 
         import mlflow
         mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
@@ -657,6 +657,44 @@ class TestLogExperiment:
         assert runs.iloc[0]["params.calibrated"] == "True"
         assert runs.iloc[0]["params.calibration_method"] == "isotonic"
         assert runs.iloc[0]["metrics.uncalibrated_overall_map"] == 0.75
+
+
+def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
+    import recsys_tfb.pipelines.training.nodes as nodes
+
+    logged_metrics, logged_artifacts = {}, []
+    monkeypatch.setattr(nodes.mlflow, "set_tracking_uri", lambda *a, **k: None)
+    monkeypatch.setattr(nodes.mlflow, "set_experiment", lambda *a, **k: None)
+
+    class _Run:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(nodes.mlflow, "start_run", lambda *a, **k: _Run())
+    monkeypatch.setattr(nodes.mlflow, "log_params", lambda *a, **k: None)
+    monkeypatch.setattr(nodes.mlflow, "log_param", lambda *a, **k: None)
+    monkeypatch.setattr(nodes.mlflow, "log_metric", lambda k, v: logged_metrics.__setitem__(k, v))
+    monkeypatch.setattr(nodes.mlflow, "log_artifacts", lambda d, *a, **k: logged_artifacts.append(d))
+
+    monkeypatch.chdir(tmp_path)
+    parameters = {"model_version": "mv1", "mlflow": {}, "training": {}}
+    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
+    diagnostics_dir(parameters)  # create the dir so log_artifacts has something
+
+    class _Model:
+        def log_to_mlflow(self): pass
+
+    eval_results = {"overall_map": 0.5, "per_item_map_attr": {}, "n_queries": 10, "n_excluded_queries": 0}
+    feature_statistics = {"f0": {"single_value": True, "high_null": False, "null_rate": 0.0, "n_distinct": 1}}
+    feature_importance = {"ranked": [], "dead_features": ["f3", "f4"]}
+    shap_diagnostics = {"global": {"top_features": []}, "per_item": {}, "examples": {}}
+
+    nodes.log_experiment(_Model(), {}, 10, eval_results, feature_statistics,
+                         feature_importance, shap_diagnostics, parameters)
+
+    assert logged_metrics["n_dead_features"] == 2
+    assert logged_metrics["n_single_value_features"] == 1
+    assert logged_metrics["n_high_null_features"] == 0
+    assert len(logged_artifacts) == 1  # whole diagnostics dir uploaded once
 
 
 # ---- Tests: calibrate_model ----
