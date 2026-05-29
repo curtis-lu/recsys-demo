@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run a one-shot PySpark admin/setup script against dev-cluster, fast.
 #
-# Pattern from ~/dev-cluster/README.md §「跑 Spark job 的三種方式」 method B
+# Pattern from ~/dev-cluster/README.md ("three ways to run a Spark job", method B)
 # blockquote (line 77-91): transient devcluster/pyspark container with local[N]
 # master and dynamicAllocation disabled — avoids the multi-minute standalone
 # scheduler init that host-venv mode incurs. Bind-mounts the project root to

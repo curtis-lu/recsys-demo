@@ -103,7 +103,7 @@ class TestComputeFeatureTableFingerprint:
         assert _HEX8_RE.match(compute_feature_table_fingerprint([]))
 
     def test_accepts_iterable(self):
-        # tuple of tuples 應該與 list of tuples 等價
+        # tuple of tuples should be equivalent to list of tuples
         cols_list = [("snap_date", "date"), ("cust_id", "string")]
         cols_tuple = (("snap_date", "date"), ("cust_id", "string"))
         assert compute_feature_table_fingerprint(cols_list) == \
@@ -163,7 +163,7 @@ class TestComputeBaseDatasetVersion:
             compute_base_dataset_version(_base_params(), schema_b)
 
     def test_fingerprint_default_none_matches_legacy(self):
-        # fingerprint=None 必須與不傳該參數時 hash 完全一致（向後相容）
+        # fingerprint=None must hash identically to omitting the param (backwards compatible)
         legacy = compute_base_dataset_version(_base_params(), _sample_schema())
         with_none = compute_base_dataset_version(
             _base_params(), _sample_schema(), feature_table_fingerprint=None
@@ -189,7 +189,7 @@ class TestComputeBaseDatasetVersion:
         assert a == b
 
     def test_fingerprint_set_differs_from_unset(self):
-        # 一旦 caller 開始傳 fingerprint，hash 應該與「沒傳」分流
+        # once a caller passes fingerprint, the hash must diverge from the "not passed" branch
         legacy = compute_base_dataset_version(_base_params(), _sample_schema())
         with_fp = compute_base_dataset_version(
             _base_params(), _sample_schema(), feature_table_fingerprint="cafeb0ba"

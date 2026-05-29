@@ -1,17 +1,17 @@
-# Sample Pool ETL Pipeline Configuration
-# Depends on feature_concat and label_{ccard,exchange,fund} produced by feature_etl
-# and label_etl respectively. Cross-DAG freshness can be enforced later via
-# source_checks on ${target_db}.feature_concat and the three label tables.
+# Sample pool ETL pipeline 配置
+# 上游依賴 feature_etl 產出的 feature_concat 與 label_etl 產出的
+# label_{ccard,exchange,fund}。未來如需做跨 DAG 新鮮度檢查，可加在
+# ${target_db}.feature_concat 與三張 label table 的 source_checks。
 
 sample_pool_etl:
   dry_run: false
   variables:
     target_db: "ml_recsys"
 
-  # Source table freshness and schema checks (run before ETL execution)
+  # 上游 source table 的新鮮度 / schema 檢查（ETL 執行前先跑）
   source_checks: {}
 
-  # Output tables — execution order = list order
+  # Output tables — 執行順序 = list 順序
   tables:
     - name: sample_pool
       sql_file: sample_pool/sample_pool.sql
@@ -21,7 +21,7 @@ sample_pool_etl:
       quality_checks:
         max_duplicate_key_ratio: 0.0
 
-  # Audit Hive table (shared across feature/label/sample_pool ETL)
+  # Audit Hive table（feature/label/sample_pool ETL 共用）
   audit:
     database: "${target_db}"
     table: etl_audit_log

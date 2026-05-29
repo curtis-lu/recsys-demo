@@ -219,12 +219,12 @@ def test_glossary_has_attr_entries():
 def test_guardrail_section_has_macro_row():
     s = rb.build_guardrail_recall_section(_metrics(), _params())
     table = s.tables[0]
-    # 頂列為 Macro 平均
+    # Top row is the macro average
     assert list(table.index)[0] == "Macro 平均"
-    # 值為各產品等權平均：hit_rate@1 → recall@1 (per-item) 欄
+    # Value is the equal-weight per-product average: hit_rate@1 → recall@1 (per-item) column
     assert table.loc["Macro 平均", "recall@1 (per-item)"] == 0.15
     assert table.loc["Macro 平均", "mean_pos"] == 4.0
-    # heatmap 不含 macro 列
+    # heatmap excludes the macro row
     assert "Macro 平均" not in list(s.figures[0].data[0].y)
 
 
@@ -240,11 +240,11 @@ def test_per_item_attr_section_has_macro_rows():
     map_tbl, ndcg_tbl = s.tables[0], s.tables[1]
     assert list(map_tbl.index)[0] == "Macro 平均"
     assert list(ndcg_tbl.index)[0] == "Macro 平均"
-    # map_attr@1 各產品平均 = (0.5 + 0.3) / 2 = 0.4
+    # map_attr@1 per-product average = (0.5 + 0.3) / 2 = 0.4
     assert map_tbl.loc["Macro 平均", "map_attr@1"] == 0.4
-    # ndcg_attr@1 各產品平均 = (0.45 + 0.25) / 2 = 0.35
+    # ndcg_attr@1 per-product average = (0.45 + 0.25) / 2 = 0.35
     assert ndcg_tbl.loc["Macro 平均", "ndcg_attr@1"] == 0.35
-    # heatmap 不含 macro 列
+    # heatmap excludes the macro row
     assert "Macro 平均" not in list(s.figures[0].data[0].y)
     assert "Macro 平均" not in list(s.figures[1].data[0].y)
 
@@ -264,7 +264,7 @@ def test_segment_section_has_macro_row():
 def test_segment_section_no_macro_when_absent():
     m = _metrics()
     m["per_segment"] = {"young": {"map@1": 0.6}}
-    # macro_avg 無 by_segment key
+    # macro_avg has no by_segment key
     s = rb.build_segment_section(m, _params())
     assert "Macro 平均" not in list(s.tables[0].index)
 
@@ -285,7 +285,7 @@ def test_category_section_recall_table_has_macro_row():
         "dataset_overview": m["dataset_overview"],
     }
     s = rb.build_category_section(m, _params())
-    # tables[1] 為大類 per-item recall@k 表
+    # tables[1] is the category-level per-item recall@k table
     rec_tbl = s.tables[1]
     assert list(rec_tbl.index)[0] == "Macro 平均"
     assert rec_tbl.loc["Macro 平均", "recall@1 (per-item)"] == 0.4

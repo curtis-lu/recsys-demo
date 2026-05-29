@@ -287,7 +287,7 @@ def build_guardrail_recall_section(
     ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
-    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    # heatmap uses the table without the macro row; display uses the one with it
     table_plain = _per_item_recall_table(per_item, ks, n_prod)
     cs = disp.get("recall_colorscale", {}) or {}
     fig = _per_item_heatmap(
@@ -321,7 +321,7 @@ def build_per_item_attr_section(
     ks = _resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
-    # heatmap 用無 macro 列的表；顯示用含 macro 列的表
+    # heatmap uses the table without the macro row; display uses the one with it
     map_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}"
     )

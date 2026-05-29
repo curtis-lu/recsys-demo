@@ -1,4 +1,4 @@
-"""Lint test: prod_name 在 yaml configs 與 ETL SQL 必須保持一致。
+"""Lint test: prod_name must stay consistent across yaml configs and ETL SQL.
 
 Six places that hard-code product names must agree:
   1. conf/base/parameters.yaml             schema.categorical_values.prod_name
@@ -113,7 +113,7 @@ def test_label_categories_nonempty(ccard_prods, fund_prods, exchange_prods):
 
 
 def test_label_categories_disjoint(ccard_prods, fund_prods, exchange_prods):
-    """No product may belong to more than one 大類."""
+    """No product may belong to more than one product category."""
     overlaps = {
         "ccard ∩ fund": sorted(ccard_prods & fund_prods),
         "ccard ∩ exchange": sorted(ccard_prods & exchange_prods),

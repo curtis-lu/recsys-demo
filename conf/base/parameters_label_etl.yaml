@@ -1,14 +1,14 @@
-# Label ETL Pipeline Configuration
-# Tables are executed in list order. depends_on is for documentation and order validation only.
+# Label ETL pipeline 配置
+# tables 依 list 順序執行；depends_on 僅作為文件與順序驗證用，不會改變執行順序。
 
 label_etl:
   variables:
     target_db: "ml_recsys"
 
-  # Source table freshness and schema checks (run before ETL execution)
+  # 上游 source table 的新鮮度 / schema 檢查（ETL 執行前先跑）
   source_checks: {}
 
-  # Output tables — execution order = list order
+  # Output tables — 執行順序 = list 順序
   tables:
     - name: label_ccard
       sql_file: label/label_ccard.sql
@@ -47,7 +47,7 @@ label_etl:
       quality_checks:
         max_duplicate_key_ratio: 0.0
 
-  # Audit Hive table (shared across feature/label/sample_pool ETL)
+  # Audit Hive table（feature/label/sample_pool ETL 共用）
   audit:
     database: "${target_db}"
     table: etl_audit_log

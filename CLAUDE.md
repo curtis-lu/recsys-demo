@@ -34,23 +34,41 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 
 - 單次改動只跑相關測試檔；驗證優先用 `git diff <base>..<head>`（SHA-based、秒級）＋針對性 grep，不重跑 subagent 已驗過的。
 - 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
-- 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash cwd 在 skill/`cd` 後會被 reset，相對路徑可能讀到 stale 的 main tree。
+- 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash 指令之間 cwd 會持續（system prompt 明文）但 skill 後可能 reset，相對路徑容易讀到 stale 的 main tree（細節見 §Worktree / venv 踩過的問題 #3）。
 
 ## Worktree / venv（完整 SOP：`docs/worktree-venv-setup.md`，務必先讀）
 
-### 已踩過、必須避免再發的兩個問題
+### 已踩過、必須避免再發的問題
 
 1. **`.venv` self-symlink ELOOP**：`.venv` 曾被誤 `git add` 進版控（`0cf79db`），其 symlink 目標指向自己 → 之後任何 checkout / `git worktree add` 都重建這個迴圈，全 `python`/`pytest` 報 `too many levels of symbolic links`。已修（`4e5af3c`：`git rm --cached .venv`、`.gitignore` 同時擋 `.venv` 與 `.venv/`、釘 `.python-version=3.10.9`）。**規則：`.venv` 永不進版控**；`git status`/`git ls-files | grep -x .venv` 一旦出現被追蹤就停下、`git rm --cached .venv`、commit 並**進 main**（否則各分支/worktree 一直繼承）。已追蹤的檔案無視 `.gitignore`。
 2. **graphify hook 擋 git checkout/merge（會靜默失敗）**：graphify 的 post-checkout/post-commit hook 會把 **tracked** `graphify-out/GRAPH_REPORT.md` 改髒，使隨後的 `git checkout` / `git merge --ff-only` 被「local changes would be overwritten」擋住；若指令用 `&&`+`set -e`+`>/dev/null` 串接，因 `set -e` 的 AND-list 例外會**靜默失敗、HEAD 沒動**而你以為成功了。**規則：切換分支/合併前先 `git -C <path> checkout -- graphify-out/GRAPH_REPORT.md`；git 串接指令不要吞 stdout/exit code，逐步檢查 HEAD。**
+3. **Worktree 內 file path / cd / data symlink 三件踩坑（2026-05-24 連續浪費 ≥3 次 Spark cold start ~2–4min）**：
+   - **(R1) 絕對路徑要含 `.worktrees/<name>`**：用 main repo 的絕對路徑 `Edit`/`Write` worktree 的 config —— 改錯邊，worktree 那份沒動、pipeline 讀的還是舊的。徵兆：訓練出來的 `model_version` / best params 跟 baseline 完全相同。
+   - **(R2) `cd` 在 Bash tool 之間會持續**（system prompt 明文「The working directory persists between commands」；跟 skill 後 cwd 可能 reset 是兩回事）。`cd <wt>/data && ln -s ...` 後沒 `cd` 回 worktree root，下一個 training 指令 `Path.cwd()/"data"` 看到雙重 `data/data/dataset` → FileNotFoundError after Spark started。**規則**：Bash 指令以 `cd <worktree-root> && ...` 開頭、或全用絕對路徑。
+   - **(R3) Worktree 的 `data/` 預設空（只有 `.gitkeep`）**，inference / training / evaluation 寫 model artifact 或讀 dataset 都會 fail。**規則**：第一次進 worktree 跑 pipeline 前 symlink 4 個子目錄到 main（`recsys_cache` 不用，`cache.root` 已是絕對路徑指向 main）：
+     ```bash
+     cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name>/data
+     ln -s /Users/curtislu/projects/recsys_tfb/data/models models
+     ln -s /Users/curtislu/projects/recsys_tfb/data/dataset dataset
+     ln -s /Users/curtislu/projects/recsys_tfb/data/evaluation evaluation
+     ln -s /Users/curtislu/projects/recsys_tfb/data/inference inference
+     ```
 
 ### Worktree 開發環境啟用 SOP
 
 1. **唯一一個真實 venv**＝`/Users/curtislu/projects/recsys_tfb/.venv`（真實目錄，非 symlink），用 `~/.pyenv/versions/3.10.9/bin/python -m venv` 建（對齊 repo 根 `.python-version=3.10.9`；`pyproject` 要求 `>=3.10,<3.12`，系統 `python3` 是 3.12 **不可用**）＋ `pip install -e ".[dev]"`。各 worktree 的 `.venv` 只是指向它的 **symlink**（`ln -s /Users/curtislu/projects/recsys_tfb/.venv <wt>/.venv`），不建各自獨立 venv。
-2. **每次在 worktree 動 python 前先 pre-flight**：`readlink <wt>/.venv` 須為 `/Users/curtislu/projects/recsys_tfb/.venv`；`/Users/curtislu/projects/recsys_tfb/.venv/bin/python -V` 須為 `Python 3.10.9`；任一失敗先依 `docs/worktree-venv-setup.md` §修復再繼續。
+2. **每次在 worktree 動 python 前先 pre-flight**（Spark pipeline 尤甚，cold start ~2–4min，失敗才發現的成本很高，不要 trust-and-hope）：
+   ```bash
+   cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name> && pwd          # 在 worktree root
+   readlink .venv && /Users/curtislu/projects/recsys_tfb/.venv/bin/python -V   # venv 對齊（Python 3.10.9）
+   readlink data/{models,dataset,evaluation,inference}                      # data/ 子目錄已 symlink 到 main
+   grep -E "^(objective|metric|snap_date):" conf/base/parameters_*.yaml     # config 真的改在 worktree 那份
+   ```
+   任一失敗先修再繼續（venv 修復見 `docs/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
 3. **跑測試/CLI 一律絕對 venv python + `PYTHONPATH=<wt>/src`**：
    `PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <paths> -q`
    （裸跑或裸 `.venv/bin/pytest` 會抓到 main 的 `src`＝editable-install target，靜默測/跑錯 code；相對路徑經 symlink 還會 ELOOP）。CLI 同理：`PYTHONPATH=<wt>/src …/.venv/bin/python -m recsys_tfb <pipeline> [--options]`。
-4. **跨 worktree git 一律 `git -C <abs-worktree>`**；Bash cwd 在 skill/`cd` 後會 reset，相對路徑可能讀到 stale main tree。
+4. **跨 worktree git 一律 `git -C <abs-worktree>`**（同 R2：cwd 在 Bash 間持續、skill 後可能 reset，相對路徑容易讀到 stale main tree）。
 
 ## Local dev-cluster testing
 

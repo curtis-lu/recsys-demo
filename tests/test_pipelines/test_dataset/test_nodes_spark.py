@@ -184,7 +184,7 @@ class TestSplitTrainKeys:
 class TestSelectValKeys:
     def test_full_population(self, label_table, parameters):
         result = select_val_keys(label_table, parameters)
-        # identity_columns 含 prod_name → 4 cust × 3 prod for val date
+        # identity_columns includes prod_name → 4 cust × 3 prod for val date
         assert result.count() == 12
         assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
 
@@ -192,7 +192,7 @@ class TestSelectValKeys:
 class TestSelectTestKeys:
     def test_full_population(self, label_table, parameters):
         result = select_test_keys(label_table, parameters)
-        # identity_columns 含 prod_name → 4 cust × 3 prod for test date
+        # identity_columns includes prod_name → 4 cust × 3 prod for test date
         assert result.count() == 12
         assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
 
@@ -334,12 +334,12 @@ class TestFitPreprocessorMissingDates:
 
 
 class TestFitPreprocessorItemMissingFromFeatures:
-    """schema.item 必須出現在 feature_columns，否則 X 缺 item 維度、HPO mAP 會塌成常數。"""
+    """schema.item must appear in feature_columns; otherwise X loses the item dimension and HPO mAP collapses to a constant."""
 
     def test_categorical_columns_missing_item_raises(
         self, spark, feature_table, parameters
     ):
-        # 模擬實際遇到的 yaml 漏列：categorical_columns 列了其他欄但漏掉 prod_name。
+        # Simulate the real-world yaml mistake: categorical_columns lists other columns but omits prod_name.
         params = {
             **parameters,
             "dataset": {
@@ -349,7 +349,7 @@ class TestFitPreprocessorItemMissingFromFeatures:
                         "snap_date", "cust_id", "label",
                         "apply_start_date", "apply_end_date", "cust_segment_typ",
                     ],
-                    "categorical_columns": [],  # 故意漏 prod_name（也省略其他 cat 以避開既有 check）
+                    "categorical_columns": [],  # intentionally omits prod_name (and other cats, to bypass existing checks)
                 },
             },
         }
@@ -360,8 +360,9 @@ class TestFitPreprocessorItemMissingFromFeatures:
     def test_default_categorical_columns_passes(
         self, spark, feature_table, parameters
     ):
-        # 未提供 prepare_model_input 時，_get_preprocessing_config 預設
-        # categorical_columns=[schema.item]，prod_name 自動進 feature_columns。
+        # When prepare_model_input is not supplied, _get_preprocessing_config
+        # defaults categorical_columns=[schema.item], so prod_name lands in
+        # feature_columns automatically.
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         assert "prod_name" in preprocessor["feature_columns"]
 
@@ -370,7 +371,7 @@ class TestApplyPreprocessorFilter:
     def test_filters_out_dates_outside_dataset_set(
         self, spark, feature_table, parameters
     ):
-        """Test A: feature_table 含週中 row 時，filter 必須排除。"""
+        """Test A: when feature_table contains mid-week rows, the filter must drop them."""
         # Add a "mid-week" row that isn't in any split's snap_dates
         midweek_pdf = pd.DataFrame({
             "snap_date": pd.to_datetime(["2024-01-15"] * 4),
@@ -394,7 +395,7 @@ class TestApplyPreprocessorFilter:
     def test_missing_required_snap_date_raises(
         self, spark, feature_table, parameters
     ):
-        """Test E2: feature_table 缺 cal/val/test 任一 snap_date 應 raise."""
+        """Test E2: feature_table missing any cal/val/test snap_date must raise."""
         # parameters val_snap_dates is 2024-04-30; remove 04-30 rows from feature_table
         ft_short = feature_table.filter(F.col("snap_date") != F.lit(pd.Timestamp("2024-04-30")))
 
@@ -407,7 +408,7 @@ class TestFitApplyFilterScopes:
     def test_apply_includes_all_splits_fit_only_train(
         self, spark, feature_table, parameters
     ):
-        """Test B: fit 看 train，apply 看 train ∪ cal ∪ val ∪ test."""
+        """Test B: fit sees train; apply sees train ∪ cal ∪ val ∪ test."""
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         result = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 

@@ -1,60 +1,60 @@
 evaluation:
-  # Snap date for evaluation. Must be an ISO date (YYYY-MM-DD): the evaluation
-  # pipeline compares it against the DATE-typed snap_date column cast to string
-  # (which yields YYYY-MM-DD). The evaluation output path normalises it via
-  # .replace("-", "") so it still produces a clean YYYYMMDD/ directory.
-  snap_date: "2025-12-31"
+  # Evaluation 的 snap_date。必須是 ISO 日期格式（YYYY-MM-DD）：evaluation
+  # pipeline 會把它和 DATE-typed snap_date column cast 成字串後比較
+  # （cast 結果就是 YYYY-MM-DD）。Evaluation 輸出路徑會以
+  # .replace("-", "") 正規化為 YYYYMMDD/ 子目錄。
+  snap_date: "2026-01-31"
 
-  # Single k superset. Every @K metric is computed at every k here, for all
-  # granularities (fine product overall/per-item/per-segment AND category).
-  # Report sections slice the k columns they show via report.display.*.
-  # "all" resolves at runtime to the distinct item count of that granularity.
+  # 單一 k superset。此處列出的每個 k 都會被算進所有 @K metric、所有粒度
+  #（fine product overall/per-item/per-segment 與 category）。Report 各段
+  # 透過 report.display.* 自行選要展示哪些 k 欄位。"all" 會在 runtime
+  # 解析成該粒度的 distinct item 數。
   k_values: [1, 2, 3, 4, 5, "all"]
 
-  # Segment columns to slice per-segment metrics by. Each must be delivered by
-  # a segment_sources entry below (config-consistency invariant A10).
+  # Per-segment metrics 切片用的 segment column。每個 column 都必須在下方
+  # segment_sources 有對應 entry（config-consistency invariant A10）。
   segment_columns:
     - cust_segment_typ
 
-  # External segment data sources — Hive tables left-joined onto eval_predictions
-  # on key_columns. Each entry: `table` (Hive-qualified), `key_columns`,
-  # `segment_column`. A configured source that cannot be read fails loud.
+  # 外部 segment 資料來源 ── 會以 key_columns 做 left join 進 eval_predictions
+  # 的 Hive table。每個 entry 包含 `table`（Hive-qualified）、`key_columns`、
+  # `segment_column`。設定了但讀不到的 source 會 fail loud。
   segment_sources:
     cust_segment_typ:
       table: ml_recsys.sample_pool
       key_columns: [cust_id, snap_date]
       segment_column: cust_segment_typ
-    # External Hive-table example (kept commented — no such table by default;
-    # an active entry with no real table would fail evaluation loud):
+    # 外部 Hive table 範例（保持註解狀態 ── 預設沒有這張表；若 enable
+    # 卻沒有真實 table，evaluation 會 fail loud）：
     # holding_combo:
     #   table: ml_recsys.holding_combo
     #   key_columns: [cust_id, snap_date]
     #   segment_column: holding_combo
 
-  # Product major-category parallel evaluation. When enabled, the fine-grained
-  # eval_predictions is collapsed to category grain (category score = max child
-  # score == best child rank; category label = max child label) and the SAME
-  # metric pipeline runs a second time; results nest under the "category" key.
+  # 產品大類的 parallel evaluation。enable 後，fine-grained eval_predictions
+  # 會被 collapse 到 category 粒度（category score = max child score == best
+  # child rank；category label = max child label），然後對「同一套」metric
+  # pipeline 跑第二輪；結果 nest 在 "category" key 之下。
   product_categories:
     enabled: true
-    unmapped: singleton          # products not in any list -> own singleton category
+    unmapped: singleton          # 沒列在任何 list 的 product 自成一個 singleton category
     mapping:
       fund: [fund_stock, fund_bond, fund_mix]
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]
 
-  # Baseline configuration — popularity baseline lookback window (months).
+  # Baseline 設定 ── popularity baseline 的 lookback 視窗（月數）。
   baseline:
     lookback_months: 12
 
-  # Report generation options
+  # Report 產生選項
   report:
     sections:
       dataset_overview: true
       primary_map: true
       guardrail_recall: true
       per_item_attr: true
-      category: true             # also gated by product_categories.enabled
+      category: true             # 同時受 product_categories.enabled 控制
       per_segment: true
       diagnostics: true
       baseline: true
@@ -66,34 +66,32 @@ evaluation:
       include_distributions: true
       include_calibration: true
       n_calibration_bins: 10
-      sample_rows: null          # toPandas row cap for diagnostics; null = no sampling
+      sample_rows: null          # diagnostics toPandas 的 row 上限；null = 不抽樣
 
-  # Compare sources — populated entries unlock `evaluation --compare <key>` and
-  # `--compare-only <key>`. Empty by default; remove the leading `#` on the
-  # entries you actually use. Each key (`v_prev`, `ext_proj_x`, ...) is the
-  # value passed on the CLI flag.
+  # Compare sources ── 有填內容的 entry 才會 unlock `evaluation --compare <key>`
+  # 與 `--compare-only <key>`。預設為空；要用哪個就把該 entry 前面的 `#` 拿掉。
+  # 每個 key（`v_prev`、`ext_proj_x`、...）就是 CLI flag 傳的值。
   #
-  # Schema (validated by core.consistency.A11):
-  #   kind:           "model_version" | "external_hive"     (required)
-  #   label:          display name in report_comparison.html (required)
-  #   model_version:  required when kind=model_version
-  #   source:         optional when kind=model_version —
-  #                   "enriched_eval_predictions" (default; symmetric with
-  #                   Model A in --compare-only mode; requires the B-side
-  #                   model_version to have already run a full `evaluation`
-  #                   pipeline so its partition exists) |
-  #                   "ranked_predictions" (inference output; use when B has
-  #                   only been through inference, not evaluation) |
-  #                   "training_eval_predictions" (training pipeline's test-set
-  #                   predictions; lets `--compare` work in `--post-training`
-  #                   mode without re-running inference for either side)
-  #   table:          required when kind=external_hive (Hive-qualified)
-  #   columns:        required when kind=external_hive — left=our schema,
-  #                   right=external column name (cust_id/snap_date/prod_name/score)
-  #   prod_mapping:   required when kind=external_hive — N:1 map of external
-  #                   prod_name → our prod_name; A6-known values on the right
-  #   unmapped_policy: "fail" (default — raise on prod outside mapping) |
-  #                    "drop" (filter and log warning)
+  # Schema（由 core.consistency.A11 驗證）：
+  #   kind:           "model_version" | "external_hive"     （必填）
+  #   label:          report_comparison.html 上顯示的名稱   （必填）
+  #   model_version:  kind=model_version 時必填
+  #   source:         kind=model_version 時選填 ──
+  #                   "enriched_eval_predictions"（預設；在 --compare-only
+  #                   模式下與 Model A 對稱；要求 B 側 model_version 已跑過
+  #                   完整 `evaluation` pipeline、partition 已存在）|
+  #                   "ranked_predictions"（inference 的輸出；B 側只跑過
+  #                   inference 沒跑 evaluation 時用）|
+  #                   "training_eval_predictions"（training pipeline 的
+  #                   test-set 預測；讓 `--compare` 在 `--post-training`
+  #                   模式下可以兩側都不用重跑 inference）
+  #   table:          kind=external_hive 時必填（Hive-qualified）
+  #   columns:        kind=external_hive 時必填 ── 左邊是我們的 schema、
+  #                   右邊是外部 column name（cust_id/snap_date/prod_name/score）
+  #   prod_mapping:   kind=external_hive 時必填 ── 外部 prod_name → 我們的
+  #                   prod_name 的 N:1 map；右側必須是 A6 已知值
+  #   unmapped_policy: "fail"（預設 ── 遇到不在 mapping 內的 prod 直接 raise）|
+  #                    "drop"（filter 掉並 log warning）
   compare_sources: {}
   #compare_sources:
   #  v_prev:
