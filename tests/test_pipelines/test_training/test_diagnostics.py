@@ -1,8 +1,12 @@
 """Unit tests for training diagnostics (pure-python, no Spark)."""
 
 import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 from recsys_tfb.pipelines.training import diagnostics as diag
 
@@ -37,3 +41,41 @@ def test_compute_feature_importance_shape_and_dead(fitted_adapter):
 def test_compute_feature_importance_disabled(fitted_adapter):
     params = {"diagnostics": {"feature_importance": {"enabled": False}}}
     assert diag.compute_feature_importance(fitted_adapter, params) == {}
+
+
+def _write_parquet(tmp_path, pdf) -> ParquetHandle:
+    path = str(tmp_path / "feat.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path)
+    return ParquetHandle(path=path)
+
+
+def test_compute_feature_statistics(tmp_path):
+    pdf = pd.DataFrame({
+        "f_num": [1.0, 2.0, 3.0, None],     # null_rate 0.25
+        "f_const": [5.0, 5.0, 5.0, 5.0],    # single_value
+        "f_cat": ["a", "b", "a", "c"],      # n_distinct 3, non-numeric
+    })
+    handle = _write_parquet(tmp_path, pdf)
+    preprocessor = {"feature_columns": ["f_num", "f_const", "f_cat"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True, "high_null_threshold": 0.5}}}
+
+    out = diag.compute_feature_statistics(handle, preprocessor, params)
+
+    assert out["f_num"]["null_rate"] == 0.25
+    assert out["f_num"]["n_distinct"] == 3
+    assert out["f_num"]["high_null"] is False
+    assert out["f_num"]["mean"] == pytest.approx(2.0)
+    assert out["f_const"]["single_value"] is True
+    assert out["f_cat"]["n_distinct"] == 3
+    # 非數值欄不應有 mean
+    assert "mean" not in out["f_cat"]
+
+
+def test_compute_feature_statistics_sampling(tmp_path):
+    pdf = pd.DataFrame({"f": list(range(100))})
+    handle = _write_parquet(tmp_path, pdf)
+    preprocessor = {"feature_columns": ["f"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 10}}}
+    out = diag.compute_feature_statistics(handle, preprocessor, params)
+    # 抽樣後仍回傳該特徵的統計（n_distinct 受抽樣上限約束）
+    assert out["f"]["n_distinct"] <= 10
