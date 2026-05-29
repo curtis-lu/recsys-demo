@@ -772,3 +772,36 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     assert captured["metric"] == "ndcg"
 
 
+class TestHpoScore:
+    GROUPS = np.array([0, 0, 0, 1, 1, 1])
+    ITEMS = np.array(["A", "B", "C", "A", "B", "C"])
+    Y = np.array([1, 0, 1, 0, 1, 0])
+    SCORE = np.array([0.9, 0.5, 0.1, 0.3, 0.8, 0.6])
+
+    def test_mean_ap_matches_compute_mean_ap(self):
+        from recsys_tfb.evaluation.metrics import compute_mean_ap
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        expected = compute_mean_ap(self.GROUPS, self.Y, self.SCORE)
+        result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
+        assert result == pytest.approx(expected)
+
+    def test_macro_per_item_map_matches_primitive(self):
+        from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        expected = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        result = _hpo_score(
+            "macro_per_item_map", self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        assert result == pytest.approx(expected)
+
+    def test_unknown_objective_raises_valueerror(self):
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        with pytest.raises(ValueError, match="hpo_objective"):
+            _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+
+

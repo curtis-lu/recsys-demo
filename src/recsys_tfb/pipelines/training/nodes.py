@@ -4,6 +4,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
 
 import mlflow
 import numpy as np
@@ -12,7 +13,10 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import compute_mean_ap
+from recsys_tfb.evaluation.metrics import (
+    compute_macro_per_item_map,
+    compute_mean_ap,
+)
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -250,6 +254,33 @@ def prepare_lgb_train_inputs(
 # ---------------------------------------------------------------------------
 # Pipeline nodes
 # ---------------------------------------------------------------------------
+
+HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
+
+
+def _hpo_score(
+    objective_name: str,
+    groups: np.ndarray,
+    items: Optional[np.ndarray],
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+) -> float:
+    """Score val predictions for one HPO trial under the chosen objective.
+
+    ``mean_ap``            — per-query mAP (``items`` unused).
+    ``macro_per_item_map`` — macro average of per-item attributed mAP.
+
+    Unknown ``objective_name`` raises ``ValueError`` (fail-loud).
+    """
+    if objective_name == "mean_ap":
+        return compute_mean_ap(groups, y_true, y_score)
+    if objective_name == "macro_per_item_map":
+        return compute_macro_per_item_map(groups, items, y_true, y_score)
+    raise ValueError(
+        f"unknown training.hpo_objective {objective_name!r}; "
+        f"allowed: {', '.join(HPO_OBJECTIVES)}"
+    )
+
 
 def tune_hyperparameters(
     train_lgb_handle,
