@@ -98,6 +98,10 @@ training:
 mlflow:
   experiment_name: recsys_tfb
   tracking_uri: "${env.MLFLOW_TRACKING_URI|mlruns}"
+  # log_experiment 是 best-effort sink：tracking server 不可用或版本不相容
+  # （如 client 3.x 對舊 server 呼叫 /api/2.0/mlflow/logged-models 收到 404）時，
+  # 預設記 warning 後讓 training 跑完。設 true 則 MLflow 失敗即中斷（CI/嚴格環境用）。
+  strict: false
 
 # Driver-local parquet cache for materialized model inputs (skips Hive scans on
 # re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
