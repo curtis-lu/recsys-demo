@@ -8,7 +8,11 @@ Scope: only ``compute_ap`` + ``compute_mean_ap``. The dict-shaped
 import numpy as np
 import pytest
 
-from recsys_tfb.evaluation.metrics import compute_ap, compute_mean_ap
+from recsys_tfb.evaluation.metrics import (
+    compute_ap,
+    compute_macro_per_item_map,
+    compute_mean_ap,
+)
 
 
 class TestComputeAP:
@@ -143,3 +147,57 @@ class TestComputeMeanAP:
 
         actual = compute_mean_ap(groups, y_true, y_score)
         assert actual == pytest.approx(expected, rel=1e-12)
+
+
+class TestComputeMacroPerItemMap:
+    # Two customers, three products (mirrors the metrics_spark
+    # _two_customer_raw fixture so the parity test shares the math):
+    #   C0: A(0.9,1) B(0.5,0) C(0.1,1)  ranking A,B,C -> prec A=1.0, C=2/3
+    #   C1: B(0.8,1) C(0.6,0) A(0.3,0)  ranking B,C,A -> prec B=1.0
+    # per-item map_attr@all: A=1.0, B=1.0, C=2/3
+    # macro = (1.0 + 1.0 + 2/3) / 3 = 8/9
+    GROUPS = np.array([0, 0, 0, 1, 1, 1])
+    ITEMS = np.array(["A", "B", "C", "A", "B", "C"])
+    Y = np.array([1, 0, 1, 0, 1, 0])
+    SCORE = np.array([0.9, 0.5, 0.1, 0.3, 0.8, 0.6])
+
+    def test_full_map_macro_over_items(self):
+        result = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        assert result == pytest.approx(8 / 9)
+
+    def test_k_truncation_zeros_contrib_beyond_k(self):
+        # k=1: C0 A pos1 -> 1.0, C pos3 -> 0.0 ; C1 B pos1 -> 1.0
+        # per-item: A=1.0, B=1.0, C=0.0 ; macro = 2/3
+        result = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, k=1
+        )
+        assert result == pytest.approx(2 / 3)
+
+    def test_skips_group_with_no_positives(self):
+        # group 2 has no positives -> contributes nothing; A and C each 1.0
+        groups = np.array([0, 0, 1, 1, 2, 2])
+        items = np.array(["A", "C", "A", "C", "A", "C"])
+        y = np.array([1, 0, 0, 1, 0, 0])
+        score = np.array([0.9, 0.1, 0.4, 0.5, 0.9, 0.1])
+        # C0: A(0.9,1) C(0.1,0) -> A prec 1.0 ; C1: C(0.5,1) A(0.4,0) -> C prec 1.0
+        # per-item: A=1.0, C=1.0 ; macro = 1.0
+        result = compute_macro_per_item_map(groups, items, y, score)
+        assert result == pytest.approx(1.0)
+
+    def test_all_no_positives_returns_zero(self):
+        groups = np.array([0, 0, 1, 1])
+        items = np.array(["A", "B", "A", "B"])
+        y = np.array([0, 0, 0, 0])
+        score = np.array([0.9, 0.8, 0.7, 0.6])
+        assert compute_macro_per_item_map(groups, items, y, score) == 0.0
+
+    def test_empty_inputs_return_zero(self):
+        empty = np.array([], dtype=np.int64)
+        assert (
+            compute_macro_per_item_map(
+                empty, np.array([]), empty, np.array([], dtype=np.float64)
+            )
+            == 0.0
+        )
