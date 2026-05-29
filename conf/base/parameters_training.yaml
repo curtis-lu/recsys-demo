@@ -1,8 +1,8 @@
-# model_version scope: only the model-defining subset of this file is hashed
-# into model_version — the `training:` block MINUS the pure logging/threading
-# knobs `verbosity`, `log_period`, `num_threads`. The `spark:`, `mlflow:`, and
-# `cache:` blocks below do NOT affect model_version. Single source of truth:
-# src/recsys_tfb/core/versioning.py :: _model_version_payload.
+# model_version scope：只有「定義模型」的子集會被 hash 進 model_version——亦即
+# `training:` 區塊扣掉純 logging / threading 的 `verbosity`、`log_period`、
+# `num_threads`。下方的 `spark:`、`mlflow:`、`cache:` 區塊「不」影響
+# model_version。Single source of truth：src/recsys_tfb/core/versioning.py ::
+# _model_version_payload。
 spark:
   app_name: recsys_tfb-training
   # spark.executor.memory: 16g
@@ -15,28 +15,28 @@ training:
     objective: binary
     metric: binary_logloss
     verbosity: -1
-    # log_period: 0 = silent. Set to N > 0 to print val metric every N boosting
-    # rounds during training (per-trial during HPO + final refit). Popped by
-    # LightGBMAdapter before lgb.train; not a native LGB param.
+    # log_period：0 表示完全靜默；> 0 時，訓練過程每 N 個 boosting round 印一次
+    # val metric（HPO 每個 trial + 最終 refit 都會印）。由 LightGBMAdapter 在
+    # 進 lgb.train 前 pop 掉，並非 LGB 原生 param。
     log_period: 100
-    # num_threads: pin to a fixed core count so LightGBM doesn't fall back to
-    # OMP_NUM_THREADS=1 or a cgroup-throttled cpu_count default.
+    # num_threads：釘定固定的 core count，避免 LightGBM fallback 到
+    # OMP_NUM_THREADS=1 或被 cgroup 限縮的 cpu_count default。
     num_threads: 4
-    # --- Learning-to-rank (Phase 1) -------------------------------------
-    # To train a ranking model, set objective + a ranking metric, e.g.:
-    #   objective: lambdarank      # or rank_xendcg
-    #   metric: ndcg               # required ranking metric; omit => ndcg
-    #   ndcg_eval_at: [5, 10]      # optional NDCG truncation levels
-    # The per-query group is schema.columns.time + entity
-    # (default: snap_date + cust_id) and is plumbed automatically into the
-    # train/train_dev binaries and HPO early stopping. A ranking objective
-    # with a non-ranking metric is rejected at CLI entry (consistency A7).
-    # Evaluation stays per-customer mAP regardless of training objective.
+    # --- Learning-to-rank（Phase 1）--------------------------------------
+    # 要訓練 ranking model，請改 objective 與 ranking metric，例如：
+    #   objective: lambdarank      # 或 rank_xendcg
+    #   metric: ndcg               # 必填 ranking metric；省略則預設 ndcg
+    #   ndcg_eval_at: [5, 10]      # NDCG 截斷層級（選填）
+    # 每個 query 的 group 來自 schema.columns.time + entity
+    # （預設 snap_date + cust_id），會自動帶進 train/train_dev binaries 與 HPO
+    # early stopping。ranking objective 配非 ranking metric 在 CLI 入口會被擋
+    # 下（consistency A7）。不論訓練 objective 為何，evaluation 永遠是
+    # per-customer mAP。
     # --------------------------------------------------------------------
   calibration:
     enabled: true
     method: sigmoid
-  # --- Per-(segment,product) sample weights (模型層冷門產品 boost) ---
+  # --- Per-(segment,product) sample weights（模型層冷門產品 boost）---
   # key 固定 "<cust_segment_typ>|<prod_name>"；value = LightGBM sample_weight
   # (>= 1.0，只 boost)。稀疏：只列 != 1.0 的組。只作用於 train/train_dev，
   # val/calibration/evaluation 不加權。A9 一致性閘驗證 product 分量。改此表
@@ -56,18 +56,18 @@ training:
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
-  # Final-model strategy after HPO:
-  #   hpo_best       — pass the HPO best-trial adapter through unchanged (default).
-  #   refit_on_full  — retrain on train + train_dev concatenated, with
-  #                    num_iterations = best_iteration and no early stopping.
+  # HPO 之後最終模型的處理策略：
+  #   hpo_best       — 直接沿用 HPO best-trial 的 adapter（預設）。
+  #   refit_on_full  — 在 train + train_dev concat 後重訓，
+  #                    num_iterations = best_iteration、不做 early stopping。
   final_model_strategy: hpo_best
-  # search_space: ordered list of ParamSpec maps (declarative HPO, Phase 2).
-  # `name` is BOTH the Optuna suggest name and the LightGBM param key.
-  # type in {int,float,categorical}. int/float: low,high (+optional step, log).
-  # categorical: choices. `when` / expression bounds are Phase 3 (rejected
-  # fail-loud until then by consistency A8). NOTE: migrating from the old
-  # dict form restructures the hashed `training:` block — this is a
-  # deliberate, accepted ONE-TIME model_version bump (see versioning.py).
+  # search_space：ParamSpec map 的有序 list（declarative HPO, Phase 2）。
+  # `name` 同時是 Optuna suggest name 與 LightGBM param key。
+  # type ∈ {int, float, categorical}。int/float：low、high（可選 step、log）；
+  # categorical：choices。`when` / expression bounds 屬於 Phase 3，現階段傳入
+  # 會被 consistency A8 fail-loud 擋下。NOTE：從舊 dict 形式遷移過來會重排
+  # 被 hash 的 `training:` 區塊——這是經過決定、接受的一次性 model_version
+  # bump（見 versioning.py）。
   search_space:
     - name: learning_rate
       type: float
@@ -103,13 +103,12 @@ mlflow:
   # 預設記 warning 後讓 training 跑完。設 true 則 MLflow 失敗即中斷（CI/嚴格環境用）。
   strict: false
 
-# Driver-local parquet cache for materialized model inputs (skips Hive scans on
-# re-runs). Keyed by base_dataset_version / train_variant_id / calibration_variant_id.
-# `cache.root` is the single source of truth for the cache path: both
-# _resolve_cache_path() (existence check) and _populate_cache_from_hive()
-# (hadoop fs copyToLocal destination) read from here. Persistence is owned by
-# training/nodes.py::_materialize_parquet_handle, not by catalog datasets.
-# All environments write parquet to disk and pass ParquetHandle through the
-# DAG; dev/test use a tmp cache.root.
+# Driver-local parquet cache：materialize 後的 model inputs，重跑時可跳過 Hive
+# scan。由 base_dataset_version / train_variant_id / calibration_variant_id 三
+# 層 key 決定。`cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
+# （存在性檢查）與 _populate_cache_from_hive()（hadoop fs copyToLocal 目的地）
+# 都從這裡讀。persistence 由 training/nodes.py::_materialize_parquet_handle
+# 負責，不經 catalog dataset。所有環境都會寫 parquet 到 disk 並在 DAG 中以
+# ParquetHandle 串接；dev/test 用一個臨時的 cache.root。
 cache:
   root: /Users/curtislu/projects/recsys_tfb/data/recsys_cache

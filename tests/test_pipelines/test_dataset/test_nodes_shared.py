@@ -30,7 +30,7 @@ class TestCollectDatasetSnapDates:
         ]
 
     def test_deduplicates_overlapping_entries(self):
-        # 不同 split 不應重複；helper 不負責 overlap 檢查（那是 validate_date_splits）
+        # Different splits must not duplicate; the helper does not check overlap (that's validate_date_splits)
         params = {
             "dataset": {
                 "train_snap_dates": ["2025-01-31", "2025-02-28"],
@@ -66,7 +66,7 @@ class TestCollectDatasetSnapDates:
             collect_dataset_snap_dates(params)
 
     def test_optional_splits_default_to_empty(self):
-        # cal/val/test 缺鍵時用 .get(..., [])，不應 raise
+        # Missing cal/val/test keys fall back to .get(..., []); must not raise
         params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
         result = collect_dataset_snap_dates(params)
         assert result == [pd.Timestamp("2025-01-31")]
@@ -160,6 +160,6 @@ class TestValidateDateSplits:
         validate_date_splits(params)  # should not raise
 
     def test_missing_optional_keys_pass(self):
-        # cal/val/test 完全沒提供時也應通過（用 .get(..., [])）
+        # Omitting cal/val/test entirely must also pass (via .get(..., []))
         params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
         validate_date_splits(params)  # should not raise

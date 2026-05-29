@@ -28,7 +28,7 @@ dataset:
     "hnw|ccard_ins|0": 0.8
   # 未指定的組合用預設 sample_ratio
 
-  # --- Carry columns ---
+  # --- Carry columns（沿用欄位）---
   # 非 identity、要從 sample_pool 帶進 train/train_dev model_input parquet 供
   # 訓練讀取（如 training.sample_weights 的 segment 維度）的欄位清單。寬鬆
   # 超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
@@ -48,12 +48,12 @@ dataset:
   # 範例：{"mass|fund_mix": 0.8}
   # 未指定時 calibration 使用 calibration_sample_ratio 作為預設
 
-  # --- Validation ---
+  # --- Validation（驗證集）---
   val_snap_dates:
     - "2025-12-31"
   val_sample_ratio: 1.0
 
-  # --- Test ---
+  # --- Test（測試集）---
   test_snap_dates:
     - "2026-01-31"
 

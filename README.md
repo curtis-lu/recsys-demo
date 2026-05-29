@@ -12,58 +12,90 @@
 
 ## 0. 快速上手 (TL;DR)
 
-**這個 repo 在做什麼？** 給銀行行銷團隊一張「每位客戶對每個金融產品的興趣分數排名表」，用來決定要主動聯繫誰、推哪一支產品。每月底拍一張客戶快照（snapshot）後跑這套 pipeline，產出寫進 Hive 表 `ml_recsys.ranked_predictions`（欄位：`snap_date, cust_id, prod_name, score, rank`）。
+**這個 repo 在做什麼？** 給銀行行銷團隊一張「每位客戶對每個金融產品的興趣分數排名表」，用來決定要主動聯繫誰、推哪一支產品。每月底拍一張客戶快照（snapshot）後跑這套 pipeline，產出寫進 Hive 表（欄位：`snap_date, cust_id, prod_name, score, rank`）。
 
-**前置條件**：Python 3.10（`>= 3.10, < 3.12`）；公司 Spark / Hive 環境由維運配好（`--env production` 對應的設定檔已就緒，你不需要改）。
+**前置條件**：Python 3.10（`>= 3.10, < 3.12`）； Spark / Hive 的設定檔已於平台右上角資料源連線管理中設定。
 
-> **關於 `--env`**：所有 CLI 指令的 `--env` 預設值是 `local`（本機開發用）。**在公司環境一律帶 `--env production`**，否則會讀到本機假設定而非實際 Hive / Spark 連線。下面所有範例都明確帶 `--env production`，照抄即可。
 
 ```bash
 # 第一次使用前（在 repo 根目錄、虛擬環境內）
 pip install -e .
 ```
 
-**最小可跑流程**（以 2025-01-31 月底快照為例）：
+**最小可跑流程**（以 `2026-01-31` 月底快照為例）。請依「步驟一 → 步驟二 → 步驟三」順序完成；步驟一、二是**一次性 setup**（決定資料合約與 ETL SQL），日後標準週期只需重跑步驟三的 CLI。
+
+### 步驟一：編寫配置檔 `conf/base/parameters.yaml`
+
+這份檔案是後續所有 pipeline 的入口，定義「資料長什麼樣子」與「Hive 在哪裡」。三件事必須先決定：
+
+1. **`hive.db`**：請改成你個人名下的開發 db（例如 `dev_<yourname>_recsys`），避免與他人共用造成相互覆寫。各環境的覆寫值可分別放在 `conf/local/parameters.yaml`（本機 / 個人開發）與 `conf/production/parameters.yaml`（驗證或正式區）；執行 pipeline 時用 `--env local` / `--env production` 切換，ConfigLoader 會把對應 env 的設定 deep-merge 覆寫 base（規則見 §5）。
+2. **`schema.columns`**：定義 `time` / `entity` / `item` / `label` 等角色對應到實際欄位名稱（預設 `snap_date` / `cust_id` / `prod_name` / `label`）。這套命名是後續所有 table 之間的**資料合約** ── feature_table / label_table / sample_pool 都必須遵守，所有 join 與衍生表都吃這些 key。一旦決定就應該凍結，避免之後再動造成大規模重跑。
+3. **`schema.categorical_values`**：列出你要建模的所有 item（例如所有金融產品代號）。這份清單是 item 宇集的**單一真實來源**（single source of truth）── 後續 `inference.products`、`sample_pool` 出現的 item、`label_table` 出現的 item 都必須與它一致；任何差異都會在 CLI 入口被一致性閘 fail-loud 擋下（§6 的 A4–A6 / B1）。
+
+### 步驟二：編寫 ETL SQL（`conf/sql/etl/`）
+
+framework 把上游資料的取得 / 變形分成三條獨立 ETL pipeline，各自產出一張下游必備的 Hive table。
+
+1. **三條 ETL 各自的最低欄位要求**（欄位名必須對齊步驟一的 schema）：
+   - **`feature_etl`** → `feature_table`：特徵表。欄位必須包含 schema 的 `time` & `entity`（預設 `snap_date, cust_id`），其餘為自由發揮的特徵欄。
+   - **`label_etl`** → `label_table`：標籤表（ground truth，0/1 表示該客戶該月有沒有承作該產品）。欄位必須包含 schema 的 `time` & `entity` & `item` 以及 `label` 欄。
+   - **`sample_pool_etl`** → `sample_pool`：訓練 / 評估的母體候選表。欄位必須包含 schema 的 `time` & `entity` & `item`，以及所有要拿來做分群抽樣的 `sample_group_keys` 欄位（例如 `cust_segment_typ`）。
+2. **單條 pipeline 可包含多份 SQL**：每條 ETL 可以有多個 SQL 檔（例如 `feature_aum.sql` → `feature_sav.sql` → `feature_concat.sql`），一份 SQL 對應一張中介或最終 Hive table。會被下游讀取的 table 必須在 `conf/base/catalog.yaml` 註冊。
+3. **重複執行的語意**：依各 SQL 設定的 `partition_by` 做 `INSERT OVERWRITE`（同一 partition 重跑會被覆寫，不會 append、不會留歷史副本）。重跑同一個 `snap_date` 是冪等的。
+4. **執行順序與相依關係**：寫在對應的 `conf/base/parameters_<feature|label|sample_pool>_etl.yaml` 的 `depends_on` 欄位（例如「必須先執行 `feature_concat` 才能執行 `feature_table`」）。同 pipeline 內依宣告順序執行；跨 pipeline 由你照「步驟三」的呼叫順序控制。
+5. **三張表怎麼被下游用**：
+   - **`sample_pool`** → `dataset` pipeline 依 `sample_group_keys` 做 train / train_dev / val / test / calibration 的分群抽樣，產出各 split 的 `*_keys` table（記錄「哪些 `(snap_date, cust_id, prod_name)` 三元組屬於哪個 split」）。
+   - **`feature_table`** → `dataset` pipeline 在 train 集上 fit 出 categorical 欄位的編碼字典與其他 preprocessor 元件，產出 `preprocessor` + `preprocessed_feature_table`（前處理完成的寬表）。
+   - **`label_table`** → 抽樣與前處理都做完後，把各 split 的 `*_keys` join `preprocessed_feature_table` 與 `label_table`，產出 `*_model_input` table（training pipeline 直接吃這個）。
+
+### 步驟三：執行 pipeline
+
+預設範例都用 `--env local`（本機 dev cluster / 個人 db）。**所有 CLI 指令都沒有 `run` 子指令、也沒有 `--pipeline` flag**；指令名就是 pipeline 名。
 
 ```bash
-# 1. Source ETL：三個獨立指令，沒有「一鍵 ETL」
-python -m recsys_tfb feature_etl     --env production --target-dates 2025-01-31
-python -m recsys_tfb label_etl       --env production --target-dates 2025-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2025-01-31
+# 1. Source ETL：三條獨立的 pipeline，沒有「一鍵 ETL」。
+#    --target-dates 指定當月 snap_date，逗號分隔可一次跑多月。
+python -m recsys_tfb feature_etl     --env local --target-dates 2026-01-31
+python -m recsys_tfb label_etl       --env local --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env local --target-dates 2026-01-31
 
-# 2. 準備資料 + 訓練模型
-python -m recsys_tfb dataset  --env production
-python -m recsys_tfb training --env production
-#    ↑ training 結束時 stdout 會印一行類似
-#      `model_version=2025-01-31_a1b2c3d4_e5f6g7h8`；也可以用
-#      `ls data/models/` 看到所有訓出來的版本目錄。
+# 2. 抽樣 → 前處理 → 訓練。版本由 config 自動算 hash，不需手動指定。
+python -m recsys_tfb dataset  --env local
+python -m recsys_tfb training --env local
+#    ↑ training 結束時 stdout 印一行：
+#        model_version=a05d0244
+#      8 碼 hex hash 即為這次訓出的 model_version（由 training 參數 +
+#      base_dataset_version + train/calibration variant 一起決定）。
+#      想看所有訓過的版本：`ls data/models/`。
 
-# 3. 看新模型好不好（產 report.html 供你決定要不要上線）
-python -m recsys_tfb evaluation --env production --post-training \
-    --model-version 2025-01-31_a1b2c3d4_e5f6g7h8
-#    ↑ 開啟 data/evaluation/<model_version>/<snap_date>/report.html 看指標
+# 3. 評估新模型（產 report.html，做為「要不要 promote 上線」的依據）
+python -m recsys_tfb evaluation --env local --post-training \
+    --model-version a05d0244
+#    ↑ 開報表：data/evaluation/<model_version>/<snap_date>/report.html
 
-# 4. 決定上線：手動切換 data/models/best symlink（不會動到舊版本目錄）
-python scripts/promote_model.py 2025-01-31_a1b2c3d4_e5f6g7h8
+# 4. 決定上線：手動切換 data/models/best symlink（不動舊版本目錄）
+python scripts/promote_model.py a05d0244
 
-# 5. 跑推論，寫入給下游用的排名表
-python -m recsys_tfb inference --env production
-#    結果：Hive 表 ml_recsys.ranked_predictions, snap_date='2025-01-31'
+# 5. 跑推論，把分數寫進下游用的排名表
+python -m recsys_tfb inference --env local
+#    結果：Hive 表 <hive.db>.ranked_predictions, snap_date='2026-01-31'
 
-# 6.（選用）線上監控 evaluation，讀 inference 結果回頭看當期品質
-python -m recsys_tfb evaluation --env production
+# 6.（選用）線上監控：讀 inference 結果再跑一次 evaluation，看當期實際品質
+python -m recsys_tfb evaluation --env local
 ```
+
+> **關於 `--env`**：所有 CLI 都吃 `--env`；預設值為 `local`，代表本機 / 個人 dev cluster。`--env production` 保留給未來上線正式區使用 ── ConfigLoader 會用 `conf/<env>/*.yaml` 對 `conf/base/` 做 deep-merge 覆寫（規則見 §5）。
 
 **怎麼確認每步跑成功？**
 
 | 跑完什麼 | 去哪看結果 / 怎麼驗證 |
 |---|---|
-| `feature_etl` / `label_etl` / `sample_pool_etl` | Hive 表 `ml_recsys.feature_table` / `label_table` / `sample_pool` 出現新 `snap_date` 分區 |
+| `feature_etl` / `label_etl` / `sample_pool_etl` | Hive 表 `<hive.db>.feature_table` / `label_table` / `sample_pool` 出現新 `snap_date` 分區 |
 | `dataset` | `data/dataset/latest` symlink 更新；底下有 `preprocessor` / `*_model_input` 等檔 |
-| `training` | stdout 印 `model_version=...`；`data/models/<model_version>/model.txt` 存在 |
+| `training` | stdout 印 `model_version=<8 碼 hex>`；`data/models/<model_version>/model.txt` 存在 |
 | `evaluation --post-training` | `data/evaluation/<model_version>/<snap_date>/report.html` 可開啟，看 `overall_map` / `mAP@k` |
 | `scripts/promote_model.py` | `readlink data/models/best` 指向你 promote 的 `model_version` |
-| `inference` | `SELECT COUNT(*) FROM ml_recsys.ranked_predictions WHERE snap_date='2025-01-31'` 不為 0 |
+| `inference` | `SELECT COUNT(*) FROM <hive.db>.ranked_predictions WHERE snap_date='2026-01-31'` 不為 0 |
 
 任一步指令失敗時，程式會以 exit code 1 結束、把所有設定 / 資料不一致的問題一次列出（見 §9 常見錯誤）。每步的進階用法、選項、版本機制見後續章節。
 
@@ -84,7 +116,7 @@ python -m recsys_tfb evaluation --env production
 | **sample_pool** | 「哪些 `(snap_date, cust_id, prod_name)` 三元組要進入訓練 / 評估」的候選集。 |
 | **source ETL** | `feature_etl` / `label_etl` / `sample_pool_etl` 三個獨立指令的合稱；**沒有單一 `source_etl` 指令**。 |
 | **dataset** / **training** / **inference** / **evaluation** | 四個主要 pipeline，各自獨立 CLI 指令，執行順序見 §0 / §3。 |
-| **model_version** | 一次 training 的版本字串（格式 `YYYY-MM-DD_xxxxxxxx_xxxxxxxx`）。training 結束時印在 stdout，也可 `ls data/models/` 看到所有版本。 |
+| **model_version** | 一次 training 的版本識別字串，格式為 **8 碼 hex hash**（例：`a05d0244`），由 training 參數 + `base_dataset_version` + `train_variant_id` +（選用）`calibration_variant_id` 一起 sha256 後取前 8 碼決定（見 §7）。training 結束時印在 stdout，也可 `ls data/models/` 看到所有版本。 |
 | **promote** | 把 `data/models/best` symlink 切到某個 `model_version`。**inference 預設讀 `best`，所以不 promote 就不會生效**。手動跑 `scripts/promote_model.py`。 |
 | **`data/models/best`**（線上版本指標） | symlink，指向「現在線上用的 `model_version`」。inference / evaluation 未帶 `--model-version` 時讀這個。 |
 | **`latest` symlink**（最近一次產出指標） | `data/dataset/latest`、`data/models/latest` 等等，各層版本（`base_dataset_version` / `train_variant_id` / `calibration_variant_id` / `model_version`）都有一個 `latest`，指「該層最近一次跑出來的版本」。training CLI 的 `--base-dataset-version` / `--train-variant` / `--calibration-variant` 不帶時各自吃對應的 `latest`。**`latest` ≠ `best`**：`latest` 只是方便不必每次貼 hash，不代表線上用哪個。 |
@@ -129,47 +161,47 @@ customer / entity  ×  product / item  ×  binary label  ->  ranking score
 
 ```bash
 # 1. Source ETL：產出 feature_table / label_table / sample_pool（三個獨立指令）
-python -m recsys_tfb feature_etl     --env production --target-dates 2025-01-31
-python -m recsys_tfb label_etl       --env production --target-dates 2025-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2025-01-31
+python -m recsys_tfb feature_etl     --env local --target-dates 2026-01-31
+python -m recsys_tfb label_etl       --env local --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env local --target-dates 2026-01-31
 
 # 1a.（選用，僅新增/調整 categorical feature 時）掃「已存在」的表推測 categorical 欄位
 #     掃描目標必須已存在：feature_etl 完成後的 feature_table，或某個既有上游來源表。
-python scripts/suggest_categorical_cols.py ml_recsys.feature_table
+python scripts/suggest_categorical_cols.py <hive.db>.feature_table
 #   -> data/profiling/<stem>_categorical.yaml  （人工檢視後貼回 parameters_dataset.yaml）
 
 # 1b.（選用，僅調抽樣 / 冷門產品加權時）profile sample_pool → 瀏覽器編輯 → 產 YAML snippet
 #     需 sample_pool_etl 已完成（sample_pool 已存在）。
-python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool
+python scripts/sampling_overrides_editor.py profile <hive.db>.sample_pool
 #   -> data/profiling/sampling_overrides_editor.html  （瀏覽器編輯後 Export JSON）
 python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_overrides_export.json
 #   -> 貼回 parameters_dataset.yaml (sample_ratio_overrides) /
 #           parameters_training.yaml (sample_weights)
 
 # 2. Dataset：一致性閘 → 抽樣切分 → 前處理 → 各 split model_input（版本由參數自動推導）
-python -m recsys_tfb dataset --env production
+python -m recsys_tfb dataset --env local
 
 # 3. Training：LightGBM + Optuna HPO，產出 versioned model + test-set 預測寫入
-#    ml_recsys.training_eval_predictions（不會自動 promote）
-python -m recsys_tfb training --env production
-#    ↑ 結束時 stdout 會印 `model_version=YYYY-MM-DD_xxxxxxxx_xxxxxxxx`；
+#    <hive.db>.training_eval_predictions（不會自動 promote）
+python -m recsys_tfb training --env local
+#    ↑ 結束時 stdout 會印 `model_version=<8 碼 hex>`（例：`a05d0244`）；
 #      也可以用 `ls data/models/` 看到所有訓出來的版本目錄（按時間排序）。
 #      把這個字串貼到下一步 `--model-version` 後面。
 
 # 4. Evaluation（post-training）：用 training 剛產出的 test-set 預測做模型驗收
-#    讀 ml_recsys.training_eval_predictions（而非 inference 的 ranked_predictions）。
-#    產出 report.html 並把 eval_predictions 持久化到 ml_recsys.enriched_eval_predictions
+#    讀 <hive.db>.training_eval_predictions（而非 inference 的 ranked_predictions）。
+#    產出 report.html 並把 eval_predictions 持久化到 <hive.db>.enriched_eval_predictions
 #    （後續 --compare-only 會用到）。決定要不要 promote 就看這份報表。
-python -m recsys_tfb evaluation --env production --post-training --model-version <model_version>
+python -m recsys_tfb evaluation --env local --post-training --model-version <model_version>
 
 # 5. 手動 promote：建立 / 更新 data/models/best symlink
 python scripts/promote_model.py <model_version>
 
-# 6. Inference：對線上 snap_date 打分，寫入 ranked_predictions
-python -m recsys_tfb inference  --env production
+# 6. Inference：對當期 snap_date 打分，寫入 ranked_predictions
+python -m recsys_tfb inference  --env local
 
 # 7. Evaluation（線上監控）：讀 ranked_predictions 算指標，產 report.html
-python -m recsys_tfb evaluation --env production
+python -m recsys_tfb evaluation --env local
 ```
 
 步驟 1a / 1b 是**按需的準備 / 調參輔助步驟**（非每輪固定要跑）：只在新增 categorical feature 或調整抽樣 / sample weight 時需要。兩者都讀「已存在」的表/檔（`suggest_categorical_cols` 掃 `feature_etl` 後的 `feature_table` 或既有上游來源表；`sampling_overrides_editor` 掃 `sample_pool_etl` 後的 `sample_pool`），輸出皆為 `data/profiling/` 下的 snippet，**需人工貼回 `conf/` 對應檔案**後，後續 `dataset` / `training` 才會吃到。因此放在對應來源表已產出之後、`dataset` 之前。
@@ -211,7 +243,7 @@ evaluation:
   compare_sources:
     v_prev:                              # CLI flag 帶這個 key
       kind: model_version                # 比另一個我們自己的 model_version
-      model_version: "2026-01-31_abcdef12_34567890"
+      model_version: "abcdef12"               # 8 碼 hex hash
       # source 預設 enriched_eval_predictions（B 也跑過 evaluation 就用這個）；
       # 其他選項：ranked_predictions（B 只跑過 inference）|
       # training_eval_predictions（B 只跑過 training，用於 --post-training 比對）

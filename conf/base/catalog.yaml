@@ -1,11 +1,13 @@
-# Production overrides - Hive tables on HDFS.
-# Three-layer versioning: base_dataset_version keys invariant artifacts;
-# train_variant_id keys per-train-sampling artifacts; calibration_variant_id
-# keys per-calibration-sampling artifacts. Each layer lives under a different
-# HDFS path (base / train_variants / calibration_variants) and table names
-# carry the corresponding version suffixes.
+# Production overrides — Hive tables on HDFS。
+# 三層 versioning：base_dataset_version 對應「與抽樣無關」的不變產物；
+# train_variant_id 對應「依 train sampling」的產物；calibration_variant_id
+# 對應「依 calibration sampling」的產物。三層分別落在不同 HDFS path
+# （base / train_variants / calibration_variants），table 名也帶各自的 version
+# 後綴。
 
-# --- Source tables (read-only, managed by source_etl) ---
+# hive.db 定義於 parameters.yaml，供 catalog.yaml 參照。
+
+# --- Source tables（唯讀，由 source_etl 維護）---
 feature_table:
   type: HiveTableDataset
   database: ${hive.db}
@@ -24,9 +26,9 @@ sample_pool:
   table: sample_pool
   read_only: true
 
-# --- Dataset base layer (per base_dataset_version) ---
-# Single Hive table per logical artifact; base_dataset_version is the outer
-# partition column. snap_date is the inner dynamic partition.
+# --- Dataset base layer（依 base_dataset_version 區分）---
+# 每個邏輯 artifact 一張 Hive table；base_dataset_version 是外層 partition column，
+# snap_date 為內層的 dynamic partition。
 val_keys:
   type: HiveTableDataset
   database: ${hive.db}
@@ -80,7 +82,7 @@ category_mappings:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/category_mappings.json
 
-# --- Dataset train-variant layer (per base + train_variant) ---
+# --- Dataset train-variant layer（依 base + train_variant 區分）---
 sample_keys:
   type: HiveTableDataset
   database: ${hive.db}
@@ -152,7 +154,7 @@ train_dev_model_input:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Dataset calibration-variant layer (per base + calibration_variant) ---
+# --- Dataset calibration-variant layer（依 base + calibration_variant 區分）---
 calibration_keys:
   type: HiveTableDataset
   database: ${hive.db}
@@ -177,7 +179,7 @@ calibration_model_input:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Training Pipeline - Binary / non-DataFrame artifacts (driver-local) ---
+# --- Training pipeline — binary / 非 DataFrame artifact（driver-local）---
 # ModelAdapterDataset / JSONDataset 用 Python 內建 open() 寫檔，不認 hdfs:// scheme，
 # 因此寫到 driver-local fs（與 cached_* 同一原則）。
 model:
@@ -205,12 +207,12 @@ evaluation_comparison_report:
 # catalog 持久化；cache node outputs（ParquetHandle）走 framework
 # auto-MemoryDataset 在 DAG 中銜接。
 
-# --- Training Pipeline - Test-set predictions for downstream evaluation reuse ---
-# Written by training/nodes.py::predict_and_write_test_predictions; read by
-# compute_test_mAP_spark (same pipeline) and evaluation/nodes_spark.py::
-# prepare_eval_data (--post-training mode). Only customers with >=1 positive
-# label in the test window are scored & written. rank not stored — Spark mAP
-# recomputes it internally via rank_within_query.
+# --- Training pipeline — test-set 預測結果（供下游 evaluation 重複使用）---
+# 由 training/nodes.py::predict_and_write_test_predictions 寫入；同 pipeline
+# 內由 compute_test_mAP_spark 與 evaluation/nodes_spark.py::prepare_eval_data
+# (--post-training mode) 讀回。只有 test window 內至少 1 個 positive label 的
+# 客戶會被 scoring 並寫入；不存 rank ──Spark mAP 端會用 rank_within_query
+# 重算。
 training_eval_predictions:
   type: HiveTableDataset
   database: ${hive.db}
@@ -219,7 +221,7 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # raw model output; equals score when calibration is off
+    - {name: score_uncalibrated, type: DOUBLE}  # 模型原始輸出；calibration 關閉時等於 score
     - {name: label, type: INT}
   partition_filter:
     model_version: ${model_version}
@@ -227,14 +229,14 @@ training_eval_predictions:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
 
-# --- Evaluation Pipeline - Cached, report-ready eval_predictions ---
-# Written by evaluation/comparison_nodes.py::persist_eval_predictions (the
-# in-memory eval_predictions from prepare_eval_data, after label join, rank,
-# and segment enrichment). Read back by --compare-only mode via catalog
-# auto-load + validate_enriched_eval_predictions_present (B4 validator).
-# columns: "auto" — schema is inferred from the DataFrame; if segment_sources
-# config changes between runs, drop the table before rerun (ALTER TABLE
-# schema evolution is a deferred follow-up).
+# --- Evaluation pipeline — 快取後可直接用於 report 的 eval_predictions ---
+# 由 evaluation/comparison_nodes.py::persist_eval_predictions 寫入
+# （prepare_eval_data 產出、做完 label join、rank 與 segment enrichment 後的
+# in-memory eval_predictions）。--compare-only 模式由 catalog auto-load 讀回，
+# 並由 validate_enriched_eval_predictions_present（B4 validator）檢查。
+# columns: "auto" ── schema 從 DataFrame 推得；若 segment_sources 設定在兩次
+# run 之間改變，請先 drop 此 table 再重跑（ALTER TABLE schema evolution 是
+# 待辦的 follow-up）。
 enriched_eval_predictions:
   type: HiveTableDataset
   database: ${hive.db}
@@ -246,8 +248,8 @@ enriched_eval_predictions:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Inference Pipeline - Hive managed table with dynamic partition overwrite ---
-# Each run only overwrites partitions present in the DataFrame (snap_date x prod_name x model_version).
+# --- Inference pipeline — Hive managed table，採 dynamic partition overwrite ---
+# 每次 run 只覆寫 DataFrame 內存在的 partition（snap_date × prod_name × model_version）。
 score_table:
   type: HiveTableDataset
   database: ${hive.db}
@@ -275,11 +277,11 @@ validated_predictions:
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
 
-# --- Inference Pipeline (cont.) - Evaluation read-side entry ---
-# Same Hive table as validated_predictions; declared separately so evaluation
-# pipeline can run standalone (without inference in same session).
-# core/catalog.py:71 auto-fallbacks unknown names to MemoryDataset, which
-# silently breaks standalone evaluation reads — this entry fixes that.
+# --- Inference pipeline（續）— Evaluation 讀取端入口 ---
+# 與 validated_predictions 對應到同一張 Hive table；獨立宣告一份，是為了
+# evaluation pipeline 可以在同 session 沒跑 inference 的情況下 standalone 執行。
+# core/catalog.py:71 對未知名稱會自動 fallback 成 MemoryDataset，會讓
+# standalone evaluation 讀取「靜默地壞掉」── 此 entry 就是為了避免這狀況。
 ranked_predictions:
   type: HiveTableDataset
   database: ${hive.db}

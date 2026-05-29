@@ -122,7 +122,7 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
         if getattr(r, "event", None) == "data_volume"
     }
     messages = [r.getMessage() for r in caplog.records]
-    # Entry summary（保留既有 domain log）
+    # Entry summary (preserve existing domain log)
     assert any(
         "extract_Xy start" in m and "n_feature_cols=3" in m and "label=label" in m
         for m in messages
@@ -135,7 +135,7 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
     assert vol["_pdf_to_X.X_df"]["rows"] == 3
     assert vol["_pdf_to_X.X_df"]["cols"] == 3
     assert vol["_pdf_to_X.X_df"]["deep"] is True
-    # encode_categoricals summary（保留既有 domain log）
+    # encode_categoricals summary (preserve existing domain log)
     assert any(
         "deferred_cats=" in m and "prod_name" in m and "count=1" in m for m in messages
     )
