@@ -701,41 +701,58 @@ def log_experiment(
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
+    # MLflow logging 是 best-effort 的 sink node（DAG 終端、無下游依賴）。
+    # tracking server 不可用或版本不相容（例如 client 3.x 對舊 server 呼叫
+    # /api/2.0/mlflow/logged-models 收到 404）時，預設記 warning 後讓 pipeline
+    # 跑完，不讓 experiment logging 拖垮整個 training。需硬失敗時設 strict: true。
+    strict = mlflow_params.get("strict", False)
     training_cfg = parameters.get("training", {})
     algorithm = training_cfg.get("algorithm", "lightgbm")
     final_model_strategy = training_cfg.get("final_model_strategy", "hpo_best")
 
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(experiment_name)
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(experiment_name)
 
-    with log_step(logger, "mlflow_log"):
-        with mlflow.start_run():
-            mlflow.log_params(best_params)
-            mlflow.log_param("algorithm", algorithm)
-            mlflow.log_param("final_model_strategy", final_model_strategy)
-            mlflow.log_metric("best_iteration", best_iteration)
-            mlflow.log_metric("overall_map", evaluation_results["overall_map"])
+        with log_step(logger, "mlflow_log"):
+            with mlflow.start_run():
+                mlflow.log_params(best_params)
+                mlflow.log_param("algorithm", algorithm)
+                mlflow.log_param("final_model_strategy", final_model_strategy)
+                mlflow.log_metric("best_iteration", best_iteration)
+                mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
-            for item, attr in evaluation_results.get("per_item_map_attr", {}).items():
-                mlflow.log_metric(f"map_attr_{item}", attr)
+                for item, attr in evaluation_results.get("per_item_map_attr", {}).items():
+                    mlflow.log_metric(f"map_attr_{item}", attr)
 
-            mlflow.log_metric("n_queries", evaluation_results["n_queries"])
-            mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
+                mlflow.log_metric("n_queries", evaluation_results["n_queries"])
+                mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
 
-            # Calibration info
-            if "uncalibrated" in evaluation_results:
-                mlflow.log_param("calibrated", True)
-                mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
-                mlflow.log_metric(
-                    "uncalibrated_overall_map",
-                    evaluation_results["uncalibrated"]["overall_map"],
-                )
-            else:
-                mlflow.log_param("calibrated", False)
+                # Calibration info
+                if "uncalibrated" in evaluation_results:
+                    mlflow.log_param("calibrated", True)
+                    mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
+                    mlflow.log_metric(
+                        "uncalibrated_overall_map",
+                        evaluation_results["uncalibrated"]["overall_map"],
+                    )
+                else:
+                    mlflow.log_param("calibrated", False)
 
-            model.log_to_mlflow()
+                model.log_to_mlflow()
 
-    logger.info("MLflow experiment logged: %s", experiment_name)
+        logger.info("MLflow experiment logged: %s", experiment_name)
+    except Exception:
+        if strict:
+            raise
+        logger.warning(
+            "MLflow logging failed; training pipeline continues without "
+            "experiment logging (set mlflow.strict=true to fail hard). "
+            "tracking_uri=%s experiment=%s",
+            tracking_uri,
+            experiment_name,
+            exc_info=True,
+        )
 
 
 def compute_test_mAP_spark(

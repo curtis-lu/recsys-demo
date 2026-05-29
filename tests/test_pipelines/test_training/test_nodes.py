@@ -566,6 +566,63 @@ class TestLogExperiment:
         assert runs.iloc[0]["params.final_model_strategy"] == "hpo_best"
         assert runs.iloc[0]["params.calibrated"] == "False"
 
+    def test_mlflow_failure_does_not_raise(
+        self, lgb_handles, training_parameters, tmp_path, monkeypatch, caplog
+    ):
+        """MLflow 寫入失敗時，node 應記 warning 後正常返回，不中斷 pipeline。"""
+        import recsys_tfb.pipelines.training.nodes as nodes_mod
+
+        model = _quick_train_adapter(lgb_handles, training_parameters)
+        evaluation_results = {
+            "overall_map": 0.75,
+            "per_item_map_attr": {},
+            "n_queries": 10,
+            "n_excluded_queries": 2,
+        }
+        params = {**training_parameters, "mlflow": {
+            "experiment_name": "test_resilient",
+            "tracking_uri": str(tmp_path / "mlruns"),
+        }}
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError(
+                "API request to endpoint /api/2.0/mlflow/logged-models "
+                "failed with error code 404 != 200"
+            )
+
+        monkeypatch.setattr(nodes_mod.mlflow, "start_run", _boom)
+
+        with caplog.at_level("WARNING"):
+            # 不應 raise
+            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
+
+        assert any("mlflow" in r.message.lower() for r in caplog.records)
+
+    def test_mlflow_failure_strict_reraises(
+        self, lgb_handles, training_parameters, tmp_path, monkeypatch
+    ):
+        """strict=True 時保留硬失敗行為（供 CI / 嚴格環境 opt-in）。"""
+        import recsys_tfb.pipelines.training.nodes as nodes_mod
+
+        model = _quick_train_adapter(lgb_handles, training_parameters)
+        evaluation_results = {
+            "overall_map": 0.75, "per_item_map_attr": {},
+            "n_queries": 10, "n_excluded_queries": 2,
+        }
+        params = {**training_parameters, "mlflow": {
+            "experiment_name": "test_strict",
+            "tracking_uri": str(tmp_path / "mlruns"),
+            "strict": True,
+        }}
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("404 logged-models")
+
+        monkeypatch.setattr(nodes_mod.mlflow, "start_run", _boom)
+
+        with pytest.raises(RuntimeError):
+            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
+
     def test_logs_calibration_info(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
     ):

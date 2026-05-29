@@ -106,7 +106,7 @@ class LightGBMAdapter(ModelAdapter):
     def log_to_mlflow(self) -> None:
         if self._booster is None:
             raise RuntimeError("No model to log.")
-        mlflow.lightgbm.log_model(self._booster, artifact_path="model")
+        mlflow.lightgbm.log_model(self._booster, name="model")
 
     @staticmethod
     def _categorical_indices(preprocessor_metadata: dict):
