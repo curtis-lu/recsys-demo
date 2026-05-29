@@ -308,7 +308,7 @@ evaluation:
                 ▼                                              （版本: base / train_variant / calibration_variant）
             ┌──────────────────────────────────────────────────────────────┐
             │ training (cache → Optuna HPO → (calibration) → predict_test → │
-            │          compute_test_mAP_spark → mlflow)                     │
+            │          compute_test_mAP_spark → diagnostics → mlflow)       │
             └──────────────────────────────────────────────────────────────┘
                 │ data/models/<model_version>/{model.txt,best_params,        training_eval_predictions
                 │ evaluation_results,manifest}                               (Hive)
@@ -349,11 +349,29 @@ Lineage 對照表（artifact → 產生者 → 消費者 → 對應版本）：
 | `calibration_model_input` | `dataset`（calibration 啟用）| `training` | `base` + `calibration_variant_id` |
 | `data/models/<mv>/{model.txt,best_params,evaluation_results,manifest}` | `training` | `promote_model.py`、`inference`、`evaluation` | `model_version` |
 | `training_eval_predictions`（Hive）| `training` | `evaluation --post-training`、`compute_test_mAP_spark` | `model_version` |
+| `data/models/<mv>/diagnostics/{feature_statistics,feature_importance,shap_diagnostics}.json` + `*.png` | `training`（diagnostic nodes）| MLflow（`log_experiment` 上傳）/ 人工 | `model_version` |
 | `data/models/best`（symlink）| `scripts/promote_model.py`（手動）| `inference` / `evaluation`（未指定 `--model-version` 時）| 指向某 `model_version` |
 | `ranked_predictions` / `score_table`（Hive）| `inference` | `evaluation`（預設模式）| `model_version` |
 | `ml_recsys.enriched_eval_predictions`（Hive）| `evaluation`（每次都 persist；catalog 自動寫入）| `evaluation --compare-only` | `(model_version, snap_date)` 分區 |
 | `data/evaluation/<mv>/<snap_date>/report.html` | `evaluation` | 人工 / 監控 | `model_version` |
 | `data/evaluation/<mv>/<snap_date>/report_comparison.html` | `evaluation --compare` / `--compare-only` | 人工（A/B 對比） | `model_version` |
+
+### Training 診斷產物（feature stats / native importance / SHAP）
+
+`training` 在 `compute_test_mAP_spark` 後、`log_experiment` 前跑三個純計算 node（不碰 Spark），產物寫到 `data/models/<mv>/diagnostics/` 並由 `log_experiment` 整包上傳 MLflow（另記 `n_dead_features` / `n_high_null_features` / `n_single_value_features` scalar）：特徵基本統計、LightGBM split+gain importance、SHAP（全域 + per-item + 代表性個例 + PNG）。設定在 `parameters_training.yaml` 的 **top-level `diagnostics:` block**（與 `mlflow`/`cache` 同層，刻意不放進 `training:` → 不影響 `model_version`）。
+
+SHAP 旋鈕（`diagnostics.shap`）：
+
+| 參數 | 作用 |
+|---|---|
+| `enabled` | SHAP 總開關（最重的診斷；`false` 時整個 node 略過） |
+| `sample_rows` | 從 test set 抽多少列算 SHAP；成本隨「樣本數 × 樹數」線性成長，**唯一的成本主旋鈕** |
+| `top_k` | 全域 / per-item 各保留前 K 重要特徵（只影響輸出大小，不影響計算量） |
+| `n_examples` | 取預測分數最高/最低各 N 筆輸出逐特徵 SHAP（「為何這客戶分數高/低」），並保證每產品至少一筆高分個例（含稀有產品） |
+| `min_rows_per_item` | per-item 分層每產品下限（不足則全取）；同時是 `low_coverage` 旗標門檻 |
+| `max_budget` | `sample_rows × 樹數` 上限，超過自動降抽樣並 warn |
+
+效率關鍵：只呼叫**一次** `TreeExplainer.shap_values`（`tree_path_dependent`，無 background dataset），全域 / per-item / 個例全從同一矩陣聚合，不會因 22 類產品而重算。per-item 為「族群代表」抽樣（產品內隨機，不偏高分）；「為何被推薦」的高分故事看 `n_examples` 那段。（`diagnostics.feature_stats` 另有獨立的 `sample_rows`，預設 500000，針對 train parquet，與 SHAP 的不互通。）
 
 ---
 
@@ -419,7 +437,7 @@ Lineage 對照表（artifact → 產生者 → 消費者 → 對應版本）：
 關鍵規則：
 
 - `training:` block 進 `model_version` hash；其中 `algorithm_params` 的 `verbosity`、`log_period`、`num_threads` **不**影響 `model_version`。
-- `spark`、`mlflow`、`cache` 等 ops-only 設定**不**影響任何版本。
+- `spark`、`mlflow`、`cache`、`diagnostics` 等 top-level ops-only 設定**不**影響任何版本（`model_version` 只雜湊 `training:` block）。
 - `training.sample_weights` 屬 `training:` block → **改它會 bust `model_version`，但不會改 `train_variant_id`**。
 - `dataset.carry_columns` 不是抽樣 key → 改它會 **bust `base_dataset_version`**（parquet schema 變）。
 - `sample_group_keys` 同時屬 train 與 calibration 抽樣 → 改它會同時改 `train_variant_id` 與 `calibration_variant_id`，但不改 `base_dataset_version`。
