@@ -142,6 +142,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         )
 
     idx = _stratified_item_sample(pdf, item_col, eff_sample, min_per_item, seed=42)
+    if len(idx) == 0:
+        logger.warning("shap diagnostics: empty sample after stratification; skipping")
+        return {}
     sample_pdf = pdf.iloc[idx].reset_index(drop=True)
 
     X = _pdf_to_X(sample_pdf, preprocessor, parameters)
@@ -160,8 +163,8 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     mean_signed = shap_values.mean(axis=0)
     order = np.argsort(mean_abs)[::-1][:top_k]
     global_top = [
-        {"feature": feature_cols[i], "mean_abs_shap": float(mean_abs[i]),
-         "mean_signed_shap": float(mean_signed[i])}
+        {"feature": feature_cols[i], "mean_abs_shap": _to_native(mean_abs[i]),
+         "mean_signed_shap": _to_native(mean_signed[i])}
         for i in order
     ]
 
@@ -175,7 +178,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         o = np.argsort(ai)[::-1][:top_k]
         sc = scores[mask]
         per_item[str(item)] = {
-            "top_features": [{"feature": feature_cols[i], "mean_abs_shap": float(ai[i])} for i in o],
+            "top_features": [{"feature": feature_cols[i], "mean_abs_shap": _to_native(ai[i])} for i in o],
             "n_sampled": int(mask.sum()),
             "n_positive": int(np.sum(labels[mask] == 1)),
             "score_min": float(sc.min()), "score_max": float(sc.max()),
@@ -186,7 +189,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     # ---- 代表性個例（全域 high/low + 每 item 一筆高分）----
     def _example(i):
         return {"item": str(items[i]), "score": float(scores[i]),
-                "shap": {feature_cols[j]: float(shap_values[i, j]) for j in range(len(feature_cols))}}
+                "shap": {feature_cols[j]: _to_native(shap_values[i, j]) for j in range(len(feature_cols))}}
 
     hi = np.argsort(scores)[::-1][:n_examples]
     lo = np.argsort(scores)[:n_examples]
