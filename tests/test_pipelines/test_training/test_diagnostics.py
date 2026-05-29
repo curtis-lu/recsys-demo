@@ -5,6 +5,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
@@ -79,3 +80,84 @@ def test_compute_feature_statistics_sampling(tmp_path):
     out = diag.compute_feature_statistics(handle, preprocessor, params)
     # 抽樣後仍回傳該特徵的統計（n_distinct 受抽樣上限約束）
     assert out["f"]["n_distinct"] <= 10
+
+
+@pytest.fixture
+def shap_setup(tmp_path, monkeypatch):
+    """小 test parquet（含 item/label/兩數值特徵，一個稀有 item）+ fitted adapter。
+
+    省略 schema → get_schema 預設 item=prod_name, label=label，對上欄名。
+    item 'rare' 僅 2 列（觸發 take-all / low_coverage）。
+    """
+    monkeypatch.chdir(tmp_path)  # diagnostics_dir 會寫到 ./data/...
+    rng = np.random.RandomState(1)
+    n = 200
+    f0 = rng.randn(n)
+    f1 = rng.randn(n)
+    prod = np.array(["A"] * 99 + ["B"] * 99 + ["rare"] * 2)
+    label = (f0 + f1 > 0).astype(int)
+    pdf = pd.DataFrame({"f0": f0, "f1": f1, "prod_name": prod, "label": label})
+    path = str(tmp_path / "test.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path)
+    handle = ParquetHandle(path=path)
+
+    adapter = LightGBMAdapter()
+    aparams = {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+               "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0}
+    adapter.train(np.c_[f0, f1], label.astype(float), None, None, aparams)
+
+    preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [], "category_mappings": {}}
+    parameters = {
+        "model_version": "testmv",
+        "diagnostics": {"shap": {"enabled": True, "top_k": 2, "n_examples": 1,
+                                 "min_rows_per_item": 30, "sample_rows": 150,
+                                 "max_budget": 4000000}},
+    }
+    return adapter, handle, preprocessor, parameters
+
+
+def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
+    adapter, handle, preprocessor, parameters = shap_setup
+
+    import shap
+    calls = {"n": 0}
+    real_sv = shap.TreeExplainer.shap_values
+
+    def counting_sv(self, X, *a, **k):
+        calls["n"] += 1
+        return real_sv(self, X, *a, **k)
+
+    monkeypatch.setattr(shap.TreeExplainer, "shap_values", counting_sv)
+
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    assert calls["n"] == 1                          # 單次計算
+    assert set(out) >= {"global", "per_item", "examples"}
+    assert len(out["global"]["top_features"]) == 2
+    assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
+               for r in out["global"]["top_features"])
+    assert "rare" in out["per_item"]
+    assert out["per_item"]["rare"]["low_coverage"] is True
+    assert out["per_item"]["rare"]["n_sampled"] <= 2
+    assert {"n_sampled", "n_positive", "score_min", "score_max", "score_mean", "low_coverage"} \
+        <= set(out["per_item"]["rare"])
+    assert {"high", "low"} <= set(out["examples"])
+    items_in_examples = {e["item"] for e in out["examples"]["per_item_high"]}
+    assert {"A", "B", "rare"} <= items_in_examples
+    d = diag.diagnostics_dir(parameters)
+    assert (d / "shap_summary.png").exists()
+
+
+def test_shap_disabled(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["enabled"] = False
+    assert diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters) == {}
+
+
+def test_shap_budget_guard_reduces_sample(shap_setup, caplog):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["max_budget"] = 1  # 強制觸發降抽樣
+    with caplog.at_level("WARNING"):
+        out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert out != {}
+    assert any("budget" in r.getMessage().lower() for r in caplog.records)
