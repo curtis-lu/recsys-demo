@@ -42,6 +42,17 @@ training:
   # val/calibration/evaluation 不加權。A9 一致性閘驗證 product 分量。改此表
   # 會 bust model_version、不動 train_variant_id。
   sample_weights: {}
+  # HPO scoring objective (switchable). Routed by tune_hyperparameters via
+  # _hpo_score; independent of algorithm_params.objective (the LightGBM
+  # learning objective).
+  #   mean_ap            — per-(snap_date,cust_id) query mAP, query-equal-weight
+  #                        (frequent products dominate via positive frequency).
+  #   macro_per_item_map — evaluation's macro_avg.by_item.map_attr@all: per-item
+  #                        attributed mAP, macro-averaged over products
+  #                        (every product equal weight; cold products count).
+  # NOTE: this key is inside the model_version-hashed training: block, so
+  # changing it is a deliberate one-time model_version bump.
+  hpo_objective: macro_per_item_map
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
