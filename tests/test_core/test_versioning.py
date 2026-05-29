@@ -348,6 +348,16 @@ class TestComputeModelVersion:
         )
         assert a == b
 
+    def test_model_version_invariant_to_diagnostics(self):
+        base = {"training": {"algorithm": "lightgbm", "algorithm_params": {"objective": "binary"}}}
+        with_diag = {
+            "training": base["training"],
+            "diagnostics": {"shap": {"enabled": True, "sample_rows": 2000}},
+        }
+        v_base = compute_model_version(base, "ds123456", "tr123456")
+        v_diag = compute_model_version(with_diag, "ds123456", "tr123456")
+        assert v_base == v_diag
+
 
 class TestWriteManifest:
     def test_writes_json_file(self, tmp_path):
@@ -611,6 +621,17 @@ class TestBuildManifestMetadata:
             base_dataset_version="abc12345",
         )
         assert "feature_table_fingerprint" not in meta
+
+
+    def test_model_version_invariant_to_diagnostics(self):
+        base = {"training": {"algorithm": "lightgbm", "algorithm_params": {"objective": "binary"}}}
+        with_diag = {
+            "training": base["training"],
+            "diagnostics": {"shap": {"enabled": True, "sample_rows": 2000}},
+        }
+        v_base = compute_model_version(base, "ds123456", "tr123456")
+        v_diag = compute_model_version(with_diag, "ds123456", "tr123456")
+        assert v_base == v_diag
 
 
 class TestWeightingVersioning:
