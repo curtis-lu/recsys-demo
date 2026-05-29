@@ -93,3 +93,70 @@ def compute_mean_ap(
     if not aps:
         return 0.0
     return float(np.mean(aps))
+
+
+def compute_macro_per_item_map(
+    groups: np.ndarray,
+    items: np.ndarray,
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    k: Optional[int] = None,
+) -> float:
+    """Macro average over items of per-item attributed mAP@k.
+
+    Reproduces ``evaluation.metrics_spark`` ``macro_avg["by_item"]["map_attr@K"]``
+    on numpy arrays so the HPO loop can score a trial without a Spark job.
+
+    Ranking is *within each query* (``groups``, e.g. ``(snap_date, cust_id)``),
+    exactly as in :func:`compute_mean_ap`. Each positive row contributes its
+    within-query cumulative precision ``prec_at_pos`` (zeroed when its rank is
+    beyond ``k``). Per item we average that contribution over the item's
+    positive rows (row-equal-weight), then average across items
+    (item-equal-weight). ``k=None`` means no truncation — full mAP, equivalent
+    to ``k = n_products``.
+
+    Empty input, or no positive rows anywhere, returns ``0.0``.
+
+    Implementation mirrors :func:`compute_mean_ap`: one ``np.lexsort`` on
+    ``(groups, -y_score)`` (``O(N log N)``), a per-group slice walk, then a
+    vectorized per-item aggregation via ``np.unique`` + ``np.bincount``.
+    """
+    if len(groups) == 0:
+        return 0.0
+
+    sort_idx = np.lexsort((-y_score, groups))
+    g_sorted = groups[sort_idx]
+    y_sorted = y_true[sort_idx].astype(np.float64, copy=False)
+    items_sorted = items[sort_idx]
+
+    boundaries = np.concatenate([
+        [0],
+        np.flatnonzero(np.diff(g_sorted)) + 1,
+        [len(g_sorted)],
+    ])
+
+    contribs: list[np.ndarray] = []
+    pos_items: list[np.ndarray] = []
+    for i in range(len(boundaries) - 1):
+        s, e = boundaries[i], boundaries[i + 1]
+        y = y_sorted[s:e]
+        if y.sum() == 0:
+            continue
+        positions = np.arange(1, len(y) + 1, dtype=np.float64)
+        prec = np.cumsum(y) / positions
+        if k is not None:
+            prec = prec * (positions <= k)
+        pos_mask = y == 1
+        contribs.append(prec[pos_mask])
+        pos_items.append(items_sorted[s:e][pos_mask])
+
+    if not contribs:
+        return 0.0
+
+    contrib_all = np.concatenate(contribs)
+    items_all = np.concatenate(pos_items)
+    _, inv = np.unique(items_all, return_inverse=True)
+    sums = np.bincount(inv, weights=contrib_all)
+    counts = np.bincount(inv)
+    per_item = sums / counts
+    return float(per_item.mean())

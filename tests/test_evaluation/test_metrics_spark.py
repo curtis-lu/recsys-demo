@@ -609,3 +609,30 @@ def test_compute_all_metrics_precision_at_n_products_is_base_rate(spark):
     df = _make_eval_predictions(spark, with_segment=False)
     result = ms.compute_all_metrics(df, _make_parameters(k_values=[3]))
     assert abs(result["overall"]["precision@3"] - 0.5) < 1e-12
+
+
+def test_macro_per_item_map_numpy_matches_spark(spark):
+    """compute_macro_per_item_map (numpy, HPO) == compute_all_metrics
+    macro_avg.by_item.map_attr@all (Spark) on identical data.
+
+    k_values=(3,) and 3 products => k=3 == n_products == 'all'.
+    Scores are distinct so lexsort tie-order vs Spark row_number is moot.
+    """
+    import numpy as np
+
+    from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+
+    df = _two_customer_raw(spark)
+    params = _make_parameters(k_values=(3,))
+    result = ms.compute_all_metrics(df, params)
+    spark_macro = result["macro_avg"]["by_item"]["map_attr@3"]
+
+    rows = df.collect()
+    group_ids = {("20240331", "C0"): 0, ("20240331", "C1"): 1}
+    groups = np.array([group_ids[(r["snap_date"], r["cust_id"])] for r in rows])
+    items = np.array([r["prod_name"] for r in rows])
+    y = np.array([r["label"] for r in rows])
+    score = np.array([r["score"] for r in rows], dtype=np.float64)
+
+    numpy_macro = compute_macro_per_item_map(groups, items, y, score)
+    assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)

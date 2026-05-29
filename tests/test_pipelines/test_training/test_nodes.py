@@ -321,7 +321,7 @@ class TestTuneHyperparameters:
         completed = [
             r.getMessage()
             for r in caplog.records
-            if "completed ap=" in r.getMessage()
+            if "completed score=" in r.getMessage()
             and "tune_hyperparameters: trial=" in r.getMessage()
         ]
         best_so_far_values = [
@@ -334,10 +334,10 @@ class TestTuneHyperparameters:
                 f"best_so_far decreased from {prev} to {curr} across trials"
             )
 
-        ap_values = [
-            float(re.search(r"\bap=([\d.]+)", m).group(1)) for m in completed
+        score_values = [
+            float(re.search(r"\bscore=([\d.]+)", m).group(1)) for m in completed
         ]
-        assert best_so_far_values[-1] == pytest.approx(max(ap_values))
+        assert best_so_far_values[-1] == pytest.approx(max(score_values))
 
     def test_start_line_params_contains_only_search_dimensions(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
@@ -770,5 +770,74 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     )
     assert int(captured["group"].sum()) == 6
     assert captured["metric"] == "ndcg"
+
+
+class TestTuneHyperparametersObjective:
+    def test_macro_per_item_objective_runs_and_returns_model(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters,
+    ):
+        import copy
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        params = copy.deepcopy(training_parameters)
+        params["training"]["hpo_objective"] = "macro_per_item_map"
+
+        best_params, best_iteration, best_model = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params,
+        )
+        assert isinstance(best_params, dict)
+        assert isinstance(best_model, ModelAdapter)
+
+    def test_unknown_objective_raises_before_trials(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters,
+    ):
+        import copy
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs
+        params = copy.deepcopy(training_parameters)
+        params["training"]["hpo_objective"] = "bogus"
+
+        with pytest.raises(ValueError, match="hpo_objective"):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                params,
+            )
+
+
+class TestHpoScore:
+    GROUPS = np.array([0, 0, 0, 1, 1, 1])
+    ITEMS = np.array(["A", "B", "C", "A", "B", "C"])
+    Y = np.array([1, 0, 1, 0, 1, 0])
+    SCORE = np.array([0.9, 0.5, 0.1, 0.3, 0.8, 0.6])
+
+    def test_mean_ap_matches_compute_mean_ap(self):
+        from recsys_tfb.evaluation.metrics import compute_mean_ap
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        expected = compute_mean_ap(self.GROUPS, self.Y, self.SCORE)
+        result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
+        assert result == pytest.approx(expected)
+
+    def test_macro_per_item_map_matches_primitive(self):
+        from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        expected = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        result = _hpo_score(
+            "macro_per_item_map", self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        assert result == pytest.approx(expected)
+
+    def test_unknown_objective_raises_valueerror(self):
+        from recsys_tfb.pipelines.training.nodes import _hpo_score
+
+        with pytest.raises(ValueError, match="hpo_objective"):
+            _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
 
 

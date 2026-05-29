@@ -4,6 +4,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
 
 import mlflow
 import numpy as np
@@ -12,7 +13,10 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import compute_mean_ap
+from recsys_tfb.evaluation.metrics import (
+    compute_macro_per_item_map,
+    compute_mean_ap,
+)
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -251,6 +255,33 @@ def prepare_lgb_train_inputs(
 # Pipeline nodes
 # ---------------------------------------------------------------------------
 
+HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
+
+
+def _hpo_score(
+    objective_name: str,
+    groups: np.ndarray,
+    items: Optional[np.ndarray],
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+) -> float:
+    """Score val predictions for one HPO trial under the chosen objective.
+
+    ``mean_ap``            — per-query mAP (``items`` unused).
+    ``macro_per_item_map`` — macro average of per-item attributed mAP.
+
+    Unknown ``objective_name`` raises ``ValueError`` (fail-loud).
+    """
+    if objective_name == "mean_ap":
+        return compute_mean_ap(groups, y_true, y_score)
+    if objective_name == "macro_per_item_map":
+        return compute_macro_per_item_map(groups, items, y_true, y_score)
+    raise ValueError(
+        f"unknown training.hpo_objective {objective_name!r}; "
+        f"allowed: {', '.join(HPO_OBJECTIVES)}"
+    )
+
+
 def tune_hyperparameters(
     train_lgb_handle,
     train_dev_lgb_handle,
@@ -280,6 +311,13 @@ def tune_hyperparameters(
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
     algorithm = training_params.get("algorithm", "lightgbm")
 
+    hpo_objective = training_params.get("hpo_objective", "mean_ap")
+    if hpo_objective not in HPO_OBJECTIVES:
+        raise ValueError(
+            f"unknown training.hpo_objective {hpo_objective!r}; "
+            f"allowed: {', '.join(HPO_OBJECTIVES)}"
+        )
+
     from recsys_tfb.core.group_utils import default_metric_for_objective
     from recsys_tfb.pipelines.training.search_space import build_trial_params
 
@@ -295,11 +333,18 @@ def tune_hyperparameters(
     # val_model_input is already pre-filtered to positive groups by the dataset
     # pipeline (filter_val_model_input node) — no in-pandas re-filter here.
     with log_step(logger, "extract_features"):
-        X_v, y_v, groups_v = extract_Xy_with_groups(
-            val_parquet_handle, preprocessor_metadata, parameters,
-        )
+        if hpo_objective == "macro_per_item_map":
+            X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
+                val_parquet_handle, preprocessor_metadata, parameters,
+                with_items=True,
+            )
+        else:
+            X_v, y_v, groups_v = extract_Xy_with_groups(
+                val_parquet_handle, preprocessor_metadata, parameters,
+            )
+            items_v = None
 
-    best_state: dict = {"mean_ap": -1.0, "model": None, "iteration": 0}
+    best_state: dict = {"score": -1.0, "model": None, "iteration": 0}
 
     def objective(trial: optuna.Trial) -> float:
         trial_idx = trial.number
@@ -347,10 +392,10 @@ def tune_hyperparameters(
             y_pred = adapter.predict(X_v)
 
         with log_step(logger, "score"):
-            mean_ap = compute_mean_ap(groups_v, y_v, y_pred)
+            score = _hpo_score(hpo_objective, groups_v, items_v, y_v, y_pred)
 
-        if mean_ap > best_state["mean_ap"]:
-            best_state["mean_ap"] = mean_ap
+        if score > best_state["score"]:
+            best_state["score"] = score
             best_state["model"] = adapter
             # `best_iteration` is set by the early_stopping callback on the
             # underlying Booster regardless of whether early stopping fired.
@@ -358,13 +403,13 @@ def tune_hyperparameters(
 
         duration = time.monotonic() - t0
         logger.info(
-            "tune_hyperparameters: trial=%d/%d completed ap=%.4f "
+            "tune_hyperparameters: trial=%d/%d completed score=%.4f "
             "best_iteration=%d duration=%.1fs best_so_far=%.4f",
-            trial_idx, n_trials, mean_ap,
-            adapter.booster.best_iteration, duration, best_state["mean_ap"],
+            trial_idx, n_trials, score,
+            adapter.booster.best_iteration, duration, best_state["score"],
         )
 
-        return mean_ap
+        return score
 
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
@@ -376,8 +421,8 @@ def tune_hyperparameters(
     best_model = best_state["model"]
     best_iteration = best_state["iteration"]
     logger.info(
-        "Best trial mAP: %.4f, best_iteration: %d, params: %s",
-        study.best_value, best_iteration, best_params,
+        "Best trial score (%s): %.4f, best_iteration: %d, params: %s",
+        hpo_objective, study.best_value, best_iteration, best_params,
     )
     return best_params, best_iteration, best_model
 

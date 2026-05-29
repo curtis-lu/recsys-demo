@@ -200,6 +200,7 @@ def extract_Xy_with_groups(
     parameters: dict,
     *,
     with_weights: bool = False,
+    with_items: bool = False,
 ) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
 
@@ -261,8 +262,13 @@ def extract_Xy_with_groups(
         int(groups.max()) + 1 if len(groups) else 0,
     )
 
+    result: list = [X, y, groups]
     if with_weights:
         w = _row_weights_from_pdf(pdf, parameters)
         log_data_volume(logger, "extract_Xy_with_groups.w", w)
-        return X, y, groups, w
-    return X, y, groups
+        result.append(w)
+    if with_items:
+        items = pdf[schema["item"]].to_numpy()
+        log_data_volume(logger, "extract_Xy_with_groups.items", items)
+        result.append(items)
+    return tuple(result)
