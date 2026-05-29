@@ -740,9 +740,13 @@ def log_experiment(
     best_params: dict,
     best_iteration: int,
     evaluation_results: dict,
+    feature_statistics: dict,
+    feature_importance: dict,
+    shap_diagnostics: dict,
     parameters: dict,
 ) -> None:
     """Log training results to MLflow."""
+    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
@@ -785,6 +789,25 @@ def log_experiment(
                     mlflow.log_param("calibrated", False)
 
                 model.log_to_mlflow()
+
+                # --- diagnostics scalar summary ---
+                if feature_importance:
+                    mlflow.log_metric("n_dead_features", len(feature_importance.get("dead_features", [])))
+                if feature_statistics:
+                    mlflow.log_metric(
+                        "n_single_value_features",
+                        sum(1 for s in feature_statistics.values() if s.get("single_value")),
+                    )
+                    mlflow.log_metric(
+                        "n_high_null_features",
+                        sum(1 for s in feature_statistics.values() if s.get("high_null")),
+                    )
+
+                # --- diagnostics artifacts (JSON written by catalog, PNG by shap node;
+                #     upload the whole dir) ---
+                diag_dir = diagnostics_dir(parameters)
+                if diag_dir.exists():
+                    mlflow.log_artifacts(str(diag_dir))
 
         logger.info("MLflow experiment logged: %s", experiment_name)
     except Exception:

@@ -2,6 +2,11 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
+from recsys_tfb.pipelines.training.diagnostics import (
+    compute_feature_importance,
+    compute_feature_statistics,
+    compute_shap_diagnostics,
+)
 from recsys_tfb.pipelines.training.nodes import (
     cache_calibration_model_input,
     cache_test_model_input,
@@ -119,10 +124,26 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             outputs="evaluation_results",
         ),
         Node(
+            compute_feature_statistics,
+            inputs=["train_parquet_handle", "preprocessor", "parameters"],
+            outputs="feature_statistics",
+        ),
+        Node(
+            compute_feature_importance,
+            inputs=["model", "parameters"],
+            outputs="feature_importance",
+        ),
+        Node(
+            compute_shap_diagnostics,
+            inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
+            outputs="shap_diagnostics",
+        ),
+        Node(
             log_experiment,
             inputs=[
-                "model", "best_params", "best_iteration",
-                "evaluation_results", "parameters",
+                "model", "best_params", "best_iteration", "evaluation_results",
+                "feature_statistics", "feature_importance", "shap_diagnostics",
+                "parameters",
             ],
             outputs=None,
         ),
