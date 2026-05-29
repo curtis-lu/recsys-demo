@@ -84,6 +84,26 @@ class TestLightGBMAdapter:
         assert isinstance(fi, dict)
         assert len(fi) == 3  # 3 features
 
+    def test_feature_importance_split_and_gain(self, tiny_data, train_params):
+        adapter = LightGBMAdapter()
+        X_train, y_train, X_val, y_val = tiny_data
+        adapter.train(X_train, y_train, X_val, y_val, train_params.copy())
+
+        split = adapter.feature_importance(kind="split")
+        gain = adapter.feature_importance(kind="gain")
+        assert set(split) == set(gain)
+        assert all(isinstance(v, float) for v in split.values())
+        assert all(isinstance(v, float) for v in gain.values())
+        # default kind is "split" (backward compatible)
+        assert adapter.feature_importance() == split
+
+    def test_booster_property(self, tiny_data, train_params):
+        import lightgbm as lgb
+        adapter = LightGBMAdapter()
+        X_train, y_train, X_val, y_val = tiny_data
+        adapter.train(X_train, y_train, X_val, y_val, train_params.copy())
+        assert isinstance(adapter.booster, lgb.Booster)
+
     def test_log_to_mlflow(self, tmp_path, tiny_data, train_params):
         import mlflow
 

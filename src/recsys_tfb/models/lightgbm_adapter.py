@@ -96,11 +96,13 @@ class LightGBMAdapter(ModelAdapter):
     def load(self, filepath: str) -> None:
         self._booster = lgb.Booster(model_file=filepath)
 
-    def feature_importance(self) -> dict[str, float]:
+    def feature_importance(self, kind: str = "split") -> dict[str, float]:
         if self._booster is None:
             raise RuntimeError("No model loaded.")
+        if kind not in ("split", "gain"):
+            raise ValueError(f"kind must be 'split' or 'gain', got {kind!r}")
         names = self._booster.feature_name()
-        importances = self._booster.feature_importance().astype(float)
+        importances = self._booster.feature_importance(importance_type=kind).astype(float)
         return dict(zip(names, importances))
 
     def log_to_mlflow(self) -> None:
@@ -293,8 +295,10 @@ class LightGBMAdapter(ModelAdapter):
         )
 
     @property
-    def booster(self) -> lgb.Booster | None:
-        """Access the underlying LightGBM Booster (for diagnostics)."""
+    def booster(self) -> "lgb.Booster":
+        """Access the underlying LightGBM Booster (for diagnostics and SHAP)."""
+        if self._booster is None:
+            raise RuntimeError("No model loaded.")
         return self._booster
 
 

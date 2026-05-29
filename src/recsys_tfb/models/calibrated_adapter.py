@@ -122,9 +122,14 @@ class CalibratedModelAdapter(ModelAdapter):
         self._calibrator = data["calibrator"]
         logger.info("Calibrator loaded from %s (method=%s)", cal_path, self._method)
 
-    def feature_importance(self) -> dict[str, float]:
+    def feature_importance(self, kind: str = "split") -> dict[str, float]:
         """Delegate to the base adapter."""
-        return self._base.feature_importance()
+        return self._base.feature_importance(kind=kind)
+
+    @property
+    def booster(self):
+        """Delegate to the base adapter's booster."""
+        return self._base.booster
 
     def log_to_mlflow(self) -> None:
         """Delegate to the base adapter."""
