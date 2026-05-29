@@ -283,6 +283,21 @@ def test_extract_xy_with_groups_returns_groups(tmp_path: Path) -> None:
     assert len(set(groups.tolist())) == 3
 
 
+def test_extract_xy_with_groups_with_items_returns_item_ids(tmp_path: Path) -> None:
+    from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    handle = _make_handle(tmp_path, _make_grouped_df())
+
+    X, y, groups, items = extract_Xy_with_groups(
+        handle, _make_grouped_prep_meta(), {}, with_items=True
+    )
+
+    assert X.shape == (6, 2)
+    assert len(items) == 6
+    # items are the raw prod_name values, row-aligned with X / y / groups
+    assert list(items) == ["fund", "ccard", "fund", "ccard", "fund", "ccard"]
+
+
 def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
     tmp_path: Path, caplog
 ) -> None:
