@@ -36,11 +36,24 @@ training:
   calibration:
     enabled: true
     method: sigmoid
-  # --- Per-(segment,product) sample weights（模型層冷門產品 boost）---
-  # key 固定 "<cust_segment_typ>|<prod_name>"；value = LightGBM sample_weight
-  # (>= 1.0，只 boost)。稀疏：只列 != 1.0 的組。只作用於 train/train_dev，
-  # val/calibration/evaluation 不加權。A9 一致性閘驗證 product 分量。改此表
-  # 會 bust model_version、不動 train_variant_id。
+  # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
+  # sample_weight_keys: weight key 由哪些欄位組成（順序即 "|" 串接順序），
+  #   與 dataset.sample_group_keys 對稱。預設 [prod_name]：直接對產品調權。
+  #   每個欄位必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
+  #   dataset.carry_columns（否則不在 train model_input parquet → weight 靜默
+  #   全 1.0，A9a 一致性閘會擋）。用非 identity/label 欄位（如 cust_segment_typ）
+  #   須先加進 dataset.carry_columns 並重跑 dataset pipeline（bust
+  #   base_dataset_version）。
+  sample_weight_keys:
+    - prod_name
+  # sample_weights: key = sample_weight_keys 值用 "|" 串接；value = LightGBM
+  #   sample_weight（任意正數：>1 boost、<1 down-weight）。稀疏：只列 != 1.0
+  #   的組，沒列到的 row = 1.0。只作用於 train/train_dev，val/calibration/
+  #   evaluation 不加權。A9b 驗 key 段數、A9c 驗 product 分量。改 keys 或此表
+  #   會 bust model_version、不動 train_variant_id。
+  #   範例（sample_weight_keys: [cust_segment_typ, prod_name]）：
+  #     "mass|ccard_ins": 2.0
+  #     "affluent|fund_mix": 0.7
   sample_weights: {}
   # HPO scoring objective (switchable). Routed by tune_hyperparameters via
   # _hpo_score; independent of algorithm_params.objective (the LightGBM
