@@ -22,6 +22,7 @@ from recsys_tfb.io.handles import ParquetHandle
 
 logger = logging.getLogger(__name__)
 
+
 def _compute_row_weights(
     pdf: pd.DataFrame,
     weight_keys: list,
