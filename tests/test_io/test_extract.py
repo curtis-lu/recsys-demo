@@ -394,19 +394,44 @@ from recsys_tfb.io.extract import _compute_row_weights
 
 
 class TestComputeRowWeights:
-    def test_known_pairs_get_weight_unknown_get_one(self):
-        seg = pd.Series(["mass", "hnw", "mass", "aff"])
-        prod = pd.Series(["a", "a", "b", "a"])
-        w = _compute_row_weights(seg, prod, {"mass|a": 3.0, "hnw|a": 2.0})
+    def _pdf(self):
+        return pd.DataFrame({
+            "cust_segment_typ": ["mass", "hnw", "mass", "aff"],
+            "prod_name": ["a", "a", "b", "a"],
+            "label": [1, 0, 1, 0],
+        })
+
+    def test_single_key_prod_name_only(self):
+        w = _compute_row_weights(self._pdf(), ["prod_name"], {"a": 3.0})
         assert isinstance(w, np.ndarray)
+        np.testing.assert_array_equal(w, np.array([3.0, 3.0, 1.0, 3.0]))
+
+    def test_multi_key_segment_prod(self):
+        w = _compute_row_weights(
+            self._pdf(), ["cust_segment_typ", "prod_name"],
+            {"mass|a": 3.0, "hnw|a": 2.0})
         np.testing.assert_array_equal(w, np.array([3.0, 2.0, 1.0, 1.0]))
 
+    def test_three_key_segment_prod_label(self):
+        w = _compute_row_weights(
+            self._pdf(), ["cust_segment_typ", "prod_name", "label"],
+            {"mass|a|1": 5.0})
+        np.testing.assert_array_equal(w, np.array([5.0, 1.0, 1.0, 1.0]))
+
+    def test_down_weight_below_one(self):
+        w = _compute_row_weights(self._pdf(), ["prod_name"], {"a": 0.5})
+        np.testing.assert_array_equal(w, np.array([0.5, 0.5, 1.0, 0.5]))
+
     def test_empty_weights_all_ones(self):
-        w = _compute_row_weights(pd.Series(["m", "h"]), pd.Series(["a", "b"]), {})
-        np.testing.assert_array_equal(w, np.array([1.0, 1.0]))
+        w = _compute_row_weights(self._pdf(), ["prod_name"], {})
+        np.testing.assert_array_equal(w, np.ones(4))
+
+    def test_empty_keys_all_ones(self):
+        w = _compute_row_weights(self._pdf(), [], {"a": 3.0})
+        np.testing.assert_array_equal(w, np.ones(4))
 
     def test_dtype_is_float64(self):
-        w = _compute_row_weights(pd.Series(["m"]), pd.Series(["a"]), {"m|a": 2.0})
+        w = _compute_row_weights(self._pdf(), ["prod_name"], {"a": 2.0})
         assert w.dtype == np.float64
 
 
@@ -414,12 +439,15 @@ from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
 
 
-def _wparams(weights):
+def _wparams(weights, weight_keys=None):
+    training = {"sample_weights": weights}
+    if weight_keys is not None:
+        training["sample_weight_keys"] = weight_keys
     return {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"],
             "item": "prod_name", "label": "label"}},
-        "training": {"sample_weights": weights},
+        "training": training,
     }
 
 
@@ -450,10 +478,34 @@ class TestExtractWithWeights:
 
     def test_extract_Xy_with_weights_appends_aligned_w(self, tmp_path):
         X, y, w = extract_Xy(_wparquet(tmp_path), _wprep(),
-                             _wparams({"mass|a": 5.0}), with_weights=True)
+                             _wparams({"mass|a": 5.0}, weight_keys=["cust_segment_typ", "prod_name"]), with_weights=True)
         assert X.shape == (4, 2)
         # rows: mass|a, mass|b, hnw|a, hnw|b
         np.testing.assert_array_equal(w, np.array([5.0, 1.0, 1.0, 1.0]))
+
+    def test_extract_Xy_default_key_is_prod_name(self, tmp_path):
+        # no sample_weight_keys -> defaults to schema.item (prod_name)
+        X, y, w = extract_Xy(_wparquet(tmp_path), _wprep(),
+                             _wparams({"a": 7.0}), with_weights=True)
+        # rows: prod a, b, a, b
+        np.testing.assert_array_equal(w, np.array([7.0, 1.0, 7.0, 1.0]))
+
+    def test_extract_Xy_three_key_segment_prod_label(self, tmp_path):
+        X, y, w = extract_Xy(
+            _wparquet(tmp_path), _wprep(),
+            _wparams({"mass|a|1": 9.0},
+                     weight_keys=["cust_segment_typ", "prod_name", "label"]),
+            with_weights=True)
+        # rows: mass|a|1, mass|b|0, hnw|a|1, hnw|b|0
+        np.testing.assert_array_equal(w, np.array([9.0, 1.0, 1.0, 1.0]))
+
+    def test_extract_Xy_missing_key_column_all_ones(self, tmp_path):
+        # configured key column not in parquet -> graceful all-ones backstop
+        X, y, w = extract_Xy(
+            _wparquet(tmp_path), _wprep(),
+            _wparams({"x": 5.0}, weight_keys=["not_a_real_column"]),
+            with_weights=True)
+        np.testing.assert_array_equal(w, np.ones(4))
 
     def test_extract_Xy_with_weights_no_table_all_ones(self, tmp_path):
         X, y, w = extract_Xy(_wparquet(tmp_path), _wprep(),
@@ -466,7 +518,7 @@ class TestExtractWithWeights:
 
     def test_extract_Xy_with_groups_with_weights_appends_w(self, tmp_path):
         X, y, g, w = extract_Xy_with_groups(
-            _wparquet(tmp_path), _wprep(), _wparams({"hnw|a": 4.0}),
+            _wparquet(tmp_path), _wprep(), _wparams({"hnw|a": 4.0}, weight_keys=["cust_segment_typ", "prod_name"]),
             with_weights=True)
         assert len(g) == 4
         # rows: mass|a, mass|b, hnw|a, hnw|b

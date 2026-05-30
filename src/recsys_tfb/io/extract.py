@@ -22,38 +22,41 @@ from recsys_tfb.io.handles import ParquetHandle
 
 logger = logging.getLogger(__name__)
 
-SEGMENT_COLUMN = "cust_segment_typ"
-
-
 def _compute_row_weights(
-    seg: pd.Series,
-    prod: pd.Series,
+    pdf: pd.DataFrame,
+    weight_keys: list,
     sample_weights: dict,
 ) -> np.ndarray:
-    """Per-row LightGBM sample weight from a ``"<segment>|<product>"`` table.
+    """Per-row LightGBM sample weight from a composite-key weight table.
 
-    Pure: no Spark, no I/O. Rows whose ``f"{seg}|{prod}"`` key is absent get
-    weight 1.0 (sparse-emit semantics: only boosted groups are written to
-    ``training.sample_weights``).
+    Pure: no Spark, no I/O. Each row's lookup key is its ``weight_keys``
+    column values joined with '|' (mirrors the dataset sampler's
+    ``sample_ratio_overrides`` key in pipelines/dataset/helpers_spark.py).
+    Rows whose key is absent from ``sample_weights`` get weight 1.0
+    (sparse-emit: only adjusted groups are written to the table).
     """
-    if not sample_weights:
-        return np.ones(len(seg), dtype=np.float64)
-    keys = seg.astype(str).str.cat(prod.astype(str), sep="|")
+    if not sample_weights or not weight_keys:
+        return np.ones(len(pdf), dtype=np.float64)
+    keys = pdf[weight_keys[0]].astype(str)
+    for k in weight_keys[1:]:
+        keys = keys.str.cat(pdf[k].astype(str), sep="|")
     return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
 
 
 def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
     """Resolve a per-row weight array from training.sample_weights.
 
-    All-ones when the table is absent/empty or the carry / item columns are
-    not present (graceful, never raises). Computed from the *given* pdf so it
-    is aligned to whatever filtering/ordering the caller has already done.
+    All-ones when the table is absent/empty or any configured weight-key
+    column is missing from pdf (graceful, never raises; consistency gate A9a
+    already blocks unavailable columns at CLI entry). Computed from the
+    *given* pdf so it stays aligned to the caller's filtering/ordering.
     """
-    sw = (parameters.get("training", {}) or {}).get("sample_weights") or {}
-    item_col = get_schema(parameters)["item"]
-    if not sw or SEGMENT_COLUMN not in pdf.columns or item_col not in pdf.columns:
+    training = parameters.get("training", {}) or {}
+    sw = training.get("sample_weights") or {}
+    weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
+    if not sw or any(k not in pdf.columns for k in weight_keys):
         return np.ones(len(pdf), dtype=np.float64)
-    return _compute_row_weights(pdf[SEGMENT_COLUMN], pdf[item_col], sw)
+    return _compute_row_weights(pdf, weight_keys, sw)
 
 
 def _log_parquet_metadata(handle: ParquetHandle) -> None:
