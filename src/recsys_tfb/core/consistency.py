@@ -44,9 +44,18 @@ Layer 1 — config-static (implemented here; aggregated by
   ``log: true`` ⟹ ``low > 0`` and no ``step``; categorical needs non-empty
   ``choices``. ``when`` / string-expression bounds are rejected until
   Phase 3. Predicate: ``search_space_errors``.
-* A9 — a ``training.sample_weights`` key references a product value absent
-  from ``schema.categorical_values[item]``. Predicate:
-  ``weight_unknown_items`` (product-only check, mirrors A5).
+* A9 — ``training.sample_weights`` integrity (keys are '|'-joined
+  ``training.sample_weight_keys`` values), split into:
+    - A9a — a ``sample_weight_keys`` column ∉ identity ∪ {label} ∪
+      ``dataset.carry_columns`` (cross-file: the column would be absent from
+      or int-encoded in the train model_input parquet, so the weight silently
+      no-ops). Predicate: ``weight_key_columns_unavailable``.
+    - A9b — a ``sample_weights`` key whose '|'-segment count ≠
+      ``len(sample_weight_keys)`` (silently never matches). Predicate:
+      ``weight_key_arity_mismatch``.
+    - A9c — a ``sample_weights`` key whose product component (when
+      ``schema.item`` is a weight key) ∉ ``resolved_item_values`` (mirrors A5).
+      Predicate: ``weight_unknown_items``.
 * A10 — an ``evaluation.segment_columns`` entry has no ``evaluation.
   segment_sources`` entry providing it (matching ``segment_column``); the
   per-segment report section would silently never render. Predicate:
@@ -351,23 +360,66 @@ def search_space_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def weight_unknown_items(parameters: dict) -> list[str]:
-    """training.sample_weights keys whose product component ∉ resolved_item_values (A9).
+def weight_key_columns_unavailable(parameters: dict) -> list[str]:
+    """training.sample_weight_keys columns absent from train model_input (A9a).
 
-    Weight-table keys are fixed-format ``"<cust_segment_typ>|<prod_name>"``
-    (2 parts, '|'-joined). Only the product component (index 1) is validated;
-    the segment component has no config-declared value list (mirrors A5's
-    item-only check in :func:`override_unknown_items`). Keys without a '|'
-    (no product component) are skipped.
+    The train/train_dev model_input parquet physically contains only identity
+    columns, the label, dataset.carry_columns, and *encoded* features. A weight
+    key must therefore be one of identity ∪ {label} ∪ carry_columns — the
+    raw-valued columns. Anything else is either physically absent (weight
+    silently no-ops at 1.0) or int-encoded (key never matches). This is a
+    cross-file dependency: sample_weight_keys lives in parameters_training.yaml
+    but carry_columns lives in parameters_dataset.yaml. Returns sorted
+    offending columns; empty means OK.
+    """
+    schema = get_schema(parameters)
+    available = (
+        set(schema["identity_columns"])
+        | {schema["label"]}
+        | set((parameters.get("dataset", {}) or {}).get("carry_columns") or [])
+    )
+    keys = (parameters.get("training", {}) or {}).get("sample_weight_keys") or []
+    return sorted(k for k in keys if k not in available)
+
+
+def weight_key_arity_mismatch(parameters: dict) -> list[str]:
+    """training.sample_weights keys whose '|'-segment count != key arity (A9b).
+
+    Each weight-table key is sample_weight_keys values joined with '|', so it
+    must have exactly len(sample_weight_keys) segments. A miscounted key
+    silently never matches any row. Returns sorted offending keys; empty
+    means OK. No keys configured (arity 0) → nothing to check.
     """
     training = parameters.get("training", {}) or {}
+    n = len(training.get("sample_weight_keys") or [])
+    if n == 0:
+        return []
+    weights = training.get("sample_weights") or {}
+    return sorted(str(k) for k in weights if len(str(k).split("|")) != n)
+
+
+def weight_unknown_items(parameters: dict) -> list[str]:
+    """training.sample_weights keys whose product component ∉ resolved_item_values (A9c).
+
+    Weight-table keys are '|'-joined sample_weight_keys values. If schema.item
+    is not a weight key there is no product component → nothing to check
+    (mirrors A5's item-only check in override_unknown_items). Only keys whose
+    segment count matches the key arity are inspected; arity errors are
+    reported separately by weight_key_arity_mismatch.
+    """
+    training = parameters.get("training", {}) or {}
+    keys = training.get("sample_weight_keys") or []
+    item = get_schema(parameters)["item"]
+    if item not in keys:
+        return []
+    idx = keys.index(item)
     weights = training.get("sample_weights") or {}
     declared = set(resolved_item_values(parameters))
     bad: set[str] = set()
     for key in weights:
         parts = str(key).split("|")
-        if len(parts) >= 2 and parts[1] not in declared:
-            bad.add(parts[1])
+        if len(parts) == len(keys) and parts[idx] not in declared:
+            bad.add(parts[idx])
     return sorted(bad)
 
 
@@ -438,7 +490,27 @@ def validate_config_consistency(parameters: dict) -> None:
             f"absent from schema.categorical_values[item] — the weight "
             f"silently never matches. Fix the key(s) or declare the value(s)."
         )
-        
+
+    cols_bad = weight_key_columns_unavailable(parameters)
+    if cols_bad:
+        errors.append(
+            f"training.sample_weight_keys column(s) {cols_bad} are not in the "
+            f"train model_input parquet (identity ∪ {{label}} ∪ "
+            f"dataset.carry_columns) — the weight would silently never match. "
+            f"Add them to dataset.carry_columns and re-run the dataset "
+            f"pipeline (this busts base_dataset_version)."
+        )
+
+    arity_bad = weight_key_arity_mismatch(parameters)
+    if arity_bad:
+        n = len(parameters.get("training", {}).get("sample_weight_keys") or [])
+        errors.append(
+            f"training.sample_weights key(s) {arity_bad} do not have "
+            f"{n} '|'-separated segment(s) to match "
+            f"sample_weight_keys — the weight silently never matches. "
+            f"Fix the key(s) or sample_weight_keys."
+        )
+
     for msg in search_space_errors(parameters):
         errors.append(msg)
 

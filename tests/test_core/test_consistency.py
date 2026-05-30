@@ -173,11 +173,27 @@ class TestValidateConfigConsistency:
 
     def test_a9_unknown_weight_product_collected(self):
         p = _base({"inference": {"products": ["a", "b"]},
-            "dataset": {"prepare_model_input": {
-                "categorical_columns": ["prod_name"]}},
-            "training": {"sample_weights": {"mass|zzz": 2.0}}})
+            "training": {
+                "sample_weight_keys": ["cust_segment_typ", "prod_name"],
+                "sample_weights": {"mass|zzz": 2.0}}})
         with pytest.raises(ConfigConsistencyError, match=r"training\.sample_weights"):
             validate_config_consistency(p)
+
+    def test_all_three_a9_errors_collected(self):
+        from recsys_tfb.core.consistency import (
+            validate_config_consistency, ConfigConsistencyError)
+        p = _base({
+            "training": {
+                "sample_weight_keys": ["cust_segment_typ", "prod_name"],
+                "sample_weights": {"mass|zzz": 2.0, "badkey": 3.0}}})
+        # cust_segment_typ not carried (A9a), "badkey" wrong arity (A9b),
+        # "zzz" unknown product (A9c)
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(p)
+        msg = str(exc.value)
+        assert "sample_weight_keys" in msg      # A9a
+        assert "segment" in msg                  # A9b
+        assert "sample_weights" in msg           # A9c
 
 
 class TestSparkGuardUsesSharedError:
@@ -287,30 +303,81 @@ class TestRankingObjectiveConflicts:
         assert len(errs) == 2
 
 
-from recsys_tfb.core.consistency import weight_unknown_items
+from recsys_tfb.core.consistency import (
+    weight_unknown_items,
+    weight_key_columns_unavailable,
+    weight_key_arity_mismatch,
+)
 
 
 class TestWeightUnknownItems:
     def test_unknown_product_component_detected(self):
-        p = _base({"dataset": {"prepare_model_input": {
-            "categorical_columns": ["prod_name"]}},
-            "training": {"sample_weights": {"mass|a": 2.0, "hnw|zzz": 3.0}}})
+        p = _base({"training": {
+            "sample_weight_keys": ["cust_segment_typ", "prod_name"],
+            "sample_weights": {"mass|a": 2.0, "hnw|zzz": 3.0}}})
+        assert weight_unknown_items(p) == ["zzz"]
+
+    def test_single_prod_name_key_unknown_detected(self):
+        p = _base({"training": {
+            "sample_weight_keys": ["prod_name"],
+            "sample_weights": {"a": 2.0, "zzz": 3.0}}})
         assert weight_unknown_items(p) == ["zzz"]
 
     def test_all_known_returns_empty(self):
-        p = _base({"dataset": {"prepare_model_input": {
-            "categorical_columns": ["prod_name"]}},
-            "training": {"sample_weights": {"mass|a": 2.0, "hnw|b": 3.0}}})
+        p = _base({"training": {
+            "sample_weight_keys": ["cust_segment_typ", "prod_name"],
+            "sample_weights": {"mass|a": 2.0, "hnw|b": 3.0}}})
+        assert weight_unknown_items(p) == []
+
+    def test_item_not_in_keys_returns_empty(self):
+        # schema.item absent from weight keys -> no product component to check
+        p = _base({"training": {
+            "sample_weight_keys": ["cust_segment_typ"],
+            "sample_weights": {"mass": 2.0}}})
         assert weight_unknown_items(p) == []
 
     def test_no_sample_weights_returns_empty(self):
         assert weight_unknown_items(_base()) == []
 
-    def test_malformed_key_without_pipe_ignored(self):
-        p = _base({"dataset": {"prepare_model_input": {
-            "categorical_columns": ["prod_name"]}},
-            "training": {"sample_weights": {"massa": 2.0}}})
-        assert weight_unknown_items(p) == []
+
+class TestWeightKeyColumnsUnavailable:
+    def test_carried_column_is_available(self):
+        p = _base({"dataset": {"carry_columns": ["cust_segment_typ"]},
+                   "training": {
+                       "sample_weight_keys": ["cust_segment_typ", "prod_name"]}})
+        assert weight_key_columns_unavailable(p) == []
+
+    def test_label_and_item_always_available(self):
+        p = _base({"training": {"sample_weight_keys": ["prod_name", "label"]}})
+        assert weight_key_columns_unavailable(p) == []
+
+    def test_uncarried_column_flagged(self):
+        p = _base({"training": {
+            "sample_weight_keys": ["cust_segment_typ", "prod_name"]}})
+        assert weight_key_columns_unavailable(p) == ["cust_segment_typ"]
+
+    def test_no_keys_returns_empty(self):
+        assert weight_key_columns_unavailable(_base()) == []
+
+
+class TestWeightKeyArityMismatch:
+    def test_matching_arity_ok(self):
+        p = _base({"training": {
+            "sample_weight_keys": ["cust_segment_typ", "prod_name"],
+            "sample_weights": {"mass|a": 2.0}}})
+        assert weight_key_arity_mismatch(p) == []
+
+    def test_wrong_segment_count_flagged(self):
+        p = _base({"training": {
+            "sample_weight_keys": ["prod_name"],
+            "sample_weights": {"mass|a": 2.0}}})
+        assert weight_key_arity_mismatch(p) == ["mass|a"]
+
+    def test_no_keys_returns_empty(self):
+        p = _base({"training": {"sample_weights": {"a": 2.0}}})
+        assert weight_key_arity_mismatch(p) == []
+
+
 from recsys_tfb.core.consistency import search_space_errors
 
 
