@@ -483,14 +483,6 @@ def validate_config_consistency(parameters: dict) -> None:
     for msg in ranking_objective_conflicts(parameters):
         errors.append(msg)
 
-    unknown_w = weight_unknown_items(parameters)
-    if unknown_w:
-        errors.append(
-            f"training.sample_weights references product value(s) {unknown_w} "
-            f"absent from schema.categorical_values[item] — the weight "
-            f"silently never matches. Fix the key(s) or declare the value(s)."
-        )
-
     cols_bad = weight_key_columns_unavailable(parameters)
     if cols_bad:
         errors.append(
@@ -503,12 +495,20 @@ def validate_config_consistency(parameters: dict) -> None:
 
     arity_bad = weight_key_arity_mismatch(parameters)
     if arity_bad:
-        n = len(parameters.get("training", {}).get("sample_weight_keys") or [])
+        n = len((parameters.get("training", {}) or {}).get("sample_weight_keys") or [])
         errors.append(
             f"training.sample_weights key(s) {arity_bad} do not have "
             f"{n} '|'-separated segment(s) to match "
             f"sample_weight_keys — the weight silently never matches. "
             f"Fix the key(s) or sample_weight_keys."
+        )
+
+    unknown_w = weight_unknown_items(parameters)
+    if unknown_w:
+        errors.append(
+            f"training.sample_weights references product value(s) {unknown_w} "
+            f"absent from schema.categorical_values[item] — the weight "
+            f"silently never matches. Fix the key(s) or declare the value(s)."
         )
 
     for msg in search_space_errors(parameters):

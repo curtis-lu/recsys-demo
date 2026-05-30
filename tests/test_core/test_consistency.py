@@ -180,8 +180,6 @@ class TestValidateConfigConsistency:
             validate_config_consistency(p)
 
     def test_all_three_a9_errors_collected(self):
-        from recsys_tfb.core.consistency import (
-            validate_config_consistency, ConfigConsistencyError)
         p = _base({
             "training": {
                 "sample_weight_keys": ["cust_segment_typ", "prod_name"],
@@ -191,9 +189,10 @@ class TestValidateConfigConsistency:
         with pytest.raises(ConfigConsistencyError) as exc:
             validate_config_consistency(p)
         msg = str(exc.value)
-        assert "sample_weight_keys" in msg      # A9a
-        assert "segment" in msg                  # A9b
-        assert "sample_weights" in msg           # A9c
+        # discriminating substrings unique to each error message
+        assert "carry_columns" in msg               # A9a
+        assert "segment(s) to match" in msg          # A9b
+        assert "schema.categorical_values[item]" in msg  # A9c
 
 
 class TestSparkGuardUsesSharedError:
