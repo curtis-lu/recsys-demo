@@ -54,6 +54,8 @@ def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
     """
     training = parameters.get("training", {}) or {}
     sw = training.get("sample_weights") or {}
+    # The base YAML always supplies sample_weight_keys (default [prod_name]); the
+    # [schema.item] fallback only matters for test fixtures that omit the key.
     weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
     if not sw or any(k not in pdf.columns for k in weight_keys):
         return np.ones(len(pdf), dtype=np.float64)
