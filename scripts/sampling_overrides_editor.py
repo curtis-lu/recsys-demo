@@ -69,39 +69,6 @@ def suggest_weight(
     return min(w_max, max(1.0, raw))
 
 
-def build_grid(
-    stats: list[tuple[str, str, int, int]],
-    target_neg_pos: float,
-    alpha: float,
-    w_max: float,
-) -> list[dict]:
-    """Turn per-(segment,product) (n_pos, n_neg) stats into editor grid rows.
-
-    ``median_pos`` is the per-cell median of n_pos across the whole grid
-    (D8). The editor's primary knob is ``suggested_neg_mult`` — the target
-    neg:pos multiplier R, defaulted uniformly to ``target_neg_pos`` per cell;
-    the browser derives the read-only downsample ratio from it live. We still
-    carry ``suggested_ratio`` (= the derived ratio at the default multiplier)
-    for any consumer that wants the starting ratio without re-deriving.
-    """
-    pos_counts = [np for (_, _, np, _) in stats]
-    median_pos = float(statistics.median(pos_counts)) if pos_counts else 1.0
-    grid: list[dict] = []
-    for seg, prod, n_pos, n_neg in stats:
-        total = n_pos + n_neg
-        grid.append({
-            "segment": seg,
-            "product": prod,
-            "n_pos": n_pos,
-            "n_neg": n_neg,
-            "pos_rate": (n_pos / total) if total else 0.0,
-            "suggested_neg_mult": target_neg_pos,
-            "suggested_ratio": suggest_ratio(n_pos, n_neg, target_neg_pos),
-            "suggested_weight": suggest_weight(n_pos, median_pos, alpha, w_max),
-        })
-    return grid
-
-
 def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dict:
     """Resolve ratio dims, weight keys, and the finest profiling granularity.
 
@@ -663,6 +630,9 @@ def profile(
     source: str = typer.Argument(..., help="Hive table db.table or parquet path"),
     params: Path = typer.Option(
         Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
+    train_params: Path = typer.Option(
+        Path("conf/base/parameters_training.yaml"),
+        help="training params yaml — source of sample_weight_keys"),
     base_params: Path = typer.Option(
         Path("conf/base/parameters.yaml"),
         help="base params yaml — source of schema.columns"),
@@ -672,53 +642,77 @@ def profile(
 ) -> None:
     cfg = yaml.safe_load(params.read_text())
     ds = cfg.get("dataset", cfg)
+    training_cfg = yaml.safe_load(train_params.read_text()).get("training", {}) or {}
     schema_cfg = yaml.safe_load(base_params.read_text()).get("schema", {})
     snap_dates = ds["train_snap_dates"]
     try:
-        cols = resolve_columns(ds, schema_cfg)
+        keys = resolve_keys(ds, training_cfg, schema_cfg)
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=1)
     typer.echo(
         f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
-        f"columns segment={cols['segment_col']} item={cols['item_col']} "
-        f"label={cols['label_col']} time={cols['time_col']}"
+        f"segment={keys['segment_col']} item={keys['item_col']} "
+        f"weight_keys={keys['weight_keys']} union_dims={keys['union_dims']}"
     )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
 
     typer.echo(
         "[2/4] starting SparkSession + reading source… "
-        "(standalone client-template/spark init can take a few minutes; "
-        "client-template-local local[*] is far faster for this script)"
+        "(client-template-local local[*] is far faster for this script)"
     )
     df = _load_spark_df(source)
     typer.echo("[3/4] profiling: Spark groupBy + single collect over snap dates…")
-    stats = profile_stats(df, snaps, **cols)
-    typer.echo(f"[3/4] {len(stats)} (segment,product) cell(s) profiled")
-    grid = build_grid(stats, target_neg_pos, alpha, w_max)
+    try:
+        stats = profile_stats(
+            df, snaps, union_dims=keys["union_dims"],
+            label_col=keys["label_col"], time_col=keys["time_col"])
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"[3/4] {len(stats)} union-granularity cell(s) profiled")
     typer.echo("[4/4] rendering self-contained HTML…")
     html = render_html(
-        grid, default_ratio=float(ds.get("sample_ratio", 1.0)),
+        stats, segment_col=keys["segment_col"], item_col=keys["item_col"],
+        label_col=keys["label_col"], weight_keys=keys["weight_keys"],
+        default_ratio=float(ds.get("sample_ratio", 1.0)),
         target_neg_pos=target_neg_pos, alpha=alpha, w_max=w_max,
     )
     PROFILING_DIR.mkdir(parents=True, exist_ok=True)
     out = PROFILING_DIR / "sampling_overrides_editor.html"
     out.write_text(html)
-    typer.echo(f"Wrote {out} ({len(grid)} cells). Open it in a browser.")
+    typer.echo(f"Wrote {out} ({len(stats)} cells). Open it in a browser.")
 
 
 @app.command("to-yaml")
 def to_yaml(
     export_json: Path = typer.Argument(..., help="browser JSON export"),
     params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="params yaml for A5/A9"),
+        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
+    train_params: Path = typer.Option(
+        Path("conf/base/parameters_training.yaml"),
+        help="training params yaml — source of sample_weight_keys"),
+    base_params: Path = typer.Option(
+        Path("conf/base/parameters.yaml"),
+        help="base params yaml — source of schema for A5/A9"),
 ) -> None:
-    cfg = yaml.safe_load(params.read_text())
+    ds = yaml.safe_load(params.read_text())
+    ds_cfg = ds.get("dataset", ds)
+    # Assemble a single parameters dict the consistency predicates accept:
+    # schema from base_params (or an inline schema in --params, for tests),
+    # dataset from --params, training from --train-params.
+    merged: dict = {}
+    if base_params.exists():
+        merged.update(yaml.safe_load(base_params.read_text()) or {})
+    if "schema" in ds:
+        merged["schema"] = ds["schema"]
+    merged["dataset"] = ds_cfg
+    merged["training"] = yaml.safe_load(train_params.read_text()).get("training", {}) or {}
     export = json.loads(export_json.read_text())
-    default_ratio = float(cfg.get("dataset", cfg).get("sample_ratio", 1.0))
+    default_ratio = float(ds_cfg.get("sample_ratio", 1.0))
     try:
-        out = grid_to_yaml(export, cfg, default_ratio)
+        out = grid_to_yaml(export, merged, default_ratio)
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=1)

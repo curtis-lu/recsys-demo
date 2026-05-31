@@ -53,33 +53,6 @@ class TestSuggestWeight:
 
 
 # ---------------------------------------------------------------------------
-# Grid construction
-# ---------------------------------------------------------------------------
-class TestBuildGrid:
-    def test_grid_has_stats_and_suggestions_per_cell(self):
-        # stats: list of (segment, product, n_pos, n_neg)
-        stats = [
-            ("mass", "a", 200, 4000),
-            ("mass", "b", 800, 1600),
-            ("hnw", "a", 8, 50),
-        ]
-        grid = build_grid(stats, target_neg_pos=5, alpha=0.5, w_max=5.0)
-        by = {(r["segment"], r["product"]): r for r in grid}
-        # median_pos over cells [200, 800, 8] = 200
-        assert by[("mass", "a")]["n_pos"] == 200
-        assert by[("mass", "a")]["suggested_weight"] == 1.0  # n_pos == median
-        # hnw|a: (200/8)**0.5 = 5.0 -> cap
-        assert by[("hnw", "a")]["suggested_weight"] == 5.0
-        # mass|a downsample: 5*200/4000 = 0.25
-        assert by[("mass", "a")]["suggested_ratio"] == 0.25
-        # primary knob: neg:pos multiplier, defaulted uniformly to the target
-        assert by[("mass", "a")]["suggested_neg_mult"] == 5
-        assert by[("hnw", "a")]["suggested_neg_mult"] == 5
-        # every row carries pos_rate
-        assert abs(by[("hnw", "a")]["pos_rate"] - 8 / 58) < 1e-9
-
-
-# ---------------------------------------------------------------------------
 # Config-driven column resolution (no hardcoded column names)
 # ---------------------------------------------------------------------------
 class TestResolveKeys:
@@ -438,12 +411,7 @@ class TestAggregateSurfaces:
 # Typer CLI (to-yaml end-to-end; profile's Spark path covered above)
 # ---------------------------------------------------------------------------
 class TestToYamlCli:
-    def test_to_yaml_prints_both_blocks(self, tmp_path):
-        export = [{"segment": "mass", "product": "a", "ratio": 0.5, "weight": 1.0},
-                  {"segment": "mass", "product": "b", "ratio": 1.0, "weight": 3.0}]
-        jf = tmp_path / "e.json"
-        jf.write_text(json.dumps(export))
-        # minimal params yaml the command reads for A5/A9
+    def _write_params(self, tmp_path):
         params = tmp_path / "p.yaml"
         params.write_text(
             "schema:\n  columns:\n    item: prod_name\n"
@@ -451,10 +419,23 @@ class TestToYamlCli:
             "dataset:\n  prepare_model_input:\n"
             "    categorical_columns: [prod_name]\n"
             "  sample_group_keys: [cust_segment_typ, prod_name, label]\n")
-        r = CliRunner().invoke(
-            app, ["to-yaml", str(jf), "--params", str(params)])
+        train = tmp_path / "t.yaml"
+        train.write_text("training:\n  sample_weight_keys: [prod_name]\n")
+        return params, train
+
+    def test_to_yaml_prints_both_blocks(self, tmp_path):
+        export = {
+            "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
+            "sample_weight_keys": ["prod_name"],
+            "ratio_rows": [{"segment": "mass", "product": "a", "ratio": 0.5}],
+            "weight_rows": [{"keys": ["b"], "weight": 3.0}],
+        }
+        jf = tmp_path / "e.json"
+        jf.write_text(json.dumps(export))
+        params, train = self._write_params(tmp_path)
+        r = CliRunner().invoke(app, [
+            "to-yaml", str(jf), "--params", str(params),
+            "--train-params", str(train), "--base-params", str(params)])
         assert r.exit_code == 0, r.output
-        assert "sample_ratio_overrides:" in r.output
-        assert "mass|a|0" in r.output
-        assert "sample_weights:" in r.output
-        assert "mass|b" in r.output
+        assert "sample_ratio_overrides:" in r.output and "mass|a|0" in r.output
+        assert "sample_weights:" in r.output and "b" in r.output
