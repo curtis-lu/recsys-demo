@@ -157,8 +157,82 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
     }
 
 
-def aggregate_surfaces(*args, **kwargs):  # implemented in Task 3
-    raise NotImplementedError
+def aggregate_surfaces(
+    stats: list[dict],
+    neg_mults: dict,
+    *,
+    segment_col: str,
+    item_col: str,
+    weight_keys: list,
+    alpha: float,
+    w_max: float,
+    default_neg_mult: float,
+) -> dict:
+    """Roll finest-granularity stats up into the ratio and weight surfaces.
+
+    Pure: no Spark, no I/O. ``stats`` are union-granularity dict rows from
+    profile_stats. ``neg_mults`` maps ``(segment_val, item_val)`` -> target
+    neg:pos multiplier (missing -> ``default_neg_mult``).
+
+    Ratio surface: aggregate fine cells to ``(segment, item)``; each row's
+    keep-rate ``ratio = clamp(neg_mult * n_pos / n_neg, 0, 1)`` (the exported
+    value). Weight surface: aggregate fine cells to the ``weight_keys`` tuple;
+    ``n_pos`` is unchanged by downsampling (positives all kept) while
+    ``n_neg_post`` is the post-downsample count — each fine cell contributes
+    ``n_neg * ratio[(its segment, its item)]`` (projection drops any extra
+    weight dims; the dataset sampler downsamples uniformly within a
+    (segment,item) group, so the shared ratio is exact). Negatives are summed
+    as fractions and rounded only for display, so the ratio surface's
+    ``kept_neg`` and the weight surface's ``n_neg_post`` stay mutually
+    consistent. ``suggested_weight`` uses the weight-surface median n_pos.
+    """
+    # --- ratio surface: aggregate to (segment, item) ---
+    racc: dict = {}
+    for s in stats:
+        k = (s[segment_col], s[item_col])
+        a = racc.setdefault(k, [0, 0])
+        a[0] += s["n_pos"]
+        a[1] += s["n_neg"]
+    ratio_by_si: dict = {}
+    ratio_rows: list[dict] = []
+    for (seg, item), (npos, nneg) in racc.items():
+        mult = float(neg_mults.get((seg, item), default_neg_mult))
+        # n_pos == 0: no positives to balance against — keep all negatives.
+        ratio = 1.0 if npos == 0 else suggest_ratio(npos, nneg, mult)
+        ratio_by_si[(seg, item)] = ratio
+        kept = round(nneg * ratio)
+        total = npos + kept
+        ratio_rows.append({
+            "segment": seg, "product": item, "n_pos": npos, "n_neg": nneg,
+            "pos_rate": (npos / (npos + nneg) if npos + nneg else 0.0),
+            "neg_mult": mult, "ratio": ratio, "kept_neg": kept,
+            "new_pos_rate": (npos / total if total else 0.0),
+        })
+    ratio_rows.sort(key=lambda r: (r["segment"], r["product"]))
+
+    # --- weight surface: aggregate to weight_keys tuple (post-downsample) ---
+    weight_rows: list[dict] = []
+    if weight_keys:
+        wacc: dict = {}
+        for s in stats:
+            wk = tuple(s[k] for k in weight_keys)
+            a = wacc.setdefault(wk, [0, 0.0])
+            a[0] += s["n_pos"]
+            a[1] += s["n_neg"] * ratio_by_si[(s[segment_col], s[item_col])]
+        pos_list = [v[0] for v in wacc.values()]
+        median_pos = float(statistics.median(pos_list)) if pos_list else 1.0
+        for wk, (npos, nneg_post) in wacc.items():
+            nneg_round = round(nneg_post)
+            total = npos + nneg_round
+            weight_rows.append({
+                "keys": list(wk), "n_pos": npos, "n_neg_post": nneg_round,
+                "pos_rate_post": (npos / total if total else 0.0),
+                "suggested_weight": round(
+                    suggest_weight(npos, median_pos, alpha, w_max), 4),
+            })
+        weight_rows.sort(key=lambda r: tuple(str(x) for x in r["keys"]))
+
+    return {"ratio_rows": ratio_rows, "weight_rows": weight_rows}
 
 
 def grid_to_yaml(

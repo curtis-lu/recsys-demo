@@ -364,6 +364,85 @@ class TestProfileStats:
 
 
 # ---------------------------------------------------------------------------
+# aggregate_surfaces: ratio + weight surfaces, downsample-coupled projection
+# ---------------------------------------------------------------------------
+class TestAggregateSurfaces:
+    # 4 fine cells over (segment, item); weight default keys = [item]
+    _STATS = [
+        {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 100, "n_neg": 9000},
+        {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 60,  "n_neg": 500},
+        {"cust_segment_typ": "mass", "prod_name": "b", "n_pos": 80,  "n_neg": 2000},
+        {"cust_segment_typ": "hnw",  "prod_name": "b", "n_pos": 0,   "n_neg": 40},
+    ]
+
+    def test_case1_weight_by_item_couples_to_ratio_downsample(self):
+        # neg_mult: mass|a=5 (ratio=clamp(5*100/9000)=0.0556), others keep-all
+        # (neg_mult huge -> ratio clamps to 1.0)
+        nm = {("mass", "a"): 5.0, ("hnw", "a"): 1e9,
+              ("mass", "b"): 1e9, ("hnw", "b"): 1e9}
+        out = aggregate_surfaces(
+            self._STATS, nm, segment_col="cust_segment_typ",
+            item_col="prod_name", weight_keys=["prod_name"],
+            alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+        rr = {(r["segment"], r["product"]): r for r in out["ratio_rows"]}
+        # mass|a downsampled: kept ~= round(9000*0.05556)=500
+        assert abs(rr[("mass", "a")]["ratio"] - (5 * 100 / 9000)) < 1e-9
+        assert rr[("mass", "a")]["kept_neg"] == 500
+        # weight surface keyed by item; post-downsample n_neg for 'a' =
+        # round(9000*0.05556 + 500*1.0) = round(500+500) = 1000
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("a",)]["n_pos"] == 160          # 100+60, unchanged by downsample
+        assert wr[("a",)]["n_neg_post"] == 1000
+        # item 'b' negatives fully kept (no downsample): 2000+40 = 2040
+        assert wr[("b",)]["n_neg_post"] == 2040
+
+    def test_case2_cross_dimension_shares_ratio_over_dropped_dim(self):
+        # weight keys = [risk_attr, item]; the extra risk_attr dim is dropped
+        # when projecting to the ratio (segment,item) cell, so both risk values
+        # under mass|a share ratio[mass,a].
+        stats = [
+            {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "lo",
+             "n_pos": 60, "n_neg": 6000},
+            {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "hi",
+             "n_pos": 40, "n_neg": 3000},
+        ]
+        nm = {("mass", "a"): 5.0}   # ratio = 5*100/9000 = 0.05556
+        out = aggregate_surfaces(
+            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            weight_keys=["risk_attr", "prod_name"], alpha=0.5, w_max=5.0,
+            default_neg_mult=5.0)
+        ratio = 5 * 100 / 9000
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        # each risk sub-cell uses the SAME ratio[mass,a]
+        assert wr[("lo", "a")]["n_neg_post"] == round(6000 * ratio)
+        assert wr[("hi", "a")]["n_neg_post"] == round(3000 * ratio)
+        assert wr[("lo", "a")]["keys"] == ["lo", "a"]
+
+    def test_no_round_until_display_totals_match(self):
+        # ratio-surface kept_neg total == weight-surface n_neg_post total only
+        # holds if rounding is deferred to display (sum of fractions, not sum of
+        # rounded). Use the rounded *totals* recomputed from fractions.
+        nm = {("mass", "a"): 3.0, ("hnw", "a"): 3.0,
+              ("mass", "b"): 3.0, ("hnw", "b"): 3.0}
+        out = aggregate_surfaces(
+            self._STATS, nm, segment_col="cust_segment_typ",
+            item_col="prod_name", weight_keys=["prod_name"],
+            alpha=0.5, w_max=5.0, default_neg_mult=3.0)
+        kept_total = sum(r["kept_neg"] for r in out["ratio_rows"])
+        post_total = sum(r["n_neg_post"] for r in out["weight_rows"])
+        # both derive from the same Σ n_neg*ratio; equal within per-row rounding
+        assert abs(kept_total - post_total) <= len(out["ratio_rows"])
+
+    def test_empty_weight_keys_yields_no_weight_rows(self):
+        out = aggregate_surfaces(
+            self._STATS, {}, segment_col="cust_segment_typ",
+            item_col="prod_name", weight_keys=[], alpha=0.5, w_max=5.0,
+            default_neg_mult=5.0)
+        assert out["weight_rows"] == []
+        assert len(out["ratio_rows"]) == 4
+
+
+# ---------------------------------------------------------------------------
 # Typer CLI (to-yaml end-to-end; profile's Spark path covered above)
 # ---------------------------------------------------------------------------
 class TestToYamlCli:
