@@ -413,6 +413,7 @@ class TestAggregateSurfaces:
 class TestToYamlCli:
     def _write_params(self, tmp_path):
         params = tmp_path / "p.yaml"
+        # schema.columns only needs 'item' here; label/time default in get_schema.
         params.write_text(
             "schema:\n  columns:\n    item: prod_name\n"
             "  categorical_values:\n    prod_name: [a, b]\n"

@@ -33,8 +33,6 @@ from recsys_tfb.core.consistency import (
     weight_key_arity_mismatch,
     weight_unknown_items,
 )
-from recsys_tfb.core.schema import get_schema
-
 PROFILING_DIR = Path("data/profiling")
 
 # Override key is '|'-joined sample_group_keys; cold-product downsample
@@ -653,7 +651,8 @@ def profile(
     typer.echo(
         f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
         f"segment={keys['segment_col']} item={keys['item_col']} "
-        f"weight_keys={keys['weight_keys']} union_dims={keys['union_dims']}"
+        f"label={keys['label_col']} weight_keys={keys['weight_keys']} "
+        f"union_dims={keys['union_dims']}"
     )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
@@ -709,6 +708,11 @@ def to_yaml(
         merged["schema"] = ds["schema"]
     merged["dataset"] = ds_cfg
     merged["training"] = yaml.safe_load(train_params.read_text()).get("training", {}) or {}
+    if not (merged.get("schema") or {}).get("columns") and not (merged.get("schema") or {}).get("categorical_values"):
+        typer.echo(
+            "WARNING: no schema resolved from --base-params / --params; "
+            "unknown-product validation (A5/A9c) may be skipped silently.",
+            err=True)
     export = json.loads(export_json.read_text())
     default_ratio = float(ds_cfg.get("sample_ratio", 1.0))
     try:
