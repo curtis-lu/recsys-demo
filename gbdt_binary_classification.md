@@ -20,6 +20,8 @@
 8. [完整走查：6 客戶從 prior 到 $p(x)$](#ch8)
 - [附錄 A：微積分小複習（一階條件、chain rule、泰勒展開）](#appendix-a)
 
+延伸閱讀：[類別不平衡的數學影響與處理](gbdt_class_imbalance.md)（companion，談 $\bar y$ 很小時不平衡如何作用在本手冊的各個數學量上）。
+
 > 每章結尾可切換上一章 / 下一章。
 
 ---
