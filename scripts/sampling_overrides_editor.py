@@ -1,20 +1,22 @@
 """Sampling overrides editor — profile sample_pool, edit in browser, emit YAML.
 
 Subcommands:
-  profile <table>   Spark-profile sample_pool, write a self-contained HTML
-                     editor to data/profiling/.
+  profile <table>   Spark-profile sample_pool at union(sample_group_keys ∪
+                     sample_weight_keys)\\{label} granularity, write a
+                     self-contained two-tab HTML editor (ratio surface keyed by
+                     sample_group_keys, weight surface keyed by
+                     sample_weight_keys) to data/profiling/.
   to-yaml <json>    Convert the browser JSON export into sparse YAML snippets
-                     (A5/A9-validated) for manual paste into config.
+                     (A5 for ratio, A9b/A9c for weights against the real
+                     sample_weight_keys) for manual paste into config.
 
 Self-contained dev tool (logic + CLI in one file), mirroring the
 scripts/promote_model.py / scripts/suggest_categorical_cols.py convention —
 unit-tested via ``from scripts.sampling_overrides_editor import ...`` in
-tests/scripts/. Not part of the production DAG. Implements the D8
-sampling-overrides formulas.
+tests/scripts/. Not part of the production DAG.
 
 Usage:
   python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool
-  python scripts/sampling_overrides_editor.py profile data/sample_pool.parquet
   python scripts/sampling_overrides_editor.py to-yaml \\
       data/profiling/sampling_overrides_export.json
 """
