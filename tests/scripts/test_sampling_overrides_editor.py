@@ -406,7 +406,7 @@ class TestAggregateSurfaces:
             {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "hi",
              "n_pos": 40, "n_neg": 3000},
         ]
-        nm = {("mass", "a"): 5.0}   # ratio = 5*100/9000 = 0.05556
+        nm = {("mass", "a"): 5.0}   # ratio = 5*(60+40)/(6000+3000) = 0.05556
         out = aggregate_surfaces(
             stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
             weight_keys=["risk_attr", "prod_name"], alpha=0.5, w_max=5.0,
@@ -419,19 +419,25 @@ class TestAggregateSurfaces:
         assert wr[("lo", "a")]["keys"] == ["lo", "a"]
 
     def test_no_round_until_display_totals_match(self):
-        # ratio-surface kept_neg total == weight-surface n_neg_post total only
-        # holds if rounding is deferred to display (sum of fractions, not sum of
-        # rounded). Use the rounded *totals* recomputed from fractions.
-        nm = {("mass", "a"): 3.0, ("hnw", "a"): 3.0,
-              ("mass", "b"): 3.0, ("hnw", "b"): 3.0}
+        # Fractional n_neg*ratio per fine cell that ONLY the deferred-rounding
+        # path gets right: two (seg,item) cells share weight bucket 'a', each
+        # with frac = 0.5. Per-cell rounding -> 0 + 0 = 0; deferring the round
+        # to the summed bucket -> round(0.5 + 0.5) = round(1.0) = 1.
+        stats = [
+            {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 1, "n_neg": 100},
+            {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 1, "n_neg": 100},
+        ]
+        nm = {("mass", "a"): 0.5, ("hnw", "a"): 0.5}   # ratio = 0.5*1/100 = 0.005
         out = aggregate_surfaces(
-            self._STATS, nm, segment_col="cust_segment_typ",
-            item_col="prod_name", weight_keys=["prod_name"],
-            alpha=0.5, w_max=5.0, default_neg_mult=3.0)
+            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=0.5)
+        # ratio surface rounds each cell's kept_neg = round(100*0.005) = round(0.5) = 0
         kept_total = sum(r["kept_neg"] for r in out["ratio_rows"])
+        # weight surface defers: bucket 'a' = round(0.5 + 0.5) = 1
         post_total = sum(r["n_neg_post"] for r in out["weight_rows"])
-        # both derive from the same Σ n_neg*ratio; equal within per-row rounding
-        assert abs(kept_total - post_total) <= len(out["ratio_rows"])
+        assert kept_total == 0
+        assert post_total == 1   # would be 0 if negatives were rounded per fine cell
+        assert kept_total != post_total
 
     def test_empty_weight_keys_yields_no_weight_rows(self):
         out = aggregate_surfaces(

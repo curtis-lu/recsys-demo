@@ -185,6 +185,8 @@ def aggregate_surfaces(
     as fractions and rounded only for display, so the ratio surface's
     ``kept_neg`` and the weight surface's ``n_neg_post`` stay mutually
     consistent. ``suggested_weight`` uses the weight-surface median n_pos.
+    Note: ratio rows carry scalar ``segment``/``product`` (always 2 dims) while
+    weight rows carry a variable-length ``keys`` list (len == len(weight_keys)).
     """
     # --- ratio surface: aggregate to (segment, item) ---
     racc: dict = {}
@@ -197,7 +199,11 @@ def aggregate_surfaces(
     ratio_rows: list[dict] = []
     for (seg, item), (npos, nneg) in racc.items():
         mult = float(neg_mults.get((seg, item), default_neg_mult))
-        # n_pos == 0: no positives to balance against — keep all negatives.
+        # n_pos == 0 -> keep all negatives (ratio 1.0): suggest_ratio would give
+        # 0 (R*0/n_neg) and silently drop a cold product's entire negative set.
+        # This override is the value written to ratio_row["ratio"] below, so any
+        # JS mirror MUST apply the same n_pos==0 guard rather than re-deriving
+        # ratio from neg_mult (which would yield 0.0 for a zero-positive cell).
         ratio = 1.0 if npos == 0 else suggest_ratio(npos, nneg, mult)
         ratio_by_si[(seg, item)] = ratio
         kept = round(nneg * ratio)
