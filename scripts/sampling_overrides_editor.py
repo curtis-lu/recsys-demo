@@ -32,6 +32,7 @@ from recsys_tfb.core.consistency import (
     override_unknown_items,
     weight_unknown_items,
 )
+from recsys_tfb.core.schema import get_schema
 
 PROFILING_DIR = Path("data/profiling")
 
@@ -157,11 +158,25 @@ def grid_to_yaml(
         if weight != default_weight:
             weights[f"{seg}|{prod}"] = weight
 
-    # Reuse the single-source consistency predicates (A5 + A9).
+    # Reuse the single-source consistency predicates (A5 + A9). The editor
+    # emits "<segment>|<product>" weight keys, so the probe must declare the
+    # matching sample_weight_keys = [segment, item] for A9c (weight_unknown_items)
+    # to validate the product component — without it the predicate short-circuits
+    # on an empty key list and unknown products slip through silently. Item at
+    # index 1 mirrors the fixed seg|prod emission order above.
+    schema = get_schema(parameters)
+    item_col, label_col = schema["item"], schema["label"]
+    group_keys = (parameters.get("dataset", {}) or {}).get("sample_group_keys", [])
+    segments = [k for k in group_keys if k not in (item_col, label_col)]
+    segment_col = segments[0] if segments else "segment"
     probe = {**parameters}
     probe.setdefault("dataset", {})
     probe["dataset"] = {**probe["dataset"], "sample_ratio_overrides": overrides}
-    probe["training"] = {**probe.get("training", {}), "sample_weights": weights}
+    probe["training"] = {
+        **probe.get("training", {}),
+        "sample_weights": weights,
+        "sample_weight_keys": [segment_col, item_col],
+    }
     bad = sorted(set(override_unknown_items(probe)) | set(weight_unknown_items(probe)))
     if bad:
         raise ValueError(

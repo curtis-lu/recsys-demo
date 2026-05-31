@@ -142,6 +142,13 @@ class TestGridToYaml:
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
 
+    def test_unknown_product_weight_only_raises(self):
+        # weight-only deviation (ratio at default, so no override emitted) must
+        # still catch an unknown product via the A9c sample_weights check.
+        export = [{"segment": "mass", "product": "zzz", "ratio": 1.0, "weight": 2.0}]
+        with pytest.raises(ValueError, match=r"zzz"):
+            grid_to_yaml(export, _params(), default_ratio=1.0)
+
 
 # ---------------------------------------------------------------------------
 # Self-contained HTML renderer
