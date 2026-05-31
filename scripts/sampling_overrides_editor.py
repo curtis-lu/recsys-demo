@@ -260,8 +260,6 @@ def grid_to_yaml(
     probe declares the *real* ``sample_weight_keys`` so A9c actually inspects
     the product component instead of short-circuiting.
     """
-    schema = get_schema(parameters)
-    item_col, label_col = schema["item"], schema["label"]
     cfg_group = (parameters.get("dataset", {}) or {}).get("sample_group_keys", [])
     cfg_weight = (parameters.get("training", {}) or {}).get("sample_weight_keys") or []
     exp_group = export.get("sample_group_keys", [])
@@ -287,13 +285,22 @@ def grid_to_yaml(
             weights["|".join(str(v) for v in row["keys"])] = weight
 
     probe = {**parameters}
-    probe.setdefault("dataset", {})
-    probe["dataset"] = {**probe["dataset"], "sample_ratio_overrides": overrides}
+    probe["dataset"] = {
+        **(parameters.get("dataset", {}) or {}),
+        "sample_ratio_overrides": overrides,
+    }
     probe["training"] = {
-        **probe.get("training", {}),
+        **(parameters.get("training", {}) or {}),
         "sample_weights": weights,
         "sample_weight_keys": list(cfg_weight),
     }
+    arity_bad = weight_key_arity_mismatch(probe)
+    if arity_bad:
+        raise ValueError(
+            f"weight key(s) {arity_bad} do not have "
+            f"{len(cfg_weight)} '|'-segment(s) to match sample_weight_keys "
+            f"{cfg_weight}; fix before paste."
+        )
     bad = sorted(
         set(override_unknown_items(probe))
         | set(weight_unknown_items(probe))
@@ -302,13 +309,6 @@ def grid_to_yaml(
         raise ValueError(
             f"editor export references unknown product value(s) {bad} "
             f"absent from schema.categorical_values[item]; fix before paste."
-        )
-    arity_bad = weight_key_arity_mismatch(probe)
-    if arity_bad:
-        raise ValueError(
-            f"weight key(s) {arity_bad} do not have "
-            f"{len(cfg_weight)} '|'-segment(s) to match sample_weight_keys "
-            f"{cfg_weight}; fix before paste."
         )
 
     return {

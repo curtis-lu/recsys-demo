@@ -148,6 +148,7 @@ def _params(weight_keys=("prod_name",)):
 def _export(ratio_rows, weight_rows, *, group_keys=None, weight_keys=None):
     return {
         "sample_group_keys": group_keys or ["cust_segment_typ", "prod_name", "label"],
+        # None sentinel (not []) so a caller can pass [] to mean "no weight keys".
         "sample_weight_keys": weight_keys if weight_keys is not None else ["prod_name"],
         "ratio_rows": ratio_rows,
         "weight_rows": weight_rows,
