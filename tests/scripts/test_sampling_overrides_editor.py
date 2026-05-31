@@ -135,40 +135,73 @@ class TestResolveKeys:
 # ---------------------------------------------------------------------------
 # Sparse JSON -> YAML with A5/A9 validation
 # ---------------------------------------------------------------------------
-def _params():
+def _params(weight_keys=("prod_name",)):
     return {
         "schema": {"columns": {"item": "prod_name"},
                    "categorical_values": {"prod_name": ["a", "b"]}},
         "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]},
                     "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+        "training": {"sample_weight_keys": list(weight_keys)},
+    }
+
+
+def _export(ratio_rows, weight_rows, *, group_keys=None, weight_keys=None):
+    return {
+        "sample_group_keys": group_keys or ["cust_segment_typ", "prod_name", "label"],
+        "sample_weight_keys": weight_keys if weight_keys is not None else ["prod_name"],
+        "ratio_rows": ratio_rows,
+        "weight_rows": weight_rows,
     }
 
 
 class TestGridToYaml:
     def test_sparse_emits_only_non_default(self):
-        # default ratio 1.0, default weight 1.0 -> only deviating cells emitted
-        export = [
-            {"segment": "mass", "product": "a", "ratio": 0.5, "weight": 1.0},
-            {"segment": "mass", "product": "b", "ratio": 1.0, "weight": 3.0},
-            {"segment": "hnw", "product": "a", "ratio": 1.0, "weight": 1.0},
-        ]
+        export = _export(
+            ratio_rows=[
+                {"segment": "mass", "product": "a", "ratio": 0.5},
+                {"segment": "mass", "product": "b", "ratio": 1.0}],
+            weight_rows=[{"keys": ["a"], "weight": 1.0},
+                         {"keys": ["b"], "weight": 3.0}])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
         ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
         sw = yaml.safe_load(out["sample_weights_yaml"])
         assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.5}}
-        assert sw == {"sample_weights": {"mass|b": 3.0}}
+        assert sw == {"sample_weights": {"b": 3.0}}
 
-    def test_unknown_product_raises_with_collected_message(self):
-        export = [{"segment": "mass", "product": "zzz", "ratio": 0.5, "weight": 2.0}]
+    def test_weight_key_joined_in_weight_keys_order(self):
+        # weight_keys = [risk_attr, prod_name] -> key "lo|a" (arity 2)
+        export = _export(
+            ratio_rows=[],
+            weight_rows=[{"keys": ["lo", "a"], "weight": 2.0}],
+            weight_keys=["risk_attr", "prod_name"])
+        out = grid_to_yaml(
+            export, _params(weight_keys=("risk_attr", "prod_name")),
+            default_ratio=1.0)
+        sw = yaml.safe_load(out["sample_weights_yaml"])
+        assert sw == {"sample_weights": {"lo|a": 2.0}}
+
+    def test_unknown_product_ratio_raises(self):
+        export = _export(
+            ratio_rows=[{"segment": "mass", "product": "zzz", "ratio": 0.5}],
+            weight_rows=[])
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
 
-    def test_unknown_product_weight_only_raises(self):
-        # weight-only deviation (ratio at default, so no override emitted) must
-        # still catch an unknown product via the A9c sample_weights check.
-        export = [{"segment": "mass", "product": "zzz", "ratio": 1.0, "weight": 2.0}]
+    def test_unknown_product_weight_only_raises_with_real_weight_keys(self):
+        # weight_keys=[prod_name] (arity 1): the A9c probe must use the REAL
+        # sample_weight_keys, else it short-circuits and the unknown slips by.
+        export = _export(
+            ratio_rows=[],
+            weight_rows=[{"keys": ["zzz"], "weight": 2.0}])
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
+
+    def test_export_keys_must_match_config(self):
+        export = _export(ratio_rows=[], weight_rows=[],
+                         weight_keys=["cust_segment_typ"])
+        with pytest.raises(ValueError, match="sample_weight_keys"):
+            grid_to_yaml(export, _params(weight_keys=("prod_name",)),
+                         default_ratio=1.0)
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ import yaml
 
 from recsys_tfb.core.consistency import (
     override_unknown_items,
+    weight_key_arity_mismatch,
     weight_unknown_items,
 )
 from recsys_tfb.core.schema import get_schema
@@ -242,52 +243,72 @@ def aggregate_surfaces(
 
 
 def grid_to_yaml(
-    export: list[dict],
+    export: dict,
     parameters: dict,
     default_ratio: float,
     default_weight: float = 1.0,
 ) -> dict:
     """Convert the browser JSON export into two sparse YAML blocks.
 
-    Emits only cells deviating from defaults. Validates the resulting keys
-    via the A5 / A9 consistency predicates (collect-all) BEFORE returning, so
-    a bad product value is caught before the user pastes into config.
+    ``export`` is the self-describing object emitted by the editor:
+    ``{sample_group_keys, sample_weight_keys, ratio_rows, weight_rows}``.
+    Emits only cells deviating from defaults. The export's key-sets must match
+    the config (guards against pasting a stale export onto changed config).
+    Validates via the single-source consistency predicates BEFORE returning:
+    ratio keys through ``override_unknown_items`` (A5), weight keys through
+    ``weight_key_arity_mismatch`` (A9b) + ``weight_unknown_items`` (A9c) — the
+    probe declares the *real* ``sample_weight_keys`` so A9c actually inspects
+    the product component instead of short-circuiting.
     """
-    overrides: dict[str, float] = {}
-    weights: dict[str, float] = {}
-    for row in export:
-        seg, prod = row["segment"], row["product"]
-        ratio = float(row.get("ratio", default_ratio))
-        weight = float(row.get("weight", default_weight))
-        if ratio != default_ratio:
-            overrides[f"{seg}|{prod}|{_NEG_LABEL}"] = ratio
-        if weight != default_weight:
-            weights[f"{seg}|{prod}"] = weight
-
-    # Reuse the single-source consistency predicates (A5 + A9). The editor
-    # emits "<segment>|<product>" weight keys, so the probe must declare the
-    # matching sample_weight_keys = [segment, item] for A9c (weight_unknown_items)
-    # to validate the product component — without it the predicate short-circuits
-    # on an empty key list and unknown products slip through silently. Item at
-    # index 1 mirrors the fixed seg|prod emission order above.
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
-    group_keys = (parameters.get("dataset", {}) or {}).get("sample_group_keys", [])
-    segments = [k for k in group_keys if k not in (item_col, label_col)]
-    segment_col = segments[0] if segments else "segment"
+    cfg_group = (parameters.get("dataset", {}) or {}).get("sample_group_keys", [])
+    cfg_weight = (parameters.get("training", {}) or {}).get("sample_weight_keys") or []
+    exp_group = export.get("sample_group_keys", [])
+    exp_weight = export.get("sample_weight_keys", [])
+    if list(exp_group) != list(cfg_group):
+        raise ValueError(
+            f"export sample_group_keys {exp_group} != config {cfg_group}; "
+            "re-profile against the current config before pasting.")
+    if list(exp_weight) != list(cfg_weight):
+        raise ValueError(
+            f"export sample_weight_keys {exp_weight} != config {cfg_weight}; "
+            "re-profile against the current config before pasting.")
+
+    overrides: dict[str, float] = {}
+    for row in export.get("ratio_rows", []):
+        ratio = float(row["ratio"])
+        if ratio != default_ratio:
+            overrides[f"{row['segment']}|{row['product']}|{_NEG_LABEL}"] = ratio
+    weights: dict[str, float] = {}
+    for row in export.get("weight_rows", []):
+        weight = float(row["weight"])
+        if weight != default_weight:
+            weights["|".join(str(v) for v in row["keys"])] = weight
+
     probe = {**parameters}
     probe.setdefault("dataset", {})
     probe["dataset"] = {**probe["dataset"], "sample_ratio_overrides": overrides}
     probe["training"] = {
         **probe.get("training", {}),
         "sample_weights": weights,
-        "sample_weight_keys": [segment_col, item_col],
+        "sample_weight_keys": list(cfg_weight),
     }
-    bad = sorted(set(override_unknown_items(probe)) | set(weight_unknown_items(probe)))
+    bad = sorted(
+        set(override_unknown_items(probe))
+        | set(weight_unknown_items(probe))
+    )
     if bad:
         raise ValueError(
             f"editor export references unknown product value(s) {bad} "
             f"absent from schema.categorical_values[item]; fix before paste."
+        )
+    arity_bad = weight_key_arity_mismatch(probe)
+    if arity_bad:
+        raise ValueError(
+            f"weight key(s) {arity_bad} do not have "
+            f"{len(cfg_weight)} '|'-segment(s) to match sample_weight_keys "
+            f"{cfg_weight}; fix before paste."
         )
 
     return {
