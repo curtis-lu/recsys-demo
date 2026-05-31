@@ -44,6 +44,8 @@ training:
   #   全 1.0，A9a 一致性閘會擋）。用非 identity/label 欄位（如 cust_segment_typ）
   #   須先加進 dataset.carry_columns 並重跑 dataset pipeline（bust
   #   base_dataset_version）。
+  #   可用 scripts/sampling_overrides_editor.py 互動式產生（weight 面依此 keys
+  #   組成 key；與 dataset.sample_group_keys 可不同）。
   sample_weight_keys:
     - prod_name
   # sample_weights: key = sample_weight_keys 值用 "|" 串接；value = LightGBM
