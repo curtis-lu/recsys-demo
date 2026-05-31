@@ -141,10 +141,11 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
             f"sample_weights."
         )
     # union dims: ratio dims (group_keys minus label, in order) then any extra
-    # weight-key columns not already present; label never enters group-by.
+    # weight-key columns not already present. label is already excluded from
+    # weight_keys by the guard above, so the extension only needs a dedup check.
     union_dims: list[str] = [k for k in group_keys if k != label_col]
     for k in weight_keys:
-        if k != label_col and k not in union_dims:
+        if k not in union_dims:
             union_dims.append(k)
     return {
         "segment_col": segments[0],
