@@ -209,145 +209,88 @@ class TestGridToYaml:
 # Self-contained HTML renderer
 # ---------------------------------------------------------------------------
 class TestRenderHtml:
-    _GRID = [{"segment": "mass", "product": "a", "n_pos": 200,
-              "n_neg": 4000, "pos_rate": 0.047, "suggested_neg_mult": 5.0,
-              "suggested_ratio": 0.25, "suggested_weight": 1.0}]
+    _STATS = [
+        {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 200,
+         "n_neg": 4000},
+        {"cust_segment_typ": "hnw", "prod_name": "a", "n_pos": 8, "n_neg": 50},
+    ]
+    _KW = dict(segment_col="cust_segment_typ", item_col="prod_name",
+               weight_keys=["prod_name"], default_ratio=1.0)
 
-    def test_html_is_self_contained_and_embeds_grid(self):
-        html = render_html(self._GRID, default_ratio=1.0)
+    def test_self_contained_and_embeds_stats_and_keys(self):
+        html = render_html(self._STATS, **self._KW)
         assert html.lstrip().startswith("<!DOCTYPE html>")
-        assert "mass" in html and "0.25" in html
-        # the grid is embedded as JSON for the export button
-        assert json.dumps(self._GRID) in html
-        # no external resource references (self-contained)
+        assert json.dumps(self._STATS) in html
+        assert 'const SEG="cust_segment_typ"' in html
+        assert 'const ITEM="prod_name"' in html
+        assert 'const WKEYS=["prod_name"]' in html
         assert "http://" not in html and "https://" not in html
         assert "Export JSON" in html and "Export YAML" in html
 
-    def test_backward_compatible_two_arg_call(self):
-        # profile()'s old call site / existing callers pass only default_ratio.
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert "<!DOCTYPE html>" in html
+    def test_two_tabs_ratio_and_weight(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function setTab(" in html
+        assert "setTab('ratio')" in html and "setTab('weight')" in html
 
-    def test_columns_are_clickable_sortable(self):
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert "function sortBy(" in html
-        # numeric / derived headers wire literal sort keys
-        for col in ("n_pos", "n_neg", "pos_rate", "_ach", "_kept", "_npr"):
-            assert f"sortBy('{col}')" in html
-        # name columns come from the per-mode column lists
-        assert "'segment'" in html and "'product'" in html
+    def test_builds_ratio_store_and_keep_rate(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function buildRatio(" in html
+        # keep-rate mirrors suggest_ratio: clamp(nm*n_pos/n_neg,0,1)
+        assert "function keepRate(" in html
+        assert "nm*np/nn" in html
 
-    def test_has_live_filter_box(self):
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert 'id="flt"' in html or "id=flt" in html
-        assert "function flt(" in html
+    def test_keep_rate_and_preview_guard_zero_positive_cell(self):
+        # Mirrors Python aggregate_surfaces: a zero-positive cell keeps ALL
+        # negatives (ratio 1.0) rather than deriving 0 from neg_mult*0/n_neg.
+        html = render_html(self._STATS, **self._KW)
+        assert "np<=0" in html          # keepRate guard
+        assert "r.n_pos<=0" in html     # preview guard
 
-    def test_edits_survive_sort_and_filter(self):
-        # sort/filter re-render the tbody; edits must be synced back to GRID
-        # first (and collect/export must read the synced values), else a user
-        # loses every edit the moment they sort a column.
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert "function syncEdits(" in html
-        assert "syncEdits()" in html  # called by sort/flt/collect
+    def test_weight_tab_recomputes_post_downsample_from_ratio_edits(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function rebuildWeight(" in html
+        # per-(seg,item) effective ratio projected onto fine cells
+        assert "function ratioBySI(" in html
+        # n_neg_post accumulates n_neg * projected ratio
+        assert "s.n_neg*rbs.get(" in html
+        # rebuildWeight runs when entering the weight tab
+        assert "rebuildWeight()" in html
 
-    def test_shows_live_post_downsample_preview_columns(self):
-        # kept_neg / new_pos_rate computed client-side from n_neg and the
-        # ratio derived from the edited multiplier, refreshed on every
-        # keystroke (oninput -> recalc).
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert "kept_neg" in html and "new_pos_rate" in html
-        assert "function preview(" in html and "function recalc(" in html
-        assert 'oninput="recalc(this)"' in html
-        # the JS derives ratio = clamp(nm*n_pos/n_neg,0,1), then computes
-        # kept_neg = round(n_neg*ratio) and new_pos_rate = n_pos/(n_pos+kept_neg);
-        # rows are built browser-side, so assert the formulas are embedded.
-        assert "nm*r.n_pos/r.n_neg" in html
-        assert "Math.round(r.n_neg*ratio)" in html
-        assert "r.n_pos/total" in html
-
-    def test_neg_mult_is_primary_knob_with_readonly_derived_ratio(self):
-        # The editable knob is the neg:pos multiplier; ratio is a read-only
-        # keep-rate derived from it, and the achieved multiplier lives in its
-        # own read-only "實際倍率" column (same unit as the knob). A cell whose
-        # target can't be reached (ratio clamps to 1.0) flags that column amber.
-        html = render_html(self._GRID, default_ratio=1.0, target_neg_pos=5.0)
+    def test_neg_mult_is_primary_knob_ratio_readonly(self):
+        html = render_html(self._STATS, **self._KW, target_neg_pos=5.0)
         assert "負樣本倍率" in html
-        # multiplier is the contenteditable knob wired to recalc
         assert "data-k=neg_mult" in html
-        # ratio is no longer directly editable; pure keep-rate cell
         assert "data-k=ratio" not in html
-        # achieved multiplier has its own column + markup helper
-        assert "實際倍率" in html
-        assert "function achMult(" in html
-        # the configured target R is surfaced to the JS for the warning text
+        assert "實際倍率" in html and "function achMult(" in html
         assert "const R=5.0" in html
-        # unreachable-target signal: amber style + 全留 explanation
         assert "td.warn" in html and "已全留" in html
 
-    def test_has_bulk_set_controls(self):
-        # Bulk-set toolbar: choose filter column (segment/product), pick one or
-        # more values from a multi-select, target field (neg_mult/weight), new
-        # value -> overwrite every matching row. Smoke-test the wiring.
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert 'id="bulk"' in html
-        for ident in ('id="bk"', 'id="bv"', 'id="sk"', 'id="sv"', 'id="bm"'):
-            assert ident in html
-        assert 'onclick="bulkSet()"' in html
-        assert 'function bulkSet(' in html
-        # value picker is a multi-select, auto-populated per dimension and
-        # repopulated when the dimension switches.
-        assert '<select id="bv" multiple' in html
-        assert 'function fillBulk(' in html
-        assert 'onchange="fillBulk()"' in html
-        assert 'selectedOptions' in html
-        # bulk apply must syncEdits first (don't drop in-flight typing)
-        # and recompute the footer totals afterwards.
-        assert 'syncEdits()' in html and 'recalcTotals()' in html
-
-    def test_has_totals_footer_row(self):
-        # tfoot row reflects current settings -> downsampled totals, rebuilt by
-        # recalcTotals() into the single #foot row (column count varies by mode).
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert "<tfoot>" in html and 'id="foot"' in html
-        assert "function recalcTotals(" in html
-        # totals computed over the whole active store, not the filtered view
-        assert "rows().forEach" in html
-
-    def test_has_mode_selector_with_three_exclusive_modes(self):
-        # Granularity chosen via a radio selector; the three modes are mutually
-        # exclusive (one editable/exportable table at a time) -> no cross-table
-        # coupling. The segment/product aggregate stores are built from the grid.
-        html = render_html(self._GRID, default_ratio=1.0)
-        assert 'id="mode"' in html
-        assert "function setMode(" in html
-        for m in ("'cell'", "'segment'", "'product'"):
-            assert f"setMode({m})" in html
-        # independent aggregate stores + per-mode median-based weight default
-        assert "function aggStore(" in html
-        assert "aggStore('segment')" in html and "aggStore('product')" in html
-        assert "function suggestWeight(" in html
-        assert "const ALPHA=0.5" in html and "const WMAX=5.0" in html
-
-    def test_export_keys_depend_on_active_mode(self):
-        # Export emits ONLY the active mode's overrides; key format differs:
-        # cell -> 'seg|prod' (|0 for ratio), segment/product -> single key.
-        html = render_html(self._GRID, default_ratio=1.0)
+    def test_export_emits_self_describing_object(self):
+        html = render_html(self._STATS, **self._KW)
         assert "function exp(" in html
-        assert "keyOf" in html
-        assert "mode==='cell'?k+'|0':k" in html
+        # cell ratio key gets the fixed |0 label; weight key joins WKEYS values
+        assert "'|0'" in html
+        assert "sample_group_keys" in html and "sample_weight_keys" in html
+        assert "ratio_rows" in html and "weight_rows" in html
 
-    def test_explains_ratio_and_weight_logic_and_purpose(self):
-        html = render_html(self._GRID, default_ratio=1.0,
-                           target_neg_pos=5.0, alpha=0.5, w_max=5.0)
-        # what each column means + where it gets pasted
-        assert "負樣本下採樣" in html and "冷門" in html
-        assert "sample_ratio_overrides" in html
-        assert "sample_weights" in html
-        # the *configured* tuning values are surfaced, not hardcoded prose
-        html2 = render_html(self._GRID, default_ratio=1.0,
-                            target_neg_pos=3.0, alpha=0.7, w_max=8.0)
-        assert "3.0" in html2 and "0.7" in html2 and "8.0" in html2
-        # still self-contained even with the explanation block
+    def test_empty_weight_keys_hides_weight_tab(self):
+        html = render_html(self._STATS, segment_col="cust_segment_typ",
+                           item_col="prod_name", weight_keys=[],
+                           default_ratio=1.0)
+        assert "const WKEYS=[]" in html
+        # weight tab disabled note when no weight keys configured
+        assert "WKEYS.length" in html
+
+    def test_edits_survive_sort_and_filter(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function syncEdits(" in html and "syncEdits()" in html
+        assert "function sortBy(" in html and "function flt(" in html
+
+    def test_explains_logic_with_configured_values(self):
+        html = render_html(self._STATS, **self._KW,
+                           target_neg_pos=3.0, alpha=0.7, w_max=8.0)
+        assert "sample_ratio_overrides" in html and "sample_weights" in html
+        assert "3.0" in html and "0.7" in html and "8.0" in html
         assert "http://" not in html and "https://" not in html
 
 

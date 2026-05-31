@@ -337,296 +337,254 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   margin:.6rem 0;max-width:60rem}}
  details summary{{cursor:pointer;font-weight:bold}}
  details code{{background:#fff;padding:0 .25rem;border:1px solid #ddd}}
- #mode{{margin:.6rem 0;padding:.5rem;background:#f0f4ff;border:1px solid #cde;
-  font-weight:bold}}
- #mode label{{font-weight:normal;margin-right:1.2rem;cursor:pointer}}
+ #tabs{{margin:.6rem 0}}
+ #tabs button.active{{background:#cde;font-weight:bold}}
  #flt{{margin:.5rem 0;padding:.35rem;width:22rem}}
- #bulk{{margin:.5rem 0;padding:.5rem;background:#f7f7f7;border:1px solid #ddd;
-  display:inline-block}}
- #bulk select,#bulk input{{margin:0 .25rem;padding:.2rem}}
- #bulk select[multiple]{{min-width:11rem;vertical-align:top}}
- #bulk input[type=number]{{width:6rem}}
- #bulk #bm{{margin-left:.6rem;color:#060}}
  tfoot td{{background:#fff7e6;font-weight:bold;border-top:2px solid #999}}
 </style></head><body>
 <h2>Sampling Overrides Editor</h2>
-<details open><summary>負樣本倍率 / ratio / 實際倍率 / weight 是什麼？用途是什麼？（點此展開/收合）</summary>
-<p><b>加權粒度（三選一，替代關係）</b>：頂端選 (1) <code>依 segment</code>、
-(2) <code>依 product</code>、(3) <code>segment × product</code>（逐格，預設）。
-三者<b>互斥</b>——同時只編輯、只匯出一張表，<b>彼此不會連動</b>。(1)/(2) 模式把每個
-segment / product 視為一個彙總單位，倍率與試算都套在它的彙總 n_pos / n_neg 上。
-下游怎麼吃這三種粒度由另一處決定，本工具只負責選粒度、編輯、試算、匯出。</p>
-<p><b>負樣本倍率 — 目標 neg:pos（主旋鈕，可編輯）。</b>
-設定每列希望的負:正樣本倍數 R。保留<b>全部</b>正樣本(label=1)，把負樣本(label=0)
-隨機抽樣，使 neg:pos 逼近此倍率。每列預設 = <code>{target_neg_pos}</code>。
-<b>用途</b>：壓低類別極不平衡處的負樣本量，縮短訓練、避免模型被海量負樣本淹沒。</p>
-<p><b>ratio — 負樣本下採樣保留率（唯讀，由倍率推導）。</b>
-<code>ratio = clamp(倍率 × n_pos / n_neg, 0, 1)</code>，這個 ratio 才是匯出的值
-（逐格模式 key 格式 <code>segment|product|0</code>，label 固定 0 因為只下採樣負樣本；
-依 segment / 依 product 模式則為單鍵 <code>segment</code> / <code>product</code>）。
-<code>ratio = {default_ratio}</code>（= default）代表不下採樣、全留。</p>
-<p><b>實際倍率 — 下採樣後實際 neg:pos（唯讀）。</b>
-= kept_neg / n_pos，與你設的「負樣本倍率」目標同單位、可直接對照（設 5、得幾）。
-一般等於目標；當負樣本不足以達到目標倍率時，ratio 會夾到 1.0（全留），此欄會
-低於目標並以琥珀底 ⚠ 標示——代表再怎麼留也達不到你要的倍率。</p>
-<p><b>weight — 冷門加權</b>（訓練時該列樣本的 loss 權重）。建議值 =
+<details open><summary>各欄是什麼？用途是什麼？（點此展開/收合）</summary>
+<p><b>兩個面（分頁切換，各自獨立）</b>：<code>ratio 面</code>依
+<code>sample_group_keys</code>（segment×item）調抽樣下採樣；<code>weight 面</code>依
+<code>sample_weight_keys</code>調訓練樣本權重。兩組 keys 可不同，匯出時各以自己的
+key-set 驗證。</p>
+<p><b>負樣本倍率 — 目標 neg:pos（ratio 面主旋鈕，可編輯）。</b>
+設定每列希望的負:正樣本倍數 R（每列預設 <code>{target_neg_pos}</code>）。保留<b>全部</b>
+正樣本，下採負樣本逼近此倍率。</p>
+<p><b>ratio — 負樣本保留率（唯讀，由倍率推導）。</b>
+<code>ratio = clamp(倍率 × n_pos / n_neg, 0, 1)</code>，即匯出值（key
+<code>segment|item|0</code>，label 固定 0）。<code>ratio = {default_ratio}</code> = 不下採。
+n_pos = 0 的冷門列維持 ratio 1.0（全留負樣本）。</p>
+<p><b>實際倍率（唯讀）。</b>下採後實際 neg:pos；負樣本不足以達標時 ratio 夾到 1.0、
+此欄低於目標並以琥珀底 ⚠ 標示（已全留）。</p>
+<p><b>weight 面 n_neg / pos_rate（唯讀，連動下採樣後）。</b>weight 作用在下採樣後的
+訓練資料；正樣本全留故 <code>n_pos</code> 不變，負樣本依 ratio 面設定上捲，故此面的
+n_neg/pos_rate 反映實際訓練分佈。</p>
+<p><b>weight — 冷門加權</b>（訓練時 loss 權重）。建議值 =
 clamp((median_pos / n_pos) ^ <code>{alpha}</code>, 1.0, <code>{w_max}</code>)，
-median_pos = <b>當前模式</b>各列 n_pos 的中位數。<code>weight = 1.0</code> 代表不加權。
-<b>用途</b>：正樣本稀少的冷門列容易被熱門壓過，提高其權重讓模型別忽略長尾。
-匯出對應 <code>training.sample_weights</code>。</p>
-<p><b>kept_neg / new_pos_rate — 下採樣後試算</b>（綠底，唯讀）。編輯
-<code>負樣本倍率</code> 時即時更新：<code>kept_neg</code> = round(n_neg × ratio)
-為下採樣後保留的負樣本筆數，<code>new_pos_rate</code> =
-n_pos / (n_pos + kept_neg)。<b>用途</b>：填數字前先看到平衡效果。</p>
-<p><b>建議預設值</b>：倍率 = R；weight = 上述冷門加權公式，median 取<b>當前模式</b>
-各列 n_pos 的中位數（邏輯三模式一致）。<b>批次設定</b>(多選一次設定多列)僅在逐格
-模式顯示。表頭可點擊排序，上方輸入框即時篩選，編輯值在排序/篩選後保留。</p>
+median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加權。匯出對應
+<code>training.sample_weights</code>。</p>
 </details>
-<div id="mode">加權粒度（三選一，替代關係，同時只編輯一張）：
-<label><input type=radio name=md value=cell checked onchange="setMode('cell')"> segment × product（逐格）</label>
-<label><input type=radio name=md value=segment onchange="setMode('segment')"> 依 segment</label>
-<label><input type=radio name=md value=product onchange="setMode('product')"> 依 product</label>
+<div id="tabs">
+<button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
+<button id="tb_weight" onclick="setTab('weight')">weight 面 (sample_weight_keys)</button>
 </div>
+<div id="note"></div>
 <input id="flt" placeholder="篩選…" oninput="flt()">
-<div id="bulk">批次設定：by
-<select id="bk" onchange="fillBulk()"><option value="product">product</option>
-<option value="segment">segment</option></select> =
-<select id="bv" multiple size=6 title="⌘/Ctrl-click 可複選"></select>
-→ set <select id="sk"><option value="neg_mult">負樣本倍率</option>
-<option value="weight">weight</option></select> =
-<input id="sv" type="number" step="any" placeholder="e.g. 3">
-<button onclick="bulkSet()">套用</button><span id="bm"></span></div>
 <table id="g"><thead></thead><tbody></tbody><tfoot><tr id="foot"></tr></tfoot></table>
 <button onclick="exp('json')">Export JSON</button>
 <button onclick="exp('yaml')">Export YAML snippet</button>
 <pre id="out"></pre>
 <script>
-const GRID={grid_json};
+const STATS={stats_json};
+const SEG="{seg_col}";
+const ITEM="{item_col}";
+const WKEYS={wkeys_json};
 const DR={default_ratio};
 const R={target_neg_pos};
 const ALPHA={alpha};
 const WMAX={w_max};
+const SEP='\\u0001';
 function median(arr){{ const s=arr.slice().sort((a,b)=>a-b),n=s.length;
  return n?(n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2):1; }}
-function suggestWeight(np,med,a,wmax){{
- // mirrors scripts suggest_weight: clamp((med/np)^a, 1, wmax); np<=0 -> wmax.
- if(np<=0) return wmax;
- return Math.min(wmax,Math.max(1,Math.pow(med/np,a)));
-}}
-// Build the two aggregate stores (segment / product). Each is an INDEPENDENT
-// editable store derived once from the per-cell grid; the three modes are
-// mutually exclusive (替代關係) so editing one never writes another.
-function aggStore(key){{
+function suggestWeight(np,med,a,wmax){{ if(np<=0) return wmax;
+ return Math.min(wmax,Math.max(1,Math.pow(med/np,a))); }}
+function keepRate(nm,np,nn){{ if(np<=0||nn<=0) return 1;
+ return Math.min(1,Math.max(0,nm*np/nn)); }}
+// ratio store: one row per (segment,item); neg_mult editable, default R.
+function buildRatio(){{
  const m=new Map();
- GRID.forEach(r=>{{ const a=m.get(r[key])||{{n_pos:0,n_neg:0}};
-  a.n_pos+=r.n_pos; a.n_neg+=r.n_neg; m.set(r[key],a); }});
- const rows=[...m.entries()].map(([k,a])=>({{[key]:k,n_pos:a.n_pos,n_neg:a.n_neg,
-  pos_rate:(a.n_pos+a.n_neg>0?a.n_pos/(a.n_pos+a.n_neg):0)}}));
- const med=median(rows.map(r=>r.n_pos));
- rows.forEach(r=>{{ r.suggested_neg_mult=R;
-  r.suggested_weight=+suggestWeight(r.n_pos,med,ALPHA,WMAX).toFixed(4); }});
+ STATS.forEach(s=>{{ const k=s[SEG]+SEP+s[ITEM];
+  const a=m.get(k)||{{segment:s[SEG],product:s[ITEM],n_pos:0,n_neg:0}};
+  a.n_pos+=s.n_pos; a.n_neg+=s.n_neg; m.set(k,a); }});
+ const rows=[...m.values()];
+ rows.forEach(r=>{{ r.pos_rate=(r.n_pos+r.n_neg>0?r.n_pos/(r.n_pos+r.n_neg):0);
+  r.suggested_neg_mult=R; }});
  return rows.sort((x,y)=>y.n_pos-x.n_pos);
 }}
-const MODES={{
- cell:{{rows:GRID,cols:['segment','product']}},
- segment:{{rows:aggStore('segment'),cols:['segment']}},
- product:{{rows:aggStore('product'),cols:['product']}},
-}};
-let mode='cell',sortKey=null,sortAsc=true;
-function rows(){{ return MODES[mode].rows; }}
+const RATIO=buildRatio();
+let WEIGHT=[];
+// effective keep-rate per (segment,item) from current neg_mult edits.
+function ratioBySI(){{
+ const m=new Map();
+ RATIO.forEach(r=>m.set(r.segment+SEP+r.product,
+  keepRate(parseFloat(r.suggested_neg_mult),r.n_pos,r.n_neg)));
+ return m;
+}}
+// weight store: aggregate STATS to WKEYS tuple; n_neg post-downsample via the
+// projected (segment,item) ratio. user weight edits preserved by key.
+function rebuildWeight(){{
+ if(!WKEYS.length){{ WEIGHT=[]; return; }}
+ const prev=new Map(WEIGHT.map(w=>[w.keyStr,w.weight]));
+ const rbs=ratioBySI(),m=new Map();
+ STATS.forEach(s=>{{ const wk=WKEYS.map(k=>s[k]),ks=wk.join('|');
+  const a=m.get(ks)||{{keys:wk,keyStr:ks,n_pos:0,_nn:0}};
+  a.n_pos+=s.n_pos; a._nn+=s.n_neg*rbs.get(s[SEG]+SEP+s[ITEM]); m.set(ks,a); }});
+ const rows=[...m.values()],med=median(rows.map(r=>r.n_pos));
+ rows.forEach(r=>{{ r.n_neg_post=Math.round(r._nn);
+  const t=r.n_pos+r.n_neg_post; r.pos_rate_post=(t>0?r.n_pos/t:0);
+  r.suggested_weight=+suggestWeight(r.n_pos,med,ALPHA,WMAX).toFixed(4);
+  r.weight=prev.has(r.keyStr)?prev.get(r.keyStr):r.suggested_weight; }});
+ WEIGHT=rows.sort((x,y)=>y.n_pos-x.n_pos);
+}}
+let tab='ratio',sortKey=null,sortAsc=true;
+function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
 function preview(r,nm){{
- // primary knob is the neg:pos multiplier nm; derive the read-only keep-rate
- // ratio = clamp(nm*n_pos/n_neg,0,1), then post-downsample preview: keep all
- // positives, keep n_neg*ratio negatives.
- if(isNaN(nm)) return {{ratio:'—',kn:'—',pr:'—',clamped:false,achieved:0,noNeg:false}};
- if(r.n_neg<=0)
-  return {{ratio:'1.0000',kn:'0',pr:(r.n_pos>0?1:0).toFixed(4),
-   clamped:false,achieved:0,noNeg:true}};
- const raw=nm*r.n_pos/r.n_neg;
- const ratio=Math.min(1,Math.max(0,raw));
+ if(isNaN(nm)) return {{ratio:'—',kn:'—',pr:'—',clamped:false,achieved:0,noNeg:false,noPos:false}};
+ if(r.n_pos<=0) return {{ratio:'1.0000',kn:String(r.n_neg),pr:'0.0000',
+   clamped:false,achieved:0,noNeg:false,noPos:true}};
+ if(r.n_neg<=0) return {{ratio:'1.0000',kn:'0',pr:(r.n_pos>0?1:0).toFixed(4),
+   clamped:false,achieved:0,noNeg:true,noPos:false}};
+ const raw=nm*r.n_pos/r.n_neg,ratio=Math.min(1,Math.max(0,raw));
  const keptNeg=Math.round(r.n_neg*ratio),total=r.n_pos+keptNeg;
  return {{ratio:ratio.toFixed(4),kn:String(keptNeg),
   pr:(total>0?r.n_pos/total:0).toFixed(4),clamped:raw>1,
-  achieved:(r.n_pos>0?keptNeg/r.n_pos:0),noNeg:false}};
+  achieved:(r.n_pos>0?keptNeg/r.n_pos:0),noNeg:false,noPos:false}};
 }}
 function achMult(pv){{
- // read-only achieved-multiplier cell (neg:pos after downsample, same unit as
- // the knob): green when target reached; amber + ⚠ when negatives ran out
- // (ratio clamped to 1.0 so the target can't be met).
  if(pv.ratio==='—') return {{cls:'calc',html:'—',title:''}};
+ if(pv.noPos) return {{cls:'calc',html:'—',title:'無正樣本，不下採樣'}};
  if(pv.noNeg) return {{cls:'calc',html:'0.0',title:'無負樣本，不下採樣'}};
  if(pv.clamped) return {{cls:'warn',html:pv.achieved.toFixed(1)+' ⚠',
   title:'負樣本不足以達到目標倍率 '+R+'，已全留'}};
  return {{cls:'calc',html:pv.achieved.toFixed(1),title:''}};
 }}
 function syncEdits(){{
- // sync the active mode's editable cells back into its store (by row index).
  document.querySelectorAll('#g td.edit').forEach(td=>{{
-  const v=parseFloat(td.textContent);
-  if(!isNaN(v)) rows()[+td.dataset.i][
-   td.dataset.k==='neg_mult'?'suggested_neg_mult':'suggested_weight']=v;
+  const v=parseFloat(td.textContent); if(isNaN(v)) return;
+  const r=rows()[+td.dataset.i];
+  if(td.dataset.k==='neg_mult') r.suggested_neg_mult=v; else r.weight=v;
  }});
 }}
 function recalc(td){{
- const r=rows()[+td.dataset.i],tr=td.closest('tr');
- const nm=parseFloat(td.textContent);
+ const r=rows()[+td.dataset.i],tr=td.closest('tr'),nm=parseFloat(td.textContent);
  r.suggested_neg_mult=nm;
  const pv=preview(r,nm),am=achMult(pv);
  tr.querySelector('td.rt').textContent=pv.ratio;
- const a=tr.querySelector('td.am');
- a.className=am.cls+' am'; a.innerHTML=am.html; a.title=am.title;
+ const a=tr.querySelector('td.am'); a.className=am.cls+' am';
+ a.innerHTML=am.html; a.title=am.title;
  tr.querySelector('td.kn').textContent=pv.kn;
  tr.querySelector('td.pr').textContent=pv.pr;
- recalcTotals();
 }}
-function recalcTotals(){{
- // totals over the WHOLE active store (not filter-aware).
- let np=0,nn=0,kn=0;
- rows().forEach(r=>{{ np+=r.n_pos; nn+=r.n_neg;
-  const pv=preview(r,parseFloat(r.suggested_neg_mult));
-  kn+=(pv.kn==='—'?r.n_neg:+pv.kn); }});
- const span=MODES[mode].cols.length;
- document.getElementById('foot').innerHTML=
-  `<td>總計</td>`+(span>1?'<td>—</td>':'')+
-  `<td class=stat>${{np}}</td><td class=stat>${{nn}}</td>`+
-  `<td class=stat>${{(np+nn>0?np/(np+nn):0).toFixed(4)}}</td>`+
-  `<td>—</td><td>—</td>`+
-  `<td class=calc>${{(np>0?kn/np:0).toFixed(1)}}</td>`+
-  `<td class=calc>${{kn}}</td>`+
-  `<td class=calc>${{(np+kn>0?np/(np+kn):0).toFixed(4)}}</td><td>—</td>`;
+function renderRatio(data,idx){{
+ document.querySelector('#g thead').innerHTML=
+  `<tr><th onclick="sortBy('segment')">segment ⇅</th>`+
+  `<th onclick="sortBy('product')">product ⇅</th>`+
+  `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
+  `<th class=stat onclick="sortBy('n_neg')">n_neg ⇅</th>`+
+  `<th class=stat>pos_rate</th><th>負樣本倍率</th><th class=calc>ratio</th>`+
+  `<th class=calc>實際倍率</th><th class=calc>kept_neg</th>`+
+  `<th class=calc>new_pos_rate</th></tr>`;
+ const tb=document.querySelector('#g tbody'); tb.innerHTML='';
+ idx.forEach(i=>{{ const r=data[i],pv=preview(r,parseFloat(r.suggested_neg_mult));
+  const am=achMult(pv),tr=document.createElement('tr');
+  tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
+   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
+   `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
+   `<td class=edit contenteditable data-k=neg_mult data-i=${{i}} `+
+   `oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`+
+   `<td class="calc rt">${{pv.ratio}}</td>`+
+   `<td class="${{am.cls}} am" title="${{am.title}}">${{am.html}}</td>`+
+   `<td class="calc kn">${{pv.kn}}</td><td class="calc pr">${{pv.pr}}</td>`;
+  tb.appendChild(tr); }});
+}}
+function renderWeight(data,idx){{
+ document.querySelector('#g thead').innerHTML=
+  `<tr>`+WKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
+  `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
+  `<th class=stat>n_neg(後)</th><th class=stat>pos_rate(後)</th>`+
+  `<th>weight</th></tr>`;
+ const tb=document.querySelector('#g tbody'); tb.innerHTML='';
+ idx.forEach(i=>{{ const r=data[i],tr=document.createElement('tr');
+  tr.innerHTML=r.keys.map(v=>`<td>${{v}}</td>`).join('')+
+   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg_post}}</td>`+
+   `<td class=stat>${{r.pos_rate_post.toFixed(4)}}</td>`+
+   `<td class=edit contenteditable data-k=weight data-i=${{i}}>${{r.weight}}</td>`;
+  tb.appendChild(tr); }});
 }}
 function render(){{
- const data=rows(),cols=MODES[mode].cols;
- // precompute derived fields so columns can be sorted on them too
- data.forEach(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
-  r._ratio=pv.ratio; r._am=achMult(pv); r._kn=pv.kn; r._pr=pv.pr;
-  r._ach=pv.achieved||0; r._kept=(pv.kn==='—'?r.n_neg:+pv.kn); r._npr=+pv.pr||0; }});
+ const data=rows();
+ data.forEach(r=>{{ if(r.keys) r.keys.forEach((v,j)=>r['k'+j]=v); }});
+ const cols=tab==='ratio'?['segment','product']:WKEYS.map((_,j)=>'k'+j);
  const q=(document.getElementById('flt').value||'').toLowerCase();
  let idx=data.map((_,i)=>i);
  if(q) idx=idx.filter(i=>cols.map(c=>data[i][c]).join(' ').toLowerCase().indexOf(q)>=0);
  if(sortKey) idx.sort((a,b)=>{{ let x=data[a][sortKey],y=data[b][sortKey];
   if(typeof x==='string'){{x=x.toLowerCase();y=y.toLowerCase();}}
   return (x<y?-1:x>y?1:0)*(sortAsc?1:-1); }});
- const nameHdr=cols.map(c=>`<th onclick="sortBy('${{c}}')">${{c}} ⇅</th>`).join('');
- document.querySelector('#g thead').innerHTML=`<tr>${{nameHdr}}`+
-  `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
-  `<th class=stat onclick="sortBy('n_neg')">n_neg ⇅</th>`+
-  `<th class=stat onclick="sortBy('pos_rate')">pos_rate ⇅</th>`+
-  `<th>負樣本倍率</th><th class=calc>ratio</th>`+
-  `<th class=calc onclick="sortBy('_ach')">實際倍率 ⇅</th>`+
-  `<th class=calc onclick="sortBy('_kept')">kept_neg ⇅</th>`+
-  `<th class=calc onclick="sortBy('_npr')">new_pos_rate ⇅</th>`+
-  `<th>weight</th></tr>`;
- const tb=document.querySelector('#g tbody'); tb.innerHTML='';
- idx.forEach(i=>{{
-  const r=data[i],tr=document.createElement('tr');
-  const names=cols.map(c=>`<td>${{r[c]}}</td>`).join('');
-  tr.innerHTML=names+
-   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
-   `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
-   `<td class=edit contenteditable data-k=neg_mult data-i=${{i}} `+
-   `oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`+
-   `<td class="calc rt">${{r._ratio}}</td>`+
-   `<td class="${{r._am.cls}} am" title="${{r._am.title}}">${{r._am.html}}</td>`+
-   `<td class="calc kn">${{r._kn}}</td><td class="calc pr">${{r._pr}}</td>`+
-   `<td class=edit contenteditable data-k=weight data-i=${{i}}>`+
-   `${{r.suggested_weight}}</td>`;
-  tb.appendChild(tr);
- }});
- recalcTotals();
+ if(tab==='ratio') renderRatio(data,idx); else renderWeight(data,idx);
+ document.getElementById('foot').innerHTML='';
 }}
-function sortBy(k){{
- syncEdits();
- if(sortKey===k){{sortAsc=!sortAsc;}}else{{sortKey=k;sortAsc=true;}}
- render();
-}}
+function sortBy(k){{ syncEdits(); if(sortKey===k){{sortAsc=!sortAsc;}}
+ else{{sortKey=k;sortAsc=true;}} render(); }}
 function flt(){{ syncEdits(); render(); }}
-function setMode(m){{
- // switch granularity; each mode keeps its own edits -> no cross-table coupling.
- syncEdits(); mode=m; sortKey=null;
- document.getElementById('bulk').style.display=(m==='cell'?'inline-block':'none');
- render();
-}}
-function fillBulk(){{
- // multi-select (cell mode) populated with distinct values of the chosen dim.
- const bk=document.getElementById('bk').value;
- const vals=[...new Set(GRID.map(r=>r[bk]))].sort();
- document.getElementById('bv').innerHTML=
-  vals.map(v=>`<option value="${{v}}">${{v}}</option>`).join('');
-}}
-function bulkSet(){{
- // cell mode only: overwrite neg_mult / weight for every selected segment/product.
+function setTab(t){{
  syncEdits();
- const bk=document.getElementById('bk').value;
- const bv=[...document.getElementById('bv').selectedOptions].map(o=>o.value);
- const sk=document.getElementById('sk').value;
- const sv=parseFloat(document.getElementById('sv').value);
- const msg=document.getElementById('bm');
- if(!bv.length||isNaN(sv)){{ msg.textContent='請選擇至少一個值並填目標值'; return; }}
- const tf=sk==='neg_mult'?'suggested_neg_mult':'suggested_weight';
- let n=0;
- GRID.forEach(r=>{{ if(bv.includes(r[bk])){{ r[tf]=sv; n++; }} }});
- msg.textContent='已更新 '+n+' 筆 ('+bk+'='+bv.join(',')+', '+sk+'='+sv+')';
+ if(t==='weight' && !WKEYS.length){{
+  document.getElementById('note').textContent=
+   'sample_weight_keys 為空，無 weight 面可編輯。'; return; }}
+ tab=t; sortKey=null;
+ document.getElementById('tb_ratio').className=(t==='ratio'?'active':'');
+ document.getElementById('tb_weight').className=(t==='weight'?'active':'');
+ document.getElementById('note').textContent=
+  (t==='weight'?'n_neg(後)/pos_rate(後) 反映 ratio 面目前的下採樣設定。':'');
+ if(t==='weight') rebuildWeight();
  render();
 }}
 function exp(kind){{
- // export ONLY the active mode's overrides; key format depends on granularity.
- syncEdits();
- const data=rows(),cols=MODES[mode].cols;
- const keyOf=r=>cols.map(c=>r[c]).join('|');
- const ov={{}},sw={{}};
- data.forEach(r=>{{
-  const pv=preview(r,parseFloat(r.suggested_neg_mult));
-  const ratio=pv.ratio==='—'?DR:parseFloat(pv.ratio);
-  const k=keyOf(r);
-  if(ratio!==DR) ov[(mode==='cell'?k+'|0':k)]=ratio;
-  if(parseFloat(r.suggested_weight)!==1.0) sw[k]=parseFloat(r.suggested_weight);
- }});
+ syncEdits(); rebuildWeight();
+ const ratio_rows=RATIO.map(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
+  return {{segment:r.segment,product:r.product,
+   ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio))}}; }});
+ const weight_rows=WEIGHT.map(r=>({{keys:r.keys,weight:parseFloat(r.weight)}}));
+ const o={{sample_group_keys:[SEG,ITEM,'label'],sample_weight_keys:WKEYS,
+  ratio_rows:ratio_rows,weight_rows:weight_rows}};
  if(kind==='json'){{
-  // cell mode keeps the array shape the to-yaml CLI consumes; others tag mode.
-  let o;
-  if(mode==='cell') o=data.map(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
-   return {{segment:r.segment,product:r.product,neg_mult:r.suggested_neg_mult,
-    ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio)),weight:r.suggested_weight}}; }});
-  else o={{mode:mode,sample_ratio_overrides:ov,sample_weights:sw}};
   document.getElementById('out').textContent=JSON.stringify(o,null,2);
   const b=new Blob([JSON.stringify(o,null,2)],{{type:'application/json'}});
-  const a=document.createElement('a');a.href=URL.createObjectURL(b);
-  a.download='sampling_overrides_export.json';a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b);
+  a.download='sampling_overrides_export.json'; a.click();
  }}else{{
-  const note=mode==='cell'?'':' (mode='+mode+'; 下游消費方式待另一處定義)';
+  const ov={{}},sw={{}};
+  ratio_rows.forEach(r=>{{ if(r.ratio!==DR) ov[r.segment+'|'+r.product+'|0']=r.ratio; }});
+  weight_rows.forEach(r=>{{ if(r.weight!==1.0) sw[r.keys.join('|')]=r.weight; }});
   document.getElementById('out').textContent=
-   '# -> sample_ratio_overrides'+note+'\\n'+
+   '# -> conf/base/parameters_dataset.yaml (under dataset:)\\n'+
    'sample_ratio_overrides:\\n'+
    Object.entries(ov).map(([k,v])=>'  "'+k+'": '+v).join('\\n')+
-   '\\n\\n# -> sample_weights'+note+'\\n'+
+   '\\n\\n# -> conf/base/parameters_training.yaml (under training:)\\n'+
    'sample_weights:\\n'+
    Object.entries(sw).map(([k,v])=>'  "'+k+'": '+v).join('\\n');
  }}
 }}
-setMode('cell');
-fillBulk();
+setTab('ratio');
 </script></body></html>"""
 
 
 def render_html(
-    grid: list[dict],
-    default_ratio: float,
+    stats: list[dict],
     *,
+    segment_col: str,
+    item_col: str,
+    weight_keys: list,
+    default_ratio: float,
     target_neg_pos: float = 5.0,
     alpha: float = 0.5,
     w_max: float = 5.0,
 ) -> str:
-    """Render a self-contained HTML editor (pure stdlib, no external assets).
+    """Render a self-contained two-tab HTML editor (pure stdlib, no assets).
 
-    The tuning knobs (``target_neg_pos`` / ``alpha`` / ``w_max``) are surfaced
-    in the in-page explanation so the rendered help reflects the *configured*
-    values, not hardcoded prose. They default to the ``profile`` command
-    defaults so existing two-arg callers keep working.
+    ``stats`` are union-granularity dict rows from profile_stats; the browser
+    mirrors aggregate_surfaces in JS to build the ratio and weight surfaces
+    live. The tuning knobs are surfaced in the help text so it reflects the
+    configured values.
     """
     return _HTML_TEMPLATE.format(
+        stats_json=json.dumps(stats),
+        seg_col=segment_col,
+        item_col=item_col,
+        wkeys_json=json.dumps(weight_keys),
         default_ratio=default_ratio,
-        grid_json=json.dumps(grid),
         target_neg_pos=target_neg_pos,
         alpha=alpha,
         w_max=w_max,
