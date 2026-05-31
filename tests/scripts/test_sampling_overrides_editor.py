@@ -322,21 +322,45 @@ class TestRenderHtml:
 # ---------------------------------------------------------------------------
 @pytest.mark.spark
 class TestProfileStats:
-    def test_groups_by_segment_product_and_counts_pos_neg(self, spark):
-        df = spark.createDataFrame(pd.DataFrame({
+    def _df(self, spark):
+        return spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
             "cust_id": [1, 2, 3, 4, 5, 6],
             "prod_name": ["a", "a", "a", "b", "b", "b"],
             "cust_segment_typ": ["mass", "mass", "mass", "hnw", "hnw", "hnw"],
+            "risk_attr": ["lo", "lo", "hi", "lo", "hi", "hi"],
             "label": [1, 0, 0, 1, 1, 0],
         }))
+
+    def test_groups_by_union_dims_and_counts_pos_neg(self, spark):
         stats = profile_stats(
-            df, [pd.Timestamp("2025-01-31")],
-            segment_col="cust_segment_typ", item_col="prod_name",
+            self._df(spark), [pd.Timestamp("2025-01-31")],
+            union_dims=["cust_segment_typ", "prod_name"],
             label_col="label", time_col="snap_date")
-        d = {(s, p): (np_, nn_) for (s, p, np_, nn_) in stats}
+        d = {(r["cust_segment_typ"], r["prod_name"]): (r["n_pos"], r["n_neg"])
+             for r in stats}
         assert d[("mass", "a")] == (1, 2)
         assert d[("hnw", "b")] == (2, 1)
+
+    def test_groups_at_finer_union_with_extra_dim(self, spark):
+        stats = profile_stats(
+            self._df(spark), [pd.Timestamp("2025-01-31")],
+            union_dims=["cust_segment_typ", "prod_name", "risk_attr"],
+            label_col="label", time_col="snap_date")
+        # every returned row carries all three union dims plus counts
+        assert all({"cust_segment_typ", "prod_name", "risk_attr",
+                    "n_pos", "n_neg"} <= set(r) for r in stats)
+        d = {(r["cust_segment_typ"], r["prod_name"], r["risk_attr"]):
+             (r["n_pos"], r["n_neg"]) for r in stats}
+        # mass|a|lo: rows (1,label1),(2,label0) -> n_pos1 n_neg1
+        assert d[("mass", "a", "lo")] == (1, 1)
+
+    def test_missing_union_column_raises(self, spark):
+        with pytest.raises(ValueError, match="not in"):
+            profile_stats(
+                self._df(spark), [pd.Timestamp("2025-01-31")],
+                union_dims=["cust_segment_typ", "prod_name", "no_such_col"],
+                label_col="label", time_col="snap_date")
 
 
 # ---------------------------------------------------------------------------
