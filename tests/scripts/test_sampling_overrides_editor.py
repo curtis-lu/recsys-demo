@@ -8,12 +8,12 @@ import yaml
 from typer.testing import CliRunner
 
 from scripts.sampling_overrides_editor import (
+    aggregate_surfaces,
     app,
-    build_grid,
     grid_to_yaml,
     profile_stats,
     render_html,
-    resolve_columns,
+    resolve_keys,
     suggest_ratio,
     suggest_weight,
 )
@@ -82,35 +82,53 @@ class TestBuildGrid:
 # ---------------------------------------------------------------------------
 # Config-driven column resolution (no hardcoded column names)
 # ---------------------------------------------------------------------------
-class TestResolveColumns:
+class TestResolveKeys:
     _SCHEMA = {"columns": {"item": "prod_name", "label": "label",
                            "time": "snap_date"}}
 
-    def test_resolves_from_schema_and_segment_by_exclusion(self):
-        cols = resolve_columns(
+    def test_case1_weight_subset_of_group_keys(self):
+        # group=[seg,item,label], weight=[item] -> union dims = [seg,item]
+        out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
-            self._SCHEMA)
-        assert cols == {"segment_col": "cust_segment_typ",
-                        "item_col": "prod_name", "label_col": "label",
-                        "time_col": "snap_date"}
+            {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+        assert out["segment_col"] == "cust_segment_typ"
+        assert out["item_col"] == "prod_name"
+        assert out["label_col"] == "label"
+        assert out["time_col"] == "snap_date"
+        assert out["weight_keys"] == ["prod_name"]
+        assert out["union_dims"] == ["cust_segment_typ", "prod_name"]
 
-    def test_segment_found_regardless_of_position(self):
-        # exclusion-based, not positional: a differently-named/ordered
-        # segment column still resolves.
-        cols = resolve_columns(
-            {"sample_group_keys": ["prod_name", "label", "cust_age_band"]},
-            self._SCHEMA)
-        assert cols["segment_col"] == "cust_age_band"
+    def test_case2_weight_adds_carry_dim_extends_union(self):
+        # weight=[risk_attr,item] adds risk_attr to the union (label excluded)
+        out = resolve_keys(
+            {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+            {"sample_weight_keys": ["risk_attr", "prod_name"]}, self._SCHEMA)
+        assert out["weight_keys"] == ["risk_attr", "prod_name"]
+        assert out["union_dims"] == ["cust_segment_typ", "prod_name", "risk_attr"]
+
+    def test_empty_weight_keys_union_is_group_dims(self):
+        out = resolve_keys(
+            {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+            {}, self._SCHEMA)
+        assert out["weight_keys"] == []
+        assert out["union_dims"] == ["cust_segment_typ", "prod_name"]
 
     def test_rejects_group_keys_not_a_segment_item_label_triple(self):
         with pytest.raises(ValueError, match="sample_group_keys"):
-            resolve_columns(
-                {"sample_group_keys": ["prod_name", "label"]}, self._SCHEMA)
+            resolve_keys({"sample_group_keys": ["prod_name", "label"]},
+                         {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+
+    def test_rejects_label_in_weight_keys(self):
+        with pytest.raises(ValueError, match="label"):
+            resolve_keys(
+                {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+                {"sample_weight_keys": ["prod_name", "label"]}, self._SCHEMA)
 
     def test_rejects_missing_schema_column(self):
         with pytest.raises(ValueError, match="schema.columns"):
-            resolve_columns(
+            resolve_keys(
                 {"sample_group_keys": ["seg", "prod_name", "label"]},
+                {"sample_weight_keys": ["prod_name"]},
                 {"columns": {"item": "prod_name", "label": "label"}})
 
 

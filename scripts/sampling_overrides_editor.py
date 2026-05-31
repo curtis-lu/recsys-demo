@@ -101,19 +101,20 @@ def build_grid(
     return grid
 
 
-def resolve_columns(dataset_cfg: dict, schema_cfg: dict) -> dict:
-    """Resolve the four profiling column names from config — no hardcoding.
+def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dict:
+    """Resolve ratio dims, weight keys, and the finest profiling granularity.
 
-    ``item`` / ``label`` / ``time`` come straight from ``schema.columns``;
-    ``segment`` is the ``dataset.sample_group_keys`` entry that is neither
-    (the editor's grid is segment x item, and the override keys it emits are
-    ``segment|item|0``). Fails fast unless ``sample_group_keys`` is exactly
-    one segment plus the item and label columns — the editor's 2-D grid model
-    is meaningless otherwise, and a mismatch would silently produce override
-    keys that no longer line up with the configured ``sample_group_keys``.
+    ``item``/``label``/``time`` come from ``schema.columns``; ``segment`` is the
+    single ``dataset.sample_group_keys`` entry that is neither item nor label
+    (the ratio surface is segment x item, label fixed to 0 on export). The
+    weight surface is keyed by ``training.sample_weight_keys`` (arbitrary
+    available columns). ``union_dims`` is the finest granularity to profile at:
+    ``(sample_group_keys ∪ sample_weight_keys) \\ {label}``, ratio dims first.
 
-    Returns a dict keyed segment_col / item_col / label_col / time_col, ready
-    to splat into ``profile_stats``.
+    Fails fast unless ``sample_group_keys`` is exactly one segment + item +
+    label, and unless ``label`` is absent from ``sample_weight_keys`` (the
+    editor's per-group n_pos/n_neg model splits on label via sum(label), so a
+    label weight key is self-contradictory — hand-write those weights instead).
     """
     cols = schema_cfg.get("columns", {})
     try:
@@ -131,12 +132,32 @@ def resolve_columns(dataset_cfg: dict, schema_cfg: dict) -> dict:
             f"{item_col!r}, {label_col!r}] (one segment + item + label); "
             f"got {group_keys}."
         )
+    weight_keys = list(training_cfg.get("sample_weight_keys") or [])
+    if label_col in weight_keys:
+        raise ValueError(
+            f"sampling editor cannot edit weights keyed by the label column "
+            f"{label_col!r} (per-group n_pos/n_neg is derived by splitting on "
+            f"label). Remove it from sample_weight_keys, or hand-write those "
+            f"sample_weights."
+        )
+    # union dims: ratio dims (group_keys minus label, in order) then any extra
+    # weight-key columns not already present; label never enters group-by.
+    union_dims: list[str] = [k for k in group_keys if k != label_col]
+    for k in weight_keys:
+        if k != label_col and k not in union_dims:
+            union_dims.append(k)
     return {
         "segment_col": segments[0],
         "item_col": item_col,
         "label_col": label_col,
         "time_col": time_col,
+        "weight_keys": weight_keys,
+        "union_dims": union_dims,
     }
+
+
+def aggregate_surfaces(*args, **kwargs):  # implemented in Task 3
+    raise NotImplementedError
 
 
 def grid_to_yaml(
