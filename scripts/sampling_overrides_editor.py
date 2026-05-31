@@ -340,7 +340,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
  #tabs{{margin:.6rem 0}}
  #tabs button.active{{background:#cde;font-weight:bold}}
  #flt{{margin:.5rem 0;padding:.35rem;width:22rem}}
- tfoot td{{background:#fff7e6;font-weight:bold;border-top:2px solid #999}}
 </style></head><body>
 <h2>Sampling Overrides Editor</h2>
 <details open><summary>各欄是什麼？用途是什麼？（點此展開/收合）</summary>
@@ -371,7 +370,7 @@ median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加
 </div>
 <div id="note"></div>
 <input id="flt" placeholder="篩選…" oninput="flt()">
-<table id="g"><thead></thead><tbody></tbody><tfoot><tr id="foot"></tr></tfoot></table>
+<table id="g"><thead></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
 <button onclick="exp('yaml')">Export YAML snippet</button>
 <pre id="out"></pre>
@@ -379,6 +378,7 @@ median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加
 const STATS={stats_json};
 const SEG="{seg_col}";
 const ITEM="{item_col}";
+const LABEL="{label_col}";
 const WKEYS={wkeys_json};
 const DR={default_ratio};
 const R={target_neg_pos};
@@ -389,6 +389,8 @@ function median(arr){{ const s=arr.slice().sort((a,b)=>a-b),n=s.length;
  return n?(n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2):1; }}
 function suggestWeight(np,med,a,wmax){{ if(np<=0) return wmax;
  return Math.min(wmax,Math.max(1,Math.pow(med/np,a))); }}
+function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+ .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 function keepRate(nm,np,nn){{ if(np<=0||nn<=0) return 1;
  return Math.min(1,Math.max(0,nm*np/nn)); }}
 // ratio store: one row per (segment,item); neg_mult editable, default R.
@@ -478,7 +480,7 @@ function renderRatio(data,idx){{
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
  idx.forEach(i=>{{ const r=data[i],pv=preview(r,parseFloat(r.suggested_neg_mult));
   const am=achMult(pv),tr=document.createElement('tr');
-  tr.innerHTML=`<td>${{r.segment}}</td><td>${{r.product}}</td>`+
+  tr.innerHTML=`<td>${{esc(r.segment)}}</td><td>${{esc(r.product)}}</td>`+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
    `<td class=edit contenteditable data-k=neg_mult data-i=${{i}} `+
@@ -496,7 +498,7 @@ function renderWeight(data,idx){{
   `<th>weight</th></tr>`;
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
  idx.forEach(i=>{{ const r=data[i],tr=document.createElement('tr');
-  tr.innerHTML=r.keys.map(v=>`<td>${{v}}</td>`).join('')+
+  tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg_post}}</td>`+
    `<td class=stat>${{r.pos_rate_post.toFixed(4)}}</td>`+
    `<td class=edit contenteditable data-k=weight data-i=${{i}}>${{r.weight}}</td>`;
@@ -513,7 +515,6 @@ function render(){{
   if(typeof x==='string'){{x=x.toLowerCase();y=y.toLowerCase();}}
   return (x<y?-1:x>y?1:0)*(sortAsc?1:-1); }});
  if(tab==='ratio') renderRatio(data,idx); else renderWeight(data,idx);
- document.getElementById('foot').innerHTML='';
 }}
 function sortBy(k){{ syncEdits(); if(sortKey===k){{sortAsc=!sortAsc;}}
  else{{sortKey=k;sortAsc=true;}} render(); }}
@@ -537,7 +538,7 @@ function exp(kind){{
   return {{segment:r.segment,product:r.product,
    ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio))}}; }});
  const weight_rows=WEIGHT.map(r=>({{keys:r.keys,weight:parseFloat(r.weight)}}));
- const o={{sample_group_keys:[SEG,ITEM,'label'],sample_weight_keys:WKEYS,
+ const o={{sample_group_keys:[SEG,ITEM,LABEL],sample_weight_keys:WKEYS,
   ratio_rows:ratio_rows,weight_rows:weight_rows}};
  if(kind==='json'){{
   document.getElementById('out').textContent=JSON.stringify(o,null,2);
@@ -566,6 +567,7 @@ def render_html(
     *,
     segment_col: str,
     item_col: str,
+    label_col: str,
     weight_keys: list,
     default_ratio: float,
     target_neg_pos: float = 5.0,
@@ -583,6 +585,7 @@ def render_html(
         stats_json=json.dumps(stats),
         seg_col=segment_col,
         item_col=item_col,
+        label_col=label_col,
         wkeys_json=json.dumps(weight_keys),
         default_ratio=default_ratio,
         target_neg_pos=target_neg_pos,

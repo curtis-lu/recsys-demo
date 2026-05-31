@@ -215,7 +215,7 @@ class TestRenderHtml:
         {"cust_segment_typ": "hnw", "prod_name": "a", "n_pos": 8, "n_neg": 50},
     ]
     _KW = dict(segment_col="cust_segment_typ", item_col="prod_name",
-               weight_keys=["prod_name"], default_ratio=1.0)
+               weight_keys=["prod_name"], label_col="label", default_ratio=1.0)
 
     def test_self_contained_and_embeds_stats_and_keys(self):
         html = render_html(self._STATS, **self._KW)
@@ -276,7 +276,7 @@ class TestRenderHtml:
     def test_empty_weight_keys_hides_weight_tab(self):
         html = render_html(self._STATS, segment_col="cust_segment_typ",
                            item_col="prod_name", weight_keys=[],
-                           default_ratio=1.0)
+                           label_col="label", default_ratio=1.0)
         assert "const WKEYS=[]" in html
         # weight tab disabled note when no weight keys configured
         assert "WKEYS.length" in html
@@ -292,6 +292,15 @@ class TestRenderHtml:
         assert "sample_ratio_overrides" in html and "sample_weights" in html
         assert "3.0" in html and "0.7" in html and "8.0" in html
         assert "http://" not in html and "https://" not in html
+
+    def test_escapes_cell_values_and_threads_label_col(self):
+        html = render_html(self._STATS, segment_col="cust_segment_typ",
+                           item_col="prod_name", weight_keys=["prod_name"],
+                           label_col="label", default_ratio=1.0)
+        assert "function esc(" in html
+        assert "esc(r.segment)" in html and "esc(r.product)" in html
+        assert 'const LABEL="label"' in html
+        assert "sample_group_keys:[SEG,ITEM,LABEL]" in html
 
 
 # ---------------------------------------------------------------------------
