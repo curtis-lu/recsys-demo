@@ -283,7 +283,7 @@ $$p \ge \tau \iff F \ge \log\frac{\tau}{1-\tau} = \operatorname{logit}(\tau)$$
 | 咬在哪 | 數學量（主手冊章） | 症狀 | 處方 |
 |---|---|---|---|
 | 起點太低 | $F_0 = \log\frac{\bar y}{1-\bar y}$（Ch 3） | 稀有正類要爬 $\lvert F_0\rvert$、常爬不過 0.5 | 調門檻（[Ch 10](#ch10)）、權重（[Ch 11](#ch11)） |
-| 梯度被稀釋 | $G = \sum g_i$（Ch 4） | 局部正類訊號被多數類淹沒 | 權重（[Ch 11](#ch11)）、重採樣（[Ch 12](#ch12)） |
+| 梯度被稀釋 | $g_i = p_i - y_i$、$G = \sum g_i$（Ch 4、5.3） | 局部正類訊號被多數類淹沒 | 權重（[Ch 11](#ch11)）、重採樣（[Ch 12](#ch12)） |
 | 稀有區飢餓 | Gain、$H+\lambda$（Ch 5.3） | 純正類切點 Gain 被 $\lambda$ / min-child 壓掉 | 權重（[Ch 11](#ch11)）、重採樣（[Ch 12](#ch12)）、自訂 loss（[Ch 13](#ch13)） |
 | 葉輸出收縮 | $\gamma = -G/(H+\lambda)$（Ch 6） | 稀有正類每步修正幅度被拉小 | 權重（[Ch 11](#ch11)）、調 $\lambda$ |
 | 門檻錯位 | $p \ge 0.5 \iff F \ge 0$（Ch 1.4） | 用 0.5 幾乎切不出正類 | 調門檻（[Ch 10](#ch10)） |
