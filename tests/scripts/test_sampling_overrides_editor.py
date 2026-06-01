@@ -177,6 +177,17 @@ class TestGridToYaml:
             grid_to_yaml(export, _params(weight_keys=("prod_name",)),
                          default_ratio=1.0)
 
+    def test_zero_pos_group_override_round_trips(self):
+        # A 0-positive product ("a", present in schema) downsampled to 0.3 must
+        # survive to config. grid_to_yaml has no n_pos visibility, so this also
+        # documents that it must never special-case "cold" products away.
+        export = _export(
+            ratio_rows=[{"segment": "mass", "product": "a", "ratio": 0.3}],
+            weight_rows=[])
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.3}}
+
 
 # ---------------------------------------------------------------------------
 # Self-contained HTML renderer
