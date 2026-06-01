@@ -40,10 +40,12 @@ training:
   # sample_weight_keys: weight key 由哪些欄位組成（順序即 "|" 串接順序），
   #   與 dataset.sample_group_keys 對稱。預設 [prod_name]：直接對產品調權。
   #   每個欄位必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
-  #   dataset.carry_columns（否則不在 train model_input parquet → weight 靜默
-  #   全 1.0，A9a 一致性閘會擋）。用非 identity/label 欄位（如 cust_segment_typ）
-  #   須先加進 dataset.carry_columns 並重跑 dataset pipeline（bust
-  #   base_dataset_version）。
+  #   dataset.carry_columns ∪ dataset.prepare_model_input.categorical_columns。
+  #   categorical feature（如 cust_segment_typ_2a）在 model_input 是「編碼後 int」，
+  #   但 sample_weights 仍用人類可讀字串：runtime 由 _translate_weight_table 依
+  #   category_mappings 翻成 code 後比對（encode-aware）。raw 值（identity/label/
+  #   carry）維持字串。打錯/不存在的值 → 不中（weight 1.0），會記入 manifest.json
+  #   的 sample_weight.unmatched_keys。
   #   可用 scripts/sampling_overrides_editor.py 互動式產生（weight 面依此 keys
   #   組成 key；與 dataset.sample_group_keys 可不同）。
   sample_weight_keys:

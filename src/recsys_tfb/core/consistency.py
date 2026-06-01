@@ -365,18 +365,27 @@ def weight_key_columns_unavailable(parameters: dict) -> list[str]:
 
     The train/train_dev model_input parquet physically contains only identity
     columns, the label, dataset.carry_columns, and *encoded* features. A weight
-    key must therefore be one of identity ∪ {label} ∪ carry_columns — the
-    raw-valued columns. Anything else is either physically absent (weight
-    silently no-ops at 1.0) or int-encoded (key never matches). This is a
-    cross-file dependency: sample_weight_keys lives in parameters_training.yaml
-    but carry_columns lives in parameters_dataset.yaml. Returns sorted
-    offending columns; empty means OK.
+    key must therefore be one of identity ∪ {label} ∪ carry_columns ∪ declared
+    categorical columns — the raw-valued columns (encode-aware lookup translates
+    declared categorical columns at runtime). Anything else is either physically
+    absent (weight silently no-ops at 1.0) or int-encoded (key never matches).
+    This is a cross-file dependency: sample_weight_keys lives in
+    parameters_training.yaml but carry_columns lives in parameters_dataset.yaml.
+    Returns sorted offending columns; empty means OK.
     """
     schema = get_schema(parameters)
+    dataset_cfg = parameters.get("dataset", {}) or {}
+    # Route through the file's own _prepare_model_input helper (as sibling
+    # predicates do) and default only when the key is absent — matching
+    # _get_preprocessing_config, so an explicit `categorical_columns: []`
+    # is honoured rather than silently coerced to [schema["item"]].
+    declared_cats = _prepare_model_input(parameters).get("categorical_columns")
+    categorical_cols = declared_cats if declared_cats is not None else [schema["item"]]
     available = (
         set(schema["identity_columns"])
         | {schema["label"]}
-        | set((parameters.get("dataset", {}) or {}).get("carry_columns") or [])
+        | set(dataset_cfg.get("carry_columns") or [])
+        | set(categorical_cols)
     )
     keys = (parameters.get("training", {}) or {}).get("sample_weight_keys") or []
     return sorted(k for k in keys if k not in available)

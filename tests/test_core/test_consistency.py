@@ -358,6 +358,19 @@ class TestWeightKeyColumnsUnavailable:
     def test_no_keys_returns_empty(self):
         assert weight_key_columns_unavailable(_base()) == []
 
+    def test_a9a_feature_categorical_is_available(self):
+        p = _base()
+        p["dataset"] = {"prepare_model_input": {"categorical_columns":
+                        ["prod_name", "cust_segment_typ_2a"]}}
+        p["training"] = {"sample_weight_keys": ["cust_segment_typ_2a", "prod_name"]}
+        assert weight_key_columns_unavailable(p) == []
+
+    def test_a9a_non_categorical_feature_still_blocked(self):
+        p = _base()
+        p["dataset"] = {"prepare_model_input": {"categorical_columns": ["prod_name"]}}
+        p["training"] = {"sample_weight_keys": ["some_numeric_feature"]}
+        assert weight_key_columns_unavailable(p) == ["some_numeric_feature"]
+
 
 class TestWeightKeyArityMismatch:
     def test_matching_arity_ok(self):

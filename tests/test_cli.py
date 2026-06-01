@@ -325,3 +325,21 @@ class TestEvaluationCLIFlags:
         result = runner.invoke(app, ["evaluation", "--help"])
         assert result.exit_code == 0
         assert "--post-training" in result.output
+
+
+def test_sample_weight_extra_reads_report(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _sample_weight_extra
+    vdir = tmp_path / "models" / "mv"
+    vdir.mkdir(parents=True)
+    (vdir / "sample_weight_report.json").write_text(
+        json.dumps({"enabled": True, "weight_keys": ["prod_name"],
+                    "n_weight_entries": 1, "unmatched_keys": []}))
+    assert _sample_weight_extra(vdir) == {
+        "sample_weight": {"enabled": True, "weight_keys": ["prod_name"],
+                          "n_weight_entries": 1, "unmatched_keys": []}}
+
+
+def test_sample_weight_extra_absent_returns_none(tmp_path):
+    from recsys_tfb.__main__ import _sample_weight_extra
+    assert _sample_weight_extra(tmp_path) is None

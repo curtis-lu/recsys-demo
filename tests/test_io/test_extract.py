@@ -455,7 +455,7 @@ class TestRowWeightsObservability:
 
     def test_logs_inactive_for_empty_table(self, caplog):
         with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
-            w = _row_weights_from_pdf(self._pdf(), self._params({}))
+            w = _row_weights_from_pdf(self._pdf(), self._params({}), {})
         np.testing.assert_array_equal(w, np.ones(4))
         msg = "\n".join(r.getMessage() for r in caplog.records)
         assert "sample_weight INACTIVE" in msg and "table is empty" in msg
@@ -463,14 +463,14 @@ class TestRowWeightsObservability:
     def test_logs_inactive_when_key_column_absent(self, caplog):
         with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
             w = _row_weights_from_pdf(
-                self._pdf(), self._params({"x": 5.0}, weight_keys=("not_a_col",)))
+                self._pdf(), self._params({"x": 5.0}, weight_keys=("not_a_col",)), {})
         np.testing.assert_array_equal(w, np.ones(4))
         msg = "\n".join(r.getMessage() for r in caplog.records)
         assert "sample_weight INACTIVE" in msg and "absent from parquet" in msg
 
     def test_logs_active_with_distribution(self, caplog):
         with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
-            w = _row_weights_from_pdf(self._pdf(), self._params({"a": 2.0}))
+            w = _row_weights_from_pdf(self._pdf(), self._params({"a": 2.0}), {})
         np.testing.assert_array_equal(w, np.array([2.0, 2.0, 1.0, 1.0]))
         msg = "\n".join(r.getMessage() for r in caplog.records)
         assert "sample_weight ACTIVE" in msg
@@ -480,12 +480,12 @@ class TestRowWeightsObservability:
     def test_warns_when_table_matches_zero_rows(self, caplog):
         # 'zzz' is not a product in the data -> table matches nothing
         with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
-            w = _row_weights_from_pdf(self._pdf(), self._params({"zzz": 2.0}))
+            w = _row_weights_from_pdf(self._pdf(), self._params({"zzz": 2.0}), {})
         np.testing.assert_array_equal(w, np.ones(4))
         warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("matched 0 of 4 rows" in m for m in warns)
         # the diagnostic surfaces the real data keys so a mismatch is obvious
-        assert any("sample data keys=" in m for m in warns)
+        assert any("sample data keys (encoded)=" in m for m in warns)
 
 
 from recsys_tfb.io.handles import ParquetHandle
@@ -576,3 +576,97 @@ class TestExtractWithWeights:
         assert len(g) == 4
         # rows: mass|a, mass|b, hnw|a, hnw|b
         np.testing.assert_array_equal(w, np.array([1.0, 1.0, 4.0, 1.0]))
+
+
+from recsys_tfb.io.extract import _translate_weight_table
+
+
+class TestTranslateWeightTable:
+    # category_mappings: code = list index. seg "mass"->0, "hnw"->1, "aff"->2.
+    CM = {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}
+    ID = ["snap_date", "cust_id", "prod_name"]
+
+    def test_feature_component_translated_to_code(self):
+        t, unk = _translate_weight_table(
+            {"hnw": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
+        assert t == {"1": 2.0} and unk == {}
+
+    def test_identity_component_passthrough(self):
+        t, unk = _translate_weight_table(
+            {"ccard_ins": 3.0}, ["prod_name"], self.CM, self.ID)
+        assert t == {"ccard_ins": 3.0} and unk == {}
+
+    def test_mixed_composite_feature_plus_identity(self):
+        t, unk = _translate_weight_table(
+            {"mass|ccard_ins": 2.0}, ["cust_segment_typ_2a", "prod_name"],
+            self.CM, self.ID)
+        assert t == {"0|ccard_ins": 2.0} and unk == {}
+
+    def test_unknown_feature_value_dropped_and_recorded(self):
+        t, unk = _translate_weight_table(
+            {"afflunet": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
+        assert t == {} and unk == {"cust_segment_typ_2a": ["afflunet"]}
+
+    def test_arity_mismatch_passthrough(self):
+        t, unk = _translate_weight_table(
+            {"mass|x|y": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
+        assert t == {"mass|x|y": 2.0} and unk == {}
+
+    def test_partial_bad_composite_dropped_correctly(self):
+        # First component unknown, second is identity — key must be dropped
+        # entirely (no partial code leaks into the translated table).
+        t, unk = _translate_weight_table(
+            {"bad_seg|ccard_ins": 2.0, "mass|fund": 3.0},
+            ["cust_segment_typ_2a", "prod_name"], self.CM, self.ID)
+        assert t == {"0|fund": 3.0}
+        assert unk == {"cust_segment_typ_2a": ["bad_seg"]}
+
+
+class TestRowWeightsEncodeAware:
+    # cust_segment_typ_2a is an encoded feature: pdf stores int codes.
+    def _pdf(self):
+        return pd.DataFrame({
+            "cust_segment_typ_2a": [0, 1, 0, 2],  # codes for mass/hnw/mass/aff
+            "prod_name": ["a", "a", "b", "a"],
+            "label": [1, 0, 1, 0],
+        })
+
+    def _params(self, weights, keys):
+        return {
+            "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                                   "item": "prod_name", "label": "label"}},
+            "training": {"sample_weights": weights, "sample_weight_keys": keys},
+        }
+
+    def _prep(self):
+        # identity cats stay raw; feature cat carries a code mapping.
+        return {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}}
+
+    def test_feature_key_translated_and_applied(self):
+        from recsys_tfb.io.extract import _row_weights_from_pdf
+        w = _row_weights_from_pdf(
+            self._pdf(), self._params({"hnw": 5.0}, ["cust_segment_typ_2a"]),
+            self._prep())
+        np.testing.assert_array_equal(w, np.array([1.0, 5.0, 1.0, 1.0]))
+
+    def test_composite_feature_plus_identity(self):
+        from recsys_tfb.io.extract import _row_weights_from_pdf
+        w = _row_weights_from_pdf(
+            self._pdf(),
+            self._params({"mass|a": 2.0}, ["cust_segment_typ_2a", "prod_name"]),
+            self._prep())
+        np.testing.assert_array_equal(w, np.array([2.0, 1.0, 1.0, 1.0]))
+
+    def test_unknown_feature_value_warns_and_all_ones(self, caplog):
+        from recsys_tfb.io.extract import _row_weights_from_pdf
+        with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(
+                self._pdf(),
+                self._params({"afflunet": 2.0}, ["cust_segment_typ_2a"]),
+                self._prep())
+        np.testing.assert_array_equal(w, np.ones(4))
+        warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("unknown category value" in m for m in warns)
+        # all keys unknown -> the unknown-value warning is the full diagnosis;
+        # the redundant 0-match warning must NOT also fire.
+        assert not any("matched 0 of" in m for m in warns)

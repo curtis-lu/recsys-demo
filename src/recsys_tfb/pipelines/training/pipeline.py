@@ -17,6 +17,7 @@ from recsys_tfb.pipelines.training.nodes import (
     compute_test_mAP_spark,
     finalize_model,
     log_experiment,
+    persist_sample_weight_report,
     predict_and_write_test_predictions,
     prepare_lgb_train_inputs,
     tune_hyperparameters,
@@ -70,6 +71,14 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "preprocessor", "parameters",
             ],
             outputs=["train_lgb_handle", "train_dev_lgb_handle"],
+        ),
+    )
+
+    nodes.append(
+        Node(
+            persist_sample_weight_report,
+            inputs=["train_parquet_handle", "preprocessor", "parameters"],
+            outputs="sample_weight_report",
         ),
     )
 
