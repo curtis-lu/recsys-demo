@@ -917,6 +917,7 @@ class TestHpoScore:
         result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
         assert result == pytest.approx(expected)
 
+
     def test_macro_per_item_map_matches_primitive(self):
         from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
         from recsys_tfb.pipelines.training.nodes import _hpo_score
@@ -934,5 +935,48 @@ class TestHpoScore:
 
         with pytest.raises(ValueError, match="hpo_objective"):
             _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+
+
+def test_resolve_weight_diagnostics_unmatched(tmp_path):
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import resolve_weight_diagnostics
+
+    # train parquet: feature seg stored as int codes (0=mass,1=hnw), prod raw.
+    pdf = pd.DataFrame({
+        "cust_segment_typ_2a": [0, 1, 0],
+        "prod_name": ["a", "a", "b"],
+        "label": [1, 0, 1],
+    })
+    p = tmp_path / "train.parquet"
+    pdf.to_parquet(p)
+    handle = ParquetHandle(path=str(p))
+
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label"}},
+        "training": {"sample_weight_keys": ["cust_segment_typ_2a"],
+                     "sample_weights": {"mass": 2.0, "aff": 3.0}},  # aff absent
+    }
+    prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}}
+
+    diag = resolve_weight_diagnostics(handle, params, prep)
+    assert diag["enabled"] is True
+    assert diag["weight_keys"] == ["cust_segment_typ_2a"]
+    assert diag["n_weight_entries"] == 2
+    assert diag["unmatched_keys"] == ["aff"]  # no row has segment 'aff'
+
+
+def test_resolve_weight_diagnostics_disabled(tmp_path):
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import resolve_weight_diagnostics
+    p = tmp_path / "t.parquet"
+    pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
+    params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+              "item": "prod_name", "label": "label"}}, "training": {}}
+    diag = resolve_weight_diagnostics(ParquetHandle(path=str(p)), params, {})
+    assert diag == {"enabled": False, "weight_keys": ["prod_name"],
+                    "n_weight_entries": 0, "unmatched_keys": []}
 
 

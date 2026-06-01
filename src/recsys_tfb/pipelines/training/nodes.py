@@ -29,6 +29,49 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def resolve_weight_diagnostics(
+    train_handle, parameters: dict, preprocessor_metadata: dict,
+) -> dict:
+    """Data-driven sample_weight diagnostic for the model manifest.
+
+    Reports configured sample_weights entries that match zero train rows
+    (``unmatched_keys``) — covers label / identity / feature / encoding
+    mismatch + unknown-category typos. Reads only the weight-key columns of the
+    train parquet (cheap distinct).
+    """
+    import pyarrow.dataset as pads
+
+    from recsys_tfb.io.extract import _composite_key_series, _translate_weight_table
+
+    training = parameters.get("training", {}) or {}
+    sw = training.get("sample_weights") or {}
+    weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
+    diag = {"enabled": bool(sw), "weight_keys": list(weight_keys),
+            "n_weight_entries": len(sw), "unmatched_keys": []}
+    if not sw:
+        return diag
+
+    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
+    identity_cols = get_schema(parameters)["identity_columns"]
+
+    ds = pads.dataset(train_handle.path, format="parquet")
+    if any(k not in ds.schema.names for k in weight_keys):
+        diag["unmatched_keys"] = sorted(str(k) for k in sw)
+        return diag
+    pdf = ds.to_table(columns=list(weight_keys)).to_pandas().drop_duplicates()
+    present = set(_composite_key_series(pdf, weight_keys).tolist())
+
+    unmatched = []
+    for key in sw:
+        one, _ = _translate_weight_table(
+            {key: sw[key]}, weight_keys, category_mappings, identity_cols)
+        if not one or next(iter(one)) not in present:
+            unmatched.append(str(key))
+    diag["unmatched_keys"] = sorted(unmatched)
+    return diag
+
+
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
