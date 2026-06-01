@@ -177,6 +177,17 @@ class TestGridToYaml:
             grid_to_yaml(export, _params(weight_keys=("prod_name",)),
                          default_ratio=1.0)
 
+    def test_zero_pos_group_override_round_trips(self):
+        # A 0-positive product ("a", present in schema) downsampled to 0.3 must
+        # survive to config. grid_to_yaml has no n_pos visibility, so this also
+        # documents that it must never special-case "cold" products away.
+        export = _export(
+            ratio_rows=[{"segment": "mass", "product": "a", "ratio": 0.3}],
+            weight_rows=[])
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.3}}
+
 
 # ---------------------------------------------------------------------------
 # Self-contained HTML renderer
@@ -233,7 +244,9 @@ class TestRenderHtml:
         html = render_html(self._STATS, **self._KW, target_neg_pos=5.0)
         assert "負樣本倍率" in html
         assert "data-k=neg_mult" in html
-        assert "data-k=ratio" not in html
+        # positive rows keep a read-only (calc) ratio cell; 0-positive rows make
+        # ratio editable via data-k=ratio_direct (see the zero-pos tests below).
+        assert 'class="calc rt"' in html
         assert "實際倍率" in html and "function achMult(" in html
         assert "const R=5.0" in html
         assert "td.warn" in html and "已全留" in html
@@ -274,6 +287,28 @@ class TestRenderHtml:
         assert "esc(r.segment)" in html and "esc(r.product)" in html
         assert 'const LABEL="label"' in html
         assert "sample_group_keys:[SEG,ITEM,LABEL]" in html
+
+    def test_zero_pos_ratio_cell_editable(self):
+        # 0-positive rows: ratio column becomes directly editable (data-k
+        # ratio_direct), the neg:pos multiplier column greys out.
+        html = render_html(self._STATS, **self._KW)
+        assert "data-k=ratio_direct" in html
+        assert "r.ratio_direct=1" in html  # buildRatio seeds the default
+
+    def test_zero_pos_preview_reads_direct_keep_rate(self):
+        # preview() noPos branch must derive ratio from r.ratio_direct, not
+        # pin it to a hard-coded 1.0000 literal.
+        html = render_html(self._STATS, **self._KW)
+        assert "parseFloat(r.ratio_direct)" in html
+        # recalc must NOT write back into the ratio cell while it is the one
+        # being edited (would wash the cursor).
+        assert "if(!editingRatio) tr.querySelector('td.rt')" in html
+
+    def test_help_text_describes_zero_pos_editable_ratio(self):
+        html = render_html(self._STATS, **self._KW)
+        # stale claim ("維持 ratio 1.0") must be gone; new wording present.
+        assert "維持 ratio 1.0" not in html
+        assert "neg:pos 無定義" in html
 
 
 # ---------------------------------------------------------------------------
