@@ -320,7 +320,7 @@ key-set 驗證。</p>
 <p><b>ratio — 負樣本保留率（唯讀，由倍率推導）。</b>
 <code>ratio = clamp(倍率 × n_pos / n_neg, 0, 1)</code>，即匯出值（key
 <code>segment|item|0</code>，label 固定 0）。<code>ratio = {default_ratio}</code> = 不下採。
-n_pos = 0 的冷門列維持 ratio 1.0（全留負樣本）。</p>
+n_pos = 0 的冷門列因 neg:pos 無定義，改為在 ratio 欄直接填保留率（預設 1.0 = 全留負樣本）。</p>
 <p><b>實際倍率（唯讀）。</b>下採後實際 neg:pos；負樣本不足以達標時 ratio 夾到 1.0、
 此欄低於目標並以琥珀底 ⚠ 標示（已全留）。</p>
 <p><b>weight 面 n_neg / pos_rate（唯讀，連動下採樣後）。</b>weight 作用在下採樣後的

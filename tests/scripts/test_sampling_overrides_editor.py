@@ -293,6 +293,12 @@ class TestRenderHtml:
         # being edited (would wash the cursor).
         assert "if(!editingRatio) tr.querySelector('td.rt')" in html
 
+    def test_help_text_describes_zero_pos_editable_ratio(self):
+        html = render_html(self._STATS, **self._KW)
+        # stale claim ("維持 ratio 1.0") must be gone; new wording present.
+        assert "維持 ratio 1.0" not in html
+        assert "neg:pos 無定義" in html
+
 
 # ---------------------------------------------------------------------------
 # Spark profiling aggregation
