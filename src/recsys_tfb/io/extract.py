@@ -23,6 +23,19 @@ from recsys_tfb.io.handles import ParquetHandle
 logger = logging.getLogger(__name__)
 
 
+def _composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
+    """Per-row '|'-joined composite key from ``weight_keys`` columns (str-cast).
+
+    Single source for the lookup-key construction so the weight mapping and the
+    zero-match diagnostic agree byte-for-byte. Mirrors the dataset sampler's
+    ``sample_ratio_overrides`` key in pipelines/dataset/helpers_spark.py.
+    """
+    keys = pdf[weight_keys[0]].astype(str)
+    for k in weight_keys[1:]:
+        keys = keys.str.cat(pdf[k].astype(str), sep="|")
+    return keys
+
+
 def _compute_row_weights(
     pdf: pd.DataFrame,
     weight_keys: list,
@@ -38,9 +51,7 @@ def _compute_row_weights(
     """
     if not sample_weights or not weight_keys:
         return np.ones(len(pdf), dtype=np.float64)
-    keys = pdf[weight_keys[0]].astype(str)
-    for k in weight_keys[1:]:
-        keys = keys.str.cat(pdf[k].astype(str), sep="|")
+    keys = _composite_key_series(pdf, weight_keys)
     return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
 
 
@@ -51,15 +62,61 @@ def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
     column is missing from pdf (graceful, never raises; consistency gate A9a
     already blocks unavailable columns at CLI entry). Computed from the
     *given* pdf so it stays aligned to the caller's filtering/ordering.
+
+    Emits one observability line per call (train + train_dev each log once) so a
+    run's log alone answers "did sample_weight take effect?":
+      - INACTIVE — table empty, or a weight-key column is absent from the parquet
+        (the graceful all-ones backstop); the message states which.
+      - ACTIVE — reports rows_total / rows_adjusted / min·mean·max so a tiny or
+        zero effect is visible.
+      - A non-empty table that matches **zero** rows is a WARNING with sample
+        data keys vs configured keys, since that almost always means the keys
+        don't match the parquet values (e.g. int-coded vs string ``prod_name``,
+        or a product-name typo) — a failure mode A9 cannot see (it never reads
+        the parquet's actual values).
     """
     training = parameters.get("training", {}) or {}
     sw = training.get("sample_weights") or {}
     # The base YAML always supplies sample_weight_keys (default [prod_name]); the
     # [schema.item] fallback only matters for test fixtures that omit the key.
     weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
-    if not sw or any(k not in pdf.columns for k in weight_keys):
-        return np.ones(len(pdf), dtype=np.float64)
-    return _compute_row_weights(pdf, weight_keys, sw)
+    n_rows = len(pdf)
+
+    missing = [k for k in weight_keys if k not in pdf.columns]
+    if not sw or missing:
+        reason = (
+            "sample_weights table is empty"
+            if not sw
+            else f"weight-key column(s) {missing} absent from parquet"
+        )
+        logger.info(
+            "sample_weight INACTIVE — all %d rows weight=1.0 (%s); "
+            "weight_keys=%s n_weight_entries=%d",
+            n_rows, reason, weight_keys, len(sw),
+        )
+        return np.ones(n_rows, dtype=np.float64)
+
+    w = _compute_row_weights(pdf, weight_keys, sw)
+    n_adjusted = int((w != 1.0).sum())
+    if n_adjusted == 0:
+        sample_data_keys = (
+            _composite_key_series(pdf, weight_keys).drop_duplicates().head(5).tolist()
+        )
+        logger.warning(
+            "sample_weight table matched 0 of %d rows — configured keys likely do "
+            "not match the parquet values (check int-coded vs string values / "
+            "typos). weight_keys=%s; sample configured keys=%s; sample data keys=%s",
+            n_rows, weight_keys, sorted(map(str, sw))[:5], sample_data_keys,
+        )
+    else:
+        logger.info(
+            "sample_weight ACTIVE — weight_keys=%s n_weight_entries=%d; "
+            "rows_total=%d rows_adjusted=%d (%.2f%%); weight min/mean/max=%.3f/%.4f/%.3f",
+            weight_keys, len(sw), n_rows, n_adjusted,
+            100.0 * n_adjusted / n_rows if n_rows else 0.0,
+            float(w.min()), float(w.mean()), float(w.max()),
+        )
+    return w
 
 
 def _log_parquet_metadata(handle: ParquetHandle) -> None:
