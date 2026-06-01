@@ -74,7 +74,7 @@
 - **各 item 的列數 $n_j$ 大致相等**（≈ 客戶數），冷熱門差異**主要落在正類率 $\bar y_j$**（購買率），不是列數。
 - 換匯 vs 保單的「4 萬 vs 100」差距，在這個佈局下是**正類筆數 $P_j$ 差 ~400 倍**，而 $n_j$ 相近。
 
-> **審稿點 A**：這個佈局假設是否為多 item 推薦 pointwise 訓練最具代表性的設定？實務上常對負類做 per-item 欠採（使 $n_j$ 不再相等）——手冊應在 Ch1 用一句話標明此假設，並說明欠採如何改變後續分析（接 Ch10）。
+> **佈局結論（已審）**：完整候選等列數佈局是 full-candidate pointwise 打分的代表性設定，能乾淨隔離「冷熱門 = base-rate 差異、非列數差異」。但 per-item 負類欠採是業界**標準**做法，它不只讓 $n_j$ 不等，還會**抬高並拉齊各 item 的有效 $\bar y_j$**（→ 縮小 Ch2 說的先驗錯位），並引入抽樣偏差，需以 **logQ / 抽樣機率修正**回正（Ch10 展開）。手冊在 Ch1 用一句話標明 base 佈局假設即可。
 
 ---
 
@@ -85,18 +85,21 @@
 #### Ch1. 從 1 個 item 到 M 個：訓練集變成「混合體」
 - 主張：$\bar y_{\text{global}} = \sum_j P_j / \sum_j n_j$ 是各 item base rate 以列數為權重的加權平均；在等列數佈局下，**分子 $\sum_j P_j$ 被熱門 item 的正類筆數主導**。
 - 結論鋪陳：全域 base rate 反映的是「熱門 item 的購買傾向」，冷門 item 的訊號在全域統計裡幾乎不可見。
-- 標明 §5 的佈局假設。
+- 術語對接：這正是推薦系統文獻的 **流行度偏差（popularity bias）/ 長尾（long-tail）**；在此點名，讓讀者把機制接回既有心智模型（Abdollahpouri et al. 2017）。
+- 標明 §5 的佈局假設（完整候選等列數；負類欠採的影響留 Ch10）。
 
 #### Ch2. 全域 $F_0$ vs per-item $F_{0,j}$：起點錯位，但這段便宜
 - $F_0 = \log\frac{\bar y_{\text{global}}}{1-\bar y_{\text{global}}}$ 是單一全域常數；各 item 的最佳起點 $F_{0,j}$ 不同。
 - 冷門 item 從 $F_0$ 出發 = **被系統性高估**（起點 $p=\bar y_{\text{global}} \gg \bar y_{\text{cold}}$）；熱門 item 被低估。
 - **誠實關鍵**：這個起點錯位**便宜**——只要 item 是可用特徵，一刀「以 item 切分」的 split 就能讓每個 item 各自落到自己的 base rate（高 Gain，見 Ch7 範例：item-isolation 切點 $\text{Gain}(\lambda{=}1)\approx5.45$）。所以**per-item 先驗不是深層問題**。把深層問題留給 Ch3–Ch5（個人化訊號）。
+- **文獻錨點（核心論點的經典前例）**：focal loss（Lin et al. 2017）做的正是同一個區分——它用稀有類**先驗初始化 $\pi$**（對應 $F_0/F_{0,j}$）穩定訓練，但明說先驗**不能**解決不平衡，真正的解是讓**大量易分樣本不再主導梯度**。手冊以此佐證主敘事，並採用「易分樣本 / 梯度被主導（gradient domination）」用語（Ch5 收束時再引一次）。
 - 與手冊2 Ch1 對照：手冊2 是「起點低、正類要爬長路」；這裡是「起點對冷門 item 而言太高、但一刀就修掉」。
 
 #### Ch3. 跨 item 的梯度質量：熱門 item 擁有大部分「正類訊號」
 - $G = \sum_j G_j$。在起點處，正類出大負梯度 $g = \bar y_{\text{global}}-1$、負類出小正梯度 $g = \bar y_{\text{global}}$。
 - **正類的梯度質量**（推動「往上抬、學會分辨誰會買」的力）總量 $\approx (\sum_j P_j)\cdot|\bar y_{\text{global}}-1|$，**被熱門 item 的 $P_j$ 主導**。
 - 推論：任何**非 item-specific 的切點**（切在客戶特徵如年齡、資產上，跨 item 共用）其 Gain 由熱門 item 的正類質量決定——於是樹學到的客戶特徵切點，是「服務熱門 item 買家輪廓」的切點；冷門 item 只能沿用。
+- **須加註的條件性**：熱門主導是**相對**的（同一切點上熱門贏冷門）。某個共享客戶特徵切點的 Gain 只有在「該特徵真能把熱門正類從熱門負類分開」時才**絕對**夠大；否則樹可能寧可選 item-isolation 切點。避免過度宣稱共享切點**總是**被選中。
 - 與手冊2 Ch2 對照：手冊2 的拔河在「單一 item 內部 正 vs 負」；這裡多一層「item 之間 熱 vs 冷」爭奪同一個切點。
 
 #### Ch4. 葉預算的競爭：冷門 item 的個人化切點被餓死
@@ -111,13 +114,11 @@
 2. **item 內部**：就算搶到，冷門正類絕對數量少 → 內部仍是手冊2 的飢餓（遞迴套用）。
 - 對照表：單一目標不平衡（手冊2）vs 多 item 冷熱門（手冊3）各自咬在哪個量。
 
-#### Ch6. 共享葉子的跨 item 遷移（transfer）
-- 後續的樹若先切**客戶特徵**（因其 Gain 由熱門主導，Ch3），該樹的葉子會**同時裝進冷門與熱門的列**（除非又切回 item）。
-- 葉輸出 $\gamma = -G_{\text{leaf}}/(H_{\text{leaf}}+\lambda)$ 由多數方（熱門）主導 → 冷門列被套上「熱門買家輪廓」推導出的調整 = **遷移（transfer）**，可正（冷熱買家相似則沾光）可負（不相似則被帶偏）。
-- 跨 item 分數可比性：共享模型輸出的分數，跨 item 不在同一尺度——但**機率校準的絕對值問題沿手冊2 立場不展開**，這裡只點出「遷移」這個學習層的效應。
-- 避免過度宣稱：不寫成「校準全面崩壞」；寫成「條件性的跨 item 遷移」。
-
-> **審稿點 B**：Ch6 的「共享葉子混入冷熱門」成立的前提是「樹未在該分支先以 item 切分」。需確認在 leaf-wise（LightGBM）+ 有限 `num_leaves` 下，這個情境的普遍性。若樹幾乎總是先切 item，則 Ch6 的效應被弱化，應如實調整語氣（甚至降格為一節）。這點請對照文獻（multi-task GBDT、negative transfer、high-cardinality categorical 在 LightGBM 的處理）。
+#### Ch6. 共享葉子的跨 item 負遷移（條件性、次要——寫成短節）
+> **定位（已審）**：此效應**條件性且多半次要**，刻意寫短（可能就是一個小節，不撐成完整一章）。理由見下。
+- 機制：後續的樹若先切**客戶特徵**，該樹的葉子會**同時裝進冷門與熱門的列**；葉輸出 $\gamma = -G_{\text{leaf}}/(H_{\text{leaf}}+\lambda)$ 由多數方（熱門）主導 → 冷門列被套上「熱門買家輪廓」的調整。這在多任務學習裡叫 **負遷移（negative transfer）**：共享參數被主導任務調校，反而傷到少數任務（可正：冷熱買家相似則沾光；可負：不相似則被帶偏）。
+- **為何次要**：LightGBM 原生類別切分把類別依 $\sum g/\sum h$ 排序後在直方圖上切（Fisher-style），item 只是**一個照 Gain 競爭的候選欄**（22 個 item ≪ ~1000 cardinality，落在原生處理範圍）。因 item-isolation 的 Gain 高（Ch2 的 ① 效應），leaf-wise 成長**常常早早就把主要 item 切出來**——於是「冷熱共處一葉」的前提經常不成立，跨 item 遷移被弱化。**所以本節要明白 hedge**，不寫成「校準全面崩壞」。
+- 跨 item 分數可比性只一句帶過；**機率校準的絕對值問題沿手冊2 立場不展開**。
 
 #### Ch7. 貫穿範例（診斷側）—— 數字已預先驗算
 **設定**：同一訓練集，兩個 item，**等列數**：
@@ -143,8 +144,9 @@
 - 解讀②vs③：熱門個人化 $39.6 \gg$ 冷門個人化 $2.97$（差 ~13×）→ 葉預算被熱門搶走，印證 Ch4。
 - 解讀③的左葉只有 2 列（$H_L = 0.1997$）→ 一碰 `min_data_in_leaf`/`min_sum_hessian` 就被禁，印證雙重稀少。
 - **放大到真實量級**：此例熱:冷正類 = $16{:}2 = 8{:}1$；真實換匯:保單 $\approx 400{:}1$。口頭說明：比例拉到 400:1 時，②③的 Gain 落差再大幅張開（冷門個人化的左葉更小、$\lambda$ 相對份量更重），冷門 item 連被個人化的機會都更稀薄。（用方向性陳述，不偽稱精確倍數。）
+- **繪稿護欄**：示範 400:1 時務必把 $n_j$ 放大（如 $n\sim10^6$）。**不可**直接把 $n{=}80$ 的玩具數字硬縮放成 $P_{\text{hot}}{=}400$ —— 那會算出 $\bar y_{\text{global}}>1$ 的荒謬值。subagent 用 $n{=}10^6, P_{\text{hot}}{=}40000, P_{\text{cold}}{=}100$ 實算過：熱/冷個人化 Gain 比擴大到 $\sim570\times$、冷門葉 hessian 塌到 $\approx1.96$，方向確認無誤。
 
-> **審稿點 C**：表中所有數字請獨立重算驗證（尤其②的 $39.6$、③的 $2.97$、①的 $5.45$）。本 spec 已驗算一輪，但定稿前需 reader-subagent + 寫稿時各驗一次。
+> **審稿點 C（已驗）**：subagent 已對表中全部數字獨立重算，零誤差（$F_0{=}{-}2.066$、$G_H{=}{-}7$、①$\lambda{=}1{=}5.45$、②$39.6$、③$2.97$、比例 $13.3\times$ 皆吻合）。寫稿落數字時仍各驗一次。
 
 ### 第二部 — 處方（都在共享模型框架內）
 
@@ -153,6 +155,7 @@
 - 用 Ch7 同一組數字再算一次：對 C 的列乘 $w_C$（取一個具體值，如 $w_C = 8$ 使冷熱正類質量拉平），重算③的 Gain，顯示它如何追上②。**寫稿時補算式**。
 - 接手冊2 Ch11：這是 `scale_pos_weight` / class weight 的「按 item」推廣（手冊2 是按類別、這裡是按 item × 類別）。
 - 誠實提醒：放大梯度也放大冷門那少數正類**雜訊**的影響；權重太猛會過擬合冷門的個別樣本。
+- 另一誠實提醒（接手冊2 校準立場）：加權會使輸出機率**系統性偏高**——模型仍 loss-calibrated / 保序（排序用途無妨），但機率絕對值失準。沿手冊2，校準絕對值不在本文範疇。
 
 #### Ch9. 全域正則化旋鈕的多 item 困境（$\lambda$ / `min_data_in_leaf` / `min_sum_hessian_in_leaf`）
 - 新現象：這些旋鈕是**全域**的，無法 per-item 設定。
@@ -161,7 +164,7 @@
 
 #### Ch10. per-item 負採樣 / 列比例再平衡
 - 機制：對熱門 item 的負類欠採，壓低其在 $\sum_j n_j$、$\sum_j P_j$ 的主導 → 共享切點不再被熱門綁架。
-- 代價：動到各 item 的 $\bar y_j$ 與全域 base rate → $F_0$ 偏移、輸出分數偏移，需以先驗修正 / 權重補償（接 §5 審稿點 A 的欠採佈局）。
+- 代價：動到各 item 的 $\bar y_j$ 與全域 base rate → $F_0$ 偏移、輸出分數偏移，需以 **logQ / 抽樣機率修正**（負採樣的標準校正）回正；這是手冊2 Ch12 base-rate 偏移的「跨 item」推廣（接 §5 佈局結論的欠採佈局）。
 - 與手冊2 Ch12（重採樣）對照：這裡的採樣是**跨 item 的列比例**問題，不只是單一 item 的正負比例。
 
 #### Ch11. 選招流程 + 收尾
@@ -180,14 +183,20 @@
 
 ---
 
-## 8. 審稿（subagent）關注點彙總
+## 8. 審稿結論（已完成，2026-06-01）
 
-送 general-purpose subagent 做「數學推導正確性 + 多 item 文獻佐證」雙重檢視，重點：
+general-purpose subagent 做了「數學推導正確性 + 多 item 文獻佐證」雙重檢視。
 
-- **審稿點 A**（§5）：完整候選佈局（等列數、冷熱門差在正類率）是否為多 item pointwise 訓練的代表性設定；欠採佈局的差異。
-- **審稿點 B**（Ch6）：共享葉子跨 item 遷移的前提與普遍性（leaf-wise + 有限 `num_leaves` 下樹是否常先切 item）；對照 multi-task GBDT / negative transfer / high-cardinality categorical 文獻。
-- **審稿點 C**（Ch7）：貫穿範例所有 Gain / $G_j$ / $H_j$ / $F_{0,j}$ 數字獨立重算。
-- **主敘事正確性**：「per-item 先驗便宜、深層問題是個人化訊號搶不到葉預算」這個核心論點，是否與 GBDT 數學與推薦系統 popularity-bias / cold-start 文獻一致；有無更精確的既有理論框架（如 long-tail recommendation、gradient domination、focal loss 動機）可佐證或修正。
-- **誠實度**：有無過度宣稱（特別是 Ch6 校準、Ch8/Ch10 處方的療效上限）。
+**VERDICT：sound with minor fixes**。Ch7 貫穿範例所有數字獨立重算零誤差；核心論點（先驗便宜、深層問題是個人化訊號搶不到葉預算）與 focal-loss 文獻同構、獲強力佐證。已將以下精修折回本 spec（§5 佈局結論、Ch1 術語、Ch2 focal 錨點、Ch3 條件性、Ch6 降級為條件性短節 + 負遷移、Ch7 護欄、Ch8 校準提醒、Ch10 logQ）。三個審稿點（A 佈局、B Ch6 普遍性、C 數字）皆已就地標記解決。
 
-文獻錨點（給 subagent 起點，非窮舉）：類別不平衡與 focal loss（Lin et al. 2017）、推薦系統 popularity bias / long-tail（Abdollahpouri 等）、cold-start items、multi-task learning 的 negative transfer、LightGBM 類別特徵與 leaf-wise 成長、`min_data_in_leaf`/`min_sum_hessian_in_leaf`/$\lambda$ 對稀有區的作用、proper scoring rule 與 base-rate 吸收。
+**寫稿時應實際引用的文獻錨點：**
+
+- focal loss（Lin et al. 2017，arXiv:1708.02002）：先驗初始化 $\pi$ 穩定訓練但不解決不平衡；真正的解是 de-dominate 易分樣本——**主敘事最強錨點**。<https://arxiv.org/abs/1708.02002>
+- 流行度偏差 / 長尾（Abdollahpouri et al. 2017，RecSys）：Ch1/Ch11 的術語對接。<https://scds.cdm.depaul.edu/wp-content/uploads/2017/05/SOCRS_2017_paper_5.pdf>
+- cold-start item 繼承 popularity bias（Meehan & Goyal 2025，arXiv:2510.11402）：支撐 Ch11 的誠實上限。<https://arxiv.org/abs/2510.11402>
+- 多任務負遷移（MTL negative transfer 文獻）：Ch6 的精確術語與「條件性、非必然」依據。
+- LightGBM 類別特徵（原生切分依 $\sum g/\sum h$ 排序、≪1000 cardinality）：Ch6 降級的機制依據。<https://lightgbm.readthedocs.io/en/stable/Features.html>
+- `scale_pos_weight` 使機率偏高但保序：Ch8 校準提醒。
+- logQ / 抽樣機率修正：Ch10 負採樣的標準校正。
+
+**誠實度**：無過度宣稱問題；Ch6 已依審稿降級、Ch8/Ch10/Ch11 療效上限均如實標明。
