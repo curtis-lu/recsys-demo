@@ -310,9 +310,16 @@ $$F_0 = \log\frac{\bar y_{\text{global}}}{1 - \bar y_{\text{global}}} = \log\fra
 $$F_{0,H} = \log\frac{0.20}{0.80} = -1.386, \qquad F_{0,C} = \log\frac{0.025}{0.975} = -3.664$$
 <p>全域起點 $-2.065$ 對兩個 item 都不對：對冷門 C 而言<strong>太高</strong>了（起點機率 $p = 0.1125$，是 C 真實率 $0.025$ 的 4.5 倍——模型一開始就系統性高估冷門 item），對熱門 H 而言又太低。</p>
 <h3>但這段錯位很便宜</h3>
-<p>這裡要<strong>誠實</strong>地踩一下煞車：起點錯位聽起來嚴重，其實是整個故事裡<strong>最便宜</strong>的一段。</p>
-<p>只要 item 是模型的一個特徵，樹只要切一刀「以 item 分組」，就能讓每個 item 各自落到自己的 base rate：左葉裝冷門 C、輸出一個負的 $\gamma$ 把它往下壓到 $\bar y_C$；右葉裝熱門 H、輸出一個正的 $\gamma$ 把它往上抬到 $\bar y_H$。這一刀<strong>同時修好兩個 item 的先驗</strong>，而且因為它一致地幫到兩邊各 80 列，Gain 很高（Ch 7 會算出這刀的 $\text{Gain}(\lambda{=}1) \approx 5.45$，遠高於去切冷門個人化的 $2.97$）。所以樹會<strong>很早就把它做掉</strong>。</p>
-<p>換句話說：<strong>per-item 先驗不是深層問題。</strong> 一刀 item split 就解決了。</p>
+<p>起點錯位聽起來嚴重，其實是整個故事裡<strong>最便宜</strong>的一段。</p>
+<p>在我們的兩-item 例子裡，樹切一刀「以 item 分組」，就能讓兩個 item 各自落到自己的 base rate：左葉裝冷門 C、輸出一個負的 $\gamma$ 把它往下壓到 $\bar y_C$；右葉裝熱門 H、輸出一個正的 $\gamma$ 把它往上抬到 $\bar y_H$。這一刀<strong>同時修好兩個 item 的先驗</strong>，因為它一致地幫到兩邊各 80 列，Gain 不小（Ch 7 會算出 $\text{Gain}(\lambda{=}1) \approx 5.45$）。</p>
+<p>「便宜」要講準一點：$5.45$ 這個值大不大，得看跟誰比。它<strong>遠高於</strong>去切冷門個人化的那一刀（$2.97$）——意思是<strong>樹會優先修先驗、而不是去個人化冷門</strong>；至於它比熱門個人化的那刀（$39.6$）小，是另一回事（熱門個人化更誘人，正是 Ch 3–Ch 4 要講的）。</p>
+<p><strong>那如果有 20、30 個 item，不就要切很多刀？</strong> 對——兩個 item 一刀，$M$ 個 item 要全部各自歸位，大約需要 $M-1$ 刀（一棵 $M$ 葉的樹；LightGBM 的類別切分一刀只把 item 分成兩組，要遞迴切到每組剩一個），對應樹深約 $\log_2 M$（$M = 22$、$30$ 都只要深度 ~5）。但這仍然<strong>便宜</strong>，有三個理由：</p>
+<ol>
+<li><strong>維度低</strong>：per-item 先驗總共只有 $M$ 個數字（每個 item 一個 base rate）。$M$ 很小，$M$ 刀就是它的全部自由度。</li>
+<li><strong>每刀都高 Gain、又廣泛共享</strong>：每一刀都一致地修好它兩邊<strong>所有列</strong>的先驗（不分客戶），Gain 大、boosting 樂意花預算；何況 base rate 相近的 item 會被歸成一組、共用一個修正，實際需要的刀數往往比 $M-1$ 還少。</li>
+<li><strong>可攤在多棵樹上</strong>：boosting 有很多棵樹，這 $M$ 刀不必擠進一棵樹的 <code>num_leaves</code>，前幾棵樹就把先驗吸收掉了。</li>
+</ol>
+<p>換句話說：<strong>per-item 先驗不是深層問題</strong>——它是一筆 $O(M)$、低維、GBDT 付得起的小帳。$M$ 變大，先驗也只是多 $M$ 刀的小帳。</p>
 <p>這個區分不是本文獨有。電腦視覺裡處理極端不平衡的 focal loss（Lin et al., 2017）做的正是同一件事：它也用一個<strong>稀有類先驗初始化</strong> $\pi$（角色等同這裡的 $F_0 / F_{0,j}$）來穩定訓練，但論文明白寫著——先驗初始化<strong>不能解決</strong>不平衡，它只是讓訓練別一開始就爆掉；真正的解，是想辦法讓<strong>大量「易分樣本」不再主導梯度</strong>。本文後面會反覆用到這個「易分樣本／梯度被主導」的框架。</p>
 <p>那麼，多 item 共享模型真正難的是什麼？是<strong>先驗修好之後</strong>的事：在每個 item 內部，模型能不能分辨「誰會買」。這就是 Ch 3–Ch 5 的主題。</p>
 <p>對照手冊2 Ch 1：手冊2 的痛點是「起點 $F_0$ 太低、稀有正類要爬很長的路」；這裡換成「全域起點對冷門 item 太高、但一刀就修掉」——同樣是起點，但多 item 的版本反而是便宜的那一段。</p>
@@ -327,15 +334,17 @@ $$F_{0,H} = \log\frac{0.20}{0.80} = -1.386, \qquad F_{0,C} = \log\frac{0.025}{0.
 </ul>
 <p>節點層級的 $G = \sum_i g_i$，現在可以按 item 拆成 $G = \sum_j G_j$。樹要學會「分辨誰會買」，靠的是把「想往上抬的正類」從「想往下壓的負類」中分離出來——而推動這件事的力量，主要來自正類那些大負梯度。</p>
 <p>關鍵在於：<strong>在起點處</strong>（所有列 $p_i = \bar y_{\text{global}}$），<strong>正類的梯度質量總量</strong> $\approx \big(\sum_j P_j\big) \cdot |\bar y_{\text{global}} - 1|$，被熱門 item 的正類筆數 $P_j$ 主導。本文玩具例裡，熱門 H 有 16 個正類、冷門 C 只有 2 個——熱門 H 貢獻了 $16/18 \approx 89\%$ 的正類梯度質量。真實的 $40000{:}100$ 下，冷門 item 的正類梯度幾乎是捨入誤差。</p>
-<h3>後果：共享的客戶特徵切點，被熱門 item 綁架</h3>
-<p>樹在找切點時，會評估各種特徵。其中有一類是<strong>非 item-specific 的切點</strong>——切在客戶屬性上（年齡、資產、月收入……），這些特徵跨 item 共用。這種切點的 Gain，由它能分離多少正類梯度質量決定；而正類梯度質量被熱門 item 主導，所以<strong>這種切點實際上是在「服務熱門 item 的買家輪廓」</strong>。冷門 item 的列被動地跟著這些切點走，不管它自己的買家長不長那樣。</p>
-<p><strong>一個必要的但書（別過度宣稱）：</strong> 熱門的主導是<strong>相對的</strong>——在同一個切點上，熱門贏過冷門。但一個共享客戶特徵切點的 Gain 是否<strong>絕對</strong>夠大，還要看「這個特徵真的能把熱門的正類從熱門的負類分開」。如果熱門 item 的購買本身就不太能被這些客戶特徵預測，那這個切點對誰都不夠好，樹可能寧可去切那刀便宜的 item-isolation（Ch 2）。所以正確的說法是「<strong>共享切點一旦被選中，它的方向是被熱門綁架的</strong>」，而不是「共享切點總是被選中」。</p>
-<p>對照手冊2 Ch 2：手冊2 的拔河發生在「單一 item 內部，正 vs 負」；這裡多疊了一層「item 之間，熱 vs 冷」爭奪同一個切點的方向。</p>
+<h3>後果（一）：item 切開「之前」，共享切點服務的是熱門</h3>
+<p>樹在找切點時會評估各種特徵。其中一類是<strong>非 item-specific 的切點</strong>——切在客戶屬性上（年齡、資產、月收入……），跨 item 共用。這種切點的 Gain 由它能分離多少正類梯度質量決定；而正類梯度質量被熱門主導，所以這種切點的<strong>方向</strong>是「服務熱門 item 的買家輪廓」。在 item 還沒被切開的節點（一棵樹的上層，或 item 根本不在特徵裡時），冷門 item 的列只能被動跟著這些熱門導向的切點走。</p>
+<p>但這個效應別說過頭。LightGBM 是 leaf-wise 生長，而切出 item 的那一刀 Gain 很高（Ch 2、Ch 7 的 ①），所以樹<strong>往往很早就把 item 切開</strong>；一旦冷門 item 被隔進自己的子樹，子樹裡後續的切點就改用<strong>冷門自己的梯度</strong>評估，不再被熱門的買家輪廓綁架。換句話說，「被熱門服務」主要是 item 切開<strong>之前</strong>的事（這也是 Ch 6 負遷移的同一個源頭，而且同樣會被「早切 item」弱化）。</p>
+<h3>後果（二）：item 切開「之後」，冷門換一種方式繼續吃虧</h3>
+<p>那 item 切開之後，冷門就沒事了嗎？沒有——問題只是換了形式。冷門子樹雖然能用自己的梯度找切點，但那些切點的 Gain 太小，在<strong>全域的葉預算競爭</strong>裡贏不過熱門子樹的切點。這才是冷門 item 真正、且躲不掉的瓶頸（它不依賴「樹有沒有先切 item」這個前提，所以比後果（一）穩固得多）。下一章專講。</p>
+<p>對照手冊2 Ch 2：手冊2 的拔河發生在「單一 item 內部，正 vs 負」；這裡多疊了一層「item 之間，熱 vs 冷」爭奪同一棵樹的切點與葉子。</p>
 <nav class="nav"><a href="#ch2">← Ch 2</a><span class="sep">｜</span><a href="#ch4">Ch 4 →</a></nav>
 <hr />
 <p><a id="ch4"></a></p>
 <h2>Ch 4. 葉預算的競爭：冷門 item 的個人化切點被餓死</h2>
-<p>先驗便宜地修好了（Ch 2），共享切點被熱門綁架了（Ch 3）。那要怎麼替<strong>冷門 item 做個人化</strong>——也就是在冷門 item 內部，分辨出它那少數真的會買的客戶？</p>
+<p>先驗便宜地修好了（Ch 2）；item 也被早早切開、冷門進了自己的子樹（Ch 3 後果二）。那麼在冷門 item 自己的子樹裡，要怎麼做<strong>個人化</strong>——分辨出它那少數真的會買的客戶？</p>
 <p>需要的是：在「已經被隔出來的冷門 item」這個子區域裡，用客戶特徵把冷門的少數正類切出來。這正是手冊2 Ch 3「稀有區飢餓」的場景——但在多 item 共享模型裡，它變成<strong>雙重稀少</strong>。</p>
 <p>第一重，和手冊2 一樣：冷門正類的<strong>絕對筆數</strong>少。切出它們的左葉，$G_L$ 與 $H_L$ 都很小（$H_L$ 小是因為列數少、且每列 $h_i = p_i(1-p_i)$ 在 $p$ 接近 0 時本來就小）。$H_L$ 一小，正則化 $\lambda$ 的相對份量就重，這刀的 Gain 被狠狠打折；葉內樣本數下限 <code>min_data_in_leaf</code> 與葉內海森下限 <code>min_sum_hessian_in_leaf</code> 更可能直接<strong>禁止</strong>這刀。</p>
 <p>第二重，是多 item 才有的。LightGBM 是 <strong>leaf-wise（逐葉）生長</strong>：每要長出一片新葉，它都在「當前所有葉子的所有候選切點」裡挑出<strong>全域 Gain 最大</strong>的那一刀，而總葉數受 <code>num_leaves</code> 上限。於是冷門 item 的個人化切點，不只要過 $\lambda$ / min-child 那關，還要在這個全域排行榜上<strong>贏過熱門 item 的個人化切點</strong>——而後者有多得多的正類撐腰。</p>
@@ -369,7 +378,7 @@ $$F_{0,H} = \log\frac{0.20}{0.80} = -1.386, \qquad F_{0,C} = \log\frac{0.025}{0.
 <tr>
 <td>起點 $F_0$</td>
 <td>太低，稀有正類要爬長路（真問題）</td>
-<td>全域起點對冷門太高，但一刀 item split 就修好（<strong>便宜</strong>）</td>
+<td>全域起點對冷門太高，但 $O(M)$ 刀 item split 就修好（<strong>便宜</strong>）</td>
 </tr>
 <tr>
 <td>梯度 $G$</td>
@@ -393,11 +402,11 @@ $$F_{0,H} = \log\frac{0.20}{0.80} = -1.386, \qquad F_{0,C} = \log\frac{0.025}{0.
 <hr />
 <p><a id="ch6"></a></p>
 <h2>Ch 6. 共享葉子的跨 item 負遷移</h2>
-<p>這一章<strong>刻意寫短</strong>，因為它描述的效應是<strong>條件性的、而且多半是次要的</strong>——但值得點名，因為它有個正式的名字。</p>
+<p>Ch 3 末尾提過：item 被早早切開後，跨 item 的污染就被弱化。但在 item 尚未切開的葉子裡，它仍會以一個有正式名字的形式短暫出現——<strong>負遷移</strong>。</p>
 <p>機制是這樣：如果某棵樹先切的是<strong>客戶特徵</strong>（而非 item），那這棵樹的葉子裡會<strong>同時裝著冷門和熱門的列</strong>。葉輸出 $\gamma = -G_{\text{leaf}}/(H_{\text{leaf}}+\lambda)$ 由葉內多數方（熱門）的梯度主導，於是落在這片葉子裡的冷門列，被套上了一個「照熱門買家輪廓推導出來的」調整。在多任務學習裡，這叫<strong>負遷移（negative transfer）</strong>：共享參數被主導任務調校，反而傷到少數任務。它可正可負——冷熱買家若相似，冷門沾光；若不相似，冷門被帶偏。</p>
 <h3>為什麼它多半次要</h3>
 <p>關鍵在於上面那個「<strong>如果</strong>樹先切客戶特徵」的前提，在實務中經常不成立。LightGBM 處理類別特徵時，是把各類別依其累積的 $\sum g / \sum h$ 排序，再在排序後的序列上找一刀切點（Fisher 1958 證過：依這個比值排序後，最佳的「哪些類別歸一組」必定落在排序上的某一刀，不必窮舉所有分組）。這些是實作細節，不必深究——對我們的目的，只要知道 <strong>item 就是一個照 Gain 跟其他特徵競爭的候選欄</strong>，而且 22 個 item 遠低於 ~1000 的 cardinality 上限、落在原生類別處理的舒適區即可。而我們在 Ch 2 看到，切出 item 的那刀 Gain 很高（玩具例 $\approx 5.45$）。所以 leaf-wise 成長<strong>常常很早就把主要的 item 切出來</strong>了——一旦 item 被隔開，後面的葉子就不再混冷熱，跨 item 的負遷移自然被弱化。</p>
-<p>所以本章的態度是 <strong>hedge</strong>：負遷移是真實存在、有名字的效應，但在「item 是高 Gain 特徵」的共享模型裡，它通常是二階的，不該被寫成「校準全面崩壞」。（至於跨 item 的分數可比性、機率絕對值是否準——那是校準問題，沿手冊2 立場本文不展開。）</p>
+<p>所以負遷移雖然真實、有名字，但在「item 是高 Gain 特徵」的共享模型裡通常是二階的，不必把它說成「校準全面崩壞」。（至於跨 item 的分數可比性、機率絕對值是否準——那是校準問題，沿手冊2 立場本文不展開。）</p>
 <nav class="nav"><a href="#ch5">← Ch 5</a><span class="sep">｜</span><a href="#ch7">Ch 7 →</a></nav>
 <hr />
 <p><a id="ch7"></a></p>
@@ -439,7 +448,8 @@ $$F_0 = \log\tfrac{0.1125}{0.8875} = -2.065, \quad F_{0,H} = \log\tfrac{0.2}{0.8
 <p>把梯度按 item 加總（正類 $g = -0.8875$、負類 $g = 0.1125$）：</p>
 <p>$$G_H = 16(-0.8875) + 64(0.1125) = -7.0, \qquad H_H = 80(0.09984) = 7.987$$
 $$G_C = \phantom{1}2(-0.8875) + 78(0.1125) = +7.0, \qquad H_C = 80(0.09984) = 7.987$$</p>
-<p>注意 $G_H + G_C = 0$——這正是主手冊 Ch 3 選 $F_0$ 的一階條件 $\sum_i g_i = 0$。但兩個 item 各自的 $G_j$ 一個 $-7$、一個 $+7$：熱門 H 整體「想被往上抬」（先驗太低），冷門 C 整體「想被往下壓」（先驗太高）。這就是 Ch 2 說的起點錯位。</p>
+<p>為什麼 $G_H + G_C$ 剛好是 $0$？這不是巧合，是<strong>必然</strong>：$F_0$ 當初就是選來讓「全是常數」的模型最優的，那個最優條件正是整體一階導數為零，即 $\sum_i g_i = 0$（主手冊 Ch 3）。把所有列拆成 H、C 兩塊後，兩塊的梯度和自然必須等值反號，所以 $G_C = -G_H$ <strong>一定</strong>成立——至於它的值剛好是 $7$，才是這組數字決定的。（換成 3 個以上 item，各 $G_j$ 仍加總為 $0$，但不再兩兩反號。）</p>
+<p>符號的意義很直白：$G_H = -7 < 0$ 表示熱門 H 整體「想被往上抬」（起點 $0.1125$ 低於它的真實率 $0.20$），$G_C = +7 > 0$ 表示冷門 C「想被往下壓」（起點高於它的 $0.025$）；全域 $F_0$ 卡在加權中點，兩邊剛好抵消。這就是 Ch 2 說的起點錯位。</p>
 <h3>三種切點的 Gain 對比</h3>
 <p>用主手冊 Ch 5.3 的 Gain 公式 $\text{Gain} = \frac12\big[\frac{G_L^2}{H_L+\lambda} + \frac{G_R^2}{H_R+\lambda} - \frac{G^2}{H+\lambda}\big]$，算三刀：</p>
 <table>
@@ -476,16 +486,39 @@ $$G_C = \phantom{1}2(-0.8875) + 78(0.1125) = +7.0, \qquad H_C = 80(0.09984) = 7.
 </tr>
 </tbody>
 </table>
+<p>先講清楚這三刀<strong>在哪裡</strong>，免得拿來亂比：① 是在 <strong>160 列的根節點</strong>上、把兩個 item 分開的那一刀；②、③ 則是各自在 <strong>H、C 子樹（各 80 列）內</strong>再切一刀做個人化。三者都用「所有列都還停在起點 $p = 0.1125$」這個<strong>同一參考點</strong>評估，所以可以擺在一起比「此刻各自值多少」（樹真正動手後梯度會更新，但這個快照足以看清相對大小）。</p>
 <p>三段解讀，正好對應前面三章：</p>
 <ul>
-<li><strong>① 印證 Ch 2「先驗便宜」</strong>：把兩個 item 隔開、各自修先驗的那刀，$\text{Gain}(\lambda{=}1) = 5.45$，相當可觀。樹會早早做掉它。</li>
+<li><strong>① 印證 Ch 2「先驗便宜」</strong>：把兩個 item 隔開、各自修先驗的那刀，$\text{Gain}(\lambda{=}1) = 5.45$。它比熱門個人化 ② 小，但<strong>遠大於</strong>冷門個人化 ③——所以樹會優先修先驗。</li>
 <li><strong>②≫③ 印證 Ch 4「葉預算競爭」</strong>：熱門個人化 $39.6$ 把冷門個人化 $2.97$ 壓在地上摩擦（差約 13 倍）。樹挑 Gain 最大的切點，葉預算一路流向熱門 item。</li>
-<li><strong>③ 印證雙重稀少</strong>：冷門個人化的左葉只裝了 2 列，$H_L = 0.1997$ 小到只要設一個尋常的 <code>min_sum_hessian_in_leaf</code> 或 <code>min_data_in_leaf</code>，這刀<strong>根本不被允許切</strong>。冷門 item 的個人化，連嘗試的資格都沒有。</li>
+<li><strong>③ 印證雙重稀少</strong>：冷門個人化的左葉只裝了 <strong>2 列</strong>——遠低於 <code>min_data_in_leaf</code> 的預設值（20），這刀<strong>根本不被允許切</strong>；就算放寬列數下限，$H_L = 0.1997$ 也很小，容易再撞上 <code>min_sum_hessian_in_leaf</code>。冷門 item 的個人化，連嘗試的資格都沒有。</li>
 </ul>
 <h3>放大到真實量級</h3>
-<p>這個玩具例的熱:冷正類是 $16{:}2 = 8{:}1$。真實的換匯:保單約 $400{:}1$。方向上，比例越極端，②③的 Gain 落差張得越開（冷門個人化的左葉更小、$\lambda$ 的相對份量更重），冷門 item 被個人化的機會越稀薄。</p>
+<p>這個玩具例的熱:冷正類是 $16{:}2 = 8{:}1$，差距已是 $13$ 倍。真實的換匯:保單約 $400{:}1$，差距會張到什麼程度？把列數一起放大到真實規模（每個 item $n = 10^6$ 列、熱門 $P_H = 40000$、冷門 $P_C = 100$，於是 $\bar y_{\text{global}} \approx 0.020$）實算這兩刀：</p>
+<table>
+<thead>
+<tr>
+<th>個人化切點</th>
+<th>$\text{Gain}(\lambda{=}1)$</th>
+<th>左葉 $H_L$</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>熱門</td>
+<td>$\approx 976{,}000$</td>
+<td>$\approx 786$</td>
+</tr>
+<tr>
+<td>冷門</td>
+<td>$\approx 1{,}720$</td>
+<td>$\approx 1.96$</td>
+</tr>
+</tbody>
+</table>
+<p>熱/冷個人化的 Gain 比，從玩具的 $13$ 倍張到 $\approx \mathbf{567}$ 倍。注意一個轉折：冷門這裡有 $100$ 個正類，左葉 $100$ 列、$H_L \approx 1.96$，已經<strong>不會</strong>被預設的 <code>min_data_in_leaf</code>（20）或 <code>min_sum_hessian_in_leaf</code> 擋掉了——它不是被「禁切」，而是 Gain 太小、在全域排行榜上<strong>徹底排不到隊</strong>。換句話說，item 越冷，先是輸在 Gain 競爭（這裡），再冷到正類只剩個位數時，連 min-child 那關都過不去（玩具例的 ③）——兩道關卡接力把冷門擋在門外。</p>
 <blockquote>
-<p><strong>一個算術陷阱（給想自己驗算的讀者）：</strong> 要示範 $400{:}1$，務必把列數 $n_j$ 一起放大（例如 $n \sim 10^6$、$P_H = 40000$、$P_C = 100$）。<strong>不能</strong>把 $n = 80$ 的玩具直接硬塞 $P_H = 400$——那會算出 $\bar y_{\text{global}} > 1$ 的荒謬值。用 $n = 10^6$ 實算，熱/冷個人化的 Gain 比會擴大到約 $570$ 倍，冷門葉的海森塌到 $\approx 1.96$，方向與玩具例一致。</p>
+<p><strong>一個算術陷阱（給想自己驗算的讀者）：</strong> 要示範 $400{:}1$，務必把列數 $n_j$ 一起放大，<strong>不能</strong>把 $n = 80$ 的玩具直接硬塞 $P_H = 400$——那會算出 $\bar y_{\text{global}} > 1$ 的荒謬值。</p>
 </blockquote>
 <nav class="nav"><a href="#ch6">← Ch 6</a><span class="sep">｜</span><a href="#ch8">Ch 8 →</a></nav>
 <hr />
@@ -503,7 +536,14 @@ $$G_C = \phantom{1}2(-0.8875) + 78(0.1125) = +7.0, \qquad H_C = 80(0.09984) = 7.
 </ul>
 $$\text{Gain}(\lambda{=}1) = \frac12\left[\frac{14.2^2}{1.598+1} + \frac{70.2^2}{62.30+1} - \frac{56^2}{63.90+1}\right] = \frac12[77.6 + 77.8 - 48.3] \approx 53.6$$
 <p>冷門個人化的 Gain 從 $2.97$ 跳到 $\mathbf{53.6}$——<strong>反超熱門個人化的 $39.6$</strong>。同樣重要的是，左葉的海森從 $H_L = 0.1997$ 抬到 $1.598$，不再一碰 <code>min_sum_hessian_in_leaf</code> 就被禁。冷門 item 終於搶得到下一刀葉預算去做個人化。</p>
-<p>這就是 <code>scale_pos_weight</code> / class weight 的「按 item」推廣：手冊2 Ch 11 是按<strong>類別</strong>（正 vs 負）加權，這裡是按 <strong>item ×（隱含的）類別</strong>加權——對冷門 item 多給一份話語權。</p>
+<p>釐清一個容易混淆的點：這跟手冊2 Ch 11 的 <code>scale_pos_weight</code> 是<strong>不同軸</strong>的加權。<code>scale_pos_weight</code> 調的是<strong>類別</strong>權重（把正類相對負類放大，治單一目標<strong>內部</strong>的正負不平衡）；這裡調的是 <strong>item</strong> 權重（把整個冷門 item——它的正類和負類<strong>一起</strong>——相對熱門 item 放大，治的是<strong>跨 item</strong> 的話語權不均）。上面的 $w_C = 8$ 就是純 item 加權：冷門 C 的每一列（不分正負）都乘 $8$。兩軸可以<strong>疊加</strong>——你大可在冷門 item 內部再對它的正類多加一層 class weight——但那是另一個獨立的旋鈕。</p>
+<h3>$w_j$ 大概怎麼設？</h3>
+<p>沒有萬用公式，但有起手式：</p>
+<ul>
+<li><strong>起點：拉平正類質量</strong>，即 $w_j \propto 1/P_j$（或 $1/\bar y_j$）。上面 $w_C = 8 = 16/2$ 就是讓冷門的正類質量追平熱門。</li>
+<li><strong>但別用純 $1/P_j$，要阻尼。</strong> 最冷的 item 正類可能只有個位數，純倒數會把它的權重開到天上，等於拿那幾筆（很可能是雜訊）去主導整棵樹。實務上改用<strong>開根號</strong>（$w_j \propto 1/\sqrt{P_j}$）或直接<strong>設一個權重上限</strong>來壓。一個有理論依據的阻尼是 Cui et al. (2019) 的「有效樣本數」：$w_j \propto (1-\beta)\big/(1-\beta^{\,n_j})$，用 $\beta \in [0,1)$ 控制阻尼強度（$\beta \to 0$ 退化成不加權，$\beta \to 1$ 趨近純 $1/n_j$）。</li>
+<li><strong>最後一定要在驗證集上調，而且看對的指標。</strong> 看 per-item 或 macro 平均的 recall / AP（每個 item 等權），而不是被熱門 item 灌水的整體 accuracy。權重開多大，沒辦法純推導，要量。</li>
+</ul>
 <h3>兩條誠實提醒</h3>
 <ul>
 <li><strong>放大訊號的同時也放大雜訊。</strong> 冷門 C 只有 2 個正類，把它們的梯度乘 8，等於讓這 2 筆樣本（可能含標註雜訊、可能是巧合）對樹的影響力暴增。權重太猛，模型會去硬背冷門 item 的個別樣本（過擬合），而不是學到可推廣的規律。$w_j$ 是一個要小心調的旋鈕，不是越大越好。</li>
@@ -531,9 +571,12 @@ $$\text{Gain}(\lambda{=}1) = \frac12\left[\frac{14.2^2}{1.598+1} + \frac{70.2^2}
 <p><a id="ch10"></a></p>
 <h2>Ch 10. per-item 負採樣 / 列比例再平衡</h2>
 <p>還有一條路是從<strong>資料的列比例</strong>下手，而不是動梯度權重。Ch 3 指出共享切點被熱門 item 綁架，根源是熱門 item 在 $\sum_j P_j$、$\sum_j n_j$ 裡的份量太大。那就<strong>對熱門 item 的負類欠採</strong>，把它的列數壓下來，讓各 item 在訓練表裡的份量更平均——共享切點就不再一面倒地服務熱門買家輪廓。</p>
-<p>這也順帶縮小了 Ch 2 的先驗錯位：對熱門 item 欠採負類，會抬高它（以及全域）的有效 $\bar y_j$，各 item 的起點落差變小。</p>
+<h3>它確實降低熱門的主導——用數字看</h3>
+<p>這裡有個值得正面回答的直覺擔心：欠採熱門的負類，不是讓熱門的正類「更不被稀釋、更容易被切乾淨」嗎？那豈不是反而<strong>幫了</strong>熱門？</p>
+<p>關鍵要分清「切得乾不乾淨」和「Gain 大不大」是兩回事——<strong>Gain 衡量的是總 loss 下降量，會隨資料量縮水</strong>。把熱門的負類從 $64$ 欠採到 $16$（玩具例、其他不動），重算熱門個人化切點：它的 $\text{Gain}(\lambda{=}1)$ 從 $39.6$ <strong>掉到 $18.5$</strong>，而冷門幾乎不動（$2.97 \to 2.93$）。於是熱對冷的主導比從 $13.3$ 倍縮到 $\mathbf{6.3}$ 倍——熱門的葉預算優勢被削掉一半。切得更乾淨是真的，但<strong>能降的 loss 變少了</strong>，所以 Gain 反而下降，這正是我們要的。</p>
+<p><strong>注意這個槓桿是不對稱的：只欠採熱門，別動冷門。</strong> 冷門 item 本來就 data-starved，對它的負類也欠採，只會讓它的列更少、Gain 更低，雪上加霜。要平衡跨 item 的份量，方向是<strong>把過多的熱門壓下來</strong>，而不是把稀少的冷門也一起砍。</p>
 <h3>代價：動了 base rate，要把它修回來</h3>
-<p>欠採是有副作用的：它<strong>改變了各 item 的 $\bar y_j$ 與全域 base rate</strong>。模型在被採樣過的資料上學到的 $F$，對應的是<strong>採樣後</strong>的機率，不是真實世界的購買率——輸出分數會系統性偏移。</p>
+<p>欠採是有副作用的：它<strong>改變了各 item 的 $\bar y_j$ 與全域 base rate</strong>。模型在被採樣過的資料上學到的 $F$，對應的是<strong>採樣後</strong>的機率，不是真實世界的購買率——輸出分數會系統性偏移。（也別誤會它能順手修好先驗：只欠採熱門負類其實會<strong>抬高</strong>全域 $\bar y$、把冷門的起點推得<strong>更偏</strong>；但先驗本來就便宜（Ch 2），加上下面的 logQ 兜底，這點不礙事。）</p>
 <p>標準的修法叫 <strong>logQ 修正</strong>（或抽樣機率修正）：對每個被採樣的 item，在分數（log-odds）上加回一個位移——若負類保留比例為 $r$（$r<1$），位移量約為 $\log r$（負值，把因欠採而被抬高的分數壓回）——就能把機率拉回真實尺度。概念上，這就是手冊2 Ch 12「重採樣會搬動 base rate、要把 $F_0$ 補回來」的<strong>跨 item 推廣</strong>——只是現在每個 item 的採樣比例可能不同，補正也要分 item 做。</p>
 <p>要分清楚這跟手冊2 重採樣的差別：手冊2 調的是<strong>單一 item 內部的正負比</strong>；這裡調的是<strong>跨 item 的列比例</strong>（哪個 item 在訓練表裡佔多少列）。前者治「正類太少」，後者治「熱門 item 佔太多」。</p>
 <nav class="nav"><a href="#ch9">← Ch 9</a><span class="sep">｜</span><a href="#ch11">Ch 11 →</a></nav>
@@ -549,6 +592,14 @@ $$\text{Gain}(\lambda{=}1) = \frac12\left[\frac{14.2^2}{1.598+1} + \frac{70.2^2}
 <li><strong>正則化旋鈕當輔助（Ch 9）。</strong> 知道它是全域的、冷熱需求互斥；通常不靠它當主力，而是配合權重微調。</li>
 <li><strong>資料份量太偏時，再考慮列比例再平衡（Ch 10）。</strong> 對熱門 item 欠採負類，記得做 logQ 修正把分數拉回真實尺度。</li>
 </ol>
+<h3>加權與欠採會打架嗎？</h3>
+<p>Ch 8（對冷門加權）和 Ch 10（對熱門欠採）其實在做同一件事——抬高冷門相對熱門的 Gain——所以它們<strong>部分冗餘</strong>。事實上，把熱門負類的保留比例降到 $r$，效果<strong>約等於</strong>把那些被丟掉的熱門列加權成 $0$；反過來，對冷門加權 $w$ 也約等於把冷門「複製」$w$ 份。兩個一起開，很容易<strong>過頭</strong>：冷門的相對 Gain 被抬太高，樹開始硬背它那寥寥幾筆正類（Ch 8 的過擬合風險加倍），熱門則被削到學不好。</p>
+<p>幾個務實原則：</p>
+<ul>
+<li><strong>擇一當主力。</strong> 通常選 item 加權（Ch 8），因為它不丟資料、旋鈕連續好調；欠採（Ch 10）多半是為了<strong>算力</strong>（列數太多）順帶做的，不必兩個都開到滿。</li>
+<li><strong>若兩個都用</strong>，欠採記得配 logQ 修正（Ch 10），而且兩者的力道要<strong>一起</strong>在 macro / per-item 驗證指標上調，不要各調各的——否則你會對同一個失衡重複補償。</li>
+<li><strong>盯著過擬合訊號</strong>：冷門 item 的訓練指標漂亮、驗證指標卻崩，就是補過頭了，把力道收回來。</li>
+</ul>
 <h3>收尾：能緩解，但別期待根治</h3>
 <p>這些手段都在<strong>同一個共享模型內</strong>動手腳，它們能把冷門 item 的處境<strong>緩解</strong>到可用——但要老實說：當冷門 item 的<strong>絕對正類筆數</strong>低到一個程度（保單那 100 人放進 1000 萬列裡），單一共享模型有它的天花板。權重再大，也只是放大那寥寥幾筆樣本，變不出本來不存在的訊號；這時答案往往不在「再調一個旋鈕」，而在資料層（更長的觀察窗、更好的正類定義、外部訊號）或更上層的結構。</p>
 <p>冷門 item 的偏好天生難學，這是 cold-start／popularity bias 的固有難處（Meehan &amp; Goyal, 2025），不是調參能無中生有的。誠實地知道天花板在哪，比硬把一個指標調漂亮更重要。</p>
