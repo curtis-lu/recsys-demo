@@ -36,6 +36,57 @@ def _composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
     return keys
 
 
+def _translate_weight_table(
+    sample_weights: dict,
+    weight_keys: list,
+    category_mappings: dict,
+    identity_columns: list,
+) -> tuple[dict, dict]:
+    """Translate config sample_weights keys into the parquet's encoded space.
+
+    A component whose column is an *encoded feature* (in ``category_mappings``
+    and NOT an identity column — identity cats are stored raw in model_input) is
+    mapped from its human-readable value to ``str(index)`` in
+    ``category_mappings[col]`` (matching ``_encode_categoricals``). Identity /
+    label / carry / numeric components pass through unchanged. A key with any
+    unknown feature value is dropped (cannot match) and recorded.
+
+    Returns ``(translated, unknown_values)``; ``unknown_values`` maps a weight-key
+    column to the sorted config values absent from its mapping.
+    """
+    identity = set(identity_columns)
+    code_of: dict[str, dict[str, str]] = {}
+    for col in weight_keys:
+        if col in category_mappings and col not in identity:
+            code_of[col] = {
+                str(cat): str(i) for i, cat in enumerate(category_mappings[col])
+            }
+
+    translated: dict[str, float] = {}
+    unknown: dict[str, list[str]] = {}
+    for key, weight in sample_weights.items():
+        parts = str(key).split("|")
+        if len(parts) != len(weight_keys):
+            # arity is enforced by A9b at the config gate; keep as-is defensively.
+            translated[str(key)] = weight
+            continue
+        out_parts: list[str] = []
+        bad = False
+        for part, col in zip(parts, weight_keys):
+            if col in code_of:
+                code = code_of[col].get(part)
+                if code is None:
+                    unknown.setdefault(col, []).append(part)
+                    bad = True
+                else:
+                    out_parts.append(code)
+            else:
+                out_parts.append(part)
+        if not bad:
+            translated["|".join(out_parts)] = weight
+    return translated, {c: sorted(set(v)) for c, v in unknown.items()}
+
+
 def _compute_row_weights(
     pdf: pd.DataFrame,
     weight_keys: list,
