@@ -253,7 +253,24 @@
 
 **Files:** Modify `gbdt_multiitem_imbalance.md`（修 QA 發現）、必要時重 build HTML
 
-- [ ] **Step 1：派 reader-subagent**（用 `docs/handbook-writing-guide.md` §11 升級版 reviewer prompt），通讀 `gbdt_multiitem_imbalance.md`，額外查：主旨一致性（共享模型框架是否守住、未越界談 per-item/LTR）／抽象未落地（每個主張有無數字）／鷹架洩漏（章名備註、代號代稱、spec 痕跡）／範疇失衡（Ch6 是否確實短、Ch7 是否撐起核心）／**簡繁體**／數學數字正確（重點 Ch7、Ch8）／跨章引用與符號一致。
+- [ ] **Step 1：派 reader-subagent**（**整篇寫完、HTML build 完才跑**），通讀 `gbdt_multiitem_imbalance.md`。使用者指定的 reviewer prompt（一字不差用這個 persona）：
+
+  > 你是一位工程背景的讀者：
+  > - 會微積分、線性代數
+  > - 知道 logistic regression、sigmoid
+  > - 沒系統學過 GBDT、boosting；不熟 Newton's method
+  > - 不熟 XGBoost / LightGBM 的內部數學
+  >
+  > 任務：通讀文件，逐段標出卡關處。不要客氣、不要假裝懂、不要從上下文猜。看不懂就明說：
+  > - 哪一句、哪個式子卡住
+  > - 卡的原因（符號沒定義 / 推導跳步 / 動機沒講 / 斷言無理 / 上下文不接）
+  > - 你期待補什麼才能往下讀
+  >
+  > 另外四項檢查：(i) 主旨一致性（結論／開場是否與內文證據矛盾、有無過度宣稱）；(ii) 抽象未落地（哪些主張只有形容詞、缺具體數字）；(iii) 鷹架洩漏（標題／內文的自用記號）；(iv) 範疇失衡（邊緣主題佔太多／核心講太淺）。
+  >
+  > 保留 persona、驗算（重算 Ch7／Ch8 所有數字）、跨章引用檢查（章號／符號／數字跨章一致）。
+
+  **給 subagent 的脈絡（自身冷啟動需知）**：本手冊**假設讀者已讀手冊1（GBDT 機制、Newton step）與手冊2（單一不平衡）**——若卡關處其實是手冊1/2 已教的前提，subagent 仍應標出，但我（觸發者）triage 時判定「屬前提、不在本手冊補」即可；真正要補的是手冊3 自身引入卻沒交代的東西。檔案路徑：worktree 內 `gbdt_multiitem_imbalance.md`、`gbdt_binary_classification.md`、`gbdt_class_imbalance.md`。
 - [ ] **Step 2：修正** QA 發現的問題（逐項）。
 - [ ] **Step 3：若改動正文 → 重跑 Task 13 Step 2 重建 HTML。**
 - [ ] **Step 4：驗證**：QA 無剩餘 blocking 問題；簡繁掃描乾淨。
