@@ -106,13 +106,23 @@ def _compute_row_weights(
     return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
 
 
-def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
+def _row_weights_from_pdf(
+    pdf: pd.DataFrame, parameters: dict, preprocessor_metadata: dict,
+) -> np.ndarray:
     """Resolve a per-row weight array from training.sample_weights.
 
     All-ones when the table is absent/empty or any configured weight-key
     column is missing from pdf (graceful, never raises; consistency gate A9a
     already blocks unavailable columns at CLI entry). Computed from the
     *given* pdf so it stays aligned to the caller's filtering/ordering.
+
+    Encode-aware: weight-key columns that are *encoded features* (present in
+    ``preprocessor_metadata["category_mappings"]`` and NOT identity columns)
+    are stored as int codes in the parquet.  The config table is translated
+    via ``_translate_weight_table`` before matching, so callers can write
+    human-readable values (e.g. ``"hnw"``) in the YAML and still get correct
+    per-row weights.  Keys with unknown category values are dropped (cannot
+    match any row) and a WARNING is emitted.
 
     Emits one observability line per call (train + train_dev each log once) so a
     run's log alone answers "did sample_weight take effect?":
@@ -128,16 +138,13 @@ def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
     """
     training = parameters.get("training", {}) or {}
     sw = training.get("sample_weights") or {}
-    # The base YAML always supplies sample_weight_keys (default [prod_name]); the
-    # [schema.item] fallback only matters for test fixtures that omit the key.
     weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
     n_rows = len(pdf)
 
     missing = [k for k in weight_keys if k not in pdf.columns]
     if not sw or missing:
         reason = (
-            "sample_weights table is empty"
-            if not sw
+            "sample_weights table is empty" if not sw
             else f"weight-key column(s) {missing} absent from parquet"
         )
         logger.info(
@@ -147,16 +154,29 @@ def _row_weights_from_pdf(pdf: pd.DataFrame, parameters: dict) -> np.ndarray:
         )
         return np.ones(n_rows, dtype=np.float64)
 
-    w = _compute_row_weights(pdf, weight_keys, sw)
+    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
+    identity_cols = get_schema(parameters)["identity_columns"]
+    translated, unknown = _translate_weight_table(
+        sw, weight_keys, category_mappings, identity_cols)
+    if unknown:
+        logger.warning(
+            "sample_weight: unknown category value(s) %s — those entries cannot "
+            "match any row (left at weight 1.0).", unknown,
+        )
+        # If every key was dropped as unknown, the unknown-value warning above
+        # is the full diagnosis — skip the redundant 0-match warning below.
+        if not translated:
+            return np.ones(n_rows, dtype=np.float64)
+
+    w = _compute_row_weights(pdf, weight_keys, translated)
     n_adjusted = int((w != 1.0).sum())
     if n_adjusted == 0:
         sample_data_keys = (
             _composite_key_series(pdf, weight_keys).drop_duplicates().head(5).tolist()
         )
         logger.warning(
-            "sample_weight table matched 0 of %d rows — configured keys likely do "
-            "not match the parquet values (check int-coded vs string values / "
-            "typos). weight_keys=%s; sample configured keys=%s; sample data keys=%s",
+            "sample_weight matched 0 of %d rows — weight_keys=%s; sample "
+            "configured keys (human-readable)=%s; sample data keys (encoded)=%s",
             n_rows, weight_keys, sorted(map(str, sw))[:5], sample_data_keys,
         )
     else:
@@ -302,7 +322,7 @@ def extract_Xy(
     log_data_volume(logger, "extract_Xy.y", y)
 
     if with_weights:
-        w = _row_weights_from_pdf(pdf, parameters)
+        w = _row_weights_from_pdf(pdf, parameters, preprocessor_metadata)
         log_data_volume(logger, "extract_Xy.w", w)
         return X, y, w
     return X, y
@@ -378,7 +398,7 @@ def extract_Xy_with_groups(
 
     result: list = [X, y, groups]
     if with_weights:
-        w = _row_weights_from_pdf(pdf, parameters)
+        w = _row_weights_from_pdf(pdf, parameters, preprocessor_metadata)
         log_data_volume(logger, "extract_Xy_with_groups.w", w)
         result.append(w)
     if with_items:
