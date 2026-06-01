@@ -151,7 +151,7 @@ def _write_pipeline_manifest(
 ):
     metadata = build_manifest_metadata(**metadata_kwargs)
     metadata["run_id"] = run_id
-    if extra_metadata:
+    if extra_metadata is not None:
         metadata.update(extra_metadata)
     write_manifest(version_dir, metadata)
     if symlink_target:
@@ -163,6 +163,15 @@ def _write_pipeline_manifest(
 
 def _dir_artifacts(d: Path) -> list[str]:
     return sorted(f.name for f in d.iterdir() if f.is_file()) if d.is_dir() else []
+
+
+def _sample_weight_extra(version_dir: Path) -> Optional[dict]:
+    """Read sample_weight_report.json (if present) into manifest extra_metadata."""
+    report = version_dir / "sample_weight_report.json"
+    if not report.exists():
+        return None
+    with open(report) as f:
+        return {"sample_weight": json.load(f)}
 
 
 def _run_etl(
@@ -468,6 +477,7 @@ def training(
         version_dir=version_dir,
         metadata_kwargs=metadata_kwargs,
         run_id=run_context.run_id,
+        extra_metadata=_sample_weight_extra(version_dir),
         symlink_target=None,
         params_name="parameters_training",
         params_dict=params_training,
