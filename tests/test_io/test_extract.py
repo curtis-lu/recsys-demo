@@ -435,6 +435,59 @@ class TestComputeRowWeights:
         assert w.dtype == np.float64
 
 
+from recsys_tfb.io.extract import _row_weights_from_pdf
+
+
+class TestRowWeightsObservability:
+    """The per-call log line is the only runtime signal of whether
+    sample_weight took effect (see _row_weights_from_pdf docstring)."""
+
+    def _pdf(self):
+        return pd.DataFrame({"prod_name": ["a", "a", "b", "c"], "label": [1, 0, 1, 0]})
+
+    def _params(self, weights, weight_keys=("prod_name",)):
+        return {
+            "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                                   "item": "prod_name", "label": "label"}},
+            "training": {"sample_weights": weights,
+                         "sample_weight_keys": list(weight_keys)},
+        }
+
+    def test_logs_inactive_for_empty_table(self, caplog):
+        with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(self._pdf(), self._params({}))
+        np.testing.assert_array_equal(w, np.ones(4))
+        msg = "\n".join(r.getMessage() for r in caplog.records)
+        assert "sample_weight INACTIVE" in msg and "table is empty" in msg
+
+    def test_logs_inactive_when_key_column_absent(self, caplog):
+        with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(
+                self._pdf(), self._params({"x": 5.0}, weight_keys=("not_a_col",)))
+        np.testing.assert_array_equal(w, np.ones(4))
+        msg = "\n".join(r.getMessage() for r in caplog.records)
+        assert "sample_weight INACTIVE" in msg and "absent from parquet" in msg
+
+    def test_logs_active_with_distribution(self, caplog):
+        with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(self._pdf(), self._params({"a": 2.0}))
+        np.testing.assert_array_equal(w, np.array([2.0, 2.0, 1.0, 1.0]))
+        msg = "\n".join(r.getMessage() for r in caplog.records)
+        assert "sample_weight ACTIVE" in msg
+        assert "rows_adjusted=2" in msg          # the two 'a' rows
+        assert "weight min/mean/max=1.000" in msg
+
+    def test_warns_when_table_matches_zero_rows(self, caplog):
+        # 'zzz' is not a product in the data -> table matches nothing
+        with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(self._pdf(), self._params({"zzz": 2.0}))
+        np.testing.assert_array_equal(w, np.ones(4))
+        warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("matched 0 of 4 rows" in m for m in warns)
+        # the diagnostic surfaces the real data keys so a mismatch is obvious
+        assert any("sample data keys=" in m for m in warns)
+
+
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
 
