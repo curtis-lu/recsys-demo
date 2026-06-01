@@ -368,7 +368,7 @@ function buildRatio(){{
   a.n_pos+=s.n_pos; a.n_neg+=s.n_neg; m.set(k,a); }});
  const rows=[...m.values()];
  rows.forEach(r=>{{ r.pos_rate=(r.n_pos+r.n_neg>0?r.n_pos/(r.n_pos+r.n_neg):0);
-  r.suggested_neg_mult=R; }});
+  r.suggested_neg_mult=R; r.ratio_direct=1; }});
  return rows.sort((x,y)=>y.n_pos-x.n_pos);
 }}
 const RATIO=buildRatio();
@@ -399,9 +399,11 @@ function rebuildWeight(){{
 let tab='ratio',sortKey=null,sortAsc=true;
 function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
 function preview(r,nm){{
+ if(r.n_pos<=0){{ let kr=parseFloat(r.ratio_direct);
+   if(isNaN(kr)) kr=1; kr=Math.min(1,Math.max(0,kr));
+   return {{ratio:kr.toFixed(4),kn:String(Math.round(r.n_neg*kr)),pr:'0.0000',
+   clamped:false,achieved:0,noNeg:false,noPos:true}}; }}
  if(isNaN(nm)) return {{ratio:'—',kn:'—',pr:'—',clamped:false,achieved:0,noNeg:false,noPos:false}};
- if(r.n_pos<=0) return {{ratio:'1.0000',kn:String(r.n_neg),pr:'0.0000',
-   clamped:false,achieved:0,noNeg:false,noPos:true}};
  if(r.n_neg<=0) return {{ratio:'1.0000',kn:'0',pr:(r.n_pos>0?1:0).toFixed(4),
    clamped:false,achieved:0,noNeg:true,noPos:false}};
  const raw=nm*r.n_pos/r.n_neg,ratio=Math.min(1,Math.max(0,raw));
@@ -412,7 +414,7 @@ function preview(r,nm){{
 }}
 function achMult(pv){{
  if(pv.ratio==='—') return {{cls:'calc',html:'—',title:''}};
- if(pv.noPos) return {{cls:'calc',html:'—',title:'無正樣本，不下採樣'}};
+ if(pv.noPos) return {{cls:'calc',html:'—',title:'無正樣本，neg:pos 無定義；保留率可直接設定'}};
  if(pv.noNeg) return {{cls:'calc',html:'0.0',title:'無負樣本，不下採樣'}};
  if(pv.clamped) return {{cls:'warn',html:pv.achieved.toFixed(1)+' ⚠',
   title:'負樣本不足以達到目標倍率 '+R+'，已全留'}};
@@ -422,14 +424,17 @@ function syncEdits(){{
  document.querySelectorAll('#g td.edit').forEach(td=>{{
   const v=parseFloat(td.textContent); if(isNaN(v)) return;
   const r=rows()[+td.dataset.i];
-  if(td.dataset.k==='neg_mult') r.suggested_neg_mult=v; else r.weight=v;
+  if(td.dataset.k==='neg_mult') r.suggested_neg_mult=v;
+  else if(td.dataset.k==='ratio_direct') r.ratio_direct=v;
+  else r.weight=v;
  }});
 }}
 function recalc(td){{
- const r=rows()[+td.dataset.i],tr=td.closest('tr'),nm=parseFloat(td.textContent);
- r.suggested_neg_mult=nm;
- const pv=preview(r,nm),am=achMult(pv);
- tr.querySelector('td.rt').textContent=pv.ratio;
+ const r=rows()[+td.dataset.i],tr=td.closest('tr'),v=parseFloat(td.textContent);
+ const editingRatio=td.dataset.k==='ratio_direct';
+ if(editingRatio) r.ratio_direct=v; else r.suggested_neg_mult=v;
+ const pv=preview(r,parseFloat(r.suggested_neg_mult)),am=achMult(pv);
+ if(!editingRatio) tr.querySelector('td.rt').textContent=pv.ratio;
  const a=tr.querySelector('td.am'); a.className=am.cls+' am';
  a.innerHTML=am.html; a.title=am.title;
  tr.querySelector('td.kn').textContent=pv.kn;
@@ -446,13 +451,17 @@ function renderRatio(data,idx){{
   `<th class=calc>new_pos_rate</th></tr>`;
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
  idx.forEach(i=>{{ const r=data[i],pv=preview(r,parseFloat(r.suggested_neg_mult));
-  const am=achMult(pv),tr=document.createElement('tr');
+  const am=achMult(pv),tr=document.createElement('tr'),noPos=r.n_pos<=0;
+  const negMultCell=noPos
+   ?`<td class=calc title="無正樣本，倍率無定義；改用 ratio 欄直接設保留率">—</td>`
+   :`<td class=edit contenteditable data-k=neg_mult data-i=${{i}} oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`;
+  const ratioCell=noPos
+   ?`<td class="edit rt" contenteditable data-k=ratio_direct data-i=${{i}} oninput="recalc(this)">${{r.ratio_direct}}</td>`
+   :`<td class="calc rt">${{pv.ratio}}</td>`;
   tr.innerHTML=`<td>${{esc(r.segment)}}</td><td>${{esc(r.product)}}</td>`+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
-   `<td class=edit contenteditable data-k=neg_mult data-i=${{i}} `+
-   `oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`+
-   `<td class="calc rt">${{pv.ratio}}</td>`+
+   negMultCell+ratioCell+
    `<td class="${{am.cls}} am" title="${{am.title}}">${{am.html}}</td>`+
    `<td class="calc kn">${{pv.kn}}</td><td class="calc pr">${{pv.pr}}</td>`;
   tb.appendChild(tr); }});
