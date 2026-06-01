@@ -207,7 +207,7 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 <p><strong>如果把這塊地基換掉，會怎麼樣？</strong> 把訓練目標從 pointwise 的 <code>binary_logloss</code> 換成<strong>按客戶分組的排序損失</strong>（learning-to-rank，lambdarank）——因為目標不同，樹怎麼切、葉子輸出什麼，都跟著變。這對冷熱門 item 又意味著什麼？另一條路是不換目標、只<strong>換結構</strong>：每個 item 各訓一個模型。本文把這兩條路講清楚。</p>
 </blockquote>
 <p>手冊3 在「單一共享 pointwise 模型」框架內證明了冷門 item 的病根：先驗便宜（$O(M)$ 刀 item split 修掉），但冷門的個人化切點搶不到 leaf-wise 的<strong>葉預算</strong>，且當冷門 item 的<strong>絕對正類筆數</strong>低到一定程度（保單 100 人 / 1000 萬列），單一共享模型有它的<strong>天花板</strong>。手冊3 結尾留下兩條可能突破的路，都是「換掉某個東西」——這正是本文的兩部。</p>
-<p><strong>這份手冊的範疇（刻意收斂）：</strong></p>
+<p><strong>這份手冊的範疇：</strong></p>
 <ul>
 <li><strong>第一部（換目標函數）</strong>：pointwise <code>binary_logloss</code> vs pairwise / listwise（RankNet → lambdarank）的<strong>梯度差異</strong>；以及「同一套 GBDT 建樹機器、餵不同的 $(g,h)$ → 切分與葉輸出皆變」的<strong>生成策略差異</strong>（明確對照手冊1）；最後分析 by-customer 排序目標對冷熱門做了什麼。</li>
 <li><strong>第二部（換模型結構）</strong>：per-item 獨立模型——它消除了什麼、又付出什麼代價。</li>
@@ -352,7 +352,7 @@ $$C_{ij} = -\bar P_{ij}\log P_{ij} - (1-\bar P_{ij})\log(1 - P_{ij}) \;\xrightar
 $$\frac{\partial C_{ij}}{\partial s_i} = -\frac{\sigma_0}{1 + e^{\sigma_0 (s_i - s_j)}} \;\equiv\; \lambda_{ij}, \qquad \frac{\partial C_{ij}}{\partial s_j} = -\lambda_{ij}$$
 <p>這個 $\lambda_{ij}$ 就是 RankNet 帶給文件 $i$ 的梯度貢獻（一對一個）。值得停下來和手冊1 對比：</p>
 $$\underbrace{g_i = p_i - y_i}_{\text{pointwise：單列 vs 標籤}} \qquad\text{變成}\qquad \underbrace{\lambda_{ij} = -\frac{\sigma_0}{1 + e^{\sigma_0(s_i - s_j)}}}_{\text{pairwise：一對 vs 分數差}}$$
-<p>梯度的「作用單位」從「一列對一個標籤」變成「一對、只看兩者的分數差」。一筆文件 $i$ 的總梯度，是把所有牽涉到 $i$ 的對加起來：$\lambda_i = \sum_{j} \lambda_{ij}$（依 $i$ 是該對裡較相關還較不相關的一方定正負號）。</p>
+<p>梯度的「作用單位」從「一列對一個標籤」變成「一對、只看兩者的分數差」。一筆文件 $i$ 的總梯度，是把所有牽涉到 $i$ 的對加起來：$\lambda_i = \sum_{j} \lambda_{ij}$。這裡的正負號要小心：上面的 $\lambda_{ij}$ 是對「$i$ 較相關」那一方寫的（$\lambda_{ij} < 0$，把 $s_i$ 往上推）；當 $i$ 在某一對裡反而是<strong>較不相關</strong>的一方時，它從那一對拿到的是 $-\lambda_{ij}$（把它往下壓）。Ch 7 會用 Alice 的數字把這個加總實際走一遍。</p>
 <p>下一章補上最後一塊：RankNet 只問「對不對」，不問「在哪個名次出錯」。把第 1、2 名弄反，和把第 50、51 名弄反，代價不該一樣。</p>
 <nav class="nav"><a href="#ch2">← Ch 2</a><span class="sep">｜</span><a href="#ch4">Ch 4 →</a></nav>
 <hr />
@@ -361,6 +361,7 @@ $$\underbrace{g_i = p_i - y_i}_{\text{pointwise：單列 vs 標籤}} \qquad\text
 <p>排序的價值集中在頂端：客戶只看推薦清單的前幾名。把該排第 1 的 item 從第 2 名救到第 1 名，比把它從第 51 名救到第 50 名重要得多。RankNet 的 $\lambda_{ij}$ 對這兩種情況一視同仁——少了「位置」這個維度。</p>
 <p>補進位置維度的指標是 <strong>NDCG</strong>（Järvelin &amp; Kekäläinen, 2002）。先定義折扣累積增益，名次越後、折扣越重：</p>
 $$\mathrm{DCG}@K = \sum_{r=1}^{K} \frac{2^{\mathrm{rel}_r} - 1}{\log_2(r+1)} \;\xrightarrow{\ \mathrm{rel}\in\{0,1\}\ }\; \sum_{\substack{\text{買了的 item}\\\text{排在前 }K}} \frac{1}{\log_2(\text{rank}+1)}$$
+<p>（截斷 $K$ 只決定「算到第幾名為止」；本文玩具例每位客戶只有 3 個候選、不設截斷，等於 $K$ ＝清單長度，所以下面的式子與 Ch 7 的手算裡看不到 $K$。實務的 $K$ 截斷只改變「哪些對被納入計算」，不改變下面 $\lambda_{ij}$ 的形狀。）</p>
 <p>把它除以「理想排序」（把所有相關 item 都擺到最前面）的 $\mathrm{IDCG}$，就得到落在 $[0,1]$ 的 $\mathrm{NDCG} = \mathrm{DCG} / \mathrm{IDCG}$。位置折扣 $1/\log_2(\text{rank}+1)$ 是關鍵：第 1 名拿 $1/\log_2 2 = 1$、第 2 名只剩 $1/\log_2 3 \approx 0.63$、第 3 名 $1/\log_2 4 = 0.5$——往後快速遞減。</p>
 <p>lambdarank 的核心一步：把 RankNet 對每一對的梯度，<strong>乘上「交換這對的排名位置會造成的 NDCG 變化量」</strong>：</p>
 $$\boxed{\;\lambda_{ij} = -\,\frac{\sigma_0}{1 + e^{\sigma_0 (s_i - s_j)}}\;\big|\Delta\mathrm{NDCG}_{ij}\big|\;}$$
@@ -439,18 +440,21 @@ $$\text{lambdarank } \lambda = [\,\lambda_H = +0.230,\; \lambda_C = -0.279,\; \l
 <li><strong>binary</strong>：$\gamma$ 是一個 <strong>log-odds 增量</strong>。它加進 $F$，再經 $\sigma$ 就還原成一個校準過的機率（手冊1 Ch 1.3、Ch 6）。</li>
 <li><strong>lambdarank</strong>：$G, H$ 是 $\lambda$ 梯度與排序 hessian 的和，$\gamma$ 是一個<strong>排序分數的增量</strong>，沒有任何機率錨點。</li>
 </ul>
-<p>具體看一片<strong>跨客戶</strong>的葉子（假設 Alice 的 C 列和 Bob 的 H 列因為共用某個客戶特徵落進同一葉）。同一條 $\gamma = -G/(H+\lambda)$，兩個目標給出不同的值：</p>
-$$\gamma_{\text{binary}} = 0.591 \;(\text{log-odds 增量}) \qquad \gamma_{\text{lambdarank}} = 0.425 \;(\text{排序分數增量})$$
-<p>不只數值不同，<strong>意義不同</strong>：前者你可以丟進 sigmoid 讀出機率，後者不行。</p>
+<p>具體看一片葉子。假設某個分裂把 Alice 整張 list 的三列分到同一葉，套同一條 $\gamma = -G/(H+\lambda)$（取手冊1 的 L2 正則 $\lambda = 1$）：</p>
+<ul>
+<li><strong>binary</strong>：$G = \sum g = 0.622 - 0.5 + 0.378 = 0.5$，$H = \sum h = 0.235 + 0.25 + 0.235 = 0.72$，$\gamma = -0.5/(0.72+1) = -0.291$——一個把這三列往下壓的 log-odds 增量。</li>
+<li><strong>lambdarank</strong>：$G = \sum \lambda = 0.230 - 0.279 + 0.049 = 0$（下一節說明為何必為 $0$），$\gamma = 0$——樹對這片葉子<strong>完全不更新</strong>。</li>
+</ul>
+<p>同一片葉、同一條公式，binary 給 $-0.291$、lambdarank 給 $0$：不只<strong>值不同</strong>，<strong>意義也不同</strong>——前者是 log-odds 增量、丟進 sigmoid 能讀出機率，後者連「該往哪個絕對水準移動」都沒有定義。</p>
 <h3>為什麼 lambdarank 的輸出不是機率（嚴格理由）</h3>
 <p>這不是「實務上不準」這種模糊說法，而是有嚴格根據的。回看 Ch 3：排序損失 $C_{ij}$ 只透過<strong>分數差</strong> $s_i - s_j$ 進入。於是對任何一個 query，把它名下<strong>所有</strong> item 的分數同時加上一個常數 $c$，所有差 $s_i - s_j$ 都不變 → 損失一點都不變。換句話說，「整個 query 的分數該停在哪個絕對水準」這件事，<strong>損失函數根本沒有意見</strong>。</p>
-<p>這對應到梯度上一個漂亮的恆等式：在一個 query 內，$\sum_i \lambda_i = 0$（每一對貢獻 $\lambda_{ij}$ 給 $i$、$-\lambda_{ij}$ 給 $j$，加總相消）。它的戲劇化後果是：<strong>如果一片葉子剛好裝下某位客戶的整張 list</strong>，那這片葉子的 $G = \sum \lambda_i = 0$，於是 $\gamma = -0/(H+\lambda) = 0$——樹對這片葉子不做任何更新。模型對「絕對水準」毫無學習訊號，它只在乎相對次序。</p>
+<p>這對應到梯度上一個漂亮的恆等式：在一個 query 內，$\sum_i \lambda_i = 0$（每一對貢獻 $\lambda_{ij}$ 給 $i$、$-\lambda_{ij}$ 給 $j$，加總相消）。這正是上一節那片葉子 lambdarank $\gamma = 0$ 的原因：當一片葉子裝下某位客戶的整張 list，$G = \sum_i \lambda_i = 0$，於是 $\gamma = -0/(H+\lambda) = 0$——樹對它不做任何更新。模型對「絕對水準」毫無學習訊號，只在乎相對次序。</p>
 <blockquote>
 <p>這個 $\sum_i \lambda_i = 0$ 是<strong>必然</strong>（源於損失只依賴分數差的恆等式）；而 Alice 那組 $\lambda$ 加起來剛好是 $0.230 - 0.279 + 0.049 = 0$，是這個必然的一次具體現身。</p>
 </blockquote>
 <p>所以「LTR 分數不是機率」不是缺陷、是定義使然。Ch 8 會講它的實務後果（要機率得另外校準）；這裡先記住機制。</p>
 <h3>連帶：正則化旋鈕的語意也變了</h3>
-<p>既然 lambdarank 的 $h$ 不再是 $p(1-p)$，那麼依賴 $h$ 的旋鈕——尤其 <code>min_sum_hessian_in_leaf</code>——擋的東西就不一樣了：它不再是「葉內機率信心的總量」，而是「葉內排序梯度二階量的總量」。同一個閾值，在兩個目標下擋掉的葉子不同。這點在調參時容易被忽略。</p>
+<p>既然 lambdarank 的 $h$ 不再是 $p(1-p)$，那麼依賴 $h$ 的旋鈕——尤其 <code>min_sum_hessian_in_leaf</code>——擋的東西就不一樣了：它不再是「葉內機率信心的總量」，而是「葉內排序梯度二階量的總量」。同一個閾值，在兩個目標下擋掉的葉子不同。實務後果：沿用 pointwise 調好的 <code>min_sum_hessian_in_leaf</code> 舊值直接搬到 lambdarank，往往過鬆或過嚴（兩者 $h$ 的尺度不同），換目標後這個旋鈕值得重新掃一遍。</p>
 <nav class="nav"><a href="#ch4">← Ch 4</a><span class="sep">｜</span><a href="#ch6">Ch 6 →</a></nav>
 <hr />
 <p><a id="ch6"></a></p>
@@ -461,20 +465,22 @@ $$\gamma_{\text{binary}} = 0.591 \;(\text{log-odds 增量}) \qquad \gamma_{\text
 <li><strong>軸 (b)：出現頻率。</strong> 冷門 C 只在 ~100 位客戶的清單裡是「買了的相關 item」（熱門 H 在 ~40000 位）。</li>
 </ul>
 <p>換成 by-customer 的 lambdarank，這兩軸的命運不同。</p>
-<h3>軸 (a) 被移除——用數字看</h3>
-<p>關鍵問題：冷門 item 全域稀有，會不會讓「為冷門買家修正排序」這件事的梯度也跟著被稀釋掉？<strong>實算說不會。</strong></p>
-<p>對照兩位客戶（完整設定見 Ch 7）：Alice 買了冷門 C、Bob 買了熱門 H，兩人現況分數相同。各自為「自己買的那個 item」貢獻的梯度大小是：</p>
-$$|\lambda_C|_{\text{Alice}} = 0.279 \qquad\approx\qquad |\lambda_H|_{\text{Bob}} = 0.274$$
-<p><strong>幾乎一樣大。</strong> 重點在於：C 的全域稀有，<strong>完全沒有縮小</strong> Alice 這一筆的力道——因為 $\lambda$ 只在 Alice 自己的清單內計算，再按她自己的 $\mathrm{IDCG}$ 正規化，這位客戶的清單裡有沒有別人、C 在別處多罕見，都進不到這個數。</p>
-<p>換句話說，lambdarank 把 Gain 的「計價貨幣」換掉了：從 pointwise 的「<strong>占總列 logloss 的比例</strong>」（冷門是零頭），換成「<strong>各客戶 NDCG 改善之和</strong>」（每一位被服務到的冷門買家都是一個<strong>完整單位</strong>）。per-query 正規化讓每位客戶等權，於是「熱門靠更多正類列灌爆全域梯度和」這個 pointwise 機制被中和了。這就是軸 (a) 被移除的意思。</p>
-<blockquote>
-<p>$0.279$ 與 $0.274$ 的微小不等是兩人現況名次/margin 的巧合，<strong>本質是等大</strong>，不是說它們會精確相等。</p>
-</blockquote>
+<h3>軸 (a) 被中和——用數字看</h3>
+<p>關鍵問題：冷門 item 全域稀有，會不會讓「為冷門買家修正排序」這件事的梯度也跟著被稀釋掉？<strong>把變因控制住來算，就知道不會。</strong></p>
+<p>並排兩位<strong>都被卡住</strong>的買家（完整算法見 Ch 7）：</p>
+<ul>
+<li><strong>Alice</strong> 買冷門 $C$，模型把她的 $C$ 壓在第 2 名（$H$ 卡在她前面）。</li>
+<li><strong>Bob</strong> 買熱門 $H$，模型把他的 $H$ 也壓在第 2 名（配置與 Alice 鏡像：一個不相關 item 在前、一個在後，分數差完全一樣）。</li>
+</ul>
+<p>各自為「自己買的那個 item」貢獻的梯度大小：</p>
+$$|\lambda_C|_{\text{Alice}} = 0.27916 \qquad=\qquad |\lambda_H|_{\text{Bob}} = 0.27916$$
+<p><strong>精確相等。</strong> 這不是巧合——是因為兩人的清單配置被刻意擺成鏡像，只差「買的是冷門還是熱門」這<strong>一個</strong>變因。算出來一模一樣，正說明：$\lambda$ 的公式（Ch 4）只吃這位客戶<strong>自己清單內</strong>的分數、名次、相關性，裡頭<strong>根本沒有「這個 item 全域多冷多熱」這個量</strong>——$C$ 在別處多罕見，進不到 Alice 這一筆。</p>
+<p>換句話說，lambdarank 把 Gain 的「計價貨幣」換掉了：從 pointwise 的「<strong>占總列 logloss 的比例</strong>」（冷門 100 列是 1000 萬列裡的零頭），換成「<strong>各客戶 NDCG 改善之和</strong>」（每一位被服務到的買家都是一個<strong>完整單位</strong>，不分冷熱）。per-query 正規化讓每位客戶等權，於是「熱門靠更多正類列灌爆全域梯度和」這個 pointwise 機制被中和了。</p>
 <h3>軸 (b) 仍在</h3>
-<p>但 lambdarank 變不出本來沒有的東西。要長出「把 C 排高給 C-買家」的切點，累積的 $\lambda$ 質量是對 <strong>~100 位 C-買家</strong>求和——仍遠少於熱門那 ~40000。樹照樣按全域最大 Gain 逐葉生長，冷門的個人化切點累積到的總梯度仍小，<strong>還是會被低估，只是不再災難性</strong>：從 pointwise 那種「被 1000 萬列尺度壓成零頭」，變成「只少了個 ~400 倍的客戶數差距」。另外，<code>min_data_in_leaf</code> 是<strong>列數</strong>的硬底、與 objective 無關，lambdarank 並沒有把它拿掉——冷到正類剩個位數時，小葉一樣會被禁切。</p>
+<p>但 lambdarank 變不出本來沒有的東西。要長出「把 $C$ 排高給 $C$-買家」的切點，累積的 $\lambda$ 質量是對 <strong>~100 位買了 $C$ 的客戶</strong>求和（其餘客戶的清單裡 $C$ 是 rel=0）——仍遠少於熱門那 ~40000 位。樹照樣按全域最大 Gain 逐葉生長，冷門的個人化切點累積到的總梯度仍小，<strong>還是會被低估</strong>。差別在程度：pointwise 下這個落差還被 1000 萬列的尺度進一步放大成手冊3 那種「災難性零頭」；lambdarank 把它收斂回大致就是 <strong>~400:1 的票數比</strong>，不再額外乘上共池稀釋。另外，<code>min_data_in_leaf</code> 是<strong>列數</strong>的硬底、與 objective 無關，lambdarank 並沒有把它拿掉——冷到正類剩個位數時，小葉一樣會被禁切。</p>
 <h3>誠實的結論</h3>
 <p>把 by-customer LTR 對冷熱門的效果講準：</p>
-$$\boxed{\text{LTR 打掉「共池稀釋」軸 (a)，但「絕對稀疏 / 出現頻率」軸 (b)——也就是手冊3 的天花板——沒被變不見。}}$$
+$$\boxed{\text{LTR 中和了「共池稀釋」軸 (a)，但「絕對稀疏 / 出現頻率」軸 (b)——也就是手冊3 的天花板——沒被變不見。}}$$
 <p>per-query 正規化讓每位冷門買家都是完整一票，這是真的進步；但只有 100 個人買的 item，換成 LTR 也生不出不存在的偏好訊號。能把冷門從「災難性低估」拉到「按客戶數比例的低估」，已經是換目標函數能拿到的東西——但別期待它根治。</p>
 <p>對照手冊3 Ch 4：手冊3 把冷門的瓶頸定位成「搶不到 leaf-wise 葉預算」，那是在 pointwise 的 Gain 貨幣下說的。換成 lambdarank，貨幣變了、軸 (a) 那部分的壓迫鬆開了，但葉預算競爭的底層邏輯（按梯度質量排隊）還在，只是現在質量按 (b) 的客戶數計——這就是同一個瓶頸在新目標下的樣貌。</p>
 <nav class="nav"><a href="#ch5">← Ch 5</a><span class="sep">｜</span><a href="#ch7">Ch 7 →</a></nav>
@@ -510,7 +516,7 @@ $$g_H = \sigma(0.5) - 0 = 0.62246,\quad g_C = \sigma(0) - 1 = -0.5,\quad g_X = \
 $$\lambda_H + \lambda_C + \lambda_X = 0.22973 - 0.27916 + 0.04943 = 0 \;\checkmark$$
 <p>這是必然（損失只依賴分數差），不是巧合——只有「值」是這組數字決定的。</p>
 <h3>放大到真實量級</h3>
-<p>Alice 只是一個人。真實裡，買冷門 C 的客戶約 100 位、買熱門 H 的約 40000 位。每一位冷門買家貢獻的梯度，都和 Alice 一樣是「完整一票」（軸 a 已移除，Ch 6）；但票數就是 $100 : 40000$，約 $1 : 400$（軸 b）。lambdarank 讓每張票等值，卻變不出更多張票——這就是它能做到與做不到的界線。</p>
+<p>Alice 只是一個人。真實裡，買冷門 C 的客戶約 100 位、買熱門 H 的約 40000 位。每一位冷門買家貢獻的梯度，都和 Alice 一樣是「完整一票」（軸 a 已中和，Ch 6）；但票數就是 $100 : 40000$，約 $1 : 400$（軸 b）。lambdarank 讓每張票等值，卻變不出更多張票——這就是它能做到與做不到的界線。</p>
 <nav class="nav"><a href="#ch6">← Ch 6</a><span class="sep">｜</span><a href="#ch8">Ch 8 →</a></nav>
 <hr />
 <p><a id="ch8"></a></p>
@@ -522,7 +528,7 @@ $$\lambda_{ij} = -\frac{\sigma_0}{1 + e^{\sigma_0(s_i - s_j)}}\;\big|\Delta\math
 <h3>輸出不再是機率</h3>
 <p>承 Ch 5 的零空間論證：排序損失不約束分數的絕對水準，所以 lambdarank 訓出來的 $s = F(x)$ <strong>不是校準過的機率</strong>。這帶來兩個實務後果：</p>
 <ul>
-<li><strong>同一位客戶名下排序</strong>：完全不受影響。加上任何常數、做任何單調變換，client 的清單次序不變（保序）。挑 top-K 推薦，這就夠了。</li>
+<li><strong>同一位客戶名下排序</strong>：完全不受影響。加上任何常數、做任何單調變換，該客戶的清單次序不變（保序）。挑 top-K 推薦，這就夠了。</li>
 <li><strong>跨 item / 跨客戶比分數，或需要機率絕對值</strong>（例如「分數 &gt; 0.8 才推播」「估算期望申購數」）：這時分數的絕對水準有意義，而 lambdarank 沒給你這個保證。需要的話，得在排序模型之外<strong>另做一層校準</strong>，把分數映回機率。</li>
 </ul>
 <p>完整的校準方法（Platt scaling、isotonic regression，以及它們在多 item 下「跨 item 可比」的額外難處）是一個獨立題目，沿手冊2 的立場本文不展開。這裡只要記住因果：<strong>換成排序目標，就是拿「機率的絕對值」換「排序的對齊」</strong>——你選了排序，就要接受輸出不是機率這個代價，並在需要機率時補一道校準。</p>
@@ -579,7 +585,7 @@ $$\lambda_{ij} = -\frac{\sigma_0}{1 + e^{\sigma_0(s_i - s_j)}}\;\big|\Delta\math
 </tr>
 </tbody>
 </table>
-<p>選哪一格，是拿你最在意的東西去換你最能容忍的代價：要校準機率就別輕易離開左欄；要排序對齊就往右走、準備補校準；冷熱買家不相似、且冷門 item 重要到值得單獨經營，才考慮下排的 per-item。沒有一格是免費的。</p>
+<p>選哪一格，是拿你最在意的東西去換你最能容忍的代價：要校準機率就別輕易離開左欄；要排序對齊就往右走、準備補校準；冷熱買家不相似、且冷門 item 重要到值得單獨經營，才考慮下排的 per-item。沒有一格是免費的——而且右下角那格的代價是<strong>單純相加</strong>：無機率（來自換目標）、$M$ 倍成本與失正遷移（來自換結構）彼此獨立，不互相放大、也不互相抵銷，所以你是同時扛下兩條軸的帳。</p>
 <h3>誠實的天花板</h3>
 <p>把四格走一遍會發現一個共同的底線：<strong>這些招數都在重新安排「誰跟誰競爭、用什麼梯度、誰借誰的力」，但沒有一招能無中生有地造出訊號。</strong> 冷門 item 的根本困難——只有 100 個人買過——是<strong>資料層</strong>的事實。換目標函數（Ch 6 的軸 b 仍在）、換結構（Ch 10 的孤立問題），都繞不過它。</p>
 <p>這呼應手冊3 的收尾，也把它講得更滿：當冷門 item 的絕對正類筆數低到一個程度，真正可能突破的不在「再換一個模型形態」，而在<strong>資料層</strong>（更長的觀察窗、更好的正類定義、引入外部訊號）或<strong>更上層的結構</strong>（把冷門 item 歸類、用 item 屬性做 content-based 補強、cold-start 專門機制）。誠實地知道天花板在哪，比硬把某一格的指標調漂亮更重要（cold-start／popularity bias 的固有難處，Meehan &amp; Pauwels, 2025）。</p>
