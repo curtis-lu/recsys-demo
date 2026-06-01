@@ -1,5 +1,6 @@
 """Pure functions for the training pipeline."""
 
+import json
 import logging
 import shutil
 import time
@@ -69,6 +70,32 @@ def resolve_weight_diagnostics(
         if not one or next(iter(one)) not in present:
             unmatched.append(str(key))
     diag["unmatched_keys"] = sorted(unmatched)
+    return diag
+
+
+def persist_sample_weight_report(
+    train_parquet_handle, preprocessor_metadata: dict, parameters: dict,
+) -> dict:
+    """Compute + persist the sample_weight diagnostic next to the model artifact.
+
+    Always runs (not gated by the lgb .bin cache) so the report reflects the
+    current config every run. Writes ``sample_weight_report.json`` into the model
+    version dir (so it appears in the manifest's artifacts list) and returns the
+    diagnostic dict.
+    """
+    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
+
+    diag = resolve_weight_diagnostics(
+        train_parquet_handle, parameters, preprocessor_metadata)
+    version_dir = diagnostics_dir(parameters).parent
+    version_dir.mkdir(parents=True, exist_ok=True)
+    report_path = version_dir / "sample_weight_report.json"
+    with open(report_path, "w") as f:
+        json.dump(diag, f, indent=2, ensure_ascii=False, default=str)
+    logger.info(
+        "Wrote sample_weight report: %s (enabled=%s unmatched=%d)",
+        report_path, diag["enabled"], len(diag["unmatched_keys"]),
+    )
     return diag
 
 

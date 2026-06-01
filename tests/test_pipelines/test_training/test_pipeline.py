@@ -8,13 +8,14 @@ from recsys_tfb.pipelines.training import create_pipeline
 
 
 class TestTrainingPipeline:
-    def test_pipeline_has_ten_nodes(self):
+    def test_pipeline_node_count(self):
         pipeline = create_pipeline()
-        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb + tune
+        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb
+        # + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
         # + log
-        assert len(pipeline.nodes) == 13
+        assert len(pipeline.nodes) == 14
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -45,6 +46,7 @@ class TestTrainingPipeline:
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
             "feature_statistics", "feature_importance", "shap_diagnostics",
+            "sample_weight_report",
         }
         assert pipeline.outputs == expected
 
@@ -97,13 +99,13 @@ class TestTrainingPipeline:
 
     # -- Calibration-enabled pipeline tests --
 
-    def test_calibration_pipeline_has_twelve_nodes(self):
+    def test_calibration_pipeline_node_count(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 5 cache nodes + prepare_lgb + tune + finalize + calibrate
+        # 5 cache nodes + prepare_lgb + persist_sample_weight_report + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
         # + log
-        assert len(pipeline.nodes) == 15
+        assert len(pipeline.nodes) == 16
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -277,7 +279,8 @@ class TestTrainingPipelineE2E:
 
         # Also register the lgb handle slots and intermediate names the pipeline produces.
         for name in ("train_lgb_handle", "train_dev_lgb_handle",
-                     "feature_statistics", "feature_importance", "shap_diagnostics"):
+                     "feature_statistics", "feature_importance", "shap_diagnostics",
+                     "sample_weight_report"):
             catalog.add(name, MemoryDataset())
 
         # -- Run training pipeline (skip cache nodes and the Hive-writing node) --
