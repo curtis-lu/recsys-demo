@@ -212,32 +212,32 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 <li><strong>第一部（換目標函數）</strong>：pointwise <code>binary_logloss</code> vs pairwise / listwise（RankNet → lambdarank）的<strong>梯度差異</strong>；以及「同一套 GBDT 建樹機器、餵不同的 $(g,h)$ → 切分與葉輸出皆變」的<strong>生成策略差異</strong>（明確對照手冊1）；最後分析 by-customer 排序目標對冷熱門做了什麼。</li>
 <li><strong>第二部（換模型結構）</strong>：per-item 獨立模型——它消除了什麼、又付出什麼代價。</li>
 </ul>
-<p><strong>明確不展開（一句話劃出去）：</strong> 完整的<strong>機率校準方法</strong>（Platt scaling / isotonic regression）是重要但獨立的主題，本文只談「LTR 輸出為何不是校準機率」的<strong>機制與後果</strong>，方法留待後續；lambdarank 的<strong>完整工程設定教學</strong>（group 構造、<code>label_gain</code>、truncation 等旋鈕）只在與數學相扣處輕點；listwise 家族的其他成員（ListNet、softmax 交叉熵等）只點名定位、不逐一展開。</p>
-<p><strong>前提：</strong> LTR 一律以 <strong>query = 客戶</strong>分組（排該客戶名下的 items，對應 top-K 推薦）；「以 item 為 query、排客戶」只在把貢獻<strong>歸因到某個 item / 做 per-item 評估</strong>時才計算，不是訓練目標。沿手冊1–3 立場，輸出主要用來<strong>排序、挑高分客戶</strong>。預設讀者已讀過手冊1–3。</p>
+<p><strong>本文不展開：</strong> lambdarank 的完整工程設定（group 構造、<code>label_gain</code>、truncation 等旋鈕）只在與數學相扣處輕點；listwise 家族的其他成員（ListNet、softmax 交叉熵等）只點名定位、不逐一展開。</p>
+<p><strong>前提：</strong> LTR 一律以 <strong>query = 客戶</strong>分組（排該客戶名下的 items，對應 top-K 推薦）。沿手冊1–3 立場，輸出主要用來<strong>排序、挑高分客戶</strong>。預設讀者已讀過手冊1–3。</p>
 <h3>兩條路是正交的兩軸</h3>
-<p>手冊3 是「單一共享 × pointwise」。要離開它，有兩個獨立方向：換<strong>目標函數</strong>（同一個模型，換每列感受到的梯度），或換<strong>模型結構</strong>（換誰跟誰競爭）。把它們擺成 2×2：</p>
+<p>手冊3 是「單一共享 × pointwise」。要離開它，有兩個獨立方向：換<strong>目標函數</strong>（同一個模型，換每列感受到的梯度），或換<strong>模型結構</strong>（換誰跟誰競爭）。兩個方向交叉成四種組合：</p>
 <table>
 <thead>
 <tr>
 <th></th>
-<th><strong>pointwise</strong>（手冊1–3）</th>
-<th><strong>listwise / LTR</strong></th>
+<th><strong>pointwise</strong>（每列獨立）</th>
+<th><strong>listwise / LTR</strong>（同客戶內排序）</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><strong>單一共享模型</strong></td>
-<td>手冊3 的世界</td>
-<td>← 第一部（換目標）</td>
+<td>手冊1–3 的起點</td>
+<td><strong>第一部</strong>主題：換目標</td>
 </tr>
 <tr>
 <td><strong>per-item 獨立模型</strong></td>
-<td>↑ 第二部（換結構）</td>
-<td>可組合：per-item LTR（Ch 11）</td>
+<td><strong>第二部</strong>主題：換結構</td>
+<td>兩者結合（Ch 11 收尾討論）</td>
 </tr>
 </tbody>
 </table>
-<p>第一部沿<strong>目標函數軸</strong>走，第二部沿<strong>結構軸</strong>走，Ch 11 把 2×2 合起來。</p>
+<p>第一部沿<strong>橫向</strong>移動（同樣是單一共享模型，把目標從 pointwise 換成 LTR）；第二部沿<strong>縱向</strong>移動（同樣是 pointwise，把單一模型拆成 per-item）。Ch 11 回到這張表，把四格合起來看。</p>
 <p><a id="toc"></a></p>
 <h2>目錄</h2>
 <nav class="toc">
@@ -315,14 +315,14 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 <p>手冊1–3 的 <code>binary_logloss</code> 對<strong>每一列</strong>獨立發問：「這位客戶這個 item 的購買機率 $p_i$，你估得準不準？」它要的是每一列的機率都對。</p>
 <p>但回頭看推薦的用途：行銷 PM 拿到的是「對這位客戶，22 個產品按分數高低排序，先推前幾名」。也就是說，真正被使用、被評估的，是<strong>同一位客戶名下、各 item 的相對次序</strong>——不是任何單一機率的絕對值。</p>
 <p>這就埋下一個錯位：<strong>「把每列機率估準」和「把同一客戶名下的 items 排對」並不是同一件事。</strong></p>
-<p>舉個具體的例子。某客戶實際買了 item A、沒買 B。考慮兩個模型：</p>
+<p>舉個具體的例子看它們怎麼<strong>脫鉤</strong>。某客戶實際買了 item A、沒買 B（$y_A = 1,\ y_B = 0$）。比兩個模型：</p>
 <ul>
-<li>模型甲：$p_A = 0.30,\ p_B = 0.20$。</li>
-<li>模型乙：$p_A = 0.12,\ p_B = 0.45$。</li>
+<li>模型 P：$p_A = 0.95,\ p_B = 0.90$。排序 $A > B$（<strong>正確</strong>，該推的 A 在前）。但它對「B 會買」也給了 $0.90$ 的高信心，而 B 其實沒買——logloss $= -\ln 0.95 - \ln(1-0.90) = 0.05 + 2.30 = 2.35$，被這一筆狠狠懲罰。</li>
+<li>模型 Q：$p_A = 0.45,\ p_B = 0.55$。排序 $B > A$（<strong>錯誤</strong>，把該推的 A 排到後面）。但兩個機率都接近 $0.5$、沒有大錯，logloss $= -\ln 0.45 - \ln(1-0.55) = 0.80 + 0.80 = 1.60$。</li>
 </ul>
-<p>若這位客戶的真實購買率接近 $0.2$ 上下，模型甲的兩個機率都離真值不遠、<code>binary_logloss</code> 漂亮；模型乙把 $p_B$ 估到 $0.45$、logloss 很差。但從<strong>排序</strong>看：模型甲把 A 排在 B 前面（$0.30 > 0.20$，正確），模型乙卻把 B 排在 A 前面（$0.45 > 0.12$，把該推的 A 排到後面去了）。logloss 漂亮的甲排對了——這次。但反過來也成立：你完全可以建構一個 logloss 更差、排序卻更對的模型。<strong>logloss 的高低和排序的對錯沒有被綁在一起</strong>：兩個模型可以有相同的 logloss 卻天差地別的排序，也可以有相同的排序卻不同的 logloss。</p>
+<p>關鍵在這裡：<strong>Q 的 logloss（$1.60$）比 P（$2.35$）低</strong>。如果你拿 <code>binary_logloss</code> 當訓練目標、挑 logloss 較低的，你會選到 <strong>Q——但 Q 把該推的 A 排錯了</strong>；排對的 P 反而 logloss 較高。為什麼會這樣？logloss 看的是<strong>每列機率的絕對值</strong>（P 對沒買的 B 過度自信、被重罰），排序看的只是<strong>A、B 誰的分數高</strong>（跟絕對值無關）。兩件事沒被綁在一起——<strong>優化前者，甚至會選到後者較差的模型</strong>。</p>
 <p>pointwise 損失沒有「同一位客戶名下要比較」這個概念——它把這位客戶的 A 列和那位客戶的某列一視同仁地丟進同一個總和裡。要讓<strong>訓練目標</strong>對齊<strong>排序用途</strong>，就得換一個「眼裡有排序」的損失。這就是 learning-to-rank。</p>
-<p>在動身之前，先埋一條會貫穿整個第一部的主軸。手冊1 推導的整套建樹流程——選切點、算葉值——從頭到尾<strong>只用到每列的一階導 $g_i$ 與二階導 $h_i$</strong>（手冊1 Ch 4–6）。所以「換損失」這件事，具體落到 GBDT 上，就是<strong>換餵進去的 $(g_i, h_i)$</strong>。第一部會一路追這條因果：換損失 → 換梯度 → 同一套公式長出不同的樹。</p>
+<p>還有一個貫穿第一部的關鍵事實：手冊1 推導的整套建樹流程——選切點、算葉值——從頭到尾<strong>只用到每列的一階導 $g_i$ 與二階導 $h_i$</strong>（手冊1 Ch 4–6）。所以「換損失」具體落到 GBDT 上，就是<strong>換餵進去的 $(g_i, h_i)$</strong>；換損失 → 換梯度 → 同一套公式長出不同的樹，這條因果鏈會一路走到 Ch 5。</p>
 <nav class="nav"><a href="#ch2">Ch 2 →</a></nav>
 <hr />
 <p><a id="ch2"></a></p>
@@ -347,9 +347,31 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 $$P_{ij} = \sigma\big(\sigma_0 (s_i - s_j)\big) = \frac{1}{1 + e^{-\sigma_0 (s_i - s_j)}}$$
 <p>這裡 $\sigma(\cdot)$ 還是手冊1 那個 sigmoid，$\sigma_0$ 是一個控制陡峭程度的常數（原論文記作 $\sigma$，本文為了不和 sigmoid 撞名改記 $\sigma_0$，玩具例取 $\sigma_0 = 1$）。對一個「已知 $i$ 確實該排在 $j$ 前」的對（$\mathrm{rel}_i > \mathrm{rel}_j$），目標機率 $\bar P_{ij} = 1$，用交叉熵當成本：</p>
 $$C_{ij} = -\bar P_{ij}\log P_{ij} - (1-\bar P_{ij})\log(1 - P_{ij}) \;\xrightarrow{\ \bar P_{ij}=1\ }\; \log\!\big(1 + e^{-\sigma_0 (s_i - s_j)}\big)$$
-<p>這個成本的意思很直白：當 $s_i \gg s_j$（已經排對、且差距大），$e^{-\sigma_0(s_i-s_j)} \to 0$、成本 $\to 0$；當 $s_i < s_j$（排反了），成本隨差距線性增大。</p>
-<p>對分數 $s_i$ 微分（鏈鎖律，跟手冊1 附錄 A 對 sigmoid 微分同一套）：</p>
+<p>這個成本怎麼隨「排得對不對」變化？記分數差 $\Delta = s_i - s_j$，代幾個值進去看（$\sigma_0 = 1$）：</p>
+<table>
+<thead>
+<tr>
+<th>$\Delta = s_i - s_j$</th>
+<th>$+2$（排對、差距大）</th>
+<th>$0$（平手）</th>
+<th>$-2$（排反、差距大）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>成本 $\log(1+e^{-\Delta})$</td>
+<td>$0.13$</td>
+<td>$0.69$</td>
+<td>$2.13$</td>
+</tr>
+</tbody>
+</table>
+<p>兩端各有直覺。$\Delta$ 很大正（排對，$i$ 分數遠高於 $j$）：$e^{-\sigma_0\Delta} \to 0$，成本 $\to \log 1 = 0$——排對了就幾乎不罰。$\Delta$ 很負（排反）：$e^{-\sigma_0\Delta}$ 變得很大，此時 $\log(1+\text{很大的數}) \approx \log(e^{-\sigma_0\Delta}) = -\sigma_0\Delta = \sigma_0|\Delta|$——成本約等於 $\sigma_0$ 乘上「排反的程度」，所以<strong>排得越反、罰得越（線性地）重</strong>。整條曲線就是「排對近乎免費、排反線性加重」的軟性懲罰。</p>
+<p>這個成本對分數 $s_i$ 的梯度，就是 RankNet 要的東西。用鏈鎖律一步步推（記 $\Delta = s_i - s_j$，且 $\partial\Delta/\partial s_i = 1$）：對外層 $\log(1+u)$ 微分得 $\tfrac{1}{1+u}$，再乘上內層 $u = e^{-\sigma_0\Delta}$ 對 $s_i$ 的導數 $u\cdot(-\sigma_0)$——</p>
+$$\frac{\partial C_{ij}}{\partial s_i} = \frac{1}{1+e^{-\sigma_0\Delta}}\cdot e^{-\sigma_0\Delta}\cdot(-\sigma_0) = -\sigma_0\,\frac{e^{-\sigma_0\Delta}}{1+e^{-\sigma_0\Delta}}$$
+<p>分子分母同乘 $e^{\sigma_0\Delta}$ 化簡（分子變 $1$、分母變 $e^{\sigma_0\Delta}+1$）：</p>
 $$\frac{\partial C_{ij}}{\partial s_i} = -\frac{\sigma_0}{1 + e^{\sigma_0 (s_i - s_j)}} \;\equiv\; \lambda_{ij}, \qquad \frac{\partial C_{ij}}{\partial s_j} = -\lambda_{ij}$$
+<p>最後這個形式有個好讀的意義：$\tfrac{1}{1+e^{\sigma_0\Delta}} = 1 - P_{ij}$（模型認為「$i$ 該排前」還差多少才到滿分 $1$）。所以 $\lambda_{ij} = -\sigma_0\,(1 - P_{ij})$——<strong>這一對排得越不對（$P_{ij}$ 離 $1$ 越遠），梯度越大</strong>；排到 $P_{ij}\to 1$ 時梯度趨近 $0$。而 $\partial C_{ij}/\partial s_j = -\lambda_{ij}$ 是大小相同、方向相反：$i$ 往上推多少，$j$ 就往下壓多少。</p>
 <p>這個 $\lambda_{ij}$ 就是 RankNet 帶給文件 $i$ 的梯度貢獻（一對一個）。值得停下來和手冊1 對比：</p>
 $$\underbrace{g_i = p_i - y_i}_{\text{pointwise：單列 vs 標籤}} \qquad\text{變成}\qquad \underbrace{\lambda_{ij} = -\frac{\sigma_0}{1 + e^{\sigma_0(s_i - s_j)}}}_{\text{pairwise：一對 vs 分數差}}$$
 <p>梯度的「作用單位」從「一列對一個標籤」變成「一對、只看兩者的分數差」。一筆文件 $i$ 的總梯度，是把所有牽涉到 $i$ 的對加起來：$\lambda_i = \sum_{j} \lambda_{ij}$。這裡的正負號要小心：上面的 $\lambda_{ij}$ 是對「$i$ 較相關」那一方寫的（$\lambda_{ij} < 0$，把 $s_i$ 往上推）；當 $i$ 在某一對裡反而是<strong>較不相關</strong>的一方時，它從那一對拿到的是 $-\lambda_{ij}$（把它往下壓）。Ch 7 會用 Alice 的數字把這個加總實際走一遍。</p>
@@ -416,7 +438,7 @@ $$\big|\Delta\mathrm{NDCG}_{ij}\big| = \frac{1}{\mathrm{IDCG}}\,\big|2^{\mathrm{
 <hr />
 <p><a id="ch5"></a></p>
 <h2>Ch 5. 同一套建樹機器、不同的 $(g,h)$：切分與葉輸出怎麼變</h2>
-<p>這是 Ch 1 埋的主軸要兌現的地方。先把那條因果鏈講白：</p>
+<p>回到 Ch 1 那條因果鏈，把它講白：</p>
 <blockquote>
 <p>LightGBM 對<strong>所有</strong> objective 共用同一段建樹與算葉值的程式碼。手冊1 推導的 Gain 公式（<strong>Ch 5.3</strong>）與葉輸出公式（<strong>Ch 6.3–6.4</strong>）<strong>原封不動</strong>，唯一變的，是餵進去的 $(g_i, h_i)$。</p>
 </blockquote>
@@ -452,7 +474,7 @@ $$\text{lambdarank } \lambda = [\,\lambda_H = +0.230,\; \lambda_C = -0.279,\; \l
 <blockquote>
 <p>這個 $\sum_i \lambda_i = 0$ 是<strong>必然</strong>（源於損失只依賴分數差的恆等式）；而 Alice 那組 $\lambda$ 加起來剛好是 $0.230 - 0.279 + 0.049 = 0$，是這個必然的一次具體現身。</p>
 </blockquote>
-<p>所以「LTR 分數不是機率」不是缺陷、是定義使然。Ch 8 會講它的實務後果（要機率得另外校準）；這裡先記住機制。</p>
+<p>所以「LTR 分數不是機率」不是缺陷、是定義使然。它的實務後果（要機率得另外校準）留到 Ch 8。</p>
 <h3>連帶：正則化旋鈕的語意也變了</h3>
 <p>既然 lambdarank 的 $h$ 不再是 $p(1-p)$，那麼依賴 $h$ 的旋鈕——尤其 <code>min_sum_hessian_in_leaf</code>——擋的東西就不一樣了：它不再是「葉內機率信心的總量」，而是「葉內排序梯度二階量的總量」。同一個閾值，在兩個目標下擋掉的葉子不同。實務後果：沿用 pointwise 調好的 <code>min_sum_hessian_in_leaf</code> 舊值直接搬到 lambdarank，往往過鬆或過嚴（兩者 $h$ 的尺度不同），換目標後這個旋鈕值得重新掃一遍。</p>
 <nav class="nav"><a href="#ch4">← Ch 4</a><span class="sep">｜</span><a href="#ch6">Ch 6 →</a></nav>
@@ -474,7 +496,7 @@ $$\text{lambdarank } \lambda = [\,\lambda_H = +0.230,\; \lambda_C = -0.279,\; \l
 </ul>
 <p>各自為「自己買的那個 item」貢獻的梯度大小：</p>
 $$|\lambda_C|_{\text{Alice}} = 0.27916 \qquad=\qquad |\lambda_H|_{\text{Bob}} = 0.27916$$
-<p><strong>精確相等。</strong> 這不是巧合——是因為兩人的清單配置被刻意擺成鏡像，只差「買的是冷門還是熱門」這<strong>一個</strong>變因。算出來一模一樣，正說明：$\lambda$ 的公式（Ch 4）只吃這位客戶<strong>自己清單內</strong>的分數、名次、相關性，裡頭<strong>根本沒有「這個 item 全域多冷多熱」這個量</strong>——$C$ 在別處多罕見，進不到 Alice 這一筆。</p>
+<p><strong>精確相等。</strong> 這不是巧合——兩人的清單配置是對稱的鏡像，只差「買的是冷門還是熱門」這<strong>一個</strong>變因。算出來一模一樣，正說明：$\lambda$ 的公式（Ch 4）只吃這位客戶<strong>自己清單內</strong>的分數、名次、相關性，裡頭<strong>根本沒有「這個 item 全域多冷多熱」這個量</strong>——$C$ 在別處多罕見，進不到 Alice 這一筆。</p>
 <p>換句話說，lambdarank 把 Gain 的「計價貨幣」換掉了：從 pointwise 的「<strong>占總列 logloss 的比例</strong>」（冷門 100 列是 1000 萬列裡的零頭），換成「<strong>各客戶 NDCG 改善之和</strong>」（每一位被服務到的買家都是一個<strong>完整單位</strong>，不分冷熱）。per-query 正規化讓每位客戶等權，於是「熱門靠更多正類列灌爆全域梯度和」這個 pointwise 機制被中和了。</p>
 <h3>軸 (b) 仍在</h3>
 <p>但 lambdarank 變不出本來沒有的東西。要長出「把 $C$ 排高給 $C$-買家」的切點，累積的 $\lambda$ 質量是對 <strong>~100 位買了 $C$ 的客戶</strong>求和（其餘客戶的清單裡 $C$ 是 rel=0）——仍遠少於熱門那 ~40000 位。樹照樣按全域最大 Gain 逐葉生長，冷門的個人化切點累積到的總梯度仍小，<strong>還是會被低估</strong>。差別在程度：pointwise 下這個落差還被 1000 萬列的尺度進一步放大成手冊3 那種「災難性零頭」；lambdarank 把它收斂回大致就是 <strong>~400:1 的票數比</strong>，不再額外乘上共池稀釋。另外，<code>min_data_in_leaf</code> 是<strong>列數</strong>的硬底、與 objective 無關，lambdarank 並沒有把它拿掉——冷到正類剩個位數時，小葉一樣會被禁切。</p>
@@ -512,7 +534,7 @@ $$\lambda_C = \lambda_{C,H} + \lambda_{C,X} = -0.22973 - 0.04943 = -0.27916 \;\c
 $$g_H = \sigma(0.5) - 0 = 0.62246,\quad g_C = \sigma(0) - 1 = -0.5,\quad g_X = \sigma(-0.5) - 0 = 0.37754$$
 <p>pointwise 只說「$C$ 是正類、$p$ 該往 1 推」（$g_C = -0.5$），但它對「$C$ 該排在 $H$ 前面」這個<strong>清單內的相對關係</strong>一無所知——$g_C$ 和 $g_H$ 是各自獨立算出來的，不知道彼此同屬 Alice。lambdarank 的 $\lambda_C$ 則把「$C$ 要越過 $H$」的位置資訊編了進去。這就是 Ch 1 那個「目標 vs 用途錯位」在梯度層面的具體長相。</p>
 <h3>query 內梯度和為零</h3>
-<p>順手驗證 Ch 5 的恆等式。$H$ 是 $(C,H)$ 對裡較不相關的一方，得 $\lambda_H = -\lambda_{C,H} = +0.22973$；$X$ 同理得 $\lambda_X = +0.04943$：</p>
+<p>驗證 Ch 5 的恆等式。$H$ 是 $(C,H)$ 對裡較不相關的一方，得 $\lambda_H = -\lambda_{C,H} = +0.22973$；$X$ 同理得 $\lambda_X = +0.04943$：</p>
 $$\lambda_H + \lambda_C + \lambda_X = 0.22973 - 0.27916 + 0.04943 = 0 \;\checkmark$$
 <p>這是必然（損失只依賴分數差），不是巧合——只有「值」是這組數字決定的。</p>
 <h3>放大到真實量級</h3>
