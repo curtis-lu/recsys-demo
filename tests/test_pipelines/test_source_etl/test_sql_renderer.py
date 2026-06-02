@@ -153,3 +153,37 @@ class TestBuildHiveCtas:
         result = SQLRenderer.build_hive_ctas(cfg, "SELECT 1", "ml_feature")
         # Hive CTAS: names only, preserving config order.
         assert "PARTITIONED BY (prod_name, snap_date)" in result
+
+
+class TestBuildAlterAddColumns:
+    def test_single_column(self):
+        cfg = TableConfig(
+            name="feature_table",
+            sql_file="feature/feature_table.sql",
+            partition_by={"snap_date": "DATE"},
+        )
+        out = SQLRenderer.build_alter_add_columns(cfg, [("new_feat", "double")], "ml_recsys")
+        assert out == "ALTER TABLE ml_recsys.feature_table ADD COLUMNS (new_feat double)"
+
+    def test_multiple_columns_preserve_order(self):
+        cfg = TableConfig(
+            name="feature_concat",
+            sql_file="feature/feature_concat.sql",
+            partition_by={"snap_date": "DATE"},
+        )
+        out = SQLRenderer.build_alter_add_columns(
+            cfg, [("col_a", "double"), ("col_b", "string")], "ml_recsys"
+        )
+        assert out == (
+            "ALTER TABLE ml_recsys.feature_concat "
+            "ADD COLUMNS (col_a double, col_b string)"
+        )
+
+    def test_decimal_type(self):
+        cfg = TableConfig(
+            name="feature_table",
+            sql_file="feature/feature_table.sql",
+            partition_by={"snap_date": "DATE"},
+        )
+        out = SQLRenderer.build_alter_add_columns(cfg, [("amt", "decimal(10,2)")], "ml_recsys")
+        assert out == "ALTER TABLE ml_recsys.feature_table ADD COLUMNS (amt decimal(10,2))"

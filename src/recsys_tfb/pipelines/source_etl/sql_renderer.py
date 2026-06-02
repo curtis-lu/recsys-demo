@@ -119,3 +119,21 @@ class SQLRenderer:
             f"PARTITION ({partition_spec})\n"
             f"{aligned_select}"
         )
+
+    @staticmethod
+    def build_alter_add_columns(
+        table_config: TableConfig,
+        new_columns: list[tuple[str, str]],
+        target_db: str,
+    ) -> str:
+        """Assemble ``ALTER TABLE <db>.<name> ADD COLUMNS (c1 t1, c2 t2)``.
+
+        ``new_columns`` is an ordered list of ``(name, hive_type)``; types come
+        from the SELECT's inferred schema (``dataType.simpleString()``). Caller
+        guarantees the list is non-empty. New columns are appended after existing
+        non-partition columns (Hive ADD COLUMNS semantics).
+        """
+        cols = ", ".join(f"{name} {dtype}" for name, dtype in new_columns)
+        return (
+            f"ALTER TABLE {target_db}.{table_config.name} ADD COLUMNS ({cols})"
+        )
