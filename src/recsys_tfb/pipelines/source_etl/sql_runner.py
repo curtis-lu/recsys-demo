@@ -212,34 +212,39 @@ class SQLRunner:
             logger.info("DRY RUN [%s]:\n%s", table.name, dry_sql)
             return True
 
-        # Real run: infer SELECT columns, build aligned SELECT, choose CTAS vs INSERT.
+        # Real run: probe SELECT columns, then CTAS (new table) or schema-aware
+        # INSERT OVERWRITE (existing table).
         table_start = time.monotonic()
         try:
             body = SQLRenderer.strip_header_comments(select_sql)
-            columns = spark.sql(
-                f"SELECT * FROM (\n{body}\n) _cols LIMIT 0"
-            ).columns
-            aligned_select = SQLRenderer.build_aligned_select(
-                select_sql, columns, table.partition_by
-            )
+            probe = spark.sql(f"SELECT * FROM (\n{body}\n) _cols LIMIT 0")
+            select_columns = probe.columns
+
             if not spark.catalog.tableExists(table.name, self._target_db):
                 logger.info(
                     "Table %s.%s not found, creating via Hive CTAS",
                     self._target_db, table.name,
                 )
-                final_sql = SQLRenderer.build_hive_ctas(
-                    table, aligned_select, self._target_db
+                aligned_select = SQLRenderer.build_aligned_select(
+                    select_sql, select_columns, table.partition_by
                 )
+                statements = [
+                    SQLRenderer.build_hive_ctas(
+                        table, aligned_select, self._target_db
+                    )
+                ]
             else:
-                final_sql = SQLRenderer.build_insert_overwrite(
-                    table, aligned_select, self._target_db
+                statements = self._build_existing_table_statements(
+                    spark, table, select_sql, select_columns, probe
                 )
 
+            final_sql = "\n;\n".join(statements)
             if self._rendered_sql_dir:
                 self._write_rendered_sql(run_id, snap_date, table.name, final_sql)
 
             logger.info("Executing %s ...", table.name)
-            spark.sql(final_sql)
+            for stmt in statements:
+                spark.sql(stmt)
             duration = time.monotonic() - table_start
             logger.info("Completed %s in %.1fs", table.name, duration)
         except Exception as exc:
@@ -264,6 +269,75 @@ class SQLRunner:
             spark, table, snap_date, run_id, audit, duration
         )
         return row_count >= 0
+
+    def _build_existing_table_statements(
+        self,
+        spark,
+        table: TableConfig,
+        select_sql: str,
+        select_columns: list[str],
+        probe,
+    ) -> list[str]:
+        """Reconcile the rendered SELECT against the existing table schema.
+
+        Returns the ordered SQL statements to execute: an optional
+        ``ALTER TABLE ADD COLUMNS`` (when the SELECT introduces new non-partition
+        columns) followed by an ``INSERT OVERWRITE`` whose projection follows the
+        TABLE's column order (existing columns first, new columns appended,
+        partition columns cast last) so the positional insert lands correctly.
+
+        Fail-loud (append-only policy): if the SELECT drops a column that the
+        existing table has, raise — removing columns needs a versioned rebuild,
+        not in-place overwrite.
+        """
+        fqn = f"{self._target_db}.{table.name}"
+        part_lower = {k.lower() for k in table.partition_by}
+        existing_nonpart = [
+            f.name
+            for f in spark.table(fqn).schema.fields
+            if f.name.lower() not in part_lower
+        ]
+        existing_lower = {c.lower() for c in existing_nonpart}
+        select_nonpart = [c for c in select_columns if c.lower() not in part_lower]
+        select_lower = {c.lower() for c in select_nonpart}
+
+        removed = [c for c in existing_nonpart if c.lower() not in select_lower]
+        if removed:
+            raise SourceETLError(
+                f"Removing columns from existing table {fqn} is not supported in "
+                f"source ETL: it breaks positional INSERT OVERWRITE and deployed "
+                f"models. Removed columns: {removed}. Use a versioned rebuild "
+                f"instead, or keep the column and exclude it downstream via "
+                f"prepare_model_input.drop_columns."
+            )
+
+        new_cols = [c for c in select_nonpart if c.lower() not in existing_lower]
+        statements: list[str] = []
+        if new_cols:
+            type_by_lower = {
+                f.name.lower(): f.dataType.simpleString()
+                for f in probe.schema.fields
+            }
+            new_with_types = [(c, type_by_lower[c.lower()]) for c in new_cols]
+            logger.info(
+                "Schema evolution on %s: ADD COLUMNS %s", fqn, new_with_types
+            )
+            statements.append(
+                SQLRenderer.build_alter_add_columns(
+                    table, new_with_types, self._target_db
+                )
+            )
+
+        target_order = existing_nonpart + new_cols
+        aligned_select = SQLRenderer.build_aligned_select_in_order(
+            select_sql, select_columns, target_order, table.partition_by
+        )
+        statements.append(
+            SQLRenderer.build_insert_overwrite(
+                table, aligned_select, self._target_db
+            )
+        )
+        return statements
 
     def _run_source_checks(
         self,
