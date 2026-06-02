@@ -187,3 +187,64 @@ class TestBuildAlterAddColumns:
         )
         out = SQLRenderer.build_alter_add_columns(cfg, [("amt", "decimal(10,2)")], "ml_recsys")
         assert out == "ALTER TABLE ml_recsys.feature_table ADD COLUMNS (amt decimal(10,2))"
+
+
+class TestBuildAlignedSelectInOrder:
+    def test_projects_in_target_order_not_select_order(self):
+        # SELECT 序是 col_b, col_a；目標表序是 col_a, col_b → 投影須照表序
+        out = SQLRenderer.build_aligned_select_in_order(
+            select_sql="SELECT col_b, col_a, snap_date FROM t",
+            select_columns=["col_b", "col_a", "snap_date"],
+            target_nonpartition_order=["col_a", "col_b"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert out.index("col_a") < out.index("col_b")
+        assert "CAST(snap_date AS DATE) AS snap_date" in out
+
+    def test_new_column_appended_last(self):
+        out = SQLRenderer.build_aligned_select_in_order(
+            select_sql="SELECT col_a, col_new, snap_date FROM t",
+            select_columns=["col_a", "col_new", "snap_date"],
+            target_nonpartition_order=["col_a", "col_new"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert out.index("col_a") < out.index("col_new")
+        assert out.index("col_new") < out.index("CAST(snap_date")
+
+    def test_multi_partition_casts_in_config_order(self):
+        out = SQLRenderer.build_aligned_select_in_order(
+            select_sql="SELECT col_a, prod_name, snap_date FROM t",
+            select_columns=["col_a", "prod_name", "snap_date"],
+            target_nonpartition_order=["col_a"],
+            partition_by={"prod_name": "STRING", "snap_date": "DATE"},
+        )
+        assert out.index("CAST(prod_name") < out.index("CAST(snap_date")
+
+    def test_missing_partition_raises(self):
+        with pytest.raises(ValueError, match="Partition columns missing"):
+            SQLRenderer.build_aligned_select_in_order(
+                select_sql="SELECT col_a FROM t",
+                select_columns=["col_a"],
+                target_nonpartition_order=["col_a"],
+                partition_by={"snap_date": "DATE"},
+            )
+
+    def test_strips_header_comments(self):
+        out = SQLRenderer.build_aligned_select_in_order(
+            select_sql="--partition by: snap_date\nSELECT col_a, snap_date FROM t",
+            select_columns=["col_a", "snap_date"],
+            target_nonpartition_order=["col_a"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert "--partition by" not in out
+
+    def test_case_insensitive_partition_match(self):
+        # Hive lowercases identifiers; SELECT may surface mixed case. The cast must
+        # source from the SELECT's actual casing and alias to the config name.
+        out = SQLRenderer.build_aligned_select_in_order(
+            select_sql="SELECT col_a, Snap_Date FROM t",
+            select_columns=["col_a", "Snap_Date"],
+            target_nonpartition_order=["col_a"],
+            partition_by={"snap_date": "DATE"},
+        )
+        assert "CAST(Snap_Date AS DATE) AS snap_date" in out
