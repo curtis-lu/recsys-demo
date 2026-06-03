@@ -32,7 +32,7 @@
 
 **同步審核(必做):** 每個驗證 subagent 的 prompt 都必須要求它**每做一步就即時 append 一行到** `/Users/curtislu/projects/recsys_tfb/.superpowers/exec-journal-<task>.md`(絕對路徑、append 模式、含時間戳與步驟結果),讓使用者 `tail -f` 同步審核;主控在檢查點把日誌 render 到視覺 companion。
 
-1. **目標讀者 persona** — prompt 要點:「你是熟 SQL/Python、做過二元分類產品回應模型、但**不熟排序問題**的資料科學家。只讀這份 `<file>`(不准看原始碼)。逐段回報:(a) 哪句看不懂/太行話;(b) 哪裡邏輯跳步;(c) 哪裡不夠白話。具體引用句子,不要籠統好評。每步 append 到 exec-journal。」
+1. **目標讀者 persona** — prompt 要點:「你是熟 SQL/Python、做過二元分類產品回應模型、但**不熟排序問題**的資料科學家。只讀這份 `<file>`(不准看原始碼)。逐段回報兩類問題。**可讀性**:(a) 哪句看不懂 / 太行話;(b) 哪裡邏輯跳步;(c) 哪裡不夠白話。**文體**(對齊 WP4–6,README 要一目瞭然):(d) 是否好掃讀?該用列點 / 表格 / 圖的地方有沒有用對形式,還是擠成難讀的散文牆?(e) 反過來,有沒有名詞短句 / 關鍵詞堆疊,讀起來卡、要自己腦補?(f) 括號太多或自言自語式旁白?(g) 哪裡太簡略沒交代語境。具體引用,不要籠統好評;對每個問題給出『改成什麼形式(表格 / 列點 / 一句完整話)會更好』的方向。每步 append 到 exec-journal。」
 2. **照做執行者** — prompt 要點:「**只照 `<file>` 寫的**去做,不准腦補。**起始狀態=已配置好的 dev-cluster + 合成來源表**(必要時先 `scripts/dev_admin.sh scripts/setup_hive_dev.py`)。**從 `parameters.yaml` 起設自己的 `hive.db`/情境,依文件實跑** `dataset→training→evaluation`(Spark 連線依 `CLAUDE.md` SPARK_CONF_DIR 對應表);`source_etl` 因 dev 跳過,改設定級核對 + 標 dev/prod 落差。回報:哪一步卡住、哪裡有文件沒寫卻必須知道的隱性步驟、指令/路徑/設定是否一致。每步 append 到 exec-journal。」
 3. **正確性稽核** — prompt 要點:「對照 `<source files>` 與實際資料,逐條查 `<file>` 的技術敘述是否與**程式碼/資料**相符。落實 §0:不接受以註解/命名為依據的敘述。列出每個不符點 + 程式碼出處(file:line)。每步 append 到 exec-journal。」
 
