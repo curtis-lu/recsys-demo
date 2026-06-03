@@ -119,15 +119,18 @@
 每完成一個建置單位後,派 subagent 從不同角色檢視,依回饋修訂,反覆到通過:
 
 1. **目標讀者 persona** — 以 §2 讀者身份(熟 SQL/Python、做過二元分類產品回應模型、不熟排序)通讀,只問:好不好懂?哪裡太行話 / 跳步 / 不夠白話?要求**具體指出**卡住的句子,而非籠統好評。
-2. **照做執行者(follow-the-doc executor)** — 嚴格「只照文件寫的」去走 quick-start / commands / change-guide SOP,回報:指令 / 路徑 / 設定是否真的存在且一致、有沒有文件沒寫卻必須知道的隱性步驟、照做會不會卡住或失敗。可實際執行的(指令解析、檔案 / 設定存在性、輕量步驟)就執行;重量級 Spark 全跑(cold start 成本高)預設不跑,改以靜態核對命令與產物路徑(實跑與否於建置時確認)。
+2. **照做執行者(follow-the-doc executor)** — 嚴格「只照文件寫的」去做,不准腦補。**起始狀態 = 已配置好的本機 dev-cluster + 合成來源表**(`scripts/setup_hive_dev.py` 把 `data/*.parquet` 載入成 Hive `ml_recsys.*`)。**從 `conf/.../parameters.yaml` 起,設自己的 `hive.db` 與情境,依 README 實跑**:`dataset → training → evaluation` 三條(dev 跑得動)真的跑過合成資料;`source_etl` 因 dev 跳過(合成資料已是 feature/label 粒度)改做**設定級核對**並標出 dev/prod 落差。回報:哪一步卡住、哪裡有文件沒寫卻必須知道的隱性步驟、指令 / 路徑 / 設定是否一致。Spark 連線依 `CLAUDE.md` 的 SPARK_CONF_DIR 對應表。
 3. **正確性稽核** — 對照原始碼 / 實際資料,逐條查文件技術敘述是否與實作相符(落實 §0 核心原則)。
 
 修訂迴圈:產出 → 三角色檢視 → 修訂 → 必要時再檢視。
+
+**同步審核機制(使用者要求)**:驗證 subagent 一律以**獨立 subagent** 執行(保留不被既有程式知識汙染的視角);但 subagent 內部步驟不會直接顯示給使用者,故每個驗證 subagent 被要求**每一步即時 append 到執行日誌檔** `/<repo-root>/.superpowers/exec-journal-<task>.md`(絕對路徑),使用者可即時 `tail -f` 同步審核;主控在檢查點把日誌 render 到視覺 companion。此日誌是同步可視的唯一管道,不可省略。
 
 ### 8.3 計畫與審核的呈現
 
 - 後續 writing-plans 產出的實作計畫,在適合處用 **HTML / 圖(視覺 companion)** 呈現以便審核,而非純文字牆。
 - 各建置單位的成品(尤其 ★A 自包式 HTML 圖)也透過視覺 companion 或直接開檔讓使用者審核。
+- **驗證過程**透過 §8.2 的即時執行日誌讓使用者同步審核(`tail -f` + 檢查點 render 到 companion)。
 
 ## 9. 附錄:資產盤點(建置時的事實依據)
 
