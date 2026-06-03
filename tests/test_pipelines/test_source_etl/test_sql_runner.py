@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pyspark.sql.types import DoubleType, StructField, StructType, StringType
 
 from recsys_tfb.pipelines.source_etl.sql_runner import SourceETLError, SQLRunner
 
@@ -59,11 +60,26 @@ def _base_config():
     }
 
 
-def _make_spark_mock(columns=None, table_exists=False):
+def _make_spark_mock(
+    columns=None, table_exists=False, existing_columns=None, select_type_overrides=None
+):
+    cols = columns or ["cust_id", "total_aum", "snap_date"]
+    overrides = select_type_overrides or {}
     spark = MagicMock()
     spark.catalog.tableExists.return_value = table_exists
     limit0_df = MagicMock()
-    limit0_df.columns = columns or ["cust_id", "total_aum", "snap_date"]
+    limit0_df.columns = cols
+    # probe.schema drives ALTER-column type inference; default StringType, but a
+    # caller can override specific columns to assert non-string type plumbing.
+    limit0_df.schema = StructType(
+        [StructField(c, overrides.get(c, StringType())) for c in cols]
+    )
+    # Existing table schema (only consulted when table_exists). Defaults to the
+    # SELECT columns so no evolution is detected for legacy tests.
+    et_cols = existing_columns if existing_columns is not None else cols
+    spark.table.return_value.schema = StructType(
+        [StructField(c, StringType()) for c in et_cols]
+    )
     _call_count = [0]
 
     def _side_effect(*args, **kwargs):
@@ -306,3 +322,92 @@ class TestProcessSingleTableMissingPartition:
                 runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("INSERT OVERWRITE" in s for s in executed)
+
+
+class TestSchemaEvolution:
+    # NOTE: _make_spark_mock returns a STATIC existing-table schema, so these
+    # tests cover the single-snap_date case. In production the ALTER actually
+    # mutates the table, so a later snap_date re-reads the evolved schema via
+    # spark.table(fqn) and emits no further ALTER. That per-date no-re-ALTER
+    # behavior is a property of "read existing schema each call" (pinned by the
+    # single-date tests below) rather than something this static mock can express.
+    def _feature_aum_config(self):
+        return {
+            "variables": {"target_db": "ml_feature"},
+            "tables": [
+                {
+                    "name": "feature_aum",
+                    "sql_file": "feature/feature_aum.sql",
+                    "partition_by": {"snap_date": "DATE"},
+                    "primary_key": ["snap_date", "cust_id"],
+                }
+            ],
+        }
+
+    def test_new_column_triggers_alter_then_insert_in_table_order(self, sql_dir):
+        # 既有表: cust_id, total_aum, snap_date(part)；SELECT 多了 sav_amt
+        spark = _make_spark_mock(
+            columns=["cust_id", "total_aum", "sav_amt", "snap_date"],
+            table_exists=True,
+            existing_columns=["cust_id", "total_aum", "snap_date"],
+        )
+        runner = SQLRunner(self._feature_aum_config(), sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        alter = [s for s in executed if "ALTER TABLE" in s]
+        insert = [s for s in executed if "INSERT OVERWRITE" in s]
+        assert alter, "ALTER TABLE not executed for new column"
+        assert "ADD COLUMNS (sav_amt string)" in alter[0]
+        assert "ml_feature.feature_aum" in alter[0]
+        assert insert, "INSERT OVERWRITE not executed"
+        # 投影照表欄序：既有欄保序在前、新欄 append 在後
+        assert insert[0].index("cust_id") < insert[0].index("total_aum")
+        assert insert[0].index("total_aum") < insert[0].index("sav_amt")
+        # ALTER 必須在 INSERT 之前執行
+        assert executed.index(alter[0]) < executed.index(insert[0])
+
+    def test_new_column_type_inferred_from_probe_schema(self, sql_dir):
+        # 新欄的 ALTER 型別取自 SELECT probe schema，不是寫死 string
+        spark = _make_spark_mock(
+            columns=["cust_id", "total_aum", "sav_amt", "snap_date"],
+            table_exists=True,
+            existing_columns=["cust_id", "total_aum", "snap_date"],
+            select_type_overrides={"sav_amt": DoubleType()},
+        )
+        runner = SQLRunner(self._feature_aum_config(), sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        alter = [s for s in executed if "ALTER TABLE" in s]
+        assert alter, "ALTER TABLE not executed for new column"
+        assert "ADD COLUMNS (sav_amt double)" in alter[0]
+
+    def test_no_alter_when_columns_unchanged(self, sql_dir):
+        spark = _make_spark_mock(
+            columns=["cust_id", "total_aum", "snap_date"],
+            table_exists=True,
+            existing_columns=["cust_id", "total_aum", "snap_date"],
+        )
+        runner = SQLRunner(self._feature_aum_config(), sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            runner.run(["2026-03-31"])
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        assert not any("ALTER TABLE" in s for s in executed)
+        assert any("INSERT OVERWRITE" in s for s in executed)
+
+    def test_removed_column_fails_loud_no_write(self, sql_dir):
+        # SELECT 缺了既有表的 total_aum → 必須擋下，不可 ALTER/INSERT
+        spark = _make_spark_mock(
+            columns=["cust_id", "snap_date"],
+            table_exists=True,
+            existing_columns=["cust_id", "total_aum", "snap_date"],
+        )
+        runner = SQLRunner(self._feature_aum_config(), sql_dir)
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+            with pytest.raises(SourceETLError, match="Removing columns"):
+                runner.run(["2026-03-31"])
+        executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
+        assert not any("INSERT OVERWRITE" in s for s in executed)
+        assert not any("ALTER TABLE" in s for s in executed)

@@ -80,6 +80,45 @@ class SQLRenderer:
         return f"SELECT\n    {projection}\nFROM (\n{body}\n) _aligned"
 
     @staticmethod
+    def build_aligned_select_in_order(
+        select_sql: str,
+        select_columns: list[str],
+        target_nonpartition_order: list[str],
+        partition_by: dict[str, str],
+    ) -> str:
+        """Like :meth:`build_aligned_select`, but project non-partition columns in
+        an explicit *target* order (the existing table's column order) rather than
+        the SELECT's own order.
+
+        Used for INSERT OVERWRITE into an existing table: Spark 3.3 INSERT is
+        positional, so the projection must match the table's column layout
+        (existing columns in table order, newly-added columns appended last,
+        partition columns cast last). Validates that every partition column is
+        present in the SELECT output (same rule/message as build_aligned_select).
+        """
+        body = SQLRenderer.strip_header_comments(select_sql)
+        part_lower = {k.lower(): (k, v) for k, v in partition_by.items()}
+        select_lower = {c.lower(): c for c in select_columns}
+
+        missing = [k for k in part_lower if k not in select_lower]
+        if missing:
+            raise ValueError(
+                f"Partition columns missing from SELECT output: {missing}. "
+                f"SELECT has: {select_columns}"
+            )
+
+        partition_casts = [
+            f"CAST({select_lower[pk.lower()]} AS {dtype}) AS {name}"
+            for pk, (name, dtype) in (
+                (pk, part_lower[pk.lower()]) for pk in partition_by
+            )
+        ]
+        projection = ",\n    ".join(
+            list(target_nonpartition_order) + partition_casts
+        )
+        return f"SELECT\n    {projection}\nFROM (\n{body}\n) _aligned"
+
+    @staticmethod
     def build_hive_ctas(
         table_config: TableConfig,
         aligned_select: str,
@@ -118,4 +157,22 @@ class SQLRenderer:
             f"INSERT OVERWRITE TABLE {target_db}.{table_config.name} "
             f"PARTITION ({partition_spec})\n"
             f"{aligned_select}"
+        )
+
+    @staticmethod
+    def build_alter_add_columns(
+        table_config: TableConfig,
+        new_columns: list[tuple[str, str]],
+        target_db: str,
+    ) -> str:
+        """Assemble ``ALTER TABLE <db>.<name> ADD COLUMNS (c1 t1, c2 t2)``.
+
+        ``new_columns`` is an ordered list of ``(name, hive_type)``; types come
+        from the SELECT's inferred schema (``dataType.simpleString()``). Caller
+        guarantees the list is non-empty. New columns are appended after existing
+        non-partition columns (Hive ADD COLUMNS semantics).
+        """
+        cols = ", ".join(f"{name} {dtype}" for name, dtype in new_columns)
+        return (
+            f"ALTER TABLE {target_db}.{table_config.name} ADD COLUMNS ({cols})"
         )
