@@ -107,7 +107,12 @@ git -C /Users/curtislu/projects/recsys_tfb/.worktrees/readme-restructure commit 
 
 ## Task 4: docs/data-lineage.html(★A 自包式 HTML)
 
-> 本 Task 開工前,先與使用者敲定 spec §7 延後的兩件事:**表卡深度**與**涵蓋範圍**(完整表卡 vs 分層詳略)。已有 mockup 可複用(`.superpowers/brainstorm/.../data-lineage-doc.html`)。
+> 本 Task 開工前,先與使用者敲定 spec §7 延後的事:**表卡深度**。已有 mockup 可複用(`.superpowers/brainstorm/.../data-lineage-doc.html`)。
+>
+> **已敲定需求(2026-06-03 與使用者談定)**:
+> - **lineage 圖**:列出 `catalog.yaml` 全部 ~28 條目(含 JSON / 模型 / 報表產物,不只 Hive 表)。**dbt 風格**:依 pipeline 階段(source_etl → dataset → training → inference → evaluation)左到右分欄;**版本層**(`base_dataset_version` / `train_variant_id` / `calibration_variant_id` / `model_version`)用背景色塊標示。每個節點標註:**產生它的 pipeline** + **類型**(Hive / JSON / 模型 / 報表)。**邊必須逐一對照各 pipeline.py 節點接線確認正確**(已知 §2 簡化版多次畫錯,務必以程式碼為準)。視覺風格與 §2 的 excalidraw pipeline 圖搭配(一般字體、圓角框)。
+> - **表卡**:每張表的 schema + 範例列(沿用先前 mockup 方向)。
+> - §2 只放「精簡主幹圖 + 連結到本檔」,完整版在此。
 
 **Files:**
 - Create: `.worktrees/readme-restructure/docs/data-lineage.html`
