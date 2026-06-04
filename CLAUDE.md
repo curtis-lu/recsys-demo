@@ -4,10 +4,12 @@ Claude Code 在此 repo 工作時的最小規範。
 
 ## Project Overview
 
-商業銀行產品推薦排序模型。預測客戶對 22 類金融產品的興趣分數，供行銷 PM 排序推薦優先順序。
+通用的**排序（ranking / learning-to-rank）批次建模框架**。對每個 query group（`time` × `entity`），把候選 `item` 依模型分數排名，供下游依名次分配有限資源。欄位角色（time / entity / item / label）由 `conf/base/parameters.yaml` 的 `schema` 區塊配置；`feature_table` / `sample_pool` / `label_table` 等來源表由使用者自定義。
 
-- **Inference**：每週批次推論，~10M 客戶 × 22 產品 × ~1500 特徵
-- **Training**：N 個月底 snapshot（顯式 `train_snap_dates` list 配置），不定期手動執行
+**商業銀行產品推薦是本 repo 的示例 instantiation**（非框架限定應用）：對每位客戶把候選金融產品排序，供行銷 PM 決定推薦優先順序。
+
+- **Inference**：每週批次推論；示例規模 ~10M entity × 22 item × ~1500 特徵
+- **Training**：N 個 snapshot（顯式 `train_snap_dates` list 配置，不一定月底），不定期手動執行
 - **Target environment**：PySpark 3.3.2 on Hadoop/HDFS/Hive, Ploomber DAG, no internet, no extra packages, CPU-only (4 core, 128GB RAM)
 
 ## Tech Stack
@@ -36,7 +38,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
 - 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash 指令之間 cwd 會持續（system prompt 明文）但 skill 後可能 reset，相對路徑容易讀到 stale 的 main tree（細節見 §Worktree / venv 踩過的問題 #3）。
 
-## Worktree / venv（完整 SOP：`docs/worktree-venv-setup.md`，務必先讀）
+## Worktree / venv（完整 SOP：`docs/operations/worktree-venv-setup.md`，務必先讀）
 
 ### 已踩過、必須避免再發的問題
 
@@ -64,7 +66,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
    readlink data/{models,dataset,evaluation,inference}                      # data/ 子目錄已 symlink 到 main
    grep -E "^(objective|metric|snap_date):" conf/base/parameters_*.yaml     # config 真的改在 worktree 那份
    ```
-   任一失敗先修再繼續（venv 修復見 `docs/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
+   任一失敗先修再繼續（venv 修復見 `docs/operations/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
 3. **跑測試/CLI 一律絕對 venv python + `PYTHONPATH=<wt>/src`**：
    `PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <paths> -q`
    （裸跑或裸 `.venv/bin/pytest` 會抓到 main 的 `src`＝editable-install target，靜默測/跑錯 code；相對路徑經 symlink 還會 ELOOP）。CLI 同理：`PYTHONPATH=<wt>/src …/.venv/bin/python -m recsys_tfb <pipeline> [--options]`。
@@ -81,7 +83,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
   scripts/dev_admin.sh scripts/nuke_ml_recsys.py
   scripts/dev_admin.sh scripts/setup_hive_dev.py
   ```
-- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
+- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
   ```bash
   source ~/dev-cluster/scripts/client-env.sh                          # 🅔 JDK17 add-opens + HADOOP_CONF_DIR
   export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark    # 🅑 local[*]，省 standalone init 3–5 min
@@ -113,11 +115,11 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 - 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
 - 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
 
-完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
+完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
 
 ## Config consistency gate
 
-`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A6；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。Layer-2 資料閘 `validate_data_consistency`（`preprocessing/_spark.py`，dataset pipeline 第一個 side-effect 節點）在跑任何抽樣/前處理前，對 `sample_pool`（與 `resolved_item_values` 雙向集合相等）與 `label_table`（只擋資料端未知 item）做 windowed `distinct(item)` 檢查，raise `DataConsistencyError`；B1 的唯一定義 predicate 是同檔的 `item_coverage_errors`。
+`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A13 ＋ 資料閘 B1；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。Layer-2 資料閘 `validate_data_consistency`（`preprocessing/_spark.py`，dataset pipeline 第一個 side-effect 節點）在跑任何抽樣/前處理前，對 `sample_pool`（與 `resolved_item_values` 雙向集合相等）與 `label_table`（只擋資料端未知 item）做 windowed `distinct(item)` 檢查，raise `DataConsistencyError`；B1 的唯一定義 predicate 是同檔的 `item_coverage_errors`。
 
 ## graphify
 

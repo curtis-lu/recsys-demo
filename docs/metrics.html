@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>recsys_tfb — 指標說明（mAP / NDCG / per-item，程式實算）</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
+    max-width:980px;margin:0 auto;padding:24px 34px;color:#1f2328;line-height:1.65;background:#fff}
+  h1{font-size:23px;margin-bottom:2px}
+  h2{font-size:19px;border-bottom:1px solid #d0d7de;padding-bottom:6px;margin-top:32px}
+  h3{font-size:16px;margin-top:24px}
+  .sub{color:#59636e;font-size:13px;margin-top:0}
+  code{background:#eff1f3;padding:1px 5px;border-radius:5px;font-size:84%;font-family:"SF Mono",Menlo,Consolas,monospace}
+  a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0}
+  th,td{border:1px solid #d0d7de;padding:5px 9px;text-align:left;vertical-align:top}
+  th{background:#f6f8fa}
+  .f{background:#0d1117;color:#e6edf3;padding:10px 14px;border-radius:8px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.6;overflow:auto;margin:8px 0}
+  .f .c{color:#7ee787}.f .k{color:#ffa657}.f .m{color:#79c0ff}
+  .note{font-size:12.5px;background:#fff8e6;border-left:3px solid #f0a000;padding:7px 11px;border-radius:4px;margin:8px 0}
+  .ok{background:#eef9f0;border-left:3px solid #2da44e}
+  .ex{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#f6f8fa;border:1px solid #e1e4e8;padding:8px 11px;border-radius:6px;overflow:auto}
+</style>
+</head>
+<body>
+
+<h1>指標說明：mAP / NDCG / per-item</h1>
+<p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。</p>
+
+<div class="note">
+評估<b>永遠</b>在 <b>query group</b> 內進行：query group ＝ 同一個 (time, entity) 下所有候選 item。模型分數只在組內比大小、指標也是<b>每組各算、再平均</b>。這和「逐筆算 AUC」的二元分類根本不同（見 README §0）。
+</div>
+
+<h2>0. 三層計算（一張圖看懂資料怎麼被縮約）</h2>
+<div class="f">
+原始預測（每筆 = 一個 entity×item 的 score）
+  │  <span class="k">rank_within_query</span>：組內按 score 由高到低給名次 <span class="c">pos</span>
+  │  <span class="k">add_query_total_rel</span>：組內正例數 <span class="c">total_rel = Σ label</span>
+  ▼
+逐列貢獻（add_row_contributions）
+  cum_rel = 到此名次累計正例     prec_at_pos = cum_rel / pos
+  dcg_term = label / log2(pos+1)  top_k@K = 1 if pos≤K else 0
+  ▼  groupBy(query)
+每組指標（compute_per_query_metrics）：map@K · ndcg@K · precision@K · recall@K
+  ▼  mean over groups
+總表指標（summary）              ▼  attribute 到 item，macro over items
+                                per-item 指標：hit_rate@K · map_attr@K · ndcg_attr@K · mean_pos
+</div>
+
+<h2>1. 主指標：mAP</h2>
+<p>每個 query group 先算 <b>AP（Average Precision）</b>，再對所有「至少有一個正例」的 group 取平均，就是 <b>mAP</b>。這是頭號指標。</p>
+
+<h3>AP（單一 query group）— <code>compute_ap</code></h3>
+<div class="f">
+order = argsort(-score)          <span class="m"># 組內按 score 由高到低</span>
+prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</span>
+<span class="c">AP = Σ( prec_at_pos × label ) / Σ label</span>
+</div>
+<p class="sub">直覺：只在「命中正例的名次」上取精確率、再平均。正例都排在前面 → AP 接近 1；排在後面 → AP 低。</p>
+<div class="note"><b>zero-positive group 回傳 <code>None</code>、不計入 mAP</b>：一組裡完全沒有正例時 AP 沒有意義（分母 0）。這也是 dataset 的 <code>filter_groups_with_positives</code> 只對 val/test 丟掉這種組的原因（見 <a href="pipelines/dataset.md">dataset.md</a>）。</p>
+
+<h3>mAP（跨 group）— <code>compute_mean_ap</code></h3>
+<div class="f"><span class="c">mAP = mean( AP_g  for g in groups if AP_g is not None )</span></div>
+<p class="sub">同分（score 相同）依輸入穩定順序決定名次（<code>np.lexsort</code>）。空輸入或全無正例 → 0.0。</p>
+
+<h2>2. @K 指標（top-K 截斷）</h2>
+<p>把名次截在前 K，算 top-K 版本。每組先算、再平均。逐組公式（<code>compute_per_query_metrics</code>）：</p>
+<table>
+  <tr><th>指標 @K</th><th>每組公式</th><th>意思</th></tr>
+  <tr><td><code>map@K</code></td><td>Σ(prec_at_pos · label · [pos≤K]) / total_rel</td><td>只看前 K 名的 AP</td></tr>
+  <tr><td><code>ndcg@K</code></td><td>Σ( dcg_term · [pos≤K] ) / iDCG@K</td><td>有位置折扣的排序品質；已被理想排序正規化到 [0,1]</td></tr>
+  <tr><td><code>precision@K</code></td><td>hits@K / K</td><td>前 K 名裡有多少比例是正例</td></tr>
+  <tr><td><code>recall@K</code></td><td>hits@K / total_rel</td><td>該組正例有多少比例被排進前 K</td></tr>
+</table>
+<p class="sub">其中 <code>dcg_term = label / log2(pos+1)</code>；<code>iDCG@K = Σ_{i=1..min(total_rel,K)} 1/log2(i+1)</code>（理想排序的 DCG，把正例全擺最前面）；<code>hits@K = Σ(label·[pos≤K])</code>。總表指標是這些每組值的平均。</p>
+<div class="note"><b>K 的退化情況</b>：當 <code>K ≥ 每組候選 item 數</code> 時，前 K 名涵蓋全組 → <code>precision@K</code> 趨近「正例佔比」、<code>recall@K</code> 恆為 1，兩者失去鑑別力。看 @K 指標時要對照每組候選數。</p>
+
+<h2>3. per-item 指標（macro over items）</h2>
+<p>把每個正例的貢獻<b>歸因到它的 item</b>，再對 item 做 macro 平均（每個 item 等權）。讓你看「哪些 item 排得好 / 差」，不被熱門 item 的數量蓋過。</p>
+<table>
+  <tr><th>指標</th><th>意思</th></tr>
+  <tr><td><code>map_attr@K</code></td><td>per-item 歸因的 mAP@K（該 item 的正例貢獻平均）</td></tr>
+  <tr><td><code>ndcg_attr@K</code></td><td>per-item 歸因的 NDCG@K</td></tr>
+  <tr><td><code>hit_rate@K</code></td><td>該 item 的邊際 recall：它的正例有多少比例被排進前 K</td></tr>
+  <tr><td><code>mean_pos</code></td><td>該 item 在 P-positive 列上的平均名次</td></tr>
+</table>
+<p class="sub">聚合採「row-equal-weight：對 P-positive 列取等權平均」（<code>aggregate_per_item</code>）。</p>
+
+<div class="note ok"><b>HPO 用哪個指標選超參？</b> training 的 <code>tune_hyperparameters</code> 在 <b>val</b> 上算的分數由 <code>hpo_objective</code> 決定。本 repo 的 config（<code>parameters_training.yaml</code>）設成 <b>macro per-item mAP</b>（<code>compute_macro_per_item_map</code>，即這節的 per-item 巨觀平均，避免熱門 item 主導調參）；config 沒設時程式碼預設回退到一般 <code>mean_ap</code>。見 <a href="pipelines/training.md">training.md</a>。</p>
+
+<h2>4. baseline 對照</h2>
+<p><code>compute_baseline_metrics</code> 算一個 <b>popularity baseline</b>：用「近期最常被選的 item」（逐 snap_date 在回溯窗內統計人氣）當不看個人特徵的基準排序，套同一組指標。模型要有價值，得明顯贏過它。報表會把模型與 baseline 並列。</p>
+
+<h2>5. 報表怎麼分段</h2>
+<table>
+  <tr><th>分段</th><th>內容</th></tr>
+  <tr><td>dataset overview</td><td>評估資料規模（group 數、正例率等，<code>compute_dataset_overview</code>）</td></tr>
+  <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / ndcg@K / precision@K / recall@K，與 baseline 並列</td></tr>
+  <tr><td>per-item</td><td>各 item 的 map_attr@K / ndcg_attr@K / hit_rate@K / mean_pos</td></tr>
+  <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（需 <code>segment_sources</code> 提供欄；否則該段不出現，見 README §4）</td></tr>
+  <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="pipelines/evaluation.md">evaluation.md</a>）</td></tr>
+</table>
+<p class="sub">可選：<code>product_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>
+
+<h2>6. 常見疑問</h2>
+<table>
+  <tr><th>疑問</th><th>解答</th></tr>
+  <tr><td>為什麼不看 AUC / logloss？</td><td>那是逐筆的分類指標；這裡要的是「組內相對名次排得好不好」，所以用 per-group 排序指標。</td></tr>
+  <tr><td>mAP 和 map@K 差在哪？</td><td>mAP 不截斷（看完整排序）；map@K 只看前 K 名。報表兩者都有。</td></tr>
+  <tr><td>同分怎麼排？</td><td>依輸入穩定順序（<code>np.lexsort</code> / Spark window），不是隨機。</td></tr>
+  <tr><td>某 item 指標是 0 或缺？</td><td>該 item 在評估窗沒有正例 → 不貢獻 per-item 平均（同 zero-positive group 的道理）。</td></tr>
+</table>
+
+<h2>接下來</h2>
+<p class="sub">
+評估兩情境與三模式 → <a href="pipelines/evaluation.md">pipelines/evaluation.md</a>；
+程式行為圖解 → <a href="behavior-diagrams.html">behavior-diagrams.html</a>；
+排序 vs 分類的數學 → 手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。
+</p>
+
+</body>
+</html>
