@@ -4,10 +4,12 @@ Claude Code 在此 repo 工作時的最小規範。
 
 ## Project Overview
 
-商業銀行產品推薦排序模型。預測客戶對 22 類金融產品的興趣分數，供行銷 PM 排序推薦優先順序。
+通用的**排序（ranking / learning-to-rank）批次建模框架**。對每個 query group（`time` × `entity`），把候選 `item` 依模型分數排名，供下游依名次分配有限資源。欄位角色（time / entity / item / label）由 `conf/base/parameters.yaml` 的 `schema` 區塊配置；`feature_table` / `sample_pool` / `label_table` 等來源表由使用者自定義。
 
-- **Inference**：每週批次推論，~10M 客戶 × 22 產品 × ~1500 特徵
-- **Training**：N 個月底 snapshot（顯式 `train_snap_dates` list 配置），不定期手動執行
+**商業銀行產品推薦是本 repo 的示例 instantiation**（非框架限定應用）：對每位客戶把候選金融產品排序，供行銷 PM 決定推薦優先順序。
+
+- **Inference**：每週批次推論；示例規模 ~10M entity × 22 item × ~1500 特徵
+- **Training**：N 個 snapshot（顯式 `train_snap_dates` list 配置，不一定月底），不定期手動執行
 - **Target environment**：PySpark 3.3.2 on Hadoop/HDFS/Hive, Ploomber DAG, no internet, no extra packages, CPU-only (4 core, 128GB RAM)
 
 ## Tech Stack
