@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>recsys_tfb — Data Lineage（資料流 · schema · 範例）</title>
+<style>
+  :root{
+    --hive:#a5d8ff; --hive-b:#1971c2;
+    --json:#ffec99; --json-b:#f08c00;
+    --model:#b2f2bb; --model-b:#2f9e44;
+    --report:#eebefa; --report-b:#ae3ec9;
+    --src:#f1f3f5; --base:#e7f5ff; --train:#fff4e6; --cal:#f3f0ff; --mv:#ebfbee;
+  }
+  body{font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
+    max-width:1080px;margin:0 auto;padding:24px 34px;color:#1f2328;line-height:1.65;background:#fff}
+  h1{font-size:23px;margin-bottom:2px}
+  h2{font-size:19px;border-bottom:1px solid #d0d7de;padding-bottom:6px;margin-top:34px}
+  h3{font-size:16px;margin-top:26px}
+  .sub{color:#59636e;font-size:13px;margin-top:0}
+  code{background:#eff1f3;padding:1px 5px;border-radius:5px;font-size:84%;
+    font-family:"SF Mono",Menlo,Consolas,monospace}
+  a{color:#0969da;text-decoration:none}
+  a:hover{text-decoration:underline}
+  /* legend */
+  .legend{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:12.5px;margin:10px 0 4px}
+  .lg{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:14px;height:14px;border-radius:4px;border:1.5px solid #888;display:inline-block}
+  .vlane{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;border:1px solid #ccc}
+  /* cards */
+  .card{border:1px solid #d0d7de;border-radius:10px;padding:12px 15px;margin:12px 0;background:#fdfdfd}
+  .card h4{margin:0 0 6px;font-size:15px;font-family:"SF Mono",Menlo,Consolas,monospace}
+  .badge{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:9px;margin-left:8px;
+    vertical-align:middle;border:1px solid}
+  .b-hive{background:var(--hive);border-color:var(--hive-b);color:#0b3d6b}
+  .b-json{background:var(--json);border-color:var(--json-b);color:#7a4a00}
+  .b-model{background:var(--model);border-color:var(--model-b);color:#14532d}
+  .b-report{background:var(--report);border-color:var(--report-b);color:#5f1a6e}
+  .vl{font-size:10.5px;padding:1px 7px;border-radius:9px;margin-left:6px;vertical-align:middle}
+  .vl-src{background:var(--src)} .vl-base{background:var(--base)} .vl-train{background:var(--train)}
+  .vl-cal{background:var(--cal)} .vl-mv{background:var(--mv)}
+  .meta{font-size:12px;color:#3a4148;margin:4px 0 8px}
+  .meta b{color:#1f2328}
+  table.sc{border-collapse:collapse;width:100%;font-size:12px;margin:6px 0}
+  table.sc th,table.sc td{border:1px solid #e1e4e8;padding:3px 8px;text-align:left;vertical-align:top}
+  table.sc th{background:#f6f8fa}
+  .ex{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#0d1117;color:#e6edf3;
+    padding:8px 11px;border-radius:7px;overflow:auto;margin-top:6px;white-space:pre}
+  .role{color:#1971c2;font-weight:600}
+  .note{font-size:12px;background:#fff8e6;border-left:3px solid #f0a000;padding:6px 10px;border-radius:4px;margin:8px 0}
+  .anchornav{font-size:12.5px;columns:2;background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;padding:10px 16px}
+  .anchornav a{display:block;padding:1px 0}
+</style>
+</head>
+<body>
+
+<h1>recsys_tfb — Data Lineage</h1>
+<p class="sub">catalog.yaml 全部資料產物的「誰產生、誰消費、長什麼樣」。邊（資料流）逐一對照各
+<code>pipeline.py</code> 的節點接線；schema 與型別對照 <code>catalog.yaml</code> / 節點程式碼 /
+實際 parquet。範例列：來源三表取自實際合成資料，其餘為依 schema 構造的<b>示意</b>列。</p>
+
+<div class="note">
+範例資料是<b>合成的</b>（repo 內 <code>data/*.parquet</code>），只有 <b>8 種產品</b>、約 1.5 萬客戶月。
+生產環境為 ~10M 客戶 × 22 產品 × ~1500 特徵。範例列用來示意 schema，不代表生產數量。
+</div>
+
+<h2>圖例</h2>
+<div class="legend">
+  <span class="lg"><span class="sw" style="background:var(--hive);border-color:var(--hive-b)"></span>Hive 表</span>
+  <span class="lg"><span class="sw" style="background:var(--json);border-color:var(--json-b)"></span>JSON</span>
+  <span class="lg"><span class="sw" style="background:var(--model);border-color:var(--model-b)"></span>模型產物</span>
+  <span class="lg"><span class="sw" style="background:var(--report);border-color:var(--report-b)"></span>報表（HTML）</span>
+</div>
+<div class="legend" style="margin-top:6px">
+  <span>版本層（決定產物落在哪個 HDFS path / 版本後綴）：</span>
+  <span class="vlane" style="background:var(--src)">source（無版本）</span>
+  <span class="vlane" style="background:var(--base)">base_dataset_version</span>
+  <span class="vlane" style="background:var(--train)">train_variant_id</span>
+  <span class="vlane" style="background:var(--cal)">calibration_variant_id</span>
+  <span class="vlane" style="background:var(--mv)">model_version</span>
+</div>
+<p class="sub" style="margin-top:8px">三層資料版本：<code>base_dataset_version</code> = 與抽樣無關的不變產物；
+<code>train_variant_id</code> = 依 train 抽樣；<code>calibration_variant_id</code> = 依 calibration 抽樣；
+<code>model_version</code> = 訓練/校準後的模型與其下游。</p>
+
+<h2>Lineage 總覽</h2>
+<p class="sub">階段由上而下：<code>source_etl → dataset → training →（分叉）inference / evaluation</code>。
+每個叢集列出它的 catalog 產物（底色 = 版本層）。叢集之間標註實際流動的資料表；
+叢集內的逐表上下游見下方各表卡的「產生 / 下游」。</p>
+
+<svg viewBox="0 0 1000 980" width="100%" style="font-family:-apple-system,'PingFang TC',sans-serif;border:1px solid #eee;border-radius:8px;background:#fff">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#495057"/></marker>
+  </defs>
+
+  <!-- ===== source_etl ===== -->
+  <rect x="250" y="20" width="500" height="74" rx="12" fill="var(--src)" stroke="#adb5bd"/>
+  <text x="500" y="40" text-anchor="middle" font-size="13" font-weight="bold">source_etl（SQL ETL，非 DAG）</text>
+  <g font-size="11.5" text-anchor="middle">
+    <rect x="270" y="52" width="140" height="30" rx="7" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="340" y="71">feature_table</text>
+    <rect x="430" y="52" width="140" height="30" rx="7" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="500" y="71">label_table</text>
+    <rect x="590" y="52" width="140" height="30" rx="7" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="660" y="71">sample_pool</text>
+  </g>
+
+  <line x1="500" y1="94" x2="500" y2="120" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="512" y="112" font-size="10.5" fill="#1971c2">feature_table · label_table · sample_pool</text>
+
+  <!-- ===== dataset (3 version lanes) ===== -->
+  <rect x="40" y="124" width="920" height="288" rx="12" fill="none" stroke="#adb5bd" stroke-dasharray="4 3"/>
+  <text x="52" y="142" font-size="13" font-weight="bold">dataset</text>
+  <text x="120" y="142" font-size="10.5" fill="#59636e">抽樣 + 前處理 + 組 model_input；keys ⋈ label_table ⋈ preprocessed_feature_table</text>
+
+  <!-- base lane -->
+  <rect x="52" y="150" width="896" height="86" rx="9" fill="var(--base)" stroke="#74c0fc"/>
+  <text x="62" y="166" font-size="11" font-weight="bold" fill="#1864ab">base_dataset_version</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="62" y="174" width="150" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="137" y="191">preprocessor (JSON)</text>
+    <rect x="222" y="174" width="160" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="302" y="191">category_mappings (JSON)</text>
+    <rect x="392" y="174" width="220" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="502" y="191">preprocessed_feature_table</text>
+    <rect x="622" y="174" width="150" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="697" y="191">val_keys · test_keys</text>
+    <rect x="782" y="174" width="156" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="860" y="191">val · test_model_input</text>
+  </g>
+  <text x="62" y="222" font-size="10" fill="#495057">val/test_model_input 經 filter_groups_with_positives（丟掉無正例的查詢群組）</text>
+
+  <!-- train-variant lane -->
+  <rect x="52" y="244" width="896" height="74" rx="9" fill="var(--train)" stroke="#ffc078"/>
+  <text x="62" y="260" font-size="11" font-weight="bold" fill="#b35309">train_variant_id（依 train 抽樣）</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="62" y="268" width="110" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="117" y="285">sample_keys</text>
+    <rect x="182" y="268" width="200" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="282" y="285">train_keys · train_dev_keys</text>
+    <rect x="392" y="268" width="270" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="527" y="285">train_model_input · train_dev_model_input</text>
+  </g>
+
+  <!-- calibration-variant lane -->
+  <rect x="52" y="326" width="896" height="74" rx="9" fill="var(--cal)" stroke="#d0bfff"/>
+  <text x="62" y="342" font-size="11" font-weight="bold" fill="#6741d9">calibration_variant_id（依 calibration 抽樣，可選）</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="62" y="350" width="140" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="132" y="367">calibration_keys</text>
+    <rect x="212" y="350" width="210" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="317" y="367">calibration_model_input</text>
+  </g>
+
+  <line x1="500" y1="412" x2="500" y2="438" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="512" y="430" font-size="10.5" fill="#1971c2">*_model_input（+ preprocessor）</text>
+
+  <!-- ===== training ===== -->
+  <rect x="120" y="442" width="760" height="116" rx="12" fill="var(--mv)" stroke="#69db7c"/>
+  <text x="132" y="460" font-size="13" font-weight="bold">training</text>
+  <text x="198" y="460" font-size="10.5" fill="#59636e">cache → HPO 調參 → 訓練 →（校準）→ 寫 test 預測 + 診斷</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="132" y="470" width="120" height="26" rx="6" fill="var(--model)" stroke="var(--model-b)"/>
+    <text x="192" y="487">model (model.txt)</text>
+    <rect x="262" y="470" width="120" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="322" y="487">best_params</text>
+    <rect x="392" y="470" width="230" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="507" y="487">training_eval_predictions</text>
+    <rect x="632" y="470" width="150" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="707" y="487">evaluation_results</text>
+    <rect x="262" y="506" width="430" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="477" y="523">診斷 JSON：feature_statistics · feature_importance · shap_diagnostics</text>
+  </g>
+  <text x="132" y="548" font-size="10" fill="#495057">evaluation_results 由 compute_test_mAP_spark 在 training 內產生（讀 training_eval_predictions），非 evaluation pipeline</text>
+
+  <!-- training -> inference -->
+  <polyline points="300,558 300,592 250,592 250,620" fill="none" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="262" y="585" font-size="10.5" fill="#1971c2">model · preprocessor（+ feature_table）</text>
+  <!-- training -> evaluation 情境1 -->
+  <polyline points="640,558 640,760 760,760 760,790" fill="none" stroke="#e8590c" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="648" y="700" font-size="10.5" fill="#e8590c">training_eval_predictions（--post-training）</text>
+
+  <!-- ===== inference ===== -->
+  <rect x="120" y="624" width="300" height="84" rx="12" fill="var(--mv)" stroke="#69db7c"/>
+  <text x="132" y="642" font-size="13" font-weight="bold">inference</text>
+  <text x="200" y="642" font-size="10.5" fill="#59636e">評分 → 排名</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="132" y="652" width="120" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="192" y="669">score_table</text>
+    <rect x="262" y="652" width="146" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="335" y="669">ranked_predictions</text>
+  </g>
+  <text x="132" y="697" font-size="10" fill="#495057">score_table → rank_predictions → ranked_predictions（= validated_predictions 同一張表）</text>
+
+  <!-- inference -> evaluation 情境2 -->
+  <polyline points="420,666 470,666 470,820 600,820" fill="none" stroke="#e8590c" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="478" y="760" font-size="10.5" fill="#e8590c">ranked_predictions（預設監控）</text>
+
+  <!-- ===== evaluation ===== -->
+  <rect x="600" y="624" width="340" height="250" rx="12" fill="var(--mv)" stroke="#69db7c"/>
+  <text x="612" y="642" font-size="13" font-weight="bold">evaluation</text>
+  <text x="688" y="642" font-size="10.5" fill="#59636e">兩情境：post-training / 監控</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="612" y="652" width="316" height="26" rx="6" fill="var(--report)" stroke="var(--report-b)"/>
+    <text x="770" y="669">evaluation_report（report.html）</text>
+    <rect x="612" y="686" width="316" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <text x="770" y="703">enriched_eval_predictions</text>
+    <rect x="612" y="720" width="316" height="26" rx="6" fill="var(--report)" stroke="var(--report-b)"/>
+    <text x="770" y="737">evaluation_comparison_report（--compare）</text>
+  </g>
+  <text x="612" y="772" font-size="10" fill="#495057" font-weight="bold">情境 1（--post-training）讀 training_eval_predictions</text>
+  <text x="612" y="788" font-size="10" fill="#495057" font-weight="bold">情境 2（預設）讀 ranked_predictions</text>
+  <text x="612" y="812" font-size="10" fill="#495057">prepare_eval_data ⋈ label_table → 指標 + 報表；</text>
+  <text x="612" y="827" font-size="10" fill="#495057">persist_eval_predictions → enriched_eval_predictions</text>
+  <text x="612" y="848" font-size="10" fill="#495057">--compare-only 直接讀回 enriched_eval_predictions</text>
+</svg>
+
+<p class="sub">※ <code>label_table</code> 同時餵 dataset（組 model_input）與 evaluation（算指標）；
+<code>feature_table</code> 同時餵 dataset（前處理）與 inference（組評分母體）。為避免長跨線，這兩條共用流向見各表卡。</p>
+
+<h2>各表表卡</h2>
+<div class="anchornav">
+  <b>source_etl：</b>
+  <a href="#feature_table">feature_table</a>
+  <a href="#label_table">label_table</a>
+  <a href="#sample_pool">sample_pool</a>
+  <b>dataset（base）：</b>
+  <a href="#preprocessor">preprocessor</a>
+  <a href="#category_mappings">category_mappings</a>
+  <a href="#preprocessed_feature_table">preprocessed_feature_table</a>
+  <a href="#val_keys">val_keys / test_keys</a>
+  <a href="#val_model_input">val_model_input / test_model_input</a>
+  <b>dataset（train-variant）：</b>
+  <a href="#sample_keys">sample_keys</a>
+  <a href="#train_keys">train_keys / train_dev_keys</a>
+  <a href="#train_model_input">train_model_input / train_dev_model_input</a>
+  <b>dataset（calibration-variant）：</b>
+  <a href="#calibration_keys">calibration_keys</a>
+  <a href="#calibration_model_input">calibration_model_input</a>
+  <b>training：</b>
+  <a href="#model">model</a>
+  <a href="#best_params">best_params</a>
+  <a href="#training_eval_predictions">training_eval_predictions</a>
+  <a href="#evaluation_results">evaluation_results</a>
+  <a href="#diagnostics">診斷 JSON ×3</a>
+  <b>inference：</b>
+  <a href="#score_table">score_table</a>
+  <a href="#ranked_predictions">ranked_predictions / validated_predictions</a>
+  <b>evaluation：</b>
+  <a href="#evaluation_report">evaluation_report</a>
+  <a href="#enriched_eval_predictions">enriched_eval_predictions</a>
+  <a href="#evaluation_comparison_report">evaluation_comparison_report</a>
+</div>
+
+<!-- ===================== source_etl ===================== -->
+<h3>source_etl（SQL ETL）</h3>
+
+<div class="card" id="feature_table">
+  <h4>feature_table <span class="badge b-hive">Hive</span><span class="vl vl-src">source</span></h4>
+  <div class="meta"><b>產生</b>：source_etl · feature_etl（aum → sav → ccard → info → concat → feature_table，多支 SQL <code>INSERT OVERWRITE</code>）　|
+  <b>下游</b>：dataset（fit_preprocessor_metadata、apply_preprocessor_to_features）、inference（build_scoring_dataset）　|
+  <b>partition</b>：snap_date</div>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date</td><td>date</td><td><span class="role">time</span>（快照日；合成 14 個月）</td></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>total_aum, fund_aum, in/out_amt_*, ccard_*（14 欄）</td><td>double / int</td><td>數值特徵</td></tr>
+    <tr><td>age, tenure_months, income_level</td><td>int</td><td>數值特徵</td></tr>
+    <tr><td>gender, risk_attr, education_level, marital_status, channel_preference</td><td>string</td><td>類別特徵（前處理時 int 編碼）</td></tr>
+  </table>
+  <p class="sub">合成 24 欄（snap_date, cust_id + 22 特徵）。<b>不含</b> <code>cust_segment_typ</code>（生產 feature_table 才有；本 repo 它只在 sample_pool）。</p>
+  <div class="ex">snap_date   cust_id   total_aum   age  gender  risk_attr  channel_preference  ...
+2025-01-31  C000001   324469.24   41   F       C3         digital             ...
+2025-01-31  C000002    11991.97   21   F       C2         branch              ...</div>
+</div>
+
+<div class="card" id="label_table">
+  <h4>label_table <span class="badge b-hive">Hive</span><span class="vl vl-src">source</span></h4>
+  <div class="meta"><b>產生</b>：source_etl · label_etl（label_ccard / label_exchange / label_fund → label_table）　|
+  <b>下游</b>：dataset（validate_data_consistency、build_model_input 各 split）、evaluation（prepare_eval_data、restrict_to_common）　|
+  <b>partition</b>：snap_date</div>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>prod_name</td><td>string</td><td><span class="role">item</span>（8 種合成產品）</td></tr>
+    <tr><td>label</td><td>int</td><td><span class="role">label</span>（0/1：客戶是否承作該產品）</td></tr>
+    <tr><td>apply_start_date, apply_end_date</td><td>date</td><td>label 認定的觀察窗（前處理時 drop）</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   apply_start  apply_end   label  prod_name
+2025-01-31  C000002   2025-02-01   2025-03-02  0      exchange_usd
+2025-01-31  C000008   2025-02-01   2025-03-02  1      exchange_usd</div>
+</div>
+
+<div class="card" id="sample_pool">
+  <h4>sample_pool <span class="badge b-hive">Hive</span><span class="vl vl-src">source</span></h4>
+  <div class="meta"><b>產生</b>：source_etl · sample_pool_etl（sample_pool.sql）　|
+  <b>下游</b>：dataset（validate_data_consistency、select_train/val/test/calibration_keys）　|
+  <b>partition</b>：snap_date　|　<b>PK</b>：(snap_date, cust_id, prod_name)</div>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>prod_name</td><td>string</td><td><span class="role">item</span>（每個 query group 要納入排名的候選範圍）</td></tr>
+    <tr><td>cust_segment_typ</td><td>string</td><td>分群鍵（分層抽樣 + carry 進 train model_input；值如 mass / affluent / hnw）</td></tr>
+    <tr><td>label</td><td>int</td><td>分層抽樣用（sample_group_keys 之一）</td></tr>
+    <tr><td>tenure_months, channel_preference</td><td>int / string</td><td>其他分群維度</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   cust_segment_typ  prod_name     label  tenure_months  channel_preference
+2025-01-31  C000001   affluent          exchange_usd  0      12             digital
+2025-01-31  C000002   mass              exchange_usd  0      26             branch</div>
+</div>
+
+<!-- ===================== dataset: base ===================== -->
+<h3>dataset — base_dataset_version 層</h3>
+
+<div class="card" id="preprocessor">
+  <h4>preprocessor <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
+  <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（在 train 期 feature_table 上 fit，與抽樣解耦）　|
+  <b>下游</b>：dataset（apply_preprocessor_to_features、build_model_input）、training（prepare_lgb_train_inputs、tune、finalize、calibrate、predict、診斷）、inference（apply_preprocessor）　|
+  <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code></div>
+  <p class="sub">類別欄編碼字典與前處理 metadata（transform 時用）。是跨 dataset / training / inference <b>共用</b>的前處理合約。</p>
+  <div class="ex">{ "categorical_columns": ["prod_name","gender",...],
+  "category_to_code": { "gender": {"F":0,"M":1}, "risk_attr": {...}, ... },
+  "feature_columns": [...], ... }</div>
+</div>
+
+<div class="card" id="category_mappings">
+  <h4>category_mappings <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
+  <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（與 preprocessor 同節點同時產出）　|
+  <b>下游</b>：—（人類可讀的對照 / 檢視用；DAG 下游節點只吃 preprocessor）　|
+  <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/category_mappings.json</code></div>
+  <div class="ex">{ "gender": {"F":0,"M":1},
+  "prod_name": {"ccard_bill":0,"ccard_cash":1,...,"fund_stock":7}, ... }</div>
+</div>
+
+<div class="card" id="preprocessed_feature_table">
+  <h4>preprocessed_feature_table <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
+  <div class="meta"><b>產生</b>：dataset · apply_preprocessor_to_features（對整張 feature_table 編碼一次，各 split 共用）　|
+  <b>下游</b>：dataset（build_model_input 各 split）　|　<b>partition</b>：snap_date</div>
+  <p class="note">版本層是 <b>base_dataset_version</b>（catalog 的 partition_filter 只有 base_dataset_version），<b>不依賴 train 抽樣</b>——即使 catalog 註解把它列在「train-variant 區塊」。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date, cust_id</td><td>date / string</td><td>identity（time, entity）</td></tr>
+    <tr><td>gender, risk_attr, education_level, marital_status, channel_preference</td><td>int</td><td>類別特徵 → int 編碼後</td></tr>
+    <tr><td>其餘 17 個數值特徵</td><td>double / int</td><td>原樣保留</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   total_aum   age  gender  risk_attr  channel_preference
+2025-01-31  C000001   324469.24   41   0       3          2          ← 類別已轉碼（示意）</div>
+</div>
+
+<div class="card" id="val_keys">
+  <h4>val_keys · test_keys <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
+  <div class="meta"><b>產生</b>：dataset · select_val_keys / select_test_keys（取 val/test 期 label 母體的 identity，full population）　|
+  <b>下游</b>：dataset（build_val_model_input / build_test_model_input）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">只含 identity 三欄（<b>不</b> carry <code>cust_segment_typ</code>，與 train/calibration keys 不同）。版本層為 base（不依 train 抽樣變體）。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色</th></tr>
+    <tr><td>snap_date</td><td>string</td><td><span class="role">time</span></td></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>prod_name</td><td>string</td><td><span class="role">item</span></td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   prod_name     （val: 2025-12-31；test: 2026-01-31，示意）
+2025-12-31  C000005   fund_mix</div>
+</div>
+
+<div class="card" id="val_model_input">
+  <h4>val_model_input · test_model_input <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
+  <div class="meta"><b>產生</b>：dataset · build_*_model_input → filter_groups_with_positives（丟掉無正例的 (time, entity) 群組）　|
+  <b>下游</b>：training（cache_val_model_input / cache_test_model_input）　|
+  <b>partition</b>：val=snap_date；test=snap_date, prod_name</div>
+  <p class="sub">keys ⋈ label_table ⋈ preprocessed_feature_table。val/test <b>不</b> carry <code>cust_segment_typ</code>。已濾除零正例群組（排序指標對這種群組無意義）。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（prod_name 同時為 int 編碼的 item 特徵）</td></tr>
+    <tr><td>label</td><td>int</td><td><span class="role">label</span></td></tr>
+    <tr><td>~23 個特徵欄（prod_name + 5 類別 int 編碼 + 17 數值）</td><td>numeric</td><td>模型輸入特徵</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   prod_name(enc)  label  total_aum  gender(enc)  ...
+2025-12-31  C000005   5               1      88231.10   0            ...  （示意）</div>
+</div>
+
+<!-- ===================== dataset: train-variant ===================== -->
+<h3>dataset — train_variant_id 層</h3>
+
+<div class="card" id="sample_keys">
+  <h4>sample_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
+  <div class="meta"><b>產生</b>：dataset · select_train_keys（對 train 期 sample_pool 做分層抽樣，sample_ratio + overrides）　|
+  <b>下游</b>：dataset（split_train_keys）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">identity + carry（<code>cust_segment_typ</code>）。抽樣決定性：<code>crc32(identity | site | seed) % BUCKETS &lt; ratio·BUCKETS</code>。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色</th></tr>
+    <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（time, entity, item）</td></tr>
+    <tr><td>cust_segment_typ</td><td>string</td><td>carry（供 sample_weights 分群）</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   prod_name     cust_segment_typ
+2025-03-31  C000001   ccard_ins     affluent        （示意）</div>
+</div>
+
+<div class="card" id="train_keys">
+  <h4>train_keys · train_dev_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
+  <div class="meta"><b>產生</b>：dataset · split_train_keys（把 sample_keys 依 cust_id hash 以 <code>train_dev_ratio</code> 切兩份）　|
+  <b>下游</b>：dataset（build_train_model_input / build_train_dev_model_input）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">schema 同 sample_keys（identity + cust_segment_typ）。切分按 <code>cust_id</code> 分桶（同客戶整批分到同一邊，避免洩漏）。</p>
+</div>
+
+<div class="card" id="train_model_input">
+  <h4>train_model_input · train_dev_model_input <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
+  <div class="meta"><b>產生</b>：dataset · build_train_model_input / build_train_dev_model_input（keys ⋈ label_table ⋈ preprocessed_feature_table）　|
+  <b>下游</b>：training（cache_train_model_input / cache_train_dev_model_input → 訓練 / early-stopping）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄 <code>cust_segment_typ</code>，且 <b>不</b>濾零正例群組（pointwise / lambdarank 的 loss 用到每一列）。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
+    <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity</td></tr>
+    <tr><td>label</td><td>int</td><td><span class="role">label</span></td></tr>
+    <tr><td>~23 個特徵欄</td><td>numeric</td><td>prod_name + 5 類別 int 編碼 + 17 數值</td></tr>
+    <tr><td>cust_segment_typ</td><td>string</td><td>carry（sample_weights 維度，原值不編碼）</td></tr>
+  </table>
+  <div class="ex">snap_date   cust_id   prod_name(enc)  label  total_aum  gender(enc)  cust_segment_typ
+2025-03-31  C000001   2               0      324469.24  0            affluent     （示意）</div>
+</div>
+
+<!-- ===================== dataset: calibration-variant ===================== -->
+<h3>dataset — calibration_variant_id 層（可選，enable_calibration）</h3>
+
+<div class="card" id="calibration_keys">
+  <h4>calibration_keys <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
+  <div class="meta"><b>產生</b>：dataset · select_calibration_keys（對 calibration_snap_dates 期 sample_pool 抽樣）　|
+  <b>下游</b>：dataset（build_calibration_model_input）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">schema 同 sample_keys（identity + cust_segment_typ）。抽樣 <code>site</code> 與 train 不同 → 即使同 seed 也抽到獨立的桶。</p>
+</div>
+
+<div class="card" id="calibration_model_input">
+  <h4>calibration_model_input <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
+  <div class="meta"><b>產生</b>：dataset · build_calibration_model_input　|
+  <b>下游</b>：training（cache_calibration_model_input → calibrate_model）　|　<b>partition</b>：snap_date</div>
+  <p class="sub">schema 同 train_model_input（identity + label + ~23 特徵 + carry）。僅在 <code>enable_calibration: true</code> 時產生。</p>
+  <div class="ex">snap_date   cust_id   prod_name(enc)  label  ...features...  cust_segment_typ
+2025-11-30  C000007   6               1      ...            mass          （示意）</div>
+</div>
+
+<!-- ===================== training ===================== -->
+<h3>training — model_version 層（driver-local 產物 + 1 張 Hive）</h3>
+
+<div class="card" id="model">
+  <h4>model <span class="badge b-model">模型</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：training · finalize_model（→ 校準時再經 calibrate_model 包裝）　|
+  <b>下游</b>：training（predict_and_write_test_predictions、compute_feature_importance、compute_shap_diagnostics、log_experiment）、inference（predict_scores）　|
+  <b>path</b>：<code>data/models/&lt;model_version&gt;/model.txt</code>（driver-local，Python open() 寫，不認 hdfs://）</div>
+  <p class="sub">單一共用 LightGBM booster（pointwise <code>binary</code> 或 LTR <code>lambdarank</code>/<code>rank_xendcg</code>，由 parameters_training.yaml 決定）。校準開啟時 model 是校準後包裝（calibrate_model 的輸出仍命名 <code>model</code>）。</p>
+</div>
+
+<div class="card" id="best_params">
+  <h4>best_params <span class="badge b-json">JSON</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：training · tune_hyperparameters（Optuna 在 val 上挑出的最佳超參）　|
+  <b>下游</b>：training（finalize_model 用來訓最終模型、log_experiment 記錄）　|
+  <b>path</b>：<code>data/models/&lt;model_version&gt;/best_params.json</code></div>
+  <div class="ex">{ "num_leaves": 63, "learning_rate": 0.043, "min_child_samples": 120,
+  "feature_fraction": 0.8, ... }  （示意）</div>
+</div>
+
+<div class="card" id="training_eval_predictions">
+  <h4>training_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：training · predict_and_write_test_predictions（對 test set 評分後 chunked 寫 Hive；節點宣告產出是 predict_manifest）　|
+  <b>下游</b>：training（compute_test_mAP_spark 讀回算 test mAP）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
+  <b>partition</b>：snap_date, prod_name（外加 model_version）</div>
+  <p class="sub">只有 test 窗內至少 1 個正例的客戶會被 scoring。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>score</td><td>double</td><td>模型分數（校準後）</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>原始輸出；校準關閉時等於 score</td></tr>
+    <tr><td>label</td><td>int</td><td>ground truth</td></tr>
+  </table>
+  <div class="ex">snap_date=2026-01-31 / prod_name=fund_mix（partition）
+cust_id   score   score_uncalibrated  label
+C000010   0.83    1.92                1      （示意）</div>
+</div>
+
+<div class="card" id="evaluation_results">
+  <h4>evaluation_results <span class="badge b-json">JSON</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：training · compute_test_mAP_spark（讀 training_eval_predictions 算 test 排序指標）　|
+  <b>下游</b>：training（log_experiment → MLflow）　|
+  <b>path</b>：<code>data/models/&lt;model_version&gt;/evaluation_results.json</code></div>
+  <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html / enriched_eval_predictions。</p>
+  <div class="ex">{ "test_map": 0.41, "ndcg@5": 0.55, "per_item_map": { "fund_mix": 0.48, ... } }  （示意）</div>
+</div>
+
+<div class="card" id="diagnostics">
+  <h4>feature_statistics · feature_importance · shap_diagnostics <span class="badge b-json">JSON</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：training · compute_feature_statistics（讀 train 快取）/ compute_feature_importance（讀 model）/ compute_shap_diagnostics（讀 model + test 快取）　|
+  <b>下游</b>：training（log_experiment → MLflow）　|
+  <b>path</b>：<code>data/models/&lt;model_version&gt;/diagnostics/*.json</code></div>
+  <p class="sub">訓練診斷：特徵統計、LightGBM 原生 importance、SHAP。皆為 model_version 層的旁路產物，不影響下游 inference / evaluation。</p>
+</div>
+
+<!-- ===================== inference ===================== -->
+<h3>inference — model_version 層</h3>
+
+<div class="card" id="score_table">
+  <h4>score_table <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：inference · predict_scores（model 對 X_score 評分；X_score 來自 feature_table → build_scoring_dataset → apply_preprocessor）　|
+  <b>下游</b>：inference（rank_predictions）　|
+  <b>partition</b>：snap_date, prod_name, model_version</div>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
+  </table>
+  <div class="ex">snap_date=2026-02-28 / prod_name=fund_mix / model_version=&lt;mv&gt;（partition）
+cust_id   score
+C000010   0.83   （示意）</div>
+</div>
+
+<div class="card" id="ranked_predictions">
+  <h4>ranked_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span>
+    <span style="font-size:11px;color:#59636e">（= validated_predictions，同一張 Hive 表）</span></h4>
+  <div class="meta"><b>產生</b>：inference · rank_predictions（每個 query group 內依 score 排名）→ validate_predictions　|
+  <b>下游</b>：evaluation 情境 2（prepare_eval_data，預設監控）　|
+  <b>partition</b>：snap_date, prod_name, model_version</div>
+  <p class="note">catalog 有兩個 entry 指向同一張表 <code>ranked_predictions</code>：<code>validated_predictions</code>（inference 寫入端，validate_predictions 的輸出）與 <code>ranked_predictions</code>（evaluation 讀取端，讓 evaluation 不跑 inference 也能 standalone 讀，避免 MemoryDataset fallback 靜默壞掉）。</p>
+  <table class="sc">
+    <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
+    <tr><td>score</td><td>double</td><td><span class="role">score</span></td></tr>
+    <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次）</td></tr>
+  </table>
+  <div class="ex">snap_date=2026-02-28 / prod_name=fund_mix / model_version=&lt;mv&gt;（partition）
+cust_id   score   rank
+C000010   0.83    1      （示意）</div>
+</div>
+
+<!-- ===================== evaluation ===================== -->
+<h3>evaluation — model_version 層</h3>
+
+<div class="card" id="evaluation_report">
+  <h4>evaluation_report <span class="badge b-report">報表</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：evaluation · generate_report（吃 eval_predictions + evaluation_metrics + baseline_metrics）　|
+  <b>下游</b>：—（終端產物，給人看）　|
+  <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report.html</code></div>
+  <p class="sub">eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions；情境 2 = ranked_predictions）⋈ label_table 而來。evaluation_metrics / baseline_metrics 是 in-memory 中間產物，不持久化於 catalog。</p>
+</div>
+
+<div class="card" id="enriched_eval_predictions">
+  <h4>enriched_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：evaluation · persist_eval_predictions（把 label join + rank + segment enrichment 後的 eval_predictions 寫回 Hive）　|
+  <b>下游</b>：evaluation（<code>--compare-only</code> 由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
+  <b>partition</b>：snap_date（外加 model_version）；columns: auto（schema 從 DataFrame 推得）</div>
+  <p class="sub">若 segment_sources 在兩次 run 之間改變，需先 drop 此表再重跑（ALTER TABLE schema evolution 是待辦 follow-up）。</p>
+</div>
+
+<div class="card" id="evaluation_comparison_report">
+  <h4>evaluation_comparison_report <span class="badge b-report">報表</span><span class="vl vl-mv">model_version</span></h4>
+  <div class="meta"><b>產生</b>：evaluation · generate_comparison_report（<code>--compare</code> / <code>--compare-only</code> 模式才有）　|
+  <b>下游</b>：—（終端產物）　|
+  <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report_comparison.html</code></div>
+  <p class="sub">把本模型與 compare_sources（另一 model_version 或 external_hive）在共同客戶上對比。<code>--compare-only</code> 走短 pipeline：讀回 enriched_eval_predictions → restrict_to_common → 只產此報表。</p>
+</div>
+
+<p class="sub" style="margin-top:30px;color:#9198a1">
+未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：scoring_dataset · X_score · eval_predictions ·
+evaluation_metrics · baseline_metrics · predict_manifest · *_parquet_handle · *_lgb_handle · sample_weight_report ·
+*_model_input_unfiltered。這些只在單次 DAG 內銜接，不持久化。
+</p>
+
+</body>
+</html>
