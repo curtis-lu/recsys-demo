@@ -38,7 +38,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 - 可能 >2 分鐘的指令用 background 執行、不阻塞流程（曾因重跑全量空轉整晚）。
 - 跨 worktree 驗證用絕對路徑或 `git -C <worktree>`；Bash 指令之間 cwd 會持續（system prompt 明文）但 skill 後可能 reset，相對路徑容易讀到 stale 的 main tree（細節見 §Worktree / venv 踩過的問題 #3）。
 
-## Worktree / venv（完整 SOP：`docs/worktree-venv-setup.md`，務必先讀）
+## Worktree / venv（完整 SOP：`docs/operations/worktree-venv-setup.md`，務必先讀）
 
 ### 已踩過、必須避免再發的問題
 
@@ -66,7 +66,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
    readlink data/{models,dataset,evaluation,inference}                      # data/ 子目錄已 symlink 到 main
    grep -E "^(objective|metric|snap_date):" conf/base/parameters_*.yaml     # config 真的改在 worktree 那份
    ```
-   任一失敗先修再繼續（venv 修復見 `docs/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
+   任一失敗先修再繼續（venv 修復見 `docs/operations/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
 3. **跑測試/CLI 一律絕對 venv python + `PYTHONPATH=<wt>/src`**：
    `PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <paths> -q`
    （裸跑或裸 `.venv/bin/pytest` 會抓到 main 的 `src`＝editable-install target，靜默測/跑錯 code；相對路徑經 symlink 還會 ELOOP）。CLI 同理：`PYTHONPATH=<wt>/src …/.venv/bin/python -m recsys_tfb <pipeline> [--options]`。
@@ -83,7 +83,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
   scripts/dev_admin.sh scripts/nuke_ml_recsys.py
   scripts/dev_admin.sh scripts/setup_hive_dev.py
   ```
-- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/spark-connection-architecture.md`](docs/spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
+- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
   ```bash
   source ~/dev-cluster/scripts/client-env.sh                          # 🅔 JDK17 add-opens + HADOOP_CONF_DIR
   export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark    # 🅑 local[*]，省 standalone init 3–5 min
@@ -115,7 +115,7 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 - 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
 - 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
 
-完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/spark-connection-architecture.md`](docs/spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
+完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
 
 ## Config consistency gate
 

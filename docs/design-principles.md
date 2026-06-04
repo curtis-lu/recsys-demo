@@ -21,7 +21,7 @@
 
 只訓練**一個**共用模型，訓練目標可切換：pointwise（`binary`，預設）或 learning-to-rank（`lambdarank` / `rank_xendcg`）。**評估永遠**是 per query group 的排序指標（mAP），與訓練目標無關。
 
-→ 模型細節見 [`pipelines/training.md`](pipelines/training.md)；排序 vs 分類的數學見手冊 `gbdt_learning_to_rank.md`。
+→ 模型細節見 [`pipelines/training.md`](pipelines/training.md)；排序 vs 分類的數學見手冊 [`gbdt_learning_to_rank.md`](handbooks/gbdt_learning_to_rank.md)。
 
 ## 3. 三層資料版本 + model_version
 

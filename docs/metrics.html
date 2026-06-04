@@ -25,7 +25,7 @@
 <body>
 
 <h1>指標說明：mAP / NDCG / per-item</h1>
-<p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <code>gbdt_learning_to_rank.md</code>。</p>
+<p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。</p>
 
 <div class="note">
 評估<b>永遠</b>在 <b>query group</b> 內進行：query group ＝ 同一個 (time, entity) 下所有候選 item。模型分數只在組內比大小、指標也是<b>每組各算、再平均</b>。這和「逐筆算 AUC」的二元分類根本不同（見 README §0）。
@@ -115,7 +115,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <p class="sub">
 評估兩情境與三模式 → <a href="pipelines/evaluation.md">pipelines/evaluation.md</a>；
 程式行為圖解 → <a href="behavior-diagrams.html">behavior-diagrams.html</a>；
-排序 vs 分類的數學 → 手冊 <code>gbdt_learning_to_rank.md</code>。
+排序 vs 分類的數學 → 手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。
 </p>
 
 </body>
