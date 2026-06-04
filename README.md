@@ -223,7 +223,7 @@ python -m recsys_tfb evaluation --env local
 
 **Q4. 排序只看相對名次，為什麼還要做機率校準（calibration）？**
 
-純看排名確實不需要校準。會需要校準，是當下游要把 `score` 當「機率」解讀時——例如算期望收益、或跨快照日比較絕對水準。由 `parameters_dataset.yaml` 的 `enable_calibration` 控制，是可選步驟。
+純看排名確實不需要校準。會需要校準，是當下游要把 `score` 當「機率」解讀時——例如算期望收益、或跨快照日比較絕對水準。可選步驟，由兩個設定一起控制：dataset 端 `enable_calibration` 產出校準資料、training 端 `training.calibration.enabled` 實際做校準。
 
 **Q5. 模型訓練好後怎麼上線？**
 
