@@ -59,8 +59,12 @@
 實際 parquet。範例列：來源三表取自實際合成資料，其餘為依 schema 構造的<b>示意</b>列。</p>
 
 <div class="note">
-範例資料是<b>合成的</b>（repo 內 <code>data/*.parquet</code>），只有 <b>8 種產品</b>、約 1.5 萬客戶月。
-生產環境為 ~10M 客戶 × 22 產品 × ~1500 特徵。範例列用來示意 schema，不代表生產數量。
+recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo 的<b>示例</b>。<code>feature_table</code> /
+<code>sample_pool</code> / <code>label_table</code> 是<b>使用者自定義</b>的來源表——框架只規範 <code>schema</code>
+的角色欄（<b>time / entity / item / label</b>），其餘特徵 / 分群 / carry 欄由應用自定。因此下方表卡
+<b>只列角色欄</b>，user 欄位一律以抽象 descriptor 與 placeholder（<code>prod_A</code>、<code>f1…fN</code>、
+<code>&lt;enc&gt;</code>）示意，不列舉銀行專屬欄位。示例規模 ~10M 客戶 × 22 產品 × ~1500 特徵
+（本 repo 合成版約 1.5 萬客戶月、8 個 item 值）。
 </div>
 
 <h2>圖例</h2>
@@ -262,16 +266,14 @@
   <b>partition</b>：snap_date</div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
-    <tr><td>snap_date</td><td>date</td><td><span class="role">time</span>（快照日；合成 14 個月）</td></tr>
-    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
-    <tr><td>total_aum, fund_aum, in/out_amt_*, ccard_*（14 欄）</td><td>double / int</td><td>數值特徵</td></tr>
-    <tr><td>age, tenure_months, income_level</td><td>int</td><td>數值特徵</td></tr>
-    <tr><td>gender, risk_attr, education_level, marital_status, channel_preference</td><td>string</td><td>類別特徵（前處理時 int 編碼）</td></tr>
+    <tr><td>snap_date</td><td>date</td><td><span class="role">time</span>（schema.columns.time）</td></tr>
+    <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span>（schema.columns.entity）</td></tr>
+    <tr><td>…特徵欄（user 自定義寬表）…</td><td>數值 / 類別</td><td>應用自定；<code>categorical_columns</code> 指定的類別欄會在前處理被 int 編碼。欄數依應用而定</td></tr>
   </table>
-  <p class="sub">合成 24 欄（snap_date, cust_id + 22 特徵）。<b>不含</b> <code>cust_segment_typ</code>（生產 feature_table 才有；本 repo 它只在 sample_pool）。</p>
-  <div class="ex">snap_date   cust_id   total_aum   age  gender  risk_attr  channel_preference  ...
-2025-01-31  C000001   324469.24   41   F       C3         digital             ...
-2025-01-31  C000002    11991.97   21   F       C2         branch              ...</div>
+  <p class="sub">只列 schema 角色欄；特徵欄為 user 自定義（本 repo 合成版約 22 欄）。注意 carry 欄（本 repo 範例為 <code>cust_segment_typ</code>）<b>不在</b> feature_table——生產才有、本 repo 只在 sample_pool，是示例性質的 dev/prod 落差。</p>
+  <div class="ex">snap_date   cust_id   …user 特徵欄（數值 + 類別；類別在前處理 int 編碼）…
+2025-01-31  C000001   f1 … fN
+2025-01-31  C000002   f1 … fN</div>
 </div>
 
 <div class="card" id="label_table">
@@ -283,13 +285,13 @@
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
-    <tr><td>prod_name</td><td>string</td><td><span class="role">item</span>（8 種合成產品）</td></tr>
-    <tr><td>label</td><td>int</td><td><span class="role">label</span>（0/1：客戶是否承作該產品）</td></tr>
-    <tr><td>apply_start_date, apply_end_date</td><td>date</td><td>label 認定的觀察窗（前處理時 drop）</td></tr>
+    <tr><td>prod_name</td><td>string</td><td><span class="role">item</span>（值由 schema.categorical_values 宣告；範例 8 種合成 item）</td></tr>
+    <tr><td>label</td><td>int</td><td><span class="role">label</span>（0/1）</td></tr>
+    <tr><td>…label 觀察窗欄（user 自定義，前處理時 drop）…</td><td>—</td><td>label 業務邏輯認定窗；欄位依 label 定義而定</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   apply_start  apply_end   label  prod_name
-2025-01-31  C000002   2025-02-01   2025-03-02  0      exchange_usd
-2025-01-31  C000008   2025-02-01   2025-03-02  1      exchange_usd</div>
+  <div class="ex">snap_date   cust_id   prod_name(item)  label  …label 觀察窗欄…
+2025-01-31  C000002   prod_A           0      …
+2025-01-31  C000008   prod_A           1      …</div>
 </div>
 
 <div class="card" id="sample_pool">
@@ -302,13 +304,12 @@
     <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>prod_name</td><td>string</td><td><span class="role">item</span>（每個 query group 要納入排名的候選範圍）</td></tr>
-    <tr><td>cust_segment_typ</td><td>string</td><td>分群鍵（分層抽樣 + carry 進 train model_input；值如 mass / affluent / hnw）</td></tr>
-    <tr><td>label</td><td>int</td><td>分層抽樣用（sample_group_keys 之一）</td></tr>
-    <tr><td>tenure_months, channel_preference</td><td>int / string</td><td>其他分群維度</td></tr>
+    <tr><td>label</td><td>int</td><td><span class="role">label</span>（可作分層抽樣維度）</td></tr>
+    <tr><td>…分群 / carry 欄（user 自定義）…</td><td>—</td><td>由 <code>sample_group_keys</code>（分層抽樣）與 <code>carry_columns</code>（帶進 train model_input）指定；欄位依應用而定</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   cust_segment_typ  prod_name     label  tenure_months  channel_preference
-2025-01-31  C000001   affluent          exchange_usd  0      12             digital
-2025-01-31  C000002   mass              exchange_usd  0      26             branch</div>
+  <div class="ex">snap_date   cust_id   prod_name(item)  label  …分群 / carry 欄（sample_group_keys / carry_columns）…
+2025-01-31  C000001   prod_A           0      …
+2025-01-31  C000002   prod_A           0      …</div>
 </div>
 
 <!-- ===================== dataset: base ===================== -->
@@ -320,8 +321,8 @@
   <b>下游</b>：dataset（apply_preprocessor_to_features、build_model_input）、training（prepare_lgb_train_inputs、tune、finalize、calibrate、predict、診斷）、inference（apply_preprocessor）　|
   <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code></div>
   <p class="sub">類別欄編碼字典與前處理 metadata（transform 時用）。是跨 dataset / training / inference <b>共用</b>的前處理合約。</p>
-  <div class="ex">{ "categorical_columns": ["prod_name","gender",...],
-  "category_to_code": { "gender": {"F":0,"M":1}, "risk_attr": {...}, ... },
+  <div class="ex">{ "categorical_columns": [&lt;item&gt;, &lt;cat_col&gt;, ...],
+  "category_to_code": { "&lt;cat_col&gt;": {"&lt;v1&gt;":0,"&lt;v2&gt;":1}, ... },
   "feature_columns": [...], ... }</div>
 </div>
 
@@ -330,8 +331,8 @@
   <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（與 preprocessor 同節點同時產出）　|
   <b>下游</b>：—（人類可讀的對照 / 檢視用；DAG 下游節點只吃 preprocessor）　|
   <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/category_mappings.json</code></div>
-  <div class="ex">{ "gender": {"F":0,"M":1},
-  "prod_name": {"ccard_bill":0,"ccard_cash":1,...,"fund_stock":7}, ... }</div>
+  <div class="ex">{ "&lt;cat_col&gt;": {"&lt;v1&gt;":0,"&lt;v2&gt;":1},
+  "prod_name": {"prod_A":0,"prod_B":1, ... } }   ← item 值由 schema.categorical_values 宣告</div>
 </div>
 
 <div class="card" id="preprocessed_feature_table">
@@ -342,18 +343,18 @@
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id</td><td>date / string</td><td>identity（time, entity）</td></tr>
-    <tr><td>gender, risk_attr, education_level, marital_status, channel_preference</td><td>int</td><td>類別特徵 → int 編碼後</td></tr>
-    <tr><td>其餘 17 個數值特徵</td><td>double / int</td><td>原樣保留</td></tr>
+    <tr><td>…<code>categorical_columns</code> 指定的類別特徵…</td><td>int</td><td>已 int 編碼</td></tr>
+    <tr><td>…其餘數值特徵…</td><td>numeric</td><td>原樣保留</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   total_aum   age  gender  risk_attr  channel_preference
-2025-01-31  C000001   324469.24   41   0       3          2          ← 類別已轉碼（示意）</div>
+  <div class="ex">snap_date   cust_id   …數值特徵原樣…   …類別特徵已轉碼(int)…
+2025-01-31  C000001   …               …          （示意）</div>
 </div>
 
 <div class="card" id="val_keys">
   <h4>val_keys · test_keys <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
   <div class="meta"><b>產生</b>：dataset · select_val_keys / select_test_keys（取 val/test 期 label 母體的 identity，full population）　|
   <b>下游</b>：dataset（build_val_model_input / build_test_model_input）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">只含 identity 三欄（<b>不</b> carry <code>cust_segment_typ</code>，與 train/calibration keys 不同）。版本層為 base（不依 train 抽樣變體）。</p>
+  <p class="sub">只含 identity 三欄（<b>不</b> carry 任何 carry 欄，與 train/calibration keys 不同）。版本層為 base（不依 train 抽樣變體）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色</th></tr>
     <tr><td>snap_date</td><td>string</td><td><span class="role">time</span></td></tr>
@@ -361,7 +362,7 @@
     <tr><td>prod_name</td><td>string</td><td><span class="role">item</span></td></tr>
   </table>
   <div class="ex">snap_date   cust_id   prod_name     （val: 2025-12-31；test: 2026-01-31，示意）
-2025-12-31  C000005   fund_mix</div>
+2025-12-31  C000005   prod_A</div>
 </div>
 
 <div class="card" id="val_model_input">
@@ -369,15 +370,15 @@
   <div class="meta"><b>產生</b>：dataset · build_*_model_input → filter_groups_with_positives（丟掉無正例的 (time, entity) 群組）　|
   <b>下游</b>：training（cache_val_model_input / cache_test_model_input）　|
   <b>partition</b>：val=snap_date；test=snap_date, prod_name</div>
-  <p class="sub">keys ⋈ label_table ⋈ preprocessed_feature_table。val/test <b>不</b> carry <code>cust_segment_typ</code>。已濾除零正例群組（排序指標對這種群組無意義）。</p>
+  <p class="sub">keys ⋈ label_table ⋈ preprocessed_feature_table。val/test <b>不</b> carry 任何 carry 欄。已濾除零正例群組（排序指標對這種群組無意義）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（prod_name 同時為 int 編碼的 item 特徵）</td></tr>
     <tr><td>label</td><td>int</td><td><span class="role">label</span></td></tr>
-    <tr><td>~23 個特徵欄（prod_name + 5 類別 int 編碼 + 17 數值）</td><td>numeric</td><td>模型輸入特徵</td></tr>
+    <tr><td>…編碼後特徵欄（prod_name + categorical_columns 類別欄 int 編碼 + 數值原樣）…</td><td>numeric</td><td>模型輸入特徵</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   prod_name(enc)  label  total_aum  gender(enc)  ...
-2025-12-31  C000005   5               1      88231.10   0            ...  （示意）</div>
+  <div class="ex">snap_date   cust_id   prod_name(item,enc)  label  …編碼特徵欄…
+2025-12-31  C000005   &lt;enc&gt;                1      …            （示意，無 carry）</div>
 </div>
 
 <!-- ===================== dataset: train-variant ===================== -->
@@ -387,37 +388,37 @@
   <h4>sample_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · select_train_keys（對 train 期 sample_pool 做分層抽樣，sample_ratio + overrides）　|
   <b>下游</b>：dataset（split_train_keys）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">identity + carry（<code>cust_segment_typ</code>）。抽樣決定性：<code>crc32(identity | site | seed) % BUCKETS &lt; ratio·BUCKETS</code>。</p>
+  <p class="sub">identity + carry 欄（<code>carry_columns</code> 指定）。抽樣決定性：<code>crc32(identity | site | seed) % BUCKETS &lt; ratio·BUCKETS</code>。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（time, entity, item）</td></tr>
-    <tr><td>cust_segment_typ</td><td>string</td><td>carry（供 sample_weights 分群）</td></tr>
+    <tr><td>…carry 欄（carry_columns 指定）…</td><td>—</td><td>原值帶入，供 sample_weights 分群</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   prod_name     cust_segment_typ
-2025-03-31  C000001   ccard_ins     affluent        （示意）</div>
+  <div class="ex">snap_date   cust_id   prod_name(item)   …carry 欄…
+2025-03-31  C000001   prod_A            …             （示意）</div>
 </div>
 
 <div class="card" id="train_keys">
   <h4>train_keys · train_dev_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · split_train_keys（把 sample_keys 依 cust_id hash 以 <code>train_dev_ratio</code> 切兩份）　|
   <b>下游</b>：dataset（build_train_model_input / build_train_dev_model_input）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">schema 同 sample_keys（identity + cust_segment_typ）。切分按 <code>cust_id</code> 分桶（同客戶整批分到同一邊，避免洩漏）。</p>
+  <p class="sub">schema 同 sample_keys（identity + carry 欄）。切分按 <code>cust_id</code> 分桶（同客戶整批分到同一邊，避免洩漏）。</p>
 </div>
 
 <div class="card" id="train_model_input">
   <h4>train_model_input · train_dev_model_input <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · build_train_model_input / build_train_dev_model_input（keys ⋈ label_table ⋈ preprocessed_feature_table）　|
   <b>下游</b>：training（cache_train_model_input / cache_train_dev_model_input → 訓練 / early-stopping）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄 <code>cust_segment_typ</code>，且 <b>不</b>濾零正例群組（pointwise / lambdarank 的 loss 用到每一列）。</p>
+  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄（<code>carry_columns</code> 指定），且 <b>不</b>濾零正例群組（pointwise / lambdarank 的 loss 用到每一列）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity</td></tr>
     <tr><td>label</td><td>int</td><td><span class="role">label</span></td></tr>
-    <tr><td>~23 個特徵欄</td><td>numeric</td><td>prod_name + 5 類別 int 編碼 + 17 數值</td></tr>
-    <tr><td>cust_segment_typ</td><td>string</td><td>carry（sample_weights 維度，原值不編碼）</td></tr>
+    <tr><td>…編碼後特徵欄…</td><td>numeric</td><td>prod_name + categorical_columns 類別欄 int 編碼 + 數值原樣</td></tr>
+    <tr><td>…carry 欄（carry_columns 指定）…</td><td>—</td><td>原值不編碼，供 sample_weights 分群</td></tr>
   </table>
-  <div class="ex">snap_date   cust_id   prod_name(enc)  label  total_aum  gender(enc)  cust_segment_typ
-2025-03-31  C000001   2               0      324469.24  0            affluent     （示意）</div>
+  <div class="ex">snap_date   cust_id   prod_name(item,enc)  label  …編碼特徵欄…   …carry 欄…
+2025-03-31  C000001   &lt;enc&gt;                0      …            …          （示意）</div>
 </div>
 
 <!-- ===================== dataset: calibration-variant ===================== -->
@@ -427,16 +428,16 @@
   <h4>calibration_keys <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · select_calibration_keys（對 calibration_snap_dates 期 sample_pool 抽樣）　|
   <b>下游</b>：dataset（build_calibration_model_input）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">schema 同 sample_keys（identity + cust_segment_typ）。抽樣 <code>site</code> 與 train 不同 → 即使同 seed 也抽到獨立的桶。</p>
+  <p class="sub">schema 同 sample_keys（identity + carry 欄）。抽樣 <code>site</code> 與 train 不同 → 即使同 seed 也抽到獨立的桶。</p>
 </div>
 
 <div class="card" id="calibration_model_input">
   <h4>calibration_model_input <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · build_calibration_model_input　|
   <b>下游</b>：training（cache_calibration_model_input → calibrate_model）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">schema 同 train_model_input（identity + label + ~23 特徵 + carry）。僅在 <code>enable_calibration: true</code> 時產生。</p>
-  <div class="ex">snap_date   cust_id   prod_name(enc)  label  ...features...  cust_segment_typ
-2025-11-30  C000007   6               1      ...            mass          （示意）</div>
+  <p class="sub">schema 同 train_model_input（identity + label + 編碼特徵 + carry）。僅在 <code>enable_calibration: true</code> 時產生。</p>
+  <div class="ex">snap_date   cust_id   prod_name(item,enc)  label  …編碼特徵欄…   …carry 欄…
+2025-11-30  C000007   &lt;enc&gt;                1      …            …          （示意）</div>
 </div>
 
 <!-- ===================== training ===================== -->
@@ -472,7 +473,7 @@
     <tr><td>score_uncalibrated</td><td>double</td><td>原始輸出；校準關閉時等於 score</td></tr>
     <tr><td>label</td><td>int</td><td>ground truth</td></tr>
   </table>
-  <div class="ex">snap_date=2026-01-31 / prod_name=fund_mix（partition）
+  <div class="ex">snap_date=2026-01-31 / prod_name=prod_A（partition）
 cust_id   score   score_uncalibrated  label
 C000010   0.83    1.92                1      （示意）</div>
 </div>
@@ -483,7 +484,7 @@ C000010   0.83    1.92                1      （示意）</div>
   <b>下游</b>：training（log_experiment → MLflow）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/evaluation_results.json</code></div>
   <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html / enriched_eval_predictions。</p>
-  <div class="ex">{ "test_map": 0.41, "ndcg@5": 0.55, "per_item_map": { "fund_mix": 0.48, ... } }  （示意）</div>
+  <div class="ex">{ "test_map": 0.41, "ndcg@5": 0.55, "per_item_map": { "prod_A": 0.48, ... } }  （示意）</div>
 </div>
 
 <div class="card" id="diagnostics">
@@ -507,7 +508,7 @@ C000010   0.83    1.92                1      （示意）</div>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
   </table>
-  <div class="ex">snap_date=2026-02-28 / prod_name=fund_mix / model_version=&lt;mv&gt;（partition）
+  <div class="ex">snap_date=2026-02-28 / prod_name=prod_A / model_version=&lt;mv&gt;（partition）
 cust_id   score
 C000010   0.83   （示意）</div>
 </div>
@@ -525,7 +526,7 @@ C000010   0.83   （示意）</div>
     <tr><td>score</td><td>double</td><td><span class="role">score</span></td></tr>
     <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次）</td></tr>
   </table>
-  <div class="ex">snap_date=2026-02-28 / prod_name=fund_mix / model_version=&lt;mv&gt;（partition）
+  <div class="ex">snap_date=2026-02-28 / prod_name=prod_A / model_version=&lt;mv&gt;（partition）
 cust_id   score   rank
 C000010   0.83    1      （示意）</div>
 </div>
