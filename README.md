@@ -192,12 +192,125 @@ python -m recsys_tfb evaluation --env local
 
 ## 3. FAQ
 
-_本節尚未完成。_
+**Q1. 這跟我做過的「逐產品二元分類」差在哪？我不也是訓一個輸出機率的模型？**
+
+模型可以還是同一種（預設就是 `binary`），差別在**評估**與**你優化的目標**：
+
+- 二元分類問「這位客戶會不會買產品 A」，逐筆看絕對機率、逐筆算 AUC / logloss。
+- 這裡問「對這位客戶，所有候選產品該怎麼**排先後**」，評估一律是 per query group 的排序指標 mAP（mAP 怎麼算見 [`docs/metrics.html`](docs/metrics.html)）。
+- 你還可以把訓練目標從 `binary` 換成 learning-to-rank（`lambdarank` / `rank_xendcg`），讓模型直接優化排序。
+
+排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](gbdt_learning_to_rank.md)。
+
+**Q2. 為什麼資料要切成 train / train_dev / val / calibration / test 五份？各做什麼？**
+
+| split | 設定（`parameters_dataset.yaml`） | 角色 |
+|---|---|---|
+| `train` | `train_snap_dates` | 建樹的主訓練資料 |
+| `train_dev` | 從 `train` 同期按 `train_dev_ratio` 切出 | early-stopping 監控集：**單次訓練內**決定樹長到第幾棵就停 |
+| `val` | `val_snap_dates` | HPO（超參數搜尋）目標集：**跨多次試驗**，Optuna 拿它的排序分數挑超參 |
+| `calibration` | `calibration_snap_dates`（`enable_calibration`） | 機率校準的 fit 資料（可選） |
+| `test` | `test_snap_dates` | 最終 held-out，產 `training_eval_predictions` 供情境 1 評估 |
+
+各 split 用**不同且時間向前**的快照日（範例設定：train 2025-01～10 → calibration 2025-11 → val 2025-12 → test 2026-01），避免拿未來資料回頭評估造成洩漏。
+
+**Q3. objective 要選 `binary` 還是 `lambdarank`？**
+
+- 預設 `binary`（pointwise，逐筆獨立評分後再排）：最穩、最接近你熟的分類流程，而且評估照樣是排序指標。建議先從這裡開始。pointwise / pairwise / listwise 的差別見手冊 [`gbdt_learning_to_rank.md`](gbdt_learning_to_rank.md)。
+- 想讓模型直接優化排序：切 `lambdarank` / `rank_xendcg`，但必須同時滿足兩件事——metric 用排序指標（`ndcg` / `map`，留空會自動帶 `ndcg`），且 query group（`schema.time + entity`）有定義。否則啟動時會被一致性閘擋下（見 §4）。
+
+設定都在 `parameters_training.yaml` 的 `algorithm_params`。
+
+**Q4. 排序只看相對名次，為什麼還要做機率校準（calibration）？**
+
+純看排名確實不需要校準。會需要校準，是當下游要把 `score` 當「機率」解讀時——例如算期望收益、或跨快照日比較絕對水準。由 `parameters_dataset.yaml` 的 `enable_calibration` 控制，是可選步驟。
+
+**Q5. 模型訓練好後怎麼上線？**
+
+用 `scripts/promote_model.py` 把某個 `model_version` 設為 `best`（**人工觸發、不會自動**）；`inference` 預設就用 `best` 那一版評分。不給版本時 `promote_model.py` 會自動挑 mAP 最佳，加 `--dry-run` 只列出候選、不真的升版。
+
+**Q6. evaluation 的兩個情境怎麼選？**
+
+| 情境 | 指令 | 讀什麼 | 什麼時候用 |
+|---|---|---|---|
+| 訓練後評估 | `evaluation --post-training` | `training_eval_predictions`（test set） | 剛訓完、想看這版在 test 上的排序表現 |
+| 上線後監控 | `evaluation`（預設） | `ranked_predictions`（inference 產出） | 模型上線後，定期追蹤線上排名品質 |
+
+**Q7. 為什麼有些設定要先用 script 從資料推導，不能手填？**
+
+`sample_ratio_overrides` / `sample_weights` 的 key 是資料裡**實際出現的分群組合**，`categorical_columns` 要對齊資料**實際的類別欄**。手填很容易跟資料對不上，啟動時就被一致性閘擋下。所以改用 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 從 `sample_pool` / `feature_table` 推導（見 §2「設定怎麼來」）。
 
 ## 4. 常見錯誤
 
-_本節尚未完成。_
+框架有兩道**會直接 fail-loud 的閘**，把設定 / 資料不一致擋在跑完長流程之前。兩道閘都**一次列出所有問題**（不是遇到第一個就停），讓你一輪修完。下表用**訊息中可搜尋的片段**對應原因與修法。
+
+### 設定一致性閘（CLI 一啟動就檢查）
+
+任何 `python -m recsys_tfb <pipeline>` 啟動時都會跑；失敗會印 `Config consistency check failed (N issue(s)):` 並中止（例外型別 `ConfigConsistencyError`）。下表「怎麼修」提到的 `parameters*.yaml`（含 `parameters.yaml`、`parameters_dataset.yaml`…）都在 `conf/base/`。
+
+| 訊息片段（可搜尋） | 代表什麼 | 怎麼修 |
+|---|---|---|
+| `is missing from dataset.prepare_model_input.categorical_columns` | 你把 `item`（如 `prod_name`）從類別欄拿掉了；排序任務裡 item 必須是特徵 | 把 item 加回 `categorical_columns` |
+| `has no schema.categorical_values[...] declaration` | item 宣告成類別欄，卻沒給它的值清單 | 在 `parameters.yaml` 的 `schema.categorical_values.<item>` 補上完整產品清單 |
+| `is declared in BOTH ... drop_columns and categorical_columns` | 同一欄同時要丟掉又要當類別特徵，意圖矛盾 | 二選一：要當特徵就移出 `drop_columns`，要排除就移出 `categorical_columns` |
+| `inference.products disagrees with schema.categorical_values` | `inference.products` 與 schema 宣告的產品集合不一致 | 兩邊改成相同集合 |
+| `sample_ratio_overrides references item value(s) ... absent` | override 的 key 拼錯產品名，或用了沒宣告的值 | 修正 key，或在 `schema.categorical_values` 補該值 |
+| `is a ranking objective but metric=... is not a ranking metric` ／ `the query group ... is undefined` | 用了 `lambdarank` / `rank_xendcg` 卻配非排序 metric，或 `schema.entity` 空（沒有 query group） | metric 設 `ndcg` / `map`（或留空自動帶 `ndcg`）；確認 `schema.entity` 有設 |
+| `sample_weight_keys column(s) ... are not in the train model_input parquet` | 拿來當 weight 維度的欄沒被帶進訓練資料 | 把該欄加進 `parameters_dataset.yaml` 的 `carry_columns`，重跑 `dataset`（資料集版本 `base_dataset_version` 會更新、需重算） |
+| `sample_weights key(s) ... do not have N ... segment(s)` | weight 表的 key 是 `sample_weight_keys` 各欄值用 `\|` 串起來（如 `mass\|ccard_ins`），段數要等於欄數 | 對齊段數，或直接用 `scripts/sampling_overrides_editor.py` 產生 key |
+| `segment_columns entries ... have no evaluation.segment_sources` | 要分群報表的欄沒有對應的 segment 來源 | 在 `evaluation.segment_sources` 補來源，或從 `segment_columns` 移除 |
+
+### 資料一致性閘（`dataset` pipeline 第一個節點）
+
+在抽樣 / 前處理**之前**，先比對「設定宣告的產品」與「資料實際出現的產品」；失敗會 raise `DataConsistencyError`。
+
+| 訊息片段（可搜尋） | 代表什麼 | 怎麼修 |
+|---|---|---|
+| `sample_pool has item value(s) ... not in schema.categorical_values` | 資料有、設定沒宣告的產品——會被編成 -1（跟 null 同碼）悄悄汙染訓練 | 在 `schema.categorical_values.<item>` 補上，或修 `sample_pool` 的 SQL |
+| `declares value(s) ... that sample_pool never produces` | 設定宣告了、但 `sample_pool` 從不產生的產品——永遠不會被排名 | 從設定移除，或修 SQL 讓它產出 |
+| `label_table has item value(s) ... not in schema.categorical_values` | label 的 SQL 產出了模型不認識的產品 | 對齊 label SQL 與 `schema.categorical_values` |
+
+> 修設定相關錯誤的逐情境 SOP（加產品 / 加特徵 / 改訓練目標各要動哪些檔），見 [`docs/change-guide.md`](docs/change-guide.md)。
 
 ## 5. 文件地圖 / 建議閱讀順序
 
-_本節尚未完成。將整理 docs/ 各文件與既有手冊的導覽與建議閱讀順序。_
+### 我想做什麼 → 看哪裡
+
+| 你想做什麼 | 看這裡 |
+|---|---|
+| 搞懂這是什麼、排序問題長怎樣 | 本文件 §0–§1；不熟排序先讀手冊 [`gbdt_learning_to_rank.md`](gbdt_learning_to_rank.md) |
+| 把整條流程跑起來 | 本文件 §2 |
+| 看資料怎麼流、每張表的 schema 與範例 | [`docs/data-lineage.html`](docs/data-lineage.html) |
+| 深入某一個 pipeline | [`docs/pipelines/`](docs/pipelines)（`source_etl` / `dataset` / `training` / `evaluation`） |
+| 改設定（加產品 / 加特徵 / 改訓練目標） | [`docs/change-guide.md`](docs/change-guide.md) ＋ 本文件 §4 |
+| 搞懂指標怎麼算 | [`docs/metrics.html`](docs/metrics.html) |
+| 理解設計取捨與最反直覺的行為 | [`docs/design-principles.md`](docs/design-principles.md)、[`docs/behavior-diagrams.html`](docs/behavior-diagrams.html) |
+
+### 概念手冊（自學，建議循序）
+
+從二元分類一路鋪到排序，不熟排序問題的人建議照順序讀：
+
+1. [`gbdt_binary_classification.md`](gbdt_binary_classification.md) — GBDT 二元分類基礎
+2. [`gbdt_class_imbalance.md`](gbdt_class_imbalance.md) — 類別不平衡的數學影響
+3. [`gbdt_multiitem_imbalance.md`](gbdt_multiitem_imbalance.md) — 多 item 共享模型的冷熱門
+4. [`gbdt_learning_to_rank.md`](gbdt_learning_to_rank.md) — learning-to-rank 與 binary 的差異
+
+（每篇都有對應的 `*_offline.html` 自包式版本可直接開。）
+
+### 完整文件地圖
+
+按分類列出所有文件（上面「我想做什麼」表是任務導向的捷徑）；`.html` 可直接用瀏覽器開、含圖表，`.md` 為純文字。
+
+| 分類 | 文件 | 用途 |
+|---|---|---|
+| 入口 | `README.md`（本檔） | 看懂 ＋ 跑起來 |
+| 資料 | `docs/data-lineage.html` | 全表 lineage ＋ schema ＋ 範例 |
+| pipeline | `docs/pipelines/{source_etl,dataset,training,evaluation}.md` | 各 pipeline 的節點、設定、重跑語意 |
+| 指標 | `docs/metrics.html` | mAP / NDCG / per-item 怎麼算、報表怎麼讀 |
+| 設計 | `docs/design-principles.md` | 設計原則、三層版本、一致性不變量 |
+| 設計 | `docs/behavior-diagrams.html` | 最反直覺的程式行為圖解 |
+| 修改 | `docs/change-guide.md` | 加產品 / 特徵 / 改設定的逐情境 SOP |
+| 概念 | `gbdt_*.md`（4 篇手冊） | 排序與不平衡的數學自學 |
+| 本機開發（選讀） | `docs/worktree-venv-setup.md`、`docs/spark-connection-architecture.md` | 在本機 dev-cluster 跑這個 repo 的環境設定 |
+
+> 公司生產環境的 Spark / Hive 連線已配置好，一般使用者不需要碰「本機開發」那一列。
