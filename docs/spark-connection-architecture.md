@@ -207,7 +207,7 @@ grep -E 'namenode|hive-metastore' /etc/hosts | head -1 # 應有 devcluster 行
 - **入口 E 的 fail-fast**：`get_or_create_spark_session` 收到只有 `app_name` 的 dict 時，
   能否偵測 `SPARK_CONF_DIR=UNSET` / `HADOOP_CONF_DIR=UNSET` / JDK17+ 缺 `--add-opens`
   → 直接拋帶 actionable hint 的錯誤，而不是讓 Spark 跑到一半 timeout。
-- **`docs/change-sop.md` line 34 `sampling_overrides_editor` 的 usage 範例**：目前是
+- **`sampling_overrides_editor` 的 usage 範例（見 `docs/change-guide.md` 情境 4、README §2）**：目前是
   bare `python scripts/...`，跟入口 E 的實際需求不符。對齊 §6 cheat-sheet 的 E 樣板。
 - **`tests/test_evaluation` ~33min**：CLAUDE.md 已列加速方向，待實測。
 

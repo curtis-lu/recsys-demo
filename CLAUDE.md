@@ -83,7 +83,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
   scripts/dev_admin.sh scripts/nuke_ml_recsys.py
   scripts/dev_admin.sh scripts/setup_hive_dev.py
   ```
-- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
+- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/spark-connection-architecture.md`](docs/spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
   ```bash
   source ~/dev-cluster/scripts/client-env.sh                          # 🅔 JDK17 add-opens + HADOOP_CONF_DIR
   export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark    # 🅑 local[*]，省 standalone init 3–5 min
@@ -115,11 +115,11 @@ export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
 - 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
 - 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
 
-完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/spark-connection-architecture.md`](spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
+完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/spark-connection-architecture.md`](docs/spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
 
 ## Config consistency gate
 
-`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A6；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。Layer-2 資料閘 `validate_data_consistency`（`preprocessing/_spark.py`，dataset pipeline 第一個 side-effect 節點）在跑任何抽樣/前處理前，對 `sample_pool`（與 `resolved_item_values` 雙向集合相等）與 `label_table`（只擋資料端未知 item）做 windowed `distinct(item)` 檢查，raise `DataConsistencyError`；B1 的唯一定義 predicate 是同檔的 `item_coverage_errors`。
+`src/recsys_tfb/core/consistency.py` 是 item-set / column-role 不變量（A1–A13 ＋ 資料閘 B1；各代號意義見該檔**模組 docstring 的 Invariant legend**，程式碼註解中的 `(A1)` 等即指此）的唯一真實來源。`validate_config_consistency(parameters)` 在 CLI entry（`__main__._load_config_and_setup`）執行，collect-all 後一次 raise `ConfigConsistencyError`（`ValueError` 子類），讓使用者在單次修正中解決所有問題。`validate_schema_config`（A3 委派）與 `preprocessing/_spark.py` identity-cat guard（A2 後備）均透過此模組的 predicate，不自行維護重複定義。**新增一致性不變量必須在此新增 predicate，不得在各 pipeline 中以 ad-hoc 方式散落**。Layer-2 資料閘 `validate_data_consistency`（`preprocessing/_spark.py`，dataset pipeline 第一個 side-effect 節點）在跑任何抽樣/前處理前，對 `sample_pool`（與 `resolved_item_values` 雙向集合相等）與 `label_table`（只擋資料端未知 item）做 windowed `distinct(item)` 檢查，raise `DataConsistencyError`；B1 的唯一定義 predicate 是同檔的 `item_coverage_errors`。
 
 ## graphify
 
