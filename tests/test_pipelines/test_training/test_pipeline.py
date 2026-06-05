@@ -10,12 +10,12 @@ from recsys_tfb.pipelines.training import create_pipeline
 class TestTrainingPipeline:
     def test_pipeline_node_count(self):
         pipeline = create_pipeline()
-        # 4 cache nodes (train, train_dev, val, test) + prepare_lgb
+        # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
         # + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
         # + log
-        assert len(pipeline.nodes) == 14
+        assert len(pipeline.nodes) == 15
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -39,6 +39,7 @@ class TestTrainingPipeline:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
+            "preprocessor_view",
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
             "predict_manifest",
@@ -97,15 +98,41 @@ class TestTrainingPipeline:
         assert names.index("predict_and_write_test_predictions") < names.index("compute_test_mAP_spark")
         assert names.index("compute_test_mAP_spark") < names.index("log_experiment")
 
+    def test_select_features_feeds_view_to_all_model_nodes(self):
+        """select_features is the single chokepoint: it consumes the dataset-built
+        `preprocessor` and emits `preprocessor_view`; every model-touching node
+        consumes the view so feature selection is applied exactly once."""
+        pipeline = create_pipeline()
+        by_name = {n.name: n for n in pipeline.nodes}
+        assert "select_features" in by_name
+        sf = by_name["select_features"]
+        assert sf.inputs == ["preprocessor", "parameters"]
+        assert sf.outputs == ["preprocessor_view"]
+        # downstream model nodes must read the view, not the raw preprocessor
+        for name in (
+            "prepare_lgb_train_inputs", "tune_hyperparameters", "finalize_model",
+            "predict_and_write_test_predictions",
+            "compute_feature_statistics", "compute_shap_diagnostics",
+            "persist_sample_weight_report",
+        ):
+            assert "preprocessor_view" in by_name[name].inputs, name
+            assert "preprocessor" not in by_name[name].inputs, name
+
+    def test_select_features_runs_before_prepare(self):
+        pipeline = create_pipeline()
+        names = [n.name for n in pipeline.nodes]
+        assert names.index("select_features") < names.index("prepare_lgb_train_inputs")
+
     # -- Calibration-enabled pipeline tests --
 
     def test_calibration_pipeline_node_count(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 5 cache nodes + prepare_lgb + persist_sample_weight_report + tune + finalize + calibrate
+        # select_features + 5 cache nodes + prepare_lgb + persist_sample_weight_report
+        # + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
         # + log
-        assert len(pipeline.nodes) == 16
+        assert len(pipeline.nodes) == 17
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -249,7 +276,7 @@ class TestTrainingPipelineE2E:
             "train_set", "train_dev_set", "val_set", "test_set",
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
-            "preprocessor", "category_mappings",
+            "preprocessor", "preprocessor_view", "category_mappings",
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
             "predict_manifest",

@@ -75,6 +75,10 @@ Layer 1 — config-static (implemented here; aggregated by
   ``ConfigConsistencyError`` directly; not aggregated by validate).
 * A13 — ``--compare`` and ``--compare-only`` are mutually exclusive (only
   one or neither). Predicate: ``compare_mutual_exclusive_errors``.
+* A14 — ``schema.item`` appears in ``training.feature_selection.exclude``.
+  Training-stage feature selection must never drop the item column (for a
+  ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
+  ``feature_selection_excludes_item``.
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2/B3/B4 implemented for compare feature):
 
@@ -155,6 +159,19 @@ def config_role_conflicts(parameters: dict) -> list[str]:
     drop = set(pmi.get("drop_columns", []) or [])
     cat = set(pmi.get("categorical_columns", []) or [])
     return sorted(drop & cat)
+
+
+def feature_selection_excludes_item(parameters: dict) -> bool:
+    """schema.item is listed in training.feature_selection.exclude (A14).
+
+    Training-stage feature selection drops features at model build time without
+    rebuilding the dataset. It must never drop the item column: for a ranking
+    task the item must remain a model feature (mirrors A2/A7). Returns True when
+    the item is in the exclude list.
+    """
+    item = get_schema(parameters)["item"]
+    fs = (parameters.get("training", {}) or {}).get("feature_selection") or {}
+    return item in (fs.get("exclude") or [])
 
 
 def inference_products_mismatch(parameters: dict) -> dict:
@@ -522,6 +539,14 @@ def validate_config_consistency(parameters: dict) -> None:
 
     for msg in search_space_errors(parameters):
         errors.append(msg)
+
+    if feature_selection_excludes_item(parameters):
+        item = get_schema(parameters)["item"]
+        errors.append(
+            f"schema.item={item!r} is listed in "
+            f"training.feature_selection.exclude. The item column must remain a "
+            f"model feature (ranking invariant); remove it from the exclude list."
+        )
 
     errors.extend(compare_source_well_formed_errors(parameters))
 

@@ -20,6 +20,7 @@ from recsys_tfb.pipelines.training.nodes import (
     persist_sample_weight_report,
     predict_and_write_test_predictions,
     prepare_lgb_train_inputs,
+    select_features,
     tune_hyperparameters,
 )
 
@@ -32,6 +33,15 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     final_model_output = "trained_model" if enable_calibration else "model"
 
     nodes = [
+        # Training-stage feature selection chokepoint: emit a (possibly subset)
+        # preprocessor view that every model-touching node below consumes, so
+        # `training.feature_selection.exclude` is applied once and stays
+        # consistent. Empty selection -> view is the raw preprocessor unchanged.
+        Node(
+            select_features,
+            inputs=["preprocessor", "parameters"],
+            outputs="preprocessor_view",
+        ),
         Node(
             cache_train_model_input,
             inputs=["train_model_input", "parameters"],
@@ -68,7 +78,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             prepare_lgb_train_inputs,
             inputs=[
                 "train_parquet_handle", "train_dev_parquet_handle",
-                "preprocessor", "parameters",
+                "preprocessor_view", "parameters",
             ],
             outputs=["train_lgb_handle", "train_dev_lgb_handle"],
         ),
@@ -77,7 +87,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     nodes.append(
         Node(
             persist_sample_weight_report,
-            inputs=["train_parquet_handle", "preprocessor", "parameters"],
+            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
             outputs="sample_weight_report",
         ),
     )
@@ -87,7 +97,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             tune_hyperparameters,
             inputs=[
                 "train_lgb_handle", "train_dev_lgb_handle",
-                "val_parquet_handle", "preprocessor", "parameters",
+                "val_parquet_handle", "preprocessor_view", "parameters",
             ],
             outputs=["best_params", "best_iteration", "hpo_best_model"],
         ),
@@ -99,7 +109,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=[
                 "train_parquet_handle", "train_dev_parquet_handle",
                 "hpo_best_model", "best_params", "best_iteration",
-                "preprocessor", "parameters",
+                "preprocessor_view", "parameters",
             ],
             outputs=final_model_output,
         ),
@@ -111,7 +121,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 calibrate_model,
                 inputs=[
                     "trained_model", "calibration_parquet_handle",
-                    "preprocessor", "parameters",
+                    "preprocessor_view", "parameters",
                 ],
                 outputs="model",
             ),
@@ -122,7 +132,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             predict_and_write_test_predictions,
             inputs=[
                 "model", "test_parquet_handle",
-                "preprocessor", "parameters",
+                "preprocessor_view", "parameters",
                 "@training_eval_predictions",  # catalog handle for chunked save
             ],
             outputs="predict_manifest",
@@ -134,7 +144,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             compute_feature_statistics,
-            inputs=["train_parquet_handle", "preprocessor", "parameters"],
+            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
             outputs="feature_statistics",
         ),
         Node(
@@ -144,7 +154,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             compute_shap_diagnostics,
-            inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
+            inputs=["model", "test_parquet_handle", "preprocessor_view", "parameters"],
             outputs="shap_diagnostics",
         ),
         Node(

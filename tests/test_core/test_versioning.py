@@ -149,6 +149,14 @@ class TestComputeBaseDatasetVersion:
         assert compute_base_dataset_version(p1, _sample_schema()) != \
             compute_base_dataset_version(p2, _sample_schema())
 
+    # NOTE: that training.feature_selection does not trigger a dataset rebuild
+    # is an integration property (the dataset pipeline loads parameters_dataset
+    # only — no `training:` block — and training resolves base_dataset_version
+    # from the symlink rather than recomputing it), not a unit property of
+    # compute_base_dataset_version, which hashes whatever params it is given.
+    # The model_version / train_variant guards below pin the part that IS a
+    # function-level invariant.
+
     def test_schema_categorical_values_affects_base(self):
         s1 = _sample_schema()
         s2 = _sample_schema()
@@ -226,6 +234,14 @@ class TestComputeTrainVariantId:
         p2["dataset"]["train_snap_dates"] = ["2022-01-31"]
         assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
 
+    def test_training_feature_selection_does_not_affect_train_variant(self):
+        # feature selection reuses the sampled train parquet (selection subsets
+        # at bin-build time); the .bin gets a separate cache sub-key instead.
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["training"] = {"feature_selection": {"exclude": ["feat_x"]}}
+        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
 
 class TestComputeCalibrationVariantId:
     def test_returns_8_char_hex(self):
@@ -285,6 +301,15 @@ class TestComputeModelVersion:
         a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
         b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", "cal12345")
         assert a != b
+
+    def test_feature_selection_changes_hash(self):
+        # training.feature_selection lives in the model_version-hashed training:
+        # block, so changing the excluded set bumps model_version (a different
+        # model) — with no versioning-code change.
+        a = {"training": {"feature_selection": {"exclude": []}}}
+        b = {"training": {"feature_selection": {"exclude": ["feat_x"]}}}
+        assert compute_model_version(a, "base1234", "trai1234") != \
+            compute_model_version(b, "base1234", "trai1234")
 
     def test_calibration_none_equivalent_to_omitted(self):
         a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")

@@ -194,6 +194,30 @@ class TestValidateConfigConsistency:
         assert "segment(s) to match" in msg          # A9b
         assert "schema.categorical_values[item]" in msg  # A9c
 
+    def test_a14_feature_selection_excludes_item_collected(self):
+        p = _base({
+            "inference": {"products": ["a", "b"]},
+            "training": {"feature_selection": {"exclude": ["prod_name"]}},
+        })
+        with pytest.raises(ConfigConsistencyError, match=r"feature_selection"):
+            validate_config_consistency(p)
+
+
+from recsys_tfb.core.consistency import feature_selection_excludes_item
+
+
+class TestFeatureSelectionExcludesItem:
+    def test_no_feature_selection_ok(self):
+        assert feature_selection_excludes_item(_base()) is False
+
+    def test_exclude_without_item_ok(self):
+        p = _base({"training": {"feature_selection": {"exclude": ["feat_a"]}}})
+        assert feature_selection_excludes_item(p) is False
+
+    def test_exclude_contains_item_detected(self):
+        p = _base({"training": {"feature_selection": {"exclude": ["prod_name"]}}})
+        assert feature_selection_excludes_item(p) is True
+
 
 class TestSparkGuardUsesSharedError:
     def test_missing_cats_raises_data_consistency_error_subclass(self):
