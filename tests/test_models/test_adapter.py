@@ -628,6 +628,56 @@ def _weight_params(objective):
     }
 
 
+def test_prepare_train_inputs_binary_bin_carries_feature_names(tmp_path):
+    """The cached .bin persists real feature names from feature_columns, so a
+    booster trained on it (the hpo_best final-model path) reports real names —
+    not LightGBM's positional Column_N defaults."""
+    import lightgbm as lgb
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        prep_meta, _ranking_parameters("binary"), str(cache),
+    )
+    ds = lgb.Dataset(str(cache / "lgb" / "binary" / "train.bin")).construct()
+    assert ds.get_feature_name() == ["feat_a", "prod_name"]
+
+
+def test_prepare_train_inputs_ranking_bin_carries_feature_names(tmp_path):
+    """Ranking branch: both train and train_dev .bin carry real feature names."""
+    import lightgbm as lgb
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    train_h, dev_h = LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        prep_meta, _ranking_parameters("lambdarank"), str(cache),
+    )
+    ds_tr = lgb.Dataset(train_h.bin_path).construct()
+    ds_dv = lgb.Dataset(dev_h.bin_path).construct()
+    assert ds_tr.get_feature_name() == ["feat_a", "prod_name"]
+    assert ds_dv.get_feature_name() == ["feat_a", "prod_name"]
+
+
 class TestPrepareTrainInputsWeight:
     def _prep(self):
         return {
