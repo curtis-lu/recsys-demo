@@ -188,6 +188,14 @@ class LightGBMAdapter(ModelAdapter):
         # splits instead of treating int codes as ordered numerics.
         cat_idx = self._categorical_indices(preprocessor_metadata)
 
+        # Real feature names (post-join feature_table column order, same order as
+        # the numpy columns from extract_Xy). Baked into the .bin so the booster
+        # trained on it reports real names in feature_importance() instead of
+        # LightGBM's positional Column_N defaults. lgb persists these into the
+        # binary; categorical_feature stays index-based (cat_idx) — the two are
+        # independent.
+        feat_names = list(preprocessor_metadata["feature_columns"])
+
         # feature_pre_filter=False at construct time: features with
         # <min_data_in_leaf samples per bin are NOT silently dropped from the
         # binned dataset. The pre-cache training path (numpy → lgb.Dataset built
@@ -214,6 +222,7 @@ class LightGBMAdapter(ModelAdapter):
                 label=y_tr[perm_tr],
                 weight=w_tr[perm_tr],
                 group=grp_tr,
+                feature_name=feat_names,
                 categorical_feature=cat_idx,
                 params=construct_params,
                 free_raw_data=True,
@@ -234,6 +243,7 @@ class LightGBMAdapter(ModelAdapter):
                 weight=w_dev[perm_dev],
                 group=grp_dev,
                 reference=ds_train,
+                feature_name=feat_names,
                 categorical_feature=cat_idx,
                 params=construct_params,
                 free_raw_data=True,
@@ -256,6 +266,7 @@ class LightGBMAdapter(ModelAdapter):
                 X_tr,
                 label=y_tr,
                 weight=w_tr,
+                feature_name=feat_names,
                 categorical_feature=cat_idx,
                 params=construct_params,
                 free_raw_data=True,
@@ -274,6 +285,7 @@ class LightGBMAdapter(ModelAdapter):
                 label=y_dev,
                 weight=w_dev,
                 reference=ds_train,
+                feature_name=feat_names,
                 categorical_feature=cat_idx,
                 params=construct_params,
                 free_raw_data=True,

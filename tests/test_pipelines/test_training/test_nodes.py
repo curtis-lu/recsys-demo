@@ -508,6 +508,36 @@ class TestFinalizeModel:
         assert isinstance(final, LightGBMAdapter)
         assert final.booster.current_iteration() == best_iteration
 
+    def test_hpo_best_booster_has_real_feature_names(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """The hpo_best model trains on the cached .bin; its booster must report
+        real feature names (from feature_columns), not Column_N defaults."""
+        _, _, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+        assert hpo_best_model.booster.feature_name() == preprocessor_metadata["feature_columns"]
+
+    def test_refit_on_full_booster_has_real_feature_names(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        """refit_on_full builds a fresh lgb.Dataset; its booster must carry real
+        feature names so feature_importance.json shows real names."""
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
+            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
+        )
+
+        params = {**training_parameters,
+                  "training": {**training_parameters["training"],
+                               "final_model_strategy": "refit_on_full"}}
+
+        final = finalize_model(
+            train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
+            preprocessor_metadata, params,
+        )
+        assert final.booster.feature_name() == preprocessor_metadata["feature_columns"]
+
     def test_unknown_strategy_raises(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
     ):
