@@ -16,6 +16,8 @@ Claude Code 在此 repo 工作時的最小規範。
 
 Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.0 | Optuna 4.5.0 | Ploomber 0.23.3 | pandas 1.5.3 | numpy 1.25.0 | pyarrow 14.0.1 | pytest 7.3.1 | SHAP 0.42.1 | Typer 0.20.1
 
+> 框架是 **Kedro 風格的手刻實作**：`src/recsys_tfb/io/*` 仿 `kedro.io`（`ParquetDataset` / `JSONDataset` / `HiveTableDataset` 等），搭配 `conf/base/{catalog,parameters*}.yaml` 與自製 `DataCatalog` / `Node` / `Pipeline` / `Runner`（`src/recsys_tfb/core/`）。**無 kedro 套件依賴**；上列 `Ploomber` 僅作排程，in-process DAG 由自製 `Runner` 執行。
+
 
 ## Production Constraints
 
