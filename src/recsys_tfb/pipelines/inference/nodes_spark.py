@@ -269,3 +269,25 @@ def validate_predictions(
 
     logger.info("All %d sanity checks passed (%d rows)", 6, n_ranked)
     return ranked_predictions
+
+
+def publish_predictions(
+    validated_predictions: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Promote validated predictions to the production ``ranked_predictions`` table.
+
+    Reached only after ``validate_predictions`` passes (the DAG edge runs through
+    ``validated_predictions``), so a failed sanity check aborts the run before
+    anything reaches production. This is the single production write: the
+    pre-validation copy lives in ``ranked_staging`` and is left in place for
+    post-mortem when validation fails. The write itself is the catalog save of
+    this node's ``ranked_predictions`` output.
+    """
+    model_version = parameters.get("model_version")
+    logger.info(
+        "Publishing validated predictions to production ranked_predictions "
+        "(model_version=%s)",
+        model_version,
+    )
+    return validated_predictions
