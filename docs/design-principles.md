@@ -73,8 +73,9 @@ pipeline 不直接呼叫 LightGBM，而是透過 `ModelAdapter` ABC（`models/ba
 
 資料產物在 `conf/base/catalog.yaml` 宣告，節點以**名稱**引用。`DataCatalog`（`core/catalog.py`）按 `type` 分派 loader（registry 含 `HiveTableDataset` / `JSONDataset` / `ModelAdapterDataset` / `TextDataset` / `ParquetDataset` / `PickleDataset`）。
 
-- 未註冊的中間產物 `save` 時**自動建 `MemoryDataset`**（只活在單次 run）。
-- ⚠️ footgun：若某個本該持久化的表沒在 catalog 註冊，會悄悄 fallback 成 MemoryDataset → standalone 讀取靜默壞掉。所以 `ranked_predictions` 在 catalog 額外宣告了讀取端 entry（見 [`data-lineage.html`](data-lineage.html)）。
+- 未註冊的中間產物 `save` 時**自動建 `MemoryDataset`**（只活在單次 run）—— inference 的 `validated_predictions`（validate 與 publish 之間的閘門中間態）就是這樣的產物。
+- ⚠️ footgun：若某個本該持久化的表沒在 catalog 註冊，會悄悄 fallback 成 MemoryDataset → standalone 讀取靜默壞掉。所以 production 的 `ranked_predictions`（由 `publish_predictions` 寫入、evaluation 也讀它）一定要顯式宣告（見 [`data-lineage.html`](data-lineage.html)）。
+- inference 的驗證採 **staging→validate→publish 閘門**：`rank_predictions` 先寫 `ranked_staging`，`validate_predictions` 讀它跑 sanity check 失敗即 raise，**通過後才由 `publish_predictions` 寫 production `ranked_predictions`**。重點是閘門 gate 的是「發布」而非只是「中止 run」—— 驗證失敗時 production 完全不被寫入，壞批次留在 `ranked_staging` 供排查。
 
 ## 10. 生產限制驅動的取捨
 

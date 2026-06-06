@@ -14,7 +14,7 @@
 | 情境 | 指令 | 讀什麼 | 何時用 |
 |---|---|---|---|
 | 訓練後評估 | `evaluation --post-training` | `training_eval_predictions`（test set，training 產） | 剛訓完看這版在 test 的排序表現 |
-| 上線後監控 | `evaluation`（預設） | `ranked_predictions`（inference 產） | 模型上線後定期追蹤排名品質 |
+| 上線後監控 | `evaluation`（預設） | `ranked_predictions`（inference 發布的已驗證結果） | 模型上線後定期追蹤排名品質 |
 
 ```bash
 python -m recsys_tfb evaluation --env local --post-training   # 情境 1
