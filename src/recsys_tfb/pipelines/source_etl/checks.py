@@ -17,6 +17,13 @@ class CheckResult:
     passed: bool
     message: str
     metric_value: float | int | None = None
+    # 報告用欄位（皆有預設，向後相容）
+    table: str = ""
+    check: str = ""          # source: partition_exists/row_count/schema_drift;
+    #                          output: min_row_count/max_duplicate_key_ratio/max_null_ratio/schema_contract
+    snap_date: str = ""
+    expected: str = ""
+    actual: str = ""
 
 
 class SourceChecker:
@@ -35,14 +42,25 @@ class SourceChecker:
                 row[0] for row in partitions_df.collect()
             ]
             target = f"{partition_key}={snap_date}"
+            expected = f"partition {target}"
             exists = any(target in p for p in partition_values)
             if exists:
-                return CheckResult(True, f"Partition {target} exists in {table}")
+                return CheckResult(
+                    True, f"Partition {target} exists in {table}",
+                    table=table, check="partition_exists",
+                    expected=expected, actual="found",
+                )
             return CheckResult(
-                False, f"Partition {target} not found in {table}"
+                False, f"Partition {target} not found in {table}",
+                table=table, check="partition_exists",
+                expected=expected, actual="not found",
             )
         except Exception as exc:
-            return CheckResult(False, f"Failed to check partitions for {table}: {exc}")
+            return CheckResult(
+                False, f"Failed to check partitions for {table}: {exc}",
+                table=table, check="partition_exists",
+                expected=f"partition {partition_key}={snap_date}", actual=f"error: {exc}",
+            )
 
     def check_row_count(
         self,
@@ -63,6 +81,8 @@ class SourceChecker:
             passed,
             f"{table} row count: {count} (min: {min_count})",
             metric_value=count,
+            table=table, check="row_count",
+            expected=f">= {min_count}", actual=str(count),
         )
 
     def check_schema_drift(
@@ -77,7 +97,10 @@ class SourceChecker:
         - New columns → pass if ``allow_new_columns`` is True
         """
         if not expected_columns:
-            return CheckResult(True, f"No schema expectations for {table}")
+            return CheckResult(
+                True, f"No schema expectations for {table}",
+                table=table, check="schema_drift", expected="(none)", actual="ok",
+            )
 
         desc_df = self._spark.sql(f"DESCRIBE {table}")
         actual = {
@@ -101,8 +124,17 @@ class SourceChecker:
                 errors.append(f"Unexpected new columns: {sorted(extra)}")
 
         if errors:
-            return CheckResult(False, f"Schema drift in {table}: {'; '.join(errors)}")
-        return CheckResult(True, f"Schema OK for {table}")
+            return CheckResult(
+                False, f"Schema drift in {table}: {'; '.join(errors)}",
+                table=table, check="schema_drift",
+                expected="declared columns present & typed",
+                actual="; ".join(errors),
+            )
+        return CheckResult(
+            True, f"Schema OK for {table}",
+            table=table, check="schema_drift",
+            expected="declared columns present & typed", actual="ok",
+        )
 
     def run_all(
         self, checks: list[SourceCheckConfig], snap_date: str
@@ -135,6 +167,8 @@ class SourceChecker:
                 results.append(result)
                 logger.info(result.message, extra={"event": "source_check", "passed": result.passed})
 
+        for r in results:
+            r.snap_date = snap_date
         return results
 
 
@@ -159,6 +193,8 @@ class OutputChecker:
             passed,
             f"{db}.{table} row count: {count} (min: {min_count})",
             metric_value=count,
+            table=table, check="min_row_count",
+            snap_date=snap_date, expected=f">= {min_count}", actual=str(count),
         )
 
     def check_duplicate_keys(
@@ -179,13 +215,19 @@ class OutputChecker:
         total = row["total"]
         distinct = row["distinct_cnt"]
         if total == 0:
-            return CheckResult(True, f"{db}.{table} has 0 rows, skip dup check", metric_value=0.0)
+            return CheckResult(
+                True, f"{db}.{table} has 0 rows, skip dup check", metric_value=0.0,
+                table=table, check="max_duplicate_key_ratio",
+                snap_date=snap_date, expected=f"<= {max_ratio}", actual="0 rows",
+            )
         ratio = (total - distinct) / total
         passed = ratio <= max_ratio
         return CheckResult(
             passed,
             f"{db}.{table} duplicate key ratio: {ratio:.4f} (max: {max_ratio})",
             metric_value=ratio,
+            table=table, check="max_duplicate_key_ratio",
+            snap_date=snap_date, expected=f"<= {max_ratio}", actual=f"{ratio:.4f}",
         )
 
     def check_null_ratio(
@@ -200,7 +242,11 @@ class OutputChecker:
             if not row["col_name"].startswith("#")
         ]
         if not columns:
-            return CheckResult(True, f"{db}.{table} has no columns to check")
+            return CheckResult(
+                True, f"{db}.{table} has no columns to check",
+                table=table, check="max_null_ratio",
+                snap_date=snap_date, expected=f"<= {max_ratio}", actual="no columns",
+            )
 
         null_exprs = " + ".join(
             f"SUM(CASE WHEN `{col}` IS NULL THEN 1 ELSE 0 END)" for col in columns
@@ -213,13 +259,19 @@ class OutputChecker:
         null_cnt = row["null_cnt"] or 0
         total_cells = row["total_cells"]
         if total_cells == 0:
-            return CheckResult(True, f"{db}.{table} has 0 cells, skip null check", metric_value=0.0)
+            return CheckResult(
+                True, f"{db}.{table} has 0 cells, skip null check", metric_value=0.0,
+                table=table, check="max_null_ratio",
+                snap_date=snap_date, expected=f"<= {max_ratio}", actual="0 cells",
+            )
         ratio = null_cnt / total_cells
         passed = ratio <= max_ratio
         return CheckResult(
             passed,
             f"{db}.{table} null ratio: {ratio:.4f} (max: {max_ratio})",
             metric_value=ratio,
+            table=table, check="max_null_ratio",
+            snap_date=snap_date, expected=f"<= {max_ratio}", actual=f"{ratio:.4f}",
         )
 
     def check_schema_contract(
@@ -227,6 +279,7 @@ class OutputChecker:
         db: str,
         table: str,
         required_columns: list[str],
+        snap_date: str = "",
     ) -> CheckResult:
         """Verify the output table contains all required schema columns.
 
@@ -237,7 +290,11 @@ class OutputChecker:
         ``SourceChecker.check_schema_drift`` on the input side.
         """
         if not required_columns:
-            return CheckResult(True, f"No required columns declared for {db}.{table}")
+            return CheckResult(
+                True, f"No required columns declared for {db}.{table}",
+                table=table, check="schema_contract",
+                snap_date=snap_date, expected="(none)", actual="ok",
+            )
 
         desc_df = self._spark.sql(f"DESCRIBE {db}.{table}")
         actual = {
@@ -251,8 +308,15 @@ class OutputChecker:
             return CheckResult(
                 False,
                 f"Schema contract failed for {db}.{table}: missing columns {missing}",
+                table=table, check="schema_contract",
+                snap_date=snap_date, expected="required columns present",
+                actual=f"missing {missing}",
             )
-        return CheckResult(True, f"Schema contract OK for {db}.{table}")
+        return CheckResult(
+            True, f"Schema contract OK for {db}.{table}",
+            table=table, check="schema_contract",
+            snap_date=snap_date, expected="required columns present", actual="ok",
+        )
 
     def run_all(
         self, table_config: TableConfig, target_db: str, snap_date: str
@@ -264,7 +328,7 @@ class OutputChecker:
         # Schema contract check — unconditional when primary_key is declared.
         if table_config.primary_key:
             result = self.check_schema_contract(
-                target_db, table_config.name, table_config.primary_key
+                target_db, table_config.name, table_config.primary_key, snap_date
             )
             results.append(result)
             logger.info(result.message, extra={"event": "output_check", "passed": result.passed})

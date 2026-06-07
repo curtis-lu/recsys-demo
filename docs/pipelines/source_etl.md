@@ -58,18 +58,51 @@ feature_aum → feature_sav → feature_ccard → feature_info → feature_conca
 stage 層級：
 
 - `variables.target_db`：輸出 database。
-- `source_checks`：上游表的新鮮度 / schema 檢查，ETL 前先跑（dry-run 時略過）。
+- `source_checks`：上游表的新鮮度 / schema 檢查，由 `--source-check` preflight 模式執行（見下方指令）。
 - `audit`：稽核表位置（預設 `etl_audit_log`）。
 - `dry_run`：是否只 render、不寫表（見下）。
+
+### `source_checks` 設定
+
+`source_checks` 是「上游表 → 檢查設定」的 map，由 `--source-check` preflight 模式
+執行（見下方指令）。每個 key 是上游表 FQN：
+
+| 欄位 | 型別 | 預設 | 意義 |
+|---|---|---|---|
+| key（表名） | str | — | 上游表 FQN，如 `feature_store.feat_aum` |
+| `partition_key` | str | （必填） | 分區欄名；檢查 `<partition_key>=<snap_date>` 是否存在 |
+| `min_row_count` | int | `0` | 該分區最少列數；`0` 表示不檢查列數 |
+| `expected_columns` | map{col: type} | `{}` | 期望欄位→型別；缺欄或型別不符即失敗；空表示不檢查 |
+| `allow_new_columns` | bool | `true` | `false` 時，上游多出 `expected_columns` 以外的欄位即失敗 |
+
+```yaml
+feature_etl:
+  source_checks:
+    feature_store.feat_aum:
+      partition_key: snap_date
+      min_row_count: 1000000
+      expected_columns:
+        cust_id: string
+        aum_bal: decimal(18,2)
+      allow_new_columns: true
+```
 
 ## 重跑語意
 
 - **指定日期**：`--target-dates 2025-01-31,2025-02-28`（逗號分隔多個）；未給則讀 config 的 `target_dates`。
-- **dry-run（不寫表）**：`dry_run` 預設在 `--env local` 為 `true`、`--env production` 為 `false`。dry-run 時只 render、**不**起 Spark、**不**寫表、**不**跑 source_checks / audit。可在各 `parameters_*_etl.yaml` 以 `dry_run: false` 覆寫。
+- **dry-run（不寫表）**：`dry_run` 預設在 `--env local` 為 `true`、`--env production` 為 `false`。dry-run 時只 render、**不**起 Spark、**不**寫表、**不**記 audit。可在各 `parameters_*_etl.yaml` 以 `dry_run: false` 覆寫。
   - ⚠️ 本 repo 的 **`sample_pool_etl` 設了 `dry_run: false`**，所以它在 `--env local` 也會**實際寫表**；`feature_etl` / `label_etl` 沒設，故 local 預設 dry-run。要在 local 實寫 feature / label，用 `--env production` 或在該檔設 `dry_run: false`。
 - **從某張表續跑**：`--restart-from <table_name>`，跳過它之前的表（接續失敗的長流程）。
 - **覆寫語意**：`INSERT OVERWRITE` 對每個 snap_date partition 整個覆寫——重跑同一天 ＝ 覆寫，不是 append。
-- **檢查失敗的後果**：`source_checks`（上游）失敗 → 跳過該 snap_date、繼續下一個日期；`quality_checks`（輸出）失敗 → 停掉該 snap_date 剩餘的表、繼續下一個日期；SQL / Spark 執行錯誤（如表不存在 / schema 不符）→ 中止整個 run。三者都記入 `etl_audit_log`。
+- **檢查 / 執行失敗的後果**：
+  - `source_checks`（上游）：只在 `--source-check` preflight 模式跑。會把**全部**
+    target_dates × 全部檢查跑完（collect-all），有任一失敗即印出彙整報告（含
+    expected vs actual、依檢查類型的修復提示、僅含失敗日期的重跑指令）並以非零碼結束；
+    **不寫任何表**。正常 ETL run（不帶 `--source-check`）**不再跑 source_checks**。
+  - `quality_checks`（輸出）：任一失敗即 **fail-fast 中止整個 run**、以非零碼結束，並
+    印出 `--restart-from <table>` 續跑指引（修復後從失敗那張表續跑、跳過先前已寫的表）。
+  - SQL / Spark 執行錯誤（如表不存在 / schema 不符）：中止整個 run。
+  - 三者都記入 `etl_audit_log`。
 
 ## 指令
 
@@ -78,6 +111,17 @@ python -m recsys_tfb feature_etl     --env local --target-dates 2025-01-31
 python -m recsys_tfb label_etl       --env local --target-dates 2025-01-31
 python -m recsys_tfb sample_pool_etl --env local --target-dates 2025-01-31   # 此 stage local 也會實寫
 ```
+
+**先 preflight 再正式跑**（建議工作流）：
+
+```bash
+# 1) 先驗上游（唯讀、不寫表；全部跑完有失敗即 exit 1 並印修復指引）
+python -m recsys_tfb feature_etl --source-check --target-dates 2025-01-31
+# 2) 通過後再實際寫表
+python -m recsys_tfb feature_etl              --target-dates 2025-01-31
+```
+
+`--source-check` 不可與 `--restart-from` 併用（檢查不寫表，無從續跑）。
 
 ## 接下來
 

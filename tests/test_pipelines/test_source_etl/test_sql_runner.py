@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pyspark.sql.types import DoubleType, StructField, StructType, StringType
 
-from recsys_tfb.pipelines.source_etl.sql_runner import SourceETLError, SQLRunner
+from recsys_tfb.pipelines.source_etl.sql_runner import (
+    OutputCheckError,
+    SourceCheckError,
+    SourceETLError,
+    SQLRunner,
+)
+from recsys_tfb.pipelines.source_etl.checks import CheckResult
 
 
 @pytest.fixture()
@@ -208,6 +214,17 @@ class TestSourceChecksConfig:
         assert runner._source_checks[0].min_row_count == 1000000
 
 
+def _all_pass_output_checks(self, table_config, target_db, snap_date):
+    """Stub for OutputChecker.run_all — returns no failures.
+
+    Tests that focus on SQL generation (CTAS / INSERT OVERWRITE / schema
+    evolution) use real Spark mocks that cannot satisfy the schema_contract
+    check. Patch with this stub so output-check failures don't obscure the
+    SQL-emission assertions.
+    """
+    return []
+
+
 class TestProcessSingleTableFirstRun:
     def test_emits_ctas_and_writes_rendered_sql(self, tmp_path, sql_dir):
         """First run (table absent) should emit Hive CTAS and write it to rendered_sql."""
@@ -224,7 +241,9 @@ class TestProcessSingleTableFirstRun:
             ],
         }
         runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
         assert files, "rendered SQL not written"
@@ -249,7 +268,9 @@ class TestProcessSingleTableExistingRun:
             ],
         }
         runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
         assert files
@@ -352,7 +373,9 @@ class TestSchemaEvolution:
             existing_columns=["cust_id", "total_aum", "snap_date"],
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
 
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
@@ -377,7 +400,9 @@ class TestSchemaEvolution:
             select_type_overrides={"sav_amt": DoubleType()},
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         alter = [s for s in executed if "ALTER TABLE" in s]
@@ -391,7 +416,9 @@ class TestSchemaEvolution:
             existing_columns=["cust_id", "total_aum", "snap_date"],
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("ALTER TABLE" in s for s in executed)
@@ -411,3 +438,137 @@ class TestSchemaEvolution:
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("INSERT OVERWRITE" in s for s in executed)
         assert not any("ALTER TABLE" in s for s in executed)
+
+
+class TestRunSourceChecks:
+    def _runner(self, sql_dir, source_checks):
+        config = _base_config()
+        config["source_checks"] = source_checks
+        return SQLRunner(config, sql_dir, dry_run=False, stage="feature_etl")
+
+    def test_collect_all_then_raise(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), None))
+
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        calls = []
+
+        def fake_run_all(self, cfgs, snap_date):
+            calls.append(snap_date)
+            ok = CheckResult(True, "ok", table="feat_a", check="partition_exists",
+                             snap_date=snap_date)
+            bad = CheckResult(False, "bad", table="feat_a", check="row_count",
+                              snap_date=snap_date, expected=">= 1", actual="0")
+            return [ok] if snap_date == "2025-01-31" else [ok, bad]
+
+        monkeypatch.setattr(checks_mod.SourceChecker, "run_all", fake_run_all)
+
+        with pytest.raises(SourceCheckError) as ei:
+            runner.run_source_checks(["2025-01-31", "2025-02-28"], run_id="r1")
+        assert calls == ["2025-01-31", "2025-02-28"]
+        assert len(ei.value.results) == 3
+        assert sum(1 for r in ei.value.results if not r.passed) == 1
+
+    def test_all_pass_no_raise(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), None))
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        monkeypatch.setattr(
+            checks_mod.SourceChecker, "run_all",
+            lambda self, cfgs, d: [CheckResult(True, "ok", snap_date=d)],
+        )
+        runner.run_source_checks(["2025-01-31"], run_id="r1")  # must NOT raise
+
+    def test_no_source_checks_warns_no_raise(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        runner.run_source_checks(["2025-01-31"], run_id="r1")  # must NOT raise
+
+    def test_audit_record_written_per_failed_check(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        audit = MagicMock()
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), audit))
+
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        monkeypatch.setattr(
+            checks_mod.SourceChecker, "run_all",
+            lambda self, cfgs, d: [CheckResult(False, "bad", table="feat_a",
+                                               check="row_count", snap_date=d,
+                                               expected=">= 1", actual="0")],
+        )
+
+        with pytest.raises(SourceCheckError):
+            runner.run_source_checks(["2025-01-31", "2025-02-28"], run_id="r1")
+
+        # one audit record per failed result (2 dates × 1 fail each)
+        assert audit.write_record.call_count == 2
+        recs = [c.args[0] for c in audit.write_record.call_args_list]
+        assert all(r.table_name == "__source_check__" for r in recs)
+        assert all(r.status == "failed" for r in recs)
+        assert {r.snap_date for r in recs} == {"2025-01-31", "2025-02-28"}
+
+
+class TestOutputCheckFailFast:
+    def test_output_check_failure_raises_and_stops(self, sql_dir, monkeypatch):
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=False, stage="feature_etl")
+        spark = _make_spark_mock(table_exists=False)  # CTAS path, table "writes" ok
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (spark, None))
+
+        from recsys_tfb.pipelines.source_etl import sql_runner as sr_mod
+
+        def fake_run_all(self, table_config, target_db, snap_date):
+            return [CheckResult(
+                False, "dup too high", table=table_config.name,
+                check="max_duplicate_key_ratio", snap_date=snap_date,
+                expected="<= 0.0", actual="0.5",
+            )]
+
+        monkeypatch.setattr(sr_mod.OutputChecker, "run_all", fake_run_all)
+
+        with pytest.raises(OutputCheckError) as ei:
+            runner.run(target_dates=["2025-01-31", "2025-02-28"], run_id="r1")
+        # fail-fast: stop at the first table (feature_aum), no further tables/dates
+        assert ei.value.table == "feature_aum"
+        assert ei.value.snap_date == "2025-01-31"
+
+
+class TestErrorReports:
+    def test_source_check_error_report(self):
+        results = [
+            CheckResult(True, "ok", table="t1", check="partition_exists",
+                        snap_date="2025-01-31", expected="partition snap_date=2025-01-31",
+                        actual="found"),
+            CheckResult(False, "bad", table="feat_aum", check="partition_exists",
+                        snap_date="2025-01-31", expected="partition snap_date=2025-01-31",
+                        actual="not found"),
+            CheckResult(False, "low", table="feat_aum", check="row_count",
+                        snap_date="2025-02-28", expected=">= 1000000", actual="523"),
+        ]
+        err = SourceCheckError(results, "feature_etl")
+        msg = str(err)
+        assert "Source check FAILED: 2 of 3 checks failed" in msg
+        assert "[FAIL] feat_aum / partition_exists @ 2025-01-31" in msg
+        assert "expected partition snap_date=2025-01-31, got: not found" in msg
+        assert "expected >= 1000000, got: 523" in msg
+        assert "SHOW PARTITIONS feat_aum" in msg            # partition hint
+        # 重跑指令只含失敗日期、去重排序
+        assert ("python -m recsys_tfb feature_etl --source-check "
+                "--target-dates 2025-01-31,2025-02-28") in msg
+        assert err.results == results
+        assert err.stage == "feature_etl"
+        assert isinstance(err, SourceETLError)
+
+    def test_output_check_error_report(self):
+        failed = [
+            CheckResult(False, "dup", table="feature_table",
+                        check="max_duplicate_key_ratio", snap_date="2025-01-31",
+                        expected="<= 0.0", actual="0.0123"),
+        ]
+        err = OutputCheckError("feature_etl", "feature_table", "2025-01-31", failed)
+        msg = str(err)
+        assert "Output quality check FAILED: feature_table @ 2025-01-31" in msg
+        assert "expected <= 0.0, got: 0.0123" in msg
+        assert ("python -m recsys_tfb feature_etl --target-dates 2025-01-31 "
+                "--restart-from feature_table") in msg
+        assert err.table == "feature_table"
+        assert isinstance(err, SourceETLError)

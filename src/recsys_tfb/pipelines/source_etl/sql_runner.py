@@ -13,6 +13,7 @@ from pathlib import Path
 from recsys_tfb.core.logging import generate_run_id
 from recsys_tfb.pipelines.source_etl.audit import AuditWriter
 from recsys_tfb.pipelines.source_etl.checks import (
+    CheckResult,
     OutputChecker,
     SourceChecker,
 )
@@ -30,6 +31,62 @@ class SourceETLError(Exception):
     """Raised when a source ETL check or execution fails."""
 
 
+class SourceCheckError(SourceETLError):
+    """Preflight source_checks 失敗：攜帶全部結果，str() 即完整報告。"""
+
+    _HINTS = {
+        "partition_exists": "上游分區尚未產出。確認上游已寫入該日：SHOW PARTITIONS {table}",
+        "row_count": "上游資料量不足／該日載入不完整。確認上游 ETL 已完成。",
+        "schema_drift": "上游 schema 與 expected_columns 不符。對齊上游欄位或更新設定。",
+    }
+
+    def __init__(self, results: list[CheckResult], stage: str) -> None:
+        self.results = results
+        self.stage = stage
+        super().__init__(self._format(results, stage))
+
+    @classmethod
+    def _format(cls, results: list[CheckResult], stage: str) -> str:
+        failed = [r for r in results if not r.passed]
+        lines = [f"Source check FAILED: {len(failed)} of {len(results)} checks failed", ""]
+        for r in failed:
+            lines.append(f"  [FAIL] {r.table} / {r.check} @ {r.snap_date}")
+            lines.append(f"         expected {r.expected}, got: {r.actual}")
+            hint = cls._HINTS.get(r.check, "")
+            if hint:
+                lines.append(f"         → {hint.format(table=r.table)}")
+        failed_dates = ",".join(sorted({r.snap_date for r in failed if r.snap_date}))
+        lines += [
+            "",
+            "修復上游後重跑（僅失敗日期）：",
+            f"  python -m recsys_tfb {stage} --source-check --target-dates {failed_dates}",
+        ]
+        return "\n".join(lines)
+
+
+class OutputCheckError(SourceETLError):
+    """單一輸出表的 quality_checks 失敗（fail-fast）。"""
+
+    def __init__(
+        self, stage: str, table: str, snap_date: str, failed: list[CheckResult]
+    ) -> None:
+        self.stage = stage
+        self.table = table
+        self.snap_date = snap_date
+        self.failed = failed
+        lines = [f"Output quality check FAILED: {table} @ {snap_date}"]
+        for r in failed:
+            lines.append(f"  [FAIL] {r.table} / {r.check} @ {r.snap_date}")
+            lines.append(f"         expected {r.expected}, got: {r.actual}")
+        lines += [
+            "",
+            "ETL 已中止。修復後可從該表續跑（跳過先前已寫的表）：",
+            f"  python -m recsys_tfb {stage} --target-dates {snap_date} "
+            f"--restart-from {table}",
+        ]
+        super().__init__("\n".join(lines))
+
+
 class SQLRunner:
     """Execute the source ETL pipeline: render SQL, run on Spark, validate."""
 
@@ -39,6 +96,7 @@ class SQLRunner:
         sql_dir: Path,
         dry_run: bool = False,
         rendered_sql_dir: Path | None = None,
+        stage: str = "source_etl",
     ) -> None:
         self._tables = [TableConfig.from_dict(t) for t in config["tables"]]
         self._source_checks = [
@@ -52,6 +110,7 @@ class SQLRunner:
         self._rendered_sql_dir = rendered_sql_dir
         self._renderer = SQLRenderer(sql_dir)
         self._target_db = self._variables.get("target_db", "default")
+        self._stage = stage
 
         # Validate depends_on consistency at init time
         self._validate_order()
@@ -115,21 +174,9 @@ class SQLRunner:
             run_start = time.monotonic()
             snap_status = "success"
             try:
-                # Source freshness checks (skip in dry-run)
-                if not self._dry_run and self._source_checks:
-                    if not self._run_source_checks(spark, snap_date, run_id, audit):
-                        snap_status = "skipped_source_check"
-                        continue  # skip this snap_date but keep processing the rest
-
                 # Execute tables
                 for table in tables_to_run:
-                    success = self._process_single_table(
-                        spark, table, snap_date, run_id, audit
-                    )
-                    if not success:
-                        # Output-quality failure: record and stop this snap_date.
-                        snap_status = "failed"
-                        break
+                    self._process_single_table(spark, table, snap_date, run_id, audit)
             except SourceETLError:
                 # SQL/Spark execution error: abort the whole run after this iteration's
                 # audit summary is written.
@@ -265,10 +312,8 @@ class SQLRunner:
                 f"{table.name} @ {snap_date}: {exc}"
             ) from exc
 
-        row_count = self._run_output_checks(
-            spark, table, snap_date, run_id, audit, duration
-        )
-        return row_count >= 0
+        self._run_output_checks(spark, table, snap_date, run_id, audit, duration)
+        return True
 
     def _build_existing_table_statements(
         self,
@@ -339,35 +384,49 @@ class SQLRunner:
         )
         return statements
 
-    def _run_source_checks(
+    def run_source_checks(
         self,
-        spark,
-        snap_date: str,
-        run_id: str,
-        audit: AuditWriter | None,
-    ) -> bool:
-        """Run source freshness and schema checks. Returns True if all pass."""
+        target_dates: list[str],
+        run_id: str | None = None,
+    ) -> None:
+        """Preflight：對全部 target_dates 跑 source_checks，collect-all。
+
+        全部跑完後若有任一失敗，raise SourceCheckError（攜帶結構化失敗清單），
+        並對每筆失敗寫 etl_audit_log（table_name="__source_check__"）。不寫任何
+        輸出表。
+        """
+        if run_id is None:
+            run_id = generate_run_id()
+        if not self._source_checks:
+            logger.warning("No source_checks configured for %s; nothing to check.", self._stage)
+            return
+
+        spark, audit = self._initialize_context()
         checker = SourceChecker(spark)
-        results = checker.run_all(self._source_checks, snap_date)
-        failed = [r for r in results if not r.passed]
+
+        all_results: list[CheckResult] = []
+        for snap_date in target_dates:
+            all_results.extend(checker.run_all(self._source_checks, snap_date))
+
+        failed = [r for r in all_results if not r.passed]
         if failed:
-            logger.error(
-                "Source checks failed for snap_date=%s: %s",
-                snap_date,
-                [r.message for r in failed],
-            )
             if audit:
-                audit.write_record(
-                    AuditRecord(
-                        run_id=run_id,
-                        snap_date=snap_date,
-                        table_name="__source_check__",
-                        status="failed",
-                        error_message="; ".join(r.message for r in failed),
+                for r in failed:
+                    audit.write_record(
+                        AuditRecord(
+                            run_id=run_id,
+                            snap_date=r.snap_date,
+                            table_name="__source_check__",
+                            status="failed",
+                            error_message=r.message,
+                        )
                     )
-                )
-            return False
-        return True
+            raise SourceCheckError(all_results, self._stage)
+
+        logger.info(
+            "Source check passed: %d checks (%s)",
+            len(all_results), self._stage,
+        )
 
     def _run_output_checks(
         self,
@@ -378,7 +437,7 @@ class SQLRunner:
         audit: AuditWriter | None,
         duration: float,
     ) -> int:
-        """Run output quality checks. Returns row_count or -1 on failure."""
+        """Run output quality checks. Returns row_count on success; raises OutputCheckError on failure."""
         checker = OutputChecker(spark)
         results = checker.run_all(table, self._target_db, snap_date)
         failed = [r for r in results if not r.passed]
@@ -408,7 +467,7 @@ class SQLRunner:
                         error_message="; ".join(r.message for r in failed),
                     )
                 )
-            return -1
+            raise OutputCheckError(self._stage, table.name, snap_date, failed)
 
         if audit:
             audit.write_record(

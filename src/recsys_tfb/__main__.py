@@ -179,6 +179,7 @@ def _run_etl(
     env: str,
     target_dates: Optional[str],
     restart_from: Optional[str],
+    source_check_only: bool = False,
 ) -> None:
     """Shared executor for the feature/label/sample_pool ETL sub-commands.
 
@@ -186,8 +187,13 @@ def _run_etl(
     and is used both as the pipeline name (for logging/config lookup) and as
     the top-level YAML key of its parameters file.
     """
-    from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner
+    from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner, SourceCheckError
     from recsys_tfb.utils.spark import get_or_create_spark_session
+
+    # restart-from 對純檢查無意義 → 先報錯（不必起 Spark）
+    if source_check_only and restart_from:
+        logger.error("--source-check 與 --restart-from 不能同時使用（檢查不寫表，無從續跑）。")
+        raise typer.Exit(code=1)
 
     config, params, run_context = _load_config_and_setup(stage, env)
 
@@ -215,9 +221,20 @@ def _run_etl(
     runner = SQLRunner(
         config=etl_config,
         sql_dir=sql_dir,
-        dry_run=dry_run,
+        dry_run=False if source_check_only else dry_run,  # 檢查唯讀、必須實查 Hive
         rendered_sql_dir=rendered_sql_dir,
+        stage=stage,
     )
+
+    if source_check_only:
+        try:
+            runner.run_source_checks(target_dates=date_list, run_id=run_context.run_id)
+        except SourceCheckError as exc:
+            logger.error("%s", exc)
+            raise typer.Exit(code=1)
+        logger.info("Source check completed: %s", stage)
+        return
+
     try:
         runner.run(
             target_dates=date_list,
@@ -244,9 +261,14 @@ def feature_etl(
         "--restart-from",
         help="Restart from this table name (skip earlier tables in the list)",
     ),
+    source_check: bool = typer.Option(
+        False, "--source-check",
+        help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
+             "全部跑完後有任一失敗即以非零碼結束。",
+    ),
 ):
     """Run the feature ETL pipeline (feature_aum/sav/ccard/info/concat/table)."""
-    _run_etl("feature_etl", env, target_dates, restart_from)
+    _run_etl("feature_etl", env, target_dates, restart_from, source_check_only=source_check)
 
 
 @app.command(name="label_etl")
@@ -262,9 +284,14 @@ def label_etl(
         "--restart-from",
         help="Restart from this table name (skip earlier tables in the list)",
     ),
+    source_check: bool = typer.Option(
+        False, "--source-check",
+        help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
+             "全部跑完後有任一失敗即以非零碼結束。",
+    ),
 ):
     """Run the label ETL pipeline (label_ccard/exchange/fund/table)."""
-    _run_etl("label_etl", env, target_dates, restart_from)
+    _run_etl("label_etl", env, target_dates, restart_from, source_check_only=source_check)
 
 
 @app.command(name="sample_pool_etl")
@@ -280,9 +307,14 @@ def sample_pool_etl(
         "--restart-from",
         help="Restart from this table name (skip earlier tables in the list)",
     ),
+    source_check: bool = typer.Option(
+        False, "--source-check",
+        help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
+             "全部跑完後有任一失敗即以非零碼結束。",
+    ),
 ):
     """Run the sample_pool ETL pipeline. Requires feature_etl and label_etl outputs."""
-    _run_etl("sample_pool_etl", env, target_dates, restart_from)
+    _run_etl("sample_pool_etl", env, target_dates, restart_from, source_check_only=source_check)
 
 
 @app.command(name="dataset")

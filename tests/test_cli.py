@@ -327,6 +327,106 @@ class TestEvaluationCLIFlags:
         assert "--post-training" in result.output
 
 
+def _setup_etl_conf(tmp_path, source_checks=None):
+    """conf/base + parameters_feature_etl.yaml（最小可跑 _run_etl）。"""
+    _setup_conf(tmp_path)
+    base_dir = tmp_path / "conf" / "base"
+    params = {
+        "feature_etl": {
+            "variables": {"target_db": "ml_recsys"},
+            "source_checks": source_checks or {},
+            "tables": [
+                {"name": "feature_table", "sql_file": "feature/feature_table.sql",
+                 "partition_by": {"snap_date": "DATE"},
+                 "primary_key": ["snap_date", "cust_id"]},
+            ],
+        }
+    }
+    with open(base_dir / "parameters_feature_etl.yaml", "w") as f:
+        yaml.dump(params, f)
+
+
+class TestSourceCheckCLI:
+    def test_flag_in_help(self):
+        for cmd in ("feature_etl", "label_etl", "sample_pool_etl"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0, result.output
+            assert "--source-check" in result.output
+
+    def test_source_check_pass_exit0_no_etl(self, tmp_path):
+        _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                inst = MockRunner.return_value
+                inst.run_source_checks.return_value = None
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            inst.run_source_checks.assert_called_once()
+            inst.run.assert_not_called()           # no table writes
+        finally:
+            os.chdir(old)
+
+    def test_source_check_fail_exit1_no_etl(self, tmp_path):
+        from recsys_tfb.pipelines.source_etl.sql_runner import SourceCheckError
+        from recsys_tfb.pipelines.source_etl.checks import CheckResult
+        _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                inst = MockRunner.return_value
+                inst.run_source_checks.side_effect = SourceCheckError(
+                    [CheckResult(False, "bad", table="feat_a", check="partition_exists",
+                                 snap_date="2025-01-31", expected="x", actual="not found")],
+                    "feature_etl",
+                )
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 1, result.output
+            inst.run.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_source_check_with_restart_from_errors(self, tmp_path):
+        _setup_etl_conf(tmp_path)
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--restart-from", "feature_table",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 1, result.output
+            MockRunner.return_value.run_source_checks.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_source_check_forces_dry_run_false(self, tmp_path):
+        # In --env local, dry_run defaults to True; --source-check must override
+        # it to False so the read-only checks actually query Hive (design D2d).
+        _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                MockRunner.return_value.run_source_checks.return_value = None
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            assert MockRunner.call_args.kwargs["dry_run"] is False
+        finally:
+            os.chdir(old)
+
+
 def test_sample_weight_extra_reads_report(tmp_path):
     import json
     from recsys_tfb.__main__ import _sample_weight_extra
