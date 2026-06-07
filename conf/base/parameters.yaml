@@ -19,6 +19,16 @@ spark:
   # spark.sql.catalogImplementation: hive
   # spark.executor.memory: 4g
   # spark.executor.cores: 2
+  #
+  # --- 大規模（~10M entity）記憶體調參 ---
+  # dataset pipeline 的 peak memory 取決於「單一 shuffle partition 大小」與 join
+  # shuffle 量，而非框出幾個月（pipeline 已依 snap_date 物理分區，詳見
+  # docs/pipelines/dataset.md §規模與記憶體）。主要旋鈕：
+  #   shuffle.partitions 目標每分區 ~128–256MB → partitions ≈ shuffle_input_bytes / 128MB
+  #   AQE（Spark 3.3 預設 on）勿關
+  # dev/測試資料小用預設即可；生產取消下面兩行註解並依實測量調整：
+  # spark.sql.shuffle.partitions: 400
+  # spark.sql.adaptive.enabled: true
 
 # [Schema 規範]
 # 進入 dataset pipeline 的所有輸入表（feature / label / sample_pool）核心 identity

@@ -585,3 +585,52 @@ class TestSplitTrainKeysCarry:
         tr, dv = split_train_keys(keys, params)
         assert "cust_segment_typ" in tr.columns
         assert "cust_segment_typ" in dv.columns
+
+
+class TestApplyPreprocessorUnknownWarning:
+    """apply_preprocessor_to_features 對每個含 unknown(-1) 的編碼欄各發一次 WARNING。
+    鎖住此可觀察行為，確保 multi-count -> single-aggregation 的重構等價。"""
+
+    def test_warns_per_column_with_unknown_categoricals(self, spark, caplog):
+        import logging
+
+        # feature_table 帶一個「非 identity」的類別特徵欄，資料含 fit 時沒見過的值
+        # -> 編碼為 -1。identity_columns = [snap_date, cust_id, prod_name]，故
+        # channel_preference 會進 encode_cols。
+        ft = spark.createDataFrame(
+            pd.DataFrame(
+                {
+                    "snap_date": pd.to_datetime(["2024-01-31"] * 3),
+                    "cust_id": ["C001", "C002", "C003"],
+                    "total_aum": [100.0, 200.0, 300.0],
+                    "channel_preference": ["digital", "branch", "unseen_channel"],
+                }
+            )
+        )
+        preprocessor = {
+            "feature_columns": ["channel_preference", "total_aum"],
+            "categorical_columns": ["channel_preference"],
+            # "unseen_channel" 刻意不在 mapping -> 編碼為 -1
+            "category_mappings": {"channel_preference": ["digital", "branch"]},
+            "drop_columns": [],
+        }
+        parameters = {
+            "schema": {"categorical_values": {"prod_name": ["exchange_fx"]}},
+            "dataset": {
+                "train_snap_dates": ["2024-01-31"],
+                "calibration_snap_dates": [],
+                "val_snap_dates": [],
+                "test_snap_dates": [],
+            },
+        }
+
+        with caplog.at_level(logging.WARNING):
+            result = apply_preprocessor_to_features(ft, preprocessor, parameters)
+            pdf = result.orderBy("cust_id").toPandas()
+
+        # digital->0, branch->1, unseen_channel->-1
+        assert pdf["channel_preference"].tolist() == [0, 1, -1]
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "1 unknowns in column 'channel_preference'" in m for m in warnings
+        ), warnings
