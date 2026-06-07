@@ -96,6 +96,7 @@ class SQLRunner:
         sql_dir: Path,
         dry_run: bool = False,
         rendered_sql_dir: Path | None = None,
+        stage: str = "source_etl",
     ) -> None:
         self._tables = [TableConfig.from_dict(t) for t in config["tables"]]
         self._source_checks = [
@@ -109,6 +110,7 @@ class SQLRunner:
         self._rendered_sql_dir = rendered_sql_dir
         self._renderer = SQLRenderer(sql_dir)
         self._target_db = self._variables.get("target_db", "default")
+        self._stage = stage
 
         # Validate depends_on consistency at init time
         self._validate_order()
@@ -172,12 +174,6 @@ class SQLRunner:
             run_start = time.monotonic()
             snap_status = "success"
             try:
-                # Source freshness checks (skip in dry-run)
-                if not self._dry_run and self._source_checks:
-                    if not self._run_source_checks(spark, snap_date, run_id, audit):
-                        snap_status = "skipped_source_check"
-                        continue  # skip this snap_date but keep processing the rest
-
                 # Execute tables
                 for table in tables_to_run:
                     success = self._process_single_table(
@@ -396,35 +392,49 @@ class SQLRunner:
         )
         return statements
 
-    def _run_source_checks(
+    def run_source_checks(
         self,
-        spark,
-        snap_date: str,
-        run_id: str,
-        audit: AuditWriter | None,
-    ) -> bool:
-        """Run source freshness and schema checks. Returns True if all pass."""
+        target_dates: list[str],
+        run_id: str | None = None,
+    ) -> None:
+        """Preflight：對全部 target_dates 跑 source_checks，collect-all。
+
+        全部跑完後若有任一失敗，raise SourceCheckError（攜帶結構化失敗清單），
+        並對每筆失敗寫 etl_audit_log（table_name="__source_check__"）。不寫任何
+        輸出表。
+        """
+        if run_id is None:
+            run_id = generate_run_id()
+        if not self._source_checks:
+            logger.warning("No source_checks configured for %s; nothing to check.", self._stage)
+            return
+
+        spark, audit = self._initialize_context()
         checker = SourceChecker(spark)
-        results = checker.run_all(self._source_checks, snap_date)
-        failed = [r for r in results if not r.passed]
+
+        all_results: list[CheckResult] = []
+        for snap_date in target_dates:
+            all_results.extend(checker.run_all(self._source_checks, snap_date))
+
+        failed = [r for r in all_results if not r.passed]
         if failed:
-            logger.error(
-                "Source checks failed for snap_date=%s: %s",
-                snap_date,
-                [r.message for r in failed],
-            )
             if audit:
-                audit.write_record(
-                    AuditRecord(
-                        run_id=run_id,
-                        snap_date=snap_date,
-                        table_name="__source_check__",
-                        status="failed",
-                        error_message="; ".join(r.message for r in failed),
+                for r in failed:
+                    audit.write_record(
+                        AuditRecord(
+                            run_id=run_id,
+                            snap_date=r.snap_date,
+                            table_name="__source_check__",
+                            status="failed",
+                            error_message=r.message,
+                        )
                     )
-                )
-            return False
-        return True
+            raise SourceCheckError(all_results, self._stage)
+
+        logger.info(
+            "Source check passed: %d checks (%s)",
+            len(all_results), self._stage,
+        )
 
     def _run_output_checks(
         self,

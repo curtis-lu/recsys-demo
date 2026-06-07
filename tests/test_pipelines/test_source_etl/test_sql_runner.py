@@ -419,6 +419,73 @@ class TestSchemaEvolution:
         assert not any("ALTER TABLE" in s for s in executed)
 
 
+class TestRunSourceChecks:
+    def _runner(self, sql_dir, source_checks):
+        config = _base_config()
+        config["source_checks"] = source_checks
+        return SQLRunner(config, sql_dir, dry_run=False, stage="feature_etl")
+
+    def test_collect_all_then_raise(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), None))
+
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        calls = []
+
+        def fake_run_all(self, cfgs, snap_date):
+            calls.append(snap_date)
+            ok = CheckResult(True, "ok", table="feat_a", check="partition_exists",
+                             snap_date=snap_date)
+            bad = CheckResult(False, "bad", table="feat_a", check="row_count",
+                              snap_date=snap_date, expected=">= 1", actual="0")
+            return [ok] if snap_date == "2025-01-31" else [ok, bad]
+
+        monkeypatch.setattr(checks_mod.SourceChecker, "run_all", fake_run_all)
+
+        with pytest.raises(SourceCheckError) as ei:
+            runner.run_source_checks(["2025-01-31", "2025-02-28"], run_id="r1")
+        assert calls == ["2025-01-31", "2025-02-28"]
+        assert len(ei.value.results) == 3
+        assert sum(1 for r in ei.value.results if not r.passed) == 1
+
+    def test_all_pass_no_raise(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), None))
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        monkeypatch.setattr(
+            checks_mod.SourceChecker, "run_all",
+            lambda self, cfgs, d: [CheckResult(True, "ok", snap_date=d)],
+        )
+        runner.run_source_checks(["2025-01-31"], run_id="r1")  # must NOT raise
+
+    def test_no_source_checks_warns_no_raise(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        runner.run_source_checks(["2025-01-31"], run_id="r1")  # must NOT raise
+
+    def test_audit_record_written_per_failed_check(self, sql_dir, monkeypatch):
+        runner = self._runner(sql_dir, {"feat_a": {"partition_key": "snap_date"}})
+        audit = MagicMock()
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (MagicMock(), audit))
+
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        monkeypatch.setattr(
+            checks_mod.SourceChecker, "run_all",
+            lambda self, cfgs, d: [CheckResult(False, "bad", table="feat_a",
+                                               check="row_count", snap_date=d,
+                                               expected=">= 1", actual="0")],
+        )
+
+        with pytest.raises(SourceCheckError):
+            runner.run_source_checks(["2025-01-31", "2025-02-28"], run_id="r1")
+
+        # one audit record per failed result (2 dates × 1 fail each)
+        assert audit.write_record.call_count == 2
+        recs = [c.args[0] for c in audit.write_record.call_args_list]
+        assert all(r.table_name == "__source_check__" for r in recs)
+        assert all(r.status == "failed" for r in recs)
+        assert {r.snap_date for r in recs} == {"2025-01-31", "2025-02-28"}
+
+
 class TestErrorReports:
     def test_source_check_error_report(self):
         results = [
