@@ -29,7 +29,9 @@
 
 - **輸入**：上游原始 Hive 表（由各 `<table>.sql` 的 `FROM` 決定；非框架管理）。
 - **輸出**：`tables` 清單裡每張表 `INSERT OVERWRITE` 到 `${target_db}.<name>`；最後一張通常就是來源表本身。
-- **稽核**：每輪寫一筆 summary 到 `${target_db}.etl_audit_log`。
+- **稽核**：每張表 / 每輪 summary / source-check 失敗都記入 `${target_db}.etl_audit_log`；
+  紀錄在 run 期間先 buffer，於 run 結束時**一次** coalesced 寫出（單檔，避免小碎檔）。
+  該表**不分區**（`snap_date` 為一般欄位，查詢用 `WHERE snap_date = '...'`）。
 
 ## 每條 ETL 的流程
 
