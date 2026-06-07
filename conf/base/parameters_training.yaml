@@ -78,6 +78,21 @@ training:
   #   refit_on_full  — 在 train + train_dev concat 後重訓，
   #                    num_iterations = best_iteration、不做 early stopping。
   final_model_strategy: hpo_best
+  # --- Training-stage feature selection ----------------------------------
+  # 在「不重建 dataset」前提下，retrain 時排除多餘特徵（重要性低 / 與其他特徵
+  # 高相關）。dataset 仍保留全特徵（base_dataset_version 不變）；只在 training
+  # 起算的路徑把 feature_columns 子集化：select_features node 產出 subset 的
+  # preprocessor_view，bin-build / HPO / finalize / calibration / test 打分 /
+  # 診斷全部消費同一份 view；inference 端則改讀 model 自己宣告的 feature_name()。
+  #   exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
+  #             不可含 schema.item，consistency A14 會 fail-loud 擋下）。
+  # 空 / 省略 = 行為與未啟用前 100% 相同（無子集、無 .bin 內部 hash、無對齊）。
+  # 此 key 在 model_version-hashed 的 training: block 內 → 只 bump model_version、
+  # 不動 base_dataset_version / train_variant_id。完整 exclude 清單會寫進
+  # manifest.json 的 parameters（provenance）。.bin 快取在啟用時落在
+  # lgb/<family>/fs_<hash>/，不會與全特徵 binary 互相污染。
+  feature_selection:
+    exclude: []
   # search_space：ParamSpec map 的有序 list（declarative HPO, Phase 2）。
   # `name` 同時是 Optuna suggest name 與 LightGBM param key。
   # type ∈ {int, float, categorical}。int/float：low、high（可選 step、log）；

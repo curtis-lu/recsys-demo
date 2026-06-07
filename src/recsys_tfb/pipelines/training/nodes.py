@@ -292,6 +292,21 @@ def cache_calibration_model_input(calibration_model_input, parameters: dict) -> 
     )
 
 
+def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
+    """Apply training-stage feature selection, returning a preprocessor view.
+
+    Single chokepoint for the training pipeline: every model-touching node
+    consumes this (possibly subset) view instead of the raw dataset-built
+    ``preprocessor``, so ``training.feature_selection.exclude`` is applied
+    exactly once and stays consistent across bin-build, HPO, finalize,
+    calibration, test scoring, and diagnostics. Empty/absent selection returns
+    the input unchanged, so non-selection runs are byte-identical.
+    """
+    from recsys_tfb.preprocessing._common import apply_feature_selection
+
+    return apply_feature_selection(preprocessor_metadata, parameters)
+
+
 def prepare_lgb_train_inputs(
     train_parquet_handle: ParquetHandle,
     train_dev_parquet_handle: ParquetHandle,

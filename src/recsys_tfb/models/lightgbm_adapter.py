@@ -25,6 +25,26 @@ logger = logging.getLogger(__name__)
 lgb.register_logger(logger)
 
 
+def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> str:
+    """Cache sub-segment isolating a training-stage feature subset's .bin.
+
+    Returns "" when ``training.feature_selection`` is inactive, so the lgb cache
+    path stays ``lgb/<family>/`` (byte-identical to pre-feature-selection runs;
+    no migration). When active, returns ``fs_<hash8>`` keyed by the *surviving*
+    ``feature_columns`` — different subsets get different ``.bin`` files under
+    the same base/train_variant/family dir, which would otherwise collide and
+    silently reuse a stale full-feature binary.
+    """
+    from recsys_tfb.preprocessing._common import feature_selection_exclude
+
+    if not feature_selection_exclude(parameters):
+        return ""
+    import hashlib
+
+    digest = hashlib.sha256("\n".join(feature_columns).encode()).hexdigest()[:8]
+    return f"fs_{digest}"
+
+
 class LightGBMAdapter(ModelAdapter):
     """ModelAdapter wrapping LightGBM Booster."""
 
@@ -163,6 +183,16 @@ class LightGBMAdapter(ModelAdapter):
         # reused for a binary objective (or vice versa). lambdarank and
         # rank_xendcg share the "ranking" family (identical group layout).
         lgb_dir = Path(cache_dir) / "lgb" / family
+        # Training-stage feature selection: the binned .bin reflects the subset
+        # feature set, but the cache dir is keyed by base/train_variant/family
+        # only — NOT by selection. Add a feature-hash sub-segment so a subset
+        # binary never collides with (or silently reuses) the full-feature one
+        # under the same train_variant. Empty when no selection -> unchanged.
+        fs_sub = _feature_selection_subpath(
+            parameters, list(preprocessor_metadata["feature_columns"])
+        )
+        if fs_sub:
+            lgb_dir = lgb_dir / fs_sub
         success = lgb_dir / "_SUCCESS"
         train_bin = lgb_dir / "train.bin"
         dev_bin = lgb_dir / "train_dev.bin"

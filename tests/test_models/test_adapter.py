@@ -678,6 +678,76 @@ def test_prepare_train_inputs_ranking_bin_carries_feature_names(tmp_path):
     assert ds_dv.get_feature_name() == ["feat_a", "prod_name"]
 
 
+def test_feature_selection_subpath_empty_when_no_selection():
+    """No selection -> empty sub-segment, so the lgb cache path stays
+    `lgb/<family>/` byte-identical to pre-feature-selection behavior."""
+    from recsys_tfb.models.lightgbm_adapter import _feature_selection_subpath
+
+    assert _feature_selection_subpath({"training": {}}, ["a", "b"]) == ""
+    assert _feature_selection_subpath(
+        {"training": {"feature_selection": {"exclude": []}}}, ["a", "b"]
+    ) == ""
+
+
+def test_feature_selection_subpath_hashes_surviving_features_when_active():
+    """Active selection -> `fs_<hash8>` keyed by the surviving feature set, so
+    different subsets get different .bin dirs (no stale-bin collision)."""
+    from recsys_tfb.models.lightgbm_adapter import _feature_selection_subpath
+
+    p = {"training": {"feature_selection": {"exclude": ["x"]}}}
+    s1 = _feature_selection_subpath(p, ["a", "b"])
+    s2 = _feature_selection_subpath(p, ["a"])
+    assert s1.startswith("fs_") and len(s1) == 11
+    assert s1 != s2
+
+
+def test_feature_selection_isolates_bin_from_full_feature_cache(tmp_path):
+    """A subset model (feature_selection active) must build its .bin under a
+    feature-hash subdir, leaving the full-feature binary that shares the same
+    base/train_variant cache dir untouched — and its bin reflects the subset."""
+    import lightgbm as lgb
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    cache = tmp_path / "variant"
+
+    # full-feature run (no selection) -> canonical path
+    full_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        full_meta, _ranking_parameters("binary"), str(cache),
+    )
+    full_bin = cache / "lgb" / "binary" / "train.bin"
+    assert full_bin.exists()
+
+    # subset run (exclude feat_a) -> separate fs_ subdir
+    subset_meta = {
+        "feature_columns": ["prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    params = _ranking_parameters("binary")
+    params["training"]["feature_selection"] = {"exclude": ["feat_a"]}
+    train_h, _ = LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        subset_meta, params, str(cache),
+    )
+    assert "/lgb/binary/fs_" in train_h.bin_path.replace("\\", "/")
+    # full-feature bin untouched (no overwrite / collision)
+    assert lgb.Dataset(str(full_bin)).construct().get_feature_name() == [
+        "feat_a", "prod_name"]
+    # subset bin carries only the kept feature
+    assert lgb.Dataset(train_h.bin_path).construct().get_feature_name() == [
+        "prod_name"]
+
+
 class TestPrepareTrainInputsWeight:
     def _prep(self):
         return {
