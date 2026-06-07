@@ -7,6 +7,7 @@ statements against Hive, and runs data quality checks.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -25,6 +26,21 @@ from recsys_tfb.pipelines.source_etl.models import (
 from recsys_tfb.pipelines.source_etl.sql_renderer import SQLRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _snap_status_from_exc(exc: BaseException | None) -> str:
+    """Map the in-flight exception (if any) to an audit summary status.
+
+    Called from a ``finally`` via ``sys.exc_info()`` so the summary reflects how
+    the snap_date actually ended — including a user interrupt (Ctrl-C), which is a
+    ``KeyboardInterrupt`` (a ``BaseException``, not ``Exception``) and would
+    otherwise be mislabelled "success".
+    """
+    if exc is None:
+        return "success"
+    if isinstance(exc, KeyboardInterrupt):
+        return "interrupted"
+    return "failed"
 
 
 class SourceETLError(Exception):
@@ -173,17 +189,14 @@ class SQLRunner:
             for snap_date in target_dates:
                 logger.info("Processing snap_date=%s", snap_date)
                 run_start = time.monotonic()
-                snap_status = "success"
                 try:
-                    # Execute tables
+                    # Execute tables. Any exception (SourceETLError, KeyboardInterrupt,
+                    # etc.) propagates out and aborts the whole run; the finally below
+                    # still buffers a summary tagged with the real outcome.
                     for table in tables_to_run:
                         self._process_single_table(spark, table, snap_date, run_id, audit)
-                except SourceETLError:
-                    # SQL/Spark execution error: abort the whole run after this
-                    # iteration's audit summary is buffered.
-                    snap_status = "failed"
-                    raise
                 finally:
+                    snap_status = _snap_status_from_exc(sys.exc_info()[1])
                     total_duration = time.monotonic() - run_start
                     if not self._dry_run and audit:
                         audit.write_summary(

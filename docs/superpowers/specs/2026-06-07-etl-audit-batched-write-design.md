@@ -111,6 +111,24 @@ dry_run 時 `_initialize_context` 回傳 `(None, None)`，`audit` 為 `None`，f
 
 代價：audit 寫入失敗只進 log、不中斷 run。對稽核用途可接受。
 
+### D6：summary status 依實際結束方式標記（中斷正確性）
+
+`run()` 每個 snap_date 的 summary status 不再用「預設 success、只有 `except
+SourceETLError` 才改 failed」的寫法——那會在使用者 Ctrl-C（`KeyboardInterrupt`，屬
+`BaseException` 不屬 `Exception`）時謊報 `success`。改在內層 `finally` 以
+`_snap_status_from_exc(sys.exc_info()[1])` 從當下 in-flight 例外推導狀態：
+
+- 無例外 → `success`
+- `KeyboardInterrupt` → `interrupted`
+- 其他（`SourceETLError` 或 bug）→ `failed`
+
+原本的 `except SourceETLError` 區塊因此移除（例外本來就會自然往上傳並 abort 整個
+run，不需 catch 後再 `raise`）。
+
+範圍界定：D6 只修**標籤正確性**，且僅在 `flush()` 有機會執行時（正常結束、Ctrl-C）。
+SIGTERM/SIGKILL 下 `finally` 不會跑、整批 audit 仍會遺失——那是持久化層級的問題，本次
+不處理（需另設計 signal handler / 分批 flush，SIGKILL 本質無解）。
+
 ## 不做（YAGNI）
 
 - **跨 run compaction**（read-modify-write / `INSERT OVERWRITE` 合併舊檔）：不分區 +
@@ -128,6 +146,8 @@ dry_run 時 `_initialize_context` 回傳 `(None, None)`，`audit` 為 `None`，f
 - **改**：`src/recsys_tfb/pipelines/source_etl/sql_runner.py`
   - `run()` 外層加 `try/finally` flush。
   - `run_source_checks()` 加 `try/finally` flush。
+  - 加 `_snap_status_from_exc()` helper；`run()` 內層改用它在 finally 推導 summary
+    status（D6），移除 `except SourceETLError` 區塊。
 - **改**：`tests/test_pipelines/test_source_etl/test_audit.py`
   - 不再斷言 `INSERT INTO` 字串與 `PARTITIONED BY`。
   - 改斷言：CREATE 不含 `PARTITIONED BY`、含 `snap_date STRING` 欄；`write_record`
