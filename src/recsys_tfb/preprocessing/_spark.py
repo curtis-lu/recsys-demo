@@ -360,8 +360,16 @@ def apply_preprocessor_to_features(
         encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
         if encode_cols:
             result = _encode_categoricals(result, encode_cols, category_mappings)
+            # Single pass: one aggregation returns the unknown (-1) count for
+            # every encoded column at once. The previous per-column .count()
+            # re-scanned the full multi-month feature_table once per categorical
+            # (N actions); this collapses it to a single scan.
+            unknown_counts = result.agg(*[
+                F.sum(F.when(F.col(c) == -1, 1).otherwise(0)).alias(c)
+                for c in encode_cols
+            ]).collect()[0]
             for col in encode_cols:
-                n_unknown = result.filter(F.col(col) == -1).count()
+                n_unknown = unknown_counts[col] or 0
                 if n_unknown > 0:
                     logger.warning(
                         "apply_preprocessor_to_features: %d unknowns in column '%s'",
