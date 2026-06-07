@@ -169,31 +169,35 @@ class SQLRunner:
         spark, audit = self._initialize_context()
         tables_to_run = self._get_tables_to_run(restart_from)
 
-        for snap_date in target_dates:
-            logger.info("Processing snap_date=%s", snap_date)
-            run_start = time.monotonic()
-            snap_status = "success"
-            try:
-                # Execute tables
-                for table in tables_to_run:
-                    self._process_single_table(spark, table, snap_date, run_id, audit)
-            except SourceETLError:
-                # SQL/Spark execution error: abort the whole run after this iteration's
-                # audit summary is written.
-                snap_status = "failed"
-                raise
-            finally:
-                total_duration = time.monotonic() - run_start
-                if not self._dry_run and audit:
-                    audit.write_summary(
-                        run_id, snap_date, snap_status, total_duration
+        try:
+            for snap_date in target_dates:
+                logger.info("Processing snap_date=%s", snap_date)
+                run_start = time.monotonic()
+                snap_status = "success"
+                try:
+                    # Execute tables
+                    for table in tables_to_run:
+                        self._process_single_table(spark, table, snap_date, run_id, audit)
+                except SourceETLError:
+                    # SQL/Spark execution error: abort the whole run after this
+                    # iteration's audit summary is buffered.
+                    snap_status = "failed"
+                    raise
+                finally:
+                    total_duration = time.monotonic() - run_start
+                    if not self._dry_run and audit:
+                        audit.write_summary(
+                            run_id, snap_date, snap_status, total_duration
+                        )
+                    logger.info(
+                        "snap_date=%s finished: status=%s, duration=%.1fs",
+                        snap_date,
+                        snap_status,
+                        total_duration,
                     )
-                logger.info(
-                    "snap_date=%s finished: status=%s, duration=%.1fs",
-                    snap_date,
-                    snap_status,
-                    total_duration,
-                )
+        finally:
+            if not self._dry_run and audit:
+                audit.flush()
 
     def _initialize_context(self) -> tuple:
         """Initialize and return the Spark context and AuditWriter."""
@@ -408,25 +412,29 @@ class SQLRunner:
         for snap_date in target_dates:
             all_results.extend(checker.run_all(self._source_checks, snap_date))
 
-        failed = [r for r in all_results if not r.passed]
-        if failed:
-            if audit:
-                for r in failed:
-                    audit.write_record(
-                        AuditRecord(
-                            run_id=run_id,
-                            snap_date=r.snap_date,
-                            table_name="__source_check__",
-                            status="failed",
-                            error_message=r.message,
+        try:
+            failed = [r for r in all_results if not r.passed]
+            if failed:
+                if audit:
+                    for r in failed:
+                        audit.write_record(
+                            AuditRecord(
+                                run_id=run_id,
+                                snap_date=r.snap_date,
+                                table_name="__source_check__",
+                                status="failed",
+                                error_message=r.message,
+                            )
                         )
-                    )
-            raise SourceCheckError(all_results, self._stage)
+                raise SourceCheckError(all_results, self._stage)
 
-        logger.info(
-            "Source check passed: %d checks (%s)",
-            len(all_results), self._stage,
-        )
+            logger.info(
+                "Source check passed: %d checks (%s)",
+                len(all_results), self._stage,
+            )
+        finally:
+            if audit:
+                audit.flush()
 
     def _run_output_checks(
         self,
