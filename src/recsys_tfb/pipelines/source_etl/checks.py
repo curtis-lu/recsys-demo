@@ -17,6 +17,12 @@ class CheckResult:
     passed: bool
     message: str
     metric_value: float | int | None = None
+    # 報告用欄位（皆有預設，向後相容）
+    table: str = ""
+    check: str = ""          # "partition_exists" | "row_count" | "schema_drift"
+    snap_date: str = ""
+    expected: str = ""
+    actual: str = ""
 
 
 class SourceChecker:
@@ -35,14 +41,25 @@ class SourceChecker:
                 row[0] for row in partitions_df.collect()
             ]
             target = f"{partition_key}={snap_date}"
+            expected = f"partition {target}"
             exists = any(target in p for p in partition_values)
             if exists:
-                return CheckResult(True, f"Partition {target} exists in {table}")
+                return CheckResult(
+                    True, f"Partition {target} exists in {table}",
+                    table=table, check="partition_exists",
+                    expected=expected, actual="found",
+                )
             return CheckResult(
-                False, f"Partition {target} not found in {table}"
+                False, f"Partition {target} not found in {table}",
+                table=table, check="partition_exists",
+                expected=expected, actual="not found",
             )
         except Exception as exc:
-            return CheckResult(False, f"Failed to check partitions for {table}: {exc}")
+            return CheckResult(
+                False, f"Failed to check partitions for {table}: {exc}",
+                table=table, check="partition_exists",
+                expected=f"partition {partition_key}={snap_date}", actual=f"error: {exc}",
+            )
 
     def check_row_count(
         self,
@@ -63,6 +80,8 @@ class SourceChecker:
             passed,
             f"{table} row count: {count} (min: {min_count})",
             metric_value=count,
+            table=table, check="row_count",
+            expected=f">= {min_count}", actual=str(count),
         )
 
     def check_schema_drift(
@@ -77,7 +96,10 @@ class SourceChecker:
         - New columns → pass if ``allow_new_columns`` is True
         """
         if not expected_columns:
-            return CheckResult(True, f"No schema expectations for {table}")
+            return CheckResult(
+                True, f"No schema expectations for {table}",
+                table=table, check="schema_drift", expected="(none)", actual="ok",
+            )
 
         desc_df = self._spark.sql(f"DESCRIBE {table}")
         actual = {
@@ -101,8 +123,17 @@ class SourceChecker:
                 errors.append(f"Unexpected new columns: {sorted(extra)}")
 
         if errors:
-            return CheckResult(False, f"Schema drift in {table}: {'; '.join(errors)}")
-        return CheckResult(True, f"Schema OK for {table}")
+            return CheckResult(
+                False, f"Schema drift in {table}: {'; '.join(errors)}",
+                table=table, check="schema_drift",
+                expected="declared columns present & typed",
+                actual="; ".join(errors),
+            )
+        return CheckResult(
+            True, f"Schema OK for {table}",
+            table=table, check="schema_drift",
+            expected="declared columns present & typed", actual="ok",
+        )
 
     def run_all(
         self, checks: list[SourceCheckConfig], snap_date: str
@@ -135,6 +166,8 @@ class SourceChecker:
                 results.append(result)
                 logger.info(result.message, extra={"event": "source_check", "passed": result.passed})
 
+        for r in results:
+            r.snap_date = snap_date
         return results
 
 

@@ -304,6 +304,46 @@ class TestOutputCheckerSchemaContract:
         assert result.passed is True
 
 
+class TestSourceCheckResultFields:
+    def test_partition_check_populates_fields(self):
+        spark = MagicMock()
+        row = MagicMock()
+        row.__getitem__ = MagicMock(return_value="snap_date=2024-02-29")
+        spark.sql.return_value.collect.return_value = [row]
+
+        checker = SourceChecker(spark)
+        r = checker.check_partition_exists("db.t", "snap_date", "2024-01-31")
+        assert r.passed is False
+        assert r.table == "db.t"
+        assert r.check == "partition_exists"
+        assert r.expected == "partition snap_date=2024-01-31"
+        assert r.actual == "not found"
+
+    def test_row_count_populates_fields(self):
+        spark = MagicMock()
+        row = MagicMock()
+        row.__getitem__ = lambda self, k: 523 if k == "cnt" else None
+        spark.sql.return_value.collect.return_value = [row]
+
+        checker = SourceChecker(spark)
+        r = checker.check_row_count("db.t", "snap_date", "2024-01-31", min_count=1000)
+        assert r.passed is False
+        assert r.check == "row_count"
+        assert r.expected == ">= 1000"
+        assert r.actual == "523"
+
+    def test_run_all_stamps_snap_date(self):
+        spark = MagicMock()
+        prow = MagicMock()
+        prow.__getitem__ = MagicMock(return_value="snap_date=2024-01-31")
+        spark.sql.return_value.collect.return_value = [prow]
+
+        checker = SourceChecker(spark)
+        cfgs = [SourceCheckConfig(table_name="db.t", partition_key="snap_date")]
+        results = checker.run_all(cfgs, "2024-01-31")
+        assert all(r.snap_date == "2024-01-31" for r in results)
+
+
 class TestOutputCheckerRunAll:
     def test_runs_configured_checks(self):
         cfg = TableConfig(
