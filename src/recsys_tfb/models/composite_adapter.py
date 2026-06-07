@@ -7,6 +7,9 @@ injected via `_from_parts`. See docs/pipelines/training.md.
 """
 from __future__ import annotations
 
+import json
+import os
+
 import lightgbm as lgb
 import numpy as np
 
@@ -95,12 +98,43 @@ class CompositeModelAdapter(ModelAdapter):
             "node reads the parquet handles directly."
         )
 
-    # -- persistence (STUBS — real implementation is a later task) -------
+    # -- persistence -----------------------------------------------------
     def save(self, filepath: str) -> None:
-        raise NotImplementedError("save implemented in Task 2.2")
+        if self._stage2 is None:
+            raise RuntimeError("No model to save.")
+        d = os.path.dirname(filepath) or "."
+        os.makedirs(d, exist_ok=True)
+        self._stage2.save_model(filepath)  # model.txt == Stage-2
+        group_to_file: dict[str, str] = {}
+        for group, booster in self._stage1.items():
+            fname = f"{_STAGE1_PREFIX}{group}.txt"
+            booster.save_model(os.path.join(d, fname))
+            group_to_file[group] = fname
+        manifest = {
+            "model_structure": "per_group_plus_rank",
+            "item_col_index": self._item_col_index,
+            "n_features": self._n_features,
+            # JSON keys are strings: store code<->group as lists of pairs.
+            "item_code_to_group": [[int(k), v] for k, v in self._item_code_to_group.items()],
+            "group_to_code": self._group_to_code,
+            "group_to_file": group_to_file,
+        }
+        with open(os.path.join(d, MANIFEST_FILENAME), "w") as f:
+            json.dump(manifest, f, indent=2)
 
     def load(self, filepath: str) -> None:
-        raise NotImplementedError("load implemented in Task 2.2")
+        d = os.path.dirname(filepath) or "."
+        with open(os.path.join(d, MANIFEST_FILENAME)) as f:
+            m = json.load(f)
+        self._stage2 = lgb.Booster(model_file=filepath)
+        self._item_col_index = m["item_col_index"]
+        self._n_features = m["n_features"]
+        self._item_code_to_group = {int(k): v for k, v in m["item_code_to_group"]}
+        self._group_to_code = dict(m["group_to_code"])
+        self._stage1 = {
+            group: lgb.Booster(model_file=os.path.join(d, fname))
+            for group, fname in m["group_to_file"].items()
+        }
 
 
 ADAPTER_REGISTRY["composite"] = CompositeModelAdapter

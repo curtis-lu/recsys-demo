@@ -46,3 +46,21 @@ def test_predict_unknown_item_code_raises():
     X = np.array([[0.1, 7.0, 0.3]])  # code 7 not in item_code_to_group
     with pytest.raises(KeyError):
         a.predict(X)
+
+
+def test_save_load_round_trip(tmp_path):
+    from recsys_tfb.models.composite_adapter import CompositeModelAdapter
+    a = _make_adapter()
+    model_path = str(tmp_path / "model.txt")
+    a.save(model_path)
+    # N+1 boosters + manifest present
+    assert (tmp_path / "model.txt").exists()
+    assert (tmp_path / "stage1_A.txt").exists()
+    assert (tmp_path / "stage1_B.txt").exists()
+    assert (tmp_path / "composite_manifest.json").exists()
+
+    b = CompositeModelAdapter()
+    b.load(model_path)
+    X = np.array([[0.1, 0.0, 0.3], [0.4, 1.0, 0.6]])
+    np.testing.assert_allclose(b.predict(X), a.predict(X), rtol=1e-6)
+    np.testing.assert_allclose(b._stage1_scores(X), a._stage1_scores(X), rtol=1e-6)
