@@ -7,6 +7,7 @@ statements against Hive, and runs data quality checks.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -25,6 +26,21 @@ from recsys_tfb.pipelines.source_etl.models import (
 from recsys_tfb.pipelines.source_etl.sql_renderer import SQLRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _snap_status_from_exc(exc: BaseException | None) -> str:
+    """Map the in-flight exception (if any) to an audit summary status.
+
+    Called from a ``finally`` via ``sys.exc_info()`` so the summary reflects how
+    the snap_date actually ended — including a user interrupt (Ctrl-C), which is a
+    ``KeyboardInterrupt`` (a ``BaseException``, not ``Exception``) and would
+    otherwise be mislabelled "success".
+    """
+    if exc is None:
+        return "success"
+    if isinstance(exc, KeyboardInterrupt):
+        return "interrupted"
+    return "failed"
 
 
 class SourceETLError(Exception):
@@ -169,31 +185,32 @@ class SQLRunner:
         spark, audit = self._initialize_context()
         tables_to_run = self._get_tables_to_run(restart_from)
 
-        for snap_date in target_dates:
-            logger.info("Processing snap_date=%s", snap_date)
-            run_start = time.monotonic()
-            snap_status = "success"
-            try:
-                # Execute tables
-                for table in tables_to_run:
-                    self._process_single_table(spark, table, snap_date, run_id, audit)
-            except SourceETLError:
-                # SQL/Spark execution error: abort the whole run after this iteration's
-                # audit summary is written.
-                snap_status = "failed"
-                raise
-            finally:
-                total_duration = time.monotonic() - run_start
-                if not self._dry_run and audit:
-                    audit.write_summary(
-                        run_id, snap_date, snap_status, total_duration
+        try:
+            for snap_date in target_dates:
+                logger.info("Processing snap_date=%s", snap_date)
+                run_start = time.monotonic()
+                try:
+                    # Execute tables. Any exception (SourceETLError, KeyboardInterrupt,
+                    # etc.) propagates out and aborts the whole run; the finally below
+                    # still buffers a summary tagged with the real outcome.
+                    for table in tables_to_run:
+                        self._process_single_table(spark, table, snap_date, run_id, audit)
+                finally:
+                    snap_status = _snap_status_from_exc(sys.exc_info()[1])
+                    total_duration = time.monotonic() - run_start
+                    if not self._dry_run and audit:
+                        audit.write_summary(
+                            run_id, snap_date, snap_status, total_duration
+                        )
+                    logger.info(
+                        "snap_date=%s finished: status=%s, duration=%.1fs",
+                        snap_date,
+                        snap_status,
+                        total_duration,
                     )
-                logger.info(
-                    "snap_date=%s finished: status=%s, duration=%.1fs",
-                    snap_date,
-                    snap_status,
-                    total_duration,
-                )
+        finally:
+            if not self._dry_run and audit:
+                audit.flush()
 
     def _initialize_context(self) -> tuple:
         """Initialize and return the Spark context and AuditWriter."""
@@ -408,25 +425,29 @@ class SQLRunner:
         for snap_date in target_dates:
             all_results.extend(checker.run_all(self._source_checks, snap_date))
 
-        failed = [r for r in all_results if not r.passed]
-        if failed:
-            if audit:
-                for r in failed:
-                    audit.write_record(
-                        AuditRecord(
-                            run_id=run_id,
-                            snap_date=r.snap_date,
-                            table_name="__source_check__",
-                            status="failed",
-                            error_message=r.message,
+        try:
+            failed = [r for r in all_results if not r.passed]
+            if failed:
+                if audit:
+                    for r in failed:
+                        audit.write_record(
+                            AuditRecord(
+                                run_id=run_id,
+                                snap_date=r.snap_date,
+                                table_name="__source_check__",
+                                status="failed",
+                                error_message=r.message,
+                            )
                         )
-                    )
-            raise SourceCheckError(all_results, self._stage)
+                raise SourceCheckError(all_results, self._stage)
 
-        logger.info(
-            "Source check passed: %d checks (%s)",
-            len(all_results), self._stage,
-        )
+            logger.info(
+                "Source check passed: %d checks (%s)",
+                len(all_results), self._stage,
+            )
+        finally:
+            if audit:
+                audit.flush()
 
     def _run_output_checks(
         self,

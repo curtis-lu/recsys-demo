@@ -10,8 +10,9 @@ from recsys_tfb.pipelines.source_etl.sql_runner import (
     SourceCheckError,
     SourceETLError,
     SQLRunner,
+    _snap_status_from_exc,
 )
-from recsys_tfb.pipelines.source_etl.checks import CheckResult
+from recsys_tfb.pipelines.source_etl.checks import CheckResult, OutputChecker
 
 
 @pytest.fixture()
@@ -505,6 +506,7 @@ class TestRunSourceChecks:
         assert all(r.table_name == "__source_check__" for r in recs)
         assert all(r.status == "failed" for r in recs)
         assert {r.snap_date for r in recs} == {"2025-01-31", "2025-02-28"}
+        assert audit.flush.call_count == 1
 
 
 class TestOutputCheckFailFast:
@@ -572,3 +574,101 @@ class TestErrorReports:
                 "--restart-from feature_table") in msg
         assert err.table == "feature_table"
         assert isinstance(err, SourceETLError)
+
+
+class TestAuditFlush:
+    _ONE_TABLE_CONFIG = {
+        "variables": {"target_db": "ml_feature"},
+        "tables": [
+            {
+                "name": "feature_aum",
+                "sql_file": "feature/feature_aum.sql",
+                "partition_by": {"snap_date": "DATE"},
+                "primary_key": ["snap_date", "cust_id"],
+            }
+        ],
+    }
+
+    def test_run_flushes_audit_once_on_success(self, sql_dir):
+        spark = _make_spark_mock(table_exists=False)
+        runner = SQLRunner(
+            self._ONE_TABLE_CONFIG, sql_dir, dry_run=False, stage="feature_etl"
+        )
+        audit = MagicMock()
+        with patch.object(runner, "_initialize_context", return_value=(spark, audit)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
+            runner.run(["2026-03-31"], run_id="r1")
+        audit.flush.assert_called_once()
+
+    def test_run_flushes_audit_even_on_failure(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        spark = MagicMock()
+        spark.sql.side_effect = RuntimeError("spark boom")
+        audit = MagicMock()
+        with patch.object(runner, "_initialize_context", return_value=(spark, audit)):
+            with pytest.raises(SourceETLError):
+                runner.run(["2026-03-31"], run_id="r1")
+        audit.flush.assert_called_once()
+
+    def test_source_checks_flushes_audit_on_failure(self, sql_dir, monkeypatch):
+        config = _base_config()
+        config["source_checks"] = {"feat_a": {"partition_key": "snap_date"}}
+        runner = SQLRunner(config, sql_dir, dry_run=False, stage="feature_etl")
+        audit = MagicMock()
+        monkeypatch.setattr(
+            runner, "_initialize_context", lambda: (MagicMock(), audit)
+        )
+        from recsys_tfb.pipelines.source_etl import checks as checks_mod
+        monkeypatch.setattr(
+            checks_mod.SourceChecker, "run_all",
+            lambda self, cfgs, d: [CheckResult(False, "bad", table="feat_a",
+                                               check="row_count", snap_date=d)],
+        )
+        with pytest.raises(SourceCheckError):
+            runner.run_source_checks(["2025-01-31"], run_id="r1")
+        audit.flush.assert_called_once()
+
+
+class TestSummaryStatus:
+    def test_status_from_exc_helper(self):
+        assert _snap_status_from_exc(None) == "success"
+        assert _snap_status_from_exc(SourceETLError("x")) == "failed"
+        assert _snap_status_from_exc(ValueError("x")) == "failed"
+        assert _snap_status_from_exc(KeyboardInterrupt()) == "interrupted"
+
+    def test_run_summary_marks_success_on_normal_completion(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        audit = MagicMock()
+        with patch.object(runner, "_initialize_context", return_value=(MagicMock(), audit)), \
+             patch.object(runner, "_process_single_table", return_value=True):
+            runner.run(["2026-03-31"], run_id="r1")
+        assert audit.write_summary.call_args.args[2] == "success"
+        audit.flush.assert_called_once()
+
+    def test_run_summary_marks_failed_on_source_etl_error(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        audit = MagicMock()
+
+        def boom(*a, **k):
+            raise SourceETLError("bad table")
+
+        with patch.object(runner, "_initialize_context", return_value=(MagicMock(), audit)), \
+             patch.object(runner, "_process_single_table", side_effect=boom):
+            with pytest.raises(SourceETLError):
+                runner.run(["2026-03-31"], run_id="r1")
+        assert audit.write_summary.call_args.args[2] == "failed"
+
+    def test_run_summary_marks_interrupted_on_keyboardinterrupt(self, sql_dir):
+        runner = SQLRunner(_base_config(), sql_dir, dry_run=False, stage="feature_etl")
+        audit = MagicMock()
+
+        def boom(*a, **k):
+            raise KeyboardInterrupt()
+
+        with patch.object(runner, "_initialize_context", return_value=(MagicMock(), audit)), \
+             patch.object(runner, "_process_single_table", side_effect=boom):
+            with pytest.raises(KeyboardInterrupt):
+                runner.run(["2026-03-31"], run_id="r1")
+        # summary reflects the interrupt, not a false "success"
+        assert audit.write_summary.call_args.args[2] == "interrupted"
+        audit.flush.assert_called_once()
