@@ -13,11 +13,15 @@ def _params(categories=True):
             "categorical_values": {"prod_name": [
                 "fund_stock", "fund_bond", "exchange_fx"]},
         },
+        "product_categories": {
+            "unmapped": "singleton",
+            "mapping": {"fund": ["fund_stock", "fund_bond"]},
+        },
         "evaluation": {
             "k_values": [1, "all"],
             "product_categories": {
-                "enabled": categories, "unmapped": "singleton",
-                "mapping": {"fund": ["fund_stock", "fund_bond"]}},
+                "enabled": categories,
+            },
         },
     }
 

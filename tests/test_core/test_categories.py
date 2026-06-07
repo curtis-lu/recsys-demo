@@ -53,3 +53,16 @@ def test_resolve_groups_category_uses_mapping():
 def test_resolve_groups_rejects_unknown_grouping():
     with pytest.raises(ValueError, match="grouping"):
         resolve_groups(_params(), "bogus")
+
+
+def test_evaluation_build_mapping_delegates(monkeypatch):
+    from recsys_tfb.evaluation import metrics_spark
+    params = {
+        "schema": {"columns": {"item": "prod_name"},
+                   "categorical_values": {"prod_name": ["fund_a", "loner"]}},
+        "product_categories": {"mapping": {"fund": ["fund_a"]}, "unmapped": "singleton"},
+        "evaluation": {"product_categories": {"enabled": True}},
+    }
+    assert metrics_spark._build_category_mapping(params) == {"fund_a": "fund", "loner": "loner"}
+    params["evaluation"]["product_categories"]["enabled"] = False
+    assert metrics_spark._build_category_mapping(params) is None

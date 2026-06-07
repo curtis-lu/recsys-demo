@@ -156,8 +156,7 @@ def test_category_section_has_composition_table():
                                            "mean_pos": 2.0}},
                      "dataset_overview": m["dataset_overview"]}
     p = _params()
-    p["evaluation"]["product_categories"] = {
-        "mapping": {"fund": ["fund_stock", "fund_bond"]}}
+    p["product_categories"] = {"mapping": {"fund": ["fund_stock", "fund_bond"]}}
     s = rb.build_category_section(m, p)
     assert "大類組成" in s.table_titles
     joined = " ".join(str(t.to_dict()) for t in s.tables)

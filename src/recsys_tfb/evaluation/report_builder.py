@@ -387,8 +387,7 @@ def build_category_section(
     rec_tbl = _per_item_recall_table(
         cat.get("per_item", {}), rec_ks, n_cat, macro_metrics=cat_macro_item
     )
-    mapping = (((parameters.get("evaluation", {}) or {})
-               .get("product_categories", {}) or {}).get("mapping", {})) or {}
+    mapping = ((parameters.get("product_categories", {}) or {}).get("mapping", {})) or {}
     tables = [map_tbl, rec_tbl]
     table_titles = ["大類 mAP@k", "大類 per-item recall@k"]
     if mapping:
