@@ -13,6 +13,7 @@ from pathlib import Path
 from recsys_tfb.core.logging import generate_run_id
 from recsys_tfb.pipelines.source_etl.audit import AuditWriter
 from recsys_tfb.pipelines.source_etl.checks import (
+    CheckResult,
     OutputChecker,
     SourceChecker,
 )
@@ -28,6 +29,62 @@ logger = logging.getLogger(__name__)
 
 class SourceETLError(Exception):
     """Raised when a source ETL check or execution fails."""
+
+
+class SourceCheckError(SourceETLError):
+    """Preflight source_checks 失敗：攜帶全部結果，str() 即完整報告。"""
+
+    _HINTS = {
+        "partition_exists": "上游分區尚未產出。確認上游已寫入該日：SHOW PARTITIONS {table}",
+        "row_count": "上游資料量不足／該日載入不完整。確認上游 ETL 已完成。",
+        "schema_drift": "上游 schema 與 expected_columns 不符。對齊上游欄位或更新設定。",
+    }
+
+    def __init__(self, results: list[CheckResult], stage: str) -> None:
+        self.results = results
+        self.stage = stage
+        super().__init__(self._format(results, stage))
+
+    @classmethod
+    def _format(cls, results: list[CheckResult], stage: str) -> str:
+        failed = [r for r in results if not r.passed]
+        lines = [f"Source check FAILED: {len(failed)} of {len(results)} checks failed", ""]
+        for r in failed:
+            lines.append(f"  [FAIL] {r.table} / {r.check} @ {r.snap_date}")
+            lines.append(f"         expected {r.expected}, got: {r.actual}")
+            hint = cls._HINTS.get(r.check, "")
+            if hint:
+                lines.append(f"         → {hint.format(table=r.table)}")
+        failed_dates = ",".join(sorted({r.snap_date for r in failed if r.snap_date}))
+        lines += [
+            "",
+            "修復上游後重跑（僅失敗日期）：",
+            f"  python -m recsys_tfb {stage} --source-check --target-dates {failed_dates}",
+        ]
+        return "\n".join(lines)
+
+
+class OutputCheckError(SourceETLError):
+    """單一輸出表的 quality_checks 失敗（fail-fast）。"""
+
+    def __init__(
+        self, stage: str, table: str, snap_date: str, failed: list[CheckResult]
+    ) -> None:
+        self.stage = stage
+        self.table = table
+        self.snap_date = snap_date
+        self.failed = failed
+        lines = [f"Output quality check FAILED: {table} @ {snap_date}"]
+        for r in failed:
+            lines.append(f"  [FAIL] {r.table} / {r.check} @ {r.snap_date}")
+            lines.append(f"         expected {r.expected}, got: {r.actual}")
+        lines += [
+            "",
+            "ETL 已中止。修復後可從該表續跑（跳過先前已寫的表）：",
+            f"  python -m recsys_tfb {stage} --target-dates {snap_date} "
+            f"--restart-from {table}",
+        ]
+        super().__init__("\n".join(lines))
 
 
 class SQLRunner:

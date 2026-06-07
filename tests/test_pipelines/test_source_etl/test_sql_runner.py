@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pyspark.sql.types import DoubleType, StructField, StructType, StringType
 
-from recsys_tfb.pipelines.source_etl.sql_runner import SourceETLError, SQLRunner
+from recsys_tfb.pipelines.source_etl.sql_runner import (
+    OutputCheckError,
+    SourceCheckError,
+    SourceETLError,
+    SQLRunner,
+)
+from recsys_tfb.pipelines.source_etl.checks import CheckResult
 
 
 @pytest.fixture()
@@ -411,3 +417,45 @@ class TestSchemaEvolution:
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("INSERT OVERWRITE" in s for s in executed)
         assert not any("ALTER TABLE" in s for s in executed)
+
+
+class TestErrorReports:
+    def test_source_check_error_report(self):
+        results = [
+            CheckResult(True, "ok", table="t1", check="partition_exists",
+                        snap_date="2025-01-31", expected="partition snap_date=2025-01-31",
+                        actual="found"),
+            CheckResult(False, "bad", table="feat_aum", check="partition_exists",
+                        snap_date="2025-01-31", expected="partition snap_date=2025-01-31",
+                        actual="not found"),
+            CheckResult(False, "low", table="feat_aum", check="row_count",
+                        snap_date="2025-02-28", expected=">= 1000000", actual="523"),
+        ]
+        err = SourceCheckError(results, "feature_etl")
+        msg = str(err)
+        assert "Source check FAILED: 2 of 3 checks failed" in msg
+        assert "[FAIL] feat_aum / partition_exists @ 2025-01-31" in msg
+        assert "expected partition snap_date=2025-01-31, got: not found" in msg
+        assert "expected >= 1000000, got: 523" in msg
+        assert "SHOW PARTITIONS feat_aum" in msg            # partition hint
+        # 重跑指令只含失敗日期、去重排序
+        assert ("python -m recsys_tfb feature_etl --source-check "
+                "--target-dates 2025-01-31,2025-02-28") in msg
+        assert err.results == results
+        assert err.stage == "feature_etl"
+        assert isinstance(err, SourceETLError)
+
+    def test_output_check_error_report(self):
+        failed = [
+            CheckResult(False, "dup", table="feature_table",
+                        check="max_duplicate_key_ratio", snap_date="2025-01-31",
+                        expected="<= 0.0", actual="0.0123"),
+        ]
+        err = OutputCheckError("feature_etl", "feature_table", "2025-01-31", failed)
+        msg = str(err)
+        assert "Output quality check FAILED: feature_table @ 2025-01-31" in msg
+        assert "expected <= 0.0, got: 0.0123" in msg
+        assert ("python -m recsys_tfb feature_etl --target-dates 2025-01-31 "
+                "--restart-from feature_table") in msg
+        assert err.table == "feature_table"
+        assert isinstance(err, SourceETLError)
