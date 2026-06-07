@@ -214,6 +214,17 @@ class TestSourceChecksConfig:
         assert runner._source_checks[0].min_row_count == 1000000
 
 
+def _all_pass_output_checks(self, table_config, target_db, snap_date):
+    """Stub for OutputChecker.run_all — returns no failures.
+
+    Tests that focus on SQL generation (CTAS / INSERT OVERWRITE / schema
+    evolution) use real Spark mocks that cannot satisfy the schema_contract
+    check. Patch with this stub so output-check failures don't obscure the
+    SQL-emission assertions.
+    """
+    return []
+
+
 class TestProcessSingleTableFirstRun:
     def test_emits_ctas_and_writes_rendered_sql(self, tmp_path, sql_dir):
         """First run (table absent) should emit Hive CTAS and write it to rendered_sql."""
@@ -230,7 +241,9 @@ class TestProcessSingleTableFirstRun:
             ],
         }
         runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
         assert files, "rendered SQL not written"
@@ -255,7 +268,9 @@ class TestProcessSingleTableExistingRun:
             ],
         }
         runner = SQLRunner(config, sql_dir, rendered_sql_dir=tmp_path / "rendered")
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         files = list((tmp_path / "rendered").rglob("feature_aum.sql"))
         assert files
@@ -358,7 +373,9 @@ class TestSchemaEvolution:
             existing_columns=["cust_id", "total_aum", "snap_date"],
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
 
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
@@ -383,7 +400,9 @@ class TestSchemaEvolution:
             select_type_overrides={"sav_amt": DoubleType()},
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         alter = [s for s in executed if "ALTER TABLE" in s]
@@ -397,7 +416,9 @@ class TestSchemaEvolution:
             existing_columns=["cust_id", "total_aum", "snap_date"],
         )
         runner = SQLRunner(self._feature_aum_config(), sql_dir)
-        with patch.object(runner, "_initialize_context", return_value=(spark, None)):
+        from recsys_tfb.pipelines.source_etl.checks import OutputChecker
+        with patch.object(runner, "_initialize_context", return_value=(spark, None)), \
+             patch.object(OutputChecker, "run_all", _all_pass_output_checks):
             runner.run(["2026-03-31"])
         executed = [c.args[0] for c in spark.sql.call_args_list if c.args]
         assert not any("ALTER TABLE" in s for s in executed)
@@ -484,6 +505,31 @@ class TestRunSourceChecks:
         assert all(r.table_name == "__source_check__" for r in recs)
         assert all(r.status == "failed" for r in recs)
         assert {r.snap_date for r in recs} == {"2025-01-31", "2025-02-28"}
+
+
+class TestOutputCheckFailFast:
+    def test_output_check_failure_raises_and_stops(self, sql_dir, monkeypatch):
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=False, stage="feature_etl")
+        spark = _make_spark_mock(table_exists=False)  # CTAS path, table "writes" ok
+        monkeypatch.setattr(runner, "_initialize_context", lambda: (spark, None))
+
+        from recsys_tfb.pipelines.source_etl import sql_runner as sr_mod
+
+        def fake_run_all(self, table_config, target_db, snap_date):
+            return [CheckResult(
+                False, "dup too high", table=table_config.name,
+                check="max_duplicate_key_ratio", snap_date=snap_date,
+                expected="<= 0.0", actual="0.5",
+            )]
+
+        monkeypatch.setattr(sr_mod.OutputChecker, "run_all", fake_run_all)
+
+        with pytest.raises(OutputCheckError) as ei:
+            runner.run(target_dates=["2025-01-31", "2025-02-28"], run_id="r1")
+        # fail-fast: stop at the first table (feature_aum), no further tables/dates
+        assert ei.value.table == "feature_aum"
+        assert ei.value.snap_date == "2025-01-31"
 
 
 class TestErrorReports:

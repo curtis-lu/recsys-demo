@@ -176,13 +176,7 @@ class SQLRunner:
             try:
                 # Execute tables
                 for table in tables_to_run:
-                    success = self._process_single_table(
-                        spark, table, snap_date, run_id, audit
-                    )
-                    if not success:
-                        # Output-quality failure: record and stop this snap_date.
-                        snap_status = "failed"
-                        break
+                    self._process_single_table(spark, table, snap_date, run_id, audit)
             except SourceETLError:
                 # SQL/Spark execution error: abort the whole run after this iteration's
                 # audit summary is written.
@@ -318,10 +312,8 @@ class SQLRunner:
                 f"{table.name} @ {snap_date}: {exc}"
             ) from exc
 
-        row_count = self._run_output_checks(
-            spark, table, snap_date, run_id, audit, duration
-        )
-        return row_count >= 0
+        self._run_output_checks(spark, table, snap_date, run_id, audit, duration)
+        return True
 
     def _build_existing_table_statements(
         self,
@@ -445,7 +437,7 @@ class SQLRunner:
         audit: AuditWriter | None,
         duration: float,
     ) -> int:
-        """Run output quality checks. Returns row_count or -1 on failure."""
+        """Run output quality checks. Returns row_count on success; raises OutputCheckError on failure."""
         checker = OutputChecker(spark)
         results = checker.run_all(table, self._target_db, snap_date)
         failed = [r for r in results if not r.passed]
@@ -475,7 +467,7 @@ class SQLRunner:
                         error_message="; ".join(r.message for r in failed),
                     )
                 )
-            return -1
+            raise OutputCheckError(self._stage, table.name, snap_date, failed)
 
         if audit:
             audit.write_record(
