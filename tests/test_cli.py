@@ -408,6 +408,24 @@ class TestSourceCheckCLI:
         finally:
             os.chdir(old)
 
+    def test_source_check_forces_dry_run_false(self, tmp_path):
+        # In --env local, dry_run defaults to True; --source-check must override
+        # it to False so the read-only checks actually query Hive (design D2d).
+        _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                MockRunner.return_value.run_source_checks.return_value = None
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            assert MockRunner.call_args.kwargs["dry_run"] is False
+        finally:
+            os.chdir(old)
+
 
 def test_sample_weight_extra_reads_report(tmp_path):
     import json
