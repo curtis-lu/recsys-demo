@@ -538,3 +538,50 @@ def test_segment_columns_without_source_ok_when_covered():
 def test_segment_columns_without_source_empty_when_no_segment_columns():
     from recsys_tfb.core.consistency import segment_columns_without_source
     assert segment_columns_without_source({"evaluation": {}}) == []
+
+
+class TestModelStructure:
+    def _base(self, **training):
+        return {
+            "schema": {"columns": {"item": "prod_name", "entity": ["cust_id"]},
+                       "categorical_values": {"prod_name": ["a", "b", "c"]}},
+            "product_categories": {"mapping": {"grp": ["a", "b"]}, "unmapped": "singleton"},
+            "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]}},
+            "inference": {"products": ["a", "b", "c"]},
+            "training": {"model_structure": "shared", "algorithm_params": {"objective": "binary"}, **training},
+        }
+
+    def test_shared_is_ok(self):
+        from recsys_tfb.core.consistency import model_structure_errors
+        assert model_structure_errors(self._base()) == []
+
+    def test_unknown_structure_flagged(self):
+        from recsys_tfb.core.consistency import model_structure_errors
+        errs = model_structure_errors(self._base(model_structure="bogus"))
+        assert any("model_structure" in e for e in errs)
+
+    def test_stage2_must_be_ranking(self):
+        from recsys_tfb.core.consistency import model_structure_errors
+        p = self._base(model_structure="per_group_plus_rank",
+                       stage1={"grouping": "category", "objective": "binary"},
+                       stage2={"objective": "binary"})  # not ranking
+        errs = model_structure_errors(p)
+        assert any("stage2" in e and "ranking" in e for e in errs)
+
+    def test_category_grouping_must_cover_all_items(self):
+        from recsys_tfb.core.consistency import model_structure_errors
+        p = self._base(model_structure="per_group_plus_rank",
+                       stage1={"grouping": "category", "objective": "binary"},
+                       stage2={"objective": "lambdarank"})
+        p["product_categories"] = {"mapping": {"grp": ["a", "b", "zzz"]}, "unmapped": "singleton"}
+        errs = model_structure_errors(p)
+        assert any("zzz" in e for e in errs)
+
+    def test_calibration_must_be_off_in_composite(self):
+        from recsys_tfb.core.consistency import model_structure_errors
+        p = self._base(model_structure="per_group_plus_rank",
+                       stage1={"grouping": "category", "objective": "binary"},
+                       stage2={"objective": "lambdarank"},
+                       calibration={"enabled": True})
+        errs = model_structure_errors(p)
+        assert any("calibration" in e for e in errs)

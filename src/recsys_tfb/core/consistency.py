@@ -79,6 +79,11 @@ Layer 1 — config-static (implemented here; aggregated by
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
+* A15 — training.model_structure ∈ {shared, per_group_plus_rank}; under
+  per_group_plus_rank: stage1.grouping ∈ {item, category}; stage2.objective is a
+  ranking objective; the category mapping references only known items; and
+  calibration is disabled (the lambdarank Stage-2 score is not a probability).
+  Predicate: ``model_structure_errors``.
 
 Layer 2 — data-stage validation (B1 implemented and wired; B2/B3/B4 implemented for compare feature):
 
@@ -269,6 +274,59 @@ def ranking_objective_conflicts(parameters: dict) -> list[str]:
             f"undefined: schema 'entity' is empty. A ranking objective needs a "
             f"per-query group."
         )
+
+    return errors
+
+
+_VALID_STRUCTURES = frozenset({"shared", "per_group_plus_rank"})
+_VALID_GROUPINGS = frozenset({"item", "category"})
+
+
+def model_structure_errors(parameters: dict) -> list[str]:
+    """A15 — two-stage stacking config validity (collect-all). Empty == OK."""
+    training = parameters.get("training", {}) or {}
+    structure = training.get("model_structure", "shared")
+    errors: list[str] = []
+    if structure not in _VALID_STRUCTURES:
+        errors.append(
+            f"training.model_structure={structure!r} invalid; must be one of "
+            f"{sorted(_VALID_STRUCTURES)}."
+        )
+        return errors
+    if structure == "shared":
+        return errors
+
+    stage1 = training.get("stage1", {}) or {}
+    stage2 = training.get("stage2", {}) or {}
+
+    grouping = stage1.get("grouping", "category")
+    if grouping not in _VALID_GROUPINGS:
+        errors.append(
+            f"training.stage1.grouping={grouping!r} invalid; must be one of "
+            f"{sorted(_VALID_GROUPINGS)}."
+        )
+
+    s2_obj = stage2.get("objective")
+    if s2_obj not in RANKING_OBJECTIVES:
+        errors.append(
+            f"training.stage2.objective={s2_obj!r} must be a ranking objective "
+            f"{sorted(RANKING_OBJECTIVES)} (Stage-2 learns cross-product ranking)."
+        )
+
+    if (training.get("calibration", {}) or {}).get("enabled"):
+        errors.append(
+            "training.calibration.enabled must be false under "
+            "model_structure=per_group_plus_rank: the lambdarank Stage-2 output "
+            "is a ranking score, not a probability. Disable calibration (a "
+            "future final-layer stacker can wrap the composite instead)."
+        )
+
+    if grouping == "category":
+        try:
+            from recsys_tfb.core.categories import resolve_category_mapping
+            resolve_category_mapping(parameters)
+        except ValueError as exc:
+            errors.append(f"training.stage1.grouping=category: {exc}")
 
     return errors
 
@@ -508,6 +566,8 @@ def validate_config_consistency(parameters: dict) -> None:
 
     for msg in ranking_objective_conflicts(parameters):
         errors.append(msg)
+
+    errors.extend(model_structure_errors(parameters))
 
     cols_bad = weight_key_columns_unavailable(parameters)
     if cols_bad:
