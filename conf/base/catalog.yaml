@@ -275,10 +275,14 @@ score_table:
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
 
-validated_predictions:
+# --- Inference pipeline — 發布前 staging（managed Hive table）---
+# rank_predictions 先把排名寫進 staging；validate_predictions 讀此表跑 sanity
+# checks（raise 即整批中止）。驗證通過後才由 publish_predictions 寫入 production
+# 的 ranked_predictions。驗證失敗時 production 完全不被觸碰，本表保留失敗批次供排查。
+ranked_staging:
   type: HiveTableDataset
   database: ${hive.db}
-  table: ranked_predictions
+  table: ranked_staging
   external: false
   columns:
     - {name: cust_id, type: STRING}
@@ -289,11 +293,11 @@ validated_predictions:
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
 
-# --- Inference pipeline（續）— Evaluation 讀取端入口 ---
-# 與 validated_predictions 對應到同一張 Hive table；獨立宣告一份，是為了
-# evaluation pipeline 可以在同 session 沒跑 inference 的情況下 standalone 執行。
-# core/catalog.py:71 對未知名稱會自動 fallback 成 MemoryDataset，會讓
-# standalone evaluation 讀取「靜默地壞掉」── 此 entry 就是為了避免這狀況。
+# --- Inference pipeline（續）— production 輸出 + Evaluation 讀取端入口 ---
+# 由 publish_predictions 寫入（唯一一次 production 寫入，且只在 validate 通過後執行）。
+# evaluation pipeline 也讀這張表；獨立宣告確保它在同 session 沒跑 inference 時也能
+# standalone 讀，避免 core/catalog.py:71 對未知名稱 fallback 成 MemoryDataset 而
+# 「靜默地壞掉」。
 ranked_predictions:
   type: HiveTableDataset
   database: ${hive.db}

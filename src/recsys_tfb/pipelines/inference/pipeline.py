@@ -9,6 +9,7 @@ def create_pipeline() -> Pipeline:
         apply_preprocessor,
         build_scoring_dataset,
         predict_scores,
+        publish_predictions,
         rank_predictions,
         validate_predictions,
     )
@@ -33,12 +34,17 @@ def create_pipeline() -> Pipeline:
             Node(
                 rank_predictions,
                 inputs=["score_table", "parameters"],
-                outputs="ranked_predictions",
+                outputs="ranked_staging",
             ),
             Node(
                 validate_predictions,
-                inputs=["ranked_predictions", "scoring_dataset", "parameters"],
+                inputs=["ranked_staging", "scoring_dataset", "parameters"],
                 outputs="validated_predictions",
+            ),
+            Node(
+                publish_predictions,
+                inputs=["validated_predictions", "parameters"],
+                outputs="ranked_predictions",
             ),
         ]
     )

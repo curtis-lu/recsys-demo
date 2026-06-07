@@ -194,7 +194,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
     <rect x="262" y="652" width="146" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <text x="335" y="669">ranked_predictions</text>
   </g>
-  <text x="132" y="697" font-size="10" fill="#495057">score_table → rank_predictions → ranked_predictions（= validated_predictions 同一張表）</text>
+  <text x="132" y="697" font-size="10" fill="#495057">score_table → rank_predictions → ranked_staging → validate_predictions → publish_predictions → ranked_predictions</text>
 
   <!-- inference -> evaluation 情境2 -->
   <polyline points="420,666 470,666 470,820 600,820" fill="none" stroke="#e8590c" stroke-width="1.6" marker-end="url(#ar)"/>
@@ -249,7 +249,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
   <a href="#diagnostics">診斷 JSON ×3</a>
   <b>inference：</b>
   <a href="#score_table">score_table</a>
-  <a href="#ranked_predictions">ranked_predictions / validated_predictions</a>
+  <a href="#ranked_predictions">ranked_staging / ranked_predictions</a>
   <b>evaluation：</b>
   <a href="#evaluation_report">evaluation_report</a>
   <a href="#enriched_eval_predictions">enriched_eval_predictions</a>
@@ -515,11 +515,11 @@ C000010   0.83   （示意）</div>
 
 <div class="card" id="ranked_predictions">
   <h4>ranked_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span>
-    <span style="font-size:11px;color:#59636e">（= validated_predictions，同一張 Hive 表）</span></h4>
-  <div class="meta"><b>產生</b>：inference · rank_predictions（每個 query group 內依 score 排名）→ validate_predictions　|
+    <span style="font-size:11px;color:#59636e">（rank 後的 production 表；發布前 staging = ranked_staging）</span></h4>
+  <div class="meta"><b>產生</b>：inference · rank_predictions → ranked_staging → validate_predictions（sanity checks）→ publish_predictions　|
   <b>下游</b>：evaluation 情境 2（prepare_eval_data，預設監控）　|
   <b>partition</b>：snap_date, prod_name, model_version</div>
-  <p class="note">catalog 有兩個 entry 指向同一張表 <code>ranked_predictions</code>：<code>validated_predictions</code>（inference 寫入端，validate_predictions 的輸出）與 <code>ranked_predictions</code>（evaluation 讀取端，讓 evaluation 不跑 inference 也能 standalone 讀，避免 MemoryDataset fallback 靜默壞掉）。</p>
+  <p class="note">production 由 <code>publish_predictions</code> 寫入，且只在 <code>validate_predictions</code> 通過後才執行：<code>rank_predictions</code> 先寫 <code>ranked_staging</code>，validate 讀它跑 sanity check，失敗即中止、production 不被寫（失敗批次留在 staging 供排查）。<code>ranked_predictions</code> 顯式宣告讓 evaluation 不跑 inference 也能 standalone 讀，避免 MemoryDataset fallback 靜默壞掉。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
