@@ -701,3 +701,29 @@ class TestModelStructureVersioning:
                     stage1={"grouping": "item", "objective": "binary"},
                     stage2={"objective": "lambdarank"}), "base1", "tv1")
         assert a != b  # grouping is part of training: -> different model_version
+
+    def test_category_mapping_change_bumps_version_when_grouping_category(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        def mk(mapping):
+            return {
+                "training": {"model_structure": "per_group_plus_rank",
+                             "stage1": {"grouping": "category", "objective": "binary"},
+                             "stage2": {"objective": "lambdarank"}},
+                "product_categories": {"mapping": mapping, "unmapped": "singleton"},
+            }
+        a = compute_model_version(mk({"g": ["x"]}), "b", "t")
+        b = compute_model_version(mk({"g": ["x", "y"]}), "b", "t")
+        assert a != b
+
+    def test_category_mapping_ignored_when_grouping_item(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        def mk(mapping):
+            return {
+                "training": {"model_structure": "per_group_plus_rank",
+                             "stage1": {"grouping": "item", "objective": "binary"},
+                             "stage2": {"objective": "lambdarank"}},
+                "product_categories": {"mapping": mapping, "unmapped": "singleton"},
+            }
+        a = compute_model_version(mk({"g": ["x"]}), "b", "t")
+        b = compute_model_version(mk({"g": ["x", "y"]}), "b", "t")
+        assert a == b  # grouping=item ignores the category table
