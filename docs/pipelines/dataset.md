@@ -64,6 +64,19 @@ python -m recsys_tfb dataset --env local
 - 改 **schema / 前處理 / carry_columns / feature_table 欄位** → bust `base_dataset_version`，整批重算。
 - **怎麼指定要用哪個版本**：`--base-dataset-version` / `--train-variant`（預設取最新）。各層的版本對齊由框架自動處理（manifest ＋ `latest` symlink）。
 
+## 規模與記憶體
+
+「12 個月一次抓」在這套 Spark backend 下**不等於把 12 個月載進記憶體**——pipeline 已在物理層按 `snap_date` 分區，四層保護：
+
+1. **全程 lazy + spill**：`apply_preprocessor_to_features` / `build_model_input` 都是 transformation，executor 記憶體不足時 spill 到磁碟，不在 driver 累積。
+2. **中間產物落 Hive、非 cache 於記憶體**：`preprocessed_feature_table` 是 `HiveTableDataset`（`partition_cols: [snap_date]`），編碼後寫回 Hive，下游各 split 從 Hive 讀；全程無 `.cache()` / `.persist()`。
+3. **輸出依 snap_date dynamic partition 寫出**：每個 `*_model_input` 寫入即逐分區落地。
+4. **join key 含 `time`**：`base_key = [snap_date] + entity`，故 keys⋈label⋈feature **永不跨 snap_date**，Spark 可逐分區處理。
+
+因此決定 peak memory 的是**單一 shuffle partition 大小**與 join shuffle 量，不是月份數。真正的旋鈕在 `conf/base/parameters.yaml` 的 `spark:` 區塊：`spark.sql.shuffle.partitions`（每分區 ~128–256MB）、AQE（Spark 3.3 預設 on，勿關）、executor memory。
+
+> 若日後在生產 10M 規模**實測**撞到單 job 記憶體天花板，逃生口是外部 per-snap_date 編排（先一次 fit 並持久化 preprocessor，再以凍結 preprocessor 逐月跑 apply+build；category mapping 必須一次 fit 完所有 train 月份，不可每月各自 fit）。非預設、目前不實作。
+
 ## 接下來
 
 - 各表 schema / 版本層 / 範例 → [`../data-lineage.html`](../data-lineage.html)
