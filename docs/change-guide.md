@@ -12,6 +12,7 @@
 | 改訓練目標（binary↔LTR） | `parameters_training.yaml` `objective` / `metric` | A7 | bust `model_version` → 只 training 之後 |
 | 改抽樣 / 樣本權重 | `sample_ratio_overrides`、`sample_weights` / `sample_weight_keys` | A5 / A9 | 視情況 bust `train_variant` 或只 `model_version` |
 | 改 schema 角色（換應用） | `parameters.yaml` `schema` | 多條 | bust `base` → 全部 |
+| 新增 model structure / 一致性不變量 | `core/consistency.py`（predicate）、`parameters_training.yaml`、`product_categories`（頂層） | A15（或新不變量） | bust `model_version` → 只 training 之後 |
 
 > 「bust `base`」＝ `base_dataset_version` 翻版，base / train / calibration 全層與下游模型都要重算。
 
@@ -85,6 +86,21 @@
 **觸發的閘**：多條（A2 / A3 / A4…）會在啟動時一次列出。
 
 **重跑**：bust `base_dataset_version` → 全部。
+
+---
+
+## 情境 6：新增 model structure / 一致性不變量
+
+**改哪些檔**
+- `core/consistency.py`：**這是唯一允許的地方**——新增一個 predicate（pure function），在 `validate_config_consistency` 的 collect-all 迴圈裡呼叫。**不得**在各 pipeline 內以 ad-hoc 方式散落。A15（`model_structure_errors`）是範例：它驗 `model_structure` 合法值、`per_group_plus_rank` 搭配條件（grouping 覆蓋 item set、ranking objective、校準關閉），單一來源、單次 raise（設計原則見 [`design-principles.md`](design-principles.md) §4）。
+- `conf/base/parameters_training.yaml`：在 `training:` 下加新 key（如 `model_structure`、`stage1`、`stage2`）。`model_version` 自動 hash `training:` 下所有 model-defining key（`core/versioning.py`），**不需手動登記**——只要新 key 位在 `training:` 區塊，切換結構就自動 bump 版本。
+- **grouping / mapping 資料放頂層 `product_categories`，不放 `schema.*`**：`schema` 變動影響 `base_dataset_version`（全層重跑）；放頂層只 bust `model_version`（僅 training 之後）。修改 `product_categories.mapping` 不會觸發 dataset 重建，這是刻意設計。
+
+**觸發的閘**：新增的 predicate（啟動即檢查，collect-all）。
+
+**重跑**：不動 dataset。`model_structure` 等 training 設定是 model-defining → bust `model_version` → 只重跑 `training` →（`inference` → `evaluation`）。
+
+> **Two-stage stacking 範例**：`model_structure: per_group_plus_rank`、`stage1`/`stage2` config、`product_categories` 頂層 mapping → A15 一致性閘驗 → `CompositeModelAdapter` 訓練 → `model_version` bump。設計細節見 [`pipelines/training.md` §Two-stage stacking](pipelines/training.md#two-stage-stacking)。
 
 ---
 

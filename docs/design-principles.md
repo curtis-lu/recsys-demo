@@ -69,6 +69,10 @@ pipeline 不直接呼叫 LightGBM，而是透過 `ModelAdapter` ABC（`models/ba
 - `CalibratedModelAdapter` 包裝一個 base adapter，加上校準器：`predict` 回校準後分數、`predict_uncalibrated` 回原始輸出。
 - **要換演算法**：實作 `ModelAdapter` 並註冊，pipeline 不動。
 
+## 8a. Adapter 邊界收斂 blast radius（以 CompositeModelAdapter 為例）
+
+`ModelAdapter` 抽象的另一個關鍵好處：多段複雜的內部結構可以完整封裝在一個新 adapter 實作裡，下游一行不動。`CompositeModelAdapter`（two-stage stacking 的實作）是具體範例：它在內部編排 N 個 Stage-1 grouping booster ＋ 1 個 Stage-2 lambdarank booster，但對外仍完整實作 `ModelAdapter` ABC 的 `predict / save / load / feature_importance / log_to_mlflow`。`inference` 的 `predict_scores`、`evaluation`、catalog 的 `ModelAdapterDataset`、`rank_predictions` 全部只呼叫 `model.predict()`——multi-booster 兩段內部結構對它們完全不可見，**blast radius 收斂在 adapter 邊界**。要加新的 model structure，只需新建一個 adapter、pipeline 分支，其餘下游全部不動。詳見 [`pipelines/training.md` §Two-stage stacking](pipelines/training.md#two-stage-stacking)。
+
 ## 9. 宣告式 catalog
 
 資料產物在 `conf/base/catalog.yaml` 宣告，節點以**名稱**引用。`DataCatalog`（`core/catalog.py`）按 `type` 分派 loader（registry 含 `HiveTableDataset` / `JSONDataset` / `ModelAdapterDataset` / `TextDataset` / `ParquetDataset` / `PickleDataset`）。
