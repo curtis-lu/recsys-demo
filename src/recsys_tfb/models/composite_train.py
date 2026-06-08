@@ -70,9 +70,19 @@ def _stage2_params(parameters):
             "num_threads": parameters["training"].get("algorithm_params", {}).get("num_threads", 0)}
 
 
-def _fit_binary(X, y, params, num_boost_round=100):
+def _fit_binary(X, y, params, num_boost_round=100, valid=None):
+    """Fit a Stage-1 binary booster. When ``valid=(X_dev, y_dev)`` is a non-empty
+    held-out set, early-stop on it (train_dev is entity-disjoint from train);
+    otherwise run the fixed ``num_boost_round`` with no early stopping."""
     ds = lgb.Dataset(X, label=y, free_raw_data=False)
-    return lgb.train({**params}, ds, num_boost_round=num_boost_round)
+    callbacks = [lgb.log_evaluation(0)]
+    valid_sets = None
+    if valid is not None and len(valid[1]) > 0:
+        X_dev, y_dev = valid
+        valid_sets = [lgb.Dataset(X_dev, label=y_dev, reference=ds, free_raw_data=False)]
+        callbacks.insert(0, lgb.early_stopping(30, verbose=False))
+    return lgb.train({**params}, ds, num_boost_round=num_boost_round,
+                     valid_sets=valid_sets, callbacks=callbacks)
 
 
 def _codes(values: np.ndarray) -> np.ndarray:
@@ -102,6 +112,11 @@ def train_composite(train_handle, train_dev_handle, val_handle,
     Xtr, ytr, etr, code_tr = _read_frame(train_handle, preprocessor_metadata, parameters)
     group_tr = np.array([item_code_to_group[int(c)] for c in code_tr])
 
+    # train_dev is the entity-disjoint early-stop valid set for Stage-1 fits
+    # (fold fits and the full-train refit). Stage-2 early-stops on val (below).
+    Xdev, ydev, _edev, code_dev = _read_frame(train_dev_handle, preprocessor_metadata, parameters)
+    group_dev = np.array([item_code_to_group[int(c)] for c in code_dev])
+
     # ---- OOF Stage-1 over train ----------------------------------------
     folds = assign_folds(etr, n_folds=n_folds, seed=42)
     s1_params = _stage1_params(parameters)
@@ -117,7 +132,9 @@ def train_composite(train_handle, train_dev_handle, val_handle,
             if not fit_mask.any() or ytr[fit_mask].sum() == 0:
                 oof[pred_mask] = float(ytr[g_mask].mean()) if g_mask.any() else 0.0
             else:
-                booster = _fit_binary(Xtr[fit_mask], ytr[fit_mask], s1_params)
+                dev_g = group_dev == g
+                valid = (Xdev[dev_g], ydev[dev_g]) if dev_g.any() else None
+                booster = _fit_binary(Xtr[fit_mask], ytr[fit_mask], s1_params, valid=valid)
                 oof[pred_mask] = booster.predict(Xtr[pred_mask])
             producing_fold[pred_mask] = k
     assert oof_is_leakage_clean(folds, producing_fold), "OOF leakage detected"
@@ -126,10 +143,12 @@ def train_composite(train_handle, train_dev_handle, val_handle,
     stage1_full: dict[str, lgb.Booster] = {}
     for g in groups:
         g_mask = group_tr == g
+        dev_g = group_dev == g
+        valid = (Xdev[dev_g], ydev[dev_g]) if dev_g.any() else None
         if ytr[g_mask].sum() == 0:
             stage1_full[g] = _fit_binary(Xtr[g_mask], ytr[g_mask], s1_params, num_boost_round=1)
         else:
-            stage1_full[g] = _fit_binary(Xtr[g_mask], ytr[g_mask], s1_params)
+            stage1_full[g] = _fit_binary(Xtr[g_mask], ytr[g_mask], s1_params, valid=valid)
 
     # ---- Stage-2 (lambdarank, query=customer) --------------------------
     def stage2_matrix(X, code, s1):

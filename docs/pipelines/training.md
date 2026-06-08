@@ -111,12 +111,12 @@ Two-stage 的核心保證：Stage-2 的訓練特徵（Stage-1 預測分數）必
         ▼
 OOF 預測（覆蓋整個 train；每列分數都來自「未見過該 entity」的 Stage-1）
         ▼
-Stage-1 在整個 train refit（供 Stage-2 valid/HPO 打分 + inference 用）
+Stage-1 在整個 train refit（供 Stage-2 的 val 打分 + inference 用）
         ▼
 Stage-2（lambdarank，query = entity）訓練：
    特徵 = [自身 grouping 的 OOF 分數, entity 特徵, (可選) grouping id]
-   early-stop valid = train_dev（用 refit Stage-1 打分，train_dev entity 對 train 互斥→乾淨）
-   HPO 目標 = val（另一 snapshot，用 refit Stage-1 打分）
+   early-stop valid = val（另一 snapshot，用 refit Stage-1 打分；entity 不在 train 內）
+   （v1 超參固定、無 HPO）
         ▼
 最終 artifact（data/models/<model_version>/）：
    {每 grouping 一個 Stage-1 refit-on-full-train booster}
@@ -132,8 +132,8 @@ Stage-2（lambdarank，query = entity）訓練：
 | split | 在 per_group_plus_rank 中的角色 |
 |---|---|
 | `train` | Stage-1 K 折 fit 的資料池；Stage-1 refit-on-full-train 的訓練集；OOF 預測覆蓋此集合 |
-| `train_dev` | Stage-1 每折 early-stop valid；Stage-2 early-stop valid（用 refit Stage-1 打分） |
-| `val` | HPO 目標（用 refit Stage-1 打分打分；另一 snapshot，entity 不在 train 內）|
+| `train_dev` | Stage-1 每折 fit 與 full-train refit 的 early-stop valid（entity-disjoint） |
+| `val` | Stage-2 early-stop valid（用 refit Stage-1 打分；另一 snapshot，entity 不在 train 內）；v1 無 HPO |
 | `test` | held-out，最終評估用 |
 
 ### Inference 不動
