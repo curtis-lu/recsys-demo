@@ -143,7 +143,7 @@ mlflow:
 # 負責，不經 catalog dataset。所有環境都會寫 parquet 到 disk 並在 DAG 中以
 # ParquetHandle 串接；dev/test 用一個臨時的 cache.root。
 cache:
-  root: /Users/curtislu/projects/recsys_tfb/data/recsys_cache
+  root: data/recsys_cache
 
 # 訓練診斷產物（特徵統計 / 原生 importance / SHAP）。
 # 刻意放 top-level（與 mlflow / cache 同層）：compute_model_version 只雜湊
