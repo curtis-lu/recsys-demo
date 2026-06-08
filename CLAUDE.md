@@ -49,14 +49,10 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
 3. **Worktree 內 file path / cd / data symlink 三件踩坑（2026-05-24 連續浪費 ≥3 次 Spark cold start ~2–4min）**：
    - **(R1) 絕對路徑要含 `.worktrees/<name>`**：用 main repo 的絕對路徑 `Edit`/`Write` worktree 的 config —— 改錯邊，worktree 那份沒動、pipeline 讀的還是舊的。徵兆：訓練出來的 `model_version` / best params 跟 baseline 完全相同。
    - **(R2) `cd` 在 Bash tool 之間會持續**（system prompt 明文「The working directory persists between commands」；跟 skill 後 cwd 可能 reset 是兩回事）。`cd <wt>/data && ln -s ...` 後沒 `cd` 回 worktree root，下一個 training 指令 `Path.cwd()/"data"` 看到雙重 `data/data/dataset` → FileNotFoundError after Spark started。**規則**：Bash 指令以 `cd <worktree-root> && ...` 開頭、或全用絕對路徑。
-   - **(R3) Worktree 的 `data/` 預設空（只有 `.gitkeep`）**，inference / training / evaluation 寫 model artifact 或讀 dataset 都會 fail。**規則**：第一次進 worktree 跑 pipeline 前 symlink 4 個子目錄到 main（`recsys_cache` 不用，`cache.root` 已是絕對路徑指向 main）：
-     ```bash
-     cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name>/data
-     ln -s /Users/curtislu/projects/recsys_tfb/data/models models
-     ln -s /Users/curtislu/projects/recsys_tfb/data/dataset dataset
-     ln -s /Users/curtislu/projects/recsys_tfb/data/evaluation evaluation
-     ln -s /Users/curtislu/projects/recsys_tfb/data/inference inference
-     ```
+   - **(R3) Worktree `data/` 隔離**：每個 worktree 用**自己的真 `data/` 樹**，**不 symlink 到 main**
+     （`cache.root` 已相對化＝`data/recsys_cache`、warehouse/metastore 也相對）。首次進 worktree 跑
+     `PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py` 即重建本機資料；隔離驗證用
+     `scripts/local_spark_setup.py --check-isolation`。詳見 `docs/operations/worktree-venv-setup.md`。
 
 ### Worktree 開發環境啟用 SOP
 
@@ -65,7 +61,7 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
    ```bash
    cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name> && pwd          # 在 worktree root
    readlink .venv && /Users/curtislu/projects/recsys_tfb/.venv/bin/python -V   # venv 對齊（Python 3.10.9）
-   readlink data/{models,dataset,evaluation,inference}                      # data/ 子目錄已 symlink 到 main
+   PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python scripts/local_spark_setup.py --check-isolation  # data/ 隔離閘
    grep -E "^(objective|metric|snap_date):" conf/base/parameters_*.yaml     # config 真的改在 worktree 那份
    ```
    任一失敗先修再繼續（venv 修復見 `docs/operations/worktree-venv-setup.md`；data symlink / config 路徑問題見上方踩過的問題 #3）。
@@ -74,50 +70,25 @@ Python 3.10+ | PySpark 3.3.2 | LightGBM 4.6.0 | scikit-learn 1.5.0 | MLflow 3.1.
    （裸跑或裸 `.venv/bin/pytest` 會抓到 main 的 `src`＝editable-install target，靜默測/跑錯 code；相對路徑經 symlink 還會 ELOOP）。CLI 同理：`PYTHONPATH=<wt>/src …/.venv/bin/python -m recsys_tfb <pipeline> [--options]`。
 4. **跨 worktree git 一律 `git -C <abs-worktree>`**（同 R2：cwd 在 Bash 間持續、skill 後可能 reset，相對路徑容易讀到 stale main tree）。
 
-## Local dev-cluster testing
+## 本機 Spark 測試
 
-在本機 dev-cluster 互動測試 pipeline：
+本機測試**不用 Docker/HDFS/Hive container**：Spark 在 venv 跑 `local[*]`、Hive 表 managed
+落 `data/local_warehouse`、metastore 是內嵌 Derby（`data/metastore_db`）。連線設定全在
+`conf/spark-local/spark-defaults.conf`。完整步驟見
+[`docs/operations/local-spark-setup.md`](docs/operations/local-spark-setup.md)。
 
-- **本機環境**：`~/dev-cluster/`（Docker Spark+HDFS+Hive Metastore），詳見其 README。
-- **Hive 來源表 setup**：`scripts/setup_hive_dev.py` 把 `data/{feature_table,label_table,sample_pool}.parquet` 寫成 `ml_recsys.<table>` Hive managed table。**跳過 source_etl**（合成資料已是 feature/label 粒度，沒有上游 `feature_concat`/`label_ccard` 等表）。腳本內**必須把 `snap_date` cast 成 DATE**（合成 parquet 是 timestamp[us]，不轉的話 Spark 對 `'YYYY-MM-DD'` 字串 filter 會 0 row，val/test/calibration 全空）。
-- **Ad-hoc / admin PySpark 腳本（setup_hive_dev / nuke_ml_recsys / `SHOW PARTITIONS` 等）**：用 `scripts/dev_admin.sh` wrapper，跑在 transient `devcluster/pyspark` container 內 + `--master local[N]`（README §line 77-91 推薦的 admin pattern）。**不要 host venv**（standalone init 3+ min、`file://<host>` 派給 worker container 找不到）；**也不要 docker exec spark-master**（無 python3）。腳本內 path 寫 `/workspace/...` 不是 host 絕對路徑。詳見 `dev-cluster-spark` skill SOP-6。
-  ```bash
-  scripts/dev_admin.sh scripts/nuke_ml_recsys.py
-  scripts/dev_admin.sh scripts/setup_hive_dev.py
-  ```
-- **`scripts/` 工具會 `import recsys_tfb` 又讀 Hive 的（如 `sampling_overrides_editor.py`、`suggest_categorical_cols.py`）**：是 host-venv 入口（架構見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md) §1 入口 E）。**不能**走 `scripts/dev_admin.sh` —— 裸 `devcluster/pyspark` container 沒有 `typer`/`recsys_tfb` 等 venv 套件，import 即 `ModuleNotFoundError`。**必須**：
-  ```bash
-  source ~/dev-cluster/scripts/client-env.sh                          # 🅔 JDK17 add-opens + HADOOP_CONF_DIR
-  export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark    # 🅑 local[*]，省 standalone init 3–5 min
-  PYTHONPATH=<root>/src .venv/bin/python scripts/<name>.py <args>
-  ```
-  順序不能反 —— `client-env.sh` 把 `SPARK_CONF_DIR` 設成 `client-template/spark`，要先 source 再 export 覆寫成 `client-template-local/spark`。**`source client-env.sh` 不是可選**：腳本對 SparkSession 只傳了 `app_name`，所有連線設定全靠環境變數 + spark-defaults.conf。跳過會踩兩種錯：(1) 沒 SPARK_CONF_DIR → 接空 in-memory catalog → `Table or view not found: ml_recsys.<table>`（表其實存在）；(2) JDK17 沒 `--add-opens` → driver 內部反射在 `sun.nio.ch` 上炸。**跑時別被 stderr 嚇到**：local mode 一定會出現一段 `ERROR Inbox: Ignoring error` + `RpcEndpointNotFoundException: CoarseGrainedScheduler@...` —— 是 Spark by-design 良性噪音（`dev-cluster-spark` skill SOP-3-C）。看 stdout 的 `[N/M]` 進度行 / `Wrote ...` 才是真實狀態。
-- **/etc/hosts**：host 端讀 Hive 資料前需加 `127.0.0.1 namenode datanode hive-metastore spark-master`，否則 `hdfs://namenode:9000/...` resolve 不到（dev-cluster README §「已知限制」第 3 點）。
-
-### Pipeline 與 SPARK_CONF_DIR 的對應
-
-`--env production` 的 training cache 跟 model artifact (`model.txt` / `calibrator.pkl` / `*.json`) 都駐留在 driver-local fs：cache 由 `_materialize_parquet_handle`（`src/recsys_tfb/pipelines/training/nodes.py`）自己從 HDFS `copyToLocal` 拉下來（不經 catalog `ParquetDataset`、不依賴 `spark.master` 模式；cache node output 是 `ParquetHandle`，由 framework auto-MemoryDataset 在 DAG 中銜接；dev/test 也必須走 `cache.root`，不再有 `enabled=false` 繞行路徑）；artifact 走 Python `open()` 寫不認 `hdfs://` scheme。Pipeline 依下表選對 `SPARK_CONF_DIR`：
-
-| Pipeline | `SPARK_CONF_DIR` | spark.master | 為什麼 |
-|---|---|---|---|
-| `dataset` / `inference` / `evaluation` / `*_etl` | `~/dev-cluster/client-template/spark`（client-env.sh 預設） | `spark://localhost:7077` | 寫 Hive managed table 走 HDFS，需要 worker container |
-| `training` | **`~/dev-cluster/client-template-local/spark`** | `local[*]` | LightGBM 是 driver 單機訓練，distributed cluster 沒幫助；model artifact 駐留 driver-local；cache 由 cache node 自己從 HDFS 拉；evaluate_model 將 test-set 預測寫入 Hive `ml_recsys.training_eval_predictions`（hive-site.xml 已 symlink 進 `client-template-local/spark/`） |
-
-執行：
 ```bash
-source ~/dev-cluster/scripts/client-env.sh                              # 設 HADOOP_CONF_DIR、JDK17 add-opens
-# dataset / inference / etc.
-.venv/bin/python -m recsys_tfb <pipeline> --env production
-# training（必須切 local conf）
-export SPARK_CONF_DIR=~/dev-cluster/client-template-local/spark
-.venv/bin/python -m recsys_tfb training --env production
+cd <repo-or-worktree-root>
+export SPARK_CONF_DIR=$PWD/conf/spark-local
+PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py            # 首次 / --reset
+PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有 pipeline 同一條路
 ```
 
-走錯 conf 的典型 trap（深入排查見 `dev-cluster-spark` skill）：
-- 把 catalog 上 model / best_params / evaluation_results 的 filepath 寫成 `hdfs://` → Python `open()` 在 cwd 建出 literal `./hdfs:/namenode:9000/...` 假目錄
-- 早期版本 `client-template-local` 缺 hive-site.xml symlink，會出現 `Table or view not found: ml_recsys.<table>`；現已修正（symlink 至 `~/dev-cluster/client-template-local/hive-site.xml`）
-
-完整入口分類（A/B/C/D/E/F）+ 5 層配置（🅐 Python config / 🅑🅒🅓 conf 檔 / 🅔 env var）對照表見 [`docs/operations/spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md)。跑任何會碰 Spark 的東西**之前**對著 §6 cheat-sheet 走，避免每次重新摸路。
+- 所有 pipeline（dataset/training/inference/evaluation/`*_etl`）與 scripts
+  （`suggest_categorical_cols`、`sampling_overrides_editor`）皆 `export SPARK_CONF_DIR` 後 host venv 直跑。
+- `--env local`（預設）；`--env local` 是唯一本機環境識別符，無需切換。
+- stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 local[*] by-design 噪音。
+- 端到端 smoke：`bash scripts/local_e2e.sh`。
 
 ## Config consistency gate
 
