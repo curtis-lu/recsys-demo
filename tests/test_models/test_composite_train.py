@@ -25,6 +25,18 @@ def test_oof_clean_guard():
     assert not oof_is_leakage_clean(folds, producing_fold=dirty)
 
 
+def test_oof_folds_are_customer_disjoint():
+    # Stage-2's OOF feature for a customer must come from a Stage-1 booster that
+    # never trained on that customer; the guarantee rests on each customer
+    # mapping to exactly ONE fold (so fit_mask = folds != k always excludes them).
+    custs = np.array([f"c{i % 9}" for i in range(60)])
+    folds = assign_folds(custs, n_folds=3, seed=42)
+    by_cust: dict = {}
+    for c, f in zip(custs, folds):
+        by_cust.setdefault(c, set()).add(int(f))
+    assert all(len(v) == 1 for v in by_cust.values())
+
+
 def _write_handle(tmp_path, name, n_cust, items, rng):
     rows = []
     for c in range(n_cust):
