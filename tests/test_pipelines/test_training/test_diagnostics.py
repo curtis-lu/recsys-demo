@@ -148,6 +148,17 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert (d / "shap_summary.png").exists()
 
 
+def test_shap_diagnostics_skipped_for_composite():
+    from tests.test_models.test_composite_adapter import _make_adapter
+    from recsys_tfb.pipelines.training.diagnostics import compute_shap_diagnostics
+    # shap.enabled defaults True, so the composite guard (not the enabled check)
+    # is what must short-circuit. Without the guard this would crash on
+    # None.to_pandas() / model.booster.
+    out = compute_shap_diagnostics(_make_adapter(), test_parquet_handle=None,
+                                   preprocessor={}, parameters={})
+    assert out == {}
+
+
 def test_shap_disabled(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["enabled"] = False

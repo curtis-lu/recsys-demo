@@ -700,6 +700,31 @@ def calibrate_model(
 
 
 
+def train_composite_model(
+    train_parquet_handle,
+    train_dev_parquet_handle,
+    val_parquet_handle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+):
+    """Two-stage composite training (replaces the prepare/tune/finalize chain
+    when training.model_structure == 'per_group_plus_rank'). Returns the
+    CompositeModelAdapter as the `model` output; downstream nodes only call
+    model.predict()."""
+    from recsys_tfb.models.composite_train import train_composite
+
+    return train_composite(
+        train_parquet_handle, train_dev_parquet_handle, val_parquet_handle,
+        preprocessor_metadata, parameters,
+    )
+
+
+def composite_hpo_placeholders(parameters: dict):
+    """Composite mode has no HPO artifacts; supply empty best_params and
+    best_iteration=0 so log_experiment's signature is unchanged."""
+    return {}, 0
+
+
 def predict_and_write_test_predictions(
     model: ModelAdapter,
     test_parquet_handle: ParquetHandle,

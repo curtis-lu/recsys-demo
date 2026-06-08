@@ -62,3 +62,13 @@ logging:
     enabled: true
     path: logs/
     format: json
+
+# 產品分群（單一真實來源）：training Stage-1 grouping(category) 與 evaluation
+# 的大類 collapse 都讀這裡。放頂層（非 schema.*）是刻意的——schema 會進
+# base_dataset_version，放這裡改 mapping 只 bust model_version、不重建 dataset。
+product_categories:
+  unmapped: singleton            # 未列入任何 list 的 product 自成 singleton 大類
+  mapping:
+    fund: [fund_stock, fund_bond, fund_mix]
+    exchange: [exchange_fx, exchange_usd]
+    ccard: [ccard_bill, ccard_cash, ccard_ins]

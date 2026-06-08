@@ -47,6 +47,142 @@ python -m recsys_tfb training --env local
 - **校準** `training.calibration.enabled`（＋ `method`，如 `sigmoid`）：可選。**為什麼要校準**：LTR 的 `score` 是排序用相對分、不是機率；即使 `binary` 目標，LightGBM 原始輸出也未必是校準過的機率。要把 `score` 當機率解讀（算期望值、跨期比較）時才需要（README §3 Q4）。校準還需 dataset 端 `enable_calibration: true` 產出 calibration split。
 - **樣本權重** `sample_weight_keys` ＋ `sample_weights`：key 是各維度值用 `|` 串起來；維度欄必須是 train model_input 裡實際有的欄（identity 欄、label、`carry_columns`、類別欄），否則被一致性閘擋。
 
+## Two-stage stacking（`model_structure`）
+
+### 概覽
+
+`training.model_structure` 決定訓練結構：
+
+| 值 | 說明 | 預設 |
+|---|---|---|
+| `shared` | **現況**：一個共用 LightGBM 模型，pointwise 或 LTR 直接對所有 item 共訓 | ✓ |
+| `per_group_plus_rank` | **Two-stage stacking**：Stage-1 per-grouping point-wise 模型 + Stage-2 一個 LTR（lambdarank） | 進階可選 |
+
+切換 `model_structure`、或修改 `stage1`/`stage2` 任一設定，都會 bump `model_version`（版本語意見「版本語意」節）。
+
+### 動機：多 item 冷熱門不平衡
+
+通用原理：一個 shared 模型同時學所有 item，冷門 item 正類筆數少，容易被熱門 item 的統計強度淹沒，難訓。把建模拆成「先各自打分、再學跨群排序」的 stacking，是處理異質群體的標準手段。套到本框架：示例規模（~10M entity × 22 item）下單一 shared model 冷熱門不平衡明顯；`per_group_plus_rank` 提供一條結構性的實驗路徑，評估工具是既有的 `macro_per_item_map`（每 item 等權，正是量冷門 item 有無改善的對的尺規）。
+
+### Config
+
+```yaml
+training:
+  model_structure: shared          # shared（現況，預設）| per_group_plus_rank
+  stage1:                          # 僅 per_group_plus_rank 生效
+    grouping: category             # item | category
+    objective: binary
+    metric: binary_logloss
+    n_folds: 5                     # OOF 折數；折鍵 = entity 雜湊互斥
+  stage2:
+    objective: lambdarank
+    metric: ndcg
+    # inputs 固定 pointwise（自身分數 + entity 特徵 + grouping id）；跨 item 相對特徵為 future
+```
+
+**`product_categories`（頂層單一真實來源）**：training Stage-1 grouping 與 evaluation 大類 collapse 共用同一份 mapping。放頂層（非 `schema.*`）是刻意的：`schema` 影響 `base_dataset_version`，放頂層讓修改 mapping 只 bust `model_version`（且僅在 `grouping: category` 時），不會重建 dataset。
+
+```yaml
+product_categories:
+  mapping:
+    fund: [...]
+    exchange: [...]
+    ccard: [...]
+  unmapped: singleton              # 未列入 mapping 的 item 各自成 singleton 大類
+```
+
+**`stage1.grouping`**：
+
+| 值 | 效果 |
+|---|---|
+| `category` | 每個 `product_categories` 大類一個 point-wise share 模型（推薦預設）；singleton 大類等價 per-item |
+| `item` | 每個 `schema.item` 值一個獨立 binary 模型（grouping 的退化極端；adapter 內部一套碼） |
+
+### OOF cross-fitting 資料流
+
+Two-stage 的核心保證：Stage-2 的訓練特徵（Stage-1 預測分數）必須 leakage-clean，不能來自看過同一 entity 的 Stage-1 模型。解法是 out-of-fold（OOF）K 折 cross-fitting，折鍵為 entity 雜湊互斥切。
+
+```
+[train 資料]  ── K 折（entity 雜湊互斥切，n_folds 控制）──┐
+   每折 k：
+     在 train\fold_k 訓各 grouping Stage-1 模型
+        └── early-stop valid = train_dev（entity-disjoint，固定）
+     對 fold_k 打分
+        ▼
+OOF 預測（覆蓋整個 train；每列分數都來自「未見過該 entity」的 Stage-1）
+        ▼
+Stage-1 在整個 train refit（供 Stage-2 的 val 打分 + inference 用）
+        ▼
+Stage-2（lambdarank，query = entity）訓練：
+   特徵 = [自身 grouping 的 OOF 分數, entity 特徵, (可選) grouping id]
+   early-stop valid = val（另一 snapshot，用 refit Stage-1 打分；entity 不在 train 內）
+   （v1 超參固定、無 HPO）
+        ▼
+最終 artifact（data/models/<model_version>/）：
+   {每 grouping 一個 Stage-1 refit-on-full-train booster}
+   + {1 個 Stage-2 booster}
+   + grouping 表
+   + model_meta.json
+```
+
+> **Leakage 不變量（核心保證）**：Stage-2 訓練特徵（train 的 OOF 分數）永不來自看過該 entity 的 Stage-1。
+
+### Split 語義（與單模型路徑一致）
+
+| split | 在 per_group_plus_rank 中的角色 |
+|---|---|
+| `train` | Stage-1 K 折 fit 的資料池；Stage-1 refit-on-full-train 的訓練集；OOF 預測覆蓋此集合 |
+| `train_dev` | Stage-1 每折 fit 與 full-train refit 的 early-stop valid（entity-disjoint） |
+| `val` | Stage-2 early-stop valid（用 refit Stage-1 打分；另一 snapshot，entity 不在 train 內）；v1 無 HPO |
+| `test` | held-out，最終評估用 |
+
+### Inference 不動
+
+`CompositeModelAdapter` 對外仍實作 `ModelAdapter` ABC（`predict / save / load / feature_importance / log_to_mlflow`）。`predict(X)` 做的事：每列路由到所屬 grouping 的 refit Stage-1 booster 打分，組 `[分數, entity 特徵]` 過 Stage-2，回最終 scalar。
+
+推論仍是 **pointwise 打分**，故 inference pipeline 的 `predict_scores` 仍按 `(snap_date, item)` chunk 控記憶體、`rank_predictions` / validation / evaluation **全部不動**。
+
+### 節點流程（per_group_plus_rank）
+
+`training/pipeline.py` 依 `model_structure` 分支：
+
+- `shared`（預設）→ 現有 `prepare_lgb_train_inputs → tune_hyperparameters → finalize_model` 不變。
+- `per_group_plus_rank` → 以單一 `train_composite_model` node 取代上述三節點鏈：
+
+| node | 做什麼 |
+|---|---|
+| `train_composite_model` | 編排 OOF K-fold（entity 雜湊切折）→ 各 grouping Stage-1 逐折訓練 + 對留出折打分 → 組 OOF 預測 → Stage-1 refit-on-full-train → Stage-2 lambdarank 訓練；組出 `CompositeModelAdapter`、save 到 version 目錄 |
+
+> **為什麼不走既有 numpy `train()` 介面**：`ModelAdapter.train(X_train, y_train, ...)` 是純 numpy 介面，拿不到 entity id，無法表達「依 entity 互斥切折 + 產 OOF」。因此 composite 的訓練走新節點 `train_composite_model`，不進舊的 tune_hyperparameters → finalize_model 鏈；composite 的 `train` / `prepare_train_inputs` 明確 `raise NotImplementedError`（提示「不該被單模型路徑呼叫」）。
+
+下游節點（`calibrate_model` 之後的預測、診斷、MLflow 記錄）不變，因為 composite 已完整實作 `predict / save / load / feature_importance`。
+
+### 校準（composite 預設關閉）
+
+Lambda ranker 輸出是排序用相對分、非機率，composite 預設不做機率校準（對 per-entity mAP 無影響）。一致性閘（A15）會擋住 `per_group_plus_rank` + `calibration.enabled: true` 的組合。
+
+未來若需在 composite 之上加校準，現有 `CalibratedModelAdapter` 已是「包住任一 `ModelAdapter`」的 wrapper，直接包住 `CompositeModelAdapter` 即可，不需改 composite 內部。
+
+### Diagnostics（v1 限制）
+
+composite 下 SHAP 跳過（N+1 booster，per-submodel SHAP 為 future）；`feature_importance` 落在 Stage-2 booster。屬報表豐富度、非正確性。
+
+### 一致性閘（A15）
+
+`core/consistency.py` 新增 A15 predicate，於 CLI 啟動時一次驗：
+
+- `model_structure` ∈ {`shared`, `per_group_plus_rank`}。
+- `per_group_plus_rank` 時：`product_categories.mapping` 必須覆蓋 `schema.categorical_values` 中所有 item 值（或 `unmapped: singleton` 吸收）；`stage2.objective` 必須是 ranking objective；`calibration.enabled` 必須為 `false`。
+
+違反任一條，啟動時即 `ConfigConsistencyError`，訊息可搜尋片段見 §4「設定一致性閘」。
+
+### 未來展望（v1 不做）
+
+- 跨 item 相對特徵（會打破 per-item inference chunking）。
+- small-group 最小門檻自動併回 shared。
+- 逐子模型完整 HPO。
+- composite SHAP 全套診斷。
+
 ## 產物（driver-local，除 1 張 Hive）
 
 | 產物 | 位置 / 型別 |

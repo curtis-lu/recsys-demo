@@ -36,12 +36,7 @@ evaluation:
   # child rank；category label = max child label），然後對「同一套」metric
   # pipeline 跑第二輪；結果 nest 在 "category" key 之下。
   product_categories:
-    enabled: true
-    unmapped: singleton          # 沒列在任何 list 的 product 自成一個 singleton category
-    mapping:
-      fund: [fund_stock, fund_bond, fund_mix]
-      exchange: [exchange_fx, exchange_usd]
-      ccard: [ccard_bill, ccard_cash, ccard_ins]
+    enabled: true                # 開大類報表；mapping 取自頂層 product_categories
 
   # Baseline 設定 ── popularity baseline 的 lookback 視窗（月數）。
   baseline:

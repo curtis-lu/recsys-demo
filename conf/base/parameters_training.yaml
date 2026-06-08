@@ -36,6 +36,21 @@ training:
   calibration:
     enabled: true
     method: sigmoid
+  # --- Two-stage stacking（進階可選模式）-------------------------------------
+  # shared(預設) = 現況單一模型；per_group_plus_rank = Stage-1 per-grouping
+  # point-wise + Stage-2 LTR（OOF cross-fitting 避免 leakage）。切換會 bump
+  # model_version。詳見 docs/pipelines/training.md。
+  model_structure: shared
+  # 僅 per_group_plus_rank 生效：
+  stage1:
+    grouping: category          # item(每產品一個 binary) | category(每大類一個 share)
+    objective: binary
+    metric: binary_logloss
+    n_folds: 5                  # OOF 折數；折鍵 = entity 雜湊互斥
+  stage2:
+    objective: lambdarank
+    metric: ndcg
+    # inputs 固定 pointwise（自身分數 + 客戶特徵 + grouping id）；跨產品相對特徵為 future
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
   # sample_weight_keys: weight key 由哪些欄位組成（順序即 "|" 串接順序），
   #   與 dataset.sample_group_keys 對稱。預設 [prod_name]：直接對產品調權。

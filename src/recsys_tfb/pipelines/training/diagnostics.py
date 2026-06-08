@@ -111,6 +111,15 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     if not cfg.get("enabled", True):
         return {}
 
+    # Composite models hold N+1 boosters (no single `.booster`); single-booster
+    # SHAP does not apply. Per-submodel SHAP is a future enhancement.
+    from recsys_tfb.models.composite_adapter import CompositeModelAdapter
+    base = getattr(model, "base", model)  # unwrap CalibratedModelAdapter if present
+    if isinstance(base, CompositeModelAdapter):
+        logger.info("SHAP diagnostics skipped for composite model "
+                    "(per-submodel SHAP is a future enhancement).")
+        return {}
+
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

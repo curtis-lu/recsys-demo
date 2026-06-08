@@ -142,7 +142,16 @@ def _model_version_payload(params: dict) -> dict:
     if isinstance(ap, dict):
         for key in MODEL_VERSION_IRRELEVANT_PARAMS:
             ap.pop(key, None)
-    return {"training": training}
+    payload: dict = {"training": training}
+    # The category table defines the model ONLY when Stage-1 groups by category.
+    # Fold it in then (so editing the mapping bumps model_version); leave it out
+    # otherwise to avoid spurious invalidation of shared / per-item models.
+    if (
+        training.get("model_structure") == "per_group_plus_rank"
+        and (training.get("stage1", {}) or {}).get("grouping") == "category"
+    ):
+        payload["product_categories"] = params.get("product_categories")
+    return payload
 
 
 def compute_model_version(

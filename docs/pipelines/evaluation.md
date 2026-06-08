@@ -44,6 +44,7 @@ python -m recsys_tfb evaluation --env local                   # 情境 2
 ## 關鍵設定（`conf/base/parameters_evaluation.yaml`）
 
 - **指標**：k 值、要算哪些指標。指標怎麼算、報表怎麼讀 → [`../metrics.html`](../metrics.html)。
+- **大類分組** `product_categories`：item 大類的 mapping 與 unmapped 策略現在是**頂層單一真實來源**（`product_categories.mapping` / `product_categories.unmapped`），training Stage-1 grouping 與 evaluation 大類 collapse 共用同一份。`evaluation.product_categories.enabled` 只是「要不要在報表裡顯示大類段落」的**開關**，mapping 資料本身已移至頂層；若你在 `evaluation.*` 下看到舊的 `mapping` 欄位，那是過時設定，應以頂層為準。
 - **分群報表** `segment_columns` ＋ `segment_sources`：每個要分群的欄都要有對應的 segment 來源，否則該段報表悄悄不出現（被一致性閘擋，README §4）。
 - **多模型比較** `compare_sources`：把本模型與其他來源在共同客戶上對比。每個來源一個 `kind`：
 
@@ -53,6 +54,10 @@ python -m recsys_tfb evaluation --env local                   # 情境 2
   | `external_hive` | 外部 Hive 表 | `table`、`columns` 映射、`prod_mapping`、`unmapped_policy` |
 
   `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。
+
+## Two-stage stacking 與 macro_per_item_map
+
+評估流程本身與模型內部結構無關——無論 `model_structure` 是 `shared` 還是 `per_group_plus_rank`，evaluation 永遠對**最終分數**做 per-(snap_date, entity) mAP，不在乎 Stage-1/Stage-2 的存在。`macro_per_item_map`（每 item 等權平均 AP）是比較 `per_group_plus_rank` 與 `shared` 基準線時**正確的尺規**：它讓冷門 item 與熱門 item 等權，能直接量出 two-stage 對冷門 item 排序品質的影響，不被熱門 item 灌水。Two-stage stacking 的設計背景與 config 見 [`training.md` §Two-stage stacking](training.md#two-stage-stacking)。
 
 ## 重跑語意
 

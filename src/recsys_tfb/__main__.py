@@ -473,7 +473,10 @@ def training(
         else None
     )
 
-    mv = compute_model_version(params_training, base_v, train_v, cal_v)
+    mv = compute_model_version(
+        {**params_training, "product_categories": params.get("product_categories")},
+        base_v, train_v, cal_v,
+    )
     logger.info("Model version: %s", mv)
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
@@ -488,7 +491,10 @@ def training(
         "snap_date": _NONE_PLACEHOLDER,
     }
 
-    pipeline_kwargs = {"enable_calibration": enable_calibration}
+    pipeline_kwargs = {
+        "enable_calibration": enable_calibration,
+        "model_structure": params_training.get("training", {}).get("model_structure", "shared"),
+    }
 
     _execute_pipeline("training", pipeline_kwargs, runtime_params, config, params, env)
 

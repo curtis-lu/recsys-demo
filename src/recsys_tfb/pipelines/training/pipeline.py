@@ -14,6 +14,7 @@ from recsys_tfb.pipelines.training.nodes import (
     cache_train_model_input,
     cache_val_model_input,
     calibrate_model,
+    composite_hpo_placeholders,
     compute_test_mAP_spark,
     finalize_model,
     log_experiment,
@@ -21,16 +22,14 @@ from recsys_tfb.pipelines.training.nodes import (
     predict_and_write_test_predictions,
     prepare_lgb_train_inputs,
     select_features,
+    train_composite_model,
     tune_hyperparameters,
 )
 
 
-def create_pipeline(enable_calibration: bool = False) -> Pipeline:
-    # finalize_model produces the trained model; under calibration it lands in
-    # `trained_model` so calibrate_model can wrap it. Strategy
-    # (hpo_best / refit_on_full) is read from parameters at runtime — not a
-    # DAG-shape concern.
-    final_model_output = "trained_model" if enable_calibration else "model"
+def create_pipeline(enable_calibration: bool = False,
+                    model_structure: str = "shared") -> Pipeline:
+    composite = model_structure == "per_group_plus_rank"
 
     nodes = [
         # Training-stage feature selection chokepoint: emit a (possibly subset)
@@ -64,7 +63,8 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
     ]
 
-    if enable_calibration:
+    # Calibration is single-model only; composite (lambdarank Stage-2) disables it.
+    if enable_calibration and not composite:
         nodes.append(
             Node(
                 cache_calibration_model_input,
@@ -73,59 +73,82 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             ),
         )
 
-    nodes.append(
-        Node(
-            prepare_lgb_train_inputs,
-            inputs=[
-                "train_parquet_handle", "train_dev_parquet_handle",
-                "preprocessor_view", "parameters",
-            ],
-            outputs=["train_lgb_handle", "train_dev_lgb_handle"],
-        ),
-    )
-
-    nodes.append(
-        Node(
-            persist_sample_weight_report,
-            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
-            outputs="sample_weight_report",
-        ),
-    )
-
-    nodes.append(
-        Node(
-            tune_hyperparameters,
-            inputs=[
-                "train_lgb_handle", "train_dev_lgb_handle",
-                "val_parquet_handle", "preprocessor_view", "parameters",
-            ],
-            outputs=["best_params", "best_iteration", "hpo_best_model"],
-        ),
-    )
-
-    nodes.append(
-        Node(
-            finalize_model,
-            inputs=[
-                "train_parquet_handle", "train_dev_parquet_handle",
-                "hpo_best_model", "best_params", "best_iteration",
-                "preprocessor_view", "parameters",
-            ],
-            outputs=final_model_output,
-        ),
-    )
-
-    if enable_calibration:
+    if composite:
         nodes.append(
             Node(
-                calibrate_model,
+                persist_sample_weight_report,
+                inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
+                outputs="sample_weight_report",
+            ),
+        )
+        nodes.append(
+            Node(
+                train_composite_model,
                 inputs=[
-                    "trained_model", "calibration_parquet_handle",
-                    "preprocessor_view", "parameters",
+                    "train_parquet_handle", "train_dev_parquet_handle",
+                    "val_parquet_handle", "preprocessor_view", "parameters",
                 ],
                 outputs="model",
             ),
         )
+        nodes.append(
+            Node(
+                composite_hpo_placeholders,
+                inputs=["parameters"],
+                outputs=["best_params", "best_iteration"],
+            ),
+        )
+    else:
+        final_model_output = "trained_model" if enable_calibration else "model"
+        nodes.append(
+            Node(
+                prepare_lgb_train_inputs,
+                inputs=[
+                    "train_parquet_handle", "train_dev_parquet_handle",
+                    "preprocessor_view", "parameters",
+                ],
+                outputs=["train_lgb_handle", "train_dev_lgb_handle"],
+            ),
+        )
+        nodes.append(
+            Node(
+                persist_sample_weight_report,
+                inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
+                outputs="sample_weight_report",
+            ),
+        )
+        nodes.append(
+            Node(
+                tune_hyperparameters,
+                inputs=[
+                    "train_lgb_handle", "train_dev_lgb_handle",
+                    "val_parquet_handle", "preprocessor_view", "parameters",
+                ],
+                outputs=["best_params", "best_iteration", "hpo_best_model"],
+            ),
+        )
+        nodes.append(
+            Node(
+                finalize_model,
+                inputs=[
+                    "train_parquet_handle", "train_dev_parquet_handle",
+                    "hpo_best_model", "best_params", "best_iteration",
+                    "preprocessor_view", "parameters",
+                ],
+                outputs=final_model_output,
+            ),
+        )
+        if enable_calibration:
+            nodes.append(
+                Node(
+                    calibrate_model,
+                    inputs=[
+                        "trained_model", "calibration_parquet_handle",
+                        "preprocessor_view", "parameters",
+                    ],
+                    outputs="model",
+                ),
+            )
 
     nodes.extend([
         Node(

@@ -15,10 +15,13 @@ def _params(enabled=True, unmapped="singleton"):
             "categorical_values": {"prod_name": [
                 "fund_stock", "fund_bond", "fund_mix", "exchange_fx", "lonely"]},
         },
+        "product_categories": {
+            "unmapped": unmapped,
+            "mapping": {"fund": ["fund_stock", "fund_bond", "fund_mix"]},
+        },
         "evaluation": {
             "product_categories": {
-                "enabled": enabled, "unmapped": unmapped,
-                "mapping": {"fund": ["fund_stock", "fund_bond", "fund_mix"]},
+                "enabled": enabled,
             },
             "segment_columns": ["cust_segment_typ"],
         },
@@ -40,7 +43,7 @@ def test_mapping_with_singleton_unmapped():
 
 def test_unknown_product_in_mapping_fails_loud():
     p = _params()
-    p["evaluation"]["product_categories"]["mapping"]["x"] = ["not_a_product"]
+    p["product_categories"]["mapping"]["x"] = ["not_a_product"]
     with pytest.raises(ValueError, match="not_a_product"):
         ms._build_category_mapping(p)
 

@@ -93,40 +93,16 @@ def _resolve_k_values(raw: Iterable, n_products: int) -> list[int]:
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     """Resolve {prod_name: category}. None when categories disabled.
 
-    Fail-loud (ValueError) if a mapped product is not in
-    ``schema.categorical_values[item_col]``. Products absent from every
-    mapping list become their own singleton category when
-    ``unmapped == 'singleton'`` (the only supported mode).
+    `enabled` is the evaluation-report toggle; the mapping data is the shared
+    top-level `product_categories` block (see core.categories). Single source:
+    do not re-read evaluation.product_categories.mapping here.
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    pc = eval_params.get("product_categories", {}) or {}
-    if not pc.get("enabled"):
+    from recsys_tfb.core.categories import resolve_category_mapping
+
+    eval_pc = (parameters.get("evaluation", {}) or {}).get("product_categories", {}) or {}
+    if not eval_pc.get("enabled"):
         return None
-
-    schema = get_schema(parameters)
-    item_col = schema["item"]
-    known = list((schema.get("categorical_values", {}) or {}).get(item_col, []))
-    known_set = set(known)
-
-    mapping: dict[str, str] = {}
-    for category, prods in (pc.get("mapping", {}) or {}).items():
-        for prod in prods:
-            if prod not in known_set:
-                raise ValueError(
-                    f"product_categories.mapping references unknown product "
-                    f"'{prod}' (not in schema.categorical_values['{item_col}'])"
-                )
-            mapping[prod] = category
-
-    unmapped = pc.get("unmapped", "singleton")
-    if unmapped != "singleton":
-        raise ValueError(
-            f"product_categories.unmapped='{unmapped}' unsupported; "
-            f"only 'singleton' is implemented"
-        )
-    for prod in known:
-        mapping.setdefault(prod, prod)
-    return mapping
+    return resolve_category_mapping(parameters)
 
 
 def collapse_to_categories(

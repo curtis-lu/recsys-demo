@@ -366,3 +366,25 @@ class TestTrainingPipelineE2E:
         evaluation_results = catalog.load("evaluation_results")
         assert isinstance(evaluation_results["overall_map"], float)
         assert isinstance(evaluation_results["per_item_map_attr"], dict)
+
+
+def test_composite_branch_swaps_model_nodes():
+    from recsys_tfb.pipelines.training.pipeline import create_pipeline
+    pipe = create_pipeline(enable_calibration=False, model_structure="per_group_plus_rank")
+    names = [n.name for n in pipe.nodes]
+    assert "train_composite_model" in names
+    assert "tune_hyperparameters" not in names
+    assert "finalize_model" not in names
+    assert "prepare_lgb_train_inputs" not in names
+    assert "predict_and_write_test_predictions" in names  # downstream intact
+    all_outputs = {o for n in pipe.nodes for o in (n.outputs or [])}
+    assert "model" in all_outputs
+    assert {"best_params", "best_iteration"} <= all_outputs
+
+
+def test_shared_pipeline_unchanged_by_new_param():
+    from recsys_tfb.pipelines.training.pipeline import create_pipeline
+    assert len(create_pipeline().nodes) == 15
+    assert len(create_pipeline(model_structure="shared").nodes) == 15
+    names = [n.name for n in create_pipeline(model_structure="shared").nodes]
+    assert "tune_hyperparameters" in names and "finalize_model" in names

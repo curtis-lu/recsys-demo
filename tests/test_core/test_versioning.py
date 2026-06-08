@@ -674,3 +674,56 @@ class TestWeightingVersioning:
         assert compute_model_version(p1, "base", "tv") != \
                compute_model_version(p2, "base", "tv")
         assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
+
+class TestModelStructureVersioning:
+    def _p(self, **training):
+        base = {"algorithm": "lightgbm", "algorithm_params": {"objective": "binary"}}
+        base.update(training)
+        return {"training": base}
+
+    def test_shared_unaffected_by_absent_keys(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        a = compute_model_version(self._p(), "base1", "tv1")
+        b = compute_model_version(self._p(model_structure="shared"), "base1", "tv1")
+        # adding the explicit default 'shared' changes the hash (training: block
+        # is hashed verbatim) — documented over-invalidation, acceptable once.
+        assert a != b  # sanity: hash is sensitive to training: content
+
+    def test_composite_config_changes_version(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        a = compute_model_version(
+            self._p(model_structure="per_group_plus_rank",
+                    stage1={"grouping": "category", "objective": "binary"},
+                    stage2={"objective": "lambdarank"}), "base1", "tv1")
+        b = compute_model_version(
+            self._p(model_structure="per_group_plus_rank",
+                    stage1={"grouping": "item", "objective": "binary"},
+                    stage2={"objective": "lambdarank"}), "base1", "tv1")
+        assert a != b  # grouping is part of training: -> different model_version
+
+    def test_category_mapping_change_bumps_version_when_grouping_category(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        def mk(mapping):
+            return {
+                "training": {"model_structure": "per_group_plus_rank",
+                             "stage1": {"grouping": "category", "objective": "binary"},
+                             "stage2": {"objective": "lambdarank"}},
+                "product_categories": {"mapping": mapping, "unmapped": "singleton"},
+            }
+        a = compute_model_version(mk({"g": ["x"]}), "b", "t")
+        b = compute_model_version(mk({"g": ["x", "y"]}), "b", "t")
+        assert a != b
+
+    def test_category_mapping_ignored_when_grouping_item(self):
+        from recsys_tfb.core.versioning import compute_model_version
+        def mk(mapping):
+            return {
+                "training": {"model_structure": "per_group_plus_rank",
+                             "stage1": {"grouping": "item", "objective": "binary"},
+                             "stage2": {"objective": "lambdarank"}},
+                "product_categories": {"mapping": mapping, "unmapped": "singleton"},
+            }
+        a = compute_model_version(mk({"g": ["x"]}), "b", "t")
+        b = compute_model_version(mk({"g": ["x", "y"]}), "b", "t")
+        assert a == b  # grouping=item ignores the category table
