@@ -478,6 +478,4 @@ per-item 模型把葉子拆開，負遷移消失了——但**正遷移也一起
 
 本文把「換目標」與「換結構」講完，但留了一個一路擱置的主題：**機率校準**。一旦走進右欄（LTR），輸出不再是機率（Ch 8），而推薦上線時往往又需要可比、可解讀的分數——怎麼把排序分數校回機率、跨 item 的分數又怎麼擺到可比的尺度，是一個獨立且夠分量的題目，留待後續手冊。
 
-**框架工程落地（Two-stage stacking）**：本手冊第一部（lambdarank）在本框架有一個具體應用——`model_structure: per_group_plus_rank` 的 Stage-2 正是一個 lambdarank 模型，吃 Stage-1 grouping 分數 ＋ entity 特徵、學跨群最終排序。config 與設計細節見 [`docs/pipelines/training.md` §Two-stage stacking](../pipelines/training.md#two-stage-stacking)。
-
 [← Ch 10](#ch10) ｜ [回到頂端 ↑](#top)
