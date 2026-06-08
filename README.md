@@ -303,10 +303,11 @@ python -m recsys_tfb evaluation --env local
 | `sample_weight_keys column(s) ... are not in the train model_input parquet` | 拿來當 weight 維度的欄沒被帶進訓練資料 | 把該欄加進 `parameters_dataset.yaml` 的 `carry_columns`，重跑 `dataset`（資料集版本 `base_dataset_version` 會更新、需重算） |
 | `sample_weights key(s) ... do not have N ... segment(s)` | weight 表的 key 是 `sample_weight_keys` 各欄值用 `\|` 串起來（如 `mass\|ccard_ins`），段數要等於欄數 | 對齊段數，或直接用 `scripts/sampling_overrides_editor.py` 產生 key |
 | `segment_columns entries ... have no evaluation.segment_sources` | 要分群報表的欄沒有對應的 segment 來源 | 在 `evaluation.segment_sources` 補來源，或從 `segment_columns` 移除 |
-| `model_structure ... is not a valid value` | `training.model_structure` 拼錯，只接受 `shared` 或 `per_group_plus_rank`（A15） | 修正拼字 |
-| `product_categories.mapping does not cover item value(s)` | `per_group_plus_rank` 時，某個 item 既未出現在 `product_categories.mapping` 任何大類，也未設 `unmapped: singleton`（A15） | 把 item 加入對應大類，或設 `unmapped: singleton` 讓無 mapping 的 item 各自成 singleton |
-| `stage2.objective ... is not a ranking objective` | `per_group_plus_rank` 的 Stage-2 必須是 ranking objective（A15） | 設 `stage2.objective: lambdarank`（或其他 ranking objective）與對應 `metric: ndcg` |
-| `per_group_plus_rank does not support calibration.enabled: true` | composite 預設不做機率校準（A15）；要校準須先評估是否值得在最外層 wrap `CalibratedModelAdapter` | 設 `training.calibration.enabled: false`，或改用 `model_structure: shared` |
+| `model_structure ... invalid; must be one of` | `training.model_structure` 拼錯，只接受 `shared` 或 `per_group_plus_rank`（A15） | 修正拼字 |
+| `stage1.grouping ... invalid; must be one of` | `per_group_plus_rank` 的 `training.stage1.grouping` 只接受 `item` 或 `category`（A15） | 改成 `item` 或 `category` |
+| `stage2.objective ... must be a ranking objective` | `per_group_plus_rank` 的 Stage-2 必須是 ranking objective（A15） | 設 `stage2.objective: lambdarank`（或其他 ranking objective）與對應 `metric: ndcg` |
+| `calibration.enabled must be false under model_structure=per_group_plus_rank` | composite 的 lambdarank 輸出是排序分數、非機率，預設不校準（A15）；未來要疊加可在最外層 wrap `CalibratedModelAdapter` | 設 `training.calibration.enabled: false`，或改用 `model_structure: shared` |
+| `product_categories.mapping references unknown product` | `stage1.grouping: category` 時，`product_categories.mapping` 列了一個不在 `schema.categorical_values[item]` 的產品（A15；singleton 已自動涵蓋未列入的 item，故這是「列錯產品名」而非「沒涵蓋」） | 修正 mapping 內的產品名，或在 `schema.categorical_values` 補宣告該產品 |
 
 ### 資料一致性閘（`dataset` pipeline 第一個節點）
 
