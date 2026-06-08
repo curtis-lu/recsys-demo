@@ -77,7 +77,7 @@ training:
   stage2:
     objective: lambdarank
     metric: ndcg
-    inputs: [group_score]          # v1 鎖 pointwise；跨 item 相對特徵為 future
+    # inputs 固定 pointwise（自身分數 + entity 特徵 + grouping id）；跨 item 相對特徵為 future
 ```
 
 **`product_categories`（頂層單一真實來源）**：training Stage-1 grouping 與 evaluation 大類 collapse 共用同一份 mapping。放頂層（非 `schema.*`）是刻意的：`schema` 影響 `base_dataset_version`，放頂層讓修改 mapping 只 bust `model_version`（且僅在 `grouping: category` 時），不會重建 dataset。
