@@ -75,6 +75,23 @@ Rules:
 - Never `>/dev/null` a chained git checkout/merge; print exit codes and
   verify `git log -1` actually moved.
 
+## Worktree data/ 隔離（重要）
+
+每個 worktree 是**完全自足的沙盒**：所有本機狀態相對 worktree root 解析、**不 symlink 到 main**。
+重建後 setup 很快（無 qemu），不需要共用 main 的 artifact。
+
+| 狀態 | 位置（相對 worktree root） |
+|---|---|
+| Hive warehouse | `data/local_warehouse`（`local_spark_setup.py` 建） |
+| 內嵌 Derby metastore | `data/metastore_db` |
+| 檔案 artifact | `data/{models,dataset,evaluation,inference}`（pipeline 自動建真目錄） |
+| training cache | `data/recsys_cache`（`cache.root` 已相對化） |
+
+首次進 worktree 只需建 venv symlink（見下），**不需要再 symlink data/ 子目錄**；
+跑 `local_spark_setup.py` 即重建本機資料。驗證隔離：`local_spark_setup.py --check-isolation`。
+
+> 若**刻意**要拿 main 的真 artifact 測（例如評估 main 訓練好的 model），才針對該子目錄手動 symlink（opt-in）。
+
 ## Pre-flight health check (run before testing/running in a worktree)
 
 ```bash
