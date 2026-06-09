@@ -400,29 +400,22 @@ class TestAggregateSurfaces:
 
     def test_case1_weight_by_item_couples_to_ratio_downsample(self):
         # neg_mult: mass|a=5 (ratio=clamp(5*100/9000)=0.0556), others keep-all
-        # (neg_mult huge -> ratio clamps to 1.0)
         nm = {("mass", "a"): 5.0, ("hnw", "a"): 1e9,
               ("mass", "b"): 1e9, ("hnw", "b"): 1e9}
         out = aggregate_surfaces(
-            self._STATS, nm, segment_col="cust_segment_typ",
-            item_col="prod_name", weight_keys=["prod_name"],
-            alpha=0.5, w_max=5.0, default_neg_mult=5.0)
-        rr = {(r["segment"], r["product"]): r for r in out["ratio_rows"]}
-        # mass|a downsampled: kept ~= round(9000*0.05556)=500
+            self._STATS, nm, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
         assert abs(rr[("mass", "a")]["ratio"] - (5 * 100 / 9000)) < 1e-9
         assert rr[("mass", "a")]["kept_neg"] == 500
-        # weight surface keyed by item; post-downsample n_neg for 'a' =
-        # round(9000*0.05556 + 500*1.0) = round(500+500) = 1000
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
         assert wr[("a",)]["n_pos"] == 160          # 100+60, unchanged by downsample
-        assert wr[("a",)]["n_neg_post"] == 1000
-        # item 'b' negatives fully kept (no downsample): 2000+40 = 2040
-        assert wr[("b",)]["n_neg_post"] == 2040
+        assert wr[("a",)]["n_neg_post"] == 1000     # round(9000*0.0556 + 500*1.0)
+        assert wr[("b",)]["n_neg_post"] == 2040     # 2000+40, fully kept
 
     def test_case2_cross_dimension_shares_ratio_over_dropped_dim(self):
-        # weight keys = [risk_attr, item]; the extra risk_attr dim is dropped
-        # when projecting to the ratio (segment,item) cell, so both risk values
-        # under mass|a share ratio[mass,a].
+        # weight keys = [risk_attr, item]; risk_attr dropped when projecting to
+        # the ratio (segment,item) cell, so both risk values share ratio[mass,a].
         stats = [
             {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "lo",
              "n_pos": 60, "n_neg": 6000},
@@ -431,44 +424,55 @@ class TestAggregateSurfaces:
         ]
         nm = {("mass", "a"): 5.0}   # ratio = 5*(60+40)/(6000+3000) = 0.05556
         out = aggregate_surfaces(
-            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
             weight_keys=["risk_attr", "prod_name"], alpha=0.5, w_max=5.0,
             default_neg_mult=5.0)
         ratio = 5 * 100 / 9000
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
-        # each risk sub-cell uses the SAME ratio[mass,a]
         assert wr[("lo", "a")]["n_neg_post"] == round(6000 * ratio)
         assert wr[("hi", "a")]["n_neg_post"] == round(3000 * ratio)
         assert wr[("lo", "a")]["keys"] == ["lo", "a"]
 
     def test_no_round_until_display_totals_match(self):
-        # Fractional n_neg*ratio per fine cell that ONLY the deferred-rounding
-        # path gets right: two (seg,item) cells share weight bucket 'a', each
-        # with frac = 0.5. Per-cell rounding -> 0 + 0 = 0; deferring the round
-        # to the summed bucket -> round(0.5 + 0.5) = round(1.0) = 1.
         stats = [
             {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 1, "n_neg": 100},
             {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 1, "n_neg": 100},
         ]
         nm = {("mass", "a"): 0.5, ("hnw", "a"): 0.5}   # ratio = 0.5*1/100 = 0.005
         out = aggregate_surfaces(
-            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
             weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=0.5)
-        # ratio surface rounds each cell's kept_neg = round(100*0.005) = round(0.5) = 0
         kept_total = sum(r["kept_neg"] for r in out["ratio_rows"])
-        # weight surface defers: bucket 'a' = round(0.5 + 0.5) = 1
         post_total = sum(r["n_neg_post"] for r in out["weight_rows"])
         assert kept_total == 0
-        assert post_total == 1   # would be 0 if negatives were rounded per fine cell
+        assert post_total == 1
         assert kept_total != post_total
 
     def test_empty_weight_keys_yields_no_weight_rows(self):
         out = aggregate_surfaces(
-            self._STATS, {}, segment_col="cust_segment_typ",
-            item_col="prod_name", weight_keys=[], alpha=0.5, w_max=5.0,
-            default_neg_mult=5.0)
+            self._STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
         assert out["weight_rows"] == []
         assert len(out["ratio_rows"]) == 4
+
+    def test_ratio_surface_by_segment_only(self):
+        # ratio_dims=[segment]: products collapse into one row per segment
+        nm = {("mass",): 1e9, ("hnw",): 1e9}   # keep-all
+        out = aggregate_surfaces(
+            self._STATS, nm, ratio_dims=["cust_segment_typ"],
+            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass",)]["n_pos"] == 180 and rr[("mass",)]["n_neg"] == 11000
+        assert rr[("hnw",)]["n_pos"] == 60 and rr[("hnw",)]["n_neg"] == 540
+
+    def test_ratio_surface_global_single_row(self):
+        out = aggregate_surfaces(
+            self._STATS, {}, ratio_dims=[], weight_keys=[],
+            alpha=0.5, w_max=5.0, default_neg_mult=1e9)
+        assert len(out["ratio_rows"]) == 1
+        r = out["ratio_rows"][0]
+        assert r["keys"] == []
+        assert r["n_pos"] == 240 and r["n_neg"] == 11540
 
 
 # ---------------------------------------------------------------------------
