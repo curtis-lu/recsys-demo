@@ -35,6 +35,29 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py <args>
 PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py --reset   # rm warehouse+metastore 後重建
 ```
 
+## 互動查表（ad-hoc）
+
+開一個已連到本機 `ml_recsys` 的 Spark shell，直接查持久化的表（managed 表的資料在
+`data/local_warehouse`、metadata 在內嵌 Derby `data/metastore_db`，跨行程持久）：
+
+```bash
+bash scripts/local_spark_shell.sh                                    # pyspark：Python REPL，spark 已建好
+bash scripts/local_spark_shell.sh sql                                # spark-sql：純 SQL 提示符
+bash scripts/local_spark_shell.sh sql -e "SHOW TABLES IN ml_recsys"  # 一行式非互動查詢
+```
+
+pyspark REPL 裡：
+
+```python
+spark.sql("SHOW TABLES IN ml_recsys").show(truncate=False)
+spark.sql("SELECT * FROM ml_recsys.feature_table LIMIT 5").show()
+spark.sql("SHOW PARTITIONS ml_recsys.recsys_prod_train_model_input").show(truncate=False)
+```
+
+離開：pyspark `exit()`／spark-sql `quit;`／Ctrl-D。wrapper 已內建「從 root 啟動 +
+`SPARK_CONF_DIR` + 把 pyspark 的 python 釘到 venv（避免抓到系統 3.12）」。
+**Derby 單行程鎖**：shell 開著時別同時跑 pipeline 或第二個 Spark session。
+
 ## 注意事項
 
 - **一定從 repo/worktree root 跑**：`conf/spark-local` 的路徑是相對的（`data/local_warehouse` 等）。

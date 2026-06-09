@@ -89,6 +89,7 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
 - `--env local`（預設）；`--env local` 是唯一本機環境識別符，無需切換。
 - stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 local[*] by-design 噪音。
 - 端到端 smoke：`bash scripts/local_e2e.sh`。
+- 互動 ad-hoc 查表：`bash scripts/local_spark_shell.sh`（pyspark REPL）／`… sql`（spark-sql CLI）。
 
 ## Config consistency gate
 
