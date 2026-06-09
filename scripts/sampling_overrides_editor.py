@@ -338,6 +338,8 @@ median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加
 <button id="tb_weight" onclick="setTab('weight')">weight 面 (sample_weight_keys)</button>
 </div>
 <div id="note"></div>
+<div id="sumbox"><label>分組試算（下採後）：<select id="grp" onchange="renderSummary()"></select></label>
+<div id="summary"></div></div>
 <input id="flt" placeholder="篩選…" oninput="flt()">
 <table id="g"><thead></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
@@ -443,6 +445,7 @@ function recalc(td){{
  a.innerHTML=am.html; a.title=am.title;
  tr.querySelector('td.kn').textContent=pv.kn;
  tr.querySelector('td.pr').textContent=pv.pr;
+ renderSummary();
 }}
 function renderRatio(data,idx){{
  document.querySelector('#g thead').innerHTML=
@@ -493,7 +496,8 @@ function render(){{
  if(sortKey) idx.sort((a,b)=>{{ let x=data[a][sortKey],y=data[b][sortKey];
   if(typeof x==='string'){{x=x.toLowerCase();y=y.toLowerCase();}}
   return (x<y?-1:x>y?1:0)*(sortAsc?1:-1); }});
- if(tab==='ratio') renderRatio(data,idx); else renderWeight(data,idx);
+ if(tab==='ratio'){{ renderRatio(data,idx); renderSummary(); }}
+ else renderWeight(data,idx);
 }}
 function sortBy(k){{ syncEdits(); if(sortKey===k){{sortAsc=!sortAsc;}}
  else{{sortKey=k;sortAsc=true;}} render(); }}
@@ -510,6 +514,30 @@ function setTab(t){{
   (t==='weight'?'n_neg(後)/pos_rate(後) 反映 ratio 面目前的下採樣設定。':'');
  if(t==='weight') rebuildWeight();
  render();
+}}
+function initSummary(){{
+ const sel=document.getElementById('grp');
+ sel.innerHTML='<option value="">（全部）</option>'+
+  GKEYS.map((k,j)=>`<option value="k${{j}}">${{k}}</option>`).join('');
+}}
+function renderSummary(){{
+ const box=document.getElementById('sumbox');
+ if(tab!=='ratio'){{ box.style.display='none'; return; }}
+ box.style.display='';
+ syncEdits();
+ const by=document.getElementById('grp').value;
+ const agg=new Map();
+ RATIO.forEach(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
+  const np=r.n_pos,kn=parseInt(pv.kn)||0;
+  const g=(by===''?'（全部）':String(r[by]));
+  const a=agg.get(g)||{{np:0,kn:0}}; a.np+=np; a.kn+=kn; agg.set(g,a); }});
+ let h='<table><thead><tr><th>分組</th><th>n_pos</th><th>n_neg(後)</th>'+
+  '<th>總數</th><th>pos_rate</th></tr></thead><tbody>';
+ [...agg.entries()].sort().forEach(([g,a])=>{{ const t=a.np+a.kn;
+  h+=`<tr><td>${{esc(g)}}</td><td>${{a.np}}</td><td>${{a.kn}}</td>`+
+   `<td>${{t}}</td><td>${{(t>0?a.np/t:0).toFixed(4)}}</td></tr>`; }});
+ h+='</tbody></table>';
+ document.getElementById('summary').innerHTML=h;
 }}
 function ratioKey(keys){{
  let it=0;
@@ -540,6 +568,7 @@ function exp(kind){{
    Object.entries(sw).map(([k,v])=>'  "'+k+'": '+v).join('\\n');
  }}
 }}
+initSummary();
 setTab('ratio');
 </script></body></html>"""
 

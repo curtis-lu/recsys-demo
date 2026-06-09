@@ -362,6 +362,17 @@ class TestRenderHtml:
         assert "維持 ratio 1.0" not in html
         assert "neg:pos 無定義" in html
 
+    def test_summary_panel_present_and_groups_by_dim(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function renderSummary(" in html
+        assert "function initSummary(" in html
+        assert "id=grp" in html or 'id="grp"' in html
+        assert "id=summary" in html or 'id="summary"' in html
+        # grand total + per-group pos_rate roll-up over RATIO via preview()
+        assert "a.np/t" in html
+        # recomputed live on every cell edit
+        assert "renderSummary()" in html
+
 
 # ---------------------------------------------------------------------------
 # Spark profiling aggregation
