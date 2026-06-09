@@ -698,9 +698,8 @@ def profile(
         raise typer.Exit(code=1)
     typer.echo(
         f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
-        f"segment={keys['segment_col']} item={keys['item_col']} "
-        f"label={keys['label_col']} weight_keys={keys['weight_keys']} "
-        f"union_dims={keys['union_dims']}"
+        f"ratio_dims={keys['ratio_dims']} label={keys['label_col']} "
+        f"weight_keys={keys['weight_keys']} union_dims={keys['union_dims']}"
     )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
@@ -721,7 +720,8 @@ def profile(
     typer.echo(f"[3/4] {len(stats)} union-granularity cell(s) profiled")
     typer.echo("[4/4] rendering self-contained HTML…")
     html = render_html(
-        stats, segment_col=keys["segment_col"], item_col=keys["item_col"],
+        stats, ratio_dims=keys["ratio_dims"],
+        group_keys=list(ds.get("sample_group_keys", [])),
         label_col=keys["label_col"], weight_keys=keys["weight_keys"],
         default_ratio=float(ds.get("sample_ratio", 1.0)),
         target_neg_pos=target_neg_pos, alpha=alpha, w_max=w_max,
