@@ -35,6 +35,7 @@ from recsys_tfb.core.consistency import (
     weight_key_arity_mismatch,
     weight_unknown_items,
 )
+from recsys_tfb.core.schema import get_schema
 PROFILING_DIR = Path("data/profiling")
 
 # Override key is '|'-joined sample_group_keys; cold-product downsample
@@ -234,11 +235,18 @@ def grid_to_yaml(
             f"export sample_weight_keys {exp_weight} != config {cfg_weight}; "
             "re-profile against the current config before pasting.")
 
+    label_col = get_schema(parameters)["label"]
     overrides: dict[str, float] = {}
     for row in export.get("ratio_rows", []):
         ratio = float(row["ratio"])
-        if ratio != default_ratio:
-            overrides[f"{row['segment']}|{row['product']}|{_NEG_LABEL}"] = ratio
+        if ratio == default_ratio:
+            continue
+        # Walk the full group_keys order: label position -> "0", every other
+        # position -> the next value from this row's ratio_dims keys.
+        vals = iter(row["keys"])
+        parts = [_NEG_LABEL if k == label_col else str(next(vals))
+                 for k in cfg_group]
+        overrides["|".join(parts)] = ratio
     weights: dict[str, float] = {}
     for row in export.get("weight_rows", []):
         weight = float(row["weight"])

@@ -137,12 +137,13 @@ class TestResolveKeys:
 # ---------------------------------------------------------------------------
 # Sparse JSON -> YAML with A5/A9 validation
 # ---------------------------------------------------------------------------
-def _params(weight_keys=("prod_name",)):
+def _params(weight_keys=("prod_name",),
+            group_keys=("cust_segment_typ", "prod_name", "label")):
     return {
         "schema": {"columns": {"item": "prod_name"},
                    "categorical_values": {"prod_name": ["a", "b"]}},
         "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]},
-                    "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+                    "sample_group_keys": list(group_keys)},
         "training": {"sample_weight_keys": list(weight_keys)},
     }
 
@@ -161,8 +162,8 @@ class TestGridToYaml:
     def test_sparse_emits_only_non_default(self):
         export = _export(
             ratio_rows=[
-                {"segment": "mass", "product": "a", "ratio": 0.5},
-                {"segment": "mass", "product": "b", "ratio": 1.0}],
+                {"keys": ["mass", "a"], "ratio": 0.5},
+                {"keys": ["mass", "b"], "ratio": 1.0}],
             weight_rows=[{"keys": ["a"], "weight": 1.0},
                          {"keys": ["b"], "weight": 3.0}])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
@@ -185,7 +186,7 @@ class TestGridToYaml:
 
     def test_unknown_product_ratio_raises(self):
         export = _export(
-            ratio_rows=[{"segment": "mass", "product": "zzz", "ratio": 0.5}],
+            ratio_rows=[{"keys": ["mass", "zzz"], "ratio": 0.5}],
             weight_rows=[])
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
@@ -211,11 +212,29 @@ class TestGridToYaml:
         # survive to config. grid_to_yaml has no n_pos visibility, so this also
         # documents that it must never special-case "cold" products away.
         export = _export(
-            ratio_rows=[{"segment": "mass", "product": "a", "ratio": 0.3}],
+            ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.3}],
             weight_rows=[])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
         ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
         assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.3}}
+
+    def test_no_segment_group_keys_reconstructs_key(self):
+        gk = ["prod_name", "label"]
+        export = _export(
+            ratio_rows=[{"keys": ["a"], "ratio": 0.5}], weight_rows=[],
+            group_keys=gk)
+        out = grid_to_yaml(export, _params(group_keys=gk), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"a|0": 0.5}}
+
+    def test_multi_dim_group_keys_reconstructs_key(self):
+        gk = ["cust_segment_typ", "prod_name", "risk_attr", "label"]
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "a", "lo"], "ratio": 0.5}],
+            weight_rows=[], group_keys=gk)
+        out = grid_to_yaml(export, _params(group_keys=gk), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|lo|0": 0.5}}
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +515,7 @@ class TestToYamlCli:
         export = {
             "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
             "sample_weight_keys": ["prod_name"],
-            "ratio_rows": [{"segment": "mass", "product": "a", "ratio": 0.5}],
+            "ratio_rows": [{"keys": ["mass", "a"], "ratio": 0.5}],
             "weight_rows": [{"keys": ["b"], "weight": 3.0}],
         }
         jf = tmp_path / "e.json"
