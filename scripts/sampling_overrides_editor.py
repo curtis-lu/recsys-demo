@@ -72,33 +72,34 @@ def suggest_weight(
 def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dict:
     """Resolve ratio dims, weight keys, and the finest profiling granularity.
 
-    ``item``/``label``/``time`` come from ``schema.columns``; ``segment`` is the
-    single ``dataset.sample_group_keys`` entry that is neither item nor label
-    (the ratio surface is segment x item, label fixed to 0 on export). The
-    weight surface is keyed by ``training.sample_weight_keys`` (arbitrary
+    The ratio surface is keyed by ``ratio_dims`` = ``sample_group_keys`` minus
+    the label column (order preserved); it may be any length (0, 1, or many) —
+    matching what the framework's ``select_keys`` supports. ``label`` MUST be a
+    ``sample_group_key``: the editor splits each cell into n_pos/n_neg via
+    sum(label) and fixes the label component to "0" on export, so a group-key
+    set without label is incompatible (hand-write those overrides instead).
+
+    The weight surface is keyed by ``training.sample_weight_keys`` (arbitrary
     available columns). ``union_dims`` is the finest granularity to profile at:
     ``(sample_group_keys ∪ sample_weight_keys) \\ {label}``, ratio dims first.
-
-    Fails fast unless ``sample_group_keys`` is exactly one segment + item +
-    label, and unless ``label`` is absent from ``sample_weight_keys`` (the
-    editor's per-group n_pos/n_neg model splits on label via sum(label), so a
-    label weight key is self-contradictory — hand-write those weights instead).
+    ``label`` must be absent from ``sample_weight_keys`` (the per-group
+    n_pos/n_neg model splits on label).
     """
     cols = schema_cfg.get("columns", {})
     try:
-        item_col, label_col, time_col = cols["item"], cols["label"], cols["time"]
+        label_col, time_col = cols["label"], cols["time"]
     except KeyError as exc:
         raise ValueError(
             f"schema.columns is missing {exc}; cannot resolve profiling "
             "columns. Check the base parameters yaml."
         ) from exc
     group_keys = list(dataset_cfg.get("sample_group_keys", []))
-    segments = [k for k in group_keys if k not in (item_col, label_col)]
-    if len(group_keys) != 3 or len(segments) != 1:
+    if label_col not in group_keys:
         raise ValueError(
-            "sampling editor expects sample_group_keys = [segment, "
-            f"{item_col!r}, {label_col!r}] (one segment + item + label); "
-            f"got {group_keys}."
+            f"sampling editor requires the label column {label_col!r} in "
+            f"sample_group_keys (it is the pos/neg split axis); got "
+            f"{group_keys}. For label-free group keys, hand-write "
+            "sample_ratio_overrides."
         )
     weight_keys = list(training_cfg.get("sample_weight_keys") or [])
     if label_col in weight_keys:
@@ -108,16 +109,15 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
             f"label). Remove it from sample_weight_keys, or hand-write those "
             f"sample_weights."
         )
-    # union dims: ratio dims (group_keys minus label, in order) then any extra
-    # weight-key columns not already present. label is already excluded from
-    # weight_keys by the guard above, so the extension only needs a dedup check.
-    union_dims: list[str] = [k for k in group_keys if k != label_col]
+    # ratio dims = group keys minus label, order preserved (may be empty).
+    ratio_dims = [k for k in group_keys if k != label_col]
+    # union dims: ratio dims first, then any extra weight-key columns.
+    union_dims: list[str] = list(ratio_dims)
     for k in weight_keys:
         if k not in union_dims:
             union_dims.append(k)
     return {
-        "segment_col": segments[0],
-        "item_col": item_col,
+        "ratio_dims": ratio_dims,
         "label_col": label_col,
         "time_col": time_col,
         "weight_keys": weight_keys,
