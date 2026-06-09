@@ -60,12 +60,11 @@ class TestResolveKeys:
                            "time": "snap_date"}}
 
     def test_case1_weight_subset_of_group_keys(self):
-        # group=[seg,item,label], weight=[item] -> union dims = [seg,item]
+        # group=[seg,item,label], weight=[item] -> ratio_dims=[seg,item]
         out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
             {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
-        assert out["segment_col"] == "cust_segment_typ"
-        assert out["item_col"] == "prod_name"
+        assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
         assert out["label_col"] == "label"
         assert out["time_col"] == "snap_date"
         assert out["weight_keys"] == ["prod_name"]
@@ -76,19 +75,49 @@ class TestResolveKeys:
         out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
             {"sample_weight_keys": ["risk_attr", "prod_name"]}, self._SCHEMA)
+        assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
         assert out["weight_keys"] == ["risk_attr", "prod_name"]
         assert out["union_dims"] == ["cust_segment_typ", "prod_name", "risk_attr"]
 
-    def test_empty_weight_keys_union_is_group_dims(self):
+    def test_empty_weight_keys_union_is_ratio_dims(self):
         out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
             {}, self._SCHEMA)
         assert out["weight_keys"] == []
+        assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
         assert out["union_dims"] == ["cust_segment_typ", "prod_name"]
 
-    def test_rejects_group_keys_not_a_segment_item_label_triple(self):
-        with pytest.raises(ValueError, match="sample_group_keys"):
-            resolve_keys({"sample_group_keys": ["prod_name", "label"]},
+    def test_accepts_segment_label_only(self):
+        out = resolve_keys(
+            {"sample_group_keys": ["cust_segment_typ", "label"]},
+            {"sample_weight_keys": []}, self._SCHEMA)
+        assert out["ratio_dims"] == ["cust_segment_typ"]
+        assert out["union_dims"] == ["cust_segment_typ"]
+
+    def test_accepts_item_label_only(self):
+        out = resolve_keys(
+            {"sample_group_keys": ["prod_name", "label"]},
+            {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+        assert out["ratio_dims"] == ["prod_name"]
+        assert out["union_dims"] == ["prod_name"]
+
+    def test_accepts_multi_dim(self):
+        out = resolve_keys(
+            {"sample_group_keys": ["cust_segment_typ", "prod_name",
+                                   "risk_attr", "label"]},
+            {"sample_weight_keys": []}, self._SCHEMA)
+        assert out["ratio_dims"] == ["cust_segment_typ", "prod_name", "risk_attr"]
+
+    def test_accepts_label_only_global(self):
+        out = resolve_keys(
+            {"sample_group_keys": ["label"]},
+            {"sample_weight_keys": []}, self._SCHEMA)
+        assert out["ratio_dims"] == []
+        assert out["union_dims"] == []
+
+    def test_rejects_group_keys_without_label(self):
+        with pytest.raises(ValueError, match="label"):
+            resolve_keys({"sample_group_keys": ["cust_segment_typ", "prod_name"]},
                          {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
 
     def test_rejects_label_in_weight_keys(self):
@@ -108,12 +137,13 @@ class TestResolveKeys:
 # ---------------------------------------------------------------------------
 # Sparse JSON -> YAML with A5/A9 validation
 # ---------------------------------------------------------------------------
-def _params(weight_keys=("prod_name",)):
+def _params(weight_keys=("prod_name",),
+            group_keys=("cust_segment_typ", "prod_name", "label")):
     return {
         "schema": {"columns": {"item": "prod_name"},
                    "categorical_values": {"prod_name": ["a", "b"]}},
         "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]},
-                    "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+                    "sample_group_keys": list(group_keys)},
         "training": {"sample_weight_keys": list(weight_keys)},
     }
 
@@ -132,8 +162,8 @@ class TestGridToYaml:
     def test_sparse_emits_only_non_default(self):
         export = _export(
             ratio_rows=[
-                {"segment": "mass", "product": "a", "ratio": 0.5},
-                {"segment": "mass", "product": "b", "ratio": 1.0}],
+                {"keys": ["mass", "a"], "ratio": 0.5},
+                {"keys": ["mass", "b"], "ratio": 1.0}],
             weight_rows=[{"keys": ["a"], "weight": 1.0},
                          {"keys": ["b"], "weight": 3.0}])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
@@ -156,7 +186,7 @@ class TestGridToYaml:
 
     def test_unknown_product_ratio_raises(self):
         export = _export(
-            ratio_rows=[{"segment": "mass", "product": "zzz", "ratio": 0.5}],
+            ratio_rows=[{"keys": ["mass", "zzz"], "ratio": 0.5}],
             weight_rows=[])
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
@@ -182,11 +212,29 @@ class TestGridToYaml:
         # survive to config. grid_to_yaml has no n_pos visibility, so this also
         # documents that it must never special-case "cold" products away.
         export = _export(
-            ratio_rows=[{"segment": "mass", "product": "a", "ratio": 0.3}],
+            ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.3}],
             weight_rows=[])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
         ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
         assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.3}}
+
+    def test_no_segment_group_keys_reconstructs_key(self):
+        gk = ["prod_name", "label"]
+        export = _export(
+            ratio_rows=[{"keys": ["a"], "ratio": 0.5}], weight_rows=[],
+            group_keys=gk)
+        out = grid_to_yaml(export, _params(group_keys=gk), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"a|0": 0.5}}
+
+    def test_multi_dim_group_keys_reconstructs_key(self):
+        gk = ["cust_segment_typ", "prod_name", "risk_attr", "label"]
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "a", "lo"], "ratio": 0.5}],
+            weight_rows=[], group_keys=gk)
+        out = grid_to_yaml(export, _params(group_keys=gk), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|lo|0": 0.5}}
 
 
 # ---------------------------------------------------------------------------
@@ -198,15 +246,17 @@ class TestRenderHtml:
          "n_neg": 4000},
         {"cust_segment_typ": "hnw", "prod_name": "a", "n_pos": 8, "n_neg": 50},
     ]
-    _KW = dict(segment_col="cust_segment_typ", item_col="prod_name",
+    _KW = dict(ratio_dims=["cust_segment_typ", "prod_name"],
+               group_keys=["cust_segment_typ", "prod_name", "label"],
                weight_keys=["prod_name"], label_col="label", default_ratio=1.0)
 
     def test_self_contained_and_embeds_stats_and_keys(self):
         html = render_html(self._STATS, **self._KW)
         assert html.lstrip().startswith("<!DOCTYPE html>")
         assert json.dumps(self._STATS) in html
-        assert 'const SEG="cust_segment_typ"' in html
-        assert 'const ITEM="prod_name"' in html
+        assert 'const GKEYS=["cust_segment_typ", "prod_name"]' in html
+        assert 'const GROUP_KEYS=["cust_segment_typ", "prod_name", "label"]' in html
+        assert 'const LABEL="label"' in html
         assert 'const WKEYS=["prod_name"]' in html
         assert "http://" not in html and "https://" not in html
         assert "Export JSON" in html and "Export YAML" in html
@@ -234,9 +284,9 @@ class TestRenderHtml:
         html = render_html(self._STATS, **self._KW)
         assert "function rebuildWeight(" in html
         # per-(seg,item) effective ratio projected onto fine cells
-        assert "function ratioBySI(" in html
+        assert "function ratioByKey(" in html
         # n_neg_post accumulates n_neg * projected ratio
-        assert "s.n_neg*rbs.get(" in html
+        assert "s.n_neg*rbk.get(" in html
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
@@ -254,15 +304,16 @@ class TestRenderHtml:
     def test_export_emits_self_describing_object(self):
         html = render_html(self._STATS, **self._KW)
         assert "function exp(" in html
-        # cell ratio key gets the fixed |0 label; weight key joins WKEYS values
-        assert "'|0'" in html
+        # cell ratio key reconstructed by walking GROUP_KEYS (label pos -> '0')
+        assert "function ratioKey(" in html
+        assert "k===LABEL?'0'" in html
         assert "sample_group_keys" in html and "sample_weight_keys" in html
         assert "ratio_rows" in html and "weight_rows" in html
 
     def test_empty_weight_keys_hides_weight_tab(self):
-        html = render_html(self._STATS, segment_col="cust_segment_typ",
-                           item_col="prod_name", weight_keys=[],
-                           label_col="label", default_ratio=1.0)
+        html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
+                           group_keys=["cust_segment_typ", "prod_name", "label"],
+                           weight_keys=[], label_col="label", default_ratio=1.0)
         assert "const WKEYS=[]" in html
         # weight tab disabled note when no weight keys configured
         assert "WKEYS.length" in html
@@ -280,13 +331,14 @@ class TestRenderHtml:
         assert "http://" not in html and "https://" not in html
 
     def test_escapes_cell_values_and_threads_label_col(self):
-        html = render_html(self._STATS, segment_col="cust_segment_typ",
-                           item_col="prod_name", weight_keys=["prod_name"],
-                           label_col="label", default_ratio=1.0)
+        html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
+                           group_keys=["cust_segment_typ", "prod_name", "label"],
+                           weight_keys=["prod_name"], label_col="label",
+                           default_ratio=1.0)
         assert "function esc(" in html
-        assert "esc(r.segment)" in html and "esc(r.product)" in html
+        assert "r.keys.map(v=>" in html and "esc(v)" in html
         assert 'const LABEL="label"' in html
-        assert "sample_group_keys:[SEG,ITEM,LABEL]" in html
+        assert "sample_group_keys:GROUP_KEYS" in html
 
     def test_zero_pos_ratio_cell_editable(self):
         # 0-positive rows: ratio column becomes directly editable (data-k
@@ -309,6 +361,17 @@ class TestRenderHtml:
         # stale claim ("維持 ratio 1.0") must be gone; new wording present.
         assert "維持 ratio 1.0" not in html
         assert "neg:pos 無定義" in html
+
+    def test_summary_panel_present_and_groups_by_dim(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function renderSummary(" in html
+        assert "function initSummary(" in html
+        assert "id=grp" in html or 'id="grp"' in html
+        assert "id=summary" in html or 'id="summary"' in html
+        # grand total + per-group pos_rate roll-up over RATIO via preview()
+        assert "a.np/t" in html
+        # recomputed live on every cell edit
+        assert "renderSummary()" in html
 
 
 # ---------------------------------------------------------------------------
@@ -371,29 +434,22 @@ class TestAggregateSurfaces:
 
     def test_case1_weight_by_item_couples_to_ratio_downsample(self):
         # neg_mult: mass|a=5 (ratio=clamp(5*100/9000)=0.0556), others keep-all
-        # (neg_mult huge -> ratio clamps to 1.0)
         nm = {("mass", "a"): 5.0, ("hnw", "a"): 1e9,
               ("mass", "b"): 1e9, ("hnw", "b"): 1e9}
         out = aggregate_surfaces(
-            self._STATS, nm, segment_col="cust_segment_typ",
-            item_col="prod_name", weight_keys=["prod_name"],
-            alpha=0.5, w_max=5.0, default_neg_mult=5.0)
-        rr = {(r["segment"], r["product"]): r for r in out["ratio_rows"]}
-        # mass|a downsampled: kept ~= round(9000*0.05556)=500
+            self._STATS, nm, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
         assert abs(rr[("mass", "a")]["ratio"] - (5 * 100 / 9000)) < 1e-9
         assert rr[("mass", "a")]["kept_neg"] == 500
-        # weight surface keyed by item; post-downsample n_neg for 'a' =
-        # round(9000*0.05556 + 500*1.0) = round(500+500) = 1000
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
         assert wr[("a",)]["n_pos"] == 160          # 100+60, unchanged by downsample
-        assert wr[("a",)]["n_neg_post"] == 1000
-        # item 'b' negatives fully kept (no downsample): 2000+40 = 2040
-        assert wr[("b",)]["n_neg_post"] == 2040
+        assert wr[("a",)]["n_neg_post"] == 1000     # round(9000*0.0556 + 500*1.0)
+        assert wr[("b",)]["n_neg_post"] == 2040     # 2000+40, fully kept
 
     def test_case2_cross_dimension_shares_ratio_over_dropped_dim(self):
-        # weight keys = [risk_attr, item]; the extra risk_attr dim is dropped
-        # when projecting to the ratio (segment,item) cell, so both risk values
-        # under mass|a share ratio[mass,a].
+        # weight keys = [risk_attr, item]; risk_attr dropped when projecting to
+        # the ratio (segment,item) cell, so both risk values share ratio[mass,a].
         stats = [
             {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "lo",
              "n_pos": 60, "n_neg": 6000},
@@ -402,44 +458,55 @@ class TestAggregateSurfaces:
         ]
         nm = {("mass", "a"): 5.0}   # ratio = 5*(60+40)/(6000+3000) = 0.05556
         out = aggregate_surfaces(
-            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
             weight_keys=["risk_attr", "prod_name"], alpha=0.5, w_max=5.0,
             default_neg_mult=5.0)
         ratio = 5 * 100 / 9000
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
-        # each risk sub-cell uses the SAME ratio[mass,a]
         assert wr[("lo", "a")]["n_neg_post"] == round(6000 * ratio)
         assert wr[("hi", "a")]["n_neg_post"] == round(3000 * ratio)
         assert wr[("lo", "a")]["keys"] == ["lo", "a"]
 
     def test_no_round_until_display_totals_match(self):
-        # Fractional n_neg*ratio per fine cell that ONLY the deferred-rounding
-        # path gets right: two (seg,item) cells share weight bucket 'a', each
-        # with frac = 0.5. Per-cell rounding -> 0 + 0 = 0; deferring the round
-        # to the summed bucket -> round(0.5 + 0.5) = round(1.0) = 1.
         stats = [
             {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 1, "n_neg": 100},
             {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 1, "n_neg": 100},
         ]
         nm = {("mass", "a"): 0.5, ("hnw", "a"): 0.5}   # ratio = 0.5*1/100 = 0.005
         out = aggregate_surfaces(
-            stats, nm, segment_col="cust_segment_typ", item_col="prod_name",
+            stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
             weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=0.5)
-        # ratio surface rounds each cell's kept_neg = round(100*0.005) = round(0.5) = 0
         kept_total = sum(r["kept_neg"] for r in out["ratio_rows"])
-        # weight surface defers: bucket 'a' = round(0.5 + 0.5) = 1
         post_total = sum(r["n_neg_post"] for r in out["weight_rows"])
         assert kept_total == 0
-        assert post_total == 1   # would be 0 if negatives were rounded per fine cell
+        assert post_total == 1
         assert kept_total != post_total
 
     def test_empty_weight_keys_yields_no_weight_rows(self):
         out = aggregate_surfaces(
-            self._STATS, {}, segment_col="cust_segment_typ",
-            item_col="prod_name", weight_keys=[], alpha=0.5, w_max=5.0,
-            default_neg_mult=5.0)
+            self._STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
         assert out["weight_rows"] == []
         assert len(out["ratio_rows"]) == 4
+
+    def test_ratio_surface_by_segment_only(self):
+        # ratio_dims=[segment]: products collapse into one row per segment
+        nm = {("mass",): 1e9, ("hnw",): 1e9}   # keep-all
+        out = aggregate_surfaces(
+            self._STATS, nm, ratio_dims=["cust_segment_typ"],
+            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass",)]["n_pos"] == 180 and rr[("mass",)]["n_neg"] == 11000
+        assert rr[("hnw",)]["n_pos"] == 60 and rr[("hnw",)]["n_neg"] == 540
+
+    def test_ratio_surface_global_single_row(self):
+        out = aggregate_surfaces(
+            self._STATS, {}, ratio_dims=[], weight_keys=[],
+            alpha=0.5, w_max=5.0, default_neg_mult=1e9)
+        assert len(out["ratio_rows"]) == 1
+        r = out["ratio_rows"][0]
+        assert r["keys"] == []
+        assert r["n_pos"] == 240 and r["n_neg"] == 11540
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +530,7 @@ class TestToYamlCli:
         export = {
             "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
             "sample_weight_keys": ["prod_name"],
-            "ratio_rows": [{"segment": "mass", "product": "a", "ratio": 0.5}],
+            "ratio_rows": [{"keys": ["mass", "a"], "ratio": 0.5}],
             "weight_rows": [{"keys": ["b"], "weight": 3.0}],
         }
         jf = tmp_path / "e.json"
