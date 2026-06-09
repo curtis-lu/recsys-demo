@@ -313,7 +313,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <h2>Sampling Overrides Editor</h2>
 <details open><summary>各欄是什麼？用途是什麼？（點此展開/收合）</summary>
 <p><b>兩個面（分頁切換，各自獨立）</b>：<code>ratio 面</code>依
-<code>sample_group_keys</code>（segment×item）調抽樣下採樣；<code>weight 面</code>依
+<code>sample_group_keys</code>（label 以外的任意維度）調抽樣下採樣；<code>weight 面</code>依
 <code>sample_weight_keys</code>調訓練樣本權重。兩組 keys 可不同，匯出時各以自己的
 key-set 驗證。</p>
 <p><b>負樣本倍率 — 目標 neg:pos（ratio 面主旋鈕，可編輯）。</b>
@@ -345,8 +345,8 @@ median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加
 <pre id="out"></pre>
 <script>
 const STATS={stats_json};
-const SEG="{seg_col}";
-const ITEM="{item_col}";
+const GKEYS={gkeys_json};
+const GROUP_KEYS={group_keys_json};
 const LABEL="{label_col}";
 const WKEYS={wkeys_json};
 const DR={default_ratio};
@@ -362,35 +362,37 @@ function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 function keepRate(nm,np,nn){{ if(np<=0||nn<=0) return 1;
  return Math.min(1,Math.max(0,nm*np/nn)); }}
-// ratio store: one row per (segment,item); neg_mult editable, default R.
+// ratio store: one row per ratio_dims tuple; neg_mult editable, default R.
 function buildRatio(){{
  const m=new Map();
- STATS.forEach(s=>{{ const k=s[SEG]+SEP+s[ITEM];
-  const a=m.get(k)||{{segment:s[SEG],product:s[ITEM],n_pos:0,n_neg:0}};
-  a.n_pos+=s.n_pos; a.n_neg+=s.n_neg; m.set(k,a); }});
+ STATS.forEach(s=>{{ const keys=GKEYS.map(k=>s[k]),ks=keys.join(SEP);
+  const a=m.get(ks)||{{keys:keys,n_pos:0,n_neg:0}};
+  a.n_pos+=s.n_pos; a.n_neg+=s.n_neg; m.set(ks,a); }});
  const rows=[...m.values()];
  rows.forEach(r=>{{ r.pos_rate=(r.n_pos+r.n_neg>0?r.n_pos/(r.n_pos+r.n_neg):0);
-  r.suggested_neg_mult=R; r.ratio_direct=1; }});
+  r.suggested_neg_mult=R; r.ratio_direct=1;
+  r.keys.forEach((v,j)=>r['k'+j]=v); }});
  return rows.sort((x,y)=>y.n_pos-x.n_pos);
 }}
 const RATIO=buildRatio();
 let WEIGHT=[];
-// effective keep-rate per (segment,item) from current neg_mult edits.
-function ratioBySI(){{
+// effective keep-rate per ratio_dims tuple from current neg_mult edits.
+function ratioByKey(){{
  const m=new Map();
- RATIO.forEach(r=>m.set(r.segment+SEP+r.product,
+ RATIO.forEach(r=>m.set(r.keys.join(SEP),
   keepRate(parseFloat(r.suggested_neg_mult),r.n_pos,r.n_neg)));
  return m;
 }}
 // weight store: aggregate STATS to WKEYS tuple; n_neg post-downsample via the
-// projected (segment,item) ratio. user weight edits preserved by key.
+// projected ratio_dims ratio. user weight edits preserved by key.
 function rebuildWeight(){{
  if(!WKEYS.length){{ WEIGHT=[]; return; }}
  const prev=new Map(WEIGHT.map(w=>[w.keyStr,w.weight]));
- const rbs=ratioBySI(),m=new Map();
+ const rbk=ratioByKey(),m=new Map();
  STATS.forEach(s=>{{ const wk=WKEYS.map(k=>s[k]),ks=wk.join('|');
+  const rk=GKEYS.map(k=>s[k]).join(SEP);
   const a=m.get(ks)||{{keys:wk,keyStr:ks,n_pos:0,_nn:0}};
-  a.n_pos+=s.n_pos; a._nn+=s.n_neg*rbs.get(s[SEG]+SEP+s[ITEM]); m.set(ks,a); }});
+  a.n_pos+=s.n_pos; a._nn+=s.n_neg*rbk.get(rk); m.set(ks,a); }});
  const rows=[...m.values()],med=median(rows.map(r=>r.n_pos));
  rows.forEach(r=>{{ r.n_neg_post=Math.round(r._nn);
   const t=r.n_pos+r.n_neg_post; r.pos_rate_post=(t>0?r.n_pos/t:0);
@@ -444,8 +446,7 @@ function recalc(td){{
 }}
 function renderRatio(data,idx){{
  document.querySelector('#g thead').innerHTML=
-  `<tr><th onclick="sortBy('segment')">segment ⇅</th>`+
-  `<th onclick="sortBy('product')">product ⇅</th>`+
+  `<tr>`+GKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
   `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
   `<th class=stat onclick="sortBy('n_neg')">n_neg ⇅</th>`+
   `<th class=stat>pos_rate</th><th>負樣本倍率</th><th class=calc>ratio</th>`+
@@ -460,7 +461,7 @@ function renderRatio(data,idx){{
   const ratioCell=noPos
    ?`<td class="edit rt" contenteditable data-k=ratio_direct data-i=${{i}} oninput="recalc(this)">${{r.ratio_direct}}</td>`
    :`<td class="calc rt">${{pv.ratio}}</td>`;
-  tr.innerHTML=`<td>${{esc(r.segment)}}</td><td>${{esc(r.product)}}</td>`+
+  tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
    negMultCell+ratioCell+
@@ -485,7 +486,7 @@ function renderWeight(data,idx){{
 function render(){{
  const data=rows();
  data.forEach(r=>{{ if(r.keys) r.keys.forEach((v,j)=>r['k'+j]=v); }});
- const cols=tab==='ratio'?['segment','product']:WKEYS.map((_,j)=>'k'+j);
+ const cols=(tab==='ratio'?GKEYS:WKEYS).map((_,j)=>'k'+j);
  const q=(document.getElementById('flt').value||'').toLowerCase();
  let idx=data.map((_,i)=>i);
  if(q) idx=idx.filter(i=>cols.map(c=>data[i][c]).join(' ').toLowerCase().indexOf(q)>=0);
@@ -510,13 +511,16 @@ function setTab(t){{
  if(t==='weight') rebuildWeight();
  render();
 }}
+function ratioKey(keys){{
+ let it=0;
+ return GROUP_KEYS.map(k=>k===LABEL?'0':String(keys[it++])).join('|');
+}}
 function exp(kind){{
  syncEdits(); rebuildWeight();
  const ratio_rows=RATIO.map(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
-  return {{segment:r.segment,product:r.product,
-   ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio))}}; }});
+  return {{keys:r.keys,ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio))}}; }});
  const weight_rows=WEIGHT.map(r=>({{keys:r.keys,weight:parseFloat(r.weight)}}));
- const o={{sample_group_keys:[SEG,ITEM,LABEL],sample_weight_keys:WKEYS,
+ const o={{sample_group_keys:GROUP_KEYS,sample_weight_keys:WKEYS,
   ratio_rows:ratio_rows,weight_rows:weight_rows}};
  if(kind==='json'){{
   document.getElementById('out').textContent=JSON.stringify(o,null,2);
@@ -525,7 +529,7 @@ function exp(kind){{
   a.download='sampling_overrides_export.json'; a.click();
  }}else{{
   const ov={{}},sw={{}};
-  ratio_rows.forEach(r=>{{ if(r.ratio!==DR) ov[r.segment+'|'+r.product+'|0']=r.ratio; }});
+  ratio_rows.forEach(r=>{{ if(r.ratio!==DR) ov[ratioKey(r.keys)]=r.ratio; }});
   weight_rows.forEach(r=>{{ if(r.weight!==1.0) sw[r.keys.join('|')]=r.weight; }});
   document.getElementById('out').textContent=
    '# -> conf/base/parameters_dataset.yaml (under dataset:)\\n'+
@@ -543,8 +547,8 @@ setTab('ratio');
 def render_html(
     stats: list[dict],
     *,
-    segment_col: str,
-    item_col: str,
+    ratio_dims: list,
+    group_keys: list,
     label_col: str,
     weight_keys: list,
     default_ratio: float,
@@ -556,13 +560,15 @@ def render_html(
 
     ``stats`` are union-granularity dict rows from profile_stats; the browser
     mirrors aggregate_surfaces in JS to build the ratio and weight surfaces
-    live. The tuning knobs are surfaced in the help text so it reflects the
-    configured values.
+    live. ``ratio_dims`` (= sample_group_keys minus label) keys the ratio
+    surface; ``group_keys`` (the full sample_group_keys incl. label, in order)
+    is used to reconstruct override keys on export. The tuning knobs are
+    surfaced in the help text so it reflects the configured values.
     """
     return _HTML_TEMPLATE.format(
         stats_json=json.dumps(stats),
-        seg_col=segment_col,
-        item_col=item_col,
+        gkeys_json=json.dumps(ratio_dims),
+        group_keys_json=json.dumps(group_keys),
         label_col=label_col,
         wkeys_json=json.dumps(weight_keys),
         default_ratio=default_ratio,

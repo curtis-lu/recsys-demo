@@ -246,15 +246,17 @@ class TestRenderHtml:
          "n_neg": 4000},
         {"cust_segment_typ": "hnw", "prod_name": "a", "n_pos": 8, "n_neg": 50},
     ]
-    _KW = dict(segment_col="cust_segment_typ", item_col="prod_name",
+    _KW = dict(ratio_dims=["cust_segment_typ", "prod_name"],
+               group_keys=["cust_segment_typ", "prod_name", "label"],
                weight_keys=["prod_name"], label_col="label", default_ratio=1.0)
 
     def test_self_contained_and_embeds_stats_and_keys(self):
         html = render_html(self._STATS, **self._KW)
         assert html.lstrip().startswith("<!DOCTYPE html>")
         assert json.dumps(self._STATS) in html
-        assert 'const SEG="cust_segment_typ"' in html
-        assert 'const ITEM="prod_name"' in html
+        assert 'const GKEYS=["cust_segment_typ", "prod_name"]' in html
+        assert 'const GROUP_KEYS=["cust_segment_typ", "prod_name", "label"]' in html
+        assert 'const LABEL="label"' in html
         assert 'const WKEYS=["prod_name"]' in html
         assert "http://" not in html and "https://" not in html
         assert "Export JSON" in html and "Export YAML" in html
@@ -282,9 +284,9 @@ class TestRenderHtml:
         html = render_html(self._STATS, **self._KW)
         assert "function rebuildWeight(" in html
         # per-(seg,item) effective ratio projected onto fine cells
-        assert "function ratioBySI(" in html
+        assert "function ratioByKey(" in html
         # n_neg_post accumulates n_neg * projected ratio
-        assert "s.n_neg*rbs.get(" in html
+        assert "s.n_neg*rbk.get(" in html
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
@@ -302,15 +304,16 @@ class TestRenderHtml:
     def test_export_emits_self_describing_object(self):
         html = render_html(self._STATS, **self._KW)
         assert "function exp(" in html
-        # cell ratio key gets the fixed |0 label; weight key joins WKEYS values
-        assert "'|0'" in html
+        # cell ratio key reconstructed by walking GROUP_KEYS (label pos -> '0')
+        assert "function ratioKey(" in html
+        assert "k===LABEL?'0'" in html
         assert "sample_group_keys" in html and "sample_weight_keys" in html
         assert "ratio_rows" in html and "weight_rows" in html
 
     def test_empty_weight_keys_hides_weight_tab(self):
-        html = render_html(self._STATS, segment_col="cust_segment_typ",
-                           item_col="prod_name", weight_keys=[],
-                           label_col="label", default_ratio=1.0)
+        html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
+                           group_keys=["cust_segment_typ", "prod_name", "label"],
+                           weight_keys=[], label_col="label", default_ratio=1.0)
         assert "const WKEYS=[]" in html
         # weight tab disabled note when no weight keys configured
         assert "WKEYS.length" in html
@@ -328,13 +331,14 @@ class TestRenderHtml:
         assert "http://" not in html and "https://" not in html
 
     def test_escapes_cell_values_and_threads_label_col(self):
-        html = render_html(self._STATS, segment_col="cust_segment_typ",
-                           item_col="prod_name", weight_keys=["prod_name"],
-                           label_col="label", default_ratio=1.0)
+        html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
+                           group_keys=["cust_segment_typ", "prod_name", "label"],
+                           weight_keys=["prod_name"], label_col="label",
+                           default_ratio=1.0)
         assert "function esc(" in html
-        assert "esc(r.segment)" in html and "esc(r.product)" in html
+        assert "r.keys.map(v=>" in html and "esc(v)" in html
         assert 'const LABEL="label"' in html
-        assert "sample_group_keys:[SEG,ITEM,LABEL]" in html
+        assert "sample_group_keys:GROUP_KEYS" in html
 
     def test_zero_pos_ratio_cell_editable(self):
         # 0-positive rows: ratio column becomes directly editable (data-k
