@@ -34,13 +34,27 @@ class TestModelAdapterDatasetRoundTrip:
         np.testing.assert_allclose(loaded.predict(X), adapter.predict(X))
 
     def test_sidecar_isolation_between_model_and_hpo_model(self, tmp_path):
+        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+
         adapter, _ = _tiny_adapter()
-        ds_model = ModelAdapterDataset(filepath=str(tmp_path / "model.txt"))
         ds_hpo = ModelAdapterDataset(filepath=str(tmp_path / "hpo" / "model.txt"))
-        ds_model.save(adapter)
         ds_hpo.save(adapter)
+
+        # Final model saved with calibration meta in the PARENT directory —
+        # the exact cross-talk scenario the hpo/ subdirectory exists to avoid.
+        calibrated = CalibratedModelAdapter(adapter, method="isotonic")
+        # fit a trivial calibrator so save() can persist it
+        rng = np.random.default_rng(0)
+        X_cal = rng.normal(size=(40, 3))
+        scores = adapter.predict(X_cal)
+        labels = (scores > np.median(scores)).astype(int)
+        calibrated.fit_calibrator(X_cal, labels)
+        ds_model = ModelAdapterDataset(filepath=str(tmp_path / "model.txt"))
+        ds_model.save(calibrated)
+
         # each directory carries its own sidecar — no cross-talk
         assert (tmp_path / "model_meta.json").exists()
         assert (tmp_path / "hpo" / "model_meta.json").exists()
-        assert ds_hpo.load() is not None
-        assert ds_model.load() is not None
+        loaded_hpo = ds_hpo.load()
+        assert not isinstance(loaded_hpo, CalibratedModelAdapter)
+        assert isinstance(ds_model.load(), CalibratedModelAdapter)
