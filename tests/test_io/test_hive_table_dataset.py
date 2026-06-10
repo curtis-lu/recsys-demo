@@ -1,6 +1,6 @@
 """Tests for HiveTableDataset.
 
-Most tests mock SparkSession because insertInto/catalog.tableExists require
+Most tests mock SparkSession because insertInto/SHOW TABLES require
 a real Hive metastore. TestSchemaEvolutionIntegration uses the real local
 `spark` fixture end-to-end.
 """
@@ -15,6 +15,10 @@ from recsys_tfb.io.hive_table_dataset import HiveTableDataset
 
 def _make_spark_mock() -> MagicMock:
     spark = MagicMock(name="SparkSession")
+    spark.catalog.tableExists.side_effect = AssertionError(
+        "HiveTableDataset no longer calls catalog.tableExists; "
+        "use _configure_mock_table_exists instead"
+    )
     return spark
 
 
@@ -23,6 +27,15 @@ def _patch_spark(spark: MagicMock):
         "recsys_tfb.utils.spark.get_or_create_spark_session",
         return_value=spark,
     )
+
+
+def _ddl_sqls(spark) -> list[str]:
+    """spark.sql 呼叫中排除 _table_exists 的 SHOW TABLES 基礎呼叫後的 DDL 清單。"""
+    return [
+        c[0][0]
+        for c in spark.sql.call_args_list
+        if not c[0][0].lstrip().upper().startswith("SHOW TABLES")
+    ]
 
 
 def _configure_mock_table_exists(spark: MagicMock, database: str, table: str) -> None:
@@ -34,6 +47,7 @@ def _configure_mock_table_exists(spark: MagicMock, database: str, table: str) ->
     """
     row = MagicMock()
     row.tableName = table
+    row.isTemporary = False
     show_result = MagicMock()
     show_result.collect.return_value = [row]
 
@@ -630,6 +644,21 @@ class TestExists:
         """SHOW TABLES IN <db> raises AnalysisException when db does not exist;
         _table_exists should catch it and return False (mirrors catalog.tableExists)."""
 
+        # Why a fake exception class instead of the real AnalysisException?
+        #
+        # (1) PySpark 3.3.2's real AnalysisException cannot be instantiated
+        #     without a live JVM: the single-arg constructor hits internal
+        #     desc/stackTrace assertions, and patching those hits a
+        #     SparkContext._jvm assertion next.  There is no clean way to
+        #     construct the real exception in a unit test.
+        #
+        # (2) Patching `pyspark.sql.utils.AnalysisException` only works here
+        #     because `_table_exists` uses a *function-local lazy import*
+        #     (`from pyspark.sql.utils import AnalysisException` inside the
+        #     method body).  If that import were moved to the module top-level,
+        #     the name would already be bound in `hive_table_dataset`'s
+        #     namespace and this patch would have no effect — the test would
+        #     fail with an uncaught _FakeAnalysisException.
         class _FakeAnalysisException(Exception):
             pass
 
@@ -810,10 +839,7 @@ class TestSchemaEvolution:
             self._make_ds().save(df)
 
         # 只發 ALTER，不發 CREATE（SHOW TABLES 是 _table_exists 基礎設施呼叫，排除不計）
-        ddl_sqls = [
-            c[0][0] for c in spark.sql.call_args_list
-            if not c[0][0].upper().startswith("SHOW TABLES")
-        ]
+        ddl_sqls = _ddl_sqls(spark)
         assert len(ddl_sqls) == 1
         assert (
             "ALTER TABLE ml_recsys.train_model_input ADD COLUMNS "
@@ -844,10 +870,7 @@ class TestSchemaEvolution:
         df.withColumn.assert_any_call("dropped_feat", null_col)
         # 缺欄不是錯誤，不發 ALTER 也不發 CREATE
         #（排除 _table_exists 的 SHOW TABLES 基礎呼叫）
-        ddl_calls = [
-            c[0][0] for c in spark.sql.call_args_list
-            if not c[0][0].upper().startswith("SHOW TABLES")
-        ]
+        ddl_calls = _ddl_sqls(spark)
         assert ddl_calls == []
 
     def test_type_conflict_raises_value_error(self):
@@ -876,10 +899,7 @@ class TestSchemaEvolution:
             self._make_ds().save(df)
 
         # 無 ALTER、無 CREATE（SHOW TABLES 是 _table_exists 基礎設施呼叫，排除不計）
-        ddl_calls = [
-            c[0][0] for c in spark.sql.call_args_list
-            if not c[0][0].upper().startswith("SHOW TABLES")
-        ]
+        ddl_calls = _ddl_sqls(spark)
         assert ddl_calls == []
 
     def test_explicit_columns_table_never_checks_existence(self):
@@ -898,13 +918,10 @@ class TestSchemaEvolution:
         with _patch_spark(spark):
             ds.save(df)
 
-        show_calls = [
-            c for c in spark.sql.call_args_list
-            if c[0][0].lstrip().upper().startswith("SHOW TABLES")
-        ]
-        assert show_calls == []
-        # 既有契約路徑不變：CREATE IF NOT EXISTS 照發
-        assert "CREATE TABLE IF NOT EXISTS" in spark.sql.call_args_list[0][0][0]
+        # 既有契約路徑不變：CREATE IF NOT EXISTS 照發（_ddl_sqls 排除 SHOW TABLES，僅含 DDL）
+        ddl_sqls = _ddl_sqls(spark)
+        assert len(ddl_sqls) >= 1
+        assert "CREATE TABLE IF NOT EXISTS" in ddl_sqls[0]
 
 
 class TestSchemaEvolutionIntegration:

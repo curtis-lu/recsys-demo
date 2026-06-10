@@ -213,7 +213,13 @@ class HiveTableDataset(AbstractDataset):
 
         ``spark.catalog.tableExists("db.table")`` returns False for qualified
         names in Spark 3.3.2 local-Hive mode (known PySpark quirk); SHOW
-        TABLES is the portable alternative.
+        TABLES is the portable alternative.  The two-arg form
+        ``tableExists(table, db)`` is available in 3.3.2 but deprecated in
+        Spark 3.4+, so we intentionally use SHOW TABLES for portability.
+
+        Hive metastore stores table names in lowercase; using
+        ``self._table.lower()`` in both the LIKE pattern and the equality
+        check prevents a silent miss when the config uses mixed case.
 
         If the database itself does not exist, ``SHOW TABLES IN <db>`` raises
         ``AnalysisException``; we treat that the same as table-not-found and
@@ -223,12 +229,15 @@ class HiveTableDataset(AbstractDataset):
 
         try:
             rows = spark.sql(
-                f"SHOW TABLES IN {self._database} LIKE '{self._table}'"
+                f"SHOW TABLES IN {self._database} LIKE '{self._table.lower()}'"
             ).collect()
         except AnalysisException:
             # Database absent == table absent; mirror catalog.tableExists.
             return False
-        return any(r.tableName == self._table for r in rows)
+        return any(
+            r.tableName.lower() == self._table.lower() and not r.isTemporary
+            for r in rows
+        )
 
     @staticmethod
     def _to_spark(spark, data):
