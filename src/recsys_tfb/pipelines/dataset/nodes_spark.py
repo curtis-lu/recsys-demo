@@ -147,10 +147,13 @@ def select_test_keys(
 def validate_data_consistency(
     sample_pool: DataFrame,
     label_table: DataFrame,
+    feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Layer-2 B1 data gate; first node of the dataset pipeline."""
-    return _validate_data_consistency(sample_pool, label_table, parameters)
+    """Layer-2 data gate (B1 + B5); first node of the dataset pipeline."""
+    return _validate_data_consistency(
+        sample_pool, label_table, feature_table, parameters
+    )
 
 
 def fit_preprocessor_metadata(
