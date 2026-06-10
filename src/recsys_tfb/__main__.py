@@ -201,23 +201,26 @@ def _execute_pipeline(
     catalog = DataCatalog(catalog_config)
     catalog.add("parameters", MemoryDataset(data=substitution_params))
 
+    # Memoize exists(): slice probing re-checks the same datasets repeatedly
+    # (per-node listing ~6x); each check can be a Hive metastore round-trip.
+    _exists_memo: dict = {}
+
+    def _can_load(name: str) -> bool:
+        if name not in _exists_memo:
+            _exists_memo[name] = catalog.exists(name)
+        return _exists_memo[name]
+
     if list_nodes:
-        # Memoize exists(): per-node slice probing re-checks the same datasets
-        # ~6x; each check can be a Hive metastore round-trip.
-        memo: dict = {}
-
-        def can_load(name: str) -> bool:
-            if name not in memo:
-                memo[name] = catalog.exists(name)
-            return memo[name]
-
-        for line in _format_node_list(pipe, can_load):
+        if from_node or only_node:
+            logger.error("--list-nodes cannot be combined with --from-node/--only-node")
+            raise typer.Exit(code=1)
+        for line in _format_node_list(pipe, _can_load):
             logger.info(line)
         return False
 
     total = len(pipe.nodes)
     try:
-        pipe, plan = _slice_pipeline(pipe, catalog.exists, from_node, only_node)
+        pipe, plan = _slice_pipeline(pipe, _can_load, from_node, only_node)
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
@@ -226,6 +229,11 @@ def _execute_pipeline(
         for line in _format_slice_plan(plan, total):
             logger.info(line)
     if dry_run:
+        if plan is None:
+            logger.info(
+                "[plan] no slicing flags: full run of %d nodes "
+                "(use --list-nodes to inspect resume costs)", total,
+            )
         logger.info("[plan] dry-run: nothing executed, nothing written")
         return False
 
