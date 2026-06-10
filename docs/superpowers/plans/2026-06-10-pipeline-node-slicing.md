@@ -1029,6 +1029,13 @@ git -C /Users/curtislu/projects/recsys_tfb/.worktrees/pipeline-node-slicing comm
 
 ---
 
+## 執行偏差紀錄
+
+- **Task 3 Step 1 測試片段修正**（實作時發現 plan 自身的 bug）：`test_format_slice_plan_contents` 的 `can_load` 應為 `lambda n: n == "a"`（原 `n != "a"` 不會觸發擴張），斷言應為 `"<- b"`（原 `"<- a"`）。已依修正版實作（commit `28528da`）。
+- **Task 4 追加**（Task 3 quality review 建議）：`--list-nodes` 呼叫端以 dict/lru_cache memo 包 `catalog.exists`（每 node 重複試算造成 ~6x 重複 exists 呼叫，Hive 後端是 metastore round-trip）；`test_format_node_list_one_line_per_node` 收緊為 `len(lines) == 4` 並斷言 `"(+ -)"`。
+- **Task 5 追加**（Task 1/2 quality review 建議）：node 名稱唯一性 lint（`_node_index` 首匹配，重名會切錯）；sidecar 隔離測試補 calibrated 串台情境（top-level 存 CalibratedModelAdapter 後斷言 hpo load 不被誤包）。
+- **Task 6 追加**（Task 2 quality review 建議）：文件註明 manifest `artifacts` 不列 `hpo/` 子目錄檔案；catalog `hpo_best_model` 註解補「為 resume 跳過 HPO 而落地」半行。
+
 ## Self-Review 紀錄
 
 - **Spec coverage**：§2 語意/演算法/判準→Task 1；§3 元件→Task 1+3+4；§3.2 計畫輸出→Task 3+4；§4 補落地（含 hpo/ sidecar、None 決議）→Task 2；§5 邊界（未知名/互斥/守門/handle/manifest/警語）→Task 1+3+4 測試；§6 三道防線→Task 4（list-nodes）+5（契約）+6（docs）；§7 測試策略 1-5→Task 1/5/3-4/2/7；§8 不做→無對應 task（正確）。
