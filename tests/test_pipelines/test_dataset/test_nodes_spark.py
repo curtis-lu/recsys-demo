@@ -509,12 +509,17 @@ def test_build_model_input_casts_float_features_to_float32(
 
 
 class TestValidateDataConsistency:
-    def test_consistent_fixtures_return_none(self, sample_pool, label_table, parameters):
+    def test_consistent_fixtures_return_none(
+        self, sample_pool, label_table, feature_table, parameters
+    ):
         # fixtures: prod_name in {exchange_fx,exchange_usd,fund_stock} ==
         # schema.categorical_values.prod_name; all snaps inside windows.
-        assert validate_data_consistency(sample_pool, label_table, parameters) is None
+        assert validate_data_consistency(
+            sample_pool, label_table, feature_table, parameters) is None
 
-    def test_undeclared_value_raises(self, sample_pool, label_table, parameters):
+    def test_undeclared_value_raises(
+        self, sample_pool, label_table, feature_table, parameters
+    ):
         # Shrink declared set so fund_stock (present in data) is undeclared.
         params = {
             **parameters,
@@ -524,13 +529,13 @@ class TestValidateDataConsistency:
             },
         }
         with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, params)
+            validate_data_consistency(sample_pool, label_table, feature_table, params)
         msg = str(ei.value)
         assert "fund_stock" in msg
         assert "sample_pool" in msg
 
     def test_declared_value_absent_from_sample_pool_raises(
-        self, sample_pool, label_table, parameters
+        self, sample_pool, label_table, feature_table, parameters
     ):
         # 'ploan' is declared but never appears in sample_pool/label data ->
         # sp_missing direction (D3 second direction). declared-label is B3,
@@ -547,13 +552,13 @@ class TestValidateDataConsistency:
             },
         }
         with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, params)
+            validate_data_consistency(sample_pool, label_table, feature_table, params)
         msg = str(ei.value)
         assert "ploan" in msg
         assert "never produces" in msg
 
     def test_value_only_in_non_window_snap_is_ignored(
-        self, spark, sample_pool, label_table, parameters
+        self, spark, sample_pool, label_table, feature_table, parameters
     ):
         # 2024-12-31 is outside collect_dataset_snap_dates (train Jan-Mar,
         # val Apr, test May). An undeclared 'ploan' there must be filtered out.
@@ -569,7 +574,50 @@ class TestValidateDataConsistency:
             }])
         )
         sp = sample_pool.unionByName(extra)
-        assert validate_data_consistency(sp, label_table, parameters) is None
+        assert validate_data_consistency(sp, label_table, feature_table, parameters) is None
+
+    def test_decimal_categorical_in_feature_table_raises(
+        self, spark, sample_pool, label_table, parameters
+    ):
+        # B5: a column declared in categorical_columns is DecimalType in
+        # feature_table -> fail fast at the gate (instead of the opaque
+        # JSON-serialization crash 141s into fit_preprocessor_metadata).
+        from decimal import Decimal
+
+        from pyspark.sql import types as T
+
+        ft_schema = T.StructType([
+            T.StructField("snap_date", T.TimestampType()),
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("industry_code", T.DecimalType(15, 0)),
+        ])
+        feature_table = spark.createDataFrame(
+            [(pd.Timestamp("2024-01-31").to_pydatetime(), "C001", Decimal("1001"))],
+            schema=ft_schema,
+        )
+        params = {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "prepare_model_input": {
+                    "categorical_columns": ["prod_name", "industry_code"],
+                },
+            },
+        }
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, feature_table, params)
+        msg = str(ei.value)
+        assert "industry_code" in msg
+        assert "decimal" in msg
+
+    def test_clean_feature_table_categoricals_pass(
+        self, sample_pool, label_table, feature_table, parameters
+    ):
+        # feature_table fixture has only numeric (non-categorical) columns and
+        # the lone declared categorical (prod_name) is an identity column absent
+        # from feature_table -> B5 finds nothing, B1 is clean -> None.
+        assert validate_data_consistency(
+            sample_pool, label_table, feature_table, parameters) is None
 
 
 class TestSplitTrainKeysCarry:

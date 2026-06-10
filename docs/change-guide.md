@@ -8,7 +8,7 @@
 | 你想改 | 主要改哪些檔 | 觸發的閘 | 重跑範圍 |
 |---|---|---|---|
 | 加一個 item（候選項目） | `schema.categorical_values`、來源 SQL、`inference.products` | A3 / A4 / B1 | bust `base` → 全部重跑 |
-| 加一個特徵欄 | feature ETL SQL、`categorical_columns` / `drop_columns` | A1 | bust `base` → dataset → 之後 |
+| 加一個特徵欄 | feature ETL SQL、`categorical_columns` / `drop_columns` | A1 / B5 | bust `base` → dataset → 之後 |
 | 改訓練目標（binary↔LTR） | `parameters_training.yaml` `objective` / `metric` | A7 | bust `model_version` → 只 training 之後 |
 | 改抽樣 / 樣本權重 | `sample_ratio_overrides`、`sample_weights` / `sample_weight_keys` | A5 / A9 | 視情況 bust `train_variant` 或只 `model_version` |
 | 改 schema 角色（換應用） | `parameters.yaml` `schema` | 多條 | bust `base` → 全部 |
@@ -36,13 +36,14 @@
 **改哪些檔**
 - feature ETL：`conf/sql/etl/feature/*.sql` 產出新欄，寫進 `feature_table`（寫入路徑支援 **append-only 加欄**）。
 - `conf/base/parameters_dataset.yaml`：
-  - 若是**類別欄** → 加進 `prepare_model_input.categorical_columns`（會被 int 編碼）。
+  - 若是**類別欄** → 加進 `prepare_model_input.categorical_columns`（會被 int 編碼）。該欄在 `feature_table` 的型別**不能是連續數值型**（decimal/double/float）——decimal 類別會在前處理存檔時炸 JSON 序列化，double/float 當類別幾乎都是標錯（B5）。代碼類欄位若在 Hive 存成 decimal，先在 feature ETL cast 成 string/int 再當類別。
   - 若要**排除** → 加進 `drop_columns`。**別同時**放兩邊（A1）。
+  - 若是**連續數值特徵** → 兩個清單都不必加；不在 `categorical_columns` 就自動走數值路徑（DecimalType/DoubleType 會在 `build_model_input` 自動轉 float32）。
   - 若要當 `sample_weights` 維度 → 加進 `carry_columns`。
 
 > 注意：**非 identity 的類別特徵欄不需要** `schema.categorical_values`——編碼字典由 `fit_preprocessor_metadata` 從資料學。只有 `item` 這種 identity 類別欄才需要在 `categorical_values` 宣告。
 
-**觸發的閘**：A1（同欄不可同時 drop ＋ categorical）。
+**觸發的閘**：A1（同欄不可同時 drop ＋ categorical）；B5（`categorical_columns` 宣告的欄在 `feature_table` 不可為 decimal/double/float，dataset 第一個節點即檢查）。
 
 **重跑**：feature_table 欄位指紋變 → bust `base_dataset_version` → `dataset` → `training` →（之後）。
 

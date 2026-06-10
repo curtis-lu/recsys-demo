@@ -255,21 +255,31 @@ def fit_preprocessor_metadata(
 def validate_data_consistency(
     sample_pool: DataFrame,
     label_table: DataFrame,
+    feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Layer-2 B1 data gate. Side-effect only: raises ``DataConsistencyError``
-    on violation, returns ``None`` on success. Wired as the first node of the
-    dataset pipeline.
+    """Layer-2 data gate (B1 + B5). Side-effect only: raises
+    ``DataConsistencyError`` on violation, returns ``None`` on success. Wired
+    as the first node of the dataset pipeline.
 
-    Item values are checked on sample_pool (set-equality vs declared, both
+    B1 — item values are checked on sample_pool (set-equality vs declared, both
     directions) and label_table (only data-has-unknown), restricted to the
     configured snap_date windows the pipeline actually uses.
+
+    B5 — a column declared in ``categorical_columns`` must not be a
+    continuous-numeric type (decimal/double/float) in feature_table. Read off
+    ``feature_table.dtypes`` (metastore metadata, no scan) so the opaque
+    "Decimal is not JSON serializable" crash inside fit_preprocessor_metadata
+    is caught up-front at the first node instead of after the full distinct pass.
+
+    All errors are collected and raised once so a single fix pass clears them.
     """
     # Local import: keep lazy to avoid an import cycle
     # (_spark -> core.schema -> core.consistency). Matches the existing
     # local-import pattern inside fit_preprocessor_metadata.
     from recsys_tfb.core.consistency import (
         DataConsistencyError,
+        categorical_dtype_errors,
         item_coverage_errors,
         resolved_item_values,
     )
@@ -288,12 +298,13 @@ def validate_data_consistency(
         )
         return {r[item] for r in rows if r[item] is not None}
 
+    _, categorical_cols = _get_preprocessing_config(parameters)
     errors = item_coverage_errors(
         item,
         resolved_item_values(parameters),
         _distinct_items(sample_pool),
         _distinct_items(label_table),
-    )
+    ) + categorical_dtype_errors(categorical_cols, dict(feature_table.dtypes))
     if errors:
         raise DataConsistencyError(
             "Data consistency check failed ("

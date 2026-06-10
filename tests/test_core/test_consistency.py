@@ -538,3 +538,67 @@ def test_segment_columns_without_source_ok_when_covered():
 def test_segment_columns_without_source_empty_when_no_segment_columns():
     from recsys_tfb.core.consistency import segment_columns_without_source
     assert segment_columns_without_source({"evaluation": {}}) == []
+
+
+from recsys_tfb.core.consistency import categorical_dtype_errors
+
+
+class TestCategoricalDtypeErrors:
+    """B5 — a declared feature categorical is a continuous-numeric type.
+
+    decimal collects to Python decimal.Decimal (not JSON-serializable → the
+    fit_preprocessor_metadata save crash); double/float serialize but are a
+    mis-tag (continuous value used as a category; fragile float-equality map
+    lookup). dtype strings are Spark ``DataFrame.dtypes`` simpleString form.
+    """
+
+    def test_string_and_int_categoricals_ok(self):
+        dtypes = {"gender": "string", "risk_attr": "int", "prod_code": "bigint"}
+        assert categorical_dtype_errors(
+            ["gender", "risk_attr", "prod_code"], dtypes) == []
+
+    def test_decimal_categorical_detected(self):
+        dtypes = {"gender": "string", "industry_code": "decimal(15,0)"}
+        errs = categorical_dtype_errors(["gender", "industry_code"], dtypes)
+        assert len(errs) == 1
+        assert "industry_code" in errs[0]
+        assert "decimal(15,0)" in errs[0]
+
+    def test_double_categorical_detected(self):
+        errs = categorical_dtype_errors(["ratio"], {"ratio": "double"})
+        assert len(errs) == 1
+        assert "ratio" in errs[0] and "double" in errs[0]
+
+    def test_float_categorical_detected(self):
+        errs = categorical_dtype_errors(["amt"], {"amt": "float"})
+        assert len(errs) == 1
+        assert "amt" in errs[0] and "float" in errs[0]
+
+    def test_identity_categorical_absent_from_feature_table_exempt(self):
+        # prod_name (item / identity categorical) comes from
+        # schema.categorical_values, not feature_table → not in dtypes → skipped.
+        dtypes = {"gender": "string"}
+        assert categorical_dtype_errors(["prod_name", "gender"], dtypes) == []
+
+    def test_numeric_column_not_declared_categorical_is_ignored(self):
+        # total_aum is decimal but NOT a declared categorical → out of scope.
+        dtypes = {"gender": "string", "total_aum": "decimal(38,6)"}
+        assert categorical_dtype_errors(["gender"], dtypes) == []
+
+    def test_collects_and_sorts_multiple_offenders(self):
+        dtypes = {
+            "industry_code": "decimal(15,0)",
+            "branch_ratio": "double",
+            "gender": "string",
+        }
+        errs = categorical_dtype_errors(
+            ["gender", "industry_code", "branch_ratio"], dtypes)
+        assert len(errs) == 2
+        # sorted by column name: branch_ratio before industry_code
+        assert "branch_ratio" in errs[0]
+        assert "industry_code" in errs[1]
+
+    def test_message_hints_at_resolution(self):
+        errs = categorical_dtype_errors(["industry_code"], {"industry_code": "decimal(15,0)"})
+        msg = errs[0]
+        assert "categorical_columns" in msg and "drop_columns" in msg

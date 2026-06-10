@@ -97,7 +97,9 @@ class TestDatasetPipeline:
         pipeline = create_pipeline()
         assert pipeline.nodes[0].name == "validate_data_consistency"
         first = pipeline.nodes[0]
-        assert sorted(first.inputs) == ["label_table", "parameters", "sample_pool"]
+        assert sorted(first.inputs) == [
+            "feature_table", "label_table", "parameters", "sample_pool"
+        ]
         assert first.outputs == []
 
     def test_preprocessed_feature_table_feeds_all_splits(self):
