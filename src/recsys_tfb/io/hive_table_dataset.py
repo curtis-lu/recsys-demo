@@ -157,7 +157,7 @@ class HiveTableDataset(AbstractDataset):
         if self._partition_filter:
             df = self._apply_partition_filter_cols(df)
 
-        if self._infer_columns and spark.catalog.tableExists(self._qualified_name):
+        if self._infer_columns and self._table_exists(spark):
             df = self._evolve_schema(spark, df)
         else:
             if self._infer_columns and not self._columns:
@@ -195,7 +195,7 @@ class HiveTableDataset(AbstractDataset):
 
     def exists(self) -> bool:
         spark = self._get_spark()
-        return spark.catalog.tableExists(self._qualified_name)
+        return self._table_exists(spark)
 
     # ---------- helpers ----------
 
@@ -207,6 +207,18 @@ class HiveTableDataset(AbstractDataset):
         from recsys_tfb.utils.spark import get_or_create_spark_session
 
         return get_or_create_spark_session()
+
+    def _table_exists(self, spark) -> bool:
+        """Reliable table existence check that works with qualified names.
+
+        ``spark.catalog.tableExists("db.table")`` returns False for qualified
+        names in Spark 3.3.2 local-Hive mode (known PySpark quirk); SHOW
+        TABLES is the portable alternative.
+        """
+        rows = spark.sql(
+            f"SHOW TABLES IN {self._database} LIKE '{self._table}'"
+        ).collect()
+        return any(r.tableName == self._table for r in rows)
 
     @staticmethod
     def _to_spark(spark, data):
@@ -306,6 +318,8 @@ class HiveTableDataset(AbstractDataset):
             spark.sql(
                 f"ALTER TABLE {self._qualified_name} ADD COLUMNS ({cols_sql})"
             )
+            # refreshTable 清除 relation cache，使緊接的 insertInto 看到已演化的 schema
+            spark.catalog.refreshTable(self._qualified_name)
 
         for f in table_fields:
             if f.name.lower() not in df_types:

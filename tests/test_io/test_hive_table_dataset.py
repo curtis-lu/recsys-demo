@@ -25,6 +25,35 @@ def _patch_spark(spark: MagicMock):
     )
 
 
+def _configure_mock_table_exists(spark: MagicMock, database: str, table: str) -> None:
+    """Configure spark mock so that _table_exists(spark) returns True.
+
+    HiveTableDataset._table_exists uses SHOW TABLES IN <db> LIKE '<table>'
+    because catalog.tableExists("db.table") returns False for qualified names
+    in Spark 3.3.2 local-Hive mode (known PySpark quirk).
+    """
+    row = MagicMock()
+    row.tableName = table
+    show_result = MagicMock()
+    show_result.collect.return_value = [row]
+
+    _original_sql = spark.sql.side_effect  # preserve any existing side_effect
+
+    def _sql_side_effect(query, *args, **kwargs):
+        import re
+        if re.search(
+            rf"SHOW TABLES IN {re.escape(database)} LIKE '{re.escape(table)}'",
+            query,
+            re.IGNORECASE,
+        ):
+            return show_result
+        if _original_sql is not None:
+            return _original_sql(query, *args, **kwargs)
+        return MagicMock()
+
+    spark.sql.side_effect = _sql_side_effect
+
+
 class TestValidation:
     def test_external_requires_location(self):
         with pytest.raises(ValueError, match="external=True requires 'location'"):
@@ -556,11 +585,14 @@ class TestAutoInferColumns:
         score_field.dataType.simpleString.return_value = "double"
         df.schema.fields = [schema_field, snap_field, score_field]
 
-        spark.catalog.tableExists.return_value = False
         with _patch_spark(spark):
             ds.save(df)
 
-        ddl_sql = spark.sql.call_args_list[0][0][0]
+        # Extract the CREATE DDL call (skipping SHOW TABLES from _table_exists)
+        all_sqls = [c[0][0] for c in spark.sql.call_args_list]
+        create_sqls = [s for s in all_sqls if s.upper().startswith("CREATE")]
+        assert create_sqls, "Expected a CREATE DDL call"
+        ddl_sql = create_sqls[0]
         assert "cust_id STRING" in ddl_sql
         assert "score DOUBLE" in ddl_sql
         # snap_date is a partition col; must not be in main columns block
@@ -569,17 +601,30 @@ class TestAutoInferColumns:
 
 
 class TestExists:
-    def test_exists_delegates_to_catalog(self):
+    def test_exists_returns_true_when_table_present(self):
         ds = HiveTableDataset(
             database="ml_recsys",
             table="foo",
             read_only=True,
         )
         spark = _make_spark_mock()
-        spark.catalog.tableExists.return_value = True
+        _configure_mock_table_exists(spark, "ml_recsys", "foo")
         with _patch_spark(spark):
             assert ds.exists() is True
-        spark.catalog.tableExists.assert_called_once_with("ml_recsys.foo")
+
+    def test_exists_returns_false_when_table_absent(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="foo",
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        # SHOW TABLES returns empty — table does not exist
+        empty_result = MagicMock()
+        empty_result.collect.return_value = []
+        spark.sql.return_value = empty_result
+        with _patch_spark(spark):
+            assert ds.exists() is False
 
 
 class TestLoadWithPartitionFilter:
@@ -722,7 +767,7 @@ class TestSchemaEvolution:
 
     def _make_spark_with_table(self, *table_fields) -> MagicMock:
         spark = _make_spark_mock()
-        spark.catalog.tableExists.return_value = True
+        _configure_mock_table_exists(spark, "ml_recsys", "train_model_input")
         # 表 schema 含分區欄（spark.table 回傳完整 schema），演化邏輯須自行排除
         part_filter = _field("base_dataset_version", "string")
         part_col = _field("snap_date", "string")
@@ -746,12 +791,15 @@ class TestSchemaEvolution:
         with _patch_spark(spark):
             self._make_ds().save(df)
 
-        # 只發 ALTER，不發 CREATE
-        sqls = [c[0][0] for c in spark.sql.call_args_list]
-        assert len(sqls) == 1
+        # 只發 ALTER，不發 CREATE（SHOW TABLES 是 _table_exists 基礎設施呼叫，排除不計）
+        ddl_sqls = [
+            c[0][0] for c in spark.sql.call_args_list
+            if not c[0][0].upper().startswith("SHOW TABLES")
+        ]
+        assert len(ddl_sqls) == 1
         assert (
             "ALTER TABLE ml_recsys.train_model_input ADD COLUMNS "
-            "(new_feat DOUBLE)" in sqls[0]
+            "(new_feat DOUBLE)" in ddl_sqls[0]
         )
         # 投影按表序：既有欄在前、新欄附加、再接分區欄
         df.select.assert_any_call(
@@ -777,7 +825,12 @@ class TestSchemaEvolution:
         mock_lit.return_value.cast.assert_any_call("double")
         df.withColumn.assert_any_call("dropped_feat", null_col)
         # 缺欄不是錯誤，不發 ALTER 也不發 CREATE
-        assert spark.sql.call_args_list == []
+        # （SHOW TABLES は _table_exists のインフラ呼び出しを除外）
+        ddl_calls = [
+            c[0][0] for c in spark.sql.call_args_list
+            if not c[0][0].upper().startswith("SHOW TABLES")
+        ]
+        assert ddl_calls == []
 
     def test_type_conflict_raises_value_error(self):
         spark = self._make_spark_with_table(
@@ -804,7 +857,12 @@ class TestSchemaEvolution:
         with _patch_spark(spark):
             self._make_ds().save(df)
 
-        assert spark.sql.call_args_list == []  # 無 ALTER、無 CREATE
+        # 無 ALTER、無 CREATE（SHOW TABLES 是 _table_exists 基礎設施呼叫，排除不計）
+        ddl_calls = [
+            c[0][0] for c in spark.sql.call_args_list
+            if not c[0][0].upper().startswith("SHOW TABLES")
+        ]
+        assert ddl_calls == []
 
     def test_explicit_columns_table_never_checks_existence(self):
         ds = HiveTableDataset(
@@ -825,3 +883,58 @@ class TestSchemaEvolution:
         spark.catalog.tableExists.assert_not_called()
         # 既有契約路徑不變：CREATE IF NOT EXISTS 照發
         assert "CREATE TABLE IF NOT EXISTS" in spark.sql.call_args_list[0][0][0]
+
+
+class TestSchemaEvolutionIntegration:
+    """Real-Spark end-to-end：ALTER 演化 + 舊分區 NULL 讀回 + 缺欄 NULL 寫入。"""
+
+    def _make_ds(self, version: str) -> HiveTableDataset:
+        return HiveTableDataset(
+            database="evo_test",
+            table="model_input",
+            columns="auto",
+            partition_filter={"base_dataset_version": version},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+    def test_add_then_drop_column_across_versions(self, spark):
+        spark.sql("CREATE DATABASE IF NOT EXISTS evo_test")
+        spark.sql("DROP TABLE IF EXISTS evo_test.model_input")
+        try:
+            # v1：窄 schema 首寫建表
+            narrow = spark.createDataFrame(
+                [("c1", 0.5, "2024-01-31")], ["cust_id", "score", "snap_date"]
+            )
+            self._make_ds("v1").save(narrow)
+
+            # v2：多一欄 → 觸發 ALTER
+            wide = spark.createDataFrame(
+                [("c2", 0.7, 1.0, "2024-01-31")],
+                ["cust_id", "score", "new_feat", "snap_date"],
+            )
+            self._make_ds("v2").save(wide)
+
+            table_cols = [
+                f.name
+                for f in spark.table("evo_test.model_input").schema.fields
+            ]
+            assert "new_feat" in table_cols
+
+            v1_rows = self._make_ds("v1").load().collect()
+            assert len(v1_rows) == 1
+            assert v1_rows[0]["new_feat"] is None  # 舊分區讀回 NULL
+
+            v2_rows = self._make_ds("v2").load().collect()
+            assert v2_rows[0]["new_feat"] == 1.0
+
+            # v3：比表窄的 df → NULL 補欄寫入
+            narrow2 = spark.createDataFrame(
+                [("c3", 0.9, "2024-01-31")], ["cust_id", "score", "snap_date"]
+            )
+            self._make_ds("v3").save(narrow2)
+            v3_rows = self._make_ds("v3").load().collect()
+            assert v3_rows[0]["new_feat"] is None
+        finally:
+            spark.sql("DROP TABLE IF EXISTS evo_test.model_input")
+            spark.sql("DROP DATABASE IF EXISTS evo_test CASCADE")
