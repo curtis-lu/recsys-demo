@@ -214,10 +214,20 @@ class HiveTableDataset(AbstractDataset):
         ``spark.catalog.tableExists("db.table")`` returns False for qualified
         names in Spark 3.3.2 local-Hive mode (known PySpark quirk); SHOW
         TABLES is the portable alternative.
+
+        If the database itself does not exist, ``SHOW TABLES IN <db>`` raises
+        ``AnalysisException``; we treat that the same as table-not-found and
+        return False, mirroring the original ``catalog.tableExists`` contract.
         """
-        rows = spark.sql(
-            f"SHOW TABLES IN {self._database} LIKE '{self._table}'"
-        ).collect()
+        from pyspark.sql.utils import AnalysisException
+
+        try:
+            rows = spark.sql(
+                f"SHOW TABLES IN {self._database} LIKE '{self._table}'"
+            ).collect()
+        except AnalysisException:
+            # Database absent == table absent; mirror catalog.tableExists.
+            return False
         return any(r.tableName == self._table for r in rows)
 
     @staticmethod

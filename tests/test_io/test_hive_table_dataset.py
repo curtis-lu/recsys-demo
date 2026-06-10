@@ -626,6 +626,24 @@ class TestExists:
         with _patch_spark(spark):
             assert ds.exists() is False
 
+    def test_exists_returns_false_when_database_absent(self):
+        """SHOW TABLES IN <db> raises AnalysisException when db does not exist;
+        _table_exists should catch it and return False (mirrors catalog.tableExists)."""
+
+        class _FakeAnalysisException(Exception):
+            pass
+
+        ds = HiveTableDataset(
+            database="nonexistent_db",
+            table="foo",
+            read_only=True,
+        )
+        spark = _make_spark_mock()
+        spark.sql.side_effect = _FakeAnalysisException("Database 'nonexistent_db' not found")
+        with patch("pyspark.sql.utils.AnalysisException", _FakeAnalysisException), \
+             _patch_spark(spark):
+            assert ds.exists() is False
+
 
 class TestLoadWithPartitionFilter:
     def test_load_without_filter_uses_spark_table(self):
@@ -825,7 +843,7 @@ class TestSchemaEvolution:
         mock_lit.return_value.cast.assert_any_call("double")
         df.withColumn.assert_any_call("dropped_feat", null_col)
         # 缺欄不是錯誤，不發 ALTER 也不發 CREATE
-        # （SHOW TABLES は _table_exists のインフラ呼び出しを除外）
+        #（排除 _table_exists 的 SHOW TABLES 基礎呼叫）
         ddl_calls = [
             c[0][0] for c in spark.sql.call_args_list
             if not c[0][0].upper().startswith("SHOW TABLES")
@@ -880,7 +898,11 @@ class TestSchemaEvolution:
         with _patch_spark(spark):
             ds.save(df)
 
-        spark.catalog.tableExists.assert_not_called()
+        show_calls = [
+            c for c in spark.sql.call_args_list
+            if c[0][0].lstrip().upper().startswith("SHOW TABLES")
+        ]
+        assert show_calls == []
         # 既有契約路徑不變：CREATE IF NOT EXISTS 照發
         assert "CREATE TABLE IF NOT EXISTS" in spark.sql.call_args_list[0][0][0]
 
