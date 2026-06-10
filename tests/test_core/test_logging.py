@@ -114,8 +114,29 @@ class TestSetupLogging:
         handler_types = [type(h).__name__ for h in root.handlers]
         assert "StreamHandler" in handler_types
         assert "FileHandler" in handler_types
-        # Verify file was created
-        log_file = tmp_path / "logs" / "dataset_20260322_120000_aabbcc.jsonl"
+        # Verify file was created under <pipeline>/<YYYY-MM>/
+        log_file = (
+            tmp_path / "logs" / "dataset" / "2026-03"
+            / "dataset_20260322_120000_aabbcc.jsonl"
+        )
+        assert log_file.exists()
+
+    def test_creates_handlers_nonstandard_run_id_falls_back_to_current_month(
+        self, tmp_path
+    ):
+        from datetime import datetime, timezone
+
+        ctx = RunContext(pipeline="dataset", run_id="custom-run-id")
+        config = {
+            "logging": {
+                "file": {"enabled": True, "path": str(tmp_path / "logs")},
+            }
+        }
+        setup_logging(config, ctx)
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        log_file = (
+            tmp_path / "logs" / "dataset" / month / "dataset_custom-run-id.jsonl"
+        )
         assert log_file.exists()
 
     def test_file_disabled(self, tmp_path):
