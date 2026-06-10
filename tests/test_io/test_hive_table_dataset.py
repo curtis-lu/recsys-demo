@@ -918,8 +918,11 @@ class TestSchemaEvolution:
         with _patch_spark(spark):
             ds.save(df)
 
-        # 既有契約路徑不變：CREATE IF NOT EXISTS 照發（_ddl_sqls 排除 SHOW TABLES，僅含 DDL）
+        # 顯式 columns 路徑不得探測存在性：所有 spark.sql 呼叫都是 DDL，
+        # 不得有任何被 _ddl_sqls 濾掉的 SHOW TABLES 呼叫
         ddl_sqls = _ddl_sqls(spark)
+        assert [c[0][0] for c in spark.sql.call_args_list] == ddl_sqls
+        # 既有契約路徑不變：CREATE IF NOT EXISTS 照發
         assert len(ddl_sqls) >= 1
         assert "CREATE TABLE IF NOT EXISTS" in ddl_sqls[0]
 
