@@ -95,6 +95,68 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
     return config, params, run_context
 
 
+def _slice_pipeline(pipe, can_load, from_node, only_node):
+    """Apply --from-node/--only-node slicing. Returns (pipeline, plan|None).
+
+    Raises ValueError on conflicting flags or unknown node names (the
+    Pipeline methods list available node names in their message).
+    """
+    if from_node and only_node:
+        raise ValueError("--from-node and --only-node are mutually exclusive")
+    if from_node:
+        return pipe.slice_from(from_node, can_load)
+    if only_node:
+        return pipe.slice_only(only_node, can_load)
+    return pipe, None
+
+
+def _format_slice_plan(plan, total: int) -> list[str]:
+    """Render a SlicePlan as [plan]-prefixed lines for logging."""
+    lines = [
+        f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}",
+    ]
+    if plan.auto_included:
+        lines.append("[plan] auto-included (missing input -> producer re-run):")
+        for name, missing in plan.auto_included.items():
+            lines.append(f"[plan]   {name}  <- {', '.join(missing)}")
+    if plan.skipped:
+        lines.append(
+            f"[plan] skipped (inputs satisfied from catalog): {', '.join(plan.skipped)}"
+        )
+    if plan.skipped_side_effect:
+        lines.append(
+            "[plan] skipped side-effect nodes (outputs=None, not re-validated): "
+            + ", ".join(plan.skipped_side_effect)
+        )
+    lines.append(
+        "[plan] WARNING: resume assumes parameters are unchanged since the "
+        "skipped artifacts were produced (overwrite-style Hive tables are not "
+        "version-stamped)."
+    )
+    running = len(plan.requested) + len(plan.auto_included)
+    lines.append(f"[plan] running {running} of {total} nodes")
+    return lines
+
+
+def _format_node_list(pipe, can_load) -> list[str]:
+    """One line per node: name + what a --from-node start there would re-run."""
+    lines = ["[nodes] # node  (auto-included when starting here)"]
+    for i, node in enumerate(pipe.nodes):
+        _, plan = pipe.slice_from(node.name, can_load)
+        extra = ", ".join(plan.auto_included) if plan.auto_included else "-"
+        lines.append(f"[nodes] {i + 1:>2}  {node.name}  (+ {extra})")
+    return lines
+
+
+def _slice_extra(from_node, only_node):
+    """Manifest extra_metadata breadcrumb for sliced runs."""
+    if from_node:
+        return {"resumed_from": from_node}
+    if only_node:
+        return {"only_node": only_node}
+    return None
+
+
 def _execute_pipeline(
     pipeline_name: str,
     pipeline_kwargs: dict,
