@@ -501,8 +501,20 @@ class TestSlicingHelpers:
         lines = _format_node_list(_slice_test_pipe(), lambda n: True)
         joined = "\n".join(lines)
         assert all(name in joined for name in ("A", "B", "C"))
+        assert len(lines) == 4  # header + one line per node
+        assert lines[1].endswith("(+ -)")
 
     def test_slice_extra(self):
         assert _slice_extra("X", None) == {"resumed_from": "X"}
         assert _slice_extra(None, "Y") == {"only_node": "Y"}
         assert _slice_extra(None, None) is None
+
+
+class TestSlicingCLIFlags:
+    def test_all_four_commands_advertise_slicing_flags(self):
+        for cmd in ("dataset", "training", "inference", "evaluation"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0
+            out = re.sub(r"\s+", " ", result.output)
+            for flag in ("--from-node", "--only-node", "--dry-run", "--list-nodes"):
+                assert flag in out, f"{cmd} missing {flag}"
