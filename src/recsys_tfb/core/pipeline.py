@@ -1,6 +1,25 @@
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Callable
 
 from recsys_tfb.core.node import Node
+
+
+@dataclass(frozen=True)
+class SlicePlan:
+    """Execution plan produced by Pipeline.slice_from / slice_only.
+
+    Pure description — printing and assertions only, no runtime behavior.
+    ``auto_included`` records, per pulled-in node, the missing dataset(s)
+    that triggered inclusion (first trigger only when one node feeds the
+    same producer twice).
+    """
+
+    mode: str                                  # "from" | "only"
+    requested: tuple[str, ...]                 # node names explicitly selected
+    auto_included: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    skipped: tuple[str, ...] = ()              # nodes with outputs, not run
+    skipped_side_effect: tuple[str, ...] = ()  # zero-output nodes, not run
 
 
 class Pipeline:
@@ -101,3 +120,70 @@ class Pipeline:
         # Preserve original ordering
         filtered = [n for n in self._nodes if n in needed]
         return Pipeline(filtered)
+
+    def slice_from(
+        self, start_node: str, can_load: Callable[[str], bool]
+    ) -> tuple["Pipeline", SlicePlan]:
+        """Forward slice: start_node and everything after it (topological
+        position semantics), plus the minimal upstream closure for inputs
+        that ``can_load`` reports unavailable.
+
+        Counterpart of ``only_nodes_with_outputs`` (which cuts downstream
+        and is catalog-agnostic); this cuts upstream and consults the
+        catalog through ``can_load``.
+        """
+        idx = self._node_index(start_node)
+        return self._slice_with_expansion("from", self._sorted[idx:], can_load)
+
+    def slice_only(
+        self, node_name: str, can_load: Callable[[str], bool]
+    ) -> tuple["Pipeline", SlicePlan]:
+        """Slice down to a single node plus its minimal upstream closure."""
+        idx = self._node_index(node_name)
+        return self._slice_with_expansion("only", [self._sorted[idx]], can_load)
+
+    def _node_index(self, name: str) -> int:
+        for i, node in enumerate(self._sorted):
+            if node.name == name:
+                return i
+        available = ", ".join(n.name for n in self._sorted)
+        raise ValueError(
+            f"Unknown node '{name}'. Available nodes (topological order): {available}"
+        )
+
+    def _slice_with_expansion(
+        self, mode: str, requested: list[Node], can_load: Callable[[str], bool]
+    ) -> tuple["Pipeline", SlicePlan]:
+        producer: dict[str, Node] = {}
+        for node in self._sorted:
+            for out in node.outputs:
+                producer[out] = node
+
+        keep = set(requested)
+        auto: dict[str, list[str]] = {}
+        queue = deque(requested)
+        while queue:
+            node = queue.popleft()
+            for inp in node.inputs:
+                name = inp[1:] if inp.startswith("@") else inp
+                p = producer.get(name)
+                if p is None or p in keep:
+                    continue
+                if not can_load(name):
+                    keep.add(p)
+                    auto.setdefault(p.name, []).append(name)
+                    queue.append(p)
+
+        kept_nodes = [n for n in self._sorted if n in keep]
+        plan = SlicePlan(
+            mode=mode,
+            requested=tuple(n.name for n in requested),
+            auto_included={k: tuple(v) for k, v in auto.items()},
+            skipped=tuple(
+                n.name for n in self._sorted if n not in keep and n.outputs
+            ),
+            skipped_side_effect=tuple(
+                n.name for n in self._sorted if n not in keep and not n.outputs
+            ),
+        )
+        return Pipeline(kept_nodes), plan
