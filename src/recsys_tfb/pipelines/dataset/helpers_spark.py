@@ -70,20 +70,30 @@ def select_keys(
         logger.info("Sampled keys (ratio=1.0, no sampling)")
         return sampled
 
-    # Build override mapping as a UDF-free approach using when/otherwise
+    # Resolve the effective per-row sampling ratio.
     if sample_ratio_overrides:
-        # Construct group key column by concatenating with "|"
+        # Group-key column: concat parts with "|", every part cast to string so
+        # it matches the override dict keys byte-for-byte (same as the keys).
         if len(group_keys) == 1:
             group_key_col = F.col(group_keys[0]).cast("string")
         else:
             group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
 
-        # Build CASE expression for effective ratio
-        ratio_expr = F.lit(sample_ratio)
-        for gk_val, override_ratio in sample_ratio_overrides.items():
-            ratio_expr = F.when(group_key_col == F.lit(str(gk_val)), F.lit(override_ratio)).otherwise(ratio_expr)
-
-        keys = keys.withColumn("_effective_ratio", ratio_expr)
+        # Map group key -> override ratio via a broadcast hash-join: one O(1)
+        # probe per row, vs the previous linear CASE-WHEN chain (O(n_overrides)
+        # string compares per row, which dominated CPU at ~10^2 overrides x
+        # ~10^8 rows). Output is row-for-row identical: matched key -> override
+        # ratio, unmatched -> sample_ratio. The dict has unique keys, so the
+        # left join is 1:1 and never fans out rows.
+        ratio_df = _ratio_lookup_df(sample_pool.sparkSession, sample_ratio_overrides)
+        keys = (
+            keys.withColumn("_gk", group_key_col)
+            .join(F.broadcast(ratio_df), on="_gk", how="left")
+            .withColumn(
+                "_effective_ratio",
+                F.coalesce(F.col("_override_ratio"), F.lit(sample_ratio)),
+            )
+        )
     else:
         keys = keys.withColumn("_effective_ratio", F.lit(sample_ratio))
 
@@ -100,3 +110,28 @@ def select_keys(
         site,
     )
     return sampled
+
+
+def _ratio_lookup_df(spark, sample_ratio_overrides: dict) -> DataFrame:
+    """Build a tiny ``(_gk -> _override_ratio)`` lookup as a JVM-side
+    ``LocalRelation`` via a ``VALUES`` clause.
+
+    Deliberately avoids ``spark.createDataFrame(list)``, which routes through
+    ``sc.parallelize()`` and pickles rows with the driver's protocol (5 on
+    Python 3.10) -> fails to unpickle on pre-3.8 Python workers. A ``VALUES``
+    inline table is materialized entirely on the driver JVM and never touches
+    Python workers, so the downstream broadcast hash-join is safe regardless of
+    the cluster's worker Python. Mirrors the constraint documented in
+    ``preprocessing._spark._encode_categoricals``.
+    """
+    def _esc(s) -> str:
+        # Single-quote string literals: double embedded quotes, escape backslash.
+        return str(s).replace("\\", "\\\\").replace("'", "''")
+
+    rows = ", ".join(
+        f"('{_esc(gk)}', CAST({float(ratio)} AS DOUBLE))"
+        for gk, ratio in sample_ratio_overrides.items()
+    )
+    return spark.sql(
+        f"SELECT * FROM VALUES {rows} AS _ratio_lookup(_gk, _override_ratio)"
+    )
