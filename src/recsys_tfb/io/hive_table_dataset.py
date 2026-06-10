@@ -27,6 +27,12 @@ class HiveTableDataset(AbstractDataset):
 
     The table is created on first write via ``CREATE [EXTERNAL] TABLE IF NOT
     EXISTS``; subsequent writes reuse the existing table.
+
+    For ``columns="auto"`` tables that already exist, the schema evolves
+    append-only on save: new DataFrame columns are added via ALTER TABLE,
+    columns the DataFrame lacks are written as typed NULLs, and same-name
+    type conflicts raise. Explicitly declared ``columns`` are a contract
+    and never evolve.
     """
 
     def __init__(
@@ -151,14 +157,16 @@ class HiveTableDataset(AbstractDataset):
         if self._partition_filter:
             df = self._apply_partition_filter_cols(df)
 
-        if self._infer_columns and not self._columns:
-            self._columns = _infer_columns_from_spark(
-                df,
-                exclude={c["name"] for c in self._partition_cols}
-                | set(self._partition_filter.keys()),
-            )
-
-        self._ensure_table_exists(spark)
+        if self._infer_columns and spark.catalog.tableExists(self._qualified_name):
+            df = self._evolve_schema(spark, df)
+        else:
+            if self._infer_columns and not self._columns:
+                self._columns = _infer_columns_from_spark(
+                    df,
+                    exclude={c["name"] for c in self._partition_cols}
+                    | set(self._partition_filter.keys()),
+                )
+            self._ensure_table_exists(spark)
 
         if self._partition_cols or self._partition_filter:
             spark.conf.set(
@@ -236,6 +244,79 @@ class HiveTableDataset(AbstractDataset):
                     f"'{self._qualified_name}': expected {{'{v}'}}, "
                     f"DataFrame has {distinct_vals}"
                 )
+        return df
+
+    def _evolve_schema(self, spark, df):
+        """Align an auto-schema DataFrame with the existing table (append-only).
+
+        Policy mirrors source_etl's schema evolution, with one deliberate
+        difference: a column the table has but the df lacks is NOT an error
+        here — these tables are partition-versioned, so a newer version that
+        dropped a feature legitimately writes NULL while older partitions
+        keep their values. Same-name type conflicts fail loud: ANSI store
+        assignment would silently narrow (e.g. double -> int).
+
+        Side effects: may ALTER TABLE ADD COLUMNS; resets ``self._columns``
+        to the table's (post-ALTER) non-partition column order so the
+        positional insertInto projection follows the TABLE, not the df.
+        """
+        from pyspark.sql import functions as F
+
+        part_lower = {c["name"].lower() for c in self._partition_cols} | {
+            k.lower() for k in self._partition_filter
+        }
+        table_fields = [
+            f
+            for f in spark.table(self._qualified_name).schema.fields
+            if f.name.lower() not in part_lower
+        ]
+        df_fields = [
+            f for f in df.schema.fields if f.name.lower() not in part_lower
+        ]
+        df_types = {f.name.lower(): f.dataType.simpleString() for f in df_fields}
+
+        conflicts = [
+            (f.name, df_types[f.name.lower()], f.dataType.simpleString())
+            for f in table_fields
+            if f.name.lower() in df_types
+            and df_types[f.name.lower()] != f.dataType.simpleString()
+        ]
+        if conflicts:
+            detail = "; ".join(
+                f"{name}: DataFrame={d} vs table={t}" for name, d, t in conflicts
+            )
+            raise ValueError(
+                f"Type conflict writing to Hive table "
+                f"'{self._qualified_name}' ({detail}). Schema evolution never "
+                f"casts; fix the upstream dtype or rebuild the table."
+            )
+
+        table_lower = {f.name.lower() for f in table_fields}
+        new_fields = [f for f in df_fields if f.name.lower() not in table_lower]
+        if new_fields:
+            cols_sql = ", ".join(
+                f"{f.name} {f.dataType.simpleString().upper()}"
+                for f in new_fields
+            )
+            logger.info(
+                "Schema evolution on %s: ADD COLUMNS %s",
+                self._qualified_name,
+                [(f.name, f.dataType.simpleString()) for f in new_fields],
+            )
+            spark.sql(
+                f"ALTER TABLE {self._qualified_name} ADD COLUMNS ({cols_sql})"
+            )
+
+        for f in table_fields:
+            if f.name.lower() not in df_types:
+                df = df.withColumn(
+                    f.name, F.lit(None).cast(f.dataType.simpleString())
+                )
+
+        self._columns = [
+            {"name": f.name, "type": f.dataType.simpleString().upper()}
+            for f in table_fields + new_fields
+        ]
         return df
 
     def _ensure_table_exists(self, spark) -> None:

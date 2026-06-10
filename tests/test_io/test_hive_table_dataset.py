@@ -1,7 +1,8 @@
 """Tests for HiveTableDataset.
 
-All tests mock SparkSession because insertInto/catalog.tableExists require
-a real Hive metastore, which is not available in local dev.
+Most tests mock SparkSession because insertInto/catalog.tableExists require
+a real Hive metastore. TestSchemaEvolutionIntegration uses the real local
+`spark` fixture end-to-end.
 """
 
 from unittest.mock import MagicMock, patch
@@ -555,6 +556,7 @@ class TestAutoInferColumns:
         score_field.dataType.simpleString.return_value = "double"
         df.schema.fields = [schema_field, snap_field, score_field]
 
+        spark.catalog.tableExists.return_value = False
         with _patch_spark(spark):
             ds.save(df)
 
@@ -685,3 +687,141 @@ class TestLoadWithPartitionFilter:
         with _patch_spark(mock_spark):
             result = ds.load()
         assert set(result.columns) == {"snap_date", "cust_id", "score"}
+
+
+def _field(name: str, simple_type: str) -> MagicMock:
+    f = MagicMock()
+    f.name = name
+    f.dataType.simpleString.return_value = simple_type
+    return f
+
+
+def _df_with_fields(*fields) -> MagicMock:
+    df = MagicMock(name="DataFrame")
+    df.schema.fields = list(fields)
+    df.select.return_value = df
+    df.withColumn.return_value = df
+    df.select.return_value.distinct.return_value.collect.return_value = []
+    writer = MagicMock()
+    df.write.mode.return_value = writer
+    return df
+
+
+class TestSchemaEvolution:
+    """columns: 'auto' 且表已存在時的 append-only 演化（spec D2）。"""
+
+    def _make_ds(self) -> HiveTableDataset:
+        return HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            columns="auto",
+            partition_filter={"base_dataset_version": "abc12345"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+    def _make_spark_with_table(self, *table_fields) -> MagicMock:
+        spark = _make_spark_mock()
+        spark.catalog.tableExists.return_value = True
+        # 表 schema 含分區欄（spark.table 回傳完整 schema），演化邏輯須自行排除
+        part_filter = _field("base_dataset_version", "string")
+        part_col = _field("snap_date", "string")
+        spark.table.return_value.schema.fields = (
+            list(table_fields) + [part_filter, part_col]
+        )
+        return spark
+
+    def test_new_df_column_triggers_alter_and_table_order_projection(self):
+        spark = self._make_spark_with_table(
+            _field("cust_id", "string"), _field("score", "double"),
+        )
+        df = _df_with_fields(
+            _field("cust_id", "string"),
+            _field("new_feat", "double"),
+            _field("score", "double"),
+            _field("snap_date", "string"),
+        )
+        df.columns = ["cust_id", "new_feat", "score", "snap_date"]
+
+        with _patch_spark(spark):
+            self._make_ds().save(df)
+
+        # 只發 ALTER，不發 CREATE
+        sqls = [c[0][0] for c in spark.sql.call_args_list]
+        assert len(sqls) == 1
+        assert (
+            "ALTER TABLE ml_recsys.train_model_input ADD COLUMNS "
+            "(new_feat DOUBLE)" in sqls[0]
+        )
+        # 投影按表序：既有欄在前、新欄附加、再接分區欄
+        df.select.assert_any_call(
+            "cust_id", "score", "new_feat", "base_dataset_version", "snap_date"
+        )
+
+    def test_df_missing_column_filled_with_typed_null(self):
+        spark = self._make_spark_with_table(
+            _field("cust_id", "string"), _field("dropped_feat", "double"),
+        )
+        df = _df_with_fields(
+            _field("cust_id", "string"), _field("snap_date", "string"),
+        )
+        df.columns = ["cust_id", "snap_date"]
+
+        with _patch_spark(spark), \
+             patch("pyspark.sql.functions.lit") as mock_lit:
+            null_col = MagicMock(name="NullCol")
+            mock_lit.return_value.cast.return_value = null_col
+            self._make_ds().save(df)
+
+        mock_lit.assert_any_call(None)
+        mock_lit.return_value.cast.assert_any_call("double")
+        df.withColumn.assert_any_call("dropped_feat", null_col)
+        # 缺欄不是錯誤，不發 ALTER 也不發 CREATE
+        assert spark.sql.call_args_list == []
+
+    def test_type_conflict_raises_value_error(self):
+        spark = self._make_spark_with_table(
+            _field("cust_id", "string"), _field("score", "int"),
+        )
+        df = _df_with_fields(
+            _field("cust_id", "string"),
+            _field("score", "double"),
+            _field("snap_date", "string"),
+        )
+        df.columns = ["cust_id", "score", "snap_date"]
+
+        with _patch_spark(spark), \
+             pytest.raises(ValueError, match="(?i)type conflict.*score"):
+            self._make_ds().save(df)
+
+    def test_column_name_case_difference_is_not_a_new_column(self):
+        spark = self._make_spark_with_table(_field("CUST_ID", "string"))
+        df = _df_with_fields(
+            _field("cust_id", "string"), _field("snap_date", "string"),
+        )
+        df.columns = ["cust_id", "snap_date"]
+
+        with _patch_spark(spark):
+            self._make_ds().save(df)
+
+        assert spark.sql.call_args_list == []  # 無 ALTER、無 CREATE
+
+    def test_explicit_columns_table_never_checks_existence(self):
+        ds = HiveTableDataset(
+            database="db",
+            table="contract_table",
+            columns=[{"name": "a", "type": "STRING"}],
+            external=False,
+        )
+        spark = _make_spark_mock()
+        df = MagicMock(name="DataFrame")
+        df.select.return_value = df
+        writer = MagicMock()
+        df.write.mode.return_value = writer
+
+        with _patch_spark(spark):
+            ds.save(df)
+
+        spark.catalog.tableExists.assert_not_called()
+        # 既有契約路徑不變：CREATE IF NOT EXISTS 照發
+        assert "CREATE TABLE IF NOT EXISTS" in spark.sql.call_args_list[0][0][0]
