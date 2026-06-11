@@ -326,7 +326,8 @@ class TestRenderHtml:
     ]
     _KW = dict(ratio_dims=["cust_segment_typ", "prod_name"],
                group_keys=["cust_segment_typ", "prod_name", "label"],
-               weight_keys=["prod_name"], label_col="label", default_ratio=1.0)
+               weight_keys=["prod_name", "label"], weight_dims=["prod_name"],
+               label_col="label", default_ratio=1.0)
 
     def test_self_contained_and_embeds_stats_and_keys(self):
         html = render_html(self._STATS, **self._KW)
@@ -334,10 +335,22 @@ class TestRenderHtml:
         assert json.dumps(self._STATS) in html
         assert 'const GKEYS=["cust_segment_typ", "prod_name"]' in html
         assert 'const GROUP_KEYS=["cust_segment_typ", "prod_name", "label"]' in html
+        assert 'const WDIMS=["prod_name"]' in html
         assert 'const LABEL="label"' in html
-        assert 'const WKEYS=["prod_name"]' in html
+        assert 'const WKEYS=["prod_name", "label"]' in html
         assert "http://" not in html and "https://" not in html
         assert "Export JSON" in html and "Export YAML" in html
+
+    def test_two_factor_weight_surface_and_knobs(self):
+        html = render_html(self._STATS, **self._KW, t=0.1666, alpha=0.5)
+        assert "let T=0.1666" in html and "let ALPHA=0.5" in html
+        assert "function floorWeight(" in html and "function twoFactor(" in html
+        # global knob inputs recompute the weight surface
+        assert "id=t" in html and "id=alpha" in html and "function onKnob(" in html
+        # two-factor diagnostic columns
+        assert "有效負" in html and "eff pos" in html and "A·m" in html
+        # no legacy cold-boost knob remains
+        assert "WMAX" not in html and "suggestWeight" not in html
 
     def test_two_tabs_ratio_and_weight(self):
         html = render_html(self._STATS, **self._KW)
@@ -385,16 +398,20 @@ class TestRenderHtml:
         # cell ratio key reconstructed by walking GROUP_KEYS (label pos -> '0')
         assert "function ratioKey(" in html
         assert "k===LABEL?'0'" in html
+        # weight key reconstructed via WKEYS with label slot -> |1 / |0
+        assert "function weightKey(" in html
+        assert "weightKey(r.keys,'1')" in html and "weightKey(r.keys,'0')" in html
         assert "sample_group_keys" in html and "sample_weight_keys" in html
         assert "ratio_rows" in html and "weight_rows" in html
 
-    def test_empty_weight_keys_hides_weight_tab(self):
+    def test_empty_weight_dims_hides_weight_tab(self):
         html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
                            group_keys=["cust_segment_typ", "prod_name", "label"],
-                           weight_keys=[], label_col="label", default_ratio=1.0)
-        assert "const WKEYS=[]" in html
-        # weight tab disabled note when no weight keys configured
-        assert "WKEYS.length" in html
+                           weight_keys=[], weight_dims=[], label_col="label",
+                           default_ratio=1.0)
+        assert "const WDIMS=[]" in html
+        # weight tab disabled when no weight dims configured
+        assert "WDIMS.length" in html
 
     def test_edits_survive_sort_and_filter(self):
         html = render_html(self._STATS, **self._KW)
@@ -403,16 +420,16 @@ class TestRenderHtml:
 
     def test_explains_logic_with_configured_values(self):
         html = render_html(self._STATS, **self._KW,
-                           target_neg_pos=3.0, alpha=0.7, w_max=8.0)
+                           target_neg_pos=3.0, alpha=0.7, t=0.2)
         assert "sample_ratio_overrides" in html and "sample_weights" in html
-        assert "3.0" in html and "0.7" in html and "8.0" in html
+        assert "3.0" in html and "0.7" in html and "0.2" in html
         assert "http://" not in html and "https://" not in html
 
     def test_escapes_cell_values_and_threads_label_col(self):
         html = render_html(self._STATS, ratio_dims=["cust_segment_typ", "prod_name"],
                            group_keys=["cust_segment_typ", "prod_name", "label"],
-                           weight_keys=["prod_name"], label_col="label",
-                           default_ratio=1.0)
+                           weight_keys=["prod_name", "label"], weight_dims=["prod_name"],
+                           label_col="label", default_ratio=1.0)
         assert "function esc(" in html
         assert "r.keys.map(v=>" in html and "esc(v)" in html
         assert 'const LABEL="label"' in html

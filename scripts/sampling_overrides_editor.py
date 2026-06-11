@@ -374,27 +374,29 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <code>sample_group_keys</code>（label 以外的任意維度）調抽樣下採樣；<code>weight 面</code>依
 <code>sample_weight_keys</code>調訓練樣本權重。兩組 keys 可不同，匯出時各以自己的
 key-set 驗證。</p>
-<p><b>負樣本倍率 — 目標 neg:pos（ratio 面主旋鈕，可編輯）。</b>
-設定每列希望的負:正樣本倍數 R（每列預設 <code>{target_neg_pos}</code>）。保留<b>全部</b>
-正樣本，下採負樣本逼近此倍率。</p>
-<p><b>ratio — 負樣本保留率（唯讀，由倍率推導）。</b>
-<code>ratio = clamp(倍率 × n_pos / n_neg, 0, 1)</code>，即匯出值（key
-<code>segment|item|0</code>，label 固定 0）。<code>ratio = {default_ratio}</code> = 不下採。
-n_pos = 0 的冷門列因 neg:pos 無定義，改為在 ratio 欄直接填保留率（預設 1.0 = 全留負樣本）。</p>
-<p><b>實際倍率（唯讀）。</b>下採後實際 neg:pos；負樣本不足以達標時 ratio 夾到 1.0、
-此欄低於目標並以琥珀底 ⚠ 標示（已全留）。</p>
-<p><b>weight 面 n_neg / pos_rate（唯讀，連動下採樣後）。</b>weight 作用在下採樣後的
-訓練資料；正樣本全留故 <code>n_pos</code> 不變，負樣本依 ratio 面設定上捲，故此面的
-n_neg/pos_rate 反映實際訓練分佈。</p>
-<p><b>weight — 冷門加權</b>（訓練時 loss 權重）。建議值 =
-clamp((median_pos / n_pos) ^ <code>{alpha}</code>, 1.0, <code>{w_max}</code>)，
-median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加權。匯出對應
-<code>training.sample_weights</code>。</p>
+<p><b>ratio 面 = 成本（下採樣，預設 keep-all）。</b>負樣本倍率欄<b>預設留空 = 全留負樣本</b>；
+只在想為了訓練成本下採某些（負樣本爆量的）列時才填目標 neg:pos 倍率，<code>ratio =
+clamp(倍率 × n_pos / n_neg, 0, 1)</code>（匯出 key <code>…|0</code>）。地板不再靠下採樣達成
+（改由 weight 面），所以冷門產品<b>不必</b>下採、保留全部負樣本給 split-finding。
+n_pos = 0 的冷門列在 ratio 欄直接填保留率。</p>
+<p><b>weight 面 = 排序抬升（雙因子，全域旋鈕 t、α）。</b>對每個 weight cell：</p>
+<p><b>v（降負樣本）→ 地板。</b><code>v = n_pos·(1−t) / (t · n_neg(下採後))</code>，把該產品
+有效正樣本率墊到目標 <code>t = {t}</code>，消掉冷門產品的 log(base-rate) 懲罰。
+n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關（解耦）。</p>
+<p><b>A（注意力）→ loss 佔比。</b><code>A = (m_min / m)^<code>{alpha}</code></code>，
+<code>m = n_pos + n_neg(後)·v ∝ n_pos</code>；<b>下調方向</b>（最少正樣本產品 A=1、越熱越小、≤1），
+把各產品 loss 佔比從原始比拉向等權，鏡像 macro per-item mAP。</p>
+<p><b>匯出。</b><code>w_pos = A</code>（key <code>…|1</code>）、<code>w_neg = A·v</code>（key
+<code>…|0</code>），對應 <code>training.sample_weights</code>（<code>sample_weight_keys</code>
+須含 label 當切分軸）。綠/藍欄是加權後驗證：eff pos_rate(後) 應每列 = t、地板 logit(後) 應每列相同。</p>
 </details>
 <div id="tabs">
 <button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
 <button id="tb_weight" onclick="setTab('weight')">weight 面 (sample_weight_keys)</button>
 </div>
+<div id="knobs">weight 面旋鈕：
+ t（目標正樣本率）<input id=t type=number step=0.01 min=0 max=1 value="{t}" oninput="onKnob()">
+ · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()"></div>
 <div id="note"></div>
 <div id="sumbox"><label>分組試算（下採後）：<select id="grp" onchange="renderSummary()"></select></label>
 <div id="summary"></div></div>
@@ -407,17 +409,21 @@ median 取 weight 面各列 n_pos 中位數。<code>weight = 1.0</code> = 不加
 const STATS={stats_json};
 const GKEYS={gkeys_json};
 const GROUP_KEYS={group_keys_json};
+const WDIMS={wdims_json};
 const LABEL="{label_col}";
 const WKEYS={wkeys_json};
 const DR={default_ratio};
 const R={target_neg_pos};
-const ALPHA={alpha};
-const WMAX={w_max};
+let T={t};
+let ALPHA={alpha};
 const SEP='\\u0001';
-function median(arr){{ const s=arr.slice().sort((a,b)=>a-b),n=s.length;
- return n?(n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2):1; }}
-function suggestWeight(np,med,a,wmax){{ if(np<=0) return wmax;
- return Math.min(wmax,Math.max(1,Math.pow(med/np,a))); }}
+// two-factor weight (mirror of Python two_factor_weights/floor_weight)
+function floorWeight(np,nnp,t){{ if(np<=0||nnp<=0) return 1;
+ return np*(1-t)/(t*nnp); }}
+function twoFactor(np,nnp,t,a,mmin){{
+ if(np<=0) return {{w_pos:1,w_neg:1,v:1,A:1,m:nnp,eff:0}};
+ const v=floorWeight(np,nnp,t),m=np+nnp*v,A=Math.pow(mmin/m,a);
+ return {{w_pos:A,w_neg:A*v,v:v,A:A,m:m,eff:np/(np+nnp*v)}}; }}
 function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 function keepRate(nm,np,nn){{ if(np<=0||nn<=0) return 1;
@@ -430,7 +436,7 @@ function buildRatio(){{
   a.n_pos+=s.n_pos; a.n_neg+=s.n_neg; m.set(ks,a); }});
  const rows=[...m.values()];
  rows.forEach(r=>{{ r.pos_rate=(r.n_pos+r.n_neg>0?r.n_pos/(r.n_pos+r.n_neg):0);
-  r.suggested_neg_mult=R; r.ratio_direct=1;
+  r.suggested_neg_mult=''; r.ratio_direct=1;   // '' = keep-all (cost off by default)
   r.keys.forEach((v,j)=>r['k'+j]=v); }});
  return rows.sort((x,y)=>y.n_pos-x.n_pos);
 }}
@@ -443,22 +449,31 @@ function ratioByKey(){{
   keepRate(parseFloat(r.suggested_neg_mult),r.n_pos,r.n_neg)));
  return m;
 }}
-// weight store: aggregate STATS to WKEYS tuple; n_neg post-downsample via the
-// projected ratio_dims ratio. user weight edits preserved by key.
+// weight store: aggregate STATS to WDIMS tuple; n_neg post-downsample via the
+// projected ratio_dims ratio; two-factor (floor v + attention A) from t/α.
 function rebuildWeight(){{
- if(!WKEYS.length){{ WEIGHT=[]; return; }}
- const prev=new Map(WEIGHT.map(w=>[w.keyStr,w.weight]));
+ if(!WDIMS.length){{ WEIGHT=[]; return; }}
  const rbk=ratioByKey(),m=new Map();
- STATS.forEach(s=>{{ const wk=WKEYS.map(k=>s[k]),ks=wk.join('|');
+ STATS.forEach(s=>{{ const wk=WDIMS.map(k=>s[k]),ks=wk.join(SEP);
   const rk=GKEYS.map(k=>s[k]).join(SEP);
-  const a=m.get(ks)||{{keys:wk,keyStr:ks,n_pos:0,_nn:0}};
-  a.n_pos+=s.n_pos; a._nn+=s.n_neg*rbk.get(rk); m.set(ks,a); }});
- const rows=[...m.values()],med=median(rows.map(r=>r.n_pos));
- rows.forEach(r=>{{ r.n_neg_post=Math.round(r._nn);
-  const t=r.n_pos+r.n_neg_post; r.pos_rate_post=(t>0?r.n_pos/t:0);
-  r.suggested_weight=+suggestWeight(r.n_pos,med,ALPHA,WMAX).toFixed(4);
-  r.weight=prev.has(r.keyStr)?prev.get(r.keyStr):r.suggested_weight; }});
- WEIGHT=rows.sort((x,y)=>y.n_pos-x.n_pos);
+  const a=m.get(ks)||{{keys:wk,n_pos:0,n_neg_raw:0,_nn:0}};
+  a.n_pos+=s.n_pos; a.n_neg_raw+=s.n_neg; a._nn+=s.n_neg*rbk.get(rk); m.set(ks,a); }});
+ const cells=[...m.values()];
+ const masses=cells.filter(c=>c.n_pos>0)
+  .map(c=>c.n_pos+c._nn*floorWeight(c.n_pos,c._nn,T));
+ const mmin=masses.length?Math.min.apply(null,masses):1;
+ const FL=Math.log(T/(1-T));
+ let hot=-Infinity;
+ cells.forEach(c=>{{ c.nat_logit=(c.n_pos>0&&c._nn>0)?Math.log(c.n_pos/c._nn):-Infinity;
+  if(c.n_pos>0&&c.nat_logit>hot) hot=c.nat_logit; }});
+ cells.forEach(c=>{{ const tf=twoFactor(c.n_pos,c._nn,T,ALPHA,mmin);
+  c.n_neg_post=Math.round(c._nn); c.v=tf.v; c.A=tf.A;
+  c.w_pos=+tf.w_pos.toFixed(6); c.w_neg=+tf.w_neg.toFixed(6);
+  c.floored_neg_mass=Math.round(c._nn*tf.v); c.eff_pos_rate=tf.eff;
+  c.floor_logit=(c.n_pos>0?FL:c.nat_logit); c.attn_mass=tf.A*tf.m;
+  c.nat_gap=(c.n_pos>0?hot-c.nat_logit:NaN);
+  c.keys.forEach((v,j)=>c['k'+j]=v); }});
+ WEIGHT=cells.sort((x,y)=>y.n_pos-x.n_pos);
 }}
 let tab='ratio',sortKey=null,sortAsc=true;
 function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
@@ -467,7 +482,9 @@ function preview(r,nm){{
    if(isNaN(kr)) kr=1; kr=Math.min(1,Math.max(0,kr));
    return {{ratio:kr.toFixed(4),kn:String(Math.round(r.n_neg*kr)),pr:'0.0000',
    clamped:false,achieved:0,noNeg:false,noPos:true}}; }}
- if(isNaN(nm)) return {{ratio:'—',kn:'—',pr:'—',clamped:false,achieved:0,noNeg:false,noPos:false}};
+ if(isNaN(nm)) return {{ratio:'1.0000',kn:String(r.n_neg),
+   pr:(r.n_pos/(r.n_pos+r.n_neg)).toFixed(4),clamped:false,
+   achieved:(r.n_pos>0?r.n_neg/r.n_pos:0),noNeg:false,noPos:false}};
  if(r.n_neg<=0) return {{ratio:'1.0000',kn:'0',pr:(r.n_pos>0?1:0).toFixed(4),
    clamped:false,achieved:0,noNeg:true,noPos:false}};
  const raw=nm*r.n_pos/r.n_neg,ratio=Math.min(1,Math.max(0,raw));
@@ -532,16 +549,32 @@ function renderRatio(data,idx){{
 }}
 function renderWeight(data,idx){{
  document.querySelector('#g thead').innerHTML=
-  `<tr>`+WKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
+  `<tr>`+WDIMS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
   `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
-  `<th class=stat>n_neg(後)</th><th class=stat>pos_rate(後)</th>`+
-  `<th>weight</th></tr>`;
+  `<th class=stat>n_neg<br>(原始)</th><th class=stat>n_neg<br>(下採後)</th>`+
+  `<th class=stat>自然<br>logit</th>`+
+  `<th class=calc>nat 差距</th><th class=calc>odds<br>(e^Δ)</th>`+
+  `<th class=calc>v</th><th class=calc>A</th>`+
+  `<th class=calc>w_pos</th><th class=calc>w_neg</th>`+
+  `<th class=calc>有效負<br>樣本質量</th><th class=calc>eff pos<br>_rate(後)</th>`+
+  `<th class=calc>地板<br>logit(後)</th><th class=calc>A·m</th></tr>`;
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
- idx.forEach(i=>{{ const r=data[i],tr=document.createElement('tr');
+ idx.forEach(i=>{{ const r=data[i],tr=document.createElement('tr'),zero=r.n_pos<=0;
+  if(zero) tr.style.color='#999';
+  const e=zero?0:Math.exp(r.nat_gap);
+  const gap=zero?'':r.nat_gap.toFixed(2);
+  const odds=zero?'':(e>=10?String(Math.round(e)):e.toFixed(1));
   tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
-   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg_post}}</td>`+
-   `<td class=stat>${{r.pos_rate_post.toFixed(4)}}</td>`+
-   `<td class=edit contenteditable data-k=weight data-i=${{i}}>${{r.weight}}</td>`;
+   `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg_raw}}</td>`+
+   `<td class=stat>${{r.n_neg_post}}</td>`+
+   `<td class=stat>${{r.n_pos>0?r.nat_logit.toFixed(3):'—'}}</td>`+
+   `<td class=calc>${{gap}}</td><td class=calc>${{odds}}</td>`+
+   `<td class=calc>${{(+r.v).toPrecision(3)}}</td><td class=calc>${{r.A.toFixed(4)}}</td>`+
+   `<td class=calc>${{r.w_pos}}</td><td class=calc>${{r.w_neg}}</td>`+
+   `<td class=calc>${{r.floored_neg_mass}}</td>`+
+   `<td class=calc>${{r.eff_pos_rate.toFixed(4)}}</td>`+
+   `<td class=calc>${{r.n_pos>0?r.floor_logit.toFixed(3):'—'}}</td>`+
+   `<td class=calc>${{Math.round(r.attn_mass)}}</td>`;
   tb.appendChild(tr); }});
 }}
 function render(){{
@@ -562,16 +595,26 @@ function sortBy(k){{ syncEdits(); if(sortKey===k){{sortAsc=!sortAsc;}}
 function flt(){{ syncEdits(); render(); }}
 function setTab(t){{
  syncEdits();
- if(t==='weight' && !WKEYS.length){{
+ if(t==='weight' && !WDIMS.length){{
   document.getElementById('note').textContent=
-   'sample_weight_keys 為空，無 weight 面可編輯。'; return; }}
+   'sample_weight_keys 為空（或只有 label），無 weight 面可編輯。'; return; }}
  tab=t; sortKey=null;
  document.getElementById('tb_ratio').className=(t==='ratio'?'active':'');
  document.getElementById('tb_weight').className=(t==='weight'?'active':'');
+ document.getElementById('knobs').style.display=(t==='weight'?'':'none');
  document.getElementById('note').textContent=
-  (t==='weight'?'n_neg(後)/pos_rate(後) 反映 ratio 面目前的下採樣設定。':'');
+  (t==='weight'
+   ?'雙因子：v 把地板墊到 t、A 壓 loss 佔比；n_neg(下採後) 連動 ratio 面。eff/地板欄每列應相同。'
+   :'');
  if(t==='weight') rebuildWeight();
  render();
+}}
+function onKnob(){{
+ const t=parseFloat(document.getElementById('t').value);
+ const a=parseFloat(document.getElementById('alpha').value);
+ if(!isNaN(t)&&t>0&&t<1) T=t;
+ if(!isNaN(a)&&a>=0) ALPHA=a;
+ rebuildWeight(); if(tab==='weight') render();
 }}
 function initSummary(){{
  const sel=document.getElementById('grp');
@@ -601,11 +644,15 @@ function ratioKey(keys){{
  let it=0;
  return GROUP_KEYS.map(k=>k===LABEL?'0':String(keys[it++])).join('|');
 }}
+function weightKey(keys,lbl){{
+ let it=0;
+ return WKEYS.map(k=>k===LABEL?lbl:String(keys[it++])).join('|');
+}}
 function exp(kind){{
  syncEdits(); rebuildWeight();
  const ratio_rows=RATIO.map(r=>{{ const pv=preview(r,parseFloat(r.suggested_neg_mult));
   return {{keys:r.keys,ratio:(pv.ratio==='—'?DR:parseFloat(pv.ratio))}}; }});
- const weight_rows=WEIGHT.map(r=>({{keys:r.keys,weight:parseFloat(r.weight)}}));
+ const weight_rows=WEIGHT.map(r=>({{keys:r.keys,w_pos:r.w_pos,w_neg:r.w_neg}}));
  const o={{sample_group_keys:GROUP_KEYS,sample_weight_keys:WKEYS,
   ratio_rows:ratio_rows,weight_rows:weight_rows}};
  if(kind==='json'){{
@@ -616,7 +663,8 @@ function exp(kind){{
  }}else{{
   const ov={{}},sw={{}};
   ratio_rows.forEach(r=>{{ if(r.ratio!==DR) ov[ratioKey(r.keys)]=r.ratio; }});
-  weight_rows.forEach(r=>{{ if(r.weight!==1.0) sw[r.keys.join('|')]=r.weight; }});
+  weight_rows.forEach(r=>{{ if(r.w_pos!==1.0) sw[weightKey(r.keys,'1')]=r.w_pos;
+   if(r.w_neg!==1.0) sw[weightKey(r.keys,'0')]=r.w_neg; }});
   document.getElementById('out').textContent=
    '# -> conf/base/parameters_dataset.yaml (under dataset:)\\n'+
    'sample_ratio_overrides:\\n'+
@@ -638,30 +686,35 @@ def render_html(
     group_keys: list,
     label_col: str,
     weight_keys: list,
+    weight_dims: list,
     default_ratio: float,
-    target_neg_pos: float = 5.0,
+    t: float = 1 / 6,
     alpha: float = 0.5,
-    w_max: float = 5.0,
+    target_neg_pos: float = 5.0,
 ) -> str:
     """Render a self-contained two-tab HTML editor (pure stdlib, no assets).
 
     ``stats`` are union-granularity dict rows from profile_stats; the browser
     mirrors aggregate_surfaces in JS to build the ratio and weight surfaces
     live. ``ratio_dims`` (= sample_group_keys minus label) keys the ratio
-    surface; ``group_keys`` (the full sample_group_keys incl. label, in order)
-    is used to reconstruct override keys on export. The tuning knobs are
-    surfaced in the help text so it reflects the configured values.
+    surface; ``group_keys`` (full, incl. label) reconstructs ratio override
+    keys. ``weight_dims`` (= sample_weight_keys minus label) keys the two-factor
+    weight surface, driven by the global knobs ``t`` (target pos-rate floor) and
+    ``alpha`` (attention damping); ``weight_keys`` (full, incl. label)
+    reconstructs the ``…|1``/``…|0`` weight keys on export. ``target_neg_pos`` is
+    only the ratio surface's cost-downsample reference (default keep-all).
     """
     return _HTML_TEMPLATE.format(
         stats_json=json.dumps(stats),
         gkeys_json=json.dumps(ratio_dims),
         group_keys_json=json.dumps(group_keys),
+        wdims_json=json.dumps(weight_dims),
         label_col=label_col,
         wkeys_json=json.dumps(weight_keys),
         default_ratio=default_ratio,
         target_neg_pos=target_neg_pos,
         alpha=alpha,
-        w_max=w_max,
+        t=t,
     )
 
 
