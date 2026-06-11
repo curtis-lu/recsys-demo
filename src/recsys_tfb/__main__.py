@@ -95,14 +95,84 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
     return config, params, run_context
 
 
+def _slice_pipeline(pipe, can_load, from_node, only_node):
+    """Apply --from-node/--only-node slicing. Returns (pipeline, plan|None).
+
+    Raises ValueError on conflicting flags or unknown node names (the
+    Pipeline methods list available node names in their message).
+    """
+    if from_node and only_node:
+        raise ValueError("--from-node and --only-node are mutually exclusive")
+    if from_node:
+        return pipe.slice_from(from_node, can_load)
+    if only_node:
+        return pipe.slice_only(only_node, can_load)
+    return pipe, None
+
+
+def _format_slice_plan(plan, total: int) -> list[str]:
+    """Render a SlicePlan as [plan]-prefixed lines for logging."""
+    lines = [
+        f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}",
+    ]
+    if plan.auto_included:
+        lines.append("[plan] auto-included (missing input -> producer re-run):")
+        for name, missing in plan.auto_included.items():
+            lines.append(f"[plan]   {name}  <- {', '.join(missing)}")
+    if plan.skipped:
+        lines.append(
+            f"[plan] skipped (inputs satisfied from catalog): {', '.join(plan.skipped)}"
+        )
+    if plan.skipped_side_effect:
+        lines.append(
+            "[plan] skipped side-effect nodes (outputs=None, not re-validated): "
+            + ", ".join(plan.skipped_side_effect)
+        )
+    lines.append(
+        "[plan] WARNING: resume assumes parameters are unchanged since the "
+        "skipped artifacts were produced (overwrite-style Hive tables are not "
+        "version-stamped)."
+    )
+    running = len(plan.requested) + len(plan.auto_included)
+    lines.append(f"[plan] running {running} of {total} nodes")
+    return lines
+
+
+def _format_node_list(pipe, can_load) -> list[str]:
+    """One line per node: name + what a --from-node start there would re-run."""
+    lines = ["[nodes] # node  (auto-included when starting here)"]
+    for i, node in enumerate(pipe.nodes):
+        _, plan = pipe.slice_from(node.name, can_load)
+        extra = ", ".join(plan.auto_included) if plan.auto_included else "-"
+        lines.append(f"[nodes] {i + 1:>2}  {node.name}  (+ {extra})")
+    return lines
+
+
+def _slice_extra(from_node, only_node):
+    """Manifest extra_metadata breadcrumb for sliced runs."""
+    if from_node:
+        return {"resumed_from": from_node}
+    if only_node:
+        return {"only_node": only_node}
+    return None
+
+
 def _execute_pipeline(
     pipeline_name: str,
     pipeline_kwargs: dict,
     runtime_params: dict,
     config: ConfigLoader,
     params: dict,
-    env: str
-):
+    env: str,
+    *,
+    from_node: Optional[str] = None,
+    only_node: Optional[str] = None,
+    dry_run: bool = False,
+    list_nodes: bool = False,
+) -> bool:
+    """Run the pipeline; returns False when nothing was executed
+    (--dry-run / --list-nodes early exits) so callers skip post-run
+    manifest writing."""
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
     except KeyError:
@@ -131,6 +201,42 @@ def _execute_pipeline(
     catalog = DataCatalog(catalog_config)
     catalog.add("parameters", MemoryDataset(data=substitution_params))
 
+    # Memoize exists(): slice probing re-checks the same datasets repeatedly
+    # (per-node listing ~6x); each check can be a Hive metastore round-trip.
+    _exists_memo: dict = {}
+
+    def _can_load(name: str) -> bool:
+        if name not in _exists_memo:
+            _exists_memo[name] = catalog.exists(name)
+        return _exists_memo[name]
+
+    if list_nodes:
+        if from_node or only_node:
+            logger.error("--list-nodes cannot be combined with --from-node/--only-node")
+            raise typer.Exit(code=1)
+        for line in _format_node_list(pipe, _can_load):
+            logger.info(line)
+        return False
+
+    total = len(pipe.nodes)
+    try:
+        pipe, plan = _slice_pipeline(pipe, _can_load, from_node, only_node)
+    except ValueError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1)
+
+    if plan is not None:
+        for line in _format_slice_plan(plan, total):
+            logger.info(line)
+    if dry_run:
+        if plan is None:
+            logger.info(
+                "[plan] no slicing flags: full run of %d nodes "
+                "(use --list-nodes to inspect resume costs)", total,
+            )
+        logger.info("[plan] dry-run: nothing executed, nothing written")
+        return False
+
     logger.info("Running pipeline '%s' (env=%s)", pipeline_name, env)
     try:
         runner = Runner()
@@ -138,6 +244,7 @@ def _execute_pipeline(
     except Exception:
         logger.exception("Pipeline '%s' failed", pipeline_name)
         raise typer.Exit(code=1)
+    return True
 
 
 def _write_pipeline_manifest(
@@ -320,6 +427,22 @@ def sample_pool_etl(
 @app.command(name="dataset")
 def dataset(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    from_node: Optional[str] = typer.Option(
+        None, "--from-node",
+        help="Start from this node (topological position); missing upstream "
+             "artifacts are auto re-run",
+    ),
+    only_node: Optional[str] = typer.Option(
+        None, "--only-node",
+        help="Run a single node (plus minimal upstream re-runs for missing inputs)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the slice execution plan and exit"
+    ),
+    list_nodes: bool = typer.Option(
+        False, "--list-nodes",
+        help="List pipeline nodes with their resume cost and exit",
+    ),
 ):
     """Run the dataset pipeline (always recomputes versions from parameters)."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -372,7 +495,13 @@ def dataset(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
-    _execute_pipeline("dataset", pipeline_kwargs, runtime_params, config, params, env)
+    executed = _execute_pipeline(
+        "dataset", pipeline_kwargs, runtime_params, config, params, env,
+        from_node=from_node, only_node=only_node,
+        dry_run=dry_run, list_nodes=list_nodes,
+    )
+    if not executed:
+        return
 
     # Post run: write three (or two) manifests and update corresponding symlinks.
     base_dir = data_dir / "dataset" / base_v
@@ -387,6 +516,7 @@ def dataset(
             "artifacts": _dir_artifacts(base_dir),
         },
         run_id=run_context.run_id,
+        extra_metadata=_slice_extra(from_node, only_node),
         symlink_target=data_dir / "dataset" / "latest",
         params_name="parameters_dataset",
         params_dict=params_dataset,
@@ -442,6 +572,22 @@ def training(
         help="Calibration variant ID (default: latest under base dataset; "
              "only used when training.calibration.enabled=true)",
     ),
+    from_node: Optional[str] = typer.Option(
+        None, "--from-node",
+        help="Start from this node (topological position); missing upstream "
+             "artifacts are auto re-run",
+    ),
+    only_node: Optional[str] = typer.Option(
+        None, "--only-node",
+        help="Run a single node (plus minimal upstream re-runs for missing inputs)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the slice execution plan and exit"
+    ),
+    list_nodes: bool = typer.Option(
+        False, "--list-nodes",
+        help="List pipeline nodes with their resume cost and exit",
+    ),
 ):
     """Run the training pipeline."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -490,7 +636,13 @@ def training(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
-    _execute_pipeline("training", pipeline_kwargs, runtime_params, config, params, env)
+    executed = _execute_pipeline(
+        "training", pipeline_kwargs, runtime_params, config, params, env,
+        from_node=from_node, only_node=only_node,
+        dry_run=dry_run, list_nodes=list_nodes,
+    )
+    if not executed:
+        return
 
     # Post run
     version_dir = data_dir / "models" / mv
@@ -505,11 +657,15 @@ def training(
     if cal_v is not None:
         metadata_kwargs["calibration_variant_id"] = cal_v
 
+    extra = _sample_weight_extra(version_dir) or {}
+    slice_extra = _slice_extra(from_node, only_node)
+    if slice_extra:
+        extra.update(slice_extra)
     _write_pipeline_manifest(
         version_dir=version_dir,
         metadata_kwargs=metadata_kwargs,
         run_id=run_context.run_id,
-        extra_metadata=_sample_weight_extra(version_dir),
+        extra_metadata=extra or None,
         symlink_target=None,
         params_name="parameters_training",
         params_dict=params_training,
@@ -551,6 +707,22 @@ def inference(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
     model_version: Optional[str] = typer.Option(
         None, "--model-version", help="Model version to use for inference (default: best symlink)"
+    ),
+    from_node: Optional[str] = typer.Option(
+        None, "--from-node",
+        help="Start from this node (topological position); missing upstream "
+             "artifacts are auto re-run",
+    ),
+    only_node: Optional[str] = typer.Option(
+        None, "--only-node",
+        help="Run a single node (plus minimal upstream re-runs for missing inputs)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the slice execution plan and exit"
+    ),
+    list_nodes: bool = typer.Option(
+        False, "--list-nodes",
+        help="List pipeline nodes with their resume cost and exit",
     ),
 ):
     """Run the inference pipeline."""
@@ -594,7 +766,13 @@ def inference(
         "source_model_version": model_version,
     }
 
-    _execute_pipeline("inference", {}, runtime_params, config, params, env)
+    executed = _execute_pipeline(
+        "inference", {}, runtime_params, config, params, env,
+        from_node=from_node, only_node=only_node,
+        dry_run=dry_run, list_nodes=list_nodes,
+    )
+    if not executed:
+        return
 
     # Post run
     version_dir = data_dir / "inference" / mv / snap_date
@@ -613,6 +791,7 @@ def inference(
         version_dir=version_dir,
         metadata_kwargs=metadata_kwargs,
         run_id=run_context.run_id,
+        extra_metadata=_slice_extra(from_node, only_node),
         symlink_target=data_dir / "inference" / "latest",
         params_name="parameters_inference",
         params_dict=params_inference,
@@ -635,6 +814,22 @@ def evaluation(
     compare_only: Optional[str] = typer.Option(
         None, "--compare-only",
         help="Like --compare, but skip prepare/compute/baseline/report and read eval_predictions from Hive (only produces report_comparison.html)",
+    ),
+    from_node: Optional[str] = typer.Option(
+        None, "--from-node",
+        help="Start from this node (topological position); missing upstream "
+             "artifacts are auto re-run",
+    ),
+    only_node: Optional[str] = typer.Option(
+        None, "--only-node",
+        help="Run a single node (plus minimal upstream re-runs for missing inputs)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the slice execution plan and exit"
+    ),
+    list_nodes: bool = typer.Option(
+        False, "--list-nodes",
+        help="List pipeline nodes with their resume cost and exit",
     ),
 ):
     """Run the evaluation pipeline."""
@@ -698,10 +893,20 @@ def evaluation(
         "compare_source": compare_source_dict,
         "compare_only": bool(compare_only),
     }
-    _execute_pipeline("evaluation", pipeline_kwargs, runtime_params, config, params, env)
+    executed = _execute_pipeline(
+        "evaluation", pipeline_kwargs, runtime_params, config, params, env,
+        from_node=from_node, only_node=only_node,
+        dry_run=dry_run, list_nodes=list_nodes,
+    )
+    if not executed:
+        return
 
     # Post run
     version_dir = data_dir / "evaluation" / mv / snap_date
+    extra = {"snap_date": snap_date, "post_training": post_training}
+    slice_extra = _slice_extra(from_node, only_node)
+    if slice_extra:
+        extra.update(slice_extra)
     _write_pipeline_manifest(
         version_dir=version_dir,
         metadata_kwargs={
@@ -711,7 +916,7 @@ def evaluation(
             "model_version": mv,
         },
         run_id=run_context.run_id,
-        extra_metadata={"snap_date": snap_date, "post_training": post_training},
+        extra_metadata=extra,
         symlink_target=data_dir / "evaluation" / "latest"
     )
     logger.info("Pipeline 'evaluation' completed successfully")

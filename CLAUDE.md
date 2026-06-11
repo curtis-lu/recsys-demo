@@ -88,6 +88,8 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
   （`suggest_categorical_cols`、`sampling_overrides_editor`）皆 `export SPARK_CONF_DIR` 後 host venv 直跑。
 - `--env local`（預設）；`--env local` 是唯一本機環境識別符，無需切換。
 - stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 local[*] by-design 噪音。
+- 部分執行：`--from-node`/`--only-node`/`--dry-run`/`--list-nodes`（四個 pipeline 指令皆有；
+  缺料自動補跑上游）。細節與開發守則見 `docs/operations/pipeline-slicing.md`。
 - 端到端 smoke：`bash scripts/local_e2e.sh`。
 - 互動 ad-hoc 查表：`bash scripts/local_spark_shell.sh`（pyspark REPL）／`… sql`（spark-sql CLI）。
 

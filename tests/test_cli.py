@@ -443,3 +443,78 @@ def test_sample_weight_extra_reads_report(tmp_path):
 def test_sample_weight_extra_absent_returns_none(tmp_path):
     from recsys_tfb.__main__ import _sample_weight_extra
     assert _sample_weight_extra(tmp_path) is None
+
+
+from recsys_tfb.__main__ import (
+    _format_node_list,
+    _format_slice_plan,
+    _slice_extra,
+    _slice_pipeline,
+)
+from recsys_tfb.core.node import Node
+from recsys_tfb.core.pipeline import Pipeline
+
+
+def _slice_test_pipe():
+    return Pipeline([
+        Node(func=lambda: None, outputs="a", name="A"),
+        Node(func=lambda a: None, inputs=["a"], outputs="b", name="B"),
+        Node(func=lambda b: None, inputs=["b"], outputs="c", name="C"),
+    ])
+
+
+class TestSlicingHelpers:
+    def test_slice_pipeline_mutual_exclusion(self):
+        import pytest
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _slice_pipeline(_slice_test_pipe(), lambda n: True, "B", "C")
+
+    def test_slice_pipeline_no_flags_passthrough(self):
+        pipe = _slice_test_pipe()
+        out, plan = _slice_pipeline(pipe, lambda n: True, None, None)
+        assert out is pipe
+        assert plan is None
+
+    def test_slice_pipeline_from_node(self):
+        out, plan = _slice_pipeline(_slice_test_pipe(), lambda n: True, "B", None)
+        assert [n.name for n in out.nodes] == ["B", "C"]
+        assert plan.mode == "from"
+
+    def test_slice_pipeline_only_node(self):
+        out, plan = _slice_pipeline(_slice_test_pipe(), lambda n: True, None, "B")
+        assert [n.name for n in out.nodes] == ["B"]
+        assert plan.mode == "only"
+
+    def test_format_slice_plan_contents(self):
+        _, plan = _slice_pipeline(
+            _slice_test_pipe(), lambda n: n == "a", "C", None
+        )
+        lines = _format_slice_plan(plan, total=3)
+        text = "\n".join(lines)
+        assert "auto-included" in text
+        assert "B" in text and "<- b" in text
+        assert "skipped" in text and "A" not in plan.auto_included
+        assert "WARNING" in text
+        assert "running 2 of 3 nodes" in text
+
+    def test_format_node_list_one_line_per_node(self):
+        lines = _format_node_list(_slice_test_pipe(), lambda n: True)
+        joined = "\n".join(lines)
+        assert all(name in joined for name in ("A", "B", "C"))
+        assert len(lines) == 4  # header + one line per node
+        assert lines[1].endswith("(+ -)")
+
+    def test_slice_extra(self):
+        assert _slice_extra("X", None) == {"resumed_from": "X"}
+        assert _slice_extra(None, "Y") == {"only_node": "Y"}
+        assert _slice_extra(None, None) is None
+
+
+class TestSlicingCLIFlags:
+    def test_all_four_commands_advertise_slicing_flags(self):
+        for cmd in ("dataset", "training", "inference", "evaluation"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0
+            out = re.sub(r"\s+", " ", result.output)
+            for flag in ("--from-node", "--only-node", "--dry-run", "--list-nodes"):
+                assert flag in out, f"{cmd} missing {flag}"

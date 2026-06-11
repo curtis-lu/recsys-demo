@@ -190,6 +190,19 @@ best_params:
   type: JSONDataset
   filepath: data/models/${model_version}/best_params.json
 
+best_iteration:
+  type: JSONDataset
+  filepath: data/models/${model_version}/best_iteration.json
+
+# hpo/ subdirectory is REQUIRED: ModelAdapterDataset writes a model_meta.json
+# sidecar next to its filepath; sharing a directory with `model` would let the
+# two datasets overwrite each other's sidecar (calibration flag cross-talk).
+# Persisted (with best_iteration) so `training --from-node finalize_model`
+# can skip tune_hyperparameters entirely.
+hpo_best_model:
+  type: ModelAdapterDataset
+  filepath: data/models/${model_version}/hpo/model.txt
+
 evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
