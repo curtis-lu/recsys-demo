@@ -16,6 +16,7 @@ from recsys_tfb.core.versioning import (
     compute_calibration_variant_id,
     compute_feature_table_fingerprint,
     compute_model_version,
+    compute_search_id,
     compute_train_variant_id,
     get_git_commit,
     read_manifest,
@@ -674,3 +675,63 @@ class TestWeightingVersioning:
         assert compute_model_version(p1, "base", "tv") != \
                compute_model_version(p2, "base", "tv")
         assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
+
+def _tp() -> dict:
+    """Minimal model-defining training params for search_id tests."""
+    return {
+        "training": {
+            "algorithm": "lightgbm",
+            "algorithm_params": {
+                "objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+            },
+            "n_trials": 20,
+            "num_iterations": 500,
+            "early_stopping_rounds": 50,
+            "search_space": [
+                {"name": "learning_rate", "type": "float", "low": 0.01, "high": 0.3},
+            ],
+        },
+    }
+
+
+class TestComputeSearchId:
+    def test_returns_8_char_hex(self):
+        sid = compute_search_id(_tp(), "baseV", "trainV")
+        assert len(sid) == 8 and all(c in "0123456789abcdef" for c in sid)
+
+    def test_deterministic(self):
+        assert compute_search_id(_tp(), "b", "t") == compute_search_id(_tp(), "b", "t")
+
+    def test_n_trials_does_not_affect(self):
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["n_trials"] = 30
+        assert compute_search_id(p1, "b", "t") == compute_search_id(p2, "b", "t")
+
+    def test_num_iterations_affects(self):
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["num_iterations"] = 1000
+        assert compute_search_id(p1, "b", "t") != compute_search_id(p2, "b", "t")
+
+    def test_early_stopping_affects(self):
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["early_stopping_rounds"] = 100
+        assert compute_search_id(p1, "b", "t") != compute_search_id(p2, "b", "t")
+
+    def test_search_space_affects(self):
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["search_space"][0]["high"] = 0.5
+        assert compute_search_id(p1, "b", "t") != compute_search_id(p2, "b", "t")
+
+    def test_base_dataset_version_affects(self):
+        assert compute_search_id(_tp(), "b1", "t") != compute_search_id(_tp(), "b2", "t")
+
+    def test_verbosity_does_not_affect(self):
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["algorithm_params"]["verbosity"] = 1
+        assert compute_search_id(p1, "b", "t") == compute_search_id(p2, "b", "t")
+
+    def test_calibration_variant_affects_when_present(self):
+        a = compute_search_id(_tp(), "b", "t", "cal1")
+        b = compute_search_id(_tp(), "b", "t", "cal2")
+        assert a != b
