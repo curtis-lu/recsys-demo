@@ -16,7 +16,6 @@ from scripts.sampling_overrides_editor import (
     render_html,
     resolve_keys,
     suggest_ratio,
-    suggest_weight,
     two_factor_weights,
 )
 
@@ -35,23 +34,6 @@ class TestSuggestRatio:
 
     def test_zero_negatives_returns_one(self):
         assert suggest_ratio(n_pos=10, n_neg=0, target_neg_pos=5) == 1.0
-
-
-class TestSuggestWeight:
-    def test_inverse_frequency_with_sqrt_damping(self):
-        # median=800, n_pos=200 -> (800/200)**0.5 = 2.0
-        assert suggest_weight(n_pos=200, median_pos=800, alpha=0.5, w_max=5.0) == 2.0
-
-    def test_hot_product_clamped_to_one(self):
-        # n_pos >= median -> ratio<=1 -> clamp lower bound 1.0
-        assert suggest_weight(n_pos=8000, median_pos=800, alpha=0.5, w_max=5.0) == 1.0
-
-    def test_extreme_tail_capped_at_w_max(self):
-        # (800/8)**0.5 = 10 -> cap 5.0
-        assert suggest_weight(n_pos=8, median_pos=800, alpha=0.5, w_max=5.0) == 5.0
-
-    def test_zero_pos_capped_at_w_max(self):
-        assert suggest_weight(n_pos=0, median_pos=800, alpha=0.5, w_max=5.0) == 5.0
 
 
 class TestFloorWeight:
@@ -495,32 +477,46 @@ class TestProfileStats:
 # aggregate_surfaces: ratio + weight surfaces, downsample-coupled projection
 # ---------------------------------------------------------------------------
 class TestAggregateSurfaces:
-    # 4 fine cells over (segment, item); weight default keys = [item]
+    # 4 fine cells over (segment, item); weight grain = [item]
     _STATS = [
         {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 100, "n_neg": 9000},
         {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 60,  "n_neg": 500},
         {"cust_segment_typ": "mass", "prod_name": "b", "n_pos": 80,  "n_neg": 2000},
         {"cust_segment_typ": "hnw",  "prod_name": "b", "n_pos": 0,   "n_neg": 40},
     ]
+    T = 1 / 6  # (1-t)/t = 5
 
-    def test_case1_weight_by_item_couples_to_ratio_downsample(self):
+    def test_ratio_downsample_then_weight_floor(self):
         # neg_mult: mass|a=5 (ratio=clamp(5*100/9000)=0.0556), others keep-all
         nm = {("mass", "a"): 5.0, ("hnw", "a"): 1e9,
               ("mass", "b"): 1e9, ("hnw", "b"): 1e9}
         out = aggregate_surfaces(
             self._STATS, nm, ratio_dims=["cust_segment_typ", "prod_name"],
-            weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+            weight_dims=["prod_name"], alpha=0.5, t=self.T, default_neg_mult=5.0)
         rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
         assert abs(rr[("mass", "a")]["ratio"] - (5 * 100 / 9000)) < 1e-9
         assert rr[("mass", "a")]["kept_neg"] == 500
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
-        assert wr[("a",)]["n_pos"] == 160          # 100+60, unchanged by downsample
-        assert wr[("a",)]["n_neg_post"] == 1000     # round(9000*0.0556 + 500*1.0)
-        assert wr[("b",)]["n_neg_post"] == 2040     # 2000+40, fully kept
+        # prod a: n_pos 100+60=160; n_neg_post 9000*0.0556+500=1000
+        assert wr[("a",)]["n_pos"] == 160
+        assert wr[("a",)]["n_neg_post"] == 1000
+        assert wr[("b",)]["n_neg_post"] == 2040
+        # floor v lifts both to t; v_a = 160*5/1000 = 0.8
+        assert abs(wr[("a",)]["v"] - 0.8) < 1e-9
+        assert abs(wr[("a",)]["eff_pos_rate"] - self.T) < 1e-9
+        assert abs(wr[("b",)]["eff_pos_rate"] - self.T) < 1e-9
+        # floored neg mass = n_neg_post*v = n_pos*(1-t)/t = 160*5=800 / 80*5=400
+        assert wr[("a",)]["floored_neg_mass"] == 800
+        assert wr[("b",)]["floored_neg_mass"] == 400
+        # attention reference = least-positive cell (prod b, n_pos 80) -> A=1
+        assert abs(wr[("b",)]["A"] - 1.0) < 1e-9
+        assert wr[("a",)]["A"] < 1.0          # hotter -> down-weighted
+        assert abs(wr[("a",)]["w_pos"] - wr[("a",)]["A"]) < 1e-6  # w_pos rounded 6dp
+        assert abs(wr[("a",)]["w_neg"] - wr[("a",)]["A"] * 0.8) < 1e-6
 
-    def test_case2_cross_dimension_shares_ratio_over_dropped_dim(self):
-        # weight keys = [risk_attr, item]; risk_attr dropped when projecting to
-        # the ratio (segment,item) cell, so both risk values share ratio[mass,a].
+    def test_cross_dimension_shares_ratio_over_dropped_dim(self):
+        # weight_dims=[risk_attr, item]; risk_attr dropped when projecting to the
+        # ratio (segment,item) cell, so both risk values share ratio[mass,a].
         stats = [
             {"cust_segment_typ": "mass", "prod_name": "a", "risk_attr": "lo",
              "n_pos": 60, "n_neg": 6000},
@@ -530,33 +526,34 @@ class TestAggregateSurfaces:
         nm = {("mass", "a"): 5.0}   # ratio = 5*(60+40)/(6000+3000) = 0.05556
         out = aggregate_surfaces(
             stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
-            weight_keys=["risk_attr", "prod_name"], alpha=0.5, w_max=5.0,
+            weight_dims=["risk_attr", "prod_name"], alpha=0.5, t=self.T,
             default_neg_mult=5.0)
         ratio = 5 * 100 / 9000
         wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
         assert wr[("lo", "a")]["n_neg_post"] == round(6000 * ratio)
         assert wr[("hi", "a")]["n_neg_post"] == round(3000 * ratio)
         assert wr[("lo", "a")]["keys"] == ["lo", "a"]
+        # both sub-cells still lifted to t
+        assert abs(wr[("lo", "a")]["eff_pos_rate"] - self.T) < 1e-9
+        assert abs(wr[("hi", "a")]["eff_pos_rate"] - self.T) < 1e-9
 
-    def test_no_round_until_display_totals_match(self):
+    def test_zero_positive_weight_cell_is_neutral(self):
+        # a weight cell with no positives keeps negatives untouched (v=A=1)
         stats = [
-            {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 1, "n_neg": 100},
-            {"cust_segment_typ": "hnw",  "prod_name": "a", "n_pos": 1, "n_neg": 100},
+            {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 50, "n_neg": 900},
+            {"cust_segment_typ": "mass", "prod_name": "z", "n_pos": 0, "n_neg": 400},
         ]
-        nm = {("mass", "a"): 0.5, ("hnw", "a"): 0.5}   # ratio = 0.5*1/100 = 0.005
         out = aggregate_surfaces(
-            stats, nm, ratio_dims=["cust_segment_typ", "prod_name"],
-            weight_keys=["prod_name"], alpha=0.5, w_max=5.0, default_neg_mult=0.5)
-        kept_total = sum(r["kept_neg"] for r in out["ratio_rows"])
-        post_total = sum(r["n_neg_post"] for r in out["weight_rows"])
-        assert kept_total == 0
-        assert post_total == 1
-        assert kept_total != post_total
+            stats, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_dims=["prod_name"], alpha=0.5, t=self.T, default_neg_mult=1e9)
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("z",)]["v"] == 1.0 and wr[("z",)]["A"] == 1.0
+        assert wr[("z",)]["w_pos"] == 1.0 and wr[("z",)]["w_neg"] == 1.0
 
-    def test_empty_weight_keys_yields_no_weight_rows(self):
+    def test_empty_weight_dims_yields_no_weight_rows(self):
         out = aggregate_surfaces(
             self._STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
-            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+            weight_dims=[], alpha=0.5, t=self.T, default_neg_mult=5.0)
         assert out["weight_rows"] == []
         assert len(out["ratio_rows"]) == 4
 
@@ -565,15 +562,15 @@ class TestAggregateSurfaces:
         nm = {("mass",): 1e9, ("hnw",): 1e9}   # keep-all
         out = aggregate_surfaces(
             self._STATS, nm, ratio_dims=["cust_segment_typ"],
-            weight_keys=[], alpha=0.5, w_max=5.0, default_neg_mult=5.0)
+            weight_dims=[], alpha=0.5, t=self.T, default_neg_mult=5.0)
         rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
         assert rr[("mass",)]["n_pos"] == 180 and rr[("mass",)]["n_neg"] == 11000
         assert rr[("hnw",)]["n_pos"] == 60 and rr[("hnw",)]["n_neg"] == 540
 
     def test_ratio_surface_global_single_row(self):
         out = aggregate_surfaces(
-            self._STATS, {}, ratio_dims=[], weight_keys=[],
-            alpha=0.5, w_max=5.0, default_neg_mult=1e9)
+            self._STATS, {}, ratio_dims=[], weight_dims=[],
+            alpha=0.5, t=self.T, default_neg_mult=1e9)
         assert len(out["ratio_rows"]) == 1
         r = out["ratio_rows"][0]
         assert r["keys"] == []

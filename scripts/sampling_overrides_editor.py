@@ -24,7 +24,7 @@ Usage:
 from __future__ import annotations
 
 import json
-import statistics
+import math
 from pathlib import Path
 
 import typer
@@ -55,23 +55,6 @@ def suggest_ratio(n_pos: int, n_neg: int, target_neg_pos: float) -> float:
     if n_neg <= 0:
         return 1.0
     return min(1.0, max(0.0, target_neg_pos * n_pos / n_neg))
-
-
-def suggest_weight(
-    n_pos: int, median_pos: float, alpha: float, w_max: float
-) -> float:
-    """Cold-product boost weight: clamp((median_pos/n_pos)**alpha, 1.0, w_max).
-
-    n_pos <= 0 -> treated as maximally cold (returns w_max).
-
-    Legacy single-factor cold-boost. Superseded by ``two_factor_weights`` (floor
-    v + attention A); kept for the existing tests until the weight surface is
-    fully migrated.
-    """
-    if n_pos <= 0:
-        return w_max
-    raw = (median_pos / n_pos) ** alpha
-    return min(w_max, max(1.0, raw))
 
 
 def floor_weight(n_pos: int, n_neg_post: float, t: float) -> float:
@@ -187,9 +170,9 @@ def aggregate_surfaces(
     neg_mults: dict,
     *,
     ratio_dims: list,
-    weight_keys: list,
+    weight_dims: list,
     alpha: float,
-    w_max: float,
+    t: float,
     default_neg_mult: float,
 ) -> dict:
     """Roll finest-granularity stats up into the ratio and weight surfaces.
@@ -200,13 +183,17 @@ def aggregate_surfaces(
     ``tuple(row[d] for d in ratio_dims)`` -> target neg:pos multiplier
     (missing -> ``default_neg_mult``).
 
-    Ratio surface: aggregate fine cells to the ratio_dims tuple; each row's
-    keep-rate ``ratio = clamp(neg_mult * n_pos / n_neg, 0, 1)`` (n_pos==0 ->
-    1.0, keep all negatives). Weight surface: aggregate to the weight_keys
-    tuple; n_pos unchanged by downsampling, n_neg_post = sum of
-    ``n_neg * ratio[ fine cell's ratio_dims projection ]`` (negatives summed as
-    fractions, rounded only for display). Both ratio_rows and weight_rows carry
-    a variable-length ``keys`` list.
+    Ratio surface (downsampling = cost): aggregate fine cells to the ratio_dims
+    tuple; keep-rate ``ratio = clamp(neg_mult * n_pos / n_neg, 0, 1)`` (n_pos==0
+    -> 1.0, keep all negatives).
+
+    Weight surface (two-factor, ranking lift): aggregate to the ``weight_dims``
+    tuple; n_pos unchanged by downsampling, ``n_neg_post`` = Σ ``n_neg *
+    ratio[fine cell's ratio_dims projection]``. Each cell gets the floor factor
+    ``v`` (lifts effective pos-rate to ``t``) and attention ``A = (m_min/m)^α``
+    (m = n_pos + n_neg_post·v ∝ n_pos; m_min over cells with positives), so
+    ``w_pos = A``, ``w_neg = A·v``. Both ratio_rows and weight_rows carry a
+    variable-length ``keys`` list.
     """
     # --- ratio surface: aggregate to ratio_dims tuple ---
     racc: dict = {}
@@ -234,26 +221,33 @@ def aggregate_surfaces(
         })
     ratio_rows.sort(key=lambda r: tuple(str(x) for x in r["keys"]))
 
-    # --- weight surface: aggregate to weight_keys tuple (post-downsample) ---
+    # --- weight surface: two-factor (floor v + attention A) per weight_dims ---
     weight_rows: list[dict] = []
-    if weight_keys:
+    if weight_dims:
         wacc: dict = {}
         for s in stats:
-            wk = tuple(s[k] for k in weight_keys)
+            wk = tuple(s[d] for d in weight_dims)
             rk = tuple(s[d] for d in ratio_dims)
             a = wacc.setdefault(wk, [0, 0.0])
             a[0] += s["n_pos"]
-            a[1] += s["n_neg"] * ratio_by_key[rk]
-        pos_list = [v[0] for v in wacc.values()]
-        median_pos = float(statistics.median(pos_list)) if pos_list else 1.0
+            a[1] += s["n_neg"] * ratio_by_key[rk]      # n_neg_post (fractional)
+        # attention reference: smallest floor-weighted mass among cells WITH
+        # positives (m = n_pos/t ∝ n_pos), so the least-positive cell gets A=1.
+        masses = [npos + nnp * floor_weight(npos, nnp, t)
+                  for npos, nnp in wacc.values() if npos > 0]
+        m_min = min(masses) if masses else 1.0
         for wk, (npos, nneg_post) in wacc.items():
-            nneg_round = round(nneg_post)
-            total = npos + nneg_round
+            tf = two_factor_weights(npos, nneg_post, t=t, alpha=alpha, m_min=m_min)
+            nat_logit = (math.log(npos / nneg_post)
+                         if npos > 0 and nneg_post > 0 else float("-inf"))
             weight_rows.append({
-                "keys": list(wk), "n_pos": npos, "n_neg_post": nneg_round,
-                "pos_rate_post": (npos / total if total else 0.0),
-                "suggested_weight": round(
-                    suggest_weight(npos, median_pos, alpha, w_max), 4),
+                "keys": list(wk), "n_pos": npos, "n_neg_post": round(nneg_post),
+                "v": tf["v"], "A": tf["A"],
+                "w_pos": round(tf["w_pos"], 6), "w_neg": round(tf["w_neg"], 6),
+                "floored_neg_mass": round(nneg_post * tf["v"]),
+                "eff_pos_rate": tf["eff_pos_rate"],
+                "nat_logit": nat_logit,
+                "attn_mass": tf["A"] * tf["m"],
             })
         weight_rows.sort(key=lambda r: tuple(str(x) for x in r["keys"]))
 
