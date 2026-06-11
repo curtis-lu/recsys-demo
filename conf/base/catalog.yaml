@@ -1,9 +1,9 @@
 # Production overrides — Hive tables on HDFS。
 # 三層 versioning：base_dataset_version 對應「與抽樣無關」的不變產物；
 # train_variant_id 對應「依 train sampling」的產物；calibration_variant_id
-# 對應「依 calibration sampling」的產物。三層分別落在不同 HDFS path
-# （base / train_variants / calibration_variants），table 名也帶各自的 version
-# 後綴。
+# 對應「依 calibration sampling」的產物。Hive 表為固定名稱，版本以
+# partition_filter 的 partition column 區分；driver-local artifacts（如
+# preprocessor.json）落在 data/dataset/${base_dataset_version}/ 版本化路徑。
 
 # hive.db 定義於 parameters.yaml，供 catalog.yaml 參照。
 
@@ -246,9 +246,9 @@ training_eval_predictions:
 # （prepare_eval_data 產出、做完 label join、rank 與 segment enrichment 後的
 # in-memory eval_predictions）。--compare-only 模式由 catalog auto-load 讀回，
 # 並由 validate_enriched_eval_predictions_present（B4 validator）檢查。
-# columns: "auto" ── schema 從 DataFrame 推得；若 segment_sources 設定在兩次
-# run 之間改變，請先 drop 此 table 再重跑（ALTER TABLE schema evolution 是
-# 待辦的 follow-up）。
+# columns: "auto" ── schema 從 DataFrame 推得；segment_sources 設定在兩次 run
+# 之間改變時，HiveTableDataset 會自動 append-only 演化（ALTER TABLE ADD
+# COLUMNS／缺欄補 NULL），不需先 drop table。
 enriched_eval_predictions:
   type: HiveTableDataset
   database: ${hive.db}
