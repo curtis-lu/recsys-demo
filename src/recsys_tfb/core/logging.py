@@ -8,6 +8,7 @@ setup_logging() to initialise handlers from config.
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from contextlib import contextmanager
@@ -39,6 +40,21 @@ def generate_run_id() -> str:
     ts = now.strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)  # 6 hex chars
     return f"{ts}_{suffix}"
+
+
+_RUN_ID_DATE_RE = re.compile(r"^(\d{4})(\d{2})\d{2}_")
+
+
+def _month_from_run_id(run_id: str) -> str:
+    """Return ``'YYYY-MM'`` parsed from a run_id beginning with ``YYYYMMDD_``.
+
+    Falls back to the current UTC month when ``run_id`` does not start with a
+    standard 8-digit date (e.g. a caller-supplied custom run_id).
+    """
+    match = _RUN_ID_DATE_RE.match(run_id or "")
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+    return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
 # Module-level context — set once per pipeline execution via setup_logging().
@@ -144,7 +160,9 @@ def setup_logging(
         root.addHandler(console_handler)
 
     if file_enabled:
-        log_dir = Path(file_path)
+        month = _month_from_run_id(context.run_id)
+        pipeline_dir = context.pipeline or "_unknown"
+        log_dir = Path(file_path) / pipeline_dir / month
         log_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{context.pipeline}_{context.run_id}.jsonl"
         file_handler = logging.FileHandler(

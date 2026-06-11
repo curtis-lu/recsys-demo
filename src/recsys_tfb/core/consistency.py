@@ -80,7 +80,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
 
-Layer 2 — data-stage validation (B1 implemented and wired; B2/B3/B4 implemented for compare feature):
+Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -90,6 +90,14 @@ Layer 2 — data-stage validation (B1 implemented and wired; B2/B3/B4 implemente
   the train window — intentionally NOT reported by ``item_coverage_errors``
   (deferred).
 * B2 — label-window leakage columns reach features (specified but DEFERRED).
+* B5 — a column declared in ``dataset.prepare_model_input.categorical_columns``
+  is a continuous-numeric type (decimal/double/float) in feature_table. decimal
+  collects to Python ``decimal.Decimal`` (not JSON-serializable → the opaque
+  ``fit_preprocessor_metadata`` save crash this gate front-runs); double/float
+  serialize but are near-certain mis-tags. Predicate:
+  ``categorical_dtype_errors`` (pure, no Spark); wired via
+  ``validate_data_consistency`` alongside B1 (reads ``feature_table.dtypes``,
+  metastore metadata only — no scan).
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -619,6 +627,57 @@ def item_coverage_errors(
             f"Reconcile label_*.sql with schema.categorical_values.{item}."
         )
 
+    return errors
+
+
+# Spark DataFrame.dtypes simpleString forms that are continuous-numeric and
+# therefore an illegal type for a declared categorical (B5). decimal carries a
+# precision/scale suffix ("decimal(15,0)"), so it is matched by prefix below.
+_CONTINUOUS_NUMERIC_DTYPES = {"double", "float"}
+
+
+def categorical_dtype_errors(
+    categorical_cols: list[str],
+    feature_table_dtypes: dict[str, str],
+) -> list[str]:
+    """B5 invariant — the single definition.
+
+    A column declared in ``dataset.prepare_model_input.categorical_columns``
+    must not be a continuous-numeric type (``decimal`` / ``double`` / ``float``)
+    in ``feature_table``:
+
+    - ``decimal`` collects to Python ``decimal.Decimal``, which is not
+      JSON-serializable — ``fit_preprocessor_metadata`` crashes when saving the
+      preprocessor metadata, but only after the full per-column ``distinct()``
+      pass (the opaque, expensive failure this gate replaces).
+    - ``double`` / ``float`` serialize fine but a continuous value used as a
+      category is almost always a mis-tag, and float-equality lookup in the
+      ``F.create_map`` encoding is fragile.
+
+    ``feature_table_dtypes`` maps a feature_table column name to its Spark
+    ``DataFrame.dtypes`` simpleString (e.g. ``"decimal(15,0)"``, ``"double"``,
+    ``"string"``). Identity categoricals (``schema.item``) come from
+    ``schema.categorical_values`` rather than feature_table, so they are absent
+    from this mapping and correctly skipped. Pure (no Spark): the Layer-2 gate
+    passes ``dict(feature_table.dtypes)`` in. Returns collect-all error strings
+    sorted by column; empty list means OK.
+    """
+    errors: list[str] = []
+    for col in sorted(categorical_cols):
+        dt = feature_table_dtypes.get(col)
+        if dt is None:
+            continue  # identity categorical / not a feature_table column
+        if dt.startswith("decimal") or dt in _CONTINUOUS_NUMERIC_DTYPES:
+            errors.append(
+                f"categorical column {col!r} is a continuous-numeric type "
+                f"(type={dt}) in feature_table — a decimal categorical is not "
+                f"JSON-serializable (fit_preprocessor_metadata save crashes) "
+                f"and a double/float categorical is almost always a mis-tag. "
+                f"If {col!r} is a numeric feature, remove it from "
+                f"dataset.prepare_model_input.categorical_columns; if it is not "
+                f"a model feature, add it to "
+                f"dataset.prepare_model_input.drop_columns."
+            )
     return errors
 
 

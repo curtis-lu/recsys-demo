@@ -31,7 +31,7 @@ python -m recsys_tfb dataset --env local
 
 | 階段 | 節點 | 做什麼 |
 |---|---|---|
-| 資料閘 | `validate_data_consistency` | **第一個節點**：抽樣前先比對「設定宣告的 item」與「資料實際 item」，不符即 `DataConsistencyError`（見 README §4） |
+| 資料閘 | `validate_data_consistency` | **第一個節點**：抽樣前先比對「設定宣告的 item」與「資料實際 item」（B1），並檢查 `categorical_columns` 宣告的欄在 `feature_table` 不是連續數值型 decimal/double/float（B5，只讀 schema metadata）；不符即 `DataConsistencyError`（見 README §4） |
 | 抽樣 | `select_sample_keys` → `split_train_keys` | 對 train 期 `sample_pool` 分層抽樣得 `sample_keys`，再按 `cust_id` 以 `train_dev_ratio` 切成 `train_keys` / `train_dev_keys` |
 | 抽樣 | `select_val_keys` / `select_test_keys` | val / test 期取全母體 identity（不 carry 分群欄；`val_sample_ratio` 可隨機縮減 cust，預設 1.0 ＝ 全母體） |
 | 前處理 | `fit_preprocessor_metadata` | 在 **train 期** feature_table 上 fit 編碼字典（與抽樣解耦）→ `preprocessor`、`category_mappings` |

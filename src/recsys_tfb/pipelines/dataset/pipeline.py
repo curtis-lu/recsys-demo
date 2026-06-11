@@ -19,11 +19,12 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     )
 
     nodes = [
-        # --- Layer-2 B1 data gate: runs first (insertion-order Kahn seed),
-        # side-effect only (outputs=None), fail-fast before any sampling ---
+        # --- Layer-2 data gate (B1 item coverage + B5 categorical dtype):
+        # runs first (insertion-order Kahn seed), side-effect only
+        # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
             validate_data_consistency,
-            inputs=["sample_pool", "label_table", "parameters"],
+            inputs=["sample_pool", "label_table", "feature_table", "parameters"],
             outputs=None,
             name="validate_data_consistency",
         ),
