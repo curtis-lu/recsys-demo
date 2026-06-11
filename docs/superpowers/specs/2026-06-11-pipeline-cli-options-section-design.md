@@ -23,10 +23,8 @@ CLI 各子指令的選項目前**散落且不完整**，使用者無法在單一
 非目標：
 - 不新增一份集中式 CLI reference 總表（刻意分散在各 pipeline 頁，貼近使用情境）。
 - 不改 `README.md §2`「常用選項」與其旗標敘述（維持精選總覽，逐情境完整版交給 pipeline 頁）。
-  - **唯一例外**：新建 `inference.md` 後，`README.md §5` 文件地圖把 `inference` 補進
-    `docs/pipelines/{...}` 清單，避免新檔 orphan。此為一行連結補綴、非「常用選項」改寫。
-    （此例外仍待使用者於 spec review 時確認；若不要動 README，改以其他既有 pipeline 頁的
-    「接下來」互連 inference.md。）
+  - **唯一例外（已確認採用）**：新建 `inference.md` 後，`README.md §5` 文件地圖把 `inference`
+    補進 `docs/pipelines/{...}` 清單，避免新檔 orphan。此為一行連結補綴、非「常用選項」改寫。
 - 不改任何程式碼／設定／測試。
 
 ## 3. CLI 簽章（權威來源，取自 `src/recsys_tfb/__main__.py`）
