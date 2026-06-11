@@ -131,11 +131,12 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
     sum(label) and fixes the label component to "0" on export, so a group-key
     set without label is incompatible (hand-write those overrides instead).
 
-    The weight surface is keyed by ``training.sample_weight_keys`` (arbitrary
-    available columns). ``union_dims`` is the finest granularity to profile at:
-    ``(sample_group_keys ∪ sample_weight_keys) \\ {label}``, ratio dims first.
-    ``label`` must be absent from ``sample_weight_keys`` (the per-group
-    n_pos/n_neg model splits on label).
+    The weight surface is keyed by ``weight_dims`` = ``training.sample_weight_keys``
+    minus label (arbitrary available columns); ``label`` MUST be present in
+    ``sample_weight_keys`` when it is non-empty, as the pos/neg split axis of the
+    two-factor weight model (w_pos vs w_neg). ``union_dims`` is the finest
+    granularity to profile at: ``(sample_group_keys ∪ sample_weight_keys) \\
+    {label}``, ratio dims first.
     """
     cols = schema_cfg.get("columns", {})
     try:
@@ -154,22 +155,26 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
             "sample_ratio_overrides."
         )
     weight_keys = list(training_cfg.get("sample_weight_keys") or [])
-    if label_col in weight_keys:
+    if weight_keys and label_col not in weight_keys:
         raise ValueError(
-            f"sampling editor cannot edit weights keyed by the label column "
-            f"{label_col!r} (per-group n_pos/n_neg is derived by splitting on "
-            f"label). Remove it from sample_weight_keys, or hand-write those "
-            f"sample_weights."
+            f"sampling editor requires the label column {label_col!r} in "
+            f"sample_weight_keys (it is the pos/neg split axis for the two-factor "
+            f"weight model: w_pos vs w_neg); got {weight_keys}. Add it, or leave "
+            "sample_weight_keys empty to skip the weight surface."
         )
-    # ratio dims = group keys minus label, order preserved (may be empty).
+    # ratio dims = group keys minus label; weight dims = weight keys minus label.
+    # Order preserved; either may be empty. label is the pos/neg split axis on
+    # both surfaces, never a grouping dim.
     ratio_dims = [k for k in group_keys if k != label_col]
-    # union dims: ratio dims first, then any extra weight-key columns.
+    weight_dims = [k for k in weight_keys if k != label_col]
+    # union dims: ratio dims first, then any extra weight dims.
     union_dims: list[str] = list(ratio_dims)
-    for k in weight_keys:
+    for k in weight_dims:
         if k not in union_dims:
             union_dims.append(k)
     return {
         "ratio_dims": ratio_dims,
+        "weight_dims": weight_dims,
         "label_col": label_col,
         "time_col": time_col,
         "weight_keys": weight_keys,

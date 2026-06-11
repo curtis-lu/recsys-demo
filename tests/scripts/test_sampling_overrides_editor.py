@@ -117,24 +117,26 @@ class TestResolveKeys:
     _SCHEMA = {"columns": {"item": "prod_name", "label": "label",
                            "time": "snap_date"}}
 
-    def test_case1_weight_subset_of_group_keys(self):
-        # group=[seg,item,label], weight=[item] -> ratio_dims=[seg,item]
+    def test_case1_weight_label_split(self):
+        # group=[seg,item,label], weight=[item,label] -> weight_dims=[item]
         out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
-            {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+            {"sample_weight_keys": ["prod_name", "label"]}, self._SCHEMA)
         assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
+        assert out["weight_dims"] == ["prod_name"]
         assert out["label_col"] == "label"
         assert out["time_col"] == "snap_date"
-        assert out["weight_keys"] == ["prod_name"]
+        assert out["weight_keys"] == ["prod_name", "label"]
         assert out["union_dims"] == ["cust_segment_typ", "prod_name"]
 
     def test_case2_weight_adds_carry_dim_extends_union(self):
-        # weight=[risk_attr,item] adds risk_attr to the union (label excluded)
+        # weight=[risk_attr,item,label] adds risk_attr to the union (label excl.)
         out = resolve_keys(
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
-            {"sample_weight_keys": ["risk_attr", "prod_name"]}, self._SCHEMA)
+            {"sample_weight_keys": ["risk_attr", "prod_name", "label"]},
+            self._SCHEMA)
         assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
-        assert out["weight_keys"] == ["risk_attr", "prod_name"]
+        assert out["weight_dims"] == ["risk_attr", "prod_name"]
         assert out["union_dims"] == ["cust_segment_typ", "prod_name", "risk_attr"]
 
     def test_empty_weight_keys_union_is_ratio_dims(self):
@@ -142,6 +144,7 @@ class TestResolveKeys:
             {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
             {}, self._SCHEMA)
         assert out["weight_keys"] == []
+        assert out["weight_dims"] == []
         assert out["ratio_dims"] == ["cust_segment_typ", "prod_name"]
         assert out["union_dims"] == ["cust_segment_typ", "prod_name"]
 
@@ -155,8 +158,9 @@ class TestResolveKeys:
     def test_accepts_item_label_only(self):
         out = resolve_keys(
             {"sample_group_keys": ["prod_name", "label"]},
-            {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+            {"sample_weight_keys": ["prod_name", "label"]}, self._SCHEMA)
         assert out["ratio_dims"] == ["prod_name"]
+        assert out["weight_dims"] == ["prod_name"]
         assert out["union_dims"] == ["prod_name"]
 
     def test_accepts_multi_dim(self):
@@ -173,16 +177,25 @@ class TestResolveKeys:
         assert out["ratio_dims"] == []
         assert out["union_dims"] == []
 
+    def test_weight_label_at_any_position(self):
+        # label need not be last in weight keys
+        out = resolve_keys(
+            {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+            {"sample_weight_keys": ["prod_name", "label", "risk_attr"]},
+            self._SCHEMA)
+        assert out["weight_dims"] == ["prod_name", "risk_attr"]
+
     def test_rejects_group_keys_without_label(self):
         with pytest.raises(ValueError, match="label"):
             resolve_keys({"sample_group_keys": ["cust_segment_typ", "prod_name"]},
-                         {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
+                         {"sample_weight_keys": ["prod_name", "label"]}, self._SCHEMA)
 
-    def test_rejects_label_in_weight_keys(self):
+    def test_rejects_weight_keys_without_label(self):
+        # label is the pos/neg split axis: required in non-empty weight keys
         with pytest.raises(ValueError, match="label"):
             resolve_keys(
                 {"sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
-                {"sample_weight_keys": ["prod_name", "label"]}, self._SCHEMA)
+                {"sample_weight_keys": ["prod_name"]}, self._SCHEMA)
 
     def test_rejects_missing_schema_column(self):
         with pytest.raises(ValueError, match="schema.columns"):
