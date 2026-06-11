@@ -1036,6 +1036,13 @@ git -C /Users/curtislu/projects/recsys_tfb/.worktrees/pipeline-node-slicing comm
 - **Task 5 追加**（Task 1/2 quality review 建議）：node 名稱唯一性 lint（`_node_index` 首匹配，重名會切錯）；sidecar 隔離測試補 calibrated 串台情境（top-level 存 CalibratedModelAdapter 後斷言 hpo load 不被誤包）。
 - **Task 6 追加**（Task 2 quality review 建議）：文件註明 manifest `artifacts` 不列 `hpo/` 子目錄檔案；catalog `hpo_best_model` 註解補「為 resume 跳過 HPO 而落地」半行。
 
+## Task 7 執行結果（2026-06-11）
+
+- **PySpark 3.3.2 `tableExists("db.t")` 恆 False quirk**：本分支原 `HiveTableDataset.exists()` 踩中（會讓 dataset/inference resume 退化成補跑全部 Hive 上游）。main 的 PR#74 已以 SHOW TABLES 版 `_table_exists` 修復 → 已 merge origin/main（`03dae66`，乾淨無衝突），合併後驗證 `exists()` 正確。
+- **dataset smoke**：full run（base `8301a89c`）→ `--list-nodes`（含 `build_test_model_input` 起跑會自動補 `build_val_model_input` 的正確擴張展示）→ `--dry-run` → `--from-node fit_preprocessor_metadata` 接續成功：11/15 node、keys 三表正確跳過、B1 列 skipped side-effect、manifest `resumed_from` 留痕。
+- **training smoke**：full run（model `6059dcef`）產出 `best_iteration.json`(161) 與 `hpo/model.txt`＋獨立 sidecar（calibration 開啟下 top-level `calibrated: true`、hpo `false`——隔離設計實證必要）→ `--from-node finalize_model`：`tune_hyperparameters` 跳過、log 零 optuna trial、auto-included 恰為 calibration 契約 5 node、12/17、42s 完成、manifest 留痕。
+- **回歸**：針對性套件（core/cli/io/pipelines）843 passed；2 failed（`TestSchemaEvolutionIntegration::test_add_then_drop_column_across_versions`、`test_persist_and_catalog_load_roundtrip`）經查為 **main 既有**的組合執行干擾（同選擇集在 main ac7ae14 重現同樣 2 fail；單獨跑皆過），非本分支造成，不在此修。
+
 ## Self-Review 紀錄
 
 - **Spec coverage**：§2 語意/演算法/判準→Task 1；§3 元件→Task 1+3+4；§3.2 計畫輸出→Task 3+4；§4 補落地（含 hpo/ sidecar、None 決議）→Task 2；§5 邊界（未知名/互斥/守門/handle/manifest/警語）→Task 1+3+4 測試；§6 三道防線→Task 4（list-nodes）+5（契約）+6（docs）；§7 測試策略 1-5→Task 1/5/3-4/2/7；§8 不做→無對應 task（正確）。
