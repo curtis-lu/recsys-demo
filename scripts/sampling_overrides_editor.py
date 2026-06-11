@@ -793,9 +793,12 @@ def profile(
     base_params: Path = typer.Option(
         Path("conf/base/parameters.yaml"),
         help="base params yaml — source of schema.columns"),
-    target_neg_pos: float = typer.Option(5.0, help="downsample target neg:pos R"),
-    alpha: float = typer.Option(0.5, help="cold-weight damping exponent"),
-    w_max: float = typer.Option(5.0, help="cold-weight cap"),
+    t: float = typer.Option(
+        1 / 6, help="weight floor target pos-rate (lift all products to this)"),
+    alpha: float = typer.Option(
+        0.5, help="weight attention damping (0=off, 1=equalize per-product loss)"),
+    target_neg_pos: float = typer.Option(
+        5.0, help="ratio surface cost-downsample reference neg:pos (default keep-all)"),
 ) -> None:
     cfg = yaml.safe_load(params.read_text())
     ds = cfg.get("dataset", cfg)
@@ -809,8 +812,9 @@ def profile(
         raise typer.Exit(code=1)
     typer.echo(
         f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
-        f"ratio_dims={keys['ratio_dims']} label={keys['label_col']} "
-        f"weight_keys={keys['weight_keys']} union_dims={keys['union_dims']}"
+        f"ratio_dims={keys['ratio_dims']} weight_dims={keys['weight_dims']} "
+        f"label={keys['label_col']} union_dims={keys['union_dims']} "
+        f"(t={t} alpha={alpha})"
     )
     import pandas as pd
     snaps = [pd.Timestamp(d) for d in snap_dates]
@@ -834,8 +838,9 @@ def profile(
         stats, ratio_dims=keys["ratio_dims"],
         group_keys=list(ds.get("sample_group_keys", [])),
         label_col=keys["label_col"], weight_keys=keys["weight_keys"],
+        weight_dims=keys["weight_dims"],
         default_ratio=float(ds.get("sample_ratio", 1.0)),
-        target_neg_pos=target_neg_pos, alpha=alpha, w_max=w_max,
+        t=t, alpha=alpha, target_neg_pos=target_neg_pos,
     )
     PROFILING_DIR.mkdir(parents=True, exist_ok=True)
     out = PROFILING_DIR / "sampling_overrides_editor.html"
