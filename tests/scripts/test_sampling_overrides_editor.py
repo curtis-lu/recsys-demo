@@ -190,7 +190,7 @@ class TestResolveKeys:
 # ---------------------------------------------------------------------------
 # Sparse JSON -> YAML with A5/A9 validation
 # ---------------------------------------------------------------------------
-def _params(weight_keys=("prod_name",),
+def _params(weight_keys=("prod_name", "label"),
             group_keys=("cust_segment_typ", "prod_name", "label")):
     return {
         "schema": {"columns": {"item": "prod_name"},
@@ -205,7 +205,8 @@ def _export(ratio_rows, weight_rows, *, group_keys=None, weight_keys=None):
     return {
         "sample_group_keys": group_keys or ["cust_segment_typ", "prod_name", "label"],
         # None sentinel (not []) so a caller can pass [] to mean "no weight keys".
-        "sample_weight_keys": weight_keys if weight_keys is not None else ["prod_name"],
+        "sample_weight_keys": (weight_keys if weight_keys is not None
+                               else ["prod_name", "label"]),
         "ratio_rows": ratio_rows,
         "weight_rows": weight_rows,
     }
@@ -213,29 +214,53 @@ def _export(ratio_rows, weight_rows, *, group_keys=None, weight_keys=None):
 
 class TestGridToYaml:
     def test_sparse_emits_only_non_default(self):
+        # weight rows carry w_pos/w_neg; each cell emits |1 and |0 entries,
+        # only those != default_weight (1.0).
         export = _export(
             ratio_rows=[
                 {"keys": ["mass", "a"], "ratio": 0.5},
                 {"keys": ["mass", "b"], "ratio": 1.0}],
-            weight_rows=[{"keys": ["a"], "weight": 1.0},
-                         {"keys": ["b"], "weight": 3.0}])
+            weight_rows=[{"keys": ["a"], "w_pos": 1.0, "w_neg": 1.0},
+                         {"keys": ["b"], "w_pos": 0.7, "w_neg": 0.2}])
         out = grid_to_yaml(export, _params(), default_ratio=1.0)
         ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
         sw = yaml.safe_load(out["sample_weights_yaml"])
         assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.5}}
-        assert sw == {"sample_weights": {"b": 3.0}}
+        assert sw == {"sample_weights": {"b|1": 0.7, "b|0": 0.2}}
 
-    def test_weight_key_joined_in_weight_keys_order(self):
-        # weight_keys = [risk_attr, prod_name] -> key "lo|a" (arity 2)
+    def test_weight_emits_pos_and_neg_per_cell(self):
         export = _export(
             ratio_rows=[],
-            weight_rows=[{"keys": ["lo", "a"], "weight": 2.0}],
-            weight_keys=["risk_attr", "prod_name"])
+            weight_rows=[{"keys": ["a"], "w_pos": 0.7, "w_neg": 0.001},
+                         {"keys": ["b"], "w_pos": 1.0, "w_neg": 0.5}])
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        sw = yaml.safe_load(out["sample_weights_yaml"])
+        # a|1, a|0, b|0 emitted; b|1 == default 1.0 dropped
+        assert sw == {"sample_weights": {"a|1": 0.7, "a|0": 0.001, "b|0": 0.5}}
+
+    def test_weight_key_joined_in_weight_keys_order(self):
+        # weight_keys = [risk_attr, prod_name, label] -> "lo|a|1" / "lo|a|0"
+        export = _export(
+            ratio_rows=[],
+            weight_rows=[{"keys": ["lo", "a"], "w_pos": 2.0, "w_neg": 0.5}],
+            weight_keys=["risk_attr", "prod_name", "label"])
         out = grid_to_yaml(
-            export, _params(weight_keys=("risk_attr", "prod_name")),
+            export, _params(weight_keys=("risk_attr", "prod_name", "label")),
             default_ratio=1.0)
         sw = yaml.safe_load(out["sample_weights_yaml"])
-        assert sw == {"sample_weights": {"lo|a": 2.0}}
+        assert sw == {"sample_weights": {"lo|a|1": 2.0, "lo|a|0": 0.5}}
+
+    def test_weight_label_at_any_position(self):
+        # label in the middle: sample_weight_keys = [prod_name, label, risk_attr]
+        export = _export(
+            ratio_rows=[],
+            weight_rows=[{"keys": ["a", "lo"], "w_pos": 0.7, "w_neg": 0.2}],
+            weight_keys=["prod_name", "label", "risk_attr"])
+        out = grid_to_yaml(
+            export, _params(weight_keys=("prod_name", "label", "risk_attr")),
+            default_ratio=1.0)
+        sw = yaml.safe_load(out["sample_weights_yaml"])
+        assert sw == {"sample_weights": {"a|1|lo": 0.7, "a|0|lo": 0.2}}
 
     def test_unknown_product_ratio_raises(self):
         export = _export(
@@ -245,19 +270,19 @@ class TestGridToYaml:
             grid_to_yaml(export, _params(), default_ratio=1.0)
 
     def test_unknown_product_weight_only_raises_with_real_weight_keys(self):
-        # weight_keys=[prod_name] (arity 1): the A9c probe must use the REAL
-        # sample_weight_keys, else it short-circuits and the unknown slips by.
+        # A9c probe uses the REAL sample_weight_keys; the unknown product in the
+        # reconstructed key (zzz|1) must be caught.
         export = _export(
             ratio_rows=[],
-            weight_rows=[{"keys": ["zzz"], "weight": 2.0}])
+            weight_rows=[{"keys": ["zzz"], "w_pos": 0.5, "w_neg": 0.1}])
         with pytest.raises(ValueError, match=r"zzz"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
 
     def test_export_keys_must_match_config(self):
         export = _export(ratio_rows=[], weight_rows=[],
-                         weight_keys=["cust_segment_typ"])
+                         weight_keys=["cust_segment_typ", "label"])
         with pytest.raises(ValueError, match="sample_weight_keys"):
-            grid_to_yaml(export, _params(weight_keys=("prod_name",)),
+            grid_to_yaml(export, _params(weight_keys=("prod_name", "label")),
                          default_ratio=1.0)
 
     def test_zero_pos_group_override_round_trips(self):
@@ -591,15 +616,15 @@ class TestToYamlCli:
             "    categorical_columns: [prod_name]\n"
             "  sample_group_keys: [cust_segment_typ, prod_name, label]\n")
         train = tmp_path / "t.yaml"
-        train.write_text("training:\n  sample_weight_keys: [prod_name]\n")
+        train.write_text("training:\n  sample_weight_keys: [prod_name, label]\n")
         return params, train
 
     def test_to_yaml_prints_both_blocks(self, tmp_path):
         export = {
             "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
-            "sample_weight_keys": ["prod_name"],
+            "sample_weight_keys": ["prod_name", "label"],
             "ratio_rows": [{"keys": ["mass", "a"], "ratio": 0.5}],
-            "weight_rows": [{"keys": ["b"], "weight": 3.0}],
+            "weight_rows": [{"keys": ["b"], "w_pos": 0.7, "w_neg": 0.2}],
         }
         jf = tmp_path / "e.json"
         jf.write_text(json.dumps(export))
@@ -609,4 +634,5 @@ class TestToYamlCli:
             "--train-params", str(train), "--base-params", str(params)])
         assert r.exit_code == 0, r.output
         assert "sample_ratio_overrides:" in r.output and "mass|a|0" in r.output
-        assert "sample_weights:" in r.output and "b" in r.output
+        assert "sample_weights:" in r.output
+        assert "b|1" in r.output and "b|0" in r.output

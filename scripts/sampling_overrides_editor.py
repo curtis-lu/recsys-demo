@@ -297,11 +297,19 @@ def grid_to_yaml(
         parts = [_NEG_LABEL if k == label_col else str(next(vals))
                  for k in cfg_group]
         overrides["|".join(parts)] = ratio
+    # Each weight cell emits two label-aware entries (two-factor model):
+    # positive rows (label component "1") -> w_pos, negative ("0") -> w_neg.
+    # Reconstruct each key by walking the full sample_weight_keys, substituting
+    # the label slot (handles label at any position).
     weights: dict[str, float] = {}
     for row in export.get("weight_rows", []):
-        weight = float(row["weight"])
-        if weight != default_weight:
-            weights["|".join(str(v) for v in row["keys"])] = weight
+        for lbl, wkey in (("1", "w_pos"), (_NEG_LABEL, "w_neg")):
+            weight = float(row[wkey])
+            if weight == default_weight:
+                continue
+            vals = iter(row["keys"])
+            parts = [lbl if k == label_col else str(next(vals)) for k in cfg_weight]
+            weights["|".join(parts)] = weight
 
     probe = {**parameters}
     probe["dataset"] = {
