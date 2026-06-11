@@ -62,7 +62,7 @@
 
 - `requested`：使用者指定的起點與其後 node（或 only-node）。
 - `auto_included`：自動補入的 node，各附觸發原因（缺哪個不可載入的 dataset）。
-- `skipped`：被跳過的 node，各附「已存在的輸出」清單。
+- `skipped`：被跳過的 node（名稱清單；實作時簡化為 names-only，不附各輸出存在狀態——§3.2 範例中的 `✓` 標記未實作，auto-included 的觸發 dataset 已足以重建邊界）。
 - `skipped_side_effect`：被跳過的 zero-output node（§5.3）。
 
 ### 3.2 執行計畫輸出
