@@ -3,6 +3,31 @@
 > 把預測 ⋈ label 算排序指標、產報表。兩個情境（訓練後 / 上線監控）、三個模式（標準 / 比較 / 只比較）。
 > DAG pipeline；節點接線見 [`../data-lineage.html`](../data-lineage.html)。
 
+## 指令與選項
+
+```bash
+# 情境1：訓練後評估（讀 training_eval_predictions）
+python -m recsys_tfb evaluation --env local --post-training
+
+# 情境2：上線監控（讀 ranked_predictions，預設）
+python -m recsys_tfb evaluation --env local
+
+# 指定要評估哪一版（Model A；省略依解析規則取對應版本）
+python -m recsys_tfb evaluation --model-version <model_version>
+
+# 加比較（同時產標準報表與 report_comparison.html）
+python -m recsys_tfb evaluation --post-training --compare <key>
+
+# 只出比較報表（前提：該版已用標準/--compare 跑過、persist 過 enriched_eval_predictions）
+python -m recsys_tfb evaluation --compare-only <key>
+
+# 先看執行計畫不跑 / 列 node 名與接續成本
+python -m recsys_tfb evaluation --from-node compute_metrics --dry-run
+python -m recsys_tfb evaluation --list-nodes
+```
+
+> `<key>` 取自 `parameters_evaluation.yaml` 的 `compare_sources`；`--compare` / `--compare-only` 互斥（只能給一個）。`--from-node` / `--only-node` 互斥；切片機制 → [`../operations/pipeline-slicing.md`](../operations/pipeline-slicing.md)。
+
 ## 用途
 
 `evaluation` 對「預測 ⋈ `label_table`」算 per query group 的排序指標（mAP / NDCG…），對照 popularity baseline，產 HTML 報表，並把 enrich 後的預測寫回 Hive 供後續比較。
@@ -15,11 +40,6 @@
 |---|---|---|---|
 | 訓練後評估 | `evaluation --post-training` | `training_eval_predictions`（test set，training 產） | 剛訓完看這版在 test 的排序表現 |
 | 上線後監控 | `evaluation`（預設） | `ranked_predictions`（inference 發布的已驗證結果） | 模型上線後定期追蹤排名品質 |
-
-```bash
-python -m recsys_tfb evaluation --env local --post-training   # 情境 1
-python -m recsys_tfb evaluation --env local                   # 情境 2
-```
 
 > 兩情境都靠 `label_table` 提供 ground truth，所以要等**該 snap_date 的 label 認定窗過完、label 補齊**後才算得出指標（上線當下通常還沒有 label，需等觀察窗結束）。
 
