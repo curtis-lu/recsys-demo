@@ -57,4 +57,9 @@ class TestModelAdapterDatasetRoundTrip:
         assert (tmp_path / "hpo" / "model_meta.json").exists()
         loaded_hpo = ds_hpo.load()
         assert not isinstance(loaded_hpo, CalibratedModelAdapter)
+        # positive check: hpo model actually loaded and predicts identically
+        _, X_probe = _tiny_adapter()
+        np.testing.assert_allclose(
+            loaded_hpo.predict(X_probe), adapter.predict(X_probe)
+        )
         assert isinstance(ds_model.load(), CalibratedModelAdapter)

@@ -27,14 +27,14 @@ def _catalog_defined() -> set[str]:
     return set(cfg) | {"parameters"}
 
 
-# pipeline -> {resume node -> exact allowed auto-included set}
+# (pipeline, frozen kwargs) -> {resume node -> exact allowed auto-included set}
 RESUME_CONTRACTS = {
-    "dataset": {
+    ("dataset", ()): {
         # all upstream artifacts (keys tables, feature/label tables) persisted
         "fit_preprocessor_metadata": set(),
         "build_train_model_input": set(),
     },
-    "training": {
+    ("training", ()): {
         # the "skip HPO, retrain final model" scenario: only cheap
         # view/handle builders may re-run, never tune_hyperparameters
         "finalize_model": {
@@ -44,11 +44,22 @@ RESUME_CONTRACTS = {
             "cache_test_model_input",
         },
     },
-    "inference": {
+    # calibration-enabled training is a real CLI path (training.calibration.enabled);
+    # its finalize_model resume additionally rebuilds the calibration handle.
+    ("training", (("enable_calibration", True),)): {
+        "finalize_model": {
+            "select_features",
+            "cache_train_model_input",
+            "cache_train_dev_model_input",
+            "cache_test_model_input",
+            "cache_calibration_model_input",
+        },
+    },
+    ("inference", ()): {
         # scoring_dataset is memory-only by design (cheap Spark transform)
         "rank_predictions": {"build_scoring_dataset"},
     },
-    "evaluation": {
+    ("evaluation", ()): {
         # eval_predictions/metrics are memory-only: report regeneration
         # re-runs the metric chain. Documented cost, pinned here.
         "generate_report": {
@@ -65,14 +76,15 @@ class TestResumeContracts:
         defined = _catalog_defined()
         can_load = lambda name: name in defined
         failures = []
-        for pipeline_name, contracts in RESUME_CONTRACTS.items():
-            pipe = get_pipeline(pipeline_name)
+        for (pipeline_name, kwargs_items), contracts in RESUME_CONTRACTS.items():
+            pipe = get_pipeline(pipeline_name, **dict(kwargs_items))
             for start, allowed in contracts.items():
                 _, plan = pipe.slice_from(start, can_load)
                 actual = set(plan.auto_included)
                 if actual != allowed:
                     failures.append(
-                        f"{pipeline_name}::{start}: auto-included {sorted(actual)} "
+                        f"{pipeline_name}{dict(kwargs_items) or ''}::{start}: "
+                        f"auto-included {dict(plan.auto_included)} "
                         f"!= contract {sorted(allowed)}.\n"
                         f"  New memory-only dataset degrading this resume point? "
                         f"Either persist it in conf/base/catalog.yaml or amend "
@@ -100,8 +112,8 @@ class TestResumeContracts:
     def test_node_names_unique_within_each_pipeline(self):
         # slice_from/_node_index resolve nodes BY NAME (first match wins);
         # duplicate names would silently slice from the wrong node.
-        for pipeline_name in RESUME_CONTRACTS:
-            pipe = get_pipeline(pipeline_name)
+        for (pipeline_name, kwargs_items) in RESUME_CONTRACTS:
+            pipe = get_pipeline(pipeline_name, **dict(kwargs_items))
             names = [n.name for n in pipe.nodes]
             assert len(names) == len(set(names)), (
                 f"{pipeline_name}: duplicate node names {names}"
