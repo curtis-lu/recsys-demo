@@ -63,11 +63,62 @@ def suggest_weight(
     """Cold-product boost weight: clamp((median_pos/n_pos)**alpha, 1.0, w_max).
 
     n_pos <= 0 -> treated as maximally cold (returns w_max).
+
+    Legacy single-factor cold-boost. Superseded by ``two_factor_weights`` (floor
+    v + attention A); kept for the existing tests until the weight surface is
+    fully migrated.
     """
     if n_pos <= 0:
         return w_max
     raw = (median_pos / n_pos) ** alpha
     return min(w_max, max(1.0, raw))
+
+
+def floor_weight(n_pos: int, n_neg_post: float, t: float) -> float:
+    """Negative-down-weight v that lifts a cell's effective pos-rate to ``t``.
+
+    ``v = n_pos·(1−t) / (t·n_neg_post)`` on the POST-downsample negative count,
+    so the resulting floor depends only on ``t`` and is independent of how much
+    the (cost-only) downsampling already removed (φ is folded into n_neg_post).
+
+    Edge cases keep negatives untouched (v=1.0): n_pos<=0 (cold cell with no
+    positives to lift) or n_neg_post<=0 (no negatives to weight).
+    """
+    if n_pos <= 0 or n_neg_post <= 0:
+        return 1.0
+    return n_pos * (1.0 - t) / (t * n_neg_post)
+
+
+def two_factor_weights(
+    n_pos: int, n_neg_post: float, *, t: float, alpha: float, m_min: float
+) -> dict:
+    """Per-cell positive/negative weights = attention A × floor factor.
+
+    ``W = A · (1 if positive else v)`` where:
+
+    - ``v = floor_weight(...)`` lifts the cell's effective pos-rate to ``t``.
+    - ``m = n_pos + n_neg_post·v`` is the floor-weighted mass (= n_pos/t for a
+      lifted cell, so ``m ∝ n_pos``); ``A = (m_min/m)**alpha`` normalises
+      attention by positive count (the least-positive cell gets A=1; hotter
+      cells are down-weighted, A≤1 — never up-weighting scarce positives).
+
+    ``m_min`` is the smallest ``m`` among the cells WITH positives (caller-
+    supplied so every cell shares one reference). A zero-positive cell does not
+    participate in attention: it returns A=1, v=1, w_pos=w_neg=1.
+
+    Returns ``{w_pos, w_neg, v, A, m, eff_pos_rate}``.
+    """
+    if n_pos <= 0:
+        return {"w_pos": 1.0, "w_neg": 1.0, "v": 1.0, "A": 1.0,
+                "m": float(n_neg_post), "eff_pos_rate": 0.0}
+    v = floor_weight(n_pos, n_neg_post, t)
+    m = n_pos + n_neg_post * v
+    A = (m_min / m) ** alpha if m > 0 else 1.0
+    w_pos = A
+    w_neg = A * v
+    eff = n_pos / (n_pos + n_neg_post * v) if (n_pos + n_neg_post * v) else 0.0
+    return {"w_pos": w_pos, "w_neg": w_neg, "v": v, "A": A, "m": m,
+            "eff_pos_rate": eff}
 
 
 def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dict:

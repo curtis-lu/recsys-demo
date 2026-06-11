@@ -10,12 +10,14 @@ from typer.testing import CliRunner
 from scripts.sampling_overrides_editor import (
     aggregate_surfaces,
     app,
+    floor_weight,
     grid_to_yaml,
     profile_stats,
     render_html,
     resolve_keys,
     suggest_ratio,
     suggest_weight,
+    two_factor_weights,
 )
 
 
@@ -50,6 +52,62 @@ class TestSuggestWeight:
 
     def test_zero_pos_capped_at_w_max(self):
         assert suggest_weight(n_pos=0, median_pos=800, alpha=0.5, w_max=5.0) == 5.0
+
+
+class TestFloorWeight:
+    def test_lifts_to_target_rate(self):
+        # n_pos=61, n_neg_post=2_340_904, t=1/6 -> 61*5/2340904
+        v = floor_weight(61, 2_340_904, 1 / 6)
+        assert abs(v - 61 * 5 / 2_340_904) < 1e-15
+        # floored neg mass = n_neg_post * v = n_pos*(1-t)/t = 61*5 = 305
+        assert abs(2_340_904 * v - 305) < 1e-6
+
+    def test_independent_of_phi_via_post_count(self):
+        # same floored mass (=305) regardless of how much was downsampled
+        for phi in (1.0, 0.1, 0.02):
+            nnp = round(phi * 2_340_904)
+            assert abs(nnp * floor_weight(61, nnp, 1 / 6) - 305) < 1.0
+
+    def test_zero_pos_or_zero_neg_keeps_negatives(self):
+        assert floor_weight(0, 1000, 1 / 6) == 1.0
+        assert floor_weight(50, 0, 1 / 6) == 1.0
+
+
+class TestTwoFactorWeights:
+    def test_effective_pos_rate_equals_t(self):
+        out = two_factor_weights(61, 2_340_904, t=1 / 6, alpha=0.5, m_min=180)
+        assert abs(out["eff_pos_rate"] - 1 / 6) < 1e-9
+
+    def test_floor_logit_equalized_across_cells(self):
+        # two very different products land on the same post-weight floor logit
+        import math
+        a = two_factor_weights(23601, 2_317_364, t=1 / 6, alpha=0.5, m_min=180)
+        b = two_factor_weights(61, 2_340_904, t=1 / 6, alpha=0.5, m_min=180)
+        la = math.log(23601 * a["w_pos"] / (2_317_364 * a["w_neg"]))
+        lb = math.log(61 * b["w_pos"] / (2_340_904 * b["w_neg"]))
+        assert abs(la - lb) < 1e-9
+        assert abs(la - math.log((1 / 6) / (1 - 1 / 6))) < 1e-9
+
+    def test_attention_reference_cell_is_one(self):
+        # m == m_min (the least-positive cell, m=n_pos/t) -> A == 1
+        m_min = 30 / (1 / 6)
+        out = two_factor_weights(30, 1_800_000, t=1 / 6, alpha=0.5, m_min=m_min)
+        assert abs(out["A"] - 1.0) < 1e-9
+
+    def test_hotter_cell_down_weighted(self):
+        m_min = 30 / (1 / 6)
+        cold = two_factor_weights(30, 1_800_000, t=1 / 6, alpha=0.5, m_min=m_min)
+        hot = two_factor_weights(23601, 2_317_364, t=1 / 6, alpha=0.5, m_min=m_min)
+        assert hot["A"] < cold["A"] <= 1.0
+
+    def test_alpha_zero_no_attention(self):
+        out = two_factor_weights(23601, 2_317_364, t=1 / 6, alpha=0.0, m_min=180)
+        assert out["A"] == 1.0
+
+    def test_zero_positive_cell_neutral(self):
+        out = two_factor_weights(0, 500_000, t=1 / 6, alpha=0.5, m_min=180)
+        assert out == {"w_pos": 1.0, "w_neg": 1.0, "v": 1.0, "A": 1.0,
+                       "m": 500_000.0, "eff_pos_rate": 0.0}
 
 
 # ---------------------------------------------------------------------------
