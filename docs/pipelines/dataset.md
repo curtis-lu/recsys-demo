@@ -3,13 +3,28 @@
 > 把三張來源表變成各 split 的訓練輸入：抽樣 → 前處理 → 組 `*_model_input`。
 > DAG pipeline；節點接線與每張表的 schema 見 [`../data-lineage.html`](../data-lineage.html)。
 
+## 指令與選項
+
+```bash
+# 建資料集（每次都依 parameters 重算三層版本）
+python -m recsys_tfb dataset --env local
+
+# 改了下游 node、從某 node 接續（缺料自動補跑上游）
+python -m recsys_tfb dataset --from-node build_model_input
+
+# 只重跑單一 node
+python -m recsys_tfb dataset --only-node fit_preprocessor_metadata
+
+# 先看執行計畫不跑 / 列 node 名與接續成本
+python -m recsys_tfb dataset --from-node build_model_input --dry-run
+python -m recsys_tfb dataset --list-nodes
+```
+
+> dataset **沒有版本旗標**：三層版本由 `parameters_dataset.yaml` 決定、每跑必重算（見「三層資料版本」）；要選既有版本是在下游 `training` 用 `--base-dataset-version` / `--train-variant`。`--from-node` / `--only-node` 互斥；切片機制 → [`../operations/pipeline-slicing.md`](../operations/pipeline-slicing.md)。
+
 ## 用途
 
 `dataset` 從 `sample_pool` 抽樣挑出各 split 的 key，對 `feature_table` 做一次前處理（編碼），再把 key ⋈ 特徵 ⋈ label 組成模型輸入。輸出供 `training` 讀。
-
-```bash
-python -m recsys_tfb dataset --env local
-```
 
 ## 三層資料版本（`core/versioning.py`）
 
@@ -62,7 +77,7 @@ python -m recsys_tfb dataset --env local
 
 - 改**抽樣**設定 → 只 bust 對應 variant 層；base（前處理、val/test）不動。
 - 改 **schema / 前處理 / carry_columns / feature_table 欄位** → bust `base_dataset_version`，整批重算。
-- **怎麼指定要用哪個版本**：`--base-dataset-version` / `--train-variant`（預設取最新）。各層的版本對齊由框架自動處理（manifest ＋ `latest` symlink）。
+- **dataset 不接受版本旗標**：版本恆由 `parameters_dataset.yaml` 重算（見開頭「指令與選項」）。下游 `training` 才用 `--base-dataset-version` / `--train-variant` 指定要吃哪個既有版本（預設取最新）；各層版本對齊由框架自動處理（manifest ＋ `latest` symlink）。
 
 ## 規模與記憶體
 

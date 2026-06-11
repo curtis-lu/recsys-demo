@@ -325,7 +325,7 @@ python -m recsys_tfb evaluation --env local
 | 搞懂這是什麼、排序問題長怎樣 | 本文件 §0–§1；不熟排序先讀手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt_learning_to_rank.md) |
 | 把整條流程跑起來 | 本文件 §2 |
 | 看資料怎麼流、每張表的 schema 與範例 | [`docs/data-lineage.html`](docs/data-lineage.html) |
-| 深入某一個 pipeline | [`docs/pipelines/`](docs/pipelines)（`source_etl` / `dataset` / `training` / `evaluation`） |
+| 深入某一個 pipeline | [`docs/pipelines/`](docs/pipelines)（`source_etl` / `dataset` / `training` / `inference` / `evaluation`） |
 | 改設定（加產品 / 加特徵 / 改訓練目標） | [`docs/change-guide.md`](docs/change-guide.md) ＋ 本文件 §4 |
 | 搞懂指標怎麼算 | [`docs/metrics.html`](docs/metrics.html) |
 | 理解設計取捨與最反直覺的行為 | [`docs/design-principles.md`](docs/design-principles.md)、[`docs/behavior-diagrams.html`](docs/behavior-diagrams.html) |
@@ -349,7 +349,7 @@ python -m recsys_tfb evaluation --env local
 |---|---|---|
 | 入口 | `README.md`（本檔） | 看懂 ＋ 跑起來 |
 | 資料 | `docs/data-lineage.html` | 全表 lineage ＋ schema ＋ 範例 |
-| pipeline | `docs/pipelines/{source_etl,dataset,training,evaluation}.md` | 各 pipeline 的節點、設定、重跑語意 |
+| pipeline | `docs/pipelines/{source_etl,dataset,training,inference,evaluation}.md` | 各 pipeline 的節點、設定、指令與選項、重跑語意 |
 | 指標 | `docs/metrics.html` | mAP / NDCG / per-item 怎麼算、報表怎麼讀 |
 | 設計 | `docs/design-principles.md` | 設計原則、三層版本、一致性不變量 |
 | 設計 | `docs/behavior-diagrams.html` | 最反直覺的程式行為圖解 |

@@ -3,13 +3,34 @@
 > 用各 split 的 `*_model_input` 訓練**一個共用** LightGBM 模型：cache → 調參 →（校準）→ 寫 test 預測 ＋ 診斷。
 > DAG pipeline；節點接線與產物見 [`../data-lineage.html`](../data-lineage.html)。
 
+## 指令與選項
+
+```bash
+# 一般訓練（取 latest base/train 版本）
+python -m recsys_tfb training --env local
+
+# 指定上游資料版本
+python -m recsys_tfb training --base-dataset-version <base_v> --train-variant <train_v>
+
+# 啟用校準時挑 calibration 版本（需 training.calibration.enabled=true）
+python -m recsys_tfb training --calibration-variant <cal_v>
+
+# 改了下游 node、跳過昂貴 HPO 接續（缺料自動補跑上游）
+python -m recsys_tfb training --from-node finalize_model
+
+# 只重跑單一 node（如校準）
+python -m recsys_tfb training --only-node calibrate_model
+
+# 先看執行計畫不跑 / 列 node 名與接續成本
+python -m recsys_tfb training --from-node finalize_model --dry-run
+python -m recsys_tfb training --list-nodes
+```
+
+> 版本旗標省略則取 latest；`--calibration-variant` 僅在 `training.calibration.enabled=true` 時生效。`--from-node` / `--only-node` 互斥；切片機制 → [`../operations/pipeline-slicing.md`](../operations/pipeline-slicing.md)。
+
 ## 用途
 
 `training` 讀 dataset 產的 `*_model_input`，訓出單一模型（pointwise 或 learning-to-rank），可選做機率校準，並對 test set 評分供 evaluation 情境 1 使用。
-
-```bash
-python -m recsys_tfb training --env local
-```
 
 > 訓練是 **driver 上的單機 LightGBM**，不靠分散式 cluster——所以模型與快取都駐留 driver 本機檔案系統（見「產物」）。
 
@@ -60,7 +81,7 @@ python -m recsys_tfb training --env local
 ## 版本語意
 
 - `model_version` ＝ hash（**model-defining** 的 training 子集 ＋ `base_dataset_version` ＋ `train_variant_id`〔＋ `calibration_variant_id`〕）。純 logging / threading 的 `algorithm_params` 鍵被排除，改它們不會翻 `model_version`。
-- 指定上游：`--base-dataset-version`、`--train-variant`（預設取最新）。
+- 指定上游版本：見開頭「指令與選項」（`--base-dataset-version` / `--train-variant` / `--calibration-variant`，預設取最新）。
 - **上線是人工的**：用 `scripts/promote_model.py` 把某個 `model_version` 設為 `best`（不自動），`inference` 預設用 `best`（README §3 Q5）。
 
 ## 接下來
