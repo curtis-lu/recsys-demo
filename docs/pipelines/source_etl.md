@@ -3,6 +3,23 @@
 > 把上游原始表整理成框架要讀的三張**來源表**：`feature_table`、`label_table`、`sample_pool`。
 > 這是唯一用 **SQL** 跑、不是 DAG node 的階段。
 
+## 指令與選項
+
+```bash
+# 三條獨立 ETL，各產一張來源表（--target-dates 逗號分隔多個；未給讀 config）
+python -m recsys_tfb feature_etl     --env local --target-dates 2025-01-31
+python -m recsys_tfb label_etl       --env local --target-dates 2025-01-31
+python -m recsys_tfb sample_pool_etl --env local --target-dates 2025-01-31
+
+# 先 preflight 驗上游（唯讀、不寫表；有失敗即 exit 1 並印修復指引）
+python -m recsys_tfb feature_etl --source-check --target-dates 2025-01-31
+
+# 從某張表續跑（跳過它之前已寫的表；接續失敗的長流程）
+python -m recsys_tfb feature_etl --restart-from <table_name> --target-dates 2025-01-31
+```
+
+> `source_etl` 非 DAG pipeline、無切片旗標。`--source-check` 不可與 `--restart-from` 併用（檢查不寫表，無從續跑）；dry-run／preflight／覆寫的完整語意見下方「重跑語意」與「preflight 工作流」。
+
 ## 用途
 
 `source_etl` 不是單一指令，而是三條獨立的 SQL ETL 流程，各自產出一張來源表：
@@ -106,15 +123,9 @@ feature_etl:
   - SQL / Spark 執行錯誤（如表不存在 / schema 不符）：中止整個 run。
   - 三者都記入 `etl_audit_log`。
 
-## 指令
+## preflight 工作流（建議）
 
-```bash
-python -m recsys_tfb feature_etl     --env local --target-dates 2025-01-31
-python -m recsys_tfb label_etl       --env local --target-dates 2025-01-31
-python -m recsys_tfb sample_pool_etl --env local --target-dates 2025-01-31   # 此 stage local 也會實寫
-```
-
-**先 preflight 再正式跑**（建議工作流）：
+對來源資料新鮮度沒把握時，**先 preflight 再正式跑**——先唯讀驗上游、通過後再寫表：
 
 ```bash
 # 1) 先驗上游（唯讀、不寫表；全部跑完有失敗即 exit 1 並印修復指引）
@@ -123,7 +134,7 @@ python -m recsys_tfb feature_etl --source-check --target-dates 2025-01-31
 python -m recsys_tfb feature_etl              --target-dates 2025-01-31
 ```
 
-`--source-check` 不可與 `--restart-from` 併用（檢查不寫表，無從續跑）。
+> 三條 ETL 的完整指令見開頭「指令與選項」。`sample_pool_etl` 在 `--env local` 也會實寫（設了 `dry_run: false`）；`feature_etl` / `label_etl` 本機預設 dry-run（見「重跑語意」）。`--source-check` 不可與 `--restart-from` 併用。
 
 ## 接下來
 
