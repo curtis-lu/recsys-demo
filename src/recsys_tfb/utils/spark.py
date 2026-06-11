@@ -66,9 +66,18 @@ def get_or_create_spark_session(
 
 
 def _is_session_alive(session: SparkSession) -> bool:
-    """True if the session's SparkContext is still attached to a live JVM."""
+    """True only if the session's SparkContext is still running.
+
+    A non-None ``_jsc`` means the Python wrapper still holds a context
+    object, not that the JVM context is live: a stopped SparkContext can
+    leave ``_jsc`` non-None, and any subsequent ``parallelize`` /
+    ``createDataFrame`` then raises ``IllegalStateException: Cannot call
+    methods on a stopped SparkContext``. Probe ``isStopped()`` so a dead
+    session reads as not-alive and the caller rebuilds a fresh one.
+    """
     try:
-        return session.sparkContext._jsc is not None
+        jsc = session.sparkContext._jsc
+        return jsc is not None and not jsc.sc().isStopped()
     except Exception:
         return False
 
@@ -90,11 +99,11 @@ def _fallback_create() -> SparkSession:
     """Return active session, or build one from base parameters.yaml.
 
     `getActiveSession()` can return a session whose SparkContext has been
-    stopped (e.g. tune_hyperparameters explicitly calls `.stop()` to free
-    JVM threads before the driver-local HPO loop). Treat a stopped session
-    as if there were none and rebuild from yaml — otherwise downstream
-    nodes call `.parallelize()` / `.createDataFrame()` on a dead context
-    and hit AttributeError: 'NoneType' object has no attribute 'sc'.
+    stopped (any caller that stops Spark mid-run — historically
+    tune_hyperparameters, removed in 85b2869). Treat a stopped session as
+    if there were none and rebuild from yaml — otherwise downstream nodes
+    call `.parallelize()` / `.createDataFrame()` on a dead context and hit
+    `IllegalStateException: Cannot call methods on a stopped SparkContext`.
     """
     active = SparkSession.getActiveSession()
     if active is not None and _is_session_alive(active):
