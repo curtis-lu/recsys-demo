@@ -36,3 +36,47 @@ class TestStudyLifecycle:
     def test_hpo_study_dir_path(self):
         from pathlib import Path
         assert hpo_resume.hpo_study_dir("abc") == Path("data") / "models" / "_hpo" / "abc"
+
+
+def _tiny_adapter():
+    import numpy as np
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    rng = np.random.RandomState(0)
+    X = rng.rand(40, 3)
+    y = (rng.rand(40) < 0.3).astype(float)
+    a = LightGBMAdapter()
+    a.train(
+        X_train=X, y_train=y, X_val=X, y_val=y,
+        params={"objective": "binary", "verbosity": -1, "num_iterations": 5},
+    )
+    return a
+
+
+class TestCheckpoint:
+    def test_round_trip(self, tmp_path):
+        import numpy as np
+        sd = tmp_path / "_hpo" / "sid"
+        hpo_resume.write_checkpoint(
+            sd, _tiny_adapter(), score=0.5, best_iteration=3,
+            best_params={"learning_rate": 0.1}, trial_number=2, search_id="sid",
+        )
+        loaded = hpo_resume.load_checkpoint(sd, "lightgbm")
+        assert loaded is not None
+        assert loaded["score"] == 0.5
+        assert loaded["iteration"] == 3          # from meta, not reloaded booster
+        assert loaded["params"] == {"learning_rate": 0.1}
+        assert loaded["trial_number"] == 2
+        preds = loaded["model"].predict(np.random.RandomState(1).rand(5, 3))
+        assert preds.shape == (5,)
+
+    def test_load_missing_returns_none(self, tmp_path):
+        assert hpo_resume.load_checkpoint(tmp_path / "nope", "lightgbm") is None
+
+    def test_no_temp_files_left(self, tmp_path):
+        sd = tmp_path / "_hpo" / "sid"
+        hpo_resume.write_checkpoint(
+            sd, _tiny_adapter(), score=0.1, best_iteration=1,
+            best_params={}, trial_number=0, search_id="sid",
+        )
+        leftovers = list((sd / "checkpoint").glob("*.tmp"))
+        assert leftovers == []
