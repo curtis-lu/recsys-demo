@@ -468,6 +468,16 @@ class TestRenderHtml:
         # recomputed live on every cell edit
         assert "renderSummary()" in html
 
+    def test_ratio_input_mode_toggle_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function setRmode(" in html
+        assert "let RMODE='mult'" in html
+        assert "依負樣本倍率" in html and "依保留率" in html
+        assert 'name="rmode"' in html
+        # keep-mode editable column branch + n_pos=0 fallback preserved
+        assert "RMODE==='keep'" in html
+        assert "r.n_pos<=0" in html
+
 
 # ---------------------------------------------------------------------------
 # Spark profiling aggregation

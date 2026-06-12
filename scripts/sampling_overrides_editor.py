@@ -405,6 +405,9 @@ n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關
 <button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
 <button id="tb_weight" onclick="setTab('weight')">weight 面 (sample_weight_keys)</button>
 </div>
+<div id="rmodebar">ratio 面輸入模式：
+ <label><input type="radio" name="rmode" value="mult" checked onclick="setRmode('mult')"> 依負樣本倍率</label>
+ <label><input type="radio" name="rmode" value="keep" onclick="setRmode('keep')"> 依保留率</label></div>
 <div id="knobs">weight 面旋鈕：
  t（目標正樣本率）<input id=t type=number step=0.01 min=0 max=1 value="{t}" oninput="onKnob()">
  · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()"></div>
@@ -487,12 +490,20 @@ function rebuildWeight(){{
  WEIGHT=cells.sort((x,y)=>y.n_pos-x.n_pos);
 }}
 let tab='ratio',sortKey=null,sortAsc=true;
+let RMODE='mult';   // 'mult'=依負樣本倍率(算保留率) | 'keep'=依保留率(算倍率)
+function setRmode(m){{ syncEdits(); RMODE=m; if(tab==='ratio') render(); }}
 function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
 function preview(r,nm){{
- if(r.n_pos<=0){{ let kr=parseFloat(r.ratio_direct);
-   if(isNaN(kr)) kr=1; kr=Math.min(1,Math.max(0,kr));
-   return {{ratio:kr.toFixed(4),kn:String(Math.round(r.n_neg*kr)),pr:'0.0000',
-   clamped:false,achieved:0,noNeg:false,noPos:true}}; }}
+ // keep 模式或無正樣本 → 直填保留率(ratio_direct)；achieved=kept/n_pos
+ const useDirect=(RMODE==='keep')||(r.n_pos<=0);
+ if(useDirect){{
+   let kr=parseFloat(r.ratio_direct); if(isNaN(kr)) kr=1;
+   kr=Math.min(1,Math.max(0,kr));
+   const kept=Math.round(r.n_neg*kr),total=r.n_pos+kept;
+   return {{ratio:kr.toFixed(4),kn:String(kept),
+   pr:(total>0?r.n_pos/total:0).toFixed(4),clamped:false,
+   achieved:(r.n_pos>0?kept/r.n_pos:0),noNeg:r.n_neg<=0,noPos:r.n_pos<=0}};
+ }}
  if(isNaN(nm)) return {{ratio:'1.0000',kn:String(r.n_neg),
    pr:(r.n_pos/(r.n_pos+r.n_neg)).toFixed(4),clamped:false,
    achieved:(r.n_pos>0?r.n_neg/r.n_pos:0),noNeg:false,noPos:false}};
@@ -544,10 +555,11 @@ function renderRatio(data,idx){{
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
  idx.forEach(i=>{{ const r=data[i],pv=preview(r,parseFloat(r.suggested_neg_mult));
   const am=achMult(pv),tr=document.createElement('tr'),noPos=r.n_pos<=0;
-  const negMultCell=noPos
-   ?`<td class=calc title="無正樣本，倍率無定義；改用 ratio 欄直接設保留率">—</td>`
+  const editKeep=(RMODE==='keep')||noPos;
+  const negMultCell=editKeep
+   ?`<td class=calc title="保留率模式/無正樣本：未使用倍率">—</td>`
    :`<td class=edit contenteditable data-k=neg_mult data-i=${{i}} oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`;
-  const ratioCell=noPos
+  const ratioCell=editKeep
    ?`<td class="edit rt" contenteditable data-k=ratio_direct data-i=${{i}} oninput="recalc(this)">${{r.ratio_direct}}</td>`
    :`<td class="calc rt">${{pv.ratio}}</td>`;
   tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
