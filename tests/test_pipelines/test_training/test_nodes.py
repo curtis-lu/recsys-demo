@@ -2,6 +2,7 @@
 
 import logging
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -171,6 +172,12 @@ def lgb_handles(synthetic_model_inputs, preprocessor_metadata, training_paramete
     return train_lgb_h, train_dev_lgb_h
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """tune_hyperparameters 會寫 ./data/models/_hpo/<sid>/；隔離到各測試自己的 tmp cwd。"""
+    monkeypatch.chdir(tmp_path)
+
+
 # ---- Tests: _compute_ap ----
 
 
@@ -240,9 +247,10 @@ class TestTuneHyperparameters:
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
     ):
         train_lgb_h, train_dev_lgb_h = lgb_handles
-        _, _, val_h, *_ = synthetic_model_inputs
-        p1, i1, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
-        p2, i2, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, training_parameters)
+        val_h = synthetic_model_inputs[2]
+        params = {**training_parameters, "hpo_checkpointing": False}
+        p1, i1, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params)
+        p2, i2, _ = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params)
         assert p1 == p2
         assert i1 == i2
 
@@ -418,6 +426,86 @@ class TestTuneHyperparameters:
                 f"step_completed count for {step_name!r} = "
                 f"{completed.count(step_name)}, expected {n_trials}"
             )
+
+    def test_resume_only_runs_remaining(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        from recsys_tfb.pipelines.training import hpo_resume
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+
+        def run(n):
+            p = {
+                **training_parameters, "search_id": "resumesid",
+                "training": {**training_parameters["training"], "n_trials": n},
+            }
+            return tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+            )
+
+        run(2)
+        sd = hpo_resume.hpo_study_dir("resumesid")
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "resumesid", 42)) == 2
+        run(4)  # n_trials 不在 search_id 內 → 同一 study → 只補 2 個
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "resumesid", 42)) == 4
+
+    def test_fresh_hpo_clears_and_logs_discard(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
+    ):
+        from recsys_tfb.pipelines.training import hpo_resume
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        base = {
+            **training_parameters, "search_id": "freshsid",
+            "training": {**training_parameters["training"], "n_trials": 2},
+        }
+        tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, base)
+        sd = hpo_resume.hpo_study_dir("freshsid")
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "freshsid", 42)) == 2
+
+        with caplog.at_level(logging.WARNING):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                {**base, "_fresh_hpo": True},
+            )
+        assert any(
+            "--fresh-hpo" in r.getMessage() and "discarding 2" in r.getMessage()
+            for r in caplog.records
+        )
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "freshsid", 42)) == 2
+
+    def test_checkpointing_disabled_writes_no_files(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        p = {
+            **training_parameters, "search_id": "nocp", "hpo_checkpointing": False,
+            "training": {**training_parameters["training"], "n_trials": 2},
+        }
+        _, _, bm = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+        )
+        assert bm is not None
+        assert not (Path("data") / "models" / "_hpo" / "nocp").exists()
+
+    def test_resume_recovers_best_model_without_retrain(
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+    ):
+        # After a 2-trial run, a re-run that adds 0 trials (same n_trials) must
+        # still return a usable model loaded from checkpoint (remaining==0 path).
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        p = {
+            **training_parameters, "search_id": "recoversid",
+            "training": {**training_parameters["training"], "n_trials": 2},
+        }
+        tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        bp, bi, bm = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        assert bm is not None
+        import numpy as np
+        assert bm.predict(np.zeros((3, len(preprocessor_metadata["feature_columns"])))).shape == (3,)
 
 
 # ---- Tests: finalize_model ----
@@ -811,6 +899,9 @@ def test_tune_defaults_ranking_metric(monkeypatch):
             return D()
 
     parameters = {
+        # FakeAdapter has no .save(); checkpointing (default True) would call it.
+        # This test only asserts metric defaulting, unrelated to persistence.
+        "hpo_checkpointing": False,
         "training": {
             "n_trials": 1,
             "num_iterations": 5,
