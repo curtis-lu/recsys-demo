@@ -5,7 +5,10 @@ Subcommands:
                      sample_weight_keys)\\{label} granularity, write a
                      self-contained two-tab HTML editor (ratio surface keyed by
                      sample_group_keys, weight surface keyed by
-                     sample_weight_keys) to data/profiling/.
+                     sample_weight_keys) to data/profiling/. ratio surface
+                     supports neg-mult / keep-rate input modes and group/batch
+                     row selection; weight surface supports a couple/decouple
+                     (global phi) negative-base toggle.
   to-yaml <json>    Convert the browser JSON export into sparse YAML snippets
                      (A5 for ratio, A9b/A9c for weights against the real
                      sample_weight_keys) for manual paste into config.
@@ -390,6 +393,10 @@ key-set 驗證。</p>
 clamp(倍率 × n_pos / n_neg, 0, 1)</code>（匯出 key <code>…|0</code>）。地板不再靠下採樣達成
 （改由 weight 面），所以冷門產品<b>不必</b>下採、保留全部負樣本給 split-finding。
 n_pos = 0 的冷門列在 ratio 欄直接填保留率。</p>
+<p><b>ratio 面輸入模式 ＋ 群組/批次選取。</b>上方可切<code>依負樣本倍率</code>或
+<code>依保留率</code>（直接填保留率、全列一致、含 n_pos=0）；兩欄值切換時互不洗掉。
+勾選列後可用<code>依群組選取</code>（維度＝值，一次選整組）再<code>批次套用</code>把同一個值
+套到所有選取列（倍率模式對 n_pos=0 列自動略過）。</p>
 <p><b>weight 面 = 排序抬升（雙因子，全域旋鈕 t、α）。</b>對每個 weight cell：</p>
 <p><b>v（降負樣本）→ 地板。</b><code>v = n_pos·(1−t) / (t · n_neg(下採後))</code>，把該產品
 有效正樣本率墊到目標 <code>t = {t}</code>，消掉冷門產品的 log(base-rate) 懲罰。
@@ -400,6 +407,9 @@ n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關
 <p><b>匯出。</b><code>w_pos = A</code>（key <code>…|1</code>）、<code>w_neg = A·v</code>（key
 <code>…|0</code>），對應 <code>training.sample_weights</code>（<code>sample_weight_keys</code>
 須含 label 當切分軸）。綠/藍欄是加權後驗證：eff pos_rate(後) 應每列 = t、地板 logit(後) 應每列相同。</p>
+<p><b>負樣本基數（連動 / 不連動）。</b>地板 v 的分母 n_neg 預設<code>連動 ratio 面</code>＝下採後負樣本，
+套用後實際正樣本率精確落在 t。切<code>不連動</code>時改用<code>原始 n_neg × φ</code>（全域旋鈕，φ=1 即原始），
+與 ratio 面無關；若 ratio 面同時有下採，套用後實際正樣本率會高於 t（overshoot）。</p>
 </details>
 <div id="tabs">
 <button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
