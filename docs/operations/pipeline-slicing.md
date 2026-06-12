@@ -19,6 +19,8 @@ python -m recsys_tfb dataset  --only-node build_train_model_input # 只跑單一
 - `--dry-run`：印計畫即退，不執行、不寫任何 pipeline 產物（run log 照常寫）。
 - `--list-nodes`：列出 node 與各自的接續成本即退；不可與 `--from-node`/`--only-node` 並用。
 
+> 這是**節點邊界**接續：整個 `tune_hyperparameters` 跑完並落地後，才能用 `--from-node finalize_model` 跳過它。HPO **跑到一半** crash 的接續（只補跑剩餘 trial）是另一層，由 `hpo_checkpointing` 機制處理，見 [`hpo-resume.md`](hpo-resume.md)。
+
 ## 自動擴張補跑
 
 被跳過 node 的輸出若「catalog 有定義且存在」（`catalog.exists()`），直接從落地讀；
