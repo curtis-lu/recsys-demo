@@ -340,6 +340,24 @@ def prepare_lgb_train_inputs(
 # Pipeline nodes
 # ---------------------------------------------------------------------------
 
+def _resolve_search_id(parameters: dict) -> str:
+    """HPO search_id：production 由 __main__ 注入；單測/直呼則就地計算。"""
+    sid = parameters.get("search_id")
+    if sid:
+        return str(sid)
+    from recsys_tfb.core.versioning import compute_search_id
+
+    cvi = parameters.get("calibration_variant_id")
+    if not isinstance(cvi, str) or cvi.startswith("__"):  # "__none__" placeholder
+        cvi = None
+    return compute_search_id(
+        parameters,
+        str(parameters.get("base_dataset_version", "")),
+        str(parameters.get("train_variant_id", "")),
+        cvi,
+    )
+
+
 HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
 
 
@@ -429,7 +447,13 @@ def tune_hyperparameters(
             )
             items_v = None
 
-    best_state: dict = {"score": -1.0, "model": None, "iteration": 0}
+    from recsys_tfb.pipelines.training import hpo_resume
+
+    checkpointing = parameters.get("hpo_checkpointing", True)
+    search_id = _resolve_search_id(parameters)
+    study_dir = None  # set in the checkpointing branch; referenced by objective
+
+    best_state: dict = {"score": -1.0, "model": None, "iteration": 0, "params": {}}
 
     def objective(trial: optuna.Trial) -> float:
         trial_idx = trial.number
@@ -451,12 +475,6 @@ def tune_hyperparameters(
         t0 = time.monotonic()
 
         adapter = get_adapter(algorithm)
-
-        # feature_pre_filter=False must match the construct_params used when
-        # writing the .bin (LightGBMAdapter.prepare_train_inputs); otherwise
-        # lgb.train hits "Cannot change feature_pre_filter after constructed".
-        # Required because min_child_samples is in the HPO search space and a
-        # pre-filtered Dataset would be tied to one specific value.
         construct_params = {"feature_pre_filter": False}
         with log_step(logger, "prepare_datasets"):
             ds_train = train_lgb_handle.load(params=construct_params).construct()
@@ -482,9 +500,15 @@ def tune_hyperparameters(
         if score > best_state["score"]:
             best_state["score"] = score
             best_state["model"] = adapter
-            # `best_iteration` is set by the early_stopping callback on the
-            # underlying Booster regardless of whether early stopping fired.
             best_state["iteration"] = adapter.booster.best_iteration
+            best_state["params"] = trial_params
+            if checkpointing and study_dir is not None:
+                hpo_resume.write_checkpoint(
+                    study_dir, adapter,
+                    score=score, best_iteration=adapter.booster.best_iteration,
+                    best_params=trial_params, trial_number=trial_idx,
+                    search_id=search_id,
+                )
 
         duration = time.monotonic() - t0
         logger.info(
@@ -496,18 +520,68 @@ def tune_hyperparameters(
 
         return score
 
-    sampler = optuna.samplers.TPESampler(seed=seed)
-    study = optuna.create_study(direction="maximize", sampler=sampler)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    with log_step(logger, "optuna_optimize"):
-        study.optimize(objective, n_trials=n_trials)
 
-    best_params = study.best_params
+    if checkpointing:
+        study_dir = hpo_resume.hpo_study_dir(search_id)
+        if parameters.get("_fresh_hpo", False):
+            n_prev, prev_best = 0, float("nan")
+            if study_dir.exists():
+                try:
+                    _tmp = hpo_resume.open_study(study_dir, search_id, seed)
+                    n_prev = hpo_resume.count_completed(_tmp)
+                    prev_best = _tmp.best_value if n_prev else float("nan")
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            logger.warning(
+                "--fresh-hpo: clearing %s (discarding %d completed trial(s), prev best=%.4f)",
+                study_dir, n_prev, prev_best,
+            )
+            hpo_resume.clear_study_dir(study_dir)
+
+        study = hpo_resume.open_study(study_dir, search_id, seed)
+        done = hpo_resume.count_completed(study)
+        ckpt = hpo_resume.load_checkpoint(study_dir, algorithm)
+        if ckpt is not None:
+            best_state.update(
+                score=ckpt["score"], model=ckpt["model"],
+                iteration=ckpt["iteration"], params=ckpt["params"],
+            )
+            logger.info(
+                "HPO resume: %d completed trial(s) found; best so far score=%.4f "
+                "(trial #%d); running %d more (target=%d)",
+                done, ckpt["score"], ckpt["trial_number"],
+                max(0, n_trials - done), n_trials,
+            )
+        remaining = max(0, n_trials - done)
+    else:
+        study = optuna.create_study(
+            direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed)
+        )
+        remaining = n_trials
+
+    if remaining > 0:
+        with log_step(logger, "optuna_optimize"):
+            study.optimize(objective, n_trials=remaining)
+    else:
+        logger.info("HPO target already met (done>=%d); skipping optimize", n_trials)
+
+    # last-resort: study has trials but no usable checkpoint model — refit best_params once.
+    if best_state["model"] is None:
+        logger.warning(
+            "No usable best model from memory/checkpoint; "
+            "refitting study.best_params once (last-resort recovery)"
+        )
+        study.enqueue_trial(study.best_params)
+        with log_step(logger, "last_resort_refit"):
+            study.optimize(objective, n_trials=1)
+
+    best_params = best_state["params"] or study.best_params
     best_model = best_state["model"]
     best_iteration = best_state["iteration"]
     logger.info(
         "Best trial score (%s): %.4f, best_iteration: %d, params: %s",
-        hpo_objective, study.best_value, best_iteration, best_params,
+        hpo_objective, best_state["score"], best_iteration, best_params,
     )
     return best_params, best_iteration, best_model
 

@@ -67,6 +67,7 @@ python -m recsys_tfb training --list-nodes
 - **HPO** `search_space`：宣告式 ParamSpec 清單（每項 `name` ＋ `type` ∈ {int, float, categorical}…）。HPO 在 **val** 上用哪個排序分數選超參由 `hpo_objective` 設定（如 per-item mAP）；指標定義見 [`../metrics.html`](../metrics.html)。
 - **校準** `training.calibration.enabled`（＋ `method`，如 `sigmoid`）：可選。**為什麼要校準**：LTR 的 `score` 是排序用相對分、不是機率；即使 `binary` 目標，LightGBM 原始輸出也未必是校準過的機率。要把 `score` 當機率解讀（算期望值、跨期比較）時才需要（README §3 Q4）。校準還需 dataset 端 `enable_calibration: true` 產出 calibration split。
 - **樣本權重** `sample_weight_keys` ＋ `sample_weights`：key 是各維度值用 `|` 串起來；維度欄必須是 train model_input 裡實際有的欄（identity 欄、label、`carry_columns`、類別欄），否則被一致性閘擋。
+- **HPO 崩潰復原** `hpo_checkpointing`（頂層，預設 `true`）：HPO 跑到一半 crash 時，重跑只補跑剩餘 trial、零重訓拿回最佳模型（持久化 Optuna study ＋ 每次刷新最佳就 checkpoint，落 `data/models/_hpo/<search_id>/`）。只改 `n_trials` 可接續／延長；強制重來用 `training --fresh-hpo`。機制、`search_id` 失效規則與清理見 [`../operations/hpo-resume.md`](../operations/hpo-resume.md)。這是 HPO **跑到一半**的接續；整個 `tune_hyperparameters` 跑完後從 `finalize_model` 接續是另一層，見 [`../operations/pipeline-slicing.md`](../operations/pipeline-slicing.md)。
 
 ## 產物（driver-local，除 1 張 Hive）
 

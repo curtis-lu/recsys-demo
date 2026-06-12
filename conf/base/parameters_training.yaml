@@ -162,3 +162,9 @@ diagnostics:
     n_examples: 5
     min_rows_per_item: 30
     max_budget: 4000000   # sample_rows * n_trees 超過則自動降抽樣
+
+# HPO 崩潰復原開關（ops 旗標，刻意放頂層不影響 model_version）。
+# true（預設）：tune_hyperparameters 持久化 Optuna study + 每次刷新最佳 checkpoint
+# 模型到 data/models/_hpo/<search_id>/，crash 後重跑只補跑剩餘 trial。
+# false：退回純記憶體、不落地（debug 用）。詳見 docs/operations/hpo-resume.md。
+hpo_checkpointing: true

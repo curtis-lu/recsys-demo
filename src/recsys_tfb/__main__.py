@@ -25,6 +25,7 @@ from recsys_tfb.core.versioning import (
     compute_calibration_variant_id,
     compute_feature_table_fingerprint,
     compute_model_version,
+    compute_search_id,
     compute_train_variant_id,
     read_manifest,
     resolve_base_dataset_version,
@@ -581,6 +582,10 @@ def training(
         None, "--only-node",
         help="Run a single node (plus minimal upstream re-runs for missing inputs)",
     ),
+    fresh_hpo: bool = typer.Option(
+        False, "--fresh-hpo",
+        help="丟棄此 search_id 已累積的 HPO study/checkpoint，從 trial 0 重新搜尋",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the slice execution plan and exit"
     ),
@@ -620,7 +625,9 @@ def training(
     )
 
     mv = compute_model_version(params_training, base_v, train_v, cal_v)
+    sid = compute_search_id(params_training, base_v, train_v, cal_v)
     logger.info("Model version: %s", mv)
+    logger.info("search_id: %s", sid)
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
     if cal_v is not None:
@@ -631,6 +638,8 @@ def training(
         "train_variant_id": train_v,
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
+        "search_id": sid,
+        "_fresh_hpo": fresh_hpo,
         "snap_date": _NONE_PLACEHOLDER,
     }
 

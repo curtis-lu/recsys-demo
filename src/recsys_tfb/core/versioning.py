@@ -171,6 +171,31 @@ def compute_model_version(
     return hashlib.sha256(combined.encode()).hexdigest()[:8]
 
 
+def compute_search_id(
+    params: dict,
+    base_dataset_version: str = "",
+    train_variant_id: str = "",
+    calibration_variant_id: str | None = None,
+) -> str:
+    """HPO 搜尋身分：與 model_version 相同的 model-defining 輸入，唯一拿掉 n_trials。
+
+    Keys the resumable Optuna study + best-model checkpoint. 只改 trial 數量
+    (n_trials) → search_id 不變 → 可接續/延長；改任何會改變一個 trial 的
+    (params -> score) 意義者（search_space / hpo_objective / num_iterations /
+    early_stopping_rounds / algorithm_params / 資料 / variant 身分）→ search_id
+    變 → 自動開新 study。
+    """
+    payload = _model_version_payload(params)  # deep-copies; safe to mutate
+    training = payload.get("training")
+    if isinstance(training, dict):
+        training.pop("n_trials", None)
+    canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
+    parts = ["search_id|", canonical, base_dataset_version, train_variant_id]
+    if calibration_variant_id is not None:
+        parts.append(calibration_variant_id)
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:8]
+
+
 def write_manifest(version_dir: Path, metadata: dict) -> None:
     """Write metadata as manifest.json in the version directory."""
     version_dir.mkdir(parents=True, exist_ok=True)

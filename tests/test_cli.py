@@ -518,3 +518,18 @@ class TestSlicingCLIFlags:
             out = re.sub(r"\s+", " ", result.output)
             for flag in ("--from-node", "--only-node", "--dry-run", "--list-nodes"):
                 assert flag in out, f"{cmd} missing {flag}"
+
+
+class TestFreshHpoFlag:
+    def test_training_help_advertises_fresh_hpo(self):
+        result = runner.invoke(app, ["training", "--help"])
+        assert result.exit_code == 0
+        assert "--fresh-hpo" in result.output
+
+
+class TestHpoCheckpointingConfig:
+    def test_parameters_training_declares_hpo_checkpointing_true(self):
+        import yaml as _yaml
+        with open("conf/base/parameters_training.yaml") as f:
+            cfg = _yaml.safe_load(f)
+        assert cfg.get("hpo_checkpointing") is True
