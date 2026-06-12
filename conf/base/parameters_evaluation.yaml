@@ -66,7 +66,8 @@ evaluation:
       include_distributions: true
       include_calibration: true
       n_calibration_bins: 10
-      sample_rows: null          # diagnostics toPandas 的 row 上限；null = 不抽樣
+      # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
+      # 不再需要 row 抽樣上限。
 
   # Compare sources ── 有填內容的 entry 才會 unlock `evaluation --compare <key>`
   # 與 `--compare-only <key>`。預設為空；要用哪個就把該 entry 前面的 `#` 拿掉。

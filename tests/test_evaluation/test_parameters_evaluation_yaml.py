@@ -27,7 +27,9 @@ def test_report_display_and_sections():
     assert rep["sections"]["per_item_attr"] is True
     assert rep["display"]["primary_map_k"] == [1, 3, 5, "all"]
     assert rep["display"]["guardrail_recall_k"] == [1, 2, 3, 4, 5]
-    assert rep["diagnostics"]["sample_rows"] is None
+    # Diagnostics are aggregated in Spark now -> no row-sampling cap.
+    assert "sample_rows" not in rep["diagnostics"]
+    assert rep["diagnostics"]["include_distributions"] is True
 
 
 def test_baseline_block_is_lookback_only():

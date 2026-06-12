@@ -1,63 +1,52 @@
-"""Tests for evaluation.calibration module."""
+"""Tests for evaluation.calibration — plotting from pre-aggregated bins.
 
-import numpy as np
+The skip rule (too few rows / no positives) now lives in
+diagnostics_spark.calibration_bins; this module just draws the points it is
+given, so the input frame already contains only the items to plot.
+"""
+
 import pandas as pd
 import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.calibration import plot_calibration_curves
 
 
-def _make_data(n_customers=100, products=None, seed=42):
-    rng = np.random.RandomState(seed)
-    if products is None:
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
-
-    pred_rows = []
-    label_rows = []
-
-    for i in range(n_customers):
-        for prod in products:
-            score = rng.rand()
-            label = int(rng.rand() < score)  # roughly calibrated
-            pred_rows.append({
-                "snap_date": "20240331",
-                "cust_id": f"C{i:04d}",
-                "prod_name": prod,
-                "score": score,
-                "rank": 0,
-            })
-            label_rows.append({
-                "snap_date": "20240331",
-                "cust_id": f"C{i:04d}",
-                "prod_name": prod,
-                "label": label,
-            })
-
-    return pd.DataFrame(pred_rows), pd.DataFrame(label_rows)
+def _calib_bins():
+    return pd.DataFrame(
+        {
+            "prod_name": ["A", "A", "B", "B"],
+            "bin": [0, 1, 0, 1],
+            "prob_pred": [0.1, 0.6, 0.2, 0.7],
+            "prob_true": [0.0, 1.0, 0.3, 0.8],
+        }
+    )
 
 
 class TestPlotCalibrationCurves:
     def test_returns_figure(self):
-        preds, labels = _make_data()
-        fig = plot_calibration_curves(preds, labels)
+        fig = plot_calibration_curves(_calib_bins())
         assert isinstance(fig, go.Figure)
 
-    def test_has_reference_line(self):
-        preds, labels = _make_data()
-        fig = plot_calibration_curves(preds, labels)
-        # First trace should be the diagonal reference
+    def test_first_trace_is_reference_diagonal(self):
+        fig = plot_calibration_curves(_calib_bins())
         assert fig.data[0].name == "Perfect Calibration"
 
-    def test_all_products_on_one_figure(self):
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
-        preds, labels = _make_data(products=products)
-        fig = plot_calibration_curves(preds, labels)
-        # 1 reference line + 3 product traces
-        assert len(fig.data) == 4
+    def test_one_curve_per_item_plus_diagonal(self):
+        fig = plot_calibration_curves(_calib_bins())
+        names = [t.name for t in fig.data]
+        assert "A" in names and "B" in names
+        assert len(fig.data) == 3  # diagonal + A + B
 
-    def test_insufficient_data_handled(self):
-        """Products with too few samples should be skipped."""
-        preds, labels = _make_data(n_customers=2)
-        fig = plot_calibration_curves(preds, labels, n_bins=10)
-        # Should not raise, some products may be skipped
-        assert isinstance(fig, go.Figure)
+    def test_curve_uses_bin_means_only(self):
+        fig = plot_calibration_curves(_calib_bins())
+        a = next(t for t in fig.data if t.name == "A")
+        assert list(a.x) == [0.1, 0.6]
+        assert list(a.y) == [0.0, 1.0]
+
+    def test_empty_frame_yields_only_diagonal(self):
+        empty = pd.DataFrame(
+            columns=["prod_name", "bin", "prob_pred", "prob_true"]
+        )
+        fig = plot_calibration_curves(empty)
+        assert len(fig.data) == 1
+        assert fig.data[0].name == "Perfect Calibration"
