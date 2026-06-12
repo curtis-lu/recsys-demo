@@ -102,10 +102,10 @@ def load_checkpoint(study_dir: Path, algorithm: str) -> Optional[dict]:
     model_path = ckpt / CHECKPOINT_MODEL
     if not (meta_path.exists() and model_path.exists()):
         return None
+    adapter = get_adapter(algorithm)  # config error (unknown algorithm) must fail loud
     try:
         with open(meta_path) as f:
             meta = json.load(f)
-        adapter = get_adapter(algorithm)
         adapter.load(str(model_path))
     except Exception:
         logger.warning("HPO checkpoint unreadable at %s; ignoring", ckpt, exc_info=True)

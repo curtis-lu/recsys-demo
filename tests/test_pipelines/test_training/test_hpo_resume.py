@@ -80,3 +80,21 @@ class TestCheckpoint:
         )
         leftovers = list((sd / "checkpoint").glob("*.tmp"))
         assert leftovers == []
+
+    def test_load_corrupt_meta_returns_none(self, tmp_path):
+        sd = tmp_path / "_hpo" / "sid"
+        hpo_resume.write_checkpoint(
+            sd, _tiny_adapter(), score=0.2, best_iteration=2,
+            best_params={}, trial_number=1, search_id="sid",
+        )
+        (sd / "checkpoint" / hpo_resume.CHECKPOINT_META).write_text("{ not valid json")
+        assert hpo_resume.load_checkpoint(sd, "lightgbm") is None
+
+    def test_load_corrupt_model_returns_none(self, tmp_path):
+        sd = tmp_path / "_hpo" / "sid"
+        hpo_resume.write_checkpoint(
+            sd, _tiny_adapter(), score=0.2, best_iteration=2,
+            best_params={}, trial_number=1, search_id="sid",
+        )
+        (sd / "checkpoint" / hpo_resume.CHECKPOINT_MODEL).write_text("garbage not a booster")
+        assert hpo_resume.load_checkpoint(sd, "lightgbm") is None
