@@ -174,8 +174,16 @@ def aggregate_surfaces(
     alpha: float,
     t: float,
     default_neg_mult: float,
+    neg_base: str = "coupled",
+    phi: float = 1.0,
 ) -> dict:
     """Roll finest-granularity stats up into the ratio and weight surfaces.
+
+    ``neg_base`` selects the weight floor's negative base: ``"coupled"`` (default)
+    uses the post-downsample count ``Σ n_neg * ratio[ratio_dims projection]`` so the
+    realized pos-rate lands exactly at ``t``; ``"decoupled"`` uses ``Σ n_neg * phi``
+    (independent of the ratio surface — ``phi=1`` means raw negatives). The JS
+    mirror in ``_HTML_TEMPLATE`` (``rebuildWeight``) must apply the same branch.
 
     Pure: no Spark, no I/O. ``stats`` are union-granularity dict rows from
     profile_stats. ``ratio_dims`` is the (possibly empty) list of ratio-surface
@@ -230,7 +238,10 @@ def aggregate_surfaces(
             rk = tuple(s[d] for d in ratio_dims)
             a = wacc.setdefault(wk, [0, 0.0])
             a[0] += s["n_pos"]
-            a[1] += s["n_neg"] * ratio_by_key[rk]      # n_neg_post (fractional)
+            if neg_base == "decoupled":
+                a[1] += s["n_neg"] * phi               # raw * phi, ratio-independent
+            else:
+                a[1] += s["n_neg"] * ratio_by_key[rk]  # n_neg_post (fractional)
         # attention reference: smallest floor-weighted mass among cells WITH
         # positives (m = n_pos/t ∝ n_pos), so the least-positive cell gets A=1.
         masses = [npos + nnp * floor_weight(npos, nnp, t)

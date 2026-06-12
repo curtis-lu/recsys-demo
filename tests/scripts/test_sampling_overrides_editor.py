@@ -618,6 +618,31 @@ class TestAggregateSurfaces:
         assert r["keys"] == []
         assert r["n_pos"] == 240 and r["n_neg"] == 11540
 
+    def test_decoupled_phi_one_uses_raw_negatives(self):
+        # neg_mult would downsample under coupled; decoupled must ignore ratio and
+        # use raw n_neg (phi=1) as the floor's negative base.
+        stats = [
+            {"prod_name": "a", "n_pos": 100, "n_neg": 1000},
+            {"prod_name": "b", "n_pos": 50, "n_neg": 4000},
+        ]
+        nm = {("a",): 1.0, ("b",): 1.0}  # coupled ratio = clamp(1*npos/nneg) < 1
+        out = aggregate_surfaces(
+            stats, nm, ratio_dims=["prod_name"], weight_dims=["prod_name"],
+            alpha=0.5, t=self.T, default_neg_mult=1.0,
+            neg_base="decoupled", phi=1.0)
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("a",)]["n_neg_post"] == 1000   # raw, not downsampled
+        assert wr[("b",)]["n_neg_post"] == 4000
+
+    def test_decoupled_phi_scales_raw_negatives(self):
+        stats = [{"prod_name": "a", "n_pos": 100, "n_neg": 1000}]
+        out = aggregate_surfaces(
+            stats, {("a",): 1.0}, ratio_dims=["prod_name"],
+            weight_dims=["prod_name"], alpha=0.5, t=self.T,
+            default_neg_mult=1.0, neg_base="decoupled", phi=0.2)
+        row = out["weight_rows"][0]
+        assert row["n_neg_post"] == round(1000 * 0.2)   # 200
+
 
 # ---------------------------------------------------------------------------
 # Typer CLI (to-yaml end-to-end; profile's Spark path covered above)
