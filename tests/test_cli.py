@@ -518,3 +518,10 @@ class TestSlicingCLIFlags:
             out = re.sub(r"\s+", " ", result.output)
             for flag in ("--from-node", "--only-node", "--dry-run", "--list-nodes"):
                 assert flag in out, f"{cmd} missing {flag}"
+
+
+class TestFreshHpoFlag:
+    def test_training_help_advertises_fresh_hpo(self):
+        result = runner.invoke(app, ["training", "--help"])
+        assert result.exit_code == 0
+        assert "--fresh-hpo" in result.output
