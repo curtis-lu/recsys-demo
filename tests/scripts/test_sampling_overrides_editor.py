@@ -478,6 +478,16 @@ class TestRenderHtml:
         assert "RMODE==='keep'" in html
         assert "r.n_pos<=0" in html
 
+    def test_group_and_batch_select_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function groupSelect(" in html
+        assert "function applyBatch(" in html
+        assert "依群組選取" in html and "套用到選取列" in html
+        assert "const RSEL=new Set(" in html
+        assert "function fillGroupVals(" in html
+        assert "function selectAllVisible(" in html
+        assert "function toggleRow(" in html
+
 
 # ---------------------------------------------------------------------------
 # Spark profiling aggregation

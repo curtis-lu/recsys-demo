@@ -414,6 +414,17 @@ n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關
 <div id="note"></div>
 <div id="sumbox"><label>分組試算（下採後）：<select id="grp" onchange="renderSummary()"></select></label>
 <div id="summary"></div></div>
+<div id="grpsel">依群組選取：維度
+ <select id="gdim" onchange="fillGroupVals()"></select> =
+ <select id="gval"></select>
+ <button onclick="groupSelect('add')">加入選取</button>
+ <button onclick="groupSelect('only')">只選此群組</button></div>
+<div id="batchsel">批次套用：對 <b id="rselcount">0</b> 個選取列設
+ <input id="rbatchval" type="number" step="0.1" placeholder="值">
+ <button onclick="applyBatch()">套用到選取列</button>
+ <button onclick="selectAllVisible(true)">全選（可見）</button>
+ <button onclick="clearRsel()">清除選取</button>
+ <label><input type="checkbox" id="rclearafter"> 套用後清除</label></div>
 <input id="flt" placeholder="篩選…" oninput="flt()">
 <table id="g"><thead></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
@@ -492,6 +503,48 @@ function rebuildWeight(){{
 let tab='ratio',sortKey=null,sortAsc=true;
 let RMODE='mult';   // 'mult'=依負樣本倍率(算保留率) | 'keep'=依保留率(算倍率)
 function setRmode(m){{ syncEdits(); RMODE=m; if(tab==='ratio') render(); }}
+// ---- ratio 選取集（以 RATIO 索引識別）＋群組/批次套用 ----
+const RSEL=new Set();
+function rselCount(){{ const el=document.getElementById('rselcount'); if(el) el.textContent=RSEL.size; }}
+function visIdx(){{
+ const q=(document.getElementById('flt').value||'').toLowerCase();
+ const cols=GKEYS.map((_,j)=>'k'+j);
+ return RATIO.map((_,i)=>i).filter(i=>!q ||
+   cols.map(c=>RATIO[i][c]).join(' ').toLowerCase().indexOf(q)>=0);
+}}
+function toggleRow(i,on){{ if(on) RSEL.add(i); else RSEL.delete(i); rselCount(); }}
+function selectAllVisible(on){{ visIdx().forEach(i=>{{ if(on===false) RSEL.delete(i); else RSEL.add(i); }});
+ if(tab==='ratio') render(); }}
+function clearRsel(){{ RSEL.clear(); if(tab==='ratio') render(); }}
+function initGroupSel(){{
+ const gd=document.getElementById('gdim');
+ gd.innerHTML=GKEYS.map((k,j)=>`<option value="${{j}}">${{esc(k)}}</option>`).join('');
+ fillGroupVals();
+}}
+function fillGroupVals(){{
+ const j=+document.getElementById('gdim').value;
+ const vals=[...new Set(RATIO.map(r=>r['k'+j]))].sort();
+ document.getElementById('gval').innerHTML=
+   vals.map(v=>`<option value="${{esc(v)}}">${{esc(v)}}</option>`).join('');
+}}
+function groupSelect(kind){{
+ const j=+document.getElementById('gdim').value, val=document.getElementById('gval').value;
+ if(kind==='only') RSEL.clear();
+ RATIO.forEach((r,i)=>{{ if(String(r['k'+j])===String(val)) RSEL.add(i); }});
+ if(tab==='ratio') render();
+}}
+function applyBatch(){{
+ const raw=document.getElementById('rbatchval').value;
+ if(raw==='') return;
+ let skipped=0;
+ RSEL.forEach(i=>{{ const r=RATIO[i];
+   if(RMODE==='keep') r.ratio_direct=raw;
+   else if(r.n_pos<=0) skipped++;          // 倍率模式：n_pos=0 無倍率，略過
+   else r.suggested_neg_mult=raw; }});
+ if(document.getElementById('rclearafter').checked) RSEL.clear();
+ if(tab==='ratio') render();
+ if(skipped) alert(`已套用；略過 ${{skipped}} 個 n_pos=0 的列（倍率模式無倍率，請改保留率模式）`);
+}}
 function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
 function preview(r,nm){{
  // keep 模式或無正樣本 → 直填保留率(ratio_direct)；achieved=kept/n_pos
@@ -546,7 +599,8 @@ function recalc(td){{
 }}
 function renderRatio(data,idx){{
  document.querySelector('#g thead').innerHTML=
-  `<tr>`+GKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
+  `<tr>`+`<th><input type=checkbox onclick="selectAllVisible(this.checked)"></th>`+
+  GKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
   `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
   `<th class=stat onclick="sortBy('n_neg')">n_neg ⇅</th>`+
   `<th class=stat>pos_rate</th><th>負樣本倍率</th><th class=calc>ratio</th>`+
@@ -562,13 +616,15 @@ function renderRatio(data,idx){{
   const ratioCell=editKeep
    ?`<td class="edit rt" contenteditable data-k=ratio_direct data-i=${{i}} oninput="recalc(this)">${{r.ratio_direct}}</td>`
    :`<td class="calc rt">${{pv.ratio}}</td>`;
-  tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
+  tr.innerHTML=`<td><input type=checkbox ${{RSEL.has(i)?'checked':''}} onclick="toggleRow(${{i}},this.checked)"></td>`+
+   r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
    negMultCell+ratioCell+
    `<td class="${{am.cls}} am" title="${{am.title}}">${{am.html}}</td>`+
    `<td class="calc kn">${{pv.kn}}</td><td class="calc pr">${{pv.pr}}</td>`;
   tb.appendChild(tr); }});
+ rselCount();
 }}
 function renderWeight(data,idx){{
  document.querySelector('#g thead').innerHTML=
@@ -698,6 +754,7 @@ function exp(kind){{
  }}
 }}
 initSummary();
+initGroupSel();
 setTab('ratio');
 </script></body></html>"""
 
