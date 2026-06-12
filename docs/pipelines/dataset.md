@@ -61,7 +61,7 @@ python -m recsys_tfb dataset --list-nodes
 - `sample_group_keys`：分層維度（用 `|` 串成 key）。**為什麼分層**：確保各組（各 item / 各客群）在樣本中保有足夠正例，避免某些 query group 抽到完全沒有正例。
 - `sample_ratio` ＋ `sample_ratio_overrides`：預設比例與各組覆寫。抽樣是**決定性 hash**（同 seed → 同結果）。
 - `carry_columns`：要從 `sample_pool` 帶進 model_input 的非 identity 欄，供 `sample_weights` 分群。
-  - 只帶進 **train / calibration**（這兩個 split 才做加權）；val / test 不帶。
+  - 帶進 **train / train_dev / calibration**（val / test 不帶）。`sample_weights` 只套用在 **train / train_dev**——calibration 不加權（見 `parameters_training.yaml` 的 `sample_weights` 註解）。
   - 改它會 bust `base_dataset_version`（model_input 的 parquet schema 變了）。
 - 各 split 日期：`train_snap_dates`、`val_snap_dates`、`test_snap_dates`、`calibration_snap_dates`；`train_dev_ratio` 控制 train / train_dev 切分。
 

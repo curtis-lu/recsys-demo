@@ -78,7 +78,7 @@ python -m recsys_tfb evaluation --list-nodes
 
 - `--model-version`：評估哪一版（預設依解析規則取對應版本）。
 - 標準模式每次重算指標並覆寫 `enriched_eval_predictions`（dynamic partition，按 `model_version` ＋ `snap_date`）。
-- `--compare-only` **不**重算，直接讀回上次 persist 的 `enriched_eval_predictions`；若 `segment_sources` 在兩次 run 間改變，需先 drop 該表再重跑（schema evolution 是待辦）。
+- `--compare-only` **不**重算，直接讀回上次 persist 的 `enriched_eval_predictions`。若 `segment_sources` 在兩次 run 間改變，重跑標準 / `--compare` 模式（會 persist）時 `enriched_eval_predictions`（`columns: "auto"`）由 `HiveTableDataset` 自動 append-only 演化 schema（新增欄位、舊資料缺欄補 NULL），不需先 drop 表。
 
 ## 接下來
 
