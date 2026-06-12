@@ -5,7 +5,10 @@ Subcommands:
                      sample_weight_keys)\\{label} granularity, write a
                      self-contained two-tab HTML editor (ratio surface keyed by
                      sample_group_keys, weight surface keyed by
-                     sample_weight_keys) to data/profiling/.
+                     sample_weight_keys) to data/profiling/. ratio surface
+                     supports neg-mult / keep-rate input modes and group/batch
+                     row selection; weight surface supports a couple/decouple
+                     (global phi) negative-base toggle.
   to-yaml <json>    Convert the browser JSON export into sparse YAML snippets
                      (A5 for ratio, A9b/A9c for weights against the real
                      sample_weight_keys) for manual paste into config.
@@ -174,8 +177,16 @@ def aggregate_surfaces(
     alpha: float,
     t: float,
     default_neg_mult: float,
+    neg_base: str = "coupled",
+    phi: float = 1.0,
 ) -> dict:
     """Roll finest-granularity stats up into the ratio and weight surfaces.
+
+    ``neg_base`` selects the weight floor's negative base: ``"coupled"`` (default)
+    uses the post-downsample count ``Σ n_neg * ratio[ratio_dims projection]`` so the
+    realized pos-rate lands exactly at ``t``; ``"decoupled"`` uses ``Σ n_neg * phi``
+    (independent of the ratio surface — ``phi=1`` means raw negatives). The JS
+    mirror in ``_HTML_TEMPLATE`` (``rebuildWeight``) must apply the same branch.
 
     Pure: no Spark, no I/O. ``stats`` are union-granularity dict rows from
     profile_stats. ``ratio_dims`` is the (possibly empty) list of ratio-surface
@@ -230,7 +241,10 @@ def aggregate_surfaces(
             rk = tuple(s[d] for d in ratio_dims)
             a = wacc.setdefault(wk, [0, 0.0])
             a[0] += s["n_pos"]
-            a[1] += s["n_neg"] * ratio_by_key[rk]      # n_neg_post (fractional)
+            if neg_base == "decoupled":
+                a[1] += s["n_neg"] * phi               # raw * phi, ratio-independent
+            else:
+                a[1] += s["n_neg"] * ratio_by_key[rk]  # n_neg_post (fractional)
         # attention reference: smallest floor-weighted mass among cells WITH
         # positives (m = n_pos/t ∝ n_pos), so the least-positive cell gets A=1.
         masses = [npos + nnp * floor_weight(npos, nnp, t)
@@ -379,6 +393,10 @@ key-set 驗證。</p>
 clamp(倍率 × n_pos / n_neg, 0, 1)</code>（匯出 key <code>…|0</code>）。地板不再靠下採樣達成
 （改由 weight 面），所以冷門產品<b>不必</b>下採、保留全部負樣本給 split-finding。
 n_pos = 0 的冷門列在 ratio 欄直接填保留率。</p>
+<p><b>ratio 面輸入模式 ＋ 群組/批次選取。</b>上方可切<code>依負樣本倍率</code>或
+<code>依保留率</code>（直接填保留率、全列一致、含 n_pos=0）；兩欄值切換時互不洗掉。
+勾選列後可用<code>依群組選取</code>（維度＝值，一次選整組）再<code>批次套用</code>把同一個值
+套到所有選取列（倍率模式對 n_pos=0 列自動略過）。</p>
 <p><b>weight 面 = 排序抬升（雙因子，全域旋鈕 t、α）。</b>對每個 weight cell：</p>
 <p><b>v（降負樣本）→ 地板。</b><code>v = n_pos·(1−t) / (t · n_neg(下採後))</code>，把該產品
 有效正樣本率墊到目標 <code>t = {t}</code>，消掉冷門產品的 log(base-rate) 懲罰。
@@ -389,17 +407,38 @@ n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關
 <p><b>匯出。</b><code>w_pos = A</code>（key <code>…|1</code>）、<code>w_neg = A·v</code>（key
 <code>…|0</code>），對應 <code>training.sample_weights</code>（<code>sample_weight_keys</code>
 須含 label 當切分軸）。綠/藍欄是加權後驗證：eff pos_rate(後) 應每列 = t、地板 logit(後) 應每列相同。</p>
+<p><b>負樣本基數（連動 / 不連動）。</b>地板 v 的分母 n_neg 預設<code>連動 ratio 面</code>＝下採後負樣本，
+套用後實際正樣本率精確落在 t。切<code>不連動</code>時改用<code>原始 n_neg × φ</code>（全域旋鈕，φ=1 即原始），
+與 ratio 面無關；若 ratio 面同時有下採，套用後實際正樣本率會高於 t（overshoot）。</p>
 </details>
 <div id="tabs">
 <button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
 <button id="tb_weight" onclick="setTab('weight')">weight 面 (sample_weight_keys)</button>
 </div>
+<div id="rmodebar">ratio 面輸入模式：
+ <label><input type="radio" name="rmode" value="mult" checked onclick="setRmode('mult')"> 依負樣本倍率</label>
+ <label><input type="radio" name="rmode" value="keep" onclick="setRmode('keep')"> 依保留率</label></div>
 <div id="knobs">weight 面旋鈕：
  t（目標正樣本率）<input id=t type=number step=0.01 min=0 max=1 value="{t}" oninput="onKnob()">
- · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()"></div>
+ · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()">
+ · 負樣本基數
+ <label><input type=radio name=wbase value=couple checked onclick="setWbase('couple')"> 連動 ratio 面</label>
+ <label><input type=radio name=wbase value=decouple onclick="setWbase('decouple')"> 不連動</label>
+ φ <input id=wphi type=number step=0.05 min=0 max=1 value="1.00" disabled oninput="onKnob()"></div>
 <div id="note"></div>
 <div id="sumbox"><label>分組試算（下採後）：<select id="grp" onchange="renderSummary()"></select></label>
 <div id="summary"></div></div>
+<div id="grpsel">依群組選取：維度
+ <select id="gdim" onchange="fillGroupVals()"></select> =
+ <select id="gval"></select>
+ <button onclick="groupSelect('add')">加入選取</button>
+ <button onclick="groupSelect('only')">只選此群組</button></div>
+<div id="batchsel">批次套用：對 <b id="rselcount">0</b> 個選取列設
+ <input id="rbatchval" type="number" step="0.1" placeholder="值">
+ <button onclick="applyBatch()">套用到選取列</button>
+ <button onclick="selectAllVisible(true)">全選（可見）</button>
+ <button onclick="clearRsel()">清除選取</button>
+ <label><input type="checkbox" id="rclearafter"> 套用後清除</label></div>
 <input id="flt" placeholder="篩選…" oninput="flt()">
 <table id="g"><thead></thead><tbody></tbody></table>
 <button onclick="exp('json')">Export JSON</button>
@@ -416,6 +455,11 @@ const DR={default_ratio};
 const R={target_neg_pos};
 let T={t};
 let ALPHA={alpha};
+let WBASE='couple';   // 'couple'=連動 ratio 面(下採後) | 'decouple'=不連動(原始×PHI)
+let PHI=1;            // 不連動時的全域負樣本保留率
+function setWbase(b){{ WBASE=b;
+ const el=document.getElementById('wphi'); if(el) el.disabled=(b!=='decouple');
+ rebuildWeight(); if(tab==='weight') render(); }}
 const SEP='\\u0001';
 // two-factor weight (mirror of Python two_factor_weights/floor_weight)
 function floorWeight(np,nnp,t){{ if(np<=0||nnp<=0) return 1;
@@ -457,7 +501,8 @@ function rebuildWeight(){{
  STATS.forEach(s=>{{ const wk=WDIMS.map(k=>s[k]),ks=wk.join(SEP);
   const rk=GKEYS.map(k=>s[k]).join(SEP);
   const a=m.get(ks)||{{keys:wk,n_pos:0,n_neg_raw:0,_nn:0}};
-  a.n_pos+=s.n_pos; a.n_neg_raw+=s.n_neg; a._nn+=s.n_neg*rbk.get(rk); m.set(ks,a); }});
+  a.n_pos+=s.n_pos; a.n_neg_raw+=s.n_neg;
+  a._nn+=s.n_neg*(WBASE==='decouple'?PHI:rbk.get(rk)); m.set(ks,a); }});
  const cells=[...m.values()];
  const masses=cells.filter(c=>c.n_pos>0)
   .map(c=>c.n_pos+c._nn*floorWeight(c.n_pos,c._nn,T));
@@ -476,12 +521,62 @@ function rebuildWeight(){{
  WEIGHT=cells.sort((x,y)=>y.n_pos-x.n_pos);
 }}
 let tab='ratio',sortKey=null,sortAsc=true;
+let RMODE='mult';   // 'mult'=依負樣本倍率(算保留率) | 'keep'=依保留率(算倍率)
+function setRmode(m){{ syncEdits(); RMODE=m; if(tab==='ratio') render(); }}
+// ---- ratio 選取集（以 RATIO 索引識別）＋群組/批次套用 ----
+const RSEL=new Set();
+function rselCount(){{ const el=document.getElementById('rselcount'); if(el) el.textContent=RSEL.size; }}
+function visIdx(){{
+ const q=(document.getElementById('flt').value||'').toLowerCase();
+ const cols=GKEYS.map((_,j)=>'k'+j);
+ return RATIO.map((_,i)=>i).filter(i=>!q ||
+   cols.map(c=>RATIO[i][c]).join(' ').toLowerCase().indexOf(q)>=0);
+}}
+function toggleRow(i,on){{ if(on) RSEL.add(i); else RSEL.delete(i); rselCount(); }}
+function selectAllVisible(on){{ visIdx().forEach(i=>{{ if(on===false) RSEL.delete(i); else RSEL.add(i); }});
+ if(tab==='ratio') render(); }}
+function clearRsel(){{ RSEL.clear(); if(tab==='ratio') render(); }}
+function initGroupSel(){{
+ const gd=document.getElementById('gdim');
+ gd.innerHTML=GKEYS.map((k,j)=>`<option value="${{j}}">${{esc(k)}}</option>`).join('');
+ fillGroupVals();
+}}
+function fillGroupVals(){{
+ const j=+document.getElementById('gdim').value;
+ const vals=[...new Set(RATIO.map(r=>r['k'+j]))].sort();
+ document.getElementById('gval').innerHTML=
+   vals.map(v=>`<option value="${{esc(v)}}">${{esc(v)}}</option>`).join('');
+}}
+function groupSelect(kind){{
+ const j=+document.getElementById('gdim').value, val=document.getElementById('gval').value;
+ if(kind==='only') RSEL.clear();
+ RATIO.forEach((r,i)=>{{ if(String(r['k'+j])===String(val)) RSEL.add(i); }});
+ if(tab==='ratio') render();
+}}
+function applyBatch(){{
+ const raw=document.getElementById('rbatchval').value;
+ if(raw==='') return;
+ let skipped=0;
+ RSEL.forEach(i=>{{ const r=RATIO[i];
+   if(RMODE==='keep') r.ratio_direct=raw;
+   else if(r.n_pos<=0) skipped++;          // 倍率模式：n_pos=0 無倍率，略過
+   else r.suggested_neg_mult=raw; }});
+ if(document.getElementById('rclearafter').checked) RSEL.clear();
+ if(tab==='ratio') render();
+ if(skipped) alert(`已套用；略過 ${{skipped}} 個 n_pos=0 的列（倍率模式無倍率，請改保留率模式）`);
+}}
 function rows(){{ return tab==='ratio'?RATIO:WEIGHT; }}
 function preview(r,nm){{
- if(r.n_pos<=0){{ let kr=parseFloat(r.ratio_direct);
-   if(isNaN(kr)) kr=1; kr=Math.min(1,Math.max(0,kr));
-   return {{ratio:kr.toFixed(4),kn:String(Math.round(r.n_neg*kr)),pr:'0.0000',
-   clamped:false,achieved:0,noNeg:false,noPos:true}}; }}
+ // keep 模式或無正樣本 → 直填保留率(ratio_direct)；achieved=kept/n_pos
+ const useDirect=(RMODE==='keep')||(r.n_pos<=0);
+ if(useDirect){{
+   let kr=parseFloat(r.ratio_direct); if(isNaN(kr)) kr=1;
+   kr=Math.min(1,Math.max(0,kr));
+   const kept=Math.round(r.n_neg*kr),total=r.n_pos+kept;
+   return {{ratio:kr.toFixed(4),kn:String(kept),
+   pr:(total>0?r.n_pos/total:0).toFixed(4),clamped:false,
+   achieved:(r.n_pos>0?kept/r.n_pos:0),noNeg:r.n_neg<=0,noPos:r.n_pos<=0}};
+ }}
  if(isNaN(nm)) return {{ratio:'1.0000',kn:String(r.n_neg),
    pr:(r.n_pos/(r.n_pos+r.n_neg)).toFixed(4),clamped:false,
    achieved:(r.n_pos>0?r.n_neg/r.n_pos:0),noNeg:false,noPos:false}};
@@ -524,7 +619,8 @@ function recalc(td){{
 }}
 function renderRatio(data,idx){{
  document.querySelector('#g thead').innerHTML=
-  `<tr>`+GKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
+  `<tr>`+`<th><input type=checkbox onclick="selectAllVisible(this.checked)"></th>`+
+  GKEYS.map((k,j)=>`<th onclick="sortBy('k${{j}}')">${{k}} ⇅</th>`).join('')+
   `<th class=stat onclick="sortBy('n_pos')">n_pos ⇅</th>`+
   `<th class=stat onclick="sortBy('n_neg')">n_neg ⇅</th>`+
   `<th class=stat>pos_rate</th><th>負樣本倍率</th><th class=calc>ratio</th>`+
@@ -533,19 +629,22 @@ function renderRatio(data,idx){{
  const tb=document.querySelector('#g tbody'); tb.innerHTML='';
  idx.forEach(i=>{{ const r=data[i],pv=preview(r,parseFloat(r.suggested_neg_mult));
   const am=achMult(pv),tr=document.createElement('tr'),noPos=r.n_pos<=0;
-  const negMultCell=noPos
-   ?`<td class=calc title="無正樣本，倍率無定義；改用 ratio 欄直接設保留率">—</td>`
+  const editKeep=(RMODE==='keep')||noPos;
+  const negMultCell=editKeep
+   ?`<td class=calc title="保留率模式/無正樣本：未使用倍率">—</td>`
    :`<td class=edit contenteditable data-k=neg_mult data-i=${{i}} oninput="recalc(this)">${{r.suggested_neg_mult}}</td>`;
-  const ratioCell=noPos
+  const ratioCell=editKeep
    ?`<td class="edit rt" contenteditable data-k=ratio_direct data-i=${{i}} oninput="recalc(this)">${{r.ratio_direct}}</td>`
    :`<td class="calc rt">${{pv.ratio}}</td>`;
-  tr.innerHTML=r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
+  tr.innerHTML=`<td><input type=checkbox ${{RSEL.has(i)?'checked':''}} onclick="toggleRow(${{i}},this.checked)"></td>`+
+   r.keys.map(v=>`<td>${{esc(v)}}</td>`).join('')+
    `<td class=stat>${{r.n_pos}}</td><td class=stat>${{r.n_neg}}</td>`+
    `<td class=stat>${{r.pos_rate.toFixed(4)}}</td>`+
    negMultCell+ratioCell+
    `<td class="${{am.cls}} am" title="${{am.title}}">${{am.html}}</td>`+
    `<td class="calc kn">${{pv.kn}}</td><td class="calc pr">${{pv.pr}}</td>`;
   tb.appendChild(tr); }});
+ rselCount();
 }}
 function renderWeight(data,idx){{
  document.querySelector('#g thead').innerHTML=
@@ -614,6 +713,8 @@ function onKnob(){{
  const a=parseFloat(document.getElementById('alpha').value);
  if(!isNaN(t)&&t>0&&t<1) T=t;
  if(!isNaN(a)&&a>=0) ALPHA=a;
+ const p=parseFloat(document.getElementById('wphi').value);
+ if(!isNaN(p)&&p>=0&&p<=1) PHI=p;
  rebuildWeight(); if(tab==='weight') render();
 }}
 function initSummary(){{
@@ -675,6 +776,7 @@ function exp(kind){{
  }}
 }}
 initSummary();
+initGroupSel();
 setTab('ratio');
 </script></body></html>"""
 

@@ -376,8 +376,8 @@ class TestRenderHtml:
         assert "function rebuildWeight(" in html
         # per-(seg,item) effective ratio projected onto fine cells
         assert "function ratioByKey(" in html
-        # n_neg_post accumulates n_neg * projected ratio
-        assert "s.n_neg*rbk.get(" in html
+        # n_neg_post accumulates n_neg * projected ratio (coupled branch)
+        assert "rbk.get(rk)" in html
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
@@ -467,6 +467,38 @@ class TestRenderHtml:
         assert "a.np/t" in html
         # recomputed live on every cell edit
         assert "renderSummary()" in html
+
+    def test_ratio_input_mode_toggle_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function setRmode(" in html
+        assert "let RMODE='mult'" in html
+        assert "依負樣本倍率" in html and "依保留率" in html
+        assert 'name="rmode"' in html
+        # keep-mode editable column branch + n_pos=0 fallback preserved
+        assert "RMODE==='keep'" in html
+        assert "r.n_pos<=0" in html
+
+    def test_group_and_batch_select_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function groupSelect(" in html
+        assert "function applyBatch(" in html
+        assert "依群組選取" in html and "套用到選取列" in html
+        assert "const RSEL=new Set(" in html
+        assert "function fillGroupVals(" in html
+        assert "function selectAllVisible(" in html
+        assert "function toggleRow(" in html
+
+    def test_weight_neg_base_toggle_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function setWbase(" in html
+        assert "let WBASE='couple'" in html
+        assert "負樣本基數" in html
+        assert 'name=wbase' in html
+        assert "id=wphi" in html
+        # decoupled branch in rebuildWeight mirrors Python aggregate_surfaces
+        assert "WBASE==='decouple'?PHI" in html
+        # existing two-factor functions untouched
+        assert "function twoFactor(" in html and "function floorWeight(" in html
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +649,31 @@ class TestAggregateSurfaces:
         r = out["ratio_rows"][0]
         assert r["keys"] == []
         assert r["n_pos"] == 240 and r["n_neg"] == 11540
+
+    def test_decoupled_phi_one_uses_raw_negatives(self):
+        # neg_mult would downsample under coupled; decoupled must ignore ratio and
+        # use raw n_neg (phi=1) as the floor's negative base.
+        stats = [
+            {"prod_name": "a", "n_pos": 100, "n_neg": 1000},
+            {"prod_name": "b", "n_pos": 50, "n_neg": 4000},
+        ]
+        nm = {("a",): 1.0, ("b",): 1.0}  # coupled ratio = clamp(1*npos/nneg) < 1
+        out = aggregate_surfaces(
+            stats, nm, ratio_dims=["prod_name"], weight_dims=["prod_name"],
+            alpha=0.5, t=self.T, default_neg_mult=1.0,
+            neg_base="decoupled", phi=1.0)
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("a",)]["n_neg_post"] == 1000   # raw, not downsampled
+        assert wr[("b",)]["n_neg_post"] == 4000
+
+    def test_decoupled_phi_scales_raw_negatives(self):
+        stats = [{"prod_name": "a", "n_pos": 100, "n_neg": 1000}]
+        out = aggregate_surfaces(
+            stats, {("a",): 1.0}, ratio_dims=["prod_name"],
+            weight_dims=["prod_name"], alpha=0.5, t=self.T,
+            default_neg_mult=1.0, neg_base="decoupled", phi=0.2)
+        row = out["weight_rows"][0]
+        assert row["n_neg_post"] == round(1000 * 0.2)   # 200
 
 
 # ---------------------------------------------------------------------------
