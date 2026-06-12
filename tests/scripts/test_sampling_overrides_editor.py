@@ -376,8 +376,8 @@ class TestRenderHtml:
         assert "function rebuildWeight(" in html
         # per-(seg,item) effective ratio projected onto fine cells
         assert "function ratioByKey(" in html
-        # n_neg_post accumulates n_neg * projected ratio
-        assert "s.n_neg*rbk.get(" in html
+        # n_neg_post accumulates n_neg * projected ratio (coupled branch)
+        assert "rbk.get(rk)" in html
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
@@ -487,6 +487,18 @@ class TestRenderHtml:
         assert "function fillGroupVals(" in html
         assert "function selectAllVisible(" in html
         assert "function toggleRow(" in html
+
+    def test_weight_neg_base_toggle_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function setWbase(" in html
+        assert "let WBASE='couple'" in html
+        assert "負樣本基數" in html
+        assert 'name=wbase' in html
+        assert "id=wphi" in html
+        # decoupled branch in rebuildWeight mirrors Python aggregate_surfaces
+        assert "WBASE==='decouple'?PHI" in html
+        # existing two-factor functions untouched
+        assert "function twoFactor(" in html and "function floorWeight(" in html
 
 
 # ---------------------------------------------------------------------------

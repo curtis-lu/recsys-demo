@@ -410,7 +410,11 @@ n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關
  <label><input type="radio" name="rmode" value="keep" onclick="setRmode('keep')"> 依保留率</label></div>
 <div id="knobs">weight 面旋鈕：
  t（目標正樣本率）<input id=t type=number step=0.01 min=0 max=1 value="{t}" oninput="onKnob()">
- · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()"></div>
+ · α（注意力阻尼）<input id=alpha type=number step=0.1 min=0 value="{alpha}" oninput="onKnob()">
+ · 負樣本基數
+ <label><input type=radio name=wbase value=couple checked onclick="setWbase('couple')"> 連動 ratio 面</label>
+ <label><input type=radio name=wbase value=decouple onclick="setWbase('decouple')"> 不連動</label>
+ φ <input id=wphi type=number step=0.05 min=0 max=1 value="1.00" disabled oninput="onKnob()"></div>
 <div id="note"></div>
 <div id="sumbox"><label>分組試算（下採後）：<select id="grp" onchange="renderSummary()"></select></label>
 <div id="summary"></div></div>
@@ -441,6 +445,11 @@ const DR={default_ratio};
 const R={target_neg_pos};
 let T={t};
 let ALPHA={alpha};
+let WBASE='couple';   // 'couple'=連動 ratio 面(下採後) | 'decouple'=不連動(原始×PHI)
+let PHI=1;            // 不連動時的全域負樣本保留率
+function setWbase(b){{ WBASE=b;
+ const el=document.getElementById('wphi'); if(el) el.disabled=(b!=='decouple');
+ rebuildWeight(); if(tab==='weight') render(); }}
 const SEP='\\u0001';
 // two-factor weight (mirror of Python two_factor_weights/floor_weight)
 function floorWeight(np,nnp,t){{ if(np<=0||nnp<=0) return 1;
@@ -482,7 +491,8 @@ function rebuildWeight(){{
  STATS.forEach(s=>{{ const wk=WDIMS.map(k=>s[k]),ks=wk.join(SEP);
   const rk=GKEYS.map(k=>s[k]).join(SEP);
   const a=m.get(ks)||{{keys:wk,n_pos:0,n_neg_raw:0,_nn:0}};
-  a.n_pos+=s.n_pos; a.n_neg_raw+=s.n_neg; a._nn+=s.n_neg*rbk.get(rk); m.set(ks,a); }});
+  a.n_pos+=s.n_pos; a.n_neg_raw+=s.n_neg;
+  a._nn+=s.n_neg*(WBASE==='decouple'?PHI:rbk.get(rk)); m.set(ks,a); }});
  const cells=[...m.values()];
  const masses=cells.filter(c=>c.n_pos>0)
   .map(c=>c.n_pos+c._nn*floorWeight(c.n_pos,c._nn,T));
@@ -693,6 +703,8 @@ function onKnob(){{
  const a=parseFloat(document.getElementById('alpha').value);
  if(!isNaN(t)&&t>0&&t<1) T=t;
  if(!isNaN(a)&&a>=0) ALPHA=a;
+ const p=parseFloat(document.getElementById('wphi').value);
+ if(!isNaN(p)&&p>=0&&p<=1) PHI=p;
  rebuildWeight(); if(tab==='weight') render();
 }}
 function initSummary(){{
