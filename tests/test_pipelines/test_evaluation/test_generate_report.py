@@ -12,8 +12,7 @@ def _params(diagnostics=False):
             "sections": {"diagnostics": diagnostics},
             "display": {"primary_map_k": [1], "guardrail_recall_k": [1]},
             "diagnostics": {"include_distributions": diagnostics,
-                            "include_calibration": False,
-                            "sample_rows": None}}},
+                            "include_calibration": False}}},
     }
 
 
@@ -53,3 +52,38 @@ def test_generate_report_with_diagnostics(spark):
     html = generate_report(_eval_pred(spark), _metrics(),
                            _params(True), None)
     assert "<details" in html          # collapsible diagnostics present
+
+
+def _params_diag_full():
+    p = _params(True)
+    diag = p["evaluation"]["report"]["diagnostics"]
+    diag["include_distributions"] = True
+    diag["include_calibration"] = True
+    diag["n_calibration_bins"] = 5
+    return p
+
+
+def _eval_pred_n(spark, n_customers):
+    rows = []
+    for i in range(n_customers):
+        s = (i % 100) / 100.0
+        rows.append(("20240331", f"c{i}", "A", s, i % 2, 1 if s > 0.5 else 2))
+        rows.append(("20240331", f"c{i}", "B", 1.0 - s, (i + 1) % 2, 2 if s > 0.5 else 1))
+    return spark.createDataFrame(
+        rows,
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
+    )
+
+
+def test_diagnostics_report_size_bounded_by_row_count(spark):
+    """The whole point of Spark-side aggregation: diagnostics figures embed
+    aggregated values (bins/quartiles/matrices), so report size must not grow
+    with the number of evaluation rows. Raw-array embedding would make the
+    large report ~100s of KB bigger."""
+    small = generate_report(
+        _eval_pred_n(spark, 100), _metrics(), _params_diag_full(), None
+    )
+    large = generate_report(
+        _eval_pred_n(spark, 3000), _metrics(), _params_diag_full(), None
+    )
+    assert abs(len(large) - len(small)) < 20000

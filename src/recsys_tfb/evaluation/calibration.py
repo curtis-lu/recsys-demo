@@ -1,46 +1,26 @@
-"""Calibration curve visualizations."""
+"""Calibration curve visualizations.
+
+Consumes the pre-aggregated per-item calibration points produced by
+``evaluation.diagnostics_spark.calibration_bins`` (the skip rule for sparse /
+all-negative items is applied there), so this module only draws the points.
+"""
 
 import pandas as pd
 import plotly.graph_objects as go
-from sklearn.calibration import calibration_curve
 
 
 def plot_calibration_curves(
-    predictions: pd.DataFrame,
-    labels: pd.DataFrame,
-    n_bins: int = 10,
+    calib_bins: pd.DataFrame,
     title_prefix: str = "",
-    id_cols: tuple = ("snap_date", "cust_id", "prod_name"),
     item_col: str = "prod_name",
-    score_col: str = "score",
-    label_col: str = "label",
 ) -> go.Figure:
-    """Plot calibration curves per product.
+    """Plot per-item calibration curves plus a diagonal reference line.
 
-    Args:
-        predictions: DataFrame with id columns + score column.
-        labels: DataFrame with id columns + label column.
-        n_bins: Number of bins for calibration curve.
-        title_prefix: Optional prefix for the chart title.
-        id_cols: Column names that identify a unique (date, entity, item) tuple.
-        item_col: Column name for the product/item.
-        score_col: Column name for predicted scores.
-        label_col: Column name for ground-truth labels.
-
-    Returns:
-        A single Figure with one trace per product plus a diagonal reference line.
+    ``calib_bins`` columns: ``[item_col, "bin", "prob_pred", "prob_true"]``,
+    already filtered to the items worth plotting and one point per non-empty
+    bin.
     """
-    merged = predictions.merge(
-        labels[list(id_cols) + [label_col]],
-        on=list(id_cols),
-        how="inner",
-    )
-
-    products = sorted(merged[item_col].unique())
-
     fig = go.Figure()
-
-    # Diagonal reference line
     fig.add_trace(
         go.Scatter(
             x=[0, 1],
@@ -52,26 +32,17 @@ def plot_calibration_curves(
         )
     )
 
-    for prod in products:
-        subset = merged[merged[item_col] == prod]
-        y_true = subset[label_col].values
-        y_prob = subset[score_col].values
-
-        if len(y_true) < n_bins or y_true.sum() == 0:
-            continue
-
-        prob_true, prob_pred = calibration_curve(
-            y_true, y_prob, n_bins=n_bins, strategy="uniform"
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=prob_pred,
-                y=prob_true,
-                mode="lines+markers",
-                name=prod,
+    if not calib_bins.empty:
+        for item in sorted(calib_bins[item_col].unique()):
+            sub = calib_bins[calib_bins[item_col] == item].sort_values("bin")
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["prob_pred"].tolist(),
+                    y=sub["prob_true"].tolist(),
+                    mode="lines+markers",
+                    name=str(item),
+                )
             )
-        )
 
     fig.update_layout(
         title=f"{title_prefix}Calibration Curves",
@@ -79,5 +50,4 @@ def plot_calibration_curves(
         yaxis_title="Fraction of Positives",
         legend_title="Product",
     )
-
     return fig

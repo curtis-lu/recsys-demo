@@ -1,6 +1,10 @@
-"""Tests for evaluation.distributions module."""
+"""Tests for evaluation.distributions — plotting from pre-aggregated frames.
 
-import numpy as np
+The figures must embed only the aggregated values (bin counts / box stats /
+matrices), never raw per-row arrays, so figure size does not scale with the
+number of evaluation rows.
+"""
+
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -8,141 +12,114 @@ from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
-    plot_score_distributions,
-    plot_score_distributions_by_label,
+    plot_score_boxplot,
+    plot_score_boxplot_by_label,
+    plot_score_histogram,
 )
 
 
-def _make_predictions(n_customers=20, products=None, seed=42):
-    rng = np.random.RandomState(seed)
-    if products is None:
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
+class TestPlotScoreHistogram:
+    def _hist(self):
+        return pd.DataFrame(
+            {
+                "prod_name": ["A", "A", "B"],
+                "bin_center": [0.25, 0.75, 0.25],
+                "count": [2, 3, 5],
+                "bin_width": [0.5, 0.5, 0.5],
+            }
+        )
 
-    rows = []
-    for i in range(n_customers):
-        scores = rng.rand(len(products))
-        for j, prod in enumerate(products):
-            rows.append({
-                "snap_date": "20240331",
-                "cust_id": f"C{i:04d}",
-                "prod_name": prod,
-                "score": scores[j],
-                "rank": 0,
-            })
-    df = pd.DataFrame(rows)
-    df["rank"] = df.groupby(["snap_date", "cust_id"])["score"].rank(
-        method="first", ascending=False
-    ).astype(int)
-    return df
-
-
-class TestPlotScoreDistributions:
-    def test_returns_two_figures(self):
-        preds = _make_predictions()
-        figs = plot_score_distributions(preds)
-        assert len(figs) == 2
-        assert all(isinstance(f, go.Figure) for f in figs)
-
-    def test_all_products_shown(self):
-        products = ["exchange_fx", "fund_bond", "fund_stock", "ccard_ins", "ccard_bill"]
-        preds = _make_predictions(products=products)
-        figs = plot_score_distributions(preds)
-        # Histogram should have 5 traces
-        assert len(figs[0].data) == 5
-        # Boxplot should have 5 traces
-        assert len(figs[1].data) == 5
-
-    def test_title_prefix(self):
-        preds = _make_predictions()
-        figs = plot_score_distributions(preds, title_prefix="Model A: ")
-        assert figs[0].layout.title.text.startswith("Model A: ")
-
-
-class TestPlotRankHeatmap:
-    def test_returns_figure(self):
-        preds = _make_predictions()
-        fig = plot_rank_heatmap(preds)
+    def test_one_bar_trace_per_item(self):
+        fig = plot_score_histogram(self._hist())
         assert isinstance(fig, go.Figure)
+        assert all(isinstance(t, go.Bar) for t in fig.data)
+        assert {t.name for t in fig.data} == {"A", "B"}
 
-    def test_dimensions(self):
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
-        preds = _make_predictions(products=products)
-        fig = plot_rank_heatmap(preds)
-        heatmap = fig.data[0]
-        assert heatmap.z.shape == (3, 3)  # 3 products × 3 rank positions
+    def test_bar_data_is_bounded_to_bins(self):
+        fig = plot_score_histogram(self._hist())
+        a = next(t for t in fig.data if t.name == "A")
+        # A has two bins -> two bars (not row count)
+        assert list(a.x) == [0.25, 0.75]
+        assert list(a.y) == [2, 3]
 
-    def test_row_sums_equal_total_queries(self):
-        n_customers = 20
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
-        preds = _make_predictions(n_customers=n_customers, products=products)
-        fig = plot_rank_heatmap(preds)
-        heatmap = fig.data[0]
-        for row in heatmap.z:
-            assert sum(row) == n_customers
+    def test_count_axis_avoids_scientific_notation(self):
+        fig = plot_score_histogram(self._hist())
+        assert fig.layout.yaxis.tickformat is not None
 
 
-def _make_labels(predictions, seed=42):
-    rng = np.random.RandomState(seed)
-    labels = predictions[["snap_date", "cust_id", "prod_name"]].copy()
-    labels["label"] = (rng.rand(len(labels)) > 0.6).astype(int)
-    return labels
+class TestPlotScoreBoxplot:
+    def _stats(self):
+        return pd.DataFrame(
+            {
+                "prod_name": ["A", "B"],
+                "q1": [1.0, 2.0],
+                "median": [2.0, 3.0],
+                "q3": [3.0, 4.0],
+                "lowerfence": [0.0, 1.0],
+                "upperfence": [4.0, 5.0],
+            }
+        )
+
+    def test_one_box_per_item(self):
+        fig = plot_score_boxplot(self._stats())
+        assert len(fig.data) == 2
+        assert all(isinstance(t, go.Box) for t in fig.data)
+
+    def test_uses_precomputed_stats_not_raw_points(self):
+        fig = plot_score_boxplot(self._stats())
+        a = next(t for t in fig.data if t.name == "A")
+        assert list(a.q1) == [1.0]
+        assert list(a.median) == [2.0]
+        assert list(a.q3) == [3.0]
+        # No raw sample array embedded.
+        assert a.y is None
 
 
-class TestPlotPositiveRankHeatmap:
-    def test_returns_figure(self):
-        preds = _make_predictions()
-        labels = _make_labels(preds)
-        fig = plot_positive_rank_heatmap(preds, labels)
-        assert isinstance(fig, go.Figure)
+class TestPlotScoreBoxplotByLabel:
+    def _stats(self):
+        return pd.DataFrame(
+            {
+                "prod_name": ["A", "A", "B", "B"],
+                "label": [1, 0, 1, 0],
+                "q1": [1.0, 1.0, 2.0, 2.0],
+                "median": [2.0, 2.0, 3.0, 3.0],
+                "q3": [3.0, 3.0, 4.0, 4.0],
+                "lowerfence": [0.0, 0.0, 1.0, 1.0],
+                "upperfence": [4.0, 4.0, 5.0, 5.0],
+            }
+        )
 
-    def test_dimensions(self):
-        products = ["exchange_fx", "fund_bond", "fund_stock"]
-        preds = _make_predictions(products=products)
-        labels = _make_labels(preds)
-        fig = plot_positive_rank_heatmap(preds, labels)
-        heatmap = fig.data[0]
-        assert heatmap.z.shape == (3, 3)
+    def test_positive_and_negative_traces(self):
+        fig = plot_score_boxplot_by_label(self._stats())
+        assert {t.name for t in fig.data} == {"Positive", "Negative"}
 
-    def test_only_positive_counts(self):
-        products = ["exchange_fx", "fund_bond"]
-        preds = _make_predictions(n_customers=10, products=products)
-        labels = _make_labels(preds, seed=99)
-        fig = plot_positive_rank_heatmap(preds, labels)
-        heatmap = fig.data[0]
-        total_in_heatmap = sum(sum(row) for row in heatmap.z)
-        assert total_in_heatmap == labels["label"].sum()
-
-
-class TestPlotPositiveRateRankHeatmap:
-    def test_returns_figure(self):
-        preds = _make_predictions()
-        labels = _make_labels(preds)
-        fig = plot_positive_rate_rank_heatmap(preds, labels)
-        assert isinstance(fig, go.Figure)
-
-    def test_values_between_0_and_1(self):
-        preds = _make_predictions()
-        labels = _make_labels(preds)
-        fig = plot_positive_rate_rank_heatmap(preds, labels)
-        heatmap = fig.data[0]
-        for row in heatmap.z:
-            for val in row:
-                assert 0.0 <= val <= 1.0
+    def test_no_raw_points(self):
+        fig = plot_score_boxplot_by_label(self._stats())
+        for t in fig.data:
+            assert t.y is None
+            assert len(t.q1) == 2  # one box per item, bounded
 
 
-class TestPlotScoreDistributionsByLabel:
-    def test_returns_list(self):
-        preds = _make_predictions()
-        labels = _make_labels(preds)
-        figs = plot_score_distributions_by_label(preds, labels)
-        assert isinstance(figs, list)
-        assert len(figs) == 1
-        assert isinstance(figs[0], go.Figure)
+class TestRankHeatmaps:
+    def _matrix(self):
+        return pd.DataFrame([[1, 1], [1, 1]], index=["A", "B"], columns=[1, 2])
 
-    def test_has_positive_and_negative_traces(self):
-        preds = _make_predictions()
-        labels = _make_labels(preds)
-        figs = plot_score_distributions_by_label(preds, labels)
-        trace_names = {t.name for t in figs[0].data}
-        assert "Positive" in trace_names
-        assert "Negative" in trace_names
+    def test_rank_heatmap_from_matrix(self):
+        fig = plot_rank_heatmap(self._matrix())
+        hm = fig.data[0]
+        assert isinstance(hm, go.Heatmap)
+        assert list(hm.y) == ["A", "B"]
+        assert hm.z.shape == (2, 2)
+
+    def test_positive_rank_heatmap_from_matrix(self):
+        fig = plot_positive_rank_heatmap(self._matrix())
+        assert isinstance(fig.data[0], go.Heatmap)
+
+    def test_positive_rate_heatmap_from_matrix(self):
+        rate = pd.DataFrame(
+            [[0.5, 0.0], [1.0, 0.25]], index=["A", "B"], columns=[1, 2]
+        )
+        fig = plot_positive_rate_rank_heatmap(rate)
+        hm = fig.data[0]
+        assert isinstance(hm, go.Heatmap)
+        assert ((hm.z >= 0.0) & (hm.z <= 1.0)).all()

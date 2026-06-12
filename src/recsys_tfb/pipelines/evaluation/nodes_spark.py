@@ -8,12 +8,22 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.calibration import plot_calibration_curves
+from recsys_tfb.evaluation.diagnostics_spark import (
+    calibration_bins,
+    positive_rank_count_matrix,
+    positive_rate_matrix,
+    rank_count_matrix,
+    score_box_stats,
+    score_box_stats_by_label,
+    score_histogram_counts,
+)
 from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
-    plot_score_distributions,
-    plot_score_distributions_by_label,
+    plot_score_boxplot,
+    plot_score_boxplot_by_label,
+    plot_score_histogram,
 )
 from recsys_tfb.evaluation.report_builder import assemble_report
 
@@ -244,12 +254,11 @@ def generate_report(
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
 ) -> str:
-    """Build the HTML report. Metrics dicts drive §0–§8; only the
-    diagnostics section (when enabled) needs row-level pandas, collected
-    here with minimal columns and an optional sample cap.
+    """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
+    section (when enabled) is aggregated in Spark into small frames so its
+    figures embed bounded summaries rather than raw per-row arrays.
     """
     schema = get_schema(parameters)
-    id_cols = schema["identity_columns"]
     score_col = schema["score"]
     rank_col = schema["rank"]
     label_col = schema["label"]
@@ -262,54 +271,46 @@ def generate_report(
 
     diagnostics_frames = None
     if sections_cfg.get("diagnostics", True):
-        sample_rows = diag_cfg.get("sample_rows")
-        sdf = eval_predictions
-        if sample_rows:
-            sdf = sdf.limit(int(sample_rows))
-        pred_cols = list(dict.fromkeys(id_cols + [score_col, rank_col]))
-        predictions = sdf.select(*pred_cols).toPandas()
-        # NOTE: when sample_rows is set, diagnostics labels are deduped over
-        # the sampled rows only (acceptable: diagnostics are display-only).
-        labels = (
-            sdf.select(*list(dict.fromkeys(id_cols + [label_col])))
-            .distinct()
-            .toPandas()
+        # Aggregate diagnostics in Spark so each figure embeds bounded summaries
+        # (bin counts / quartiles / rank matrices), not raw per-row arrays.
+        # eval_predictions is scanned once per aggregation, so project the
+        # needed columns and cache before the multiple passes.
+        needed = list(
+            dict.fromkeys([item_col, score_col, rank_col, label_col])
         )
+        sdf = eval_predictions.select(*needed).cache()
         figs = []
         if diag_cfg.get("include_distributions", True):
-            figs += plot_score_distributions(
-                predictions, item_col=item_col, score_col=score_col
-            )
-            figs += plot_score_distributions_by_label(
-                predictions, labels, id_cols=tuple(id_cols),
-                item_col=item_col, score_col=score_col, label_col=label_col
-            )
-            figs.append(
-                plot_rank_heatmap(
-                    predictions, item_col=item_col, rank_col=rank_col
-                )
-            )
-            figs.append(
-                plot_positive_rank_heatmap(
-                    predictions, labels, id_cols=tuple(id_cols),
-                    item_col=item_col, rank_col=rank_col, label_col=label_col
-                )
-            )
-            figs.append(
-                plot_positive_rate_rank_heatmap(
-                    predictions, labels, id_cols=tuple(id_cols),
-                    item_col=item_col, rank_col=rank_col, label_col=label_col
-                )
-            )
+            figs.append(plot_score_histogram(
+                score_histogram_counts(sdf, item_col, score_col),
+                item_col=item_col,
+            ))
+            figs.append(plot_score_boxplot(
+                score_box_stats(sdf, item_col, score_col),
+                item_col=item_col,
+            ))
+            figs.append(plot_score_boxplot_by_label(
+                score_box_stats_by_label(sdf, item_col, score_col, label_col),
+                item_col=item_col, label_col=label_col,
+            ))
+            figs.append(plot_rank_heatmap(
+                rank_count_matrix(sdf, item_col, rank_col)
+            ))
+            figs.append(plot_positive_rank_heatmap(
+                positive_rank_count_matrix(sdf, item_col, rank_col, label_col)
+            ))
+            figs.append(plot_positive_rate_rank_heatmap(
+                positive_rate_matrix(sdf, item_col, rank_col, label_col)
+            ))
         if diag_cfg.get("include_calibration", True):
-            figs.append(
-                plot_calibration_curves(
-                    predictions, labels,
+            figs.append(plot_calibration_curves(
+                calibration_bins(
+                    sdf, item_col, score_col, label_col,
                     n_bins=diag_cfg.get("n_calibration_bins", 10),
-                    id_cols=tuple(id_cols), item_col=item_col,
-                    score_col=score_col, label_col=label_col,
-                )
-            )
+                ),
+                item_col=item_col,
+            ))
+        sdf.unpersist()
         diagnostics_frames = {"figures": figs}
 
     return assemble_report(

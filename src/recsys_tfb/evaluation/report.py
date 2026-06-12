@@ -1,12 +1,58 @@
 """HTML report generation for evaluation results."""
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.offline
+
+
+def _fmt_no_sci(x: float) -> str:
+    """Format a float for report tables without scientific notation.
+
+    Integer-valued -> thousands-separated integer (``12,345,678``); otherwise
+    fixed 6-decimal with trailing zeros stripped (``0.000034``, ``0.5``).
+    Magnitudes below display precision collapse to ``"0"`` and never render as
+    ``"-0"``.
+    """
+    x = float(x)
+    if x.is_integer():
+        return f"{int(x):,}"
+    s = f"{x:,.6f}".rstrip("0").rstrip(".")
+    return "0" if s in ("-0", "-", "") else s
+
+
+def _fmt_cell(x):
+    """Per-cell formatter for report tables. Numbers go through the
+    no-scientific-notation rules (big ints also get thousands separators),
+    NaN/None render blank, and non-numeric cells (strings, lists) pass through
+    unchanged."""
+    if x is None or x is pd.NA:
+        return ""
+    if isinstance(x, bool):
+        return str(x)
+    if isinstance(x, (int, np.integer)):
+        return f"{int(x):,}"
+    if isinstance(x, (float, np.floating)):
+        if math.isnan(x):
+            return ""
+        return _fmt_no_sci(float(x))
+    return x
+
+
+def _render_table(table: pd.DataFrame) -> str:
+    """Render a DataFrame to HTML with no scientific notation.
+
+    pandas formats a whole float column uniformly, so one extreme value flips
+    the entire column to exponential. Formatting every cell up front sidesteps
+    that (and keeps object-dtype columns working too). ``applymap`` is used
+    because ``DataFrame.map`` does not exist on pandas 1.5.x.
+    """
+    return table.applymap(_fmt_cell).to_html(index=True)
 
 
 @dataclass
@@ -113,7 +159,7 @@ def generate_html_report(
         for ti, table in enumerate(section.tables):
             if ti < len(section.table_titles) and section.table_titles[ti]:
                 html_parts.append(f"<h3>{section.table_titles[ti]}</h3>")
-            html_parts.append(table.to_html(index=True))
+            html_parts.append(_render_table(table))
 
         html_parts.append("</details>" if section.collapsible else "</div>")
 
