@@ -4,11 +4,14 @@ import json
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.report import (
     ReportSection,
+    _fmt_no_sci,
+    _render_table,
     generate_html_report,
     save_metrics_json,
     save_report,
@@ -149,6 +152,69 @@ class TestGenerateHtmlReport:
         html = generate_html_report(sections)
         # JS handler exists that sets .open = true on <details> target
         assert ".open = true" in html or ".open=true" in html
+
+
+class TestFmtNoSci:
+    """Number -> string with no scientific notation (report tables)."""
+
+    def test_integer_valued_float_uses_thousands_separator(self):
+        assert _fmt_no_sci(12345678.0) == "12,345,678"
+
+    def test_small_value_is_fixed_point_not_scientific(self):
+        assert _fmt_no_sci(3.4e-5) == "0.000034"
+
+    def test_strips_trailing_zeros(self):
+        assert _fmt_no_sci(0.5) == "0.5"
+        assert _fmt_no_sci(0.123456789) == "0.123457"
+
+    def test_tiny_value_collapses_to_zero_without_negative_sign(self):
+        assert _fmt_no_sci(-1.5e-7) == "0"
+        assert _fmt_no_sci(5e-8) == "0"
+
+    def test_negative_value_kept(self):
+        assert _fmt_no_sci(-0.0234) == "-0.0234"
+
+
+class TestRenderTable:
+    """_render_table formats every cell so no column flips to sci notation,
+    big ints get thousands separators, and NaN/None render blank."""
+
+    def _mixed_df(self):
+        # A float column whose range (1e8 .. 3e-5) would flip the WHOLE
+        # column to scientific notation under pandas' default to_html.
+        return pd.DataFrame(
+            {
+                "rate": [0.000034, None, 0.5, 120000000.0],
+                "count": [120000000, 22, 3, 7],
+                "prod": ["exchange_fx", "fund_bond", "x", "y"],
+            },
+            index=["A", "B", "C", "D"],
+        )
+
+    def test_no_scientific_notation(self):
+        html = _render_table(self._mixed_df())
+        for bad in ("e-05", "e+08", "e-0", "e+0", "5.000000e-01"):
+            assert bad not in html, f"found sci-notation token {bad!r}"
+
+    def test_formatted_values_present(self):
+        html = _render_table(self._mixed_df())
+        assert "0.000034" in html
+        assert "120,000,000" in html  # both the float and the int column
+
+    def test_int_column_gets_thousands_separator(self):
+        html = _render_table(self._mixed_df())
+        # the raw, separator-less integer must not survive
+        assert ">120000000<" not in html
+
+    def test_nan_and_none_render_blank(self):
+        html = _render_table(self._mixed_df())
+        assert "NaN" not in html
+        assert "<td></td>" in html
+
+    def test_string_cells_pass_through(self):
+        html = _render_table(self._mixed_df())
+        assert "exchange_fx" in html
+        assert "fund_bond" in html
 
 
 class TestSaveReport:
