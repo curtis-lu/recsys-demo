@@ -108,3 +108,28 @@
 3. **Q1：training `diagnostics`/`final_model_strategy`/`mlflow` + evaluation `product_categories`/`baseline`/`report`** — 補進各 pipeline 文件「關鍵設定」。
 4. **Q2-1、Q2-2、Q2-3（三段長 yaml 註解瘦身 + 指回正典）** — 中，逐段處理。
 5. **Q3-3/4/5、Q2-4/5/6、附錄** — 低，順手。
+
+---
+
+## 補充發現（盤點期間新增）
+
+6. **`logging.file.format: json` 是失效鍵（dead config）** — sev 中
+   - 真實：`setup_logging` 只讀 `level` / `console` / `file.enabled` / `file.path`，**從不讀 `format`**；console 恆為 `ConsoleFormatter`、file 恆為 `JsonFormatter`（jsonl）。
+   - 證據：`src/recsys_tfb/core/logging.py:142–173`（無 `format` 讀取；handler formatter 寫死）。
+   - 處置：已在 yaml 就地標注 `⚠ 未被讀取、改值無效`。若要更乾淨，可移除該鍵或讓 code 真的支援——待你決定。
+
+## 處理進度（feat/config-docs-audit 分支）
+
+| 項目 | 狀態 | commit 摘要 |
+|---|---|---|
+| Q3-1 evaluation.md schema evolution 過時 | ✅ | `docs(fix)` |
+| Q3-2 dataset.md carry/加權寫錯 | ✅ | `docs(fix)` |
+| Q1 training diagnostics/final_model_strategy/mlflow + evaluation product_categories/baseline/report | ✅ | `docs(q1)` |
+| Q2-1 compare_sources 瘦身 | ✅ | `docs(q2)` |
+| Q2-2 sample_weight_keys 瘦身 | ✅ | `docs(q2)` |
+| Q2-3 feature_selection 瘦身 | ✅ | `docs(q2)` |
+| 全面列舉合法值 + ★可編輯標注（含 Q2-5 schema、Q3-4 carry 補 calibration、Q3-6 logging.format 標注） | ✅ | `docs(yaml)` |
+| Q2-4 catalog footgun 註解去寫死行號 | ⏳ 待處理 | — |
+| Q3-3 source_etl.md「dev-cluster」術語 | ⏳ 待處理 | — |
+| Q3-5 LTR「metric 必填」措辭 | ⏳ 待處理 | — |
+| 附錄 A9a code 錯誤訊息不完整 | ⏳ 待決定（屬 code） | — |
