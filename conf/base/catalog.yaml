@@ -309,8 +309,8 @@ ranked_staging:
 # --- Inference pipeline（續）— production 輸出 + Evaluation 讀取端入口 ---
 # 由 publish_predictions 寫入（唯一一次 production 寫入，且只在 validate 通過後執行）。
 # evaluation pipeline 也讀這張表；獨立宣告確保它在同 session 沒跑 inference 時也能
-# standalone 讀，避免 core/catalog.py:71 對未知名稱 fallback 成 MemoryDataset 而
-# 「靜默地壞掉」。
+# standalone 讀，避免 DataCatalog 對未知名稱 fallback 成 MemoryDataset 而「靜默地壞掉」
+# （此 footgun 的正典說明見 docs/design-principles.md §9）。
 ranked_predictions:
   type: HiveTableDataset
   database: ${hive.db}

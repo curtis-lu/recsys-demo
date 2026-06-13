@@ -25,7 +25,7 @@ training:
     # --- Learning-to-rank（Phase 1）--------------------------------------
     # 要訓練 ranking model，請改 objective 與 ranking metric，例如：
     #   objective: lambdarank      # 或 rank_xendcg
-    #   metric: ndcg               # 必填 ranking metric；省略則預設 ndcg
+    #   metric: ndcg               # ranking metric ∈ {ndcg, map}；可省略（A7 預設 ndcg）
     #   ndcg_eval_at: [5, 10]      # NDCG 截斷層級（選填）
     # 每個 query 的 group 來自 schema.columns.time + entity
     # （預設 snap_date + cust_id），會自動帶進 train/train_dev binaries 與 HPO
