@@ -129,7 +129,9 @@
 | Q2-2 sample_weight_keys 瘦身 | ✅ | `docs(q2)` |
 | Q2-3 feature_selection 瘦身 | ✅ | `docs(q2)` |
 | 全面列舉合法值 + ★可編輯標注（含 Q2-5 schema、Q3-4 carry 補 calibration、Q3-6 logging.format 標注） | ✅ | `docs(yaml)` |
-| Q2-4 catalog footgun 註解去寫死行號 | ⏳ 待處理 | — |
-| Q3-3 source_etl.md「dev-cluster」術語 | ⏳ 待處理 | — |
-| Q3-5 LTR「metric 必填」措辭 | ⏳ 待處理 | — |
-| 附錄 A9a code 錯誤訊息不完整 | ⏳ 待決定（屬 code） | — |
+| Q2-4 catalog footgun 註解去寫死行號 | ✅ | `docs(q2/q3)` |
+| Q3-3 source_etl.md「dev-cluster」術語 | ✅ | `docs(q2/q3)` |
+| Q3-5 LTR「metric 必填」措辭 | ✅ | `docs(q2/q3)` |
+| Q2-6 model_version 頂註 / diagnostics 頂註 | ✅ 維持（合格 gloss，已指回 versioning.py） | — |
+| 附錄 A9a code 錯誤訊息不完整（補列 categorical_columns） | ⏳ 待決定（屬 code，超出 config×docs 範圍） | — |
+| `logging.file.format` 失效鍵是否移除/讓 code 支援 | ⏳ 待決定 | 已就地 ⚠ 標注 |
