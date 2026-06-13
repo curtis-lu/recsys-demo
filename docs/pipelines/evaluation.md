@@ -63,7 +63,7 @@ python -m recsys_tfb evaluation --list-nodes
 
 ## 關鍵設定（`conf/base/parameters_evaluation.yaml`）
 
-- **指標**：k 值、要算哪些指標。指標怎麼算、報表怎麼讀 → [`../metrics.html`](../metrics.html)。
+- **評估範圍與指標** `snap_date`（評估的時間切點）＋ `k_values`（所有 @K 指標的 k 值 superset；可含 `"all"`，runtime 解析成該粒度的 distinct item 數）。指標怎麼算、報表怎麼讀 → [`../metrics.html`](../metrics.html)。
 - **分群報表** `segment_columns` ＋ `segment_sources`：每個要分群的欄都要有對應的 segment 來源，否則該段報表悄悄不出現（被一致性閘擋，README §4）。
 - **多模型比較** `compare_sources`：把本模型與其他來源在共同客戶上對比。每個來源一個 `kind`：
 
@@ -73,6 +73,9 @@ python -m recsys_tfb evaluation --list-nodes
   | `external_hive` | 外部 Hive 表 | `table`、`columns` 映射、`prod_mapping`、`unmapped_policy` |
 
   `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。
+- **產品大類平行評估** `product_categories`（`enabled` / `mapping` / `unmapped`）：enable 後把 fine-grained 預測 collapse 到大類（category score ＝ max child score、label ＝ max child label）再跑一輪同一套 metric，結果 nest 在 `category` 之下。`unmapped` 目前只支援 `singleton`（沒列入任何 list 的 product 自成一類）；`mapping` 引用未知 product 會 fail-loud。
+- **Popularity baseline** `baseline.lookback_months`：popularity baseline 的歷史回看視窗（月數）。
+- **報表產生** `report.sections` / `report.display` / `report.diagnostics`：各報表分段開關、要顯示哪些 k（如 `primary_map_k`）、診斷圖選項（如 `n_calibration_bins`、`include_calibration`）。`category` 段同時受 `product_categories.enabled` 控制。
 
 ## 重跑語意
 
