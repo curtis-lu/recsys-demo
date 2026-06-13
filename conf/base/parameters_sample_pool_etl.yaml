@@ -4,7 +4,7 @@
 # ${target_db}.feature_concat 與三張 label table 的 source_checks。
 
 sample_pool_etl:
-  dry_run: false
+  dry_run: false   # bool；★此檔設 false 故 local 也實寫表（feature/label 未設→local 預設 dry-run，見 docs/pipelines/source_etl.md）
   variables:
     target_db: "ml_recsys"
 

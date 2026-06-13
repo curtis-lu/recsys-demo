@@ -30,20 +30,21 @@ spark:
   # spark.sql.shuffle.partitions: 400
   # spark.sql.adaptive.enabled: true
 
-# [Schema 規範]
-# 進入 dataset pipeline 的所有輸入表（feature / label / sample_pool）核心 identity
-# 欄位「必須」遵守以下命名慣例。
+# [Schema 規範] role（左側固定）：time / entity / item / label / score / rank。
+# ★右側欄名由你對應到自己的資料（換應用＝改這裡 + 來源 SQL）；抽象設計見
+# docs/design-principles.md §1。進入 dataset pipeline 的所有輸入表
+# （feature / label / sample_pool）核心 identity 欄位「必須」遵守此命名。
 schema:
   columns:
-    time: snap_date # 切 partition / point-in-time join 用的日期欄
-    entity: [cust_id] # 主要 entity key（list 形式）
-    item: prod_name # 主要 item identifier
-    label: label
-    score: score
-    rank: rank
-  # Identity categorical 欄位的顯式列舉（如 prod_name），這些欄位的 distinct 值
-  # 無法從 feature_table 推得，必須在此宣告。
-  # 改動此 list 會使 base_dataset_version 失效（重新版本化）。
+    time: snap_date # ★切 partition / point-in-time join 用的日期欄
+    entity: [cust_id] # ★主要 entity key（list 形式）
+    item: prod_name # ★主要 item identifier
+    label: label # ★
+    score: score # 模型分數輸出欄（一般不需改）
+    rank: rank # 組內名次欄（一般不需改）
+  # ★Identity categorical 欄位的顯式值列舉（如 prod_name）：這些欄的 distinct 值
+  # 無法從 feature_table 推得、必須在此宣告（為什麼見 design-principles §1）。
+  # ⚠改動此 list 會使 base_dataset_version 失效（重新版本化、整批重算）。
   categorical_values:
     prod_name:
       - ccard_bill
@@ -56,9 +57,9 @@ schema:
       - fund_stock
 
 logging:
-  level: INFO
-  console: true
+  level: INFO          # ∈ {DEBUG, INFO, WARNING, ERROR, CRITICAL}（大小寫不拘；無法解析則 fallback INFO）
+  console: true        # bool；console 一律 human-readable ConsoleFormatter
   file:
-    enabled: true
-    path: logs/
-    format: json
+    enabled: true      # bool
+    path: logs/        # 根目錄；實際落 <path>/<pipeline>/<YYYY-MM>/<pipeline>_<run_id>.jsonl
+    format: json       # ⚠ 目前未被 setup_logging 讀取——file 一律 JSON lines；改此值無效

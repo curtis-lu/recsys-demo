@@ -10,10 +10,10 @@ spark:
   # spark.driver.memory: 8g
 
 training:
-  algorithm: lightgbm
+  algorithm: lightgbm          # ∈ {lightgbm}（ADAPTER_REGISTRY 已註冊者；未知會 raise 列出可用）
   algorithm_params:
-    objective: binary
-    metric: binary_logloss
+    objective: binary          # pointwise；要 LTR 改 {lambdarank, rank_xendcg}（見下方 LTR 說明）
+    metric: binary_logloss     # binary→LightGBM metric；LTR→{ndcg, map}（留空預設 ndcg，A7 驗）
     verbosity: -1
     # log_period：0 表示完全靜默；> 0 時，訓練過程每 N 個 boosting round 印一次
     # val metric（HPO 每個 trial + 最終 refit 都會印）。由 LightGBMAdapter 在
@@ -25,7 +25,7 @@ training:
     # --- Learning-to-rank（Phase 1）--------------------------------------
     # 要訓練 ranking model，請改 objective 與 ranking metric，例如：
     #   objective: lambdarank      # 或 rank_xendcg
-    #   metric: ndcg               # 必填 ranking metric；省略則預設 ndcg
+    #   metric: ndcg               # ranking metric ∈ {ndcg, map}；可省略（A7 預設 ndcg）
     #   ndcg_eval_at: [5, 10]      # NDCG 截斷層級（選填）
     # 每個 query 的 group 來自 schema.columns.time + entity
     # （預設 snap_date + cust_id），會自動帶進 train/train_dev binaries 與 HPO
@@ -34,27 +34,23 @@ training:
     # per-customer mAP。
     # --------------------------------------------------------------------
   calibration:
-    enabled: true
-    method: sigmoid
+    enabled: true              # bool；★ 要把 score 當機率時才開
+    method: sigmoid            # ∈ {isotonic, sigmoid}
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
-  # sample_weight_keys: weight key 由哪些欄位組成（順序即 "|" 串接順序），
-  #   與 dataset.sample_group_keys 對稱。預設 [prod_name]：直接對產品調權。
-  #   每個欄位必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
-  #   dataset.carry_columns ∪ dataset.prepare_model_input.categorical_columns。
-  #   categorical feature（如 cust_segment_typ_2a）在 model_input 是「編碼後 int」，
-  #   但 sample_weights 仍用人類可讀字串：runtime 由 _translate_weight_table 依
-  #   category_mappings 翻成 code 後比對（encode-aware）。raw 值（identity/label/
-  #   carry）維持字串。打錯/不存在的值 → 不中（weight 1.0），會記入 manifest.json
-  #   的 sample_weight.unmatched_keys。
-  #   可用 scripts/sampling_overrides_editor.py 互動式產生（weight 面依此 keys
-  #   組成 key；與 dataset.sample_group_keys 可不同）。
+  # sample_weight_keys: weight key 由哪些欄位組成（順序＝ "|" 串接順序），與
+  #   dataset.sample_group_keys 對稱（可不同）。預設 [prod_name]＝直接對產品調權。
+  #   ★每欄必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
+  #   dataset.carry_columns ∪ dataset.prepare_model_input.categorical_columns（A9a 驗）。
+  #   類別欄填人類可讀字串即可（runtime encode-aware 翻 code）；機制與 edge case 見
+  #   docs/pipelines/training.md。可用 scripts/sampling_overrides_editor.py 產生。
   sample_weight_keys:
     - prod_name
-  # sample_weights: key = sample_weight_keys 值用 "|" 串接；value = LightGBM
-  #   sample_weight（任意正數：>1 boost、<1 down-weight）。稀疏：只列 != 1.0
-  #   的組，沒列到的 row = 1.0。只作用於 train/train_dev，val/calibration/
-  #   evaluation 不加權。A9b 驗 key 段數、A9c 驗 product 分量。改 keys 或此表
-  #   會 bust model_version、不動 train_variant_id。
+  # sample_weights: ★key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數
+  #   （>1 boost、<1 down-weight）。稀疏：只列 != 1.0 的組，其餘 = 1.0。
+  #   只作用於 train/train_dev（val/calibration/evaluation 不加權）。打錯/不存在的值
+  #   → 不中（weight 1.0），記入 manifest.json 的 sample_weight.unmatched_keys。
+  #   A9b 驗 key 段數、A9c 驗 product 分量；改 keys 或此表 bust model_version、
+  #   不動 train_variant_id。
   #   範例（sample_weight_keys: [cust_segment_typ, prod_name]）：
   #     "mass|ccard_ins": 2.0
   #     "affluent|fund_mix": 0.7
@@ -69,7 +65,7 @@ training:
   #                        (every product equal weight; cold products count).
   # NOTE: this key is inside the model_version-hashed training: block, so
   # changing it is a deliberate one-time model_version bump.
-  hpo_objective: macro_per_item_map
+  hpo_objective: macro_per_item_map   # ∈ {mean_ap, macro_per_item_map}
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
@@ -77,20 +73,13 @@ training:
   #   hpo_best       — 直接沿用 HPO best-trial 的 adapter（預設）。
   #   refit_on_full  — 在 train + train_dev concat 後重訓，
   #                    num_iterations = best_iteration、不做 early stopping。
-  final_model_strategy: hpo_best
-  # --- Training-stage feature selection ----------------------------------
-  # 在「不重建 dataset」前提下，retrain 時排除多餘特徵（重要性低 / 與其他特徵
-  # 高相關）。dataset 仍保留全特徵（base_dataset_version 不變）；只在 training
-  # 起算的路徑把 feature_columns 子集化：select_features node 產出 subset 的
-  # preprocessor_view，bin-build / HPO / finalize / calibration / test 打分 /
-  # 診斷全部消費同一份 view；inference 端則改讀 model 自己宣告的 feature_name()。
-  #   exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
-  #             不可含 schema.item，consistency A14 會 fail-loud 擋下）。
-  # 空 / 省略 = 行為與未啟用前 100% 相同（無子集、無 .bin 內部 hash、無對齊）。
-  # 此 key 在 model_version-hashed 的 training: block 內 → 只 bump model_version、
-  # 不動 base_dataset_version / train_variant_id。完整 exclude 清單會寫進
-  # manifest.json 的 parameters（provenance）。.bin 快取在啟用時落在
-  # lgb/<family>/fs_<hash>/，不會與全特徵 binary 互相污染。
+  final_model_strategy: hpo_best   # ∈ {hpo_best, refit_on_full}
+  # --- Training-stage feature selection（不重建 dataset、retrain 時排除多餘特徵）---
+  #   ★exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
+  #              不可含 schema.item，A14 fail-loud 擋下）。空/省略＝完全不啟用。
+  #   啟用只 bump model_version（不動 base/train_variant），完整清單寫進 manifest.json；
+  #   機制（select_features / preprocessor_view / inference 對齊 / .bin 快取）見
+  #   docs/pipelines/training.md。
   feature_selection:
     exclude: []
   # search_space：ParamSpec map 的有序 list（declarative HPO, Phase 2）。

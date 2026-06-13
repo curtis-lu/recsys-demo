@@ -63,7 +63,7 @@ python -m recsys_tfb evaluation --list-nodes
 
 ## 關鍵設定（`conf/base/parameters_evaluation.yaml`）
 
-- **指標**：k 值、要算哪些指標。指標怎麼算、報表怎麼讀 → [`../metrics.html`](../metrics.html)。
+- **評估範圍與指標** `snap_date`（評估的時間切點）＋ `k_values`（所有 @K 指標的 k 值 superset；可含 `"all"`，runtime 解析成該粒度的 distinct item 數）。指標怎麼算、報表怎麼讀 → [`../metrics.html`](../metrics.html)。
 - **分群報表** `segment_columns` ＋ `segment_sources`：每個要分群的欄都要有對應的 segment 來源，否則該段報表悄悄不出現（被一致性閘擋，README §4）。
 - **多模型比較** `compare_sources`：把本模型與其他來源在共同客戶上對比。每個來源一個 `kind`：
 
@@ -72,13 +72,21 @@ python -m recsys_tfb evaluation --list-nodes
   | `model_version` | 同框架的另一個 model_version | `model_version` |
   | `external_hive` | 外部 Hive 表 | `table`、`columns` 映射、`prod_mapping`、`unmapped_policy` |
 
-  `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。
+  `kind=model_version` 還可加選填 `source`（B 側預測讀哪張表，三選一）：
+  - `enriched_eval_predictions`（**預設**）：B 側已跑過完整 `evaluation`、partition 已存在；`--compare-only` 下與 Model A 對稱。
+  - `ranked_predictions`：B 側只跑過 `inference`（還沒跑 evaluation）時用。
+  - `training_eval_predictions`：B 側 training 的 test 預測，讓 `--compare --post-training` 兩側都免重跑 inference。
+
+  `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。完整欄位 schema 的真實來源是 `core/consistency.py` 的 A11。
+- **產品大類平行評估** `product_categories`（`enabled` / `mapping` / `unmapped`）：enable 後把 fine-grained 預測 collapse 到大類（category score ＝ max child score、label ＝ max child label）再跑一輪同一套 metric，結果 nest 在 `category` 之下。`unmapped` 目前只支援 `singleton`（沒列入任何 list 的 product 自成一類）；`mapping` 引用未知 product 會 fail-loud。
+- **Popularity baseline** `baseline.lookback_months`：popularity baseline 的歷史回看視窗（月數）。
+- **報表產生** `report.sections` / `report.display` / `report.diagnostics`：各報表分段開關、要顯示哪些 k（如 `primary_map_k`）、診斷圖選項（如 `n_calibration_bins`、`include_calibration`）。`category` 段同時受 `product_categories.enabled` 控制。
 
 ## 重跑語意
 
 - `--model-version`：評估哪一版（預設依解析規則取對應版本）。
 - 標準模式每次重算指標並覆寫 `enriched_eval_predictions`（dynamic partition，按 `model_version` ＋ `snap_date`）。
-- `--compare-only` **不**重算，直接讀回上次 persist 的 `enriched_eval_predictions`；若 `segment_sources` 在兩次 run 間改變，需先 drop 該表再重跑（schema evolution 是待辦）。
+- `--compare-only` **不**重算，直接讀回上次 persist 的 `enriched_eval_predictions`。若 `segment_sources` 在兩次 run 間改變，重跑標準 / `--compare` 模式（會 persist）時 `enriched_eval_predictions`（`columns: "auto"`）由 `HiveTableDataset` 自動 append-only 演化 schema（新增欄位、舊資料缺欄補 NULL），不需先 drop 表。
 
 ## 接下來
 

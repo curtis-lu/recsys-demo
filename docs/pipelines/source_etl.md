@@ -34,7 +34,7 @@ python -m recsys_tfb feature_etl --restart-from <table_name> --target-dates 2025
 
 > **query group**：同一個 (time, entity) 下所有候選 `item` 形成一組；模型分數只在組內比大小、排序指標也每組各算再平均（見 README §0）。`sample_pool` 就是在界定每組的候選範圍；它的「分群欄」供下游 `dataset` 分層抽樣 / 加權使用（見 [`dataset.md`](dataset.md)）。
 >
-> 本機 dev-cluster 用合成資料時**跳過 source_etl**（合成資料已是 feature / label 粒度，沒有上游表）。以下說明的是生產環境怎麼產這三張表。
+> 本機（`--env local`）用合成資料時**跳過 source_etl**（合成資料已是 feature / label 粒度，沒有上游表）。以下說明的是生產環境怎麼產這三張表。
 
 ## 機制（與 DAG pipeline 不同）
 

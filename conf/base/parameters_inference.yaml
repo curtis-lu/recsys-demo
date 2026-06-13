@@ -5,10 +5,10 @@ spark:
   # spark.sql.shuffle.partitions: 400
 
 inference:
-  use_calibration: true
-  snap_dates:
+  use_calibration: true   # bool；★是否套用校準後模型輸出（需該 model 有 calibration）
+  snap_dates:             # ★要評分的時間切點清單（你的資料）
     - "2025-12-31"
-  products:
+  products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）
     - "exchange_usd"
     - "exchange_fx"
     - "fund_stock"
