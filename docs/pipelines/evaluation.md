@@ -72,7 +72,12 @@ python -m recsys_tfb evaluation --list-nodes
   | `model_version` | 同框架的另一個 model_version | `model_version` |
   | `external_hive` | 外部 Hive 表 | `table`、`columns` 映射、`prod_mapping`、`unmapped_policy` |
 
-  `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。
+  `kind=model_version` 還可加選填 `source`（B 側預測讀哪張表，三選一）：
+  - `enriched_eval_predictions`（**預設**）：B 側已跑過完整 `evaluation`、partition 已存在；`--compare-only` 下與 Model A 對稱。
+  - `ranked_predictions`：B 側只跑過 `inference`（還沒跑 evaluation）時用。
+  - `training_eval_predictions`：B 側 training 的 test 預測，讓 `--compare --post-training` 兩側都免重跑 inference。
+
+  `--compare X` 與 `--compare-only X` 的 `X` 必須是 `compare_sources` 裡的 key，且兩者互斥（只能給一個）。設定不合法會被一致性閘擋（README §4）。完整欄位 schema 的真實來源是 `core/consistency.py` 的 A11。
 - **產品大類平行評估** `product_categories`（`enabled` / `mapping` / `unmapped`）：enable 後把 fine-grained 預測 collapse 到大類（category score ＝ max child score、label ＝ max child label）再跑一輪同一套 metric，結果 nest 在 `category` 之下。`unmapped` 目前只支援 `singleton`（沒列入任何 list 的 product 自成一類）；`mapping` 引用未知 product 會 fail-loud。
 - **Popularity baseline** `baseline.lookback_months`：popularity baseline 的歷史回看視窗（月數）。
 - **報表產生** `report.sections` / `report.display` / `report.diagnostics`：各報表分段開關、要顯示哪些 k（如 `primary_map_k`）、診斷圖選項（如 `n_calibration_bins`、`include_calibration`）。`category` 段同時受 `product_categories.enabled` 控制。

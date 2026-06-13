@@ -69,46 +69,33 @@ evaluation:
       # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
       # 不再需要 row 抽樣上限。
 
-  # Compare sources ── 有填內容的 entry 才會 unlock `evaluation --compare <key>`
-  # 與 `--compare-only <key>`。預設為空；要用哪個就把該 entry 前面的 `#` 拿掉。
-  # 每個 key（`v_prev`、`ext_proj_x`、...）就是 CLI flag 傳的值。
-  #
-  # Schema（由 core.consistency.A11 驗證）：
-  #   kind:           "model_version" | "external_hive"     （必填）
-  #   label:          report_comparison.html 上顯示的名稱   （必填）
-  #   model_version:  kind=model_version 時必填
-  #   source:         kind=model_version 時選填 ──
-  #                   "enriched_eval_predictions"（預設；在 --compare-only
-  #                   模式下與 Model A 對稱；要求 B 側 model_version 已跑過
-  #                   完整 `evaluation` pipeline、partition 已存在）|
-  #                   "ranked_predictions"（inference 的輸出；B 側只跑過
-  #                   inference 沒跑 evaluation 時用）|
-  #                   "training_eval_predictions"（training pipeline 的
-  #                   test-set 預測；讓 `--compare` 在 `--post-training`
-  #                   模式下可以兩側都不用重跑 inference）
-  #   table:          kind=external_hive 時必填（Hive-qualified）
-  #   columns:        kind=external_hive 時必填 ── 左邊是我們的 schema、
-  #                   右邊是外部 column name（cust_id/snap_date/prod_name/score）
-  #   prod_mapping:   kind=external_hive 時必填 ── 外部 prod_name → 我們的
-  #                   prod_name 的 N:1 map；右側必須是 A6 已知值
-  #   unmapped_policy: "fail"（預設 ── 遇到不在 mapping 內的 prod 直接 raise）|
-  #                    "drop"（filter 掉並 log warning）
+  # Compare sources（多模型比較）。有填內容的 entry 才 unlock
+  # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）
+  # 即 CLI flag 傳的值。★整段（含 key 名與各值）由你定義；預設空。
+  # 完整 schema 由 core/consistency.py 的 A11 驗證（正典）；各 source 的用法、
+  # kind 對照見 docs/pipelines/evaluation.md。
+  # 可填欄位（值的合法集合）：
+  #   kind            ∈ {model_version, external_hive}                （必填）
+  #   label           任意字串（report_comparison.html 顯示名）        （必填）
+  #   model_version   字串                                  （kind=model_version 必填）
+  #   source          ∈ {enriched_eval_predictions, ranked_predictions,
+  #                      training_eval_predictions}  （kind=model_version 選填，預設第一個）
+  #   table           Hive-qualified 字串                   （kind=external_hive 必填）
+  #   columns         我們的欄 → 外部欄名 map                （kind=external_hive 必填）
+  #   prod_mapping    外部 prod_name → 我們的 prod_name（N:1，右側須 A6 已知值）（同上必填）
+  #   unmapped_policy ∈ {fail, drop}                       （kind=external_hive，預設 fail）
   compare_sources: {}
+  # 範本（拿掉 # 即啟用；★ 所有值由你填）：
   #compare_sources:
-  #  v_prev:
+  #  v_prev:                                  # kind=model_version：另一個同框架版本
   #    kind: model_version
-  #    model_version: "2026-01-31_abcdef12_34567890"
   #    label: "v_prev (上一版)"
-  #  ext_proj_x:
+  #    model_version: "2026-01-31_abcdef12_34567890"
+  #    source: enriched_eval_predictions      # 選填，合法值見上
+  #  ext_proj_x:                              # kind=external_hive：外部 Hive 表
   #    kind: external_hive
-  #    table: other_project.predictions
   #    label: "External Project X"
-  #    columns:
-  #      cust_id: customer_id
-  #      snap_date: as_of_date
-  #      prod_name: item_code
-  #      score: pred_score
-  #    prod_mapping:
-  #      ext_fund_a: fund_stock
-  #      ext_fund_b: fund_bond
-  #    unmapped_policy: fail
+  #    table: other_project.predictions
+  #    columns: {cust_id: customer_id, snap_date: as_of_date, prod_name: item_code, score: pred_score}
+  #    prod_mapping: {ext_fund_a: fund_stock, ext_fund_b: fund_bond}
+  #    unmapped_policy: fail                   # fail（預設）| drop
