@@ -90,6 +90,6 @@
 
 ## 產物與流程
 
-- 報告落點：`docs/config-docs-audit.md`（單一 markdown，三節分明，每筆附 `file:line` 與 code 證據）。
+- 盤點報告為**一次性工作產物**：findings、`file:line` 證據與處理進度留在 PR 描述 + git history，不作為 living doc 提交（report 是執行用鷹架，用完即拆；本 spec 的目標架構才是持久產物）。
 - 流程：本 spec 覆核 → 產出報告 → 使用者逐項確認 → 才動手改 yaml 註解 / docs。
 - 分支：`feat/config-docs-audit` worktree；本任務不跑 Spark（純讀 `src/` + 寫 markdown/yaml）。
