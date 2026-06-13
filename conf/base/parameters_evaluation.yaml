@@ -36,9 +36,9 @@ evaluation:
   # child rank；category label = max child label），然後對「同一套」metric
   # pipeline 跑第二輪；結果 nest 在 "category" key 之下。
   product_categories:
-    enabled: true
-    unmapped: singleton          # 沒列在任何 list 的 product 自成一個 singleton category
-    mapping:
+    enabled: true                # bool
+    unmapped: singleton          # ∈ {singleton}（目前唯一支援）；沒列入任何 list 的 product 自成一類
+    mapping:                      # ★大類 → 子 product 清單（值由你定義；右側須 A6 已知 item）
       fund: [fund_stock, fund_bond, fund_mix]
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]

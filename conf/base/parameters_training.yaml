@@ -10,10 +10,10 @@ spark:
   # spark.driver.memory: 8g
 
 training:
-  algorithm: lightgbm
+  algorithm: lightgbm          # ∈ {lightgbm}（ADAPTER_REGISTRY 已註冊者；未知會 raise 列出可用）
   algorithm_params:
-    objective: binary
-    metric: binary_logloss
+    objective: binary          # pointwise；要 LTR 改 {lambdarank, rank_xendcg}（見下方 LTR 說明）
+    metric: binary_logloss     # binary→LightGBM metric；LTR→{ndcg, map}（留空預設 ndcg，A7 驗）
     verbosity: -1
     # log_period：0 表示完全靜默；> 0 時，訓練過程每 N 個 boosting round 印一次
     # val metric（HPO 每個 trial + 最終 refit 都會印）。由 LightGBMAdapter 在
@@ -34,8 +34,8 @@ training:
     # per-customer mAP。
     # --------------------------------------------------------------------
   calibration:
-    enabled: true
-    method: sigmoid
+    enabled: true              # bool；★ 要把 score 當機率時才開
+    method: sigmoid            # ∈ {isotonic, sigmoid}
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
   # sample_weight_keys: weight key 由哪些欄位組成（順序＝ "|" 串接順序），與
   #   dataset.sample_group_keys 對稱（可不同）。預設 [prod_name]＝直接對產品調權。
@@ -65,7 +65,7 @@ training:
   #                        (every product equal weight; cold products count).
   # NOTE: this key is inside the model_version-hashed training: block, so
   # changing it is a deliberate one-time model_version bump.
-  hpo_objective: macro_per_item_map
+  hpo_objective: macro_per_item_map   # ∈ {mean_ap, macro_per_item_map}
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50
@@ -73,7 +73,7 @@ training:
   #   hpo_best       — 直接沿用 HPO best-trial 的 adapter（預設）。
   #   refit_on_full  — 在 train + train_dev concat 後重訓，
   #                    num_iterations = best_iteration、不做 early stopping。
-  final_model_strategy: hpo_best
+  final_model_strategy: hpo_best   # ∈ {hpo_best, refit_on_full}
   # --- Training-stage feature selection（不重建 dataset、retrain 時排除多餘特徵）---
   #   ★exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
   #              不可含 schema.item，A14 fail-loud 擋下）。空/省略＝完全不啟用。

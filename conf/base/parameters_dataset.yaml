@@ -15,8 +15,8 @@ dataset:
     - "2025-10-31"
 
   # --- 抽樣 ---
-  sample_ratio: 1.0
-  sample_group_keys:
+  sample_ratio: 1.0      # float [0,1]；★ 預設抽樣比例（決定性 hash，同 seed→同結果）
+  sample_group_keys:     # ★分層維度（你的欄；多欄用 "|" 串成 override / weight key）
     - "cust_segment_typ"
     - "prod_name"
     - "label"
@@ -29,10 +29,10 @@ dataset:
   # 未指定的組合用預設 sample_ratio
 
   # --- Carry columns（沿用欄位）---
-  # 非 identity、要從 sample_pool 帶進 train/train_dev model_input parquet 供
-  # 訓練讀取（如 training.sample_weights 的 segment 維度）的欄位清單。寬鬆
-  # 超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
-  # 重產 dataset。改此清單會 bust base_dataset_version（parquet schema 變）。
+  # ★非 identity、要從 sample_pool 帶進 train/train_dev/calibration model_input
+  # parquet 的欄位清單（供 training.sample_weights 分群；權重實際只套 train/train_dev）。
+  # 寬鬆超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
+  # 重產 dataset。⚠改此清單會 bust base_dataset_version（parquet schema 變、整批重算）。
   carry_columns:
     - cust_segment_typ
 
