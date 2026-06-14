@@ -20,8 +20,8 @@
 | 項目 | 結論 |
 |---|---|
 | 計算引擎 | **Spark 3.3.x**（AQE 預設開）+ **Hive 3.1.3**（CDP Private Cloud Base 7.1.9）；底層 YARN + HDFS，另有 Impala |
-| 介面 | 同事以 **SQL 為主**：Spark SQL 字串、Hive/Hue、Impala；**少用 PySpark DataFrame API** |
-| 手冊範例方言 | 以 **SQL** 為主（非 `df.filter()` 鏈式 API） |
+| 介面 | 同事以 **SQL 為主**：Spark SQL 字串、Hive/Hue、Impala；**少用 PySpark DataFrame API**（但使用者要求納入一章） |
+| 手冊範例方言 | 以 **SQL** 為主（非 `df.filter()` 鏈式 API）；DataFrame API 集中在專章 |
 | 引擎範圍 | **Spark 為主軸** + 一章引擎選用（Spark vs Hive/Tez vs Impala） |
 | 診斷工具 | 主推 **Spark UI** + `EXPLAIN`；Impala/Hive 的等價工具（query profile / Tez UI）在引擎選用章帶過 |
 | 使用場景 | ① ad-hoc 分析 ② 排程定期產表 ③ 模型訓練特徵運算 |
@@ -31,7 +31,7 @@
 
 ## 3. 非目標（Out of Scope，YAGNI）
 
-- 不教 PySpark DataFrame/RDD API 程式設計（讀者以 SQL 為主）。
+- 不教 **RDD 低階 API** 與低階分散式程式設計（partitioner、mapPartitions…）；DataFrame API 有專章，但只到「SQL-first 的人何時/如何改用」的程度。
 - 不深入 Spark 原始碼 / JVM 內部 / Catalyst 實作細節。
 - 不寫叢集建置、YARN/HDFS 運維、安全/權限設定（讀者非平台管理者）。
 - 不做 Hive-Tez 與 Impala 的**深度**優化（僅在引擎選用章談定位與何時改用）。
@@ -64,7 +64,7 @@
 - `EXPLAIN` / `EXPLAIN FORMATTED` 讀重點：找 `Exchange`(=shuffle)、`BroadcastHashJoin` vs `SortMergeJoin`、Scan 的 partition filter 有沒有生效。
 - Spark UI 各頁籤該看什麼（SQL-first 的人主看 SQL 頁籤的 query plan + Stages 的 task 時間/資料分佈）。
 - 認症狀：shuffle 過大、**skew**（少數 task 特別久）、**spill**（記憶體不足落磁碟）、小檔/掃太多（partition 沒裁到）。
-- 產出「症狀 → 看哪裡 → 翻到哪章」對照表（呼應 §08）。
+- 產出「症狀 → 看哪裡 → 翻到哪章」對照表（呼應 §09）。
 
 ### `03-sql-tuning.md` — SQL 寫法優化
 - 只讀需要的：partition 裁剪（`WHERE` 帶 partition column）、projection（別 `SELECT *`）、predicate pushdown。
@@ -103,21 +103,28 @@
 - CDP 實務：同一 Hive table 三引擎都讀；Impala metadata `INVALIDATE`/`REFRESH`、ACID 表 Impala 支援限制。
 - 取捨：Impala 快但吃記憶體、不適合超大 shuffle；Spark 通用但啟動/排程成本高。
 
-### `07-scenario-playbooks.md` — 場景對應
+### `07-pyspark-dataframe-api.md` — 進階：何時與如何改用 PySpark DataFrame API
+- 何時值得從 SQL 改用 DataFrame API：複雜可重用邏輯、要單元測試、動態組查詢、與 ML pipeline / Python 生態整合（本 repo 的 pipeline 即一例）。
+- SQL ↔ DataFrame 心智對照（同一 query 兩種寫法並排）；**破除「API 比 SQL 快/慢」迷思 ＝ 底層同一個 Catalyst，效能等價**。
+- API 特有效能注意：`cache()`/`persist()` 何時用與記憶體取捨；避免 `collect()`/`toPandas()` 把資料拉回 driver（OOM）；`repartition` vs `coalesce`；UDF 成本（呼應本 repo 生產禁 UDF）；lazy 與 action。
+- 取捨：可測試/可維護 vs 純 SQL 的簡潔。
+- 範圍界線：只到 DataFrame API；**不碰 RDD 低階 API**（§3）。
+
+### `08-scenario-playbooks.md` — 場景對應
 - 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)`。
 - 場景 2 排程產表：可重跑、控輸出檔大小、partition 設計、`ANALYZE`、用 Spark/Hive、用 Spark UI 抓退化。
-- 場景 3 特徵運算：寬表多 join、多 window、易 skew；broadcast 維度表、預聚合、控 shuffle、cache 中間結果的取捨。
+- 場景 3 特徵運算：寬表多 join、多 window、易 skew；broadcast 維度表、預聚合、控 shuffle、cache 中間結果的取捨（可用 SQL 或 §07 的 DataFrame API）。
 - 每場景：典型陷阱 → 對策 → 引用前面哪章。
 
-### `08-cheatsheet-and-glossary.md` — 速查與名詞表
+### `09-cheatsheet-and-glossary.md` — 速查與名詞表
 - 取捨速查表：時間 ↔ 記憶體 ↔ 儲存（每個手段三維度影響）。
 - config 速查表（名稱/預設/何時調/風險）。
 - 症狀→對策速查（呼應 §02）。
 - 名詞對照表（partition/shuffle/executor/skew/spill/broadcast… 中英對照＋一句話）。
 
-> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §08 收成速查表。
+> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §09 收成速查表。
 >
-> 章數彈性：若某章寫起來太薄，允許合併（如 04 併入 03、08 併入 index），定案以實作計畫為準。
+> 章數彈性：若某章寫起來太薄，允許合併（如 04 併入 03、09 併入 index），定案以實作計畫為準。
 
 ## 6. 寫作慣例與權威來源
 
@@ -139,13 +146,16 @@
 ## 7. 圖表方案
 
 - `.md` 內用 **Mermaid**（GitHub/VSCode 可預覽，便於內容檢閱）畫概念圖（flowchart / 簡單架構圖）。
-- 轉 HTML 時嵌 **mermaid.js** 渲染，沿用既有手冊離線 HTML 的樣式（自包含、右下角浮動回頂鈕、anchor 目錄）。
+- **離線瀏覽可行**：轉 HTML 時把 **mermaid.js 函式庫直接內嵌（vendored/inline）進 HTML**，不靠 CDN，從本機 `file://` 開啟即可渲染（沿用既有 `*_offline.html` 自包含做法）。維持「`.md` 的 mermaid 原始碼 ＝ HTML 內同一份」單一來源。
+  - 替代方案（更穩、多一道建置）：建置時用 mermaid-cli 把每張圖**預渲染成內嵌 SVG**，HTML 完全不依賴 JS（連 JS 關閉也能看）；代價是圖原始碼與 `.md` 分離、建置端需 node/puppeteer。
+  - **預設採內嵌 mermaid.js**；若要「連 JS 都不依賴」的最強離線，再切預渲染 SVG。
 - 圖以「簡單概念圖」為原則：cluster、query→stage→task、narrow vs wide shuffle、broadcast vs sort-merge join、partition 裁剪、小檔成因、引擎決策樹等。
 
 ## 8. 交付流程
 
-1. **先全部產 `.md`**（方便內容檢閱）；一章一審。
-2. 全部 `.md` 經使用者確認 OK 後，**再一次轉成 `.html`**（方便概念圖呈現），與 `.md` 成對放在 `docs/handbooks/spark-tuning/`。
+1. **先全部產 `.md`**（方便內容檢閱）。每章節奏：`我寫草稿 → 兩個審稿 subagent 並行審（§11）→ 我 triage 修 → 使用者審 → 打勾 commit`。
+2. 全部 `.md` 經使用者確認 OK 後，**再一次轉成 `.html`**（方便概念圖呈現，內嵌 mermaid.js 離線可看），與 `.md` 成對放在 `docs/handbooks/spark-tuning/`。
+3. HTML 完成後做一次整體檢查：跨章導覽/anchor 連結、離線渲染、回頂鈕。
 
 ## 9. 跨 session / 跨日持續工作機制
 
@@ -155,11 +165,30 @@
 2. **實作計畫** `docs/superpowers/plans/2026-06-14-spark-tuning-handbook-plan.md` = 分階段（每章一階段或數階段），每階段含狀態勾選（未開始/進行中/已完成/已審）、產出檔案、驗收點。**新 session 開頭先讀此計畫**知道進度。
 3. **Direction Log（方向日誌）**：計畫檔內 append-only 區段，每次 session 記下使用者的調整與決定（日期＋一句話），跨 session 不忘修正方向。
 4. **project memory**：寫一條 memory 記錄本任務關鍵不變項（環境前提、骨架、風格、檔案位置、進度指標、worktree/分支）；context reset 仍找得回。方向大改時更新它。
-5. **每章交付節奏**：一章 `.md` 完成 → 使用者審 → OK 才動下一章；每完成一章在計畫打勾 + commit。
+5. **每章交付節奏**：一章 `.md` 完成 → 審稿 subagent → 使用者審 → OK 才動下一章；每完成一章在計畫打勾 + commit。
 6. **每次 session 收尾**：更新計畫進度 + Direction Log + commit。
 
-## 10. 成功標準
+## 10. 審稿 subagent 工作流程
 
-- 一位無 DE 背景的分析師，能照手冊**自行**：讀懂自己 SQL 的 Spark UI、判斷瓶頸類型、改寫 SQL 或調少數 config、選對引擎、設計合理的 partition/儲存。
-- 每個建議都有權威來源、具體數字、與明確取捨。
-- 階層化、可分章查閱；`.md` 與 `.html` 成對交付。
+每章 `.md` 草稿完成後、送使用者審閱前，**派兩個 subagent 各自通讀該章**（可並行，彼此獨立）。沿用 `docs/handbooks/handbook-writing-guide.md` §11–§12 的審稿精神，拆成兩個互補角色：
+
+**角色 A — 技術審查員（reviewer，驗真實性）**
+- 任務：逐條檢查技術主張正確性。每個 config 名稱、預設值、版本特性（AQE 在 3.3 預設開、`autoBroadcastJoinThreshold` 預設值、Hive 3 ACID 行為、Impala `INVALIDATE/REFRESH`…）對**權威來源**（Spark 3.3 官方文件、§6 書籍）核對；「做 X → 變快」的因果方向要確認；不得把「建議」寫成「硬限制」（過度宣稱）。
+- 工具：WebFetch/WebSearch 查 Spark 3.3 官方文件；Read 該章。
+- 產出：逐條 claim + 判定（已驗證＋出處 URL／錯誤／無法查證），按「真缺陷／可加強／誤讀」分類。
+
+**角色 B — 目標讀者（reader，驗易讀性）**
+- 人設：**無 DE 背景的資料分析師/科學家**（對齊 §1 讀者）。從頭讀到尾，標出：哪裡卡住、**缺脈絡**、**太抽象**（只有形容詞、沒具體數字/例子）、用了還沒定義的術語、概念圖不自明、寫作鷹架洩漏（guide §11）。
+- 產出：逐段卡關點 +「缺脈絡／太抽象／沒講清楚」標記，按「真缺陷／可加強／誤讀」分類。
+
+**同步可審核**：每個 subagent 邊讀邊把發現**即時寫入** companion 日誌檔 `docs/handbooks/spark-tuning/.reviews/<chapter>__<role>.md`，使用者可隨時打開看進度，不必等最終回報。
+
+**回饋處理**：我收兩份報告後，按「真缺陷（必補）／可加強（斟酌）／誤讀（不改或微調）」三級處理，修完才把該章送使用者審。重大分歧或取捨不明處，才回頭問使用者。
+
+**節奏**：與「一章一審」對齊；全部 `.md` 定稿、轉 HTML 後，可選擇再派 reader subagent 做一次跨章通讀（導覽/連結/全書一致性）。
+
+## 11. 成功標準
+
+- 一位無 DE 背景的分析師，能照手冊**自行**：讀懂自己 SQL 的 Spark UI、判斷瓶頸類型、改寫 SQL 或調少數 config、選對引擎、設計合理的 partition/儲存；需要時知道何時改用 DataFrame API。
+- 每個建議都有權威來源、具體數字、與明確取捨；每章經 reviewer + reader 兩個 subagent 審過並 triage 修正。
+- 階層化、可分章查閱；`.md` 與 `.html` 成對交付，HTML 離線可看（內嵌 mermaid.js）。
