@@ -140,10 +140,42 @@ inference_population (time,entity)        feature_table (time,entity,features)
 - catalog / parameters 接線：`inference_population` 可被 load；ETL 設定可被解析。
 - 既有 inference 下游測試（predict/rank/validate）保持綠燈（介面不變）。
 
+## 與 evaluation `segment_sources` 的關係
+
+evaluation 既有的 `segment_sources`（`src/recsys_tfb/evaluation/segments.py` 的
+`join_segment_sources`）是「任意 keyed Hive 表 → 把屬性欄 left-join 進
+eval_predictions」的泛用機制：每個 entry 宣告 `table` / `key_columns` /
+`segment_column`，讀表後 `dropDuplicates(key_columns)` 再 `how="left"` join，缺表/缺欄
+fail-loud。預設示例已指向 `ml_recsys.sample_pool`。
+
+**`inference_population` 可直接當成 evaluation 的分群來源，零程式改動**——它的 grain
+`(time, entity)` = 一 key 一列，`dropDuplicates` 為 no-op、不會 fan-out。只要它帶有分群
+欄，加一條 `segment_sources` entry 即可（受 config-consistency invariant A10 約束：每個
+`segment_columns` 要有對應 `segment_sources` entry）。
+
+**設計原則：不合併機制，但可共用實體表。** `inference_population` ＝ membership（哪些列
+要被評分），`segment_sources` ＝ attribute enrichment（每個 key 屬於哪一群）；這是與
+「母體 vs feature_table」相同的 membership/enrichment 分界，不應再揉回一起。
+`segment_sources` 仍是泛用機制（可指多張屬性表、多種 eval 模式）。讓
+`inference_population` **順帶帶分群欄**、由 `segment_sources` 指向它，等同 `sample_pool`
+現在扮演的角色。
+
+**好處——分群定義對齊實際母體。** 目前分群預設來自 `sample_pool`（training 時期）；但
+evaluation 評的是 inference 輸出（`ranked_predictions` 的客戶 = 推論母體），用 training 表
+切群會有 train/inference 分群定義分歧的風險。原則：**segment source 跟著該 eval 模式的母體
+走**——
+
+- **monitoring（評 inference 輸出）** → segment source 指 `inference_population`
+- **post-training（評 `training_eval_predictions`）** → 維持 `sample_pool`
+
+兩者不是重複，是各自對應不同場景。inference 與 evaluation 的**程式都不需改**，只動
+`inference_population` 的 ETL（產分群欄）＋ `parameters_evaluation.yaml` 的 config。
+
 ## 開放 / 待確認
 
 1. `feature_present` 是否要**下推**到 `score_table` / `ranked_predictions`（讓 production 消費端也看得到）？目前列為可選 follow-up（涉及 Hive 輸出表 schema 演化）。
 2. 範例（合成資料）的 `inference_population.sql` 內容：最小可用版＝對 feature 來源在 snap_date 取 distinct `(time, entity)`；之後由使用者放入真實業務資格邏輯。
+3. `inference_population` 是否在設計上**帶分群屬性欄**（讓它能直接當 evaluation 的 segment source）？若是，分群欄由其 ETL SQL 產出，evaluation 端只動 `segment_sources` config（見上節「與 evaluation `segment_sources` 的關係」）。
 
 ## YAGNI
 
