@@ -1,0 +1,57 @@
+# Spark 優化參考手冊
+
+寫給數據部門同事的實用手冊：讓你能自己**讀懂查詢為什麼慢、改寫 SQL、調整 Spark 設定、選對引擎、設計合理的資料儲存**，把資料處理變快、變省。
+
+「效率」在本手冊指三件事，遇到兩難時會明講取捨：
+
+1. **運算時間**（查詢跑多久）
+2. **記憶體使用**（會不會 OOM、會不會 spill 到磁碟）
+3. **資料儲存**（檔案佔多少空間、好不好讀）
+
+---
+
+## 預設讀者與前提
+
+**讀者**：會寫 SQL、熟悉自己的業務資料的分析師、資料科學家。**不需要**資料工程或分散式系統背景——partition、shuffle、executor 這些詞第一次出現時都會解釋。
+
+**環境**（本手冊所有建議都對齊這個環境）：
+
+| 項目 | 內容 |
+|---|---|
+| 計算引擎 | Spark 3.3.x（AQE 預設開啟）、Hive 3.1.3、Impala，跑在 CDP（Cloudera）平台上 |
+| 底層 | YARN + HDFS |
+| 你怎麼下指令 | 主要是 SQL（Spark SQL、Hive/Hue、Impala）；範例以 SQL 為主，DataFrame API 集中在第 07 章 |
+
+> 資料量級參考（本手冊範例會用到）：客戶數 ~1000 萬、信用卡帳務 ~3000 萬筆/月、App ~1000 萬筆/天。
+
+---
+
+## 如何使用本手冊
+
+不必從頭讀到尾。依你的情況切入：
+
+- **想先建立直覺、看懂後面在講什麼** → 先讀第 01、02 章，這是其他章的基礎。
+- **手上有個查詢很慢、想知道慢在哪** → 第 02 章（用 Spark UI 找瓶頸）→ 依症狀翻第 03/04/05 章。
+- **想改 SQL 把查詢寫快** → 第 03 章。
+- **想知道該不該、該怎麼調 Spark 參數** → 第 04 章。
+- **要建表/產表，想讓它省空間又好讀** → 第 05 章。
+- **同一個分析該用 Spark、Hive 還是 Impala** → 第 06 章。
+- **SQL 已經不夠用、想改用 PySpark** → 第 07 章。
+- **想看自己這類工作（ad-hoc / 排程產表 / 特徵運算）的整套做法** → 第 08 章。
+- **想快速查一個參數預設值、或某個名詞是什麼** → 第 09 章。
+
+---
+
+## 章節導覽
+
+| 章 | 標題 | 一句話 |
+|---|---|---|
+| 01 | [Spark 怎麼跑你的 SQL](01-how-spark-runs-your-sql.md) | 建立心智模型：一條 SQL 在叢集裡發生什麼、為什麼 shuffle 最貴 |
+| 02 | [用 Spark UI 找瓶頸](02-diagnose-with-spark-ui.md) | 先量再調：怎麼讀 `EXPLAIN` 與 Spark UI，認出 shuffle/skew/spill/小檔 |
+| 03 | [SQL 寫法優化](03-sql-tuning.md) | 改寫法就變快：partition 裁剪、join 策略、避免爆量、處理 skew |
+| 04 | [Spark 設定（AQE-first）](04-spark-config.md) | AQE 自動幫你做了什麼、剩下少數真正值得調的旋鈕 |
+| 05 | [儲存效率](05-storage-efficiency.md) | 檔案格式、partition 設計、小檔問題、壓縮與統計的取捨 |
+| 06 | [引擎選用](06-engine-selection.md) | Spark vs Hive/Tez vs Impala：什麼情況用哪個 |
+| 07 | [PySpark DataFrame API（進階）](07-pyspark-dataframe-api.md) | 何時值得從 SQL 改用 API、改用時要注意什麼 |
+| 08 | [場景對應](08-scenario-playbooks.md) | ad-hoc 分析 / 排程產表 / 特徵運算，各自的整套做法 |
+| 09 | [速查與名詞表](09-cheatsheet-and-glossary.md) | 取捨速查、config 速查、中英名詞對照 |
