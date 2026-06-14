@@ -123,6 +123,10 @@ class TestCalibratedModelAdapter:
         fi = cal_adapter.feature_importance()
         assert fi == trained_base.feature_importance()
 
+    def test_feature_names_delegate(self, trained_base):
+        cal_adapter = CalibratedModelAdapter(trained_base)
+        assert cal_adapter.feature_names() == trained_base.feature_names()
+
     def test_feature_importance_and_booster_delegate(self, trained_base):
         cal_adapter = CalibratedModelAdapter(trained_base)
         split = cal_adapter.feature_importance(kind="split")

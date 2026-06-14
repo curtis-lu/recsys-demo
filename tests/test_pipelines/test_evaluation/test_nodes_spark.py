@@ -29,6 +29,7 @@ class TestPrepareEvalDataModelVersionFilter:
         from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
         predictions = MagicMock(name="predictions_sdf")
+        predictions.columns = ["model_version"]
         filtered = MagicMock(name="filtered_sdf")
         predictions.filter.return_value = filtered
 
@@ -68,8 +69,9 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     prepare_eval_data must add it via rank_within_query so downstream
     nodes (generate_report) still find `rank`.
 
-    The predictions input here carries a `label` column to mirror the real
-    training_eval_predictions schema; prepare_eval_data must still produce a
+    The predictions input carries a `label` column but no `model_version`:
+    HiveTableDataset already filters that static partition and drops the
+    constant column on load. prepare_eval_data must still produce a
     non-ambiguous result.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
@@ -81,7 +83,6 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
         "prod_name": ["A", "B", "A", "B"],
         "score": [0.9, 0.1, 0.2, 0.8],
         "label": [1, 0, 0, 1],
-        "model_version": ["v1"] * 4,
     })
     labels_pdf = pd.DataFrame({
         "cust_id": ["c1", "c1", "c2", "c2"],
