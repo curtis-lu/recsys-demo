@@ -60,6 +60,33 @@ class TestValidatePredictionsPass:
         result = validate_predictions(ranked, scoring, parameters)
         assert result.count() == 30
 
+    def test_ignores_other_model_and_date_partitions(
+        self, spark, parameters
+    ):
+        parameters["model_version"] = "current"
+        ranked, scoring = _make_valid_data(spark)
+        ranked = ranked.withColumn("model_version", F.lit("current"))
+
+        other_model = (
+            ranked.withColumn("model_version", F.lit("previous"))
+            .withColumn("score", F.lit(2.0))
+        )
+        other_date = (
+            ranked.withColumn("snap_date", F.lit("2024-01-31").cast("date"))
+            .withColumn("score", F.lit(2.0))
+        )
+        persisted_staging = ranked.unionByName(other_model).unionByName(other_date)
+
+        result = validate_predictions(
+            persisted_staging, scoring, parameters
+        )
+
+        assert result.count() == ranked.count()
+        assert {
+            row["model_version"]
+            for row in result.select("model_version").distinct().collect()
+        } == {"current"}
+
 
 class TestRowCountMatch:
     def test_mismatch_raises(self, spark, parameters):

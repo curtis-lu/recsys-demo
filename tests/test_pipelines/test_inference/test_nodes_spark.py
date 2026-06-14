@@ -81,6 +81,17 @@ class TestBuildScoringDataset:
             cust_prods = pdf.loc[pdf["cust_id"] == cid, "prod_name"].tolist()
             assert sorted(cust_prods) == sorted(products)
 
+    def test_missing_snap_date_raises(self, feature_table, parameters):
+        parameters["inference"]["snap_dates"] = [
+            "2024-03-31",
+            "2024-04-30",
+        ]
+
+        with pytest.raises(
+            ValueError, match="feature_table missing inference.snap_dates"
+        ):
+            build_scoring_dataset(feature_table, parameters)
+
 
 class TestApplyPreprocessor:
     def test_output_has_identity_and_features(self, feature_table, parameters, preprocessor):
@@ -198,6 +209,34 @@ class TestPredictScores:
         result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert result.count() == 9  # 3 customers x 3 products
 
+    def test_uses_model_feature_names_for_training_feature_selection(
+        self, feature_table, parameters, preprocessor
+    ):
+        scoring = build_scoring_dataset(feature_table, parameters)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
+
+        class MockModel:
+            seen_columns = []
+
+            def feature_names(self):
+                return ["prod_name", "total_aum"]
+
+            def predict(self, X):
+                self.seen_columns.append(list(X.columns))
+                return np.full(len(X), 0.5)
+
+        model = MockModel()
+        result = predict_scores(
+            model, X_score, scoring, parameters
+        )
+
+        assert result.count() == 9
+        assert model.seen_columns
+        assert all(
+            columns == ["prod_name", "total_aum"]
+            for columns in model.seen_columns
+        )
+
 
 class TestRankPredictions:
     def test_rank_column_added(self, spark, parameters):
@@ -241,3 +280,33 @@ class TestRankPredictions:
         for cid in ["C001", "C002"]:
             cust_ranks = sorted(pdf.loc[pdf["cust_id"] == cid, "rank"].tolist())
             assert cust_ranks == [1, 2, 3]
+
+    def test_filters_persisted_history_to_current_model_and_dates(
+        self, spark, parameters
+    ):
+        parameters["model_version"] = "current"
+        score_pdf = pd.DataFrame({
+            "snap_date": pd.to_datetime(
+                ["2024-03-31"] * 3
+                + ["2024-01-31"] * 3
+                + ["2024-03-31"] * 3
+            ),
+            "cust_id": ["C001"] * 9,
+            "prod_name": [
+                "exchange_fx", "fund_stock", "fund_bond",
+            ] * 3,
+            "score": [0.9, 0.3, 0.6] * 3,
+            "model_version": (
+                ["current"] * 3 + ["current"] * 3 + ["previous"] * 3
+            ),
+        })
+
+        result = rank_predictions(spark.createDataFrame(score_pdf), parameters)
+        rows = result.select("snap_date", "model_version", "rank").collect()
+
+        assert len(rows) == 3
+        assert {row["model_version"] for row in rows} == {"current"}
+        assert {
+            row["snap_date"].strftime("%Y-%m-%d") for row in rows
+        } == {"2024-03-31"}
+        assert sorted(row["rank"] for row in rows) == [1, 2, 3]

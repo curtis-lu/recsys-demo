@@ -58,8 +58,21 @@ def prepare_eval_data(
             "parameters['model_version'] missing. CLI should resolve via "
             "core.versioning.resolve_model_version before pipeline run."
         )
-    logger.info("Filtering predictions to model_version=%s", model_version)
-    ranked_predictions = ranked_predictions.filter(F.col("model_version") == model_version)
+    if "model_version" in ranked_predictions.columns:
+        logger.info("Filtering predictions to model_version=%s", model_version)
+        ranked_predictions = ranked_predictions.filter(
+            F.col("model_version") == model_version
+        )
+    else:
+        # HiveTableDataset drops partition_filter columns after applying the
+        # WHERE clause. training_eval_predictions uses model_version as a
+        # static partition_filter, so its CLI-loaded DataFrame is already
+        # pruned even though the constant column is no longer present.
+        logger.info(
+            "Predictions input has no model_version column; assuming catalog "
+            "partition_filter already selected model_version=%s",
+            model_version,
+        )
 
     # Filter predictions to the configured evaluation snap_date. evaluation.
     # snap_date is an ISO date string (YYYY-MM-DD); the snap_date partition
