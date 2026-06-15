@@ -33,6 +33,10 @@ class ModelAdapter(ABC):
         """Return probability scores as a 1-D numpy array."""
         ...
 
+    def feature_names(self) -> list[str] | None:
+        """Return the ordered feature names expected by the fitted model."""
+        return None
+
     @abstractmethod
     def save(self, filepath: str) -> None:
         """Save the model to the given filepath using the algorithm's native format."""

@@ -108,6 +108,11 @@ class LightGBMAdapter(ModelAdapter):
             raise RuntimeError("Model not trained or loaded. Call train() or load() first.")
         return self._booster.predict(X)
 
+    def feature_names(self) -> list[str] | None:
+        if self._booster is None:
+            return None
+        return list(self._booster.feature_name())
+
     def save(self, filepath: str) -> None:
         if self._booster is None:
             raise RuntimeError("No model to save. Call train() first.")
