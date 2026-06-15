@@ -84,6 +84,7 @@ def build_scoring_dataset(
             )
 
     with log_step(logger, "feature_coverage_report"):
+        # 用窄投影（join_key + 指標）算覆蓋，避免在 wide feature 上做聚合
         ft_keys = (
             feature_table.select(*join_key).distinct()
             .withColumn("_ft_present", F.lit(True))
