@@ -36,9 +36,30 @@ flowchart TB
 
 ---
 
-## 1.2 Spark 不會馬上算：先攢計畫，再一次跑
+## 1.2 你的資料被切成幾塊？partition 從哪來
 
-第二個和單機 SQL 很不一樣的地方：你寫的查詢，Spark **不是讀到就算**。
+上一節說資料被切成 partition——但切成幾塊？這個數字很關鍵，因為 **一個 partition 對應一個 task**（下面 §1.4 會正式講），所以 partition 數＝這一步**最多能同時做幾件事**。
+
+讀檔時，Spark 大致按**固定大小**把檔案切成 partition，一塊預設約 **128MB**（由 `spark.sql.files.maxPartitionBytes` 控制）。所以一張 30GB 的表讀進來，大約 30GB ÷ 128MB ≈ **240 個 partition → 240 個 task** 平行讀。（這是粗估：很多小檔、或像 gzip 這種「不能從中間切開」的檔，實際塊數會不一樣。）
+
+為什麼你該在意這個數字：
+
+- **太少（每塊太大）**：平行度不足，機器在閒著；而且單一 task 要嚼的資料太多，記憶體不夠就 **spill**（溢寫到磁碟——暫時放不下的資料先寫去磁碟，慢；§1.6 會詳述）。極端情況——整張大表只有 1 個 partition，等於一個 task 扛全部，叢集再大也沒用。
+- **太多（每塊太小）**：每個 task 都有固定的啟動、排程開銷；幾萬個只有幾 KB 的 task，光開銷就拖垮你，寫出時還會產生一堆小檔（第 05 章的小檔問題）。
+
+```mermaid
+flowchart LR
+    F["一張 30GB 的表<br/>（存在 HDFS）"] --> P["按 ~128MB 切<br/>≈ 240 個 partition"]
+    P --> T["240 個 task<br/>平行讀、各處理一塊"]
+```
+
+partition 數**不是固定的**：讀進來是一個數，經過 shuffle 後會變成另一個數（§1.6 會講），自己重新分配也會變。但你心裡最好隨時有個「現在大概幾塊、每塊多大」的概念——這是判斷「夠不夠平行、會不會 spill」的基礎。
+
+---
+
+## 1.3 Spark 不會馬上算：先攢計畫，再一次跑
+
+第三個和單機 SQL 很不一樣的地方：你寫的查詢，Spark **不是讀到就算**。
 
 像 `SELECT`、`WHERE`、`JOIN`、`GROUP BY` 這些，Spark 只是把它們記下來，攢成一份「待辦計畫」，先不動手。這叫 **lazy evaluation（延遲求值）**。
 
@@ -52,13 +73,13 @@ flowchart TB
 
 ---
 
-## 1.3 從 SQL 到一群 task：工作分成四層
+## 1.4 從 SQL 到一群 task：工作分成四層
 
-當 action 觸發後（§1.2），你交給 Spark 的工作會由大到小分成四層。先把名字對齊——第 02 章用 Spark UI 找瓶頸時，畫面上看到的就是這四層：
+當 action 觸發後（§1.3），你交給 Spark 的工作會由大到小分成四層。先把名字對齊——第 02 章用 Spark UI 找瓶頸時，畫面上看到的就是這四層：
 
 - **Application（應用）**：你這一次連上 Spark 的整個工作階段（你的 SparkSession、一支程式、或一個 Hue 連線跑的所有東西）。一個 application 從頭到尾共用同一批 executor。
 - **Job（作業）**：**每觸發一次 action，就產生一個 job**（絕大多數情況如此；極少數 action 會拆成多個 job，本手冊的批次情境幾乎不會遇到）。所以一段程式裡跑了三次 `count`、又寫了一次表，大致就是四個 job。
-- **Stage（階段）**：一個 job 內，一段「不用在機器之間搬資料」就能連續做完的工作。**每遇到一次 shuffle（§1.5 會詳談），就切成下一個 stage。**
+- **Stage（階段）**：一個 job 內，一段「不用在機器之間搬資料」就能連續做完的工作。**每遇到一次 shuffle（§1.5 會講），就切成下一個 stage。**
 - **Task（任務）**：一個 stage 裡最小的工作單位。**一個 partition 對應一個 task**。100 個 partition 就是 100 個 task，由眾多 executor 分頭平行跑。
 
 ```mermaid
@@ -90,7 +111,7 @@ flowchart LR
 
 ---
 
-## 1.4 兩種運算：自己算的（便宜）vs 要交換的（貴）
+## 1.5 兩種運算：自己算的（便宜）vs 要交換的（貴）
 
 機器和分工講完了，回到「運算本身」。Spark 的運算可以粗分成兩類，差別在於**一塊資料能不能自己算完、還是得跟別塊交換**。
 
@@ -100,7 +121,7 @@ flowchart LR
 **寬依賴（wide）—— 貴**：要把散在各 partition、但「同一個 key」的資料聚到一起，才算得出來。
 例如 `GROUP BY cust_id`（同一客戶的交易可能散在每個 partition，得先聚過來）、`JOIN`（兩邊相同 join key 的列要碰頭）、`DISTINCT`、`ORDER BY`。
 
-這個「把同 key 的資料跨機器重新分配」的動作，就是 **shuffle**。它就是 §1.3 說的「切 stage 的那一刀」。
+這個「把同 key 的資料跨機器重新分配」的動作，就是 **shuffle**。它就是 §1.4 說的「切 stage 的那一刀」。
 
 ```mermaid
 flowchart TB
@@ -120,11 +141,9 @@ flowchart TB
 
 ---
 
-## 1.5 為什麼 shuffle 是頭號敵人
+## 1.6 為什麼 shuffle 是頭號敵人
 
-用一個具體的例子體會「貴」到什麼程度。
-
-假設你要算**每位客戶這個月刷了多少**：
+用一個具體的例子體會「貴」到什麼程度。假設你要算**每位客戶這個月刷了多少**：
 
 ```sql
 SELECT cust_id, SUM(amount) AS total
@@ -140,16 +159,17 @@ GROUP BY cust_id;
 
 於是這 3000 萬筆資料，幾乎**每一筆都經歷了一次「序列化 → 落地磁碟 → 過網路」**。相較之下，前面的 `WHERE month = '2026-05'` 是窄依賴：每個 partition 各自篩掉不要的列，完全不搬資料，幾乎不花什麼成本。
 
-差距的根源在於：**CPU 算數很快，但寫磁碟、過網路慢得多。** shuffle 把大量資料推去做這些慢事，所以它通常是一個查詢裡最花時間、也最容易出問題的環節。常見的兩種麻煩是：
+差距的根源在於：**CPU 算數很快，但寫磁碟、過網路慢得多。** shuffle 把大量資料推去做這些慢事，所以它通常是一個查詢裡最花時間、也最容易出問題的環節。
 
-- **記憶體不夠**：要搬、要聚的資料太多，記憶體塞不下，Spark 只好把一部分**溢寫到磁碟（spill，溢寫）**，又被磁碟拖慢一次。
-- **資料傾斜（skew）**：某些 key 的資料量特別大，全擠到少數幾個 task，別的 task 都做完了還在等它一個（第 03 章會教怎麼處理）。
+**麻煩一：記憶體不夠就 spill。** 要搬、要聚的資料太多，記憶體塞不下，Spark 只好把一部分溢寫到磁碟（這就是 §1.2 提過的 **spill**），又被磁碟拖慢一次。shuffle 正是 spill 最常發生的場景。
 
-記住 spill 這個詞，下一節馬上會用到。
+**麻煩二：shuffle 會讓大家「等齊」（stage barrier）。** 一個 stage 的所有 task 沒有全部跑完，下一個 stage **一個都不能開始**——因為 shuffle read 必須等所有 shuffle write 都寫好了才能拉。這帶出 **資料傾斜（skew）** 為什麼這麼痛：如果某些 key 的資料量特別大（例如某個超級大戶、或一個 `NULL` key 吃掉一大塊），它們會全擠到少數幾個 task；於是 199 個 task 三秒做完，剩 1 個肥 task 跑了五分鐘，**其他人只能乾等它**，整個 stage 卡在最慢的那一個（第 03 章會教怎麼拆這種熱點）。
+
+**麻煩三：shuffle 之後有幾塊？預設被「重設」成 200。** 一個常見困惑：很多人發現 shuffle 後的 stage 永遠是 200 個 task。原因是——shuffle 輸出的 partition 數**不是延續輸入**，而是被重設成一個固定值 `spark.sql.shuffle.partitions`，**預設 200**。這個數字太大太小都不好：對只有幾 MB 的小結果，200 塊＝ 200 個幾乎空的 task ＋一堆小檔；對好幾百 GB 的大結果，200 塊＝每塊太大、狂 spill。好消息是 Spark 3.3 的 **AQE**（Adaptive Query Execution，查詢途中自動調整執行計畫的機制）**會在執行時自動把過多的小 partition 合併**成大小剛好的塊（第 04 章詳談），所以這個值你多半不必手動煩惱——但你要看得懂「為什麼是 200」。（注意 AQE 主要幫的是「塊太小太多」這頭把它們併大；「塊太大」那頭得靠別的辦法，後面會談。）
 
 ---
 
-## 1.6 一個 executor 該多大？core、記憶體、台數的取捨
+## 1.7 一個 executor 該多大？core、記憶體、台數的取捨
 
 知道 shuffle 會 spill、磁碟很慢之後，就能談「該給每個工人配多少資源」了。一個 executor 由兩種資源組成：
 
@@ -182,7 +202,62 @@ GROUP BY cust_id;
 
 ---
 
-## 1.7 一句話帶走：優化＝少搬、少讀、用對機器
+## 1.8 把它全部串起來：一條 SQL 的旅程
+
+前面的零件——partition、窄/寬依賴、shuffle、stage、task——現在組起來看一條真實的查詢。假設你要算**每個客群這個月的總刷卡金額**，需要把帳務表接上客戶維度表：
+
+```sql
+SELECT c.segment, SUM(t.amount) AS total
+FROM card_txn t
+JOIN dim_customer c ON t.cust_id = c.cust_id
+WHERE t.month = '2026-05'
+GROUP BY c.segment;
+```
+
+Spark 大致會這樣跑（`dim_customer` 是大表的情況）：
+
+```mermaid
+flowchart TB
+    subgraph S1["Stage 1：讀 card_txn"]
+        A1["讀檔（~240 個 partition→task）"] --> A2["WHERE month 過濾（窄，pushdown）"] --> A3["按 cust_id<br/>shuffle write"]
+    end
+    subgraph S2["Stage 2：讀 dim_customer"]
+        B1["讀 dim_customer"] --> B2["按 cust_id<br/>shuffle write"]
+    end
+    subgraph S3["Stage 3：join + 準備 group by"]
+        C1["shuffle read（按 cust_id 對齊兩邊）"] --> C2["JOIN"] --> C3["按 segment<br/>shuffle write"]
+    end
+    subgraph S4["Stage 4：算總和"]
+        D1["shuffle read（按 segment）"] --> D2["SUM(amount)"] --> D3["寫出 / 回傳"]
+    end
+    S1 --> S3
+    S2 --> S3
+    S3 --> S4
+```
+
+（圖中每個 stage 結尾的 `shuffle write`，和它**箭頭指向的下一個 stage** 開頭的 `shuffle read`，是同一次 shuffle 的兩半——前者寫出去、後者再拉回來。）
+
+讀法：
+
+1. `WHERE month` 是**窄依賴**，跟著讀檔一起做、不搬資料——而且因為是 partition 欄位，根本不會去讀其他月份（第 03、05 章的 partition 裁剪）。
+2. `JOIN` 和 `GROUP BY` 各是一次 **shuffle**，所以這條查詢有 **兩個 shuffle、被切成多個 stage**。每個 shuffle 都是前面說的「序列化→落地→過網路」，是這條 SQL 的主要成本。
+3. 每個 stage 的 task 數＝它的 partition 數：讀 `card_txn` 那段約 240 個；shuffle 之後的 stage 預設 200 個（§1.6 的 200）。
+
+**同一條查詢，換個寫法成本差很多。** 如果 `dim_customer` 其實很小（例如幾 MB 的客群對照表），Spark 可以把它**廣播**到每台 executor，`JOIN` 就地完成、**完全不用為 join 做 shuffle**——於是少掉一整個 shuffle、少切好幾個 stage。這就是第 03 章 broadcast join 的威力，也是「為什麼同一條 SQL，懂的人寫起來快得多」的具體例子。
+
+---
+
+## 1.9 為什麼 Spark 通常比老 Hive（MapReduce）快
+
+你可能也用 Hive 跑過 SQL。老式的 Hive 跑在 **MapReduce** 上時，一條多步驟的查詢會被拆成一個個 MapReduce job，**每個 job 之間都把整批中間結果落地到 HDFS**，下一個 job 再從 HDFS 讀回來——多步驟就是多次「寫 HDFS→讀 HDFS」的來回。
+
+Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上一節那條 SQL 的 stage 圖就是），在一個 stage 內把多個窄依賴運算**在記憶體裡串著做、中間不落地**，只有遇到 shuffle 才寫磁碟。少掉大量「寫 HDFS→讀 HDFS」的來回，這是 Spark 通常更快的主因。
+
+但別過度宣稱：Spark 不是「永遠比較快」。對非常單純的大批次掃描，差距有限；而且**現在的 Hive 多半跑在 Tez 上（不是 MapReduce）**，Tez 也用 DAG、把這個差距縮小了不少。哪個引擎適合哪種工作，第 06 章專門討論。
+
+---
+
+## 1.10 一句話帶走：優化＝少搬、少讀、用對機器
 
 把這章收斂成一條主軸，後面所有技巧都掛在它底下：
 
@@ -190,10 +265,10 @@ GROUP BY cust_id;
 
 接下來：
 
-- 你怎麼**知道**自己的查詢卡在 shuffle、卡在讀太多、還是卡在某個 task（資料傾斜）？→ 第 02 章用 Spark UI 看。
-- 怎麼**改 SQL** 來少搬少讀？→ 第 03 章。
-- 哪些 **Spark 設定**值得調？Spark 3.3 內建一個叫 **AQE**（Adaptive Query Execution）的機制，會在查詢跑的途中**自動調整執行計畫**、幫你處理掉不少 shuffle 與傾斜問題；第 04 章會說它已經自動做了什麼、以及 §1.6 那些 executor 資源該怎麼實際設、還剩什麼值得手動調。
-- 怎麼從**資料儲存**端就讓查詢少讀？→ 第 05 章。
+- 你怎麼**知道**自己的查詢卡在 shuffle、卡在讀太多、還是卡在某個肥 task（資料傾斜）？→ 第 02 章用 Spark UI 看。
+- 怎麼**改 SQL** 來少搬少讀（partition 裁剪、broadcast join、拆 skew）？→ 第 03 章。
+- 哪些 **Spark 設定**值得調？Spark 3.3 的 **AQE**（Adaptive Query Execution）會在查詢途中**自動調整執行計畫**、合併過多的 shuffle partition、處理傾斜；第 04 章會說它已自動做了什麼、§1.7 那些 executor 資源怎麼實際設、還剩什麼值得手動調。
+- 怎麼從**資料儲存**端就讓查詢少讀（檔案格式、partition 設計、別讓小檔爆掉）？→ 第 05 章。
 
 ---
 

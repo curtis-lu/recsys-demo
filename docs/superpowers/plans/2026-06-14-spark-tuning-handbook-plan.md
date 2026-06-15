@@ -128,7 +128,7 @@
 ## Progress Tracker
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
-- [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 已寫＋兩輪雙 subagent 審＋修（含 application/job/stage/task 層級、executor 取捨）；待 user 最終 glance
+- [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
 - [ ] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）
 - [ ] Task 3：`03-sql-tuning.md`（SQL 寫法）
 - [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）

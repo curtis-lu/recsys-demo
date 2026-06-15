@@ -248,3 +248,129 @@
 - Spark CSV data source（inferSchema 額外掃檔→多 job 佐證）：https://spark.apache.org/docs/latest/sql-data-sources-csv.html
 
 > 版本對齊備註（第二輪）：Configuration 的 `spark.executor.memoryOverheadFactor` 自 **3.3.0** 起引入、預設 0.10（涵蓋本手冊 3.3.x），舊版（如 Cloudera 文件引的 `spark.yarn.executor.memoryOverhead = max(384, .1*executorMemory)`）為同一概念的舊鍵/舊式，數值口徑（~10%）一致。其餘 Glossary / broadcast / tuning 定義自 2.x 穩定，docs/latest 與 3.3.x 無行為差異。
+
+---
+
+## 第三輪：§1.2 / §1.6 新增 / §1.8 / §1.9
+
+審查時間：2026-06-15（第三輪）
+範圍：本輪查核新增/改寫段落 —— §1.2「partition 從哪來」（maxPartitionBytes、partition 數近似、太少/太多的取捨）、§1.6 新增兩段（stage barrier、shuffle 後 partition 重設成 200 + AQE coalesce + skew 例子）、§1.8 端到端範例（JOIN+GROUP BY+WHERE(partition 欄)、兩個 shuffle、多 stage、partition 裁剪、broadcast 免 shuffle、stage DAG 拆法）、§1.9 Spark vs Hive（MR 落地 HDFS、Spark DAG 記憶體 pipeline、Hive on Tez 縮小差距 + 但書）。前兩輪已驗的舊主張不重查。
+新增權威來源：Spark 3.3 SQL Performance Tuning、Configuration、RDD Programming Guide（docs/latest，3.3.2 專頁本次仍 404；下方版本對齊備註說明）；Cloudera CDP「Hive on Tez introduction」（runtime 7.2.10 / CDP-PvC-Base 7.1.9，與目標環境同系）；Spark DAGScheduler / ShuffleMapStage 內部語意（The Internals of Spark Core）；Spark SQL SortMergeJoinExec 物理計畫。
+
+### §1.2 你的資料被切成幾塊？partition 從哪來
+
+**主張 1.2-a【關鍵事實：maxPartitionBytes 預設】：「讀檔一塊預設約 128MB，由 `spark.sql.files.maxPartitionBytes` 控制」**
+✅ 已驗證——**預設值正確**。Spark SQL Performance Tuning 逐字：`spark.sql.files.maxPartitionBytes` **預設 `134217728 (128 MB)`**，「The maximum number of bytes to pack into a single partition when reading files. This configuration is effective only when using file-based sources such as Parquet, JSON and ORC.」文中「約 128MB」與 134217728 bytes = 128 MiB 完全一致。此值在 3.3.2 與 latest 一致（WebSearch 對 3.3.2 二次確認）。
+出處：https://spark.apache.org/docs/latest/sql-performance-tuning.html （Other Configuration Options：spark.sql.files.maxPartitionBytes，預設 134217728 (128 MB)）。
+
+**主張 1.2-b：「讀檔 partition 數 ≈ 資料大小 ÷ maxPartitionBytes」（30GB ÷ 128MB ≈ 240）這個近似站不站得住**
+✅ 算術正確、⚠️ **但近似有 nuance，文中已部分提醒、可再補一兩點**。30GB ÷ 128MB ≈ 240 算術自洽。此「÷ maxPartitionBytes」是「教學用一階近似」，實際 Spark 的 `FilePartition` 打包公式還受三件事影響：
+  1. **openCostInBytes**：`spark.sql.files.openCostInBytes` 預設 **`4194304 (4 MB)`**，逐字「The estimated cost to open a file… used when putting multiple files into a partition. It is better to over-estimate…」。打包時每個檔案會額外加上 4MB「開檔成本」，所以**多個小檔**的情境下，partition 數會比「純資料大小 ÷ 128MB」**多**（每檔多算 4MB）。
+  2. **檔案不可切分（non-splittable）**：gzip 壓縮的 CSV/text 不可切分，**整個檔案只能進一個 partition**，再大也不切——此時「÷ maxPartitionBytes」完全失效（單檔 > 128MB 也只有 1 個 partition、1 個 task）。Parquet 本身可切分（按 row group），故本手冊 Parquet/ORC 語境下此問題較輕，但仍值得一句提醒。
+  3. **多檔 / `maxSplitBytes` 公式**：實際切分大小 = `min(maxPartitionBytes, max(openCostInBytes, totalBytes/defaultParallelism))`，再把 split 與小檔 bin-pack 成 partition。故 partition 數也受 `defaultParallelism`（≈ 總 core 數）下限影響——資料很小但 core 很多時，partition 數可能被 defaultParallelism 抬高、而非單純 ÷128MB。
+  判定：文中已寫「Spark **大致**按固定大小切」「**大約** 240 個」「partition 數**不是固定的**」，方向正確、用詞夠 hedge，**不構成錯誤**。建議（可加強，非必補）：補一句「很多小檔時實際塊數會更多（每開一個檔有約 4MB 的固定成本），且 gzip 這類不可切分的檔，再大也只能算一塊」——這正是 §1.2/§05 小檔問題的伏筆，且糾正讀者「30GB 一定剛好 240 塊」的過度精確期待。
+出處：https://spark.apache.org/docs/latest/sql-performance-tuning.html （spark.sql.files.maxPartitionBytes、spark.sql.files.openCostInBytes 預設 4194304 (4 MB)）；切分/打包與 splittable 行為見 ASF JIRA SPARK-29102（gzip 單檔不可切分）、Spark `FilePartition.maxSplitBytes` 公式（社群多方一致，原始碼層級）。
+
+**主張 1.2-c：「太少（每塊太大）→ 平行度不足、機器閒著、單 task 資料太多記憶體不夠就 spill；極端 1 個 partition＝一個 task 扛全部」**
+✅ 已驗證（方向正確）。partition↔task 一對一（前兩輪 STDG Ch.15 逐字背書）→ partition 太少＝可同時跑的 task 太少＝平行度不足，與「同時能跑 task 數 = 台數×core」（§1.7，前輪已驗）一致。單 task 資料過大→記憶體放不下→spill，與 §1.6 spill 因果同源。「1 個 partition＝1 個 task 扛全部」是 partition↔task 一對一的直接推論，正確。
+出處：《Spark: The Definitive Guide》Ch.15「Tasks」（前輪逐字）；spill 因果見 RDD guide「Shuffle operations / Performance Impact」（前輪）。
+
+**主張 1.2-d：「太多（每塊太小）→ 每 task 固定啟動/排程開銷；幾萬個幾 KB 的 task 光開銷就拖垮、寫出產生一堆小檔」**
+✅ 已驗證（方向正確）。Cluster Overview：Task = sent to one executor，每個 task 有調度成本（driver 發送、序列化 task、結果回收）為標準認知。Spark Tuning guide 亦把「task 太小、調度開銷佔比過高」列為反模式（建議每 core 2-3 個 task 為宜的脈絡）。「寫出產生小檔」＝ output partition 數 ≈ 寫出檔數，partition 過多→小檔，與 §05 小檔問題一致。方向無誤。
+出處：https://spark.apache.org/docs/latest/cluster-overview.html （Task）；https://spark.apache.org/docs/latest/tuning.html （Level of Parallelism / 排程開銷脈絡）。
+⚠️ 量級註記（非錯）：「幾萬個幾 KB 的 task」「光開銷就拖垮」屬合理常識性誇示，官方未給逐字倍率；方向正確、不需改。
+
+### §1.6 新增段：stage barrier + shuffle 後 partition 重設
+
+**主張 1.6-barrier【關鍵事實：stage barrier】：「一個 stage 的所有 task 沒全部跑完，下一個 stage 一個都不能開始——因為 shuffle read 必須等所有 shuffle write 都寫好才能拉」**
+✅ 已驗證（shuffle 依賴下正確）。Spark 排程語意：上游是 **ShuffleMapStage**，下游（reduce/result stage）必須等 ShuffleMapStage 的**所有 map output 都可用（all partitions have shuffle map outputs available）**才被視為 ready、下游才能開始 fetch。這正是 shuffle 邊界的天然 barrier：「all map tasks in a ShuffleMapStage must complete before any downstream reduce stages can begin execution.」文中因果（read 要等所有 write 寫好）精確。
+  範圍提醒（非錯，文中語境已成立）：嚴格說 barrier 是「**有 shuffle 依賴的** stage 之間」才有——文中此段在「shuffle 為什麼是頭號敵人」脈絡下講，討論對象正是 shuffle 切出來的 stage，**語境正確**。窄依賴在同一 stage 內 pipeline、不存在跨 stage 等待，文中也未宣稱「任意兩 stage 都要等齊」，無過度宣稱。
+出處：Spark DAGScheduler / ShuffleMapStage 執行語意（The Internals of Spark Core：「When all partitions have shuffle map outputs available, ShuffleMapStage is considered ready/available」；下游 stage 須待其 ready）：https://books.japila.pl/apache-spark-internals/scheduler/ShuffleMapStage/ ；shuffle map-write / reduce-read 機制 RDD guide「Shuffle operations / Background」（前輪逐字）。
+
+**主張 1.6-skew：skew 例子「某超級大戶或 NULL key 集中到少數 task → 199 個 3 秒做完、剩 1 個肥 task 跑 5 分鐘、其他乾等」是否合理**
+✅ 已驗證（合理、為標準 skew 病徵）。shuffle 按 key 的 hash 分配到 reduce partition；單一 key（大戶 / `NULL` 被當成一個 key 集中）資料量遠大於其他 key 時，承接該 key 的 task 變肥，stage 卡在最慢 task = stage barrier 的直接後果（與上一條 barrier 一致）。「NULL key 集中」是 join/group by skew 的經典來源（NULL 全 hash 到同一 partition）。「199 個快、1 個慢」呼應 §1.6 的「shuffle 後 200 partition」，數字內部自洽。Spark 3.3 AQE 的 skew join 處理（`spark.sql.adaptive.skewJoin.enabled`，預設 true）正是為此而設——文中把細節留待 03 章，本章只描述病徵，定位正確。
+出處：skew 病徵與 AQE skew 處理 https://spark.apache.org/docs/latest/sql-performance-tuning.html （Optimizing Skew Join）；NULL/單一 key 集中為 shuffle hash 分配的直接後果（RDD guide「Shuffle operations」按 key 重分配，前輪）。
+
+**主張 1.6-200【關鍵事實：shuffle.partitions 預設 200】：「shuffle 輸出 partition 數不延續輸入，被重設成固定值 `spark.sql.shuffle.partitions`，預設 200」**
+✅ 已驗證——**預設值與「與輸入無關」皆正確**。Spark SQL Performance Tuning 逐字：`spark.sql.shuffle.partitions` **預設 `200`**，「Configures the number of partitions to use when shuffling data for joins or aggregations.」此值是 shuffle/join/aggregation 的輸出 partition 數，由 config 決定、**不延續輸入 partition 數**（輸入 240 → shuffle 後仍 200），與文中「重設、與輸入無關」一致。3.3.2 與 latest 同值（WebSearch 二次確認）。物理計畫佐證：SortMergeJoin 兩側 `Exchange hashpartitioning(key, 200)`，200 即此 config。
+出處：https://spark.apache.org/docs/latest/sql-performance-tuning.html （spark.sql.shuffle.partitions，預設 200）；物理計畫 Exchange hashpartitioning(…, 200) 見 SortMergeJoinExec（The Internals of Spark SQL）。
+
+**主張 1.6-aqe：「Spark 3.3 的 AQE 會在執行時自動把過多的小 partition 合併（coalesce）」**
+✅ 已驗證——**正確、且預設開**。Spark SQL Performance Tuning「Coalescing Post Shuffle Partitions」逐字：「This feature coalesces the post shuffle partitions based on the map output statistics when both `spark.sql.adaptive.enabled` and `spark.sql.adaptive.coalescePartitions.enabled` configurations are true… You do not need to set a proper shuffle partition number to fit your dataset. Spark can pick the proper shuffle partition number at runtime…」。`spark.sql.adaptive.coalescePartitions.enabled` **預設 `true`**、`spark.sql.adaptive.enabled` 自 3.2.0 預設 true（前輪已驗）→ 3.3.x「AQE 自動合併過多小 partition」預設生效，與文中「好消息是…AQE 會自動合併、你多半不必手動煩惱」一致。
+  ⚠️ 精確度提醒（非錯）：AQE coalesce 只**合併（減少）**過多的小 partition，**不會把過大的 partition 拆細**（拆大 partition 是 skew join 那條路徑做的、且僅限 join skew）。文中「對好幾百 GB 的大結果，200 塊＝每塊太大、狂 spill」這個「太大」的情境，**AQE coalesce 並不能救**（它只往下合併、不往上拆）。文中緊接著只說 coalesce 解「太多小 partition」、未宣稱它解「太大」，故**不構成錯誤**；但讀者可能誤以為「AQE 兩頭都顧」。建議（可加強，非必補）：點一句「AQE 自動合併處理的是『太多小塊』那頭；結果太大要靠調高 shuffle.partitions 或 AQE 的 skew 處理（03/04 章）」。
+出處：https://spark.apache.org/docs/latest/sql-performance-tuning.html （Coalescing Post Shuffle Partitions：coalescePartitions.enabled 預設 true；只 coalesce、不 split）。
+
+### §1.8 端到端範例（JOIN + GROUP BY + WHERE(partition 欄)）
+
+**主張 1.8-a：「WHERE t.month='2026-05' 是窄依賴、跟讀檔一起做、且因為是 partition 欄位根本不會去讀其他月份（partition 裁剪）」**
+✅ 已驗證。filter = narrow + predicate pushdown（前輪逐字）。「partition 欄位的 WHERE → 不讀其他月份」= **partition pruning（分區裁剪）**，Catalyst 標準優化：當過濾條件打在表的分區欄（此處 `month`）時，Spark 在 file listing 階段就排除不符的分區目錄、根本不掃。文中定位為「第 03、05 章的 partition 裁剪」，前瞻指向正確。
+出處：partition pruning 為 Catalyst/FileScan 標準行為，見 Spark SQL（Partition Discovery / 分區裁剪）https://spark.apache.org/docs/latest/sql-data-sources-parquet.html （Partition Discovery）；predicate pushdown 前輪 Databricks Catalyst blog。
+⚠️ 前提註記（非錯）：partition pruning 成立的前提是 `month` 確為**表的實體分區欄**（Hive 分區 / Parquet 目錄分區）。文中範例語境（card_txn 按 month 分區的帳務表）此前提成立；若 month 只是普通欄位則只有 predicate pushdown（少讀列）、無「不讀其他月目錄」。文中以分區欄立論，合理。
+
+**主張 1.8-b：「JOIN 和 GROUP BY 各是一次 shuffle → 這條查詢有兩個 shuffle、被切成多個 stage」**
+✅ 已驗證。JOIN（sort-merge / shuffle hash）與 GROUP BY（aggregation）各為 wide dependency＝各一次 shuffle（前輪逐字），shuffle 為 stage 邊界（前輪逐字）→ 兩個 shuffle 把 job 切成多個 stage。文中「兩個 shuffle、被切成多個 stage」正確。
+出處：JOIN/GROUP BY 為 wide＋shuffle 切 stage，前輪《STDG》Ch.2 / Ch.15 逐字；SortMergeJoin 兩側 Exchange 見 SortMergeJoinExec。
+
+**主張 1.8-c：stage DAG 圖的拆法（大表 join：S1 讀 card_txn→過濾→按 cust_id shuffle write；S2 讀 dim_customer→按 cust_id shuffle write；S3 兩邊 shuffle read 對齊→JOIN→按 segment shuffle write；S4 按 segment shuffle read→SUM→寫出）是否合理**
+✅ 已驗證（拆法正確，對齊 sort-merge join 物理計畫）。`dim_customer` 為大表時走 **sort-merge join**：物理計畫兩側各一個 `Exchange hashpartitioning(cust_id, 200)`（＝兩個獨立的 shuffle write stage，對應圖中 S1、S2），下游 stage 把兩邊按 cust_id 對齊（shuffle read）後 SortMergeJoin（S3）。GROUP BY segment 再觸發一次 `Exchange hashpartitioning(segment)`（S3 尾的 shuffle write → S4 的 shuffle read + SUM）。圖中「S1、S2 各自 shuffle write → S3 read 對齊 join → S3 write → S4 read 聚合」與真實物理計畫的 stage 邊界一致。**S1、S2 可並行**（彼此無依賴，皆為 S3 的上游），圖用 `S1→S3`、`S2→S3` 兩條入邊表達，正確。
+出處：SortMergeJoinExec 物理計畫「兩側各 Exchange hashpartitioning + Sort，再 SortMergeJoin」https://jaceklaskowski.gitbooks.io/mastering-spark-sql/content/spark-sql-SparkPlan-SortMergeJoinExec.html ；shuffle 切 stage 前輪《STDG》Ch.15。
+⚠️ 細節（非錯，AQE 開時的小出入）：sort-merge join 在 Exchange 之後、join 之前各側還有一個 **Sort** 算子（圖中併入「JOIN」這一格未單獨畫，對 SQL-first 讀者合理省略）；又 §1.8 范例 `dim_customer` 設為大表才有此「兩邊都 shuffle」的圖，若實務上 dim_customer 不大、AQE 可能在 runtime 轉成 broadcast（即 1.8-d 講的情形），圖會塌成更少 stage——文中下一段正是用「換成小表 broadcast」對照，銜接正確、無矛盾。
+
+**主張 1.8-d【關鍵事實：broadcast 免 shuffle】：「若 dim_customer 很小，Spark 可把它廣播到每台 executor，JOIN 就地完成、完全不用為 join 做 shuffle → 少掉一整個 shuffle、少切好幾個 stage」**
+✅ 已驗證——**broadcast join 免去 join 的 shuffle 正確**。Spark SQL Performance Tuning：`spark.sql.autoBroadcastJoinThreshold`「Configures the maximum size in bytes for a table that will be **broadcast to all worker nodes when performing a join**.」BROADCAST hint：以 t1 為 build side 做 broadcast hash join。AQE 文件亦逐字佐證 broadcast 省 shuffle：把 sort-merge 轉 broadcast hash join 可「**avoid sorting both join sides and read shuffle files locally to save network traffic**」。broadcast hash join 把小表送到各 executor、與大表的本地分區就地 join，大表**不需按 join key shuffle**→少掉一整個（其實是兩邊各一個）shuffle、stage 數下降。文中「完全不用為 join 做 shuffle」精確（注意是免去 *join 的* shuffle；後續 GROUP BY 的 shuffle 仍在——文中只說「少掉一整個 shuffle」對應 join 那個，未宣稱全程零 shuffle，無誤）。
+出處：https://spark.apache.org/docs/latest/sql-performance-tuning.html （autoBroadcastJoinThreshold「broadcast to all worker nodes when performing a join」；BROADCAST hint；AQE「avoid sorting both join sides」）；定位第 03 章 broadcast join，前瞻正確。
+
+**主張 1.8-e：「每個 stage 的 task 數＝它的 partition 數：讀 card_txn 約 240 個；shuffle 之後的 stage 預設 200 個」**
+✅ 已驗證（自洽）。讀檔 stage task 數 = 讀檔 partition 數 ≈ 240（承 1.2-b，含其 nuance）；shuffle 後 stage = `spark.sql.shuffle.partitions` 預設 200（承 1.6-200）。partition↔task 一對一（前輪）。內部一致。
+出處：承 1.2-b（maxPartitionBytes）、1.6-200（shuffle.partitions）。
+⚠️ 一致性提醒（非錯）：此處「shuffle 後 200」未提 AQE coalesce 會在 runtime 把 200 往下合併——但 §1.6 已明說 AQE 會合併、且 §1.8 是「預設規劃階段」的靜態視角（計畫 plan 的 partition 數 = 200，AQE 是 runtime 調整），兩節並不矛盾。SQL-first 讀者用「預設 200」建立心智模型即可，AQE 細節留 04 章，定位正確。
+
+### §1.9 為什麼 Spark 通常比老 Hive（MapReduce）快
+
+**主張 1.9-a【關鍵事實：MR 落地 HDFS】：「老式 Hive 跑在 MapReduce 上時，每個步驟（map、reduce）把整批中間結果寫回 HDFS、下一步再讀回；多步驟查詢＝串起多個 MR job，每個都落地一次磁碟」**
+✅ 已驗證（方向正確）。MapReduce 模型在 job 之間、以及多 MR step 的查詢中，**依賴 HDFS 存放每一步輸出**：「MapReduce-based query engines like Hive materialize intermediate data to disk… when queries need multiple MapReduce steps… rely on HDFS to store the output of each step.」一條複雜 Hive 查詢被編譯成串接的多個 MR job，每個 job 的輸出落 HDFS 供下一個讀。文中描述與此一致。
+出處：MR 多 step 之間以 HDFS 落地中間結果為 MapReduce 標準行為（Cloudera/業界一致；亦見 Tez 設計動機文件，下條）。
+⚠️ 精確度註記（非錯，常見簡化）：嚴格說 MR **單一 job 內** map→reduce 之間的 shuffle 是寫 **mapper 本地磁碟**（不是 HDFS）；落 **HDFS** 的是「**job 與 job 之間**的最終/中間輸出」。文中「每一個步驟（map、reduce）都會把整批中間結果寫回 HDFS」字面把「map↔reduce 的本地 spill」與「job↔job 的 HDFS 落地」混為一談，略有過度——但 Spark 比 MR 快的**主因確實是「多 job/多 step 之間省去 HDFS 來回」**，文中結論（少掉「寫 HDFS→讀 HDFS」來回）正確。建議（可加強，非必補）：把「每個 map、reduce 步驟都寫 HDFS」收斂為「每個 MapReduce job 之間把結果落地 HDFS」更精準（單 job 內 shuffle 是本地磁碟，這點與 Spark shuffle 落本地磁碟其實同類）。
+
+**主張 1.9-b：「Spark 把整條查詢規劃成一張 DAG，一個 stage 內把多個窄依賴運算在記憶體裡串著做、中間不落地，只有遇到 shuffle 才寫磁碟 → 少掉大量寫/讀 HDFS 來回，是更快主因」**
+✅ 已驗證。stage 內窄依賴 pipeline（不落地）為標準執行模型（《STDG》Ch.15「Pipelining」：narrow transformations 在一個 stage 內 pipeline、不寫中間結果）；只有 shuffle 才落（本機）磁碟（前輪 RDD guide / STDG 逐字）。「比 MR 快主因＝省去步驟間 HDFS 來回」與 1.9-a 出處的「avoid writing intermediate data to HDFS / pipeline consecutive steps」一致。正確。
+出處：《Spark: The Definitive Guide》Ch.15「Pipelining」（前輪）；shuffle 才落磁碟，前輪 RDD guide「Shuffle operations / Performance Impact」。
+
+**主張 1.9-c：「別過度宣稱：Spark 不是永遠較快；對非常單純的大批次掃描差距有限；現在 Hive 多半跑在 Tez 上（不是 MapReduce），Tez 也用 DAG、把差距縮小了不少」（但書）**
+✅ 已驗證——**但書站得住、且對 CDP 7.1.9 尤其正確**。
+  - 「Hive 多半跑在 Tez 上」：Cloudera CDP **Tez 是 Hive 的預設（且唯一）執行引擎，MapReduce 已被取代**——CDP 文件逐字「Tez is the default execution engine for Hive in CDP, as the MapReduce execution engine has been replaced by Tez」「MapReduce is not supported, and if a legacy script… specifies MapReduce… an exception occurs」。本手冊目標環境正是 CDP 7.1.9（Hive 3.1.x on Tez），故「現在 Hive 多半跑在 Tez」對讀者環境**不只成立、是強成立**（根本不能用 MR）。
+  - 「Tez 也用 DAG、縮小差距」：Tez 把計算建成 DAG、**中間結果儘量留記憶體、reducer 輸出可直接 pipe 進下一個 mapper 而不經 HDFS**——「Tez keeps the intermediate results in memory rather than keeping it in disk」「pipe the output of a reducer into the input of a subsequent mapper without any intervening HDFS activity」。正是「用 DAG 縮小與 Spark 的差距」，文中但書精確、無過度宣稱（反而沒過度褒 Spark）。
+  - 「對單純大批次掃描差距有限」：合理常識性陳述（純掃描無多步 shuffle 時，引擎間差距本就小），方向正確；官方未給逐字倍率，標記為合理陳述。定位「哪個引擎適合哪種工作，第 06 章」前瞻正確。
+出處：Cloudera CDP「Hive on Tez introduction」（runtime 7.2.10 / CDP-PvC-Base 7.1.9，Tez 為預設、MR 不支援）https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-hive/topics/hive_query_progress.html 及 https://docs-archive.cloudera.com/runtime/7.2.10/hive-introduction/topics/hive-on-tez.html ；Tez 記憶體 pipeline / 不經 HDFS（Tez 設計動機，業界與 Hortonworks/Cloudera 一致）。
+
+---
+
+# 第三輪三級彙整
+
+## A. 真缺陷（必補）
+- **無。** 本輪所有受查主張的關鍵事實都正確：**maxPartitionBytes 預設 128MB（134217728）✅、shuffle.partitions 預設 200 ✅、stage barrier（shuffle 依賴下下游須等上游所有 map output 寫好）✅、broadcast join 免去 join 的 shuffle ✅、MR 步驟間落地 HDFS ✅、CDP Hive on Tez ✅**。§1.8 stage DAG 拆法對齊 sort-merge join 真實物理計畫（兩側各 Exchange、再對齊 join、再按 segment 聚合）。§1.9 但書（Tez 縮小差距）不僅成立、對 CDP 7.1.9 是強成立。無觀念/機制錯誤、無因果反向、無預設值錯。
+
+## B. 可加強（斟酌，不影響正確性）
+1. **§1.2-b partition 近似的 nuance**：文中「30GB÷128MB≈240」已用「大致/大約」hedge，方向對。可補一句涵蓋兩個真實偏差源：①**很多小檔時實際更多塊**（每開一檔約 +4MB openCostInBytes 成本）；②**gzip 等不可切分檔，再大也只算一塊**（Parquet 可切，故本語境較輕但值得提）。這同時是 §05 小檔問題的伏筆。
+2. **§1.6-aqe coalesce 只往下合併、不往上拆**：文中說 AQE「自動合併過多小 partition」正確，但同段「結果太大→每塊太大狂 spill」這頭 **coalesce 救不了**（只合併小塊、不拆大塊；拆是 skew-join 路徑、且僅限 join）。文中未宣稱 AQE 兩頭都顧，不構成錯誤；可點一句「coalesce 處理『太多小塊』那頭；『結果太大』要靠調高 shuffle.partitions 或 03/04 章的 skew 處理」避免讀者誤會。
+3. **§1.9-a「每個 map、reduce 步驟都寫 HDFS」字面略過度**：嚴格說 MR **單一 job 內** map↔reduce 的 shuffle 寫的是 **mapper 本地磁碟**（與 Spark shuffle 同類），落 **HDFS** 的是 **job↔job 之間**的輸出。Spark 比 MR 快的主因（省 job 間 HDFS 來回）文中結論正確；若要精準可改「每個 MapReduce job 之間把結果落地 HDFS」。
+
+## C. 誤讀 / 不改（嚴謹但讀者語境下成立）
+1. **§1.6-barrier 範圍**：barrier 是「**有 shuffle 依賴的** stage 之間」才有；文中此段全在 shuffle 脈絡下講、討論對象就是 shuffle 切出的 stage，未宣稱「任意兩 stage 都等齊」，語境正確、不改。
+2. **§1.8-a partition pruning 前提**：成立前提是 month 為表的實體分區欄；範例語境（按 month 分區的帳務表）已滿足，不改。
+3. **§1.8-c Sort 算子省略 / dim_customer 設為大表**：sort-merge join 在 Exchange 後有 Sort 算子，圖中併入「JOIN」格、對 SQL-first 讀者合理省略；「dim_customer 是大表」是為了示範兩邊都 shuffle 的最壞情形，緊接的小表 broadcast 段做對照，銜接正確、不改。
+4. **§1.8-e「shuffle 後 200」未提 AQE coalesce**：§1.8 是規劃階段靜態視角（plan 的 partition=200），AQE 是 runtime 調整、§1.6 已交代，兩節不矛盾，不改。
+5. **§1.9-c「單純掃描差距有限」量級**：合理常識性陳述，官方無逐字倍率；方向對、不改。
+
+---
+
+# 第三輪新增查核出處清單（權威）
+- Spark SQL Performance Tuning（**maxPartitionBytes 預設 134217728/128MB、openCostInBytes 預設 4194304/4MB、shuffle.partitions 預設 200、AQE Coalescing Post Shuffle Partitions / coalescePartitions.enabled 預設 true、autoBroadcastJoinThreshold「broadcast to all worker nodes」、BROADCAST hint、AQE broadcast「avoid sorting both join sides」、Optimizing Skew Join**）：https://spark.apache.org/docs/latest/sql-performance-tuning.html
+- Spark Cluster Overview / Tuning（Task 調度成本、Level of Parallelism）：https://spark.apache.org/docs/latest/cluster-overview.html ；https://spark.apache.org/docs/latest/tuning.html
+- Spark DAGScheduler / ShuffleMapStage 執行語意（**stage barrier**：下游須待上游所有 map output 可用）：https://books.japila.pl/apache-spark-internals/scheduler/ShuffleMapStage/
+- Spark SQL SortMergeJoinExec 物理計畫（**§1.8 DAG 拆法**：兩側各 Exchange hashpartitioning + Sort，再 SortMergeJoin）：https://jaceklaskowski.gitbooks.io/mastering-spark-sql/content/spark-sql-SparkPlan-SortMergeJoinExec.html
+- Spark Parquet data source（**partition pruning / Partition Discovery**）：https://spark.apache.org/docs/latest/sql-data-sources-parquet.html
+- ASF JIRA SPARK-29102（**gzip 單檔不可切分**，partition 近似失效情境）：https://issues.apache.org/jira/browse/SPARK-29102
+- Cloudera CDP「Hive on Tez introduction」/「Tracking Hive on Tez query execution」（**CDP 7.1.9 Tez 為 Hive 預設且唯一引擎、MR 不支援**）：https://docs-archive.cloudera.com/runtime/7.2.10/hive-introduction/topics/hive-on-tez.html ；https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-hive/topics/hive_query_progress.html
+
+> 版本對齊備註（第三輪）：3.3.2 專屬 doc URL（sql-performance-tuning / configuration）本次 WebFetch 仍回 404（前兩輪同症，fetcher 端問題）；改引 docs/latest 並以 WebSearch 對 3.3.2 二次確認三個關鍵預設值（maxPartitionBytes=134217728、openCostInBytes=4194304、shuffle.partitions=200）皆與 latest 一致——這些值自 2.x/3.0 起穩定、3.3.x 無變動。AQE coalescePartitions.enabled 預設 true、adaptive.enabled 自 3.2.0 預設 true（前輪已驗）涵蓋 3.3.x。Cloudera 引 runtime 7.2.10 與目標 CDP-PvC-Base 7.1.9 同系、Hive-on-Tez 行為一致（兩版皆 Tez 為預設、MR 不支援）。
