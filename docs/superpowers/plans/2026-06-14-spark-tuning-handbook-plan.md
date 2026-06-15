@@ -127,11 +127,11 @@
 
 ## Progress Tracker
 
-> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01 章已定版，立為**深度與體例範本**（見 spec §12 撰寫基準）。**下一步＝Task 2 寫第 02 章「用 Spark UI 找瓶頸」**，照 spec §12 基準 + §6 來源慣例 + §10 審稿流程進行（在 worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02 章已寫完並經雙 subagent 審＋triage 修（第 02 章待 user 最終 glance）。**下一步＝Task 3 寫第 03 章「SQL 寫法優化」**，照 spec §12 基準 + §6 來源慣例 + §10 審稿流程進行（在 worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
-- [ ] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）
+- [x] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）— 9 節、雙 subagent 審＋triage 修；**修正 §2.2 live UI 入口方向**（CDP 官方建議直連 `:4040`、RM/ApplicationMaster 為連不到 driver 時的備援，原稿寫反）、**升級 AQE `isFinalPlan` 來源**（Databricks AQE 文 + SPARK-33850）、補 EXPLAIN 示意輸出、percentile 白話、HashAggregate/ResourceManager/ApplicationMaster 等術語；待 user 最終 glance
 - [ ] Task 3：`03-sql-tuning.md`（SQL 寫法）
 - [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）
 - [ ] Task 5：`05-storage-efficiency.md`（儲存效率）
