@@ -12,12 +12,11 @@
 
 ---
 
-## Base 與排序（先讀）
+## Base 與排序（已處理）
 
-- 本分支 `feat/inference-population-source` 由 **main（efeebe7，尚未含 audit-fix PR #84）** 切出。
-- PR #84 也改 `build_scoring_dataset` 與 `predict_scores`（model `feature_names` 對齊、snap_dates date-cast、missing-date 檢查）。**本計畫整段替換 `build_scoring_dataset`**，故與 #84 在該函式必然衝突。
-- **排序**：先讓 #84 合併進 main，再 `git -C <worktree> rebase main`（或 rebase 到 `feat/inference-eval-audit-fixes`）。Rebase 衝突時：`build_scoring_dataset` 取本計畫版本；`predict_scores` 保留 #84 的 `feature_names` 版本（本計畫不改 `predict_scores`）。
-- 若先實作再 rebase 亦可；無論先後，`build_scoring_dataset` 以 Task 3 的完整函式為準。
+- PR #84（audit-fix）已 merge 進 main（`f63ebee`）。本分支已在**實作前**乾淨 rebase 到該 main 之上（branch 當時只有 docs commits，無 src 衝突）。
+- 因此 base 已含 audit-fix：`build_scoring_dataset` 為 #84 版（含 snap_dates date-cast、missing-date 檢查、`dropDuplicates`），`predict_scores` 為 #84 的 `feature_names` 版。
+- Task 3 以「整段替換 `build_scoring_dataset`」進行：取代 #84 在該函式引入的 missing-date 檢查與 `dropDuplicates`，改以 `inference_population` 為母體。**`predict_scores` 不改**，維持 #84 的 `feature_names` 版本。
 
 ## 檔案結構（先 map）
 
