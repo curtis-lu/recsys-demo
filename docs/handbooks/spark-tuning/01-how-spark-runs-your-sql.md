@@ -3,6 +3,8 @@
 > **本章前提**：你會寫 SQL。不需要任何分散式系統或資料工程背景。
 >
 > 這一章不教你怎麼調優，而是先建立一個心智模型：你送出一條 SQL 後，Spark 在背後做了什麼、用了多少機器。後面每一章的建議，追根究柢都是在「讓 Spark 少做這個模型裡最貴的那件事，或把有限的機器用在刀口上」。
+>
+> 每節末尾附 📚 **來源**，方便你自行查證；章末「資料來源與精確度說明」另列出哪些地方是刻意簡化、不該當精確值。
 
 ---
 
@@ -34,6 +36,8 @@ flowchart TB
 
 **為什麼這件事重要**：因為運算被切開平行做，所以「資料怎麼切、要不要在機器之間搬動、給你多少台機器」就決定了快慢——這是本手冊反覆出現的主軸。
 
+> 📚 **來源**：driver／executor／task 的角色定義見 [Spark Cluster Overview（Glossary）](https://spark.apache.org/docs/latest/cluster-overview.html)（executor 嚴格是「行程」，同頁）；HDFS 把檔案切塊分存見 [Apache Hadoop HDFS 架構](https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html)。
+
 ---
 
 ## 1.2 你的資料被切成幾塊？partition 從哪來
@@ -55,6 +59,8 @@ flowchart LR
 
 partition 數**不是固定的**：讀進來是一個數，經過 shuffle 後會變成另一個數（§1.6 會講），自己重新分配也會變。但你心裡最好隨時有個「現在大概幾塊、每塊多大」的概念——這是判斷「夠不夠平行、會不會 spill」的基礎。
 
+> 📚 **來源**：讀檔每塊預設 128MB（`spark.sql.files.maxPartitionBytes` = 134217728）見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)；partition↔task 一對一見《Spark: The Definitive Guide》Ch.15。⚠️「30GB÷128MB≈240」是教學一階近似——很多小檔會更多塊（每開一檔約多算 4MB 成本），gzip 等不可切分的檔再大也只算一塊（[SPARK-29102](https://issues.apache.org/jira/browse/SPARK-29102)）。
+
 ---
 
 ## 1.3 Spark 不會馬上算：先攢計畫，再一次跑
@@ -70,6 +76,8 @@ partition 數**不是固定的**：讀進來是一個數，經過 shuffle 後會
 - 算總數 `count`
 
 **為什麼這件事重要**：因為 Spark 看得到「整份計畫」才動手，它就有機會幫你優化——例如把 `WHERE` 條件提早、把用不到的欄位整段砍掉（下一節的優化器在做的事）。你寫 SQL 的方式會影響它能不能優化得動。
+
+> 📚 **來源**：lazy evaluation（transformation 只記不算、action 才觸發）見 [Spark RDD Programming Guide](https://spark.apache.org/docs/latest/rdd-programming-guide.html) 與《Spark: The Definitive Guide》Ch.2。
 
 ---
 
@@ -109,6 +117,8 @@ flowchart LR
 
 > **為什麼要在乎這四層？** 第 02 章你會在 Spark UI 看到 Job 列表，點進去看它由哪些 Stage 組成，再看每個 Stage 的 Task 時間分佈。「慢在哪一層」決定你往哪裡查。
 
+> 📚 **來源**：application／job（每 action 一個）／stage（shuffle 切）／task（一 partition 一個）的定義見 [Spark Cluster Overview（Glossary）](https://spark.apache.org/docs/latest/cluster-overview.html) 與《Spark: The Definitive Guide》Ch.15；Catalyst 把 logical plan 優化成 physical plan（含 predicate pushdown）見 [Databricks：Deep Dive into Catalyst Optimizer](https://www.databricks.com/blog/2015/04/13/deep-dive-into-spark-sqls-catalyst-optimizer.html)（Spark SQL 核心開發者所寫）。⚠️「一 action 一 job」是心智模型；少數情況（如讀 CSV 推斷 schema）一個 action 會被拆成多個 job。
+
 ---
 
 ## 1.5 兩種運算：自己算的（便宜）vs 要交換的（貴）
@@ -139,6 +149,8 @@ flowchart TB
     end
 ```
 
+> 📚 **來源**：窄／寬依賴定義、「寬依賴＝shuffle＝跨叢集重新分配」見《Spark: The Definitive Guide》Ch.2 與 [Spark RDD Programming Guide（Shuffle operations）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)。
+
 ---
 
 ## 1.6 為什麼 shuffle 是頭號敵人
@@ -166,6 +178,8 @@ GROUP BY cust_id;
 **麻煩二：shuffle 會讓大家「等齊」（stage barrier）。** 一個 stage 的所有 task 沒有全部跑完，下一個 stage **一個都不能開始**——因為 shuffle read 必須等所有 shuffle write 都寫好了才能拉。這帶出 **資料傾斜（skew）** 為什麼這麼痛：如果某些 key 的資料量特別大（例如某個超級大戶、或一個 `NULL` key 吃掉一大塊），它們會全擠到少數幾個 task；於是 199 個 task 三秒做完，剩 1 個肥 task 跑了五分鐘，**其他人只能乾等它**，整個 stage 卡在最慢的那一個（第 03 章會教怎麼拆這種熱點）。
 
 **麻煩三：shuffle 之後有幾塊？預設被「重設」成 200。** 一個常見困惑：很多人發現 shuffle 後的 stage 永遠是 200 個 task。原因是——shuffle 輸出的 partition 數**不是延續輸入**，而是被重設成一個固定值 `spark.sql.shuffle.partitions`，**預設 200**。這個數字太大太小都不好：對只有幾 MB 的小結果，200 塊＝ 200 個幾乎空的 task ＋一堆小檔；對好幾百 GB 的大結果，200 塊＝每塊太大、狂 spill。好消息是 Spark 3.3 的 **AQE**（Adaptive Query Execution，查詢途中自動調整執行計畫的機制）**會在執行時自動把過多的小 partition 合併**成大小剛好的塊（第 04 章詳談），所以這個值你多半不必手動煩惱——但你要看得懂「為什麼是 200」。（注意 AQE 主要幫的是「塊太小太多」這頭把它們併大；「塊太大」那頭得靠別的辦法，後面會談。）
+
+> 📚 **來源**：shuffle 成本＝磁碟 I/O＋序列化＋網路 I/O、且 shuffle 一定在磁碟產生中間檔，見 [Spark RDD Programming Guide（Shuffle operations）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)；`spark.sql.shuffle.partitions` 預設 200、AQE 自動合併過小 partition（`coalescePartitions`，預設開）、skew join 處理見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)；stage barrier（reduce 端要等上游所有 map output 寫好才能拉）是 shuffle 機制的直接後果——見上述 RDD guide ＋ [Cluster Overview（stage 互相依賴）](https://spark.apache.org/docs/latest/cluster-overview.html)。⚠️「CPU 很快、磁碟／網路慢得多」方向正確但無官方逐字倍率；shuffle write 的「分桶」是觀念簡化（sort-based shuffle 實作為單一資料檔＋索引檔）；AQE 只「合併過小」、不「拆過大」。
 
 ---
 
@@ -199,6 +213,8 @@ GROUP BY cust_id;
 所以實務上常見的起手建議是**每台 executor 抓大約 4～5 個 core**（在 HDFS 吞吐與管理開銷之間取平衡），記憶體則抓到「讓同時在跑的 task 各自夠用、不要一直 spill」為原則。
 
 > 這裡先有直覺就好。**怎麼在 CDP/YARN 上把這些值實際設下去、怎麼用 dynamic allocation 隨需求伸縮而不佔著資源餓死同事，第 04 章詳談。** 而且你會發現：很多時候與其糾結這些數字，不如先照第 03 章把 SQL 寫法和統計弄對，省下來的更多。
+
+> 📚 **來源**：core ＝同時可跑的 task 數（`spark.executor.cores`／`spark.task.cpus`）、overhead 約佔一成（`spark.executor.memoryOverheadFactor` = 0.10）見 [Spark Configuration](https://spark.apache.org/docs/latest/configuration.html)；廣播變數「每台機器各快取一份、而非隨每個 task 送」見 [Spark RDD Programming Guide（Broadcast Variables）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)；「每 executor 約 5 個 task 才有完整 HDFS 寫吞吐、記憶體過大→GC 長停頓」與 4～5 core 起手值見 [Cloudera CDP：Tuning Resource Allocation](https://docs.cloudera.com/runtime/7.2.10/tuning-spark/topics/spark-admin-tuning-resource-allocation.html)（目標環境同系）。⚠️ 100 core／400 GB 的胖／瘦範例是把總額度乾淨對切的示意（實務每台還要再扣約 10% overhead，無法整包配成 heap）。
 
 ---
 
@@ -245,6 +261,8 @@ flowchart TB
 
 **同一條查詢，換個寫法成本差很多。** 如果 `dim_customer` 其實很小（例如幾 MB 的客群對照表），Spark 可以把它**廣播**到每台 executor，`JOIN` 就地完成、**完全不用為 join 做 shuffle**——於是少掉一整個 shuffle、少切好幾個 stage。這就是第 03 章 broadcast join 的威力，也是「為什麼同一條 SQL，懂的人寫起來快得多」的具體例子。
 
+> 📚 **來源**：partition 欄位的 WHERE → partition pruning（不讀其他月目錄）見 [Spark Parquet（Partition Discovery）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；JOIN／GROUP BY 各一次 shuffle、shuffle 切 stage 見《Spark: The Definitive Guide》Ch.15；小表 broadcast「送到每台 worker、免去 join 的 shuffle」見 [Spark SQL Performance Tuning（autoBroadcastJoinThreshold／AQE）](https://spark.apache.org/docs/latest/sql-performance-tuning.html)。⚠️ DAG 圖把 sort-merge join 的 Sort 算子併入「JOIN」格、為清楚而省略。
+
 ---
 
 ## 1.9 為什麼 Spark 通常比老 Hive（MapReduce）快
@@ -254,6 +272,8 @@ flowchart TB
 Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上一節那條 SQL 的 stage 圖就是），在一個 stage 內把多個窄依賴運算**在記憶體裡串著做、中間不落地**，只有遇到 shuffle 才把中間結果寫到**本機磁碟**（§1.6 的 shuffle write，且是本機磁碟、不是 HDFS）。比起 MapReduce 每個 job 之間都來回一趟 HDFS，Spark 少掉大量磁碟來回，這是它通常更快的主因。
 
 但別過度宣稱：Spark 不是「永遠比較快」。對非常單純的大批次掃描，差距有限；而且**現在的 Hive 多半跑在 Tez 上（不是 MapReduce）**，Tez 也用 DAG、把這個差距縮小了不少。哪個引擎適合哪種工作，第 06 章專門討論。
+
+> 📚 **來源**：「Spark 用 DAG、stage 內窄依賴在記憶體 pipeline、只在 shuffle 落本機磁碟」見《Spark: The Definitive Guide》Ch.15（Pipelining）；「CDP 的 Hive 執行引擎是 Tez、MapReduce 不支援」見 [Cloudera CDP：Hive on Tez（7.1.9）](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/hive-introduction/topics/hive-on-tez.html)。⚠️ 嚴格說 MR 單一 job 內 map↔reduce 的 shuffle 也是寫本機磁碟，落 HDFS 的是 job 與 job 之間（本章已採此較精準說法）。
 
 ---
 
@@ -269,6 +289,27 @@ Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上
 - 怎麼**改 SQL** 來少搬少讀（partition 裁剪、broadcast join、拆 skew）？→ 第 03 章。
 - 哪些 **Spark 設定**值得調？Spark 3.3 的 **AQE**（Adaptive Query Execution）會在查詢途中**自動調整執行計畫**、合併過多的 shuffle partition、處理傾斜；第 04 章會說它已自動做了什麼、§1.7 那些 executor 資源怎麼實際設、還剩什麼值得手動調。
 - 怎麼從**資料儲存**端就讓查詢少讀（檔案格式、partition 設計、別讓小檔爆掉）？→ 第 05 章。
+
+---
+
+## 資料來源與精確度說明
+
+本手冊希望你**不要照單全收**，而是能自行查證、也看得出哪些地方是為了好懂而簡化的。
+
+**版本對齊**：上面各節的 Spark 官方連結指向「最新版」頁面（撰寫時自動工具無法直接驗證版本鎖定的 3.3.2 頁是否可達）。要對齊本手冊版本，把網址裡的版本字串改掉即可，例如 `…/docs/latest/…` → `…/docs/3.3.2/…`。本章引用的關鍵預設值（`maxPartitionBytes` 128MB、`shuffle.partitions` 200、AQE 自 Spark 3.2 起預設開）自 Spark 3.2/3.3 起未變、已對 3.3 核對。
+
+**本章刻意簡化、或屬「方向正確但無官方逐字數字」之處**（自行斟酌、別當精確值）：
+
+1. **§1.2** partition 數 ≈ 資料大小 ÷ 128MB —— 一階近似；實際還受小檔的開檔成本、不可切分檔、平行度下限影響。
+2. **§1.6** 「CPU 很快、寫磁碟／過網路慢得多」—— 量級為常識性陳述，官方未給逐字倍率。
+3. **§1.6** shuffle write 的「分桶」—— 觀念簡化；sort-based shuffle 實作是「單一資料檔＋索引檔」，非一桶一檔。
+4. **§1.7** 胖／瘦 executor 的 80／20 GB —— 把總額度乾淨對切的示意，未扣每台的 overhead。
+5. **§1.8** stage DAG 圖 —— 省略了 sort-merge join 的 Sort 算子。
+6. **「一個 action 一個 job」** —— 心智模型；少數 action（如讀 CSV 推斷 schema）會被拆成多個 job。
+
+**逐條主張的完整查證記錄**（哪句話對到哪份文件的哪句）：見 [`.reviews/01-how-spark-runs-your-sql__reviewer.md`](.reviews/01-how-spark-runs-your-sql__reviewer.md)（三輪技術審查日誌）。
+
+> 引用原則：以 Spark 官方文件、Apache Hadoop 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章（如 Databricks Catalyst 文）、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。
 
 ---
 
