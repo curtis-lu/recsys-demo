@@ -33,38 +33,35 @@ flowchart LR
 
 ## 2.2 怎麼打開 Spark UI（在 CDP 上）
 
-Spark UI 不是另外一個程式，而是每次跑 Spark 時它自己附帶的一個網頁。要打開它，先分清楚你的查詢是**還在跑**還是**已經跑完**——這兩種情況入口不同。
-
-**查詢還在跑（live UI）。** 每一個 Spark application（你的整個工作階段，見 §1.4）活著的時候，它的 driver 會開一個網頁介面，預設在 **port 4040**（同一台若有多個同時跑，會順延到 4041、4042…）。**注意：這個介面只在 application 活著時存在，application 一結束就消失。** 在 CDP 上開它最直接的方式，就是在瀏覽器打開 `http://<driver 主機>:4040`（CDP 官方文件就是這樣指示的）。
-
-如果你不知道 driver 在哪台、或從你的位置連不到那台，還有一條路，會用到兩個 YARN 名詞：
-
-- **ResourceManager**：YARN（§1.1 提過的「叢集資源管家」）的總管。它有一個網頁，**列出叢集上所有正在跑的作業**。
-- **ApplicationMaster**：每個作業在 YARN 裡的「現場代表」，負責張羅那個作業的資源。它在 ResourceManager 清單上會有一個連結，**點下去就把你導到該作業的 Spark UI**。
-
-所以這條路是：打開 ResourceManager 網頁 → 在清單裡認出你的作業（靠你的**使用者名稱、送出時間、作業名稱**）→ 點它的 ApplicationMaster 連結。
-
-**查詢已經跑完（History Server）。** application 結束後 live UI 就沒了，但只要當初有開「事件記錄」（event log，Spark 把 UI 要顯示的資訊寫到硬碟、之後還能讀回來的功能；CDP 預設開著），就能事後重建那個 UI。負責重建的服務叫 **Spark History Server**。在 CDP 上進去的方式：
+Spark UI 不是另外一個程式，而是每次跑 Spark 時它附帶的一個網頁。在 CDP 上，不論你的查詢**還在跑**還是**已經跑完**，都從同一個地方進去：**Spark History Server**。進去的方式：
 
 1. 打開 **Cloudera Manager**（你們平台的管理介面）→ 點 **Spark** 服務 → 點 **History Server Web UI** 連結；
-2. 或直接開 `http://<history-server-host>:18088`；
-3. 進去會看到一張**已完成 application 的清單**，點你那次查詢的 **App ID** 就進到它的 Spark UI。
+2. 或直接開 `http://<history-server-host>:18088`。
+
+進去會看到一張 application 清單，分成兩種：
+
+- **completed（已完成）**：已經跑完的查詢。
+- **incomplete（未完成）**：**還在跑的查詢也在這裡**——所以你不必等它跑完，就能即時點進去看它現在卡在哪。（嚴格說，incomplete 是「還沒把自己標記成完成」的；所以萬一某個查詢中途崩潰、沒正常收尾，也會留在這個清單。）
+
+點你那次查詢的 **App ID** 就進到它的 Spark UI。清單上要認出哪個是你的，靠你的**使用者名稱、送出時間、作業名稱**。
+
+有兩個前提、一個延遲要知道：
+
+- History Server 能事後（或執行中）重建這個 UI，是因為 Spark 邊跑邊把畫面要顯示的資訊寫成「事件記錄」（event log，寫到硬碟、之後還讀得到；**CDP 預設開著**）。
+- History Server 是**每隔一段時間**（預設約 **10 秒**，由 `spark.history.fs.update.interval` 控制）才去掃一次這些記錄、更新畫面。所以看「還在跑」的查詢時，畫面會比真實進度**慢個幾秒到十幾秒**、資訊也隨它跑而逐步長出來——這是正常的，重整一下即可。
 
 ```mermaid
 flowchart TB
-    subgraph LIVE["查詢還在跑"]
-        L1["首選：直接開 http://driver主機:4040"]
-        L2["或：YARN ResourceManager 網頁<br/>→ 點你作業的 ApplicationMaster"]
-        L2 -. "連不到 driver 那台時" .-> L1
-    end
-    subgraph DONE["查詢已跑完（live UI 已消失）"]
-        D1["event log 已寫到硬碟"] --> D2["Spark History Server（:18088）<br/>Cloudera Manager → 點 App ID"]
-    end
+    CM["Cloudera Manager → Spark<br/>→ History Server Web UI（:18088）"] --> LIST["application 清單"]
+    LIST --> C["completed（已完成）"]
+    LIST --> I["incomplete（還在跑、或崩潰沒收尾）"]
+    C --> APPID["點 App ID<br/>→ 進該查詢的 Spark UI"]
+    I --> APPID
 ```
 
-> **對營運的意義**：排程作業（第 08 章）通常半夜自己跑、跑完就結束，你早上來看時 live UI 早沒了——所以**會用 History Server 回頭翻歷史，是營運排程的基本功**。它還讓你能比較「同一支作業這週和上週各跑多久、搬了多少資料」，及早發現作業隨資料長大而退化（第 08 章監控會再談）。
+> **對營運的意義**：排程作業（第 08 章）通常半夜自己跑，你早上來看時它早結束了——History Server 把跑過的作業都留著，讓你回頭翻。它還讓你比較「同一支作業這週和上週各跑多久、搬了多少資料」，及早發現作業隨資料長大而退化（第 08 章監控會再談）。
 
-> 📚 **來源**：live UI 預設 port 4040、多個 context 順延 4041/4042、「資訊預設只在 application 存活期間可得」見 [Spark Monitoring](https://spark.apache.org/docs/latest/monitoring.html)；事後用 History Server 重建 UI 需 `spark.eventLog.enabled`、同頁。CDP 上**執行中**的 application 直接開 `http://spark_driver_host:4040`，見 [Cloudera CDP 7.1.9：Accessing the Web UI of a Running Spark Application](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/monitoring-and-diagnostics/topics/cm-accessing-the-web-ui-of-a-running-spark-application.html)；**已完成**的 application 經 Cloudera Manager → Spark → History Server Web UI（或 `:18088`）、點 App ID，見 [Accessing the Web UI of a Completed Spark Application](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/monitoring-and-diagnostics/topics/cm-accessing-the-web-ui-of-a-completed-spark-application.html)。ResourceManager／ApplicationMaster 為 YARN 元件，見 [Apache Hadoop YARN 架構](https://hadoop.apache.org/docs/stable/hadoop-yarn/hadoop-yarn-site/YARN.html)。
+> 📚 **來源**：History Server「列出 incomplete 與 completed 的 application」、incomplete 只間歇更新（間隔即 `spark.history.fs.update.interval`，預設 `10s`）、「未把自己標記完成的 application（含崩潰者）會列為 incomplete」、以及需 `spark.eventLog.enabled`，見 [Spark Monitoring](https://spark.apache.org/docs/latest/monitoring.html)。CDP 上經 Cloudera Manager → Spark → History Server Web UI（或 `:18088`）、點 App ID 看 application，見 [Cloudera CDP 7.1.9：Accessing the Web UI of a Completed Spark Application](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/monitoring-and-diagnostics/topics/cm-accessing-the-web-ui-of-a-completed-spark-application.html)。
 
 ---
 
@@ -185,6 +182,16 @@ flowchart TB
 
 （上圖左邊 Max 和 Median 接近＝健康；右邊那根 5 分鐘的 task 把整個 stage 卡住＝skew。在 Summary Metrics 表上，就表現為 `Duration` 的 Max 遠大於 Median。）
 
+一個出問題的 stage，它的 Summary Metrics 表大概長這樣（**數字為示意**，幫你想像實際畫面）：
+
+| 指標 | Min | 25th pct | Median | 75th pct | Max |
+|---|---|---|---|---|---|
+| **Duration**（task 花的時間） | 8 s | 11 s | 12 s | 14 s | **9.2 min** |
+| **Shuffle Read Size**（讀進來多少） | 240 MB | 250 MB | 260 MB | 290 MB | **6.1 GB** |
+| **Shuffle spill (disk)** | 0 | 0 | 0 | 0 | **8.3 GB** |
+
+這張表一眼看出兩件事：① `Duration` 的 Max（9.2 分）和 `Shuffle Read` 的 Max（6.1 GB）都**遠大於** Median（12 秒、260 MB）——代表絕大多數 task 十幾秒、讀 260 MB 就做完，卻有個 task 讀了 6 GB、跑了 9 分多 → **skew**；② 那個肥 task 還 `spill` 了 8.3 GB 到磁碟 → 記憶體被它撐爆。結論：少數熱點 key 造成傾斜、連帶吃光記憶體。這就是你要修的目標（第 03 章）。
+
 > 📚 **來源**：Stages 頁籤的「Summary Metrics for Completed Tasks」以分位數呈現各 task 指標分佈；`Shuffle Read Size / Records`＝「本地與遠端讀入的 shuffle 總位元組」、`Shuffle spill (memory)`＝「shuffled data 在記憶體反序列化形式的大小」、`Shuffle spill (disk)`＝「資料在磁碟序列化形式的大小」，引用字句見 [Spark Web UI（Stage detail）](https://spark.apache.org/docs/latest/web-ui.html)。skew＝少數 task 因 key 分佈不均而資料量/時間遠大於其他、stage 卡在最慢 task，見 §1.6 與《Spark: The Definitive Guide》Ch.15。⚠️ 分位數的確切列標（Min/25th/Median/75th/Max）工具未能逐字擷取，屬 Spark UI 標準呈現（見章末）。
 
 ---
@@ -215,9 +222,37 @@ flowchart TB
 
 ---
 
-## 2.8 速查：症狀 → 看哪裡 → 翻到哪章
+## 2.8 完整走一遍：一條慢查詢的驗屍
 
-把上一節那四種症狀，拆細成一張隨手可查的表（同一種症狀可能有不只一個入手點，所以列數比四多；第 09 章場景索引、第 10 章速查會再彙整）：
+把前面的工具串成一次真實的診斷。情境：你有一條算「每個客群本月刷卡總額」的查詢（就是 §2.3 那條），平常幾分鐘，今天**跑了 20 分鐘還沒完**。你不亂調參數，照步驟驗屍：
+
+**第 1 步——先 `EXPLAIN FORMATTED`（不花錢、先看計畫）。** 你注意到兩件事：
+
+- 接 `dim_customer` 那裡是 `SortMergeJoin`，**不是**你以為的 `BroadcastHashJoin`——小表沒被廣播（§2.3 教的關鍵字）。
+- `Scan card_txn` 那行**有** `PartitionFilters: [month = '2026-05']`，月份有裁到，讀的量沒被放大。
+
+→ 初步懷疑：這個 join 本來可以免 shuffle，現在卻白白多做了一次。
+
+**第 2 步——讓查詢跑起來，從 History Server 的 incomplete 清單點進去，看 SQL 頁籤。** 順著 DAG 看數字：
+
+- 某個 `Exchange` 的 `shuffle bytes written total` 是 **12.4 GB**——這是最貴的一步。
+- `SortMergeJoin` 的 `number of output rows` 跟輸入差不多、沒暴增（§2.5）→ 排除「爆量 join」。
+
+→ 確認主要成本在那個 shuffle；記住它落在哪個 stage。
+
+**第 3 步——跳到那個 stage 的 Stages 頁籤，看 Summary Metrics（就是 §2.6 那張示意表）。** 看到 `Duration` Max 9.2 分 ≫ Median 12 秒、`Shuffle spill (disk)` 8.3 GB。
+
+→ 結論：這條查詢同時中了兩刀——**該 broadcast 卻走了 `SortMergeJoin`**（白白多一次 shuffle），而且 join key 上有**熱點造成 skew**、把那個肥 task 撐到 spill。
+
+**第 4 步——對症下藥，翻對應章節。** 兩個問題各有解：小表沒廣播 → 第 03 章 broadcast join／第 04 章調 broadcast 門檻；skew → 第 03 章 salting／AQE skew join。**改完再跑一次、回頭看同一張 Summary Metrics 表**：確認 Max 和 Median 拉近了、spill 歸零——用同一套工具驗證你的修改真的有效，診斷才算閉環。
+
+> 整個流程沒有新東西，全是 §2.3–§2.7 的零件組起來：`EXPLAIN` 看計畫 → SQL 頁籤找最貴的步驟 → Stages 頁籤看 task 分佈與 spill → 認症狀 → 翻章調 → 用同樣的數字驗證。（本節數字皆為示意，幫你想像畫面；實際以你環境跑出來為準。）
+
+---
+
+## 2.9 速查：症狀 → 看哪裡 → 翻到哪章
+
+把 §2.7 的四種症狀，拆細成一張隨手可查的表（同一種症狀可能有不只一個入手點，所以列數比四多；第 09 章場景索引、第 10 章速查會再彙整）：
 
 | 症狀 | 在哪看、看什麼 | 多半的解法在 |
 |---|---|---|
@@ -233,7 +268,7 @@ flowchart TB
 
 ---
 
-## 2.9 一句話帶走：先讓資料告訴你瓶頸在哪
+## 2.10 一句話帶走：先讓資料告訴你瓶頸在哪
 
 把這章收成一條原則：
 
@@ -250,15 +285,16 @@ flowchart TB
 
 ## 資料來源與精確度說明
 
-本手冊希望你**不要照單全收**，而是能自行查證、也看得出哪些地方是為了好懂而簡化、或工具沒能逐字確認的。
 
 **版本對齊**：本章 Spark 官方連結指向「最新版」頁面（撰寫時自動工具無法直接驗證版本鎖定的 3.3.2 頁是否可達）。要對齊本手冊版本，把網址裡的版本字串改掉即可：`…/docs/latest/…` → `…/docs/3.3.2/…`。本章引用的頁籤組成、metric 名稱、`EXPLAIN` 模式自 Spark 3.x 起穩定，已對 3.3 行為核對。
 
 **本章刻意簡化、或屬「行為已知但工具未能逐字查證」之處**（自行斟酌，必要時以你環境實跑為準）：
 
 1. **§2.2 History Server port**：本章用 CDP 的 **18088**（Cloudera 文件）；上游 Apache Spark 文件的 History Server 預設是 **18080**。兩者各自情境下都對，以你平台實際設定為準。
-2. **§2.3 `EXPLAIN FORMATTED` 輸出範例**：本章那段 plan 是**簡化示意**，只為標出你該找的關鍵字（`Exchange`／`BroadcastHashJoin`／`PartitionFilters` 等）；實際排版、欄位、縮排以你環境跑出來為準。
-3. **§2.6 Summary Metrics 的分位數列標**（Min / 25th percentile / Median / 75th percentile / Max）：屬 Spark UI Stage 頁的標準呈現，但查證工具未能逐字擷取這幾個列標字樣；`Shuffle spill (memory/disk)`、`Shuffle Read Size / Records` 的定義字句則已逐字查證。
+2. **§2.2 incomplete 清單**：「History Server 同時列出 incomplete 與 completed、incomplete 含還在跑或崩潰未收尾者、間歇更新（預設 10s）、需 `spark.eventLog.enabled`」皆已逐字查證自 Spark Monitoring 文件；但 UI 上**切換／顯示 incomplete 的確切控制項字樣**官方文件未逐字載明，依你環境畫面為準。
+3. **§2.3 `EXPLAIN FORMATTED` 輸出範例**：本章那段 plan 是**簡化示意**，只為標出你該找的關鍵字（`Exchange`／`BroadcastHashJoin`／`PartitionFilters` 等）；實際排版、欄位、縮排以你環境跑出來為準。
+4. **§2.6／§2.8 的 Summary Metrics 表與驗屍數字**：皆為**示意，非真實截圖或輸出**（為幫你想像畫面與診斷流程），數字屬虛構、實際以你環境為準。轉成 HTML 時，這些示意面板可替換成你公司環境的**真實 Spark UI 截圖**，會更直觀。
+5. **§2.6 Summary Metrics 的分位數列標**（Min / 25th percentile / Median / 75th percentile / Max）：屬 Spark UI Stage 頁的標準呈現，但查證工具未能逐字擷取這幾個列標字樣；`Shuffle spill (memory/disk)`、`Shuffle Read Size / Records` 的定義字句則已逐字查證。
 
 > 引用原則：以 Spark 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。逐條查證記錄見 [`.reviews/02-diagnose-with-spark-ui__reviewer.md`](.reviews/02-diagnose-with-spark-ui__reviewer.md)。
 

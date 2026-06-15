@@ -131,7 +131,7 @@
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
-- [x] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）— 9 節、雙 subagent 審＋triage 修；**修正 §2.2 live UI 入口方向**（CDP 官方建議直連 `:4040`、RM/ApplicationMaster 為連不到 driver 時的備援，原稿寫反）、**升級 AQE `isFinalPlan` 來源**（Databricks AQE 文 + SPARK-33850）、補 EXPLAIN 示意輸出、percentile 白話、HashAggregate/ResourceManager/ApplicationMaster 等術語；待 user 最終 glance
+- [x] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）— 10 節、雙 subagent 審＋triage 修＋user 回饋修；**§2.2 改為「一律從 History Server 進」（completed/incomplete 清單）**（user 公司經驗：還在跑的 app 在 incomplete 查得到，已對 monitoring.html 逐字查證；同時解掉原 live UI 入口方向錯誤＋RM/AM 術語沒解釋）、升級 AQE `isFinalPlan` 來源（Databricks AQE 文＋SPARK-33850）、**加 mock Summary Metrics 面板＋§2.8「一條慢查詢的驗屍」貫穿範例**、EXPLAIN 示意輸出、percentile 白話；待 user 再 glance
 - [ ] Task 3：`03-sql-tuning.md`（SQL 寫法）
 - [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）
 - [ ] Task 5：`05-storage-efficiency.md`（儲存效率）
@@ -157,6 +157,7 @@
 - 2026-06-14（審第 01 章後）：**整本提高深度**。讀者雖是分析師/科學家，但要假設他們未來會**自己營運資料排程、經營多人共用的資料產品（如特徵庫/feature store）**，故每章在易懂的基礎上要帶到進階與營運取捨，不止於 ad-hoc。具體點名要有：① application / job / stage / task 的層級關係（第 01 章）；② executor 的 core 數 / instance 台數 / memory size 之間的取捨（第 01 章建立直覺、第 04 章給操作與多租戶/dynamic allocation 細節）。
 - 2026-06-15：**新增第三個審稿角色 C（完整度與架構審查員）**，跨整本看邏輯架構/章節順序/深度，確保「Spark 新手讀完能長期穩定營運排程與特徵庫」這個終極能力目標達成。里程碑跑（outline 定/大改、每寫完數章、最終 pass），不逐章。spec §10.4、§11 已更新；模板見下方「審稿 subagent prompt 模板」。round-1 在「只有 outline + 第 01 章」時即跑（早期抓結構缺口）。
 - 2026-06-15：**每章必附資料來源**（user 要求）。每個重要概念段落末尾加「📚 來源」footer（代表性出處＋連結）、章末加「資料來源與精確度說明」（列簡化／無逐字出處處＋版本對齊）。目的＝讓讀者自行驗證、看得出哪裡不完全精確。來源限官方/核心開發者/指定書籍，不引未認證部落格；連結用可達頁（工具對 3.3.x 404→用 latest+註明改版本號）。01 章已套用為範本。spec §6 已加此慣例。
+- 2026-06-16（第 02 章 user 回饋）：(1) **live UI / port 4040 不提**——user 公司經驗：還在跑的 application 一樣在 History Server 的 **incomplete** 清單查得到，故 §2.2 改成「不分跑中/跑完，一律從 History Server 進，清單分 completed/incomplete」（已對 `monitoring.html` 逐字查證：列 incomplete＋completed、incomplete 含還在跑或崩潰未收尾者、間歇更新預設 10s、需 `spark.eventLog.enabled`）。附帶好處：解掉前一版 reviewer 抓到的「live UI 入口方向寫反」＋ reader 抓到的「ResourceManager/ApplicationMaster 沒給人話」。(2) **要實際範例對照**（純文字難想像）——加 mock Summary Metrics 面板（示意數字）＋ §2.8「一條慢查詢的驗屍」貫穿走查；數字皆示意，章末已標、轉 HTML 時可換公司環境真實截圖。後續各章比照：能上 mock 面板/貫穿範例就上。
 - 2026-06-15：**採納 architecture round-1 建議，新增營運專章** `08-operating-data-pipelines.md`（手冊 9→10 章）。原因：營運線（終極目標）原散落 08 場景條列、資料品質驗證零覆蓋、特徵洩漏只一句。新章用 01 深度教冪等/回填/排程相依/資料品質驗證/時間點正確性/監控/表維護；原場景章變 09（回歸純索引）、速查變 10。優化線 01–07 不動。spec/index/plan 已同步重編號。
 
 ---
