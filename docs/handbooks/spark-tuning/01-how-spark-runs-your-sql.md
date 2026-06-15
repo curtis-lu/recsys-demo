@@ -294,8 +294,6 @@ Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上
 
 ## 資料來源與精確度說明
 
-本手冊希望你**不要照單全收**，而是能自行查證、也看得出哪些地方是為了好懂而簡化的。
-
 **版本對齊**：上面各節的 Spark 官方連結指向「最新版」頁面（撰寫時自動工具無法直接驗證版本鎖定的 3.3.2 頁是否可達）。要對齊本手冊版本，把網址裡的版本字串改掉即可，例如 `…/docs/latest/…` → `…/docs/3.3.2/…`。本章引用的關鍵預設值（`maxPartitionBytes` 128MB、`shuffle.partitions` 200、AQE 自 Spark 3.2 起預設開）自 Spark 3.2/3.3 起未變、已對 3.3 核對。
 
 **本章刻意簡化、或屬「方向正確但無官方逐字數字」之處**（自行斟酌、別當精確值）：
@@ -307,7 +305,6 @@ Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上
 5. **§1.8** stage DAG 圖 —— 省略了 sort-merge join 的 Sort 算子。
 6. **「一個 action 一個 job」** —— 心智模型；少數 action（如讀 CSV 推斷 schema）會被拆成多個 job。
 
-**逐條主張的完整查證記錄**（哪句話對到哪份文件的哪句）：見 [`.reviews/01-how-spark-runs-your-sql__reviewer.md`](.reviews/01-how-spark-runs-your-sql__reviewer.md)（三輪技術審查日誌）。
 
 > 引用原則：以 Spark 官方文件、Apache Hadoop 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章（如 Databricks Catalyst 文）、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。
 

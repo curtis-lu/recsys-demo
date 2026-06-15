@@ -127,7 +127,7 @@
 
 ## Progress Tracker
 
-> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02 章已寫完並經雙 subagent 審＋triage 修（第 02 章待 user 最終 glance）。**下一步＝Task 3 寫第 03 章「SQL 寫法優化」**，照 spec §12 基準 + §6 來源慣例 + §10 審稿流程進行（在 worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02 章已寫完、雙 subagent 審＋triage 修，且第 02 章已納入 user 回饋（§2.2 改走 History Server 的 completed/incomplete 清單、加 mock Summary Metrics 面板＋§2.8 慢查詢驗屍貫穿範例）。**下一步＝Task 3 寫第 03 章「SQL 寫法優化」**，照 spec §12 基準（含第 02 章兩個教訓：『能上 mock 面板／貫穿範例就上』『環境細節以 user 公司經驗為準』，見 Direction Log 2026-06-16）＋ §6 來源慣例 ＋ §10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
