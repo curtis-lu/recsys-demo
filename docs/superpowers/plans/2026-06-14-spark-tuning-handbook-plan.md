@@ -127,6 +127,8 @@
 
 ## Progress Tracker
 
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01 章已定版，立為**深度與體例範本**（見 spec §12 撰寫基準）。**下一步＝Task 2 寫第 02 章「用 Spark UI 找瓶頸」**，照 spec §12 基準 + §6 來源慣例 + §10 審稿流程進行（在 worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
+
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
 - [ ] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）
