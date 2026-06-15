@@ -26,6 +26,12 @@ sample_pool:
   table: sample_pool
   read_only: true
 
+inference_population:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: inference_population
+  read_only: true
+
 # --- Dataset base layer（依 base_dataset_version 區分）---
 # 每個邏輯 artifact 一張 Hive table；base_dataset_version 是外層 partition column，
 # snap_date 為內層的 dynamic partition。

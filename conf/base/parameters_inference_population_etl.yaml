@@ -1,0 +1,23 @@
+# Inference 推論母體 ETL pipeline 配置
+# 上游依賴 feature_etl 產出的 feature_concat。對應 training 端的 sample_pool，
+# 但 grain 為 (snap_date, cust_id) 且時間切點為 inference 當期 snap_date。
+
+inference_population_etl:
+  dry_run: false   # 與 sample_pool 一致：local 也實寫表
+  variables:
+    target_db: "ml_recsys"
+
+  source_checks: {}
+
+  tables:
+    - name: inference_population
+      sql_file: inference_population/inference_population.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, cust_id]
+      quality_checks:
+        max_duplicate_key_ratio: 0.0
+
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log
