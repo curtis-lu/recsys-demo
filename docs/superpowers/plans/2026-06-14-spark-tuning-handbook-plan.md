@@ -96,23 +96,52 @@
 日誌檔內：逐段/逐節卡關點 + 類型（缺脈絡/太抽象＝只有形容詞沒數字例子/術語沒先定義/概念圖不自明/步驟不可操作/鷹架洩漏）+「我會這樣想、我會問什麼」；全章主旨是否一致、範疇有無失衡；結尾按 真缺陷/可加強/誤讀 三級彙整。回傳一段摘要。
 ```
 
+**Architecture / Completeness（角色 C，subagent_type: general-purpose；里程碑跑、非逐章）**
+```
+你是《Spark 優化參考手冊》的完整度與架構審查員。所有輸出用繁體中文。這是跨整本手冊的審查，不是單章。
+
+[背景]
+- 手冊讀者起點是 SQL-first、無 DE 背景的分析師/科學家，但**終極學習目標**是：讓一個 Spark 新手讀完整本後，具備「長期穩定營運資料排程與特徵庫(feature store)」的能力——不只 ad-hoc，還要懂資源配置與多租戶、可靠/可重跑、schema 演進與維護、時間點正確性等營運課題。
+- 手冊骨架(index + 9 章)與各章大綱見 spec：/Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook/docs/superpowers/specs/2026-06-14-spark-tuning-handbook-design.md（讀 §1 目標/讀者/深度、§5 各章大綱、§11 成功標準）。
+- 哪些章「已寫成 .md」、哪些「還只有大綱」，看 plan 的 Progress Tracker：/Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook/docs/superpowers/plans/2026-06-14-spark-tuning-handbook-plan.md
+
+[目標]
+從整本的角度檢查：邏輯架構是否清楚、章節順序是否合理、深度是否足以達成終極能力目標。找出缺漏主題、順序/依賴問題、深度不足之處。
+
+[素材]
+- 已寫章節：/Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook/docs/handbooks/spark-tuning/*.md（實際讀內容）
+- 尚未寫的章節：只能評 spec §5 的大綱
+- spec 全文、plan 的 Progress Tracker（路徑如上）
+
+[限制]
+- 不查單點技術對錯(那是 reviewer A)、不挑逐句易讀性(那是 reader B)——只看整體架構、順序、覆蓋度、深度。
+- 不改稿。
+- 明確區分「已寫章節的實況」與「尚未寫、只能評 outline」。
+- 把發現即時 append 到 /Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook/docs/handbooks/spark-tuning/.reviews/_architecture__round-{N}.md（{N}=本輪輪次）。
+
+[完成的定義]
+日誌檔內：(a) 能力地圖——把「長期營運排程/特徵庫」需要的能力逐項列出、對應到「由哪章哪節支撐」，明確標出無人覆蓋的缺口；(b) 章節順序/依賴是否合理(有沒有前面用到後面才教的概念)；(c) 各章深度是否足以支撐營運；(d) 具體補強建議(新增章/節、調順序、加深何處)；按 真缺陷(必補)/可加強/誤讀 三級彙整。回傳一段摘要(最重要的結構缺口與建議)。
+```
+
 ---
 
 ## Progress Tracker
 
-- [ ] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
-- [ ] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）
+- [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
+- [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 已寫＋兩輪雙 subagent 審＋修（含 application/job/stage/task 層級、executor 取捨）；待 user 最終 glance
 - [ ] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）
 - [ ] Task 3：`03-sql-tuning.md`（SQL 寫法）
 - [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）
 - [ ] Task 5：`05-storage-efficiency.md`（儲存效率）
 - [ ] Task 6：`06-engine-selection.md`（引擎選用）
 - [ ] Task 7：`07-pyspark-dataframe-api.md`（DataFrame API 進階）
-- [ ] Task 8：`08-scenario-playbooks.md`（場景對應）
-- [ ] Task 9：`09-cheatsheet-and-glossary.md`（速查與名詞表）
-- [ ] Task 10：完稿 `index.md`（導覽/連結/如何使用）
-- [ ] Task 11：轉 HTML（內嵌 mermaid.js、離線檢查、回頂鈕、跨章導覽）
-- [ ] Task 12：全書 reader subagent 通讀 + 修正
+- [ ] Task 8：`08-operating-data-pipelines.md`（**營運專章**：冪等/回填/排程相依/資料品質/時間點正確性/監控/表維護）← architecture C round-1 補
+- [ ] Task 9：`09-scenario-playbooks.md`（場景對應＝索引）
+- [ ] Task 10：`10-cheatsheet-and-glossary.md`（速查與名詞表）
+- [ ] Task 11：完稿 `index.md`（導覽/連結/如何使用/兩條學習路線）
+- [ ] Task 12：轉 HTML（內嵌 mermaid.js、離線檢查、回頂鈕、跨章導覽）
+- [ ] Task 13：全書最終 pass（reader 通讀 + architecture C 架構審查）+ 修正
+- 架構審查(C)：round-1 已跑（outline+01，產出營運專章決策）；里程碑續跑（每寫完數章、最終 pass）
 
 ---
 
@@ -123,6 +152,9 @@
 - 2026-06-14：每章需派 reviewer + reader 兩個 subagent 審，按「目標/背景/素材/限制/DoD」五項給 prompt，並即時寫日誌可同步審核。
 - 2026-06-14：離線 HTML 預設內嵌 mermaid.js（單一來源）；要「連 JS 都不依賴」才切 SVG 預渲染。
 - 2026-06-14：純文件任務改用 worktree（避免與使用者其他 session 的 code 改動互相干擾）；給使用者的路徑一律帶 `.worktrees/spark-handbook/` 前綴。
+- 2026-06-14（審第 01 章後）：**整本提高深度**。讀者雖是分析師/科學家，但要假設他們未來會**自己營運資料排程、經營多人共用的資料產品（如特徵庫/feature store）**，故每章在易懂的基礎上要帶到進階與營運取捨，不止於 ad-hoc。具體點名要有：① application / job / stage / task 的層級關係（第 01 章）；② executor 的 core 數 / instance 台數 / memory size 之間的取捨（第 01 章建立直覺、第 04 章給操作與多租戶/dynamic allocation 細節）。
+- 2026-06-15：**新增第三個審稿角色 C（完整度與架構審查員）**，跨整本看邏輯架構/章節順序/深度，確保「Spark 新手讀完能長期穩定營運排程與特徵庫」這個終極能力目標達成。里程碑跑（outline 定/大改、每寫完數章、最終 pass），不逐章。spec §10.4、§11 已更新；模板見下方「審稿 subagent prompt 模板」。round-1 在「只有 outline + 第 01 章」時即跑（早期抓結構缺口）。
+- 2026-06-15：**採納 architecture round-1 建議，新增營運專章** `08-operating-data-pipelines.md`（手冊 9→10 章）。原因：營運線（終極目標）原散落 08 場景條列、資料品質驗證零覆蓋、特徵洩漏只一句。新章用 01 深度教冪等/回填/排程相依/資料品質驗證/時間點正確性/監控/表維護；原場景章變 09（回歸純索引）、速查變 10。優化線 01–07 不動。spec/index/plan 已同步重編號。
 
 ---
 
@@ -161,15 +193,17 @@ git checkout -- graphify-out/GRAPH_REPORT.md
 **內容大綱：**
 - 從一條熟悉的 SQL 出發，講它在 Spark 裡發生什麼。
 - cluster = driver + executors（在 YARN 上）；資料切成 partitions 平行處理。
-- query 生命週期：SQL → logical plan → Catalyst 優化 → physical plan → jobs → stages → tasks。
+- **執行層級：application → job（每 action 一個）→ stage（每 shuffle 切一刀）→ task（一 partition 一個）**；對應第 02 章 Spark UI 頁籤。
+- lazy evaluation：transformation 累積、action 才觸發。
+- query 生命週期：SQL → logical plan → Catalyst 優化 → physical plan → stages → tasks。
+- **executor 的形狀與平行度取捨**：core 數＝同時能跑幾個 task；總平行度＝executors×cores；同 executor 的並行 task 共用其記憶體（core 多→各 task 記憶體少→spill）；fat vs thin executor 工作範例（給定 YARN 額度怎麼切）；instance 台數與多租戶。操作細節 forward 第 04 章。
 - 窄依賴（map-like，便宜，不搬資料）vs 寬依賴 = shuffle（貴，跨網路重分佈）。
 - shuffle 為什麼是頭號敵人（用 3000 萬筆帳務 `GROUP BY` 客戶舉例）。
-- lazy evaluation：transformation 累積、action 才觸發。
 - 主軸預告：多數優化＝減少/減輕 shuffle 與掃描量。
 
-**概念圖（Mermaid）：** ① cluster（driver + N executors on YARN）；② SQL→logical→physical→jobs→stages→tasks 流程；③ narrow vs wide（shuffle）對照。
+**概念圖（Mermaid）：** ① cluster（driver + N executors on YARN）；② application→job→stage→task 層級巢狀；③ SQL→logical→physical→stage→task 流程；④ narrow vs wide（shuffle）對照；⑤（可選）fat vs thin executor 切法對照。
 
-**須查證重點（reviewer 會查）：** 窄/寬依賴定義；shuffle 對應 physical plan 的 `Exchange`；transformation vs action 的 lazy 機制；stage 邊界由 shuffle 切。出處：Spark 3.3 官方文件 + Definitive Guide/Learning Spark。
+**須查證重點（reviewer 會查）：** application/job/stage/task 層級語意（job 由 action 觸發、stage 由 shuffle 切、task↔partition 一對一）；窄/寬依賴定義；shuffle 對應 physical plan 的 `Exchange`；lazy（transformation vs action）；**一個 core 同時跑一個 task、總平行度＝executors×cores**；`spark.executor.memoryOverhead` 預設；「每 executor ~4–5 core」這類 heuristic 需找權威來源（High Performance Spark / Cloudera 官方文件，非部落格），找不到就改用推理＋hedge。出處：Spark 3.3 官方文件 + Definitive Guide / High Performance Spark。
 
 - [ ] Step A：查證並記錄關鍵事實
 - [ ] Step B：寫 `01-how-spark-runs-your-sql.md` 草稿（大綱 + 3 張 Mermaid 圖 + 章末導覽）
@@ -310,68 +344,93 @@ git checkout -- graphify-out/GRAPH_REPORT.md
 
 ---
 
-## Task 8：第 08 章 — 場景對應
+## Task 8：第 08 章 — 營運資料排程與資料產品（營運專章）
 
-**File:** Create `docs/handbooks/spark-tuning/08-scenario-playbooks.md`
-**前置章：** 01–07
+**File:** Create `docs/handbooks/spark-tuning/08-operating-data-pipelines.md`
+**前置章：** 01, 03, 05（尤其 05 儲存）
 
 **內容大綱：**
-- 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)`。
-- 場景 2 排程產表：可重跑、控輸出檔大小、partition 設計、`ANALYZE`、用 Spark/Hive、用 Spark UI 抓退化。
-- 場景 3 特徵運算：寬表多 join、多 window、易 skew；broadcast 維度表、預聚合、控 shuffle、cache 中間結果取捨（SQL 或第 07 章的 DataFrame API）。
-- 每場景：典型陷阱 → 對策 → 引用前面哪章。
+- 定位：把產出的表/特徵當成**要長期營運的服務**，正確/可靠/可維護優先於快。
+- 冪等與可重跑：`INSERT OVERWRITE ... PARTITION` + dynamic partition overwrite（覆寫單一 partition），對照 append 重跑造成重複。
+- 回填（backfill）：按 partition 分批、控資源、可中斷續跑。
+- 排程相依與資料就緒：上游沒齊不跑下游；partition 存在/列數 gate。
+- 資料品質驗證（補 C12，§11 明文要求）：列數量級、null 比例、key 唯一性、值域、對昨日漂移；不過擋下游、發警報。
+- 時間點正確性 / 特徵洩漏（C11，特徵庫命門）：只能用 snapshot date 之前資料；常見洩漏（用到未來/label 期間）；as-of join 概念。
+- 監控與退化：Spark UI/歷史看時間/資料量/shuffle 隨時間惡化。
+- 表生命週期維護：compaction、重算 `ANALYZE`、清過期 partition、schema 演進不打爛下游（呼應 §05）。
+- 多人共用資料產品：schema/SLA 契約、版本、文件。
+- 取捨：冪等覆寫 vs append；驗證嚴格 vs 誤擋；回填一次到位 vs 分批。
 
-**概念圖（Mermaid）：** 三場景各一張「典型陷阱 → 對策」流程（或一張總表）。
+**概念圖（Mermaid）：** ① 冪等覆寫 vs append（重跑後結果對照）；② 排程相依 gate（上游就緒才跑下游）；③ 時間點正確性（snapshot date 切線，只能用左邊資料）。
 
-**須查證重點：** 本章主要綜合前面已查證內容；只需確認跨章引用指對、無新的未查證主張。
+**須查證重點：** `INSERT OVERWRITE TABLE ... PARTITION` 語意；`spark.sql.sources.partitionOverwriteMode`（預設 static、dynamic 行為）；`ANALYZE TABLE` 重算統計；Hive 3 ACID compaction（major/minor）。對齊 Spark 3.3 / Hive 3.1.3 CDP。出處：Spark 3.3 SQL ref（INSERT OVERWRITE）、Configuration、Cloudera CDP/Hive 文件。
 
-- [ ] Step A–F（`{CHAPTER}=08-scenario-playbooks`，`{PRIOR_CHAPTERS}=01, 02, 03, 04, 05, 06, 07`）
+- [ ] Step A–F（`{CHAPTER}=08-operating-data-pipelines`，`{PRIOR_CHAPTERS}=01, 03, 05`）
 
 ---
 
-## Task 9：第 09 章 — 速查與名詞表
+## Task 9：第 09 章 — 場景對應（索引）
 
-**File:** Create `docs/handbooks/spark-tuning/09-cheatsheet-and-glossary.md`
+**File:** Create `docs/handbooks/spark-tuning/09-scenario-playbooks.md`
 **前置章：** 01–08
+
+**內容大綱（純索引/指路，不重教概念）：**
+- 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)` → 引 §02/§03/§06。
+- 場景 2 排程產表：冪等/可重跑、控檔大小、資源穩 → 引 §08（營運）+ §03/§04/§05。
+- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 引 §08 + §03/§05/§07。
+- 每場景：典型流程 → 對應章節清單 → 該情境最常踩的雷。
+
+**概念圖（Mermaid）：** 三場景各一張「典型流程 → 對應章節」對照（或一張總表）。
+
+**須查證重點：** 純綜合，無新技術主張；只需確認跨章引用指對、與各章一致。
+
+- [ ] Step A–F（`{CHAPTER}=09-scenario-playbooks`，`{PRIOR_CHAPTERS}=01, 02, 03, 04, 05, 06, 07, 08`）
+
+---
+
+## Task 10：第 10 章 — 速查與名詞表
+
+**File:** Create `docs/handbooks/spark-tuning/10-cheatsheet-and-glossary.md`
+**前置章：** 01–09
 
 **內容大綱：**
 - 取捨速查表：時間 ↔ 記憶體 ↔ 儲存（每個手段三維度影響）。
 - config 速查表（名稱 / Spark 3.3 預設 / 何時調 / 風險）。
 - 症狀→對策速查（呼應第 02 章）。
-- 名詞對照表（partition/shuffle/executor/skew/spill/broadcast/AQE/CBO… 中英對照 + 一句話）。
+- 名詞對照表（partition/shuffle/executor/skew/spill/broadcast/AQE/CBO/冪等/backfill/時間點正確性… 中英對照 + 一句話）。
 
 **概念圖（Mermaid）：** 視需要，可不放（本章以表格為主）。
 
 **須查證重點：** config 速查表每一列的預設值要與第 04/03/05 章一致且對齊 Spark 3.3；名詞定義精確。
 
-- [ ] Step A–F（`{CHAPTER}=09-cheatsheet-and-glossary`，`{PRIOR_CHAPTERS}=01–08`）
+- [ ] Step A–F（`{CHAPTER}=10-cheatsheet-and-glossary`，`{PRIOR_CHAPTERS}=01–09`）
 
 ---
 
-## Task 10：完稿 index.md
+## Task 11：完稿 index.md
 
 **File:** Modify `docs/handbooks/spark-tuning/index.md`
 
-- [ ] **Step 1：** 補各章「一句話地圖」、確認 9 章連結正確、補「如何使用本手冊」（依場景/問題快速導向哪一章）、環境前提摘要、讀者假設。
+- [ ] **Step 1：** 補各章「一句話地圖」、確認 10 章連結正確、補「如何使用本手冊」（依場景/問題快速導向哪一章）、兩條學習路線、環境前提摘要、讀者假設。
 - [ ] **Step 2：** 全書跨章引用檢查（grep「第 NN 章」「見 §」指對沒）。
 - [ ] **Step 3：** commit + graphify reset。
 
 ---
 
-## Task 11：轉 HTML（離線可看）
+## Task 12：轉 HTML（離線可看）
 
 **Files:** Create `docs/handbooks/spark-tuning/*.html`（與各 `.md` 成對）；可建一支建置 script（如 `scripts/` 下，若沿用既有手冊 HTML 產法則沿用之）。
 
 - [ ] **Step 1：** 確認既有手冊 HTML 的產法（看 `docs/handbooks/*_offline.html` 怎麼來的；沿用同套樣式/工具，含 anchor 目錄、右下角浮動回頂鈕）。
-- [ ] **Step 2：** 把 9 章 + index 的 `.md` 轉 HTML，**內嵌 mermaid.js**（vendored/inline，不靠 CDN），渲染 ` ```mermaid ` 區塊。
+- [ ] **Step 2：** 把 10 章 + index 的 `.md` 轉 HTML，**內嵌 mermaid.js**（vendored/inline，不靠 CDN），渲染 ` ```mermaid ` 區塊。
 - [ ] **Step 3：** 離線驗證：斷網 / `file://` 開啟，確認所有 Mermaid 圖正常渲染、跨章連結可走、回頂鈕可用。
 - [ ] **Step 4：** commit + graphify reset。
 
 ---
 
-## Task 12：全書 reader subagent 通讀 + 修正
+## Task 13：全書最終 pass（reader 通讀 + architecture 架構審查）+ 修正
 
-- [ ] **Step 1：** 派一個 reader subagent（人設同 §reader 模板）從 index 一路讀到第 09 章，檢查全書一致性、導覽是否好走、有無跨章脈絡斷裂；即時寫日誌到 `.reviews/whole-book__reader.md`。
+- [ ] **Step 1：** 並行派兩個 subagent：①reader（人設同 §reader 模板）從 index 一路讀到第 10 章，檢查全書一致性、導覽是否好走、有無跨章脈絡斷裂，即時寫日誌到 `.reviews/whole-book__reader.md`；②architecture（角色 C 模板）做最後一輪完整度/架構/深度稽核（能力地圖是否全覆蓋終極能力目標），寫 `.reviews/_architecture__round-{最終輪次}.md`。
 - [ ] **Step 2：** triage 三級並修。
 - [ ] **Step 3：** 送使用者最終確認。
 - [ ] **Step 4：** commit + graphify reset；（使用者要求時）用 `superpowers:finishing-a-development-branch` 收尾（PR/merge）。
@@ -380,6 +439,6 @@ git checkout -- graphify-out/GRAPH_REPORT.md
 
 ## Self-Review（撰計畫後自查，已做）
 
-- **Spec 覆蓋**：spec §5 的 index + 9 章 → Task 0/10 + Task 1–9 全覆蓋；§8 交付流程（先 .md 後 HTML）→ Task 1–10 為 .md、Task 11 為 HTML；§10 審稿 subagent → 每章 Step C/D + Task 12；§9 跨 session 機制 → 本檔 Progress Tracker + Direction Log + commit 節奏；§7 離線 mermaid → Task 11。
+- **Spec 覆蓋**：spec §5 的 index + 10 章 → Task 0/11 + Task 1–10 全覆蓋；§8 交付流程（先 .md 後 HTML）→ Task 1–11 為 .md、Task 12 為 HTML；§10 審稿 subagent（A/B 逐章、C 里程碑）→ 每章 Step C/D + Task 13；§9 跨 session 機制 → 本檔 Progress Tracker + Direction Log + commit 節奏；§7 離線 mermaid → Task 12。
 - **Placeholder 掃描**：每章 task 都有具體內容大綱、概念圖、須查證重點、前置章；subagent prompt 為完整可貼模板（僅 `{CHAPTER}`/`{PRIOR_CHAPTERS}` 為刻意的填空）。
-- **一致性**：章節編號 01–09 與檔名、PRIOR_CHAPTERS、index 連結一致；config 預設值集中在 04/03/05 並由 09 速查表彙整，避免各章各說。
+- **一致性**：章節編號 01–10 與檔名、PRIOR_CHAPTERS、index 連結一致；config 預設值集中在 04/03/05 並由 10 速查表彙整，避免各章各說。

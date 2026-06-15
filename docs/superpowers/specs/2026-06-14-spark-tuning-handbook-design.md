@@ -15,6 +15,8 @@
 
 **讀者**：資料分析師、資料科學家。**無專業資料工程背景** —— 對系統架構、基礎設施、網路通訊只有淺薄認知。因此凡是 partition / shuffle / executor / skew / spill 這類概念，第一次出現都要用易懂方式建立心智模型，搭配概念圖，**不碰原始碼、不假設 DE 知識**。
 
+**深度定位（重要）**：起點易懂，但**不止於 ad-hoc 分析**。要假設讀者未來會**自己營運資料排程、經營多人共用的資料產品（如特徵庫 / feature store）**，因此每章在打好直覺後，要帶到進階概念與**營運層取捨**：資源配置（executor core/instance/memory）、併發與多租戶、可靠度與可重跑、schema 演進與維護。寫法上「先易懂直覺 → 再進階／營運取捨」分層遞進，讓只做 ad-hoc 的人讀前半段就夠用，要營運資料產品的人能讀到後半段。
+
 ## 2. 已確認前提（環境與使用方式）
 
 | 項目 | 結論 |
@@ -51,11 +53,13 @@
 ### `01-how-spark-runs-your-sql.md` — 心智模型：Spark 怎麼跑你的 SQL
 - 從一條熟悉的 SQL 出發，講它在 Spark 裡發生什麼。
 - cluster = driver + executors（在 YARN 上）；資料切成 **partitions** 平行處理。
-- query 生命週期：SQL → logical plan → Catalyst 優化 → physical plan → jobs → stages → tasks。
+- **執行的層級關係：application → job（每個 action 一個）→ stage（每次 shuffle 切一刀）→ task（一 partition 一個）**，並對應到第 02 章 Spark UI 看到的頁籤。
+- query 生命週期：SQL → logical plan → Catalyst 優化 → physical plan → stages → tasks。
+- **executor 的形狀：core 數（＝可同時跑幾個 task）/ instance 台數（＝總平行度）/ memory size 三者的取捨**（fat vs thin executor、平行度＝executors×cores、記憶體被同時跑的 task 分掉→spill 風險、HDFS 吞吐與 GC、多租戶）；建立直覺，操作細節 forward 到第 04 章。
 - 兩種運算：**窄依賴**（map-like，便宜，不搬資料）vs **寬依賴 = shuffle**（貴，跨網路重分佈資料）。
 - **shuffle 為什麼是頭號敵人**（用 3000 萬筆帳務 `GROUP BY` 客戶舉例）。
 - lazy evaluation：action 才觸發。
-- 概念圖：cluster 圖、SQL→stage→task 圖、narrow vs wide 圖。
+- 概念圖：cluster 圖、application→job→stage→task 層級圖、SQL→plan→stage→task 流程圖、narrow vs wide 圖。
 - 主軸預告：多數優化＝減少或減輕 shuffle 與掃描量。
 
 ### `02-diagnose-with-spark-ui.md` — 用 Spark UI 與 EXPLAIN 找瓶頸
@@ -64,7 +68,7 @@
 - `EXPLAIN` / `EXPLAIN FORMATTED` 讀重點：找 `Exchange`(=shuffle)、`BroadcastHashJoin` vs `SortMergeJoin`、Scan 的 partition filter 有沒有生效。
 - Spark UI 各頁籤該看什麼（SQL-first 的人主看 SQL 頁籤的 query plan + Stages 的 task 時間/資料分佈）。
 - 認症狀：shuffle 過大、**skew**（少數 task 特別久）、**spill**（記憶體不足落磁碟）、小檔/掃太多（partition 沒裁到）。
-- 產出「症狀 → 看哪裡 → 翻到哪章」對照表（呼應 §09）。
+- 產出「症狀 → 看哪裡 → 翻到哪章」對照表（呼應 §10）。
 
 ### `03-sql-tuning.md` — SQL 寫法優化
 - 只讀需要的：partition 裁剪（`WHERE` 帶 partition column）、projection（別 `SELECT *`）、predicate pushdown。
@@ -80,9 +84,10 @@
 ### `04-spark-config.md` — Spark 設定（AQE-first）
 - 心法：3.3 AQE 預設開，先別亂調靜態旋鈕。AQE 自動做：合併 shuffle 分區、動態切 broadcast、處理 skew join。
 - 確認 AQE 開著（`spark.sql.adaptive.enabled`）。
-- 仍要懂的少數旋鈕：`spark.sql.shuffle.partitions`（AQE 下角色變了）、`spark.sql.autoBroadcastJoinThreshold`、executor memory/cores/數量（CDP/YARN 上怎麼給）、`spark.sql.files.maxPartitionBytes`、dynamic allocation。
-- 怎麼在 Hue/notebook 用 `SET` 設定。
-- 記憶體模型一句話：executor memory 分 execution/storage，spill 是不夠的徵兆。
+- 仍要懂的少數旋鈕：`spark.sql.shuffle.partitions`（AQE 下角色變了）、`spark.sql.autoBroadcastJoinThreshold`、`spark.sql.files.maxPartitionBytes`、dynamic allocation。
+- **executor 資源配置（深化第 01 章直覺）**：`spark.executor.cores` / `spark.executor.memory` / `spark.executor.memoryOverhead` / instance 數的實際設定與取捨；fat vs thin executor 的工作範例（給定 YARN 額度怎麼切）；execution/storage 統一記憶體模型、spill 徵兆與救法。
+- **營運/多租戶**：dynamic allocation（隨需求伸縮、把資源讓回叢集）、靜態大額配置會餓死同事的風險、排程作業該怎麼要資源才穩定又不擾鄰。
+- 怎麼在 Hue/notebook 用 `SET` 設定（哪些可在 session 設、哪些要在 submit/啟動時給）。
 - 取捨：更多記憶體/核心 vs 叢集併發；broadcast threshold 調大 vs driver OOM。
 - 強調：對 SQL-first 的人，調 SQL 寫法 + 喂統計，多半比硬調 config 有效。
 
@@ -94,6 +99,7 @@
 - bucketing：何時有用（固定 join key 反覆 join）、Hive 3 注意事項。
 - 統計：`ANALYZE TABLE ... COMPUTE STATISTICS` 為何關鍵（AQE/CBO 靠它選 join 策略）、怎麼跑。
 - Hive 3.x ACID/transactional table 提醒（delta 檔、compaction）。
+- **營運共用資料表（深度）**：給多人/多作業共用的表，partition 與檔案大小要為「下游怎麼讀」設計；schema 演進（加欄/型別）怎麼不打爛既有讀者；定期維護（compaction、`ANALYZE` 重算統計）；併發寫入與覆寫的安全。
 - 取捨：分割細→掃描省但小檔/metadata 爆；壓縮強→省儲存但耗 CPU。
 
 ### `06-engine-selection.md` — 引擎選用：Spark vs Hive/Tez vs Impala
@@ -110,21 +116,36 @@
 - 取捨：可測試/可維護 vs 純 SQL 的簡潔。
 - 範圍界線：只到 DataFrame API；**不碰 RDD 低階 API**（§3）。
 
-### `08-scenario-playbooks.md` — 場景對應
-- 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)`。
-- 場景 2 排程產表：可重跑、控輸出檔大小、partition 設計、`ANALYZE`、用 Spark/Hive、用 Spark UI 抓退化。
-- 場景 3 特徵運算：寬表多 join、多 window、易 skew；broadcast 維度表、預聚合、控 shuffle、cache 中間結果的取捨（可用 SQL 或 §07 的 DataFrame API）。
-- 每場景：典型陷阱 → 對策 → 引用前面哪章。
+### `08-operating-data-pipelines.md` — 營運資料排程與資料產品（營運專章）
+> 由 architecture round-1 補上：終極目標「能長期營運排程＋特徵庫」原本散落在場景章條列、無教學主體。本章用 01 章深度補齊整條營運線。
+- 定位：把產出的表/特徵當成**要長期營運的服務**，不是一次性查詢；正確、可靠、可維護優先於快。
+- **冪等與可重跑**：用「整個 partition 覆寫」（`INSERT OVERWRITE ... PARTITION`、dynamic partition overwrite）而非 append——失敗重跑不重複、可安全補跑；對照 append 在重跑時造成重複的坑。
+- **回填（backfill）**：補某段歷史；按 partition 分批、控資源、可中斷續跑。
+- **排程相依與資料就緒**：上游沒齊不要跑下游；以「partition 是否存在/列數是否到位」當 gate。
+- **資料品質驗證（補 C12，§11 明文要求）**：產表後基本檢查（列數量級、null 比例、key 唯一性、值域、跟昨天比的漂移），不過就擋下游、發警報。
+- **時間點正確性 / 特徵洩漏（C11，特徵庫命門）**：某時間點的特徵只能用「該時間點之前」的資料；常見洩漏（用到未來、用到 label 期間）；以 snapshot date 為界、as-of join 的概念。
+- **監控與退化**：用 Spark UI/歷史看作業時間、資料量、shuffle 是否隨時間惡化；資料量成長導致的退化與因應。
+- **表的生命週期維護**：定期 compaction（小檔）、重算 `ANALYZE` 統計、清過期 partition、schema 演進不打爛下游（呼應 §05）。
+- **多人共用的資料產品**：schema/SLA 契約、版本、文件、別人怎麼讀你的表。
+- 取捨就地：冪等覆寫 vs append 成本；驗證嚴格 vs 誤擋；回填一次到位 vs 分批。
+- 概念圖：① 冪等覆寫 vs append（重跑後結果對照）；② 排程相依 gate（上游就緒才跑下游）；③ 時間點正確性（snapshot date 切線，只能用左邊資料）。
 
-### `09-cheatsheet-and-glossary.md` — 速查與名詞表
+### `09-scenario-playbooks.md` — 場景對應（索引）
+- 角色：純**索引/指路**，不重教概念——把前面各章技巧，按三大情境串成「遇到這種工作，照哪些章、最常踩什麼雷」。
+- 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)` → 主要引 §02/§03/§06。
+- 場景 2 排程產表：可重跑/冪等、控檔大小、資源要得穩 → 主要引 **§08**（營運）＋ §03/§04/§05。
+- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 主要引 **§08**（時間點/品質）＋ §03/§05/§07。
+- 每場景：典型流程 → 對應章節清單 → 該情境最常踩的雷。
+
+### `10-cheatsheet-and-glossary.md` — 速查與名詞表
 - 取捨速查表：時間 ↔ 記憶體 ↔ 儲存（每個手段三維度影響）。
 - config 速查表（名稱/預設/何時調/風險）。
 - 症狀→對策速查（呼應 §02）。
 - 名詞對照表（partition/shuffle/executor/skew/spill/broadcast… 中英對照＋一句話）。
 
-> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §09 收成速查表。
+> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §10 收成速查表。
 >
-> 章數彈性：若某章寫起來太薄，允許合併（如 04 併入 03、09 併入 index），定案以實作計畫為準。
+> 章數彈性：若某章寫起來太薄，允許合併（如 04 併入 03、10 併入 index），定案以實作計畫為準。
 
 ## 6. 寫作慣例與權威來源
 
@@ -192,16 +213,24 @@
 - **限制**：(1) 只回報讀者視角問題、**不查技術對錯**（那是角色 A）；(2) **不改稿**；(3) **不可因自己其實懂 Spark 就放水**——嚴格扮演無 DE 背景讀者，任何第一次出現、沒當場解釋的術語都要標；(4) 全程即時寫日誌（§10.4）。
 - **完成的定義**：逐段/逐節標卡關點，每點註明類型（缺脈絡 / 太抽象＝只有形容詞沒數字例子 / 術語沒先定義 / 概念圖不自明 / 步驟不可操作 / 鷹架洩漏），並寫「我會這樣想、我會問什麼」讓我知道怎麼補；指出全章主旨是否一致、範疇有無失衡（邊緣主題佔太多 / 核心太淺）；結尾按**真缺陷／可加強／誤讀**三級彙整；日誌檔已落地。
 
-### 10.4 同步可審核（即時日誌）
-每個 subagent 邊讀邊把發現**即時寫入** companion 日誌檔 `docs/handbooks/spark-tuning/.reviews/<chapter>__<role>.md`（如 `03-sql-tuning__reviewer.md`），使用者可隨時打開看進度，不必等最終回報（對齊既有「subagent 過程可同步審核」偏好）。
+### 10.4 角色 C — 完整度與架構審查員（architecture / curriculum，驗邏輯與深度）
+- **目標**：從**整本手冊**的角度，檢查邏輯架構是否清楚、章節順序是否合理、深度是否足夠，確保一個 **Spark 新手讀完，能具備長期穩定營運資料排程與特徵庫（feature store）的能力**。找出：缺漏的主題、順序/依賴問題（前面用到後面才教的概念）、深度不足以支撐營運之處。
+- **背景**：共用背景（§10.1）＋ 終極學習目標（新手 → 能長期營運 data scheduling + feature store）＋ §1 深度定位 ＋ 手冊骨架（index + 9 章，§5）。
+- **素材**：目前**已寫**的章節 `.md`（依 plan 的 Progress Tracker 判斷哪些已寫）；尚未寫的章節看 §5 大綱；spec 全文（§1、§5、§11）。
+- **限制**：(1) 不查單點技術對錯（reviewer A 的事）、不挑逐句易讀性（reader B 的事）——**只看整體架構、順序、覆蓋度、深度是否達成終極能力目標**；(2) 不改稿；(3) 明確區分「已寫章節的實況」與「尚未寫、只能評 outline」；(4) 即時寫日誌（§10.5）。
+- **完成的定義**：產出 (a) **能力地圖**——把「長期營運排程／特徵庫」需要的能力逐項對應到「由哪章哪節支撐」，標出**無人覆蓋的缺口**；(b) 章節順序/依賴是否合理；(c) 各章深度是否足以支撐營運（不只 ad-hoc）；(d) 具體補強建議（新增章/節、調順序、加深何處）；按「真缺陷（必補）／可加強／誤讀」三級彙整。
 
-### 10.5 回饋處理與節奏
-- 我收兩份報告後，按**真缺陷（必補）／可加強（斟酌）／誤讀（不改或微調）**三級處理，修完才把該章送使用者審；重大分歧或取捨不明處才回頭問使用者。
-- 節奏與「一章一審」對齊：`我寫草稿 → A+B 並行審 → 我 triage 修 → 使用者審 → 打勾 commit`。
-- 全部 `.md` 定稿、轉 HTML 後，可選擇再派 reader subagent 做一次跨章通讀（導覽/連結/全書一致性）。
+### 10.5 同步可審核（即時日誌）
+每個 subagent 邊讀邊把發現**即時寫入** companion 日誌檔：逐章審稿用 `docs/handbooks/spark-tuning/.reviews/<chapter>__<role>.md`（如 `03-sql-tuning__reviewer.md`）；角色 C 的全書審查用 `docs/handbooks/spark-tuning/.reviews/_architecture__round-N.md`。使用者可隨時打開看進度，不必等最終回報（對齊既有「subagent 過程可同步審核」偏好）。
+
+### 10.6 回饋處理與節奏
+- **逐章（A+B）**：每章草稿完成 → A 技術 reviewer ＋ B 目標 reader 並行審 → 我按**真缺陷（必補）／可加強（斟酌）／誤讀（不改或微調）**三級 triage 修 → 送使用者審 → 打勾 commit。重大分歧或取捨不明才回頭問使用者。
+- **里程碑（C）**：角色 C 在下列時點各跑一次——①outline/骨架剛定或大改時；②每累積寫完數章時；③全書 `.md` 定稿的最終 pass（Task 12）。用來確保整體邏輯與深度持續對準終極能力目標、及早發現結構缺口。
+- 全書 `.md` 定稿、轉 HTML 後，最終 pass 同時跑 reader（跨章通讀導覽/連結）與 architecture（C）兩種審查。
 
 ## 11. 成功標準
 
 - 一位無 DE 背景的分析師，能照手冊**自行**：讀懂自己 SQL 的 Spark UI、判斷瓶頸類型、改寫 SQL 或調少數 config、選對引擎、設計合理的 partition/儲存；需要時知道何時改用 DataFrame API。
-- 每個建議都有權威來源、具體數字、與明確取捨；每章經 reviewer + reader 兩個 subagent 審過並 triage 修正。
+- **終極能力目標**：一個 Spark 新手從頭讀完整本手冊後，具備**長期穩定營運資料排程與特徵庫（feature store）**的能力——不只會跑 ad-hoc，還懂資源配置與多租戶、可靠/可重跑、schema 演進與維護、時間點正確性等營運課題。整本的邏輯架構、章節順序與深度都要服務這個終點（由審稿角色 C 在里程碑持續把關）。
+- 每個建議都有權威來源、具體數字、與明確取捨；每章經 reviewer(A) + reader(B) 審過並 triage 修正，整體架構/深度經 architecture reviewer(C) 在里程碑把關。
 - 階層化、可分章查閱；`.md` 與 `.html` 成對交付，HTML 離線可看（內嵌 mermaid.js）。
