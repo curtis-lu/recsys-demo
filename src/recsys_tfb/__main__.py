@@ -425,6 +425,32 @@ def sample_pool_etl(
     _run_etl("sample_pool_etl", env, target_dates, restart_from, source_check_only=source_check)
 
 
+@app.command(name="inference_population_etl")
+def inference_population_etl(
+    env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    target_dates: Optional[str] = typer.Option(
+        None,
+        "--target-dates",
+        help="Comma-separated target dates, e.g. 2024-01-31,2024-02-29",
+    ),
+    restart_from: Optional[str] = typer.Option(
+        None,
+        "--restart-from",
+        help="Restart from this table name (skip earlier tables in the list)",
+    ),
+    source_check: bool = typer.Option(
+        False, "--source-check",
+        help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
+             "全部跑完後有任一失敗即以非零碼結束。",
+    ),
+):
+    """Run the inference population ETL pipeline (inference_population)."""
+    _run_etl(
+        "inference_population_etl", env, target_dates, restart_from,
+        source_check_only=source_check,
+    )
+
+
 @app.command(name="dataset")
 def dataset(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),

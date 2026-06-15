@@ -34,6 +34,11 @@ def feature_table(spark):
 
 
 @pytest.fixture
+def inference_population(feature_table):
+    return feature_table.select("snap_date", "cust_id").distinct()
+
+
+@pytest.fixture
 def parameters():
     return {
         "inference": {
@@ -61,41 +66,47 @@ def preprocessor():
 
 
 class TestBuildScoringDataset:
-    def test_cross_join_shape(self, feature_table, parameters):
-        result = build_scoring_dataset(feature_table, parameters)
+    def test_cross_join_shape(self, inference_population, feature_table, parameters):
+        result = build_scoring_dataset(inference_population, feature_table, parameters)
         # 3 customers x 3 products = 9 rows (only snap_date 2024-03-31)
         assert result.count() == 9
 
-    def test_columns_present(self, feature_table, parameters):
-        result = build_scoring_dataset(feature_table, parameters)
+    def test_columns_present(self, inference_population, feature_table, parameters):
+        result = build_scoring_dataset(inference_population, feature_table, parameters)
         assert "snap_date" in result.columns
         assert "cust_id" in result.columns
         assert "prod_name" in result.columns
         assert "total_aum" in result.columns
 
-    def test_all_products_per_customer(self, feature_table, parameters):
-        result = build_scoring_dataset(feature_table, parameters)
-        pdf = result.toPandas()
+    def test_all_products_per_customer(self, inference_population, feature_table, parameters):
+        result = build_scoring_dataset(inference_population, feature_table, parameters)
         products = parameters["inference"]["products"]
+        # toPandas() 在 BooleanType 欄（feature_present）上會觸發 PySpark 3.3.2 + NumPy 1.25 的
+        # np.bool 廢棄問題，改用 Spark 端 collect() 避免
         for cid in ["C001", "C002", "C003"]:
-            cust_prods = pdf.loc[pdf["cust_id"] == cid, "prod_name"].tolist()
+            cust_prods = [
+                row["prod_name"]
+                for row in result.filter(result["cust_id"] == cid)
+                .select("prod_name")
+                .collect()
+            ]
             assert sorted(cust_prods) == sorted(products)
 
-    def test_missing_snap_date_raises(self, feature_table, parameters):
+    def test_missing_snap_date_raises(self, inference_population, feature_table, parameters):
         parameters["inference"]["snap_dates"] = [
             "2024-03-31",
             "2024-04-30",
         ]
 
         with pytest.raises(
-            ValueError, match="feature_table missing inference.snap_dates"
+            ValueError, match="inference_population missing inference.snap_dates"
         ):
-            build_scoring_dataset(feature_table, parameters)
+            build_scoring_dataset(inference_population, feature_table, parameters)
 
 
 class TestApplyPreprocessor:
-    def test_output_has_identity_and_features(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_output_has_identity_and_features(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         result = apply_preprocessor(scoring, preprocessor, parameters)
         # Should have identity cols + feature cols
         assert "snap_date" in result.columns
@@ -104,15 +115,15 @@ class TestApplyPreprocessor:
         for fc in preprocessor["feature_columns"]:
             assert fc in result.columns
 
-    def test_feature_column_order(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_feature_column_order(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         result = apply_preprocessor(scoring, preprocessor, parameters)
         identity_cols = ["snap_date", "cust_id", "prod_name"]
         expected = identity_cols + preprocessor["feature_columns"]
         assert result.columns == expected
 
-    def test_missing_feature_raises(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_missing_feature_raises(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         preprocessor["feature_columns"] = preprocessor["feature_columns"] + ["nonexistent_col"]
         with pytest.raises(ValueError, match="Missing feature columns"):
             apply_preprocessor(scoring, preprocessor, parameters)
@@ -175,8 +186,8 @@ class TestApplyPreprocessor:
 
 
 class TestPredictScores:
-    def test_output_is_spark_df(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_output_is_spark_df(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
@@ -187,8 +198,8 @@ class TestPredictScores:
         from pyspark.sql import DataFrame
         assert isinstance(result, DataFrame)
 
-    def test_output_columns(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_output_columns(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
@@ -198,8 +209,8 @@ class TestPredictScores:
         result = predict_scores(MockModel(), X_score, scoring, parameters)
         assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
-    def test_row_count_matches(self, feature_table, parameters, preprocessor):
-        scoring = build_scoring_dataset(feature_table, parameters)
+    def test_row_count_matches(self, inference_population, feature_table, parameters, preprocessor):
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
@@ -210,9 +221,9 @@ class TestPredictScores:
         assert result.count() == 9  # 3 customers x 3 products
 
     def test_uses_model_feature_names_for_training_feature_selection(
-        self, feature_table, parameters, preprocessor
+        self, inference_population, feature_table, parameters, preprocessor
     ):
-        scoring = build_scoring_dataset(feature_table, parameters)
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor, parameters)
 
         class MockModel:
@@ -236,6 +247,56 @@ class TestPredictScores:
             columns == ["prod_name", "total_aum"]
             for columns in model.seen_columns
         )
+
+
+class TestBuildScoringDatasetPopulation:
+    def _params(self):
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "score": "score", "rank": "rank",
+            }},
+            "inference": {"snap_dates": ["2024-03-31"],
+                          "products": ["fund_stock", "fund_bond"]},
+        }
+
+    def _pop(self, spark):
+        return spark.createDataFrame(
+            [("2024-03-31", "c1"), ("2024-03-31", "c2"), ("2024-03-31", "c3")],
+            ["snap_date", "cust_id"],
+        )
+
+    def _features(self, spark):
+        return spark.createDataFrame(
+            [("2024-03-31", "c1", 1.0), ("2024-03-31", "c2", 2.0),
+             ("2024-03-31", "c9", 9.0)],
+            ["snap_date", "cust_id", "total_aum"],
+        )
+
+    def test_membership_from_population_not_feature_table(self, spark):
+        from recsys_tfb.pipelines.inference.nodes_spark import build_scoring_dataset
+        out = build_scoring_dataset(self._pop(spark), self._features(spark), self._params())
+        custs = {r["cust_id"] for r in out.select("cust_id").distinct().collect()}
+        assert custs == {"c1", "c2", "c3"}
+
+    def test_missing_feature_member_kept_and_flagged(self, spark):
+        from recsys_tfb.pipelines.inference.nodes_spark import build_scoring_dataset
+        out = build_scoring_dataset(self._pop(spark), self._features(spark), self._params())
+        flags = {r["cust_id"]: r["feature_present"]
+                 for r in out.select("cust_id", "feature_present").distinct().collect()}
+        assert flags == {"c1": True, "c2": True, "c3": False}
+
+    def test_row_count_is_members_times_products(self, spark):
+        from recsys_tfb.pipelines.inference.nodes_spark import build_scoring_dataset
+        out = build_scoring_dataset(self._pop(spark), self._features(spark), self._params())
+        assert out.count() == 3 * 2
+
+    def test_missing_snap_date_raises(self, spark):
+        from recsys_tfb.pipelines.inference.nodes_spark import build_scoring_dataset
+        params = self._params()
+        params["inference"]["snap_dates"] = ["2024-03-31", "2024-04-30"]
+        with pytest.raises(ValueError, match="inference_population missing inference.snap_dates"):
+            build_scoring_dataset(self._pop(spark), self._features(spark), params)
 
 
 class TestRankPredictions:

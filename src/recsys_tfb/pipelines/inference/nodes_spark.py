@@ -43,10 +43,15 @@ def _filter_current_inference_scope(
 
 
 def build_scoring_dataset(
+    inference_population: DataFrame,
     feature_table: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Build scoring dataset by cross-joining customers with all products."""
+    """以 inference_population 為母體建立評分資料；feature_table 僅作 enrichment。
+
+    母體 grain (time, entity) 由 source_etl 保證唯一，故不需 dropDuplicates。
+    缺特徵的母體成員保留，以 feature_present=false 標記（in-memory + log，不下推）。
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
@@ -58,35 +63,60 @@ def build_scoring_dataset(
         for value in parameters["inference"]["snap_dates"]
     ]
     products = parameters["inference"]["products"]
+    spark = feature_table.sparkSession
 
-    with log_step(logger, "filter_customers"):
+    with log_step(logger, "read_population"):
         customers = (
-            feature_table.filter(
-                F.col(time_col).cast("date").isin(snap_dates)
-            )
+            inference_population
+            .filter(F.col(time_col).cast("date").isin(snap_dates))
             .select(*join_key)
-            .dropDuplicates()
         )
         available_dates = {
             pd.Timestamp(row[time_col]).date()
             for row in customers.select(time_col).distinct().collect()
             if row[time_col] is not None
         }
-        expected_dates = set(snap_dates)
-        missing_dates = sorted(expected_dates - available_dates)
+        missing_dates = sorted(set(snap_dates) - available_dates)
         if missing_dates:
             raise ValueError(
-                "feature_table missing inference.snap_dates: "
+                "inference_population missing inference.snap_dates: "
                 f"{[value.isoformat() for value in missing_dates]}"
             )
 
+    with log_step(logger, "feature_coverage_report"):
+        # 用窄投影（join_key + 指標）算覆蓋，避免在 wide feature 上做聚合
+        ft_keys = (
+            feature_table.select(*join_key).distinct()
+            .withColumn("_ft_present", F.lit(True))
+        )
+        presence = customers.join(ft_keys, on=join_key, how="left")
+        coverage = (
+            presence.groupBy(time_col)
+            .agg(
+                F.count(F.lit(1)).alias("members"),
+                F.sum(
+                    F.when(F.col("_ft_present").isNull(), F.lit(1)).otherwise(F.lit(0))
+                ).alias("members_missing_features"),
+            )
+            .collect()
+        )
+        for row in coverage:
+            logger.info(
+                "feature coverage %s=%s: members=%d missing_features=%d",
+                time_col, row[time_col], row["members"],
+                row["members_missing_features"],
+            )
+
     with log_step(logger, "cross_join"):
-        spark = feature_table.sparkSession
         products_df = spark.createDataFrame([(p,) for p in products], [item_col])
         scoring = customers.crossJoin(products_df)
 
     with log_step(logger, "merge_features"):
-        scoring = scoring.join(feature_table, on=join_key, how="left")
+        ft = feature_table.withColumn("_ft_present", F.lit(True))
+        scoring = scoring.join(ft, on=join_key, how="left")
+        scoring = scoring.withColumn(
+            "feature_present", F.col("_ft_present").isNotNull()
+        ).drop("_ft_present")
 
     logger.info(
         "Built scoring dataset for %d products x %d snap_dates",
