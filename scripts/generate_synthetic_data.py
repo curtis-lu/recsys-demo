@@ -294,6 +294,18 @@ def generate_feature_table(rng: np.random.Generator) -> pd.DataFrame:
     return df
 
 
+def generate_inference_population(feature_table: pd.DataFrame) -> pd.DataFrame:
+    """Inference 推論母體：每個 snap_date 的 distinct (snap_date, cust_id)。
+
+    示例最小版＝feature 客戶全集；正式環境由 ETL SQL 放入資格邏輯。
+    """
+    return (
+        feature_table[["snap_date", "cust_id"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+
 def generate_label_table(
     rng: np.random.Generator, feature_table: pd.DataFrame
 ) -> pd.DataFrame:
@@ -415,6 +427,7 @@ def main():
     feature_table = generate_feature_table(rng)
     label_table = generate_label_table(rng, feature_table)
     sample_pool = generate_sample_pool(feature_table, label_table)
+    inference_population = generate_inference_population(feature_table)
 
     # Spark 3.3.2 only supports timestamp(us); pandas defaults to ns and breaks
     # `Illegal Parquet type: INT64 (TIMESTAMP(NANOS,false))` on read. Write via
@@ -423,6 +436,7 @@ def main():
         ("data/feature_table.parquet", feature_table),
         ("data/label_table.parquet", label_table),
         ("data/sample_pool.parquet", sample_pool),
+        ("data/inference_population.parquet", inference_population),
     ]:
         pq.write_table(
             pa.Table.from_pandas(df, preserve_index=False),
