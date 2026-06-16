@@ -180,9 +180,15 @@ def _maybe_warn_retrain(plan, retrain_advice):
     """
     if retrain_advice is None or plan is None:
         return []
+    # auto_included maps node -> tuple[str, ...] of missing dataset names; `in`
+    # is element membership. Fire iff the missing dataset is exactly `model`,
+    # i.e. the model producer (finalize_model, or calibrate_model under
+    # calibration) had to be pulled in -> an unexpected retrain.
     if not any("model" in missing for missing in plan.auto_included.values()):
         return []
     latest = find_latest_completed_model_version(retrain_advice["models_dir"])
+    # Pass every pulled-in node (not just the model producer) so the advisory
+    # shows the full retrain footprint of the model's upstream closure.
     return _format_retrain_advisory(
         retrain_advice["model_version"], list(plan.auto_included), latest
     )

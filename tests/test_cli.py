@@ -629,6 +629,17 @@ def test_maybe_warn_retrain_fires_when_model_pulled_in(tmp_path):
     assert "ab12cd34" in text and "finalize_model" in text and "old11111" in text
 
 
+def test_maybe_warn_retrain_fires_under_calibration(tmp_path):
+    # Under calibration the `model` dataset is produced by calibrate_model, not
+    # finalize_model; the trigger must still fire on the missing `model`.
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"calibrate_model": ("model",)})
+    lines = _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
+    text = "\n".join(lines)
+    assert "ab12cd34" in text and "calibrate_model" in text
+
+
 def test_maybe_warn_retrain_silent_when_model_present(tmp_path):
     from recsys_tfb.__main__ import _maybe_warn_retrain
     plan = _plan_with_auto({"cache_val_model_input": ("val_model_input",)})
