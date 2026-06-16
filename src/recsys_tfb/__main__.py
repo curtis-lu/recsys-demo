@@ -27,6 +27,7 @@ from recsys_tfb.core.versioning import (
     compute_model_version,
     compute_search_id,
     compute_train_variant_id,
+    find_latest_completed_model_version,
     read_manifest,
     resolve_base_dataset_version,
     resolve_model_version,
@@ -168,6 +169,23 @@ def _format_retrain_advisory(model_version, retrain_nodes, latest):
         )
     lines.append("[retrain] 仍依契約繼續執行（缺料自動補跑）…")
     return lines
+
+
+def _maybe_warn_retrain(plan, retrain_advice):
+    """Return loud-WARN lines when a sliced run will auto-include the model
+    producer (``model`` was missing -> finalize/calibrate pulled in), else ``[]``.
+
+    ``retrain_advice`` is ``{"models_dir": Path, "model_version": str}`` (passed
+    only by the training command) or ``None``.
+    """
+    if retrain_advice is None or plan is None:
+        return []
+    if not any("model" in missing for missing in plan.auto_included.values()):
+        return []
+    latest = find_latest_completed_model_version(retrain_advice["models_dir"])
+    return _format_retrain_advisory(
+        retrain_advice["model_version"], list(plan.auto_included), latest
+    )
 
 
 def _slice_extra(from_node, only_node):

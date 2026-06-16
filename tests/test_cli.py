@@ -607,3 +607,41 @@ def test_format_retrain_advisory_without_latest():
     assert "ab12cd34" in text
     assert "finalize_model" in text
     assert "manifest.json" not in text  # no nearest-version section
+
+
+def _plan_with_auto(auto):
+    from recsys_tfb.core.pipeline import SlicePlan
+    return SlicePlan(mode="from", requested=("predict_and_write_test_predictions",),
+                     auto_included=auto)
+
+
+def test_maybe_warn_retrain_fires_when_model_pulled_in(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    (tmp_path / "old11111").mkdir()
+    (tmp_path / "old11111" / "manifest.json").write_text(json.dumps(
+        {"version": "old11111", "status": "completed",
+         "created_at": "2026-06-01T00:00:00+00:00"}))
+    plan = _plan_with_auto({"finalize_model": ("model", "best_params")})
+    lines = _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
+    text = "\n".join(lines)
+    assert "ab12cd34" in text and "finalize_model" in text and "old11111" in text
+
+
+def test_maybe_warn_retrain_silent_when_model_present(tmp_path):
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"cache_val_model_input": ("val_model_input",)})
+    assert _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"}) == []
+
+
+def test_maybe_warn_retrain_silent_without_advice():
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"finalize_model": ("model",)})
+    assert _maybe_warn_retrain(plan, None) == []
+
+
+def test_maybe_warn_retrain_silent_when_plan_none():
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    assert _maybe_warn_retrain(None, {"models_dir": ".", "model_version": "x"}) == []
