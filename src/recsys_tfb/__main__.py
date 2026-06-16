@@ -248,7 +248,7 @@ def _execute_pipeline(
     return True
 
 
-def _write_manifest_stub(version_dir, metadata_kwargs, run_id):
+def _write_manifest_stub(version_dir: Path, metadata_kwargs: dict, run_id: str):
     """Pre-run provenance stub: write manifest.json with status=running so a
     crash before the post-run write still records which parameters defined this
     version. Skip-if-present (never clobber an existing manifest); writes no
