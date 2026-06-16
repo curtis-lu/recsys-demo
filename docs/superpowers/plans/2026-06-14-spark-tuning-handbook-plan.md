@@ -19,7 +19,7 @@
 - 寫作規範：`docs/handbooks/handbook-writing-guide.md`（可轉移者：具體數字落地、結論誠實、不洩漏鷹架、流程可操作、§11/§12 審稿清單）
 - **給使用者的檔案路徑一律帶 `.worktrees/spark-handbook/` 前綴**（否則他開到主目錄打不開）。
 - git 一律 `git -C /Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook ...` 或先 `cd` 該 worktree root。
-- **每次 commit 後**：`git -C /Users/curtislu/projects/recsys_tfb/.worktrees/spark-handbook checkout -- graphify-out/GRAPH_REPORT.md`（post-commit hook 會弄髒它，不還原會擋住後續 checkout/merge）。
+- **commit 後不必再還原 `graphify-out/GRAPH_REPORT.md`**：它現在是 **untracked**（graphify 已修，commit `61ee9ac`），post-commit hook 重建它不會弄髒 tracked tree、也不會擋後續 checkout/merge。舊版那行 `git checkout -- graphify-out/GRAPH_REPORT.md` 已過時（會報 `pathspec did not match`），別再串進 commit 指令。
 
 ## 寫作慣例（每章共用）
 
@@ -127,13 +127,13 @@
 
 ## Progress Tracker
 
-> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02、03 章已寫完、雙 subagent 審＋triage 修＋user glance。第 03 章另按 user 要求在 §3.5 加「Spark 5 種 join 物理模式對照表（含 BroadcastNestedLoopJoin）」並過一輪聚焦 reviewer。**下一步＝Task 4 寫第 04 章「Spark 設定（AQE-first）」**，照 spec §12 基準（含第 02 章兩個教訓：『能上 mock 面板／貫穿範例就上』『環境細節以 user 公司經驗為準』，見 Direction Log 2026-06-16）＋ §6 來源慣例 ＋ §10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。**體例微調**：precision footer 不再放「逐條查證記錄見 .reviews/…」指標（對齊 01；02/03 已移除，後續各章比照）。
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02、03、04 章已寫完、雙 subagent 審＋triage 修＋user glance。第 04 章骨架＝風險梯度（AQE-first→SQL 層旋鈕→資源層→多租戶），含 3 圖（AQE 三件事／executor 記憶體 execution-storage-overhead／dynamic allocation 伸縮）＋ mock Environment 面板＋§4.8 排程作業配置貫穿範例；reviewer 證實技術骨幹零事實錯誤（含 CDP dynamic allocation 預設 true vs 開源 false 這個關鍵差異）。**下一步＝Task 5 寫第 05 章「儲存效率」**（`05-storage-efficiency.md`，PRIOR_CHAPTERS=01, 03），照 spec §12 基準（含第 02 章兩個教訓：『能上 mock 面板／貫穿範例就上』『環境細節以 user 公司經驗為準』）＋ §6 來源慣例 ＋ §10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。**體例微調**：precision footer 不放「逐條查證記錄見 .reviews/…」指標（對齊 01–04，後續各章比照）。**小檔主題分工已定（見 Direction Log 2026-06-16 第 04 章）**：完整成因+解法歸第 05 章，第 04 章只承載「設定側成因」（shuffle.partitions/AQE coalesce）並指向第 05 章——寫第 05 章時務必把它寫成主體、別跟 04 重複。
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
 - [x] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）— 10 節、雙 subagent 審＋triage 修＋user 回饋修；**§2.2 改為「一律從 History Server 進」（completed/incomplete 清單）**（user 公司經驗：還在跑的 app 在 incomplete 查得到，已對 monitoring.html 逐字查證；同時解掉原 live UI 入口方向錯誤＋RM/AM 術語沒解釋）、升級 AQE `isFinalPlan` 來源（Databricks AQE 文＋SPARK-33850）、**加 mock Summary Metrics 面板＋§2.8「一條慢查詢的驗屍」貫穿範例**、EXPLAIN 示意輸出、percentile 白話；待 user 再 glance
 - [x] Task 3：`03-sql-tuning.md`（SQL 寫法）— 12 節、4 圖、雙 subagent 審＋triage 修；骨架＝「少讀（partition 裁剪／projection／pushdown）＋少搬（broadcast vs sort-merge、手動 hint、join 陷阱型別/爆量、聚合 approx_count_distinct、window、skew AQE→salting→分流）」＋§3.11 貫穿範例；triage 修：型別前提矛盾、Definitive Guide 章號 Ch.8→9、cast→NULL 會算錯、HLL++ 直覺、術語白話、§3.10 門檻降為細節；**user 加碼**：§3.5 加「5 種 join 物理模式對照表（含 BNLJ）」過聚焦 reviewer（修掉掛錯的 Databricks KB URL）；02/03 precision footer 的 .reviews 指標已移除對齊 01
-- [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）
+- [x] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）— 9 節、3 圖、雙 subagent 審＋triage 修＋user glance；骨架＝風險梯度（§4.1 心法 AQE-first＋兩前提〔改 SQL+喂統計>調 config、旋鈕分 SQL 層/資源層〕→ §4.2 AQE 三件事 → §4.3 確認 AQE＋SET 生效分野＋mock Environment 面板 → §4.4 少數 SQL 旋鈕〔shuffle.partitions/autoBroadcast/maxPartitionBytes〕→ §4.5 記憶體 execution/storage/overhead＋M/R＋spill 救法 → §4.6 core/mem/台數 worked example〔接 §1.7 的 100core/400GB→啟動參數〕→ §4.7 dynamic allocation 與多租戶〔**CDP 預設 true vs 開源 false**〕→ §4.8 排程作業配置貫穿範例 → §4.9〕；Step A 查證：adaptive.enabled true(3.2+)/shuffle.partitions 200/advisoryPartitionSizeInBytes 64MB/autoBroadcast 10MB/maxPartitionBytes 128MB/memory.fraction 0.6(heap−300MB)/storageFraction 0.5/memoryOverheadFactor 0.10/dynamicAllocation 開源 false·CDP true 皆對齊；triage 修：補 heap 定義、重畫記憶體圖（顯示扣 300MB 再分 0.6/0.4 順序、去 §12 禁的 `←`）、解釋 ÷1.1、補資源層「在哪設/Livy/請平台」對 Hue 落地、gloss external shuffle service/SLA、SET 全稱補 static SQL config 例外、「多給 task」改具體、overhead 用途貼官方字、5 core→「至多約 5」貼 Cloudera、20GB 口徑與 §1.7 同步（含 overhead 總額）；小檔分工定案（見 Direction Log）
 - [ ] Task 5：`05-storage-efficiency.md`（儲存效率）
 - [ ] Task 6：`06-engine-selection.md`（引擎選用）
 - [ ] Task 7：`07-pyspark-dataframe-api.md`（DataFrame API 進階）
@@ -160,6 +160,7 @@
 - 2026-06-16（第 02 章 user 回饋）：(1) **live UI / port 4040 不提**——user 公司經驗：還在跑的 application 一樣在 History Server 的 **incomplete** 清單查得到，故 §2.2 改成「不分跑中/跑完，一律從 History Server 進，清單分 completed/incomplete」（已對 `monitoring.html` 逐字查證：列 incomplete＋completed、incomplete 含還在跑或崩潰未收尾者、間歇更新預設 10s、需 `spark.eventLog.enabled`）。附帶好處：解掉前一版 reviewer 抓到的「live UI 入口方向寫反」＋ reader 抓到的「ResourceManager/ApplicationMaster 沒給人話」。(2) **要實際範例對照**（純文字難想像）——加 mock Summary Metrics 面板（示意數字）＋ §2.8「一條慢查詢的驗屍」貫穿走查；數字皆示意，章末已標、轉 HTML 時可換公司環境真實截圖。後續各章比照：能上 mock 面板/貫穿範例就上。
 - 2026-06-16（第 03 章）：(1) 寫完第 03 章「SQL 寫法優化」，骨架＝「少讀／少搬」兩主軸，每招原理→SQL before/after→EXPLAIN/UI→取捨；雙審 triage 修（§3.11/§3.7 型別前提矛盾、Definitive Guide 章號、cast→NULL 會算錯非只慢、HLL++ 直覺、隱式轉換/笛卡兒積白話、§3.10 AQE skew 門檻數字降為「細節」）。(2) **user 要求補「Spark 各種 join 模式介紹與比較」**（點名 BroadcastNestedLoopJoin）→ 在 §3.5 末尾加 5 種 join 物理模式對照表＋「非等值 join 退化成 BNLJ（O(n×m)）、看到先檢查少不少一個 `=`」；因章內 §3.6–3.12 交叉引用多，**刻意做成 §3.5 內小節而非新節**以免重編號斷鏈（spec §12.6）；過一輪聚焦 technical reviewer，修掉一個掛錯情境的 Databricks KB URL（該頁其實講 NOT IN，改以官方 Perf Tuning「依有無 equi-join key 分流」撐、O(n×m) 標為 nested loop 定義性成本）。(3) **體例微調**：precision footer 不再放「逐條查證記錄見 .reviews/…」指標（對齊 user 先前對 01 章的精簡）；已套用 02、03，後續各章比照。
 - 2026-06-15：**採納 architecture round-1 建議，新增營運專章** `08-operating-data-pipelines.md`（手冊 9→10 章）。原因：營運線（終極目標）原散落 08 場景條列、資料品質驗證零覆蓋、特徵洩漏只一句。新章用 01 深度教冪等/回填/排程相依/資料品質驗證/時間點正確性/監控/表維護；原場景章變 09（回歸純索引）、速查變 10。優化線 01–07 不動。spec/index/plan 已同步重編號。
+- 2026-06-16（第 04 章）：(1) 寫完第 04 章「Spark 設定（AQE-first）」，骨架＝風險梯度（先 AQE-first→低風險 SQL 層旋鈕→高風險資源層→多租戶）；雙審 triage 修（補 heap 定義、重畫記憶體圖去 §12 禁的 `←`、解釋 ÷1.1、補資源層在哪設/Livy 對 Hue 落地、gloss external shuffle service/SLA、SET 全稱補 static SQL config 例外）。reviewer 證實技術骨幹零事實錯誤。(2) **小檔（HDFS 小碎檔）主題分工定案**（user 問「適合寫在第 04 章嗎」）：完整「成因+解法」（partition 設計/目標檔案大小/compaction/寫出前 repartition·coalesce/bucketing）**歸第 05 章**（spec §5 已排定、全書交叉引用都指向那）；**第 04 章只承載「設定側成因」**——shuffle.partitions 設太大/AQE coalesce → 寫出小檔——並指向第 05 章。已在 §4.4 補一句點明因果。寫第 05 章時務必把小檔寫成主體、勿與 04 重複。
 
 ---
 
