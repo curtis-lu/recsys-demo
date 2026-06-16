@@ -127,12 +127,12 @@
 
 ## Progress Tracker
 
-> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02 章已寫完、雙 subagent 審＋triage 修，且第 02 章已納入 user 回饋（§2.2 改走 History Server 的 completed/incomplete 清單、加 mock Summary Metrics 面板＋§2.8 慢查詢驗屍貫穿範例）。**下一步＝Task 3 寫第 03 章「SQL 寫法優化」**，照 spec §12 基準（含第 02 章兩個教訓：『能上 mock 面板／貫穿範例就上』『環境細節以 user 公司經驗為準』，見 Direction Log 2026-06-16）＋ §6 來源慣例 ＋ §10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01、02、03 章已寫完、雙 subagent 審＋triage 修＋user glance。第 03 章另按 user 要求在 §3.5 加「Spark 5 種 join 物理模式對照表（含 BroadcastNestedLoopJoin）」並過一輪聚焦 reviewer。**下一步＝Task 4 寫第 04 章「Spark 設定（AQE-first）」**，照 spec §12 基準（含第 02 章兩個教訓：『能上 mock 面板／貫穿範例就上』『環境細節以 user 公司經驗為準』，見 Direction Log 2026-06-16）＋ §6 來源慣例 ＋ §10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。**體例微調**：precision footer 不再放「逐條查證記錄見 .reviews/…」指標（對齊 01；02/03 已移除，後續各章比照）。
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
 - [x] Task 2：`02-diagnose-with-spark-ui.md`（Spark UI 診斷）— 10 節、雙 subagent 審＋triage 修＋user 回饋修；**§2.2 改為「一律從 History Server 進」（completed/incomplete 清單）**（user 公司經驗：還在跑的 app 在 incomplete 查得到，已對 monitoring.html 逐字查證；同時解掉原 live UI 入口方向錯誤＋RM/AM 術語沒解釋）、升級 AQE `isFinalPlan` 來源（Databricks AQE 文＋SPARK-33850）、**加 mock Summary Metrics 面板＋§2.8「一條慢查詢的驗屍」貫穿範例**、EXPLAIN 示意輸出、percentile 白話；待 user 再 glance
-- [ ] Task 3：`03-sql-tuning.md`（SQL 寫法）
+- [x] Task 3：`03-sql-tuning.md`（SQL 寫法）— 12 節、4 圖、雙 subagent 審＋triage 修；骨架＝「少讀（partition 裁剪／projection／pushdown）＋少搬（broadcast vs sort-merge、手動 hint、join 陷阱型別/爆量、聚合 approx_count_distinct、window、skew AQE→salting→分流）」＋§3.11 貫穿範例；triage 修：型別前提矛盾、Definitive Guide 章號 Ch.8→9、cast→NULL 會算錯、HLL++ 直覺、術語白話、§3.10 門檻降為細節；**user 加碼**：§3.5 加「5 種 join 物理模式對照表（含 BNLJ）」過聚焦 reviewer（修掉掛錯的 Databricks KB URL）；02/03 precision footer 的 .reviews 指標已移除對齊 01
 - [ ] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）
 - [ ] Task 5：`05-storage-efficiency.md`（儲存效率）
 - [ ] Task 6：`06-engine-selection.md`（引擎選用）
@@ -158,6 +158,7 @@
 - 2026-06-15：**新增第三個審稿角色 C（完整度與架構審查員）**，跨整本看邏輯架構/章節順序/深度，確保「Spark 新手讀完能長期穩定營運排程與特徵庫」這個終極能力目標達成。里程碑跑（outline 定/大改、每寫完數章、最終 pass），不逐章。spec §10.4、§11 已更新；模板見下方「審稿 subagent prompt 模板」。round-1 在「只有 outline + 第 01 章」時即跑（早期抓結構缺口）。
 - 2026-06-15：**每章必附資料來源**（user 要求）。每個重要概念段落末尾加「📚 來源」footer（代表性出處＋連結）、章末加「資料來源與精確度說明」（列簡化／無逐字出處處＋版本對齊）。目的＝讓讀者自行驗證、看得出哪裡不完全精確。來源限官方/核心開發者/指定書籍，不引未認證部落格；連結用可達頁（工具對 3.3.x 404→用 latest+註明改版本號）。01 章已套用為範本。spec §6 已加此慣例。
 - 2026-06-16（第 02 章 user 回饋）：(1) **live UI / port 4040 不提**——user 公司經驗：還在跑的 application 一樣在 History Server 的 **incomplete** 清單查得到，故 §2.2 改成「不分跑中/跑完，一律從 History Server 進，清單分 completed/incomplete」（已對 `monitoring.html` 逐字查證：列 incomplete＋completed、incomplete 含還在跑或崩潰未收尾者、間歇更新預設 10s、需 `spark.eventLog.enabled`）。附帶好處：解掉前一版 reviewer 抓到的「live UI 入口方向寫反」＋ reader 抓到的「ResourceManager/ApplicationMaster 沒給人話」。(2) **要實際範例對照**（純文字難想像）——加 mock Summary Metrics 面板（示意數字）＋ §2.8「一條慢查詢的驗屍」貫穿走查；數字皆示意，章末已標、轉 HTML 時可換公司環境真實截圖。後續各章比照：能上 mock 面板/貫穿範例就上。
+- 2026-06-16（第 03 章）：(1) 寫完第 03 章「SQL 寫法優化」，骨架＝「少讀／少搬」兩主軸，每招原理→SQL before/after→EXPLAIN/UI→取捨；雙審 triage 修（§3.11/§3.7 型別前提矛盾、Definitive Guide 章號、cast→NULL 會算錯非只慢、HLL++ 直覺、隱式轉換/笛卡兒積白話、§3.10 AQE skew 門檻數字降為「細節」）。(2) **user 要求補「Spark 各種 join 模式介紹與比較」**（點名 BroadcastNestedLoopJoin）→ 在 §3.5 末尾加 5 種 join 物理模式對照表＋「非等值 join 退化成 BNLJ（O(n×m)）、看到先檢查少不少一個 `=`」；因章內 §3.6–3.12 交叉引用多，**刻意做成 §3.5 內小節而非新節**以免重編號斷鏈（spec §12.6）；過一輪聚焦 technical reviewer，修掉一個掛錯情境的 Databricks KB URL（該頁其實講 NOT IN，改以官方 Perf Tuning「依有無 equi-join key 分流」撐、O(n×m) 標為 nested loop 定義性成本）。(3) **體例微調**：precision footer 不再放「逐條查證記錄見 .reviews/…」指標（對齊 user 先前對 01 章的精簡）；已套用 02、03，後續各章比照。
 - 2026-06-15：**採納 architecture round-1 建議，新增營運專章** `08-operating-data-pipelines.md`（手冊 9→10 章）。原因：營運線（終極目標）原散落 08 場景條列、資料品質驗證零覆蓋、特徵洩漏只一句。新章用 01 深度教冪等/回填/排程相依/資料品質驗證/時間點正確性/監控/表維護；原場景章變 09（回歸純索引）、速查變 10。優化線 01–07 不動。spec/index/plan 已同步重編號。
 
 ---

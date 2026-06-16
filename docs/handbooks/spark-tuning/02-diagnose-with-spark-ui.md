@@ -296,7 +296,7 @@ flowchart TB
 4. **§2.6／§2.8 的 Summary Metrics 表與驗屍數字**：皆為**示意，非真實截圖或輸出**（為幫你想像畫面與診斷流程），數字屬虛構、實際以你環境為準。轉成 HTML 時，這些示意面板可替換成你公司環境的**真實 Spark UI 截圖**，會更直觀。
 5. **§2.6 Summary Metrics 的分位數列標**（Min / 25th percentile / Median / 75th percentile / Max）：屬 Spark UI Stage 頁的標準呈現，但查證工具未能逐字擷取這幾個列標字樣；`Shuffle spill (memory/disk)`、`Shuffle Read Size / Records` 的定義字句則已逐字查證。
 
-> 引用原則：以 Spark 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。逐條查證記錄見 [`.reviews/02-diagnose-with-spark-ui__reviewer.md`](.reviews/02-diagnose-with-spark-ui__reviewer.md)。
+> 引用原則：以 Spark 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。
 
 ---
 
