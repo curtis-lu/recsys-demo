@@ -583,11 +583,14 @@ def dataset(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    # Pre-run crash-safe provenance stubs (skip-if-present, no `latest` symlink);
+    # the post-run writes below upgrade these to status=completed + artifacts.
     if not dry_run and not list_nodes:
         stub_base_dir = data_dir / "dataset" / base_v
         _write_manifest_stub(stub_base_dir, {
             "version": base_v, "pipeline": "dataset", "parameters": params_dataset,
             "base_dataset_version": base_v,
+            # feature_table_fingerprint on base only; variants inherit via parent_version.
             "feature_table_fingerprint": feature_table_fp,
         }, run_context.run_id)
         _write_manifest_stub(stub_base_dir / "train_variants" / train_v, {
@@ -749,6 +752,8 @@ def training(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the
+    # post-run write below upgrades it to status=completed + artifacts.
     if not dry_run and not list_nodes:
         stub_kwargs = {
             "version": mv,
@@ -757,6 +762,8 @@ def training(
             "base_dataset_version": base_v,
             "train_variant_id": train_v,
         }
+        # Omit when None: the manifest uses no _NONE_PLACEHOLDER sentinel (unlike
+        # runtime_params, whose placeholder is for the Spark substitution layer).
         if cal_v is not None:
             stub_kwargs["calibration_variant_id"] = cal_v
         _write_manifest_stub(data_dir / "models" / mv, stub_kwargs, run_context.run_id)
@@ -765,6 +772,8 @@ def training(
         "training", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        # Always passed; _maybe_warn_retrain is a no-op under --list-nodes
+        # (it returns early before plan exists) and only fires on sliced runs.
         retrain_advice={"models_dir": data_dir / "models", "model_version": mv},
     )
     if not executed:
