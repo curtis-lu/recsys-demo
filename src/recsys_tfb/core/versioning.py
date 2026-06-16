@@ -362,3 +362,36 @@ def build_manifest_metadata(
     if artifacts is not None:
         metadata["artifacts"] = artifacts
     return metadata
+
+
+def find_latest_completed_model_version(models_dir: Path) -> tuple[str, str] | None:
+    """Return ``(version, created_at)`` of the most recently created model whose
+    manifest ``status`` is ``"completed"`` (or legacy: no ``status`` field).
+
+    Skips running/failed and unreadable manifests, and the ``best`` symlink.
+    ``created_at`` is an ISO-8601 string, so lexicographic max == newest.
+    Returns ``None`` when nothing qualifies or ``models_dir`` does not exist.
+    """
+    if not models_dir.is_dir():
+        return None
+    best: tuple[str, str] | None = None  # (created_at, version)
+    for child in models_dir.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        manifest_path = child / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            with open(manifest_path) as f:
+                m = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if m.get("status", "completed") != "completed":
+            continue
+        created = m.get("created_at", "")
+        version = m.get("version", child.name)
+        if best is None or created > best[0]:
+            best = (created, version)
+    if best is None:
+        return None
+    return (best[1], best[0])

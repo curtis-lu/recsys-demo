@@ -752,3 +752,47 @@ class TestComputeSearchId:
         a = compute_search_id(_tp(), "b", "t", "cal1")
         b = compute_search_id(_tp(), "b", "t", "cal2")
         assert a != b
+
+
+class TestFindLatestCompletedModelVersion:
+    def _write(self, d, manifest):
+        import json
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "manifest.json", "w") as f:
+            json.dump(manifest, f)
+
+    def test_picks_most_recent_completed(self, tmp_path):
+        from recsys_tfb.core.versioning import find_latest_completed_model_version
+        self._write(tmp_path / "old11111", {
+            "version": "old11111", "status": "completed",
+            "created_at": "2026-06-01T00:00:00+00:00"})
+        self._write(tmp_path / "new22222", {
+            "version": "new22222", "status": "completed",
+            "created_at": "2026-06-10T00:00:00+00:00"})
+        assert find_latest_completed_model_version(tmp_path) == (
+            "new22222", "2026-06-10T00:00:00+00:00")
+
+    def test_skips_running_and_broken(self, tmp_path):
+        from recsys_tfb.core.versioning import find_latest_completed_model_version
+        self._write(tmp_path / "crashed1", {
+            "version": "crashed1", "status": "running",
+            "created_at": "2026-06-20T00:00:00+00:00"})
+        (tmp_path / "garbage1").mkdir()
+        (tmp_path / "garbage1" / "manifest.json").write_text("{not json")
+        self._write(tmp_path / "good3333", {
+            "version": "good3333", "status": "completed",
+            "created_at": "2026-06-05T00:00:00+00:00"})
+        assert find_latest_completed_model_version(tmp_path) == (
+            "good3333", "2026-06-05T00:00:00+00:00")
+
+    def test_legacy_missing_status_counts_as_completed(self, tmp_path):
+        from recsys_tfb.core.versioning import find_latest_completed_model_version
+        self._write(tmp_path / "legacy11", {
+            "version": "legacy11", "created_at": "2026-06-07T00:00:00+00:00"})
+        assert find_latest_completed_model_version(tmp_path) == (
+            "legacy11", "2026-06-07T00:00:00+00:00")
+
+    def test_none_when_no_models(self, tmp_path):
+        from recsys_tfb.core.versioning import find_latest_completed_model_version
+        assert find_latest_completed_model_version(tmp_path) is None
+        assert find_latest_completed_model_version(tmp_path / "missing") is None
