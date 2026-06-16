@@ -157,7 +157,8 @@ def _format_retrain_advisory(model_version, retrain_nodes, latest):
     model, or ``None``.
     """
     lines = [
-        f"[retrain] model_version={model_version} — 無既有 finalized 模型。",
+        f"[retrain] model_version={model_version} — 此版本尚無 finalized 模型"
+        "（可能因 parameters 異動而版本漂移）。",
         f"[retrain] 此切片將 auto-include 並重新訓練：{', '.join(retrain_nodes)}",
     ]
     if latest is not None:
