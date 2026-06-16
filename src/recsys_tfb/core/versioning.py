@@ -369,12 +369,17 @@ def find_latest_completed_model_version(models_dir: Path) -> tuple[str, str] | N
     manifest ``status`` is ``"completed"`` (or legacy: no ``status`` field).
 
     Skips running/failed and unreadable manifests, and the ``best`` symlink.
-    ``created_at`` is an ISO-8601 string, so lexicographic max == newest.
-    Returns ``None`` when nothing qualifies or ``models_dir`` does not exist.
+    ``created_at`` is an ISO-8601 string (always written by
+    :func:`build_manifest_metadata`), so lexicographic max == newest; the
+    ``created_at``/``version`` fallbacks below only guard manifests not produced
+    by that function. Returns ``None`` when nothing qualifies or ``models_dir``
+    does not exist.
     """
     if not models_dir.is_dir():
         return None
-    best: tuple[str, str] | None = None  # (created_at, version)
+    # internal accumulator is (created_at, version); the return value flips it
+    # to (version, created_at) to match the documented signature.
+    best: tuple[str, str] | None = None
     for child in models_dir.iterdir():
         if not child.is_dir() or child.is_symlink():
             continue
