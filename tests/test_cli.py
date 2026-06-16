@@ -570,3 +570,19 @@ class TestHpoCheckpointingConfig:
         with open("conf/base/parameters_training.yaml") as f:
             cfg = _yaml.safe_load(f)
         assert cfg.get("hpo_checkpointing") is True
+
+
+def test_write_pipeline_manifest_stamps_completed(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_pipeline_manifest
+    vdir = tmp_path / "ab12cd34"
+    _write_pipeline_manifest(
+        version_dir=vdir,
+        metadata_kwargs={"version": "ab12cd34", "pipeline": "training",
+                         "parameters": {"lr": 0.01}, "artifacts": ["model"]},
+        run_id="run-1",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m["status"] == "completed"
+    assert m["artifacts"] == ["model"]

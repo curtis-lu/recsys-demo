@@ -270,7 +270,7 @@ def _write_pipeline_manifest(
     params_name: Optional[str] = None,
     params_dict: Optional[dict] = None
 ):
-    metadata = build_manifest_metadata(**metadata_kwargs)
+    metadata = build_manifest_metadata(**metadata_kwargs, status="completed")
     metadata["run_id"] = run_id
     if extra_metadata is not None:
         metadata.update(extra_metadata)
