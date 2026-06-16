@@ -94,11 +94,16 @@ provenance 可還原。
 
 ### 防呆分層
 
-**Tier 0 — 觀測（generic，含 dataset；近零成本）**
+**Tier 0 — 觀測（近零成本）**
 - 既有 `logger.info("Model version: %s", mv)` 保留。
-- slice plan 輸出（`_format_slice_plan`）在「model 生產節點被 auto-include」時，明講
-  「將（重）訓：finalize_model, …」，讓 `--dry-run` 與正常 run 都看得到。此為 generic、
-  dataset 同享。
+- slice plan 輸出（`_format_slice_plan`）保留既有的 auto-included 節點清單。
+
+> **〔已撤回，2026-06-16 final review〕** 原本規劃在 `_format_slice_plan` 另加一行
+> 明講「將（重）訓：finalize_model, …」（含 dataset）。實作階段撤回：`model` 是
+> **training-only dataset**，這個「model 生產節點被 auto-include」的泛用標註**只會在
+> training 觸發**，而那裡 Tier 1 的 `[retrain]` WARN 已大聲顯示（且 `--dry-run` 也看得到）。
+> 故 Tier 0 的這條與 Tier 1 完全重疊、屬冗餘，不實作。對應的 `_format_slice_plan` 測試項
+> 一併移除（見 §9）。
 
 **Tier 1 — advisory（僅 training；讀本次新增的 stub）**
 - 觸發條件（pipeline-aware、精確）：**sliced run（`--from-node`/`--only-node`）的 slice
@@ -141,8 +146,8 @@ provenance 可還原。
   ```
 - `_write_pipeline_manifest(...)`：以 `status="completed"` 建 metadata（此函式只在 post-run
   成功時被呼叫，恆為已完成）。
-- `_format_slice_plan(...)`（Tier 0）：當 plan 的 `auto_included` 含 model 生產節點時，輸出
-  明確的「將（重）訓：…」字句。
+- `_format_slice_plan(...)`：**不變**（Tier 0 的「將（重）訓」加行已撤回，見 §5；保留既有
+  auto-included 清單即可）。
 - 新增 advisory helper（Tier 1，training-only），於切片完成後、有 `from_node`/`only_node`
   且 slice plan auto-include 了 model 生產節點時呼叫：組並 `logger.warning(...)` 上述三段
   訊息（用 `find_latest_completed_model_version` 取最接近版本）。**不**改變執行流程。
@@ -165,13 +170,15 @@ provenance 可還原。
 | 中途 crash | 寫 stub `running` | 不會到達 | `running` + 完整 params（可還原）；`latest` **未**前進 |
 | `--from-node predict` 落進既有 `<mv>/`（model 在） | 見 manifest → **skip** | 覆寫（既有行為） | `completed`；無 advisory（model 在、不重訓） |
 | `--from-node predict`、model_version 漂移（model 不在） | 寫新 `<mv_new>` stub `running` | 重訓後覆寫 `completed` | **Tier 1 WARN**（含既有版本 + diff 提示）後照跑重訓 |
-| `--dry-run` / `--list-nodes` | **閘擋掉**，不寫 | 不適用 | 不寫任何東西；plan 仍顯示「將（重）訓」 |
+| `--dry-run`（sliced training、model 不在） | **閘擋掉**，不寫 | 不適用 | 不寫任何東西；Tier 1 `[retrain]` WARN 仍印出（advisory 置於 dry-run early-return 之前） |
+| `--list-nodes` | **閘擋掉**，不寫 | 不適用 | 不寫任何東西；advisory 不觸發（plan 尚未計算） |
 
 ## 8. 邊界情況與已知限制
 
 ### 邊界情況（本設計處理）
-- **dry-run / list-nodes**：`if not dry_run and not list_nodes` 閘確保 stub 不寫；advisory
-  在 `--dry-run` 下仍可透過 plan 輸出看到「將（重）訓」（Tier 0）。
+- **dry-run / list-nodes**：`if not dry_run and not list_nodes` 閘確保 stub 不寫。Tier 1
+  advisory 置於 `_execute_pipeline` 的 dry-run early-return **之前**，故 `--dry-run` 下仍會印
+  `[retrain]` WARN；`--list-nodes` 早於 plan 計算就 return，advisory 不觸發。
 - **dataset `latest` symlink 安全**：stub 絕不寫 symlink，crash 不會讓 `latest` 指向不完整
   dataset。
 - **crash 後重跑（同版本）**：stub 因 manifest 已存在（`running`）被 skip；post-run 成功時
@@ -201,11 +208,10 @@ provenance 可還原。
   內嵌完整 `parameters`。
 - **`find_latest_completed_model_version`**：多版本取最近 completed；忽略 `running`/壞 manifest；
   全空回 `None`。
-- **Tier 0 plan 輸出**：`_format_slice_plan` 在 model 生產節點被 auto-include 時含「將（重）訓」
-  字句。
 - **Tier 1 advisory**：給定 (sliced + model 生產節點在 auto_included) → 產生含 `mv`、既有版本、
-  diff 提示的 WARN 文字；model 在（未 auto-include）→ 不產生；非 sliced full run → 不產生。
-  測 advisory 的訊息組裝（純函式），不需跑 pipeline。
+  diff 提示的 WARN 文字；model 在（未 auto-include）→ 不產生；非 sliced full run → 不產生；
+  calibration（`calibrate_model` 生產 model）亦觸發。測 advisory 的訊息組裝（純函式），不需跑
+  pipeline。（Tier 0 的 `_format_slice_plan` 測試項已隨 Tier 0 撤回而移除。）
 - **生命週期回歸**：stub（`running` + 完整 params）→ `_write_pipeline_manifest` 翻成 `completed`
   + 補 `artifacts`。
 - **既有 manifest 形狀測試**：更新為預期含 `status: "completed"`。
