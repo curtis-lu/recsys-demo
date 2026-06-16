@@ -215,6 +215,7 @@ def _execute_pipeline(
     only_node: Optional[str] = None,
     dry_run: bool = False,
     list_nodes: bool = False,
+    retrain_advice: Optional[dict] = None,
 ) -> bool:
     """Run the pipeline; returns False when nothing was executed
     (--dry-run / --list-nodes early exits) so callers skip post-run
@@ -274,6 +275,8 @@ def _execute_pipeline(
     if plan is not None:
         for line in _format_slice_plan(plan, total):
             logger.info(line)
+    for line in _maybe_warn_retrain(plan, retrain_advice):
+        logger.warning(line)
     if dry_run:
         if plan is None:
             logger.info(
@@ -580,6 +583,23 @@ def dataset(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    if not dry_run and not list_nodes:
+        stub_base_dir = data_dir / "dataset" / base_v
+        _write_manifest_stub(stub_base_dir, {
+            "version": base_v, "pipeline": "dataset", "parameters": params_dataset,
+            "base_dataset_version": base_v,
+            "feature_table_fingerprint": feature_table_fp,
+        }, run_context.run_id)
+        _write_manifest_stub(stub_base_dir / "train_variants" / train_v, {
+            "version": train_v, "pipeline": "dataset", "parameters": params_dataset,
+            "parent_version": base_v, "variant_kind": "train",
+        }, run_context.run_id)
+        if cal_v is not None:
+            _write_manifest_stub(stub_base_dir / "calibration_variants" / cal_v, {
+                "version": cal_v, "pipeline": "dataset", "parameters": params_dataset,
+                "parent_version": base_v, "variant_kind": "calibration",
+            }, run_context.run_id)
+
     executed = _execute_pipeline(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
@@ -729,10 +749,23 @@ def training(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    if not dry_run and not list_nodes:
+        stub_kwargs = {
+            "version": mv,
+            "pipeline": "training",
+            "parameters": params_training,
+            "base_dataset_version": base_v,
+            "train_variant_id": train_v,
+        }
+        if cal_v is not None:
+            stub_kwargs["calibration_variant_id"] = cal_v
+        _write_manifest_stub(data_dir / "models" / mv, stub_kwargs, run_context.run_id)
+
     executed = _execute_pipeline(
         "training", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        retrain_advice={"models_dir": data_dir / "models", "model_version": mv},
     )
     if not executed:
         return
