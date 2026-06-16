@@ -648,6 +648,23 @@ class TestBuildManifestMetadata:
         )
         assert "feature_table_fingerprint" not in meta
 
+    def test_status_included_when_passed(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="training",
+            parameters={"lr": 0.01},
+            status="running",
+        )
+        assert meta["status"] == "running"
+
+    def test_status_omitted_when_none(self):
+        meta = build_manifest_metadata(
+            version="abc12345",
+            pipeline="training",
+            parameters={"lr": 0.01},
+        )
+        assert "status" not in meta
+
 
 class TestWeightingVersioning:
     def _ds(self, carry=None):

@@ -319,6 +319,7 @@ def build_manifest_metadata(
     version: str,
     pipeline: str,
     parameters: dict,
+    status: str | None = None,
     base_dataset_version: str | None = None,
     train_variant_id: str | None = None,
     calibration_variant_id: str | None = None,
@@ -342,6 +343,8 @@ def build_manifest_metadata(
         "git_commit": get_git_commit(),
         "parameters": parameters,
     }
+    if status is not None:
+        metadata["status"] = status
     if base_dataset_version is not None:
         metadata["base_dataset_version"] = base_dataset_version
     if train_variant_id is not None:
