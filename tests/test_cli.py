@@ -445,6 +445,43 @@ def test_sample_weight_extra_absent_returns_none(tmp_path):
     assert _sample_weight_extra(tmp_path) is None
 
 
+def test_write_manifest_stub_writes_running(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_manifest_stub
+    vdir = tmp_path / "ab12cd34"
+    _write_manifest_stub(
+        vdir,
+        {"version": "ab12cd34", "pipeline": "training",
+         "parameters": {"training": {"lr": 0.01}},
+         "base_dataset_version": "base1234", "train_variant_id": "trv12345"},
+        run_id="run-xyz",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m["status"] == "running"
+    assert m["run_id"] == "run-xyz"
+    assert m["parameters"] == {"training": {"lr": 0.01}}
+    assert not (vdir / "latest").exists()           # no symlink
+    assert not (vdir / "parameters_training.json").exists()  # no sidecar
+
+
+def test_write_manifest_stub_skips_if_present(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_manifest_stub
+    vdir = tmp_path / "ab12cd34"
+    vdir.mkdir()
+    (vdir / "manifest.json").write_text(json.dumps(
+        {"version": "ab12cd34", "status": "completed", "sentinel": True}))
+    _write_manifest_stub(
+        vdir,
+        {"version": "ab12cd34", "pipeline": "training", "parameters": {}},
+        run_id="run-new",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m == {"version": "ab12cd34", "status": "completed", "sentinel": True}
+
+
 from recsys_tfb.__main__ import (
     _format_node_list,
     _format_slice_plan,
