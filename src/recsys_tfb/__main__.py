@@ -149,6 +149,27 @@ def _format_node_list(pipe, can_load) -> list[str]:
     return lines
 
 
+def _format_retrain_advisory(model_version, retrain_nodes, latest):
+    """Loud WARN lines for an unexpected retrain triggered by a sliced resume.
+
+    ``latest`` is ``(version, created_at)`` of the nearest existing completed
+    model, or ``None``.
+    """
+    lines = [
+        f"[retrain] model_version={model_version} — 無既有 finalized 模型。",
+        f"[retrain] 此切片將 auto-include 並重新訓練：{', '.join(retrain_nodes)}",
+    ]
+    if latest is not None:
+        ver, created = latest
+        lines.append(f"[retrain] 最接近的既有模型：{ver} (completed, {created})")
+        lines.append(
+            "[retrain] 想對它重跑？比對你現在的 parameters_training.yaml 與 "
+            f"data/models/{ver}/manifest.json 的 parameters（training: 區塊）。"
+        )
+    lines.append("[retrain] 仍依契約繼續執行（缺料自動補跑）…")
+    return lines
+
+
 def _slice_extra(from_node, only_node):
     """Manifest extra_metadata breadcrumb for sliced runs."""
     if from_node:

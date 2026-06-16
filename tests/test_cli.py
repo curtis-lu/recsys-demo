@@ -586,3 +586,24 @@ def test_write_pipeline_manifest_stamps_completed(tmp_path):
         m = json.load(f)
     assert m["status"] == "completed"
     assert m["artifacts"] == ["model"]
+
+
+def test_format_retrain_advisory_with_latest():
+    from recsys_tfb.__main__ import _format_retrain_advisory
+    lines = _format_retrain_advisory(
+        "ab12cd34", ["finalize_model", "tune_hyperparameters"],
+        ("old11111", "2026-06-01T00:00:00+00:00"))
+    text = "\n".join(lines)
+    assert "ab12cd34" in text
+    assert "finalize_model" in text and "tune_hyperparameters" in text
+    assert "old11111" in text
+    assert "data/models/old11111/manifest.json" in text
+
+
+def test_format_retrain_advisory_without_latest():
+    from recsys_tfb.__main__ import _format_retrain_advisory
+    lines = _format_retrain_advisory("ab12cd34", ["finalize_model"], None)
+    text = "\n".join(lines)
+    assert "ab12cd34" in text
+    assert "finalize_model" in text
+    assert "manifest.json" not in text  # no nearest-version section
