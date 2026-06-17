@@ -27,6 +27,7 @@ from recsys_tfb.core.versioning import (
     compute_model_version,
     compute_search_id,
     compute_train_variant_id,
+    find_latest_completed_model_version,
     read_manifest,
     resolve_base_dataset_version,
     resolve_model_version,
@@ -149,6 +150,51 @@ def _format_node_list(pipe, can_load) -> list[str]:
     return lines
 
 
+def _format_retrain_advisory(model_version, retrain_nodes, latest):
+    """Loud WARN lines for an unexpected retrain triggered by a sliced resume.
+
+    ``latest`` is ``(version, created_at)`` of the nearest existing completed
+    model, or ``None``.
+    """
+    lines = [
+        f"[retrain] model_version={model_version} — 此版本尚無 finalized 模型"
+        "（可能因 parameters 異動而版本漂移）。",
+        f"[retrain] 此切片將 auto-include 並重新訓練：{', '.join(retrain_nodes)}",
+    ]
+    if latest is not None:
+        ver, created = latest
+        lines.append(f"[retrain] 最接近的既有模型：{ver} (completed, {created})")
+        lines.append(
+            "[retrain] 想對它重跑？比對你現在的 parameters_training.yaml 與 "
+            f"data/models/{ver}/manifest.json 的 parameters（training: 區塊）。"
+        )
+    lines.append("[retrain] 仍依契約繼續執行（缺料自動補跑）…")
+    return lines
+
+
+def _maybe_warn_retrain(plan, retrain_advice):
+    """Return loud-WARN lines when a sliced run will auto-include the model
+    producer (``model`` was missing -> finalize/calibrate pulled in), else ``[]``.
+
+    ``retrain_advice`` is ``{"models_dir": Path, "model_version": str}`` (passed
+    only by the training command) or ``None``.
+    """
+    if retrain_advice is None or plan is None:
+        return []
+    # auto_included maps node -> tuple[str, ...] of missing dataset names; `in`
+    # is element membership. Fire iff the missing dataset is exactly `model`,
+    # i.e. the model producer (finalize_model, or calibrate_model under
+    # calibration) had to be pulled in -> an unexpected retrain.
+    if not any("model" in missing for missing in plan.auto_included.values()):
+        return []
+    latest = find_latest_completed_model_version(retrain_advice["models_dir"])
+    # Pass every pulled-in node (not just the model producer) so the advisory
+    # shows the full retrain footprint of the model's upstream closure.
+    return _format_retrain_advisory(
+        retrain_advice["model_version"], list(plan.auto_included), latest
+    )
+
+
 def _slice_extra(from_node, only_node):
     """Manifest extra_metadata breadcrumb for sliced runs."""
     if from_node:
@@ -170,6 +216,7 @@ def _execute_pipeline(
     only_node: Optional[str] = None,
     dry_run: bool = False,
     list_nodes: bool = False,
+    retrain_advice: Optional[dict] = None,
 ) -> bool:
     """Run the pipeline; returns False when nothing was executed
     (--dry-run / --list-nodes early exits) so callers skip post-run
@@ -229,6 +276,8 @@ def _execute_pipeline(
     if plan is not None:
         for line in _format_slice_plan(plan, total):
             logger.info(line)
+    for line in _maybe_warn_retrain(plan, retrain_advice):
+        logger.warning(line)
     if dry_run:
         if plan is None:
             logger.info(
@@ -248,6 +297,19 @@ def _execute_pipeline(
     return True
 
 
+def _write_manifest_stub(version_dir: Path, metadata_kwargs: dict, run_id: str):
+    """Pre-run provenance stub: write manifest.json with status=running so a
+    crash before the post-run write still records which parameters defined this
+    version. Skip-if-present (never clobber an existing manifest); writes no
+    `latest` symlink and no params sidecar (the stub already embeds parameters).
+    """
+    if (version_dir / "manifest.json").exists():
+        return
+    metadata = build_manifest_metadata(**metadata_kwargs, status="running")
+    metadata["run_id"] = run_id
+    write_manifest(version_dir, metadata)
+
+
 def _write_pipeline_manifest(
     version_dir: Path,
     metadata_kwargs: dict,
@@ -257,7 +319,7 @@ def _write_pipeline_manifest(
     params_name: Optional[str] = None,
     params_dict: Optional[dict] = None
 ):
-    metadata = build_manifest_metadata(**metadata_kwargs)
+    metadata = build_manifest_metadata(**metadata_kwargs, status="completed")
     metadata["run_id"] = run_id
     if extra_metadata is not None:
         metadata.update(extra_metadata)
@@ -522,6 +584,26 @@ def dataset(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    # Pre-run crash-safe provenance stubs (skip-if-present, no `latest` symlink);
+    # the post-run writes below upgrade these to status=completed + artifacts.
+    if not dry_run and not list_nodes:
+        stub_base_dir = data_dir / "dataset" / base_v
+        _write_manifest_stub(stub_base_dir, {
+            "version": base_v, "pipeline": "dataset", "parameters": params_dataset,
+            "base_dataset_version": base_v,
+            # feature_table_fingerprint on base only; variants inherit via parent_version.
+            "feature_table_fingerprint": feature_table_fp,
+        }, run_context.run_id)
+        _write_manifest_stub(stub_base_dir / "train_variants" / train_v, {
+            "version": train_v, "pipeline": "dataset", "parameters": params_dataset,
+            "parent_version": base_v, "variant_kind": "train",
+        }, run_context.run_id)
+        if cal_v is not None:
+            _write_manifest_stub(stub_base_dir / "calibration_variants" / cal_v, {
+                "version": cal_v, "pipeline": "dataset", "parameters": params_dataset,
+                "parent_version": base_v, "variant_kind": "calibration",
+            }, run_context.run_id)
+
     executed = _execute_pipeline(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
@@ -671,10 +753,29 @@ def training(
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
+    # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the
+    # post-run write below upgrades it to status=completed + artifacts.
+    if not dry_run and not list_nodes:
+        stub_kwargs = {
+            "version": mv,
+            "pipeline": "training",
+            "parameters": params_training,
+            "base_dataset_version": base_v,
+            "train_variant_id": train_v,
+        }
+        # Omit when None: the manifest uses no _NONE_PLACEHOLDER sentinel (unlike
+        # runtime_params, whose placeholder is for the Spark substitution layer).
+        if cal_v is not None:
+            stub_kwargs["calibration_variant_id"] = cal_v
+        _write_manifest_stub(data_dir / "models" / mv, stub_kwargs, run_context.run_id)
+
     executed = _execute_pipeline(
         "training", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        # Always passed; _maybe_warn_retrain is a no-op under --list-nodes
+        # (it returns early before plan exists) and only fires on sliced runs.
+        retrain_advice={"models_dir": data_dir / "models", "model_version": mv},
     )
     if not executed:
         return
