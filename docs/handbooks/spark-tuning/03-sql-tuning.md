@@ -79,7 +79,7 @@ flowchart LR
 
 ## 3.3 少讀（二）：只取需要的欄位（別 `SELECT *`）
 
-**原理**。生產用的大表常常是**寬表**（欄位很多的表）——一張特徵表動輒幾百、上千個欄位。第 05 章會講，這些表幾乎都用 **Parquet／ORC** 這類**列式（columnar）**格式存：同一個**欄位**的值連續存在一起（注意「列式」這個譯名容易讓人想反——它是把**同一欄位**收在一起存，不是把整列綁在一起）。列式的好處正是「**要哪幾欄就只讀哪幾欄**」，用不到的欄位的資料塊根本不會從磁碟讀出來。所以 `SELECT *` 和 `SELECT cust_id, amount` 在一張 1000 欄的寬表上，讀進來的量可能差幾十倍。
+**原理**。生產用的大表常常是**寬表**（欄位很多的表）——一張特徵表動輒幾百、上千個欄位。第 05 章會講，這些表幾乎都用 **Parquet／ORC** 這類**欄式（columnar）**格式存：把**同一個欄位**的值收在一起存（「欄」就是 column；相對地像 CSV 那種把整列綁在一起的叫逐列／行式存）。欄式的好處正是「**要哪幾欄就只讀哪幾欄**」，用不到的欄位的資料塊根本不會從磁碟讀出來。所以 `SELECT *` 和 `SELECT cust_id, amount` 在一張 1000 欄的寬表上，讀進來的量可能差幾十倍。
 
 **SQL before/after**。
 
@@ -95,7 +95,7 @@ SELECT cust_id, txn_cnt_30d FROM cust_features WHERE month = '2026-05';
 
 **取捨**。這招幾乎是**純賺、沒有壞處**，唯一要注意的是別在不知不覺中又把欄位要回來——例如 `SELECT *` 之後再 `JOIN`、或包一層 view 用 `*`，都會讓 column pruning 失效。原則：**從讀檔到最終輸出，全程只帶你真的會用到的欄位**。也因此，「先 `SELECT *` 撈進來再慢慢挑」這種 ad-hoc 習慣，在大表上代價很高。
 
-> 📚 **來源**：列式格式只讀取用到的欄位（column pruning）、配合謂詞下推見 [Spark SQL Parquet](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html) 與《Spark: The Definitive Guide》Ch.9（Data Sources）。⚠️「1000 欄差幾十倍」是依欄位數與型別的量級示意，非逐字數字。
+> 📚 **來源**：欄式格式只讀取用到的欄位（column pruning）、配合謂詞下推見 [Spark SQL Parquet](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html) 與《Spark: The Definitive Guide》Ch.9（Data Sources）。⚠️「1000 欄差幾十倍」是依欄位數與型別的量級示意，非逐字數字。
 
 ---
 
