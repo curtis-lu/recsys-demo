@@ -38,6 +38,24 @@ flowchart TB
 
 > 📚 **來源**：driver／executor／task 的角色定義見 [Spark Cluster Overview（Glossary）](https://spark.apache.org/docs/latest/cluster-overview.html)（executor 嚴格是「行程」，同頁）；HDFS 把檔案切塊分存見 [Apache Hadoop HDFS 架構](https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html)。
 
+### 順帶認識：你查的「表」存在哪、又是誰記得它在哪
+
+你在 Hue 打 `SELECT … FROM card_txn`，這個 `card_txn` 其實是**兩樣東西合起來**：
+
+- **資料本身**：一堆檔案，照前面說的存在 **HDFS** 上（被切塊、分散在多台機器）。
+- **「這張表長什麼樣」的登記**：另有一份目錄，記著「有哪些表、每張表有哪些欄位、分成哪些分區、檔案放在 HDFS 的哪個路徑」。這份目錄叫 **Hive Metastore**（常簡稱 HMS；它存的是「描述資料的資料」，即 metadata／中繼資料）。
+
+所以一條查詢真正發生的事是：引擎先問 **Metastore**「`card_txn` 在哪、欄位是什麼」，拿到 HDFS 路徑後，再去 **HDFS** 把資料讀進來算。**HDFS 存的是位元組、Metastore 記的是「有哪些表、在哪裡」**——分工不同、缺一不可。（第 05 章 §5.6 會講，`ANALYZE TABLE` 算出的表大小統計也是存在這份 Metastore 裡；第 06 章整章則建立在「多個引擎共用這同一份 Metastore」之上。）
+
+**這裡要趁早澄清一個常見混淆**：「Hive」這個字，在你的平台上其實指**兩件不同的事**——
+
+1. **Hive 表 ／ Hive Metastore**：上面這份**三個引擎共用**的表目錄與資料（這三個引擎是 Spark、Hive，以及 **Impala**——一種專做高速互動查詢的引擎，第 06 章詳談）。你用哪個引擎查，看的都是同一份登記、同一份 HDFS 資料。
+2. **Hive 這個查詢引擎**：實際把 SQL 跑起來的其中一種引擎（另兩種是 Spark、Impala）。下面 §1.9、以及第 06 章講的「Hive 快不快、該選哪個引擎」，是這個意思。
+
+把這兩個分開，後面很多話才不會打結：「我用 Spark 也能查別人用 Hive 建的表」講的是第 1 點（**共用目錄**）；「Spark 通常比老 Hive 快」（§1.9）講的是第 2 點（**引擎**）。**你平常在 Hue 選的那個「Hive」，就是第 2 個（引擎）；它查到的表，登記在第 1 個（Metastore）裡。**
+
+> 📚 **來源**：CDP 上 Hive／Impala／Spark 共用同一個 Hive Metastore（記錄表／分區／欄位／儲存位置的中繼目錄）、同一張 external 表跨引擎可讀見 [Cloudera CDP — Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html)；Spark SQL 透過 Hive Metastore 存取既有 Hive 表見 [Spark SQL — Hive Tables](https://spark.apache.org/docs/latest/sql-data-sources-hive-tables.html)。⚠️「三引擎共用同一份資料／Metastore」是第 06 章的立論，本節只先建立心智模型；Hive Metastore 與 §1.2／§5.4 那個 HDFS NameNode（記「檔案清單」的）是兩份不同的目錄，別混為一談。
+
 ---
 
 ## 1.2 你的資料被切成幾塊？partition 從哪來
@@ -267,7 +285,7 @@ flowchart TB
 
 ## 1.9 為什麼 Spark 通常比老 Hive（MapReduce）快
 
-你可能也用 Hive 跑過 SQL。老式的 Hive 跑在 **MapReduce** 上時，一條多步驟的查詢會被拆成一個個 MapReduce job，**每個 job 之間都把整批中間結果落地到 HDFS**，下一個 job 再從 HDFS 讀回來——多步驟就是多次「寫 HDFS→讀 HDFS」的來回。
+你可能也用 Hive 跑過 SQL。（提醒：這裡說的「Hive」是那個**查詢引擎**，不是 §1.1 那份三引擎共用的 Hive 表／Metastore——同名、不同事。）老式的 Hive 跑在 **MapReduce** 上時，一條多步驟的查詢會被拆成一個個 MapReduce job，**每個 job 之間都把整批中間結果落地到 HDFS**，下一個 job 再從 HDFS 讀回來——多步驟就是多次「寫 HDFS→讀 HDFS」的來回。
 
 Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上一節那條 SQL 的 stage 圖就是），在一個 stage 內把多個窄依賴運算**在記憶體裡串著做、中間不落地**，只有遇到 shuffle 才把中間結果寫到**本機磁碟**（§1.6 的 shuffle write，且是本機磁碟、不是 HDFS）。比起 MapReduce 每個 job 之間都來回一趟 HDFS，Spark 少掉大量磁碟來回，這是它通常更快的主因。
 
@@ -304,6 +322,7 @@ Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上
 4. **§1.7** 胖／瘦 executor 的 80／20 GB —— 把總額度乾淨對切的示意，未扣每台的 overhead。
 5. **§1.8** stage DAG 圖 —— 省略了 sort-merge join 的 Sort 算子。
 6. **「一個 action 一個 job」** —— 心智模型；少數 action（如讀 CSV 推斷 schema）會被拆成多個 job。
+7. **§1.1（順帶認識）** Hive Metastore 與 HDFS NameNode 是兩份不同的目錄（前者記「有哪些表」、後者記「有哪些檔案塊」）；「三引擎共用同一份 Metastore」是第 06 章的立論，本章只先建立心智模型、不展開跨引擎存取的細節（如 managed 表要走 HWC，見 §5.8／第 06 章）。
 
 
 > 引用原則：以 Spark 官方文件、Apache Hadoop 官方文件、Cloudera CDP 官方文件、Spark 核心開發者文章（如 Databricks Catalyst 文）、《Spark: The Definitive Guide》(Chambers & Zaharia) 為限，不引用未經認證的個人部落格。

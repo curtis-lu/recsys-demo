@@ -62,6 +62,45 @@ flowchart TB
 
 > 📚 **來源**：Parquet 為欄式格式、Spark 自動只讀需要的欄（column pruning）、`spark.sql.parquet.filterPushdown` 預設 `true`（謂詞下推依資料塊統計跳塊）見 [Spark SQL — Parquet Files](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；欄式格式的壓縮與只讀必要欄優勢見《Spark: The Definitive Guide》Ch.9（Data Sources）。⚠️ 本手冊用「欄式（columnar）」指 column-oriented（同一欄收在一起）；繁中慣例欄＝column、列＝row，故不採易被讀成 row 的「列式」一詞，全書與第 03 章 §3.3 一致。
 
+### 進階：Parquet 檔內部長什麼樣，以及這如何決定「跳得掉多少」
+
+上面說欄式格式能「跳掉不可能命中的資料塊」，但那個「塊」到底是什麼、為什麼有時候明明下推了卻幾乎沒跳掉？這要看進 Parquet 檔的內部。**這節偏進階——日常查詢用不到也沒關係；但當你要負責產出、調校共用大表時，懂這層能解釋很多「為什麼快／為什麼沒效果」。**
+
+一個 Parquet 檔的內部結構，由大到小是這樣：
+
+```mermaid
+flowchart TB
+    FILE["一個 Parquet 檔"] --> RG1["Row Group 1<br/>（列群組，預設 ~128MB）"]
+    FILE --> RG2["Row Group 2<br/>…"]
+    FILE --> FOOT["檔尾 metadata<br/>每個 row group、每一欄的<br/>min／max／null 數等統計"]
+    RG1 --> CC1["欄塊：cust_id"]
+    RG1 --> CC2["欄塊：amount"]
+    RG1 --> CC3["欄塊：…"]
+    CC2 --> PG["Page（頁，預設 ~1MB）<br/>真正存值的最小單位，壓縮在這層做"]
+```
+
+- **Row group（列群組）**：把整個檔「橫著」切成幾大段，每段預設約 **128MB**；每個 row group 內部，才是「同一欄收在一起」。它是 Spark／Impala 跳塊（skip）的**基本單位**——§5.2 講的「跳掉不可能命中的塊」，跳的就是一整個 row group。
+- **Column chunk（欄塊）**：一個 row group 裡某一欄的全部值。column pruning（§3.3 只讀需要的欄）就是只挑你要那幾欄的欄塊讀。
+- **Page（頁）**：欄塊再切成許多頁，預設約 **1MB**，是壓縮（§5.3）與編碼真正作用的最小單位。
+
+**為什麼這決定了「跳得掉多少」**：Parquet 在檔尾替**每個 row group、每一欄**存了 min／max／null 數等統計（較新的 Parquet 還有 page 層級的 **page index**，能跳到更細的頁）。`WHERE amount > 1000` 下推後，引擎逐個 row group 看：某個 row group 的 `amount` 最大值若 < 1000，**整段 128MB 連讀都不讀**。
+
+關鍵的反面就在這裡——**統計能不能幫上忙，取決於資料怎麼排**：
+
+- 若 `amount`（或你常拿來篩的欄）在檔裡是**亂序**的，幾乎每個 row group 的 [min, max] 都橫跨整個範圍 → 沒有一段排除得掉 → **下推了卻一段都跳不掉**。
+- 若資料**照常篩的欄排序**（寫出前 `SORT BY`、或叢集化）再寫出，每個 row group 的範圍就**又窄又不重疊** → 大量 row group 一眼排除。**這是「為什麼有人下推有效、有人無效」最常見的答案**，也是你產表時能主動做的一招：把最常用來過濾的欄排好再寫出。
+
+**幾個你產表、調 Spark／Hive 時會碰到的進階點**：
+
+- **字典編碼（dictionary encoding）**：低基數欄位（如 `product_type` 只有 22 種值）Parquet 預設會字典化——存一份「編號→值」對照表＋一串編號，**又省空間、又多一種跳塊**（某個 row group 的字典裡根本沒有你要的值，就整段跳過）。所以「低基數＋有排序」的欄，壓縮與跳塊都特別有效。
+- **向量化讀取（vectorized reader）**：Spark 讀 Parquet 預設**一次一批（預設 4096 列）**用欄式批次解碼（`spark.sql.parquet.enableVectorizedReader` 預設 `true`、批次大小 `spark.sql.parquet.columnarReaderBatchSize` 預設 4096），比逐列快很多。要知道它**對某些複雜巢狀型別（如 `array`／`struct` 這種「欄裡還有結構」的型別）會自動關掉**、退回逐列——若掃描莫名變慢，這是可疑點之一。
+- **row group 別大過 HDFS block**：理想上一個 row group 落在**單一 HDFS block**（**HDFS block**＝HDFS 把檔案存到磁碟時切的固定大小區塊，§5.4 詳談，預設 128MB）內，讀一段 row group 就不必跨兩個 block／跨機器拉。寫出時若把 `parquet.block.size`（名字雖叫 block.size，它控制的其實是 **row group** 大小、不是 HDFS block）設得比 HDFS block 還大，反而製造跨 block 的遠端讀。（Parquet 官方建議 row group 512MB–1GB，是搭配「HDFS block 也設這麼大」的情境，不是叫你在 128MB block 上硬塞 1GB row group。）
+- **min／max 幫不上的高基數等值查詢，靠 bloom filter**：篩 `WHERE card_no = 'xxxx'` 這種高基數、又沒排序的欄，min／max 範圍幾乎一定涵蓋到 → 跳不掉。Parquet／ORC 都支援對指定欄寫入 **bloom filter**（一種能快速回答「這段裡一定沒有這個值」的小索引），補上這個洞。屬進階、預設多半不開，要用時依你平台設定為指定欄開啟。
+
+**ORC 也是同一套，只是換了名字**：CDP 上 Hive 的受管表預設用 ORC（§5.2／§5.8），它的對應物是——**stripe**（≈ row group，預設約 64MB）、**每 10000 列一個 row group index**（注意 ORC 把這層更細的索引單位也叫「row group」，跟 Parquet 那個 ~128MB 的 row group 不是同一層、別混；它是更細的跳塊單位）、stripe／row-group 層級的 min／max 統計、以及同樣可選的 **bloom filter**。所以上面「排序讓統計變窄、低基數好壓、bloom filter 補高基數」這些心法，在 Hive／ORC 一樣成立——你只要知道兩邊是同一回事、名詞不同即可。
+
+> 📚 **來源**：Parquet 檔的 row group → column chunk → page 結構、檔尾 metadata、page index（頁層級跳讀）、dictionary 與 bloom filter 見 [Apache Parquet — File Format](https://parquet.apache.org/docs/file-format/)；row group 預設 128MB（`parquet.block.size`）、page 預設 1MB，Parquet 官方建議 row group 512MB–1GB（假設較大的 HDFS block）見 [Apache Parquet — Configurations](https://parquet.apache.org/docs/file-format/configurations/)；`spark.sql.parquet.filterPushdown`／`enableVectorizedReader` 預設 `true`、`columnarReaderBatchSize` 預設 4096、`aggregatePushdown`／`mergeSchema` 預設 `false` 見 [Spark SQL — Parquet Files](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；ORC 的 row group index（預設每 10000 列）／min-max 統計／bloom filter（Hive 1.2 起）見 [Apache ORC — Indexes](https://orc.apache.org/docs/indexes.html)、stripe 預設 64MB（`orc.stripe.size` = 67108864）見 [Apache ORC — Hive Configuration](https://orc.apache.org/docs/hive-config.html)。⚠️ row group 128MB 是 parquet-hadoop 函式庫的預設值（`parquet.block.size`），Spark 寫出沿用；確切值可由叢集設定覆寫，以你平台為準。「排序讓 row group 統計變窄→跳更多」方向正確，實際跳掉比例依資料分佈與 row group 大小而異，無官方逐字數字；向量化讀取對哪些型別會退回逐列依 Spark 版本而異。
+
 ---
 
 ## 5.3 壓縮：snappy（快）vs zstd／gzip（小）的取捨
