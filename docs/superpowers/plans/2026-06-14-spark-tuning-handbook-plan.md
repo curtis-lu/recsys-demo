@@ -127,7 +127,7 @@
 
 ## Progress Tracker
 
-> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01–06 章已寫完並 commit。第 06 章「引擎選用：Spark vs Hive on Tez vs Impala」（10 節、4 圖、PRIOR=01/02/05）骨架＝§6.1 同一份資料三引擎都能查＋在哪選引擎（看你從哪個入口下 SQL）→§6.2 三引擎跑法（Impala 常駐 daemon/MPP/不容錯、Hive on Tez 非 §1.9 那個老 MapReduce、Spark 你熟那套）＋大量術語鋪墊→§6.3 決策表＋決策樹（界線分明只一條：秒級互動走 Impala、容錯重批次別走 Impala）→§6.4 三引擎驗屍工具（Spark UI / Tez UI / Impala PROFILE，心法同第 02 章）→§6.5 共用表威力與陷阱→§6.6 `REFRESH` vs `INVALIDATE METADATA`＋CDP 事件驅動自動同步→§6.7 ACID 從零講起〔兩個 `###`：先補基礎(交易白話/A·C·I·D/base+delta+compaction/有 vs 沒有/三情境)＋跨引擎限制矩陣〕→§6.8 取捨→§6.9 一天三引擎貫穿→§6.10 帶走；1 輪 reviewer(技術零事實錯、5 點查證全逐字對齊)＋2 輪 reader＋§6.7 補審、triage 全修；修了 3 個 stale Cloudera URL(blog→canonical、runtime/7.1.0→docs-archive；ch05 §5.8 同款一起修)。**下一步＝Task 7 寫第 07 章「PySpark DataFrame API（進階）」**（`07-pyspark-dataframe-api.md`，PRIOR_CHAPTERS=01, 03, 04），照 spec §12 基準＋§6 來源慣例＋§10 審稿流程（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）；須查證重點見下方 Task 7（SQL 與 DataFrame 編到同一 Catalyst/效能等價、cache/persist storage levels 與預設、collect/toPandas 拉回 driver、coalesce vs repartition、Python UDF 序列化成本）。**體例慣例（01–06 已立）**：precision footer 不放 .reviews 指標；深主題/插章中間優先做 `###` 小節避免重編號（§6.7 即兩個 `###`）；能上 mock 面板/貫穿範例就上；環境細節以 user 公司經驗為準；**審稿後若再加料一定要補審**（ch05、ch06 §6.7 皆如此）；reader 常抓「基礎設施/縮寫詞第一次出現沒當場定義」→第一次承重就 gloss；commit 後**不必**還原 graphify-out/GRAPH_REPORT.md（已 untracked）。
+> **▶ 目前進度 / 下一步（/compact 後先讀這裡）**：第 01–06 章已寫完並 commit；**Hive/Parquet 補基礎**（ch01 §1.1 Metastore／兩個 Hive、ch05 §5.2 Parquet/ORC 內部結構進階節、ch03 gloss；雙審＋triage 全修）已 commit（`c90841d`）。**【2026-06-19 調整】**(1) ch07 PySpark **暫緩**，先寫營運線；(2) 原單一營運專章**拆兩章**＋全書 9→11 章重編號（**08 營運一·排程可靠性／09 營運二·資料產品正確性／10 場景索引／11 速查**；spec §5、index、ch01–06 交叉引用、本 plan 皆已改）。第 06 章「引擎選用：Spark vs Hive on Tez vs Impala」（10 節、4 圖、PRIOR=01/02/05）骨架＝§6.1 同一份資料三引擎都能查＋在哪選引擎（看你從哪個入口下 SQL）→§6.2 三引擎跑法（Impala 常駐 daemon/MPP/不容錯、Hive on Tez 非 §1.9 那個老 MapReduce、Spark 你熟那套）＋大量術語鋪墊→§6.3 決策表＋決策樹（界線分明只一條：秒級互動走 Impala、容錯重批次別走 Impala）→§6.4 三引擎驗屍工具（Spark UI / Tez UI / Impala PROFILE，心法同第 02 章）→§6.5 共用表威力與陷阱→§6.6 `REFRESH` vs `INVALIDATE METADATA`＋CDP 事件驅動自動同步→§6.7 ACID 從零講起〔兩個 `###`：先補基礎(交易白話/A·C·I·D/base+delta+compaction/有 vs 沒有/三情境)＋跨引擎限制矩陣〕→§6.8 取捨→§6.9 一天三引擎貫穿→§6.10 帶走；1 輪 reviewer(技術零事實錯、5 點查證全逐字對齊)＋2 輪 reader＋§6.7 補審、triage 全修；修了 3 個 stale Cloudera URL(blog→canonical、runtime/7.1.0→docs-archive；ch05 §5.8 同款一起修)。**下一步＝Task 8 寫 `08-operating-pipelines.md`（營運一）**（PRIOR=01,03,04,05），照 spec §5「08」大綱＋§12 基準＋§6 來源（**Airflow/dbt 官方文件已納入權威來源**）＋§10 審稿（worktree `.worktrees/spark-handbook`、分支 `feat/spark-tuning-handbook`）。設計經 brainstorming＋grill-me 鎖定**四個決策**：①grounding＝抽象→具體，每節「原則→落地」（dbt 為主／Airflow·cron／CDP SQL）；②排程器＝Airflow＋cron 雙軌（dbt=轉換層、Airflow=排程層觸發 dbt、dbt 非排程器）；③特徵時間模型＝(entity, snapshot_date) snapshot-partition → §9.3 的 as-of＝「讀對分區」非大 join；④compaction 表種＝external Parquet/ORC → **重寫**（`INSERT OVERWRITE` 併小檔）非 `ALTER COMPACT`。要點：**到處用具體程式**；§9.5 資料版本＝build-version 欄／audit 帳本（**通用、不點名框架**）／雙層 `(snapshot_date, build_version)` 分區留歷史。下方 Task 8／Task 8b 為兩章細節。**體例慣例（01–06 已立）**：precision footer 不放 .reviews 指標；深主題/插章中間優先做 `###` 小節避免重編號（§6.7 即兩個 `###`）；能上 mock 面板/貫穿範例就上；環境細節以 user 公司經驗為準；**審稿後若再加料一定要補審**（ch05、ch06 §6.7 皆如此）；reader 常抓「基礎設施/縮寫詞第一次出現沒當場定義」→第一次承重就 gloss；commit 後**不必**還原 graphify-out/GRAPH_REPORT.md（已 untracked）。
 
 - [x] Task 0：scaffold（目錄 + index 骨架 + .reviews/）
 - [x] Task 1：`01-how-spark-runs-your-sql.md`（心智模型）— 10 節、三輪雙 subagent 審＋修（含 partition 來源、application/job/stage/task 層級、executor 取捨、shuffle 三麻煩、端到端範例、Spark vs Hive-MR）；待 user 最終 glance
@@ -136,11 +136,12 @@
 - [x] Task 4：`04-spark-config.md`（Spark 設定 AQE-first）— 9 節、3 圖、雙 subagent 審＋triage 修＋user glance；骨架＝風險梯度（§4.1 心法 AQE-first＋兩前提〔改 SQL+喂統計>調 config、旋鈕分 SQL 層/資源層〕→ §4.2 AQE 三件事 → §4.3 確認 AQE＋SET 生效分野＋mock Environment 面板 → §4.4 少數 SQL 旋鈕〔shuffle.partitions/autoBroadcast/maxPartitionBytes〕→ §4.5 記憶體 execution/storage/overhead＋M/R＋spill 救法 → §4.6 core/mem/台數 worked example〔接 §1.7 的 100core/400GB→啟動參數〕→ §4.7 dynamic allocation 與多租戶〔**CDP 預設 true vs 開源 false**〕→ §4.8 排程作業配置貫穿範例 → §4.9〕；Step A 查證：adaptive.enabled true(3.2+)/shuffle.partitions 200/advisoryPartitionSizeInBytes 64MB/autoBroadcast 10MB/maxPartitionBytes 128MB/memory.fraction 0.6(heap−300MB)/storageFraction 0.5/memoryOverheadFactor 0.10/dynamicAllocation 開源 false·CDP true 皆對齊；triage 修：補 heap 定義、重畫記憶體圖（顯示扣 300MB 再分 0.6/0.4 順序、去 §12 禁的 `←`）、解釋 ÷1.1、補資源層「在哪設/Livy/請平台」對 Hue 落地、gloss external shuffle service/SLA、SET 全稱補 static SQL config 例外、「多給 task」改具體、overhead 用途貼官方字、5 core→「至多約 5」貼 Cloudera、20GB 口徑與 §1.7 同步（含 overhead 總額）；小檔分工定案（見 Direction Log）
 - [x] Task 5：`05-storage-efficiency.md`（儲存效率）— 10 節、3 圖、**兩輪**雙 subagent 審＋triage 修＋user 兩輪深問加料；骨架＝「§03 花用本錢/§05 存本錢」（§5.2 欄式 Parquet/ORC→§5.3 壓縮 snappy→§5.4 partition 設計＋`###`DataNode/locality→§5.5 小檔成因[含成因四上游就碎+openCost 虛胖]/徵兆/解法[SQL hint REPARTITION/COALESCE]＋`###`進一步＋`###`兩個實戰問題[寫分區表帶分區欄位、CTE hint 放最外層]→§5.6 ANALYZE[非自動/NOSCAN/FOR COLUMNS/CBO opt-in]→§5.7 bucketing[Spark/Hive hash 不相容]→§5.8 Hive3 managed(ACID/ORC/HWC) vs external(Spark CREATE TABLE 預設/Metastore 共用 Hue/Impala 可查/dbt-spark)/schema 只加不改→§5.9 貫穿範例)；Step A 查證：parquet.compression snappy/filterPushdown true/ANALYZE 語法/cbo.enabled·joinReorder·statistics.size.autoUpdate 皆 false(翻 3.3.2 SQLConf 原始碼)/openCostInBytes 4MB/HDFS block 128MB·副本 3/CDP managed=ACID·Spark CREATE TABLE=external·managed 需 HWC/bucketing 不相容/partitioning hints(COALESCE/REPARTITION/RANGE/REBALANCE)/data locality 等級；**誠實更正**：小碎檔對 locality 影響間接偏弱(真正傷的是不可切分大檔)；**全書 列式→欄式**(03 同步)；小檔出處改 Cloudera 官方部落格(原掛錯 HDFS Architecture 頁)；r2 reader 抓過載→§5.4 改結論先行/§5.5 拆兩個 `###`
 - [x] Task 6：`06-engine-selection.md`（引擎選用）— 10 節、4 圖、1 輪 reviewer＋2 輪 reader＋§6.7 補審＋triage 修；Step A 查證 5 點全逐字對齊官方（`REFRESH` 增量/同步/輕量/可刷單一 PARTITION vs `INVALIDATE METADATA` 丟快取/非同步/昂貴/不帶表名 flush 全部/官方原話 prefer REFRESH；Impala 讀 full ACID(ORC)·不可寫·insert-only 可讀寫；CDP Hive 只跑 Tez(指定 MapReduce 報錯)；Impala 不容錯；CDP catalogd 輪詢 HMS 自動同步 `hms_event_polling_interval_s`）；triage 修：**3 個 stale Cloudera URL**(blog→`www.cloudera.com/blog/technical/…`、`runtime/7.1.0`→`docs-archive`；**ch05 §5.8 同款一起修**)、補 Impala 官方 MPP/circumvents-MapReduce 出處、Tez UI 出處改正、§6.8「記憶體導向」軟化為「重 join/聚合吃記憶體」(官方:多數查詢 CPU-bound)；reader→大量基礎設施詞就地 gloss(YARN/容器/MPP/HMS/daemon-d 命名/DAG/full ACID/HQL/ad-hoc/OOM/fragment≈stage/catalog vs Metastore)、§6.3 決策表兩判準改可操作、§6.7 散文矩陣改「表種×引擎×讀/寫」對照表；**user 追問→§6.7 改寫成「不預設懂 ACID」**：兩個 `###`(先補基礎從『HDFS 表＝一堆檔案只能整批覆寫』→ACID 補改既有列→A/C/I/D 白話→base+delta+compaction→有 vs 沒有→三情境;跨引擎限制矩陣)；§6.7 補審抓 4 must-fix(交易/transaction 未定義+撞銀行『一筆交易帳』、`commit`、`MERGE` 首見、`full` 懸空)全補
-- [ ] Task 7：`07-pyspark-dataframe-api.md`（DataFrame API 進階）
-- [ ] Task 8：`08-operating-data-pipelines.md`（**營運專章**：冪等/回填/排程相依/資料品質/時間點正確性/監控/表維護）← architecture C round-1 補
-- [ ] Task 9：`09-scenario-playbooks.md`（場景對應＝索引）
-- [ ] Task 10：`10-cheatsheet-and-glossary.md`（速查與名詞表）
-- [ ] Task 11：完稿 `index.md`（導覽/連結/如何使用/兩條學習路線）
+- [ ] Task 7：`07-pyspark-dataframe-api.md`（DataFrame API 進階）— **暫緩**，先寫 08/09（user 2026-06-19 調序）
+- [ ] Task 8：`08-operating-pipelines.md`（**營運一·排程可靠性**：三層落地 dbt/Airflow/cron；冪等可重跑/排程相依/回填/監控退化/檔案統計維護〔compaction 重寫〕）← 原營運專章拆兩章之一
+- [ ] Task 8b：`09-data-product-correctness.md`（**營運二·資料產品正確性**：資料品質驗證〔dbt tests＋純 SQL〕/時間點正確性·特徵洩漏〔snapshot-partition〕/共用特徵庫多消費者契約/資料版本與可重現性）← 拆兩章之二
+- [ ] Task 9：`10-scenario-playbooks.md`（場景對應＝索引；PRIOR 含 07–09）
+- [ ] Task 10：`11-cheatsheet-and-glossary.md`（速查與名詞表）
+- [ ] Task 11：完稿 `index.md`（導覽/連結/如何使用/兩條學習路線；拆章導覽已更新、最終再校）
 - [ ] Task 12：轉 HTML（內嵌 mermaid.js、離線檢查、回頂鈕、跨章導覽）
 - [ ] Task 13：全書最終 pass（reader 通讀 + architecture C 架構審查）+ 修正
 - 架構審查(C)：round-1 已跑（outline+01，產出營運專章決策）；里程碑續跑（每寫完數章、最終 pass）
@@ -163,6 +164,7 @@
 - 2026-06-16（第 04 章）：(1) 寫完第 04 章「Spark 設定（AQE-first）」，骨架＝風險梯度（先 AQE-first→低風險 SQL 層旋鈕→高風險資源層→多租戶）；雙審 triage 修（補 heap 定義、重畫記憶體圖去 §12 禁的 `←`、解釋 ÷1.1、補資源層在哪設/Livy 對 Hue 落地、gloss external shuffle service/SLA、SET 全稱補 static SQL config 例外）。reviewer 證實技術骨幹零事實錯誤。(2) **小檔（HDFS 小碎檔）主題分工定案**（user 問「適合寫在第 04 章嗎」）：完整「成因+解法」（partition 設計/目標檔案大小/compaction/寫出前 repartition·coalesce/bucketing）**歸第 05 章**（spec §5 已排定、全書交叉引用都指向那）；**第 04 章只承載「設定側成因」**——shuffle.partitions 設太大/AQE coalesce → 寫出小檔——並指向第 05 章。已在 §4.4 補一句點明因果。寫第 05 章時務必把小檔寫成主體、勿與 04 重複。
 - 2026-06-19（第 06 章）：(1) 寫完第 06 章「引擎選用：Spark vs Hive on Tez vs Impala」（10 節、4 圖、PRIOR=01/02/05）。Step A 5 點查證全逐字對齊官方（見 Task 6 行）。(2) reviewer 判技術零事實錯＋交叉引用零失誤；唯一真缺陷＝**3 個 stale Cloudera URL**（blog 改 canonical `www.cloudera.com/blog/technical/…`、`runtime/7.1.0` 改 `docs-archive`；**ch05 §5.8 同款 7.1.0 連結一起修**）；另補 Impala 官方 MPP/原生執行出處、把『Impala 不容錯』標為 Cloudera 文的「對比隱含」、§6.8『記憶體導向』軟化（官方:多數查詢 CPU-bound、只特定運算 memory-intensive）。(3) reader 主訴：決策樹/取捨頁能照著選、**但一票基礎設施詞沒當場定義**（YARN/容器/MPP/HMS/daemon/DAG/full ACID/HQL/ad-hoc/OOM/fragment）→全部第一次承重就補一句 gloss；§6.3 決策表兩個對不上號的判準（『塞不塞得進記憶體』『複雜度 vs HQL 三欄不同軸』）改可操作；§6.4 fragment≈stage、Tez UI 出處修；§6.7 散文 ACID 矩陣改『表種×引擎×讀/寫』對照表＋表種小地圖；§6.9 去後設旁白『本節沒有新東西』＋修虛線圖例。(4) **user 追問『為什麼要寫 ACID 表、有跟沒有差在哪』→ 要求補基礎、不預設懂 ACID**：§6.7 改寫成兩個 `###`——「先補基礎」從『HDFS 表＝一堆檔案、只能整批覆寫、改不了藏在檔中間的一列』→『ACID 補改既有列的能力』→A/C/I/D 白話(各配畫面)→base+delta+compaction→『有 vs 沒有』對照→三情境(更正/合規刪除被遺忘權/維度表 upsert)→反面:只是整批換掉就不需要；「跨引擎限制」矩陣。(5) **§6.7 補審**（落實『審稿後加料要補審』）：reader-r2 抓 4 must-fix——『交易(transaction)』沒先白話定義(且跟銀行『一筆交易帳』撞名)、`commit` 黑盒、`MERGE` 首見沒交代、`full` 懸空——全補；cheap：C 一致加『帳兜不攏的中間態』畫面、刪無用的 micromanaged、維度表 gloss、拿掉未定義的『重述』。(6) 體例新點：深主題用 `###` 小節（§6.7 兩個）；環境細節『在哪選引擎＝看你從哪個入口下 SQL（Hue Impala/Hive 編輯器、spark-submit/impala-shell/beeline）』以 user 公司經驗補。
 - 2026-06-18（第 05 章）：(1) 寫完第 05 章「儲存效率」，小檔成為主體（成因/徵兆/解法，SQL hint 為主、非 DataFrame API）。(2) **user 兩輪深問→大量加料**：repartition vs coalesce 怎麼選＋`coalesce` 的 n＝整段上游平行度上限（repartition 因 shuffle 切 stage 無此問題）、寫分區表要 `REPARTITION(分區欄位)`、CTE hint 放最外層 SELECT、`ANALYZE` 非自動要排程、external 表登記共用 Metastore 故 Hue/Impala 可查、dbt-spark 走 Spark CREATE TABLE 規則、補 DataNode/資料本地性小節。(3) **誠實更正**：原 §5.4 把「小碎檔傷 locality」講過頭，更正為「小碎檔主要傷 NameNode metadata/排程開銷，對 locality 影響間接偏弱；真正傷 locality 的是不可切分大檔」（reviewer 沒抓到是因為該段是審稿後才加的）。(4) **全書 `列式`→`欄式`**：繁中慣例欄=column、列=row，「列式」會被讀成 row（簡中相反），故統一欄式（columnar）；03、05 已改。(5) **體例**：審稿後再加料要補審→本章跑了兩輪雙審；r2 reviewer 翻 3.3.2 SQLConf 原始碼確認 cbo/joinReorder/statistics.size.autoUpdate 預設皆 false；r2 reader 抓出新內容過載→§5.4 改結論先行、§5.5 過載小節拆成「進一步」+「兩個實戰問題」兩個 `###`、補中間算式。(6) 小檔→NameNode 出處原掛錯 HDFS Architecture 頁→改 Cloudera 官方部落格《The Small Files Problem》(已驗證 URL)；引用原則 footer 明列「含 Cloudera 官方工程部落格 blog.cloudera.com」。
+- 2026-06-19（補基礎 ＋ 營運線拆兩章）：(0) 寫完 **Hive/Parquet 補基礎**並 commit（`c90841d`）：ch01 §1.1 新 `###` 從零講 Hive Metastore（HDFS 存位元組／Metastore 記「有哪些表」）＋當場拆「Hive 表/Metastore」vs「Hive on Tez 引擎」兩義（接 Hue anchor）；ch05 §5.2 新 `###` Parquet/ORC 內部結構進階（row group→column chunk→page、排序讓 min/max 變窄→跳更多、字典編碼/向量化讀取/`parquet.block.size`↔HDFS block/bloom filter、ORC stripe 對應）；ch03 §3.3 Parquet gloss。雙審（reviewer ACCURATE、reader 三段 LANDS）＋triage 全修（Hue 連兩個 Hive、Impala/Tez/HDFS block/巢狀型別 gloss、ORC「row group」撞名、ORC stripe 改引 `hive-config.html`）。(1) **user 調序**：ch07 PySpark **暫緩**，先寫營運線。(2) **user 要求拆兩章**（brainstorming＋grill-me 後）：原單一營運專章因納入 dbt/Airflow/cron 三層落地＋完整特徵庫＋資料版本＋到處具體程式，**單章 2–3 倍長 → 拆「08 排程可靠性」＋「09 資料產品正確性」**；全書 9→**11 章**重編號（場景→10、速查→11）。spec §5（兩章大綱）/§6（**Airflow/dbt 官方文件納入權威來源**）/index/ch01–06 交叉引用（execution refs 留 §08、混合 refs 改 §08–09、場景 §09→§10、速查 §10→§11）/本 plan 皆已改。(3) **grill-me 鎖定四決策**：①grounding＝抽象→具體、每節「原則→落地」(dbt 為主/Airflow·cron/CDP SQL)，dbt=轉換層、Airflow=排程層觸發 dbt、**dbt 非排程器**；②排程器＝Airflow＋cron 雙軌；③特徵時間模型＝**(entity, snapshot_date) snapshot-partition** → §9.3 as-of＝「讀對分區、絕不讀未來分區」非大 join；④**compaction 表種＝external Parquet/ORC** → 重寫（`INSERT OVERWRITE` 併小檔）非 `ALTER COMPACT`（後者只對 ACID 表）。(4) **user 要點**：到處用具體程式；§9.5 資料版本＝build-version 標記欄／audit 帳本（**通用、不點名 recsys 框架**）／**雙層 `(snapshot_date, build_version)` 分區留歷史**（子分區互不覆蓋、讀時須挑版本＝釘死 or current-build view、取捨吃儲存/須清理呼應 §5.4）。低風險假設已 baking（partitionOverwriteMode 教 static/dynamic＋footgun、警報 generic、回填獨立 queue 指回 §04），保留第二輪 grilling（警報管道/static-dynamic 標準/queue 隔離/manifest 是否已存在）。
 
 ---
 
@@ -352,54 +354,61 @@ git checkout -- graphify-out/GRAPH_REPORT.md
 
 ---
 
-## Task 8：第 08 章 — 營運資料排程與資料產品（營運專章）
+## Task 8：第 08 章 — 營運（一）：可靠地把排程跑起來
 
-**File:** Create `docs/handbooks/spark-tuning/08-operating-data-pipelines.md`
-**前置章：** 01, 03, 05（尤其 05 儲存）
+**File:** Create `docs/handbooks/spark-tuning/08-operating-pipelines.md`
+**前置章：** 01, 03, 04, 05
+**完整大綱見 spec §5「08-operating-pipelines.md」**（三層落地模型 dbt/Airflow/cron；§8.1 地圖＋三層模型→§8.2 冪等與可重跑→§8.3 排程相依→§8.4 回填→§8.5 監控與退化→§8.6 檔案與統計維護→§8.7 取捨→§8.8 帶走）。每節「先通用原則 → 再落地（dbt 為主／Airflow·cron／CDP SQL）」分節遞進。
 
-**內容大綱：**
-- 定位：把產出的表/特徵當成**要長期營運的服務**，正確/可靠/可維護優先於快。
-- 冪等與可重跑：`INSERT OVERWRITE ... PARTITION` + dynamic partition overwrite（覆寫單一 partition），對照 append 重跑造成重複。
-- 回填（backfill）：按 partition 分批、控資源、可中斷續跑。
-- 排程相依與資料就緒：上游沒齊不跑下游；partition 存在/列數 gate。
-- 資料品質驗證（補 C12，§11 明文要求）：列數量級、null 比例、key 唯一性、值域、對昨日漂移；不過擋下游、發警報。
-- 時間點正確性 / 特徵洩漏（C11，特徵庫命門）：只能用 snapshot date 之前資料；常見洩漏（用到未來/label 期間）；as-of join 概念。
-- 監控與退化：Spark UI/歷史看時間/資料量/shuffle 隨時間惡化。
-- 表生命週期維護：compaction、重算 `ANALYZE`、清過期 partition、schema 演進不打爛下游（呼應 §05）。
-- 多人共用資料產品：schema/SLA 契約、版本、文件。
-- 取捨：冪等覆寫 vs append；驗證嚴格 vs 誤擋；回填一次到位 vs 分批。
+**具體程式（user 要求到處落地）：** `INSERT OVERWRITE … PARTITION` ＋ `partitionOverwriteMode` static/dynamic（講 footgun）；dbt incremental `insert_overwrite` 策略；Airflow `BashOperator(dbt run)` ＋ `ExternalTaskSensor`；cron sentinel 模式；compaction-by-rewrite（external 表用 `INSERT OVERWRITE` 併小檔，**非** `ALTER COMPACT`）。
 
-**概念圖（Mermaid）：** ① 冪等覆寫 vs append（重跑後結果對照）；② 排程相依 gate（上游就緒才跑下游）；③ 時間點正確性（snapshot date 切線，只能用左邊資料）。
+**概念圖（Mermaid）：** ① 冪等覆寫 vs append（重跑結果對照）；② 排程相依 gate（Airflow sensor vs cron 時間差）。
 
-**須查證重點：** `INSERT OVERWRITE TABLE ... PARTITION` 語意；`spark.sql.sources.partitionOverwriteMode`（預設 static、dynamic 行為）；`ANALYZE TABLE` 重算統計；Hive 3 ACID compaction（major/minor）。對齊 Spark 3.3 / Hive 3.1.3 CDP。出處：Spark 3.3 SQL ref（INSERT OVERWRITE）、Configuration、Cloudera CDP/Hive 文件。
+**須查證重點：** Spark `INSERT OVERWRITE TABLE … PARTITION` 語意、`spark.sql.sources.partitionOverwriteMode`（預設 static / dynamic 行為）、`ANALYZE TABLE`（Spark 3.3）；external 表 compaction＝重寫（無 `ALTER COMPACT`，對 §5.5）；**Airflow 官方**（`BashOperator`、`ExternalTaskSensor`、`retries`/`retry_delay`、`catchup`/backfill）；**dbt 官方**（incremental ＋ dbt-spark `insert_overwrite` 策略、`ref()`/DAG、「dbt 非排程器」）。出處：Spark 3.3 SQL ref/Configuration、Cloudera CDP、airflow.apache.org、docs.getdbt.com。
 
-- [ ] Step A–F（`{CHAPTER}=08-operating-data-pipelines`，`{PRIOR_CHAPTERS}=01, 03, 05`）
+- [ ] Step A–F（`{CHAPTER}=08-operating-pipelines`，`{PRIOR_CHAPTERS}=01, 03, 04, 05`）
 
 ---
 
-## Task 9：第 09 章 — 場景對應（索引）
+## Task 8b：第 09 章 — 營運（二）：讓資料產品可信
 
-**File:** Create `docs/handbooks/spark-tuning/09-scenario-playbooks.md`
-**前置章：** 01–08
+**File:** Create `docs/handbooks/spark-tuning/09-data-product-correctness.md`
+**前置章：** 01, 03, 05, 08
+**完整大綱見 spec §5「09-data-product-correctness.md」**（§9.1 地圖→§9.2 資料品質驗證→§9.3 時間點正確性/特徵洩漏→§9.4 共用特徵庫多消費者契約→§9.5 資料版本與可重現性→§9.6 取捨→§9.7 帶走）。沿用 §08 三層落地模型。
+
+**具體程式：** dbt tests YAML（not_null/unique/accepted_values/relationships ＋ severity warn/error）＋純 Spark SQL 品質檢查；`WHERE snapshot_date=…`（讀對分區）＋誤 join 未來分區反例；§9.5 雙層 `(snapshot_date, build_version)` 分區 DDL ＋ `INSERT OVERWRITE` 子分區 ＋ current-build view（build-version 標記欄、audit 帳本＝**通用模式、不點名框架**）。
+
+**概念圖（Mermaid）：** ③ 時間點正確性切線（snapshot 分區，只能讀左邊／不讀未來）。
+
+**須查證重點：** **dbt 官方** generic tests ＋ test severity（warn/error）；as-of join 在 Spark 3.3 無原生語法（snapshot-partition 模型不需要，只當「若特徵帶任意 effective_date 才需要」補充）；schema 演進「只加不改」（對 §5.8）；雙層分區留歷史的取捨（吃儲存/須挑版本/清理政策呼應 §5.4 高基數分區）。出處：docs.getdbt.com、Spark 3.3 SQL ref、Cloudera CDP。
+
+- [ ] Step A–F（`{CHAPTER}=09-data-product-correctness`，`{PRIOR_CHAPTERS}=01, 03, 05, 08`）
+
+---
+
+## Task 9：第 10 章 — 場景對應（索引）
+
+**File:** Create `docs/handbooks/spark-tuning/10-scenario-playbooks.md`
+**前置章：** 01–09
 
 **內容大綱（純索引/指路，不重教概念）：**
 - 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)` → 引 §02/§03/§06。
-- 場景 2 排程產表：冪等/可重跑、控檔大小、資源穩 → 引 §08（營運）+ §03/§04/§05。
-- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 引 §08 + §03/§05/§07。
+- 場景 2 排程產表：冪等/可重跑、控檔大小、資源穩 → 引 §08（排程可靠性）+ §09（品質/版本）+ §03/§04/§05。
+- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 引 §09（時間點/特徵庫契約）+ §03/§05/§07/§08。
 - 每場景：典型流程 → 對應章節清單 → 該情境最常踩的雷。
 
 **概念圖（Mermaid）：** 三場景各一張「典型流程 → 對應章節」對照（或一張總表）。
 
 **須查證重點：** 純綜合，無新技術主張；只需確認跨章引用指對、與各章一致。
 
-- [ ] Step A–F（`{CHAPTER}=09-scenario-playbooks`，`{PRIOR_CHAPTERS}=01, 02, 03, 04, 05, 06, 07, 08`）
+- [ ] Step A–F（`{CHAPTER}=10-scenario-playbooks`，`{PRIOR_CHAPTERS}=01, 02, 03, 04, 05, 06, 07, 08, 09`）
 
 ---
 
-## Task 10：第 10 章 — 速查與名詞表
+## Task 10：第 11 章 — 速查與名詞表
 
-**File:** Create `docs/handbooks/spark-tuning/10-cheatsheet-and-glossary.md`
-**前置章：** 01–09
+**File:** Create `docs/handbooks/spark-tuning/11-cheatsheet-and-glossary.md`
+**前置章：** 01–10
 
 **內容大綱：**
 - 取捨速查表：時間 ↔ 記憶體 ↔ 儲存（每個手段三維度影響）。

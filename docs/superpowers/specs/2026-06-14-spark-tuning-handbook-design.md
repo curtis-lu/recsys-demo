@@ -116,34 +116,42 @@
 - 取捨：可測試/可維護 vs 純 SQL 的簡潔。
 - 範圍界線：只到 DataFrame API；**不碰 RDD 低階 API**（§3）。
 
-### `08-operating-data-pipelines.md` — 營運資料排程與資料產品（營運專章）
-> 由 architecture round-1 補上：終極目標「能長期營運排程＋特徵庫」原本散落在場景章條列、無教學主體。本章用 01 章深度補齊整條營運線。
-- 定位：把產出的表/特徵當成**要長期營運的服務**，不是一次性查詢；正確、可靠、可維護優先於快。
-- **冪等與可重跑**：用「整個 partition 覆寫」（`INSERT OVERWRITE ... PARTITION`、dynamic partition overwrite）而非 append——失敗重跑不重複、可安全補跑；對照 append 在重跑時造成重複的坑。
-- **回填（backfill）**：補某段歷史；按 partition 分批、控資源、可中斷續跑。
-- **排程相依與資料就緒**：上游沒齊不要跑下游；以「partition 是否存在/列數是否到位」當 gate。
-- **資料品質驗證（補 C12，§11 明文要求）**：產表後基本檢查（列數量級、null 比例、key 唯一性、值域、跟昨天比的漂移），不過就擋下游、發警報。
-- **時間點正確性 / 特徵洩漏（C11，特徵庫命門）**：某時間點的特徵只能用「該時間點之前」的資料；常見洩漏（用到未來、用到 label 期間）；以 snapshot date 為界、as-of join 的概念。
-- **監控與退化**：用 Spark UI/歷史看作業時間、資料量、shuffle 是否隨時間惡化；資料量成長導致的退化與因應。
-- **表的生命週期維護**：定期 compaction（小檔）、重算 `ANALYZE` 統計、清過期 partition、schema 演進不打爛下游（呼應 §05）。
-- **多人共用的資料產品**：schema/SLA 契約、版本、文件、別人怎麼讀你的表。
-- 取捨就地：冪等覆寫 vs append 成本；驗證嚴格 vs 誤擋；回填一次到位 vs 分批。
-- 概念圖：① 冪等覆寫 vs append（重跑後結果對照）；② 排程相依 gate（上游就緒才跑下游）；③ 時間點正確性（snapshot date 切線，只能用左邊資料）。
+### `08-operating-pipelines.md` — 營運（一）：可靠地把排程跑起來
+> 營運線拆兩章（原 architecture round-1 的單一營運專章，因納入三層落地模型 dbt/Airflow/cron ＋完整特徵庫 ＋資料版本 ＋到處具體程式，單章過長 → 拆「執行可靠性」與「資料產品正確性」兩章）。本章＝把排程**跑起來且可靠**。`PRIOR=01,03,04,05`。
+> **三層落地模型**（兩章共用骨架，§8.1 先講清，因最常被搞混）：dbt＝轉換層（你寫 model/test、`ref()` 自動算相依 DAG）｜Airflow＝排程層（何時跑/相依/重試/回填，**觸發** dbt——dbt 不是排程器）｜cron＝沒上 dbt/Airflow 的簡單 job（同樣紀律得手工補）。每節「先通用原則 → 再落地（dbt 為主、Airflow/cron 為輔、CDP SQL）」分節遞進。
+- 定位：把產出的表/特徵當成**要長期營運的服務**，正確/可靠/可維護優先於快。
+- **冪等與可重跑**：`INSERT OVERWRITE ... PARTITION`、`spark.sql.sources.partitionOverwriteMode`（static 預設 vs dynamic，講清 footgun）；dbt incremental 的 `insert_overwrite` 策略＝同一招；對照 cron append 重跑重複的坑。【具體碼】
+- **排程相依**：dbt `ref()` 同工具內自動 DAG ＋ Airflow sensor/ExternalTaskSensor 管跨工具 gate（特徵表 fan-out 給 N 個下游模型）；cron 用時間差/sentinel 的脆弱與防呆。【具體碼：Airflow `BashOperator(dbt run)`＋sensor、cron sentinel】
+- **回填（backfill）**：Airflow `catchup`/backfill；dbt 重跑指定 model 分批；cron 手工分批；資源隔離指回 §04（建議獨立 YARN queue）。【具體碼】
+- **監控與退化**：Spark UI/History（§2.2）＋ Airflow SLA/duration ＋ dbt run 時間趨勢；作業隨資料長大退化的信號。
+- **檔案與統計維護**：compaction＝**重寫**（external Parquet/ORC：`INSERT OVERWRITE` 併小檔，指回 §5.5；非 `ALTER TABLE COMPACT`——那只對 ACID 表、§6.7 一句帶過）、`ANALYZE` 重算（§5.6）、清過期分區。【具體碼：compaction-by-rewrite】
+- 取捨就地：冪等覆寫 vs append；static vs dynamic overwrite；回填一次到位 vs 分批。
+- 概念圖：① 冪等覆寫 vs append（重跑結果對照）；② 排程相依 gate（Airflow sensor vs cron 時間差）。
 
-### `09-scenario-playbooks.md` — 場景對應（索引）
+### `09-data-product-correctness.md` — 營運（二）：讓資料產品可信
+> 營運線第二章＝產出**對不對、可不可信、能不能重現**。`PRIOR=01,03,05,08`。沿用上面三層落地模型。
+- 定位：表/特徵是給多人多模型長期取用的資料產品，這章顧的是它的「可信度」。
+- **資料品質驗證（C12，§11 明文要求）**：**dbt tests**（not_null/unique/accepted_values/relationships ＋自訂 generic test；severity=warn/error 對應「警報 vs 硬擋」）為主；不在 dbt 的 job 用純 Spark SQL 檢查（列數量級/null 比例/key 唯一性/值域/對昨日漂移）；警報要有真去處（Airflow `on_failure_callback`／既有管道），不假設特定工具。【具體碼：dbt tests YAML ＋ plain SQL】
+- **時間點正確性 / 特徵洩漏（C11，特徵庫命門）**：本手冊環境＝**snapshot-partition 模型**（一列一個 (entity, snapshot_date)）→ 正解＝讀對 snapshot 分區、**絕不讀未來分區**；training/serving 必須同一 snapshot 定義；洩漏三類（用到未來資料／label 期間混入／跨 snapshot 取錯）；as-of join 只當「若特徵改帶任意 effective_date 才需要（snapshot 模型不需要＝好設計）」一段帶過、不展開成大 join。【具體碼：`WHERE snapshot_date=…`、誤 join 未來分區反例】
+- **共用特徵庫的多消費者契約**：N 個模型共用一張表 → schema 演進「只加不改」不打爛下游（指回 §5.8）、變更先溝通/版本化、相依就緒（指回 §8.3）。
+- **資料版本與可重現性**（純 Hive/Parquet-ORC，**無 Iceberg/Delta time-travel**）：問題（沒 time-travel 怎麼重現過去 snapshot 的特徵長相、冪等 overwrite 會毀舊版）→ build-version 標記欄 → audit 帳本表（**通用模式、不點名框架**）→ **連 build_version 一起分區留歷史**（雙層 `(snapshot_date, build_version)`、子分區互不覆蓋；讀時須挑版本＝釘死版本重現 or「current build」view；取捨＝吃儲存/須挑版本/要清理政策，呼應 §5.4 高基數分區與本章清過期分區）。【具體碼：雙層分區 DDL ＋ INSERT ＋ current-build view】
+- 取捨就地：驗證嚴格 vs 誤擋；留歷史 vs 儲存成本；overwrite 簡單 vs 可重現。
+- 概念圖：③ 時間點正確性切線（snapshot 分區，只能讀左邊／不讀未來）。
+
+### `10-scenario-playbooks.md` — 場景對應（索引）
 - 角色：純**索引/指路**，不重教概念——把前面各章技巧，按三大情境串成「遇到這種工作，照哪些章、最常踩什麼雷」。
 - 場景 1 ad-hoc：先 Impala/小樣本、partition 裁剪、`LIMIT`、別 `SELECT *`、別全表 `COUNT(DISTINCT)` → 主要引 §02/§03/§06。
-- 場景 2 排程產表：可重跑/冪等、控檔大小、資源要得穩 → 主要引 **§08**（營運）＋ §03/§04/§05。
-- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 主要引 **§08**（時間點/品質）＋ §03/§05/§07。
+- 場景 2 排程產表：可重跑/冪等、控檔大小、資源要得穩 → 主要引 **§08**（執行可靠性）＋ §03/§04/§05；資料品質/版本 → **§09**。
+- 場景 3 特徵運算/特徵庫：寬表多 join/window、易 skew、時間點正確性 → 主要引 **§09**（時間點/品質/特徵庫契約）＋ §03/§05/§07/§08。
 - 每場景：典型流程 → 對應章節清單 → 該情境最常踩的雷。
 
-### `10-cheatsheet-and-glossary.md` — 速查與名詞表
+### `11-cheatsheet-and-glossary.md` — 速查與名詞表
 - 取捨速查表：時間 ↔ 記憶體 ↔ 儲存（每個手段三維度影響）。
 - config 速查表（名稱/預設/何時調/風險）。
 - 症狀→對策速查（呼應 §02）。
-- 名詞對照表（partition/shuffle/executor/skew/spill/broadcast… 中英對照＋一句話）。
+- 名詞對照表（partition/shuffle/executor/skew/spill/broadcast/AQE/CBO/冪等/backfill/時間點正確性/build-version… 中英對照＋一句話）。
 
-> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §10 收成速查表。
+> 「記憶體 vs 時間 vs 儲存」取捨**就地點在各章**（如 broadcast join 省 shuffle 但吃記憶體；過度 partition 省掃描但爆小檔），最後在 §11 收成速查表。
 >
 > 章數彈性：若某章寫起來太薄，允許合併（如 04 併入 03、10 併入 index），定案以實作計畫為準。
 
@@ -153,6 +161,8 @@
 - Spark 官方文件，特別是 **SQL Performance Tuning Guide** 與 **Configuration**（對齊 3.3.x 的預設值與 config 名稱）。
 - 《Learning Spark, 2nd ed》(Damji 等)、《Spark: The Definitive Guide》(Chambers & Zaharia)、《High Performance Spark》(Karau & Warren)。
 - Databricks 官方文件/課程。
+- Apache Hadoop / Cloudera CDP 官方文件（HDFS、Hive on Tez、Impala、ACID、metadata 同步等環境相關）。
+- **你們實際在用的工具，其官方文件亦屬權威**：Apache Airflow（airflow.apache.org）、dbt（docs.getdbt.com）——官方專案文件、非未認證個人部落格，用於 §08/§09 排程與轉換的落地範例；引用時標明版本、確切行為以你們環境實測為準。
 - 需要精確處（預設值、config 名稱、行為）以 **WebFetch 對 Spark 3.3 官方文件核對**。
 
 **風格**（沿用 `docs/handbooks/handbook-writing-guide.md` 可轉移者，並加運維手冊特例）：
@@ -216,7 +226,7 @@
 
 ### 10.4 角色 C — 完整度與架構審查員（architecture / curriculum，驗邏輯與深度）
 - **目標**：從**整本手冊**的角度，檢查邏輯架構是否清楚、章節順序是否合理、深度是否足夠，確保一個 **Spark 新手讀完，能具備長期穩定營運資料排程與特徵庫（feature store）的能力**。找出：缺漏的主題、順序/依賴問題（前面用到後面才教的概念）、深度不足以支撐營運之處。
-- **背景**：共用背景（§10.1）＋ 終極學習目標（新手 → 能長期營運 data scheduling + feature store）＋ §1 深度定位 ＋ 手冊骨架（index + 9 章，§5）。
+- **背景**：共用背景（§10.1）＋ 終極學習目標（新手 → 能長期營運 data scheduling + feature store）＋ §1 深度定位 ＋ 手冊骨架（index + 11 章，§5；營運線為 §08 執行可靠性 ＋ §09 資料產品正確性兩章）。
 - **素材**：目前**已寫**的章節 `.md`（依 plan 的 Progress Tracker 判斷哪些已寫）；尚未寫的章節看 §5 大綱；spec 全文（§1、§5、§11）。
 - **限制**：(1) 不查單點技術對錯（reviewer A 的事）、不挑逐句易讀性（reader B 的事）——**只看整體架構、順序、覆蓋度、深度是否達成終極能力目標**；(2) 不改稿；(3) 明確區分「已寫章節的實況」與「尚未寫、只能評 outline」；(4) 即時寫日誌（§10.5）。
 - **完成的定義**：產出 (a) **能力地圖**——把「長期營運排程／特徵庫」需要的能力逐項對應到「由哪章哪節支撐」，標出**無人覆蓋的缺口**；(b) 章節順序/依賴是否合理；(c) 各章深度是否足以支撐營運（不只 ad-hoc）；(d) 具體補強建議（新增章/節、調順序、加深何處）；按「真缺陷（必補）／可加強／誤讀」三級彙整。

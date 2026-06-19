@@ -311,7 +311,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 ## 5.8 營運共用資料表：Hive 3 的 managed／external、與 schema 演進
 
-前面都在講「怎麼存得快又省」。但如果你的表是**要長期給很多人、很多作業共用**的資料產品（特徵庫就是典型），還有一層營運課題——這是 §08 營運專章的鋪墊。對 SQL-first 的你，先記**三個務實結論**，背後的為什麼放後面、知道有這回事即可：
+前面都在講「怎麼存得快又省」。但如果你的表是**要長期給很多人、很多作業共用**的資料產品（特徵庫就是典型），還有一層營運課題——這是 §08–§09 營運兩章的鋪墊。對 SQL-first 的你，先記**三個務實結論**，背後的為什麼放後面、知道有這回事即可：
 
 1. **你用 Spark 產的共用表，多半是「external（外部）表」**——就是一般的 Parquet 檔放在 HDFS、誰都能直接讀。下游用 Spark／Impala 直接讀沒問題，照 §5.2–§5.6 存好即可。
 2. **要去讀「別的團隊用 Hive 建的表」時，先別假設 Spark 直接讀就對。** Hive 3 有一種「受管交易表」（下面解釋），從 Spark 讀它有時要透過一個叫 **HWC** 的橋接元件——讀不到時，**知道可能是這個原因，去問平台**就好。
@@ -329,7 +329,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 - **加欄位**通常安全：舊查詢沒 `SELECT` 到新欄、不受影響（Parquet／ORC 讀舊檔時會把缺的新欄補成 null；至於「跨檔自動合併不同 schema」的 `spark.sql.parquet.mergeSchema` **預設是關的**，要時才開）。
 - **改既有欄位的型別、改名、刪欄**是危險動作——下游 `SELECT 那個欄位` 會壞掉或語意悄悄改變（呼應第 03 章 §3.7「join key 型別不一致」那類坑）。要做就**新開一欄、或版本化並通知下游**，別原地改舊欄。
 
-**取捨講白**：給共用表設計 partition 與檔案大小時，要為「**下游怎麼讀**」著想（大家都按 `month` 查，就按 `month` 分區），而不只是自己寫起來方便；schema 要演進得「**只加不改**」，把對下游的衝擊降到最低。這些營運課題（冪等可重跑、回填、資料品質驗證、時間點正確性、監控退化、表維護）第 08 章會完整展開。
+**取捨講白**：給共用表設計 partition 與檔案大小時，要為「**下游怎麼讀**」著想（大家都按 `month` 查，就按 `month` 分區），而不只是自己寫起來方便；schema 要演進得「**只加不改**」，把對下游的衝擊降到最低。這些營運課題（冪等可重跑、回填、資料品質驗證、時間點正確性、監控退化、表維護）第 08–09 章會完整展開。
 
 > 📚 **來源**：「Hive 3 預設 `CREATE TABLE` 建 managed ACID（ORC）表、external 表非 ACID」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)；「Spark SQL `CREATE TABLE` 在 CDP 建的是 external 表、存取 Hive managed 表需 HWC、external 表不需、external 表登記於共用 Hive Metastore 供 Hive/Impala 存取」見 [Cloudera CDP — Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html)；Parquet/ORC 支援加欄、`spark.sql.parquet.mergeSchema` 預設 `false` 見 [Spark SQL — Parquet（Schema Merging）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；ACID compaction（major/minor）、營運維護見第 08 章。⚠️ HWC 的確切使用方式、ACID 表從 Spark 的可讀寫範圍依 CDP 版本與設定而異，以你平台為準；schema 演進「加欄安全、改／刪危險」是通則，個別型別變更是否相容依資料源與設定而定。⚠️ dbt-spark 屬第三方工具、不在本手冊權威來源範圍，「建表走 Spark CREATE TABLE 規則」為其行為的合理推論，實際 materialization／表類型依你的 dbt 設定，以實測為準。
 
@@ -363,8 +363,8 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 接下來：
 
 - 同一張 Hive 表，什麼時候該用 Spark、什麼時候用 Impala／Hive on Tez 去查？managed/ACID 表跨引擎怎麼處理？→ 第 06 章（引擎選用）。
-- 這些表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、schema 演進不打爛下游？→ 第 08 章（營運專章）。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 09 章。
+- 這些表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、schema 演進不打爛下游？→ 第 08–09 章（營運兩章）。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 10 章。
 
 ---
 
