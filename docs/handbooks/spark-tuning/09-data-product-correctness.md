@@ -307,11 +307,159 @@ JOIN  (SELECT snapshot_date, MAX(build_version) AS build_version
 
 可重現性是有價的；雙層分區是你**為它付的儲存與維護成本**，按需採用、別全表都上。
 
+> 以上是入門三招。要把它升級成**可回滾、扛得住歷史回補與稽核**的設計（並認識背後「兩條時間軸」的模型），看下一節 §9.6。
+
 > 📚 **來源**：多欄 `PARTITIONED BY`（巢狀子分區）見 [Spark SQL — CREATE TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-table-hiveformat.html)；`INSERT OVERWRITE … PARTITION(a=,b=)` 寫指定子分區、`CREATE VIEW` 見 [Spark SQL — INSERT](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-insert-table.html)、[Spark SQL — CREATE VIEW](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-view.html)；高基數分區→分區膨脹/小檔的取捨見[第 05 章 §5.4](05-storage-efficiency.md)、清過期分區見[第 08 章 §8.6](08-operating-pipelines.md)。⚠️ build-version 標記欄／audit 帳本／雙層分區是**通用的可重現性模式**（純 Hive/Parquet-ORC、無 Iceberg/Delta time-travel 時的常見做法），非某特定產品功能；`MAX(build_version)` 取最新依賴版本字串可排序（用時間戳格式），保留版數與清理政策依你稽核需求與儲存預算定。
 
 ---
 
-## 9.6 取捨總表
+## 9.6 進階：資料版本化的設計模式與歷史回補
+
+> 本節較進階，給「要長期經營特徵庫、會碰到歷史回補與稽核」的人。只做當期產表的人，§9.5 三招就夠了。
+
+§9.5 把版本化當「保存歷史」。但一旦你要**回補（backfill——補算或更正過去某個 snapshot）**，版本化就從「存檔」升級成一個要認真設計的東西。先給一個讓全節都通的心智模型。
+
+### 兩條時間軸：bitemporal 心智模型
+
+`cust_feature_versioned` 的兩個分區鍵，其實是**兩條不同的時間軸**：
+
+- **`snapshot_date`＝業務時間（valid time）**：這份資料**描述**的是哪個時間點的客戶狀態（「3 月底的客戶長相」）。
+- **`build_version`＝處理時間（transaction time）**：這份資料**什麼時候被算出來**的（「首次跑」還是「修 bug 重算」）。
+
+同時拿這兩條軸記資料，在資料倉儲裡叫 **bitemporal（雙時間軸）**——雙層分區就是它最樸素的實作。一講清這兩條軸，回補就只剩一句話：
+
+> **回補＝對一個「舊的 `snapshot_date`」、寫一個「新的 `build_version`」。**
+
+```mermaid
+flowchart TB
+    M3["snapshot_date = 2026-03-31<br/>（業務時間：3 月的客戶狀態）"]
+    M3 --> V1["build_version = 20260405T0200<br/>首次產出（後來發現算錯）"]
+    M3 --> V2["build_version = 20260612T0200<br/>修 bug 回補：新子分區、舊版不動"]
+    V1 --> REPRO["釘住這版 → 重現得出舊模型當初看到的特徵"]
+    V2 --> ACTIVE["promote 後 → current view 指向修正版"]
+```
+
+### 回補 × 版本化：一個具體走查
+
+情境：**6 月你發現 3 月的某個特徵算錯了**（漏了一個 join 條件），修好 code，要重算 `2026-03`。
+
+**沒版本化（單層分區、直接覆寫）會怎樣：**
+
+```sql
+-- 直接覆寫 3 月分區：舊的（錯的）3 月資料就此消失
+INSERT OVERWRITE TABLE cust_feature PARTITION (snapshot_date='2026-03-31')
+SELECT cust_id, feat_a, feat_b FROM ... ;     -- 修好的邏輯
+```
+
+兩個後果，都不報錯：
+
+1. **舊模型再也重現不出來**：當初拿「錯版 3 月」訓練的模型，現在表裡已經沒有那份資料，你無法解釋、也無法重算它當初看到了什麼。
+2. **表與模型悄悄不一致**：表已經是修正版，但用舊版訓練、還在線上跑的模型學的是錯的——表說一套、模型是另一套，這個落差**沒有任何訊號**。
+
+**有 `build_version`（雙層分區）會怎樣：**
+
+```sql
+-- 回補寫成「3 月的新一版」子分區；舊版子分區原封不動
+INSERT OVERWRITE TABLE cust_feature_versioned
+PARTITION (snapshot_date='2026-03-31', build_version='20260612T0200')
+SELECT cust_id, feat_a, feat_b FROM ... ;     -- 修好的邏輯
+
+-- 同時 append 一列 audit（§9.5），把「為什麼重算」留下底
+INSERT INTO feature_build_audit
+SELECT 'cust_feature_versioned', '2026-03-31', '20260612T0200',
+       COUNT(*), current_timestamp(), 'airflow:backfill_2026_03',
+       'fix-missing-join-cond@a1b2c3d'          -- code_version 帶上「修了什麼」
+FROM   cust_feature_versioned
+WHERE  snapshot_date='2026-03-31' AND build_version='20260612T0200';
+```
+
+> ⚠️ 這裡**兩個分區值都要寫成靜態的**（`snapshot_date='…', build_version='…'`）。若把 `build_version` 留成動態欄（`PARTITION (snapshot_date='2026-03-31', build_version)`），覆寫範圍會變成「該 snapshot 底下**所有** build」——正好把你想保護的舊版一起清掉。靜態值才只動這一個子分區。
+
+於是：**舊版（`20260405…`）留著 → 重現得出舊模型**；**current view 指到修正版 → 下游重訓讀到對的**；**audit 帳本留了一筆「3 月於 6/12 因 X 重算」→ 稽核查得到**。
+
+這也正是 [§8.4](08-operating-pipelines.md)「回填要分批、可中斷、別擾鄰」能成立的底層原因：因為每個 `(snapshot, build)` 子分區的寫入**冪等且不可變**，回補才能一個 snapshot 一個 snapshot 補、補到哪算數、中斷再續跑都不會弄髒別的版本。
+
+### 設計模式：把「產出」和「發佈」分開——active-version 指標
+
+§9.5 的 current view 用 `MAX(build_version)`＝「最新一版自動就是對外那一版」。多數時候沒問題，但它有個盲點：**萬一你的回補本身有 bug 呢？**「最新」就不再是「最好」，而 `MAX` 會**自動把壞版本推上線**，你還沒有乾淨的辦法退回去。
+
+更穩的設計是把兩件事拆開：
+
+- **產出（build）**：把新版算出來、寫進 `(snapshot, build)` 子分區。這一步只代表「**算好了**」，不代表「對外用這版」。
+- **發佈（promote）**：明確記下「**這個 snapshot 現在對外發佈哪一版**」。這是一個**刻意的動作**，過了品質閘（§9.2）才做。
+
+實作上不需要去「改」任何資料——而且**純 external Parquet 在 Spark 3.3 本來就不支援 `UPDATE`／`MERGE` 改單列**（那要 Iceberg/Delta 那種支援列級操作的格式，同 §8.2 對 `MERGE` 的說明）。最乾淨的是一張 **append-only 的「發佈紀錄」表**：每次 promote 就**追加一列**，現行版本＝每個 snapshot「最後一次被 promote」的那版。
+
+```sql
+-- 發佈紀錄：append-only，每次 promote／rollback 都只追加一列
+CREATE TABLE IF NOT EXISTS feature_version_promotion (
+    table_name     STRING,
+    snapshot_date  STRING,
+    build_version  STRING,        -- 這次要對外發佈的版本
+    promoted_at    TIMESTAMP,
+    promoted_by    STRING,
+    reason         STRING         -- 'initial' / 'backfill bugfix' / 'rollback' …
+)
+STORED AS PARQUET;
+
+-- promote 3 月的修正版（過了品質閘才做）：就是 append 一列
+INSERT INTO feature_version_promotion
+VALUES ('cust_feature_versioned', '2026-03-31', '20260612T0200',
+        current_timestamp(), 'analyst:alice', 'backfill bugfix');
+```
+
+current view 改成「join 到每個 snapshot 最後一次 promote 的版本」，而不是盲取 `MAX`：
+
+```sql
+CREATE OR REPLACE VIEW cust_feature_current AS
+WITH active AS (          -- 每個 snapshot：取「最後一次被 promote」的那一版
+  SELECT snapshot_date, build_version
+  FROM  (SELECT snapshot_date, build_version,
+                ROW_NUMBER() OVER (PARTITION BY snapshot_date
+                                   ORDER BY promoted_at DESC) AS rn
+         FROM   feature_version_promotion
+         WHERE  table_name = 'cust_feature_versioned') t
+  WHERE rn = 1
+)
+SELECT f.*
+FROM   cust_feature_versioned f
+JOIN   active a
+  ON   f.snapshot_date = a.snapshot_date
+ AND   f.build_version = a.build_version;
+```
+
+這帶來兩個你原本沒有的能力：
+
+- **回滾（rollback）零成本**：發佈的新版出包，再 append 一列指回舊 build 就好（`reason='rollback'`）——資料一點沒動，只是把「對外指標」撥回去。
+- **產出與發佈解耦**：可以先把好幾個月的回補**全部算完、全部驗過**，再一次性 promote，避免「補一半、半新半舊」被下游讀到。
+
+這其實就是資料版的 **blue/green 部署**：新版先擺旁邊備好、確認沒問題才切過去、出事立刻切回。而且——**promote 是一個人為把關的決定，不是 `MAX` 自動發生的**。要不要做到這一層，看這張表下游有多關鍵、出錯代價有多高。
+
+> （更簡單的等價作法：發佈紀錄表也可以「每個 snapshot 只留一列、用 `INSERT OVERWRITE` 整表覆寫」來改指向，因為它很小。append-only 版的額外好處是**連『誰在何時把哪版換成哪版』都留了底**，本身就是一份發佈稽核。）
+
+### 保留與清理：別讓雙層分區無限長大
+
+雙層分區的代價 §5.4 就警告過：`build_version` 是高基數的第二層分區，**留越多版、分區數與儲存越膨脹**（36 個月 × 每月留 N 版）。所以雙層分區**一定要配一條保留政策**，否則遲早壓垮 NameNode 與查詢計畫。常見幾種：
+
+- **留 current ＋ 最近 N 版**：每個 snapshot 只保最新幾版，更舊的 `DROP PARTITION`（§8.6）。
+- **「被釘住的」全留、其餘按時清**：被生產模型訓練用過、要長期可重現的 snapshot/build 標記為 **pinned** 全留；沒被引用的按時間清。
+- **時間制**：build 超過 90 天就清，pinned 除外。
+
+**audit 帳本（§9.5）是讓清理變安全的關鍵**：清之前先查「這個 build 還有沒有被任何模型／報表引用」，確定沒人用了才刪。
+
+> ⚠️ **回補的清理陷阱**：「每 snapshot 只留最近 N 版」這條政策，可能會把你**回補前那一版（想留作稽核基準的）給刪掉**——因為它現在「比較舊」。所以清理政策要認得 pinned／baseline 版本，別純按時間或版次砍。
+
+### 其他模式與邊界（誠實收尾）
+
+- **列級版本化（SCD Type 2）**：在每一列加 `effective_from`／`effective_to`／`is_current`，讓**單列**帶生效區間。比分區級的 `build_version` 細，但讀「某時間點的樣子」要回到 §9.3 刻意避開的 **as-of join**、也較重。我們的特徵是「整批重算一個 snapshot」的粒度，**分區級 `build_version` 剛好對得上**、更簡單；列級 SCD2 留給「維度表少量列零星變動」的場景。
+- **若日後能上 Iceberg／Delta Lake**：它們內建 snapshot／tag／branch ＋ time-travel，能用一行語法取代本節整套手搭機制（回補＝寫一個新 snapshot、可命名 tag、可 time-travel 查任意版）。**本書環境目前沒有**，故只在此點到；真要長期經營特徵庫，評估換表格式是值得的一步。
+- **邊界（別 overclaim）**：本節給的是**資料**可重現的原語（哪份特徵、哪一版、何時算的）。完整的**實驗**可重現（模型超參、隨機種子、執行環境）是 ML 平台（如 MLflow 之類）的事，不是這張表能全包的——兩者搭著用才完整。
+
+> 📚 **來源**：`INSERT OVERWRITE … PARTITION(a=,b=)` 子分區、`CREATE VIEW`、`ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)` 視窗函式見 [Spark SQL — INSERT](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-insert-table.html)、[CREATE VIEW](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-view.html)、[Window Functions](https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-window.html)；「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`DELETE`／`MERGE` 改單列（row-level DML 需 DataSource v2 支援列級操作，如 Iceberg/Delta）」見 [Spark SQL — DELETE FROM](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-delete-from.html) 與 §8.2 對 `MERGE` 的同款說明。⚠️ **bitemporal（valid time／transaction time）**、**產出/發佈分離（blue/green、promote 指標）**、**SCD Type 2** 皆為通用資料倉儲設計模式，無單一官方逐字出處、方向明確；保留版數與清理政策依你稽核需求與儲存預算定；`ROW_NUMBER` 依 `promoted_at` 取最新，promote 時間需單調遞增（同一時刻多次 promote 要另加序號 tie-break）。
+
+---
+
+## 9.7 取捨總表
 
 | 取捨 | 一邊 | 另一邊 | 怎麼選 |
 |---|---|---|---|
@@ -320,10 +468,12 @@ JOIN  (SELECT snapshot_date, MAX(build_version) AS build_version
 | 時間對齊 | snapshot 分區等值 join：便宜、本書做法 | as-of join：特徵帶任意 effective_date 才需要、Spark 3.3 無原生 | 維持 snapshot 模型→只需等值 join；別把它複雜化成 as-of |
 | schema 演進 | 原地改/刪欄：省事 | 只加不改＋新欄過渡：不打爛下游 | 共用表**一律只加不改**；破壞性變更走版本化＋遷移期 |
 | 留不留歷史 | 單層分區＋冪等覆寫：省儲存、但舊版沒了 | 雙層 `(snapshot_date, build_version)`：可重現、但吃儲存＋要清理 | 多數表只留 current；要稽核/可重現的關鍵表才上雙層分區＋清理政策 |
+| 回補更正歷史 | 直接覆寫舊 snapshot：簡單、但舊版與舊模型沒了 | 寫新 `build_version` 子分區：可重現＋表模型可對齊 | 會被回補/受稽核的特徵表用新 build；一次性 backfill 純補洞可直接覆寫（§9.6） |
+| current 版怎麼選 | `MAX(build_version)` 自動：簡單、但壞回補會自動上線 | 發佈紀錄＋promote 指標：可回滾、人為把關 | 一般表 `MAX` 夠；關鍵/高代價表用「產出/發佈分離」（§9.6） |
 
 ---
 
-## 9.7 一句話帶走：跑成功 ≠ 算對，可信的資料產品要主動去守
+## 9.8 一句話帶走：跑成功 ≠ 算對，可信的資料產品要主動去守
 
 把這兩章營運線收束：第 08 章讓作業**可靠地跑**，這一章讓產出**值得信**。
 
@@ -348,6 +498,7 @@ JOIN  (SELECT snapshot_date, MAX(build_version) AS build_version
 2. **§9.3** 「特徵洩漏／時間點正確性／training–serving skew」為 ML 特徵工程通用方法學，本章給的是 snapshot-partition 模型下的具體 SQL 做法；無單一官方逐字出處，方向（用未來資訊→離線虛高/上線崩盤）明確。Spark 3.3 無原生 AS OF join 已對 3.3.2 join 文件逐字確認。
 3. **§9.4** 「同名欄改語意最危險」「破壞性變更版本化＋過渡期」為資料產品介面治理通用實踐；過渡期長短依下游數量與遷移成本。
 4. **§9.5** build-version 標記欄／audit 帳本／雙層分區為通用可重現性模式（無 Iceberg/Delta time-travel 時的常見做法），非特定產品功能；`MAX(build_version)` 取最新依賴版本字串可排序（時間戳格式）；保留版數與清理政策依稽核需求與儲存預算。
+5. **§9.6** bitemporal（valid time／transaction time）、產出/發佈分離（promote 指標、blue/green）、SCD Type 2 為通用資料倉儲設計模式，無單一官方逐字出處、方向明確。「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`MERGE` 改單列、需 DataSource v2 列級操作（Iceberg/Delta）」已對 Spark 3.3 行為查證（故 promote 用 append-only 發佈紀錄或整表 `INSERT OVERWRITE`）；發佈紀錄以 `promoted_at` 取最新，同一時刻多次 promote 需另加序號 tie-break。保留/清理政策、是否上 active-version 指標依下游關鍵度與儲存預算定。
 
 > 引用原則：以 Spark／Hadoop／Cloudera CDP 官方文件、Spark 核心開發者文章、**你們在用工具的官方文件（dbt、Apache Airflow）**、指定書籍為限，不引用未經認證的個人部落格。
 
