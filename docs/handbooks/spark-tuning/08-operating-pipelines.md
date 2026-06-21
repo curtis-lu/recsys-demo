@@ -336,7 +336,7 @@ ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 | 改一張共用表，一次打爛 N 個下游 | schema 改動（改／刪欄）破壞既有讀者 | schema「只加不改」、變更先溝通版本化 | →[§9.4](09-data-product-correctness.md) |
 | 特徵「測得很準、上線很差」 | 用到未來資料／label 期間（時間點洩漏） | 只讀 snapshot 之前資料、絕不讀未來分區 | →[§9.3](09-data-product-correctness.md) |
 
-> 最後三列屬「**資料對不對**」的正確性問題，是[第 09 章](09-data-product-correctness.md)（營運二）的主場，這裡只先讓你在同一張表上看見它們的存在。
+> 最後兩列屬「**資料對不對**」的正確性問題，是[第 09 章](09-data-product-correctness.md)（營運二）的主場，這裡只先讓你在同一張表上看見它們的存在。
 
 ---
 
