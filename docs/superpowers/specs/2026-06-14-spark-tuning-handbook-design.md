@@ -125,6 +125,7 @@
 - **回填（backfill）**：Airflow `catchup`/backfill；dbt 重跑指定 model 分批；cron 手工分批；資源隔離指回 §04（建議獨立 YARN queue）。【具體碼】
 - **監控與退化**：Spark UI/History（§2.2）＋ Airflow SLA/duration ＋ dbt run 時間趨勢；作業隨資料長大退化的信號。
 - **檔案與統計維護**：compaction＝**重寫**（external Parquet/ORC：`INSERT OVERWRITE` 併小檔，指回 §5.5；非 `ALTER TABLE COMPACT`——那只對 ACID 表、§6.7 一句帶過）、`ANALYZE` 重算（§5.6）、清過期分區。【具體碼：compaction-by-rewrite】
+- **常見維運踩雷速查（§8.7，user 要求補）**：症狀→成因→修法→去哪節對照表（共通特徵＝不報錯只默默算錯）；三個有程式碼的頭號 footgun fold 進原節——① positional `INSERT…SELECT` 按位置對欄→欄位錯位（§8.2，解＝明確欄位清單／`BY NAME` 須 Spark 3.5）；② `current_date()` 進排程 SQL→回填不可重現（§8.4，解＝日期當參數）；③ cron 靜默失敗（§8.5，解＝`set -euo pipefail`＋成功才落 `_SUCCESS`）。
 - 取捨就地：冪等覆寫 vs append；static vs dynamic overwrite；回填一次到位 vs 分批。
 - 概念圖：① 冪等覆寫 vs append（重跑結果對照）；② 排程相依 gate（Airflow sensor vs cron 時間差）。
 
