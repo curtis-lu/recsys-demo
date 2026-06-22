@@ -62,7 +62,7 @@ flowchart TB
 
 上一節說資料被切成 partition——但切成幾塊？這個數字很關鍵，因為 **一個 partition 對應一個 task**（下面 §1.4 會正式講），所以 partition 數＝這一步**最多能同時做幾件事**。
 
-讀檔時，Spark 大致按**固定大小**把檔案切成 partition，一塊預設約 **128MB**（由 `spark.sql.files.maxPartitionBytes` 控制）。所以一張 30GB 的表讀進來，大約 30GB ÷ 128MB ≈ **240 個 partition → 240 個 task** 平行讀。（這是粗估：很多小檔、或像 gzip 這種「不能從中間切開」的檔，實際塊數會不一樣。）
+讀檔時，Spark 大致按**固定大小**把檔案切成 partition，一塊預設約 **128MB**（由 `spark.sql.files.maxPartitionBytes` 控制）。所以一張 30GB 的表讀進來，大約 30GB ÷ 128MB ≈ **240 個 partition → 240 個 task** 平行讀。（這是粗估：很多小檔、或像 gzip（一種常見壓縮格式，壓縮後不能從中間切開讀）這種「不能從中間切開」的檔，實際塊數會不一樣。）
 
 為什麼你該在意這個數字：
 
@@ -103,7 +103,7 @@ partition 數**不是固定的**：讀進來是一個數，經過 shuffle 後會
 
 當 action 觸發後（§1.3），你交給 Spark 的工作會由大到小分成四層。先把名字對齊——第 02 章用 Spark UI 找瓶頸時，畫面上看到的就是這四層：
 
-- **Application（應用）**：你這一次連上 Spark 的整個工作階段（你的 SparkSession、一支程式、或一個 Hue 連線跑的所有東西）。一個 application 從頭到尾共用同一批 executor。
+- **Application（應用）**：你這一次連上 Spark 的整個工作階段（你的 SparkSession、一支程式、或一個 Hue 連線跑的所有東西——你在 Hue 每開一個 Spark 查詢視窗，背後就是一個 SparkSession）。一個 application 從頭到尾共用同一批 executor——這批 executor 被你佔著時，別人的 application 就得排隊（多租戶饑餓），第 04 章會談怎麼配才不互相卡死。
 - **Job（作業）**：**每觸發一次 action，就產生一個 job**（絕大多數情況如此；極少數 action 會拆成多個 job，本手冊的批次情境幾乎不會遇到）。所以一段程式裡跑了三次 `count`、又寫了一次表，大致就是四個 job。
 - **Stage（階段）**：一個 job 內，一段「不用在機器之間搬資料」就能連續做完的工作。**每遇到一次 shuffle（§1.5 會講），就切成下一個 stage。**
 - **Task（任務）**：一個 stage 裡最小的工作單位。**一個 partition 對應一個 task**。100 個 partition 就是 100 個 task，由眾多 executor 分頭平行跑。
@@ -191,17 +191,19 @@ GROUP BY cust_id;
 
 差距的根源在於：**CPU 算數很快，但寫磁碟、過網路慢得多。** shuffle 把大量資料推去做這些慢事，所以它通常是一個查詢裡最花時間、也最容易出問題的環節。
 
-**麻煩一：記憶體不夠時，還會「額外」spill。** 先釐清一個常見誤解：上面步驟 1 的 shuffle write **本來就一定會寫本機磁碟**（為了交棒給下一個 stage、也為了容錯），跟記憶體夠不夠無關。**spill 是在這之外的另一次磁碟寫**——當要排序／聚合的暫存資料連記憶體都塞不下，Spark 把一部分溢寫到磁碟（§1.2 提過的 **spill**），於是在 shuffle 本來的寫之上再多一筆 I/O。換句話說：shuffle 一定寫磁碟，spill 只是雪上加霜。
+**麻煩一：記憶體不夠時，還會「額外」spill。** 先釐清一個常見誤解：上面步驟 1 的 shuffle write **本來就一定會寫本機磁碟**（為了交棒給下一個 stage、也為了容錯），跟記憶體夠不夠無關。**spill 是在這之外的另一次磁碟寫**——當要排序／聚合的暫存資料連記憶體都塞不下，Spark 把一部分溢寫到磁碟（§1.2 提過的 **spill**），於是在 shuffle 本來的寫之上再多一筆 I/O。換句話說：shuffle 一定寫磁碟，spill 只是雪上加霜。之所以 shuffle 特別容易觸發 spill，是因為 shuffle 要把同一個 key 的資料全聚到同一個 task，單一 task 手上的暫存量遠大於「各自算、各自放」的窄依賴，自然更容易把記憶體塞爆。
 
 **麻煩二：shuffle 會讓大家「等齊」（stage barrier）。** 一個 stage 的所有 task 沒有全部跑完，下一個 stage **一個都不能開始**——因為 shuffle read 必須等所有 shuffle write 都寫好了才能拉。這帶出 **資料傾斜（skew）** 為什麼這麼痛：如果某些 key 的資料量特別大（例如某個超級大戶、或一個 `NULL` key 吃掉一大塊），它們會全擠到少數幾個 task；於是 199 個 task 三秒做完，剩 1 個肥 task 跑了五分鐘，**其他人只能乾等它**，整個 stage 卡在最慢的那一個（第 03 章會教怎麼拆這種熱點）。
 
-**麻煩三：shuffle 之後有幾塊？預設被「重設」成 200。** 一個常見困惑：很多人發現 shuffle 後的 stage 永遠是 200 個 task。原因是——shuffle 輸出的 partition 數**不是延續輸入**，而是被重設成一個固定值 `spark.sql.shuffle.partitions`，**預設 200**。這個數字太大太小都不好：對只有幾 MB 的小結果，200 塊＝ 200 個幾乎空的 task ＋一堆小檔；對好幾百 GB 的大結果，200 塊＝每塊太大、狂 spill。好消息是 Spark 3.3 的 **AQE**（Adaptive Query Execution，查詢途中自動調整執行計畫的機制）**會在執行時自動把過多的小 partition 合併**成大小剛好的塊（第 04 章詳談），所以這個值你多半不必手動煩惱——但你要看得懂「為什麼是 200」。（注意 AQE 主要幫的是「塊太小太多」這頭把它們併大；「塊太大」那頭得靠別的辦法，後面會談。）
+**麻煩三：shuffle 之後有幾塊？預設被「重設」成 200。** 一個常見困惑：很多人發現 shuffle 後的 stage 永遠是 200 個 task。原因是——shuffle 輸出的 partition 數**不是延續輸入**，而是被重設成一個固定值 `spark.sql.shuffle.partitions`，**預設 200**。這個數字太大太小都不好：對只有幾 MB 的小結果，200 塊＝ 200 個幾乎空的 task ＋一堆小檔；對好幾百 GB 的大結果，200 塊＝每塊太大、狂 spill。好消息是 Spark 3.3 的 **AQE**（Adaptive Query Execution）會自動把過小的 partition 合併、緩解「太多小塊」的問題，所以這個值你多半不必手動煩惱——但你要看得懂「為什麼是 200」。AQE 能做什麼、有什麼限制（例如過大的塊它不拆），第 04 章詳談。
 
 > 📚 **來源**：shuffle 成本＝磁碟 I/O＋序列化＋網路 I/O、且 shuffle 一定在磁碟產生中間檔，見 [Spark RDD Programming Guide（Shuffle operations）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)；`spark.sql.shuffle.partitions` 預設 200、AQE 自動合併過小 partition（`coalescePartitions`，預設開）、skew join 處理見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)；stage barrier（reduce 端要等上游所有 map output 寫好才能拉）是 shuffle 機制的直接後果——見上述 RDD guide ＋ [Cluster Overview（stage 互相依賴）](https://spark.apache.org/docs/latest/cluster-overview.html)。⚠️「CPU 很快、磁碟／網路慢得多」方向正確但無官方逐字倍率；shuffle write 的「分桶」是觀念簡化（sort-based shuffle 實作為單一資料檔＋索引檔）；AQE 只「合併過小」、不「拆過大」。
 
 ---
 
 ## 1.7 一個 executor 該多大？core、記憶體、台數的取捨
+
+> （若你的叢集資源由 IT 統一管理、你不自己設定，這節可快速瀏覽、建立直覺即可；操作細節在第 04 章。）
 
 知道 shuffle 會 spill、磁碟很慢之後，就能談「該給每個工人配多少資源」了。一個 executor 由兩種資源組成：
 
@@ -212,7 +214,7 @@ GROUP BY cust_id;
 
 > **同時能跑的 task 數 ＝ executor 台數 × 每台 core 數。**
 
-例如 10 台 executor、每台 5 core，就是同時 50 個 task。若這個 stage 有 200 個 task，得分成大約 4 批（一批叫一個 wave）才跑得完。想更快，就要讓更多 task 能同時跑——加台數，或加每台的 core 數。
+例如 10 台 executor、每台 5 core，就是同時 50 個 task。若這個 stage 有 200 個 task，得分成大約 4 批（一批叫一個 wave）才跑得完——wave 數越多、總時間越長，所以 task 數 ÷ 同時可跑的 task 數就是這個 stage 最少要幾輪（第 04 章談怎麼估來幫你設資源）。想更快，就要讓更多 task 能同時跑——加台數，或加每台的 core 數。
 
 但「加 core」不是免費的，這帶出 executor 大小的取捨。假設 YARN 分給你的額度是**共 100 個 core、400 GB 記憶體**，你可以切成很多種形狀，兩個極端是：
 
@@ -226,11 +228,11 @@ GROUP BY cust_id;
 兩種極端各有代價：
 
 - **太胖**（每台塞太多 core）：①一次跑 20 個 task **搶同一份記憶體**，平均每個能用的變少，容易 spill 到磁碟；②一台同時對 HDFS（§1.1 的分散式檔案系統）開太多讀取，**吞吐反而卡住**；③記憶體配到非常大時，系統在背景整理／回收記憶體（稱為 GC，垃圾回收）時，偶爾會讓那台短暫卡一下；④一台掛掉，一次損失 20 個 task 的進度。
-- **太瘦**（每台 core 太少）：①每台 executor 都要額外保留一塊「管理用」記憶體（overhead，約佔該台記憶體的一成），台數越多、被它吃掉的總量越多；②廣播出去的小表（第 03 章會講）要**每台各複製一份**，台數越多、總記憶體花得越凶。
+- **太瘦**（每台 core 太少）：①每台 executor 都要額外保留一塊「管理用」記憶體（overhead）——YARN 上實際能用的 heap 比你設定的小一截（約 10% 拿去當 overhead），台數越多、被它吃掉的總量越多（操作細節 forward 第 04 章）；②廣播出去的小表（第 03 章會講）要**每台各複製一份**，台數越多、總記憶體花得越凶。
 
 所以實務上常見的起手建議是**每台 executor 抓大約 4～5 個 core**（在 HDFS 吞吐與管理開銷之間取平衡），記憶體則抓到「讓同時在跑的 task 各自夠用、不要一直 spill」為原則。
 
-> 這裡先有直覺就好。**怎麼在 CDP/YARN 上把這些值實際設下去、怎麼用 dynamic allocation 隨需求伸縮而不佔著資源餓死同事，第 04 章詳談。** 而且你會發現：很多時候與其糾結這些數字，不如先照第 03 章把 SQL 寫法和統計弄對，省下來的更多。
+> 這裡先有直覺就好。**怎麼在 CDP/YARN 上把這些值實際設下去、怎麼用 dynamic allocation（動態分配，讓 executor 台數隨工作量自動增減）隨需求伸縮而不佔著資源餓死同事，第 04 章詳談。** 而且你會發現：很多時候與其糾結這些數字，不如先照第 03 章把 SQL 寫法和統計弄對，省下來的更多。
 
 > 📚 **來源**：core ＝同時可跑的 task 數（`spark.executor.cores`／`spark.task.cpus`）、overhead 約佔一成（`spark.executor.memoryOverheadFactor` = 0.10）見 [Spark Configuration](https://spark.apache.org/docs/latest/configuration.html)；廣播變數「每台機器各快取一份、而非隨每個 task 送」見 [Spark RDD Programming Guide（Broadcast Variables）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)；「每 executor 約 5 個 task 才有完整 HDFS 寫吞吐、記憶體過大→GC 長停頓」與 4～5 core 起手值見 [Cloudera CDP：Tuning Resource Allocation](https://docs.cloudera.com/runtime/7.2.10/tuning-spark/topics/spark-admin-tuning-resource-allocation.html)（目標環境同系）。⚠️ 100 core／400 GB 的胖／瘦範例是把總額度乾淨對切的示意（實務每台還要再扣約 10% overhead，無法整包配成 heap）。
 
