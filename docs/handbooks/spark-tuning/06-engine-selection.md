@@ -59,7 +59,7 @@ flowchart TB
     end
 ```
 
-**Impala：一直待命，所以快。** Impala 在每台資料節點上跑一個**常駐**的程序（一直開著待命的背景程序叫 **daemon**，這支叫 `impalad`，字尾 `d` 就是 daemon；後面 §6.6 還會遇到 `catalogd`），365 天開著等查詢。所以一條查詢進來，**不需要像 Spark／Hive 那樣先「起一個 application／向 YARN 申請容器」**（**YARN**＝第 01 章那個叢集資源管家；「**容器**」＝它撥給你這次工作的一塊運算資源——光是申請這塊資源，在互動場景動輒就要好幾秒到幾十秒，對「人坐在螢幕前等結果」是致命的）。Impala 省掉它，加上它是 **MPP**（大規模平行處理：一份工作拆給很多台機器同時算）架構、盡量在記憶體裡算、用 C++ 寫的執行引擎（C++ 直接管記憶體，少了 Spark／Hive 那層 Java／JVM 的開銷），就換來「秒級回應」。代價在下一點。
+**Impala：一直待命，所以快。** Impala 在每台資料節點上跑一個**常駐**的程序（一直開著待命的背景程序叫 **daemon**，這支叫 `impalad`，字尾 `d` 就是 daemon；後面 §6.6 還會遇到 `catalogd`），365 天開著等查詢。所以一條查詢進來，**不需要像 Spark／Hive 那樣先「起一個 application／向 YARN 申請容器」**。這裡先把兩個關鍵字講清楚，後面整章都會用到：**YARN** 是第 01 章那個叢集的資源管家，誰要算東西都得先跟它要資源；它撥給你這次工作的一塊運算資源（一份 CPU＋記憶體的配額）就叫一個**容器（container）**。光是「跟 YARN 申請容器、等它調度好」這一步，在互動場景動輒就要好幾秒到幾十秒——對「人坐在螢幕前等結果」是致命的。Impala 省掉這一步，加上它是 **MPP** 架構（massively parallel processing，大規模平行處理：把一份工作拆給很多台機器同時算，最後再彙整），盡量在記憶體裡算、用 C++ 寫的執行引擎（C++ 直接管記憶體，少了 Spark／Hive 那層 Java／JVM 的開銷），就換來「秒級回應」。代價在下一點。
 
 **Impala：不容錯，所以不適合長跑。** Impala**不像** Spark／Hive 那樣容錯。第 01 章說 Spark 某個 task 掛了會自動重試、某個 stage 的資料沒了會重算；Impala**沒有**這層保護——查詢跑到一半某台機器掛了，**整條查詢就失敗、得從頭重來**。對跑幾秒的互動查詢，重跑一次無所謂；對跑幾小時的重 ETL，跑到第 3 小時掛掉要從頭，就是災難。這就是「Impala 為互動而生、不為長批次而生」的根本原因。（它**能** spill 到磁碟、不是一律 OOM〔out of memory，記憶體爆掉〕，但「不容錯」這條躲不掉。）
 
@@ -85,7 +85,7 @@ flowchart TB
 | **要不要接 Python／ML** | **要**（第 10 章） | 不要 | 不要 |
 | **誰在用** | 資料工程／排程 | 排程／既有 HQL 報表 | 分析師／PM／BI 互動 |
 
-（**HQL**＝Hive 的 SQL 方言，你平常寫的 SQL 幾乎都通用，差別在少數函式與語法；本表把它放「複雜度」欄只是因為既有 HQL 報表多半屬中等～複雜那一格。**「單次工作別太重」怎麼抓**：沒有精確界線，但若你的查詢要把上億列做多步大 join、或中間結果動輒幾十 GB，就偏「重」、別賭 Impala；單純掃一個月、聚合出幾萬列，就是 Impala 的舒適區。真要量，用 §6.4 的 query profile 看它有沒有一直 spill。）
+（**HQL**＝Hive 的 SQL 方言，你平常寫的 SQL 幾乎都通用，差別在少數函式與語法；本表「查詢複雜度」這一欄三個引擎講的是**同一根軸——查詢有多複雜**：Spark 一格是「多步複雜邏輯」、Impala 一格是「相對單純」，Hive 一格之所以寫成「既有 HQL 報表常落這」，是因為那類報表的複雜度多半落在中間，不是在講 HQL 這個語言本身。**「單次工作別太重」怎麼抓**：SQL-first 的你很難事先估出「中間結果幾 GB」，所以改用兩個**看得出來的代理訊號**——① 你的 join／聚合會不會把資料**放大很多倍**（例如多張大表互相 join、或一對多展開）；② 你是不是**一次要跨很多月、掃一張很大的表**。任一個成立就偏「重」、別賭 Impala；反過來，單純掃一個月、聚合出幾萬列，就是 Impala 的舒適區。真要量，用 §6.4 的 query profile 看它有沒有一直 spill。）
 
 把它收成一棵決策樹（從最強的訊號「延遲」問起）：
 
@@ -151,7 +151,7 @@ flowchart TB
 
 **最常見的真實場景**：你的 Spark 排程半夜把 `monthly_cust_txn` 灌了新的一個月分區，早上同事用 Impala 一查——**新分區的資料出不來，或乾脆說沒這張表**。資料明明寫進 HDFS 了，怎麼回事？
 
-**原因**：Impala 為了快，把「有哪些表、各有哪些分區與檔案」這些 metadata **快取在自己的 catalog 裡**（**catalog** 是 Impala 私有的那份 metadata 快取；它的源頭仍是大家共用的 Hive Metastore §5.8——兩者不同：**Metastore 是共用源頭、catalog 是 Impala 自己的快取副本**）。外面（Spark／Hive）改了共用源頭的資料，Impala 手上那份快取**不會自動立刻跟上**，於是它還拿著舊的清單回答你。
+**原因**：Impala 為了快，把「有哪些表、各有哪些分區與檔案」這些 metadata **快取在自己的 catalog 裡**。這裡要分清兩個很容易混為一談的東西：**Hive Metastore（簡稱 HMS，§5.8 那個三引擎共用的中繼目錄）是 metadata 的共用源頭**，記著「有哪些表、欄位是什麼、各多大」；而 **Impala 的 catalog 是 Impala 自己另外存的一份快取副本**——它的源頭仍是 HMS，但 Impala 平常查的是手上這份快取、不是每次都回去問 HMS。所以外面（Spark／Hive）改了共用源頭 HMS 上的資料，Impala 手上那份快取副本**不會自動立刻跟上**，於是它還拿著舊的清單回答你。
 
 解法是叫 Impala 去**重新同步** metadata，有兩個指令，**輕重差很多，別用錯**：
 
@@ -175,11 +175,13 @@ flowchart LR
 
 **原則一句話**：**能用 `REFRESH` 就別用 `INVALIDATE METADATA`**（官方原話：when possible, prefer `REFRESH`）。絕大多數「Spark 寫完、Impala 看不到」其實只是加了資料／分區，`REFRESH 那張表`就解決了。
 
-**知道有這回事就好——CDP 多半會自動同步**：CDP 可以開「**事件驅動的自動 invalidate／refresh**」——Impala 的 catalog 服務（catalogd）定時去輪詢 Hive Metastore 的變更事件，自動把對應的表刷新。開了之後，多數情況**不用你手動下**這兩個指令。但仍要懂它們，因為：①自動同步有**輪詢間隔的延遲**，你要「Spark 寫完馬上讓 Impala 看到」時，手動 `REFRESH` 最即時；②自動同步**可能被關、或被針對某些表停用**。所以把手動 `REFRESH`／`INVALIDATE METADATA` 當成「Impala 看不到新資料時的救命指令」記著。
+**知道有這回事就好——CDP 多半會自動同步**：CDP 可以開「**事件驅動的自動 invalidate／refresh**」——Impala 的 catalog 服務（catalogd）定時去輪詢 Hive Metastore 的變更事件，自動把對應的表刷新。在你們的 CDP 7.1.9 上，這個輪詢間隔（Cloudera Manager 的「HMS Event Polling Interval」，對應 `hms_event_polling_interval_s`）**預設是 2 秒**（設成 0 就關閉這個功能；Cloudera 建議值小於 5 秒）。開了之後，多數情況**不用你手動下**這兩個指令。但仍要懂它們，因為：①自動同步有**輪詢間隔的延遲**——預設雖只 2 秒，但「Spark 寫完同一瞬間就要 Impala 看到」時，手動 `REFRESH` 仍最即時、不必賭那個輪詢剛好追上；②自動同步**可能被關（設成 0）、或被針對某些表停用**（`impala.disableHmsSync`）。所以把手動 `REFRESH`／`INVALIDATE METADATA` 當成「Impala 看不到新資料時的救命指令」記著。
 
 **落地建議**：如果你的排程「Spark 產表 → 下游馬上要用 Impala 查」，可以在 Spark 寫完那一步**後面接一個 `REFRESH`**（透過你的排程工具對 Impala 下指令），別賭自動同步剛好那一刻已經追上。
 
-> 📚 **來源**：`REFRESH` 重載 metastore 的表 metadata、增量重載 HDFS 的檔案與資料塊清單、為同步、比完整載入輕量、用於外部加／改檔案或分區見 [Impala — REFRESH Statement](https://impala.apache.org/docs/build/html/topics/impala_refresh.html)；`INVALIDATE METADATA` 標記一或全部表 metadata 為過期、為非同步、「比 `REFRESH` 的增量更新昂貴得多，可能時優先用 `REFRESH`」、不帶表名會 flush 所有表見 [Impala — INVALIDATE METADATA Statement](https://impala.apache.org/docs/build/html/topics/impala_invalidate_metadata.html)；CDP 事件驅動自動 invalidate／refresh（catalogd 以 `hms_event_polling_interval_s` 輪詢 HMS 事件、可用 `impala.disableHmsSync` 停用）見 [Cloudera CDP — Automatic Invalidation/Refresh of Metadata](https://docs.cloudera.com/cdp-private-cloud-base/7.1.8/impala-manage/topics/impala-auto-metadata-sync.html)。
+**反過來的那條坑：Spark 自己也會讀到過時的 metadata。** 上面講的都是「Spark 寫 → Impala 沒跟上」這個方向，但同一個快取問題反過來也會咬人——**Spark 也把 metadata 快取在自己手裡**。如果你開了一個**長時間存活的 SparkSession**（例如一個跑很久的 notebook、或常駐的服務），中途**別人**（Hive、Impala、或另一個 Spark 作業）往某張表補了新分區、或改了 schema，**你這個 session 可能還拿著啟動時那份舊的表 metadata**，於是讀不到新分區、或看到的還是舊的欄位結構。解法對稱：對那張表下 `REFRESH TABLE 表名`（Spark SQL 的指令，叫 Spark 重新去 Metastore 拿這張表的 metadata），或乾脆**重啟 session**。所以「長命的 session ＋ 同一張表有別人在動」這個組合，記得先 `REFRESH` 再讀。
+
+> 📚 **來源**：`REFRESH` 重載 metastore 的表 metadata、增量重載 HDFS 的檔案與資料塊清單、為同步、比完整載入輕量、用於外部加／改檔案或分區見 [Impala — REFRESH Statement](https://impala.apache.org/docs/build/html/topics/impala_refresh.html)；`INVALIDATE METADATA` 標記一或全部表 metadata 為過期、為非同步、「比 `REFRESH` 的增量更新昂貴得多，可能時優先用 `REFRESH`」、不帶表名會 flush 所有表見 [Impala — INVALIDATE METADATA Statement](https://impala.apache.org/docs/build/html/topics/impala_invalidate_metadata.html)；CDP 事件驅動自動 invalidate／refresh（catalogd 以 `hms_event_polling_interval_s` 輪詢 HMS 事件、可用 `impala.disableHmsSync` 停用、`hms_event_polling_interval_s=0` 關閉功能）見 [Cloudera CDP — Automatic Invalidation/Refresh of Metadata](https://docs.cloudera.com/cdp-private-cloud-base/7.1.8/impala-manage/topics/impala-auto-metadata-sync.html)；該 polling interval 在 CDP 7.1.9 的 Cloudera Manager **預設值為 2 秒**（屬性名「HMS Event Polling Interval」）見 [Cloudera CDP — Impala Properties in Cloudera Runtime 7.1.9](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/configuration-properties/topics/cm_props_cdh710_impala.html)（注意：上游 Impala 旗標文件描述「設正整數才啟用」、Cloudera 建議值 <5 秒，CDP 透過 Cloudera Manager 預設給 2 秒）。Spark 端長命 session 的 catalog 快取需 `REFRESH TABLE 表名` 重抓 metastore metadata 見 [Apache Spark SQL — REFRESH TABLE](https://spark.apache.org/docs/3.3.2/sql-ref-syntax-aux-cache-refresh-table.html)。
 
 ---
 
@@ -191,7 +193,7 @@ flowchart LR
 
 一張放在 HDFS 上的普通表（CSV、或我們一路在推的 external Parquet），骨子裡就是**一堆檔案**。對檔案，你天生只能做粗粒度的事：加一批新檔、把**整個分區整批覆寫**、或整張砍掉重建。你**沒辦法**像在一般資料庫那樣說「把第 12345 號客戶那一列的金額改成 500」——那一列藏在某個 Parquet 檔中間，檔案不是設計來「就地改一格」的。
 
-**ACID 表就是來補這個能力的**：它讓存在 HDFS 上的表行為**像資料庫**——你能下 `UPDATE … WHERE`、`DELETE … WHERE`、`MERGE`（有就更新、沒有就新增，俗稱 upsert），**精準改／刪某幾列**。名字 **ACID** 是資料庫對「**交易**」的四個保證的縮寫。先講「交易（transaction）」是什麼：它是資料庫術語，指**把一組修改綁成一個整體、一起算數**（注意不是銀行業務那種「一筆交易帳」的意思）。對這樣一個整體，資料庫給四個保證，白話講就是：
+**ACID 表就是來補這個能力的**：它讓存在 HDFS 上的表行為**像資料庫**——你能下 `UPDATE … WHERE`、`DELETE … WHERE`、`MERGE`（有就更新、沒有就新增，俗稱 upsert），**精準改／刪某幾列**。名字 **ACID** 是資料庫對「**交易**」的四個保證的縮寫。先講「交易（transaction）」是什麼：它是資料庫術語，指**把一組修改綁成一個整體、一起算數**。**這裡的「交易」是資料庫術語，跟銀行業務那種「一筆交易帳」（一筆轉帳、一筆刷卡）完全是兩回事，別被同一個詞混淆——它講的是「資料庫怎麼把一組改動安全地做完」，不是業務上的金流。** 對這樣一個整體，資料庫給四個保證，白話講就是：
 
 - **不可分割（Atomicity）**：一次修改要嘛全成、要嘛全不成，不留「改一半」的爛狀態；
 - **一致 ＋ 隔離（Consistency／Isolation）**：有人在改、同時有人在查，查的人看到的是「改之前」或「改之後」的完整、對得起來的樣子（不會出現「帳算到一半、總額兜不攏」的中間態），**不會讀到改到一半的混合**；
@@ -213,18 +215,24 @@ flowchart LR
 | 表種 | Hive | Impala | Spark |
 |---|---|---|---|
 | **external**（非交易，§5.8 的最大公約數） | 讀／寫 | 讀／寫 | 讀／寫（**不需** HWC） |
-| **managed・full ACID**（可 `UPDATE`／`DELETE`） | 讀／寫（擁有者、負責維護） | **只能讀、不能建／寫** | 讀／寫需走 **HWC** |
+| **managed・full ACID**（可 `UPDATE`／`DELETE`） | 讀／寫（擁有者、負責維護；**不支援 `INSERT OVERWRITE`**） | **只能讀、不能建／寫** | 讀／寫需走 **HWC**（**別直讀 HDFS 路徑**） |
 | **managed・insert-only**（只新增） | 讀／寫 | 讀／寫 | 讀／寫需走 **HWC** |
 
 （**HWC**＝Hive Warehouse Connector，§5.8 提過的、讓 Spark 安全存取 Hive managed／ACID 表的橋接元件；讀 external 表不需要它。CDP 7.1.x 起 Impala 可直接讀 full ACID〔ORC〕表、不必特別設定。）一句話讀這張表：**full ACID 的「寫」只歸 Hive**（由它建、由它維護含 compaction），Impala 對它只能讀；Spark 要碰任何 managed／ACID 表都得繞 HWC，碰 external 表才直接。
+
+> ⚠️ **最容易踩、又最危險的一條：要在 Spark 讀 full ACID 表，務必走 HWC，別自己直讀它在 HDFS 上的檔案路徑。** 為什麼這很危險？回想前面講的——full ACID 表的資料是 **base 檔 ＋ 一堆 delta／delete-delta 增量檔**疊出來的，「某一列現在的正確值」要把這些檔按交易順序合併、並套用刪除標記才算得出來。HWC 會幫你做這層合併（它懂交易語義）；但**如果你繞過 HWC、直接拿 Spark 去掃那個目錄的底層檔案，Spark 不懂這套交易語義**，就可能把**已經被刪掉的列**、或**被更新前的舊版列**也讀進來——而且這通常**不會報錯**，你拿到的是一份「看起來正常、其實混進髒資料」的結果。對拿來訓練模型／建特徵庫的場景，這種**靜默的錯誤**比直接報錯更可怕（你不會發現，髒資料就這樣進了特徵）。所以規則很死：**Spark 讀 full ACID 表只走 HWC，不直讀 HDFS 路徑。**（嚴格的逐字保證以 Cloudera HWC 文件為準，見本節來源；上述「會讀到刪除／舊版列」的機制是基於 ACID base＋delta 結構的合理推論，方向明確，但不是官方逐字承諾「無錯誤訊息」。）
 
 把這些限制收成一個**最省事的設計原則**：
 
 > **要給多個引擎共用、又想避開 ACID 跨引擎的麻煩 → 就用 §5.8 那種 external Parquet 表。** 它不是交易表、沒有 ACID 那層增量檔與 compaction 包袱，三個引擎都能直接讀、Spark 寫也不必走 HWC——這就是為什麼 §5.8 與 §5.9 一路推「共用表優先 external Parquet」。
 
-回到前面那個判斷：如果你的需求其實是「每次重算整個月、整批換掉」，那 §5.9／§07 講的「**整個 partition 覆寫**」（`INSERT OVERWRITE ... PARTITION`）配 external Parquet 就夠了，根本不需要 ACID——也順帶躲開這節所有跨引擎限制。**只有真的要「改／刪既有的列」時（更正、合規刪除、upsert），才值得為 ACID 扛上 compaction 維護 ＋ 跨引擎限制。**
+**還有一條寫入限制值得記：full ACID 表不支援 `INSERT OVERWRITE`。** 這跟上面「Spark 想重算整批就用 `INSERT OVERWRITE ... PARTITION`」是直接衝突的——只要表是 full ACID（OutputFormat 實作 `AcidOutputFormat` ＋ ACID transaction manager），Hive 從 0.14 起就**禁掉**這張表的 `INSERT OVERWRITE`（目的是避免有人不小心把交易歷史整個蓋掉）。想清空重灌得改用 `TRUNCATE TABLE` 或 `DROP PARTITION` ＋ `INSERT INTO`。換句話說，**「整批覆寫」這個我們最愛用的 idiom，在 full ACID 表上就是不能用**——這又是一個「能用 external Parquet 就別碰 ACID」的理由。
 
-> 📚 **來源**：**ACID** 為資料庫交易四保證（Atomicity／Consistency／Isolation／Durability）的通用資料庫概念；Hive ACID 表用 base ＋ delta 增量檔記錄變更、靠 compaction 合併（見下方 Hive 3 tables 連結與 §5.8）。「Impala 可讀 full ACID v2（ORC）交易表、但不能 CREATE 或寫入 full ACID 表；insert-only 交易表 Impala 可讀可寫；full ACID 表由 Hive 建與改、Impala 只讀」見 [Cloudera CDP — READ Support for FULL ACID ORC Tables](https://docs.cloudera.com/runtime/7.2.17/impala-manage/topics/impala-read-fullacid-orc.html)；「Hive 3 預設 `CREATE TABLE`＝managed ACID(ORC)、Spark 存取 managed 表需 HWC、external 表不需」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)、[Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html) 與第 05 章 §5.8；`INSERT OVERWRITE ... PARTITION` 整批覆寫見 §5.9／第 07 章。⚠️ Impala 對 full ACID 表的可讀範圍依 CDP／Impala 版本而異（本手冊環境 CDP 7.1.9；full ACID 讀支援在 7.1.x／Runtime 7.2.2+ 文件均有，確切邊界以你平台實測為準）；HWC 的確切用法依版本與設定而定。
+**選了 ACID，就接手了一筆隱性運維成本：compaction 要有人跑。** 前面說 ACID 表靠 base＋delta 增量檔，delta 會越積越多、讀會越來越慢，要靠 **compaction** 定期把 delta 併回大檔。這件事是 **Hive 端負責**的（full ACID 表本來就歸 Hive 寫與維護）——但「歸 Hive 負責」不等於「自動就好、你不用管」：如果 compaction 長期沒被排上、或被關掉，delta 一路累積，這張表會**越讀越慢**。所以選用 ACID 表時，要把「誰來確保它的 compaction 有在跑」當成一個明確的 ownership 問題，別假設它會自己處理。
+
+回到前面那個判斷：如果你的需求其實是「每次重算整個月、整批換掉」，那 §5.9／§07 講的「**整個 partition 覆寫**」（`INSERT OVERWRITE ... PARTITION`）配 external Parquet 就夠了，根本不需要 ACID——也順帶躲開這節所有跨引擎限制（包含上面那條 full ACID 不能 `INSERT OVERWRITE`）。**只有真的要「改／刪既有的列」時（更正、合規刪除、upsert），才值得為 ACID 扛上 compaction 維護 ＋ 跨引擎讀寫限制。**
+
+> 📚 **來源**：**ACID** 為資料庫交易四保證（Atomicity／Consistency／Isolation／Durability）的通用資料庫概念；Hive ACID 表用 base ＋ delta 增量檔記錄變更、靠 compaction 合併（見下方 Hive 3 tables 連結與 §5.8）。「Impala 可讀 full ACID v2（ORC）交易表、但不能 CREATE 或寫入 full ACID 表；insert-only 交易表 Impala 可讀可寫；full ACID 表由 Hive 建與改、Impala 只讀」見 [Cloudera CDP — READ Support for FULL ACID ORC Tables](https://docs.cloudera.com/runtime/7.2.17/impala-manage/topics/impala-read-fullacid-orc.html)；「Hive 3 預設 `CREATE TABLE`＝managed ACID(ORC)、Spark 存取 managed 表需 HWC、external 表不需」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)、[Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html) 與第 05 章 §5.8；`INSERT OVERWRITE ... PARTITION` 整批覆寫見 §5.9／第 07 章。**「Spark 存取 Hive managed／ACID 表需走 HWC」**（"You need to use the HWC if you want to access Hive managed tables from Spark"）見 [Cloudera CDP — Introduction to HWC](https://docs-archive.cloudera.com/cdp-private-cloud-base/7.1.3/integrating-hive-and-bi/topics/hive_hivewarehouseconnector_for_handling_apache_spark_data.html)；**「full ACID 表不支援 `INSERT OVERWRITE`」**——「if a table has an OutputFormat that implements AcidOutputFormat and the system is configured to use a transaction manager that implements ACID, then INSERT OVERWRITE will be disabled for that table」（Hive 0.14 起，避免覆寫交易歷史）見 [Apache Hive — LanguageManual DML](https://cwiki.apache.org/confluence/display/hive/languagemanual+dml)，CDP 對應遷移建議改用 truncate＋insert 見 [Cloudera CDP — INSERT OVERWRITE](https://docs.cloudera.com/cdp-public-cloud/cloud/cdppc-workload-migration-hive/topics/cdp-one-workload-migration-insert-overwrite.html)；**ACID 表 base＋delta／delete-delta 結構與 compaction 合併（Hive 端負責、不跑會越讀越慢）**見 [Cloudera CDP — Apache Hive 3 ACID transactions](https://docs-archive.cloudera.com/runtime/7.2.6/using-hiveql/topics/hive_3_internals.html) 與 §5.8。⚠️ Impala 對 full ACID 表的可讀範圍依 CDP／Impala 版本而異（本手冊環境 CDP 7.1.9；full ACID 讀支援在 7.1.x／Runtime 7.2.2+ 文件均有，確切邊界以你平台實測為準）；HWC 的確切用法依版本與設定而定。**「Spark 不走 HWC 直讀 full ACID 會讀到刪除／舊版列且無錯誤訊息」屬基於 ACID base＋delta 結構的合理推論與社群觀察（Cloudera Community／工程部落格）的方向性說法，非官方逐字保證；官方逐字只到「存取 managed 表需用 HWC」。**
 
 ---
 
@@ -307,8 +315,8 @@ flowchart TB
 1. **§6.2 引擎跑法**：「Impala 常駐省啟動開銷、不容錯」「Hive on Tez 是 DAG、比老 MapReduce 快」「Spark 容錯靠重試／重算」皆為設計取向的方向性描述，方向正確；確切啟動秒數、容錯邊界、spill 觸發點依叢集設定與查詢而異，無官方逐字數字。
 2. **§6.3 決策表／決策樹**：為「典型傾向」的整理，**非硬規則**；Spark 與 Hive on Tez 在「容錯長批次」上大量重疊，邊界案例依團隊既有技術棧而定。唯一界線分明的是「秒級互動走 Impala、容錯重批次別走 Impala」。
 3. **§6.4 診斷工具**：各 UI 的確切入口（Cloudera Manager／Hue／web 連結）與權限依你平台部署而異；本節只給「每引擎都有對應驗屍工具、心法與第 02 章相同」的層次，未逐一示範各工具欄位。
-4. **§6.6 metadata 同步**：`REFRESH`（增量、同步、輕量、用於外部加改檔案／分區）與 `INVALIDATE METADATA`（丟快取、非同步、昂貴、用於新表／改 schema、不帶表名 flush 全部、官方建議可能時優先 `REFRESH`）已對 Impala 官方文件逐字核對；CDP 事件驅動自動同步（catalogd 以 `hms_event_polling_interval_s` 輪詢 HMS 事件、`impala.disableHmsSync` 可停用）有 Cloudera 出處。是否啟用自動同步、輪詢間隔，依你叢集設定而定。
-5. **§6.7 ACID 跨引擎**：「Impala 讀 full ACID／不可寫、insert-only 可讀寫、full ACID 由 Hive 寫與維護、Spark 存取 managed 表需 HWC」有 Cloudera 出處；Impala 對 full ACID 的可讀範圍依 CDP／Impala 版本而異（本手冊環境 7.1.9；確切邊界以你平台實測為準）。「需要 update／delete 才用 ACID，否則整批 partition 覆寫＋external Parquet 即可」為設計建議。
+4. **§6.6 metadata 同步**：`REFRESH`（增量、同步、輕量、用於外部加改檔案／分區）與 `INVALIDATE METADATA`（丟快取、非同步、昂貴、用於新表／改 schema、不帶表名 flush 全部、官方建議可能時優先 `REFRESH`）已對 Impala 官方文件逐字核對；CDP 事件驅動自動同步（catalogd 以 `hms_event_polling_interval_s` 輪詢 HMS 事件、`impala.disableHmsSync` 可停用、設 0 關閉）有 Cloudera 出處。**輪詢間隔在 CDP 7.1.9 的 Cloudera Manager 預設為 2 秒**（屬性「HMS Event Polling Interval」，已對 7.1.9 configuration-properties 頁核對）；注意上游 Impala 旗標文件的措辭是「設正整數才啟用」，與 CDP 經 Cloudera Manager 給的 2 秒預設是不同層級的事，是否啟用／實際間隔仍依你叢集設定為準。Spark 端長命 session 自有 catalog 快取、需 `REFRESH TABLE 表名` 重抓，為 Spark SQL 文件記載的對稱情形。
+5. **§6.7 ACID 跨引擎**：「Impala 讀 full ACID／不可寫、insert-only 可讀寫、full ACID 由 Hive 寫與維護、Spark 存取 managed 表需 HWC」有 Cloudera 出處；**「full ACID 表不支援 `INSERT OVERWRITE`」**有 Apache Hive DML（Hive 0.14 起 disabled）＋ CDP 遷移文件出處；**「ACID 表 compaction 由 Hive 端負責、不跑會越讀越慢」**為 base＋delta 結構的直接後果、有 Hive 3 ACID 文件支撐。**「Spark 不走 HWC 直讀 full ACID 會靜默讀到刪除／舊版列」**——「需走 HWC」官方逐字成立，但「直讀會得到含髒資料且無錯誤訊息」是基於 ACID base＋delta 結構的合理推論＋社群觀察的方向性說法，非官方逐字保證，已在正文以保守語氣標明。Impala 對 full ACID 的可讀範圍依 CDP／Impala 版本而異（本手冊環境 7.1.9；確切邊界以你平台實測為準）。「需要 update／delete 才用 ACID，否則整批 partition 覆寫＋external Parquet 即可」為設計建議。
 6. **§6.8 取捨**：甜蜜點／雷區為三引擎設計取向的整理，方向正確；個別工作是否「該換引擎」仍須以你環境量測（§6.4）為準，不照單全收。
 
 > 引用原則：以 Spark 官方文件、Apache Impala 官方文件、Apache Hadoop 官方文件、Cloudera CDP 官方文件（含 Cloudera 官方工程部落格 `blog.cloudera.com`）、Spark 核心開發者文章、《Spark: The Definitive Guide》(Chambers & Zaharia)、《High Performance Spark》(Karau & Warren) 為限，不引用未經認證的個人部落格。Cloudera Community 論壇答覆僅作「方向性傾向」的佐證、非規格來源。
