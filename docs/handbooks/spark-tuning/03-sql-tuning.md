@@ -71,7 +71,7 @@ flowchart LR
     end
 ```
 
-**取捨**。partition 裁剪幾乎沒有壞處，但有兩個前提：**(1) 這張表得真的按那個欄位分區**（怎麼設計分區是第 05 章的事；若表沒分區，`WHERE` 再準也省不了讀檔，只能靠下一節的 pushdown 在讀進來後提早篩）。**(2) 別在分區欄位上包函數**——`WHERE substr(month,1,4)='2026'` 會讓裁剪失效（§3.4 詳述），要寫成 `WHERE month >= '2026-01' AND month <= '2026-12'` 這種「直接比較欄位」的形式才裁得到。
+**取捨**。partition 裁剪幾乎沒有壞處，但有兩個前提：**(1) 這張表得真的按那個欄位分區**（怎麼設計分區是第 05 章的事；若表沒分區，`WHERE` 再準也省不了讀檔，只能靠下一節的 pushdown 在讀進來後提早篩）。不確定一張表有沒有分區、分區欄是什麼，用 `SHOW PARTITIONS 表名` 或 `DESCRIBE EXTENDED 表名` 查。**(2) 別在分區欄位上包函數**——`WHERE substr(month,1,4)='2026'` 會讓裁剪失效（§3.4 詳述），要寫成 `WHERE month >= '2026-01' AND month <= '2026-12'` 這種「直接比較欄位」的形式才裁得到。
 
 > 📚 **來源**：partition 欄位的 `WHERE` → 只讀命中目錄（partition pruning / discovery）見 [Spark SQL Parquet（Partition Discovery）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；裁剪在 `EXPLAIN` 呈現為 Scan 的 `PartitionFilters` 見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html) 與第 02 章 §2.3。⚠️「36 個月＝差 36 倍」是把每月資料量視為相近的算術示意；實際各月筆數不同。
 
@@ -101,7 +101,7 @@ SELECT cust_id, txn_cnt_30d FROM cust_features WHERE month = '2026-05';
 
 ## 3.4 少讀（三）：讓過濾提早發生（predicate pushdown），以及它為什麼會失效
 
-**原理**。理想情況下，`WHERE` 的過濾條件應該**在讀檔那一刻就生效**，而不是「先把幾億列全讀進記憶體、再慢慢篩」。Spark 會盡量把過濾條件**下推（push down）**到最靠近資料的地方：Parquet／ORC 檔內部存了每個資料塊的最小值／最大值統計，下推之後，**整個不可能命中的資料塊會被跳過、根本不解壓縮**。這叫 **predicate pushdown（謂詞下推）**。
+**原理**。理想情況下，`WHERE` 的過濾條件應該**在讀檔那一刻就生效**，而不是「先把幾億列全讀進記憶體、再慢慢篩」。Spark 會盡量把過濾條件**下推（push down）**到最靠近資料的地方：Parquet／ORC 檔內部存了每個資料塊的最小值／最大值統計，下推之後，**整個不可能命中的資料塊會被跳過、根本不解壓縮**。這叫 **predicate pushdown（謂詞下推；謂詞即 `WHERE` 後面的條件）**。
 
 和 §3.2 的差別：partition 裁剪跳過的是**整個目錄**（分區欄位）；predicate pushdown 跳過的是檔案**內部的資料塊**（一般資料欄位）。兩者一個在目錄層、一個在檔案層，方向一樣——讓不需要的資料**根本不被讀出來**。
 
@@ -151,7 +151,7 @@ flowchart TB
     end
 ```
 
-**好消息：多數時候 AQE / 統計會自動幫你選 broadcast。** Spark 估計到一邊小於門檻 `spark.sql.autoBroadcastJoinThreshold`（**預設 10MB**）時，就自動走 broadcast。而且 Spark 3.3 的 **AQE**（Adaptive Query Execution，會在查詢**執行途中**自動調整計畫的機制，第 01 章 §1.6 提過、第 04 章詳談）更進一步：就算一開始計畫是 `SortMergeJoin`，執行途中發現某邊 shuffle 後實際很小，AQE 還會**動態改成 broadcast**。所以你常常什麼都不用做，它就對了。
+**好消息：多數時候 AQE / 統計會自動幫你選 broadcast——前提是表有統計、Spark 估得出它夠小；沒統計就不會自動。** Spark 估計到一邊小於門檻 `spark.sql.autoBroadcastJoinThreshold`（**預設 10MB**）時，就自動走 broadcast。而且 Spark 3.3 的 **AQE**（Adaptive Query Execution，會在查詢**執行途中**自動調整計畫的機制，第 01 章 §1.6 提過、第 04 章詳談）更進一步：就算一開始計畫是 `SortMergeJoin`，執行途中發現某邊 shuffle 後實際很小，AQE 還會**動態改成 broadcast**。所以你常常什麼都不用做，它就對了。
 
 **在 `EXPLAIN`／UI 看到什麼**。`EXPLAIN` 裡是 `BroadcastHashJoin` 還是 `SortMergeJoin`，一翻兩瞪眼（§2.3）。若你**以為**某張小表會被廣播、計畫裡卻是 `SortMergeJoin`，那就是警訊——通常是下一節（§3.6）或型別問題（§3.7）造成的。
 
@@ -165,11 +165,13 @@ flowchart TB
 
 | 物理模式（`EXPLAIN` 裡的名字） | Spark 何時選它 | 要 shuffle 嗎 | 你該有的反應 |
 |---|---|---|---|
-| **`BroadcastHashJoin`** | 等值 join（`ON a.id = b.id`），且一邊夠小（< 10MB 門檻或有 `BROADCAST` hint） | 否（廣播小表） | 最快，理想狀態 |
+| **`BroadcastHashJoin`** | 等值 join（`ON a.id = b.id`），且一邊夠小（< 10MB 門檻或有 `BROADCAST` hint） | 否（廣播小表） | 最快，理想狀態（把小表在記憶體建成 hash 表、大表逐列查，免 shuffle） |
 | **`SortMergeJoin`** | 等值 join、兩邊都大 | 是（兩邊都 shuffle＋排序） | 大表 × 大表的正常做法 |
 | **`ShuffledHashJoin`** | 等值 join、一邊夠小可建記憶體 hash 但沒小到能廣播 | 是（兩邊都 shuffle，但不排序） | 較少見；Spark 多半偏好 sort-merge，通常要靠 `SHUFFLE_HASH` hint 才會走它 |
 | **`BroadcastNestedLoopJoin`** | **非等值** join（沒有 `=`），且一邊可廣播 | 否（廣播一邊） | ⚠️ 警訊，見下 |
 | **`CartesianProduct`** | cross join／完全沒有 join 條件 | 否，但兩邊每列互配 | ⚠️ 多半是 join 寫漏了 |
+| **`LEFT SEMI JOIN`** | 存在性過濾（只回左表、不帶右表任何欄位）：`WHERE key IN (SELECT ...)` 常見被改寫成此 | 依大小，小的那邊可 broadcast | 特徵庫「篩在母體內」場景首選；廣播小的那邊可免 shuffle |
+| **`LEFT ANTI JOIN`** | 不存在性過濾（保留在右表找不到對應 key 的左表列）：`WHERE key NOT IN (...)` 的高效等價 | 依大小，小的那邊可 broadcast | 特徵庫「篩不在母體內」場景首選；同樣可 broadcast 小的那邊 |
 
 前三種都是 **等值 join**（join 條件是 `=`）的做法——這也是日常絕大多數 join 的樣子，所以你主要就在 broadcast 和 sort-merge 之間權衡（本節前半 + 下一節 hint）。
 
@@ -236,7 +238,13 @@ JOIN dim_customer c ON t.cust_id = c.cust_id
 JOIN dim_customer c ON t.cust_id = CAST(c.cust_id AS BIGINT)
 ```
 
-**怎麼發現**：`EXPLAIN`（§2.3）裡 join 條件那行會看到 `cast(...)` 包在 key 上。**治本是讓兩張表的 key 從建表起就同型別**（第 05、08 章的 schema 設計）；手動 `CAST` 只是補救。
+**怎麼發現**：`EXPLAIN`（§2.3）裡 join 條件那行會看到 `cast(...)` 包在 key 上。例如（示意，實際格式依環境而異）：
+
+```
+SortMergeJoin [cast(cust_id#12 as bigint)], [cust_id#34], Inner
+```
+
+看到 key 被 `cast(...)` 包住，就是型別不一致的訊號。**治本是讓兩張表的 key 從建表起就同型別**（第 05、08 章的 schema 設計）；手動 `CAST` 只是補救。
 
 ### 陷阱二：一對多 / 笛卡兒積，爆量 join
 
@@ -258,7 +266,7 @@ JOIN dim_customer c ON t.cust_id = CAST(c.cust_id AS BIGINT)
 **原理**。第 01 章說 `GROUP BY`、`DISTINCT` 都是寬依賴，**每一次都是一次 shuffle**。但它們的成本差很多，關鍵在 Spark 能不能先在各 partition **本地先算一輪**（術語叫 partial aggregation，「先在自己手上的資料算個小計、再把小計拿去 shuffle」）、把資料先縮小再 shuffle：
 
 - **`GROUP BY` + `SUM`/`COUNT`/`AVG` 這類**：可以先本地聚合。每個 partition 先把自己手上的 3000 萬筆壓成「每個客戶一個小計」，再 shuffle 這些小計——搬的量小得多。這種相對便宜。
-- **`COUNT(DISTINCT ...)`**：要去重，就得**先把所有不同的值都搬到一起**才能數，本地能先做的有限。對一個高基數欄位（如 `cust_id`，1000 萬個不同值）做 `COUNT(DISTINCT)`，等於要把這些值幾乎全搬一遍，**很貴**；多個 `COUNT(DISTINCT)` 疊在一起更糟。
+- **`COUNT(DISTINCT ...)`**：要去重，就得**先把所有不同的值都搬到一起**才能數，本地能先做的有限。對一個高基數（這個欄位有很多不同值）欄位（如 `cust_id`，1000 萬個不同值）做 `COUNT(DISTINCT)`，等於要把這些值幾乎全搬一遍，**很貴**；多個 `COUNT(DISTINCT)` 疊在一起更糟——因為每一個 `DISTINCT` 都需要各自維護一套去重狀態，彼此不能共用，Spark 等於要跑好幾趟昂貴的去重 shuffle。KPI summary 這類場景常見替代做法：拆成多個 CTE 各自先去重、再 JOIN 回來，讓每個 CTE 只專心做一次去重。
 
 **SQL before/after**（當你能接受近似值時）：
 
@@ -278,7 +286,7 @@ FROM card_txn GROUP BY month;
 
 **取捨**：
 
-- `approx_count_distinct`：**用時間／記憶體換精確度**。算「本月活躍客戶數大約多少」「某活動觸及人數量級」這種**看趨勢／量級**的指標，5% 誤差通常無所謂、該用；但**對帳、稽核、要跟財報對得起來的精確數字**，就得用精確的 `COUNT(DISTINCT)`，別圖快。
+- `approx_count_distinct`：**犧牲一點精確度，換取更快執行與更省記憶體**。算「本月活躍客戶數大約多少」「某活動觸及人數量級」這種**看趨勢／量級**的指標，5% 誤差通常無所謂、該用；但**對帳、稽核、要跟財報對得起來的精確數字**，就得用精確的 `COUNT(DISTINCT)`，別圖快。
 - 一般 `GROUP BY` 聚合：本身已相對便宜，重點是**先 `WHERE` 過濾、只 `SELECT` 要的欄位再 `GROUP BY`**，別讓它在一大坨原始資料上做。
 
 > 📚 **來源**：`COUNT(DISTINCT)` 需去重故較貴、`GROUP BY` 聚合可做 partial（map-side）aggregation 見《Spark: The Definitive Guide》Ch.7（Aggregations）；`approx_count_distinct(expr[, relativeSD])`「以 HyperLogLog++ 估計基數、`relativeSD` 為允許的最大相對標準差」見 [Spark SQL Functions](https://spark.apache.org/docs/latest/api/sql/index.html#approx_count_distinct)。⚠️ 預設 `relativeSD`≈0.05（5%）出自 DataFrame API（`approxCountDistinct` 預設 rsd=0.05）；SQL 函數參考頁未逐字印出此預設值，章末精確度說明另記。
@@ -336,6 +344,25 @@ flowchart TB
 ```
 
 salting 要改寫 SQL（在 join／group key 上 concat 一個隨機數、最後多一層彙整），稍微囉嗦，所以是 **AQE 不夠才用**的進階手段。
+
+以 `GROUP BY` 聚合為例的 SQL 骨架（AQE 處理不了的極端 skew 才手動這樣做，示意）：
+
+```sql
+-- 第一層：打散熱點 — 在 group key 後接隨機後綴 0–15，把一個肥 key 拆成最多 16 份
+SELECT
+    join_key,
+    CONCAT(join_key, '_', CAST(FLOOR(RAND() * 16) AS INT)) AS salted_key,
+    SUM(amount) AS partial_sum
+FROM big_table
+GROUP BY join_key, CONCAT(join_key, '_', CAST(FLOOR(RAND() * 16) AS INT));
+
+-- 第二層：去鹽合回 — 按原始 join_key 把 16 份小計加總
+SELECT
+    join_key,
+    SUM(partial_sum) AS total_sum
+FROM (/* 上面第一層 */)
+GROUP BY join_key;
+```
 
 **第三層：熱點 key 分流。** 有些 skew 來自**沒意義的值**——大量 `NULL` 或預設值（如 `cust_id IS NULL` 的髒資料）擠成一塊。這種最乾淨的解法是**把它們分流**：能過濾就 `WHERE key IS NOT NULL` 濾掉，或把「NULL／預設值」那群單獨處理、不要讓它參與主 join。
 
