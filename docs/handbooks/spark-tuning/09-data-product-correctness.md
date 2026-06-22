@@ -435,6 +435,16 @@ JOIN   active a
 
 這其實就是資料版的 **blue/green 部署**：新版先擺旁邊備好、確認沒問題才切過去、出事立刻切回。而且——**promote 是一個人為把關的決定，不是 `MAX` 自動發生的**。要不要做到這一層，看這張表下游有多關鍵、出錯代價有多高。
 
+**這個模式有個業界名字：Write-Audit-Publish（WAP）。** 把它和 §9.2 串起來看，三步剛好對上本章：
+
+| WAP 步驟 | 對到本章 |
+|---|---|
+| **Write** | 把新 build 寫進 `(snapshot, build)` 子分區——指標還沒指它、下游看不到 |
+| **Audit** | 對那個指定 `build_version` 跑 §9.2 的品質閘 |
+| **Publish** | 過了才 promote（append 發佈紀錄／撥指標）→ current view 這才指過去 |
+
+WAP 的核心保證就是這一句：**消費者永遠只讀到驗過的資料**。我們這裡「Write 到一個還看不到的地方」靠的是『新 build 先寫進子分區、但 current view 還沒指它』——而且這個暫存的 build **可以用它的 `build_version` 直接查到**，剛好讓你就地 audit、過了再 flip 指標。
+
 > （更簡單的等價作法：發佈紀錄表也可以「每個 snapshot 只留一列、用 `INSERT OVERWRITE` 整表覆寫」來改指向，因為它很小。append-only 版的額外好處是**連『誰在何時把哪版換成哪版』都留了底**，本身就是一份發佈稽核。）
 
 ### 保留與清理：別讓雙層分區無限長大
@@ -452,10 +462,10 @@ JOIN   active a
 ### 其他模式與邊界（誠實收尾）
 
 - **列級版本化（SCD Type 2）**：在每一列加 `effective_from`／`effective_to`／`is_current`，讓**單列**帶生效區間。比分區級的 `build_version` 細，但讀「某時間點的樣子」要回到 §9.3 刻意避開的 **as-of join**、也較重。我們的特徵是「整批重算一個 snapshot」的粒度，**分區級 `build_version` 剛好對得上**、更簡單；列級 SCD2 留給「維度表少量列零星變動」的場景。
-- **若日後能上 Iceberg／Delta Lake**：它們內建 snapshot／tag／branch ＋ time-travel，能用一行語法取代本節整套手搭機制（回補＝寫一個新 snapshot、可命名 tag、可 time-travel 查任意版）。**本書環境目前沒有**，故只在此點到；真要長期經營特徵庫，評估換表格式是值得的一步。
+- **若日後能上 Iceberg／Delta Lake**：它們內建 snapshot／tag／branch ＋ time-travel，能用一行語法取代本節整套手搭機制（回補＝寫一個新 snapshot、可命名 tag、可 time-travel 查任意版）。**WAP 在這類表格式是原生的**——例如 Iceberg 用 `spark.wap.branch` 把寫入導到一條 audit 分支、驗過再 `fast_forward` 把 main 快轉過去發佈；我們上面那套指標／view，就是在沒有分支的純 Hive/Parquet 上手搭出同樣的語意。**本書環境目前沒有**，故只在此點到；真要長期經營特徵庫，評估換表格式是值得的一步。
 - **邊界（別 overclaim）**：本節給的是**資料**可重現的原語（哪份特徵、哪一版、何時算的）。完整的**實驗**可重現（模型超參、隨機種子、執行環境）是 ML 平台（如 MLflow 之類）的事，不是這張表能全包的——兩者搭著用才完整。
 
-> 📚 **來源**：`INSERT OVERWRITE … PARTITION(a=,b=)` 子分區、`CREATE VIEW`、`ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)` 視窗函式見 [Spark SQL — INSERT](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-insert-table.html)、[CREATE VIEW](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-view.html)、[Window Functions](https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-window.html)；「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`DELETE`／`MERGE` 改單列（row-level DML 需 DataSource v2 支援列級操作，如 Iceberg/Delta）」見 [Spark SQL — DELETE FROM](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-delete-from.html) 與 §8.2 對 `MERGE` 的同款說明。⚠️ **bitemporal（valid time／transaction time）**、**產出/發佈分離（blue/green、promote 指標）**、**SCD Type 2** 皆為通用資料倉儲設計模式，無單一官方逐字出處、方向明確；保留版數與清理政策依你稽核需求與儲存預算定；`ROW_NUMBER` 依 `promoted_at` 取最新，promote 時間需單調遞增（同一時刻多次 promote 要另加序號 tie-break）。
+> 📚 **來源**：`INSERT OVERWRITE … PARTITION(a=,b=)` 子分區、`CREATE VIEW`、`ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)` 視窗函式見 [Spark SQL — INSERT](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-insert-table.html)、[CREATE VIEW](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-view.html)、[Window Functions](https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-window.html)；「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`DELETE`／`MERGE` 改單列（row-level DML 需 DataSource v2 支援列級操作，如 Iceberg/Delta）」見 [Spark SQL — DELETE FROM](https://spark.apache.org/docs/latest/sql-ref-syntax-dml-delete-from.html) 與 §8.2 對 `MERGE` 的同款說明；**Write-Audit-Publish（WAP）**為資料工程通用工作流（Write→Audit→Publish，消費者只見驗過的資料），Iceberg 原生支援（`spark.wap.branch` audit 分支寫入＋`fast_forward`／`publish_changes` 發佈）見 [Apache Iceberg — Branching and Tagging](https://iceberg.apache.org/docs/latest/branching/) 與 [Spark Writes](https://iceberg.apache.org/docs/latest/spark-writes/)。⚠️ **bitemporal（valid time／transaction time）**、**產出/發佈分離（WAP、blue/green、promote 指標）**、**SCD Type 2** 皆為通用資料倉儲設計模式，無單一官方逐字出處、方向明確；保留版數與清理政策依你稽核需求與儲存預算定；`ROW_NUMBER` 依 `promoted_at` 取最新，promote 時間需單調遞增（同一時刻多次 promote 要另加序號 tie-break）。
 
 ---
 
@@ -498,7 +508,7 @@ JOIN   active a
 2. **§9.3** 「特徵洩漏／時間點正確性／training–serving skew」為 ML 特徵工程通用方法學，本章給的是 snapshot-partition 模型下的具體 SQL 做法；無單一官方逐字出處，方向（用未來資訊→離線虛高/上線崩盤）明確。Spark 3.3 無原生 AS OF join 已對 3.3.2 join 文件逐字確認。
 3. **§9.4** 「同名欄改語意最危險」「破壞性變更版本化＋過渡期」為資料產品介面治理通用實踐；過渡期長短依下游數量與遷移成本。
 4. **§9.5** build-version 標記欄／audit 帳本／雙層分區為通用可重現性模式（無 Iceberg/Delta time-travel 時的常見做法），非特定產品功能；`MAX(build_version)` 取最新依賴版本字串可排序（時間戳格式）；保留版數與清理政策依稽核需求與儲存預算。
-5. **§9.6** bitemporal（valid time／transaction time）、產出/發佈分離（promote 指標、blue/green）、SCD Type 2 為通用資料倉儲設計模式，無單一官方逐字出處、方向明確。「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`MERGE` 改單列、需 DataSource v2 列級操作（Iceberg/Delta）」已對 Spark 3.3 行為查證（故 promote 用 append-only 發佈紀錄或整表 `INSERT OVERWRITE`）；發佈紀錄以 `promoted_at` 取最新，同一時刻多次 promote 需另加序號 tie-break。保留/清理政策、是否上 active-version 指標依下游關鍵度與儲存預算定。
+5. **§9.6** bitemporal（valid time／transaction time）、產出/發佈分離（promote 指標、blue/green）、SCD Type 2 為通用資料倉儲設計模式，無單一官方逐字出處、方向明確。「純 Hive/Parquet 表在 Spark 3.3 不支援 `UPDATE`／`MERGE` 改單列、需 DataSource v2 列級操作（Iceberg/Delta）」已對 Spark 3.3 行為查證（故 promote 用 append-only 發佈紀錄或整表 `INSERT OVERWRITE`）；發佈紀錄以 `promoted_at` 取最新，同一時刻多次 promote 需另加序號 tie-break。保留/清理政策、是否上 active-version 指標依下游關鍵度與儲存預算定。**Write-Audit-Publish（WAP）**為通用工作流，§9.6 的「產出/發佈分離」＋§9.2 品質閘即其手搭版；Iceberg/Nessie 等表格式原生支援，本書環境（純 Hive/Parquet）以指標／view 間接層達成等價語意。
 
 > 引用原則：以 Spark／Hadoop／Cloudera CDP 官方文件、Spark 核心開發者文章、**你們在用工具的官方文件（dbt、Apache Airflow）**、指定書籍為限，不引用未經認證的個人部落格。
 
