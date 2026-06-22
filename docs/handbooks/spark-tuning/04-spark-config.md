@@ -184,9 +184,9 @@ flowchart TB
 
 這就和 §1.7 表格裡那個「20 台 × 5 core × 20 GB」的瘦 executor 對上了——只是這裡把它**翻成實際的啟動參數**。（提醒口徑：§1.7 的「20 GB」指每台跟 YARN 要的**總額**、含 overhead；這裡把它拆成 `executor.memory` 18g 的 heap ＋ 約 1.8g overhead。）
 
-**一個「作業卡在 ACCEPTED 不動」的常見死法**：單一 executor 配超過叢集層上限（`yarn.scheduler.maximum-allocation-mb` 或 `maximum-allocation-vcores`，由叢集管理者設定）時，YARN 根本給不出這麼大的 container，作業會一直停在 ACCEPTED 狀態等不到資源。這是第一次手動配資源最常見的卡關點——配之前先確認你的 executor 大小沒超過叢集的 container 上限。
+**配資源最常見的兩種死法**（症狀像、成因不同，先看 YARN ResourceManager 的頁面/日誌分辨）：(1) 單一 executor 或 driver 配**超過叢集層上限**（`yarn.scheduler.maximum-allocation-mb` 或 `maximum-allocation-vcores`，由叢集管理者設定）——YARN 給不出這麼大的 container，會**直接拒絕這個請求**（拋 `InvalidResourceRequestException`、作業根本起不來、立刻報錯）；(2) 大小沒超上限、但你所在 queue 當下被佔滿——作業會**卡在 ACCEPTED 狀態**等別人釋放資源。第一種改小 executor／driver、第二種等或換 queue。配之前先確認你的 executor 大小沒超過叢集的 container 上限。
 
-**別忘了 driver 也是一個獨立的 YARN container**，由 `spark.driver.memory` 控制（預設 1g）。大量 `collect()`、把結果抓回 driver、或廣播小表時「在 driver 端組裝那份要廣播的資料」，都吃 driver 記憶體，**配再多 executor 也擋不住 driver OOM**。實務上 driver 給 2–4g 通常夠，但若作業大量 collect 結果，要相應加大。別忘了 driver 也要留一份記憶體。
+**別忘了 driver 也是一個獨立的 YARN container**，由 `spark.driver.memory` 控制（預設 1g）。大量 `collect()`、把結果抓回 driver、或廣播小表時「在 driver 端組裝那份要廣播的資料」，都吃 driver 記憶體，**配再多 executor 也擋不住 driver OOM**。實務上 driver 給 2–4g 通常夠，但若作業大量 collect 結果，要相應加大。
 
 **取捨**（每個方向都連到 §1.7 的直覺）：
 
