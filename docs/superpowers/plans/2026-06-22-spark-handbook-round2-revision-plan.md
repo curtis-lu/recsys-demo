@@ -88,7 +88,7 @@
 ## Progress Tracker
 
 - [x] **Phase 0**：grill 釐清 → Phase1 全書 C＋P 掃描 → 使用者拍板新骨架（2026-06-22）＋ch02 D-UI 追加（2026-06-23）。spec 已寫。
-- [ ] **Phase 1**：結構落地（Task 1.1–1.4）
+- [x] **Phase 1**：結構落地完成（commit `1077609` 重排+重編號+導覽軟指標、`3c8197a` index 12 章）；C 複核 `.reviews/_round2-structure-verify.md` 判 **PASS 零不一致**。
 - [ ] **Phase 2**：逐章深審＋ch02 D-UI（Task 2.1–2.9）
 - [ ] **Phase 3**：補缺口新內容（Task 3.1 reverse ETL／3.2 G2）
 - [ ] **Phase 4**：補未寫章（Task 4.1 PySpark／4.2 場景／4.3 速查）
