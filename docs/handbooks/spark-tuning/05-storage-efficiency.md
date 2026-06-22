@@ -147,6 +147,8 @@ flowchart TB
 
 **目標檔案大小**：分區切到「**每個分區裡的檔案大約落在 128MB–1GB**」這個區間最舒服——對齊第 01 章 §1.2 說的「讀檔每塊約 128MB＝一個 task」（HDFS 的預設區塊大小也是 128MB），讓每個 task 嚼一塊大小剛好的資料，既不會小到開檔成本爆、也不會大到單 task 撐不住。
 
+**共用特徵表的分區欄位要同時顧及下游的主要存取模式**：訓練常按**時間**（`snap_date`）過濾、推論／reverse ETL 有時按 **entity**（如 `cust_id`）過濾，兩者拉扯時以**最高頻、最吃掃描量**的那個為主——通常時間欄勝出，因為 `WHERE snap_date = ?` 裁掉的資料量最大；若 reverse ETL 的 entity 過濾需求也很重，出口設計見第 09 章（其餘細節待補），此處給軟指標：**時間優先、entity 留給下游按需過濾**，不要為 entity 多加一層分區讓目錄數爆炸。
+
 **取捨講白**：分區**切得越細**，`WHERE` 能裁掉的越多（少讀），但**小檔與 metadata 的壓力越大**。所以分區欄位要選「裁得到、又不會把表炸成幾百萬個碎目錄」的——日期類幾乎永遠是安全牌；真要按客群之類再切，頂多用低基數的 `segment`（幾十種），絕不用 `cust_id` 這種一人一值的欄位。
 
 > 📚 **來源**：partition 把資料按欄位值分到不同目錄、`WHERE` 分區欄位→只讀命中目錄見 [Spark SQL — Parquet（Partition Discovery）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html) 與第 03 章 §3.2；HDFS 預設區塊 128MB、NameNode 保管所有檔案系統 metadata 見 [Apache Hadoop HDFS Architecture](https://hadoop.apache.org/docs/r3.1.3/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html)；「過多小檔壓垮 NameNode 記憶體（每個 metadata 物件約 150 bytes、千萬檔約 3GB 記憶體）」見 [Cloudera：The Small Files Problem](https://blog.cloudera.com/the-small-files-problem/)（Cloudera 官方部落格）；「目標檔案 128MB–1GB、勿用高基數欄位分區」見《High Performance Spark》Ch.5（資料布局）。⚠️「128MB–1GB」是業界常見的目標區間（對齊 HDFS block），非官方逐字硬規定；HDFS block 大小可由叢集設定（`dfs.blocksize`），以你平台為準。
@@ -172,9 +174,11 @@ flowchart TB
 
 ---
 
-## 5.5 管好檔案大小：小碎檔問題（成因、徵兆、解法）
+## 5.5 管好檔案大小：小碎檔問題
 
 小碎檔（small files：大量遠小於一個 HDFS 區塊、只有幾 KB～幾 MB 的檔案）是排程產表最常見、也最容易累積成災的問題。它和分區設計、shuffle 分區數都有關，單獨拉出來講透。
+
+### 成因、徵兆、解法
 
 **成因**——三條路都會生出小檔：
 
@@ -208,7 +212,7 @@ SELECT /*+ REPARTITION(16) */ cust_id, SUM(amount) AS total
 FROM card_txn WHERE month='2026-05' GROUP BY cust_id;
 ```
 
-- **`/*+ REPARTITION(n) */`**：重新分配成 n 塊（會觸發一次 shuffle，但分得**均勻**）。
+- **`/*+ REPARTITION(n) */`**：重新分配成 n 塊（會觸發一次 shuffle，但分得**均勻**）。**n 怎麼估？**目標塊數 ≈ 這份資料總大小 ÷ 目標檔案大小（128MB–1GB）；例如 30GB 資料想讓每塊約 256MB，就約 120 塊（`REPARTITION(120)`）。
 - **`/*+ COALESCE(n) */`**：把塊數**減少**到 n（**不**觸發 shuffle、便宜，但可能分得不均）。
 - ⚠️ 這個 hint 裡的 `COALESCE` 跟 SQL 的 `COALESCE(a, b)` 函數（取第一個非 null 值）**只是剛好同名、毫無關係**——一個是寫在 `/*+ ... */` 裡的分區提示，一個是一般欄位函數，別混。
 
@@ -219,7 +223,7 @@ FROM card_txn WHERE month='2026-05' GROUP BY cust_id;
 - **定期 compaction（把累積的小檔合併成大檔）**：對已經堆出小檔的表，定期跑一支「把一個分區讀進來、重寫成少數大檔」的維護作業（第 07 章營運維護的一環）。
 - **從源頭別過度分割**（§5.4）：不要用高基數欄位分區。
 
-### 進一步：`REPARTITION` 還是 `COALESCE`？放在哪？
+### `REPARTITION` vs `COALESCE` 怎麼選
 
 這兩個常被搞混，講清楚你才知道何時用哪個：
 
@@ -288,6 +292,8 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 **要自己跑——`ANALYZE` 不會自動發生。** Spark **不會**在你每次寫表後自動幫你重算統計；所以實務上要**主動把它排進排程**：產完表後跟著跑一次 `ANALYZE`（資料變了統計才準，第 07 章維護），不是建好表就一勞永逸。（有個 `spark.sql.statistics.size.autoUpdate.enabled` 能在你用 Spark 指令改動表時自動更新「大小」，但**預設是關的**，而且只更新大小、不含欄位級統計——別指望它代勞。）
 
+**統計過期的可觀測性**：若你的表是**每週 append 新快照**、卻沒有跟著每次重跑 `ANALYZE`，優化器會拿**過期統計**做計畫——常見後果是：原本大小合格可以 broadcast 的小維度表，因為舊統計記錄的列數還停在幾個月前的舊數字（或完全沒統計），被優化器當成大表、改走開銷更高的 `SortMergeJoin`，查詢突然明顯變慢。**怎麼發現**：第 02 章 §2.5 的 EXPLAIN 若看到 join 走了 `SortMergeJoin` 而你覺得那張表應該小到可以 broadcast（§2.9 Broadcast Hint 一節），過期統計就是首要嫌疑——跑一次 `ANALYZE TABLE … COMPUTE STATISTICS` 再重看計畫，若變成 `BroadcastHashJoin` 就確認了。另外，特徵表有 1500 欄時，**不必對全部欄位跑 `FOR COLUMNS`**——對**常用於 join 或 `WHERE` 過濾的欄**（例如 `cust_id`、時間欄）跑即可，其餘欄的欄位統計對 broadcast 決策幫助有限、掃描成本卻按欄數線性增加。
+
 **取捨講白**：`ANALYZE` 要花一次掃描成本（`NOSCAN` 便宜很多），但它讓之後**每一條**查詢都估得更準、少走冤枉的 shuffle。對排程定期產出的大表，**產完表後跟著跑一次** 幾乎永遠值得。
 
 > 📚 **來源**：`ANALYZE TABLE … COMPUTE STATISTICS [NOSCAN | FOR COLUMNS …]` 語法與各選項收集的統計（預設＝列數＋大小、`NOSCAN`＝只大小、`FOR COLUMNS`＝欄位級）見 [Spark SQL — ANALYZE TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-aux-analyze-table.html)；join 大小估計「來自資料源或 catalog（後者由 `ANALYZE TABLE` 收集／更新）」、`autoBroadcastJoinThreshold` 10MB 見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)；AQE 用 runtime 統計、不靠事前 `ANALYZE` 見第 04 章 §4.2；`ANALYZE` 為使用者主動下的指令（非自動）見上述 ANALYZE TABLE 頁。`spark.sql.cbo.enabled`（CBO 需手動開並先跑 `FOR COLUMNS`）、`spark.sql.statistics.size.autoUpdate.enabled`（只自動更新大小、不含欄位統計）預設皆 `false`，已對 Spark 3.3.2 原始碼（`SQLConf`）確認。
@@ -302,6 +308,8 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 - **何時才值得**：一張**很大、又會反覆拿同一個 key 去 join** 的表（例如某張總是按 `cust_id` 跟別人 join 的大事實表）。一次性查詢不值得為它 bucketing。
 - **Hive／Spark 不相容的雷**（CDP 上特別要小心）：**Spark 的 bucketing 用的雜湊（hash——把 key 算成一個固定編號、用來決定它該落哪個桶）函數和 Hive 的不一樣、兩者不相容。** 具體後果：你用 Spark 想**寫入**一張 Hive 的 bucketed 表，會直接報錯（`AnalysisException：Spark 目前不會產生與 Hive 相容的 bucketed 輸出`）。而跨引擎讀彼此的 bucketed 表時，「分桶能省 shuffle」這類 **bucket-aware 優化也不保證跨引擎互通**（不同 bucketing 版本之間更要小心）。所以在 CDP 這種 Spark／Hive／Impala 並存的環境，**碰到 bucketed 表先確認它是誰、用什麼引擎建的，並在你的環境實測驗證**，別假設能無縫互通。
+
+**怎麼確認 bucket-aware join 真的生效**：用 `EXPLAIN` 看那個 join 上方**沒有** `Exchange`（即沒有 shuffle 節點），或到 Spark UI 確認該 stage **沒有 shuffle write/read 資料量**——有 Exchange 就代表 Spark 沒有信任兩邊的 bucketing、仍觸發了 shuffle，呼應第 02 章 §2.5 的計畫讀法。
 
 **取捨講白**：bucketing 用「**存的時候多花工、且綁死一個 key**」換「之後該 key 的 join 免 shuffle」。鍵選錯、或跨引擎不相容，反而是包袱。對日常工作，把 §5.2–§5.6（格式／分區／小檔／統計）做好，收益通常已經足夠；bucketing 是有特定反覆 join 場景、且確認過相容性後才上的進階手段。
 
@@ -320,7 +328,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 **背後的為什麼（知道有這回事即可，不必深究）**：Hive 3 / CDP 把表分兩種——
 
 - **managed（受管）表**：在 **Hive** 裡直接 `CREATE TABLE` 建出來的預設就是這種，預設是**交易表**（**ACID**：像資料庫那樣支援 insert／update／delete，用 ORC 存）。代價是它背後用「增量檔」累積變更、要定期**合併維護**（compaction）才不會越拖越慢。**從 Spark 存取這種表通常要走 HWC**（Hive Warehouse Connector，讓 Spark 安全存取 Hive 受管表的橋接元件）。
-- **external（外部）表**：就是「一般檔案放那、Hive 不特別管」，**不是**交易表。**你在 CDP 上用 Spark SQL `CREATE TABLE` 建的，預設就是 external**——所以你產的表多半落這類，Spark／Impala 讀寫都不需要 HWC。而且因為它一樣**登記在共用的中繼目錄（Hive Metastore）**裡，所以**用 Hue 在 Hive 上、或用 Impala，都一樣查得到這張表**（這正是 external「大家都能讀」的好處；反過來，Hive 那種 managed/ACID 表才是 Spark 要繞 HWC 的那種）。
+- **external（外部）表**：就是「一般檔案放那、Hive 不特別管」，**不是**交易表。**你在 CDP 上用 Spark SQL `CREATE TABLE` 建的，預設就是 external**——所以你產的表多半落這類，Spark／Impala 讀寫都不需要 HWC。而且因為它一樣**登記在共用的中繼目錄（Hive Metastore）**裡，所以**用 Hue 在 Hive 上、或用 Impala，都一樣查得到這張表**（這正是 external「大家都能讀」的好處；反過來，Hive 那種 managed/ACID 表才是 Spark 要繞 HWC 的那種）。不過要注意：**Spark 寫出新分區後，Impala 不會自動感知**——需要在 Impala 端執行 `REFRESH <table>` 或 `INVALIDATE METADATA <table>` 才能看到新分區（細節見 [第 06 章 §6.6](06-engine-selection.md)，本章不重講）。
 
 （你多半不必、也不會在 Hue 打 SQL 時去操心底層走不走 HWC——那通常是平台幫你接好的。若你的團隊用 **dbt-spark** 之類工具建模型表，它底層也是走 Spark SQL 建表，所以同樣吃上面這條規則——預設多落在 external 那一類；要它建成別種、或放到哪個位置，看你 dbt 的 materialization／`file_format`／`location` 設定。跨引擎的定位與選用，第 06 章專門談。）
 
