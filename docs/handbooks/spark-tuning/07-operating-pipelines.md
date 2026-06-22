@@ -1,16 +1,16 @@
-# 08 · 營運（一）：可靠地把排程跑起來
+# 07 · 營運（一）：可靠地把排程跑起來
 
 > **本章前提**：你讀過[第 01 章](01-how-spark-runs-your-sql.md)（partition、shuffle、HDFS/Hive Metastore、容錯）、[第 03 章](03-sql-tuning.md)（SQL 寫法）、[第 04 章](04-spark-config.md)（資源與多租戶）、[第 05 章](05-storage-efficiency.md)（partition 設計、小檔、`ANALYZE`、external/managed 表）；你會寫 SQL。
 >
 > 前面七章都在教「怎麼把一條查詢跑得快」。但當你的查詢變成**每天自動跑、產出給別人用的表**，問題就換了一種：不是「快不快」，而是「**半夜自己跑、出錯了會怎樣、能不能安全重跑、上游沒好它會不會亂跑**」。這一章（和下一章）講的就是這條**營運線**。
 >
-> 本章（營運一）只談**把排程可靠地跑起來**：冪等可重跑、相依、回填、監控、維護。產出「對不對、可不可信、能不能重現」留給[第 09 章](09-data-product-correctness.md)（營運二）。
+> 本章（營運一）只談**把排程可靠地跑起來**：冪等可重跑、相依、回填、監控、維護。產出「對不對、可不可信、能不能重現」留給[第 08 章](08-data-product-correctness.md)（營運二）。
 >
 > 每節先講**通用原則**（不管你用什麼工具都成立），再落到你們的三件工具上。每節末附 📚 來源，章末有「資料來源與精確度說明」。
 
 ---
 
-## 8.1 本章地圖：從「跑得快」到「跑得可靠」，以及你的三層工具
+## 7.1 本章地圖：從「跑得快」到「跑得可靠」，以及你的三層工具
 
 前七章是**優化線**——讓一條查詢少讀、少搬、用對資源。這一章起是**營運線**——讓查詢變成「**天天自動產出、可信賴的資料服務**」。一個只跑一次的 ad-hoc 查詢，跑錯了你重跑就好；但一支每天半夜自動跑、下游好幾個模型都等著用的排程作業，**跑錯的代價是隔天才發現、而且可能已經污染了下游**。所以營運線的優先序是：**正確 > 可靠 > 可維護 > 快**。
 
@@ -43,7 +43,7 @@ flowchart LR
 
 ---
 
-## 8.2 冪等與可重跑：重跑會壞，是頭號營運風險
+## 7.2 冪等與可重跑：重跑會壞，是頭號營運風險
 
 **原則。** 排程作業遲早會失敗重跑——機器掛了、上游延遲、你修了 bug 要補算。**冪等（idempotent）**的意思是：**同一步驟重跑幾次，結果都跟只跑一次一樣**。不冪等的作業，重跑一次就多一份資料，這是營運最常見、最難查的災難。
 
@@ -109,7 +109,7 @@ WHERE  snapshot_date = '{{ var("run_date") }}'   -- 只重算這次要的分區
 {% endif %}
 ```
 
-（上面 `var("run_date")` ＝你在 `dbt run --vars` 傳進來的值，下節 §8.4 回填會用到；`is_incremental()` 只在「增量重跑」時為真，所以那段 `WHERE` 只在重跑時生效、首次建表時不套用。）
+（上面 `var("run_date")` ＝你在 `dbt run --vars` 傳進來的值，下節 §7.4 回填會用到；`is_incremental()` 只在「增量重跑」時為真，所以那段 `WHERE` 只在重跑時生效、首次建表時不套用。）
 
 dbt 官方有一條**關鍵 caveat**：用 `insert_overwrite` 時，**該分區的資料要在這次 query 裡全部重新 select 出來**——因為它會把整個分區換掉，少 select 的就會在重跑時消失。這正好是冪等的另一面：**覆寫的單位是「一整個分區」，所以你每次都要把那個分區「算完整」。**
 
@@ -134,7 +134,7 @@ FROM   staging_features WHERE snapshot_date='2026-05-31';
 
 ---
 
-## 8.3 排程相依：上游沒齊，別跑下游
+## 7.3 排程相依：上游沒齊，別跑下游
 
 **原則。** 你的下游作業（訓練模型、算衍生表）依賴上游的表先產好。最危險的不是「上游失敗」——那看得見；而是**上游還沒跑完、或只寫了一半，下游就開跑**，讀到**半成品或舊資料**，算出一個「沒報錯但其實錯」的結果。所以下游開跑前要有一道**閘門（gate）**：確認上游**真的就緒**了才放行。「就緒」不是「時間到了」，是「上游那一步**成功完成**了」。
 
@@ -193,11 +193,11 @@ spark-sql -f train_inputs.sql   # 確認就緒才跑
 
 ---
 
-## 8.4 回填：補歷史，要分批、可中斷、別擾鄰
+## 7.4 回填：補歷史，要分批、可中斷、別擾鄰
 
 **原則。** 你常需要**回填（backfill）**——補算過去某段時間本該產出的資料：新上線一張特徵表要補三年歷史、修了 bug 要重算上個月、漏跑了幾天要補。回填的三個鐵則：**分批**（一個 snapshot/分區一批，別一條 SQL 撈三年）、**可中斷續跑**（跑到一半掛了，從斷點接、別從頭來）、**別擾鄰**（回填很重，別把當天的正常排程資源吃光）。
 
-分批＋冪等是天生一對：因為每個分區的寫入是 `INSERT OVERWRITE PARTITION`（§8.2，冪等），所以回填可以**一個分區一個分區補，補到哪算數，中斷再續跑也不會重複**。
+分批＋冪等是天生一對：因為每個分區的寫入是 `INSERT OVERWRITE PARTITION`（§7.2，冪等），所以回填可以**一個分區一個分區補，補到哪算數，中斷再續跑也不會重複**。
 
 **落地（Airflow）——`catchup` 與 `backfill`。** Airflow 的 DAG 有「資料區間」概念：你給它一個 `start_date` 和排程週期，它知道「從那天起每一天/每月該有一次執行」。
 
@@ -211,7 +211,7 @@ airflow dags backfill build_cust_feature \
     --max-active-runs 4
 ```
 
-**落地（dbt）——重跑指定 model、用變數圈定分區，自己分批。** dbt 沒有「日期區間」的內建回填；你用變數把要補的分區傳進去（呼應 §8.2 那個 `var("run_date")`），外層用 Airflow 或 shell 迴圈逐日呼叫：
+**落地（dbt）——重跑指定 model、用變數圈定分區，自己分批。** dbt 沒有「日期區間」的內建回填；你用變數把要補的分區傳進去（呼應 §7.2 那個 `var("run_date")`），外層用 Airflow 或 shell 迴圈逐日呼叫：
 
 ```bash
 # 逐日回填：每天一次 dbt run，只重算該天分區（冪等，掛了重跑該天即可）
@@ -234,13 +234,13 @@ WHERE event_date = current_date()
 WHERE event_date = '{{ var("run_date") }}'   -- dbt；Airflow 用 logical_date、cron 用腳本參數
 ```
 
-於是你 `backfill` 2026-03-01，SQL 卻拿今天的資料去算，**補出來的歷史全錯、而且明天再跑又是另一個結果**。**原則：排程或會被回填的 SQL，所有「現在幾號」一律從外面當參數傳進來**（§8.2 的 `var("run_date")`、Airflow 的 logical_date——這次排程被指派的「邏輯日」，由 Airflow 自動傳進來、不是執行當天），程式內**不碰 `current_date()`**。這也是「冪等」的時間版本：同一個邏輯日重跑，結果要一樣。
+於是你 `backfill` 2026-03-01，SQL 卻拿今天的資料去算，**補出來的歷史全錯、而且明天再跑又是另一個結果**。**原則：排程或會被回填的 SQL，所有「現在幾號」一律從外面當參數傳進來**（§7.2 的 `var("run_date")`、Airflow 的 logical_date——這次排程被指派的「邏輯日」，由 Airflow 自動傳進來、不是執行當天），程式內**不碰 `current_date()`**。這也是「冪等」的時間版本：同一個邏輯日重跑，結果要一樣。
 
 > 📚 **來源**：Airflow `catchup`（控制是否自動補跑 `start_date` 起未執行的區間）、`airflow dags backfill` 指定日期區間補跑見 [Apache Airflow — DAGs（Catchup / Backfill）](https://airflow.apache.org/docs/apache-airflow/2.10.5/core-concepts/dags.html)；dbt 以 `--vars` 傳執行參數、`--select` 圈定 model 見 [dbt — dbt run](https://docs.getdbt.com/reference/commands/run)。⚠️ `catchup` 預設值依 Airflow 版本與 `catchup_by_default` 設定而定（多數部署為 True），故文中建議排程作業明設 `catchup=False`；YARN 佇列隔離為通則，確切佇列配置以你平台為準。
 
 ---
 
-## 8.5 監控與退化：作業會隨資料長大而變慢
+## 7.5 監控與退化：作業會隨資料長大而變慢
 
 **原則。** 一支今天 10 分鐘跑完的作業，半年後資料長大、可能變 40 分鐘還不自知，直到某天撞上 **SLA**（service-level agreement，服務水準協議——這裡就是「這支作業該在幾點前跑完」的承諾）或把下游卡住。營運不是「跑得起來就好」，是**持續盯著它有沒有在退化**。要看三件事隨時間的變化：**跑多久、處理多少資料量、shuffle/spill 有沒有惡化**。
 
@@ -268,16 +268,16 @@ train_model = BashOperator(
 #!/usr/bin/env bash
 set -euo pipefail   # 任一指令失敗就停（-e）、用到未設變數就報錯（-u）、pipe 中間失敗也算失敗（pipefail）
 spark-sql -f build_features.sql
-hdfs dfs -touchz /warehouse/cust_feature/snapshot_date=2026-05-31/_SUCCESS   # touchz＝在該路徑放一個空標記檔；真的成功才落 _SUCCESS（給 §8.3 下游當就緒訊號）
+hdfs dfs -touchz /warehouse/cust_feature/snapshot_date=2026-05-31/_SUCCESS   # touchz＝在該路徑放一個空標記檔；真的成功才落 _SUCCESS（給 §7.3 下游當就緒訊號）
 ```
 
-沒有這行，你的監控（和 §8.3 下游靠的 `_SUCCESS`）都建立在沙上——壞了也不會有人知道。
+沒有這行，你的監控（和 §7.3 下游靠的 `_SUCCESS`）都建立在沙上——壞了也不會有人知道。
 
-> 📚 **來源**：History Server 保留已完成/進行中作業、可回看與比較歷次執行見[第 02 章 §2.2](02-diagnose-with-spark-ui.md) 與 [Spark — Monitoring and Instrumentation](https://spark.apache.org/docs/latest/monitoring.html)；Airflow 任務 `retries`／`retry_delay`（`BaseOperator`，預設 `retries=0`、`retry_delay=5 分鐘`）、`sla` 與 SLA miss 通知見 [Apache Airflow 2.10 — Tasks（SLAs）](https://airflow.apache.org/docs/apache-airflow/2.10.5/core-concepts/tasks.html)（SLA 為 Airflow 2.x 功能，3.x 起改為 Deadline Alerts，見 §8.1 版本提醒）；dbt 產出 `run_results.json`（含各 model 執行時間）見 [dbt — run_results.json](https://docs.getdbt.com/reference/artifacts/run-results-json)。⚠️ 「隨資料長大而退化」是營運常態觀察，無官方逐字數字；確切告警管道（email/Slack/PagerDuty）依你平台整合而定。
+> 📚 **來源**：History Server 保留已完成/進行中作業、可回看與比較歷次執行見[第 02 章 §2.2](02-diagnose-with-spark-ui.md) 與 [Spark — Monitoring and Instrumentation](https://spark.apache.org/docs/latest/monitoring.html)；Airflow 任務 `retries`／`retry_delay`（`BaseOperator`，預設 `retries=0`、`retry_delay=5 分鐘`）、`sla` 與 SLA miss 通知見 [Apache Airflow 2.10 — Tasks（SLAs）](https://airflow.apache.org/docs/apache-airflow/2.10.5/core-concepts/tasks.html)（SLA 為 Airflow 2.x 功能，3.x 起改為 Deadline Alerts，見 §7.1 版本提醒）；dbt 產出 `run_results.json`（含各 model 執行時間）見 [dbt — run_results.json](https://docs.getdbt.com/reference/artifacts/run-results-json)。⚠️ 「隨資料長大而退化」是營運常態觀察，無官方逐字數字；確切告警管道（email/Slack/PagerDuty）依你平台整合而定。
 
 ---
 
-## 8.6 檔案與統計維護：把產出的健康維持住
+## 7.6 檔案與統計維護：把產出的健康維持住
 
 **原則。** 共用表是活的：天天被寫入、被查。不維護，它會慢慢爛——小檔愈堆愈多（拖垮讀取與 NameNode，§5.5）、統計過期（查詢計畫變爛，§5.6）、過期分區佔著儲存。維護**不是一次性**，是**排進排程的例行公事**：多久做一次、誰負責、漏做的後果。**機制第 05、06 章已教過，這裡只給「怎麼排進營運」＋你最常要的那段具體程式。**
 
@@ -296,7 +296,7 @@ FROM   cust_feature
 WHERE  snapshot_date='2026-05-31';
 ```
 
-它正是 §8.2 的冪等覆寫——所以 compaction 本身也是安全可重跑的。
+它正是 §7.2 的冪等覆寫——所以 compaction 本身也是安全可重跑的。
 
 **落地——重算統計（`ANALYZE`）。** §5.6 講過 `ANALYZE` 不會自動發生、資料變了統計才準。維護面的重點是：**產完表/補完資料就跟著重算、把它排進同一支作業**，別等查詢計畫變爛才想起：
 
@@ -310,37 +310,37 @@ ANALYZE TABLE cust_feature PARTITION (snapshot_date='2026-05-31') COMPUTE STATIS
 ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 ```
 
-（注意：external 表 `DROP PARTITION` 預設只移除 Metastore 登記、HDFS 檔案可能還在，要一併清檔需確認你環境的設定或另外刪目錄——這點以平台為準。）這也和[第 09 章 §9.5](09-data-product-correctness.md) 的「資料版本／保留歷史」直接相關：要留幾版、留多久，是同一個政策的兩面。
+（注意：external 表 `DROP PARTITION` 預設只移除 Metastore 登記、HDFS 檔案可能還在，要一併清檔需確認你環境的設定或另外刪目錄——這點以平台為準。）這也和[第 08 章 §8.5](08-data-product-correctness.md) 的「資料版本／保留歷史」直接相關：要留幾版、留多久，是同一個政策的兩面。
 
 > 📚 **來源**：external（非 ACID）表無 `ALTER COMPACT`、compaction 以「讀進來重寫」達成、小檔成因與檔大小控制見[第 05 章 §5.5](05-storage-efficiency.md)；ACID 表 `ALTER TABLE … COMPACT`（major/minor、由 Hive 觸發）見[第 06 章 §6.7](06-engine-selection.md) 與 [Cloudera CDP — Hive compaction tasks](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-hive/topics/hive-compaction-tasks.html)；`ANALYZE TABLE … COMPUTE STATISTICS` 見[第 05 章 §5.6](05-storage-efficiency.md) 與 [Spark SQL — ANALYZE TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-aux-analyze-table.html)；`ALTER TABLE … DROP PARTITION` 見 [Spark SQL — ALTER TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-alter-table.html)。⚠️ external 表 `DROP PARTITION` 是否一併刪 HDFS 檔依表設定（`external.table.purge` 等）與平台而異，以你環境實測為準。
 
 ---
 
-## 8.7 常見維運踩雷（速查）
+## 7.7 常見維運踩雷（速查）
 
 把本章（和跨章）最常默默出事的維運雷收成一張表。**多數的共通特徵是「不報錯、只是默默算錯或默默不跑」**——所以它們特別貴。症狀對上了，去對應章節看修法：
 
 | 症狀（你會看到的） | 成因 | 修法 | 哪節 |
 |---|---|---|---|
-| 重跑後資料變兩份 | 用 `INSERT INTO`（append）重跑 | 改 `INSERT OVERWRITE` 指定分區（冪等） | §8.2 |
-| 一次動態覆寫，結果整表被清空 | `partitionOverwriteMode` 預設 `static` | 動態覆寫前 `SET … = dynamic`；能指定分區值就指定 | §8.2 |
-| 沒報錯但欄位值全錯／錯位 | `INSERT … SELECT` 按位置對欄，上游加欄或改欄序 | 寫明確欄位清單、不 `SELECT *`；可用 `BY NAME` | §8.2 |
-| 回填出來的歷史是錯的、且重現不出來 | 排程 SQL 用 `current_date()` 而非參數 | 日期一律當參數傳（`var`／logical_date），程式內不碰 `current_date()` | §8.4 |
-| 下游讀到半成品／舊資料 | 沒有就緒閘門，靠時間差賭上游做完 | Airflow `ExternalTaskSensor`／dbt `ref()`；cron 用 `_SUCCESS` sentinel | §8.3 |
-| 新 DAG 一上線就把叢集塞爆 | `catchup=True` 自動補跑大量歷史區間 | 排程作業設 `catchup=False`，補歷史用 `backfill --max-active-runs` | §8.4 |
-| cron 作業「成功」了其實半路就壞 | 沒 `set -euo pipefail`、exit code/pipe 失敗被吞 | 腳本開頭 `set -euo pipefail`、成功才落 `_SUCCESS` | §8.5 |
-| 重試把問題放大成 N 倍災難 | 對**非冪等**作業設了 `retries` | 先讓作業冪等（§8.2）再開重試；兩者要搭配 | §8.2＋§8.5 |
-| 一支 job 卡死、整條線跟著堵住 | sensor／作業沒設 timeout，無限等下去 | 給 sensor 與長作業都設 `timeout`，逾時就失敗、好讓人介入 | §8.3 |
-| Impala／下游看不到剛寫的新資料 | metadata 沒同步、統計過期 | Impala `REFRESH`、寫完跑 `ANALYZE` | §6.6＋§8.6 |
-| 表愈查愈慢、計畫變爛 | 小檔堆積、統計過期、分區爆量 | 定期 compaction（重寫）＋`ANALYZE`＋清過期分區，排進排程 | §8.6＋§5.5 |
-| 改一張共用表，一次打爛 N 個下游 | schema 改動（改／刪欄）破壞既有讀者 | schema「只加不改」、變更先溝通版本化 | →[§9.4](09-data-product-correctness.md) |
-| 特徵「測得很準、上線很差」 | 用到未來資料／label 期間（時間點洩漏） | 只讀 snapshot 之前資料、絕不讀未來分區 | →[§9.3](09-data-product-correctness.md) |
+| 重跑後資料變兩份 | 用 `INSERT INTO`（append）重跑 | 改 `INSERT OVERWRITE` 指定分區（冪等） | §7.2 |
+| 一次動態覆寫，結果整表被清空 | `partitionOverwriteMode` 預設 `static` | 動態覆寫前 `SET … = dynamic`；能指定分區值就指定 | §7.2 |
+| 沒報錯但欄位值全錯／錯位 | `INSERT … SELECT` 按位置對欄，上游加欄或改欄序 | 寫明確欄位清單、不 `SELECT *`；可用 `BY NAME` | §7.2 |
+| 回填出來的歷史是錯的、且重現不出來 | 排程 SQL 用 `current_date()` 而非參數 | 日期一律當參數傳（`var`／logical_date），程式內不碰 `current_date()` | §7.4 |
+| 下游讀到半成品／舊資料 | 沒有就緒閘門，靠時間差賭上游做完 | Airflow `ExternalTaskSensor`／dbt `ref()`；cron 用 `_SUCCESS` sentinel | §7.3 |
+| 新 DAG 一上線就把叢集塞爆 | `catchup=True` 自動補跑大量歷史區間 | 排程作業設 `catchup=False`，補歷史用 `backfill --max-active-runs` | §7.4 |
+| cron 作業「成功」了其實半路就壞 | 沒 `set -euo pipefail`、exit code/pipe 失敗被吞 | 腳本開頭 `set -euo pipefail`、成功才落 `_SUCCESS` | §7.5 |
+| 重試把問題放大成 N 倍災難 | 對**非冪等**作業設了 `retries` | 先讓作業冪等（§7.2）再開重試；兩者要搭配 | §7.2＋§7.5 |
+| 一支 job 卡死、整條線跟著堵住 | sensor／作業沒設 timeout，無限等下去 | 給 sensor 與長作業都設 `timeout`，逾時就失敗、好讓人介入 | §7.3 |
+| Impala／下游看不到剛寫的新資料 | metadata 沒同步、統計過期 | Impala `REFRESH`、寫完跑 `ANALYZE` | §6.6＋§7.6 |
+| 表愈查愈慢、計畫變爛 | 小檔堆積、統計過期、分區爆量 | 定期 compaction（重寫）＋`ANALYZE`＋清過期分區，排進排程 | §7.6＋§5.5 |
+| 改一張共用表，一次打爛 N 個下游 | schema 改動（改／刪欄）破壞既有讀者 | schema「只加不改」、變更先溝通版本化 | →[§8.4](08-data-product-correctness.md) |
+| 特徵「測得很準、上線很差」 | 用到未來資料／label 期間（時間點洩漏） | 只讀 snapshot 之前資料、絕不讀未來分區 | →[§8.3](08-data-product-correctness.md) |
 
-> 最後兩列屬「**資料對不對**」的正確性問題，是[第 09 章](09-data-product-correctness.md)（營運二）的主場，這裡只先讓你在同一張表上看見它們的存在。
+> 最後兩列屬「**資料對不對**」的正確性問題，是[第 08 章](08-data-product-correctness.md)（營運二）的主場，這裡只先讓你在同一張表上看見它們的存在。
 
 ---
 
-## 8.8 取捨總表
+## 7.8 取捨總表
 
 | 取捨 | 一邊 | 另一邊 | 怎麼選 |
 |---|---|---|---|
@@ -352,7 +352,7 @@ ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 
 ---
 
-## 8.9 一句話帶走：營運的作業，正確與可重跑優先於快
+## 7.9 一句話帶走：營運的作業，正確與可重跑優先於快
 
 把這章收成一條原則：
 
@@ -362,26 +362,26 @@ ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 
 接下來：
 
-- 作業跑得可靠了，但**產出的資料對不對、可不可信、能不能重現**（品質驗證、時間點正確性／特徵洩漏、共用特徵庫契約、資料版本）？→ [第 09 章](09-data-product-correctness.md)（營運二）。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 10 章。
+- 作業跑得可靠了，但**產出的資料對不對、可不可信、能不能重現**（品質驗證、時間點正確性／特徵洩漏、共用特徵庫契約、資料版本）？→ [第 08 章](08-data-product-correctness.md)（營運二）。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 11 章。
 
 ---
 
 ## 資料來源與精確度說明
 
-**版本對齊**：Spark 連結用 `/docs/latest/` 頁（與全書一致），要對齊本手冊的 Spark 3.3.2 把網址版本字串改為 `/docs/3.3.2/`——注意主站的 version-locked 舊頁多已 404，需改用 `archive.apache.org/dist/spark/docs/3.3.2/…`。Airflow 範例以 **2.x** 為基準（見 §8.1 版本提醒），連結指向 2.10 官方頁（3.x 部分 API 已改名）；dbt 連結為官方文件。皆官方專案文件、非個人部落格（spec §6 已納入權威來源），確切行為以你環境實測。
+**版本對齊**：Spark 連結用 `/docs/latest/` 頁（與全書一致），要對齊本手冊的 Spark 3.3.2 把網址版本字串改為 `/docs/3.3.2/`——注意主站的 version-locked 舊頁多已 404，需改用 `archive.apache.org/dist/spark/docs/3.3.2/…`。Airflow 範例以 **2.x** 為基準（見 §7.1 版本提醒），連結指向 2.10 官方頁（3.x 部分 API 已改名）；dbt 連結為官方文件。皆官方專案文件、非個人部落格（spec §6 已納入權威來源），確切行為以你環境實測。
 
 **本章刻意簡化、或屬「方向正確但依環境而異」之處**（自行斟酌、別當精確值）：
 
-1. **§8.1** dbt/Airflow/cron 三層分工是職責定位；你們實際怎麼把 Airflow 接上 dbt（`BashOperator` vs Cosmos vs dbt Cloud）依部署而定，範例採最通用的「Airflow 觸發 `dbt run`」。
-2. **§8.2** `static` 模式對「不給值的動態分區」的確切覆寫範圍依表型別（Hive／datasource）與 Spark 版本而異；本章給「指定分區值最安全、動態覆寫先 `SET … = dynamic`」的可操作建議。
-3. **§8.3** `_SUCCESS` 標記作就緒訊號是 Hadoop 輸出慣例；確切路徑、是否啟用以平台為準。`ExternalTaskSensor` 在 Airflow 較新版屬 `providers-standard` 套件，匯入路徑依版本略有不同。
-4. **§8.4** `catchup` 預設值依 Airflow 版本與 `catchup_by_default` 而定（多數部署 True），故建議排程作業明設 `catchup=False`；佇列隔離為通則。
-5. **§8.5** `retries` 預設 0、`retry_delay` 預設 5 分鐘為 `BaseOperator` 預設；告警管道依平台整合。「隨資料長大退化」是常態觀察，無逐字數字。
-6. **§8.6** external 表 `DROP PARTITION` 是否一併刪 HDFS 檔依表設定與平台而異。
+1. **§7.1** dbt/Airflow/cron 三層分工是職責定位；你們實際怎麼把 Airflow 接上 dbt（`BashOperator` vs Cosmos vs dbt Cloud）依部署而定，範例採最通用的「Airflow 觸發 `dbt run`」。
+2. **§7.2** `static` 模式對「不給值的動態分區」的確切覆寫範圍依表型別（Hive／datasource）與 Spark 版本而異；本章給「指定分區值最安全、動態覆寫先 `SET … = dynamic`」的可操作建議。
+3. **§7.3** `_SUCCESS` 標記作就緒訊號是 Hadoop 輸出慣例；確切路徑、是否啟用以平台為準。`ExternalTaskSensor` 在 Airflow 較新版屬 `providers-standard` 套件，匯入路徑依版本略有不同。
+4. **§7.4** `catchup` 預設值依 Airflow 版本與 `catchup_by_default` 而定（多數部署 True），故建議排程作業明設 `catchup=False`；佇列隔離為通則。
+5. **§7.5** `retries` 預設 0、`retry_delay` 預設 5 分鐘為 `BaseOperator` 預設；告警管道依平台整合。「隨資料長大退化」是常態觀察，無逐字數字。
+6. **§7.6** external 表 `DROP PARTITION` 是否一併刪 HDFS 檔依表設定與平台而異。
 
 > 引用原則：以 Spark／Hadoop／Cloudera CDP 官方文件、Spark 核心開發者文章、**你們在用工具的官方文件（Apache Airflow、dbt）**、指定書籍為限，不引用未經認證的個人部落格。
 
 ---
 
-*上一章 →* [07 · PySpark DataFrame API（進階）](07-pyspark-dataframe-api.md)（撰寫順序暫緩）　|　*下一章 →* [09 · 營運（二）：讓資料產品可信](09-data-product-correctness.md)　|　*回* [手冊首頁](index.md)
+*←上一章* [06 · 引擎選用](06-engine-selection.md)　|　*下一章 →* [08 · 營運（二）：讓資料產品可信](08-data-product-correctness.md)　|　*回* [手冊首頁](index.md)

@@ -212,11 +212,11 @@ FROM card_txn WHERE month='2026-05' GROUP BY cust_id;
 - **`/*+ COALESCE(n) */`**：把塊數**減少**到 n（**不**觸發 shuffle、便宜，但可能分得不均）。
 - ⚠️ 這個 hint 裡的 `COALESCE` 跟 SQL 的 `COALESCE(a, b)` 函數（取第一個非 null 值）**只是剛好同名、毫無關係**——一個是寫在 `/*+ ... */` 裡的分區提示，一個是一般欄位函數，別混。
 
-例如一天的結果只有 2GB，與其讓它預設寫成 200 個 10MB 的小檔，不如用 `/*+ REPARTITION(16) */` 收成約 16 塊、每塊約 128MB。（習慣用 DataFrame API 的人，對應的是 `.repartition(n)`／`.coalesce(n)`，第 07 章談。）
+例如一天的結果只有 2GB，與其讓它預設寫成 200 個 10MB 的小檔，不如用 `/*+ REPARTITION(16) */` 收成約 16 塊、每塊約 128MB。（習慣用 DataFrame API 的人，對應的是 `.repartition(n)`／`.coalesce(n)`，第 10 章談。）
 
 其餘兩個方向：
 
-- **定期 compaction（把累積的小檔合併成大檔）**：對已經堆出小檔的表，定期跑一支「把一個分區讀進來、重寫成少數大檔」的維護作業（第 08 章營運維護的一環）。
+- **定期 compaction（把累積的小檔合併成大檔）**：對已經堆出小檔的表，定期跑一支「把一個分區讀進來、重寫成少數大檔」的維護作業（第 07 章營運維護的一環）。
 - **從源頭別過度分割**（§5.4）：不要用高基數欄位分區。
 
 ### 進一步：`REPARTITION` 還是 `COALESCE`？放在哪？
@@ -286,7 +286,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 2. **CBO（Cost-Based Optimizer，成本式優化器）**：用**欄位級**統計做更進階的優化（例如多表 join 時自動排出較省的 join 順序）。CBO 預設是**關著**的（`spark.sql.cbo.enabled` 預設 `false`；連「自動 join 重排序」還要再另開 `spark.sql.cbo.joinReorder.enabled`，也預設 `false`），要手動開、且要先跑 `FOR COLUMNS`。對 SQL-first 的人，這屬於進階、不是第一優先。
 3. **AQE（第 04 章）**：注意 AQE 用的是**執行途中**（查詢真的跑起來、邊跑邊量）的真實大小，**不靠 `ANALYZE` 的事前統計**——所以就算你沒跑 `ANALYZE`，AQE 仍能在執行期把 sort-merge 動態改成 broadcast。但**計畫階段的初始**選擇仍受益於 `ANALYZE`，兩者不衝突、互補。
 
-**要自己跑——`ANALYZE` 不會自動發生。** Spark **不會**在你每次寫表後自動幫你重算統計；所以實務上要**主動把它排進排程**：產完表後跟著跑一次 `ANALYZE`（資料變了統計才準，第 08 章維護），不是建好表就一勞永逸。（有個 `spark.sql.statistics.size.autoUpdate.enabled` 能在你用 Spark 指令改動表時自動更新「大小」，但**預設是關的**，而且只更新大小、不含欄位級統計——別指望它代勞。）
+**要自己跑——`ANALYZE` 不會自動發生。** Spark **不會**在你每次寫表後自動幫你重算統計；所以實務上要**主動把它排進排程**：產完表後跟著跑一次 `ANALYZE`（資料變了統計才準，第 07 章維護），不是建好表就一勞永逸。（有個 `spark.sql.statistics.size.autoUpdate.enabled` 能在你用 Spark 指令改動表時自動更新「大小」，但**預設是關的**，而且只更新大小、不含欄位級統計——別指望它代勞。）
 
 **取捨講白**：`ANALYZE` 要花一次掃描成本（`NOSCAN` 便宜很多），但它讓之後**每一條**查詢都估得更準、少走冤枉的 shuffle。對排程定期產出的大表，**產完表後跟著跑一次** 幾乎永遠值得。
 
@@ -311,7 +311,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 ## 5.8 營運共用資料表：Hive 3 的 managed／external、與 schema 演進
 
-前面都在講「怎麼存得快又省」。但如果你的表是**要長期給很多人、很多作業共用**的資料產品（特徵庫就是典型），還有一層營運課題——這是 §08–§09 營運兩章的鋪墊。對 SQL-first 的你，先記**三個務實結論**，背後的為什麼放後面、知道有這回事即可：
+前面都在講「怎麼存得快又省」。但如果你的表是**要長期給很多人、很多作業共用**的資料產品（特徵庫就是典型），還有一層營運課題——這是 §07–§08 營運兩章的鋪墊。對 SQL-first 的你，先記**三個務實結論**，背後的為什麼放後面、知道有這回事即可：
 
 1. **你用 Spark 產的共用表，多半是「external（外部）表」**——就是一般的 Parquet 檔放在 HDFS、誰都能直接讀。下游用 Spark／Impala 直接讀沒問題，照 §5.2–§5.6 存好即可。
 2. **要去讀「別的團隊用 Hive 建的表」時，先別假設 Spark 直接讀就對。** Hive 3 有一種「受管交易表」（下面解釋），從 Spark 讀它有時要透過一個叫 **HWC** 的橋接元件——讀不到時，**知道可能是這個原因，去問平台**就好。
@@ -329,9 +329,9 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 - **加欄位**通常安全：舊查詢沒 `SELECT` 到新欄、不受影響（Parquet／ORC 讀舊檔時會把缺的新欄補成 null；至於「跨檔自動合併不同 schema」的 `spark.sql.parquet.mergeSchema` **預設是關的**，要時才開）。
 - **改既有欄位的型別、改名、刪欄**是危險動作——下游 `SELECT 那個欄位` 會壞掉或語意悄悄改變（呼應第 03 章 §3.7「join key 型別不一致」那類坑）。要做就**新開一欄、或版本化並通知下游**，別原地改舊欄。
 
-**取捨講白**：給共用表設計 partition 與檔案大小時，要為「**下游怎麼讀**」著想（大家都按 `month` 查，就按 `month` 分區），而不只是自己寫起來方便；schema 要演進得「**只加不改**」，把對下游的衝擊降到最低。這些營運課題（冪等可重跑、回填、資料品質驗證、時間點正確性、監控退化、表維護）第 08–09 章會完整展開。
+**取捨講白**：給共用表設計 partition 與檔案大小時，要為「**下游怎麼讀**」著想（大家都按 `month` 查，就按 `month` 分區），而不只是自己寫起來方便；schema 要演進得「**只加不改**」，把對下游的衝擊降到最低。這些營運課題（冪等可重跑、回填、資料品質驗證、時間點正確性、監控退化、表維護）第 07–08 章會完整展開。
 
-> 📚 **來源**：「Hive 3 預設 `CREATE TABLE` 建 managed ACID（ORC）表、external 表非 ACID」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)；「Spark SQL `CREATE TABLE` 在 CDP 建的是 external 表、存取 Hive managed 表需 HWC、external 表不需、external 表登記於共用 Hive Metastore 供 Hive/Impala 存取」見 [Cloudera CDP — Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html)；Parquet/ORC 支援加欄、`spark.sql.parquet.mergeSchema` 預設 `false` 見 [Spark SQL — Parquet（Schema Merging）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；ACID compaction（major/minor）、營運維護見第 08 章。⚠️ HWC 的確切使用方式、ACID 表從 Spark 的可讀寫範圍依 CDP 版本與設定而異，以你平台為準；schema 演進「加欄安全、改／刪危險」是通則，個別型別變更是否相容依資料源與設定而定。⚠️ dbt-spark 屬第三方工具、不在本手冊權威來源範圍，「建表走 Spark CREATE TABLE 規則」為其行為的合理推論，實際 materialization／表類型依你的 dbt 設定，以實測為準。
+> 📚 **來源**：「Hive 3 預設 `CREATE TABLE` 建 managed ACID（ORC）表、external 表非 ACID」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)；「Spark SQL `CREATE TABLE` 在 CDP 建的是 external 表、存取 Hive managed 表需 HWC、external 表不需、external 表登記於共用 Hive Metastore 供 Hive/Impala 存取」見 [Cloudera CDP — Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html)；Parquet/ORC 支援加欄、`spark.sql.parquet.mergeSchema` 預設 `false` 見 [Spark SQL — Parquet（Schema Merging）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；ACID compaction（major/minor）、營運維護見第 07 章。⚠️ HWC 的確切使用方式、ACID 表從 Spark 的可讀寫範圍依 CDP 版本與設定而異，以你平台為準；schema 演進「加欄安全、改／刪危險」是通則，個別型別變更是否相容依資料源與設定而定。⚠️ dbt-spark 屬第三方工具、不在本手冊權威來源範圍，「建表走 Spark CREATE TABLE 規則」為其行為的合理推論，實際 materialization／表類型依你的 dbt 設定，以實測為準。
 
 ---
 
@@ -342,7 +342,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 1. **格式（§5.2）**：用 **Parquet**（或跟平台主流），不要 CSV——下游要的就是「只讀幾個欄位、謂詞下推跳塊」這些欄式好處。
 2. **壓縮（§5.3）**：天天被查的熱表，用預設 **snappy**（解壓快，省的是每次查詢的時間），不為了省一點空間去用 gzip 拖慢每次查詢。
 3. **分區（§5.4）**：按 **`month`** 分區（下游幾乎都帶時間範圍查，裁得到；36 個月＝36 個目錄，基數適中）。**絕不**按 `cust_id` 分區（1000 萬目錄＝小檔災難）。
-4. **檔案大小（§5.5）**：假設一個月的彙總約 4GB，寫出時用 `/*+ REPARTITION(32) */` 收成約 **32 塊**（每塊約 128MB），別讓它散成 200 個小檔（這裡一次只寫一個月＝單一靜態分區，裸 `REPARTITION(32)` 即可；若是一次**回填多個月**＝動態分區，要改用 `/*+ REPARTITION(month) */` 按分區欄位分，見 §5.5）；之後若靠 append 累積出碎檔，排定期 compaction（§08）。
+4. **檔案大小（§5.5）**：假設一個月的彙總約 4GB，寫出時用 `/*+ REPARTITION(32) */` 收成約 **32 塊**（每塊約 128MB），別讓它散成 200 個小檔（這裡一次只寫一個月＝單一靜態分區，裸 `REPARTITION(32)` 即可；若是一次**回填多個月**＝動態分區，要改用 `/*+ REPARTITION(month) */` 按分區欄位分，見 §5.5）；之後若靠 append 累積出碎檔，排定期 compaction（§07）。
 5. **統計（§5.6）**：每月產完表後跑一次 `ANALYZE TABLE monthly_cust_txn PARTITION(month='2026-05') COMPUTE STATISTICS`，讓下游拿它 join 時 Spark 估得準、該 broadcast 就 broadcast。
 6. **共用與演進（§5.8）**：它多半是 external Parquet 表，下游直接讀；日後要加特徵欄就**加欄**、別改既有欄的型別，保護下游。
 
@@ -363,8 +363,8 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 接下來：
 
 - 同一張 Hive 表，什麼時候該用 Spark、什麼時候用 Impala／Hive on Tez 去查？managed/ACID 表跨引擎怎麼處理？→ 第 06 章（引擎選用）。
-- 這些表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、schema 演進不打爛下游？→ 第 08–09 章（營運兩章）。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 10 章。
+- 這些表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、schema 演進不打爛下游？→ 第 07–08 章（營運兩章）。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 11 章。
 
 ---
 

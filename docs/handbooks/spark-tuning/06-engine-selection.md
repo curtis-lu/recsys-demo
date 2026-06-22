@@ -65,7 +65,7 @@ flowchart TB
 
 **Hive on Tez：不是 §1.9 那個慢老 Hive。** 這裡要特別澄清，免得你誤會：第 01 章 §1.9 說「Spark 比老 Hive 快」，那個「老 Hive」指的是**跑在 MapReduce 上的 Hive**——每個 stage 都把中間結果寫回 HDFS、再讀出來，慢在這。但**在 CDP 上，Hive 早就不用 MapReduce 了**（CDP 直接把 MapReduce 執行引擎拿掉，你硬指定它還會報錯），改用 **Tez**：和 Spark 一樣是「DAG 引擎」（DAG＝把一條查詢拆成一張「哪步接哪步」的工作流程圖，按圖一路算下去、stage 之間盡量不把中間結果落地寫回 HDFS），容器可重用，比老 MapReduce 快得多。所以「Hive on Tez」是個**穩健、能容錯的現代批次引擎**，不是該被嫌棄的老古董——它只是每條查詢仍要走「申請 YARN 容器」這個批次起跑流程，互動體感不如常駐的 Impala。
 
-**Spark SQL：你已經熟的那套。** 前五章講的就是它：起 application、driver 排程、executor 平行算、shuffle、容錯靠重試／重算。它的甜蜜點是**複雜多步轉換**（一長串 join／window／聚合）、**與 Python／機器學習生態整合**（本手冊所屬的 repo 就是 Spark pipeline）、以及需要**寫成可重用、可測試程式**的場合（第 07 章）。
+**Spark SQL：你已經熟的那套。** 前五章講的就是它：起 application、driver 排程、executor 平行算、shuffle、容錯靠重試／重算。它的甜蜜點是**複雜多步轉換**（一長串 join／window／聚合）、**與 Python／機器學習生態整合**（本手冊所屬的 repo 就是 Spark pipeline）、以及需要**寫成可重用、可測試程式**的場合（第 10 章）。
 
 > 📚 **來源**：Impala 為 **MPP（massively parallel processing）database engine**、原生執行（官方原話「circumvents MapReduce to directly access the data」、不轉成 MapReduce job）見 [Impala — Components of Impala](https://impala.apache.org/docs/build/html/topics/impala_components.html) 與 [Impala — Overview](https://impala.apache.org/overview.html)（Apache Impala 官方）；「Impala 低延遲互動、記憶體密集、不像 Hive 那樣容錯」見 [Cloudera Blog — Apache Hive LLAP vs Apache Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html)（Cloudera 官方部落格；該文逐字寫的是「Hive is designed to be very fault-tolerant」，Impala 不容錯為其對比所隱含、非逐字直述）；Impala 近記憶體上限時 spill 到磁碟、可設 `MEM_LIMIT` 見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html)；CDP 的 Hive 只跑在 Tez（MapReduce 不支援、指定會報錯）、Tez 以 DAG 改善查詢效能見 [Cloudera CDP — Hive on Tez introduction](https://docs.cloudera.com/runtime/7.2.18/hive-introduction/topics/hive-on-tez.html)；Spark 的 driver／executor／容錯機制見第 01 章。⚠️ 「常駐 daemon 省下啟動開銷」「不容錯」是各引擎的設計取向，方向正確；確切啟動秒數、spill 行為依叢集設定與查詢而異，無官方逐字數字。
 
@@ -82,7 +82,7 @@ flowchart TB
 | **資料量／單次工作規模** | 很大、很重 | 很大、很重 | 中小～中（單次工作別太重；超大 join／聚合會吃力） |
 | **要不要容錯長跑** | 要（會跑很久、不能半途重來） | 要 | 不要（短查詢，重跑也快） |
 | **要不要寫回大表／寫 ACID 交易表** | 寫 external 大表、複雜寫入 | **寫 ACID 交易表**（§6.7） | 主要是查；寫入有限制（§6.7） |
-| **要不要接 Python／ML** | **要**（第 07 章） | 不要 | 不要 |
+| **要不要接 Python／ML** | **要**（第 10 章） | 不要 | 不要 |
 | **誰在用** | 資料工程／排程 | 排程／既有 HQL 報表 | 分析師／PM／BI 互動 |
 
 （**HQL**＝Hive 的 SQL 方言，你平常寫的 SQL 幾乎都通用，差別在少數函式與語法；本表把它放「複雜度」欄只是因為既有 HQL 報表多半屬中等～複雜那一格。**「單次工作別太重」怎麼抓**：沒有精確界線，但若你的查詢要把上億列做多步大 join、或中間結果動輒幾十 GB，就偏「重」、別賭 Impala；單純掃一個月、聚合出幾萬列，就是 Impala 的舒適區。真要量，用 §6.4 的 query profile 看它有沒有一直 spill。）
@@ -104,7 +104,7 @@ flowchart TB
 
 這棵樹是**傾向**、不是法律：很多工作 Spark 和 Hive on Tez 都能穩穩做（兩者都容錯、都適合長批次），這時跟著你團隊的既有慣例走即可（既有一堆 HQL → 沿用 Hive；既有 Spark pipeline → 沿用 Spark）。真正**界線分明**的只有一條：**「有人在等的秒級互動」幾乎一定走 Impala，「容錯的重批次」一定別走 Impala。**
 
-> 📚 **來源**：「Impala 適合低延遲 ad-hoc／BI、Hive 適合容錯批次 ETL、Impala 不適合重型 join／長跑」見 [Cloudera Blog — Hive LLAP vs Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html) 與 [Cloudera Community — Hive on Spark or Impala in batch (ETL)](https://community.cloudera.com/t5/Support-Questions/Hive-on-Spark-or-Impala-in-batch-Process-ETL/td-p/54314)；Spark 與 ML／Python 整合見第 07 章。⚠️ 本表為「典型傾向」的整理，邊界案例（Spark vs Hive 都可）依團隊既有技術棧與工作負載而定，非硬規則。
+> 📚 **來源**：「Impala 適合低延遲 ad-hoc／BI、Hive 適合容錯批次 ETL、Impala 不適合重型 join／長跑」見 [Cloudera Blog — Hive LLAP vs Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html) 與 [Cloudera Community — Hive on Spark or Impala in batch (ETL)](https://community.cloudera.com/t5/Support-Questions/Hive-on-Spark-or-Impala-in-batch-Process-ETL/td-p/54314)；Spark 與 ML／Python 整合見第 10 章。⚠️ 本表為「典型傾向」的整理，邊界案例（Spark vs Hive 都可）依團隊既有技術棧與工作負載而定，非硬規則。
 
 ---
 
@@ -222,9 +222,9 @@ flowchart LR
 
 > **要給多個引擎共用、又想避開 ACID 跨引擎的麻煩 → 就用 §5.8 那種 external Parquet 表。** 它不是交易表、沒有 ACID 那層增量檔與 compaction 包袱，三個引擎都能直接讀、Spark 寫也不必走 HWC——這就是為什麼 §5.8 與 §5.9 一路推「共用表優先 external Parquet」。
 
-回到前面那個判斷：如果你的需求其實是「每次重算整個月、整批換掉」，那 §5.9／§08 講的「**整個 partition 覆寫**」（`INSERT OVERWRITE ... PARTITION`）配 external Parquet 就夠了，根本不需要 ACID——也順帶躲開這節所有跨引擎限制。**只有真的要「改／刪既有的列」時（更正、合規刪除、upsert），才值得為 ACID 扛上 compaction 維護 ＋ 跨引擎限制。**
+回到前面那個判斷：如果你的需求其實是「每次重算整個月、整批換掉」，那 §5.9／§07 講的「**整個 partition 覆寫**」（`INSERT OVERWRITE ... PARTITION`）配 external Parquet 就夠了，根本不需要 ACID——也順帶躲開這節所有跨引擎限制。**只有真的要「改／刪既有的列」時（更正、合規刪除、upsert），才值得為 ACID 扛上 compaction 維護 ＋ 跨引擎限制。**
 
-> 📚 **來源**：**ACID** 為資料庫交易四保證（Atomicity／Consistency／Isolation／Durability）的通用資料庫概念；Hive ACID 表用 base ＋ delta 增量檔記錄變更、靠 compaction 合併（見下方 Hive 3 tables 連結與 §5.8）。「Impala 可讀 full ACID v2（ORC）交易表、但不能 CREATE 或寫入 full ACID 表；insert-only 交易表 Impala 可讀可寫；full ACID 表由 Hive 建與改、Impala 只讀」見 [Cloudera CDP — READ Support for FULL ACID ORC Tables](https://docs.cloudera.com/runtime/7.2.17/impala-manage/topics/impala-read-fullacid-orc.html)；「Hive 3 預設 `CREATE TABLE`＝managed ACID(ORC)、Spark 存取 managed 表需 HWC、external 表不需」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)、[Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html) 與第 05 章 §5.8；`INSERT OVERWRITE ... PARTITION` 整批覆寫見 §5.9／第 08 章。⚠️ Impala 對 full ACID 表的可讀範圍依 CDP／Impala 版本而異（本手冊環境 CDP 7.1.9；full ACID 讀支援在 7.1.x／Runtime 7.2.2+ 文件均有，確切邊界以你平台實測為準）；HWC 的確切用法依版本與設定而定。
+> 📚 **來源**：**ACID** 為資料庫交易四保證（Atomicity／Consistency／Isolation／Durability）的通用資料庫概念；Hive ACID 表用 base ＋ delta 增量檔記錄變更、靠 compaction 合併（見下方 Hive 3 tables 連結與 §5.8）。「Impala 可讀 full ACID v2（ORC）交易表、但不能 CREATE 或寫入 full ACID 表；insert-only 交易表 Impala 可讀可寫；full ACID 表由 Hive 建與改、Impala 只讀」見 [Cloudera CDP — READ Support for FULL ACID ORC Tables](https://docs.cloudera.com/runtime/7.2.17/impala-manage/topics/impala-read-fullacid-orc.html)；「Hive 3 預設 `CREATE TABLE`＝managed ACID(ORC)、Spark 存取 managed 表需 HWC、external 表不需」見 [Cloudera CDP — Apache Hive 3 tables](https://docs-archive.cloudera.com/runtime/7.1.0/using-hiveql/topics/hive_hive_3_tables.html)、[Apache Spark access to Apache Hive](https://docs-archive.cloudera.com/runtime/7.1.0/securing-hive/topics/hive_spark_access_to_hive.html) 與第 05 章 §5.8；`INSERT OVERWRITE ... PARTITION` 整批覆寫見 §5.9／第 07 章。⚠️ Impala 對 full ACID 表的可讀範圍依 CDP／Impala 版本而異（本手冊環境 CDP 7.1.9；full ACID 讀支援在 7.1.x／Runtime 7.2.2+ 文件均有，確切邊界以你平台實測為準）；HWC 的確切用法依版本與設定而定。
 
 ---
 
@@ -243,7 +243,7 @@ flowchart LR
 - **一句話**：穩批次與既有 HQL 的可靠老手，但不是給人即時互動的。
 
 **Spark SQL**
-- **甜蜜點**：複雜多步轉換（一長串 join／window／自訂邏輯）、與 Python／ML 整合、要寫成**可重用可測試**的程式（第 07 章）。容錯、最通用。
+- **甜蜜點**：複雜多步轉換（一長串 join／window／自訂邏輯）、與 Python／ML 整合、要寫成**可重用可測試**的程式（第 10 章）。容錯、最通用。
 - **雷區**：起 application／排程有成本，**拿它開一個秒級小 ad-hoc 不划算**（啟動可能比查詢還久——那種就丟 Impala）。學習曲線也最陡。
 - **一句話**：複雜、要接 ML、要工程化就靠它；但別用大砲打小鳥。
 
@@ -252,7 +252,7 @@ flowchart LR
 1. **為了「快」，把幾小時的重 ETL 硬塞 Impala** → 不容錯＋記憶體壓力，遲早爆。重 ETL 給 Spark／Hive on Tez。
 2. **為了「都用 Spark」，拿 Spark 開一個秒級小查詢給人互動** → 啟動開銷比查詢本身還久。互動給 Impala。
 
-> 📚 **來源**：Impala 低延遲互動／不容錯／記憶體密集、不適合重型 join；Hive 容錯適合批次 ETL 見 [Cloudera Blog — Hive LLAP vs Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html) 與 [Cloudera Community — Hive on Spark or Impala in batch (ETL)](https://community.cloudera.com/t5/Support-Questions/Hive-on-Spark-or-Impala-in-batch-Process-ETL/td-p/54314)；Impala spill 行為見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html)；Spark 與 ML／工程化整合見第 07 章。⚠️ 「啟動開銷」「記憶體壓力」為設計取向的方向性描述，確切數字依叢集設定與查詢而異。
+> 📚 **來源**：Impala 低延遲互動／不容錯／記憶體密集、不適合重型 join；Hive 容錯適合批次 ETL 見 [Cloudera Blog — Hive LLAP vs Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html) 與 [Cloudera Community — Hive on Spark or Impala in batch (ETL)](https://community.cloudera.com/t5/Support-Questions/Hive-on-Spark-or-Impala-in-batch-Process-ETL/td-p/54314)；Impala spill 行為見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html)；Spark 與 ML／工程化整合見第 10 章。⚠️ 「啟動開銷」「記憶體壓力」為設計取向的方向性描述，確切數字依叢集設定與查詢而異。
 
 ---
 
@@ -292,9 +292,9 @@ flowchart TB
 
 接下來：
 
-- SQL 有時就是不夠用——複雜可重用邏輯、要單元測試、要接 Python／ML——什麼時候、怎麼從 SQL 改用 **PySpark DataFrame API**？→ 第 07 章。
-- 這些跨引擎的表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、metadata 同步排進排程？→ 第 08–09 章（營運兩章）。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、用哪個引擎、最常踩什麼雷」？→ 第 10 章。
+- SQL 有時就是不夠用——複雜可重用邏輯、要單元測試、要接 Python／ML——什麼時候、怎麼從 SQL 改用 **PySpark DataFrame API**？→ 第 10 章。
+- 這些跨引擎的表怎麼**長期穩定營運**——冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、metadata 同步排進排程？→ 第 07–08 章（營運兩章）。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、用哪個引擎、最常踩什麼雷」？→ 第 11 章。
 
 ---
 
@@ -315,4 +315,4 @@ flowchart TB
 
 ---
 
-*←上一章* [05 · 儲存效率](05-storage-efficiency.md)　|　*下一章 →* [07 · PySpark DataFrame API（進階）](07-pyspark-dataframe-api.md)　|　*回* [手冊首頁](index.md)
+*←上一章* [05 · 儲存效率](05-storage-efficiency.md)　|　*下一章 →* [07 · 營運（一）：可靠地把排程跑起來](07-operating-pipelines.md)　|　*回* [手冊首頁](index.md)

@@ -137,7 +137,7 @@ flowchart TB
   - **先扣 300MB** 給 Spark 內部固定開銷。
   - **M ＝（heap − 300MB）× `spark.memory.fraction`（預設 0.6）**：這是 execution 與 storage **共用**的大池。
     - **execution memory**：做 shuffle／join／sort／聚合時的運算暫存。**不夠用，就是 §1.6／§2.6 那個 spill**（溢寫到磁碟）。
-    - **storage memory**：你用 `cache()`／`persist()`（第 07 章）存起來的資料放這。
+    - **storage memory**：你用 `cache()`／`persist()`（第 10 章）存起來的資料放這。
   - **剩下約 40%**：留給使用者資料結構、Spark metadata、和估算誤差的安全緩衝。
 - **execution 與 storage 會動態互相借用**：沒人 cache 時，execution 可以用滿整個 M；要 cache 時，storage 至少保得住 **R ＝ M × `spark.memory.storageFraction`（預設 0.5）** 這一塊不被搶走。execution 可以逼退 storage 一直到 R 為止，反過來 storage 不能逼退 execution。
 
@@ -206,7 +206,7 @@ flowchart LR
 - **開源 Spark 預設 `spark.dynamicAllocation.enabled=false`**（要自己開）。
 - **但 CDP 預設是開的**——所以你在公司環境多半**已經在用** dynamic allocation。這時 `--num-executors` 變成「初始台數」，真正的範圍由 `minExecutors`（預設 0）和 `maxExecutors`（預設無上限）框住；executor 閒置超過 `executorIdleTimeout`（預設 60s）就會被釋放。（它能在釋放一台 executor 之後、仍不弄丟那台已經寫好的 shuffle 中間檔，靠的是一個**獨立保管這些中間檔的常駐服務**〔即 external shuffle service〕、或等價的 shuffle 追蹤機制——CDP 已經幫你設好，你不必管。）
 
-**對排程作業（第 08 章）的實務建議**：
+**對排程作業（第 07 章）的實務建議**：
 
 - **設一個合理的 `maxExecutors`**，別讓它無上限——否則你的作業在半夜尖峰可能把整個叢集吃光，**餓死**同時在跑的其他作業。
 - **別對 streaming 作業開** dynamic allocation（Cloudera 明確提醒兩者會衝突）。本手冊以批次為主，但知道有這個雷。
@@ -214,13 +214,13 @@ flowchart LR
 
 **取捨**：dynamic allocation 把資源讓回叢集（對鄰居好、整體吞吐高），代價是 executor 反覆起降有啟動延遲、且要靠 shuffle service／tracking 保留中間資料。在多租戶環境，這個取捨幾乎**永遠該選「用它」**——重點是把 `maxExecutors` 框好。
 
-> 📚 **來源**：`spark.dynamicAllocation.enabled`（開源預設 `false`）、`shuffleTracking.enabled`（`false`）、`minExecutors`（0）、`maxExecutors`（infinity）、`executorIdleTimeout`（60s）、需 external shuffle service 或 shuffle tracking 為前提，見 [Spark Configuration（Dynamic Allocation）](https://spark.apache.org/docs/latest/configuration.html) 與 [Spark Job Scheduling](https://spark.apache.org/docs/latest/job-scheduling.html)；**CDP 預設啟用 dynamic allocation**、可在 Cloudera Manager 以 `spark.dynamicAllocation.enabled=false` 關閉、streaming 應停用，見 [Cloudera CDP：Dynamic allocation](https://docs.cloudera.com/runtime/7.2.18/running-spark-applications/topics/spark-yarn-dynamic-allocation.html)。多租戶與排程營運見第 08 章。
+> 📚 **來源**：`spark.dynamicAllocation.enabled`（開源預設 `false`）、`shuffleTracking.enabled`（`false`）、`minExecutors`（0）、`maxExecutors`（infinity）、`executorIdleTimeout`（60s）、需 external shuffle service 或 shuffle tracking 為前提，見 [Spark Configuration（Dynamic Allocation）](https://spark.apache.org/docs/latest/configuration.html) 與 [Spark Job Scheduling](https://spark.apache.org/docs/latest/job-scheduling.html)；**CDP 預設啟用 dynamic allocation**、可在 Cloudera Manager 以 `spark.dynamicAllocation.enabled=false` 關閉、streaming 應停用，見 [Cloudera CDP：Dynamic allocation](https://docs.cloudera.com/runtime/7.2.18/running-spark-applications/topics/spark-yarn-dynamic-allocation.html)。多租戶與排程營運見第 07 章。
 
 ---
 
 ## 4.8 把它全部串起來：替一支排程特徵作業配置
 
-把這章的零件組到一個真實情境上。**情境**：你要把一支「每天算全行客戶特徵寬表」的排程作業（第 08 章那種）從「能跑」調到「跑得穩、又不擾鄰」。資料量是 3000 萬筆／月帳務 join 1000 萬客戶、加上好幾個 window。
+把這章的零件組到一個真實情境上。**情境**：你要把一支「每天算全行客戶特徵寬表」的排程作業（第 07 章那種）從「能跑」調到「跑得穩、又不擾鄰」。資料量是 3000 萬筆／月帳務 join 1000 萬客戶、加上好幾個 window。
 
 照本章的風險梯度，**由低風險到高風險**地動：
 
@@ -228,7 +228,7 @@ flowchart LR
 2. **確認 AQE 開著（§4.3）。** Environment 頁籤看 `adaptive.enabled=true`、跑完看 `isFinalPlan=true`。分區合併、skew join、動態 broadcast 就自動有了——你不必手動調分區數。
 3. **看 §2.6 的 Summary Metrics 判斷還缺什麼。** 還在 spill？→ 先回第 1 步再減量、或 §4.4 把 `shuffle.partitions` 調大給 AQE 更細的起點；**真的是資料量本來就大、前面都做了**，才到第 4 步加記憶體。
 4. **配資源（§4.6）。** 例如 `--executor-cores 5 --executor-memory 18g`；因為 CDP 的 dynamic allocation 已開（§4.7），重點是**設一個合理的 `maxExecutors`（例如 30）**，避免半夜尖峰把叢集吃光、餓死別的作業。
-5. **上線後持續看（第 08 章監控）。** 用 History Server（§2.2）比較「這支作業這週和上週各跑多久、搬多少」，等資料長大、開始退化，再回頭調——而且多半又是回到第 1 步。
+5. **上線後持續看（第 07 章監控）。** 用 History Server（§2.2）比較「這支作業這週和上週各跑多久、搬多少」，等資料長大、開始退化，再回頭調——而且多半又是回到第 1 步。
 
 一句話：**先 SQL、再確認 AQE、最後才動資源；而動資源時，連同多租戶一起想。**
 
@@ -247,8 +247,8 @@ flowchart LR
 接下來：
 
 - 很多「該 broadcast 卻沒有」「Spark 估不準」其實根源在**資料怎麼存**——沒分區、沒跑統計、滿地小檔？→ 第 05 章（partition 設計、檔案格式、`ANALYZE TABLE`）。
-- 這支排程作業怎麼**長期穩定營運**（冪等可重跑、回填、跟鄰居要資源、監控退化）？→ 第 08 章。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 10 章。
+- 這支排程作業怎麼**長期穩定營運**（冪等可重跑、回填、跟鄰居要資源、監控退化）？→ 第 07 章。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 11 章。
 
 ---
 
