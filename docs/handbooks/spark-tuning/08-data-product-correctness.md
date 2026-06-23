@@ -189,6 +189,43 @@ WHERE  f.snapshot_date = '2026-05-31';
 
 > 📚 **來源**：Spark 3.3 SQL 支援的 join 類型（inner/cross/left[outer]/left semi/right[outer]/full[outer]/left anti，**無 AS OF／temporal join**）見 [Spark SQL — JOIN](https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-join.html)（要對齊 3.3.2 把網址 `latest` 改 `3.3.2`，主站舊頁多已 404、需用 `archive.apache.org/dist/spark/docs/3.3.2/`）。⚠️ 「特徵洩漏」「時間點正確性」「training–serving skew」是機器學習特徵工程的通用方法學概念，本節給的是它在 snapshot-partition 模型下的具體 SQL 做法（時間上界過濾、join 鎖 snapshot_date）；無單一官方逐字出處，方向（用到未來資訊→離線虛高、上線崩盤）明確。
 
+
+### 進階：訓練與推論用同一份特徵——training–serving 一致
+
+上面說「snapshot-partition 模型天生幫你對齊」，**前提是你真的讓兩邊讀同一份定義**。這個前提不會自動成立——你得主動確保。
+
+**核心問題：特徵計算邏輯寫了兩份。** 最常見的犯法是：訓練 pipeline 裡有一段 SQL（或 Python 轉換）算出特徵，推論 pipeline 裡另寫一段「差不多一樣」的邏輯。起初看起來沒問題——後來有人修了訓練那邊的缺值填充、或改了某個欄位的計算窗口，推論那邊沒跟著改。模型在離線 hold-out 上分數好看，上線後分數崩——排查要花多少時間，取決於你多久才想到「兩邊的特徵是不是對不上了」。
+
+**解法：特徵定義單一真實來源（single source of truth）。** 同一個 dbt model（或同一段共用 SQL）**同時是訓練表的來源，也是推論直接讀取的那張表**。不存在「訓練用的算法」與「推論用的算法」兩份——只有「這張表怎麼建的」一份。
+
+```sql
+-- 同一個 dbt model，訓練與推論讀同一張表
+-- dbt model: models/features/cust_feature_snap.sql
+SELECT
+    entity_id,
+    snapshot_date,
+    AVG(tx_amount) OVER (
+        PARTITION BY entity_id
+        ORDER BY tx_date
+        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+    ) AS feat_tx_avg_30d,
+    COALESCE(income, 0.0)  AS feat_income  -- 缺值填充只定義一次，此處
+FROM raw_transactions
+WHERE tx_date <= snapshot_date   -- §8.3 時間上界：訓練和推論都吃這個過濾
+
+-- 訓練時讀歷史分區：WHERE snapshot_date IN ('2024-10-31', '2024-11-30', ...)
+-- 推論時讀最新分區：WHERE snapshot_date = '2025-03-31'  → 見 §8.5/§8.6
+-- 同一張表、同一段計算、只有 snapshot_date 值不同
+```
+
+**三個必須同步的校驗點：**
+
+① **serving 要直讀同一張快照表、同一段計算。** 這才是 snapshot-partition 模型「天生消掉 training–serving skew」的真正前提——如果推論 pipeline 另起爐灶重算特徵，snapshot 分區對齊的好處就白費了。確認方式：`SHOW CREATE TABLE cust_feature_snap`，訓練與推論都從同一個 Hive/DWH 表名讀，不是各自從上游不同 SQL 輸出。
+
+② **serving 要明確讀對的那一期 `snapshot_date`。** 通常是「最新已發佈且過了品質閘的分區」——怎麼讓推論 pipeline 可靠地找到這個分區，是 §8.5/§8.6 的主題（分區就緒感知、`build_version` 標記），這裡不重複。要強調的是：讀錯期（例如讀到上上月的 snapshot）是一種靜默錯誤，模型不報錯、分數只是偏掉。
+
+③ **缺值填充（imputation）要與訓練完全一模一樣。** 訓練時 `COALESCE(income, 0.0)`、推論時 `COALESCE(income, -1.0)`——這也是 training–serving skew，只是不在 join 鍵而在填充邏輯。「單一真實來源」的原則同樣適用：把缺值填充寫在特徵表的建表 SQL 裡（如上例），而不是分別在訓練腳本和推論腳本裡各自填。如果填充必須在 ML pipeline 端做（例如模型預處理器），那就序列化儲存 `preprocessor` 物件、推論時載入同一份，不要手動複寫填充邏輯。
+
 ---
 
 ## 8.4 共用特徵庫的多消費者契約：改一張表＝同時改 N 個下游
