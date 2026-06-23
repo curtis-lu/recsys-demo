@@ -64,7 +64,7 @@ models:
 
 四個內建 test 對應：`not_null`（非空）、`unique`（單欄唯一）、`accepted_values`（值域）、`relationships`（參照完整）。（範例裡的 `ref('dim_product')` 就是[第 07 章 §7.3](07-operating-pipelines.md) 那個 dbt 跨表參照，指向另一張 model。）
 
-> ⚠️ **唯一性別只測單欄。** 本書的特徵表 grain 是 **(cust_id, snapshot_date)**——同一個 `cust_id` 會在每個月的分區各出現一次。所以對 `cust_id` 單獨下 `unique` **會誤判失敗**（跨 snapshot 本來就重複）。要測的是「**同一個 snapshot 內** cust_id 不重複」，那是**多欄組合**唯一，得用 `dbt_utils.unique_combination_of_columns`（dbt-utils 套件）或自訂 generic test，不是內建的單欄 `unique`。這正是「具體 grain 決定你該測什麼」——抄一個 `- unique` 上去反而天天假警報。
+> ⚠️ **唯一性別只測單欄。** 本書的特徵表 grain 是 **(cust_id, snapshot_date)**——同一個 `cust_id` 會在每個月的分區各出現一次。所以對 `cust_id` 單獨下 `unique` **會誤判失敗**（跨 snapshot 本來就重複）。要測的是「**同一個 snapshot 內** cust_id 不重複」，那是**多欄組合**唯一，得用 `dbt_utils.unique_combination_of_columns`（dbt-utils＝dbt 的社群工具套件，需在 `packages.yml` 宣告後 `dbt deps` 安裝）或自訂 generic test，不是內建的單欄 `unique`。這正是「具體 grain 決定你該測什麼」——抄一個 `- unique` 上去反而天天假警報。
 
 **落地（dbt）——severity：哪些該硬擋、哪些只示警。** 每個 test 可設 `severity`：
 
