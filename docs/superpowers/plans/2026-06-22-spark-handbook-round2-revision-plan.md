@@ -91,7 +91,7 @@
 - [x] **Phase 1**：結構落地完成（commit `1077609` 重排+重編號+導覽軟指標、`3c8197a` index 12 章）；C 複核 `.reviews/_round2-structure-verify.md` 判 **PASS 零不一致**。
 - [x] **Phase 2**：逐章深審完成（ch01 `72c9248`／ch02 D-UI `46e6457`+`3089c70`／ch03 `a087904`／ch04 `f959745`+`7d1c664`／ch05 `84c96b3`／ch06 `dc28bf6`／ch07 capstone `673e1c7`／ch08 `6d62db5`）。各章雙/三審＋triage；ch02 升級手把手診斷核心、ch06 補 ACID 多引擎安全（HWC）、ch07 補 capstone 端到端走查。
 - [x] **Phase 3**：補缺口完成。G1＝新增第 09 章 reverse ETL（`fa8b1a2` 主迴圈手寫 9 節＋3 圖，`37a2c82` 雙 reader 深審修訂：增量/全量、schema drift、partial-reject、術語 gloss、pre-flight checklist；接 08 導覽＋index 硬連結）。G2＝第 08 章補 training–serving 一致 `###`（`081a28f`）。**教訓：含 WebFetch 的長 subagent 連 3 次 socket 死（一次 hang 100min）→ 新章改主迴圈手寫＋事實預先查好；reader/fix subagent 不帶 WebFetch 則穩定。**
-- [ ] **Phase 4**：補未寫章（Task 4.1 PySpark／4.2 場景／4.3 速查）
+- [x] **Phase 4**：補完三章（皆主迴圈手寫，因 infra 對長 subagent 寫作不穩）。ch10 PySpark `5bde678`、ch11 場景索引＋ch12 速查名詞表 `de535a4`；全書 12 章硬連結、無「撰寫中」殘留。ch11/ch12 為索引/速查（config 值取自 round-1 已驗），技術一致性待 Phase 5 C round-3 複核。
 - [ ] **Phase 5**：收尾（Task 5.1 index／5.2 HTML／5.3 最終 pass）
 
 ---
