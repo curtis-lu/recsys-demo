@@ -76,6 +76,8 @@ WHERE  ...;
 
 這條重跑幾次，`snapshot_date=2026-05-31` 這個分區永遠被換成最新結果、**其他分區一根寒毛都不動**。這是排程產表的黃金預設。
 
+不過要注意：直接 `INSERT OVERWRITE` 線上表時，**覆寫過程中有一段時間舊資料已被清、新資料還沒寫完**——若下游剛好在這瞬間來讀，會讀到半成品。要更穩，可以先把結果寫到 staging（暫存表或暫存分區）、驗完無誤再**一次切換**到正式分區，讓下游永遠只看到「完整的舊版」或「完整的新版」、不會撞到中間態。這正是[第 08 章](08-data-product-correctness.md) WAP（write-audit-publish）的精神，這裡先點到。
+
 **落地——一次寫多個分區時的 footgun（務必懂）。** 有時你想一次算好幾個 snapshot、讓分區值**由資料決定**（動態分區，`PARTITION(snapshot_date)` 不給值）。這時行為由 `spark.sql.sources.partitionOverwriteMode` 決定：
 
 - **`static`（預設）**：**覆寫範圍比你以為的大**——它會把符合 `PARTITION` 子句的範圍整批清掉再寫；用「不給值的動態分區」時，**可能清掉的遠不只你這批算到的那幾個分區**。
@@ -91,6 +93,8 @@ FROM   ...;
 ```
 
 > ⚠️ 「沒設 dynamic 就動態覆寫 → 不小心清掉整表」是很多人踩過的坑。**最穩的習慣是回到上面那條「指定分區值」的寫法**；真的要一次多分區，就先 `SET … = dynamic`。確切的覆寫範圍依表型別（Hive 表 vs datasource 表）與設定而異（datasource 表的 `INSERT OVERWRITE … PARTITION` 自早期版本〔Spark 2.1〕起就只覆寫「符合指定的分區」、不再整表覆寫；Hive 表另有自己的語意），**請在你環境實測確認一次**。
+>
+> **怎麼知道自己的表是哪一種？** 跑 `DESCRIBE FORMATTED 表名`，看 `Provider`（`hive` 是 Hive 表；`parquet`／`orc` 等是 datasource 表）或 `InputFormat` 欄位；分不清就問當初建表的人。最保險的是——**兩種覆寫行為都在你環境各驗一次**，別只憑欄位猜。
 
 **落地（dbt）——`insert_overwrite` 策略就是同一招。** 你把 model 設成 incremental（增量），策略選 `insert_overwrite`、指定 `partition_by`，dbt 就會幫你產生「動態覆寫所涵蓋分區」的 `INSERT OVERWRITE`。先認一下 dbt 的模板語法：dbt model 是「**SQL ＋ Jinja 模板**」，`{{ }}` 用來取值／設定、`{% %}` 是流程控制（if 等），這些在 `dbt run` 時才**展開成真正的 SQL** 送進 Spark：
 
@@ -138,7 +142,7 @@ FROM   staging_features WHERE snapshot_date='2026-05-31';
 
 **原則。** 你的下游作業（訓練模型、算衍生表）依賴上游的表先產好。最危險的不是「上游失敗」——那看得見；而是**上游還沒跑完、或只寫了一半，下游就開跑**，讀到**半成品或舊資料**，算出一個「沒報錯但其實錯」的結果。所以下游開跑前要有一道**閘門（gate）**：確認上游**真的就緒**了才放行。「就緒」不是「時間到了」，是「上游那一步**成功完成**了」。
 
-這對共用特徵庫尤其要命：一張 `cust_feature` 表下游可能**扇出（fan-out）給 N 個模型**取用，上游晚了或壞了，N 個下游一起遭殃。
+這對共用特徵庫尤其要命：一張 `cust_feature` 表下游可能**扇出（fan-out，一個上游完成後觸發多個下游分支）給 N 個模型**取用，上游晚了或壞了，N 個下游一起遭殃。
 
 ```mermaid
 flowchart TB
@@ -168,6 +172,8 @@ wait_for_features = ExternalTaskSensor(
 
 wait_for_features >> train_model            # 上游 success 後才跑下游
 ```
+
+⚠️ **週期不同的相依要對齊「等哪一期」。** 上面範例假設上下游同一天跑。但常見的是「**上游月底跑、下游每週跑**」這種週期不對齊的相依：下游週三的這次執行，要等的其實是**上個月底**那一期的上游，不是「同一天」的上游（它根本沒跑）。`ExternalTaskSensor` 預設拿「同一個 logical date」去比對上游，這時會永遠等不到、卡到 timeout。解法是用 `execution_date_fn`（或舊版的 `execution_delta`）自訂「我這期該對齊上游的哪一期」的邏輯，把下游的邏輯日**映射回它真正依賴的那期上游**再去等。
 
 **落地（cron）——沒有就緒訊號，只能靠「時間差」或「sentinel 檔」。** cron 不知道上游做完沒，它只認時間。兩種常見補法、都比 Airflow 脆弱：
 
@@ -260,6 +266,8 @@ train_model = BashOperator(
 
 `retries`／`retry_delay` 還順帶是一個**健康訊號**：一支作業最近老是要靠重試才成功，本身就是「它在惡化」的警報——cron 完全沒有這層可觀測性（失敗就是默默地失敗）。
 
+**不只看「有沒有跑完」，還要看「產出的列數對不對」。** SLA 與 `retries` 抓的是「**跑不跑得完**」，但有一種更陰險的退化是「**跑完了，產出卻不對**」——上游某天殘缺、join 條件變了爆量、或某個分區掉了一截資料。這些都不會讓作業失敗，作業照樣綠燈、`_SUCCESS` 照樣落下，錯只藏在列數裡。實務做法：每次寫完就把該分區的輸出列數記下來（一支 `SELECT count(*)`），和歷史同期比；一旦**掉超過某比例就告警**（例如比近 4 期中位數少 10%，或多 50% 這種突增，門檻依你資料的正常波動量身定）。這條成本極低、卻能擋掉一整類「綠燈但資料錯」的事故——更完整的列數／分布驗證留給[第 08 章](08-data-product-correctness.md)。
+
 **落地（dbt）——run 時間趨勢。** dbt 每次 run 會產生執行結果（含每個 model 的耗時，落在 `run_results.json`）。把它收集起來看趨勢，就能抓出「哪個 model 最近愈跑愈久」。
 
 **⚠️ footgun：cron 的「靜默失敗」——監控的前提是失敗真的會冒出來。** Airflow 失敗會標紅、會重試、會通知；**cron 預設不會**——它只是默默把腳本跑完、回一個你沒在看的 exit code。更糟的是 shell 的兩個預設：①一支腳本中間某條指令失敗，**後面照樣往下跑**（沒設 `set -e`）；②用 `a | b` 串接時，**只看最後一個指令的成敗**（中間的 `spark-sql` 掛了也被吞掉）。結果就是「作業看起來成功了，其實半路就壞了」。cron 腳本開頭固定加上：
@@ -296,6 +304,8 @@ FROM   cust_feature
 WHERE  snapshot_date='2026-05-31';
 ```
 
+這裡的 `4` 不是隨手填的：它呼應 §5.5 的公式「**資料總大小 ÷ 目標檔案大小（128MB–1GB）**」——例如這個分區約 1GB、想讓每塊檔案 ~256MB，就寫 `REPARTITION(4)`（1GB ÷ 256MB ≈ 4）。分區更大就把這個數字按同一公式放大。
+
 它正是 §7.2 的冪等覆寫——所以 compaction 本身也是安全可重跑的。
 
 **落地——重算統計（`ANALYZE`）。** §5.6 講過 `ANALYZE` 不會自動發生、資料變了統計才準。維護面的重點是：**產完表/補完資料就跟著重算、把它排進同一支作業**，別等查詢計畫變爛才想起：
@@ -310,13 +320,38 @@ ANALYZE TABLE cust_feature PARTITION (snapshot_date='2026-05-31') COMPUTE STATIS
 ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 ```
 
-（注意：external 表 `DROP PARTITION` 預設只移除 Metastore 登記、HDFS 檔案可能還在，要一併清檔需確認你環境的設定或另外刪目錄——這點以平台為準。）這也和[第 08 章 §8.5](08-data-product-correctness.md) 的「資料版本／保留歷史」直接相關：要留幾版、留多久，是同一個政策的兩面。
+（注意：external 表 `DROP PARTITION` 預設只移除 Metastore 登記、**HDFS 上的底層目錄與檔案還在**，要真的回收儲存得另外刪目錄：
+
+```bash
+# external 表 drop 分區後，底層目錄要手動清（路徑＝該分區在 HDFS 上的目錄）
+hdfs dfs -rm -r /warehouse/cust_feature/snapshot_date=2023-01-31
+```
+
+是否一併刪、刪到哪依你環境的 `external.table.purge` 等設定而異，以平台為準。）這也和[第 08 章 §8.5](08-data-product-correctness.md) 的「資料版本／保留歷史」直接相關：要留幾版、留多久，是同一個政策的兩面。
 
 > 📚 **來源**：external（非 ACID）表無 `ALTER COMPACT`、compaction 以「讀進來重寫」達成、小檔成因與檔大小控制見[第 05 章 §5.5](05-storage-efficiency.md)；ACID 表 `ALTER TABLE … COMPACT`（major/minor、由 Hive 觸發）見[第 06 章 §6.7](06-engine-selection.md) 與 [Cloudera CDP — Hive compaction tasks](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-hive/topics/hive-compaction-tasks.html)；`ANALYZE TABLE … COMPUTE STATISTICS` 見[第 05 章 §5.6](05-storage-efficiency.md) 與 [Spark SQL — ANALYZE TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-aux-analyze-table.html)；`ALTER TABLE … DROP PARTITION` 見 [Spark SQL — ALTER TABLE](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-alter-table.html)。⚠️ external 表 `DROP PARTITION` 是否一併刪 HDFS 檔依表設定（`external.table.purge` 等）與平台而異，以你環境實測為準。
 
 ---
 
-## 7.7 常見維運踩雷（速查）
+## 7.7 一支特徵排程從 0 到穩定營運：端到端走查
+
+前面六節各講了一件事；但實際把一支排程養到「能放著它自己跑、半夜出事也救得回來」，是這些事**接連發生**的過程。用一支 `cust_feature` 週排程當例子，把它從第一次上線走到例行維護，每一步回指本章：
+
+1. **首次上線——選對寫入法（§7.2）。** 第一件決定是「怎麼寫」。排程產表一律用 `INSERT OVERWRITE` 指定分區，讓它**冪等**：這週的 `snapshot_date` 重跑幾次都是同一份、不會疊成兩份。寫入法選錯，後面所有重試、回填都建在流沙上。
+
+2. **補歷史——回填過去 N 期（§7.4）。** 新表上線通常要補一段歷史（例如過去一年的週快照）讓下游模型有得訓練。**一個分區一批、逐期補**，靠的正是第一步的冪等——補到一半掛了，接著補、補錯了重補該期即可。SQL 裡的日期一律當參數傳，**不碰 `current_date()`**，否則補出來的歷史全是用「今天」算的、錯且重現不出來。
+
+3. **接 DAG——設上游相依與 sensor（§7.3）。** 這張表餵 N 個下游，所以它自己也得等它的上游就緒。用 `ExternalTaskSensor`（或 dbt `ref()`）做就緒閘門，**等上游「成功完成」而非「時間到」**。若上游月底跑、這支週跑，記得用 `execution_date_fn` 對齊「該等哪一期」，別預設同一天。
+
+4. **設監控——跑完＋列數＋退化（§7.5）。** 上線後要盯三層：**有沒有跑完**（SLA／`retries`）、**產出列數對不對**（和歷史比，掉太多就告警，抓「綠燈但資料錯」）、**有沒有愈跑愈慢**（History Server 看歷史曲線）。cron 場景則靠 `set -euo pipefail`＋真的成功才落 `_SUCCESS`，否則監控建在沙上。
+
+5. **例行維護——compaction／統計（§7.6）。** 表天天被寫、會慢慢爛：把 compaction（重寫成少數大檔）、`ANALYZE`（重算統計）、清過期分區**排進同一支作業**當例行公事，而不是等查詢變爛才補救。
+
+走完這五步，你不是「跑過一次」，而是「**它能可靠地一直跑下去**」。冪等、回填、相依、監控、維護——**這七件事是同一個故事的不同章節**，缺一個，這支排程就在某個半夜以你最不想要的方式提醒你。
+
+---
+
+## 7.8 常見維運踩雷（速查）
 
 把本章（和跨章）最常默默出事的維運雷收成一張表。**多數的共通特徵是「不報錯、只是默默算錯或默默不跑」**——所以它們特別貴。症狀對上了，去對應章節看修法：
 
@@ -340,7 +375,7 @@ ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 
 ---
 
-## 7.8 取捨總表
+## 7.9 取捨總表
 
 | 取捨 | 一邊 | 另一邊 | 怎麼選 |
 |---|---|---|---|
@@ -352,7 +387,7 @@ ALTER TABLE cust_feature DROP IF EXISTS PARTITION (snapshot_date='2023-01-31');
 
 ---
 
-## 7.9 一句話帶走：營運的作業，正確與可重跑優先於快
+## 7.10 一句話帶走：營運的作業，正確與可重跑優先於快
 
 把這章收成一條原則：
 
