@@ -206,7 +206,7 @@ flowchart LR
 
 ---
 
-*← 上一章：[第 08 章 營運（二）：讓資料產品可信](08-data-product-correctness.md)　｜　下一章：第 10 章（進階）PySpark DataFrame API（撰寫中）*
+*← 上一章：[第 08 章 營運（二）：讓資料產品可信](08-data-product-correctness.md)　｜　下一章：[第 10 章（進階）PySpark DataFrame API](10-pyspark-dataframe-api.md)*
 
 ---
 
