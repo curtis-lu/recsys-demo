@@ -90,7 +90,7 @@
 - [x] **Phase 0**：grill 釐清 → Phase1 全書 C＋P 掃描 → 使用者拍板新骨架（2026-06-22）＋ch02 D-UI 追加（2026-06-23）。spec 已寫。
 - [x] **Phase 1**：結構落地完成（commit `1077609` 重排+重編號+導覽軟指標、`3c8197a` index 12 章）；C 複核 `.reviews/_round2-structure-verify.md` 判 **PASS 零不一致**。
 - [x] **Phase 2**：逐章深審完成（ch01 `72c9248`／ch02 D-UI `46e6457`+`3089c70`／ch03 `a087904`／ch04 `f959745`+`7d1c664`／ch05 `84c96b3`／ch06 `dc28bf6`／ch07 capstone `673e1c7`／ch08 `6d62db5`）。各章雙/三審＋triage；ch02 升級手把手診斷核心、ch06 補 ACID 多引擎安全（HWC）、ch07 補 capstone 端到端走查。
-- [ ] **Phase 3**：補缺口新內容（Task 3.1 reverse ETL／3.2 G2）
+- [x] **Phase 3**：補缺口完成。G1＝新增第 09 章 reverse ETL（`fa8b1a2` 主迴圈手寫 9 節＋3 圖，`37a2c82` 雙 reader 深審修訂：增量/全量、schema drift、partial-reject、術語 gloss、pre-flight checklist；接 08 導覽＋index 硬連結）。G2＝第 08 章補 training–serving 一致 `###`（`081a28f`）。**教訓：含 WebFetch 的長 subagent 連 3 次 socket 死（一次 hang 100min）→ 新章改主迴圈手寫＋事實預先查好；reader/fix subagent 不帶 WebFetch 則穩定。**
 - [ ] **Phase 4**：補未寫章（Task 4.1 PySpark／4.2 場景／4.3 速查）
 - [ ] **Phase 5**：收尾（Task 5.1 index／5.2 HTML／5.3 最終 pass）
 
