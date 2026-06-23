@@ -92,7 +92,7 @@
 - [x] **Phase 2**：逐章深審完成（ch01 `72c9248`／ch02 D-UI `46e6457`+`3089c70`／ch03 `a087904`／ch04 `f959745`+`7d1c664`／ch05 `84c96b3`／ch06 `dc28bf6`／ch07 capstone `673e1c7`／ch08 `6d62db5`）。各章雙/三審＋triage；ch02 升級手把手診斷核心、ch06 補 ACID 多引擎安全（HWC）、ch07 補 capstone 端到端走查。
 - [x] **Phase 3**：補缺口完成。G1＝新增第 09 章 reverse ETL（`fa8b1a2` 主迴圈手寫 9 節＋3 圖，`37a2c82` 雙 reader 深審修訂：增量/全量、schema drift、partial-reject、術語 gloss、pre-flight checklist；接 08 導覽＋index 硬連結）。G2＝第 08 章補 training–serving 一致 `###`（`081a28f`）。**教訓：含 WebFetch 的長 subagent 連 3 次 socket 死（一次 hang 100min）→ 新章改主迴圈手寫＋事實預先查好；reader/fix subagent 不帶 WebFetch 則穩定。**
 - [x] **Phase 4**：補完三章（皆主迴圈手寫，因 infra 對長 subagent 寫作不穩）。ch10 PySpark `5bde678`、ch11 場景索引＋ch12 速查名詞表 `de535a4`；全書 12 章硬連結、無「撰寫中」殘留。ch11/ch12 為索引/速查（config 值取自 round-1 已驗），技術一致性待 Phase 5 C round-3 複核。
-- [ ] **Phase 5**：收尾（Task 5.1 index／5.2 HTML／5.3 最終 pass）
+- [~] **Phase 5**：`.md` 部分完成。Task 5.3 全書 C round-3 一致性終審 **PASS**（`.reviews/_round2-architecture__round3.md`：12 章交叉引用/§ref 全對、ch12 16 個 config 值與各章一致、G1/G2 覆蓋、兩主線 end-to-end 無斷點、章序合理）；triage 4 項全修（`ad48e84`：ch07 六章、ch05 去草稿 TODO、ch09 pull 軟化、index ch11 雙線）；全書硬連結健檢無 broken。**待辦（等使用者對 .md 簽核後）**：Task 5.2 轉離線 HTML（內嵌 mermaid.js）；可選 index Diátaxis 入口 mermaid 圖（Pedagogy f-6）；可選全書雙 persona 通讀（per-chapter 已逐章審過，視需要）。
 
 ---
 
