@@ -89,7 +89,7 @@ DataFrame API 的心智模型跟 SQL 一樣（第 01 章），但有幾個 Pytho
 - **lazy 一樣**：`.select()`、`.filter()`、`.withColumn()` 都是 transformation，只是在累積計畫；要 `.show()`、`.count()`、`.write` 這種 action 才真的跑（同第 01 章）。所以在中間「印一下 DataFrame 變數」不會花錢，跑 action 才會。
 - **別在 Python 迴圈裡反覆 `withColumn`／`union`**：每呼叫一次就在計畫上長一截，幾百次之後 **Catalyst 光是分析、優化這個超長計畫就慢到爆**（甚至 driver 端 StackOverflow）。要對很多欄位做事，**一次 `select` 把多個欄一起算出來**；要把很多片段疊起來，先收集成 list 再用 `functools.reduce(DataFrame.unionByName, dfs)` 一次合，別一筆一筆 `union`。
 - **避免 `collect()` 把大量資料抓回 driver**：`.collect()`／`.toPandas()` 會把**整份資料拉回 driver 那一台機器的記憶體**——資料一大就 driver OOM（接第 04 章 driver 記憶體那段）。要看幾筆用 `.show(20)`；要落地用 `.write`；只有「結果本來就很小」（少數幾列）才 `collect`。
-- **No UDF 紀律（生產約束，務必守）**：能用內建的 `pyspark.sql.functions`（`F.when`、`F.col`、`F.regexp_replace`、`F.coalesce`…）就**別寫 Python UDF**。Python UDF 要把每一列在 **JVM 和 Python 之間搬來搬去**、逐列呼叫你的 Python 函式，慢得多；而且本手冊環境**生產禁用 UDF**。內建 function 走的是 Catalyst、和 SQL 一樣快——幾乎所有你想用 UDF 做的事，內建函式都有對應寫法，先找它。
+- **優先用內建函式、別寫 Python UDF**：能用內建的 `pyspark.sql.functions`（`F.when`、`F.col`、`F.regexp_replace`、`F.coalesce`…）表達的，就別自己寫 Python UDF。Python UDF 要把每一列在 **JVM 和 Python 之間搬來搬去**、逐列呼叫你的 Python 函式，比內建慢很多；更關鍵的是它對 Catalyst 是一個**黑盒**，優化器看不進去、無法幫它下推或重排。內建 function 走的是 Catalyst、和 SQL 一樣快，幾乎所有你想用 UDF 做的事，內建函式都有對應寫法，先找它。（若你的平台另有「禁用 UDF」的治理規定，這條就更是硬性要求。）
 
 > 📚 **來源**：DataFrame 為 lazy、action 才觸發見第 01 章與 [SQL Programming Guide](https://spark.apache.org/docs/3.3.2/sql-programming-guide.html)；`collect` 把所有資料載回 driver、內建函式優於 Python UDF（跨 JVM/Python 邊界序列化成本）見 [PySpark `functions`](https://spark.apache.org/docs/3.3.2/api/python/reference/pyspark.sql/functions.html) 與第 04 章 driver 記憶體。
 
@@ -143,6 +143,6 @@ def test_add_amt_30d(spark):
 > **資料來源與精確度說明**
 >
 > - **SQL 與 DataFrame API 共用 Catalyst、編譯成相同計畫、效能相同**，見 [Spark SQL, DataFrames and Datasets Guide](https://spark.apache.org/docs/3.3.2/sql-programming-guide.html)。
-> - **內建函式優於 Python UDF**（UDF 跨 JVM/Python 邊界逐列序列化、較慢）為 Spark 普遍建議；本手冊環境另有「生產禁用 UDF」的硬約束。
+> - **內建函式優於 Python UDF**（UDF 跨 JVM/Python 邊界逐列序列化、且對 Catalyst 不透明）為 Spark 普遍建議；部分平台另以治理規範禁用 UDF，依你所在環境的規定為準。
 > - 本章程式碼（`add_amt_30d`、window 寫法、pytest 風格測試）為**示意**，重在表達結構，非可直接複製執行的完整程式；`over(...)` 的 window 規格、缺值語意請依你的特徵定義補全。
 > - 引用原則：以 Spark 官方文件為限，不引未認證個人部落格。
