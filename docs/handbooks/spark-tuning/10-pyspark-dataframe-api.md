@@ -1,4 +1,4 @@
-# 第 10 章 （進階）何時與如何改用 PySpark DataFrame API
+# 10 · （進階）何時與如何改用 PySpark DataFrame API
 
 > **本章前提**：你已讀過第 01 章（心智模型：partition／shuffle／lazy／Catalyst）與第 03 章（SQL 寫法優化）；若你要做營運級特徵庫，第 07、08 章（排程可靠、資料產品正確）也建議讀過。本章是**進階、視需要**的一章，前九章都用 SQL，這章告訴你：**當 SQL 開始不夠用時，下一步往哪走。不碰 RDD 那種低階 API。**
 
@@ -147,7 +147,7 @@ def test_add_amt_30d(spark):
 
 ---
 
-*← 上一章：[第 09 章 營運（三）：reverse ETL 回業務系統](09-reverse-etl.md)　｜　下一章：[第 11 章 速查與名詞表](11-cheatsheet-and-glossary.md)*
+*←上一章* [09 · 營運（三）：把資料送出去——reverse ETL 回業務系統](09-reverse-etl.md)　|　*下一章 →* [11 · 速查與名詞表](11-cheatsheet-and-glossary.md)　|　*回* [手冊首頁](index.md)
 
 ---
 

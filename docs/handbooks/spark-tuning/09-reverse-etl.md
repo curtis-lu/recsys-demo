@@ -1,4 +1,4 @@
-# 第 09 章 營運（三）：把資料送出去——reverse ETL 回業務系統
+# 09 · 營運（三）：把資料送出去——reverse ETL 回業務系統
 
 > **本章前提**：你已讀過第 05（儲存效率：external 表）、06（引擎選用：共用表怎麼被多引擎讀）、07（排程可靠：冪等、相依、監控）、08（資料產品正確：品質閘、時間點正確、版本與發佈）。你可以假設已懂：external 表是三引擎的共用最大公約數、`INSERT OVERWRITE` 冪等覆寫、品質閘、「已發佈版本」。**本章要幹的事**：把你算好、驗過的特徵／行銷名單，從 Hadoop 推回 Hadoop 外面的業務系統（客戶行銷及管理系統、CRM、行銷自動化平台），完成兩條主線的最後一哩。
 
@@ -220,7 +220,7 @@ flowchart LR
 
 ---
 
-*← 上一章：[第 08 章 營運（二）：讓資料產品可信](08-data-product-correctness.md)　｜　下一章：[第 10 章（進階）PySpark DataFrame API](10-pyspark-dataframe-api.md)*
+*←上一章* [08 · 營運（二）：讓資料產品可信](08-data-product-correctness.md)　|　*下一章 →* [10 · （進階）何時與如何改用 PySpark DataFrame API](10-pyspark-dataframe-api.md)　|　*回* [手冊首頁](index.md)
 
 ---
 

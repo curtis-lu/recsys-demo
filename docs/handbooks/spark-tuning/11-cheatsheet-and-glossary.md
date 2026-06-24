@@ -1,4 +1,4 @@
-# 第 11 章 速查與名詞表
+# 11 · 速查與名詞表
 
 > **本章前提**：這是一頁式的**速查**：取捨、常用設定預設值、症狀對策、中英名詞對照。內容都是前面各章的彙整，每項附「去哪章看細節」。預設值對齊 **Spark 3.3 / CDP 7.1.9**，請以你平台實際設定為準。
 
@@ -112,4 +112,4 @@
 
 ---
 
-*← 上一章：[第 10 章（進階）PySpark DataFrame API](10-pyspark-dataframe-api.md)　｜　回 [手冊首頁](index.md)*
+*←上一章* [10 · （進階）何時與如何改用 PySpark DataFrame API](10-pyspark-dataframe-api.md)　|　*回* [手冊首頁](index.md)
