@@ -25,6 +25,7 @@ TABLES = {
     "feature_table": DATA / "feature_table.parquet",
     "label_table": DATA / "label_table.parquet",
     "sample_pool": DATA / "sample_pool.parquet",
+    "inference_population": DATA / "inference_population.parquet",
 }
 
 

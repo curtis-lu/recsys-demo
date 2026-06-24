@@ -111,6 +111,15 @@ evaluation:
 `segment_columns` 中每一欄都必須由某個 source 的 `segment_column` 提供，否則 CLI 設定一致性檢查會阻擋。
 目前 metric pipeline 只會使用清單中第一個實際存在的 segment column 計算 per-segment 與 per-item-segment 指標；若要評估多種分群，應分次調整第一個欄位並執行 evaluation。
 
+segment source 可指向任何 keyed Hive table，不限 `sample_pool`。實務上建議**分群來源跟著該評估情境的母體走**：
+
+| 評估情境 | 預測來源 | 建議 segment source |
+|---|---|---|
+| 監控模式 | `ranked_predictions`（inference 輸出） | `inference_population`（inference 評分母體） |
+| post-training 模式 | `training_eval_predictions` | `sample_pool`（training 母體） |
+
+監控模式指向 `inference_population` 可讓切群定義對齊**實際被評分的客戶**，避免用 training 母體切 inference 結果造成分群定義分歧。`inference_population` 的 grain 為 `(time, entity)`、一 key 一列，`dropDuplicates` 為 no-op、不會 fan-out，只要它帶有分群欄即可直接作為 segment source——evaluation 端只動 `segment_sources` config（程式不變，見 [`inference.md`](inference.md) §3.5）。
+
 ### 3.3 產品大類
 
 ```yaml

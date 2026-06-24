@@ -33,10 +33,20 @@ python -m recsys_tfb dataset  --only-node build_train_model_input # 只跑單一
 - **參數未變**才能接續：`exists()` 不驗證落地產物是否由當前參數產生。版本化路徑
   （`${base_dataset_version}` 等）天然防呆；**不帶版本的覆寫式 Hive 表**
   （`recsys_prod_train_keys` 等）存在 ≠ 新鮮，風險自負（計畫輸出有固定警語）。
+- **training 改了 model-defining 參數會「漂移」到新 `model_version`**：版本化路徑此時
+  把你導向一個空的新版本目錄，`--from-node`（例如從 `predict_and_write_test_predictions`
+  接續）因而自動補跑 `finalize_model` 等上游＝**重新訓練一個不同的模型**，而非沿用既有
+  finalized 模型。training 偵測到此情形（切片把 `model` 的生產節點拉回必跑集合）會在開跑前
+  印 `[retrain]` 警告——含算出的 `model_version`、將被重訓的節點、最接近的既有 `completed`
+  版本與 diff 提示——但**仍照跑、不擋**（`--dry-run` 下也看得到）。若只是想對既有模型重跑
+  下游，先把 `parameters_training.yaml` 的 `training:` 區塊還原到該模型 finalize 時的狀態
+  （可比對 `data/models/<model_version>/manifest.json` 的 `parameters`）。
 - **side-effect node（outputs=None）不重跑**：位於起點前的守門 node
   （如 dataset 的 `validate_data_consistency` B1/B5 資料閘）在接續時跳過、
   不重新驗證，計畫輸出會列出。資料有變請跑 full run。
-- manifest 照常寫，metadata 多 `resumed_from` / `only_node` 留痕。
+- manifest 照常寫（開跑前先落一份 `status: running` stub 供崩潰溯源，完成後覆寫為
+  `status: completed`；既有 manifest 採 skip-if-present，stub 不會覆蓋它），metadata 多
+  `resumed_from` / `only_node` 留痕。
 - manifest 的 `artifacts` 清單只列版本目錄第一層檔案，**不含 `hpo/` 子目錄**
   （`hpo/model.txt`、`hpo/model_meta.json`）；稽核 manifest 時請知悉。
 

@@ -16,34 +16,107 @@ from recsys_tfb.preprocessing._spark import apply_preprocessor as _apply_preproc
 logger = logging.getLogger(__name__)
 
 
+def _filter_current_inference_scope(
+    df: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Limit a persisted inference table to the model and dates of this run."""
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    inference = parameters.get("inference", {})
+
+    model_version = parameters.get("model_version")
+    if not model_version:
+        return df
+
+    if "model_version" in df.columns:
+        df = df.filter(F.col("model_version") == model_version)
+
+    snap_dates = [
+        pd.Timestamp(value).date()
+        for value in inference.get("snap_dates", [])
+    ]
+    if snap_dates and time_col in df.columns:
+        df = df.filter(F.col(time_col).cast("date").isin(snap_dates))
+
+    return df
+
+
 def build_scoring_dataset(
+    inference_population: DataFrame,
     feature_table: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Build scoring dataset by cross-joining customers with all products."""
+    """以 inference_population 為母體建立評分資料；feature_table 僅作 enrichment。
+
+    母體 grain (time, entity) 由 source_etl 保證唯一，故不需 dropDuplicates。
+    缺特徵的母體成員保留，以 feature_present=false 標記（in-memory + log，不下推）。
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
     join_key = [time_col] + entity_cols
 
-    snap_dates = [pd.Timestamp(d) for d in parameters["inference"]["snap_dates"]]
+    snap_dates = [
+        pd.Timestamp(value).date()
+        for value in parameters["inference"]["snap_dates"]
+    ]
     products = parameters["inference"]["products"]
+    spark = feature_table.sparkSession
 
-    with log_step(logger, "filter_customers"):
+    with log_step(logger, "read_population"):
         customers = (
-            feature_table.filter(F.col(time_col).isin(snap_dates))
+            inference_population
+            .filter(F.col(time_col).cast("date").isin(snap_dates))
             .select(*join_key)
-            .dropDuplicates()
         )
+        available_dates = {
+            pd.Timestamp(row[time_col]).date()
+            for row in customers.select(time_col).distinct().collect()
+            if row[time_col] is not None
+        }
+        missing_dates = sorted(set(snap_dates) - available_dates)
+        if missing_dates:
+            raise ValueError(
+                "inference_population missing inference.snap_dates: "
+                f"{[value.isoformat() for value in missing_dates]}"
+            )
+
+    with log_step(logger, "feature_coverage_report"):
+        # 用窄投影（join_key + 指標）算覆蓋，避免在 wide feature 上做聚合
+        ft_keys = (
+            feature_table.select(*join_key).distinct()
+            .withColumn("_ft_present", F.lit(True))
+        )
+        presence = customers.join(ft_keys, on=join_key, how="left")
+        coverage = (
+            presence.groupBy(time_col)
+            .agg(
+                F.count(F.lit(1)).alias("members"),
+                F.sum(
+                    F.when(F.col("_ft_present").isNull(), F.lit(1)).otherwise(F.lit(0))
+                ).alias("members_missing_features"),
+            )
+            .collect()
+        )
+        for row in coverage:
+            logger.info(
+                "feature coverage %s=%s: members=%d missing_features=%d",
+                time_col, row[time_col], row["members"],
+                row["members_missing_features"],
+            )
 
     with log_step(logger, "cross_join"):
-        spark = feature_table.sparkSession
         products_df = spark.createDataFrame([(p,) for p in products], [item_col])
         scoring = customers.crossJoin(products_df)
 
     with log_step(logger, "merge_features"):
-        scoring = scoring.join(feature_table, on=join_key, how="left")
+        ft = feature_table.withColumn("_ft_present", F.lit(True))
+        scoring = scoring.join(ft, on=join_key, how="left")
+        scoring = scoring.withColumn(
+            "feature_present", F.col("_ft_present").isNotNull()
+        ).drop("_ft_present")
 
     logger.info(
         "Built scoring dataset for %d products x %d snap_dates",
@@ -75,9 +148,25 @@ def predict_scores(
     identity_cols = schema["identity_columns"]
     score_col = schema["score"]
 
-    feature_columns = [
+    available_feature_columns = [
         c for c in X_score.columns if c not in identity_cols
     ]
+    feature_names_fn = getattr(model, "feature_names", None)
+    model_feature_names = (
+        feature_names_fn() if callable(feature_names_fn) else None
+    )
+    feature_columns = (
+        list(model_feature_names)
+        if model_feature_names
+        else available_feature_columns
+    )
+    missing_features = sorted(set(feature_columns) - set(X_score.columns))
+    if missing_features:
+        raise ValueError(
+            "Scoring data is missing feature columns required by the model: "
+            f"{missing_features}"
+        )
+
     spark = X_score.sparkSession
 
     use_calibration = parameters.get("inference", {}).get("use_calibration", True)
@@ -96,8 +185,14 @@ def predict_scores(
             chunk = X_score.filter(
                 (F.col(time_col) == sd) & (F.col(item_col) == prod)
             )
-            features_pdf = chunk.select(*feature_columns).toPandas()
-            identity_pdf = chunk.select(*identity_cols).toPandas()
+            collection_columns = identity_cols + [
+                column
+                for column in feature_columns
+                if column not in identity_cols
+            ]
+            chunk_pdf = chunk.select(*collection_columns).toPandas()
+            features_pdf = chunk_pdf[feature_columns]
+            identity_pdf = chunk_pdf[identity_cols].copy()
             if use_uncalibrated:
                 scores = model.predict_uncalibrated(features_pdf)
             else:
@@ -105,6 +200,10 @@ def predict_scores(
             identity_pdf[score_col] = scores
             all_results.append(identity_pdf)
 
+        if not all_results:
+            raise ValueError(
+                "No scoring rows found for inference.snap_dates and products"
+            )
         result_pdf = pd.concat(all_results, ignore_index=True)
 
     logger.info(
@@ -127,6 +226,8 @@ def rank_predictions(
     parameters: dict,
 ) -> DataFrame:
     """Rank products by score within each query group."""
+    score_table = _filter_current_inference_scope(score_table, parameters)
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
@@ -148,6 +249,13 @@ def validate_predictions(
     parameters: dict,
 ) -> DataFrame:
     """Validate inference output with sanity checks. Raises ValidationError on failure."""
+    ranked_predictions = _filter_current_inference_scope(
+        ranked_predictions, parameters
+    )
+    scoring_dataset = _filter_current_inference_scope(
+        scoring_dataset, parameters
+    )
+
     schema = get_schema(parameters)
     identity_cols = schema["identity_columns"]
     time_col = schema["time"]

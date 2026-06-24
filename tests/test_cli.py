@@ -445,6 +445,43 @@ def test_sample_weight_extra_absent_returns_none(tmp_path):
     assert _sample_weight_extra(tmp_path) is None
 
 
+def test_write_manifest_stub_writes_running(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_manifest_stub
+    vdir = tmp_path / "ab12cd34"
+    _write_manifest_stub(
+        vdir,
+        {"version": "ab12cd34", "pipeline": "training",
+         "parameters": {"training": {"lr": 0.01}},
+         "base_dataset_version": "base1234", "train_variant_id": "trv12345"},
+        run_id="run-xyz",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m["status"] == "running"
+    assert m["run_id"] == "run-xyz"
+    assert m["parameters"] == {"training": {"lr": 0.01}}
+    assert not (vdir / "latest").exists()           # no symlink
+    assert not (vdir / "parameters_training.json").exists()  # no sidecar
+
+
+def test_write_manifest_stub_skips_if_present(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_manifest_stub
+    vdir = tmp_path / "ab12cd34"
+    vdir.mkdir()
+    (vdir / "manifest.json").write_text(json.dumps(
+        {"version": "ab12cd34", "status": "completed", "sentinel": True}))
+    _write_manifest_stub(
+        vdir,
+        {"version": "ab12cd34", "pipeline": "training", "parameters": {}},
+        run_id="run-new",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m == {"version": "ab12cd34", "status": "completed", "sentinel": True}
+
+
 from recsys_tfb.__main__ import (
     _format_node_list,
     _format_slice_plan,
@@ -533,3 +570,89 @@ class TestHpoCheckpointingConfig:
         with open("conf/base/parameters_training.yaml") as f:
             cfg = _yaml.safe_load(f)
         assert cfg.get("hpo_checkpointing") is True
+
+
+def test_write_pipeline_manifest_stamps_completed(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _write_pipeline_manifest
+    vdir = tmp_path / "ab12cd34"
+    _write_pipeline_manifest(
+        version_dir=vdir,
+        metadata_kwargs={"version": "ab12cd34", "pipeline": "training",
+                         "parameters": {"lr": 0.01}, "artifacts": ["model"]},
+        run_id="run-1",
+    )
+    with open(vdir / "manifest.json") as f:
+        m = json.load(f)
+    assert m["status"] == "completed"
+    assert m["artifacts"] == ["model"]
+
+
+def test_format_retrain_advisory_with_latest():
+    from recsys_tfb.__main__ import _format_retrain_advisory
+    lines = _format_retrain_advisory(
+        "ab12cd34", ["finalize_model", "tune_hyperparameters"],
+        ("old11111", "2026-06-01T00:00:00+00:00"))
+    text = "\n".join(lines)
+    assert "ab12cd34" in text
+    assert "finalize_model" in text and "tune_hyperparameters" in text
+    assert "old11111" in text
+    assert "data/models/old11111/manifest.json" in text
+
+
+def test_format_retrain_advisory_without_latest():
+    from recsys_tfb.__main__ import _format_retrain_advisory
+    lines = _format_retrain_advisory("ab12cd34", ["finalize_model"], None)
+    text = "\n".join(lines)
+    assert "ab12cd34" in text
+    assert "finalize_model" in text
+    assert "manifest.json" not in text  # no nearest-version section
+
+
+def _plan_with_auto(auto):
+    from recsys_tfb.core.pipeline import SlicePlan
+    return SlicePlan(mode="from", requested=("predict_and_write_test_predictions",),
+                     auto_included=auto)
+
+
+def test_maybe_warn_retrain_fires_when_model_pulled_in(tmp_path):
+    import json
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    (tmp_path / "old11111").mkdir()
+    (tmp_path / "old11111" / "manifest.json").write_text(json.dumps(
+        {"version": "old11111", "status": "completed",
+         "created_at": "2026-06-01T00:00:00+00:00"}))
+    plan = _plan_with_auto({"finalize_model": ("model", "best_params")})
+    lines = _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
+    text = "\n".join(lines)
+    assert "ab12cd34" in text and "finalize_model" in text and "old11111" in text
+
+
+def test_maybe_warn_retrain_fires_under_calibration(tmp_path):
+    # Under calibration the `model` dataset is produced by calibrate_model, not
+    # finalize_model; the trigger must still fire on the missing `model`.
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"calibrate_model": ("model",)})
+    lines = _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
+    text = "\n".join(lines)
+    assert "ab12cd34" in text and "calibrate_model" in text
+
+
+def test_maybe_warn_retrain_silent_when_model_present(tmp_path):
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"cache_val_model_input": ("val_model_input",)})
+    assert _maybe_warn_retrain(
+        plan, {"models_dir": tmp_path, "model_version": "ab12cd34"}) == []
+
+
+def test_maybe_warn_retrain_silent_without_advice():
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    plan = _plan_with_auto({"finalize_model": ("model",)})
+    assert _maybe_warn_retrain(plan, None) == []
+
+
+def test_maybe_warn_retrain_silent_when_plan_none():
+    from recsys_tfb.__main__ import _maybe_warn_retrain
+    assert _maybe_warn_retrain(None, {"models_dir": ".", "model_version": "x"}) == []

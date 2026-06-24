@@ -319,6 +319,7 @@ def build_manifest_metadata(
     version: str,
     pipeline: str,
     parameters: dict,
+    status: str | None = None,
     base_dataset_version: str | None = None,
     train_variant_id: str | None = None,
     calibration_variant_id: str | None = None,
@@ -342,6 +343,8 @@ def build_manifest_metadata(
         "git_commit": get_git_commit(),
         "parameters": parameters,
     }
+    if status is not None:
+        metadata["status"] = status
     if base_dataset_version is not None:
         metadata["base_dataset_version"] = base_dataset_version
     if train_variant_id is not None:
@@ -359,3 +362,41 @@ def build_manifest_metadata(
     if artifacts is not None:
         metadata["artifacts"] = artifacts
     return metadata
+
+
+def find_latest_completed_model_version(models_dir: Path) -> tuple[str, str] | None:
+    """Return ``(version, created_at)`` of the most recently created model whose
+    manifest ``status`` is ``"completed"`` (or legacy: no ``status`` field).
+
+    Skips running/failed and unreadable manifests, and the ``best`` symlink.
+    ``created_at`` is an ISO-8601 string (always written by
+    :func:`build_manifest_metadata`), so lexicographic max == newest; the
+    ``created_at``/``version`` fallbacks below only guard manifests not produced
+    by that function. Returns ``None`` when nothing qualifies or ``models_dir``
+    does not exist.
+    """
+    if not models_dir.is_dir():
+        return None
+    # internal accumulator is (created_at, version); the return value flips it
+    # to (version, created_at) to match the documented signature.
+    best: tuple[str, str] | None = None
+    for child in models_dir.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        manifest_path = child / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            with open(manifest_path) as f:
+                m = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if m.get("status", "completed") != "completed":
+            continue
+        created = m.get("created_at", "")
+        version = m.get("version", child.name)
+        if best is None or created > best[0]:
+            best = (created, version)
+    if best is None:
+        return None
+    return (best[1], best[0])

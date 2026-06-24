@@ -18,7 +18,7 @@ def create_pipeline() -> Pipeline:
         [
             Node(
                 build_scoring_dataset,
-                inputs=["feature_table", "parameters"],
+                inputs=["inference_population", "feature_table", "parameters"],
                 outputs="scoring_dataset",
             ),
             Node(

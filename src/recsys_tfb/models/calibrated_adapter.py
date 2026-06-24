@@ -98,6 +98,10 @@ class CalibratedModelAdapter(ModelAdapter):
         """Return raw (uncalibrated) scores from the base model."""
         return self._base.predict(X)
 
+    def feature_names(self) -> list[str] | None:
+        """Return the base model's ordered feature contract."""
+        return self._base.feature_names()
+
     def save(self, filepath: str) -> None:
         """Save base model and calibrator sidecar."""
         self._base.save(filepath)
