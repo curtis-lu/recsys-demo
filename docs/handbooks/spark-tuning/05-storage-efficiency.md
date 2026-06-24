@@ -94,7 +94,7 @@ flowchart TB
 
 - **字典編碼（dictionary encoding）**：低基數欄位（如 `product_type` 只有 22 種值）Parquet 預設會字典化——存一份「編號→值」對照表＋一串編號，**又省空間、又多一種跳塊**（某個 row group 的字典裡根本沒有你要的值，就整段跳過）。所以「低基數＋有排序」的欄，壓縮與跳塊都特別有效。
 - **向量化讀取（vectorized reader）**：Spark 讀 Parquet 預設**一次一批（預設 4096 列）**用欄式批次解碼（`spark.sql.parquet.enableVectorizedReader` 預設 `true`、批次大小 `spark.sql.parquet.columnarReaderBatchSize` 預設 4096），比逐列快很多。要知道它**對某些複雜巢狀型別（如 `array`／`struct` 這種「欄裡還有結構」的型別）會自動關掉**、退回逐列——若掃描莫名變慢，這是可疑點之一。
-- **row group 別大過 HDFS block**：理想上一個 row group 落在**單一 HDFS block**（**HDFS block**＝HDFS 把檔案存到磁碟時切的固定大小區塊，§5.4 詳談，預設 128MB）內，讀一段 row group 就不必跨兩個 block／跨機器拉。寫出時若把 `parquet.block.size`（名字雖叫 block.size，它控制的其實是 **row group** 大小、不是 HDFS block）設得比 HDFS block 還大，反而製造跨 block 的遠端讀。（Parquet 官方建議 row group 512MB–1GB，是搭配「HDFS block 也設這麼大」的情境，不是叫你在 128MB block 上硬塞 1GB row group。）
+- **row group 別大過 HDFS block**：理想上一個 row group 落在**單一 HDFS block**（**HDFS block**＝HDFS 把檔案存到磁碟時切的固定大小區塊，§5.4 詳談，預設 128MB）內，讀一段 row group 就不必跨兩個 block／跨機器拉。寫出時若把 `parquet.block.size`（名字雖叫 block.size，它控制的其實是 **row group** 大小、不是 HDFS block）設得比 HDFS block 還大，反而製造跨 block 的遠端讀。（Parquet 官方建議 row group 512MB–1GB，是搭配「HDFS block 也設這麼大」的情境，不是叫你在 128MB block 上勉強塞進 1GB row group。）
 - **min／max 幫不上的高基數等值查詢，靠 bloom filter**：篩 `WHERE card_no = 'xxxx'` 這種高基數、又沒排序的欄，min／max 範圍幾乎一定涵蓋到 → 跳不掉。Parquet／ORC 都支援對指定欄寫入 **bloom filter**（一種能快速回答「這段裡一定沒有這個值」的小索引），補上這個洞。屬進階、預設多半不開，要用時依你平台設定為指定欄開啟。
 
 **ORC 也是同一套，只是換了名字**：CDP 上 Hive 的受管表預設用 ORC（§5.2／§5.8），它的對應物是——**stripe**（≈ row group，預設約 64MB）、**每 10000 列一個 row group index**（注意 ORC 把這層更細的索引單位也叫「row group」，跟 Parquet 那個 ~128MB 的 row group 不是同一層、別混；它是更細的跳塊單位）、stripe／row-group 層級的 min／max 統計、以及同樣可選的 **bloom filter**。所以上面「排序讓統計變窄、低基數好壓、bloom filter 補高基數」這些心法，在 Hive／ORC 一樣成立——你只要知道兩邊是同一回事、名詞不同即可。
@@ -147,9 +147,9 @@ flowchart TB
 
 **目標檔案大小**：分區切到「**每個分區裡的檔案大約落在 128MB–1GB**」這個區間最舒服——對齊第 01 章 §1.2 說的「讀檔每塊約 128MB＝一個 task」（HDFS 的預設區塊大小也是 128MB），讓每個 task 嚼一塊大小剛好的資料，既不會小到開檔成本爆、也不會大到單 task 撐不住。
 
-**共用特徵表的分區欄位要同時顧及下游的主要存取模式**：訓練常按**時間**（`snap_date`）過濾、推論／reverse ETL 有時按 **entity**（如 `cust_id`）過濾，兩者拉扯時以**最高頻、最吃掃描量**的那個為主——通常時間欄勝出，因為 `WHERE snap_date = ?` 裁掉的資料量最大；若 reverse ETL 的 entity 過濾需求也很重，推送通道的選擇見第 09 章；此處的原則是：**時間優先、entity 留給下游按需過濾**，不要為 entity 多加一層分區讓目錄數爆炸。
+**共用特徵表的分區欄位要同時顧及下游的主要存取模式**：訓練常按**時間**（`snap_date`）過濾、推論／reverse ETL 有時按 **entity**（如 `cust_id`）過濾，兩者拉扯時以**最高頻、最吃掃描量**的那個為主——通常時間欄勝出，因為 `WHERE snap_date = ?` 裁掉的資料量最大；若 reverse ETL 的 entity 過濾需求也很重，推送通道的選擇見第 09 章；此處的原則是：**時間優先、entity 留給下游按需過濾**，不要為 entity 多加一層分區讓目錄數暴增。
 
-**取捨講白**：分區**切得越細**，`WHERE` 能裁掉的越多（少讀），但**小檔與 metadata 的壓力越大**。所以分區欄位要選「裁得到、又不會把表炸成幾百萬個碎目錄」的——日期類幾乎永遠是安全牌；真要按客群之類再切，頂多用低基數的 `segment`（幾十種），絕不用 `cust_id` 這種一人一值的欄位。
+**取捨講白**：分區**切得越細**，`WHERE` 能裁掉的越多（少讀），但**小檔與 metadata 的壓力越大**。所以分區欄位要選「裁得到、又不會把表拆成幾百萬個碎目錄」的——日期類幾乎永遠是安全牌；真要按客群之類再切，頂多用低基數的 `segment`（幾十種），絕不用 `cust_id` 這種一人一值的欄位。
 
 > 📚 **來源**：partition 把資料按欄位值分到不同目錄、`WHERE` 分區欄位→只讀命中目錄見 [Spark SQL — Parquet（Partition Discovery）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html) 與第 03 章 §3.2；HDFS 預設區塊 128MB、NameNode 保管所有檔案系統 metadata 見 [Apache Hadoop HDFS Architecture](https://hadoop.apache.org/docs/r3.1.3/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html)；「過多小檔壓垮 NameNode 記憶體（每個 metadata 物件約 150 bytes、千萬檔約 3GB 記憶體）」見 [Cloudera：The Small Files Problem](https://blog.cloudera.com/the-small-files-problem/)（Cloudera 官方部落格）；「目標檔案 128MB–1GB、勿用高基數欄位分區」見《High Performance Spark》Ch.5（資料布局）。⚠️「128MB–1GB」是業界常見的目標區間（對齊 HDFS block），非官方逐字硬規定；HDFS block 大小可由叢集設定（`dfs.blocksize`），以你平台為準。
 
@@ -163,10 +163,10 @@ flowchart TB
 
 **為什麼通常不用你管**：它**自動**發生（背後的 `spark.locality.wait` 官方說預設多半夠用）；而「能不能就近」主要看**運算和資料在不在同一批機器、HDFS 有幾份副本（預設 3）、那台忙不忙、資料是放本地 HDFS（有 locality）還是遠端物件儲存（沒有、全網路讀）**——這些多半是平台層的事，不是你寫 SQL 能調的。**頻寬**同理：你不會去「調頻寬」，而是**靠少搬（少 shuffle）讓網路傳輸變少**來省它。
 
-**那這跟你的存法有什麼關係？一個真的會中、一個別誇大**：
+**那這跟你的存法有什麼關係？一個確實成立、一個被誇大**：
 
-- **會中的**：一個**大到無法切分的怪檔**（例如整個 gzip）只能由單一 task 從頭讀到尾，它的區塊又散在不同節點 → 大部分只能遠端讀，locality 就破功。
-- **別誇大的**：**滿地小碎檔**的主要傷害其實是**別的**（NameNode metadata、排程開銷、每 task 沒幾筆可做，見 §5.5），它對 locality 本身的影響**間接、偏弱**——別把小檔的鍋算到 locality 頭上。
+- **確實成立的**：一個**大到無法切分的怪檔**（例如整個 gzip）只能由單一 task 從頭讀到尾，它的區塊又散在不同節點 → 大部分只能遠端讀，locality 就破功。
+- **被誇大的**：**滿地小碎檔**的主要傷害其實是**別的**（NameNode metadata、排程開銷、每 task 沒幾筆可做，見 §5.5），它對 locality 本身的影響**間接、偏弱**——別把小檔的問題怪到 locality 頭上。
 
 結論不變：**把格式／分區／檔案大小做好（§5.2–§5.5），自然少踩 locality 與頻寬的雷。**
 
@@ -249,7 +249,7 @@ FROM card_txn WHERE month='2026-05' GROUP BY cust_id;
 
 **問題一：寫「分區表」（`PARTITIONED BY`）時，repartition 要帶那個分區欄位。** 寫分區表有個專屬陷阱：**每個 task 會為它手上碰到的每一個分區值各寫一個檔**。所以——
 
-- **一次寫很多個分區**（動態分區、或回填一整段歷史）又用**裸 `REPARTITION(n)`**（隨機散）→ 每個分區值都被打散到全部 n 個 task → **每個分區目錄 n 個檔** → `分區數 × n` 的小檔爆炸。
+- **一次寫很多個分區**（動態分區、或回填一整段歷史）又用**裸 `REPARTITION(n)`**（隨機散）→ 每個分區值都被打散到全部 n 個 task → **每個分區目錄 n 個檔** → `分區數 × n` 的小檔暴增。
 - **正解：按分區欄位重分** `/*+ REPARTITION(dt) */`（或 `/*+ REPARTITION(n, dt) */`），讓同一個 `dt` 集中到同一（或少數）個 task → 每個分區目錄只剩 1（或少數）個大檔。某個分區值特別肥（skew）就用 `/*+ REBALANCE(dt) */`。
 - **只寫單一靜態分區**（像上面 `PARTITION (month='2026-05')` 那例，只有一個輸出目錄）→ 裸 `REPARTITION(16)` 就對了，不會踩這個雷。
 
@@ -332,7 +332,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 （你多半不必、也不會在 Hue 打 SQL 時去操心底層走不走 HWC——那通常是平台幫你接好的。若你的團隊用 **dbt-spark** 之類工具建模型表，它底層也是走 Spark SQL 建表，所以同樣吃上面這條規則——預設多落在 external 那一類；要它建成別種、或放到哪個位置，看你 dbt 的 materialization／`file_format`／`location` 設定。跨引擎的定位與選用，第 06 章專門談。）
 
-**schema 演進（schema evolution）——共用表的命門**：一張被很多下游讀的表，**改 schema 不能隨便**，否則打爛既有讀者。安全原則：
+**schema 演進（schema evolution）——共用表的頭號風險**：一張被很多下游讀的表，**改 schema 不能隨便**，否則打爛既有讀者。安全原則：
 
 - **加欄位**通常安全：舊查詢沒 `SELECT` 到新欄、不受影響（Parquet／ORC 讀舊檔時會把缺的新欄補成 null；至於「跨檔自動合併不同 schema」的 `spark.sql.parquet.mergeSchema` **預設是關的**，要時才開）。
 - **改既有欄位的型別、改名、刪欄**是危險動作——下游 `SELECT 那個欄位` 會壞掉或語意悄悄改變（呼應第 03 章 §3.7「join key 型別不一致」那類坑）。要做就**新開一欄、或版本化並通知下游**，別原地改舊欄。

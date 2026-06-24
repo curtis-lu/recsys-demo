@@ -93,7 +93,7 @@ SELECT cust_id, txn_cnt_30d FROM cust_features WHERE month = '2026-05';
 
 **在 `EXPLAIN`／UI 看到什麼**。`EXPLAIN` 的 `Scan` 那行會列出 `ReadSchema: struct<cust_id,txn_cnt_30d>`——只有你要的欄位；用 `SELECT *` 則會列出全部欄位。對照 Spark UI 讀檔算子的輸入位元組，兩者差很多。這種「只讀需要欄位」叫 **column pruning（欄位裁剪）**。
 
-**取捨**。這招幾乎是**純賺、沒有壞處**，唯一要注意的是別在不知不覺中又把欄位要回來——例如 `SELECT *` 之後再 `JOIN`、或包一層 view 用 `*`，都會讓 column pruning 失效。原則：**從讀檔到最終輸出，全程只帶你真的會用到的欄位**。也因此，「先 `SELECT *` 撈進來再慢慢挑」這種 ad-hoc 習慣，在大表上代價很高。
+**取捨**。這招**幾乎沒有壞處**，唯一要注意的是別在不知不覺中又把欄位要回來——例如 `SELECT *` 之後再 `JOIN`、或包一層 view 用 `*`，都會讓 column pruning 失效。原則：**從讀檔到最終輸出，全程只帶你真的會用到的欄位**。也因此，「先 `SELECT *` 撈進來再慢慢挑」這種 ad-hoc 習慣，在大表上代價很高。
 
 > 📚 **來源**：欄式格式只讀取用到的欄位（column pruning）、配合謂詞下推見 [Spark SQL Parquet](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html) 與《Spark: The Definitive Guide》Ch.9（Data Sources）。⚠️「1000 欄差幾十倍」是依欄位數與型別的量級示意，非逐字數字。
 
@@ -121,7 +121,7 @@ WHERE txn_date >= '2026-01-01' AND txn_date < '2027-01-01'
 
 原則：**過濾條件裡，要被下推的那個欄位最好「裸著」直接和常數比較**，別用函數、運算、或型別轉換把它包起來。包起來的瞬間，Spark 就無法拿欄位的統計值去跳塊／跳目錄，只能整批讀進來再逐列算——你以為下了 `WHERE`，其實一行都沒少讀。（後面 §3.7 會看到，**join key 上的隱式型別轉換**也是同一類坑。）
 
-**取捨**。改寫成「裸欄位比較」通常不損失可讀性，是純賺。唯一的代價是你得知道哪些欄位有下推價值（分區欄位、Parquet 裡有統計的欄位），這要靠 `EXPLAIN` 確認 `PushedFilters`／`PartitionFilters` 有沒有出現——這正是第 02 章那套「先量再調」的用法。
+**取捨**。改寫成「裸欄位比較」通常不損失可讀性，幾乎沒有壞處。唯一的代價是你得知道哪些欄位有下推價值（分區欄位、Parquet 裡有統計的欄位），這要靠 `EXPLAIN` 確認 `PushedFilters`／`PartitionFilters` 有沒有出現——這正是第 02 章那套「先量再調」的用法。
 
 > 📚 **來源**：predicate pushdown 把過濾推到資料源、Parquet 依 row-group 統計跳塊見 [Spark SQL Parquet（`spark.sql.parquet.filterPushdown`，預設 true）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；下推呈現為 `Scan` 的 `PushedFilters` 見第 02 章 §2.3。⚠️「用函數包住欄位 → 下推失效」方向正確，是 Spark 只能對「欄位 vs 常數」這類可轉成資料源 filter 的謂詞下推；個別函數是否仍能下推依版本與資料源而異，以 `EXPLAIN` 實際看 `PushedFilters` 為準。
 
@@ -153,7 +153,7 @@ flowchart TB
 
 **好消息：多數時候 AQE / 統計會自動幫你選 broadcast——前提是表有統計、Spark 估得出它夠小；沒統計就不會自動。** Spark 估計到一邊小於門檻 `spark.sql.autoBroadcastJoinThreshold`（**預設 10MB**）時，就自動走 broadcast。而且 Spark 3.3 的 **AQE**（Adaptive Query Execution，會在查詢**執行途中**自動調整計畫的機制，第 01 章 §1.6 提過、第 04 章詳談）更進一步：就算一開始計畫是 `SortMergeJoin`，執行途中發現某邊 shuffle 後實際很小，AQE 還會**動態改成 broadcast**。所以你常常什麼都不用做，它就對了。
 
-**在 `EXPLAIN`／UI 看到什麼**。`EXPLAIN` 裡是 `BroadcastHashJoin` 還是 `SortMergeJoin`，一翻兩瞪眼（§2.3）。若你**以為**某張小表會被廣播、計畫裡卻是 `SortMergeJoin`，那就是警訊——通常是下一節（§3.6）或型別問題（§3.7）造成的。
+**在 `EXPLAIN`／UI 看到什麼**。`EXPLAIN` 裡是 `BroadcastHashJoin` 還是 `SortMergeJoin`，一眼就分得出（§2.3）。若你**以為**某張小表會被廣播、計畫裡卻是 `SortMergeJoin`，那就是警訊——通常是下一節（§3.6）或型別問題（§3.7）造成的。
 
 **取捨**。broadcast 省掉 join 的 shuffle（省時間），但要付**記憶體**：小表會在 driver 收集、再複製到**每一台** executor（§1.7 提過「廣播的小表每台各一份」）。**所以「小表」必須真的小**——若把一張其實很大的表硬廣播，會撐爆 driver 或 executor 記憶體（OOM）。這就是為什麼有個門檻、也是下一節手動 hint 要小心的地方。
 
@@ -327,7 +327,7 @@ FROM card_txn WHERE month = '2026-05';
 
 **第一層：先靠 AQE（多半夠用，你什麼都不用做）。** Spark 3.3 的 AQE 內建 **skew join 處理**（預設開）：執行時它會自動偵測「哪個 partition 大得異常」，把那個肥 partition**再切成幾小塊、並行處理**，肥 task 就被拆開了。所以遇到 skew，**第一件事是確認 AQE 開著**（第 04 章）、讓它自動處理，往往就解決了——你**不必記任何數字**。（給想深究的人的細節：它判定「異常大」的門檻是「某 partition 同時 大於所有 partition 中位數的 5 倍、且 大於 256MB」，分別由 `spark.sql.adaptive.skewJoin.skewedPartitionFactor`〔預設 5.0〕與 `skewedPartitionThresholdInBytes`〔預設 256MB〕控制；知道有這兩個旋鈕即可，平常不用動。）
 
-**第二層：AQE 沒搞定時，手動 salting（加鹽）。** 如果熱點極端（例如九成資料集中在一個 key），AQE 也可能力有未逮。salting 的概念是**給 key 人工加上隨機後綴**，把一個肥 key 打散成 N 個小 key，分到 N 個 task，算完再合併：
+**第二層：AQE 處理不了時，手動 salting（加鹽）。** 如果熱點極端（例如九成資料集中在一個 key），AQE 也可能力有未逮。salting 的概念是**給 key 人工加上隨機後綴**，把一個肥 key 打散成 N 個小 key，分到 N 個 task，算完再合併：
 
 ```mermaid
 flowchart TB

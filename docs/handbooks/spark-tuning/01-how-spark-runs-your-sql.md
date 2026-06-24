@@ -232,7 +232,7 @@ GROUP BY cust_id;
 
 所以實務上常見的起手建議是**每台 executor 抓大約 4～5 個 core**（在 HDFS 吞吐與管理開銷之間取平衡），記憶體則抓到「讓同時在跑的 task 各自夠用、不要一直 spill」為原則。
 
-> 這裡先有直覺就好。**怎麼在 CDP/YARN 上把這些值實際設下去、怎麼用 dynamic allocation（動態分配，讓 executor 台數隨工作量自動增減）隨需求伸縮而不佔著資源餓死同事，第 04 章詳談。** 而且你會發現：很多時候與其糾結這些數字，不如先照第 03 章把 SQL 寫法和統計弄對，省下來的更多。
+> 這裡先有直覺就好。**怎麼在 CDP/YARN 上把這些值實際設下去、怎麼用 dynamic allocation（動態分配，讓 executor 台數隨工作量自動增減）隨需求伸縮而不佔著資源排擠別的作業，第 04 章詳談。** 而且你會發現：很多時候與其糾結這些數字，不如先照第 03 章把 SQL 寫法和統計弄對，省下來的更多。
 
 > 📚 **來源**：core ＝同時可跑的 task 數（`spark.executor.cores`／`spark.task.cpus`）、overhead 約佔一成（`spark.executor.memoryOverheadFactor` = 0.10）見 [Spark Configuration](https://spark.apache.org/docs/latest/configuration.html)；廣播變數「每台機器各快取一份、而非隨每個 task 送」見 [Spark RDD Programming Guide（Broadcast Variables）](https://spark.apache.org/docs/latest/rdd-programming-guide.html)；「每 executor 約 5 個 task 才有完整 HDFS 寫吞吐、記憶體過大→GC 長停頓」與 4～5 core 起手值見 [Cloudera CDP：Tuning Resource Allocation](https://docs.cloudera.com/runtime/7.2.10/tuning-spark/topics/spark-admin-tuning-resource-allocation.html)（目標環境同系）。⚠️ 100 core／400 GB 的胖／瘦範例是把總額度乾淨對切的示意（實務每台還要再扣約 10% overhead，無法整包配成 heap）。
 
@@ -291,7 +291,7 @@ flowchart TB
 
 Spark 的做法不同：它把整條多步驟查詢規劃成**一張 DAG**（上一節那條 SQL 的 stage 圖就是），在一個 stage 內把多個窄依賴運算**在記憶體裡串著做、中間不落地**，只有遇到 shuffle 才把中間結果寫到**本機磁碟**（§1.6 的 shuffle write，且是本機磁碟、不是 HDFS）。比起 MapReduce 每個 job 之間都來回一趟 HDFS，Spark 少掉大量磁碟來回，這是它通常更快的主因。
 
-但別過度宣稱：Spark 不是「永遠比較快」。對非常單純的大批次掃描，差距有限；而且**現在的 Hive 多半跑在 Tez 上（不是 MapReduce）**，Tez 也用 DAG、把這個差距縮小了不少。哪個引擎適合哪種工作，第 06 章專門討論。
+但要持平說：Spark 不是「永遠比較快」。對非常單純的大批次掃描，差距有限；而且**現在的 Hive 多半跑在 Tez 上（不是 MapReduce）**，Tez 也用 DAG、把這個差距縮小了不少。哪個引擎適合哪種工作，第 06 章專門討論。
 
 > 📚 **來源**：「Spark 用 DAG、stage 內窄依賴在記憶體 pipeline、只在 shuffle 落本機磁碟」見《Spark: The Definitive Guide》Ch.15（Pipelining）；「CDP 的 Hive 執行引擎是 Tez、MapReduce 不支援」見 [Cloudera CDP：Hive on Tez（7.1.9）](https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/hive-introduction/topics/hive-on-tez.html)。⚠️ 嚴格說 MR 單一 job 內 map↔reduce 的 shuffle 也是寫本機磁碟，落 HDFS 的是 job 與 job 之間（本章已採此較精準說法）。
 

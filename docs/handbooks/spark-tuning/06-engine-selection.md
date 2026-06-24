@@ -110,7 +110,7 @@ flowchart TB
 
 ## 6.4 各引擎怎麼看「為什麼慢」：診斷工具對照
 
-第 02 章教你用 **Spark UI** 給 Spark 查詢「驗屍」。好消息是：**那套「先量再調、找最慢的 stage／看資料分佈／看 spill」的心法，三個引擎通用**，只是各自有自己的「驗屍房」：
+第 02 章教你用 **Spark UI** 給 Spark 查詢做「完整診斷」。好消息是：**那套「先量再調、找最慢的 stage／看資料分佈／看 spill」的心法，三個引擎通用**，只是各自有自己的「診斷工具」：
 
 | 引擎 | 看哪裡 | 主要看什麼 |
 |---|---|---|
@@ -124,7 +124,7 @@ flowchart TB
 2. **再看那一段是哪種病**——資料太多（少讀，第 03/05 章）、搬太多（shuffle）、還是分佈不均（skew）。Impala 的 profile 額外好用的一點是它會列出「**優化器估計幾列 vs 實際幾列**」，差很多就表示**統計過時**——這時該回去 §5.6 跑 `ANALYZE`（或 Impala 端的 `COMPUTE STATS`）。
 3. **對症下藥**：改寫法（第 03 章）、調存法（第 05 章）、或——這一章的重點——**換個引擎**。
 
-> 📚 **來源**：Spark UI 用法見第 02 章；Impala `PROFILE` 提供查詢執行細節（各 fragment 時間、記憶體、spill）見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html) 與 Impala 文件的 `EXPLAIN`／`PROFILE`／`SUMMARY` 工具族；Hive on Tez 把查詢拆成 Tez DAG（多個 vertex）執行見 [Cloudera CDP — Hive on Tez introduction](https://docs.cloudera.com/runtime/7.2.18/hive-introduction/topics/hive-on-tez.html)。⚠️ 各 UI 的確切入口（Cloudera Manager／Hue／web 連結、Tez DAG 的檢視位置）依你平台的部署與權限而異，以你環境為準；本節只給「每個引擎都有對應的驗屍工具、心法與第 02 章相同」這個層次，不逐一示範各工具欄位。
+> 📚 **來源**：Spark UI 用法見第 02 章；Impala `PROFILE` 提供查詢執行細節（各 fragment 時間、記憶體、spill）見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html) 與 Impala 文件的 `EXPLAIN`／`PROFILE`／`SUMMARY` 工具族；Hive on Tez 把查詢拆成 Tez DAG（多個 vertex）執行見 [Cloudera CDP — Hive on Tez introduction](https://docs.cloudera.com/runtime/7.2.18/hive-introduction/topics/hive-on-tez.html)。⚠️ 各 UI 的確切入口（Cloudera Manager／Hue／web 連結、Tez DAG 的檢視位置）依你平台的部署與權限而異，以你環境為準；本節只給「每個引擎都有對應的診斷工具、心法與第 02 章相同」這個層次，不逐一示範各工具欄位。
 
 ---
 
@@ -257,7 +257,7 @@ flowchart LR
 
 **兩個最常見的選錯**，記住就少踩坑：
 
-1. **為了「快」，把幾小時的重 ETL 硬塞 Impala** → 不容錯＋記憶體壓力，遲早爆。重 ETL 給 Spark／Hive on Tez。
+1. **為了「快」，把幾小時的重 ETL 勉強塞給 Impala** → 不容錯＋記憶體壓力，遲早爆。重 ETL 給 Spark／Hive on Tez。
 2. **為了「都用 Spark」，拿 Spark 開一個秒級小查詢給人互動** → 啟動開銷比查詢本身還久。互動給 Impala。
 
 > 📚 **來源**：Impala 低延遲互動／不容錯／記憶體密集、不適合重型 join；Hive 容錯適合批次 ETL 見 [Cloudera Blog — Hive LLAP vs Impala](https://www.cloudera.com/blog/technical/choosing-the-right-data-warehouse-sql-engine-apache-hive-llap-vs-apache-impala.html) 與 [Cloudera Community — Hive on Spark or Impala in batch (ETL)](https://community.cloudera.com/t5/Support-Questions/Hive-on-Spark-or-Impala-in-batch-Process-ETL/td-p/54314)；Impala spill 行為見 [Impala — Scalability Considerations](https://impala.apache.org/docs/build/html/topics/impala_scalability.html)；Spark 與 ML／工程化整合見第 10 章。⚠️ 「啟動開銷」「記憶體壓力」為設計取向的方向性描述，確切數字依叢集設定與查詢而異。
@@ -314,7 +314,7 @@ flowchart TB
 
 1. **§6.2 引擎跑法**：「Impala 常駐省啟動開銷、不容錯」「Hive on Tez 是 DAG、比老 MapReduce 快」「Spark 容錯靠重試／重算」皆為設計取向的方向性描述，方向正確；確切啟動秒數、容錯邊界、spill 觸發點依叢集設定與查詢而異，無官方逐字數字。
 2. **§6.3 決策表／決策樹**：為「典型傾向」的整理，**非硬規則**；Spark 與 Hive on Tez 在「容錯長批次」上大量重疊，邊界案例依團隊既有技術棧而定。唯一界線分明的是「秒級互動走 Impala、容錯重批次別走 Impala」。
-3. **§6.4 診斷工具**：各 UI 的確切入口（Cloudera Manager／Hue／web 連結）與權限依你平台部署而異；本節只給「每引擎都有對應驗屍工具、心法與第 02 章相同」的層次，未逐一示範各工具欄位。
+3. **§6.4 診斷工具**：各 UI 的確切入口（Cloudera Manager／Hue／web 連結）與權限依你平台部署而異；本節只給「每引擎都有對應診斷工具、心法與第 02 章相同」的層次，未逐一示範各工具欄位。
 4. **§6.6 metadata 同步**：`REFRESH`（增量、同步、輕量、用於外部加改檔案／分區）與 `INVALIDATE METADATA`（丟快取、非同步、昂貴、用於新表／改 schema、不帶表名 flush 全部、官方建議可能時優先 `REFRESH`）已對 Impala 官方文件逐字核對；CDP 事件驅動自動同步（catalogd 以 `hms_event_polling_interval_s` 輪詢 HMS 事件、`impala.disableHmsSync` 可停用、設 0 關閉）有 Cloudera 出處。**輪詢間隔在 CDP 7.1.9 的 Cloudera Manager 預設為 2 秒**（屬性「HMS Event Polling Interval」，已對 7.1.9 configuration-properties 頁核對）；注意上游 Impala 旗標文件的措辭是「設正整數才啟用」，與 CDP 經 Cloudera Manager 給的 2 秒預設是不同層級的事，是否啟用／實際間隔仍依你叢集設定為準。Spark 端長命 session 自有 catalog 快取、需 `REFRESH TABLE 表名` 重抓，為 Spark SQL 文件記載的對稱情形。
 5. **§6.7 ACID 跨引擎**：「Impala 讀 full ACID／不可寫、insert-only 可讀寫、full ACID 由 Hive 寫與維護、Spark 存取 managed 表需 HWC」有 Cloudera 出處；**「full ACID 表不支援 `INSERT OVERWRITE`」**有 Apache Hive DML（Hive 0.14 起 disabled）＋ CDP 遷移文件出處；**「ACID 表 compaction 由 Hive 端負責、不跑會越讀越慢」**為 base＋delta 結構的直接後果、有 Hive 3 ACID 文件支撐。**「Spark 不走 HWC 直讀 full ACID 會靜默讀到刪除／舊版列」**——「需走 HWC」官方逐字成立，但「直讀會得到含髒資料且無錯誤訊息」是基於 ACID base＋delta 結構的合理推論＋社群觀察的方向性說法，非官方逐字保證，已在正文以保守語氣標明。Impala 對 full ACID 的可讀範圍依 CDP／Impala 版本而異（本手冊環境 7.1.9；確切邊界以你平台實測為準）。「需要 update／delete 才用 ACID，否則整批 partition 覆寫＋external Parquet 即可」為設計建議。
 6. **§6.8 取捨**：甜蜜點／雷區為三引擎設計取向的整理，方向正確；個別工作是否「該換引擎」仍須以你環境量測（§6.4）為準，不照單全收。

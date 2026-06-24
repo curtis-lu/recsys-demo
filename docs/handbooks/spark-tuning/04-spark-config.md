@@ -17,7 +17,7 @@
 **前提二：Spark 設定分兩類，風險天差地遠——動之前先分清楚。**
 
 - **SQL 層旋鈕**（`spark.sql.*`，如 `shuffle.partitions`、`autoBroadcastJoinThreshold`）：可以在你打 SQL 的當下臨時設、只影響接下來的查詢、隨時改回來。**低風險、可回退。**
-- **資源層旋鈕**（`spark.executor.memory`／`cores`／台數、`spark.dynamicAllocation.*`、`spark.memory.fraction`）：在你這個 Spark 工作階段**啟動的那一刻就定死**，而且影響的是整支作業要佔叢集多少資源——調錯不是慢一點，是 **OOM（記憶體爆掉）或佔住資源餓死同事**。**高風險、要連多租戶一起想。**
+- **資源層旋鈕**（`spark.executor.memory`／`cores`／台數、`spark.dynamicAllocation.*`、`spark.memory.fraction`）：在你這個 Spark 工作階段**啟動的那一刻就定死**，而且影響的是整支作業要佔叢集多少資源——調錯不是慢一點，是 **OOM（記憶體爆掉）或佔住資源排擠別的作業**。**高風險、要連多租戶一起想。**
 
 本章順著這個風險梯度走：先講 AQE 自動做了什麼、怎麼確認它開著（§4.2–§4.3），再講剩下少數值得手動碰的 SQL 旋鈕（§4.4），最後才碰資源層（§4.5–§4.7），用一個排程作業的例子串起來（§4.8）。
 
@@ -198,7 +198,7 @@ flowchart TB
 
 ---
 
-## 4.7 dynamic allocation 與多租戶：別佔著資源餓死同事
+## 4.7 dynamic allocation 與多租戶：別佔住資源排擠別的作業
 
 > **進階** — 日常只跑 ad-hoc 的讀者可先跳到 §4.8；要替排程作業配資源、跟同事共用叢集再回來細讀。
 
@@ -223,7 +223,7 @@ flowchart LR
 
 **對排程作業（第 07 章）的實務建議**：
 
-- **設一個合理的 `maxExecutors`**，別讓它無上限——否則你的作業在半夜尖峰可能把整個叢集（或整個 queue）吃光，**餓死**同時在跑的其他作業。`maxExecutors` 設多少，參照你 queue 的容量與這支作業該佔的份額。
+- **設一個合理的 `maxExecutors`**，別讓它無上限——否則你的作業在半夜尖峰可能把整個叢集（或整個 queue）吃光，**排擠**同時在跑的其他作業。`maxExecutors` 設多少，參照你 queue 的容量與這支作業該佔的份額。
 - **別對 streaming 作業開** dynamic allocation（持續不斷處理的串流，不是你的批次排程；批次讀者可略過——Cloudera 明確提醒兩者會衝突）。本手冊以批次為主，但知道有這個雷。
 - **要穩定達成 SLA**（service-level agreement，對下游的服務承諾，例如「保證每天早上 8 點前把表產好」）**的關鍵作業**，可以給較高的 `minExecutors`，確保它一啟動就有基本資源、不必慢慢長。
 
@@ -242,7 +242,7 @@ flowchart LR
 1. **先別碰任何 config——把 SQL 弄對（第 03、05 章）。** 分區裁剪只算當天／當月（§3.2）、別 `SELECT *`（§3.3）、多個 window 共用同一個 `PARTITION BY`（§3.9）、小維度表走 broadcast（§3.5）；對大表跑 `ANALYZE TABLE`（§05）讓 Spark 估得準、broadcast 不誤判。**多數的慢在這一步就解掉了。**
 2. **確認 AQE 開著（§4.3）。** Environment 頁籤看 `adaptive.enabled=true`、跑完看 `isFinalPlan=true`。分區合併、skew join、動態 broadcast 就自動有了——你不必手動調分區數。
 3. **看 §2.6 的 Summary Metrics（在 Spark UI Stages 頁，見 §2.6）判斷還缺什麼。** 還在 spill？→ 先回第 1 步再減量、或 §4.4 把 `shuffle.partitions` 調大給 AQE 更細的起點；**真的是資料量本來就大、前面都做了**，才到第 4 步加記憶體。
-4. **配資源（§4.6）。** 例如 `--executor-cores 5 --executor-memory 18g`；因為 CDP 的 dynamic allocation 已開（§4.7），重點是**設一個合理的 `maxExecutors`（例如 30）**，避免半夜尖峰把叢集吃光、餓死別的作業。這個數字的依據是你所在 YARN queue 的容量與這支作業該佔的份額粗估，不是固定值——queue 容量不同、合理的 `maxExecutors` 就不同，先問叢集管理者或看 YARN Scheduler 頁面。
+4. **配資源（§4.6）。** 例如 `--executor-cores 5 --executor-memory 18g`；因為 CDP 的 dynamic allocation 已開（§4.7），重點是**設一個合理的 `maxExecutors`（例如 30）**，避免半夜尖峰把叢集吃光、排擠別的作業。這個數字的依據是你所在 YARN queue 的容量與這支作業該佔的份額粗估，不是固定值——queue 容量不同、合理的 `maxExecutors` 就不同，先問叢集管理者或看 YARN Scheduler 頁面。
 5. **上線後持續看（第 07 章監控）。** 用 History Server（§2.2）比較「這支作業這週和上週各跑多久、搬多少」，等資料長大、開始退化，再回頭調——而且多半又是回到第 1 步。
 
 一句話：**先 SQL、再確認 AQE、最後才動資源；而動資源時，連同多租戶一起想。**

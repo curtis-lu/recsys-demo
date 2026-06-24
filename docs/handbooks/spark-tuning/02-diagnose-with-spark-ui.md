@@ -17,7 +17,7 @@
 「量」有兩個時機、兩個工具：
 
 - **跑之前——`EXPLAIN`**：不真的執行，只請 Spark 把「它打算怎麼做」這份計畫印出來給你看。幾秒就有結果，適合在送出大查詢前先檢查「我以為會發生的優化，真的有發生嗎」（例如該裁掉的月份有沒有被裁掉、小表有沒有走 broadcast）。
-- **跑當下／跑完——Spark UI**：查詢實際執行時，Spark 把每個 stage、每個 task 花了多久、搬了多少資料、spill 了沒，全部記錄下來，用一個網頁介面呈現。這是「事後驗屍」也是「現場監看」，告訴你計畫**實際**跑起來的數字。
+- **跑當下／跑完——Spark UI**：查詢實際執行時，Spark 把每個 stage、每個 task 花了多久、搬了多少資料、spill 了沒，全部記錄下來，用一個網頁介面呈現。這是「事後完整診斷」也是「現場監看」，告訴你計畫**實際**跑起來的數字。
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
     EX -. "計畫不對就先改寫" .-> Q
 ```
 
-兩個工具互補：`EXPLAIN` 看「計畫對不對」（便宜、快），Spark UI 看「實際貴在哪」（要真的跑一遍）。本章其餘部分就是這兩樣的操作手冊：§2.2 教怎麼進去、§2.3 教 `EXPLAIN`、§2.4–§2.8 一個頁籤一個頁籤帶你讀畫面、§2.9–§2.11 收成查表、checklist、和一個完整驗屍。
+兩個工具互補：`EXPLAIN` 看「計畫對不對」（便宜、快），Spark UI 看「實際貴在哪」（要真的跑一遍）。本章其餘部分就是這兩樣的操作手冊：§2.2 教怎麼進去、§2.3 教 `EXPLAIN`、§2.4–§2.8 一個頁籤一個頁籤帶你讀畫面、§2.9–§2.11 收成查表、checklist、和一個完整診斷。
 
 > **怎麼用本章**：遇到問題時你**不必從頭讀**。先看 §2.9 的「症狀 → 面板 → 章」總表對號入座，再回到對應頁籤那節看細節；或直接照 §2.10 的三張 checklist 逐項打勾。第一次讀建議照順序走一遍，建立「哪個畫面看哪件事」的地圖。
 
@@ -305,7 +305,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 |---|---|---|
 | Failed Tasks 一直長大、伴隨 OOM | 單批量太大或記憶體太小 | 寫法減量 → [第 03 章](03-sql-tuning.md)；executor 記憶體 → [§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead) |
 | GC Time 佔比高 | 記憶體壓力大 | executor 記憶體配置 → [§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead)、[§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定) |
-| 拿到的 executor 數量遠少於預期 | 資源分配／多租戶 | core/記憶體/台數 → [§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定)；dynamic allocation/多租戶 → [§4.7](04-spark-config.md#47-dynamic-allocation-與多租戶別佔著資源餓死同事) |
+| 拿到的 executor 數量遠少於預期 | 資源分配／多租戶 | core/記憶體/台數 → [§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定)；dynamic allocation/多租戶 → [§4.7](04-spark-config.md#47-dynamic-allocation-與多租戶別佔住資源排擠別的作業) |
 
 > **spill 要回 Stages 頁看，不是這裡**：Executors 頁告訴你「誰記憶體吃緊」（GC、Storage Memory、Failed Tasks），但**判定 spill 的權威數字在 Stages 頁的 `Shuffle spill (memory/disk)`**（§2.6）。Executors 頁的 GC／OOM 是 spill 的旁證，不是 spill 本身——別把兩者混為一談。
 
@@ -376,7 +376,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 - [ ] **Stages 頁**：shuffle 後的分區數是不是過多、每個 task 的 `Shuffle Read` 都很小（碎分區）——還是 AQE 已經幫你合併了？→ [§4.2 AQE](04-spark-config.md#42-aqe-自動幫你做的三件事)、[§4.4](04-spark-config.md#44-aqe-之後還值得手動懂的少數-sql-旋鈕)
 - [ ] **Environment 頁**：`spark.sql.autoBroadcastJoinThreshold`（broadcast 門檻）、`spark.sql.adaptive.enabled`（AQE）的實際值，跟你以為的一樣嗎？→ [§4.3](04-spark-config.md#43-確認-aqe-開著怎麼用-set-改設定)、[§4.4](04-spark-config.md#44-aqe-之後還值得手動懂的少數-sql-旋鈕)
 - [ ] **Executors 頁**：GC Time 佔 Task Time 比例高、Failed Tasks 長大（記憶體吃緊）？→ [§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead)
-- [ ] **Executors 頁**：實際拿到的 executor 數量/core，跟你申請的一樣嗎（資源沒配到/被搶）？**怎麼查**：Executors 頁每台 executor 一列，**數有幾列（＝現役台數）、看每列的 `Cores`（＝每台幾核）**；最上面彙總列給你總和。→ [§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定)、[§4.7](04-spark-config.md#47-dynamic-allocation-與多租戶別佔著資源餓死同事)
+- [ ] **Executors 頁**：實際拿到的 executor 數量/core，跟你申請的一樣嗎（資源沒配到/被搶）？**怎麼查**：Executors 頁每台 executor 一列，**數有幾列（＝現役台數）、看每列的 `Cores`（＝每台幾核）**；最上面彙總列給你總和。→ [§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定)、[§4.7](04-spark-config.md#47-dynamic-allocation-與多租戶別佔住資源排擠別的作業)
 
 ### C. 讀 UI 改寫表 / 儲存邏輯（→ 第 05 章）
 
@@ -390,9 +390,9 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 
 ---
 
-## 2.11 完整走一遍：一條慢查詢的驗屍
+## 2.11 完整走一遍：拆解一條慢查詢
 
-把整本章的零件串成一次真實診斷，順手把三張 checklist 都走過。情境：一條算「每個客群本月刷卡總額」的查詢（就是 §2.3 那條），平常幾分鐘，今天**跑了 20 分鐘還沒完**。你不亂調參數，照頁籤驗屍：
+把整本章的零件串成一次真實診斷，順手把三張 checklist 都走過。情境：一條算「每個客群本月刷卡總額」的查詢（就是 §2.3 那條），平常幾分鐘，今天**跑了 20 分鐘還沒完**。你不亂調參數，照頁籤逐項排查：
 
 **第 1 步——先 `EXPLAIN FORMATTED`（不花錢、先看計畫）。** 用 checklist A 的前三項對：
 - 接 `dim_customer` 那裡是 `SortMergeJoin`，**不是**你以為的 `BroadcastHashJoin`——小表沒被廣播。
@@ -456,7 +456,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 1. **§2.2 History Server port**：本章用 CDP 的 **18088**（Cloudera 文件）；上游 Apache Spark 文件的 History Server 預設是 **18080**。兩者各自情境下都對，以你平台實際設定為準。
 2. **§2.3 `EXPLAIN FORMATTED` 輸出範例**：那段 plan 是**簡化示意**，只為標出你該找的關鍵字。官方 EXPLAIN 範例只示範到 `Exchange`/`HashAggregate`/`Scan`，`PartitionFilters`/`PushedFilters`/`BroadcastHashJoin`/`SortMergeJoin` 字樣為 Spark physical plan 標準輸出（見《Spark: The Definitive Guide》Ch.8/15），實際排版、欄位、縮排以你環境跑出來為準。
 3. **§2.5 AQE 的 `AdaptiveSparkPlan`／`isFinalPlan`**：AQE 於執行期把 sort-merge join 轉 broadcast、合併分區、處理 skew，已查證自 Spark SQL Performance Tuning；但 `AdaptiveSparkPlan` 節點與 `isFinalPlan` 旗標的**字樣**官方主文未逐字載明，依 Databricks AQE 文（Spark 核心團隊撰）與 SPARK-33850 佐證，以你環境 SQL 頁實際顯示為準。
-4. **§2.2、§2.4–§2.11 的 mock 面板與驗屍數字**：History Server application 清單（§2.2）、Jobs／SQL／Stages／Executors（§2.4–§2.7）各 mock 面板與所有數字皆為**示意，非真實截圖或輸出**（為幫你想像畫面與診斷流程），App ID／時間／數字屬虛構、實際以你環境為準。**轉成 HTML 時，這些示意面板可替換成你公司環境的真實 Spark History Server 截圖，會更直觀。**
+4. **§2.2、§2.4–§2.11 的 mock 面板與診斷數字**：History Server application 清單（§2.2）、Jobs／SQL／Stages／Executors（§2.4–§2.7）各 mock 面板與所有數字皆為**示意，非真實截圖或輸出**（為幫你想像畫面與診斷流程），App ID／時間／數字屬虛構、實際以你環境為準。**轉成 HTML 時，這些示意面板可替換成你公司環境的真實 Spark History Server 截圖，會更直觀。**
 5. **§2.6 Summary Metrics 的分位數列標**（Min / 25th percentile / Median / 75th percentile / Max）：屬 Spark UI Stage 頁的標準呈現；web-ui 主文以 "Summary metrics for all task ... in a table and in a timeline" 描述、未逐字列出這五個列標字樣，惟與官方 monitoring 生態一致。`Shuffle spill (memory/disk)`、`Shuffle Read Size / Records`、`Storage Memory`、`GC time` 等定義字句則已逐字查證。
 6. **§2.7 Executors 頁的「Shuffle Spill」**：web-ui 主文未把 spill 列為 Executors 頁的獨立欄；故本章把 spill 的判定**收斂到 Stages 頁**的 `Shuffle spill (memory/disk)`，Executors 頁只當「誰記憶體吃緊」（GC Time、Failed Tasks、Storage Memory）的旁證，不杜撰 Executors 有 spill 欄。
 

@@ -155,7 +155,7 @@ flowchart TB
     end
 ```
 
-**落地（dbt）——同一工具內的相依，`ref()` 自動搞定。** 只要下游 model 裡寫了 `FROM {{ ref('cust_feature') }}`，dbt 就知道「`cust_feature` 要先建、這個 model 後建」，`dbt run` 會**自動照相依順序跑**。同一個 dbt 專案內的表，你**不必手動排順序**。
+**落地（dbt）——同一工具內的相依，`ref()` 自動處理。** 只要下游 model 裡寫了 `FROM {{ ref('cust_feature') }}`，dbt 就知道「`cust_feature` 要先建、這個 model 後建」，`dbt run` 會**自動照相依順序跑**。同一個 dbt 專案內的表，你**不必手動排順序**。
 
 **落地（Airflow）——跨工具／跨 DAG 的閘門，用 `ExternalTaskSensor`。** 當相依跨出 dbt（例如上游是另一個團隊的 Airflow DAG、或一支非 dbt 的 Spark 作業），就需要排程層的閘門。**sensor** 是 Airflow 裡一種「一直等到某條件成立才放行」的特殊任務；`ExternalTaskSensor` 專門用來**等另一個 DAG 裡的某個任務成功**：
 
