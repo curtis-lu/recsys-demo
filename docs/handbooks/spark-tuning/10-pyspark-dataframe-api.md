@@ -136,7 +136,7 @@ def test_add_amt_30d(spark):
 
 ---
 
-*← 上一章：[第 09 章 營運（三）：reverse ETL 回業務系統](09-reverse-etl.md)　｜　下一章：[第 11 章 場景對應（索引）](11-scenario-playbooks.md)*
+*← 上一章：[第 09 章 營運（三）：reverse ETL 回業務系統](09-reverse-etl.md)　｜　下一章：[第 11 章 速查與名詞表](11-cheatsheet-and-glossary.md)*
 
 ---
 

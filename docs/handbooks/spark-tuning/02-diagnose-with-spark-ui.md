@@ -339,7 +339,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 
 ## 2.9 速查：症狀 → 在哪個頁籤哪一格看 → 翻到哪章
 
-把前面六個頁籤收成一張隨手可查的對照表。**先在這裡對號入座，再回到對應節看細節。**（同一種症狀可能有不只一個入手點，所以列數較多；第 11 章場景索引、第 12 章速查會再彙整。）
+把前面六個頁籤收成一張隨手可查的對照表。**先在這裡對號入座，再回到對應節看細節。**（同一種症狀可能有不只一個入手點，所以列數較多；首頁場景對應、第 11 章速查會再彙整。）
 
 | 症狀 | 在哪個頁籤、看哪一格 | 怎麼判定異常 | 多半的解法在 |
 |---|---|---|---|
@@ -443,7 +443,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 - 問題多半出在 **SQL 寫法**（shuffle、skew、爆量 join、掃太多）？→ [第 03 章](03-sql-tuning.md)逐招教改寫。
 - 想知道哪些 **Spark 設定**值得調、AQE 已經自動幫你處理了哪些（spill、過多分區、skew join）？→ [第 04 章](04-spark-config.md)。
 - 問題在「讀／寫」——檔案格式、partition 設計、小檔？→ [第 05 章](05-storage-efficiency.md)。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 第 11 章。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 見[首頁〔場景對應〕](index.md#場景對應先認出你在做哪種工作)。
 
 ---
 
