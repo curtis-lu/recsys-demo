@@ -8,6 +8,20 @@
 
 ---
 
+## 本章目錄
+
+- [4.1 心法：先別急著轉旋鈕，AQE-first](#41-心法先別急著轉旋鈕aqe-first)
+- [4.2 AQE 自動幫你做的三件事](#42-aqe-自動幫你做的三件事)
+- [4.3 確認 AQE 開著、怎麼用 `SET` 改設定](#43-確認-aqe-開著怎麼用-set-改設定)
+- [4.4 AQE 之後，還值得手動懂的少數 SQL 旋鈕](#44-aqe-之後還值得手動懂的少數-sql-旋鈕)
+- [4.5 一個 executor 的記憶體裡裝了什麼：execution／storage／overhead](#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead)
+- [4.6 給 executor 配多少：core、記憶體、台數的實際設定](#46-給-executor-配多少core記憶體台數的實際設定)
+- [4.7 dynamic allocation 與多租戶：別佔住資源排擠別的作業](#47-dynamic-allocation-與多租戶別佔住資源排擠別的作業)
+- [4.8 把它全部串起來：替一支排程特徵作業配置](#48-把它全部串起來替一支排程特徵作業配置)
+- [4.9 一句話帶走：AQE-first，先 SQL 再資源](#49-一句話帶走aqe-first先-sql-再資源)
+
+---
+
 ## 4.1 心法：先別急著轉旋鈕，AQE-first
 
 第 02 章 §2.1 提過新手最常犯的錯：查詢一慢就開始亂槍打鳥，把記憶體調大、把 `spark.sql.shuffle.partitions` 改一改、到處加參數。這一章要先幫你**踩煞車**，建立兩個務實前提，再談該調什麼。

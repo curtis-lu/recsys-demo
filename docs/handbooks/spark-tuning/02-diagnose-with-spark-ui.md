@@ -10,6 +10,22 @@
 
 ---
 
+## 本章目錄
+
+- [2.1 先量再調，不要憑感覺](#21-先量再調不要憑感覺)
+- [2.2 怎麼打開 Spark UI（在 CDP 上）](#22-怎麼打開-spark-ui在-cdp-上)
+- [2.3 跑之前先看計畫：`EXPLAIN`](#23-跑之前先看計畫explain)
+- [2.4 Jobs 頁籤：先掃一眼有沒有失敗、誰最慢](#24-jobs-頁籤先掃一眼有沒有失敗誰最慢)
+- [2.5 SQL／DataFrame 頁籤：這條查詢花在哪一步](#25-sqldataframe-頁籤這條查詢花在哪一步)
+- [2.6 Stages 頁籤：這個 stage 是 skew 還是 spill](#26-stages-頁籤這個-stage-是-skew-還是-spill)
+- [2.7 Executors 頁籤：資源夠不夠、誰在喊累](#27-executors-頁籤資源夠不夠誰在喊累)
+- [2.8 Storage 與 Environment 頁籤：兩個偶爾才看，但能救命](#28-storage-與-environment-頁籤兩個偶爾才看但能救命)
+- [2.9 速查：症狀 → 在哪個頁籤哪一格看 → 翻到哪章](#29-速查症狀--在哪個頁籤哪一格看--翻到哪章)
+- [2.10 三張檢核表：對著 UI 逐項打勾](#210-三張檢核表對著-ui-逐項打勾)
+- [2.11 完整走一遍：拆解一條慢查詢](#211-完整走一遍拆解一條慢查詢)
+
+---
+
 ## 2.1 先量再調，不要憑感覺
 
 新手最常犯的錯，是查詢一慢就開始亂槍打鳥：把記憶體調大、把 `spark.sql.shuffle.partitions` 改一改、到處加 hint（提示語法，告訴 Spark 該怎麼做某件事，第 03 章會講）。多數時候沒效，因為**沒先搞清楚到底慢在哪**。一條查詢可能慢在掃了太多資料、慢在某個 shuffle、慢在一個被 skew 拖住的肥 task，病因不同，藥也不同。**先量，再調。**
@@ -270,7 +286,7 @@ flowchart TB
 | `Duration` / `Shuffle Read` 的 Max ≫ Median | skew | [§3.10 處理 skew](03-sql-tuning.md#310-少搬六處理-skew資料傾斜)（`salting` 等手法 §3.10 會講）；AQE skew join → [§4.2](04-spark-config.md#42-aqe-自動幫你做的三件事) |
 | `Shuffle spill (memory/disk)` 非零 | 記憶體相對資料太小 | 寫法減量 → [第 03 章](03-sql-tuning.md)；分區數／executor 記憶體 → [§4.4](04-spark-config.md#44-aqe-之後還值得手動懂的少數-sql-旋鈕)、[§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead) |
 | `Input Size` 的 Max 異常大、或整體掃量遠大於預期 | 掃太多／沒裁分區 | [§3.2 partition 裁剪](03-sql-tuning.md#32-少讀一只掃需要的分區partition-裁剪)；partition 設計 → [§5.4](05-storage-efficiency.md#54-設計-partition選對欄位但別過度分割) |
-| task 數異常多、每個 `Input` 都很小 | 小檔太多 | [§5.5 管好檔案大小](05-storage-efficiency.md#55-管好檔案大小小碎檔問題成因徵兆解法) |
+| task 數異常多、每個 `Input` 都很小 | 小檔太多 | [§5.5 管好檔案大小](05-storage-efficiency.md#55-管好檔案大小小碎檔問題) |
 
 > 📚 **來源**：Stages 頁的 Summary Metrics 以表格＋timeline 呈現各 task 指標（官方原文 "Summary metrics for all task are represented in a table and in a timeline"）；`Shuffle spill (memory)`＝"the size of the deserialized form of the shuffled data in memory"、`Shuffle spill (disk)`＝"the size of the serialized form of the data on disk"、`Shuffle Read Size / Records`＝"Total shuffle bytes read, includes both data read locally and data read from remote executors"，已逐字查證自 [Spark Web UI（Stage detail）](https://spark.apache.org/docs/latest/web-ui.html)。`Input Size / Records`＝從 Hadoop/Spark storage 讀入的 bytes 與 records（inputMetrics）。⚠️ 五分位列標（Min / 25th percentile / Median / 75th percentile / Max）為 Stage Summary Metrics 標準呈現、web-ui 主文未逐字列出（見章末）。skew 概念見 §1.6 與《Spark: The Definitive Guide》Ch.15。
 
@@ -347,7 +363,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 | **skew（資料傾斜）** | Stages 頁：`Duration`／`Shuffle Read` 的分位數 | Max ≫ Median（差一個量級） | [§3.10 skew](03-sql-tuning.md#310-少搬六處理-skew資料傾斜)；AQE skew join → [§4.2](04-spark-config.md#42-aqe-自動幫你做的三件事) |
 | **spill（落磁碟）** | Stages 頁：`Shuffle spill (memory/disk)` | 任一非零即是 | 寫法減量 → [第 03 章](03-sql-tuning.md)；分區/記憶體 → [§4.4](04-spark-config.md#44-aqe-之後還值得手動懂的少數-sql-旋鈕)、[§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead) |
 | **掃太多 / 沒裁分區** | `EXPLAIN`：`Scan` 缺 `PartitionFilters`；Stages 頁：`Input Size` 遠大於預期 | 期待的 `WHERE` 欄位沒出現在 PartitionFilters | [§3.2 裁剪](03-sql-tuning.md#32-少讀一只掃需要的分區partition-裁剪)、[§3.4 pushdown](03-sql-tuning.md#34-少讀三讓過濾提早發生predicate-pushdown以及它為什麼會失效)；partition 設計 → [§5.4](05-storage-efficiency.md#54-設計-partition選對欄位但別過度分割) |
-| **小檔太多** | Stages 頁：讀檔 stage 的 task 數異常多、每個 `Input` 很小 | task 數遠多於資料量該有的 | [§5.5 小檔](05-storage-efficiency.md#55-管好檔案大小小碎檔問題成因徵兆解法) |
+| **小檔太多** | Stages 頁：讀檔 stage 的 task 數異常多、每個 `Input` 很小 | task 數遠多於資料量該有的 | [§5.5 小檔](05-storage-efficiency.md#55-管好檔案大小小碎檔問題) |
 | **broadcast 沒生效** | `EXPLAIN`／SQL 頁：小表處是 `SortMergeJoin` 而非 `BroadcastHashJoin` | 該廣播卻走 SortMerge | [§3.6 BROADCAST hint](03-sql-tuning.md#36-少搬二手動--broadcastt-何時該自己出手)；門檻 → [§4.4](04-spark-config.md#44-aqe-之後還值得手動懂的少數-sql-旋鈕) |
 | **爆量 join** | SQL 頁：`Join` 算子 `number of output rows` ≫ 輸入 | 輸出列數暴增（接近笛卡兒積） | [§3.7 join 陷阱](03-sql-tuning.md#37-少搬三join-的兩個隱藏陷阱key-型別不一致爆量-join) |
 | **有 job 失敗 / OOM** | Jobs 頁：FAILED；Executors 頁：Failed Tasks、GC Time 高 | 紅色 FAILED、Failed Tasks 長大 | 寫法減量 → [第 03 章](03-sql-tuning.md)；資源 → [§4.5](04-spark-config.md#45-一個-executor-的記憶體裡裝了什麼executionstorageoverhead)、[§4.6](04-spark-config.md#46-給-executor-配多少core記憶體台數的實際設定) |
@@ -381,8 +397,8 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 ### C. 讀 UI 改寫表 / 儲存邏輯（→ 第 05 章）
 
 - [ ] **Stages 頁**：讀檔 stage 的 `Input Size` 是不是掃了你**不該掃**的分區（partition 設計沒對齊查詢的 `WHERE`）？→ [§5.4](05-storage-efficiency.md#54-設計-partition選對欄位但別過度分割)
-- [ ] **Stages 頁**：讀檔 stage 的 **task 數暴增、每個 `Input` 很小**（疑似小碎檔）？→ [§5.5](05-storage-efficiency.md#55-管好檔案大小小碎檔問題成因徵兆解法)
-- [ ] **Stages／SQL 頁**：寫出那個 stage 的 **task 數暴增**、而每個 task 的 **`Output` 很小**（例如各才幾百 KB）？這就是「產出一堆小檔」的可見訊號（UI 沒有直接的「檔案數」欄，task 數＋每 task 寫出量是你能對著看的代理），下游讀它的人會痛。→ [§5.5](05-storage-efficiency.md#55-管好檔案大小小碎檔問題成因徵兆解法)
+- [ ] **Stages 頁**：讀檔 stage 的 **task 數暴增、每個 `Input` 很小**（疑似小碎檔）？→ [§5.5](05-storage-efficiency.md#55-管好檔案大小小碎檔問題)
+- [ ] **Stages／SQL 頁**：寫出那個 stage 的 **task 數暴增**、而每個 task 的 **`Output` 很小**（例如各才幾百 KB）？這就是「產出一堆小檔」的可見訊號（UI 沒有直接的「檔案數」欄，task 數＋每 task 寫出量是你能對著看的代理），下游讀它的人會痛。→ [§5.5](05-storage-efficiency.md#55-管好檔案大小小碎檔問題)
 - [ ] **SQL 頁／`EXPLAIN`**：明明該裁分區卻整表掃，是查詢沒寫對，還是**表的 partition 欄位當初就選錯**？→ [§5.4](05-storage-efficiency.md#54-設計-partition選對欄位但別過度分割)
 - [ ] **SQL 頁**：讀檔很慢、`PushedFilters` 沒生效，是不是格式不對（CSV 而非 Parquet/ORC）、或沒餵統計？→ [§5.2 格式](05-storage-efficiency.md#52-用對格式為什麼-parquetorc-比-csv-快又省)、[§5.6 ANALYZE TABLE](05-storage-efficiency.md#56-餵統計analyze-table-為什麼關鍵)
 

@@ -8,6 +8,23 @@
 
 ---
 
+## 本章目錄
+
+- [3.1 本章地圖：所有招數都掛在「少讀」或「少搬」底下](#31-本章地圖所有招數都掛在少讀或少搬底下)
+- [3.2 少讀（一）：只掃需要的分區（partition 裁剪）](#32-少讀一只掃需要的分區partition-裁剪)
+- [3.3 少讀（二）：只取需要的欄位（別 `SELECT *`）](#33-少讀二只取需要的欄位別-select-)
+- [3.4 少讀（三）：讓過濾提早發生（predicate pushdown），以及它為什麼會失效](#34-少讀三讓過濾提早發生predicate-pushdown以及它為什麼會失效)
+- [3.5 少搬（一）：join 策略，broadcast vs sort-merge](#35-少搬一join-策略broadcast-vs-sort-merge)
+- [3.6 少搬（二）：手動 `/*+ BROADCAST(t) */`，何時該自己出手](#36-少搬二手動--broadcastt-何時該自己出手)
+- [3.7 少搬（三）：join 的兩個隱藏陷阱，key 型別不一致、爆量 join](#37-少搬三join-的兩個隱藏陷阱key-型別不一致爆量-join)
+- [3.8 少搬（四）：聚合的成本，`GROUP BY`、`DISTINCT`、`COUNT(DISTINCT)`](#38-少搬四聚合的成本group-bydistinctcountdistinct)
+- [3.9 少搬（五）：window function，每個 `PARTITION BY` 是一次 shuffle](#39-少搬五window-function每個-partition-by-是一次-shuffle)
+- [3.10 少搬（六）：處理 skew（資料傾斜）](#310-少搬六處理-skew資料傾斜)
+- [3.11 把它全部串起來：改寫一條慢查詢](#311-把它全部串起來改寫一條慢查詢)
+- [3.12 一句話帶走：先少讀，再少搬，每招都回 UI 驗證](#312-一句話帶走先少讀再少搬每招都回-ui-驗證)
+
+---
+
 ## 3.1 本章地圖：所有招數都掛在「少讀」或「少搬」底下
 
 第 01 章說，一條查詢的成本主要來自兩件事：**讀資料**（從 HDFS 把 partition 讀進來）和**搬資料**（shuffle，跨機器重新分配）。所以「改 SQL 來變快」也只有兩個大方向：
