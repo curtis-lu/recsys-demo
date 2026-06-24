@@ -87,6 +87,13 @@
 
 ## Progress Tracker
 
+> **▶ round-2 完成並 merge（PR #87, merge commit `722318e`, 2026-06-23）。下一步（user 2026-06-23 定，/compact 後接續）：**
+> 1. **回饋驅動的整體修訂（round-3）**：user 會帶**同事閱讀回饋**進來（文字風格／章節內容搬移／內容補強）。沿用本套方法論（grill→spec→計畫→subagent-driven 分階段審稿→三級 triage→commit）；**動手前先把 branch sync 到最新 main**（落後 32 commit）。章節搬移小心重編號（插節用 `###`；重排用 Task 1.1 的單次掃描 `re.sub`＋連結健檢＋C 複核）。
+> 2. **把撰寫流程做成可複用 skill**：方法論藍本在 memory `project_handbook_writing_skill`（5 審稿角色、socket-death 等教訓、模板位置）。
+> 3. **已知待修**：`index.md`「如何使用本手冊」01–08 純文字、09–12 是連結 → 統一成全連結（跟章節導覽表一致）。
+>
+> 審稿 subagent 模板與寫作慣例在本檔上方；風格原則在 `docs/handbooks/handbook-writing-guide.md`。
+
 - [x] **Phase 0**：grill 釐清 → Phase1 全書 C＋P 掃描 → 使用者拍板新骨架（2026-06-22）＋ch02 D-UI 追加（2026-06-23）。spec 已寫。
 - [x] **Phase 1**：結構落地完成（commit `1077609` 重排+重編號+導覽軟指標、`3c8197a` index 12 章）；C 複核 `.reviews/_round2-structure-verify.md` 判 **PASS 零不一致**。
 - [x] **Phase 2**：逐章深審完成（ch01 `72c9248`／ch02 D-UI `46e6457`+`3089c70`／ch03 `a087904`／ch04 `f959745`+`7d1c664`／ch05 `84c96b3`／ch06 `dc28bf6`／ch07 capstone `673e1c7`／ch08 `6d62db5`）。各章雙/三審＋triage；ch02 升級手把手診斷核心、ch06 補 ACID 多引擎安全（HWC）、ch07 補 capstone 端到端走查。
