@@ -71,7 +71,7 @@ flowchart LR
     end
 ```
 
-**取捨**。partition 裁剪幾乎沒有壞處，但有兩個前提：**(1) 這張表得真的按那個欄位分區**（怎麼設計分區是第 05 章的事；若表沒分區，`WHERE` 再準也省不了讀檔，只能靠下一節的 pushdown 在讀進來後提早篩）。不確定一張表有沒有分區、分區欄是什麼，用 `SHOW PARTITIONS 表名` 或 `DESCRIBE EXTENDED 表名` 查。**(2) 別在分區欄位上包函數**——`WHERE substr(month,1,4)='2026'` 會讓裁剪失效（§3.4 詳述），要寫成 `WHERE month >= '2026-01' AND month <= '2026-12'` 這種「直接比較欄位」的形式才裁得到。
+**取捨**。partition 裁剪幾乎沒有壞處，但有兩個前提：**(1) 這張表得真的按那個欄位分區**（怎麼設計分區是第 05 章的事；若表沒分區，`WHERE` 再準也省不了讀檔，只能靠 §3.4 的 pushdown 在讀進來後提早篩）。不確定一張表有沒有分區、分區欄是什麼，用 `SHOW PARTITIONS 表名` 或 `DESCRIBE EXTENDED 表名` 查。**(2) 別在分區欄位上包函數**——`WHERE substr(month,1,4)='2026'` 會讓裁剪失效（§3.4 詳述），要寫成 `WHERE month >= '2026-01' AND month <= '2026-12'` 這種「直接比較欄位」的形式才裁得到。
 
 > 📚 **來源**：partition 欄位的 `WHERE` → 只讀命中目錄（partition pruning / discovery）見 [Spark SQL Parquet（Partition Discovery）](https://spark.apache.org/docs/latest/sql-data-sources-parquet.html)；裁剪在 `EXPLAIN` 呈現為 Scan 的 `PartitionFilters` 見 [Spark SQL Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html) 與第 02 章 §2.3。⚠️「36 個月＝差 36 倍」是把每月資料量視為相近的算術示意；實際各月筆數不同。
 
@@ -119,7 +119,7 @@ WHERE month >= '2026-01' AND month <= '2026-12'
 WHERE txn_date >= '2026-01-01' AND txn_date < '2027-01-01'
 ```
 
-原則：**過濾條件裡，要被下推的那個欄位最好「裸著」直接和常數比較**，別用函數、運算、或型別轉換把它包起來。包起來的瞬間，Spark 就無法拿欄位的統計值去跳塊／跳目錄，只能整批讀進來再逐列算——你以為下了 `WHERE`，其實一行都沒少讀。（下一節會看到，**join key 上的隱式型別轉換**也是同一類坑。）
+原則：**過濾條件裡，要被下推的那個欄位最好「裸著」直接和常數比較**，別用函數、運算、或型別轉換把它包起來。包起來的瞬間，Spark 就無法拿欄位的統計值去跳塊／跳目錄，只能整批讀進來再逐列算——你以為下了 `WHERE`，其實一行都沒少讀。（後面 §3.7 會看到，**join key 上的隱式型別轉換**也是同一類坑。）
 
 **取捨**。改寫成「裸欄位比較」通常不損失可讀性，是純賺。唯一的代價是你得知道哪些欄位有下推價值（分區欄位、Parquet 裡有統計的欄位），這要靠 `EXPLAIN` 確認 `PushedFilters`／`PartitionFilters` 有沒有出現——這正是第 02 章那套「先量再調」的用法。
 
