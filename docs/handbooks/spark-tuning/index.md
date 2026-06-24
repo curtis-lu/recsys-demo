@@ -29,14 +29,7 @@ flowchart TB
 
 ## 如何使用本手冊
 
-不必從頭讀到尾。下面三種切入法，挑最貼近你的：
-
-### 兩條主線：你是哪種讀者
-
-- **初階資料分析師**：在 Hue/Impala 做 ad-hoc、用 Spark 排程出名單給 PM、建模時產特徵表。沿 **01→09** 建立優化與營運能力，最後把名單交給 PM。
-- **進階 analytics engineer**：經營多人共用的特徵庫、把資料 reverse ETL 回業務端。在初階基礎上多走 **第 10 章** 工程化、用 **第 09 章** 把資料送回業務系統（CRM／行銷平台）。
-
-**兩條主線都終於第 09 章「把資料送出去」。**
+不必從頭讀到尾。下面兩種切入法，挑最貼近你的：
 
 ### 依你現在最想解決的事
 
@@ -63,20 +56,29 @@ flowchart TB
 
 ## 章節導覽
 
+**建立基礎、把單一查詢調快**
+
 | 章 | 標題 | 一句話 |
 |---|---|---|
-| **01–06** | **建立基礎、把單一查詢調快** | |
 | 01 | [Spark 怎麼跑你的 SQL](01-how-spark-runs-your-sql.md) | 建立心智模型：一條 SQL 在叢集裡發生什麼、為什麼 shuffle 最貴 |
 | 02 | [用 Spark UI 找瓶頸](02-diagnose-with-spark-ui.md) | 先量再調：怎麼讀 `EXPLAIN` 與 Spark UI，認出 shuffle/skew/spill/小檔 |
 | 03 | [SQL 寫法優化](03-sql-tuning.md) | 改寫法就變快：partition 裁剪、join 策略、避免爆量、處理 skew |
 | 04 | [Spark 設定（AQE-first）](04-spark-config.md) | AQE 自動幫你做了什麼、剩下少數真正值得調的旋鈕 |
 | 05 | [儲存效率](05-storage-efficiency.md) | 檔案格式、partition 設計、小檔問題、壓縮與統計的取捨 |
 | 06 | [引擎選用](06-engine-selection.md) | Spark vs Hive/Tez vs Impala：什麼情況用哪個 |
-| **07–09** | **把查詢變成可靠的資料服務** | |
+
+**把查詢變成可靠的資料服務**
+
+| 章 | 標題 | 一句話 |
+|---|---|---|
 | 07 | [營運（一）：可靠地把排程跑起來](07-operating-pipelines.md) | 三層落地（dbt/Airflow/cron）：冪等可重跑、排程相依、回填、監控退化、檔案與統計維護 |
 | 08 | [營運（二）：讓資料產品可信](08-data-product-correctness.md) | 資料品質驗證、時間點正確性／特徵洩漏、共用特徵庫契約、資料版本與可重現性 |
 | 09 | [營運（三）：把資料送出去——reverse ETL 回業務系統](09-reverse-etl.md) | 把模型輸出／名單回寫 CRM/行銷平台，確保送出的資料正確、可追蹤 |
-| **10–11** | **進階與速查** | |
+
+**進階與速查**
+
+| 章 | 標題 | 一句話 |
+|---|---|---|
 | 10 | [（進階）何時與如何改用 PySpark DataFrame API](10-pyspark-dataframe-api.md) | SQL 不夠用時的升級路徑：何時值得改、改用時要注意什麼 |
 | 11 | [速查與名詞表](11-cheatsheet-and-glossary.md) | 取捨速查、config 速查、中英名詞對照 |
 
