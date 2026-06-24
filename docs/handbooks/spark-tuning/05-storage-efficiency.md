@@ -387,7 +387,7 @@ ANALYZE TABLE dim_customer COMPUTE STATISTICS FOR COLUMNS cust_id, segment;
 
 - 同一張 Hive 表，什麼時候該用 Spark、什麼時候用 Impala／Hive on Tez 去查？managed/ACID 表跨引擎怎麼處理？→ 第 06 章（引擎選用）。
 - 這些表怎麼**長期穩定營運**：冪等可重跑、回填、資料品質驗證、時間點正確性、定期 compaction／重算 `ANALYZE`、schema 演進不打爛下游？→ 第 07–08 章（營運兩章）。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 見[首頁〔場景對應〕](index.md#場景對應先認出你在做哪種工作)。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 見[首頁場景速查](index.md#場景速查你在做哪種工作)。
 
 ---
 
