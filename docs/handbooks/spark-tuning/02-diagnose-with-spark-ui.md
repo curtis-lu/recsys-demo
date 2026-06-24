@@ -459,7 +459,7 @@ Executor  Cores  Active  Failed  Complete  Task Time  Shuffle Read  GC Time   St
 - 問題多半出在 **SQL 寫法**（shuffle、skew、爆量 join、掃太多）？→ [第 03 章](03-sql-tuning.md)逐招教改寫。
 - 想知道哪些 **Spark 設定**值得調、AQE 已經自動幫你處理了哪些（spill、過多分區、skew join）？→ [第 04 章](04-spark-config.md)。
 - 問題在「讀／寫」：檔案格式、partition 設計、小檔？→ [第 05 章](05-storage-efficiency.md)。
-- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 見[首頁場景速查](index.md#場景速查你在做哪種工作)。
+- 想看「我這類工作（ad-hoc／排程／特徵）通常照哪些章、最常踩什麼雷」？→ 見[首頁場景速查](index.md#場景速查依你的工作型態)。
 
 ---
 
