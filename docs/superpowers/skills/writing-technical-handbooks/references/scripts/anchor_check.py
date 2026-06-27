@@ -67,7 +67,8 @@ def check_dir(root: Path) -> list[str]:
                 continue
             if in_fence:
                 continue
-            for target in _LINK_RE.findall(line):
+            # strip inline code spans (`...`): links inside them are not rendered
+            for target in _LINK_RE.findall(re.sub(r"`[^`]*`", "", line)):
                 if target.startswith(("http://", "https://", "mailto:", "#!")):
                     continue
                 file_part, _, anchor = target.partition("#")

@@ -46,3 +46,8 @@ def test_check_dir_skips_dot_directories(tmp_path):
     (tmp_path / ".reviews" / "note.md").write_text("[x](nope.md)\n", encoding="utf-8")
     (tmp_path / "ok.md").write_text("# Fine\n", encoding="utf-8")
     assert check_dir(tmp_path) == []
+
+
+def test_check_dir_ignores_links_in_inline_code(tmp_path):
+    (tmp_path / "a.md").write_text("# T\n用 `[x](nope.md)` 當錨點格式範例\n", encoding="utf-8")
+    assert check_dir(tmp_path) == []
