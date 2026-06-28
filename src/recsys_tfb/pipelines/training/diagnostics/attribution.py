@@ -29,6 +29,6 @@ def feature_attributions(model, X, feature_names) -> np.ndarray:
 
 
 def attribution_budget_units(model) -> int:
-    """budget guard 的成本因子（今天 = booster 樹數）。"""
-    booster = getattr(model, "booster", None)
-    return int(booster.num_trees()) if booster is not None else 1
+    """budget guard 的成本因子（今天 = booster 樹數）。boosterless 與
+    feature_attributions 一致 fail-fast（raise TypeError）。"""
+    return int(_resolve_booster(model).num_trees())

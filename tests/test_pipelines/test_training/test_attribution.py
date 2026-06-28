@@ -24,7 +24,7 @@ def test_feature_attributions_shape():
 
 def test_attribution_budget_units_positive():
     a, _ = _fitted()
-    assert attribution.attribution_budget_units(a) >= 1
+    assert attribution.attribution_budget_units(a) == 10  # num_iterations=10, no early stopping
 
 
 def test_feature_attributions_raises_without_booster():
@@ -32,3 +32,10 @@ def test_feature_attributions_raises_without_booster():
         pass
     with pytest.raises(TypeError, match="booster"):
         attribution.feature_attributions(NoBooster(), np.zeros((2, 3)), ["a", "b", "c"])
+
+
+def test_attribution_budget_units_raises_without_booster():
+    class NoBooster:
+        pass
+    with pytest.raises(TypeError, match="booster"):
+        attribution.attribution_budget_units(NoBooster())
