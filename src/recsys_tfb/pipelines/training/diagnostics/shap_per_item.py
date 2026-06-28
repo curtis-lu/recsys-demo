@@ -9,7 +9,7 @@ from recsys_tfb.core.logging import log_step
 
 from ._util import _to_native
 from .attribution import attribution_budget_units, feature_attributions
-from .paths import diagnostics_dir
+from .paths import per_item_summary_dir, safe_name, summary_dir
 from .sampling import _stratified_item_sample
 
 logger = logging.getLogger(__name__)
@@ -161,19 +161,23 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
                 "per_item_high": per_item_high}
 
     # ---- PNG ----
-    d = diagnostics_dir(parameters)
+    sdir = summary_dir(parameters)
     plt.figure()
     shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
     plt.tight_layout()
-    plt.savefig(d / "shap_summary.png", dpi=100)
+    plt.savefig(sdir / "shap_summary_global.png", dpi=100)
     plt.close()
-    for rank, i in enumerate(hi):
-        plt.figure()
-        shap.summary_plot(shap_values[[i]], features=X[[i]], feature_names=feature_cols,
-                          plot_type="bar", show=False)
-        plt.tight_layout()
-        plt.savefig(d / f"waterfall_high_{rank}.png", dpi=100)
-        plt.close()
+
+    if cfg.get("per_item_beeswarm", True):
+        pdir = per_item_summary_dir(parameters)
+        for item in pd.unique(items):
+            m = items == item
+            plt.figure()
+            shap.summary_plot(shap_values[m], features=X[m],
+                              feature_names=feature_cols, show=False)
+            plt.tight_layout()
+            plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
+            plt.close()
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))

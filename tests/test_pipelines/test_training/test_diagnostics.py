@@ -144,8 +144,8 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert {"high", "low"} <= set(out["examples"])
     items_in_examples = {e["item"] for e in out["examples"]["per_item_high"]}
     assert {"A", "B", "rare"} <= items_in_examples
-    d = diag.diagnostics_dir(parameters)
-    assert (d / "shap_summary.png").exists()
+    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
 
 
 def test_shap_disabled(shap_setup):
@@ -244,3 +244,16 @@ def test_per_item_signed_can_be_negative(shap_setup):
         for blk in out["per_item"].values() for r in blk["top_features"]
     )
     assert found
+
+
+def test_summary_pngs_global_and_per_item(shap_setup):
+    from recsys_tfb.pipelines.training.diagnostics.paths import (
+        per_item_summary_dir, safe_name, summary_dir)
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
+    pidir = per_item_summary_dir(parameters)
+    for item in out["per_item"]:
+        assert (pidir / f"shap_summary__{safe_name(item)}.png").exists()
+    # 舊命名不應再產出
+    assert not (diag.diagnostics_dir(parameters) / "waterfall_high_0.png").exists()
