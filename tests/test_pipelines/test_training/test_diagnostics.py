@@ -206,6 +206,23 @@ def test_divergence_disjoint_top_is_one():
     assert set(idio) == {"c", "d"}
 
 
+def test_divergence_identical_spearman_is_zero():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    v = np.array([3.0, 1.0, 2.0, 0.5])
+    div, _ = _divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
+    assert div == pytest.approx(0.0)
+
+
+def test_divergence_reversed_spearman_is_one():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    va = np.array([1.0, 2.0, 3.0, 4.0])
+    vb = np.array([4.0, 3.0, 2.0, 1.0])
+    div, _ = _divergence(va, vb, "spearman", 2, ["a", "b", "c", "d"])
+    assert div == pytest.approx(1.0)
+
+
 def test_per_item_divergence_and_idiosyncrasy(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)

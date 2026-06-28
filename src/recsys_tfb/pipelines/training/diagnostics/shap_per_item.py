@@ -27,6 +27,7 @@ def _signed_profile(sv_subset, feature_cols, top_k):
 
 
 def _rankdata(a):
+    """升序整數 rank（0..n-1）；平手以 argsort 穩定排序位置決定（非 scipy 的中點 rank）。"""
     order = np.argsort(a)
     ranks = np.empty(len(a), dtype=float)
     ranks[order] = np.arange(len(a), dtype=float)
@@ -71,7 +72,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     max_budget = int(cfg.get("max_budget", 4_000_000))
     positive_min_rows = int(cfg.get("positive_min_rows", 20))
     divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
-    divergence_top_k = int(cfg.get("divergence_top_k", 15))
+    divergence_top_k = int(cfg.get("divergence_top_k", 15))  # 通常比 top_k 小；只用於 Jaccard/idio 的 top-k 集合比較
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
