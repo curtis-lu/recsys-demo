@@ -153,7 +153,7 @@ diagnostics:
     max_budget: 4000000   # sample_rows * n_trees 超過則自動降抽樣
     # --- P1: per-item 強化（皆 top-level，不影響 model_version）---
     profile_positive: true          # 同時算 label==1 的 signed profile 對照；false 則略過
-    positive_min_rows: 20           # 正樣本 < 此 → positive_low_coverage、profile_positive=null
+    positive_min_rows: 20           # 正樣本 < 此 → positive_low_coverage=True、top_features_positive=null
     divergence_metric: jaccard_topk # per-item 驅動排序 vs 全域；∈ {jaccard_topk, spearman}
     divergence_top_k: 15            # 偏離度用的 top-k（通常比 top_k 小）
     per_item_beeswarm: true         # 每 item 輸出一張 beeswarm（summary/per_item/）

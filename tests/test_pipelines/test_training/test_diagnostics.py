@@ -261,13 +261,14 @@ def test_summary_pngs_global_and_per_item(shap_setup):
 
 def test_per_item_beeswarm_can_be_disabled(shap_setup):
     import os
-    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    from recsys_tfb.pipelines.training.diagnostics.paths import (
+        per_item_summary_dir, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
     diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert (summary_dir(parameters) / "shap_summary_global.png").exists()
-    pidir = summary_dir(parameters) / "per_item"
-    assert (not pidir.exists()) or (len(os.listdir(pidir)) == 0)
+    pidir = per_item_summary_dir(parameters)
+    assert len(os.listdir(pidir)) == 0
 
 
 def test_profile_positive_can_be_disabled(shap_setup):
