@@ -1,4 +1,5 @@
 """per-item SHAP 診斷 orchestrator。"""
+
 import logging
 
 import numpy as np
@@ -7,6 +8,7 @@ import pandas as pd
 from recsys_tfb.core.logging import log_step
 
 from ._util import _to_native
+from .attribution import attribution_budget_units, feature_attributions
 from .paths import diagnostics_dir
 from .sampling import _stratified_item_sample
 
@@ -39,8 +41,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     pdf = test_parquet_handle.to_pandas()
 
-    booster = model.booster
-    n_trees = booster.num_trees()
+    n_trees = attribution_budget_units(model)
     eff_sample = sample_rows
     if eff_sample * max(1, n_trees) > max_budget:
         eff_sample = max(min_per_item, max_budget // max(1, n_trees))
@@ -59,12 +60,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     scores = model.predict(X)
 
     with log_step(logger, "shap_values"):
-        explainer = shap.TreeExplainer(booster)      # tree_path_dependent (default)
-        shap_values = explainer.shap_values(X)        # SINGLE call
-    shap_values = np.asarray(shap_values)
-    if shap_values.ndim == 3:                         # 某些版本回傳 [classes, n, feat]
-        shap_values = shap_values[-1]
-    shap_values = shap_values[:, : len(feature_cols)] # 去掉可能的 bias 欄
+        shap_values = feature_attributions(model, X, feature_cols)
 
     # ---- 全域 ----
     mean_abs = np.abs(shap_values).mean(axis=0)
