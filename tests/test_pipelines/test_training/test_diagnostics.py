@@ -161,3 +161,11 @@ def test_shap_budget_guard_reduces_sample(shap_setup, caplog):
         out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert out != {}
     assert any("budget" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_per_item_top_features_signed(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
+                   for r in blk["top_features"])

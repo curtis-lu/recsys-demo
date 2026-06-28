@@ -15,6 +15,17 @@ from .sampling import _stratified_item_sample
 logger = logging.getLogger(__name__)
 
 
+def _signed_profile(sv_subset, feature_cols, top_k):
+    """回傳 (top_features[含 signed], mean_abs 向量)。mean_abs 向量供後續 divergence 用。"""
+    ai = np.abs(sv_subset).mean(axis=0)
+    si = sv_subset.mean(axis=0)
+    order = np.argsort(ai)[::-1][:top_k]
+    profile = [{"feature": feature_cols[i],
+                "mean_abs_shap": _to_native(ai[i]),
+                "mean_signed_shap": _to_native(si[i])} for i in order]
+    return profile, ai
+
+
 def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
     """SHAP 全域 / per-item（族群代表）/ 代表性個例。單次 shap_values 三用。"""
     cfg = parameters.get("diagnostics", {}).get("shap", {})
@@ -78,11 +89,10 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
-        ai = np.abs(shap_values[mask]).mean(axis=0)
-        o = np.argsort(ai)[::-1][:top_k]
+        prof_all, _ = _signed_profile(shap_values[mask], feature_cols, top_k)
         sc = scores[mask]
         per_item[str(item)] = {
-            "top_features": [{"feature": feature_cols[i], "mean_abs_shap": _to_native(ai[i])} for i in o],
+            "top_features": prof_all,
             "n_sampled": int(mask.sum()),
             "n_positive": int(np.sum(labels[mask] == 1)),
             "score_min": float(sc.min()), "score_max": float(sc.max()),
