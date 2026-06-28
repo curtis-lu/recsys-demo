@@ -163,21 +163,25 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     # ---- PNG ----
     sdir = summary_dir(parameters)
     plt.figure()
-    shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
-    plt.tight_layout()
-    plt.savefig(sdir / "shap_summary_global.png", dpi=100)
-    plt.close()
+    try:
+        shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
+        plt.tight_layout()
+        plt.savefig(sdir / "shap_summary_global.png", dpi=100)
+    finally:
+        plt.close()
 
     if cfg.get("per_item_beeswarm", True):
         pdir = per_item_summary_dir(parameters)
         for item in pd.unique(items):
             m = items == item
             plt.figure()
-            shap.summary_plot(shap_values[m], features=X[m],
-                              feature_names=feature_cols, show=False)
-            plt.tight_layout()
-            plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
-            plt.close()
+            try:
+                shap.summary_plot(shap_values[m], features=X[m],
+                                  feature_names=feature_cols, show=False)
+                plt.tight_layout()
+                plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
+            finally:
+                plt.close()
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
