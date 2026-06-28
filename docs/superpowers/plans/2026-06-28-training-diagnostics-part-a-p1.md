@@ -235,7 +235,7 @@ Run:
 PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   tests/test_pipelines/test_training/test_diagnostics.py -q
 ```
-Expected: PASS(既有 8 測試全綠;import 相容、行為不變)。
+Expected: PASS(既有 7 測試全綠;import 相容、行為不變)。
 
 - [ ] **Step 7: Commit**
 
