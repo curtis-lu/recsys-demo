@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _signed_profile(sv_subset, feature_cols, top_k):
-    """回傳 (top_features[含 signed], mean_abs 向量)。mean_abs 向量供後續 divergence 用。"""
+    """回傳 (top_features[含 signed], mean_abs 向量)。mean_abs 向量供後續 divergence 用（全特徵向量，非 top-k 過濾）。"""
     ai = np.abs(sv_subset).mean(axis=0)
     si = sv_subset.mean(axis=0)
     order = np.argsort(ai)[::-1][:top_k]
@@ -24,6 +24,30 @@ def _signed_profile(sv_subset, feature_cols, top_k):
                 "mean_abs_shap": _to_native(ai[i]),
                 "mean_signed_shap": _to_native(si[i])} for i in order]
     return profile, ai
+
+
+def _rankdata(a):
+    order = np.argsort(a)
+    ranks = np.empty(len(a), dtype=float)
+    ranks[order] = np.arange(len(a), dtype=float)
+    return ranks
+
+
+def _divergence(item_abs, global_abs, metric, k, feature_cols):
+    """per-item |SHAP| 排序 vs 全域排序的偏離度（0=一致, 1=完全不同）。
+    回傳 (divergence float, idiosyncratic_features list)。"""
+    k = min(int(k), len(feature_cols))
+    i_order = np.argsort(item_abs)[::-1]
+    g_top = set(np.argsort(global_abs)[::-1][:k].tolist())
+    i_top = set(i_order[:k].tolist())
+    if metric == "spearman":
+        ir, gr = _rankdata(item_abs), _rankdata(global_abs)
+        div = (1.0 - float(np.corrcoef(ir, gr)[0, 1])) / 2.0 if ir.std() and gr.std() else 0.0
+    else:  # jaccard_topk
+        inter, union = len(i_top & g_top), len(i_top | g_top)
+        div = (1.0 - inter / union) if union else 0.0
+    idio = [feature_cols[i] for i in i_order[:k] if i not in g_top]
+    return float(div), idio
 
 
 def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
@@ -46,6 +70,8 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     sample_rows = int(cfg.get("sample_rows", 2000))
     max_budget = int(cfg.get("max_budget", 4_000_000))
     positive_min_rows = int(cfg.get("positive_min_rows", 20))
+    divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
+    divergence_top_k = int(cfg.get("divergence_top_k", 15))
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
@@ -75,14 +101,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         shap_values = feature_attributions(model, X, feature_cols)
 
     # ---- 全域 ----
-    mean_abs = np.abs(shap_values).mean(axis=0)
-    mean_signed = shap_values.mean(axis=0)
-    order = np.argsort(mean_abs)[::-1][:top_k]
-    global_top = [
-        {"feature": feature_cols[i], "mean_abs_shap": _to_native(mean_abs[i]),
-         "mean_signed_shap": _to_native(mean_signed[i])}
-        for i in order
-    ]
+    global_top, mean_abs = _signed_profile(shap_values, feature_cols, top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
     items = sample_pdf[item_col].values
@@ -90,8 +109,11 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
-        prof_all, _ = _signed_profile(shap_values[mask], feature_cols, top_k)
+        prof_all, ai = _signed_profile(shap_values[mask], feature_cols, top_k)
         sc = scores[mask]
+        # -- divergence vs global driver ranking --
+        div, idio = _divergence(ai, mean_abs, divergence_metric, divergence_top_k, feature_cols)
+        # -- positive-only profile (adopters vs all-rows) --
         pos_mask = mask & (labels == 1)
         n_pos = int(pos_mask.sum())
         if n_pos >= positive_min_rows:
@@ -107,8 +129,19 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
             "score_mean": float(sc.mean()),
             "low_coverage": bool(mask.sum() < min_per_item),
             "top_features_positive": prof_pos,
-            "positive_low_coverage": pos_low,
+            "positive_low_coverage": bool(pos_low),
+            "divergence_from_global": _to_native(div),
+            "idiosyncratic_features": idio,
         }
+
+    item_idiosyncrasy = sorted(
+        ({"item": k,
+          "divergence_from_global": v["divergence_from_global"],
+          "idiosyncratic_features": v["idiosyncratic_features"]}
+         for k, v in per_item.items()),
+        key=lambda r: r["divergence_from_global"],
+        reverse=True,
+    )
 
     # ---- 代表性個例（全域 high/low + 每 item 一筆高分）----
     def _example(i):
@@ -143,4 +176,5 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
-    return {"global": {"top_features": global_top}, "per_item": per_item, "examples": examples}
+    return {"global": {"top_features": global_top}, "per_item": per_item, "examples": examples,
+            "item_idiosyncrasy": item_idiosyncrasy}

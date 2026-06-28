@@ -185,3 +185,45 @@ def test_per_item_profile_positive_and_coverage(shap_setup):
         else:
             assert blk["top_features_positive"] is None
             assert blk["positive_low_coverage"] is True
+
+
+def test_divergence_identical_is_zero():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    v = np.array([3.0, 1.0, 2.0, 0.5])
+    div, idio = _divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    assert div == 0.0
+    assert idio == []
+
+
+def test_divergence_disjoint_top_is_one():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    item = np.array([0.0, 0.0, 5.0, 4.0])   # top2 = idx {2,3}
+    glob = np.array([5.0, 4.0, 0.0, 0.0])   # top2 = idx {0,1}
+    div, idio = _divergence(item, glob, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    assert div == 1.0
+    assert set(idio) == {"c", "d"}
+
+
+def test_per_item_divergence_and_idiosyncrasy(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert 0.0 <= blk["divergence_from_global"] <= 1.0
+        assert isinstance(blk["idiosyncratic_features"], list)
+    idio = out["item_idiosyncrasy"]
+    divs = [r["divergence_from_global"] for r in idio]
+    assert divs == sorted(divs, reverse=True)
+    assert {r["item"] for r in idio} == set(out["per_item"])
+
+
+def test_per_item_signed_can_be_negative(shap_setup):
+    # carry-over guard: mean_signed_shap must be the SIGNED mean, not abs.
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    found = any(
+        r["mean_signed_shap"] is not None and r["mean_signed_shap"] < r["mean_abs_shap"]
+        for blk in out["per_item"].values() for r in blk["top_features"]
+    )
+    assert found
