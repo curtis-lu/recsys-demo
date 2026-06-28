@@ -73,6 +73,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     positive_min_rows = int(cfg.get("positive_min_rows", 20))
     divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
     divergence_top_k = int(cfg.get("divergence_top_k", 15))  # 通常比 top_k 小；只用於 Jaccard/idio 的 top-k 集合比較
+    profile_positive = bool(cfg.get("profile_positive", True))
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
@@ -117,7 +118,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         # -- positive-only profile (adopters vs all-rows) --
         pos_mask = mask & (labels == 1)
         n_pos = int(pos_mask.sum())
-        if n_pos >= positive_min_rows:
+        if not profile_positive:
+            prof_pos, pos_low = None, False
+        elif n_pos >= positive_min_rows:
             prof_pos, _ = _signed_profile(shap_values[pos_mask], feature_cols, top_k)
             pos_low = False
         else:

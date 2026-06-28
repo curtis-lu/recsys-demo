@@ -257,3 +257,23 @@ def test_summary_pngs_global_and_per_item(shap_setup):
         assert (pidir / f"shap_summary__{safe_name(item)}.png").exists()
     # 舊命名不應再產出
     assert not (diag.diagnostics_dir(parameters) / "waterfall_high_0.png").exists()
+
+
+def test_per_item_beeswarm_can_be_disabled(shap_setup):
+    import os
+    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
+    diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
+    pidir = summary_dir(parameters) / "per_item"
+    assert (not pidir.exists()) or (len(os.listdir(pidir)) == 0)
+
+
+def test_profile_positive_can_be_disabled(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert blk["top_features_positive"] is None
+        assert blk["positive_low_coverage"] is False
