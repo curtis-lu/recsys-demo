@@ -169,3 +169,19 @@ def test_per_item_top_features_signed(shap_setup):
     for blk in out["per_item"].values():
         assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
                    for r in blk["top_features"])
+
+
+def test_per_item_profile_positive_and_coverage(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["positive_min_rows"] = 5
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert "top_features_positive" in blk
+        assert "positive_low_coverage" in blk
+        if blk["n_positive"] >= 5:
+            assert blk["top_features_positive"] is not None
+            assert all("mean_signed_shap" in r for r in blk["top_features_positive"])
+            assert blk["positive_low_coverage"] is False
+        else:
+            assert blk["top_features_positive"] is None
+            assert blk["positive_low_coverage"] is True

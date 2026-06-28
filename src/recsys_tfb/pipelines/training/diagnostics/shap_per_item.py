@@ -45,6 +45,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     min_per_item = int(cfg.get("min_rows_per_item", 30))
     sample_rows = int(cfg.get("sample_rows", 2000))
     max_budget = int(cfg.get("max_budget", 4_000_000))
+    positive_min_rows = int(cfg.get("positive_min_rows", 20))
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
@@ -91,13 +92,22 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         mask = items == item
         prof_all, _ = _signed_profile(shap_values[mask], feature_cols, top_k)
         sc = scores[mask]
+        pos_mask = mask & (labels == 1)
+        n_pos = int(pos_mask.sum())
+        if n_pos >= positive_min_rows:
+            prof_pos, _ = _signed_profile(shap_values[pos_mask], feature_cols, top_k)
+            pos_low = False
+        else:
+            prof_pos, pos_low = None, True
         per_item[str(item)] = {
             "top_features": prof_all,
             "n_sampled": int(mask.sum()),
-            "n_positive": int(np.sum(labels[mask] == 1)),
+            "n_positive": n_pos,
             "score_min": float(sc.min()), "score_max": float(sc.max()),
             "score_mean": float(sc.mean()),
             "low_coverage": bool(mask.sum() < min_per_item),
+            "top_features_positive": prof_pos,
+            "positive_low_coverage": pos_low,
         }
 
     # ---- 代表性個例（全域 high/low + 每 item 一筆高分）----
