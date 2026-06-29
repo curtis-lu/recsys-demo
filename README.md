@@ -141,7 +141,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 - **超參數搜尋與資料集職責分離**：Optuna HPO 使用 train 訓練、train_dev 執行 early stopping，並以 val 的排序指標選擇最佳超參數；`hpo_objective` 可選擇整體 query mAP 或各 item 等權重的 macro mAP。
 - **HPO 崩潰恢復**：啟用 `hpo_checkpointing` 時會保存 Optuna study 與目前最佳模型，訓練中斷後可只補跑剩餘 trials；若要放棄既有搜尋結果，可使用 `--fresh-hpo` 從頭開始。
 - **最終模型與機率校準**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練；若下游需要將 score 解讀為機率，可選擇使用獨立 calibration split 執行 sigmoid 或 isotonic calibration。
-- **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷；模型、參數、指標與診斷也可記錄至 MLflow。
+- **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷（含 per-item 帶方向的特徵 profile、採購者對照與跨 item 偏離度 `item_idiosyncrasy`）；模型、參數、指標與診斷也可記錄至 MLflow。
 - **版本化但不自動上線**：模型與其上游 `base_dataset_version`、`train_variant_id`、可選的 `calibration_variant_id` 及有效 training 設定共同決定 `model_version`。training 完成後不會自動供 inference 使用，仍須人工檢視評估結果並透過 `scripts/promote_model.py` 將核准版本設為 `best`。
 
 ### evaluation pipeline
