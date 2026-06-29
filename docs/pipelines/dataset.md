@@ -99,7 +99,7 @@ dataset:
 
 抽樣使用 identity key、sampling site 與 `random_seed` 計算固定 CRC32 bucket。同一份資料與設定重跑會選出相同資料，不受 Spark partition 排列影響。未出現在 `sample_ratio_overrides` 的分層使用 `sample_ratio`。
 
-override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_editor.py` 可減少欄位順序、字串格式或不存在 item 導致規則沒有命中的風險。
+override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_editor.py` 可減少欄位順序、字串格式或不存在 item 導致規則沒有命中的風險。用法、概念與 key 組法見 [`../operations/sampling-overrides-editor.md`](../operations/sampling-overrides-editor.md)。
 
 #### Sample group key 的欄位來源
 

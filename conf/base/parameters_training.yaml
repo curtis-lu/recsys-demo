@@ -42,7 +42,9 @@ training:
   #   ★每欄必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
   #   dataset.carry_columns ∪ dataset.prepare_model_input.categorical_columns（A9a 驗）。
   #   類別欄填人類可讀字串即可（runtime encode-aware 翻 code）；機制與 edge case 見
-  #   docs/pipelines/training.md。可用 scripts/sampling_overrides_editor.py 產生。
+  #   docs/pipelines/training.md。可用 scripts/sampling_overrides_editor.py 從實際資料推導
+  #   （雙因子地板＋注意力權重）；概念框架、公式與範例見
+  #   docs/operations/sampling-overrides-editor.md。
   sample_weight_keys:
     - prod_name
   # sample_weights: ★key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數

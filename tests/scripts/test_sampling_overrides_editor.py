@@ -381,6 +381,22 @@ class TestRenderHtml:
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
+    def test_couple_keep_rate_guards_empty_neg_mult(self):
+        # Regression: default neg_mult is '' (keep-all). parseFloat('') is NaN;
+        # without a guard keepRate returns NaN, poisoning the whole coupled
+        # weight surface (every _nn / w_pos / w_neg becomes NaN on first open).
+        # keepRate must mirror preview()'s isNaN(nm) -> keep-all (1) branch.
+        html = render_html(self._STATS, **self._KW)
+        assert "if(isNaN(nm)) return 1" in html
+
+    def test_couple_linkage_honors_keep_mode_ratio_direct(self):
+        # Regression: ratioByKey feeds the coupled weight surface. In keep mode
+        # (and for zero-positive rows) the user edits ratio_direct, not
+        # neg_mult, so the coupling must read ratio_direct there — mirroring
+        # preview()'s useDirect branch — instead of always reading neg_mult.
+        html = render_html(self._STATS, **self._KW)
+        assert "RMODE==='keep'||r.n_pos<=0" in html
+
     def test_neg_mult_is_primary_knob_ratio_readonly(self):
         html = render_html(self._STATS, **self._KW, target_neg_pos=5.0)
         assert "負樣本倍率" in html

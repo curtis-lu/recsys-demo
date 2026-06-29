@@ -383,33 +383,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
  #flt{{margin:.5rem 0;padding:.35rem;width:22rem}}
 </style></head><body>
 <h2>Sampling Overrides Editor</h2>
-<details open><summary>各欄是什麼？用途是什麼？（點此展開/收合）</summary>
-<p><b>兩個面（分頁切換，各自獨立）</b>：<code>ratio 面</code>依
-<code>sample_group_keys</code>（label 以外的任意維度）調抽樣下採樣；<code>weight 面</code>依
-<code>sample_weight_keys</code>調訓練樣本權重。兩組 keys 可不同，匯出時各以自己的
-key-set 驗證。</p>
-<p><b>ratio 面 = 成本（下採樣，預設 keep-all）。</b>負樣本倍率欄<b>預設留空 = 全留負樣本</b>；
-只在想為了訓練成本下採某些（負樣本爆量的）列時才填目標 neg:pos 倍率，<code>ratio =
-clamp(倍率 × n_pos / n_neg, 0, 1)</code>（匯出 key <code>…|0</code>）。地板不再靠下採樣達成
-（改由 weight 面），所以冷門產品<b>不必</b>下採、保留全部負樣本給 split-finding。
-n_pos = 0 的冷門列在 ratio 欄直接填保留率。</p>
-<p><b>ratio 面輸入模式 ＋ 群組/批次選取。</b>上方可切<code>依負樣本倍率</code>或
-<code>依保留率</code>（直接填保留率、全列一致、含 n_pos=0）；兩欄值切換時互不洗掉。
-勾選列後可用<code>依群組選取</code>（維度＝值，一次選整組）再<code>批次套用</code>把同一個值
-套到所有選取列（倍率模式對 n_pos=0 列自動略過）。</p>
-<p><b>weight 面 = 排序抬升（雙因子，全域旋鈕 t、α）。</b>對每個 weight cell：</p>
-<p><b>v（降負樣本）→ 地板。</b><code>v = n_pos·(1−t) / (t · n_neg(下採後))</code>，把該產品
-有效正樣本率墊到目標 <code>t = {t}</code>，消掉冷門產品的 log(base-rate) 懲罰。
-n_neg 用下採後值 → 地板只取決於 t，與 ratio 面下採多少無關（解耦）。</p>
-<p><b>A（注意力）→ loss 佔比。</b><code>A = (m_min / m)^<code>{alpha}</code></code>，
-<code>m = n_pos + n_neg(後)·v ∝ n_pos</code>；<b>下調方向</b>（最少正樣本產品 A=1、越熱越小、≤1），
-把各產品 loss 佔比從原始比拉向等權，鏡像 macro per-item mAP。</p>
-<p><b>匯出。</b><code>w_pos = A</code>（key <code>…|1</code>）、<code>w_neg = A·v</code>（key
-<code>…|0</code>），對應 <code>training.sample_weights</code>（<code>sample_weight_keys</code>
-須含 label 當切分軸）。綠/藍欄是加權後驗證：eff pos_rate(後) 應每列 = t、地板 logit(後) 應每列相同。</p>
-<p><b>負樣本基數（連動 / 不連動）。</b>地板 v 的分母 n_neg 預設<code>連動 ratio 面</code>＝下採後負樣本，
-套用後實際正樣本率精確落在 t。切<code>不連動</code>時改用<code>原始 n_neg × φ</code>（全域旋鈕，φ=1 即原始），
-與 ratio 面無關；若 ratio 面同時有下採，套用後實際正樣本率會高於 t（overshoot）。</p>
+<details open><summary>各欄速覽（完整概念框架、推導與範例見 docs，見下方連結）</summary>
+<p><b>兩個面（分頁切換，各自獨立匯出、各自的 key-set）。</b>
+<code>ratio 面</code>＝訓練<b>成本</b>：依 <code>sample_group_keys</code> 下採負樣本
+（→ <code>sample_ratio_overrides</code>；<b>負樣本倍率欄預設留空＝全留</b>，只為省訓練成本才填）。
+<code>weight 面</code>＝排序<b>抬升</b>：依 <code>sample_weight_keys</code> 調樣本權重
+（→ <code>sample_weights</code>；雙因子 <code>v×A</code>，全域旋鈕 <code>t</code>、<code>α</code>）。
+下採與抬升<b>解耦</b>：冷門 item 不必下採，地板高低只由 <code>t</code> 決定。</p>
+<p><b>匯出與驗證提醒。</b><code>w_pos = A</code>（key <code>…|1</code>）、<code>w_neg = A·v</code>
+（key <code>…|0</code>）；<code>sample_weight_keys</code> 須含 <code>label</code> 當正/負切分軸。
+綠/藍欄是加權後驗證：eff pos_rate(後) 每列應 = <code>t</code>、地板 logit(後) 每列應相同。</p>
+<details><summary>公式速查（v / A / w / 保留率）</summary>
+<p><code>v = n_pos·(1−t) / (t · n_neg)</code> — <b>地板</b>：降負樣本權重把有效正樣本率墊到 <code>t</code>，消 base-rate 懲罰。<br>
+<code>A = (m_min / m)^α</code>，<code>m = n_pos + n_neg·v</code> — <b>注意力</b>：把各 item 的 loss 佔比拉向等權（最輕者 A=1、越熱越小、≤1）。<br>
+<code>w_pos = A</code>、<code>w_neg = A·v</code>。<br>
+ratio 面保留率 <code>= clamp(倍率·n_pos/n_neg, 0, 1)</code>；<code>n_pos=0</code> 的格在 ratio 欄直接填保留率。<br>
+負樣本基數：<b>連動</b>(預設) 用下採後 <code>n_neg</code> → 套用後 pos-rate 精確 = <code>t</code>；<b>不連動</b>用原始 <code>n_neg × φ</code>。</p>
+</details>
+<p><b>完整概念與範例</b>：<code>docs/operations/sampling-overrides-editor.md</code>
+（<a href="../../docs/operations/sampling-overrides-editor.md">相對連結</a>，若從 repo 的
+<code>data/profiling/</code> 開啟此頁可直接點開）。</p>
 </details>
 <div id="tabs">
 <button id="tb_ratio" class="active" onclick="setTab('ratio')">ratio 面 (sample_group_keys)</button>
@@ -471,6 +464,7 @@ function twoFactor(np,nnp,t,a,mmin){{
 function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 function keepRate(nm,np,nn){{ if(np<=0||nn<=0) return 1;
+ if(isNaN(nm)) return 1;   // '' = keep-all(cost off)，鏡像 preview() 的 isNaN(nm) 分支
  return Math.min(1,Math.max(0,nm*np/nn)); }}
 // ratio store: one row per ratio_dims tuple; neg_mult editable, default R.
 function buildRatio(){{
@@ -489,8 +483,15 @@ let WEIGHT=[];
 // effective keep-rate per ratio_dims tuple from current neg_mult edits.
 function ratioByKey(){{
  const m=new Map();
- RATIO.forEach(r=>m.set(r.keys.join(SEP),
-  keepRate(parseFloat(r.suggested_neg_mult),r.n_pos,r.n_neg)));
+ // mirror preview() 的 useDirect 分支：keep 模式或無正樣本 → 直接吃 ratio_direct，
+ // 否則用 keepRate(neg_mult)。不然 couple 連動會無視 keep 模式下的保留率編輯。
+ RATIO.forEach(r=>{{
+  let kr;
+  if(RMODE==='keep'||r.n_pos<=0){{ kr=parseFloat(r.ratio_direct); if(isNaN(kr)) kr=1;
+   kr=Math.min(1,Math.max(0,kr)); }}
+  else kr=keepRate(parseFloat(r.suggested_neg_mult),r.n_pos,r.n_neg);
+  m.set(r.keys.join(SEP),kr);
+ }});
  return m;
 }}
 // weight store: aggregate STATS to WDIMS tuple; n_neg post-downsample via the
