@@ -278,3 +278,56 @@ def test_profile_positive_can_be_disabled(shap_setup):
     for blk in out["per_item"].values():
         assert blk["top_features_positive"] is None
         assert blk["positive_low_coverage"] is False
+
+
+def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
+    import shap
+    adapter, handle, preprocessor, parameters = shap_setup
+    # force EVERY summary_plot to raise; diagnostics must still return a dict.
+    def boom(*a, **k):
+        raise RuntimeError("plot exploded")
+    monkeypatch.setattr(shap, "summary_plot", boom)
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert isinstance(out, dict)
+    assert "per_item" in out and len(out["per_item"]) >= 1
+
+
+def test_divergence_integration_multifeature(tmp_path, monkeypatch):
+    import numpy as np, pandas as pd, pyarrow as pa, pyarrow.parquet as pq
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.RandomState(7)
+    n = 240
+    X4 = rng.randn(n, 4)
+    prod = np.array((["A"] * (n // 3)) + (["B"] * (n // 3)) + (["C"] * (n - 2 * (n // 3))))
+    # item-dependent signal so per-item |SHAP| rankings can differ across the 4 features
+    label = np.where(prod == "A", (X4[:, 0] > 0),
+             np.where(prod == "B", (X4[:, 2] > 0), (X4[:, 3] > 0))).astype(int)
+    pdf = pd.DataFrame({"f0": X4[:, 0], "f1": X4[:, 1], "f2": X4[:, 2],
+                        "f3": X4[:, 3], "prod_name": prod, "label": label})
+    path = str(tmp_path / "t4.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path)
+    handle = ParquetHandle(path=path)
+    adapter = LightGBMAdapter()
+    adapter.train(X4, label.astype(float), None, None,
+                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+                   "num_leaves": 8, "seed": 7, "num_iterations": 30, "early_stopping_rounds": 0})
+    preprocessor = {"feature_columns": ["f0", "f1", "f2", "f3"],
+                    "categorical_columns": [], "category_mappings": {}}
+    for metric in ("jaccard_topk", "spearman"):
+        parameters = {"model_version": f"mv4_{metric}",
+                      "diagnostics": {"shap": {"enabled": True, "top_k": 4, "n_examples": 1,
+                                               "min_rows_per_item": 10, "sample_rows": 240,
+                                               "max_budget": 4000000,
+                                               "divergence_metric": metric, "divergence_top_k": 2}}}
+        out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+        for blk in out["per_item"].values():
+            assert 0.0 <= blk["divergence_from_global"] <= 1.0
+            assert set(blk["idiosyncratic_features"]) <= {"f0", "f1", "f2", "f3"}
+        idio = out["item_idiosyncrasy"]
+        divs = [r["divergence_from_global"] for r in idio]
+        assert divs == sorted(divs, reverse=True)
+        assert {r["item"] for r in idio} == set(out["per_item"])
+        # non-degenerate: with 4 features and top_k=2, at least one item should diverge from global
+        assert any(d > 0.0 for d in divs)

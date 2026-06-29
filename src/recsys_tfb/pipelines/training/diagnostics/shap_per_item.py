@@ -163,28 +163,34 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
                 "low": [_example(i) for i in lo],
                 "per_item_high": per_item_high}
 
-    # ---- PNG ----
+    # ---- PNG（best-effort：繪圖失敗不應中斷診斷/訓練，spec §4）----
     sdir = summary_dir(parameters)
-    plt.figure()
     try:
-        shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
-        plt.tight_layout()
-        plt.savefig(sdir / "shap_summary_global.png", dpi=100)
-    finally:
-        plt.close()
+        plt.figure()
+        try:
+            shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
+            plt.tight_layout()
+            plt.savefig(sdir / "shap_summary_global.png", dpi=100)
+        finally:
+            plt.close()
+    except Exception as e:
+        logger.warning("global shap summary plot failed: %s", e)
 
     if cfg.get("per_item_beeswarm", True):
         pdir = per_item_summary_dir(parameters)
         for item in pd.unique(items):
             m = items == item
-            plt.figure()
             try:
-                shap.summary_plot(shap_values[m], features=X[m],
-                                  feature_names=feature_cols, show=False)
-                plt.tight_layout()
-                plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
-            finally:
-                plt.close()
+                plt.figure()
+                try:
+                    shap.summary_plot(shap_values[m], features=X[m],
+                                      feature_names=feature_cols, show=False)
+                    plt.tight_layout()
+                    plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
+                finally:
+                    plt.close()
+            except Exception as e:
+                logger.warning("per-item beeswarm failed for item %s: %s", item, e)
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
