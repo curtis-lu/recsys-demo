@@ -210,27 +210,45 @@ dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled`
 
 #### `diagnostics.shap` 設定詳細說明
 
-`diagnostics.shap` 除既有的 `enabled`、`sample_rows`、`top_k`、`n_examples`、`min_rows_per_item`、`max_budget` 外，提供以下 per-item 強化設定（皆頂層、不影響 `model_version`）：
+`diagnostics.shap` 用來解釋模型在 test split 上「靠什麼把候選 item 排高或排低」。它不改變模型訓練結果，也不影響 `model_version`；調整這個區塊通常是為了控制診斷成本、提高 per-item 覆蓋率，或讓輸出更適合人工審核。
 
-| 設定鍵 | 預設 | 說明 |
+SHAP 診斷主要回答三個問題：
+
+| 問題 | 看哪裡 | 解讀方式 |
 |---|---|---|
-| `profile_positive` | `true` | 同時為 label==1 的採購者計算 signed SHAP profile 作對照；`false` 則略過 |
-| `positive_min_rows` | `20` | 正樣本數低於此值時 `top_features_positive` 為 `null`，並標記 `positive_low_coverage: true` |
-| `divergence_metric` | `jaccard_topk` | per-item \|SHAP\| 排序與全域排序的偏離度量；∈ {`jaccard_topk`, `spearman`} |
-| `divergence_top_k` | `15` | 偏離度計算與 `idiosyncratic_features` 識別使用的 top-k 大小（通常比 `top_k` 小） |
-| `per_item_beeswarm` | `true` | 每個 item 各輸出一張 beeswarm PNG 至 `diagnostics/summary/per_item/`；beeswarm 同時呈現 SHAP 幅度與方向 |
+| 整體模型靠哪些特徵排序？ | `global.top_features`、`summary/shap_summary_global.png` | `mean_abs_shap` 越大代表整體影響越大；`mean_signed_shap` > 0 表示平均把分數往上推，< 0 表示往下壓 |
+| 某個 item 是否有自己的驅動特徵？ | `per_item[<item>].top_features`、per-item beeswarm | 對照全域 top features；若方向或排序明顯不同，代表 shared model 對該 item 使用了不同訊號 |
+| 實際採購者和全體候選是否被同一組特徵驅動？ | `top_features_positive`、`positive_low_coverage` | 正樣本足夠時，可比較採購者 profile 與全體候選 profile；正樣本不足時先不要過度解讀 |
 
-`shap_diagnostics.json` 的 `per_item[<item>]` 區塊新增以下欄位：
+設定時可先依下列順序調整：
 
-- **`top_features[*].mean_abs_shap` / `mean_signed_shap`**：既有的幅度，加上有正負號的平均 SHAP（>0 將此 item 分數往上推，<0 往下壓）。
-- **`top_features_positive`**：只對 label==1 採購者計算的同格式 signed profile；正樣本不足 `positive_min_rows` 時為 `null`（`positive_low_coverage: true`），可對照「全體候選 vs 實際採購者」的驅動特徵差異。
-- **`divergence_from_global`**：0～1 浮點數；0 表示此 item 的 \|SHAP\| 特徵排序與全域完全一致，1 完全不同。
-- **`idiosyncratic_features`**：此 item top-k 中不在全域 top-k 的特徵清單。
-- **`positive_low_coverage`**：布林值，`profile_positive: true` 但正樣本不足 `positive_min_rows` 時為 `true`。
+| 目的 | 參數 | 怎麼設定 |
+|---|---|---|
+| 開關 SHAP | `enabled` | 正式候選模型建議開啟；快速 smoke test 或 driver 資源不足時可暫時關閉 |
+| 控制抽樣量 | `sample_rows` | SHAP 最主要的成本來源；資料量大、特徵多或樹多時先降低此值 |
+| 避免超出計算預算 | `max_budget` | 以 `sample_rows * n_trees` 估算成本；超過時框架會自動降低有效抽樣列數 |
+| 控制每個 item 的最低覆蓋 | `min_rows_per_item` | item 很多或長尾明顯時，可降低以避免抽樣不足；解讀時仍要看 `low_coverage` |
+| 控制輸出特徵數 | `top_k` | 影響 JSON 與圖上顯示的特徵數；通常 20～30 足夠人工審核 |
+| 控制全域 high/low 案例數 | `n_examples` | 只影響 `shap_diagnostics.json` 中的 example 摘要數，不影響 SHAP profile 計算 |
+| 產生 per-item 圖 | `per_item_beeswarm` | item 數少或需要逐 item 審核時開啟；item 很多時可關閉以減少圖片數與執行時間 |
+| 比較採購者 profile | `profile_positive` | 推薦保留 `true`；只有不需要 label==1 對照或正樣本極稀疏時才關閉 |
+| 設定採購者 profile 門檻 | `positive_min_rows` | 正樣本低於此值時 `top_features_positive` 會是 `null`，避免用太少樣本解讀採購者特徵 |
+| 衡量 item 與全域的差異 | `divergence_metric`、`divergence_top_k` | 預設 `jaccard_topk` 適合快速比較 top features 是否重疊；`divergence_top_k` 通常小於或等於 `top_k` |
 
-頂層 `item_idiosyncrasy` 以 `divergence_from_global` 降序排列，快速識別哪些 item 在共用模型下使用了最不同的特徵組合；偏離度高的 item 是評估是否引入 per-item 或兩階段模型的判斷起點。
+`shap_diagnostics.json` 的重點欄位如下：
 
-SHAP 值透過 `attribution.feature_attributions(model, X, feature_names)` 這個模型結構無關的接縫存取，診斷層不直接存取 `model.booster`，日後擴充至 composite（兩階段）模型時只需在此接縫修改，上層診斷邏輯不需調整。
+| 欄位 | 說明 |
+|---|---|
+| `top_features[*].mean_abs_shap` | 該特徵的平均影響幅度 |
+| `top_features[*].mean_signed_shap` | 該特徵平均把分數往上或往下推的方向 |
+| `top_features_positive` | 只用 label==1 採購者計算的 signed profile；正樣本不足 `positive_min_rows` 時為 `null` |
+| `low_coverage` | 該 item 抽樣列數低於 `min_rows_per_item`，相關結論應保守解讀 |
+| `positive_low_coverage` | 採購者樣本數低於 `positive_min_rows`，不要用 `top_features_positive` 做決策 |
+| `divergence_from_global` | 0～1 浮點數；越高代表此 item 的重要特徵排序越不同於全域 |
+| `idiosyncratic_features` | 此 item top-k 中不在全域 top-k 的特徵清單 |
+| `item_idiosyncrasy` | 依 `divergence_from_global` 由高到低排序的 item 清單，用來快速找出 shared model 下最「不像全域」的 item |
+
+偏離度高不一定代表模型錯了；它表示該 item 可能依賴更特殊的訊號。若該 item 的離線指標也偏弱，才是評估補特徵、調整 sampling、引入 per-item 策略或兩階段模型的起點。
 
 local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 會再依 objective family 與 feature selection 子集隔離。
 
@@ -395,7 +413,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...` |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
-SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向；舊版的 per-example waterfall PNG 已由此架構取代。
+SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向；高分、低分與 per-item 高分案例摘要則寫在 `shap_diagnostics.json` 的 `examples` 區塊。
 
 `model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 放在獨立 `hpo/` 子目錄，避免它的 sidecar 與最終模型互相覆寫。
 
