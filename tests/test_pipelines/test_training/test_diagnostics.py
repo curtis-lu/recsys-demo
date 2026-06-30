@@ -144,8 +144,8 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert {"high", "low"} <= set(out["examples"])
     items_in_examples = {e["item"] for e in out["examples"]["per_item_high"]}
     assert {"A", "B", "rare"} <= items_in_examples
-    d = diag.diagnostics_dir(parameters)
-    assert (d / "shap_summary.png").exists()
+    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
 
 
 def test_shap_disabled(shap_setup):
@@ -161,3 +161,173 @@ def test_shap_budget_guard_reduces_sample(shap_setup, caplog):
         out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert out != {}
     assert any("budget" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_per_item_top_features_signed(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
+                   for r in blk["top_features"])
+
+
+def test_per_item_profile_positive_and_coverage(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["positive_min_rows"] = 5
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert "top_features_positive" in blk
+        assert "positive_low_coverage" in blk
+        if blk["n_positive"] >= 5:
+            assert blk["top_features_positive"] is not None
+            assert all("mean_signed_shap" in r for r in blk["top_features_positive"])
+            assert blk["positive_low_coverage"] is False
+        else:
+            assert blk["top_features_positive"] is None
+            assert blk["positive_low_coverage"] is True
+
+
+def test_divergence_identical_is_zero():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    v = np.array([3.0, 1.0, 2.0, 0.5])
+    div, idio = _divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    assert div == 0.0
+    assert idio == []
+
+
+def test_divergence_disjoint_top_is_one():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    item = np.array([0.0, 0.0, 5.0, 4.0])   # top2 = idx {2,3}
+    glob = np.array([5.0, 4.0, 0.0, 0.0])   # top2 = idx {0,1}
+    div, idio = _divergence(item, glob, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    assert div == 1.0
+    assert set(idio) == {"c", "d"}
+
+
+def test_divergence_identical_spearman_is_zero():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    v = np.array([3.0, 1.0, 2.0, 0.5])
+    div, _ = _divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
+    assert div == pytest.approx(0.0)
+
+
+def test_divergence_reversed_spearman_is_one():
+    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    import numpy as np
+    va = np.array([1.0, 2.0, 3.0, 4.0])
+    vb = np.array([4.0, 3.0, 2.0, 1.0])
+    div, _ = _divergence(va, vb, "spearman", 2, ["a", "b", "c", "d"])
+    assert div == pytest.approx(1.0)
+
+
+def test_per_item_divergence_and_idiosyncrasy(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert 0.0 <= blk["divergence_from_global"] <= 1.0
+        assert isinstance(blk["idiosyncratic_features"], list)
+    idio = out["item_idiosyncrasy"]
+    divs = [r["divergence_from_global"] for r in idio]
+    assert divs == sorted(divs, reverse=True)
+    assert {r["item"] for r in idio} == set(out["per_item"])
+
+
+def test_per_item_signed_can_be_negative(shap_setup):
+    # carry-over guard: mean_signed_shap must be the SIGNED mean, not abs.
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    found = any(
+        r["mean_signed_shap"] is not None and r["mean_signed_shap"] < r["mean_abs_shap"]
+        for blk in out["per_item"].values() for r in blk["top_features"]
+    )
+    assert found
+
+
+def test_summary_pngs_global_and_per_item(shap_setup):
+    from recsys_tfb.pipelines.training.diagnostics.paths import (
+        per_item_summary_dir, safe_name, summary_dir)
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
+    pidir = per_item_summary_dir(parameters)
+    for item in out["per_item"]:
+        assert (pidir / f"shap_summary__{safe_name(item)}.png").exists()
+    # 舊命名不應再產出
+    assert not (diag.diagnostics_dir(parameters) / "waterfall_high_0.png").exists()
+
+
+def test_per_item_beeswarm_can_be_disabled(shap_setup):
+    import os
+    from recsys_tfb.pipelines.training.diagnostics.paths import (
+        per_item_summary_dir, summary_dir)
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
+    diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
+    pidir = per_item_summary_dir(parameters)
+    assert len(os.listdir(pidir)) == 0
+
+
+def test_profile_positive_can_be_disabled(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert blk["top_features_positive"] is None
+        assert blk["positive_low_coverage"] is False
+
+
+def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
+    import shap
+    adapter, handle, preprocessor, parameters = shap_setup
+    # force EVERY summary_plot to raise; diagnostics must still return a dict.
+    def boom(*a, **k):
+        raise RuntimeError("plot exploded")
+    monkeypatch.setattr(shap, "summary_plot", boom)
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert isinstance(out, dict)
+    assert "per_item" in out and len(out["per_item"]) >= 1
+
+
+def test_divergence_integration_multifeature(tmp_path, monkeypatch):
+    import numpy as np, pandas as pd, pyarrow as pa, pyarrow.parquet as pq
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.RandomState(7)
+    n = 240
+    X4 = rng.randn(n, 4)
+    prod = np.array((["A"] * (n // 3)) + (["B"] * (n // 3)) + (["C"] * (n - 2 * (n // 3))))
+    # item-dependent signal so per-item |SHAP| rankings can differ across the 4 features
+    label = np.where(prod == "A", (X4[:, 0] > 0),
+             np.where(prod == "B", (X4[:, 2] > 0), (X4[:, 3] > 0))).astype(int)
+    pdf = pd.DataFrame({"f0": X4[:, 0], "f1": X4[:, 1], "f2": X4[:, 2],
+                        "f3": X4[:, 3], "prod_name": prod, "label": label})
+    path = str(tmp_path / "t4.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path)
+    handle = ParquetHandle(path=path)
+    adapter = LightGBMAdapter()
+    adapter.train(X4, label.astype(float), None, None,
+                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+                   "num_leaves": 8, "seed": 7, "num_iterations": 30, "early_stopping_rounds": 0})
+    preprocessor = {"feature_columns": ["f0", "f1", "f2", "f3"],
+                    "categorical_columns": [], "category_mappings": {}}
+    for metric in ("jaccard_topk", "spearman"):
+        parameters = {"model_version": f"mv4_{metric}",
+                      "diagnostics": {"shap": {"enabled": True, "top_k": 4, "n_examples": 1,
+                                               "min_rows_per_item": 10, "sample_rows": 240,
+                                               "max_budget": 4000000,
+                                               "divergence_metric": metric, "divergence_top_k": 2}}}
+        out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+        for blk in out["per_item"].values():
+            assert 0.0 <= blk["divergence_from_global"] <= 1.0
+            assert set(blk["idiosyncratic_features"]) <= {"f0", "f1", "f2", "f3"}
+        idio = out["item_idiosyncrasy"]
+        divs = [r["divergence_from_global"] for r in idio]
+        assert divs == sorted(divs, reverse=True)
+        assert {r["item"] for r in idio} == set(out["per_item"])
+        # non-degenerate: with 4 features and top_k=2, at least one item should diverge from global
+        assert any(d > 0.0 for d in divs)
