@@ -5,8 +5,10 @@ from recsys_tfb.core.pipeline import Pipeline
 from recsys_tfb.pipelines.training.diagnostics import (
     compute_feature_importance,
     compute_feature_statistics,
+    compute_quadrant_profiles,
     compute_shap_diagnostics,
 )
+from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
 from recsys_tfb.pipelines.training.nodes import (
     cache_calibration_model_input,
     cache_test_model_input,
@@ -157,12 +159,35 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=["model", "test_parquet_handle", "preprocessor_view", "parameters"],
             outputs="shap_diagnostics",
         ),
+        # P2b 象限診斷:Spark 選樣(top@1 象限 + 每格抽樣)→ pandas per-(item×象限)
+        # signed profile,獨立寫 per_quadrant.json。compute_shap_diagnostics 不動。
+        Node(
+            select_shap_population,
+            # predict_manifest is an ordering-only dependency (same convention as
+            # compute_test_mAP_spark): it forces this node to run AFTER
+            # predict_and_write_test_predictions has written training_eval_predictions.
+            # Without it, all three data inputs lack a node producer and Kahn's sort
+            # would float this node ahead of the predict node (stale predictions).
+            inputs=[
+                "training_eval_predictions", "test_model_input",
+                "parameters", "predict_manifest",
+            ],
+            outputs="shap_population",
+        ),
+        Node(
+            compute_quadrant_profiles,
+            inputs=["model", "shap_population", "preprocessor_view", "parameters"],
+            outputs="quadrant_profiles",
+        ),
         Node(
             log_experiment,
+            # quadrant_profiles 置末:log_experiment 簽名新參數有 default None（在
+            # parameters 之後），Runner 以 node.inputs 位置對應傳參,故此處順序須與簽名
+            # 一致。此依賴也保證 per_quadrant.json 已由 catalog 寫入後才 log_artifacts。
             inputs=[
                 "model", "best_params", "best_iteration", "evaluation_results",
                 "feature_statistics", "feature_importance", "shap_diagnostics",
-                "parameters",
+                "parameters", "quadrant_profiles",
             ],
             outputs=None,
         ),

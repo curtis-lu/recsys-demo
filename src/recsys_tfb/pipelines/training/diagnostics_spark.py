@@ -9,11 +9,18 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def select_shap_population(training_eval_predictions, test_model_input, parameters):
+def select_shap_population(
+    training_eval_predictions, test_model_input, parameters, predict_manifest=None
+):
     """回傳每 (item×象限) 抽樣的小 pandas(特徵 + item + quadrant),供 per_quadrant SHAP。
 
     ``quadrant_enabled=false`` → None。rank/象限/抽樣/join 全在 Spark(executor);
     driver 只 toPandas 小族群。
+
+    ``predict_manifest`` 僅作 in-DAG 排序依賴(與 ``compute_test_mAP_spark`` 同慣例):
+    ``training_eval_predictions`` 由 ``predict_and_write_test_predictions`` 寫入,本節點
+    的三個資料輸入都無 node producer,若不掛此依賴,topological sort 會把本節點排到
+    predict 之前而讀到未寫入/過期的預測。內容不使用,只用來建立 DAG edge。
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F

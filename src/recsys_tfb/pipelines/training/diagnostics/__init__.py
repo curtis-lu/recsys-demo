@@ -5,11 +5,13 @@
 from .feature_stats import compute_feature_statistics
 from .importance import compute_feature_importance
 from .paths import diagnostics_dir
+from .shap_cases import compute_quadrant_profiles
 from .shap_per_item import compute_shap_diagnostics
 
 __all__ = [
     "compute_feature_statistics",
     "compute_feature_importance",
+    "compute_quadrant_profiles",
     "compute_shap_diagnostics",
     "diagnostics_dir",
 ]

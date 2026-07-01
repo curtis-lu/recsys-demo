@@ -71,3 +71,29 @@ def test_quadrant_profiles_empty_or_disabled():
     pop = _pop_from_counts({("A", "TP"): 5})
     p = _params(); p["diagnostics"]["shap"]["quadrant_enabled"] = False
     assert compute_quadrant_profiles(adapter, pop, _PREP, p) == {}
+
+
+# ---- Task 3: wiring (pipeline + catalog) ----
+
+
+def test_pipeline_wires_quadrant_nodes():
+    from recsys_tfb.pipelines.training.pipeline import create_pipeline
+    pipe = create_pipeline()
+    fns = {n.func.__name__ for n in pipe.nodes}
+    assert "select_shap_population" in fns
+    assert "compute_quadrant_profiles" in fns
+    # log_experiment 依賴 quadrant_profiles(排序保證 per_quadrant.json 先寫)
+    log_node = next(n for n in pipe.nodes if n.func.__name__ == "log_experiment")
+    assert "quadrant_profiles" in log_node.inputs
+
+
+def test_catalog_has_quadrant_profiles():
+    from pathlib import Path
+
+    import yaml
+
+    # tests/test_pipelines/test_training/<this file> -> parents[3] == worktree root
+    catalog_path = Path(__file__).resolve().parents[3] / "conf" / "base" / "catalog.yaml"
+    cat = yaml.safe_load(catalog_path.read_text())
+    assert cat["quadrant_profiles"]["type"] == "JSONDataset"
+    assert "per_quadrant.json" in cat["quadrant_profiles"]["filepath"]

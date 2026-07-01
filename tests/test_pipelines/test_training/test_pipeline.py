@@ -14,8 +14,9 @@ class TestTrainingPipeline:
         # + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + select_shap_population + compute_quadrant_profiles
         # + log
-        assert len(pipeline.nodes) == 15
+        assert len(pipeline.nodes) == 17
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -47,6 +48,7 @@ class TestTrainingPipeline:
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
             "feature_statistics", "feature_importance", "shap_diagnostics",
+            "shap_population", "quadrant_profiles",
             "sample_weight_report",
         }
         assert pipeline.outputs == expected
@@ -131,8 +133,9 @@ class TestTrainingPipeline:
         # + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + select_shap_population + compute_quadrant_profiles
         # + log
-        assert len(pipeline.nodes) == 17
+        assert len(pipeline.nodes) == 19
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -319,6 +322,10 @@ class TestTrainingPipelineE2E:
         # Drop predict_and_write_test_predictions: it writes to a Hive table via a
         # real metastore + catalog handle which the local Spark fixture doesn't provide.
         # Inject a stub predict_manifest so compute_test_mAP_spark also skips.
+        # select_shap_population reads `training_eval_predictions` (Spark-loaded from
+        # the Hive-backed predict node, skipped here) so it and its downstream
+        # compute_quadrant_profiles are skipped too — same reason as the predict /
+        # mAP nodes. quadrant_profiles is stubbed below so log_experiment can load it.
         skipped_node_names = {
             "cache_train_model_input",
             "cache_train_dev_model_input",
@@ -326,6 +333,8 @@ class TestTrainingPipelineE2E:
             "cache_test_model_input",
             "predict_and_write_test_predictions",
             "compute_test_mAP_spark",
+            "select_shap_population",
+            "compute_quadrant_profiles",
         }
         # Provide stub predict_manifest and evaluation_results so log_experiment has inputs.
         # catalog.add overwrites any existing registration.
@@ -339,6 +348,9 @@ class TestTrainingPipelineE2E:
             "n_excluded_queries": 0,
         }
         catalog.add("evaluation_results", MemoryDataset(stub_eval))
+        # quadrant_profiles producer (compute_quadrant_profiles) is skipped above;
+        # stub it so log_experiment can load its input.
+        catalog.add("quadrant_profiles", MemoryDataset({}))
 
         training_nodes = [
             n for n in full_training_pipeline.nodes
