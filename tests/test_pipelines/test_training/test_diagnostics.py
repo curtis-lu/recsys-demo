@@ -361,3 +361,57 @@ def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     assert seen["n_indices"] == 100
     assert set(stats) == {"f0", "f1"}
     assert "mean" in stats["f0"]
+
+
+def test_shap_does_not_full_load_to_pandas(shap_setup, monkeypatch):
+    # 重構意圖：SHAP 路徑不得再呼叫 ParquetHandle.to_pandas()（全量物化）。
+    from recsys_tfb.io.handles import ParquetHandle
+
+    def boom(self):
+        raise AssertionError("compute_shap_diagnostics must not call to_pandas()")
+
+    monkeypatch.setattr(ParquetHandle, "to_pandas", boom)
+    adapter, handle, preprocessor, parameters = shap_setup
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(out) >= {"global", "per_item"}
+
+
+def test_shap_on_hive_partitioned_cache(tmp_path):
+    # prod_name 為分區欄時（生產 cache 佈局），需能從分區重建並正常產出。
+    import numpy as np
+    import pandas as pd
+    import pyarrow.dataset as pads
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    rng = np.random.RandomState(7)
+    n = 240
+    prod = np.where(np.arange(n) % 2 == 0, "A", "B")
+    X = rng.randn(n, 3)
+    label = (X[:, 0] + (prod == "A") * 0.5 > 0).astype(int)
+    pdf = pd.DataFrame({"f0": X[:, 0], "f1": X[:, 1], "f2": X[:, 2],
+                        "prod_name": prod, "snap_date": "2024-01-31", "label": label})
+    base = str(tmp_path / "parted")
+    pads.write_dataset(
+        __import__("pyarrow").Table.from_pandas(pdf), base, format="parquet",
+        partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
+    )
+    handle = ParquetHandle(path=base)
+    adapter = LightGBMAdapter()
+    # prod_name is a declared categorical feature (feature_columns 含它)；_pdf_to_X 會把它
+    # encode 成 code(A=0,B=1) 併入 X，故模型須以同樣 4 欄矩陣訓練（否則 predict 4!=3）。
+    X_train = np.column_stack([X, (prod == "B").astype(float)])
+    adapter.train(X_train, label.astype(float), None, None,
+                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+                   "num_leaves": 8, "seed": 7, "num_iterations": 20, "early_stopping_rounds": 0})
+    preprocessor = {"feature_columns": ["f0", "f1", "f2", "prod_name"],
+                    "categorical_columns": ["prod_name"],
+                    "category_mappings": {"prod_name": ["A", "B"]}}
+    parameters = {"model_version": "mvpart",
+                  "schema": {"item": "prod_name", "label": "label"},
+                  "diagnostics": {"shap": {"enabled": True, "top_k": 3, "n_examples": 1,
+                                           "min_rows_per_item": 10, "sample_rows": 120,
+                                           "max_budget": 4000000}}}
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(out["per_item"]) == {"A", "B"}     # prod_name 從分區重建成功
+    assert len(out["global"]["top_features"]) == 3

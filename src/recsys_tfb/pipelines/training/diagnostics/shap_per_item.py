@@ -7,6 +7,7 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 
+from . import data_access
 from ._util import _to_native
 from .attribution import attribution_budget_units, feature_attributions
 from .paths import per_item_summary_dir, safe_name, summary_dir
@@ -79,7 +80,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     item_col, label_col = schema["item"], schema["label"]
     feature_cols = list(preprocessor["feature_columns"])
 
-    pdf = test_parquet_handle.to_pandas()
+    path = test_parquet_handle.path
 
     n_trees = attribution_budget_units(model)
     eff_sample = sample_rows
@@ -90,11 +91,24 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
             sample_rows, n_trees, max_budget, eff_sample,
         )
 
-    idx = _stratified_item_sample(pdf, item_col, eff_sample, min_per_item, seed=42)
+    # 只讀 item 分區欄做分層（避免全量物化 test）
+    item_values = data_access.read_column(path, item_col)
+    idx = _stratified_item_sample(item_values, eff_sample, min_per_item, seed=42)
     if len(idx) == 0:
         logger.warning("shap diagnostics: empty sample after stratification; skipping")
         return {}
-    sample_pdf = pdf.iloc[idx].reset_index(drop=True)
+
+    # 只取抽中的列 × (feature 欄 + item 欄 + label 欄)。生產上 item_col 通常即
+    # categorical feature（已在 feature_cols 內），但診斷 fixture / cache 佈局未必；
+    # 下游 per-item 分群需 sample_pdf[item_col]，故顯式確保 item/label 皆在 take_cols。
+    names = data_access.schema_names(path)
+    take_cols = list(feature_cols)
+    for col in (item_col, label_col):
+        if col in names and col not in take_cols:
+            take_cols.append(col)
+    sample_pdf = data_access.take_rows(path, idx, columns=take_cols).reset_index(drop=True)
+    logger.info("shap diagnostics: n_total=%d n_sampled=%d n_cols=%d",
+                len(item_values), len(sample_pdf), len(take_cols))
 
     X = _pdf_to_X(sample_pdf, preprocessor, parameters)
     scores = model.predict(X)
