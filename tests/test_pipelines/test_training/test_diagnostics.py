@@ -476,3 +476,58 @@ def test_positive_profile_skipped_when_disabled(shap_setup, monkeypatch):
     for it in out["per_item"]:
         assert out["per_item"][it]["top_features_positive"] is None
         assert out["per_item"][it]["positive_low_coverage"] is False
+
+
+def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
+    # profile_positive on + 正例存在 → sample A + sample B = 恰好 2 次 SHAP;
+    # 且 sample B 的 take_rows 只取 <= positive_sample_per_item * n_items 列(記憶體 bound,spec §6#5)。
+    import numpy as np
+    import pandas as pd
+    from recsys_tfb.pipelines.training.diagnostics import data_access
+    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+
+    rng = np.random.RandomState(0)
+    n = 2000
+    prod = np.where(np.arange(n) % 2 == 0, "A", "B")   # n_items = 2
+    f0, f1 = rng.randn(n), rng.randn(n)
+    label = (rng.rand(n) < 0.08).astype(int)           # 每 item 正例足夠
+    pdf = pd.DataFrame({"f0": f0, "f1": f1, "prod_name": prod, "label": label})
+    path = str(tmp_path / "t.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=400)
+    handle = ParquetHandle(path=path)
+    adapter = LightGBMAdapter()
+    adapter.train(np.c_[f0, f1], label.astype(float), None, None,
+                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+                   "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0})
+    preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
+                    "category_mappings": {}}
+    per_item = 40
+    parameters = {"model_version": "mvx",
+                  "diagnostics": {"shap": {"enabled": True, "top_k": 2,
+                                           "min_rows_per_item": 30, "sample_rows": 300,
+                                           "max_budget": 4000000, "profile_positive": True,
+                                           "positive_min_rows": 20,
+                                           "positive_sample_per_item": per_item}}}
+
+    shap_calls = {"n": 0}
+    real_attr = spi.feature_attributions
+
+    def counting_attr(*a, **k):
+        shap_calls["n"] += 1
+        return real_attr(*a, **k)
+
+    take_lens = []
+    real_take = data_access.take_rows
+
+    def spy_take(p, indices, columns):
+        take_lens.append(len(indices))
+        return real_take(p, indices, columns)
+
+    monkeypatch.setattr(spi, "feature_attributions", counting_attr)
+    monkeypatch.setattr(data_access, "take_rows", spy_take)
+
+    diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    assert shap_calls["n"] == 2                 # sample A + sample B,恰好一次額外 pass
+    assert len(take_lens) == 2                  # sample A take,再 sample B take
+    assert take_lens[1] <= per_item * 2         # sample B bounded by per_item * n_items

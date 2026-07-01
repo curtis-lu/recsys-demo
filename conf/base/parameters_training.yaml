@@ -156,6 +156,7 @@ diagnostics:
     # per-item SHAP 解讀設定（top-level ops 診斷，不影響 model_version）。
     profile_positive: true          # 同時計算 label==1 採購者 profile，對照全體候選
     positive_min_rows: 20           # 採購者樣本不足時 top_features_positive=null
+    positive_sample_per_item: 30    # 正例 profile 每 item 針對 label==1 抽樣的目標數；應 >= positive_min_rows，否則永遠無法達覆蓋門檻
     divergence_metric: jaccard_topk # item top features vs 全域 top features；可用 spearman
     divergence_top_k: 15            # 偏離度比較用 top-k，通常小於或等於 top_k
     per_item_beeswarm: true         # item 很多時可關閉，減少圖片數與執行時間
