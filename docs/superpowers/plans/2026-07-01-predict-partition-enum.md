@@ -260,14 +260,26 @@ Expected: 3 個 PASS。
     # da.distinct_partitions enumerates (snap_date, prod_name) from fragment/
     # directory metadata only (O(n_fragments), zero row scan) — unlike
     # projecting the partition columns via ds.to_table(), which materializes
-    # one row per data row before de-duplicating.
-    for snap_date, prod_name in da.distinct_partitions(
+    # one row per data row before de-duplicating. str() matches the old
+    # code's cast exactly: pyarrow infers partition-column types from the
+    # directory name (usually str, but int for numeric-looking values), and
+    # the old ds.to_table(...).to_pandas() path already applied str() before
+    # building the filter below — preserve that here too so behavior
+    # (including the pre-existing ArrowNotImplementedError this would raise
+    # for numeric-looking partition values, unchanged by this refactor) stays
+    # byte-for-byte identical to before.
+    for raw_snap_date, raw_prod_name in da.distinct_partitions(
         test_parquet_handle.path, [time_col, item_col]
     ):
+        snap_date = str(raw_snap_date)
+        prod_name = str(raw_prod_name)
+
         with log_step(logger, f"partition_{snap_date}_{prod_name}"):
 ```
 
 其餘函式內容(迴圈內的 `part_table = ds.to_table(filter=...)` 以下到函式結尾)完全不動。
+
+**Code review addendum(於 Task 1 code-quality review 發現,已驗證並收斂於此)**:`pyarrow.dataset.get_partition_keys()` 的回傳型別跟隨 pyarrow 對 hive partition 目錄名的型別推斷——對純數字目錄名(如 `snap_date=20260701`)會推斷成 `int`,不保證是 `str`。已用本機 venv 對 pyarrow 14.0.1 實測確認:**舊碼**(`ds.to_table(columns=...).to_pandas()` → `str(row[...])` → `pads.field(...) == snap_date_str` filter)在這種數字型 partition 情境下,filter 早就會因 `ArrowNotImplementedError: Function 'equal' has no kernel matching input types (int32, string)` 而炸掉——這是**既有限制,不是本次改動造成的退化**。因此上面採用「保留 `str()` cast」的寫法,是刻意讓新碼在任何 partition 值型別下都與舊碼行為(包含這個既有的失敗模式)逐位元相同,而不是趁機修掉這個跟本次任務無關的既有 bug。
 
 - [ ] **Step 3: 執行 predict 節點既有測試,確認行為不變(全 PASS,無需改測試本身)**
 
