@@ -41,6 +41,14 @@ partition 理應是 `O(n_fragments)`、零資料掃描,而不是 `O(n_rows)`。
   metadata,**不掃資料列**。
 - 兩者回傳的分區值都是 Python **`str`**,與現況 `str(row[time_col])` 型別一致;用該值組出的
   `pads.field(col) == value` filter,命中的 row 數與現況完全相同(已用 `filter=...` 直接比對驗證)。
+  **附帶發現(實作階段 code review 挖出,已收斂)**:上述「回傳 `str`」只在 partition 目錄名
+  非純數字時成立——pyarrow 的 hive partition 型別推斷對純數字目錄名(如
+  `snap_date=20260701`)會推斷成 `int`,不保證 `str`。已實測確認:**現況**
+  `ds.to_table(columns=...).to_pandas()` → `str(row[...])` → `pads.field(...) == snap_date` 這條
+  filter,在這種數字型 partition 情境下本就會因 `ArrowNotImplementedError`(型別不符)炸掉——
+  是**既有限制,非本次改動造成的退化**。因此 `nodes.py` 的整合(§4.2)刻意保留 `str()` cast
+  在 `distinct_partitions` 的回傳值上,讓新碼在任何 partition 值型別下都與舊碼行為(包含這個
+  既有失敗模式)逐位元相同,而非趁機修掉這個跟本任務無關的既有 bug。
 - pyarrow 的 dataset discovery **已自動排除** `_SUCCESS`、`.DS_Store` 等非 parquet
   檔案/隱藏檔(已建 fixture 驗證,無需自行維護排除清單)。
 - 一個 partition 若由多個檔案組成(Spark 多 task 寫入的常態),會產生多個 fragment 但
