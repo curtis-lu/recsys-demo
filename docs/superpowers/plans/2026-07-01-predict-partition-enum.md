@@ -17,6 +17,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-01-predict-partition-enum-design.md`
 
+> **事後修正(PR review 階段,commit `b2578ed`)**:下面 Task 1/2 執行時 `data_access.py` 仍在
+> `diagnostics/` 底下(當時位置正確)。實作完成後使用者指出「非 diagnostics 的 predict 節點依賴
+> `diagnostics/data_access.py`」違反該模組 docstring 宣稱的邊界,經確認搬移成本低(僅 5 處
+> import),已把它移到 `src/recsys_tfb/pipelines/training/data_access.py`(與 `nodes.py` 同層)。
+> 讀下面 Task 1/2 時,`diagnostics/data_access.py` 這個路徑請視為「執行當下的位置」,最終落點
+> 見 spec 文件的對應 addendum。
+
 **Worktree:** `/Users/curtislu/projects/recsys_tfb/.worktrees/predict-partition-enum`(branch
 `feat/predict-partition-enum`,off `origin/main` @ `ac281a0`)。所有指令一律用絕對 venv python +
 `PYTHONPATH=src`:

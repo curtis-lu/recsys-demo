@@ -57,9 +57,17 @@ partition 理應是 `O(n_fragments)`、零資料掃描,而不是 `O(n_rows)`。
   不需額外特判。
 
 結論:採用 **pyarrow fragments 方案**(候選 1),放進候選 3 建議的落點——
-`src/recsys_tfb/pipelines/training/diagnostics/data_access.py`(PR #93 新增的唯一
-`pyarrow.dataset` I/O 層)。放棄候選 2(檔案系統 glob),因為它得自行重做 pyarrow 已內建的
-垃圾檔排除與 hive 值解碼,純屬重複造輪子。
+`data_access.py`(PR #93 新增的唯一 `pyarrow.dataset` I/O 層)。放棄候選 2(檔案系統 glob),
+因為它得自行重做 pyarrow 已內建的垃圾檔排除與 hive 值解碼,純屬重複造輪子。
+
+**架構修正(實作完成後、使用者 review 時發現,已收斂)**:`data_access.py` 原本落在
+`diagnostics/` 底下,其 module docstring 宣稱「diagnostics 內唯一碰 pyarrow.dataset 的地方」。
+但 `predict_and_write_test_predictions` 並非 diagnostics——依賴它就讓這句宣稱失真,是本 PR
+自己造成的架構語意破壞,不是可以留給「日後第三個呼叫者出現」才處理的小事。因此把
+`data_access.py` 連同其測試檔一併移到 `src/recsys_tfb/pipelines/training/data_access.py`
+(與 `nodes.py` 同層),docstring 改為「pipelines.training 內(nodes 與 diagnostics 皆算)
+唯一碰 pyarrow.dataset 的地方」,並修正 `feature_stats.py`/`shap_per_item.py`/`nodes.py`
+及兩個測試檔的 import。純搬移、函式邏輯零改動,`test_training/` 126 測試全綠。
 
 ## 4. 設計
 
