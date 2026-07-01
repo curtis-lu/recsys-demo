@@ -90,6 +90,10 @@ def distinct_partitions(path: str, columns: list) -> list:
     Reads fragment/partition metadata only (``Dataset.get_fragments()`` +
     ``pyarrow.dataset.get_partition_keys()``) — O(n_fragments), never O(rows).
     Returns tuples in the given column order, deduplicated and sorted ascending.
+
+    Tuple element types follow pyarrow's hive-partition type inference for
+    each column (usually ``str``, but numeric-looking directory names infer
+    as ``int``) — callers that need a specific type must cast explicitly.
     """
     import pyarrow.dataset as pads
 
