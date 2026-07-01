@@ -118,6 +118,10 @@ def shap_setup(tmp_path, monkeypatch):
 
 def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     adapter, handle, preprocessor, parameters = shap_setup
+    # 這裡驗證的是 sample A 的「單次 SHAP 供 global/per_item/examples 三用」;
+    # 正例 profile 的第二次 SHAP(decoupled sample B)另由 positive_profile 測試覆蓋,
+    # 故此關閉 profile_positive 以隔離 sample-A 的單次計算語意。
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
 
     import shap
     calls = {"n": 0}
@@ -415,3 +419,60 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert set(out["per_item"]) == {"A", "B"}     # prod_name 從分區重建成功
     assert len(out["global"]["top_features"]) == 3
+
+
+def test_positive_profile_covered_by_targeted_sampling(tmp_path, monkeypatch):
+    # A 的正例夠多但辦卡率低:全域 item 分層樣本幾乎撈不到正例;針對正樣本抽後
+    # top_features_positive 應為非 null(coverage 修好)。
+    import numpy as np
+    import pandas as pd
+    rng = np.random.RandomState(0)
+    n = 4000
+    prod = np.where(np.arange(n) % 2 == 0, "A", "B")
+    f0 = rng.randn(n)
+    f1 = rng.randn(n)
+    # 稀疏正例(~3%),但絕對數量夠(A 的正例 > positive_min_rows)
+    label = (rng.rand(n) < 0.03).astype(int)
+    pdf = pd.DataFrame({"f0": f0, "f1": f1, "prod_name": prod, "label": label})
+    path = str(tmp_path / "test.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=500)
+    handle = ParquetHandle(path=path)
+
+    adapter = LightGBMAdapter()
+    adapter.train(np.c_[f0, f1], label.astype(float), None, None,
+                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+                   "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0})
+    preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
+                    "category_mappings": {}}
+    parameters = {"model_version": "mvpos",
+                  "diagnostics": {"shap": {"enabled": True, "top_k": 2,
+                                           "min_rows_per_item": 30, "sample_rows": 300,
+                                           "max_budget": 4000000,
+                                           "profile_positive": True,
+                                           "positive_min_rows": 20,
+                                           "positive_sample_per_item": 40}}}
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    # 至少一個 item 的正例 profile 因針對抽樣而有值
+    assert any(out["per_item"][it]["top_features_positive"] is not None
+               for it in out["per_item"])
+
+
+def test_positive_profile_skipped_when_disabled(shap_setup, monkeypatch):
+    # profile_positive=False → 不跑第二次 SHAP(不呼叫 attribution 於正例樣本)。
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
+
+    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+    calls = {"n": 0}
+    real = spi.feature_attributions
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(spi, "feature_attributions", counting)
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert calls["n"] == 1                     # 只有 sample A 那一次
+    for it in out["per_item"]:
+        assert out["per_item"][it]["top_features_positive"] is None
+        assert out["per_item"][it]["positive_low_coverage"] is False
