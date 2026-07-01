@@ -11,7 +11,7 @@ from . import data_access
 from ._util import _to_native
 from .attribution import attribution_budget_units, feature_attributions
 from .paths import per_item_summary_dir, safe_name, summary_dir
-from .sampling import _stratified_item_sample
+from .sampling import _positive_item_sample, _stratified_item_sample
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,41 @@ def _divergence(item_abs, global_abs, metric, k, feature_cols):
     return float(div), idio
 
 
+def _positive_profiles(model, path, item_values, item_col, label_col, feature_cols,
+                       take_cols, preprocessor, parameters, *, profile_positive,
+                       per_item, min_rows, top_k):
+    """針對正樣本(label==1)抽樣、單獨跑一次 SHAP,回傳每 item 的正例 profile。
+
+    回傳 {item_str: (top_features_positive|None, n_positive, positive_low_coverage)}。
+    profile_positive 關閉或資料無 label 欄 → 回傳 {}(呼叫端以預設處理)。與全域
+    item 分層樣本解耦,避免稀疏正樣本 coverage 不足。
+    """
+    from recsys_tfb.io.extract import _pdf_to_X
+
+    if not profile_positive or label_col not in data_access.schema_names(path):
+        return {}
+    all_labels = data_access.read_column(path, label_col)
+    pos_idx = _positive_item_sample(item_values, all_labels, per_item, seed=42)
+    if len(pos_idx) == 0:
+        return {}
+    pos_pdf = data_access.take_rows(path, pos_idx, columns=take_cols).reset_index(drop=True)
+    log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
+    X_pos = _pdf_to_X(pos_pdf, preprocessor, parameters)
+    with log_step(logger, "shap_values_positive"):
+        shap_pos = feature_attributions(model, X_pos, feature_cols)
+    pos_items = pos_pdf[item_col].values
+    out = {}
+    for item in pd.unique(pos_items):
+        m = pos_items == item
+        n = int(m.sum())
+        if n >= min_rows:
+            prof, _ = _signed_profile(shap_pos[m], feature_cols, top_k)
+            out[str(item)] = (prof, n, False)
+        else:
+            out[str(item)] = (None, n, True)
+    return out
+
+
 def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
     """SHAP 全域 / per-item（族群代表）/ 代表性個例。單次 shap_values 三用。"""
     cfg = parameters.get("diagnostics", {}).get("shap", {})
@@ -72,6 +107,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     sample_rows = int(cfg.get("sample_rows", 2000))
     max_budget = int(cfg.get("max_budget", 4_000_000))
     positive_min_rows = int(cfg.get("positive_min_rows", 20))
+    positive_sample_per_item = int(cfg.get("positive_sample_per_item", 30))
     divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
     divergence_top_k = int(cfg.get("divergence_top_k", 15))  # 通常比 top_k 小；只用於 Jaccard/idio 的 top-k 集合比較
     profile_positive = bool(cfg.get("profile_positive", True))
@@ -120,9 +156,14 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     # ---- 全域 ----
     global_top, mean_abs = _signed_profile(shap_values, feature_cols, top_k)
 
+    # ---- 正例 profile（解耦的正樣本目標 sample B；獨立第二次 SHAP）----
+    positive_profiles = _positive_profiles(
+        model, path, item_values, item_col, label_col, feature_cols, take_cols,
+        preprocessor, parameters, profile_positive=profile_positive,
+        per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
+
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
     items = sample_pdf[item_col].values
-    labels = sample_pdf[label_col].values if label_col in sample_pdf else np.zeros(len(sample_pdf))
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
@@ -130,16 +171,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         sc = scores[mask]
         # -- divergence vs global driver ranking --
         div, idio = _divergence(ai, mean_abs, divergence_metric, divergence_top_k, feature_cols)
-        # -- positive-only profile (adopters vs all-rows) --
-        pos_mask = mask & (labels == 1)
-        n_pos = int(pos_mask.sum())
-        if not profile_positive:
-            prof_pos, pos_low = None, False
-        elif n_pos >= positive_min_rows:
-            prof_pos, _ = _signed_profile(shap_values[pos_mask], feature_cols, top_k)
-            pos_low = False
-        else:
-            prof_pos, pos_low = None, True
+        # -- positive-only profile (decoupled positive-targeted sample B) --
+        prof_pos, n_pos, pos_low = positive_profiles.get(
+            str(item), (None, 0, bool(profile_positive)))
         per_item[str(item)] = {
             "top_features": prof_all,
             "n_sampled": int(mask.sum()),
