@@ -331,3 +331,33 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
         assert {r["item"] for r in idio} == set(out["per_item"])
         # non-degenerate: with 4 features and top_k=2, at least one item should diverge from global
         assert any(d > 0.0 for d in divs)
+
+
+def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+    from recsys_tfb.pipelines.training.diagnostics import data_access
+
+    n = 400
+    rng = np.random.RandomState(0)
+    pdf = pd.DataFrame({"f0": rng.randn(n), "f1": rng.randn(n)})
+    path = str(tmp_path / "train.parquet")
+    pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=50)
+    handle = ParquetHandle(path=path)
+    preprocessor = {"feature_columns": ["f0", "f1"]}
+    parameters = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 100}}}
+
+    seen = {}
+    real_take = data_access.take_rows
+
+    def spy_take(p, indices, columns):
+        seen["n_indices"] = len(indices)
+        return real_take(p, indices, columns)
+
+    monkeypatch.setattr(data_access, "take_rows", spy_take)
+    stats = diag.compute_feature_statistics(handle, preprocessor, parameters)
+
+    # bounded: only sample_rows rows were taken, not the full 400
+    assert seen["n_indices"] == 100
+    assert set(stats) == {"f0", "f1"}
+    assert "mean" in stats["f0"]
