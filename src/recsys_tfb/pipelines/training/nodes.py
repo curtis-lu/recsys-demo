@@ -803,6 +803,7 @@ def predict_and_write_test_predictions(
     import pyarrow.dataset as pads
 
     from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.pipelines.training.diagnostics import data_access as da
 
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]
@@ -822,29 +823,27 @@ def predict_and_write_test_predictions(
     # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
     ds = pads.dataset(test_parquet_handle.path, format="parquet", partitioning="hive")
 
-    # Enumerate distinct (snap_date, prod_name) values by projecting just the
-    # two partition columns and de-duplicating. Note: select-on-partition-cols
-    # in pyarrow still materializes one row per data row (the values are filled
-    # from directory names per fragment), so this is two-string-columns-wide,
-    # not zero I/O. At production scale (~220M rows × 2 short strings) the
-    # transient DataFrame fits comfortably on the 128GB driver — much cheaper
-    # than reading any feature columns — and drop_duplicates collapses it to
-    # n_snap_dates * n_prods rows immediately.
-    partition_table = ds.to_table(columns=[time_col, item_col])
-    log_data_volume(logger, "predict.partition_table", partition_table)
-    partition_pdf = partition_table.to_pandas()
-    log_data_volume(logger, "predict.partition_pdf", partition_pdf, deep=False)
-    partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
-    log_data_volume(logger, "predict.partition_pdf_unique", partition_pdf, deep=False)
-
     snap_dates_seen: set[str] = set()
     prods_seen: set[str] = set()
     n_rows_written = 0
     is_calibrated = isinstance(model, CalibratedModelAdapter)
 
-    for _, row in partition_pdf.iterrows():
-        snap_date = str(row[time_col])
-        prod_name = str(row[item_col])
+    # da.distinct_partitions enumerates (snap_date, prod_name) from fragment/
+    # directory metadata only (O(n_fragments), zero row scan) — unlike
+    # projecting the partition columns via ds.to_table(), which materializes
+    # one row per data row before de-duplicating. str() matches the old
+    # code's cast exactly: pyarrow infers partition-column types from the
+    # directory name (usually str, but int for numeric-looking values), and
+    # the old ds.to_table(...).to_pandas() path already applied str() before
+    # building the filter below — preserve that here too so behavior
+    # (including the pre-existing ArrowNotImplementedError this would raise
+    # for numeric-looking partition values, unchanged by this refactor) stays
+    # byte-for-byte identical to before.
+    for raw_snap_date, raw_prod_name in da.distinct_partitions(
+        test_parquet_handle.path, [time_col, item_col]
+    ):
+        snap_date = str(raw_snap_date)
+        prod_name = str(raw_prod_name)
 
         with log_step(logger, f"partition_{snap_date}_{prod_name}"):
             part_table = ds.to_table(
