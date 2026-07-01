@@ -225,6 +225,10 @@ shap_diagnostics:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/shap_diagnostics.json
 
+quadrant_profiles:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/per_quadrant.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

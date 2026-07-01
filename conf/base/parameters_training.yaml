@@ -160,6 +160,11 @@ diagnostics:
     divergence_metric: jaccard_topk # item top features vs 全域 top features；可用 spearman
     divergence_top_k: 15            # 偏離度比較用 top-k，通常小於或等於 top_k
     per_item_beeswarm: true         # item 很多時可關閉，減少圖片數與執行時間
+    # 象限診斷（P2b:TP/FP/FN/TN top@1;per-(item×象限) profile → per_quadrant.json）
+    quadrant_enabled: true          # 關閉則不跑象限選樣/profile
+    quadrant_top_k_decision: 1      # 象限「判正」名次界線（top@K）
+    quadrant_sample_per_cell: 30    # 每 (item×象限) profile 抽樣目標數
+    quadrant_min_rows: 10           # 某格 < 此 → low_coverage
 
 # HPO 崩潰復原開關（ops 旗標，刻意放頂層不影響 model_version）。
 # true（預設）：tune_hyperparameters 持久化 Optuna study + 每次刷新最佳 checkpoint
