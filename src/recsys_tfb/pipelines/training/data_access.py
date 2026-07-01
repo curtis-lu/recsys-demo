@@ -1,8 +1,9 @@
-"""Bounded, memory-frugal parquet reads for training diagnostics.
+"""Bounded, memory-frugal parquet reads for the training pipeline.
 
-I/O layer: the only place in diagnostics that touches ``pyarrow.dataset``.
-Reads operate on the hive-partitioned ``*_model_input`` caches
-(``…/snap_date=…/prod_name=…/``) written by the training cache nodes.
+I/O layer: the only place in ``pipelines.training`` (nodes and diagnostics
+alike) that touches ``pyarrow.dataset``. Reads operate on the hive-partitioned
+``*_model_input`` caches (``…/snap_date=…/prod_name=…/``) written by the
+training cache nodes.
 
 Row order is the deterministic path-sorted fragment order (``use_threads=False``),
 identical to ``pyarrow.parquet.read_table``. So positional indices computed

@@ -803,7 +803,7 @@ def predict_and_write_test_predictions(
     import pyarrow.dataset as pads
 
     from recsys_tfb.io.extract import _pdf_to_X
-    from recsys_tfb.pipelines.training.diagnostics import data_access as da
+    from recsys_tfb.pipelines.training import data_access as da
 
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]

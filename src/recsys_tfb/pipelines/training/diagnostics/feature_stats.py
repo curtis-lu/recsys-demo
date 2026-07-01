@@ -7,7 +7,7 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume
 
-from . import data_access
+from .. import data_access
 from ._util import _to_native
 
 logger = logging.getLogger(__name__)

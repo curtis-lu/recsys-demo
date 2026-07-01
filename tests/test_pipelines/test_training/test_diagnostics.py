@@ -336,7 +336,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
 def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     import numpy as np
     import pandas as pd
-    from recsys_tfb.pipelines.training.diagnostics import data_access
+    from recsys_tfb.pipelines.training import data_access
 
     n = 400
     rng = np.random.RandomState(0)

@@ -7,7 +7,7 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume, log_step
 
-from . import data_access
+from .. import data_access
 from ._util import _to_native
 from .attribution import attribution_budget_units, feature_attributions
 from .paths import per_item_summary_dir, safe_name, summary_dir
