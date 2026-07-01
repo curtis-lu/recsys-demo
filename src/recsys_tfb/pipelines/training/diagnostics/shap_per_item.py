@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.core.logging import log_step
+from recsys_tfb.core.logging import log_data_volume, log_step
 
 from . import data_access
 from ._util import _to_native
@@ -109,6 +109,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     sample_pdf = data_access.take_rows(path, idx, columns=take_cols).reset_index(drop=True)
     logger.info("shap diagnostics: n_total=%d n_sampled=%d n_cols=%d",
                 len(item_values), len(sample_pdf), len(take_cols))
+    log_data_volume(logger, "shap.sample_pdf", sample_pdf, deep=True)
 
     X = _pdf_to_X(sample_pdf, preprocessor, parameters)
     scores = model.predict(X)

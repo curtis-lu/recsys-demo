@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.logging import log_data_volume
+
 from . import data_access
 from ._util import _to_native
 
@@ -34,6 +36,7 @@ def compute_feature_statistics(train_parquet_handle, preprocessor: dict, paramet
         idx = np.arange(n, dtype=np.int64)
         logger.info("feature_statistics: reading all %d rows (<= sample_rows)", n)
     pdf = data_access.take_rows(path, idx, columns=feature_cols)
+    log_data_volume(logger, "feature_statistics.sample", pdf, deep=True)
 
     stats: dict = {}
     for col in feature_cols:
