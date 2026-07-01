@@ -82,3 +82,20 @@ def take_rows(path: str, indices, columns: list) -> pd.DataFrame:
     if not out_batches:
         return ds.head(0, columns=list(columns)).to_pandas()
     return pa.Table.from_batches(out_batches).to_pandas()
+
+
+def distinct_partitions(path: str, columns: list) -> list:
+    """Enumerate distinct hive-partition value tuples for ``columns``.
+
+    Reads fragment/partition metadata only (``Dataset.get_fragments()`` +
+    ``pyarrow.dataset.get_partition_keys()``) — O(n_fragments), never O(rows).
+    Returns tuples in the given column order, deduplicated and sorted ascending.
+    """
+    import pyarrow.dataset as pads
+
+    ds = _dataset(path)
+    seen = set()
+    for fragment in ds.get_fragments():
+        keys = pads.get_partition_keys(fragment.partition_expression)
+        seen.add(tuple(keys[c] for c in columns))
+    return sorted(seen)

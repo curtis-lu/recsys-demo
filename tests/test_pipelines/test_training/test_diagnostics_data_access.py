@@ -1,4 +1,6 @@
 """Tests for diagnostics.data_access — bounded parquet reads."""
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -89,3 +91,52 @@ def test_take_rows_empty_returns_typed_empty(flat_path):
     got = da.take_rows(path, np.array([], dtype=np.int64), columns=["f0", "label"])
     assert list(got.columns) == ["f0", "label"]
     assert len(got) == 0
+
+
+def test_distinct_partitions_matches_reference_and_is_sorted(part_path):
+    path, pdf = part_path
+    columns = ["snap_date", "prod_name"]
+    expected = sorted(set(pdf[columns].drop_duplicates().itertuples(index=False, name=None)))
+    got = da.distinct_partitions(path, columns)
+    assert got == expected
+
+
+def test_distinct_partitions_dedupes_multi_file_partition(tmp_path):
+    # Two separate write_dataset calls into the SAME partition dir, mimicking
+    # Spark's multi-task output — must collapse to a single tuple.
+    base = str(tmp_path / "multi")
+    pdf = pd.DataFrame({
+        "snap_date": ["2025-01-31"] * 4,
+        "prod_name": ["prod_A"] * 4,
+        "x": range(4),
+    })
+    pads.write_dataset(
+        pa.Table.from_pandas(pdf.iloc[:2]), base, format="parquet",
+        partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
+        basename_template="task0-{i}.parquet",
+    )
+    pads.write_dataset(
+        pa.Table.from_pandas(pdf.iloc[2:]), base, format="parquet",
+        partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
+        existing_data_behavior="overwrite_or_ignore",
+        basename_template="task1-{i}.parquet",
+    )
+    got = da.distinct_partitions(base, ["snap_date", "prod_name"])
+    assert got == [("2025-01-31", "prod_A")]
+
+
+def test_distinct_partitions_ignores_non_data_files(part_path):
+    path, pdf = part_path
+    columns = ["snap_date", "prod_name"]
+    Path(path, "_SUCCESS").write_text("")
+    Path(path, ".DS_Store").write_text("")
+    expected = sorted(set(pdf[columns].drop_duplicates().itertuples(index=False, name=None)))
+    got = da.distinct_partitions(path, columns)
+    assert got == expected
+
+
+def test_distinct_partitions_empty_dataset_returns_empty_list(tmp_path):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    got = da.distinct_partitions(str(empty_dir), ["snap_date", "prod_name"])
+    assert got == []
