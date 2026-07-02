@@ -205,7 +205,7 @@ dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled`
 | `cache.root` | driver-local Parquet 與演算法格式快取根目錄 |
 | `diagnostics.feature_stats` | 控制特徵統計開關、抽樣列數與高 null threshold |
 | `diagnostics.feature_importance` | 控制模型原生 split/gain importance |
-| `diagnostics.shap` | 控制 SHAP 開關、抽樣量、top K、案例數、計算預算與 per-item 強化（方向、採購者對照、偏離度） |
+| `diagnostics.shap` | 控制 SHAP 開關、抽樣量、top K、計算預算、per-item 強化（方向、採購者對照、偏離度）與象限診斷（per-(item×象限) profile 與極值案例圖） |
 | `mlflow` | 設定 experiment、tracking URI 與失敗策略 |
 | `hpo_checkpointing` | 是否持久化 Optuna study 與最佳模型 checkpoint |
 | `spark` | training CLI 初始化 Spark 使用的執行設定 |
@@ -231,7 +231,7 @@ SHAP 診斷主要回答三個問題：
 | 避免超出計算預算 | `max_budget` | 以 `sample_rows * n_trees` 估算成本；超過時框架會自動降低有效抽樣列數 |
 | 控制每個 item 的最低覆蓋 | `min_rows_per_item` | item 很多或長尾明顯時，可降低以避免抽樣不足；解讀時仍要看 `low_coverage` |
 | 控制輸出特徵數 | `top_k` | 影響 JSON 與圖上顯示的特徵數；通常 20～30 足夠人工審核 |
-| 控制全域 high/low 案例數 | `n_examples` | 只影響 `shap_diagnostics.json` 中的 example 摘要數，不影響 SHAP profile 計算 |
+| 控制案例圖特徵數 | `case_top_k` | 單列 case 圖顯示 |SHAP| 最大的前 N 個特徵；預設 15，太擠可再降 |
 | 產生 per-item 圖 | `per_item_beeswarm` | item 數少或需要逐 item 審核時開啟；item 很多時可關閉以減少圖片數與執行時間 |
 | 比較採購者 profile | `profile_positive` | 推薦保留 `true`；只有不需要 label==1 對照或正樣本極稀疏時才關閉 |
 | 設定採購者 profile 門檻 | `positive_min_rows` | 正樣本低於此值時 `top_features_positive` 會是 `null`，避免用太少樣本解讀採購者特徵 |
@@ -249,6 +249,23 @@ SHAP 診斷主要回答三個問題：
 | `divergence_from_global` | 0～1 浮點數；越高代表此 item 的重要特徵排序越不同於全域 |
 | `idiosyncratic_features` | 此 item top-k 中不在全域 top-k 的特徵清單 |
 | `item_idiosyncrasy` | 依 `divergence_from_global` 由高到低排序的 item 清單，用來快速找出 shared model 下最「不像全域」的 item |
+
+#### 象限診斷（top@1 TP/FP/FN/TN）
+
+象限診斷聚焦「模型的 top@1 決策」：對每個 query group（time × entity），以最高分候選為決策。
+依 `label` 分四象限——`TP`（排第 1 且採用）、`FP`（排第 1 未採用）、`FN`（未排第 1 但採用）、
+`TN`（未排第 1 未採用）。由 `quadrant_enabled` 開關（沿用同一組 `quadrant_*` 設定）。
+
+| 產物 | 內容 | 位置 |
+| --- | --- | --- |
+| `per_quadrant.json` | 每 (item×象限) 聚合的 signed SHAP profile（平均驅動特徵 + 方向 + `low_coverage`），每格抽樣 `quadrant_sample_per_cell` 列 | `diagnostics/per_quadrant.json` |
+| 案例圖 | 每 (item×象限) 全格最高分、最低分各一列的單列 signed SHAP 貢獻橫條圖（`case_top_k` 個特徵，紅=推高分、藍=拉低分） | `diagnostics/cases/<item>/{TP,FP,FN,TN}_{high,low}.png` |
+| `cases_manifest.json` | 完整 4-象限稽核表：每 item × 4 象限 × {high,low} 一筆,含 schema 欄位值（time/entity 欄，如 `snap_date`/`cust_id`）與 `rank/score/label` 及 PNG 路徑；空格記 `reason=empty`、單行格 low 記 `reason=single_row_same_as_high` | `diagnostics/cases/cases_manifest.json` |
+
+**top@1 本質**：多數 item 從不會被排到第 1，因此其 `TP/FP` 格常為空（manifest 記 `empty`），
+`FN/TN` 才飽滿——這本身即是「該 item 幾乎不被列為首選」的重要訊號，而非缺漏。
+案例圖用來看「某位客戶在某象限被排高／排低，具體靠哪些特徵」，與 `per_quadrant.json` 的
+「平均驅動特徵」互補。SHAP 值在 log-odds（margin）尺上;正值把分數推高、負值拉低。
 
 偏離度高不一定代表模型錯了；它表示該 item 可能依賴更特殊的訊號。若該 item 的離線指標也偏弱，才是評估補特徵、調整 sampling、引入 per-item 策略或兩階段模型的起點。
 
@@ -390,6 +407,9 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 | 特徵統計 | `compute_feature_statistics` | train handle、preprocessor view | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
 | SHAP | `compute_shap_diagnostics` | model、test handle | 依 item 分層抽樣後計算全域 beeswarm、per-item 帶方向 SHAP profile（含採購者對照）與偏離度排名 | `shap_diagnostics`、PNG |
+| 象限選樣 | `select_shap_population` | training_eval_predictions、test_model_input | top@1 象限 + 每格抽樣（profile）與全格極值（cases） | `shap_population`、`case_rows` |
+| 象限 profile | `compute_quadrant_profiles` | model、shap_population | per-(item×象限) 聚合 signed profile | `quadrant_profiles`（`per_quadrant.json`） |
+| 象限案例 | `compute_quadrant_cases` | model、case_rows | 每 (item×象限) 極值案例單列 SHAP 圖 | `cases_manifest`、PNG |
 | 實驗記錄 | `log_experiment` | model、參數、指標、診斷 | 將實驗寫入 MLflow | 無 |
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
@@ -408,14 +428,14 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | HPO best model | `hpo/model.txt`、`hpo/model_meta.json` | `data/models/<model_version>/hpo/` |
 | Test 指標 | `evaluation_results.json` | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
-| 模型診斷 | feature statistics、importance、`shap_diagnostics.json` 與 PNG | `data/models/<model_version>/diagnostics/` |
+| 模型診斷 | feature statistics、importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
 | Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...` |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
-SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向；高分、低分與 per-item 高分案例摘要則寫在 `shap_diagnostics.json` 的 `examples` 區塊。
+SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
 
 `model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 放在獨立 `hpo/` 子目錄，避免它的 sidecar 與最終模型互相覆寫。
 
