@@ -27,6 +27,13 @@ def per_item_summary_dir(parameters: dict) -> Path:
     return d
 
 
+def cases_dir(parameters: dict) -> Path:
+    """Resolve（並建立）diagnostics/cases/ —— 每 (item×象限) 極值案例圖 + manifest。"""
+    d = diagnostics_dir(parameters) / "cases"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def safe_name(s: object) -> str:
     """檔名安全化（item 值可能含空白/斜線）。"""
     return re.sub(r"[^0-9A-Za-z._-]+", "_", str(s))
