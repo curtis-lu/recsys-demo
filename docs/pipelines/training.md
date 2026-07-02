@@ -260,7 +260,7 @@ SHAP 診斷主要回答三個問題：
 | --- | --- | --- |
 | `per_quadrant.json` | 每 (item×象限) 聚合的 signed SHAP profile（平均驅動特徵 + 方向 + `low_coverage`），每格抽樣 `quadrant_sample_per_cell` 列 | `diagnostics/per_quadrant.json` |
 | 案例圖 | 每 (item×象限) 全格最高分、最低分各一列的單列 signed SHAP 貢獻橫條圖（`case_top_k` 個特徵，紅=推高分、藍=拉低分） | `diagnostics/cases/<item>/{TP,FP,FN,TN}_{high,low}.png` |
-| `cases_manifest.json` | 完整 4-象限稽核表：每 item × 4 象限 × {high,low} 一筆,含 schema 欄位值（time/entity 欄，如 `snap_date`/`cust_id`）與 `rank/score/label` 及 PNG 路徑；空格記 `reason=empty`、單行格 low 記 `reason=single_row_same_as_high` | `diagnostics/cases/cases_manifest.json` |
+| `cases_manifest.json` | 完整 4-象限稽核表：每 item × 4 象限 × {high,low} 一筆,含 schema 欄位值（time/entity 欄，如 `snap_date`/`cust_id`）與 `rank/score/label` 及 PNG 路徑（相對於 `diagnostics/`，如 `cases/<item>/TP_high.png`）；空格記 `reason=empty`、單行格 low 記 `reason=single_row_same_as_high` | `diagnostics/cases/cases_manifest.json` |
 
 **top@1 本質**：多數 item 從不會被排到第 1，因此其 `TP/FP` 格常為空（manifest 記 `empty`），
 `FN/TN` 才飽滿——這本身即是「該 item 幾乎不被列為首選」的重要訊號，而非缺漏。
