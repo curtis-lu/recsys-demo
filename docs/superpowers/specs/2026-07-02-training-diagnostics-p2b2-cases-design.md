@@ -100,7 +100,7 @@ per-item 子目錄 `cases/<safe_item>/` 在寫圖時以 `safe_name(item)` 建立
   "ccard": {
     "TP": {
       "high": {"rendered": true, "png": "cases/ccard/TP_high.png",
-               "snap_date": "20260101", "cust": "C0001", "rank": 1, "score": 0.912, "label": 1},
+               "snap_date": "20260101", "cust_id": "C0001", "rank": 1, "score": 0.912, "label": 1},
       "low":  {"rendered": false, "reason": "single_row_same_as_high"}
     },
     "FP": {
@@ -116,7 +116,7 @@ per-item 子目錄 `cases/<safe_item>/` 在寫圖時以 `safe_name(item)` 建立
 - **item universe** = `case_rows` 中出現過的 item(自足、不需額外輸入;實務上每 item 至少有 TN 會出現 ≈ 涵蓋全部)。
 - **空格**(該 item×象限無列):`{"rendered": false, "reason": "empty"}`,不產圖。
 - **單行格**(該格僅 1 列,`high` 與 `low` 為同一實體列 —— 以 group-key 相等判定):畫 `high`,`low` 記 `{"rendered": false, "reason": "single_row_same_as_high"}`,不產重複檔。
-- `cust` 放原始值(不 hash);多個 entity 欄則以其值組合表示。
+- **manifest 鍵用實際 schema 欄名**(泛用框架,不寫死 `snap_date`/`cust`):`{time_col: 值, **{entity_col: 值}}`——銀行示例即 `snap_date` + `cust_id`;多個 entity 欄各自成鍵。值放原始值(不 hash;公司環境已做資料隔離)。
 
 ## 7. 接線 / config / catalog
 
