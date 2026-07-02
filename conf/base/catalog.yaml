@@ -229,6 +229,10 @@ quadrant_profiles:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/per_quadrant.json
 
+cases_manifest:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/cases/cases_manifest.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

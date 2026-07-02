@@ -165,6 +165,7 @@ diagnostics:
     quadrant_top_k_decision: 1      # 象限「判正」名次界線（top@K）
     quadrant_sample_per_cell: 30    # 每 (item×象限) profile 抽樣目標數
     quadrant_min_rows: 10           # 某格 < 此 → low_coverage
+    case_top_k: 15                  # 單列 case 案例圖顯示的特徵數（|SHAP| 最大的前 N）
 
 # HPO 崩潰復原開關（ops 旗標，刻意放頂層不影響 model_version）。
 # true（預設）：tune_hyperparameters 持久化 Optuna study + 每次刷新最佳 checkpoint

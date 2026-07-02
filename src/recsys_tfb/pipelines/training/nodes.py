@@ -906,6 +906,7 @@ def log_experiment(
     shap_diagnostics: dict,
     parameters: dict,
     quadrant_profiles: dict = None,
+    cases_manifest: dict = None,
 ) -> None:
     """Log training results to MLflow."""
     from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
@@ -967,6 +968,12 @@ def log_experiment(
                 if quadrant_profiles:
                     n_cells = sum(len(v) for v in quadrant_profiles.values())
                     mlflow.log_metric("n_quadrant_cells", n_cells)
+                if cases_manifest:
+                    n_cases = sum(
+                        1 for it in cases_manifest.values() for cell in it.values()
+                        for r in cell.values() if r.get("rendered")
+                    )
+                    mlflow.log_metric("n_cases_rendered", n_cases)
 
                 # --- diagnostics artifacts (JSON written by catalog, PNG by shap node;
                 #     upload the whole dir) ---

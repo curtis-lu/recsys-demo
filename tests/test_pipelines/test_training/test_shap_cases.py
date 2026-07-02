@@ -159,6 +159,10 @@ def test_pipeline_wires_quadrant_nodes():
     # log_experiment 依賴 quadrant_profiles(排序保證 per_quadrant.json 先寫)
     log_node = next(n for n in pipe.nodes if n.func.__name__ == "log_experiment")
     assert "quadrant_profiles" in log_node.inputs
+    assert "compute_quadrant_cases" in fns
+    assert "cases_manifest" in log_node.inputs
+    sp = next(n for n in pipe.nodes if n.func.__name__ == "select_shap_population")
+    assert sp.outputs == ["shap_population", "case_rows"]
 
 
 def test_catalog_has_quadrant_profiles():
@@ -171,3 +175,24 @@ def test_catalog_has_quadrant_profiles():
     cat = yaml.safe_load(catalog_path.read_text())
     assert cat["quadrant_profiles"]["type"] == "JSONDataset"
     assert "per_quadrant.json" in cat["quadrant_profiles"]["filepath"]
+
+
+def test_catalog_has_cases_manifest():
+    from pathlib import Path
+
+    import yaml
+
+    catalog_path = Path(__file__).resolve().parents[3] / "conf" / "base" / "catalog.yaml"
+    cat = yaml.safe_load(catalog_path.read_text())
+    assert cat["cases_manifest"]["type"] == "JSONDataset"
+    assert "cases/cases_manifest.json" in cat["cases_manifest"]["filepath"]
+
+
+def test_config_has_case_top_k():
+    from pathlib import Path
+
+    import yaml
+
+    p = Path(__file__).resolve().parents[3] / "conf" / "base" / "parameters_training.yaml"
+    cfg = yaml.safe_load(p.read_text())["diagnostics"]["shap"]
+    assert cfg["case_top_k"] == 15

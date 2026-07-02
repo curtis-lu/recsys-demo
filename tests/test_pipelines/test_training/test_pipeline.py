@@ -14,9 +14,9 @@ class TestTrainingPipeline:
         # + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
-        # + select_shap_population + compute_quadrant_profiles
+        # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 17
+        assert len(pipeline.nodes) == 18
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -48,7 +48,7 @@ class TestTrainingPipeline:
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
             "feature_statistics", "feature_importance", "shap_diagnostics",
-            "shap_population", "quadrant_profiles",
+            "shap_population", "case_rows", "quadrant_profiles", "cases_manifest",
             "sample_weight_report",
         }
         assert pipeline.outputs == expected
@@ -133,9 +133,9 @@ class TestTrainingPipeline:
         # + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
-        # + select_shap_population + compute_quadrant_profiles
+        # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 19
+        assert len(pipeline.nodes) == 20
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)
@@ -335,6 +335,7 @@ class TestTrainingPipelineE2E:
             "compute_test_mAP_spark",
             "select_shap_population",
             "compute_quadrant_profiles",
+            "compute_quadrant_cases",
         }
         # Provide stub predict_manifest and evaluation_results so log_experiment has inputs.
         # catalog.add overwrites any existing registration.
@@ -351,6 +352,7 @@ class TestTrainingPipelineE2E:
         # quadrant_profiles producer (compute_quadrant_profiles) is skipped above;
         # stub it so log_experiment can load its input.
         catalog.add("quadrant_profiles", MemoryDataset({}))
+        catalog.add("cases_manifest", MemoryDataset({}))
 
         training_nodes = [
             n for n in full_training_pipeline.nodes
