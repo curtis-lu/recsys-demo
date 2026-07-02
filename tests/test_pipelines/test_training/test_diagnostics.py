@@ -109,7 +109,7 @@ def shap_setup(tmp_path, monkeypatch):
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [], "category_mappings": {}}
     parameters = {
         "model_version": "testmv",
-        "diagnostics": {"shap": {"enabled": True, "top_k": 2, "n_examples": 1,
+        "diagnostics": {"shap": {"enabled": True, "top_k": 2,
                                  "min_rows_per_item": 30, "sample_rows": 150,
                                  "max_budget": 4000000}},
     }
@@ -118,7 +118,7 @@ def shap_setup(tmp_path, monkeypatch):
 
 def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     adapter, handle, preprocessor, parameters = shap_setup
-    # 這裡驗證的是 sample A 的「單次 SHAP 供 global/per_item/examples 三用」;
+    # 這裡驗證的是 sample A 的「單次 SHAP 供 global/per_item 兩用」;
     # 正例 profile 的第二次 SHAP(decoupled sample B)另由 positive_profile 測試覆蓋,
     # 故此關閉 profile_positive 以隔離 sample-A 的單次計算語意。
     parameters["diagnostics"]["shap"]["profile_positive"] = False
@@ -136,7 +136,8 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
 
     assert calls["n"] == 1                          # 單次計算
-    assert set(out) >= {"global", "per_item", "examples"}
+    assert set(out) >= {"global", "per_item", "item_idiosyncrasy"}
+    assert "examples" not in out
     assert len(out["global"]["top_features"]) == 2
     assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
                for r in out["global"]["top_features"])
@@ -145,9 +146,6 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert out["per_item"]["rare"]["n_sampled"] <= 2
     assert {"n_sampled", "n_positive", "score_min", "score_max", "score_mean", "low_coverage"} \
         <= set(out["per_item"]["rare"])
-    assert {"high", "low"} <= set(out["examples"])
-    items_in_examples = {e["item"] for e in out["examples"]["per_item_high"]}
-    assert {"A", "B", "rare"} <= items_in_examples
     from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
     assert (summary_dir(parameters) / "shap_summary_global.png").exists()
 
@@ -321,7 +319,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
                     "categorical_columns": [], "category_mappings": {}}
     for metric in ("jaccard_topk", "spearman"):
         parameters = {"model_version": f"mv4_{metric}",
-                      "diagnostics": {"shap": {"enabled": True, "top_k": 4, "n_examples": 1,
+                      "diagnostics": {"shap": {"enabled": True, "top_k": 4,
                                                "min_rows_per_item": 10, "sample_rows": 240,
                                                "max_budget": 4000000,
                                                "divergence_metric": metric, "divergence_top_k": 2}}}
@@ -413,7 +411,7 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
                     "category_mappings": {"prod_name": ["A", "B"]}}
     parameters = {"model_version": "mvpart",
                   "schema": {"item": "prod_name", "label": "label"},
-                  "diagnostics": {"shap": {"enabled": True, "top_k": 3, "n_examples": 1,
+                  "diagnostics": {"shap": {"enabled": True, "top_k": 3,
                                            "min_rows_per_item": 10, "sample_rows": 120,
                                            "max_budget": 4000000}}}
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)

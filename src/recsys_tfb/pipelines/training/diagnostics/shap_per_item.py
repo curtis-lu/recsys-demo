@@ -88,7 +88,7 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
 
 
 def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
-    """SHAP 全域 / per-item（族群代表）/ 代表性個例。單次 shap_values 三用。"""
+    """SHAP 全域 / per-item（族群代表）。單次 shap_values 兩用。"""
     cfg = parameters.get("diagnostics", {}).get("shap", {})
     if not cfg.get("enabled", True):
         return {}
@@ -102,7 +102,6 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     from recsys_tfb.io.extract import _pdf_to_X
 
     top_k = int(cfg.get("top_k", 30))
-    n_examples = int(cfg.get("n_examples", 5))
     min_per_item = int(cfg.get("min_rows_per_item", 30))
     sample_rows = int(cfg.get("sample_rows", 2000))
     max_budget = int(cfg.get("max_budget", 4_000_000))
@@ -196,22 +195,6 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         reverse=True,
     )
 
-    # ---- 代表性個例（全域 high/low + 每 item 一筆高分）----
-    def _example(i):
-        return {"item": str(items[i]), "score": float(scores[i]),
-                "shap": {feature_cols[j]: _to_native(shap_values[i, j]) for j in range(len(feature_cols))}}
-
-    hi = np.argsort(scores)[::-1][:n_examples]
-    lo = np.argsort(scores)[:n_examples]
-    per_item_high = []
-    for item in pd.unique(items):
-        pos = np.where(items == item)[0]
-        best = pos[np.argmax(scores[pos])]
-        per_item_high.append(_example(best))
-    examples = {"high": [_example(i) for i in hi],
-                "low": [_example(i) for i in lo],
-                "per_item_high": per_item_high}
-
     # ---- PNG（best-effort：繪圖失敗不應中斷診斷/訓練，spec §4）----
     sdir = summary_dir(parameters)
     try:
@@ -243,5 +226,5 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
-    return {"global": {"top_features": global_top}, "per_item": per_item, "examples": examples,
+    return {"global": {"top_features": global_top}, "per_item": per_item,
             "item_idiosyncrasy": item_idiosyncrasy}

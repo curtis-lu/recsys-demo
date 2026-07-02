@@ -804,7 +804,7 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     eval_results = {"overall_map": 0.5, "per_item_map_attr": {}, "n_queries": 10, "n_excluded_queries": 0}
     feature_statistics = {"f0": {"single_value": True, "high_null": False, "null_rate": 0.0, "n_distinct": 1}}
     feature_importance = {"ranked": [], "dead_features": ["f3", "f4"]}
-    shap_diagnostics = {"global": {"top_features": []}, "per_item": {}, "examples": {}}
+    shap_diagnostics = {"global": {"top_features": []}, "per_item": {}, "item_idiosyncrasy": []}
 
     nodes.log_experiment(_Model(), {}, 10, eval_results, feature_statistics,
                          feature_importance, shap_diagnostics, parameters)
