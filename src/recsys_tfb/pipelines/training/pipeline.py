@@ -5,6 +5,7 @@ from recsys_tfb.core.pipeline import Pipeline
 from recsys_tfb.pipelines.training.diagnostics import (
     compute_feature_importance,
     compute_feature_statistics,
+    compute_quadrant_cases,
     compute_quadrant_profiles,
     compute_shap_diagnostics,
 )
@@ -172,22 +173,30 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "training_eval_predictions", "test_model_input",
                 "parameters", "predict_manifest",
             ],
-            outputs="shap_population",
+            outputs=["shap_population", "case_rows"],
         ),
         Node(
             compute_quadrant_profiles,
             inputs=["model", "shap_population", "preprocessor_view", "parameters"],
             outputs="quadrant_profiles",
         ),
+        # P2b-2 象限案例:每 (item×象限) 全格極值案例的單列 signed SHAP 圖 + manifest。
+        # 與 profile 依目的解耦(讀 case_rows,自己一次小 SHAP);compute_quadrant_profiles 不動。
+        Node(
+            compute_quadrant_cases,
+            inputs=["model", "case_rows", "preprocessor_view", "parameters"],
+            outputs="cases_manifest",
+        ),
         Node(
             log_experiment,
             # quadrant_profiles 置末:log_experiment 簽名新參數有 default None（在
             # parameters 之後），Runner 以 node.inputs 位置對應傳參,故此處順序須與簽名
             # 一致。此依賴也保證 per_quadrant.json 已由 catalog 寫入後才 log_artifacts。
+            # cases_manifest 亦置末(default None),保證 cases PNG/manifest 於 log_artifacts 前寫好。
             inputs=[
                 "model", "best_params", "best_iteration", "evaluation_results",
                 "feature_statistics", "feature_importance", "shap_diagnostics",
-                "parameters", "quadrant_profiles",
+                "parameters", "quadrant_profiles", "cases_manifest",
             ],
             outputs=None,
         ),
