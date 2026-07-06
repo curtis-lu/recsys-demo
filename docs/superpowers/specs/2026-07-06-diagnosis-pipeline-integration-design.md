@@ -22,7 +22,7 @@
 3. **不動 model_version 的語意**：評估側全部新 config 在 `evaluation.*`（本來就不進 model_version）；訓練側新診斷 config 掛既有頂層 `diagnostics:`（已確立不進 model_version 的前例）。**任何會改變 `compute_model_version` 輸入的鍵都不允許在本案新增。**
 4. **模組邊界**：evaluation 不 import `pipelines/training` 內部。Phase 5 的 triage 總表需要訓練側產物（gain ledger），**靠 catalog 的 JSON 產物銜接，不靠 import**。
 5. **HPO objective 本案不動**：`training.hpo_objective` 維持現狀（`mean_ap` / `macro_per_item_map`，`pipelines/training/nodes.py:361-364`）。把參數化指標接進 HPO 會經 training params 影響 model_version 與搜尋行為，留待指標定案後另案。
-6. **與 shaprx 的邊界**：loss-SHAP、cohort 偵測器、處方器不在本案（shaprx 疆域）。本案的 SHAP 只到「per-item 背景的分數歸因」（Phase 5）。
+6. **SHAP 範圍**：本案的 SHAP 只到「per-item 背景的分數歸因」（Phase 5）；loss-SHAP、cohort 偵測器、處方自動化不在本案（見 §6）。
 
 ## 2. 共用底座：診斷抽樣（bounded driver-side sample）
 
@@ -172,7 +172,7 @@
 ## 6. 明確不做（v1 邊界）
 
 1. offset 的**部署**（predict 後處理）——診斷產物裡有 $\delta^*$，要不要部署等真實數字。
-2. loss-SHAP、cohort 偵測、處方自動化——shaprx 疆域。
+2. loss-SHAP、cohort 偵測、處方自動化——不在本案；要不要做、以什麼形式做（repo 內或獨立工具）皆未定，等本案落地取得真實讀數後再評估。
 3. influence／訓練資料歸因。
 4. HPO objective 的參數化對齊（§1 不變量 5）。
 5. 公司環境驗證——每階段驗收都在本機合成資料；公司規模的成本（bootstrap、sweep 的抽樣上限是否夠）標為部署前另驗項。
