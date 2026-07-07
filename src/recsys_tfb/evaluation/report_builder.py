@@ -515,8 +515,8 @@ def build_quadrant_section(
     if not quadrant or not quadrant.get("enabled"):
         return None
     by_item = quadrant.get("by_item", {}) or {}
-    cols = ["quadrant", "gap_vs_global", "auc", "ap_sampled", "ci_low",
-            "ci_high", "top_share", "y_rate", "suppression_count",
+    cols = ["quadrant", "gap_vs_global", "auc", "auc_reason", "ap_sampled",
+            "ci_low", "ci_high", "top_share", "y_rate", "suppression_count",
             "n_pos", "n_rows"]
     tbl = pd.DataFrame(
         {c: [by_item[it].get(c) for it in by_item] for c in cols},

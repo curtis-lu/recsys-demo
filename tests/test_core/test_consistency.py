@@ -742,7 +742,8 @@ class TestQuadrantParamsA17:
 
     def test_auc_threshold_boundaries(self):
         from recsys_tfb.core.consistency import quadrant_param_errors
-        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) == []
+        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) != []
+        assert quadrant_param_errors(self._params({"auc_threshold": 0.51})) == []
         assert quadrant_param_errors(self._params({"auc_threshold": 1.0})) != []
 
     def test_wired_into_validate(self):

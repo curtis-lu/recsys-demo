@@ -34,7 +34,9 @@ def top_slot_share(sdf: SparkDataFrame, parameters: dict, k: int) -> dict:
     rows = (
         sdf.groupBy(item_col)
         .agg(
-            F.sum(F.when(F.col(rank_col) <= k, 1).otherwise(0)).alias("n_top"),
+            F.sum(
+                F.when(F.col(rank_col).cast("long") <= k, 1).otherwise(0)
+            ).alias("n_top"),
             F.mean(F.col(label_col).cast("double")).alias("y_rate"),
             F.count(F.lit(1)).alias("n_rows"),
         )
@@ -65,13 +67,14 @@ def suppression_counts(sdf: SparkDataFrame, parameters: dict) -> dict:
 
     w = Window.partitionBy(*query_cols)
     lbl = F.col(label_col).cast("int")
+    rnk = F.col(rank_col).cast("long")
     with_min = sdf.withColumn(
-        "_min_pos_rank", F.min(F.when(lbl == 1, F.col(rank_col))).over(w)
+        "_min_pos_rank", F.min(F.when(lbl == 1, rnk)).over(w)
     )
     suppressing = with_min.filter(
         (lbl == 0)
         & F.col("_min_pos_rank").isNotNull()
-        & (F.col(rank_col) < F.col("_min_pos_rank"))
+        & (rnk < F.col("_min_pos_rank"))
     )
     rows = suppressing.groupBy(item_col).count().collect()
     n_pos_queries = sdf.filter(lbl == 1).select(*query_cols).distinct().count()

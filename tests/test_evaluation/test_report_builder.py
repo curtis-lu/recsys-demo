@@ -657,11 +657,13 @@ def test_quadrant_section_none_when_disabled_or_absent():
 
 def test_quadrant_section_notes_and_missing_axis():
     from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    auc_reason = "單一類別（n_pos=0, n_neg=10）——AUC 未定義"
     fx = dict(
         _QUAD_FIXTURE,
         by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
                            gap_vs_global=None, level_status="無法評估",
-                           quadrant="無法評估")},
+                           quadrant="無法評估", auc=None,
+                           auc_reason=auc_reason)},
         notes=["reconciliation 停用或缺席——水準軸無法評估。"],
     )
     sec = build_quadrant_section(fx, _params_min())
@@ -669,6 +671,8 @@ def test_quadrant_section_notes_and_missing_axis():
     assert "reconciliation 停用" in sec.description
     # 缺軸的 item 不進散布圖：唯一 item 缺 y → 無圖
     assert sec.figures == []
+    # 單類 item 的 auc 為 None 時，人類可讀的原因要進報表（不只在 JSON）。
+    assert auc_reason in sec.tables[0]["auc_reason"].tolist()
 
 
 def test_assemble_report_renders_quadrant():

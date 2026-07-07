@@ -88,7 +88,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``score_col`` ∈ {score, score_uncalibrated}; ``explained_threshold`` > 0
   (log-odds). Predicate: ``reconciliation_param_errors``.
 * A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
-  ``auc_threshold`` ∈ [0.5, 1); ``gap_band`` > 0 (log-odds);
+  ``auc_threshold`` ∈ (0.5, 1); ``gap_band`` > 0 (log-odds);
   ``top_k_occupancy`` integer >= 1. Predicate: ``quadrant_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
@@ -582,10 +582,10 @@ def quadrant_param_errors(parameters: dict) -> list[str]:
         .get("quadrant", {}) or {}
     )
     thr = quad.get("auc_threshold", 0.6)
-    if not (_is_number(thr) and 0.5 <= float(thr) < 1.0):
+    if not (_is_number(thr) and 0.5 < float(thr) < 1.0):
         errors.append(
             f"evaluation.diagnosis.quadrant.auc_threshold={thr!r} must be a "
-            f"number in [0.5, 1)."
+            f"number in (0.5, 1)."
         )
     band = quad.get("gap_band", 0.35)
     if not (_is_number(band) and float(band) > 0.0):
