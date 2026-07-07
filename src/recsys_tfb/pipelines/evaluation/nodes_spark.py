@@ -324,6 +324,40 @@ def compute_reconciliation(
     return out
 
 
+def compute_quadrant(
+    eval_predictions: Optional[SparkDataFrame],
+    label_table: Optional[SparkDataFrame],
+    metric_ci: Optional[dict],
+    reconciliation: Optional[dict],
+    parameters: dict,
+) -> dict:
+    """象限層薄 node（框架診斷項目 3/5/10）。
+
+    領域邏輯全在 ``diagnosis.metric.quadrant``。停用時寫 stub；上游診斷
+    產物（metric_ci/reconciliation）是停用 stub 時 best-effort 降級不失敗。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {}).get("quadrant", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("quadrant disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None or label_table is None:
+        raise ValueError(
+            "compute_quadrant: eval_predictions and label_table are required "
+            "when evaluation.diagnosis.quadrant.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.quadrant import build_quadrant_summary
+    out = build_quadrant_summary(
+        eval_predictions, label_table, metric_ci, reconciliation, parameters
+    )
+    logger.info(
+        "quadrant computed: %d items, %d aggressors",
+        len(out["by_item"]),
+        sum(1 for v in out["by_item"].values() if v["is_aggressor"]),
+    )
+    return out
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
@@ -331,6 +365,7 @@ def generate_report(
     baseline_metrics: Optional[dict] = None,
     metric_ci: Optional[dict] = None,
     reconciliation: Optional[dict] = None,
+    quadrant: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its

@@ -242,6 +242,10 @@ evaluation_reconciliation:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/reconciliation.json
 
+evaluation_quadrant:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/quadrant_summary.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

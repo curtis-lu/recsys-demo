@@ -8,7 +8,7 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 7
+        assert len(pipeline.nodes) == 8
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -21,7 +21,7 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_reconciliation",
+            "evaluation_reconciliation", "evaluation_quadrant",
         }
         assert pipeline.outputs == expected
 
@@ -32,7 +32,19 @@ class TestEvaluationPipelineDefault:
             "prepare_eval_data", "compute_metrics",
             "compute_baseline_metrics", "compute_metric_ci",
             "compute_reconciliation",
-            "persist_eval_predictions", "generate_report",
+            "persist_eval_predictions", "compute_quadrant", "generate_report",
+        ]
+
+    def test_compute_quadrant_inputs_wired_in_order(self):
+        # Both evaluation_metric_ci and evaluation_reconciliation are dicts,
+        # so a swap between them would type-check but silently feed the
+        # level axis (gap_vs_global) from the wrong upstream (or None) —
+        # this pins the exact positional wiring so that swap fails loudly.
+        pipeline = create_pipeline()
+        node = next(n for n in pipeline.nodes if n.name == "compute_quadrant")
+        assert node.inputs == [
+            "eval_predictions", "label_table", "evaluation_metric_ci",
+            "evaluation_reconciliation", "parameters",
         ]
 
 
@@ -41,7 +53,7 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        assert len(pipeline.nodes) == 7
+        assert len(pipeline.nodes) == 8
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -54,7 +66,7 @@ class TestEvaluationPipelinePostTraining:
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_reconciliation",
+            "evaluation_reconciliation", "evaluation_quadrant",
         }
         assert pipeline.outputs == expected
 
@@ -64,7 +76,7 @@ class TestEvaluationPipelineCompareMode:
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        assert len(pipeline.nodes) == 10
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

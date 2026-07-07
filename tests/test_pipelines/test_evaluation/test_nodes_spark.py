@@ -607,3 +607,57 @@ def test_compute_reconciliation_end_to_end_small(spark):
     assert out["enabled"] is True
     assert out["by_item"]["A"]["verdict"] == "可解釋"
     assert out["all_explained"] is True
+
+
+def test_compute_quadrant_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {"enabled": False}}},
+    }
+    assert compute_quadrant(None, None, None, None, params) == {"enabled": False}
+
+
+def test_compute_quadrant_requires_inputs_when_enabled(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_quadrant"):
+        compute_quadrant(None, None, None, None, params)
+
+
+def test_compute_quadrant_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, 1),
+            ("20240331", "C0", "B", 0.5, 0, 2),
+            ("20240331", "C1", "A", 0.2, 0, 2),
+            ("20240331", "C1", "B", 0.6, 1, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
+    )
+    labels = spark.createDataFrame(
+        [("20240331", "C0", "A", 1), ("20240331", "C1", "B", 1)],
+        schema=["snap_date", "cust_id", "prod_name", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {
+            "enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+            "top_k_occupancy": 1}}},
+    }
+    out = compute_quadrant(df, labels, {"enabled": False},
+                           {"enabled": False}, params)
+    assert out["enabled"] is True
+    assert set(out["by_item"]) == {"A", "B"}
+    assert out["by_item"]["A"]["quadrant"] == "無法評估"  # 上游 stub → 水準軸缺
