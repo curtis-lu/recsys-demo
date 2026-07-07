@@ -58,6 +58,7 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
+      reconciliation: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]

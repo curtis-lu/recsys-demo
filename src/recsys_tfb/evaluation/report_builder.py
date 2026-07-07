@@ -412,6 +412,47 @@ def build_per_item_attr_section(
     )
 
 
+def build_reconciliation_section(
+    reconciliation: dict | None, parameters: dict
+) -> ReportSection | None:
+    if not _section_on(parameters, "reconciliation"):
+        return None
+    if not reconciliation or not reconciliation.get("enabled"):
+        return None
+    by_item = reconciliation.get("by_item", {}) or {}
+    cols = ["theory_min", "theory_max", "gap", "gap_calibrated",
+            "residual", "verdict", "p_mean", "y_rate", "n_rows"]
+    tbl = pd.DataFrame(
+        {c: [by_item[it].get(c) for it in by_item] for c in cols},
+        index=list(by_item),
+    )
+    score_col = reconciliation.get("score_col_used")
+    desc = (
+        "對帳層：理論偏移（由 dataset.sample_ratio_overrides 與 "
+        "training.sample_weights 推得的正負類曝險比，單位 log-odds）"
+        "vs 實測校準差距 gap = logit(平均預測機率) − logit(實際正類率)，"
+        f"主判欄用 {score_col}。theory_min/max 是 item 層的近似帶"
+        "（多維 override 跨 segment 聚合，cell 細目見 reconciliation.json）；"
+        "residual = gap 距帶的距離，|residual| ≤ "
+        f"{reconciliation.get('explained_threshold')} → 可解釋。"
+        "gap_calibrated 為校準後分數的同式 gap——校準層有效時應接近 0。"
+    )
+    if reconciliation.get("fallback"):
+        desc += (
+            "⚠ 本次執行找不到 score_uncalibrated 欄（monitoring 路徑），"
+            "已退回 score——gap 內含校準層效應，判讀時注意。"
+        )
+    notes = (reconciliation.get("theory", {}) or {}).get("notes") or []
+    if notes:
+        desc += "／".join(notes)
+    return ReportSection(
+        title="對帳 Reconciliation（理論偏移 vs 實測校準差距）",
+        description=desc,
+        tables=[tbl],
+        table_titles=["per-item 對帳表"],
+    )
+
+
 def build_category_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -624,6 +665,7 @@ def assemble_report(
     baseline_metrics: dict | None = None,
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
+    reconciliation: dict | None = None,
 ) -> str:
     """Assemble enabled sections (§0–§8) into the final HTML string."""
     candidates = [
@@ -632,6 +674,7 @@ def assemble_report(
         build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
+        build_reconciliation_section(reconciliation, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),

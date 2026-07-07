@@ -522,3 +522,52 @@ def test_assemble_report_passes_metric_ci_through():
         _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
     )
     assert "CI 2.5%" in html
+
+
+_RECON_FIXTURE = {
+    "enabled": True, "score_col_used": "score_uncalibrated",
+    "fallback": False, "explained_threshold": 0.3,
+    "theory": {"cells": {}, "by_item": {}, "notes": []},
+    "by_item": {
+        "A": {"theory_min": 0.693, "theory_max": 0.693, "theory_approx": True,
+              "gap": 0.75, "gap_calibrated": 0.02, "residual": 0.057,
+              "verdict": "可解釋", "p_mean": 0.4, "y_rate": 0.25, "n_rows": 100},
+        "B": {"theory_min": 0.0, "theory_max": 0.0, "theory_approx": False,
+              "gap": 0.9, "gap_calibrated": 0.8, "residual": 0.9,
+              "verdict": "不可解釋", "p_mean": 0.5, "y_rate": 0.3, "n_rows": 80},
+    },
+    "all_explained": False,
+}
+
+
+def test_reconciliation_section_renders_table_and_verdict():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    sec = build_reconciliation_section(_RECON_FIXTURE, _params_min())
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["A", "B"]
+    assert tbl.loc["B", "verdict"] == "不可解釋"
+    assert "理論" in sec.description and "近似" in sec.description
+    assert "score_uncalibrated" in sec.description
+
+
+def test_reconciliation_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    assert build_reconciliation_section(None, _params_min()) is None
+    assert build_reconciliation_section({"enabled": False}, _params_min()) is None
+    params_off = {"evaluation": {"report": {"sections": {"reconciliation": False}}}}
+    assert build_reconciliation_section(_RECON_FIXTURE, params_off) is None
+
+
+def test_reconciliation_fallback_marked():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    fx = dict(_RECON_FIXTURE, fallback=True, score_col_used="score")
+    sec = build_reconciliation_section(fx, _params_min())
+    assert "退回" in sec.description
+
+
+def test_assemble_report_renders_reconciliation():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), reconciliation=_RECON_FIXTURE
+    )
+    assert "對帳" in html

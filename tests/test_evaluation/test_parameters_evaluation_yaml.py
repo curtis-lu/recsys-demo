@@ -56,3 +56,7 @@ def test_reconciliation_block():
         "score_col": "score_uncalibrated",
         "explained_threshold": 0.3,
     }
+
+
+def test_report_sections_include_reconciliation():
+    assert _load()["report"]["sections"]["reconciliation"] is True
