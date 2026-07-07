@@ -8,7 +8,7 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 6
+        assert len(pipeline.nodes) == 7
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -21,6 +21,7 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
+            "evaluation_reconciliation",
         }
         assert pipeline.outputs == expected
 
@@ -30,6 +31,7 @@ class TestEvaluationPipelineDefault:
         assert names == [
             "prepare_eval_data", "compute_metrics",
             "compute_baseline_metrics", "compute_metric_ci",
+            "compute_reconciliation",
             "persist_eval_predictions", "generate_report",
         ]
 
@@ -39,7 +41,7 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        assert len(pipeline.nodes) == 6
+        assert len(pipeline.nodes) == 7
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -52,16 +54,17 @@ class TestEvaluationPipelinePostTraining:
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
+            "evaluation_reconciliation",
         }
         assert pipeline.outputs == expected
 
 
 class TestEvaluationPipelineCompareMode:
-    """compare_source set — 9 nodes total, both reports produced."""
+    """compare_source set — 10 nodes total, both reports produced."""
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        assert len(pipeline.nodes) == 9
+        assert len(pipeline.nodes) == 10
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

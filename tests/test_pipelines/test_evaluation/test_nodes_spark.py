@@ -567,3 +567,43 @@ def test_compute_metric_ci_end_to_end_small(spark):
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
     assert out["sample"]["n_queries_sampled"] == 2
+
+
+def test_compute_reconciliation_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_reconciliation
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"reconciliation": {"enabled": False}}},
+    }
+    assert compute_reconciliation(None, params) == {"enabled": False}
+
+
+def test_compute_reconciliation_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_reconciliation
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.5, 0.5, 1),
+            ("20240331", "C1", "A", 0.5, 0.5, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score",
+                "score_uncalibrated", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "dataset": {"sample_ratio": 1.0,
+                    "sample_group_keys": ["prod_name", "label"],
+                    "sample_ratio_overrides": {}},
+        "training": {"sample_weight_keys": ["prod_name"],
+                     "sample_weights": {}},
+        "evaluation": {"diagnosis": {"reconciliation": {
+            "enabled": True, "score_col": "score_uncalibrated",
+            "explained_threshold": 0.3}}},
+    }
+    out = compute_reconciliation(df, params)
+    assert out["enabled"] is True
+    assert out["by_item"]["A"]["verdict"] == "可解釋"
+    assert out["all_explained"] is True

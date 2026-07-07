@@ -238,6 +238,10 @@ evaluation_metric_ci:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json
 
+evaluation_reconciliation:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/reconciliation.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html
