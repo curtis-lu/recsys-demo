@@ -7,7 +7,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset._hashing import HASH_BUCKETS, spark_bucket
+from recsys_tfb.utils.hashing import HASH_BUCKETS, spark_bucket
 
 logger = logging.getLogger(__name__)
 

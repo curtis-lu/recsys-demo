@@ -1,6 +1,6 @@
 """Tests for the deterministic CRC32 hashing utilities used by sampling."""
 
-from recsys_tfb.pipelines.dataset._hashing import (
+from recsys_tfb.utils.hashing import (
     HASH_BUCKETS,
     ratio_to_threshold,
 )
