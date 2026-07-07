@@ -46,3 +46,4 @@
 - PySpark 3.3.2 `tableExists("db.t")` 兩段式寫法永遠回 False（實證於 PR#74），要用 `tableExists("t", "db")` 或先 `USE db`。
 - local[*] 下 stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 by-design 噪音，不是錯誤。
 - catalog deep-merge 對 type-discriminator 有 bug：workaround＝base 檔完整定義該 entry，不要依賴 env overlay 局部覆蓋 type。
+- 【2026-07-07】取 model_version 不要用 `ls -t data/models`：目錄 mtime 不隨「內容檔被覆寫」更新（重訓寫回既有 mv 目錄時，該目錄不會浮到最上面），且 `data/models/` 混有測試殘留目錄（e2e_test_mv、mvx…）。徵兆＝抓到的 mv 與 config 語意矛盾（還原 config 後「新 mv」竟等於注入版）。正解：從 training log 的 `Wrote manifest: .../data/models/<mv>/manifest.json` 行取，或 `python -c "import json; print(json.load(open('data/models/<候選>/manifest.json'))['model_version'])"` 核對。驗證方式：取到 mv 後 grep training log 確認同一 run 寫的就是它。
