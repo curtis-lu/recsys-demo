@@ -602,3 +602,60 @@ class TestCategoricalDtypeErrors:
         errs = categorical_dtype_errors(["industry_code"], {"industry_code": "decimal(15,0)"})
         msg = errs[0]
         assert "categorical_columns" in msg and "drop_columns" in msg
+
+
+class TestDiagnosisMetricParamsA15:
+    def _params(self, metric=None, sample=None, ci=None):
+        ev = {}
+        if metric is not None:
+            ev["metric"] = metric
+        diag = {}
+        if sample is not None:
+            diag["sample"] = sample
+        if ci is not None:
+            diag["ci"] = ci
+        if diag:
+            ev["diagnosis"] = diag
+        return {"evaluation": ev}
+
+    def test_absent_blocks_are_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        assert diagnosis_metric_param_errors({}) == []
+        assert diagnosis_metric_param_errors(self._params()) == []
+
+    def test_valid_defaults_are_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = self._params(
+            metric={"weight_alpha": 0.0, "k": None, "min_positives": 0,
+                    "shrinkage_k": 0},
+            sample={"max_queries": 200000, "min_pos_queries_per_item": 50,
+                    "seed": 42},
+            ci={"enabled": True, "n_boot": 200},
+        )
+        assert diagnosis_metric_param_errors(p) == []
+
+    def test_each_bad_value_reports(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = self._params(
+            metric={"weight_alpha": 1.5, "k": 0, "min_positives": -1,
+                    "shrinkage_k": -0.1},
+            sample={"max_queries": 0, "min_pos_queries_per_item": 0},
+            ci={"n_boot": 0},
+        )
+        errors = diagnosis_metric_param_errors(p)
+        assert len(errors) == 7
+        joined = "\n".join(errors)
+        for token in ["weight_alpha", "metric.k", "min_positives",
+                      "shrinkage_k", "max_queries",
+                      "min_pos_queries_per_item", "n_boot"]:
+            assert token in joined
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            validate_config_consistency,
+        )
+        p = self._params(metric={"weight_alpha": 2.0})
+        with _pytest.raises(ConfigConsistencyError, match="weight_alpha"):
+            validate_config_consistency(p)

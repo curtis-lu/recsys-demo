@@ -79,6 +79,11 @@ Layer 1 — config-static (implemented here; aggregated by
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
+* A15 — ``evaluation.metric`` / ``evaluation.diagnosis`` parameter domains:
+  ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
+  ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
+  ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
+  ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -473,6 +478,59 @@ def segment_columns_without_source(parameters: dict) -> list[str]:
     return sorted(c for c in seg_cols if c not in provided)
 
 
+def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
+    """evaluation.metric / evaluation.diagnosis parameter domains (A15).
+
+    Absent blocks are fine (all keys have behavior-preserving defaults);
+    present values must be in-domain, else the metric family silently
+    degenerates (e.g. alpha>1 over-concentrates on hot items) or the
+    bootstrap is undefined (n_boot<1).
+    """
+    errors: list[str] = []
+    ev = parameters.get("evaluation", {}) or {}
+    metric = ev.get("metric", {}) or {}
+    diag = ev.get("diagnosis", {}) or {}
+    sample = diag.get("sample", {}) or {}
+    ci = diag.get("ci", {}) or {}
+
+    alpha = metric.get("weight_alpha", 0.0)
+    if not (_is_number(alpha) and 0.0 <= float(alpha) <= 1.0):
+        errors.append(
+            f"evaluation.metric.weight_alpha={alpha!r} must be a number in "
+            f"[0, 1] (0 = equal-weight macro, 1 = positive-count weighting)."
+        )
+    k = metric.get("k", None)
+    if k is not None and not (
+        isinstance(k, int) and not isinstance(k, bool) and k >= 1
+    ):
+        errors.append(
+            f"evaluation.metric.k={k!r} must be null (no truncation) or an "
+            f"int >= 1."
+        )
+    mp = metric.get("min_positives", 0)
+    if not (isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0):
+        errors.append(
+            f"evaluation.metric.min_positives={mp!r} must be an int >= 0."
+        )
+    sk = metric.get("shrinkage_k", 0)
+    if not (_is_number(sk) and float(sk) >= 0.0):
+        errors.append(
+            f"evaluation.metric.shrinkage_k={sk!r} must be a number >= 0."
+        )
+
+    for key, val, floor in (
+        ("evaluation.diagnosis.sample.max_queries",
+         sample.get("max_queries", 200000), 1),
+        ("evaluation.diagnosis.sample.min_pos_queries_per_item",
+         sample.get("min_pos_queries_per_item", 50), 1),
+        ("evaluation.diagnosis.ci.n_boot", ci.get("n_boot", 200), 1),
+    ):
+        if not (isinstance(val, int) and not isinstance(val, bool)
+                and val >= floor):
+            errors.append(f"{key}={val!r} must be an int >= {floor}.")
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -568,6 +626,8 @@ def validate_config_consistency(parameters: dict) -> None:
             f"segment_sources entry for each, or remove them from "
             f"segment_columns."
         )
+
+    errors.extend(diagnosis_metric_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

@@ -69,6 +69,34 @@ evaluation:
       # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
       # 不再需要 row 抽樣上限。
 
+  # 主指標參數化家族（框架診斷項目 4；A15）。預設值全部等價現行為：
+  # weight_alpha=0 ＝ item 等權 macro；min_positives=0 ＝ 不設觀察名單門檻；
+  # shrinkage_k=0 ＝ 不收縮。作用順序：min_positives 先排除 → shrinkage 向
+  # pooled（n_pos 加權）平均收縮 → weight_alpha 加權（w_j ∝ n_pos^α）。
+  # 只作用於 item 粒度（by_item / by_item_segment）；by_segment 維持等權。
+  # k = 診斷側（CI）計算 AP 的截斷 k；null ＝ 不截斷（full mAP）。
+  metric:
+    weight_alpha: 0.0
+    k: null
+    min_positives: 0
+    shrinkage_k: 0
+
+  # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座 + §3 Phase 1 CI）。
+  diagnosis:
+    # 診斷抽樣：單位＝query（snap_date × cust_id）、只取有正例的 query；
+    # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
+    # hash-ratio 抽到補滿 max_queries。中型 item 抽後仍可能低於保底：
+    # 不硬補，metadata 誠實回報（報表會標示樣本規模）。
+    sample:
+      max_queries: 200000
+      min_pos_queries_per_item: 50
+      seed: 42
+    # per-item AP 與 macro 的 cluster bootstrap CI（cluster＝cust_id，
+    # 同一客戶跨期整批重抽）。driver 端 numpy、跑在上面的抽樣上。
+    ci:
+      enabled: true
+      n_boot: 200
+
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）
   # 即 CLI flag 傳的值。★整段（含 key 名與各值）由你定義；預設空。
