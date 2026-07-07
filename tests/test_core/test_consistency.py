@@ -715,3 +715,40 @@ class TestEnabledMustBeBool:
                                           "reconciliation": {"enabled": False}}}}
         assert diagnosis_metric_param_errors(p) == []
         assert reconciliation_param_errors(p) == []
+
+
+class TestQuadrantParamsA17:
+    def _params(self, quad):
+        return {"evaluation": {"diagnosis": {"quadrant": quad}}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        assert quadrant_param_errors({}) == []
+        assert quadrant_param_errors(self._params(
+            {"enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+             "top_k_occupancy": 1}
+        )) == []
+
+    def test_bad_values_report(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        errors = quadrant_param_errors(self._params(
+            {"auc_threshold": 0.4, "gap_band": 0, "top_k_occupancy": 0,
+             "enabled": "false"}
+        ))
+        assert len(errors) == 4
+        joined = "\n".join(errors)
+        assert "auc_threshold" in joined and "gap_band" in joined
+        assert "top_k_occupancy" in joined and "enabled" in joined
+
+    def test_auc_threshold_boundaries(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) == []
+        assert quadrant_param_errors(self._params({"auc_threshold": 1.0})) != []
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="auc_threshold"):
+            validate_config_consistency(self._params({"auc_threshold": 0.4}))

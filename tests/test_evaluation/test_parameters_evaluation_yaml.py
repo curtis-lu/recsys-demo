@@ -60,3 +60,13 @@ def test_reconciliation_block():
 
 def test_report_sections_include_reconciliation():
     assert _load()["report"]["sections"]["reconciliation"] is True
+
+
+def test_quadrant_block():
+    quad = _load()["diagnosis"]["quadrant"]
+    assert quad == {
+        "enabled": True,
+        "auc_threshold": 0.6,
+        "gap_band": 0.35,
+        "top_k_occupancy": 1,
+    }

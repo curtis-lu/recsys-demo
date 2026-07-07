@@ -111,6 +111,17 @@ evaluation:
       score_col: score_uncalibrated
       explained_threshold: 0.3
 
+    # 象限層（A17）：縱軸 gap_vs_global（水準，取對帳層產物；行為觀測不含
+    # 歸因）× 橫軸 within-item AUC（條件判別力，midrank rank-sum）。
+    # gap_band 單位 log-odds：|gap_vs_global| 超出帶＝水準偏（偏高＝加害者，
+    # 判準與判別力無關）；auc_threshold 以下＝條件判別力差。
+    # top_k_occupancy：top-slot 佔據統計的 k。
+    quadrant:
+      enabled: true
+      auc_threshold: 0.6
+      gap_band: 0.35
+      top_k_occupancy: 1
+
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）
   # 即 CLI flag 傳的值。★整段（含 key 名與各值）由你定義；預設空。
