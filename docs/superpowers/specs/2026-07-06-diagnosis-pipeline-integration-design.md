@@ -119,7 +119,7 @@ src/recsys_tfb/diagnosis/
 - 象限組裝：新檔 `src/recsys_tfb/diagnosis/metric/quadrant.py`：合併 per-item {校準 gap（Phase 2）、within-item AUC、AP±CI（Phase 1）、suppression counts} → 象限判定（AUC 門檻與 gap 帶寬 config）→ `diagnosis/quadrant_summary.json` ＋ 散布圖（樣式沿手冊 `docs/diagrams/ranking-diagnosis/fig2-quadrant-map.png`；**修訂 2026-07-07**：原文寫 matplotlib，但 repo 報表圖的既有慣例實為 plotly `go.Figure` 內嵌 report HTML——證據 `evaluation/distributions.py:9` `import plotly.graph_objects as go`、內嵌點 `evaluation/report.py:156`，無任何 matplotlib/PNG 產圖路徑。散布圖故在報表側以 plotly 建、隨 report.html 交付，JSON 只存數據）。
 - report 新 section `quadrant`。
 - **config**：`evaluation.diagnosis.quadrant: {enabled: true, auc_threshold: 0.6, gap_band: 0.35, top_k_occupancy: 1}`。
-- **consistency（A17）**：`0.5 ≤ auc_threshold < 1`、`gap_band > 0`。
+- **consistency（A17）**：`0.5 < auc_threshold < 1`、`gap_band > 0`。（**修訂 2026-07-07**：原文含 0.5；審查發現 `_disc_status` 用 `auc ≥ threshold` 判「好」，threshold=0.5 時 AUC 恰 0.5——零判別力、常數分數 item 的真值——會被判「好」，與軸定義矛盾，故下界改嚴格。）
 
 **驗收（真實執行）**：
 1. 重跑 evaluation（同一 model_version，`--only-node` 切片可用）。
