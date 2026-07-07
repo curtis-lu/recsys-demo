@@ -22,6 +22,9 @@ from __future__ import annotations
 import logging
 import math
 
+from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import functions as F
+
 from recsys_tfb.core.schema import get_schema
 
 logger = logging.getLogger(__name__)
@@ -165,3 +168,108 @@ def theoretical_offsets(parameters: dict) -> dict:
         agg["approx"] = True  # item 層是跨 cell 聚合近似（見模組 docstring）
 
     return {"cells": cells, "by_item": by_item, "notes": notes}
+
+
+def _logit(p: float) -> float:
+    return math.log(p / (1.0 - p))
+
+
+def calibration_gap_by_item(
+    sdf: SparkDataFrame, parameters: dict, score_col: str,
+) -> dict[str, dict]:
+    """per item 的 logit(p̄) − logit(ȳ)（先平均再 logit，spec 釘的公式）。
+
+    Spark 只做 groupBy 聚合（無 UDF）；logit 在 driver 端對 22 個 item 級的
+    小 dict 計算。ȳ 或 p̄ ∉ (0,1) → gap=None＋reason（不炸）。
+    """
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    label_col = schema["label"]
+
+    rows = (
+        sdf.groupBy(item_col)
+        .agg(
+            F.mean(F.col(score_col).cast("double")).alias("p_mean"),
+            F.mean(F.col(label_col).cast("double")).alias("y_rate"),
+            F.count(F.lit(1)).alias("n_rows"),
+        )
+        .collect()
+    )
+    out: dict[str, dict] = {}
+    for r in rows:
+        p, y = float(r["p_mean"]), float(r["y_rate"])
+        entry: dict = {"p_mean": p, "y_rate": y, "n_rows": int(r["n_rows"])}
+        if not (0.0 < y < 1.0):
+            entry["gap"] = None
+            entry["reason"] = f"y_rate={y} 使 logit 未定義（全正或全負）"
+        elif not (0.0 < p < 1.0):
+            entry["gap"] = None
+            entry["reason"] = f"p_mean={p} 不在 (0,1)——score 欄可能不是機率"
+        else:
+            entry["gap"] = _logit(p) - _logit(y)
+        out[str(r[item_col])] = entry
+    return out
+
+
+def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
+    """對帳表：理論帶 × 實測 gap → residual → verdict（JSON-ready）。"""
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("reconciliation", {}) or {})
+    score_col = str(cfg.get("score_col", "score_uncalibrated"))
+    threshold = float(cfg.get("explained_threshold", 0.3))
+    schema = get_schema(parameters)
+    base_score_col = schema["score"]
+
+    fallback = False
+    if score_col not in eval_predictions.columns:
+        logger.warning(
+            "reconcile: %s 欄不存在（monitoring 路徑無校準前分數）——"
+            "退回 %s，理論對帳將包含校準層效應", score_col, base_score_col,
+        )
+        score_col, fallback = base_score_col, True
+
+    theory = theoretical_offsets(parameters)
+    gaps = calibration_gap_by_item(eval_predictions, parameters, score_col)
+    gaps_cal = (
+        calibration_gap_by_item(eval_predictions, parameters, base_score_col)
+        if score_col != base_score_col else None
+    )
+
+    by_item: dict[str, dict] = {}
+    all_explained = True
+    for item, g in sorted(gaps.items()):
+        band = theory["by_item"].get(item)
+        t_min = band["min"] if band else 0.0
+        t_max = band["max"] if band else 0.0
+        entry = {
+            "theory_min": t_min, "theory_max": t_max,
+            "theory_approx": bool(band and band.get("approx")),
+            "gap": g["gap"], "p_mean": g["p_mean"], "y_rate": g["y_rate"],
+            "n_rows": g["n_rows"],
+        }
+        if gaps_cal is not None:
+            entry["gap_calibrated"] = gaps_cal.get(item, {}).get("gap")
+        if g["gap"] is None:
+            entry["residual"] = None
+            entry["verdict"] = "無法評估"
+            entry["reason"] = g.get("reason")
+        else:
+            clipped = min(max(g["gap"], t_min), t_max)
+            entry["residual"] = g["gap"] - clipped
+            entry["verdict"] = (
+                "可解釋" if abs(entry["residual"]) <= threshold else "不可解釋"
+            )
+            if entry["verdict"] != "可解釋":
+                all_explained = False
+        by_item[item] = entry
+
+    return {
+        "enabled": True,
+        "score_col_used": score_col,
+        "fallback": fallback,
+        "explained_threshold": threshold,
+        "theory": theory,
+        "by_item": by_item,
+        "all_explained": all_explained,
+    }
