@@ -659,3 +659,33 @@ class TestDiagnosisMetricParamsA15:
         p = self._params(metric={"weight_alpha": 2.0})
         with _pytest.raises(ConfigConsistencyError, match="weight_alpha"):
             validate_config_consistency(p)
+
+
+class TestReconciliationParamsA16:
+    def _params(self, recon):
+        return {"evaluation": {"diagnosis": {"reconciliation": recon}}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        assert reconciliation_param_errors({}) == []
+        assert reconciliation_param_errors(self._params(
+            {"enabled": True, "score_col": "score_uncalibrated",
+             "explained_threshold": 0.3}
+        )) == []
+
+    def test_bad_values_report(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        errors = reconciliation_param_errors(self._params(
+            {"score_col": "rank", "explained_threshold": 0}
+        ))
+        assert len(errors) == 2
+        joined = "\n".join(errors)
+        assert "score_col" in joined and "explained_threshold" in joined
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="score_col"):
+            validate_config_consistency(self._params({"score_col": "rank"}))

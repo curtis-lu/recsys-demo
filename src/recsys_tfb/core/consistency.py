@@ -84,6 +84,9 @@ Layer 1 — config-static (implemented here; aggregated by
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
   ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
+* A16 — ``evaluation.diagnosis.reconciliation`` parameter domains:
+  ``score_col`` ∈ {score, score_uncalibrated}; ``explained_threshold`` > 0
+  (log-odds). Predicate: ``reconciliation_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -531,6 +534,28 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def reconciliation_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.reconciliation parameter domains (A16)."""
+    errors: list[str] = []
+    recon = (
+        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+        .get("reconciliation", {}) or {}
+    )
+    sc = recon.get("score_col", "score_uncalibrated")
+    if sc not in ("score", "score_uncalibrated"):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.score_col={sc!r} must be "
+            f"'score' or 'score_uncalibrated'."
+        )
+    thr = recon.get("explained_threshold", 0.3)
+    if not (_is_number(thr) and float(thr) > 0.0):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.explained_threshold={thr!r} "
+            f"must be a number > 0 (log-odds units)."
+        )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -628,6 +653,8 @@ def validate_config_consistency(parameters: dict) -> None:
         )
 
     errors.extend(diagnosis_metric_param_errors(parameters))
+
+    errors.extend(reconciliation_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
