@@ -531,6 +531,14 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
         if not (isinstance(val, int) and not isinstance(val, bool)
                 and val >= floor):
             errors.append(f"{key}={val!r} must be an int >= {floor}.")
+
+    en = ci.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.ci.enabled={en!r} must be a boolean "
+            f"(YAML true/false; a quoted string like \"false\" is truthy and "
+            f"would silently enable the node)."
+        )
     return errors
 
 
@@ -552,6 +560,13 @@ def reconciliation_param_errors(parameters: dict) -> list[str]:
         errors.append(
             f"evaluation.diagnosis.reconciliation.explained_threshold={thr!r} "
             f"must be a number > 0 (log-odds units)."
+        )
+    en = recon.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.enabled={en!r} must be a "
+            f"boolean (YAML true/false; a quoted string like \"false\" is "
+            f"truthy and would silently enable the node)."
         )
     return errors
 

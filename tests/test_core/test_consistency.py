@@ -689,3 +689,29 @@ class TestReconciliationParamsA16:
         )
         with _pytest.raises(ConfigConsistencyError, match="score_col"):
             validate_config_consistency(self._params({"score_col": "rank"}))
+
+
+class TestEnabledMustBeBool:
+    """A15/A16：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
+
+    def test_ci_enabled_string_rejected(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = {"evaluation": {"diagnosis": {"ci": {"enabled": "false"}}}}
+        errors = diagnosis_metric_param_errors(p)
+        assert len(errors) == 1 and "ci.enabled" in errors[0]
+
+    def test_reconciliation_enabled_string_rejected(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        p = {"evaluation": {"diagnosis": {"reconciliation": {"enabled": "false"}}}}
+        errors = reconciliation_param_errors(p)
+        assert len(errors) == 1 and "reconciliation.enabled" in errors[0]
+
+    def test_bool_values_clean(self):
+        from recsys_tfb.core.consistency import (
+            diagnosis_metric_param_errors,
+            reconciliation_param_errors,
+        )
+        p = {"evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                          "reconciliation": {"enabled": False}}}}
+        assert diagnosis_metric_param_errors(p) == []
+        assert reconciliation_param_errors(p) == []
