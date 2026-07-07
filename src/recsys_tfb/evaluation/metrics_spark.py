@@ -61,11 +61,13 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
+import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.metrics import macro_from_per_item
 
 logger = logging.getLogger(__name__)
 
@@ -513,22 +515,65 @@ def aggregate_per_item(
 _N_POS_KEY = "n_pos"
 
 
-def macro_average(per_dim: dict[str, dict[str, float]]) -> dict[str, float]:
-    """Equal-dim-key weight mean of inner metric dicts.
+def macro_average(
+    per_dim: dict[str, dict[str, float]],
+    *,
+    weight_alpha: float = 0.0,
+    min_positives: int = 0,
+    shrinkage_k: float = 0.0,
+) -> dict[str, float]:
+    """Parameterized macro over dim keys (defaults = equal weight, 現行為).
 
-    ``n_pos`` is a reserved weight-source key (see aggregate_per_item) — it is
-    never averaged into the output. Empty input → empty dict. Missing keys in
-    some inner dicts are handled per-metric.
+    ``n_pos`` is the reserved weight-source key — never averaged into the
+    output. Non-default params require every inner dict to carry ``n_pos``;
+    otherwise raises ValueError (fail loud, no silent equal-weight fallback).
+    Per-metric combine goes through ``metrics.macro_from_per_item``; a metric
+    whose items are all excluded by ``min_positives`` is omitted.
+
+    Default params take the ORIGINAL sum/len code path — bit-identical to the
+    pre-parameterization behavior (the real-run regression gate compares
+    report values verbatim; ``np.dot`` with uniform weights can differ from
+    ``sum/len`` in the last ulp).
     """
     if not per_dim:
         return {}
-    accum: dict[str, list[float]] = {}
+    params_active = (
+        weight_alpha != 0.0 or min_positives > 0 or shrinkage_k > 0
+    )
+    if not params_active:
+        accum: dict[str, list[float]] = {}
+        for metrics in per_dim.values():
+            for k, v in metrics.items():
+                if k == _N_POS_KEY:
+                    continue
+                accum.setdefault(k, []).append(float(v))
+        return {k: sum(v) / len(v) for k, v in accum.items()}
+
+    missing = [k for k, m in per_dim.items() if _N_POS_KEY not in m]
+    if missing:
+        raise ValueError(
+            f"macro_average: weight_alpha/min_positives/shrinkage_k need "
+            f"'n_pos' in every per-item dict; missing for {missing}. "
+            f"Upstream must be aggregate_per_item (which emits n_pos)."
+        )
+
+    pairs_by_metric: dict[str, list[tuple[float, float]]] = {}
     for metrics in per_dim.values():
+        n = float(metrics[_N_POS_KEY])
         for k, v in metrics.items():
             if k == _N_POS_KEY:
                 continue
-            accum.setdefault(k, []).append(float(v))
-    return {k: sum(v) / len(v) for k, v in accum.items()}
+            pairs_by_metric.setdefault(k, []).append((float(v), n))
+    out: dict[str, float] = {}
+    for k, pairs in pairs_by_metric.items():
+        values = np.array([p[0] for p in pairs])
+        n_pos = np.array([p[1] for p in pairs])
+        combined = macro_from_per_item(
+            values, n_pos, weight_alpha, min_positives, shrinkage_k
+        )
+        if combined is not None:
+            out[k] = combined
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +587,7 @@ _EMPTY_RESULT = {
     "per_item": {},
     "per_item_segment": {},
     "macro_avg": {},
+    "observation_items": [],
 }
 
 
@@ -566,6 +612,12 @@ def _compute_core(
     eval_params = parameters.get("evaluation", {}) or {}
     k_values_raw = eval_params.get("k_values", [5, "all"])
     segment_columns = eval_params.get("segment_columns", []) or []
+    metric_cfg = eval_params.get("metric", {}) or {}
+    metric_params = {
+        "weight_alpha": float(metric_cfg.get("weight_alpha", 0.0) or 0.0),
+        "min_positives": int(metric_cfg.get("min_positives", 0) or 0),
+        "shrinkage_k": float(metric_cfg.get("shrinkage_k", 0) or 0.0),
+    }
 
     n_products = eval_predictions.select(item_col).distinct().count()
     k_values = _resolve_k_values(k_values_raw, n_products)
@@ -619,11 +671,18 @@ def _compute_core(
                     enriched, [item_col, active_seg_col], label_col, k_values
                 )
 
-            macro_avg: dict = {"by_item": macro_average(per_item)}
+            macro_avg: dict = {"by_item": macro_average(per_item, **metric_params)}
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
-                macro_avg["by_item_segment"] = macro_average(per_item_segment)
+                macro_avg["by_item_segment"] = macro_average(
+                    per_item_segment, **metric_params
+                )
+
+            observation_items = sorted(
+                it for it, m in per_item.items()
+                if m.get("n_pos", 0) < metric_params["min_positives"]
+            ) if metric_params["min_positives"] > 0 else []
 
             return {
                 "overall": overall,
@@ -631,6 +690,7 @@ def _compute_core(
                 "per_item": per_item,
                 "per_item_segment": per_item_segment,
                 "macro_avg": macro_avg,
+                "observation_items": observation_items,
                 "n_queries": n_queries_total,
                 "n_excluded_queries": n_excluded_queries,
             }
@@ -716,6 +776,7 @@ def compute_all_metrics(
               "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
               "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
           },
+          "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
           "n_queries":          int  (total distinct queries before filtering),
           "n_excluded_queries": int  (queries with zero positives → dropped),
           "dataset_overview": {

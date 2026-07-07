@@ -57,8 +57,8 @@ def _enriched(spark, k_values=(3,)):
     return df
 
 
-def _make_parameters(k_values=(3,), segment_columns=()):
-    return {
+def _make_parameters(k_values=(3,), segment_columns=(), metric=None):
+    params = {
         "schema": {
             "columns": {
                 "time": "snap_date",
@@ -74,6 +74,9 @@ def _make_parameters(k_values=(3,), segment_columns=()):
             "segment_columns": list(segment_columns),
         },
     }
+    if metric is not None:
+        params["evaluation"]["metric"] = dict(metric)
+    return params
 
 
 # ===========================================================================
@@ -520,7 +523,8 @@ def test_compute_all_metrics_returns_expected_keys(spark):
     result = ms.compute_all_metrics(df, params)
     assert set(result.keys()) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "n_queries", "n_excluded_queries", "dataset_overview",
+        "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
+        "dataset_overview",
     }
 
 
@@ -656,4 +660,89 @@ def test_macro_per_item_map_numpy_matches_spark(spark):
     score = np.array([r["score"] for r in rows], dtype=np.float64)
 
     numpy_macro = compute_macro_per_item_map(groups, items, y, score)
+    assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)
+
+
+# ===========================================================================
+# macro_average parameterization (weight_alpha / min_positives / shrinkage_k)
+# + compute_all_metrics observation_items / evaluation.metric wiring
+# ===========================================================================
+
+
+def _three_customer_raw(spark):
+    """A 正例 2 個 query（contrib 1.0、0.5 → AP 0.75, n_pos=2）、B 1 個（1.0, n_pos=1）。"""
+    return spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.1, 0),
+            ("20240331", "C1", "A", 0.1, 1),
+            ("20240331", "C1", "B", 0.9, 0),
+            ("20240331", "C2", "A", 0.1, 0),
+            ("20240331", "C2", "B", 0.9, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+
+
+def test_macro_average_weighted_by_n_pos():
+    per_dim = {
+        "A": {"map_attr@2": 0.75, "n_pos": 2},
+        "B": {"map_attr@2": 1.0, "n_pos": 1},
+    }
+    assert ms.macro_average(per_dim, weight_alpha=1.0) == {
+        "map_attr@2": pytest.approx(5 / 6)
+    }
+    assert ms.macro_average(per_dim, min_positives=2) == {
+        "map_attr@2": pytest.approx(0.75)
+    }
+    assert ms.macro_average(per_dim, shrinkage_k=1.0) == {
+        "map_attr@2": pytest.approx(61 / 72)
+    }
+    assert ms.macro_average(per_dim, min_positives=5) == {}
+
+
+def test_macro_average_missing_n_pos_fails_loud():
+    per_dim = {"A": {"map_attr@2": 0.75}, "B": {"map_attr@2": 1.0}}
+    with pytest.raises(ValueError, match="n_pos"):
+        ms.macro_average(per_dim, weight_alpha=1.0)
+
+
+def test_compute_all_metrics_observation_items_and_param_macro(spark):
+    df = _three_customer_raw(spark)
+    # 預設參數：additive 鍵存在且為空、macro 不變
+    base = ms.compute_all_metrics(df, _make_parameters(k_values=[2]))
+    assert base["observation_items"] == []
+    assert base["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.875)
+    # min_positives=2：B 進觀察名單、macro 只剩 A
+    params = _make_parameters(
+        k_values=[2],
+        metric={"weight_alpha": 0.0, "min_positives": 2, "shrinkage_k": 0},
+    )
+    result = ms.compute_all_metrics(df, params)
+    assert result["observation_items"] == ["B"]
+    assert result["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.75)
+
+
+def test_param_macro_numpy_matches_spark(spark):
+    """參數化後 numpy／Spark 兩實作同輸入同結果（spec Phase 1 parity 要求）。"""
+    import numpy as np
+
+    from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+
+    df = _three_customer_raw(spark)
+    metric = {"weight_alpha": 1.0, "min_positives": 0, "shrinkage_k": 1.0}
+    result = ms.compute_all_metrics(df, _make_parameters(k_values=[2], metric=metric))
+    spark_macro = result["macro_avg"]["by_item"]["map_attr@2"]
+
+    rows = df.collect()
+    group_ids = {("20240331", f"C{i}"): i for i in range(3)}
+    groups = np.array([group_ids[(r["snap_date"], r["cust_id"])] for r in rows])
+    items = np.array([r["prod_name"] for r in rows])
+    y = np.array([r["label"] for r in rows])
+    score = np.array([r["score"] for r in rows], dtype=np.float64)
+
+    numpy_macro = compute_macro_per_item_map(
+        groups, items, y, score,
+        weight_alpha=1.0, min_positives=0, shrinkage_k=1.0,
+    )
     assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)
