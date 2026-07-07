@@ -675,6 +675,9 @@ def _compute_core(
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
+                # (item, segment) cell 亦受 min_positives 過濾（cell 的
+                # n_pos < 門檻即移出 by_item_segment macro）；觀察名單只在
+                # item 粒度回報，cell 層級不另列。
                 macro_avg["by_item_segment"] = macro_average(
                     per_item_segment, **metric_params
                 )

@@ -277,6 +277,12 @@ def compute_metric_ci(
         logger.info("metric CI disabled — writing stub")
         return {"enabled": False}
 
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_metric_ci: eval_predictions is required when "
+            "evaluation.diagnosis.ci.enabled is true"
+        )
+
     from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
     from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 

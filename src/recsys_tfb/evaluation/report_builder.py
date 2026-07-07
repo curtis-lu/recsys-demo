@@ -371,10 +371,12 @@ def build_per_item_attr_section(
         for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
                            ("CI 97.5%", "ci_high"), ("n_pos(抽樣)", "n_pos")):
             map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
+        ci_k_label = metric_ci.get("k") or "all"
         description_extra = (
             f"AP(抽樣)/CI 欄為抽樣估計（{sample_meta.get('n_queries_sampled')} "
             f"個正例 query、bootstrap n_boot={metric_ci.get('n_boot')}，"
-            f"cluster=客戶），非全量值；點估計以全量欄 map_attr 為準。"
+            f"cluster=客戶），非全量值；其截斷 k={ci_k_label}，點估計以全量欄 "
+            f"map_attr@{ci_k_label} 為準（不要拿去對其他 @k 欄）。"
             f"n_pos(抽樣) 為該 item 進入 CI 估計的正例列數——太小的值代表"
             f"該列 CI 不可靠，判讀時先看這欄。"
         )

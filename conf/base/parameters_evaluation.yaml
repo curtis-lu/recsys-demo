@@ -87,6 +87,9 @@ evaluation:
     # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
     # hash-ratio 抽到補滿 max_queries。中型 item 抽後仍可能低於保底：
     # 不硬補，metadata 誠實回報（報表會標示樣本規模）。
+    # 注意 driver 記憶體：max_queries 是 query 數上限，落到 driver 的
+    # DataFrame 列數 ≈ max_queries × 每 query 候選列數（22 個 item 時即
+    # 22 倍、約 4.4M 列 ~1GB），調大前先估 driver 可用記憶體。
     sample:
       max_queries: 200000
       min_pos_queries_per_item: 50
