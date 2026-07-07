@@ -730,7 +730,9 @@ def test_param_macro_numpy_matches_spark(spark):
     from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
 
     df = _three_customer_raw(spark)
-    metric = {"weight_alpha": 1.0, "min_positives": 0, "shrinkage_k": 1.0}
+    # weight_alpha 與 shrinkage_k 刻意用相異值：兩者同值時，_compute_core 把
+    # 兩個 config 鍵接反（swap bug）也測不出來（審查用 fault injection 實證過）。
+    metric = {"weight_alpha": 1.0, "min_positives": 0, "shrinkage_k": 2.0}
     result = ms.compute_all_metrics(df, _make_parameters(k_values=[2], metric=metric))
     spark_macro = result["macro_avg"]["by_item"]["map_attr@2"]
 
@@ -743,6 +745,6 @@ def test_param_macro_numpy_matches_spark(spark):
 
     numpy_macro = compute_macro_per_item_map(
         groups, items, y, score,
-        weight_alpha=1.0, min_positives=0, shrinkage_k=1.0,
+        weight_alpha=1.0, min_positives=0, shrinkage_k=2.0,
     )
     assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)

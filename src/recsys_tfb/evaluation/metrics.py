@@ -156,14 +156,18 @@ def macro_from_per_item(
     (2) shrink each surviving value toward the pooled (n_pos-weighted)
     mean of the survivors with factor ``n/(n+k)``; (3) weight items
     ``∝ n_pos**weight_alpha`` (alpha=0 → equal weight). Defaults reproduce
-    the plain equal-weight mean. Returns None when every item is excluded
-    (caller picks the fallback).
+    the plain equal-weight mean bit-for-bit (``np.dot`` with uniform weights
+    can differ from ``mean`` in the last ulp, so the inactive path returns
+    ``v.mean()`` directly — same principle as metrics_spark.macro_average).
+    Returns None when every item is excluded (caller picks the fallback).
     """
     keep = n_pos >= min_positives
     if not keep.any():
         return None
     v = values[keep].astype(np.float64, copy=True)
     n = n_pos[keep].astype(np.float64)
+    if weight_alpha == 0.0 and shrinkage_k == 0.0:
+        return float(v.mean())
     if shrinkage_k > 0:
         pooled = float(np.dot(v, n) / n.sum())
         v = (n * v + shrinkage_k * pooled) / (n + shrinkage_k)
