@@ -379,7 +379,7 @@ def test_aggregate_per_item_emits_attribution_keys_not_precision_recall(spark):
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
     assert set(per_item.keys()) == {"A", "B", "C"}
     for prod, m in per_item.items():
-        assert set(m.keys()) == {"mean_pos", "hit_rate@3", "map_attr@3", "ndcg_attr@3"}
+        assert set(m.keys()) == {"mean_pos", "n_pos", "hit_rate@3", "map_attr@3", "ndcg_attr@3"}
         assert "precision@3" not in m
         assert "recall@3" not in m
 
@@ -441,6 +441,27 @@ def test_aggregate_per_item_filters_label_zero_rows(spark):
     enriched = _enriched(spark, k_values=[3])
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
     assert per_item["A"]["mean_pos"] == 1.0   # would be (1+3)/2 = 2.0 if label=0 leaked in
+
+
+def test_aggregate_per_item_emits_n_pos(spark):
+    """n_pos = 該 item 的正例列數（weight_alpha/min_positives/shrinkage_k 的 P_j 來源）。"""
+    enriched = _enriched(spark)
+    per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
+    # _two_customer_raw：A 正例 1 列（C0）、B 1 列（C1）、C 1 列（C0）
+    assert per_item["A"]["n_pos"] == 1
+    assert per_item["B"]["n_pos"] == 1
+    assert per_item["C"]["n_pos"] == 1
+    assert isinstance(per_item["A"]["n_pos"], int)
+
+
+def test_macro_average_excludes_n_pos_from_output(spark=None):
+    per_dim = {
+        "A": {"map_attr@3": 0.75, "n_pos": 2},
+        "B": {"map_attr@3": 1.0, "n_pos": 1},
+    }
+    avg = ms.macro_average(per_dim)
+    assert avg == {"map_attr@3": pytest.approx(0.875)}
+    assert "n_pos" not in avg
 
 
 # ===========================================================================

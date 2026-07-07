@@ -469,6 +469,7 @@ def aggregate_per_item(
                         normalized by query-level iDCG@K)
         mean_pos     = mean(pos) over P-positive rows
                        (average ranked position of P when it is the truth)
+        n_pos        = count of P-positive rows (weight source for macro_average)
 
     NOTE: no precision@K / recall@K here on purpose. Their query-level
     definitions don't carry over cleanly to the per-item dimension
@@ -477,7 +478,10 @@ def aggregate_per_item(
     """
     rel = enriched.filter(F.col(label_col) == 1)
 
-    aggs = [F.mean(F.col("pos").cast("double")).alias("mean_pos")]
+    aggs = [
+        F.mean(F.col("pos").cast("double")).alias("mean_pos"),
+        F.count(F.lit(1)).alias("n_pos"),
+    ]
     for k in k_values:
         aggs.extend(
             [
@@ -497,6 +501,7 @@ def aggregate_per_item(
         else:
             key = "_".join(str(r[c]) for c in dim_cols)
         out[key] = {c: float(r[c]) for c in metric_cols}
+        out[key]["n_pos"] = int(r["n_pos"])
     return out
 
 
@@ -505,18 +510,23 @@ def aggregate_per_item(
 # ---------------------------------------------------------------------------
 
 
+_N_POS_KEY = "n_pos"
+
+
 def macro_average(per_dim: dict[str, dict[str, float]]) -> dict[str, float]:
     """Equal-dim-key weight mean of inner metric dicts.
 
-    Empty input → empty dict. Missing keys in some inner dicts are
-    handled per-metric (each metric averages only over the dim keys that
-    have it).
+    ``n_pos`` is a reserved weight-source key (see aggregate_per_item) — it is
+    never averaged into the output. Empty input → empty dict. Missing keys in
+    some inner dicts are handled per-metric.
     """
     if not per_dim:
         return {}
     accum: dict[str, list[float]] = {}
     for metrics in per_dim.values():
         for k, v in metrics.items():
+            if k == _N_POS_KEY:
+                continue
             accum.setdefault(k, []).append(float(v))
     return {k: sum(v) / len(v) for k, v in accum.items()}
 
