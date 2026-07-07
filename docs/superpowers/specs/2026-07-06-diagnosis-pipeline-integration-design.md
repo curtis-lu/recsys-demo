@@ -21,7 +21,7 @@
 1. **生產限制沿用**：no Spark UDF、no network、no additional packages、CPU-only。所有 Spark 端診斷用內建函式（window / groupBy）；需要逐列迭代的計算（bootstrap、offset sweep、成對帳本）一律在 **driver 端 numpy、跑在有上限的抽樣**上（§2）。
 2. **新增 config 鍵必附 consistency predicate**：進 `src/recsys_tfb/core/consistency.py`，新代號從 **A15** 起（現用到 A14），照該檔慣例：predicate 函式＋`validate_config_consistency` 串接＋docstring Invariant legend 補代號。
 3. **不動 model_version 的語意**：評估側全部新 config 在 `evaluation.*`（本來就不進 model_version）；訓練側新診斷 config 掛既有頂層 `diagnostics:`（已確立不進 model_version 的前例）。**任何會改變 `compute_model_version` 輸入的鍵都不允許在本案新增。**
-4. **模組邊界與依賴方向（單向，違反即錯）**：`pipelines/* → diagnosis → evaluation`（僅 numpy 原語 `evaluation/metrics.py`）`/ io / utils`；`diagnosis` 不得 import 任何 `pipelines/*` 內部；pipeline 之間不互相 import。Phase 5 的 triage 總表需要訓練側產物（gain ledger），**靠 catalog 的 JSON 產物銜接，不靠 import**。
+4. **模組邊界與依賴方向（單向，違反即錯）**：`pipelines/* → diagnosis → core / evaluation`（僅 numpy 原語 `evaluation/metrics.py`）`/ io / utils`（core 為既有平移程式的實際依賴：`core.logging`、`core.schema`）；`diagnosis` 不得 import 任何 `pipelines/*` 內部；pipeline 之間不互相 import。Phase 5 的 triage 總表需要訓練側產物（gain ledger），**靠 catalog 的 JSON 產物銜接，不靠 import**。
 5. **HPO objective 本案不動**：`training.hpo_objective` 維持現狀（`mean_ap` / `macro_per_item_map`，`pipelines/training/nodes.py:361-364`）。把參數化指標接進 HPO 會經 training params 影響 model_version 與搜尋行為，留待指標定案後另案。
 6. **SHAP 範圍**：本案的 SHAP 只到「per-item 背景的分數歸因」（Phase 5）；loss-SHAP、cohort 偵測器、處方自動化不在本案（見 §6）。
 
