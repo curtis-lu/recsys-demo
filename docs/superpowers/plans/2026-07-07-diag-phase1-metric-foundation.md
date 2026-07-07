@@ -39,7 +39,7 @@
 - **CI 是抽樣估計**：metric_ci.json 與報表都必須標示樣本規模（正例 query 數）與 n_boot，不得讓抽樣估計冒充全量。
 - **cluster bootstrap 的 cluster＝entity（cust_id）**，不含 time——同一客戶跨期整批重抽（spec §3 Phase 1）。關鍵簡化：整 cluster 重抽不改變任何 query 內的排序，所以每列正例貢獻只算一次，replicate 只是帶乘數的重新聚合。
 - **抽樣單位＝query（time × entity），只取有正例的 query**；被抽中的 query 取其**全部候選列**（含負例列，排序需要）。保底機制照 spec：正例 query 數 < 保底的 item 整批全取；其餘 query 用 CRC32 hash-ratio 補滿 `max_queries`。中型 item 抽後仍可能低於保底——不硬補，metadata 誠實回報＋log WARN。
-- **既有測試會被本計畫「合法」改到的只有一處**：`tests/test_pipelines/test_evaluation/test_pipeline.py` 鎖「五個 node」——加 `compute_metric_ci` 後改成六個（Task 8）。`tests/.../TestComputeMacroPerItemMap` 與 `test_macro_average_*` 既有案例**不得改**，必須原樣全綠。
+- **既有測試會被本計畫「合法」改到的只有兩處**：(1) `tests/test_pipelines/test_evaluation/test_pipeline.py` 鎖「五個 node」——加 `compute_metric_ci` 後改成六個（Task 8）；(2) `tests/test_evaluation/test_metrics_spark.py::test_aggregate_per_item_emits_attribution_keys_not_precision_recall` 的精確鍵集合斷言——其意圖是「不得有 precision/recall 鍵」，`n_pos` 為 spec 要求的 additive 鍵，加入預期集合（Task 2，執行時裁決）。`tests/.../TestComputeMacroPerItemMap` 與 `test_macro_average_*` 既有案例**不得改**，必須原樣全綠。
 
 ## 執行模式（controller 注意）
 
