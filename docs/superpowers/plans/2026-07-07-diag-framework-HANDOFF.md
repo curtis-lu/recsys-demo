@@ -40,6 +40,12 @@
 6. **文件是一等交付物（spec §3 固定結構）**：新報表段落必同步擴充 `docs/pipelines/evaluation-diagnosis.md`。寫法鐵則（Phase 2 四輪返工的教訓，詳見 memory feedback_analysis_docs_handbook_style）：(a) 手冊禁用開發詞彙（本機/Phase N/spec/驗收/真跑），交付前 grep；(b) 貫穿範例契約——**把示例產物直接印進文件**，各節走讀看得見的表，嚴禁敘述讀者看不見的報表；(c) 對無直覺尺度建「數感」節（錨點表＋門檻合理性的夾擠論證）；(d) 報表描述只留短判讀順序＋指向手冊；(e) 交付前派讀者 agent，驗證清單含「列出所有指涉你看不到的東西的詞」。
 7. **質性反饋（讀不懂類）不得用字面替換修復＋自驗**——判準已入 `~/.claude/rules/20-judgment-rubrics.md` §2 反例：修法可用 sed 表達＝假修復；必須從段落目的重寫＋fresh 讀者驗收。
 8. **對使用者的訊息中，檔案引用一律絕對路徑（含 `.worktrees/diag-framework`）**（2026-07-07 使用者多次糾正後定案）：相對路徑在 worktree 工作流下點不開／開到 main 舊檔；轉述 subagent 回報時把 `檔案:行號` 補上絕對前綴再交付。詳見 memory feedback_clickable_absolute_paths。
+9. **提速協議（2026-07-08 Phase 3 覆盤定案；品質手段——TDD、突變檢查、雙審、讀者 agent、真跑閘門——一項不減）**：
+   - (a) **派工內嵌全文**：implementer prompt 直接貼該 task 全文＋執行者必讀＋設計定案，計畫檔路徑只作查證用——Phase 3 七個 agent 各自重讀 1,480 行計畫，估浪費 10+ 分鐘與數萬 tokens。
+   - (b) **同構小模組合批**：互不相依、setup 相同的小模組（如 Phase 3 的 discrimination/occupancy/cross_purchase 三連發）合成一次派工，agent 內部逐模組 TDD＋各自 commit。
+   - (c) **審查分工釘死、禁止重工**：合併 reviewer 只讀 diff＋只跑新增測試檔（prompt 附 controller 的綠燈證據並明令不重跑全套）；opus 總審管閘門證據核驗與跨檔一致性。Phase 3 的 sonnet 合併審自行重驗全套花了 65 分鐘，大半與既有證據重複。
+   - (d) **審查一律背景執行、與真跑閘門/文件任務並行**：Phase 3 靠這招把 65 分鐘審查幾乎完全遮進閘門與文件的時段——是制度不是巧合，照做。
+   - (e) **文件任務的素材包由 controller 先備好**（示例表 markdown、判讀素材數字、既有節指向），writer 不自己挖數字——Phase 3 已如此做，讀者迴圈仍花 34 分鐘屬品質成本，不砍。
 
 ## Phase 3 開工提醒
 
