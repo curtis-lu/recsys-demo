@@ -473,6 +473,87 @@ def build_reconciliation_section(
     )
 
 
+def _quadrant_scatter(by_item: dict, thresholds: dict) -> go.Figure | None:
+    """象限散布圖：橫軸 AUC（→ 判別力好）、縱軸 gap_vs_global（↑ 水準偏高）。
+
+    樣式鏡射框架手冊 fig2-quadrant-map：淺藍水平帶＝水準大致正確的範圍、
+    垂直虛線＝判別力門檻。任一軸缺值的 item 不進圖（表中仍列）。
+    """
+    pts = {
+        it: v for it, v in by_item.items()
+        if v.get("auc") is not None and v.get("gap_vs_global") is not None
+    }
+    if not pts:
+        return None
+    band = float(thresholds.get("gap_band", 0.35))
+    thr = float(thresholds.get("auc_threshold", 0.6))
+    fig = go.Figure(
+        go.Scatter(
+            x=[v["auc"] for v in pts.values()],
+            y=[v["gap_vs_global"] for v in pts.values()],
+            mode="markers+text",
+            text=list(pts),
+            textposition="top center",
+        )
+    )
+    fig.add_hrect(y0=-band, y1=band, fillcolor="lightblue", opacity=0.3,
+                  line_width=0)
+    fig.add_vline(x=thr, line_dash="dash")
+    fig.update_layout(
+        title="象限地圖：水準（縱）× 條件判別力（橫）",
+        xaxis_title="within-item AUC（→ 判別力好）",
+        yaxis_title="gap_vs_global（↑ 水準偏高）",
+    )
+    return fig
+
+
+def build_quadrant_section(
+    quadrant: dict | None, parameters: dict
+) -> ReportSection | None:
+    if not _section_on(parameters, "quadrant"):
+        return None
+    if not quadrant or not quadrant.get("enabled"):
+        return None
+    by_item = quadrant.get("by_item", {}) or {}
+    cols = ["quadrant", "gap_vs_global", "auc", "ap_sampled", "ci_low",
+            "ci_high", "top_share", "y_rate", "suppression_count",
+            "n_pos", "n_rows"]
+    tbl = pd.DataFrame(
+        {c: [by_item[it].get(c) for it in by_item] for c in cols},
+        index=list(by_item),
+    )
+    thresholds = quadrant.get("thresholds", {}) or {}
+    fig = _quadrant_scatter(by_item, thresholds)
+    tables = [tbl]
+    table_titles = ["per-item 象限表"]
+    cp = (quadrant.get("cross_purchase", {}) or {}).get("matrix", {}) or {}
+    if cp:
+        cp_tbl = pd.DataFrame.from_dict(cp, orient="index")
+        order = sorted(cp_tbl.index)
+        cp_tbl = cp_tbl.reindex(index=order, columns=order)
+        tables.append(cp_tbl)
+        table_titles.append("交叉購買矩陣 P(買 k｜買 j)（列＝j、欄＝k）")
+    desc = (
+        "行為層象限：縱軸 gap_vs_global（水準）、橫軸 within-item AUC"
+        "（條件判別力）。判讀順序：(1) 先看散布圖每個 item 落在哪個象限；"
+        f"(2) 水準帶外（|gap_vs_global| > {thresholds.get('gap_band')}）的 "
+        "item 回對帳表查可否由配置解釋；(3) AUC 低於 "
+        f"{thresholds.get('auc_threshold')} 的 item 看 suppression_count 與 "
+        "top_share 評估傷害；(4) 交叉購買矩陣看高共購 item 之間的壓制是否"
+        "實質。完整判讀：docs/pipelines/evaluation-diagnosis.md。"
+    )
+    notes = quadrant.get("notes") or []
+    if notes:
+        desc += "⚠ " + "／".join(notes)
+    return ReportSection(
+        title="象限 Quadrant（水準 × 條件判別力）",
+        description=desc,
+        figures=[fig] if fig is not None else [],
+        tables=tables,
+        table_titles=table_titles,
+    )
+
+
 def build_category_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -686,6 +767,7 @@ def assemble_report(
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
     reconciliation: dict | None = None,
+    quadrant: dict | None = None,
 ) -> str:
     """Assemble enabled sections (§0–§8) into the final HTML string."""
     candidates = [
@@ -695,6 +777,7 @@ def assemble_report(
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
         build_reconciliation_section(reconciliation, parameters),
+        build_quadrant_section(quadrant, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),

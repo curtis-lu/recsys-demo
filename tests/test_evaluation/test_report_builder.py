@@ -1,5 +1,7 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
+import pytest
+
 from recsys_tfb.evaluation import report_builder as rb
 
 
@@ -602,3 +604,76 @@ def test_assemble_report_renders_reconciliation():
         _metrics_min(), _params_min(), reconciliation=_RECON_FIXTURE
     )
     assert "對帳" in html
+
+
+_QUAD_FIXTURE = {
+    "enabled": True,
+    "thresholds": {"auc_threshold": 0.6, "gap_band": 0.35,
+                   "top_k_occupancy": 1},
+    "n_queries": 1000, "n_pos_queries": 400,
+    "by_item": {
+        "A": {"auc": 0.82, "auc_reason": None, "n_pos": 120, "n_neg": 880,
+              "n_rows": 1000, "gap_vs_global": 0.05, "level_status": "正常",
+              "disc_status": "好", "quadrant": "健康", "is_aggressor": False,
+              "ap_sampled": 0.61, "ci_low": 0.55, "ci_high": 0.68,
+              "top_share": 0.2, "n_top": 200, "y_rate": 0.12,
+              "suppression_count": 30},
+        "B": {"auc": 0.51, "auc_reason": None, "n_pos": 20, "n_neg": 980,
+              "n_rows": 1000, "gap_vs_global": 0.9, "level_status": "偏高",
+              "disc_status": "差", "quadrant": "加害者（常數高分型）",
+              "is_aggressor": True, "ap_sampled": 0.7, "ci_low": 0.5,
+              "ci_high": 0.85, "top_share": 0.6, "n_top": 600,
+              "y_rate": 0.02, "suppression_count": 480},
+    },
+    "cross_purchase": {
+        "matrix": {"A": {"A": 1.0, "B": 0.3}, "B": {"A": 0.5, "B": 1.0}},
+        "n_buyers": {"A": 100, "B": 60},
+    },
+    "sources": {"reconciliation": True, "metric_ci": True},
+    "notes": [],
+}
+
+
+def test_quadrant_section_renders_table_figure_and_matrix():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    sec = build_quadrant_section(_QUAD_FIXTURE, _params_min())
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["A", "B"]
+    assert tbl.loc["B", "quadrant"] == "加害者（常數高分型）"
+    assert len(sec.figures) == 1          # 散布圖
+    assert len(sec.tables) == 2           # 象限表＋交叉購買矩陣
+    assert sec.tables[1].loc["B", "A"] == pytest.approx(0.5)
+    assert "判讀" in sec.description
+    assert "evaluation-diagnosis" in sec.description
+
+
+def test_quadrant_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    assert build_quadrant_section(None, _params_min()) is None
+    assert build_quadrant_section({"enabled": False}, _params_min()) is None
+    params_off = {"evaluation": {"report": {"sections": {"quadrant": False}}}}
+    assert build_quadrant_section(_QUAD_FIXTURE, params_off) is None
+
+
+def test_quadrant_section_notes_and_missing_axis():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    fx = dict(
+        _QUAD_FIXTURE,
+        by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
+                           gap_vs_global=None, level_status="無法評估",
+                           quadrant="無法評估")},
+        notes=["reconciliation 停用或缺席——水準軸無法評估。"],
+    )
+    sec = build_quadrant_section(fx, _params_min())
+    assert "無法評估" in sec.tables[0]["quadrant"].tolist()
+    assert "reconciliation 停用" in sec.description
+    # 缺軸的 item 不進散布圖：唯一 item 缺 y → 無圖
+    assert sec.figures == []
+
+
+def test_assemble_report_renders_quadrant():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
+    )
+    assert "象限" in html

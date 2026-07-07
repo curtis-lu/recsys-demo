@@ -70,3 +70,7 @@ def test_quadrant_block():
         "gap_band": 0.35,
         "top_k_occupancy": 1,
     }
+
+
+def test_report_sections_include_quadrant():
+    assert _load()["report"]["sections"]["quadrant"] is True

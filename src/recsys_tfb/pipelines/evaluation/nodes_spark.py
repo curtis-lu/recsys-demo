@@ -432,4 +432,5 @@ def generate_report(
         diagnostics_frames=diagnostics_frames,
         metric_ci=metric_ci,
         reconciliation=reconciliation,
+        quadrant=quadrant,
     )
