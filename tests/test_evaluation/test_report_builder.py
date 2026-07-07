@@ -532,6 +532,9 @@ def test_assemble_report_passes_metric_ci_through():
 #      （|.|>0.3 → 不可解釋，verdict 不變）。
 # pooled_gap 依 A/B 的 p_mean/y_rate/n_rows 加權合併算出（僅供顯示，
 # report_builder 本身不重算）。
+# gap_calibrated_vs_global＝gap_calibrated 減全局參考值 reference_calibrated
+# =-0.1（opus 審查修正：gap_calibrated 同樣受母體條件化位移，判讀校準層要
+# 看相對值而非絕對值）：A: 0.02-(-0.1)=0.12；B: 0.8-(-0.1)=0.9。
 _RECON_FIXTURE = {
     "enabled": True, "score_col_used": "score_uncalibrated",
     "fallback": False, "explained_threshold": 0.3,
@@ -539,10 +542,12 @@ _RECON_FIXTURE = {
     "by_item": {
         "A": {"theory_min": 0.693, "theory_max": 0.693, "theory_approx": True,
               "gap": 0.75, "gap_vs_global": 0.45, "gap_calibrated": 0.02,
+              "gap_calibrated_vs_global": 0.12,
               "residual": -0.243,
               "verdict": "可解釋", "p_mean": 0.4, "y_rate": 0.25, "n_rows": 100},
         "B": {"theory_min": 0.0, "theory_max": 0.0, "theory_approx": False,
               "gap": 0.9, "gap_vs_global": 0.6, "gap_calibrated": 0.8,
+              "gap_calibrated_vs_global": 0.9,
               "residual": 0.6,
               "verdict": "不可解釋", "p_mean": 0.5, "y_rate": 0.3, "n_rows": 80},
     },
@@ -550,6 +555,7 @@ _RECON_FIXTURE = {
     "global": {
         "reference": 0.3, "method": "median_of_config_neutral_items",
         "pooled_gap": 0.7605, "n_neutral_items": 3,
+        "reference_calibrated": -0.1,
     },
 }
 
@@ -566,6 +572,13 @@ def test_reconciliation_section_renders_table_and_verdict():
     assert (list(tbl.columns).index("gap_vs_global")
             == list(tbl.columns).index("gap") + 1)
     assert "全局" in sec.description
+    # opus 總審修正 1：gap_calibrated_vs_global 緊接 gap_calibrated 之後，
+    # 描述需點出「中性」（config 中性 item 中位數）與「帶」（理論帶/帶寬）。
+    assert "gap_calibrated_vs_global" in tbl.columns
+    assert (list(tbl.columns).index("gap_calibrated_vs_global")
+            == list(tbl.columns).index("gap_calibrated") + 1)
+    assert "中性" in sec.description
+    assert "帶" in sec.description
 
 
 def test_reconciliation_section_none_when_disabled_or_absent():

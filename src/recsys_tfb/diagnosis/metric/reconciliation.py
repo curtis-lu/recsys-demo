@@ -203,6 +203,9 @@ def calibration_gap_by_item(
 
     Spark 只做 groupBy 聚合（無 UDF）；logit 在 driver 端對 22 個 item 級的
     小 dict 計算。ȳ 或 p̄ ∉ (0,1) → gap=None＋reason（不炸）。
+
+    誠實限制：gap 用 logit(平均) 而非平均(logit)，是近似——item 內分數越
+    分散，方向性偏差越大（Jensen's inequality，logit 非線性）。
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -233,6 +236,55 @@ def calibration_gap_by_item(
     return out
 
 
+def _fused_calibration_gaps(
+    sdf: SparkDataFrame, parameters: dict, score_col: str, base_score_col: str,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """``reconcile`` 內部效率路徑：一趟 groupBy 同時取兩個 score 欄的 p̄，
+    取代呼叫兩次 ``calibration_gap_by_item``（各自各一趟 full groupBy）。
+
+    語意與呼叫兩次 ``calibration_gap_by_item(sdf, parameters, score_col)``／
+    ``calibration_gap_by_item(sdf, parameters, base_score_col)`` 完全相同
+    （同一批列上算 ȳ 與兩個 p̄，逐 item 各自 None-safe 判斷），只是省一趟
+    掃描；``calibration_gap_by_item`` 本身保持單欄語意不動，供其既有測試
+    與其他呼叫點沿用。
+    """
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    label_col = schema["label"]
+
+    rows = (
+        sdf.groupBy(item_col)
+        .agg(
+            F.mean(F.col(score_col).cast("double")).alias("p_mean"),
+            F.mean(F.col(base_score_col).cast("double")).alias("p_mean_cal"),
+            F.mean(F.col(label_col).cast("double")).alias("y_rate"),
+            F.count(F.lit(1)).alias("n_rows"),
+        )
+        .collect()
+    )
+
+    def _entry(p: float, y: float, n: int) -> dict:
+        entry: dict = {"p_mean": p, "y_rate": y, "n_rows": n}
+        if not (0.0 < y < 1.0):
+            entry["gap"] = None
+            entry["reason"] = f"y_rate={y} 使 logit 未定義（全正或全負）"
+        elif not (0.0 < p < 1.0):
+            entry["gap"] = None
+            entry["reason"] = f"p_mean={p} 不在 (0,1)——score 欄可能不是機率"
+        else:
+            entry["gap"] = _logit(p) - _logit(y)
+        return entry
+
+    gaps: dict[str, dict] = {}
+    gaps_cal: dict[str, dict] = {}
+    for r in rows:
+        key = str(r[item_col])
+        y, n = float(r["y_rate"]), int(r["n_rows"])
+        gaps[key] = _entry(float(r["p_mean"]), y, n)
+        gaps_cal[key] = _entry(float(r["p_mean_cal"]), y, n)
+    return gaps, gaps_cal
+
+
 def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
     """對帳表：理論帶 × 實測 gap → residual → verdict（JSON-ready）。"""
     eval_params = parameters.get("evaluation", {}) or {}
@@ -252,11 +304,15 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         score_col, fallback = base_score_col, True
 
     theory = theoretical_offsets(parameters)
-    gaps = calibration_gap_by_item(eval_predictions, parameters, score_col)
-    gaps_cal = (
-        calibration_gap_by_item(eval_predictions, parameters, base_score_col)
-        if score_col != base_score_col else None
-    )
+    if score_col != base_score_col:
+        # fused：一趟 groupBy 同時取兩個 score 欄的 p̄，取代兩次
+        # calibration_gap_by_item（各自各一趟 full groupBy）。
+        gaps, gaps_cal = _fused_calibration_gaps(
+            eval_predictions, parameters, score_col, base_score_col
+        )
+    else:
+        gaps = calibration_gap_by_item(eval_predictions, parameters, score_col)
+        gaps_cal = None
 
     # Pass 1：per-item 理論帶＋實測 gap（尚未套用 global_reference）。
     raw: dict[str, dict] = {}
@@ -294,6 +350,25 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         global_reference = 0.0
         global_method = "insufficient_neutral_items_fallback_zero"
 
+    # reference_calibrated：gap_calibrated 同樣受母體條件化位移（見模組
+    # docstring 的修訂說明）——校準層是否有效不能看 gap_calibrated 的絕對
+    # 值，要看它相對這個基準的位置。同一組 config 中性 item，取其
+    # gap_calibrated 中位數；規則與 global_reference 相同（候選 <3 個 →
+    # 退回 0.0）。只在主判欄≠score（gaps_cal 不為 None）時才有意義，
+    # 否則沒有 gap_calibrated 這個維度，回傳 None。
+    if gaps_cal is None:
+        reference_calibrated = None
+    else:
+        cal_candidates = [
+            r["gap_calibrated"] for r in raw.values()
+            if r["theory_min"] == 0.0 and r["theory_max"] == 0.0
+            and r["gap_calibrated"] is not None
+        ]
+        reference_calibrated = (
+            statistics.median(cal_candidates) if len(cal_candidates) >= 3
+            else 0.0
+        )
+
     # pooled_gap：n_rows 加權合併全體 item 的 p̄/ȳ 後的 logit 差——獨立於
     # global_reference 的另一個「全局水準」讀數，供報表對照；任何 item 的
     # p̄/ȳ 退化（∉(0,1)，即該 item gap 為 None）→ 整體 pooled_gap 也是 None。
@@ -321,6 +396,10 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         }
         if gaps_cal is not None:
             entry["gap_calibrated"] = r["gap_calibrated"]
+            entry["gap_calibrated_vs_global"] = (
+                None if r["gap_calibrated"] is None
+                else r["gap_calibrated"] - reference_calibrated
+            )
         if gap is None:
             entry["residual"] = None
             entry["verdict"] = "無法評估"
@@ -352,6 +431,7 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         }
         if gaps_cal is not None:
             missing["gap_calibrated"] = None
+            missing["gap_calibrated_vs_global"] = None
         missing.update({
             "residual": None,
             "verdict": "無法評估",
@@ -373,5 +453,6 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
             "method": global_method,
             "pooled_gap": pooled_gap,
             "n_neutral_items": len(candidates),
+            "reference_calibrated": reference_calibrated,
         },
     }

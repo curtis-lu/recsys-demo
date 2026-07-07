@@ -421,8 +421,8 @@ def build_reconciliation_section(
         return None
     by_item = reconciliation.get("by_item", {}) or {}
     cols = ["theory_min", "theory_max", "gap", "gap_vs_global",
-            "gap_calibrated", "residual", "verdict", "p_mean", "y_rate",
-            "n_rows"]
+            "gap_calibrated", "gap_calibrated_vs_global",
+            "residual", "verdict", "p_mean", "y_rate", "n_rows"]
     tbl = pd.DataFrame(
         {c: [by_item[it].get(c) for it in by_item] for c in cols},
         index=list(by_item),
@@ -431,19 +431,32 @@ def build_reconciliation_section(
     glob = reconciliation.get("global", {}) or {}
     reference = glob.get("reference", 0.0)
     method = glob.get("method", "unknown")
+    n_neutral = glob.get("n_neutral_items", 0)
+    pooled_gap = glob.get("pooled_gap")
+    pooled_clause = (
+        f"；n_rows 加權 pooled gap {pooled_gap:.3f} 供交叉檢核"
+        if pooled_gap is not None else ""
+    )
     desc = (
         "對帳層：理論偏移（由 dataset.sample_ratio_overrides 與 "
         "training.sample_weights 推得的正負類曝險比，單位 log-odds）"
-        "vs 實測校準差距 gap = logit(平均預測機率) − logit(實際正類率)，"
+        "vs 實測校準差距 gap = logit(平均預測機率) − logit(實際正類率)"
+        "（gap 用 logit(平均) 而非平均(logit)，是近似——item 內分數越分散，"
+        "方向性偏差越大），"
         f"主判欄用 {score_col}。theory_min/max 是 item 層的近似帶"
-        "（多維 override 跨 segment 聚合，cell 細目見 reconciliation.json）；"
-        f"verdict 以 gap_vs_global（gap 減全局參考值 {reference:.3f}，"
+        "（多維 override 跨 segment 聚合，cell 細目見 reconciliation.json；"
+        "theory_min≠theory_max 的 item 帶越寬 verdict 越寬容，判讀時"
+        "注意帶寬）。"
+        f"verdict 以 gap_vs_global（gap 減全局參考值 {reference:.3f}——"
+        f"{n_neutral} 個 config 中性 item 的中位數{pooled_clause}，"
         f"方法 {method}）判定，residual = gap_vs_global 距帶的距離，"
         f"|residual| ≤ {reconciliation.get('explained_threshold')} → 可解釋。"
         "全局水準偏移本身是獨立現象——post-training 模式評估母體僅含有正例"
         "客戶，母體條件化會把全體 item 的 gap 一致下移，屬預期效應非 "
         "per-item 問題。"
-        "gap_calibrated 為校準後分數的同式 gap——校準層有效時應接近 0。"
+        "gap_calibrated 同樣受母體條件化位移，判讀校準層要看 "
+        "gap_calibrated_vs_global（校準層有效時它應明顯小於 gap_vs_global "
+        "的量級、趨近 0）。"
     )
     if reconciliation.get("fallback"):
         desc += (

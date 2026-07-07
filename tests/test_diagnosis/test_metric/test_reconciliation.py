@@ -264,6 +264,46 @@ def test_reconcile_fallback_reference_zero_when_few_neutral(spark):
     assert b["verdict"] == "可解釋"
 
 
+def test_reconcile_calibrated_reference_and_vs_global(spark):
+    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
+    # opus 總審修正 1：gap_calibrated 同樣受母體條件化位移，判讀校準層要看
+    # gap_calibrated_vs_global 而非絕對值。reference_calibrated 走跟
+    # global_reference 一樣的規則（config 中性 item 中位數），但用
+    # base_score_col="score" 算，因此與 gap 用的 score_uncalibrated 中位數
+    # 各自獨立、數值本該不同。
+    # 3 個中性 item（無 override，帶 [0,0]），score/score_uncalibrated 刻意
+    # 設不同數值：
+    #   neutral1: score=0.35, score_uncalibrated=0.30
+    #   neutral2: score=0.32, score_uncalibrated=0.25   （score 中位數 item）
+    #   neutral3: score=0.28, score_uncalibrated=0.20
+    # 每 item 1 正 1 負 → ȳ=0.5 → logit(ȳ)=0 → gap(_calibrated) = logit(p̄)。
+    # reference_calibrated = median(logit(0.35), logit(0.32), logit(0.28))
+    #                       = logit(0.32) = ln(0.32/0.68)。
+    rows = [
+        ("20240331", "C0", "prod_neutral1", 0.35, 0.30, 1),
+        ("20240331", "C1", "prod_neutral1", 0.35, 0.30, 0),
+        ("20240331", "C2", "prod_neutral2", 0.32, 0.25, 1),
+        ("20240331", "C3", "prod_neutral2", 0.32, 0.25, 0),
+        ("20240331", "C4", "prod_neutral3", 0.28, 0.20, 1),
+        ("20240331", "C5", "prod_neutral3", 0.28, 0.20, 0),
+    ]
+    out = reconcile(_eval_df(spark, rows), _full_params())
+
+    expected_reference_calibrated = math.log(0.32 / 0.68)
+    assert out["global"]["reference_calibrated"] == pytest.approx(
+        expected_reference_calibrated
+    )
+
+    item = out["by_item"]["prod_neutral1"]
+    assert item["gap_calibrated"] == pytest.approx(math.log(0.35 / 0.65))
+    assert item["gap_calibrated_vs_global"] == pytest.approx(
+        item["gap_calibrated"] - out["global"]["reference_calibrated"]
+    )
+    assert item["gap_calibrated_vs_global"] == pytest.approx(
+        math.log(0.35 / 0.65) - expected_reference_calibrated
+    )
+
+
 def test_invalid_label_token_skipped_not_misclassified():
     # 審查修正：label 分量非 "0"/"1"（如 "True"）不得被靜默當負類（正負號會反轉）
     out = theoretical_offsets(_params(overrides={"mass|fund_bond|True": 0.5}))
