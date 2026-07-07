@@ -113,7 +113,7 @@ def build_dataset_overview_section(
 
 
 def build_primary_map_section(
-    metrics: dict, parameters: dict
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
 ) -> ReportSection | None:
     if not _section_on(parameters, "primary_map"):
         return None
@@ -130,14 +130,27 @@ def build_primary_map_section(
             for k in ks
         }
     table = pd.DataFrame(rows).T
+    tables = [table]
+    table_titles = ["per-query 指標 @k"]
+    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
+        m = metric_ci["macro"]
+        sample_meta = metric_ci.get("sample", {}) or {}
+        ci_tbl = pd.DataFrame(
+            [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+              "CI 97.5%": m.get("ci_high"),
+              "樣本 query 數": sample_meta.get("n_queries_sampled")}],
+            index=["macro per-item mAP"],
+        )
+        tables.append(ci_tbl)
+        table_titles.append("macro per-item mAP 的 CI（抽樣估計）")
     return ReportSection(
         title="主指標 mAP@k（細產品 per-query）",
         description=(
             "overall mAP@k 為主軸；precision/ndcg/recall@k 作脈絡。"
             "K = 產品數時 precision 退化為 base rate、recall 恆為 1。"
         ),
-        tables=[table],
-        table_titles=["per-query 指標 @k"],
+        tables=tables,
+        table_titles=table_titles,
     )
 
 
@@ -310,7 +323,7 @@ def build_guardrail_recall_section(
 
 
 def build_per_item_attr_section(
-    metrics: dict, parameters: dict
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
 ) -> ReportSection | None:
     if not _section_on(parameters, "per_item_attr"):
         return None
@@ -344,6 +357,39 @@ def build_per_item_attr_section(
         per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
         macro_metrics=macro_item,
     )
+
+    description_extra = ""
+    if metric_ci and metric_ci.get("enabled"):
+        ci_items = metric_ci.get("per_item", {}) or {}
+        ci_macro = metric_ci.get("macro") or {}
+        sample_meta = metric_ci.get("sample", {}) or {}
+
+        def _ci_val(idx: str, field: str):
+            src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
+            return src.get(field)
+
+        for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
+                           ("CI 97.5%", "ci_high")):
+            map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
+        description_extra = (
+            f"AP(抽樣)/CI 欄為抽樣估計（{sample_meta.get('n_queries_sampled')} "
+            f"個正例 query、bootstrap n_boot={metric_ci.get('n_boot')}，"
+            f"cluster=客戶），非全量值；點估計以全量欄 map_attr 為準。"
+        )
+
+    tables = [map_tbl, ndcg_tbl]
+    table_titles = ["per-item map_attr@k", "per-item ndcg_attr@k"]
+    observation_items = metrics.get("observation_items", []) or []
+    if observation_items:
+        per_item_all = metrics.get("per_item", {})
+        obs_tbl = pd.DataFrame(
+            {"n_pos": [per_item_all.get(it, {}).get("n_pos")
+                       for it in observation_items]},
+            index=observation_items,
+        )
+        tables.append(obs_tbl)
+        table_titles.append("觀察名單（n_pos < min_positives，已移出 macro）")
+
     return ReportSection(
         title="per_item 歸因 Attribution（細產品）",
         description=(
@@ -355,10 +401,10 @@ def build_per_item_attr_section(
             "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
             "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
             "換成 log 折扣的 ndcg_contrib@k。頂列「Macro 平均」為各產品等權平均。"
-        ),
+        ) + description_extra,
         figures=[map_fig, ndcg_fig],
-        tables=[map_tbl, ndcg_tbl],
-        table_titles=["per-item map_attr@k", "per-item ndcg_attr@k"],
+        tables=tables,
+        table_titles=table_titles,
     )
 
 
@@ -573,14 +619,15 @@ def assemble_report(
     parameters: dict,
     baseline_metrics: dict | None = None,
     diagnostics_frames: dict | None = None,
+    metric_ci: dict | None = None,
 ) -> str:
     """Assemble enabled sections (§0–§8) into the final HTML string."""
     candidates = [
         build_headline_section(metrics, parameters),
         build_dataset_overview_section(metrics, parameters),
-        build_primary_map_section(metrics, parameters),
+        build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
-        build_per_item_attr_section(metrics, parameters),
+        build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),

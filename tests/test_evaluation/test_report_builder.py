@@ -438,3 +438,87 @@ def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
         "per-item ndcg_attr@k (M/B/Δ)",
     ):
         assert title not in s.table_titles
+
+
+def _metrics_min():
+    return {
+        "overall": {"map@2": 0.8, "precision@2": 0.5,
+                    "ndcg@2": 0.9, "recall@2": 1.0},
+        "per_item": {
+            "A": {"map_attr@2": 0.75, "ndcg_attr@2": 0.8,
+                  "hit_rate@2": 1.0, "mean_pos": 1.5, "n_pos": 2},
+            "B": {"map_attr@2": 1.0, "ndcg_attr@2": 1.0,
+                  "hit_rate@2": 1.0, "mean_pos": 1.0, "n_pos": 1},
+        },
+        "macro_avg": {"by_item": {"map_attr@2": 0.875, "ndcg_attr@2": 0.9,
+                                  "hit_rate@2": 1.0, "mean_pos": 1.25}},
+        "observation_items": [],
+        "n_queries": 3,
+        "n_excluded_queries": 0,
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+
+
+_CI_FIXTURE = {
+    "enabled": True, "n_boot": 50, "k": None, "seed": 42,
+    "metric_params": {"weight_alpha": 0.0, "min_positives": 0,
+                      "shrinkage_k": 0.0},
+    "per_item": {
+        "A": {"ap": 0.74, "ci_low": 0.60, "ci_high": 0.90, "n_pos": 2},
+        "B": {"ap": 1.0, "ci_low": 1.0, "ci_high": 1.0, "n_pos": 1},
+    },
+    "macro": {"ap": 0.87, "ci_low": 0.80, "ci_high": 0.95},
+    "sample": {"n_queries_sampled": 3, "n_pos_queries_total": 3},
+}
+
+
+def _params_min():
+    return {"evaluation": {"report": {"display": {"primary_map_k": [2]}}}}
+
+
+def test_per_item_attr_ci_columns_present_when_metric_ci_given():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    sec = build_per_item_attr_section(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    map_tbl = sec.tables[0]
+    for col in ["AP(抽樣)", "CI 2.5%", "CI 97.5%"]:
+        assert col in map_tbl.columns
+    assert map_tbl.loc["A", "CI 2.5%"] == 0.60
+    assert map_tbl.loc["Macro 平均", "AP(抽樣)"] == 0.87
+    assert "抽樣" in sec.description and "50" in sec.description
+
+
+def test_per_item_attr_no_ci_columns_when_absent():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    sec = build_per_item_attr_section(_metrics_min(), _params_min())
+    assert "AP(抽樣)" not in sec.tables[0].columns
+
+
+def test_per_item_attr_observation_list_table():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    metrics = _metrics_min()
+    metrics["observation_items"] = ["B"]
+    sec = build_per_item_attr_section(metrics, _params_min())
+    assert "觀察名單" in sec.table_titles[-1]
+    obs_tbl = sec.tables[-1]
+    assert list(obs_tbl.index) == ["B"]
+    assert obs_tbl.loc["B", "n_pos"] == 1
+
+
+def test_primary_map_macro_ci_table():
+    from recsys_tfb.evaluation.report_builder import build_primary_map_section
+    sec = build_primary_map_section(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    assert any("CI" in t for t in sec.table_titles)
+    ci_tbl = sec.tables[-1]
+    assert ci_tbl.loc["macro per-item mAP", "CI 97.5%"] == 0.95
+
+
+def test_assemble_report_passes_metric_ci_through():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    assert "CI 2.5%" in html

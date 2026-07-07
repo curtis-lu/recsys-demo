@@ -360,4 +360,5 @@ def generate_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
         diagnostics_frames=diagnostics_frames,
+        metric_ci=metric_ci,
     )
