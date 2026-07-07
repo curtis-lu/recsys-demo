@@ -83,7 +83,7 @@ def persist_sample_weight_report(
     version dir (so it appears in the manifest's artifacts list) and returns the
     diagnostic dict.
     """
-    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
+    from recsys_tfb.diagnosis.model import diagnostics_dir
 
     diag = resolve_weight_diagnostics(
         train_parquet_handle, parameters, preprocessor_metadata)
@@ -909,7 +909,7 @@ def log_experiment(
     cases_manifest: dict = None,
 ) -> None:
     """Log training results to MLflow."""
-    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
+    from recsys_tfb.diagnosis.model import diagnostics_dir
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")

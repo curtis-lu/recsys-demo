@@ -9,7 +9,7 @@ import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-from recsys_tfb.pipelines.training import diagnostics as diag
+from recsys_tfb.diagnosis import model as diag
 
 
 @pytest.fixture
@@ -146,7 +146,7 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert out["per_item"]["rare"]["n_sampled"] <= 2
     assert {"n_sampled", "n_positive", "score_min", "score_max", "score_mean", "low_coverage"} \
         <= set(out["per_item"]["rare"])
-    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    from recsys_tfb.diagnosis.model.paths import summary_dir
     assert (summary_dir(parameters) / "shap_summary_global.png").exists()
 
 
@@ -190,7 +190,7 @@ def test_per_item_profile_positive_and_coverage(shap_setup):
 
 
 def test_divergence_identical_is_zero():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
     div, idio = _divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
@@ -199,7 +199,7 @@ def test_divergence_identical_is_zero():
 
 
 def test_divergence_disjoint_top_is_one():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     item = np.array([0.0, 0.0, 5.0, 4.0])   # top2 = idx {2,3}
     glob = np.array([5.0, 4.0, 0.0, 0.0])   # top2 = idx {0,1}
@@ -209,7 +209,7 @@ def test_divergence_disjoint_top_is_one():
 
 
 def test_divergence_identical_spearman_is_zero():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
     div, _ = _divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
@@ -217,7 +217,7 @@ def test_divergence_identical_spearman_is_zero():
 
 
 def test_divergence_reversed_spearman_is_one():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     va = np.array([1.0, 2.0, 3.0, 4.0])
     vb = np.array([4.0, 3.0, 2.0, 1.0])
@@ -249,7 +249,7 @@ def test_per_item_signed_can_be_negative(shap_setup):
 
 
 def test_summary_pngs_global_and_per_item(shap_setup):
-    from recsys_tfb.pipelines.training.diagnostics.paths import (
+    from recsys_tfb.diagnosis.model.paths import (
         per_item_summary_dir, safe_name, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
@@ -263,7 +263,7 @@ def test_summary_pngs_global_and_per_item(shap_setup):
 
 def test_per_item_beeswarm_can_be_disabled(shap_setup):
     import os
-    from recsys_tfb.pipelines.training.diagnostics.paths import (
+    from recsys_tfb.diagnosis.model.paths import (
         per_item_summary_dir, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
@@ -338,7 +338,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
 def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     import numpy as np
     import pandas as pd
-    from recsys_tfb.pipelines.training.diagnostics import data_access
+    from recsys_tfb.diagnosis.model import data_access
 
     n = 400
     rng = np.random.RandomState(0)
@@ -460,7 +460,7 @@ def test_positive_profile_skipped_when_disabled(shap_setup, monkeypatch):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["profile_positive"] = False
 
-    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
     calls = {"n": 0}
     real = spi.feature_attributions
 
@@ -481,8 +481,8 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     # 且 sample B 的 take_rows 只取 <= positive_sample_per_item * n_items 列(記憶體 bound,spec §6#5)。
     import numpy as np
     import pandas as pd
-    from recsys_tfb.pipelines.training.diagnostics import data_access
-    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+    from recsys_tfb.diagnosis.model import data_access
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
 
     rng = np.random.RandomState(0)
     n = 2000

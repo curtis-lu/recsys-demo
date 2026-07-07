@@ -6,7 +6,7 @@ import pyarrow.parquet as pq
 import pyarrow.dataset as pads
 import pytest
 
-from recsys_tfb.pipelines.training.diagnostics import data_access as da
+from recsys_tfb.diagnosis.model import data_access as da
 
 
 def _frame(n=50):

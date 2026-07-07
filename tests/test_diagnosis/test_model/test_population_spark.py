@@ -14,7 +14,7 @@ _FEAT_COLS = ["snap_date", "cust_id", "prod_name", "f0", "f1"]
 
 
 def test_quadrant_assignment_and_features_joined(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1),   # rank1 adopted -> TP
          ("2024-01-31", "c1", "B", 0.2, 0),   # rank2 not     -> TN
@@ -38,7 +38,7 @@ def test_quadrant_assignment_and_features_joined(spark):
 
 
 def test_per_cell_cap_and_determinism(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     # (A, TP) 有 2 列;per_cell=1 → 只留 1,且兩次結果相同
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1),
@@ -62,14 +62,14 @@ def test_per_cell_cap_and_determinism(spark):
 
 
 def test_disabled_returns_none(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     preds = spark.createDataFrame([("2024-01-31", "c1", "A", 0.9, 1)], _PRED_COLS)
     feats = spark.createDataFrame([("2024-01-31", "c1", "A", 1.0, 2.0)], _FEAT_COLS)
     assert select_shap_population(preds, feats, _params(enabled=False)) == (None, None)
 
 
 def test_case_rows_extremes_role_and_features(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     # c1/c2/c4 三位客戶,item A 都排第1(score 高於 B)→ (A, TP)。
     # (A, TP) 有 3 列,分數 0.9/0.7/0.5 → high=c1, low=c4。
     preds = spark.createDataFrame(
@@ -93,7 +93,7 @@ def test_case_rows_extremes_role_and_features(spark):
 
 
 def test_case_rows_single_row_cell_marks_same_row(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     # (A, TP) 只有 c1 一列 → high 與 low 落在同一 group-key。
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1), ("2024-01-31", "c1", "B", 0.1, 0)],
@@ -109,7 +109,7 @@ def test_case_rows_single_row_cell_marks_same_row(spark):
 
 
 def test_case_rows_tiebreak_same_score_picks_distinct_rows(spark):
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
     # (A, TP) 兩列同分(0.9)→ 不對稱 tiebreak 必須挑到不同列(high≠low)。
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1), ("2024-01-31", "c1", "B", 0.1, 0),
@@ -132,8 +132,8 @@ def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch
     import numpy as np
 
     from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-    from recsys_tfb.pipelines.training.diagnostics.shap_cases import compute_quadrant_cases
-    from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+    from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_cases
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
 
     monkeypatch.chdir(tmp_path)
     rng = np.random.RandomState(0)

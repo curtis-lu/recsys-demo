@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-from recsys_tfb.pipelines.training.diagnostics import attribution
+from recsys_tfb.diagnosis.model import attribution
 
 
 def _fitted():
