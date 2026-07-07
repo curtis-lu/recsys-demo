@@ -565,5 +565,6 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 - 上游 label 與來源表：[`source_etl.md`](source_etl.md)
 - Dataset test 母體與 zero-positive query filtering：[`dataset.md`](dataset.md)
 - 指標定義與報表解讀：[`../metrics/metrics.html`](../metrics/metrics.html)
+- 診斷產物判讀（metric_ci CI 欄、對帳 Reconciliation）：[`evaluation-diagnosis.md`](evaluation-diagnosis.md)
 - 資料表、partition 與完整 lineage：[`../data-lineage.html`](../data-lineage.html)
 - 版本化、恢復與人工卡控設計背景：[`../design-principles.md`](../design-principles.md)

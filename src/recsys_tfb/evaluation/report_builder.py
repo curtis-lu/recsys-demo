@@ -430,7 +430,6 @@ def build_reconciliation_section(
     score_col = reconciliation.get("score_col_used")
     glob = reconciliation.get("global", {}) or {}
     reference = glob.get("reference", 0.0)
-    method = glob.get("method", "unknown")
     n_neutral = glob.get("n_neutral_items", 0)
     pooled_gap = glob.get("pooled_gap")
     pooled_clause = (
@@ -438,25 +437,25 @@ def build_reconciliation_section(
         if pooled_gap is not None else ""
     )
     desc = (
-        "對帳層：理論偏移（由 dataset.sample_ratio_overrides 與 "
-        "training.sample_weights 推得的正負類曝險比，單位 log-odds）"
-        "vs 實測校準差距 gap = logit(平均預測機率) − logit(實際正類率)"
-        "（gap 用 logit(平均) 而非平均(logit)，是近似——item 內分數越分散，"
-        "方向性偏差越大），"
-        f"主判欄用 {score_col}。theory_min/max 是 item 層的近似帶"
-        "（多維 override 跨 segment 聚合，cell 細目見 reconciliation.json；"
-        "theory_min≠theory_max 的 item 帶越寬 verdict 越寬容，判讀時"
-        "注意帶寬）。"
-        f"verdict 以 gap_vs_global（gap 減全局參考值 {reference:.3f}——"
-        f"{n_neutral} 個 config 中性 item 的中位數{pooled_clause}，"
-        f"方法 {method}）判定，residual = gap_vs_global 距帶的距離，"
-        f"|residual| ≤ {reconciliation.get('explained_threshold')} → 可解釋。"
-        "全局水準偏移本身是獨立現象——post-training 模式評估母體僅含有正例"
-        "客戶，母體條件化會把全體 item 的 gap 一致下移，屬預期效應非 "
-        "per-item 問題。"
-        "gap_calibrated 同樣受母體條件化位移，判讀校準層要看 "
-        "gap_calibrated_vs_global（校準層有效時它應明顯小於 gap_vs_global "
-        "的量級、趨近 0）。"
+        "這張表在回答一個問題：模型的機率水準偏移，是不是你自己的抽樣／"
+        "加權配置造成的？欄位定義與完整前因後果見 "
+        "docs/pipelines/evaluation-diagnosis.md，這裡只給判讀順序：<br>"
+        "1. 先掃 verdict 欄。全部「可解釋」＝偏移都是配置的直接後果，"
+        "不用動模型；出現「不可解釋」＝有配置以外的事在發生，值得追；"
+        "「無法評估」看 reason 欄。<br>"
+        "2. theory_min／theory_max＝由配置推得的理論偏移帶（log-odds）。"
+        "同一產品在不同客群的抽樣比率不同，所以是「帶」不是單值——"
+        "帶越寬 verdict 越寬容（跨 segment 聚合近似，cell 級精確值在 "
+        "reconciliation.json）。<br>"
+        f"3. verdict 比的是 gap_vs_global（＝gap − 全局參考值 "
+        f"{reference:.3f}，取 {n_neutral} 個 config 中性產品的 gap 中位數"
+        f"{pooled_clause}），不是絕對 gap——post-training 的評估母體只含"
+        "有正例的客戶，所有產品的 gap 會被一致下移，那是母體性質、"
+        f"不是任何單一產品的問題。|residual| ≤ "
+        f"{reconciliation.get('explained_threshold')} → 可解釋。<br>"
+        f"4. 主判欄用 {score_col}（模型原始輸出）。判讀校準層看 "
+        "gap_calibrated_vs_global：校準有效時它應遠小於 gap_vs_global、"
+        "趨近 0。gap 為 logit(平均) 的近似——產品內分數越分散，偏差越大。"
     )
     if reconciliation.get("fallback"):
         desc += (

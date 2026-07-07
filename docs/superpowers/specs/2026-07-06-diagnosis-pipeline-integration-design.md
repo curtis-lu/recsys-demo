@@ -37,7 +37,7 @@
 
 ## 3. 六個階段（Phase 0–5）
 
-每階段的固定結構：**做什麼 → 動哪些檔 → 新 config → 驗收（真實執行）**。驗收一律在本機 local Spark 環境（`--env local`，合成資料），指令照 `docs/operations/local-spark-setup.md`；「已知答案注入」指刻意在 local config 製造一個已知效應、驗證診斷能抓到它——這是每階段閘門的核心。
+每階段的固定結構：**做什麼 → 動哪些檔 → 新 config → 文件 → 驗收（真實執行）**。**文件是一等交付物（2026-07-07 使用者要求補入）**：每階段凡新增報表段落或診斷產物，必須同步更新 `docs/pipelines/evaluation-diagnosis.md`（判讀手冊——前因後果、白話原理、真實數字範例、判讀順序；handbook 風格，見 `docs/handbooks/handbook-writing-guide.md`），報表描述只留「短判讀順序＋指向該文件」，不得把完整理論塞進報表描述；文件交付前派讀者 subagent 通讀。驗收一律在本機 local Spark 環境（`--env local`，合成資料），指令照 `docs/operations/local-spark-setup.md`；「已知答案注入」指刻意在 local config 製造一個已知效應、驗證診斷能抓到它——這是每階段閘門的核心。
 
 ---
 

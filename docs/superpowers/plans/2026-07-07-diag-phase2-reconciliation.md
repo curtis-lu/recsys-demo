@@ -988,6 +988,16 @@ git checkout conf/base/parameters_dataset.yaml && grep -c "fund_bond" conf/base/
 
 ---
 
+### Task 8（追加，2026-07-07 使用者閘門反饋）：判讀文件
+
+使用者反饋報表描述「完全看不懂」——理論全塞在一段報表文字裡、無前因後果。追加交付：
+
+- [x] 新文件 `docs/pipelines/evaluation-diagnosis.md`：評估側診斷產物判讀手冊（handbook 風格；§1 對帳在回答什麼、§2 理論偏移含 −ln r 白話推導＋真實數字、§3 gap 定義、§4 為什麼看 gap_vs_global＝母體條件化故事、§5 欄位對照＋判讀順序、§6 fund_bond 注入實驗走讀、§7 metric_ci、§8 限制）。
+- [x] `build_reconciliation_section` 描述改寫成「4 步判讀順序＋指向文件」，理論細節全部移出。
+- [x] `docs/pipelines/evaluation.md` 相關文件清單掛連結。
+- [x] spec §3 固定結構補「文件」一節（Phase 3–5 起為必備交付：新報表段落必同步更新判讀手冊＋讀者 subagent 通讀）。
+- [x] 讀者 subagent 通讀後修稿。
+
 ## Self-review（計畫作者已核）
 
 - Spec §3 Phase 2 覆蓋：`theoretical_offsets`（Task 2，含多維 key 誠實限制→cell 細列＋item 近似帶）、`calibration_gap_by_item`（Task 3，spec 公式＋score_col 雙欄＋monitoring 降級）、對帳表 verdict（Task 3）、report section＋reconciliation.json（Task 5/6）、config＋A16（Task 4）、驗收 1–3（Task 7 Step 3/4 的注入-還原全鏈重跑，含 spec 特別警告的「全 segment 一起注入」）。
