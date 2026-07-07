@@ -420,21 +420,29 @@ def build_reconciliation_section(
     if not reconciliation or not reconciliation.get("enabled"):
         return None
     by_item = reconciliation.get("by_item", {}) or {}
-    cols = ["theory_min", "theory_max", "gap", "gap_calibrated",
-            "residual", "verdict", "p_mean", "y_rate", "n_rows"]
+    cols = ["theory_min", "theory_max", "gap", "gap_vs_global",
+            "gap_calibrated", "residual", "verdict", "p_mean", "y_rate",
+            "n_rows"]
     tbl = pd.DataFrame(
         {c: [by_item[it].get(c) for it in by_item] for c in cols},
         index=list(by_item),
     )
     score_col = reconciliation.get("score_col_used")
+    glob = reconciliation.get("global", {}) or {}
+    reference = glob.get("reference", 0.0)
+    method = glob.get("method", "unknown")
     desc = (
         "對帳層：理論偏移（由 dataset.sample_ratio_overrides 與 "
         "training.sample_weights 推得的正負類曝險比，單位 log-odds）"
         "vs 實測校準差距 gap = logit(平均預測機率) − logit(實際正類率)，"
         f"主判欄用 {score_col}。theory_min/max 是 item 層的近似帶"
         "（多維 override 跨 segment 聚合，cell 細目見 reconciliation.json）；"
-        "residual = gap 距帶的距離，|residual| ≤ "
-        f"{reconciliation.get('explained_threshold')} → 可解釋。"
+        f"verdict 以 gap_vs_global（gap 減全局參考值 {reference:.3f}，"
+        f"方法 {method}）判定，residual = gap_vs_global 距帶的距離，"
+        f"|residual| ≤ {reconciliation.get('explained_threshold')} → 可解釋。"
+        "全局水準偏移本身是獨立現象——post-training 模式評估母體僅含有正例"
+        "客戶，母體條件化會把全體 item 的 gap 一致下移，屬預期效應非 "
+        "per-item 問題。"
         "gap_calibrated 為校準後分數的同式 gap——校準層有效時應接近 0。"
     )
     if reconciliation.get("fallback"):

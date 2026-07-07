@@ -197,3 +197,68 @@ def test_reconcile_fallback_when_uncalibrated_missing(spark):
     )
     out = reconcile(df, _full_params())
     assert out["fallback"] is True and out["score_col_used"] == "score"
+
+
+def test_reconcile_global_reference_median(spark):
+    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
+    # 3 個中性 item（無 override，帶 [0,0]）＋ 1 個有 override 的 item。
+    # 每 item 2 列（1 正 1 負）、ȳ 皆 0.5，用 score_uncalibrated 控制 p̄：
+    #   neutral1 p̄=0.30 → gap = logit(0.30) = ln(3/7)  ≈ -0.8473
+    #   neutral2 p̄=0.25 → gap = logit(0.25) = ln(1/3)  ≈ -1.0986（中位數）
+    #   neutral3 p̄=0.20 → gap = logit(0.20) = ln(1/4)  ≈ -1.3863
+    #   offset   p̄=0.40 → gap = logit(0.40) = ln(2/3)  ≈ -0.4055（override
+    #     mass|prod_offset|0=0.5 → 理論帶 [ln2, ln2]）
+    # 全局參考值 = median(3 個中性 gap) = ln(1/3)。
+    # offset item 的 gap_vs_global = ln(2/3) − ln(1/3) = ln2，恰落理論帶內。
+    rows = [
+        ("20240331", "C0", "prod_neutral1", 0.30, 0.30, 1),
+        ("20240331", "C1", "prod_neutral1", 0.30, 0.30, 0),
+        ("20240331", "C2", "prod_neutral2", 0.25, 0.25, 1),
+        ("20240331", "C3", "prod_neutral2", 0.25, 0.25, 0),
+        ("20240331", "C4", "prod_neutral3", 0.20, 0.20, 1),
+        ("20240331", "C5", "prod_neutral3", 0.20, 0.20, 0),
+        ("20240331", "C6", "prod_offset", 0.40, 0.40, 1),
+        ("20240331", "C7", "prod_offset", 0.40, 0.40, 0),
+    ]
+    params = _full_params(overrides={"mass|prod_offset|0": 0.5})
+    out = reconcile(_eval_df(spark, rows), params)
+
+    assert out["global"]["method"] == "median_of_config_neutral_items"
+    assert out["global"]["reference"] == pytest.approx(math.log(1 / 3))
+    assert out["global"]["n_neutral_items"] == 3
+    assert out["global"]["pooled_gap"] is not None
+
+    for item in ("prod_neutral1", "prod_neutral2", "prod_neutral3"):
+        assert out["by_item"][item]["verdict"] == "可解釋"
+
+    d = out["by_item"]["prod_offset"]
+    assert d["theory_min"] == d["theory_max"] == pytest.approx(math.log(2))
+    assert d["gap_vs_global"] == pytest.approx(math.log(2))
+    assert d["residual"] == pytest.approx(0.0, abs=1e-6)
+    assert d["verdict"] == "可解釋"
+
+
+def test_reconcile_fallback_reference_zero_when_few_neutral(spark):
+    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
+    # 只有 1 個中性 item（B）→ 候選數 < 3 → global_reference 退回 0.0，
+    # method 是 fallback，行為同原絕對語意（gap_vs_global == gap）。
+    rows = [
+        ("20240331", "C0", "A", 0.5, 2 / 3, 1),
+        ("20240331", "C1", "A", 0.5, 2 / 3, 0),
+        ("20240331", "C2", "A", 0.5, 2 / 3, 0),
+        ("20240331", "C0", "B", 0.5, 0.5, 1),
+        ("20240331", "C1", "B", 0.5, 0.5, 0),
+    ]
+    params = _full_params(overrides={"mass|A|0": 0.5})
+    out = reconcile(_eval_df(spark, rows), params)
+
+    assert out["global"]["reference"] == 0.0
+    assert out["global"]["method"] == "insufficient_neutral_items_fallback_zero"
+    assert out["global"]["n_neutral_items"] == 1
+
+    a = out["by_item"]["A"]
+    assert a["gap_vs_global"] == pytest.approx(a["gap"])
+    assert a["verdict"] == "不可解釋"
+    b = out["by_item"]["B"]
+    assert b["gap_vs_global"] == pytest.approx(0.0)
+    assert b["verdict"] == "可解釋"

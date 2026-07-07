@@ -16,11 +16,26 @@ item 層只給 {min, max, mean} 摘要帶並標 approx，verdict 用帶不用單
 直接疊乘；維度不同時權重 cell 是「跨該 item 全部抽樣 cell 都適用」的效應，
 廣播疊加到同 item 的每個抽樣 cell 上（無抽樣 cell 覆蓋的 item 才單獨列出
 權重 cell）。
+
+**修訂（2026-07-07，Phase 2 真跑實證）**：``reconcile`` 的 verdict 判準改
+以 ``gap_vs_global = gap − global_reference`` 取代原本直接對絕對 gap 判定。
+成因：post-training 模式的評估母體只含 test 窗有正例的客戶
+（``training_eval_predictions`` 的寫入條件），這個母體條件化會把**全體**
+item 的 gap 一致下移（本機實測 8/8 item 皆下移 −0.38～−0.44 log-odds）——
+這是一個獨立於 per-item 校準品質的全局水準效應，絕對式 verdict 會把它誤判
+成逐 item 的「不可解釋」。``global_reference`` 取「理論帶為零（config 中
+性，即該 item 沒有任何 sampling/weight override）」的 item 的 gap 中位數，
+作為「配置中性基準」；這類 item 理論上 gap 應為 0，實測卻一致偏離，代表的
+正是母體條件化本身的水準位移，而非 per-item 效應。中性候選不足 3 個時樣本
+太小、中位數不穩，退回 0.0（＝原絕對語意，見 ``insufficient_neutral_items
+_fallback_zero``）。絕對 gap 與 global_reference 仍照列在輸出中（全局位移
+是可觀察的獨立現象，report 會註明成因），只有 verdict 判準改吃相對值。
 """
 from __future__ import annotations
 
 import logging
 import math
+import statistics
 
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
@@ -236,32 +251,85 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         if score_col != base_score_col else None
     )
 
-    by_item: dict[str, dict] = {}
-    all_explained = True
+    # Pass 1：per-item 理論帶＋實測 gap（尚未套用 global_reference）。
+    raw: dict[str, dict] = {}
     for item, g in sorted(gaps.items()):
         band = theory["by_item"].get(item)
         t_min = band["min"] if band else 0.0
         t_max = band["max"] if band else 0.0
-        entry = {
-            "theory_min": t_min, "theory_max": t_max,
+        raw[item] = {
+            "theory_min": t_min,
+            "theory_max": t_max,
             "theory_approx": bool(band and band.get("approx")),
-            "gap": g["gap"], "p_mean": g["p_mean"], "y_rate": g["y_rate"],
+            "gap": g["gap"],
+            "gap_calibrated": (
+                gaps_cal.get(item, {}).get("gap")
+                if gaps_cal is not None else None
+            ),
+            "p_mean": g["p_mean"],
+            "y_rate": g["y_rate"],
             "n_rows": g["n_rows"],
+            "reason": g.get("reason"),
+        }
+
+    # global_reference：理論帶為零（config 中性）且 gap 不為 None 的 item，
+    # 取其 gap 中位數——這代表「母體條件化」造成的共同水準位移（見模組
+    # docstring 的修訂說明）。候選不足 3 個 → 退回 0.0（原絕對語意）。
+    candidates = [
+        r["gap"] for r in raw.values()
+        if r["theory_min"] == 0.0 and r["theory_max"] == 0.0
+        and r["gap"] is not None
+    ]
+    if len(candidates) >= 3:
+        global_reference = statistics.median(candidates)
+        global_method = "median_of_config_neutral_items"
+    else:
+        global_reference = 0.0
+        global_method = "insufficient_neutral_items_fallback_zero"
+
+    # pooled_gap：n_rows 加權合併全體 item 的 p̄/ȳ 後的 logit 差——獨立於
+    # global_reference 的另一個「全局水準」讀數，供報表對照；任何 item 的
+    # p̄/ȳ 退化（∉(0,1)，即該 item gap 為 None）→ 整體 pooled_gap 也是 None。
+    total_n = sum(r["n_rows"] for r in raw.values())
+    if total_n == 0 or any(r["gap"] is None for r in raw.values()):
+        pooled_gap = None
+    else:
+        pooled_p = sum(r["p_mean"] * r["n_rows"] for r in raw.values()) / total_n
+        pooled_y = sum(r["y_rate"] * r["n_rows"] for r in raw.values()) / total_n
+        pooled_gap = (
+            _logit(pooled_p) - _logit(pooled_y)
+            if (0.0 < pooled_p < 1.0 and 0.0 < pooled_y < 1.0) else None
+        )
+
+    # Pass 2：套用 global_reference → gap_vs_global → residual → verdict。
+    by_item: dict[str, dict] = {}
+    all_explained = True
+    for item, r in raw.items():
+        gap = r["gap"]
+        entry = {
+            "theory_min": r["theory_min"], "theory_max": r["theory_max"],
+            "theory_approx": r["theory_approx"],
+            "gap": gap,
+            "gap_vs_global": None if gap is None else gap - global_reference,
         }
         if gaps_cal is not None:
-            entry["gap_calibrated"] = gaps_cal.get(item, {}).get("gap")
-        if g["gap"] is None:
+            entry["gap_calibrated"] = r["gap_calibrated"]
+        if gap is None:
             entry["residual"] = None
             entry["verdict"] = "無法評估"
-            entry["reason"] = g.get("reason")
+            entry["reason"] = r["reason"]
         else:
-            clipped = min(max(g["gap"], t_min), t_max)
-            entry["residual"] = g["gap"] - clipped
+            gvg = entry["gap_vs_global"]
+            clipped = min(max(gvg, r["theory_min"]), r["theory_max"])
+            entry["residual"] = gvg - clipped
             entry["verdict"] = (
                 "可解釋" if abs(entry["residual"]) <= threshold else "不可解釋"
             )
             if entry["verdict"] != "可解釋":
                 all_explained = False
+        entry["p_mean"] = r["p_mean"]
+        entry["y_rate"] = r["y_rate"]
+        entry["n_rows"] = r["n_rows"]
         by_item[item] = entry
 
     return {
@@ -272,4 +340,10 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         "theory": theory,
         "by_item": by_item,
         "all_explained": all_explained,
+        "global": {
+            "reference": global_reference,
+            "method": global_method,
+            "pooled_gap": pooled_gap,
+            "n_neutral_items": len(candidates),
+        },
     }
