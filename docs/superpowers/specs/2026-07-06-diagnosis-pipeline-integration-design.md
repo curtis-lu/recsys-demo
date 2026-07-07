@@ -116,7 +116,7 @@ src/recsys_tfb/diagnosis/
   - `top_slot_share(sdf, k)`：per item 佔據 top-k 的 query 比例，並列該 item 正類率當對照。
   - `suppression_counts(sdf)`：per item「以**負例**身分排在該 query 內某正例上方」的次數（框架的傷害直接觀測；用 query 內 min positive rank 的 window 實作）。
 - 交叉購買率：新檔 `src/recsys_tfb/diagnosis/metric/cross_purchase.py`：`cross_purchase_matrix(label_rows) -> DataFrame`（$P(\text{買 }k \mid \text{買 }j)$，label_table 自 join，per snap_date 聚合）。`label_table` 已是 evaluation pipeline 的既有輸入（`compute_baseline_metrics` 的 in 清單就有它），新 node 照同樣方式接線，無需新資料源。
-- 象限組裝：新檔 `src/recsys_tfb/diagnosis/metric/quadrant.py`：合併 per-item {校準 gap（Phase 2）、within-item AUC、AP±CI（Phase 1）、suppression counts} → 象限判定（AUC 門檻與 gap 帶寬 config）→ `diagnosis/quadrant_summary.json` ＋ 散布圖（樣式沿手冊 `docs/diagrams/ranking-diagnosis/fig2-quadrant-map.png`；matplotlib 走既有 `evaluation/distributions.py` 慣例）。
+- 象限組裝：新檔 `src/recsys_tfb/diagnosis/metric/quadrant.py`：合併 per-item {校準 gap（Phase 2）、within-item AUC、AP±CI（Phase 1）、suppression counts} → 象限判定（AUC 門檻與 gap 帶寬 config）→ `diagnosis/quadrant_summary.json` ＋ 散布圖（樣式沿手冊 `docs/diagrams/ranking-diagnosis/fig2-quadrant-map.png`；**修訂 2026-07-07**：原文寫 matplotlib，但 repo 報表圖的既有慣例實為 plotly `go.Figure` 內嵌 report HTML——證據 `evaluation/distributions.py:9` `import plotly.graph_objects as go`、內嵌點 `evaluation/report.py:156`，無任何 matplotlib/PNG 產圖路徑。散布圖故在報表側以 plotly 建、隨 report.html 交付，JSON 只存數據）。
 - report 新 section `quadrant`。
 - **config**：`evaluation.diagnosis.quadrant: {enabled: true, auc_threshold: 0.6, gap_band: 0.35, top_k_occupancy: 1}`。
 - **consistency（A17）**：`0.5 ≤ auc_threshold < 1`、`gap_band > 0`。
