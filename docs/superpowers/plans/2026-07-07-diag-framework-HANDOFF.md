@@ -39,6 +39,7 @@
 5. 既有測試的 exact-set／結構斷言若因 additive 鍵或新節點必須更新，屬合法改動——在計畫「設計定案」節預授權或執行時裁決後記錄。
 6. **文件是一等交付物（spec §3 固定結構）**：新報表段落必同步擴充 `docs/pipelines/evaluation-diagnosis.md`。寫法鐵則（Phase 2 四輪返工的教訓，詳見 memory feedback_analysis_docs_handbook_style）：(a) 手冊禁用開發詞彙（本機/Phase N/spec/驗收/真跑），交付前 grep；(b) 貫穿範例契約——**把示例產物直接印進文件**，各節走讀看得見的表，嚴禁敘述讀者看不見的報表；(c) 對無直覺尺度建「數感」節（錨點表＋門檻合理性的夾擠論證）；(d) 報表描述只留短判讀順序＋指向手冊；(e) 交付前派讀者 agent，驗證清單含「列出所有指涉你看不到的東西的詞」。
 7. **質性反饋（讀不懂類）不得用字面替換修復＋自驗**——判準已入 `~/.claude/rules/20-judgment-rubrics.md` §2 反例：修法可用 sed 表達＝假修復；必須從段落目的重寫＋fresh 讀者驗收。
+8. **對使用者的訊息中，檔案引用一律絕對路徑（含 `.worktrees/diag-framework`）**（2026-07-07 使用者多次糾正後定案）：相對路徑在 worktree 工作流下點不開／開到 main 舊檔；轉述 subagent 回報時把 `檔案:行號` 補上絕對前綴再交付。詳見 memory feedback_clickable_absolute_paths。
 
 ## Phase 3 開工提醒
 
