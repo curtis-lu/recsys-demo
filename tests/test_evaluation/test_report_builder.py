@@ -482,7 +482,7 @@ def test_per_item_attr_ci_columns_present_when_metric_ci_given():
         _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
     )
     map_tbl = sec.tables[0]
-    for col in ["AP(抽樣)", "CI 2.5%", "CI 97.5%"]:
+    for col in ["AP(抽樣)", "CI 2.5%", "CI 97.5%", "n_pos(抽樣)"]:
         assert col in map_tbl.columns
     assert map_tbl.loc["A", "CI 2.5%"] == 0.60
     assert map_tbl.loc["Macro 平均", "AP(抽樣)"] == 0.87
