@@ -769,7 +769,8 @@ def assemble_report(
     reconciliation: dict | None = None,
     quadrant: dict | None = None,
 ) -> str:
-    """Assemble enabled sections (§0–§8) into the final HTML string."""
+    """Assemble every enabled section (the ``candidates`` list below is the
+    authoritative order) into the final HTML string."""
     candidates = [
         build_headline_section(metrics, parameters),
         build_dataset_overview_section(metrics, parameters),
