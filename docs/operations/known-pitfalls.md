@@ -47,3 +47,10 @@
 - local[*] 下 stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 by-design 噪音，不是錯誤。
 - catalog deep-merge 對 type-discriminator 有 bug：workaround＝base 檔完整定義該 entry，不要依賴 env overlay 局部覆蓋 type。
 - 【2026-07-07】取 model_version 不要用 `ls -t data/models`：目錄 mtime 不隨「內容檔被覆寫」更新（重訓寫回既有 mv 目錄時，該目錄不會浮到最上面），且 `data/models/` 混有測試殘留目錄（e2e_test_mv、mvx…）。徵兆＝抓到的 mv 與 config 語意矛盾（還原 config 後「新 mv」竟等於注入版）。正解：從 training log 的 `Wrote manifest: .../data/models/<mv>/manifest.json` 行取，或 `python -c "import json; print(json.load(open('data/models/<候選>/manifest.json'))['model_version'])"` 核對。驗證方式：取到 mv 後 grep training log 確認同一 run 寫的就是它。
+
+## 7. macOS 換網路後 Spark 起不來：hostname 解析到過期 IP（2026-07-07）
+
+- **症狀（第一分鐘認出它）**：所有需要 Spark 的測試在 fixture setup 階段**秒炸**（整批 ERROR 而非 FAIL，總時長短到不可能有 JVM 起來過，例：226 passed + 39 errors in 12.9s）；stack 尾是 netty 的 `sun.nio.ch.Net.bind0 ... AbstractBootstrap` bind 失敗。CLI pipeline 同樣在啟動即炸。
+- **根因**：macOS 的 hostname（`Mac`）在換 Wi-Fi/VPN 後仍解析到舊 DHCP 位址（實例：解析到 192.168.50.12，實際介面是 192.168.50.218）。Spark driver 預設綁 hostname 解析出的 IP → 綁不上。**錯誤看起來在測試/pipeline（下游），原因在網路環境（上游）**——R 系列鐵則同款形態。
+- **規則**：本機一律 loopback——已固定在兩處：`tests/conftest.py` 的 `os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")`、`conf/spark-local/spark-env.sh` 的 `export SPARK_LOCAL_IP=127.0.0.1`（spark-submit 自動 source）。不要改設 `spark.driver.host`（spark-defaults.conf 註記過的 RpcEndpointNotFoundException 陷阱）。
+- **驗證方式**：`python3 -c "import socket; h=socket.gethostname(); print(socket.gethostbyname(h))"` 對照 `ifconfig | grep "inet "`——兩邊不含同一 IP 即中招；修復後單跑任一 Spark 測試應 pass（本次實證 1 passed in 3.81s）。
