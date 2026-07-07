@@ -1,47 +1,48 @@
-# 診斷框架開發交接檔（/compact 前固化，2026-07-07）
+# 診斷框架開發交接檔（/compact 前固化；最後更新：2026-07-07 Phase 2 閘門通過後）
 
-> 給續作 session：讀完本檔＋下列兩份文件，即可直接開工，不需要舊對話。
+> 給續作 session：讀完本檔＋下列文件，即可直接開工，不需要舊對話。
 
 ## 現在進行到哪
 
-- **Phase 0 已完成並通過使用者閘門**。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `ee9caef`。
-- **下一步＝寫 Phase 1（指標基座）的實作計畫**，然後 subagent-driven 執行。
+- **Phase 0（診斷域歸位）、Phase 1（指標基座）、Phase 2（對帳層）全部完成且使用者閘門通過**（2026-07-07）。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `cf9404f`。
+- **下一步＝寫 Phase 3（行為層象限）的實作計畫**，然後 subagent-driven 執行。
 
-## 唯一真實來源（先讀這兩份）
+## 唯一真實來源（先讀這些）
 
-1. **Spec**：`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`——六階段（Phase 0–5）的完整設計，含每階段的檔案清單、config 鍵、consistency 代號（A15 起）、已知前置缺口與驗收閘門。**Phase 1 要做什麼全在 §3 Phase 1**，關鍵接縫的檔案:行號都寫在裡面（行號以 main 的平移前狀態為準；診斷模組已搬家，見下）。
-2. **Phase 0 計畫**（當範本用）：`docs/superpowers/plans/2026-07-07-diag-phase0-relocation.md`——後續 phase 計畫照這個規格寫（零佔位符、每步完整指令＋預期輸出、真跑閘門收尾）。
+1. **Spec**：`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`——**Phase 3 要做什麼全在 §3 Phase 3**（框架診斷項目 3、5、10）。注意 spec 有兩處執行時修訂已入文：§3 固定結構含「文件」一等交付物；Phase 2 段的 verdict 相對全局修訂。
+2. **計畫範本**：`docs/superpowers/plans/2026-07-07-diag-phase2-reconciliation.md`（最新一份；含「設計定案」節與追加的 Task 8 文件交付模式）。Phase 0/1 計畫同目錄。
+3. **判讀手冊**：`docs/pipelines/evaluation-diagnosis.md`——Phase 3 新增報表段落時**必須**擴充此檔（見下方執行協議 6）。
+4. 方法論背景（需要時再讀）：`docs/ranking-diagnosis-framework.md`。
 
-方法論背景（需要時再讀）：`docs/ranking-diagnosis-framework.md`（診斷框架手冊）；`docs/notes/2026-07-05-ranking-diagnosis-direction.md`（方向診斷）。
+## Phase 0–2 之後的 code 現狀
 
-## Phase 0 之後的 code 現狀（行號級事實）
+- `src/recsys_tfb/diagnosis/`：`model/`＝訓練側診斷（Phase 0 平移）；`metric/`＝`sample.py`（兩趟診斷抽樣 `draw_diagnosis_sample`）、`uncertainty.py`（cluster bootstrap `bootstrap_per_item_ci`）、`reconciliation.py`（`theoretical_offsets`／`calibration_gap_by_item`／`reconcile`，verdict＝gap−global_reference 比理論帶）。依賴白名單：`pipelines/* → diagnosis → core / evaluation(僅 numpy 原語 metrics.py) / io / utils`。
+- `evaluation/metrics.py`：`positive_row_contributions`、`macro_from_per_item`、參數化 `compute_macro_per_item_map`（weight_alpha/min_positives/shrinkage_k，預設等價現行）。`metrics_spark.py`：`aggregate_per_item` 出 `n_pos`、`macro_average` 接參數（預設路徑保留原 sum/len 逐位元）、`_compute_core` 出 `observation_items`。
+- 評估 pipeline **7 個 node**（新增 `compute_metric_ci`、`compute_reconciliation`）；catalog：`evaluation_metric_ci`、`evaluation_reconciliation` → `data/evaluation/${mv}/${snap}/diagnosis/*.json`。
+- consistency：**A15**（metric/diagnosis 參數域）＋ **A16**（reconciliation；含 enabled bool 檢查）；下一個代號 **A17**。
+- config：`evaluation.metric`、`evaluation.diagnosis.{sample,ci,reconciliation}`；`report.sections.reconciliation`。
+- 測試新家：`tests/test_diagnosis/test_metric/`（sample/uncertainty/reconciliation）；相關測試全綠 @ cf9404f。
 
-- 新套件：`src/recsys_tfb/diagnosis/`——`model/`＝原 `pipelines/training/diagnostics/` 全部＋`population_spark.py`（原 `diagnostics_spark.py`）；`metric/`＝空殼（Phase 1–5 之家）。依賴白名單（`diagnosis/__init__.py` docstring）：`pipelines/* → diagnosis → core / evaluation(僅 numpy 原語) / io / utils`。
-- `src/recsys_tfb/utils/hashing.py`＝原 `pipelines/dataset/_hashing.py`（`spark_bucket`/`ratio_to_threshold`）。
-- 測試新家：`tests/test_diagnosis/test_model/`（6 檔）；`tests/test_utils/test_hashing.py`。
-- **注意**：`src/recsys_tfb/evaluation/diagnostics_spark.py` 是**另一個**既有模組（評估側圖表聚合），沒搬、別混淆。
+## 本機環境狀態
 
-## 本機環境狀態（worktree 內已就緒）
+- local Spark 已 setup。`data/models/` 有 **6059dcef**（正式示例模型，Phase 2 閘門還原時重訓過——與最初版位元級不同屬預期）與 **8883dd58**（fund_bond 注入實驗產物，留作對照可不理）。`data/models/` 另有測試殘留目錄（e2e_test_mv、mvx…）。
+- **evaluation CLI 必帶 `--model-version 6059dcef`**（無 `best` symlink；promote 是使用者保留的人工步驟）。
+- **取 model_version 禁用 `ls -t data/models`**（目錄 mtime 陷阱，見 known-pitfalls.md §6 末條）——從 training log 的 `Wrote manifest` 行取。
+- `/tmp` 的 phase1/phase2 基準檔重開機會消失；Phase 3 不依賴它們。
 
-- local Spark 已 setup（合成資料＋warehouse），已訓模型 `model_version=6059dcef`（`data/models/6059dcef/`，含 diagnostics 產物）。
-- Phase 0 基準檔在 `/tmp`（重開機會消失，Phase 1 不依賴它們）：`/tmp/phase0_mv.txt`、`/tmp/phase0_diag_before/`、`/tmp/phase0_test_baseline.txt`。
-- 測試 baseline 事實：`tests/test_pipelines/test_training + test_dataset`＝209 passed 零 fail；加 `tests/test_diagnosis + tests/test_utils`＝238 passed。
+## 已確立的執行協議（使用者定案＋實證教訓，勿走回頭路）
 
-## 已確立的執行協議（使用者定案，勿走回頭路）
+1. **一階段一份計畫**；每階段結束＝本機真跑產物＋已知答案注入閘門，**使用者檢視通過才進下一階段**。
+2. **subagent token 成本控制**：機械步驟 controller 直跑；sonnet implementer（prompt 給「計畫檔路徑＋要點摘錄」即可，計畫檔本身是零佔位符規格）；合併 reviewer 批次審；opus 只做階段總審。
+3. 行為不變類判準＝與 baseline 一致；報表逐字回歸比對必須在任何重訓**之前**做（重訓位元重現性未鎖）。
+4. shaprx 已擱置；HPO objective 不動。
+5. 既有測試的 exact-set／結構斷言若因 additive 鍵或新節點必須更新，屬合法改動——在計畫「設計定案」節預授權或執行時裁決後記錄。
+6. **文件是一等交付物（spec §3 固定結構）**：新報表段落必同步擴充 `docs/pipelines/evaluation-diagnosis.md`。寫法鐵則（Phase 2 四輪返工的教訓，詳見 memory feedback_analysis_docs_handbook_style）：(a) 手冊禁用開發詞彙（本機/Phase N/spec/驗收/真跑），交付前 grep；(b) 貫穿範例契約——**把示例產物直接印進文件**，各節走讀看得見的表，嚴禁敘述讀者看不見的報表；(c) 對無直覺尺度建「數感」節（錨點表＋門檻合理性的夾擠論證）；(d) 報表描述只留短判讀順序＋指向手冊；(e) 交付前派讀者 agent，驗證清單含「列出所有指涉你看不到的東西的詞」。
+7. **質性反饋（讀不懂類）不得用字面替換修復＋自驗**——判準已入 `~/.claude/rules/20-judgment-rubrics.md` §2 反例：修法可用 sed 表達＝假修復；必須從段落目的重寫＋fresh 讀者驗收。
 
-1. **一階段一份計畫**；每階段結束＝本機真跑產物＋已知答案注入的閘門，**使用者檢視通過才進下一階段**。
-2. **subagent token 成本控制**（使用者明示）：機械步驟 controller 直跑不派 agent；多檔改寫派 sonnet implementer；審查合併成單一 reviewer（sonnet）；opus 只在階段收尾做一次總審。
-3. 行為不變類改動的判準＝與 baseline 一致，不是絕對全綠。
-4. shaprx 已擱置，任何規劃不得引用它當既有資產或邊界。
-5. HPO objective 本案不動；指標參數化預設值必須等價現行為。
+## Phase 3 開工提醒
 
-## 踩坑教訓（Phase 0 實證）
-
-- sed 連續字串 pattern 抓不到**分離式 import**（`from X import Y as Z`）——每次批次改寫後必須用寬 pattern 複查（已寫進 Task 4 之後的派工範式）。
-- 整條重訓的位元重現性未鎖（config 無顯式 seed）——產物比對類閘門用 pipeline 切片（`--from-node`）吃同一 model artifact，不要整條重跑。
-
-## Phase 1 的三個開工提醒（spec 裡都有，這裡只標重點）
-
-1. **先修前置缺口**：`evaluation/metrics_spark.py::aggregate_per_item`（`:447`）要增列 per-item 正例數 `n_pos`（additive），否則 `weight_alpha/min_positives/shrinkage_k` 在 Spark 側數學上做不到、會靜默退回等權。
-2. 指標參數化留在 `evaluation/`（評估本體）；CI（`bootstrap_per_item_ci`）與診斷抽樣（兩趟設計）進 `diagnosis/metric/`。
-3. consistency 新代號從 **A15** 起；新增法＝predicate 函式＋`validate_config_consistency`（`consistency.py:476`）串接＋docstring legend。
+1. 先讀 spec §3 Phase 3 全文再拆計畫。既知前置（spec 審查記錄）：within-item AUC 需 **midrank tie 處理**＋「全同分 item 必須恰得 0.5」的測試 fixture；象限判準＝加害者只看水準偏高（手冊定案）；兩軸＝水準（Phase 2 的 gap_vs_global 可重用）×條件判別力。
+2. 抽樣底座（`diagnosis/metric/sample.py`）與 reconciliation 的 per-item 產物都是現成積木，先查可重用性再寫新件。
+3. 計畫必含「文件」task（判讀手冊擴充＋示例表走讀＋讀者通讀），照 Phase 2 計畫 Task 8 的追加模式直接內建。
+4. 新 consistency 代號從 **A17** 起。
