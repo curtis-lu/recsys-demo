@@ -262,3 +262,23 @@ def test_reconcile_fallback_reference_zero_when_few_neutral(spark):
     b = out["by_item"]["B"]
     assert b["gap_vs_global"] == pytest.approx(0.0)
     assert b["verdict"] == "可解釋"
+
+
+def test_invalid_label_token_skipped_not_misclassified():
+    # 審查修正：label 分量非 "0"/"1"（如 "True"）不得被靜默當負類（正負號會反轉）
+    out = theoretical_offsets(_params(overrides={"mass|fund_bond|True": 0.5}))
+    assert out["cells"] == {} and out["by_item"] == {}
+
+
+def test_reconcile_theory_item_missing_from_data_listed(spark):
+    # 審查修正：理論有偏移但評估資料無該 item → 列「無法評估」而非靜默消失
+    rows = [
+        ("20240331", "C0", "A", 0.5, 0.5, 1),
+        ("20240331", "C1", "A", 0.5, 0.5, 0),
+    ]
+    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
+    out = reconcile(_eval_df(spark, rows), _full_params(overrides={"mass|B|0": 0.5}))
+    b = out["by_item"]["B"]
+    assert b["verdict"] == "無法評估" and b["gap"] is None and b["n_rows"] == 0
+    assert "無其任何列" in b["reason"]
+    assert out["by_item"]["A"]["verdict"] == "可解釋"

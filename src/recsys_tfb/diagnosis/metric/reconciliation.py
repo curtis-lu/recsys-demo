@@ -67,6 +67,13 @@ def _pair_by_cell(table: dict, keys: list[str], label_col: str,
         if len(parts) != len(keys):
             continue  # 段數不符（A9b/A5 是它們的守門，這裡靜默略過）
         label_val = parts[idx]
+        if label_val not in ("0", "1"):
+            logger.warning(
+                "reconciliation: key %r 的 label 分量 %r 不是字面 '0'/'1'——"
+                "略過此 cell（若不略過會被誤當負類，理論偏移正負號反轉）",
+                key, label_val,
+            )
+            continue
         rest = "|".join(p for i, p in enumerate(parts) if i != idx)
         slot = "pos" if label_val == "1" else "neg"
         cells.setdefault(rest, {})[slot] = float(val)
@@ -331,6 +338,27 @@ def reconcile(eval_predictions: SparkDataFrame, parameters: dict) -> dict:
         entry["y_rate"] = r["y_rate"]
         entry["n_rows"] = r["n_rows"]
         by_item[item] = entry
+
+    # 理論有偏移、但本次評估資料完全沒有該 item 的列（下架／母體過濾／
+    # 打錯 item 名）——不靜默消失，列成「無法評估」讓讀表者知道有一個
+    # 本該被對帳的 item 缺資料。
+    for item, band in sorted(theory["by_item"].items()):
+        if item in by_item:
+            continue
+        missing = {
+            "theory_min": band["min"], "theory_max": band["max"],
+            "theory_approx": bool(band.get("approx")),
+            "gap": None, "gap_vs_global": None,
+        }
+        if gaps_cal is not None:
+            missing["gap_calibrated"] = None
+        missing.update({
+            "residual": None,
+            "verdict": "無法評估",
+            "reason": "config 有此 item 的理論偏移，但本次評估資料無其任何列",
+            "p_mean": None, "y_rate": None, "n_rows": 0,
+        })
+        by_item[item] = missing
 
     return {
         "enabled": True,
