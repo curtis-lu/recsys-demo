@@ -261,11 +261,41 @@ def compute_baseline_metrics(
     return metrics
 
 
+def compute_metric_ci(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """診斷抽樣＋cluster bootstrap CI（spec §3 Phase 1）。
+
+    薄 node：抽樣與 bootstrap 都在 ``diagnosis.metric``。停用時回傳 stub
+    （catalog 仍寫出 ``{"enabled": false}``，產物路徑恆存在、下游可判別）。
+    輸出含 ``sample`` metadata——CI 是抽樣估計，報表必須標示樣本規模。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
+    if not ci_cfg.get("enabled", True):
+        logger.info("metric CI disabled — writing stub")
+        return {"enabled": False}
+
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
+    out = bootstrap_per_item_ci(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "metric CI computed on %d sampled queries (n_boot=%d)",
+        sample_meta["n_queries_sampled"], out["n_boot"],
+    )
+    return out
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
+    metric_ci: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its

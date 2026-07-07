@@ -233,6 +233,11 @@ cases_manifest:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/cases/cases_manifest.json
 
+# --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
+evaluation_metric_ci:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

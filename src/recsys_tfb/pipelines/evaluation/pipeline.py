@@ -23,6 +23,7 @@ def create_pipeline(
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         compute_baseline_metrics,
+        compute_metric_ci,
         compute_metrics,
         generate_report,
         prepare_eval_data,
@@ -86,9 +87,14 @@ def create_pipeline(
             outputs="baseline_metrics",
         ),
         Node(
+            compute_metric_ci,
+            inputs=["eval_predictions", "parameters"],
+            outputs="evaluation_metric_ci",
+        ),
+        Node(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
-                    "parameters", "baseline_metrics"],
+                    "parameters", "baseline_metrics", "evaluation_metric_ci"],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog

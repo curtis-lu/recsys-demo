@@ -525,3 +525,45 @@ class TestComputeBaselineMetrics:
             self._parameters(baseline_section=False),
         )
         assert result is None
+
+
+def test_compute_metric_ci_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
+    }
+    assert compute_metric_ci(None, params) == {"enabled": False}
+
+
+def test_compute_metric_ci_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.1, 0),
+            ("20240331", "C1", "A", 0.1, 1),
+            ("20240331", "C1", "B", 0.9, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {
+            "metric": {"weight_alpha": 0.0, "k": None,
+                       "min_positives": 0, "shrinkage_k": 0},
+            "diagnosis": {
+                "sample": {"max_queries": 100,
+                           "min_pos_queries_per_item": 1, "seed": 42},
+                "ci": {"enabled": True, "n_boot": 20},
+            },
+        },
+    }
+    out = compute_metric_ci(df, params)
+    assert out["enabled"] is True
+    assert "A" in out["per_item"] and "macro" in out and "sample" in out
+    assert out["sample"]["n_queries_sampled"] == 2

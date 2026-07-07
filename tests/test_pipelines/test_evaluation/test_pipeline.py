@@ -6,9 +6,9 @@ from recsys_tfb.pipelines.evaluation import create_pipeline
 class TestEvaluationPipelineDefault:
     """Default (post_training=False) — monitoring scenario."""
 
-    def test_pipeline_has_five_nodes(self):
+    def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 5
+        assert len(pipeline.nodes) == 6
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -20,7 +20,7 @@ class TestEvaluationPipelineDefault:
         expected = {
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "enriched_eval_predictions",
+            "enriched_eval_predictions", "evaluation_metric_ci",
         }
         assert pipeline.outputs == expected
 
@@ -29,17 +29,17 @@ class TestEvaluationPipelineDefault:
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data", "compute_metrics",
-            "compute_baseline_metrics", "persist_eval_predictions",
-            "generate_report",
+            "compute_baseline_metrics", "compute_metric_ci",
+            "persist_eval_predictions", "generate_report",
         ]
 
 
 class TestEvaluationPipelinePostTraining:
     """post_training=True — read from training_eval_predictions."""
 
-    def test_pipeline_has_five_nodes(self):
+    def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        assert len(pipeline.nodes) == 5
+        assert len(pipeline.nodes) == 6
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -51,17 +51,17 @@ class TestEvaluationPipelinePostTraining:
         expected = {
             "eval_predictions", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "enriched_eval_predictions",
+            "enriched_eval_predictions", "evaluation_metric_ci",
         }
         assert pipeline.outputs == expected
 
 
 class TestEvaluationPipelineCompareMode:
-    """compare_source set — 8 nodes total, both reports produced."""
+    """compare_source set — 9 nodes total, both reports produced."""
 
-    def test_pipeline_has_eight_nodes(self):
+    def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        assert len(pipeline.nodes) == 8
+        assert len(pipeline.nodes) == 9
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
