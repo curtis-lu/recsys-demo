@@ -34,7 +34,9 @@ def draw_diagnosis_sample(
     """兩趟診斷抽樣。回傳 (sample_pdf, metadata)。
 
     sample_pdf 欄位：query cols（time + entity）、item、label、score、
-    （存在時）score_uncalibrated。metadata 見模組 docstring。
+    （存在時）score_uncalibrated＋配置的 ``evaluation.segment_columns``
+    （存在者，供 by_segment 分組用；未配置或欄不存在則靜默略過）。
+    metadata 見模組 docstring。
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -52,12 +54,14 @@ def draw_diagnosis_sample(
     floor = int(cfg.get("min_pos_queries_per_item", 50))
     seed = int(cfg.get("seed", 42))
 
-    keep_cols = [
+    seg_cols = list((parameters.get("evaluation", {}) or {})
+                    .get("segment_columns", []) or [])
+    keep_cols = list(dict.fromkeys(
         c
         for c in [*query_cols, item_col, label_col, score_col,
-                  "score_uncalibrated"]
+                  "score_uncalibrated", *seg_cols]
         if c in eval_predictions.columns
-    ]
+    ))
     df = eval_predictions.select(*keep_cols)
 
     # ---- pass 1：正例 query 全集＋per-item 正例 query 數 ----

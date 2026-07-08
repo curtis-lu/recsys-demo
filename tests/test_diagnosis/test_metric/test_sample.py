@@ -2,11 +2,23 @@
 
 import pandas as pd
 import pytest
+from pyspark.sql import functions as F
 
 from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 
 
-def _params(max_queries=3, floor=2, seed=42):
+def _params(max_queries=3, floor=2, seed=42, segment_columns=None):
+    evaluation = {
+        "diagnosis": {
+            "sample": {
+                "max_queries": max_queries,
+                "min_pos_queries_per_item": floor,
+                "seed": seed,
+            },
+        },
+    }
+    if segment_columns is not None:
+        evaluation["segment_columns"] = segment_columns
     return {
         "schema": {
             "columns": {
@@ -18,15 +30,7 @@ def _params(max_queries=3, floor=2, seed=42):
                 "rank": "rank",
             },
         },
-        "evaluation": {
-            "diagnosis": {
-                "sample": {
-                    "max_queries": max_queries,
-                    "min_pos_queries_per_item": floor,
-                    "seed": seed,
-                },
-            },
-        },
+        "evaluation": evaluation,
     }
 
 
@@ -82,6 +86,14 @@ def test_metadata_shape(spark):
         assert k in meta
     assert meta["per_item_pos_queries_sampled"]["cold"] == 1
     assert meta["seed"] == 42
+
+
+def test_segment_columns_kept_when_configured_and_present(spark):
+    sdf = _fixture(spark).withColumn("seg_a", F.lit("x"))
+    params = _params(segment_columns=["seg_a", "seg_missing"])
+    pdf, _meta = draw_diagnosis_sample(sdf, params)
+    assert "seg_a" in pdf.columns          # 配置且存在 → 帶回
+    assert "seg_missing" not in pdf.columns  # 配置但不存在 → 靜默略過（沿 score_uncalibrated 慣例）
 
 
 def test_take_all_when_everything_is_small(spark):
