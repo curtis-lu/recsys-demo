@@ -358,6 +358,46 @@ def compute_quadrant(
     return out
 
 
+def compute_offset_sweep(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """分流層薄 node（spec §3 Phase 4；框架診斷項目 6）。
+
+    領域邏輯全在 ``diagnosis.metric.offset_sweep``（driver 端 numpy）。
+    抽樣與 metric_ci 同一套 ``draw_diagnosis_sample``（同 seed＝同一份
+    樣本）。停用時寫 stub。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("offset_sweep", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("offset sweep disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_offset_sweep: eval_predictions is required when "
+            "evaluation.diagnosis.offset_sweep.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.offset_sweep import sweep
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(
+        eval_predictions, parameters
+    )
+    out = sweep(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "offset sweep computed: %d items, rounds=%d converged=%s, "
+        "holdout mAP zero=%s star=%s",
+        len(out.get("delta_star", {})), out.get("n_rounds_run"),
+        out.get("converged"),
+        (out.get("map_holdout") or {}).get("zero"),
+        (out.get("map_holdout") or {}).get("star"),
+    )
+    return out
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
@@ -366,6 +406,7 @@ def generate_report(
     metric_ci: Optional[dict] = None,
     reconciliation: Optional[dict] = None,
     quadrant: Optional[dict] = None,
+    offset_sweep: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
@@ -433,4 +474,5 @@ def generate_report(
         metric_ci=metric_ci,
         reconciliation=reconciliation,
         quadrant=quadrant,
+        offset_sweep=offset_sweep,
     )

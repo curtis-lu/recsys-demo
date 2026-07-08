@@ -25,6 +25,7 @@ def create_pipeline(
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
+        compute_offset_sweep,
         compute_quadrant,
         compute_reconciliation,
         generate_report,
@@ -105,10 +106,16 @@ def create_pipeline(
             outputs="evaluation_quadrant",
         ),
         Node(
+            compute_offset_sweep,
+            inputs=["eval_predictions", "parameters"],
+            outputs="evaluation_offset_sweep",
+        ),
+        Node(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
                     "parameters", "baseline_metrics", "evaluation_metric_ci",
-                    "evaluation_reconciliation", "evaluation_quadrant"],
+                    "evaluation_reconciliation", "evaluation_quadrant",
+                    "evaluation_offset_sweep"],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog

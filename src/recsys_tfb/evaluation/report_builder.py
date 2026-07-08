@@ -768,9 +768,15 @@ def assemble_report(
     metric_ci: dict | None = None,
     reconciliation: dict | None = None,
     quadrant: dict | None = None,
+    offset_sweep: dict | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
-    authoritative order) into the final HTML string."""
+    authoritative order) into the final HTML string.
+
+    ``offset_sweep`` is accepted here ahead of its section wiring (this is
+    Task 4 of the Phase 4a plan) so ``generate_report``'s new pass-through
+    parameter has somewhere to land without breaking existing callers; the
+    ``build_offset_sweep_section`` candidate is added in Task 5."""
     candidates = [
         build_headline_section(metrics, parameters),
         build_dataset_overview_section(metrics, parameters),

@@ -661,3 +661,27 @@ def test_compute_quadrant_end_to_end_small(spark):
     assert out["enabled"] is True
     assert set(out["by_item"]) == {"A", "B"}
     assert out["by_item"]["A"]["quadrant"] == "無法評估"  # 上游 stub → 水準軸缺
+
+
+def test_compute_offset_sweep_disabled_writes_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": False}}},
+    }
+    assert compute_offset_sweep(None, params) == {"enabled": False}
+
+
+def test_compute_offset_sweep_requires_eval_predictions_when_enabled(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_offset_sweep"):
+        compute_offset_sweep(None, params)
