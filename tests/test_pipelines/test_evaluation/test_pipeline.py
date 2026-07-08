@@ -8,7 +8,7 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 9
+        assert len(pipeline.nodes) == 10
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -22,7 +22,7 @@ class TestEvaluationPipelineDefault:
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
-            "evaluation_offset_sweep",
+            "evaluation_offset_sweep", "evaluation_pair_ledger",
         }
         assert pipeline.outputs == expected
 
@@ -33,6 +33,7 @@ class TestEvaluationPipelineDefault:
             "prepare_eval_data", "compute_metrics",
             "compute_baseline_metrics", "compute_metric_ci",
             "compute_reconciliation", "compute_offset_sweep",
+            "compute_pair_ledger",
             "persist_eval_predictions", "compute_quadrant", "generate_report",
         ]
 
@@ -54,7 +55,7 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        assert len(pipeline.nodes) == 9
+        assert len(pipeline.nodes) == 10
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -68,7 +69,7 @@ class TestEvaluationPipelinePostTraining:
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
-            "evaluation_offset_sweep",
+            "evaluation_offset_sweep", "evaluation_pair_ledger",
         }
         assert pipeline.outputs == expected
 
@@ -78,7 +79,7 @@ class TestEvaluationPipelineCompareMode:
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        assert len(pipeline.nodes) == 12
+        assert len(pipeline.nodes) == 13
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

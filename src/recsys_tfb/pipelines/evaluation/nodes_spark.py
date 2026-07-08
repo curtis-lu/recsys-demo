@@ -399,6 +399,46 @@ def compute_offset_sweep(
     return out
 
 
+def compute_pair_ledger(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """壓制帳本薄 node（spec §3 Phase 4b；框架診斷項目 7）。
+
+    領域邏輯全在 ``diagnosis.metric.pair_ledger``（driver 端 numpy）。
+    抽樣與其他診斷節點走同一套 ``draw_diagnosis_sample``（同 seed→內容
+    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
+    停用時寫 stub。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("pair_ledger", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("pair ledger disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_pair_ledger: eval_predictions is required when "
+            "evaluation.diagnosis.pair_ledger.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.pair_ledger import pair_ledger
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(
+        eval_predictions, parameters
+    )
+    out = pair_ledger(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "pair ledger computed: %d mis-ordered pairs, %d suppressors, "
+        "map_current=%s",
+        out.get("n_mis_ordered_pairs", 0),
+        len(out.get("by_suppressor", {})),
+        out.get("map_current"),
+    )
+    return out
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
