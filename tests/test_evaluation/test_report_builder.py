@@ -681,3 +681,67 @@ def test_assemble_report_renders_quadrant():
         _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
     )
     assert "象限" in html
+
+
+_SWEEP_FIXTURE = {
+    "enabled": True,
+    "map_fit": {"zero": 0.50, "star": 0.58},
+    "map_holdout": {"zero": 0.51, "star": 0.56},
+    "recovered_gap_holdout": 0.05,
+    "interaction_residual_holdout": -0.01,
+    "delta_star": {"A": -1.0, "B": 0.0},
+    "per_item": {
+        "A": {"delta_star": -1.0, "loo_contribution_holdout": 0.06},
+        "B": {"delta_star": 0.0, "loo_contribution_holdout": None},
+    },
+    "params": {"shrink_lambda": 0.1, "holdout_fraction": 0.5,
+               "max_rounds": 5,
+               "grid": {"lo": -2.0, "hi": 2.0, "step": 0.05}},
+    "notes": [],
+}
+
+
+def test_offset_sweep_section_off_by_config():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    params_off = {
+        "evaluation": {"report": {"sections": {"offset_sweep": False}}}
+    }
+    assert build_offset_sweep_section(_SWEEP_FIXTURE, params_off) is None
+
+
+def test_offset_sweep_section_none_for_stub_or_missing():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    assert build_offset_sweep_section(None, _params_min()) is None
+    assert build_offset_sweep_section({"enabled": False}, _params_min()) is None
+
+
+def test_offset_sweep_section_tables_and_waterfall():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    section = build_offset_sweep_section(_SWEEP_FIXTURE, _params_min())
+    assert section is not None
+    assert len(section.tables) == 2
+    assert "delta_star" in section.tables[1].columns
+    assert len(section.figures) == 1  # waterfall（有非零 δ*）
+
+
+def test_offset_sweep_waterfall_skipped_when_all_deltas_zero():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    payload = dict(
+        _SWEEP_FIXTURE,
+        delta_star={"A": 0.0, "B": 0.0},
+        per_item={
+            "A": {"delta_star": 0.0, "loo_contribution_holdout": None},
+            "B": {"delta_star": 0.0, "loo_contribution_holdout": None},
+        },
+    )
+    section = build_offset_sweep_section(payload, _params_min())
+    assert section is not None
+    assert section.figures == []
+
+
+def test_assemble_report_includes_offset_sweep_section():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
+    )
+    assert "Offset sweep" in html
