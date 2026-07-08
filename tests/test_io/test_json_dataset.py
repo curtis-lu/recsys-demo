@@ -1,3 +1,5 @@
+import pytest
+
 from recsys_tfb.io.json_dataset import JSONDataset
 
 
@@ -31,3 +33,21 @@ class TestJSONDataset:
         ds.save({"key": "value"})
         assert ds.exists() is True
         assert ds.load() == {"key": "value"}
+
+    def test_optional_missing_file_returns_none(self, tmp_path):
+        filepath = str(tmp_path / "missing.json")
+        ds = JSONDataset(filepath=filepath, optional=True)
+        assert ds.exists() is False
+        assert ds.load() is None
+
+    def test_default_missing_file_raises(self, tmp_path):
+        filepath = str(tmp_path / "missing.json")
+        ds = JSONDataset(filepath=filepath)
+        with pytest.raises(FileNotFoundError):
+            ds.load()
+
+    def test_optional_existing_file_loads_normally(self, tmp_path):
+        filepath = str(tmp_path / "present.json")
+        ds = JSONDataset(filepath=filepath, optional=True)
+        ds.save({"a": 1})
+        assert ds.load() == {"a": 1}
