@@ -642,13 +642,14 @@ def offset_sweep_param_errors(parameters: dict) -> list[str]:
     step = grid.get("step", 0.05)
     if not (_is_number(lo) and _is_number(hi) and float(lo) < float(hi)):
         errors.append(
-            f"evaluation.diagnosis.offset_sweep.grid lo={lo!r} hi={hi!r} "
-            f"must be numbers with lo < hi."
+            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
+            f".grid.hi={hi!r} must be numbers with lo < hi."
         )
     elif not (float(lo) <= 0.0 <= float(hi)):
         errors.append(
-            f"evaluation.diagnosis.offset_sweep.grid [lo={lo!r}, hi={hi!r}] "
-            f"must contain 0 — δ=0 (no shift) must stay reachable so the "
+            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
+            f".grid.hi={hi!r}: [lo, hi] must contain 0 — δ=0 (no shift) "
+            f"must stay reachable so the "
             f"sweep can report a clean baseline."
         )
     if not (_is_number(step) and float(step) > 0.0):

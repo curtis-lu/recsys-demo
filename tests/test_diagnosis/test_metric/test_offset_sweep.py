@@ -183,3 +183,12 @@ class TestMechanics:
         assert out["delta_star"]["A"] == pytest.approx(-0.99)
         assert out["delta_star"]["B"] == 0.0
         assert out["delta_star"]["C"] == 0.0
+
+    def test_null_query_key_rows_get_defined_fold_assignment(self):
+        # query 鍵含 null 的列自成一組（groupby dropna=False）——預設
+        # dropna=True 會給 ngroup 代碼 -1，hold_flag[-1] 靜默繞到最後一組。
+        pdf = _interleaved_pdf()
+        extra = pdf.iloc[:6].copy()
+        extra["cust_id"] = None
+        out = sweep(pd.concat([pdf, extra], ignore_index=True), _params())
+        assert out["n_queries_fit"] + out["n_queries_holdout"] == 13

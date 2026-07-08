@@ -365,8 +365,9 @@ def compute_offset_sweep(
     """分流層薄 node（spec §3 Phase 4；框架診斷項目 6）。
 
     領域邏輯全在 ``diagnosis.metric.offset_sweep``（driver 端 numpy）。
-    抽樣與 metric_ci 同一套 ``draw_diagnosis_sample``（同 seed＝同一份
-    樣本）。停用時寫 stub。
+    抽樣與 metric_ci 走同一套 ``draw_diagnosis_sample``（同 seed→內容
+    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
+    停用時寫 stub。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cfg = ((eval_params.get("diagnosis", {}) or {})

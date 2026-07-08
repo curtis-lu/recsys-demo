@@ -132,7 +132,13 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
         notes.append("診斷抽樣為空——sweep 未執行")
         return out
 
-    groups = sample_pdf.groupby(query_cols, sort=False).ngroup().to_numpy()
+    # dropna=False：query 鍵含 null 的列自成一組（預設 dropna=True 會給
+    # ngroup 代碼 -1，讓 hold_flag[-1] 靜默繞到最後一組的折別）。
+    groups = (
+        sample_pdf.groupby(query_cols, sort=False, dropna=False)
+        .ngroup()
+        .to_numpy()
+    )
     items = sample_pdf[item_col].astype(str).to_numpy()
     y = sample_pdf[label_col].to_numpy()
     z, z_notes = _logit_scores(sample_pdf[score_col].to_numpy())
