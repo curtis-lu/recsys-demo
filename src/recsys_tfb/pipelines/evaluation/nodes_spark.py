@@ -448,6 +448,7 @@ def generate_report(
     reconciliation: Optional[dict] = None,
     quadrant: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
+    pair_ledger: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
@@ -516,4 +517,5 @@ def generate_report(
         reconciliation=reconciliation,
         quadrant=quadrant,
         offset_sweep=offset_sweep,
+        pair_ledger=pair_ledger,
     )
