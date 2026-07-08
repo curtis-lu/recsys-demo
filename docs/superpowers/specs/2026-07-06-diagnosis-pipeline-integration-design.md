@@ -166,7 +166,7 @@ src/recsys_tfb/diagnosis/
 - 條件化 SHAP：`diagnosis/model/shap_per_item.py::compute_shap_diagnostics`（平移前 `:90`）增 `diagnostics.shap.background: global | per_item` 選項——`per_item` 時背景樣本取自該 item 子母體（重用 `sampling.py::_stratified_item_sample:7`）。預設 `global`（現行為不變）。同時把 attribution 接縫（`diagnosis/model/attribution.py`）的簽名開放 explainer 選項傳遞——**只留參數空間、不實作 loss 模式**（loss-SHAP 為 v2 候選，見 §6）。
 - triage 總表：新檔 `src/recsys_tfb/diagnosis/metric/triage.py`＋evaluation pipeline 新 node `assemble_triage_summary`（in=[`quadrant_summary`、`reconciliation`、`offset_sweep`、`gain_ledger`（catalog JSON，跨側靠產物不靠 import）、`parameters`] out=`triage_summary`）：per item 產出判定 {健康｜水準-配置型｜水準-指標再平衡型｜餓死型｜特徵缺失型} ＋建議槓桿（框架 Ch 5 的映射表寫成 code 常數表）＋**起手值欄**——配置型附 logQ offset 精確值（來自 Phase 2 對帳）、再平衡型附 $\delta^*$（來自 Phase 4）、餓死型附 item weight 起手式（$w_j \propto 1/\sqrt{P_j}$ 加上限，手冊3 Ch8），欄位明標「**起手值，須經快迴路驗證，非定案**」→ report 新 section `triage` ＋ `diagnosis/triage.json`。gain_ledger 缺席（訓練側未跑該 node）時 triage 降級為「無結構層證據」標註，不失敗（best-effort，沿 cases_manifest 慣例）。
 - **config**：`diagnostics.gain_ledger: {enabled: true}`；`diagnostics.shap.background: global`；`evaluation.diagnosis.triage: {enabled: true}`。
-- **consistency（A19）**：`background ∈ {global, per_item}`。
+- **consistency（A20）**：`background ∈ {global, per_item}`。（原編 A19，2026-07-08 讓號：A19 已由 Phase 4b 的 pair_ledger 參數域占用，見 `core/consistency.py` legend。）
 
 **驗收（真實執行）**：
 1. `python -m recsys_tfb training --env local`（產 `gain_ledger.json`）→ `python -m recsys_tfb evaluation --env local --post-training`。

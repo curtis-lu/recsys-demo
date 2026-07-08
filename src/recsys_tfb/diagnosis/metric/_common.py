@@ -5,7 +5,9 @@
 兩個 leaf 節點；metric_ci／reconciliation／quadrant 不受影響。
 
 ``_HASH_BUCKETS`` 與 ``utils.hashing.HASH_BUCKETS`` 同值（100_000）——
-該模組 top-level import pyspark，diagnosis 依賴白名單禁止，故本地重申。
+該模組 top-level import pyspark，而分流層家族的 numpy-leaf 模組
+（offset_sweep／pair_ledger／本檔）刻意保持 pyspark-free 以利無 Spark
+單元測試，故本地重申而不 import。
 """
 from __future__ import annotations
 
