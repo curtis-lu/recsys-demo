@@ -38,6 +38,7 @@
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
 - core+cli+io+pipelines **組合跑**時有 2 個 Spark 整合測試互相干擾 fail；**單獨跑皆過**。看到只在組合跑才出現的 fail，先單獨重跑確認。
+- 【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs` 在 main 本來就 failing（單獨跑也紅、確定性）：PR#85 給 inference pipeline 加了 `inference_population` input，該 exact-set 斷言未同步。待獨立修（一行 additive）。
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 

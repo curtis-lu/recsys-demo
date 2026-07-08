@@ -48,7 +48,7 @@
 - **跨側讀取＝io 層 optional 載入（計畫階段拍板）**：evaluation pipeline 的 triage node 宣告 input `"gain_ledger"`（與 training 側**同一個** catalog 條目，路徑 `data/models/${model_version}/diagnostics/gain_ledger.json`——evaluation 已有 `${model_version}` runtime 替換）。Runner 載入 input 發生在 node 之外，node 接不到 FileNotFoundError → 在 `io` 的 `JSONDataset` 加建構參數 `optional: bool = False`：`load()` 時檔案不存在且 optional → 回 `None`（log 一行）而不 raise；`save()`／`exists()` 語意不變。catalog 的 `gain_ledger` 條目標 `optional: true`。這讓「訓練側未跑該 node」時 triage 拿到 None → best-effort 降級（spec 明文），且不需任何跨側 import。
 - **consistency A20（一個 predicate 涵蓋 Phase 5 三鍵）**：`diagnostics.shap.background ∈ {global, per_item}`（spec 明文）＋`diagnostics.gain_ledger.enabled` 為 bool＋`evaluation.diagnosis.triage.enabled` 為 bool（後兩者沿 A19 的 enabled-bool 慣例，additive）。`validate_config_consistency` 拿到的是全量 deep-merge dict（`config.py:169-175`），頂層 `diagnostics.*` 讀得到（已查證）。落點：docstring legend `consistency.py:99` 之後、predicate 接 `pair_ledger_param_errors`（`:690-702`）之後、aggregator 註冊 `:809` 之後。
 - **報表**：`build_triage_section(triage, parameters)`——無圖、一張主表（列＝item；欄＝判定／建議槓桿／起手值／關鍵證據（AUC、gap_vs_global、δ*centered、context_gain_share）／備註），判定欄用全形括注不用色碼（HTML 簡單優先）；`summary` 一行文字（各判定 item 數）；glossary 補 3 條（triage、餓死型、起手值）。`assemble_report` 尾參 `triage=None`；`generate_report` node inputs 尾端加 `"evaluation_triage"`。
-- **既有測試會被本計畫「合法」改到的（預先授權，僅 additive）**：(a) `tests/test_pipelines/test_evaluation/test_pipeline.py` 節點結構——default/post_training **10→11**、compare **13→14**、node 名單加 `assemble_triage_summary`（`compute_pair_ledger` 之後、`generate_report` 之前）、outputs 加 `evaluation_triage`、`generate_report` inputs 尾端加 `"evaluation_triage"`；(b) training pipeline／`tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`——新增 `compute_gain_ledger` node（輸出有 catalog 落地、非昂貴）需把它加進受影響接續點的允許集合（含 calibration-enabled 變體），改動附一句理由；(c) report sections／diagnosis config 鍵的 exact-set 斷言（`tests/test_conf/`、`test_report_builder.py`）additive 更新；(d) `tests/test_core/test_consistency.py` 加 A20 測試。**任何非 additive 的既有測試改動 → 停下回報**。
+- **既有測試會被本計畫「合法」改到的（預先授權，僅 additive）**：(a) `tests/test_pipelines/test_evaluation/test_pipeline.py` 節點結構——default/post_training **10→11**、compare **13→14**、node 名單加 `assemble_triage_summary`（`compute_pair_ledger` 之後、`generate_report` 之前）、outputs 加 `evaluation_triage`、`generate_report` inputs 尾端加 `"evaluation_triage"`；(b) training pipeline／`tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`——新增 `compute_gain_ledger` node（輸出有 catalog 落地、非昂貴）需把它加進受影響接續點的允許集合（含 calibration-enabled 變體），改動附一句理由；(c) report sections／diagnosis config 鍵的 exact-set 斷言（`tests/test_evaluation/test_parameters_evaluation_yaml.py`、`test_report_builder.py`）additive 更新；(d) `tests/test_core/test_consistency.py` 加 A20 測試。**任何非 additive 的既有測試改動 → 停下回報**。
 - **效能觀測義務**：Task 9 記錄 gain_ledger node 秒數（trees_to_dataframe ~800 樹預估秒級）、triage node（純 dict，毫秒級）、per_item SHAP smoke 的 wall time，按公司規模（22 item）外推寫進手冊。
 - **文件是一等交付物（spec §3 固定結構）**：Task 10 內建——判讀手冊 `docs/pipelines/evaluation-diagnosis.md` 新增 **§12 結構層（gain_ledger 判讀＋條件化 SHAP background）**、**§13 triage 總表**（含數感節＋真跑示例走讀）、既有已知限制節改號為 **§14** 並新增條目；`docs/pipelines/training.md` 診斷節加路由行（判讀在手冊，training.md 不複述）；spec 帶日期修訂（node inputs 加 preprocessor_view、A20 涵蓋三鍵、起手值 centered 定案）。寫法鐵則（禁開發詞彙、真跑產物印進文件、讀者 agent 驗洩漏）不可省。
 
@@ -79,7 +79,8 @@ Expected: worktree root、Python 3.10.9、isolation OK、working tree 乾淨（@
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-framework && \
 PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   tests/test_diagnosis/ tests/test_core/test_consistency.py tests/test_core/test_versioning.py \
-  tests/test_evaluation/test_report_builder.py tests/test_pipelines/ tests/test_io/ tests/test_conf/ \
+  tests/test_evaluation/test_report_builder.py tests/test_evaluation/test_parameters_evaluation_yaml.py \
+  tests/test_pipelines/ tests/test_io/ \
   -q 2>&1 | tail -5 | tee /tmp/phase5_test_baseline.txt
 ```
 Expected: 全 pass（記下確切數字；main 既知互擾清單見 known-pitfalls §5，若有 fail 先歸因）。
@@ -522,7 +523,7 @@ git commit -m "feat(diagnosis): gain_ledger 結構層帳本（集合遍歷＋手
 - Modify: `conf/base/catalog.yaml`（`cases_manifest` 條目 :232-234 之後）
 - Modify: `conf/base/parameters_training.yaml`（diagnostics 區塊 :142-167）
 - Modify: `src/recsys_tfb/core/consistency.py`（legend :99 後、predicate :702 後、aggregator :809 後）
-- Modify（additive）: `tests/test_pipelines/test_resume_contracts.py`、training pipeline 結構測試（若有 exact-set 斷言）、`tests/test_conf/`（config 鍵回歸）、`tests/test_core/test_consistency.py`
+- Modify（additive）: `tests/test_pipelines/test_resume_contracts.py`、training pipeline 結構測試（若有 exact-set 斷言）、`tests/test_evaluation/test_parameters_evaluation_yaml.py`（config 鍵回歸）、`tests/test_core/test_consistency.py`
 - 注意：**io `JSONDataset` 的 `optional` 參數屬 Task 6**；本 task 的 catalog `gain_ledger` 條目**先不帶** `optional:` 鍵（Task 7 再補），避免依賴倒置。
 
 - [ ] **Step 1: 失敗測試——A20**（`tests/test_core/test_consistency.py` 追加，照 A19 測試版型）
@@ -613,7 +614,7 @@ gain_ledger:
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-framework && \
 PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   tests/test_core/test_consistency.py tests/test_core/test_versioning.py \
-  tests/test_pipelines/ tests/test_conf/ -q 2>&1 | tail -5
+  tests/test_pipelines/ tests/test_evaluation/test_parameters_evaluation_yaml.py -q 2>&1 | tail -5
 ```
 - [ ] **Step 7: 故意弄壞 A20 predicate 一行**（域檢查改永真）確認測試轉紅後改回。
 - [ ] **Step 8: Commit**（`feat(training): gain_ledger node＋catalog＋config＋consistency A20`）
@@ -780,7 +781,7 @@ class TestDegrade:
 - Modify: `conf/base/catalog.yaml`（`evaluation_pair_ledger` :253-255 之後；`gain_ledger` 條目補 `optional: true`）
 - Modify: `conf/base/parameters_evaluation.yaml`（diagnosis 區塊 `pair_ledger` :146-147 之後；`report.sections` :64 之後）
 - Modify: `src/recsys_tfb/evaluation/report_builder.py`（`build_triage_section`＋`assemble_report` :950-978 尾參＋glossary）
-- Test（additive）: `tests/test_pipelines/test_evaluation/test_pipeline.py`、`tests/test_evaluation/test_report_builder.py`、`tests/test_conf/`
+- Test（additive）: `tests/test_pipelines/test_evaluation/test_pipeline.py`、`tests/test_evaluation/test_report_builder.py`、`tests/test_evaluation/test_parameters_evaluation_yaml.py`
 
 - [ ] **Step 1: 失敗測試**——(a) pipeline 結構：default/post_training 11 node、compare 14 node、`assemble_triage_summary` 位於 `compute_pair_ledger` 之後、`generate_report` inputs 尾端 `"evaluation_triage"`；(b) node 函式：`enabled: false` → `{"enabled": False}` stub；gain_ledger=None 傳遞後 `gain_ledger_present is False`；(c) 報表：triage dict → section 有主表、`triage=None` → 無 section、sections 開關 false → 無 section。
 - [ ] **Step 2: RED → 實作**
@@ -836,7 +837,7 @@ evaluation_triage:
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-framework && \
 PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   tests/test_pipelines/test_evaluation/ tests/test_evaluation/test_report_builder.py \
-  tests/test_conf/ -q 2>&1 | tail -5
+   tests/test_evaluation/test_parameters_evaluation_yaml.py -q 2>&1 | tail -5
 ```
 - [ ] **Step 4: 故意弄壞 node stub 分支**確認測試轉紅後改回。
 - [ ] **Step 5: Commit**（`feat(evaluation): assemble_triage_summary node＋triage 報表 section＋catalog/config 接線`）
