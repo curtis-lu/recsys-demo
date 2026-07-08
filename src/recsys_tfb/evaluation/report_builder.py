@@ -625,7 +625,7 @@ def build_offset_sweep_section(
         index=["折內（fit）", "折外（holdout）"],
     )
     per_item = sweep.get("per_item", {}) or {}
-    cols = ["delta_star", "loo_contribution_holdout"]
+    cols = ["delta_star", "delta_star_centered", "loo_contribution_holdout"]
     tbl = pd.DataFrame(
         {c: [per_item[it].get(c) for it in per_item] for c in cols},
         index=list(per_item),

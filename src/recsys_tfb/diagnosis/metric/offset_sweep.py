@@ -14,6 +14,8 @@ mAP(δ*) − mAP(0) ＝「純水準（per-item 平移）可收復的指標缺口
   |g| 升冪、僅嚴格改善才換——乾淨資料 δ* 恰為 0。
 - debug_inject_offsets（僅驗收/測試）：在一切計算之前加到 logit 分數上，
   模擬已知水準錯位；mAP(0) 是注入後的現狀。scope 僅本模組。
+- gauge（規範自由度）：對所有 item 加同一常數不改變排序、mAP 不變——
+  δ* 只有相對差可識別。跨執行比較用 ``delta_star_centered``（去均值）。
 """
 from __future__ import annotations
 
@@ -117,6 +119,7 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
         "injected_offsets": inject,
         "items": [],
         "delta_star": {},
+        "delta_star_centered": {},
         "per_item": {},
         "n_rounds_run": 0,
         "converged": False,
@@ -204,6 +207,13 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     zero_off = np.zeros(len(z), dtype=np.float64)
     out["items"] = unique_items
     out["delta_star"] = dict(delta)
+    # gauge：對所有 item 加同一常數不改變任何 query 內排序（mAP 不變），
+    # δ* 只有相對差可識別——跨執行比較請用去均值後的 centered 值，
+    # 原始值會被最佳化路徑選到的共同平移污染。
+    mean_delta = float(np.mean(list(delta.values()))) if delta else 0.0
+    out["delta_star_centered"] = {
+        it: float(d - mean_delta) for it, d in delta.items()
+    }
     out["map_fit"] = {
         "zero": _map_on(fit_mask, zero_off),
         "star": _map_on(fit_mask, off),
@@ -224,7 +234,11 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
             m_wo = _map_on(hold_mask, off - d * masks[it])
             if m_wo is not None:
                 loo = mh["star"] - m_wo
-        per_item[it] = {"delta_star": d, "loo_contribution_holdout": loo}
+        per_item[it] = {
+            "delta_star": d,
+            "delta_star_centered": out["delta_star_centered"][it],
+            "loo_contribution_holdout": loo,
+        }
     out["per_item"] = per_item
     if out["recovered_gap_holdout"] is not None:
         loo_sum = sum(

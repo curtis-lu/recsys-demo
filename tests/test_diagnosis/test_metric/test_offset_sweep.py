@@ -192,3 +192,13 @@ class TestMechanics:
         extra["cust_id"] = None
         out = sweep(pd.concat([pdf, extra], ignore_index=True), _params())
         assert out["n_queries_fit"] + out["n_queries_holdout"] == 13
+
+    def test_delta_star_centered_is_mean_removed_gauge_fix(self):
+        # gauge：對所有 item 加同一常數不改變排序、mAP 不變——δ* 只有
+        # 相對差可識別，跨執行比較用去均值的 centered 值。
+        out = sweep(_interleaved_pdf(), _params(inject={"A": 1.0}))
+        m = np.mean(list(out["delta_star"].values()))
+        for it, d in out["delta_star"].items():
+            assert out["delta_star_centered"][it] == pytest.approx(d - m)
+            assert (out["per_item"][it]["delta_star_centered"]
+                    == pytest.approx(d - m))

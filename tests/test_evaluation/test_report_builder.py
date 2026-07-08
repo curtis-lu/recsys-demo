@@ -690,9 +690,12 @@ _SWEEP_FIXTURE = {
     "recovered_gap_holdout": 0.05,
     "interaction_residual_holdout": -0.01,
     "delta_star": {"A": -1.0, "B": 0.0},
+    "delta_star_centered": {"A": -0.5, "B": 0.5},
     "per_item": {
-        "A": {"delta_star": -1.0, "loo_contribution_holdout": 0.06},
-        "B": {"delta_star": 0.0, "loo_contribution_holdout": None},
+        "A": {"delta_star": -1.0, "delta_star_centered": -0.5,
+              "loo_contribution_holdout": 0.06},
+        "B": {"delta_star": 0.0, "delta_star_centered": 0.5,
+              "loo_contribution_holdout": None},
     },
     "params": {"shrink_lambda": 0.1, "holdout_fraction": 0.5,
                "max_rounds": 5,
@@ -721,6 +724,7 @@ def test_offset_sweep_section_tables_and_waterfall():
     assert section is not None
     assert len(section.tables) == 2
     assert "delta_star" in section.tables[1].columns
+    assert "delta_star_centered" in section.tables[1].columns
     assert len(section.figures) == 1  # waterfall（有非零 δ*）
 
 
