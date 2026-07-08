@@ -872,3 +872,48 @@ class TestPairLedgerParamsA19:
             validate_config_consistency(
                 self._params({"enabled": "yes"})
             )
+
+
+class TestPhase5DiagnosticsParamsA20:
+    def _params(self, background=None, gain_ledger_enabled=None, triage_enabled=None):
+        diag = {}
+        if background is not None:
+            diag["shap"] = {"background": background}
+        if gain_ledger_enabled is not None:
+            diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
+        params = {"diagnostics": diag}
+        if triage_enabled is not None:
+            params["evaluation"] = {
+                "diagnosis": {"triage": {"enabled": triage_enabled}}
+            }
+        return params
+
+    def test_bad_background_domain_rejected(self):
+        from recsys_tfb.core.consistency import phase5_diagnostics_param_errors
+        errs = phase5_diagnostics_param_errors(self._params(background="per_query"))
+        assert len(errs) == 1
+        assert "diagnostics.shap.background" in errs[0]
+
+    def test_valid_background_values_clean(self):
+        from recsys_tfb.core.consistency import phase5_diagnostics_param_errors
+        assert phase5_diagnostics_param_errors(self._params(background="global")) == []
+        assert phase5_diagnostics_param_errors(self._params(background="per_item")) == []
+        # absent block / absent key -> default "global" -> clean
+        assert phase5_diagnostics_param_errors({}) == []
+
+    def test_non_bool_enabled_flags_both_rejected(self):
+        from recsys_tfb.core.consistency import phase5_diagnostics_param_errors
+        errs = phase5_diagnostics_param_errors(
+            self._params(gain_ledger_enabled="yes", triage_enabled=1)
+        )
+        assert len(errs) == 2
+        assert any("gain_ledger.enabled" in e for e in errs)
+        assert any("triage.enabled" in e for e in errs)
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="background"):
+            validate_config_consistency(self._params(background="per_query"))

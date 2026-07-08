@@ -233,6 +233,10 @@ cases_manifest:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/cases/cases_manifest.json
 
+gain_ledger:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/gain_ledger.json
+
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
 evaluation_metric_ci:
   type: JSONDataset

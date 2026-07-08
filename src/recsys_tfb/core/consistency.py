@@ -97,6 +97,8 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
+* A20 — Phase 5 診斷參數域（``diagnostics.shap.background`` ∈ {global, per_item}；
+  gain_ledger/triage ``enabled`` 為 bool）。Predicate: ``phase5_diagnostics_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -702,6 +704,24 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def phase5_diagnostics_param_errors(parameters: dict) -> list[str]:
+    """A20 — Phase 5 參數域：shap.background 域＋兩個 enabled bool。"""
+    errors: list[str] = []
+    diag = parameters.get("diagnostics", {}) or {}
+    bg = (diag.get("shap", {}) or {}).get("background", "global")
+    if bg not in ("global", "per_item"):
+        errors.append(
+            f"A20: diagnostics.shap.background 必須是 global|per_item，得到 {bg!r}")
+    gl_en = (diag.get("gain_ledger", {}) or {}).get("enabled", True)
+    if not isinstance(gl_en, bool):
+        errors.append("A20: diagnostics.gain_ledger.enabled 必須是 bool")
+    tri_en = (((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+              .get("triage", {}) or {}).get("enabled", True)
+    if not isinstance(tri_en, bool):
+        errors.append("A20: evaluation.diagnosis.triage.enabled 必須是 bool")
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -807,6 +827,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(offset_sweep_param_errors(parameters))
 
     errors.extend(pair_ledger_param_errors(parameters))
+
+    errors.extend(phase5_diagnostics_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
