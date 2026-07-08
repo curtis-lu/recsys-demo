@@ -282,6 +282,72 @@ def test_profile_positive_can_be_disabled(shap_setup):
         assert blk["positive_low_coverage"] is False
 
 
+def test_shap_background_absent_equals_explicit_global(shap_setup):
+    # 回歸鎖：background 鍵缺席（預設 "global"）與顯式寫 "global" 的輸出 dict
+    # 必須全等——這是「global 模式行為完全不變」宣稱的驗收依據。
+    adapter, handle, preprocessor, parameters = shap_setup
+    out_absent = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    parameters["diagnostics"]["shap"]["background"] = "global"
+    out_explicit = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert out_absent == out_explicit
+    assert "notes" not in out_absent and "notes" not in out_explicit
+
+
+def test_shap_per_item_background_contract(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(out) >= {"global", "per_item", "item_idiosyncrasy", "notes"}
+    assert any("per_item" in n for n in out["notes"])
+    contract_keys = {"top_features", "n_sampled", "n_positive", "score_min", "score_max",
+                     "score_mean", "low_coverage", "top_features_positive",
+                     "positive_low_coverage", "divergence_from_global",
+                     "idiosyncratic_features"}
+    for blk in out["per_item"].values():
+        assert contract_keys <= set(blk)
+        assert 0.0 <= blk["divergence_from_global"] <= 1.0
+
+
+def test_shap_per_item_profile_positive_disabled(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert blk["top_features_positive"] is None
+        assert blk["positive_low_coverage"] is False
+
+
+def test_per_item_background_cap():
+    from recsys_tfb.diagnosis.model.shap_per_item import _BACKGROUND_CAP, _per_item_background
+    X = np.arange(300).reshape(150, 2).astype(float)
+    bg = _per_item_background(X, seed=42)
+    assert bg.shape[0] == min(150, _BACKGROUND_CAP)
+    X_small = X[:50]
+    bg_small = _per_item_background(X_small, seed=42)
+    assert np.array_equal(bg_small, X_small)  # 未超過上限 → 原樣回傳
+
+
+def test_per_item_background_uses_item_subset_not_full_sample(shap_setup, monkeypatch):
+    # 弄壞偵測：若 per-item 迴圈誤把整份抽樣 X 當背景（而非該 item 子母體），
+    # 這裡會抓到——_per_item_background 收到的列數應等於該 item 的 n_sampled,
+    # 不是整體抽樣列數。
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
+    seen_shapes = []
+    real_bg = spi._per_item_background
+
+    def spy_bg(X_item, seed):
+        seen_shapes.append(len(X_item))
+        return real_bg(X_item, seed)
+
+    monkeypatch.setattr(spi, "_per_item_background", spy_bg)
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    n_sampled = sorted(blk["n_sampled"] for blk in out["per_item"].values())
+    assert sorted(seen_shapes) == n_sampled
+
+
 def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
     import shap
     adapter, handle, preprocessor, parameters = shap_setup

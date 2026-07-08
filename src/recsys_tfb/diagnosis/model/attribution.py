@@ -17,12 +17,26 @@ def _resolve_booster(model):
     return booster
 
 
-def feature_attributions(model, X, feature_names) -> np.ndarray:
-    """回傳 (n_rows, n_features) 的 SHAP 值；去掉可能的 bias 欄。"""
+def feature_attributions(model, X, feature_names, *, background=None,
+                         feature_perturbation="tree_path_dependent") -> np.ndarray:
+    """回傳 (n_rows, n_features) 的 SHAP 值；去掉可能的 bias 欄。
+
+    ``background=None``（預設）→ ``shap.TreeExplainer(booster)``，即現行
+    ``tree_path_dependent`` 隱式背景，與改動前**位元等價**。傳入
+    ``background``（ndarray/DataFrame）時改走 ``data=background`` 顯式背景，
+    需搭配 ``feature_perturbation``（如 ``"interventional"``）。此參數空間只
+    開放給呼叫端（如 per-item 條件化背景），本函式不對 background 內容做任何
+    假設或驗證。
+    """
     import shap
 
     booster = _resolve_booster(model)
-    sv = np.asarray(shap.TreeExplainer(booster).shap_values(X))
+    if background is None:
+        explainer = shap.TreeExplainer(booster)
+    else:
+        explainer = shap.TreeExplainer(
+            booster, data=background, feature_perturbation=feature_perturbation)
+    sv = np.asarray(explainer.shap_values(X))
     if sv.ndim == 3:                      # 某些版本回 [classes, n, feat]
         sv = sv[-1]
     return sv[:, : len(feature_names)]

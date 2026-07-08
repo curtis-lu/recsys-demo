@@ -15,6 +15,19 @@ from .sampling import _positive_item_sample, _stratified_item_sample
 
 logger = logging.getLogger(__name__)
 
+_BACKGROUND_CAP = 128  # per-item interventional 背景列數上限；起手值，非 config 鍵
+
+
+def _per_item_background(X_item, seed):
+    """該 item 子母體（前景抽樣中屬於該 item 的列）當背景；超過 `_BACKGROUND_CAP`
+    用固定 seed 的 RandomState 無放回抽樣至上限。"""
+    n = len(X_item)
+    if n <= _BACKGROUND_CAP:
+        return X_item
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(n, size=_BACKGROUND_CAP, replace=False)
+    return X_item[idx]
+
 
 def _signed_profile(sv_subset, feature_cols, top_k):
     """回傳 (top_features[含 signed], mean_abs 向量)。mean_abs 向量供後續 divergence 用（全特徵向量，非 top-k 過濾）。"""
@@ -110,6 +123,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
     divergence_top_k = int(cfg.get("divergence_top_k", 15))  # 通常比 top_k 小；只用於 Jaccard/idio 的 top-k 集合比較
     profile_positive = bool(cfg.get("profile_positive", True))
+    background_mode = str(cfg.get("background", "global"))
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
@@ -156,23 +170,55 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     global_top, mean_abs = _signed_profile(shap_values, feature_cols, top_k)
 
     # ---- 正例 profile（解耦的正樣本目標 sample B；獨立第二次 SHAP）----
-    positive_profiles = _positive_profiles(
-        model, path, item_values, item_col, label_col, feature_cols, take_cols,
-        preprocessor, parameters, profile_positive=profile_positive,
-        per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
+    # per_item 背景模式下不跑這第二次全域 pass：正例 profile 改在下面迴圈內,
+    # 直接從該 item 自己的 per-item SHAP 輸出切 label==1 列(見迴圈內註解)。
+    if background_mode == "per_item":
+        positive_profiles = {}
+    else:
+        positive_profiles = _positive_profiles(
+            model, path, item_values, item_col, label_col, feature_cols, take_cols,
+            preprocessor, parameters, profile_positive=profile_positive,
+            per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
     items = sample_pdf[item_col].values
+    label_present = background_mode == "per_item" and label_col in sample_pdf.columns
+    labels = sample_pdf[label_col].values if label_present else None
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
-        prof_all, ai = _signed_profile(shap_values[mask], feature_cols, top_k)
+        if background_mode == "per_item":
+            # 背景＝該 item 子母體（自己的前景列，上限 _BACKGROUND_CAP）；
+            # interventional TreeSHAP。全域 top_features/divergence 的全域向量
+            # 仍用 shap_values（global 背景）算，見下方 mean_abs 用法不變。
+            X_item = X[mask]
+            bg = _per_item_background(X_item, seed=42)
+            with log_step(logger, "shap_values_per_item"):
+                sv_item = feature_attributions(
+                    model, X_item, feature_cols, background=bg,
+                    feature_perturbation="interventional")
+            prof_all, ai = _signed_profile(sv_item, feature_cols, top_k)
+        else:
+            sv_item = None
+            prof_all, ai = _signed_profile(shap_values[mask], feature_cols, top_k)
         sc = scores[mask]
         # -- divergence vs global driver ranking --
         div, idio = _divergence(ai, mean_abs, divergence_metric, divergence_top_k, feature_cols)
-        # -- positive-only profile (decoupled positive-targeted sample B) --
-        prof_pos, n_pos, pos_low = positive_profiles.get(
-            str(item), (None, 0, bool(profile_positive)))
+        # -- positive-only profile --
+        if background_mode == "per_item" and profile_positive and label_present:
+            # 解耦的正樣本 sample B（_positive_profiles）在 per_item 模式下不跑；
+            # 改用同一份 per-item 輸出中 label==1 的列（未額外抽樣，coverage 受限於
+            # 前景抽樣本身，非 sample B 的針對性 oversampling）。
+            pos_mask = labels[mask] == 1
+            n_pos = int(pos_mask.sum())
+            if n_pos >= positive_min_rows:
+                prof_pos, _ = _signed_profile(sv_item[pos_mask], feature_cols, top_k)
+                pos_low = False
+            else:
+                prof_pos, pos_low = None, True
+        else:
+            prof_pos, n_pos, pos_low = positive_profiles.get(
+                str(item), (None, 0, bool(profile_positive)))
         per_item[str(item)] = {
             "top_features": prof_all,
             "n_sampled": int(mask.sum()),
@@ -226,5 +272,13 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
-    return {"global": {"top_features": global_top}, "per_item": per_item,
-            "item_idiosyncrasy": item_idiosyncrasy}
+    out = {"global": {"top_features": global_top}, "per_item": per_item,
+           "item_idiosyncrasy": item_idiosyncrasy}
+    if background_mode == "per_item":
+        # global 模式的輸出 dict 不得多這個鍵（行為完全不變的宣稱），故只在
+        # per_item 模式才附加 notes。
+        out["notes"] = [
+            "shap background=per_item（interventional，背景=各 item 子母體，上限 128 列）；"
+            "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
+        ]
+    return out
