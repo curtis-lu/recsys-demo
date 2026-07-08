@@ -197,3 +197,32 @@ def test_compute_gain_ledger_missing_category_mappings_falls_back():
     assert result["per_item"] is None
     assert result["context"] is None
     assert any("category_mappings" in n for n in result["notes"])
+
+
+# ---- 審查修復（2026-07-08）：item 欄非類別切點防呆 ----
+
+def test_numeric_item_split_not_booked_but_noted():
+    """item 欄出現 decision_type != "==" 的數值切點：不解類別碼、不動 reachable、
+    不記 per-item 帳；notes 記異常。（審查發現 1：spec 明文 decision_type == "=="）"""
+    rows = _tree0_rows() + [
+        # 第二棵樹：root 是 item 欄的「數值」切點（threshold 1.5，不可解類別碼），
+        # 其下掛一個 context 切點——因 root 未 conditioned 且不是合法 item 切點，
+        # 該 context 切點不得進任何帳。
+        _split(2, "2-S0", np.nan, "2-S1", "2-L0", ITEM_COL, 5.0, 1.5, "<="),
+        _split(2, "2-S1", "2-S0", "2-L1", "2-L2", "f_age", 3.0, 0.7, "<="),
+        _leaf(2, "2-L0", "2-S0"),
+        _leaf(2, "2-L1", "2-S1"),
+        _leaf(2, "2-L2", "2-S1"),
+    ]
+    out = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    p = out["per_item"]
+    # per-item 帳與純手算錨完全相同（數值切點與其子樹零貢獻）
+    assert p["A"]["context_gain"] == pytest.approx(6.0)
+    assert p["D"]["context_gain"] == pytest.approx(2.0)
+    assert [p[i]["isolating_split_count"] for i in "ABCD"] == [1, 2, 1, 2]
+    # 全域 conditioned context 帳也不含 3.0
+    assert out["context"]["gain_sum"] == pytest.approx(8.0)
+    # item_id 帳按特徵名仍納入（與遍歷解耦的既有語意）
+    assert out["item_id"]["split_count"] == 3
+    assert out["item_id"]["gain_sum"] == pytest.approx(19.0)
+    assert any("非類別切點" in n for n in out["notes"])

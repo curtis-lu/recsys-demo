@@ -218,3 +218,30 @@ def test_starved_zero_y_rate_starter_none():
     assert vz["verdict"] == "餓死型"
     assert vz["starter"] is None
     assert any("y_rate" in n for n in vz["notes"])
+
+
+# ---- 審查修復（2026-07-08）：level_status「無法評估」不是水準偏移 ----
+
+def test_level_unmeasured_not_treated_as_level_off():
+    """審查發現 2（已重現的真 bug）：reconciliation 停用時 quadrant 的
+    level_status="無法評估"，舊邏輯把它當 level_off → 對沒量到的軸判
+    「水準-指標再平衡型」。修後：不觸發水準型判定＋note 說明。"""
+    q = _quadrant({"x": {"auc": 0.8, "disc_status": "好",
+                         "level_status": "無法評估", "gap_vs_global": None,
+                         "auc_reason": None, "y_rate": 0.1}})
+    out = triage(q, {"enabled": False}, _base_offset_sweep(), None, {})
+    v = out["verdicts"]["x"]
+    assert v["verdict"] == "健康"
+    assert any("無法評估" in n for n in v["notes"])
+
+
+def test_level_unmeasured_with_config_signal_still_not_config_verdict():
+    """無法評估＋帳面上有 config_signal → 仍不得判配置型（level_off 是必要條件）。"""
+    q = _quadrant({"x": {"auc": 0.8, "disc_status": "好",
+                         "level_status": "無法評估", "gap_vs_global": None,
+                         "auc_reason": None, "y_rate": 0.1}})
+    r = {"enabled": True,
+         "by_item": {"x": _recon_entry(0.1, 0.7, True)},
+         "theory": {"by_item": {"x": {"min": 0.1, "max": 0.7, "mean": 0.4}}}}
+    out = triage(q, r, _base_offset_sweep(), None, {})
+    assert out["verdicts"]["x"]["verdict"] == "健康"

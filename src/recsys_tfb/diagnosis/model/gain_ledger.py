@@ -124,6 +124,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     context_global_split_count = 0
     context_global_gain_sum = 0.0
     unknown_codes: set = set()
+    numeric_item_splits = 0
 
     for _, tdf in trees.groupby("tree_index"):
         tdf = tdf.set_index("node_index")
@@ -142,6 +143,14 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
             t_idx = int(row["tree_index"])
 
             if feat == item_feature:
+                if row["decision_type"] != "==":
+                    # item 欄出現非類別切點（欄位可能未宣告 categorical）——不解
+                    # 類別碼、不動 reachable、不記 per-item 帳，只計異常（防呆，
+                    # 審查修復 2026-07-08；spec 定案明文 decision_type == "=="）。
+                    numeric_item_splits += 1
+                    stack.append((row["left_child"], reachable, conditioned))
+                    stack.append((row["right_child"], reachable, conditioned))
+                    continue
                 for it in reachable:
                     isolating_split_count[it] += 1
                     trees_touched[it].add(t_idx)
@@ -173,6 +182,12 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
         notes.append(
             "item 切點 threshold 出現超出 categories 範圍的碼(已忽略): "
             f"{sorted(unknown_codes)}"
+        )
+    if numeric_item_splits:
+        notes.append(
+            f"item 欄出現 {numeric_item_splits} 筆非類別切點（decision_type != '=='）"
+            "——該欄可能未宣告 categorical；這些切點不參與 per-item 帳"
+            "（item_id 帳按特徵名仍納入）"
         )
 
     sum_context_gain = sum(context_gain.values())

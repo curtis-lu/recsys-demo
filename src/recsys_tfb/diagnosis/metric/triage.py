@@ -182,7 +182,12 @@ def triage(
         if disc_status == "差" and auc_reason is not None:
             notes.append(f"AUC 樣本不足（{auc_reason}）——判別力軸略過，未計入 disc_low")
 
-        level_off = q.get("level_status") != "正常"
+        # 「無法評估」（gap_vs_global 缺席，例：reconciliation 停用）不是水準偏移
+        # ——沒量到的軸不得觸發水準型判定（審查修復 2026-07-08）。
+        level_status = q.get("level_status")
+        level_off = level_status in ("偏高", "偏低")
+        if level_status == "無法評估":
+            notes.append("水準軸無法評估（gap_vs_global 缺席）——水準側判定略過")
         config_signal = _config_signal(r)
 
         if level_off and config_signal:

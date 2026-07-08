@@ -166,6 +166,28 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     with log_step(logger, "shap_values"):
         shap_values = feature_attributions(model, X, feature_cols)
 
+    # ---- per_item 能力探針（審查修復 2026-07-08）----
+    # interventional TreeSHAP 需 shap 自行解析樹結構；shap 0.42.1 的 SingleTree
+    # 以 float 陣列表示 threshold，無法表示 LightGBM 類別切分（"2||3||4"），而本
+    # 框架模型必含 item 類別切點 → 真模型上必炸（實證：6059dcef 129/161 棵樹
+    # SingleTree 解析失敗）。探針失敗＝整段降級回 global 行為＋notes 記錄
+    # （best-effort，不炸訓練）。
+    requested_background = background_mode
+    degrade_note = None
+    if background_mode == "per_item":
+        try:
+            probe = X[: min(len(X), 4)]
+            feature_attributions(model, probe, feature_cols, background=probe,
+                                 feature_perturbation="interventional")
+        except Exception as exc:
+            background_mode = "global"
+            degrade_note = (
+                "per_item 背景已降級為 global：interventional TreeSHAP 在目前"
+                f"版本組合下無法解析類別切分（{type(exc).__name__}）。"
+                "條件化背景不可行，見手冊已知限制。"
+            )
+            logger.warning("shap background=per_item 不可行，降級 global：%s", exc)
+
     # ---- 全域 ----
     global_top, mean_abs = _signed_profile(shap_values, feature_cols, top_k)
 
@@ -274,10 +296,11 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
                 len(idx), n_trees, len(per_item))
     out = {"global": {"top_features": global_top}, "per_item": per_item,
            "item_idiosyncrasy": item_idiosyncrasy}
-    if background_mode == "per_item":
+    if requested_background == "per_item":
         # global 模式的輸出 dict 不得多這個鍵（行為完全不變的宣稱），故只在
-        # per_item 模式才附加 notes。
-        out["notes"] = [
+        # 「要求了 per_item」時才附加 notes——含降級情形（要求 per_item 但實際
+        # 跑了 global，note 必須說明）。
+        out["notes"] = [degrade_note] if degrade_note else [
             "shap background=per_item（interventional，背景=各 item 子母體，上限 128 列）；"
             "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
         ]

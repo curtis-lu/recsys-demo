@@ -595,3 +595,30 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     assert shap_calls["n"] == 2                 # sample A + sample B,恰好一次額外 pass
     assert len(take_lens) == 2                  # sample A take,再 sample B take
     assert take_lens[1] <= per_item * 2         # sample B bounded by per_item * n_items
+
+
+def test_shap_per_item_degrades_to_global_when_interventional_unavailable(
+        shap_setup, monkeypatch):
+    """審查後真跑 smoke 的實證：shap 0.42.1 的 SingleTree 無法表示 LightGBM
+    類別切分（"2||3||4" 轉 float 炸），interventional 在真模型上必炸。
+    per_item 模式必須降級回 global 行為＋notes 說明，不炸訓練。
+    這裡以 monkeypatch 模擬「帶 background 就炸」的版本組合。"""
+    from recsys_tfb.diagnosis.model import shap_per_item as spi
+    adapter, handle, preprocessor, parameters = shap_setup
+
+    parameters["diagnostics"]["shap"]["background"] = "global"
+    out_global = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    real = spi.feature_attributions
+    def flaky(model, X, feature_names, **kwargs):
+        if kwargs.get("background") is not None:
+            raise ValueError("could not convert string to float: '2||3||4'")
+        return real(model, X, feature_names, **kwargs)
+    monkeypatch.setattr(spi, "feature_attributions", flaky)
+
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    notes = out.pop("notes")
+    assert any("降級" in n for n in notes)
+    # 除 notes 外，輸出與 global 模式完全一致（降級＝global 行為）
+    assert out == out_global
