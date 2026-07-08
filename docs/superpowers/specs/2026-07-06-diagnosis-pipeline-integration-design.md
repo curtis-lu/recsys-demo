@@ -173,6 +173,14 @@ src/recsys_tfb/diagnosis/
 2. 檢視：`gain_ledger.json`（item-id 切點樹序、per-item 個人化 Gain）；report 的 triage 表——每 item 一列、判定＋建議槓桿＋支撐證據欄。
 3. 已知答案（方向性）：最冷合成 item 的 per-item 個人化 Gain 應顯著低於熱門（手冊3 Ch4 的預測在合成資料上重現）；Phase 2 曾注入過採樣偏移的組合重演一次，triage 應把該 item 判成「水準-配置型」而非餓死型。
 
+> **執行時修訂（2026-07-08，Phase 5 真跑實證，四點）**：
+> 1. **gain_ledger node 簽名加 `preprocessor_view`**——實作為 `compute_gain_ledger(model, preprocessor, parameters)`、node `in=["model", "preprocessor_view", "parameters"]`（非 spec 原寫的 `[model, parameters]`）。原因：`trees_to_dataframe()` 的類別切點 threshold 是**整數碼**（如 `"2||3||4"`），碼→item 值的映射在 preprocessor 的 `category_mappings[item_col]`（碼＝list 索引），booster 本身沒有這份映射。`preprocessor_view` 是 `select_features` 的既有輸出、切片時自動補跑成本近零。gain_ledger.json 走 catalog JSONDataset（`data/models/${model_version}/diagnostics/gain_ledger.json`），evaluation 側 triage 跨側讀它靠 catalog `optional: true`（檔案缺席回 None 降級）、不 import 訓練側。
+> 2. **A20 實作涵蓋三鍵**（非只 background 域）：`diagnostics.shap.background ∈ {global, per_item}` ＋ `diagnostics.gain_ledger.enabled` 為 bool ＋ `evaluation.diagnosis.triage.enabled` 為 bool（後兩者沿 A19 的 enabled-bool 慣例，additive）。三鍵同屬 Phase 5 參數域，合一個 predicate。
+> 3. **`background: per_item` 在釘版本下結構性不可行**——SHAP 0.42.1 的 SingleTree 以 float 陣列表示切點閾值，無法解析 LightGBM 的類別切點（`"2||3||4"` 轉 float 炸；實測真模型 6059dcef 161 棵樹有 129 棵解析失敗），而本框架模型第一特徵即 item 類別切點 → interventional 必炸。實作為**能力探針降級**：per_item 模式先以少數列試建 interventional explainer，失敗即整段降級回 global 行為＋`notes` 說明，訓練不中斷。spec「只留參數空間、不實作 loss 模式」的承諾以此形式兌現——設定可設、config 檢查會擋非法值，但釘版本下實際等同 global；未來 SHAP 支援 LightGBM 類別 interventional 時降級自動消失。（loss-SHAP 仍為 v2 未做。）
+> 4. **triage 起手值採 `delta_star_centered`（再平衡型）**——gauge 定案：跨執行只有 centered 可比，且加到分數上與 raw 差一共同平移、對排序等價（見手冊 §10.3、§13.2）。餓死型起手值＝`item_weight = min(8, √(max_rate/y_rate))`，配置型＝對帳理論帶的 mean（logQ offset）。門檻常數 `starve_ratio=0.25`、`weight_cap=8.0` 寫在 code、非 config（v2 若有調整需求再議）。
+>
+> **驗收 3 實跑結果**：(方向性) 最冷 `fund_mix`（n_pos=23）的 `context_gain_share` 0.0419 全場最低，vs 最熱 `exchange_usd` 0.2574（6.1×），fund 家族三支包辦倒數前三；(重演) Phase 2 的 fund_bond 三 segment 保留率 0.5 抽樣注入重訓（mv 8883dd58），triage 把 fund_bond 判**水準-配置型**（非餓死型）、起手值 `logq_offset = 0.6931 = ln 2`（保留率 0.5 的閉式理論值），次要 note 保留「條件判別力軸同時偏低（AUC 0.513）」不吞訊號。三態閘門：State A 五份既有 JSON 位元不變＋報表舊內容零改動僅插入 triage section；State C 六份 JSON（含 triage.json）與 State A 位元一致。
+
 ---
 
 ## 4. 新增 config 總表
