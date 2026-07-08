@@ -1,56 +1,47 @@
-# 診斷框架開發交接檔（/compact 前固化；最後更新：2026-07-08 Phase 4a 閘門通過後）
+# 診斷框架開發交接檔（/compact 前固化；最後更新：2026-07-08 Phase 4b 完成後）
 
 > 給續作 session：讀完本檔＋下列文件，即可直接開工，不需要舊對話。
 
 ## 現在進行到哪
 
-- **Phase 0（診斷域歸位）、Phase 1（指標基座）、Phase 2（對帳層）、Phase 3（行為層象限）、Phase 4a（分流層 offset sweep）全部完成且使用者閘門通過**（Phase 4a 於 2026-07-08 通過）。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `f44d4f8` 之後。
-- **Phase 4 已由使用者定案拆兩個閘門**（2026-07-08）：4a=offset_sweep（已完成）、4b=pair_ledger。
-- **下一步＝寫 Phase 4b（壓制帳本：pair_ledger＋substitution_ablation＋傷害×segment）的實作計畫**，然後 subagent-driven 執行。
+- **Phase 0（歸位）、1（指標基座）、2（對帳層）、3（象限層）、4a（分流 offset_sweep）、4b（壓制帳本 pair_ledger）全部完成**；4b 閘門證據已交付、使用者已指示續作（2026-07-08）。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `611e0f3`。
+- **下一步＝寫 Phase 5（結構層 gain_ledger＋條件化 SHAP background＋triage 總表）的實作計畫**，然後 subagent-driven 執行。**Phase 5 是最後一個階段**；完成後剩收尾：finishing-a-development-branch → 開 PR（feat/diag-framework 涵蓋 Phase 0–5 全部）。
 
 ## 唯一真實來源（先讀這些）
 
-1. **Spec**：`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`——**Phase 4b 要做什麼在 §3 Phase 4 的 pair_ledger 段**（約 138–141 行；診斷項目 7）。spec 有**五處**帶日期執行時修訂已入文（固定結構含文件、Phase 2 verdict 相對全局、Phase 3 散布圖 plotly、A17 域排除 0.5、**Phase 4 gauge/centered 讀法＋合成資料指標再平衡缺口實證**）——都是合法修訂，不是矛盾。
-2. **計畫範本**：`docs/superpowers/plans/2026-07-08-diag-phase4a-offset-sweep.md`（最新一份；「設計定案」節＋內建文件 task＋閘門三狀態＋提速協議內建）。
-3. **判讀手冊**：`docs/pipelines/evaluation-diagnosis.md`——現況：§10 分流層（10.1–10.7）、§11 已知限制（檔尾）。Phase 4b 新增報表段落**必須**擴充此檔。
-4. 方法論背景（需要時再讀）：`docs/ranking-diagnosis-framework.md`（pair_ledger＝Ch 3 診斷項目 7、λ 會計）。
+1. **Spec**：`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`——**Phase 5 在 §3 Phase 5 段（約 157–175 行）**。spec 有**七處**帶日期執行時修訂已入文（固定結構含文件、Phase 2 verdict 相對全局、Phase 3 plotly、A17 域排除 0.5、Phase 4a gauge/centered、**Phase 4b 注入閘門主判準改 pair_ledger（λ 懲罰 vs 實際損傷實證）**、**Phase 5 consistency 代號 A19→A20 讓號**）——都是合法修訂。
+2. **計畫範本**：`docs/superpowers/plans/2026-07-08-diag-phase4b-pair-ledger.md`（最新一份；「設計定案」節＋執行者必讀＋三狀態閘門＋提速協議內建）。
+3. **判讀手冊**：`docs/pipelines/evaluation-diagnosis.md`——現況：§10 分流層、§11 壓制帳本（11.1–11.7 含判讀順序清單）、§12 已知限制（檔尾）、名詞速查 21 條。triage 的報表段落**必須**擴充此檔；gain_ledger 是訓練側產物，判讀寫哪份（本手冊 vs `docs/pipelines/training.md` 的診斷節）在計畫階段定。
+4. 方法論背景：`docs/ranking-diagnosis-framework.md`（gain_ledger＝Ch 3 診斷項目 8、條件化 SHAP＝項目 9、triage＝Ch 5 槓桿映射）。
 
-## Phase 0–4a 之後的 code 現狀
+## Phase 0–4b 之後的 code 現狀
 
-- `src/recsys_tfb/diagnosis/metric/`：`sample.py`（`draw_diagnosis_sample`；**keep_cols 目前不含 segment 欄**——4b 前置要補）、`uncertainty.py`、`reconciliation.py`、`discrimination.py`、`occupancy_spark.py`、`cross_purchase.py`、`quadrant.py`、**Phase 4a 新增 `offset_sweep.py`**（`sweep(sample_pdf, parameters) -> dict`：logit 平移、座標下降＋λ·g²/M 收縮＋平手偏 0、query 層折切 seed 重用 sample.seed、折外 LOO 拆解、`delta_star`＋**`delta_star_centered`**（gauge 去均值）、`debug_inject_offsets` 注入 scope 僅此模組、groupby `dropna=False` 防 null 鍵繞折）。依賴白名單不變：diagnosis 不 import plotly/pyspark（offset_sweep 純 numpy/pandas）。
-- 評估 pipeline **9 個 node**（`compute_offset_sweep` in=[eval_predictions, parameters] out=`evaluation_offset_sweep`；拓樸序落在 `compute_reconciliation` 後、`persist_eval_predictions` 前）；catalog：`evaluation_offset_sweep` → `diagnosis/offset_sweep.json`。
-- 報表：`report_builder.py` 的 `build_offset_sweep_section`＋`_offset_sweep_waterfall`（plotly `go.Waterfall`，藍 #1565c0 收復/橘 #e65100 負向；全零 δ* 不畫圖）；`assemble_report(..., offset_sweep=None)`。
-- consistency：A15–A17＋**A18**（offset_sweep 參數域＋debug_inject_offsets 有限實數；grid 須含 0）；**下一個代號 A19**。
-- config：`evaluation.metric`（含 k——診斷家族截斷，null=full mAP，**不影響報表主指標**）、`evaluation.diagnosis.{sample,ci,reconciliation,quadrant,offset_sweep,debug_inject_offsets}`；`report.sections.{reconciliation,quadrant,offset_sweep}`。
-- 測試：相關四目錄（test_diagnosis/test_metric、test_consistency、test_report_builder、test_pipelines/test_evaluation）**259 passed 零 fail** @ f44d4f8。
+- `src/recsys_tfb/diagnosis/metric/`：sample.py（keep_cols 已含 `evaluation.segment_columns`）、uncertainty、reconciliation、discrimination、occupancy_spark、cross_purchase、quadrant、offset_sweep（**hash 折別**：`_fold_split` CRC32 分桶、列序無關、datetime64 NaT 已正規化）、**pair_ledger**（傘函數 `pair_ledger()` 內含 `substitution_ablation()`；|ΔAP| λ 會計＋by_segment；全樣本不切折）、**`_common.py`**（家族共用：diag_cfg/metric_params/to_logit/parse_injection/apply_injection；numpy-leaf 三模組刻意 pyspark-free）。
+- `src/recsys_tfb/diagnosis/model/`：Phase 0 平移的訓練側診斷（shap_per_item.py、attribution.py 等）——**Phase 5 的 gain_ledger 加在這裡**。
+- 評估 pipeline **10 個 node**（`compute_pair_ledger` 在 `compute_offset_sweep` 後）；catalog：`evaluation_pair_ledger` → `diagnosis/pair_ledger.json`。報表：`build_pair_ledger_section`（go.Heatmap＋三表）＋glossary 三條。
+- consistency：A15–A18＋**A19**（pair_ledger.enabled bool）；**下一個代號 A20**（spec Phase 5 已改號）。
+- `debug_inject_offsets` scope＝分流層家族兩節點（offset_sweep＋pair_ledger），config 註解已同步。
+- 測試：相關四目錄 **285 passed 零 fail** @ 611e0f3（Phase 4b +26）。
 
 ## 本機環境狀態
 
-- **本機跑 evaluation 必帶 `--post-training`**（known-pitfalls §6 首條，2026-07-08）：default 模式讀 `ml_recsys.ranked_predictions`（inference 產物）本機沒有，`prepare_eval_data` 秒炸 Table not found。
-- SPARK_LOCAL_IP=127.0.0.1 已釘 conftest＋spark-env.sh（known-pitfalls §7）；模型 **6059dcef**、`--model-version` 必帶、`ls -t` 禁用（§6）。
-- 現行 `data/evaluation/6059dcef/20260131/diagnosis/` 有**四份 JSON**（metric_ci／reconciliation／quadrant_summary／offset_sweep），是 Phase 4a 還原後的乾淨基準（位元復原已驗，含 k=1/k=3 實驗後的復原）。`/tmp/phase4a_*`、`/tmp/k*_*.json` 重開機會消失，勿依賴。
-- Phase 4a 實測基準數字（乾淨態）：δ*（centered）fund_bond +0.66、fund_stock +0.51、exchange_usd −0.54、其餘≈0；折內收復 +0.0515、折外 +0.0352；節點 5.6s（654 query×8 item）。注入 ccard_ins +1.0 時 centered 位移 −1.05（原始 −1.40——**注入判讀一律用 centered 位移**，spec 修訂有寫）。
-- `evaluation.metric.k` 實驗結論（2026-07-08，產物已還原）：k=1/k=3 都讓冷門 fund 系 AP 精確歸零（CI 飽和 [0,0]＝從未進榜，不是精確的零）、診斷解析度喪失；預設留 `k: null`。
+- 本機 evaluation 必帶 `--post-training`（known-pitfalls §6）；模型 **6059dcef**、`--model-version` 必帶；SPARK_LOCAL_IP 已釘（§7）。
+- `data/evaluation/6059dcef/20260131/diagnosis/` 現有**五份 JSON**（metric_ci／reconciliation／quadrant_summary／offset_sweep／pair_ledger）＝Phase 4b 還原後乾淨基準（位元復原已驗，含 NaT 修復後重驗）。`/tmp/phase4b_*` 重開機會消失；**B′（λ=0）實驗產物未留存**（機制算術可從留存 JSON 重算，opus 已核）。
+- Phase 4b 乾淨態基準數字：pair_ledger 654 query/1006 正例列/1273 pairs、map_current 0.5410、top 壓制者 exchange_usd 41.5%／ccard_ins 34.2%、substitution 淨傷害只有 fund_stock +0.0199/fund_bond +0.0038；offset_sweep（hash 折別後）fit 317/hold 337、折外收復 +0.0295、centered：fund_bond +0.494/fund_stock +0.344/ccard_ins −0.456/exchange_usd −0.306。
+- **λ vs 損傷教訓（Phase 4b 核心發現）**：注入 ccard_ins +1.0 對 macro mAP 實際損傷僅 +0.0034 < λ 懲罰 0.0125 → sweep 不反制是正確行為；已知答案主判準＝pair_ledger 暴增（dap ×1.98）。Phase 4a 的 −1.05 帶折別運氣。sweep 類已知答案驗收都要附「損傷 vs 懲罰」數字對照。
+- 效能：compute_pair_ledger 本機 0.83s；公司外推 pair 枚舉 4–5 分鐘＋substitution ~1 分鐘。
 
-## 已確立的執行協議（使用者定案＋實證教訓，勿走回頭路）
+## 已確立的執行協議（不變，勿走回頭路）
 
-1. **一階段一份計畫**；每階段結束＝本機真跑產物＋已知答案注入閘門，**使用者檢視通過才進下一階段**。
-2. **subagent token 成本控制**：機械步驟 controller 直跑；sonnet implementer；合併 reviewer 批次審；opus 只做階段總審。
-3. 行為不變類判準＝與 baseline 一致；報表逐字回歸比對必須在任何重訓**之前**做（Phase 4b 只動 evaluation 側就不需重訓）。
-4. shaprx 已擱置；HPO objective 不動。
-5. 既有測試的 exact-set／結構斷言若因 additive 鍵或新節點必須更新，屬合法改動——計畫「設計定案」節預授權或執行時裁決後記錄。
-6. **文件是一等交付物（spec §3 固定結構）**：新報表段落必同步擴充 `docs/pipelines/evaluation-diagnosis.md`。寫法鐵則（詳見 memory feedback_analysis_docs_handbook_style）：(a) 手冊禁用開發詞彙，交付前 grep；(b) 示例產物直接印進文件走讀；(c) 無直覺尺度建「數感」節；(d) 報表描述只留短判讀順序＋指向手冊；(e) 交付前派 fresh 讀者 agent（驗證清單含「列出所有指涉你看不到的東西的詞」）。
-7. **質性反饋（讀不懂類）不得用字面替換修復＋自驗**——判準見 `~/.claude/rules/20-judgment-rubrics.md` §2 反例。
-8. **對使用者的訊息中，檔案引用一律絕對路徑（含 `.worktrees/diag-framework`）**；轉述 subagent 回報時補上絕對前綴。
-9. **提速協議（Phase 3 覆盤定案；品質手段一項不減）**：(a) 派工內嵌 task 全文＋執行者必讀＋設計定案，計畫檔路徑只作查證；(b) 同構小模組合批一次派工（Phase 4a 的 Task 3–5 合批實證有效）；(c) 審查分工釘死——合併 reviewer 只讀 diff＋只跑新增/變更測試檔（附 controller 綠燈證據、明令不重跑全套）、opus 管閘門證據核驗與跨檔一致性；(d) 審查一律背景執行、與真跑閘門/文件任務並行；(e) 文件素材包由 controller 先備好。
+同前版 9 條：一階段一計畫＋使用者閘門；subagent token 成本控制（sonnet implementer／合併 reviewer 批次／opus 只總審）；行為不變類判準＝與 baseline 一致、**報表逐字回歸比對必須在任何重訓之前做**；shaprx 擱置、HPO objective 不動；exact-set 斷言 additive 更新屬合法（預授權或記錄）；文件一等交付物（禁開發詞彙＋真跑示例印進文件＋數感節＋fresh 讀者 agent）；質性反饋不得字面替換自驗；檔案引用絕對路徑；提速協議五款（內嵌全文／合批／審查附證據禁重跑全套／審查背景並行／素材包 controller 先備）。
 
-## Phase 4b 開工提醒
+## Phase 5 開工提醒
 
-1. **先讀 spec §3 Phase 4 的 pair_ledger 段全文再拆計畫**（約 138–141 行）。交付物：`diagnosis/metric/pair_ledger.py`——`pair_ledger(sample_pdf, parameters) -> dict`（對每個正例列，列舉同 query 排其上方的 item、記 |ΔAP| 指標敏感度 → 壓制者×受害者矩陣）＋`substitution_ablation(sample_pdf, parameters) -> dict`（逐 item 換成 base-rate logit 常數、重算指標 O(M) 次 → 淨貢獻/淨傷害）＋**傷害×segment 分組 by_segment 區塊**（併入 pair_ledger.json）；config `evaluation.diagnosis.pair_ledger: {enabled: true}`；catalog `diagnosis/pair_ledger.json`；報表 section（spec 只明定 offset_sweep 有 waterfall——pair_ledger 的報表呈現在計畫階段定，矩陣熱圖沿 plotly 慣例）；**A19**；手冊擴充（已知限制節維持檔尾、需再改號）。
-2. **開工第一件事＝修 opus N1（折別穩定性）**：現行 fit/holdout 折別依 `ngroup()` 位置碼＝依 `toPandas()` 列序（`sample.py:115` 無 orderBy），公司叢集不同平行度重跑可能翻折別。修法方向＝對 query key 做 hash 折別（列序無關）。**修了 δ*/LOO 數字會變**→手冊 §10.6 示例表＋乾淨基準快照要一起重生（一次真跑即可），閘門判準（centered 位移）不受影響。
-3. **前置：`draw_diagnosis_sample` keep_cols 補 segment 欄**（`sample.py:55-61` 目前只有 query cols＋item/label/score/score_uncalibrated；spec §風險表已預告「5 個核心欄＋配置的 segment_columns」）。segment 欄由 `prepare_eval_data` 的 `join_segment_sources` 併進 eval_predictions（config 鍵 `evaluation.segment_columns`，本機合成資料只有 `cust_segment_typ`）；**by_segment 只消費欄位、不得 import `evaluation/segments.py`**（spec 明文邊界）。
-4. **閘門重用 Phase 4a 注入模式**：`debug_inject_offsets: {ccard_ins: 1.0}` → pair_ledger 應顯示 ccard_ins 的壓制次數暴增（spec 驗收 1 後半）；還原 → 位元復原。注意 debug_inject_offsets 目前 scope 只在 offset_sweep 模組內——**pair_ledger 要不要也吃注入，在計畫階段決定**（要吃就把注入邏輯抽成共用 helper，不要複製貼上）。
-5. **效能**：pair_ledger 的 |ΔAP| 會計與 substitution_ablation 都跑診斷抽樣（driver-side numpy）；substitution_ablation 是 O(M) 次全量指標評估（8 次本機、22 次公司）＝比 offset_sweep 便宜得多；pair 枚舉是 per 正例列 × 其上方 items（本機 ~5k 列可忽略，公司 4.4M 列 × 平均深度——計畫要先估記憶體/時間）。
-6. 計畫必含「文件」task（壓制矩陣、|ΔAP|、substitution ablation、by_segment 都是無直覺概念，數感節＋示例表走讀比照 §10 規格；素材包由 controller 從閘門真跑備好）。
-7. 新 consistency 代號從 **A19** 起。閘門真跑指令：`python -m recsys_tfb evaluation --env local --model-version 6059dcef --post-training`（背景執行）。
-8. 遺留取捨（已記錄、非 4b 義務）：N2=debug_inject_offsets 無硬閘門只告警（leaf 節點可接受）；N3=空抽樣時 offset_sweep 報表段渲染退化 section（與姊妹段一致）。
+1. **先讀 spec §3 Phase 5 段全文再拆計畫**（約 157–175 行）。交付物三塊：(a) `diagnosis/model/gain_ledger.py`＝`compute_gain_ledger(model, parameters) -> dict`（經 `LightGBMAdapter.booster` 取 `trees_to_dataframe()`，跨樹按 item 記帳：item 切點樹序分佈、item 隔離子樹內 context 切點數與 Gain、item-id vs context Gain 占比）＋training pipeline 新 node＋catalog `data/models/${model_version}/diagnostics/gain_ledger.json`；(b) 條件化 SHAP：`shap_per_item.py` 增 `diagnostics.shap.background: global|per_item`（預設 global 行為不變）＋attribution 接縫開放 explainer 選項傳遞（只留參數空間）；(c) `diagnosis/metric/triage.py`＋evaluation 新 node `assemble_triage_summary`（in 含 gain_ledger **走 catalog JSON 跨側、不 import**）→ 判定 {健康|水準-配置型|水準-指標再平衡型|餓死型|特徵缺失型}＋建議槓桿＋起手值欄（配置型附 logQ offset、再平衡型附 δ*、餓死型附 w∝1/√P_j）→ report section＋`diagnosis/triage.json`；gain_ledger 缺席時 best-effort 降級。config 三鍵＋**A20**。
+2. **Spike 前置（spec 明文，進實作前必驗）**：LightGBM 類別切分在 `trees_to_dataframe` 的 threshold（category set）解析＋item 隔離子樹的 parent-child 遍歷可行性。退路＝降級粗帳本（切點計數＋Gain 占比，仍可判餓死型）。計畫第一個實作 task 就排 spike。
+3. **閘門首次需要 training 真跑**（Phase 1–4b 都只跑 evaluation）。計畫階段先查清楚：(a) `diagnostics.*` config 是否參與 model_version hash——會 bump 的話 6059dcef 基準銜接怎麼處理（歷史先例：cases_manifest 的 config top-level 不影響 model_version，見 memory project_training_diagnostics）；(b) 能否用 pipeline 切片 `--only-node compute_gain_ledger` 對既有模型補產 gain_ledger（讀 `docs/operations/pipeline-slicing.md`＋RESUME_CONTRACTS；注意 sliced 把 model 生產節點拉回會觸發 [retrain] WARN advisory）；(c) 協議鐵則「報表逐字回歸在重訓前做」——若真要重訓，先跑一次 evaluation 報表基準。
+4. **已知答案（spec 驗收 3）**：方向性＝最冷合成 item 的 per-item 個人化 Gain 顯著低於熱門（fund_mix n_pos=23 最冷）；triage 重演＝Phase 2 的 fund_bond 抽樣注入組合（三 segment 0.5，會重訓出新 mv——Phase 2 當時是 8883dd58）應被判「水準-配置型」而非餓死型。Phase 4b 的診斷結論可當交叉驗證錨：fund_stock/fund_bond 應落餓死型輪廓（AUC≈0.5＋substitution 淨傷害）、exchange_usd/ccard_ins 應判健康。
+5. **triage 讀 offset_sweep 的 δ* 起手值用 centered 還是 raw**：計畫階段定案（gauge 教訓——跨執行比較只有 centered 有意義；但「加到分數上」的起手值語意是 raw…兩者差共同平移，對排序等價，建議 centered＋文件說明）。
+6. 文件 task：triage 是總表（無直覺概念：判定類型、槓桿、起手值），手冊擴充比照 §11 規格；gain_ledger 判讀落點（本手冊 vs training.md）計畫階段定。
+7. 閘門指令：training＝`python -m recsys_tfb training --env local`（背景；Spark cold start 2–4 分）→ evaluation 同 4b。真跑前 pre-flight 照抄 CLAUDE.md §Worktree。
+8. Phase 5 之後的收尾清單：superpowers:finishing-a-development-branch → 開 PR（整條 feat/diag-framework，Phase 0–5）；HANDOFF/memory 收尾；遺留非義務項（N2 注入無硬閘門、substitution 反向、B′ 產物留存、`_HASH_BUCKETS` 底線 import nit）在 PR 描述如實列出。
