@@ -1,17 +1,19 @@
-# 診斷框架開發交接檔（/compact 前固化；最後更新：2026-07-08 Phase 4b 完成後）
+# 診斷框架開發交接檔（最後更新：2026-07-08 Phase 5 完成後）
 
 > 給續作 session：讀完本檔＋下列文件，即可直接開工，不需要舊對話。
 
 ## 現在進行到哪
 
-- **Phase 0（歸位）、1（指標基座）、2（對帳層）、3（象限層）、4a（分流 offset_sweep）、4b（壓制帳本 pair_ledger）全部完成**；4b 閘門證據已交付、使用者已指示續作（2026-07-08）。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `611e0f3`。
-- **下一步＝寫 Phase 5（結構層 gain_ledger＋條件化 SHAP background＋triage 總表）的實作計畫**，然後 subagent-driven 執行。**Phase 5 是最後一個階段**；完成後剩收尾：finishing-a-development-branch → 開 PR（feat/diag-framework 涵蓋 Phase 0–5 全部）。
+- **Phase 0–5 全部完成**（0 歸位、1 指標基座、2 對帳層、3 象限層、4a 分流 offset_sweep、4b 壓制帳本 pair_ledger、5 結構層 gain_ledger＋條件化 SHAP background＋triage 總表）。branch `feat/diag-framework`（worktree `.worktrees/diag-framework`）@ `913144b`。
+- **Phase 5 閘門已通過、文件已交付**；剩：讀者驗收（sonnet）＋opus 總審的 nit 回收（若有）→ 使用者閘門 → **收尾：superpowers:finishing-a-development-branch → 開 PR（feat/diag-framework 涵蓋 Phase 0–5 全部）**。這是整個診斷框架的最後動作。
+- **Phase 5 交付 commit 串**：587c0a8（gain_ledger 模組）→ 9335af0（training 接線＋A20）→ ab25a4a（SHAP background）→ 0fbe1dc（triage 模組＋io optional）→ bb5bd61（evaluation 接線＋報表）→ f3673bc（審查修復 3 項）→ 913144b（手冊 §12/§13/§14＋spec 修訂）。計畫檔＝`docs/superpowers/plans/2026-07-08-diag-phase5-structure-triage.md`。
+- **PR 描述要列的非義務遺留**：(1) per_item SHAP interventional 在 shap 0.42.1×LightGBM 類別切分下不可行→降級 global（版本解鎖後自動生效，見手冊 §12.5）；(2) triage 起手門檻 starve_ratio/weight_cap 未 config 化；(3) substitution 反向、B′ 產物、`_HASH_BUCKETS` 底線 import 等 Phase 4b 遺留；(4) gain_ledger `item_id` 帳與遍歷解耦（病態樹下理論落差，已文件化為設計選擇）；(5) main 既有 fail `test_inference/.../test_pipeline_inputs`（PR#85 未同步，非本 branch）。
 
 ## 唯一真實來源（先讀這些）
 
 1. **Spec**：`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`——**Phase 5 在 §3 Phase 5 段（約 157–175 行）**。spec 有**七處**帶日期執行時修訂已入文（固定結構含文件、Phase 2 verdict 相對全局、Phase 3 plotly、A17 域排除 0.5、Phase 4a gauge/centered、**Phase 4b 注入閘門主判準改 pair_ledger（λ 懲罰 vs 實際損傷實證）**、**Phase 5 consistency 代號 A19→A20 讓號**）——都是合法修訂。
 2. **計畫範本**：`docs/superpowers/plans/2026-07-08-diag-phase4b-pair-ledger.md`（最新一份；「設計定案」節＋執行者必讀＋三狀態閘門＋提速協議內建）。
-3. **判讀手冊**：`docs/pipelines/evaluation-diagnosis.md`——現況：§10 分流層、§11 壓制帳本（11.1–11.7 含判讀順序清單）、§12 已知限制（檔尾）、名詞速查 21 條。triage 的報表段落**必須**擴充此檔；gain_ledger 是訓練側產物，判讀寫哪份（本手冊 vs `docs/pipelines/training.md` 的診斷節）在計畫階段定。
+3. **判讀手冊**：`docs/pipelines/evaluation-diagnosis.md`——現況：§10 分流層、§11 壓制帳本、**§12 結構層（gain_ledger＋條件化 SHAP background）**、**§13 triage 總表**、§14 已知限制（檔尾）、名詞速查 27 條。gain_ledger 判讀落在此手冊（§12），training.md 只加路由行不複述。
 4. 方法論背景：`docs/ranking-diagnosis-framework.md`（gain_ledger＝Ch 3 診斷項目 8、條件化 SHAP＝項目 9、triage＝Ch 5 槓桿映射）。
 
 ## Phase 0–4b 之後的 code 現狀
