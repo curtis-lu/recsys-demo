@@ -834,3 +834,41 @@ class TestOffsetSweepParamsA18:
             validate_config_consistency(
                 self._params({"shrink_lambda": -1})
             )
+
+
+class TestPairLedgerParamsA19:
+    def _params(self, pair_ledger=None):
+        diag = {}
+        if pair_ledger is not None:
+            diag["pair_ledger"] = pair_ledger
+        return {"evaluation": {"diagnosis": diag}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        assert pair_ledger_param_errors({}) == []
+        assert pair_ledger_param_errors(self._params()) == []
+        assert pair_ledger_param_errors(
+            self._params({"enabled": True})
+        ) == []
+
+    def test_non_bool_enabled_rejected(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        errs = pair_ledger_param_errors(self._params({"enabled": "yes"}))
+        assert len(errs) == 1
+        assert "evaluation.diagnosis.pair_ledger.enabled" in errs[0]
+
+    def test_missing_block_defaults_clean(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        params = self._params({"enabled": True})
+        params["evaluation"]["diagnosis"].pop("pair_ledger", None)
+        assert pair_ledger_param_errors(params) == []
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="pair_ledger"):
+            validate_config_consistency(
+                self._params({"enabled": "yes"})
+            )

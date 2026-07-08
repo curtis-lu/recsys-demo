@@ -95,6 +95,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
   integer >= 1; ``enabled`` bool; ``debug_inject_offsets`` values finite
   numbers. Predicate: ``offset_sweep_param_errors``.
+* A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
+  ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -685,6 +687,21 @@ def offset_sweep_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def pair_ledger_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.pair_ledger parameter domains (A19)."""
+    errors: list[str] = []
+    diag = ((parameters.get("evaluation", {}) or {})
+            .get("diagnosis", {}) or {})
+    cfg = diag.get("pair_ledger", {}) or {}
+    en = cfg.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.pair_ledger.enabled={en!r} must be a "
+            "bool"
+        )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -788,6 +805,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(quadrant_param_errors(parameters))
 
     errors.extend(offset_sweep_param_errors(parameters))
+
+    errors.extend(pair_ledger_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
