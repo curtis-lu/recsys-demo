@@ -753,3 +753,84 @@ class TestQuadrantParamsA17:
         )
         with _pytest.raises(ConfigConsistencyError, match="auc_threshold"):
             validate_config_consistency(self._params({"auc_threshold": 0.4}))
+
+
+class TestOffsetSweepParamsA18:
+    def _params(self, sweep=None, inject=None):
+        diag = {}
+        if sweep is not None:
+            diag["offset_sweep"] = sweep
+        if inject is not None:
+            diag["debug_inject_offsets"] = inject
+        return {"evaluation": {"diagnosis": diag}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        assert offset_sweep_param_errors({}) == []
+        assert offset_sweep_param_errors(self._params(
+            {"enabled": True, "shrink_lambda": 0.1, "holdout_fraction": 0.5,
+             "max_rounds": 5, "grid": {"lo": -2.0, "hi": 2.0, "step": 0.05}}
+        )) == []
+
+    def test_holdout_fraction_must_be_strictly_inside_unit_interval(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (0.0, 1.0, -0.1, "0.5"):
+            errors = offset_sweep_param_errors(
+                self._params({"holdout_fraction": bad})
+            )
+            assert any("holdout_fraction" in e for e in errors)
+
+    def test_shrink_lambda_nonnegative(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(
+            self._params({"shrink_lambda": -0.1})
+        )
+        assert any("shrink_lambda" in e for e in errors)
+
+    def test_grid_well_formed_and_straddles_zero(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": 2.0, "hi": -2.0, "step": 0.05}}
+        ))
+        assert any("lo" in e for e in errors)
+
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": 0.5, "hi": 2.0, "step": 0.05}}
+        ))
+        assert any("must contain 0" in e for e in errors)
+
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": -2.0, "hi": 2.0, "step": 0}}
+        ))
+        assert any("step" in e for e in errors)
+
+    def test_max_rounds_positive_int_not_bool(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (0, True, 2.5):
+            errors = offset_sweep_param_errors(
+                self._params({"max_rounds": bad})
+            )
+            assert any("max_rounds" in e for e in errors)
+
+    def test_enabled_must_be_bool(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(self._params({"enabled": "false"}))
+        assert any("enabled" in e for e in errors)
+
+    def test_inject_values_must_be_finite_numbers(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (float("nan"), float("inf"), "1.0"):
+            errors = offset_sweep_param_errors(
+                self._params(inject={"x": bad})
+            )
+            assert any("debug_inject_offsets" in e for e in errors)
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="shrink_lambda"):
+            validate_config_consistency(
+                self._params({"shrink_lambda": -1})
+            )
