@@ -812,3 +812,101 @@ def test_assemble_report_includes_pair_ledger_section():
         _metrics_min(), _params_min(), pair_ledger=_LEDGER_FIXTURE
     )
     assert "壓制帳本" in html
+
+
+_TRIAGE_FIXTURE = {
+    "enabled": True,
+    "gain_ledger_present": True,
+    "thresholds": {"starve_ratio": 0.25, "weight_cap": 8.0},
+    "verdicts": {
+        "cfg": {
+            "verdict": "水準-配置型",
+            "lever": "槓桿1：推論期 logQ/offset 修正或修採樣配置（閉式）",
+            "starter": {"type": "logq_offset", "value": 0.4,
+                        "band": [0.1, 0.7], "unit": "log-odds",
+                        "caveat": "起手值，須經快迴路驗證，非定案"},
+            "evidence": {"auc": 0.7, "disc_status": "好",
+                        "level_status": "偏低", "gap_vs_global": -0.6,
+                        "recon_verdict": "可解釋", "theory_min": 0.1,
+                        "theory_max": 0.7, "residual": 0.0,
+                        "delta_star_centered": -0.5,
+                        "loo_contribution_holdout": 0.0,
+                        "context_gain_share": None, "y_rate": None},
+            "notes": [],
+        },
+        "stv": {
+            "verdict": "餓死型",
+            "lever": "槓桿3：item-aware weight／熱門負類欠採（配 logQ）／HPO 先驗",
+            "starter": {"type": "item_weight", "value": 4.47,
+                        "unit": "sample_weight 相對倍率（w∝1/√P 加上限，手冊3 Ch8）",
+                        "caveat": "起手值，須經快迴路驗證，非定案"},
+            "evidence": {"auc": 0.5, "disc_status": "差",
+                        "level_status": "正常", "gap_vs_global": 0.0,
+                        "recon_verdict": "可解釋", "theory_min": 0.0,
+                        "theory_max": 0.0, "residual": 0.0,
+                        "delta_star_centered": 0.3,
+                        "loo_contribution_holdout": 0.0,
+                        "context_gain_share": 0.01, "y_rate": 0.02},
+            "notes": [],
+        },
+    },
+    "summary": {"水準-配置型": 1, "餓死型": 1},
+    "notes": [],
+}
+
+
+def test_triage_section_renders_main_table():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
+    assert sec is not None
+    assert sec.figures == []
+    assert len(sec.tables) == 1
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["cfg", "stv"]
+    for col in ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+                "δ*_centered", "context_gain_share", "備註"]:
+        assert col in tbl.columns
+    assert tbl.loc["cfg", "判定"] == "水準-配置型"
+    assert tbl.loc["stv", "判定"] == "餓死型"
+    assert "logq_offset=0.400" in tbl.loc["cfg", "起手值"]
+
+
+def test_triage_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    assert build_triage_section(None, _params_min()) is None
+    assert build_triage_section({"enabled": False}, _params_min()) is None
+    params_off = {
+        "evaluation": {"report": {"sections": {"triage": False}}}
+    }
+    assert build_triage_section(_TRIAGE_FIXTURE, params_off) is None
+
+
+def test_triage_section_description_has_summary_and_gain_ledger_status():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
+    assert "水準-配置型" in sec.description
+    assert "gain_ledger" in sec.description
+
+
+def test_triage_section_gain_ledger_absent_flagged_in_description():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    ledger_absent = dict(_TRIAGE_FIXTURE, gain_ledger_present=False)
+    sec = build_triage_section(ledger_absent, _params_min())
+    assert "缺席" in sec.description or "降級" in sec.description
+
+
+def test_glossary_has_triage_entries():
+    from recsys_tfb.evaluation.report_builder import build_glossary_section
+    sec = build_glossary_section(_params_min())
+    txt = " ".join(str(t.to_dict()) for t in sec.tables)
+    assert "triage 總表" in txt
+    assert "餓死型" in txt
+    assert "起手值" in txt
+
+
+def test_assemble_report_includes_triage_section():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), triage=_TRIAGE_FIXTURE
+    )
+    assert "Triage" in html

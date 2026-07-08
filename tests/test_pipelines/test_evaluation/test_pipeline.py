@@ -8,7 +8,8 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 10
+        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -23,6 +24,7 @@ class TestEvaluationPipelineDefault:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
+            "evaluation_triage",
         }
         assert pipeline.outputs == expected
 
@@ -34,7 +36,8 @@ class TestEvaluationPipelineDefault:
             "compute_baseline_metrics", "compute_metric_ci",
             "compute_reconciliation", "compute_offset_sweep",
             "compute_pair_ledger",
-            "persist_eval_predictions", "compute_quadrant", "generate_report",
+            "persist_eval_predictions", "compute_quadrant",
+            "assemble_triage_summary", "generate_report",
         ]
 
     def test_compute_quadrant_inputs_wired_in_order(self):
@@ -55,7 +58,8 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        assert len(pipeline.nodes) == 10
+        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -70,6 +74,7 @@ class TestEvaluationPipelinePostTraining:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
+            "evaluation_triage",
         }
         assert pipeline.outputs == expected
 
@@ -79,7 +84,8 @@ class TestEvaluationPipelineCompareMode:
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        assert len(pipeline.nodes) == 13
+        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        assert len(pipeline.nodes) == 14
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

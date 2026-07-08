@@ -439,6 +439,17 @@ def compute_pair_ledger(
     return out
 
 
+def assemble_triage_summary(quadrant: Optional[dict], reconciliation: Optional[dict],
+                            offset_sweep: Optional[dict], gain_ledger: Optional[dict],
+                            parameters: dict) -> dict:
+    """Triage 總表 node：純 dict 合成，gain_ledger 缺席 best-effort 降級。"""
+    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+    if not (diag.get("triage", {}) or {}).get("enabled", True):
+        return {"enabled": False}
+    from recsys_tfb.diagnosis.metric.triage import triage
+    return triage(quadrant, reconciliation, offset_sweep, gain_ledger, parameters)
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
@@ -449,6 +460,7 @@ def generate_report(
     quadrant: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
     pair_ledger: Optional[dict] = None,
+    triage: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
@@ -518,4 +530,5 @@ def generate_report(
         quadrant=quadrant,
         offset_sweep=offset_sweep,
         pair_ledger=pair_ledger,
+        triage=triage,
     )

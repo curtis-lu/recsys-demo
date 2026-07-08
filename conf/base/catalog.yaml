@@ -236,6 +236,7 @@ cases_manifest:
 gain_ledger:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/gain_ledger.json
+  optional: true  # evaluation 跨側讀取；訓練側未跑該 node 時回 None 降級
 
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
 evaluation_metric_ci:
@@ -257,6 +258,10 @@ evaluation_offset_sweep:
 evaluation_pair_ledger:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/pair_ledger.json
+
+evaluation_triage:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/triage.json
 
 evaluation_report:
   type: TextDataset

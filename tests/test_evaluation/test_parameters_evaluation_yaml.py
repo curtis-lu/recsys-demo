@@ -74,3 +74,12 @@ def test_quadrant_block():
 
 def test_report_sections_include_quadrant():
     assert _load()["report"]["sections"]["quadrant"] is True
+
+
+def test_triage_block():
+    triage = _load()["diagnosis"]["triage"]
+    assert triage["enabled"] is True
+
+
+def test_report_sections_include_triage():
+    assert _load()["report"]["sections"]["triage"] is True

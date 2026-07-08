@@ -62,6 +62,7 @@ evaluation:
       quadrant: true
       offset_sweep: true
       pair_ledger: true
+      triage: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
@@ -144,6 +145,14 @@ evaluation:
     # ablation 逐 item 換 base-rate logit 常數重算指標（O(M) 次）量淨貢
     # 獻/淨傷害。跑在同一份診斷抽樣上；描述性會計、全樣本不切折。
     pair_ledger:
+      enabled: true
+
+    # 三層診斷合成總表（A20 後續）：把 quadrant/reconciliation/offset_sweep
+    # /gain_ledger 四個診斷 dict 合成 per-item 判定＋建議槓桿＋起手值。
+    # gain_ledger 缺席時 best-effort 降級（見 catalog.yaml gain_ledger
+    # optional: true）。判讀邏輯見 src/recsys_tfb/diagnosis/metric/triage.py
+    # 模組 docstring（docs/pipelines/evaluation-diagnosis.md 尚未收錄此節）。
+    triage:
       enabled: true
 
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數

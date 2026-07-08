@@ -734,6 +734,78 @@ def build_pair_ledger_section(
     )
 
 
+def _fmt_triage_starter(starter: dict | None) -> str:
+    if not starter:
+        return "—"
+    value = starter.get("value")
+    if value is None:
+        value_txt = "—"
+    elif isinstance(value, (int, float)):
+        value_txt = f"{value:.3f}"
+    else:
+        value_txt = str(value)
+    unit = starter.get("unit") or ""
+    return f"{starter.get('type')}={value_txt} {unit}".strip()
+
+
+def build_triage_section(
+    triage: dict | None, parameters: dict
+) -> ReportSection | None:
+    if not _section_on(parameters, "triage"):
+        return None
+    if not triage or not triage.get("enabled"):
+        return None
+    from recsys_tfb.diagnosis.metric.triage import STARTER_CAVEAT
+
+    verdicts = triage.get("verdicts", {}) or {}
+    items = sorted(verdicts)
+    cols = ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+            "δ*_centered", "context_gain_share", "備註"]
+    rows = {}
+    for it in items:
+        v = verdicts[it] or {}
+        ev = v.get("evidence", {}) or {}
+        rows[it] = [
+            v.get("verdict"),
+            v.get("lever"),
+            _fmt_triage_starter(v.get("starter")),
+            ev.get("auc"),
+            ev.get("gap_vs_global"),
+            ev.get("delta_star_centered"),
+            ev.get("context_gain_share"),
+            "；".join(v.get("notes") or []),
+        ]
+    tbl = pd.DataFrame(
+        {c: [rows[it][i] for it in items] for i, c in enumerate(cols)},
+        index=items,
+    )
+    summary = triage.get("summary", {}) or {}
+    summary_txt = "、".join(f"{k}×{n}" for k, n in summary.items()) or "無 item"
+    gl_present = triage.get("gain_ledger_present")
+    gl_txt = (
+        "gain_ledger 可用" if gl_present
+        else "gain_ledger 缺席或降級——特徵缺失型與餓死型無法區分"
+    )
+    desc = (
+        "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+        "per-item 判定總表，省去逐張表交叉核對。判讀順序：(1) 判定欄看落"
+        "在哪一型、建議槓桿欄看對應修法；(2) 起手值只是計算出的起點，"
+        f"{STARTER_CAVEAT}，套用前務必用快迴路（offline 重算或小流量）驗證"
+        "——不是可以直接上線的定案；(3) 證據欄回對應診斷層原表查完整脈絡。"
+        f"本次判定分布：{summary_txt}；{gl_txt}。"
+        "完整判讀：docs/pipelines/evaluation-diagnosis.md。"
+    )
+    notes = triage.get("notes") or []
+    if notes:
+        desc += "⚠ " + "／".join(notes)
+    return ReportSection(
+        title="Triage 總表（跨診斷判定合成）",
+        description=desc,
+        tables=[tbl],
+        table_titles=["per-item 判定表"],
+    )
+
+
 def build_category_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -934,6 +1006,15 @@ _GLOSSARY = [
     ("substitution ablation",
      "把某 item 分數換成 base-rate 常數重算指標；delta 正＝該 item "
      "個性化分數是淨傷害、負＝淨貢獻"),
+    ("triage 總表",
+     "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+     "per-item 判定＋建議槓桿＋起手值總表"),
+    ("餓死型",
+     "條件判別力差、且結構層 context_gain_share 遠低於同儕——特徵夠但曝光"
+     "／訓練樣本不足，非特徵缺失"),
+    ("起手值",
+     "由診斷數字直接算出的建議修正量（非最終定案）；套用前須經快迴路"
+     "（offline 重算或小流量）驗證才能升格"),
 ]
 
 
@@ -957,6 +1038,7 @@ def assemble_report(
     quadrant: dict | None = None,
     offset_sweep: dict | None = None,
     pair_ledger: dict | None = None,
+    triage: dict | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
     authoritative order) into the final HTML string."""
@@ -970,6 +1052,7 @@ def assemble_report(
         build_quadrant_section(quadrant, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
         build_pair_ledger_section(pair_ledger, parameters),
+        build_triage_section(triage, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),
