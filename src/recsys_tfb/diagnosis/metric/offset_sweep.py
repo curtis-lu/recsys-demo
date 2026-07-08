@@ -65,7 +65,12 @@ def _fold_split(
     for c in query_cols:
         s = sample_pdf[c]
         if pd.api.types.is_datetime64_any_dtype(s):
-            parts.append(s.dt.strftime("%Y-%m-%d %H:%M:%S"))
+            # NaT 經 strftime 會變 float NaN，str.cat 會把整列 key 傳染成
+            # NaN（不同 entity 的 null-time query 被摺進同一把 hash key）
+            # ——fillna 成確定性字串，對齊 astype(str) 分支的 null 語意。
+            parts.append(
+                s.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("NaT")
+            )
         else:
             parts.append(s.astype(str))
     keys = parts[0] if len(parts) == 1 else parts[0].str.cat(parts[1:], sep="|")

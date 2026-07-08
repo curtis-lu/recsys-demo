@@ -194,6 +194,28 @@ class TestMechanics:
         out = sweep(pd.concat([pdf, extra], ignore_index=True), _params())
         assert out["n_queries_fit"] + out["n_queries_holdout"] == 13
 
+    def test_fold_split_datetime_nat_keys_preserve_entity(self):
+        # datetime64 欄含 NaT 時 strftime 產生 NaN，str.cat 會把整列 key
+        # 傳染成 NaN——不同 entity 的 null-time query 被摺進同一把 hash
+        # key。正規化後必須與等價字串 key 的折別完全一致（parity；
+        # entity c1/c2 的字串 key 折別相異、NaN 傳染下同折，故可判別）。
+        from recsys_tfb.diagnosis.metric.offset_sweep import _fold_split
+
+        dt = pd.DataFrame({
+            "snap_date": pd.to_datetime(
+                ["2026-01-31", "2026-01-31", None, None]),
+            "cust_id": ["c9", "c10", "c1", "c2"],
+        })
+        st = pd.DataFrame({
+            "snap_date": ["2026-01-31 00:00:00", "2026-01-31 00:00:00",
+                          "NaT", "NaT"],
+            "cust_id": ["c9", "c10", "c1", "c2"],
+        })
+        fit_dt, hold_dt = _fold_split(dt, ["snap_date", "cust_id"], 0.5, 42)
+        fit_st, hold_st = _fold_split(st, ["snap_date", "cust_id"], 0.5, 42)
+        np.testing.assert_array_equal(fit_dt, fit_st)
+        np.testing.assert_array_equal(hold_dt, hold_st)
+
     def test_fold_assignment_invariant_to_row_order(self):
         # opus N1：折別不得依 toPandas() 列序（公司叢集不同平行度會翻折）。
         pdf = _interleaved_pdf()
