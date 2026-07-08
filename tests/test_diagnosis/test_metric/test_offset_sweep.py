@@ -132,10 +132,11 @@ class TestMechanics:
         b = sweep(_interleaved_pdf(), _params(inject={"A": 1.0}))
         assert a == b
 
-    def test_holdout_split_counts(self):
-        out = sweep(_interleaved_pdf(n_queries=12), _params())
+    def test_fold_partition_invariants(self):
+        out = sweep(_interleaved_pdf(), _params())
         assert out["n_queries_fit"] + out["n_queries_holdout"] == 12
-        assert out["n_queries_holdout"] == 6  # round(12 * 0.5)
+        assert out["n_queries_fit"] >= 1        # fit 非空保證
+        assert out["n_queries_holdout"] >= 1    # 本 fixture 實際不劣化（驗過再釘）
 
     def test_single_query_leaves_holdout_empty_without_crash(self):
         out = sweep(_interleaved_pdf(n_queries=1), _params())
@@ -192,6 +193,23 @@ class TestMechanics:
         extra["cust_id"] = None
         out = sweep(pd.concat([pdf, extra], ignore_index=True), _params())
         assert out["n_queries_fit"] + out["n_queries_holdout"] == 13
+
+    def test_fold_assignment_invariant_to_row_order(self):
+        # opus N1：折別不得依 toPandas() 列序（公司叢集不同平行度會翻折）。
+        pdf = _interleaved_pdf()
+        shuffled = pdf.sample(frac=1.0, random_state=7).reset_index(drop=True)
+        a = sweep(pdf, _params())
+        b = sweep(shuffled, _params())
+        assert a["items"] == b["items"]
+        assert a["delta_star"] == b["delta_star"]          # grid 點，精確
+        assert a["n_queries_fit"] == b["n_queries_fit"]
+        assert a["n_queries_holdout"] == b["n_queries_holdout"]
+        for fold in ("map_fit", "map_holdout"):
+            for kk in ("zero", "star"):
+                va, vb = a[fold][kk], b[fold][kk]
+                assert (va is None) == (vb is None)
+                if va is not None:
+                    np.testing.assert_allclose(va, vb, rtol=1e-12)
 
     def test_delta_star_centered_is_mean_removed_gauge_fix(self):
         # gauge：對所有 item 加同一常數不改變排序、mAP 不變——δ* 只有

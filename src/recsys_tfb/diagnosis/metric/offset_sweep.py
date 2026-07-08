@@ -8,7 +8,7 @@ mAP(δ*) − mAP(0) ＝「純水準（per-item 平移）可收復的指標缺口
 設計要點（計畫「設計定案」節的落地）：
 - δ 單位 log-odds：排序分數先 logit 變換再平移，與對帳層 offset 同尺度。
   整欄超出 (0,1) 時略過 logit（直接平移原始分數）＋ notes 註記。
-- holdout：query 層切折（RandomState(sample.seed) permutation），δ 只在
+- holdout：query 層切折（query key CRC32 hash 分桶，列序無關），δ 只在
   fit 折搜尋、mAP 兩折分開報告——防「收復缺口」只是擬合驗證雜訊。
 - 收縮＋平手偏 0：座標選擇目標 = mAP_fit − shrink_lambda·g²/M，候選按
   |g| 升冪、僅嚴格改善才換——乾淨資料 δ* 恰為 0。
@@ -20,19 +20,22 @@ mAP(δ*) − mAP(0) ＝「純水準（per-item 平移）可收復的指標缺口
 from __future__ import annotations
 
 import logging
+import zlib
 
 import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
-    apply_injection, diag_cfg, metric_params, parse_injection, to_logit,
+    _HASH_BUCKETS, apply_injection, diag_cfg, metric_params, parse_injection,
+    to_logit,
 )
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
 
 logger = logging.getLogger(__name__)
 
 _TIE_EPS = 1e-12
+_FOLD_SITE = "offset_sweep_fold"
 
 
 def _grid(cfg: dict) -> np.ndarray:
@@ -47,19 +50,36 @@ def _grid(cfg: dict) -> np.ndarray:
     return grid
 
 
-def _split_queries(
-    groups: np.ndarray, holdout_fraction: float, seed: int
+def _fold_split(
+    sample_pdf: pd.DataFrame, query_cols: list, holdout_fraction: float,
+    seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """query 層切折。groups 必須是連續碼 0..n-1（groupby().ngroup()）。"""
-    n = int(groups.max()) + 1 if len(groups) else 0
-    rng = np.random.RandomState(seed)
-    perm = rng.permutation(n)
-    n_hold = min(int(round(n * holdout_fraction)), n - 1) if n else 0
-    hold_flag = np.zeros(n, dtype=bool)
-    if n_hold > 0:
-        hold_flag[perm[:n_hold]] = True
-    hold_mask = hold_flag[groups] if len(groups) else np.zeros(0, dtype=bool)
-    return ~hold_mask, hold_mask
+    """query 層 hash 折別（列序無關；opus N1 修，2026-07-08）。
+
+    對 query key 字串 CRC32 分桶：bucket < fraction*BUCKETS → holdout。
+    同 query 各列 key 相同 → 折別與 toPandas() 列序無關。近似比例
+    （非精確 round(n×fraction)）。fit 折空時把 bucket 最小的 query 移入
+    fit（確定性），保 fit 非空；holdout 空由呼叫端既有路徑處理。
+    """
+    parts = []
+    for c in query_cols:
+        s = sample_pdf[c]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            parts.append(s.dt.strftime("%Y-%m-%d %H:%M:%S"))
+        else:
+            parts.append(s.astype(str))
+    keys = parts[0] if len(parts) == 1 else parts[0].str.cat(parts[1:], sep="|")
+    token = f"|{_FOLD_SITE}|{seed}"
+    buckets = keys.map(
+        lambda k_: zlib.crc32(f"{k_}{token}".encode()) % _HASH_BUCKETS
+    ).to_numpy()
+    threshold = int(round(holdout_fraction * _HASH_BUCKETS))
+    hold_mask = buckets < threshold
+    fit_mask = ~hold_mask
+    if len(buckets) and not fit_mask.any():
+        rescue = buckets == buckets.min()
+        fit_mask, hold_mask = rescue, ~rescue
+    return fit_mask, hold_mask
 
 
 def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
@@ -123,7 +143,9 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     z, inj_notes = apply_injection(z, items, inject)
     notes.extend(inj_notes)
 
-    fit_mask, hold_mask = _split_queries(groups, holdout_fraction, seed)
+    fit_mask, hold_mask = _fold_split(
+        sample_pdf, query_cols, holdout_fraction, seed
+    )
     out["n_queries_fit"] = int(len(np.unique(groups[fit_mask])))
     out["n_queries_holdout"] = int(len(np.unique(groups[hold_mask])))
     if out["n_queries_holdout"] == 0:
