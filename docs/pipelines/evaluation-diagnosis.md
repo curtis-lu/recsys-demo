@@ -34,7 +34,8 @@
 | `gap_vs_global` | gap − 全局參考值＝扣掉共同水準後，產品**自己**偏了多少（§5.2） |
 | `gap_calibrated_vs_global` | gap_calibrated − 校準版全局參考值（§5.2） |
 | `residual` | gap_vs_global 超出理論帶的部分；帶內＝0（§5.3） |
-| `verdict` | 可解釋（\|residual\| ≤ 門檻）／不可解釋／無法評估（§5.4） |
+| `verdict`（對帳） | `reconciliation.json` 的欄：可解釋（\|residual\| ≤ 門檻）／不可解釋／無法評估（§5.4）——與 triage 的同名 `verdict` 值域不同，別混 |
+| `verdict`（triage） | `triage.json` 的欄：健康／水準-配置型／水準-指標再平衡型／餓死型／特徵缺失型／餓死型或特徵缺失型（無結構層證據）（§13.1） |
 | post-training / monitoring 模式 | 訓練後用 test 窗預測評估（平常看的 report）／用正式批次推論結果評估（§5.1） |
 | `within_item_auc` | 只取同一個 item 自己的列算 ROC-AUC；隨機一正一負、正例分數較高的機率，對水準偏移免疫（§8.2） |
 | `gap_band` | 象限縱軸的容忍帶寬度（log-odds 尺度）；`gap_vs_global` 在帶內＝正常水準（§8.3/§8.6） |
@@ -640,7 +641,7 @@ python -m recsys_tfb training --env local --only-node compute_gain_ledger
 
 - `item_id`：產品 id 切點本身的帳。`split_count`（有幾個產品 id 切點）、`gain_sum`（它們的 Gain 總和）、`gain_share`（占全模型 Gain 的比例）、`tree_index_summary`（這些切點分佈在第幾棵樹——`min`=0 表示第一棵樹就開始用產品先驗，這是正常的：模型會先用最強的產品水準訊號）。
 - `context`：**已條件化**（conditioned，路徑上已經過至少一個產品 id 切點）的 context 切點全帳，`split_count`／`gain_sum`／`gain_share`。這是「模型花在個人化上的總容量」。
-- `per_item`：每個產品一列，七欄。最重要的是 **`context_gain_share`**——這個產品分到的 context Gain 占「所有產品 context Gain 總和」的比例，是判餓死的主欄。其餘：`context_split_count`（該產品的個人化切點數）、`context_gain`（累積 Gain）、`context_gain_isolated`（只在「可達集合只剩這一個產品」時累積的 Gain，見 12.4 陷阱）、`isolating_split_count`（把這個產品隔出來的產品 id 切點數）、`first_tree_index`／`trees_touched`（第一次出現在第幾棵樹、總共出現在幾棵樹）。
+- `per_item`：每個產品一列，七欄。最重要的是 **`context_gain_share`**——這個產品分到的 context Gain 占「所有產品 context Gain 總和」的比例，是判餓死的主欄。其餘：`context_split_count`（該產品的個人化切點數）、`context_gain`（累積 Gain）、`context_gain_isolated`（只在「可達集合只剩這一個產品」時累積的 Gain，見 12.4 陷阱）、`isolating_split_count`（把這個產品隔出來的產品 id 切點數）、`first_tree_index`（第一次出現在第幾棵樹）、`trees_touched`（這個產品出現過的**所有**樹序號的排序清單——是一個 list，不是計數；要「總共幾棵樹」自己取長度）。
 
 停用（`diagnostics.gain_ledger.enabled: false`）時只寫 `{"enabled": false}`。
 
@@ -696,21 +697,21 @@ python -m recsys_tfb training --env local --only-node compute_gain_ledger
 3. **水準偏了、但偏移解釋不掉**（不是配置造成的）→ **水準-指標再平衡型**：模型可能校準是對的，只是 macro 等權指標要求把冷門往上抬（§10.5 的現象），處方是常態化的後處理 offset 或 item-aware 權重。
 4. 以上都沒中 → **健康**。
 
-判別力差但被更前面的水準型攔下時，帳不會被吞：判定的 `notes` 會補一句「條件判別力軸同時偏低，修完水準後重量再判」（框架的判讀第 5 步：動水準槓桿會連帶搬動判別力，每輪之後要重走）。
+判別力差但被更前面的水準型攔下時，帳不會被吞：判定的 `notes` 會補一句「條件判別力軸同時偏低，修完水準後重量再判」。要重量的原因是**這個產品本來就兩軸都有問題**（水準偏、判別力也差，兩件事各自成立），先做便宜的水準修正、判別力軸的處方留到重量之後再定——而且不能盲目也套一個判別力槓桿：加權、欠採這類槓桿**會反過來搬動水準**（框架判讀第 5 步），套下去之後水準又得重判，所以整個流程是迭代的、一輪只動一件事。
 
 ### 13.2 起手值欄怎麼讀
 
-每個非健康的判定帶一個 `starter`（起手值），三種：
+有數值起手值的判定是**三種**（配置型、再平衡型、餓死型）；另外兩種——特徵缺失型與「無結構層證據」——`starter` 是 `null`，因為它們的處方不是一個數字（補特徵是領域知識、補跑 gain 帳本是先做完診斷），拿到這兩型判定看到 `starter: null` 是預期行為、不是產物漏欄。三種有值的：
 
 - 配置型 → `logq_offset`：來自對帳層的理論偏移帶（§3），單位 log-odds。直接加回推論分數的 log-odds 上。
 - 再平衡型 → `delta_star_centered`：來自分流層的 centered δ*（§10.3）。**為什麼用 centered 而不是原始 δ***：跨執行比較時只有相對差有意義（原始 δ* 帶著一個不可觀察的共同平移，§10.3 的 gauge 說明）；而且加到分數上時，centered 與原始只差一個所有產品共同的常數，對 query 內排序完全等價——所以用 centered 既可跨執行對照、又不影響實際效果。
-- 餓死型 → `item_weight`：訓練端的 sample_weight 相對倍率，起手式 w ∝ 1/√P（P 是該產品正類率）、加上限 8（出處：加權手冊 Ch8；純倒數會把個位數正例的雜訊放大成主導，所以開根號阻尼＋設上限）。
+- 餓死型 → `item_weight`：訓練端的 sample_weight 相對倍率，起手式 w ∝ 1/√P（P 是該產品正類率）、加上限 8（出處：GBDT 手冊 3＝`docs/handbooks/gbdt/gbdt_multiitem_imbalance.md` 第 8 章 item-aware sample weight；純倒數會把個位數正例的雜訊放大成主導，所以開根號阻尼＋設上限）。
 
 **每個起手值都帶 `caveat`「起手值，須經快迴路驗證，非定案」**——這欄不是答案，是「從這裡開始試」的建議值。框架反覆強調的是：這些槓桿（尤其加權）方向可靠、但幅度不可預測，一定要配一個快的驗證迴路調，不能照抄一個數字就當定案。
 
 ### 13.3 示例走讀：乾淨態，與注入後的翻轉
 
-**乾淨態**（前面 §12.3 那個模型）的 triage 判定：8 個產品裡 5 個健康、3 個餓死型（`fund_mix` 起手權重 3.67、`fund_bond` 2.4、`fund_stock` 2.01）。這跟 §11.6 從壓制帳本看到的「基金系是換成常數反而更好的產品」、§12.3 的「基金分到的個人化 Gain 最少」完全對得上——三個側面（指標代價、結構容量、合成判定）指向同一結論：基金餓死。
+**乾淨態**（前面 §12.3 那個模型）的 triage 判定：8 個產品裡 5 個健康、3 個餓死型（`fund_mix` 起手權重 3.67、`fund_bond` 2.4、`fund_stock` 2.01）。這跟 §11.6 從壓制帳本看到的「`fund_stock`／`fund_bond` 是僅有的兩個換成常數反而更好的產品」、§12.3 的「三個基金分到的個人化 Gain 最少」完全對得上——三個側面（指標代價、結構容量、合成判定）指向同一結論：基金餓死。（`fund_mix` 在 substitution 那張表是「幾乎中性」而非「換成常數更好」，但它在 Gain 帳本裡個人化容量墊底、判別力也差，所以 triage 仍判它餓死——三個側面不必每一格都同號，重點是合起來指向同一結論。）
 
 值得注意的是**餓死門檻只對判別力已經差的產品生效**。這個模型的餓死線是 `starve_ratio`（0.25）× 最大 share（`exchange_usd` 的 0.2574）= 0.0643。`ccard_cash` 的 `context_gain_share` 是 0.0525，也低於這條線，但它**不是**餓死型——因為它的 within-item AUC 是好的（判別力沒問題），根本不進第 2 步的裁決。它 context Gain 占比低只是因為它更多靠水準先驗、個人化需求本來就不高，不是被餓死。**低 share 只有在判別力也差時才是餓死證據**，單看 share 會冤枉像 `ccard_cash` 這種「不太需要個人化、但需要的部分有學到」的健康產品。
 
