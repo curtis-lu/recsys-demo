@@ -42,6 +42,13 @@
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 
+## 5b. 弄壞驗證（break-it check）在未提交檔案上的還原坑（2026-07-08）
+
+- **症狀**：對「尚未 commit 的改動」做弄壞驗證後，用 `git checkout -- <file>` 還原——把整份未提交改動連同弄壞的那行一起洗掉；若接著用 `&&` 串 commit，pytest 經 pipe（`| tail`）exit code 被吃掉，紅燈照樣 commit 出一個壞 commit。
+- **根因**：`git checkout --` 的還原目標是 HEAD，不是「弄壞前的工作樹狀態」；pipe 尾端指令的 exit code 掩蓋 pytest 失敗。
+- **規則**：弄壞驗證一律「Edit 弄壞 → 跑測試 → Edit 改回原字串」，**禁止 `git checkout -- <file>`**（除非該檔在 HEAD 已是想要的狀態）；弄壞驗證與 commit 不串在同一條指令，commit 前獨立跑一次測試看到綠燈原文。
+- **驗證方式**：還原後 `git diff --stat <file>` 應顯示**預期中的未提交改動仍在**（而不是空）；空 diff＝洗掉了。
+
 ## 6. 環境 quirk 速記
 
 - PySpark 3.3.2 `tableExists("db.t")` 兩段式寫法永遠回 False（實證於 PR#74），要用 `tableExists("t", "db")` 或先 `USE db`。
