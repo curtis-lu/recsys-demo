@@ -25,38 +25,14 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.diagnosis.metric._common import (
+    apply_injection, diag_cfg, metric_params, parse_injection, to_logit,
+)
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
 
 logger = logging.getLogger(__name__)
 
-_CLIP_EPS = 1e-12
 _TIE_EPS = 1e-12
-
-
-def _diag_cfg(parameters: dict) -> dict:
-    return ((parameters.get("evaluation", {}) or {})
-            .get("diagnosis", {}) or {})
-
-
-def _metric_params(parameters: dict) -> dict:
-    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
-    k = m.get("k")
-    return {
-        "k": int(k) if k is not None else None,
-        "weight_alpha": float(m.get("weight_alpha", 0.0)),
-        "min_positives": int(m.get("min_positives", 0)),
-        "shrinkage_k": float(m.get("shrinkage_k", 0.0)),
-    }
-
-
-def _logit_scores(scores: np.ndarray) -> tuple[np.ndarray, list[str]]:
-    s = np.asarray(scores, dtype=np.float64)
-    if len(s) and (s.min() < 0.0 or s.max() > 1.0):
-        return s.copy(), [
-            "score 超出 (0,1)——略過 logit 變換，δ 單位為原始分數尺度"
-        ]
-    z = np.clip(s, _CLIP_EPS, 1.0 - _CLIP_EPS)
-    return np.log(z / (1.0 - z)), []
 
 
 def _grid(cfg: dict) -> np.ndarray:
@@ -93,17 +69,14 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     label_col = schema["label"]
     score_col = schema["score"]
 
-    diag = _diag_cfg(parameters)
+    diag = diag_cfg(parameters)
     cfg = diag.get("offset_sweep", {}) or {}
     shrink_lambda = float(cfg.get("shrink_lambda", 0.1))
     holdout_fraction = float(cfg.get("holdout_fraction", 0.5))
     max_rounds = int(cfg.get("max_rounds", 5))
     seed = int((diag.get("sample", {}) or {}).get("seed", 42))
-    mp = _metric_params(parameters)
-    inject = {
-        str(k): float(v)
-        for k, v in (diag.get("debug_inject_offsets", {}) or {}).items()
-    }
+    mp = metric_params(parameters)
+    inject = parse_injection(parameters)
     notes: list[str] = []
 
     out: dict = {
@@ -144,18 +117,11 @@ def sweep(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     )
     items = sample_pdf[item_col].astype(str).to_numpy()
     y = sample_pdf[label_col].to_numpy()
-    z, z_notes = _logit_scores(sample_pdf[score_col].to_numpy())
+    z, z_notes = to_logit(sample_pdf[score_col].to_numpy())
     notes.extend(z_notes)
 
-    if inject:
-        z = z + pd.Series(items).map(inject).fillna(0.0).to_numpy()
-        notes.append(
-            f"debug_inject_offsets 生效（僅本節點；mAP(0) 為注入後現狀）："
-            f"{inject}"
-        )
-        unknown = sorted(set(inject) - set(items.tolist()))
-        if unknown:
-            notes.append(f"注入鍵不在抽樣 item 中（無作用）：{unknown}")
+    z, inj_notes = apply_injection(z, items, inject)
+    notes.extend(inj_notes)
 
     fit_mask, hold_mask = _split_queries(groups, holdout_fraction, seed)
     out["n_queries_fit"] = int(len(np.unique(groups[fit_mask])))
