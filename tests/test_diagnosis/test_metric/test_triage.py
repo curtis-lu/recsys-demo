@@ -245,3 +245,20 @@ def test_level_unmeasured_with_config_signal_still_not_config_verdict():
          "theory": {"by_item": {"x": {"min": 0.1, "max": 0.7, "mean": 0.4}}}}
     out = triage(q, r, _base_offset_sweep(), None, {})
     assert out["verdicts"]["x"]["verdict"] == "健康"
+
+
+def test_disc_unmeasured_leaves_note_symmetric_to_level():
+    """opus 總審 nit 1：disc_status「無法評估」（AUC 算不出）要跟水準軸對稱
+    留 note，免得只看 verdict 的讀者誤以為判別力已查過沒問題。"""
+    by_item = _base_quadrant_by_item()
+    by_item["x"] = {
+        "auc": None, "disc_status": "無法評估", "level_status": "正常",
+        "gap_vs_global": 0.0, "auc_reason": None, "y_rate": 0.1,
+    }
+    out = triage(
+        _quadrant(by_item), _base_reconciliation(),
+        _base_offset_sweep(), _base_gain_ledger(), {},
+    )
+    vx = out["verdicts"]["x"]
+    assert vx["verdict"] == "健康"
+    assert any("判別力軸" in n and "無法評估" in n for n in vx["notes"])

@@ -179,8 +179,14 @@ def triage(
         auc_reason = q.get("auc_reason")
         disc_status = q.get("disc_status")
         disc_low = disc_status == "差" and auc_reason is None
-        if disc_status == "差" and auc_reason is not None:
-            notes.append(f"AUC 樣本不足（{auc_reason}）——判別力軸略過，未計入 disc_low")
+        # 判別力軸無法評估（AUC 算不出＝quadrant 給「無法評估」，或算得出但
+        # 樣本太少帶 auc_reason）時，跟水準軸對稱：不計入 disc_low＋留 note，
+        # 免得只看 verdict 的讀者誤以為判別力已查過沒問題（審查修復 2026-07-08）。
+        if disc_status == "無法評估" or (disc_status == "差" and auc_reason is not None):
+            reason = auc_reason or "樣本不足"
+            notes.append(
+                f"判別力軸（within-item AUC）無法評估（{reason}）"
+                "——判別力側判定略過，未計入 disc_low")
 
         # 「無法評估」（gap_vs_global 缺席，例：reconciliation 停用）不是水準偏移
         # ——沒量到的軸不得觸發水準型判定（審查修復 2026-07-08）。
