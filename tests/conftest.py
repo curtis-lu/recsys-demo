@@ -12,6 +12,24 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
 
 
+@pytest.fixture(autouse=True)
+def _reset_spark_canonical_configs():
+    """Forget canonical configs around every test so mode-1 memory never leaks.
+
+    ``get_or_create_spark_session`` caches the first mode-1 call's configs at
+    module level; without this, a test that sets them silently influences a
+    later test's mode-2 rebuild. Enforced from the root so every test file gets
+    it, not just the ones that remember. Does not stop the session — the
+    ``spark`` fixture's cross-test reuse is untouched (only the config memory is
+    cleared, not the live SparkContext).
+    """
+    from recsys_tfb.utils.spark import reset_spark_session_state
+
+    reset_spark_session_state()
+    yield
+    reset_spark_session_state()
+
+
 @pytest.fixture
 def spark():
     """SparkSession with local-mode test configs and Hive support.

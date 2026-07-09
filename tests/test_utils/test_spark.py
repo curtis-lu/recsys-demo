@@ -199,3 +199,79 @@ class TestCanonicalConfigs:
             )
         finally:
             second.stop()
+
+
+class TestDeadContextRecovery:
+    """JVM 端停掉 SparkContext(等同 cluster 端殺掉 app)後的復原。
+
+    根因同一個:JVM 端自行死亡不動 Python 端狀態。PySpark 的 getOrCreate 只在
+    Python 端 _jsc is None 時才重建(pyspark/sql/session.py:264),而 _jsc 只有
+    Python 端 SparkContext.stop() 才會設成 None(pyspark/context.py:568)。同一個
+    根因在死亡前 session 有沒有被用過而有兩種表現:
+
+    - 用過的 session(SharedState / sessionState 已 lazy init):getOrCreate 走
+      else 分支呼叫 applyModifiableSettings,不重建 SharedState,於是**安靜地把
+      同一個死 session 原封不動回傳**;要到之後 createDataFrame 摸到
+      defaultParallelism 才炸 stopped SparkContext。這是**生產那條**——HPO 前
+      cache_* 節點早把 session 用熱了。
+    - 從未用過的 session:applyModifiableSettings 會觸發 SharedState.<init>,
+      當場撞已停的 LiveListenerBus 而拋 Py4JJavaError(LiveListenerBus is
+      stopped)。這是另一條表現,不是生產走的那條。
+
+    兩條都被 _stop_and_clear(先 Python 端 stop 清掉單例)修好。前兩個測試暖機以
+    釘住生產那條,第三個測試守未暖機那條。
+    """
+
+    @staticmethod
+    def _kill_jvm_context(session):
+        """Stop the JVM-side SparkContext, leaving Python-side state intact."""
+        session.sparkContext._jsc.sc().stop()
+
+    def test_mode2_rebuilds_after_jvm_side_stop(self, monkeypatch, tmp_path):
+        first = get_or_create_spark_session(_minimal_configs())
+        # 暖機:讓 SharedState / sessionState 完成 lazy init。生產情境裡 session
+        # 早就被 cache_* 節點用過了;沒暖機的話 getOrCreate 會在
+        # applyModifiableSettings 觸發 SharedState.<init> 而當場炸
+        # (LiveListenerBus is stopped),那是另一條失敗路徑,不是我們要守的那條。
+        assert first.createDataFrame([(0,)], ["a"]).count() == 1
+        self._kill_jvm_context(first)
+        monkeypatch.chdir(tmp_path)
+
+        second = get_or_create_spark_session(None)
+        try:
+            assert second is not first
+            assert second.createDataFrame([(1,), (2,)], ["a"]).count() == 2
+        finally:
+            second.stop()
+
+    def test_mode1_rebuilds_after_jvm_side_stop(self, monkeypatch, tmp_path):
+        first = get_or_create_spark_session(_minimal_configs())
+        # 暖機:見 test_mode2_rebuilds_after_jvm_side_stop 的說明。
+        assert first.createDataFrame([(0,)], ["a"]).count() == 1
+        self._kill_jvm_context(first)
+        monkeypatch.chdir(tmp_path)
+
+        second = get_or_create_spark_session(_minimal_configs())
+        try:
+            assert second is not first
+            assert second.createDataFrame([(1,)], ["a"]).count() == 1
+        finally:
+            second.stop()
+
+    def test_rebuilds_after_jvm_side_stop_on_never_used_session(
+        self, monkeypatch, tmp_path
+    ):
+        """未暖機的 session 死掉時,getOrCreate 會在 applyModifiableSettings
+        觸發 SharedState.<init> 而拋 LiveListenerBus is stopped——與「用過的
+        session 被安靜回傳」是同一個根因(Python 端單例沒被清)的兩種表現。
+        """
+        first = get_or_create_spark_session(_minimal_configs())
+        self._kill_jvm_context(first)
+        monkeypatch.chdir(tmp_path)
+
+        second = get_or_create_spark_session(None)
+        try:
+            assert second is not first
+            assert second.createDataFrame([(1,)], ["a"]).count() == 1
+        finally:
+            second.stop()

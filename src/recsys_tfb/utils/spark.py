@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from pyspark import SparkContext
 from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def get_or_create_spark_session(
        configs are applied and the existing session is returned
        (cluster-level configs would be ignored by PySpark — a warning is
        logged).
-    2. IO / SQLRunner / scripts call with ``None``. An active session is
+    2. IO / SQLRunner / scripts call with ``None``. An alive active session is
        returned directly. Otherwise a session is rebuilt from the remembered
        canonical configs, or — if no mode-1 call ever happened (scripts,
        tests) — from the base ``parameters.yaml`` ``spark:`` block.
@@ -69,7 +70,10 @@ def get_or_create_spark_session(
     _canonical_configs = dict(spark_configs)
     _canonical_enable_hive = enable_hive
 
-    if SparkSession.getActiveSession() is not None:
+    active = SparkSession.getActiveSession()
+    if active is not None and not _is_session_alive(active):
+        _stop_and_clear(active)
+    elif active is not None:
         logger.warning(
             "Active SparkSession already exists; cluster-level configs "
             "in spark_configs will be ignored by PySpark."
@@ -83,6 +87,13 @@ def _rebuild_or_active() -> SparkSession:
     active = SparkSession.getActiveSession()
     if active is not None and _is_session_alive(active):
         return active
+
+    if active is not None:
+        _stop_and_clear(active)
+    else:
+        stale = SparkSession._instantiatedSession
+        if stale is not None and not _is_session_alive(stale):
+            _stop_and_clear(stale)
 
     if _canonical_configs is not None:
         return _build(_canonical_configs, _canonical_enable_hive)
@@ -117,6 +128,29 @@ def _is_session_alive(session: SparkSession) -> bool:
         return jsc is not None and not jsc.sc().isStopped()
     except Exception:
         return False
+
+
+def _stop_and_clear(session: SparkSession) -> None:
+    """Stop a session Python-side and clear PySpark's singletons.
+
+    ``SparkSession.builder.getOrCreate()`` treats a session as reusable
+    whenever ``_instantiatedSession._sc._jsc`` is not None. Only a Python-side
+    ``SparkContext.stop()`` sets ``_jsc`` to None, so a JVM-side death leaves
+    the singletons pointing at a corpse and every "rebuild" hands it back.
+    Clearing them is what makes the next getOrCreate actually build.
+
+    ``SparkSession.stop()`` clears the singletons only if its JVM calls
+    succeed; when the py4j gateway itself is gone it raises partway through.
+    The explicit assignments below are the belt-and-braces for that case.
+    """
+    try:
+        session.stop()
+    except Exception as exc:  # noqa: BLE001 — JVM/gateway may already be gone
+        logger.warning("SparkSession.stop() raised while clearing: %s", exc)
+
+    SparkSession._instantiatedSession = None
+    SparkSession._activeSession = None
+    SparkContext._active_spark_context = None
 
 
 def _validate_values(spark_configs: dict[str, Any]) -> None:
