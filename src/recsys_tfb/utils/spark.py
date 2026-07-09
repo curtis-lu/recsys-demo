@@ -1,4 +1,4 @@
-"""SparkSession entrypoint with config-driven creation and fallback."""
+"""SparkSession entrypoint: config-driven creation with canonical-config memory."""
 
 import logging
 from typing import Any
@@ -8,6 +8,20 @@ from pyspark.sql import SparkSession
 logger = logging.getLogger(__name__)
 
 _VALID_VALUE_TYPES = (str, int, bool)
+
+# Canonical configs, remembered from the first mode-1 call (a CLI entry).
+# mode-2 rebuilds from these instead of re-reading yaml: the yaml path guesses
+# the env from CONF_ENV (never set anywhere) and misses the per-pipeline
+# `spark:` block that _load_spark_config merges in.
+_canonical_configs: dict[str, Any] | None = None
+_canonical_enable_hive: bool = False
+
+
+def reset_spark_session_state() -> None:
+    """Forget the canonical configs. Test-only: module state leaks across tests."""
+    global _canonical_configs, _canonical_enable_hive
+    _canonical_configs = None
+    _canonical_enable_hive = False
 
 
 def get_or_create_spark_session(
@@ -19,14 +33,15 @@ def get_or_create_spark_session(
     Two call modes:
 
     1. Pipeline entrypoint passes ``spark_configs`` (already deep-merged
-       ``params["spark"]``). Builder is configured and a session is
-       created. If an active session already exists, runtime configs are
-       applied and the existing session is returned (cluster-level
-       configs would be ignored by PySpark — a warning is logged).
-    2. IO / SQLRunner / scripts call with ``None``. If an active session
-       exists, return it directly. Otherwise fall back to loading the
-       base ``parameters.yaml`` ``spark:`` block via ConfigLoader and
-       create a session from that.
+       ``params["spark"]``). The configs are remembered as canonical and a
+       session is created. If an active session already exists, runtime
+       configs are applied and the existing session is returned
+       (cluster-level configs would be ignored by PySpark — a warning is
+       logged).
+    2. IO / SQLRunner / scripts call with ``None``. An active session is
+       returned directly. Otherwise a session is rebuilt from the remembered
+       canonical configs, or — if no mode-1 call ever happened (scripts,
+       tests) — from the base ``parameters.yaml`` ``spark:`` block.
 
     enable_hive (default False): when True, the builder calls
         ``.enableHiveSupport()`` before ``getOrCreate()``. Required for
@@ -34,13 +49,16 @@ def get_or_create_spark_session(
         DDL needs Hive parser support). Production code paths leave this
         False; the cluster session inherits Hive support from
         ``SPARK_CONF_DIR``'s ``hive-site.xml`` rather than this flag.
+        Remembered alongside the configs so a rebuild keeps Hive support.
 
     Raises:
         TypeError: ``spark_configs`` is not a dict.
         ValueError: any value is not str / int / bool.
     """
+    global _canonical_configs, _canonical_enable_hive
+
     if spark_configs is None:
-        return _fallback_create()
+        return _rebuild_or_active()
 
     if not isinstance(spark_configs, dict):
         raise TypeError(
@@ -48,12 +66,31 @@ def get_or_create_spark_session(
         )
     _validate_values(spark_configs)
 
+    _canonical_configs = dict(spark_configs)
+    _canonical_enable_hive = enable_hive
+
     if SparkSession.getActiveSession() is not None:
         logger.warning(
             "Active SparkSession already exists; cluster-level configs "
             "in spark_configs will be ignored by PySpark."
         )
 
+    return _build(spark_configs, enable_hive)
+
+
+def _rebuild_or_active() -> SparkSession:
+    """Return the active session, or rebuild one (canonical configs, else yaml)."""
+    active = SparkSession.getActiveSession()
+    if active is not None and _is_session_alive(active):
+        return active
+
+    if _canonical_configs is not None:
+        return _build(_canonical_configs, _canonical_enable_hive)
+
+    return _build_from_yaml()
+
+
+def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
     app_name = spark_configs.get("app_name", "recsys_tfb")
     builder = SparkSession.builder.appName(app_name)
     for key, value in spark_configs.items():
@@ -95,20 +132,12 @@ def _validate_values(spark_configs: dict[str, Any]) -> None:
         )
 
 
-def _fallback_create() -> SparkSession:
-    """Return active session, or build one from base parameters.yaml.
+def _build_from_yaml() -> SparkSession:
+    """Build a session from base parameters.yaml. Only for never-configured callers.
 
-    `getActiveSession()` can return a session whose SparkContext has been
-    stopped (any caller that stops Spark mid-run — historically
-    tune_hyperparameters, removed in 85b2869). Treat a stopped session as
-    if there were none and rebuild from yaml — otherwise downstream nodes
-    call `.parallelize()` / `.createDataFrame()` on a dead context and hit
-    `IllegalStateException: Cannot call methods on a stopped SparkContext`.
+    Reached by scripts and tests that call mode-2 without any prior mode-1
+    call. Pipeline runs always go through the canonical configs instead.
     """
-    active = SparkSession.getActiveSession()
-    if active is not None and _is_session_alive(active):
-        return active
-
     import os
     from pathlib import Path
 
@@ -138,9 +167,15 @@ def _fallback_create() -> SparkSession:
     from recsys_tfb.utils.vdclient_resolver import resolve_vdclient_placeholders
     spark_configs = resolve_vdclient_placeholders(spark_configs)
 
+    # _build (not the mode-1 entry) — recursing through mode-1 would write
+    # yaml configs into _canonical_configs and poison the memory. That skips
+    # mode-1's _validate_values, so re-apply it here.
+    spark_configs = spark_configs or {"app_name": "recsys_tfb"}
+    _validate_values(spark_configs)
+
     logger.info(
         "Fallback: building SparkSession (yaml=conf/%s/parameters.yaml, "
         "connection settings from SPARK_CONF_DIR)",
         env,
     )
-    return get_or_create_spark_session(spark_configs or {"app_name": "recsys_tfb"})
+    return _build(spark_configs, False)

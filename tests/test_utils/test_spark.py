@@ -9,16 +9,20 @@ pytestmark = pytest.mark.spark
 
 @pytest.fixture(autouse=True)
 def _stop_session_between_tests():
-    """Ensure each test starts without an active SparkSession."""
+    """Ensure each test starts without an active SparkSession or remembered configs."""
     from pyspark.sql import SparkSession
+
+    from recsys_tfb.utils.spark import reset_spark_session_state
 
     existing = SparkSession.getActiveSession()
     if existing is not None:
         existing.stop()
+    reset_spark_session_state()
     yield
     after = SparkSession.getActiveSession()
     if after is not None:
         after.stop()
+    reset_spark_session_state()
 
 
 def _minimal_configs(extra: dict | None = None) -> dict:
@@ -110,6 +114,27 @@ class TestFallback:
         finally:
             spark.stop()
 
+    def test_fallback_validates_yaml_values(self, monkeypatch, tmp_path):
+        """yaml 路徑仍套 _validate_values:非 str/int/bool 的值要 raise。
+
+        _build_from_yaml 改走 _build(不遞迴回 mode-1,避免污染 canonical
+        記憶),因此必須自己補回驗證。這裡放一個 list 值證明驗證生效。
+        """
+        conf = tmp_path / "conf"
+        (conf / "base").mkdir(parents=True)
+        (conf / "base" / "parameters.yaml").write_text(
+            "spark:\n"
+            "  app_name: bad-yaml\n"
+            "  spark.master: local[1]\n"
+            "  bad_key:\n"
+            "    - 1\n"
+            "    - 2\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValueError, match="bad_key"):
+            get_or_create_spark_session(None)
+
     def test_fallback_resolves_env_placeholders(self, monkeypatch, tmp_path):
         """Fallback path serves ${env.*}-resolved spark config to the builder.
 
@@ -139,3 +164,38 @@ class TestFallback:
             assert spark.sparkContext.appName == "from-env-placeholder"
         finally:
             spark.stop()
+
+
+class TestCanonicalConfigs:
+    def test_mode2_rebuild_uses_remembered_configs(self, monkeypatch, tmp_path):
+        """mode-2 重建用 mode-1 記住的 configs,不重讀 yaml。
+
+        chdir 到一個沒有 conf/ 的空目錄:若實作退回 yaml,會 raise
+        RuntimeError('conf/ not found'),測試就抓得到。
+        """
+        first = get_or_create_spark_session(
+            _minimal_configs({"app_name": "canonical-app"})
+        )
+        first.stop()
+        monkeypatch.chdir(tmp_path)
+
+        second = get_or_create_spark_session(None)
+        try:
+            assert second.sparkContext.appName == "canonical-app"
+        finally:
+            second.stop()
+
+    def test_mode2_rebuild_remembers_enable_hive(self, monkeypatch, tmp_path):
+        first = get_or_create_spark_session(
+            _minimal_configs(), enable_hive=True
+        )
+        first.stop()
+        monkeypatch.chdir(tmp_path)
+
+        second = get_or_create_spark_session(None)
+        try:
+            assert (
+                second.conf.get("spark.sql.catalogImplementation") == "hive"
+            )
+        finally:
+            second.stop()
