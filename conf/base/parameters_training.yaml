@@ -14,7 +14,10 @@ spark:
 # predict_and_write_test_predictions 之間完全閒置，可能數小時。閒置的 application
 # 會被叢集端回收，context 在 JVM 端死掉，之後寫 Hive 就撞 stopped SparkContext。
 # 改成主動釋放，由下一個用到 Spark 的節點依 canonical configs 重建。
-# 設為 false 可停用（session 全程存活；重建修復仍會兜底）。
+#
+# 診斷用途：設為 false 時 session 全程存活（重建修復仍兜底），HPO 期間若真的被叢集
+# 回收，log 會出現 spark_context_dead 事件，其 seconds_since_last_use 貼合 HPO 窗口
+# 即證實「閒置回收」。true（預設）時窗口內沒有 session 可被殺，該事件不會為此而發。
 spark_lifecycle:
   release_during_hpo: true
 

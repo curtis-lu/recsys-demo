@@ -18,10 +18,19 @@ _VALID_VALUE_TYPES = (str, int, bool)
 _canonical_configs: dict[str, Any] | None = None
 _canonical_enable_hive: bool = False
 
-# Last application id we successfully built, and the last time Spark was known
-# alive. Reported when a context is later found dead: the gap between them tells
-# an idle-reclaim death (long gap, matches the HPO window) apart from a
-# fixed-lifetime one such as an expiring delegation token (gap unrelated to HPO).
+# Last application id we successfully built, and the last time we handed out a
+# live session. Reported by the ``spark_context_dead`` event, which fires only
+# when a context is found dead that *we* did not stop — i.e. the cluster took it.
+#
+# Reading the event: with ``spark_lifecycle.release_during_hpo`` on (the
+# default) the HPO window holds no session at all, so an idle reclaim during HPO
+# cannot happen and no event fires for it. An event under the default therefore
+# means the context died while Spark was in active use — which already rules out
+# idle reclaim and points at preemption / AM failure / token expiry. To let an
+# idle-reclaim death happen and be attributed, set ``release_during_hpo: false``
+# and read ``seconds_since_last_use``: a gap matching the HPO window is an idle
+# reclaim; a gap unrelated to it is a fixed-lifetime death such as an expiring
+# delegation token.
 _last_app_id: str | None = None
 _last_alive_ts: float | None = None
 
@@ -195,10 +204,15 @@ def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
     try:
         session = builder.getOrCreate()
     except Exception as exc:  # noqa: BLE001 — surface one readable error
+        # Deliberately neutral: this also catches a first build failing on an
+        # unreachable master, a port clash, or a queue rejection. The real cause
+        # is chained via `from exc` and stays in the traceback.
         raise SparkSessionUnavailableError(
             f"Failed to build SparkSession (app_name={app_name!r}, "
-            f"last_application_id={_last_app_id!r}). If the py4j gateway is "
-            "dead the driver JVM is gone and the run must be restarted."
+            f"last_application_id={_last_app_id!r}). Check the spark configs "
+            "and cluster availability. If the py4j gateway itself is dead the "
+            "driver JVM is gone: the run cannot recover in-process and must be "
+            "restarted."
         ) from exc
 
     _mark_alive(session)
@@ -247,9 +261,13 @@ def _stop_and_clear(session: SparkSession) -> None:
     Clearing them is what makes the next getOrCreate actually build.
 
     ``SparkSession.stop()`` clears the singletons only if its JVM calls
-    succeed; when the py4j gateway itself is gone it raises partway through.
-    The explicit assignments below are the belt-and-braces for that case.
+    succeed; when the py4j gateway itself is gone it raises at
+    ``clearDefaultSession()`` (pyspark/sql/session.py) and never reaches its own
+    assignments. The explicit assignments below are the belt-and-braces for that
+    case, and mirror every singleton ``SparkSession.stop()`` would have cleared.
     """
+    from pyspark.sql.context import SQLContext
+
     try:
         session.stop()
     except Exception as exc:  # noqa: BLE001 — JVM/gateway may already be gone
@@ -258,6 +276,7 @@ def _stop_and_clear(session: SparkSession) -> None:
     SparkSession._instantiatedSession = None
     SparkSession._activeSession = None
     SparkContext._active_spark_context = None
+    SQLContext._instantiatedContext = None
 
 
 def _validate_values(spark_configs: dict[str, Any]) -> None:
