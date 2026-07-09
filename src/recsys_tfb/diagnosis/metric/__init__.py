@@ -1,1 +1,4 @@
-"""指標層診斷（Phase 1–5 進駐；目前為空殼，見 spec §3）。"""
+"""指標層診斷：抽樣、CI、對帳、判別力、象限、offset sweep、成對帳本、triage。
+
+方法論見 docs/ranking-diagnosis-framework.md、判讀見 docs/pipelines/evaluation-diagnosis.md。
+"""

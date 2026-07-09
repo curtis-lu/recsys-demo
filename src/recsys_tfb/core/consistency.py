@@ -97,8 +97,11 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
-* A20 — Phase 5 診斷參數域（``diagnostics.shap.background`` ∈ {global, per_item}；
-  gain_ledger/triage ``enabled`` 為 bool）。Predicate: ``phase5_diagnostics_param_errors``.
+* A20 — structure-layer (gain_ledger + conditional-SHAP background) and triage
+  diagnostics parameter domains: ``diagnostics.shap.background`` ∈
+  {global, per_item}; ``diagnostics.gain_ledger.enabled`` and
+  ``evaluation.diagnosis.triage.enabled`` are bool. Predicate:
+  ``structure_triage_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -704,21 +707,38 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def phase5_diagnostics_param_errors(parameters: dict) -> list[str]:
-    """A20 — Phase 5 參數域：shap.background 域＋兩個 enabled bool。"""
+def structure_triage_param_errors(parameters: dict) -> list[str]:
+    """A20 — structure-layer + triage diagnostics parameter domains.
+
+    Covers the three config keys the structure layer (Gain ledger + conditional
+    SHAP background) and the triage summary read: ``diagnostics.shap.background``
+    must be ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` and
+    ``evaluation.diagnosis.triage.enabled`` must be bool (a quoted YAML string
+    like "false" is truthy and would silently enable the node). Absent keys use
+    behavior-preserving defaults. Returns collect-all error strings; empty
+    means OK.
+    """
     errors: list[str] = []
     diag = parameters.get("diagnostics", {}) or {}
     bg = (diag.get("shap", {}) or {}).get("background", "global")
     if bg not in ("global", "per_item"):
         errors.append(
-            f"A20: diagnostics.shap.background 必須是 global|per_item，得到 {bg!r}")
+            f"A20: diagnostics.shap.background must be 'global' or 'per_item' "
+            f"(got {bg!r})."
+        )
     gl_en = (diag.get("gain_ledger", {}) or {}).get("enabled", True)
     if not isinstance(gl_en, bool):
-        errors.append("A20: diagnostics.gain_ledger.enabled 必須是 bool")
+        errors.append(
+            f"A20: diagnostics.gain_ledger.enabled={gl_en!r} must be a bool "
+            f"(true/false without quotes in YAML)."
+        )
     tri_en = (((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
               .get("triage", {}) or {}).get("enabled", True)
     if not isinstance(tri_en, bool):
-        errors.append("A20: evaluation.diagnosis.triage.enabled 必須是 bool")
+        errors.append(
+            f"A20: evaluation.diagnosis.triage.enabled={tri_en!r} must be a "
+            f"bool (true/false without quotes in YAML)."
+        )
     return errors
 
 
@@ -828,7 +848,7 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(pair_ledger_param_errors(parameters))
 
-    errors.extend(phase5_diagnostics_param_errors(parameters))
+    errors.extend(structure_triage_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

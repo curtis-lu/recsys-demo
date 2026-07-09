@@ -8,7 +8,7 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        # +1: assemble_triage_summary node (triage summary wiring).
         assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_ranked_predictions(self):
@@ -58,7 +58,7 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        # +1: assemble_triage_summary node (triage summary wiring).
         assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_training_eval_predictions(self):
@@ -84,7 +84,7 @@ class TestEvaluationPipelineCompareMode:
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        # +1: assemble_triage_summary node (Phase 5 triage wiring).
+        # +1: assemble_triage_summary node (triage summary wiring).
         assert len(pipeline.nodes) == 14
 
     def test_pipeline_outputs_include_comparison_report(self):
