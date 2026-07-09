@@ -342,3 +342,74 @@ class TestBuildFailure:
 
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert "gateway is gone" in str(excinfo.value.__cause__)
+
+
+class TestInstrumentation:
+    """公司環境只拿得到應用層 log。這三個事件是 Layer 1 歸因的唯一線索。"""
+
+    def test_emits_created_event(self, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="recsys_tfb.utils.spark"):
+            session = get_or_create_spark_session(_minimal_configs())
+        try:
+            events = [r.event for r in caplog.records if hasattr(r, "event")]
+            assert "spark_session_created" in events
+        finally:
+            session.stop()
+
+    def test_emits_released_event(self, caplog):
+        import logging as _logging
+
+        get_or_create_spark_session(_minimal_configs())
+        with caplog.at_level(_logging.INFO, logger="recsys_tfb.utils.spark"):
+            assert stop_spark_session() is True
+
+        released = [
+            r
+            for r in caplog.records
+            if getattr(r, "event", None) == "spark_session_released"
+        ]
+        assert len(released) == 1
+        assert released[0].application_id is not None
+
+    def test_emits_context_dead_event_with_idle_seconds(
+        self, caplog, monkeypatch, tmp_path
+    ):
+        """seconds_since_last_use 必須反映真實間隔,不能只是「是個 int」。
+
+        注入時鐘往前跳一小時:若實作沒有真的記錄上次存活的時間戳,idle 會退化成
+        0 而不是 3600,這個斷言才抓得到。那個欄位是公司環境分辨「閒置回收」與
+        「固定時長 token 過期」的唯一依據,測鬆了等於沒測。
+        """
+        import logging as _logging
+
+        import recsys_tfb.utils.spark as spark_mod
+
+        first = get_or_create_spark_session(_minimal_configs())
+        assert first.createDataFrame([(0,)], ["a"]).count() == 1  # 暖機
+        built_at = spark_mod._last_alive_ts
+        assert built_at is not None
+
+        first.sparkContext._jsc.sc().stop()
+        monkeypatch.chdir(tmp_path)
+
+        class _FrozenClock:
+            def time(self):
+                return built_at + 3600.0
+
+        monkeypatch.setattr(spark_mod, "time", _FrozenClock())
+
+        with caplog.at_level(_logging.WARNING, logger="recsys_tfb.utils.spark"):
+            second = get_or_create_spark_session(None)
+        try:
+            dead = [
+                r
+                for r in caplog.records
+                if getattr(r, "event", None) == "spark_context_dead"
+            ]
+            assert len(dead) == 1
+            assert dead[0].seconds_since_last_use == 3600
+            assert dead[0].last_application_id is not None
+        finally:
+            second.stop()

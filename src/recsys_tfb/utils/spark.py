@@ -1,6 +1,7 @@
 """SparkSession entrypoint: config-driven creation with canonical-config memory."""
 
 import logging
+import time
 from typing import Any
 
 from pyspark import SparkContext
@@ -17,9 +18,12 @@ _VALID_VALUE_TYPES = (str, int, bool)
 _canonical_configs: dict[str, Any] | None = None
 _canonical_enable_hive: bool = False
 
-# Last application id we successfully built. Reported when a context is later
-# found dead, so a cluster-side death can be traced back to its application.
+# Last application id we successfully built, and the last time Spark was known
+# alive. Reported when a context is later found dead: the gap between them tells
+# an idle-reclaim death (long gap, matches the HPO window) apart from a
+# fixed-lifetime one such as an expiring delegation token (gap unrelated to HPO).
 _last_app_id: str | None = None
+_last_alive_ts: float | None = None
 
 
 class SparkSessionUnavailableError(RuntimeError):
@@ -33,10 +37,11 @@ class SparkSessionUnavailableError(RuntimeError):
 
 def reset_spark_session_state() -> None:
     """Forget the canonical configs. Test-only: module state leaks across tests."""
-    global _canonical_configs, _canonical_enable_hive, _last_app_id
+    global _canonical_configs, _canonical_enable_hive, _last_app_id, _last_alive_ts
     _canonical_configs = None
     _canonical_enable_hive = False
     _last_app_id = None
+    _last_alive_ts = None
 
 
 def get_or_create_spark_session(
@@ -125,16 +130,32 @@ def _safe_app_id(session: SparkSession) -> str | None:
 
 def _rebuild_or_active() -> SparkSession:
     """Return the active session, or rebuild one (canonical configs, else yaml)."""
+    global _last_alive_ts
+
     active = SparkSession.getActiveSession()
     if active is not None and _is_session_alive(active):
+        _last_alive_ts = time.time()
         return active
 
-    if active is not None:
-        _stop_and_clear(active)
-    else:
+    dead = active
+    if dead is None:
         stale = SparkSession._instantiatedSession
         if stale is not None and not _is_session_alive(stale):
-            _stop_and_clear(stale)
+            dead = stale
+
+    if dead is not None:
+        idle = int(time.time() - (_last_alive_ts or time.time()))
+        logger.warning(
+            "Detected stopped SparkContext; rebuilding "
+            "(last_application_id=%s, seconds_since_last_use=%d)",
+            _last_app_id, idle,
+            extra={
+                "event": "spark_context_dead",
+                "last_application_id": _last_app_id,
+                "seconds_since_last_use": idle,
+            },
+        )
+        _stop_and_clear(dead)
 
     if _canonical_configs is not None:
         return _build(_canonical_configs, _canonical_enable_hive)
@@ -162,12 +183,22 @@ def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
         ) from exc
 
     _mark_alive(session)
+    logger.info(
+        "SparkSession ready (application_id=%s, app_name=%s)",
+        _last_app_id, app_name,
+        extra={
+            "event": "spark_session_created",
+            "application_id": _last_app_id,
+            "app_name": app_name,
+        },
+    )
     return session
 
 
 def _mark_alive(session: SparkSession) -> None:
-    global _last_app_id
+    global _last_app_id, _last_alive_ts
     _last_app_id = _safe_app_id(session)
+    _last_alive_ts = time.time()
 
 
 def _is_session_alive(session: SparkSession) -> bool:
