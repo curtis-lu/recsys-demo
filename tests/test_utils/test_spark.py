@@ -1,8 +1,13 @@
 """Tests for recsys_tfb.utils.spark.get_or_create_spark_session."""
 
 import pytest
+from pyspark.sql import SparkSession
 
-from recsys_tfb.utils.spark import get_or_create_spark_session
+from recsys_tfb.utils.spark import (
+    _is_session_alive,
+    get_or_create_spark_session,
+    stop_spark_session,
+)
 
 pytestmark = pytest.mark.spark
 
@@ -275,3 +280,25 @@ class TestDeadContextRecovery:
             assert second.createDataFrame([(1,)], ["a"]).count() == 1
         finally:
             second.stop()
+
+
+class TestStopSparkSession:
+    """明確釋放 session,讓 driver-local 的長區段不必抱著閒置的 executors。"""
+
+    def test_stops_alive_session_and_is_idempotent(self):
+        session = get_or_create_spark_session(_minimal_configs())
+        assert _is_session_alive(session)
+
+        assert stop_spark_session() is True
+        assert SparkSession.getActiveSession() is None
+
+        # 第二次沒有東西可停
+        assert stop_spark_session() is False
+
+    def test_stops_jvm_dead_session_without_raising(self):
+        """對 JVM 端已死的 session 呼叫也要安全——這是叢集回收 app 後的狀態。"""
+        session = get_or_create_spark_session(_minimal_configs())
+        session.sparkContext._jsc.sc().stop()
+
+        assert stop_spark_session() is True
+        assert SparkSession._instantiatedSession is None

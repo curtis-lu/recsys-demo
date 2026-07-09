@@ -82,6 +82,33 @@ def get_or_create_spark_session(
     return _build(spark_configs, enable_hive)
 
 
+def stop_spark_session() -> bool:
+    """Stop the current SparkSession, if any. True when one was actually stopped.
+
+    Idempotent: safe on an already-dead session and on no session at all. The
+    next mode-2 caller rebuilds from the canonical configs, so stopping is a
+    way to hand the executors back — not to end the run.
+    """
+    session = SparkSession.getActiveSession() or SparkSession._instantiatedSession
+    if session is None:
+        return False
+
+    app_id = _safe_app_id(session)
+    _stop_and_clear(session)
+    logger.info(
+        "SparkSession released (application_id=%s)", app_id,
+        extra={"event": "spark_session_released", "application_id": app_id},
+    )
+    return True
+
+
+def _safe_app_id(session: SparkSession) -> str | None:
+    try:
+        return session.sparkContext.applicationId
+    except Exception:  # noqa: BLE001 — the context may already be gone
+        return None
+
+
 def _rebuild_or_active() -> SparkSession:
     """Return the active session, or rebuild one (canonical configs, else yaml)."""
     active = SparkSession.getActiveSession()
