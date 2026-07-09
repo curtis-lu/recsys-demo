@@ -8,7 +8,7 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset._hashing import ratio_to_threshold, spark_bucket
+from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import validate_date_splits
 from recsys_tfb.preprocessing._spark import (

@@ -79,6 +79,29 @@ Layer 1 — config-static (implemented here; aggregated by
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
+* A15 — ``evaluation.metric`` / ``evaluation.diagnosis`` parameter domains:
+  ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
+  ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
+  ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
+  ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
+* A16 — ``evaluation.diagnosis.reconciliation`` parameter domains:
+  ``score_col`` ∈ {score, score_uncalibrated}; ``explained_threshold`` > 0
+  (log-odds). Predicate: ``reconciliation_param_errors``.
+* A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
+  ``auc_threshold`` ∈ (0.5, 1); ``gap_band`` > 0 (log-odds);
+  ``top_k_occupancy`` integer >= 1. Predicate: ``quadrant_param_errors``.
+* A18 — ``evaluation.diagnosis.{offset_sweep,debug_inject_offsets}``
+  parameter domains: ``holdout_fraction`` ∈ (0,1); ``shrink_lambda`` >= 0;
+  ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
+  integer >= 1; ``enabled`` bool; ``debug_inject_offsets`` values finite
+  numbers. Predicate: ``offset_sweep_param_errors``.
+* A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
+  ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
+* A20 — structure-layer (gain_ledger + conditional-SHAP background) and triage
+  diagnostics parameter domains: ``diagnostics.shap.background`` ∈
+  {global, per_item}; ``diagnostics.gain_ledger.enabled`` and
+  ``evaluation.diagnosis.triage.enabled`` are bool. Predicate:
+  ``structure_triage_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 implemented and wired):
 
@@ -107,6 +130,8 @@ the plan doc for the full table:
 """
 
 from __future__ import annotations
+
+import math
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
@@ -473,6 +498,250 @@ def segment_columns_without_source(parameters: dict) -> list[str]:
     return sorted(c for c in seg_cols if c not in provided)
 
 
+def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
+    """evaluation.metric / evaluation.diagnosis parameter domains (A15).
+
+    Absent blocks are fine (all keys have behavior-preserving defaults);
+    present values must be in-domain, else the metric family silently
+    degenerates (e.g. alpha>1 over-concentrates on hot items) or the
+    bootstrap is undefined (n_boot<1).
+    """
+    errors: list[str] = []
+    ev = parameters.get("evaluation", {}) or {}
+    metric = ev.get("metric", {}) or {}
+    diag = ev.get("diagnosis", {}) or {}
+    sample = diag.get("sample", {}) or {}
+    ci = diag.get("ci", {}) or {}
+
+    alpha = metric.get("weight_alpha", 0.0)
+    if not (_is_number(alpha) and 0.0 <= float(alpha) <= 1.0):
+        errors.append(
+            f"evaluation.metric.weight_alpha={alpha!r} must be a number in "
+            f"[0, 1] (0 = equal-weight macro, 1 = positive-count weighting)."
+        )
+    k = metric.get("k", None)
+    if k is not None and not (
+        isinstance(k, int) and not isinstance(k, bool) and k >= 1
+    ):
+        errors.append(
+            f"evaluation.metric.k={k!r} must be null (no truncation) or an "
+            f"int >= 1."
+        )
+    mp = metric.get("min_positives", 0)
+    if not (isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0):
+        errors.append(
+            f"evaluation.metric.min_positives={mp!r} must be an int >= 0."
+        )
+    sk = metric.get("shrinkage_k", 0)
+    if not (_is_number(sk) and float(sk) >= 0.0):
+        errors.append(
+            f"evaluation.metric.shrinkage_k={sk!r} must be a number >= 0."
+        )
+
+    for key, val, floor in (
+        ("evaluation.diagnosis.sample.max_queries",
+         sample.get("max_queries", 200000), 1),
+        ("evaluation.diagnosis.sample.min_pos_queries_per_item",
+         sample.get("min_pos_queries_per_item", 50), 1),
+        ("evaluation.diagnosis.ci.n_boot", ci.get("n_boot", 200), 1),
+    ):
+        if not (isinstance(val, int) and not isinstance(val, bool)
+                and val >= floor):
+            errors.append(f"{key}={val!r} must be an int >= {floor}.")
+
+    en = ci.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.ci.enabled={en!r} must be a boolean "
+            f"(YAML true/false; a quoted string like \"false\" is truthy and "
+            f"would silently enable the node)."
+        )
+    return errors
+
+
+def reconciliation_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.reconciliation parameter domains (A16)."""
+    errors: list[str] = []
+    recon = (
+        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+        .get("reconciliation", {}) or {}
+    )
+    sc = recon.get("score_col", "score_uncalibrated")
+    if sc not in ("score", "score_uncalibrated"):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.score_col={sc!r} must be "
+            f"'score' or 'score_uncalibrated'."
+        )
+    thr = recon.get("explained_threshold", 0.3)
+    if not (_is_number(thr) and float(thr) > 0.0):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.explained_threshold={thr!r} "
+            f"must be a number > 0 (log-odds units)."
+        )
+    en = recon.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.reconciliation.enabled={en!r} must be a "
+            f"boolean (YAML true/false; a quoted string like \"false\" is "
+            f"truthy and would silently enable the node)."
+        )
+    return errors
+
+
+def quadrant_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.quadrant parameter domains (A17)."""
+    errors: list[str] = []
+    quad = (
+        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+        .get("quadrant", {}) or {}
+    )
+    thr = quad.get("auc_threshold", 0.6)
+    if not (_is_number(thr) and 0.5 < float(thr) < 1.0):
+        errors.append(
+            f"evaluation.diagnosis.quadrant.auc_threshold={thr!r} must be a "
+            f"number in (0.5, 1)."
+        )
+    band = quad.get("gap_band", 0.35)
+    if not (_is_number(band) and float(band) > 0.0):
+        errors.append(
+            f"evaluation.diagnosis.quadrant.gap_band={band!r} must be a "
+            f"number > 0 (log-odds units)."
+        )
+    k = quad.get("top_k_occupancy", 1)
+    if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):
+        errors.append(
+            f"evaluation.diagnosis.quadrant.top_k_occupancy={k!r} must be an "
+            f"integer >= 1."
+        )
+    en = quad.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.quadrant.enabled={en!r} must be a bool "
+            f"(true/false without quotes in YAML)."
+        )
+    return errors
+
+
+def offset_sweep_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.{offset_sweep,debug_inject_offsets} domains (A18)."""
+    errors: list[str] = []
+    diag = (
+        (parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {}
+    )
+    cfg = diag.get("offset_sweep", {}) or {}
+
+    f = cfg.get("holdout_fraction", 0.5)
+    if not (_is_number(f) and 0.0 < float(f) < 1.0):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.holdout_fraction={f!r} must "
+            f"be a number in (0, 1) — 0 leaves no holdout fold (out-of-fold "
+            f"mAP undefined), 1 leaves nothing to fit on."
+        )
+    lam = cfg.get("shrink_lambda", 0.1)
+    if not (_is_number(lam) and float(lam) >= 0.0):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.shrink_lambda={lam!r} must "
+            f"be a number >= 0."
+        )
+    grid = cfg.get("grid", {}) or {}
+    lo = grid.get("lo", -2.0)
+    hi = grid.get("hi", 2.0)
+    step = grid.get("step", 0.05)
+    if not (_is_number(lo) and _is_number(hi) and float(lo) < float(hi)):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
+            f".grid.hi={hi!r} must be numbers with lo < hi."
+        )
+    elif not (float(lo) <= 0.0 <= float(hi)):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
+            f".grid.hi={hi!r}: [lo, hi] must contain 0 — δ=0 (no shift) "
+            f"must stay reachable so the "
+            f"sweep can report a clean baseline."
+        )
+    if not (_is_number(step) and float(step) > 0.0):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.grid.step={step!r} must be "
+            f"a number > 0."
+        )
+    r = cfg.get("max_rounds", 5)
+    if not (isinstance(r, int) and not isinstance(r, bool) and r >= 1):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.max_rounds={r!r} must be an "
+            f"integer >= 1."
+        )
+    en = cfg.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.offset_sweep.enabled={en!r} must be a "
+            f"bool (true/false without quotes in YAML)."
+        )
+    inj = diag.get("debug_inject_offsets", {}) or {}
+    if not isinstance(inj, dict):
+        errors.append(
+            f"evaluation.diagnosis.debug_inject_offsets={inj!r} must be a "
+            f"mapping item -> finite number (log-odds units)."
+        )
+    else:
+        for key, v in inj.items():
+            if not (_is_number(v) and math.isfinite(float(v))):
+                errors.append(
+                    f"evaluation.diagnosis.debug_inject_offsets[{key!r}]="
+                    f"{v!r} must be a finite number (log-odds units)."
+                )
+    return errors
+
+
+def pair_ledger_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.pair_ledger parameter domains (A19)."""
+    errors: list[str] = []
+    diag = ((parameters.get("evaluation", {}) or {})
+            .get("diagnosis", {}) or {})
+    cfg = diag.get("pair_ledger", {}) or {}
+    en = cfg.get("enabled", True)
+    if not isinstance(en, bool):
+        errors.append(
+            f"evaluation.diagnosis.pair_ledger.enabled={en!r} must be a "
+            "bool"
+        )
+    return errors
+
+
+def structure_triage_param_errors(parameters: dict) -> list[str]:
+    """A20 — structure-layer + triage diagnostics parameter domains.
+
+    Covers the three config keys the structure layer (Gain ledger + conditional
+    SHAP background) and the triage summary read: ``diagnostics.shap.background``
+    must be ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` and
+    ``evaluation.diagnosis.triage.enabled`` must be bool (a quoted YAML string
+    like "false" is truthy and would silently enable the node). Absent keys use
+    behavior-preserving defaults. Returns collect-all error strings; empty
+    means OK.
+    """
+    errors: list[str] = []
+    diag = parameters.get("diagnostics", {}) or {}
+    bg = (diag.get("shap", {}) or {}).get("background", "global")
+    if bg not in ("global", "per_item"):
+        errors.append(
+            f"A20: diagnostics.shap.background must be 'global' or 'per_item' "
+            f"(got {bg!r})."
+        )
+    gl_en = (diag.get("gain_ledger", {}) or {}).get("enabled", True)
+    if not isinstance(gl_en, bool):
+        errors.append(
+            f"A20: diagnostics.gain_ledger.enabled={gl_en!r} must be a bool "
+            f"(true/false without quotes in YAML)."
+        )
+    tri_en = (((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+              .get("triage", {}) or {}).get("enabled", True)
+    if not isinstance(tri_en, bool):
+        errors.append(
+            f"A20: evaluation.diagnosis.triage.enabled={tri_en!r} must be a "
+            f"bool (true/false without quotes in YAML)."
+        )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -568,6 +837,18 @@ def validate_config_consistency(parameters: dict) -> None:
             f"segment_sources entry for each, or remove them from "
             f"segment_columns."
         )
+
+    errors.extend(diagnosis_metric_param_errors(parameters))
+
+    errors.extend(reconciliation_param_errors(parameters))
+
+    errors.extend(quadrant_param_errors(parameters))
+
+    errors.extend(offset_sweep_param_errors(parameters))
+
+    errors.extend(pair_ledger_param_errors(parameters))
+
+    errors.extend(structure_triage_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

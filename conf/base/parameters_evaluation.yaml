@@ -58,6 +58,11 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
+      reconciliation: true
+      quadrant: true
+      offset_sweep: true
+      pair_ledger: true
+      triage: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
@@ -68,6 +73,91 @@ evaluation:
       n_calibration_bins: 10
       # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
       # 不再需要 row 抽樣上限。
+
+  # 主指標參數化家族（框架診斷項目 4；A15）。預設值全部等價現行為：
+  # weight_alpha=0 ＝ item 等權 macro；min_positives=0 ＝ 不設觀察名單門檻；
+  # shrinkage_k=0 ＝ 不收縮。作用順序：min_positives 先排除 → shrinkage 向
+  # pooled（n_pos 加權）平均收縮 → weight_alpha 加權（w_j ∝ n_pos^α）。
+  # 只作用於 item 粒度（by_item / by_item_segment）；by_segment 維持等權。
+  # k = 診斷側（CI）計算 AP 的截斷 k；null ＝ 不截斷（full mAP）。
+  metric:
+    weight_alpha: 0.0
+    k: null
+    min_positives: 0
+    shrinkage_k: 0
+
+  # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座 + §3 Phase 1 CI）。
+  diagnosis:
+    # 診斷抽樣：單位＝query（snap_date × cust_id）、只取有正例的 query；
+    # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
+    # hash-ratio 抽到補滿 max_queries。中型 item 抽後仍可能低於保底：
+    # 不硬補，metadata 誠實回報（報表會標示樣本規模）。
+    # 注意 driver 記憶體：max_queries 是 query 數上限，落到 driver 的
+    # DataFrame 列數 ≈ max_queries × 每 query 候選列數（22 個 item 時即
+    # 22 倍、約 4.4M 列 ~1GB），調大前先估 driver 可用記憶體。
+    sample:
+      max_queries: 200000
+      min_pos_queries_per_item: 50
+      seed: 42
+    # per-item AP 與 macro 的 cluster bootstrap CI（cluster＝cust_id，
+    # 同一客戶跨期整批重抽）。driver 端 numpy、跑在上面的抽樣上。
+    ci:
+      enabled: true
+      n_boot: 200
+
+    # 對帳層（Phase 2；A16）：理論偏移（抽樣×權重的正負類曝險比，per-cell
+    # 細列、item 層近似帶）vs 實測 per-item 校準差距 logit(p̄)−logit(ȳ)。
+    # score_col 預設 score_uncalibrated——校準層本身就在修 level，對帳要看
+    # 模型原始輸出；eval 資料無此欄（monitoring 路徑）自動退回 score 並標註。
+    # explained_threshold 單位是 log-odds：實測 gap 距理論帶超過此值＝不可解釋。
+    reconciliation:
+      enabled: true
+      score_col: score_uncalibrated
+      explained_threshold: 0.3
+
+    # 象限層（A17）：縱軸 gap_vs_global（水準，取對帳層產物；行為觀測不含
+    # 歸因）× 橫軸 within-item AUC（條件判別力，midrank rank-sum）。
+    # gap_band 單位 log-odds：|gap_vs_global| 超出帶＝水準偏（偏高＝加害者，
+    # 判準與判別力無關）；auc_threshold 以下＝條件判別力差。
+    # top_k_occupancy：top-slot 佔據統計的 k。
+    quadrant:
+      enabled: true
+      auc_threshold: 0.6
+      gap_band: 0.35
+      top_k_occupancy: 1
+
+    # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
+    # item 的 logit 分數加常數 δ、座標下降搜尋讓參數化 macro mAP 最大的
+    # δ*。δ 單位 log-odds（與對帳層 offset 同尺度）。holdout_fraction 切
+    # query 折、折外報告防擬合雜訊；shrink_lambda 把 δ 向 0 收縮（座標目
+    # 標 = mAP_fit − λ·δ²/M）。成本 ≈ rounds×items×grid點數 次 mAP 評估，
+    # 大樣本時先調粗 grid.step。
+    offset_sweep:
+      enabled: true
+      shrink_lambda: 0.1
+      holdout_fraction: 0.5
+      max_rounds: 5
+      grid: {lo: -2.0, hi: 2.0, step: 0.05}
+
+    # 壓制帳本（A19）：pair_ledger——對每個正例列列舉同 query 排其上方的
+    # 負例 item，記交換名次的指標敏感度 |ΔAP|（λ 會計）→「壓制者×受害者」
+    # 矩陣＋傷害×segment 分組（evaluation.segment_columns）；substitution
+    # ablation 逐 item 換 base-rate logit 常數重算指標（O(M) 次）量淨貢
+    # 獻/淨傷害。跑在同一份診斷抽樣上；描述性會計、全樣本不切折。
+    pair_ledger:
+      enabled: true
+
+    # 三層診斷合成總表：把 quadrant/reconciliation/offset_sweep/gain_ledger
+    # 四個診斷 dict 合成 per-item 判定＋建議槓桿＋起手值。gain_ledger 缺席時
+    # best-effort 降級（見 catalog.yaml gain_ledger optional: true）。
+    # 判讀見 docs/pipelines/evaluation-diagnosis.md §13。
+    triage:
+      enabled: true
+
+    # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
+    # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
+    # 正式評估必須留空。
+    debug_inject_offsets: {}
 
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-from recsys_tfb.pipelines.training.diagnostics.shap_cases import compute_quadrant_profiles
+from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_profiles
 
 
 def _trained_adapter(seed=1):
@@ -75,7 +75,7 @@ def test_quadrant_profiles_empty_or_disabled():
 
 # ---- P2b-2: compute_quadrant_cases ----
 
-from recsys_tfb.pipelines.training.diagnostics.shap_cases import compute_quadrant_cases
+from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_cases
 
 
 def _case_rows(specs):

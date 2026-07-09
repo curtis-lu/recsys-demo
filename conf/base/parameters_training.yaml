@@ -146,8 +146,11 @@ diagnostics:
     high_null_threshold: 0.5
   feature_importance:
     enabled: true
+  gain_ledger:
+    enabled: true   # 結構層 Gain 帳本（診斷項目 8）；判讀見 docs/pipelines/evaluation-diagnosis.md §12
   shap:
     enabled: true
+    background: global   # global | per_item（per_item＝背景取該 item 子母體，interventional；成本較高）
     sample_rows: 2000       # SHAP 抽樣列數；過慢或 driver memory 不足時先降低
     top_k: 30               # JSON/profile 顯示的特徵數；通常 20~30 足夠審核
     min_rows_per_item: 30   # item 抽樣低於此值會標記 low_coverage，解讀需保守

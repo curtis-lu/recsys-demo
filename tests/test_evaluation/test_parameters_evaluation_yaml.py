@@ -35,3 +35,51 @@ def test_report_display_and_sections():
 def test_baseline_block_is_lookback_only():
     cfg = _load()["baseline"]
     assert cfg == {"lookback_months": 12}
+
+
+def test_metric_and_diagnosis_blocks():
+    ev = _load()
+    assert ev["metric"] == {
+        "weight_alpha": 0.0, "k": None, "min_positives": 0, "shrinkage_k": 0,
+    }
+    diag = ev["diagnosis"]
+    assert diag["sample"] == {
+        "max_queries": 200000, "min_pos_queries_per_item": 50, "seed": 42,
+    }
+    assert diag["ci"] == {"enabled": True, "n_boot": 200}
+
+
+def test_reconciliation_block():
+    recon = _load()["diagnosis"]["reconciliation"]
+    assert recon == {
+        "enabled": True,
+        "score_col": "score_uncalibrated",
+        "explained_threshold": 0.3,
+    }
+
+
+def test_report_sections_include_reconciliation():
+    assert _load()["report"]["sections"]["reconciliation"] is True
+
+
+def test_quadrant_block():
+    quad = _load()["diagnosis"]["quadrant"]
+    assert quad == {
+        "enabled": True,
+        "auc_threshold": 0.6,
+        "gap_band": 0.35,
+        "top_k_occupancy": 1,
+    }
+
+
+def test_report_sections_include_quadrant():
+    assert _load()["report"]["sections"]["quadrant"] is True
+
+
+def test_triage_block():
+    triage = _load()["diagnosis"]["triage"]
+    assert triage["enabled"] is True
+
+
+def test_report_sections_include_triage():
+    assert _load()["report"]["sections"]["triage"] is True

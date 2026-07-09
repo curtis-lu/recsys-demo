@@ -2,14 +2,15 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.pipelines.training.diagnostics import (
+from recsys_tfb.diagnosis.model import (
     compute_feature_importance,
     compute_feature_statistics,
     compute_quadrant_cases,
     compute_quadrant_profiles,
     compute_shap_diagnostics,
 )
-from recsys_tfb.pipelines.training.diagnostics_spark import select_shap_population
+from recsys_tfb.diagnosis.model.gain_ledger import compute_gain_ledger
+from recsys_tfb.diagnosis.model.population_spark import select_shap_population
 from recsys_tfb.pipelines.training.nodes import (
     cache_calibration_model_input,
     cache_test_model_input,
@@ -154,6 +155,11 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             compute_feature_importance,
             inputs=["model", "parameters"],
             outputs="feature_importance",
+        ),
+        Node(
+            compute_gain_ledger,
+            inputs=["model", "preprocessor_view", "parameters"],
+            outputs="gain_ledger",
         ),
         Node(
             compute_shap_diagnostics,

@@ -12,6 +12,7 @@ from recsys_tfb.evaluation.metrics import (
     compute_ap,
     compute_macro_per_item_map,
     compute_mean_ap,
+    macro_from_per_item,
 )
 
 
@@ -201,3 +202,68 @@ class TestComputeMacroPerItemMap:
             )
             == 0.0
         )
+
+
+class TestMacroFromPerItem:
+    # 兩個 item：A 值 0.75、n=2；B 值 1.0、n=1。pooled = (2*0.75+1*1.0)/3 = 5/6
+    VALUES = np.array([0.75, 1.0])
+    N_POS = np.array([2, 1])
+
+    def test_defaults_equal_plain_mean(self):
+        assert macro_from_per_item(self.VALUES, self.N_POS) == pytest.approx(0.875)
+
+    def test_weight_alpha_one_weights_by_n_pos(self):
+        r = macro_from_per_item(self.VALUES, self.N_POS, weight_alpha=1.0)
+        assert r == pytest.approx(5 / 6)
+
+    def test_min_positives_drops_cold_item(self):
+        r = macro_from_per_item(self.VALUES, self.N_POS, min_positives=2)
+        assert r == pytest.approx(0.75)
+
+    def test_min_positives_all_excluded_returns_none(self):
+        assert macro_from_per_item(self.VALUES, self.N_POS, min_positives=3) is None
+
+    def test_shrinkage_known_value(self):
+        # pooled=5/6；A'=(2*0.75+5/6)/3=7/9；B'=(1.0+5/6)/2=11/12；mean=61/72
+        r = macro_from_per_item(self.VALUES, self.N_POS, shrinkage_k=1.0)
+        assert r == pytest.approx(61 / 72)
+
+    def test_shrinkage_large_k_approaches_pooled(self):
+        r = macro_from_per_item(self.VALUES, self.N_POS, shrinkage_k=1e9)
+        assert r == pytest.approx(5 / 6, abs=1e-6)
+
+
+class TestComputeMacroPerItemMapParams:
+    # 3 queries、2 items。A 正例 2 列（contrib 1.0、0.5 → AP 0.75）、B 1 列（1.0）
+    GROUPS = np.array([0, 0, 1, 1, 2, 2])
+    ITEMS = np.array(["A", "B", "A", "B", "A", "B"])
+    Y = np.array([1, 0, 1, 0, 0, 1])
+    SCORE = np.array([0.9, 0.1, 0.1, 0.9, 0.1, 0.9])
+
+    def test_defaults_unchanged(self):
+        r = compute_macro_per_item_map(self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+        assert r == pytest.approx(0.875)
+
+    def test_weight_alpha(self):
+        r = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weight_alpha=1.0
+        )
+        assert r == pytest.approx(5 / 6)
+
+    def test_min_positives(self):
+        r = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, min_positives=2
+        )
+        assert r == pytest.approx(0.75)
+
+    def test_min_positives_all_excluded_returns_zero(self):
+        r = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, min_positives=3
+        )
+        assert r == 0.0
+
+    def test_shrinkage(self):
+        r = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, shrinkage_k=1.0
+        )
+        assert r == pytest.approx(61 / 72)

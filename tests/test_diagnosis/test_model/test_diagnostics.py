@@ -9,7 +9,7 @@ import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
-from recsys_tfb.pipelines.training import diagnostics as diag
+from recsys_tfb.diagnosis import model as diag
 
 
 @pytest.fixture
@@ -146,7 +146,7 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert out["per_item"]["rare"]["n_sampled"] <= 2
     assert {"n_sampled", "n_positive", "score_min", "score_max", "score_mean", "low_coverage"} \
         <= set(out["per_item"]["rare"])
-    from recsys_tfb.pipelines.training.diagnostics.paths import summary_dir
+    from recsys_tfb.diagnosis.model.paths import summary_dir
     assert (summary_dir(parameters) / "shap_summary_global.png").exists()
 
 
@@ -190,7 +190,7 @@ def test_per_item_profile_positive_and_coverage(shap_setup):
 
 
 def test_divergence_identical_is_zero():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
     div, idio = _divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
@@ -199,7 +199,7 @@ def test_divergence_identical_is_zero():
 
 
 def test_divergence_disjoint_top_is_one():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     item = np.array([0.0, 0.0, 5.0, 4.0])   # top2 = idx {2,3}
     glob = np.array([5.0, 4.0, 0.0, 0.0])   # top2 = idx {0,1}
@@ -209,7 +209,7 @@ def test_divergence_disjoint_top_is_one():
 
 
 def test_divergence_identical_spearman_is_zero():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
     div, _ = _divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
@@ -217,7 +217,7 @@ def test_divergence_identical_spearman_is_zero():
 
 
 def test_divergence_reversed_spearman_is_one():
-    from recsys_tfb.pipelines.training.diagnostics.shap_per_item import _divergence
+    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
     import numpy as np
     va = np.array([1.0, 2.0, 3.0, 4.0])
     vb = np.array([4.0, 3.0, 2.0, 1.0])
@@ -249,7 +249,7 @@ def test_per_item_signed_can_be_negative(shap_setup):
 
 
 def test_summary_pngs_global_and_per_item(shap_setup):
-    from recsys_tfb.pipelines.training.diagnostics.paths import (
+    from recsys_tfb.diagnosis.model.paths import (
         per_item_summary_dir, safe_name, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
@@ -263,7 +263,7 @@ def test_summary_pngs_global_and_per_item(shap_setup):
 
 def test_per_item_beeswarm_can_be_disabled(shap_setup):
     import os
-    from recsys_tfb.pipelines.training.diagnostics.paths import (
+    from recsys_tfb.diagnosis.model.paths import (
         per_item_summary_dir, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
@@ -280,6 +280,72 @@ def test_profile_positive_can_be_disabled(shap_setup):
     for blk in out["per_item"].values():
         assert blk["top_features_positive"] is None
         assert blk["positive_low_coverage"] is False
+
+
+def test_shap_background_absent_equals_explicit_global(shap_setup):
+    # 回歸鎖：background 鍵缺席（預設 "global"）與顯式寫 "global" 的輸出 dict
+    # 必須全等——這是「global 模式行為完全不變」宣稱的驗收依據。
+    adapter, handle, preprocessor, parameters = shap_setup
+    out_absent = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    parameters["diagnostics"]["shap"]["background"] = "global"
+    out_explicit = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert out_absent == out_explicit
+    assert "notes" not in out_absent and "notes" not in out_explicit
+
+
+def test_shap_per_item_background_contract(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(out) >= {"global", "per_item", "item_idiosyncrasy", "notes"}
+    assert any("per_item" in n for n in out["notes"])
+    contract_keys = {"top_features", "n_sampled", "n_positive", "score_min", "score_max",
+                     "score_mean", "low_coverage", "top_features_positive",
+                     "positive_low_coverage", "divergence_from_global",
+                     "idiosyncratic_features"}
+    for blk in out["per_item"].values():
+        assert contract_keys <= set(blk)
+        assert 0.0 <= blk["divergence_from_global"] <= 1.0
+
+
+def test_shap_per_item_profile_positive_disabled(shap_setup):
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    parameters["diagnostics"]["shap"]["profile_positive"] = False
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    for blk in out["per_item"].values():
+        assert blk["top_features_positive"] is None
+        assert blk["positive_low_coverage"] is False
+
+
+def test_per_item_background_cap():
+    from recsys_tfb.diagnosis.model.shap_per_item import _BACKGROUND_CAP, _per_item_background
+    X = np.arange(300).reshape(150, 2).astype(float)
+    bg = _per_item_background(X, seed=42)
+    assert bg.shape[0] == min(150, _BACKGROUND_CAP)
+    X_small = X[:50]
+    bg_small = _per_item_background(X_small, seed=42)
+    assert np.array_equal(bg_small, X_small)  # 未超過上限 → 原樣回傳
+
+
+def test_per_item_background_uses_item_subset_not_full_sample(shap_setup, monkeypatch):
+    # 弄壞偵測：若 per-item 迴圈誤把整份抽樣 X 當背景（而非該 item 子母體），
+    # 這裡會抓到——_per_item_background 收到的列數應等於該 item 的 n_sampled,
+    # 不是整體抽樣列數。
+    adapter, handle, preprocessor, parameters = shap_setup
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
+    seen_shapes = []
+    real_bg = spi._per_item_background
+
+    def spy_bg(X_item, seed):
+        seen_shapes.append(len(X_item))
+        return real_bg(X_item, seed)
+
+    monkeypatch.setattr(spi, "_per_item_background", spy_bg)
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    n_sampled = sorted(blk["n_sampled"] for blk in out["per_item"].values())
+    assert sorted(seen_shapes) == n_sampled
 
 
 def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
@@ -338,7 +404,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
 def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     import numpy as np
     import pandas as pd
-    from recsys_tfb.pipelines.training.diagnostics import data_access
+    from recsys_tfb.diagnosis.model import data_access
 
     n = 400
     rng = np.random.RandomState(0)
@@ -460,7 +526,7 @@ def test_positive_profile_skipped_when_disabled(shap_setup, monkeypatch):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["profile_positive"] = False
 
-    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
     calls = {"n": 0}
     real = spi.feature_attributions
 
@@ -481,8 +547,8 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     # 且 sample B 的 take_rows 只取 <= positive_sample_per_item * n_items 列(記憶體 bound,spec §6#5)。
     import numpy as np
     import pandas as pd
-    from recsys_tfb.pipelines.training.diagnostics import data_access
-    import recsys_tfb.pipelines.training.diagnostics.shap_per_item as spi
+    from recsys_tfb.diagnosis.model import data_access
+    import recsys_tfb.diagnosis.model.shap_per_item as spi
 
     rng = np.random.RandomState(0)
     n = 2000
@@ -529,3 +595,30 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     assert shap_calls["n"] == 2                 # sample A + sample B,恰好一次額外 pass
     assert len(take_lens) == 2                  # sample A take,再 sample B take
     assert take_lens[1] <= per_item * 2         # sample B bounded by per_item * n_items
+
+
+def test_shap_per_item_degrades_to_global_when_interventional_unavailable(
+        shap_setup, monkeypatch):
+    """審查後真跑 smoke 的實證：shap 0.42.1 的 SingleTree 無法表示 LightGBM
+    類別切分（"2||3||4" 轉 float 炸），interventional 在真模型上必炸。
+    per_item 模式必須降級回 global 行為＋notes 說明，不炸訓練。
+    這裡以 monkeypatch 模擬「帶 background 就炸」的版本組合。"""
+    from recsys_tfb.diagnosis.model import shap_per_item as spi
+    adapter, handle, preprocessor, parameters = shap_setup
+
+    parameters["diagnostics"]["shap"]["background"] = "global"
+    out_global = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    real = spi.feature_attributions
+    def flaky(model, X, feature_names, **kwargs):
+        if kwargs.get("background") is not None:
+            raise ValueError("could not convert string to float: '2||3||4'")
+        return real(model, X, feature_names, **kwargs)
+    monkeypatch.setattr(spi, "feature_attributions", flaky)
+
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    notes = out.pop("notes")
+    assert any("降級" in n for n in notes)
+    # 除 notes 外，輸出與 global 模式完全一致（降級＝global 行為）
+    assert out == out_global

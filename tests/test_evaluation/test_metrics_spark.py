@@ -57,8 +57,8 @@ def _enriched(spark, k_values=(3,)):
     return df
 
 
-def _make_parameters(k_values=(3,), segment_columns=()):
-    return {
+def _make_parameters(k_values=(3,), segment_columns=(), metric=None):
+    params = {
         "schema": {
             "columns": {
                 "time": "snap_date",
@@ -74,6 +74,9 @@ def _make_parameters(k_values=(3,), segment_columns=()):
             "segment_columns": list(segment_columns),
         },
     }
+    if metric is not None:
+        params["evaluation"]["metric"] = dict(metric)
+    return params
 
 
 # ===========================================================================
@@ -379,7 +382,7 @@ def test_aggregate_per_item_emits_attribution_keys_not_precision_recall(spark):
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
     assert set(per_item.keys()) == {"A", "B", "C"}
     for prod, m in per_item.items():
-        assert set(m.keys()) == {"mean_pos", "hit_rate@3", "map_attr@3", "ndcg_attr@3"}
+        assert set(m.keys()) == {"mean_pos", "n_pos", "hit_rate@3", "map_attr@3", "ndcg_attr@3"}
         assert "precision@3" not in m
         assert "recall@3" not in m
 
@@ -443,6 +446,27 @@ def test_aggregate_per_item_filters_label_zero_rows(spark):
     assert per_item["A"]["mean_pos"] == 1.0   # would be (1+3)/2 = 2.0 if label=0 leaked in
 
 
+def test_aggregate_per_item_emits_n_pos(spark):
+    """n_pos = 該 item 的正例列數（weight_alpha/min_positives/shrinkage_k 的 P_j 來源）。"""
+    enriched = _enriched(spark)
+    per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
+    # _two_customer_raw：A 正例 1 列（C0）、B 1 列（C1）、C 1 列（C0）
+    assert per_item["A"]["n_pos"] == 1
+    assert per_item["B"]["n_pos"] == 1
+    assert per_item["C"]["n_pos"] == 1
+    assert isinstance(per_item["A"]["n_pos"], int)
+
+
+def test_macro_average_excludes_n_pos_from_output(spark=None):
+    per_dim = {
+        "A": {"map_attr@3": 0.75, "n_pos": 2},
+        "B": {"map_attr@3": 1.0, "n_pos": 1},
+    }
+    avg = ms.macro_average(per_dim)
+    assert avg == {"map_attr@3": pytest.approx(0.875)}
+    assert "n_pos" not in avg
+
+
 # ===========================================================================
 # macro_average
 # ===========================================================================
@@ -499,7 +523,8 @@ def test_compute_all_metrics_returns_expected_keys(spark):
     result = ms.compute_all_metrics(df, params)
     assert set(result.keys()) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "n_queries", "n_excluded_queries", "dataset_overview",
+        "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
+        "dataset_overview",
     }
 
 
@@ -635,4 +660,91 @@ def test_macro_per_item_map_numpy_matches_spark(spark):
     score = np.array([r["score"] for r in rows], dtype=np.float64)
 
     numpy_macro = compute_macro_per_item_map(groups, items, y, score)
+    assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)
+
+
+# ===========================================================================
+# macro_average parameterization (weight_alpha / min_positives / shrinkage_k)
+# + compute_all_metrics observation_items / evaluation.metric wiring
+# ===========================================================================
+
+
+def _three_customer_raw(spark):
+    """A 正例 2 個 query（contrib 1.0、0.5 → AP 0.75, n_pos=2）、B 1 個（1.0, n_pos=1）。"""
+    return spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.1, 0),
+            ("20240331", "C1", "A", 0.1, 1),
+            ("20240331", "C1", "B", 0.9, 0),
+            ("20240331", "C2", "A", 0.1, 0),
+            ("20240331", "C2", "B", 0.9, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+
+
+def test_macro_average_weighted_by_n_pos():
+    per_dim = {
+        "A": {"map_attr@2": 0.75, "n_pos": 2},
+        "B": {"map_attr@2": 1.0, "n_pos": 1},
+    }
+    assert ms.macro_average(per_dim, weight_alpha=1.0) == {
+        "map_attr@2": pytest.approx(5 / 6)
+    }
+    assert ms.macro_average(per_dim, min_positives=2) == {
+        "map_attr@2": pytest.approx(0.75)
+    }
+    assert ms.macro_average(per_dim, shrinkage_k=1.0) == {
+        "map_attr@2": pytest.approx(61 / 72)
+    }
+    assert ms.macro_average(per_dim, min_positives=5) == {}
+
+
+def test_macro_average_missing_n_pos_fails_loud():
+    per_dim = {"A": {"map_attr@2": 0.75}, "B": {"map_attr@2": 1.0}}
+    with pytest.raises(ValueError, match="n_pos"):
+        ms.macro_average(per_dim, weight_alpha=1.0)
+
+
+def test_compute_all_metrics_observation_items_and_param_macro(spark):
+    df = _three_customer_raw(spark)
+    # 預設參數：additive 鍵存在且為空、macro 不變
+    base = ms.compute_all_metrics(df, _make_parameters(k_values=[2]))
+    assert base["observation_items"] == []
+    assert base["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.875)
+    # min_positives=2：B 進觀察名單、macro 只剩 A
+    params = _make_parameters(
+        k_values=[2],
+        metric={"weight_alpha": 0.0, "min_positives": 2, "shrinkage_k": 0},
+    )
+    result = ms.compute_all_metrics(df, params)
+    assert result["observation_items"] == ["B"]
+    assert result["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.75)
+
+
+def test_param_macro_numpy_matches_spark(spark):
+    """參數化後 numpy／Spark 兩實作同輸入同結果（spec Phase 1 parity 要求）。"""
+    import numpy as np
+
+    from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+
+    df = _three_customer_raw(spark)
+    # weight_alpha 與 shrinkage_k 刻意用相異值：兩者同值時，_compute_core 把
+    # 兩個 config 鍵接反（swap bug）也測不出來（審查用 fault injection 實證過）。
+    metric = {"weight_alpha": 1.0, "min_positives": 0, "shrinkage_k": 2.0}
+    result = ms.compute_all_metrics(df, _make_parameters(k_values=[2], metric=metric))
+    spark_macro = result["macro_avg"]["by_item"]["map_attr@2"]
+
+    rows = df.collect()
+    group_ids = {("20240331", f"C{i}"): i for i in range(3)}
+    groups = np.array([group_ids[(r["snap_date"], r["cust_id"])] for r in rows])
+    items = np.array([r["prod_name"] for r in rows])
+    y = np.array([r["label"] for r in rows])
+    score = np.array([r["score"] for r in rows], dtype=np.float64)
+
+    numpy_macro = compute_macro_per_item_map(
+        groups, items, y, score,
+        weight_alpha=1.0, min_positives=0, shrinkage_k=2.0,
+    )
     assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)

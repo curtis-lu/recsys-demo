@@ -1,7 +1,7 @@
 """Tests for diagnostics.sampling._stratified_item_sample (item_values 簽名)."""
 import numpy as np
 
-from recsys_tfb.pipelines.training.diagnostics.sampling import _stratified_item_sample
+from recsys_tfb.diagnosis.model.sampling import _stratified_item_sample
 
 
 def test_returns_sorted_unique_valid_indices():
@@ -37,7 +37,7 @@ def test_per_item_floor_from_total():
     assert (taken == "C").sum() == 3
 
 
-from recsys_tfb.pipelines.training.diagnostics.sampling import _positive_item_sample
+from recsys_tfb.diagnosis.model.sampling import _positive_item_sample
 
 
 def test_positive_sample_only_picks_positives():

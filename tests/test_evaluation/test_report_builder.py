@@ -1,5 +1,7 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
+import pytest
+
 from recsys_tfb.evaluation import report_builder as rb
 
 
@@ -438,3 +440,473 @@ def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
         "per-item ndcg_attr@k (M/B/Δ)",
     ):
         assert title not in s.table_titles
+
+
+def _metrics_min():
+    return {
+        "overall": {"map@2": 0.8, "precision@2": 0.5,
+                    "ndcg@2": 0.9, "recall@2": 1.0},
+        "per_item": {
+            "A": {"map_attr@2": 0.75, "ndcg_attr@2": 0.8,
+                  "hit_rate@2": 1.0, "mean_pos": 1.5, "n_pos": 2},
+            "B": {"map_attr@2": 1.0, "ndcg_attr@2": 1.0,
+                  "hit_rate@2": 1.0, "mean_pos": 1.0, "n_pos": 1},
+        },
+        "macro_avg": {"by_item": {"map_attr@2": 0.875, "ndcg_attr@2": 0.9,
+                                  "hit_rate@2": 1.0, "mean_pos": 1.25}},
+        "observation_items": [],
+        "n_queries": 3,
+        "n_excluded_queries": 0,
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+
+
+_CI_FIXTURE = {
+    "enabled": True, "n_boot": 50, "k": None, "seed": 42,
+    "metric_params": {"weight_alpha": 0.0, "min_positives": 0,
+                      "shrinkage_k": 0.0},
+    "per_item": {
+        "A": {"ap": 0.74, "ci_low": 0.60, "ci_high": 0.90, "n_pos": 2},
+        "B": {"ap": 1.0, "ci_low": 1.0, "ci_high": 1.0, "n_pos": 1},
+    },
+    "macro": {"ap": 0.87, "ci_low": 0.80, "ci_high": 0.95},
+    "sample": {"n_queries_sampled": 3, "n_pos_queries_total": 3},
+}
+
+
+def _params_min():
+    return {"evaluation": {"report": {"display": {"primary_map_k": [2]}}}}
+
+
+def test_per_item_attr_ci_columns_present_when_metric_ci_given():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    sec = build_per_item_attr_section(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    map_tbl = sec.tables[0]
+    for col in ["AP(抽樣)", "CI 2.5%", "CI 97.5%", "n_pos(抽樣)"]:
+        assert col in map_tbl.columns
+    assert map_tbl.loc["A", "CI 2.5%"] == 0.60
+    assert map_tbl.loc["Macro 平均", "AP(抽樣)"] == 0.87
+    assert "抽樣" in sec.description and "50" in sec.description
+
+
+def test_per_item_attr_no_ci_columns_when_absent():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    sec = build_per_item_attr_section(_metrics_min(), _params_min())
+    assert "AP(抽樣)" not in sec.tables[0].columns
+
+
+def test_per_item_attr_observation_list_table():
+    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
+    metrics = _metrics_min()
+    metrics["observation_items"] = ["B"]
+    sec = build_per_item_attr_section(metrics, _params_min())
+    assert "觀察名單" in sec.table_titles[-1]
+    obs_tbl = sec.tables[-1]
+    assert list(obs_tbl.index) == ["B"]
+    assert obs_tbl.loc["B", "n_pos"] == 1
+
+
+def test_primary_map_macro_ci_table():
+    from recsys_tfb.evaluation.report_builder import build_primary_map_section
+    sec = build_primary_map_section(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    assert any("CI" in t for t in sec.table_titles)
+    ci_tbl = sec.tables[-1]
+    assert ci_tbl.loc["macro per-item mAP", "CI 97.5%"] == 0.95
+
+
+def test_assemble_report_passes_metric_ci_through():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
+    )
+    assert "CI 2.5%" in html
+
+
+# gap_vs_global＝gap 減全局參考值 0.3（見 "global"）；residual 已按新公式
+# gap_vs_global − clip(gap_vs_global, theory_min, theory_max) 重算：
+#   A: gap_vs_global=0.75-0.3=0.45，clip 到帶 [0.693,0.693]→0.693，
+#      residual=0.45-0.693=-0.243（|.|≤0.3 → 可解釋，verdict 不變）。
+#   B: gap_vs_global=0.9-0.3=0.6，clip 到帶 [0,0]→0，residual=0.6
+#      （|.|>0.3 → 不可解釋，verdict 不變）。
+# pooled_gap 依 A/B 的 p_mean/y_rate/n_rows 加權合併算出（僅供顯示，
+# report_builder 本身不重算）。
+# gap_calibrated_vs_global＝gap_calibrated 減全局參考值 reference_calibrated
+# =-0.1（opus 審查修正：gap_calibrated 同樣受母體條件化位移，判讀校準層要
+# 看相對值而非絕對值）：A: 0.02-(-0.1)=0.12；B: 0.8-(-0.1)=0.9。
+_RECON_FIXTURE = {
+    "enabled": True, "score_col_used": "score_uncalibrated",
+    "fallback": False, "explained_threshold": 0.3,
+    "theory": {"cells": {}, "by_item": {}, "notes": []},
+    "by_item": {
+        "A": {"theory_min": 0.693, "theory_max": 0.693, "theory_approx": True,
+              "gap": 0.75, "gap_vs_global": 0.45, "gap_calibrated": 0.02,
+              "gap_calibrated_vs_global": 0.12,
+              "residual": -0.243,
+              "verdict": "可解釋", "p_mean": 0.4, "y_rate": 0.25, "n_rows": 100},
+        "B": {"theory_min": 0.0, "theory_max": 0.0, "theory_approx": False,
+              "gap": 0.9, "gap_vs_global": 0.6, "gap_calibrated": 0.8,
+              "gap_calibrated_vs_global": 0.9,
+              "residual": 0.6,
+              "verdict": "不可解釋", "p_mean": 0.5, "y_rate": 0.3, "n_rows": 80},
+    },
+    "all_explained": False,
+    "global": {
+        "reference": 0.3, "method": "median_of_config_neutral_items",
+        "pooled_gap": 0.7605, "n_neutral_items": 3,
+        "reference_calibrated": -0.1,
+    },
+}
+
+
+def test_reconciliation_section_renders_table_and_verdict():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    sec = build_reconciliation_section(_RECON_FIXTURE, _params_min())
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["A", "B"]
+    assert tbl.loc["B", "verdict"] == "不可解釋"
+    assert "理論" in sec.description and "近似" in sec.description
+    assert "score_uncalibrated" in sec.description
+    assert "gap_vs_global" in tbl.columns
+    assert (list(tbl.columns).index("gap_vs_global")
+            == list(tbl.columns).index("gap") + 1)
+    assert "全局" in sec.description
+    # opus 總審修正 1：gap_calibrated_vs_global 緊接 gap_calibrated 之後，
+    # 描述需點出「中性」（config 中性 item 中位數）與「帶」（理論帶/帶寬）。
+    assert "gap_calibrated_vs_global" in tbl.columns
+    assert (list(tbl.columns).index("gap_calibrated_vs_global")
+            == list(tbl.columns).index("gap_calibrated") + 1)
+    assert "中性" in sec.description
+    assert "帶" in sec.description
+
+
+def test_reconciliation_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    assert build_reconciliation_section(None, _params_min()) is None
+    assert build_reconciliation_section({"enabled": False}, _params_min()) is None
+    params_off = {"evaluation": {"report": {"sections": {"reconciliation": False}}}}
+    assert build_reconciliation_section(_RECON_FIXTURE, params_off) is None
+
+
+def test_reconciliation_fallback_marked():
+    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
+    fx = dict(_RECON_FIXTURE, fallback=True, score_col_used="score")
+    sec = build_reconciliation_section(fx, _params_min())
+    assert "退回" in sec.description
+
+
+def test_assemble_report_renders_reconciliation():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), reconciliation=_RECON_FIXTURE
+    )
+    assert "對帳" in html
+
+
+_QUAD_FIXTURE = {
+    "enabled": True,
+    "thresholds": {"auc_threshold": 0.6, "gap_band": 0.35,
+                   "top_k_occupancy": 1},
+    "n_queries": 1000, "n_pos_queries": 400,
+    "by_item": {
+        "A": {"auc": 0.82, "auc_reason": None, "n_pos": 120, "n_neg": 880,
+              "n_rows": 1000, "gap_vs_global": 0.05, "level_status": "正常",
+              "disc_status": "好", "quadrant": "健康", "is_aggressor": False,
+              "ap_sampled": 0.61, "ci_low": 0.55, "ci_high": 0.68,
+              "top_share": 0.2, "n_top": 200, "y_rate": 0.12,
+              "suppression_count": 30},
+        "B": {"auc": 0.51, "auc_reason": None, "n_pos": 20, "n_neg": 980,
+              "n_rows": 1000, "gap_vs_global": 0.9, "level_status": "偏高",
+              "disc_status": "差", "quadrant": "加害者（常數高分型）",
+              "is_aggressor": True, "ap_sampled": 0.7, "ci_low": 0.5,
+              "ci_high": 0.85, "top_share": 0.6, "n_top": 600,
+              "y_rate": 0.02, "suppression_count": 480},
+    },
+    "cross_purchase": {
+        "matrix": {"A": {"A": 1.0, "B": 0.3}, "B": {"A": 0.5, "B": 1.0}},
+        "n_buyers": {"A": 100, "B": 60},
+    },
+    "sources": {"reconciliation": True, "metric_ci": True},
+    "notes": [],
+}
+
+
+def test_quadrant_section_renders_table_figure_and_matrix():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    sec = build_quadrant_section(_QUAD_FIXTURE, _params_min())
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["A", "B"]
+    assert tbl.loc["B", "quadrant"] == "加害者（常數高分型）"
+    assert len(sec.figures) == 1          # 散布圖
+    assert len(sec.tables) == 2           # 象限表＋交叉購買矩陣
+    assert sec.tables[1].loc["B", "A"] == pytest.approx(0.5)
+    assert "判讀" in sec.description
+    assert "evaluation-diagnosis" in sec.description
+
+
+def test_quadrant_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    assert build_quadrant_section(None, _params_min()) is None
+    assert build_quadrant_section({"enabled": False}, _params_min()) is None
+    params_off = {"evaluation": {"report": {"sections": {"quadrant": False}}}}
+    assert build_quadrant_section(_QUAD_FIXTURE, params_off) is None
+
+
+def test_quadrant_section_notes_and_missing_axis():
+    from recsys_tfb.evaluation.report_builder import build_quadrant_section
+    auc_reason = "單一類別（n_pos=0, n_neg=10）——AUC 未定義"
+    fx = dict(
+        _QUAD_FIXTURE,
+        by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
+                           gap_vs_global=None, level_status="無法評估",
+                           quadrant="無法評估", auc=None,
+                           auc_reason=auc_reason)},
+        notes=["reconciliation 停用或缺席——水準軸無法評估。"],
+    )
+    sec = build_quadrant_section(fx, _params_min())
+    assert "無法評估" in sec.tables[0]["quadrant"].tolist()
+    assert "reconciliation 停用" in sec.description
+    # 缺軸的 item 不進散布圖：唯一 item 缺 y → 無圖
+    assert sec.figures == []
+    # 單類 item 的 auc 為 None 時，人類可讀的原因要進報表（不只在 JSON）。
+    assert auc_reason in sec.tables[0]["auc_reason"].tolist()
+
+
+def test_assemble_report_renders_quadrant():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
+    )
+    assert "象限" in html
+
+
+_SWEEP_FIXTURE = {
+    "enabled": True,
+    "map_fit": {"zero": 0.50, "star": 0.58},
+    "map_holdout": {"zero": 0.51, "star": 0.56},
+    "recovered_gap_holdout": 0.05,
+    "interaction_residual_holdout": -0.01,
+    "delta_star": {"A": -1.0, "B": 0.0},
+    "delta_star_centered": {"A": -0.5, "B": 0.5},
+    "per_item": {
+        "A": {"delta_star": -1.0, "delta_star_centered": -0.5,
+              "loo_contribution_holdout": 0.06},
+        "B": {"delta_star": 0.0, "delta_star_centered": 0.5,
+              "loo_contribution_holdout": None},
+    },
+    "params": {"shrink_lambda": 0.1, "holdout_fraction": 0.5,
+               "max_rounds": 5,
+               "grid": {"lo": -2.0, "hi": 2.0, "step": 0.05}},
+    "notes": [],
+}
+
+
+def test_offset_sweep_section_off_by_config():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    params_off = {
+        "evaluation": {"report": {"sections": {"offset_sweep": False}}}
+    }
+    assert build_offset_sweep_section(_SWEEP_FIXTURE, params_off) is None
+
+
+def test_offset_sweep_section_none_for_stub_or_missing():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    assert build_offset_sweep_section(None, _params_min()) is None
+    assert build_offset_sweep_section({"enabled": False}, _params_min()) is None
+
+
+def test_offset_sweep_section_tables_and_waterfall():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    section = build_offset_sweep_section(_SWEEP_FIXTURE, _params_min())
+    assert section is not None
+    assert len(section.tables) == 2
+    assert "delta_star" in section.tables[1].columns
+    assert "delta_star_centered" in section.tables[1].columns
+    assert len(section.figures) == 1  # waterfall（有非零 δ*）
+
+
+def test_offset_sweep_waterfall_skipped_when_all_deltas_zero():
+    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
+    payload = dict(
+        _SWEEP_FIXTURE,
+        delta_star={"A": 0.0, "B": 0.0},
+        per_item={
+            "A": {"delta_star": 0.0, "loo_contribution_holdout": None},
+            "B": {"delta_star": 0.0, "loo_contribution_holdout": None},
+        },
+    )
+    section = build_offset_sweep_section(payload, _params_min())
+    assert section is not None
+    assert section.figures == []
+
+
+def test_assemble_report_includes_offset_sweep_section():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
+    )
+    assert "Offset sweep" in html
+
+
+_LEDGER_FIXTURE = {
+    "enabled": True,
+    "n_queries": 2, "n_pos_rows": 3, "n_mis_ordered_pairs": 3,
+    "matrix": {"B": {"A": {"pair_count": 2, "dap_sum": 1.0},
+                     "C": {"pair_count": 1, "dap_sum": 5 / 6}}},
+    "by_suppressor": {"B": {"pair_count": 3, "dap_sum": 11 / 6,
+                            "dap_share": 1.0}},
+    "by_victim": {"A": {"pair_count": 2, "dap_sum": 1.0,
+                        "dap_share": 6 / 11},
+                  "C": {"pair_count": 1, "dap_sum": 5 / 6,
+                        "dap_share": 5 / 11}},
+    "map_current": 7 / 12,
+    "substitution": {"B": {"base_rate": 0.0, "base_logit": -27.6,
+                           "map_substituted": 1.0,
+                           "delta_vs_current": 5 / 12}},
+    "by_segment": {"seg": {"X": {"n_pos_rows": 2,
+                                 "n_suppressed_pos_rows": 2,
+                                 "dap_sum": 4 / 3,
+                                 "dap_share": 8 / 11}}},
+    "notes": [],
+}
+
+
+def test_pair_ledger_section_renders_heatmap_and_tables():
+    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
+    sec = build_pair_ledger_section(_LEDGER_FIXTURE, _params_min())
+    assert sec is not None
+    assert len(sec.figures) == 1
+    assert len(sec.tables) == 3  # 壓制者邊際、substitution、by_segment
+
+
+def test_pair_ledger_section_no_pairs_skips_figure_keeps_tables():
+    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
+    ledger = dict(_LEDGER_FIXTURE, n_mis_ordered_pairs=0, matrix={})
+    sec = build_pair_ledger_section(ledger, _params_min())
+    assert sec is not None and sec.figures == []
+
+
+def test_pair_ledger_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
+    assert build_pair_ledger_section({"enabled": False}, _params_min()) is None
+    assert build_pair_ledger_section(None, _params_min()) is None
+    params_off = {
+        "evaluation": {"report": {"sections": {"pair_ledger": False}}}
+    }
+    assert build_pair_ledger_section(_LEDGER_FIXTURE, params_off) is None
+
+
+def test_pair_ledger_section_notes_appended_to_description():
+    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
+    ledger = dict(_LEDGER_FIXTURE, notes=["某注意事項"])
+    sec = build_pair_ledger_section(ledger, _params_min())
+    assert "某注意事項" in sec.description
+
+
+def test_assemble_report_includes_pair_ledger_section():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), pair_ledger=_LEDGER_FIXTURE
+    )
+    assert "壓制帳本" in html
+
+
+_TRIAGE_FIXTURE = {
+    "enabled": True,
+    "gain_ledger_present": True,
+    "thresholds": {"starve_ratio": 0.25, "weight_cap": 8.0},
+    "verdicts": {
+        "cfg": {
+            "verdict": "水準-配置型",
+            "lever": "槓桿1：推論期 logQ/offset 修正或修採樣配置（閉式）",
+            "starter": {"type": "logq_offset", "value": 0.4,
+                        "band": [0.1, 0.7], "unit": "log-odds",
+                        "caveat": "起手值，須經快迴路驗證，非定案"},
+            "evidence": {"auc": 0.7, "disc_status": "好",
+                        "level_status": "偏低", "gap_vs_global": -0.6,
+                        "recon_verdict": "可解釋", "theory_min": 0.1,
+                        "theory_max": 0.7, "residual": 0.0,
+                        "delta_star_centered": -0.5,
+                        "loo_contribution_holdout": 0.0,
+                        "context_gain_share": None, "y_rate": None},
+            "notes": [],
+        },
+        "stv": {
+            "verdict": "餓死型",
+            "lever": "槓桿3：item-aware weight／熱門負類欠採（配 logQ）／HPO 先驗",
+            "starter": {"type": "item_weight", "value": 4.47,
+                        "unit": "sample_weight 相對倍率（w∝1/√P 加上限，手冊3 Ch8）",
+                        "caveat": "起手值，須經快迴路驗證，非定案"},
+            "evidence": {"auc": 0.5, "disc_status": "差",
+                        "level_status": "正常", "gap_vs_global": 0.0,
+                        "recon_verdict": "可解釋", "theory_min": 0.0,
+                        "theory_max": 0.0, "residual": 0.0,
+                        "delta_star_centered": 0.3,
+                        "loo_contribution_holdout": 0.0,
+                        "context_gain_share": 0.01, "y_rate": 0.02},
+            "notes": [],
+        },
+    },
+    "summary": {"水準-配置型": 1, "餓死型": 1},
+    "notes": [],
+}
+
+
+def test_triage_section_renders_main_table():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
+    assert sec is not None
+    assert sec.figures == []
+    assert len(sec.tables) == 1
+    tbl = sec.tables[0]
+    assert list(tbl.index) == ["cfg", "stv"]
+    for col in ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+                "δ*_centered", "context_gain_share", "備註"]:
+        assert col in tbl.columns
+    assert tbl.loc["cfg", "判定"] == "水準-配置型"
+    assert tbl.loc["stv", "判定"] == "餓死型"
+    assert "logq_offset=0.400" in tbl.loc["cfg", "起手值"]
+
+
+def test_triage_section_none_when_disabled_or_absent():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    assert build_triage_section(None, _params_min()) is None
+    assert build_triage_section({"enabled": False}, _params_min()) is None
+    params_off = {
+        "evaluation": {"report": {"sections": {"triage": False}}}
+    }
+    assert build_triage_section(_TRIAGE_FIXTURE, params_off) is None
+
+
+def test_triage_section_description_has_summary_and_gain_ledger_status():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
+    assert "水準-配置型" in sec.description
+    assert "gain_ledger" in sec.description
+
+
+def test_triage_section_gain_ledger_absent_flagged_in_description():
+    from recsys_tfb.evaluation.report_builder import build_triage_section
+    ledger_absent = dict(_TRIAGE_FIXTURE, gain_ledger_present=False)
+    sec = build_triage_section(ledger_absent, _params_min())
+    assert "缺席" in sec.description or "降級" in sec.description
+
+
+def test_glossary_has_triage_entries():
+    from recsys_tfb.evaluation.report_builder import build_glossary_section
+    sec = build_glossary_section(_params_min())
+    txt = " ".join(str(t.to_dict()) for t in sec.tables)
+    assert "triage 總表" in txt
+    assert "餓死型" in txt
+    assert "起手值" in txt
+
+
+def test_assemble_report_includes_triage_section():
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), triage=_TRIAGE_FIXTURE
+    )
+    assert "Triage" in html

@@ -602,3 +602,318 @@ class TestCategoricalDtypeErrors:
         errs = categorical_dtype_errors(["industry_code"], {"industry_code": "decimal(15,0)"})
         msg = errs[0]
         assert "categorical_columns" in msg and "drop_columns" in msg
+
+
+class TestDiagnosisMetricParamsA15:
+    def _params(self, metric=None, sample=None, ci=None):
+        ev = {}
+        if metric is not None:
+            ev["metric"] = metric
+        diag = {}
+        if sample is not None:
+            diag["sample"] = sample
+        if ci is not None:
+            diag["ci"] = ci
+        if diag:
+            ev["diagnosis"] = diag
+        return {"evaluation": ev}
+
+    def test_absent_blocks_are_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        assert diagnosis_metric_param_errors({}) == []
+        assert diagnosis_metric_param_errors(self._params()) == []
+
+    def test_valid_defaults_are_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = self._params(
+            metric={"weight_alpha": 0.0, "k": None, "min_positives": 0,
+                    "shrinkage_k": 0},
+            sample={"max_queries": 200000, "min_pos_queries_per_item": 50,
+                    "seed": 42},
+            ci={"enabled": True, "n_boot": 200},
+        )
+        assert diagnosis_metric_param_errors(p) == []
+
+    def test_each_bad_value_reports(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = self._params(
+            metric={"weight_alpha": 1.5, "k": 0, "min_positives": -1,
+                    "shrinkage_k": -0.1},
+            sample={"max_queries": 0, "min_pos_queries_per_item": 0},
+            ci={"n_boot": 0},
+        )
+        errors = diagnosis_metric_param_errors(p)
+        assert len(errors) == 7
+        joined = "\n".join(errors)
+        for token in ["weight_alpha", "metric.k", "min_positives",
+                      "shrinkage_k", "max_queries",
+                      "min_pos_queries_per_item", "n_boot"]:
+            assert token in joined
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            validate_config_consistency,
+        )
+        p = self._params(metric={"weight_alpha": 2.0})
+        with _pytest.raises(ConfigConsistencyError, match="weight_alpha"):
+            validate_config_consistency(p)
+
+
+class TestReconciliationParamsA16:
+    def _params(self, recon):
+        return {"evaluation": {"diagnosis": {"reconciliation": recon}}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        assert reconciliation_param_errors({}) == []
+        assert reconciliation_param_errors(self._params(
+            {"enabled": True, "score_col": "score_uncalibrated",
+             "explained_threshold": 0.3}
+        )) == []
+
+    def test_bad_values_report(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        errors = reconciliation_param_errors(self._params(
+            {"score_col": "rank", "explained_threshold": 0}
+        ))
+        assert len(errors) == 2
+        joined = "\n".join(errors)
+        assert "score_col" in joined and "explained_threshold" in joined
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="score_col"):
+            validate_config_consistency(self._params({"score_col": "rank"}))
+
+
+class TestEnabledMustBeBool:
+    """A15/A16：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
+
+    def test_ci_enabled_string_rejected(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = {"evaluation": {"diagnosis": {"ci": {"enabled": "false"}}}}
+        errors = diagnosis_metric_param_errors(p)
+        assert len(errors) == 1 and "ci.enabled" in errors[0]
+
+    def test_reconciliation_enabled_string_rejected(self):
+        from recsys_tfb.core.consistency import reconciliation_param_errors
+        p = {"evaluation": {"diagnosis": {"reconciliation": {"enabled": "false"}}}}
+        errors = reconciliation_param_errors(p)
+        assert len(errors) == 1 and "reconciliation.enabled" in errors[0]
+
+    def test_bool_values_clean(self):
+        from recsys_tfb.core.consistency import (
+            diagnosis_metric_param_errors,
+            reconciliation_param_errors,
+        )
+        p = {"evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                          "reconciliation": {"enabled": False}}}}
+        assert diagnosis_metric_param_errors(p) == []
+        assert reconciliation_param_errors(p) == []
+
+
+class TestQuadrantParamsA17:
+    def _params(self, quad):
+        return {"evaluation": {"diagnosis": {"quadrant": quad}}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        assert quadrant_param_errors({}) == []
+        assert quadrant_param_errors(self._params(
+            {"enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+             "top_k_occupancy": 1}
+        )) == []
+
+    def test_bad_values_report(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        errors = quadrant_param_errors(self._params(
+            {"auc_threshold": 0.4, "gap_band": 0, "top_k_occupancy": 0,
+             "enabled": "false"}
+        ))
+        assert len(errors) == 4
+        joined = "\n".join(errors)
+        assert "auc_threshold" in joined and "gap_band" in joined
+        assert "top_k_occupancy" in joined and "enabled" in joined
+
+    def test_auc_threshold_boundaries(self):
+        from recsys_tfb.core.consistency import quadrant_param_errors
+        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) != []
+        assert quadrant_param_errors(self._params({"auc_threshold": 0.51})) == []
+        assert quadrant_param_errors(self._params({"auc_threshold": 1.0})) != []
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="auc_threshold"):
+            validate_config_consistency(self._params({"auc_threshold": 0.4}))
+
+
+class TestOffsetSweepParamsA18:
+    def _params(self, sweep=None, inject=None):
+        diag = {}
+        if sweep is not None:
+            diag["offset_sweep"] = sweep
+        if inject is not None:
+            diag["debug_inject_offsets"] = inject
+        return {"evaluation": {"diagnosis": diag}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        assert offset_sweep_param_errors({}) == []
+        assert offset_sweep_param_errors(self._params(
+            {"enabled": True, "shrink_lambda": 0.1, "holdout_fraction": 0.5,
+             "max_rounds": 5, "grid": {"lo": -2.0, "hi": 2.0, "step": 0.05}}
+        )) == []
+
+    def test_holdout_fraction_must_be_strictly_inside_unit_interval(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (0.0, 1.0, -0.1, "0.5"):
+            errors = offset_sweep_param_errors(
+                self._params({"holdout_fraction": bad})
+            )
+            assert any("holdout_fraction" in e for e in errors)
+
+    def test_shrink_lambda_nonnegative(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(
+            self._params({"shrink_lambda": -0.1})
+        )
+        assert any("shrink_lambda" in e for e in errors)
+
+    def test_grid_well_formed_and_straddles_zero(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": 2.0, "hi": -2.0, "step": 0.05}}
+        ))
+        assert any("lo" in e for e in errors)
+
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": 0.5, "hi": 2.0, "step": 0.05}}
+        ))
+        assert any("must contain 0" in e for e in errors)
+
+        errors = offset_sweep_param_errors(self._params(
+            {"grid": {"lo": -2.0, "hi": 2.0, "step": 0}}
+        ))
+        assert any("step" in e for e in errors)
+
+    def test_max_rounds_positive_int_not_bool(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (0, True, 2.5):
+            errors = offset_sweep_param_errors(
+                self._params({"max_rounds": bad})
+            )
+            assert any("max_rounds" in e for e in errors)
+
+    def test_enabled_must_be_bool(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        errors = offset_sweep_param_errors(self._params({"enabled": "false"}))
+        assert any("enabled" in e for e in errors)
+
+    def test_inject_values_must_be_finite_numbers(self):
+        from recsys_tfb.core.consistency import offset_sweep_param_errors
+        for bad in (float("nan"), float("inf"), "1.0"):
+            errors = offset_sweep_param_errors(
+                self._params(inject={"x": bad})
+            )
+            assert any("debug_inject_offsets" in e for e in errors)
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="shrink_lambda"):
+            validate_config_consistency(
+                self._params({"shrink_lambda": -1})
+            )
+
+
+class TestPairLedgerParamsA19:
+    def _params(self, pair_ledger=None):
+        diag = {}
+        if pair_ledger is not None:
+            diag["pair_ledger"] = pair_ledger
+        return {"evaluation": {"diagnosis": diag}}
+
+    def test_absent_and_valid_defaults_clean(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        assert pair_ledger_param_errors({}) == []
+        assert pair_ledger_param_errors(self._params()) == []
+        assert pair_ledger_param_errors(
+            self._params({"enabled": True})
+        ) == []
+
+    def test_non_bool_enabled_rejected(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        errs = pair_ledger_param_errors(self._params({"enabled": "yes"}))
+        assert len(errs) == 1
+        assert "evaluation.diagnosis.pair_ledger.enabled" in errs[0]
+
+    def test_missing_block_defaults_clean(self):
+        from recsys_tfb.core.consistency import pair_ledger_param_errors
+        params = self._params({"enabled": True})
+        params["evaluation"]["diagnosis"].pop("pair_ledger", None)
+        assert pair_ledger_param_errors(params) == []
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="pair_ledger"):
+            validate_config_consistency(
+                self._params({"enabled": "yes"})
+            )
+
+
+class TestStructureTriageParamsA20:
+    def _params(self, background=None, gain_ledger_enabled=None, triage_enabled=None):
+        diag = {}
+        if background is not None:
+            diag["shap"] = {"background": background}
+        if gain_ledger_enabled is not None:
+            diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
+        params = {"diagnostics": diag}
+        if triage_enabled is not None:
+            params["evaluation"] = {
+                "diagnosis": {"triage": {"enabled": triage_enabled}}
+            }
+        return params
+
+    def test_bad_background_domain_rejected(self):
+        from recsys_tfb.core.consistency import structure_triage_param_errors
+        errs = structure_triage_param_errors(self._params(background="per_query"))
+        assert len(errs) == 1
+        assert "diagnostics.shap.background" in errs[0]
+
+    def test_valid_background_values_clean(self):
+        from recsys_tfb.core.consistency import structure_triage_param_errors
+        assert structure_triage_param_errors(self._params(background="global")) == []
+        assert structure_triage_param_errors(self._params(background="per_item")) == []
+        # absent block / absent key -> default "global" -> clean
+        assert structure_triage_param_errors({}) == []
+
+    def test_non_bool_enabled_flags_both_rejected(self):
+        from recsys_tfb.core.consistency import structure_triage_param_errors
+        errs = structure_triage_param_errors(
+            self._params(gain_ledger_enabled="yes", triage_enabled=1)
+        )
+        assert len(errs) == 2
+        assert any("gain_ledger.enabled" in e for e in errs)
+        assert any("triage.enabled" in e for e in errs)
+
+    def test_registered_in_validate_config_consistency(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError, validate_config_consistency,
+        )
+        with _pytest.raises(ConfigConsistencyError, match="background"):
+            validate_config_consistency(self._params(background="per_query"))

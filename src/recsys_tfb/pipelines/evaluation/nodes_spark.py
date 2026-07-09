@@ -261,11 +261,206 @@ def compute_baseline_metrics(
     return metrics
 
 
+def compute_metric_ci(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """診斷抽樣＋cluster bootstrap CI（spec §3 Phase 1）。
+
+    薄 node：抽樣與 bootstrap 都在 ``diagnosis.metric``。停用時回傳 stub
+    （catalog 仍寫出 ``{"enabled": false}``，產物路徑恆存在、下游可判別）。
+    輸出含 ``sample`` metadata——CI 是抽樣估計，報表必須標示樣本規模。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
+    if not ci_cfg.get("enabled", True):
+        logger.info("metric CI disabled — writing stub")
+        return {"enabled": False}
+
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_metric_ci: eval_predictions is required when "
+            "evaluation.diagnosis.ci.enabled is true"
+        )
+
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
+    out = bootstrap_per_item_ci(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "metric CI computed on %d sampled queries (n_boot=%d)",
+        sample_meta["n_queries_sampled"], out["n_boot"],
+    )
+    return out
+
+
+def compute_reconciliation(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """對帳層薄 node（spec §3 Phase 2）：理論偏移 vs 實測校準差距。
+
+    領域邏輯全在 ``diagnosis.metric.reconciliation``。停用時寫 stub。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("reconciliation", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("reconciliation disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_reconciliation: eval_predictions is required when "
+            "evaluation.diagnosis.reconciliation.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
+    out = reconcile(eval_predictions, parameters)
+    logger.info(
+        "reconciliation computed: %d items, all_explained=%s (score_col=%s)",
+        len(out["by_item"]), out["all_explained"], out["score_col_used"],
+    )
+    return out
+
+
+def compute_quadrant(
+    eval_predictions: Optional[SparkDataFrame],
+    label_table: Optional[SparkDataFrame],
+    metric_ci: Optional[dict],
+    reconciliation: Optional[dict],
+    parameters: dict,
+) -> dict:
+    """象限層薄 node（框架診斷項目 3/5/10）。
+
+    領域邏輯全在 ``diagnosis.metric.quadrant``。停用時寫 stub；上游診斷
+    產物（metric_ci/reconciliation）是停用 stub 時 best-effort 降級不失敗。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {}).get("quadrant", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("quadrant disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None or label_table is None:
+        raise ValueError(
+            "compute_quadrant: eval_predictions and label_table are required "
+            "when evaluation.diagnosis.quadrant.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.quadrant import build_quadrant_summary
+    out = build_quadrant_summary(
+        eval_predictions, label_table, metric_ci, reconciliation, parameters
+    )
+    logger.info(
+        "quadrant computed: %d items, %d aggressors",
+        len(out["by_item"]),
+        sum(1 for v in out["by_item"].values() if v["is_aggressor"]),
+    )
+    return out
+
+
+def compute_offset_sweep(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """分流層薄 node（spec §3 Phase 4；框架診斷項目 6）。
+
+    領域邏輯全在 ``diagnosis.metric.offset_sweep``（driver 端 numpy）。
+    抽樣與 metric_ci 走同一套 ``draw_diagnosis_sample``（同 seed→內容
+    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
+    停用時寫 stub。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("offset_sweep", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("offset sweep disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_offset_sweep: eval_predictions is required when "
+            "evaluation.diagnosis.offset_sweep.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.offset_sweep import sweep
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(
+        eval_predictions, parameters
+    )
+    out = sweep(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "offset sweep computed: %d items, rounds=%d converged=%s, "
+        "holdout mAP zero=%s star=%s",
+        len(out.get("delta_star", {})), out.get("n_rounds_run"),
+        out.get("converged"),
+        (out.get("map_holdout") or {}).get("zero"),
+        (out.get("map_holdout") or {}).get("star"),
+    )
+    return out
+
+
+def compute_pair_ledger(
+    eval_predictions: Optional[SparkDataFrame],
+    parameters: dict,
+) -> dict:
+    """壓制帳本薄 node（spec §3 Phase 4b；框架診斷項目 7）。
+
+    領域邏輯全在 ``diagnosis.metric.pair_ledger``（driver 端 numpy）。
+    抽樣與其他診斷節點走同一套 ``draw_diagnosis_sample``（同 seed→內容
+    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
+    停用時寫 stub。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    cfg = ((eval_params.get("diagnosis", {}) or {})
+           .get("pair_ledger", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("pair ledger disabled — writing stub")
+        return {"enabled": False}
+    if eval_predictions is None:
+        raise ValueError(
+            "compute_pair_ledger: eval_predictions is required when "
+            "evaluation.diagnosis.pair_ledger.enabled is true"
+        )
+    from recsys_tfb.diagnosis.metric.pair_ledger import pair_ledger
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+
+    sample_pdf, sample_meta = draw_diagnosis_sample(
+        eval_predictions, parameters
+    )
+    out = pair_ledger(sample_pdf, parameters)
+    out["sample"] = sample_meta
+    logger.info(
+        "pair ledger computed: %d mis-ordered pairs, %d suppressors, "
+        "map_current=%s",
+        out.get("n_mis_ordered_pairs", 0),
+        len(out.get("by_suppressor", {})),
+        out.get("map_current"),
+    )
+    return out
+
+
+def assemble_triage_summary(quadrant: Optional[dict], reconciliation: Optional[dict],
+                            offset_sweep: Optional[dict], gain_ledger: Optional[dict],
+                            parameters: dict) -> dict:
+    """Triage 總表 node：純 dict 合成，gain_ledger 缺席 best-effort 降級。"""
+    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+    if not (diag.get("triage", {}) or {}).get("enabled", True):
+        return {"enabled": False}
+    from recsys_tfb.diagnosis.metric.triage import triage
+    return triage(quadrant, reconciliation, offset_sweep, gain_ledger, parameters)
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
+    metric_ci: Optional[dict] = None,
+    reconciliation: Optional[dict] = None,
+    quadrant: Optional[dict] = None,
+    offset_sweep: Optional[dict] = None,
+    pair_ledger: Optional[dict] = None,
+    triage: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
@@ -330,4 +525,10 @@ def generate_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
         diagnostics_frames=diagnostics_frames,
+        metric_ci=metric_ci,
+        reconciliation=reconciliation,
+        quadrant=quadrant,
+        offset_sweep=offset_sweep,
+        pair_ledger=pair_ledger,
+        triage=triage,
     )

@@ -5,6 +5,11 @@ import pytest
 
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+# loopback 綁定：macOS 換網路後 hostname 會解析到過期 IP，driver 綁不上 →
+# 所有 Spark fixture 在 setup 秒炸（netty bind error）。測試都是 local[1]，
+# 走 127.0.0.1 恆正確。setdefault 保留外部顯式覆寫空間。
+# （2026-07-07，known-pitfalls.md §7）
+os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
 
 
 @pytest.fixture

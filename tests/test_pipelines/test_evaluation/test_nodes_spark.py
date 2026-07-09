@@ -525,3 +525,192 @@ class TestComputeBaselineMetrics:
             self._parameters(baseline_section=False),
         )
         assert result is None
+
+
+def test_compute_metric_ci_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
+    }
+    assert compute_metric_ci(None, params) == {"enabled": False}
+
+
+def test_compute_metric_ci_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1),
+            ("20240331", "C0", "B", 0.1, 0),
+            ("20240331", "C1", "A", 0.1, 1),
+            ("20240331", "C1", "B", 0.9, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {
+            "metric": {"weight_alpha": 0.0, "k": None,
+                       "min_positives": 0, "shrinkage_k": 0},
+            "diagnosis": {
+                "sample": {"max_queries": 100,
+                           "min_pos_queries_per_item": 1, "seed": 42},
+                "ci": {"enabled": True, "n_boot": 20},
+            },
+        },
+    }
+    out = compute_metric_ci(df, params)
+    assert out["enabled"] is True
+    assert "A" in out["per_item"] and "macro" in out and "sample" in out
+    assert out["sample"]["n_queries_sampled"] == 2
+
+
+def test_compute_reconciliation_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_reconciliation
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"reconciliation": {"enabled": False}}},
+    }
+    assert compute_reconciliation(None, params) == {"enabled": False}
+
+
+def test_compute_reconciliation_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_reconciliation
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.5, 0.5, 1),
+            ("20240331", "C1", "A", 0.5, 0.5, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score",
+                "score_uncalibrated", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "dataset": {"sample_ratio": 1.0,
+                    "sample_group_keys": ["prod_name", "label"],
+                    "sample_ratio_overrides": {}},
+        "training": {"sample_weight_keys": ["prod_name"],
+                     "sample_weights": {}},
+        "evaluation": {"diagnosis": {"reconciliation": {
+            "enabled": True, "score_col": "score_uncalibrated",
+            "explained_threshold": 0.3}}},
+    }
+    out = compute_reconciliation(df, params)
+    assert out["enabled"] is True
+    assert out["by_item"]["A"]["verdict"] == "可解釋"
+    assert out["all_explained"] is True
+
+
+def test_compute_quadrant_disabled_returns_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {"enabled": False}}},
+    }
+    assert compute_quadrant(None, None, None, None, params) == {"enabled": False}
+
+
+def test_compute_quadrant_requires_inputs_when_enabled(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_quadrant"):
+        compute_quadrant(None, None, None, None, params)
+
+
+def test_compute_quadrant_end_to_end_small(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, 1),
+            ("20240331", "C0", "B", 0.5, 0, 2),
+            ("20240331", "C1", "A", 0.2, 0, 2),
+            ("20240331", "C1", "B", 0.6, 1, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
+    )
+    labels = spark.createDataFrame(
+        [("20240331", "C0", "A", 1), ("20240331", "C1", "B", 1)],
+        schema=["snap_date", "cust_id", "prod_name", "label"],
+    )
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"quadrant": {
+            "enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+            "top_k_occupancy": 1}}},
+    }
+    out = compute_quadrant(df, labels, {"enabled": False},
+                           {"enabled": False}, params)
+    assert out["enabled"] is True
+    assert set(out["by_item"]) == {"A", "B"}
+    assert out["by_item"]["A"]["quadrant"] == "無法評估"  # 上游 stub → 水準軸缺
+
+
+def test_compute_offset_sweep_disabled_writes_stub(spark):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": False}}},
+    }
+    assert compute_offset_sweep(None, params) == {"enabled": False}
+
+
+def test_compute_offset_sweep_requires_eval_predictions_when_enabled(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_offset_sweep"):
+        compute_offset_sweep(None, params)
+
+
+def test_assemble_triage_summary_disabled_returns_stub():
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        assemble_triage_summary,
+    )
+    params = {"evaluation": {"diagnosis": {"triage": {"enabled": False}}}}
+    out = assemble_triage_summary(
+        {"enabled": True, "by_item": {}}, None, None, None, params
+    )
+    assert out == {"enabled": False}
+
+
+def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        assemble_triage_summary,
+    )
+    params = {"evaluation": {"diagnosis": {"triage": {"enabled": True}}}}
+    quadrant = {
+        "enabled": True,
+        "by_item": {
+            "A": {"auc": 0.5, "disc_status": "差", "level_status": "正常",
+                  "gap_vs_global": 0.0, "auc_reason": None, "y_rate": 0.1},
+        },
+    }
+    out = assemble_triage_summary(quadrant, None, None, None, params)
+    assert out["enabled"] is True
+    assert out["gain_ledger_present"] is False
+    assert "A" in out["verdicts"]

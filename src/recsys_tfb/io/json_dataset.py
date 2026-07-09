@@ -7,10 +7,13 @@ from recsys_tfb.io.base import AbstractDataset
 class JSONDataset(AbstractDataset):
     """Dataset for reading and writing structured data as JSON files."""
 
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, optional: bool = False):
         self._filepath = filepath
+        self._optional = optional
 
     def load(self):
+        if self._optional and not os.path.exists(self._filepath):
+            return None
         with open(self._filepath) as f:
             return json.load(f)
 

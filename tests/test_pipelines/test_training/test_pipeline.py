@@ -13,10 +13,11 @@ class TestTrainingPipeline:
         # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
         # + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
-        # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
+        # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 18
+        assert len(pipeline.nodes) == 19
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -47,7 +48,7 @@ class TestTrainingPipeline:
             "train_parquet_handle", "train_dev_parquet_handle",
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
-            "feature_statistics", "feature_importance", "shap_diagnostics",
+            "feature_statistics", "feature_importance", "gain_ledger", "shap_diagnostics",
             "shap_population", "case_rows", "quadrant_profiles", "cases_manifest",
             "sample_weight_report",
         }
@@ -132,10 +133,11 @@ class TestTrainingPipeline:
         # select_features + 5 cache nodes + prepare_lgb + persist_sample_weight_report
         # + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
-        # + compute_feature_statistics + compute_feature_importance + compute_shap_diagnostics
+        # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
+        # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 20
+        assert len(pipeline.nodes) == 21
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)

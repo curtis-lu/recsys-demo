@@ -795,7 +795,7 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     parameters = {"model_version": "mv1", "mlflow": {}, "training": {}}
-    from recsys_tfb.pipelines.training.diagnostics import diagnostics_dir
+    from recsys_tfb.diagnosis.model import diagnostics_dir
     diagnostics_dir(parameters)  # create the dir so log_artifacts has something
 
     class _Model:
@@ -1114,7 +1114,7 @@ def test_persist_sample_weight_report_writes_json(tmp_path, monkeypatch):
     # node resolves the model version dir via diagnostics_dir(...).parent;
     # patch the SOURCE module so the node's lazy import picks up the fake.
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.diagnostics.diagnostics_dir",
+        "recsys_tfb.diagnosis.model.diagnostics_dir",
         lambda params: version_dir / "diagnostics",
     )
 
@@ -1142,7 +1142,7 @@ def test_persist_sample_weight_report_writes_when_disabled(tmp_path, monkeypatch
     pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
     version_dir = tmp_path / "models" / "abc123"
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.diagnostics.diagnostics_dir",
+        "recsys_tfb.diagnosis.model.diagnostics_dir",
         lambda params: version_dir / "diagnostics",
     )
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
