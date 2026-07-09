@@ -9,6 +9,15 @@ spark:
   # spark.executor.cores: 4
   # spark.driver.memory: 8g
 
+# ops block（與 spark:／mlflow:／cache: 同層）——不影響 model_version。
+# HPO 與其後的 finalize/calibrate 全是 driver-local，Spark 從 cache_* 節點結束到
+# predict_and_write_test_predictions 之間完全閒置，可能數小時。閒置的 application
+# 會被叢集端回收，context 在 JVM 端死掉，之後寫 Hive 就撞 stopped SparkContext。
+# 改成主動釋放，由下一個用到 Spark 的節點依 canonical configs 重建。
+# 設為 false 可停用（session 全程存活；重建修復仍會兜底）。
+spark_lifecycle:
+  release_during_hpo: true
+
 training:
   algorithm: lightgbm          # ∈ {lightgbm}（ADAPTER_REGISTRY 已註冊者；未知會 raise 列出可用）
   algorithm_params:

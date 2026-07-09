@@ -121,6 +121,25 @@ def stop_spark_session() -> bool:
     return True
 
 
+def release_spark_session(parameters: dict) -> bool:
+    """Release the SparkSession before a long driver-local stretch (HPO).
+
+    Holding an idle Spark application for hours invites the cluster to reclaim
+    it; the context then dies JVM-side and every later Spark call fails. Give
+    the executors back instead, and let the next mode-2 caller rebuild from the
+    canonical configs.
+
+    Returns True when a session was actually stopped.
+    """
+    lifecycle = parameters.get("spark_lifecycle") or {}
+    if not lifecycle.get("release_during_hpo", True):
+        logger.info(
+            "spark_lifecycle.release_during_hpo=false; keeping SparkSession alive"
+        )
+        return False
+    return stop_spark_session()
+
+
 def _safe_app_id(session: SparkSession) -> str | None:
     try:
         return session.sparkContext.applicationId

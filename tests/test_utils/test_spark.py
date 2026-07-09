@@ -413,3 +413,30 @@ class TestInstrumentation:
             assert dead[0].last_application_id is not None
         finally:
             second.stop()
+
+
+class TestReleaseSparkSession:
+    """HPO 之前主動釋放 session,把 executors 還給叢集。"""
+
+    def test_releases_by_default(self):
+        from recsys_tfb.utils.spark import release_spark_session
+
+        get_or_create_spark_session(_minimal_configs())
+        assert release_spark_session({}) is True
+        assert SparkSession.getActiveSession() is None
+
+    def test_toggle_off_keeps_session_alive(self):
+        from recsys_tfb.utils.spark import release_spark_session
+
+        session = get_or_create_spark_session(_minimal_configs())
+        params = {"spark_lifecycle": {"release_during_hpo": False}}
+        try:
+            assert release_spark_session(params) is False
+            assert _is_session_alive(session)
+        finally:
+            session.stop()
+
+    def test_no_session_returns_false(self):
+        from recsys_tfb.utils.spark import release_spark_session
+
+        assert release_spark_session({}) is False
