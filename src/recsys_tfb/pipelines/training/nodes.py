@@ -22,6 +22,7 @@ from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
+from recsys_tfb.utils.spark import release_spark_session
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,19 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
     """
+    # HPO 與其後的 finalize/calibrate 全是 driver-local:Spark 從這裡到
+    # predict_and_write_test_predictions 完全閒置,可能數小時。閒置的 application
+    # 會被叢集端回收,context 在 JVM 端死掉,之後寫 Hive 就撞 IllegalStateException。
+    # 主動釋放,由 predict 節點依 canonical configs 重建。
+    #
+    # 放在函式體第一行(而非新增 DAG 節點):Runner 循序執行,「第一行」在構造上就等於
+    # 「前面的節點都跑完」;零入度節點的排序則取決於宣告位置,靠不住。
+    #
+    # 注意:fb0d4c4 也曾在此 stop 過 session,並在 85b28699 被移除——那次是誤診效能
+    # 問題(真因是 OMP thread oversubscription),且當時的重建路徑無法處理 JVM 端
+    # 死亡(只處理 Python 端 stop)。這次不同:釋放是目的,且重建對兩種死法都有效。
+    release_spark_session(parameters)
+
     from recsys_tfb.io.extract import extract_Xy_with_groups
 
     training_params = parameters["training"]

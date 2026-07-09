@@ -1,13 +1,56 @@
-"""SparkSession entrypoint with config-driven creation and fallback."""
+"""SparkSession entrypoint: config-driven creation with canonical-config memory."""
 
 import logging
+import time
 from typing import Any
 
+from pyspark import SparkContext
 from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
 
 _VALID_VALUE_TYPES = (str, int, bool)
+
+# Canonical configs, remembered from the first mode-1 call (a CLI entry).
+# mode-2 rebuilds from these instead of re-reading yaml: the yaml path guesses
+# the env from CONF_ENV (never set anywhere) and misses the per-pipeline
+# `spark:` block that _load_spark_config merges in.
+_canonical_configs: dict[str, Any] | None = None
+_canonical_enable_hive: bool = False
+
+# Last application id we successfully built, and the last time we handed out a
+# live session. Reported by the ``spark_context_dead`` event, which fires only
+# when a context is found dead that *we* did not stop — i.e. the cluster took it.
+#
+# Reading the event: with ``spark_lifecycle.release_during_hpo`` on (the
+# default) the HPO window holds no session at all, so an idle reclaim during HPO
+# cannot happen and no event fires for it. An event under the default therefore
+# means the context died while Spark was in active use — which already rules out
+# idle reclaim and points at preemption / AM failure / token expiry. To let an
+# idle-reclaim death happen and be attributed, set ``release_during_hpo: false``
+# and read ``seconds_since_last_use``: a gap matching the HPO window is an idle
+# reclaim; a gap unrelated to it is a fixed-lifetime death such as an expiring
+# delegation token.
+_last_app_id: str | None = None
+_last_alive_ts: float | None = None
+
+
+class SparkSessionUnavailableError(RuntimeError):
+    """A SparkSession could not be created or rebuilt.
+
+    Raised instead of letting py4j's ``Py4JNetworkError`` (dead JVM gateway —
+    unrecoverable in-process, the run must be restarted) or Spark's
+    ``IllegalStateException`` surface at an unrelated call site.
+    """
+
+
+def reset_spark_session_state() -> None:
+    """Forget the canonical configs. Test-only: module state leaks across tests."""
+    global _canonical_configs, _canonical_enable_hive, _last_app_id, _last_alive_ts
+    _canonical_configs = None
+    _canonical_enable_hive = False
+    _last_app_id = None
+    _last_alive_ts = None
 
 
 def get_or_create_spark_session(
@@ -19,14 +62,15 @@ def get_or_create_spark_session(
     Two call modes:
 
     1. Pipeline entrypoint passes ``spark_configs`` (already deep-merged
-       ``params["spark"]``). Builder is configured and a session is
-       created. If an active session already exists, runtime configs are
-       applied and the existing session is returned (cluster-level
-       configs would be ignored by PySpark — a warning is logged).
-    2. IO / SQLRunner / scripts call with ``None``. If an active session
-       exists, return it directly. Otherwise fall back to loading the
-       base ``parameters.yaml`` ``spark:`` block via ConfigLoader and
-       create a session from that.
+       ``params["spark"]``). The configs are remembered as canonical and a
+       session is created. If an active session already exists, runtime
+       configs are applied and the existing session is returned
+       (cluster-level configs would be ignored by PySpark — a warning is
+       logged).
+    2. IO / SQLRunner / scripts call with ``None``. An alive active session is
+       returned directly. Otherwise a session is rebuilt from the remembered
+       canonical configs, or — if no mode-1 call ever happened (scripts,
+       tests) — from the base ``parameters.yaml`` ``spark:`` block.
 
     enable_hive (default False): when True, the builder calls
         ``.enableHiveSupport()`` before ``getOrCreate()``. Required for
@@ -34,13 +78,16 @@ def get_or_create_spark_session(
         DDL needs Hive parser support). Production code paths leave this
         False; the cluster session inherits Hive support from
         ``SPARK_CONF_DIR``'s ``hive-site.xml`` rather than this flag.
+        Remembered alongside the configs so a rebuild keeps Hive support.
 
     Raises:
         TypeError: ``spark_configs`` is not a dict.
         ValueError: any value is not str / int / bool.
     """
+    global _canonical_configs, _canonical_enable_hive
+
     if spark_configs is None:
-        return _fallback_create()
+        return _rebuild_or_active()
 
     if not isinstance(spark_configs, dict):
         raise TypeError(
@@ -48,12 +95,103 @@ def get_or_create_spark_session(
         )
     _validate_values(spark_configs)
 
-    if SparkSession.getActiveSession() is not None:
+    _canonical_configs = dict(spark_configs)
+    _canonical_enable_hive = enable_hive
+
+    active = SparkSession.getActiveSession()
+    if active is not None and not _is_session_alive(active):
+        _stop_and_clear(active)
+    elif active is not None:
         logger.warning(
             "Active SparkSession already exists; cluster-level configs "
             "in spark_configs will be ignored by PySpark."
         )
 
+    return _build(spark_configs, enable_hive)
+
+
+def stop_spark_session() -> bool:
+    """Stop the current SparkSession, if any. True when one was actually stopped.
+
+    Idempotent: safe on an already-dead session and on no session at all. The
+    next mode-2 caller rebuilds from the canonical configs, so stopping is a
+    way to hand the executors back — not to end the run.
+    """
+    session = SparkSession.getActiveSession() or SparkSession._instantiatedSession
+    if session is None:
+        return False
+
+    app_id = _safe_app_id(session)
+    _stop_and_clear(session)
+    logger.info(
+        "SparkSession released (application_id=%s)", app_id,
+        extra={"event": "spark_session_released", "application_id": app_id},
+    )
+    return True
+
+
+def release_spark_session(parameters: dict) -> bool:
+    """Release the SparkSession before a long driver-local stretch (HPO).
+
+    Holding an idle Spark application for hours invites the cluster to reclaim
+    it; the context then dies JVM-side and every later Spark call fails. Give
+    the executors back instead, and let the next mode-2 caller rebuild from the
+    canonical configs.
+
+    Returns True when a session was actually stopped.
+    """
+    lifecycle = parameters.get("spark_lifecycle") or {}
+    if not lifecycle.get("release_during_hpo", True):
+        logger.info(
+            "spark_lifecycle.release_during_hpo=false; keeping SparkSession alive"
+        )
+        return False
+    return stop_spark_session()
+
+
+def _safe_app_id(session: SparkSession) -> str | None:
+    try:
+        return session.sparkContext.applicationId
+    except Exception:  # noqa: BLE001 — the context may already be gone
+        return None
+
+
+def _rebuild_or_active() -> SparkSession:
+    """Return the active session, or rebuild one (canonical configs, else yaml)."""
+    global _last_alive_ts
+
+    active = SparkSession.getActiveSession()
+    if active is not None and _is_session_alive(active):
+        _last_alive_ts = time.time()
+        return active
+
+    dead = active
+    if dead is None:
+        stale = SparkSession._instantiatedSession
+        if stale is not None and not _is_session_alive(stale):
+            dead = stale
+
+    if dead is not None:
+        idle = int(time.time() - (_last_alive_ts or time.time()))
+        logger.warning(
+            "Detected stopped SparkContext; rebuilding "
+            "(last_application_id=%s, seconds_since_last_use=%d)",
+            _last_app_id, idle,
+            extra={
+                "event": "spark_context_dead",
+                "last_application_id": _last_app_id,
+                "seconds_since_last_use": idle,
+            },
+        )
+        _stop_and_clear(dead)
+
+    if _canonical_configs is not None:
+        return _build(_canonical_configs, _canonical_enable_hive)
+
+    return _build_from_yaml()
+
+
+def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
     app_name = spark_configs.get("app_name", "recsys_tfb")
     builder = SparkSession.builder.appName(app_name)
     for key, value in spark_configs.items():
@@ -62,7 +200,38 @@ def get_or_create_spark_session(
         builder = builder.config(key, value)
     if enable_hive:
         builder = builder.enableHiveSupport()
-    return builder.getOrCreate()
+
+    try:
+        session = builder.getOrCreate()
+    except Exception as exc:  # noqa: BLE001 — surface one readable error
+        # Deliberately neutral: this also catches a first build failing on an
+        # unreachable master, a port clash, or a queue rejection. The real cause
+        # is chained via `from exc` and stays in the traceback.
+        raise SparkSessionUnavailableError(
+            f"Failed to build SparkSession (app_name={app_name!r}, "
+            f"last_application_id={_last_app_id!r}). Check the spark configs "
+            "and cluster availability. If the py4j gateway itself is dead the "
+            "driver JVM is gone: the run cannot recover in-process and must be "
+            "restarted."
+        ) from exc
+
+    _mark_alive(session)
+    logger.info(
+        "SparkSession ready (application_id=%s, app_name=%s)",
+        _last_app_id, app_name,
+        extra={
+            "event": "spark_session_created",
+            "application_id": _last_app_id,
+            "app_name": app_name,
+        },
+    )
+    return session
+
+
+def _mark_alive(session: SparkSession) -> None:
+    global _last_app_id, _last_alive_ts
+    _last_app_id = _safe_app_id(session)
+    _last_alive_ts = time.time()
 
 
 def _is_session_alive(session: SparkSession) -> bool:
@@ -82,6 +251,34 @@ def _is_session_alive(session: SparkSession) -> bool:
         return False
 
 
+def _stop_and_clear(session: SparkSession) -> None:
+    """Stop a session Python-side and clear PySpark's singletons.
+
+    ``SparkSession.builder.getOrCreate()`` treats a session as reusable
+    whenever ``_instantiatedSession._sc._jsc`` is not None. Only a Python-side
+    ``SparkContext.stop()`` sets ``_jsc`` to None, so a JVM-side death leaves
+    the singletons pointing at a corpse and every "rebuild" hands it back.
+    Clearing them is what makes the next getOrCreate actually build.
+
+    ``SparkSession.stop()`` clears the singletons only if its JVM calls
+    succeed; when the py4j gateway itself is gone it raises at
+    ``clearDefaultSession()`` (pyspark/sql/session.py) and never reaches its own
+    assignments. The explicit assignments below are the belt-and-braces for that
+    case, and mirror every singleton ``SparkSession.stop()`` would have cleared.
+    """
+    from pyspark.sql.context import SQLContext
+
+    try:
+        session.stop()
+    except Exception as exc:  # noqa: BLE001 — JVM/gateway may already be gone
+        logger.warning("SparkSession.stop() raised while clearing: %s", exc)
+
+    SparkSession._instantiatedSession = None
+    SparkSession._activeSession = None
+    SparkContext._active_spark_context = None
+    SQLContext._instantiatedContext = None
+
+
 def _validate_values(spark_configs: dict[str, Any]) -> None:
     bad = [
         k
@@ -95,20 +292,12 @@ def _validate_values(spark_configs: dict[str, Any]) -> None:
         )
 
 
-def _fallback_create() -> SparkSession:
-    """Return active session, or build one from base parameters.yaml.
+def _build_from_yaml() -> SparkSession:
+    """Build a session from base parameters.yaml. Only for never-configured callers.
 
-    `getActiveSession()` can return a session whose SparkContext has been
-    stopped (any caller that stops Spark mid-run — historically
-    tune_hyperparameters, removed in 85b2869). Treat a stopped session as
-    if there were none and rebuild from yaml — otherwise downstream nodes
-    call `.parallelize()` / `.createDataFrame()` on a dead context and hit
-    `IllegalStateException: Cannot call methods on a stopped SparkContext`.
+    Reached by scripts and tests that call mode-2 without any prior mode-1
+    call. Pipeline runs always go through the canonical configs instead.
     """
-    active = SparkSession.getActiveSession()
-    if active is not None and _is_session_alive(active):
-        return active
-
     import os
     from pathlib import Path
 
@@ -138,9 +327,15 @@ def _fallback_create() -> SparkSession:
     from recsys_tfb.utils.vdclient_resolver import resolve_vdclient_placeholders
     spark_configs = resolve_vdclient_placeholders(spark_configs)
 
+    # _build (not the mode-1 entry) — recursing through mode-1 would write
+    # yaml configs into _canonical_configs and poison the memory. That skips
+    # mode-1's _validate_values, so re-apply it here.
+    spark_configs = spark_configs or {"app_name": "recsys_tfb"}
+    _validate_values(spark_configs)
+
     logger.info(
         "Fallback: building SparkSession (yaml=conf/%s/parameters.yaml, "
         "connection settings from SPARK_CONF_DIR)",
         env,
     )
-    return get_or_create_spark_session(spark_configs or {"app_name": "recsys_tfb"})
+    return _build(spark_configs, False)
