@@ -17,12 +17,26 @@ _VALID_VALUE_TYPES = (str, int, bool)
 _canonical_configs: dict[str, Any] | None = None
 _canonical_enable_hive: bool = False
 
+# Last application id we successfully built. Reported when a context is later
+# found dead, so a cluster-side death can be traced back to its application.
+_last_app_id: str | None = None
+
+
+class SparkSessionUnavailableError(RuntimeError):
+    """A SparkSession could not be created or rebuilt.
+
+    Raised instead of letting py4j's ``Py4JNetworkError`` (dead JVM gateway —
+    unrecoverable in-process, the run must be restarted) or Spark's
+    ``IllegalStateException`` surface at an unrelated call site.
+    """
+
 
 def reset_spark_session_state() -> None:
     """Forget the canonical configs. Test-only: module state leaks across tests."""
-    global _canonical_configs, _canonical_enable_hive
+    global _canonical_configs, _canonical_enable_hive, _last_app_id
     _canonical_configs = None
     _canonical_enable_hive = False
+    _last_app_id = None
 
 
 def get_or_create_spark_session(
@@ -137,7 +151,23 @@ def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
         builder = builder.config(key, value)
     if enable_hive:
         builder = builder.enableHiveSupport()
-    return builder.getOrCreate()
+
+    try:
+        session = builder.getOrCreate()
+    except Exception as exc:  # noqa: BLE001 — surface one readable error
+        raise SparkSessionUnavailableError(
+            f"Failed to build SparkSession (app_name={app_name!r}, "
+            f"last_application_id={_last_app_id!r}). If the py4j gateway is "
+            "dead the driver JVM is gone and the run must be restarted."
+        ) from exc
+
+    _mark_alive(session)
+    return session
+
+
+def _mark_alive(session: SparkSession) -> None:
+    global _last_app_id
+    _last_app_id = _safe_app_id(session)
 
 
 def _is_session_alive(session: SparkSession) -> bool:

@@ -302,3 +302,43 @@ class TestStopSparkSession:
 
         assert stop_spark_session() is True
         assert SparkSession._instantiatedSession is None
+
+
+class TestBuildFailure:
+    """重建失敗要丟看得懂的例外,不要讓 py4j 的原始例外冒到無關的呼叫點。"""
+
+    def test_build_failure_wrapped_in_spark_session_unavailable(
+        self, monkeypatch
+    ):
+        import recsys_tfb.utils.spark as spark_mod
+        from recsys_tfb.utils.spark import SparkSessionUnavailableError
+
+        class _ExplodingBuilder:
+            def appName(self, *_args):
+                return self
+
+            def config(self, *_args):
+                return self
+
+            def enableHiveSupport(self):
+                return self
+
+            def getOrCreate(self):
+                raise RuntimeError("gateway is gone")
+
+        class _FakeSparkSession:
+            builder = _ExplodingBuilder()
+            _instantiatedSession = None
+            _activeSession = None
+
+            @staticmethod
+            def getActiveSession():
+                return None
+
+        monkeypatch.setattr(spark_mod, "SparkSession", _FakeSparkSession)
+
+        with pytest.raises(SparkSessionUnavailableError) as excinfo:
+            get_or_create_spark_session(_minimal_configs())
+
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert "gateway is gone" in str(excinfo.value.__cause__)
