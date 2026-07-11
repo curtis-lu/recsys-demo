@@ -917,3 +917,57 @@ class TestStructureTriageParamsA20:
         )
         with _pytest.raises(ConfigConsistencyError, match="background"):
             validate_config_consistency(self._params(background="per_query"))
+
+
+from recsys_tfb.core.consistency import (
+    nonnumeric_feature_errors,
+    spark_dtype_is_numeric,
+)
+
+
+class TestSparkDtypeIsNumeric:
+    @pytest.mark.parametrize(
+        "dt,expected",
+        [
+            ("int", True), ("bigint", True), ("smallint", True),
+            ("double", True), ("float", True), ("boolean", True),
+            ("decimal(15,0)", True), ("decimal(38,10)", True),
+            ("string", False), ("STRING", False), (" string ", False),
+            ("binary", False), ("date", False), ("timestamp", False),
+            ("array<string>", False), ("map<string,int>", False),
+            ("struct<a:int>", False),
+        ],
+    )
+    def test_classification(self, dt, expected):
+        assert spark_dtype_is_numeric(dt) is expected
+
+
+class TestNonnumericFeatureErrors:
+    def test_string_feature_not_encoded_is_flagged(self):
+        errs = nonnumeric_feature_errors(
+            {"age": "numeric", "cust_segment": "nonnumeric"}, set()
+        )
+        assert len(errs) == 1
+        assert "cust_segment" in errs[0]
+        assert "categorical_columns" in errs[0]
+        assert "drop_columns" in errs[0]
+
+    def test_nonnumeric_but_will_be_encoded_is_ok(self):
+        # prod_name: 在 parquet 是 string，但屬 deferred identity categorical
+        errs = nonnumeric_feature_errors(
+            {"prod_name": "nonnumeric", "age": "numeric"}, {"prod_name"}
+        )
+        assert errs == []
+
+    def test_all_numeric_is_ok(self):
+        assert nonnumeric_feature_errors({"a": "numeric", "b": "numeric"}, set()) == []
+
+    def test_empty_is_ok(self):
+        assert nonnumeric_feature_errors({}, set()) == []
+
+    def test_multiple_offenders_sorted_by_column(self):
+        errs = nonnumeric_feature_errors(
+            {"zzz": "nonnumeric", "aaa": "nonnumeric"}, set()
+        )
+        assert len(errs) == 2
+        assert "aaa" in errs[0] and "zzz" in errs[1]

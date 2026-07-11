@@ -121,6 +121,14 @@ Layer 2 — data-stage validation (B1 + B5 implemented and wired):
   ``categorical_dtype_errors`` (pure, no Spark); wired via
   ``validate_data_consistency`` alongside B1 (reads ``feature_table.dtypes``,
   metastore metadata only — no scan).
+* B6 — a feature column that is non-numeric (string / binary / date / timestamp /
+  complex) and is NOT declared categorical (so never integer-encoded): it becomes
+  an ``object``-dtype model feature → driver OOM at ``_pdf_to_X`` ``to_numpy`` and
+  a downstream LightGBM float-cast error. Predicate: ``nonnumeric_feature_errors``
+  (with the ``spark_dtype_is_numeric`` classifier). Wired at TWO call sites — the
+  dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
+  in) and a training-read backstop in ``io/extract.py`` (fails fast on an
+  already-built parquet, before the expensive pandas read). B4 is unused.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -957,6 +965,61 @@ def categorical_dtype_errors(
                 f"If {col!r} is a numeric feature, remove it from "
                 f"dataset.prepare_model_input.categorical_columns; if it is not "
                 f"a model feature, add it to "
+                f"dataset.prepare_model_input.drop_columns."
+            )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# B6 — non-numeric feature column that will not be encoded (object-dtype OOM)
+# ---------------------------------------------------------------------------
+
+_NONNUMERIC_SPARK_PREFIXES = (
+    "string", "binary", "date", "timestamp", "interval",
+    "array", "map", "struct",
+)
+
+
+def spark_dtype_is_numeric(simple_string: str) -> bool:
+    """True iff a Spark ``DataFrame.dtypes`` simpleString denotes a type that
+    survives ``DataFrame.values`` into a numeric numpy matrix (int / float /
+    decimal / boolean). String / binary / date / timestamp / complex types force
+    ``object`` dtype — the B6 footgun. Pure string classification (no Spark import).
+    """
+    return not simple_string.strip().lower().startswith(_NONNUMERIC_SPARK_PREFIXES)
+
+
+def nonnumeric_feature_errors(
+    feature_kinds: dict[str, str],
+    will_be_encoded: set[str],
+) -> list[str]:
+    """B6 invariant — the single definition.
+
+    A *feature* column that is non-numeric AND will not be encoded to numeric
+    downstream forces ``DataFrame.values`` into ``object`` dtype: every cell
+    becomes a boxed Python object (~34 B/cell vs 8 B for float64), exploding
+    driver memory (OOM at ``_pdf_to_X`` ``to_numpy``) and later failing
+    LightGBM's float cast. Prevented by declaring the column categorical (so it
+    is integer-encoded) or dropping it.
+
+    ``feature_kinds`` maps each *feature* column to ``"numeric"`` or
+    ``"nonnumeric"``; the caller classifies using its own dtype vocabulary
+    (Spark simpleString via :func:`spark_dtype_is_numeric` at the dataset gate,
+    or pyarrow types at the training-read backstop). ``will_be_encoded`` is the
+    set of feature columns that are non-numeric now but become numeric
+    downstream (declared categoricals, incl. deferred identity categoricals).
+    Returns collect-all error strings sorted by column; empty means OK.
+    """
+    errors: list[str] = []
+    for col in sorted(feature_kinds):
+        if feature_kinds[col] != "numeric" and col not in will_be_encoded:
+            errors.append(
+                f"feature column {col!r} is non-numeric and is not declared "
+                f"categorical, so it would become an un-encoded object-dtype "
+                f"model feature (OOM at _pdf_to_X.to_numpy, then a LightGBM "
+                f"float-cast error). If {col!r} is a categorical feature, add it "
+                f"to dataset.prepare_model_input.categorical_columns (it is then "
+                f"integer-encoded); if it is not a model feature, add it to "
                 f"dataset.prepare_model_input.drop_columns."
             )
     return errors
