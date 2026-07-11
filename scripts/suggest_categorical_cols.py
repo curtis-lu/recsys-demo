@@ -11,6 +11,11 @@ Usage:
 The output YAML is written to data/profiling/<stem>_categorical.yaml
 (directory auto-created). The stem is derived from Path(input).stem for
 parquet inputs and from the raw table name for Hive inputs.
+
+High-cardinality string columns (nunique > --max-string-cardinality, default 50)
+are NOT emitted as categoricals — they are listed under a ``drop_columns:`` block,
+because an un-encoded string feature becomes an object-dtype model feature and
+OOMs training (consistency invariant B6). Review both blocks before copying.
 """
 
 from __future__ import annotations
@@ -35,16 +40,21 @@ app = typer.Typer(
 def suggest_categorical_columns_spark(
     df: "SparkDataFrame",
     max_numerical_cardinality: int = 20,
-) -> tuple[list[str], list[tuple[str, int]], int]:
-    """Infer categorical columns from a Spark DataFrame.
+    max_string_cardinality: int = 50,
+) -> tuple[list[str], list[tuple[str, int]], list[tuple[str, int]], int]:
+    """Infer categorical columns (and high-cardinality strings to drop).
 
-    String and boolean columns are classified directly from the schema.
-    Numeric columns are evaluated via a single aggregation that also
-    computes count(*), so the caller needs no additional Spark action
-    to obtain the row count.
+    Numeric columns with nunique <= ``max_numerical_cardinality`` are implicit
+    categoricals (else left as numeric features). String/boolean columns with
+    nunique <= ``max_string_cardinality`` are categoricals; ABOVE that they are
+    routed to ``drop_suggestions`` — an un-encoded high-cardinality string would
+    become an object-dtype model feature → training OOM (consistency B6).
+    Cardinality for BOTH numeric and string/bool columns is computed in the
+    single existing aggregation (no extra scan).
 
     Returns:
-        (categorical_columns, implicit_numeric_info, n_rows)
+        (categorical_columns, drop_suggestions, implicit_numeric_info, n_rows)
+        drop_suggestions: list of (column, approx_nunique) sorted by column.
     """
     from pyspark.sql import functions as F
     from pyspark.sql.types import BooleanType, NumericType, StringType
@@ -59,42 +69,63 @@ def suggest_categorical_columns_spark(
         elif isinstance(dt, NumericType):
             numeric_cols.append(field.name)
 
-    implicit: list[tuple[str, int]] = []
-    numeric_categorical: set[str] = set()
-
+    counted_cols = numeric_cols + string_bool_cols
     agg_exprs = [F.count("*").alias("__n_rows__")] + [
         F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
-        for c in numeric_cols
+        for c in counted_cols
     ]
     row = df.agg(*agg_exprs).collect()[0]
     n_rows = int(row["__n_rows__"])
 
+    implicit: list[tuple[str, int]] = []
+    numeric_categorical: set[str] = set()
     for col in numeric_cols:
         n_distinct = int(row[col])
         if n_distinct <= max_numerical_cardinality:
             numeric_categorical.add(col)
             implicit.append((col, n_distinct))
 
+    string_categorical: set[str] = set()
+    drop_suggestions: list[tuple[str, int]] = []
+    for col in string_bool_cols:
+        n_distinct = int(row[col])
+        if n_distinct <= max_string_cardinality:
+            string_categorical.add(col)
+        else:
+            drop_suggestions.append((col, n_distinct))
+    drop_suggestions.sort()
+
     categorical: list[str] = []
-    string_bool_set = set(string_bool_cols)
     for field in df.schema.fields:
-        if field.name in string_bool_set or field.name in numeric_categorical:
+        if field.name in string_categorical or field.name in numeric_categorical:
             categorical.append(field.name)
 
-    return categorical, implicit, n_rows
+    return categorical, drop_suggestions, implicit, n_rows
 
 
-def format_yaml_output(categorical: list[str]) -> str:
-    """Format categorical columns as a flat YAML snippet.
+def format_yaml_output(
+    categorical: list[str],
+    drop_suggestions: list[tuple[str, int]] | None = None,
+) -> str:
+    """Format categorical + suggested drop columns as a YAML snippet.
 
     Example output:
         categorical_columns:
           - "col_a"
-          - "col_b"
+        drop_columns:
+          - "raw_id"   # nunique=4200 — high-cardinality string, not a categorical
     """
     lines = ["categorical_columns:"]
     for col in categorical:
         lines.append(f'  - "{col}"')
+    lines.append("drop_columns:")
+    if drop_suggestions:
+        for col, n in drop_suggestions:
+            lines.append(
+                f'  - "{col}"   # nunique={n} — high-cardinality string, not a categorical'
+            )
+    else:
+        lines.append("  # （無高 cardinality 字串欄；此清單供人工確認）")
     return "\n".join(lines) + "\n"
 
 
@@ -132,6 +163,7 @@ def _print_summary(
     n_cols: int,
     categorical: list[str],
     implicit: list[tuple[str, int]],
+    drop_suggestions: list[tuple[str, int]],
     output_path: Path,
 ) -> None:
     typer.echo(
@@ -154,6 +186,15 @@ def _print_summary(
         )
         for col, n in implicit:
             typer.echo(f"  - {col} (nunique={n})", err=True)
+    if drop_suggestions:
+        typer.echo("", err=True)
+        typer.echo(
+            "High-cardinality string columns routed to drop_columns "
+            "(un-encoded string feature → object-dtype OOM, consistency B6):",
+            err=True,
+        )
+        for col, n in drop_suggestions:
+            typer.echo(f"  - {col} (nunique={n})", err=True)
     typer.echo("", err=True)
     typer.echo(f"Written to: {output_path}", err=True)
 
@@ -170,6 +211,11 @@ def main(
         "-k",
         help="Numeric columns with nunique <= this are considered implicit categoricals",
     ),
+    max_string_cardinality: int = typer.Option(
+        50,
+        "--max-string-cardinality",
+        help="String/bool columns with nunique > this are suggested into drop_columns (B6 footgun)",
+    ),
 ) -> None:
     """Suggest categorical columns from a dataset and write a YAML snippet."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -177,14 +223,14 @@ def main(
     spark = get_or_create_spark_session()
     try:
         sdf, stem = _load_spark(source, spark)
-        categorical, implicit, n_rows = suggest_categorical_columns_spark(
-            sdf, max_cardinality
+        categorical, drop_suggestions, implicit, n_rows = suggest_categorical_columns_spark(
+            sdf, max_cardinality, max_string_cardinality
         )
         n_cols = len(sdf.schema.fields)
     finally:
         spark.stop()
 
-    yaml_content = format_yaml_output(categorical)
+    yaml_content = format_yaml_output(categorical, drop_suggestions)
     output_path = _write_output(stem, yaml_content)
     _print_summary(
         source=source,
@@ -193,6 +239,7 @@ def main(
         n_cols=n_cols,
         categorical=categorical,
         implicit=implicit,
+        drop_suggestions=drop_suggestions,
         output_path=output_path,
     )
 
