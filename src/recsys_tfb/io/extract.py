@@ -235,6 +235,59 @@ def _log_parquet_metadata(handle: ParquetHandle) -> None:
         )
 
 
+def _assert_feature_dtypes_numeric(
+    handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> None:
+    """B6 training-read backstop — raise before the expensive pandas read if any
+    model feature column is a non-numeric parquet type that will NOT be encoded
+    downstream (would OOM at ``_pdf_to_X`` ``to_numpy``, then fail LightGBM's
+    float cast).
+
+    Reads parquet schema only (pyarrow metadata, no data). Deferred identity
+    categoricals (e.g. ``prod_name``, encoded later in ``_pdf_to_X``) are exempt.
+    """
+    import pyarrow.dataset as pads
+    import pyarrow.types as pat
+
+    from recsys_tfb.core.consistency import (
+        DataConsistencyError,
+        nonnumeric_feature_errors,
+    )
+
+    feature_cols = preprocessor_metadata["feature_columns"]
+    categorical_cols = preprocessor_metadata["categorical_columns"]
+    identity_cols = get_schema(parameters)["identity_columns"]
+    deferred = {c for c in categorical_cols if c in identity_cols}
+
+    schema = pads.dataset(handle.path, format="parquet").schema
+    field_type = {name: schema.field(name).type for name in schema.names}
+
+    def _kind(t) -> str:
+        if (
+            pat.is_integer(t)
+            or pat.is_floating(t)
+            or pat.is_boolean(t)
+            or pat.is_decimal(t)
+        ):
+            return "numeric"
+        return "nonnumeric"
+
+    feature_kinds = {
+        c: _kind(field_type[c]) for c in feature_cols if c in field_type
+    }
+    errors = nonnumeric_feature_errors(feature_kinds, deferred)
+    if errors:
+        raise DataConsistencyError(
+            "train_model_input feature columns include un-encoded non-numeric "
+            "type(s) — this OOMs at to_numpy and fails LightGBM's float cast ("
+            + str(len(errors))
+            + " issue(s)):\n- "
+            + "\n- ".join(errors)
+        )
+
+
 def _pdf_to_X(
     pdf: pd.DataFrame,
     preprocessor_metadata: dict,
@@ -310,6 +363,7 @@ def extract_Xy(
     )
 
     _log_parquet_metadata(handle)
+    _assert_feature_dtypes_numeric(handle, preprocessor_metadata, parameters)
 
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()
@@ -360,6 +414,7 @@ def extract_Xy_with_groups(
     )
 
     _log_parquet_metadata(handle)
+    _assert_feature_dtypes_numeric(handle, preprocessor_metadata, parameters)
 
     with log_step(logger, "read_parquet"):
         pdf = handle.to_pandas()
