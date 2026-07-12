@@ -103,7 +103,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``evaluation.diagnosis.triage.enabled`` are bool. Predicate:
   ``structure_triage_param_errors``.
 
-Layer 2 — data-stage validation (B1 + B5 implemented and wired):
+Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).

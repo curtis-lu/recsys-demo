@@ -63,3 +63,10 @@
 - **根因**：macOS 的 hostname（`Mac`）在換 Wi-Fi/VPN 後仍解析到舊 DHCP 位址（實例：解析到 192.168.50.12，實際介面是 192.168.50.218）。Spark driver 預設綁 hostname 解析出的 IP → 綁不上。**錯誤看起來在測試/pipeline（下游），原因在網路環境（上游）**——R 系列鐵則同款形態。
 - **規則**：本機一律 loopback——已固定在兩處：`tests/conftest.py` 的 `os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")`、`conf/spark-local/spark-env.sh` 的 `export SPARK_LOCAL_IP=127.0.0.1`（spark-submit 自動 source）。不要改設 `spark.driver.host`（spark-defaults.conf 註記過的 RpcEndpointNotFoundException 陷阱）。
 - **驗證方式**：`python3 -c "import socket; h=socket.gethostname(); print(socket.gethostbyname(h))"` 對照 `ifconfig | grep "inet "`——兩邊不含同一 IP 即中招；修復後單跑任一 Spark 測試應 pass（本次實證 1 passed in 3.81s）。
+
+## 8. 字串特徵欄靜默 → object 矩陣 OOM（已加 B6 閘，2026-07-11）
+
+- **症狀（第一分鐘認出它）**：training `prepare_lgb_train_inputs` 在 `_pdf_to_X` 的 `to_numpy` 步被 `Killed`（OOM）；或（B6 上線後）在讀 parquet 前秒級 `DataConsistencyError: ... un-encoded non-numeric type(s)`。本機合成資料永不重現（合成 feature_table 無此欄）。
+- **根因**：生產 `feature_table` 有字串欄，未宣告 `categorical_columns`、也未 `drop_columns` → `_compute_feature_columns` 收它為特徵 → `_encode_categoricals` 不編它 → `X_df.values` 塌縮成 object 矩陣（每格 ~34 B vs float64 8 B，公司規模 22→96 GiB）。錯誤在 training（下游），根因在 dataset schema 設定（上游）——R 系列同款形態。
+- **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。詳見 `docs/operations/training-oom-object-matrix.md`。
+- **驗證方式**：`python -c "import pyarrow.parquet as pq, pyarrow as pa; s=pq.read_schema('<train_model_input.parquet>'); print([f.name for f in s if pa.types.is_string(f.type)])"` 對照 `preprocessor.json` 的 `feature_columns`／`categorical_columns`；差集非空即中招。

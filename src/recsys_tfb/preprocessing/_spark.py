@@ -258,7 +258,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Layer-2 data gate (B1 + B5). Side-effect only: raises
+    """Layer-2 data gate (B1 + B5 + B6). Side-effect only: raises
     ``DataConsistencyError`` on violation, returns ``None`` on success. Wired
     as the first node of the dataset pipeline.
 
@@ -271,6 +271,11 @@ def validate_data_consistency(
     ``feature_table.dtypes`` (metastore metadata, no scan) so the opaque
     "Decimal is not JSON serializable" crash inside fit_preprocessor_metadata
     is caught up-front at the first node instead of after the full distinct pass.
+
+    B6 — a prospective feature column (from ``_compute_feature_columns``) that is
+    non-numeric in feature_table and is NOT declared categorical would become an
+    un-encoded object-dtype model feature (training OOM at ``_pdf_to_X``). Also
+    read off ``feature_table.dtypes`` (no scan) via ``spark_dtype_is_numeric``.
 
     All errors are collected and raised once so a single fix pass clears them.
     """

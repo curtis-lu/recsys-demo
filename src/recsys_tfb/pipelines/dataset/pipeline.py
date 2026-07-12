@@ -19,7 +19,8 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     )
 
     nodes = [
-        # --- Layer-2 data gate (B1 item coverage + B5 categorical dtype):
+        # --- Layer-2 data gate (B1 item coverage + B5 categorical dtype
+        #     + B6 non-numeric feature column):
         # runs first (insertion-order Kahn seed), side-effect only
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
