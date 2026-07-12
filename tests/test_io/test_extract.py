@@ -670,3 +670,54 @@ class TestRowWeightsEncodeAware:
         # all keys unknown -> the unknown-value warning is the full diagnosis;
         # the redundant 0-match warning must NOT also fire.
         assert not any("matched 0 of" in m for m in warns)
+
+
+# ---------------------------------------------------------------------------
+# B6 training-read backstop — fail fast on un-encoded non-numeric feature cols
+# ---------------------------------------------------------------------------
+
+
+def _b6_df(with_string: bool) -> pd.DataFrame:
+    cols = {
+        "cust_id": ["c1", "c2", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 3),
+        "prod_name": ["fund", "ccard", "fund"],  # deferred identity cat (legit string)
+        "f_num": [1.0, 2.0, 3.0],
+        "flag_bool": [True, False, True],  # boolean feature — numeric, must NOT be flagged
+        "label": [0, 1, 0],
+    }
+    if with_string:
+        cols["rogue_str"] = ["x", "y", "z"]  # string feature, NOT declared categorical
+    return pd.DataFrame(cols)
+
+
+def _b6_meta(with_string: bool) -> dict:
+    feats = ["f_num", "flag_bool", "prod_name"] + (["rogue_str"] if with_string else [])
+    return {
+        "feature_columns": feats,
+        "categorical_columns": ["prod_name"],  # rogue_str is not here
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+
+
+_B6_PARAMS = {
+    "schema": {"label": "label", "identity_columns": ["cust_id", "snap_date", "prod_name"]}
+}
+
+
+class TestExtractXyB6Backstop:
+    def test_string_feature_fails_fast(self, tmp_path: Path) -> None:
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.io.extract import extract_Xy
+
+        handle = _make_handle(tmp_path, _b6_df(True))
+        with pytest.raises(DataConsistencyError, match="rogue_str"):
+            extract_Xy(handle, _b6_meta(True), _B6_PARAMS)
+
+    def test_clean_parquet_proceeds(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        handle = _make_handle(tmp_path, _b6_df(False))
+        X, y = extract_Xy(handle, _b6_meta(False), _B6_PARAMS)
+        assert X.shape[0] == 3
+        assert list(y) == [0, 1, 0]

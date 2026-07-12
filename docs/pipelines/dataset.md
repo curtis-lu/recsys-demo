@@ -35,7 +35,7 @@
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
 4. **日期切分互斥**：train、calibration、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
-5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 產生候選清單，再決定 `categorical_columns`。
+5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 產生候選清單（含把高 cardinality 字串欄建議進 `drop_columns` 的區塊），再決定 `categorical_columns` 與 `drop_columns`。
 6. **抽樣設定已檢視**：可使用 `scripts/sampling_overrides_editor.py` 檢視各分層樣本量並產生 override。
 7. **calibration 設定對齊**：若 dataset 啟用 calibration，training 端也應有相應設定；不需要將 score 解讀為機率時通常不必啟用。
 
@@ -170,6 +170,7 @@ dataset:
 
 - `schema.item` 必須列在 `categorical_columns`，否則模型無法區分 query group 內的 items。
 - 同一欄不可同時出現在 `categorical_columns` 與 `drop_columns`。
+- 字串／非數值欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（成因見 `docs/operations/training-oom-object-matrix.md`）。
 - 真正的連續數值特徵不需列入任一清單。
 - 宣告為 categorical 的 feature 欄位不可是 Decimal、Double 或 Float；數字代碼應先在 source ETL 轉為 string 或 integer。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。

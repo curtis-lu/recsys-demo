@@ -258,7 +258,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Layer-2 data gate (B1 + B5). Side-effect only: raises
+    """Layer-2 data gate (B1 + B5 + B6). Side-effect only: raises
     ``DataConsistencyError`` on violation, returns ``None`` on success. Wired
     as the first node of the dataset pipeline.
 
@@ -272,6 +272,11 @@ def validate_data_consistency(
     "Decimal is not JSON serializable" crash inside fit_preprocessor_metadata
     is caught up-front at the first node instead of after the full distinct pass.
 
+    B6 — a prospective feature column (from ``_compute_feature_columns``) that is
+    non-numeric in feature_table and is NOT declared categorical would become an
+    un-encoded object-dtype model feature (training OOM at ``_pdf_to_X``). Also
+    read off ``feature_table.dtypes`` (no scan) via ``spark_dtype_is_numeric``.
+
     All errors are collected and raised once so a single fix pass clears them.
     """
     # Local import: keep lazy to avoid an import cycle
@@ -281,12 +286,16 @@ def validate_data_consistency(
         DataConsistencyError,
         categorical_dtype_errors,
         item_coverage_errors,
+        nonnumeric_feature_errors,
         resolved_item_values,
+        spark_dtype_is_numeric,
     )
 
     schema = get_schema(parameters)
     item = schema["item"]
     time_col = schema["time"]
+    label_col = schema["label"]
+    identity_cols = schema["identity_columns"]
     windows = collect_dataset_snap_dates(parameters)
 
     def _distinct_items(df: DataFrame) -> set:
@@ -298,13 +307,33 @@ def validate_data_consistency(
         )
         return {r[item] for r in rows if r[item] is not None}
 
-    _, categorical_cols = _get_preprocessing_config(parameters)
-    errors = item_coverage_errors(
-        item,
-        resolved_item_values(parameters),
-        _distinct_items(sample_pool),
-        _distinct_items(label_table),
-    ) + categorical_dtype_errors(categorical_cols, dict(feature_table.dtypes))
+    drop_cols, categorical_cols = _get_preprocessing_config(parameters)
+    ft_dtypes = dict(feature_table.dtypes)
+    feature_cols = _compute_feature_columns(
+        list(feature_table.columns),
+        identity_cols,
+        categorical_cols,
+        drop_cols,
+        label_col,
+    )
+    # Only feature_table-sourced columns have a dtype here; identity categoricals
+    # (e.g. prod_name) come from schema.categorical_values, are absent from
+    # feature_table.dtypes, and are validated by A3.
+    feature_kinds = {
+        c: ("numeric" if spark_dtype_is_numeric(ft_dtypes[c]) else "nonnumeric")
+        for c in feature_cols
+        if c in ft_dtypes
+    }
+    errors = (
+        item_coverage_errors(
+            item,
+            resolved_item_values(parameters),
+            _distinct_items(sample_pool),
+            _distinct_items(label_table),
+        )
+        + categorical_dtype_errors(categorical_cols, ft_dtypes)
+        + nonnumeric_feature_errors(feature_kinds, set(categorical_cols))
+    )
     if errors:
         raise DataConsistencyError(
             "Data consistency check failed ("

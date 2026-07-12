@@ -459,5 +459,6 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md)、[`behavior-diagrams.html`](docs/behavior-diagrams.html) |
 | 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt_learning_to_rank.md) |
 | 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/pipeline-slicing.md)、[`hpo-resume.md`](docs/operations/hpo-resume.md) |
+| 排查訓練 OOM（字串特徵欄 → object 矩陣） | [`training-oom-object-matrix.md`](docs/operations/training-oom-object-matrix.md)、[`known-pitfalls.md`](docs/operations/known-pitfalls.md) |
 
 > 公司生產環境的 Spark／Hive 連線已配置好；只有本機開發或排查連線問題時，才需要閱讀 [`spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md) 與 [`worktree-venv-setup.md`](docs/operations/worktree-venv-setup.md)。概念手冊另提供 `*_offline.html`，可在無網路環境直接開啟。

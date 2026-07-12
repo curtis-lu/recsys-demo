@@ -682,3 +682,32 @@ class TestApplyPreprocessorUnknownWarning:
         assert any(
             "1 unknowns in column 'channel_preference'" in m for m in warnings
         ), warnings
+
+
+class TestValidateDataConsistencyB6:
+    def test_unencoded_string_feature_raises(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # 注入一個未宣告 categorical、也未 drop 的字串特徵欄
+        rogue = feature_table.withColumn("rogue_str", F.lit("free_text"))
+        with pytest.raises(DataConsistencyError, match="rogue_str"):
+            validate_data_consistency(sample_pool, label_table, rogue, parameters)
+
+    def test_clean_feature_table_passes(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # 乾淨 feature_table（既有 fixture 特徵欄全數值）→ 不 raise
+        assert (
+            validate_data_consistency(sample_pool, label_table, feature_table, parameters)
+            is None
+        )
+
+    def test_boolean_feature_not_flagged(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # 布林特徵欄是數值（bool→numeric），B6 不得誤報
+        with_bool = feature_table.withColumn("flag_bool", F.lit(True))
+        assert (
+            validate_data_consistency(sample_pool, label_table, with_bool, parameters)
+            is None
+        )
