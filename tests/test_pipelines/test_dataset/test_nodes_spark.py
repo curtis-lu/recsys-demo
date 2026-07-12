@@ -701,3 +701,13 @@ class TestValidateDataConsistencyB6:
             validate_data_consistency(sample_pool, label_table, feature_table, parameters)
             is None
         )
+
+    def test_boolean_feature_not_flagged(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # 布林特徵欄是數值（bool→numeric），B6 不得誤報
+        with_bool = feature_table.withColumn("flag_bool", F.lit(True))
+        assert (
+            validate_data_consistency(sample_pool, label_table, with_bool, parameters)
+            is None
+        )

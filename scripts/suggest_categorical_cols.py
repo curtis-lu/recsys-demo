@@ -113,7 +113,7 @@ def format_yaml_output(
         categorical_columns:
           - "col_a"
         drop_columns:
-          - "raw_id"   # nunique=4200 — high-cardinality string, not a categorical
+          - "raw_id"   # nunique=4200 high-card string — review: declare categorical or drop
     """
     lines = ["categorical_columns:"]
     for col in categorical:
@@ -122,7 +122,8 @@ def format_yaml_output(
     if drop_suggestions:
         for col, n in drop_suggestions:
             lines.append(
-                f'  - "{col}"   # nunique={n} — high-cardinality string, not a categorical'
+                f'  - "{col}"   # nunique={n} high-card string — review: '
+                f"declare categorical or drop (script cannot decide)"
             )
     else:
         lines.append("  # （無高 cardinality 字串欄；此清單供人工確認）")

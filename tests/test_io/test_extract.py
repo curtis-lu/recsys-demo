@@ -683,6 +683,7 @@ def _b6_df(with_string: bool) -> pd.DataFrame:
         "snap_date": pd.to_datetime(["2025-01-31"] * 3),
         "prod_name": ["fund", "ccard", "fund"],  # deferred identity cat (legit string)
         "f_num": [1.0, 2.0, 3.0],
+        "flag_bool": [True, False, True],  # boolean feature — numeric, must NOT be flagged
         "label": [0, 1, 0],
     }
     if with_string:
@@ -691,7 +692,7 @@ def _b6_df(with_string: bool) -> pd.DataFrame:
 
 
 def _b6_meta(with_string: bool) -> dict:
-    feats = ["f_num", "prod_name"] + (["rogue_str"] if with_string else [])
+    feats = ["f_num", "flag_bool", "prod_name"] + (["rogue_str"] if with_string else [])
     return {
         "feature_columns": feats,
         "categorical_columns": ["prod_name"],  # rogue_str is not here

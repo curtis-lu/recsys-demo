@@ -974,19 +974,25 @@ def categorical_dtype_errors(
 # B6 — non-numeric feature column that will not be encoded (object-dtype OOM)
 # ---------------------------------------------------------------------------
 
-_NONNUMERIC_SPARK_PREFIXES = (
-    "string", "binary", "date", "timestamp", "interval",
-    "array", "map", "struct",
+# Spark ``DataFrame.dtypes`` simpleStrings for the numeric/boolean types that
+# survive ``DataFrame.values`` into a numeric numpy matrix. ``decimal(p,s)`` is
+# the only parametric one (special-cased below). Whitelist, NOT blacklist: an
+# unknown type (char/varchar/void/null/…) must be treated as non-numeric so it
+# is never silently passed by the B6 gate (fail-safe).
+_NUMERIC_SPARK_TYPES = frozenset(
+    {"tinyint", "smallint", "int", "bigint", "float", "double", "boolean"}
 )
 
 
 def spark_dtype_is_numeric(simple_string: str) -> bool:
     """True iff a Spark ``DataFrame.dtypes`` simpleString denotes a type that
     survives ``DataFrame.values`` into a numeric numpy matrix (int / float /
-    decimal / boolean). String / binary / date / timestamp / complex types force
-    ``object`` dtype — the B6 footgun. Pure string classification (no Spark import).
+    decimal / boolean). Every other type — string / binary / date / timestamp /
+    char / varchar / void / null / complex — forces ``object`` dtype (the B6
+    footgun) and returns False. Pure string classification (no Spark import).
     """
-    return not simple_string.strip().lower().startswith(_NONNUMERIC_SPARK_PREFIXES)
+    dt = simple_string.strip().lower()
+    return dt.startswith("decimal") or dt in _NUMERIC_SPARK_TYPES
 
 
 def nonnumeric_feature_errors(

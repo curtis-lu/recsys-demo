@@ -936,6 +936,11 @@ class TestSparkDtypeIsNumeric:
             ("binary", False), ("date", False), ("timestamp", False),
             ("array<string>", False), ("map<string,int>", False),
             ("struct<a:int>", False),
+            # fail-safe: unknown / exotic types must be treated as non-numeric,
+            # never silently pass the gate (whitelist, not blacklist).
+            ("char(10)", False), ("varchar(20)", False),
+            ("void", False), ("null", False),
+            ("interval day to second", False),
         ],
     )
     def test_classification(self, dt, expected):
