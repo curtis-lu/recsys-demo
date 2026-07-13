@@ -272,6 +272,9 @@ python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
 
 ```bash
 python scripts/suggest_categorical_cols.py <database>.feature_table --max-cardinality 30
+# 大表可用 --where 裁分區（Spark 下推省 I/O）或 --sample-fraction 抽樣加速；
+# 子集會低估 cardinality（低卡判定僅為下界），詳見 docs/pipelines/dataset.md：
+python scripts/suggest_categorical_cols.py <database>.feature_table --where "snap_date >= '2026-06-01'" --sample-fraction 0.1
 python scripts/sampling_overrides_editor.py profile <database>.sample_pool
 ```
 

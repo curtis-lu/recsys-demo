@@ -207,7 +207,7 @@ print("兇手（是特徵、卻沒宣告成 categorical）:", sorted((set(str_co
 
 > ⚠ **這會 bump `base_dataset_version`，需要重建整個 dataset**（就是 log 裡那個大 Spark job）——因為這兩個鍵都參與 dataset 版本雜湊。這一步才讓 training 真的跑得起來。閘門本身（B6）只負責讓你**知道是哪幾欄**、並防止未來重建時再犯，不會替你改 config。
 
-`scripts/suggest_categorical_cols.py` 現在會對高 cardinality 的字串欄直接建議進 `drop_columns`，可用來加速這個決定（見 `docs/pipelines/dataset.md`）。
+`scripts/suggest_categorical_cols.py` 可用來加速這個決定（見 `docs/pipelines/dataset.md`）：它把高 cardinality 字串欄建議進 `drop_columns`，並把 date／timestamp／binary／複合型欄（同屬本節的 object-dtype OOM 兇手，且不做 cardinality 判定、一律列出）放進一個待人工判斷的 review 區塊——這些欄同樣要二選一（`categorical_columns` 或 `drop_columns`），工具不替你決定。
 
 ## 7. 兩個容易被忽略的陷阱
 
