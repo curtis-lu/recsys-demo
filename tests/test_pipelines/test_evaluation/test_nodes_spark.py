@@ -733,3 +733,86 @@ class TestSampleConsumerFlags:
             "pair_ledger": {"enabled": False},
         }}}
         assert _sample_consumer_flags(params) == (False, True, False)
+
+
+class TestDrawDiagnosisSampleNode:
+    @staticmethod
+    def _params():
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank",
+            }},
+            "evaluation": {"diagnosis": {"sample": {
+                "max_queries": 10, "min_pos_queries_per_item": 2, "seed": 42,
+            }}},
+        }
+
+    @staticmethod
+    def _eval_predictions(spark):
+        rows = []
+        for cust in ["H1", "H2", "H3", "H4"]:
+            rows.append(("20240331", cust, "hot", 0.9, 1))
+            rows.append(("20240331", cust, "cold", 0.1, 0))
+        rows.append(("20240331", "C1", "hot", 0.9, 0))
+        rows.append(("20240331", "C1", "cold", 0.1, 1))
+        return spark.createDataFrame(
+            rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
+        )
+
+    def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
+        from unittest.mock import patch
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()
+        params["evaluation"]["diagnosis"].update({
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+        })
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+        ) as spy:
+            result = nodes_spark.draw_diagnosis_sample_node(
+                self._eval_predictions(spark), params
+            )
+        assert result is None
+        assert spy.call_count == 0
+
+    def test_draws_when_one_enabled(self):
+        from unittest.mock import patch
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()
+        params["evaluation"]["diagnosis"].update({
+            "ci": {"enabled": True},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+        })
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
+        ) as spy:
+            nodes_spark.draw_diagnosis_sample_node(None, params)
+        assert spy.call_count == 1
+
+    def test_node_output_equals_direct_draw(self, spark):
+        # Faithfulness / behaviour-preservation: the node is a pass-through of
+        # draw_diagnosis_sample. Same seed -> identical content.
+        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all three consumers default-enabled
+        direct_pdf, direct_meta = draw_diagnosis_sample(
+            self._eval_predictions(spark), params
+        )
+        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(
+            self._eval_predictions(spark), params
+        )
+        assert node_meta == direct_meta
+        assert (
+            node_pdf.sort_values(list(node_pdf.columns))
+            .reset_index(drop=True)
+            .equals(
+                direct_pdf.sort_values(list(direct_pdf.columns))
+                .reset_index(drop=True)
+            )
+        )

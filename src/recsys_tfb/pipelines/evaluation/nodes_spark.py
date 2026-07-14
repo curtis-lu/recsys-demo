@@ -187,6 +187,36 @@ def prepare_eval_data(
     return eval_predictions
 
 
+def draw_diagnosis_sample_node(
+    eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> Optional[tuple]:
+    """Draw the shared driver-side diagnosis sample ONCE per run.
+
+    ``compute_metric_ci`` / ``compute_offset_sweep`` / ``compute_pair_ledger``
+    all consume this single sample instead of each re-drawing it (same seed ->
+    identical content; 3 Spark scans collapse to 1). Returns ``None`` when none
+    of the three consumers is enabled — matching the previous behaviour of
+    drawing zero samples in that case.
+    """
+    ci_on, sweep_on, ledger_on = _sample_consumer_flags(parameters)
+    if not (ci_on or sweep_on or ledger_on):
+        logger.info(
+            "diagnosis sample: all consumers (ci/offset_sweep/pair_ledger) "
+            "disabled — skipping sample draw"
+        )
+        return None
+
+    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
+    logger.info(
+        "diagnosis sample drawn once for %d consumer(s): %d queries sampled "
+        "(shared by metric_ci/offset_sweep/pair_ledger)",
+        sum((ci_on, sweep_on, ledger_on)), sample_meta["n_queries_sampled"],
+    )
+    return sample_pdf, sample_meta
+
+
 def compute_metrics(
     eval_predictions: SparkDataFrame,
     parameters: dict,
