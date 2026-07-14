@@ -539,7 +539,10 @@ def test_compute_metric_ci_disabled_returns_stub(spark):
 
 
 def test_compute_metric_ci_end_to_end_small(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_metric_ci,
+        draw_diagnosis_sample_node,
+    )
     df = spark.createDataFrame(
         [
             ("20240331", "C0", "A", 0.9, 1),
@@ -563,7 +566,9 @@ def test_compute_metric_ci_end_to_end_small(spark):
             },
         },
     }
-    out = compute_metric_ci(df, params)
+    # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
+    sample = draw_diagnosis_sample_node(df, params)
+    out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
     assert out["sample"]["n_queries_sampled"] == 2
