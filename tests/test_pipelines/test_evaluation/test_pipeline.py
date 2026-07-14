@@ -8,8 +8,8 @@ class TestEvaluationPipelineDefault:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
-        # +1: assemble_triage_summary node (triage summary wiring).
-        assert len(pipeline.nodes) == 11
+        # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
+        assert len(pipeline.nodes) == 12
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -19,7 +19,7 @@ class TestEvaluationPipelineDefault:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
-            "eval_predictions", "evaluation_metrics",
+            "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
@@ -32,11 +32,11 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "compute_metrics",
-            "compute_baseline_metrics", "compute_metric_ci",
-            "compute_reconciliation", "compute_offset_sweep",
-            "compute_pair_ledger",
-            "persist_eval_predictions", "compute_quadrant",
+            "prepare_eval_data", "draw_diagnosis_sample_node",
+            "compute_metrics", "compute_baseline_metrics",
+            "compute_reconciliation", "persist_eval_predictions",
+            "compute_metric_ci", "compute_offset_sweep",
+            "compute_pair_ledger", "compute_quadrant",
             "assemble_triage_summary", "generate_report",
         ]
 
@@ -58,8 +58,8 @@ class TestEvaluationPipelinePostTraining:
 
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
-        # +1: assemble_triage_summary node (triage summary wiring).
-        assert len(pipeline.nodes) == 11
+        # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
+        assert len(pipeline.nodes) == 12
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -69,7 +69,7 @@ class TestEvaluationPipelinePostTraining:
     def test_pipeline_outputs_same_as_default(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
-            "eval_predictions", "evaluation_metrics",
+            "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_reconciliation", "evaluation_quadrant",
@@ -84,8 +84,8 @@ class TestEvaluationPipelineCompareMode:
 
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
-        # +1: assemble_triage_summary node (triage summary wiring).
-        assert len(pipeline.nodes) == 14
+        # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
+        assert len(pipeline.nodes) == 15
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

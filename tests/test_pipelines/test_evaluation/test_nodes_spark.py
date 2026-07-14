@@ -816,3 +816,31 @@ class TestDrawDiagnosisSampleNode:
                 .reset_index(drop=True)
             )
         )
+
+    def test_draw_diagnosis_sample_called_once_across_three_consumers(self):
+        from unittest.mock import patch
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all three default-enabled
+        stub_pdf = pd.DataFrame({
+            "snap_date": ["20240331"], "cust_id": ["H1"],
+            "prod_name": ["hot"], "score": [0.9], "label": [1],
+        })
+        stub = (stub_pdf, {"n_queries_sampled": 1})
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            return_value=stub,
+        ) as spy, patch(
+            "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
+            return_value={"n_boot": 1},
+        ), patch(
+            "recsys_tfb.diagnosis.metric.offset_sweep.sweep", return_value={},
+        ), patch(
+            "recsys_tfb.diagnosis.metric.pair_ledger.pair_ledger",
+            return_value={},
+        ):
+            sample = nodes_spark.draw_diagnosis_sample_node(None, params)
+            nodes_spark.compute_metric_ci(sample, params)
+            nodes_spark.compute_offset_sweep(sample, params)
+            nodes_spark.compute_pair_ledger(sample, params)
+        assert spy.call_count == 1

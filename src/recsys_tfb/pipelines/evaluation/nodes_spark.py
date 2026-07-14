@@ -307,14 +307,15 @@ def compute_baseline_metrics(
 
 
 def compute_metric_ci(
-    eval_predictions: Optional[SparkDataFrame],
+    diagnosis_sample: Optional[tuple],
     parameters: dict,
 ) -> dict:
     """診斷抽樣＋cluster bootstrap CI（spec §3 Phase 1）。
 
-    薄 node：抽樣與 bootstrap 都在 ``diagnosis.metric``。停用時回傳 stub
-    （catalog 仍寫出 ``{"enabled": false}``，產物路徑恆存在、下游可判別）。
-    輸出含 ``sample`` metadata——CI 是抽樣估計，報表必須標示樣本規模。
+    抽樣改由 ``draw_diagnosis_sample_node`` 一次抽好、經 ``diagnosis_sample``
+    傳入（同 seed→內容與各自重抽相同）。停用時回傳 stub（catalog 仍寫出
+    ``{"enabled": false}``）。輸出含 ``sample`` metadata——CI 是抽樣估計，
+    報表必須標示樣本規模。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
@@ -322,16 +323,16 @@ def compute_metric_ci(
         logger.info("metric CI disabled — writing stub")
         return {"enabled": False}
 
-    if eval_predictions is None:
+    if diagnosis_sample is None:
         raise ValueError(
-            "compute_metric_ci: eval_predictions is required when "
-            "evaluation.diagnosis.ci.enabled is true"
+            "compute_metric_ci: diagnosis_sample is None while "
+            "evaluation.diagnosis.ci.enabled is true — draw_diagnosis_sample_node "
+            "gate is out of sync with the consumer enable flag"
         )
 
-    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
     from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 
-    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
+    sample_pdf, sample_meta = diagnosis_sample
     out = bootstrap_per_item_ci(sample_pdf, parameters)
     out["sample"] = sample_meta
     logger.info(
@@ -404,15 +405,13 @@ def compute_quadrant(
 
 
 def compute_offset_sweep(
-    eval_predictions: Optional[SparkDataFrame],
+    diagnosis_sample: Optional[tuple],
     parameters: dict,
 ) -> dict:
     """分流層薄 node（spec §3 Phase 4；框架診斷項目 6）。
 
-    領域邏輯全在 ``diagnosis.metric.offset_sweep``（driver 端 numpy）。
-    抽樣與 metric_ci 走同一套 ``draw_diagnosis_sample``（同 seed→內容
-    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
-    停用時寫 stub。
+    領域邏輯全在 ``diagnosis.metric.offset_sweep``（driver 端 numpy）。抽樣改由
+    ``draw_diagnosis_sample_node`` 共用（同 seed→內容相同）。停用時寫 stub。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cfg = ((eval_params.get("diagnosis", {}) or {})
@@ -420,17 +419,15 @@ def compute_offset_sweep(
     if not cfg.get("enabled", True):
         logger.info("offset sweep disabled — writing stub")
         return {"enabled": False}
-    if eval_predictions is None:
+    if diagnosis_sample is None:
         raise ValueError(
-            "compute_offset_sweep: eval_predictions is required when "
-            "evaluation.diagnosis.offset_sweep.enabled is true"
+            "compute_offset_sweep: diagnosis_sample is None while "
+            "evaluation.diagnosis.offset_sweep.enabled is true — "
+            "draw_diagnosis_sample_node gate out of sync with the consumer flag"
         )
     from recsys_tfb.diagnosis.metric.offset_sweep import sweep
-    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 
-    sample_pdf, sample_meta = draw_diagnosis_sample(
-        eval_predictions, parameters
-    )
+    sample_pdf, sample_meta = diagnosis_sample
     out = sweep(sample_pdf, parameters)
     out["sample"] = sample_meta
     logger.info(
@@ -445,15 +442,13 @@ def compute_offset_sweep(
 
 
 def compute_pair_ledger(
-    eval_predictions: Optional[SparkDataFrame],
+    diagnosis_sample: Optional[tuple],
     parameters: dict,
 ) -> dict:
     """壓制帳本薄 node（spec §3 Phase 4b；框架診斷項目 7）。
 
-    領域邏輯全在 ``diagnosis.metric.pair_ledger``（driver 端 numpy）。
-    抽樣與其他診斷節點走同一套 ``draw_diagnosis_sample``（同 seed→內容
-    相同；各自重抽、非共享快取，每次呼叫都是一趟 Spark 掃描）。
-    停用時寫 stub。
+    領域邏輯全在 ``diagnosis.metric.pair_ledger``（driver 端 numpy）。抽樣改由
+    ``draw_diagnosis_sample_node`` 共用（同 seed→內容相同）。停用時寫 stub。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cfg = ((eval_params.get("diagnosis", {}) or {})
@@ -461,17 +456,15 @@ def compute_pair_ledger(
     if not cfg.get("enabled", True):
         logger.info("pair ledger disabled — writing stub")
         return {"enabled": False}
-    if eval_predictions is None:
+    if diagnosis_sample is None:
         raise ValueError(
-            "compute_pair_ledger: eval_predictions is required when "
-            "evaluation.diagnosis.pair_ledger.enabled is true"
+            "compute_pair_ledger: diagnosis_sample is None while "
+            "evaluation.diagnosis.pair_ledger.enabled is true — "
+            "draw_diagnosis_sample_node gate out of sync with the consumer flag"
         )
     from recsys_tfb.diagnosis.metric.pair_ledger import pair_ledger
-    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 
-    sample_pdf, sample_meta = draw_diagnosis_sample(
-        eval_predictions, parameters
-    )
+    sample_pdf, sample_meta = diagnosis_sample
     out = pair_ledger(sample_pdf, parameters)
     out["sample"] = sample_meta
     logger.info(
