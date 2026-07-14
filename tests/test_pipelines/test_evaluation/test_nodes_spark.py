@@ -714,3 +714,22 @@ def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
     assert out["enabled"] is True
     assert out["gain_ledger_present"] is False
     assert "A" in out["verdicts"]
+
+
+class TestSampleConsumerFlags:
+    def test_defaults_all_true(self):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _sample_consumer_flags,
+        )
+        assert _sample_consumer_flags({}) == (True, True, True)
+
+    def test_respects_disabled(self):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _sample_consumer_flags,
+        )
+        params = {"evaluation": {"diagnosis": {
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": True},
+            "pair_ledger": {"enabled": False},
+        }}}
+        assert _sample_consumer_flags(params) == (False, True, False)

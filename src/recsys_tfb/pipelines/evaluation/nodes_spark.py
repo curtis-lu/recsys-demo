@@ -30,6 +30,21 @@ from recsys_tfb.evaluation.report_builder import assemble_report
 logger = logging.getLogger(__name__)
 
 
+def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool, bool]:
+    """Return (ci_enabled, offset_sweep_enabled, pair_ledger_enabled).
+
+    Single source of truth for the enable flags of the three diagnosis nodes
+    that consume the shared sample. ``draw_diagnosis_sample_node`` draws iff any
+    is True; each consumer still checks its own flag. Reading them here with the
+    exact same keys/defaults as the consumers prevents gate/consumer drift.
+    """
+    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+    ci = (diag.get("ci", {}) or {}).get("enabled", True)
+    sweep = (diag.get("offset_sweep", {}) or {}).get("enabled", True)
+    ledger = (diag.get("pair_ledger", {}) or {}).get("enabled", True)
+    return bool(ci), bool(sweep), bool(ledger)
+
+
 def prepare_eval_data(
     ranked_predictions: SparkDataFrame,
     label_table: SparkDataFrame,
