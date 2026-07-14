@@ -35,7 +35,7 @@
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
 4. **日期切分互斥**：train、calibration、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
-5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 產生候選清單（含把高 cardinality 字串欄建議進 `drop_columns` 的區塊），再決定 `categorical_columns` 與 `drop_columns`。
+5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。
 6. **抽樣設定已檢視**：可使用 `scripts/sampling_overrides_editor.py` 檢視各分層樣本量並產生 override。
 7. **calibration 設定對齊**：若 dataset 啟用 calibration，training 端也應有相應設定；不需要將 score 解讀為機率時通常不必啟用。
 
@@ -175,6 +175,23 @@ dataset:
 - 宣告為 categorical 的 feature 欄位不可是 Decimal、Double 或 Float；數字代碼應先在 source ETL 轉為 string 或 integer。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。
 - identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域。
+
+#### 用 `suggest_categorical_cols.py` 產生候選
+
+工具吃一個 Hive 表或 parquet 路徑，把 YAML 片段寫到 `data/profiling/<stem>_categorical.yaml`（供人工貼回上面的設定，不會自動改 config）。它把**每一個**欄位分類，不靜默漏欄：
+
+- 低 cardinality 欄 → `categorical_columns:`；高 cardinality 字串欄 → `drop_columns:`（附 nunique）；
+- date／timestamp／binary／複合型 → 一個**註解式 review 區塊**：這些同屬 object-dtype OOM 兇手（見上一則設定原則與 `docs/operations/training-oom-object-matrix.md`），但工具無法判該當 categorical 還是 drop，故只列出、由你把每欄搬進上面兩塊之一；
+- 高 cardinality 數值欄留作連續特徵（不列入任一清單）。
+
+terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 columns = 2 categorical + 1 numeric-feature + 1 drop-suggested + 4 review`），可據此確認沒有欄位被漏掉。
+
+**大表加速**（兩者可組合，皆為選用；預設全表掃描）：
+
+- `--where "<Spark SQL 述語>"`：只掃符合述語的資料。述語引用**分區欄**時 Spark 會下推、跳過其他分區目錄（真正省 I/O）；引用非分區欄則只是 row filter。
+- `--sample-fraction <比例>`（須 `0 < 比例 ≤ 1`，超出範圍會在起 Spark 前就報錯）：隨機抽樣（固定 seed、可重現）。省的是每欄 cardinality 估算，**不省 parquet I/O**（I/O 槓桿是 `--where`）。
+
+> ⚠ `--where` 與 `--sample-fraction` 都只看**子集**，會**低估** cardinality——子集裡判為低卡的欄只是「至少這麼低」的下界，全表可能更高。因此 summary 會印出本次 scan scope，子集模式的 YAML 也在 `categorical_columns:` 頂加上一段「採用前請複查」的警告註解。（已被建議 `drop` 的高卡欄不受**此低估**影響——子集裡已超過門檻，代表全表也一定超過。）掃分散的多個分區、而非單一連續窗口，可降低「與分區鍵相關的欄」被藏住的風險。
 
 preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、calibration、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
 
