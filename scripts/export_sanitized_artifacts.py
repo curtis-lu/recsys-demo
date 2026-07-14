@@ -28,7 +28,9 @@ from pathlib import Path
 # 台灣身分證：第 1 碼英文字母 + 9 碼數字。字母洩漏戶籍縣市、首位數字洩漏性別，
 # 故預設 --mask-keep 0（全遮）。舊式居留證為 2 英文 + 8 數字，不符此樣式，
 # 客群含外籍人士時需另用 --id-pattern '[A-Z]{2}[0-9]{8}' 補上。
-DEFAULT_ID_PATTERN = r"\b[A-Z][0-9]{9}\b"
+# 刻意不加 \b 錨定：\b 對與底線/字母相黏的 id（如 x_A123456789）不成立、會漏遮；
+# 去錨定硬抓「大寫字母 + 9 數字」，寧可偶爾過度遮罩也不放行（誤遮比漏遮安全）。
+DEFAULT_ID_PATTERN = r"[A-Z][0-9]{9}"
 
 # 已知二進位副檔名：原樣複製、不刷（無法 regex）。其餘副檔名一律當文字處理。
 KNOWN_BINARY_EXTS = {
@@ -84,10 +86,20 @@ def is_binary_ext(path):
     return Path(path).suffix.lower() in KNOWN_BINARY_EXTS
 
 
+def _validate_version(version):
+    """擋掉會逃出目錄的 version（路徑分隔字元 / .. / 空）。"""
+    if (not version) or version in {".", ".."} or "/" in version or "\\" in version or ".." in version:
+        raise ValueError(f"invalid model_version: {version!r}")
+
+
 def _gather_sources(data_root, version, eval_snap):
     """收集要匯出的來源檔（models/<v> 全部 + evaluation/<v>[/<snap>]）。"""
     def _files(root):
-        return sorted(p for p in root.rglob("*") if p.is_file() and p.name not in SKIP_NAMES)
+        # 跳過 symlink：避免經連結拉入 version 目錄外的內容（未經此工具檢查）。
+        return sorted(
+            p for p in root.rglob("*")
+            if p.is_file() and not p.is_symlink() and p.name not in SKIP_NAMES
+        )
 
     sources = []
     models_dir = data_root / "models" / version
@@ -120,11 +132,15 @@ def export(
     - 有殘留且非 force → **不寫產出物**（只寫報告），fail-closed。
     - dry_run → 完全不寫任何檔。
     """
+    _validate_version(version)
     data_root = Path(data_root)
     out_root = Path(out_root)
     now = now or datetime.now(timezone.utc)
     pattern_strs = list(patterns) if patterns else [DEFAULT_ID_PATTERN]
     compiled = compile_patterns(pattern_strs)
+    # 兜底掃描用「更鬆」的 pattern（剝除 \b 錨定），才能獨立於 scrub 抓到結構性
+    # 漏抓（與 word char 相黏的 id）——安全網不可與主刷除共用同一盲點。
+    backstop_compiled = compile_patterns([p.replace(r"\b", "") for p in pattern_strs])
 
     sources, models_dir, eval_dir = _gather_sources(data_root, version, eval_snap)
 
@@ -160,7 +176,7 @@ def export(
     residual = []
     for rel, out_bytes in outputs:
         text = out_bytes.decode("utf-8", errors="ignore")
-        for ln, match in scan_text(text, compiled):
+        for ln, match in scan_text(text, backstop_compiled):
             residual.append({"path": rel.as_posix(), "line": ln, "match": match})
 
     artifacts_written = False
@@ -193,10 +209,11 @@ def export(
     if not dry_run:
         # 持久化報告時遮掉 residual 的原始 id：fail-closed 下報告是唯一產物，
         # 不可讓它自己夾帶個資。檔案:行號 仍保留、足以定位漏點；
-        # 原始值只在 main() 的 stderr（VDI 上、短暫）印出以利人工排查。
+        # 一律全遮（keep=0），與使用者 --mask-keep 脫鉤——報告是安全產物，
+        # 即使使用者選了保留前綴，報告也不得漏。原始值只在 main() stderr 短暫印出。
         persisted = dict(report)
         persisted["residual"] = [
-            {**r, "match": mask_value(r["match"], mask_keep, mask_char)} for r in residual
+            {**r, "match": mask_value(r["match"], 0, mask_char)} for r in residual
         ]
         (out_root / version / "SANITIZATION_REPORT.json").write_text(
             json.dumps(persisted, indent=2, ensure_ascii=False), encoding="utf-8"

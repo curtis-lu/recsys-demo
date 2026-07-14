@@ -272,6 +272,55 @@ def test_skips_os_junk_files(tmp_path):
     assert all(".DS_Store" not in f["path"] for f in report["files"])
 
 
+def test_scrub_masks_id_glued_to_word_char():
+    # 與底線/字母相黏的 id：去錨定的預設 pattern 仍要遮（review Finding 1）
+    out, n = scrub_text(f"x_{FAKE_ID}", compile_patterns([DEFAULT_ID_PATTERN]))
+    assert n == 1
+    assert FAKE_ID not in out
+
+
+def test_backstop_independent_of_anchored_scrub(tmp_path):
+    # 使用者給 \b 錨定的 pattern，scrub 漏掉相黏 id，但兜底（去錨定）要抓到 → fail-closed
+    data, v, _ = _build_data_root(
+        tmp_path, extra_files={f"models/{'A1B2C3D4'}/glued.txt": f"ref_{FAKE_ID}\n"}
+    )
+    out = tmp_path / "export"
+    report = export(
+        v, data_root=data, out_root=out, patterns=[r"\b[A-Z][0-9]{9}\b"], now=FIXED_NOW
+    )
+    assert report["residual"], "兜底應獨立於 scrub 的錨定、抓到相黏 id"
+    assert any("glued.txt" in r["path"] for r in report["residual"])
+    assert not (out / v / "models" / v / "glued.txt").exists()  # fail-closed
+
+
+def test_report_clean_even_with_large_mask_keep(tmp_path):
+    # --mask-keep 20 >= id 長度 → scrub 不遮 → 兜底抓到 → fail-closed；報告仍不得夾原始 id
+    data, v, _ = _build_data_root(tmp_path)
+    out = tmp_path / "export"
+    report = export(v, data_root=data, out_root=out, mask_keep=20, now=FIXED_NOW)
+    assert report["residual"], "mask_keep 過大時 scrub 未遮，兜底應抓到"
+    blob = (out / v / "SANITIZATION_REPORT.json").read_text(encoding="utf-8")
+    assert FAKE_ID not in blob and FAKE_ID_2 not in blob
+
+
+def test_validate_version_rejects_path_escape(tmp_path):
+    for bad in ["../evil", "a/b", "..", "", "a\\b"]:
+        with pytest.raises(ValueError):
+            export(bad, data_root=tmp_path / "data", out_root=tmp_path / "out")
+
+
+def test_symlink_source_skipped(tmp_path):
+    # symlink 來源檔不納入匯出（避免經連結拉入 version 目錄外、未經檢查的內容）
+    data, v, _ = _build_data_root(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text(f"outside {FAKE_ID}", encoding="utf-8")
+    (data / "models" / v / "link.txt").symlink_to(secret)
+    out = tmp_path / "export"
+    report = export(v, data_root=data, out_root=out, now=FIXED_NOW)
+    assert not (out / v / "models" / v / "link.txt").exists()
+    assert all("link.txt" not in f["path"] for f in report["files"])
+
+
 def test_undecodable_unknown_ext_copied_as_binary(tmp_path):
     # 未知副檔名但含非法 UTF-8 bytes → 退回當二進位原樣複製，不 crash
     bad = b"\xff\xfe\x00\x01 not decodable"
