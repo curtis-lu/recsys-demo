@@ -692,6 +692,34 @@ def test_compute_offset_sweep_requires_eval_predictions_when_enabled(spark):
         compute_offset_sweep(None, params)
 
 
+def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"ci": {"enabled": True}}},
+    }
+    # gate/consumer drift guard: an enabled consumer must raise a clear
+    # ValueError (not AttributeError on None) if the shared sample is None.
+    with _pytest.raises(ValueError, match="compute_metric_ci"):
+        compute_metric_ci(None, params)
+
+
+def test_compute_pair_ledger_raises_when_enabled_but_sample_none(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_pair_ledger
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"pair_ledger": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_pair_ledger"):
+        compute_pair_ledger(None, params)
+
+
 def test_assemble_triage_summary_disabled_returns_stub():
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         assemble_triage_summary,
@@ -798,7 +826,9 @@ class TestDrawDiagnosisSampleNode:
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy:
             nodes_spark.draw_diagnosis_sample_node(None, params)
-        assert spy.call_count == 1
+        # exact args, not just count: guards against a regression forwarding a
+        # limited/mutated eval_predictions or a copied params.
+        spy.assert_called_once_with(None, params)
 
     def test_node_output_equals_direct_draw(self, spark):
         # Faithfulness / behaviour-preservation: the node is a pass-through of
@@ -848,7 +878,9 @@ class TestDrawDiagnosisSampleNode:
             nodes_spark.compute_metric_ci(sample, params)
             nodes_spark.compute_offset_sweep(sample, params)
             nodes_spark.compute_pair_ledger(sample, params)
-        assert spy.call_count == 1
+        # exactly one draw, with the node's own inputs — the three consumers
+        # must NOT re-draw (they consume the shared sample).
+        spy.assert_called_once_with(None, params)
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
         import logging

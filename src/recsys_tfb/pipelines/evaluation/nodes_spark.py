@@ -210,7 +210,11 @@ def draw_diagnosis_sample_node(
 
     from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
     sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
-    log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=True)
+    # deep=False keeps this a free observation: rows/cols are exact and the
+    # bytes figure is a shallow estimate. deep=True would scan every string
+    # cell (O(n_cells)) on the already-materialised sample — accurate but not
+    # "free", which is the constraint for this always-on instrumentation.
+    log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
     logger.info(
         "diagnosis sample drawn once for %d consumer(s): %d queries sampled "
         "(shared by metric_ci/offset_sweep/pair_ledger)",
