@@ -6,6 +6,7 @@ from typing import Optional
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.calibration import plot_calibration_curves
 from recsys_tfb.evaluation.diagnostics_spark import (
@@ -209,6 +210,7 @@ def draw_diagnosis_sample_node(
 
     from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
     sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
+    log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=True)
     logger.info(
         "diagnosis sample drawn once for %d consumer(s): %d queries sampled "
         "(shared by metric_ci/offset_sweep/pair_ledger)",

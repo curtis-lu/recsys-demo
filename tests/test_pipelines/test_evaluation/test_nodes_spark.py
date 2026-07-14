@@ -844,3 +844,21 @@ class TestDrawDiagnosisSampleNode:
             nodes_spark.compute_offset_sweep(sample, params)
             nodes_spark.compute_pair_ledger(sample, params)
         assert spy.call_count == 1
+
+    def test_node_logs_free_pandas_data_volume(self, spark, caplog):
+        import logging
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all enabled
+        with caplog.at_level(logging.INFO):
+            nodes_spark.draw_diagnosis_sample_node(
+                self._eval_predictions(spark), params
+            )
+        vols = [
+            r.volume for r in caplog.records
+            if getattr(r, "event", None) == "data_volume"
+            and getattr(r, "volume", {}).get("name") == "diagnosis.sample_pdf"
+        ]
+        assert vols, "expected a data_volume event for diagnosis.sample_pdf"
+        # Free pandas measurement (rows populated), NOT a Spark count.
+        assert vols[0]["kind"] == "pandas"
+        assert vols[0]["rows"] is not None

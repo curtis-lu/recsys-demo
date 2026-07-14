@@ -19,6 +19,7 @@ import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 
@@ -65,58 +66,61 @@ def draw_diagnosis_sample(
     df = eval_predictions.select(*keep_cols)
 
     # ---- pass 1：正例 query 全集＋per-item 正例 query 數 ----
-    pos_rows = df.filter(F.col(label_col) == 1)
-    pos_queries = pos_rows.select(*query_cols).distinct()
-    n_pos_total = pos_queries.count()
+    with log_step(logger, "diagnosis_sample.pass1_count"):
+        pos_rows = df.filter(F.col(label_col) == 1)
+        pos_queries = pos_rows.select(*query_cols).distinct()
+        n_pos_total = pos_queries.count()
 
-    item_counts = {
-        str(r[item_col]): int(r["cnt"])
-        for r in pos_rows.select(*query_cols, item_col)
-        .distinct()
-        .groupBy(item_col)
-        .agg(F.count(F.lit(1)).alias("cnt"))
-        .collect()
-    }
+        item_counts = {
+            str(r[item_col]): int(r["cnt"])
+            for r in pos_rows.select(*query_cols, item_col)
+            .distinct()
+            .groupBy(item_col)
+            .agg(F.count(F.lit(1)).alias("cnt"))
+            .collect()
+        }
     take_all_items = sorted(
         it for it, c in item_counts.items() if c < floor
     )
 
     # ---- pass 2：take-all ∪ hash-ratio ----
-    if take_all_items:
-        must = (
-            pos_rows.filter(F.col(item_col).isin(take_all_items))
-            .select(*query_cols)
-            .distinct()
-        )
-        n_must = must.count()
-        others = pos_queries.join(must, on=query_cols, how="left_anti")
-    else:
-        must = None
-        n_must = 0
-        others = pos_queries
-    n_others = n_pos_total - n_must
+    with log_step(logger, "diagnosis_sample.pass2_select"):
+        if take_all_items:
+            must = (
+                pos_rows.filter(F.col(item_col).isin(take_all_items))
+                .select(*query_cols)
+                .distinct()
+            )
+            n_must = must.count()
+            others = pos_queries.join(must, on=query_cols, how="left_anti")
+        else:
+            must = None
+            n_must = 0
+            others = pos_queries
+        n_others = n_pos_total - n_must
 
-    budget = max_queries - n_must
-    if budget <= 0:
-        logger.warning(
-            "diagnosis sample: take-all queries (%d) already exceed "
-            "max_queries=%d — sample is take-all only",
-            n_must, max_queries,
-        )
-        ratio = 0.0
-        sampled = must
-    elif n_others == 0:
-        ratio = 0.0
-        sampled = must if must is not None else pos_queries.limit(0)
-    else:
-        ratio = min(1.0, budget / n_others)
-        threshold = ratio_to_threshold(ratio)
-        picked = others.filter(
-            spark_bucket(others, query_cols, seed, _SITE) < threshold
-        )
-        sampled = picked if must is None else picked.unionByName(must)
+        budget = max_queries - n_must
+        if budget <= 0:
+            logger.warning(
+                "diagnosis sample: take-all queries (%d) already exceed "
+                "max_queries=%d — sample is take-all only",
+                n_must, max_queries,
+            )
+            ratio = 0.0
+            sampled = must
+        elif n_others == 0:
+            ratio = 0.0
+            sampled = must if must is not None else pos_queries.limit(0)
+        else:
+            ratio = min(1.0, budget / n_others)
+            threshold = ratio_to_threshold(ratio)
+            picked = others.filter(
+                spark_bucket(others, query_cols, seed, _SITE) < threshold
+            )
+            sampled = picked if must is None else picked.unionByName(must)
 
-    sample_pdf = df.join(sampled, on=query_cols, how="inner").toPandas()
+    with log_step(logger, "diagnosis_sample.to_pandas"):
+        sample_pdf = df.join(sampled, on=query_cols, how="inner").toPandas()
 
     # ---- metadata（報表據此標示「抽樣估計＋樣本規模」）----
     n_sampled = int(
