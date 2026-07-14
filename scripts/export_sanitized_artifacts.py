@@ -191,8 +191,15 @@ def export(
     }
 
     if not dry_run:
+        # 持久化報告時遮掉 residual 的原始 id：fail-closed 下報告是唯一產物，
+        # 不可讓它自己夾帶個資。檔案:行號 仍保留、足以定位漏點；
+        # 原始值只在 main() 的 stderr（VDI 上、短暫）印出以利人工排查。
+        persisted = dict(report)
+        persisted["residual"] = [
+            {**r, "match": mask_value(r["match"], mask_keep, mask_char)} for r in residual
+        ]
         (out_root / version / "SANITIZATION_REPORT.json").write_text(
-            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(persisted, indent=2, ensure_ascii=False), encoding="utf-8"
         )
     return report
 

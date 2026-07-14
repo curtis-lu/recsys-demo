@@ -230,6 +230,20 @@ def test_backstop_catches_id_in_binary_and_fails_closed(tmp_path):
     assert (out / v / "SANITIZATION_REPORT.json").exists()
 
 
+def test_report_file_does_not_embed_raw_id(tmp_path):
+    # fail-closed 下報告是唯一產物，其內容不得夾帶原始 id（residual match 要遮）
+    data, v, _ = _build_data_root(
+        tmp_path, extra_files={f"models/{'A1B2C3D4'}/leak.pkl": b"id " + FAKE_ID.encode()}
+    )
+    out = tmp_path / "export"
+    report = export(v, data_root=data, out_root=out, now=FIXED_NOW)
+    assert report["residual"]  # 記憶體回傳仍保留原值供 stderr 排查
+    blob = (out / v / "SANITIZATION_REPORT.json").read_text(encoding="utf-8")
+    assert FAKE_ID not in blob  # 但寫進檔案的報告不得有原始 id
+    persisted = json.loads(blob)
+    assert persisted["residual"], "報告仍應記錄有殘留（只是遮掉值）"
+
+
 def test_main_exit_2_on_residual(tmp_path):
     data, v, _ = _build_data_root(
         tmp_path, extra_files={f"models/{'A1B2C3D4'}/leak.pkl": b"id " + FAKE_ID.encode()}
