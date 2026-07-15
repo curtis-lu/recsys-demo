@@ -101,3 +101,33 @@ def compute_boundary(
                      "at_low": at_low, "at_high": at_high,
                      "suggestion": suggestion, "note": note}
     return out
+
+
+def compute_importances(study) -> Optional[dict]:
+    """Best-effort fANOVA param importances。任何失敗（trial/參數過少、objective
+    近常數、backend 缺）都回 None（空 dict 也視為 None）。"""
+    try:
+        import optuna
+
+        imp = optuna.importance.get_param_importances(study)
+        return {k: float(v) for k, v in imp.items()} or None
+    except Exception:  # pragma: no cover - 由退化 study 測試觸發
+        logger.warning("HPO param importance unavailable; skipping", exc_info=True)
+        return None
+
+
+def build_summary(
+    study, trials_payload: dict, *, patience: int, hi_thresh: float, lo_thresh: float
+) -> dict:
+    """彙整 convergence（純 trials）+ boundary（純 best_params）+ importances（study, best-effort）。"""
+    trials = trials_payload["trials"]
+    best = trials_payload.get("best") or {}
+    best_params = best.get("params", {})
+    search_space = trials_payload["meta"]["search_space"]
+    return {
+        "convergence": compute_convergence(trials, patience=patience),
+        "boundary": compute_boundary(
+            best_params, search_space, hi_thresh=hi_thresh, lo_thresh=lo_thresh
+        ),
+        "importances": compute_importances(study),
+    }
