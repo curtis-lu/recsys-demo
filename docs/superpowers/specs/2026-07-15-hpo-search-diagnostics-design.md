@@ -44,7 +44,7 @@
 | D3 | 每次自動存 7 個檔：`hpo_trials.json`、`hpo_summary.json`、5 張 HTML 圖 | 3 |
 | D4 | 5 張圖全部每次自動存（含 contour / parallel coordinate）；**不做按需 script**（避免多一個元件的複雜度，使用者定案） | 3, 4 |
 | D5 | 全程 best-effort（失敗只 warning，絕不 raise） | 1 |
-| D6 | 開關 `training.hpo_diagnostics`（預設 `true`），可整包關 | 4 |
+| D6 | 開關 `diagnostics.hpo_search.enabled`（預設 `true`），可整包關；放 `diagnostics:` block（**不進 model_version hash**） | 4 |
 
 ## 4. 架構與整合點
 
@@ -189,18 +189,34 @@ except Exception:
 | `contour.html` | `plot_contour` | 參數交互 / 最佳區域 |
 | `parallel_coordinate.html` | `plot_parallel_coordinate` | 參數交互 / 最佳區域 |
 
-**每張圖各自 best-effort**（`render.py` 內各包 try/except）：任一張失敗（例如 `contour` /
-`parallel_coordinate` 在**只有 1 個搜尋參數**時退化）只記 warning、跳過該張，不影響其餘圖與 JSON。
+**每張圖各自 best-effort**（`render.py` 內各包 try/except）：任一張失敗只記 warning、跳過該張，不影響
+其餘圖與 JSON。實測的真實退化案例是 **`param_importances` 在完成 trial <2 時**（內部 `get_param_importances`
+raise `ValueError`）→ 跳過該張、其餘 4 張照畫。（註：只有 1 個搜尋參數時 contour/parallel **不 raise**，
+會畫出退化圖，非失敗。）
 
-**成本（要求 4）**：5 張皆 driver-local，無額外 Spark job / 網路 / 新套件。`contour` 是唯一成本隨
-搜尋參數個數約 O(n²) 成長的（兩兩配對子圖）——典型 LightGBM 搜尋空間約 4–8 參數仍是秒級小事；若日後
-參數數大到 HTML 過大，靠 per-chart best-effort ＋（必要時）參數數上限守衛處理，本輪不預先加守衛（YAGNI）。
+**HTML 大小（要求 4，重要）**：`fig.write_html` 預設把整份 plotly.js（~3.6MB）inline 進**每個**檔
+（實測 5 張＝18MB）。故一律 `write_html(..., include_plotlyjs="directory")`：整個 `hpo/` dir **共用一份**
+`plotly.min.js`（~3.6MB），各 HTML 只剩 ~8–10KB，且**離線可看（不觸網）**。每次 HPO 的圖表淨成本
+≈ 一份 3.6MB 共用 JS ＋ 5 個 KB 級 HTML。
+
+**成本（要求 4）**：皆 driver-local，無額外 Spark job / 網路 / 新套件。`contour` 成本隨搜尋參數個數約
+O(n²) 成長（兩兩配對子圖），典型 4–8 參數仍是秒級小事；本輪不預先加參數數守衛（YAGNI）。
 
 ## 9. 開關與 config（對應要求 4）
 
-- `training.hpo_diagnostics: true`（預設）。設 `false` 整包跳過（連稽核 JSON 都不寫）。
-- 啟發式閾值（`patience` / `hi_thresh` / `lo_thresh`）：對齊既有 diagnosis config 區放置（實際
-  鍵位置待實作時對齊，見 §12）。
+放 `diagnostics:` block（**不進 model_version hash**，對齊既有 `diagnostics.shap` 等；`training:`
+block 會進 hash，放那會導致「開/關診斷」churn model_version，故不放那）：
+
+```yaml
+diagnostics:
+  hpo_search:
+    enabled: true        # false → 整包跳過（連稽核 JSON 都不寫）
+    patience: 10         # 連續 N 個完成 trial 未進步 → plateau 提示
+    boundary_hi: 0.98    # 相對位置 >= 此 → 貼上界，建議放寬
+    boundary_lo: 0.02    # 相對位置 <= 此 → 貼下界，建議放寬
+```
+
+預設值為啟發式，文件明講是提示、非保證。`write_hpo_diagnostics` 以 `.get()` 讀取、缺鍵用上述預設。
 
 ## 10. 約束（專案不變量）
 
@@ -216,6 +232,8 @@ except Exception:
 - **`--from-node finalize_model` 不重生診斷**（§5 邊角）——可接受。
 - **`contour` 的 HTML 隨搜尋參數個數 O(n²) 膨脹**；本輪不加參數數守衛，靠 per-chart best-effort
   兜底（§8）。典型 4–8 參數無虞。
+- **每次 HPO 產出一份 ~3.6MB 的共用 `plotly.min.js`**（`include_plotlyjs="directory"`；比 inline
+  的 18MB 省 5×、且離線可看）——這是互動 plotly 圖的成本地板，隨 model_version 進 MLflow。
 - **`hpo_checkpointing: false`**（純記憶體 study）時，crash 則無 resume 也無診斷——**既有行為，不變**。
 
 ## 12. 測試計畫（TDD）
@@ -223,8 +241,9 @@ except Exception:
 - **unit / collect**：對 fake study 抽 trials → `hpo_trials.json` schema 欄位正確、`best` 對齊。
 - **unit / summary**：對已知 trials 算 convergence（plateau 觸發/未觸發兩例）、boundary
   （`widen_high` / `widen_low` / `ok` 各一例，含 log-scale）、importances best-effort 降級（退化 study → `null`）。
-- **unit / render**：5 張圖 `write_html` 產出檔存在且非空；**只有 1 個搜尋參數時 `contour` /
-  `parallel_coordinate` 退化 → 該張跳過並記 warning，其餘檔仍產出**（per-chart best-effort）。
+- **unit / render**：5 張圖 `write_html(include_plotlyjs="directory")` 產出檔存在且非空、且共用
+  一份 `plotly.min.js`；**完成 trial <2 的 study → `param_importances` 跳過並記 warning，其餘 4 張
+  仍產出**（per-chart best-effort 的實測退化案例）。
 - **integration**：`tune_hyperparameters` 尾端呼叫；**注入 render 例外 → 確認記 warning 且回傳正常**
   （mutation：拿掉 try/except，該測試應轉紅——證明 best-effort 真的覆蓋）。
 - **resume 契約**：跑 `tests/test_pipelines/test_resume_contracts.py`，應**原封不動全綠**
@@ -232,5 +251,6 @@ except Exception:
 
 ## 13. 待確認 / 開放項
 
-1. diagnosis config 區的實際鍵位置（啟發式閾值放哪）——實作時對齊既有 config 慣例。
-2. **有序 categorical 參數**的邊界建議策略（本 spec 預設不建議；若之後要有序 categorical 也判邊界再加）。
+1. **有序 categorical 參數**的邊界建議策略（本 spec 預設不建議；若之後要有序 categorical 也判邊界再加）。
+
+（原開放項「config 鍵位置」已定案：`diagnostics.hpo_search`，見 §9——放不進 hash 的 `diagnostics:` block。）
