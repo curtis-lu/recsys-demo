@@ -17,6 +17,7 @@ def atomic_write_json(path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.chmod(tmp, 0o644)  # mkstemp 預設 0600；對齊 repo 其他診斷 JSON 的 0644
         os.replace(tmp, str(path))
     except Exception:
         if os.path.exists(tmp):
