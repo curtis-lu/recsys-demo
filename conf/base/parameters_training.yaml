@@ -180,6 +180,14 @@ diagnostics:
     quadrant_sample_per_cell: 30    # 每 (item×象限) profile 抽樣目標數
     quadrant_min_rows: 10           # 某格 < 此 → low_coverage
     case_top_k: 15                  # 單列 case 案例圖顯示的特徵數（|SHAP| 最大的前 N）
+  # HPO 搜尋診斷（放此非 training:，故不進 model_version hash）。每次 HPO 後 best-effort
+  # 寫 diagnostics/hpo/：hpo_trials.json（稽核）+ hpo_summary.json（收斂/邊界/重要性）+ 5 張圖。
+  # patience/boundary_* 是啟發式提示、非保證，判讀見 spec 2026-07-15-hpo-search-diagnostics-design.md §7。
+  hpo_search:
+    enabled: true        # false → 整包跳過（連稽核 JSON 都不寫）
+    patience: 10         # 連續 N 個完成 trial 未進步 → plateau 提示（答「要不要再繼續 trial」）
+    boundary_hi: 0.98    # 最佳值相對位置 >= 此 → 貼上界，建議放寬（答「search range 要不要調」）
+    boundary_lo: 0.02    # 相對位置 <= 此 → 貼下界，建議放寬
 
 # HPO 崩潰復原開關（ops 旗標，刻意放頂層不影響 model_version）。
 # true（預設）：tune_hyperparameters 持久化 Optuna study + 每次刷新最佳 checkpoint
