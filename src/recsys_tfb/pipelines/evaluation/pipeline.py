@@ -30,6 +30,7 @@ def create_pipeline(
         compute_pair_ledger,
         compute_quadrant,
         compute_reconciliation,
+        draw_diagnosis_sample_node,
         generate_report,
         prepare_eval_data,
     )
@@ -81,6 +82,14 @@ def create_pipeline(
             inputs=[predictions_input, "label_table", "parameters"],
             outputs="eval_predictions",
         ),
+        # Draw the driver-side diagnosis sample ONCE; the three diagnosis
+        # consumers below read this shared in-memory output instead of each
+        # re-drawing it (same seed -> identical content).
+        Node(
+            draw_diagnosis_sample_node,
+            inputs=["eval_predictions", "parameters"],
+            outputs="diagnosis_sample",
+        ),
         Node(
             compute_metrics,
             inputs=["eval_predictions", "parameters"],
@@ -93,7 +102,7 @@ def create_pipeline(
         ),
         Node(
             compute_metric_ci,
-            inputs=["eval_predictions", "parameters"],
+            inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_metric_ci",
         ),
         Node(
@@ -109,12 +118,12 @@ def create_pipeline(
         ),
         Node(
             compute_offset_sweep,
-            inputs=["eval_predictions", "parameters"],
+            inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_offset_sweep",
         ),
         Node(
             compute_pair_ledger,
-            inputs=["eval_predictions", "parameters"],
+            inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_pair_ledger",
         ),
         Node(

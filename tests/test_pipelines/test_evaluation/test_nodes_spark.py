@@ -539,7 +539,10 @@ def test_compute_metric_ci_disabled_returns_stub(spark):
 
 
 def test_compute_metric_ci_end_to_end_small(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_metric_ci,
+        draw_diagnosis_sample_node,
+    )
     df = spark.createDataFrame(
         [
             ("20240331", "C0", "A", 0.9, 1),
@@ -563,7 +566,9 @@ def test_compute_metric_ci_end_to_end_small(spark):
             },
         },
     }
-    out = compute_metric_ci(df, params)
+    # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
+    sample = draw_diagnosis_sample_node(df, params)
+    out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
     assert out["sample"]["n_queries_sampled"] == 2
@@ -687,6 +692,34 @@ def test_compute_offset_sweep_requires_eval_predictions_when_enabled(spark):
         compute_offset_sweep(None, params)
 
 
+def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"ci": {"enabled": True}}},
+    }
+    # gate/consumer drift guard: an enabled consumer must raise a clear
+    # ValueError (not AttributeError on None) if the shared sample is None.
+    with _pytest.raises(ValueError, match="compute_metric_ci"):
+        compute_metric_ci(None, params)
+
+
+def test_compute_pair_ledger_raises_when_enabled_but_sample_none(spark):
+    import pytest as _pytest
+    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_pair_ledger
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score", "rank": "rank"}},
+        "evaluation": {"diagnosis": {"pair_ledger": {"enabled": True}}},
+    }
+    with _pytest.raises(ValueError, match="compute_pair_ledger"):
+        compute_pair_ledger(None, params)
+
+
 def test_assemble_triage_summary_disabled_returns_stub():
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         assemble_triage_summary,
@@ -714,3 +747,155 @@ def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
     assert out["enabled"] is True
     assert out["gain_ledger_present"] is False
     assert "A" in out["verdicts"]
+
+
+class TestSampleConsumerFlags:
+    def test_defaults_all_true(self):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _sample_consumer_flags,
+        )
+        assert _sample_consumer_flags({}) == (True, True, True)
+
+    def test_respects_disabled(self):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _sample_consumer_flags,
+        )
+        params = {"evaluation": {"diagnosis": {
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": True},
+            "pair_ledger": {"enabled": False},
+        }}}
+        assert _sample_consumer_flags(params) == (False, True, False)
+
+
+class TestDrawDiagnosisSampleNode:
+    @staticmethod
+    def _params():
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank",
+            }},
+            "evaluation": {"diagnosis": {"sample": {
+                "max_queries": 10, "min_pos_queries_per_item": 2, "seed": 42,
+            }}},
+        }
+
+    @staticmethod
+    def _eval_predictions(spark):
+        rows = []
+        for cust in ["H1", "H2", "H3", "H4"]:
+            rows.append(("20240331", cust, "hot", 0.9, 1))
+            rows.append(("20240331", cust, "cold", 0.1, 0))
+        rows.append(("20240331", "C1", "hot", 0.9, 0))
+        rows.append(("20240331", "C1", "cold", 0.1, 1))
+        return spark.createDataFrame(
+            rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
+        )
+
+    def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
+        from unittest.mock import patch
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()
+        params["evaluation"]["diagnosis"].update({
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+        })
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+        ) as spy:
+            result = nodes_spark.draw_diagnosis_sample_node(
+                self._eval_predictions(spark), params
+            )
+        assert result is None
+        assert spy.call_count == 0
+
+    def test_draws_when_one_enabled(self):
+        from unittest.mock import patch
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()
+        params["evaluation"]["diagnosis"].update({
+            "ci": {"enabled": True},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+        })
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
+        ) as spy:
+            nodes_spark.draw_diagnosis_sample_node(None, params)
+        # exact args, not just count: guards against a regression forwarding a
+        # limited/mutated eval_predictions or a copied params.
+        spy.assert_called_once_with(None, params)
+
+    def test_node_output_equals_direct_draw(self, spark):
+        # Faithfulness / behaviour-preservation: the node is a pass-through of
+        # draw_diagnosis_sample. Same seed -> identical content.
+        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all three consumers default-enabled
+        direct_pdf, direct_meta = draw_diagnosis_sample(
+            self._eval_predictions(spark), params
+        )
+        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(
+            self._eval_predictions(spark), params
+        )
+        assert node_meta == direct_meta
+        assert (
+            node_pdf.sort_values(list(node_pdf.columns))
+            .reset_index(drop=True)
+            .equals(
+                direct_pdf.sort_values(list(direct_pdf.columns))
+                .reset_index(drop=True)
+            )
+        )
+
+    def test_draw_diagnosis_sample_called_once_across_three_consumers(self):
+        from unittest.mock import patch
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all three default-enabled
+        stub_pdf = pd.DataFrame({
+            "snap_date": ["20240331"], "cust_id": ["H1"],
+            "prod_name": ["hot"], "score": [0.9], "label": [1],
+        })
+        stub = (stub_pdf, {"n_queries_sampled": 1})
+        with patch(
+            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            return_value=stub,
+        ) as spy, patch(
+            "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
+            return_value={"n_boot": 1},
+        ), patch(
+            "recsys_tfb.diagnosis.metric.offset_sweep.sweep", return_value={},
+        ), patch(
+            "recsys_tfb.diagnosis.metric.pair_ledger.pair_ledger",
+            return_value={},
+        ):
+            sample = nodes_spark.draw_diagnosis_sample_node(None, params)
+            nodes_spark.compute_metric_ci(sample, params)
+            nodes_spark.compute_offset_sweep(sample, params)
+            nodes_spark.compute_pair_ledger(sample, params)
+        # exactly one draw, with the node's own inputs — the three consumers
+        # must NOT re-draw (they consume the shared sample).
+        spy.assert_called_once_with(None, params)
+
+    def test_node_logs_free_pandas_data_volume(self, spark, caplog):
+        import logging
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+        params = self._params()  # all enabled
+        with caplog.at_level(logging.INFO):
+            nodes_spark.draw_diagnosis_sample_node(
+                self._eval_predictions(spark), params
+            )
+        vols = [
+            r.volume for r in caplog.records
+            if getattr(r, "event", None) == "data_volume"
+            and getattr(r, "volume", {}).get("name") == "diagnosis.sample_pdf"
+        ]
+        assert vols, "expected a data_volume event for diagnosis.sample_pdf"
+        # Free pandas measurement (rows populated), NOT a Spark count.
+        assert vols[0]["kind"] == "pandas"
+        assert vols[0]["rows"] is not None
