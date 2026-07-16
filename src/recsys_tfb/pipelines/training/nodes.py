@@ -597,6 +597,22 @@ def tune_hyperparameters(
         "Best trial score (%s): %.4f, best_iteration: %d, params: %s",
         hpo_objective, best_state["score"], best_iteration, best_params,
     )
+
+    # HPO 搜尋診斷：best-effort 側輸出，衍生自本地 study。失敗只 warning、絕不影響
+    # 回傳（診斷 bug 不得逼你重跑 HPO）。不新增 DAG node、不改本函式 outputs → 對
+    # RESUME_CONTRACTS 隱形。產物寫進 diagnostics_dir/hpo/，由 log_experiment 的
+    # log_artifacts 撿走。見 docs/superpowers/specs/2026-07-15-hpo-search-diagnostics-design.md
+    try:
+        from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
+
+        write_hpo_diagnostics(
+            study, search_space, parameters,
+            search_id=search_id, hpo_objective=hpo_objective, seed=seed,
+            n_trials_target=n_trials, best_iteration=best_iteration,
+        )
+    except Exception:  # pragma: no cover - best-effort guard
+        logger.warning("HPO diagnostics failed; training continues", exc_info=True)
+
     return best_params, best_iteration, best_model
 
 
