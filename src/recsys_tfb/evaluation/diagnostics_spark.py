@@ -84,19 +84,6 @@ def _box_stats(rows: pd.DataFrame, key_cols: list[str]) -> pd.DataFrame:
     )
 
 
-def score_box_stats(
-    sdf: SparkDataFrame, item_col: str, score_col: str, accuracy: int = 10000
-) -> pd.DataFrame:
-    """Pre-computed boxplot stats per item: one row per item with
-    ``q1, median, q3, lowerfence, upperfence`` (no per-point outliers)."""
-    rows = (
-        sdf.groupBy(item_col)
-        .agg(F.percentile_approx(F.col(score_col), _PCTS, accuracy).alias("p"))
-        .toPandas()
-    )
-    return _box_stats(rows, [item_col])
-
-
 def score_box_stats_by_label(
     sdf: SparkDataFrame,
     item_col: str,

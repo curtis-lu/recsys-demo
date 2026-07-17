@@ -14,7 +14,6 @@ from recsys_tfb.evaluation.diagnostics_spark import (
     positive_rank_count_matrix,
     positive_rate_matrix,
     rank_count_matrix,
-    score_box_stats,
     score_box_stats_by_label,
     score_histogram_counts,
 )
@@ -22,7 +21,6 @@ from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
-    plot_score_boxplot,
     plot_score_boxplot_by_label,
     plot_score_histogram,
 )
@@ -502,10 +500,6 @@ def generate_report(
         if diag_cfg.get("include_distributions", True):
             figs.append(plot_score_histogram(
                 score_histogram_counts(sdf, item_col, score_col),
-                item_col=item_col,
-            ))
-            figs.append(plot_score_boxplot(
-                score_box_stats(sdf, item_col, score_col),
                 item_col=item_col,
             ))
             figs.append(plot_score_boxplot_by_label(
