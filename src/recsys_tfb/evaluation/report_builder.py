@@ -48,7 +48,13 @@ _HIDDEN_METRIC_PREFIXES = ("ndcg",)
 
 
 def _visible_metric_keys(keys) -> list:
-    """濾掉刻意不呈現的 metric key，保留原順序。"""
+    """濾掉刻意不呈現的 metric key，保留原順序。
+
+    契約以**顯示鍵的命名**為準（prefix 比對），不是以「屬於哪個指標家族」
+    為準——目前擋掉的是 ``ndcg@k``／``ndcg_attr@k``。若日後 metrics_spark
+    把同族但不以 ``ndcg`` 起頭的鍵（例如 ``dcg@k``）曝到攤平表格，需在
+    ``_HIDDEN_METRIC_PREFIXES`` 補上，否則會繞過這層過濾。
+    """
     return [
         k for k in keys
         if not str(k).startswith(_HIDDEN_METRIC_PREFIXES)

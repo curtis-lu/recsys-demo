@@ -152,6 +152,22 @@ def test_assemble_report_is_html():
     assert "摘要 Headline" in html
 
 
+def test_assemble_report_has_no_ndcg_end_to_end():
+    """端到端護欄：完整 report.html 整份不得出現 ndcg。fixture 刻意讓
+    per_segment 與 baseline 兩條 key-agnostic 路徑都被走到——它們把 metrics
+    dict 的 key 直接攤平，是 ndcg 最容易漏出去的地方（metrics_spark 仍算 ndcg，
+    只是刻意不呈現）。section 級測試涵蓋不到這種整份洩漏，故獨立一條網子。"""
+    m = _metrics()
+    m["per_segment"] = {
+        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
+        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
+    }
+    html = rb.assemble_report(
+        m, _params(), baseline_metrics=_baseline_metrics_full()
+    )
+    assert "ndcg" not in html.lower()
+
+
 def test_primary_map_orientation_locked():
     s = rb.build_primary_map_section(_metrics(), _params())
     assert "map" in s.tables[0].index   # families are the row index
