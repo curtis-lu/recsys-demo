@@ -412,67 +412,6 @@ def build_per_item_attr_section(
     )
 
 
-def build_reconciliation_section(
-    reconciliation: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "reconciliation"):
-        return None
-    if not reconciliation or not reconciliation.get("enabled"):
-        return None
-    by_item = reconciliation.get("by_item", {}) or {}
-    cols = ["theory_min", "theory_max", "gap", "gap_vs_global",
-            "gap_calibrated", "gap_calibrated_vs_global",
-            "residual", "verdict", "p_mean", "y_rate", "n_rows"]
-    tbl = pd.DataFrame(
-        {c: [by_item[it].get(c) for it in by_item] for c in cols},
-        index=list(by_item),
-    )
-    score_col = reconciliation.get("score_col_used")
-    glob = reconciliation.get("global", {}) or {}
-    reference = glob.get("reference", 0.0)
-    n_neutral = glob.get("n_neutral_items", 0)
-    pooled_gap = glob.get("pooled_gap")
-    pooled_clause = (
-        f"；n_rows 加權 pooled gap {pooled_gap:.3f} 供交叉檢核"
-        if pooled_gap is not None else ""
-    )
-    desc = (
-        "這張表在回答一個問題：模型的機率水準偏移，是不是你自己的抽樣／"
-        "加權配置造成的？欄位定義與完整前因後果見 "
-        "docs/pipelines/evaluation-diagnosis.md，這裡只給判讀順序：<br>"
-        "1. 先掃 verdict 欄。全部「可解釋」＝偏移都是配置的直接後果，"
-        "不用動模型；出現「不可解釋」＝有配置以外的事在發生，值得追；"
-        "「無法評估」看 reason 欄。<br>"
-        "2. theory_min／theory_max＝由配置推得的理論偏移帶（log-odds）。"
-        "同一產品在不同客群的抽樣比率不同，所以是「帶」不是單值——"
-        "帶越寬 verdict 越寬容（跨 segment 聚合近似，cell 級精確值在 "
-        "reconciliation.json）。<br>"
-        f"3. verdict 比的是 gap_vs_global（＝gap − 全局參考值 "
-        f"{reference:.3f}，取 {n_neutral} 個 config 中性產品的 gap 中位數"
-        f"{pooled_clause}），不是絕對 gap——post-training 的評估母體只含"
-        "有正例的客戶，所有產品的 gap 會被一致下移，那是母體性質、"
-        f"不是任何單一產品的問題。|residual| ≤ "
-        f"{reconciliation.get('explained_threshold')} → 可解釋。<br>"
-        f"4. 主判欄用 {score_col}（模型原始輸出）。判讀校準層看 "
-        "gap_calibrated_vs_global：校準有效時它應遠小於 gap_vs_global、"
-        "趨近 0。gap 為 logit(平均) 的近似——產品內分數越分散，偏差越大。"
-    )
-    if reconciliation.get("fallback"):
-        desc += (
-            "⚠ 本次執行找不到 score_uncalibrated 欄（monitoring 路徑），"
-            "已退回 score——gap 內含校準層效應，判讀時注意。"
-        )
-    notes = (reconciliation.get("theory", {}) or {}).get("notes") or []
-    if notes:
-        desc += "／".join(notes)
-    return ReportSection(
-        title="對帳 Reconciliation（理論偏移 vs 實測校準差距）",
-        description=desc,
-        tables=[tbl],
-        table_titles=["per-item 對帳表"],
-    )
-
-
 def build_quadrant_section(
     quadrant: dict | None, parameters: dict
 ) -> ReportSection | None:
@@ -597,8 +536,8 @@ def build_offset_sweep_section(
         "分流閥：對每個 item 的 logit 分數加常數 δ（不重訓）能收復多少 "
         "macro mAP。判讀順序：(1) 看折外收復量——大＝缺口主要在水準（配置"
         "／再平衡可修）、小＝缺口在條件判別力（必須動訓練）；(2) 看 δ* 大"
-        "的 item 是誰，回對帳表查可否由配置解釋；(3) waterfall 看收復量怎"
-        "麼分攤到各 item。δ* 單位＝log-odds，與對帳層 offset 同尺度。完整"
+        "的 item 是誰；(3) waterfall 看收復量怎"
+        "麼分攤到各 item。δ* 單位＝log-odds。完整"
         "判讀：docs/pipelines/evaluation-diagnosis.md。"
     )
     notes = sweep.get("notes") or []
@@ -968,7 +907,7 @@ _GLOSSARY = [
      "把某 item 分數換成 base-rate 常數重算指標；delta 正＝該 item "
      "個性化分數是淨傷害、負＝淨貢獻"),
     ("triage 總表",
-     "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+     "跨診斷（判別力／分流，＋結構層 gain_ledger）合成的 "
      "per-item 判定＋建議槓桿＋起手值總表"),
     ("餓死型",
      "條件判別力差、且結構層 context_gain_share 遠低於同儕——特徵夠但曝光"
@@ -995,7 +934,6 @@ def assemble_report(
     baseline_metrics: dict | None = None,
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
-    reconciliation: dict | None = None,
     quadrant: dict | None = None,
     offset_sweep: dict | None = None,
     pair_ledger: dict | None = None,
@@ -1009,7 +947,6 @@ def assemble_report(
         build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
-        build_reconciliation_section(reconciliation, parameters),
         build_quadrant_section(quadrant, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
         build_pair_ledger_section(pair_ledger, parameters),

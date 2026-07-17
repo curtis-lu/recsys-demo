@@ -29,7 +29,6 @@ def create_pipeline(
         compute_offset_sweep,
         compute_pair_ledger,
         compute_quadrant,
-        compute_reconciliation,
         draw_diagnosis_sample_node,
         generate_report,
         prepare_eval_data,
@@ -106,11 +105,6 @@ def create_pipeline(
             outputs="evaluation_metric_ci",
         ),
         Node(
-            compute_reconciliation,
-            inputs=["eval_predictions", "parameters"],
-            outputs="evaluation_reconciliation",
-        ),
-        Node(
             compute_quadrant,
             inputs=["eval_predictions", "label_table", "evaluation_metric_ci",
                     "parameters"],
@@ -136,7 +130,7 @@ def create_pipeline(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
                     "parameters", "baseline_metrics", "evaluation_metric_ci",
-                    "evaluation_reconciliation", "evaluation_quadrant",
+                    "evaluation_quadrant",
                     "evaluation_offset_sweep", "evaluation_pair_ledger",
                     "evaluation_triage"],
             outputs="evaluation_report",

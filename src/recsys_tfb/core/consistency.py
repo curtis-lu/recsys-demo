@@ -84,9 +84,9 @@ Layer 1 — config-static (implemented here; aggregated by
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
   ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
-* A16 — ``evaluation.diagnosis.reconciliation`` parameter domains:
-  ``score_col`` ∈ {score, score_uncalibrated}; ``explained_threshold`` > 0
-  (log-odds). Predicate: ``reconciliation_param_errors``.
+* A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
+  renumbered: existing docs and plans cite invariants by number, so reusing
+  A16 or shifting A17+ would silently repoint those references.
 * A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
   ``auc_threshold`` ∈ (0.5, 1); ``top_k_occupancy`` integer >= 1.
   Predicate: ``quadrant_param_errors``.
@@ -567,35 +567,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def reconciliation_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.reconciliation parameter domains (A16)."""
-    errors: list[str] = []
-    recon = (
-        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-        .get("reconciliation", {}) or {}
-    )
-    sc = recon.get("score_col", "score_uncalibrated")
-    if sc not in ("score", "score_uncalibrated"):
-        errors.append(
-            f"evaluation.diagnosis.reconciliation.score_col={sc!r} must be "
-            f"'score' or 'score_uncalibrated'."
-        )
-    thr = recon.get("explained_threshold", 0.3)
-    if not (_is_number(thr) and float(thr) > 0.0):
-        errors.append(
-            f"evaluation.diagnosis.reconciliation.explained_threshold={thr!r} "
-            f"must be a number > 0 (log-odds units)."
-        )
-    en = recon.get("enabled", True)
-    if not isinstance(en, bool):
-        errors.append(
-            f"evaluation.diagnosis.reconciliation.enabled={en!r} must be a "
-            f"boolean (YAML true/false; a quoted string like \"false\" is "
-            f"truthy and would silently enable the node)."
-        )
-    return errors
-
-
 def quadrant_param_errors(parameters: dict) -> list[str]:
     """evaluation.diagnosis.quadrant parameter domains (A17)."""
     errors: list[str] = []
@@ -841,8 +812,6 @@ def validate_config_consistency(parameters: dict) -> None:
         )
 
     errors.extend(diagnosis_metric_param_errors(parameters))
-
-    errors.extend(reconciliation_param_errors(parameters))
 
     errors.extend(quadrant_param_errors(parameters))
 

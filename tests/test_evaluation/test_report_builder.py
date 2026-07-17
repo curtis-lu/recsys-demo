@@ -537,75 +537,6 @@ def test_assemble_report_passes_metric_ci_through():
 # gap_calibrated_vs_global＝gap_calibrated 減全局參考值 reference_calibrated
 # =-0.1（opus 審查修正：gap_calibrated 同樣受母體條件化位移，判讀校準層要
 # 看相對值而非絕對值）：A: 0.02-(-0.1)=0.12；B: 0.8-(-0.1)=0.9。
-_RECON_FIXTURE = {
-    "enabled": True, "score_col_used": "score_uncalibrated",
-    "fallback": False, "explained_threshold": 0.3,
-    "theory": {"cells": {}, "by_item": {}, "notes": []},
-    "by_item": {
-        "A": {"theory_min": 0.693, "theory_max": 0.693, "theory_approx": True,
-              "gap": 0.75, "gap_vs_global": 0.45, "gap_calibrated": 0.02,
-              "gap_calibrated_vs_global": 0.12,
-              "residual": -0.243,
-              "verdict": "可解釋", "p_mean": 0.4, "y_rate": 0.25, "n_rows": 100},
-        "B": {"theory_min": 0.0, "theory_max": 0.0, "theory_approx": False,
-              "gap": 0.9, "gap_vs_global": 0.6, "gap_calibrated": 0.8,
-              "gap_calibrated_vs_global": 0.9,
-              "residual": 0.6,
-              "verdict": "不可解釋", "p_mean": 0.5, "y_rate": 0.3, "n_rows": 80},
-    },
-    "all_explained": False,
-    "global": {
-        "reference": 0.3, "method": "median_of_config_neutral_items",
-        "pooled_gap": 0.7605, "n_neutral_items": 3,
-        "reference_calibrated": -0.1,
-    },
-}
-
-
-def test_reconciliation_section_renders_table_and_verdict():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    sec = build_reconciliation_section(_RECON_FIXTURE, _params_min())
-    tbl = sec.tables[0]
-    assert list(tbl.index) == ["A", "B"]
-    assert tbl.loc["B", "verdict"] == "不可解釋"
-    assert "理論" in sec.description and "近似" in sec.description
-    assert "score_uncalibrated" in sec.description
-    assert "gap_vs_global" in tbl.columns
-    assert (list(tbl.columns).index("gap_vs_global")
-            == list(tbl.columns).index("gap") + 1)
-    assert "全局" in sec.description
-    # opus 總審修正 1：gap_calibrated_vs_global 緊接 gap_calibrated 之後，
-    # 描述需點出「中性」（config 中性 item 中位數）與「帶」（理論帶/帶寬）。
-    assert "gap_calibrated_vs_global" in tbl.columns
-    assert (list(tbl.columns).index("gap_calibrated_vs_global")
-            == list(tbl.columns).index("gap_calibrated") + 1)
-    assert "中性" in sec.description
-    assert "帶" in sec.description
-
-
-def test_reconciliation_section_none_when_disabled_or_absent():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    assert build_reconciliation_section(None, _params_min()) is None
-    assert build_reconciliation_section({"enabled": False}, _params_min()) is None
-    params_off = {"evaluation": {"report": {"sections": {"reconciliation": False}}}}
-    assert build_reconciliation_section(_RECON_FIXTURE, params_off) is None
-
-
-def test_reconciliation_fallback_marked():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    fx = dict(_RECON_FIXTURE, fallback=True, score_col_used="score")
-    sec = build_reconciliation_section(fx, _params_min())
-    assert "退回" in sec.description
-
-
-def test_assemble_report_renders_reconciliation():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), reconciliation=_RECON_FIXTURE
-    )
-    assert "對帳" in html
-
-
 _QUAD_FIXTURE = {
     "enabled": True,
     "thresholds": {"auc_threshold": 0.6, "top_k_occupancy": 1},
@@ -662,16 +593,13 @@ def test_quadrant_section_notes_and_missing_axis():
     fx = dict(
         _QUAD_FIXTURE,
         by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
-                           gap_vs_global=None, level_status="無法評估",
                            quadrant="無法評估", auc=None,
                            auc_reason=auc_reason)},
-        notes=["reconciliation 停用或缺席——水準軸無法評估。"],
+        notes=["metric_ci 停用或缺席——AP±CI 欄從缺。"],
     )
     sec = build_quadrant_section(fx, _params_min())
     assert "無法評估" in sec.tables[0]["quadrant"].tolist()
-    assert "reconciliation 停用" in sec.description
-    # 缺軸的 item 不進散布圖：唯一 item 缺 y → 無圖
-    assert sec.figures == []
+    assert "metric_ci 停用" in sec.description
     # 單類 item 的 auc 為 None 時，人類可讀的原因要進報表（不只在 JSON）。
     assert auc_reason in sec.tables[0]["auc_reason"].tolist()
 
@@ -681,7 +609,17 @@ def test_assemble_report_renders_quadrant():
     html = assemble_report(
         _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
     )
-    assert "象限" in html
+    assert "條件判別力" in html
+
+
+def test_assemble_report_has_no_reconciliation_section():
+    """對帳層已退場——report.html 不得再出現該段落。"""
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
+    )
+    assert "對帳" not in html
+    assert "Reconciliation" not in html
 
 
 _SWEEP_FIXTURE = {

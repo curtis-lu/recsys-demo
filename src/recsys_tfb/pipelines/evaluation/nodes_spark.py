@@ -348,34 +348,6 @@ def compute_metric_ci(
     return out
 
 
-def compute_reconciliation(
-    eval_predictions: Optional[SparkDataFrame],
-    parameters: dict,
-) -> dict:
-    """對帳層薄 node（spec §3 Phase 2）：理論偏移 vs 實測校準差距。
-
-    領域邏輯全在 ``diagnosis.metric.reconciliation``。停用時寫 stub。
-    """
-    eval_params = parameters.get("evaluation", {}) or {}
-    cfg = ((eval_params.get("diagnosis", {}) or {})
-           .get("reconciliation", {}) or {})
-    if not cfg.get("enabled", True):
-        logger.info("reconciliation disabled — writing stub")
-        return {"enabled": False}
-    if eval_predictions is None:
-        raise ValueError(
-            "compute_reconciliation: eval_predictions is required when "
-            "evaluation.diagnosis.reconciliation.enabled is true"
-        )
-    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
-    out = reconcile(eval_predictions, parameters)
-    logger.info(
-        "reconciliation computed: %d items, all_explained=%s (score_col=%s)",
-        len(out["by_item"]), out["all_explained"], out["score_col_used"],
-    )
-    return out
-
-
 def compute_quadrant(
     eval_predictions: Optional[SparkDataFrame],
     label_table: Optional[SparkDataFrame],
@@ -496,7 +468,6 @@ def generate_report(
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
     metric_ci: Optional[dict] = None,
-    reconciliation: Optional[dict] = None,
     quadrant: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
     pair_ledger: Optional[dict] = None,
@@ -566,7 +537,6 @@ def generate_report(
         baseline_metrics=baseline_metrics,
         diagnostics_frames=diagnostics_frames,
         metric_ci=metric_ci,
-        reconciliation=reconciliation,
         quadrant=quadrant,
         offset_sweep=offset_sweep,
         pair_ledger=pair_ledger,
