@@ -13,6 +13,7 @@ from recsys_tfb.evaluation.report_builder import (
     _resolve_display_k,
     _k_to_lookup,
     _n_products,
+    _visible_metric_keys,
     build_glossary_section,
 )
 
@@ -101,7 +102,9 @@ def _build_overall_section(comparison: dict) -> ReportSection:
     overall_a = comparison["result_a"].get("overall", {}) or {}
     overall_b = comparison["result_b"].get("overall", {}) or {}
     overall_d = comparison["overall_delta"]
-    keys = sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    keys = _visible_metric_keys(
+        sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    )
     tbl = pd.DataFrame(
         {
             label_a: [overall_a.get(k) for k in keys],
@@ -141,7 +144,6 @@ def _build_per_item_section(
     for metric_key, col_fmt, ks, title in (
         ("hit_rate", "recall@{k}", rec_ks, "per-item recall@k (M/B/Δ)"),
         ("map_attr", "map_attr@{k}", attr_ks, "per-item map_attr@k (M/B/Δ)"),
-        ("ndcg_attr", "ndcg_attr@{k}", attr_ks, "per-item ndcg_attr@k (M/B/Δ)"),
     ):
         tbl = _per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
@@ -152,7 +154,7 @@ def _build_per_item_section(
         titles.append(title)
     return ReportSection(
         title="per-item M/B/Δ",
-        description="細產品粒度的 recall / map_attr / ndcg_attr,頂列 Macro 平均。",
+        description="細產品粒度的 recall / map_attr,頂列 Macro 平均。",
         tables=tables,
         table_titles=titles,
     )
@@ -189,7 +191,9 @@ def _build_category_section(
     overall_a = cat_a.get("overall", {}) or {}
     overall_b = cat_b.get("overall", {}) or {}
     overall_d = comparison_cat["overall_delta"]
-    keys = sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    keys = _visible_metric_keys(
+        sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    )
     overall_tbl = pd.DataFrame(
         {"Model": [overall_a.get(k) for k in keys],
          "Compare": [overall_b.get(k) for k in keys],
@@ -201,7 +205,6 @@ def _build_category_section(
     for metric_key, col_fmt, ks, title in (
         ("hit_rate", "recall@{k}", rec_ks, "大類 per-item recall@k (M/B/Δ)"),
         ("map_attr", "map_attr@{k}", attr_ks, "大類 per-item map_attr@k (M/B/Δ)"),
-        ("ndcg_attr", "ndcg_attr@{k}", attr_ks, "大類 per-item ndcg_attr@k (M/B/Δ)"),
     ):
         tbl = _per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
@@ -212,7 +215,7 @@ def _build_category_section(
         titles.append(title)
     return ReportSection(
         title="大類 Category M/B/Δ",
-        description="大類粒度 overall + per-category recall/map_attr/ndcg_attr。只列雙方共通的大類。",
+        description="大類粒度 overall + per-category recall/map_attr。只列雙方共通的大類。",
         tables=tables,
         table_titles=titles,
     )

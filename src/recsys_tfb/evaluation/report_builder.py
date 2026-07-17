@@ -41,6 +41,19 @@ def _k_to_lookup(k, n_products: int) -> int | str:
 
 _MACRO_LABEL = "Macro 平均"
 
+# metrics_spark 仍會算出 ndcg@k / ndcg_attr@k，但兩份報表都刻意不呈現它們。
+# 下面幾張表把 metrics dict 的 key 直接攤成欄／列（key-agnostic），所以
+# 「不呈現」必須在這裡濾——光是原始碼裡不寫 "ndcg" 字樣擋不住。
+_HIDDEN_METRIC_PREFIXES = ("ndcg",)
+
+
+def _visible_metric_keys(keys) -> list:
+    """濾掉刻意不呈現的 metric key，保留原順序。"""
+    return [
+        k for k in keys
+        if not str(k).startswith(_HIDDEN_METRIC_PREFIXES)
+    ]
+
 
 def _report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
@@ -124,7 +137,7 @@ def build_primary_map_section(
     )
     rows = {}
     n_prod = _n_products(metrics)
-    for fam in ("map", "precision", "ndcg", "recall"):
+    for fam in ("map", "precision", "recall"):
         rows[fam] = {
             f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
             for k in ks
@@ -146,7 +159,7 @@ def build_primary_map_section(
     return ReportSection(
         title="主指標 mAP@k（細產品 per-query）",
         description=(
-            "overall mAP@k 為主軸；precision/ndcg/recall@k 作脈絡。"
+            "overall mAP@k 為主軸；precision/recall@k 作脈絡。"
             "K = 產品數時 precision 退化為 base rate、recall 恆為 1。"
         ),
         tables=tables,
@@ -338,23 +351,12 @@ def build_per_item_attr_section(
     map_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}"
     )
-    ndcg_tbl_plain = _per_item_metric_table(
-        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
-    )
     map_fig = _per_item_heatmap(
         map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
         "per-item map_attr@k 色階",
     )
-    ndcg_fig = _per_item_heatmap(
-        ndcg_tbl_plain, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
-        "per-item ndcg_attr@k 色階",
-    )
     map_tbl = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        macro_metrics=macro_item,
-    )
-    ndcg_tbl = _per_item_metric_table(
-        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
         macro_metrics=macro_item,
     )
 
@@ -381,8 +383,8 @@ def build_per_item_attr_section(
             f"該列 CI 不可靠，判讀時先看這欄。"
         )
 
-    tables = [map_tbl, ndcg_tbl]
-    table_titles = ["per-item map_attr@k", "per-item ndcg_attr@k"]
+    tables = [map_tbl]
+    table_titles = ["per-item map_attr@k"]
     observation_items = metrics.get("observation_items", []) or []
     if observation_items:
         per_item_all = metrics.get("per_item", {})
@@ -397,16 +399,15 @@ def build_per_item_attr_section(
     return ReportSection(
         title="per_item 歸因 Attribution（細產品）",
         description=(
-            "每個產品對主指標 mAP@k / nDCG@k 各貢獻多少。算法：對每筆"
+            "每個產品對主指標 mAP@k 各貢獻多少。算法：對每筆"
             "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
             "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
             "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
             "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
             "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
-            "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
-            "換成 log 折扣的 ndcg_contrib@k。頂列「Macro 平均」為各產品等權平均。"
+            "即這個產品平均替 AP@k 加了多少分。頂列「Macro 平均」為各產品等權平均。"
         ) + description_extra,
-        figures=[map_fig, ndcg_fig],
+        figures=[map_fig],
         tables=tables,
         table_titles=table_titles,
     )
@@ -767,6 +768,11 @@ def build_segment_section(
         if macro_seg
         else dict(per_segment)
     )
+    rows = {
+        seg: {k: (m or {}).get(k)
+              for k in _visible_metric_keys(list((m or {}).keys()))}
+        for seg, m in rows.items()
+    }
     table = pd.DataFrame(rows).T
     return ReportSection(
         title="分群 Per-Segment",
@@ -837,7 +843,9 @@ def build_baseline_section(
     overall_a = comp["result_a"].get("overall", {}) or {}
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]
-    overall_keys = sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    overall_keys = _visible_metric_keys(
+        sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    )
     overall_tbl = pd.DataFrame(
         {
             "Model": [overall_a.get(k) for k in overall_keys],
@@ -861,8 +869,6 @@ def build_baseline_section(
              "per-item recall@k (M/B/Δ)"),
             ("map_attr", "map_attr@{k}", attr_ks,
              "per-item map_attr@k (M/B/Δ)"),
-            ("ndcg_attr", "ndcg_attr@{k}", attr_ks,
-             "per-item ndcg_attr@k (M/B/Δ)"),
         ):
             tbl = _per_item_metric_compare_table(
                 per_item_a, per_item_b, per_item_delta,
@@ -876,7 +882,7 @@ def build_baseline_section(
         title="基準比較 Baseline",
         description=(
             "Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)+ "
-            "per-item recall/map_attr/ndcg_attr(M/B/Δ)。"
+            "per-item recall/map_attr(M/B/Δ)。"
         ),
         tables=tables,
         table_titles=table_titles,
@@ -887,14 +893,10 @@ _GLOSSARY = [
     ("mAP@k", "per-query Average Precision@k 對 query 平均；主指標"),
     ("recall@k (per-item)", "P(rank(P)≤k | P 為正)，命中事件等權；護欄"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
-    ("ndcg@k", "log 折扣排序品質，正規化 [0,1]"),
     ("map_attr@k",
      "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
      "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
      "是 mAP@k 拆到單一產品的貢獻"),
-    ("ndcg_attr@k",
-     "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
-     "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("Macro 平均",
      "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),

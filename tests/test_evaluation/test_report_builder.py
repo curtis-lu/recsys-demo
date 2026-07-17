@@ -67,10 +67,53 @@ def test_dataset_overview_section_tables():
     assert s.title
 
 
+class TestVisibleMetricKeys:
+    def test_drops_ndcg_keys(self):
+        keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]
+        assert rb._visible_metric_keys(keys) == [
+            "map@3", "precision@3", "recall@3"
+        ]
+
+    def test_preserves_input_order(self):
+        assert rb._visible_metric_keys(["recall@1", "ndcg@1", "map@1"]) == [
+            "recall@1", "map@1"
+        ]
+
+    def test_does_not_drop_unrelated_keys_that_merely_contain_ndcg(self):
+        """只濾「以 prefix 起頭」的 key，不是子字串比對。"""
+        assert rb._visible_metric_keys(["my_ndcg@1"]) == ["my_ndcg@1"]
+
+
+def test_segment_section_hides_ndcg():
+    # per_segment 的每個 seg dict 的 key 會被直接攤成表格的欄（key-agnostic），
+    # 程式碼裡沒有 "ndcg" 字樣也會渲染出來。fixture 刻意帶 ndcg@1，否則假綠。
+    m = _metrics()
+    m["per_segment"] = {
+        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
+        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
+    }
+    s = rb.build_segment_section(m, _params())
+    cols = [str(c) for c in s.tables[0].columns]
+    assert "map@1" in cols, "非 ndcg 的欄不該被誤濾"
+    assert not [c for c in cols if c.startswith("ndcg")]
+
+
+def test_baseline_overall_table_hides_ndcg():
+    # _metrics()["overall"] 與 _baseline_metrics_full()["overall"] 都含 ndcg@1；
+    # overall 表用 set union 攤成列，ndcg@1 必須被濾掉。
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    overall = s.tables[s.table_titles.index("overall metrics")]
+    idx = [str(i) for i in overall.index]
+    assert "map@1" in idx, "非 ndcg 的列不該被誤濾"
+    assert not [i for i in idx if i.startswith("ndcg")]
+
+
 def test_primary_map_section_slices_k():
     s = rb.build_primary_map_section(_metrics(), _params())
     # families on the row index, @k slices as columns (one set shared by all)
-    assert set(s.tables[0].index) == {"map", "precision", "ndcg", "recall"}
+    assert set(s.tables[0].index) == {"map", "precision", "recall"}
     cols = " ".join(map(str, s.tables[0].columns))
     assert "@1" in cols and "@3" in cols
 
@@ -189,13 +232,13 @@ def test_category_section_omits_composition_when_no_mapping():
 def test_per_item_attr_section_built():
     s = rb.build_per_item_attr_section(_metrics(), _params())
     assert s is not None
-    assert len(s.tables) == 2 and len(s.figures) == 2
+    assert len(s.tables) == 1 and len(s.figures) == 1
     map_tbl = s.tables[0]
     assert set(map_tbl.index) == {"Macro 平均", "A", "B"}
     cols = " ".join(map(str, map_tbl.columns))
     assert "map_attr@1" in cols and "map_attr@3" in cols
-    ndcg_cols = " ".join(map(str, s.tables[1].columns))
-    assert "ndcg_attr@1" in ndcg_cols
+    # ndcg 仍由 metrics_spark 算出(fixture 帶 ndcg_attr@1)，但刻意不呈現
+    assert "ndcg" not in cols
 
 
 def test_per_item_attr_section_off():
@@ -215,7 +258,9 @@ def test_glossary_has_attr_entries():
     s = rb.build_glossary_section(_params())
     terms = set(s.tables[0]["指標"])
     assert "map_attr@k" in terms
-    assert "ndcg_attr@k" in terms
+    # ndcg 兩條已退場——glossary 與 report_comparison.html 共用同一份 _GLOSSARY
+    assert "ndcg@k" not in terms
+    assert "ndcg_attr@k" not in terms
 
 
 def test_guardrail_section_has_macro_row():
@@ -239,16 +284,12 @@ def test_guardrail_section_no_macro_when_absent():
 
 def test_per_item_attr_section_has_macro_rows():
     s = rb.build_per_item_attr_section(_metrics(), _params())
-    map_tbl, ndcg_tbl = s.tables[0], s.tables[1]
+    map_tbl = s.tables[0]
     assert list(map_tbl.index)[0] == "Macro 平均"
-    assert list(ndcg_tbl.index)[0] == "Macro 平均"
     # map_attr@1 per-product average = (0.5 + 0.3) / 2 = 0.4
     assert map_tbl.loc["Macro 平均", "map_attr@1"] == 0.4
-    # ndcg_attr@1 per-product average = (0.45 + 0.25) / 2 = 0.35
-    assert ndcg_tbl.loc["Macro 平均", "ndcg_attr@1"] == 0.35
     # heatmap excludes the macro row
     assert "Macro 平均" not in list(s.figures[0].data[0].y)
-    assert "Macro 平均" not in list(s.figures[1].data[0].y)
 
 
 def test_segment_section_has_macro_row():
@@ -370,21 +411,21 @@ def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
     assert "precision@1" in tbl.index   # model-only key still listed
 
 
-def test_baseline_section_has_three_per_item_compare_tables():
-    """recall / map_attr / ndcg_attr each get a M/B/Δ-interleaved table."""
+def test_baseline_section_has_two_per_item_compare_tables():
+    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
     # Old delta-only title must be gone.
     assert "per-item recall@k delta" not in s.table_titles
-    # Three new titles present.
+    # Two new titles present.
     for title in (
         "per-item recall@k (M/B/Δ)",
         "per-item map_attr@k (M/B/Δ)",
-        "per-item ndcg_attr@k (M/B/Δ)",
     ):
         assert title in s.table_titles
+    assert "per-item ndcg_attr@k (M/B/Δ)" not in s.table_titles
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
