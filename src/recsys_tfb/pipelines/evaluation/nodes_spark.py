@@ -478,15 +478,16 @@ def compute_pair_ledger(
     return out
 
 
-def assemble_triage_summary(quadrant: Optional[dict], reconciliation: Optional[dict],
-                            offset_sweep: Optional[dict], gain_ledger: Optional[dict],
+def assemble_triage_summary(quadrant: Optional[dict],
+                            offset_sweep: Optional[dict],
+                            gain_ledger: Optional[dict],
                             parameters: dict) -> dict:
     """Triage 總表 node：純 dict 合成，gain_ledger 缺席 best-effort 降級。"""
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     if not (diag.get("triage", {}) or {}).get("enabled", True):
         return {"enabled": False}
     from recsys_tfb.diagnosis.metric.triage import triage
-    return triage(quadrant, reconciliation, offset_sweep, gain_ledger, parameters)
+    return triage(quadrant, offset_sweep, gain_ledger, parameters)
 
 
 def generate_report(

@@ -727,7 +727,7 @@ def test_assemble_triage_summary_disabled_returns_stub():
     )
     params = {"evaluation": {"diagnosis": {"triage": {"enabled": False}}}}
     out = assemble_triage_summary(
-        {"enabled": True, "by_item": {}}, None, None, None, params
+        {"enabled": True, "by_item": {}}, None, None, params
     )
     assert out == {"enabled": False}
 
@@ -740,11 +740,11 @@ def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
     quadrant = {
         "enabled": True,
         "by_item": {
-            "A": {"auc": 0.5, "disc_status": "差", "level_status": "正常",
-                  "gap_vs_global": 0.0, "auc_reason": None, "y_rate": 0.1},
+            "A": {"auc": 0.5, "disc_status": "差",
+                  "auc_reason": None, "y_rate": 0.1},
         },
     }
-    out = assemble_triage_summary(quadrant, None, None, None, params)
+    out = assemble_triage_summary(quadrant, None, None, params)
     assert out["enabled"] is True
     assert out["gain_ledger_present"] is False
     assert "A" in out["verdicts"]

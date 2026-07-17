@@ -820,19 +820,14 @@ _TRIAGE_FIXTURE = {
     "gain_ledger_present": True,
     "thresholds": {"starve_ratio": 0.25, "weight_cap": 8.0},
     "verdicts": {
-        "cfg": {
-            "verdict": "水準-配置型",
-            "lever": "槓桿1：推論期 logQ/offset 修正或修採樣配置（閉式）",
-            "starter": {"type": "logq_offset", "value": 0.4,
-                        "band": [0.1, 0.7], "unit": "log-odds",
-                        "caveat": "起手值，須經快迴路驗證，非定案"},
-            "evidence": {"auc": 0.7, "disc_status": "好",
-                        "level_status": "偏低", "gap_vs_global": -0.6,
-                        "recon_verdict": "可解釋", "theory_min": 0.1,
-                        "theory_max": 0.7, "residual": 0.0,
+        "feat": {
+            "verdict": "特徵缺失型",
+            "lever": "槓桿5：補特徵（診斷只能縮小範圍，補什麼是領域知識）",
+            "starter": None,
+            "evidence": {"auc": 0.5, "disc_status": "差",
                         "delta_star_centered": -0.5,
                         "loo_contribution_holdout": 0.0,
-                        "context_gain_share": None, "y_rate": None},
+                        "context_gain_share": 0.35, "y_rate": 0.05},
             "notes": [],
         },
         "stv": {
@@ -842,16 +837,13 @@ _TRIAGE_FIXTURE = {
                         "unit": "sample_weight 相對倍率（w∝1/√P 加上限，手冊3 Ch8）",
                         "caveat": "起手值，須經快迴路驗證，非定案"},
             "evidence": {"auc": 0.5, "disc_status": "差",
-                        "level_status": "正常", "gap_vs_global": 0.0,
-                        "recon_verdict": "可解釋", "theory_min": 0.0,
-                        "theory_max": 0.0, "residual": 0.0,
                         "delta_star_centered": 0.3,
                         "loo_contribution_holdout": 0.0,
                         "context_gain_share": 0.01, "y_rate": 0.02},
             "notes": [],
         },
     },
-    "summary": {"水準-配置型": 1, "餓死型": 1},
+    "summary": {"特徵缺失型": 1, "餓死型": 1},
     "notes": [],
 }
 
@@ -863,13 +855,15 @@ def test_triage_section_renders_main_table():
     assert sec.figures == []
     assert len(sec.tables) == 1
     tbl = sec.tables[0]
-    assert list(tbl.index) == ["cfg", "stv"]
-    for col in ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+    assert list(tbl.index) == ["feat", "stv"]
+    for col in ["判定", "建議槓桿", "起手值", "AUC",
                 "δ*_centered", "context_gain_share", "備註"]:
         assert col in tbl.columns
-    assert tbl.loc["cfg", "判定"] == "水準-配置型"
+    # 水準軸退場 → 證據欄不再有 gap_vs_global
+    assert "gap_vs_global" not in tbl.columns
+    assert tbl.loc["feat", "判定"] == "特徵缺失型"
     assert tbl.loc["stv", "判定"] == "餓死型"
-    assert "logq_offset=0.400" in tbl.loc["cfg", "起手值"]
+    assert "item_weight=4.470" in tbl.loc["stv", "起手值"]
 
 
 def test_triage_section_none_when_disabled_or_absent():
@@ -885,7 +879,7 @@ def test_triage_section_none_when_disabled_or_absent():
 def test_triage_section_description_has_summary_and_gain_ledger_status():
     from recsys_tfb.evaluation.report_builder import build_triage_section
     sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
-    assert "水準-配置型" in sec.description
+    assert "特徵缺失型" in sec.description
     assert "gain_ledger" in sec.description
 
 

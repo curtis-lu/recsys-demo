@@ -721,7 +721,7 @@ def build_triage_section(
 
     verdicts = triage.get("verdicts", {}) or {}
     items = sorted(verdicts)
-    cols = ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+    cols = ["判定", "建議槓桿", "起手值", "AUC",
             "δ*_centered", "context_gain_share", "備註"]
     rows = {}
     for it in items:
@@ -732,7 +732,6 @@ def build_triage_section(
             v.get("lever"),
             _fmt_triage_starter(v.get("starter")),
             ev.get("auc"),
-            ev.get("gap_vs_global"),
             ev.get("delta_star_centered"),
             ev.get("context_gain_share"),
             "；".join(v.get("notes") or []),
@@ -749,7 +748,7 @@ def build_triage_section(
         else "gain_ledger 缺席或降級——特徵缺失型與餓死型無法區分"
     )
     desc = (
-        "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+        "跨診斷（判別力／分流，＋結構層 gain_ledger）合成的 "
         "per-item 判定總表，省去逐張表交叉核對。判讀順序：(1) 判定欄看落"
         "在哪一型、建議槓桿欄看對應修法；(2) 起手值只是計算出的起點，"
         f"{STARTER_CAVEAT}，套用前務必用快迴路（offline 重算或小流量）驗證"

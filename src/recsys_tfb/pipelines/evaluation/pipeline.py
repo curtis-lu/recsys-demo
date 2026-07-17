@@ -128,8 +128,8 @@ def create_pipeline(
         ),
         Node(
             assemble_triage_summary,
-            inputs=["evaluation_quadrant", "evaluation_reconciliation",
-                    "evaluation_offset_sweep", "gain_ledger", "parameters"],
+            inputs=["evaluation_quadrant", "evaluation_offset_sweep",
+                    "gain_ledger", "parameters"],
             outputs="evaluation_triage",
         ),
         Node(
