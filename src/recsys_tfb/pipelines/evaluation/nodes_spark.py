@@ -380,13 +380,12 @@ def compute_quadrant(
     eval_predictions: Optional[SparkDataFrame],
     label_table: Optional[SparkDataFrame],
     metric_ci: Optional[dict],
-    reconciliation: Optional[dict],
     parameters: dict,
 ) -> dict:
     """象限層薄 node（框架診斷項目 3/5/10）。
 
     領域邏輯全在 ``diagnosis.metric.quadrant``。停用時寫 stub；上游診斷
-    產物（metric_ci/reconciliation）是停用 stub 時 best-effort 降級不失敗。
+    產物（metric_ci）是停用 stub 時 best-effort 降級不失敗。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cfg = ((eval_params.get("diagnosis", {}) or {}).get("quadrant", {}) or {})
@@ -400,13 +399,9 @@ def compute_quadrant(
         )
     from recsys_tfb.diagnosis.metric.quadrant import build_quadrant_summary
     out = build_quadrant_summary(
-        eval_predictions, label_table, metric_ci, reconciliation, parameters
+        eval_predictions, label_table, metric_ci, parameters
     )
-    logger.info(
-        "quadrant computed: %d items, %d aggressors",
-        len(out["by_item"]),
-        sum(1 for v in out["by_item"].values() if v["is_aggressor"]),
-    )
+    logger.info("quadrant computed: %d items", len(out["by_item"]))
     return out
 
 

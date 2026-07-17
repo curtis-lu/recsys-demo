@@ -88,8 +88,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``score_col`` ∈ {score, score_uncalibrated}; ``explained_threshold`` > 0
   (log-odds). Predicate: ``reconciliation_param_errors``.
 * A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
-  ``auc_threshold`` ∈ (0.5, 1); ``gap_band`` > 0 (log-odds);
-  ``top_k_occupancy`` integer >= 1. Predicate: ``quadrant_param_errors``.
+  ``auc_threshold`` ∈ (0.5, 1); ``top_k_occupancy`` integer >= 1.
+  Predicate: ``quadrant_param_errors``.
 * A18 — ``evaluation.diagnosis.{offset_sweep,debug_inject_offsets}``
   parameter domains: ``holdout_fraction`` ∈ (0,1); ``shrink_lambda`` >= 0;
   ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
@@ -608,12 +608,6 @@ def quadrant_param_errors(parameters: dict) -> list[str]:
         errors.append(
             f"evaluation.diagnosis.quadrant.auc_threshold={thr!r} must be a "
             f"number in (0.5, 1)."
-        )
-    band = quad.get("gap_band", 0.35)
-    if not (_is_number(band) and float(band) > 0.0):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.gap_band={band!r} must be a "
-            f"number > 0 (log-odds units)."
         )
     k = quad.get("top_k_occupancy", 1)
     if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):

@@ -622,7 +622,7 @@ def test_compute_quadrant_disabled_returns_stub(spark):
                                "score": "score", "rank": "rank"}},
         "evaluation": {"diagnosis": {"quadrant": {"enabled": False}}},
     }
-    assert compute_quadrant(None, None, None, None, params) == {"enabled": False}
+    assert compute_quadrant(None, None, None, params) == {"enabled": False}
 
 
 def test_compute_quadrant_requires_inputs_when_enabled(spark):
@@ -635,7 +635,7 @@ def test_compute_quadrant_requires_inputs_when_enabled(spark):
         "evaluation": {"diagnosis": {"quadrant": {"enabled": True}}},
     }
     with _pytest.raises(ValueError, match="compute_quadrant"):
-        compute_quadrant(None, None, None, None, params)
+        compute_quadrant(None, None, None, params)
 
 
 def test_compute_quadrant_end_to_end_small(spark):
@@ -658,14 +658,15 @@ def test_compute_quadrant_end_to_end_small(spark):
                                "item": "prod_name", "label": "label",
                                "score": "score", "rank": "rank"}},
         "evaluation": {"diagnosis": {"quadrant": {
-            "enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+            "enabled": True, "auc_threshold": 0.6,
             "top_k_occupancy": 1}}},
     }
-    out = compute_quadrant(df, labels, {"enabled": False},
-                           {"enabled": False}, params)
+    out = compute_quadrant(df, labels, {"enabled": False}, params)
     assert out["enabled"] is True
     assert set(out["by_item"]) == {"A", "B"}
-    assert out["by_item"]["A"]["quadrant"] == "無法評估"  # 上游 stub → 水準軸缺
+    # metric_ci stub 只讓 AP±CI 欄從缺；判別力軸照算（A 正例 0.9 > 負例 0.2）
+    assert out["by_item"]["A"]["quadrant"] == "健康"
+    assert out["by_item"]["A"]["ap_sampled"] is None
 
 
 def test_compute_offset_sweep_disabled_writes_stub(spark):

@@ -608,20 +608,19 @@ def test_assemble_report_renders_reconciliation():
 
 _QUAD_FIXTURE = {
     "enabled": True,
-    "thresholds": {"auc_threshold": 0.6, "gap_band": 0.35,
-                   "top_k_occupancy": 1},
+    "thresholds": {"auc_threshold": 0.6, "top_k_occupancy": 1},
     "n_queries": 1000, "n_pos_queries": 400,
     "by_item": {
         "A": {"auc": 0.82, "auc_reason": None, "n_pos": 120, "n_neg": 880,
-              "n_rows": 1000, "gap_vs_global": 0.05, "level_status": "正常",
-              "disc_status": "好", "quadrant": "健康", "is_aggressor": False,
+              "n_rows": 1000,
+              "disc_status": "好", "quadrant": "健康",
               "ap_sampled": 0.61, "ci_low": 0.55, "ci_high": 0.68,
               "top_share": 0.2, "n_top": 200, "y_rate": 0.12,
               "suppression_count": 30},
         "B": {"auc": 0.51, "auc_reason": None, "n_pos": 20, "n_neg": 980,
-              "n_rows": 1000, "gap_vs_global": 0.9, "level_status": "偏高",
-              "disc_status": "差", "quadrant": "加害者（常數高分型）",
-              "is_aggressor": True, "ap_sampled": 0.7, "ci_low": 0.5,
+              "n_rows": 1000,
+              "disc_status": "差", "quadrant": "冷門受害者（判別力差）",
+              "ap_sampled": 0.7, "ci_low": 0.5,
               "ci_high": 0.85, "top_share": 0.6, "n_top": 600,
               "y_rate": 0.02, "suppression_count": 480},
     },
@@ -629,19 +628,21 @@ _QUAD_FIXTURE = {
         "matrix": {"A": {"A": 1.0, "B": 0.3}, "B": {"A": 0.5, "B": 1.0}},
         "n_buyers": {"A": 100, "B": 60},
     },
-    "sources": {"reconciliation": True, "metric_ci": True},
+    "sources": {"metric_ci": True},
     "notes": [],
 }
 
 
-def test_quadrant_section_renders_table_figure_and_matrix():
+def test_quadrant_section_renders_table_and_matrix():
     from recsys_tfb.evaluation.report_builder import build_quadrant_section
     sec = build_quadrant_section(_QUAD_FIXTURE, _params_min())
     tbl = sec.tables[0]
     assert list(tbl.index) == ["A", "B"]
-    assert tbl.loc["B", "quadrant"] == "加害者（常數高分型）"
-    assert len(sec.figures) == 1          # 散布圖
-    assert len(sec.tables) == 2           # 象限表＋交叉購買矩陣
+    assert tbl.loc["B", "quadrant"] == "冷門受害者（判別力差）"
+    # 散布圖的縱軸是 gap_vs_global（已隨對帳層退場）→ 整張圖移除
+    assert not sec.figures
+    assert "gap_vs_global" not in tbl.columns
+    assert len(sec.tables) == 2           # 判別力表＋交叉購買矩陣
     assert sec.tables[1].loc["B", "A"] == pytest.approx(0.5)
     assert "判讀" in sec.description
     assert "evaluation-diagnosis" in sec.description

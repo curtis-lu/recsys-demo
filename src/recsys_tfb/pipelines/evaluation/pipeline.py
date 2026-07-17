@@ -113,7 +113,7 @@ def create_pipeline(
         Node(
             compute_quadrant,
             inputs=["eval_predictions", "label_table", "evaluation_metric_ci",
-                    "evaluation_reconciliation", "parameters"],
+                    "parameters"],
             outputs="evaluation_quadrant",
         ),
         Node(

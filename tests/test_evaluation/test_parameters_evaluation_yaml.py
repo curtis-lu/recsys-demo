@@ -67,7 +67,6 @@ def test_quadrant_block():
     assert quad == {
         "enabled": True,
         "auc_threshold": 0.6,
-        "gap_band": 0.35,
         "top_k_occupancy": 1,
     }
 

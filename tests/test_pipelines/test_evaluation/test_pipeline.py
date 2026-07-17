@@ -41,15 +41,15 @@ class TestEvaluationPipelineDefault:
         ]
 
     def test_compute_quadrant_inputs_wired_in_order(self):
-        # Both evaluation_metric_ci and evaluation_reconciliation are dicts,
-        # so a swap between them would type-check but silently feed the
-        # level axis (gap_vs_global) from the wrong upstream (or None) —
-        # this pins the exact positional wiring so that swap fails loudly.
+        # evaluation_metric_ci and parameters are both dicts, so a swap
+        # would type-check but silently feed the CI axis from parameters
+        # (or vice versa) — this pins the exact positional wiring so that
+        # swap fails loudly.
         pipeline = create_pipeline()
         node = next(n for n in pipeline.nodes if n.name == "compute_quadrant")
         assert node.inputs == [
             "eval_predictions", "label_table", "evaluation_metric_ci",
-            "evaluation_reconciliation", "parameters",
+            "parameters",
         ]
 
 

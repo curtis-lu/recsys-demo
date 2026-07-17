@@ -725,19 +725,19 @@ class TestQuadrantParamsA17:
         from recsys_tfb.core.consistency import quadrant_param_errors
         assert quadrant_param_errors({}) == []
         assert quadrant_param_errors(self._params(
-            {"enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+            {"enabled": True, "auc_threshold": 0.6,
              "top_k_occupancy": 1}
         )) == []
 
     def test_bad_values_report(self):
         from recsys_tfb.core.consistency import quadrant_param_errors
         errors = quadrant_param_errors(self._params(
-            {"auc_threshold": 0.4, "gap_band": 0, "top_k_occupancy": 0,
+            {"auc_threshold": 0.4, "top_k_occupancy": 0,
              "enabled": "false"}
         ))
-        assert len(errors) == 4
+        assert len(errors) == 3
         joined = "\n".join(errors)
-        assert "auc_threshold" in joined and "gap_band" in joined
+        assert "auc_threshold" in joined
         assert "top_k_occupancy" in joined and "enabled" in joined
 
     def test_auc_threshold_boundaries(self):

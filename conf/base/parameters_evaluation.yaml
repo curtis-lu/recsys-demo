@@ -115,15 +115,13 @@ evaluation:
       score_col: score_uncalibrated
       explained_threshold: 0.3
 
-    # 象限層（A17）：縱軸 gap_vs_global（水準，取對帳層產物；行為觀測不含
-    # 歸因）× 橫軸 within-item AUC（條件判別力，midrank rank-sum）。
-    # gap_band 單位 log-odds：|gap_vs_global| 超出帶＝水準偏（偏高＝加害者，
-    # 判準與判別力無關）；auc_threshold 以下＝條件判別力差。
-    # top_k_occupancy：top-slot 佔據統計的 k。
+    # 象限層（A17）：within-item AUC（條件判別力，midrank rank-sum）一軸。
+    # 原本的縱軸 gap_vs_global（水準，取對帳層產物）已隨對帳層退場；純排序的
+    # 替代品（offset sweep 的 δ*_j）未定案，目前只有判別力一軸。
+    # auc_threshold 以下＝條件判別力差。top_k_occupancy：top-slot 佔據統計的 k。
     quadrant:
       enabled: true
       auc_threshold: 0.6
-      gap_band: 0.35
       top_k_occupancy: 1
 
     # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
