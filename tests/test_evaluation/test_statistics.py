@@ -56,6 +56,19 @@ class TestProductStatistics:
         # Mean = (2 + 2 + 1 + 1) / 4 = 1.5
         assert result.loc["A", "avg_positive_products_per_customer"] == pytest.approx(1.5)
 
+    def test_custom_column_names(self):
+        # Schema-driven: item/entity/label columns are configurable, not
+        # hardcoded to prod_name/cust_id/label. (Migrated from the obsolete
+        # test_schema_driven_viz.py, whose viz helpers were removed in the
+        # Spark-aggregation refactor; this is the sole surviving concern.)
+        df = pd.DataFrame({
+            "item": ["A", "A", "B"], "uid": ["c1", "c2", "c1"],
+            "y": [1, 0, 1]})
+        stats = compute_product_statistics(
+            df, item_col="item", entity_col="uid", label_col="y")
+        assert "positive_rate" in stats.columns
+        assert set(stats.index) == {"A", "B"}
+
 
 class TestSegmentStatistics:
     def test_columns(self):
