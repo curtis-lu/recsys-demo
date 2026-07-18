@@ -1,7 +1,7 @@
-"""Triage：跨三層診斷 dict 合成 per-item 判定表（框架 Ch4 判讀流程落地為 code）。
+"""Triage：跨診斷 dict 合成 per-item 判定表（框架 Ch4 判讀流程落地為 code）。
 
-輸入四個由各自診斷節點產出的 JSON-ready dict（quadrant/reconciliation/
-offset_sweep/gain_ledger），輸出 per-item 判定＋槓桿建議＋起手值。任一輸入
+輸入三個由各自診斷節點產出的 JSON-ready dict（quadrant/offset_sweep/
+gain_ledger），輸出 per-item 判定＋槓桿建議＋起手值。任一輸入
 缺席或降級都不 raise（best-effort，與其餘 diagnosis metric 模組同一慣例）；
 跨側讀 gain_ledger.json 走 catalog 的 optional JSON 載入（見
 ``recsys_tfb.io.json_dataset.JSONDataset``），本模組本身只吃 dict，不管檔案
@@ -19,29 +19,16 @@ _WEIGHT_CAP = 8.0  # 餓死型起手權重上限（w∝1/√P 加上限，手冊
 STARTER_CAVEAT = "起手值，須經快迴路驗證，非定案"
 
 _V_HEALTHY = "健康"
-_V_CONFIG = "水準-配置型"
-_V_REBALANCE = "水準-指標再平衡型"
 _V_STARVED = "餓死型"
 _V_FEATURE_MISSING = "特徵缺失型"
 _V_NO_STRUCTURAL_EVIDENCE = "餓死型或特徵缺失型（無結構層證據）"
 
 _LEVERS = {
     _V_HEALTHY: "無（維持觀測）",
-    _V_CONFIG: "槓桿1：推論期 logQ/offset 修正或修採樣配置（閉式）",
-    _V_REBALANCE: "槓桿2：常態化後處理 per-item offset 或 item-aware sample_weight",
     _V_STARVED: "槓桿3：item-aware weight／熱門負類欠採（配 logQ）／HPO 先驗",
     _V_FEATURE_MISSING: "槓桿5：補特徵（診斷只能縮小範圍，補什麼是領域知識）",
     _V_NO_STRUCTURAL_EVIDENCE: "槓桿3 或 5（先補跑 gain_ledger 再分流）",
 }
-
-
-def _config_signal(r: dict | None) -> bool:
-    """水準偏移是否有配置面（採樣/權重）理論解釋——band 退化 [0,0] 的
-    「可解釋」＝本來就沒偏，不算配置訊號。"""
-    if r is None or r.get("verdict") != "可解釋":
-        return False
-    band_width = (r.get("theory_max", 0) or 0) - (r.get("theory_min", 0) or 0)
-    return bool(band_width > 0 or r.get("theory_approx", False))
 
 
 def _gain_ledger_usable(gain_ledger: dict | None) -> bool:
@@ -64,45 +51,6 @@ def _max_y_rate(by_item: dict) -> float:
     return max(rates) if rates else 0.0
 
 
-def _config_starter(item: str, r: dict, reconciliation: dict | None) -> dict:
-    theory_min = r.get("theory_min")
-    theory_max = r.get("theory_max")
-    theory_entry = (
-        ((reconciliation or {}).get("theory") or {}).get("by_item") or {}
-    ).get(item)
-    mean = theory_entry.get("mean") if theory_entry else None
-    if mean is None:
-        mean = ((theory_min or 0.0) + (theory_max or 0.0)) / 2
-    return {
-        "type": "logq_offset",
-        "value": mean,
-        "band": [theory_min, theory_max],
-        "unit": "log-odds",
-        "caveat": STARTER_CAVEAT,
-    }
-
-
-def _rebalance_starter(
-    item: str, sweep_by_item: dict, notes: list[str]
-) -> dict | None:
-    entry = sweep_by_item.get(item)
-    if not entry or entry.get("delta_star_centered") is None:
-        notes.append(
-            "offset_sweep 缺席或無該 item 資料——再平衡型起手值從缺，"
-            "待補跑 offset sweep"
-        )
-        return None
-    return {
-        "type": "delta_star_centered",
-        "value": entry["delta_star_centered"],
-        "unit": (
-            "logit（centered；跨執行只有相對差可比，加到分數上與 raw 差一共同"
-            "平移、排序等價）"
-        ),
-        "caveat": STARTER_CAVEAT,
-    }
-
-
 def _starved_starter(
     item: str, by_item: dict, notes: list[str]
 ) -> dict | None:
@@ -122,15 +70,14 @@ def _starved_starter(
 
 def triage(
     quadrant: dict | None,
-    reconciliation: dict | None,
     offset_sweep: dict | None,
     gain_ledger: dict | None,
     parameters: dict,
 ) -> dict:
-    """跨三層診斷 dict → per-item 判定表（框架 Ch4 判讀流程）。
+    """跨診斷 dict → per-item 判定表（框架 Ch4 判讀流程）。
 
-    best-effort：quadrant/reconciliation/offset_sweep/gain_ledger 任一缺席、
-    停用或降級都不 raise，改記 notes 並儘量給出可評估的部分。``parameters``
+    best-effort：quadrant/offset_sweep/gain_ledger 任一缺席、停用或降級都不
+    raise，改記 notes 並儘量給出可評估的部分。``parameters``
     保留供未來 config 覆寫門檻，目前未讀取任何鍵（門檻是起手值，見模組
     docstring）。
     """
@@ -145,17 +92,10 @@ def triage(
             "quadrant 缺席、停用或 by_item 為空——無法產生逐 item 判定"
         )
 
-    recon_by_item = (reconciliation or {}).get("by_item") or {}
-    if not reconciliation or not reconciliation.get("by_item"):
-        top_notes.append(
-            "reconciliation 缺席或 by_item 為空——水準判定與配置訊號的"
-            "部分證據無法評估"
-        )
-
     sweep_by_item = (offset_sweep or {}).get("per_item") or {}
     if not offset_sweep or not offset_sweep.get("per_item"):
         top_notes.append(
-            "offset_sweep 缺席或 per_item 為空——再平衡型起手值可能無法計算"
+            "offset_sweep 缺席或 per_item 為空——健康 item 的 δ* 漂移觀測從缺"
         )
 
     gl_present = _gain_ledger_usable(gain_ledger)
@@ -170,7 +110,6 @@ def triage(
     verdicts: dict[str, dict] = {}
     for item in sorted(by_item):
         q = by_item[item] or {}
-        r = recon_by_item.get(item)
         sweep_entry = sweep_by_item.get(item)
         gl_entry = gl_per_item.get(item)
 
@@ -188,17 +127,7 @@ def triage(
                 f"判別力軸（within-item AUC）無法評估（{reason}）"
                 "——判別力側判定略過，未計入 disc_low")
 
-        # 「無法評估」（gap_vs_global 缺席，例：reconciliation 停用）不是水準偏移
-        # ——沒量到的軸不得觸發水準型判定（審查修復 2026-07-08）。
-        level_status = q.get("level_status")
-        level_off = level_status in ("偏高", "偏低")
-        if level_status == "無法評估":
-            notes.append("水準軸無法評估（gap_vs_global 缺席）——水準側判定略過")
-        config_signal = _config_signal(r)
-
-        if level_off and config_signal:
-            verdict = _V_CONFIG
-        elif disc_low:
+        if disc_low:
             if gl_present:
                 share = (gl_entry or {}).get("context_gain_share")
                 share = share if share is not None else 0.0
@@ -212,18 +141,10 @@ def triage(
                 notes.append(
                     "gain_ledger 缺席或降級——無法區分餓死型與特徵缺失型"
                 )
-        elif level_off:
-            verdict = _V_REBALANCE
         else:
             verdict = _V_HEALTHY
 
-        if verdict in (_V_CONFIG, _V_REBALANCE) and disc_low:
-            auc_txt = f"{auc:.3f}" if auc is not None else "N/A"
-            notes.append(
-                f"條件判別力軸同時偏低（AUC {auc_txt}），"
-                "修完水準後重量再判（框架 Ch 4 第 5 步）"
-            )
-        elif verdict == _V_HEALTHY and sweep_entry is not None:
+        if verdict == _V_HEALTHY and sweep_entry is not None:
             dsc = sweep_entry.get("delta_star_centered")
             loo = sweep_entry.get("loo_contribution_holdout")
             if dsc is not None and loo is not None and abs(dsc) >= 0.3 and loo > 0:
@@ -233,11 +154,7 @@ def triage(
                 )
 
         starter = None
-        if verdict == _V_CONFIG:
-            starter = _config_starter(item, r, reconciliation)
-        elif verdict == _V_REBALANCE:
-            starter = _rebalance_starter(item, sweep_by_item, notes)
-        elif verdict == _V_STARVED:
+        if verdict == _V_STARVED:
             starter = _starved_starter(item, by_item, notes)
 
         verdicts[item] = {
@@ -247,12 +164,6 @@ def triage(
             "evidence": {
                 "auc": auc,
                 "disc_status": disc_status,
-                "level_status": q.get("level_status"),
-                "gap_vs_global": q.get("gap_vs_global"),
-                "recon_verdict": r.get("verdict") if r else None,
-                "theory_min": r.get("theory_min") if r else None,
-                "theory_max": r.get("theory_max") if r else None,
-                "residual": r.get("residual") if r else None,
                 "delta_star_centered": (
                     sweep_entry.get("delta_star_centered") if sweep_entry else None
                 ),

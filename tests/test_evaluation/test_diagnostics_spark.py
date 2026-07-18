@@ -10,7 +10,6 @@ from recsys_tfb.evaluation.diagnostics_spark import (
     positive_rank_count_matrix,
     positive_rate_matrix,
     rank_count_matrix,
-    score_box_stats,
     score_box_stats_by_label,
     score_histogram_counts,
 )
@@ -51,29 +50,6 @@ class TestScoreHistogramCounts:
         # All identical -> one bin holding everything.
         assert int(out["count"].sum()) == 3
         assert len(out) == 1
-
-
-class TestScoreBoxStats:
-    def test_quartiles_and_clamped_fences(self, spark):
-        rows = [("A", float(v)) for v in range(1, 101)]  # 1..100
-        sdf = _sdf(spark, rows, ["item", "score"])
-        out = score_box_stats(sdf, "item", "score").set_index("item")
-
-        assert abs(out.loc["A", "median"] - 50.5) < 2.0
-        assert out.loc["A", "q1"] <= out.loc["A", "median"] <= out.loc["A", "q3"]
-        # Tukey fences fall outside the data range here, so they clamp to
-        # the actual min/max (exact percentiles).
-        assert out.loc["A", "lowerfence"] == 1.0
-        assert out.loc["A", "upperfence"] == 100.0
-
-    def test_one_row_per_item(self, spark):
-        rows = [("A", 1.0), ("A", 2.0), ("B", 5.0), ("B", 9.0)]
-        sdf = _sdf(spark, rows, ["item", "score"])
-        out = score_box_stats(sdf, "item", "score")
-        assert sorted(out["item"]) == ["A", "B"]
-        assert set(out.columns) >= {
-            "item", "q1", "median", "q3", "lowerfence", "upperfence"
-        }
 
 
 class TestScoreBoxStatsByLabel:

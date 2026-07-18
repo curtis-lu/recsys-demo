@@ -9,7 +9,7 @@ class TestEvaluationPipelineDefault:
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline()
         # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
-        assert len(pipeline.nodes) == 12
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_ranked_predictions(self):
         pipeline = create_pipeline()
@@ -22,7 +22,7 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_reconciliation", "evaluation_quadrant",
+            "evaluation_quadrant",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_triage",
         }
@@ -34,22 +34,22 @@ class TestEvaluationPipelineDefault:
         assert names == [
             "prepare_eval_data", "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
-            "compute_reconciliation", "persist_eval_predictions",
+            "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
             "compute_pair_ledger", "compute_quadrant",
             "assemble_triage_summary", "generate_report",
         ]
 
     def test_compute_quadrant_inputs_wired_in_order(self):
-        # Both evaluation_metric_ci and evaluation_reconciliation are dicts,
-        # so a swap between them would type-check but silently feed the
-        # level axis (gap_vs_global) from the wrong upstream (or None) —
-        # this pins the exact positional wiring so that swap fails loudly.
+        # evaluation_metric_ci and parameters are both dicts, so a swap
+        # would type-check but silently feed the CI axis from parameters
+        # (or vice versa) — this pins the exact positional wiring so that
+        # swap fails loudly.
         pipeline = create_pipeline()
         node = next(n for n in pipeline.nodes if n.name == "compute_quadrant")
         assert node.inputs == [
             "eval_predictions", "label_table", "evaluation_metric_ci",
-            "evaluation_reconciliation", "parameters",
+            "parameters",
         ]
 
 
@@ -59,7 +59,7 @@ class TestEvaluationPipelinePostTraining:
     def test_pipeline_has_six_nodes(self):
         pipeline = create_pipeline(post_training=True)
         # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
-        assert len(pipeline.nodes) == 12
+        assert len(pipeline.nodes) == 11
 
     def test_pipeline_reads_training_eval_predictions(self):
         pipeline = create_pipeline(post_training=True)
@@ -72,7 +72,7 @@ class TestEvaluationPipelinePostTraining:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_reconciliation", "evaluation_quadrant",
+            "evaluation_quadrant",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_triage",
         }
@@ -85,7 +85,7 @@ class TestEvaluationPipelineCompareMode:
     def test_pipeline_has_nine_nodes(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
         # +1 assemble_triage_summary, +1 draw_diagnosis_sample_node (shared sample).
-        assert len(pipeline.nodes) == 15
+        assert len(pipeline.nodes) == 14
 
     def test_pipeline_outputs_include_comparison_report(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})

@@ -58,7 +58,6 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
-      reconciliation: true
       quadrant: true
       offset_sweep: true
       pair_ledger: true
@@ -105,25 +104,13 @@ evaluation:
       enabled: true
       n_boot: 200
 
-    # 對帳層（Phase 2；A16）：理論偏移（抽樣×權重的正負類曝險比，per-cell
-    # 細列、item 層近似帶）vs 實測 per-item 校準差距 logit(p̄)−logit(ȳ)。
-    # score_col 預設 score_uncalibrated——校準層本身就在修 level，對帳要看
-    # 模型原始輸出；eval 資料無此欄（monitoring 路徑）自動退回 score 並標註。
-    # explained_threshold 單位是 log-odds：實測 gap 距理論帶超過此值＝不可解釋。
-    reconciliation:
-      enabled: true
-      score_col: score_uncalibrated
-      explained_threshold: 0.3
-
-    # 象限層（A17）：縱軸 gap_vs_global（水準，取對帳層產物；行為觀測不含
-    # 歸因）× 橫軸 within-item AUC（條件判別力，midrank rank-sum）。
-    # gap_band 單位 log-odds：|gap_vs_global| 超出帶＝水準偏（偏高＝加害者，
-    # 判準與判別力無關）；auc_threshold 以下＝條件判別力差。
-    # top_k_occupancy：top-slot 佔據統計的 k。
+    # 象限層（A17）：within-item AUC（條件判別力，midrank rank-sum）一軸。
+    # 原本的縱軸 gap_vs_global（水準，取對帳層產物）已隨對帳層退場；純排序的
+    # 替代品（offset sweep 的 δ*_j）未定案，目前只有判別力一軸。
+    # auc_threshold 以下＝條件判別力差。top_k_occupancy：top-slot 佔據統計的 k。
     quadrant:
       enabled: true
       auc_threshold: 0.6
-      gap_band: 0.35
       top_k_occupancy: 1
 
     # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
@@ -147,8 +134,8 @@ evaluation:
     pair_ledger:
       enabled: true
 
-    # 三層診斷合成總表：把 quadrant/reconciliation/offset_sweep/gain_ledger
-    # 四個診斷 dict 合成 per-item 判定＋建議槓桿＋起手值。gain_ledger 缺席時
+    # 跨診斷合成總表：把 quadrant/offset_sweep/gain_ledger 三個診斷 dict
+    # 合成 per-item 判定＋建議槓桿＋起手值。gain_ledger 缺席時
     # best-effort 降級（見 catalog.yaml gain_ledger optional: true）。
     # 判讀見 docs/pipelines/evaluation-diagnosis.md §13。
     triage:

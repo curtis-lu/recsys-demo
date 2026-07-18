@@ -67,10 +67,53 @@ def test_dataset_overview_section_tables():
     assert s.title
 
 
+class TestVisibleMetricKeys:
+    def test_drops_ndcg_keys(self):
+        keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]
+        assert rb._visible_metric_keys(keys) == [
+            "map@3", "precision@3", "recall@3"
+        ]
+
+    def test_preserves_input_order(self):
+        assert rb._visible_metric_keys(["recall@1", "ndcg@1", "map@1"]) == [
+            "recall@1", "map@1"
+        ]
+
+    def test_does_not_drop_unrelated_keys_that_merely_contain_ndcg(self):
+        """只濾「以 prefix 起頭」的 key，不是子字串比對。"""
+        assert rb._visible_metric_keys(["my_ndcg@1"]) == ["my_ndcg@1"]
+
+
+def test_segment_section_hides_ndcg():
+    # per_segment 的每個 seg dict 的 key 會被直接攤成表格的欄（key-agnostic），
+    # 程式碼裡沒有 "ndcg" 字樣也會渲染出來。fixture 刻意帶 ndcg@1，否則假綠。
+    m = _metrics()
+    m["per_segment"] = {
+        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
+        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
+    }
+    s = rb.build_segment_section(m, _params())
+    cols = [str(c) for c in s.tables[0].columns]
+    assert "map@1" in cols, "非 ndcg 的欄不該被誤濾"
+    assert not [c for c in cols if c.startswith("ndcg")]
+
+
+def test_baseline_overall_table_hides_ndcg():
+    # _metrics()["overall"] 與 _baseline_metrics_full()["overall"] 都含 ndcg@1；
+    # overall 表用 set union 攤成列，ndcg@1 必須被濾掉。
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    overall = s.tables[s.table_titles.index("overall metrics")]
+    idx = [str(i) for i in overall.index]
+    assert "map@1" in idx, "非 ndcg 的列不該被誤濾"
+    assert not [i for i in idx if i.startswith("ndcg")]
+
+
 def test_primary_map_section_slices_k():
     s = rb.build_primary_map_section(_metrics(), _params())
     # families on the row index, @k slices as columns (one set shared by all)
-    assert set(s.tables[0].index) == {"map", "precision", "ndcg", "recall"}
+    assert set(s.tables[0].index) == {"map", "precision", "recall"}
     cols = " ".join(map(str, s.tables[0].columns))
     assert "@1" in cols and "@3" in cols
 
@@ -107,6 +150,22 @@ def test_assemble_report_is_html():
     html = rb.assemble_report(_metrics(), _params())
     assert html.startswith("<!DOCTYPE html>")
     assert "摘要 Headline" in html
+
+
+def test_assemble_report_has_no_ndcg_end_to_end():
+    """端到端護欄：完整 report.html 整份不得出現 ndcg。fixture 刻意讓
+    per_segment 與 baseline 兩條 key-agnostic 路徑都被走到——它們把 metrics
+    dict 的 key 直接攤平，是 ndcg 最容易漏出去的地方（metrics_spark 仍算 ndcg，
+    只是刻意不呈現）。section 級測試涵蓋不到這種整份洩漏，故獨立一條網子。"""
+    m = _metrics()
+    m["per_segment"] = {
+        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
+        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
+    }
+    html = rb.assemble_report(
+        m, _params(), baseline_metrics=_baseline_metrics_full()
+    )
+    assert "ndcg" not in html.lower()
 
 
 def test_primary_map_orientation_locked():
@@ -189,13 +248,13 @@ def test_category_section_omits_composition_when_no_mapping():
 def test_per_item_attr_section_built():
     s = rb.build_per_item_attr_section(_metrics(), _params())
     assert s is not None
-    assert len(s.tables) == 2 and len(s.figures) == 2
+    assert len(s.tables) == 1 and len(s.figures) == 1
     map_tbl = s.tables[0]
     assert set(map_tbl.index) == {"Macro 平均", "A", "B"}
     cols = " ".join(map(str, map_tbl.columns))
     assert "map_attr@1" in cols and "map_attr@3" in cols
-    ndcg_cols = " ".join(map(str, s.tables[1].columns))
-    assert "ndcg_attr@1" in ndcg_cols
+    # ndcg 仍由 metrics_spark 算出(fixture 帶 ndcg_attr@1)，但刻意不呈現
+    assert "ndcg" not in cols
 
 
 def test_per_item_attr_section_off():
@@ -215,7 +274,9 @@ def test_glossary_has_attr_entries():
     s = rb.build_glossary_section(_params())
     terms = set(s.tables[0]["指標"])
     assert "map_attr@k" in terms
-    assert "ndcg_attr@k" in terms
+    # ndcg 兩條已退場——glossary 與 report_comparison.html 共用同一份 _GLOSSARY
+    assert "ndcg@k" not in terms
+    assert "ndcg_attr@k" not in terms
 
 
 def test_guardrail_section_has_macro_row():
@@ -239,16 +300,12 @@ def test_guardrail_section_no_macro_when_absent():
 
 def test_per_item_attr_section_has_macro_rows():
     s = rb.build_per_item_attr_section(_metrics(), _params())
-    map_tbl, ndcg_tbl = s.tables[0], s.tables[1]
+    map_tbl = s.tables[0]
     assert list(map_tbl.index)[0] == "Macro 平均"
-    assert list(ndcg_tbl.index)[0] == "Macro 平均"
     # map_attr@1 per-product average = (0.5 + 0.3) / 2 = 0.4
     assert map_tbl.loc["Macro 平均", "map_attr@1"] == 0.4
-    # ndcg_attr@1 per-product average = (0.45 + 0.25) / 2 = 0.35
-    assert ndcg_tbl.loc["Macro 平均", "ndcg_attr@1"] == 0.35
     # heatmap excludes the macro row
     assert "Macro 平均" not in list(s.figures[0].data[0].y)
-    assert "Macro 平均" not in list(s.figures[1].data[0].y)
 
 
 def test_segment_section_has_macro_row():
@@ -370,21 +427,21 @@ def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
     assert "precision@1" in tbl.index   # model-only key still listed
 
 
-def test_baseline_section_has_three_per_item_compare_tables():
-    """recall / map_attr / ndcg_attr each get a M/B/Δ-interleaved table."""
+def test_baseline_section_has_two_per_item_compare_tables():
+    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
     # Old delta-only title must be gone.
     assert "per-item recall@k delta" not in s.table_titles
-    # Three new titles present.
+    # Two new titles present.
     for title in (
         "per-item recall@k (M/B/Δ)",
         "per-item map_attr@k (M/B/Δ)",
-        "per-item ndcg_attr@k (M/B/Δ)",
     ):
         assert title in s.table_titles
+    assert "per-item ndcg_attr@k (M/B/Δ)" not in s.table_titles
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
@@ -537,91 +594,21 @@ def test_assemble_report_passes_metric_ci_through():
 # gap_calibrated_vs_global＝gap_calibrated 減全局參考值 reference_calibrated
 # =-0.1（opus 審查修正：gap_calibrated 同樣受母體條件化位移，判讀校準層要
 # 看相對值而非絕對值）：A: 0.02-(-0.1)=0.12；B: 0.8-(-0.1)=0.9。
-_RECON_FIXTURE = {
-    "enabled": True, "score_col_used": "score_uncalibrated",
-    "fallback": False, "explained_threshold": 0.3,
-    "theory": {"cells": {}, "by_item": {}, "notes": []},
-    "by_item": {
-        "A": {"theory_min": 0.693, "theory_max": 0.693, "theory_approx": True,
-              "gap": 0.75, "gap_vs_global": 0.45, "gap_calibrated": 0.02,
-              "gap_calibrated_vs_global": 0.12,
-              "residual": -0.243,
-              "verdict": "可解釋", "p_mean": 0.4, "y_rate": 0.25, "n_rows": 100},
-        "B": {"theory_min": 0.0, "theory_max": 0.0, "theory_approx": False,
-              "gap": 0.9, "gap_vs_global": 0.6, "gap_calibrated": 0.8,
-              "gap_calibrated_vs_global": 0.9,
-              "residual": 0.6,
-              "verdict": "不可解釋", "p_mean": 0.5, "y_rate": 0.3, "n_rows": 80},
-    },
-    "all_explained": False,
-    "global": {
-        "reference": 0.3, "method": "median_of_config_neutral_items",
-        "pooled_gap": 0.7605, "n_neutral_items": 3,
-        "reference_calibrated": -0.1,
-    },
-}
-
-
-def test_reconciliation_section_renders_table_and_verdict():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    sec = build_reconciliation_section(_RECON_FIXTURE, _params_min())
-    tbl = sec.tables[0]
-    assert list(tbl.index) == ["A", "B"]
-    assert tbl.loc["B", "verdict"] == "不可解釋"
-    assert "理論" in sec.description and "近似" in sec.description
-    assert "score_uncalibrated" in sec.description
-    assert "gap_vs_global" in tbl.columns
-    assert (list(tbl.columns).index("gap_vs_global")
-            == list(tbl.columns).index("gap") + 1)
-    assert "全局" in sec.description
-    # opus 總審修正 1：gap_calibrated_vs_global 緊接 gap_calibrated 之後，
-    # 描述需點出「中性」（config 中性 item 中位數）與「帶」（理論帶/帶寬）。
-    assert "gap_calibrated_vs_global" in tbl.columns
-    assert (list(tbl.columns).index("gap_calibrated_vs_global")
-            == list(tbl.columns).index("gap_calibrated") + 1)
-    assert "中性" in sec.description
-    assert "帶" in sec.description
-
-
-def test_reconciliation_section_none_when_disabled_or_absent():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    assert build_reconciliation_section(None, _params_min()) is None
-    assert build_reconciliation_section({"enabled": False}, _params_min()) is None
-    params_off = {"evaluation": {"report": {"sections": {"reconciliation": False}}}}
-    assert build_reconciliation_section(_RECON_FIXTURE, params_off) is None
-
-
-def test_reconciliation_fallback_marked():
-    from recsys_tfb.evaluation.report_builder import build_reconciliation_section
-    fx = dict(_RECON_FIXTURE, fallback=True, score_col_used="score")
-    sec = build_reconciliation_section(fx, _params_min())
-    assert "退回" in sec.description
-
-
-def test_assemble_report_renders_reconciliation():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), reconciliation=_RECON_FIXTURE
-    )
-    assert "對帳" in html
-
-
 _QUAD_FIXTURE = {
     "enabled": True,
-    "thresholds": {"auc_threshold": 0.6, "gap_band": 0.35,
-                   "top_k_occupancy": 1},
+    "thresholds": {"auc_threshold": 0.6, "top_k_occupancy": 1},
     "n_queries": 1000, "n_pos_queries": 400,
     "by_item": {
         "A": {"auc": 0.82, "auc_reason": None, "n_pos": 120, "n_neg": 880,
-              "n_rows": 1000, "gap_vs_global": 0.05, "level_status": "正常",
-              "disc_status": "好", "quadrant": "健康", "is_aggressor": False,
+              "n_rows": 1000,
+              "disc_status": "好", "quadrant": "健康",
               "ap_sampled": 0.61, "ci_low": 0.55, "ci_high": 0.68,
               "top_share": 0.2, "n_top": 200, "y_rate": 0.12,
               "suppression_count": 30},
         "B": {"auc": 0.51, "auc_reason": None, "n_pos": 20, "n_neg": 980,
-              "n_rows": 1000, "gap_vs_global": 0.9, "level_status": "偏高",
-              "disc_status": "差", "quadrant": "加害者（常數高分型）",
-              "is_aggressor": True, "ap_sampled": 0.7, "ci_low": 0.5,
+              "n_rows": 1000,
+              "disc_status": "差", "quadrant": "冷門受害者（判別力差）",
+              "ap_sampled": 0.7, "ci_low": 0.5,
               "ci_high": 0.85, "top_share": 0.6, "n_top": 600,
               "y_rate": 0.02, "suppression_count": 480},
     },
@@ -629,19 +616,21 @@ _QUAD_FIXTURE = {
         "matrix": {"A": {"A": 1.0, "B": 0.3}, "B": {"A": 0.5, "B": 1.0}},
         "n_buyers": {"A": 100, "B": 60},
     },
-    "sources": {"reconciliation": True, "metric_ci": True},
+    "sources": {"metric_ci": True},
     "notes": [],
 }
 
 
-def test_quadrant_section_renders_table_figure_and_matrix():
+def test_quadrant_section_renders_table_and_matrix():
     from recsys_tfb.evaluation.report_builder import build_quadrant_section
     sec = build_quadrant_section(_QUAD_FIXTURE, _params_min())
     tbl = sec.tables[0]
     assert list(tbl.index) == ["A", "B"]
-    assert tbl.loc["B", "quadrant"] == "加害者（常數高分型）"
-    assert len(sec.figures) == 1          # 散布圖
-    assert len(sec.tables) == 2           # 象限表＋交叉購買矩陣
+    assert tbl.loc["B", "quadrant"] == "冷門受害者（判別力差）"
+    # 散布圖的縱軸是 gap_vs_global（已隨對帳層退場）→ 整張圖移除
+    assert not sec.figures
+    assert "gap_vs_global" not in tbl.columns
+    assert len(sec.tables) == 2           # 判別力表＋交叉購買矩陣
     assert sec.tables[1].loc["B", "A"] == pytest.approx(0.5)
     assert "判讀" in sec.description
     assert "evaluation-diagnosis" in sec.description
@@ -661,16 +650,13 @@ def test_quadrant_section_notes_and_missing_axis():
     fx = dict(
         _QUAD_FIXTURE,
         by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
-                           gap_vs_global=None, level_status="無法評估",
                            quadrant="無法評估", auc=None,
                            auc_reason=auc_reason)},
-        notes=["reconciliation 停用或缺席——水準軸無法評估。"],
+        notes=["metric_ci 停用或缺席——AP±CI 欄從缺。"],
     )
     sec = build_quadrant_section(fx, _params_min())
     assert "無法評估" in sec.tables[0]["quadrant"].tolist()
-    assert "reconciliation 停用" in sec.description
-    # 缺軸的 item 不進散布圖：唯一 item 缺 y → 無圖
-    assert sec.figures == []
+    assert "metric_ci 停用" in sec.description
     # 單類 item 的 auc 為 None 時，人類可讀的原因要進報表（不只在 JSON）。
     assert auc_reason in sec.tables[0]["auc_reason"].tolist()
 
@@ -680,7 +666,17 @@ def test_assemble_report_renders_quadrant():
     html = assemble_report(
         _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
     )
-    assert "象限" in html
+    assert "條件判別力" in html
+
+
+def test_assemble_report_has_no_reconciliation_section():
+    """對帳層已退場——report.html 不得再出現該段落。"""
+    from recsys_tfb.evaluation.report_builder import assemble_report
+    html = assemble_report(
+        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
+    )
+    assert "對帳" not in html
+    assert "Reconciliation" not in html
 
 
 _SWEEP_FIXTURE = {
@@ -819,19 +815,14 @@ _TRIAGE_FIXTURE = {
     "gain_ledger_present": True,
     "thresholds": {"starve_ratio": 0.25, "weight_cap": 8.0},
     "verdicts": {
-        "cfg": {
-            "verdict": "水準-配置型",
-            "lever": "槓桿1：推論期 logQ/offset 修正或修採樣配置（閉式）",
-            "starter": {"type": "logq_offset", "value": 0.4,
-                        "band": [0.1, 0.7], "unit": "log-odds",
-                        "caveat": "起手值，須經快迴路驗證，非定案"},
-            "evidence": {"auc": 0.7, "disc_status": "好",
-                        "level_status": "偏低", "gap_vs_global": -0.6,
-                        "recon_verdict": "可解釋", "theory_min": 0.1,
-                        "theory_max": 0.7, "residual": 0.0,
+        "feat": {
+            "verdict": "特徵缺失型",
+            "lever": "槓桿5：補特徵（診斷只能縮小範圍，補什麼是領域知識）",
+            "starter": None,
+            "evidence": {"auc": 0.5, "disc_status": "差",
                         "delta_star_centered": -0.5,
                         "loo_contribution_holdout": 0.0,
-                        "context_gain_share": None, "y_rate": None},
+                        "context_gain_share": 0.35, "y_rate": 0.05},
             "notes": [],
         },
         "stv": {
@@ -841,16 +832,13 @@ _TRIAGE_FIXTURE = {
                         "unit": "sample_weight 相對倍率（w∝1/√P 加上限，手冊3 Ch8）",
                         "caveat": "起手值，須經快迴路驗證，非定案"},
             "evidence": {"auc": 0.5, "disc_status": "差",
-                        "level_status": "正常", "gap_vs_global": 0.0,
-                        "recon_verdict": "可解釋", "theory_min": 0.0,
-                        "theory_max": 0.0, "residual": 0.0,
                         "delta_star_centered": 0.3,
                         "loo_contribution_holdout": 0.0,
                         "context_gain_share": 0.01, "y_rate": 0.02},
             "notes": [],
         },
     },
-    "summary": {"水準-配置型": 1, "餓死型": 1},
+    "summary": {"特徵缺失型": 1, "餓死型": 1},
     "notes": [],
 }
 
@@ -862,13 +850,15 @@ def test_triage_section_renders_main_table():
     assert sec.figures == []
     assert len(sec.tables) == 1
     tbl = sec.tables[0]
-    assert list(tbl.index) == ["cfg", "stv"]
-    for col in ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+    assert list(tbl.index) == ["feat", "stv"]
+    for col in ["判定", "建議槓桿", "起手值", "AUC",
                 "δ*_centered", "context_gain_share", "備註"]:
         assert col in tbl.columns
-    assert tbl.loc["cfg", "判定"] == "水準-配置型"
+    # 水準軸退場 → 證據欄不再有 gap_vs_global
+    assert "gap_vs_global" not in tbl.columns
+    assert tbl.loc["feat", "判定"] == "特徵缺失型"
     assert tbl.loc["stv", "判定"] == "餓死型"
-    assert "logq_offset=0.400" in tbl.loc["cfg", "起手值"]
+    assert "item_weight=4.470" in tbl.loc["stv", "起手值"]
 
 
 def test_triage_section_none_when_disabled_or_absent():
@@ -884,7 +874,7 @@ def test_triage_section_none_when_disabled_or_absent():
 def test_triage_section_description_has_summary_and_gain_ledger_status():
     from recsys_tfb.evaluation.report_builder import build_triage_section
     sec = build_triage_section(_TRIAGE_FIXTURE, _params_min())
-    assert "水準-配置型" in sec.description
+    assert "特徵缺失型" in sec.description
     assert "gain_ledger" in sec.description
 
 

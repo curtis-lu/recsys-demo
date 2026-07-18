@@ -661,38 +661,8 @@ class TestDiagnosisMetricParamsA15:
             validate_config_consistency(p)
 
 
-class TestReconciliationParamsA16:
-    def _params(self, recon):
-        return {"evaluation": {"diagnosis": {"reconciliation": recon}}}
-
-    def test_absent_and_valid_defaults_clean(self):
-        from recsys_tfb.core.consistency import reconciliation_param_errors
-        assert reconciliation_param_errors({}) == []
-        assert reconciliation_param_errors(self._params(
-            {"enabled": True, "score_col": "score_uncalibrated",
-             "explained_threshold": 0.3}
-        )) == []
-
-    def test_bad_values_report(self):
-        from recsys_tfb.core.consistency import reconciliation_param_errors
-        errors = reconciliation_param_errors(self._params(
-            {"score_col": "rank", "explained_threshold": 0}
-        ))
-        assert len(errors) == 2
-        joined = "\n".join(errors)
-        assert "score_col" in joined and "explained_threshold" in joined
-
-    def test_wired_into_validate(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError, validate_config_consistency,
-        )
-        with _pytest.raises(ConfigConsistencyError, match="score_col"):
-            validate_config_consistency(self._params({"score_col": "rank"}))
-
-
 class TestEnabledMustBeBool:
-    """A15/A16：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
+    """A15：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
 
     def test_ci_enabled_string_rejected(self):
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
@@ -700,21 +670,10 @@ class TestEnabledMustBeBool:
         errors = diagnosis_metric_param_errors(p)
         assert len(errors) == 1 and "ci.enabled" in errors[0]
 
-    def test_reconciliation_enabled_string_rejected(self):
-        from recsys_tfb.core.consistency import reconciliation_param_errors
-        p = {"evaluation": {"diagnosis": {"reconciliation": {"enabled": "false"}}}}
-        errors = reconciliation_param_errors(p)
-        assert len(errors) == 1 and "reconciliation.enabled" in errors[0]
-
     def test_bool_values_clean(self):
-        from recsys_tfb.core.consistency import (
-            diagnosis_metric_param_errors,
-            reconciliation_param_errors,
-        )
-        p = {"evaluation": {"diagnosis": {"ci": {"enabled": False},
-                                          "reconciliation": {"enabled": False}}}}
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        p = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
         assert diagnosis_metric_param_errors(p) == []
-        assert reconciliation_param_errors(p) == []
 
 
 class TestQuadrantParamsA17:
@@ -725,19 +684,19 @@ class TestQuadrantParamsA17:
         from recsys_tfb.core.consistency import quadrant_param_errors
         assert quadrant_param_errors({}) == []
         assert quadrant_param_errors(self._params(
-            {"enabled": True, "auc_threshold": 0.6, "gap_band": 0.35,
+            {"enabled": True, "auc_threshold": 0.6,
              "top_k_occupancy": 1}
         )) == []
 
     def test_bad_values_report(self):
         from recsys_tfb.core.consistency import quadrant_param_errors
         errors = quadrant_param_errors(self._params(
-            {"auc_threshold": 0.4, "gap_band": 0, "top_k_occupancy": 0,
+            {"auc_threshold": 0.4, "top_k_occupancy": 0,
              "enabled": "false"}
         ))
-        assert len(errors) == 4
+        assert len(errors) == 3
         joined = "\n".join(errors)
-        assert "auc_threshold" in joined and "gap_band" in joined
+        assert "auc_threshold" in joined
         assert "top_k_occupancy" in joined and "enabled" in joined
 
     def test_auc_threshold_boundaries(self):

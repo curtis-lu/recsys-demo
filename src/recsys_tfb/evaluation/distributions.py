@@ -60,28 +60,6 @@ def _add_box(fig: go.Figure, name: str, stats: pd.DataFrame, **kwargs) -> None:
     )
 
 
-def plot_score_boxplot(
-    box_stats: pd.DataFrame,
-    title_prefix: str = "",
-    item_col: str = "prod_name",
-) -> go.Figure:
-    """Boxplot (one box per item) from pre-computed quartiles/fences.
-
-    ``box_stats`` columns: ``[item_col, "q1", "median", "q3", "lowerfence",
-    "upperfence"]`` (one row per item).
-    """
-    fig = go.Figure()
-    for item in sorted(box_stats[item_col].unique()):
-        sub = box_stats[box_stats[item_col] == item]
-        _add_box(fig, str(item), sub)
-    fig.update_layout(
-        title=f"{title_prefix}Score Distribution (Boxplot)",
-        yaxis_title="Score",
-        legend_title="Product",
-    )
-    return fig
-
-
 def plot_score_boxplot_by_label(
     box_stats_by_label: pd.DataFrame,
     title_prefix: str = "",

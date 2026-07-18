@@ -41,6 +41,25 @@ def _k_to_lookup(k, n_products: int) -> int | str:
 
 _MACRO_LABEL = "Macro 平均"
 
+# metrics_spark 仍會算出 ndcg@k / ndcg_attr@k，但兩份報表都刻意不呈現它們。
+# 下面幾張表把 metrics dict 的 key 直接攤成欄／列（key-agnostic），所以
+# 「不呈現」必須在這裡濾——光是原始碼裡不寫 "ndcg" 字樣擋不住。
+_HIDDEN_METRIC_PREFIXES = ("ndcg",)
+
+
+def _visible_metric_keys(keys) -> list:
+    """濾掉刻意不呈現的 metric key，保留原順序。
+
+    契約以**顯示鍵的命名**為準（prefix 比對），不是以「屬於哪個指標家族」
+    為準——目前擋掉的是 ``ndcg@k``／``ndcg_attr@k``。若日後 metrics_spark
+    把同族但不以 ``ndcg`` 起頭的鍵（例如 ``dcg@k``）曝到攤平表格，需在
+    ``_HIDDEN_METRIC_PREFIXES`` 補上，否則會繞過這層過濾。
+    """
+    return [
+        k for k in keys
+        if not str(k).startswith(_HIDDEN_METRIC_PREFIXES)
+    ]
+
 
 def _report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
@@ -124,7 +143,7 @@ def build_primary_map_section(
     )
     rows = {}
     n_prod = _n_products(metrics)
-    for fam in ("map", "precision", "ndcg", "recall"):
+    for fam in ("map", "precision", "recall"):
         rows[fam] = {
             f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
             for k in ks
@@ -146,7 +165,7 @@ def build_primary_map_section(
     return ReportSection(
         title="主指標 mAP@k（細產品 per-query）",
         description=(
-            "overall mAP@k 為主軸；precision/ndcg/recall@k 作脈絡。"
+            "overall mAP@k 為主軸；precision/recall@k 作脈絡。"
             "K = 產品數時 precision 退化為 base rate、recall 恆為 1。"
         ),
         tables=tables,
@@ -338,23 +357,12 @@ def build_per_item_attr_section(
     map_tbl_plain = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}"
     )
-    ndcg_tbl_plain = _per_item_metric_table(
-        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}"
-    )
     map_fig = _per_item_heatmap(
         map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
         "per-item map_attr@k 色階",
     )
-    ndcg_fig = _per_item_heatmap(
-        ndcg_tbl_plain, per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
-        "per-item ndcg_attr@k 色階",
-    )
     map_tbl = _per_item_metric_table(
         per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        macro_metrics=macro_item,
-    )
-    ndcg_tbl = _per_item_metric_table(
-        per_item, ks, n_prod, "ndcg_attr", "ndcg_attr@{k}",
         macro_metrics=macro_item,
     )
 
@@ -381,8 +389,8 @@ def build_per_item_attr_section(
             f"該列 CI 不可靠，判讀時先看這欄。"
         )
 
-    tables = [map_tbl, ndcg_tbl]
-    table_titles = ["per-item map_attr@k", "per-item ndcg_attr@k"]
+    tables = [map_tbl]
+    table_titles = ["per-item map_attr@k"]
     observation_items = metrics.get("observation_items", []) or []
     if observation_items:
         per_item_all = metrics.get("per_item", {})
@@ -397,114 +405,18 @@ def build_per_item_attr_section(
     return ReportSection(
         title="per_item 歸因 Attribution（細產品）",
         description=(
-            "每個產品對主指標 mAP@k / nDCG@k 各貢獻多少。算法：對每筆"
+            "每個產品對主指標 mAP@k 各貢獻多少。算法：對每筆"
             "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
             "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
             "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
             "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
             "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
-            "即這個產品平均替 AP@k 加了多少分。ndcg_attr@k 同理，把單筆貢獻"
-            "換成 log 折扣的 ndcg_contrib@k。頂列「Macro 平均」為各產品等權平均。"
+            "即這個產品平均替 AP@k 加了多少分。頂列「Macro 平均」為各產品等權平均。"
         ) + description_extra,
-        figures=[map_fig, ndcg_fig],
+        figures=[map_fig],
         tables=tables,
         table_titles=table_titles,
     )
-
-
-def build_reconciliation_section(
-    reconciliation: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "reconciliation"):
-        return None
-    if not reconciliation or not reconciliation.get("enabled"):
-        return None
-    by_item = reconciliation.get("by_item", {}) or {}
-    cols = ["theory_min", "theory_max", "gap", "gap_vs_global",
-            "gap_calibrated", "gap_calibrated_vs_global",
-            "residual", "verdict", "p_mean", "y_rate", "n_rows"]
-    tbl = pd.DataFrame(
-        {c: [by_item[it].get(c) for it in by_item] for c in cols},
-        index=list(by_item),
-    )
-    score_col = reconciliation.get("score_col_used")
-    glob = reconciliation.get("global", {}) or {}
-    reference = glob.get("reference", 0.0)
-    n_neutral = glob.get("n_neutral_items", 0)
-    pooled_gap = glob.get("pooled_gap")
-    pooled_clause = (
-        f"；n_rows 加權 pooled gap {pooled_gap:.3f} 供交叉檢核"
-        if pooled_gap is not None else ""
-    )
-    desc = (
-        "這張表在回答一個問題：模型的機率水準偏移，是不是你自己的抽樣／"
-        "加權配置造成的？欄位定義與完整前因後果見 "
-        "docs/pipelines/evaluation-diagnosis.md，這裡只給判讀順序：<br>"
-        "1. 先掃 verdict 欄。全部「可解釋」＝偏移都是配置的直接後果，"
-        "不用動模型；出現「不可解釋」＝有配置以外的事在發生，值得追；"
-        "「無法評估」看 reason 欄。<br>"
-        "2. theory_min／theory_max＝由配置推得的理論偏移帶（log-odds）。"
-        "同一產品在不同客群的抽樣比率不同，所以是「帶」不是單值——"
-        "帶越寬 verdict 越寬容（跨 segment 聚合近似，cell 級精確值在 "
-        "reconciliation.json）。<br>"
-        f"3. verdict 比的是 gap_vs_global（＝gap − 全局參考值 "
-        f"{reference:.3f}，取 {n_neutral} 個 config 中性產品的 gap 中位數"
-        f"{pooled_clause}），不是絕對 gap——post-training 的評估母體只含"
-        "有正例的客戶，所有產品的 gap 會被一致下移，那是母體性質、"
-        f"不是任何單一產品的問題。|residual| ≤ "
-        f"{reconciliation.get('explained_threshold')} → 可解釋。<br>"
-        f"4. 主判欄用 {score_col}（模型原始輸出）。判讀校準層看 "
-        "gap_calibrated_vs_global：校準有效時它應遠小於 gap_vs_global、"
-        "趨近 0。gap 為 logit(平均) 的近似——產品內分數越分散，偏差越大。"
-    )
-    if reconciliation.get("fallback"):
-        desc += (
-            "⚠ 本次執行找不到 score_uncalibrated 欄（monitoring 路徑），"
-            "已退回 score——gap 內含校準層效應，判讀時注意。"
-        )
-    notes = (reconciliation.get("theory", {}) or {}).get("notes") or []
-    if notes:
-        desc += "／".join(notes)
-    return ReportSection(
-        title="對帳 Reconciliation（理論偏移 vs 實測校準差距）",
-        description=desc,
-        tables=[tbl],
-        table_titles=["per-item 對帳表"],
-    )
-
-
-def _quadrant_scatter(by_item: dict, thresholds: dict) -> go.Figure | None:
-    """象限散布圖：橫軸 AUC（→ 判別力好）、縱軸 gap_vs_global（↑ 水準偏高）。
-
-    樣式鏡射框架手冊 fig2-quadrant-map：淺藍水平帶＝水準大致正確的範圍、
-    垂直虛線＝判別力門檻。任一軸缺值的 item 不進圖（表中仍列）。
-    """
-    pts = {
-        it: v for it, v in by_item.items()
-        if v.get("auc") is not None and v.get("gap_vs_global") is not None
-    }
-    if not pts:
-        return None
-    band = float(thresholds.get("gap_band", 0.35))
-    thr = float(thresholds.get("auc_threshold", 0.6))
-    fig = go.Figure(
-        go.Scatter(
-            x=[v["auc"] for v in pts.values()],
-            y=[v["gap_vs_global"] for v in pts.values()],
-            mode="markers+text",
-            text=list(pts),
-            textposition="top center",
-        )
-    )
-    fig.add_hrect(y0=-band, y1=band, fillcolor="lightblue", opacity=0.3,
-                  line_width=0)
-    fig.add_vline(x=thr, line_dash="dash")
-    fig.update_layout(
-        title="象限地圖：水準（縱）× 條件判別力（橫）",
-        xaxis_title="within-item AUC（→ 判別力好）",
-        yaxis_title="gap_vs_global（↑ 水準偏高）",
-    )
-    return fig
 
 
 def build_quadrant_section(
@@ -515,7 +427,7 @@ def build_quadrant_section(
     if not quadrant or not quadrant.get("enabled"):
         return None
     by_item = quadrant.get("by_item", {}) or {}
-    cols = ["quadrant", "gap_vs_global", "auc", "auc_reason", "ap_sampled",
+    cols = ["quadrant", "auc", "auc_reason", "ap_sampled",
             "ci_low", "ci_high", "top_share", "y_rate", "suppression_count",
             "n_pos", "n_rows"]
     tbl = pd.DataFrame(
@@ -523,9 +435,8 @@ def build_quadrant_section(
         index=list(by_item),
     )
     thresholds = quadrant.get("thresholds", {}) or {}
-    fig = _quadrant_scatter(by_item, thresholds)
     tables = [tbl]
-    table_titles = ["per-item 象限表"]
+    table_titles = ["per-item 判別力表"]
     cp = (quadrant.get("cross_purchase", {}) or {}).get("matrix", {}) or {}
     if cp:
         cp_tbl = pd.DataFrame.from_dict(cp, orient="index")
@@ -534,21 +445,18 @@ def build_quadrant_section(
         tables.append(cp_tbl)
         table_titles.append("交叉購買矩陣 P(買 k｜買 j)（列＝j、欄＝k）")
     desc = (
-        "行為層象限：縱軸 gap_vs_global（水準）、橫軸 within-item AUC"
-        "（條件判別力）。判讀順序：(1) 先看散布圖每個 item 落在哪個象限；"
-        f"(2) 水準帶外（|gap_vs_global| > {thresholds.get('gap_band')}）的 "
-        "item 回對帳表查可否由配置解釋；(3) AUC 低於 "
-        f"{thresholds.get('auc_threshold')} 的 item 看 suppression_count 與 "
-        "top_share 評估傷害；(4) 交叉購買矩陣看高共購 item 之間的壓制是否"
-        "實質。完整判讀：docs/pipelines/evaluation-diagnosis.md。"
+        "行為層：within-item AUC（條件判別力）＋傷害觀測。判讀順序："
+        f"(1) AUC 低於 {thresholds.get('auc_threshold')} 的 item 看 "
+        "suppression_count 與 top_share 評估傷害；(2) 交叉購買矩陣看高共購 "
+        "item 之間的壓制是否實質。完整判讀："
+        "docs/pipelines/evaluation-diagnosis.md。"
     )
     notes = quadrant.get("notes") or []
     if notes:
         desc += "⚠ " + "／".join(notes)
     return ReportSection(
-        title="象限 Quadrant（水準 × 條件判別力）",
+        title="條件判別力 Discrimination（per-item 行為觀測）",
         description=desc,
-        figures=[fig] if fig is not None else [],
         tables=tables,
         table_titles=table_titles,
     )
@@ -635,8 +543,8 @@ def build_offset_sweep_section(
         "分流閥：對每個 item 的 logit 分數加常數 δ（不重訓）能收復多少 "
         "macro mAP。判讀順序：(1) 看折外收復量——大＝缺口主要在水準（配置"
         "／再平衡可修）、小＝缺口在條件判別力（必須動訓練）；(2) 看 δ* 大"
-        "的 item 是誰，回對帳表查可否由配置解釋；(3) waterfall 看收復量怎"
-        "麼分攤到各 item。δ* 單位＝log-odds，與對帳層 offset 同尺度。完整"
+        "的 item 是誰；(3) waterfall 看收復量怎"
+        "麼分攤到各 item。δ* 單位＝log-odds。完整"
         "判讀：docs/pipelines/evaluation-diagnosis.md。"
     )
     notes = sweep.get("notes") or []
@@ -759,7 +667,7 @@ def build_triage_section(
 
     verdicts = triage.get("verdicts", {}) or {}
     items = sorted(verdicts)
-    cols = ["判定", "建議槓桿", "起手值", "AUC", "gap_vs_global",
+    cols = ["判定", "建議槓桿", "起手值", "AUC",
             "δ*_centered", "context_gain_share", "備註"]
     rows = {}
     for it in items:
@@ -770,7 +678,6 @@ def build_triage_section(
             v.get("lever"),
             _fmt_triage_starter(v.get("starter")),
             ev.get("auc"),
-            ev.get("gap_vs_global"),
             ev.get("delta_star_centered"),
             ev.get("context_gain_share"),
             "；".join(v.get("notes") or []),
@@ -787,7 +694,7 @@ def build_triage_section(
         else "gain_ledger 缺席或降級——特徵缺失型與餓死型無法區分"
     )
     desc = (
-        "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+        "跨診斷（判別力／分流，＋結構層 gain_ledger）合成的 "
         "per-item 判定總表，省去逐張表交叉核對。判讀順序：(1) 判定欄看落"
         "在哪一型、建議槓桿欄看對應修法；(2) 起手值只是計算出的起點，"
         f"{STARTER_CAVEAT}，套用前務必用快迴路（offline 重算或小流量）驗證"
@@ -867,6 +774,11 @@ def build_segment_section(
         if macro_seg
         else dict(per_segment)
     )
+    rows = {
+        seg: {k: (m or {}).get(k)
+              for k in _visible_metric_keys(list((m or {}).keys()))}
+        for seg, m in rows.items()
+    }
     table = pd.DataFrame(rows).T
     return ReportSection(
         title="分群 Per-Segment",
@@ -937,7 +849,9 @@ def build_baseline_section(
     overall_a = comp["result_a"].get("overall", {}) or {}
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]
-    overall_keys = sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    overall_keys = _visible_metric_keys(
+        sorted(set(overall_a) | set(overall_b) | set(overall_delta))
+    )
     overall_tbl = pd.DataFrame(
         {
             "Model": [overall_a.get(k) for k in overall_keys],
@@ -961,8 +875,6 @@ def build_baseline_section(
              "per-item recall@k (M/B/Δ)"),
             ("map_attr", "map_attr@{k}", attr_ks,
              "per-item map_attr@k (M/B/Δ)"),
-            ("ndcg_attr", "ndcg_attr@{k}", attr_ks,
-             "per-item ndcg_attr@k (M/B/Δ)"),
         ):
             tbl = _per_item_metric_compare_table(
                 per_item_a, per_item_b, per_item_delta,
@@ -976,7 +888,7 @@ def build_baseline_section(
         title="基準比較 Baseline",
         description=(
             "Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)+ "
-            "per-item recall/map_attr/ndcg_attr(M/B/Δ)。"
+            "per-item recall/map_attr(M/B/Δ)。"
         ),
         tables=tables,
         table_titles=table_titles,
@@ -987,14 +899,10 @@ _GLOSSARY = [
     ("mAP@k", "per-query Average Precision@k 對 query 平均；主指標"),
     ("recall@k (per-item)", "P(rank(P)≤k | P 為正)，命中事件等權；護欄"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
-    ("ndcg@k", "log 折扣排序品質，正規化 [0,1]"),
     ("map_attr@k",
      "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
      "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
      "是 mAP@k 拆到單一產品的貢獻"),
-    ("ndcg_attr@k",
-     "同 map_attr@k，單筆貢獻改用 ndcg_contrib@k（log 折扣排序品質，已用 "
-     "iDCG 正規化）。越高越好"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("Macro 平均",
      "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),
@@ -1007,7 +915,7 @@ _GLOSSARY = [
      "把某 item 分數換成 base-rate 常數重算指標；delta 正＝該 item "
      "個性化分數是淨傷害、負＝淨貢獻"),
     ("triage 總表",
-     "跨三層診斷（象限／對帳／分流，＋結構層 gain_ledger）合成的 "
+     "跨診斷（判別力／分流，＋結構層 gain_ledger）合成的 "
      "per-item 判定＋建議槓桿＋起手值總表"),
     ("餓死型",
      "條件判別力差、且結構層 context_gain_share 遠低於同儕——特徵夠但曝光"
@@ -1034,7 +942,6 @@ def assemble_report(
     baseline_metrics: dict | None = None,
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
-    reconciliation: dict | None = None,
     quadrant: dict | None = None,
     offset_sweep: dict | None = None,
     pair_ledger: dict | None = None,
@@ -1048,7 +955,6 @@ def assemble_report(
         build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
-        build_reconciliation_section(reconciliation, parameters),
         build_quadrant_section(quadrant, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
         build_pair_ledger_section(pair_ledger, parameters),

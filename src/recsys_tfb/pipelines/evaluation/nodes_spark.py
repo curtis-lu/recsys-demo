@@ -14,7 +14,6 @@ from recsys_tfb.evaluation.diagnostics_spark import (
     positive_rank_count_matrix,
     positive_rate_matrix,
     rank_count_matrix,
-    score_box_stats,
     score_box_stats_by_label,
     score_histogram_counts,
 )
@@ -22,7 +21,6 @@ from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
-    plot_score_boxplot,
     plot_score_boxplot_by_label,
     plot_score_histogram,
 )
@@ -348,45 +346,16 @@ def compute_metric_ci(
     return out
 
 
-def compute_reconciliation(
-    eval_predictions: Optional[SparkDataFrame],
-    parameters: dict,
-) -> dict:
-    """對帳層薄 node（spec §3 Phase 2）：理論偏移 vs 實測校準差距。
-
-    領域邏輯全在 ``diagnosis.metric.reconciliation``。停用時寫 stub。
-    """
-    eval_params = parameters.get("evaluation", {}) or {}
-    cfg = ((eval_params.get("diagnosis", {}) or {})
-           .get("reconciliation", {}) or {})
-    if not cfg.get("enabled", True):
-        logger.info("reconciliation disabled — writing stub")
-        return {"enabled": False}
-    if eval_predictions is None:
-        raise ValueError(
-            "compute_reconciliation: eval_predictions is required when "
-            "evaluation.diagnosis.reconciliation.enabled is true"
-        )
-    from recsys_tfb.diagnosis.metric.reconciliation import reconcile
-    out = reconcile(eval_predictions, parameters)
-    logger.info(
-        "reconciliation computed: %d items, all_explained=%s (score_col=%s)",
-        len(out["by_item"]), out["all_explained"], out["score_col_used"],
-    )
-    return out
-
-
 def compute_quadrant(
     eval_predictions: Optional[SparkDataFrame],
     label_table: Optional[SparkDataFrame],
     metric_ci: Optional[dict],
-    reconciliation: Optional[dict],
     parameters: dict,
 ) -> dict:
     """象限層薄 node（框架診斷項目 3/5/10）。
 
     領域邏輯全在 ``diagnosis.metric.quadrant``。停用時寫 stub；上游診斷
-    產物（metric_ci/reconciliation）是停用 stub 時 best-effort 降級不失敗。
+    產物（metric_ci）是停用 stub 時 best-effort 降級不失敗。
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cfg = ((eval_params.get("diagnosis", {}) or {}).get("quadrant", {}) or {})
@@ -400,13 +369,9 @@ def compute_quadrant(
         )
     from recsys_tfb.diagnosis.metric.quadrant import build_quadrant_summary
     out = build_quadrant_summary(
-        eval_predictions, label_table, metric_ci, reconciliation, parameters
+        eval_predictions, label_table, metric_ci, parameters
     )
-    logger.info(
-        "quadrant computed: %d items, %d aggressors",
-        len(out["by_item"]),
-        sum(1 for v in out["by_item"].values() if v["is_aggressor"]),
-    )
+    logger.info("quadrant computed: %d items", len(out["by_item"]))
     return out
 
 
@@ -483,15 +448,16 @@ def compute_pair_ledger(
     return out
 
 
-def assemble_triage_summary(quadrant: Optional[dict], reconciliation: Optional[dict],
-                            offset_sweep: Optional[dict], gain_ledger: Optional[dict],
+def assemble_triage_summary(quadrant: Optional[dict],
+                            offset_sweep: Optional[dict],
+                            gain_ledger: Optional[dict],
                             parameters: dict) -> dict:
     """Triage 總表 node：純 dict 合成，gain_ledger 缺席 best-effort 降級。"""
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     if not (diag.get("triage", {}) or {}).get("enabled", True):
         return {"enabled": False}
     from recsys_tfb.diagnosis.metric.triage import triage
-    return triage(quadrant, reconciliation, offset_sweep, gain_ledger, parameters)
+    return triage(quadrant, offset_sweep, gain_ledger, parameters)
 
 
 def generate_report(
@@ -500,7 +466,6 @@ def generate_report(
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
     metric_ci: Optional[dict] = None,
-    reconciliation: Optional[dict] = None,
     quadrant: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
     pair_ledger: Optional[dict] = None,
@@ -537,10 +502,6 @@ def generate_report(
                 score_histogram_counts(sdf, item_col, score_col),
                 item_col=item_col,
             ))
-            figs.append(plot_score_boxplot(
-                score_box_stats(sdf, item_col, score_col),
-                item_col=item_col,
-            ))
             figs.append(plot_score_boxplot_by_label(
                 score_box_stats_by_label(sdf, item_col, score_col, label_col),
                 item_col=item_col, label_col=label_col,
@@ -570,7 +531,6 @@ def generate_report(
         baseline_metrics=baseline_metrics,
         diagnostics_frames=diagnostics_frames,
         metric_ci=metric_ci,
-        reconciliation=reconciliation,
         quadrant=quadrant,
         offset_sweep=offset_sweep,
         pair_ledger=pair_ledger,

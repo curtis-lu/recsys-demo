@@ -12,7 +12,6 @@ from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
-    plot_score_boxplot,
     plot_score_boxplot_by_label,
     plot_score_histogram,
 )
@@ -45,34 +44,6 @@ class TestPlotScoreHistogram:
     def test_count_axis_avoids_scientific_notation(self):
         fig = plot_score_histogram(self._hist())
         assert fig.layout.yaxis.tickformat is not None
-
-
-class TestPlotScoreBoxplot:
-    def _stats(self):
-        return pd.DataFrame(
-            {
-                "prod_name": ["A", "B"],
-                "q1": [1.0, 2.0],
-                "median": [2.0, 3.0],
-                "q3": [3.0, 4.0],
-                "lowerfence": [0.0, 1.0],
-                "upperfence": [4.0, 5.0],
-            }
-        )
-
-    def test_one_box_per_item(self):
-        fig = plot_score_boxplot(self._stats())
-        assert len(fig.data) == 2
-        assert all(isinstance(t, go.Box) for t in fig.data)
-
-    def test_uses_precomputed_stats_not_raw_points(self):
-        fig = plot_score_boxplot(self._stats())
-        a = next(t for t in fig.data if t.name == "A")
-        assert list(a.q1) == [1.0]
-        assert list(a.median) == [2.0]
-        assert list(a.q3) == [3.0]
-        # No raw sample array embedded.
-        assert a.y is None
 
 
 class TestPlotScoreBoxplotByLabel:
