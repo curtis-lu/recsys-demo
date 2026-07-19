@@ -36,6 +36,7 @@
 | `contract.check_module` 補簽名檢查（`compute(diagnosis_sample, parameters)`）與三態 key-set 一致性檢查 | **Task 2.3**（`render` 存在之後） | 只有 `compute` 時釘不了完整契約；目前簽名形狀是默默立的，後四項寫錯簽名契約測試照樣綠 |
 | `field_notes` 與實際輸出鍵的一致性檢查（新增欄位忘了補說明不會有測試轉紅） | Task 2.3，與上一列一起 | 同屬 contract 強化 |
 | `q_agg` 的 `weight=("w","max")` 假設 `inclusion_weight` 在 query 內為常數 | **Plan 2 開工時檢查** | 對 `draw_diagnosis_sample` 的產出成立（權重由 stratum 決定、stratum 是 query 級屬性），但無測試釘住；上游若讓同一 query 的列帶不同權重，`max` 會靜默選一個 |
+| 讓診斷提供 result-dependent 的 `blind_to`（例如偵測到 lambdarank 時動態多一條） | 有第二個實例需要時 | 目前 `notes` 已承載這類資訊、`render` 也顯示了；為此加一個每項診斷各一份的 hook，會讓同一段邏輯被抄五次（Task 2.3 的 `scope_for()` 即因此撤回） |
 
 **Task 2.2 已知的弱斷言（不擋交付，但別當成有守住）**：`test_null_context_group_survives_and_is_visible` 對 note 的斷言是 `"prod_tier" in n`，靠當下文案措辭撐著——目前只有結構 note 含欄名所以有鑑別力（mutation 1b 驗證過），但改文案可能讓它退化成假綠。
 

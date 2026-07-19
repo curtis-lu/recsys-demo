@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import subprocess
+import sys
 import types
 
 import pytest
@@ -105,12 +107,29 @@ def test_registered_diagnoses_use_the_agreed_signatures(name):
     assert list(inspect.signature(mod.render).parameters) == ["result", "parameters"]
 
 
-def test_max_figure_points_is_re_exported_not_redefined():
-    """唯一定義在 ``report.figures``；這裡另外賦值的話兩個常數會漂移，而
-    ``assert_within_budget`` 只認 figures.py 那個，報表會靜默超量。"""
-    from recsys_tfb.report import figures
+def test_contract_pulls_in_no_heavy_dependencies():
+    """``contract`` 只能依賴 stdlib——``core/consistency.py`` 為了驗每項診斷的
+    enabled 旗標而 import 它，而 ``validate_config_consistency`` 在**每個**
+    pipeline 的 CLI entry 都會跑。
 
-    assert contract.MAX_FIGURE_POINTS is figures.MAX_FIGURE_POINTS
+    這條守的是一個實際發生過的回歸：contract 曾 re-export
+    ``report.figures.MAX_FIGURE_POINTS``，那條 import 連帶把 plotly 拉進來，
+    import 成本 ~0 → 374ms，dataset／training／inference 三條不畫圖的 pipeline
+    每次啟動都白付。
+
+    用子行程量測，因為同一個 pytest session 裡 plotly 早被別的測試載入了，
+    在本行程檢查 ``sys.modules`` 永遠會是 False positive。
+    """
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;"
+         "import recsys_tfb.diagnosis.metric.contract;"
+         "print('plotly' in sys.modules or 'pandas' in sys.modules)"],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == "False", (
+        f"contract 拉進了重量級依賴：{result.stdout.strip()}"
+    )
 
 
 @pytest.mark.parametrize("name", contract.DIAGNOSES)

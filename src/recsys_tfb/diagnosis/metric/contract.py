@@ -27,7 +27,19 @@ from __future__ import annotations
 
 import inspect
 
-from recsys_tfb.report.figures import MAX_FIGURE_POINTS
+# **本模組刻意只 import stdlib，不要在這裡加 recsys_tfb 的 import。**
+#
+# 理由：``core/consistency.py`` 需要 :data:`DIAGNOSES` 來驗每項診斷的 enabled
+# 旗標，而 ``validate_config_consistency`` 在**每個** pipeline 的 CLI entry 都會
+# 跑（dataset／training／inference／evaluation）。這裡曾經 re-export
+# ``report.figures.MAX_FIGURE_POINTS``，那條 import 會連帶把 plotly 拉進來——
+# 實測讓 import 本模組從 ~0 變成 374ms，四條 pipeline 每次啟動都白付，而
+# 其中三條根本不畫圖。該 re-export 當時沒有任何 production 消費者（只有它
+# 自己的測試在斷言它存在），已移除。
+#
+# 診斷模組要用 ``MAX_FIGURE_POINTS`` 請直接
+# ``from recsys_tfb.report.figures import MAX_FIGURE_POINTS``——那裡是實際執行
+# ``assert_within_budget`` 的地方，多一層 re-export 只會讓兩個常數有機會漂移。
 
 #: 每個診斷模組必須提供的符號。順序即錯誤訊息中的列出順序。
 _REQUIRED = ("NAME", "TITLE", "SCOPE", "compute", "render")
@@ -48,7 +60,7 @@ _SIGNATURES = {
 #: 隨計畫逐步補齊（本計畫只有第一項）。
 DIAGNOSES: tuple[str, ...] = ("config_shift",)
 
-__all__ = ["DIAGNOSES", "MAX_FIGURE_POINTS", "check_module"]
+__all__ = ["DIAGNOSES", "check_module"]
 
 
 def check_module(mod) -> None:

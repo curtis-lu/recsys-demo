@@ -633,8 +633,16 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
         if section is None:
             continue
         slug = f"{i:02d}-{name.replace('_', '-')}"  # 數字前綴＝閱讀順序
+        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：五項共用同一份
+        # diagnosis_sample，sampling_description 永遠在同一個位置。讓各診斷
+        # 各帶一個 scope_for() hook 等於同一段 replace 被抄五次。
+        scope = dataclasses.replace(
+            mod.SCOPE,
+            sampling=(result.get("sample_meta", {}) or {}).get(
+                "sampling_description", ""),
+        )
         pages.append(Page(slug=slug, title=mod.TITLE,
-                          scope=mod.SCOPE, sections=(section,)))
+                          scope=scope, sections=(section,)))
     return write_pages(pages, out_dir=out_dir,
                        index_title="排序診斷",
                        index_intro=_diagnosis_index_intro())
