@@ -226,3 +226,60 @@ def test_strata_lists_only_existing_layers_when_all_take_all(spark):
     # ZeroDivisionError，所以權重一律讀 strata。
     assert meta["sample_ratio"] == 0.0
     assert meta["strata"]["take_all"]["weight"] == 1.0
+
+
+# ---- sampling_description（人看得懂的一句話，動態組字）----
+
+
+def test_sampling_description_present(spark):
+    _pdf, meta = draw_diagnosis_sample(_fixture(spark), _params())
+    assert "sampling_description" in meta
+    assert isinstance(meta["sampling_description"], str)
+    assert meta["sampling_description"]
+
+
+def test_sampling_description_says_not_sampled_when_ratio_is_one(spark):
+    # max_queries 遠大於正例 query 數 → sample_ratio == 1.0（有 hash 層但沒吃到）
+    _pdf, meta = draw_diagnosis_sample(
+        _fixture(spark), _params(max_queries=1000)
+    )
+    assert meta["sample_ratio"] == 1.0
+    desc = meta["sampling_description"]
+    assert "未抽樣" in desc
+    assert f"{meta['n_pos_queries_total']:,}" in desc
+
+
+def test_sampling_description_says_no_hash_layer_when_ratio_is_zero_sentinel(spark):
+    # floor 拉高 → 全 take-all，sample_ratio 的 0.0 是「無 hash 層」哨兵值
+    _pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
+    assert meta["sample_ratio"] == 0.0
+    desc = meta["sampling_description"]
+    assert "無 hash-ratio 層" in desc
+    assert "抽了 0%" not in desc
+    assert "0%" not in desc
+
+
+def test_sampling_description_says_stratified_with_actual_query_counts(spark):
+    # 自造 ratio < 1 的情境：沿用既有的 _stratified_fixture(max_queries=11, floor=2)
+    _pdf, meta = draw_diagnosis_sample(
+        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+    )
+    assert 0.0 < meta["sample_ratio"] < 1.0
+    desc = meta["sampling_description"]
+    assert "分層" in desc
+    strata = meta["strata"]
+    assert f"{strata['take_all']['n_queries']:,}" in desc
+    assert f"{strata['hash_ratio']['n_queries']:,}" in desc
+
+
+def test_sampling_description_helper_uses_thousands_separators():
+    from recsys_tfb.diagnosis.metric.sample import _sampling_description
+
+    strata = {
+        "take_all": {"n_queries": 1200, "weight": 1.0},
+        "hash_ratio": {"n_queries": 18800, "weight": 1.85},
+    }
+    desc = _sampling_description(20000, 0.4, strata)
+    assert "1,200" in desc
+    assert "18,800" in desc
+    assert "分層" in desc
