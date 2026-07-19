@@ -100,7 +100,8 @@ def positive_row_contributions(
     y_true: np.ndarray,
     y_score: np.ndarray,
     k: Optional[int] = None,
-) -> tuple[np.ndarray, np.ndarray]:
+    weights: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, ...]:
     """Per-positive-row AP contribution + original-order row indices.
 
     contrib[i] is the within-query cumulative precision of positive row
@@ -109,9 +110,32 @@ def positive_row_contributions(
     :func:`compute_macro_per_item_map` and the diagnosis bootstrap
     (``diagnosis.metric.uncertainty``) — cluster resampling never changes
     within-query ranking, so contributions are computed exactly once.
+
+    ``weights`` (optional) is a **row-aligned, query-level** weight vector of
+    length ``len(groups)``: every row of a query carries that query's weight
+    (e.g. the inverse inclusion probability of a stratified diagnosis sample).
+    Weights never enter the contribution values themselves — a query counted
+    twice has the same internal ranking, hence the same per-row precisions —
+    so this argument only broadcasts the weights onto the returned positive
+    rows. Passing it therefore **widens the return to a 3-tuple**
+    ``(contrib, row_idx, weight_of_positive_row)``; omitting it (or passing
+    ``None``) keeps the historical 2-tuple and the historical code path
+    untouched, which is what every existing caller relies on.
     """
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (len(groups),):
+            raise ValueError(
+                f"weights must be row-aligned with groups: expected shape "
+                f"({len(groups)},), got {weights.shape}"
+            )
+
     if len(groups) == 0:
-        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
+        empty_f = np.array([], dtype=np.float64)
+        empty_i = np.array([], dtype=np.int64)
+        if weights is None:
+            return empty_f, empty_i
+        return empty_f, empty_i, empty_f
 
     sort_idx = np.lexsort((-y_score, groups))
     g_sorted = groups[sort_idx]
@@ -139,8 +163,17 @@ def positive_row_contributions(
         row_idx.append(sort_idx[s:e][pos_mask])
 
     if not contribs:
-        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
-    return np.concatenate(contribs), np.concatenate(row_idx)
+        empty_f = np.array([], dtype=np.float64)
+        empty_i = np.array([], dtype=np.int64)
+        if weights is None:
+            return empty_f, empty_i
+        return empty_f, empty_i, empty_f
+
+    contrib_out = np.concatenate(contribs)
+    row_idx_out = np.concatenate(row_idx)
+    if weights is None:
+        return contrib_out, row_idx_out
+    return contrib_out, row_idx_out, weights[row_idx_out]
 
 
 def macro_from_per_item(
@@ -185,6 +218,7 @@ def compute_macro_per_item_map(
     weight_alpha: float = 0.0,
     min_positives: int = 0,
     shrinkage_k: float = 0.0,
+    weights: Optional[np.ndarray] = None,
 ) -> float:
     """Macro average over items of per-item attributed mAP@k.
 
@@ -209,6 +243,27 @@ def compute_macro_per_item_map(
     ``weight_alpha`` weights items ``∝ n_pos**weight_alpha``. See
     :func:`macro_from_per_item` for the exact formulas.
 
+    ``weights`` (optional) is a **row-aligned, query-level** weight vector —
+    typically the inverse inclusion probability of a stratified diagnosis
+    sample, where unweighted estimates are biased whenever the sampling ratio
+    is below 1. Semantics: giving a query weight ``w`` is defined to be exactly
+    equivalent to that query appearing ``w`` times in the input. Concretely,
+    each item's AP becomes the *weighted* mean over its positive rows, and the
+    per-item ``n_pos`` handed to :func:`macro_from_per_item` becomes the sum of
+    those weights — so ``min_positives`` / ``shrinkage_k`` / ``weight_alpha``
+    all see the effective (weighted) count rather than the raw row count.
+
+    The macro combine across items stays equal-weight: weighting corrects each
+    item's *within-item* estimate, it does not re-weight the items themselves.
+    That is precisely the duplication semantics — replaying a query does not
+    add items to the catalogue. This is also why ``weights`` is not threaded
+    into :func:`macro_from_per_item`: its ``n_pos`` argument already carries
+    the weight, so a second weight channel there would double-count.
+
+    ``weights=None`` (the default) runs the original unweighted code path
+    verbatim — no ``np.ones`` fill-in — so the main metric path, which shares
+    these primitives with the diagnosis layer, stays bit-for-bit unchanged.
+
     Empty input, or no positive rows anywhere, returns ``0.0``. If every
     item is excluded by ``min_positives``, also returns ``0.0``.
 
@@ -217,14 +272,29 @@ def compute_macro_per_item_map(
     :func:`positive_row_contributions`, then a vectorized per-item
     aggregation via ``np.unique`` + ``np.bincount``.
     """
-    contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
-    if len(contrib_all) == 0:
-        return 0.0
+    if weights is None:
+        contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
+        if len(contrib_all) == 0:
+            return 0.0
+        items_all = items[row_idx]
+        _, inv = np.unique(items_all, return_inverse=True)
+        sums = np.bincount(inv, weights=contrib_all)
+        counts = np.bincount(inv)
+    else:
+        contrib_all, row_idx, w_pos = positive_row_contributions(
+            groups, y_true, y_score, k, weights
+        )
+        if len(contrib_all) == 0:
+            return 0.0
+        items_all = items[row_idx]
+        _, inv = np.unique(items_all, return_inverse=True)
+        sums = np.bincount(inv, weights=contrib_all * w_pos)
+        # Weighted denominator: the effective number of positive rows behind
+        # each item, NOT len(rows). Using the raw count here would divide
+        # weighted mass by unweighted support and silently rescale every
+        # per-item AP.
+        counts = np.bincount(inv, weights=w_pos)
 
-    items_all = items[row_idx]
-    _, inv = np.unique(items_all, return_inverse=True)
-    sums = np.bincount(inv, weights=contrib_all)
-    counts = np.bincount(inv)
     per_item = sums / counts
     macro = macro_from_per_item(
         per_item, counts, weight_alpha, min_positives, shrinkage_k
