@@ -2,13 +2,14 @@
 
 import json
 import math
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.offline
+
+from recsys_tfb.report.types import ReportSection  # noqa: F401
 
 
 def _fmt_no_sci(x: float) -> str:
@@ -53,18 +54,6 @@ def _render_table(table: pd.DataFrame) -> str:
     because ``DataFrame.map`` does not exist on pandas 1.5.x.
     """
     return table.applymap(_fmt_cell).to_html(index=True)
-
-
-@dataclass
-class ReportSection:
-    """A section in the evaluation report."""
-
-    title: str
-    description: str
-    figures: list[go.Figure] = field(default_factory=list)
-    tables: list[pd.DataFrame] = field(default_factory=list)
-    table_titles: list[str] = field(default_factory=list)
-    collapsible: bool = False
 
 
 def generate_html_report(
