@@ -372,6 +372,28 @@ def test_dtype_mismatch_zero_hit_override_is_reported_not_silent():
 # 三條 return 路徑的 key set 必須一致，否則 render 會在最少被跑到的路徑上炸。
 # --------------------------------------------------------------------------
 
+def test_declared_items_missing_from_sample_are_reported():
+    """宣告了卻沒被抽到的 item 不能無聲消失。
+
+    offset 矩陣只枚舉觀測到的 (context, item) 組合，所以這種 item 會整列不見。
+    報表上「少一列」與「這個 item 沒有偏移」長得一模一樣，而讀者會把沉默讀成
+    沒問題——跟零命中的 override key 是同一種病。
+    """
+    params = {**PARAMS, "schema": {"categorical_values": {
+        "prod_name": ["ccard_ins", "fund_bond", "never_sampled"]}}}
+    out = compute((_sample(), {}), params)
+
+    assert out["items"] == ["ccard_ins", "fund_bond"]
+    assert out["items_declared_not_observed"] == ["never_sampled"]
+    assert any("never_sampled" in n for n in out["notes"]), out["notes"]
+
+    # 沒宣告 categorical_values 時差集恆為空，且**不該**為此發 note——那是正常
+    # 情形，為正常情形發 note 會讓 notes 變成雜訊、真正的觀測被淹掉。
+    plain = compute((_sample(), {}), PARAMS)
+    assert plain["items_declared_not_observed"] == []
+    assert not any("categorical_values" in n for n in plain["notes"])
+
+
 def test_all_return_paths_share_the_same_key_set():
     """停用／空樣本／完整三條路徑的頂層 key set 必須完全相同。
 

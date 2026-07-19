@@ -363,6 +363,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "metric_params": mp,
         "context_columns": [],
         "items": [],
+        "items_declared_not_observed": [],
         "offset_spread": {},
         "query_offset_spread": {},
         "offset_matrix": {},
@@ -421,6 +422,29 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         for g, sub in offset_df.groupby("group")
     }
     out["items"] = offset_meta["items"]
+
+    # offset 矩陣只枚舉觀測到的 (context, item)，所以「config 宣告了、但抽樣裡
+    # 一次都沒出現」的 item 會整列消失。而報表上「少一列」與「該 item 沒有
+    # 偏移」長得一模一樣——沉默會被讀成沒問題，跟零命中的 override key 是同一
+    # 種病。差集非空時明說。categorical_values 沒宣告 item 清單時差集恆為空，
+    # 那是正常情形，不發 note。
+    declared_items = [
+        str(i)
+        for i in ((schema.get("categorical_values", {}) or {}).get(item_col, []) or [])
+    ]
+    if declared_items:
+        observed_items = set(out["items"])
+        out["items_declared_not_observed"] = [
+            i for i in declared_items if i not in observed_items
+        ]
+    if out["items_declared_not_observed"]:
+        out["notes"].append(
+            f"schema.categorical_values[{item_col!r}] 宣告了 "
+            f"{len(declared_items)} 個 item，本次診斷抽樣中出現 "
+            f"{len(set(out['items']))} 個；未出現的："
+            f"{out['items_declared_not_observed']}。這些 item 不在 "
+            "offset_matrix、offset_spread 與 per_item 之中。"
+        )
 
     groups = pd.factorize(_query_key(sample_pdf, query_cols))[0]
     clusters = _query_key(sample_pdf, entity_cols)
