@@ -90,6 +90,84 @@ logger = logging.getLogger(__name__)
 #: 唯一可用的分數欄。見模組 docstring 修正 1——不設 fallback 是刻意的。
 SCORE_COL = "score_uncalibrated"
 
+#: context 欄為 NULL 的 group 在報表上的標籤。**只用於顯示**——offset 查表的
+#: key 仍走 ``str(value)``（NaN → ``"nan"``），那是 dataset pipeline 實際組 key
+#: 的方式，改了會對不上使用者的 override。
+NULL_GROUP_LABEL = "<NULL>"
+
+#: 兩個 spread 視角的數值對帳容差。純浮點雜訊防護，不是把連續量分類的門檻。
+_DIVERGENCE_EPS = 1e-12
+
+
+def _ctx_label(value: Any) -> str:
+    """context 值 → 顯示標籤。NULL 用明確字串，不讓它印成 ``'nan'``。"""
+    try:
+        if pd.isna(value):
+            return NULL_GROUP_LABEL
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
+def _weighted_quantile(
+    values: np.ndarray, weights: np.ndarray, q: float,
+) -> float:
+    """inverse-CDF（不插值）加權分位數：最小的 v 使累積權重 ≥ q × 總權重。
+
+    為什麼要加權：``query_offset_spread`` 描述的是**母體**裡每個 query 的偏移
+    範圍，而診斷抽樣是分層的——不吃 ``inclusion_weight`` 的話，被降抽那層的
+    query 會被系統性低估，這個號稱「真正抵達排序的偏移」講的就只是樣本而不是
+    母體。同一份權重也餵給 delta／CI／n_pos_effective，三者必須一致。
+
+    不插值是刻意的：插值會產生一個資料裡不存在的 spread 值，而這裡的每個值都
+    對應「某個 query 實際出現的偏移範圍」，捏造中間值沒有意義。
+    """
+    if len(values) == 0:
+        return 0.0
+    order = np.argsort(values, kind="stable")
+    v = values[order]
+    w = weights[order]
+    cw = np.cumsum(w)
+    total = float(cw[-1])
+    if total <= 0.0:
+        return float(v[-1])
+    idx = int(np.searchsorted(cw, q * total, side="left"))
+    return float(v[min(idx, len(v) - 1)])
+
+
+#: 每個非顯然欄位一句話定義，跟著 JSON 走。理由：讀者拿到 JSON 時無法從欄名
+#: 判斷 n_pos_raw 與 n_pos_effective 哪個是加權的、query_offset_spread 的分位數
+#: 是不是插值出來的——那些只寫在原始碼註解裡等於沒寫。純定義，不含判讀。
+FIELD_NOTES: dict[str, str] = {
+    "offset_spread_by_context": (
+        "每個 context group 內 max − min 的 offset 範圍。純 config 算術、零估計"
+        "誤差。只有當 context 欄在每個 query 內為常數（entity 級屬性）時，它才"
+        "等於單一 query 內實際出現的偏移範圍。"
+    ),
+    "query_offset_spread": (
+        "在實際樣本上逐 query 算 max − min 的分布，依 inclusion_weight 加權"
+        "（與 delta／CI／n_pos_effective 同一組權重）。分位數為 inverse-CDF "
+        "定義、不插值。帶抽樣誤差。"
+    ),
+    "n_queries_multi_candidate": (
+        "候選 item 數 ≥ 2 的 query 數。單候選 query 的 offset 範圍結構性為 0"
+        "（沒有第二個 item 可比），會把 query_offset_spread 的分位數往 0 拉。"
+    ),
+    "n_pos_raw": "該 item 的正例列數，未加權。",
+    "n_pos_effective": (
+        "該 item 的正例列 inclusion_weight 之和。mAP 與 min_positives／"
+        "shrinkage_k／weight_alpha 吃的是這個加權計數，不是 n_pos_raw。"
+    ),
+    "delta": "corrected_map − baseline_map（把理論 offset 扣掉之後的變化量）。",
+    "delta_ci_low": "delta 的 2.5 百分位（分層配對 cluster bootstrap）。",
+    "delta_ci_high": "delta 的 97.5 百分位（分層配對 cluster bootstrap）。",
+    "offset_centered": "offset 減去該 context group 內的中位數。呈現用。",
+    "unmatched_override_keys": "config 宣告了、但這批樣本一次都沒查到的 key。",
+    "items_declared_not_observed": (
+        "schema.categorical_values 宣告了、但這批樣本裡沒出現的 item。"
+    ),
+}
+
 
 def _key_from_values(keys: list[str], values: dict[str, Any]) -> str:
     return "|".join(str(values[k]) for k in keys)
@@ -241,8 +319,17 @@ def build_offset_frame(
     )
     # 單一 context 欄時傳純量而非長度 1 的 list：pandas 對後者發 FutureWarning
     # （未來版本會改回傳長度 1 的 tuple）。下面統一把 ctx 正規化成 tuple。
+    #
+    # dropna=False 是**必要**的，不是保險：pandas 預設會把 NULL group 整組丟掉。
+    # Spark 的整數欄只要含任一 NULL，toPandas() 之後必然是 float64 帶 NaN
+    # ——那一整群客戶的 offset 會從矩陣裡消失，而 row_offsets 照樣把它算進
+    # delta 與 query_offset_spread。讀者於是看到一個矩陣裡沒有任何 group 能
+    # 解釋的偏移量。與 A2 的 dtype 坑同源。
     grouped = (
-        observed.groupby(a_cols[0] if len(a_cols) == 1 else a_cols, sort=True)
+        observed.groupby(
+            a_cols[0] if len(a_cols) == 1 else a_cols,
+            sort=True, dropna=False,
+        )
         if a_cols else [((), observed)]
     )
 
@@ -261,7 +348,10 @@ def build_offset_frame(
             )
         offsets = list(item_offsets.values())
         median = float(np.median(offsets)) if offsets else 0.0
-        group_label = "ALL" if not a_cols else " | ".join(str(v) for v in ctx_tuple)
+        group_label = (
+            "ALL" if not a_cols
+            else " | ".join(_ctx_label(v) for v in ctx_tuple)
+        )
         for item, off in item_offsets.items():
             rows.append({
                 "group": group_label,
@@ -364,7 +454,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "context_columns": [],
         "items": [],
         "items_declared_not_observed": [],
-        "offset_spread": {},
+        "offset_spread_by_context": {},
         "query_offset_spread": {},
         "offset_matrix": {},
         "offset_centered": {},
@@ -378,6 +468,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "per_item": [],
         "sample": {},
         "sample_meta": dict(sample_meta or {}),
+        "field_notes": FIELD_NOTES,
         "notes": [],
     }
     if not out["enabled"]:
@@ -407,7 +498,10 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     )
     # 群內 spread：每個 context group 自己算 max − min。這是「config 說了什麼」
     # 那一面；「真正抵達排序的是什麼」由下面的 query_offset_spread 回答。
-    out["offset_spread"] = {
+    # 兩個名字都帶標記（by_context／query_）是刻意的：無標記的短名字會被讀成
+    # 主指標，而讀者真正要問的「偏移對排序有多大影響」只有 query 內的相對差
+    # 能回答——把那個可能是錯答案的量取名叫 offset_spread 是在誤導。
+    out["offset_spread_by_context"] = {
         str(g): float(sub["offset"].max() - sub["offset"].min())
         for g, sub in offset_df.groupby("group")
     }
@@ -466,29 +560,92 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
     # 逐 query 的實際 offset 範圍。這一面對 entity 級與 item 級 context 都成立
     # （見模組 docstring「兩個 spread」）。只給分位數，不設門檻、不給布林。
-    q_spread = (
-        pd.Series(offs).groupby(groups).agg(lambda s: float(s.max() - s.min()))
-    ).to_numpy(dtype=np.float64)
+    ht_weights = (
+        sample_pdf["inclusion_weight"].to_numpy(dtype=np.float64)
+        if "inclusion_weight" in sample_pdf.columns
+        else None
+    )
+    q_frame = pd.DataFrame({
+        "g": groups,
+        "off": offs,
+        "w": (ht_weights if ht_weights is not None
+              else np.ones(len(sample_pdf), dtype=np.float64)),
+        "item": items,
+    })
+    q_agg = q_frame.groupby("g").agg(
+        spread=("off", lambda s: float(s.max() - s.min())),
+        # 權重是 query 級屬性（同一 query 的每一列同值），取 max 只是挑出來。
+        weight=("w", "max"),
+        n_items=("item", "nunique"),
+    )
+    q_spread = q_agg["spread"].to_numpy(dtype=np.float64)
+    q_weight = q_agg["weight"].to_numpy(dtype=np.float64)
     out["query_offset_spread"] = {
-        "mean": float(np.mean(q_spread)),
-        "p50": float(np.percentile(q_spread, 50)),
-        "p90": float(np.percentile(q_spread, 90)),
+        "mean": float(np.average(q_spread, weights=q_weight)),
+        "p50": _weighted_quantile(q_spread, q_weight, 0.50),
+        "p90": _weighted_quantile(q_spread, q_weight, 0.90),
         "max": float(np.max(q_spread)),
         "n_queries": int(len(q_spread)),
+        # 單候選 query 的 spread 結構性為 0（沒有第二個 item 可比），會把分位數
+        # 往 0 拉而讀者看不出來。給出多候選 query 數讓他自己判斷稀釋程度。
+        "n_queries_multi_candidate": int((q_agg["n_items"] > 1).sum()),
     }
 
-    # context 欄在 query 內非常數 ＝ 兩個 spread 會分歧，讀者必須知道該看哪個。
+    # ---- 兩個視角的分歧提示 ----
+    # 主觸發是**數值對帳**：逐 query 的最大範圍若超過任何 context group 內的
+    # 範圍，兩個視角就是不一致的，報表必須自己講出來。刻意不依賴任何結構推斷
+    # ——結構檢查得先猜對「這次會不會分歧」，而它猜錯過：context 欄含 NULL 時
+    # nunique() 預設吃掉 NaN，於是分歧最大的那一次（by_context 全 0 vs
+    # p50=4.605）正好不觸發。數值比較沒有這個破口。
+    max_ctx = (
+        max(out["offset_spread_by_context"].values())
+        if out["offset_spread_by_context"] else 0.0
+    )
+    if out["query_offset_spread"]["max"] > max_ctx + _DIVERGENCE_EPS:
+        out["notes"].append(
+            f"兩個 spread 視角不一致：逐 query 的最大 offset 範圍 "
+            f"{out['query_offset_spread']['max']:.6g} 大於任一 context group 內"
+            f"的範圍（最大 {max_ctx:.6g}）。代表同一個 query 內跨越了多個 "
+            f"context group，group 間的 offset 差確實會改動名次——這部分不會出現"
+            f"在 offset_spread_by_context 裡。"
+        )
+
+    # 第二觸發（保留）：context 欄在 query 內非常數。它先於數值比較解釋「為什麼」
+    # 會分歧，點得出是哪一欄。nunique(dropna=False)：預設會吃掉 NaN，讓
+    # {hi, NULL} 這種真正非常數的 query 被算成 nunique==1。
     if context_cols:
         varying = [
             c for c in context_cols
-            if int(sample_pdf.groupby(groups)[c].nunique().max()) > 1
+            if int(sample_pdf.groupby(groups)[c].nunique(dropna=False).max()) > 1
         ]
         if varying:
             out["notes"].append(
                 f"context 欄 {varying} 在部分 query 內非常數（item 級屬性）："
-                "offset_spread 是同一 context group 內的 max − min，此時它不等於"
-                "單一 query 內實際出現的 offset 範圍；逐 query 的實際範圍見 "
-                "query_offset_spread。"
+                "offset_spread_by_context 是同一 context group 內的 max − min，"
+                "此時它不等於單一 query 內實際出現的 offset 範圍；逐 query 的"
+                "實際範圍見 query_offset_spread。"
+            )
+
+    # label 不在 key 清單裡時，該家族的 override 一條都不會被查（正負例同比例
+    # 下採樣不動 log-odds，數學上正確）。但這樣「config 真的沒影響」與「我漏寫
+    # label」在輸出上完全一樣——都是全 0、無 note。這裡不列舉 key（會誤報成
+    # 零命中），只陳述事實。
+    label_col_name = schema["label"]
+    for cfg_path, keys_path, declared in (
+        ("dataset.sample_ratio_overrides", "dataset.sample_group_keys",
+         (parameters.get("dataset", {}) or {}).get("sample_ratio_overrides", {}) or {}),
+        ("training.sample_weights", "training.sample_weight_keys",
+         (parameters.get("training", {}) or {}).get("sample_weights", {}) or {}),
+    ):
+        keys_list = list(
+            (parameters.get(keys_path.split(".")[0], {}) or {})
+            .get(keys_path.split(".")[1], []) or []
+        )
+        if declared and label_col_name not in keys_list:
+            out["notes"].append(
+                f"{label_col_name!r} 不在 {keys_path} 中：該設定對正負例同等"
+                f"作用、不改變 log-odds，因此 {cfg_path} 的 {len(declared)} 條"
+                f"設定未納入 offset 計算。"
             )
 
     out["unmatched_override_keys"] = unmatched_override_keys(
@@ -508,14 +665,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             "'3.0'）、或 key 有錯字。零命中的 key 對 offset 沒有任何作用。"
         )
 
-    # Horvitz–Thompson 修正：點估計與 CI 必須用同一組權重，否則 CI 可能不含點
-    # 估計。缺欄（未分層抽樣）時走 weights=None 的原始未加權路徑。
-    ht_weights = (
-        sample_pdf["inclusion_weight"].to_numpy(dtype=np.float64)
-        if "inclusion_weight" in sample_pdf.columns
-        else None
-    )
-
+    # ht_weights 在 query_offset_spread 之前就取好了（同一組權重要餵給所有
+    # 估計量：分位數、baseline／corrected、CI、n_pos_effective）。缺欄
+    # （未分層抽樣）時 ht_weights is None，走 weights=None 的原始未加權路徑。
     baseline = float(compute_macro_per_item_map(
         groups, items, y, z, weights=ht_weights, **mp
     ))

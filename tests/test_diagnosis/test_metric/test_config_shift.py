@@ -66,8 +66,8 @@ def test_group_internal_spread_not_global():
               "sample_ratio_overrides": {"mass|ccard_ins|0": 0.001,
                                          "mass|fund_bond|0": 0.001}}}
     out = compute((_sample(), {"n_queries": 40}), params)
-    assert out["offset_spread"]["mass"] == pytest.approx(0.0, abs=1e-12)
-    assert out["offset_spread"]["affluent"] == pytest.approx(0.0, abs=1e-12)
+    assert out["offset_spread_by_context"]["mass"] == pytest.approx(0.0, abs=1e-12)
+    assert out["offset_spread_by_context"]["affluent"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_delta_is_invariant_to_adding_a_constant_per_segment():
@@ -259,30 +259,51 @@ PARAMS_ITEM_LEVEL_CONTEXT = {
     "dataset": {
         "sample_group_keys": ["prod_tier", "label"],
         "sample_ratio": 1.0,
-        # 兩層各自內部比例一致 → 每個 context group 內 offset 均勻 → 群內
-        # spread 全為 0，但 hi 與 lo 之間差 ln(1/0.1)，而**同一個 query 同時
-        # 含有兩層的 item**，所以這個差真的會改動名次。
-        "sample_ratio_overrides": {"hi|0": 0.1, "lo|0": 1.0},
+        # 三層各自內部比例一致 → 每個 context group 內 offset 均勻 → 群內
+        # spread 全為 0，但層與層之間有差，而**同一個 query 同時含有多層的
+        # item**，所以這個差真的會改動名次。
+        # offset：hi = ln(1/0.1) = ln 10、mid = ln(1/0.5) = ln 2、lo = 0。
+        "sample_ratio_overrides": {"hi|0": 0.1, "mid|0": 0.5, "lo|0": 1.0},
     },
     "training": {"sample_weight_keys": [], "sample_weights": {}},
     "evaluation": {"diagnosis": {"ci": {"enabled": False},
                                  "config_shift": {"enabled": True}}},
 }
 
+_TIER_OF = {"h1": "hi", "m1": "mid", "l1": "lo", "l2": "lo"}
 
-def _sample_with_item_level_context():
-    """context 欄 ``prod_tier`` 是 **item 級**屬性：每個 query 內都有兩種值。"""
+
+def _sample_with_item_level_context(hi_query_weight=1.0):
+    """context 欄 ``prod_tier`` 是 **item 級**屬性，且**不同 query 的 offset
+    範圍不同**。
+
+    後者是刻意的：若每個 query 的候選組合都一樣，逐 query 的 spread 會全部相等
+    而**恰好等於全域 max − min**，「逐 query」與「全域」兩種實作在這份資料上位元
+    相同，斷言在結構上不可能紅（本 repo 反覆踩到的假綠形態）。
+
+    三種 query 各 20 個，spread 三個不同的值：
+      (l1, l2) → 同屬 lo，spread 0
+      (l1, m1) → lo vs mid，spread ln 2  ≈ 0.6931
+      (l1, h1) → lo vs hi， spread ln 10 ≈ 2.3026
+    ``hi_query_weight`` 只給第三種 query，用來驗分位數有沒有吃 inclusion_weight。
+    """
     rng = np.random.default_rng(0)
+    plan = [(("l1", "l2"), 1.0), (("l1", "m1"), 1.0),
+            (("l1", "h1"), hi_query_weight)]
     rows = []
-    for c in range(40):
-        for item, tier in (("a", "hi"), ("b", "hi"), ("c", "lo"), ("d", "lo")):
-            rows.append({
-                "snap_date": "2026-01-31", "cust_id": f"c{c}",
-                "prod_name": item, "prod_tier": tier,
-                "label": int(item == "c"),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
-            })
+    qid = 0
+    for candidates, weight in plan:
+        for _ in range(20):
+            qid += 1
+            for k, item in enumerate(candidates):
+                rows.append({
+                    "snap_date": "2026-01-31", "cust_id": f"c{qid}",
+                    "prod_name": item, "prod_tier": _TIER_OF[item],
+                    "label": int(k == 1),
+                    "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                    "score": 0.5,
+                    "inclusion_weight": weight,
+                })
     return pd.DataFrame(rows)
 
 
@@ -298,15 +319,83 @@ def test_item_level_context_offset_spread_underreports_and_is_flagged():
                   PARAMS_ITEM_LEVEL_CONTEXT)
 
     # config 視角：每個 group 內部完全均勻，看不出任何偏移。
-    assert out["offset_spread"] == {"hi": pytest.approx(0.0, abs=1e-12),
-                                    "lo": pytest.approx(0.0, abs=1e-12)}
-    # 實際抵達排序的視角：每個 query 內都橫跨兩層，範圍 = ln(1/0.1) = ln 10。
-    assert out["query_offset_spread"]["p50"] == pytest.approx(np.log(10.0),
-                                                              abs=1e-9)
-    assert out["query_offset_spread"]["max"] > 0
+    assert out["offset_spread_by_context"] == {
+        "hi": pytest.approx(0.0, abs=1e-12),
+        "mid": pytest.approx(0.0, abs=1e-12),
+        "lo": pytest.approx(0.0, abs=1e-12),
+    }
     # 而且 Δ 明確非 0——「處處無偏移」是錯的。
     assert abs(out["delta"]) > 1e-6
     assert any("query_offset_spread" in n for n in out["notes"]), out["notes"]
+
+
+def test_query_offset_spread_is_per_query_not_global():
+    """分位數必須來自逐 query 的分布，不是一個全域 max − min。
+
+    全域實作會讓三個分位數塌成同一個值（全域範圍 = ln 10）。這裡的資料刻意讓
+    三種 query 有三個不同的 spread，分位數才有分辨力。
+    """
+    out = compute((_sample_with_item_level_context(), {}),
+                  PARAMS_ITEM_LEVEL_CONTEXT)
+    q = out["query_offset_spread"]
+
+    assert q["max"] == pytest.approx(np.log(10.0), abs=1e-9)
+    assert q["p50"] == pytest.approx(np.log(2.0), abs=1e-9)
+    assert q["p90"] == pytest.approx(np.log(10.0), abs=1e-9)
+    # 全域實作下三者相等 —— 這兩條就是分辨力本身。
+    assert q["p50"] != pytest.approx(q["max"], abs=1e-9)
+    assert q["p90"] > q["p50"]
+    assert q["n_queries"] == 60
+    assert q["n_queries_multi_candidate"] == 60
+
+
+def test_query_offset_spread_respects_inclusion_weight():
+    """分位數要吃 inclusion_weight，否則講的是樣本而不是母體。
+
+    delta／CI／n_pos_effective 全部走 HT 加權，分位數不走的話，分層抽樣一啟用
+    （``max_queries`` 觸發時就會）這個號稱「真正抵達排序的偏移」就跟其他數字
+    描述的不是同一個母體。
+    """
+    plain = compute((_sample_with_item_level_context(1.0), {}),
+                    PARAMS_ITEM_LEVEL_CONTEXT)
+    upweighted = compute((_sample_with_item_level_context(20.0), {}),
+                         PARAMS_ITEM_LEVEL_CONTEXT)
+
+    # 把 spread 最大的那 20 個 query 的權重放大 20 倍 → 中位數必須往上移。
+    assert plain["query_offset_spread"]["p50"] == pytest.approx(np.log(2.0),
+                                                                abs=1e-9)
+    assert upweighted["query_offset_spread"]["p50"] == pytest.approx(
+        np.log(10.0), abs=1e-9)
+    assert (upweighted["query_offset_spread"]["mean"]
+            > plain["query_offset_spread"]["mean"])
+
+
+def test_offset_matrix_has_no_cartesian_product_cells():
+    """矩陣只列實際觀測到的 (context, item)，不補不存在的格子。
+
+    笛卡兒積會虛報「hi 層 × 只存在於 lo 層的產品」這種不存在的偏移，而且把它
+    算進該 group 的中位數，污染 offset_centered。
+    """
+    out = compute((_sample_with_item_level_context(), {}),
+                  PARAMS_ITEM_LEVEL_CONTEXT)
+    assert set(out["offset_matrix"]["hi"]) == {"h1"}
+    assert set(out["offset_matrix"]["mid"]) == {"m1"}
+    assert set(out["offset_matrix"]["lo"]) == {"l1", "l2"}
+
+
+def test_divergence_between_two_spread_views_is_reported_numerically():
+    """兩個視角不一致時要靠**數值對帳**講出來，不是靠結構推斷。
+
+    結構檢查（context 欄在 query 內是否非常數）得先猜對「這次會不會分歧」，
+    而它猜錯過：context 欄含 NULL 時 ``nunique()`` 預設吃掉 NaN，於是分歧最大
+    的那一次正好不觸發。數值比較沒有這個破口。
+    """
+    out = compute((_sample_with_item_level_context(), {}),
+                  PARAMS_ITEM_LEVEL_CONTEXT)
+    assert max(out["offset_spread_by_context"].values()) == pytest.approx(
+        0.0, abs=1e-12)
+    assert out["query_offset_spread"]["max"] > 0
+    assert any("兩個 spread 視角不一致" in n for n in out["notes"]), out["notes"]
 
 
 # --------------------------------------------------------------------------
@@ -356,11 +445,11 @@ def test_dtype_mismatch_zero_hit_override_is_reported_not_silent():
     miss = compute((_sample_with_int_context("float64"), {}), PARAMS_INT_CONTEXT)
 
     # 命中的那一側：override 生效，沒有零命中回報。
-    assert hit["offset_spread"]["3"] == pytest.approx(np.log(1 / 0.2), abs=1e-9)
+    assert hit["offset_spread_by_context"]["3"] == pytest.approx(np.log(1 / 0.2), abs=1e-9)
     assert hit["unmatched_override_keys"] == []
 
     # 未命中的那一側：offset 歸零，但**必須**留下痕跡。
-    assert miss["offset_spread"]["3.0"] == pytest.approx(0.0, abs=1e-12)
+    assert miss["offset_spread_by_context"]["3.0"] == pytest.approx(0.0, abs=1e-12)
     assert miss["delta"] == pytest.approx(0.0, abs=1e-12)
     assert miss["unmatched_override_keys"] == [
         {"config": "dataset.sample_ratio_overrides", "key": "3|a|0"}
@@ -371,6 +460,63 @@ def test_dtype_mismatch_zero_hit_override_is_reported_not_silent():
 # --------------------------------------------------------------------------
 # 三條 return 路徑的 key set 必須一致，否則 render 會在最少被跑到的路徑上炸。
 # --------------------------------------------------------------------------
+
+PARAMS_NULL_CONTEXT = {
+    "schema": {},
+    "dataset": {
+        "sample_group_keys": ["prod_tier", "label"],
+        "sample_ratio": 1.0,
+        "sample_ratio_overrides": {"hi|0": 0.1, "nan|0": 0.01},
+    },
+    "training": {"sample_weight_keys": [], "sample_weights": {}},
+    "evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                 "config_shift": {"enabled": True}}},
+}
+
+
+def _sample_with_null_context():
+    """context 欄含 NULL，而且在 query 內非常數。
+
+    Spark 的整數欄只要含任一 NULL，``toPandas()`` 之後必然是 float64 帶 NaN
+    ——這不是假想情境，跟 dtype 那個坑同源。offset 查表的 key 走 ``str(nan)``
+    ＝ ``"nan"``（dataset pipeline 實際組 key 的方式），所以 override 是命中的，
+    零命中儀器不會報，只有 NULL group 本身會從矩陣裡消失。
+    """
+    rng = np.random.default_rng(0)
+    rows = []
+    for c in range(40):
+        for item, tier in (("a", "hi"), ("b", float("nan"))):
+            rows.append({
+                "snap_date": "2026-01-31", "cust_id": f"c{c}",
+                "prod_name": item, "prod_tier": tier,
+                "label": int(item == "a"),
+                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                "score": 0.5,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_null_context_group_survives_and_is_visible():
+    """NULL context group 不能從 offset 矩陣裡消失。
+
+    pandas 的 ``groupby`` / ``nunique`` 預設 ``dropna=True`` 會把整個 NULL group
+    丟掉，而 ``row_offsets`` 照樣把那些列的 offset 算進 delta 與
+    query_offset_spread。結果：讀者看到一個非零的偏移量，卻在矩陣裡找不到任何
+    group 能解釋它——而且零命中儀器不會報（key 其實命中了）。
+    """
+    out = compute((_sample_with_null_context(), {}), PARAMS_NULL_CONTEXT)
+
+    # NULL group 必須在，且用明確標籤而不是印成 'nan'。
+    assert set(out["offset_matrix"]) == {"hi", "<NULL>"}
+    assert out["offset_matrix"]["<NULL>"]["b"] == pytest.approx(
+        np.log(100.0), abs=1e-9)
+    assert out["offset_matrix"]["hi"]["a"] == pytest.approx(
+        np.log(10.0), abs=1e-9)
+    # 零命中儀器在這裡**不**會報（key 命中了），所以它擋不住這個洞。
+    assert out["unmatched_override_keys"] == []
+    # 而 query 內橫跨 hi 與 NULL 兩群，結構檢查必須認得 NaN 也是一種值。
+    assert any("prod_tier" in n for n in out["notes"]), out["notes"]
+
 
 def test_declared_items_missing_from_sample_are_reported():
     """宣告了卻沒被抽到的 item 不能無聲消失。
@@ -392,6 +538,75 @@ def test_declared_items_missing_from_sample_are_reported():
     plain = compute((_sample(), {}), PARAMS)
     assert plain["items_declared_not_observed"] == []
     assert not any("categorical_values" in n for n in plain["notes"])
+
+
+def test_per_item_reports_both_raw_and_effective_positive_counts():
+    """n_pos_effective 必須是 HT 加權計數，不能退化成原始列數。
+
+    mAP 與 min_positives／shrinkage_k／weight_alpha 吃的是加權計數
+    （``metrics.py`` 的 weights 路徑）。只報原始列數，讀者就會拿一個母體去篩
+    另一個母體算出來的數字——與先前修掉的「點估計與 CI 估不同的量」同一種病。
+    """
+    out = compute((_sample_with_two_tier_inclusion_weight(), {}), PARAMS)
+    by_item = {r["item"]: r for r in out["per_item"]}
+    fund = by_item["fund_bond"]
+
+    # fund_bond 在 40 個 query 各有 1 個正例列；一半權重 1.0、一半 4.0。
+    assert fund["n_pos_raw"] == 40
+    assert fund["n_pos_effective"] == pytest.approx(20 * 1.0 + 20 * 4.0)
+    assert fund["n_pos_effective"] != pytest.approx(float(fund["n_pos_raw"]))
+    assert out["sample"]["n_positive_rows_effective"] == pytest.approx(100.0)
+
+
+def _sample_with_unbounded_scores():
+    """lambdarank 那類 pairwise/listwise objective 的原始分數：無界、不在 (0,1)。"""
+    pdf = _sample()
+    pdf["score_uncalibrated"] = np.linspace(-3.5, 5.25, len(pdf))
+    return pdf
+
+
+def test_non_probabilistic_scores_flag_the_objective_assumption():
+    """分數不在 (0,1) 時要點名 Δ 的推導前提可能不成立。
+
+    offset = ln(r_pos/r_neg) 是 **log-odds 上**的加性常數，只對 pointwise 機率型
+    objective 成立。``training.objective`` 允許 lambdarank，此時 score 是無界原始
+    分數，相減沒有理論基礎。這裡刻意**不** fail-loud——offset 矩陣與兩個 spread
+    是純 config 算術、與 objective 無關，砍掉整項診斷是過度反應。
+    """
+    out = compute((_sample_with_unbounded_scores(), {}), PARAMS)
+
+    assert any("pointwise" in n for n in out["notes"]), out["notes"]
+    # 診斷本身仍然跑完，config 算術那半仍有值。
+    assert out["delta"] is not None
+    assert out["offset_spread_by_context"]["mass"] == pytest.approx(
+        np.log(2.0), abs=1e-9)
+
+
+def test_ratio_overrides_ignored_when_label_absent_from_group_keys():
+    """label 不在 group keys 時，override 一條都不會生效——這件事要說出來。
+
+    數學上正確（正負例同比例下採樣不改變 log-odds），但輸出上「config 真的沒
+    影響」與「我漏寫 label」完全一樣：都是全 0、無 note。這裡不列舉 key（那會
+    誤報成零命中），只陳述事實。
+    """
+    params = {**PARAMS, "dataset": {
+        "sample_group_keys": ["cust_segment_typ", "prod_name"],  # 漏了 label
+        "sample_ratio": 1.0,
+        "sample_ratio_overrides": {"mass|ccard_ins|0": 0.5, "mass|fund_bond|0": 0.25},
+    }}
+    out = compute((_sample(), {}), params)
+
+    assert out["delta"] == pytest.approx(0.0, abs=1e-12)
+    assert out["unmatched_override_keys"] == []   # 不誤報成零命中
+    assert any("sample_group_keys" in n for n in out["notes"]), out["notes"]
+
+
+def test_field_notes_document_the_non_obvious_fields():
+    """JSON 要自我說明：哪個計數是加權的、分位數有沒有插值。"""
+    out = compute((_sample(), {"n_queries": 40}), PARAMS)
+    for key in ("offset_spread_by_context", "query_offset_spread",
+                "n_pos_raw", "n_pos_effective"):
+        assert key in out["field_notes"] and out["field_notes"][key]
 
 
 def test_all_return_paths_share_the_same_key_set():
