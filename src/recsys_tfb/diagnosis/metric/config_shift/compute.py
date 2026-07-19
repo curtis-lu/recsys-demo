@@ -303,6 +303,14 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     item_col = schema["item"]
     label_col = schema["label"]
 
+    # 空樣本必須在 build_offset_frame **之前**擋掉：item 清單是從資料推的，
+    # 空資料 → 零個 context × 零個 item → offset_df 是一個「連欄位都沒有」的
+    # 空 DataFrame，下面的 groupby("group") 會 KeyError。這是良性退化輸入
+    # （抽樣沒抽到東西），不是壞輸入，不該炸。
+    if len(sample_pdf) == 0:
+        out["notes"].append("診斷抽樣為空——offset 矩陣與 Δ 均未計算。")
+        return out
+
     offset_df, offset_meta = build_offset_frame(sample_pdf, parameters, schema)
     # 群內 spread（見模組 docstring 修正 2）：每個客群自己算 max − min。跨客群
     # 的 offset 差不會落在同一個 query 裡，所以全域 max − min 不是排序影響的量。
@@ -321,10 +329,6 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         for g, sub in offset_df.groupby("group")
     }
     out["items"] = offset_meta["items"]
-
-    if len(sample_pdf) == 0:
-        out["notes"].append("診斷抽樣為空——Δ 未計算。")
-        return out
 
     groups = pd.factorize(_query_key(sample_pdf, query_cols))[0]
     clusters = _query_key(sample_pdf, entity_cols)
