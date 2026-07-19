@@ -84,3 +84,11 @@
 - **根因**：`generate_html_report`（`evaluation/report.py:85,118`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
 - **規則**：驗證「某個功能的字樣是否清乾淨」一律 **grep 產生 HTML 的原始碼**（`src/recsys_tfb/evaluation/`、`src/recsys_tfb/pipelines/evaluation/`），不要 grep 產物 HTML。
 - **驗證方式**：命中時用 `grep -o ".\{100\}<字>.\{100\}" report.html` 看上下文——落在 minified JS 裡（無空白、大量單字母變數）即為假陽性。決定性檢查是 `grep -rn "<字>" src/recsys_tfb/evaluation/` 為零。
+
+## 11. pandas `groupby` 預設 `dropna=True` 讓 NULL 群整組消失（診斷層尤其危險，2026-07-20）
+
+- **症狀（第一分鐘認出它）**：某個彙總表／矩陣少了一整個群，而其他數字（總量、極值、逐列計算的結果）顯示那個群明明存在。實例：`config_shift` 的 `query_offset_spread.max = 4.605`，但 `offset_matrix` 裡沒有任何一個 group 的 spread 解釋得了這個值；`notes` 也是空的。
+- **根因**：`DataFrame.groupby()` 的 `dropna` 預設是 `True`——**分組鍵含 NaN 的列被整批丟棄，不報錯、不警告**。而 Spark 端的整數欄只要有任一 NULL，`toPandas()` 之後必然是 `float64` 帶 `NaN`（同 §8 的 dtype 家族）。用 `drop_duplicates().sort_values()` 手動迭代則會保留 NaN，所以**把手動迭代重構成 groupby 是典型的引入點**——這正是本次的實際來源（重構前後測試全綠）。
+- **為什麼在診斷層特別貴**：診斷的輸出常被讀成「我量過了，沒事」。一個群靜默消失會讓「沒量到」與「量到零」在報表上長得一模一樣，讀者據此排除掉真正的原因——比不提供這項診斷更糟。
+- **規則**：**彙總診斷數字的 `groupby` 一律顯式寫 `dropna=False`**，NaN 群給明確標籤（如 `"<NULL>"`），並讓輸出帶一則「有 N 個 NULL 群」的觀測。要丟棄 NaN 也可以，但必須是寫出來的決定，不是撿到的預設。
+- **驗證方式**：`grep -rn "groupby(" src/recsys_tfb/diagnosis/ | grep -v dropna` 應為空。針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。

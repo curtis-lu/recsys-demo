@@ -335,7 +335,10 @@ from recsys_tfb.report import ReportSection
 # 實際的鍵以 _compute.py 為準（Task 2.2 完成後照著它抄一份，不要憑本計畫檔猜）
 RESULT = {
     "enabled": True,
-    "offset_spread": {"mass": 0.693, "affluent": 0.105},
+    # 名字刻意都帶標記：讀者問的是「偏移對排序有多大影響」，只有 query 內的
+    # 相對差答得了；by_context 只在 context 為 entity 級屬性時才等於它。讓無
+    # 標記的短名字獨佔其中一個，會讓讀者把它當預設主指標。
+    "offset_spread_by_context": {"mass": 0.693, "affluent": 0.105},
     "offset_matrix": {"mass": {"ccard_ins": 0.693, "fund_bond": 0.0}},
     "query_offset_spread": {"p50": 0.0, "p90": 0.693, "max": 0.693},
     "baseline_map": 0.4210, "corrected_map": 0.4202,
@@ -343,6 +346,7 @@ RESULT = {
     "per_item": [{"item": "ccard_ins", "delta_j": 0.0449,
                   "n_pos_raw": 120, "n_pos_effective": 120.0}],
     "notes": [], "unmatched_override_keys": [],
+    "items_declared_not_observed": [],
     "sample": {"n_queries": 654, "n_items": 8},
 }
 
@@ -396,7 +400,7 @@ Expected: FAIL — `AttributeError: module 'recsys_tfb.diagnosis.metric.config_s
 4. **per-item Δ_j 條圖**：`bar(x=item, y=delta_j, center=0.0)`，發散色階；下方緊接 `Σ Δ_j ≠ Δ` 那句說明——**這句話由 `SCOPE.blind_to` 擁有，不是從 `compute` 的 JSON 讀來的**（計畫原稿要 `compute` 輸出 `per_item_sum_note`，那與 `SCOPE` 重複，已移除）。
 5. **樣本規模**：`n_queries`／`n_items`／`n_positive_rows`，用 `fmt_count`。
 6. **`query_offset_spread` 分位數**：逐 query 的 offset `max − min` 分布（p50／p90／max）。這是「真正抵達排序的偏移」，`offset_spread` 是「config 說了什麼」——兩者在 context 欄為 item 級屬性時會分歧，此時 `notes` 會有一則說明，**必須一併呈現**。
-7. **`notes` 與 `unmatched_override_keys`**：零命中的 override key 清單。這一區不可省——`Δ ≈ 0` 是本項診斷宣稱可以排除整個方向的訊號，而查表全未命中會偽造出同樣的 `Δ = 0`。
+7. **`notes`、`unmatched_override_keys`、`items_declared_not_observed`**：零命中的 override key 清單，以及 config 宣告了但抽樣裡沒出現的 item 清單。**這一區不可省**——三者都是「診斷看不見某樣東西」的觀測，而看不見與「量到零」在報表上長得一模一樣：`Δ ≈ 0` 是本項診斷宣稱可以排除整個方向的訊號，查表全未命中會偽造出同樣的 `Δ = 0`；`offset_matrix` 少一列，跟該 item 沒有偏移也長得一樣。
 
 `__init__.py`：
 
