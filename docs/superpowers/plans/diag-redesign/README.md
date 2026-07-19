@@ -34,6 +34,12 @@
 | 把 query key／`ht_weights`／CI frame 組裝那 ~40 行樣板抽到 `_common.py` | **Plan 2 開工時**（有第二個實例可對照） | 一個實例看不出哪些是共通、哪些是 `config_shift` 特有 |
 | `_common` 加「CI 方向自帶名字」的包裝，讓不知道反號這回事的人也不會寫錯 | Plan 2，與上一項一起 | 同上；目前靠 config_shift 自己的測試守著，風險是重寫的人不是照抄的人 |
 | `contract.check_module` 補簽名檢查（`compute(diagnosis_sample, parameters)`）與三態 key-set 一致性檢查 | **Task 2.3**（`render` 存在之後） | 只有 `compute` 時釘不了完整契約；目前簽名形狀是默默立的，後四項寫錯簽名契約測試照樣綠 |
+| `field_notes` 與實際輸出鍵的一致性檢查（新增欄位忘了補說明不會有測試轉紅） | Task 2.3，與上一列一起 | 同屬 contract 強化 |
+| `q_agg` 的 `weight=("w","max")` 假設 `inclusion_weight` 在 query 內為常數 | **Plan 2 開工時檢查** | 對 `draw_diagnosis_sample` 的產出成立（權重由 stratum 決定、stratum 是 query 級屬性），但無測試釘住；上游若讓同一 query 的列帶不同權重，`max` 會靜默選一個 |
+
+**Task 2.2 已知的弱斷言（不擋交付，但別當成有守住）**：`test_null_context_group_survives_and_is_visible` 對 note 的斷言是 `"prod_tier" in n`，靠當下文案措辭撐著——目前只有結構 note 含欄名所以有鑑別力（mutation 1b 驗證過），但改文案可能讓它退化成假綠。
+
+**一個跨版本比對的注意事項**：`query_offset_spread` 的分位數用 inverse-CDF（不插值），與 `np.percentile` 的線性插值**算出來的數字不同**，即使權重全為 1 也不同。理由是插值會產生一個資料裡不存在的 spread 值，而每個值都該對應「某個 query 實際出現的偏移範圍」。目前尚無任何一次公司環境 real-run，所以沒有舊 JSON 需要對照；日後若要跨版本比 `p50`／`p90`，要知道這件事（`mean`／`max` 不受影響）。
 
 **Plan 0 已落地、後續計畫可直接用的地基**：
 - `src/recsys_tfb/report/`：`types`（`ReportSection`／`ScopeNote`／`Page`）、`fmt`（六個語意化格式器）、`scales`、`figures`（含 `MAX_FIGURE_POINTS`）、`pages`（多頁 HTML ＋共用 plotly.js，單頁實測 9.3KB）
