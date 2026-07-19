@@ -44,6 +44,6 @@ def test_metric_and_diagnosis_blocks():
     }
     diag = ev["diagnosis"]
     assert diag["sample"] == {
-        "max_queries": 200000, "min_pos_queries_per_item": 50, "seed": 42,
+        "max_queries": 250000, "min_pos_queries_per_item": 50, "seed": 42,
     }
     assert diag["ci"] == {"enabled": True, "n_boot": 200}
