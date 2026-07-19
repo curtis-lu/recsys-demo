@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import math
+
 # 單一色相（indigo/teal 家族），淺到深。
 _SEQ_LIGHT = "#f0fdfa"
 _SEQ_MID = "#2dd4bf"
@@ -45,18 +47,39 @@ def diverging_scale(
     """發散色階：兩端不同色相、中點中性色，中點位置由 ``center``/``lo``/``hi`` 算出。
 
     ``lo``／``hi`` 都給定時，把 ``center`` 正規化到 ``[0, 1]`` 的位置
-    ``(center - lo) / (hi - lo)``，夾在 ``[0, 1]`` 內；``hi <= lo`` 視為無效
-    區間，raise ``ValueError``。未給定 ``lo``/``hi`` 時假設資料對稱於
-    ``center``，中點固定在 0.5。
+    ``(center - lo) / (hi - lo)``，夾在 ``[0, 1]`` 內。未給定 ``lo``/``hi``
+    時假設資料對稱於 ``center``，中點固定在 0.5。
+
+    退化輸入的處理方向——**良性的退化資料要能畫出圖，壞掉的資料要講清楚**：
+
+    * ``hi == lo``（所有值相同，含全 0）→ 這是良性狀態（例如 config 沒變動時
+      Δ 全為 0，正是預期結果），回傳中性色為主的兩段色階，不 raise。
+    * ``lo``／``hi`` 任一為 ``NaN`` → 視為壞資料，raise ``ValueError``。呼叫端
+      應先用有限值算出 ``lo``/``hi``（例如忽略 NaN 後取 min/max），不能讓
+      NaN 一路傳進來靜默算出一個沒有意義的中點。
+    * ``hi < lo`` → 真正的區間倒置，代表呼叫端算錯，raise ``ValueError``
+      （既有行為，維持不變）。
 
     Raises:
-        ValueError: ``hi <= lo``（訊息含兩個值，方便直接看出哪個區間錯了）。
+        ValueError: ``lo``/``hi`` 含 NaN，或 ``hi < lo``（訊息含兩個值，方便
+            直接看出哪個區間錯了）。
     """
     if lo is not None and hi is not None:
-        if hi <= lo:
+        if math.isnan(lo) or math.isnan(hi):
             raise ValueError(
-                f"diverging_scale: hi ({hi!r}) must be greater than lo ({lo!r})"
+                f"diverging_scale: lo ({lo!r}) / hi ({hi!r}) must be finite — "
+                "caller must exclude NaN before computing the range (e.g. take "
+                "min/max over finite values only), not pass NaN through"
             )
+        if hi < lo:
+            raise ValueError(
+                f"diverging_scale: hi ({hi!r}) must be greater than or equal to "
+                f"lo ({lo!r})"
+            )
+        if hi == lo:
+            # 所有值相同（含全 0）——沒有可分辨的方向，回傳中性色為主的色階
+            # 讓圖仍能正常畫出，而不是把「什麼都沒變」當成錯誤擋下來。
+            return [(0.0, _DIV_NEUTRAL), (1.0, _DIV_NEUTRAL)]
         mid = (center - lo) / (hi - lo)
         mid = max(0.0, min(1.0, mid))
     else:

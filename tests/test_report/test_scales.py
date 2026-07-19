@@ -2,7 +2,7 @@
 
 import pytest
 
-from recsys_tfb.report.scales import diverging_scale, sequential_scale
+from recsys_tfb.report.scales import _DIV_NEUTRAL, diverging_scale, sequential_scale
 
 
 class TestSequentialScale:
@@ -70,14 +70,31 @@ class TestDivergingScale:
         stops = diverging_scale()
         assert stops[0][1] != stops[-1][1]
 
-    def test_hi_must_be_greater_than_lo(self):
-        with pytest.raises(ValueError) as exc:
-            diverging_scale(center=0.0, lo=1.0, hi=1.0)
-        msg = str(exc.value)
-        assert "1.0" in msg
+    def test_hi_equal_lo_does_not_raise(self):
+        # 所有值相同（含全 0）是良性退化狀態（例如 config 沒變動時 Δ 全為
+        # 0），不是錯誤——不得 raise，必須能正常畫出色階。
+        stops = diverging_scale(center=0.0, lo=1.0, hi=1.0)
+        assert stops[0][0] == 0.0
+        assert stops[-1][0] == 1.0
+
+    def test_hi_equal_lo_returns_neutral_colors(self):
+        stops = diverging_scale(center=0.0, lo=1.0, hi=1.0)
+        colors = {c for _, c in stops}
+        # 沒有可分辨的方向：只用中性色，不應該出現兩端的有向色相。
+        assert colors == {_DIV_NEUTRAL}
 
     def test_hi_less_than_lo_raises(self):
         with pytest.raises(ValueError) as exc:
             diverging_scale(center=0.0, lo=2.0, hi=1.0)
         msg = str(exc.value)
         assert "2.0" in msg and "1.0" in msg
+
+    def test_nan_lo_raises(self):
+        with pytest.raises(ValueError) as exc:
+            diverging_scale(center=0.0, lo=float("nan"), hi=1.0)
+        assert "nan" in str(exc.value).lower()
+
+    def test_nan_hi_raises(self):
+        with pytest.raises(ValueError) as exc:
+            diverging_scale(center=0.0, lo=0.0, hi=float("nan"))
+        assert "nan" in str(exc.value).lower()

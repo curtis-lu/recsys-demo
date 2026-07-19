@@ -145,6 +145,12 @@ def _render_page_html(page: Page) -> str:
 
 def _render_index_html(pages: list[Page], index_title: str,
                         index_intro: str) -> str:
+    """``index_title`` 會被 escape；``index_intro`` 不會——這是刻意的不對稱。
+
+    ``index_intro`` 的設計意圖就是放一段 HTML 片段（例如診斷首頁的邏輯架構
+    說明表格），所以直接注入、不 escape。呼叫端若要放使用者輸入或任何不信任
+    的字串進 ``index_intro``，**必須自己先 escape**——這裡不會替你做。
+    """
     sorted_pages = sorted(pages, key=lambda p: p.slug)
     parts = [
         "<!DOCTYPE html>",
@@ -174,8 +180,14 @@ def write_pages(
 ) -> list[Path]:
     """把多個 ``Page`` 寫成 ``out_dir`` 下的多份 HTML＋一份共用 plotly.min.js。
 
-    回傳實際寫出的檔案路徑（順序：各頁依傳入順序、最後 index.html、
-    plotly.min.js）。
+    回傳實際寫出的檔案路徑（順序：``plotly.min.js`` 最先、各頁依傳入順序、
+    最後 ``index.html``）。
+
+    Args:
+        index_intro: **raw HTML 片段**，直接注入 index 頁、不 escape（跟
+            ``index_title`` 不對稱——``index_title`` 會 escape）。設計意圖
+            就是放結構化說明（例如邏輯架構表格），呼叫端若放使用者輸入或
+            其他不信任字串，必須自己先 escape。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

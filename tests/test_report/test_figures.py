@@ -67,6 +67,42 @@ class TestHeatmap:
             heatmap(z, x=x, y=y, title="t", colorbar_title="c")
         assert str(MAX_FIGURE_POINTS) in str(exc.value)
 
+    # -- 退化輸入（F1/F2/F3 review finding）：良性的退化資料要能畫出圖，
+    #    壞掉的資料要講清楚，兩者不能同一個標準。
+
+    def test_all_zero_matrix_does_not_raise(self):
+        # config 沒變動時 Δ 全為 0 正是預期狀態，這裡曾經因為
+        # diverging_scale 把 hi==lo 當錯誤而整張圖崩潰。
+        fig = heatmap(
+            [[0.0, 0.0], [0.0, 0.0]], x=["a", "b"], y=["c", "d"],
+            title="t", colorbar_title="c", center=0.0,
+        )
+        assert fig is not None
+
+    def test_single_cell_does_not_raise(self):
+        fig = heatmap(
+            [[5.0]], x=["a"], y=["b"], title="t", colorbar_title="c",
+            center=0.0,
+        )
+        assert fig is not None
+
+    def test_empty_matrix_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            heatmap([], x=[], y=[], title="t", colorbar_title="c", center=0.0)
+        msg = str(exc.value)
+        assert "heatmap" in msg
+        assert "empty" in msg.lower()
+
+    def test_all_nan_matrix_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            heatmap(
+                [[float("nan"), float("nan")]], x=["a", "b"], y=["c"],
+                title="t", colorbar_title="c", center=0.0,
+            )
+        msg = str(exc.value)
+        assert "heatmap" in msg
+        assert "nan" in msg.lower()
+
 
 class TestBubbleGrid:
     def test_size_and_color_are_distinct_encodings(self):
@@ -108,6 +144,41 @@ class TestBubbleGrid:
                 title="t",
                 colorbar_title="c",
             )
+
+    def test_all_zero_colour_does_not_raise(self):
+        fig = bubble_grid(
+            x=[1, 2], y=[1, 2], size=[10, 20], colour=[0.0, 0.0],
+            hover_text=["a", "b"], title="t", colorbar_title="c",
+        )
+        assert fig is not None
+
+    def test_single_point_does_not_raise(self):
+        fig = bubble_grid(
+            x=[1], y=[1], size=[10], colour=[0.5],
+            hover_text=["a"], title="t", colorbar_title="c",
+        )
+        assert fig is not None
+
+    def test_empty_input_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            bubble_grid(
+                x=[], y=[], size=[], colour=[], hover_text=[],
+                title="t", colorbar_title="c",
+            )
+        msg = str(exc.value)
+        assert "bubble_grid" in msg
+        assert "empty" in msg.lower()
+
+    def test_all_nan_colour_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            bubble_grid(
+                x=[1, 2], y=[1, 2], size=[10, 20],
+                colour=[float("nan"), float("nan")],
+                hover_text=["a", "b"], title="t", colorbar_title="c",
+            )
+        msg = str(exc.value)
+        assert "bubble_grid" in msg
+        assert "nan" in msg.lower()
 
 
 class TestScatter:
@@ -151,6 +222,40 @@ class TestBar:
         with pytest.raises(ValueError):
             bar(x=list(range(n)), y=[0.0] * n, title="t", x_title="x",
                 y_title="y")
+
+    def test_all_zero_does_not_raise(self):
+        # 這是這次 fresh-context 審查最直接的實證案例：config 沒變動時
+        # Δ 全為 0，曾經因 hi==lo 被 diverging_scale 當錯誤崩潰。
+        fig = bar(x=["A", "B", "C"], y=[0.0, 0.0, 0.0], title="t",
+                  x_title="x", y_title="y", center=0.0)
+        assert fig is not None
+
+    def test_single_bar_does_not_raise(self):
+        fig = bar(x=["A"], y=[3.0], title="t", x_title="x", y_title="y",
+                  center=0.0)
+        assert fig is not None
+
+    def test_empty_input_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            bar(x=[], y=[], title="t", x_title="x", y_title="y", center=0.0)
+        msg = str(exc.value)
+        assert "bar" in msg
+        assert "empty" in msg.lower()
+
+    def test_all_nan_raises_clear_message(self):
+        with pytest.raises(ValueError) as exc:
+            bar(x=["A", "B"], y=[float("nan"), float("nan")], title="t",
+                x_title="x", y_title="y", center=0.0)
+        msg = str(exc.value)
+        assert "bar" in msg
+        assert "nan" in msg.lower()
+
+    def test_partial_nan_ignores_nan_and_does_not_raise(self):
+        # 混著 NaN 的有限值：忽略 NaN、用剩餘有限值算範圍，不因單一 NaN
+        # 格拖垮整張圖。
+        fig = bar(x=["A", "B", "C"], y=[0.0, float("nan"), 2.0], title="t",
+                  x_title="x", y_title="y", center=0.0)
+        assert fig is not None
 
 
 class TestSharedTheme:

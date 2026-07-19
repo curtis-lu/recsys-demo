@@ -45,6 +45,19 @@ class TestWrittenFiles:
         for name in names:
             assert (tmp_path / name).exists()
 
+    def test_returned_order_matches_docstring(self, tmp_path):
+        # docstring 宣稱的順序：plotly.min.js 最先、各頁依傳入順序、
+        # 最後 index.html（曾經寫反，說「最後 index.html、plotly.min.js」）。
+        pages = [_page("01-a", "Page A"), _page("02-b", "Page B"),
+                 _page("03-c", "Page C")]
+        written = write_pages(pages, tmp_path, index_title="Idx",
+                               index_intro="")
+        names = [p.name for p in written]
+        assert names == [
+            "plotly.min.js", "01-a.html", "02-b.html", "03-c.html",
+            "index.html",
+        ]
+
 
 class TestPlotlyJsSharedNotEmbedded:
     def test_page_references_external_script_not_inline(self, tmp_path):

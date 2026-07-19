@@ -109,6 +109,17 @@ src/recsys_tfb/diagnosis/metric/score_shift/{__init__,compute,render}.py
 | `diagnosis/metric/occupancy_spark.py` | 84 | 併入 `score_shift/`（曝光份額 guardrail） |
 | `docs/pipelines/evaluation-diagnosis.md` | 754 | 內容三分：判讀→報表、方法論→框架文件、操作→quickstart |
 
+> **目前孤兒狀態，不是遺漏**：`quadrant.py`（表中第一列）已刪，導致
+> `discrimination.py`／`cross_purchase.py`／`occupancy_spark.py` 這三個
+> **目前**沒有任何 production 呼叫者——但它們不是被清場漏掉的殘骸，是還沒
+> 輪到刪除的「等取代者落地」狀態：`discrimination.py` 等 Plan 2
+> （`03-plan-2-item-ability-capacity.md`）把 `item_ability/` 生出來才刪；
+> `cross_purchase.py` 等 Plan 3（`04-plan-3-suppression.md`）併入
+> `suppression/` 才刪；`occupancy_spark.py` 等 Plan 4
+> （`05-plan-4-score-shift.md`）併入 `score_shift/` 才刪。下一個人若只看
+> import graph、看到零呼叫者，**不要直接當成死碼清掉**——先看這份表的
+> 「替代者」欄有沒有排進計畫。
+
 ### 2.5 改名（純改名，功能不動）
 
 repo 裡有第二套也叫「診斷」但與 `diagnosis/` 無關的東西（分數直方圖／箱型圖／名次熱圖／校準曲線）。兩套同名、報表上又相鄰，是可讀性的實際負擔。

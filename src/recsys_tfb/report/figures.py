@@ -39,6 +39,29 @@ def assert_within_budget(n: int, name: str) -> None:
         )
 
 
+def _finite_bounds(arr: np.ndarray, name: str) -> tuple[float, float]:
+    """算 ``arr`` 中有限值的 ``(min, max)``，供 ``diverging_scale`` 的 ``lo``/``hi``。
+
+    空輸入與「全部非有限值（NaN/inf）」都 raise 明確訊息——這兩種是壞資料
+    （沒有任何訊號可畫色階），跟「所有有限值恰好相同」（良性退化，見
+    ``scales.diverging_scale`` docstring）不是同一件事，不能用同一個標準
+    處理。部分 NaN（混著有限值）則忽略 NaN、只用有限值算範圍：那些 NaN
+    格在圖上會自然顯示為空白，範圍計算不該被它們拖垮。
+    """
+    if arr.size == 0:
+        raise ValueError(
+            f"{name}: cannot build a color scale from empty input (0 values)"
+        )
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        raise ValueError(
+            f"{name}: all {arr.size} value(s) are NaN/inf — cannot build a "
+            "color scale from non-finite input; caller must filter to finite "
+            "values before calling"
+        )
+    return float(finite.min()), float(finite.max())
+
+
 def _apply_theme(fig: go.Figure, title: str) -> go.Figure:
     fig.update_layout(
         template=_TEMPLATE,
@@ -64,9 +87,8 @@ def heatmap(
     assert_within_budget(flat.size, name="heatmap")
 
     if center is not None:
-        colorscale = diverging_scale(
-            center=center, lo=float(np.min(flat)), hi=float(np.max(flat))
-        )
+        lo, hi = _finite_bounds(flat, name="heatmap")
+        colorscale = diverging_scale(center=center, lo=lo, hi=hi)
     else:
         colorscale = sequential_scale()
 
@@ -101,9 +123,8 @@ def bubble_grid(
     max_size = float(np.max(size_arr)) if size_arr.size else 0.0
     sizeref = (2.0 * max_size / (40.0 ** 2)) if max_size > 0 else 1.0
 
-    colorscale = diverging_scale(
-        center=center, lo=float(np.min(colour_arr)), hi=float(np.max(colour_arr))
-    )
+    lo, hi = _finite_bounds(colour_arr, name="bubble_grid")
+    colorscale = diverging_scale(center=center, lo=lo, hi=hi)
 
     fig = go.Figure(
         data=go.Scatter(
@@ -164,9 +185,8 @@ def bar(
     assert_within_budget(len(x), name="bar")
 
     if center is not None:
-        colorscale = diverging_scale(
-            center=center, lo=float(np.min(y_arr)), hi=float(np.max(y_arr))
-        )
+        lo, hi = _finite_bounds(y_arr, name="bar")
+        colorscale = diverging_scale(center=center, lo=lo, hi=hi)
         marker = dict(
             color=y_arr,
             colorscale=colorscale,

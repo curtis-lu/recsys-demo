@@ -1,6 +1,11 @@
 """中性呈現層的共用型別。
 
-``report`` 套件被 ``diagnosis/`` 與 ``evaluation/report_builder.py`` 共同依賴，
+**現況**：``report`` 套件目前唯一的消費者是 ``evaluation/report.py``
+re-export ``ReportSection``；``diagnosis/`` 與 ``evaluation/report_builder.py``
+目前都沒有 import 它。**目標狀態**（後續 diag-redesign 計畫，見
+``docs/superpowers/plans/diag-redesign/00-shared-context.md``）：各項診斷
+模組會 import 本套件產出 ``ReportSection``，屆時才會是兩邊共同依賴。
+
 本身不含任何診斷邏輯——只負責「怎麼呈現一個數字／一段敘述」，不負責「這個
 數字代表什麼判斷」。三個型別各管一層：
 
@@ -37,6 +42,11 @@ class ScopeNote:
 
     ``blind_to`` 不得為空：一個數字如果說不出它看不見什麼，讀者就會過度
     解讀。這是契約，不是建議。
+
+    ``blind_to``／``reference_points`` 都必須是 ``tuple``/``list`` of ``str``，
+    **不能是單一字串**——字串本身是 ``Iterable[str]``，`pages.py` 的
+    ``_render_scope_note`` 逐字元 iterate 會把它拆成一堆單字元 ``<li>``，
+    不會噴任何錯誤，靜默壞掉。這是最容易誤用的地方，所以在建構時就明確擋。
     """
 
     measures: str                          # 這個數字量的是什麼
@@ -46,9 +56,21 @@ class ScopeNote:
     sampling: str = ""                     # 由 render() 從 meta["sampling_description"] 動態帶入
 
     def __post_init__(self) -> None:
+        if isinstance(self.blind_to, str):
+            raise TypeError(
+                "ScopeNote.blind_to 不得是單一字串——需要 tuple/list of str"
+                f"（例如 ('不能推論因果',)，不是 {self.blind_to!r}）；單一字串"
+                "會被逐字元拆成多個 <li>"
+            )
         if not self.blind_to:
             raise ValueError(
                 "ScopeNote.blind_to 不得為空——每項診斷必須寫出它不能推論什麼"
+            )
+        if isinstance(self.reference_points, str):
+            raise TypeError(
+                "ScopeNote.reference_points 不得是單一字串——需要 tuple/list "
+                f"of str（例如 ('baseline model',)，不是 "
+                f"{self.reference_points!r}）；單一字串會被逐字元拆成多個 <li>"
             )
 
 
