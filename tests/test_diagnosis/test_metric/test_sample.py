@@ -102,3 +102,87 @@ def test_take_all_when_everything_is_small(spark):
     assert sorted(meta["take_all_items"]) == ["cold", "hot"]
     assert meta["n_queries_sampled"] == 5
     assert set(pdf["cust_id"]) == {"H1", "H2", "H3", "H4", "C1"}
+
+
+# ---- 納入機率權重（分層抽樣的 π 顯性化）----
+
+
+def _stratified_fixture(spark, n_hot=40):
+    """造出「兩層都非空」的情境：hot 有 n_hot 個正例 query（會走 hash-ratio），
+    cold 只有 1 個（低於保底 → take-all）。搭配 max_queries 遠小於 n_hot 使
+    ratio < 1。每個 query 兩個候選列（hot、cold 各一）。"""
+    rows = []
+    for i in range(n_hot):
+        cust = f"HOT{i:03d}"
+        rows.append(("20240331", cust, "hot", 0.9, 1))
+        rows.append(("20240331", cust, "cold", 0.1, 0))
+    rows.append(("20240331", "COLD0", "hot", 0.9, 0))
+    rows.append(("20240331", "COLD0", "cold", 0.1, 1))
+    return spark.createDataFrame(
+        rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
+    )
+
+
+def test_sample_carries_inclusion_weight_and_stratum_columns(spark):
+    pdf, _meta = draw_diagnosis_sample(_fixture(spark), _params())
+    assert "inclusion_weight" in pdf.columns
+    assert "stratum" in pdf.columns
+    assert pdf["stratum"].notna().all()
+    assert set(pdf["stratum"]) <= {"take_all", "hash_ratio"}
+
+
+def test_inclusion_weight_degenerates_to_one_without_subsampling(spark):
+    # max_queries 遠大於正例 query 數 → 沒有次抽樣，加權退化成全 1
+    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(max_queries=1000))
+    assert meta["sample_ratio"] == 1.0
+    assert (pdf["inclusion_weight"] == 1.0).all()
+
+
+def test_inclusion_weight_is_inverse_probability_per_stratum(spark):
+    # 自造 ratio < 1：40 個 hot query + 1 個 cold（take-all），max_queries=11
+    pdf, meta = draw_diagnosis_sample(
+        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+    )
+    assert 0.0 < meta["sample_ratio"] < 1.0
+    assert meta["take_all_items"], "測試情境沒產生 take-all 層，這條沒測到東西"
+
+    take_all = pdf[pdf["stratum"] == "take_all"]
+    hash_ratio = pdf[pdf["stratum"] == "hash_ratio"]
+    assert not take_all.empty, "take-all 層是空的，分層沒真的發生"
+    assert not hash_ratio.empty, "hash-ratio 層是空的，分層沒真的發生"
+
+    assert (take_all["inclusion_weight"] == 1.0).all()
+    expected = 1.0 / meta["sample_ratio"]
+    assert (hash_ratio["inclusion_weight"] - expected).abs().max() < 1e-9
+
+
+def test_inclusion_weight_is_constant_within_a_query(spark):
+    # 抽樣單位是 query → 同一 query 的所有候選列必須同權重
+    pdf, _meta = draw_diagnosis_sample(
+        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+    )
+    per_query = pdf.groupby(["snap_date", "cust_id"])["inclusion_weight"].nunique()
+    assert (per_query == 1).all()
+
+
+def test_meta_reports_strata_query_counts_and_weights(spark):
+    _pdf, meta = draw_diagnosis_sample(
+        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+    )
+    strata = meta["strata"]
+    assert set(strata) == {"take_all", "hash_ratio"}
+    assert strata["take_all"]["weight"] == 1.0
+    assert strata["take_all"]["n_queries"] >= 1
+    assert abs(strata["hash_ratio"]["weight"] - 1.0 / meta["sample_ratio"]) < 1e-9
+    assert strata["hash_ratio"]["n_queries"] >= 1
+    assert (
+        strata["take_all"]["n_queries"] + strata["hash_ratio"]["n_queries"]
+        == meta["n_queries_sampled"]
+    )
+
+
+def test_strata_lists_only_existing_layers_when_all_take_all(spark):
+    # floor 拉高 → 全部 take-all，不存在 hash_ratio 層
+    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
+    assert set(meta["strata"]) == {"take_all"}
+    assert (pdf["inclusion_weight"] == 1.0).all()
