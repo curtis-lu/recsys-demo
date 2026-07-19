@@ -36,6 +36,26 @@
 
 **五項共用同一份 `diagnosis_sample`。** 這是整套設計最重要的一致性保證：若 AUC 來自全量、壓制帳本來自抽樣、Δ 來自另一份抽樣，三個數字描述的不是同一批列，並排解讀會出現細微的錯。
 
+### 運算預算：搜尋用子樣本，量測用全樣本
+
+`max_queries` 已設在母體之上（250,000 vs 公司環境約 22 萬個有正例的 query，2026-07-19 實況），所以共用樣本是**普查**——`ratio == 1.0`、權重全 1、`sampling_description` 會寫「未抽樣」。
+
+**不要用縮小共用樣本來控制運算成本**：那會讓便宜的診斷也一起失去母體性，換來的省錢在它們身上根本不需要。成本控制在各診斷自己的旋鈕上：
+
+| 診斷 | 成本量級 | 預算旋鈕 |
+|---|---|---|
+| `config_shift` | (N_items+2) 次 mAP，閉式不搜尋 | 無需 |
+| `item_ability` | sort-once 後主成本是線性掃 | `ci.n_boot`（已有） |
+| `model_capacity` | 零（只讀 `gain_ledger.json`） | 無需 |
+| `suppression` | 成對枚舉，向量化後仍隨誤序 pair 數成長 | `top_examples`；必要時加列數上限 |
+| `score_shift` | **最貴：約 300 次全量 mAP** | `n_trials` ＋ `search_max_queries` |
+
+**`score_shift` 的原則**：位移向量在 `search_max_queries` 的子樣本上搜出來，效果在 **holdout 全樣本**上量測。這不只是省錢——搜尋與量測分離本來就是避免過擬合的正確做法，省錢是附帶的。
+
+**每項診斷必須把自己的實際執行秒數寫進輸出**，讓預算能依實測調整而不是靠猜。
+
+> ⚠ 母體若成長超過 `max_queries`，次抽樣會自動恢復，分層權重接手做 Horvitz–Thompson 修正、`sampling_description` 也會改口——**不會靜默偏差**。但普查的解讀更乾淨，發現超過時優先調高 `max_queries`，而不是靠加權。
+
 **抽樣母體已經是「有正例的 query」**（`src/recsys_tfb/diagnosis/metric/sample.py:70-72`），理由是 macro per-item mAP 只在這些 query 上累積。這件事必須寫進每項診斷的 `ScopeNote.population`。
 
 ---
