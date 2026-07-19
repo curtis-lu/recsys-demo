@@ -12,10 +12,28 @@
 | Plan | 狀態 |
 |---|---|
 | **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
-| **1 config_shift** | 🔨 **進行中**，branch `feat/diag-config-shift`（從 merged main 開出）。7 個 task 皆未開始 |
+| **1 config_shift** | 🔨 **進行中**，branch `feat/diag-config-shift`（從 merged main 開出）。2.1 契約 ✅／2.2 計算層 ✅（審查中）／2.3 起未開始 |
 | 2–5 | 未開始 |
 
-**續作接手方式**：讀 `00-shared-context.md` ＋ `02-plan-1-config-shift.md`，從 Task 2.1 開始。worktree 是 `/Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign`，**本機 Spark 環境已建好**（dataset／training 跑過，model_version `6059dcef`），不必重跑 `local_spark_setup --reset`。
+**續作接手方式**：讀 `00-shared-context.md` ＋ `02-plan-1-config-shift.md`，從上表標示的下一個 task 開始。worktree 是 `/Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign`，**本機 Spark 環境已建好**（dataset／training 跑過，model_version `6059dcef`），不必重跑 `local_spark_setup --reset`。
+
+**執行過程中對計畫原稿的修正（照計畫檔逐字實作會撞到，先看這裡）**：
+
+- **Task 2.2 的 `build_offset_frame` 簽章**：計畫的測試寫成單參數 `build_offset_frame(PARAMS)`，但同一個 task 的移植表要求「原樣移植」——原函式是 `(pdf, parameters, schema)` 且回傳 `(offset_df, meta)` tuple。單參數版本推導不出未出現在 `sample_ratio_overrides` 裡的 item，該測試無解。**以移植表為準**。
+- **Task 2.2 的 `test_group_internal_spread_not_global` 原稿是假綠**：`_sample()` 只有 `mass` 一個客群，單一 context 下「群內 spread」恆等於「全域 spread」，Step 5 的 mutation 改成全域之後測試照樣過。已改成兩個客群（`mass`／`affluent`）且群間 offset 不同。
+- **`paired_bootstrap_delta` 與各診斷的 Δ 反號**：它回的是 `mAP(F) − mAP(F − shift)`，而 `config_shift` 的 `delta = corrected − baseline`。呼叫端要取負並對調上下界。**Plan 2–5 照抄樣板時會踩到同一個坑**，且符號寫反不會有任何數值測試轉紅（大小完全正確、只有正負相反），必須用「CI 與 Δ 同號」這種結構性斷言釘住。
+- **診斷子套件的檔名用 `_compute.py`／`_render.py`（前綴底線）**，不是計畫原稿寫的 `compute.py`／`render.py`。理由：`from .compute import compute` 會把子模組名重綁成函式（`pkg.compute is mod` → `False`），而 `contract.check_module` 走 `getattr` 剛好拿到函式、**抓不到這個遮蔽**。與 repo 既有的 `_common.py`／`_spark.py` 命名也一致。
+- **「同一客群內 offset 同加常數 → Δ 不變」不是無條件成立的不變量**：前提是「每個 query 完整落在單一 context group 內」，只有 context 欄是 **entity 級**屬性時才成立。context ＝ `sample_group_keys ∪ sample_weight_keys − {item, label}`，而 `parameters_training.yaml:54-55` 明文允許它取自 item 級屬性（產品層級／類別）。實測反例：`offset_spread` 報 `{hi: 0.0, lo: 0.0}` 而 `delta = 0.1875`。**Task 2.3 的 `SCOPE.blind_to` 原稿把它寫成無條件成立，要改成有前提的敘述。**
+
+## 已裁決延後的重構（不是遺漏，時機到了再做）
+
+兩關審查提出、我判斷**現在做是從單一實例猜共用抽象**，延到有第二個實例時再收：
+
+| 項目 | 何時做 | 為什麼不是現在 |
+|---|---|---|
+| 把 query key／`ht_weights`／CI frame 組裝那 ~40 行樣板抽到 `_common.py` | **Plan 2 開工時**（有第二個實例可對照） | 一個實例看不出哪些是共通、哪些是 `config_shift` 特有 |
+| `_common` 加「CI 方向自帶名字」的包裝，讓不知道反號這回事的人也不會寫錯 | Plan 2，與上一項一起 | 同上；目前靠 config_shift 自己的測試守著，風險是重寫的人不是照抄的人 |
+| `contract.check_module` 補簽名檢查（`compute(diagnosis_sample, parameters)`）與三態 key-set 一致性檢查 | **Task 2.3**（`render` 存在之後） | 只有 `compute` 時釘不了完整契約；目前簽名形狀是默默立的，後四項寫錯簽名契約測試照樣綠 |
 
 **Plan 0 已落地、後續計畫可直接用的地基**：
 - `src/recsys_tfb/report/`：`types`（`ReportSection`／`ScopeNote`／`Page`）、`fmt`（六個語意化格式器）、`scales`、`figures`（含 `MAX_FIGURE_POINTS`）、`pages`（多頁 HTML ＋共用 plotly.js，單頁實測 9.3KB）
