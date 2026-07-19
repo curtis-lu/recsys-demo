@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.diagnosis.metric.config_shift.compute import (
+from recsys_tfb.diagnosis.metric.config_shift._compute import (
     build_offset_frame,
     compute,
 )
@@ -86,13 +86,51 @@ def test_uses_uncalibrated_score_and_fails_loud_without_it():
         compute((sample, {"n_queries": 40}), PARAMS)
 
 
+PARAMS_COUPLED = {
+    **PARAMS,
+    "dataset": {**PARAMS["dataset"],
+                "sample_ratio_overrides": {"mass|a|0": 0.5, "mass|b|0": 0.25}},
+    "evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                 "config_shift": {"enabled": True}}},
+}
+
+
+def _sample_with_coupled_items():
+    """三個 item、其中兩個有**互不相同的非零** offset，正例輪流分佈在三者身上。
+
+    現行 ``PARAMS`` 造不出這條契約：它只有一個 item 有非零 offset，實測
+    ``delta`` 與 ``Σ Δ_j`` 恰好相等（−0.0125），任何「兩者不相等」的斷言都會
+    立刻紅。要讓名次真的互相耦合，至少要兩個 item 各自把別人擠開。
+    offset：a = ln 2 ≈ 0.693、b = ln 4 ≈ 1.386、c = 0。
+    """
+    rng = np.random.default_rng(7)
+    rows = []
+    for c in range(60):
+        for item in ("a", "b", "c"):
+            rows.append({
+                "snap_date": "2026-01-31", "cust_id": f"c{c}",
+                "prod_name": item, "cust_segment_typ": "mass",
+                "label": int("abc"[c % 3] == item),
+                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                "score": 0.5,
+            })
+    return pd.DataFrame(rows)
+
+
 def test_per_item_deltas_do_not_sum_to_total_delta():
-    """替換實驗不是分解——這條契約必須在數字上成立，也要寫進報表。"""
-    out = compute((_sample(), {"n_queries": 40}), PARAMS)
+    """Σ Δ_j ≠ Δ：逐項替換是 M 次獨立介入，不是把 Δ 拆成 M 份。
+
+    一個 item 的分數變動會改變**同一 query 內所有 item 的名次**，各項效果透過
+    名次互相耦合，沒有守恆律可言。把 Δ_j 照比例縮放成一個「加起來剛好等於 Δ」
+    的偽分解，會讓讀者以為可以逐項歸因——這條就是擋那個。
+    """
+    out = compute((_sample_with_coupled_items(), {}), PARAMS_COUPLED)
     total = out["delta"]
     per_item_sum = sum(r["delta_j"] for r in out["per_item"])
-    assert out["per_item_sum_note"], "必須帶上 Σ Δ_j ≠ Δ 的說明字串"
-    assert isinstance(total, float) and isinstance(per_item_sum, float)
+    assert abs(per_item_sum - total) > 1e-6, (
+        f"Σ Δ_j ({per_item_sum}) 與 Δ ({total}) 不該相等——相等代表逐項結果被"
+        f"當成可加分解"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -209,3 +247,146 @@ def test_empty_sample_returns_stub_without_raising():
     assert out["enabled"] is True
     assert out["delta"] is None
     assert out["per_item"] == []
+
+
+# --------------------------------------------------------------------------
+# context 欄不保證是 entity 級 —— 「一個 query 落在單一 context group 內」
+# 這個前提不成立時，offset_spread 會漏報真實抵達排序的偏移。
+# --------------------------------------------------------------------------
+
+PARAMS_ITEM_LEVEL_CONTEXT = {
+    "schema": {},
+    "dataset": {
+        "sample_group_keys": ["prod_tier", "label"],
+        "sample_ratio": 1.0,
+        # 兩層各自內部比例一致 → 每個 context group 內 offset 均勻 → 群內
+        # spread 全為 0，但 hi 與 lo 之間差 ln(1/0.1)，而**同一個 query 同時
+        # 含有兩層的 item**，所以這個差真的會改動名次。
+        "sample_ratio_overrides": {"hi|0": 0.1, "lo|0": 1.0},
+    },
+    "training": {"sample_weight_keys": [], "sample_weights": {}},
+    "evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                 "config_shift": {"enabled": True}}},
+}
+
+
+def _sample_with_item_level_context():
+    """context 欄 ``prod_tier`` 是 **item 級**屬性：每個 query 內都有兩種值。"""
+    rng = np.random.default_rng(0)
+    rows = []
+    for c in range(40):
+        for item, tier in (("a", "hi"), ("b", "hi"), ("c", "lo"), ("d", "lo")):
+            rows.append({
+                "snap_date": "2026-01-31", "cust_id": f"c{c}",
+                "prod_name": item, "prod_tier": tier,
+                "label": int(item == "c"),
+                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                "score": 0.5,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_item_level_context_offset_spread_underreports_and_is_flagged():
+    """群內 spread 全 0，但逐 query 的實際 offset 範圍非 0，且 notes 要講明。
+
+    這是計畫原稿寫錯的地方：它把「群內同加常數 → Δ 不變」當成無條件成立的
+    不變量。只有當 context 欄在每個 query 內為常數（entity 級屬性）才成立；
+    context 取自產品層級這種 item 級屬性時，一個 query 內同時存在多個 context
+    group，group 間的 offset 差**確實**會改動名次。
+    """
+    out = compute((_sample_with_item_level_context(), {}),
+                  PARAMS_ITEM_LEVEL_CONTEXT)
+
+    # config 視角：每個 group 內部完全均勻，看不出任何偏移。
+    assert out["offset_spread"] == {"hi": pytest.approx(0.0, abs=1e-12),
+                                    "lo": pytest.approx(0.0, abs=1e-12)}
+    # 實際抵達排序的視角：每個 query 內都橫跨兩層，範圍 = ln(1/0.1) = ln 10。
+    assert out["query_offset_spread"]["p50"] == pytest.approx(np.log(10.0),
+                                                              abs=1e-9)
+    assert out["query_offset_spread"]["max"] > 0
+    # 而且 Δ 明確非 0——「處處無偏移」是錯的。
+    assert abs(out["delta"]) > 1e-6
+    assert any("query_offset_spread" in n for n in out["notes"]), out["notes"]
+
+
+# --------------------------------------------------------------------------
+# offset 查表零命中必須看得見：Δ ≈ 0 是本模組宣稱「可排除這個方向」的訊號，
+# 靜默歸零會讓讀者排除掉真正的原因。
+# --------------------------------------------------------------------------
+
+PARAMS_INT_CONTEXT = {
+    "schema": {},
+    "dataset": {
+        "sample_group_keys": ["seg", "prod_name", "label"],
+        "sample_ratio": 1.0,
+        "sample_ratio_overrides": {"3|a|0": 0.2},
+    },
+    "training": {"sample_weight_keys": [], "sample_weights": {}},
+    "evaluation": {"diagnosis": {"ci": {"enabled": False},
+                                 "config_shift": {"enabled": True}}},
+}
+
+
+def _sample_with_int_context(dtype):
+    rng = np.random.default_rng(0)
+    rows = []
+    for c in range(40):
+        for item in ("a", "b"):
+            rows.append({
+                "snap_date": "2026-01-31", "cust_id": f"c{c}",
+                "prod_name": item, "seg": 3,
+                "label": int(item == "a"),
+                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                "score": 0.5,
+            })
+    pdf = pd.DataFrame(rows)
+    pdf["seg"] = pdf["seg"].astype(dtype)
+    return pdf
+
+
+def test_dtype_mismatch_zero_hit_override_is_reported_not_silent():
+    """int64 → float64 讓 key 由 '3|a|0' 變 '3.0|a|0'，offset 靜默歸零。
+
+    這個 dtype 變化不是假想：Spark 的整數欄只要含任一 NULL，``toPandas()``
+    後就**必然**是 float64。實測同資料同 config，只換 dtype →
+    offset_spread 由 1.609 掉到 0.0、delta 由 −0.200 掉到 0.0、notes 全空。
+    零命中不該 raise（config 有一條用不到的 override 是合法的），但必須看得見。
+    """
+    hit = compute((_sample_with_int_context("int64"), {}), PARAMS_INT_CONTEXT)
+    miss = compute((_sample_with_int_context("float64"), {}), PARAMS_INT_CONTEXT)
+
+    # 命中的那一側：override 生效，沒有零命中回報。
+    assert hit["offset_spread"]["3"] == pytest.approx(np.log(1 / 0.2), abs=1e-9)
+    assert hit["unmatched_override_keys"] == []
+
+    # 未命中的那一側：offset 歸零，但**必須**留下痕跡。
+    assert miss["offset_spread"]["3.0"] == pytest.approx(0.0, abs=1e-12)
+    assert miss["delta"] == pytest.approx(0.0, abs=1e-12)
+    assert miss["unmatched_override_keys"] == [
+        {"config": "dataset.sample_ratio_overrides", "key": "3|a|0"}
+    ]
+    assert any("3|a|0" in n for n in miss["notes"]), miss["notes"]
+
+
+# --------------------------------------------------------------------------
+# 三條 return 路徑的 key set 必須一致，否則 render 會在最少被跑到的路徑上炸。
+# --------------------------------------------------------------------------
+
+def test_all_return_paths_share_the_same_key_set():
+    """停用／空樣本／完整三條路徑的頂層 key set 必須完全相同。
+
+    render 會直接讀 ``data["items"]`` 這類鍵。若某條 return 少了一個鍵，錯誤
+    只會在「診斷被停用」或「抽樣為空」這兩條最少被跑到的路徑上出現——正是最
+    晚被發現的那種 KeyError。
+    """
+    disabled_params = {
+        **PARAMS,
+        "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": 20},
+                                     "config_shift": {"enabled": False}}},
+    }
+    disabled = compute((_sample(), {"n_queries": 40}), disabled_params)
+    empty = compute((_sample().iloc[0:0], {}), PARAMS)
+    full = compute((_sample(), {"n_queries": 40}), PARAMS)
+
+    assert set(disabled) == set(full), set(disabled) ^ set(full)
+    assert set(empty) == set(full), set(empty) ^ set(full)
