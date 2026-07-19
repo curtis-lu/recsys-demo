@@ -151,7 +151,7 @@ def check_module(mod) -> None:
 - [ ] **Step 4: 跑測試確認通過（第 2 條會因 `config_shift` 尚未存在而失敗）**
 
 Run: `PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest tests/test_diagnosis/test_metric/test_contract.py -v`
-Expected: `test_registry_lists_expected_diagnoses`、`test_orders_are_unique_and_contiguous_from_one`、`test_check_module_rejects_missing_scope` PASS；`test_every_registered_diagnosis_satisfies_contract` FAIL（`ModuleNotFoundError: recsys_tfb.diagnosis.metric.config_shift`）。**這是預期的 RED**，Task 2.2 會補上。若失敗訊息與此不同，停下回報。
+Expected: `test_registry_order_is_reading_order`、`test_registry_has_no_duplicates`、`test_check_module_rejects_missing_scope` PASS；`test_every_registered_diagnosis_satisfies_contract` FAIL（`ModuleNotFoundError: No module named 'recsys_tfb.diagnosis.metric.config_shift'`）。**這是預期的 RED**，Task 2.2 會補上。若失敗訊息與此不同，停下回報。
 
 - [ ] **Step 5: Commit**
 
@@ -625,7 +625,7 @@ Run（背景執行）：
 ```bash
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training
 ```
 接著驗證產物：
 ```bash

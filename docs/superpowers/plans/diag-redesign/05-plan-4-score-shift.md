@@ -219,7 +219,7 @@ Run（背景執行）：
 ```bash
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training
 ls data/evaluation/*/*/diagnosis/
 du -sh data/evaluation/*/*/diagnosis/
 ```
@@ -229,8 +229,8 @@ Expected: 五份 HTML ＋ `index.html` ＋ 一份 `plotly.min.js` ＋ 五份 JSO
 
 Run:
 ```bash
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --list-nodes
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --from-node diagnose_score_shift
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --list-nodes
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --from-node diagnose_score_shift
 ```
 Expected: `--list-nodes` 列出五個 `diagnose_*` node；`--from-node` 能只重跑該診斷與下游報表。這驗證了「重跑靠 `--from-node`」這條設計前提真的成立。
 

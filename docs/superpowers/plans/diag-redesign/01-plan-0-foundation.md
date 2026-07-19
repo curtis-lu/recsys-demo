@@ -175,7 +175,7 @@ Run:
 ```bash
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training
 ```
 Expected: 成功結束，產出 `data/evaluation/<mv>/<snap>/report.html`，且該檔**不含** quadrant／triage 區塊。
 
