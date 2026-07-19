@@ -25,12 +25,18 @@ def test_registry_has_no_duplicates():
 
 
 def test_check_module_accepts_a_module_with_every_required_symbol():
+    """兩個函式必須寫出契約要求的參數名——``*a, **k`` 不算數。
+
+    這裡原本是 ``lambda *a, **k``，在 ``check_module`` 只檢查符號存在的年代
+    可以過。加上簽章檢查之後改成具名參數：一個吞掉所有參數的簽章正是這條
+    檢查要擋的東西（它讓任何呼叫形狀看起來都成立），假模組不該示範它。
+    """
     mod = types.SimpleNamespace(
         NAME="fake",
         TITLE="假診斷",
         SCOPE=object(),
-        compute=lambda *a, **k: {},
-        render=lambda *a, **k: None,
+        compute=lambda diagnosis_sample, parameters: {},
+        render=lambda result, parameters: None,
     )
     contract.check_module(mod)  # 不應 raise
 
