@@ -54,6 +54,26 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   -q 2>&1 | tail -20 > /tmp/baseline.txt
 ```
 
+### 本機 real-run（第一次要先建環境）
+
+worktree 的 `data/` 樹是空的（鐵則 R3：每個 worktree 用自己的真 `data/`，不 symlink 到 main）。第一次要建完整鏈：
+
+```bash
+cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign
+export SPARK_CONF_DIR=$PWD/conf/spark-local
+V=/Users/curtislu/projects/recsys_tfb/.venv/bin/python
+PYTHONPATH=src $V scripts/local_spark_setup.py --reset
+PYTHONPATH=src $V -m recsys_tfb dataset  --env local
+PYTHONPATH=src $V -m recsys_tfb training --env local      # 印出 model_version，記下來
+PYTHONPATH=src $V -m recsys_tfb evaluation --env local --post-training --model-version <mv>
+```
+
+**兩個旗標都是必要的，少一個就跑不動**（2026-07-19 實測）：
+
+- `--post-training`：預設模式讀 inference 產出的 `ranked_predictions`，而本機 inference 撞既有 issue #63（`scripts/local_e2e.sh:6-9` 明寫本機 e2e 只收斂到 training）。加了它改讀 training 自己產出的 `training_eval_predictions`（見 `pipelines/evaluation/pipeline.py:74` 的三元式）。
+- `--model-version <mv>`：不指定會解析成 `data/models/best` symlink，而那個 symlink 要 promote 才有。**promote 是使用者保留的人工步驟，實作者不得自行執行**（CLAUDE.md 不變量）。用上一步 training 印出的 model_version 代入。
+
+
 ---
 
 
@@ -219,7 +239,7 @@ Run（背景執行）：
 ```bash
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --model-version <mv>
 ls data/evaluation/*/*/diagnosis/
 du -sh data/evaluation/*/*/diagnosis/
 ```
@@ -229,8 +249,8 @@ Expected: 五份 HTML ＋ `index.html` ＋ 一份 `plotly.min.js` ＋ 五份 JSO
 
 Run:
 ```bash
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --list-nodes
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --from-node diagnose_score_shift
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --model-version <mv> --list-nodes
+PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb evaluation --env local --post-training --model-version <mv> --from-node diagnose_score_shift
 ```
 Expected: `--list-nodes` 列出五個 `diagnose_*` node；`--from-node` 能只重跑該診斷與下游報表。這驗證了「重跑靠 `--from-node`」這條設計前提真的成立。
 
