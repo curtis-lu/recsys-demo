@@ -91,4 +91,6 @@
 - **根因**：`DataFrame.groupby()` 的 `dropna` 預設是 `True`——**分組鍵含 NaN 的列被整批丟棄，不報錯、不警告**。而 Spark 端的整數欄只要有任一 NULL，`toPandas()` 之後必然是 `float64` 帶 `NaN`（同 §8 的 dtype 家族）。用 `drop_duplicates().sort_values()` 手動迭代則會保留 NaN，所以**把手動迭代重構成 groupby 是典型的引入點**——這正是本次的實際來源（重構前後測試全綠）。
 - **為什麼在診斷層特別貴**：診斷的輸出常被讀成「我量過了，沒事」。一個群靜默消失會讓「沒量到」與「量到零」在報表上長得一模一樣，讀者據此排除掉真正的原因——比不提供這項診斷更糟。
 - **規則**：**彙總診斷數字的 `groupby` 一律顯式寫 `dropna=False`**，NaN 群給明確標籤（如 `"<NULL>"`），並讓輸出帶一則「有 N 個 NULL 群」的觀測。要丟棄 NaN 也可以，但必須是寫出來的決定，不是撿到的預設。
-- **驗證方式**：`grep -rn "groupby(" src/recsys_tfb/diagnosis/ | grep -v dropna` 應為空。針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。
+- **驗證方式**：`grep -rn "groupby(" src/recsys_tfb/diagnosis/` 拿到**候選清單**（不是通過／失敗閘——實測 10 個命中只有 1 個相關，當閘用會被當噪音略過）。逐一問一個問題：**這個分組鍵可能是 NaN 嗎？** 來自使用者資料的欄（context 欄、item、entity）可能；自己造的（`factorize` 碼、自己組的字串標籤）不可能。只有前者需要 `dropna=False`。
+  針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。
+  **已知待查（2026-07-20 掃到、未處理）**：`diagnosis/metric/sample.py:281` 的 `groupby(item_col)` 分組鍵來自使用者資料，item 為 NULL 時該筆會從 `per_item_sampled` 計數靜默消失。屬 Plan 0 已 merge 的程式碼，尚未評估 item 欄是否有上游 not-null 保證。
