@@ -27,6 +27,7 @@ def create_pipeline(
         compute_metrics,
         compute_offset_sweep,
         compute_pair_ledger,
+        diagnose_config_shift,
         draw_diagnosis_sample_node,
         generate_report,
         prepare_eval_data,
@@ -111,6 +112,14 @@ def create_pipeline(
             compute_pair_ledger,
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_pair_ledger",
+        ),
+        # 診斷 1／5（registry: diagnosis.metric.contract.DIAGNOSES）。與上面
+        # 三個舊診斷讀同一份 diagnosis_sample —— 五項診斷的數字要能並排解讀，
+        # 就必須算在同一批列上。報表接線是下一個 task，這裡先落 JSON 產物。
+        Node(
+            diagnose_config_shift,
+            inputs=["diagnosis_sample", "parameters"],
+            outputs="evaluation_config_shift",
         ),
         Node(
             generate_report,

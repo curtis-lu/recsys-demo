@@ -26,6 +26,7 @@ class TestEvaluationPipelineDefault:
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
+            "evaluation_config_shift",
         }
         assert pipeline.outputs == expected
 
@@ -37,7 +38,7 @@ class TestEvaluationPipelineDefault:
             "compute_metrics", "compute_baseline_metrics",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
-            "compute_pair_ledger",
+            "compute_pair_ledger", "diagnose_config_shift",
             "generate_report",
         ]
 
@@ -53,7 +54,7 @@ class TestEvaluationPipelinePostTraining:
             "compute_metrics", "compute_baseline_metrics",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
-            "compute_pair_ledger",
+            "compute_pair_ledger", "diagnose_config_shift",
             "generate_report",
         ]
 
@@ -69,6 +70,7 @@ class TestEvaluationPipelinePostTraining:
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
+            "evaluation_config_shift",
         }
         assert pipeline.outputs == expected
 
@@ -85,7 +87,8 @@ class TestEvaluationPipelineCompareMode:
             "compute_baseline_metrics", "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
             "compute_offset_sweep", "compute_pair_ledger",
-            "generate_comparison_report", "generate_report",
+            "diagnose_config_shift", "generate_comparison_report",
+            "generate_report",
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
@@ -241,3 +244,35 @@ class TestGenerateComparisonReportNodeWiring:
         for label, node in self._comparison_nodes().items():
             assert node.inputs[0] == "eval_predictions_common", label
             assert node.inputs[1] == "compare_predictions_common", label
+
+
+class TestConfigShiftNodeWiring:
+    """診斷 1／5（config_shift）接上 evaluation pipeline。
+
+    只驗接線，不驗計算——計算層的測試在 tests/test_diagnosis/。這裡要釘的是
+    「它真的吃到共用的 diagnosis_sample」：五項診斷共用同一份樣本是一致性
+    保證（不同母體的數字並排解讀會錯），一旦哪天有人把 inputs 改成
+    eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
+    """
+
+    def test_config_shift_node_wired_after_diagnosis_sample(self):
+        pipeline = create_pipeline()
+        names = [n.name for n in pipeline.nodes]
+        assert "diagnose_config_shift" in names
+        assert (
+            names.index("draw_diagnosis_sample_node")
+            < names.index("diagnose_config_shift")
+        )
+
+    def test_config_shift_inputs_and_outputs(self):
+        pipeline = create_pipeline()
+        node = next(
+            n for n in pipeline.nodes if n.name == "diagnose_config_shift"
+        )
+        assert node.inputs == ["diagnosis_sample", "parameters"]
+        assert node.outputs == ["evaluation_config_shift"]
+
+    def test_config_shift_wired_in_post_training_mode_too(self):
+        """--post-training 走的是同一組診斷節點，只有預測來源不同。"""
+        pipeline = create_pipeline(post_training=True)
+        assert "evaluation_config_shift" in pipeline.outputs

@@ -83,9 +83,16 @@ Layer 1 — config-static (implemented here; aggregated by
   ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.ci.n_boot`` ≥ 1; and ``evaluation.segment_columns`` must not
-  use the sampler's reserved names ``stratum`` / ``inclusion_weight``.
-  Predicate: ``diagnosis_metric_param_errors``.
+  ``diagnosis.ci.n_boot`` ≥ 1; ``diagnosis.ci.enabled`` and every
+  ``diagnosis.<name>.enabled`` for ``name`` in
+  ``diagnosis.metric.contract.DIAGNOSES`` must be a real bool (a quoted YAML
+  ``"false"`` is truthy and would silently enable the node); and
+  ``evaluation.segment_columns`` must not use the sampler's reserved names
+  ``stratum`` / ``inclusion_weight``. Predicate:
+  ``diagnosis_metric_param_errors``. Registry diagnoses stay in A15 rather
+  than getting their own code: their ``enabled`` flag is what decides whether
+  the shared diagnosis sample is drawn, i.e. the same invariant family as
+  ``ci.enabled``.
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
@@ -569,6 +576,26 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
             f"(YAML true/false; a quoted string like \"false\" is truthy and "
             f"would silently enable the node)."
         )
+
+    # Same YAML trap for every registry diagnosis (diagnosis.metric.contract.
+    # DIAGNOSES). These belong to A15 rather than a new code: their `enabled`
+    # is what decides whether the SHARED diagnosis sample gets drawn at all,
+    # so it is another member of the same invariant as ci.enabled — not a
+    # separate concern.
+    #
+    # Imported lazily: core/ must not gain an import-time dependency on
+    # diagnosis/ (the layering claim is that diagnosis sits above the core
+    # config layer, not beside it).
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    for name in DIAGNOSES:
+        val = (diag.get(name, {}) or {}).get("enabled", True)
+        if not isinstance(val, bool):
+            errors.append(
+                f"evaluation.diagnosis.{name}.enabled={val!r} must be a "
+                f"boolean (YAML true/false; a quoted string like \"false\" is "
+                f"truthy and would silently enable the node)."
+            )
 
     # ``draw_diagnosis_sample`` adds its own 'stratum' / 'inclusion_weight'
     # columns to the sample, then joins them onto the predictions by query

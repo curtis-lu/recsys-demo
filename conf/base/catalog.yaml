@@ -254,6 +254,11 @@ evaluation_pair_ledger:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/pair_ledger.json
 
+# registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／5
+evaluation_config_shift:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/config_shift.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

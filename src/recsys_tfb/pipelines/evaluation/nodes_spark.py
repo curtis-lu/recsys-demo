@@ -44,6 +44,27 @@ def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool, bool]:
     return bool(ci), bool(sweep), bool(ledger)
 
 
+def _registry_diagnosis_enabled(parameters: dict) -> bool:
+    """registry 診斷（``contract.DIAGNOSES``）有任一啟用嗎。
+
+    與 ``_sample_consumer_flags`` 分開的理由：舊三項（ci／offset_sweep／
+    pair_ledger）是即將被取代的既有診斷、新五項走 registry，兩組生命週期
+    不同。合在一起的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
+    registry 要消除的東西——所以這裡回一個 bool，不回擴增的 tuple。
+
+    鍵與預設值必須跟各消費節點自己讀的完全一致（``enabled``，預設 True），
+    否則閘門與消費端會漂移：使用者關掉舊三項、只開一項 registry 診斷時，
+    樣本不會被抽，消費節點拿到 None 而 fail-loud。
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+    return any(
+        bool((diag.get(name, {}) or {}).get("enabled", True))
+        for name in DIAGNOSES
+    )
+
+
 def prepare_eval_data(
     ranked_predictions: SparkDataFrame,
     label_table: SparkDataFrame,
@@ -193,16 +214,19 @@ def draw_diagnosis_sample_node(
     """Draw the shared driver-side diagnosis sample ONCE per run.
 
     ``compute_metric_ci`` / ``compute_offset_sweep`` / ``compute_pair_ledger``
-    all consume this single sample instead of each re-drawing it (same seed ->
-    identical content; 3 Spark scans collapse to 1). Returns ``None`` when none
-    of the three consumers is enabled — matching the previous behaviour of
-    drawing zero samples in that case.
+    plus every registry diagnosis (``contract.DIAGNOSES``, e.g.
+    ``diagnose_config_shift``) all consume this single sample instead of each
+    re-drawing it (same seed -> identical content; N Spark scans collapse to
+    1). Sharing one sample is also a correctness property, not just a speed
+    one: numbers computed on different populations must not be read side by
+    side. Returns ``None`` only when *every* consumer is disabled.
     """
     ci_on, sweep_on, ledger_on = _sample_consumer_flags(parameters)
-    if not (ci_on or sweep_on or ledger_on):
+    registry_on = _registry_diagnosis_enabled(parameters)
+    if not (ci_on or sweep_on or ledger_on or registry_on):
         logger.info(
-            "diagnosis sample: all consumers (ci/offset_sweep/pair_ledger) "
-            "disabled — skipping sample draw"
+            "diagnosis sample: all consumers (ci/offset_sweep/pair_ledger + "
+            "registry diagnoses) disabled — skipping sample draw"
         )
         return None
 
@@ -214,9 +238,10 @@ def draw_diagnosis_sample_node(
     # "free", which is the constraint for this always-on instrumentation.
     log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
     logger.info(
-        "diagnosis sample drawn once for %d consumer(s): %d queries sampled "
-        "(shared by metric_ci/offset_sweep/pair_ledger)",
-        sum((ci_on, sweep_on, ledger_on)), sample_meta["n_queries_sampled"],
+        "diagnosis sample drawn once for %d legacy consumer(s) + registry "
+        "diagnoses(enabled=%s): %d queries sampled",
+        sum((ci_on, sweep_on, ledger_on)), registry_on,
+        sample_meta["n_queries_sampled"],
     )
     return sample_pdf, sample_meta
 
@@ -415,6 +440,39 @@ def compute_pair_ledger(
         out.get("n_mis_ordered_pairs", 0),
         len(out.get("by_suppressor", {})),
         out.get("map_current"),
+    )
+    return out
+
+
+def diagnose_config_shift(
+    diagnosis_sample: Optional[tuple],
+    parameters: dict,
+) -> dict:
+    """薄 node：領域邏輯全在 ``diagnosis.metric.config_shift``。停用時寫 stub。
+
+    與上面三個舊 node 的差別只有一處，抄形狀時最容易改壞：registry 診斷的
+    ``compute`` 吃的是整個 ``diagnosis_sample`` tuple（``(sample_pdf,
+    sample_meta)``），不是解包後的 ``sample_pdf``——契約在
+    ``diagnosis.metric.contract._SIGNATURES`` 釘住這個簽章。
+    """
+    cfg = (((parameters.get("evaluation", {}) or {})
+            .get("diagnosis", {}) or {}).get("config_shift", {}) or {})
+    if not cfg.get("enabled", True):
+        logger.info("config_shift disabled — writing stub")
+        return {"enabled": False}
+    if diagnosis_sample is None:
+        raise ValueError(
+            "diagnose_config_shift: diagnosis_sample is None while "
+            "evaluation.diagnosis.config_shift.enabled is true — "
+            "draw_diagnosis_sample_node gate out of sync with the consumer flag"
+        )
+    from recsys_tfb.diagnosis.metric import config_shift
+
+    out = config_shift.compute(diagnosis_sample, parameters)
+    logger.info(
+        "config_shift computed: %d context groups, delta=%s CI=[%s, %s]",
+        len(out.get("offset_spread_by_context", {})), out.get("delta"),
+        out.get("delta_ci_low"), out.get("delta_ci_high"),
     )
     return out
 

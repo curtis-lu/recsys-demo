@@ -133,6 +133,12 @@ evaluation:
     pair_ledger:
       enabled: true
 
+    # 診斷 1／5：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
+    # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
+    # 校準層是後貼的）。
+    config_shift:
+      enabled: true
+
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
     # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
     # 正式評估必須留空。
