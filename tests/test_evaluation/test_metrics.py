@@ -5,14 +5,18 @@ Scope: only ``compute_ap`` + ``compute_mean_ap``. The dict-shaped
 ``recsys_tfb.evaluation.metrics_spark``; see ``test_metrics_spark.py``.
 """
 
+import inspect
+
 import numpy as np
 import pytest
 
 from recsys_tfb.evaluation.metrics import (
+    align_positive_row_weights,
     compute_ap,
     compute_macro_per_item_map,
     compute_mean_ap,
     macro_from_per_item,
+    positive_row_contributions,
 )
 
 
@@ -267,3 +271,304 @@ class TestComputeMacroPerItemMapParams:
             self.GROUPS, self.ITEMS, self.Y, self.SCORE, shrinkage_k=1.0
         )
         assert r == pytest.approx(61 / 72)
+
+
+class TestWeightedMap:
+    """Optional query-level ``weights`` (Horvitz–Thompson inclusion weights).
+
+    Same fixture as ``TestComputeMacroPerItemMapParams``:
+      q0: A(0.9,y=1) B(0.1,y=0) -> A prec@1 = 1.0
+      q1: A(0.1,y=1) B(0.9,y=0) -> A prec@2 = 0.5
+      q2: A(0.1,y=0) B(0.9,y=1) -> B prec@1 = 1.0
+    unweighted per-item: A = (1.0+0.5)/2 = 0.75, B = 1.0 ; macro = 0.875
+    """
+
+    GROUPS = np.array([0, 0, 1, 1, 2, 2])
+    ITEMS = np.array(["A", "B", "A", "B", "A", "B"])
+    Y = np.array([1, 0, 1, 0, 0, 1])
+    SCORE = np.array([0.9, 0.1, 0.1, 0.9, 0.1, 0.9])
+
+    @staticmethod
+    def _duplicate_query(groups, items, y, score, query_id, times):
+        """Append ``times - 1`` verbatim copies of ``query_id``'s rows as NEW
+        queries. Cloning a query into a fresh group id (rather than growing the
+        existing one) is what a duplicated *sampling unit* means: within-query
+        ranking is untouched, only the query's multiplicity changes."""
+        mask = groups == query_id
+        next_gid = int(groups.max()) + 1
+        g, it, yy, sc = [groups], [items], [y], [score]
+        for j in range(times - 1):
+            g.append(np.full(int(mask.sum()), next_gid + j, dtype=groups.dtype))
+            it.append(items[mask])
+            yy.append(y[mask])
+            sc.append(score[mask])
+        return (
+            np.concatenate(g), np.concatenate(it),
+            np.concatenate(yy), np.concatenate(sc),
+        )
+
+    # --- 1. backward compatibility: omitted == explicit None (exact) ---
+
+    def test_omitted_weights_bit_identical_to_none(self):
+        a = compute_macro_per_item_map(self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+        b = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=None
+        )
+        assert a == b  # exact, not approx — the None path must not be rerouted
+
+    def test_omitted_weights_bit_identical_to_none_with_params(self):
+        kwargs = dict(k=2, weight_alpha=1.0, min_positives=1, shrinkage_k=1.0)
+        a = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, **kwargs
+        )
+        b = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=None, **kwargs
+        )
+        assert a == b
+
+    def test_none_path_never_materializes_a_weight_vector(self, monkeypatch):
+        """The ``weights=None`` path must run the ORIGINAL unweighted
+        aggregation, not ``np.ones``-filled weighted aggregation.
+
+        Why this is a structural test and not a numeric one: on any small
+        fixture ``contrib * 1.0`` is exact and ``np.bincount`` accumulates in
+        the same order, so an ``np.ones`` fill-in produces bit-identical
+        output here and NO equality assertion can detect it. Verified: swapping
+        the None branch for an ``np.ones`` reroute leaves every numeric test in
+        this class green. The contract we actually need to defend is that the
+        main metric path (shared with HPO and the Spark parity tests) keeps its
+        exact float op-order, so we assert on the op-order itself — the
+        per-item count must come from an UNWEIGHTED ``np.bincount``.
+        """
+        import recsys_tfb.evaluation.metrics as metrics_mod
+
+        real_bincount = np.bincount
+        seen_weights = []
+
+        def spy(x, weights=None, minlength=0):
+            seen_weights.append(weights)
+            return real_bincount(x, weights=weights, minlength=minlength)
+
+        monkeypatch.setattr(metrics_mod.np, "bincount", spy)
+        compute_macro_per_item_map(self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+
+        assert seen_weights, "expected the aggregation to use np.bincount"
+        assert any(w is None for w in seen_weights), (
+            "weights=None must reach an unweighted np.bincount; an np.ones "
+            "fill-in silently reroutes the main metric path through float "
+            "weighting and can shift results in the last ulp"
+        )
+
+    def test_weighted_path_does_weight_every_bincount(self, monkeypatch):
+        """Mirror of the above: when weights ARE supplied, neither the
+        numerator nor the denominator may fall back to an unweighted count."""
+        import recsys_tfb.evaluation.metrics as metrics_mod
+
+        real_bincount = np.bincount
+        seen_weights = []
+
+        def spy(x, weights=None, minlength=0):
+            seen_weights.append(weights)
+            return real_bincount(x, weights=weights, minlength=minlength)
+
+        monkeypatch.setattr(metrics_mod.np, "bincount", spy)
+        compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE,
+            weights=np.where(self.GROUPS == 0, 2.0, 1.0),
+        )
+
+        assert seen_weights, "expected the aggregation to use np.bincount"
+        assert all(w is not None for w in seen_weights), (
+            "every bincount on the weighted path must carry weights; an "
+            "unweighted denominator divides weighted mass by raw support"
+        )
+
+    def test_contributions_return_arity_is_always_two(self):
+        """positive_row_contributions must never vary its return arity: a
+        caller writing ``a, b = f(...)`` has to keep working for every
+        argument combination, including the empty-input early returns."""
+        empty = np.array([], dtype=np.int64)
+        for args in (
+            (self.GROUPS, self.Y, self.SCORE),
+            (self.GROUPS, self.Y, self.SCORE, 2),          # k truncation
+            (self.GROUPS, np.zeros_like(self.Y), self.SCORE),  # no positives
+            (empty, empty, np.array([], dtype=np.float64)),    # empty input
+        ):
+            out = positive_row_contributions(*args)
+            assert isinstance(out, tuple) and len(out) == 2, args
+        # ...and it takes no weights argument at all — weight broadcasting
+        # lives in align_positive_row_weights.
+        assert "weights" not in inspect.signature(
+            positive_row_contributions
+        ).parameters
+
+    # --- 2. uniform weights == unweighted ---
+
+    def test_uniform_weights_equal_unweighted(self):
+        unweighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE,
+            weights=np.ones(len(self.GROUPS)),
+        )
+        assert weighted == pytest.approx(unweighted)
+
+    def test_uniform_weights_equal_unweighted_with_params(self):
+        kwargs = dict(k=2, weight_alpha=1.0, min_positives=1, shrinkage_k=1.0)
+        unweighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, **kwargs
+        )
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE,
+            weights=np.ones(len(self.GROUPS)), **kwargs
+        )
+        assert weighted == pytest.approx(unweighted)
+
+    # --- 3. THE core semantic: weight 2 == the query counted twice ---
+
+    def test_weight_two_equals_duplicating_that_query(self):
+        w = np.where(self.GROUPS == 0, 2.0, 1.0)
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=w
+        )
+        dg, di, dy, ds = self._duplicate_query(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, query_id=0, times=2
+        )
+        duplicated = compute_macro_per_item_map(dg, di, dy, ds)
+        assert weighted == pytest.approx(duplicated, rel=1e-12)
+        # sanity: this is a real change, not a no-op equality
+        assert weighted != pytest.approx(
+            compute_macro_per_item_map(self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+        )
+        assert weighted == pytest.approx((2.5 / 3 + 1.0) / 2)
+
+    def test_weight_three_equals_tripling_that_query(self):
+        w = np.where(self.GROUPS == 1, 3.0, 1.0)
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=w
+        )
+        dg, di, dy, ds = self._duplicate_query(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, query_id=1, times=3
+        )
+        assert weighted == pytest.approx(
+            compute_macro_per_item_map(dg, di, dy, ds), rel=1e-12
+        )
+
+    def test_duplication_equivalence_holds_for_param_family(self):
+        """The weighted path must also reproduce duplication once
+        min_positives / shrinkage_k / weight_alpha are active — i.e. the
+        weighted per-item n_pos, not the raw row count, must reach the
+        macro combine."""
+        w = np.where(self.GROUPS == 0, 2.0, 1.0)
+        dg, di, dy, ds = self._duplicate_query(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, query_id=0, times=2
+        )
+        for kwargs in (
+            dict(weight_alpha=1.0),
+            dict(min_positives=2),
+            dict(min_positives=3),
+            dict(shrinkage_k=1.0),
+            dict(weight_alpha=1.0, min_positives=2, shrinkage_k=1.0),
+        ):
+            weighted = compute_macro_per_item_map(
+                self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=w, **kwargs
+            )
+            duplicated = compute_macro_per_item_map(dg, di, dy, ds, **kwargs)
+            assert weighted == pytest.approx(duplicated, rel=1e-12), kwargs
+
+    def test_duplication_equivalence_at_scale_random(self):
+        """Duplication equivalence on random multi-query/multi-item data with
+        heterogeneous integer weights — the 6-row fixture above is too small
+        to distinguish several plausible-but-wrong aggregations."""
+        rng = np.random.default_rng(7)
+        n_queries, n_items = 60, 8
+        sizes = rng.integers(3, n_items + 1, size=n_queries)
+        groups = np.repeat(np.arange(n_queries), sizes)
+        items = np.concatenate([
+            rng.choice(n_items, size=s, replace=False) for s in sizes
+        ]).astype(str)
+        y = rng.integers(0, 2, size=groups.shape[0]).astype(np.int64)
+        score = rng.uniform(size=groups.shape[0])  # distinct -> no ties
+        mult = rng.integers(1, 4, size=n_queries)  # per-query multiplicity
+        w = mult[groups].astype(np.float64)
+
+        # explicit replay: emit each query `mult` times as fresh group ids
+        dg, di, dy, ds, next_gid = [], [], [], [], 0
+        for q in range(n_queries):
+            m = groups == q
+            for _ in range(int(mult[q])):
+                dg.append(np.full(int(m.sum()), next_gid))
+                di.append(items[m]); dy.append(y[m]); ds.append(score[m])
+                next_gid += 1
+        dg = np.concatenate(dg); di = np.concatenate(di)
+        dy = np.concatenate(dy); ds = np.concatenate(ds)
+
+        for kwargs in (
+            {}, dict(k=3), dict(weight_alpha=1.0),
+            dict(min_positives=5), dict(k=3, shrinkage_k=2.0),
+        ):
+            weighted = compute_macro_per_item_map(
+                groups, items, y, score, weights=w, **kwargs
+            )
+            duplicated = compute_macro_per_item_map(dg, di, dy, ds, **kwargs)
+            assert weighted == pytest.approx(duplicated, rel=1e-12), kwargs
+
+    # --- 4. weights really reach the macro aggregate ---
+
+    def test_weights_change_macro(self):
+        w = np.where(self.GROUPS == 0, 3.0, 1.0)
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=w
+        )
+        unweighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
+        )
+        # A = (3*1.0 + 1*0.5)/4 = 0.875 ; B = 1.0 ; macro = 0.9375
+        assert weighted == pytest.approx(0.9375)
+        assert unweighted == pytest.approx(0.875)
+        assert weighted != pytest.approx(unweighted)
+
+    def test_downweighting_a_query_also_moves_macro(self):
+        """Weights below 1 must move the estimate the other way — guards
+        against an implementation that only ever adds mass."""
+        w = np.where(self.GROUPS == 0, 0.5, 1.0)
+        weighted = compute_macro_per_item_map(
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE, weights=w
+        )
+        # A = (0.5*1.0 + 1*0.5)/1.5 = 2/3 ; B = 1.0 ; macro = 5/6
+        assert weighted == pytest.approx(5 / 6)
+
+    # --- the shared broadcast helper aligns weights onto positive rows ---
+
+    def test_align_helper_selects_the_positive_row_weights(self):
+        w = np.array([2.0, 2.0, 1.0, 1.0, 5.0, 5.0])
+        contrib, row_idx = positive_row_contributions(
+            self.GROUPS, self.Y, self.SCORE
+        )
+        w_pos = align_positive_row_weights(w, len(self.GROUPS), row_idx)
+        assert w_pos.shape == contrib.shape
+        assert np.array_equal(w_pos, w[row_idx])
+
+    def test_align_helper_rejects_wrong_length(self):
+        _contrib, row_idx = positive_row_contributions(
+            self.GROUPS, self.Y, self.SCORE
+        )
+        with pytest.raises(ValueError, match="row-aligned"):
+            align_positive_row_weights(
+                np.ones(len(self.GROUPS) - 1), len(self.GROUPS), row_idx
+            )
+
+    def test_weights_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            compute_macro_per_item_map(
+                self.GROUPS, self.ITEMS, self.Y, self.SCORE,
+                weights=np.ones(len(self.GROUPS) - 1),
+            )
+
+    def test_weighted_empty_input_returns_zero(self):
+        empty = np.array([], dtype=np.int64)
+        assert compute_macro_per_item_map(
+            empty, np.array([]), empty, np.array([], dtype=np.float64),
+            weights=np.array([], dtype=np.float64),
+        ) == 0.0

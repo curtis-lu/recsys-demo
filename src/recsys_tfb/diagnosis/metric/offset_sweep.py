@@ -6,7 +6,7 @@ mAP(δ*) − mAP(0) ＝「純水準（per-item 平移）可收復的指標缺口
 的部分＝條件判別力缺口（必須動訓練）。
 
 設計要點（計畫「設計定案」節的落地）：
-- δ 單位 log-odds：排序分數先 logit 變換再平移，與對帳層 offset 同尺度。
+- δ 單位 log-odds：排序分數先 logit 變換再平移。
   整欄超出 (0,1) 時略過 logit（直接平移原始分數）＋ notes 註記。
 - holdout：query 層切折（query key CRC32 hash 分桶，列序無關），δ 只在
   fit 折搜尋、mAP 兩折分開報告——防「收復缺口」只是擬合驗證雜訊。

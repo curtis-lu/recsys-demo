@@ -2,7 +2,8 @@
 
 抽出動機：``debug_inject_offsets`` 的注入語意是分流層閘門的已知答案來源，
 必須在家族內完全一致，不允許兩份複製品各自漂移。scope＝僅分流層家族的
-兩個 leaf 節點；metric_ci／quadrant 不受影響。
+兩個 leaf 節點；metric_ci 不受影響（``quadrant.py`` 已刪，不再是本檔案
+scope 說明的相關對照對象）。
 
 ``_HASH_BUCKETS`` 與 ``utils.hashing.HASH_BUCKETS`` 同值（100_000）——
 該模組 top-level import pyspark，而分流層家族的 numpy-leaf 模組

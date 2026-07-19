@@ -346,35 +346,6 @@ def compute_metric_ci(
     return out
 
 
-def compute_quadrant(
-    eval_predictions: Optional[SparkDataFrame],
-    label_table: Optional[SparkDataFrame],
-    metric_ci: Optional[dict],
-    parameters: dict,
-) -> dict:
-    """象限層薄 node（框架診斷項目 3/5/10）。
-
-    領域邏輯全在 ``diagnosis.metric.quadrant``。停用時寫 stub；上游診斷
-    產物（metric_ci）是停用 stub 時 best-effort 降級不失敗。
-    """
-    eval_params = parameters.get("evaluation", {}) or {}
-    cfg = ((eval_params.get("diagnosis", {}) or {}).get("quadrant", {}) or {})
-    if not cfg.get("enabled", True):
-        logger.info("quadrant disabled — writing stub")
-        return {"enabled": False}
-    if eval_predictions is None or label_table is None:
-        raise ValueError(
-            "compute_quadrant: eval_predictions and label_table are required "
-            "when evaluation.diagnosis.quadrant.enabled is true"
-        )
-    from recsys_tfb.diagnosis.metric.quadrant import build_quadrant_summary
-    out = build_quadrant_summary(
-        eval_predictions, label_table, metric_ci, parameters
-    )
-    logger.info("quadrant computed: %d items", len(out["by_item"]))
-    return out
-
-
 def compute_offset_sweep(
     diagnosis_sample: Optional[tuple],
     parameters: dict,
@@ -448,28 +419,14 @@ def compute_pair_ledger(
     return out
 
 
-def assemble_triage_summary(quadrant: Optional[dict],
-                            offset_sweep: Optional[dict],
-                            gain_ledger: Optional[dict],
-                            parameters: dict) -> dict:
-    """Triage 總表 node：純 dict 合成，gain_ledger 缺席 best-effort 降級。"""
-    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-    if not (diag.get("triage", {}) or {}).get("enabled", True):
-        return {"enabled": False}
-    from recsys_tfb.diagnosis.metric.triage import triage
-    return triage(quadrant, offset_sweep, gain_ledger, parameters)
-
-
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
     parameters: dict,
     baseline_metrics: Optional[dict] = None,
     metric_ci: Optional[dict] = None,
-    quadrant: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
     pair_ledger: Optional[dict] = None,
-    triage: Optional[dict] = None,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
@@ -531,8 +488,6 @@ def generate_report(
         baseline_metrics=baseline_metrics,
         diagnostics_frames=diagnostics_frames,
         metric_ci=metric_ci,
-        quadrant=quadrant,
         offset_sweep=offset_sweep,
         pair_ledger=pair_ledger,
-        triage=triage,
     )

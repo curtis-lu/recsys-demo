@@ -1,4 +1,10 @@
-"""指標層診斷：抽樣、CI、對帳、判別力、象限、offset sweep、成對帳本、triage。
+"""指標層診斷：評估側診斷模組，全部跑在 ``sample.py`` 產出的共用診斷抽樣上。
 
-方法論見 docs/ranking-diagnosis-framework.md、判讀見 docs/pipelines/evaluation-diagnosis.md。
+共用同一份抽樣是刻意的一致性保證——若各診斷各自抽樣，它們的數字描述的就不是
+同一批列，並排解讀會出現細微的錯。
+
+此處刻意不列舉子模組：清單增刪頻繁（本檔曾同時列出已刪除的「對帳」又漏掉實際
+存在的模組），列了必然與實況漂移。以目錄內容為準。
+
+方法論見 docs/ranking-diagnosis-framework.md。
 """

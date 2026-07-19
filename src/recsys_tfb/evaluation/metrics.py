@@ -109,6 +109,15 @@ def positive_row_contributions(
     :func:`compute_macro_per_item_map` and the diagnosis bootstrap
     (``diagnosis.metric.uncertainty``) — cluster resampling never changes
     within-query ranking, so contributions are computed exactly once.
+
+    Returns a **fixed 2-tuple** ``(contrib, row_idx)`` — always, for every
+    argument combination. Sampling weights deliberately do NOT belong here:
+    a query counted twice has the same internal ranking, hence the same
+    per-row precisions, so weights cannot influence what this function
+    computes; they only need broadcasting onto the returned positive rows.
+    That broadcast lives in :func:`align_positive_row_weights`, which every
+    weighted caller shares, so this function's return arity never varies
+    with its arguments.
     """
     if len(groups) == 0:
         return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
@@ -140,7 +149,41 @@ def positive_row_contributions(
 
     if not contribs:
         return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
+
     return np.concatenate(contribs), np.concatenate(row_idx)
+
+
+def align_positive_row_weights(
+    weights: np.ndarray,
+    n_rows: int,
+    row_idx: np.ndarray,
+) -> np.ndarray:
+    """Validate a query-level weight vector and select the positive rows.
+
+    ``weights`` is **row-aligned**: one entry per input row, every row of a
+    query carrying that query's weight (e.g. the inverse inclusion
+    probability of a stratified diagnosis sample). ``n_rows`` is the input
+    row count the vector must match (``len(groups)``); ``row_idx`` is the
+    original-order index vector returned by
+    :func:`positive_row_contributions`. Returns ``weights[row_idx]`` as
+    float64 — the weight of each positive row, aligned element-for-element
+    with that call's ``contrib``.
+
+    Why this is a separate function rather than an optional argument of
+    :func:`positive_row_contributions`: a return arity that changes with an
+    argument is a footgun for callers that unpack it, and the two things
+    have genuinely different jobs — one ranks, one broadcasts. Keeping the
+    validation and the broadcast here (rather than inline at each call site)
+    is what stops the logic from being duplicated between
+    :func:`compute_macro_per_item_map` and the diagnosis bootstrap.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    if w.shape != (n_rows,):
+        raise ValueError(
+            f"weights must be row-aligned with groups: expected shape "
+            f"({n_rows},), got {w.shape}"
+        )
+    return w[row_idx]
 
 
 def macro_from_per_item(
@@ -185,6 +228,7 @@ def compute_macro_per_item_map(
     weight_alpha: float = 0.0,
     min_positives: int = 0,
     shrinkage_k: float = 0.0,
+    weights: Optional[np.ndarray] = None,
 ) -> float:
     """Macro average over items of per-item attributed mAP@k.
 
@@ -209,6 +253,27 @@ def compute_macro_per_item_map(
     ``weight_alpha`` weights items ``∝ n_pos**weight_alpha``. See
     :func:`macro_from_per_item` for the exact formulas.
 
+    ``weights`` (optional) is a **row-aligned, query-level** weight vector —
+    typically the inverse inclusion probability of a stratified diagnosis
+    sample, where unweighted estimates are biased whenever the sampling ratio
+    is below 1. Semantics: giving a query weight ``w`` is defined to be exactly
+    equivalent to that query appearing ``w`` times in the input. Concretely,
+    each item's AP becomes the *weighted* mean over its positive rows, and the
+    per-item ``n_pos`` handed to :func:`macro_from_per_item` becomes the sum of
+    those weights — so ``min_positives`` / ``shrinkage_k`` / ``weight_alpha``
+    all see the effective (weighted) count rather than the raw row count.
+
+    The macro combine across items stays equal-weight: weighting corrects each
+    item's *within-item* estimate, it does not re-weight the items themselves.
+    That is precisely the duplication semantics — replaying a query does not
+    add items to the catalogue. This is also why ``weights`` is not threaded
+    into :func:`macro_from_per_item`: its ``n_pos`` argument already carries
+    the weight, so a second weight channel there would double-count.
+
+    ``weights=None`` (the default) runs the original unweighted code path
+    verbatim — no ``np.ones`` fill-in — so the main metric path, which shares
+    these primitives with the diagnosis layer, stays bit-for-bit unchanged.
+
     Empty input, or no positive rows anywhere, returns ``0.0``. If every
     item is excluded by ``min_positives``, also returns ``0.0``.
 
@@ -218,13 +283,28 @@ def compute_macro_per_item_map(
     aggregation via ``np.unique`` + ``np.bincount``.
     """
     contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
+    # Validate/broadcast before the empty-input return so a malformed weight
+    # vector raises regardless of whether the input happened to be empty.
+    w_pos = (
+        None if weights is None
+        else align_positive_row_weights(weights, len(groups), row_idx)
+    )
     if len(contrib_all) == 0:
         return 0.0
 
     items_all = items[row_idx]
     _, inv = np.unique(items_all, return_inverse=True)
-    sums = np.bincount(inv, weights=contrib_all)
-    counts = np.bincount(inv)
+    if w_pos is None:
+        sums = np.bincount(inv, weights=contrib_all)
+        counts = np.bincount(inv)
+    else:
+        sums = np.bincount(inv, weights=contrib_all * w_pos)
+        # Weighted denominator: the effective number of positive rows behind
+        # each item, NOT len(rows). Using the raw count here would divide
+        # weighted mass by unweighted support and silently rescale every
+        # per-item AP.
+        counts = np.bincount(inv, weights=w_pos)
+
     per_item = sums / counts
     macro = macro_from_per_item(
         per_item, counts, weight_alpha, min_positives, shrinkage_k

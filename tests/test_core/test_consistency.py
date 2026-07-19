@@ -643,12 +643,43 @@ class TestDiagnosisMetricParamsA15:
             ci={"n_boot": 0},
         )
         errors = diagnosis_metric_param_errors(p)
-        assert len(errors) == 7
         joined = "\n".join(errors)
+        # Token check first: if a predicate is dropped, the failure message
+        # then names *which* key stopped being validated, instead of only
+        # reporting a count that went from 7 to 6.
         for token in ["weight_alpha", "metric.k", "min_positives",
                       "shrinkage_k", "max_queries",
                       "min_pos_queries_per_item", "n_boot"]:
-            assert token in joined
+            assert token in joined, f"{token} is no longer validated"
+        assert len(errors) == 7
+
+    def test_max_queries_below_one_rejected(self):
+        """A15 must reject ``max_queries <= 0`` on its own.
+
+        Not redundant with test_each_bad_value_reports: this is the one key
+        whose absence degrades *silently* rather than crashing.
+        ``draw_diagnosis_sample`` with ``max_queries=0`` and a take-all item
+        does not raise — it returns a 1-query sample with
+        ``sample_ratio=0.0``, i.e. a plausible-looking artefact computed from
+        almost no data. (With no take-all item it instead dies at
+        ``sample.py`` with an opaque ``AttributeError: 'NoneType' object has
+        no attribute 'withColumn'``.) Both are config errors that must be
+        caught at CLI entry, before Spark starts. Mirrors the >= 1 guard on
+        the training-side ``diagnostics.shap.quadrant_*`` int keys (A20).
+        """
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in (0, -1):
+            errors = diagnosis_metric_param_errors(
+                self._params(sample={"max_queries": bad})
+            )
+            assert len(errors) == 1, errors
+            assert "max_queries" in errors[0] and "int >= 1" in errors[0]
+        # a bool is not an acceptable int here (True == 1 would slip through
+        # a naive `>= 1` check)
+        errors = diagnosis_metric_param_errors(
+            self._params(sample={"max_queries": True})
+        )
+        assert len(errors) == 1 and "max_queries" in errors[0]
 
     def test_wired_into_validate(self):
         import pytest as _pytest
@@ -659,6 +690,57 @@ class TestDiagnosisMetricParamsA15:
         p = self._params(metric={"weight_alpha": 2.0})
         with _pytest.raises(ConfigConsistencyError, match="weight_alpha"):
             validate_config_consistency(p)
+
+
+class TestReservedSegmentColumnsA15:
+    """A15：segment_columns 不得用抽樣器的保留欄名。
+
+    為什麼要在 config 層再擋一次（``sample.py::_guard_reserved_columns``
+    已經有 runtime 守衛）：兩者驗的輸入不同。這條驗「config 宣告了什麼」，
+    在 CLI entry 一秒內擋掉；runtime 那條驗「實際 DataFrame 有什麼欄」，
+    是給繞過 Layer-1 的呼叫路徑（``scripts/*_diagnosis.py`` 直接 import）
+    的 backstop。少了這條，使用者要等 Spark 起來 2–4 分鐘才知道配置錯了。
+    """
+
+    def _params(self, seg_cols):
+        return {"evaluation": {"segment_columns": seg_cols}}
+
+    def test_reserved_names_rejected(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in ("stratum", "inclusion_weight"):
+            errors = diagnosis_metric_param_errors(self._params([bad]))
+            assert len(errors) == 1, errors
+            assert bad in errors[0] and "reserved" in errors[0]
+
+    def test_both_reserved_names_reported_together(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        errors = diagnosis_metric_param_errors(
+            self._params(["cust_segment_typ", "stratum", "inclusion_weight"])
+        )
+        assert len(errors) == 2
+        joined = "\n".join(errors)
+        assert "stratum" in joined and "inclusion_weight" in joined
+
+    def test_ordinary_segment_columns_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        assert diagnosis_metric_param_errors(
+            self._params(["cust_segment_typ", "age_band"])
+        ) == []
+        # 缺席 / None 都不算錯
+        assert diagnosis_metric_param_errors({"evaluation": {}}) == []
+        assert diagnosis_metric_param_errors(self._params(None)) == []
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            validate_config_consistency,
+        )
+        # match 用 "reserved" 而非 "stratum"：A10（segment_columns 沒有對應
+        # segment_source）也會對同一份 config 報錯、訊息裡同樣有 "stratum"，
+        # 拿 "stratum" 當 match 的話這條測試在 A15 被拔掉後照樣會綠。
+        with _pytest.raises(ConfigConsistencyError, match="reserved column"):
+            validate_config_consistency(self._params(["stratum"]))
 
 
 class TestEnabledMustBeBool:
@@ -674,44 +756,6 @@ class TestEnabledMustBeBool:
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
         p = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
         assert diagnosis_metric_param_errors(p) == []
-
-
-class TestQuadrantParamsA17:
-    def _params(self, quad):
-        return {"evaluation": {"diagnosis": {"quadrant": quad}}}
-
-    def test_absent_and_valid_defaults_clean(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        assert quadrant_param_errors({}) == []
-        assert quadrant_param_errors(self._params(
-            {"enabled": True, "auc_threshold": 0.6,
-             "top_k_occupancy": 1}
-        )) == []
-
-    def test_bad_values_report(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        errors = quadrant_param_errors(self._params(
-            {"auc_threshold": 0.4, "top_k_occupancy": 0,
-             "enabled": "false"}
-        ))
-        assert len(errors) == 3
-        joined = "\n".join(errors)
-        assert "auc_threshold" in joined
-        assert "top_k_occupancy" in joined and "enabled" in joined
-
-    def test_auc_threshold_boundaries(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) != []
-        assert quadrant_param_errors(self._params({"auc_threshold": 0.51})) == []
-        assert quadrant_param_errors(self._params({"auc_threshold": 1.0})) != []
-
-    def test_wired_into_validate(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError, validate_config_consistency,
-        )
-        with _pytest.raises(ConfigConsistencyError, match="auc_threshold"):
-            validate_config_consistency(self._params({"auc_threshold": 0.4}))
 
 
 class TestOffsetSweepParamsA18:
@@ -833,41 +877,89 @@ class TestPairLedgerParamsA19:
             )
 
 
-class TestStructureTriageParamsA20:
-    def _params(self, background=None, gain_ledger_enabled=None, triage_enabled=None):
-        diag = {}
+class TestTrainingDiagnosticsParamsA20:
+    def _params(self, background=None, gain_ledger_enabled=None,
+                quadrant_enabled=None, quadrant_top_k_decision=None,
+                quadrant_sample_per_cell=None, quadrant_min_rows=None):
+        shap_cfg = {}
         if background is not None:
-            diag["shap"] = {"background": background}
+            shap_cfg["background"] = background
+        if quadrant_enabled is not None:
+            shap_cfg["quadrant_enabled"] = quadrant_enabled
+        if quadrant_top_k_decision is not None:
+            shap_cfg["quadrant_top_k_decision"] = quadrant_top_k_decision
+        if quadrant_sample_per_cell is not None:
+            shap_cfg["quadrant_sample_per_cell"] = quadrant_sample_per_cell
+        if quadrant_min_rows is not None:
+            shap_cfg["quadrant_min_rows"] = quadrant_min_rows
+        diag = {}
+        if shap_cfg:
+            diag["shap"] = shap_cfg
         if gain_ledger_enabled is not None:
             diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
-        params = {"diagnostics": diag}
-        if triage_enabled is not None:
-            params["evaluation"] = {
-                "diagnosis": {"triage": {"enabled": triage_enabled}}
-            }
-        return params
+        return {"diagnostics": diag}
 
     def test_bad_background_domain_rejected(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        errs = structure_triage_param_errors(self._params(background="per_query"))
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(self._params(background="per_query"))
         assert len(errs) == 1
         assert "diagnostics.shap.background" in errs[0]
 
     def test_valid_background_values_clean(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        assert structure_triage_param_errors(self._params(background="global")) == []
-        assert structure_triage_param_errors(self._params(background="per_item")) == []
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(self._params(background="global")) == []
+        assert training_diagnostics_param_errors(self._params(background="per_item")) == []
         # absent block / absent key -> default "global" -> clean
-        assert structure_triage_param_errors({}) == []
+        assert training_diagnostics_param_errors({}) == []
 
-    def test_non_bool_enabled_flags_both_rejected(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        errs = structure_triage_param_errors(
-            self._params(gain_ledger_enabled="yes", triage_enabled=1)
+    def test_non_bool_gain_ledger_enabled_rejected(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(
+            self._params(gain_ledger_enabled="yes")
         )
-        assert len(errs) == 2
-        assert any("gain_ledger.enabled" in e for e in errs)
-        assert any("triage.enabled" in e for e in errs)
+        assert len(errs) == 1
+        assert "gain_ledger.enabled" in errs[0]
+
+    def test_non_bool_quadrant_enabled_rejected(self):
+        # The failure mode this predicate exists to catch (see docstring):
+        # shap_cases.py / population_spark.py read
+        # cfg.get("quadrant_enabled", True) with bare truthiness, so a
+        # quoted YAML string like "false" is truthy in Python and would
+        # silently enable the node instead of disabling it.
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(
+            self._params(quadrant_enabled="false")
+        )
+        assert len(errs) == 1
+        assert "quadrant_enabled" in errs[0]
+
+    def test_valid_quadrant_enabled_values_clean(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(
+            self._params(quadrant_enabled=True)) == []
+        assert training_diagnostics_param_errors(
+            self._params(quadrant_enabled=False)) == []
+        # absent key -> default True -> clean
+        assert training_diagnostics_param_errors({}) == []
+
+    def test_non_positive_int_quadrant_keys_rejected(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        for key, bad in (
+            ("quadrant_top_k_decision", 0),
+            ("quadrant_sample_per_cell", -1),
+            ("quadrant_min_rows", 1.5),
+        ):
+            errs = training_diagnostics_param_errors(self._params(**{key: bad}))
+            assert len(errs) == 1, (key, bad, errs)
+            assert key in errs[0]
+
+    def test_valid_quadrant_int_keys_clean(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(self._params(
+            quadrant_top_k_decision=1,
+            quadrant_sample_per_cell=30,
+            quadrant_min_rows=10,
+        )) == []
 
     def test_registered_in_validate_config_consistency(self):
         import pytest as _pytest

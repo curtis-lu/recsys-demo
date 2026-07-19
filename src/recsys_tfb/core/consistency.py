@@ -83,13 +83,17 @@ Layer 1 — config-static (implemented here; aggregated by
   ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
+  ``diagnosis.ci.n_boot`` ≥ 1; and ``evaluation.segment_columns`` must not
+  use the sampler's reserved names ``stratum`` / ``inclusion_weight``.
+  Predicate: ``diagnosis_metric_param_errors``.
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
-* A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
-  ``auc_threshold`` ∈ (0.5, 1); ``top_k_occupancy`` integer >= 1.
-  Predicate: ``quadrant_param_errors``.
+* A17 — retired 2026-07-19 with the quadrant diagnosis layer (threshold-based
+  bucketing discarded continuous information; superseded by a scatter view).
+  The code is NOT renumbered: existing docs and plans cite invariants by
+  number, so reusing A17 or shifting A18+ would silently repoint those
+  references.
 * A18 — ``evaluation.diagnosis.{offset_sweep,debug_inject_offsets}``
   parameter domains: ``holdout_fraction`` ∈ (0,1); ``shrink_lambda`` >= 0;
   ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
@@ -97,11 +101,12 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
-* A20 — structure-layer (gain_ledger + conditional-SHAP background) and triage
-  diagnostics parameter domains: ``diagnostics.shap.background`` ∈
-  {global, per_item}; ``diagnostics.gain_ledger.enabled`` and
-  ``evaluation.diagnosis.triage.enabled`` are bool. Predicate:
-  ``structure_triage_param_errors``.
+* A20 — training-side ``diagnostics.*`` parameter domains:
+  ``diagnostics.shap.background`` ∈ {global, per_item};
+  ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
+  quadrant_enabled`` are bool; ``diagnostics.shap.quadrant_top_k_decision`` /
+  ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
+  Predicate: ``training_diagnostics_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -564,33 +569,24 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
             f"(YAML true/false; a quoted string like \"false\" is truthy and "
             f"would silently enable the node)."
         )
-    return errors
 
-
-def quadrant_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.quadrant parameter domains (A17)."""
-    errors: list[str] = []
-    quad = (
-        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-        .get("quadrant", {}) or {}
+    # ``draw_diagnosis_sample`` adds its own 'stratum' / 'inclusion_weight'
+    # columns to the sample, then joins them onto the predictions by query
+    # key. A segment column of the same name would be duplicated by that join
+    # and blow up far downstream with an opaque pandas error ("Grouper for
+    # 'stratum' not 1-dimensional"). Catching it here means the CLI rejects
+    # the config in ~1s instead of 2-4 minutes into a Spark job.
+    reserved = {"stratum", "inclusion_weight"}
+    bad_seg = sorted(
+        set(ev.get("segment_columns", []) or []) & reserved
     )
-    thr = quad.get("auc_threshold", 0.6)
-    if not (_is_number(thr) and 0.5 < float(thr) < 1.0):
+    for col in bad_seg:
         errors.append(
-            f"evaluation.diagnosis.quadrant.auc_threshold={thr!r} must be a "
-            f"number in (0.5, 1)."
-        )
-    k = quad.get("top_k_occupancy", 1)
-    if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.top_k_occupancy={k!r} must be an "
-            f"integer >= 1."
-        )
-    en = quad.get("enabled", True)
-    if not isinstance(en, bool):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.enabled={en!r} must be a bool "
-            f"(true/false without quotes in YAML)."
+            f"evaluation.segment_columns entry {col!r} is a reserved column "
+            f"name: the diagnosis sampler creates its own 'stratum' and "
+            f"'inclusion_weight' columns, so a segment column of the same "
+            f"name would collide in the sample join. Rename it in the source "
+            f"table or drop it from evaluation.segment_columns."
         )
     return errors
 
@@ -680,20 +676,27 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def structure_triage_param_errors(parameters: dict) -> list[str]:
-    """A20 — structure-layer + triage diagnostics parameter domains.
+def training_diagnostics_param_errors(parameters: dict) -> list[str]:
+    """A20 — training-side ``diagnostics.*`` parameter domains.
 
-    Covers the three config keys the structure layer (Gain ledger + conditional
-    SHAP background) and the triage summary read: ``diagnostics.shap.background``
-    must be ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` and
-    ``evaluation.diagnosis.triage.enabled`` must be bool (a quoted YAML string
-    like "false" is truthy and would silently enable the node). Absent keys use
+    Covers every ``diagnostics.*`` key consumed via bare truthiness/int
+    comparison by the training-side diagnostics nodes, where a wrong YAML
+    type is silently accepted rather than raising:
+    ``diagnostics.shap.background`` must be ``global`` or ``per_item``;
+    ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
+    quadrant_enabled`` must be bool (a quoted YAML string like "false" is
+    truthy in Python and would silently enable the node —
+    ``shap_cases.py``/``population_spark.py`` both read
+    ``cfg.get("quadrant_enabled", True)`` bare); ``diagnostics.shap.
+    quadrant_top_k_decision`` / ``quadrant_sample_per_cell`` /
+    ``quadrant_min_rows`` must be integers >= 1. Absent keys use
     behavior-preserving defaults. Returns collect-all error strings; empty
     means OK.
     """
     errors: list[str] = []
     diag = parameters.get("diagnostics", {}) or {}
-    bg = (diag.get("shap", {}) or {}).get("background", "global")
+    shap_cfg = diag.get("shap", {}) or {}
+    bg = shap_cfg.get("background", "global")
     if bg not in ("global", "per_item"):
         errors.append(
             f"A20: diagnostics.shap.background must be 'global' or 'per_item' "
@@ -705,13 +708,22 @@ def structure_triage_param_errors(parameters: dict) -> list[str]:
             f"A20: diagnostics.gain_ledger.enabled={gl_en!r} must be a bool "
             f"(true/false without quotes in YAML)."
         )
-    tri_en = (((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-              .get("triage", {}) or {}).get("enabled", True)
-    if not isinstance(tri_en, bool):
+    q_en = shap_cfg.get("quadrant_enabled", True)
+    if not isinstance(q_en, bool):
         errors.append(
-            f"A20: evaluation.diagnosis.triage.enabled={tri_en!r} must be a "
-            f"bool (true/false without quotes in YAML)."
+            f"A20: diagnostics.shap.quadrant_enabled={q_en!r} must be a bool "
+            f"(true/false without quotes in YAML)."
         )
+    for key, default in (
+        ("quadrant_top_k_decision", 1),
+        ("quadrant_sample_per_cell", 30),
+        ("quadrant_min_rows", 10),
+    ):
+        v = shap_cfg.get(key, default)
+        if not (isinstance(v, int) and not isinstance(v, bool) and v >= 1):
+            errors.append(
+                f"A20: diagnostics.shap.{key}={v!r} must be an integer >= 1."
+            )
     return errors
 
 
@@ -813,13 +825,11 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(diagnosis_metric_param_errors(parameters))
 
-    errors.extend(quadrant_param_errors(parameters))
-
     errors.extend(offset_sweep_param_errors(parameters))
 
     errors.extend(pair_ledger_param_errors(parameters))
 
-    errors.extend(structure_triage_param_errors(parameters))
+    errors.extend(training_diagnostics_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

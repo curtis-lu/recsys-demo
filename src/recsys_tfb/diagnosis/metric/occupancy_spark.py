@@ -1,8 +1,11 @@
 """名次佔據統計（框架診斷項目 5）：水準軸傷害的直接觀測。
 
 寫法沿 evaluation/diagnostics_spark.py 的聚合家族慣例（Spark 聚合、driver
-端只收 item 級小結果），但歸屬診斷域——象限組裝（quadrant.py）在此模組
-之上，放 evaluation 會造成跨邊界 import。
+端只收 item 級小結果），但歸屬診斷域，放 evaluation 會造成跨邊界 import。
+
+**孤兒模組**：`quadrant.py` 已刪，本模組目前無 production 呼叫者；預定由
+`score_shift/` 的曝光份額 guardrail 取代（見 `docs/superpowers/plans/
+diag-redesign/00-shared-context.md` §2.4 附近說明與 `05-plan-4-score-shift.md`）。
 
 rank 欄由 prepare_eval_data 保證存在（缺時已用 rank_within_query 注入）。
 """

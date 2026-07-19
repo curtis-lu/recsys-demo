@@ -58,10 +58,8 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
-      quadrant: true
       offset_sweep: true
       pair_ledger: true
-      triage: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
@@ -91,11 +89,21 @@ evaluation:
     # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
     # hash-ratio 抽到補滿 max_queries。中型 item 抽後仍可能低於保底：
     # 不硬補，metadata 誠實回報（報表會標示樣本規模）。
-    # 注意 driver 記憶體：max_queries 是 query 數上限，落到 driver 的
-    # DataFrame 列數 ≈ max_queries × 每 query 候選列數（22 個 item 時即
-    # 22 倍、約 4.4M 列 ~1GB），調大前先估 driver 可用記憶體。
+    # max_queries 設在「有正例的 query 總數」之上 → ratio == 1.0 → 不觸發
+    # 次抽樣，診斷是母體普查而非抽樣估計。2026-07-19 實況：公司環境有正例的
+    # query 約 22 萬，故設 25 萬。driver 記憶體不是約束（128GB；25 萬 query ×
+    # 22 個 item ≈ 5.5M 列 ≈ 1.25GB）。
+    #
+    # ⚠ 若母體成長超過此值，次抽樣會自動恢復：分層權重（inclusion_weight）
+    # 會接手做 Horvitz–Thompson 修正，metadata 的 sampling_description 也會
+    # 從「未抽樣」改口。**不會靜默偏差**，但普查的解讀更乾淨，發現超過時
+    # 優先調高這個值而不是靠加權。
+    #
+    # 這個值不是控制運算成本的旋鈕——貴的診斷各自有自己的預算旋鈕
+    # （見下方 score_shift 一帶），原則是「搜尋用子樣本、量測用全樣本」。
+    # 用縮小共用樣本來省錢會讓便宜的診斷也一起失去母體性。
     sample:
-      max_queries: 200000
+      max_queries: 250000
       min_pos_queries_per_item: 50
       seed: 42
     # per-item AP 與 macro 的 cluster bootstrap CI（cluster＝cust_id，
@@ -104,18 +112,9 @@ evaluation:
       enabled: true
       n_boot: 200
 
-    # 象限層（A17）：within-item AUC（條件判別力，midrank rank-sum）一軸。
-    # 原本的縱軸 gap_vs_global（水準，取對帳層產物）已隨對帳層退場；純排序的
-    # 替代品（offset sweep 的 δ*_j）未定案，目前只有判別力一軸。
-    # auc_threshold 以下＝條件判別力差。top_k_occupancy：top-slot 佔據統計的 k。
-    quadrant:
-      enabled: true
-      auc_threshold: 0.6
-      top_k_occupancy: 1
-
     # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
     # item 的 logit 分數加常數 δ、座標下降搜尋讓參數化 macro mAP 最大的
-    # δ*。δ 單位 log-odds（與對帳層 offset 同尺度）。holdout_fraction 切
+    # δ*。δ 單位 log-odds。holdout_fraction 切
     # query 折、折外報告防擬合雜訊；shrink_lambda 把 δ 向 0 收縮（座標目
     # 標 = mAP_fit − λ·δ²/M）。成本 ≈ rounds×items×grid點數 次 mAP 評估，
     # 大樣本時先調粗 grid.step。
@@ -132,13 +131,6 @@ evaluation:
     # ablation 逐 item 換 base-rate logit 常數重算指標（O(M) 次）量淨貢
     # 獻/淨傷害。跑在同一份診斷抽樣上；描述性會計、全樣本不切折。
     pair_ledger:
-      enabled: true
-
-    # 跨診斷合成總表：把 quadrant/offset_sweep/gain_ledger 三個診斷 dict
-    # 合成 per-item 判定＋建議槓桿＋起手值。gain_ledger 缺席時
-    # best-effort 降級（見 catalog.yaml gain_ledger optional: true）。
-    # 判讀見 docs/pipelines/evaluation-diagnosis.md §13。
-    triage:
       enabled: true
 
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數

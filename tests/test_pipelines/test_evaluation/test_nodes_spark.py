@@ -574,61 +574,6 @@ def test_compute_metric_ci_end_to_end_small(spark):
     assert out["sample"]["n_queries_sampled"] == 2
 
 
-def test_compute_quadrant_disabled_returns_stub(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"quadrant": {"enabled": False}}},
-    }
-    assert compute_quadrant(None, None, None, params) == {"enabled": False}
-
-
-def test_compute_quadrant_requires_inputs_when_enabled(spark):
-    import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"quadrant": {"enabled": True}}},
-    }
-    with _pytest.raises(ValueError, match="compute_quadrant"):
-        compute_quadrant(None, None, None, params)
-
-
-def test_compute_quadrant_end_to_end_small(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_quadrant
-    df = spark.createDataFrame(
-        [
-            ("20240331", "C0", "A", 0.9, 1, 1),
-            ("20240331", "C0", "B", 0.5, 0, 2),
-            ("20240331", "C1", "A", 0.2, 0, 2),
-            ("20240331", "C1", "B", 0.6, 1, 1),
-        ],
-        schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    )
-    labels = spark.createDataFrame(
-        [("20240331", "C0", "A", 1), ("20240331", "C1", "B", 1)],
-        schema=["snap_date", "cust_id", "prod_name", "label"],
-    )
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"quadrant": {
-            "enabled": True, "auc_threshold": 0.6,
-            "top_k_occupancy": 1}}},
-    }
-    out = compute_quadrant(df, labels, {"enabled": False}, params)
-    assert out["enabled"] is True
-    assert set(out["by_item"]) == {"A", "B"}
-    # metric_ci stub 只讓 AP±CI 欄從缺；判別力軸照算（A 正例 0.9 > 負例 0.2）
-    assert out["by_item"]["A"]["quadrant"] == "健康"
-    assert out["by_item"]["A"]["ap_sampled"] is None
-
-
 def test_compute_offset_sweep_disabled_writes_stub(spark):
     from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
     params = {
@@ -679,35 +624,6 @@ def test_compute_pair_ledger_raises_when_enabled_but_sample_none(spark):
     }
     with _pytest.raises(ValueError, match="compute_pair_ledger"):
         compute_pair_ledger(None, params)
-
-
-def test_assemble_triage_summary_disabled_returns_stub():
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        assemble_triage_summary,
-    )
-    params = {"evaluation": {"diagnosis": {"triage": {"enabled": False}}}}
-    out = assemble_triage_summary(
-        {"enabled": True, "by_item": {}}, None, None, params
-    )
-    assert out == {"enabled": False}
-
-
-def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        assemble_triage_summary,
-    )
-    params = {"evaluation": {"diagnosis": {"triage": {"enabled": True}}}}
-    quadrant = {
-        "enabled": True,
-        "by_item": {
-            "A": {"auc": 0.5, "disc_status": "差",
-                  "auc_reason": None, "y_rate": 0.1},
-        },
-    }
-    out = assemble_triage_summary(quadrant, None, None, params)
-    assert out["enabled"] is True
-    assert out["gain_ledger_present"] is False
-    assert "A" in out["verdicts"]
 
 
 class TestSampleConsumerFlags:
