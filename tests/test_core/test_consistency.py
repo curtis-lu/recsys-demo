@@ -833,41 +833,35 @@ class TestPairLedgerParamsA19:
             )
 
 
-class TestStructureTriageParamsA20:
-    def _params(self, background=None, gain_ledger_enabled=None, triage_enabled=None):
+class TestShapBackgroundParamsA20:
+    def _params(self, background=None, gain_ledger_enabled=None):
         diag = {}
         if background is not None:
             diag["shap"] = {"background": background}
         if gain_ledger_enabled is not None:
             diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
-        params = {"diagnostics": diag}
-        if triage_enabled is not None:
-            params["evaluation"] = {
-                "diagnosis": {"triage": {"enabled": triage_enabled}}
-            }
-        return params
+        return {"diagnostics": diag}
 
     def test_bad_background_domain_rejected(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        errs = structure_triage_param_errors(self._params(background="per_query"))
+        from recsys_tfb.core.consistency import shap_background_param_errors
+        errs = shap_background_param_errors(self._params(background="per_query"))
         assert len(errs) == 1
         assert "diagnostics.shap.background" in errs[0]
 
     def test_valid_background_values_clean(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        assert structure_triage_param_errors(self._params(background="global")) == []
-        assert structure_triage_param_errors(self._params(background="per_item")) == []
+        from recsys_tfb.core.consistency import shap_background_param_errors
+        assert shap_background_param_errors(self._params(background="global")) == []
+        assert shap_background_param_errors(self._params(background="per_item")) == []
         # absent block / absent key -> default "global" -> clean
-        assert structure_triage_param_errors({}) == []
+        assert shap_background_param_errors({}) == []
 
-    def test_non_bool_enabled_flags_both_rejected(self):
-        from recsys_tfb.core.consistency import structure_triage_param_errors
-        errs = structure_triage_param_errors(
-            self._params(gain_ledger_enabled="yes", triage_enabled=1)
+    def test_non_bool_gain_ledger_enabled_rejected(self):
+        from recsys_tfb.core.consistency import shap_background_param_errors
+        errs = shap_background_param_errors(
+            self._params(gain_ledger_enabled="yes")
         )
-        assert len(errs) == 2
-        assert any("gain_ledger.enabled" in e for e in errs)
-        assert any("triage.enabled" in e for e in errs)
+        assert len(errs) == 1
+        assert "gain_ledger.enabled" in errs[0]
 
     def test_registered_in_validate_config_consistency(self):
         import pytest as _pytest

@@ -681,35 +681,6 @@ def test_compute_pair_ledger_raises_when_enabled_but_sample_none(spark):
         compute_pair_ledger(None, params)
 
 
-def test_assemble_triage_summary_disabled_returns_stub():
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        assemble_triage_summary,
-    )
-    params = {"evaluation": {"diagnosis": {"triage": {"enabled": False}}}}
-    out = assemble_triage_summary(
-        {"enabled": True, "by_item": {}}, None, None, params
-    )
-    assert out == {"enabled": False}
-
-
-def test_assemble_triage_summary_gain_ledger_absent_reports_not_present():
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        assemble_triage_summary,
-    )
-    params = {"evaluation": {"diagnosis": {"triage": {"enabled": True}}}}
-    quadrant = {
-        "enabled": True,
-        "by_item": {
-            "A": {"auc": 0.5, "disc_status": "差",
-                  "auc_reason": None, "y_rate": 0.1},
-        },
-    }
-    out = assemble_triage_summary(quadrant, None, None, params)
-    assert out["enabled"] is True
-    assert out["gain_ledger_present"] is False
-    assert "A" in out["verdicts"]
-
-
 class TestSampleConsumerFlags:
     def test_defaults_all_true(self):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (

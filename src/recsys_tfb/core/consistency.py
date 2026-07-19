@@ -97,11 +97,10 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
-* A20 — structure-layer (gain_ledger + conditional-SHAP background) and triage
+* A20 — structure-layer (gain_ledger + conditional-SHAP background)
   diagnostics parameter domains: ``diagnostics.shap.background`` ∈
-  {global, per_item}; ``diagnostics.gain_ledger.enabled`` and
-  ``evaluation.diagnosis.triage.enabled`` are bool. Predicate:
-  ``structure_triage_param_errors``.
+  {global, per_item}; ``diagnostics.gain_ledger.enabled`` is bool.
+  Predicate: ``shap_background_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -680,16 +679,15 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def structure_triage_param_errors(parameters: dict) -> list[str]:
-    """A20 — structure-layer + triage diagnostics parameter domains.
+def shap_background_param_errors(parameters: dict) -> list[str]:
+    """A20 — structure-layer diagnostics parameter domains.
 
-    Covers the three config keys the structure layer (Gain ledger + conditional
-    SHAP background) and the triage summary read: ``diagnostics.shap.background``
-    must be ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` and
-    ``evaluation.diagnosis.triage.enabled`` must be bool (a quoted YAML string
-    like "false" is truthy and would silently enable the node). Absent keys use
-    behavior-preserving defaults. Returns collect-all error strings; empty
-    means OK.
+    Covers the two config keys the structure layer (Gain ledger + conditional
+    SHAP background) reads: ``diagnostics.shap.background`` must be
+    ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` must be
+    bool (a quoted YAML string like "false" is truthy and would silently
+    enable the node). Absent keys use behavior-preserving defaults. Returns
+    collect-all error strings; empty means OK.
     """
     errors: list[str] = []
     diag = parameters.get("diagnostics", {}) or {}
@@ -704,13 +702,6 @@ def structure_triage_param_errors(parameters: dict) -> list[str]:
         errors.append(
             f"A20: diagnostics.gain_ledger.enabled={gl_en!r} must be a bool "
             f"(true/false without quotes in YAML)."
-        )
-    tri_en = (((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-              .get("triage", {}) or {}).get("enabled", True)
-    if not isinstance(tri_en, bool):
-        errors.append(
-            f"A20: evaluation.diagnosis.triage.enabled={tri_en!r} must be a "
-            f"bool (true/false without quotes in YAML)."
         )
     return errors
 
@@ -819,7 +810,7 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(pair_ledger_param_errors(parameters))
 
-    errors.extend(structure_triage_param_errors(parameters))
+    errors.extend(shap_background_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

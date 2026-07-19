@@ -255,10 +255,6 @@ evaluation_pair_ledger:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/pair_ledger.json
 
-evaluation_triage:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/triage.json
-
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

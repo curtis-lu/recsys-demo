@@ -22,7 +22,6 @@ def create_pipeline(
         partition (B4), and only produces report_comparison.html.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        assemble_triage_summary,
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
@@ -121,18 +120,11 @@ def create_pipeline(
             outputs="evaluation_pair_ledger",
         ),
         Node(
-            assemble_triage_summary,
-            inputs=["evaluation_quadrant", "evaluation_offset_sweep",
-                    "gain_ledger", "parameters"],
-            outputs="evaluation_triage",
-        ),
-        Node(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
                     "parameters", "baseline_metrics", "evaluation_metric_ci",
                     "evaluation_quadrant",
-                    "evaluation_offset_sweep", "evaluation_pair_ledger",
-                    "evaluation_triage"],
+                    "evaluation_offset_sweep", "evaluation_pair_ledger"],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog
