@@ -96,6 +96,41 @@ def test_segment_columns_kept_when_configured_and_present(spark):
     assert "seg_missing" not in pdf.columns  # 配置但不存在 → 靜默略過（沿 score_uncalibrated 慣例）
 
 
+@pytest.mark.parametrize("reserved", ["stratum", "inclusion_weight"])
+def test_reserved_column_in_segment_columns_fails_loud(spark, reserved):
+    """撞名必須在抽樣前就炸，且訊息要指得到根因。
+
+    沒有這個守衛時，撞名的欄會被 keep_cols 選進 df，再被 query 級 join 複製成
+    兩個同名欄，最後炸在 pandas 的 groupby("stratum")：
+    ``ValueError: Grouper for 'stratum' not 1-dimensional``——訊息完全沒提到
+    segment 撞名，等於把人送去追一條錯的線。
+    """
+    sdf = _fixture(spark).withColumn(reserved, F.lit("x"))
+    params = _params(segment_columns=[reserved])
+    with pytest.raises(ValueError) as exc:
+        draw_diagnosis_sample(sdf, params)
+    msg = str(exc.value)
+    assert "segment_columns" in msg      # 點名是哪個配置鍵
+    assert reserved in msg               # 點名是哪個欄
+    # 兩者要綁在同一句，不能只是各自出現在訊息某處
+    assert f"{reserved!r} (configured via evaluation.segment_columns)" in msg
+
+
+def test_non_reserved_segment_column_still_works(spark):
+    """守衛不得誤傷正常 segment 欄——只有兩個保留名才擋。"""
+    sdf = _fixture(spark).withColumn("seg_a", F.lit("x"))
+    pdf, _meta = draw_diagnosis_sample(sdf, _params(segment_columns=["seg_a"]))
+    assert "seg_a" in pdf.columns
+
+
+def test_reserved_column_present_but_not_configured_is_fine(spark):
+    """來源表剛好有同名欄、但沒配進 segment_columns → 不會被 keep_cols 選中，
+    不構成撞名，不該擋。"""
+    sdf = _fixture(spark).withColumn("stratum", F.lit("x"))
+    pdf, _meta = draw_diagnosis_sample(sdf, _params())
+    assert set(pdf["stratum"]) <= {"take_all", "hash_ratio"}
+
+
 def test_take_all_when_everything_is_small(spark):
     # 保底拉到 10 > 所有 item 的正例 query 數 → 全部 take-all、全量進樣本
     pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
@@ -186,3 +221,8 @@ def test_strata_lists_only_existing_layers_when_all_take_all(spark):
     pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
     assert set(meta["strata"]) == {"take_all"}
     assert (pdf["inclusion_weight"] == 1.0).all()
+    # 全 take-all 時 sample_ratio 是 0.0（「沒有 hash 層」的哨兵值），不是 1.0。
+    # 這條釘住模組 docstring 的宣告——下游若照「權重＝1/sample_ratio」理解就是
+    # ZeroDivisionError，所以權重一律讀 strata。
+    assert meta["sample_ratio"] == 0.0
+    assert meta["strata"]["take_all"]["weight"] == 1.0

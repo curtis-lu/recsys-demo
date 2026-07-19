@@ -100,8 +100,7 @@ def positive_row_contributions(
     y_true: np.ndarray,
     y_score: np.ndarray,
     k: Optional[int] = None,
-    weights: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, ...]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-positive-row AP contribution + original-order row indices.
 
     contrib[i] is the within-query cumulative precision of positive row
@@ -111,31 +110,17 @@ def positive_row_contributions(
     (``diagnosis.metric.uncertainty``) — cluster resampling never changes
     within-query ranking, so contributions are computed exactly once.
 
-    ``weights`` (optional) is a **row-aligned, query-level** weight vector of
-    length ``len(groups)``: every row of a query carries that query's weight
-    (e.g. the inverse inclusion probability of a stratified diagnosis sample).
-    Weights never enter the contribution values themselves — a query counted
-    twice has the same internal ranking, hence the same per-row precisions —
-    so this argument only broadcasts the weights onto the returned positive
-    rows. Passing it therefore **widens the return to a 3-tuple**
-    ``(contrib, row_idx, weight_of_positive_row)``; omitting it (or passing
-    ``None``) keeps the historical 2-tuple and the historical code path
-    untouched, which is what every existing caller relies on.
+    Returns a **fixed 2-tuple** ``(contrib, row_idx)`` — always, for every
+    argument combination. Sampling weights deliberately do NOT belong here:
+    a query counted twice has the same internal ranking, hence the same
+    per-row precisions, so weights cannot influence what this function
+    computes; they only need broadcasting onto the returned positive rows.
+    That broadcast lives in :func:`align_positive_row_weights`, which every
+    weighted caller shares, so this function's return arity never varies
+    with its arguments.
     """
-    if weights is not None:
-        weights = np.asarray(weights, dtype=np.float64)
-        if weights.shape != (len(groups),):
-            raise ValueError(
-                f"weights must be row-aligned with groups: expected shape "
-                f"({len(groups)},), got {weights.shape}"
-            )
-
     if len(groups) == 0:
-        empty_f = np.array([], dtype=np.float64)
-        empty_i = np.array([], dtype=np.int64)
-        if weights is None:
-            return empty_f, empty_i
-        return empty_f, empty_i, empty_f
+        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
 
     sort_idx = np.lexsort((-y_score, groups))
     g_sorted = groups[sort_idx]
@@ -163,17 +148,42 @@ def positive_row_contributions(
         row_idx.append(sort_idx[s:e][pos_mask])
 
     if not contribs:
-        empty_f = np.array([], dtype=np.float64)
-        empty_i = np.array([], dtype=np.int64)
-        if weights is None:
-            return empty_f, empty_i
-        return empty_f, empty_i, empty_f
+        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
 
-    contrib_out = np.concatenate(contribs)
-    row_idx_out = np.concatenate(row_idx)
-    if weights is None:
-        return contrib_out, row_idx_out
-    return contrib_out, row_idx_out, weights[row_idx_out]
+    return np.concatenate(contribs), np.concatenate(row_idx)
+
+
+def align_positive_row_weights(
+    weights: np.ndarray,
+    n_rows: int,
+    row_idx: np.ndarray,
+) -> np.ndarray:
+    """Validate a query-level weight vector and select the positive rows.
+
+    ``weights`` is **row-aligned**: one entry per input row, every row of a
+    query carrying that query's weight (e.g. the inverse inclusion
+    probability of a stratified diagnosis sample). ``n_rows`` is the input
+    row count the vector must match (``len(groups)``); ``row_idx`` is the
+    original-order index vector returned by
+    :func:`positive_row_contributions`. Returns ``weights[row_idx]`` as
+    float64 — the weight of each positive row, aligned element-for-element
+    with that call's ``contrib``.
+
+    Why this is a separate function rather than an optional argument of
+    :func:`positive_row_contributions`: a return arity that changes with an
+    argument is a footgun for callers that unpack it, and the two things
+    have genuinely different jobs — one ranks, one broadcasts. Keeping the
+    validation and the broadcast here (rather than inline at each call site)
+    is what stops the logic from being duplicated between
+    :func:`compute_macro_per_item_map` and the diagnosis bootstrap.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    if w.shape != (n_rows,):
+        raise ValueError(
+            f"weights must be row-aligned with groups: expected shape "
+            f"({n_rows},), got {w.shape}"
+        )
+    return w[row_idx]
 
 
 def macro_from_per_item(
@@ -272,22 +282,22 @@ def compute_macro_per_item_map(
     :func:`positive_row_contributions`, then a vectorized per-item
     aggregation via ``np.unique`` + ``np.bincount``.
     """
-    if weights is None:
-        contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
-        if len(contrib_all) == 0:
-            return 0.0
-        items_all = items[row_idx]
-        _, inv = np.unique(items_all, return_inverse=True)
+    contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
+    # Validate/broadcast before the empty-input return so a malformed weight
+    # vector raises regardless of whether the input happened to be empty.
+    w_pos = (
+        None if weights is None
+        else align_positive_row_weights(weights, len(groups), row_idx)
+    )
+    if len(contrib_all) == 0:
+        return 0.0
+
+    items_all = items[row_idx]
+    _, inv = np.unique(items_all, return_inverse=True)
+    if w_pos is None:
         sums = np.bincount(inv, weights=contrib_all)
         counts = np.bincount(inv)
     else:
-        contrib_all, row_idx, w_pos = positive_row_contributions(
-            groups, y_true, y_score, k, weights
-        )
-        if len(contrib_all) == 0:
-            return 0.0
-        items_all = items[row_idx]
-        _, inv = np.unique(items_all, return_inverse=True)
         sums = np.bincount(inv, weights=contrib_all * w_pos)
         # Weighted denominator: the effective number of positive rows behind
         # each item, NOT len(rows). Using the raw count here would divide

@@ -643,12 +643,43 @@ class TestDiagnosisMetricParamsA15:
             ci={"n_boot": 0},
         )
         errors = diagnosis_metric_param_errors(p)
-        assert len(errors) == 7
         joined = "\n".join(errors)
+        # Token check first: if a predicate is dropped, the failure message
+        # then names *which* key stopped being validated, instead of only
+        # reporting a count that went from 7 to 6.
         for token in ["weight_alpha", "metric.k", "min_positives",
                       "shrinkage_k", "max_queries",
                       "min_pos_queries_per_item", "n_boot"]:
-            assert token in joined
+            assert token in joined, f"{token} is no longer validated"
+        assert len(errors) == 7
+
+    def test_max_queries_below_one_rejected(self):
+        """A15 must reject ``max_queries <= 0`` on its own.
+
+        Not redundant with test_each_bad_value_reports: this is the one key
+        whose absence degrades *silently* rather than crashing.
+        ``draw_diagnosis_sample`` with ``max_queries=0`` and a take-all item
+        does not raise — it returns a 1-query sample with
+        ``sample_ratio=0.0``, i.e. a plausible-looking artefact computed from
+        almost no data. (With no take-all item it instead dies at
+        ``sample.py`` with an opaque ``AttributeError: 'NoneType' object has
+        no attribute 'withColumn'``.) Both are config errors that must be
+        caught at CLI entry, before Spark starts. Mirrors the >= 1 guard on
+        the training-side ``diagnostics.shap.quadrant_*`` int keys (A20).
+        """
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in (0, -1):
+            errors = diagnosis_metric_param_errors(
+                self._params(sample={"max_queries": bad})
+            )
+            assert len(errors) == 1, errors
+            assert "max_queries" in errors[0] and "int >= 1" in errors[0]
+        # a bool is not an acceptable int here (True == 1 would slip through
+        # a naive `>= 1` check)
+        errors = diagnosis_metric_param_errors(
+            self._params(sample={"max_queries": True})
+        )
+        assert len(errors) == 1 and "max_queries" in errors[0]
 
     def test_wired_into_validate(self):
         import pytest as _pytest

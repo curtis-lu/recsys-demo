@@ -10,8 +10,20 @@ numpy 迭代計算（bootstrap／offset sweep／成對帳本）重複使用。
 兩層的納入機率不同（take-all π=1、hash-ratio π=ratio），所以樣本**不是**
 簡單隨機樣本：``sample_pdf`` 帶出 ``stratum`` 與 ``inclusion_weight``
 （＝1/π），下游估計量須加權，否則 ``ratio < 1`` 時 take-all 層會被系統性
-高估 1/ratio 倍。``ratio == 1.0``（正例 query 總數 ≤ ``max_queries``）時
-權重全為 1，加權自然退化成不加權。
+高估 1/ratio 倍。
+
+metadata 的 ``sample_ratio`` 有**兩個**權重全為 1 的分支，讀的人容易只記得
+第一個：
+
+* ``sample_ratio == 1.0``——有 hash-ratio 層，但正例 query 總數 ≤
+  ``max_queries``，該層無須次抽樣，π=1。
+* ``sample_ratio == 0.0``——**根本沒有 hash-ratio 層**（全部 take-all，或
+  take-all 已吃掉整個 ``max_queries`` 預算）。這裡的 0.0 是「無此層」的
+  哨兵值，**不是**「抽了 0%」。
+
+因此下游**不得**對 ``sample_ratio`` 取倒數當權重用（0.0 會 ZeroDivisionError，
+且語意也不對）。要判斷分層與權重一律讀 ``strata``——它由實際落地的樣本推導，
+只列真的存在的層，每層直接附 ``weight``。
 
 誠實限制：中型 item 經 hash-ratio 抽樣後仍可能低於保底——不硬補，
 metadata 回報實際覆蓋＋log WARN；報表必須標示樣本規模，不得讓抽樣估計
@@ -33,6 +45,46 @@ logger = logging.getLogger(__name__)
 
 _SITE = "diagnosis_sample"
 
+#: 本模組在樣本上自造的欄名。它們不是配置項，但會跟使用者配置的欄位共用
+#: 命名空間——撞名時 join 會產出兩個同名欄，錯誤要到很下游才炸
+#: （見 ``_guard_reserved_columns``）。
+_RESERVED_COLS = ("stratum", "inclusion_weight")
+
+
+def _guard_reserved_columns(keep_cols: list[str], seg_cols: list[str]) -> None:
+    """撞名就 fail-loud——這是本模組唯一的欄名命名空間守衛。
+
+    為什麼要在這裡擋：``draw_diagnosis_sample`` 會在 ``sampled`` 上自造
+    ``stratum`` / ``inclusion_weight``，再 ``df.join(sampled, on=query_cols)``。
+    若 ``df`` 已經帶了同名欄（最可能的來源＝使用者把它配進
+    ``evaluation.segment_columns``），join 後會有**兩個同名欄**，pandas 的
+    ``groupby("stratum")`` 拿到 2-D 切片，實測炸在
+    ``ValueError: Grouper for 'stratum' not 1-dimensional``——訊息完全指不到
+    根因（沒有一個字提到 segment 撞名）。與其讓人去追那條 traceback，不如在
+    抽樣開始前就講清楚是哪個配置鍵用了保留欄名。
+    """
+    collisions = []
+    for name in _RESERVED_COLS:
+        if name not in keep_cols:
+            continue
+        origin = (
+            "evaluation.segment_columns" if name in seg_cols
+            else "the schema block (schema.columns.*)"
+        )
+        collisions.append(f"{name!r} (configured via {origin})")
+    if not collisions:
+        return
+    raise ValueError(
+        "diagnosis sample: reserved column name collision — "
+        + "; ".join(collisions)
+        + ". draw_diagnosis_sample adds its own 'stratum' and "
+        "'inclusion_weight' columns to the sample, so an input column of "
+        "the same name would be duplicated by the query-level join and fail "
+        "far downstream with an opaque pandas error (\"Grouper for "
+        "'stratum' not 1-dimensional\"). Fix: drop the column from "
+        "evaluation.segment_columns (or rename it in the source table)."
+    )
+
 
 def draw_diagnosis_sample(
     eval_predictions: SparkDataFrame,
@@ -45,7 +97,12 @@ def draw_diagnosis_sample(
     （存在者，供 by_segment 分組用；未配置或欄不存在則靜默略過），外加
     ``stratum``（``take_all`` / ``hash_ratio``）與 ``inclusion_weight``
     （納入機率的倒數，query 級：同一 query 的所有候選列同權重）。
-    metadata 見模組 docstring。
+    metadata 見模組 docstring（特別注意 ``sample_ratio == 0.0`` 的語意）。
+
+    Raises:
+        ValueError: 配置的欄位（``evaluation.segment_columns`` 或 schema 角色欄）
+            用了保留欄名 ``stratum`` / ``inclusion_weight``，見
+            :func:`_guard_reserved_columns`。
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -71,6 +128,7 @@ def draw_diagnosis_sample(
                   "score_uncalibrated", *seg_cols]
         if c in eval_predictions.columns
     ))
+    _guard_reserved_columns(keep_cols, seg_cols)
     df = eval_predictions.select(*keep_cols)
 
     # ---- pass 1：正例 query 全集＋per-item 正例 query 數 ----
@@ -140,7 +198,19 @@ def draw_diagnosis_sample(
                 else picked.unionByName(_tag(must, "take_all"))
             )
 
-        # 納入機率 π 的倒數＝設計權重：take-all 層 π=1；hash-ratio 層 π=ratio。
+        # 納入機率 π 的倒數＝**設計權重**（Horvitz–Thompson）：take-all 層
+        # π=1；hash-ratio 層 π=ratio（該層的設計抽樣率）。
+        #
+        # 這裡刻意用設計值，**不是**實現比例（realized ratio，
+        # ＝該層實際抽中數／該層候選數）。誠實標註：小樣本下兩者會明顯偏離
+        # ——實測 ratio=0.25 的一層，40 個候選 query 實際抽中 14 個
+        # （14/40 = 0.35），權重仍是 4.0（＝1/0.25）而不是 2.86。CRC32 分桶是
+        # 無偏的，大樣本下實現比例會收斂到設計值，所以設計權重的估計量無偏；
+        # 但單次小樣本的變異數會比自歸一化（Hájek / ratio estimator）大。
+        #
+        # 下游若要改用自歸一化估計量：自己除以樣本內的權重和，**不要**假設
+        # 本模組已經歸一化過——這裡的權重沒有除以任何東西。
+        #
         # ratio==0 代表根本沒有 hash-ratio 層（budget<=0 或 n_others==0），
         # 此時不會有列落在 otherwise 分支，權重取 1.0 只為避免除以零。
         hash_weight = 1.0 / ratio if ratio > 0 else 1.0

@@ -400,12 +400,27 @@ Expected: FAIL — `TypeError: compute_macro_per_item_map() got an unexpected ke
 
 - [ ] **Step 3: 實作**
 
-在 `evaluation/metrics.py` 的 `compute_macro_per_item_map`、`macro_from_per_item`、`positive_row_contributions` 加 **optional `weights=None`** 參數：
+在 `evaluation/metrics.py` 的 `compute_macro_per_item_map` 加 **optional `weights=None`** 參數：
 
 - `weights is None` → 走原本的程式碼路徑，**一行都不改**（`test_weights_none_is_bit_identical_to_before` 守這件事）。
 - 給了 weights → per-item AP 的加總改成加權平均（權重是 query 級的納入權重倒數）。
 
 > **為什麼用 optional 參數而不是另開 `weighted_*` 函式**：`compute_macro_per_item_map` 同時被主指標路徑與診斷路徑使用。另開一套會變成兩份要同步維護的 mAP 實作——而這次重構的主軸之一就是消除重複實作。optional 參數＋位元等價測試同時保住相容與單一實作。
+
+> **更正（2026-07-19 審查修復）**：本節原本還要求對 `positive_row_contributions`
+> 與 `macro_from_per_item` 加 `weights`，**兩者都已撤回**，理由不同：
+>
+> - `positive_row_contributions`：加了 optional `weights` 會讓**回傳 arity 隨參數變動**
+>   （2-tuple ↔ 3-tuple）。它有 8＋個既有呼叫點（`diagnosis/metric/uncertainty.py:63`、
+>   `scripts/per_item_score_shift_diagnosis.py:397,440`、
+>   `scripts/per_item_score_shift_optuna_diagnosis.py:623,666`、
+>   `scripts/config_sorting_shift_diagnosis.py:379` …）全部寫 `contrib, row_idx = ...`。
+>   改成**固定 2-tuple**，權重的驗證與廣播抽成 `align_positive_row_weights(weights,
+>   n_rows, row_idx)`，Task 0.5.3 的 bootstrap 直接呼叫它取那條對齊向量——
+>   廣播邏輯仍只有一份，但沒有變動 arity 的 footgun。
+> - `macro_from_per_item`：跨 item 的 macro 合併**必須維持等權重**（複製一個 query
+>   不會增加 item），加權後的 `n_pos` 已由 `compute_macro_per_item_map` 經既有
+>   `n_pos` 參數傳入，第二條權重通道會重複計數。
 
 - [ ] **Step 4: 跑測試確認通過**
 

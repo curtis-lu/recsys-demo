@@ -5,10 +5,13 @@ Scope: only ``compute_ap`` + ``compute_mean_ap``. The dict-shaped
 ``recsys_tfb.evaluation.metrics_spark``; see ``test_metrics_spark.py``.
 """
 
+import inspect
+
 import numpy as np
 import pytest
 
 from recsys_tfb.evaluation.metrics import (
+    align_positive_row_weights,
     compute_ap,
     compute_macro_per_item_map,
     compute_mean_ap,
@@ -380,13 +383,24 @@ class TestWeightedMap:
             "unweighted denominator divides weighted mass by raw support"
         )
 
-    def test_contributions_omitted_weights_bit_identical_to_none(self):
-        c1, r1 = positive_row_contributions(self.GROUPS, self.Y, self.SCORE)
-        c2, r2 = positive_row_contributions(
-            self.GROUPS, self.Y, self.SCORE, weights=None
-        )
-        assert np.array_equal(c1, c2)
-        assert np.array_equal(r1, r2)
+    def test_contributions_return_arity_is_always_two(self):
+        """positive_row_contributions must never vary its return arity: a
+        caller writing ``a, b = f(...)`` has to keep working for every
+        argument combination, including the empty-input early returns."""
+        empty = np.array([], dtype=np.int64)
+        for args in (
+            (self.GROUPS, self.Y, self.SCORE),
+            (self.GROUPS, self.Y, self.SCORE, 2),          # k truncation
+            (self.GROUPS, np.zeros_like(self.Y), self.SCORE),  # no positives
+            (empty, empty, np.array([], dtype=np.float64)),    # empty input
+        ):
+            out = positive_row_contributions(*args)
+            assert isinstance(out, tuple) and len(out) == 2, args
+        # ...and it takes no weights argument at all — weight broadcasting
+        # lives in align_positive_row_weights.
+        assert "weights" not in inspect.signature(
+            positive_row_contributions
+        ).parameters
 
     # --- 2. uniform weights == unweighted ---
 
@@ -525,15 +539,25 @@ class TestWeightedMap:
         # A = (0.5*1.0 + 1*0.5)/1.5 = 2/3 ; B = 1.0 ; macro = 5/6
         assert weighted == pytest.approx(5 / 6)
 
-    # --- contributions helper exposes the aligned per-positive-row weight ---
+    # --- the shared broadcast helper aligns weights onto positive rows ---
 
-    def test_contributions_returns_aligned_weights(self):
+    def test_align_helper_selects_the_positive_row_weights(self):
         w = np.array([2.0, 2.0, 1.0, 1.0, 5.0, 5.0])
-        contrib, row_idx, w_pos = positive_row_contributions(
-            self.GROUPS, self.Y, self.SCORE, weights=w
+        contrib, row_idx = positive_row_contributions(
+            self.GROUPS, self.Y, self.SCORE
         )
+        w_pos = align_positive_row_weights(w, len(self.GROUPS), row_idx)
         assert w_pos.shape == contrib.shape
         assert np.array_equal(w_pos, w[row_idx])
+
+    def test_align_helper_rejects_wrong_length(self):
+        _contrib, row_idx = positive_row_contributions(
+            self.GROUPS, self.Y, self.SCORE
+        )
+        with pytest.raises(ValueError, match="row-aligned"):
+            align_positive_row_weights(
+                np.ones(len(self.GROUPS) - 1), len(self.GROUPS), row_idx
+            )
 
     def test_weights_length_mismatch_raises(self):
         with pytest.raises(ValueError):
