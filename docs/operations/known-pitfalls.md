@@ -70,3 +70,17 @@
 - **根因**：生產 `feature_table` 有字串欄，未宣告 `categorical_columns`、也未 `drop_columns` → `_compute_feature_columns` 收它為特徵 → `_encode_categoricals` 不編它 → `X_df.values` 塌縮成 object 矩陣（每格 ~34 B vs float64 8 B，公司規模 22→96 GiB）。錯誤在 training（下游），根因在 dataset schema 設定（上游）——R 系列同款形態。
 - **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。詳見 `docs/operations/training-oom-object-matrix.md`。
 - **驗證方式**：`python -c "import pyarrow.parquet as pq, pyarrow as pa; s=pq.read_schema('<train_model_input.parquet>'); print([f.name for f in s if pa.types.is_string(f.type)])"` 對照 `preprocessor.json` 的 `feature_columns`／`categorical_columns`；差集非空即中招。
+
+## 9. 本機跑 evaluation 必須兩個旗標，少一個就跑不動（2026-07-19）
+
+- **症狀（第一分鐘認出它）**：不帶 `--post-training` → 卡在讀不到 `ranked_predictions`（inference 產物）；不帶 `--model-version` → `FileNotFoundError: No 'best' symlink found in .../data/models`。
+- **根因**：兩個獨立原因。(a) evaluation 預設模式讀 inference 產出的 `ranked_predictions`，而本機 inference 撞既有 issue #63（`scripts/local_e2e.sh:6-9` 明寫本機 e2e 只收斂到 training）；`--post-training` 改讀 training 自己產出的 `training_eval_predictions`（分歧點在 `pipelines/evaluation/pipeline.py` 的三元式）。(b) 不指定 model_version 會解析 `data/models/best` symlink，而那要 promote 才有——**promote 是使用者保留的人工步驟，Claude 不得自行執行**。
+- **規則**：本機一律 `python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`，`<mv>` 用 training 那步印出的值。**不要為了讓它跑起來而去 promote。**
+- **驗證方式**：先跑 `dataset` → `training`（training log 尾端會印 model_version 與 manifest 路徑），再帶入。完整建置鏈見 `docs/superpowers/plans/diag-redesign/00-shared-context.md` 的環境前置段。
+
+## 10. 用 grep report.html 當驗收會假陽性：內嵌 plotly.js 含大量常見英文字（2026-07-19）
+
+- **症狀（第一分鐘認出它）**：明明原始碼已清乾淨，`grep -c "<某個字>" report.html` 仍有命中，看起來像刪除不完整。實例：清掉 quadrant 診斷後，report.html 仍 grep 到 2 個 `quadrant`。
+- **根因**：`generate_html_report`（`evaluation/report.py:85,118`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
+- **規則**：驗證「某個功能的字樣是否清乾淨」一律 **grep 產生 HTML 的原始碼**（`src/recsys_tfb/evaluation/`、`src/recsys_tfb/pipelines/evaluation/`），不要 grep 產物 HTML。
+- **驗證方式**：命中時用 `grep -o ".\{100\}<字>.\{100\}" report.html` 看上下文——落在 minified JS 裡（無空白、大量單字母變數）即為假陽性。決定性檢查是 `grep -rn "<字>" src/recsys_tfb/evaluation/` 為零。

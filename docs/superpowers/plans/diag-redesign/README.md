@@ -7,6 +7,24 @@
 1. **`00-shared-context.md`** — 開工前必讀。五項診斷的邏輯架構、檔案結構、持久化邊界、共同統計限制、診斷契約。六份計畫都依賴它，都不複述它。
 2. 然後照編號執行下面六份。
 
+## 進度（最後更新 2026-07-20）
+
+| Plan | 狀態 |
+|---|---|
+| **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
+| **1 config_shift** | 🔨 **進行中**，branch `feat/diag-config-shift`（從 merged main 開出）。7 個 task 皆未開始 |
+| 2–5 | 未開始 |
+
+**續作接手方式**：讀 `00-shared-context.md` ＋ `02-plan-1-config-shift.md`，從 Task 2.1 開始。worktree 是 `/Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign`，**本機 Spark 環境已建好**（dataset／training 跑過，model_version `6059dcef`），不必重跑 `local_spark_setup --reset`。
+
+**Plan 0 已落地、後續計畫可直接用的地基**：
+- `src/recsys_tfb/report/`：`types`（`ReportSection`／`ScopeNote`／`Page`）、`fmt`（六個語意化格式器）、`scales`、`figures`（含 `MAX_FIGURE_POINTS`）、`pages`（多頁 HTML ＋共用 plotly.js，單頁實測 9.3KB）
+- `diagnosis/metric/sample.py`：回傳的 `sample_pdf` 帶 `stratum`／`inclusion_weight`；`meta` 帶 `strata`／`sampling_description`
+- `diagnosis/metric/uncertainty.py::paired_bootstrap_delta`：分層配對 cluster bootstrap（**不要再寫第二份 bootstrap**）
+- `evaluation/metrics.py`：mAP 原語支援 optional `weights`（不傳時位元等價）＋`align_positive_row_weights`
+
+**公司環境實況（本機測不到，已據此設定）**：有正例的 query 約 22 萬、driver 128GB → `max_queries` 設 250,000 → `ratio == 1.0` → 診斷是**普查**、權重全 1。
+
 ## 六份計畫
 
 | # | 檔案 | 一句話 | 交付後你看什麼 |
