@@ -692,6 +692,57 @@ class TestDiagnosisMetricParamsA15:
             validate_config_consistency(p)
 
 
+class TestReservedSegmentColumnsA15:
+    """A15：segment_columns 不得用抽樣器的保留欄名。
+
+    為什麼要在 config 層再擋一次（``sample.py::_guard_reserved_columns``
+    已經有 runtime 守衛）：兩者驗的輸入不同。這條驗「config 宣告了什麼」，
+    在 CLI entry 一秒內擋掉；runtime 那條驗「實際 DataFrame 有什麼欄」，
+    是給繞過 Layer-1 的呼叫路徑（``scripts/*_diagnosis.py`` 直接 import）
+    的 backstop。少了這條，使用者要等 Spark 起來 2–4 分鐘才知道配置錯了。
+    """
+
+    def _params(self, seg_cols):
+        return {"evaluation": {"segment_columns": seg_cols}}
+
+    def test_reserved_names_rejected(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in ("stratum", "inclusion_weight"):
+            errors = diagnosis_metric_param_errors(self._params([bad]))
+            assert len(errors) == 1, errors
+            assert bad in errors[0] and "reserved" in errors[0]
+
+    def test_both_reserved_names_reported_together(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        errors = diagnosis_metric_param_errors(
+            self._params(["cust_segment_typ", "stratum", "inclusion_weight"])
+        )
+        assert len(errors) == 2
+        joined = "\n".join(errors)
+        assert "stratum" in joined and "inclusion_weight" in joined
+
+    def test_ordinary_segment_columns_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        assert diagnosis_metric_param_errors(
+            self._params(["cust_segment_typ", "age_band"])
+        ) == []
+        # 缺席 / None 都不算錯
+        assert diagnosis_metric_param_errors({"evaluation": {}}) == []
+        assert diagnosis_metric_param_errors(self._params(None)) == []
+
+    def test_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            validate_config_consistency,
+        )
+        # match 用 "reserved" 而非 "stratum"：A10（segment_columns 沒有對應
+        # segment_source）也會對同一份 config 報錯、訊息裡同樣有 "stratum"，
+        # 拿 "stratum" 當 match 的話這條測試在 A15 被拔掉後照樣會綠。
+        with _pytest.raises(ConfigConsistencyError, match="reserved column"):
+            validate_config_consistency(self._params(["stratum"]))
+
+
 class TestEnabledMustBeBool:
     """A15：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
 

@@ -83,7 +83,9 @@ Layer 1 — config-static (implemented here; aggregated by
   ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.ci.n_boot`` ≥ 1. Predicate: ``diagnosis_metric_param_errors``.
+  ``diagnosis.ci.n_boot`` ≥ 1; and ``evaluation.segment_columns`` must not
+  use the sampler's reserved names ``stratum`` / ``inclusion_weight``.
+  Predicate: ``diagnosis_metric_param_errors``.
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
@@ -566,6 +568,25 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
             f"evaluation.diagnosis.ci.enabled={en!r} must be a boolean "
             f"(YAML true/false; a quoted string like \"false\" is truthy and "
             f"would silently enable the node)."
+        )
+
+    # ``draw_diagnosis_sample`` adds its own 'stratum' / 'inclusion_weight'
+    # columns to the sample, then joins them onto the predictions by query
+    # key. A segment column of the same name would be duplicated by that join
+    # and blow up far downstream with an opaque pandas error ("Grouper for
+    # 'stratum' not 1-dimensional"). Catching it here means the CLI rejects
+    # the config in ~1s instead of 2-4 minutes into a Spark job.
+    reserved = {"stratum", "inclusion_weight"}
+    bad_seg = sorted(
+        set(ev.get("segment_columns", []) or []) & reserved
+    )
+    for col in bad_seg:
+        errors.append(
+            f"evaluation.segment_columns entry {col!r} is a reserved column "
+            f"name: the diagnosis sampler creates its own 'stratum' and "
+            f"'inclusion_weight' columns, so a segment column of the same "
+            f"name would collide in the sample join. Rename it in the source "
+            f"table or drop it from evaluation.segment_columns."
         )
     return errors
 

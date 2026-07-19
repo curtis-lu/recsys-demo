@@ -52,7 +52,14 @@ _RESERVED_COLS = ("stratum", "inclusion_weight")
 
 
 def _guard_reserved_columns(keep_cols: list[str], seg_cols: list[str]) -> None:
-    """撞名就 fail-loud——這是本模組唯一的欄名命名空間守衛。
+    """撞名就 fail-loud——runtime backstop，主閘在 A15。
+
+    **這不是重複的真實來源，兩者驗的輸入不同**：``core.consistency`` 的 A15
+    predicate（``diagnosis_metric_param_errors``）驗「config **宣告**了什麼」，
+    在 CLI entry 一秒內擋掉，是主閘；本函式驗「實際 DataFrame **有**什麼欄」。
+    保留本函式是因為有繞過 Layer-1 的呼叫路徑——``scripts/*_diagnosis.py``
+    直接 import 這個函式，不經過 CLI entry 的 config 驗證；schema 角色欄
+    撞到保留名也只有這裡看得到。**刪掉任何一個都會留下缺口。**
 
     為什麼要在這裡擋：``draw_diagnosis_sample`` 會在 ``sampled`` 上自造
     ``stratum`` / ``inclusion_weight``，再 ``df.join(sampled, on=query_cols)``。
