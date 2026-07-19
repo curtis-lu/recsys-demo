@@ -104,7 +104,7 @@ evaluation:
 
     # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
     # item 的 logit 分數加常數 δ、座標下降搜尋讓參數化 macro mAP 最大的
-    # δ*。δ 單位 log-odds（與對帳層 offset 同尺度）。holdout_fraction 切
+    # δ*。δ 單位 log-odds。holdout_fraction 切
     # query 折、折外報告防擬合雜訊；shrink_lambda 把 δ 向 0 收縮（座標目
     # 標 = mAP_fit − λ·δ²/M）。成本 ≈ rounds×items×grid點數 次 mAP 評估，
     # 大樣本時先調粗 grid.step。

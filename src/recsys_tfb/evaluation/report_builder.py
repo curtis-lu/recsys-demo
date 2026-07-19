@@ -575,7 +575,7 @@ def build_pair_ledger_section(
     desc = (
         "壓制帳本：誰的負例壓在誰的正例上方、交換名次會讓 query AP 變多少"
         "（|ΔAP|，λ 會計——記帳不訓練）。判讀順序：(1) 看壓制者邊際表，"
-        "|ΔAP| 總量大的 item 是主要加害者，回象限表看它是否「水準偏高」；"
+        "|ΔAP| 總量大的 item 是主要加害者；"
         "(2) substitution 表 delta_vs_current 為正＝把該 item 分數換成 "
         "base-rate 常數反而更好（個性化分數是淨傷害）、負＝淨貢獻；"
         "(3) by_segment 看傷害集中在哪群。完整判讀："

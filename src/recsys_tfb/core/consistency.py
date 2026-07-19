@@ -99,9 +99,11 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
-* A20 — training-side ``diagnostics.*`` parameter domains (structure layer:
-  gain_ledger + conditional-SHAP background): ``diagnostics.shap.background``
-  ∈ {global, per_item}; ``diagnostics.gain_ledger.enabled`` is bool.
+* A20 — training-side ``diagnostics.*`` parameter domains:
+  ``diagnostics.shap.background`` ∈ {global, per_item};
+  ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
+  quadrant_enabled`` are bool; ``diagnostics.shap.quadrant_top_k_decision`` /
+  ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
@@ -654,18 +656,26 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
 
 
 def training_diagnostics_param_errors(parameters: dict) -> list[str]:
-    """A20 — structure-layer diagnostics parameter domains.
+    """A20 — training-side ``diagnostics.*`` parameter domains.
 
-    Covers the two config keys the structure layer (Gain ledger + conditional
-    SHAP background) reads: ``diagnostics.shap.background`` must be
-    ``global`` or ``per_item``; ``diagnostics.gain_ledger.enabled`` must be
-    bool (a quoted YAML string like "false" is truthy and would silently
-    enable the node). Absent keys use behavior-preserving defaults. Returns
-    collect-all error strings; empty means OK.
+    Covers every ``diagnostics.*`` key consumed via bare truthiness/int
+    comparison by the training-side diagnostics nodes, where a wrong YAML
+    type is silently accepted rather than raising:
+    ``diagnostics.shap.background`` must be ``global`` or ``per_item``;
+    ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
+    quadrant_enabled`` must be bool (a quoted YAML string like "false" is
+    truthy in Python and would silently enable the node —
+    ``shap_cases.py``/``population_spark.py`` both read
+    ``cfg.get("quadrant_enabled", True)`` bare); ``diagnostics.shap.
+    quadrant_top_k_decision`` / ``quadrant_sample_per_cell`` /
+    ``quadrant_min_rows`` must be integers >= 1. Absent keys use
+    behavior-preserving defaults. Returns collect-all error strings; empty
+    means OK.
     """
     errors: list[str] = []
     diag = parameters.get("diagnostics", {}) or {}
-    bg = (diag.get("shap", {}) or {}).get("background", "global")
+    shap_cfg = diag.get("shap", {}) or {}
+    bg = shap_cfg.get("background", "global")
     if bg not in ("global", "per_item"):
         errors.append(
             f"A20: diagnostics.shap.background must be 'global' or 'per_item' "
@@ -677,6 +687,22 @@ def training_diagnostics_param_errors(parameters: dict) -> list[str]:
             f"A20: diagnostics.gain_ledger.enabled={gl_en!r} must be a bool "
             f"(true/false without quotes in YAML)."
         )
+    q_en = shap_cfg.get("quadrant_enabled", True)
+    if not isinstance(q_en, bool):
+        errors.append(
+            f"A20: diagnostics.shap.quadrant_enabled={q_en!r} must be a bool "
+            f"(true/false without quotes in YAML)."
+        )
+    for key, default in (
+        ("quadrant_top_k_decision", 1),
+        ("quadrant_sample_per_cell", 30),
+        ("quadrant_min_rows", 10),
+    ):
+        v = shap_cfg.get(key, default)
+        if not (isinstance(v, int) and not isinstance(v, bool) and v >= 1):
+            errors.append(
+                f"A20: diagnostics.shap.{key}={v!r} must be an integer >= 1."
+            )
     return errors
 
 

@@ -796,10 +796,23 @@ class TestPairLedgerParamsA19:
 
 
 class TestTrainingDiagnosticsParamsA20:
-    def _params(self, background=None, gain_ledger_enabled=None):
-        diag = {}
+    def _params(self, background=None, gain_ledger_enabled=None,
+                quadrant_enabled=None, quadrant_top_k_decision=None,
+                quadrant_sample_per_cell=None, quadrant_min_rows=None):
+        shap_cfg = {}
         if background is not None:
-            diag["shap"] = {"background": background}
+            shap_cfg["background"] = background
+        if quadrant_enabled is not None:
+            shap_cfg["quadrant_enabled"] = quadrant_enabled
+        if quadrant_top_k_decision is not None:
+            shap_cfg["quadrant_top_k_decision"] = quadrant_top_k_decision
+        if quadrant_sample_per_cell is not None:
+            shap_cfg["quadrant_sample_per_cell"] = quadrant_sample_per_cell
+        if quadrant_min_rows is not None:
+            shap_cfg["quadrant_min_rows"] = quadrant_min_rows
+        diag = {}
+        if shap_cfg:
+            diag["shap"] = shap_cfg
         if gain_ledger_enabled is not None:
             diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
         return {"diagnostics": diag}
@@ -824,6 +837,47 @@ class TestTrainingDiagnosticsParamsA20:
         )
         assert len(errs) == 1
         assert "gain_ledger.enabled" in errs[0]
+
+    def test_non_bool_quadrant_enabled_rejected(self):
+        # The failure mode this predicate exists to catch (see docstring):
+        # shap_cases.py / population_spark.py read
+        # cfg.get("quadrant_enabled", True) with bare truthiness, so a
+        # quoted YAML string like "false" is truthy in Python and would
+        # silently enable the node instead of disabling it.
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(
+            self._params(quadrant_enabled="false")
+        )
+        assert len(errs) == 1
+        assert "quadrant_enabled" in errs[0]
+
+    def test_valid_quadrant_enabled_values_clean(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(
+            self._params(quadrant_enabled=True)) == []
+        assert training_diagnostics_param_errors(
+            self._params(quadrant_enabled=False)) == []
+        # absent key -> default True -> clean
+        assert training_diagnostics_param_errors({}) == []
+
+    def test_non_positive_int_quadrant_keys_rejected(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        for key, bad in (
+            ("quadrant_top_k_decision", 0),
+            ("quadrant_sample_per_cell", -1),
+            ("quadrant_min_rows", 1.5),
+        ):
+            errs = training_diagnostics_param_errors(self._params(**{key: bad}))
+            assert len(errs) == 1, (key, bad, errs)
+            assert key in errs[0]
+
+    def test_valid_quadrant_int_keys_clean(self):
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(self._params(
+            quadrant_top_k_decision=1,
+            quadrant_sample_per_cell=30,
+            quadrant_min_rows=10,
+        )) == []
 
     def test_registered_in_validate_config_consistency(self):
         import pytest as _pytest
