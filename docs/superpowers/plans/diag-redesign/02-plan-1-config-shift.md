@@ -361,7 +361,7 @@ def test_scope_declares_what_it_cannot_tell():
 def test_no_verdict_vocabulary_in_output():
     """報表不得出現判定字眼——這是本次重構的核心約束。"""
     section = config_shift.render(RESULT, {})
-    blob = section.body_html + "".join(str(t) for t in section.tables.values())
+    blob = section.description + "".join(str(t) for t in section.tables)
     banned = ["建議", "應該", "異常", "不足", "有問題", "健康", "通過", "失敗",
               "verdict", "severity", "recommend"]
     hit = [w for w in banned if w in blob]
@@ -370,7 +370,7 @@ def test_no_verdict_vocabulary_in_output():
 
 def test_sum_note_is_shown():
     section = config_shift.render(RESULT, {})
-    assert "Σ Δ_j ≠ Δ" in section.body_html
+    assert "Σ Δ_j ≠ Δ" in section.description
 
 
 def test_module_satisfies_contract():

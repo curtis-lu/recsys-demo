@@ -192,7 +192,7 @@ git commit -m "feat(diagnosis): score_shift 計算層（Optuna＋曝光 guardrai
 def test_exposure_guardrail_shown():
     from recsys_tfb.diagnosis.metric import score_shift
     section = score_shift.render(RESULT, {})
-    assert "曝光" in section.body_html
+    assert "曝光" in section.description
 
 
 def test_counterfactual_framing_in_scope():

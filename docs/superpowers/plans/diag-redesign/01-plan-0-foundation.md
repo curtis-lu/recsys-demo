@@ -658,9 +658,11 @@ from typing import Any
 class ReportSection:
     """報表的一個區塊。"""
     title: str
-    body_html: str = ""
+    description: str
     figures: list = field(default_factory=list)
-    tables: dict = field(default_factory=dict)
+    tables: list = field(default_factory=list)
+    table_titles: list = field(default_factory=list)
+    collapsible: bool = False
 
 
 @dataclass(frozen=True)
@@ -698,7 +700,18 @@ class Page:
 
 > **`ReportSection` 的欄位必須與現況逐字一致。** 動手前先 `sed -n '55,70p' src/recsys_tfb/evaluation/report.py` 讀出實際定義照抄，不要用上面的示意當真實來源。
 >
-> **若實際欄名與上面示意不同**（本計畫後續所有測試都用 `title`／`body_html`／`figures`／`tables` 這四個名字），**以 repo 現況為準，並把後續測試裡的欄名一次改齊**——不要為了配合計畫去改既有 `ReportSection` 的欄名，那會波及全部 13 個既有 `build_*_section`。發現不一致時在本步驟記錄實際欄名，後面每個 Task 照著用。
+> **✅ 已實測（2026-07-19），`ReportSection` 的真實欄位如下**，六份計畫的測試碼都已對齊：
+>
+> ```python
+> title: str
+> description: str                                    # ← 不是 body_html
+> figures: list[go.Figure] = field(default_factory=list)
+> tables: list[pd.DataFrame] = field(default_factory=list)   # ← list，不是 dict
+> table_titles: list[str] = field(default_factory=list)
+> collapsible: bool = False
+> ```
+>
+> 它是**非 frozen** 的 `@dataclass`。**不得改動這些欄位的名稱或型別**——13 個既有 `build_*_section` 全靠它們。上面示意的 `body_html` 是規劃時的錯誤假設，已修正。
 
 ```python
 # src/recsys_tfb/report/__init__.py
@@ -1078,7 +1091,7 @@ _SCOPE = ScopeNote(
 
 def _page(slug, title):
     return Page(slug=slug, title=title, scope=_SCOPE,
-                sections=(ReportSection(title="s", body_html="<p>x</p>"),))
+                sections=(ReportSection(title="s", description="<p>x</p>"),))
 
 
 def test_writes_one_html_per_page_plus_index_and_shared_js(tmp_path):

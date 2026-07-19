@@ -386,7 +386,7 @@ def test_unavailable_result_renders_reason_not_blank():
     section = model_capacity.render(
         {"enabled": True, "available": False, "reason": "訓練側未產出 gain_ledger.json"}, {})
     assert section is not None
-    assert "gain_ledger" in section.body_html
+    assert "gain_ledger" in section.description
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
