@@ -87,9 +87,11 @@ Layer 1 — config-static (implemented here; aggregated by
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
-* A17 — ``evaluation.diagnosis.quadrant`` parameter domains:
-  ``auc_threshold`` ∈ (0.5, 1); ``top_k_occupancy`` integer >= 1.
-  Predicate: ``quadrant_param_errors``.
+* A17 — retired 2026-07-19 with the quadrant diagnosis layer (threshold-based
+  bucketing discarded continuous information; superseded by a scatter view).
+  The code is NOT renumbered: existing docs and plans cite invariants by
+  number, so reusing A17 or shifting A18+ would silently repoint those
+  references.
 * A18 — ``evaluation.diagnosis.{offset_sweep,debug_inject_offsets}``
   parameter domains: ``holdout_fraction`` ∈ (0,1); ``shrink_lambda`` >= 0;
   ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
@@ -97,10 +99,10 @@ Layer 1 — config-static (implemented here; aggregated by
   numbers. Predicate: ``offset_sweep_param_errors``.
 * A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
   ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
-* A20 — structure-layer (gain_ledger + conditional-SHAP background)
-  diagnostics parameter domains: ``diagnostics.shap.background`` ∈
-  {global, per_item}; ``diagnostics.gain_ledger.enabled`` is bool.
-  Predicate: ``shap_background_param_errors``.
+* A20 — training-side ``diagnostics.*`` parameter domains (structure layer:
+  gain_ledger + conditional-SHAP background): ``diagnostics.shap.background``
+  ∈ {global, per_item}; ``diagnostics.gain_ledger.enabled`` is bool.
+  Predicate: ``training_diagnostics_param_errors``.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -566,34 +568,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def quadrant_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.quadrant parameter domains (A17)."""
-    errors: list[str] = []
-    quad = (
-        ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-        .get("quadrant", {}) or {}
-    )
-    thr = quad.get("auc_threshold", 0.6)
-    if not (_is_number(thr) and 0.5 < float(thr) < 1.0):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.auc_threshold={thr!r} must be a "
-            f"number in (0.5, 1)."
-        )
-    k = quad.get("top_k_occupancy", 1)
-    if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.top_k_occupancy={k!r} must be an "
-            f"integer >= 1."
-        )
-    en = quad.get("enabled", True)
-    if not isinstance(en, bool):
-        errors.append(
-            f"evaluation.diagnosis.quadrant.enabled={en!r} must be a bool "
-            f"(true/false without quotes in YAML)."
-        )
-    return errors
-
-
 def offset_sweep_param_errors(parameters: dict) -> list[str]:
     """evaluation.diagnosis.{offset_sweep,debug_inject_offsets} domains (A18)."""
     errors: list[str] = []
@@ -679,7 +653,7 @@ def pair_ledger_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def shap_background_param_errors(parameters: dict) -> list[str]:
+def training_diagnostics_param_errors(parameters: dict) -> list[str]:
     """A20 — structure-layer diagnostics parameter domains.
 
     Covers the two config keys the structure layer (Gain ledger + conditional
@@ -804,13 +778,11 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(diagnosis_metric_param_errors(parameters))
 
-    errors.extend(quadrant_param_errors(parameters))
-
     errors.extend(offset_sweep_param_errors(parameters))
 
     errors.extend(pair_ledger_param_errors(parameters))
 
-    errors.extend(shap_background_param_errors(parameters))
+    errors.extend(training_diagnostics_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

@@ -419,49 +419,6 @@ def build_per_item_attr_section(
     )
 
 
-def build_quadrant_section(
-    quadrant: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "quadrant"):
-        return None
-    if not quadrant or not quadrant.get("enabled"):
-        return None
-    by_item = quadrant.get("by_item", {}) or {}
-    cols = ["quadrant", "auc", "auc_reason", "ap_sampled",
-            "ci_low", "ci_high", "top_share", "y_rate", "suppression_count",
-            "n_pos", "n_rows"]
-    tbl = pd.DataFrame(
-        {c: [by_item[it].get(c) for it in by_item] for c in cols},
-        index=list(by_item),
-    )
-    thresholds = quadrant.get("thresholds", {}) or {}
-    tables = [tbl]
-    table_titles = ["per-item 判別力表"]
-    cp = (quadrant.get("cross_purchase", {}) or {}).get("matrix", {}) or {}
-    if cp:
-        cp_tbl = pd.DataFrame.from_dict(cp, orient="index")
-        order = sorted(cp_tbl.index)
-        cp_tbl = cp_tbl.reindex(index=order, columns=order)
-        tables.append(cp_tbl)
-        table_titles.append("交叉購買矩陣 P(買 k｜買 j)（列＝j、欄＝k）")
-    desc = (
-        "行為層：within-item AUC（條件判別力）＋傷害觀測。判讀順序："
-        f"(1) AUC 低於 {thresholds.get('auc_threshold')} 的 item 看 "
-        "suppression_count 與 top_share 評估傷害；(2) 交叉購買矩陣看高共購 "
-        "item 之間的壓制是否實質。完整判讀："
-        "docs/pipelines/evaluation-diagnosis.md。"
-    )
-    notes = quadrant.get("notes") or []
-    if notes:
-        desc += "⚠ " + "／".join(notes)
-    return ReportSection(
-        title="條件判別力 Discrimination（per-item 行為觀測）",
-        description=desc,
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
 _SWEEP_BLUE = "#1565c0"
 _SWEEP_ORANGE = "#e65100"
 
@@ -862,7 +819,6 @@ def assemble_report(
     baseline_metrics: dict | None = None,
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
-    quadrant: dict | None = None,
     offset_sweep: dict | None = None,
     pair_ledger: dict | None = None,
 ) -> str:
@@ -874,7 +830,6 @@ def assemble_report(
         build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
-        build_quadrant_section(quadrant, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
         build_pair_ledger_section(pair_ledger, parameters),
         build_category_section(metrics, parameters),

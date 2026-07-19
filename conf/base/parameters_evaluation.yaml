@@ -58,7 +58,6 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
-      quadrant: true
       offset_sweep: true
       pair_ledger: true
     display:
@@ -102,15 +101,6 @@ evaluation:
     ci:
       enabled: true
       n_boot: 200
-
-    # 象限層（A17）：within-item AUC（條件判別力，midrank rank-sum）一軸。
-    # 原本的縱軸 gap_vs_global（水準，取對帳層產物）已隨對帳層退場；純排序的
-    # 替代品（offset sweep 的 δ*_j）未定案，目前只有判別力一軸。
-    # auc_threshold 以下＝條件判別力差。top_k_occupancy：top-slot 佔據統計的 k。
-    quadrant:
-      enabled: true
-      auc_threshold: 0.6
-      top_k_occupancy: 1
 
     # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
     # item 的 logit 分數加常數 δ、座標下降搜尋讓參數化 macro mAP 最大的

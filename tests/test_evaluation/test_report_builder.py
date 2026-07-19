@@ -1,7 +1,5 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
-import pytest
-
 from recsys_tfb.evaluation import report_builder as rb
 
 
@@ -583,98 +581,10 @@ def test_assemble_report_passes_metric_ci_through():
     assert "CI 2.5%" in html
 
 
-# gap_vs_global＝gap 減全局參考值 0.3（見 "global"）；residual 已按新公式
-# gap_vs_global − clip(gap_vs_global, theory_min, theory_max) 重算：
-#   A: gap_vs_global=0.75-0.3=0.45，clip 到帶 [0.693,0.693]→0.693，
-#      residual=0.45-0.693=-0.243（|.|≤0.3 → 可解釋，verdict 不變）。
-#   B: gap_vs_global=0.9-0.3=0.6，clip 到帶 [0,0]→0，residual=0.6
-#      （|.|>0.3 → 不可解釋，verdict 不變）。
-# pooled_gap 依 A/B 的 p_mean/y_rate/n_rows 加權合併算出（僅供顯示，
-# report_builder 本身不重算）。
-# gap_calibrated_vs_global＝gap_calibrated 減全局參考值 reference_calibrated
-# =-0.1（opus 審查修正：gap_calibrated 同樣受母體條件化位移，判讀校準層要
-# 看相對值而非絕對值）：A: 0.02-(-0.1)=0.12；B: 0.8-(-0.1)=0.9。
-_QUAD_FIXTURE = {
-    "enabled": True,
-    "thresholds": {"auc_threshold": 0.6, "top_k_occupancy": 1},
-    "n_queries": 1000, "n_pos_queries": 400,
-    "by_item": {
-        "A": {"auc": 0.82, "auc_reason": None, "n_pos": 120, "n_neg": 880,
-              "n_rows": 1000,
-              "disc_status": "好", "quadrant": "健康",
-              "ap_sampled": 0.61, "ci_low": 0.55, "ci_high": 0.68,
-              "top_share": 0.2, "n_top": 200, "y_rate": 0.12,
-              "suppression_count": 30},
-        "B": {"auc": 0.51, "auc_reason": None, "n_pos": 20, "n_neg": 980,
-              "n_rows": 1000,
-              "disc_status": "差", "quadrant": "冷門受害者（判別力差）",
-              "ap_sampled": 0.7, "ci_low": 0.5,
-              "ci_high": 0.85, "top_share": 0.6, "n_top": 600,
-              "y_rate": 0.02, "suppression_count": 480},
-    },
-    "cross_purchase": {
-        "matrix": {"A": {"A": 1.0, "B": 0.3}, "B": {"A": 0.5, "B": 1.0}},
-        "n_buyers": {"A": 100, "B": 60},
-    },
-    "sources": {"metric_ci": True},
-    "notes": [],
-}
-
-
-def test_quadrant_section_renders_table_and_matrix():
-    from recsys_tfb.evaluation.report_builder import build_quadrant_section
-    sec = build_quadrant_section(_QUAD_FIXTURE, _params_min())
-    tbl = sec.tables[0]
-    assert list(tbl.index) == ["A", "B"]
-    assert tbl.loc["B", "quadrant"] == "冷門受害者（判別力差）"
-    # 散布圖的縱軸是 gap_vs_global（已隨對帳層退場）→ 整張圖移除
-    assert not sec.figures
-    assert "gap_vs_global" not in tbl.columns
-    assert len(sec.tables) == 2           # 判別力表＋交叉購買矩陣
-    assert sec.tables[1].loc["B", "A"] == pytest.approx(0.5)
-    assert "判讀" in sec.description
-    assert "evaluation-diagnosis" in sec.description
-
-
-def test_quadrant_section_none_when_disabled_or_absent():
-    from recsys_tfb.evaluation.report_builder import build_quadrant_section
-    assert build_quadrant_section(None, _params_min()) is None
-    assert build_quadrant_section({"enabled": False}, _params_min()) is None
-    params_off = {"evaluation": {"report": {"sections": {"quadrant": False}}}}
-    assert build_quadrant_section(_QUAD_FIXTURE, params_off) is None
-
-
-def test_quadrant_section_notes_and_missing_axis():
-    from recsys_tfb.evaluation.report_builder import build_quadrant_section
-    auc_reason = "單一類別（n_pos=0, n_neg=10）——AUC 未定義"
-    fx = dict(
-        _QUAD_FIXTURE,
-        by_item={"A": dict(_QUAD_FIXTURE["by_item"]["A"],
-                           quadrant="無法評估", auc=None,
-                           auc_reason=auc_reason)},
-        notes=["metric_ci 停用或缺席——AP±CI 欄從缺。"],
-    )
-    sec = build_quadrant_section(fx, _params_min())
-    assert "無法評估" in sec.tables[0]["quadrant"].tolist()
-    assert "metric_ci 停用" in sec.description
-    # 單類 item 的 auc 為 None 時，人類可讀的原因要進報表（不只在 JSON）。
-    assert auc_reason in sec.tables[0]["auc_reason"].tolist()
-
-
-def test_assemble_report_renders_quadrant():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
-    )
-    assert "條件判別力" in html
-
-
 def test_assemble_report_has_no_reconciliation_section():
     """對帳層已退場——report.html 不得再出現該段落。"""
     from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), quadrant=_QUAD_FIXTURE
-    )
+    html = assemble_report(_metrics_min(), _params_min())
     assert "對帳" not in html
     assert "Reconciliation" not in html
 

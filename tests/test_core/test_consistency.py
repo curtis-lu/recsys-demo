@@ -676,44 +676,6 @@ class TestEnabledMustBeBool:
         assert diagnosis_metric_param_errors(p) == []
 
 
-class TestQuadrantParamsA17:
-    def _params(self, quad):
-        return {"evaluation": {"diagnosis": {"quadrant": quad}}}
-
-    def test_absent_and_valid_defaults_clean(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        assert quadrant_param_errors({}) == []
-        assert quadrant_param_errors(self._params(
-            {"enabled": True, "auc_threshold": 0.6,
-             "top_k_occupancy": 1}
-        )) == []
-
-    def test_bad_values_report(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        errors = quadrant_param_errors(self._params(
-            {"auc_threshold": 0.4, "top_k_occupancy": 0,
-             "enabled": "false"}
-        ))
-        assert len(errors) == 3
-        joined = "\n".join(errors)
-        assert "auc_threshold" in joined
-        assert "top_k_occupancy" in joined and "enabled" in joined
-
-    def test_auc_threshold_boundaries(self):
-        from recsys_tfb.core.consistency import quadrant_param_errors
-        assert quadrant_param_errors(self._params({"auc_threshold": 0.5})) != []
-        assert quadrant_param_errors(self._params({"auc_threshold": 0.51})) == []
-        assert quadrant_param_errors(self._params({"auc_threshold": 1.0})) != []
-
-    def test_wired_into_validate(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError, validate_config_consistency,
-        )
-        with _pytest.raises(ConfigConsistencyError, match="auc_threshold"):
-            validate_config_consistency(self._params({"auc_threshold": 0.4}))
-
-
 class TestOffsetSweepParamsA18:
     def _params(self, sweep=None, inject=None):
         diag = {}
@@ -833,7 +795,7 @@ class TestPairLedgerParamsA19:
             )
 
 
-class TestShapBackgroundParamsA20:
+class TestTrainingDiagnosticsParamsA20:
     def _params(self, background=None, gain_ledger_enabled=None):
         diag = {}
         if background is not None:
@@ -843,21 +805,21 @@ class TestShapBackgroundParamsA20:
         return {"diagnostics": diag}
 
     def test_bad_background_domain_rejected(self):
-        from recsys_tfb.core.consistency import shap_background_param_errors
-        errs = shap_background_param_errors(self._params(background="per_query"))
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(self._params(background="per_query"))
         assert len(errs) == 1
         assert "diagnostics.shap.background" in errs[0]
 
     def test_valid_background_values_clean(self):
-        from recsys_tfb.core.consistency import shap_background_param_errors
-        assert shap_background_param_errors(self._params(background="global")) == []
-        assert shap_background_param_errors(self._params(background="per_item")) == []
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        assert training_diagnostics_param_errors(self._params(background="global")) == []
+        assert training_diagnostics_param_errors(self._params(background="per_item")) == []
         # absent block / absent key -> default "global" -> clean
-        assert shap_background_param_errors({}) == []
+        assert training_diagnostics_param_errors({}) == []
 
     def test_non_bool_gain_ledger_enabled_rejected(self):
-        from recsys_tfb.core.consistency import shap_background_param_errors
-        errs = shap_background_param_errors(
+        from recsys_tfb.core.consistency import training_diagnostics_param_errors
+        errs = training_diagnostics_param_errors(
             self._params(gain_ledger_enabled="yes")
         )
         assert len(errs) == 1

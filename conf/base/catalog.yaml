@@ -243,10 +243,6 @@ evaluation_metric_ci:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json
 
-evaluation_quadrant:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/quadrant_summary.json
-
 evaluation_offset_sweep:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/offset_sweep.json
