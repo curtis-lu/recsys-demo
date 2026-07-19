@@ -224,6 +224,15 @@ def paired_bootstrap_delta(
        在兩層拿到獨立的乘數（層間相關性被切斷），這在診斷用途下遠比扭曲層
        比重無害。
 
+       **但這個代價目前是惰性的**：query ＝ ``(snap_date, entity)``，而
+       evaluation 一次只跑一個 snap_date（產物路徑 ``data/evaluation/
+       ${model_version}/${snap_date}/`` 即是此結構）。因此一個 entity 恰好
+       對應一個 query、恰好屬於一個層，**跨層在現行 pipeline 裡不可能發生**
+       （2026-07-19 在本機資料實測：654 個 entity、654 個 query，比值 1.000）。
+       ⚠ **若日後 evaluation 改成跨期評估（單次涵蓋多個 snap_date），這個取捨
+       就會活過來，屆時要重新評估「切斷層間相關性」是否仍可接受**——它會讓
+       橫跨兩層的 entity 被當成兩個獨立 cluster，低估變異、CI 偏窄。
+
     每列的最終權重 ＝ ``inclusion_weight × 該 (層, cluster) 的重抽次數``，
     經 :func:`~recsys_tfb.evaluation.metrics.align_positive_row_weights`
     對齊到正例列後餵進加權聚合——不修正的話，被降抽的那一層會被系統性低估。
