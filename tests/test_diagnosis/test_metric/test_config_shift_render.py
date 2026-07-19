@@ -23,12 +23,8 @@
 from __future__ import annotations
 
 import copy
-import inspect
-import types
 
-import pandas as pd
 import plotly.graph_objects as go
-import pytest
 
 from recsys_tfb.diagnosis.metric import config_shift, contract
 from recsys_tfb.report import ReportSection, ScopeNote
@@ -184,18 +180,14 @@ def test_scope_names_the_sum_of_delta_j_caveat():
     assert any("Σ Δ_j ≠ Δ" in item for item in config_shift.SCOPE.blind_to)
 
 
-def test_sampling_description_flows_into_scope():
-    """``sampling`` 是每次執行都不同的事實，必須從 result 帶入而非寫死。"""
-    assert config_shift.SCOPE.sampling == ""  # 模組層級的那份不帶執行期事實
-    scope = config_shift.scope_for(_result())
-    assert scope.sampling == SAMPLING_DESCRIPTION
-    assert scope.measures == config_shift.SCOPE.measures
+def test_module_level_scope_carries_no_run_specific_facts():
+    """``sampling`` 必須留空，由組裝層（Task 2.5）從 ``sample_meta`` 填。
 
-
-def test_scope_for_tolerates_missing_sampling_description():
-    result = _result()
-    result["sample_meta"] = {}
-    assert config_shift.scope_for(result).sampling == ""
+    這條守的是「別把執行期事實寫死進模組常數」——寫死的話，import 到的 SCOPE
+    會帶著上一次執行的抽樣描述，而那是個看不出來的錯（字串長得很合理）。
+    填值那一步本身不在這裡測：它屬於組裝層，五項診斷共用一份實作。
+    """
+    assert config_shift.SCOPE.sampling == ""
 
 
 # ---- 鐵則 1：不下結論 --------------------------------------------------
@@ -206,10 +198,9 @@ def test_no_verdict_vocabulary_in_output():
         "建議", "應該", "異常", "不足", "有問題", "健康", "通過", "失敗",
         "verdict", "severity", "recommend",
     ]
-    text = _all_text(config_shift.render(_result(), {}))
-    scope = config_shift.scope_for(_result())
-    text += "\n".join(
-        [scope.measures, scope.population, scope.sampling,
+    scope = config_shift.SCOPE
+    text = _all_text(config_shift.render(_result(), {})) + "\n".join(
+        [scope.measures, scope.population,
          *scope.blind_to, *scope.reference_points]
     )
     hits = [word for word in forbidden if word.lower() in text.lower()]
@@ -319,51 +310,9 @@ def test_tables_and_titles_stay_aligned():
 
 
 def test_module_satisfies_contract():
-    contract.check_module(config_shift)
+    """本模組滿足契約（符號齊全 ＋ 兩個函式簽章正確）。
 
-
-def test_contract_rejects_a_wrong_compute_signature():
-    """簽章形狀是 Task 2.2 默默立的；不檢查的話後四項診斷寫錯照樣綠。
-
-    ``match`` 挑 ``diagnosis_sample`` ——只有簽章檢查的訊息會出現這個字，
-    缺符號那條訊息不會，避免 pattern 被別條規則的訊息滿足而假綠。
+    ``check_module`` 本身的行為（含簽章檢查會不會擋下錯的形狀）測在
+    ``test_contract.py``——那是它的家，Plans 2–5 新增診斷時該跑的也是那一檔。
     """
-    mod = types.SimpleNamespace(
-        NAME="fake", TITLE="假診斷",
-        SCOPE=config_shift.SCOPE,
-        compute=lambda diagnosis_sample, parameters, extra: {},
-        render=lambda result, parameters: None,
-    )
-    with pytest.raises(TypeError, match="diagnosis_sample"):
-        contract.check_module(mod)
-
-
-def test_contract_rejects_a_wrong_render_signature():
-    mod = types.SimpleNamespace(
-        NAME="fake", TITLE="假診斷",
-        SCOPE=config_shift.SCOPE,
-        compute=lambda diagnosis_sample, parameters: {},
-        render=lambda payload, parameters: None,
-    )
-    with pytest.raises(TypeError, match="payload"):
-        contract.check_module(mod)
-
-
-def test_contract_accepts_the_agreed_signatures():
-    mod = types.SimpleNamespace(
-        NAME="fake", TITLE="假診斷",
-        SCOPE=config_shift.SCOPE,
-        compute=lambda diagnosis_sample, parameters: {},
-        render=lambda result, parameters: None,
-    )
-    contract.check_module(mod)  # 不應 raise
-
-
-def test_real_compute_and_render_match_the_contract_signatures():
-    """真模組的簽章就是契約要釘住的那一份，兩邊必須同步。"""
-    assert list(inspect.signature(config_shift.compute).parameters) == [
-        "diagnosis_sample", "parameters",
-    ]
-    assert list(inspect.signature(config_shift.render).parameters) == [
-        "result", "parameters",
-    ]
+    contract.check_module(config_shift)

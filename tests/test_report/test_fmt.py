@@ -11,11 +11,15 @@ from recsys_tfb.report.fmt import (
     fmt_delta,
     fmt_logodds,
     fmt_ratio,
+    fmt_weighted_count,
 )
 
 # 每個函式對「壞值」的共同契約：None/NaN/inf/無法轉 float → 空字串，不 raise。
 _BAD_VALUES = [None, float("nan"), float("inf"), float("-inf"), "not-a-number", object()]
-_ALL_FMTS = [fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count]
+_ALL_FMTS = [
+    fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count,
+    fmt_weighted_count,
+]
 
 
 @pytest.mark.parametrize("fn", _ALL_FMTS)
@@ -73,6 +77,29 @@ class TestFmtCount:
         assert fmt_count(4400000) == "4,400,000"
         assert fmt_count(4_400_000.0) == "4,400,000"
         assert fmt_count(0) == "0"
+
+
+class TestFmtWeightedCount:
+    """加權計數（HT 權重之和）：不是整數，所以不能借用 ``fmt_count``。"""
+
+    def test_keeps_one_decimal(self):
+        assert fmt_weighted_count(61.5) == "61.5"
+        assert fmt_weighted_count(28.5) == "28.5"
+
+    def test_thousands_separator_like_fmt_count(self):
+        assert fmt_weighted_count(4_400_000.25) == "4,400,000.2"
+
+    def test_whole_numbers_still_show_the_decimal(self):
+        """``62`` 與 ``62.0`` 在報表上要長得一樣——不然讀者會以為前者是精確整數。"""
+        assert fmt_weighted_count(62) == "62.0"
+
+    def test_does_not_round_two_halves_in_opposite_directions(self):
+        """這個函式存在的理由：``fmt_count`` 對 61.5→62、28.5→28（銀行家捨入
+        兩個 .5 往不同方向跑），並排在同一欄看起來像資料壞了。加權和保留小數
+        就沒有這個問題。"""
+        assert fmt_count(61.5) != fmt_count(28.5) + ""  # 前提：兩者都是 .5
+        assert fmt_weighted_count(61.5).endswith(".5")
+        assert fmt_weighted_count(28.5).endswith(".5")
 
 
 def test_module_uses_math_isfinite_consistently():

@@ -12,8 +12,9 @@
 2. 不設門檻——不拿 config 門檻把連續量切成離散類別；顏色只編碼大小與正負。
    唯一的門檻是 ``MAX_FIGURE_POINTS``，它管的是**繪圖能力**不是資料的意義，
    所以超標時只換呈現形式（圖 → 表），一列資料都不丟。
-3. 每個數字自帶說明——範圍說明由 :data:`SCOPE` 擁有（見 ``__init__``），執行期
-   才知道的抽樣設計由 :func:`scope_for` 從 ``sample_meta`` 帶入。
+3. 每個數字自帶說明——範圍說明由 :data:`SCOPE` 擁有（見 ``__init__``）。執行期
+   才知道的抽樣設計由**組裝層**填進 ``SCOPE.sampling``，不在這裡：五項診斷共用
+   同一份 ``diagnosis_sample``，各放一份填值 helper 只會得到五份會漂移的同義碼。
 
 **圖形預算為什麼非處理不可**：公司環境的 context 群 ＝
 ``sample_group_keys ∪ sample_weight_keys − {item, label}`` 的笛卡兒積，乘上 item
@@ -23,15 +24,20 @@
 """
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.report import ReportSection, ScopeNote
+from recsys_tfb.report import ReportSection
 from recsys_tfb.report.figures import MAX_FIGURE_POINTS, bar, heatmap
-from recsys_tfb.report.fmt import fmt_ap, fmt_count, fmt_delta, fmt_logodds
+from recsys_tfb.report.fmt import (
+    fmt_ap,
+    fmt_count,
+    fmt_delta,
+    fmt_logodds,
+    fmt_weighted_count,
+)
 
 _CTX = "context 群"
 _ITEM = "item"
@@ -44,23 +50,12 @@ def _own_package():
 
     **為什麼是函式內 import**：``__init__`` 在 module 層級 ``from ._render import
     render``，本模組若在 module 層級反向 import 它就是循環 import。延到呼叫時才
-    取，父套件早已初始化完畢。代價是多一次字典查找，換到的是「標題與範圍說明
-    只有一份定義」——兩邊各寫一份字串，改了其中一邊不會有任何東西變紅。
+    取，父套件早已初始化完畢。代價是多一次字典查找，換到的是「標題只有一份
+    定義」——兩邊各寫一份字串，改了其中一邊不會有任何東西變紅。
     """
     import recsys_tfb.diagnosis.metric.config_shift as pkg
 
     return pkg
-
-
-def scope_for(result: dict) -> ScopeNote:
-    """把執行期才知道的抽樣設計填進 :data:`SCOPE`。
-
-    ``ScopeNote`` 是 frozen dataclass，所以這裡回一份新的而不是就地改——模組層級
-    的那份必須保持不帶任何單次執行的事實，否則跨執行 import 到的 SCOPE 會帶著
-    上一次的抽樣描述。
-    """
-    sampling = str((result.get("sample_meta") or {}).get("sampling_description", ""))
-    return replace(_own_package().SCOPE, sampling=sampling)
 
 
 def _fits(n_points: int) -> bool:
@@ -246,7 +241,8 @@ def render(result: dict, parameters: dict) -> ReportSection | None:
                     _ITEM: r["item"],
                     "Δ_j": fmt_delta(r.get("delta_j")),
                     "n_pos_raw": fmt_count(r.get("n_pos_raw")),
-                    "n_pos_effective": fmt_count(r.get("n_pos_effective")),
+                    # 加權和不是整數，捨入到整數會讓 61.5 與 28.5 往相反方向跑。
+                    "n_pos_effective": fmt_weighted_count(r.get("n_pos_effective")),
                 }
                 for r in per_item
             ],
@@ -266,7 +262,8 @@ def render(result: dict, parameters: dict) -> ReportSection | None:
             "本次診斷抽樣的規模："
             f"{fmt_count(sample.get('n_queries'))} 個 query、"
             f"{fmt_count(sample.get('n_items'))} 個 item、"
-            f"{fmt_count(sample.get('n_positive_rows'))} 列正例。"
+            f"{fmt_count(sample.get('n_positive_rows'))} 列正例"
+            f"（加權後 {fmt_weighted_count(sample.get('n_positive_rows_effective'))}）。"
         )
 
     # ---- 8. 可見性區塊 ----

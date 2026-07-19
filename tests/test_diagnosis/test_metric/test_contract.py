@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import types
 
 import pytest
@@ -61,6 +62,47 @@ def test_check_module_reports_all_missing_symbols_at_once():
     message = str(exc.value)
     for symbol in ("TITLE", "SCOPE", "compute", "render"):
         assert symbol in message
+
+
+def test_check_module_rejects_a_wrong_compute_signature():
+    """簽章形狀是 Task 2.2 默默立的；不檢查的話後四項診斷寫錯照樣綠。
+
+    ``match`` 挑 ``diagnosis_sample``——只有簽章檢查的訊息會出現這個字，缺符號
+    那條訊息不會，避免 pattern 被別條規則的訊息滿足而假綠。
+    """
+    mod = types.SimpleNamespace(
+        NAME="fake", TITLE="假診斷", SCOPE=object(),
+        compute=lambda diagnosis_sample, parameters, extra: {},
+        render=lambda result, parameters: None,
+    )
+    with pytest.raises(TypeError, match="diagnosis_sample"):
+        contract.check_module(mod)
+
+
+def test_check_module_rejects_a_wrong_render_signature():
+    """參數**名字**也要對：report_builder 之後若改用關鍵字呼叫，一個
+    ``render(payload, ...)`` 只有在真的跑報表時才炸，而那是 pipeline 最尾端。"""
+    mod = types.SimpleNamespace(
+        NAME="fake", TITLE="假診斷", SCOPE=object(),
+        compute=lambda diagnosis_sample, parameters: {},
+        render=lambda payload, parameters: None,
+    )
+    with pytest.raises(TypeError, match="payload"):
+        contract.check_module(mod)
+
+
+@pytest.mark.parametrize("name", contract.DIAGNOSES)
+def test_registered_diagnoses_use_the_agreed_signatures(name):
+    """真模組的簽章對照**寫死的**期望值，而不是對照 ``contract._SIGNATURES``。
+
+    ``check_module`` 拿契約自己的常數去比，所以「常數與模組一起被改掉」的漂移
+    它抓不到。這裡把約定的形狀獨立釘一份，改契約時必須有意識地也改這裡。
+    """
+    mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+    assert list(inspect.signature(mod.compute).parameters) == [
+        "diagnosis_sample", "parameters",
+    ]
+    assert list(inspect.signature(mod.render).parameters) == ["result", "parameters"]
 
 
 def test_max_figure_points_is_re_exported_not_redefined():
