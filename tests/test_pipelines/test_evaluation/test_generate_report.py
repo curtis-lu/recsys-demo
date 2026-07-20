@@ -47,15 +47,16 @@ def _metrics():
 
 
 def test_generate_report_html_no_diagnostics(spark):
-    html = generate_report(_eval_pred(spark), _metrics(), _params(False), None)
+    html = generate_report(_eval_pred(spark), _metrics(), _params(False),
+                            None, None, None, None, None)
     assert html.startswith("<!DOCTYPE html>")
     assert "摘要 Headline" in html
     assert "<details" not in html      # diagnostics off
 
 
 def test_generate_report_with_diagnostics(spark):
-    html = generate_report(_eval_pred(spark), _metrics(),
-                           _params(True), None)
+    html = generate_report(_eval_pred(spark), _metrics(), _params(True),
+                            None, None, None, None, None)
     assert "<details" in html          # collapsible diagnostics present
 
 
@@ -86,10 +87,12 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     with the number of evaluation rows. Raw-array embedding would make the
     large report ~100s of KB bigger."""
     small = generate_report(
-        _eval_pred_n(spark, 100), _metrics(), _params_diag_full(), None
+        _eval_pred_n(spark, 100), _metrics(), _params_diag_full(),
+        None, None, None, None, None,
     )
     large = generate_report(
-        _eval_pred_n(spark, 3000), _metrics(), _params_diag_full(), None
+        _eval_pred_n(spark, 3000), _metrics(), _params_diag_full(),
+        None, None, None, None, None,
     )
     assert abs(len(large) - len(small)) < 20000
 

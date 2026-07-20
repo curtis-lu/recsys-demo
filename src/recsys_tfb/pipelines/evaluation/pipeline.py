@@ -32,6 +32,7 @@ def create_pipeline(
         draw_diagnosis_sample_node,
         generate_report,
         prepare_eval_data,
+        render_diagnosis_pages,
     )
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
         generate_comparison_report,
@@ -122,16 +123,22 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_config_shift",
         ),
-        # registry 診斷的 catalog 名字由 DIAGNOSES 導出（``evaluation_<name>``
-        # 是既有慣例），**不是手寫清單**：generate_report 用 varargs 依 registry
-        # 順序收這些結果，手寫的清單一旦與 registry 錯位，頁面標題會接到別項
-        # 診斷的數字上——而那是靜默的錯（每頁看起來都很正常）。
+        # inputs 裡的診斷產物**只當依賴宣告**，node 本身按檔名讀（見
+        # nodes_spark.render_diagnosis_pages 的 docstring）。列出它們是為了
+        # (1) 讓拓撲排序把這個 node 排在所有診斷之後、(2) 讓 --only-node 的
+        # 切片擴張在 JSON 不存在時能往上拉到診斷節點。
+        Node(
+            render_diagnosis_pages,
+            inputs=["parameters",
+                    *(f"evaluation_{name}" for name in DIAGNOSES)],
+            outputs="evaluation_diagnosis_pages",
+        ),
         Node(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
                     "parameters", "baseline_metrics", "evaluation_metric_ci",
                     "evaluation_offset_sweep", "evaluation_pair_ledger",
-                    *(f"evaluation_{name}" for name in DIAGNOSES)],
+                    "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog

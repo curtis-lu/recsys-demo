@@ -503,30 +503,70 @@ def _diagnosis_pages_dir(parameters: dict):
             / "diagnosis")
 
 
+def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
+    """把已落地的診斷 JSON 組成多頁 HTML，回傳寫出的檔案路徑。
+
+    ``*_dag_deps`` **刻意不讀值**。它們是 ``evaluation_<name>`` 那些診斷產物，
+    在這裡只當 DAG 的 happens-before 邊，買到兩件事：
+
+    1. **執行順序**（主要理由）。拓撲排序只看 ``node.inputs``
+       （``core/pipeline.py:69-73``）。只宣告 ``parameters`` 的話這個 node
+       的 in-degree 是 0——``parameters`` 沒有生產者——於是 Kahn 會把它排在
+       **診斷節點之前**，整條 pipeline 正常跑時它就會先執行，讀到上一次執行
+       留下的舊 JSON，或者什麼都讀不到。而它照樣「成功」。
+    2. **切片擴張**。``Pipeline._slice_with_expansion``（``core/pipeline.py:154``）
+       沿 ``node.inputs`` 往上找生產者，只在 ``can_load`` 為 False 時拉進來。
+       所以 ``--only-node render_diagnosis_pages`` 在**診斷 JSON 已落地**時
+       不會重算（那正是想要的行為：便宜地重繪），在 JSON 不存在時（全新
+       model_version、或清過檔）才自動補算。
+
+    結果本身按**檔名**讀（``diagnosis/<name>.json``），與離線工具
+    ``scripts/render_diagnosis.py`` 共用 ``diagnosis.metric.results.load_results``。
+    為什麼不用位置對應：Plan 2-5 每加一項診斷都要補一條 ``catalog.yaml``
+    entry；忘了補的話位置對應會安靜地走記憶體——頁面正常產出、磁碟上卻沒有那
+    份 JSON，離線重繪少一頁而沒有任何訊息。按檔名讀則當場進 ``missing``。
+
+    **刻意不吞例外**：寫頁失敗直接紅，比「報表產出了、但少了診斷入口」好認
+    ——後者要比對兩次執行的 HTML 才看得出來。
+    """
+    from recsys_tfb.diagnosis.metric.results import load_results
+
+    out_dir = _diagnosis_pages_dir(parameters)
+    results, missing, unknown = load_results(out_dir)
+    if missing:
+        logger.info(
+            "diagnosis results not on disk, no page for: %s",
+            ", ".join(missing),
+        )
+    if unknown:
+        logger.info(
+            "JSON files outside the diagnosis registry, ignored: %s",
+            ", ".join(unknown),
+        )
+    pages = assemble_diagnosis_pages(results, parameters, out_dir)
+    logger.info(
+        "diagnosis pages written to %s (%d files from %d results)",
+        out_dir, len(pages), len(results),
+    )
+    return [str(p) for p in pages]
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
     parameters: dict,
-    baseline_metrics: Optional[dict] = None,
-    metric_ci: Optional[dict] = None,
-    offset_sweep: Optional[dict] = None,
-    pair_ledger: Optional[dict] = None,
-    *registry_diagnoses: Optional[dict],
+    baseline_metrics: Optional[dict],
+    metric_ci: Optional[dict],
+    offset_sweep: Optional[dict],
+    pair_ledger: Optional[dict],
+    diagnosis_pages: Optional[list],
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
     figures embed bounded summaries rather than raw per-row arrays.
 
-    ``registry_diagnoses`` 是 ``diagnosis.metric.contract.DIAGNOSES`` 各項的
-    ``compute`` 輸出，**依 registry 順序**傳入——pipeline 的 inputs 清單就是從
-    ``DIAGNOSES`` 導出的（見 ``pipeline.py``），所以順序不靠人工維護。用
-    varargs 而不是一個具名參數配一項診斷：後者會讓每加一項診斷就得同時改
-    pipeline 與這個簽章，而簽章改動是報表層「不認識個別診斷」宣稱破功的入口。
-
-    診斷頁（多頁 HTML）寫在與各診斷 JSON 同一個 ``diagnosis/`` 目錄，主報表
-    只放一個指向它的連結。這裡**刻意不吞例外**：這是 pipeline 的最後一個
-    node，寫頁失敗直接紅比「報表產出了、但少了診斷入口」好認——後者要比對
-    兩次執行的 HTML 才看得出來。
+    診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
+    的路徑清單、放一個連結進主報表。
     """
     schema = get_schema(parameters)
     score_col = schema["score"]
@@ -578,25 +618,6 @@ def generate_report(
             ))
         sdf.unpersist()
         diagnostics_frames = {"figures": figs}
-
-    # registry 診斷 → 獨立多頁 HTML。全部缺席時連目錄都不建：一個只有
-    # index.html 與 3.5MB plotly.min.js、沒有任何診斷頁的目錄，看起來像
-    # 「跑了但什麼都沒量到」。
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-    results = {
-        name: result
-        for name, result in zip(DIAGNOSES, registry_diagnoses)
-        if result is not None
-    }
-    diagnosis_pages = None
-    if results:
-        out_dir = _diagnosis_pages_dir(parameters)
-        diagnosis_pages = assemble_diagnosis_pages(results, parameters, out_dir)
-        logger.info(
-            "diagnosis pages written to %s (%d files, %d diagnoses)",
-            out_dir, len(diagnosis_pages), len(results),
-        )
 
     return assemble_report(
         evaluation_metrics, parameters,
