@@ -708,10 +708,31 @@ class TestRenderDiagnosisPagesNodeWiring:
             "parameters", *(f"evaluation_{name}" for name in DIAGNOSES)
         ]
 
-    def test_slicing_only_this_node_pulls_in_the_diagnosis_nodes(self):
-        """真正驗切片行為，而不只是驗 inputs 字串。
+    def test_runs_after_every_diagnosis_node(self):
+        """**主要理由**：拓撲排序只看 ``node.inputs``。
 
-        ``can_load`` 全回 False ＝ 什麼都還沒落地，切片必須把整條上游拉回來。
+        拿掉診斷 inputs 的話這個 node 的 in-degree 是 0（``parameters`` 沒有
+        生產者），Kahn 會把它排到診斷節點**之前**——整條 pipeline 正常跑時
+        它先執行、讀到上次留下的舊 JSON，而且照樣「成功」。這條測試釘的是
+        「它在所有診斷之後」，不是 inputs 字串長什麼樣。
+        """
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+        names = [n.name for n in create_pipeline().nodes]
+        me = names.index("render_diagnosis_pages")
+        for diag in DIAGNOSES:
+            assert names.index(f"diagnose_{diag}") < me, (
+                f"render_diagnosis_pages 排在 diagnose_{diag} 之前，"
+                "會讀到上一次執行留下的 JSON"
+            )
+
+    def test_slicing_pulls_in_the_diagnosis_nodes_when_nothing_is_on_disk(self):
+        """次要理由：切片擴張。
+
+        ``can_load`` 全回 False ＝ 什麼都還沒落地（全新 model_version），切片
+        必須把整條上游拉回來。**注意這不是「防止讀到舊 JSON」**——診斷 JSON
+        已落地時 ``can_load`` 為 True，切片刻意不重算，那正是 ``--only-node``
+        想要的便宜重繪。
         """
         pipeline = create_pipeline()
         sliced, _plan = pipeline.slice_only(
@@ -749,10 +770,18 @@ def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
     """把已落地的診斷 JSON 組成多頁 HTML，回傳寫出的檔案路徑。
 
     ``*_dag_deps`` **刻意不讀值**。它們是 ``evaluation_<name>`` 那些診斷產物，
-    在這裡只當 DAG 的 happens-before 邊：``Pipeline._slice_with_expansion``
-    走 ``node.inputs`` 往上拉依賴，拿掉的話 ``--only-node
-    render_diagnosis_pages`` 不會把診斷節點拉進來，會拿上一次執行留下的 JSON
-    安靜地重繪。
+    在這裡只當 DAG 的 happens-before 邊，買到兩件事：
+
+    1. **執行順序**（主要理由）。拓撲排序只看 ``node.inputs``
+       （``core/pipeline.py:69-73``）。只宣告 ``parameters`` 的話這個 node
+       的 in-degree 是 0——``parameters`` 沒有生產者——於是 Kahn 會把它排在
+       **診斷節點之前**，整條 pipeline 正常跑時它就會先執行，讀到上一次執行
+       留下的舊 JSON，或者什麼都讀不到。而它照樣「成功」。
+    2. **切片擴張**。``Pipeline._slice_with_expansion``（``core/pipeline.py:154``）
+       沿 ``node.inputs`` 往上找生產者，只在 ``can_load`` 為 False 時拉進來。
+       所以 ``--only-node render_diagnosis_pages`` 在**診斷 JSON 已落地**時
+       不會重算（那正是想要的行為：便宜地重繪），在 JSON 不存在時（全新
+       model_version、或清過檔）才自動補算。
 
     結果本身按**檔名**讀（``diagnosis/<name>.json``），與離線工具
     ``scripts/render_diagnosis.py`` 共用 ``diagnosis.metric.results.load_results``。
@@ -899,12 +928,19 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
   tests/test_pipelines/test_evaluation/test_pipeline.py -v
 ```
 
-預期：`test_every_registry_diagnosis_is_wired_as_a_dependency` **與**
-`test_slicing_only_this_node_pulls_in_the_diagnosis_nodes` 兩條都轉紅。
+預期**三條**都轉紅：
 
-**為什麼要兩條都紅**：只有前者紅代表我們只驗了字串、沒驗切片真的會壞——而
-切片行為才是這些 inputs 存在的唯一理由。**若第二條沒紅 → 停下回報**，那表示
-切片測試寫得不對，改測試而不是改實作。
+| 測試 | 為什麼該紅 |
+|---|---|
+| `test_every_registry_diagnosis_is_wired_as_a_dependency` | 只驗 inputs 字串 |
+| `test_runs_after_every_diagnosis_node` | in-degree 掉到 0 → 排到診斷之前 |
+| `test_slicing_pulls_in_the_diagnosis_nodes_when_nothing_is_on_disk` | 沒有邊可走訪 → 切片塌成單一 node |
+
+**只有第一條紅 ＝ 這些 inputs 只被字串斷言守著**，而它們存在的真正理由是後兩者。
+**後兩條任一沒紅 → 停下回報**，改測試而不是改實作。
+
+（對抗審查已實測過第三條：套用本 mutation 後切片從 4 個 node 塌成 1 個。第二條
+是本次新增的，尚未實測——它若沒紅，回報時說明你觀察到的排序。）
 
 確認後改回。
 
