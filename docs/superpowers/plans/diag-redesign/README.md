@@ -13,7 +13,7 @@
 |---|---|
 | **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
 | **1 config_shift** | ✅ **實作完成**，branch `feat/diag-config-shift`。2.1–2.7 全部完成；**2.8 樣板檢查點使用者已通過**（2026-07-20 公司環境實跑成功，回饋見下方三則）；**2.9 offset 換算量表已追加**（`810cce3`，見下方） |
-| **1.5 接線層重構** | ⏭ **下一步，Plan 2 開工前必做**。來源＝Task 2.8 回饋 1＋2，見下方「下一步」 |
+| **1.5 接線層重構** | 📋 **計畫已寫好，待執行** → `02b-plan-1.5-wiring.md`（7 個 task）。來源＝Task 2.8 回饋 1＋2 |
 | 2–5 | 未開始。**開工前先做 1.5**，否則四項診斷會照抄目前有已知缺陷的接線形狀 |
 
 ## Task 2.9：offset 換算量表（2026-07-20 追加，`810cce3` → `2d2604f`）
@@ -40,11 +40,19 @@
 
 ## 下一步：接線層重構（Plan 2 之前）
 
+**計畫已寫好：`02b-plan-1.5-wiring.md`（7 個 task）。以下是它的摘要，細節與理由以該檔為準。**
+
 Task 2.8 的回饋 1 與 2 指向同一組接線缺陷，且**已在公司環境造成一次實際故障**。Plan 2–5 會各新增一項診斷，照現在的形狀做下去＝四份手寫 Node、四次位置平移的機會。所以在 Plan 2 之前先收掉：
 
 1. **診斷 Node 由 `contract.DIAGNOSES` 導出**，不再每項手寫。
-2. **`generate_report` 不再用 N 個位置參數收診斷結果**，改成收單一 dict（或由 runner 具名綁定）。這是 2026-07-20 那個 `TypeError` 的根治法。
-3. **把 `generate_report` 裡的五個 Spark 聚合抽成獨立 node**，落地 JSON；`generate_report` 簽章不再有 `SparkDataFrame`，變成純函式。
+2. **`generate_report` 不再收診斷結果**——診斷頁改由獨立的 `render_diagnosis_pages` 產生。
+3. **把 `generate_report` 裡的 Spark 聚合抽成獨立 node**，落地 JSON；`generate_report` 簽章不再有 `SparkDataFrame`，變成純函式。
+
+> **兩處更正（2026-07-20，寫 Plan 1.5 時查證）：**
+>
+> - **原本第 3 條寫「五個 Spark 聚合」，實際是六個。** `include_distributions` 底下 5 個、`include_calibration` 底下還有 `calibration_bins`（`nodes_spark.py:571-578`）。
+> - **原本第 1 條被寫成「TypeError 的根治法」，這是錯的。** `pipeline.py:134` 現在**就已經**從 `DIAGNOSES` 導出 inputs；出事是因為公司環境那份 `pipeline.py` 是手動拷貝的舊檔。真正的成因是 `generate_report` 有 4 個帶預設值的參數再加 varargs，**6/7/8/9 個 inputs 全都在合法範圍內**——個數對、位置錯。根治法是讓它變成剛好個數（無 varargs、無預設值），這樣少接一個 input 就是 `TypeError`。實作見 `02b-plan-1.5-wiring.md` Task 3。
+> - 連帶結論：**不動 `core/runner.py` 的位置綁定**。盤點 4 條 pipeline、52 個不重複 node，具備「少給 input 不會立刻爆」形狀的只有 3 個（`generate_report`、`log_experiment`、`select_shap_population`），其餘 49 個本來就 fail-loud。為 3 個 node 改 59 個呼叫點共用的執行核心，radius 不成比例。
 4. **每項診斷對使用者只有一個開關**：`evaluation.diagnosis.<name>.enabled`；`DIAGNOSES` 降級成「程式碼裡存在」的宣告，並把兩者的差別寫進文件。
 
 1＋2 動同一個簽章，3 讓那個簽章順便擺脫 Spark——**一次做完比分三次便宜**。做完的連帶好處：`scripts/render_diagnosis.py` 的 2 秒重繪範圍可從診斷頁擴大到整份主報表；公司環境手動同步時 `pipeline.py` 不再需要逐項核對。
@@ -81,7 +89,8 @@ Task 2.8 的回饋 1 與 2 指向同一組接線缺陷，且**已在公司環境
 **哪些是過渡期、哪些是真問題**：
 
 - **過渡期（Plan 5 收尾自然消失）**：#3 只服務舊診斷。五項 registry 診斷全部上線、舊的移除後，`report.sections` 會只剩非診斷的區塊，#3 就不再是「診斷開關」。
-- **真問題，且已經咬過一次**：#1 每項診斷手寫一個 Node，而 `generate_report` 用**位置**收 7 個具名參數 ＋ varargs。2026-07-20 公司環境實例：`node.inputs` 少了兩個元素 → 位置 6 的 `evaluation_config_shift` 綁進 `offset_sweep` 參數 → `build_offset_sweep_section` 拿到 `per_item` 是 list 而非 dict → `TypeError`。**運氣好才爆；型別相容的話會靜默把 A 診斷的數字印在 B 診斷的標題下。**
+- **真問題，且已經咬過一次**：`generate_report` 用**位置**收 7 個具名參數 ＋ varargs。2026-07-20 公司環境實例：`node.inputs` 少了兩個元素 → 位置 6 的 `evaluation_config_shift` 綁進 `offset_sweep` 參數 → `build_offset_sweep_section` 拿到 `per_item` 是 list 而非 dict → `TypeError`。**運氣好才爆；型別相容的話會靜默把 A 診斷的數字印在 B 診斷的標題下。**
+  - **更正（2026-07-20）**：這一條原本把 #1（手寫 Node）也算成成因，不成立——`pipeline.py:134` 早就是從 `DIAGNOSES` 導出的。真正讓錯位變得可能的是**簽章裡那 4 個預設值加 varargs**，它讓「個數不對」不再是錯誤。#1 仍值得收（Plan 2–5 會產生四份只差模組名的複製品，而它們會各自漂移），但它是**簡化**，不是這個故障的修法。
 - **真問題**：#4 在 Python 裡而 #2 在 YAML 裡，「關掉一項診斷」有兩個位置、語意不同（不進 registry ＝ 完全不存在；`enabled: false` ＝ 存在但寫 stub）。使用者要關一項時該動哪個，目前沒有任何地方寫。
 
 **目標狀態（Plan 2 開工前定案，因為 Plan 2–5 會照抄現在的形狀）**：
