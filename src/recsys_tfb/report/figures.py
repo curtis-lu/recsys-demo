@@ -39,6 +39,16 @@ def assert_within_budget(n: int, name: str) -> None:
         )
 
 
+def fits_budget(n: int) -> bool:
+    """``n`` 是否在單張圖的預算內。
+
+    與 :func:`assert_within_budget` 同一常數、同一比較方向——呼叫端要在
+    「畫得下就畫圖、畫不下就退回表格」這種決策裡用它，藉此避免「這裡判斷
+    畫得下、那裡 raise」的死角：兩處各自維護一份門檻比較，遲早會漂移。
+    """
+    return n <= MAX_FIGURE_POINTS
+
+
 def _finite_bounds(arr: np.ndarray, name: str) -> tuple[float, float]:
     """算 ``arr`` 中有限值的 ``(min, max)``，供 ``diverging_scale`` 的 ``lo``/``hi``。
 

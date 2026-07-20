@@ -106,8 +106,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
   integer >= 1; ``enabled`` bool; ``debug_inject_offsets`` values finite
   numbers. Predicate: ``offset_sweep_param_errors``.
-* A19 — ``evaluation.diagnosis.pair_ledger`` parameter domains:
-  ``enabled`` must be a bool. Predicate: ``pair_ledger_param_errors``.
+* A19 — evaluation.diagnosis.suppression.top_examples must be a non-negative
+  int (enabled is covered by A15). Predicate: ``suppression_param_errors``.
 * A20 — training-side ``diagnostics.*`` parameter domains:
   ``diagnostics.shap.background`` ∈ {global, per_item};
   ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
@@ -688,17 +688,27 @@ def offset_sweep_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def pair_ledger_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.pair_ledger parameter domains (A19)."""
+def suppression_param_errors(parameters: dict) -> list[str]:
+    """evaluation.diagnosis.suppression.top_examples parameter domain (A19).
+
+    ``enabled`` is intentionally NOT re-validated here: A15
+    (``diagnosis_metric_param_errors``) already walks every name in
+    ``diagnosis.metric.contract.DIAGNOSES`` — including ``suppression`` once
+    it is registered — and validates its ``enabled`` flag there. Checking it
+    again here would raise two error messages for the same bad value.
+    """
     errors: list[str] = []
     diag = ((parameters.get("evaluation", {}) or {})
             .get("diagnosis", {}) or {})
-    cfg = diag.get("pair_ledger", {}) or {}
-    en = cfg.get("enabled", True)
-    if not isinstance(en, bool):
+    cfg = diag.get("suppression", {}) or {}
+    top_examples = cfg.get("top_examples", 50)
+    if not (
+        isinstance(top_examples, int) and not isinstance(top_examples, bool)
+        and top_examples >= 0
+    ):
         errors.append(
-            f"evaluation.diagnosis.pair_ledger.enabled={en!r} must be a "
-            "bool"
+            f"evaluation.diagnosis.suppression.top_examples={top_examples!r} "
+            "must be a non-negative int."
         )
     return errors
 
@@ -854,7 +864,7 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(offset_sweep_param_errors(parameters))
 
-    errors.extend(pair_ledger_param_errors(parameters))
+    errors.extend(suppression_param_errors(parameters))
 
     errors.extend(training_diagnostics_param_errors(parameters))
 

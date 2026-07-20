@@ -41,7 +41,7 @@ from typing import Any
 import pandas as pd
 
 from recsys_tfb.report import ReportSection
-from recsys_tfb.report.figures import MAX_FIGURE_POINTS, bar, scatter
+from recsys_tfb.report.figures import MAX_FIGURE_POINTS, bar, fits_budget, scatter
 from recsys_tfb.report.fmt import fmt_auc, fmt_count, fmt_delta
 
 _ITEM = "item"
@@ -77,12 +77,6 @@ _FORMULA_RANK = (
 )
 
 
-def _fits(n_points: int) -> bool:
-    """``n_points`` 是否在單張圖的預算內（與 ``figures.assert_within_budget``
-    同一常數、同一比較方向，避免「這裡判斷畫得下、那裡 raise」的死角）。"""
-    return n_points <= MAX_FIGURE_POINTS
-
-
 def _rows_with(per_item: list[dict], *keys: str) -> list[dict]:
     """只保留指定鍵全部非 ``None`` 的列。
 
@@ -112,7 +106,7 @@ def _scatter_section(result: dict) -> ReportSection | None:
         "的整體分數差異，而非 query 內的相對排序；線上方則相反。",
     ]
 
-    if _fits(len(rows)):
+    if fits_budget(len(rows)):
         fig = scatter(
             x=raw, y=centered, labels=items,
             title="raw vs query-centered AUC（逐 item）",
@@ -174,7 +168,7 @@ def _per_item_auc_section(result: dict) -> ReportSection | None:
         f"，{_RANDOM_AUC:.3f}）；圖中橫虛線標示此值。",
     ]
 
-    if _fits(len(rows)):
+    if fits_budget(len(rows)):
         for auc_key, ci_lo_key, ci_hi_key, label in (
             (_RAW_AUC, _RAW_CI_LOW, _RAW_CI_HIGH, "raw_within_item_auc"),
             (_CENTERED_AUC, _CENTERED_CI_LOW, _CENTERED_CI_HIGH, "query_centered_auc"),
@@ -243,7 +237,7 @@ def _gap_section(result: dict) -> ReportSection | None:
         "本身就是訊號，這裡不取絕對值。",
     ]
 
-    if _fits(len(rows)):
+    if fits_budget(len(rows)):
         figures.append(bar(
             x=items, y=gaps,
             title="逐 item 的 auc_gap_raw_minus_centered",
@@ -300,7 +294,7 @@ def _rank_percentile_section(result: dict) -> ReportSection | None:
         "（四分位距，不是信賴區間）。",
     ]
 
-    if _fits(len(rows)):
+    if fits_budget(len(rows)):
         figures.append(bar(
             x=items, y=median,
             title="正例名次百分位（AP 最低的前幾個 item）",

@@ -19,7 +19,9 @@ from recsys_tfb.diagnosis.metric import contract
 
 
 def test_registry_is_exactly_the_planned_diagnoses():
-    assert contract.DIAGNOSES == ("config_shift", "item_ability", "model_capacity")
+    assert contract.DIAGNOSES == (
+        "config_shift", "item_ability", "model_capacity", "suppression",
+    )
 
 
 def test_registry_has_no_duplicates():
@@ -103,6 +105,7 @@ _EXPECTED_COMPUTE_PARAMS = {
     "config_shift": ("diagnosis_sample", "parameters"),
     "item_ability": ("diagnosis_sample", "parameters"),
     "model_capacity": ("gain_ledger", "item_ability", "parameters"),
+    "suppression": ("diagnosis_sample", "parameters"),
 }
 
 

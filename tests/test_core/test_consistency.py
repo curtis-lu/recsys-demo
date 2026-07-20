@@ -884,41 +884,81 @@ class TestOffsetSweepParamsA18:
             )
 
 
-class TestPairLedgerParamsA19:
-    def _params(self, pair_ledger=None):
+class TestSuppressionParamsA19:
+    """A19 改軌（Plan 3 Task 5.3）：原本驗 ``pair_ledger.enabled``，改驗
+    ``suppression.top_examples``。``enabled`` 不在這裡驗——``suppression``
+    進了 ``diagnosis.metric.contract.DIAGNOSES`` 之後，A15
+    （``diagnosis_metric_param_errors``）已經對 registry 裡每個名字驗過
+    ``enabled``，兩邊都驗會對同一個壞值吐兩條訊息。
+
+    ⚠ ``match="suppression"`` 選字陷阱：A15 對同一份 config 也會 raise，
+    訊息裡含 ``evaluation.diagnosis.suppression.enabled=...``——也含
+    "suppression" 這個子字串。所以
+    ``test_registered_in_validate_config_consistency`` 改用只有 A19 訊息
+    才有的 "top_examples" 當 match pattern，並且參數只給
+    ``top_examples``（不去動 ``enabled``），避免真的觸發 A15 而讓這條測試
+    在「哪個 predicate 負責」這件事上失去辨識力。
+    """
+
+    def _params(self, suppression=None):
         diag = {}
-        if pair_ledger is not None:
-            diag["pair_ledger"] = pair_ledger
+        if suppression is not None:
+            diag["suppression"] = suppression
         return {"evaluation": {"diagnosis": diag}}
 
     def test_absent_and_valid_defaults_clean(self):
-        from recsys_tfb.core.consistency import pair_ledger_param_errors
-        assert pair_ledger_param_errors({}) == []
-        assert pair_ledger_param_errors(self._params()) == []
-        assert pair_ledger_param_errors(
-            self._params({"enabled": True})
+        from recsys_tfb.core.consistency import suppression_param_errors
+        assert suppression_param_errors({}) == []
+        assert suppression_param_errors(self._params()) == []
+        assert suppression_param_errors(
+            self._params({"top_examples": 50})
         ) == []
+        assert suppression_param_errors(
+            self._params({"top_examples": 0})
+        ) == [], "0 是合法值（不列具體案例），不是 falsy 就該擋"
 
-    def test_non_bool_enabled_rejected(self):
-        from recsys_tfb.core.consistency import pair_ledger_param_errors
-        errs = pair_ledger_param_errors(self._params({"enabled": "yes"}))
+    def test_non_int_top_examples_rejected(self):
+        from recsys_tfb.core.consistency import suppression_param_errors
+        errs = suppression_param_errors(self._params({"top_examples": "50"}))
         assert len(errs) == 1
-        assert "evaluation.diagnosis.pair_ledger.enabled" in errs[0]
+        assert "evaluation.diagnosis.suppression.top_examples" in errs[0]
+
+    def test_bool_top_examples_rejected(self):
+        """``isinstance(True, int)`` 是 ``True``——bool 不算數，必須先擋。"""
+        from recsys_tfb.core.consistency import suppression_param_errors
+        errs = suppression_param_errors(self._params({"top_examples": True}))
+        assert len(errs) == 1
+        assert "top_examples" in errs[0]
+
+    def test_negative_top_examples_rejected(self):
+        from recsys_tfb.core.consistency import suppression_param_errors
+        errs = suppression_param_errors(self._params({"top_examples": -1}))
+        assert len(errs) == 1
+        assert "top_examples" in errs[0]
 
     def test_missing_block_defaults_clean(self):
-        from recsys_tfb.core.consistency import pair_ledger_param_errors
-        params = self._params({"enabled": True})
-        params["evaluation"]["diagnosis"].pop("pair_ledger", None)
-        assert pair_ledger_param_errors(params) == []
+        from recsys_tfb.core.consistency import suppression_param_errors
+        params = self._params({"top_examples": 50})
+        params["evaluation"]["diagnosis"].pop("suppression", None)
+        assert suppression_param_errors(params) == []
+
+    def test_enabled_is_not_validated_here(self):
+        """``enabled`` 的型別檢查交給 A15，A19 不重複驗——即使給一個非
+        bool 的 enabled，這個 predicate 也不該對它有意見。"""
+        from recsys_tfb.core.consistency import suppression_param_errors
+        errs = suppression_param_errors(
+            self._params({"enabled": "yes", "top_examples": 50})
+        )
+        assert errs == []
 
     def test_registered_in_validate_config_consistency(self):
         import pytest as _pytest
         from recsys_tfb.core.consistency import (
             ConfigConsistencyError, validate_config_consistency,
         )
-        with _pytest.raises(ConfigConsistencyError, match="pair_ledger"):
+        with _pytest.raises(ConfigConsistencyError, match="top_examples"):
             validate_config_consistency(
-                self._params({"enabled": "yes"})
+                self._params({"top_examples": "50"})
             )
 
 

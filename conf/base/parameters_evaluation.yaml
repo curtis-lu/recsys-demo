@@ -159,6 +159,14 @@ evaluation:
     model_capacity:
       enabled: true
 
+    # 診斷 4／5：壓制帳本與交叉購買——同一 query 內，label=0 的 item 排在
+    # label=1 之前時，把該正例列的 AP 缺口依比例分攤給排在它上面的每個負例
+    # （壓制矩陣熱圖）；並列出同一批 query 單位上的實際標籤共買 lift（泡泡
+    # 格圖，同軸序對照）。top_examples＝具體案例表最多列出幾筆。
+    suppression:
+      enabled: true
+      top_examples: 50
+
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
     # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
     # 正式評估必須留空。
