@@ -54,7 +54,26 @@
 2. **Node 由 `DIAGNOSES` 導出**，不再每項手寫——同時消滅 #1 的手寫 Node 與 `generate_report` 的位置綁定脆弱性。
 3. **`generate_report` 不再用 N 個位置參數收診斷結果**，改成收單一 dict（或由 runner 具名綁定）。這是上面那個 TypeError 的根治法，不是 workaround。
 
-### 回饋 2：舊 `offset_sweep` section 的判讀語氣
+### 回饋 2：`generate_report` 應該只組裝，不該再做 Spark 計算
+
+使用者原話：「我想把 `generate_report` 這個 node 的負擔降低，我希望跑這個 node 單純就是在組裝之前 node 已經跑過的結果，不要再有多餘的 spark 計算。」
+
+**現況（`nodes_spark.py:542-570`）**：`generate_report` 吃 `eval_predictions: SparkDataFrame`，`.select(...).cache()` 之後跑五個 Spark 聚合——`score_histogram_counts`／`score_box_stats_by_label`／`rank_count_matrix`／`positive_rank_count_matrix`／`positive_rate_matrix`。每個都是一次全掃。
+
+**為什麼這是問題，不只是效能**：
+
+1. **它是最後一個 node，卻是最貴的之一。** 失敗成本最大化：前面全部跑完才死在這裡（2026-07-20 公司環境的 TypeError 正是如此）。
+2. **主報表無法離線重繪。** 診斷頁已經做到「JSON 落地 → 純函式 render → 2 秒重繪」，主報表沒有——因為它的圖表要靠 Spark 現算。使用者要調主報表版面就得重跑整條 pipeline。
+3. **它違反這次重構的核心邊界。** `compute` 純計算落地 JSON、`render` 純呈現讀 JSON——五項新診斷都遵守，而報表層自己沒有。
+
+**修法（與診斷層同一個模式）**：把那五個聚合抽成獨立 node，輸出落地成 JSON（都是小東西：bin counts、quartiles、rank 矩陣），`generate_report` 改讀那份 JSON、簽章不再有 `SparkDataFrame`。
+
+**連帶效果**：
+- `generate_report` 變成純函式 → 可以納入 `scripts/render_diagnosis.py` 的離線重繪範圍，2 秒迴圈從診斷頁擴大到整份報表。
+- 失敗點往上游移到真正做事的地方。
+- 與回饋 1 的第 3 條（`generate_report` 不再用 N 個位置參數收診斷結果）是同一次改動的兩面，一起做比分兩次做便宜。
+
+### 回饋 3：舊 `offset_sweep` section 的判讀語氣
 
 見下方「過渡期的兩種語氣並存」。使用者可用 `report.sections.offset_sweep: false` 立即關掉，理由獨立成立（該段文字違反鐵則 1），不必等 Plan 4。
 
