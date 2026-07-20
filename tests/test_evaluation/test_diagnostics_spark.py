@@ -145,3 +145,95 @@ class TestCalibrationBins:
         assert "A" in items
         assert "B" not in items   # too few rows
         assert "C" not in items   # no positives
+
+
+class TestFrameJson:
+    """聚合小 frame 的落地格式。
+
+    兩種形狀分開處理的理由：長格式的 index 是無意義的 RangeIndex，矩陣的
+    index 是 item 名稱（heatmap 的 y 軸標籤，丟了圖就沒有標籤）。
+    """
+
+    def test_matrix_round_trip_preserves_index_and_int_columns(self):
+        import json
+
+        from recsys_tfb.evaluation.diagnostics_spark import (
+            frame_from_json, frame_to_json,
+        )
+        mat = pd.DataFrame([[1, 2], [3, 4]],
+                           index=["insur", "loan"], columns=[1, 2])
+        payload = frame_to_json(mat, "matrix")
+        back = frame_from_json(json.loads(json.dumps(payload)))
+        assert back.equals(mat)
+        # 欄名必須留在 int：_heatmap_from_matrix 用 list(matrix.columns) 當
+        # rank 值渲染成 "Rank 1"。變成字串 "1" 不會有任何測試轉紅，圖也照畫。
+        assert list(back.columns) == [1, 2]
+        assert list(back.index) == ["insur", "loan"]
+
+    def test_long_round_trip_drops_the_meaningless_index(self):
+        import json
+
+        from recsys_tfb.evaluation.diagnostics_spark import (
+            frame_from_json, frame_to_json,
+        )
+        long = pd.DataFrame({"prod_name": ["a", "b"], "count": [1, 2]})
+        payload = frame_to_json(long, "long")
+        assert "index" not in payload
+        back = frame_from_json(json.loads(json.dumps(payload)))
+        assert back.equals(long)
+        assert isinstance(back.index, pd.RangeIndex)
+
+    def test_kind_is_declared_not_inferred(self):
+        """``kind`` 必須明寫。
+
+        從 index 型別推斷會在「item 名稱剛好是 0,1,2」時猜錯——那時矩陣的
+        index 看起來就是 RangeIndex，會被當成長格式而把 y 軸標籤丟掉，而且
+        不會有任何測試轉紅。
+        """
+        import pytest
+
+        from recsys_tfb.evaluation.diagnostics_spark import frame_to_json
+        with pytest.raises(ValueError, match="kind"):
+            frame_to_json(pd.DataFrame({"a": [1]}), "records")
+
+    def test_empty_frame_round_trips(self):
+        """退化輸入：空 frame。
+
+        ``score_histogram_counts`` 在輸入為空時就是回
+        ``pd.DataFrame(columns=cols)``（diagnostics_spark.py:39），所以這不是
+        假想的邊界。
+        """
+        import json
+
+        from recsys_tfb.evaluation.diagnostics_spark import (
+            frame_from_json, frame_to_json,
+        )
+        empty = pd.DataFrame(columns=["prod_name", "count"])
+        back = frame_from_json(
+            json.loads(json.dumps(frame_to_json(empty, "long"))))
+        assert list(back.columns) == ["prod_name", "count"]
+        assert len(back) == 0
+
+    def test_nan_becomes_null_so_the_file_stays_strict_json(self):
+        """NaN 必須換成 None。
+
+        ``JSONDataset.save``（io/json_dataset.py:20-23）用預設
+        ``allow_nan=True``，NaN 會寫成 ``NaN`` 這個**非合法 JSON** 的字面值。
+        Python 的 ``json.loads`` 讀得回來，別的工具不行——而這些檔案的用途
+        就是被拷到別的環境去讀。
+
+        用 ``parse_constant`` 驗而不是掃字串：``"NaN" in text`` 會被
+        item 名稱裡剛好有 NaN 三個字母的情況誤判。
+        """
+        import json
+
+        import numpy as np
+
+        from recsys_tfb.evaluation.diagnostics_spark import frame_to_json
+        df = pd.DataFrame({"a": [1.0, np.nan]})
+        text = json.dumps(frame_to_json(df, "long"))
+
+        def _boom(const):
+            raise AssertionError(f"非合法 JSON 常數：{const}")
+
+        json.loads(text, parse_constant=_boom)   # 有 NaN/Infinity 就 raise
