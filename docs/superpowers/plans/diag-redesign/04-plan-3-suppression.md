@@ -197,7 +197,21 @@ git commit -m "refactor(diagnosis): per_item_ap 抽進 _common（第四個消費
 
 ⚠ **記憶體**：成對表的列數 ＝ 上面估的 250 萬–500 萬，乘以 6 欄 float64/int64 ≈ **120–240 MB**。這在 driver 上可以接受，但**必須在 log 印出實際列數**，公司環境跑完才知道估得準不準。用 `logger.info` 印 `n_pairs` 與 `n_positive_rows`。
 
-**改動 2（`cross_purchase_stats`，新函式）**：對每組 `(j, k)` 輸出 `n_joint`（同時買 j 與 k 的 entity 數）、`n_j`、`n_k`、`p_k_given_j = n_joint / n_j`、`lift = p_k_given_j / (n_k / n_entities)`。
+**改動 2（`cross_purchase_stats`，新函式）**。簽章 `cross_purchase_stats(sample_pdf: pd.DataFrame, schema: dict) -> list[dict]`。
+
+**共現單位 ＝ query 單位 ＝ `(time, entity)`**（與 `compute` 裡算 `groups` 的併鍵同一個），只看 `label == 1` 的列。對每組 `(j, k)` 輸出：
+
+- `n_units` ＝ 樣本內相異 query 單位數
+- `n_j` ＝ 有 `label == 1` 於 item j 的 query 單位數；`n_k` 同理
+- `n_joint` ＝ 同一個 query 單位上 j 與 k **都** `label == 1` 的單位數
+- `p_k_given_j = n_joint / n_j`
+- `lift = p_k_given_j / (n_k / n_units)`
+
+> ⚠ **本節初稿把單位寫成「entity」，錯了**（2026-07-20 更正，已 SendMessage 通知執行中的 agent）。證據：被取代的 `cross_purchase.py:33-47` 用的是 `key_cols = [schema["time"]] + schema["entity"]`，且該檔 docstring 第 4 行明寫理由「join 鍵＝(time, entity)：同一 snap_date 內算共現、跨 snap_date 加總」。
+>
+> 為什麼這個單位才對，兩個理由（第二個比較重要）：
+> 1. 這次唯一想改的是**母體**（全量 label_table → diagnosis_sample），不該夾帶一個沒人要求的單位變更。買 j 在一月、買 k 在六月，不是同一件事。
+> 2. **與壓制矩陣同單位**。壓制帳本是逐 query 算的。兩張圖並排對照，橫縱軸同序還不夠——**分母的單位也得是同一個**，否則讀者做的每一次對照都夾帶一個沒說出口的換算。
 
 **為什麼是 lift 不是裸條件機率**：熱門 item k 對**任何** j 的 `P(k|j)` 都高，只給條件機率的話矩陣會退化成「熱門那幾行整片亮」——那張圖等於在畫 item 的熱門度，不是在畫關聯。lift 把 k 自己的基礎購買率除掉，`lift = 1` ＝ 在這份樣本上兩者近似獨立。
 
