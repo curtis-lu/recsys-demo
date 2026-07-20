@@ -370,9 +370,18 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
 
 把 `results.py` 的 `from recsys_tfb.diagnosis.metric import contract` 搬到模組頂層並改成 `from recsys_tfb.diagnosis.metric.contract import DIAGNOSES`（同時把函式內的 `contract.DIAGNOSES` 改成 `DIAGNOSES`），重跑 Step 7。
 
-預期：`test_registry_is_read_at_call_time_not_import_time` 與 script 那兩條 monkeypatch 測試**轉紅**。確認後改回。
+預期轉紅（**已於 2026-07-20 實跑校正，原本的預期寫多了一條**）：
 
-在回報中寫出你改了哪一行、哪幾條轉紅。**若全綠 → 停下回報**：代表這個契約沒有被任何測試守住。
+| 測試 | 實際 | 為什麼 |
+|---|---|---|
+| `test_registry_is_read_at_call_time_not_import_time` | 🔴 | 直接驗這個契約 |
+| `test_results_follow_registry_order` | 🔴 | 凍結後看不到 monkeypatch 的兩項 registry |
+| `tests/scripts/…::test_reports_skipped_diagnoses_on_stderr` | 🔴 | 斷言缺的那項要出現在 stderr |
+| `tests/scripts/…::test_skips_missing_diagnoses_without_failing` | 🟢 **仍綠** | 見下 |
+
+**最後那條為什麼抓不到**：它的三條斷言是「`01-config-shift.html` 存在」「`02-<缺的那項>.html` **不**存在」「`written` 為真」。「知道有第二項但沒資料所以跳過」與「根本不知道有第二項」產生**完全相同的檔案系統狀態**，所以「不存在」這種斷言對這個 mutation 結構上不敏感。這不是本次搬移引入的問題，是既有測試的形態——**Plan 2–5 寫「某項被正確略過」的測試時要記得：斷言要落在「系統說了什麼」（stderr／`missing` 清單），不能只落在「檔案沒產生」。**
+
+確認後改回。在回報中寫出你改了哪一行、哪幾條轉紅。**若上表前三條沒有全部轉紅 → 停下回報**：代表這個契約沒有被守住。
 
 - [ ] **Step 9: Commit**
 
