@@ -13,8 +13,30 @@
 |---|---|
 | **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
 | **1 config_shift** | ✅ **實作完成**，branch `feat/diag-config-shift`。2.1–2.7 全部完成；**2.8 樣板檢查點使用者已通過**（2026-07-20 公司環境實跑成功，回饋見下方三則）；**2.9 offset 換算量表已追加**（`810cce3`，見下方） |
-| **1.5 接線層重構** | 📋 **計畫已寫好，待執行** → `02b-plan-1.5-wiring.md`（7 個 task）。來源＝Task 2.8 回饋 1＋2 |
-| 2–5 | 未開始。**開工前先做 1.5**，否則四項診斷會照抄目前有已知缺陷的接線形狀 |
+| **1.5 接線層重構** | ✅ **完成**（`f91bdf6`…`5bfbe45`，7 個 task）。計畫＋執行紀錄見 `02b-plan-1.5-wiring.md` |
+| 2–5 | **可以開工了**。接線形狀已收乾淨，照抄 `config_shift` 不會再複製缺陷 |
+
+### Plan 1.5 交付了什麼（Plan 2 開工前先看這段）
+
+`generate_report` 原本一個 node 做三件事（Spark 聚合 ／ 產生診斷頁 ／ 組裝主報表），拆成三個：
+
+| node | 職責 | 產物 |
+|---|---|---|
+| `compute_report_aggregates` | 6 個 Spark 聚合 | `report_aggregates.json` |
+| `render_diagnosis_pages` | 按**檔名**讀診斷 JSON → 多頁 HTML | `diagnosis/*.html` |
+| `generate_report` | 純組裝（**無 Spark**） | `report.html` |
+
+**對 Plan 2–5 的直接影響**：新增一項診斷要動的地方是**三個**，全部有測試守著——
+
+1. `contract.DIAGNOSES` 加一行；
+2. `catalog.yaml` 加一條 `evaluation_<name>` 的 **JSONDataset** entry（漏了會靜默不落地 → `test_every_registry_diagnosis_has_a_catalog_entry` 擋）；
+3. 診斷子套件本身（契約測試擋）。
+
+**`pipeline.py` 與 `generate_report` 都不必動**——Node 由 `DIAGNOSES` 導出，`generate_report` 的簽章裡不再出現任何診斷。
+
+**real-run 驗證**（2026-07-20，`--post-training --model-version 6059dcef`，654 queries）：pipeline 12 節點 49.2s；`generate_report` 從最貴的 node 之一變成 **0.10s**；主報表 10 張圖與重構前 **traces/layout 逐位元相同**；`report_aggregates.json` 通過嚴格 JSON 解析（無 `NaN` 字面值）、rank 欄名仍是 int。
+
+**`--only-node render_diagnosis_pages` 的兩種行為**（診斷 inputs 存在的理由）：診斷 JSON 已落地 → 跑 1/12 個 node（便宜重繪）；JSON 不存在 → 跑 4/12（自動往上拉抽樣與診斷）。
 
 ## Task 2.9：offset 換算量表（2026-07-20 追加，`810cce3` → `2d2604f`）
 
@@ -37,12 +59,20 @@
 - **未閉合的 `<details>` 會吞掉後續所有 section**（游離的 `</div>` 不會隱式關閉它）。只驗開標籤的測試抓不到——實測：把 `</details>` 寫成 `</div>`，22 條測試全綠，而真實產物有 5 節被吞進收合區。**任何產生成對標籤的渲染測試都要驗守恆**，不只驗開標籤。
 - **bullet 的動態數值不可用 substring `in` 斷言**：`"÷21" in bullet` 會被 `÷21.9`／`÷210`／`÷21,000` 滿足；而且 lo/hi 對調（範圍上下顛倒）也照樣通過。用整句相等。
 - **`min`／`max` 前必須濾掉非有限值**：`nan` 比較恆為 False，結果隨 dict 插入順序而變——NaN 排前面回 `nan`，排後面被靜默吞掉。`_compute` 的 `if val <= 0.0: raise` 守衛擋不住 NaN（`nan <= 0.0` 為 False）。
+- **node 順序是拓撲排序的結果，不是宣告順序**（Plan 1.5）。新增 node 之後的名單要**實跑**取得（`[n.name for n in create_pipeline(**kw).nodes]`），不要用宣告順序推。同一個 node 在 default 與 compare 模式可能落在不同位置——`render_diagnosis_pages` 在 default 是倒數第二，在 compare 模式落在 `generate_comparison_report` **之後**。
+- **只讀 `parameters` 的 node，in-degree 是 0**（Plan 1.5）。`parameters` 沒有生產者，所以 Kahn 會把這種 node 排到很前面。一個「要在某些 node 之後才有意義」的 node，即使它按檔名／路徑自己讀資料，也**必須把上游產物列進 `inputs`**——否則它會提早執行、讀到上一次執行留下的檔案，而且照樣「成功」。
 - **用 annotation 的字串表示驗型別，成敗取決於模組有沒有 `from __future__ import annotations`**（2026-07-20，Plan 1.5 Task 4）。有這行時 annotation 是**原始碼字串**（`"SparkDataFrame"`）；沒有時是**解析後的型別物件**，`str()` 給 `<class 'pyspark.sql.dataframe.DataFrame'>`——**別名不保留**。所以 `assert "SparkDataFrame" not in str(annotation)` 在後者恆真，**改動前就是綠的**。`nodes_spark.py` 正是後者。**判準：驗型別就比對型別物件本身（`p.annotation is SparkDataFrame` 或 `"pyspark" in str(...)`），不要比對你以為它會印出的字串。** 這是 substring 斷言家族的一個變種，特徵是「字串來自你沒有控制權的 repr」。順帶：驗「函式不碰 Spark」時，annotation 與函式體要分開驗——annotation 可以改而行為不變，反之亦然。
 - **「不存在」斷言同時被「正確跳過」與「根本沒嘗試」滿足**（2026-07-20，Plan 1.5 Task 1 的 mutation 意外揭露）。`tests/scripts/test_render_diagnosis.py:106-121` monkeypatch `DIAGNOSES` 成兩項、只放一項的 JSON，然後斷言 `01-config-shift.html` 存在、`02-<缺的那項>.html` **不**存在。把 registry 改成「import 時凍結」（等於完全看不到 monkeypatch 的第二項）之後，**三條斷言全部照樣通過**——因為「知道有第二項但沒資料所以跳過」與「根本不知道有第二項」產生**完全相同的檔案系統狀態**。真正有鑑別力的是它的兄弟測試 `:124-137`：斷言那個名字**出現在 stderr**。**判準：驗「某件事被正確略過」時，斷言要落在「系統說了什麼」（log／回傳的 `missing` 清單），不能只落在「檔案沒產生」——後者是雙關的。**
 
-## 下一步：接線層重構（Plan 2 之前）
+## 下一步：Plan 2（`03-plan-2-item-ability-capacity.md`）
 
-**計畫已寫好：`02b-plan-1.5-wiring.md`（7 個 task）。以下是它的摘要，細節與理由以該檔為準。**
+接線層已就緒，可以直接開工。開工時順手做掉「已裁決延後」表裡標記 **Plan 2 開工時** 的三項（`_common.py` 樣板抽取、CI 方向自帶名字的包裝、`q_agg` 權重常數假設的檢查）——它們都需要「有第二個實例可對照」，現在有了。
+
+---
+
+## 附錄：接線層重構（Plan 1.5，已完成）
+
+**計畫與執行紀錄：`02b-plan-1.5-wiring.md`（7 個 task）。以下是當初的問題描述，保留供追溯。**
 
 Task 2.8 的回饋 1 與 2 指向同一組接線缺陷，且**已在公司環境造成一次實際故障**。Plan 2–5 會各新增一項診斷，照現在的形狀做下去＝四份手寫 Node、四次位置平移的機會。所以在 Plan 2 之前先收掉：
 
