@@ -80,6 +80,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import diag_cfg, metric_params, to_logit
 from recsys_tfb.diagnosis.metric.uncertainty import paired_bootstrap_delta
@@ -668,12 +669,17 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # ht_weights 在 query_offset_spread 之前就取好了（同一組權重要餵給所有
     # 估計量：分位數、baseline／corrected、CI、n_pos_effective）。缺欄
     # （未分層抽樣）時 ht_weights is None，走 weights=None 的原始未加權路徑。
-    baseline = float(compute_macro_per_item_map(
-        groups, items, y, z, weights=ht_weights, **mp
-    ))
-    corrected = float(compute_macro_per_item_map(
-        groups, items, y, z - offs, weights=ht_weights, **mp
-    ))
+    # 以下三個區塊是本模組的全部耗時來源：兩次全樣本 mAP、一次配對重抽、
+    # 每個 item 一次全樣本 mAP。公司規模（≈25 萬 query × 22 item ≈ 5.5M 列）
+    # 下這段會安靜跑很久，看起來像卡住——所以逐段 log_step，per-item 那圈
+    # 還要逐項報進度，否則 22 次 mAP 之間是一整段沒有任何輸出的空白。
+    with log_step(logger, "config_shift.macro_map_baseline_and_corrected"):
+        baseline = float(compute_macro_per_item_map(
+            groups, items, y, z, weights=ht_weights, **mp
+        ))
+        corrected = float(compute_macro_per_item_map(
+            groups, items, y, z - offs, weights=ht_weights, **mp
+        ))
     out["baseline_map"] = baseline
     out["corrected_map"] = corrected
     out["delta"] = float(corrected - baseline)
@@ -692,10 +698,14 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         # paired_bootstrap_delta 回的是 mAP(F) − mAP(F − shift) ＝ baseline −
         # corrected，與本模組的 Δ ＝ corrected − baseline 反號。取負後上下界
         # 對調，才是 Δ 自己的 [2.5%, 97.5%]。
-        lo, hi = paired_bootstrap_delta(
-            frame, mp, offs,
-            n_boot=ci_info["n_boot"], seed=ci_info["seed"],
-        )
+        with log_step(
+            logger,
+            f"config_shift.paired_bootstrap（{ci_info['n_boot']} 次重抽）",
+        ):
+            lo, hi = paired_bootstrap_delta(
+                frame, mp, offs,
+                n_boot=ci_info["n_boot"], seed=ci_info["seed"],
+            )
         out["delta_ci_low"] = float(-hi)
         out["delta_ci_high"] = float(-lo)
 
@@ -707,27 +717,37 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         else np.ones(len(sample_pdf), dtype=np.float64)
     )
     per_item: list[dict[str, Any]] = []
-    for item in sorted(set(items.tolist())):
-        mask = items == item
-        z_one = z.copy()
-        z_one[mask] = z_one[mask] - offs[mask]
-        m_one = float(compute_macro_per_item_map(
-            groups, items, y, z_one, weights=ht_weights, **mp
-        ))
-        item_pos = mask & pos_mask
-        per_item.append({
-            "item": str(item),
-            "delta_j": float(m_one - baseline),
-            "map_after_only_this_item": m_one,
-            # n_pos_raw ＝ 原始列數；n_pos_effective ＝ HT 加權後的有效正例數。
-            # mAP 與 min_positives/shrinkage_k/weight_alpha 吃的是**加權**計數
-            # （metrics.py 的 weights 路徑），只報 raw 會讓讀者用一個母體去篩
-            # 另一個母體算出來的數字。兩個都給，讓讀者自己看。
-            "n_pos_raw": int(item_pos.sum()),
-            "n_pos_effective": float(w_pos_rows[item_pos].sum()),
-            "offset_min": float(np.min(offs[mask])) if mask.any() else None,
-            "offset_max": float(np.max(offs[mask])) if mask.any() else None,
-        })
+    unique_items = sorted(set(items.tolist()))
+    n_items_total = len(unique_items)
+    # 這圈是整個模組最貴的一段（item 數 × 一次全樣本 mAP，佔 2+N 次裡的 N 次）。
+    # 進度逐項印而不是只包一個 log_step：只包外層的話，使用者看到的仍是
+    # 「開始」與「結束」之間一段長時間沒有任何輸出，跟卡住分不出來。
+    with log_step(logger, f"config_shift.per_item_replacement（{n_items_total} 項）"):
+        for idx, item in enumerate(unique_items, start=1):
+            mask = items == item
+            z_one = z.copy()
+            z_one[mask] = z_one[mask] - offs[mask]
+            m_one = float(compute_macro_per_item_map(
+                groups, items, y, z_one, weights=ht_weights, **mp
+            ))
+            logger.info(
+                "config_shift per-item replacement %d/%d (item=%s, Δ_j=%+.6f)",
+                idx, n_items_total, item, m_one - baseline,
+            )
+            item_pos = mask & pos_mask
+            per_item.append({
+                "item": str(item),
+                "delta_j": float(m_one - baseline),
+                "map_after_only_this_item": m_one,
+                # n_pos_raw ＝ 原始列數；n_pos_effective ＝ HT 加權後的有效正例數。
+                # mAP 與 min_positives/shrinkage_k/weight_alpha 吃的是**加權**計數
+                # （metrics.py 的 weights 路徑），只報 raw 會讓讀者用一個母體去篩
+                # 另一個母體算出來的數字。兩個都給，讓讀者自己看。
+                "n_pos_raw": int(item_pos.sum()),
+                "n_pos_effective": float(w_pos_rows[item_pos].sum()),
+                "offset_min": float(np.min(offs[mask])) if mask.any() else None,
+                "offset_max": float(np.max(offs[mask])) if mask.any() else None,
+            })
     per_item.sort(key=lambda r: r["delta_j"], reverse=True)
     out["per_item"] = per_item
 

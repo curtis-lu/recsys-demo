@@ -627,3 +627,41 @@ def test_all_return_paths_share_the_same_key_set():
 
     assert set(disabled) == set(full), set(disabled) ^ set(full)
     assert set(empty) == set(full), set(empty) ^ set(full)
+
+
+def test_per_item_loop_reports_progress_per_item(caplog):
+    """最貴的那圈要逐項報進度，不是只包一個 log_step。
+
+    使用者回饋：「在跑 diagnose_config_shift 時，等了一分鐘才有下一個訊息」。
+    公司規模是 2+N 次全樣本 mAP（N ＝ item 數），其中 N 次在這圈裡。只包外層
+    的話，使用者看到的仍是「開始」與「結束」之間一整段沒有輸出的空白，跟卡住
+    分不出來。
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        out = compute((_sample(), {"n_queries": 40}), PARAMS)
+
+    progress = [r for r in caplog.records
+                if "per-item replacement" in r.getMessage()]
+    assert len(progress) == len(out["per_item"]), (
+        f"每個 item 該有一行進度，實際 {len(progress)} 行 / "
+        f"{len(out['per_item'])} 個 item"
+    )
+    assert "1/" in progress[0].getMessage(), "進度要帶 idx/total 才看得出還剩多少"
+
+
+def test_expensive_blocks_are_wrapped_in_log_step(caplog):
+    """三個耗時區塊各自要有 step_started／step_completed（含耗時）。"""
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        compute((_sample(), {"n_queries": 40}), PARAMS)
+
+    steps = {r.__dict__.get("step") for r in caplog.records
+             if r.__dict__.get("event") == "step_completed"}
+    for expected in ("config_shift.macro_map_baseline_and_corrected",
+                     "config_shift.per_item_replacement"):
+        assert any(s and s.startswith(expected) for s in steps), (
+            f"缺 log_step：{expected}；實際有 {steps}"
+        )
