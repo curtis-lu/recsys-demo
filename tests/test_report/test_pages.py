@@ -156,3 +156,75 @@ class TestSectionRendering:
         # 若整份 plotly.js 被內嵌，檔案會遠大於 200KB（見上面的大小測試），
         # 這裡再直接確認不含 plotly.js 的特徵字串。
         assert "Plotly.newPlot" in html or "plotly-graph-div" in html
+
+
+class TestFormulaAndBullets:
+    """``formula``／``bullets`` 的渲染。
+
+    使用者的回饋是「說明集中在最上面、看不出在講哪張圖」與「附上公式」，
+    所以這兩個欄位必須跟著各自的 section 一起渲染，而不是併回頁首。
+    """
+
+    def _html(self, tmp_path, section) -> str:
+        write_pages([_page("01-a", "Page A", sections=(section,))], tmp_path,
+                    index_title="Idx", index_intro="")
+        return (tmp_path / "01-a.html").read_text()
+
+    def test_formula_rendered_in_its_own_block(self, tmp_path):
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", formula="Δ = mAP(F − offset) − mAP(F)"))
+        assert 'class="formula"' in html
+        assert "Δ = mAP(F − offset) − mAP(F)" in html
+
+    def test_bullets_rendered_as_list_items(self, tmp_path):
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", bullets=["第一則", "第二則"]))
+        assert '<ul class="section-bullets">' in html
+        assert "<li>第一則</li>" in html
+        assert "<li>第二則</li>" in html
+
+    def test_empty_formula_and_bullets_render_nothing(self, tmp_path):
+        """既有 13 個 ``build_*_section`` 不帶新欄位，輸出必須完全不變。
+
+        比對的是**渲染出來的標籤**而不是字串 "formula"——後者永遠會命中
+        ``_CSS`` 裡的 ``.formula`` 樣式定義，是一條永遠綠的假測試。
+        """
+        html = self._html(tmp_path, ReportSection(title="S", description="d"))
+        assert 'class="formula"' not in html
+        assert 'class="section-bullets"' not in html
+        # 這一頁 scope=None、沒有 bullets，整頁不該有任何 <ul>
+        assert "<ul>" not in html
+
+    def test_bullets_are_escaped(self, tmp_path):
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", bullets=["<script>alert(1)</script>"]))
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_formula_is_escaped(self, tmp_path):
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", formula="a < b & c > d"))
+        assert "a &lt; b &amp; c &gt; d" in html
+
+    def test_formula_precedes_bullets_and_both_precede_figures(self, tmp_path):
+        """順序：description → formula → bullets → 圖。
+
+        讀者要先知道「這個數字怎麼算的」才看得懂圖；公式排在圖後面等於沒有。
+        """
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", formula="F = x + y",
+            bullets=["一則重點"], figures=[_simple_figure()]))
+        assert (html.index("F = x + y") < html.index("一則重點")
+                < html.index("plotly-graph-div"))
+
+    def test_formula_style_present_in_css(self, tmp_path):
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", formula="F = x"))
+        assert ".formula {" in html
+
+    def test_no_external_math_renderer_is_pulled_in(self, tmp_path):
+        """生產限制是 no network——MathJax／KaTeX 的 CDN 一定載不到。"""
+        html = self._html(tmp_path, ReportSection(
+            title="S", description="d", formula="Σ Δⱼ ≠ Δ"))
+        assert "mathjax" not in html.lower()
+        assert "katex" not in html.lower()

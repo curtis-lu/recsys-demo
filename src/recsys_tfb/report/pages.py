@@ -57,6 +57,20 @@ tr:nth-child(even) { background: #fafafa; }
 .scope-note dt { font-weight: 600; color: #78350f; margin-top: 8px; }
 .scope-note dd { margin: 2px 0 2px 0; color: #444; }
 .scope-note ul { margin: 4px 0; padding-left: 20px; }
+.formula {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  background: #f5f7fa;
+  border-left: 3px solid #94a3b8;
+  padding: 10px 16px;
+  margin: 12px 0 16px;
+  border-radius: 2px;
+  font-size: 0.95em;
+  color: #1f2937;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.section-bullets { margin: 12px 0 16px; padding-left: 22px; line-height: 1.7; }
+.section-bullets li { margin: 4px 0; color: #444; }
 """
 
 
@@ -109,6 +123,25 @@ def _render_scope_note(scope: ScopeNote) -> str:
     return "\n".join(parts)
 
 
+def _render_section_extras(section) -> list[str]:
+    """``formula`` 與 ``bullets`` 的 HTML；兩者皆空時回空 list。
+
+    回空 list 而不是空字串是刻意的：呼叫端 ``extend`` 之後**一個標籤都不會多**，
+    所以既有 13 個不帶新欄位的 ``build_*_section`` 輸出逐位元不變。
+
+    兩個渲染器（本檔與 ``evaluation/report.py``）共用這一份，不是各寫一份：
+    各寫一份的話，之後只改其中一邊，另一邊會靜默丟掉欄位而不報錯。
+    """
+    parts: list[str] = []
+    if section.formula:
+        parts.append(f'<div class="formula">{_escape(section.formula)}</div>')
+    if section.bullets:
+        parts.append('<ul class="section-bullets">')
+        parts.extend(f"<li>{_escape(b)}</li>" for b in section.bullets)
+        parts.append("</ul>")
+    return parts
+
+
 def _render_page_html(page: Page) -> str:
     parts = [
         "<!DOCTYPE html>",
@@ -128,6 +161,7 @@ def _render_page_html(page: Page) -> str:
         parts.append('<div class="section">')
         parts.append(f"<h2>{_escape(section.title)}</h2>")
         parts.append(f'<p class="description">{_escape(section.description)}</p>')
+        parts.extend(_render_section_extras(section))
 
         for fig in section.figures:
             parts.append(fig.to_html(full_html=False, include_plotlyjs=False))

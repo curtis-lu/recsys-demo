@@ -901,9 +901,11 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
     """把每項診斷的結果組成獨立頁面。本函式不認識任何單一診斷。
 
     Args:
-        results: ``{診斷名: compute 的輸出 dict}``。缺席或 ``render`` 回 ``None``
-            （例如該項停用）的診斷不會產生頁面——**缺席是「這頁不存在」，不是
-            「這頁是空的」**；空頁看起來像「量到了、結果什麼都沒有」。
+        results: ``{診斷名: compute 的輸出 dict}``。缺席或 ``render`` 回**空
+            序列**（例如該項停用）的診斷不會產生頁面——**缺席是「這頁不存在」，
+            不是「這頁是空的」**；空頁看起來像「量到了、結果什麼都沒有」。
+            ``render`` 回傳的是多個 section（一張圖／一張表各一個 section，
+            各自帶標題、公式與重點），整頁的 section 順序即閱讀順序。
         out_dir: 頁面輸出目錄（與各診斷 JSON 同一個 ``diagnosis/`` 目錄）。
 
     Returns:
@@ -922,8 +924,8 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
         if result is None:
             continue
         mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-        section = mod.render(result, parameters)
-        if section is None:
+        sections = mod.render(result, parameters)
+        if not sections:
             continue
         slug = f"{i:02d}-{name.replace('_', '-')}"   # 數字前綴＝閱讀順序
         # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：五項共用同一份
@@ -935,7 +937,7 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
                 "sampling_description", ""),
         )
         pages.append(Page(slug=slug, title=mod.TITLE,
-                          scope=scope, sections=(section,)))
+                          scope=scope, sections=tuple(sections)))
     if not pages:
         # 一頁都沒有就完全不落地。否則會留下一個「index.html 說有五項、清單
         # 是空的、外加 3.5MB plotly.min.js」的目錄，看起來像跑過但什麼都沒

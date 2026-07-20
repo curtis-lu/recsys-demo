@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.offline
 
+from recsys_tfb.report.pages import _render_section_extras
 from recsys_tfb.report.types import ReportSection  # noqa: F401
 
 
@@ -89,6 +90,16 @@ def generate_html_report(
         ".metadata { background: #f0f4f8; padding: 16px; border-radius: 8px; margin-bottom: 24px; }",
         ".section { margin-bottom: 40px; }",
         ".description { color: #666; margin-bottom: 16px; }",
+        # 公式用等寬字＋淺底，與敘述區分開；純 Unicode 文字，不引入 MathJax／
+        # KaTeX——生產限制是 no network，外部 CDN 一定載不到。
+        '.formula { font-family: "SF Mono", Menlo, Consolas, monospace; '
+        "background: #f5f7fa; border-left: 3px solid #94a3b8; "
+        "padding: 10px 16px; margin: 12px 0 16px; border-radius: 2px; "
+        "font-size: 0.95em; color: #1f2937; overflow-x: auto; "
+        "white-space: pre-wrap; }",
+        ".section-bullets { margin: 12px 0 16px; padding-left: 22px; "
+        "line-height: 1.7; }",
+        ".section-bullets li { margin: 4px 0; color: #444; }",
         "nav.toc { background: #f5f5f5; padding: 12px 20px; border-radius: 4px; margin-bottom: 24px; }",
         "nav.toc strong { display: block; margin-bottom: 6px; color: #444; }",
         "nav.toc ul { margin: 4px 0 0; padding-left: 20px; }",
@@ -139,6 +150,9 @@ def generate_html_report(
             html_parts.append(f'<div class="section" id="{section_id}">')
             html_parts.append(f"<h2>{section.title}</h2>")
         html_parts.append(f'<p class="description">{section.description}</p>')
+        # 與 report/pages.py 共用同一個 helper：兩邊各寫一份的話，之後只改其中
+        # 一邊，另一邊會靜默丟掉 formula/bullets 而不報任何錯。
+        html_parts.extend(_render_section_extras(section))
 
         for fig in section.figures:
             html_parts.append(

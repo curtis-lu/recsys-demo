@@ -13,7 +13,12 @@
   **不能**推論什麼。這是「每個數字自帶說明」的執行點，所以它是**必要**符號
   而不是可選的——一項說不出自己看不見什麼的診斷，不該進報表。
 * ``compute`` —— 純計算，回傳 JSON-safe dict。不碰呈現。
-* ``render``  —— 把 ``compute`` 的 dict 轉成 ``report.types.Page``。不做計算。
+* ``render``  —— 把 ``compute`` 的 dict 轉成 ``tuple[report.types.ReportSection,
+  ...]``。不做計算。停用時回**空 tuple**（不是 ``None``）：組裝層一律以
+  「序列為空 ＝ 這頁不存在」判斷，回 ``None`` 與回 ``()`` 兩種寫法並存的話，
+  之後新增的診斷有一半會挑錯一種。**回多個 section 而不是一個**是版面定案：
+  每張圖／每張表自己一個 section，各自帶 ``title``／``formula``／``bullets``，
+  說明才會落在它描述的那張圖旁邊。簽章不變，所以 :data:`_SIGNATURES` 不受影響。
 
 刻意**不做**的兩件事，以及理由：
 

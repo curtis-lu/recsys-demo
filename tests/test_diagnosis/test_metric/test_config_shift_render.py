@@ -126,36 +126,137 @@ def _over_budget_result(n_contexts: int = 60, n_items: int = 40) -> dict:
     return result
 
 
-def _all_text(section: ReportSection) -> str:
-    """禁用字掃描範圍：標題＋說明＋表標題＋所有表格的字串內容。"""
-    parts = [section.title, section.description, *section.table_titles]
-    parts.extend(table.to_string() for table in section.tables)
+def _all_text(sections) -> str:
+    """禁用字掃描範圍：標題＋說明＋公式＋重點＋表標題＋所有表格的字串內容。
+
+    ``render`` 現在回傳多個 section（使用者回饋：說明擠在最上面看不出在講哪張
+    圖），所以掃描範圍是整頁——漏掉任何一個新欄位，禁用字掃描就會出現死角。
+    """
+    if isinstance(sections, ReportSection):
+        sections = (sections,)
+    parts: list[str] = []
+    for section in sections:
+        parts.extend([section.title, section.description, section.formula])
+        parts.extend(section.bullets)
+        parts.extend(section.table_titles)
+        parts.extend(table.to_string() for table in section.tables)
     return "\n".join(parts)
 
 
-def _has_heatmap(section: ReportSection) -> bool:
+def _has_heatmap(sections) -> bool:
+    if isinstance(sections, ReportSection):
+        sections = (sections,)
     return any(
         isinstance(trace, go.Heatmap)
+        for section in sections
         for figure in section.figures
         for trace in figure.data
     )
 
 
+def _all_tables(sections) -> list:
+    return [table for section in sections for table in section.tables]
+
+
+def _all_figures(sections) -> list:
+    return [fig for section in sections for fig in section.figures]
+
+
 # ---- 基本形狀 ----------------------------------------------------------
 
 
-def test_render_returns_section():
-    section = config_shift.render(_result(), {})
-    assert isinstance(section, ReportSection)
+def test_render_returns_sections():
+    sections = config_shift.render(_result(), {})
+    assert isinstance(sections, tuple)
+    assert all(isinstance(s, ReportSection) for s in sections)
 
 
-def test_render_returns_none_when_disabled():
-    """停用時回 ``None``，不是回一個空 section。
+def test_render_returns_multiple_sections():
+    """一張圖一個 section，各自帶標題。
 
-    差別在報表層：``None`` 代表「這頁不存在」，空 section 會產出一個看起來
+    使用者的回饋：「說明的地方集中在上面很難知道你要描述的圖表是哪一個」。
+    全部塞回單一 section 就是那個被抱怨的版面，所以這條直接守住拆分本身。
+    """
+    sections = config_shift.render(_result(), {})
+    assert len(sections) >= 5
+    assert all(s.title.strip() for s in sections)
+
+
+def test_section_titles_are_distinct():
+    """標題重複的話，讀者仍然分不出哪段在講哪張圖。"""
+    titles = [s.title for s in config_shift.render(_result(), {})]
+    assert len(set(titles)) == len(titles)
+
+
+def test_every_section_with_a_figure_has_its_own_explanation():
+    """帶圖或表的 section 必須自己帶說明——這條直接守使用者的抱怨。"""
+    for section in config_shift.render(_result(), {}):
+        if section.figures or section.tables:
+            assert section.description.strip() or section.bullets, (
+                f"section {section.title!r} 有圖表卻沒有自己的說明"
+            )
+
+
+def test_formulas_present_for_computed_quantities():
+    """使用者：「強烈建議應該附上公式，讓讀者一眼就知道數字怎麼算出來的」。
+
+    唯一免公式的是最後那個可見性清單（它列的是三份名單，沒有計算量）。用
+    ``sections[:-1]`` 而不是 ``sections[:5]``：後者在某些 section 因資料為空而
+    缺席時，會把可見性那一節算進要求範圍，變成一條會誤紅的測試。
+    """
+    sections = config_shift.render(_result(), {})
+    assert sections[-1].title == "這次診斷看不見什麼"
+    for section in sections[:-1]:
+        assert section.formula.strip(), f"section {section.title!r} 缺公式"
+
+
+def test_formula_names_the_config_keys_behind_the_symbols():
+    """公式裡的符號要能對回 config 的鍵名。
+
+    只給 ``offset = ln(r₊/r₋) + ln(w₊/w₋)`` 的話，讀者知道「怎麼算」卻不知道
+    「算的是哪個設定」——那個公式就只是裝飾。
+    """
+    formula = config_shift.render(_result(), {})[0].formula
+    assert "sample_ratio_overrides" in formula
+    assert "sample_weights" in formula
+
+
+def test_formulas_use_plain_unicode_not_latex():
+    """生產限制是 no network、no additional packages——CDN 上的 MathJax／KaTeX
+    一定載不到，LaTeX 原始碼會原樣印在報表上。
+    """
+    for section in config_shift.render(_result(), {}):
+        assert "\\frac" not in section.formula
+        assert "$" not in section.formula
+
+
+def test_no_section_description_is_a_wall_of_text():
+    """使用者：「這整段太冗長，看報表的人不會有耐心看完全部」。"""
+    for section in config_shift.render(_result(), {}):
+        assert len(section.description) <= 120, (
+            f"section {section.title!r} 的 description 有 "
+            f"{len(section.description)} 字元，超過 120"
+        )
+
+
+def test_bullets_are_one_sentence_each():
+    """每則 bullet 一句話——原本那種「A；B；C，而且 D」的長句要拆開。
+
+    可見性那一節排除在外：它的 bullet 有一部分是 ``compute`` 的 notes **原文
+    照登**，長度不歸呈現層管，改寫反而會讓計算層的觀測失真。
+    """
+    for section in config_shift.render(_result(), {})[:-1]:
+        for bullet in section.bullets:
+            assert len(bullet) <= 160, f"bullet 過長：{bullet[:40]}…"
+
+
+def test_render_returns_empty_tuple_when_disabled():
+    """停用時回空 tuple，不是回一個空 section。
+
+    差別在報表層：空 tuple 代表「這頁不存在」，空 section 會產出一個看起來
     「量到了、結果什麼都沒有」的章節——那正是本專案要避免的誤讀。
     """
-    assert config_shift.render({"enabled": False}, {}) is None
+    assert config_shift.render({"enabled": False}, {}) == ()
 
 
 def test_render_is_pure_and_does_not_mutate_input():
@@ -208,17 +309,18 @@ def test_no_verdict_vocabulary_in_output():
 
 
 def test_sum_note_is_shown():
-    section = config_shift.render(_result(), {})
-    assert "Σ Δ_j ≠ Δ" in section.description
+    """``Σ Δⱼ ≠ Δ`` 這句警語不得在拆分 section 的過程中掉隊。"""
+    text = _all_text(config_shift.render(_result(), {}))
+    assert "Σ Δⱼ ≠ Δ" in text or "Σ Δ_j ≠ Δ" in text
 
 
 def test_delta_and_ci_are_shown_without_a_significance_verdict():
     """Δ 與區間都要在，但不得替讀者判讀區間有沒有跨 0。"""
-    section = config_shift.render(_result(), {})
-    assert "-0.0200" in section.description
-    assert "-0.0500" in section.description and "+0.0100" in section.description
+    text = _all_text(config_shift.render(_result(), {}))
+    assert "-0.0200" in text
+    assert "-0.0500" in text and "+0.0100" in text
     for word in ("顯著", "不顯著"):
-        assert word not in section.description
+        assert word not in text
 
 
 # ---- 鐵則 3：可見性區塊 ------------------------------------------------
@@ -254,29 +356,46 @@ def test_heatmap_is_drawn_when_within_budget():
 
 def test_heatmap_skipped_when_over_figure_budget():
     result = _over_budget_result()
-    section = config_shift.render(result, {})
+    sections = config_shift.render(result, {})
 
-    assert not _has_heatmap(section), "超過繪圖預算時不應該畫熱圖"
+    assert not _has_heatmap(sections), "超過繪圖預算時不應該畫熱圖"
 
     n_contexts = len(result["offset_matrix"])
     n_items = len(result["items"])
     matrix_tables = [
-        table for table in section.tables
+        table for table in _all_tables(sections)
         if {"context 群", "item"} <= set(table.columns)
     ]
     assert len(matrix_tables) == 1, "超預算時矩陣必須以表格完整呈現"
     # 門檻管的是繪圖能力，不是資料的意義——一列都不准少。
     assert len(matrix_tables[0]) == n_contexts * n_items
 
-    assert str(MAX_FIGURE_POINTS) in section.description
-    assert f"{n_contexts * n_items}" in section.description
+    text = _all_text(sections)
+    assert str(MAX_FIGURE_POINTS) in text
+    assert f"{n_contexts * n_items}" in text
+
+
+def test_budget_downgrade_note_lives_in_the_section_it_describes():
+    """降級敘述必須放在被降級的那個 section，不是散到別處。
+
+    整份說明擠在頁首正是使用者抱怨的版面；降級敘述漂到別的 section 會複製
+    同一個問題——讀者在矩陣表旁邊看不到「為什麼這裡是表不是圖」。
+    """
+    sections = config_shift.render(_over_budget_result(), {})
+    matrix_sections = [
+        s for s in sections
+        if any({"context 群", "item"} <= set(t.columns) for t in s.tables)
+    ]
+    assert len(matrix_sections) == 1
+    assert str(MAX_FIGURE_POINTS) in "\n".join(matrix_sections[0].bullets)
 
 
 def test_bar_figures_survive_the_heatmap_budget_cut():
-    """熱圖被略過不代表整個 section 沒圖：兩張條圖各自在預算內，應照畫。"""
-    section = config_shift.render(_over_budget_result(), {})
+    """熱圖被略過不代表整頁沒圖：兩張條圖各自在預算內，應照畫。"""
+    sections = config_shift.render(_over_budget_result(), {})
     assert any(
-        isinstance(trace, go.Bar) for fig in section.figures for trace in fig.data
+        isinstance(trace, go.Bar)
+        for fig in _all_figures(sections) for trace in fig.data
     )
 
 
@@ -293,17 +412,37 @@ def test_render_survives_an_empty_sample():
         "delta_ci_low": None, "delta_ci_high": None,
         "notes": ["診斷抽樣為空——offset 矩陣與 Δ 均未計算。"],
     })
-    section = config_shift.render(result, {})
-    assert isinstance(section, ReportSection)
-    assert not _has_heatmap(section)
-    assert "診斷抽樣為空" in _all_text(section)
+    sections = config_shift.render(result, {})
+    assert all(isinstance(s, ReportSection) for s in sections)
+    assert not _has_heatmap(sections)
+    assert "診斷抽樣為空" in _all_text(sections)
+
+
+def test_empty_sample_produces_no_hollow_sections():
+    """沒有資料的 section 不該留在頁面上。
+
+    一個只有標題與公式、底下什麼都沒有的區塊，看起來像「量到了、結果是空的」，
+    跟「這次沒有這批資料」在報表上長得一樣。
+    """
+    result = _result()
+    result.update({
+        "items": [], "offset_matrix": {}, "offset_centered": {},
+        "offset_spread_by_context": {}, "query_offset_spread": {},
+        "per_item": [], "sample": {}, "delta": None,
+        "delta_ci_low": None, "delta_ci_high": None,
+        "notes": ["診斷抽樣為空——offset 矩陣與 Δ 均未計算。"],
+    })
+    for section in config_shift.render(result, {}):
+        assert section.figures or section.tables or section.bullets, (
+            f"section {section.title!r} 是空殼"
+        )
 
 
 def test_tables_and_titles_stay_aligned():
     """``table_titles`` 與 ``tables`` 是兩個平行 list，長度不一致會錯位。"""
     for result in (_result(), _over_budget_result()):
-        section = config_shift.render(result, {})
-        assert len(section.tables) == len(section.table_titles)
+        for section in config_shift.render(result, {}):
+            assert len(section.tables) == len(section.table_titles)
 
 
 # ---- 契約 --------------------------------------------------------------
