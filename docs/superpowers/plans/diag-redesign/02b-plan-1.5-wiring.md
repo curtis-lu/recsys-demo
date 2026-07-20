@@ -32,11 +32,15 @@
 
 `node.inputs` 少了兩個元素 → 位置 6 的 `evaluation_config_shift` 綁進 `offset_sweep` 參數 → `build_offset_sweep_section` 拿到 `per_item` 是 list 而非 dict → `TypeError`。
 
-**盤點結論（4 條 pipeline、52 個不重複 node）：具備這種「少給 input 不會立刻爆」形狀的只有 3 個** —— `generate_report`（`req=3 all=7 +*args`）、`log_experiment`（training，`req=8 all=10`）、`select_shap_population`（training，`req=3 all=4`）。其餘 49 個是剛好個數，少給即 `TypeError`、爆在該 node 上。
+**盤點結論**（4 條 pipeline ＋ evaluation 的 4 種 variant，依 node 名去重得 52 個；重跑用 `scripts` 外的一次性腳本，方法見本節末）：**具備這種「少給 input 不會立刻爆」形狀的只有 3 個** —— `generate_report`（`req=3 all=7 +*args`）、`log_experiment`（training，`req=8 all=10`）、`select_shap_population`（training，`req=3 all=4`）。其餘 49 個是剛好個數，少給即 `TypeError`、爆在該 node 上。
 
-**因此不動 `core/runner.py` 的位置綁定。** 為 3 個 node 去改 59 個呼叫點共用的執行核心，收益／風險比不成立；而其中 1 個正是本計畫要重寫的對象。
+**因此不動 `core/runner.py` 的位置綁定。**
 
-> 曾經考慮過、已否決：在 `Node.__init__` 加「inputs 個數要對得上簽章」的檢查。**擋不住這次的失敗**——`generate_report` 有 4 個帶預設值的參數再加 varargs，6/7/8/9 個 inputs 全在合法範圍內。個數對，位置錯。
+> **這個結論的成本估算要誠實**（2026-07-20 對抗審查指出，原稿此處誇大）：改成關鍵字綁定的**實際 radius 只有 `runner.py:92` 一行**（`node.func(*inputs)`），加上 `Node` 接受 dict 形式的 `inputs`。既有的 list 形式維持位置綁定，**59 個既有 Node 呼叫點一個都不用改**。原稿寫「為 3 個 node 去改 59 個呼叫點共用的執行核心」是把 radius 講大了——論證誇大就算結論對也是壞論證。
+>
+> 修正後的理由：52 個 node 有 49 個本來就 fail-loud，剩 3 個裡有 1 個（`generate_report`）本計畫會直接消滅它的危險形狀，另 2 個在 training 側、無已知故障。**收益集中在一個本來就要重寫的對象上**，所以先用便宜的做法（讓簽章變成剛好個數）；真要做關鍵字綁定，它是獨立一件事，且不必等這個計畫。
+>
+> 另一個已否決的替代方案：在 `Node.__init__` 加「inputs 個數要對得上簽章」的檢查。**擋不住這次的失敗**——`generate_report` 有 4 個帶預設值的參數再加 varargs，6/7/8/9 個 inputs 全在合法範圍內。個數對，位置錯。
 
 ### 拆完之後的資料流
 
@@ -151,7 +155,9 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <p
 
 （Task 1 起見下一節）
 
-## Task 1: `load_results` 搬進 `src/`
+## Task 1: `load_results` 搬進 `src/` ✅ 已完成（`10506ca`）
+
+> **本 task 已執行完畢。下面的行號是撰寫當時的狀態，執行後已失效**——`scripts/render_diagnosis.py` 現在只有 137 行、不再有 `def load_results`。保留全文是為了讓後續 task 的審查者看得到當初的規格與理由，**不要照著再做一次**。
 
 搬移的理由見 §0 (2)。**這是純搬移，不改行為。**
 
@@ -394,7 +400,7 @@ git commit -m "refactor(diagnosis): load_results 搬進 src，pipeline 與離線
 
 ---
 
-## Task 2: 聚合結果的 JSON 序列化
+## Task 2: 聚合結果的 JSON 序列化 ✅ 已完成（`d0d9e0c`）
 
 **Files:**
 - Modify: `src/recsys_tfb/evaluation/diagnostics_spark.py`（加 3 個函式，既有 6 個聚合不動）
@@ -720,7 +726,7 @@ class TestRenderDiagnosisPagesNodeWiring:
 
 - `:22-31` 與 `:66-75` 的 `expected` 集合，加 `"evaluation_diagnosis_pages"`。
 - `:33-43`、`:49-59` 的 `names`，在 `"diagnose_config_shift"` 與 `"generate_report"` 之間插入 `"render_diagnosis_pages"`。
-- `:81-92`（compare 模式）同上，插在 `"diagnose_config_shift"` 與 `"generate_comparison_report"` 之間。
+- `:81-92`（compare 模式）同上。**位置與 default 模式不同**：對抗審查以 Kahn模擬器推得 `render_diagnosis_pages` 落在 `"generate_comparison_report"` **之後**（14 項的最後一項之前），不是夾在 `"diagnose_config_shift"` 與 `"generate_comparison_report"` 中間。**這是模擬結果不是實跑，Step 4 要以實跑為準。**
 
 **注意 node 順序是 topological sort 的結果，不是宣告順序**（`core/pipeline.py:56-93`）。上面三個插入位置是推導出來的，**Step 4 要實跑確認**。
 
@@ -982,9 +988,15 @@ class TestAggregateReportDiagnostics:
             "rank_counts", "positive_rank_counts", "positive_rate",
             "calibration",
         }
-        # 每個家族都要有實際資料——全空也會通過上面的鍵集合斷言。
-        for key in set(out) - {"columns"}:
+        # 每個家族都要有實際資料。長格式驗「有列」就夠；**矩陣家族不行**
+        # ——`_to_matrix`（diagnostics_spark.py:116-122）對「有列但全被濾掉」
+        # 的輸入會回一個 items×ranks 的**全零**frame，`data` 是
+        # [[0,0],[0,0]] 恆為 truthy。只驗 truthy 等於沒驗到「量到東西」。
+        for key in ("score_histogram", "score_box_by_label", "calibration"):
             assert out[key]["data"], f"{key} 是空的，這份 fixture 量不到它"
+        for key in ("rank_counts", "positive_rank_counts", "positive_rate"):
+            total = sum(abs(v) for row in out[key]["data"] for v in row)
+            assert total > 0, f"{key} 是全零矩陣，這份 fixture 量不到它"
 
         def _boom(const):
             raise AssertionError(f"非合法 JSON 常數：{const}")
@@ -1213,8 +1225,14 @@ def generate_report(
 ) -> str:
 ```
 
-**參數順序不是隨意的**：`TestGenerateReportNodeWiring` 要求「catalog 鍵剝掉
-`evaluation_` 前綴後等於參數名，逐位對齊」。上面這個順序對應的 inputs 是
+**這條測試釘的是殘留，不是在背書位置綁定。** 使用者的原始反饋正是「不該
+被要求符合一定順序」，而本計畫的做法是**把診斷從這個簽章裡整個拿掉**——順序
+約束對「加一項診斷」這件事已經不存在。剩下的 8 個參數仍是位置綁定（框架層的
+性質，見 §0 為何不在本計畫處理），這條測試讓它們的漂移變成**紅燈而不是靜默
+錯位**。沒有這條測試會更糟，不是更好。
+
+`TestGenerateReportNodeWiring` 要求「catalog 鍵剝掉 `evaluation_` 前綴後等於
+參數名，逐位對齊」。上面這個順序對應的 inputs 是
 
 ```python
         Node(
@@ -1359,7 +1377,7 @@ git commit -m "refactor(evaluation): 6 個 Spark 聚合拆成獨立 node，gener
 ## Task 5: 診斷 node 由 `DIAGNOSES` 導出
 
 **Files:**
-- Modify: `src/recsys_tfb/pipelines/evaluation/nodes_spark.py:450-488`（`diagnose_config_shift` → `make_diagnosis_node`）
+- Modify: `src/recsys_tfb/pipelines/evaluation/nodes_spark.py`（`diagnose_config_shift` → `make_diagnosis_node`；**刪除範圍以符號為準不要用行號**，`_diagnosis_pages_dir` 緊接其後且 Task 3 依賴它）
 - Modify: `src/recsys_tfb/pipelines/evaluation/pipeline.py`
 - Modify: `tests/test_pipelines/test_evaluation/test_nodes_spark.py:855-893`
 
@@ -1420,7 +1438,7 @@ def test_generated_node_delegates_to_the_named_module(monkeypatch):
     assert called["sample"] is sample
 
 
-def test_每項診斷的_node_名字互不相同():
+def test_each_diagnosis_node_gets_a_distinct_name():
     """``Node.name`` 預設取 ``func.__name__``（core/node.py:8）。
 
     工廠不設 ``__name__`` 的話五個 node 全叫 ``_run``：``--only-node`` 指不到
@@ -1440,7 +1458,13 @@ def test_每項診斷的_node_名字互不相同():
 
 - [ ] **Step 3: 實作**
 
-`nodes_spark.py`：把 `diagnose_config_shift`（`:450-488`）整個換成
+`nodes_spark.py`：把 `diagnose_config_shift` 整個換成下面的工廠。
+
+> **刪除範圍請以符號為準，不要用行號。** `diagnose_config_shift` 是
+> **450–481**（`def` 到 `return out`），**483 起是 `_diagnosis_pages_dir`**
+> ——而 Task 3 新增的 `render_diagnosis_pages` 依賴它。刪過頭會讓 Task 3 的
+> 成果一起消失，症狀是 `NameError: name '_diagnosis_pages_dir' is not defined`
+> 出現在 pipeline 尾端。刪之前先 `grep -n "^def " nodes_spark.py` 確認邊界。
 
 ```python
 def make_diagnosis_node(name: str):
@@ -1520,7 +1544,7 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
 
 拿掉 `_run.__name__ = f"diagnose_{name}"` 那一行，重跑 Step 4。
 
-預期：`test_每項診斷的_node_名字互不相同` 與 `test_pipeline.py` 的 node 名單斷言都轉紅。
+預期：`test_each_diagnosis_node_gets_a_distinct_name` 與 `test_pipeline.py` 的 node 名單斷言都轉紅。
 
 **為什麼下在這一行**：這是工廠化這條因果鏈上唯一不可省的一步。目前 registry
 只有一項，「名字互不相同」那條在單項時恆真——所以它靠的是**與期望名字相等**
