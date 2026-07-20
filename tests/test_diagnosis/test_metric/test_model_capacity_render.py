@@ -263,3 +263,29 @@ def test_completeness_section_lists_notes():
     sections = model_capacity.render(RESULT_WITHOUT_ABILITY, {})
     section = _section(sections, _COMPLETENESS_TITLE)
     assert "item_ability" in "\n".join(section.bullets)
+
+
+def test_fallback_ledger_reason_reaches_the_rendered_page():
+    """粗帳本降級（``gain_ledger.py:_coarse_ledger``）算出的 compute() 結果，
+    餵進 render() 之後，「這是降級版本」的原因必須真的出現在頁面文字裡——
+    不能只在 JSON 的 notes 裡有，頁面上卻悄悄消失。串接 compute()＋render()
+    （而不是手造一份 RESULT）是為了驗證兩層真的接得起來。
+    """
+    from recsys_tfb.diagnosis.metric.model_capacity._compute import compute
+
+    coarse = {
+        "enabled": True, "item_feature": "prod_name", "n_trees": 100,
+        "n_items": None, "total_gain": 60.0,
+        "item_id": {"split_count": 40, "gain_sum": 60.0, "gain_share": 1.0},
+        "context": None,
+        "per_item": None,
+        "fallback": True,
+        "notes": ["preprocessor 缺 category_mappings[item 欄]，降級為粗帳本"],
+    }
+    params = {"evaluation": {"diagnosis": {"model_capacity": {"enabled": True}}}}
+    result = compute(coarse, None, params)
+    sections = model_capacity.render(result, {})
+    text = _all_text(sections)
+    assert "粗帳本" in text or "降級" in text, (
+        f"粗帳本降級原因沒有出現在渲染出的頁面文字裡，實際章節：{[s.title for s in sections]}"
+    )

@@ -34,23 +34,32 @@ dict）。**前兩種必須等價處理成「這次沒有 ability 資料可 join
 「有資料但剛好是空的」，跟「壓根沒有這份資料」在讀者眼裡長得一樣但成因不同
 ——這裡分開處理是為了讓 ``notes`` 能講出是哪一種。
 
-``gain_ledger`` 的兩種來源形狀（相容讀取，見 :func:`_gain_sum`）
------------------------------------------------------------------
-``diagnosis.model.gain_ledger.compute_gain_ledger`` 的正式輸出把 item-id／
-context 帳分別巢狀在 ``gain_ledger["item_id"]["gain_sum"]``／
-``gain_ledger["context"]["gain_sum"]``。但本模組的驗收測試用的是扁平鍵
-``item_id_gain``／``post_item_context_gain``（見
-``tests/test_diagnosis/test_metric/test_model_capacity.py`` 的 ``LEDGER``
-fixture，逐字對應 Plan 2 Task 4.1 規格）。兩者不是同一份契約——:func:`_gain_sum`
-刻意兩種都認：巢狀鍵優先（真正的訓練產物長這樣），扁平鍵當備援（測試 fixture
-與早期腳本 ``scripts/model_capacity_diagnosis.py`` 用這個名字）。只在頂層兩個
-純量（item-id／context 的 gain 總和）上做這層相容；``per_item`` 的
-``context_gain`` 欄名兩種形狀完全一致，不需要轉換。
+``gain_ledger`` 只認正式的巢狀 schema（見 :func:`_gain_sum`）
+----------------------------------------------------------------
+``diagnosis.model.gain_ledger.compute_gain_ledger`` 與其降級路徑
+``_coarse_ledger``（``diagnosis/model/gain_ledger.py:217-256``）**兩條路都**
+把 item-id／context 帳分別巢狀在 ``gain_ledger["item_id"]["gain_sum"]``／
+``gain_ledger["context"]["gain_sum"]``——這是唯一的正式契約。
+
+（2026-07-20 修正：本模組先前對一組扁平鍵 ``item_id_gain``／
+``post_item_context_gain`` 提供了「相容讀取」備援，源頭是規格草稿裡一份憑空
+捏造、``gain_ledger.py`` 從未產出過的測試 fixture。那個備援讓 schema 真的不
+符時（例如巢狀鍵被改名）整項診斷會靜默算出全 ``None``、報表空白，而
+**29 條測試沒有一條會轉紅**——相容讀取把「真正的 schema bug」偽裝成「正常
+的降級路徑」。已整段移除，只認巢狀 schema；找不到就在 ``notes`` 出聲，見
+:func:`_schema_notes`，不是靜默吞掉。）
 
 ``gain_ledger`` 還可能是**粗帳本降級**（``fallback: True``，訓練側 preprocessor
-缺 item 欄的 category mapping 時）：此時只有 item-id 帳，``context``／
-``per_item`` 都是 ``None``。這裡不當成錯誤，只是讓 context 相關欄位自然留
-``None``，並在 ``notes`` 點名成因。
+缺 item 欄的 category mapping 時，即 ``_coarse_ledger``）：此時只有 item-id
+帳，``context``／``per_item`` 都明確是 ``None``——這是**已知合法**的退化
+形狀（``gain_ledger.py`` 自己的契約），不是 schema 不符，:func:`_schema_notes`
+刻意不對這個已知案例重複發另一句警告（``fallback`` 分支已經有自己的 note）。
+
+**schema 真的不符時**（``item_id`` 整個找不到，或 ``context`` 找不到但
+``fallback`` 沒有宣告——不符合上述任何一種已知形狀）：:func:`_schema_notes`
+在 ``notes`` 點名缺了哪個區塊，**不 raise**（``gain_ledger`` 是 best-effort
+產物，一份 schema 不符的 ledger 不該讓整條 evaluation pipeline 死掉）；對應
+的 gain／share 欄位留 ``None``，不假裝算出一個數字。
 
 per-item context_gain_share 的分母
 ------------------------------------
@@ -117,15 +126,50 @@ _EMPTY_SUMMARY: dict[str, Any] = {
 }
 
 
-def _gain_sum(ledger: dict, nested_key: str, flat_key: str) -> Optional[float]:
-    """相容讀取：巢狀（正式 gain_ledger.py schema）優先，扁平（測試 fixture／
-    早期腳本）當備援。見模組 docstring「gain_ledger 的兩種來源形狀」。
+def _gain_sum(ledger: dict, nested_key: str) -> Optional[float]:
+    """讀 ``ledger[nested_key]["gain_sum"]``——只認 ``gain_ledger.py`` 的正式
+    巢狀 schema（``compute_gain_ledger`` 與 ``_coarse_ledger`` 兩條路都是這個
+    形狀，見 ``diagnosis/model/gain_ledger.py:217-256``）。找不到就回
+    ``None``，不 raise——呼叫端 :func:`_schema_notes` 另外判斷這個「找不到」
+    要不要對讀者出聲。
     """
     nested = ledger.get(nested_key)
     if isinstance(nested, dict) and nested.get("gain_sum") is not None:
         return float(nested["gain_sum"])
-    flat = ledger.get(flat_key)
-    return None if flat is None else float(flat)
+    return None
+
+
+def _schema_notes(ledger: dict) -> list[str]:
+    """``gain_ledger`` 存在（非 None、非 stub）但找不到預期巢狀區塊時的說明。
+
+    **不 raise**——``gain_ledger`` 是 best-effort 產物，schema 不符不該讓
+    整條 evaluation pipeline 死掉；但也不能靜默：找不到就在 ``notes`` 點名
+    缺哪個鍵，讀者才能分辨「這批 item 的 context gain 真的是 0」與「這份
+    ledger 我根本讀不懂」。
+
+    ``context`` 缺席在 ``fallback: True`` 時是**已知合法**的形狀
+    （``_coarse_ledger`` 的既定契約，見模組 docstring）——那個案例已經有自己
+    的 fallback note，這裡不重複發第二句。``item_id`` 則不論 fallback 與否
+    都應該存在（兩條產出路徑都有 item-id 帳），缺席一律視為 schema 不符。
+    """
+    notes: list[str] = []
+    if not isinstance(ledger.get("item_id"), dict) or ledger["item_id"].get("gain_sum") is None:
+        notes.append(
+            "gain_ledger schema 不符：找不到 item_id.gain_sum（預期巢狀區塊 "
+            "'item_id'，見 diagnosis/model/gain_ledger.py 的正式輸出）——"
+            "item_id_gain 留空，不假裝算出一個數字。"
+        )
+    if not ledger.get("fallback") and (
+        not isinstance(ledger.get("context"), dict)
+        or ledger["context"].get("gain_sum") is None
+    ):
+        notes.append(
+            "gain_ledger schema 不符：找不到 context.gain_sum（預期巢狀區塊 "
+            "'context'，見 diagnosis/model/gain_ledger.py 的正式輸出；"
+            "fallback=True 時 context 為 None 是已知合法形狀，不算這裡）——"
+            "context_gain 留空，不假裝算出一個數字。"
+        )
+    return notes
 
 
 def _ability_lookup(item_ability: Optional[dict]) -> tuple[dict[str, dict], list[str]]:
@@ -211,8 +255,9 @@ def compute(
 
     total_gain = gain_ledger.get("total_gain")
     total_gain = None if total_gain is None else float(total_gain)
-    item_id_gain = _gain_sum(gain_ledger, "item_id", "item_id_gain")
-    context_gain = _gain_sum(gain_ledger, "context", "post_item_context_gain")
+    item_id_gain = _gain_sum(gain_ledger, "item_id")
+    context_gain = _gain_sum(gain_ledger, "context")
+    out["notes"].extend(_schema_notes(gain_ledger))
 
     ability_by_item, ability_notes = _ability_lookup(item_ability)
     out["notes"].extend(ability_notes)
