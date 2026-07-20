@@ -37,6 +37,8 @@
 | `field_notes` 與實際輸出鍵的一致性檢查（新增欄位忘了補說明不會有測試轉紅） | Task 2.3，與上一列一起 | 同屬 contract 強化 |
 | `q_agg` 的 `weight=("w","max")` 假設 `inclusion_weight` 在 query 內為常數 | **Plan 2 開工時檢查** | 對 `draw_diagnosis_sample` 的產出成立（權重由 stratum 決定、stratum 是 query 級屬性），但無測試釘住；上游若讓同一 query 的列帶不同權重，`max` 會靜默選一個 |
 | 讓診斷提供 result-dependent 的 `blind_to`（例如偵測到 lambdarank 時動態多一條） | 有第二個實例需要時 | 目前 `notes` 已承載這類資訊、`render` 也顯示了；為此加一個每項診斷各一份的 hook，會讓同一段邏輯被抄五次（Task 2.3 的 `scope_for()` 即因此撤回） |
+| `display` config 機制（YAML 覆寫表格欄位順序／欄名） | 使用者在公司環境看過真實產出、明確說出要調哪幾樣之後 | 中介層要的性質（JSON 持久化、呈現隨時可改、不必重跑公司環境）**離線重繪 2 秒就已經拿到了**。再疊一層 config：每個旋鈕都是程式碼＋測試＋文件，而且只調得動事先想到的那幾樣；直接改 `_render.py` 再重繪則什麼都能調、成本一樣。理由完整寫在 `scripts/render_diagnosis.py` 的 module docstring，**那是刻意不做、不是漏做** |
+| `render_diagnosis.py` 的 `--params` 讀不到時退回空 dict | 某項診斷的 `render` 真的開始讀 `parameters` 時 | 今天無害（`config_shift.render` 完全沒用到 `parameters`，只有簽章要求），但屆時會變成「安靜地用空 config 畫圖」。**現在沒有守衛**，那時要補 |
 
 **過渡期的兩種語氣並存（Plan 2–5 收尾前會一直存在）**：主報表裡舊的 `build_offset_sweep_section`（`report_builder.py:501-502`）寫著「大＝缺口主要在水準（配置／再平衡可修）、小＝缺口在條件判別力（必須動訓練）」——明確的處方，與三條鐵則相反。它服務的是 Plan 4 將由 `score_shift` 取代的舊診斷，且**今天就已在 main 出貨**，所以留著不會讓現況變差，改了也是改一段即將刪除的程式碼。**但 Task 2.8 檢視樣板時要把它排除在外**，否則會看到新舊兩種語氣打架而誤判樣板本身有問題。Plan 4 移除該診斷時一併清掉，Plan 5 全案驗收時複查。
 
