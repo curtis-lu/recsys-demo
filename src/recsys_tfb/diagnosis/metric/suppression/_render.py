@@ -254,7 +254,10 @@ def _examples_section(result: dict) -> ReportSection | None:
         formula=_FORMULA_EXAMPLES,
         bullets=bullets,
         tables=[table],
-        table_titles=["具體案例（依 gap 排序）"],
+        # 表格標題不重複 section 標題的「具體案例」四個字——兩者在頁面上
+        # 是連著的兩行，重複會讀成結巴。這裡只補 section 標題沒說的資訊
+        # （排序依據）。
+        table_titles=["依分攤到的 AP 缺口降冪排序"],
     )
 
 
