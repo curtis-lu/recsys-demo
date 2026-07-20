@@ -59,23 +59,59 @@ import inspect
 #: 每個診斷模組必須提供的符號。順序即錯誤訊息中的列出順序。
 _REQUIRED = ("NAME", "TITLE", "SCOPE", "compute", "render")
 
-#: 兩個函式的參數名與順序。**檢查名字而不只是個數**：``report_builder`` 之後
-#: 若改用關鍵字呼叫，一個名字打錯的 ``render(payload, parameters)`` 只有在真的
-#: 跑報表時才會炸，而那是 pipeline 尾端最貴的位置。
-#:
-#: 為什麼要有這條檢查：這個形狀是第一項診斷（Task 2.2）默默立下的，沒有寫在
-#: 任何地方。在補上這條之前，後面每一項診斷都可以寫成別的簽章而契約測試照樣
-#: 全綠——測試綠但形狀不一致，正是 report_builder「零改動」宣稱破功的方式。
+#: ``render`` 的參數名與順序，對所有診斷都固定——``compute`` 的結果 dict 形狀
+#: 各異，但 ``render(result, parameters)`` 這個殼不變，``report_builder`` 靠它
+#: 才能用同一套呼叫方式對待每一項診斷。**檢查名字而不只是個數**：之後若改用
+#: 關鍵字呼叫，一個名字打錯的 ``render(payload, parameters)`` 只有在真的跑報表
+#: 時才會炸，而那是 pipeline 尾端最貴的位置。
 _SIGNATURES = {
-    "compute": ("diagnosis_sample", "parameters"),
     "render": ("result", "parameters"),
 }
+
+#: 一項診斷的 node inputs（也是 ``compute`` 的參數名，見
+#: :func:`compute_params_for`）。多數診斷吃共用抽樣，所以有這個預設值；宣告了
+#: ``INPUTS`` 的模組（例如讀 ``gain_ledger`` 的 ``model_capacity``）覆寫它。
+#:
+#: **這是 node inputs 與 compute 簽章的單一真實來源**：``make_diagnosis_node``
+#: 與 ``pipeline.py`` 的 registry 迴圈都呼叫 :func:`inputs_for`，不是各自寫一份
+#: ``["diagnosis_sample", "parameters"]``。改之前（Plan 2 Task 4.0 之前）兩處
+#: 各寫一份、靠人對；現在寫錯 ``compute`` 簽章會被 :func:`check_module` 擋下，
+#: 結構上不可能兩邊不一致。
+DEFAULT_INPUTS: tuple[str, ...] = ("diagnosis_sample", "parameters")
 
 #: registry：順序即閱讀順序，也決定 HTML 檔名的數字前綴。
 #: 隨計畫逐步補齊（Plan 2 加入第二項 ``item_ability``）。
 DIAGNOSES: tuple[str, ...] = ("config_shift", "item_ability")
 
-__all__ = ["DIAGNOSES", "check_module"]
+__all__ = [
+    "DEFAULT_INPUTS", "DIAGNOSES", "check_module", "compute_params_for",
+    "inputs_for",
+]
+
+
+def inputs_for(mod) -> tuple[str, ...]:
+    """這項診斷的 node inputs（catalog 鍵）。
+
+    模組沒宣告 ``INPUTS`` 就用 :data:`DEFAULT_INPUTS`（共用抽樣）；宣告了就
+    原樣採用——不做任何驗證或轉換，打錯字或漏掉 ``parameters`` 由 §3 的兩條
+    不變量測試守住，這裡只負責「讀」。
+    """
+    return tuple(getattr(mod, "INPUTS", DEFAULT_INPUTS))
+
+
+def compute_params_for(mod) -> tuple[str, ...]:
+    """由 :func:`inputs_for` 導出的 ``compute`` 參數名。
+
+    catalog 鍵去掉 ``evaluation_`` 前綴即參數名（``evaluation_item_ability``
+    → ``item_ability``）——與 ``generate_report`` 的位置對齊檢查同一套慣例。
+    沒有 ``evaluation_`` 前綴的鍵（``diagnosis_sample``／``gain_ledger``／
+    ``parameters``）原樣通過。
+    """
+    prefix = "evaluation_"
+    return tuple(
+        name[len(prefix):] if name.startswith(prefix) else name
+        for name in inputs_for(mod)
+    )
 
 
 def check_module(mod) -> None:
@@ -86,6 +122,10 @@ def check_module(mod) -> None:
 
     collect-all 只用在缺符號那一段：一次列出**所有**缺的符號，補的人才不必補
     一個、跑一次、再發現還缺下一個。簽章檢查排在後面，因為它得先拿得到函式。
+
+    ``compute`` 的期望簽章不是寫死的常數，是 :func:`compute_params_for` 從
+    這個模組自己的 ``INPUTS``（或預設值）導出——宣告了 ``INPUTS`` 卻沒跟著改
+    ``compute`` 參數名，這裡就是唯一擋得住的地方。
     """
     missing = [symbol for symbol in _REQUIRED if not hasattr(mod, symbol)]
     name = getattr(mod, "__name__", repr(mod))
@@ -97,7 +137,8 @@ def check_module(mod) -> None:
             "for what each symbol is for."
         )
 
-    for symbol, expected in _SIGNATURES.items():
+    expected_by_symbol = {"compute": compute_params_for(mod), **_SIGNATURES}
+    for symbol, expected in expected_by_symbol.items():
         func = getattr(mod, symbol)
         try:
             actual = tuple(inspect.signature(func).parameters)

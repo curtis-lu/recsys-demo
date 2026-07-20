@@ -34,23 +34,43 @@ def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool, bool]:
 
 
 def _registry_diagnosis_enabled(parameters: dict) -> bool:
-    """registry 診斷（``contract.DIAGNOSES``）有任一啟用嗎。
+    """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
     與 ``_sample_consumer_flags`` 分開的理由：舊三項（ci／offset_sweep／
     pair_ledger）是即將被取代的既有診斷、新五項走 registry，兩組生命週期
     不同。合在一起的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
     registry 要消除的東西——所以這裡回一個 bool，不回擴增的 tuple。
 
+    判準是「這項診斷的 ``INPUTS`` 裡有沒有 ``diagnosis_sample``」，不是
+    「有沒有在 ``DIAGNOSES`` 裡」：不吃抽樣的診斷（例如讀 ``gain_ledger`` 的
+    ``model_capacity``）不該觸發這次抽樣——那是一次公司規模
+    ``toPandas()``（≈25 萬 query × 22 item 收到 driver）的白付，而且沒有任何
+    測試會轉紅、也不會有錯誤訊息，pipeline 只是安靜地變慢。
+
     鍵與預設值必須跟各消費節點自己讀的完全一致（``enabled``，預設 True），
-    否則閘門與消費端會漂移：使用者關掉舊三項、只開一項 registry 診斷時，
-    樣本不會被抽，消費節點拿到 None 而 fail-loud。
+    否則閘門與消費端會漂移：使用者關掉舊三項、只開一項吃抽樣的 registry 診斷
+    時，樣本不會被抽，消費節點拿到 None 而 fail-loud。
+
+    ``contract.DIAGNOSES`` 走**模組屬性**存取（``contract.DIAGNOSES``），不是
+    ``from ... import DIAGNOSES``。兩種寫法在這裡都能被 monkeypatch（本函式
+    的 import 在呼叫當下才執行，兩者都是每次呼叫重新解析），但模組屬性存取
+    讀起來更明確是「當下的 registry 值」，不必先確認 import 是模組層級還是
+    函式內才敢信任 monkeypatch 生效。
     """
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    import importlib
+
+    from recsys_tfb.diagnosis.metric import contract
 
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
+    sample_consumers = [
+        name for name in contract.DIAGNOSES
+        if "diagnosis_sample" in contract.inputs_for(
+            importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        )
+    ]
     return any(
         bool((diag.get(name, {}) or {}).get("enabled", True))
-        for name in DIAGNOSES
+        for name in sample_consumers
     )
 
 
@@ -436,36 +456,64 @@ def compute_pair_ledger(
 def make_diagnosis_node(name: str):
     """為 registry 裡的一項診斷造一個薄 node 函式。
 
-    Plan 2-5 的五項診斷 node 長得一模一樣：讀 ``enabled``、停用寫 stub、樣本是
-    ``None`` 就 fail-loud、否則轉呼叫模組的 ``compute``。手寫五份的問題不是
-    行數，是那五份會各自漂移——尤其「停用時回什麼」與「樣本 None 時 raise 還
-    是靜默」這兩件事，寫錯了 pipeline 照樣跑得完。
+    Plan 2-5 的診斷 node 長得幾乎一樣：讀 ``enabled``、停用寫 stub、若吃共用
+    抽樣則樣本是 ``None`` 就 fail-loud、否則轉呼叫模組的 ``compute``。手寫多份
+    的問題不是行數，是那些副本會各自漂移——尤其「停用時回什麼」與「樣本
+    ``None`` 時 raise 還是靜默」這兩件事，寫錯了 pipeline 照樣跑得完。
 
-    registry 診斷的 ``compute`` 吃的是整個 ``diagnosis_sample`` tuple
-    （``(sample_pdf, sample_meta)``），不是解包後的 ``sample_pdf``——契約在
-    ``diagnosis.metric.contract._SIGNATURES`` 釘住。
+    node inputs 不是寫死的 ``["diagnosis_sample", "parameters"]``：每次呼叫都
+    向 ``contract.inputs_for`` 問這個模組宣告了什麼（多數診斷沒宣告，落回
+    ``DEFAULT_INPUTS``）。``diagnosis_sample`` 的 fail-loud 守衛只在它真的出現
+    在 ``INPUTS`` 裡時才適用——不吃抽樣的診斷（例如 ``model_capacity``）沒有
+    這個守衛，因為它們的第一個 input 從來就不是抽樣。
+
+    個數檢查（``len(node_inputs) != len(declared)``）是這裡的核心宣稱之一：
+    Plan 1.5 的教訓是「寬簽章讓個數不對不再是錯誤」，所以這裡刻意用
+    ``*node_inputs`` 接、立刻核對個數，不用 ``*args`` 直接轉呼叫——後者會讓
+    少給一個 input 靜默地把某個位置參數錯當成 ``parameters``。
+
+    ``parameters`` 一律取 ``node_inputs[-1]``——這是 ``INPUTS`` 的不變量
+    （§3 之一，contract 測試守著）：宣告了 ``INPUTS`` 的模組必須把
+    ``"parameters"`` 放在最後一格。
+
+    registry 診斷的 ``compute`` 吃的是 ``INPUTS`` 宣告的每個 input 本身（吃
+    ``diagnosis_sample`` 的診斷拿到的是整個 ``(sample_pdf, sample_meta)``
+    tuple，不是解包後的 ``sample_pdf``）——契約在
+    ``diagnosis.metric.contract.compute_params_for`` 釘住。
 
     ``__name__`` 明設：``Node.name`` 預設取 ``func.__name__``
-    （``core/node.py:8``），不設的話五個 node 同名，``--only-node`` 指不到、
+    （``core/node.py:8``），不設的話多個 node 同名，``--only-node`` 指不到、
     log 分不出誰是誰，而 pipeline 照樣跑得完。
     """
-    def _run(diagnosis_sample: Optional[tuple], parameters: dict) -> dict:
+    def _run(*node_inputs) -> dict:
+        import importlib
+
+        from recsys_tfb.diagnosis.metric import contract
+
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        declared = contract.inputs_for(mod)
+        if len(node_inputs) != len(declared):
+            raise TypeError(
+                f"diagnose_{name}: expected {len(declared)} inputs "
+                f"({', '.join(declared)}), got {len(node_inputs)}"
+            )
+        parameters = node_inputs[-1]
         cfg = (((parameters.get("evaluation", {}) or {})
                 .get("diagnosis", {}) or {}).get(name, {}) or {})
         if not cfg.get("enabled", True):
             logger.info("%s disabled — writing stub", name)
             return {"enabled": False}
-        if diagnosis_sample is None:
-            raise ValueError(
-                f"diagnose_{name}: diagnosis_sample is None while "
-                f"evaluation.diagnosis.{name}.enabled is true — "
-                "draw_diagnosis_sample_node gate out of sync with the "
-                "consumer flag"
-            )
-        import importlib
+        if "diagnosis_sample" in declared:
+            sample_idx = declared.index("diagnosis_sample")
+            if node_inputs[sample_idx] is None:
+                raise ValueError(
+                    f"diagnose_{name}: diagnosis_sample is None while "
+                    f"evaluation.diagnosis.{name}.enabled is true — "
+                    "draw_diagnosis_sample_node gate out of sync with the "
+                    "consumer flag"
+                )
 
-        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-        out = mod.compute(diagnosis_sample, parameters)
+        out = mod.compute(*node_inputs)
         # 純量鍵通用地印出來，不為每項診斷各寫一句摘要：那樣 Plan 2-5 每加
         # 一項就要多一段格式化字串，而它們沒有任何測試守著格式。
         scalars = {

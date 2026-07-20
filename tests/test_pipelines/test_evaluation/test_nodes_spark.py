@@ -852,6 +852,61 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
     spy.assert_called_once_with(None, params)
 
 
+def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
+    caplog, monkeypatch
+):
+    """只開不吃抽樣的診斷時不得抽樣。
+
+    斷言落在「回傳 None ＋ log 說了 skipping」，不能只斷言沒呼叫 Spark——
+    後者被「正確跳過」與「根本沒走到這段」同時滿足（本專案踩過的假綠形態，
+    見 known-pitfalls 的教訓 3）。
+
+    目前 ``DIAGNOSES`` 還沒有不吃抽樣的成員（``model_capacity`` 是下一個
+    task），這裡用 monkeypatch 造一個假的——``INPUTS`` 裡沒有
+    ``diagnosis_sample``，只讀 ``gain_ledger``。``contract.DIAGNOSES`` 走模組
+    屬性存取（見 ``_registry_diagnosis_enabled`` 的 docstring），所以這裡對
+    ``contract`` 模組本身 patch 屬性即可生效。
+    """
+    import logging
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recsys_tfb.diagnosis.metric import contract
+    from recsys_tfb.pipelines.evaluation import nodes_spark
+
+    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_capacity")
+    fake.INPUTS = ("gain_ledger", "parameters")
+    fake.compute = lambda gain_ledger, parameters: {}
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_capacity", fake)
+    monkeypatch.setattr(contract, "DIAGNOSES", ("fake_capacity",))
+
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+        }},
+        "evaluation": {"diagnosis": {
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+            "fake_capacity": {"enabled": True},
+        }},
+    }
+
+    with caplog.at_level(logging.INFO), patch(
+        "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+    ) as spy:
+        result = nodes_spark.draw_diagnosis_sample_node(None, params)
+
+    assert result is None
+    assert spy.call_count == 0
+    assert any(
+        "skip" in record.getMessage().lower() for record in caplog.records
+    ), "expected a log message explaining the sample draw was skipped"
+
+
 def test_generated_node_writes_stub_when_disabled():
     from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
 

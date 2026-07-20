@@ -143,6 +143,97 @@ def test_every_registered_diagnosis_satisfies_contract(name):
     contract.check_module(mod)
 
 
+def test_default_inputs_apply_when_module_is_silent():
+    """沒宣告 ``INPUTS`` 的模組（目前的 config_shift）落回吃共用抽樣的預設。"""
+    from recsys_tfb.diagnosis.metric import config_shift
+
+    assert contract.inputs_for(config_shift) == ("diagnosis_sample", "parameters")
+
+
+def test_declared_inputs_override_the_default():
+    mod = types.SimpleNamespace(INPUTS=("gain_ledger", "parameters"))
+    assert contract.inputs_for(mod) == ("gain_ledger", "parameters")
+
+
+def test_compute_params_strip_the_evaluation_prefix():
+    mod = types.SimpleNamespace(
+        INPUTS=("gain_ledger", "evaluation_item_ability", "parameters"))
+    assert contract.compute_params_for(mod) == (
+        "gain_ledger", "item_ability", "parameters")
+
+
+def test_signature_mismatch_against_declared_inputs_raises():
+    """契約的實際價值：宣告 INPUTS 卻寫錯 compute 簽章 → TypeError。
+
+    match 用 'gain_ledger' 而不是 'contract'——後者會被別條規則的訊息滿足。
+    """
+    mod = types.SimpleNamespace(
+        NAME="x", TITLE="X", SCOPE=object(),
+        INPUTS=("gain_ledger", "parameters"),
+        compute=lambda diagnosis_sample, parameters: {},   # ← 沒跟著改
+        render=lambda result, parameters: (),
+    )
+    with pytest.raises(TypeError, match="gain_ledger"):
+        contract.check_module(mod)
+
+
+def test_parameters_must_be_the_last_input():
+    """§3 不變量 1：``make_diagnosis_node`` 用位置 ``-1`` 取 ``parameters``。
+
+    宣告 ``INPUTS`` 卻沒把 ``parameters`` 放最後，node 會把別的東西當成
+    ``parameters`` 餵給 ``compute``，而不會有任何錯誤訊息——這條測試守的是
+    「登記進 registry 的每一項診斷都遵守這個位置慣例」。
+    """
+    assert contract.DEFAULT_INPUTS[-1] == "parameters"
+    for name in contract.DIAGNOSES:
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        declared = contract.inputs_for(mod)
+        assert declared[-1] == "parameters", (
+            f"{name}: INPUTS 的最後一個元素是 {declared[-1]!r}，"
+            "不是 'parameters'——make_diagnosis_node 靠位置 -1 取值"
+        )
+
+
+def test_every_diagnosis_node_input_has_a_catalog_entry():
+    """§3 不變量 2：``INPUTS`` 裡除 ``parameters``／``diagnosis_sample`` 外的
+    每個名字，都必須在 ``catalog.yaml`` 有 entry。
+
+    打錯字時 runner 會給 MemoryDataset 的 ``None``，而 node 照樣跑得完——
+    沒有這條測試就沒有任何東西擋。
+    """
+    from pathlib import Path
+
+    import yaml
+
+    catalog_path = (Path(__file__).resolve().parents[3]
+                    / "conf" / "base" / "catalog.yaml")
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    for name in contract.DIAGNOSES:
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        declared = contract.inputs_for(mod)
+        for key in declared:
+            if key in ("parameters", "diagnosis_sample"):
+                continue
+            assert key in catalog, (
+                f"{name}: INPUTS 含 {key!r}，但 catalog.yaml 沒有這個 entry"
+                "——runner 會給 MemoryDataset 的 None，node 照樣跑得完"
+            )
+
+
+def test_diagnosis_node_rejects_a_short_inputs_list():
+    """少給一個 input 必須 TypeError，不得靜默。
+
+    這是 Plan 1.5 整個重構的核心宣稱，換成 INPUTS 之後要重新釘一次：工廠若
+    改用 ``*args`` 直接轉呼叫（不核對個數），少給一個 input 只會讓某個位置
+    參數被錯當成 ``parameters`` 餵進去，而不會有任何錯誤訊息。
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
+    with pytest.raises(TypeError, match="expected 2 inputs"):
+        node_fn(None)  # 少給 parameters
+
+
 def test_every_registry_diagnosis_has_a_catalog_entry():
     """registry 有的診斷，``catalog.yaml`` 必須有對應的 JSONDataset。
 

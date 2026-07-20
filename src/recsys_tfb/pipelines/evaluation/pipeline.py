@@ -1,8 +1,10 @@
 """Evaluation pipeline definition."""
 
+import importlib
+
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
 
 
 def create_pipeline(
@@ -123,10 +125,19 @@ def create_pipeline(
         ),
         # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
         # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
+        # inputs 不是寫死的 ["diagnosis_sample", "parameters"]：每項診斷宣告
+        # 自己的 INPUTS（contract.inputs_for），多數診斷沒宣告就落回吃共用
+        # 抽樣的預設值。不吃抽樣的診斷（例如讀 gain_ledger 的
+        # model_capacity）就此能宣告自己的 node inputs，不必讓每項診斷都收
+        # 寬簽章。
         *[
             Node(
                 make_diagnosis_node(name),
-                inputs=["diagnosis_sample", "parameters"],
+                inputs=list(inputs_for(
+                    importlib.import_module(
+                        f"recsys_tfb.diagnosis.metric.{name}"
+                    )
+                )),
                 outputs=f"evaluation_{name}",
             )
             for name in DIAGNOSES
