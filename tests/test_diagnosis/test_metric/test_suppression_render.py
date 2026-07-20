@@ -25,12 +25,21 @@ from recsys_tfb.diagnosis.metric import contract, suppression
 from recsys_tfb.report import ReportSection, ScopeNote
 from recsys_tfb.report.figures import MAX_FIGURE_POINTS
 
-_GLOSSARY_TITLE = "數字定義"
+_DEFS_TITLE = "本區數字定義"
 _SUMMARY_TITLE = "per-item"
 _MATRIX_TITLE = "壓制矩陣"
 _BUBBLE_TITLE = "交叉購買 lift"
 _EXAMPLES_TITLE = "具體案例"
 _BY_SUPPRESSOR_TITLE = "壓制者視角"
+
+
+def _section_text(section) -> str:
+    """一個 section 的所有可讀文字（含定義小表的內容）。"""
+    parts = [section.title, section.description, section.formula]
+    parts.extend(section.bullets)
+    parts.extend(section.table_titles)
+    parts.extend(t.to_string() for t in section.tables)
+    return "\n".join(parts)
 _COMPLETENESS_TITLE = "本次執行的完整性檢查"
 
 _N_AXIS_MAX = 44  # floor(sqrt(MAX_FIGURE_POINTS)) == floor(sqrt(2000))
@@ -136,10 +145,10 @@ def test_render_returns_sections():
 
 
 def test_render_returns_multiple_sections():
-    """七個 section：定義、per-item 彙總、壓制矩陣、壓制者視角、交叉購買、
-    具體案例、完整性檢查。"""
+    """六個 section：per-item 彙總、壓制矩陣、壓制者視角、交叉購買、
+    具體案例、完整性檢查。數字定義不再是獨立 section，而是分散進各區。"""
     sections = suppression.render(_result(), {})
-    assert len(sections) >= 6
+    assert len(sections) >= 5
     assert all(s.title.strip() for s in sections)
 
 
@@ -248,32 +257,52 @@ def test_scope_explains_lift_equal_one():
     assert "近似獨立" in joined
 
 
-# ---- 使用者反饋（2026-07-21）：定義要清楚、per-item 全貌要先於矩陣 --------
+# ---- 使用者反饋（2026-07-21）：定義拆進各區、per-item 全貌先於矩陣 --------
 
 
-def test_glossary_defines_the_terms_the_reader_asked_about():
-    """使用者的具體抱怨：讀者無從知道 allocated_ap_gap／n_j／n_k／n_units
-    是什麼。定義表必須真的**定義**到這些字（不是只列個標題）——所以除了字
-    出現，還要求該列有一段夠長的定義文字。
+def test_definitions_are_distributed_into_each_section_not_a_top_glossary():
+    """使用者要求：數字定義拆進各個圖表的段落裡，不放頁首一張總表。
+
+    驗兩件事：(a) 沒有一個獨立的頁首「定義」section；(b) 每個用到數字的區
+    自己第一張表就是「本區數字定義」。
     """
     sections = suppression.render(_result(), {})
-    section = _section(sections, _GLOSSARY_TITLE)
-    assert section.tables, "定義區沒有表格"
-    df = section.tables[0]
-    joined = df.to_string()
-    for term in ("allocated_ap_gap", "n_units", "n_j / n_k", "n_joint",
-                 "lift", "AP gap from suppressors", "P(k|j)"):
-        assert term in joined, f"定義表沒有列出 {term!r}"
-    # 每一列的定義欄都要有實質內容，不能是空的佔位
-    for _, row in df.iterrows():
-        assert len(str(row["定義"])) >= 15, f"{row['數字']!r} 的定義太短"
+    titles = [s.title for s in sections]
+    assert not any("數字定義" == t for t in titles), (
+        f"還存在獨立的頁首定義 section：{titles}"
+    )
+    # 用到數字的四個區，各自第一張表是定義表
+    for key in (_SUMMARY_TITLE, _BY_SUPPRESSOR_TITLE, _BUBBLE_TITLE, _EXAMPLES_TITLE):
+        section = _section(sections, key)
+        assert section.tables, f"{key} 區沒有表格"
+        assert section.table_titles[0] == _DEFS_TITLE, (
+            f"{key} 區的第一張表不是「{_DEFS_TITLE}」，而是 "
+            f"{section.table_titles[0]!r}"
+        )
 
 
-def test_glossary_comes_first():
-    """定義表放最前面——下面每個數字才連得回來（使用者原話：直覺連結到
-    前面部分的某數字）。"""
-    titles = [s.title for s in suppression.render(_result(), {})]
-    assert _GLOSSARY_TITLE in titles[0], f"第一節不是定義表：{titles}"
+def test_each_number_the_reader_asked_about_is_defined_in_its_own_section():
+    """使用者點名的字（allocated_ap_gap／n_j/n_k／n_units／lift）必須各自
+    定義在**它出現的那一區**——不是別區、不是頁首。
+    """
+    sections = suppression.render(_result(), {})
+    cross = _section_text(_section(sections, _BUBBLE_TITLE))
+    for term in ("n_units", "n_j / n_k", "n_joint", "P(k|j)", "lift"):
+        assert term in cross, f"交叉購買區沒有定義 {term!r}"
+    # allocated_ap_gap 出現在多個區，至少矩陣區要定義它
+    matrix = _section_text(_section(sections, _MATRIX_TITLE))
+    assert "allocated_ap_gap" in matrix and "分帳" in matrix, (
+        "壓制矩陣區沒有就地定義 allocated_ap_gap"
+    )
+    # 定義要有實質內容：每個定義小表的「定義」欄都夠長
+    for section in sections:
+        for title, tbl in zip(section.table_titles, section.tables):
+            if title != _DEFS_TITLE:
+                continue
+            for _, row in tbl.iterrows():
+                assert len(str(row["定義"])) >= 15, (
+                    f"{section.title} 區 {row['數字']!r} 的定義太短"
+                )
 
 
 def test_per_item_summary_comes_before_the_matrix():
@@ -287,10 +316,13 @@ def test_per_item_summary_comes_before_the_matrix():
 
 
 def test_per_item_summary_has_the_core_columns():
-    """codex 版一開場給的那幾個數字，這裡必須都有——這是使用者點名要的。"""
+    """codex 版一開場給的那幾個數字，這裡必須都有——這是使用者點名要的。
+
+    資料表是這一區的**最後**一張表（第一張是定義小表）。
+    """
     section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
     assert section.tables, "per-item 彙總沒有表格"
-    cols = list(section.tables[0].columns)
+    cols = list(section.tables[-1].columns)
     for col in ("受害 item", "AP gap from suppressors", "unexplained AP gap",
                 "overall gap share", "suppressed pos / n_pos", "mean neg above",
                 "頭號壓制者"):
@@ -369,7 +401,7 @@ def test_examples_section_lists_query_and_items():
     sections = suppression.render(_result(), {})
     section = _section(sections, _EXAMPLES_TITLE)
     assert section.tables, "具體案例 section 沒有表格"
-    table = section.tables[0]
+    table = section.tables[-1]  # 最後一張是資料表；第一張是定義小表
     for col in ("query", "positive_item", "suppressor_item"):
         assert col in table.columns
 
