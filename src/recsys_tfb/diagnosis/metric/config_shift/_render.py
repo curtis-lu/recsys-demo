@@ -336,12 +336,21 @@ def _per_item_section(result: dict) -> ReportSection | None:
 
 
 def _visibility_section(result: dict) -> ReportSection:
-    """6. 這次診斷看不見什麼。**這一節不可省，空的時候也照樣印「無」。**
+    """6. 本次執行的完整性檢查。**這一節不可省，空的時候也照樣印「無」。**
 
-    三者都是「診斷看不見某樣東西」的觀測，而看不見與量到零在報表上長得一模
-    一樣：Δ ≈ 0 是本項診斷宣稱可以排除整個方向的訊號，但查表全未命中會偽造出
-    同樣的 Δ ＝ 0；offset 矩陣少一列，跟該 item 沒有偏移也長得一樣。所以空的
-    時候也照樣印「無」——讀者要看得出這三件事被檢查過。
+    這一節與頁首 ``ScopeNote`` 的「推論不到什麼」是**不同性質的東西**，早期
+    兩者都叫「看不見什麼」而使用者當場指出標題與內容對不起來：
+
+    * ``ScopeNote.blind_to`` ＝ 這個指標**結構上**推論不到的事。與這次跑了什麼
+      資料無關，永遠成立。
+    * 這一節 ＝ 三種**已知的靜默失效**在**本次執行**的實際結果。會隨每次執行
+      變動，正常情況下三項都是「無」。
+
+    為什麼空的時候也要印：這三種失效都會讓數字看起來正常、實際上沒量到。
+    Δ ≈ 0 是本項診斷宣稱可以排除整個方向的訊號，但查表全未命中會偽造出同樣的
+    Δ ＝ 0；offset 矩陣少一列，跟該 item 沒有偏移也長得一樣。讀者要看得出這三
+    件事被檢查過、結果是什麼——「沒有這一節」與「這一節全是無」對讀者是天差
+    地別的兩件事。
     """
     unmatched = result.get("unmatched_override_keys") or []
     not_observed = result.get("items_declared_not_observed") or []
@@ -379,8 +388,11 @@ def _visibility_section(result: dict) -> ReportSection:
         table_titles.append("本次樣本零命中的 override key")
 
     return ReportSection(
-        title="這次診斷看不見什麼",
-        description="以下每一項都被檢查過，內容如實列出。",
+        title="本次執行的完整性檢查",
+        description=(
+            "以下三種情況會讓上面的數字看起來正常、實際上沒量到。"
+            "每項列出本次執行的實際結果。"
+        ),
         bullets=bullets,
         tables=tables,
         table_titles=table_titles,

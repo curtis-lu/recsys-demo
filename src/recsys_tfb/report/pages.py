@@ -123,7 +123,11 @@ def _render_scope_note(scope: ScopeNote) -> str:
     parts.append(f"<dt>算在哪批列上</dt><dd>{_escape(scope.population)}</dd>")
     if scope.sampling:
         parts.append(f"<dt>抽樣設計</dt><dd>{_escape(scope.sampling)}</dd>")
-    parts.append("<dt>看不見什麼</dt><dd><ul>")
+    # 「推論不到什麼」而不是「看不見什麼」：後者與各診斷頁裡「本次執行的完整性
+    # 檢查」那一節混淆——那一節講的是這次跑出來有沒有踩到已知的靜默失效（會隨
+    # 執行變動），這裡講的是這個指標結構上就推論不到的事（與資料無關，永遠成立）。
+    # 兩者同名時使用者當場指出「標題跟內容對不起來，而且兩邊內容完全無關」。
+    parts.append("<dt>推論不到什麼</dt><dd><ul>")
     for item in scope.blind_to:
         parts.append(f"<li>{_escape(item)}</li>")
     parts.append("</ul></dd>")

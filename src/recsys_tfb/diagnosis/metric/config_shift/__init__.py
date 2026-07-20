@@ -50,12 +50,20 @@ SCOPE = ScopeNote(
         "分數是無界原始分數，log-odds offset 的相減沒有理論基礎（此時 notes 會點名）。",
         "沒有出現在樣本中的 (context, item) 組合——offset 矩陣只列實際觀測到的組合。",
     ),
-    reference_points=(
-        "群內 spread = 0 代表該 context 群內 offset 均勻，對 query 內名次零影響"
-        "（可直接推導，不需估計）。",
-        "Δ 的 95% CI 來自配對 bootstrap：同一組重抽的 entity 上同時算 mAP(F) 與 "
-        "mAP(F−offset) 再取差。",
-    ),
+    # reference_points 刻意留空：判讀某張圖表的方式，要寫在那張圖表旁邊。
+    #
+    # 這兩條原本放在這裡（「spread = 0 ⇒ 群內均勻 ⇒ 對名次零影響」、「Δ 的 CI
+    # 來自配對 bootstrap」），而 ScopeNote 渲染在頁首、圖表在下方數百像素處。
+    # 使用者的原話：「裡面的內容跟下方圖表中的內容有重疊，我覺得寫在上面會很難
+    # 理解，不知道在講什麼。」——讀者還沒看到那張圖，就先被要求理解它的判讀方式。
+    #
+    # 兩條的內容都沒有消失，只是搬到它們解釋的東西旁邊：spread 那條在「群內
+    # offset 範圍」節的 bullet，bootstrap 那條在「扣掉 offset 之後的 mAP 變化」
+    # 節的 bullet。
+    #
+    # 頁首只留與整頁有關、且讀者在看任何圖表**之前**就該知道的事：量什麼、算在
+    # 哪批列上、抽樣設計、推論不到什麼。
+    reference_points=(),
 )
 
 __all__ = ["NAME", "TITLE", "SCOPE", "compute", "render"]

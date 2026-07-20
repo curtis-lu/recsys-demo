@@ -205,7 +205,7 @@ def test_formulas_present_for_computed_quantities():
     缺席時，會把可見性那一節算進要求範圍，變成一條會誤紅的測試。
     """
     sections = config_shift.render(_result(), {})
-    assert sections[-1].title == "這次診斷看不見什麼"
+    assert sections[-1].title == "本次執行的完整性檢查"
     for section in sections[:-1]:
         assert section.formula.strip(), f"section {section.title!r} 缺公式"
 
@@ -455,3 +455,39 @@ def test_module_satisfies_contract():
     ``test_contract.py``——那是它的家，Plans 2–5 新增診斷時該跑的也是那一檔。
     """
     contract.check_module(config_shift)
+
+
+def test_page_head_and_run_checks_do_not_share_a_label():
+    """頁首的「推論不到什麼」與各頁「本次執行的完整性檢查」是不同性質的東西。
+
+    早期兩者都叫「看不見什麼」，使用者當場指出「標題跟內容對不起來，而且兩邊
+    內容完全無關」。前者是這個指標**結構上**推論不到的事（與資料無關，永遠成
+    立），後者是三種已知靜默失效在**本次執行**的結果（會隨執行變動）。
+    """
+    from recsys_tfb.report.pages import _render_scope_note
+
+    head = _render_scope_note(config_shift.SCOPE)
+    sections = config_shift.render(_result(), {})
+    run_checks_title = sections[-1].title
+
+    assert "推論不到什麼" in head
+    assert "看不見什麼" not in head, "頁首標籤與逐次執行的檢查同名會混淆"
+    assert run_checks_title not in head
+
+
+def test_no_reference_point_repeats_a_section_bullet():
+    """判讀某張圖表的方式要寫在那張圖表旁邊，不是頁首。
+
+    使用者原話：「裡面的內容跟下方圖表中的內容有重疊，我覺得寫在上面會很難理
+    解，不知道在講什麼」——讀者還沒看到那張圖，就先被要求理解它的判讀方式。
+    這條不禁止 reference_points 存在，只禁止它與 section 的 bullet 重複。
+    """
+    sections = config_shift.render(_result(), {})
+    bullets = [b for s in sections for b in s.bullets]
+
+    for point in config_shift.SCOPE.reference_points:
+        head = point[:20]
+        clashes = [b for b in bullets if head in b]
+        assert not clashes, (
+            f"頁首對照點與圖表旁的說明重複：{point!r} ↔ {clashes!r}"
+        )
