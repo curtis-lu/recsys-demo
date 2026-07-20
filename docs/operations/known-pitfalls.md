@@ -94,3 +94,36 @@
 - **驗證方式**：`grep -rn "groupby(" src/recsys_tfb/diagnosis/` 拿到**候選清單**（不是通過／失敗閘——實測 10 個命中只有 1 個相關，當閘用會被當噪音略過）。逐一問一個問題：**這個分組鍵可能是 NaN 嗎？** 來自使用者資料的欄（context 欄、item、entity）可能；自己造的（`factorize` 碼、自己組的字串標籤）不可能。只有前者需要 `dropna=False`。
   針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。
   **已知待查（2026-07-20 掃到、未處理）**：`diagnosis/metric/sample.py:281` 的 `groupby(item_col)` 分組鍵來自使用者資料，item 為 NULL 時該筆會從 `per_item_sampled` 計數靜默消失。屬 Plan 0 已 merge 的程式碼，尚未評估 item 欄是否有上游 not-null 保證。
+
+## 12. Node inputs 與函式簽章是**位置**綁定：少一個輸入就整排平移（2026-07-20 公司環境實例）
+
+- **症狀（第一分鐘認出它）**：某個 node 收到「另一個 node 的產物」。徵兆是型別完全不合的錯誤出現在看似無關的函式裡，例如 `build_offset_sweep_section` 爆 `TypeError: list indices must be integers or slices, not dict`——因為 `offset_sweep` 參數收到的是 `config_shift` 的 dict（它的 `per_item` 是 list of dicts，而 offset_sweep 的是 dict）。
+- **根因**：`core/runner.py` 是 `result = node.func(*inputs)`，**位置展開**。`node.inputs` 少了一個元素，其後每個參數都往前移一格。`generate_report` 有 7 個具名參數 ＋ varargs，是這個 repo 裡最脆弱的一處。**運氣好才會爆**——兩邊型別相容時不會有任何錯誤，報表會靜靜把 A 診斷的數字印在 B 診斷的標題底下。
+- **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。**新增診斷時尤其必跑**——registry 診斷是用 `*(f"evaluation_{name}" for name in DIAGNOSES)` 展開接在尾端的，中間少一個就全平移。
+- **驗證方式**：
+  ```bash
+  python -c "
+  import inspect
+  from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+  from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+  from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
+  sig = list(inspect.signature(generate_report).parameters)
+  node = next(n for n in create_pipeline({}).nodes if n.name == 'generate_report')
+  for i in range(max(len(sig), len(node.inputs))):
+      s = sig[i] if i < len(sig) else '—'; n = node.inputs[i] if i < len(node.inputs) else '—'
+      print('%-2d %-24s %s' % (i+1, s, n))
+  "
+  ```
+  第 6 位應為 `offset_sweep` ↔ `evaluation_offset_sweep`。repo 內另有 `test_inputs_positionally_match_signature` 守這件事，但**它守不了手動同步的環境**（見 §13）。
+
+## 13. 隔離環境（不能連 git）手動同步後，必須逐檔核對 hash（2026-07-20）
+
+- **症狀（第一分鐘認出它）**：traceback 的行號與你本機的檔案完全吻合，但行為對不上任何一個你認得的版本；或 config 讀到的值與你剛改的不同。典型組合是 **`src/` 是新的、`conf/` 是舊的**——因為兩者是分開拷貝的。
+- **根因**：公司環境無法 `git fetch`，程式碼靠手動拷貝進去。拷貝沒有原子性也沒有完整性檢查，漏一個檔或漏一個目錄不會有任何徵兆，而 git 那套「branch 名稱正確 ＝ 內容正確」的直覺在這裡不成立（shell prompt 顯示的 branch 名可能只是個空殼）。
+- **規則**：同步之後**先核對 hash 再跑任何東西**。產出清單的方式（在能連 git 的那端）：
+  ```bash
+  git diff --name-only <對方目前的 base>..HEAD -- src/ conf/ | while read f; do
+    printf "%s  %s\n" "$(shasum -a 1 "$f" | cut -c1-12)" "$f"; done
+  ```
+  刪除的檔案會印不出 hash——那些是**要刪**的，不是漏拷的。對方用 `sha1sum` 逐檔比對。
+- **驗證方式**：hash 全對之後，再跑 §12 的位置綁定比對。兩關都過才開始跑 pipeline——否則失敗會出現在 pipeline 尾端，前面所有昂貴計算全部白做。

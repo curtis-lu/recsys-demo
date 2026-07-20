@@ -12,8 +12,22 @@
 | Plan | 狀態 |
 |---|---|
 | **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
-| **1 config_shift** | 🔨 **進行中**，branch `feat/diag-config-shift`（從 merged main 開出）。2.1 契約 ✅／2.2 計算層 ✅（審查中）／2.3 起未開始 |
-| 2–5 | 未開始 |
+| **1 config_shift** | ✅ **實作完成**，branch `feat/diag-config-shift`。2.1–2.7 全部完成；**2.8 樣板檢查點使用者已通過**（2026-07-20 公司環境實跑成功，回饋見下方三則） |
+| **1.5 接線層重構** | ⏭ **下一步，Plan 2 開工前必做**。來源＝Task 2.8 回饋 1＋2，見下方「下一步」 |
+| 2–5 | 未開始。**開工前先做 1.5**，否則四項診斷會照抄目前有已知缺陷的接線形狀 |
+
+## 下一步：接線層重構（Plan 2 之前）
+
+Task 2.8 的回饋 1 與 2 指向同一組接線缺陷，且**已在公司環境造成一次實際故障**。Plan 2–5 會各新增一項診斷，照現在的形狀做下去＝四份手寫 Node、四次位置平移的機會。所以在 Plan 2 之前先收掉：
+
+1. **診斷 Node 由 `contract.DIAGNOSES` 導出**，不再每項手寫。
+2. **`generate_report` 不再用 N 個位置參數收診斷結果**，改成收單一 dict（或由 runner 具名綁定）。這是 2026-07-20 那個 `TypeError` 的根治法。
+3. **把 `generate_report` 裡的五個 Spark 聚合抽成獨立 node**，落地 JSON；`generate_report` 簽章不再有 `SparkDataFrame`，變成純函式。
+4. **每項診斷對使用者只有一個開關**：`evaluation.diagnosis.<name>.enabled`；`DIAGNOSES` 降級成「程式碼裡存在」的宣告，並把兩者的差別寫進文件。
+
+1＋2 動同一個簽章，3 讓那個簽章順便擺脫 Spark——**一次做完比分三次便宜**。做完的連帶好處：`scripts/render_diagnosis.py` 的 2 秒重繪範圍可從診斷頁擴大到整份主報表；公司環境手動同步時 `pipeline.py` 不再需要逐項核對。
+
+**這一輪要正式走 `superpowers:writing-plans` 產出計畫**，不要當成順手的重構——它動的是五項診斷共用的接線，出錯的半徑是全部。
 
 **續作接手方式**：讀 `00-shared-context.md` ＋ `02-plan-1-config-shift.md`，從上表標示的下一個 task 開始。worktree 是 `/Users/curtislu/projects/recsys_tfb/.worktrees/diag-redesign`，**本機 Spark 環境已建好**（dataset／training 跑過，model_version `6059dcef`），不必重跑 `local_spark_setup --reset`。
 
