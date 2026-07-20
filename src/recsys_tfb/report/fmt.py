@@ -47,6 +47,20 @@ def fmt_auc(x: Any) -> str:
     return f"{v:.3f}"
 
 
+def fmt_percent(x: Any) -> str:
+    """佔比／比率當百分比讀：[0,1] 量 × 100，1 位小數＋``%``。
+
+    與 ``fmt_auc`` 是同一種底層量（[0,1] 的份額），差別只在**呈現單位**：
+    「這個 item 佔全體缺口的 20.8%」比「0.208」直覺，尤其是分子／分母都在
+    定義表裡寫清楚的時候。AUC 這種本身就習慣讀小數的量仍用 ``fmt_auc``；
+    「share」「rate」這種「一部分佔全部」的量用這個。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v * 100:.1f}%"
+
+
 def fmt_ap(x: Any) -> str:
     """AP／mAP：4 位小數（有意義差異常在第 3–4 位）。"""
     v = _to_finite_float(x)

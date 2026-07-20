@@ -25,10 +25,12 @@ from recsys_tfb.diagnosis.metric import contract, suppression
 from recsys_tfb.report import ReportSection, ScopeNote
 from recsys_tfb.report.figures import MAX_FIGURE_POINTS
 
-_MATRIX_TITLE = "壓制矩陣：target_gap_share"
+_GLOSSARY_TITLE = "數字定義"
+_SUMMARY_TITLE = "per-item"
+_MATRIX_TITLE = "壓制矩陣"
 _BUBBLE_TITLE = "交叉購買 lift"
 _EXAMPLES_TITLE = "具體案例"
-_BY_SUPPRESSOR_TITLE = "per-suppressor"
+_BY_SUPPRESSOR_TITLE = "壓制者視角"
 _COMPLETENESS_TITLE = "本次執行的完整性檢查"
 
 _N_AXIS_MAX = 44  # floor(sqrt(MAX_FIGURE_POINTS)) == floor(sqrt(2000))
@@ -134,9 +136,10 @@ def test_render_returns_sections():
 
 
 def test_render_returns_multiple_sections():
-    """五個 section：壓制矩陣、交叉購買泡泡格、具體案例、per-suppressor、完整性檢查。"""
+    """七個 section：定義、per-item 彙總、壓制矩陣、壓制者視角、交叉購買、
+    具體案例、完整性檢查。"""
     sections = suppression.render(_result(), {})
-    assert len(sections) >= 4
+    assert len(sections) >= 6
     assert all(s.title.strip() for s in sections)
 
 
@@ -243,6 +246,66 @@ def test_scope_explains_lift_equal_one():
     joined = " ".join(suppression.SCOPE.blind_to)
     assert "lift = 1" in joined or "lift=1" in joined
     assert "近似獨立" in joined
+
+
+# ---- 使用者反饋（2026-07-21）：定義要清楚、per-item 全貌要先於矩陣 --------
+
+
+def test_glossary_defines_the_terms_the_reader_asked_about():
+    """使用者的具體抱怨：讀者無從知道 allocated_ap_gap／n_j／n_k／n_units
+    是什麼。定義表必須真的**定義**到這些字（不是只列個標題）——所以除了字
+    出現，還要求該列有一段夠長的定義文字。
+    """
+    sections = suppression.render(_result(), {})
+    section = _section(sections, _GLOSSARY_TITLE)
+    assert section.tables, "定義區沒有表格"
+    df = section.tables[0]
+    joined = df.to_string()
+    for term in ("allocated_ap_gap", "n_units", "n_j / n_k", "n_joint",
+                 "lift", "AP gap from suppressors", "P(k|j)"):
+        assert term in joined, f"定義表沒有列出 {term!r}"
+    # 每一列的定義欄都要有實質內容，不能是空的佔位
+    for _, row in df.iterrows():
+        assert len(str(row["定義"])) >= 15, f"{row['數字']!r} 的定義太短"
+
+
+def test_glossary_comes_first():
+    """定義表放最前面——下面每個數字才連得回來（使用者原話：直覺連結到
+    前面部分的某數字）。"""
+    titles = [s.title for s in suppression.render(_result(), {})]
+    assert _GLOSSARY_TITLE in titles[0], f"第一節不是定義表：{titles}"
+
+
+def test_per_item_summary_comes_before_the_matrix():
+    """使用者的具體抱怨：一開始就跳到矩陣，讀者不知道 per-item 基本狀況。
+    per-item 彙總表必須排在壓制矩陣之前。
+    """
+    titles = [s.title for s in suppression.render(_result(), {})]
+    i_summary = next(i for i, t in enumerate(titles) if _SUMMARY_TITLE in t)
+    i_matrix = next(i for i, t in enumerate(titles) if _MATRIX_TITLE in t)
+    assert i_summary < i_matrix, f"per-item 彙總沒有排在矩陣之前：{titles}"
+
+
+def test_per_item_summary_has_the_core_columns():
+    """codex 版一開場給的那幾個數字，這裡必須都有——這是使用者點名要的。"""
+    section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
+    assert section.tables, "per-item 彙總沒有表格"
+    cols = list(section.tables[0].columns)
+    for col in ("受害 item", "AP gap from suppressors", "unexplained AP gap",
+                "overall gap share", "suppressed pos / n_pos", "mean neg above",
+                "頭號壓制者"):
+        assert col in cols, f"per-item 表缺欄位 {col!r}"
+
+
+def test_matrix_formula_or_bullets_link_back_to_the_per_item_summary():
+    """使用者原話：矩陣的數字要嘛在公式那邊講清楚定義、要嘛讓讀者連得回
+    前面某個數字。這裡驗後者：矩陣區要提到它跟頭號壓制者/前一區的關係。
+    """
+    section = _section(suppression.render(_result(), {}), _MATRIX_TITLE)
+    text = section.formula + "\n" + "\n".join(section.bullets)
+    assert "頭號壓制者" in text or "第 2 區" in text or "allocated_ap_gap" in text, (
+        "矩陣區沒有把數字連回前面的 per-item 彙總"
+    )
 
 
 # ---- 本項專屬：兩張圖同軸序、雙量編碼、點數預算截斷 -------------------------

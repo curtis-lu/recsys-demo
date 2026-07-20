@@ -10,6 +10,7 @@ from recsys_tfb.report.fmt import (
     fmt_count,
     fmt_delta,
     fmt_logodds,
+    fmt_percent,
     fmt_ratio,
     fmt_weighted_count,
 )
@@ -18,7 +19,7 @@ from recsys_tfb.report.fmt import (
 _BAD_VALUES = [None, float("nan"), float("inf"), float("-inf"), "not-a-number", object()]
 _ALL_FMTS = [
     fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count,
-    fmt_weighted_count,
+    fmt_weighted_count, fmt_percent,
 ]
 
 
@@ -49,6 +50,18 @@ class TestFmtAuc:
         assert fmt_auc(0.5) == "0.500"
         assert fmt_auc(1) == "1.000"
         assert fmt_auc(0) == "0.000"
+
+
+class TestFmtPercent:
+    def test_proportion_becomes_percentage_one_decimal(self):
+        assert fmt_percent(0.208) == "20.8%"
+        assert fmt_percent(1) == "100.0%"
+        assert fmt_percent(0) == "0.0%"
+
+    def test_distinguishes_from_fmt_auc(self):
+        # 同一個底層量、不同呈現單位——這正是分開兩個函式的理由
+        assert fmt_auc(0.464) == "0.464"
+        assert fmt_percent(0.464) == "46.4%"
 
 
 class TestFmtAp:

@@ -4,24 +4,30 @@
 不 import pyspark、不讀檔、不做任何計算——出現在報表上的每個數字都必須已經
 在 JSON 裡。停用時回空 tuple；最後一節固定是「本次執行的完整性檢查」。
 
-**五節內容**：
-1. 壓制矩陣熱圖——``matrices["target_gap_share"]``，列＝受害 item、欄＝
-   壓制者 item。單向大小（∈[0,1]），不給 ``center``，走 ``sequential_scale``。
-2. 交叉購買 lift 泡泡格圖——``cross_purchase``，限制在與矩陣同一組
-   （截斷後的）軸序內，兩張圖才能同軸對照。大小＝``n_joint``，顏色＝
-   ``lift``（``center=1.0``，獨立時的期望值）。
-3. 具體案例表——``examples``，逐列列出 gap 最大的 (正例, 壓制者) 組合。
-4. per-suppressor 彙總條圖——``by_suppressor`` 的 ``overall_ap_gap_share``。
-5. 完整性檢查（固定殿後）。
+**版面原則（2026-07-21 依使用者反饋重排）**：使用者要的是「清楚的邏輯架構
+＋ 每個數字都有定義 ＋ 數字之間連得起來」，不是更多圖。所以改成**抽屜式
+下鑽**，先給定義、再給 per-item 全貌、再逐層拆細：
 
-⚠ **圖形點數預算**：矩陣／泡泡格圖都是 ``|axis_order|²``，item 一多就會撞
-``figures.MAX_FIGURE_POINTS``（2000）。這裡不像 ``item_ability`` 的長條圖那樣
-超量就整個退回表格——矩陣退回表格會變成 item 數平方那麼多列，沒人讀得下去，
-而且兩張圖並排對照正是這項診斷的價值所在，拿掉圖等於拿掉診斷。改成**截斷**：
-只畫分攤缺口最大的前 ``N = floor(sqrt(MAX_FIGURE_POINTS))`` 個 item（見
-:func:`_ranked_axis`），完整成對資料仍以表格／JSON 形式附在旁邊，不損失
-資訊，只損失「一眼掃過去」的範圍。``N`` 是由繪圖引擎硬上限推導出來的常數，
-不是可調參數，不進 config（見三條鐵則之二：不設門檻）。
+1. **數字定義表**——所有比率的分子／分母、所有量值的算法。放最前面當參照，
+   下面每一區的數字都指得回這裡（使用者原話：「讓讀者可以直覺連結到前面
+   部分的某數字」）。
+2. **per-item 彙總表**——每個受害 item 一列：AP、AP gap、被壓制造成多少、
+   還剩多少沒解釋、佔全部缺口多少、被壓率、上方負例平均數、名次、頭號壓制者。
+   這是主表，先用它看哪個 item 被壓最兇、該先查誰（對齊 codex 版的開場）。
+3. **壓制矩陣熱圖**——把第 2 區每個受害 item 的「被壓制造成的缺口」拆開，
+   看它是被哪些壓制者分走的。格 (row, col) ＝ 壓制者 col 分走 row 的佔比；
+   對得回第 2 區 row 那列的 top_suppressor。單向大小 ∈[0,1]，不給 center。
+4. **壓制者視角表**——反過來：每個壓制者 item 分走多少、影響誰。
+5. **交叉購買 lift**——獨立一區、清楚定義：這些 item 在真實資料上本來就多常
+   一起買（與模型排序無關的對照組）。表格為主，附一張同軸序泡泡圖供一眼對照。
+6. **具體案例表**——gap 最大的 (正例, 壓制者) 逐列，供核對。
+7. **完整性檢查**（固定殿後）。
+
+⚠ **圖形點數預算**：矩陣／泡泡圖都是 ``|axis_order|²``，item 一多就會撞
+``figures.MAX_FIGURE_POINTS``（2000）。表格不受此限（第 2/4/5 區的表都是逐列、
+線性），只有兩張圖要截：只畫分攤缺口最大的前 ``N = floor(sqrt(2000))`` 個
+item（見 :func:`_ranked_axis`），完整資料仍在表格裡，不損失資訊，只損失
+「一眼掃過去」的範圍。``N`` 由繪圖引擎硬上限反推，不是可調門檻，不進 config。
 """
 from __future__ import annotations
 
@@ -31,35 +37,163 @@ from typing import Any
 import pandas as pd
 
 from recsys_tfb.report import ReportSection
-from recsys_tfb.report.figures import (
-    MAX_FIGURE_POINTS, bar, bubble_grid, fits_budget, heatmap,
+from recsys_tfb.report.figures import MAX_FIGURE_POINTS, bubble_grid, heatmap
+from recsys_tfb.report.fmt import (
+    fmt_ap, fmt_auc, fmt_count, fmt_logodds, fmt_percent, fmt_ratio,
 )
-from recsys_tfb.report.fmt import fmt_ap, fmt_auc, fmt_count, fmt_logodds, fmt_ratio
 
-#: 單張圖（矩陣／泡泡格圖，皆為 |axis|² 個點）能承受的最大軸長。由繪圖引擎
-#: 的硬上限反推，不是可調的判斷門檻——見模組 docstring「圖形點數預算」。
+#: 單張圖（矩陣／泡泡圖，皆為 |axis|² 個點）能承受的最大軸長。由繪圖引擎的
+#: 硬上限反推，不是可調的判斷門檻——見模組 docstring「圖形點數預算」。
 _N_AXIS_MAX = math.isqrt(MAX_FIGURE_POINTS)
 
-_FORMULA_MATRIX = (
-    "target_gap_share(row, col) = pair_ledger[row, col] 的 allocated_ap_gap "
-    "÷ row 這個受害 item 的 allocated_ap_gap 總和"
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1. 數字定義表
+# ─────────────────────────────────────────────────────────────────────────
+
+#: (數字, 定義, 出現在哪一區)。分子／分母型的比率寫成「A ÷ B」；量值寫算法。
+#: 這張表是本頁所有數字的單一參照——下面各區的 formula 只寫最精簡的算式，
+#: 詳細語意一律回指這裡，避免同一個定義在頁面上出現好幾份、各自漂移。
+_GLOSSARY: tuple[tuple[str, str, str], ...] = (
+    ("AP",
+     "該 item 在它自己的正例列上的 average precision（0–1）。越高＝該 item "
+     "的正例越常被排在前面。",
+     "per-item 彙總"),
+    ("AP gap",
+     "1 − AP。離「正例全部排最前」還差多少。",
+     "per-item 彙總"),
+    ("allocated_ap_gap（分攤 AP 缺口）",
+     "把每個被壓制的正例列的 AP 缺口，依「排在它上方的各個負例各自造成多少"
+     "名次損失」的比例分給那些負例，跨列加總到 (受害 item, 壓制者 item) 組合"
+     "上。這是分帳慣例、不是因果——拿掉某壓制者不代表會賺回這麼多。",
+     "壓制矩陣 / 壓制者視角 / 案例"),
+    ("AP gap from suppressors",
+     "該 item 分到的 allocated_ap_gap 總量 ÷ 該 item 的正例列數（n_pos）。"
+     "與 AP gap 同尺度（都是每正例列），所以兩者可以相減。",
+     "per-item 彙總"),
+    ("unexplained AP gap",
+     "max(0, AP gap − AP gap from suppressors)。AP 缺口裡**不是**被同 query "
+     "負例壓制造成的部分（例：正例排在別的正例後面、或 k 截斷）。",
+     "per-item 彙總"),
+    ("overall gap share",
+     "該 item（或該壓制者）分到的 allocated_ap_gap ÷ 全部 item 的 "
+     "allocated_ap_gap 總和。單一 item 佔全體被壓制損失的比重。",
+     "per-item 彙總 / 壓制者視角"),
+    ("suppressed pos / n_pos",
+     "該 item 至少被一個負例壓過的正例列數 ÷ 該 item 全部正例列數。被壓制"
+     "有多普遍（跟嚴重程度是兩回事）。",
+     "per-item 彙總"),
+    ("mean neg above",
+     "該 item 的每個正例列上方，平均有幾個負例。",
+     "per-item 彙總"),
+    ("target gap share（矩陣格）",
+     "壓制者 col 分到的 allocated_ap_gap ÷ 受害 item row 的 allocated_ap_gap "
+     "總和。同一個 row 橫著加起來＝1。回答「row 的缺口主要是被誰分走的」。",
+     "壓制矩陣"),
+    ("mean logit margin",
+     "受影響列上，logit(壓制者分數) − logit(正例分數) 的平均。正值＝壓制者的"
+     "分數確實比正例高。這是分數強度的線索，不是名次優先序。",
+     "案例 / 壓制者視角"),
+    ("n_units",
+     "樣本內相異 query 單位數。一個 query 單位＝一組 (time, entity)。",
+     "交叉購買"),
+    ("n_j / n_k",
+     "item j／k 為正例（label=1）的 query 單位數。",
+     "交叉購買"),
+    ("n_joint",
+     "同一個 query 單位上 j 與 k **都**是正例的單位數。",
+     "交叉購買"),
+    ("P(k|j)",
+     "n_joint ÷ n_j。買了 j 的單位裡，有多少也買了 k。",
+     "交叉購買"),
+    ("lift",
+     "P(k|j) ÷ (n_k ÷ n_units)。買 j 的人買 k 的機率，相對於 k 的整體基礎率"
+     "的倍數。lift=1 ≈ 在這份樣本上兩者近似獨立。",
+     "交叉購買"),
 )
 
-_FORMULA_CROSS_PURCHASE = (
-    "p_k_given_j = n_joint ÷ n_j\n"
-    "lift = p_k_given_j ÷ (n_k ÷ n_units)"
-)
 
-_FORMULA_EXAMPLES = (
-    "row_ap_gap = max(0, 1 − 該正例列目前的 precision 貢獻)；"
-    "allocated_ap_gap 依比例分攤自 row_ap_gap"
-)
+def _glossary_section() -> ReportSection:
+    """1. 數字定義表——本頁所有數字的單一參照，放最前面。"""
+    table = pd.DataFrame(
+        list(_GLOSSARY), columns=["數字", "定義", "出現在"],
+    )
+    return ReportSection(
+        title="數字定義",
+        description=(
+            "本頁每個數字的定義。比率寫成「分子 ÷ 分母」，量值寫算法；"
+            "下面各區看到不懂的數字都回這裡查。"
+        ),
+        bullets=[
+            "分數一律是 logit(score_uncalibrated)——offset 活在模型輸出的 "
+            "log-odds 空間，校準層是後貼的。",
+            "「壓制」只在負例（label=0）排在同一個 query 的正例（label=1）之上"
+            "時才計入。",
+        ],
+        tables=[table],
+        table_titles=["數字 → 定義"],
+    )
 
-_FORMULA_BY_SUPPRESSOR = (
-    "overall_ap_gap_share = 該壓制者分攤到的 allocated_ap_gap ÷ "
-    "全部 pair_ledger 的 allocated_ap_gap 總和"
-)
 
+# ─────────────────────────────────────────────────────────────────────────
+# 2. per-item 彙總表
+# ─────────────────────────────────────────────────────────────────────────
+
+_TARGET_COLUMNS = [
+    "受害 item", "AP", "AP gap", "AP gap from suppressors",
+    "unexplained AP gap", "overall gap share", "n_pos",
+    "suppressed pos / n_pos", "mean neg above", "median pos rank",
+    "頭號壓制者",
+]
+
+
+def _target_summary_section(result: dict) -> ReportSection | None:
+    """2. per-item 彙總表——每個受害 item 一列，主表，先看哪個 item 該先查。"""
+    rows = result.get("target_summary") or []
+    if not rows:
+        return None
+
+    table = pd.DataFrame(
+        [
+            {
+                "受害 item": r.get("positive_item"),
+                "AP": fmt_ap(r.get("ap")),
+                "AP gap": fmt_ap(r.get("ap_gap")),
+                "AP gap from suppressors": fmt_ap(r.get("ap_gap_from_suppressors")),
+                "unexplained AP gap": fmt_ap(r.get("unexplained_ap_gap")),
+                "overall gap share": fmt_percent(r.get("overall_ap_gap_share")),
+                "n_pos": fmt_count(r.get("n_pos")),
+                "suppressed pos / n_pos": fmt_percent(r.get("suppressed_positive_rate")),
+                "mean neg above": fmt_ratio(r.get("mean_negatives_above_positive")),
+                "median pos rank": r.get("median_positive_rank_display"),
+                "頭號壓制者": r.get("top_suppressor"),
+            }
+            for r in rows
+        ],
+        columns=_TARGET_COLUMNS,
+    )
+    return ReportSection(
+        title="per-item 壓制彙總",
+        description=(
+            "每個受害 item 一列：被壓得多兇、多普遍、佔全體缺口多少、頭號"
+            "壓制者是誰。先用這張表決定要細看哪個 item。"
+        ),
+        formula="AP gap = 1 − AP；unexplained AP gap = AP gap − AP gap from suppressors",
+        bullets=[
+            "「AP gap from suppressors」是 AP gap 裡被同 query 負例壓制的部分，"
+            "「unexplained AP gap」是剩下的部分（定義見第 1 區）。",
+            "「頭號壓制者」就是第 3 區矩陣裡這一列 target gap share 最大的那一欄，"
+            "兩處可以互相印證。",
+            "依 overall gap share 由大到小排（compute 已排序，這裡不重排）。",
+        ],
+        tables=[table],
+        table_titles=["per-item 壓制彙總（依 overall gap share 降冪）"],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 3. 壓制矩陣熱圖
+# ─────────────────────────────────────────────────────────────────────────
 
 def _ranked_axis(result: dict) -> tuple[list[str], int, int]:
     """回傳 ``(顯示用軸序, 顯示個數, 全部個數)``。
@@ -67,7 +201,7 @@ def _ranked_axis(result: dict) -> tuple[list[str], int, int]:
     ``axis_order`` 本身已排序（見 ``_compute.py``）。超過 :data:`_N_AXIS_MAX`
     時，依該 item 在 ``target_summary`` 的 ``overall_ap_gap_share`` 由大到小
     只取前 ``_N_AXIS_MAX`` 個，取完再排序回字母序——截斷改變的是「畫哪些」，
-    不改變「畫出來的軸怎麼排」，這樣矩陣與泡泡格圖才能繼續同軸對照。
+    不改變「畫出來的軸怎麼排」，這樣矩陣與泡泡圖才能繼續同軸對照。
     """
     axis_order = [str(a) for a in (result.get("axis_order") or [])]
     n_all = len(axis_order)
@@ -83,34 +217,8 @@ def _ranked_axis(result: dict) -> tuple[list[str], int, int]:
     return shown, len(shown), n_all
 
 
-def _pair_ledger_table(result: dict) -> pd.DataFrame:
-    """完整（未截斷）的壓制帳本——矩陣截斷時附在旁邊，資料不因截斷而遺失。"""
-    rows = result.get("pair_ledger") or []
-    return pd.DataFrame(
-        [
-            {
-                "positive_item": r.get("positive_item"),
-                "suppressor_item": r.get("suppressor_item"),
-                "allocated_ap_gap": fmt_ap(r.get("allocated_ap_gap")),
-                "target_ap_gap_share": fmt_auc(r.get("target_ap_gap_share")),
-                "overall_ap_gap_share": fmt_auc(r.get("overall_ap_gap_share")),
-                "affected_positive_rows": fmt_count(r.get("affected_positive_rows")),
-                "affected_positive_rate": fmt_auc(r.get("affected_positive_rate")),
-                "mean_score_margin": fmt_logodds(r.get("mean_score_margin")),
-            }
-            for r in rows
-        ],
-        columns=[
-            "positive_item", "suppressor_item", "allocated_ap_gap",
-            "target_ap_gap_share", "overall_ap_gap_share",
-            "affected_positive_rows", "affected_positive_rate",
-            "mean_score_margin",
-        ],
-    )
-
-
 def _matrix_section(result: dict) -> ReportSection | None:
-    """1. 壓制矩陣熱圖——本項的第一張核心圖。"""
+    """3. 壓制矩陣熱圖——把第 2 區每列的缺口拆給各壓制者。"""
     shown, n_shown, n_all = _ranked_axis(result)
     if not shown:
         return None
@@ -123,94 +231,179 @@ def _matrix_section(result: dict) -> ReportSection | None:
     fig = heatmap(
         z=z, x=shown, y=shown,
         title="壓制矩陣：target_gap_share（列＝受害 item，欄＝壓制者 item）",
-        colorbar_title="target_ap_gap_share",
+        colorbar_title="target gap share",
     )
 
     bullets = [
-        "格子 (row, col) 的值＝壓制者 item（col）分攤走 row 這個受害 item 的"
-        "AP 缺口佔比。",
-        "顏色只編碼佔比大小（單向量，∈[0,1]），不是正負對照。",
+        "格 (row, col) ＝ 壓制者 col 分走了 row 這個受害 item 多少比例的缺口"
+        "（同一列橫著加＝1）。",
+        "這是把第 2 區「AP gap from suppressors」那一欄，按壓制者拆開——每列"
+        "顏色最深的那一欄，就是第 2 區的「頭號壓制者」。",
+        "顏色只編碼佔比大小（單向量 ∈[0,1]），不編碼好壞。",
     ]
-    tables: list[pd.DataFrame] = []
-    table_titles: list[str] = []
     if n_all > n_shown:
         bullets.append(
             f"item 共 {n_all} 個，超過單張圖的 {MAX_FIGURE_POINTS} 點上限"
             f"（矩陣是 item 數的平方），此圖只畫分攤缺口最大的 {n_shown} 個；"
-            "完整成對資料見下方壓制帳本表格。"
+            "完整成對資料見第 4 區的壓制者視角表與 JSON 產物。"
         )
-        tables.append(_pair_ledger_table(result))
-        table_titles.append("完整壓制帳本（pair_ledger）")
 
     return ReportSection(
         title="壓制矩陣熱圖",
-        description="列＝受害 item，欄＝壓制者 item；顏色深淺＝該壓制者分攤走的 AP 缺口佔比。",
-        formula=_FORMULA_MATRIX,
+        description="列＝受害 item，欄＝壓制者 item；顏色深淺＝該壓制者分走的缺口佔比。",
+        formula="target gap share(row, col) = allocated_ap_gap(row, col) ÷ row 的 allocated_ap_gap 總和",
         bullets=bullets,
         figures=[fig],
-        tables=tables,
-        table_titles=table_titles,
     )
 
 
-def _cross_purchase_section(result: dict) -> ReportSection | None:
-    """2. 交叉購買 lift 泡泡格圖——與矩陣同軸序，並排對照。"""
-    shown, n_shown, n_all = _ranked_axis(result)
-    if not shown:
-        return None
+# ─────────────────────────────────────────────────────────────────────────
+# 4. 壓制者視角表
+# ─────────────────────────────────────────────────────────────────────────
 
-    shown_set = set(shown)
+_BY_SUPPRESSOR_COLUMNS = [
+    "壓制者 item", "overall gap share", "影響幾個受害 item",
+    "影響幾列正例", "mean logit margin", "主要受害 item",
+]
+
+
+def _by_suppressor_section(result: dict) -> ReportSection | None:
+    """4. 壓制者視角表——反過來看：每個壓制者分走多少、影響誰。"""
     rows = [
-        r for r in (result.get("cross_purchase") or [])
-        if r.get("item_j") in shown_set and r.get("item_k") in shown_set
+        r for r in (result.get("by_suppressor") or [])
+        if r.get("overall_ap_gap_share") is not None
     ]
     if not rows:
         return None
 
-    x = [str(r["item_j"]) for r in rows]
-    y = [str(r["item_k"]) for r in rows]
-    size = [float(r.get("n_joint") or 0.0) for r in rows]
-    colour = [
-        float(r["lift"]) if r.get("lift") is not None else float("nan")
-        for r in rows
-    ]
-    hover = [
-        f"{r['item_j']} × {r['item_k']}"
-        f"<br>n_joint={fmt_count(r.get('n_joint'))}"
-        f"<br>n_j={fmt_count(r.get('n_j'))}　n_k={fmt_count(r.get('n_k'))}"
-        f"<br>p_k_given_j={fmt_auc(r.get('p_k_given_j'))}"
-        f"<br>lift={fmt_ratio(r.get('lift'))}"
-        for r in rows
-    ]
-    fig = bubble_grid(
-        x=x, y=y, size=size, colour=colour, hover_text=hover,
-        title="交叉購買 lift（同一 query 單位、label=1 的共現）",
-        colorbar_title="lift",
+    table = pd.DataFrame(
+        [
+            {
+                "壓制者 item": r.get("suppressor_item"),
+                "overall gap share": fmt_percent(r.get("overall_ap_gap_share")),
+                "影響幾個受害 item": fmt_count(r.get("affected_positive_items")),
+                "影響幾列正例": fmt_count(r.get("affected_positive_rows")),
+                "mean logit margin": fmt_logodds(r.get("mean_score_margin")),
+                "主要受害 item": r.get("top_positive_items"),
+            }
+            for r in rows
+        ],
+        columns=_BY_SUPPRESSOR_COLUMNS,
+    )
+    return ReportSection(
+        title="壓制者視角",
+        description="每個壓制者 item 一列：它總共分走多少缺口、壓了幾個 item、主要壓誰。",
+        formula="overall gap share = 該壓制者的 allocated_ap_gap ÷ 全部 allocated_ap_gap 總和",
+        bullets=[
+            "這是第 3 區矩陣「直著看」的版本：矩陣一欄加起來就是這裡的一列。",
+            "overall gap share 是全域排序用；「主要受害 item」只列前幾名供快速掃描，"
+            "完整分布看矩陣。",
+            "依 overall gap share 由大到小排。",
+        ],
+        tables=[table],
+        table_titles=["壓制者視角（依 overall gap share 降冪）"],
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5. 交叉購買 lift
+# ─────────────────────────────────────────────────────────────────────────
+
+_CROSS_COLUMNS = [
+    "item_j", "item_k", "n_joint", "n_j", "n_k", "P(k|j)", "lift",
+]
+
+
+def _cross_purchase_section(result: dict) -> ReportSection | None:
+    """5. 交叉購買 lift——獨立一區。表格為主，泡泡圖當一眼對照的 companion。"""
+    rows = result.get("cross_purchase") or []
+    if not rows:
+        return None
+
+    # 表格：全部 (j, k) 列，依 lift 由大到小（None 沉底）。表格不受點數預算限制。
+    def _lift_key(r: dict) -> float:
+        v = r.get("lift")
+        return float(v) if v is not None else float("-inf")
+
+    sorted_rows = sorted(rows, key=_lift_key, reverse=True)
+    table = pd.DataFrame(
+        [
+            {
+                "item_j": r.get("item_j"),
+                "item_k": r.get("item_k"),
+                "n_joint": fmt_count(r.get("n_joint")),
+                "n_j": fmt_count(r.get("n_j")),
+                "n_k": fmt_count(r.get("n_k")),
+                "P(k|j)": fmt_percent(r.get("p_k_given_j")),
+                "lift": fmt_ratio(r.get("lift")),
+            }
+            for r in sorted_rows
+        ],
+        columns=_CROSS_COLUMNS,
+    )
+
+    figures: list[Any] = []
     bullets = [
-        "大小＝n_joint（同買的 query 單位數），顏色＝lift；大小大不代表顏色深"
-        "，兩者是不同的量。",
-        "hover 附 n_joint／n_j／n_k／p_k_given_j／lift 五個數，供逐格核對。",
+        "這一區與模型排序無關——算的是同一批 query 單位上、實際 label=1 的"
+        "共現。用它跟第 3 區對照：一對 item 在這裡 lift 高（本來就常一起買）、"
+        "在壓制矩陣裡又互壓，是兩種不同的情況，判斷留給你。",
+        "lift 而非裸 P(k|j)：熱門 item 對任何 j 的 P(k|j) 都高，只看條件機率會"
+        "退化成「熱門那幾列整片高」。lift 把 k 的基礎率除掉了（定義見第 1 區）。",
+        "依 lift 由大到小排。",
     ]
-    if n_all > n_shown:
+
+    # companion 泡泡圖：只在 item 數不超過點數預算時附上，供一眼掃形狀。
+    shown, n_shown, n_all = _ranked_axis(result)
+    shown_set = set(shown)
+    grid_rows = [
+        r for r in rows
+        if r.get("item_j") in shown_set and r.get("item_k") in shown_set
+    ]
+    if grid_rows:
+        x = [str(r["item_j"]) for r in grid_rows]
+        y = [str(r["item_k"]) for r in grid_rows]
+        size = [float(r.get("n_joint") or 0.0) for r in grid_rows]
+        colour = [
+            float(r["lift"]) if r.get("lift") is not None else float("nan")
+            for r in grid_rows
+        ]
+        hover = [
+            f"{r['item_j']} × {r['item_k']}"
+            f"<br>n_joint={fmt_count(r.get('n_joint'))}"
+            f"<br>n_j={fmt_count(r.get('n_j'))}　n_k={fmt_count(r.get('n_k'))}"
+            f"<br>P(k|j)={fmt_percent(r.get('p_k_given_j'))}"
+            f"<br>lift={fmt_ratio(r.get('lift'))}"
+            for r in grid_rows
+        ]
+        figures.append(bubble_grid(
+            x=x, y=y, size=size, colour=colour, hover_text=hover,
+            title="交叉購買 lift（泡泡：大小＝n_joint、顏色＝lift；與壓制矩陣同軸序）",
+            colorbar_title="lift",
+        ))
         bullets.append(
-            f"item 共 {n_all} 個，超過單張圖的 {MAX_FIGURE_POINTS} 點上限"
-            f"（矩陣是 item 數的平方），此圖只畫分攤缺口最大的 {n_shown} 個；"
-            "完整成對資料見 JSON 產物的 cross_purchase。"
+            "下方泡泡圖與第 3 區壓制矩陣同一組軸序，供一眼並排對照；大小＝"
+            "n_joint、顏色＝lift 是兩個不同的量。"
         )
+        if n_all > n_shown:
+            bullets.append(
+                f"泡泡圖只畫分攤缺口最大的 {n_shown} 個 item（點數上限），"
+                "上方表格是完整的。"
+            )
 
     return ReportSection(
-        title="交叉購買 lift 泡泡格圖",
-        description=(
-            "左圖是模型的排序行為，右圖是這批 entity 的實際標籤共現；"
-            "兩張圖的橫縱軸是同一組 item、同一個順序。"
-        ),
-        formula=_FORMULA_CROSS_PURCHASE,
+        title="交叉購買 lift",
+        description="這些 item 在真實資料上本來就多常一起買——與模型排序無關的對照組。",
+        formula="P(k|j) = n_joint ÷ n_j；lift = P(k|j) ÷ (n_k ÷ n_units)",
         bullets=bullets,
-        figures=[fig],
+        figures=figures,
+        tables=[table],
+        table_titles=["交叉購買 lift（依 lift 降冪）"],
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# 6. 具體案例表
+# ─────────────────────────────────────────────────────────────────────────
 
 _EXAMPLE_COLUMNS = [
     "query", "positive_item", "suppressor_item",
@@ -221,7 +414,7 @@ _EXAMPLE_COLUMNS = [
 
 
 def _examples_section(result: dict) -> ReportSection | None:
-    """3. 具體案例表——gap 最大的 (正例, 壓制者) 組合，逐案核對用。"""
+    """6. 具體案例表——gap 最大的 (正例, 壓制者) 組合，逐案核對用。"""
     examples = result.get("examples") or []
     if not examples:
         return None
@@ -244,86 +437,29 @@ def _examples_section(result: dict) -> ReportSection | None:
         columns=_EXAMPLE_COLUMNS,
     )
     bullets = [
-        "依 gap 由大到小排序（compute 已排序，這裡不重排）。",
+        "依 allocated_ap_gap 由大到小排序（compute 已排序，這裡不重排）。",
         "score_margin ＝ 壓制者 logit − 正例 logit；正值代表壓制者分數確實較高。",
+        "逐列核對用，不做聚合證據——聚合看第 2–4 區。",
     ]
 
     return ReportSection(
         title="具體案例：被壓制的正例列",
-        description="gap 最大的具體 (正例, 壓制者) 案例，逐列列出供核對，不做聚合證據用。",
-        formula=_FORMULA_EXAMPLES,
+        description="gap 最大的具體 (正例, 壓制者) 案例，逐列列出供核對。",
+        formula="score_margin = logit(壓制者分數) − logit(正例分數)",
         bullets=bullets,
         tables=[table],
         # 表格標題不重複 section 標題的「具體案例」四個字——兩者在頁面上
-        # 是連著的兩行，重複會讀成結巴。這裡只補 section 標題沒說的資訊
-        # （排序依據）。
+        # 是連著的兩行，重複會讀成結巴。這裡只補 section 標題沒說的資訊。
         table_titles=["依分攤到的 AP 缺口降冪排序"],
     )
 
 
-def _by_suppressor_section(result: dict) -> ReportSection | None:
-    """4. per-suppressor 彙總條圖——每個壓制者分攤走多少比例的 AP 缺口。"""
-    rows = [
-        r for r in (result.get("by_suppressor") or [])
-        if r.get("overall_ap_gap_share") is not None
-    ]
-    if not rows:
-        return None
-
-    items = [str(r["suppressor_item"]) for r in rows]
-    shares = [float(r["overall_ap_gap_share"]) for r in rows]
-
-    figures: list[Any] = []
-    tables: list[pd.DataFrame] = []
-    table_titles: list[str] = []
-    bullets = [
-        "依壓制者 item 彙總：這個負例 item 總共分攤走多少比例的全部 AP 缺口。",
-    ]
-
-    if fits_budget(len(rows)):
-        figures.append(bar(
-            x=items, y=shares,
-            title="per-suppressor 彙總：overall_ap_gap_share",
-            x_title="suppressor_item", y_title="overall_ap_gap_share",
-        ))
-    else:
-        tables.append(pd.DataFrame(
-            [
-                {
-                    "suppressor_item": r["suppressor_item"],
-                    "overall_ap_gap_share": fmt_auc(r.get("overall_ap_gap_share")),
-                    "affected_positive_items": fmt_count(r.get("affected_positive_items")),
-                    "affected_positive_rows": fmt_count(r.get("affected_positive_rows")),
-                    "mean_score_margin": fmt_logodds(r.get("mean_score_margin")),
-                    "top_positive_items": r.get("top_positive_items"),
-                }
-                for r in rows
-            ],
-            columns=[
-                "suppressor_item", "overall_ap_gap_share",
-                "affected_positive_items", "affected_positive_rows",
-                "mean_score_margin", "top_positive_items",
-            ],
-        ))
-        table_titles.append("per-suppressor 彙總（依 overall_ap_gap_share）")
-        bullets.append(
-            f"item 共 {len(rows)} 個，超過單張圖的 {MAX_FIGURE_POINTS} 點上限，"
-            "改以表格呈現。"
-        )
-
-    return ReportSection(
-        title="per-suppressor 彙總",
-        description="每個壓制者 item 一根長條：它總共分攤走多少比例的全部 AP 缺口。",
-        formula=_FORMULA_BY_SUPPRESSOR,
-        bullets=bullets,
-        figures=figures,
-        tables=tables,
-        table_titles=table_titles,
-    )
-
+# ─────────────────────────────────────────────────────────────────────────
+# 7. 完整性檢查
+# ─────────────────────────────────────────────────────────────────────────
 
 def _completeness_section(result: dict) -> ReportSection:
-    """5. 本次執行的完整性檢查——固定殿後，空的時候也照樣印「無」。"""
+    """7. 本次執行的完整性檢查——固定殿後，空的時候也照樣印「無」。"""
     notes = result.get("notes") or []
     axis_order = result.get("axis_order") or []
     cross_purchase = result.get("cross_purchase") or []
@@ -331,7 +467,7 @@ def _completeness_section(result: dict) -> ReportSection:
     bullets = [
         "計算層 notes（含 logit 轉換的觀測）："
         + (f"{len(notes)} 則，列於下方" if notes else "無"),
-        "axis_order 涵蓋的 item 數（出現在壓制成對表裡，才會進兩張圖）："
+        "axis_order 涵蓋的 item 數（出現在壓制成對表裡，才會進矩陣與泡泡圖）："
         + fmt_count(len(axis_order)),
         "cross_purchase 列數（限制在 axis_order 內、n_units="
         + fmt_count(result.get("n_units")) + "）："
@@ -356,18 +492,20 @@ def _completeness_section(result: dict) -> ReportSection:
 def render(result: dict, parameters: dict) -> tuple[ReportSection, ...]:
     """把 ``compute`` 的輸出轉成一串報表章節；停用時回空 tuple。
 
-    順序即閱讀順序：先看壓制矩陣（模型排序行為），再看交叉購買（實際標籤
-    共現，與矩陣同軸並排），然後是具體案例與 per-suppressor 彙總，完整性
-    檢查永遠在最後。
+    順序即閱讀順序（抽屜式下鑽，見模組 docstring）：定義 → per-item 全貌 →
+    壓制矩陣（拆細）→ 壓制者視角（反看）→ 交叉購買（對照組）→ 具體案例 →
+    完整性檢查。定義表永遠在最前、完整性檢查永遠在最後。
     """
     if not result.get("enabled"):
         return ()
 
     sections = [
+        _glossary_section(),
+        _target_summary_section(result),
         _matrix_section(result),
+        _by_suppressor_section(result),
         _cross_purchase_section(result),
         _examples_section(result),
-        _by_suppressor_section(result),
         _completeness_section(result),
     ]
     return tuple(s for s in sections if s is not None)
