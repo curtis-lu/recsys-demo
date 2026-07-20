@@ -82,8 +82,10 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.diagnosis.metric._common import diag_cfg, metric_params, to_logit
-from recsys_tfb.diagnosis.metric.uncertainty import paired_bootstrap_delta
+from recsys_tfb.diagnosis.metric._common import (
+    ci_for_corrected_minus_baseline, diag_cfg, metric_params, query_key,
+    sample_arrays, to_logit,
+)
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
 
 logger = logging.getLogger(__name__)
@@ -418,14 +420,6 @@ def _validate(pdf: pd.DataFrame, parameters: dict, schema: dict) -> list[str]:
     return context_cols
 
 
-def _query_key(pdf: pd.DataFrame, query_cols: list[str]) -> pd.Series:
-    parts = [pdf[c].astype(str) for c in query_cols]
-    out = parts[0]
-    for p in parts[1:]:
-        out = out.str.cat(p, sep="|")
-    return out
-
-
 def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> dict:
     """回傳 JSON-safe dict（會直接被 JSONDataset 寫檔）。
 
@@ -479,10 +473,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     context_cols = _validate(sample_pdf, parameters, schema)
     out["context_columns"] = context_cols
 
-    query_cols = [schema["time"], *schema["entity"]]
     entity_cols = schema["entity"]
     item_col = schema["item"]
-    label_col = schema["label"]
 
     # 空樣本必須在 build_offset_frame **之前**擋掉：offset 矩陣是從觀測到的
     # (context, item) 組合枚舉的，空資料 → 零個組合 → offset_df 是一個「連欄位
@@ -541,10 +533,11 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             "offset_matrix、offset_spread 與 per_item 之中。"
         )
 
-    groups = pd.factorize(_query_key(sample_pdf, query_cols))[0]
-    clusters = _query_key(sample_pdf, entity_cols)
-    items = sample_pdf[item_col].astype(str).to_numpy()
-    y = sample_pdf[label_col].to_numpy(dtype=np.int64)
+    groups, items, y, ht_weights, row_weights = sample_arrays(sample_pdf, schema)
+    # config_shift 要未 factorize 的字串 key（下面用 .nunique()，且
+    # paired_bootstrap_delta 會自己 factorize）——這是 sample_arrays 刻意不
+    # 把 clusters 一起回傳的原因，見該函式 docstring。
+    clusters = query_key(sample_pdf, entity_cols)
     z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
     out["notes"].extend(logit_notes)
     if logit_notes:
@@ -561,24 +554,37 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
     # 逐 query 的實際 offset 範圍。這一面對 entity 級與 item 級 context 都成立
     # （見模組 docstring「兩個 spread」）。只給分位數，不設門檻、不給布林。
-    ht_weights = (
-        sample_pdf["inclusion_weight"].to_numpy(dtype=np.float64)
-        if "inclusion_weight" in sample_pdf.columns
-        else None
-    )
+    # ht_weights／row_weights 已由 sample_arrays 取好（同一組權重要餵給所有
+    # 估計量：分位數、baseline／corrected、CI、n_pos_effective）；row_weights
+    # 是「缺 inclusion_weight 欄時填 1」的版本，這裡不用再自己算一次 fallback。
     q_frame = pd.DataFrame({
         "g": groups,
         "off": offs,
-        "w": (ht_weights if ht_weights is not None
-              else np.ones(len(sample_pdf), dtype=np.float64)),
+        "w": row_weights,
         "item": items,
     })
     q_agg = q_frame.groupby("g").agg(
         spread=("off", lambda s: float(s.max() - s.min())),
         # 權重是 query 級屬性（同一 query 的每一列同值），取 max 只是挑出來。
+        # 這個假設對 draw_diagnosis_sample 的產出成立（權重由 stratum 決定、
+        # stratum 是 query 級屬性），但沒有測試釘住——上游若讓同一 query 的列
+        # 帶不同權重，.max() 會靜默選一個。weight_nunique 讓下面能先驗證再用。
         weight=("w", "max"),
+        weight_nunique=("w", lambda s: int(s.nunique(dropna=False))),
         n_items=("item", "nunique"),
     )
+    # 非常數時**不 raise**（診斷不該因為上游變動就讓整條 pipeline 死掉）：
+    # 照舊取 max，但把違反假設的 query 數記進 notes，讀者才看得見「這個代表
+    # 值可能不是預期權重」，而不是靜默沿用一個可能錯的數字。
+    n_weight_varying = int((q_agg["weight_nunique"] > 1).sum())
+    if n_weight_varying > 0:
+        out["notes"].append(
+            f"inclusion_weight 在 {n_weight_varying} 個 query 內非常數——"
+            "query_offset_spread 假設它是 query 級屬性（同一 query 每列同值），"
+            "此時逐 query 只能取 max 當代表值，可能不是預期權重。"
+            "draw_diagnosis_sample 的權重由 stratum 決定、stratum 是 query 級"
+            "屬性，此假設理應恆成立；出現非常數代表上游抽樣邏輯已改變。"
+        )
     q_spread = q_agg["spread"].to_numpy(dtype=np.float64)
     q_weight = q_agg["weight"].to_numpy(dtype=np.float64)
     out["query_offset_spread"] = {
@@ -666,9 +672,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             "'3.0'）、或 key 有錯字。零命中的 key 對 offset 沒有任何作用。"
         )
 
-    # ht_weights 在 query_offset_spread 之前就取好了（同一組權重要餵給所有
-    # 估計量：分位數、baseline／corrected、CI、n_pos_effective）。缺欄
-    # （未分層抽樣）時 ht_weights is None，走 weights=None 的原始未加權路徑。
+    # ht_weights 由 sample_arrays 取好，同一組權重餵給所有估計量：分位數、
+    # baseline／corrected、CI、n_pos_effective。缺欄（未分層抽樣）時
+    # ht_weights is None，走 weights=None 的原始未加權路徑。
     # 以下三個區塊是本模組的全部耗時來源：兩次全樣本 mAP、一次配對重抽、
     # 每個 item 一次全樣本 mAP。公司規模（≈25 萬 query × 22 item ≈ 5.5M 列）
     # 下這段會安靜跑很久，看起來像卡住——所以逐段 log_step，per-item 那圈
@@ -695,27 +701,22 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         for col in ("stratum", "inclusion_weight"):
             if col in sample_pdf.columns:
                 frame[col] = sample_pdf[col].to_numpy()
-        # paired_bootstrap_delta 回的是 mAP(F) − mAP(F − shift) ＝ baseline −
-        # corrected，與本模組的 Δ ＝ corrected − baseline 反號。取負後上下界
-        # 對調，才是 Δ 自己的 [2.5%, 97.5%]。
+        # 本模組的 Δ ＝ corrected − baseline；ci_for_corrected_minus_baseline
+        # 把「paired_bootstrap_delta 回的是反向差、取負後上下界要對調」這步
+        # 收在 _common.py 一處，理由見該函式 docstring。
         with log_step(
             logger,
             f"config_shift.paired_bootstrap（{ci_info['n_boot']} 次重抽）",
         ):
-            lo, hi = paired_bootstrap_delta(
+            out["delta_ci_low"], out["delta_ci_high"] = ci_for_corrected_minus_baseline(
                 frame, mp, offs,
                 n_boot=ci_info["n_boot"], seed=ci_info["seed"],
             )
-        out["delta_ci_low"] = float(-hi)
-        out["delta_ci_high"] = float(-lo)
 
     # 逐項替換：一次只扣掉一個 item 的 offset。Σ Δ_j ≠ Δ（名次耦合），這句話由
     # Task 2.3 的 SCOPE 擁有並顯示，不在計算層再存一份。
     pos_mask = y == 1
-    w_pos_rows = (
-        ht_weights if ht_weights is not None
-        else np.ones(len(sample_pdf), dtype=np.float64)
-    )
+    w_pos_rows = row_weights
     per_item: list[dict[str, Any]] = []
     unique_items = sorted(set(items.tolist()))
     n_items_total = len(unique_items)

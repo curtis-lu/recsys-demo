@@ -73,7 +73,9 @@ import pandas as pd
 
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.diagnosis.metric._common import diag_cfg, metric_params, to_logit
+from recsys_tfb.diagnosis.metric._common import (
+    diag_cfg, metric_params, query_key, sample_arrays, to_logit,
+)
 from recsys_tfb.diagnosis.metric.uncertainty import iter_stratified_cluster_multipliers
 from recsys_tfb.evaluation.metrics import macro_from_per_item, positive_row_contributions
 
@@ -130,15 +132,6 @@ FIELD_NOTES: dict[str, str] = {
         "權，與 ap 同一計算路徑）。"
     ),
 }
-
-
-def _join_key(pdf: pd.DataFrame, cols: list[str]) -> pd.Series:
-    """把多欄拼成一條字串 key（``"|"`` 分隔），供 query／cluster 分組用。"""
-    parts = [pdf[c].astype(str) for c in cols]
-    out = parts[0]
-    for p in parts[1:]:
-        out = out.str.cat(p, sep="|")
-    return out
 
 
 def query_center_scores(groups: np.ndarray, z: np.ndarray) -> np.ndarray:
@@ -340,24 +333,19 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         out["notes"].append("診斷抽樣為空——per-item AUC 均未計算。")
         return out
 
-    query_cols = [schema["time"], *schema["entity"]]
     entity_cols = schema["entity"]
-    item_col = schema["item"]
-    label_col = schema["label"]
 
-    groups = pd.factorize(_join_key(sample_pdf, query_cols))[0]
-    clusters = pd.factorize(_join_key(sample_pdf, entity_cols))[0]
-    items = sample_pdf[item_col].astype(str).to_numpy()
-    y = sample_pdf[label_col].to_numpy(dtype=np.int64)
+    groups, items, y, _, ht_weight = sample_arrays(sample_pdf, schema)
+    # item_ability 只需要「缺席時填 1」的權重（見 sample_arrays docstring 的
+    # ht_weights／row_weights 區分），丟掉可為 None 的 ht_weights 那一個。
+    # clusters 這裡要**已經 factorize** 過的連續 int 陣列（下面
+    # iter_stratified_cluster_multipliers 拿它直接當索引），sample_arrays
+    # 刻意不回傳 clusters（config_shift 要的是另一種型別），故自己現組。
+    clusters = pd.factorize(query_key(sample_pdf, entity_cols))[0]
     n_entities = int(clusters.max()) + 1
 
-    # ht_weight／strata 同一套來源，與 config_shift／uncertainty 一致：缺欄
-    # （未分層抽樣）時退回全 1 權重、單一層 "__all__"。
-    ht_weight = (
-        sample_pdf["inclusion_weight"].to_numpy(dtype=np.float64)
-        if "inclusion_weight" in sample_pdf.columns
-        else np.ones(len(sample_pdf), dtype=np.float64)
-    )
+    # strata 同一套來源，與 config_shift／uncertainty 一致：缺欄（未分層抽樣）
+    # 時退回單一層 "__all__"。
     strata = (
         sample_pdf["stratum"].astype(str).to_numpy()
         if "stratum" in sample_pdf.columns
