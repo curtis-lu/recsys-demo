@@ -74,10 +74,9 @@ import pandas as pd
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
-    diag_cfg, metric_params, query_key, sample_arrays, to_logit,
+    diag_cfg, metric_params, per_item_ap, query_key, sample_arrays, to_logit,
 )
 from recsys_tfb.diagnosis.metric.uncertainty import iter_stratified_cluster_multipliers
-from recsys_tfb.evaluation.metrics import macro_from_per_item, positive_row_contributions
 
 logger = logging.getLogger(__name__)
 
@@ -159,39 +158,6 @@ def rank_percentiles(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
         n = e - s
         out[idx] = np.arange(1, n + 1, dtype=np.float64) / float(n)
     return out
-
-
-def per_item_ap(
-    groups: np.ndarray,
-    items: np.ndarray,
-    y: np.ndarray,
-    score: np.ndarray,
-    mp: dict,
-) -> tuple[dict[str, float], dict[str, int], float]:
-    """每個 item 的 AP（未加權）＋ macro。與
-    ``suppression_ledger_diagnosis.py`` 的同名函式逐位元組相同——Plan 3 才
-    抽到 ``_common.py`` 共用，本 Phase 先各自放一份。
-    """
-    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
-    if len(contrib) == 0:
-        return {}, {}, 0.0
-    pos_items = items[row_idx].astype(str)
-    uniq, inv = np.unique(pos_items, return_inverse=True)
-    sums = np.bincount(inv, weights=contrib)
-    counts = np.bincount(inv)
-    vals = sums / counts
-    macro = macro_from_per_item(
-        vals,
-        counts,
-        weight_alpha=mp["weight_alpha"],
-        min_positives=mp["min_positives"],
-        shrinkage_k=mp["shrinkage_k"],
-    )
-    return (
-        {str(item): float(v) for item, v in zip(uniq, vals)},
-        {str(item): int(n) for item, n in zip(uniq, counts)},
-        0.0 if macro is None else float(macro),
-    )
 
 
 def presort_by_score(score: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

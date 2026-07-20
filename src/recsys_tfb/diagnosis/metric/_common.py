@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.diagnosis.metric.uncertainty import paired_bootstrap_delta
+from recsys_tfb.evaluation.metrics import macro_from_per_item, positive_row_contributions
 
 _CLIP_EPS = 1e-12
 _HASH_BUCKETS = 100_000
@@ -162,3 +163,38 @@ def ci_for_corrected_minus_baseline(
         frame, metric_kwargs, shift, n_boot=n_boot, seed=seed,
     )
     return -hi, -lo
+
+
+def per_item_ap(
+    groups: np.ndarray,
+    items: np.ndarray,
+    y: np.ndarray,
+    score: np.ndarray,
+    mp: dict,
+) -> tuple[dict[str, float], dict[str, int], float]:
+    """每個 item 的 AP（未加權）＋ macro。原本在 ``item_ability/_compute.py``
+    與 ``scripts/item_ability_diagnosis.py``／``scripts/suppression_ledger_
+    diagnosis.py`` 各自維護一份逐位元組相同的副本，``suppression`` 是第四個
+    消費者，門檻到了（見本檔案模組 docstring：兩個以上實例逐字相同才抽），
+    Task 5.1 把它搬到這裡共用。
+    """
+    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+    if len(contrib) == 0:
+        return {}, {}, 0.0
+    pos_items = items[row_idx].astype(str)
+    uniq, inv = np.unique(pos_items, return_inverse=True)
+    sums = np.bincount(inv, weights=contrib)
+    counts = np.bincount(inv)
+    vals = sums / counts
+    macro = macro_from_per_item(
+        vals,
+        counts,
+        weight_alpha=mp["weight_alpha"],
+        min_positives=mp["min_positives"],
+        shrinkage_k=mp["shrinkage_k"],
+    )
+    return (
+        {str(item): float(v) for item, v in zip(uniq, vals)},
+        {str(item): int(n) for item, n in zip(uniq, counts)},
+        0.0 if macro is None else float(macro),
+    )
