@@ -230,6 +230,34 @@ class TestFormulaAndBullets:
         assert "katex" not in html.lower()
 
 
+def test_collapsible_section_renders_details(tmp_path):
+    """``ReportSection.collapsible`` 原本只有 ``evaluation/report.py`` 實作，
+    ``report/pages.py`` 完全忽略它——設了會被靜默丟掉。這條守住兩邊都要渲染。
+    """
+    collapsible_section = ReportSection(title="Collapsible S", description="d",
+                                         collapsible=True)
+    regular_section = ReportSection(title="Regular S", description="d",
+                                     collapsible=False)
+    pages = [_page("01-a", "Page A",
+                    sections=(collapsible_section, regular_section))]
+    write_pages(pages, tmp_path, index_title="Idx", index_intro="")
+    html = (tmp_path / "01-a.html").read_text()
+
+    assert '<details class="section">' in html
+    assert "<summary>Collapsible S</summary>" in html
+    assert "<h2>Collapsible S</h2>" not in html
+
+    assert '<div class="section">' in html
+    assert "<h2>Regular S</h2>" in html
+
+    # **開閉標籤必須守恆**：只驗開標籤的話，把收尾寫成 `</div>` 也全綠——而未
+    # 閉合的 <details> 不會被游離的 </div> 隱式關掉，瀏覽器會把**後續所有
+    # section 當成它的子節點**吞進收合區。config_shift 頁的尺是第 2 節且預設
+    # 收合，那一改會讓第 3–7 節整片消失，而測試不會有任何反應。
+    assert html.count("<details") == html.count("</details>") == 1
+    assert html.count('<div class="section">') == html.count("</div>")
+
+
 def test_range_index_is_not_rendered_as_a_data_column():
     """自動流水號 0 1 2 3 在報表上是雜訊——第一份真實產出就把統計量表印成
     ``0 mean +0.445``，讀者得先判斷第一欄是不是資料。"""

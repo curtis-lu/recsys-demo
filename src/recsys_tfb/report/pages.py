@@ -71,6 +71,7 @@ tr:nth-child(even) { background: #fafafa; }
 }
 .section-bullets { margin: 12px 0 16px; padding-left: 22px; line-height: 1.7; }
 .section-bullets li { margin: 4px 0; color: #444; }
+details > summary { font-size: 1.5em; color: #555; cursor: pointer; margin: 24px 0 8px; }
 """
 
 
@@ -176,8 +177,12 @@ def _render_page_html(page: Page) -> str:
         parts.append(_render_scope_note(page.scope))
 
     for section in page.sections:
-        parts.append('<div class="section">')
-        parts.append(f"<h2>{_escape(section.title)}</h2>")
+        if section.collapsible:
+            parts.append('<details class="section">')
+            parts.append(f"<summary>{_escape(section.title)}</summary>")
+        else:
+            parts.append('<div class="section">')
+            parts.append(f"<h2>{_escape(section.title)}</h2>")
         parts.append(f'<p class="description">{_escape(section.description)}</p>')
         parts.extend(_render_section_extras(section))
 
@@ -189,7 +194,7 @@ def _render_page_html(page: Page) -> str:
                 parts.append(f"<h3>{_escape(section.table_titles[i])}</h3>")
             parts.append(_render_table(table))
 
-        parts.append("</div>")
+        parts.append("</details>" if section.collapsible else "</div>")
 
     parts.append("</body></html>")
     return "\n".join(parts)

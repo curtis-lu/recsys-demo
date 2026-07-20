@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 
+import pandas as pd
 import plotly.graph_objects as go
 
 from recsys_tfb.diagnosis.metric import config_shift, contract
@@ -443,6 +444,183 @@ def test_tables_and_titles_stay_aligned():
     for result in (_result(), _over_budget_result()):
         for section in config_shift.render(result, {}):
             assert len(section.tables) == len(section.table_titles)
+
+
+# ---- offset 的尺（log-odds → 倍率換算表） -------------------------------
+
+
+_SCALE_TITLE = "offset 的尺：log-odds 換算成倍率"
+
+
+def _scale_section(result: dict | None = None):
+    sections = config_shift.render(result if result is not None else _result(), {})
+    return next((s for s in sections if s.title == _SCALE_TITLE), None)
+
+
+def _scale_row(table, offset_label: str):
+    """依 ``offset`` 欄取一列。
+
+    ``offset`` 刻意是普通欄位而不是 index（具名 index 會讓 pandas 產生兩列
+    表頭），所以查表走欄位比對而不是 ``.loc``。
+    """
+    matches = table[table["offset"] == offset_label]
+    assert len(matches) == 1, f"{offset_label} 應恰好對到一列，實際 {len(matches)}"
+    return matches.iloc[0]
+
+
+def test_scale_section_is_second():
+    """插入點是 index 1（緊接 offset 矩陣之後），其餘六節順序不變。"""
+    sections = config_shift.render(_result(), {})
+    assert len(sections) == 7
+    assert sections[1].title == _SCALE_TITLE
+
+    other_titles = [s.title for s in sections if s.title != _SCALE_TITLE]
+    assert other_titles == [
+        "offset 矩陣（context 群 × item）",
+        "群內 offset 範圍",
+        "逐 query 的 offset 範圍",
+        "扣掉 offset 之後的 mAP 變化",
+        "逐 item 的替換實驗",
+        "本次執行的完整性檢查",
+    ]
+
+
+def test_scale_table_exact_values():
+    """逐格核對 4 列（``-10``／``-1``／``+1``／``+10``）的完整內容。
+
+    期望值由 ``勝算倍率 = exp(offset)``、``p_after = sigmoid(logit(base) +
+    offset)`` 離線算過，見任務規格；這裡只驗證程式輸出與算過的值逐格相等。
+    """
+    section = _scale_section()
+    table = section.tables[0]
+    columns = ["勝算倍率", "從 0.1%", "從 1%", "從 10%", "從 50%"]
+
+    expected = {
+        "-10": ("÷22,026", "0.00000454%（÷22,004）", "0.0000459%（÷21,806）",
+                "0.000504%（÷19,824）", "0.00454%（÷11,014）"),
+        "-1": ("÷2.72", "0.0368%（÷2.72）", "0.370%（÷2.70）",
+               "3.93%（÷2.55）", "26.9%（÷1.86）"),
+        "+1": ("×2.72", "0.271%（×2.71）", "2.67%（×2.67）",
+               "23.2%（×2.32）", "73.1%（×1.46）"),
+        "+10": ("×22,026", "95.7%（×957）", "99.6%（×99.6）",
+                "100%（×10.00）", "100%（×2.00）"),
+    }
+    for label, values in expected.items():
+        row = _scale_row(table, label)
+        assert tuple(row[col] for col in columns) == values, label
+
+    # offset 必須是普通欄位而非 index：set_index 會讓 pandas 產生兩列表頭，
+    # 第二列是「offset ＋ 五個空格」，本頁其他表格都不長那樣。
+    assert list(table.columns)[0] == "offset"
+    assert isinstance(table.index, pd.RangeIndex)
+
+
+def test_probability_columns_differ_across_base_rates():
+    """關鍵結構性測試：機率倍率隨起點而變，勝算倍率不變。
+
+    若把機率誤實作成 ``p_after = p * exp(offset)``（少了 sigmoid/logit 往返），
+    四個機率欄的倍率會全部退化成勝算倍率、彼此相同——這條測試點名這個失效模式。
+    """
+    section = _scale_section()
+    table = section.tables[0]
+    row = _scale_row(table, "+1")
+
+    ratio_from_01pct = row["從 0.1%"].split("×")[-1].rstrip("）")
+    ratio_from_50pct = row["從 50%"].split("×")[-1].rstrip("）")
+
+    assert ratio_from_01pct == "2.71"
+    assert ratio_from_50pct == "1.46"
+    assert ratio_from_01pct != ratio_from_50pct
+
+
+def test_scale_section_absent_when_no_offsets():
+    """``offset_centered`` 與 ``offset_matrix`` 都空 → 整節回 None（不進頁面）。
+
+    與 ``_offset_matrix_section`` 在 ``n_cells == 0`` 時回 None 一致：沒有
+    offset 圖表時，這張尺沒有服務對象。
+    """
+    result = _result()
+    result["offset_centered"] = {}
+    result["offset_matrix"] = {}
+    assert _scale_section(result) is None
+
+
+def test_scale_bullet_reports_actual_ranges():
+    """第 3 則 bullet 的動態範圍真的讀了資料，不是寫死常數。
+
+    exp(9.46) ≈ 12835.88 → ``,.0f`` 格式化四捨五入為 ``12,836``（用實際算出的
+    值核對，不是憑印象抄一個接近的數字）。
+    """
+    result = _result()
+    result["offset_centered"] = {"g": {"a": -3.05, "b": 2.99}}
+    result["offset_matrix"] = {"g": {"a": 3.42, "b": 9.46}}
+    section = _scale_section(result)
+
+    # **整句相等**，不是 substring `in`。用 `in` 的話：(a) 把 lo/hi 對調（報表
+    # 印出「+2.99 ~ -3.05」這種上下顛倒的範圍）測試照樣全綠；(b) `"÷21" in`
+    # 會被 ÷21.9／÷210／÷21,000 滿足，`"×30" in` 會被 ×30.0~×30.9 全部滿足
+    # （實際值是 ×30.6）——截斷數字做 substring 等於把斷言放寬成一個區間。
+    assert section.bullets[2] == (
+        "本次執行：置中後 -3.05 ~ +2.99（÷21.1 ~ ×19.9）；"
+        "未置中原始值 +3.42 ~ +9.46（×30.6 ~ ×12,836）。"
+    )
+
+
+def test_scale_bullet_drops_non_finite_offsets():
+    """NaN／inf 必須先濾掉再取 min/max，否則結果隨 dict 插入順序而變。
+
+    ``nan`` 的比較恆為 False，所以 ``min``／``max`` 會依順序給出相反結果：
+    NaN 排前面 → 整個範圍變成 nan（報表印「+nan ~ +nan」）；NaN 排後面 →
+    被靜默吞掉、報表宣稱範圍是剩下那些值。兩種都是錯的，而且同一份資料換個
+    順序就換一種錯法。這裡兩種順序都測。
+    """
+    nan = float("nan")
+    for matrix in (
+        {"g": {"a": nan, "b": 1.0, "c": 2.0}},   # NaN 在前
+        {"g": {"a": 1.0, "b": 2.0, "c": nan}},   # NaN 在後
+    ):
+        result = _result()
+        result["offset_centered"] = matrix
+        result["offset_matrix"] = {}
+        bullet = _scale_section(result).bullets[2]
+        assert bullet == "本次執行：置中後 +1.00 ~ +2.00（×2.72 ~ ×7.39）。", matrix
+        assert "nan" not in bullet
+
+
+def test_scale_section_absent_when_all_offsets_non_finite():
+    """全是 NaN ＝ 沒有可用值，與空 dict 同路（回 None），不是印出 nan 範圍。"""
+    result = _result()
+    result["offset_centered"] = {"g": {"a": float("nan")}}
+    result["offset_matrix"] = {"g": {"b": float("inf")}}
+    assert _scale_section(result) is None
+
+
+def test_scale_bullet_benign_degenerate_inputs():
+    """良性退化（群存在但無 item、單一值 min == max、只有單邊有值）要靜默通過。
+
+    與上面兩條「真的壞」的輸入分開列舉：壞資料該被濾掉／回 None，良性退化該
+    照常印出範圍。只測其中一類的話，另一類的行為就沒有任何測試釘住。
+    """
+    # 群存在但沒有 item → 該群不貢獻值，等同空
+    result = _result()
+    result["offset_centered"] = {"g": {}, "h": {"a": 0.5}}
+    result["offset_matrix"] = {}
+    assert _scale_section(result).bullets[2] == (
+        "本次執行：置中後 +0.50 ~ +0.50（×1.65 ~ ×1.65）。"
+    )
+
+    # 只有 offset_matrix 有值 → range_parts 只有一段（單邊路徑）
+    result = _result()
+    result["offset_centered"] = {}
+    result["offset_matrix"] = {"g": {"a": 2.0, "b": 2.0}}
+    assert _scale_section(result).bullets[2] == (
+        "本次執行：未置中原始值 +2.00 ~ +2.00（×7.39 ~ ×7.39）。"
+    )
+
+
+def test_scale_section_is_collapsible():
+    section = _scale_section()
+    assert section.collapsible is True
 
 
 # ---- 契約 --------------------------------------------------------------
