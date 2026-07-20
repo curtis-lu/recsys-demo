@@ -141,27 +141,45 @@ class TestGenerateReportNodeWiring:
 
     Catalog keys and parameter names aren't spelled identically: the first
     four line up exactly (eval_predictions, evaluation_metrics, parameters,
-    baseline_metrics) but the last three catalog keys carry an
+    baseline_metrics) but the next three catalog keys carry an
     "evaluation_" prefix the parameter names drop (evaluation_metric_ci ->
     metric_ci, evaluation_offset_sweep -> offset_sweep,
     evaluation_pair_ledger -> pair_ledger). So we can't assert plain string
     equality position-for-position; the strongest checkable property is:
     each catalog key equals its parameter name, optionally after stripping
     a leading "evaluation_", position-for-position.
+
+    The signature ends in ``*registry_diagnoses`` — the contract registry's
+    diagnoses, collected by position. Named parameters can't cover that tail
+    (one name per diagnosis is exactly the coupling the registry removes), so
+    the tail is checked against a different invariant: the trailing inputs
+    must be ``evaluation_<name>`` for each name in ``DIAGNOSES``, **in
+    registry order**. That order is what ``generate_report`` zips against, so
+    a mismatch hands one diagnosis's numbers to another's page title — every
+    page still renders, which is why this needs pinning rather than trusting
+    the derived comprehension in pipeline.py to stay derived.
     """
 
     def test_inputs_positionally_match_signature(self):
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
         pipeline = create_pipeline()
         node = next(n for n in pipeline.nodes if n.name == "generate_report")
-        param_names = list(inspect.signature(node.func).parameters)
+        params = inspect.signature(node.func).parameters
+        fixed = [
+            name for name, p in params.items()
+            if p.kind is not inspect.Parameter.VAR_POSITIONAL
+        ]
+        has_varargs = len(fixed) != len(params)
 
-        assert len(node.inputs) == len(param_names), (
-            f"generate_report takes {len(param_names)} params "
-            f"{param_names} but the Node wires {len(node.inputs)} inputs "
-            f"{node.inputs} — positional binding would misalign."
+        assert len(node.inputs) == len(fixed) + len(DIAGNOSES), (
+            f"generate_report takes {len(fixed)} fixed params {fixed} plus "
+            f"{len(DIAGNOSES)} registry diagnoses but the Node wires "
+            f"{len(node.inputs)} inputs {node.inputs} — positional binding "
+            "would misalign."
         )
         for position, (catalog_key, param_name) in enumerate(
-            zip(node.inputs, param_names)
+            zip(node.inputs, fixed)
         ):
             stripped = catalog_key[len("evaluation_"):] \
                 if catalog_key.startswith("evaluation_") else catalog_key
@@ -170,6 +188,19 @@ class TestGenerateReportNodeWiring:
                 f"positionally bind to parameter {param_name!r} — inputs "
                 f"list and function signature are out of sync."
             )
+
+        assert has_varargs, (
+            "generate_report no longer ends in *registry_diagnoses; the "
+            "registry tail below is checking inputs that now bind to named "
+            "parameters instead."
+        )
+        assert node.inputs[len(fixed):] == [
+            f"evaluation_{name}" for name in DIAGNOSES
+        ], (
+            f"registry diagnosis inputs {node.inputs[len(fixed):]} are out of "
+            f"sync with DIAGNOSES {DIAGNOSES} — generate_report zips the two "
+            "by position, so a mismatch silently retitles pages."
+        )
 
 
 class TestGenerateComparisonReportNodeWiring:

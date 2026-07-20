@@ -24,7 +24,10 @@ from recsys_tfb.evaluation.distributions import (
     plot_score_boxplot_by_label,
     plot_score_histogram,
 )
-from recsys_tfb.evaluation.report_builder import assemble_report
+from recsys_tfb.evaluation.report_builder import (
+    assemble_diagnosis_pages,
+    assemble_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +480,29 @@ def diagnose_config_shift(
     return out
 
 
+def _diagnosis_pages_dir(parameters: dict):
+    """診斷頁的輸出目錄，對齊 catalog 的
+    ``data/evaluation/${model_version}/${snap_date}/diagnosis/``。
+
+    **為什麼可以在這裡重算這條路徑**：``__main__`` 把 ``runtime_params``
+    （含 dash 已剝掉的 ``snap_date``）併進 node 拿到的 ``parameters``，再拿同
+    一份 dict 去做 catalog 的 ``${...}`` 代換——所以這裡取的是 catalog 代換用
+    的**同一組值**，不是另外猜一次。同樣的做法見
+    ``diagnosis.model.paths.diagnostics_dir``。
+
+    退回 ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params）；
+    dash 一律剝掉，因為 catalog 拿到的就是剝過的值。
+    """
+    from pathlib import Path
+
+    eval_params = parameters.get("evaluation", {}) or {}
+    snap = parameters.get("snap_date") or eval_params.get("snap_date", "unknown")
+    return (Path("data") / "evaluation"
+            / str(parameters.get("model_version", "unknown"))
+            / str(snap).replace("-", "")
+            / "diagnosis")
+
+
 def generate_report(
     eval_predictions: SparkDataFrame,
     evaluation_metrics: dict,
@@ -485,10 +511,22 @@ def generate_report(
     metric_ci: Optional[dict] = None,
     offset_sweep: Optional[dict] = None,
     pair_ledger: Optional[dict] = None,
+    *registry_diagnoses: Optional[dict],
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) is aggregated in Spark into small frames so its
     figures embed bounded summaries rather than raw per-row arrays.
+
+    ``registry_diagnoses`` 是 ``diagnosis.metric.contract.DIAGNOSES`` 各項的
+    ``compute`` 輸出，**依 registry 順序**傳入——pipeline 的 inputs 清單就是從
+    ``DIAGNOSES`` 導出的（見 ``pipeline.py``），所以順序不靠人工維護。用
+    varargs 而不是一個具名參數配一項診斷：後者會讓每加一項診斷就得同時改
+    pipeline 與這個簽章，而簽章改動是報表層「不認識個別診斷」宣稱破功的入口。
+
+    診斷頁（多頁 HTML）寫在與各診斷 JSON 同一個 ``diagnosis/`` 目錄，主報表
+    只放一個指向它的連結。這裡**刻意不吞例外**：這是 pipeline 的最後一個
+    node，寫頁失敗直接紅比「報表產出了、但少了診斷入口」好認——後者要比對
+    兩次執行的 HTML 才看得出來。
     """
     schema = get_schema(parameters)
     score_col = schema["score"]
@@ -541,6 +579,25 @@ def generate_report(
         sdf.unpersist()
         diagnostics_frames = {"figures": figs}
 
+    # registry 診斷 → 獨立多頁 HTML。全部缺席時連目錄都不建：一個只有
+    # index.html 與 3.5MB plotly.min.js、沒有任何診斷頁的目錄，看起來像
+    # 「跑了但什麼都沒量到」。
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    results = {
+        name: result
+        for name, result in zip(DIAGNOSES, registry_diagnoses)
+        if result is not None
+    }
+    diagnosis_pages = None
+    if results:
+        out_dir = _diagnosis_pages_dir(parameters)
+        diagnosis_pages = assemble_diagnosis_pages(results, parameters, out_dir)
+        logger.info(
+            "diagnosis pages written to %s (%d files, %d diagnoses)",
+            out_dir, len(diagnosis_pages), len(results),
+        )
+
     return assemble_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
@@ -548,4 +605,5 @@ def generate_report(
         metric_ci=metric_ci,
         offset_sweep=offset_sweep,
         pair_ledger=pair_ledger,
+        diagnosis_pages=diagnosis_pages,
     )

@@ -813,6 +813,167 @@ def build_glossary_section(parameters: dict) -> ReportSection:
     )
 
 
+# =====================================================================
+# registry 診斷的多頁輸出
+# =====================================================================
+#
+# **這一段刻意不認識任何單一診斷。** 走的是
+# ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
+# ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
+# registry 補一行，本檔零改動。舊的 ``build_offset_sweep_section``／
+# ``build_pair_ledger_section`` 不在這個規則的管轄範圍——它們服務的是尚未被
+# 取代的既有診斷 node，會在整個 diag-redesign 收尾時一起清掉。
+#
+# 為什麼數字不複製一份到主報表：主報表只放入口
+# （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
+# 各自演化的格式與措辭，而讀者無從得知哪一份是後改的。
+
+#: 索引頁的邏輯架構：五項診斷各回答什麼、各排除什麼，以及編號代表的意思。
+#:
+#: **這張表是規劃層級的敘述**（五項診斷的分工），不是 registry。哪些項目真的
+#: 存在由 ``DIAGNOSES`` 決定，見 :func:`_diagnosis_index_intro` 的狀態欄——
+#: 兩者分開，索引頁才不會在後四項尚未落地時假裝它們都在。
+_DIAGNOSIS_PLAN = (
+    ("config_shift", "配置引入的排序偏移",
+     "抽樣比例與 sample weight 有沒有在每個 item 上引入 log-odds 偏移。",
+     "偏移為 0 時，排序落差的來源就不在訓練設定這一側。"),
+    ("item_ability", "item 辨識力",
+     "模型能不能在同一個 query 內分辨誰會買哪一個 item。",
+     "把客戶活躍度誤讀成 item 推薦能力。"),
+    ("model_capacity", "模型容量分配",
+     "gain／split 花在 item 身分，還是花在 context 特徵。",
+     "把「學到互動訊號」與「只記住 item prior」分開。"),
+    ("suppression", "壓制帳本",
+     "哪些 label=0 排在 label=1 之前，造成多少 AP 缺口。",
+     "把「模型排錯」與「商品本來就競爭」分開。"),
+    ("score_shift", "per-item 分數位移",
+     "不重訓、只加 per-item 常數位移，holdout mAP 能不能提升。",
+     "把「偏 item 水準」與「偏辨識力／特徵表達」分開。"),
+)
+
+
+def _diagnosis_index_intro() -> str:
+    """索引頁的說明片段（raw HTML，``write_pages`` 不 escape）。
+
+    **這段文字就是使用者要的產出本身，不是裝飾**：需求原話是「忠實呈現數據，
+    但是用一個清楚好懂的邏輯架構來幫助人類判斷，而不是直接給結論」。這裡寫
+    的是那個邏輯架構——每項診斷回答什麼、排除什麼、為什麼是這個順序——讀者
+    據此自己判斷，而報表本身一個結論都不下。
+
+    狀態欄從 ``DIAGNOSES`` 動態導出，不寫死：後四項診斷分別在後續計畫落地，
+    寫死的話這頁會在它們落地前就宣稱五項都在（而那種錯看不出來，因為字串
+    長得很合理）。
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    rows = []
+    for i, (name, title, answers, rules_out) in enumerate(
+        _DIAGNOSIS_PLAN, start=1
+    ):
+        live = name in DIAGNOSES
+        status = "已在 registry" if live else "尚未進 registry"
+        rows.append(
+            f"<tr><td>{i}</td><td>{title}<br><code>{name}</code></td>"
+            f"<td>{answers}</td><td>{rules_out}</td><td>{status}</td></tr>"
+        )
+    table = (
+        "<table><thead><tr>"
+        "<th>#</th><th>診斷</th><th>回答什麼</th><th>排除什麼</th>"
+        "<th>目前狀態</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+    return (
+        "<p>這裡把排序結果拆成五個彼此不重疊的提問。每一頁只呈現它量到的"
+        "數字，並在頁首用「範圍說明」寫出這些數字量的是什麼、算在哪批列上、"
+        "看不見什麼。判讀留給讀者。</p>"
+        + table
+        + "<p><strong>編號的意思</strong>：由「資料與訓練設定造成的」往"
+        "「模型學到什麼」再往「排序結果本身」推進。前一層解釋得掉的部分，"
+        "後一層就不必重複歸因——這是歸因的優先權，也是預設的閱讀順序。</p>"
+        "<p><strong>編號不是硬閘門</strong>：已實作的項目每次都會跑、都會"
+        "呈現，前一項的結果不會擋掉後一項；任何一頁都可以單獨打開來讀。</p>"
+        "<p>狀態欄標「尚未進 registry」的項目還沒有實作，這次執行不會有"
+        "它們的頁面；下方清單列出的就是本次實際寫出的全部頁面。</p>"
+    )
+
+
+def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
+    """把每項診斷的結果組成獨立頁面。本函式不認識任何單一診斷。
+
+    Args:
+        results: ``{診斷名: compute 的輸出 dict}``。缺席或 ``render`` 回 ``None``
+            （例如該項停用）的診斷不會產生頁面——**缺席是「這頁不存在」，不是
+            「這頁是空的」**；空頁看起來像「量到了、結果什麼都沒有」。
+        out_dir: 頁面輸出目錄（與各診斷 JSON 同一個 ``diagnosis/`` 目錄）。
+
+    Returns:
+        實際寫出的檔案路徑（``plotly.min.js`` 最先、各頁、``index.html`` 最後）。
+    """
+    import dataclasses
+    import importlib
+
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.report import Page
+    from recsys_tfb.report.pages import write_pages
+
+    pages = []
+    for i, name in enumerate(DIAGNOSES, start=1):
+        result = (results or {}).get(name)
+        if result is None:
+            continue
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        section = mod.render(result, parameters)
+        if section is None:
+            continue
+        slug = f"{i:02d}-{name.replace('_', '-')}"   # 數字前綴＝閱讀順序
+        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：五項共用同一份
+        # diagnosis_sample，sampling_description 永遠在同一個位置。讓各診斷
+        # 各帶一個 hook 等於同一段 replace 被抄五次。
+        scope = dataclasses.replace(
+            mod.SCOPE,
+            sampling=(result.get("sample_meta", {}) or {}).get(
+                "sampling_description", ""),
+        )
+        pages.append(Page(slug=slug, title=mod.TITLE,
+                          scope=scope, sections=(section,)))
+    if not pages:
+        # 一頁都沒有就完全不落地。否則會留下一個「index.html 說有五項、清單
+        # 是空的、外加 3.5MB plotly.min.js」的目錄，看起來像跑過但什麼都沒
+        # 量到——那是本重構要避免的誤讀，不是「誠實地呈現沒有資料」。
+        return []
+    return write_pages(pages, out_dir=out_dir,
+                       index_title="排序診斷",
+                       index_intro=_diagnosis_index_intro())
+
+
+def build_diagnosis_links_section(
+    diagnosis_pages: list | None,
+    parameters: dict,
+) -> ReportSection | None:
+    """主報表指向診斷頁的入口。**只放連結，不放任何診斷數字。**
+
+    數字複製一份到主報表就會有兩個真實來源；改了其中一邊，讀者無從得知哪一
+    份是後改的。一頁都沒寫出來時回 ``None``——指向 404 的入口比沒有入口更糟。
+
+    連結是相對路徑：主報表在 ``…/<snap_date>/report.html``，診斷頁在同層的
+    ``diagnosis/``，兩者一起搬移時連結仍有效。
+    """
+    if not diagnosis_pages or not _section_on(parameters, "diagnosis_links"):
+        return None
+    n_pages = sum(
+        1 for p in diagnosis_pages
+        if str(p).endswith(".html") and not str(p).endswith("index.html")
+    )
+    return ReportSection(
+        title="排序診斷（獨立頁面）",
+        description=(
+            '<a href="diagnosis/index.html">診斷索引 diagnosis/index.html</a>'
+            f"　—　本次寫出 {n_pages} 頁。索引頁說明每一項回答什麼、排除"
+            "什麼，各頁的數字與範圍說明都留在該頁，這裡不複製一份。"
+        ),
+    )
+
+
 def assemble_report(
     metrics: dict,
     parameters: dict,
@@ -821,6 +982,7 @@ def assemble_report(
     metric_ci: dict | None = None,
     offset_sweep: dict | None = None,
     pair_ledger: dict | None = None,
+    diagnosis_pages: list | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
     authoritative order) into the final HTML string."""
@@ -830,6 +992,7 @@ def assemble_report(
         build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
         build_guardrail_recall_section(metrics, parameters),
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
+        build_diagnosis_links_section(diagnosis_pages, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
         build_pair_ledger_section(pair_ledger, parameters),
         build_category_section(metrics, parameters),

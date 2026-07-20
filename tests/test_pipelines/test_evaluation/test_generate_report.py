@@ -1,5 +1,10 @@
 """generate_report: dict-driven HTML, toPandas only when diagnostics on."""
 
+import inspect
+
+import numpy as np
+import pandas as pd
+
 from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
 
 
@@ -87,3 +92,159 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         _eval_pred_n(spark, 3000), _metrics(), _params_diag_full(), None
     )
     assert abs(len(large) - len(small)) < 20000
+
+
+# =====================================================================
+# 診斷多頁輸出（Task 2.5）：報表層與 registry 診斷解耦
+# =====================================================================
+
+SAMPLING_DESCRIPTION = "分層抽樣：正例 query 全取，負例 query 依 hash 取 40%。"
+
+_DIAG_PARAMS = {
+    "schema": {"time": "snap_date", "entity": ["cust_id"],
+               "item": "prod_name", "label": "label", "score": "score"},
+    "dataset": {
+        "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
+        "sample_ratio": 1.0,
+        "sample_ratio_overrides": {"mass|ccard_ins|0": 0.5},
+    },
+    "training": {"sample_weight_keys": [], "sample_weights": {}},
+    "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": 20},
+                                 "config_shift": {"enabled": True}}},
+}
+
+
+def _diag_sample_pdf() -> pd.DataFrame:
+    """兩個客群 × 兩個 item 的小樣本（形狀取自 test_config_shift.py）。"""
+    rng = np.random.default_rng(0)
+    rows = []
+    for c in range(40):
+        segment = "mass" if c % 2 == 0 else "affluent"
+        for item in ("ccard_ins", "fund_bond"):
+            rows.append({
+                "snap_date": "2026-01-31", "cust_id": f"c{c}",
+                "prod_name": item, "cust_segment_typ": segment,
+                "label": int((item == "ccard_ins" and c % 2 == 0)
+                             or (item == "fund_bond" and c % 5 == 0)),
+                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
+                "score": 0.5,
+            })
+    return pd.DataFrame(rows)
+
+
+def _diag_results() -> dict:
+    """用**真的** ``config_shift.compute`` 產生 fixture，不手刻 dict。
+
+    手刻的 22 個頂層鍵會跟 ``compute`` 的實際輸出漂移，而漂移的方向剛好是
+    「測試綠、real-run 紅」——組裝層讀的每個鍵都必須是計算層真的會給的。
+    """
+    from recsys_tfb.diagnosis.metric import config_shift
+
+    sample_meta = {"n_queries": 40,
+                   "sampling_description": SAMPLING_DESCRIPTION}
+    return {"config_shift": config_shift.compute(
+        (_diag_sample_pdf(), sample_meta), _DIAG_PARAMS)}
+
+
+def test_report_builder_has_no_per_diagnosis_builders():
+    """報表層不得認識任何 registry 診斷——這是解耦的驗收條件。
+
+    禁用清單動態從 DIAGNOSES 導出：Plan 2-5 每加一項診斷這條自動收緊。
+    舊的 offset_sweep/pair_ledger builder 不在管轄範圍（它們服務的是尚未
+    被取代的既有診斷，Plan 5 收尾才清）。
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.evaluation import report_builder
+
+    names = [n for n, _ in inspect.getmembers(report_builder, inspect.isfunction)]
+    forbidden = [n for n in names
+                 if n.startswith("build_") and any(d in n for d in DIAGNOSES)]
+    assert not forbidden, f"report_builder 仍認識個別 registry 診斷：{forbidden}"
+
+
+def test_diagnosis_pages_written(tmp_path):
+    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
+
+    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
+    names = sorted(p.name for p in written)
+    assert "01-config-shift.html" in names
+    assert "index.html" in names
+    assert "plotly.min.js" in names
+
+
+def test_index_intro_states_order_is_not_a_gate():
+    """閱讀順序不是硬閘門——五項都會跑、都會呈現，前一項擋不掉後一項。
+
+    沒有這句，編號會被讀成「第 1 項沒事就不必看後面」，而那正是這份索引
+    要避免的誤讀。
+    """
+    from recsys_tfb.evaluation.report_builder import _diagnosis_index_intro
+
+    intro = _diagnosis_index_intro()
+    assert "不是硬閘門" in intro
+
+
+def test_index_intro_has_no_verdict_vocabulary():
+    """鐵則 1（不下結論）同樣適用於索引頁的說明文字本身。"""
+    from recsys_tfb.evaluation.report_builder import _diagnosis_index_intro
+
+    forbidden = ["建議", "應該", "異常", "不足", "有問題", "健康",
+                 "通過", "失敗", "verdict", "severity", "recommend"]
+    intro = _diagnosis_index_intro()
+    hits = [word for word in forbidden if word in intro]
+    assert not hits, f"索引說明出現下結論字眼：{hits}"
+
+
+def test_unimplemented_diagnoses_produce_no_page(tmp_path):
+    """``results`` 只有 config_shift 時，不生出其他頁、也不 raise。
+
+    未實作的診斷在 ``results`` 裡就是缺席，組裝層必須把缺席當成「這頁不
+    存在」而不是「這頁是空的」——空頁看起來像「量到了、結果什麼都沒有」。
+    """
+    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
+
+    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
+    page_names = sorted(p.name for p in written if p.suffix == ".html")
+    assert page_names == ["01-config-shift.html", "index.html"]
+
+
+def test_sampling_description_flows_into_page_scope(tmp_path):
+    """``sample_meta["sampling_description"]`` 必須進到該頁的 ScopeNote。
+
+    這條守的是組裝層那一句 ``dataclasses.replace``：模組層級的 ``SCOPE``
+    刻意留空 ``sampling``（執行期事實不寫死進常數），填值只發生在這裡。
+    """
+    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
+
+    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
+    page = next(p for p in written if p.name == "01-config-shift.html")
+    html = page.read_text()
+    assert SAMPLING_DESCRIPTION in html
+    assert "抽樣設計" in html
+
+
+def test_main_report_links_out_without_duplicating_numbers(tmp_path):
+    """主報表只給入口，數字留在專屬頁——複製一份就會有兩個真實來源。"""
+    from recsys_tfb.evaluation.report_builder import (
+        assemble_diagnosis_pages,
+        build_diagnosis_links_section,
+    )
+
+    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
+    section = build_diagnosis_links_section(written, {})
+    text = "\n".join(
+        [section.title, section.description, *section.table_titles]
+        + [t.to_string() for t in section.tables]
+    )
+    assert "diagnosis/index.html" in text
+    for number_word in ("delta", "Δ", "offset", "mAP"):
+        assert number_word not in text, f"主報表複製了診斷數字：{number_word}"
+
+
+def test_no_diagnosis_pages_means_no_links_section():
+    """一頁都沒寫出來時不放入口——連出去是 404 的連結比沒有連結更糟。"""
+    from recsys_tfb.evaluation.report_builder import (
+        build_diagnosis_links_section,
+    )
+
+    assert build_diagnosis_links_section([], {}) is None

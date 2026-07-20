@@ -2,6 +2,7 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
+from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
 
 def create_pipeline(
@@ -121,11 +122,16 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_config_shift",
         ),
+        # registry 診斷的 catalog 名字由 DIAGNOSES 導出（``evaluation_<name>``
+        # 是既有慣例），**不是手寫清單**：generate_report 用 varargs 依 registry
+        # 順序收這些結果，手寫的清單一旦與 registry 錯位，頁面標題會接到別項
+        # 診斷的數字上——而那是靜默的錯（每頁看起來都很正常）。
         Node(
             generate_report,
             inputs=["eval_predictions", "evaluation_metrics",
                     "parameters", "baseline_metrics", "evaluation_metric_ci",
-                    "evaluation_offset_sweep", "evaluation_pair_ledger"],
+                    "evaluation_offset_sweep", "evaluation_pair_ledger",
+                    *(f"evaluation_{name}" for name in DIAGNOSES)],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog
