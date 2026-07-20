@@ -1176,7 +1176,15 @@ def build_diagnostics_figures(report_aggregates: dict | None) -> list:
         plot_score_histogram,
     )
 
-    if not report_aggregates or not report_aggregates.get("enabled"):
+    # 用「有沒有家族鍵」判斷，**不看 ``enabled`` 旗標**。旗標是 node 設的、
+    # 聚合函式不設，所以看旗標的話 build_diagnostics_figures(
+    # aggregate_report_diagnostics(...)) 會靜默回空——直接呼叫的人（測試、
+    # 未來的離線重繪）拿到 [] 卻沒有任何線索。停用時的 stub 是
+    # {"enabled": False}，沒有任何家族鍵，這個判斷自然回 []。
+    families = ("score_histogram", "calibration")
+    if not report_aggregates or not any(
+        k in report_aggregates for k in families
+    ):
         return []
     cols = report_aggregates["columns"]
     item_col, label_col = cols["item"], cols["label"]
@@ -1378,11 +1386,13 @@ def test_serialisation_round_trip_leaves_every_figure_identical(spark):
     ]
 
     # 新路徑：Spark 聚合 → JSON → 繪圖函式
+    # 直接把聚合輸出餵進去，**不需要補任何旗標**——build_diagnostics_figures
+    # 靠家族鍵判斷。要是哪天它改成看 enabled，這一行會回 [] 而下面的長度斷言
+    # 會轉紅，那正是想要的。
     payload = aggregate_report_diagnostics(
         sdf, item_col=i, score_col=s, rank_col=r, label_col=lab,
         n_calibration_bins=2,
     )
-    payload["enabled"] = True
     after = build_diagnostics_figures(payload)
 
     assert len(after) == len(before)
