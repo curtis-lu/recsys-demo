@@ -228,3 +228,26 @@ class TestFormulaAndBullets:
             title="S", description="d", formula="Σ Δⱼ ≠ Δ"))
         assert "mathjax" not in html.lower()
         assert "katex" not in html.lower()
+
+
+def test_range_index_is_not_rendered_as_a_data_column():
+    """自動流水號 0 1 2 3 在報表上是雜訊——第一份真實產出就把統計量表印成
+    ``0 mean +0.445``，讀者得先判斷第一欄是不是資料。"""
+    import pandas as pd
+
+    from recsys_tfb.report.pages import _render_table
+
+    html = _render_table(pd.DataFrame({"統計量": ["mean", "p50"], "值": [0.4, 0.7]}))
+    assert "<th>0</th>" not in html
+    assert "mean" in html
+
+
+def test_meaningful_index_is_still_rendered():
+    """被 set_index 過的 index 是 row label，藏起來表格就讀不懂了。"""
+    import pandas as pd
+
+    from recsys_tfb.report.pages import _render_table
+
+    frame = pd.DataFrame({"值": [0.4, 0.7]}, index=["ccard_ins", "fund_bond"])
+    html = _render_table(frame)
+    assert "ccard_ins" in html

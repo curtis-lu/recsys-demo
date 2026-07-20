@@ -53,8 +53,15 @@ def _render_table(table: pd.DataFrame) -> str:
     the entire column to exponential. Formatting every cell up front sidesteps
     that (and keeps object-dtype columns working too). ``applymap`` is used
     because ``DataFrame.map`` does not exist on pandas 1.5.x.
+
+    預設 ``RangeIndex`` 不顯示（``0 1 2 3`` 的自動流水號在報表上是雜訊，讀者
+    得花一秒判斷它是不是一欄資料）；被 ``set_index`` 過的 index 是 row label，
+    照常顯示。與 ``report/pages.py::_show_index`` 同一條規則——兩個渲染器對
+    同一個 ``ReportSection`` 必須產生一致的表格，不然同一份資料在主報表與
+    診斷頁會長得不一樣。
     """
-    return table.applymap(_fmt_cell).to_html(index=True)
+    show_index = not isinstance(table.index, pd.RangeIndex)
+    return table.applymap(_fmt_cell).to_html(index=show_index)
 
 
 def generate_html_report(

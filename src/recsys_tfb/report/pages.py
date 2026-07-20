@@ -97,8 +97,22 @@ def _fmt_cell(x: Any) -> Any:
     return x
 
 
+def _show_index(table: pd.DataFrame) -> bool:
+    """預設 ``RangeIndex`` 不顯示，其餘顯示。
+
+    ``0 1 2 3`` 這種自動流水號在報表上是純雜訊——讀者會花一秒判斷它是不是
+    一欄資料（實測第一份真實產出就發生了：統計量表印成
+    ``0 mean +0.445``）。反過來，被 ``set_index`` 成 item 名稱或客群名稱的
+    index 是那張表的 row label，藏起來會讓表格讀不懂。
+
+    用 index 的**型別**而不是 config 開關來判斷：呼叫端有沒有刻意設定 index，
+    這件事它自己就表達完了，多一個參數只是讓每個呼叫端重講一次。
+    """
+    return not isinstance(table.index, pd.RangeIndex)
+
+
 def _render_table(table: pd.DataFrame) -> str:
-    return table.applymap(_fmt_cell).to_html(index=True)
+    return table.applymap(_fmt_cell).to_html(index=_show_index(table))
 
 
 def _render_scope_note(scope: ScopeNote) -> str:
