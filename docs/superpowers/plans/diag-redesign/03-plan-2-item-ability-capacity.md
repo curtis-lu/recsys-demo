@@ -108,6 +108,8 @@ PYTHONPATH=src $V -m recsys_tfb evaluation --env local --post-training --model-v
 
 > **原稿的一個缺陷，已修正。** 原稿把簽章寫成 `weighted_auc_presorted(labels, weights)`（兩參數），同時要求 `test_weighted_auc_handles_ties_with_midrank` 對 `[1.0, 1.0]` 這組**同分**輸入回 0.5。兩者不相容：只給 label 與 weight，函式無從知道哪些列同分——`[1, 0]` 在「全部相異」的假設下 AUC ＝ 1.0，不是 0.5。**同分邊界必須當成參數傳進去。** 下面的簽章是三參數版本。
 
+> **本 task 的步驟編號有一處瑕疵（2026-07-20 執行後記錄）**：Step 1a 先加函式、Step 1 才寫測試，所以 `test_uncertainty_draws.py` 的預期 RED（`ImportError`）**不會發生**——測試檔存在時函式已經在了。實作者依「訊息與預期不符就停下」的指示回報，並改用「故意讓 `iter_stratified_cluster_multipliers` 跨層重抽」的 mutation 證明那兩條測試非空轉（確認轉紅後還原）。**Plan 3–5 寫計畫時，測試一律排在被測程式之前**；已經寫成這樣時，用 mutation 代替 RED 是正確的補救。
+
 #### Step 1a：先抽出重抽骨架（`uncertainty.py`）
 
 `item_ability` 的 AUC CI 是本 repo 第二個需要「分層 cluster 重抽」的地方（第一個是 `paired_bootstrap_delta`）。**不准寫第二份重抽迴圈**——把既有那份的抽籤骨架抽出來共用。
@@ -456,7 +458,21 @@ Expected: FAIL — 模組缺 `render`／`SCOPE`
 2. **per-item AUC 條圖含 CI 誤差線**，`fmt_auc`。
 3. **AUC 差條圖**：`bar(y=auc_gap_raw_minus_centered, center=0.0)`，發散色階。
 4. **正例名次百分位分布**：最低 AP 的前 N 個 item（`top_n` 預設 30）的名次分布條圖。
-5. **對照點文字**：隨機打散 = 0.500；「只用 item 全域購買率排序」的 baseline **實跑數值**（不是假設值）。
+5. **對照點文字**：隨機打散 ＝ **0.500**。
+
+> **原稿要求的第二個對照點已撤除（2026-07-20，實測後）。** 原文是「『只用 item 全域購買率排序』的 baseline **實跑數值**（不是假設值）」。
+>
+> 這個對照點在 within-item AUC 底下**不存在**：本項的 AUC 是在**單一 item j 的所有列**上算的（正例列 vs 負例列），而「item 全域購買率」是 item 的函數 ⇒ 那些列全部拿到**同一個分數** ⇒ 全部同分 ⇒ 依同分半分規則 AUC 恆等於 0.500。實測確認：
+>
+> ```
+> popularity-only 的 within-item AUC = 0.5
+> 隨機打散的對照點                    = 0.5
+> 兩者相同 → True
+> ```
+>
+> 也就是說它與隨機對照點**逐位元重合**，不是第二個參考點。硬把它印成兩列會讓讀者以為那是兩個獨立基準。
+>
+> **popularity baseline 是有意義的，但它屬於跨 item 的指標（mAP）**，不屬於 within-item AUC——`report.html` 已有 `compute_baseline_metrics` 在做那件事。這裡只留 0.500 一個對照點，並在 bullet 說明「0.500 ＝ 在這個 item 內完全沒有辨識力」。
 
 `SCOPE.blind_to` 必含（逐字寫進程式碼）：
 - 「item j 的正例列與負例列分屬**不同 query**，而 macro mAP 從頭到尾沒做過跨 query 的分數比較——這個 AUC 是 proxy，不是指標的分解。」
