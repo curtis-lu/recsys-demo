@@ -77,10 +77,19 @@ _FORMULA_OFFSET = (
 
 #: 「offset 的尺」表格用的 offset 量級與起始機率——純數學換算，不是資料驅動。
 #: 涵蓋 ±10：公司環境實測未置中原始值最高到 +9.46，尺要蓋過它。
-_SCALE_MAGNITUDES = (0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 10)
+#:
+#: 這一節可摺疊（見 :func:`_scale_section`），**列數因此不是成本、欄寬才是**：
+#: 26 列收在 summary 後面不佔版面，但 9 欄一律撐開頁寬。所以格線在 |offset|
+#: ≥1 之後補到每整數一列（查表不必內插），起始機率補到 7 個（讀者找得到接近
+#: 自己情境的那一欄），而每格**只印結果機率、不印倍率**——倍率括號會讓總字寬
+#: 從 109 漲到 172（約 1590px，超過多數螢幕的內容寬度而需要橫向捲動）。
+#: 倍率的資訊沒有消失：勝算倍率自成一欄，機率倍率讀者由前後值自己看得出來。
+_SCALE_MAGNITUDES = (0.1, 0.25, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 _SCALE_OFFSETS = tuple(-m for m in reversed(_SCALE_MAGNITUDES)) + _SCALE_MAGNITUDES
-_SCALE_BASE_RATES = (0.001, 0.01, 0.10, 0.50)
-_SCALE_BASE_LABELS = ("從 0.1%", "從 1%", "從 10%", "從 50%")
+_SCALE_BASE_RATES = (0.0001, 0.001, 0.01, 0.02, 0.05, 0.10, 0.50)
+_SCALE_BASE_LABELS = (
+    "從 0.01%", "從 0.1%", "從 1%", "從 2%", "從 5%", "從 10%", "從 50%",
+)
 
 _FORMULA_SCALE = (
     "勝算倍率 = exp(offset)\n"
@@ -221,11 +230,14 @@ def _scale_offset_label(offset: float) -> str:
 
 
 def _scale_table() -> pd.DataFrame:
-    """log-odds offset → 勝算倍率 → 從四個起始機率出發的機率變化。
+    """log-odds offset → 勝算倍率 → 從七個起始機率出發會變成多少。
 
     純數學換算，magnitudes／base rates 都是模組常數，不吃任何執行期資料——
     這張表本身不隨 ``result`` 變動，只有它旁邊的動態 bullet（見
     :func:`_scale_section`）才讀本次執行的 offset 範圍。
+
+    機率欄只印**結果機率**（``p_after``），不印 ``p_after / base`` 的倍率——
+    理由見 :data:`_SCALE_BASE_RATES` 上方的欄寬說明。
     """
     rows = []
     for offset in _SCALE_OFFSETS:
@@ -236,7 +248,7 @@ def _scale_table() -> pd.DataFrame:
         for base, label in zip(_SCALE_BASE_RATES, _SCALE_BASE_LABELS):
             logit_base = math.log(base / (1 - base))
             p_after = 1 / (1 + math.exp(-(logit_base + offset)))
-            row[label] = f"{_pct_str(p_after)}（{_ratio_str(p_after / base)}）"
+            row[label] = _pct_str(p_after)
         rows.append(row)
     # offset 保持成普通欄位、**不要 set_index**：具名 index 會讓 pandas 產生
     # 兩列表頭（第一列是欄名、第二列只有一個 "offset" 加五個空格），而本頁其他
@@ -287,13 +299,16 @@ def _scale_section(result: dict) -> ReportSection | None:
         return None
 
     bullets = [
-        # 這裡**不要**寫「起點越低，勝算倍率越接近機率倍率」——被自己的表推翻：
-        # +10 那列從 0.1% 出發，勝算 ×22,026 但機率只有 ×957（差 23 倍），因為
-        # 機率已被推到 95.7%、頂到 1/p 的天花板。決定兩者接不接近的是「結果機率
+        # 這裡**不要**寫「起點越低，勝算倍率越接近機率倍率」——會被自己的表推
+        # 翻：+10 那列從 0.1% 出發，勝算 ×22,026 但機率只從 0.1% 到 95.7%（不到
+        # ×1000），因為機率已頂到 100% 的天花板。決定兩者接不接近的是「結果機率
         # 離 100% 遠不遠」，不是「起點高不高」。
-        "勝算倍率固定不變；機率倍率隨起點而變——往上有天花板 1/原本機率（從 50% "
-        "最多 ×2），往下沒有底（÷11,014）。機率貼近 100% 時兩者差很多"
-        "（+10 列 ×22,026 vs ×957）。",
+        #
+        # 引用的每個數字都必須在表格裡看得到：機率欄改成只印結果機率之後，倍率
+        # （×957）就不在表上了，所以這句改用 68.8%／100% 這兩個看得到的值來講。
+        "勝算倍率固定不變；同一個 offset 讓機率變成多少要看起點——+10 從 0.01% "
+        "出發只到 68.8%，從 50% 出發到 100%。機率有 100% 的上限，起點越高越快"
+        "頂住。",
         "上面熱圖顯示的是置中後的 offset（有正有負）；格數超過繪圖上限改用表格"
         "時，顯示的是未置中的原始值（常常整片同號）。兩種都用這張尺讀。",
     ]

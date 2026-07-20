@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 
 import pandas as pd
+import pytest
 import plotly.graph_objects as go
 
 from recsys_tfb.diagnosis.metric import config_shift, contract
@@ -493,17 +494,18 @@ def test_scale_table_exact_values():
     """
     section = _scale_section()
     table = section.tables[0]
-    columns = ["勝算倍率", "從 0.1%", "從 1%", "從 10%", "從 50%"]
+    columns = ["勝算倍率", "從 0.01%", "從 0.1%", "從 1%", "從 2%",
+               "從 5%", "從 10%", "從 50%"]
 
     expected = {
-        "-10": ("÷22,026", "0.00000454%（÷22,004）", "0.0000459%（÷21,806）",
-                "0.000504%（÷19,824）", "0.00454%（÷11,014）"),
-        "-1": ("÷2.72", "0.0368%（÷2.72）", "0.370%（÷2.70）",
-               "3.93%（÷2.55）", "26.9%（÷1.86）"),
-        "+1": ("×2.72", "0.271%（×2.71）", "2.67%（×2.67）",
-               "23.2%（×2.32）", "73.1%（×1.46）"),
-        "+10": ("×22,026", "95.7%（×957）", "99.6%（×99.6）",
-                "100%（×10.00）", "100%（×2.00）"),
+        "-10": ("÷22,026", "0.000000454%", "0.00000454%", "0.0000459%",
+                "0.0000927%", "0.000239%", "0.000504%", "0.00454%"),
+        "-1": ("÷2.72", "0.00368%", "0.0368%", "0.370%", "0.745%",
+               "1.9%", "3.93%", "26.9%"),
+        "+1": ("×2.72", "0.0272%", "0.271%", "2.67%", "5.26%",
+               "12.5%", "23.2%", "73.1%"),
+        "+10": ("×22,026", "68.8%", "95.7%", "99.6%", "99.8%",
+                "99.9%", "100%", "100%"),
     }
     for label, values in expected.items():
         row = _scale_row(table, label)
@@ -516,21 +518,36 @@ def test_scale_table_exact_values():
 
 
 def test_probability_columns_differ_across_base_rates():
-    """關鍵結構性測試：機率倍率隨起點而變，勝算倍率不變。
+    """關鍵結構性測試：同一個 offset 造成的**機率倍率**隨起點而變。
 
-    若把機率誤實作成 ``p_after = p * exp(offset)``（少了 sigmoid/logit 往返），
-    四個機率欄的倍率會全部退化成勝算倍率、彼此相同——這條測試點名這個失效模式。
+    若把機率誤實作成 ``p_after = base * exp(offset)``（少了 sigmoid/logit 往
+    返），每一欄的 ``p_after / base`` 都會退化成同一個勝算倍率。機率欄現在只
+    印結果機率、不印倍率，所以這裡**自己從結果機率反算倍率**再比對——比對數
+    值而不是字串，換掉格式化方式也不會讓這條失效。
     """
     section = _scale_section()
     table = section.tables[0]
     row = _scale_row(table, "+1")
 
-    ratio_from_01pct = row["從 0.1%"].split("×")[-1].rstrip("）")
-    ratio_from_50pct = row["從 50%"].split("×")[-1].rstrip("）")
+    def _ratio(column: str, base: float) -> float:
+        return float(row[column].rstrip("%")) / 100 / base
 
-    assert ratio_from_01pct == "2.71"
-    assert ratio_from_50pct == "1.46"
-    assert ratio_from_01pct != ratio_from_50pct
+    # exp(1) = 2.718：起點極低時機率倍率≈勝算倍率，起點高時被 100% 壓下來。
+    assert _ratio("從 0.01%", 0.0001) == pytest.approx(2.72, abs=0.01)
+    assert _ratio("從 50%", 0.50) == pytest.approx(1.46, abs=0.01)
+    assert _ratio("從 0.01%", 0.0001) != _ratio("從 50%", 0.50)
+
+
+def test_no_probability_exceeds_100_percent():
+    """任何一格都不可能超過 100%——機率誤算成 ``base * exp(offset)`` 的直接徵兆。
+
+    上面那條比的是倍率是否隨起點而變；這條守的是更粗暴的失效：+10 那列從 50%
+    出發，錯誤實作會算出 50% × 22026 ＝ 1,101,300%。全表掃過，一格都不放過。
+    """
+    table = _scale_section().tables[0]
+    for column in table.columns[2:]:
+        for cell in table[column]:
+            assert float(cell.rstrip("%")) <= 100.0, f"{column}: {cell}"
 
 
 def test_scale_section_absent_when_no_offsets():
