@@ -433,37 +433,51 @@ def compute_pair_ledger(
     return out
 
 
-def diagnose_config_shift(
-    diagnosis_sample: Optional[tuple],
-    parameters: dict,
-) -> dict:
-    """薄 node：領域邏輯全在 ``diagnosis.metric.config_shift``。停用時寫 stub。
+def make_diagnosis_node(name: str):
+    """為 registry 裡的一項診斷造一個薄 node 函式。
 
-    與上面三個舊 node 的差別只有一處，抄形狀時最容易改壞：registry 診斷的
-    ``compute`` 吃的是整個 ``diagnosis_sample`` tuple（``(sample_pdf,
-    sample_meta)``），不是解包後的 ``sample_pdf``——契約在
-    ``diagnosis.metric.contract._SIGNATURES`` 釘住這個簽章。
+    Plan 2-5 的五項診斷 node 長得一模一樣：讀 ``enabled``、停用寫 stub、樣本是
+    ``None`` 就 fail-loud、否則轉呼叫模組的 ``compute``。手寫五份的問題不是
+    行數，是那五份會各自漂移——尤其「停用時回什麼」與「樣本 None 時 raise 還
+    是靜默」這兩件事，寫錯了 pipeline 照樣跑得完。
+
+    registry 診斷的 ``compute`` 吃的是整個 ``diagnosis_sample`` tuple
+    （``(sample_pdf, sample_meta)``），不是解包後的 ``sample_pdf``——契約在
+    ``diagnosis.metric.contract._SIGNATURES`` 釘住。
+
+    ``__name__`` 明設：``Node.name`` 預設取 ``func.__name__``
+    （``core/node.py:8``），不設的話五個 node 同名，``--only-node`` 指不到、
+    log 分不出誰是誰，而 pipeline 照樣跑得完。
     """
-    cfg = (((parameters.get("evaluation", {}) or {})
-            .get("diagnosis", {}) or {}).get("config_shift", {}) or {})
-    if not cfg.get("enabled", True):
-        logger.info("config_shift disabled — writing stub")
-        return {"enabled": False}
-    if diagnosis_sample is None:
-        raise ValueError(
-            "diagnose_config_shift: diagnosis_sample is None while "
-            "evaluation.diagnosis.config_shift.enabled is true — "
-            "draw_diagnosis_sample_node gate out of sync with the consumer flag"
-        )
-    from recsys_tfb.diagnosis.metric import config_shift
+    def _run(diagnosis_sample: Optional[tuple], parameters: dict) -> dict:
+        cfg = (((parameters.get("evaluation", {}) or {})
+                .get("diagnosis", {}) or {}).get(name, {}) or {})
+        if not cfg.get("enabled", True):
+            logger.info("%s disabled — writing stub", name)
+            return {"enabled": False}
+        if diagnosis_sample is None:
+            raise ValueError(
+                f"diagnose_{name}: diagnosis_sample is None while "
+                f"evaluation.diagnosis.{name}.enabled is true — "
+                "draw_diagnosis_sample_node gate out of sync with the "
+                "consumer flag"
+            )
+        import importlib
 
-    out = config_shift.compute(diagnosis_sample, parameters)
-    logger.info(
-        "config_shift computed: %d context groups, delta=%s CI=[%s, %s]",
-        len(out.get("offset_spread_by_context", {})), out.get("delta"),
-        out.get("delta_ci_low"), out.get("delta_ci_high"),
-    )
-    return out
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        out = mod.compute(diagnosis_sample, parameters)
+        # 純量鍵通用地印出來，不為每項診斷各寫一句摘要：那樣 Plan 2-5 每加
+        # 一項就要多一段格式化字串，而它們沒有任何測試守著格式。
+        scalars = {
+            k: v for k, v in out.items()
+            if isinstance(v, (int, float, str, bool))
+        }
+        logger.info("%s computed: %s", name, scalars)
+        return out
+
+    _run.__name__ = f"diagnose_{name}"
+    _run.__qualname__ = f"diagnose_{name}"
+    return _run
 
 
 def _diagnosis_pages_dir(parameters: dict):

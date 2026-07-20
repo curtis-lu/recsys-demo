@@ -29,9 +29,9 @@ def create_pipeline(
         compute_offset_sweep,
         compute_pair_ledger,
         compute_report_aggregates,
-        diagnose_config_shift,
         draw_diagnosis_sample_node,
         generate_report,
+        make_diagnosis_node,
         prepare_eval_data,
         render_diagnosis_pages,
     )
@@ -121,14 +121,16 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_pair_ledger",
         ),
-        # 診斷 1／5（registry: diagnosis.metric.contract.DIAGNOSES）。與上面
-        # 三個舊診斷讀同一份 diagnosis_sample —— 五項診斷的數字要能並排解讀，
-        # 就必須算在同一批列上。報表接線是下一個 task，這裡先落 JSON 產物。
-        Node(
-            diagnose_config_shift,
-            inputs=["diagnosis_sample", "parameters"],
-            outputs="evaluation_config_shift",
-        ),
+        # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
+        # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
+        *[
+            Node(
+                make_diagnosis_node(name),
+                inputs=["diagnosis_sample", "parameters"],
+                outputs=f"evaluation_{name}",
+            )
+            for name in DIAGNOSES
+        ],
         # inputs 裡的診斷產物**只當依賴宣告**，node 本身按檔名讀（見
         # nodes_spark.render_diagnosis_pages 的 docstring）。列出它們是為了
         # (1) 讓拓撲排序把這個 node 排在所有診斷之後、(2) 讓 --only-node 的

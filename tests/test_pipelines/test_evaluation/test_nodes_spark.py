@@ -852,44 +852,67 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
     spy.assert_called_once_with(None, params)
 
 
-def test_diagnose_config_shift_disabled_writes_stub():
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        diagnose_config_shift,
-    )
+def test_generated_node_writes_stub_when_disabled():
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
     params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
-    assert diagnose_config_shift(None, params) == {"enabled": False}
+    assert node_fn(None, params) == {"enabled": False}
 
 
-def test_diagnose_config_shift_raises_when_enabled_but_sample_none():
+def test_generated_node_raises_when_enabled_but_sample_none():
     import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        diagnose_config_shift,
-    )
-    params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": True}}}}
-    with _pytest.raises(ValueError, match="diagnose_config_shift"):
-        diagnose_config_shift(None, params)
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
+    with _pytest.raises(ValueError, match="draw_diagnosis_sample_node"):
+        node_fn(None, {})
 
 
-def test_diagnose_config_shift_delegates_to_diagnosis_module():
-    """薄 node 的定義：領域邏輯不在這裡。
+def test_generated_node_delegates_to_the_named_module(monkeypatch):
+    """轉呼叫的是**以名字查到的**模組，不是寫死的 config_shift。
 
-    斷言它把 ``diagnosis_sample`` tuple **原樣**轉交（不是解包成 sample_pdf
-    後只傳一半）——config_shift 的 compute 簽章吃的是整個 tuple，這與舊三項
-    的 node 不同，正是抄舊 node 形狀時最容易改壞的一行。
+    工廠若把模組名寫死，registry 只有一項時**每一條測試都會照樣綠**——
+    Plan 2 加第二項才會爆，而症狀是「第二項診斷的頁面印出第一項的數字」，
+    每頁看起來都很正常。所以這裡注入一個假模組，用它有沒有被呼叫到來證明
+    查表這件事真的發生了。
     """
-    from unittest.mock import patch
-    import pandas as pd
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
-        diagnose_config_shift,
-    )
-    params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": True}}}}
-    sample = (pd.DataFrame(), {"n_queries_sampled": 3})
-    payload = {"offset_spread_by_context": {}, "delta": 0.0,
-               "delta_ci_low": 0.0, "delta_ci_high": 0.0}
-    with patch(
-        "recsys_tfb.diagnosis.metric.config_shift.compute",
-        return_value=payload,
-    ) as spy:
-        out = diagnose_config_shift(sample, params)
-    assert out is payload
-    spy.assert_called_once_with(sample, params)
+    import sys
+    import types
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    called = {}
+    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_diag")
+
+    def _compute(diagnosis_sample, parameters):
+        called["sample"] = diagnosis_sample
+        return {"marker": "from_fake"}
+
+    fake.compute = _compute
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_diag", fake)
+
+    node_fn = make_diagnosis_node("fake_diag")
+    sample = ("pdf-sentinel", {"sampling_description": "x"})
+    out = node_fn(sample, {})
+
+    assert out == {"marker": "from_fake"}
+    # compute 拿到的是整個 tuple，不是解包後的 sample_pdf——契約在
+    # contract._SIGNATURES 釘住，抄形狀時最容易改壞的就是這裡。
+    assert called["sample"] is sample
+
+
+def test_each_diagnosis_node_gets_a_distinct_name():
+    """``Node.name`` 預設取 ``func.__name__``（core/node.py:8）。
+
+    工廠不設 ``__name__`` 的話五個 node 全叫 ``_run``：``--only-node`` 指不到
+    任何一個，log 也分不出誰是誰。而 pipeline 照樣跑得完——這是靜默的。
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    names = [make_diagnosis_node(n).__name__ for n in DIAGNOSES]
+    assert names == [f"diagnose_{n}" for n in DIAGNOSES]
+    assert len(set(names)) == len(names)
