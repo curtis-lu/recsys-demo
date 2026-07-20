@@ -25,6 +25,39 @@
 - **診斷子套件的檔名用 `_compute.py`／`_render.py`（前綴底線）**，不是計畫原稿寫的 `compute.py`／`render.py`。理由：`from .compute import compute` 會把子模組名重綁成函式（`pkg.compute is mod` → `False`），而 `contract.check_module` 走 `getattr` 剛好拿到函式、**抓不到這個遮蔽**。與 repo 既有的 `_common.py`／`_spark.py` 命名也一致。
 - **「同一客群內 offset 同加常數 → Δ 不變」不是無條件成立的不變量**：前提是「每個 query 完整落在單一 context group 內」，只有 context 欄是 **entity 級**屬性時才成立。context ＝ `sample_group_keys ∪ sample_weight_keys − {item, label}`，而 `parameters_training.yaml:54-55` 明文允許它取自 item 級屬性（產品層級／類別）。實測反例：`offset_spread` 報 `{hi: 0.0, lo: 0.0}` 而 `delta = 0.1875`。**Task 2.3 的 `SCOPE.blind_to` 原稿把它寫成無條件成立，要改成有前提的敘述。**
 
+## Task 2.8 使用者回饋（2026-07-20，公司環境實跑後）
+
+### 回饋 1：診斷的開關散在三個地方，分不清誰管誰
+
+使用者原話：「診斷項目的開關有點混亂，evaluation pipeline 的 `pipeline.py` 中可以定義要跑的 node、`parameters_evaluation.yaml` 中的 `report` 段落、然後又有 `diagnosis` 段落」。
+
+**實際的開關面（盤點，不是印象）**：
+
+| # | 在哪 | 管什麼 | 舊診斷 | registry 診斷 |
+|---|---|---|---|---|
+| 1 | `pipeline.py` 的 Node 清單 | 這個 node 存不存在 | 手寫 | **也是手寫**（每項一個） |
+| 2 | `diagnosis.<name>.enabled` | 算不算（不算就寫 stub） | ✓ | ✓ |
+| 3 | `report.sections.<name>` | 在主報表渲不渲染 | ✓ | **無**（走自己的頁） |
+| 4 | `contract.DIAGNOSES` | 進不進 registry（決定 catalog 鍵、頁面、`generate_report` 輸入） | 不適用 | ✓（**在 Python 裡，不是 config**） |
+| 5 | `_sample_consumer_flags` ＋ `_registry_diagnosis_enabled` | 共用抽樣抽不抽 | 衍生 | 衍生 |
+| 6 | CLI `--only-node` / `--from-node` | 這次跑哪些 | 正交 | 正交 |
+
+**哪些是過渡期、哪些是真問題**：
+
+- **過渡期（Plan 5 收尾自然消失）**：#3 只服務舊診斷。五項 registry 診斷全部上線、舊的移除後，`report.sections` 會只剩非診斷的區塊，#3 就不再是「診斷開關」。
+- **真問題，且已經咬過一次**：#1 每項診斷手寫一個 Node，而 `generate_report` 用**位置**收 7 個具名參數 ＋ varargs。2026-07-20 公司環境實例：`node.inputs` 少了兩個元素 → 位置 6 的 `evaluation_config_shift` 綁進 `offset_sweep` 參數 → `build_offset_sweep_section` 拿到 `per_item` 是 list 而非 dict → `TypeError`。**運氣好才爆；型別相容的話會靜默把 A 診斷的數字印在 B 診斷的標題下。**
+- **真問題**：#4 在 Python 裡而 #2 在 YAML 裡，「關掉一項診斷」有兩個位置、語意不同（不進 registry ＝ 完全不存在；`enabled: false` ＝ 存在但寫 stub）。使用者要關一項時該動哪個，目前沒有任何地方寫。
+
+**目標狀態（Plan 2 開工前定案，因為 Plan 2–5 會照抄現在的形狀）**：
+
+1. **每項診斷對使用者只有一個開關**：`evaluation.diagnosis.<name>.enabled`。`contract.DIAGNOSES` 降級成「這個診斷在程式碼裡存在」的宣告，不是使用者面的開關。
+2. **Node 由 `DIAGNOSES` 導出**，不再每項手寫——同時消滅 #1 的手寫 Node 與 `generate_report` 的位置綁定脆弱性。
+3. **`generate_report` 不再用 N 個位置參數收診斷結果**，改成收單一 dict（或由 runner 具名綁定）。這是上面那個 TypeError 的根治法，不是 workaround。
+
+### 回饋 2：舊 `offset_sweep` section 的判讀語氣
+
+見下方「過渡期的兩種語氣並存」。使用者可用 `report.sections.offset_sweep: false` 立即關掉，理由獨立成立（該段文字違反鐵則 1），不必等 Plan 4。
+
 ## 已裁決延後的重構（不是遺漏，時機到了再做）
 
 兩關審查提出、我判斷**現在做是從單一實例猜共用抽象**，延到有第二個實例時再收：
