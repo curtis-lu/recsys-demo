@@ -238,16 +238,16 @@ def test_reports_json_files_that_are_not_in_the_registry(tmp_path, capsys):
     """目錄裡有、但不在 registry 的 JSON 也要講出來。
 
     使用者拷回來的是整個 diagnosis/ 目錄，過渡期裡面還有 metric_ci.json／
-    offset_sweep.json／pair_ledger.json 這些尚未進 registry 的既有診斷。拷了
-    4 份卻只看到 1 頁、畫面一片安靜，讀起來像工具壞了。
+    offset_sweep.json 這些尚未進 registry 的既有診斷。拷了 3 份卻只看到 1
+    頁、畫面一片安靜，讀起來像工具壞了。
     """
     src, out = tmp_path / "in", tmp_path / "out"
     _write_input(src, {"config_shift": _real_result()})
-    (src / "pair_ledger.json").write_text("{}", encoding="utf-8")
+    (src / "offset_sweep.json").write_text("{}", encoding="utf-8")
     (src / "metric_ci.json").write_text("{}", encoding="utf-8")
 
     main(["--input-dir", str(src), "--output-dir", str(out)])
 
     err = capsys.readouterr().err
     assert "不在 registry" in err
-    assert "pair_ledger" in err and "metric_ci" in err
+    assert "offset_sweep" in err and "metric_ci" in err

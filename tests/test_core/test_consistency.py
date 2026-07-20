@@ -885,8 +885,8 @@ class TestOffsetSweepParamsA18:
 
 
 class TestSuppressionParamsA19:
-    """A19 改軌（Plan 3 Task 5.3）：原本驗 ``pair_ledger.enabled``，改驗
-    ``suppression.top_examples``。``enabled`` 不在這裡驗——``suppression``
+    """A19 改軌（Plan 3 Task 5.3）：驗 ``suppression.top_examples``。
+    ``enabled`` 不在這裡驗——``suppression``
     進了 ``diagnosis.metric.contract.DIAGNOSES`` 之後，A15
     （``diagnosis_metric_param_errors``）已經對 registry 裡每個名字驗過
     ``enabled``，兩邊都驗會對同一個壞值吐兩條訊息。

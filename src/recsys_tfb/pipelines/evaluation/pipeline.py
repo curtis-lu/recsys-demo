@@ -29,7 +29,6 @@ def create_pipeline(
         compute_metric_ci,
         compute_metrics,
         compute_offset_sweep,
-        compute_pair_ledger,
         compute_report_aggregates,
         draw_diagnosis_sample_node,
         generate_report,
@@ -85,7 +84,7 @@ def create_pipeline(
             inputs=[predictions_input, "label_table", "parameters"],
             outputs="eval_predictions",
         ),
-        # Draw the driver-side diagnosis sample ONCE; the three diagnosis
+        # Draw the driver-side diagnosis sample ONCE; the two diagnosis
         # consumers below read this shared in-memory output instead of each
         # re-drawing it (same seed -> identical content).
         Node(
@@ -117,11 +116,6 @@ def create_pipeline(
             compute_offset_sweep,
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_offset_sweep",
-        ),
-        Node(
-            compute_pair_ledger,
-            inputs=["diagnosis_sample", "parameters"],
-            outputs="evaluation_pair_ledger",
         ),
         # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
         # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
@@ -156,7 +150,7 @@ def create_pipeline(
             generate_report,
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
                     "evaluation_metric_ci", "evaluation_offset_sweep",
-                    "evaluation_pair_ledger", "evaluation_report_aggregates",
+                    "evaluation_report_aggregates",
                     "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),

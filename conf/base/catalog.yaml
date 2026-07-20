@@ -251,10 +251,6 @@ evaluation_offset_sweep:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/offset_sweep.json
 
-evaluation_pair_ledger:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/pair_ledger.json
-
 # registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／5
 evaluation_config_shift:
   type: JSONDataset

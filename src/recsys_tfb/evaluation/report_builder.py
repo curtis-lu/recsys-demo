@@ -517,88 +517,6 @@ def build_offset_sweep_section(
     )
 
 
-def _pair_ledger_heatmap(ledger: dict) -> go.Figure | None:
-    matrix = ledger.get("matrix") or {}
-    if not matrix:
-        return None
-    suppressors = sorted(matrix)
-    victims = sorted({v for row in matrix.values() for v in row})
-    z = [[(matrix.get(s_, {}).get(v) or {}).get("dap_sum")
-          for v in victims] for s_ in suppressors]
-    counts = [[(matrix.get(s_, {}).get(v) or {}).get("pair_count", 0)
-               for v in victims] for s_ in suppressors]
-    fig = go.Figure(go.Heatmap(
-        z=z, x=victims, y=suppressors, colorscale="Blues",
-        customdata=counts,
-        hovertemplate=("壓制者 %{y} → 受害者 %{x}<br>"
-                       "|ΔAP| 總量 %{z:.4f}<br>"
-                       "pair 數 %{customdata}<extra></extra>"),
-        colorbar={"title": "|ΔAP| 總量"},
-    ))
-    fig.update_layout(
-        title="壓制帳本：交換名次的指標敏感度 |ΔAP|（λ 會計）",
-        xaxis_title="受害者（正例被壓的 item）",
-        yaxis_title="壓制者（排上方的負例 item）",
-    )
-    return fig
-
-
-def build_pair_ledger_section(
-    ledger: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "pair_ledger"):
-        return None
-    if not ledger or not ledger.get("enabled"):
-        return None
-    sup = ledger.get("by_suppressor", {}) or {}
-    sup_tbl = pd.DataFrame(
-        {c: [sup[it].get(c) for it in sup]
-         for c in ["pair_count", "dap_sum", "dap_share"]},
-        index=list(sup),
-    ).sort_values("dap_sum", ascending=False) if sup else pd.DataFrame()
-    subst = ledger.get("substitution", {}) or {}
-    sub_tbl = pd.DataFrame(
-        {c: [subst[it].get(c) for it in subst]
-         for c in ["base_rate", "base_logit", "map_substituted",
-                   "delta_vs_current"]},
-        index=list(subst),
-    ).sort_values(
-        "delta_vs_current", ascending=False
-    ) if subst else pd.DataFrame()
-    seg_rows = []
-    for col, block in (ledger.get("by_segment", {}) or {}).items():
-        for val, st in block.items():
-            seg_rows.append({"segment": f"{col}={val}", **st})
-    seg_tbl = pd.DataFrame(seg_rows).set_index("segment") if seg_rows \
-        else pd.DataFrame()
-    fig = _pair_ledger_heatmap(ledger)
-    desc = (
-        "壓制帳本：誰的負例壓在誰的正例上方、交換名次會讓 query AP 變多少"
-        "（|ΔAP|，λ 會計——記帳不訓練）。判讀順序：(1) 看壓制者邊際表，"
-        "|ΔAP| 總量大的 item 是主要加害者；"
-        "(2) substitution 表 delta_vs_current 為正＝把該 item 分數換成 "
-        "base-rate 常數反而更好（個性化分數是淨傷害）、負＝淨貢獻；"
-        "(3) by_segment 看傷害集中在哪群。完整判讀："
-        "docs/pipelines/evaluation-diagnosis.md。"
-    )
-    if ledger.get("n_mis_ordered_pairs", 0) == 0:
-        desc += "（本次抽樣無任何排錯 pair——矩陣為空，不畫圖。）"
-    notes = ledger.get("notes") or []
-    if notes:
-        desc += "⚠ " + "／".join(notes)
-    tables = [sup_tbl, sub_tbl, seg_tbl]
-    table_titles = ["壓制者邊際（|ΔAP| 總量降冪）",
-                    "Substitution ablation（淨傷害降冪）",
-                    "傷害 × segment"]
-    return ReportSection(
-        title="壓制帳本 Pair ledger（誰壓了誰、代價多少）",
-        description=desc,
-        figures=[fig] if fig is not None else [],
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
 def build_category_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -869,9 +787,9 @@ def build_glossary_section(parameters: dict) -> ReportSection:
 # **這一段刻意不認識任何單一診斷。** 走的是
 # ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
 # ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
-# registry 補一行，本檔零改動。舊的 ``build_offset_sweep_section``／
-# ``build_pair_ledger_section`` 不在這個規則的管轄範圍——它們服務的是尚未被
-# 取代的既有診斷 node，會在整個 diag-redesign 收尾時一起清掉。
+# registry 補一行，本檔零改動。舊的 ``build_offset_sweep_section`` 不在這個
+# 規則的管轄範圍——它服務的是尚未被取代的既有診斷 node，會在整個
+# diag-redesign 收尾時一起清掉。
 #
 # 為什麼數字不複製一份到主報表：主報表只放入口
 # （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
@@ -1032,7 +950,6 @@ def assemble_report(
     diagnostics_frames: dict | None = None,
     metric_ci: dict | None = None,
     offset_sweep: dict | None = None,
-    pair_ledger: dict | None = None,
     diagnosis_pages: list | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
@@ -1045,7 +962,6 @@ def assemble_report(
         build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
         build_diagnosis_links_section(diagnosis_pages, parameters),
         build_offset_sweep_section(offset_sweep, parameters),
-        build_pair_ledger_section(pair_ledger, parameters),
         build_category_section(metrics, parameters),
         build_segment_section(metrics, parameters),
         build_diagnostics_section(diagnostics_frames, parameters),

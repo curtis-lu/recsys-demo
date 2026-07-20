@@ -3,8 +3,8 @@
 Scope（2026-07-20 更新，取代原「僅分流層兩個 leaf 節點」的說法——那句話
 在 ``config_shift``／``item_ability`` 開始 import ``diag_cfg``／
 ``metric_params``／``to_logit`` 之後就已經過時，卻沒人回頭改）：本檔案是
-**整個 metric-diagnosis 家族**（``offset_sweep``、``pair_ledger``、
-``config_shift``、``item_ability``）的共用 helper，不限分流層。新增函式前
+**整個 metric-diagnosis 家族**（``offset_sweep``、``config_shift``、
+``item_ability``、``suppression``）的共用 helper，不限分流層。新增函式前
 先確認是「兩個以上實例逐字相同」才抽——見 :func:`query_key`／
 :func:`sample_arrays`／:func:`ci_for_corrected_minus_baseline` 各自的
 docstring 交代「為什麼這是真的共用、什麼刻意沒抽」。
@@ -14,7 +14,7 @@ docstring 交代「為什麼這是真的共用、什麼刻意沒抽」。
 
 ``_HASH_BUCKETS`` 與 ``utils.hashing.HASH_BUCKETS`` 同值（100_000）——
 該模組 top-level import pyspark，而分流層家族的 numpy-leaf 模組
-（offset_sweep／pair_ledger／本檔）刻意保持 pyspark-free 以利無 Spark
+（offset_sweep／本檔）刻意保持 pyspark-free 以利無 Spark
 單元測試，故本地重申而不 import。
 """
 from __future__ import annotations

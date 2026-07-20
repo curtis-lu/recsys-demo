@@ -18,10 +18,10 @@ from recsys_tfb.evaluation.report_builder import (
 logger = logging.getLogger(__name__)
 
 
-def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool, bool]:
-    """Return (ci_enabled, offset_sweep_enabled, pair_ledger_enabled).
+def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool]:
+    """Return (ci_enabled, offset_sweep_enabled).
 
-    Single source of truth for the enable flags of the three diagnosis nodes
+    Single source of truth for the enable flags of the two diagnosis nodes
     that consume the shared sample. ``draw_diagnosis_sample_node`` draws iff any
     is True; each consumer still checks its own flag. Reading them here with the
     exact same keys/defaults as the consumers prevents gate/consumer drift.
@@ -29,16 +29,15 @@ def _sample_consumer_flags(parameters: dict) -> tuple[bool, bool, bool]:
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     ci = (diag.get("ci", {}) or {}).get("enabled", True)
     sweep = (diag.get("offset_sweep", {}) or {}).get("enabled", True)
-    ledger = (diag.get("pair_ledger", {}) or {}).get("enabled", True)
-    return bool(ci), bool(sweep), bool(ledger)
+    return bool(ci), bool(sweep)
 
 
 def _registry_diagnosis_enabled(parameters: dict) -> bool:
     """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
-    與 ``_sample_consumer_flags`` 分開的理由：舊三項（ci／offset_sweep／
-    pair_ledger）是即將被取代的既有診斷、新五項走 registry，兩組生命週期
-    不同。合在一起的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
+    與 ``_sample_consumer_flags`` 分開的理由：舊兩項（ci／offset_sweep）是
+    即將被取代的既有診斷、新五項走 registry，兩組生命週期不同。合在一起
+    的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
     registry 要消除的東西——所以這裡回一個 bool，不回擴增的 tuple。
 
     判準是「這項診斷的 ``INPUTS`` 裡有沒有 ``diagnosis_sample``」，不是
@@ -222,19 +221,19 @@ def draw_diagnosis_sample_node(
 ) -> Optional[tuple]:
     """Draw the shared driver-side diagnosis sample ONCE per run.
 
-    ``compute_metric_ci`` / ``compute_offset_sweep`` / ``compute_pair_ledger``
-    plus every registry diagnosis (``contract.DIAGNOSES``, e.g.
-    ``diagnose_config_shift``) all consume this single sample instead of each
-    re-drawing it (same seed -> identical content; N Spark scans collapse to
-    1). Sharing one sample is also a correctness property, not just a speed
-    one: numbers computed on different populations must not be read side by
-    side. Returns ``None`` only when *every* consumer is disabled.
+    ``compute_metric_ci`` / ``compute_offset_sweep`` plus every registry
+    diagnosis (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
+    consume this single sample instead of each re-drawing it (same seed ->
+    identical content; N Spark scans collapse to 1). Sharing one sample is
+    also a correctness property, not just a speed one: numbers computed on
+    different populations must not be read side by side. Returns ``None``
+    only when *every* consumer is disabled.
     """
-    ci_on, sweep_on, ledger_on = _sample_consumer_flags(parameters)
+    ci_on, sweep_on = _sample_consumer_flags(parameters)
     registry_on = _registry_diagnosis_enabled(parameters)
-    if not (ci_on or sweep_on or ledger_on or registry_on):
+    if not (ci_on or sweep_on or registry_on):
         logger.info(
-            "diagnosis sample: all consumers (ci/offset_sweep/pair_ledger + "
+            "diagnosis sample: all consumers (ci/offset_sweep + "
             "registry diagnoses) disabled — skipping sample draw"
         )
         return None
@@ -249,7 +248,7 @@ def draw_diagnosis_sample_node(
     logger.info(
         "diagnosis sample drawn once for %d legacy consumer(s) + registry "
         "diagnoses(enabled=%s): %d queries sampled",
-        sum((ci_on, sweep_on, ledger_on)), registry_on,
+        sum((ci_on, sweep_on)), registry_on,
         sample_meta["n_queries_sampled"],
     )
     return sample_pdf, sample_meta
@@ -413,42 +412,6 @@ def compute_offset_sweep(
         out.get("converged"),
         (out.get("map_holdout") or {}).get("zero"),
         (out.get("map_holdout") or {}).get("star"),
-    )
-    return out
-
-
-def compute_pair_ledger(
-    diagnosis_sample: Optional[tuple],
-    parameters: dict,
-) -> dict:
-    """壓制帳本薄 node（spec §3 Phase 4b；框架診斷項目 7）。
-
-    領域邏輯全在 ``diagnosis.metric.pair_ledger``（driver 端 numpy）。抽樣改由
-    ``draw_diagnosis_sample_node`` 共用（同 seed→內容相同）。停用時寫 stub。
-    """
-    eval_params = parameters.get("evaluation", {}) or {}
-    cfg = ((eval_params.get("diagnosis", {}) or {})
-           .get("pair_ledger", {}) or {})
-    if not cfg.get("enabled", True):
-        logger.info("pair ledger disabled — writing stub")
-        return {"enabled": False}
-    if diagnosis_sample is None:
-        raise ValueError(
-            "compute_pair_ledger: diagnosis_sample is None while "
-            "evaluation.diagnosis.pair_ledger.enabled is true — "
-            "draw_diagnosis_sample_node gate out of sync with the consumer flag"
-        )
-    from recsys_tfb.diagnosis.metric.pair_ledger import pair_ledger
-
-    sample_pdf, sample_meta = diagnosis_sample
-    out = pair_ledger(sample_pdf, parameters)
-    out["sample"] = sample_meta
-    logger.info(
-        "pair ledger computed: %d mis-ordered pairs, %d suppressors, "
-        "map_current=%s",
-        out.get("n_mis_ordered_pairs", 0),
-        len(out.get("by_suppressor", {})),
-        out.get("map_current"),
     )
     return out
 
@@ -645,7 +608,6 @@ def generate_report(
     baseline_metrics: Optional[dict],
     metric_ci: Optional[dict],
     offset_sweep: Optional[dict],
-    pair_ledger: Optional[dict],
     report_aggregates: Optional[dict],
     diagnosis_pages: Optional[list],
 ) -> str:
@@ -666,6 +628,5 @@ def generate_report(
         diagnostics_frames=diagnostics_frames,
         metric_ci=metric_ci,
         offset_sweep=offset_sweep,
-        pair_ledger=pair_ledger,
         diagnosis_pages=diagnosis_pages,
     )

@@ -35,8 +35,8 @@ def load_results(input_dir) -> tuple[dict, list[str], list[str]]:
     missing: list[str] = []
     # 目錄裡有、但不在 registry 的 JSON。與 missing 是相反方向的同一件事：
     # 不要讓「沒處理」看起來像「沒問題」。使用者拷回來的是整個 diagnosis/
-    # 目錄，過渡期裡面還有 metric_ci.json／offset_sweep.json／pair_ledger.json
-    # 這些尚未進 registry 的既有診斷——拷了 4 份只看到 1 頁而畫面一片安靜，
+    # 目錄，過渡期裡面還有 metric_ci.json／offset_sweep.json
+    # 這些尚未進 registry 的既有診斷——拷了幾份只看到 1 頁而畫面一片安靜，
     # 讀起來像工具壞了。
     unknown = sorted(
         p.stem for p in input_dir.glob("*.json")
