@@ -27,6 +27,7 @@ class TestEvaluationPipelineDefault:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_config_shift", "evaluation_diagnosis_pages",
+            "evaluation_report_aggregates",
         }
         assert pipeline.outputs == expected
 
@@ -36,6 +37,7 @@ class TestEvaluationPipelineDefault:
         assert names == [
             "prepare_eval_data", "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
+            "compute_report_aggregates",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
             "compute_pair_ledger", "diagnose_config_shift",
@@ -53,6 +55,7 @@ class TestEvaluationPipelinePostTraining:
         assert names == [
             "prepare_eval_data", "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
+            "compute_report_aggregates",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
             "compute_pair_ledger", "diagnose_config_shift",
@@ -73,6 +76,7 @@ class TestEvaluationPipelinePostTraining:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_config_shift", "evaluation_diagnosis_pages",
+            "evaluation_report_aggregates",
         }
         assert pipeline.outputs == expected
 
@@ -86,7 +90,8 @@ class TestEvaluationPipelineCompareMode:
         assert names == [
             "prepare_eval_data", "load_compare_predictions",
             "draw_diagnosis_sample_node", "compute_metrics",
-            "compute_baseline_metrics", "persist_eval_predictions",
+            "compute_baseline_metrics", "compute_report_aggregates",
+            "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
             "compute_offset_sweep", "compute_pair_ledger",
             "diagnose_config_shift", "generate_comparison_report",

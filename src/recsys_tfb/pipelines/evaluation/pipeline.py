@@ -28,6 +28,7 @@ def create_pipeline(
         compute_metrics,
         compute_offset_sweep,
         compute_pair_ledger,
+        compute_report_aggregates,
         diagnose_config_shift,
         draw_diagnosis_sample_node,
         generate_report,
@@ -101,6 +102,11 @@ def create_pipeline(
             outputs="baseline_metrics",
         ),
         Node(
+            compute_report_aggregates,
+            inputs=["eval_predictions", "parameters"],
+            outputs="evaluation_report_aggregates",
+        ),
+        Node(
             compute_metric_ci,
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_metric_ci",
@@ -135,9 +141,9 @@ def create_pipeline(
         ),
         Node(
             generate_report,
-            inputs=["eval_predictions", "evaluation_metrics",
-                    "parameters", "baseline_metrics", "evaluation_metric_ci",
-                    "evaluation_offset_sweep", "evaluation_pair_ledger",
+            inputs=["evaluation_metrics", "parameters", "baseline_metrics",
+                    "evaluation_metric_ci", "evaluation_offset_sweep",
+                    "evaluation_pair_ledger", "evaluation_report_aggregates",
                     "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),

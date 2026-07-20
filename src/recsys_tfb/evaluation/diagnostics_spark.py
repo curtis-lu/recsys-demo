@@ -260,3 +260,50 @@ def frame_from_json(payload: dict) -> pd.DataFrame:
     if payload.get("kind") == _MATRIX:
         df.index = payload["index"]
     return df
+
+
+def aggregate_report_diagnostics(
+    sdf: SparkDataFrame,
+    item_col: str,
+    score_col: str,
+    rank_col: str,
+    label_col: str,
+    include_distributions: bool = True,
+    include_calibration: bool = True,
+    n_calibration_bins: int = 10,
+) -> dict:
+    """報表診斷區需要的全部聚合，一次算完並轉成可落地的 dict。
+
+    ``sdf`` 必須由呼叫端先投影並 ``cache()``：這裡每個家族各是一次 action，
+    不 cache 就是 6 次全掃。
+
+    關掉的家族**不放進 payload**（不是放空的）：空的看起來像「量到了、結果
+    什麼都沒有」，那是這次重構要避免的誤讀。
+
+    ``columns`` 跟著 payload 走，好讓這份 JSON 拷到別的環境也能單獨重繪——
+    重繪端不保證拿得到同一份 ``parameters``。
+    """
+    out: dict = {
+        "columns": {
+            "item": item_col, "score": score_col,
+            "rank": rank_col, "label": label_col,
+        },
+    }
+    if include_distributions:
+        out["score_histogram"] = frame_to_json(
+            score_histogram_counts(sdf, item_col, score_col), _LONG)
+        out["score_box_by_label"] = frame_to_json(
+            score_box_stats_by_label(sdf, item_col, score_col, label_col),
+            _LONG)
+        out["rank_counts"] = frame_to_json(
+            rank_count_matrix(sdf, item_col, rank_col), _MATRIX)
+        out["positive_rank_counts"] = frame_to_json(
+            positive_rank_count_matrix(sdf, item_col, rank_col, label_col),
+            _MATRIX)
+        out["positive_rate"] = frame_to_json(
+            positive_rate_matrix(sdf, item_col, rank_col, label_col), _MATRIX)
+    if include_calibration:
+        out["calibration"] = frame_to_json(
+            calibration_bins(sdf, item_col, score_col, label_col,
+                             n_bins=n_calibration_bins), _LONG)
+    return out

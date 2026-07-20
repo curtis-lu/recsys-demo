@@ -8,25 +8,11 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.calibration import plot_calibration_curves
-from recsys_tfb.evaluation.diagnostics_spark import (
-    calibration_bins,
-    positive_rank_count_matrix,
-    positive_rate_matrix,
-    rank_count_matrix,
-    score_box_stats_by_label,
-    score_histogram_counts,
-)
-from recsys_tfb.evaluation.distributions import (
-    plot_positive_rank_heatmap,
-    plot_positive_rate_rank_heatmap,
-    plot_rank_heatmap,
-    plot_score_boxplot_by_label,
-    plot_score_histogram,
-)
+from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
+    build_diagnostics_figures,
 )
 
 logger = logging.getLogger(__name__)
@@ -551,73 +537,66 @@ def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
     return [str(p) for p in pages]
 
 
-def generate_report(
+def compute_report_aggregates(
     eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> dict:
+    """主報表診斷區的 Spark 聚合，落地成 JSON。
+
+    從 ``generate_report`` 拆出來（Plan 1.5）。理由不只是效能：它讓
+    ``generate_report`` 變成純函式，主報表因此能離線重繪；也把這 6 次全掃的
+    失敗點從 pipeline 的**最後一個 node** 往上游移。
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    report_cfg = eval_params.get("report", {}) or {}
+    sections_cfg = report_cfg.get("sections", {}) or {}
+    diag_cfg = report_cfg.get("diagnostics", {}) or {}
+    if not sections_cfg.get("diagnostics", True):
+        logger.info("report diagnostics section disabled — writing stub")
+        return {"enabled": False}
+
+    schema = get_schema(parameters)
+    item_col, score_col = schema["item"], schema["score"]
+    rank_col, label_col = schema["rank"], schema["label"]
+    needed = list(dict.fromkeys([item_col, score_col, rank_col, label_col]))
+    # 每個家族各是一次 action，不 cache 就是 6 次全掃。
+    sdf = eval_predictions.select(*needed).cache()
+    try:
+        out = aggregate_report_diagnostics(
+            sdf, item_col=item_col, score_col=score_col,
+            rank_col=rank_col, label_col=label_col,
+            include_distributions=diag_cfg.get("include_distributions", True),
+            include_calibration=diag_cfg.get("include_calibration", True),
+            n_calibration_bins=diag_cfg.get("n_calibration_bins", 10),
+        )
+    finally:
+        # 原本的寫法在例外時不會 unpersist。行為上這是純改善：輸出不變。
+        sdf.unpersist()
+    out["enabled"] = True
+    logger.info("report aggregates computed: %s", sorted(out))
+    return out
+
+
+def generate_report(
     evaluation_metrics: dict,
     parameters: dict,
     baseline_metrics: Optional[dict],
     metric_ci: Optional[dict],
     offset_sweep: Optional[dict],
     pair_ledger: Optional[dict],
+    report_aggregates: Optional[dict],
     diagnosis_pages: Optional[list],
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
-    section (when enabled) is aggregated in Spark into small frames so its
-    figures embed bounded summaries rather than raw per-row arrays.
+    section (when enabled) reads the already-aggregated Spark JSON from
+    ``compute_report_aggregates`` (Plan 1.5) so this function stays pure —
+    no SparkDataFrame in the signature, no Spark action in the body.
 
     診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
     的路徑清單、放一個連結進主報表。
     """
-    schema = get_schema(parameters)
-    score_col = schema["score"]
-    rank_col = schema["rank"]
-    label_col = schema["label"]
-    item_col = schema["item"]
-
-    eval_params = parameters.get("evaluation", {}) or {}
-    report_cfg = eval_params.get("report", {}) or {}
-    sections_cfg = report_cfg.get("sections", {}) or {}
-    diag_cfg = report_cfg.get("diagnostics", {}) or {}
-
-    diagnostics_frames = None
-    if sections_cfg.get("diagnostics", True):
-        # Aggregate diagnostics in Spark so each figure embeds bounded summaries
-        # (bin counts / quartiles / rank matrices), not raw per-row arrays.
-        # eval_predictions is scanned once per aggregation, so project the
-        # needed columns and cache before the multiple passes.
-        needed = list(
-            dict.fromkeys([item_col, score_col, rank_col, label_col])
-        )
-        sdf = eval_predictions.select(*needed).cache()
-        figs = []
-        if diag_cfg.get("include_distributions", True):
-            figs.append(plot_score_histogram(
-                score_histogram_counts(sdf, item_col, score_col),
-                item_col=item_col,
-            ))
-            figs.append(plot_score_boxplot_by_label(
-                score_box_stats_by_label(sdf, item_col, score_col, label_col),
-                item_col=item_col, label_col=label_col,
-            ))
-            figs.append(plot_rank_heatmap(
-                rank_count_matrix(sdf, item_col, rank_col)
-            ))
-            figs.append(plot_positive_rank_heatmap(
-                positive_rank_count_matrix(sdf, item_col, rank_col, label_col)
-            ))
-            figs.append(plot_positive_rate_rank_heatmap(
-                positive_rate_matrix(sdf, item_col, rank_col, label_col)
-            ))
-        if diag_cfg.get("include_calibration", True):
-            figs.append(plot_calibration_curves(
-                calibration_bins(
-                    sdf, item_col, score_col, label_col,
-                    n_bins=diag_cfg.get("n_calibration_bins", 10),
-                ),
-                item_col=item_col,
-            ))
-        sdf.unpersist()
-        diagnostics_frames = {"figures": figs}
+    figures = build_diagnostics_figures(report_aggregates)
+    diagnostics_frames = {"figures": figures} if figures else None
 
     return assemble_report(
         evaluation_metrics, parameters,

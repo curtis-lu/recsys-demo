@@ -677,6 +677,55 @@ def build_segment_section(
     )
 
 
+def build_diagnostics_figures(report_aggregates: dict | None) -> list:
+    """把 ``aggregate_report_diagnostics`` 的 payload 還原成圖。
+
+    純函式、不碰 Spark——這是主報表能離線重繪的那一半。缺席的家族直接跳過
+    （見該函式：關掉的家族不放進 payload）。
+    """
+    from recsys_tfb.evaluation.calibration import plot_calibration_curves
+    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
+    from recsys_tfb.evaluation.distributions import (
+        plot_positive_rank_heatmap,
+        plot_positive_rate_rank_heatmap,
+        plot_rank_heatmap,
+        plot_score_boxplot_by_label,
+        plot_score_histogram,
+    )
+
+    # 用「有沒有家族鍵」判斷，**不看 ``enabled`` 旗標**。旗標是 node 設的、
+    # 聚合函式不設，所以看旗標的話 build_diagnostics_figures(
+    # aggregate_report_diagnostics(...)) 會靜默回空——直接呼叫的人（測試、
+    # 未來的離線重繪）拿到 [] 卻沒有任何線索。停用時的 stub 是
+    # {"enabled": False}，沒有任何家族鍵，這個判斷自然回 []。
+    families = ("score_histogram", "calibration")
+    if not report_aggregates or not any(
+        k in report_aggregates for k in families
+    ):
+        return []
+    cols = report_aggregates["columns"]
+    item_col, label_col = cols["item"], cols["label"]
+    figs = []
+    if "score_histogram" in report_aggregates:
+        figs.append(plot_score_histogram(
+            frame_from_json(report_aggregates["score_histogram"]),
+            item_col=item_col))
+        figs.append(plot_score_boxplot_by_label(
+            frame_from_json(report_aggregates["score_box_by_label"]),
+            item_col=item_col, label_col=label_col))
+        figs.append(plot_rank_heatmap(
+            frame_from_json(report_aggregates["rank_counts"])))
+        figs.append(plot_positive_rank_heatmap(
+            frame_from_json(report_aggregates["positive_rank_counts"])))
+        figs.append(plot_positive_rate_rank_heatmap(
+            frame_from_json(report_aggregates["positive_rate"])))
+    if "calibration" in report_aggregates:
+        figs.append(plot_calibration_curves(
+            frame_from_json(report_aggregates["calibration"]),
+            item_col=item_col))
+    return figs
+
+
 def build_diagnostics_section(
     diagnostics_frames: dict | None, parameters: dict
 ) -> ReportSection | None:

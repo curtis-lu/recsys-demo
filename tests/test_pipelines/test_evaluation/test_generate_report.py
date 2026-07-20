@@ -1,11 +1,19 @@
-"""generate_report: dict-driven HTML, toPandas only when diagnostics on."""
+"""generate_report: pure, dict-driven HTML (Plan 1.5 Task 4).
+
+Spark-side toPandas aggregation now lives in ``compute_report_aggregates``;
+these tests call it to produce the ``report_aggregates`` payload, then feed
+that into ``generate_report`` — exactly the two-step path the pipeline wires.
+"""
 
 import inspect
 
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    compute_report_aggregates,
+    generate_report,
+)
 
 
 def _params(diagnostics=False):
@@ -47,16 +55,20 @@ def _metrics():
 
 
 def test_generate_report_html_no_diagnostics(spark):
-    html = generate_report(_eval_pred(spark), _metrics(), _params(False),
-                            None, None, None, None, None)
+    params = _params(False)
+    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    html = generate_report(_metrics(), params,
+                            None, None, None, None, aggregates, None)
     assert html.startswith("<!DOCTYPE html>")
     assert "摘要 Headline" in html
     assert "<details" not in html      # diagnostics off
 
 
 def test_generate_report_with_diagnostics(spark):
-    html = generate_report(_eval_pred(spark), _metrics(), _params(True),
-                            None, None, None, None, None)
+    params = _params(True)
+    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    html = generate_report(_metrics(), params,
+                            None, None, None, None, aggregates, None)
     assert "<details" in html          # collapsible diagnostics present
 
 
@@ -85,14 +97,21 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     """The whole point of Spark-side aggregation: diagnostics figures embed
     aggregated values (bins/quartiles/matrices), so report size must not grow
     with the number of evaluation rows. Raw-array embedding would make the
-    large report ~100s of KB bigger."""
+    large report ~100s of KB bigger.
+
+    The aggregation itself now happens in ``compute_report_aggregates``
+    (Plan 1.5); this test exercises that node directly, then checks that
+    feeding its bounded JSON into the now-pure ``generate_report`` still
+    yields a bounded report.
+    """
+    params = _params_diag_full()
+    small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
+    large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
     small = generate_report(
-        _eval_pred_n(spark, 100), _metrics(), _params_diag_full(),
-        None, None, None, None, None,
+        _metrics(), params, None, None, None, None, small_aggregates, None,
     )
     large = generate_report(
-        _eval_pred_n(spark, 3000), _metrics(), _params_diag_full(),
-        None, None, None, None, None,
+        _metrics(), params, None, None, None, None, large_aggregates, None,
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -251,3 +270,62 @@ def test_no_diagnosis_pages_means_no_links_section():
     )
 
     assert build_diagnosis_links_section([], {}) is None
+
+
+# =====================================================================
+# generate_report 變純函式（Plan 1.5 Task 4）
+# =====================================================================
+
+
+def test_generate_report_takes_no_spark_dataframe():
+    """``generate_report`` 是純函式——這是主報表能離線重繪的前提。
+
+    用簽章驗而不是「跑跑看有沒有用到 Spark」：後者在 diagnostics 關閉時會
+    假綠（那條路徑本來就不碰 sdf）。
+
+    **不能只用字串比對 ``"SparkDataFrame" in str(annotation)``**：
+    ``nodes_spark.py`` 沒有 ``from __future__ import annotations``，所以
+    annotation 是活的型別物件，``str()`` 印出的是
+    ``"<class 'pyspark.sql.dataframe.DataFrame'>"`` —— 不含字面
+    ``"SparkDataFrame"`` 這個 alias 名稱，字串比對永遠命中不到，改壞了也
+    測不出來（實測：refactor 前跑這條就已經是綠的）。改用型別本身比對，並
+    同時涵蓋兩種可能的 annotation 形式（活物件 或 未來若加了
+    postponed-evaluation 字串）。
+    """
+    import inspect
+
+    from pyspark.sql import DataFrame as SparkDataFrame
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+
+    def _is_spark_dataframe(annotation) -> bool:
+        if annotation is SparkDataFrame:
+            return True
+        return "pyspark.sql.dataframe.DataFrame" in str(annotation) \
+            or "SparkDataFrame" in str(annotation)
+
+    annotations = [
+        p.annotation for p in
+        inspect.signature(generate_report).parameters.values()
+    ]
+    hits = [a for a in annotations if _is_spark_dataframe(a)]
+    assert not hits, f"generate_report 又收了 Spark 物件：{hits}"
+
+
+def test_generate_report_body_has_no_spark_actions():
+    """額外要求 A：annotation 可以改而行為不變，反之亦然，所以也查函式體。
+
+    掃 ``inspect.getsource`` 找 Spark action/cache 呼叫的字面樣式
+    （``.select(``／``.cache(``／``.unpersist(``）——這些是舊實作裡真正碰
+    Spark 的呼叫，新的 ``generate_report`` 不應該再出現它們。
+    """
+    import inspect
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+
+    source = inspect.getsource(generate_report)
+    forbidden = [tok for tok in (".select(", ".cache(", ".unpersist(")
+                 if tok in source]
+    assert not forbidden, (
+        f"generate_report 函式體仍有 Spark action 呼叫：{forbidden}"
+    )
