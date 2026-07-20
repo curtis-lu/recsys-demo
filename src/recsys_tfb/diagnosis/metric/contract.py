@@ -80,8 +80,8 @@ _SIGNATURES = {
 DEFAULT_INPUTS: tuple[str, ...] = ("diagnosis_sample", "parameters")
 
 #: registry：順序即閱讀順序，也決定 HTML 檔名的數字前綴。
-#: 隨計畫逐步補齊（Plan 2 加入第二項 ``item_ability``）。
-DIAGNOSES: tuple[str, ...] = ("config_shift", "item_ability")
+#: 隨計畫逐步補齊（Plan 2 加入第二項 ``item_ability``、第三項 ``model_capacity``）。
+DIAGNOSES: tuple[str, ...] = ("config_shift", "item_ability", "model_capacity")
 
 __all__ = [
     "DEFAULT_INPUTS", "DIAGNOSES", "check_module", "compute_params_for",

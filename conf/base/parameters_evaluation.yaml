@@ -151,6 +151,14 @@ evaluation:
       enabled: true
       top_n: 30
 
+    # 診斷 3／5：模型容量分配——全模型 split gain 分成 Item Prior（item-id
+    # 切點）、Post-Item Context（item 切點之後的 context 切點，逐 item 分配）
+    # 與未分配三份；用來分辨「學到互動訊號」與「只記住 item prior」。不吃
+    # 診斷抽樣，只讀訓練側的 gain_ledger（optional，可能缺席）＋同一次執行
+    # 的 item_ability 結果畫對照散點。
+    model_capacity:
+      enabled: true
+
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
     # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
     # 正式評估必須留空。

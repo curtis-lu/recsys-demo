@@ -236,9 +236,10 @@ cases_manifest:
 gain_ledger:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/gain_ledger.json
-  # optional: 訓練側未跑該 node 時 load() 回 None 而非 raise。
-  # 現況（2026-07-19，triage 退場後）evaluation 側暫時沒有讀者；保留此旗標是因為
-  # 重構中的 model_capacity 診斷會把它接回 evaluation 的 node input。
+  # optional: 訓練側未跑該 node 時 load() 回 None 而非 raise——evaluation 的
+  # model_capacity 診斷（2026-07-20 接上）把它當 node input，單獨跑
+  # evaluation、或訓練側是舊版沒跑過這個 node 時都可能是 None，這是正常路徑
+  # （見 diagnosis/metric/model_capacity/_compute.py 的三種拿不到資料路徑）。
   optional: true
 
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
@@ -262,6 +263,10 @@ evaluation_config_shift:
 evaluation_item_ability:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/item_ability.json
+
+evaluation_model_capacity:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/model_capacity.json
 
 # 主報表診斷區的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此變成純函式，主報表可以離線重繪。

@@ -19,7 +19,7 @@ from recsys_tfb.diagnosis.metric import contract
 
 
 def test_registry_is_exactly_the_planned_diagnoses():
-    assert contract.DIAGNOSES == ("config_shift", "item_ability")
+    assert contract.DIAGNOSES == ("config_shift", "item_ability", "model_capacity")
 
 
 def test_registry_has_no_duplicates():
@@ -93,6 +93,19 @@ def test_check_module_rejects_a_wrong_render_signature():
         contract.check_module(mod)
 
 
+#: 每項診斷的 ``compute`` 期望參數名——**寫死**，不是從 ``contract.
+#: compute_params_for`` 動態導出（那樣會讓「常數與模組一起被改掉」的漂移測不
+#: 出來，見下方 docstring）。多數診斷吃共用抽樣，``model_capacity`` 宣告了
+#: 自己的 ``INPUTS``（不吃 ``diagnosis_sample``，改吃 ``gain_ledger``／
+#: ``item_ability``）——所以這裡不能再對全部名字套同一組期望值，改成逐名字
+#: 查表。
+_EXPECTED_COMPUTE_PARAMS = {
+    "config_shift": ("diagnosis_sample", "parameters"),
+    "item_ability": ("diagnosis_sample", "parameters"),
+    "model_capacity": ("gain_ledger", "item_ability", "parameters"),
+}
+
+
 @pytest.mark.parametrize("name", contract.DIAGNOSES)
 def test_registered_diagnoses_use_the_agreed_signatures(name):
     """真模組的簽章對照**寫死的**期望值，而不是對照 ``contract._SIGNATURES``。
@@ -101,9 +114,9 @@ def test_registered_diagnoses_use_the_agreed_signatures(name):
     它抓不到。這裡把約定的形狀獨立釘一份，改契約時必須有意識地也改這裡。
     """
     mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-    assert list(inspect.signature(mod.compute).parameters) == [
-        "diagnosis_sample", "parameters",
-    ]
+    assert list(inspect.signature(mod.compute).parameters) == list(
+        _EXPECTED_COMPUTE_PARAMS[name]
+    )
     assert list(inspect.signature(mod.render).parameters) == ["result", "parameters"]
 
 

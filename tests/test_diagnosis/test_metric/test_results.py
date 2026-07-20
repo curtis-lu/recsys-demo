@@ -17,10 +17,12 @@ def _write(tmp_path, name, payload):
 def test_reads_each_registry_diagnosis_by_filename(tmp_path):
     _write(tmp_path, "config_shift", {"delta": 0.25})
     _write(tmp_path, "item_ability", {"macro_per_item_map": 0.4})
+    _write(tmp_path, "model_capacity", {"available": True})
     out, missing, unknown = results.load_results(tmp_path)
     assert out == {
         "config_shift": {"delta": 0.25},
         "item_ability": {"macro_per_item_map": 0.4},
+        "model_capacity": {"available": True},
     }
     assert missing == []
     assert unknown == []
@@ -29,7 +31,7 @@ def test_reads_each_registry_diagnosis_by_filename(tmp_path):
 def test_absent_file_is_reported_as_missing_not_raised(tmp_path):
     out, missing, unknown = results.load_results(tmp_path)
     assert out == {}
-    assert missing == ["config_shift", "item_ability"]
+    assert missing == ["config_shift", "item_ability", "model_capacity"]
     assert unknown == []
 
 

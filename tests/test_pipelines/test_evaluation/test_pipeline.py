@@ -27,6 +27,7 @@ class TestEvaluationPipelineDefault:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_config_shift", "evaluation_item_ability",
+            "evaluation_model_capacity",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
         }
@@ -43,6 +44,7 @@ class TestEvaluationPipelineDefault:
             "compute_metric_ci", "compute_offset_sweep",
             "compute_pair_ledger", "diagnose_config_shift",
             "diagnose_item_ability",
+            "diagnose_model_capacity",
             "render_diagnosis_pages",
             "generate_report",
         ]
@@ -62,6 +64,7 @@ class TestEvaluationPipelinePostTraining:
             "compute_metric_ci", "compute_offset_sweep",
             "compute_pair_ledger", "diagnose_config_shift",
             "diagnose_item_ability",
+            "diagnose_model_capacity",
             "render_diagnosis_pages",
             "generate_report",
         ]
@@ -79,6 +82,7 @@ class TestEvaluationPipelinePostTraining:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_offset_sweep", "evaluation_pair_ledger",
             "evaluation_config_shift", "evaluation_item_ability",
+            "evaluation_model_capacity",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
         }
@@ -100,6 +104,7 @@ class TestEvaluationPipelineCompareMode:
             "compute_offset_sweep", "compute_pair_ledger",
             "diagnose_config_shift", "diagnose_item_ability",
             "generate_comparison_report",
+            "diagnose_model_capacity",
             "render_diagnosis_pages", "generate_report",
         ]
 

@@ -798,6 +798,9 @@ class TestRegistryDiagnosisEnabled:
         assert _registry_diagnosis_enabled({}) is True
 
     def test_false_only_when_every_registry_diagnosis_disabled(self):
+        import importlib
+
+        from recsys_tfb.diagnosis.metric import contract
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
             _registry_diagnosis_enabled,
@@ -807,13 +810,34 @@ class TestRegistryDiagnosisEnabled:
         }}}
         assert _registry_diagnosis_enabled(all_off) is False
 
-        # 任一開著就是 True。逐項單開，避免哪天 registry 只剩一項時這條
-        # 測試退化成「跟上一條測同一件事」。
-        for name in DIAGNOSES:
+        # 任一「吃共用抽樣」的診斷開著就是 True。逐項單開，避免哪天 registry
+        # 只剩一項時這條測試退化成「跟上一條測同一件事」。
+        #
+        # ``model_capacity``（Plan 2 Task 4）刻意排除在這個迴圈之外：它的
+        # ``INPUTS`` 沒有 ``diagnosis_sample``（只讀 ``gain_ledger``），單獨
+        # 開啟它不該觸發抽樣——這正是 ``_registry_diagnosis_enabled`` 的判準
+        # 本身（見該函式 docstring），下面另外斷言這個反例。
+        sample_consumers = [
+            name for name in DIAGNOSES
+            if "diagnosis_sample" in contract.inputs_for(
+                importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+            )
+        ]
+        assert sample_consumers, "registry 裡至少要有一項吃共用抽樣的診斷，否則這條測試是空的"
+        for name in sample_consumers:
             params = {"evaluation": {"diagnosis": {
                 other: {"enabled": other == name} for other in DIAGNOSES
             }}}
             assert _registry_diagnosis_enabled(params) is True, name
+
+        non_sample_consumers = [n for n in DIAGNOSES if n not in sample_consumers]
+        for name in non_sample_consumers:
+            params = {"evaluation": {"diagnosis": {
+                other: {"enabled": other == name} for other in DIAGNOSES
+            }}}
+            assert _registry_diagnosis_enabled(params) is False, (
+                f"{name} 不吃 diagnosis_sample，單獨開啟不該觸發抽樣閘門"
+            )
 
 
 def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
