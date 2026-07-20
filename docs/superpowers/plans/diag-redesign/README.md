@@ -38,6 +38,8 @@
 | `q_agg` 的 `weight=("w","max")` 假設 `inclusion_weight` 在 query 內為常數 | **Plan 2 開工時檢查** | 對 `draw_diagnosis_sample` 的產出成立（權重由 stratum 決定、stratum 是 query 級屬性），但無測試釘住；上游若讓同一 query 的列帶不同權重，`max` 會靜默選一個 |
 | 讓診斷提供 result-dependent 的 `blind_to`（例如偵測到 lambdarank 時動態多一條） | 有第二個實例需要時 | 目前 `notes` 已承載這類資訊、`render` 也顯示了；為此加一個每項診斷各一份的 hook，會讓同一段邏輯被抄五次（Task 2.3 的 `scope_for()` 即因此撤回） |
 
+**過渡期的兩種語氣並存（Plan 2–5 收尾前會一直存在）**：主報表裡舊的 `build_offset_sweep_section`（`report_builder.py:501-502`）寫著「大＝缺口主要在水準（配置／再平衡可修）、小＝缺口在條件判別力（必須動訓練）」——明確的處方，與三條鐵則相反。它服務的是 Plan 4 將由 `score_shift` 取代的舊診斷，且**今天就已在 main 出貨**，所以留著不會讓現況變差，改了也是改一段即將刪除的程式碼。**但 Task 2.8 檢視樣板時要把它排除在外**，否則會看到新舊兩種語氣打架而誤判樣板本身有問題。Plan 4 移除該診斷時一併清掉，Plan 5 全案驗收時複查。
+
 **Task 2.2 已知的弱斷言（不擋交付，但別當成有守住）**：`test_null_context_group_survives_and_is_visible` 對 note 的斷言是 `"prod_tier" in n`，靠當下文案措辭撐著——目前只有結構 note 含欄名所以有鑑別力（mutation 1b 驗證過），但改文案可能讓它退化成假綠。
 
 **一個跨版本比對的注意事項**：`query_offset_spread` 的分位數用 inverse-CDF（不插值），與 `np.percentile` 的線性插值**算出來的數字不同**，即使權重全為 1 也不同。理由是插值會產生一個資料裡不存在的 spread 值，而每個值都該對應「某個 query 實際出現的偏移範圍」。目前尚無任何一次公司環境 real-run，所以沒有舊 JSON 需要對照；日後若要跨版本比 `p50`／`p90`，要知道這件事（`mean`／`max` 不受影響）。
