@@ -643,6 +643,41 @@ def compute_params_for(mod) -> tuple[str, ...]:
 - `INPUTS` 的**最後一個**元素必須是 `"parameters"`——`make_diagnosis_node` 靠它拿 `enabled` 旗標。
 - `INPUTS` 裡除 `"parameters"`／`"diagnosis_sample"` 外的每個名字，都必須在 `catalog.yaml` 裡有 entry（否則 runner 會拿到 MemoryDataset 的 None，而 node 照樣跑得完）。
 
+#### 順帶修掉一個靜默的浪費（2026-07-20 查證，原稿沒寫）
+
+`nodes_spark.py:36-54` 的 `_registry_diagnosis_enabled` 目前把 **`DIAGNOSES` 裡的每一項**都算成共用抽樣的消費者：
+
+```python
+return any(bool((diag.get(name, {}) or {}).get("enabled", True)) for name in DIAGNOSES)
+```
+
+`model_capacity` 進 registry 之後這句就不再成立——它**不吃 `diagnosis_sample`**。後果：使用者只開 `model_capacity`、關掉其他四項時，`draw_diagnosis_sample_node` 仍會跑一次完整抽樣（公司規模 ≈25 萬 query × 22 item 的 `toPandas()` 收到 driver），而那份樣本沒有任何人讀。
+
+**這不會有任何測試轉紅、也不會有錯誤訊息**——pipeline 只是安靜地慢。正是「多一個手工維護的真實來源」的典型後果。
+
+`INPUTS` 讓它可以用導出的：
+
+```python
+def _registry_diagnosis_enabled(parameters: dict) -> bool:
+    """有任一**吃共用抽樣**的 registry 診斷啟用嗎。
+
+    判準是 ``"diagnosis_sample" in inputs_for(mod)``，不是「有沒有在
+    DIAGNOSES 裡」——``model_capacity`` 只讀 gain_ledger，把它算進來會讓
+    「只開 model_capacity」白抽一次全量樣本，而且完全沒有徵兆。
+    """
+```
+
+必要測試（**斷言系統做了什麼，不是斷言副作用沒發生**）：
+
+```python
+def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled():
+    """只開 model_capacity 時不得抽樣。
+
+    斷言落在「回傳 None ＋ log 說了 skipping」而不是只看有沒有呼叫 Spark：
+    後者被「正確跳過」與「根本沒走到這段」同時滿足。
+    """
+```
+
 `make_diagnosis_node(name)` 改寫：
 
 ```python
