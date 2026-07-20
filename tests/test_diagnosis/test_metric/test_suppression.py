@@ -36,6 +36,24 @@ def _two_query_sample():
     ])
 
 
+def _sample_with_suppression_and_cross_purchase():
+    """``_two_query_sample`` 的壓制情境（c1／c2：A 壓制 B）之上，加一個 A、B
+    都是正例的第三個 query（c3）。
+
+    ``cross_purchase_stats`` 只看 label=1 的列；``_two_query_sample`` 裡 A
+    永遠是負例，兩個 item 裡只有 B 曾經是正例——``item_units`` 天生只會有
+    一個 key，湊不出 ``item_j != item_k`` 的交叉購買列（實測：直接對
+    ``_two_query_sample`` 跑 ``compute``，``cross_purchase`` 恆為 ``[]``）。
+    c3 讓 A、B 都進入正例集合，同時 A／B 仍然是 ``axis_order`` 裡的一對
+    （來自 c1／c2 的壓制關係）——這樣『compute 有沒有把資料接上』與『同軸
+    限制』才有東西可測。
+    """
+    rows = _two_query_sample().to_dict("records")
+    rows.append(_row("c3", "A", 1, 0.5))
+    rows.append(_row("c3", "B", 1, 0.5))
+    return pd.DataFrame(rows)
+
+
 def _cross_sample():
     """A 是熱門 item（20 個 query 單位中 16 個買）、B 是小眾（僅 3 個買）。
     只用來驗 cross_purchase_stats 回傳的列帶有 lift／n_joint／n_j／n_k／
@@ -239,18 +257,16 @@ def test_pair_ledger_attributes_gap_to_the_suppressor():
 def test_allocated_gap_sums_to_the_row_level_ap_gap():
     """會計恆等式：分攤是把單列的 AP 缺口切開，切完要等於原本那塊。
 
-    這是「分攤是會計慣例」這個宣稱的可檢驗形式；比單看某一格 > 0 強得多
-    ——後者對一個把比例算錯的實作照樣綠。
+    ⚠ 等號兩邊必須來自**獨立算出來的量**：左邊是分攤結果的加總，右邊是
+    逐列累加的 row_ap_gap 本身。舊版拿同一張成對表的三種分組互比，
+    分組不同不代表來源獨立，那個等式對任何 gap 值恆成立（實測：把分攤
+    比例的分母換成常數 1.0，測試照樣綠）。
     """
     out = compute((_two_query_sample(), {"n_queries": 2}), _params())
-    total_pairs = sum(p["allocated_ap_gap"] for p in out["pair_ledger"])
-    assert out["total_ap_gap_allocated_to_suppressors"] == pytest.approx(
-        total_pairs)
-    per_target = sum(
-        (t["ap_gap_from_suppressors"] or 0.0) * t["n_pos"]
-        for t in out["target_summary"]
-    )
-    assert per_target == pytest.approx(total_pairs, rel=1e-9)
+    allocated = sum(p["allocated_ap_gap"] for p in out["pair_ledger"])
+    assert out["total_row_ap_gap_allocated"] > 0, \
+        "fixture 沒有製造出任何分攤，這條測試會退化成 0 == 0"
+    assert allocated == pytest.approx(out["total_row_ap_gap_allocated"])
 
 
 def test_axis_order_is_sorted_and_shared():
@@ -279,6 +295,30 @@ def test_cross_purchase_lift_exceeds_one_for_items_bought_together():
     stats = cross_purchase_stats(_coupled_sample(), _params()["schema"])
     row = next(r for r in stats if r["item_j"] == "P" and r["item_k"] == "Q")
     assert row["lift"] > 1.5
+
+
+def test_compute_output_carries_the_cross_purchase_data_not_just_its_field_notes():
+    """單元測試驗『cross_purchase_stats 算得對不對』，這條驗『它有沒有進產物』。
+
+    上一輪四條單元測試全綠，而 compute 根本沒呼叫它——所有測試都直接
+    呼叫該函式，於是「算得對」全覆蓋、「有進產物」零覆蓋。
+    """
+    out = compute(
+        (_sample_with_suppression_and_cross_purchase(), {"n_queries": 3}), _params())
+    assert out["cross_purchase"], "compute 沒有把 cross_purchase_stats 的結果放進輸出"
+    assert out["n_units"] > 0
+    row = out["cross_purchase"][0]
+    assert {"item_j", "item_k", "n_joint", "n_j", "n_k", "p_k_given_j", "lift"} <= set(row)
+
+
+def test_cross_purchase_is_restricted_to_the_shared_axis():
+    """兩張圖同軸序是並排對照的技術前提；多出來的格子對不上。"""
+    out = compute(
+        (_sample_with_suppression_and_cross_purchase(), {"n_queries": 3}), _params())
+    axis = set(out["axis_order"])
+    assert out["cross_purchase"], "fixture 沒有製造出任何交叉購買列可驗"
+    for r in out["cross_purchase"]:
+        assert r["item_j"] in axis and r["item_k"] in axis
 
 
 def test_empty_sample_returns_stub_without_raising():

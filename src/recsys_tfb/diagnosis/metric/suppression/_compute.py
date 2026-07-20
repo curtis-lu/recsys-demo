@@ -118,6 +118,18 @@ FIELD_NOTES: dict[str, str] = {
         "出現在成對表裡的 item 名稱排序後的清單。壓制矩陣與交叉購買資料"
         "共用這組順序，兩張圖才能同軸對照。"
     ),
+    "cross_purchase": (
+        "item_j／item_k **都在 axis_order 內**（都出現在壓制成對表裡）的交叉"
+        "購買列——刻意限制在與壓制矩陣相同的軸序，不是全樣本的完整共買表，"
+        "兩張圖才能同軸對照；完整的成對統計見 cross_purchase_stats() 本身。"
+    ),
+    "n_units": "診斷抽樣內相異 query 單位數——cross_purchase 每一列 lift 的分母依據。",
+    "total_row_ap_gap_allocated": (
+        "逐列累加的 row_ap_gap 本身（只計入實際發生分攤的正例列，即 "
+        "raw_total_for_row > 0 且 row_ap_gap > 0 的列）——與 pair_ledger 的 "
+        "allocated_ap_gap 加總是兩條獨立算出來、理論上應相等的路徑（見會計"
+        "恆等式測試）。"
+    ),
 }
 
 #: cross_purchase_stats 的欄位說明，跟著它回傳的 list[dict] 走。
@@ -278,6 +290,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_misordered_pairs": 0,
         "macro_per_item_map": None,
         "total_ap_gap_allocated_to_suppressors": 0.0,
+        "total_row_ap_gap_allocated": 0.0,
         "target_summary": [],
         "top_suppressors_by_target": [],
         "pair_ledger": [],
@@ -290,6 +303,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             "suppressor_target_gap_share": {},
         },
         "axis_order": [],
+        "cross_purchase": [],
+        "n_units": 0,
         "sample_meta": dict(sample_meta or {}),
         "field_notes": FIELD_NOTES,
         "cross_purchase_field_notes": CROSS_PURCHASE_FIELD_NOTES,
@@ -366,6 +381,10 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     margin_parts: list[np.ndarray] = []
 
     n_misordered_pairs = 0
+    # 逐列累加的 row_ap_gap 本身——與 pairs_df["gap"] 加總（分攤結果）是兩條
+    # 獨立算出來的量，會計恆等式測試靠這條獨立性才測得出「分攤比例算錯」
+    # （見 test_allocated_gap_sums_to_the_row_level_ap_gap 的 docstring）。
+    total_row_ap_gap_allocated = 0.0
 
     with log_step(logger, f"suppression.enumerate_pairs（{n} 列）"):
         for qi in range(len(boundaries) - 1):
@@ -420,6 +439,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                     if raw_total_for_row > 0.0 and row_ap_gap > 0.0
                     else np.zeros_like(raw_severity)
                 )
+                if raw_total_for_row > 0.0 and row_ap_gap > 0.0:
+                    total_row_ap_gap_allocated += row_ap_gap
 
                 n_above = len(above)
                 pos_row_parts.append(np.full(n_above, pos_orig, dtype=np.int64))
@@ -667,6 +688,14 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "suppressor_target_gap_share": suppressor_target_gap_share_matrix,
     }
     out["axis_order"] = sorted(axis_items)
+
+    cross_purchase_rows = cross_purchase_stats(sample_pdf, schema)
+    out["cross_purchase"] = [
+        row for row in cross_purchase_rows
+        if row["item_j"] in axis_items and row["item_k"] in axis_items
+    ]
+    out["n_units"] = int(query_key(sample_pdf, query_cols).nunique())
+
     out["n_rows"] = int(n)
     out["n_queries"] = int(len(boundaries) - 1)
     out["n_entities"] = int(len(np.unique(clusters)))
@@ -681,6 +710,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     )
     out["n_misordered_pairs"] = int(n_misordered_pairs)
     out["total_ap_gap_allocated_to_suppressors"] = total_allocated_gap
+    out["total_row_ap_gap_allocated"] = float(total_row_ap_gap_allocated)
 
     logger.info(
         "suppression: %d queries, %d entities, %d items, "
