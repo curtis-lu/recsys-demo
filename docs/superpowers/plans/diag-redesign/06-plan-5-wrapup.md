@@ -200,10 +200,10 @@ git rm docs/pipelines/evaluation-diagnosis.md
 把上一步找到的非歷史引用改指向新的 quickstart 或框架文件。**已知的存活 signpost（2026-07-19 實查，執行時要重新 grep 確認）**：
 
 - `src/recsys_tfb/evaluation/report_builder.py:505`（offset_sweep 區塊的判讀指路）
-- `src/recsys_tfb/evaluation/report_builder.py:582`（pair_ledger 區塊的判讀指路）
+- ~~`src/recsys_tfb/evaluation/report_builder.py:582`（pair_ledger 區塊的判讀指路）~~ —— **已於 Plan 3 Task 5.4 隨 `build_pair_ledger_section` 整段刪除**（2026-07-20 追記）。留在這裡是為了讓「它去哪了」有答案，不是待辦。
 - `conf/base/parameters_training.yaml:162`（`diagnostics.gain_ledger.enabled` 的註解，指向該檔 §12）
 
-前兩處所屬的區塊在 Plan 3／Plan 4 會被新診斷取代，屆時可能已自然消失——**執行本 task 時重新 grep，不要照抄這份清單**。
+第一處所屬的區塊在 Plan 4 會被新診斷取代，屆時可能已自然消失——**執行本 task 時重新 grep，不要照抄這份清單**（上面那條刪除線就是照抄會踩到的實例）。
 
 > `src/recsys_tfb/diagnosis/metric/__init__.py` 原本也有一處，已於 2026-07-19 的 docstring 修正中移除。
 >
@@ -348,6 +348,22 @@ Expected: 零命中（`assemble_diagnosis_pages` 是透過 `DIAGNOSES` registry 
 - [ ] **fresh-context 驗收**
 
 派一個沒有本次對話脈絡的 subagent 審查 `git diff main..feat/diag-redesign`，只給它 §0 的三條鐵則與 §9 的驗收條件，**不給任何作者結論**。要求至少 3 個具體問題（附檔案:行號與失敗情境），找不到就逐項列出檢查過的面向。
+
+### 9b. Plan 3 執行時發現、刻意延後到這裡的兩個落差
+
+兩者都是 Plan 3 查證途中撞到的既有缺口，**當下沒順手修**（不屬於那個 task 的範圍，見 `~/.claude/rules/90-letter-to-future-sessions.md` 第 3 點：deferred 項目被延後都有原因）。收尾時一併處理：
+
+- [ ] **`_common.py` 沒有自己的測試檔**
+
+`query_key`／`sample_arrays`／`ci_for_corrected_minus_baseline`／`to_logit`／`apply_injection` 全靠消費者（`config_shift`／`item_ability`）間接覆蓋。Plan 3 Task 5.1 為了 `per_item_ap` **新建**了 `tests/test_diagnosis/test_metric/test_common.py`，但只放了那兩條。
+
+**為什麼要補**：共用層沒有自己的測試，改壞它的紅燈只會出現在別人的測試檔裡，訊息也指不到根因——而這一層現在有五個消費者。至少補：`query_key` 的多欄併鍵與分隔字元、`sample_arrays` 在缺 `inclusion_weight` 欄時 `ht_weights is None` 而 `row_weights` 全 1（**這兩條路是位元等價的，所以只驗數值的測試守不住，要斷言 `is None`**）、`ci_for_corrected_minus_baseline` 的方向（見它自己的 docstring）。
+
+- [ ] **`evaluation.diagnosis.item_ability.top_n` 沒有 consistency 驗證**
+
+查證：`grep -rn "top_n" src/recsys_tfb/core/consistency.py` 零命中。Plan 3 給 `suppression.top_examples` 加了 A19 驗證（非負 int），`top_n` 沒有是不一致的。
+
+補在 **A15**（`diagnosis_metric_param_errors`）而不是新代號——它與 `sample.max_queries` ≥ 1 之類的同屬「診斷參數域」，不值得為它開一個代號。legend 同步更新。
 
 ---
 
