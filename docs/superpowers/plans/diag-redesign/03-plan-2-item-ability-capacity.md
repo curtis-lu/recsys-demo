@@ -481,7 +481,9 @@ Expected: FAIL — 模組缺 `render`／`SCOPE`
 
 **接線只有三處**（Plan 1.5 之後的形狀）：
 
-1. `contract.py` 的 `DIAGNOSES` 加 `"item_ability"`（接在 `"config_shift"` 之後——順序即閱讀順序、也決定 HTML 檔名前綴 `02-item-ability.html`），`test_contract.py` 的 `EXPECTED_ORDER` 同步加。
+1. `contract.py` 的 `DIAGNOSES` 加 `"item_ability"`（接在 `"config_shift"` 之後——順序即閱讀順序、也決定 HTML 檔名前綴 `02-item-ability.html`），`test_contract.py` 的 registry 快照同步加。
+
+> **識別字更正（2026-07-20 執行時查證）**：本檔原本寫「`test_contract.py` 的 `EXPECTED_ORDER`」，**repo 裡沒有這個符號**——實際是 `test_contract.py:22` 的 `test_registry_is_exactly_the_planned_diagnoses`。`EXPECTED_ORDER` 來自一份已漂移的舊計畫稿。文件要對齊程式碼的真實識別字，不憑記憶寫。
 2. `conf/base/catalog.yaml` 加：
    ```yaml
    evaluation_item_ability:
