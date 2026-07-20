@@ -78,13 +78,14 @@ def load_parameters(path) -> dict:
     return yaml.safe_load(text) or {}
 
 
-def load_results(input_dir) -> tuple[dict, list[str]]:
+def load_results(input_dir) -> tuple[dict, list[str], list[str]]:
     """依 ``DIAGNOSES`` 的順序讀 ``<input-dir>/<name>.json``。
 
     Returns:
-        ``(results, missing)``——``results`` 直接餵給
-        ``assemble_diagnosis_pages``；``missing`` 是沒找到 JSON 的診斷名，
-        由呼叫端印到 stderr。
+        ``(results, missing, unknown)``——``results`` 直接餵給
+        ``assemble_diagnosis_pages``；``missing`` 是 registry 有、目錄裡沒有的
+        診斷名；``unknown`` 是目錄裡有、registry 沒有的 JSON 檔名。後兩者都由
+        呼叫端印到 stderr，方向相反但目的相同：不讓「沒處理」看起來像「沒問題」。
 
     這裡用 ``contract.DIAGNOSES``（模組屬性）而不是 ``from … import DIAGNOSES``：
     組裝層也是在呼叫當下讀同一個屬性，兩邊看到的 registry 才保證是同一份。
@@ -94,13 +95,22 @@ def load_results(input_dir) -> tuple[dict, list[str]]:
     input_dir = Path(input_dir)
     results: dict = {}
     missing: list[str] = []
+    # 目錄裡有、但不在 registry 的 JSON。與 missing 是相反方向的同一件事：
+    # 不要讓「沒處理」看起來像「沒問題」。使用者拷回來的是整個 diagnosis/
+    # 目錄，過渡期裡面還有 metric_ci.json／offset_sweep.json／pair_ledger.json
+    # 這些尚未進 registry 的既有診斷——拷了 4 份只看到 1 頁而畫面一片安靜，
+    # 讀起來像工具壞了。
+    unknown = sorted(
+        p.stem for p in input_dir.glob("*.json")
+        if p.stem not in contract.DIAGNOSES
+    )
     for name in contract.DIAGNOSES:
         path = input_dir / f"{name}.json"
         if not path.exists():
             missing.append(name)
             continue
         results[name] = json.loads(path.read_text(encoding="utf-8"))
-    return results, missing
+    return results, missing, unknown
 
 
 def main(argv=None) -> list[Path]:
@@ -125,7 +135,12 @@ def main(argv=None) -> list[Path]:
         help=f"parameters YAML（預設 {DEFAULT_PARAMS}；讀不到則用空 dict）")
     args = parser.parse_args(argv)
 
-    results, missing = load_results(args.input_dir)
+    results, missing, unknown = load_results(args.input_dir)
+
+    if unknown:
+        print(f"[render_diagnosis] 目錄裡有 {len(unknown)} 份不在 registry 的 "
+              f"JSON，不會產生頁面：{', '.join(unknown)}", file=sys.stderr)
+
     for name in missing:
         # 跳過要看得見：靜靜少一頁的話，使用者會把「這項沒拷回來」讀成
         # 「這項沒問題」——那兩件事的結論完全相反。
