@@ -84,6 +84,9 @@ evaluation:
     shrinkage_k: 0
 
   # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座 + §3 Phase 1 CI）。
+  # 每項診斷只有這一個開關。關掉 => 仍會落地一份 {"enabled": false} 的 stub
+  # JSON、但不產生頁面。想讓一項診斷「完全不存在」是改 code
+  # （diagnosis.metric.contract.DIAGNOSES），不是改這裡。
   diagnosis:
     # 診斷抽樣：單位＝query（snap_date × cust_id）、只取有正例的 query；
     # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32

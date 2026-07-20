@@ -95,11 +95,15 @@
   針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。
   **已知待查（2026-07-20 掃到、未處理）**：`diagnosis/metric/sample.py:281` 的 `groupby(item_col)` 分組鍵來自使用者資料，item 為 NULL 時該筆會從 `per_item_sampled` 計數靜默消失。屬 Plan 0 已 merge 的程式碼，尚未評估 item 欄是否有上游 not-null 保證。
 
-## 12. Node inputs 與函式簽章是**位置**綁定：少一個輸入就整排平移（2026-07-20 公司環境實例）
+## 12. Node inputs 與函式簽章是**位置**綁定：少一個輸入就整排平移（2026-07-20 公司環境實例；`generate_report` 已於同日修復）
 
 - **症狀（第一分鐘認出它）**：某個 node 收到「另一個 node 的產物」。徵兆是型別完全不合的錯誤出現在看似無關的函式裡，例如 `build_offset_sweep_section` 爆 `TypeError: list indices must be integers or slices, not dict`——因為 `offset_sweep` 參數收到的是 `config_shift` 的 dict（它的 `per_item` 是 list of dicts，而 offset_sweep 的是 dict）。
-- **根因**：`core/runner.py` 是 `result = node.func(*inputs)`，**位置展開**。`node.inputs` 少了一個元素，其後每個參數都往前移一格。`generate_report` 有 7 個具名參數 ＋ varargs，是這個 repo 裡最脆弱的一處。**運氣好才會爆**——兩邊型別相容時不會有任何錯誤，報表會靜靜把 A 診斷的數字印在 B 診斷的標題底下。
-- **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。**新增診斷時尤其必跑**——registry 診斷是用 `*(f"evaluation_{name}" for name in DIAGNOSES)` 展開接在尾端的，中間少一個就全平移。
+- **根因（通用，仍然存在）**：`core/runner.py` 是 `result = node.func(*inputs)`，**位置展開**。`node.inputs` 少了一個元素，其後每個參數都往前移一格。**運氣好才會爆**——兩邊型別相容時不會有任何錯誤，報表會靜靜把 A 診斷的數字印在 B 診斷的標題底下。這個機制沒有修、也修不掉：只要 node 呼叫維持位置傳參，任何具名參數 ≥2 個的 node 都吃這條規則。
+- **`generate_report` 這個實例已修復（2026-07-20，Plan 1.5）**：修復前它是「7 個具名參數 ＋ `*args` varargs」——registry 診斷用 `*(f"evaluation_{name}" for name in DIAGNOSES)` 展開接在尾端，中間漏一個完全不會報錯，只會平移。修法是**把簽章改成剛好 8 個必填、無預設值、無 varargs 的參數**（`evaluation_metrics, parameters, baseline_metrics, metric_ci, offset_sweep, pair_ledger, report_aggregates, diagnosis_pages`），對應 `pipeline.py` 裡剛好 8 個元素的 `inputs` 列表。**varargs 消失才是真正的修復**：少一個輸入現在會直接 `TypeError: missing 1 required positional argument`，在 node 呼叫當下就炸，不會等到報表算出一堆型別兜得上但語意錯的數字。純粹「參數個數對得上」不算修好——8 對 8 只是把賭注從「兩邊型別碰巧相容」降到「兩邊個數碰巧相同」，varargs 沒了才是把「漏一個不報錯」這個洞本身補起來。
+- **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。**新增診斷時尤其必跑**（Plan 2-5 每加一項診斷，`generate_report` 的簽章與 `inputs` 都不會變，因為診斷產物已經改走 `render_diagnosis_pages` 而非直接進 `generate_report`——但其他仍是「具名參數＋位置傳參」形狀的 node 一樣要跑這個檢查）。
+- **已知未修的同形狀 node（2026-07-20 盤點，範圍外，不在本次修復範圍）**：
+  - `log_experiment`（training）：`inputs` 10 個元素、函式 10 個具名參數（8 個必填 ＋ `quadrant_profiles`／`cases_manifest` 兩個有 `None` 預設值）。目前順序對得上，但沒有 varargs 這種「明顯錯誤形態」保護——中間插一個新輸入而忘記同步簽章順序，一樣會靜默位移。
+  - `select_shap_population`（training，`diagnosis/model/population_spark.py`）：`inputs` 4 個元素、函式 4 個參數（3 個必填 ＋ `predict_manifest=None`）。同上，形狀小但機制相同。
 - **驗證方式**：
   ```bash
   python -c "
@@ -108,13 +112,13 @@
   from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
   from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
   sig = list(inspect.signature(generate_report).parameters)
-  node = next(n for n in create_pipeline({}).nodes if n.name == 'generate_report')
+  node = next(n for n in create_pipeline().nodes if n.name == 'generate_report')
   for i in range(max(len(sig), len(node.inputs))):
       s = sig[i] if i < len(sig) else '—'; n = node.inputs[i] if i < len(node.inputs) else '—'
       print('%-2d %-24s %s' % (i+1, s, n))
   "
   ```
-  第 6 位應為 `offset_sweep` ↔ `evaluation_offset_sweep`。repo 內另有 `test_inputs_positionally_match_signature` 守這件事，但**它守不了手動同步的環境**（見 §13）。
+  （`create_pipeline()` 不帶參數——舊版寫 `create_pipeline({})`，`{}` 是 falsy，剛好被當成 `post_training=False` 的預設值用，能跑只是巧合，不要照抄。）第 4 位應為 `metric_ci` ↔ `evaluation_metric_ci`、第 5 位 `offset_sweep` ↔ `evaluation_offset_sweep`。repo 內另有 `test_inputs_positionally_match_signature` 守這件事，但**它守不了手動同步的環境**（見 §13）。
 
 ## 13. 隔離環境（不能連 git）手動同步後，必須逐檔核對 hash（2026-07-20）
 

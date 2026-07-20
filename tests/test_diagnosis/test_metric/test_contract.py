@@ -141,3 +141,37 @@ def test_every_registered_diagnosis_satisfies_contract(name):
     """
     mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
     contract.check_module(mod)
+
+
+def test_every_registry_diagnosis_has_a_catalog_entry():
+    """registry 有的診斷，``catalog.yaml`` 必須有對應的 JSONDataset。
+
+    漏掉的話 catalog 會自動建一個 MemoryDataset：pipeline 跑得完、頁面也產得
+    出來，但**磁碟上沒有那份 JSON**——離線重繪少一頁，而且沒有任何訊息。
+    Plan 2-5 每加一項診斷都要補一條 entry，所以這個動作會重複四次。
+
+    連 ``type`` 一起驗：只驗 key 存在的話，寫成 MemoryDataset 照樣通過，而那
+    正是要擋的東西。
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    catalog_path = (Path(__file__).resolve().parents[3]
+                    / "conf" / "base" / "catalog.yaml")
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    for name in DIAGNOSES:
+        key = f"evaluation_{name}"
+        assert key in catalog, (
+            f"{key} 不在 catalog.yaml——診斷結果不會落地，離線重繪看不到它"
+        )
+        assert catalog[key]["type"] == "JSONDataset", (
+            f"{key} 的 type 是 {catalog[key]['type']}，"
+            "非 JSONDataset 就不會有磁碟產物"
+        )
+        assert catalog[key]["filepath"].endswith(f"diagnosis/{name}.json"), (
+            f"{key} 的 filepath 不是 diagnosis/{name}.json——"
+            "render_diagnosis_pages 按檔名讀，路徑不對就讀不到"
+        )

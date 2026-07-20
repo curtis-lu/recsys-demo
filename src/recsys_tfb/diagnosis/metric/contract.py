@@ -20,6 +20,16 @@
   每張圖／每張表自己一個 section，各自帶 ``title``／``formula``／``bullets``，
   說明才會落在它描述的那張圖旁邊。簽章不變，所以 :data:`_SIGNATURES` 不受影響。
 
+**``DIAGNOSES`` 不是使用者面的開關。** 它宣告的是「這項診斷在程式碼裡存在」
+——決定 catalog 鍵、頁面編號、以及 ``render_diagnosis_pages`` 會去找哪些檔案。
+使用者要關掉一項診斷，動的是 ``evaluation.diagnosis.<name>.enabled``：那條路
+會讓 ``compute`` 寫一份 ``{"enabled": False}`` stub，``render`` 讀到後回空
+tuple，於是那一頁不存在。
+
+兩者的差別在**產物**：``enabled: false`` 仍會落地一份 stub JSON（看得出來
+「這次刻意沒算」）；從 ``DIAGNOSES`` 移除則連檔案都不會有（看起來像「這個
+版本還沒有這項診斷」）。前者是操作，後者是改版本。
+
 刻意**不做**的兩件事，以及理由：
 
 1. **不用 dataclass 包 ``(name, order)``**：order 可由 tuple 順序推導，多一個
