@@ -15,7 +15,29 @@
 | **1 config_shift** | ✅ **實作完成**，branch `feat/diag-config-shift`。2.1–2.7 全部完成；**2.8 樣板檢查點使用者已通過**（2026-07-20 公司環境實跑成功，回饋見下方三則）；**2.9 offset 換算量表已追加**（`810cce3`，見下方） |
 | **1.5 接線層重構** | ✅ **完成**（`f91bdf6`…`5bfbe45`，7 個 task）。計畫＋執行紀錄見 `02b-plan-1.5-wiring.md` |
 | **2 item_ability ＋ model_capacity** | ✅ **完成**（`77ae013`…`b008588`，6 個 task）。含 `contract.INPUTS` 機制與三項延後案結清 |
-| 3–5 | **可以開工了** |
+| **3 suppression ＋ 交叉購買** | ✅ **完成**（`0dd41d3`…`29952e5`，5 個 task）。`pair_ledger`／`cross_purchase` 已退場 |
+| 4–5 | **可以開工了** |
+
+### Plan 3 交付了什麼（2026-07-21）
+
+`DIAGNOSES` 從三項變四項：`config_shift` → `item_ability` → `model_capacity` → `suppression`。
+
+| 交付 | 內容 |
+|---|---|
+| `suppression` 計算層 | 壓制帳本（哪些 label=0 排在 label=1 之前、分攤多少 AP 缺口）＋ `cross_purchase_stats`（lift，非裸條件機率）。**內層逐 pair 迴圈向量化**：合成 6 萬列／13.6 萬成對跑 **0.56s** |
+| `suppression` 呈現層 | 壓制矩陣熱圖 ＋ 共買 lift 泡泡格圖（**同軸序**）＋ 案例表 ＋ per-suppressor 條圖 |
+| `_common.per_item_ap` | 第四個消費者出現前先去重（原有三份逐位元組相同的副本） |
+| `figures.fits_budget` | `item_ability/_render.py` 的私有 `_fits` 收到常數旁邊——它的 docstring 自陳存在理由就是避免兩份判斷漂移，再複製一份正好破壞它 |
+| `pair_ledger`／`cross_purchase` 退場 | 17 個檔、−824 行，獨立 commit（`72101e2`）。A19 改軌成驗 `suppression.top_examples`，`enabled` 交還 A15（避免同一個壞值吐兩條訊息） |
+
+**兩個設計取捨，都寫進 `SCOPE.blind_to`：**
+
+1. **共買的母體變了**——舊 `cross_purchase.py` 吃 Spark `label_table` **全量**，新的吃**診斷抽樣**。理由不是省事，是**兩張圖並排對照時分母的單位必須相同**；軸序對齊了但母體不同，讀者每一次對照都夾帶一個沒說出口的換算。代價是抽樣分層，樣本內共買頻率不是母體的無偏估計——這句必須寫在頁面上。
+2. **共現單位是 `(time, entity)` 不是 `entity`**——沿用舊實作，且與壓制帳本同單位。買 j 在一月、買 k 在六月不是同一件事。
+
+**矩陣的點數預算**：兩張圖都是 |items|²，`MAX_FIGURE_POINTS=2000` 表示 **45 個 item 就會 raise**。截到前 44 個（依分攤缺口降冪）並在 `bullets` 說明。**沒有退回表格**——那個慣例對「逐 item 一列」的圖是對的，矩陣退回表格是 |items|² 列，而並排對照正是這項診斷的全部價值。
+
+**real-run 驗證**（`--post-training --model-version 6059dcef`，654 queries）：14 節點 50.4s；`diagnose_suppression` **0.04s**（1273 個成對）；四頁 HTML＋index 編號 01–04 連續；四份 JSON 過嚴格解析；離線重繪 2.6 秒。**會計恆等式在真實資料上成立**（295.46428571428567 vs 295.464285714286）。`report.html` 正規化後差異**恰好**是「少一個 pair_ledger 區塊（h2＋3 個 h3）、目錄編號遞補、3 頁→4 頁」，**零新增**。
 
 ### Plan 2 交付了什麼（2026-07-20 收工）
 
@@ -85,9 +107,13 @@
 - **函式寫了、測了，但沒有被接上生產路徑**（2026-07-20，Plan 3 Task 5.2，同一次覆盤）。`cross_purchase_stats` 實作完整、四條測試全綠，但 `compute` 從頭到尾**沒有呼叫它**——輸出只有 `cross_purchase_field_notes`（欄位說明），沒有資料本身。所有測試都直接呼叫 `cross_purchase_stats(...)`，於是「這個函式算得對不對」被完整覆蓋，「這個函式的結果有沒有進到產物」零覆蓋。**根因是規格漏寫**（controller 的 task 說明只寫了「`compute` 的輸出另加 `axis_order`」，沒寫「另加 `cross_purchase`」），但測試的形狀讓這個漏洞看不出來。**判準：對每個新函式問一次「誰呼叫它？」——若答案只有測試，那它還沒上線。契約層級的測試（斷言 `compute` 的輸出含某鍵）與單元測試是兩回事，不能互相替代。**
 - **「不存在」斷言同時被「正確跳過」與「根本沒嘗試」滿足**（2026-07-20，Plan 1.5 Task 1 的 mutation 意外揭露）。`tests/scripts/test_render_diagnosis.py:106-121` monkeypatch `DIAGNOSES` 成兩項、只放一項的 JSON，然後斷言 `01-config-shift.html` 存在、`02-<缺的那項>.html` **不**存在。把 registry 改成「import 時凍結」（等於完全看不到 monkeypatch 的第二項）之後，**三條斷言全部照樣通過**——因為「知道有第二項但沒資料所以跳過」與「根本不知道有第二項」產生**完全相同的檔案系統狀態**。真正有鑑別力的是它的兄弟測試 `:124-137`：斷言那個名字**出現在 stderr**。**判準：驗「某件事被正確略過」時，斷言要落在「系統說了什麼」（log／回傳的 `missing` 清單），不能只落在「檔案沒產生」——後者是雙關的。**
 
-## 下一步：Plan 3（`04-plan-3-suppression.md`）
+## 公司環境同步：**只看 `SYNC-4bfaeb8-to-plan3.md`**
 
-第四項診斷 `suppression` ＋ 交叉購買。開工前先讀本檔的「Plan 2 交付了什麼」與下方「假綠形態」兩段。
+`SYNC-4bfaeb8-to-6e2138d.md` 與 `SYNC-4bfaeb8-to-plan2.md` **都已作廢**（檔頭有標記）。它們宣稱的「零刪除」與「conf 全部是純新增」在 Plan 3 之後都是錯的——現在有 6 個檔要刪、`conf/` 有 17 行刪除。三份並存是為了對照歷史，同步時只跟最新那份。
+
+## 下一步：Plan 4（`05-plan-4-score-shift.md`）
+
+第五項診斷 `score_shift`（Optuna 反事實位移搜尋），本系列最貴的一項。開工前先讀本檔的「Plan 3 交付了什麼」與下方「假綠形態」兩段。
 
 **新增一項診斷要動的地方仍然是三處**（Plan 1.5 的宣稱，Plan 2 兩次實測都成立）：`contract.DIAGNOSES` 一行、`catalog.yaml` 一條 JSONDataset entry、診斷子套件本身。**若那項診斷不吃共用抽樣，再加一行模組層級的 `INPUTS`。** `pipeline.py` 與 `nodes_spark.py` 都不必動。
 
