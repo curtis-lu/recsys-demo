@@ -202,25 +202,36 @@ def test_no_json_at_all_writes_nothing(tmp_path):
     assert not (out / "index.html").exists()
 
 
-def test_script_declares_no_pyspark_import():
-    """script 自己的 import 區不得把 Spark 拉進來。
+def test_no_pyspark_import_in_the_offline_render_path():
+    """離線重繪路徑上的**每個**檔案都不得把 Spark 拉進來。
 
-    為什麼不能只靠上面那條 monkeypatch：script 的 module-level import 在
+    為什麼不能只靠 sys.modules 那條 monkeypatch：module-level import 在
     **收集測試時**就跑完了，比 ``monkeypatch.setitem`` 早——真的寫了
-    ``import pyspark`` 在檔頭，那條測試反而看不到。這裡用 AST 掃 import
-    敘述（不是掃全文），docstring 才能自由說明這條約束。
+    ``import pyspark`` 在檔頭，那條測試反而看不到。
+
+    為什麼掃兩個檔案而不只是 script：``load_results`` 已經搬進 ``src/``
+    （Plan 1.5 Task 1）。只掃 script 的話，這條會繼續全綠但守備範圍是空的
+    ——真正會長出 Spark 相依的是 src 那邊。
     """
     import ast
 
-    source = (Path(__file__).resolve().parents[2]
-              / "scripts" / "render_diagnosis.py").read_text(encoding="utf-8")
-    imported = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            imported.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-    assert not [m for m in imported if m.split(".")[0] == "pyspark"]
+    repo = Path(__file__).resolve().parents[2]
+    targets = [
+        repo / "scripts" / "render_diagnosis.py",
+        repo / "src" / "recsys_tfb" / "diagnosis" / "metric" / "results.py",
+    ]
+    offenders = {}
+    for path in targets:
+        imported = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        bad = [m for m in imported if m.split(".")[0] == "pyspark"]
+        if bad:
+            offenders[path.name] = bad
+    assert not offenders, offenders
 
 
 def test_reports_json_files_that_are_not_in_the_registry(tmp_path, capsys):
