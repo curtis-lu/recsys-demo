@@ -72,8 +72,8 @@ _SIGNATURES = {
 }
 
 #: registry：順序即閱讀順序，也決定 HTML 檔名的數字前綴。
-#: 隨計畫逐步補齊（本計畫只有第一項）。
-DIAGNOSES: tuple[str, ...] = ("config_shift",)
+#: 隨計畫逐步補齊（Plan 2 加入第二項 ``item_ability``）。
+DIAGNOSES: tuple[str, ...] = ("config_shift", "item_ability")
 
 __all__ = ["DIAGNOSES", "check_module"]
 

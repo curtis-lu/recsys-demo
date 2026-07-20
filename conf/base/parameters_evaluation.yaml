@@ -142,6 +142,15 @@ evaluation:
     config_shift:
       enabled: true
 
+    # 診斷 2／5：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
+    # raw（原始分數）與 query_centered（扣掉各自 query 平均後）各算一次；
+    # 差值即客戶活躍度被誤計入 item 推薦能力的量。用 score_uncalibrated（與
+    # config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
+    # macro per-item AP 最低的前幾個 item。
+    item_ability:
+      enabled: true
+      top_n: 30
+
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
     # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
     # 正式評估必須留空。

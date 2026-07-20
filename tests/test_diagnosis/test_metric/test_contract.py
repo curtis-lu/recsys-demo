@@ -19,7 +19,7 @@ from recsys_tfb.diagnosis.metric import contract
 
 
 def test_registry_is_exactly_the_planned_diagnoses():
-    assert contract.DIAGNOSES == ("config_shift",)
+    assert contract.DIAGNOSES == ("config_shift", "item_ability")
 
 
 def test_registry_has_no_duplicates():

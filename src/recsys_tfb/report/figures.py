@@ -179,8 +179,17 @@ def bar(
     y_title: str,
     *,
     center: float | None = None,
+    ci_low: Sequence[float] | None = None,
+    ci_high: Sequence[float] | None = None,
 ) -> go.Figure:
-    """長條圖。``center`` 給定時（有號量）用發散色階，否則單色。"""
+    """長條圖。``center`` 給定時（有號量）用發散色階，否則單色。
+
+    ``ci_low``／``ci_high``：給定時（兩者都要給）加上不對稱誤差線。呼叫端
+    直接傳區間的**絕對邊界**（例如 bootstrap 的 2.5／97.5 百分位），這裡才
+    算上下差——呼叫端不必自己重複這個減法。兩者之一缺席（``None``）就完全
+    不畫誤差線；個別列是 ``None`` 會被轉成 NaN，那一根長條的誤差線由 plotly
+    自然跳過，不影響其餘列。
+    """
     y_arr = np.asarray(y, dtype=float)
     assert_within_budget(len(x), name="bar")
 
@@ -194,6 +203,20 @@ def bar(
     else:
         marker = dict(color=sequential_scale()[1][1])
 
-    fig = go.Figure(data=go.Bar(x=list(x), y=y_arr, marker=marker))
+    error_y = None
+    if ci_low is not None and ci_high is not None:
+        lo_arr = np.asarray(ci_low, dtype=float)
+        hi_arr = np.asarray(ci_high, dtype=float)
+        error_y = dict(
+            type="data",
+            symmetric=False,
+            array=hi_arr - y_arr,
+            arrayminus=y_arr - lo_arr,
+            visible=True,
+        )
+
+    fig = go.Figure(
+        data=go.Bar(x=list(x), y=y_arr, marker=marker, error_y=error_y)
+    )
     fig.update_layout(xaxis_title=x_title, yaxis_title=y_title)
     return _apply_theme(fig, title)
