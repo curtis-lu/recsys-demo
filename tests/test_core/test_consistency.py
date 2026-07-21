@@ -757,6 +757,51 @@ class TestEnabledMustBeBool:
         p = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
         assert diagnosis_metric_param_errors(p) == []
 
+    def test_config_shift_enabled_string_rejected(self):
+        """同一個 YAML 陷阱套用在 config_shift 上。
+
+        歸在 A15（診斷抽樣與 CI 的參數家族）而不是開新代號：config_shift 的
+        enabled 決定的正是「共用診斷抽樣要不要抽」，跟 ci.enabled 是同一條
+        不變量的另一個成員。
+        """
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in ("false", "true", 0, 1, None):
+            p = {"evaluation": {"diagnosis": {
+                "config_shift": {"enabled": bad}
+            }}}
+            errors = diagnosis_metric_param_errors(p)
+            assert len(errors) == 1, (bad, errors)
+            assert "config_shift.enabled" in errors[0], (bad, errors)
+
+    def test_config_shift_bool_values_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for good in (True, False):
+            p = {"evaluation": {"diagnosis": {
+                "config_shift": {"enabled": good}
+            }}}
+            assert diagnosis_metric_param_errors(p) == [], good
+        # 缺席 / 空 block 都採預設值，不算錯
+        assert diagnosis_metric_param_errors(
+            {"evaluation": {"diagnosis": {"config_shift": {}}}}
+        ) == []
+
+    def test_config_shift_wired_into_validate(self):
+        import pytest as _pytest
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            validate_config_consistency,
+        )
+        p = {"evaluation": {"diagnosis": {
+            "config_shift": {"enabled": "false"}
+        }}}
+        # match 挑 "config_shift.enabled"：這個 repo 踩過「match pattern 被別條
+        # predicate 的訊息滿足」的假綠。沒有第二條 predicate 會對這份 config
+        # 吐出這個字串，所以拔掉本檢查這條測試一定紅。
+        with _pytest.raises(
+            ConfigConsistencyError, match=r"config_shift\.enabled"
+        ):
+            validate_config_consistency(p)
+
 
 class TestOffsetSweepParamsA18:
     def _params(self, sweep=None, inject=None):

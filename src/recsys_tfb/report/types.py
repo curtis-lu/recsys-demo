@@ -26,7 +26,24 @@ import plotly.graph_objects as go
 
 @dataclass
 class ReportSection:
-    """A section in the evaluation report."""
+    """A section in the evaluation report.
+
+    ``formula`` 與 ``bullets`` 是後加的兩個**可選**欄位（新增於 diag-redesign，
+    需求來自使用者對第一份真實產出的回饋）：
+
+    * ``formula`` —— 這個區塊的數字是怎麼算出來的，一行。讀者不必翻手冊就能
+      對上圖表裡的數字。用 Unicode 純文字寫數學符號（``Δ``／``Σ``／``≠``／
+      ``ln``），**不要引入 MathJax／KaTeX**——生產限制是 no network、no
+      additional packages，外部 CDN 一定載不到。
+    * ``bullets`` —— 重點，每則一句。``description`` 在兩個渲染器都是包進單一
+      ``<p>``，塞不進列點；長段落正是被抱怨「沒耐心看完」的那個形狀。
+
+    **兩者都必須維持可選且有預設值**：``evaluation/report_builder.py`` 有 13 個
+    既有的 ``build_*_section`` 只傳 title/description，加必填欄位會讓它們全部
+    ``TypeError``。兩個渲染器（``report/pages.py`` 與 ``evaluation/report.py``）
+    都必須渲染這兩個欄位——只改一邊的話，另一邊會**默默丟掉**它們，而那種 bug
+    不會有任何錯誤訊息。
+    """
 
     title: str
     description: str
@@ -34,6 +51,8 @@ class ReportSection:
     tables: list[pd.DataFrame] = field(default_factory=list)
     table_titles: list[str] = field(default_factory=list)
     collapsible: bool = False
+    formula: str = ""
+    bullets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
+from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
 
 def create_pipeline(
@@ -27,9 +28,12 @@ def create_pipeline(
         compute_metrics,
         compute_offset_sweep,
         compute_pair_ledger,
+        compute_report_aggregates,
         draw_diagnosis_sample_node,
         generate_report,
+        make_diagnosis_node,
         prepare_eval_data,
+        render_diagnosis_pages,
     )
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
         generate_comparison_report,
@@ -98,6 +102,11 @@ def create_pipeline(
             outputs="baseline_metrics",
         ),
         Node(
+            compute_report_aggregates,
+            inputs=["eval_predictions", "parameters"],
+            outputs="evaluation_report_aggregates",
+        ),
+        Node(
             compute_metric_ci,
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_metric_ci",
@@ -112,11 +121,32 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_pair_ledger",
         ),
+        # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
+        # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
+        *[
+            Node(
+                make_diagnosis_node(name),
+                inputs=["diagnosis_sample", "parameters"],
+                outputs=f"evaluation_{name}",
+            )
+            for name in DIAGNOSES
+        ],
+        # inputs 裡的診斷產物**只當依賴宣告**，node 本身按檔名讀（見
+        # nodes_spark.render_diagnosis_pages 的 docstring）。列出它們是為了
+        # (1) 讓拓撲排序把這個 node 排在所有診斷之後、(2) 讓 --only-node 的
+        # 切片擴張在 JSON 不存在時能往上拉到診斷節點。
+        Node(
+            render_diagnosis_pages,
+            inputs=["parameters",
+                    *(f"evaluation_{name}" for name in DIAGNOSES)],
+            outputs="evaluation_diagnosis_pages",
+        ),
         Node(
             generate_report,
-            inputs=["eval_predictions", "evaluation_metrics",
-                    "parameters", "baseline_metrics", "evaluation_metric_ci",
-                    "evaluation_offset_sweep", "evaluation_pair_ledger"],
+            inputs=["evaluation_metrics", "parameters", "baseline_metrics",
+                    "evaluation_metric_ci", "evaluation_offset_sweep",
+                    "evaluation_pair_ledger", "evaluation_report_aggregates",
+                    "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),
         # persist returns the same DF as-is; framework auto-saves via catalog

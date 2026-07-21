@@ -57,6 +57,21 @@ tr:nth-child(even) { background: #fafafa; }
 .scope-note dt { font-weight: 600; color: #78350f; margin-top: 8px; }
 .scope-note dd { margin: 2px 0 2px 0; color: #444; }
 .scope-note ul { margin: 4px 0; padding-left: 20px; }
+.formula {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  background: #f5f7fa;
+  border-left: 3px solid #94a3b8;
+  padding: 10px 16px;
+  margin: 12px 0 16px;
+  border-radius: 2px;
+  font-size: 0.95em;
+  color: #1f2937;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.section-bullets { margin: 12px 0 16px; padding-left: 22px; line-height: 1.7; }
+.section-bullets li { margin: 4px 0; color: #444; }
+details > summary { font-size: 1.5em; color: #555; cursor: pointer; margin: 24px 0 8px; }
 """
 
 
@@ -83,8 +98,22 @@ def _fmt_cell(x: Any) -> Any:
     return x
 
 
+def _show_index(table: pd.DataFrame) -> bool:
+    """預設 ``RangeIndex`` 不顯示，其餘顯示。
+
+    ``0 1 2 3`` 這種自動流水號在報表上是純雜訊——讀者會花一秒判斷它是不是
+    一欄資料（實測第一份真實產出就發生了：統計量表印成
+    ``0 mean +0.445``）。反過來，被 ``set_index`` 成 item 名稱或客群名稱的
+    index 是那張表的 row label，藏起來會讓表格讀不懂。
+
+    用 index 的**型別**而不是 config 開關來判斷：呼叫端有沒有刻意設定 index，
+    這件事它自己就表達完了，多一個參數只是讓每個呼叫端重講一次。
+    """
+    return not isinstance(table.index, pd.RangeIndex)
+
+
 def _render_table(table: pd.DataFrame) -> str:
-    return table.applymap(_fmt_cell).to_html(index=True)
+    return table.applymap(_fmt_cell).to_html(index=_show_index(table))
 
 
 def _render_scope_note(scope: ScopeNote) -> str:
@@ -95,7 +124,11 @@ def _render_scope_note(scope: ScopeNote) -> str:
     parts.append(f"<dt>算在哪批列上</dt><dd>{_escape(scope.population)}</dd>")
     if scope.sampling:
         parts.append(f"<dt>抽樣設計</dt><dd>{_escape(scope.sampling)}</dd>")
-    parts.append("<dt>看不見什麼</dt><dd><ul>")
+    # 「推論不到什麼」而不是「看不見什麼」：後者與各診斷頁裡「本次執行的完整性
+    # 檢查」那一節混淆——那一節講的是這次跑出來有沒有踩到已知的靜默失效（會隨
+    # 執行變動），這裡講的是這個指標結構上就推論不到的事（與資料無關，永遠成立）。
+    # 兩者同名時使用者當場指出「標題跟內容對不起來，而且兩邊內容完全無關」。
+    parts.append("<dt>推論不到什麼</dt><dd><ul>")
     for item in scope.blind_to:
         parts.append(f"<li>{_escape(item)}</li>")
     parts.append("</ul></dd>")
@@ -107,6 +140,25 @@ def _render_scope_note(scope: ScopeNote) -> str:
     parts.append("</dl>")
     parts.append("</div>")
     return "\n".join(parts)
+
+
+def _render_section_extras(section) -> list[str]:
+    """``formula`` 與 ``bullets`` 的 HTML；兩者皆空時回空 list。
+
+    回空 list 而不是空字串是刻意的：呼叫端 ``extend`` 之後**一個標籤都不會多**，
+    所以既有 13 個不帶新欄位的 ``build_*_section`` 輸出逐位元不變。
+
+    兩個渲染器（本檔與 ``evaluation/report.py``）共用這一份，不是各寫一份：
+    各寫一份的話，之後只改其中一邊，另一邊會靜默丟掉欄位而不報錯。
+    """
+    parts: list[str] = []
+    if section.formula:
+        parts.append(f'<div class="formula">{_escape(section.formula)}</div>')
+    if section.bullets:
+        parts.append('<ul class="section-bullets">')
+        parts.extend(f"<li>{_escape(b)}</li>" for b in section.bullets)
+        parts.append("</ul>")
+    return parts
 
 
 def _render_page_html(page: Page) -> str:
@@ -125,9 +177,14 @@ def _render_page_html(page: Page) -> str:
         parts.append(_render_scope_note(page.scope))
 
     for section in page.sections:
-        parts.append('<div class="section">')
-        parts.append(f"<h2>{_escape(section.title)}</h2>")
+        if section.collapsible:
+            parts.append('<details class="section">')
+            parts.append(f"<summary>{_escape(section.title)}</summary>")
+        else:
+            parts.append('<div class="section">')
+            parts.append(f"<h2>{_escape(section.title)}</h2>")
         parts.append(f'<p class="description">{_escape(section.description)}</p>')
+        parts.extend(_render_section_extras(section))
 
         for fig in section.figures:
             parts.append(fig.to_html(full_html=False, include_plotlyjs=False))
@@ -137,7 +194,7 @@ def _render_page_html(page: Page) -> str:
                 parts.append(f"<h3>{_escape(section.table_titles[i])}</h3>")
             parts.append(_render_table(table))
 
-        parts.append("</div>")
+        parts.append("</details>" if section.collapsible else "</div>")
 
     parts.append("</body></html>")
     return "\n".join(parts)

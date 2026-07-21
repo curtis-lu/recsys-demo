@@ -62,10 +62,15 @@ RESUME_CONTRACTS = {
     ("evaluation", ()): {
         # eval_predictions/metrics are memory-only: report regeneration
         # re-runs the metric chain. Documented cost, pinned here.
+        # render_diagnosis_pages is also memory-only (its output is a list of
+        # paths, meaningful only for the run that wrote them) — resuming at
+        # generate_report re-renders the pages from the diagnosis JSONs, which
+        # is the cheap half-second path, not a Spark job.
         "generate_report": {
             "prepare_eval_data",
             "compute_metrics",
             "compute_baseline_metrics",
+            "render_diagnosis_pages",
         },
     },
 }

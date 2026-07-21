@@ -48,6 +48,46 @@ class TestGenerateHtmlReport:
         assert "Section A" in html
         assert "Section B" in html
 
+    def test_formula_rendered(self):
+        """主報表也要渲染 ``formula``。
+
+        只改診斷頁那個渲染器的話，``ReportSection`` 就多了一個「某個渲染器
+        會默默丟掉」的欄位——之後有人在主報表的 section 加公式會靜默消失，
+        而那種 bug 沒有任何錯誤訊息。
+        """
+        sections = [ReportSection(title="S", description="d",
+                                  formula="Δ = mAP(F − offset) − mAP(F)")]
+        html = generate_html_report(sections)
+        assert 'class="formula"' in html
+        assert "Δ = mAP(F − offset) − mAP(F)" in html
+
+    def test_bullets_rendered(self):
+        sections = [ReportSection(title="S", description="d",
+                                  bullets=["第一則", "第二則"])]
+        html = generate_html_report(sections)
+        assert "<li>第一則</li>" in html
+        assert "<li>第二則</li>" in html
+
+    def test_bullets_are_escaped(self):
+        sections = [ReportSection(title="S", description="d",
+                                  bullets=["<script>alert(1)</script>"])]
+        html = generate_html_report(sections)
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_empty_formula_and_bullets_render_nothing(self):
+        """既有 13 個 ``build_*_section`` 的輸出必須不受影響。
+
+        ``<ul>`` 在主報表被目錄用掉了，所以只數 section 區塊之後的部分；
+        比對渲染出的**標籤**而不是字串 "formula"，避免命中 CSS 裡的樣式定義。
+        """
+        sections = [ReportSection(title="S", description="d")]
+        html = generate_html_report(sections)
+        body = html[html.index("</nav>"):]
+        assert "<ul>" not in body
+        assert 'class="formula"' not in body
+        assert 'class="section-bullets"' not in body
+
     def test_metadata_table(self):
         sections = [ReportSection(title="Test", description="Test")]
         metadata = {"Model Version": "abc12345", "Snap Date": "2024-03-31"}

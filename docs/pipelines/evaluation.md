@@ -364,11 +364,14 @@ python -m recsys_tfb evaluation \
   --dry-run
 ```
 
-`eval_predictions`、`evaluation_metrics` 與 `baseline_metrics` 都是記憶體中間結果。即使從 `generate_report` 接續，前次完整 run 成功時仍會自動補跑：
+`generate_report` 本身已不直接吃 `eval_predictions`（Plan 1.5 把它拆成純函式，8 個參數全部是別的 node 算好的產物，見 5.1 節的表）。但這 8 個裡 `evaluation_metrics`、`baseline_metrics`、`evaluation_diagnosis_pages` 三個仍是記憶體中間結果（`catalog.yaml` 沒有對應 entry）；其餘四份（`evaluation_metric_ci`／`evaluation_offset_sweep`／`evaluation_pair_ledger`／`evaluation_report_aggregates`，以及每項 registry 診斷各自的 JSON，如 `evaluation_config_shift`）都已落地成 `JSONDataset`。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時只會自動補跑：
 
-- `prepare_eval_data`
+- `prepare_eval_data`（`eval_predictions` 沒地方讀，得重算）
 - `compute_metrics`
 - `compute_baseline_metrics`
+- `render_diagnosis_pages`（它的輸出是「這次執行寫出的頁面路徑清單」，語意上不該落地重用；但它讀的診斷 JSON 已落地，不會連 `diagnose_config_shift` 一起被拉回來重跑）
+
+這組清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS[("evaluation", ())]["generate_report"]`，之後改動這幾個 node 的形狀，該測試會紅燈提醒同步文件。
 
 因此 evaluation 沒有便宜的「只重新渲染標準報表」接續點。需要只重做模型比較時，應使用持久化 `enriched_eval_predictions` 的 `--compare-only`。
 
@@ -378,13 +381,24 @@ python -m recsys_tfb evaluation \
 
 ### 5.1 標準模式
 
+Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與診斷渲染拆成獨立 node；default 模式現在是 12 個 node（不含比較模式追加的 3 個），順序即 `--list-nodes` 印出的拓撲序：
+
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
+| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`） | `diagnosis_sample` |
 | 模型指標 | `compute_metrics` | enriched rows | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics | `evaluation_metrics` |
 | Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標 | `baseline_metrics` |
+| 報表區 Spark 聚合 | `compute_report_aggregates` | enriched rows、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
 | 持久化 | `persist_eval_predictions` | enriched rows | 透過 catalog 寫入 Hive | `enriched_eval_predictions` |
-| 標準報表 | `generate_report` | rows、metrics、baseline | 產生互動式 HTML | `evaluation_report` |
+| 指標信賴區間 | `compute_metric_ci` | `diagnosis_sample`、parameters | per-item AP 與 macro 的 cluster bootstrap CI（cluster＝`cust_id`） | `evaluation_metric_ci` |
+| 分流層：offset sweep | `compute_offset_sweep` | `diagnosis_sample`、parameters | 座標下降搜尋每個 item 的最適 logit 偏移 δ*，量化排序結果對配置的敏感度 | `evaluation_offset_sweep` |
+| 分流層：壓制帳本 | `compute_pair_ledger` | `diagnosis_sample`、parameters | 逐正例列舉排其上的負例、記交換名次的 \|ΔAP\|，組成壓制者×受害者矩陣 | `evaluation_pair_ledger` |
+| 診斷（registry，現有 1／5） | `diagnose_config_shift` | `diagnosis_sample`、parameters | 讀 `evaluation.diagnosis.config_shift.enabled`（使用者唯一的開關，見該鍵旁的註解與 `diagnosis.metric.contract` docstring）；停用時寫 `{"enabled": false}` stub | `evaluation_config_shift` |
+| 診斷頁面組裝 | `render_diagnosis_pages` | parameters（診斷 JSON 只當 DAG 依賴，實際按檔名讀，見 4.6 節） | 把已落地的診斷 JSON 組成獨立分頁 HTML；哪項停用就少哪一頁 | `evaluation_diagnosis_pages` |
+| 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_offset_sweep`、`evaluation_pair_ledger`、`evaluation_report_aggregates`、`evaluation_diagnosis_pages`（8 個必填參數，皆無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action | `evaluation_report` |
+
+`diagnose_config_shift` 這一列會隨 registry（`diagnosis.metric.contract.DIAGNOSES`）成長：Plan 2-5 每加一項診斷，pipeline 就多一個同形狀的 `diagnose_<name>` node（由 `make_diagnosis_node` 產生），此表要跟著補列。
 
 `training_eval_predictions` 不保存 rank，因此 post-training 模式會依 score 在每個 query group 內重算。監控模式的 `ranked_predictions` 已有 rank，`prepare_eval_data` 會保留發布結果中的 rank；metric computation 本身仍會依 score 重新建立內部 position。
 
@@ -486,7 +500,8 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | `segment_columns`／`segment_sources` | 標準 full run | 需要重新 join 並更新 enriched schema/data |
 | `product_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
 | `baseline.lookback_months` | 標準 full run | 需要重新讀歷史 labels 與計算 baseline |
-| 標準 report sections／display／diagnostics | 標準 full run 或從 `generate_report` 接續 | metrics 是記憶體產物，接續仍會補跑 metric chain |
+| 標準 report `sections`／`display`／`diagnostics`（只影響報表怎麼呈現，不影響任何診斷怎麼算） | 標準 full run 或從 `generate_report` 接續 | `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 是記憶體產物，接續仍會補跑對應 node（見 4.6 節） |
+| `evaluation.diagnosis.*`（任一項診斷的 `enabled` 或計算參數，如 `config_shift`／`sample`／`offset_sweep`——這是診斷唯一的使用者開關） | 標準 full run | 該項診斷的 JSON 已落地磁碟；`--from-node generate_report` 的自動擴張只看「存在與否」不看新鮮度，只改開關會讀到舊設定算出的舊結果 |
 | `compare_sources` 或比較對象 | `--compare-only` | Model A enriched data 未變時可直接重做比較 |
 | 比較報表使用的 K／category 設定 | `--compare-only` | 會在 common rows 上重新計算雙方 metrics |
 | Model A 預測來源由 training 改為 monitoring，或反向切換 | 標準 full run | 必須重新建立 enriched Model A partition |
@@ -507,7 +522,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 ### 7.4 部分重跑的安全邊界
 
 - `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。
-- `generate_report` 的上游 rows、metrics 與 baseline 都是 memory-only，因此從該 node 接續仍會補跑完整 metric chain。
+- `generate_report` 的直接輸入已不含 `eval_predictions`（rows）；但 `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 仍是 memory-only，因此從該 node 接續仍會補跑 `prepare_eval_data`／`compute_metrics`／`compute_baseline_metrics`／`render_diagnosis_pages`（見 4.6 節；四份已落地的診斷 JSON 不在此列，不會重算——這正是上一條「`exists()` 不驗新鮮度」在這裡的具體後果：改了 `evaluation.diagnosis.*` 而只做這個接續，不會生效）。
 - `enriched_eval_predictions` 是唯一為 comparison recovery 持久化的 row-level 中間產物；`--compare-only` 會先驗證指定 model/date partition 非空。
 - `--compare-only` 不會更新 enriched partition，也不會重新產生標準 report。
 - 位於 slicing 起點之前的資料讀取或驗證可能被跳過；來源資料變更時應 full run。

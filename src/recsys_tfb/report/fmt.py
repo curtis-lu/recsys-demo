@@ -72,8 +72,26 @@ def fmt_ratio(x: Any) -> str:
 
 
 def fmt_count(x: Any) -> str:
-    """計數：千分位、無小數。"""
+    """計數：千分位、無小數。**只給真正的整數計數**，加權和用 ``fmt_weighted_count``。"""
     v = _to_finite_float(x)
     if v is None:
         return ""
     return f"{round(v):,}"
+
+
+def fmt_weighted_count(x: Any) -> str:
+    """加權計數（inclusion_weight 之和）：千分位＋1 位小數。
+
+    為什麼不共用 ``fmt_count``：加權和不是整數，捨入到整數會在 ``.5`` 上出事。
+    Python 的 ``round`` 是銀行家捨入，於是 61.5 → 62 而 28.5 → 28——同一欄裡兩個
+    都是 ``.5`` 的值往相反方向跑，讀者看到的是「這張表的數字不對」。保留一位
+    小數就沒有這個問題，而且順帶讓「加權和」與「原始列數」在視覺上分得開
+    （``62.0`` vs ``62``）。
+
+    位數選 1 是因為它的用途是給規模感（n_pos_effective 有多少），不是拿來對帳；
+    要精確值的人看 JSON。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v:,.1f}"

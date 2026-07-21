@@ -12,6 +12,8 @@ rest is ``groupBy`` + ``count``/``avg``/``sum``.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -212,3 +214,96 @@ def calibration_bins(
     ].index
     out = agg[agg[item_col].isin(keep)][cols]
     return out.sort_values([item_col, "bin"]).reset_index(drop=True)
+
+
+#: :func:`frame_to_json` 支援的兩種形狀。
+_LONG = "long"
+_MATRIX = "matrix"
+
+
+def _no_nan(value):
+    """NaN → None。理由見 :func:`frame_to_json` 的 docstring。"""
+    return None if isinstance(value, float) and math.isnan(value) else value
+
+
+def frame_to_json(df: pd.DataFrame, kind: str) -> dict:
+    """把聚合出來的小 frame 轉成可以落地的 dict。
+
+    ``kind`` 明寫而不是從 index 型別推斷：長格式的 index 是無意義的
+    ``RangeIndex``（丟掉），矩陣的 index 是 item 名稱（丟了 heatmap 就沒有
+    y 軸標籤）。推斷會在「item 剛好是 0, 1, 2」時猜錯，而那不會有任何測試轉紅。
+
+    ``to_dict("split")`` **已經**把 numpy 純量轉成 Python 原生型別（實測
+    ``int64`` → ``int``、object index → ``str``），所以這裡不逐格轉型。但它
+    **不處理 NaN**：``JSONDataset`` 用預設 ``allow_nan=True``，NaN 會寫成
+    ``NaN`` 這個非合法 JSON 的字面值，Python 讀得回來、別的工具不行——而這些
+    檔案的用途正是被拷到別的環境去讀。所以在這裡換成 ``None``。
+    """
+    if kind not in (_LONG, _MATRIX):
+        raise ValueError(
+            f"kind must be {_LONG!r} or {_MATRIX!r}, got {kind!r}"
+        )
+    split = df.to_dict("split")
+    out = {
+        "kind": kind,
+        "columns": list(split["columns"]),
+        "data": [[_no_nan(v) for v in row] for row in split["data"]],
+    }
+    if kind == _MATRIX:
+        out["index"] = list(split["index"])
+    return out
+
+
+def frame_from_json(payload: dict) -> pd.DataFrame:
+    """:func:`frame_to_json` 的反向。回傳的 frame 直接餵給繪圖函式。"""
+    df = pd.DataFrame(payload["data"], columns=payload["columns"])
+    if payload.get("kind") == _MATRIX:
+        df.index = payload["index"]
+    return df
+
+
+def aggregate_report_diagnostics(
+    sdf: SparkDataFrame,
+    item_col: str,
+    score_col: str,
+    rank_col: str,
+    label_col: str,
+    include_distributions: bool = True,
+    include_calibration: bool = True,
+    n_calibration_bins: int = 10,
+) -> dict:
+    """報表診斷區需要的全部聚合，一次算完並轉成可落地的 dict。
+
+    ``sdf`` 必須由呼叫端先投影並 ``cache()``：這裡每個家族各是一次 action，
+    不 cache 就是 6 次全掃。
+
+    關掉的家族**不放進 payload**（不是放空的）：空的看起來像「量到了、結果
+    什麼都沒有」，那是這次重構要避免的誤讀。
+
+    ``columns`` 跟著 payload 走，好讓這份 JSON 拷到別的環境也能單獨重繪——
+    重繪端不保證拿得到同一份 ``parameters``。
+    """
+    out: dict = {
+        "columns": {
+            "item": item_col, "score": score_col,
+            "rank": rank_col, "label": label_col,
+        },
+    }
+    if include_distributions:
+        out["score_histogram"] = frame_to_json(
+            score_histogram_counts(sdf, item_col, score_col), _LONG)
+        out["score_box_by_label"] = frame_to_json(
+            score_box_stats_by_label(sdf, item_col, score_col, label_col),
+            _LONG)
+        out["rank_counts"] = frame_to_json(
+            rank_count_matrix(sdf, item_col, rank_col), _MATRIX)
+        out["positive_rank_counts"] = frame_to_json(
+            positive_rank_count_matrix(sdf, item_col, rank_col, label_col),
+            _MATRIX)
+        out["positive_rate"] = frame_to_json(
+            positive_rate_matrix(sdf, item_col, rank_col, label_col), _MATRIX)
+    if include_calibration:
+        out["calibration"] = frame_to_json(
+            calibration_bins(sdf, item_col, score_col, label_col,
+                             n_bins=n_calibration_bins), _LONG)
+    return out

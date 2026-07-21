@@ -84,6 +84,9 @@ evaluation:
     shrinkage_k: 0
 
   # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座 + §3 Phase 1 CI）。
+  # 每項診斷只有這一個開關。關掉 => 仍會落地一份 {"enabled": false} 的 stub
+  # JSON、但不產生頁面。想讓一項診斷「完全不存在」是改 code
+  # （diagnosis.metric.contract.DIAGNOSES），不是改這裡。
   diagnosis:
     # 診斷抽樣：單位＝query（snap_date × cust_id）、只取有正例的 query；
     # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
@@ -131,6 +134,12 @@ evaluation:
     # ablation 逐 item 換 base-rate logit 常數重算指標（O(M) 次）量淨貢
     # 獻/淨傷害。跑在同一份診斷抽樣上；描述性會計、全樣本不切折。
     pair_ledger:
+      enabled: true
+
+    # 診斷 1／5：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
+    # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
+    # 校準層是後貼的）。
+    config_shift:
       enabled: true
 
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數

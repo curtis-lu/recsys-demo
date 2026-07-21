@@ -332,14 +332,21 @@ import pytest
 from recsys_tfb.diagnosis.metric import config_shift
 from recsys_tfb.report import ReportSection
 
+# 實際的鍵以 _compute.py 為準（Task 2.2 完成後照著它抄一份，不要憑本計畫檔猜）
 RESULT = {
     "enabled": True,
-    "offset_spread": {"mass": 0.693, "affluent": 0.105},
+    # 名字刻意都帶標記：讀者問的是「偏移對排序有多大影響」，只有 query 內的
+    # 相對差答得了；by_context 只在 context 為 entity 級屬性時才等於它。讓無
+    # 標記的短名字獨佔其中一個，會讓讀者把它當預設主指標。
+    "offset_spread_by_context": {"mass": 0.693, "affluent": 0.105},
     "offset_matrix": {"mass": {"ccard_ins": 0.693, "fund_bond": 0.0}},
+    "query_offset_spread": {"p50": 0.0, "p90": 0.693, "max": 0.693},
     "baseline_map": 0.4210, "corrected_map": 0.4202,
     "delta": -0.0008, "delta_ci_low": -0.0030, "delta_ci_high": 0.0013,
-    "per_item": [{"item": "ccard_ins", "delta_j": 0.0449, "n_pos": 120}],
-    "per_item_sum_note": "Σ Δ_j ≠ Δ：名次耦合，逐項替換實驗不是分解",
+    "per_item": [{"item": "ccard_ins", "delta_j": 0.0449,
+                  "n_pos_raw": 120, "n_pos_effective": 120.0}],
+    "notes": [], "unmatched_override_keys": [],
+    "items_declared_not_observed": [],
     "sample": {"n_queries": 654, "n_items": 8},
 }
 
@@ -390,8 +397,10 @@ Expected: FAIL — `AttributeError: module 'recsys_tfb.diagnosis.metric.config_s
 1. **offset 矩陣熱圖**：`heatmap(z=客群×item 的 offset, center=0.0)`——有號量，發散色階。註明「顯示值已扣掉群內中位數（純美觀，不影響任何結論）」。
 2. **群內 spread 條圖**：`bar(x=客群, y=spread)`，`fmt_logodds`。
 3. **Δ 與 CI**：一行文字，`fmt_delta(delta)` ＋ `[fmt_delta(lo), fmt_delta(hi)]`。**不加任何判讀句**——不寫「顯著」「不顯著」，只給數字與區間，讀者自己看區間有沒有跨 0。
-4. **per-item Δ_j 條圖**：`bar(x=item, y=delta_j, center=0.0)`，發散色階；下方緊接 `per_item_sum_note`。
+4. **per-item Δ_j 條圖**：`bar(x=item, y=delta_j, center=0.0)`，發散色階；下方緊接 `Σ Δ_j ≠ Δ` 那句說明——**這句話由 `SCOPE.blind_to` 擁有，不是從 `compute` 的 JSON 讀來的**（計畫原稿要 `compute` 輸出 `per_item_sum_note`，那與 `SCOPE` 重複，已移除）。
 5. **樣本規模**：`n_queries`／`n_items`／`n_positive_rows`，用 `fmt_count`。
+6. **`query_offset_spread` 分位數**：逐 query 的 offset `max − min` 分布（p50／p90／max）。這是「真正抵達排序的偏移」，`offset_spread` 是「config 說了什麼」——兩者在 context 欄為 item 級屬性時會分歧，此時 `notes` 會有一則說明，**必須一併呈現**。
+7. **`notes`、`unmatched_override_keys`、`items_declared_not_observed`**：零命中的 override key 清單，以及 config 宣告了但抽樣裡沒出現的 item 清單。**這一區不可省**——三者都是「診斷看不見某樣東西」的觀測，而看不見與「量到零」在報表上長得一模一樣：`Δ ≈ 0` 是本項診斷宣稱可以排除整個方向的訊號，查表全未命中會偽造出同樣的 `Δ = 0`；`offset_matrix` 少一列，跟該 item 沒有偏移也長得一樣。
 
 `__init__.py`：
 
@@ -414,8 +423,15 @@ SCOPE = ScopeNote(
         "偏移是否真的被模型吸收——這裡算的是理論值，不是從模型參數量出來的。",
         "Σ Δ_j ≠ Δ：逐 item 的 Δ_j 是替換實驗，名次互相耦合，不可相加。",
         "Δ 只反映『扣掉理論 offset』這一種操作的效果，不代表配置的全部影響。",
-        "同一客群內所有 item 的 offset 同加一個常數時 Δ 完全不變——"
-        "所以 Δ 量不到偏移的絕對水準，只量得到 item 之間的差。",
+        "當 context 欄在每個 query 內為常數（entity 級屬性）時，同一群內所有 "
+        "item 的 offset 同加一個常數則 Δ 完全不變——此前提下 Δ 量不到偏移的絕對"
+        "水準，只量得到 item 之間的差。context 欄取自 item 級屬性（產品層級／"
+        "類別）時前提不成立，改看 query_offset_spread。",
+        "Δ 的推導前提是 pointwise 機率型 objective；objective 為 lambdarank 等"
+        "非機率型時分數是無界原始分數，log-odds offset 的相減沒有理論基礎"
+        "（此時 notes 會點名此事）。",
+        "沒有出現在樣本中的 (context, item) 組合——offset 矩陣只列實際觀測到的"
+        "組合，config 上存在但資料裡沒有的組合不會被算進任何 spread。",
     ),
     reference_points=(
         "群內 spread = 0 代表該客群內 offset 均勻，對 query 內名次零影響（可直接推導，不需估計）。",
@@ -617,8 +633,16 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
         if section is None:
             continue
         slug = f"{i:02d}-{name.replace('_', '-')}"  # 數字前綴＝閱讀順序
+        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：五項共用同一份
+        # diagnosis_sample，sampling_description 永遠在同一個位置。讓各診斷
+        # 各帶一個 scope_for() hook 等於同一段 replace 被抄五次。
+        scope = dataclasses.replace(
+            mod.SCOPE,
+            sampling=(result.get("sample_meta", {}) or {}).get(
+                "sampling_description", ""),
+        )
         pages.append(Page(slug=slug, title=mod.TITLE,
-                          scope=mod.SCOPE, sections=(section,)))
+                          scope=scope, sections=(section,)))
     return write_pages(pages, out_dir=out_dir,
                        index_title="排序診斷",
                        index_intro=_diagnosis_index_intro())

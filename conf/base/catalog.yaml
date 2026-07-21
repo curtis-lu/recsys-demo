@@ -254,6 +254,17 @@ evaluation_pair_ledger:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/pair_ledger.json
 
+# registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／5
+evaluation_config_shift:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/config_shift.json
+
+# 主報表診斷區的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
+# 落地的理由不只是快取：generate_report 因此變成純函式，主報表可以離線重繪。
+evaluation_report_aggregates:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/report_aggregates.json
+
 evaluation_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report.html

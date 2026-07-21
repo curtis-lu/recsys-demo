@@ -672,12 +672,16 @@ class TestDrawDiagnosisSampleNode:
 
     def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
         from unittest.mock import patch
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
         from recsys_tfb.pipelines.evaluation import nodes_spark
         params = self._params()
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": False},
             "offset_sweep": {"enabled": False},
             "pair_ledger": {"enabled": False},
+            # registry 診斷（contract.DIAGNOSES）預設也是 enabled，所以「全部
+            # 停用」必須連它們一起關——只關舊三項的話樣本仍然該抽。
+            **{name: {"enabled": False} for name in DIAGNOSES},
         })
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
@@ -776,3 +780,139 @@ class TestDrawDiagnosisSampleNode:
         # Free pandas measurement (rows populated), NOT a Spark count.
         assert vols[0]["kind"] == "pandas"
         assert vols[0]["rows"] is not None
+
+
+class TestRegistryDiagnosisEnabled:
+    """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。
+
+    為什麼跟 ``_sample_consumer_flags`` 分開而不是把 3-tuple 擴成 4-tuple：
+    舊三項（ci／offset_sweep／pair_ledger）是即將被取代的既有診斷，新五項走
+    ``contract.DIAGNOSES``。合在一個 tuple 裡的話，registry 每加一項診斷都要
+    改所有解包點——而「新增診斷不必改接線」正是 registry 存在的目的。
+    """
+
+    def test_defaults_true(self):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _registry_diagnosis_enabled,
+        )
+        assert _registry_diagnosis_enabled({}) is True
+
+    def test_false_only_when_every_registry_diagnosis_disabled(self):
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            _registry_diagnosis_enabled,
+        )
+        all_off = {"evaluation": {"diagnosis": {
+            name: {"enabled": False} for name in DIAGNOSES
+        }}}
+        assert _registry_diagnosis_enabled(all_off) is False
+
+        # 任一開著就是 True。逐項單開，避免哪天 registry 只剩一項時這條
+        # 測試退化成「跟上一條測同一件事」。
+        for name in DIAGNOSES:
+            params = {"evaluation": {"diagnosis": {
+                other: {"enabled": other == name} for other in DIAGNOSES
+            }}}
+            assert _registry_diagnosis_enabled(params) is True, name
+
+
+def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
+    """關掉舊三項、只開 config_shift → 仍然必須抽樣。
+
+    這是本次接線最容易靜默失效的地方：抽樣閘門若只看舊三項，使用者關掉它們
+    之後 ``diagnosis_sample`` 是 None，config_shift 節點就撞 fail-loud 的
+    ValueError——一個純粹由接線遺漏造成、使用者無從自救的失敗。
+    """
+    from unittest.mock import patch
+    import pandas as pd
+    from recsys_tfb.pipelines.evaluation import nodes_spark
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+        }},
+        "evaluation": {"diagnosis": {
+            "sample": {"max_queries": 10, "min_pos_queries_per_item": 2,
+                       "seed": 42},
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": False},
+            "pair_ledger": {"enabled": False},
+            "config_shift": {"enabled": True},
+        }},
+    }
+    with patch(
+        "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+        return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
+    ) as spy:
+        result = nodes_spark.draw_diagnosis_sample_node(None, params)
+    assert result is not None, (
+        "sample gate ignored the registry diagnoses — config_shift is enabled "
+        "but no sample was drawn"
+    )
+    spy.assert_called_once_with(None, params)
+
+
+def test_generated_node_writes_stub_when_disabled():
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
+    params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
+    assert node_fn(None, params) == {"enabled": False}
+
+
+def test_generated_node_raises_when_enabled_but_sample_none():
+    import pytest as _pytest
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
+    with _pytest.raises(ValueError, match="draw_diagnosis_sample_node"):
+        node_fn(None, {})
+
+
+def test_generated_node_delegates_to_the_named_module(monkeypatch):
+    """轉呼叫的是**以名字查到的**模組，不是寫死的 config_shift。
+
+    工廠若把模組名寫死，registry 只有一項時**每一條測試都會照樣綠**——
+    Plan 2 加第二項才會爆，而症狀是「第二項診斷的頁面印出第一項的數字」，
+    每頁看起來都很正常。所以這裡注入一個假模組，用它有沒有被呼叫到來證明
+    查表這件事真的發生了。
+    """
+    import sys
+    import types
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    called = {}
+    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_diag")
+
+    def _compute(diagnosis_sample, parameters):
+        called["sample"] = diagnosis_sample
+        return {"marker": "from_fake"}
+
+    fake.compute = _compute
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_diag", fake)
+
+    node_fn = make_diagnosis_node("fake_diag")
+    sample = ("pdf-sentinel", {"sampling_description": "x"})
+    out = node_fn(sample, {})
+
+    assert out == {"marker": "from_fake"}
+    # compute 拿到的是整個 tuple，不是解包後的 sample_pdf——契約在
+    # contract._SIGNATURES 釘住，抄形狀時最容易改壞的就是這裡。
+    assert called["sample"] is sample
+
+
+def test_each_diagnosis_node_gets_a_distinct_name():
+    """``Node.name`` 預設取 ``func.__name__``（core/node.py:8）。
+
+    工廠不設 ``__name__`` 的話五個 node 全叫 ``_run``：``--only-node`` 指不到
+    任何一個，log 也分不出誰是誰。而 pipeline 照樣跑得完——這是靜默的。
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    names = [make_diagnosis_node(n).__name__ for n in DIAGNOSES]
+    assert names == [f"diagnose_{n}" for n in DIAGNOSES]
+    assert len(set(names)) == len(names)
