@@ -285,6 +285,26 @@ def test_item_detail_has_item_share_tables():
     assert (abs(share_tbl.sum(axis=0) - 1.0) < 1e-6).all()
 
 
+# ---- Task 9: 完整性檢查 ----
+
+def test_completeness_section_lists_run_facts():
+    s = rb.build_completeness_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert s.title == "完整性檢查"
+    joined = (s.description + " ".join(s.bullets)
+              + " ".join(t.to_string() for t in s.tables))
+    assert "k" in joined.lower()               # k_values / metric.k 交代
+    assert "query" in joined.lower()           # 規模
+    assert "抽樣" in joined or "未抽樣" in joined  # sampling_description 流入
+
+
+def test_completeness_section_no_verdict_vocabulary():
+    s = rb.build_completeness_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.bullets)
+            + " ".join(t.to_string() for t in s.tables))
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
+
+
 class TestVisibleMetricKeys:
     def test_drops_ndcg_keys(self):
         keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]

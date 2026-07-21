@@ -1336,6 +1336,54 @@ def build_diagnosis_links_section(
     )
 
 
+def build_completeness_section(
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
+) -> ReportSection:
+    """完整性檢查（殿後）：本次執行的事實 ＋「什麼看似正常其實沒量到」。
+
+    presentation §一.4：交代邊界。只陳述事實，不評級。
+    """
+    eval_p = parameters.get("evaluation", {}) or {}
+    totals = (metrics.get("dataset_overview", {}) or {}).get("totals", {}) or {}
+    metric_p = eval_p.get("metric", {}) or {}
+    sample_meta = (metric_ci or {}).get("sample", {}) or {}
+
+    facts = {
+        "k_values": eval_p.get("k_values"),
+        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        "正例列數 n_positives": totals.get("n_positives"),
+        "產品數 n_products": totals.get("n_products"),
+        "metric.weight_alpha": metric_p.get("weight_alpha"),
+        "metric.k（截斷）": metric_p.get("k"),
+        "metric.min_positives": metric_p.get("min_positives"),
+        "metric.shrinkage_k": metric_p.get("shrinkage_k"),
+        "抽樣描述": sample_meta.get("sampling_description"),
+    }
+    facts_tbl = pd.DataFrame([facts]).T
+    facts_tbl.columns = ["value"]
+
+    bullets = [
+        "ndcg@k／ndcg_attr@k 有算但刻意不呈現（本框架目標是排序 macro mAP，"
+        "非機率校準）。",
+        "per-segment 樣本統計與每-query 正例數分佈本版未算（Phase 2，需新增 "
+        "by_segment／per-query 聚合）。",
+        "baseline 各月明細與趨勢未落地（Phase 2，需保留逐月計數）。",
+        "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
+        "同序，非獨立軸。",
+    ]
+    return ReportSection(
+        title="完整性檢查",
+        description=(
+            "本次執行的事實（k、規模、抽樣、metric 參數）與「什麼情況數字看起來"
+            "正常、其實沒量到或不完整」。放在最後，交代邊界。"
+        ),
+        tables=[facts_tbl],
+        table_titles=["本次執行事實"],
+        bullets=bullets,
+    )
+
+
 def assemble_report(
     metrics: dict,
     parameters: dict,
