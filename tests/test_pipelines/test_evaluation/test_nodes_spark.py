@@ -506,13 +506,20 @@ class TestComputeBaselineMetrics:
             self._label_table(spark),
             self._parameters(),
         )
-        assert set(result.keys()) == {"overall", "per_item", "purchase_counts"}
+        assert set(result.keys()) == {
+            "overall", "per_item", "purchase_counts", "monthly_counts",
+        }
         assert "A" in result["per_item"]
         # purchase_counts comes from _label_table fixture (snap=2024-06-30
         # falls inside the [2024-01-31, 2025-01-31) lookback window for the
         # 2025-01-31 eval snap). A=3 positives (h0/h1/h2 all label=1),
         # B=1 (only h0 label=1), C=0.
         assert result["purchase_counts"] == {"A": 3, "B": 1, "C": 0}
+        # All history sits in a single calendar month → monthly_counts breaks
+        # the same totals down by "2024-06" and reconciles with purchase_counts.
+        assert result["monthly_counts"] == {
+            "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
+        }
 
     def test_returns_none_when_section_disabled(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (

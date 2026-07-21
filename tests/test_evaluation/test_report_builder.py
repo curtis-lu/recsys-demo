@@ -611,6 +611,36 @@ def test_baseline_section_renders_popularity_table():
     assert list(tbl["rank"]) == [1, 2, 3]
 
 
+def test_baseline_monthly_trend_table():
+    """monthly_counts -> 月度趨勢 table: rows=item(總計降序), cols=月份(升序)+合計."""
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 3, "B": 1},
+        "monthly_counts": {
+            "A": {"2024-06": 2, "2024-12": 1},
+            "B": {"2024-06": 1},
+        },
+    }
+    s = rb.build_baseline_section(m, base, _params())
+    assert "popularity 月度趨勢" in s.table_titles
+    tbl = s.tables[s.table_titles.index("popularity 月度趨勢")]
+    assert list(tbl.columns) == ["2024-06", "2024-12", "合計"]
+    assert list(tbl.index) == ["A", "B"]          # A 總計 3 > B 總計 1
+    assert list(tbl.loc["A"]) == [2, 1, 3]
+    assert list(tbl.loc["B"]) == [1, 0, 1]        # 缺月補 0
+    # 合計欄逐 item 對齊 purchase_counts（兩者都是同一批 per-月計數的重排）
+    assert tbl.loc["A", "合計"] == base["purchase_counts"]["A"]
+
+
+def test_baseline_omits_monthly_trend_when_absent():
+    """Backward compat: no monthly_counts -> no 月度趨勢 table."""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 3}}
+    s = rb.build_baseline_section(m, base, _params())
+    assert "popularity 月度趨勢" not in s.table_titles
+
+
 def test_baseline_section_omits_popularity_when_purchase_counts_absent():
     """Backward compat: no purchase_counts -> no popularity table, others stay."""
     m = _metrics()

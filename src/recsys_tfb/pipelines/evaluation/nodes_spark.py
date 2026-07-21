@@ -295,6 +295,7 @@ def compute_baseline_metrics(
     """
     from recsys_tfb.evaluation.baselines import (
         build_baseline_frame,
+        compute_monthly_purchase_counts,
         compute_purchase_counts,
     )
     from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
@@ -331,13 +332,30 @@ def compute_baseline_metrics(
         .agg(F.sum(F.col(score_col)).alias(score_col))
         .collect()
     }
+    # Per-(month, item) breakdown of the same windows → report's monthly
+    # popularity trend. Summed over months, each item reconciles with
+    # purchase_counts (both sum the same per-snap-per-month counts).
+    monthly = compute_monthly_purchase_counts(
+        label_table, snap_dates, lookback_months, parameters
+    )
+    monthly_counts: dict[str, dict[str, int]] = {}
+    for r in (
+        monthly.groupBy("month", item_col)
+        .agg(F.sum(F.col(score_col)).alias(score_col))
+        .collect()
+    ):
+        monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
+            r[score_col]
+        )
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     metrics = compute_overall_per_item(baseline_frame, parameters)
     metrics["purchase_counts"] = purchase_counts
+    metrics["monthly_counts"] = monthly_counts
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
-        "purchase_counts has %d products",
+        "purchase_counts has %d products, monthly_counts spans %d months",
         snap_dates, len(purchase_counts),
+        len({mo for per in monthly_counts.values() for mo in per}),
     )
     return metrics
 

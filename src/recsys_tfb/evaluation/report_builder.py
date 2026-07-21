@@ -685,6 +685,21 @@ def build_baseline_section(
             "popularity 排名組成", False,
         )
 
+    # [1b] 月度趨勢：rows=item（總計降序，與 [1] 同序）、cols=月份升序＋合計。
+    #      各 item 的「合計」＝該列月份和，逐 item 對齊 [1] 的 count。
+    monthly = (baseline_metrics or {}).get("monthly_counts") or {}
+    if monthly:
+        months = sorted({mo for per in monthly.values() for mo in per})
+        item_order = sorted(
+            monthly, key=lambda it: sum(monthly[it].values()), reverse=True
+        )
+        mdf = pd.DataFrame(
+            {mo: [monthly[it].get(mo, 0) for it in item_order] for mo in months},
+            index=item_order,
+        )
+        mdf["合計"] = mdf.sum(axis=1)
+        _add(mdf, "popularity 月度趨勢", True)
+
     # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
     #     cols=@k（superset），明細收合。explicit family → 天然不含 ndcg。
     overall_a = comp["result_a"].get("overall", {}) or {}
@@ -732,8 +747,9 @@ def build_baseline_section(
         title="baseline — popularity 對照",
         description=(
             f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
-            "排名組成為各 item 跨月合計（總計＋平均每月）；各月明細與趨勢為後續"
-            "階段（需保留逐月計數）。overall 的 mAP／recall／precision 各一張表、"
+            "排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把同一批計數"
+            "拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名組成）。"
+            "overall 的 mAP／recall／precision 各一張表、"
             "k 放欄位、點標題展開。對照僅做 overall 與 per-item 兩層"
             "（per-segment／大類 vs baseline 從略）；per-item 兩張表 k 欄一致＝"
             "[1,3,5,all]（控寬，與衡量指標 per-item 的完整 [1..5,all] 不同）。"
@@ -982,7 +998,6 @@ def build_completeness_section(
         "部分排序衍生指標有算但刻意不呈現（本框架目標是排序 macro mAP，"
         "非機率校準）。",
         "每-query 正例數分佈本版未算（Phase 2，需新增 per-query 聚合）。",
-        "baseline 各月明細與趨勢未落地（Phase 2，需保留逐月計數）。",
         "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
         "同序，非獨立軸。",
     ]
