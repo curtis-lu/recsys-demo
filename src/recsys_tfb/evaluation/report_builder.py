@@ -122,18 +122,25 @@ def build_overview_section(
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
 
-    # 關鍵指標 1：macro per-item mAP（頭號，抽樣估計 + CI）——沿用 primary_map
-    # 的讀法（metric_ci.macro / sample），避免定義漂移。
+    # 關鍵指標 1：macro per-item mAP（頭號，含 bootstrap CI）——沿用 metric_ci
+    # 的讀法（macro / sample），避免定義漂移。
+    ci_note = ""
     if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
         m = metric_ci["macro"]
         sample_meta = metric_ci.get("sample", {}) or {}
         tables.append(pd.DataFrame(
-            [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+            [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
               "CI 97.5%": m.get("ci_high"),
-              "樣本 query 數": sample_meta.get("n_queries_sampled")}],
+              "CI 用 query 數": sample_meta.get("n_queries_sampled")}],
             index=["macro per-item mAP"],
         ))
-        titles.append("關鍵指標：macro per-item mAP（頭號，抽樣估計）")
+        titles.append("關鍵指標：macro per-item mAP（頭號，含 bootstrap CI）")
+        n_boot = metric_ci.get("n_boot")
+        sd = sample_meta.get("sampling_description", "")
+        ci_note = (
+            f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
+            f"重抽得到；{sd}點估 AP 與衡量指標的全量 macro map_attr@all 相同。"
+        )
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
     card = {
@@ -150,7 +157,7 @@ def build_overview_section(
         "有正例 query 數 n_queries": metrics.get("n_queries"),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
-        "正樣本率 positive_rate": totals.get("positive_rate"),
+        "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
         "每客戶平均正例數 avg_positives_per_customer":
             totals.get("avg_positives_per_customer"),
     }
@@ -186,6 +193,7 @@ def build_overview_section(
             "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
             "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權）；"
             "overall mAP 為 per-query 等權，是另一種加權，並列呈現、不比高下。"
+            + ci_note
         ),
         tables=tables,
         table_titles=titles,
@@ -213,16 +221,21 @@ def build_core_concept_section(parameters: dict) -> ReportSection:
         "同一個量，換一種切法。"
     )
     formula = (
-        "AP@k = (1 / min(k, R)) · Σ(i=1..k) rel_i · P@i\n"
+        "AP@k = (1 / R) · Σ(i=1..k) rel_i · P@i\n"
         "  P@i = 前 i 名中的正例數 / i　（前 i 名的精確率）\n"
-        "  rel_i = 第 i 名是正例則 1、否則 0；R = 該 query 的正例數"
+        "  rel_i = 第 i 名是正例則 1、否則 0\n"
+        "  R = 該 query 的正例總數（total_rel）；分母是 R、不是 min(k, R)——"
+        "k < R 時 AP@k 追不到 1（頂多 k 個正例能進前 k、卻除以較大的 R）"
     )
     bullets = [
-        f"例：某 query 有 4 個候選 {item_col}、2 個正例，排名後正例落在第 1、"
+        f"例：某 query 有 4 個候選 {item_col}、R=2 個正例，排名後正例落在第 1、"
         "第 3 名。",
         "P@1 = 1/1 = 1.0、P@2 = 1/2 = 0.5、P@3 = 2/3 ≈ 0.667。",
-        "AP@3 = (1/min(3,2)) · (1·1.0 + 0·0.5 + 1·0.667) ≈ 0.83——只在正例"
-        "出現的名次上累加精確率，再除以正例數 R。",
+        "AP@3 = (1/2)·(1·1.0 + 0·0.5 + 1·0.667) ≈ 0.83；"
+        "AP@1 = (1/2)·(1·1.0) = 0.50——分母固定為 R=2，k=1 只納入第 1 名那個"
+        "正例的貢獻、仍除以 2。",
+        "手算核對點：k=1 時每個 query 的 AP@1 = rel_1 / R，正好等於 recall@1，"
+        "所以整份報表的 overall map@1 會等於 recall@1（衡量指標段可對照）。",
         "地圖（下面每區＝這個 per-query AP 加總到不同粒度）："
         "overall＝跨 query 等權平均；per-item＝把 AP 歸因到正例所屬的 "
         f"{item_col} 後 item 等權（macro）；per-segment＝依 segment 分組平均；"
@@ -255,7 +268,7 @@ def build_dataset_overview_section(
         n_pos = d.get("n_positives")
         by_item_rows[item] = {
             "正例數": n_pos,
-            "正樣本率": d.get("positive_rate"),
+            "正樣本率(÷此item候選列)": d.get("positive_rate"),
             "正例佔比": (n_pos / total_pos)
             if (n_pos is not None and total_pos) else None,
         }
@@ -269,16 +282,20 @@ def build_dataset_overview_section(
         cat_by_item = (cat.get("dataset_overview", {}) or {}).get("by_item", {})
         if cat_by_item:
             tables.append(pd.DataFrame(cat_by_item).T)
-            titles.append("by 大類")
-            collapsed.append(False)
+            titles.append("by 大類（大類粒度，不與整體相加）")
+            collapsed.append(True)
     return ReportSection(
         title="基本統計 — 資料集",
         description=(
             "整體規模與 per-item 的正例組成。per-item 三欄（正例數／正樣本率／"
             "正例佔比）在密集候選集下同序（僅換分母或讀法），非三個獨立軸；候選"
-            "覆蓋率因每 item 覆蓋全部 query 恆為 100%，故不列。per-segment 樣本"
-            "統計與每-query 正例數分佈為後續階段（需新增 by_segment／per-query "
-            "聚合）。"
+            "覆蓋率因每 item 覆蓋全部 query 恆為 100%，故不列。注意「正樣本率」有"
+            "兩種分母：概覽的母體 positive_rate 除以全體候選列（此 run 5,232），"
+            "此處 per-item 那欄除以「該 item 自己的候選列數」（此 run 每 item 654），"
+            "量級不同。「by 大類」是大類粒度（每客戶每大類一列、label＝該大類任一"
+            "子產品為正例、大類分數＝子產品最佳分數），故其正例數 ≤ item 粒度合計、"
+            "不與整體 n_positives 相加。per-segment 樣本統計與每-query 正例數分佈"
+            "為後續階段（需新增 by_segment／per-query 聚合）。"
         ),
         tables=tables,
         table_titles=titles,
@@ -796,16 +813,18 @@ def build_metrics_section(
         sm = metric_ci.get("sample", {}) or {}
         _add(
             pd.DataFrame(
-                [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+                [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
                   "CI 97.5%": m.get("ci_high"),
-                  "樣本 query 數": sm.get("n_queries_sampled")}],
+                  "CI 用 query 數": sm.get("n_queries_sampled")}],
                 index=["macro per-item mAP"],
             ),
-            "頭號指標：macro per-item mAP（item 等權，抽樣估計）",
+            "頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）",
             False,
         )
 
-    # (2) per-item（中細）：map_attr@k（+CI 欄）與 recall@k 互補角度，明細收合
+    # (2) per-item（中細）：map_attr@k（+CI 上下界）與 recall@k 互補角度，明細收合。
+    # 只補 CI 上下界與 n_pos——CI 點估在不截斷 k 下等於 map_attr@all，補一欄同值
+    # 是冗餘（§二），故不放。
     map_tbl = _per_item_metric_table(
         per_item, map_ks, n_prod, "map_attr", "map_attr@{k}",
         macro_metrics=macro_item,
@@ -818,8 +837,8 @@ def build_metrics_section(
             src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
             return src.get(field)
 
-        for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
-                           ("CI 97.5%", "ci_high"), ("n_pos(抽樣)", "n_pos")):
+        for col, field in (("CI 2.5%", "ci_low"), ("CI 97.5%", "ci_high"),
+                           ("n_pos（CI 用）", "n_pos")):
             map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
     _add(map_tbl, "per-item map_attr@k（排序品質）", True)
     _add(
@@ -841,7 +860,16 @@ def build_metrics_section(
                   for k in _visible_metric_keys(list((mm or {}).keys()))}
             for seg, mm in seg_rows.items()
         }
-        _add(pd.DataFrame(seg_rows).T, "per-segment per-query 指標", True)
+        seg_df = pd.DataFrame(seg_rows).T
+        # 與他表一致：把 @{n_products} 顯示成 @all（其餘 k 不動）
+        seg_df.columns = [
+            (str(c)[: -len(str(n_prod))] + "all")
+            if str(c).endswith(f"@{n_prod}") else c
+            for c in seg_df.columns
+        ]
+        _add(seg_df,
+             "per-segment per-query 指標（segment 值來自設定的 segment_columns）",
+             True)
 
     # (4) per-category（大類，選 b 收進本段）：明細收合
     cat = metrics.get("category")
@@ -881,7 +909,9 @@ def build_metrics_section(
             "並列、不比高下。recall@k 與 map_attr@k 互補：map_attr@k 看排序品質"
             "（正例排得多前），recall@k 看正例有沒有進 top-k；兩者並列一起看，"
             "判斷留給你。明細表點標題展開。K = 產品數時 precision 退化為 base "
-            "rate、recall 恆為 1。"
+            "rate、recall 恆為 1。手算核對：overall map@1 = recall@1（見核心概念"
+            "的 AP@k 分母＝R）。per-item 的 CI 2.5%／97.5% 為 cluster bootstrap "
+            "上下界，其點估＝該列 map_attr@all（不截斷 k）。"
         ),
         tables=tables,
         table_titles=titles,
@@ -1147,20 +1177,14 @@ _GLOSSARY = [
      "（正例有沒有進 top-k），不下 pass/fail"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
     ("map_attr@k",
-     "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
-     "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
-     "是 mAP@k 拆到單一產品的貢獻"),
+     "某產品為正解時 ap_contrib@k 的平均（＝mAP@k 拆到單一產品的貢獻，非該"
+     "產品自己的 mAP@k）。ap_contrib@k：該正例產品排名 r 若 ≤k 則為 P@r（前 r "
+     "名精確率）、否則 0——就是核心概念 AP@k 分子 Σ rel_i·P@i 裡屬於這個產品的"
+     "那一項。客戶該買它、模型排越前 → 值越高"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("Macro 平均",
      "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),
     ("base rate", "母體正樣本率"),
-    ("|ΔAP|",
-     "交換一對名次讓該 query 的 AP 貢獻總和變多少；λ 會計，query-AP 粒度"),
-    ("壓制者／受害者",
-     "同 query 排在正例上方的負例 item／被壓的正例 item"),
-    ("substitution ablation",
-     "把某 item 分數換成 base-rate 常數重算指標；delta 正＝該 item "
-     "個性化分數是淨傷害、負＝淨貢獻"),
     ("macro per-item mAP",
      "各 item 的 map_attr 等權平均；本框架頭號指標（item 等權），與 query "
      "等權的 overall mAP 是兩種加權、並列不比高下"),
@@ -1358,17 +1382,22 @@ def build_completeness_section(
     metric_p = eval_p.get("metric", {}) or {}
     sample_meta = (metric_ci or {}).get("sample", {}) or {}
 
+    mk = metric_p.get("k")
     facts = {
         "k_values": eval_p.get("k_values"),
         "有正例 query 數 n_queries": metrics.get("n_queries"),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         "產品數 n_products": totals.get("n_products"),
-        "metric.weight_alpha": metric_p.get("weight_alpha"),
-        "metric.k（截斷）": metric_p.get("k"),
-        "metric.min_positives": metric_p.get("min_positives"),
-        "metric.shrinkage_k": metric_p.get("shrinkage_k"),
-        "抽樣描述": sample_meta.get("sampling_description"),
+        "metric.weight_alpha（item 加權指數 α；0＝item 等權）":
+            metric_p.get("weight_alpha"),
+        "metric.k（AP 截斷 k；無＝不截斷、算全長）":
+            ("無（不截斷）" if mk is None else mk),
+        "metric.min_positives（觀察名單門檻；0＝不設）":
+            metric_p.get("min_positives"),
+        "metric.shrinkage_k（向 pooled 平均收縮強度；0＝不收縮）":
+            metric_p.get("shrinkage_k"),
+        "抽樣描述 sampling_description": sample_meta.get("sampling_description"),
     }
     facts_tbl = pd.DataFrame([facts]).T
     facts_tbl.columns = ["value"]

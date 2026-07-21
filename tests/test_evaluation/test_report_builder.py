@@ -124,6 +124,19 @@ def test_core_concept_section_no_verdict_vocabulary():
         assert bad not in text
 
 
+def test_core_concept_formula_normalizes_by_R_not_min():
+    """AP@k 分母是 R（正例總數）、不是 min(k,R)——這是與 metrics_spark 實作
+    （map@K = sum(ap_contrib@K)/total_rel）對齊的硬約束。寫錯會讓讀者拿公式
+    手算頭號家族時對不上（map@1 會被誤推成 precision@1 而非 recall@1）。"""
+    s = rb.build_core_concept_section(_params())
+    body = s.formula + " ".join(s.bullets)
+    assert "AP@k = (1 / R)" in s.formula          # 正規化分母＝R
+    assert "(1 / min" not in s.formula            # 不得用 min(k,R) 當 AP 分母
+    assert "1/min" not in s.formula.replace(" ", "")
+    # 提供可手算核對的錨點：map@1 = recall@1
+    assert "map@1" in body and "recall@1" in body
+
+
 def test_dataset_overview_section_tables():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     assert len(s.tables) == 3   # totals / by_snap_date / by_item
@@ -464,7 +477,7 @@ def test_dataset_overview_adds_by_category_when_present():
         "fund": {"n_rows": 10, "n_positives": 3, "n_customers": 5,
                  "positive_rate": 0.3}}}}
     s = rb.build_dataset_overview_section(m, _params())
-    assert "by 大類" in s.table_titles
+    assert any(tt.startswith("by 大類") for tt in s.table_titles)
 
 
 def test_category_section_has_composition_table():
