@@ -114,6 +114,10 @@ def generate_html_report(
         "nav.toc a { color: #0066cc; text-decoration: none; }",
         "nav.toc a:hover { text-decoration: underline; }",
         "details > summary { font-size: 1.5em; color: #555; cursor: pointer; margin: 24px 0 8px; }",
+        # 逐表收合的 summary 走小一號字（表標題級，不是 section 標題級），
+        # 覆寫上面 details>summary 的 1.5em。
+        "details.table-collapse > summary { font-size: 1em; font-weight: 600; "
+        "color: #444; cursor: pointer; margin: 12px 0 6px; }",
         "#to-top { position: fixed; bottom: 24px; right: 24px; "
         "background: rgba(0, 102, 204, 0.85); color: white; border: none; "
         "border-radius: 50%; width: 44px; height: 44px; font-size: 20px; "
@@ -167,9 +171,26 @@ def generate_html_report(
             )
 
         for ti, table in enumerate(section.tables):
-            if ti < len(section.table_titles) and section.table_titles[ti]:
-                html_parts.append(f"<h3>{section.table_titles[ti]}</h3>")
-            html_parts.append(_render_table(table))
+            title = (
+                section.table_titles[ti]
+                if ti < len(section.table_titles)
+                else ""
+            )
+            collapsed = (
+                ti < len(section.collapsed_tables)
+                and section.collapsed_tables[ti]
+            )
+            if collapsed:
+                # 單張明細表收合：點標題才展開，與整段收合的 class="section"
+                # 區隔，避免動到 section 級 <details> 的樣式與測試。
+                html_parts.append('<details class="table-collapse">')
+                html_parts.append(f"<summary>{title or '明細表'}</summary>")
+                html_parts.append(_render_table(table))
+                html_parts.append("</details>")
+            else:
+                if title:
+                    html_parts.append(f"<h3>{title}</h3>")
+                html_parts.append(_render_table(table))
 
         html_parts.append("</details>" if section.collapsible else "</div>")
 

@@ -12,7 +12,6 @@ from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
-    build_diagnostics_figures,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,6 +295,7 @@ def compute_baseline_metrics(
     """
     from recsys_tfb.evaluation.baselines import (
         build_baseline_frame,
+        compute_monthly_purchase_counts,
         compute_purchase_counts,
     )
     from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
@@ -332,13 +332,39 @@ def compute_baseline_metrics(
         .agg(F.sum(F.col(score_col)).alias(score_col))
         .collect()
     }
+    # Per-(month, item) breakdown of the same windows → report's monthly
+    # popularity trend. Summed over months, each item reconciles with
+    # purchase_counts (both sum the same per-snap-per-month counts).
+    monthly = compute_monthly_purchase_counts(
+        label_table, snap_dates, lookback_months, parameters
+    )
+    monthly_counts: dict[str, dict[str, int]] = {}
+    for r in (
+        monthly.groupBy("month", item_col)
+        .agg(F.sum(F.col(score_col)).alias(score_col))
+        .collect()
+    ):
+        monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
+            r[score_col]
+        )
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
-    metrics = compute_overall_per_item(baseline_frame, parameters)
+    # per_segment / category slices for the report's by-segment / 大類 vs
+    # baseline comparison. Gated by the same config that turns them on for the
+    # model (segment_columns present / product_categories maps items), so the
+    # baseline pays for a slice only when the model already computed its match.
+    metrics = compute_overall_per_item(
+        baseline_frame,
+        parameters,
+        with_segment=bool(eval_params.get("segment_columns")),
+        with_category=True,
+    )
     metrics["purchase_counts"] = purchase_counts
+    metrics["monthly_counts"] = monthly_counts
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
-        "purchase_counts has %d products",
+        "purchase_counts has %d products, monthly_counts spans %d months",
         snap_dates, len(purchase_counts),
+        len({mo for per in monthly_counts.values() for mo in per}),
     )
     return metrics
 
@@ -619,13 +645,10 @@ def generate_report(
     診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
     的路徑清單、放一個連結進主報表。
     """
-    figures = build_diagnostics_figures(report_aggregates)
-    diagnostics_frames = {"figures": figures} if figures else None
-
     return assemble_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
-        diagnostics_frames=diagnostics_frames,
+        report_aggregates=report_aggregates,
         metric_ci=metric_ci,
         offset_sweep=offset_sweep,
         diagnosis_pages=diagnosis_pages,

@@ -198,6 +198,8 @@ def compute_dataset_overview(
     entity_cols = schema["entity"]
     item_col = item_col_override or schema["item"]
     label_col = schema["label"]
+    eval_params = parameters.get("evaluation", {}) or {}
+    group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
     n_rows = eval_predictions.count()
     n_customers = eval_predictions.select(*entity_cols).distinct().count()
@@ -209,30 +211,46 @@ def compute_dataset_overview(
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
     avg_pos_per_customer = (n_positives / n_customers) if n_customers else 0.0
 
-    def _group(col: str) -> dict:
-        rows = (
-            eval_predictions.groupBy(col)
-            .agg(
-                F.count(F.lit(1)).alias("n_rows"),
-                F.sum(F.col(label_col)).alias("n_positives"),
-                F.countDistinct(*entity_cols).alias("n_customers"),
-            )
-            .collect()
-        )
+    # active segment 欄：segment_columns 裡第一個真的在資料中的（對齊 per_segment
+    # 的 active_seg_col），by_segment 的 key 才會跟 per_segment 一致。
+    active_seg_col = next(
+        (c for c in (eval_params.get("segment_columns", []) or [])
+         if c in eval_predictions.columns),
+        None,
+    )
+    total_queries = (
+        eval_predictions.select(*group_cols).distinct().count()
+        if active_seg_col else 0
+    )
+
+    def _group(col: str, with_queries: bool = False) -> dict:
+        aggs = [
+            F.count(F.lit(1)).alias("n_rows"),
+            F.sum(F.col(label_col)).alias("n_positives"),
+            F.countDistinct(*entity_cols).alias("n_customers"),
+        ]
+        if with_queries:
+            aggs.append(F.countDistinct(*group_cols).alias("n_queries"))
+        rows = eval_predictions.groupBy(col).agg(*aggs).collect()
         out = {}
         for r in rows:
             key = r[col] if isinstance(r[col], str) else str(r[col])
             nr = int(r["n_rows"])
             npos = int(r["n_positives"] or 0)
-            out[key] = {
+            cell = {
                 "n_rows": nr,
                 "n_positives": npos,
                 "n_customers": int(r["n_customers"]),
                 "positive_rate": (npos / nr) if nr else 0.0,
             }
+            if with_queries:
+                nq = int(r["n_queries"])
+                cell["n_queries"] = nq
+                cell["query_share"] = (nq / total_queries) if total_queries else 0.0
+            out[key] = cell
         return out
 
-    return {
+    result = {
         "totals": {
             "n_rows": n_rows,
             "n_customers": n_customers,
@@ -245,6 +263,9 @@ def compute_dataset_overview(
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
     }
+    if active_seg_col:
+        result["by_segment"] = _group(active_seg_col, with_queries=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -706,15 +727,28 @@ def _compute_core(
 def compute_overall_per_item(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    *,
+    with_segment: bool = False,
+    with_category: bool = False,
 ) -> dict:
-    """Slim metric bundle: ``overall`` + ``per_item`` only.
+    """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
     Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
-    skips per-segment, per-item-segment, macro_avg, category collapse, and
-    dataset_overview. Used by the popularity baseline, whose report section
-    consumes only these two keys.
+    skips per-item-segment, macro_avg, and dataset_overview. Used by the
+    popularity baseline, whose report section consumes these keys.
 
-    Returns ``{"overall": {...}, "per_item": {...}}``; both empty when no
+    Flags (each costed against the model's matching pass, so the baseline
+    comparison stays symmetric only when the model already computed them):
+      - ``with_segment``: also emit ``per_segment`` (overall metrics per active
+        segment value), reusing the cached ``enriched`` — no extra full pass,
+        just one extra groupBy. Silently skipped when no ``segment_columns``
+        entry is present in the data.
+      - ``with_category``: also emit ``category`` (a nested slim bundle on the
+        category-collapsed frame — one extra collapse pass), only when
+        ``product_categories`` maps the items. Nested bundle never re-nests.
+
+    Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
+    ``category`` when requested and available); overall/per_item empty when no
     query has a positive label.
     """
     schema = get_schema(parameters)
@@ -741,14 +775,36 @@ def compute_overall_per_item(
         df_with_pos, group_cols, label_col, k_values
     ).cache()
     try:
+        # Detect active segment column the same way as _compute_core (first
+        # segment_columns entry that survives into enriched), so baseline
+        # per_segment keys line up with the model's.
+        active_seg_col: str | None = None
+        if with_segment:
+            for seg in (eval_params.get("segment_columns", []) or []):
+                if seg in enriched.columns:
+                    active_seg_col = seg
+                    break
+        carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=[]
+            enriched, group_cols, label_col, k_values, carry_cols=carry
         )
-        overall = aggregate_overall(per_query, k_values)
-        per_item = aggregate_per_item(enriched, [item_col], label_col, k_values)
-        return {"overall": overall, "per_item": per_item}
+        result = {
+            "overall": aggregate_overall(per_query, k_values),
+            "per_item": aggregate_per_item(
+                enriched, [item_col], label_col, k_values
+            ),
+        }
+        if active_seg_col:
+            result["per_segment"] = aggregate_per_segment(
+                per_query, active_seg_col, k_values
+            )
     finally:
         enriched.unpersist()
+
+    if with_category and _build_category_mapping(parameters) is not None:
+        collapsed = collapse_to_categories(eval_predictions, parameters)
+        result["category"] = compute_overall_per_item(collapsed, parameters)
+    return result
 
 
 def compute_all_metrics(

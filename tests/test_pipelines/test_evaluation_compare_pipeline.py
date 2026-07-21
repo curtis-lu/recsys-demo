@@ -149,6 +149,14 @@ def test_persist_and_catalog_load_roundtrip(spark):
     """End-to-end: persist returns DF as-is; HiveTableDataset saves to local
     warehouse with partition_filter(model_version) + partition_cols(snap_date);
     load reads back and drops model_version.
+
+    Isolation: runs against a DEDICATED test database, never the production
+    ``ml_recsys.enriched_eval_predictions``. The shared local warehouse holds
+    real eval artifacts (see docs/operations/known-pitfalls.md §14); an earlier
+    version of this test DROP-ed the production table, silently destroying them
+    and breaking the local re-render workflow. The round-trip behaviour is
+    table-name-agnostic, so a test DB exercises the identical HiveTableDataset
+    code path without touching real data. A finally block removes the residue.
     """
     import shutil
     from recsys_tfb.io.hive_table_dataset import HiveTableDataset
@@ -156,40 +164,47 @@ def test_persist_and_catalog_load_roundtrip(spark):
         persist_eval_predictions,
     )
 
-    # Start clean: drop table and warehouse dir if a previous run left them
-    spark.sql("CREATE DATABASE IF NOT EXISTS ml_recsys")
-    spark.sql("DROP TABLE IF EXISTS ml_recsys.enriched_eval_predictions")
-    table_dir = _warehouse_table_dir(
-        spark, "ml_recsys", "enriched_eval_predictions"
-    )
-    if table_dir.exists():
-        shutil.rmtree(table_dir)
+    test_db = "test_persist_roundtrip"        # isolated: never ml_recsys
+    test_table = "enriched_eval_predictions"
 
-    # Mimic the catalog entry from conf/base/catalog.yaml
-    ds = HiveTableDataset(
-        database="ml_recsys",
-        table="enriched_eval_predictions",
-        columns="auto",
-        partition_filter={"model_version": "MV_X"},
-        partition_cols=[{"name": "snap_date", "type": "STRING"}],
-        external=False,
-    )
+    def _clean():
+        spark.sql(f"DROP TABLE IF EXISTS {test_db}.{test_table}")
+        d = _warehouse_table_dir(spark, test_db, test_table)
+        if d.exists():
+            shutil.rmtree(d)
 
-    df_in = spark.createDataFrame(
-        [("c1", "2026-01-31", "p1", 0.9, 1, 1)],
-        ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
-    )
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {test_db}")
+    _clean()  # start clean if a previous run left residue
+    try:
+        # Mimic the catalog entry from conf/base/catalog.yaml, on the test DB.
+        ds = HiveTableDataset(
+            database=test_db,
+            table=test_table,
+            columns="auto",
+            partition_filter={"model_version": "MV_X"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
 
-    # Framework auto-save flow: node returns DF, runner saves via catalog
-    returned = persist_eval_predictions(df_in)
-    assert returned is df_in  # identity guarantee re-verified
-    ds.save(returned)
+        df_in = spark.createDataFrame(
+            [("c1", "2026-01-31", "p1", 0.9, 1, 1)],
+            ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+        )
 
-    # Framework auto-load flow: catalog filters by partition_filter, drops mv
-    out = ds.load()
-    cols = set(out.columns)
-    assert "model_version" not in cols
-    assert {"cust_id", "snap_date", "prod_name", "score", "rank", "label"} <= cols
+        # Framework auto-save flow: node returns DF, runner saves via catalog
+        returned = persist_eval_predictions(df_in)
+        assert returned is df_in  # identity guarantee re-verified
+        ds.save(returned)
 
-    rows = [(r["cust_id"], r["prod_name"], r["score"]) for r in out.collect()]
-    assert rows == [("c1", "p1", 0.9)]
+        # Framework auto-load flow: catalog filters by partition_filter, drops mv
+        out = ds.load()
+        cols = set(out.columns)
+        assert "model_version" not in cols
+        assert {"cust_id", "snap_date", "prod_name", "score", "rank",
+                "label"} <= cols
+
+        rows = [(r["cust_id"], r["prod_name"], r["score"])
+                for r in out.collect()]
+        assert rows == [("c1", "p1", 0.9)]
+    finally:
+        _clean()

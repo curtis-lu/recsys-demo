@@ -53,6 +53,11 @@ class ReportSection:
     collapsible: bool = False
     formula: str = ""
     bullets: list[str] = field(default_factory=list)
+    # ``collapsed_tables`` —— 與 ``tables`` 平行的旗標，``True`` 的那張明細表
+    # 預設收合（``<details class="table-collapse">``，點標題才展開）。``collapsible``
+    # 收的是**整段**；這個收的是**單張表**，兩者正交。維持可選有預設（同 formula/
+    # bullets 的理由：13 個既有 build_* 全不傳）；缺項／短於 tables 的位置視為不收合。
+    collapsed_tables: list[bool] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
