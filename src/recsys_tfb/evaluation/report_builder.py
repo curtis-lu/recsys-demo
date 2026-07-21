@@ -634,6 +634,11 @@ def build_item_detail_section(
     )
 
 
+def _od(a, b):
+    """None-safe A − B (either operand missing → None)."""
+    return None if a is None or b is None else a - b
+
+
 def build_baseline_section(
     metrics: dict, baseline_metrics: dict | None, parameters: dict
 ) -> ReportSection | None:
@@ -739,6 +744,50 @@ def build_baseline_section(
                 title, True,
             )
 
+    # [4] per-segment mAP@k M/B/Δ — 只比主指標 mAP（控寬，reference 段）；rows＝
+    #     每個 segment 的 Model/Baseline/Δ 三列、cols＝@k。需 model 與 baseline
+    #     兩側都有 per_segment（key 由同一 active_seg_col 對齊）。明細收合。
+    seg_a = metrics.get("per_segment", {}) or {}
+    seg_b = (baseline_metrics or {}).get("per_segment", {}) or {}
+    if seg_a and seg_b:
+        rows: dict[str, dict] = {}
+        for seg in sorted(set(seg_a) | set(seg_b)):
+            a, b = seg_a.get(seg, {}) or {}, seg_b.get(seg, {}) or {}
+            for who, src in ((f"{seg} · Model", a), (f"{seg} · Baseline", b)):
+                rows[who] = {
+                    f"@{k}": src.get(f"map@{_k_to_lookup(k, n_prod)}")
+                    for k in k_super
+                }
+            rows[f"{seg} · Δ"] = {
+                f"@{k}": _od(a.get(f"map@{_k_to_lookup(k, n_prod)}"),
+                            b.get(f"map@{_k_to_lookup(k, n_prod)}"))
+                for k in k_super
+            }
+        _add(pd.DataFrame(rows).T, "per-segment mAP@k (M/B/Δ)", True)
+
+    # [5] 大類 overall mAP@k M/B/Δ — 大類粒度的 overall mAP 對照；rows＝
+    #     [Model,Baseline,Δ]、cols＝@k。n_cat 取 model 的 category 產品數
+    #     （baseline slim bundle 無 dataset_overview，兩側同一 category 集）。
+    cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
+    cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
+    if cat_a and cat_b:
+        n_cat = int(
+            (metrics.get("category") or {}).get("dataset_overview", {})
+            .get("totals", {}).get("n_products", 0)
+        ) or n_prod
+        cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        data = {}
+        for who, src in (("Model", cat_a), ("Baseline", cat_b)):
+            data[who] = {
+                f"@{k}": src.get(f"map@{_k_to_lookup(k, n_cat)}") for k in cks
+            }
+        data["Δ"] = {
+            f"@{k}": _od(cat_a.get(f"map@{_k_to_lookup(k, n_cat)}"),
+                        cat_b.get(f"map@{_k_to_lookup(k, n_cat)}"))
+            for k in cks
+        }
+        _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)
+
     lookback_note = (
         f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
         if lookback else ""
@@ -750,9 +799,11 @@ def build_baseline_section(
             "排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把同一批計數"
             "拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名組成）。"
             "overall 的 mAP／recall／precision 各一張表、"
-            "k 放欄位、點標題展開。對照僅做 overall 與 per-item 兩層"
-            "（per-segment／大類 vs baseline 從略）；per-item 兩張表 k 欄一致＝"
-            "[1,3,5,all]（控寬，與衡量指標 per-item 的完整 [1..5,all] 不同）。"
+            "k 放欄位、點標題展開。對照層級：overall（三家族）、per-item"
+            "（recall／map_attr 兩張，k＝[1,3,5,all] 控寬）、per-segment 與大類"
+            "overall（只比主指標 mAP，各一張，reference 段控寬）。per-segment／大類"
+            "僅在 model 與 baseline 兩側都有該切片時出現（key 由同一 active segment／"
+            "product_categories 對齊）。"
         ),
         tables=tables,
         table_titles=titles,

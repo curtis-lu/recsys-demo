@@ -727,15 +727,28 @@ def _compute_core(
 def compute_overall_per_item(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    *,
+    with_segment: bool = False,
+    with_category: bool = False,
 ) -> dict:
-    """Slim metric bundle: ``overall`` + ``per_item`` only.
+    """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
     Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
-    skips per-segment, per-item-segment, macro_avg, category collapse, and
-    dataset_overview. Used by the popularity baseline, whose report section
-    consumes only these two keys.
+    skips per-item-segment, macro_avg, and dataset_overview. Used by the
+    popularity baseline, whose report section consumes these keys.
 
-    Returns ``{"overall": {...}, "per_item": {...}}``; both empty when no
+    Flags (each costed against the model's matching pass, so the baseline
+    comparison stays symmetric only when the model already computed them):
+      - ``with_segment``: also emit ``per_segment`` (overall metrics per active
+        segment value), reusing the cached ``enriched`` — no extra full pass,
+        just one extra groupBy. Silently skipped when no ``segment_columns``
+        entry is present in the data.
+      - ``with_category``: also emit ``category`` (a nested slim bundle on the
+        category-collapsed frame — one extra collapse pass), only when
+        ``product_categories`` maps the items. Nested bundle never re-nests.
+
+    Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
+    ``category`` when requested and available); overall/per_item empty when no
     query has a positive label.
     """
     schema = get_schema(parameters)
@@ -762,14 +775,36 @@ def compute_overall_per_item(
         df_with_pos, group_cols, label_col, k_values
     ).cache()
     try:
+        # Detect active segment column the same way as _compute_core (first
+        # segment_columns entry that survives into enriched), so baseline
+        # per_segment keys line up with the model's.
+        active_seg_col: str | None = None
+        if with_segment:
+            for seg in (eval_params.get("segment_columns", []) or []):
+                if seg in enriched.columns:
+                    active_seg_col = seg
+                    break
+        carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=[]
+            enriched, group_cols, label_col, k_values, carry_cols=carry
         )
-        overall = aggregate_overall(per_query, k_values)
-        per_item = aggregate_per_item(enriched, [item_col], label_col, k_values)
-        return {"overall": overall, "per_item": per_item}
+        result = {
+            "overall": aggregate_overall(per_query, k_values),
+            "per_item": aggregate_per_item(
+                enriched, [item_col], label_col, k_values
+            ),
+        }
+        if active_seg_col:
+            result["per_segment"] = aggregate_per_segment(
+                per_query, active_seg_col, k_values
+            )
     finally:
         enriched.unpersist()
+
+    if with_category and _build_category_mapping(parameters) is not None:
+        collapsed = collapse_to_categories(eval_predictions, parameters)
+        result["category"] = compute_overall_per_item(collapsed, parameters)
+    return result
 
 
 def compute_all_metrics(

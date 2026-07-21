@@ -556,6 +556,78 @@ def _params_lookback():
     return p
 
 
+def _metrics_with_seg_cat():
+    """Model metrics carrying per_segment + category overall (for baseline
+    by-seg / 大類 comparison)."""
+    m = _metrics()
+    m["per_segment"] = {
+        "X": {"map@1": 0.6, "map@3": 0.62, "map@2": 0.61,
+              "recall@1": 0.3, "precision@1": 0.5},
+        "Y": {"map@1": 0.4, "map@3": 0.44, "map@2": 0.42,
+              "recall@1": 0.2, "precision@1": 0.35},
+    }
+    m["category"] = {
+        "overall": {"map@1": 0.55, "map@3": 0.6, "map@2": 0.58},
+        "dataset_overview": {"totals": {"n_products": 3}},
+    }
+    return m
+
+
+def _baseline_with_seg_cat():
+    base = dict(_baseline_metrics_full())
+    base["per_segment"] = {
+        "X": {"map@1": 0.5, "map@3": 0.52, "map@2": 0.51,
+              "recall@1": 0.25, "precision@1": 0.45},
+        "Y": {"map@1": 0.3, "map@3": 0.34, "map@2": 0.32,
+              "recall@1": 0.15, "precision@1": 0.3},
+    }
+    base["category"] = {
+        "overall": {"map@1": 0.45, "map@3": 0.5, "map@2": 0.48},
+    }
+    return base
+
+
+def test_baseline_per_segment_map_compare_table():
+    s = rb.build_baseline_section(
+        _metrics_with_seg_cat(), _baseline_with_seg_cat(), _params()
+    )
+    title = "per-segment mAP@k (M/B/Δ)"
+    assert title in s.table_titles
+    tbl = s.tables[s.table_titles.index(title)]
+    # rows: seg × {Model, Baseline, Δ}, in segment order
+    assert list(tbl.index) == [
+        "X · Model", "X · Baseline", "X · Δ",
+        "Y · Model", "Y · Baseline", "Y · Δ",
+    ]
+    assert tbl.loc["X · Model", "@1"] == 0.6
+    assert tbl.loc["X · Baseline", "@1"] == 0.5
+    assert abs(tbl.loc["X · Δ", "@1"] - 0.1) < 1e-9    # 0.6 - 0.5
+    assert s.collapsed_tables[s.table_titles.index(title)] is True
+
+
+def test_baseline_category_overall_map_compare_table():
+    s = rb.build_baseline_section(
+        _metrics_with_seg_cat(), _baseline_with_seg_cat(), _params()
+    )
+    title = "大類 overall mAP@k (M/B/Δ)"
+    assert title in s.table_titles
+    tbl = s.tables[s.table_titles.index(title)]
+    assert list(tbl.index) == ["Model", "Baseline", "Δ"]
+    assert tbl.loc["Model", "@1"] == 0.55
+    assert tbl.loc["Baseline", "@1"] == 0.45
+    assert abs(tbl.loc["Δ", "@1"] - 0.10) < 1e-9
+
+
+def test_baseline_omits_seg_cat_tables_when_absent():
+    """Backward compat: baseline without per_segment/category -> no extra
+    tables (older artifacts, or model without those slices)."""
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    assert "per-segment mAP@k (M/B/Δ)" not in s.table_titles
+    assert "大類 overall mAP@k (M/B/Δ)" not in s.table_titles
+
+
 def test_baseline_shows_lookback_window():
     s = rb.build_baseline_section(
         _metrics(), _baseline_metrics_full(), _params_lookback()
