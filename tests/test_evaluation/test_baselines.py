@@ -140,6 +140,36 @@ def test_build_baseline_frame_matches_timestamp_typed_snap_date(spark):
     assert by_prod["B"] == 2.0
 
 
+def test_monthly_purchase_counts_breaks_window_into_months(spark):
+    from recsys_tfb.evaluation.baselines import compute_monthly_purchase_counts
+
+    # 12-month window [2024-01-31, 2025-01-31): the two history snaps land in
+    # distinct calendar months (2024-06, 2024-12). A: 2 in 2024-06 + 1 in
+    # 2024-12; B: 1 in 2024-06 only.
+    monthly = compute_monthly_purchase_counts(
+        _label_table(spark), ["2025-01-31"], 12, _parameters()
+    )
+    by_key = {(r["month"], r["prod_name"]): r["score"] for r in monthly.collect()}
+    assert by_key[("2024-06", "A")] == 2
+    assert by_key[("2024-12", "A")] == 1
+    assert by_key[("2024-06", "B")] == 1
+    # Summed over months reconciles with the single-window total (A=3, B=1).
+    a_total = sum(v for (mo, it), v in by_key.items() if it == "A")
+    b_total = sum(v for (mo, it), v in by_key.items() if it == "B")
+    assert a_total == 3 and b_total == 1
+
+
+def test_monthly_purchase_counts_rejects_empty_snap_dates(spark):
+    import pytest
+    from recsys_tfb.evaluation.baselines import compute_monthly_purchase_counts
+
+    empty = spark.createDataFrame(
+        [], schema="snap_date string, prod_name string, label int"
+    )
+    with pytest.raises(ValueError, match="non-empty"):
+        compute_monthly_purchase_counts(empty, [], 12, _parameters())
+
+
 def test_compute_purchase_counts_rejects_empty_snap_dates(spark):
     import pytest
     from recsys_tfb.evaluation.baselines import compute_purchase_counts

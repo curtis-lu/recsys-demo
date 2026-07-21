@@ -1,8 +1,10 @@
 """Evaluation pipeline definition."""
 
+import importlib
+
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
 
 
 def create_pipeline(
@@ -27,7 +29,6 @@ def create_pipeline(
         compute_metric_ci,
         compute_metrics,
         compute_offset_sweep,
-        compute_pair_ledger,
         compute_report_aggregates,
         draw_diagnosis_sample_node,
         generate_report,
@@ -83,7 +84,7 @@ def create_pipeline(
             inputs=[predictions_input, "label_table", "parameters"],
             outputs="eval_predictions",
         ),
-        # Draw the driver-side diagnosis sample ONCE; the three diagnosis
+        # Draw the driver-side diagnosis sample ONCE; the two diagnosis
         # consumers below read this shared in-memory output instead of each
         # re-drawing it (same seed -> identical content).
         Node(
@@ -116,17 +117,21 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_offset_sweep",
         ),
-        Node(
-            compute_pair_ledger,
-            inputs=["diagnosis_sample", "parameters"],
-            outputs="evaluation_pair_ledger",
-        ),
         # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
         # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
+        # inputs 不是寫死的 ["diagnosis_sample", "parameters"]：每項診斷宣告
+        # 自己的 INPUTS（contract.inputs_for），多數診斷沒宣告就落回吃共用
+        # 抽樣的預設值。不吃抽樣的診斷（例如讀 gain_ledger 的
+        # model_capacity）就此能宣告自己的 node inputs，不必讓每項診斷都收
+        # 寬簽章。
         *[
             Node(
                 make_diagnosis_node(name),
-                inputs=["diagnosis_sample", "parameters"],
+                inputs=list(inputs_for(
+                    importlib.import_module(
+                        f"recsys_tfb.diagnosis.metric.{name}"
+                    )
+                )),
                 outputs=f"evaluation_{name}",
             )
             for name in DIAGNOSES
@@ -145,7 +150,7 @@ def create_pipeline(
             generate_report,
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
                     "evaluation_metric_ci", "evaluation_offset_sweep",
-                    "evaluation_pair_ledger", "evaluation_report_aggregates",
+                    "evaluation_report_aggregates",
                     "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),

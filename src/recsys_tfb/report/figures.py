@@ -39,6 +39,16 @@ def assert_within_budget(n: int, name: str) -> None:
         )
 
 
+def fits_budget(n: int) -> bool:
+    """``n`` 是否在單張圖的預算內。
+
+    與 :func:`assert_within_budget` 同一常數、同一比較方向——呼叫端要在
+    「畫得下就畫圖、畫不下就退回表格」這種決策裡用它，藉此避免「這裡判斷
+    畫得下、那裡 raise」的死角：兩處各自維護一份門檻比較，遲早會漂移。
+    """
+    return n <= MAX_FIGURE_POINTS
+
+
 def _finite_bounds(arr: np.ndarray, name: str) -> tuple[float, float]:
     """算 ``arr`` 中有限值的 ``(min, max)``，供 ``diverging_scale`` 的 ``lo``/``hi``。
 
@@ -80,8 +90,15 @@ def heatmap(
     colorbar_title: str,
     *,
     center: float | None = None,
+    text: Sequence[Sequence[str]] | None = None,
 ) -> go.Figure:
-    """矩陣熱圖。``x``/``y`` 的順序原樣保留，絕不重新排序。"""
+    """矩陣熱圖。``x``/``y`` 的順序原樣保留，絕不重新排序。
+
+    ``text``：給定時（與 ``z`` 同形狀的字串矩陣）把每格的值直接寫在格子上，
+    讓熱圖同時能「一眼看形狀」與「讀得出精確值」。留 ``None`` 則只有顏色與
+    hover——色階本身讀不出數值時（例如格子代表的是名次而非比例），呼叫端應
+    傳 ``text`` 把數值標出來。
+    """
     z_arr = np.asarray(z, dtype=float)
     flat = z_arr.ravel()
     assert_within_budget(flat.size, name="heatmap")
@@ -92,15 +109,18 @@ def heatmap(
     else:
         colorscale = sequential_scale()
 
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z_arr,
-            x=list(x),
-            y=list(y),
-            colorscale=colorscale,
-            colorbar=dict(title=colorbar_title),
-        )
+    heatmap_kwargs: dict = dict(
+        z=z_arr,
+        x=list(x),
+        y=list(y),
+        colorscale=colorscale,
+        colorbar=dict(title=colorbar_title),
     )
+    if text is not None:
+        heatmap_kwargs["text"] = [list(row) for row in text]
+        heatmap_kwargs["texttemplate"] = "%{text}"
+
+    fig = go.Figure(data=go.Heatmap(**heatmap_kwargs))
     return _apply_theme(fig, title)
 
 
@@ -179,8 +199,17 @@ def bar(
     y_title: str,
     *,
     center: float | None = None,
+    ci_low: Sequence[float] | None = None,
+    ci_high: Sequence[float] | None = None,
 ) -> go.Figure:
-    """長條圖。``center`` 給定時（有號量）用發散色階，否則單色。"""
+    """長條圖。``center`` 給定時（有號量）用發散色階，否則單色。
+
+    ``ci_low``／``ci_high``：給定時（兩者都要給）加上不對稱誤差線。呼叫端
+    直接傳區間的**絕對邊界**（例如 bootstrap 的 2.5／97.5 百分位），這裡才
+    算上下差——呼叫端不必自己重複這個減法。兩者之一缺席（``None``）就完全
+    不畫誤差線；個別列是 ``None`` 會被轉成 NaN，那一根長條的誤差線由 plotly
+    自然跳過，不影響其餘列。
+    """
     y_arr = np.asarray(y, dtype=float)
     assert_within_budget(len(x), name="bar")
 
@@ -194,6 +223,20 @@ def bar(
     else:
         marker = dict(color=sequential_scale()[1][1])
 
-    fig = go.Figure(data=go.Bar(x=list(x), y=y_arr, marker=marker))
+    error_y = None
+    if ci_low is not None and ci_high is not None:
+        lo_arr = np.asarray(ci_low, dtype=float)
+        hi_arr = np.asarray(ci_high, dtype=float)
+        error_y = dict(
+            type="data",
+            symmetric=False,
+            array=hi_arr - y_arr,
+            arrayminus=y_arr - lo_arr,
+            visible=True,
+        )
+
+    fig = go.Figure(
+        data=go.Bar(x=list(x), y=y_arr, marker=marker, error_y=error_y)
+    )
     fig.update_layout(xaxis_title=x_title, yaxis_title=y_title)
     return _apply_theme(fig, title)

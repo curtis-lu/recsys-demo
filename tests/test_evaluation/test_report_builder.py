@@ -1,5 +1,7 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
+import pandas as pd
+
 from recsys_tfb.evaluation import report_builder as rb
 
 
@@ -40,7 +42,14 @@ def _metrics():
             "by_item": {"A": {"n_rows": 50, "n_positives": 12,
                               "n_customers": 10, "positive_rate": 0.24},
                         "B": {"n_rows": 50, "n_positives": 8,
-                              "n_customers": 10, "positive_rate": 0.16}}},
+                              "n_customers": 10, "positive_rate": 0.16}},
+            "by_segment": {
+                "X": {"n_rows": 60, "n_positives": 14, "n_customers": 6,
+                      "positive_rate": 14 / 60, "n_queries": 6,
+                      "query_share": 0.6},
+                "Y": {"n_rows": 40, "n_positives": 6, "n_customers": 4,
+                      "positive_rate": 6 / 40, "n_queries": 4,
+                      "query_share": 0.4}}},
         "macro_avg": {
             "by_item": {
                 "hit_rate@1": 0.15, "hit_rate@2": 0.35, "mean_pos": 4.0,
@@ -52,17 +61,341 @@ def _metrics():
     }
 
 
-def test_headline_section_has_map_card():
-    s = rb.build_headline_section(_metrics(), _params())
-    txt = " ".join(str(t.to_dict()) for t in s.tables)
-    assert "map@1" in txt and "map@all" in txt   # "all" resolves via display
-    assert "map@5" not in txt                     # not in display list
+def _metric_ci():
+    return {
+        "enabled": True,
+        "macro": {"ap": 0.541, "ci_low": 0.520, "ci_high": 0.559},
+        "sample": {
+            "n_queries_sampled": 10,
+            "sampling_description": "未抽樣：全部 10 個有正例的 query 都納入。",
+        },
+        "per_item": {"A": {"ap": 0.5, "ci_low": 0.45, "ci_high": 0.55,
+                           "n_pos": 12}},
+    }
+
+
+def test_overview_section_has_purpose_and_macro_headline():
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert s.title == "概覽"
+    # 目的句提到排序（這份報表在幹嘛）
+    assert "排序" in s.description
+    # 關鍵數含 macro per-item mAP（頭號指標）
+    joined = " ".join(t.to_string() for t in s.tables)
+    assert "macro" in joined.lower()
+    # 有「問題 → 看哪一區」導覽表
+    assert any("導覽" in tt or "看哪" in tt for tt in s.table_titles)
+
+
+def test_overview_scale_and_severity_separated():
+    # 規模／分母（n_queries 等）與關鍵指標分成不同表，避免分母被讀成嚴重度
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert len(s.tables) >= 2
+    # overall per-query mAP 明標為「另一種加權」，不宣稱哪個才對
+    joined = s.description + " ".join(s.table_titles) + " ".join(
+        t.to_string() for t in s.tables
+    )
+    assert "加權" in joined
+
+
+def test_overview_no_verdict_vocabulary():
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.table_titles)
+            + " ".join(t.to_string() for t in s.tables) + " ".join(s.bullets))
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
+
+
+def test_core_concept_section_defines_atomic_unit():
+    s = rb.build_core_concept_section(_params())
+    assert s.title.startswith("核心概念")
+    # 有公式（AP@k 定義）
+    assert s.formula
+    # 用一個具體數字走一遍（bullets 內含數例）
+    assert any(any(ch.isdigit() for ch in b) for b in s.bullets)
+    # 有「每區＝同一數換切法」的地圖字樣
+    joined = s.description + " ".join(s.bullets)
+    assert "粒度" in joined or "加總" in joined
+
+
+def test_core_concept_section_no_verdict_vocabulary():
+    s = rb.build_core_concept_section(_params())
+    text = s.description + s.formula + " ".join(s.bullets)
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
+
+
+def test_core_concept_formula_normalizes_by_R_not_min():
+    """AP@k 分母是 R（正例總數）、不是 min(k,R)——這是與 metrics_spark 實作
+    （map@K = sum(ap_contrib@K)/total_rel）對齊的硬約束。寫錯會讓讀者拿公式
+    手算頭號家族時對不上（map@1 會被誤推成 precision@1 而非 recall@1）。"""
+    s = rb.build_core_concept_section(_params())
+    body = s.formula + " ".join(s.bullets)
+    assert "AP@k = (1 / R)" in s.formula          # 正規化分母＝R
+    assert "(1 / min" not in s.formula            # 不得用 min(k,R) 當 AP 分母
+    assert "1/min" not in s.formula.replace(" ", "")
+    # 提供可手算核對的錨點：map@1 = recall@1
+    assert "map@1" in body and "recall@1" in body
 
 
 def test_dataset_overview_section_tables():
     s = rb.build_dataset_overview_section(_metrics(), _params())
-    assert len(s.tables) == 3   # totals / by_snap_date / by_item
+    assert len(s.tables) == 4   # totals / by_snap_date / by_item / by_segment
     assert s.title
+
+
+def test_dataset_section_per_segment_real_numbers():
+    """per-segment 表顯示真數字（正例數/正樣本率/query 數佔比），無「待補」。
+
+    防退化：欄名或 query_share 讀錯、或退回 placeholder，都該紅。
+    """
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    seg = next(t for t, tt in zip(s.tables, s.table_titles)
+               if "per-segment" in tt)
+    cols = list(map(str, seg.columns))
+    assert "正例數" in cols and "query 數佔比" in cols
+    assert "待補" not in " ".join(map(str, seg.values.ravel()))
+    # query 數佔比逐列加總≈1（X=0.6、Y=0.4）
+    assert abs(seg["query 數佔比"].astype(float).sum() - 1.0) < 1e-6
+    # 第 3 欄不是「正例佔比」（防止被誤改成 per-item 那一軸）
+    assert "正例佔比" not in cols
+
+
+def test_dataset_section_per_segment_has_candidate_col():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    idx = next(i for i, tt in enumerate(s.table_titles) if "per-segment" in tt)
+    cols = list(map(str, s.tables[idx].columns))
+    assert "候選列數" in cols          # 讓正樣本率可手算核對（正例數÷候選列數）
+
+
+def test_dataset_section_per_item_has_three_cols_with_share():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    by_item = next(
+        t for t, tt in zip(s.tables, s.table_titles)
+        if "per-item" in tt or "產品" in tt
+    )
+    cols = " ".join(map(str, by_item.columns))
+    assert "正例數" in cols and "正樣本率" in cols and "正例佔比" in cols
+
+
+def test_dataset_section_share_reconciles():
+    # 正例佔比 = n_positives / 總正例，逐列加總 ≈ 1（手算可核對）
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    by_item = next(
+        t for t in s.tables
+        if "正例佔比" in " ".join(map(str, t.columns))
+    )
+    assert abs(by_item["正例佔比"].astype(float).sum() - 1.0) < 1e-6
+
+
+def test_dataset_section_flags_remaining_phase2():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    # per-segment 已補真數字；仍待的是每-query 正例數分佈
+    assert "每-query" in s.description or "per-query" in s.description.lower()
+
+
+# ---- Task 5: 衡量指標（合併 primary_map/guardrail/attr/segment/category）----
+
+def test_metrics_section_overall_orientation_locked():
+    # families（map/precision/recall）是 overall 彙總表的 row index，非欄（方向鎖）
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    fam_tbl = next(t for t in s.tables
+                   if set(["map", "precision", "recall"]).issubset(set(t.index)))
+    assert "map" in fam_tbl.index and "recall" in fam_tbl.index
+
+
+def test_metrics_section_two_family_blocks_consistent():
+    m = _metrics()
+    m["per_segment"] = {"seg1": {"map@1": 0.5, "precision@1": 0.4, "recall@1": 0.3}}
+    m["category"] = {
+        "overall": {"map@1": 0.4, "precision@1": 0.3, "recall@1": 0.2},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "map_attr@1": 0.5,
+                                  "mean_pos": 2.0}},
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    tt = s.table_titles
+    # A 塊 per-segment 拆成 map/precision/recall 三張
+    assert sum(1 for x in tt if "per-segment" in x and "map@k" in x) == 1
+    assert sum(1 for x in tt if "per-segment" in x and "precision@k" in x) == 1
+    assert sum(1 for x in tt if "per-segment" in x and "recall@k" in x) == 1
+    # A 塊 大類 overall 有 precision（families 表含 precision 列）
+    cat_ov = next(t for t, x in zip(s.tables, tt)
+                  if "大類 overall" in x)
+    assert "precision" in cat_ov.index
+    # B 塊 大類 per-item 補了 map_attr（與 per-item 對稱）
+    assert any("大類 per-item" in x and "map_attr@k" in x for x in tt)
+    assert any("大類 per-item" in x and "recall@k" in x for x in tt)
+
+
+def test_metrics_section_macro_is_headline():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert any("macro per-item mAP" in tt and "頭號" in tt
+               for tt in s.table_titles)
+
+
+def test_metrics_section_per_item_columns_bare_at_k_family_in_title():
+    """B 塊(per-item 歸因)欄名統一裸 @k、family 只在標題——與 A 塊一致。
+
+    防退化：改回冗餘欄名 map_attr@1／recall@1 (per-item)，或把 family
+    從標題拿掉，本測試都該轉紅。也順帶驗兩張 per-item 表都在（attr+recall）。
+    """
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    by_title = dict(zip(s.table_titles, s.tables))
+    map_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "map_attr@k" in t
+                     and "大類" not in t)
+    rec_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "recall@k" in t
+                     and "大類" not in t)
+    map_cols = list(map(str, by_title[map_title].columns))
+    rec_cols = list(map(str, by_title[rec_title].columns))
+    # 欄名裸 @k（family 在標題、不重複塞進欄名），與 A 塊 _families/_entities 一致
+    assert "@1" in map_cols and "@1" in rec_cols
+    # 舊冗餘欄名已消除
+    assert "map_attr@1" not in map_cols
+    assert "recall@1 (per-item)" not in rec_cols
+    # recall 表仍保留 mean_pos 額外欄
+    assert "mean_pos" in rec_cols
+
+
+def test_metrics_section_no_guardrail_verdict():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.table_titles)
+            + " ".join(t.to_string() for t in s.tables))
+    for bad in ("護欄", "pass/fail", "達標", "未達標", "偏高", "偏低",
+                "不足", "異常", "嚴重", "良好"):
+        assert bad not in text
+
+
+def test_metrics_section_hides_ndcg():
+    m = _metrics()
+    m["per_segment"] = {"seg1": {"map@1": 0.5, "ndcg@1": 0.6, "recall@1": 0.3}}
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
+
+
+def test_metrics_section_detail_tables_collapsed():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert any(s.collapsed_tables)      # 明細收合
+    assert not s.collapsed_tables[0]    # overall 頂線可見
+
+
+def test_metrics_section_has_macro_rows():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    # 以標題定位 per-item map_attr 表（欄名裸 @k，不能再靠欄名找）
+    map_tbl = next(t for t, tt in zip(s.tables, s.table_titles)
+                   if "per-item 歸因" in tt and "map_attr@k" in tt
+                   and "大類" not in tt)
+    assert rb._MACRO_LABEL in map_tbl.index
+
+
+def test_metrics_section_category_present_when_key():
+    m = _metrics()
+    m["category"] = {
+        "overall": {"map@1": 0.4, "map@2": 0.45},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    assert any("大類" in tt for tt in s.table_titles)
+
+
+def test_metrics_section_none_when_off():
+    p = _params()
+    p["evaluation"]["report"]["sections"] = {"primary_map": False}
+    assert rb.build_metrics_section(_metrics(), p, metric_ci=_metric_ci()) is None
+
+
+# ---- Task 6: per-item 細部拆解 ----
+
+def _report_aggregates():
+    """手建的 report_aggregates payload（frame_from_json 格式；含 calibration
+    以驗證本段刻意不畫它）。"""
+    return {
+        "columns": {"item": "prod_name", "score": "score",
+                    "rank": "rank", "label": "label"},
+        "score_histogram": {
+            "kind": "long",
+            "columns": ["prod_name", "bin_center", "count", "bin_width"],
+            "data": [["A", 0.1, 10, 0.2], ["A", 0.3, 10, 0.2],
+                     ["B", 0.2, 8, 0.2], ["B", 0.4, 8, 0.2]]},
+        "score_box_by_label": {
+            "kind": "long",
+            "columns": ["prod_name", "label", "q1", "median", "q3",
+                        "lowerfence", "upperfence"],
+            "data": [["A", 0, 0.1, 0.2, 0.3, 0.05, 0.35],
+                     ["A", 1, 0.5, 0.6, 0.7, 0.45, 0.75],
+                     ["B", 0, 0.1, 0.15, 0.2, 0.05, 0.25],
+                     ["B", 1, 0.4, 0.5, 0.6, 0.35, 0.65]]},
+        "rank_counts": {"kind": "matrix", "index": ["A", "B"],
+                        "columns": [1, 2], "data": [[30, 10], [10, 30]]},
+        "positive_rank_counts": {"kind": "matrix", "index": ["A", "B"],
+                                 "columns": [1, 2], "data": [[6, 2], [2, 6]]},
+        "positive_rate": {"kind": "matrix", "index": ["A", "B"],
+                          "columns": [1, 2], "data": [[0.2, 0.2], [0.2, 0.2]]},
+        "calibration": {"kind": "long",
+                        "columns": ["prod_name", "bin", "mean_pred", "frac_pos"],
+                        "data": [["A", 0, 0.2, 0.15], ["B", 0, 0.3, 0.25]]},
+    }
+
+
+def test_item_share_by_rank_columns_sum_to_one():
+    # 欄正規化：每個 rank 欄 ÷ 欄和，每欄加總=1（render 端純算術，G#1）。
+    # ★用非對稱矩陣：對稱矩陣下列正規化也會讓欄和=1，測不出「走哪條」，
+    # 這裡兩列和不同（40 vs 20），故列正規化會讓欄和≠1（mutation 咬得住）。
+    counts = pd.DataFrame([[30, 10], [10, 10]], index=["A", "B"], columns=[1, 2])
+    share = rb._item_share_by_rank(counts)
+    assert (abs(share.sum(axis=0) - 1.0) < 1e-6).all()
+
+
+def test_item_detail_drops_calibration():
+    # fixture 含 calibration，但本段刻意不畫（排序不是校準）。5 張圖＝score 分布 2
+    # ＋rank 矩陣 heatmap 3（含 positive rate），無 calibration 第 6 張。
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert len(s.figures) == 5
+
+
+def test_item_detail_positive_rate_is_figure_not_table():
+    # positive rate 改成 heatmap（圖），item-share 仍是數字表；圖群組在前
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert len(s.tables) == 2   # 只剩兩張 item-share 數字表
+    assert all("item share by rank" in tt for tt in s.table_titles)
+
+
+def test_item_detail_is_top_level_not_collapsible():
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert s.collapsible is False   # 升為頂層，不再整段收合
+
+
+def test_item_detail_has_item_share_tables():
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    joined = " ".join(s.table_titles)
+    assert "item share by rank" in joined
+    # share 表逐欄加總=1（手算可核對）
+    share_tbl = s.tables[0]
+    assert (abs(share_tbl.sum(axis=0) - 1.0) < 1e-6).all()
+
+
+# ---- Task 9: 完整性檢查 ----
+
+def test_completeness_section_lists_run_facts():
+    s = rb.build_completeness_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert s.title == "完整性檢查"
+    joined = (s.description + " ".join(s.bullets)
+              + " ".join(t.to_string() for t in s.tables))
+    assert "k" in joined.lower()               # k_values / metric.k 交代
+    assert "query" in joined.lower()           # 規模
+    assert "抽樣" in joined or "未抽樣" in joined  # sampling_description 流入
+
+
+def test_completeness_section_no_verdict_vocabulary():
+    s = rb.build_completeness_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.bullets)
+            + " ".join(t.to_string() for t in s.tables))
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
 
 
 class TestVisibleMetricKeys:
@@ -82,60 +415,13 @@ class TestVisibleMetricKeys:
         assert rb._visible_metric_keys(["my_ndcg@1"]) == ["my_ndcg@1"]
 
 
-def test_segment_section_hides_ndcg():
-    # per_segment 的每個 seg dict 的 key 會被直接攤成表格的欄（key-agnostic），
-    # 程式碼裡沒有 "ndcg" 字樣也會渲染出來。fixture 刻意帶 ndcg@1，否則假綠。
-    m = _metrics()
-    m["per_segment"] = {
-        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
-        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
-    }
-    s = rb.build_segment_section(m, _params())
-    cols = [str(c) for c in s.tables[0].columns]
-    assert "map@1" in cols, "非 ndcg 的欄不該被誤濾"
-    assert not [c for c in cols if c.startswith("ndcg")]
-
-
 def test_baseline_overall_table_hides_ndcg():
-    # _metrics()["overall"] 與 _baseline_metrics_full()["overall"] 都含 ndcg@1；
-    # overall 表用 set union 攤成列，ndcg@1 必須被濾掉。
+    # overall 拆成 mAP/recall/precision 三張 explicit-family 表，天然不含 ndcg。
     s = rb.build_baseline_section(
         _metrics(), _baseline_metrics_full(), _params()
     )
-    overall = s.tables[s.table_titles.index("overall metrics")]
-    idx = [str(i) for i in overall.index]
-    assert "map@1" in idx, "非 ndcg 的列不該被誤濾"
-    assert not [i for i in idx if i.startswith("ndcg")]
-
-
-def test_primary_map_section_slices_k():
-    s = rb.build_primary_map_section(_metrics(), _params())
-    # families on the row index, @k slices as columns (one set shared by all)
-    assert set(s.tables[0].index) == {"map", "precision", "recall"}
-    cols = " ".join(map(str, s.tables[0].columns))
-    assert "@1" in cols and "@3" in cols
-
-
-def test_guardrail_section_renames_hitrate_and_has_heatmap():
-    s = rb.build_guardrail_recall_section(_metrics(), _params())
-    cols = " ".join(map(str, s.tables[0].columns))
-    assert "recall@1 (per-item)" in cols
-    assert "hit_rate" not in cols
-    assert len(s.figures) == 1            # plotly heatmap
-
-
-def test_category_section_none_when_absent():
-    assert rb.build_category_section(_metrics(), _params()) is None
-
-
-def test_category_section_present_when_category_key():
-    m = _metrics()
-    m["category"] = {"overall": {"map@1": 0.7},
-                     "per_item": {"fund": {"hit_rate@1": 0.5,
-                                           "mean_pos": 2.0}},
-                     "dataset_overview": m["dataset_overview"]}
-    s = rb.build_category_section(m, _params())
-    assert s is not None and s.tables
+    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
+    assert any(tt == "overall mAP@k (M/B/Δ)" for tt in s.table_titles)
 
 
 def test_glossary_section_always_built():
@@ -147,7 +433,29 @@ def test_glossary_section_always_built():
 def test_assemble_report_is_html():
     html = rb.assemble_report(_metrics(), _params())
     assert html.startswith("<!DOCTYPE html>")
-    assert "摘要 Headline" in html
+    assert "概覽" in html                    # 新 spine 第一段
+
+
+def test_assemble_report_new_spine_order():
+    html = rb.assemble_report(
+        _metrics(), _params(), baseline_metrics=_baseline_metrics_full(),
+        metric_ci=_metric_ci(),
+    )
+    # 概覽最前、詞彙表殿後、完整性檢查在詞彙表之前
+    assert html.index("概覽") < html.index("核心概念")
+    assert html.index("完整性檢查") < html.index("詞彙表")
+    for title in ("核心概念 — 一個 query 的排序", "基本統計 — 資料集",
+                  "衡量指標", "baseline — popularity 對照", "完整性檢查"):
+        assert title in html
+
+
+def test_assemble_report_no_offset_sweep_in_main():
+    # offset-sweep 已移出主報表（改由診斷連結導向後繼 score_shift）
+    html = rb.assemble_report(
+        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
+    )
+    assert "Offset sweep" not in html
+    assert "分流 Offset" not in html
 
 
 def test_assemble_report_has_no_ndcg_end_to_end():
@@ -164,11 +472,6 @@ def test_assemble_report_has_no_ndcg_end_to_end():
         m, _params(), baseline_metrics=_baseline_metrics_full()
     )
     assert "ndcg" not in html.lower()
-
-
-def test_primary_map_orientation_locked():
-    s = rb.build_primary_map_section(_metrics(), _params())
-    assert "map" in s.tables[0].index   # families are the row index
 
 
 def _baseline_metrics_full():
@@ -205,22 +508,9 @@ def test_dataset_overview_adds_by_category_when_present():
         "fund": {"n_rows": 10, "n_positives": 3, "n_customers": 5,
                  "positive_rate": 0.3}}}}
     s = rb.build_dataset_overview_section(m, _params())
-    assert "by 大類" in s.table_titles
-
-
-def test_category_section_has_composition_table():
-    m = _metrics()
-    m["category"] = {"overall": {"map@1": 0.7},
-                     "per_item": {"fund": {"hit_rate@1": 0.5,
-                                           "mean_pos": 2.0}},
-                     "dataset_overview": m["dataset_overview"]}
-    p = _params()
-    p["evaluation"]["product_categories"] = {
-        "mapping": {"fund": ["fund_stock", "fund_bond"]}}
-    s = rb.build_category_section(m, p)
-    assert "大類組成" in s.table_titles
-    joined = " ".join(str(t.to_dict()) for t in s.tables)
-    assert "fund_stock" in joined
+    idx = next(i for i, tt in enumerate(s.table_titles)
+               if tt.startswith("by 大類"))
+    assert s.collapsed_tables[idx] is False   # 大類表預設展開，不收合
 
 
 def test_baseline_section_no_per_item_delta_omits_table():
@@ -228,44 +518,13 @@ def test_baseline_section_no_per_item_delta_omits_table():
     base = {"overall": {"map@1": 0.4}}          # no per_item -> per_item_delta empty
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
-    assert s.table_titles == ["overall metrics"]
-    assert len(s.tables) == 1
-
-
-def test_category_section_omits_composition_when_no_mapping():
-    m = _metrics()
-    m["category"] = {"overall": {"map@1": 0.7},
-                     "per_item": {"fund": {"hit_rate@1": 0.5,
-                                           "mean_pos": 2.0}},
-                     "dataset_overview": m["dataset_overview"]}
-    p = _params()  # _params() has no product_categories.mapping
-    s = rb.build_category_section(m, p)
-    assert "大類組成" not in s.table_titles
-
-
-def test_per_item_attr_section_built():
-    s = rb.build_per_item_attr_section(_metrics(), _params())
-    assert s is not None
-    assert len(s.tables) == 1 and len(s.figures) == 1
-    map_tbl = s.tables[0]
-    assert set(map_tbl.index) == {"Macro 平均", "A", "B"}
-    cols = " ".join(map(str, map_tbl.columns))
-    assert "map_attr@1" in cols and "map_attr@3" in cols
-    # ndcg 仍由 metrics_spark 算出(fixture 帶 ndcg_attr@1)，但刻意不呈現
-    assert "ndcg" not in cols
-
-
-def test_per_item_attr_section_off():
-    p = _params()
-    p["evaluation"]["report"].setdefault("sections", {})["per_item_attr"] = False
-    assert rb.build_per_item_attr_section(_metrics(), p) is None
-
-
-def test_per_item_attr_heatmap_autoscale():
-    s = rb.build_per_item_attr_section(_metrics(), _params())
-    for fig in s.figures:
-        hm = fig.data[0]
-        assert hm.zmin is None and hm.zmax is None
+    # 無 per_item、無 purchase_counts → 只剩 overall 三張 family 表
+    assert s.table_titles == [
+        "overall mAP@k (M/B/Δ)",
+        "overall recall@k (M/B/Δ)",
+        "overall precision@k (M/B/Δ)",
+    ]
+    assert len(s.tables) == 3
 
 
 def test_glossary_has_attr_entries():
@@ -277,81 +536,131 @@ def test_glossary_has_attr_entries():
     assert "ndcg_attr@k" not in terms
 
 
-def test_guardrail_section_has_macro_row():
-    s = rb.build_guardrail_recall_section(_metrics(), _params())
-    table = s.tables[0]
-    # Top row is the macro average
-    assert list(table.index)[0] == "Macro 平均"
-    # Value is the equal-weight per-product average: hit_rate@1 → recall@1 (per-item) column
-    assert table.loc["Macro 平均", "recall@1 (per-item)"] == 0.15
-    assert table.loc["Macro 平均", "mean_pos"] == 4.0
-    # heatmap excludes the macro row
-    assert "Macro 平均" not in list(s.figures[0].data[0].y)
-
-
-def test_guardrail_section_no_macro_when_absent():
-    m = _metrics()
-    del m["macro_avg"]
-    s = rb.build_guardrail_recall_section(m, _params())
-    assert "Macro 平均" not in list(s.tables[0].index)
-
-
-def test_per_item_attr_section_has_macro_rows():
-    s = rb.build_per_item_attr_section(_metrics(), _params())
-    map_tbl = s.tables[0]
-    assert list(map_tbl.index)[0] == "Macro 平均"
-    # map_attr@1 per-product average = (0.5 + 0.3) / 2 = 0.4
-    assert map_tbl.loc["Macro 平均", "map_attr@1"] == 0.4
-    # heatmap excludes the macro row
-    assert "Macro 平均" not in list(s.figures[0].data[0].y)
-
-
-def test_segment_section_has_macro_row():
-    m = _metrics()
-    m["per_segment"] = {
-        "young": {"map@1": 0.6, "ndcg@1": 0.7},
-        "old": {"map@1": 0.4, "ndcg@1": 0.5},
-    }
-    m["macro_avg"]["by_segment"] = {"map@1": 0.5, "ndcg@1": 0.6}
-    s = rb.build_segment_section(m, _params())
-    assert list(s.tables[0].index)[0] == "Macro 平均"
-    assert s.tables[0].loc["Macro 平均", "map@1"] == 0.5
-
-
-def test_segment_section_no_macro_when_absent():
-    m = _metrics()
-    m["per_segment"] = {"young": {"map@1": 0.6}}
-    # macro_avg has no by_segment key
-    s = rb.build_segment_section(m, _params())
-    assert "Macro 平均" not in list(s.tables[0].index)
-
-
-def test_category_section_recall_table_has_macro_row():
-    m = _metrics()
-    m["category"] = {
-        "overall": {"map@1": 0.7},
-        "per_item": {
-            "fund": {"hit_rate@1": 0.5, "hit_rate@2": 0.6, "mean_pos": 2.0},
-            "loan": {"hit_rate@1": 0.3, "hit_rate@2": 0.4, "mean_pos": 4.0},
-        },
-        "macro_avg": {
-            "by_item": {
-                "hit_rate@1": 0.4, "hit_rate@2": 0.5, "mean_pos": 3.0,
-            },
-        },
-        "dataset_overview": m["dataset_overview"],
-    }
-    s = rb.build_category_section(m, _params())
-    # tables[1] is the category-level per-item recall@k table
-    rec_tbl = s.tables[1]
-    assert list(rec_tbl.index)[0] == "Macro 平均"
-    assert rec_tbl.loc["Macro 平均", "recall@1 (per-item)"] == 0.4
-
-
 def test_glossary_has_macro_average_entry():
     s = rb.build_glossary_section(_params())
     terms = list(s.tables[0]["指標"])
     assert "Macro 平均" in terms
+
+
+def test_glossary_has_new_structure_terms():
+    s = rb.build_glossary_section(_params())
+    terms = set(s.tables[0]["指標"])
+    assert "正例佔比" in terms
+    assert "item share by rank" in terms
+    assert "macro per-item mAP" in terms
+
+
+def _params_lookback():
+    p = _params()
+    p["evaluation"]["baseline"] = {"lookback_months": 12}
+    return p
+
+
+def _metrics_with_seg_cat():
+    """Model metrics carrying per_segment + category overall (for baseline
+    by-seg / 大類 comparison)."""
+    m = _metrics()
+    m["per_segment"] = {
+        "X": {"map@1": 0.6, "map@3": 0.62, "map@2": 0.61,
+              "recall@1": 0.3, "precision@1": 0.5},
+        "Y": {"map@1": 0.4, "map@3": 0.44, "map@2": 0.42,
+              "recall@1": 0.2, "precision@1": 0.35},
+    }
+    m["category"] = {
+        "overall": {"map@1": 0.55, "map@3": 0.6, "map@2": 0.58},
+        "dataset_overview": {"totals": {"n_products": 3}},
+    }
+    return m
+
+
+def _baseline_with_seg_cat():
+    base = dict(_baseline_metrics_full())
+    base["per_segment"] = {
+        "X": {"map@1": 0.5, "map@3": 0.52, "map@2": 0.51,
+              "recall@1": 0.25, "precision@1": 0.45},
+        "Y": {"map@1": 0.3, "map@3": 0.34, "map@2": 0.32,
+              "recall@1": 0.15, "precision@1": 0.3},
+    }
+    base["category"] = {
+        "overall": {"map@1": 0.45, "map@3": 0.5, "map@2": 0.48},
+    }
+    return base
+
+
+def test_baseline_per_segment_map_compare_table():
+    s = rb.build_baseline_section(
+        _metrics_with_seg_cat(), _baseline_with_seg_cat(), _params()
+    )
+    title = "per-segment mAP@k (M/B/Δ)"
+    assert title in s.table_titles
+    tbl = s.tables[s.table_titles.index(title)]
+    # rows: seg × {Model, Baseline, Δ}, in segment order
+    assert list(tbl.index) == [
+        "X · Model", "X · Baseline", "X · Δ",
+        "Y · Model", "Y · Baseline", "Y · Δ",
+    ]
+    assert tbl.loc["X · Model", "@1"] == 0.6
+    assert tbl.loc["X · Baseline", "@1"] == 0.5
+    assert abs(tbl.loc["X · Δ", "@1"] - 0.1) < 1e-9    # 0.6 - 0.5
+    assert s.collapsed_tables[s.table_titles.index(title)] is True
+
+
+def test_baseline_category_overall_map_compare_table():
+    s = rb.build_baseline_section(
+        _metrics_with_seg_cat(), _baseline_with_seg_cat(), _params()
+    )
+    title = "大類 overall mAP@k (M/B/Δ)"
+    assert title in s.table_titles
+    tbl = s.tables[s.table_titles.index(title)]
+    assert list(tbl.index) == ["Model", "Baseline", "Δ"]
+    assert tbl.loc["Model", "@1"] == 0.55
+    assert tbl.loc["Baseline", "@1"] == 0.45
+    assert abs(tbl.loc["Δ", "@1"] - 0.10) < 1e-9
+
+
+def test_baseline_omits_seg_cat_tables_when_absent():
+    """Backward compat: baseline without per_segment/category -> no extra
+    tables (older artifacts, or model without those slices)."""
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    assert "per-segment mAP@k (M/B/Δ)" not in s.table_titles
+    assert "大類 overall mAP@k (M/B/Δ)" not in s.table_titles
+
+
+def test_baseline_shows_lookback_window():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params_lookback()
+    )
+    assert "12" in s.description
+
+
+def test_baseline_overall_three_tables_k_as_columns():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    fam = [tt for tt in s.table_titles if tt.startswith("overall ")]
+    assert len(fam) == 3          # mAP / recall / precision 各一
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    cols = [str(c) for c in s.tables[idx].columns]
+    assert "@1" in cols and "@all" in cols   # k 放欄位
+
+
+def test_baseline_detail_tables_collapsed():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    assert s.collapsed_tables[idx] is True     # overall 明細收合
+
+
+def test_baseline_popularity_avg_per_month_when_lookback():
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 120, "B": 240}}
+    s = rb.build_baseline_section(m, base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert "平均每月" in pop.columns
+    assert pop.loc["B", "平均每月"] == 20.0     # 240 / 12
 
 
 def test_baseline_section_renders_popularity_table():
@@ -372,6 +681,36 @@ def test_baseline_section_renders_popularity_table():
     assert list(tbl.index) == ["B", "A", "C"]
     assert list(tbl["count"]) == [200, 50, 10]
     assert list(tbl["rank"]) == [1, 2, 3]
+
+
+def test_baseline_monthly_trend_table():
+    """monthly_counts -> 月度趨勢 table: rows=item(總計降序), cols=月份(升序)+合計."""
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 3, "B": 1},
+        "monthly_counts": {
+            "A": {"2024-06": 2, "2024-12": 1},
+            "B": {"2024-06": 1},
+        },
+    }
+    s = rb.build_baseline_section(m, base, _params())
+    assert "popularity 月度趨勢" in s.table_titles
+    tbl = s.tables[s.table_titles.index("popularity 月度趨勢")]
+    assert list(tbl.columns) == ["2024-06", "2024-12", "合計"]
+    assert list(tbl.index) == ["A", "B"]          # A 總計 3 > B 總計 1
+    assert list(tbl.loc["A"]) == [2, 1, 3]
+    assert list(tbl.loc["B"]) == [1, 0, 1]        # 缺月補 0
+    # 合計欄逐 item 對齊 purchase_counts（兩者都是同一批 per-月計數的重排）
+    assert tbl.loc["A", "合計"] == base["purchase_counts"]["A"]
+
+
+def test_baseline_omits_monthly_trend_when_absent():
+    """Backward compat: no monthly_counts -> no 月度趨勢 table."""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 3}}
+    s = rb.build_baseline_section(m, base, _params())
+    assert "popularity 月度趨勢" not in s.table_titles
 
 
 def test_baseline_section_omits_popularity_when_purchase_counts_absent():
@@ -395,8 +734,8 @@ def test_baseline_section_omits_popularity_when_purchase_counts_empty():
     assert "popularity 排名組成" not in s.table_titles
 
 
-def test_baseline_section_overall_table_has_model_baseline_delta_cols():
-    """overall table: rows = metric keys, cols = [Model, Baseline, Delta]."""
+def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
+    """新結構：overall mAP 表 rows=[Model,Baseline,Δ]、cols=@k。"""
     m = _metrics()
     base = {
         "overall": {"map@1": 0.40, "ndcg@1": 0.50},
@@ -404,25 +743,24 @@ def test_baseline_section_overall_table_has_model_baseline_delta_cols():
     }
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
-    assert "overall metrics" in s.table_titles
-    idx = s.table_titles.index("overall metrics")
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     tbl = s.tables[idx]
-    assert list(tbl.columns) == ["Model", "Baseline", "Delta"]
-    # Model fixture has overall["map@1"]=0.5, ndcg@1=0.55 (see _metrics()).
-    assert tbl.loc["map@1", "Model"] == 0.5
-    assert tbl.loc["map@1", "Baseline"] == 0.40
-    assert abs(tbl.loc["map@1", "Delta"] - (0.5 - 0.40)) < 1e-9
+    assert list(tbl.index) == ["Model", "Baseline", "Δ"]
+    # Model fixture has overall["map@1"]=0.5.
+    assert tbl.loc["Model", "@1"] == 0.5
+    assert tbl.loc["Baseline", "@1"] == 0.40
+    assert abs(tbl.loc["Δ", "@1"] - (0.5 - 0.40)) < 1e-9
 
 
-def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
-    """Keys only in Model OR Baseline still appear, missing side as NaN."""
-    m = _metrics()  # has 'precision@1', 'recall@1'
-    base = {"overall": {"map@1": 0.4, "extra_key@1": 0.9}}  # no precision/recall
+def test_baseline_section_overall_tables_use_k_superset_columns():
+    """overall family 表以 k superset [1,2,3,4,5,all] 放欄位（explicit family，
+    不再吃任意 metric key）。"""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("overall metrics")
-    tbl = s.tables[idx]
-    assert "extra_key@1" in tbl.index   # baseline-only key still listed
-    assert "precision@1" in tbl.index   # model-only key still listed
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    cols = [str(c) for c in s.tables[idx].columns]
+    assert "@1" in cols and "@5" in cols and "@all" in cols
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
@@ -443,7 +781,8 @@ def test_baseline_section_has_two_per_item_compare_tables():
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
-    """recall table: cols = recall@1 M/B/Δ, recall@2 M/B/Δ (params has guardrail_recall_k=[1,2])."""
+    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]
+    （Task：baseline per-item 兩表統一 k 集）。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -451,7 +790,8 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     tbl = s.tables[idx]
     assert list(tbl.columns) == [
         "recall@1 M", "recall@1 B", "recall@1 Δ",
-        "recall@2 M", "recall@2 B", "recall@2 Δ",
+        "recall@3 M", "recall@3 B", "recall@3 Δ",
+        "recall@all M", "recall@all B", "recall@all Δ",
     ]
     # Macro row first.
     assert list(tbl.index)[0] == "Macro 平均"
@@ -533,46 +873,6 @@ def _params_min():
     return {"evaluation": {"report": {"display": {"primary_map_k": [2]}}}}
 
 
-def test_per_item_attr_ci_columns_present_when_metric_ci_given():
-    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
-    sec = build_per_item_attr_section(
-        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
-    )
-    map_tbl = sec.tables[0]
-    for col in ["AP(抽樣)", "CI 2.5%", "CI 97.5%", "n_pos(抽樣)"]:
-        assert col in map_tbl.columns
-    assert map_tbl.loc["A", "CI 2.5%"] == 0.60
-    assert map_tbl.loc["Macro 平均", "AP(抽樣)"] == 0.87
-    assert "抽樣" in sec.description and "50" in sec.description
-
-
-def test_per_item_attr_no_ci_columns_when_absent():
-    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
-    sec = build_per_item_attr_section(_metrics_min(), _params_min())
-    assert "AP(抽樣)" not in sec.tables[0].columns
-
-
-def test_per_item_attr_observation_list_table():
-    from recsys_tfb.evaluation.report_builder import build_per_item_attr_section
-    metrics = _metrics_min()
-    metrics["observation_items"] = ["B"]
-    sec = build_per_item_attr_section(metrics, _params_min())
-    assert "觀察名單" in sec.table_titles[-1]
-    obs_tbl = sec.tables[-1]
-    assert list(obs_tbl.index) == ["B"]
-    assert obs_tbl.loc["B", "n_pos"] == 1
-
-
-def test_primary_map_macro_ci_table():
-    from recsys_tfb.evaluation.report_builder import build_primary_map_section
-    sec = build_primary_map_section(
-        _metrics_min(), _params_min(), metric_ci=_CI_FIXTURE
-    )
-    assert any("CI" in t for t in sec.table_titles)
-    ci_tbl = sec.tables[-1]
-    assert ci_tbl.loc["macro per-item mAP", "CI 97.5%"] == 0.95
-
-
 def test_assemble_report_passes_metric_ci_through():
     from recsys_tfb.evaluation.report_builder import assemble_report
     html = assemble_report(
@@ -609,112 +909,3 @@ _SWEEP_FIXTURE = {
     "notes": [],
 }
 
-
-def test_offset_sweep_section_off_by_config():
-    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
-    params_off = {
-        "evaluation": {"report": {"sections": {"offset_sweep": False}}}
-    }
-    assert build_offset_sweep_section(_SWEEP_FIXTURE, params_off) is None
-
-
-def test_offset_sweep_section_none_for_stub_or_missing():
-    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
-    assert build_offset_sweep_section(None, _params_min()) is None
-    assert build_offset_sweep_section({"enabled": False}, _params_min()) is None
-
-
-def test_offset_sweep_section_tables_and_waterfall():
-    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
-    section = build_offset_sweep_section(_SWEEP_FIXTURE, _params_min())
-    assert section is not None
-    assert len(section.tables) == 2
-    assert "delta_star" in section.tables[1].columns
-    assert "delta_star_centered" in section.tables[1].columns
-    assert len(section.figures) == 1  # waterfall（有非零 δ*）
-
-
-def test_offset_sweep_waterfall_skipped_when_all_deltas_zero():
-    from recsys_tfb.evaluation.report_builder import build_offset_sweep_section
-    payload = dict(
-        _SWEEP_FIXTURE,
-        delta_star={"A": 0.0, "B": 0.0},
-        per_item={
-            "A": {"delta_star": 0.0, "loo_contribution_holdout": None},
-            "B": {"delta_star": 0.0, "loo_contribution_holdout": None},
-        },
-    )
-    section = build_offset_sweep_section(payload, _params_min())
-    assert section is not None
-    assert section.figures == []
-
-
-def test_assemble_report_includes_offset_sweep_section():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
-    )
-    assert "Offset sweep" in html
-
-
-_LEDGER_FIXTURE = {
-    "enabled": True,
-    "n_queries": 2, "n_pos_rows": 3, "n_mis_ordered_pairs": 3,
-    "matrix": {"B": {"A": {"pair_count": 2, "dap_sum": 1.0},
-                     "C": {"pair_count": 1, "dap_sum": 5 / 6}}},
-    "by_suppressor": {"B": {"pair_count": 3, "dap_sum": 11 / 6,
-                            "dap_share": 1.0}},
-    "by_victim": {"A": {"pair_count": 2, "dap_sum": 1.0,
-                        "dap_share": 6 / 11},
-                  "C": {"pair_count": 1, "dap_sum": 5 / 6,
-                        "dap_share": 5 / 11}},
-    "map_current": 7 / 12,
-    "substitution": {"B": {"base_rate": 0.0, "base_logit": -27.6,
-                           "map_substituted": 1.0,
-                           "delta_vs_current": 5 / 12}},
-    "by_segment": {"seg": {"X": {"n_pos_rows": 2,
-                                 "n_suppressed_pos_rows": 2,
-                                 "dap_sum": 4 / 3,
-                                 "dap_share": 8 / 11}}},
-    "notes": [],
-}
-
-
-def test_pair_ledger_section_renders_heatmap_and_tables():
-    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
-    sec = build_pair_ledger_section(_LEDGER_FIXTURE, _params_min())
-    assert sec is not None
-    assert len(sec.figures) == 1
-    assert len(sec.tables) == 3  # 壓制者邊際、substitution、by_segment
-
-
-def test_pair_ledger_section_no_pairs_skips_figure_keeps_tables():
-    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
-    ledger = dict(_LEDGER_FIXTURE, n_mis_ordered_pairs=0, matrix={})
-    sec = build_pair_ledger_section(ledger, _params_min())
-    assert sec is not None and sec.figures == []
-
-
-def test_pair_ledger_section_none_when_disabled_or_absent():
-    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
-    assert build_pair_ledger_section({"enabled": False}, _params_min()) is None
-    assert build_pair_ledger_section(None, _params_min()) is None
-    params_off = {
-        "evaluation": {"report": {"sections": {"pair_ledger": False}}}
-    }
-    assert build_pair_ledger_section(_LEDGER_FIXTURE, params_off) is None
-
-
-def test_pair_ledger_section_notes_appended_to_description():
-    from recsys_tfb.evaluation.report_builder import build_pair_ledger_section
-    ledger = dict(_LEDGER_FIXTURE, notes=["某注意事項"])
-    sec = build_pair_ledger_section(ledger, _params_min())
-    assert "某注意事項" in sec.description
-
-
-def test_assemble_report_includes_pair_ledger_section():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), pair_ledger=_LEDGER_FIXTURE
-    )
-    assert "壓制帳本" in html

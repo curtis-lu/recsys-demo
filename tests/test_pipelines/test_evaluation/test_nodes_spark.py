@@ -506,13 +506,20 @@ class TestComputeBaselineMetrics:
             self._label_table(spark),
             self._parameters(),
         )
-        assert set(result.keys()) == {"overall", "per_item", "purchase_counts"}
+        assert set(result.keys()) == {
+            "overall", "per_item", "purchase_counts", "monthly_counts",
+        }
         assert "A" in result["per_item"]
         # purchase_counts comes from _label_table fixture (snap=2024-06-30
         # falls inside the [2024-01-31, 2025-01-31) lookback window for the
         # 2025-01-31 eval snap). A=3 positives (h0/h1/h2 all label=1),
         # B=1 (only h0 label=1), C=0.
         assert result["purchase_counts"] == {"A": 3, "B": 1, "C": 0}
+        # All history sits in a single calendar month → monthly_counts breaks
+        # the same totals down by "2024-06" and reconciles with purchase_counts.
+        assert result["monthly_counts"] == {
+            "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
+        }
 
     def test_returns_none_when_section_disabled(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
@@ -613,25 +620,12 @@ def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
         compute_metric_ci(None, params)
 
 
-def test_compute_pair_ledger_raises_when_enabled_but_sample_none(spark):
-    import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_pair_ledger
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"pair_ledger": {"enabled": True}}},
-    }
-    with _pytest.raises(ValueError, match="compute_pair_ledger"):
-        compute_pair_ledger(None, params)
-
-
 class TestSampleConsumerFlags:
     def test_defaults_all_true(self):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
             _sample_consumer_flags,
         )
-        assert _sample_consumer_flags({}) == (True, True, True)
+        assert _sample_consumer_flags({}) == (True, True)
 
     def test_respects_disabled(self):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
@@ -640,9 +634,8 @@ class TestSampleConsumerFlags:
         params = {"evaluation": {"diagnosis": {
             "ci": {"enabled": False},
             "offset_sweep": {"enabled": True},
-            "pair_ledger": {"enabled": False},
         }}}
-        assert _sample_consumer_flags(params) == (False, True, False)
+        assert _sample_consumer_flags(params) == (False, True)
 
 
 class TestDrawDiagnosisSampleNode:
@@ -678,9 +671,8 @@ class TestDrawDiagnosisSampleNode:
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": False},
             "offset_sweep": {"enabled": False},
-            "pair_ledger": {"enabled": False},
             # registry 診斷（contract.DIAGNOSES）預設也是 enabled，所以「全部
-            # 停用」必須連它們一起關——只關舊三項的話樣本仍然該抽。
+            # 停用」必須連它們一起關——只關舊兩項的話樣本仍然該抽。
             **{name: {"enabled": False} for name in DIAGNOSES},
         })
         with patch(
@@ -700,7 +692,6 @@ class TestDrawDiagnosisSampleNode:
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": True},
             "offset_sweep": {"enabled": False},
-            "pair_ledger": {"enabled": False},
         })
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
@@ -716,7 +707,7 @@ class TestDrawDiagnosisSampleNode:
         # draw_diagnosis_sample. Same seed -> identical content.
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         from recsys_tfb.pipelines.evaluation import nodes_spark
-        params = self._params()  # all three consumers default-enabled
+        params = self._params()  # both consumers default-enabled
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark), params
         )
@@ -733,11 +724,11 @@ class TestDrawDiagnosisSampleNode:
             )
         )
 
-    def test_draw_diagnosis_sample_called_once_across_three_consumers(self):
+    def test_draw_diagnosis_sample_called_once_across_two_consumers(self):
         from unittest.mock import patch
         import pandas as pd
         from recsys_tfb.pipelines.evaluation import nodes_spark
-        params = self._params()  # all three default-enabled
+        params = self._params()  # both default-enabled
         stub_pdf = pd.DataFrame({
             "snap_date": ["20240331"], "cust_id": ["H1"],
             "prod_name": ["hot"], "score": [0.9], "label": [1],
@@ -751,15 +742,11 @@ class TestDrawDiagnosisSampleNode:
             return_value={"n_boot": 1},
         ), patch(
             "recsys_tfb.diagnosis.metric.offset_sweep.sweep", return_value={},
-        ), patch(
-            "recsys_tfb.diagnosis.metric.pair_ledger.pair_ledger",
-            return_value={},
         ):
             sample = nodes_spark.draw_diagnosis_sample_node(None, params)
             nodes_spark.compute_metric_ci(sample, params)
             nodes_spark.compute_offset_sweep(sample, params)
-            nodes_spark.compute_pair_ledger(sample, params)
-        # exactly one draw, with the node's own inputs — the three consumers
+        # exactly one draw, with the node's own inputs — the two consumers
         # must NOT re-draw (they consume the shared sample).
         spy.assert_called_once_with(None, params)
 
@@ -785,8 +772,8 @@ class TestDrawDiagnosisSampleNode:
 class TestRegistryDiagnosisEnabled:
     """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。
 
-    為什麼跟 ``_sample_consumer_flags`` 分開而不是把 3-tuple 擴成 4-tuple：
-    舊三項（ci／offset_sweep／pair_ledger）是即將被取代的既有診斷，新五項走
+    為什麼跟 ``_sample_consumer_flags`` 分開而不是把 2-tuple 擴成 3-tuple：
+    舊兩項（ci／offset_sweep）是即將被取代的既有診斷，新五項走
     ``contract.DIAGNOSES``。合在一個 tuple 裡的話，registry 每加一項診斷都要
     改所有解包點——而「新增診斷不必改接線」正是 registry 存在的目的。
     """
@@ -798,6 +785,9 @@ class TestRegistryDiagnosisEnabled:
         assert _registry_diagnosis_enabled({}) is True
 
     def test_false_only_when_every_registry_diagnosis_disabled(self):
+        import importlib
+
+        from recsys_tfb.diagnosis.metric import contract
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
             _registry_diagnosis_enabled,
@@ -807,17 +797,38 @@ class TestRegistryDiagnosisEnabled:
         }}}
         assert _registry_diagnosis_enabled(all_off) is False
 
-        # 任一開著就是 True。逐項單開，避免哪天 registry 只剩一項時這條
-        # 測試退化成「跟上一條測同一件事」。
-        for name in DIAGNOSES:
+        # 任一「吃共用抽樣」的診斷開著就是 True。逐項單開，避免哪天 registry
+        # 只剩一項時這條測試退化成「跟上一條測同一件事」。
+        #
+        # ``model_capacity``（Plan 2 Task 4）刻意排除在這個迴圈之外：它的
+        # ``INPUTS`` 沒有 ``diagnosis_sample``（只讀 ``gain_ledger``），單獨
+        # 開啟它不該觸發抽樣——這正是 ``_registry_diagnosis_enabled`` 的判準
+        # 本身（見該函式 docstring），下面另外斷言這個反例。
+        sample_consumers = [
+            name for name in DIAGNOSES
+            if "diagnosis_sample" in contract.inputs_for(
+                importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+            )
+        ]
+        assert sample_consumers, "registry 裡至少要有一項吃共用抽樣的診斷，否則這條測試是空的"
+        for name in sample_consumers:
             params = {"evaluation": {"diagnosis": {
                 other: {"enabled": other == name} for other in DIAGNOSES
             }}}
             assert _registry_diagnosis_enabled(params) is True, name
 
+        non_sample_consumers = [n for n in DIAGNOSES if n not in sample_consumers]
+        for name in non_sample_consumers:
+            params = {"evaluation": {"diagnosis": {
+                other: {"enabled": other == name} for other in DIAGNOSES
+            }}}
+            assert _registry_diagnosis_enabled(params) is False, (
+                f"{name} 不吃 diagnosis_sample，單獨開啟不該觸發抽樣閘門"
+            )
+
 
 def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
-    """關掉舊三項、只開 config_shift → 仍然必須抽樣。
+    """關掉舊兩項、只開 config_shift → 仍然必須抽樣。
 
     這是本次接線最容易靜默失效的地方：抽樣閘門若只看舊三項，使用者關掉它們
     之後 ``diagnosis_sample`` 是 None，config_shift 節點就撞 fail-loud 的
@@ -836,7 +847,6 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
                        "seed": 42},
             "ci": {"enabled": False},
             "offset_sweep": {"enabled": False},
-            "pair_ledger": {"enabled": False},
             "config_shift": {"enabled": True},
         }},
     }
@@ -850,6 +860,60 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "but no sample was drawn"
     )
     spy.assert_called_once_with(None, params)
+
+
+def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
+    caplog, monkeypatch
+):
+    """只開不吃抽樣的診斷時不得抽樣。
+
+    斷言落在「回傳 None ＋ log 說了 skipping」，不能只斷言沒呼叫 Spark——
+    後者被「正確跳過」與「根本沒走到這段」同時滿足（本專案踩過的假綠形態，
+    見 known-pitfalls 的教訓 3）。
+
+    目前 ``DIAGNOSES`` 還沒有不吃抽樣的成員（``model_capacity`` 是下一個
+    task），這裡用 monkeypatch 造一個假的——``INPUTS`` 裡沒有
+    ``diagnosis_sample``，只讀 ``gain_ledger``。``contract.DIAGNOSES`` 走模組
+    屬性存取（見 ``_registry_diagnosis_enabled`` 的 docstring），所以這裡對
+    ``contract`` 模組本身 patch 屬性即可生效。
+    """
+    import logging
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recsys_tfb.diagnosis.metric import contract
+    from recsys_tfb.pipelines.evaluation import nodes_spark
+
+    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_capacity")
+    fake.INPUTS = ("gain_ledger", "parameters")
+    fake.compute = lambda gain_ledger, parameters: {}
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_capacity", fake)
+    monkeypatch.setattr(contract, "DIAGNOSES", ("fake_capacity",))
+
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+        }},
+        "evaluation": {"diagnosis": {
+            "ci": {"enabled": False},
+            "offset_sweep": {"enabled": False},
+            "fake_capacity": {"enabled": True},
+        }},
+    }
+
+    with caplog.at_level(logging.INFO), patch(
+        "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+    ) as spy:
+        result = nodes_spark.draw_diagnosis_sample_node(None, params)
+
+    assert result is None
+    assert spy.call_count == 0
+    assert any(
+        "skip" in record.getMessage().lower() for record in caplog.records
+    ), "expected a log message explaining the sample draw was skipped"
 
 
 def test_generated_node_writes_stub_when_disabled():

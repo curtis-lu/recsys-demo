@@ -47,6 +47,20 @@ def fmt_auc(x: Any) -> str:
     return f"{v:.3f}"
 
 
+def fmt_percent(x: Any) -> str:
+    """佔比／比率當百分比讀：[0,1] 量 × 100，1 位小數＋``%``。
+
+    與 ``fmt_auc`` 是同一種底層量（[0,1] 的份額），差別只在**呈現單位**：
+    「這個 item 佔全體缺口的 20.8%」比「0.208」直覺，尤其是分子／分母都在
+    定義表裡寫清楚的時候。AUC 這種本身就習慣讀小數的量仍用 ``fmt_auc``；
+    「share」「rate」這種「一部分佔全部」的量用這個。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v * 100:.1f}%"
+
+
 def fmt_ap(x: Any) -> str:
     """AP／mAP：4 位小數（有意義差異常在第 3–4 位）。"""
     v = _to_finite_float(x)
@@ -71,12 +85,42 @@ def fmt_ratio(x: Any) -> str:
     return f"{v:.2f}x"
 
 
+def fmt_mean(x: Any) -> str:
+    """平均量（每列平均個數等）：2 位小數，**無單位後綴**。
+
+    與 ``fmt_ratio`` 的區別是關鍵：``fmt_ratio`` 的 ``x`` 後綴代表「幾倍」，
+    只該用在真正的倍率（lift）。「每個正例列上方平均有幾個負例」這種**平均
+    個數**不是倍率，加 ``x`` 會讓讀者誤以為是倍數關係。這裡不加後綴。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v:.2f}"
+
+
 def fmt_count(x: Any) -> str:
     """計數：千分位、無小數。**只給真正的整數計數**，加權和用 ``fmt_weighted_count``。"""
     v = _to_finite_float(x)
     if v is None:
         return ""
     return f"{round(v):,}"
+
+
+def fmt_gain(x: Any) -> str:
+    """split gain 量級（大而無界的非負浮點，如 LightGBM 的 split_gain 加總）：
+    千分位＋1 位小數。
+
+    與 ``fmt_count`` 的區別是語意而非位數：gain 是連續量、不是計數，保留一位
+    小數讓它在視覺上與整數計數分得開（``7,799.0`` vs ``7,799``，同 ``fmt_
+    weighted_count`` 的理由）。與 ``fmt_weighted_count`` 格式恰好相同但語意不同
+    （一個是 split gain、一個是 inclusion_weight 之和）——本模組按量的語意命名
+    格式器，格式偶合不代表可以共用一個名字（同 ``fmt_percent`` vs ``fmt_auc``
+    的取捨）。千分位是必要的：gain 常在數萬到數十萬量級，沒有分位很難讀。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v:,.1f}"
 
 
 def fmt_weighted_count(x: Any) -> str:

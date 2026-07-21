@@ -25,8 +25,10 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_offset_sweep", "evaluation_pair_ledger",
-            "evaluation_config_shift", "evaluation_diagnosis_pages",
+            "evaluation_offset_sweep",
+            "evaluation_config_shift", "evaluation_item_ability",
+            "evaluation_model_capacity", "evaluation_suppression",
+            "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
         }
         assert pipeline.outputs == expected
@@ -40,7 +42,10 @@ class TestEvaluationPipelineDefault:
             "compute_report_aggregates",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
-            "compute_pair_ledger", "diagnose_config_shift",
+            "diagnose_config_shift",
+            "diagnose_item_ability",
+            "diagnose_suppression",
+            "diagnose_model_capacity",
             "render_diagnosis_pages",
             "generate_report",
         ]
@@ -58,7 +63,10 @@ class TestEvaluationPipelinePostTraining:
             "compute_report_aggregates",
             "persist_eval_predictions",
             "compute_metric_ci", "compute_offset_sweep",
-            "compute_pair_ledger", "diagnose_config_shift",
+            "diagnose_config_shift",
+            "diagnose_item_ability",
+            "diagnose_suppression",
+            "diagnose_model_capacity",
             "render_diagnosis_pages",
             "generate_report",
         ]
@@ -74,15 +82,17 @@ class TestEvaluationPipelinePostTraining:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_offset_sweep", "evaluation_pair_ledger",
-            "evaluation_config_shift", "evaluation_diagnosis_pages",
+            "evaluation_offset_sweep",
+            "evaluation_config_shift", "evaluation_item_ability",
+            "evaluation_model_capacity", "evaluation_suppression",
+            "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
         }
         assert pipeline.outputs == expected
 
 
 class TestEvaluationPipelineCompareMode:
-    """compare_source set — 12 nodes total, both reports produced."""
+    """compare_source set — 16 nodes total, both reports produced."""
 
     def test_full_node_name_order(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
@@ -93,8 +103,11 @@ class TestEvaluationPipelineCompareMode:
             "compute_baseline_metrics", "compute_report_aggregates",
             "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
-            "compute_offset_sweep", "compute_pair_ledger",
-            "diagnose_config_shift", "generate_comparison_report",
+            "compute_offset_sweep",
+            "diagnose_config_shift", "diagnose_item_ability",
+            "diagnose_suppression",
+            "generate_comparison_report",
+            "diagnose_model_capacity",
             "render_diagnosis_pages", "generate_report",
         ]
 

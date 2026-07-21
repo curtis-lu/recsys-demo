@@ -14,7 +14,47 @@
 | **0 地基** | ✅ **已 merge（PR #109）**。清場＋抽樣加權＋`recsys_tfb/report/` 五個檔全部在 main |
 | **1 config_shift** | ✅ **實作完成**，branch `feat/diag-config-shift`。2.1–2.7 全部完成；**2.8 樣板檢查點使用者已通過**（2026-07-20 公司環境實跑成功，回饋見下方三則）；**2.9 offset 換算量表已追加**（`810cce3`，見下方） |
 | **1.5 接線層重構** | ✅ **完成**（`f91bdf6`…`5bfbe45`，7 個 task）。計畫＋執行紀錄見 `02b-plan-1.5-wiring.md` |
-| 2–5 | **可以開工了**。接線形狀已收乾淨，照抄 `config_shift` 不會再複製缺陷 |
+| **2 item_ability ＋ model_capacity** | ✅ **完成**（`77ae013`…`b008588`，6 個 task）。含 `contract.INPUTS` 機制與三項延後案結清 |
+| **3 suppression ＋ 交叉購買** | ✅ **完成**（`0dd41d3`…`29952e5`，5 個 task）。`pair_ledger`／`cross_purchase` 已退場 |
+| 4–5 | **可以開工了** |
+
+### Plan 3 交付了什麼（2026-07-21）
+
+`DIAGNOSES` 從三項變四項：`config_shift` → `item_ability` → `model_capacity` → `suppression`。
+
+| 交付 | 內容 |
+|---|---|
+| `suppression` 計算層 | 壓制帳本（哪些 label=0 排在 label=1 之前、分攤多少 AP 缺口）＋ `cross_purchase_stats`（lift，非裸條件機率）。**內層逐 pair 迴圈向量化**：合成 6 萬列／13.6 萬成對跑 **0.56s** |
+| `suppression` 呈現層 | 壓制矩陣熱圖 ＋ 共買 lift 泡泡格圖（**同軸序**）＋ 案例表 ＋ per-suppressor 條圖 |
+| `_common.per_item_ap` | 第四個消費者出現前先去重（原有三份逐位元組相同的副本） |
+| `figures.fits_budget` | `item_ability/_render.py` 的私有 `_fits` 收到常數旁邊——它的 docstring 自陳存在理由就是避免兩份判斷漂移，再複製一份正好破壞它 |
+| `pair_ledger`／`cross_purchase` 退場 | 17 個檔、−824 行，獨立 commit（`72101e2`）。A19 改軌成驗 `suppression.top_examples`，`enabled` 交還 A15（避免同一個壞值吐兩條訊息） |
+
+**兩個設計取捨，都寫進 `SCOPE.blind_to`：**
+
+1. **共買的母體變了**——舊 `cross_purchase.py` 吃 Spark `label_table` **全量**，新的吃**診斷抽樣**。理由不是省事，是**兩張圖並排對照時分母的單位必須相同**；軸序對齊了但母體不同，讀者每一次對照都夾帶一個沒說出口的換算。代價是抽樣分層，樣本內共買頻率不是母體的無偏估計——這句必須寫在頁面上。
+2. **共現單位是 `(time, entity)` 不是 `entity`**——沿用舊實作，且與壓制帳本同單位。買 j 在一月、買 k 在六月不是同一件事。
+
+**矩陣的點數預算**：兩張圖都是 |items|²，`MAX_FIGURE_POINTS=2000` 表示 **45 個 item 就會 raise**。截到前 44 個（依分攤缺口降冪）並在 `bullets` 說明。**沒有退回表格**——那個慣例對「逐 item 一列」的圖是對的，矩陣退回表格是 |items|² 列，而並排對照正是這項診斷的全部價值。
+
+**real-run 驗證**（`--post-training --model-version 6059dcef`，654 queries）：14 節點 50.4s；`diagnose_suppression` **0.04s**（1273 個成對）；四頁 HTML＋index 編號 01–04 連續；四份 JSON 過嚴格解析；離線重繪 2.6 秒。**會計恆等式在真實資料上成立**（295.46428571428567 vs 295.464285714286）。`report.html` 正規化後差異**恰好**是「少一個 pair_ledger 區塊（h2＋3 個 h3）、目錄編號遞補、3 頁→4 頁」，**零新增**。
+
+### Plan 2 交付了什麼（2026-07-20 收工）
+
+`DIAGNOSES` 從一項變三項：`config_shift` → `item_ability` → `model_capacity`。
+
+| 交付 | 內容 |
+|---|---|
+| `item_ability` | within-item AUC（raw vs query-centered 對照）＋ sort-once bootstrap；`discrimination.py` 退場 |
+| `model_capacity` | gain 三分（item prior／post-item context／未分配）＋ capacity vs ability 散點；只讀 `gain_ledger`，不碰評測資料 |
+| **`contract.INPUTS`** | 每項診斷宣告自己的 node inputs，成為 **node inputs 與 `compute` 簽章的單一真實來源**（契約測試證明兩者對齊） |
+| `uncertainty.iter_stratified_cluster_multipliers` | 分層 cluster 重抽骨架抽出共用（generator，公司規模下記憶體 O(n_rows)；`paired_bootstrap_delta` 逐位元不變） |
+| `_common.query_key` / `sample_arrays` | 兩個實例對照後才抽的共用層 |
+| `_common.ci_for_corrected_minus_baseline` | CI 方向自帶名字（符號反了不會有任何數值斷言轉紅，靠 `test_ci_brackets_the_point_estimate` 結構性守住） |
+
+**real-run 驗證**（`--post-training --model-version 6059dcef`，654 queries）：14 節點 49.6s；三頁 HTML 產出、`index.html` 編號 01/02/03 連續；兩份新 JSON 過嚴格解析；`report.html` 正規化（去 plotly UUID 與時間戳）後**唯一實質差異是「本次寫出 1 頁 → 3 頁」**；離線重繪 2.5 秒產出三頁。
+
+**`_registry_diagnosis_enabled` 的判準改了**（本 Plan 唯一的既有行為變更）：從「在 `DIAGNOSES` 裡」改成「`INPUTS` 含 `diagnosis_sample`」。`model_capacity` 不吃抽樣，舊判準會讓「只開 `model_capacity`」白抽一次全量樣本（公司規模 ≈25 萬 query × 22 item 的 `toPandas()`），**而且沒有任何徵兆**——不會報錯、不會有測試轉紅，pipeline 只是安靜地慢。
 
 ### Plan 1.5 交付了什麼（Plan 2 開工前先看這段）
 
@@ -62,11 +102,26 @@
 - **node 順序是拓撲排序的結果，不是宣告順序**（Plan 1.5）。新增 node 之後的名單要**實跑**取得（`[n.name for n in create_pipeline(**kw).nodes]`），不要用宣告順序推。同一個 node 在 default 與 compare 模式可能落在不同位置——`render_diagnosis_pages` 在 default 是倒數第二，在 compare 模式落在 `generate_comparison_report` **之後**。
 - **只讀 `parameters` 的 node，in-degree 是 0**（Plan 1.5）。`parameters` 沒有生產者，所以 Kahn 會把這種 node 排到很前面。一個「要在某些 node 之後才有意義」的 node，即使它按檔名／路徑自己讀資料，也**必須把上游產物列進 `inputs`**——否則它會提早執行、讀到上一次執行留下的檔案，而且照樣「成功」。
 - **用 annotation 的字串表示驗型別，成敗取決於模組有沒有 `from __future__ import annotations`**（2026-07-20，Plan 1.5 Task 4）。有這行時 annotation 是**原始碼字串**（`"SparkDataFrame"`）；沒有時是**解析後的型別物件**，`str()` 給 `<class 'pyspark.sql.dataframe.DataFrame'>`——**別名不保留**。所以 `assert "SparkDataFrame" not in str(annotation)` 在後者恆真，**改動前就是綠的**。`nodes_spark.py` 正是後者。**判準：驗型別就比對型別物件本身（`p.annotation is SparkDataFrame` 或 `"pyspark" in str(...)`），不要比對你以為它會印出的字串。** 這是 substring 斷言家族的一個變種，特徵是「字串來自你沒有控制權的 repr」。順帶：驗「函式不碰 Spark」時，annotation 與函式體要分開驗——annotation 可以改而行為不變，反之亦然。
+- **fixture 用的是計畫稿捏造的 schema，而不是生產端真正產出的形狀**（2026-07-20，Plan 2 Task 4.1，**本系列目前最嚴重的一次假綠**）。`model_capacity` 的 `LEDGER` fixture 寫成扁平鍵（`item_id_gain`／`post_item_context_gain`），但 `diagnosis/model/gain_ledger.py:217-232` 從頭到尾只產巢狀（`item_id: {gain_sum: ...}`／`context: {gain_sum: ...}`）——**兩條 emit 路徑（`compute_gain_ledger` 與 `_coarse_ledger`）都是巢狀，扁平形狀在 production 從未存在**。實作者發現不符後讓讀取「巢狀優先、扁平備援」，runtime 是對的，但**fixture 留著錯的**，於是：把巢狀讀取整段拿掉 → **29 條測試全綠**，而真實 ledger 算出 `item_id_share=None`、`context_share=None`（公司環境整頁空白）。修正＝fixture 換真實 schema ＋ **扁平備援整段刪除**（留著等於「靜默回退到錯答案」的機制），同一 mutation 之後轉紅 3 條。**判準：fixture 的形狀必須從生產端的產出程式碼查證，不得從計畫稿抄；計畫稿裡的 schema 是待驗證的假設，不是事實。** 連帶揭露計畫漏掉的第四條退化路徑（`_coarse_ledger` 的 `context`／`per_item` 為 `None`、`fallback: True`），已補測試——並要求 `context_gain_share` 必須是 `None` 而非 `0.0`，因為 `0` 會被讀成「context 完全沒貢獻」這個錯誤結論。
+- **恆等式測試比對的是同一張表的不同聚合方式**（2026-07-20，Plan 3 Task 5.2，**這條是 controller 自己寫進計畫的假綠，由執行者的 mutation 抓出來**）。`test_allocated_gap_sums_to_the_row_level_ap_gap` 想驗的是「分攤是把單列的 AP 缺口切開，切完要等於原本那塊」，寫法卻是比對三個量：`total_ap_gap_allocated_to_suppressors`、`pair_ledger` 的 `allocated_ap_gap` 加總、`target_summary` 的 `ap_gap_from_suppressors × n_pos` 加總。**三者全是同一張成對表 `pairs_df["gap"]` 的重新分組加總**，相等在數學上對**任何** gap 數值恆成立——把分攤比例的分母 `raw_total_for_row` 換成常數 `1.0`（mutation A），**兩條相關測試照樣綠**（已實跑坐實，不是推理）。真正抓到它的是獨立寫的 `test_vectorised_allocation_matches_the_slow_reference`（慢版參考實作比對）。**判準：恆等式測試的兩邊必須來自「獨立算出來的量」，不能只是同一份中間結果的兩種分組——分組不同不代表資料來源獨立。寫完先問：「等號右邊那個數，有沒有可能根本是左邊那個數換個算法？」答得出「是」就換一邊。** 修法＝在 `compute` 輸出獨立累加的 `total_row_ap_gap_allocated`（累加 `row_ap_gap` 本身，不是累加分攤結果），並以「mutation A 必須讓這條轉紅」當驗收條件，不是以「這個鍵存在」當驗收條件。
+- **函式寫了、測了，但沒有被接上生產路徑**（2026-07-20，Plan 3 Task 5.2，同一次覆盤）。`cross_purchase_stats` 實作完整、四條測試全綠，但 `compute` 從頭到尾**沒有呼叫它**——輸出只有 `cross_purchase_field_notes`（欄位說明），沒有資料本身。所有測試都直接呼叫 `cross_purchase_stats(...)`，於是「這個函式算得對不對」被完整覆蓋，「這個函式的結果有沒有進到產物」零覆蓋。**根因是規格漏寫**（controller 的 task 說明只寫了「`compute` 的輸出另加 `axis_order`」，沒寫「另加 `cross_purchase`」），但測試的形狀讓這個漏洞看不出來。**判準：對每個新函式問一次「誰呼叫它？」——若答案只有測試，那它還沒上線。契約層級的測試（斷言 `compute` 的輸出含某鍵）與單元測試是兩回事，不能互相替代。**
 - **「不存在」斷言同時被「正確跳過」與「根本沒嘗試」滿足**（2026-07-20，Plan 1.5 Task 1 的 mutation 意外揭露）。`tests/scripts/test_render_diagnosis.py:106-121` monkeypatch `DIAGNOSES` 成兩項、只放一項的 JSON，然後斷言 `01-config-shift.html` 存在、`02-<缺的那項>.html` **不**存在。把 registry 改成「import 時凍結」（等於完全看不到 monkeypatch 的第二項）之後，**三條斷言全部照樣通過**——因為「知道有第二項但沒資料所以跳過」與「根本不知道有第二項」產生**完全相同的檔案系統狀態**。真正有鑑別力的是它的兄弟測試 `:124-137`：斷言那個名字**出現在 stderr**。**判準：驗「某件事被正確略過」時，斷言要落在「系統說了什麼」（log／回傳的 `missing` 清單），不能只落在「檔案沒產生」——後者是雙關的。**
 
-## 下一步：Plan 2（`03-plan-2-item-ability-capacity.md`）
+## 公司環境同步：**只看 `SYNC-4bfaeb8-to-plan3.md`**
 
-接線層已就緒，可以直接開工。開工時順手做掉「已裁決延後」表裡標記 **Plan 2 開工時** 的三項（`_common.py` 樣板抽取、CI 方向自帶名字的包裝、`q_agg` 權重常數假設的檢查）——它們都需要「有第二個實例可對照」，現在有了。
+`SYNC-4bfaeb8-to-6e2138d.md` 與 `SYNC-4bfaeb8-to-plan2.md` **都已作廢**（檔頭有標記）。它們宣稱的「零刪除」與「conf 全部是純新增」在 Plan 3 之後都是錯的——現在有 6 個檔要刪、`conf/` 有 17 行刪除。三份並存是為了對照歷史，同步時只跟最新那份。
+
+## 下一步：Plan 4（`05-plan-4-score-shift.md`）
+
+第五項診斷 `score_shift`（Optuna 反事實位移搜尋），本系列最貴的一項。開工前先讀本檔的「Plan 3 交付了什麼」與下方「假綠形態」兩段。
+
+**新增一項診斷要動的地方仍然是三處**（Plan 1.5 的宣稱，Plan 2 兩次實測都成立）：`contract.DIAGNOSES` 一行、`catalog.yaml` 一條 JSONDataset entry、診斷子套件本身。**若那項診斷不吃共用抽樣，再加一行模組層級的 `INPUTS`。** `pipeline.py` 與 `nodes_spark.py` 都不必動。
+
+### Plan 2 執行後對「派工方式」的三條教訓（Plan 3 開工前先看）
+
+1. **驗收條件裡的字串一律先查證再寫。** Plan 2 有三次因為「憑印象寫的識別字」讓 agent 做錯或差點做錯：`EXPECTED_ORDER`（repo 裡沒這個符號）、`git stash` 取 baseline（乾淨工作區會失敗、髒工作區有掉工作的風險，正解是 `git archive <sha> src | tar -x -C <暫存目錄>`）、`grep "item_id_gain" 零命中`（該字串同時是輸出鍵名，照做會打壞對外 schema）。**驗收條件的定義是「兩個人檢查會得到同一結論」——寫之前自己先跑一次。**
+2. **測試 fixture 必須對照真實產出，不得從計畫稿捏造。** `model_capacity` 的 `LEDGER` fixture 用扁平鍵，而 `gain_ledger.py:217-232` 從來只產巢狀。結果是 **29 條測試全綠、production 路徑零覆蓋**——把巢狀讀取整段拿掉，測試不會有一條轉紅，而公司環境會整頁空白。修正後同一 mutation 轉紅 3 條。
+3. **測試指令開太寬是浪費。** 每個 task 都跑五個測試目錄（665 條 / 36 秒）而 agent 會跑很多次；專案 CLAUDE.md 自己寫著「單次改動只跑相關測試檔」。Plan 3 改成「相關測試檔 ＋ 最後一次全量」。另外 task 別切太細——每個新 agent 都要冷啟動重讀同一批樣板檔（`_render.py` 各 400–600 行）。
 
 ---
 
@@ -155,6 +210,10 @@ Task 2.8 的回饋 1 與 2 指向同一組接線缺陷，且**已在公司環境
 見下方「過渡期的兩種語氣並存」。使用者可用 `report.sections.offset_sweep: false` 立即關掉，理由獨立成立（該段文字違反鐵則 1），不必等 Plan 4。
 
 ## 已裁決延後的重構（不是遺漏，時機到了再做）
+
+> **✅ 標記「Plan 2 開工時」的三項已於 2026-07-20 結清**（`3c026be`）：`_common.py` 樣板抽取、CI 方向自帶名字的包裝、`q_agg` 權重常數假設檢查。下表保留原始條目供追溯。
+>
+> 抽取的結論值得記一筆：**逐行比對後真正能抽的很少**——只有 `query_key` 與 `sample_arrays` 的三行陣列組裝。`clusters` **刻意不合併**：`config_shift` 要未 factorize 的 `pd.Series`（要呼叫 `.nunique()`、且 `paired_bootstrap_delta` 會自己 factorize），`item_ability` 要已 factorize 的 0-based int 陣列（`iter_stratified_cluster_multipliers` 直接拿它當索引）。兩者名字一樣、語意不同，硬合併會造出一個沒有人真正需要的中間型別。**「抽得少」是正確結論，不是失敗**——這正是當初延後到「有第二個實例」才動手要換到的判斷依據。
 
 兩關審查提出、我判斷**現在做是從單一實例猜共用抽象**，延到有第二個實例時再收：
 

@@ -59,7 +59,6 @@ evaluation:
       diagnostics: true
       baseline: true
       offset_sweep: true
-      pair_ledger: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
@@ -128,22 +127,39 @@ evaluation:
       max_rounds: 5
       grid: {lo: -2.0, hi: 2.0, step: 0.05}
 
-    # 壓制帳本（A19）：pair_ledger——對每個正例列列舉同 query 排其上方的
-    # 負例 item，記交換名次的指標敏感度 |ΔAP|（λ 會計）→「壓制者×受害者」
-    # 矩陣＋傷害×segment 分組（evaluation.segment_columns）；substitution
-    # ablation 逐 item 換 base-rate logit 常數重算指標（O(M) 次）量淨貢
-    # 獻/淨傷害。跑在同一份診斷抽樣上；描述性會計、全樣本不切折。
-    pair_ledger:
-      enabled: true
-
     # 診斷 1／5：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
     # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
     # 校準層是後貼的）。
     config_shift:
       enabled: true
 
+    # 診斷 2／5：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
+    # raw（原始分數）與 query_centered（扣掉各自 query 平均後）各算一次；
+    # 差值即客戶活躍度被誤計入 item 推薦能力的量。用 score_uncalibrated（與
+    # config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
+    # macro per-item AP 最低的前幾個 item。
+    item_ability:
+      enabled: true
+      top_n: 30
+
+    # 診斷 3／5：模型容量分配——全模型 split gain 分成 Item Prior（item-id
+    # 切點）、Post-Item Context（item 切點之後的 context 切點，逐 item 分配）
+    # 與未分配三份；用來分辨「學到互動訊號」與「只記住 item prior」。不吃
+    # 診斷抽樣，只讀訓練側的 gain_ledger（optional，可能缺席）＋同一次執行
+    # 的 item_ability 結果畫對照散點。
+    model_capacity:
+      enabled: true
+
+    # 診斷 4／5：壓制帳本與交叉購買——同一 query 內，label=0 的 item 排在
+    # label=1 之前時，把該正例列的 AP 缺口依比例分攤給排在它上面的每個負例
+    # （壓制矩陣熱圖）；並列出同一批 query 單位上的實際標籤共買 lift（泡泡
+    # 格圖，同軸序對照）。top_examples＝具體案例表最多列出幾筆。
+    suppression:
+      enabled: true
+      top_examples: 50
+
     # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
-    # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep＋pair_ledger）；
+    # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep）；
     # 正式評估必須留空。
     debug_inject_offsets: {}
 

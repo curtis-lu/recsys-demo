@@ -9,7 +9,10 @@ from recsys_tfb.report.fmt import (
     fmt_auc,
     fmt_count,
     fmt_delta,
+    fmt_gain,
     fmt_logodds,
+    fmt_mean,
+    fmt_percent,
     fmt_ratio,
     fmt_weighted_count,
 )
@@ -18,7 +21,7 @@ from recsys_tfb.report.fmt import (
 _BAD_VALUES = [None, float("nan"), float("inf"), float("-inf"), "not-a-number", object()]
 _ALL_FMTS = [
     fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count,
-    fmt_weighted_count,
+    fmt_weighted_count, fmt_percent, fmt_mean, fmt_gain,
 ]
 
 
@@ -49,6 +52,30 @@ class TestFmtAuc:
         assert fmt_auc(0.5) == "0.500"
         assert fmt_auc(1) == "1.000"
         assert fmt_auc(0) == "0.000"
+
+
+class TestFmtPercent:
+    def test_proportion_becomes_percentage_one_decimal(self):
+        assert fmt_percent(0.208) == "20.8%"
+        assert fmt_percent(1) == "100.0%"
+        assert fmt_percent(0) == "0.0%"
+
+    def test_distinguishes_from_fmt_auc(self):
+        # 同一個底層量、不同呈現單位——這正是分開兩個函式的理由
+        assert fmt_auc(0.464) == "0.464"
+        assert fmt_percent(0.464) == "46.4%"
+
+
+class TestFmtMean:
+    def test_two_decimals_no_suffix(self):
+        assert fmt_mean(0.77) == "0.77"
+        assert fmt_mean(2.8182) == "2.82"
+        assert fmt_mean(0) == "0.00"
+
+    def test_no_x_suffix_unlike_ratio(self):
+        # 平均個數不是倍率——不該有 fmt_ratio 的 x 後綴
+        assert not fmt_mean(2.82).endswith("x")
+        assert fmt_ratio(2.82).endswith("x")
 
 
 class TestFmtAp:
@@ -100,6 +127,19 @@ class TestFmtWeightedCount:
         assert fmt_count(61.5) != fmt_count(28.5) + ""  # 前提：兩者都是 .5
         assert fmt_weighted_count(61.5).endswith(".5")
         assert fmt_weighted_count(28.5).endswith(".5")
+
+
+class TestFmtGain:
+    """split gain 量級：千分位＋1 位小數，語意上與整數計數分開。"""
+
+    def test_thousands_separator_one_decimal(self):
+        assert fmt_gain(140895.75539) == "140,895.8"
+        assert fmt_gain(7798.980126) == "7,799.0"
+
+    def test_distinguishes_from_fmt_count(self):
+        """gain 是連續量、不是計數——保留小數，才不會被讀成精確整數計數。"""
+        assert fmt_gain(556) == "556.0"
+        assert fmt_count(556) == "556"
 
 
 def test_module_uses_math_isfinite_consistently():

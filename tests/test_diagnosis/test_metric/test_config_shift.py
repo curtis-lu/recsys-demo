@@ -216,6 +216,16 @@ def _sample_with_two_tier_inclusion_weight():
     return pd.DataFrame(rows)
 
 
+def test_ci_brackets_the_point_estimate():
+    """CI 必須包住點估計。符號寫反時這條會紅——那是唯一抓得到反號的形狀，
+    因為 delta 與 CI 的絕對值在反號後全部不變（見 ``test_ci_has_same_sign_
+    as_delta`` 的同一個坑：數值大小對、方向錯，一般數值斷言測不出來）。
+    這條是通用版：不管符號本身為何，Δ 都該落在自己的 CI 之內。
+    """
+    out = compute((_sample(), {"n_queries": 40}), PARAMS)
+    assert out["delta_ci_low"] <= out["delta"] <= out["delta_ci_high"]
+
+
 def test_point_estimate_uses_inclusion_weight():
     """點估計必須吃 inclusion_weight，否則它與 CI 描述的不是同一個母體。
 
@@ -368,6 +378,49 @@ def test_query_offset_spread_respects_inclusion_weight():
         np.log(10.0), abs=1e-9)
     assert (upweighted["query_offset_spread"]["mean"]
             > plain["query_offset_spread"]["mean"])
+
+
+# --------------------------------------------------------------------------
+# q_agg 的 weight=("w", "max") 假設 inclusion_weight 在同一 query 內為常數
+# （stratum 是 query 級屬性時恆成立）。上游若違反這個假設，不該讓整條
+# pipeline 死掉，但也不能靜默選一個代表值——notes 要講出來。
+# --------------------------------------------------------------------------
+
+def _sample_with_nonconstant_query_weight():
+    """只弄壞一個 query（c0）：同一 query 的兩個 item 帶不同 inclusion_weight。
+
+    其餘 39 個 query 的權重維持常數——這條測試要驗的是「有問題的那個 query
+    被算對且被回報」，不是「權重一律非常數」。
+    """
+    pdf = _sample()
+    pdf["inclusion_weight"] = 1.0
+    mask = (pdf["cust_id"] == "c0") & (pdf["prod_name"] == "fund_bond")
+    pdf.loc[mask, "inclusion_weight"] = 3.0
+    return pdf
+
+
+def test_q_agg_weight_non_constant_within_query_is_reported():
+    """違反「inclusion_weight 在 query 內為常數」的假設時：不 raise，但
+    notes 要點名有幾個 query 違反——斷言落在系統說了什麼（notes 的內容），
+    不能只斷言副作用沒發生（本 repo 反覆踩到的假綠形態：「不存在」斷言同時
+    被「正確處理」與「根本沒嘗試」滿足）。
+    """
+    out = compute((_sample_with_nonconstant_query_weight(), {}), PARAMS)
+    assert out["delta"] is not None  # 沒有因此炸掉
+    assert any(
+        "inclusion_weight" in n and "1 個 query 內非常數" in n
+        for n in out["notes"]
+    ), out["notes"]
+
+
+def test_q_agg_weight_constant_within_query_reports_nothing():
+    """反向釘住：權重本來就常數時，這條 note 不該出現——避免「一律都報」
+    這種恆真實作把測試蒙混過去。
+    """
+    out = compute((_sample(), {"n_queries": 40}), PARAMS)
+    assert not any("inclusion_weight" in n and "非常數" in n for n in out["notes"]), (
+        out["notes"]
+    )
 
 
 def test_offset_matrix_has_no_cartesian_product_cells():

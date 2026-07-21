@@ -131,3 +131,11 @@
   ```
   刪除的檔案會印不出 hash——那些是**要刪**的，不是漏拷的。對方用 `sha1sum` 逐檔比對。
 - **驗證方式**：hash 全對之後，再跑 §12 的位置綁定比對。兩關都過才開始跑 pipeline——否則失敗會出現在 pipeline 尾端，前面所有昂貴計算全部白做。
+
+## 14. 跑到 `test_evaluation_compare_pipeline.py` 會 DROP 掉本機真表 `enriched_eval_predictions`（2026-07-22）
+
+- **症狀（第一分鐘認出它）**：重繪報表時 per-segment 相關數字**整批空掉**——基本統計的「per-segment 正例組成」表不見、衡量指標的 per_segment 三張表不見、baseline per-segment/大類 對照不見；查 `enriched_eval_predictions` 只剩 **1 列**、內容是 `("c1","p1",0.9,1,1)`、**無 `cust_segment_typ` 欄**。但 golden `data/evaluation/<mv>/<snap>/report.html` 仍有 per-segment 內容（那是舊的富資料產的，靜態檔沒被動到）——這個「產物有、活表沒有」的落差就是指紋。
+- **根因**：`tests/test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`（:159-186）在測試**開頭**就 `DROP TABLE IF EXISTS ml_recsys.enriched_eval_predictions` ＋ `shutil.rmtree(table_dir)`，再寫入一列 fixture `("c1","2026-01-31","p1",0.9,1,1)`。它用的是**共用的** `data/local_warehouse`（讀 `spark.sql.warehouse.dir`），**無 temp warehouse 隔離、無 teardown 還原**。所以**任何人跑到這個測試（全測試套件，或 safety-net batch 恰好帶到它）本機那張富 `enriched_eval_predictions` 就被洗成 1 列**。這不是 #63、不是「資料自己退化」——是**測試副作用洗掉真表**。
+- **規則**：(a) 需要「本機重繪 / 驗 per-segment」前，先確認 `enriched_eval_predictions` 是富的（count 遠大於 1、且有 `cust_segment_typ` 欄）；被洗掉就重建，別把空 per-segment 誤判成程式 bug 或 #63。(b) 重建＝`python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`（走 `training_eval_predictions` 繞過 #63；`persist_eval_predictions` 會重寫這張表；segment 欄由 `prepare_eval_data`→`join_segment_sources` 從 `ml_recsys.sample_pool` 依 `[cust_id, snap_date]` join 進來）。(c) 跑重繪/驗收的 session 不要順手跑 `test_evaluation_compare_pipeline.py`；跑了就要重建。
+- **驗證方式**：`python3 -c "import pyarrow.parquet as pq,glob; f=glob.glob('data/local_warehouse/ml_recsys.db/enriched_eval_predictions/**/*.parquet',recursive=True); print(sum(pq.read_metadata(x).num_rows for x in f),'rows')"`——印 `1 rows` 即被洗過；重建後應是數百～上千列。或 `spark.table('ml_recsys.enriched_eval_predictions').columns` 應含 `cust_segment_typ`。
+- **已修（2026-07-22，本 branch `feat/report-restructure`）**：`test_persist_and_catalog_load_roundtrip` 改跑在隔離的 **test DB `test_persist_roundtrip`**（round-trip 行為與表名無關，走的是同一條 HiveTableDataset code path），並加 `finally` teardown。驗證：跑完整檔後真表 `ml_recsys.enriched_eval_predictions` 仍為 5232 列（fix 前會被洗成 1 列）。**舊 branch/commit（fix 之前）仍會踩**——辨識指紋與重建法同上。此檔其餘測試都用 in-memory `createDataFrame`、不落 warehouse，無此問題。

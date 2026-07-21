@@ -67,3 +67,73 @@ def test_empty_when_no_positive_queries(spark):
     result = compute_overall_per_item(spark.createDataFrame(pdf), _parameters())
 
     assert result == {"overall": {}, "per_item": {}}
+
+
+# --- optional per_segment / category slices (baseline by-seg / 大類 compare) ---
+
+def _params_seg_cat():
+    p = _parameters()
+    p["schema"]["categorical_values"] = {
+        "prod_name": ["fund_stock", "fund_bond", "exchange_fx"]}
+    p["evaluation"]["segment_columns"] = ["cust_segment_typ"]
+    p["evaluation"]["product_categories"] = {
+        "enabled": True, "unmapped": "singleton",
+        "mapping": {"fund": ["fund_stock", "fund_bond"]}}
+    return p
+
+
+def _eval_seg_cat(spark):
+    pdf = pd.DataFrame({
+        "snap_date": ["2025-01-31"] * 6,
+        "cust_id": ["c1", "c1", "c1", "c2", "c2", "c2"],
+        "prod_name": ["fund_stock", "fund_bond", "exchange_fx"] * 2,
+        "label": [1, 0, 1, 0, 1, 0],
+        "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3],
+        "cust_segment_typ": ["mass", "mass", "mass", "hnw", "hnw", "hnw"],
+    })
+    return spark.createDataFrame(pdf)
+
+
+def test_with_segment_adds_per_segment_matching_full(spark):
+    from recsys_tfb.evaluation.metrics_spark import (
+        compute_all_metrics,
+        compute_overall_per_item,
+    )
+    p = _params_seg_cat()
+    slim = compute_overall_per_item(_eval_seg_cat(spark), p, with_segment=True)
+    assert "per_segment" in slim
+    assert set(slim["per_segment"]) == {"mass", "hnw"}
+    # Same building blocks as the model path → values identical to full metrics.
+    full = compute_all_metrics(_eval_seg_cat(spark), p)
+    assert slim["per_segment"] == full["per_segment"]
+
+
+def test_with_category_adds_category_overall_matching_full(spark):
+    from recsys_tfb.evaluation.metrics_spark import (
+        compute_all_metrics,
+        compute_overall_per_item,
+    )
+    p = _params_seg_cat()
+    slim = compute_overall_per_item(_eval_seg_cat(spark), p, with_category=True)
+    assert "category" in slim
+    assert set(slim["category"]) == {"overall", "per_item"}
+    full = compute_all_metrics(_eval_seg_cat(spark), p)
+    assert slim["category"]["overall"] == full["category"]["overall"]
+
+
+def test_with_segment_silently_skips_when_no_seg_col(spark):
+    from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
+    p = _parameters()
+    p["evaluation"]["segment_columns"] = ["cust_segment_typ"]  # absent from df
+    result = compute_overall_per_item(
+        _eval_predictions(spark), p, with_segment=True
+    )
+    assert "per_segment" not in result
+
+
+def test_with_category_silently_skips_when_no_mapping(spark):
+    from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
+    result = compute_overall_per_item(
+        _eval_predictions(spark), _parameters(), with_category=True
+    )
+    assert "category" not in result

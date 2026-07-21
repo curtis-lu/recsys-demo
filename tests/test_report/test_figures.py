@@ -93,6 +93,22 @@ class TestHeatmap:
         assert "heatmap" in msg
         assert "empty" in msg.lower()
 
+    def test_text_annotations_are_written_onto_cells(self):
+        """給定 ``text`` 時每格要標出值（色階讀不出名次這種量時的必要條件）。"""
+        z = [[1.0, 4.0], [2.0, 3.0]]
+        text = [["1", "4"], ["2", "3"]]
+        fig = heatmap(z, x=["p10", "p90"], y=["a", "b"], title="t",
+                      colorbar_title="rank", text=text)
+        assert fig.data[0].text is not None
+        assert [list(row) for row in fig.data[0].text] == text
+        assert fig.data[0].texttemplate == "%{text}"
+
+    def test_no_text_leaves_cells_unannotated(self):
+        """不給 ``text`` 時維持原行為（只有顏色與 hover），既有呼叫端不受影響。"""
+        fig = heatmap([[1.0, 2.0]], x=["a", "b"], y=["r"], title="t",
+                      colorbar_title="c")
+        assert fig.data[0].text is None
+
     def test_all_nan_matrix_raises_clear_message(self):
         with pytest.raises(ValueError) as exc:
             heatmap(
@@ -256,6 +272,30 @@ class TestBar:
         fig = bar(x=["A", "B", "C"], y=[0.0, float("nan"), 2.0], title="t",
                   x_title="x", y_title="y", center=0.0)
         assert fig is not None
+
+    def test_no_error_bars_when_ci_not_given(self):
+        fig = bar(x=["A"], y=[0.5], title="t", x_title="x", y_title="y")
+        assert fig.data[0].error_y.array is None
+
+    def test_error_bars_use_absolute_ci_bounds(self):
+        """``ci_low``／``ci_high`` 是絕對邊界，不是 delta——這裡驗證 ``bar``
+        自己做了那個減法（``array`` ＝ hi − y，``arrayminus`` ＝ y − lo）。
+        """
+        fig = bar(x=["a", "b"], y=[0.5, 0.6], title="t", x_title="x",
+                  y_title="y", ci_low=[0.4, 0.5], ci_high=[0.7, 0.65])
+        err = fig.data[0].error_y
+        assert err.symmetric is False
+        assert list(err.array) == pytest.approx([0.2, 0.05])
+        assert list(err.arrayminus) == pytest.approx([0.1, 0.1])
+
+    def test_error_bars_tolerate_missing_bounds_on_individual_rows(self):
+        """單一列的 CI 是 ``None``（例如該 item bootstrap 全 NaN）不炸圖——
+        轉成 NaN 後那根長條的誤差線由 plotly 自然跳過。
+        """
+        fig = bar(x=["a", "b"], y=[0.5, 0.6], title="t", x_title="x",
+                  y_title="y", ci_low=[0.4, None], ci_high=[0.7, None])
+        assert fig is not None
+        assert fig.data[0].error_y.array[0] == pytest.approx(0.2)
 
 
 class TestSharedTheme:

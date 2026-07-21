@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
-import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 
@@ -78,30 +77,149 @@ def _n_products(metrics: dict) -> int:
     )
 
 
-def build_headline_section(metrics: dict, parameters: dict) -> ReportSection:
+def build_overview_section(
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
+) -> ReportSection:
+    """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
+
+    presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
+    表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權，＋CI 抽樣估計）；
+    overall per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
+    """
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
-    )
+    ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
+
+    tables: list[pd.DataFrame] = []
+    titles: list[str] = []
+
+    # 關鍵指標 1：macro per-item mAP（頭號，含 bootstrap CI）——沿用 metric_ci
+    # 的讀法（macro / sample），避免定義漂移。
+    ci_note = ""
+    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
+        m = metric_ci["macro"]
+        sample_meta = metric_ci.get("sample", {}) or {}
+        tables.append(pd.DataFrame(
+            [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+              "CI 97.5%": m.get("ci_high"),
+              "CI 用 query 數": sample_meta.get("n_queries_sampled")}],
+            index=["macro per-item mAP"],
+        ))
+        titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）")
+        n_boot = metric_ci.get("n_boot")
+        sd = sample_meta.get("sampling_description", "")
+        ci_note = (
+            f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
+            f"重抽得到；{sd}點估 AP 與衡量指標的全量 macro map_attr@all 相同。"
+        )
+
+    # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
     card = {
-        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_prod)}")
-        for k in ks
+        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_prod)}") for k in ks
     }
-    meta = {
-        "n_queries": metrics.get("n_queries"),
-        "n_excluded_queries": metrics.get("n_excluded_queries"),
+    t_overall = pd.DataFrame([card]).T
+    t_overall.columns = ["value"]
+    tables.append(t_overall)
+    titles.append("overall mAP@k（per-query 等權，另一種加權）")
+
+    # 規模／分母（非好壞，明標與關鍵數分開）
+    totals = metrics.get("dataset_overview", {}).get("totals", {}) or {}
+    scale = {
+        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        "正例列數 n_positives": totals.get("n_positives"),
+        "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
+        "每客戶平均正例數 avg_positives_per_customer":
+            totals.get("avg_positives_per_customer"),
     }
-    t1 = pd.DataFrame([card]).T
-    t1.columns = ["value"]
-    t2 = pd.DataFrame([meta]).T
-    t2.columns = ["value"]
+    t_scale = pd.DataFrame([scale]).T
+    t_scale.columns = ["value"]
+    tables.append(t_scale)
+    titles.append("規模／分母（以下為分母與規模，非好壞）")
+
+    # 導覽：想回答什麼 → 看哪一區（RangeIndex → render 端自動藏流水號）
+    nav = pd.DataFrame({
+        "想回答的問題": [
+            "模型整體排得好不好",
+            "哪些 item／segment 排得弱",
+            "每個 item 的分數與名次分布長怎樣",
+            "跟熱門度（popularity）比如何",
+            "想深入各項診斷（排序偏移、item 能力、壓制帳本…）",
+            "本次量到什麼、沒量到什麼",
+        ],
+        "看哪一區": [
+            "衡量指標",
+            "衡量指標（per-item／per-segment）",
+            "per-item 細部拆解",
+            "baseline",
+            "排序診斷（獨立報表）",
+            "完整性檢查",
+        ],
+    })
+    tables.append(nav)
+    titles.append("導覽：想回答什麼 → 看哪一區")
+
     return ReportSection(
-        title="摘要 Headline",
-        description="主指標 mAP@k（細產品 overall）與 run 概況。",
-        tables=[t1, t2],
-        table_titles=["主指標 mAP@k", "Run 概況"],
+        title="概覽",
+        description=(
+            "這份報表幫你判斷這個模型在 per-query 排序上表現如何、好壞落在哪些 "
+            "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
+            "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權）；"
+            "overall mAP 為 per-query 等權，是另一種加權，並列呈現、不比高下。"
+            + ci_note
+        ),
+        tables=tables,
+        table_titles=titles,
+    )
+
+
+def build_core_concept_section(parameters: dict) -> ReportSection:
+    """核心概念（地基）：講清一次原子量，後面各區都是它換切法。
+
+    presentation §一.2：定義 ＋ 用一個具體數字走一遍 ＋「下面每區＝它加總到
+    什麼粒度」的地圖。不各區重複這條定義（會漂移）。
+    """
+    cols = ((parameters.get("schema", {}) or {}).get("columns", {}) or {})
+    time_col = cols.get("time", "snap_date")
+    entity = cols.get("entity", ["cust_id"])
+    entity_str = "×".join(entity) if isinstance(entity, list) else str(entity)
+    item_col = cols.get("item", "prod_name")
+    score_col = cols.get("score", "score")
+    label_col = cols.get("label", "label")
+
+    description = (
+        f"一個 query＝一組（{time_col} × {entity_str}）。query 內的候選 "
+        f"{item_col} 依模型分數 {score_col} 由高到低排名；{label_col}=1 的是"
+        f"正例。下面每一個數字都是「這個 per-query 排序結果」加總到不同粒度——"
+        "同一個量，換一種切法。"
+    )
+    formula = (
+        "AP@k = (1 / R) · Σ(i=1..k) rel_i · P@i\n"
+        "  P@i = 前 i 名中的正例數 / i　（前 i 名的精確率）\n"
+        "  rel_i = 第 i 名是正例則 1、否則 0\n"
+        "  R = 該 query 的正例總數（total_rel）；分母是 R、不是 min(k, R)——"
+        "k < R 時 AP@k 追不到 1（頂多 k 個正例能進前 k、卻除以較大的 R）"
+    )
+    bullets = [
+        f"例：某 query 有 4 個候選 {item_col}、R=2 個正例，排名後正例落在第 1、"
+        "第 3 名。",
+        "P@1 = 1/1 = 1.0、P@2 = 1/2 = 0.5、P@3 = 2/3 ≈ 0.667。",
+        "AP@3 = (1/2)·(1·1.0 + 0·0.5 + 1·0.667) ≈ 0.83；"
+        "AP@1 = (1/2)·(1·1.0) = 0.50——分母固定為 R=2，k=1 只納入第 1 名那個"
+        "正例的貢獻、仍除以 2。",
+        "手算核對點：k=1 時每個 query 的 AP@1 = rel_1 / R，正好等於 recall@1，"
+        "所以整份報表的 overall map@1 會等於 recall@1（衡量指標段可對照）。",
+        "地圖（下面每區＝這個 per-query AP 加總到不同粒度）："
+        "overall＝跨 query 等權平均；per-item＝把 AP 歸因到正例所屬的 "
+        f"{item_col} 後 item 等權（macro）；per-segment＝依 segment 分組平均；"
+        "per-item 細部拆解＝同一批排名的分數／名次分布側面。",
+    ]
+    return ReportSection(
+        title="核心概念 — 一個 query 的排序",
+        description=description,
+        formula=formula,
+        bullets=bullets,
     )
 
 
@@ -111,65 +229,72 @@ def build_dataset_overview_section(
     if not _section_on(parameters, "dataset_overview"):
         return None
     ov = metrics.get("dataset_overview", {})
-    totals = pd.DataFrame([ov.get("totals", {})]).T
+    totals_d = ov.get("totals", {}) or {}
+    totals = pd.DataFrame([totals_d]).T
     totals.columns = ["value"]
     by_snap = pd.DataFrame(ov.get("by_snap_date", {})).T
-    by_item = pd.DataFrame(ov.get("by_item", {})).T
+
+    # per-item 正例組成：正例數 / 正樣本率 / 正例佔比（＝n_positives÷總正例，
+    # render 端純算術、無 Spark）。密集候選下三欄同序，ScopeNote 於 description。
+    total_pos = totals_d.get("n_positives") or 0
+    by_item_rows: dict = {}
+    # per-item 列序統一按字母（與衡量指標、item-share 對齊）
+    for item, d in sorted((ov.get("by_item", {}) or {}).items()):
+        n_pos = d.get("n_positives")
+        by_item_rows[item] = {
+            "正例數": n_pos,
+            "正樣本率(÷此item候選列)": d.get("positive_rate"),
+            "正例佔比": (n_pos / total_pos)
+            if (n_pos is not None and total_pos) else None,
+        }
+    by_item = pd.DataFrame(by_item_rows).T
+
     tables = [totals, by_snap, by_item]
-    titles = ["總覽", "by snap_date", "by 產品"]
+    titles = ["整體 totals", "各期 by snap_date", "per-item 正例組成"]
+    collapsed = [False, True, False]   # 各期單 snap 時＝totals，預設收合
+    # per-segment 正例組成：正例數／正樣本率（÷該 segment 候選列）／query 數佔比。
+    # 第 3 欄用「query 數佔比」（該 segment 佔多少 query，反映 segment 大小）——
+    # segment 分的是 query、per-item 分的是正例，兩者不同軸，故不與 per-item 的
+    # 「正例佔比」互換。by_segment 由 compute_dataset_overview 依 active_seg_col
+    # 聚合；缺席（舊 artifact 或無 segment 欄）則不呈現此表。
+    by_seg = ov.get("by_segment", {}) or {}
+    if by_seg:
+        seg_rows = {}
+        for seg, d in sorted(by_seg.items()):
+            seg_rows[seg] = {
+                "正例數": d.get("n_positives"),
+                "候選列數": d.get("n_rows"),
+                "正樣本率(÷此segment候選列)": d.get("positive_rate"),
+                "query 數佔比": d.get("query_share"),
+            }
+        tables.append(pd.DataFrame(seg_rows).T)
+        titles.append("per-segment 正例組成")
+        collapsed.append(False)
     cat = metrics.get("category")
     if cat:
         cat_by_item = (cat.get("dataset_overview", {}) or {}).get("by_item", {})
         if cat_by_item:
             tables.append(pd.DataFrame(cat_by_item).T)
-            titles.append("by 大類")
-    return ReportSection(
-        title="資料概況 Dataset Overview",
-        description="總覽、依 snap_date、依產品（及大類）的筆數／正樣本數／客戶數。",
-        tables=tables,
-        table_titles=titles,
-    )
+            titles.append("by 大類（大類粒度，不與整體相加）")
+            collapsed.append(False)   # 大類表預設展開（與 totals/by_item/by_segment 一致）
 
-
-def build_primary_map_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
-) -> ReportSection | None:
-    if not _section_on(parameters, "primary_map"):
-        return None
-    overall = metrics.get("overall", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), _n_products(metrics)
-    )
-    rows = {}
-    n_prod = _n_products(metrics)
-    for fam in ("map", "precision", "recall"):
-        rows[fam] = {
-            f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
-            for k in ks
-        }
-    table = pd.DataFrame(rows).T
-    tables = [table]
-    table_titles = ["per-query 指標 @k"]
-    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
-        m = metric_ci["macro"]
-        sample_meta = metric_ci.get("sample", {}) or {}
-        ci_tbl = pd.DataFrame(
-            [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
-              "CI 97.5%": m.get("ci_high"),
-              "樣本 query 數": sample_meta.get("n_queries_sampled")}],
-            index=["macro per-item mAP"],
-        )
-        tables.append(ci_tbl)
-        table_titles.append("macro per-item mAP 的 CI（抽樣估計）")
     return ReportSection(
-        title="主指標 mAP@k（細產品 per-query）",
+        title="基本統計 — 資料集",
         description=(
-            "overall mAP@k 為主軸；precision/recall@k 作脈絡。"
-            "K = 產品數時 precision 退化為 base rate、recall 恆為 1。"
+            "整體規模與 per-item 的正例組成。per-item 三欄（正例數／正樣本率／"
+            "正例佔比）在密集候選集下同序（僅換分母或讀法），非三個獨立軸；候選"
+            "覆蓋率因每 item 覆蓋全部 query 恆為 100%，故不列。注意「正樣本率」有"
+            "兩種分母：概覽的母體 positive_rate 除以全體候選列（此 run 5,232），"
+            "此處 per-item 那欄除以「該 item 自己的候選列數」（此 run 每 item 654），"
+            "量級不同。「by 大類」是大類粒度（每客戶每大類一列、label＝該大類任一"
+            "子產品為正例、大類分數＝子產品最佳分數），故其正例數 ≤ item 粒度合計、"
+            "不與整體 n_positives 相加。per-segment 正例組成：正例數、候選列數、"
+            "正樣本率、query 數佔比（該 segment 佔多少 query）。每-query 正例數"
+            "分佈為後續階段。"
         ),
         tables=tables,
-        table_titles=table_titles,
+        table_titles=titles,
+        collapsed_tables=collapsed,
     )
 
 
@@ -207,37 +332,6 @@ def _per_item_metric_table(
     for item, m in per_item.items():
         data[item] = _row(m)
     return pd.DataFrame(data).T
-
-
-def _per_item_heatmap(
-    table: pd.DataFrame,
-    per_item: dict,
-    ks: list,
-    n_prod: int,
-    metric_key: str,
-    x_fmt: str,
-    title: str,
-    zmin: float | None = None,
-    zmax: float | None = None,
-) -> go.Figure:
-    """RdYlGn heatmap; z from ``per_item[item][f"{metric_key}@{lookup(k)}"]``,
-    rows ordered by ``table.index``. ``zmin``/``zmax`` left None -> Plotly
-    autoscales the colour range.
-    """
-    z = [
-        [per_item.get(it, {}).get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
-         for k in ks]
-        for it in table.index
-    ]
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z, x=[x_fmt.format(k=k) for k in ks], y=list(table.index),
-            zmin=zmin, zmax=zmax,
-            colorscale="RdYlGn", texttemplate="%{z:.3f}",
-        )
-    )
-    fig.update_layout(title=title, yaxis_title="產品")
-    return fig
 
 
 def _per_item_metric_compare_table(
@@ -300,390 +394,186 @@ def _per_item_metric_compare_table(
 def _per_item_recall_table(
     per_item: dict, ks: list, n_prod: int, macro_metrics: dict | None = None
 ) -> pd.DataFrame:
-    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
+    """Rows = items; bare ``@k`` cols (from hit_rate@k) + mean_pos.
+
+    欄名裸 @k、family（recall）在呼叫端的表標題交代——與 A 塊 per-query 表
+    及 per-item map_attr 表的欄名慣例一致（family 不重複塞進欄名）。
+    """
     return _per_item_metric_table(
-        per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
+        per_item, ks, n_prod, "hit_rate", "@{k}",
         extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
     )
 
 
-def build_guardrail_recall_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "guardrail_recall"):
-        return None
-    per_item = metrics.get("per_item", {})
-    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
-    )
-    # heatmap uses the table without the macro row; display uses the one with it
-    table_plain = _per_item_recall_table(per_item, ks, n_prod)
-    cs = disp.get("recall_colorscale", {}) or {}
-    fig = _per_item_heatmap(
-        table_plain, per_item, ks, n_prod, "hit_rate", "recall@{k}",
-        "per-item recall@k 色階",
-        zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
-    )
-    table = _per_item_recall_table(per_item, ks, n_prod, macro_metrics=macro_item)
-    return ReportSection(
-        title="護欄 per_item recall@k（細產品）",
-        description=(
-            "每產品 recall@k（per-item，即 hit_rate@k 正名）＋色階。"
-            "頂列「Macro 平均」為各產品等權平均。"
-            "純判讀、無 pass/fail 閾值。完整資料統計見「資料概況」。"
-        ),
-        figures=[fig],
-        tables=[table],
-        table_titles=["per-item recall@k"],
-    )
+def _families_by_k_table(overall: dict, ks: list, n_prod: int) -> pd.DataFrame:
+    """單一 per-query aggregate → rows=[map, precision, recall]、cols=@k。
+
+    給「單一彙總」用（overall、大類 overall）：只有一個實體，故用指標家族當列。
+    explicit family（map/precision/recall）→ 天然不含 ndcg。
+    """
+    rows = {}
+    for fam in ("map", "precision", "recall"):
+        rows[fam] = {f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+                     for k in ks}
+    return pd.DataFrame(rows).T
 
 
-def build_per_item_attr_section(
+def _entities_by_k_table(
+    per_entity: dict, macro: dict | None, ks: list, n_prod: int, fam: str
+) -> pd.DataFrame:
+    """多實體 per-query → rows=實體（Macro 頂列）、cols=@k，單一 metric family。
+
+    給「多實體拆分」用（per-segment）：拆成 map/precision/recall 各一張，實體當列。
+    """
+    src = {_MACRO_LABEL: macro, **per_entity} if macro else dict(per_entity)
+    data = {}
+    for ent, m in src.items():
+        data[ent] = {f"@{k}": (m or {}).get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+                     for k in ks}
+    return pd.DataFrame(data).T
+
+
+def build_metrics_section(
     metrics: dict, parameters: dict, metric_ci: dict | None = None
 ) -> ReportSection | None:
-    if not _section_on(parameters, "per_item_attr"):
-        return None
-    per_item = metrics.get("per_item", {})
-    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
-    )
-    # heatmap uses the table without the macro row; display uses the one with it
-    map_tbl_plain = _per_item_metric_table(
-        per_item, ks, n_prod, "map_attr", "map_attr@{k}"
-    )
-    map_fig = _per_item_heatmap(
-        map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        "per-item map_attr@k 色階",
-    )
-    map_tbl = _per_item_metric_table(
-        per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        macro_metrics=macro_item,
-    )
+    """衡量指標：分兩塊、各塊內維度與方向一致。
 
-    description_extra = ""
+    A｜per-query 指標（map/precision/recall）——overall、per-segment、大類 overall。
+    B｜per-item 歸因（map_attr/recall）——per-item、大類 per-item。precision 是
+    per-query 量（整組 top-k 的性質），無法歸因到單一 item，故 B 塊沒有 precision。
+    方向規則：單一彙總用指標家族當列；多實體拆分用實體當列。所有表 k 欄統一＝
+    [1,2,3,4,5,all]，每張表只一個 metric family（避免寬混表）。全克制、明細收合。
+    """
+    if not _section_on(parameters, "primary_map"):
+        return None
+    overall = metrics.get("overall", {})
+    # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
+    per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
+    n_prod = _n_products(metrics)
+    ks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_prod)  # 全表統一 k
+
+    tables: list[pd.DataFrame] = []
+    titles: list[str] = []
+    collapsed: list[bool] = []
+
+    def _add(tbl, title, is_collapsed):
+        tables.append(tbl)
+        titles.append(title)
+        collapsed.append(is_collapsed)
+
+    # 頭號指標：macro per-item mAP CI（可見，放最前）
+    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
+        m = metric_ci["macro"]
+        sm = metric_ci.get("sample", {}) or {}
+        _add(
+            pd.DataFrame(
+                [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+                  "CI 97.5%": m.get("ci_high"),
+                  "CI 用 query 數": sm.get("n_queries_sampled")}],
+                index=["macro per-item mAP"],
+            ),
+            "頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）",
+            False,
+        )
+
+    # ===== Block A：per-query 指標（map / precision / recall）=====
+    _add(_families_by_k_table(overall, ks, n_prod),
+         "A · per-query｜overall（列＝map/precision/recall）", False)
+    per_segment = metrics.get("per_segment", {})
+    if per_segment:
+        macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
+        for fam in ("map", "precision", "recall"):
+            _add(_entities_by_k_table(per_segment, macro_seg, ks, n_prod, fam),
+                 f"A · per-query｜per-segment {fam}@k（列＝segment）", True)
+    cat = metrics.get("category")
+    cks = None
+    if cat:
+        n_cat = int(
+            cat.get("dataset_overview", {}).get("totals", {}).get("n_products", 0)
+        )
+        cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        _add(_families_by_k_table(cat.get("overall", {}), cks, n_cat),
+             "A · per-query｜大類 overall（列＝map/precision/recall）", True)
+
+    # ===== Block B：per-item 歸因（map_attr / recall；無 precision）=====
+    b_map = _per_item_metric_table(
+        per_item, ks, n_prod, "map_attr", "@{k}", macro_metrics=macro_item,
+    )
     if metric_ci and metric_ci.get("enabled"):
         ci_items = metric_ci.get("per_item", {}) or {}
         ci_macro = metric_ci.get("macro") or {}
-        sample_meta = metric_ci.get("sample", {}) or {}
 
-        def _ci_val(idx: str, field: str):
+        def _ci_val(idx, field):
             src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
             return src.get(field)
 
-        for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
-                           ("CI 97.5%", "ci_high"), ("n_pos(抽樣)", "n_pos")):
-            map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
-        ci_k_label = metric_ci.get("k") or "all"
-        description_extra = (
-            f"AP(抽樣)/CI 欄為抽樣估計（{sample_meta.get('n_queries_sampled')} "
-            f"個正例 query、bootstrap n_boot={metric_ci.get('n_boot')}，"
-            f"cluster=客戶），非全量值；其截斷 k={ci_k_label}，點估計以全量欄 "
-            f"map_attr@{ci_k_label} 為準（不要拿去對其他 @k 欄）。"
-            f"n_pos(抽樣) 為該 item 進入 CI 估計的正例列數——太小的值代表"
-            f"該列 CI 不可靠，判讀時先看這欄。"
-        )
-
-    tables = [map_tbl]
-    table_titles = ["per-item map_attr@k"]
-    observation_items = metrics.get("observation_items", []) or []
-    if observation_items:
-        per_item_all = metrics.get("per_item", {})
-        obs_tbl = pd.DataFrame(
-            {"n_pos": [per_item_all.get(it, {}).get("n_pos")
-                       for it in observation_items]},
-            index=observation_items,
-        )
-        tables.append(obs_tbl)
-        table_titles.append("觀察名單（n_pos < min_positives，已移出 macro）")
+        for col, field in (("CI 2.5%", "ci_low"), ("CI 97.5%", "ci_high"),
+                           ("n_pos（CI 用）", "n_pos")):
+            b_map[col] = [_ci_val(idx, field) for idx in b_map.index]
+    _add(b_map, "B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）", True)
+    _add(_per_item_recall_table(per_item, ks, n_prod, macro_metrics=macro_item),
+         "B · per-item 歸因｜recall@k（列＝item）", True)
+    if cat:
+        cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
+        cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
+        _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
+                                    "@{k}", macro_metrics=cat_macro_item),
+             "B · 大類 per-item 歸因｜map_attr@k（列＝大類）", True)
+        _add(_per_item_recall_table(cat_pi, cks, n_cat,
+                                    macro_metrics=cat_macro_item),
+             "B · 大類 per-item 歸因｜recall@k（列＝大類）", True)
 
     return ReportSection(
-        title="per_item 歸因 Attribution（細產品）",
+        title="衡量指標",
         description=(
-            "每個產品對主指標 mAP@k 各貢獻多少。算法：對每筆"
-            "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
-            "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
-            "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
-            "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
-            "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
-            "即這個產品平均替 AP@k 加了多少分。頂列「Macro 平均」為各產品等權平均。"
-        ) + description_extra,
-        figures=[map_fig],
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
-_SWEEP_BLUE = "#1565c0"
-_SWEEP_ORANGE = "#e65100"
-
-
-def _offset_sweep_waterfall(sweep: dict) -> go.Figure | None:
-    """分流 waterfall：折外 mAP(0) → 各 item 的 LOO 貢獻 → mAP(δ*)。
-
-    顏色語意沿手冊 fig6-offset-sweep-split：藍＝offset 收復（水準缺口）、
-    橘＝負向；mAP(δ*) 與可及上限之間收不回的部分＝條件判別力缺口（上限
-    未知，圖上不畫）。原圖為 matplotlib，此處依 spec 修訂以 plotly 重刻。
-    """
-    mh = sweep.get("map_holdout", {}) or {}
-    if mh.get("zero") is None or mh.get("star") is None:
-        return None
-    per_item = sweep.get("per_item", {}) or {}
-    moved = {
-        it: v["loo_contribution_holdout"]
-        for it, v in per_item.items()
-        if v.get("delta_star") and v.get("loo_contribution_holdout") is not None
-    }
-    if not moved:
-        return None
-    order = sorted(moved, key=lambda it: -abs(moved[it]))
-    x = ["mAP(0) 折外"] + [f"δ*({it})" for it in order]
-    y = [mh["zero"]] + [moved[it] for it in order]
-    measure = ["absolute"] + ["relative"] * len(order)
-    residual = sweep.get("interaction_residual_holdout")
-    if residual is not None:
-        x.append("交互殘差")
-        y.append(residual)
-        measure.append("relative")
-    x.append("mAP(δ*) 折外")
-    y.append(mh["star"])
-    measure.append("total")
-    fig = go.Figure(go.Waterfall(
-        x=x, y=y, measure=measure,
-        increasing={"marker": {"color": _SWEEP_BLUE}},
-        decreasing={"marker": {"color": _SWEEP_ORANGE}},
-        totals={"marker": {"color": "#9e9e9e"}},
-    ))
-    fig.update_layout(
-        title="水準分流：per-item 平移（δ*）可收復的指標缺口（折外）",
-        yaxis_title="macro per-item mAP",
-        showlegend=False,
-    )
-    return fig
-
-
-def build_offset_sweep_section(
-    sweep: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "offset_sweep"):
-        return None
-    if not sweep or not sweep.get("enabled"):
-        return None
-    mf = sweep.get("map_fit", {}) or {}
-    mh = sweep.get("map_holdout", {}) or {}
-
-    def _gap(zero, star):
-        return (star - zero) if (zero is not None and star is not None) else None
-
-    summary = pd.DataFrame(
-        {
-            "mAP(0)": [mf.get("zero"), mh.get("zero")],
-            "mAP(δ*)": [mf.get("star"), mh.get("star")],
-            "收復量": [_gap(mf.get("zero"), mf.get("star")),
-                       _gap(mh.get("zero"), mh.get("star"))],
-        },
-        index=["折內（fit）", "折外（holdout）"],
-    )
-    per_item = sweep.get("per_item", {}) or {}
-    cols = ["delta_star", "delta_star_centered", "loo_contribution_holdout"]
-    tbl = pd.DataFrame(
-        {c: [per_item[it].get(c) for it in per_item] for c in cols},
-        index=list(per_item),
-    )
-    fig = _offset_sweep_waterfall(sweep)
-    desc = (
-        "分流閥：對每個 item 的 logit 分數加常數 δ（不重訓）能收復多少 "
-        "macro mAP。判讀順序：(1) 看折外收復量——大＝缺口主要在水準（配置"
-        "／再平衡可修）、小＝缺口在條件判別力（必須動訓練）；(2) 看 δ* 大"
-        "的 item 是誰；(3) waterfall 看收復量怎"
-        "麼分攤到各 item。δ* 單位＝log-odds。完整"
-        "判讀：docs/pipelines/evaluation-diagnosis.md。"
-    )
-    notes = sweep.get("notes") or []
-    if notes:
-        desc += "⚠ " + "／".join(notes)
-    return ReportSection(
-        title="分流 Offset sweep（水準 vs 條件判別力）",
-        description=desc,
-        figures=[fig] if fig is not None else [],
-        tables=[summary, tbl],
-        table_titles=["mAP 收復摘要（折內／折外）",
-                      "per-item δ* 與折外 LOO 貢獻"],
-    )
-
-
-def _pair_ledger_heatmap(ledger: dict) -> go.Figure | None:
-    matrix = ledger.get("matrix") or {}
-    if not matrix:
-        return None
-    suppressors = sorted(matrix)
-    victims = sorted({v for row in matrix.values() for v in row})
-    z = [[(matrix.get(s_, {}).get(v) or {}).get("dap_sum")
-          for v in victims] for s_ in suppressors]
-    counts = [[(matrix.get(s_, {}).get(v) or {}).get("pair_count", 0)
-               for v in victims] for s_ in suppressors]
-    fig = go.Figure(go.Heatmap(
-        z=z, x=victims, y=suppressors, colorscale="Blues",
-        customdata=counts,
-        hovertemplate=("壓制者 %{y} → 受害者 %{x}<br>"
-                       "|ΔAP| 總量 %{z:.4f}<br>"
-                       "pair 數 %{customdata}<extra></extra>"),
-        colorbar={"title": "|ΔAP| 總量"},
-    ))
-    fig.update_layout(
-        title="壓制帳本：交換名次的指標敏感度 |ΔAP|（λ 會計）",
-        xaxis_title="受害者（正例被壓的 item）",
-        yaxis_title="壓制者（排上方的負例 item）",
-    )
-    return fig
-
-
-def build_pair_ledger_section(
-    ledger: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "pair_ledger"):
-        return None
-    if not ledger or not ledger.get("enabled"):
-        return None
-    sup = ledger.get("by_suppressor", {}) or {}
-    sup_tbl = pd.DataFrame(
-        {c: [sup[it].get(c) for it in sup]
-         for c in ["pair_count", "dap_sum", "dap_share"]},
-        index=list(sup),
-    ).sort_values("dap_sum", ascending=False) if sup else pd.DataFrame()
-    subst = ledger.get("substitution", {}) or {}
-    sub_tbl = pd.DataFrame(
-        {c: [subst[it].get(c) for it in subst]
-         for c in ["base_rate", "base_logit", "map_substituted",
-                   "delta_vs_current"]},
-        index=list(subst),
-    ).sort_values(
-        "delta_vs_current", ascending=False
-    ) if subst else pd.DataFrame()
-    seg_rows = []
-    for col, block in (ledger.get("by_segment", {}) or {}).items():
-        for val, st in block.items():
-            seg_rows.append({"segment": f"{col}={val}", **st})
-    seg_tbl = pd.DataFrame(seg_rows).set_index("segment") if seg_rows \
-        else pd.DataFrame()
-    fig = _pair_ledger_heatmap(ledger)
-    desc = (
-        "壓制帳本：誰的負例壓在誰的正例上方、交換名次會讓 query AP 變多少"
-        "（|ΔAP|，λ 會計——記帳不訓練）。判讀順序：(1) 看壓制者邊際表，"
-        "|ΔAP| 總量大的 item 是主要加害者；"
-        "(2) substitution 表 delta_vs_current 為正＝把該 item 分數換成 "
-        "base-rate 常數反而更好（個性化分數是淨傷害）、負＝淨貢獻；"
-        "(3) by_segment 看傷害集中在哪群。完整判讀："
-        "docs/pipelines/evaluation-diagnosis.md。"
-    )
-    if ledger.get("n_mis_ordered_pairs", 0) == 0:
-        desc += "（本次抽樣無任何排錯 pair——矩陣為空，不畫圖。）"
-    notes = ledger.get("notes") or []
-    if notes:
-        desc += "⚠ " + "／".join(notes)
-    tables = [sup_tbl, sub_tbl, seg_tbl]
-    table_titles = ["壓制者邊際（|ΔAP| 總量降冪）",
-                    "Substitution ablation（淨傷害降冪）",
-                    "傷害 × segment"]
-    return ReportSection(
-        title="壓制帳本 Pair ledger（誰壓了誰、代價多少）",
-        description=desc,
-        figures=[fig] if fig is not None else [],
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
-def build_category_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "category"):
-        return None
-    cat = metrics.get("category")
-    if not cat:
-        return None
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_cat = int(cat.get("dataset_overview", {}).get("totals", {})
-                .get("n_products", 0))
-    map_ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
-    rec_ks = _resolve_display_k(
-        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_cat)
-    overall = cat.get("overall", {})
-    map_tbl = pd.DataFrame(
-        [{f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_cat)}")
-          for k in map_ks}]
-    ).T
-    map_tbl.columns = ["value"]
-    cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
-    rec_tbl = _per_item_recall_table(
-        cat.get("per_item", {}), rec_ks, n_cat, macro_metrics=cat_macro_item
-    )
-    mapping = (((parameters.get("evaluation", {}) or {})
-               .get("product_categories", {}) or {}).get("mapping", {})) or {}
-    tables = [map_tbl, rec_tbl]
-    table_titles = ["大類 mAP@k", "大類 per-item recall@k"]
-    if mapping:
-        comp_tbl = pd.DataFrame(
-            [{"子產品": ", ".join(v)} for v in mapping.values()],
-            index=list(mapping.keys()),
-        )
-        tables.append(comp_tbl)
-        table_titles.append("大類組成")
-    return ReportSection(
-        title="大類層級 Category",
-        description=(
-            "大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。"
-            "recall@k 表頂列「Macro 平均」為各大類等權平均。"
+            "分兩塊、各塊內維度與方向一致。A｜per-query 指標（map／precision／"
+            "recall）——對 overall、per-segment、大類 overall；precision@k 是"
+            " per-query 量（整組 top-k 命中幾個），只在這塊。B｜per-item 歸因"
+            "（map_attr／recall）——對 per-item、大類 per-item；precision 無法歸因"
+            "到單一 item（那是整組 top-k 的性質），故 B 塊沒有 precision。方向規則："
+            "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
+            "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
+            "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
+            "mAP（item 等權，含 bootstrap CI；CI 上下界的點估＝該列 map_attr@all）；"
+            "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
+            "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
+            "退化為 base rate、recall 恆為 1。CI 僅算到 item 層（大類 per-item 無 "
+            "bootstrap CI）。per-item 列序統一按字母。明細表點標題展開。"
         ),
         tables=tables,
-        table_titles=table_titles,
+        table_titles=titles,
+        collapsed_tables=collapsed,
     )
 
 
-def build_segment_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "per_segment"):
-        return None
-    per_segment = metrics.get("per_segment", {})
-    if not per_segment:
-        return None
-    macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
-    rows = (
-        {_MACRO_LABEL: macro_seg, **per_segment}
-        if macro_seg
-        else dict(per_segment)
-    )
-    rows = {
-        seg: {k: (m or {}).get(k)
-              for k in _visible_metric_keys(list((m or {}).keys()))}
-        for seg, m in rows.items()
-    }
-    table = pd.DataFrame(rows).T
-    return ReportSection(
-        title="分群 Per-Segment",
-        description=(
-            "per-query 指標依 segment 切分。"
-            "頂列「Macro 平均」為各 segment 等權平均。"
-        ),
-        tables=[table],
-        table_titles=["per-segment 指標"],
-    )
+def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
+    """欄正規化：每個 rank 欄 ÷ 欄和 → 各 item 在該 rank 位置的佔比。
 
-
-def build_diagnostics_figures(report_aggregates: dict | None) -> list:
-    """把 ``aggregate_report_diagnostics`` 的 payload 還原成圖。
-
-    純函式、不碰 Spark——這是主報表能離線重繪的那一半。缺席的家族直接跳過
-    （見該函式：關掉的家族不放進 payload）。
+    每個 rank 欄加總=1（誰佔據該名次）。全 0 欄（0/0）得 NaN、render 端空白。
+    依 §二，正規化後的矩陣用「按欄讀的數字表」呈現，不掛全域色階 heatmap。
     """
-    from recsys_tfb.evaluation.calibration import plot_calibration_curves
+    col_sums = counts_frame.sum(axis=0)
+    return counts_frame.divide(col_sums, axis=1)
+
+
+def build_item_detail_section(
+    report_aggregates: dict | None, parameters: dict
+) -> ReportSection | None:
+    """per-item 細部拆解（原診斷區升為頂層）。
+
+    同一批排名的分數／名次分布側面。沿用 score 分布圖與 rank 計數 heatmap；
+    新增 item-share-by-rank（欄正規化，數字表，G#1）＋ positive rate by rank
+    數字表。依「排序不是校準」，calibration 曲線移到獨立診斷報表、本段不畫
+    （即使 payload 有 calibration 鍵）。升為頂層（collapsible=False）。
+    """
+    if not _section_on(parameters, "diagnostics"):
+        return None
+    # 與 build_diagnostics_figures 同一個「有沒有 score_histogram 家族」判斷；
+    # 只有 calibration 沒有分布家族時，本段不畫。
+    if not report_aggregates or "score_histogram" not in report_aggregates:
+        return None
+
     from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
     from recsys_tfb.evaluation.distributions import (
         plot_positive_rank_heatmap,
@@ -693,53 +583,60 @@ def build_diagnostics_figures(report_aggregates: dict | None) -> list:
         plot_score_histogram,
     )
 
-    # 用「有沒有家族鍵」判斷，**不看 ``enabled`` 旗標**。旗標是 node 設的、
-    # 聚合函式不設，所以看旗標的話 build_diagnostics_figures(
-    # aggregate_report_diagnostics(...)) 會靜默回空——直接呼叫的人（測試、
-    # 未來的離線重繪）拿到 [] 卻沒有任何線索。停用時的 stub 是
-    # {"enabled": False}，沒有任何家族鍵，這個判斷自然回 []。
-    families = ("score_histogram", "calibration")
-    if not report_aggregates or not any(
-        k in report_aggregates for k in families
-    ):
-        return []
     cols = report_aggregates["columns"]
     item_col, label_col = cols["item"], cols["label"]
-    figs = []
-    if "score_histogram" in report_aggregates:
-        figs.append(plot_score_histogram(
+    # 先群組所有圖（score 分布 2 張＋rank 矩陣 heatmap 3 張），再放數字表——
+    # 段內視覺一致（section 先 render figures 再 render tables）。positive rate
+    # 是有界 [0,1] 的率矩陣，全域色階有意義 → 用 heatmap。
+    figs = [
+        plot_score_histogram(
             frame_from_json(report_aggregates["score_histogram"]),
-            item_col=item_col))
-        figs.append(plot_score_boxplot_by_label(
+            item_col=item_col),
+        plot_score_boxplot_by_label(
             frame_from_json(report_aggregates["score_box_by_label"]),
-            item_col=item_col, label_col=label_col))
-        figs.append(plot_rank_heatmap(
-            frame_from_json(report_aggregates["rank_counts"])))
-        figs.append(plot_positive_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rank_counts"])))
-        figs.append(plot_positive_rate_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rate"])))
-    if "calibration" in report_aggregates:
-        figs.append(plot_calibration_curves(
-            frame_from_json(report_aggregates["calibration"]),
-            item_col=item_col))
-    return figs
+            item_col=item_col, label_col=label_col),
+        plot_rank_heatmap(
+            frame_from_json(report_aggregates["rank_counts"])),
+        plot_positive_rank_heatmap(
+            frame_from_json(report_aggregates["positive_rank_counts"])),
+        plot_positive_rate_rank_heatmap(
+            frame_from_json(report_aggregates["positive_rate"])),
+    ]
 
-
-def build_diagnostics_section(
-    diagnostics_frames: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "diagnostics") or not diagnostics_frames:
-        return None
-    figs = diagnostics_frames.get("figures", [])
-    if not figs:
-        return None
+    # item share by rank：逐欄正規化（每 rank 欄加總=1），刻意用數字表——掛全域
+    # 色階 heatmap 會誘導跨欄比色誤讀（§二）。放在所有 heatmap 之後。
+    rank_counts = frame_from_json(report_aggregates["rank_counts"])
+    pos_rank_counts = frame_from_json(report_aggregates["positive_rank_counts"])
+    tables = [
+        _item_share_by_rank(rank_counts),
+        _item_share_by_rank(pos_rank_counts),
+    ]
+    titles = [
+        "item share by rank（query 數，欄正規化：每 rank 各 item 佔比，欄和=1）",
+        "item share by rank（positive query 數，欄正規化）",
+    ]
     return ReportSection(
-        title="診斷 Diagnostics",
-        description="score 分布／rank heatmap／calibration（預設收合）。",
+        title="per-item 細部拆解",
+        description=(
+            "同一批排名的分數與名次分布側面。先看圖（群組在前）：score 分布、"
+            "score by label、rank 計數 heatmap、positive rank 計數 heatmap、"
+            "positive rate by rank heatmap；再看數字表：item share by rank（欄"
+            "正規化，看誰佔據各名次）。item share 刻意用數字表而非 heatmap——它"
+            "是逐欄正規化（每欄加總=1），掛全域色階會誘導跨欄比色誤讀，請在同一"
+            "欄內比。依「排序不是校準」，校準曲線移到獨立診斷報表、本段不畫。rank "
+            "計數的欄和＝總 query 數。明細數字表點標題展開。"
+        ),
         figures=figs,
-        collapsible=True,
+        tables=tables,
+        table_titles=titles,
+        collapsed_tables=[True, True],
+        collapsible=False,
     )
+
+
+def _od(a, b):
+    """None-safe A − B (either operand missing → None)."""
+    return None if a is None or b is None else a - b
 
 
 def build_baseline_section(
@@ -760,95 +657,183 @@ def build_baseline_section(
     attr_ks = _resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
+    # overall 三表用 k superset（使用者指定，k 放欄位）
+    k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_prod)
+    lookback = (
+        ((parameters.get("evaluation", {}) or {}).get("baseline", {}) or {})
+        .get("lookback_months")
+    )
 
     tables: list[pd.DataFrame] = []
-    table_titles: list[str] = []
+    titles: list[str] = []
+    collapsed: list[bool] = []
 
-    # [1] popularity composition (omitted when missing/empty for back-compat).
+    def _add(tbl, title, is_collapsed):
+        tables.append(tbl)
+        titles.append(title)
+        collapsed.append(is_collapsed)
+
+    # [1] popularity 排名組成（總計 count + 平均每月）；各月明細/趨勢＝Phase 2。
     pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
     if pcounts:
         sorted_items = sorted(
             pcounts.items(), key=lambda kv: kv[1], reverse=True
         )
-        pop_df = pd.DataFrame(
-            {
-                "count": [v for _, v in sorted_items],
-                "rank": list(range(1, len(sorted_items) + 1)),
-            },
-            index=[k for k, _ in sorted_items],
+        pop_cols = {"count": [v for _, v in sorted_items]}
+        if lookback:
+            pop_cols["平均每月"] = [
+                round(v / lookback, 1) for _, v in sorted_items
+            ]
+        pop_cols["rank"] = list(range(1, len(sorted_items) + 1))
+        _add(
+            pd.DataFrame(pop_cols, index=[k for k, _ in sorted_items]),
+            "popularity 排名組成", False,
         )
-        tables.append(pop_df)
-        table_titles.append("popularity 排名組成")
 
-    # [2] overall metrics: Model / Baseline / Delta.
+    # [1b] 月度趨勢：rows=item（總計降序，與 [1] 同序）、cols=月份升序＋合計。
+    #      各 item 的「合計」＝該列月份和，逐 item 對齊 [1] 的 count。
+    monthly = (baseline_metrics or {}).get("monthly_counts") or {}
+    if monthly:
+        months = sorted({mo for per in monthly.values() for mo in per})
+        item_order = sorted(
+            monthly, key=lambda it: sum(monthly[it].values()), reverse=True
+        )
+        mdf = pd.DataFrame(
+            {mo: [monthly[it].get(mo, 0) for it in item_order] for mo in months},
+            index=item_order,
+        )
+        mdf["合計"] = mdf.sum(axis=1)
+        _add(mdf, "popularity 月度趨勢", True)
+
+    # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
+    #     cols=@k（superset），明細收合。explicit family → 天然不含 ndcg。
     overall_a = comp["result_a"].get("overall", {}) or {}
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]
-    overall_keys = _visible_metric_keys(
-        sorted(set(overall_a) | set(overall_b) | set(overall_delta))
-    )
-    overall_tbl = pd.DataFrame(
-        {
-            "Model": [overall_a.get(k) for k in overall_keys],
-            "Baseline": [overall_b.get(k) for k in overall_keys],
-            "Delta": [overall_delta.get(k) for k in overall_keys],
-        },
-        index=overall_keys,
-    )
-    tables.append(overall_tbl)
-    table_titles.append("overall metrics")
+    for fam, label in (("map", "mAP"), ("recall", "recall"),
+                       ("precision", "precision")):
+        data = {}
+        for who, src in (("Model", overall_a), ("Baseline", overall_b),
+                         ("Δ", overall_delta)):
+            data[who] = {
+                f"@{k}": src.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+                for k in k_super
+            }
+        _add(pd.DataFrame(data).T, f"overall {label}@k (M/B/Δ)", True)
 
-    # [3] per-item compare tables — only when baseline has per_item.
+    # [3] per-item compare tables — only when baseline has per_item；明細收合。
     per_item_a = comp["result_a"].get("per_item", {}) or {}
     per_item_b = comp["result_b"].get("per_item", {}) or {}
     per_item_delta = comp.get("per_item_delta", {}) or {}
     macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
     if per_item_b:
+        # 兩張 per-item M/B/Δ 用同一組 k（attr_ks＝primary_map_k），彼此一致；
+        # 為控寬用縮減集，與衡量指標 per-item 的完整 [1..5,all] 不同（描述封邊）。
         for metric_key, col_fmt, ks, title in (
-            ("hit_rate", "recall@{k}", rec_ks,
-             "per-item recall@k (M/B/Δ)"),
+            ("hit_rate", "recall@{k}", attr_ks, "per-item recall@k (M/B/Δ)"),
             ("map_attr", "map_attr@{k}", attr_ks,
              "per-item map_attr@k (M/B/Δ)"),
         ):
-            tbl = _per_item_metric_compare_table(
-                per_item_a, per_item_b, per_item_delta,
-                ks, n_prod, metric_key, col_fmt,
-                macro_a=macro_a, macro_b=macro_b,
+            _add(
+                _per_item_metric_compare_table(
+                    per_item_a, per_item_b, per_item_delta,
+                    ks, n_prod, metric_key, col_fmt,
+                    macro_a=macro_a, macro_b=macro_b,
+                ),
+                title, True,
             )
-            tables.append(tbl)
-            table_titles.append(title)
 
+    # [4] per-segment mAP@k M/B/Δ — 只比主指標 mAP（控寬，reference 段）；rows＝
+    #     每個 segment 的 Model/Baseline/Δ 三列、cols＝@k。需 model 與 baseline
+    #     兩側都有 per_segment（key 由同一 active_seg_col 對齊）。明細收合。
+    seg_a = metrics.get("per_segment", {}) or {}
+    seg_b = (baseline_metrics or {}).get("per_segment", {}) or {}
+    if seg_a and seg_b:
+        rows: dict[str, dict] = {}
+        for seg in sorted(set(seg_a) | set(seg_b)):
+            a, b = seg_a.get(seg, {}) or {}, seg_b.get(seg, {}) or {}
+            for who, src in ((f"{seg} · Model", a), (f"{seg} · Baseline", b)):
+                rows[who] = {
+                    f"@{k}": src.get(f"map@{_k_to_lookup(k, n_prod)}")
+                    for k in k_super
+                }
+            rows[f"{seg} · Δ"] = {
+                f"@{k}": _od(a.get(f"map@{_k_to_lookup(k, n_prod)}"),
+                            b.get(f"map@{_k_to_lookup(k, n_prod)}"))
+                for k in k_super
+            }
+        _add(pd.DataFrame(rows).T, "per-segment mAP@k (M/B/Δ)", True)
+
+    # [5] 大類 overall mAP@k M/B/Δ — 大類粒度的 overall mAP 對照；rows＝
+    #     [Model,Baseline,Δ]、cols＝@k。n_cat 取 model 的 category 產品數
+    #     （baseline slim bundle 無 dataset_overview，兩側同一 category 集）。
+    cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
+    cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
+    if cat_a and cat_b:
+        n_cat = int(
+            (metrics.get("category") or {}).get("dataset_overview", {})
+            .get("totals", {}).get("n_products", 0)
+        ) or n_prod
+        cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        data = {}
+        for who, src in (("Model", cat_a), ("Baseline", cat_b)):
+            data[who] = {
+                f"@{k}": src.get(f"map@{_k_to_lookup(k, n_cat)}") for k in cks
+            }
+        data["Δ"] = {
+            f"@{k}": _od(cat_a.get(f"map@{_k_to_lookup(k, n_cat)}"),
+                        cat_b.get(f"map@{_k_to_lookup(k, n_cat)}"))
+            for k in cks
+        }
+        _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)
+
+    lookback_note = (
+        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
+        if lookback else ""
+    )
     return ReportSection(
-        title="基準比較 Baseline",
+        title="baseline — popularity 對照",
         description=(
-            "Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)+ "
-            "per-item recall/map_attr(M/B/Δ)。"
+            f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
+            "排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把同一批計數"
+            "拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名組成）。"
+            "overall 的 mAP／recall／precision 各一張表、"
+            "k 放欄位、點標題展開。對照層級：overall（三家族）、per-item"
+            "（recall／map_attr 兩張，k＝[1,3,5,all] 控寬）、per-segment 與大類"
+            "overall（只比主指標 mAP，各一張，reference 段控寬）。per-segment／大類"
+            "僅在 model 與 baseline 兩側都有該切片時出現（key 由同一 active segment／"
+            "product_categories 對齊）。"
         ),
         tables=tables,
-        table_titles=table_titles,
+        table_titles=titles,
+        collapsed_tables=collapsed,
     )
 
 
 _GLOSSARY = [
     ("mAP@k", "per-query Average Precision@k 對 query 平均；主指標"),
-    ("recall@k (per-item)", "P(rank(P)≤k | P 為正)，命中事件等權；護欄"),
+    ("recall@k (per-item)",
+     "P(rank(P)≤k | P 為正)，命中事件等權；map_attr@k 的互補角度"
+     "（正例有沒有進 top-k），不下 pass/fail"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),
     ("map_attr@k",
-     "某產品為正解時 ap_contrib@k 的平均；ap_contrib@k = 該產品進前 k 時的"
-     "累積精度。客戶該買它、模型排越前 → 值越高。非該產品自己的 mAP@k，"
-     "是 mAP@k 拆到單一產品的貢獻"),
+     "某產品為正解時 ap_contrib@k 的平均（＝mAP@k 拆到單一產品的貢獻，非該"
+     "產品自己的 mAP@k）。ap_contrib@k：該正例產品排名 r 若 ≤k 則為 P@r（前 r "
+     "名精確率）、否則 0——就是核心概念 AP@k 分子 Σ rel_i·P@i 裡屬於這個產品的"
+     "那一項。客戶該買它、模型排越前 → 值越高"),
     ("mean_pos", "產品為正時平均排名位置（越小越好）"),
     ("Macro 平均",
      "對所有產品（或 segment）等權平均；與 query 等權的 overall 不同"),
     ("base rate", "母體正樣本率"),
-    ("|ΔAP|",
-     "交換一對名次讓該 query 的 AP 貢獻總和變多少；λ 會計，query-AP 粒度"),
-    ("壓制者／受害者",
-     "同 query 排在正例上方的負例 item／被壓的正例 item"),
-    ("substitution ablation",
-     "把某 item 分數換成 base-rate 常數重算指標；delta 正＝該 item "
-     "個性化分數是淨傷害、負＝淨貢獻"),
+    ("macro per-item mAP",
+     "各 item 的 map_attr 等權平均；本框架頭號指標（item 等權），與 query "
+     "等權的 overall mAP 是兩種加權、並列不比高下"),
+    ("正例佔比",
+     "某 item 的正例數 ÷ 全體正例數；密集候選下與正例數同序（僅換分母／讀法）"),
+    ("item share by rank",
+     "rank 計數矩陣逐欄正規化——某 rank 位置上各 item 佔的比例（每欄加總=1），"
+     "回答「誰佔據該名次」"),
 ]
 
 
@@ -869,9 +854,9 @@ def build_glossary_section(parameters: dict) -> ReportSection:
 # **這一段刻意不認識任何單一診斷。** 走的是
 # ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
 # ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
-# registry 補一行，本檔零改動。舊的 ``build_offset_sweep_section``／
-# ``build_pair_ledger_section`` 不在這個規則的管轄範圍——它們服務的是尚未被
-# 取代的既有診斷 node，會在整個 diag-redesign 收尾時一起清掉。
+# registry 補一行，本檔零改動。（offset_sweep 這項既有診斷仍在計算層產出
+# offset_sweep.json，但其主報表呈現段已移除——後繼 score_shift 走
+# ``build_diagnosis_links_section`` 連出的獨立診斷報表。）
 #
 # 為什麼數字不複製一份到主報表：主報表只放入口
 # （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
@@ -1016,12 +1001,66 @@ def build_diagnosis_links_section(
         if str(p).endswith(".html") and not str(p).endswith("index.html")
     )
     return ReportSection(
-        title="排序診斷（獨立頁面）",
+        title="排序診斷（獨立報表）",
         description=(
             '<a href="diagnosis/index.html">診斷索引 diagnosis/index.html</a>'
             f"　—　本次寫出 {n_pages} 頁。索引頁說明每一項回答什麼、排除"
             "什麼，各頁的數字與範圍說明都留在該頁，這裡不複製一份。"
+            "（分流分析的後繼 score_shift 為獨立診斷報表，日後於此連出。）"
         ),
+    )
+
+
+def build_completeness_section(
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
+) -> ReportSection:
+    """完整性檢查（殿後）：本次執行的事實 ＋「什麼看似正常其實沒量到」。
+
+    presentation §一.4：交代邊界。只陳述事實，不評級。
+    """
+    eval_p = parameters.get("evaluation", {}) or {}
+    totals = (metrics.get("dataset_overview", {}) or {}).get("totals", {}) or {}
+    metric_p = eval_p.get("metric", {}) or {}
+    sample_meta = (metric_ci or {}).get("sample", {}) or {}
+
+    mk = metric_p.get("k")
+    facts = {
+        "k_values": eval_p.get("k_values"),
+        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        "正例列數 n_positives": totals.get("n_positives"),
+        "產品數 n_products": totals.get("n_products"),
+        "metric.weight_alpha（item 加權指數 α；0＝item 等權）":
+            metric_p.get("weight_alpha"),
+        "metric.k（AP 截斷 k；無＝不截斷、算全長）":
+            ("無（不截斷）" if mk is None else mk),
+        "metric.min_positives（觀察名單門檻；0＝不設）":
+            metric_p.get("min_positives"),
+        "metric.shrinkage_k（向 pooled 平均收縮強度；0＝不收縮）":
+            metric_p.get("shrinkage_k"),
+        "抽樣描述 sampling_description": sample_meta.get("sampling_description"),
+    }
+    facts_tbl = pd.DataFrame([facts]).T
+    facts_tbl.columns = ["value"]
+
+    bullets = [
+        # 刻意不寫出被隱藏指標的名字：整份報表有一條端到端護欄禁止該字串出現
+        # （避免值洩漏）；這裡只陳述「算了但不呈現」這件事。
+        "部分排序衍生指標有算但刻意不呈現（本框架目標是排序 macro mAP，"
+        "非機率校準）。",
+        "每-query 正例數分佈本版未算（Phase 2，需新增 per-query 聚合）。",
+        "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
+        "同序，非獨立軸。",
+    ]
+    return ReportSection(
+        title="完整性檢查",
+        description=(
+            "本次執行的事實（k、規模、抽樣、metric 參數）與「什麼情況數字看起來"
+            "正常、其實沒量到或不完整」。放在最後，交代邊界。"
+        ),
+        tables=[facts_tbl],
+        table_titles=["本次執行事實"],
+        bullets=bullets,
     )
 
 
@@ -1029,27 +1068,28 @@ def assemble_report(
     metrics: dict,
     parameters: dict,
     baseline_metrics: dict | None = None,
-    diagnostics_frames: dict | None = None,
+    report_aggregates: dict | None = None,
     metric_ci: dict | None = None,
     offset_sweep: dict | None = None,
-    pair_ledger: dict | None = None,
     diagnosis_pages: list | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
-    authoritative order) into the final HTML string."""
+    authoritative order) into the final HTML string.
+
+    8 段 spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
+    衡量指標 → per-item 細部拆解 → baseline → 排序診斷連結 → 完整性檢查 →
+    詞彙表。offset_sweep 不再進主報表（其後繼 score_shift 走診斷連結）；
+    ``offset_sweep`` 參數保留僅為簽章相容（未使用）。
+    """
     candidates = [
-        build_headline_section(metrics, parameters),
+        build_overview_section(metrics, parameters, metric_ci=metric_ci),
+        build_core_concept_section(parameters),
         build_dataset_overview_section(metrics, parameters),
-        build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
-        build_guardrail_recall_section(metrics, parameters),
-        build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
-        build_diagnosis_links_section(diagnosis_pages, parameters),
-        build_offset_sweep_section(offset_sweep, parameters),
-        build_pair_ledger_section(pair_ledger, parameters),
-        build_category_section(metrics, parameters),
-        build_segment_section(metrics, parameters),
-        build_diagnostics_section(diagnostics_frames, parameters),
+        build_metrics_section(metrics, parameters, metric_ci=metric_ci),
+        build_item_detail_section(report_aggregates, parameters),
         build_baseline_section(metrics, baseline_metrics, parameters),
+        build_diagnosis_links_section(diagnosis_pages, parameters),
+        build_completeness_section(metrics, parameters, metric_ci=metric_ci),
         build_glossary_section(parameters),
     ]
     sections = [s for s in candidates if s is not None]
