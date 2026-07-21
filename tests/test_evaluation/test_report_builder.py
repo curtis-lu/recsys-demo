@@ -803,7 +803,8 @@ def test_baseline_section_has_two_per_item_compare_tables():
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
-    """recall table: cols = recall@1 M/B/Δ, recall@2 M/B/Δ (params has guardrail_recall_k=[1,2])."""
+    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]
+    （Task：baseline per-item 兩表統一 k 集）。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -811,7 +812,8 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     tbl = s.tables[idx]
     assert list(tbl.columns) == [
         "recall@1 M", "recall@1 B", "recall@1 Δ",
-        "recall@2 M", "recall@2 B", "recall@2 Δ",
+        "recall@3 M", "recall@3 B", "recall@3 Δ",
+        "recall@all M", "recall@all B", "recall@all Δ",
     ]
     # Macro row first.
     assert list(tbl.index)[0] == "Macro 平均"

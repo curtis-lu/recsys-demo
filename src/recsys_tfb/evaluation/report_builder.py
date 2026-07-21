@@ -134,7 +134,7 @@ def build_overview_section(
               "CI 用 query 數": sample_meta.get("n_queries_sampled")}],
             index=["macro per-item mAP"],
         ))
-        titles.append("關鍵指標：macro per-item mAP（頭號，含 bootstrap CI）")
+        titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）")
         n_boot = metric_ci.get("n_boot")
         sd = sample_meta.get("sampling_description", "")
         ci_note = (
@@ -173,6 +173,7 @@ def build_overview_section(
             "哪些 item／segment 排得弱",
             "每個 item 的分數與名次分布長怎樣",
             "跟熱門度（popularity）比如何",
+            "想深入各項診斷（排序偏移、item 能力、壓制帳本…）",
             "本次量到什麼、沒量到什麼",
         ],
         "看哪一區": [
@@ -180,6 +181,7 @@ def build_overview_section(
             "衡量指標（per-item／per-segment）",
             "per-item 細部拆解",
             "baseline",
+            "排序診斷（獨立報表）",
             "完整性檢查",
         ],
     })
@@ -264,7 +266,8 @@ def build_dataset_overview_section(
     # render 端純算術、無 Spark）。密集候選下三欄同序，ScopeNote 於 description。
     total_pos = totals_d.get("n_positives") or 0
     by_item_rows: dict = {}
-    for item, d in (ov.get("by_item", {}) or {}).items():
+    # per-item 列序統一按字母（與衡量指標、item-share 對齊）
+    for item, d in sorted((ov.get("by_item", {}) or {}).items()):
         n_pos = d.get("n_positives")
         by_item_rows[item] = {
             "正例數": n_pos,
@@ -824,7 +827,8 @@ def build_metrics_section(
     if not _section_on(parameters, "primary_map"):
         return None
     overall = metrics.get("overall", {})
-    per_item = metrics.get("per_item", {})
+    # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
+    per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     n_prod = _n_products(metrics)
     ks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_prod)  # 全表統一 k
@@ -892,7 +896,7 @@ def build_metrics_section(
          "B · per-item 歸因｜recall@k（列＝item）", True)
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
-        cat_pi = cat.get("per_item", {})
+        cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
         _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
                                     "map_attr@{k}", macro_metrics=cat_macro_item),
              "B · 大類 per-item 歸因｜map_attr@k（列＝大類）", True)
@@ -914,7 +918,8 @@ def build_metrics_section(
             "mAP（item 等權，含 bootstrap CI；CI 上下界的點估＝該列 map_attr@all）；"
             "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
             "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
-            "退化為 base rate、recall 恆為 1。明細表點標題展開。"
+            "退化為 base rate、recall 恆為 1。CI 僅算到 item 層（大類 per-item 無 "
+            "bootstrap CI）。per-item 列序統一按字母。明細表點標題展開。"
         ),
         tables=tables,
         table_titles=titles,
@@ -1148,8 +1153,10 @@ def build_baseline_section(
     macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
     if per_item_b:
+        # 兩張 per-item M/B/Δ 用同一組 k（attr_ks＝primary_map_k），彼此一致；
+        # 為控寬用縮減集，與衡量指標 per-item 的完整 [1..5,all] 不同（描述封邊）。
         for metric_key, col_fmt, ks, title in (
-            ("hit_rate", "recall@{k}", rec_ks, "per-item recall@k (M/B/Δ)"),
+            ("hit_rate", "recall@{k}", attr_ks, "per-item recall@k (M/B/Δ)"),
             ("map_attr", "map_attr@{k}", attr_ks,
              "per-item map_attr@k (M/B/Δ)"),
         ):
@@ -1172,7 +1179,9 @@ def build_baseline_section(
             f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
             "排名組成為各 item 跨月合計（總計＋平均每月）；各月明細與趨勢為後續"
             "階段（需保留逐月計數）。overall 的 mAP／recall／precision 各一張表、"
-            "k 放欄位、點標題展開。"
+            "k 放欄位、點標題展開。對照僅做 overall 與 per-item 兩層"
+            "（per-segment／大類 vs baseline 從略）；per-item 兩張表 k 欄一致＝"
+            "[1,3,5,all]（控寬，與衡量指標 per-item 的完整 [1..5,all] 不同）。"
         ),
         tables=tables,
         table_titles=titles,
