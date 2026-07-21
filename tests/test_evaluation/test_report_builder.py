@@ -596,6 +596,14 @@ def test_glossary_has_macro_average_entry():
     assert "Macro 平均" in terms
 
 
+def test_glossary_has_new_structure_terms():
+    s = rb.build_glossary_section(_params())
+    terms = set(s.tables[0]["指標"])
+    assert "正例佔比" in terms
+    assert "item share by rank" in terms
+    assert "macro per-item mAP" in terms
+
+
 def _params_lookback():
     p = _params()
     p["evaluation"]["baseline"] = {"lookback_months": 12}
