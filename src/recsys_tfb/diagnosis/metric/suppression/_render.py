@@ -50,13 +50,14 @@ _N_AXIS_MAX = math.isqrt(MAX_FIGURE_POINTS)
 #: （見 :func:`_defs_table`）：定義貼在數字旁邊，而非頁首一張總表。
 _DEFS: dict[str, str] = {
     "allocated_ap_gap":
-        "**基礎量（逐列）**：某一個正例列的 AP 缺口，按上方各負例造成的名次損失"
-        "比例，分給每個負例的那一份。公式：分給負例 s 的份 = row_ap_gap × "
-        "severity(s) ÷ Σ severity；其中 row_ap_gap = 1 − 該正例列目前的 AP 貢獻，"
-        "severity(s) = 把負例 s 移到正例下方能回補的 AP。例：正例在 rank 3、"
-        "上方兩個負例（rank 1、2），row_ap_gap = 1−1/3 = 0.667 按 severity 4:1 拆成 "
-        "0.533 與 0.133。案例表顯示的就是這個未加總的單列值；壓制矩陣與 gap share "
-        "則是把它**跨列加總**到 (受害, 壓制者) 組合或整個 item。分帳、非因果。",
+        "**基礎量（逐列）**：某一個正例列的 AP 缺口，按上方各負例的 severity 比例，"
+        "分給每個負例的那一份。公式：分給負例 s 的份 = row_ap_gap × severity(s) ÷ "
+        "Σ severity；其中 row_ap_gap = 1 − 該正例列目前的 AP 貢獻，severity(s) = "
+        "把正例提到負例 s 的名次、它的 AP 貢獻會多出多少（負例排得越高、提上去越賺 "
+        "→ severity 越大）。例：正例在 rank 3（目前貢獻 1/3），上方兩個負例在 rank 1、2；"
+        "提到 rank 1 貢獻變 1（多 2/3）、提到 rank 2 變 1/2（多 1/6），severity 比 2/3:1/6"
+        "＝4:1，於是 row_ap_gap 0.667 拆成 0.533 與 0.133。案例表顯示的就是這個未加總的"
+        "單列值；壓制矩陣與 gap share 則是把它**跨列加總**。分帳、非因果。",
     "AP": "該 item 在它自己的正例列上的 average precision（0–1）；越高＝正例越常被排在前面。",
     "AP gap": "1 − AP。離「正例全部排最前」還差多少（每列平均）。",
     "AP gap from suppressors":
