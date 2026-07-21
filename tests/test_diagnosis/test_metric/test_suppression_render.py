@@ -305,6 +305,51 @@ def test_each_number_the_reader_asked_about_is_defined_in_its_own_section():
                 )
 
 
+def test_per_item_warns_gap_share_sort_is_volume_weighted():
+    """reader 反饋：主表依 overall gap share 排序會把排得不錯的大宗 item 頂到
+    最前、把真正壞掉的小宗 item 沉到後面。必須明講這個陷阱、並指向嚴重度欄。"""
+    section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
+    text = _section_text(section)
+    assert "筆數加權" in text or "總損失" in text, "沒有點出 gap share 是筆數加權"
+    assert "median pos rank" in text and "AP" in text, "沒有指向嚴重度角度"
+
+
+def test_per_item_defines_median_pos_rank_and_n_pos():
+    """reader 反饋：median pos rank（「a of b」）與 n_pos 沒定義。"""
+    section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
+    defs = section.tables[0]
+    names = list(defs["數字"])
+    assert "median pos rank" in names and "n_pos" in names
+    joined = defs.to_string()
+    assert "of b" in joined or "a of b" in joined, "median pos rank 沒解釋 a of b"
+
+
+def test_examples_score_margin_formula_is_not_double_logit():
+    """reader 反饋：分數欄已經是 logit，公式不該再套一層 logit()。"""
+    section = _section(suppression.render(_result(), {}), _EXAMPLES_TITLE)
+    assert "logit(壓制者分數)" not in section.formula, "公式重複套了 logit()"
+    assert "logit" in _section_text(section), "沒有說明分數已是 logit"
+
+
+def test_examples_column_marks_the_single_row_atomic_value():
+    """reader 反饋：allocated_ap_gap 定義說『跨列加總』，案例表卻是單列值。
+    案例欄要標成單列值，並在說明裡點出它與加總值的關係。"""
+    section = _section(suppression.render(_result(), {}), _EXAMPLES_TITLE)
+    data = section.tables[-1]
+    assert "此列分攤缺口" in data.columns, "案例欄沒有標成單列值"
+    assert "allocated_ap_gap" not in data.columns, "案例欄仍用會誤解的加總名"
+    assert "單列" in _section_text(section) and "加總" in _section_text(section)
+
+
+def test_unexplained_definition_admits_it_is_zero_under_k_all():
+    """reader 反饋：unexplained 全 0、定義卻舉了不會發生的例子。
+    定義要說明 k=all 下結構上恆為 0。"""
+    section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
+    text = _section_text(section)
+    assert "unexplained AP gap" in text
+    assert "k=all" in text and ("恆為 0" in text or "恆 0" in text)
+
+
 def test_per_item_summary_comes_before_the_matrix():
     """使用者的具體抱怨：一開始就跳到矩陣，讀者不知道 per-item 基本狀況。
     per-item 彙總表必須排在壓制矩陣之前。
