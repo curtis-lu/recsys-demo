@@ -52,11 +52,55 @@ def _metrics():
     }
 
 
+def _metric_ci():
+    return {
+        "enabled": True,
+        "macro": {"ap": 0.541, "ci_low": 0.520, "ci_high": 0.559},
+        "sample": {
+            "n_queries_sampled": 10,
+            "sampling_description": "未抽樣：全部 10 個有正例的 query 都納入。",
+        },
+        "per_item": {"A": {"ap": 0.5, "ci_low": 0.45, "ci_high": 0.55,
+                           "n_pos": 12}},
+    }
+
+
 def test_headline_section_has_map_card():
     s = rb.build_headline_section(_metrics(), _params())
     txt = " ".join(str(t.to_dict()) for t in s.tables)
     assert "map@1" in txt and "map@all" in txt   # "all" resolves via display
     assert "map@5" not in txt                     # not in display list
+
+
+def test_overview_section_has_purpose_and_macro_headline():
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert s.title == "概覽"
+    # 目的句提到排序（這份報表在幹嘛）
+    assert "排序" in s.description
+    # 關鍵數含 macro per-item mAP（頭號指標）
+    joined = " ".join(t.to_string() for t in s.tables)
+    assert "macro" in joined.lower()
+    # 有「問題 → 看哪一區」導覽表
+    assert any("導覽" in tt or "看哪" in tt for tt in s.table_titles)
+
+
+def test_overview_scale_and_severity_separated():
+    # 規模／分母（n_queries 等）與關鍵指標分成不同表，避免分母被讀成嚴重度
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert len(s.tables) >= 2
+    # overall per-query mAP 明標為「另一種加權」，不宣稱哪個才對
+    joined = s.description + " ".join(s.table_titles) + " ".join(
+        t.to_string() for t in s.tables
+    )
+    assert "加權" in joined
+
+
+def test_overview_no_verdict_vocabulary():
+    s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.table_titles)
+            + " ".join(t.to_string() for t in s.tables) + " ".join(s.bullets))
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
 
 
 def test_dataset_overview_section_tables():

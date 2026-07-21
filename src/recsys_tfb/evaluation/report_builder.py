@@ -105,6 +105,93 @@ def build_headline_section(metrics: dict, parameters: dict) -> ReportSection:
     )
 
 
+def build_overview_section(
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
+) -> ReportSection:
+    """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
+
+    presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
+    表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權，＋CI 抽樣估計）；
+    overall per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
+    """
+    overall = metrics.get("overall", {})
+    disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
+    ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
+
+    tables: list[pd.DataFrame] = []
+    titles: list[str] = []
+
+    # 關鍵指標 1：macro per-item mAP（頭號，抽樣估計 + CI）——沿用 primary_map
+    # 的讀法（metric_ci.macro / sample），避免定義漂移。
+    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
+        m = metric_ci["macro"]
+        sample_meta = metric_ci.get("sample", {}) or {}
+        tables.append(pd.DataFrame(
+            [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+              "CI 97.5%": m.get("ci_high"),
+              "樣本 query 數": sample_meta.get("n_queries_sampled")}],
+            index=["macro per-item mAP"],
+        ))
+        titles.append("關鍵指標：macro per-item mAP（頭號，抽樣估計）")
+
+    # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
+    card = {
+        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_prod)}") for k in ks
+    }
+    t_overall = pd.DataFrame([card]).T
+    t_overall.columns = ["value"]
+    tables.append(t_overall)
+    titles.append("overall mAP@k（per-query 等權，另一種加權）")
+
+    # 規模／分母（非好壞，明標與關鍵數分開）
+    totals = metrics.get("dataset_overview", {}).get("totals", {}) or {}
+    scale = {
+        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        "正例列數 n_positives": totals.get("n_positives"),
+        "正樣本率 positive_rate": totals.get("positive_rate"),
+        "每客戶平均正例數 avg_positives_per_customer":
+            totals.get("avg_positives_per_customer"),
+    }
+    t_scale = pd.DataFrame([scale]).T
+    t_scale.columns = ["value"]
+    tables.append(t_scale)
+    titles.append("規模／分母（以下為分母與規模，非好壞）")
+
+    # 導覽：想回答什麼 → 看哪一區（RangeIndex → render 端自動藏流水號）
+    nav = pd.DataFrame({
+        "想回答的問題": [
+            "模型整體排得好不好",
+            "哪些 item／segment 排得弱",
+            "每個 item 的分數與名次分布長怎樣",
+            "跟熱門度（popularity）比如何",
+            "本次量到什麼、沒量到什麼",
+        ],
+        "看哪一區": [
+            "衡量指標",
+            "衡量指標（per-item／per-segment）",
+            "per-item 細部拆解",
+            "baseline",
+            "完整性檢查",
+        ],
+    })
+    tables.append(nav)
+    titles.append("導覽：想回答什麼 → 看哪一區")
+
+    return ReportSection(
+        title="概覽",
+        description=(
+            "這份報表幫你判斷這個模型在 per-query 排序上表現如何、好壞落在哪些 "
+            "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
+            "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權）；"
+            "overall mAP 為 per-query 等權，是另一種加權，並列呈現、不比高下。"
+        ),
+        tables=tables,
+        table_titles=titles,
+    )
+
+
 def build_dataset_overview_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
