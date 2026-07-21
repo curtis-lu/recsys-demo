@@ -30,7 +30,7 @@ _SUMMARY_TITLE = "per-item"
 _MATRIX_TITLE = "壓制矩陣"
 _BUBBLE_TITLE = "交叉購買 lift"
 _EXAMPLES_TITLE = "具體案例"
-_BY_SUPPRESSOR_TITLE = "壓制者視角"
+_BY_SUPPRESSOR_TITLE = "壓制者明細"
 
 
 def _section_text(section) -> str:
@@ -343,16 +343,32 @@ def test_matrix_formula_or_bullets_link_back_to_the_per_item_summary():
 # ---- 本項專屬：兩張圖同軸序、雙量編碼、點數預算截斷 -------------------------
 
 
-def test_two_matrices_share_axis_order():
-    """兩張圖同軸序是『並排對照』這個版面決定的唯一技術前提。
-    軸序漂掉不會 raise、不會有數值測試轉紅、圖看起來也正常——
-    只是讀者對照出來的每一個結論都是錯的。
+def _matrix_data_table(sections):
+    """壓制矩陣區的資料表（最後一張；第一張是定義小表）。"""
+    return _section(sections, _MATRIX_TITLE).tables[-1]
+
+
+def test_matrix_is_a_by_row_table_sharing_axis_with_the_bubble():
+    """矩陣改成可讀數字表（不再是熱圖）：列＝受害 item、欄＝壓制者 item，
+    方陣同軸序；泡泡圖的 j／k 軸落在同一組 item 內，兩者才對照得起來。
     """
     sections = suppression.render(_result(), {})
-    supp = _figure_of_type(sections, "heatmap")
+    matrix = _matrix_data_table(sections)
+    sup_axis = list(matrix.columns[1:])          # 首欄是「受害 item ＼ 壓制者」
+    victim_axis = list(matrix.iloc[:, 0])
+    assert sup_axis == sorted(sup_axis), "壓制者欄沒有排序"
+    assert victim_axis == sup_axis, "受害列與壓制者欄不是同一組同軸序"
     bubble = _figure_of_type(sections, "scatter")
-    assert list(supp.x) == sorted(set(bubble.x))
-    assert list(supp.y) == sorted(set(bubble.y))
+    assert set(bubble.x) <= set(sup_axis) and set(bubble.y) <= set(sup_axis)
+
+
+def test_matrix_rows_sum_to_one_hundred_percent():
+    """target gap share 每列橫著加＝100%——這是『按列看』的數學前提，
+    也是不該跨列比大小的理由。空白格＝0。"""
+    matrix = _matrix_data_table(suppression.render(_result(), {}))
+    for _, row in matrix.iterrows():
+        pct = [float(c[:-1]) for c in row[1:] if isinstance(c, str) and c.endswith("%")]
+        assert abs(sum(pct) - 100.0) < 0.5, f"某列的 target gap share 不加到 100%：{sum(pct)}"
 
 
 def test_bubble_grid_encodes_two_different_quantities():
@@ -365,36 +381,64 @@ def test_bubble_grid_encodes_two_different_quantities():
     assert list(bubble.marker.size) != list(bubble.marker.color)
 
 
-def test_axis_is_capped_and_says_so_when_items_exceed_the_point_budget():
-    """點數預算：item 數超過 44 時必須截斷**並在 bullets 說明**。
+def test_bubble_axes_are_labelled_j_and_k():
+    """使用者反饋：j／k 分別對應哪一軸要標清楚。"""
+    sections = suppression.render(_result(), {})
+    fig = next(f for s in sections for f in s.figures
+               if f.data and f.data[0].type == "scatter")
+    xt = fig.layout.xaxis.title.text or ""
+    yt = fig.layout.yaxis.title.text or ""
+    assert "j" in xt and "買了這個" in xt, f"橫軸沒標清楚 j：{xt!r}"
+    assert "k" in yt and "也買了這個" in yt, f"縱軸沒標清楚 k：{yt!r}"
 
-    只斷言『沒有炸掉』會同時被『正確截斷』與『根本沒畫這張圖』滿足
-    （已知假綠形態：「不存在」斷言是雙關的）——所以要斷言系統**說了什麼**。
-    bullets 而不是 description：照 item_ability/_render.py:140-142 的既有慣例。
+
+def test_distribution_bars_cover_both_victim_and_suppressor_views():
+    """使用者反饋：除了壓制者視角，也要有受害者視角的分布圖。
+    兩張長條圖：一張按受害 item、一張按壓制者 item。"""
+    sections = suppression.render(_result(), {})
+    bar_titles = [
+        f.layout.title.text for s in sections for f in s.figures
+        if f.data and f.data[0].type == "bar"
+    ]
+    joined = " ".join(t for t in bar_titles if t)
+    assert "誰承受" in joined and "誰造成" in joined, (
+        f"缺口分布長條圖不齊全（受害者／壓制者）：{bar_titles}"
+    )
+
+
+def test_suppressor_table_drops_mean_logit_margin():
+    """使用者反饋：mean logit margin 在壓制者明細表裡多餘，刪掉。"""
+    section = _section(suppression.render(_result(), {}), _BY_SUPPRESSOR_TITLE)
+    for tbl in section.tables:
+        assert "mean logit margin" not in tbl.columns, "壓制者明細還留著 mean logit margin"
+
+
+def test_cross_purchase_has_no_data_table_only_figure_and_defs():
+    """使用者反饋：交叉購買有圖就清楚，不必再展開 (j,k) 資料表。
+    只留定義小表與圖，不留逐列資料表。"""
+    section = _section(suppression.render(_result(), {}), _BUBBLE_TITLE)
+    assert section.figures, "交叉購買沒有圖"
+    assert len(section.tables) == 1, "交叉購買除了定義表不該還有資料表"
+    assert section.table_titles == [_DEFS_TITLE]
+
+
+def test_axis_is_capped_and_says_so_when_items_exceed_the_budget():
+    """item 太多時矩陣表截斷**並在 bullets 說明**。
+
+    只斷言『沒有炸掉』會同時被『正確截斷』與『根本沒畫』滿足（已知假綠
+    形態：「不存在」斷言雙關）——所以要斷言系統**說了什麼**。
     """
     sections = suppression.render(_result_with_items(60), {})
-    supp = _figure_of_type(sections, "heatmap")
-    assert len(supp.x) == 44
+    matrix = _matrix_data_table(sections)
+    assert len(matrix.columns) - 1 == 44, "矩陣欄數沒有截到 44"
     text = " ".join(b for s in sections for b in s.bullets)
     assert "60" in text and "44" in text
 
 
 def test_axis_is_not_capped_when_items_fit():
-    """反向釘住上一條：22 個 item（公司實際規模）必須整張畫出來。
-    少了它，一個『永遠只畫 44 個』甚至『永遠只畫前 N 個』的實作也會綠。
-    """
-    supp = _figure_of_type(suppression.render(_result_with_items(22), {}), "heatmap")
-    assert len(supp.x) == 22
-
-
-def test_heatmap_has_no_diverging_center():
-    """壓制矩陣是單向大小（target_gap_share ∈ [0,1]），不是有號量——
-    不得傳 center，走 sequential_scale()。"""
-    supp = _figure_of_type(suppression.render(_result(), {}), "heatmap")
-    # sequential 色階與 diverging 色階的第一個顏色不同；這裡只驗證
-    # heatmap 建構時沒有走 diverging 分支（有 colorscale 即可，形狀檢查
-    # 交給 figures 模組自己的測試，這裡驗證的是呼叫端沒有傳 center）。
-    assert supp.colorscale is not None
+    """反向釘住上一條：22 個 item（公司實際規模）整張畫出來，不截。"""
+    matrix = _matrix_data_table(suppression.render(_result_with_items(22), {}))
+    assert len(matrix.columns) - 1 == 22
 
 
 def test_examples_section_lists_query_and_items():

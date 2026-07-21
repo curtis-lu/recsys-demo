@@ -85,6 +85,19 @@ def fmt_ratio(x: Any) -> str:
     return f"{v:.2f}x"
 
 
+def fmt_mean(x: Any) -> str:
+    """平均量（每列平均個數等）：2 位小數，**無單位後綴**。
+
+    與 ``fmt_ratio`` 的區別是關鍵：``fmt_ratio`` 的 ``x`` 後綴代表「幾倍」，
+    只該用在真正的倍率（lift）。「每個正例列上方平均有幾個負例」這種**平均
+    個數**不是倍率，加 ``x`` 會讓讀者誤以為是倍數關係。這裡不加後綴。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v:.2f}"
+
+
 def fmt_count(x: Any) -> str:
     """計數：千分位、無小數。**只給真正的整數計數**，加權和用 ``fmt_weighted_count``。"""
     v = _to_finite_float(x)

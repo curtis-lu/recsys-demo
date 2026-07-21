@@ -34,7 +34,9 @@ SCOPE = ScopeNote(
         "同一個 query 內，label=0 的 item 排在 label=1 的 item 之前的壓制"
         "關係（AP 缺口如何依比例分攤給排在它上面的每個負例，彙總成壓制"
         "帳本），以及 item 對之間的交叉購買 lift（p_k_given_j 相對 k 的"
-        "基礎購買率）。"
+        "基礎購買率）。壓制事件的計數與 metric k 無關（只要負例排在正例"
+        "之上就算）；但 AP 缺口與其分攤是在 top-k 之內衡量的——k 由設定"
+        "決定，值印在頁面上。"
     ),
     population=(
         "壓制帳本與 cross_purchase 都算在同一份診斷抽樣（與其餘診斷共用）"

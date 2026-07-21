@@ -10,6 +10,7 @@ from recsys_tfb.report.fmt import (
     fmt_count,
     fmt_delta,
     fmt_logodds,
+    fmt_mean,
     fmt_percent,
     fmt_ratio,
     fmt_weighted_count,
@@ -19,7 +20,7 @@ from recsys_tfb.report.fmt import (
 _BAD_VALUES = [None, float("nan"), float("inf"), float("-inf"), "not-a-number", object()]
 _ALL_FMTS = [
     fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count,
-    fmt_weighted_count, fmt_percent,
+    fmt_weighted_count, fmt_percent, fmt_mean,
 ]
 
 
@@ -62,6 +63,18 @@ class TestFmtPercent:
         # 同一個底層量、不同呈現單位——這正是分開兩個函式的理由
         assert fmt_auc(0.464) == "0.464"
         assert fmt_percent(0.464) == "46.4%"
+
+
+class TestFmtMean:
+    def test_two_decimals_no_suffix(self):
+        assert fmt_mean(0.77) == "0.77"
+        assert fmt_mean(2.8182) == "2.82"
+        assert fmt_mean(0) == "0.00"
+
+    def test_no_x_suffix_unlike_ratio(self):
+        # 平均個數不是倍率——不該有 fmt_ratio 的 x 後綴
+        assert not fmt_mean(2.82).endswith("x")
+        assert fmt_ratio(2.82).endswith("x")
 
 
 class TestFmtAp:
