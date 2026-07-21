@@ -90,8 +90,15 @@ def heatmap(
     colorbar_title: str,
     *,
     center: float | None = None,
+    text: Sequence[Sequence[str]] | None = None,
 ) -> go.Figure:
-    """矩陣熱圖。``x``/``y`` 的順序原樣保留，絕不重新排序。"""
+    """矩陣熱圖。``x``/``y`` 的順序原樣保留，絕不重新排序。
+
+    ``text``：給定時（與 ``z`` 同形狀的字串矩陣）把每格的值直接寫在格子上，
+    讓熱圖同時能「一眼看形狀」與「讀得出精確值」。留 ``None`` 則只有顏色與
+    hover——色階本身讀不出數值時（例如格子代表的是名次而非比例），呼叫端應
+    傳 ``text`` 把數值標出來。
+    """
     z_arr = np.asarray(z, dtype=float)
     flat = z_arr.ravel()
     assert_within_budget(flat.size, name="heatmap")
@@ -102,15 +109,18 @@ def heatmap(
     else:
         colorscale = sequential_scale()
 
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z_arr,
-            x=list(x),
-            y=list(y),
-            colorscale=colorscale,
-            colorbar=dict(title=colorbar_title),
-        )
+    heatmap_kwargs: dict = dict(
+        z=z_arr,
+        x=list(x),
+        y=list(y),
+        colorscale=colorscale,
+        colorbar=dict(title=colorbar_title),
     )
+    if text is not None:
+        heatmap_kwargs["text"] = [list(row) for row in text]
+        heatmap_kwargs["texttemplate"] = "%{text}"
+
+    fig = go.Figure(data=go.Heatmap(**heatmap_kwargs))
     return _apply_theme(fig, title)
 
 

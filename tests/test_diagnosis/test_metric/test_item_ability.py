@@ -3,8 +3,40 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.diagnosis.metric.item_ability._compute import (
-    compute, presort_by_score, weighted_auc_presorted,
+    compute, descending_ranks, presort_by_score, weighted_auc_presorted,
 )
+
+
+def test_descending_ranks_are_one_based_highest_score_first():
+    """名次 1 給同一 query 內分數最高的列；跨 query 各自從 1 起算。"""
+    groups = np.array([0, 0, 0, 1, 1])
+    score = np.array([0.1, 0.9, 0.5, 0.2, 0.8])
+    # q0: 0.9→1, 0.5→2, 0.1→3 ; q1: 0.8→1, 0.2→2
+    np.testing.assert_array_equal(
+        descending_ranks(groups, score), np.array([3.0, 1.0, 2.0, 2.0, 1.0])
+    )
+
+
+def test_per_item_reports_ranks_not_percentiles():
+    """名次欄是原始名次（≥1 的整數空間），不是 rank÷query_size 的百分位。
+
+    合成樣本每 query 只有 2 個候選，名次只可能是 1 或 2——若實作退回百分位
+    （0.5／1.0）這條會紅。
+    """
+    out = compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+    item = out["per_item"][0]
+    assert set(item["positive_ranks"]) <= {1, 2}
+    assert item["median_positive_rank"] in (1.0, 1.5, 2.0)
+    for key in ("p10_positive_rank", "p25_positive_rank",
+                "median_positive_rank", "p75_positive_rank", "p90_positive_rank"):
+        assert item[key] is not None and item[key] >= 1.0
+
+
+def test_candidates_per_query_reports_query_size():
+    """名次的分母（每 query 幾個候選）要交代清楚。合成樣本固定 2 個候選。"""
+    out = compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+    cpq = out["candidates_per_query"]
+    assert cpq == {"min": 2, "median": 2.0, "max": 2}
 
 
 def test_weighted_auc_matches_hand_computed_value():

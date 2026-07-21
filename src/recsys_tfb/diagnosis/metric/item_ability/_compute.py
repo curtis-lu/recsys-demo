@@ -1,7 +1,7 @@
 """item_ability 計算層：模型能不能在同一個 query 內分辨誰會買哪個 item。
 
 回答的問題（只有這一個）：**對每個 item，模型是不是真的在同一位客戶的候選
-清單裡把它排到前面，而不是只因為某些客戶整體分數偏高**。
+清單裡把它排到前面，而不是只因為某些客戶整體分數較高**。
 
 兩個 AUC，為什麼要兩個
 -----------------------
@@ -13,14 +13,16 @@
 
 ``query_centered_auc`` 先用 :func:`query_center_scores` 把每個 query 的平均
 logit 分數扣掉，只留「同一位客戶的候選之間誰比較被看好」這個相對訊號；
-``raw_within_item_auc`` 沒扣，混進了「這位客戶整體分數是不是偏高」（活躍度、
-信用等級等跟這個 item 無關的因素）。
+``raw_within_item_auc`` 沒扣，混進了「這位客戶整體分數水準」（同一 query 內
+所有候選的平均分數，跟這個 item 專屬的排序無關）。
 
     auc_gap_raw_minus_centered = raw_within_item_auc − query_centered_auc
 
-**這個差值的方向**（raw 減 centered，不是絕對值、不是反過來）**就是「客戶
-活躍度被誤計入 item 推薦能力」的量**——這是整項診斷的核心，散點圖偏離對角
-線的距離就是它。取絕對值或反號都不會讓任何數值測試轉紅，只有方向測試
+**這個差值的方向**（raw 減 centered，不是絕對值、不是反過來）**量的是客戶整體
+分數水準對 raw AUC 的貢獻**：正值＝raw AUC 被「買家恰好是整體分數較高的客戶」
+撐高（看起來的能力有一部分不是 item 專屬的）、負值＝相反（買家整體分數較低、
+raw AUC 反而被拉低）。方向本身就是訊號，散點圖偏離對角線的方向就是它。取絕對
+值或反號都不會讓任何數值測試轉紅，只有方向測試
 （``test_auc_gap_is_raw_minus_centered_not_absolute``）守得住。
 
 sort-once bootstrap
@@ -89,7 +91,7 @@ FIELD_NOTES: dict[str, str] = {
     "raw_within_item_auc": (
         "item j 的正例列 vs 負例列，在 logit(score_uncalibrated) 上直接算的"
         "加權 AUC（inclusion_weight 加權，同分給 0.5 分）。未扣掉 query 內的"
-        "平均分數，客戶活躍度與 item 專屬的排序能力混在一起。"
+        "平均分數，客戶整體分數水準與 item 專屬的排序能力混在一起。"
     ),
     "query_centered_auc": (
         "與 raw_within_item_auc 同樣的 AUC 計算，但分數先扣掉各自 query 的"
@@ -97,9 +99,11 @@ FIELD_NOTES: dict[str, str] = {
         "內的整體水準移除，只留 item 相對於同一 query 其他候選的排序能力。"
     ),
     "auc_gap_raw_minus_centered": (
-        "raw_within_item_auc − query_centered_auc。方向固定：raw 減 "
-        "centered，不是絕對值。這個差值就是「客戶活躍度被誤計入 item 推薦"
-        "能力」的量。"
+        "raw_within_item_auc − query_centered_auc（方向固定：raw 減 centered，"
+        "不取絕對值）。量的是 raw AUC 裡有多少來自「客戶整體分數水準」（同一 "
+        "query 內所有候選的平均分數）而非 item 在 query 內的相對排序：正值＝raw "
+        "被『買家恰好是整體分數較高的客戶』撐高、負值＝相反。無論正負，"
+        "query_centered_auc 才是移除這個因素後 item 自己的排序能力。"
     ),
     "raw_within_item_auc_ci_low": "raw_within_item_auc 的 2.5 百分位（分層 cluster bootstrap）。",
     "raw_within_item_auc_ci_high": "raw_within_item_auc 的 97.5 百分位（分層 cluster bootstrap）。",
@@ -108,14 +112,18 @@ FIELD_NOTES: dict[str, str] = {
     "mean_relative_score_pos": "該 item 正例列的 query-centered 分數平均。",
     "mean_relative_score_neg": "該 item 負例列的 query-centered 分數平均。",
     "relative_score_gap": "mean_relative_score_pos − mean_relative_score_neg。",
-    "median_positive_rank_percentile": (
-        "該 item 正例列在各自 query 內的名次百分位（1/query size 為最好、"
-        "1.0 為最差）之中位數。未加權。"
+    "median_positive_rank": (
+        "該 item 正例列在各自 query 內的名次（1＝分數最高、排最前；越大越靠後）"
+        "之中位數。未加權。"
     ),
-    "p25_positive_rank_percentile": "正例名次百分位的 25 百分位數，未加權。",
-    "p75_positive_rank_percentile": "正例名次百分位的 75 百分位數，未加權。",
-    "p90_positive_rank_percentile": "正例名次百分位的 90 百分位數，未加權。",
-    "positive_rank_percentiles": "該 item 每一個正例列的名次百分位原始值列表。",
+    "p10_positive_rank": "正例名次的第 10 百分位數（較好的一端），未加權。",
+    "p25_positive_rank": "正例名次的第 25 百分位數，未加權。",
+    "p75_positive_rank": "正例名次的第 75 百分位數，未加權。",
+    "p90_positive_rank": "正例名次的第 90 百分位數（較差的一端），未加權。",
+    "positive_ranks": (
+        "該 item 每一個正例列在各自 query 內的名次（1-based，1＝排最前）原始值"
+        "列表。"
+    ),
     "ap": (
         "該 item 的 average precision（依 evaluation.metric 的 k／shrinkage "
         "設定），未經 inclusion_weight 加權。"
@@ -140,8 +148,14 @@ def query_center_scores(groups: np.ndarray, z: np.ndarray) -> np.ndarray:
     return z - (sums / counts)[groups]
 
 
-def rank_percentiles(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
-    """One-based descending rank divided by query size; lower is better."""
+def descending_ranks(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
+    """One-based rank within each query, highest score = rank 1; lower is better.
+
+    回傳原始名次（不除以 query size）：名次直接讀得懂（「排第 3」），而百分位
+    （rank ÷ query size）在 query 候選數不固定時才需要，且「0.125」這種數字讀
+    者難以直覺對上「排第 1」。候選數本身另外在 ``candidates_per_query`` 交代，
+    讓讀者知道名次是「幾中選幾」。
+    """
     out = np.full(len(score), np.nan, dtype=np.float64)
     if len(score) == 0:
         return out
@@ -156,7 +170,7 @@ def rank_percentiles(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
         s, e = boundaries[i], boundaries[i + 1]
         idx = order[s:e]
         n = e - s
-        out[idx] = np.arange(1, n + 1, dtype=np.float64) / float(n)
+        out[idx] = np.arange(1, n + 1, dtype=np.float64)
     return out
 
 
@@ -281,6 +295,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_items": 0,
         "n_positive_rows": 0,
         "macro_per_item_map": None,
+        "candidates_per_query": None,
         "ci": ci_info,
         "per_item": [],
         "sample_meta": dict(sample_meta or {}),
@@ -323,9 +338,18 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         out["logit_notes"] = logit_notes
         out["notes"].extend(logit_notes)
         rel = query_center_scores(groups, z)
-        rank_pct = rank_percentiles(groups, z)
+        rank = descending_ranks(groups, z)
         ap_by_item, n_pos_ap, macro_map = per_item_ap(groups, items, y, z, mp)
     out["macro_per_item_map"] = macro_map
+
+    # 每個 query 的候選數（＝該 query 內的列數）：名次要「幾中選幾」才讀得懂，
+    # 這是名次的分母。min==max 代表候選數固定（例如每位客戶都對全部 item 評分）。
+    query_sizes = np.bincount(groups)
+    out["candidates_per_query"] = {
+        "min": int(query_sizes.min()),
+        "median": float(np.median(query_sizes)),
+        "max": int(query_sizes.max()),
+    }
 
     n_boot = ci_info["n_boot"] if ci_info["enabled"] else 0
     seed = ci_info["seed"]
@@ -382,7 +406,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
             pos_rel = rel_i[pos_mask]
             neg_rel = rel_i[neg_mask]
-            pos_rank = rank_pct[mask][pos_mask]
+            pos_rank = rank[mask][pos_mask]
             mean_pos = float(np.mean(pos_rel)) if len(pos_rel) else None
             mean_neg = float(np.mean(neg_rel)) if len(neg_rel) else None
 
@@ -404,19 +428,22 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                     None if mean_pos is None or mean_neg is None
                     else float(mean_pos - mean_neg)
                 ),
-                "median_positive_rank_percentile": (
+                "median_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanmedian(pos_rank))
                 ),
-                "p25_positive_rank_percentile": (
+                "p10_positive_rank": (
+                    None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 10))
+                ),
+                "p25_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 25))
                 ),
-                "p75_positive_rank_percentile": (
+                "p75_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 75))
                 ),
-                "p90_positive_rank_percentile": (
+                "p90_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 90))
                 ),
-                "positive_rank_percentiles": pos_rank.tolist(),
+                "positive_ranks": [int(r) for r in pos_rank],
                 "n_pos_ap": int(n_pos_ap.get(item, 0)),
             })
             logger.info(

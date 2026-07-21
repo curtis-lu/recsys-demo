@@ -32,8 +32,9 @@ SCOPE = ScopeNote(
     measures=(
         "同一個 item 內，正例列與負例列的加權 AUC——分別在原始 logit 分數"
         "（raw_within_item_auc）與扣掉各自 query 平均後的分數"
-        "（query_centered_auc）上各算一次；兩者之差 auc_gap_raw_minus_centered"
-        "即「客戶活躍度被誤計入 item 推薦能力」的量。"
+        "（query_centered_auc）上各算一次。兩者之差 auc_gap_raw_minus_centered"
+        "（＝raw − centered）量的是客戶整體分數水準（同一 query 內所有候選的"
+        "平均分數）對 raw AUC 的貢獻：正值把 raw 撐高、負值拉低。"
     ),
     population="診斷抽樣：只含有正例的 query（與其餘診斷共用同一份抽樣）。",
     blind_to=(

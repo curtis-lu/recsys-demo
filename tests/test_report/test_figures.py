@@ -93,6 +93,22 @@ class TestHeatmap:
         assert "heatmap" in msg
         assert "empty" in msg.lower()
 
+    def test_text_annotations_are_written_onto_cells(self):
+        """給定 ``text`` 時每格要標出值（色階讀不出名次這種量時的必要條件）。"""
+        z = [[1.0, 4.0], [2.0, 3.0]]
+        text = [["1", "4"], ["2", "3"]]
+        fig = heatmap(z, x=["p10", "p90"], y=["a", "b"], title="t",
+                      colorbar_title="rank", text=text)
+        assert fig.data[0].text is not None
+        assert [list(row) for row in fig.data[0].text] == text
+        assert fig.data[0].texttemplate == "%{text}"
+
+    def test_no_text_leaves_cells_unannotated(self):
+        """不給 ``text`` 時維持原行為（只有顏色與 hover），既有呼叫端不受影響。"""
+        fig = heatmap([[1.0, 2.0]], x=["a", "b"], y=["r"], title="t",
+                      colorbar_title="c")
+        assert fig.data[0].text is None
+
     def test_all_nan_matrix_raises_clear_message(self):
         with pytest.raises(ValueError) as exc:
             heatmap(
