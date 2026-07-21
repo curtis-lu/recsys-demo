@@ -317,15 +317,12 @@ def test_segment_section_hides_ndcg():
 
 
 def test_baseline_overall_table_hides_ndcg():
-    # _metrics()["overall"] 與 _baseline_metrics_full()["overall"] 都含 ndcg@1；
-    # overall 表用 set union 攤成列，ndcg@1 必須被濾掉。
+    # overall 拆成 mAP/recall/precision 三張 explicit-family 表，天然不含 ndcg。
     s = rb.build_baseline_section(
         _metrics(), _baseline_metrics_full(), _params()
     )
-    overall = s.tables[s.table_titles.index("overall metrics")]
-    idx = [str(i) for i in overall.index]
-    assert "map@1" in idx, "非 ndcg 的列不該被誤濾"
-    assert not [i for i in idx if i.startswith("ndcg")]
+    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
+    assert any(tt == "overall mAP@k (M/B/Δ)" for tt in s.table_titles)
 
 
 def test_primary_map_section_slices_k():
@@ -448,8 +445,13 @@ def test_baseline_section_no_per_item_delta_omits_table():
     base = {"overall": {"map@1": 0.4}}          # no per_item -> per_item_delta empty
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
-    assert s.table_titles == ["overall metrics"]
-    assert len(s.tables) == 1
+    # 無 per_item、無 purchase_counts → 只剩 overall 三張 family 表
+    assert s.table_titles == [
+        "overall mAP@k (M/B/Δ)",
+        "overall recall@k (M/B/Δ)",
+        "overall precision@k (M/B/Δ)",
+    ]
+    assert len(s.tables) == 3
 
 
 def test_category_section_omits_composition_when_no_mapping():
@@ -574,6 +576,47 @@ def test_glossary_has_macro_average_entry():
     assert "Macro 平均" in terms
 
 
+def _params_lookback():
+    p = _params()
+    p["evaluation"]["baseline"] = {"lookback_months": 12}
+    return p
+
+
+def test_baseline_shows_lookback_window():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params_lookback()
+    )
+    assert "12" in s.description
+
+
+def test_baseline_overall_three_tables_k_as_columns():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    fam = [tt for tt in s.table_titles if tt.startswith("overall ")]
+    assert len(fam) == 3          # mAP / recall / precision 各一
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    cols = [str(c) for c in s.tables[idx].columns]
+    assert "@1" in cols and "@all" in cols   # k 放欄位
+
+
+def test_baseline_detail_tables_collapsed():
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()
+    )
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    assert s.collapsed_tables[idx] is True     # overall 明細收合
+
+
+def test_baseline_popularity_avg_per_month_when_lookback():
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 120, "B": 240}}
+    s = rb.build_baseline_section(m, base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert "平均每月" in pop.columns
+    assert pop.loc["B", "平均每月"] == 20.0     # 240 / 12
+
+
 def test_baseline_section_renders_popularity_table():
     """purchase_counts -> popularity composition table prepended."""
     m = _metrics()
@@ -615,8 +658,8 @@ def test_baseline_section_omits_popularity_when_purchase_counts_empty():
     assert "popularity 排名組成" not in s.table_titles
 
 
-def test_baseline_section_overall_table_has_model_baseline_delta_cols():
-    """overall table: rows = metric keys, cols = [Model, Baseline, Delta]."""
+def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
+    """新結構：overall mAP 表 rows=[Model,Baseline,Δ]、cols=@k。"""
     m = _metrics()
     base = {
         "overall": {"map@1": 0.40, "ndcg@1": 0.50},
@@ -624,25 +667,24 @@ def test_baseline_section_overall_table_has_model_baseline_delta_cols():
     }
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
-    assert "overall metrics" in s.table_titles
-    idx = s.table_titles.index("overall metrics")
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     tbl = s.tables[idx]
-    assert list(tbl.columns) == ["Model", "Baseline", "Delta"]
-    # Model fixture has overall["map@1"]=0.5, ndcg@1=0.55 (see _metrics()).
-    assert tbl.loc["map@1", "Model"] == 0.5
-    assert tbl.loc["map@1", "Baseline"] == 0.40
-    assert abs(tbl.loc["map@1", "Delta"] - (0.5 - 0.40)) < 1e-9
+    assert list(tbl.index) == ["Model", "Baseline", "Δ"]
+    # Model fixture has overall["map@1"]=0.5.
+    assert tbl.loc["Model", "@1"] == 0.5
+    assert tbl.loc["Baseline", "@1"] == 0.40
+    assert abs(tbl.loc["Δ", "@1"] - (0.5 - 0.40)) < 1e-9
 
 
-def test_baseline_section_overall_table_includes_keys_unique_to_one_side():
-    """Keys only in Model OR Baseline still appear, missing side as NaN."""
-    m = _metrics()  # has 'precision@1', 'recall@1'
-    base = {"overall": {"map@1": 0.4, "extra_key@1": 0.9}}  # no precision/recall
+def test_baseline_section_overall_tables_use_k_superset_columns():
+    """overall family 表以 k superset [1,2,3,4,5,all] 放欄位（explicit family，
+    不再吃任意 metric key）。"""
+    m = _metrics()
+    base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("overall metrics")
-    tbl = s.tables[idx]
-    assert "extra_key@1" in tbl.index   # baseline-only key still listed
-    assert "precision@1" in tbl.index   # model-only key still listed
+    idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
+    cols = [str(c) for c in s.tables[idx].columns]
+    assert "@1" in cols and "@5" in cols and "@all" in cols
 
 
 def test_baseline_section_has_two_per_item_compare_tables():

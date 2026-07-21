@@ -1052,45 +1052,56 @@ def build_baseline_section(
     attr_ks = _resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
     )
+    # overall 三表用 k superset（使用者指定，k 放欄位）
+    k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_prod)
+    lookback = (
+        ((parameters.get("evaluation", {}) or {}).get("baseline", {}) or {})
+        .get("lookback_months")
+    )
 
     tables: list[pd.DataFrame] = []
-    table_titles: list[str] = []
+    titles: list[str] = []
+    collapsed: list[bool] = []
 
-    # [1] popularity composition (omitted when missing/empty for back-compat).
+    def _add(tbl, title, is_collapsed):
+        tables.append(tbl)
+        titles.append(title)
+        collapsed.append(is_collapsed)
+
+    # [1] popularity 排名組成（總計 count + 平均每月）；各月明細/趨勢＝Phase 2。
     pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
     if pcounts:
         sorted_items = sorted(
             pcounts.items(), key=lambda kv: kv[1], reverse=True
         )
-        pop_df = pd.DataFrame(
-            {
-                "count": [v for _, v in sorted_items],
-                "rank": list(range(1, len(sorted_items) + 1)),
-            },
-            index=[k for k, _ in sorted_items],
+        pop_cols = {"count": [v for _, v in sorted_items]}
+        if lookback:
+            pop_cols["平均每月"] = [
+                round(v / lookback, 1) for _, v in sorted_items
+            ]
+        pop_cols["rank"] = list(range(1, len(sorted_items) + 1))
+        _add(
+            pd.DataFrame(pop_cols, index=[k for k, _ in sorted_items]),
+            "popularity 排名組成", False,
         )
-        tables.append(pop_df)
-        table_titles.append("popularity 排名組成")
 
-    # [2] overall metrics: Model / Baseline / Delta.
+    # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
+    #     cols=@k（superset），明細收合。explicit family → 天然不含 ndcg。
     overall_a = comp["result_a"].get("overall", {}) or {}
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]
-    overall_keys = _visible_metric_keys(
-        sorted(set(overall_a) | set(overall_b) | set(overall_delta))
-    )
-    overall_tbl = pd.DataFrame(
-        {
-            "Model": [overall_a.get(k) for k in overall_keys],
-            "Baseline": [overall_b.get(k) for k in overall_keys],
-            "Delta": [overall_delta.get(k) for k in overall_keys],
-        },
-        index=overall_keys,
-    )
-    tables.append(overall_tbl)
-    table_titles.append("overall metrics")
+    for fam, label in (("map", "mAP"), ("recall", "recall"),
+                       ("precision", "precision")):
+        data = {}
+        for who, src in (("Model", overall_a), ("Baseline", overall_b),
+                         ("Δ", overall_delta)):
+            data[who] = {
+                f"@{k}": src.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+                for k in k_super
+            }
+        _add(pd.DataFrame(data).T, f"overall {label}@k (M/B/Δ)", True)
 
-    # [3] per-item compare tables — only when baseline has per_item.
+    # [3] per-item compare tables — only when baseline has per_item；明細收合。
     per_item_a = comp["result_a"].get("per_item", {}) or {}
     per_item_b = comp["result_b"].get("per_item", {}) or {}
     per_item_delta = comp.get("per_item_delta", {}) or {}
@@ -1098,27 +1109,34 @@ def build_baseline_section(
     macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
     if per_item_b:
         for metric_key, col_fmt, ks, title in (
-            ("hit_rate", "recall@{k}", rec_ks,
-             "per-item recall@k (M/B/Δ)"),
+            ("hit_rate", "recall@{k}", rec_ks, "per-item recall@k (M/B/Δ)"),
             ("map_attr", "map_attr@{k}", attr_ks,
              "per-item map_attr@k (M/B/Δ)"),
         ):
-            tbl = _per_item_metric_compare_table(
-                per_item_a, per_item_b, per_item_delta,
-                ks, n_prod, metric_key, col_fmt,
-                macro_a=macro_a, macro_b=macro_b,
+            _add(
+                _per_item_metric_compare_table(
+                    per_item_a, per_item_b, per_item_delta,
+                    ks, n_prod, metric_key, col_fmt,
+                    macro_a=macro_a, macro_b=macro_b,
+                ),
+                title, True,
             )
-            tables.append(tbl)
-            table_titles.append(title)
 
+    lookback_note = (
+        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
+        if lookback else ""
+    )
     return ReportSection(
-        title="基準比較 Baseline",
+        title="baseline — popularity 對照",
         description=(
-            "Model vs Baseline:popularity 排名組成 + overall metrics(M/B/Δ)+ "
-            "per-item recall/map_attr(M/B/Δ)。"
+            f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
+            "排名組成為各 item 跨月合計（總計＋平均每月）；各月明細與趨勢為後續"
+            "階段（需保留逐月計數）。overall 的 mAP／recall／precision 各一張表、"
+            "k 放欄位、點標題展開。"
         ),
         tables=tables,
-        table_titles=table_titles,
+        table_titles=titles,
+        collapsed_tables=collapsed,
     )
 
 
