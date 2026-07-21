@@ -390,9 +390,13 @@ def _per_item_metric_compare_table(
 def _per_item_recall_table(
     per_item: dict, ks: list, n_prod: int, macro_metrics: dict | None = None
 ) -> pd.DataFrame:
-    """Rows = items; recall@k (per-item) cols (renamed from hit_rate@k) + mean_pos."""
+    """Rows = items; bare ``@k`` cols (from hit_rate@k) + mean_pos.
+
+    欄名裸 @k、family（recall）在呼叫端的表標題交代——與 A 塊 per-query 表
+    及 per-item map_attr 表的欄名慣例一致（family 不重複塞進欄名）。
+    """
     return _per_item_metric_table(
-        per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
+        per_item, ks, n_prod, "hit_rate", "@{k}",
         extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
     )
 
@@ -588,7 +592,7 @@ def build_metrics_section(
 
     # ===== Block B：per-item 歸因（map_attr / recall；無 precision）=====
     b_map = _per_item_metric_table(
-        per_item, ks, n_prod, "map_attr", "map_attr@{k}", macro_metrics=macro_item,
+        per_item, ks, n_prod, "map_attr", "@{k}", macro_metrics=macro_item,
     )
     if metric_ci and metric_ci.get("enabled"):
         ci_items = metric_ci.get("per_item", {}) or {}
@@ -608,7 +612,7 @@ def build_metrics_section(
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
         cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
         _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
-                                    "map_attr@{k}", macro_metrics=cat_macro_item),
+                                    "@{k}", macro_metrics=cat_macro_item),
              "B · 大類 per-item 歸因｜map_attr@k（列＝大類）", True)
         _add(_per_item_recall_table(cat_pi, cks, n_cat,
                                     macro_metrics=cat_macro_item),

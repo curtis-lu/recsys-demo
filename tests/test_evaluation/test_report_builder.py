@@ -202,11 +202,29 @@ def test_metrics_section_macro_is_headline():
                for tt in s.table_titles)
 
 
-def test_metrics_section_per_item_has_attr_and_recall():
+def test_metrics_section_per_item_columns_bare_at_k_family_in_title():
+    """B 塊(per-item 歸因)欄名統一裸 @k、family 只在標題——與 A 塊一致。
+
+    防退化：改回冗餘欄名 map_attr@1／recall@1 (per-item)，或把 family
+    從標題拿掉，本測試都該轉紅。也順帶驗兩張 per-item 表都在（attr+recall）。
+    """
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
-    cols = " ".join(" ".join(map(str, t.columns)) for t in s.tables)
-    assert "map_attr@1" in cols
-    assert "recall@1 (per-item)" in cols
+    by_title = dict(zip(s.table_titles, s.tables))
+    map_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "map_attr@k" in t
+                     and "大類" not in t)
+    rec_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "recall@k" in t
+                     and "大類" not in t)
+    map_cols = list(map(str, by_title[map_title].columns))
+    rec_cols = list(map(str, by_title[rec_title].columns))
+    # 欄名裸 @k（family 在標題、不重複塞進欄名），與 A 塊 _families/_entities 一致
+    assert "@1" in map_cols and "@1" in rec_cols
+    # 舊冗餘欄名已消除
+    assert "map_attr@1" not in map_cols
+    assert "recall@1 (per-item)" not in rec_cols
+    # recall 表仍保留 mean_pos 額外欄
+    assert "mean_pos" in rec_cols
 
 
 def test_metrics_section_no_guardrail_verdict():
@@ -233,8 +251,10 @@ def test_metrics_section_detail_tables_collapsed():
 
 def test_metrics_section_has_macro_rows():
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
-    map_tbl = next(t for t in s.tables
-                   if "map_attr@1" in " ".join(map(str, t.columns)))
+    # 以標題定位 per-item map_attr 表（欄名裸 @k，不能再靠欄名找）
+    map_tbl = next(t for t, tt in zip(s.tables, s.table_titles)
+                   if "per-item 歸因" in tt and "map_attr@k" in tt
+                   and "大類" not in tt)
     assert rb._MACRO_LABEL in map_tbl.index
 
 
