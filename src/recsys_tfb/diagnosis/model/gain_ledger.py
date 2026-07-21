@@ -5,6 +5,14 @@
 還花了多少 gain 精修判別力）。「item 隔出來之後幾乎沒有後續 context gain」＝該 item
 葉預算餓死的結構鐵證——診斷框架項目 8。
 
+另外三個全域輸出（供 ``model_capacity`` 呈現層用，不影響上面兩帳）：
+``total_split_count``（非葉節點總數，讓 split 三分能算未分配殘差＝total−item−
+context）、``pre_item``（item 切點**之前**的未 conditioned 切點按特徵拆解，其 gain
+加總恆等於未分配殘差 ``total_gain−item_id_gain−context_gain``；Q3-#1）、
+``first_item_split_depth``（每棵樹最淺 item 切點的 ``node_depth`` 分位摘要，root=1，
+量 item 條件化坐落多深；Q3-#2）。粗帳本降級路徑只有 ``total_split_count``，
+``pre_item``／``first_item_split_depth`` 為 ``None``（需 reachable 走訪才算得出）。
+
 雙層結構（可測性）：``_ledger_from_trees`` 是純 pandas/dict 核心（只吃
 ``booster.trees_to_dataframe()`` 的 DataFrame，不碰 model/preprocessor，單元測試直接
 餵手工 DataFrame）；``compute_gain_ledger`` 是 thin wrapper——讀 config/schema、解析
@@ -40,6 +48,27 @@ def _tree_index_summary(tree_indices: list) -> dict:
         "p50": float(np.percentile(arr, 50)),
         "p75": float(np.percentile(arr, 75)),
         "max": int(arr.max()),
+    }
+
+
+def _depth_summary(depths: list) -> dict:
+    """每棵樹最淺 item 切點深度的分位摘要（node_depth，root=1）；空 list 全回 None。
+
+    ``n_trees_with_item_split`` 是這批深度的來源樹數（有 ≥1 個 item 切點的樹），
+    讓讀者知道分位是算在幾棵樹上——與全模型樹數可能不同（有些樹整棵沒有 item
+    切點）。
+    """
+    if not depths:
+        return {"min": None, "p25": None, "p50": None, "p75": None,
+                "max": None, "n_trees_with_item_split": 0}
+    arr = np.asarray(sorted(depths), dtype=float)
+    return {
+        "min": int(arr.min()),
+        "p25": float(np.percentile(arr, 25)),
+        "p50": float(np.percentile(arr, 50)),
+        "p75": float(np.percentile(arr, 75)),
+        "max": int(arr.max()),
+        "n_trees_with_item_split": int(len(depths)),
     }
 
 
@@ -118,6 +147,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     context_split_count = {it: 0 for it in all_items}
     context_gain = {it: 0.0 for it in all_items}
     context_gain_isolated = {it: 0.0 for it in all_items}
+    context_split_isolated = {it: 0 for it in all_items}
     trees_touched: dict = {it: set() for it in all_items}
     first_tree_index: dict = {it: None for it in all_items}
 
@@ -126,11 +156,25 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     unknown_codes: set = set()
     numeric_item_splits = 0
 
+    # 未分配（pre-item）＝任何 item 切點**之前**（``conditioned=False``）的非 item
+    # 切點，模型還沒條件化到「哪個 item」就用的全域 context——按特徵記帳，讓
+    # ``model_capacity`` 能拆解「未分配那塊是哪些特徵撐起來的」（診斷框架 Q3-#1）。
+    # 這批切點在既有邏輯裡不進任何帳；其 gain 加總恆等於
+    # ``total_gain − item_id_gain − context_gain``（＝未分配殘差）。
+    pre_item_gain_by_feat: dict = {}
+    pre_item_split_by_feat: dict = {}
+    pre_item_gain_sum = 0.0
+    pre_item_split_count = 0
+    # 每棵樹「最淺的 item 切點」節點深度（node_depth，root=1）：item 條件化坐落
+    # 多深＝它上方壓了多少全域 context（Q3-#2）。只收有 item 切點的樹。
+    first_item_split_depths: list = []
+
     for _, tdf in trees.groupby("tree_index"):
         tdf = tdf.set_index("node_index")
         roots = tdf.index[tdf["parent_index"].isna()]
         if len(roots) == 0:
             continue  # 防禦性：畸形樹（無 root）直接跳過，不炸
+        tree_item_depths: list = []
         stack = [(roots[0], set(all_items), False)]
         while stack:
             node, reachable, conditioned = stack.pop()
@@ -151,6 +195,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
                     stack.append((row["left_child"], reachable, conditioned))
                     stack.append((row["right_child"], reachable, conditioned))
                     continue
+                tree_item_depths.append(int(row["node_depth"]))
                 for it in reachable:
                     isolating_split_count[it] += 1
                     trees_touched[it].add(t_idx)
@@ -172,10 +217,23 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
                         trees_touched[it].add(t_idx)
                         if len(reachable) == 1:
                             context_gain_isolated[it] += gain
+                            context_split_isolated[it] += 1
+                else:
+                    # pre-item：item 條件化之前的全域 context 切點，按特徵記帳。
+                    pre_item_gain_by_feat[feat] = (
+                        pre_item_gain_by_feat.get(feat, 0.0) + gain
+                    )
+                    pre_item_split_by_feat[feat] = (
+                        pre_item_split_by_feat.get(feat, 0) + 1
+                    )
+                    pre_item_gain_sum += gain
+                    pre_item_split_count += 1
                 if not reachable:
                     continue
                 stack.append((row["left_child"], reachable, conditioned))
                 stack.append((row["right_child"], reachable, conditioned))
+        if tree_item_depths:
+            first_item_split_depths.append(min(tree_item_depths))
 
     notes = []
     if unknown_codes:
@@ -200,6 +258,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
             "context_split_count": context_split_count[it],
             "context_gain": cg,
             "context_gain_isolated": context_gain_isolated[it],
+            "context_split_isolated": context_split_isolated[it],
             "context_gain_share": share,
             "first_tree_index": first_tree_index[it],
             "trees_touched": sorted(trees_touched[it]),
@@ -208,6 +267,18 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     context_gain_share = (
         (context_global_gain_sum / total_gain) if total_gain > 0 else None
     )
+
+    # pre-item（未分配）按特徵，gain 遞減排序——讀者最想先看哪個全域特徵吃掉
+    # 最多未分配 gain（Q3-#1）。
+    pre_item_by_feature = {
+        f: {
+            "gain": pre_item_gain_by_feat[f],
+            "split_count": pre_item_split_by_feat[f],
+        }
+        for f in sorted(pre_item_gain_by_feat,
+                        key=lambda k: pre_item_gain_by_feat[k], reverse=True)
+    }
+    total_split_count = int(trees["split_feature"].notna().sum())
 
     logger.info(
         "gain_ledger: n_trees=%d n_items=%d item_id.split_count=%d context.split_count=%d",
@@ -220,12 +291,19 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
         "n_trees": n_trees,
         "n_items": n_items,
         "total_gain": total_gain,
+        "total_split_count": total_split_count,
         "item_id": item_block,
         "context": {
             "split_count": context_global_split_count,
             "gain_sum": context_global_gain_sum,
             "gain_share": context_gain_share,
         },
+        "pre_item": {
+            "gain_sum": pre_item_gain_sum,
+            "split_count": pre_item_split_count,
+            "by_feature": pre_item_by_feature,
+        },
+        "first_item_split_depth": _depth_summary(first_item_split_depths),
         "per_item": per_item,
         "fallback": False,
         "notes": notes,
@@ -244,13 +322,19 @@ def _coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict
         "n_trees": n_trees,
         "n_items": None,
         "total_gain": total_gain,
+        # 總 split 數只需數非葉節點、不需 reachable 走訪，粗帳本也能給。
+        "total_split_count": int(trees["split_feature"].notna().sum()),
         "item_id": item_block,
         "context": None,
+        # pre-item 拆解與 item 切點深度都需要 reachable 走訪，粗帳本無從算 → None。
+        "pre_item": None,
+        "first_item_split_depth": None,
         "per_item": None,
         "fallback": True,
         "notes": [
             "preprocessor 缺 category_mappings[item_col]，降級為粗帳本"
-            "（無法拆解 per-item context/isolating 帳）"
+            "（無法拆解 per-item context/isolating 帳，也沒有 pre-item 拆解"
+            "與 item 切點深度）"
         ],
     }
 

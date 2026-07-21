@@ -9,18 +9,21 @@ ITEM_COL = "prod_code"
 CATEGORIES = ["A", "B", "C", "D"]  # 碼 = list 索引
 
 
-def _leaf(tree_index, node_index, parent_index):
+# node_depth 是 trees_to_dataframe() 一定有的欄（root=1）；手算 fixture 補上它，
+# 預設 1，只有測 item 切點深度的 fixture 才給真實深度。
+def _leaf(tree_index, node_index, parent_index, node_depth=1):
     return {
-        "tree_index": tree_index, "node_index": node_index,
+        "tree_index": tree_index, "node_index": node_index, "node_depth": node_depth,
         "left_child": np.nan, "right_child": np.nan, "parent_index": parent_index,
         "split_feature": np.nan, "split_gain": np.nan, "threshold": np.nan,
         "decision_type": np.nan,
     }
 
 
-def _split(tree_index, node_index, parent_index, left, right, feature, gain, threshold, decision_type):
+def _split(tree_index, node_index, parent_index, left, right, feature, gain,
+           threshold, decision_type, node_depth=1):
     return {
-        "tree_index": tree_index, "node_index": node_index,
+        "tree_index": tree_index, "node_index": node_index, "node_depth": node_depth,
         "left_child": left, "right_child": right, "parent_index": parent_index,
         "split_feature": feature, "split_gain": gain, "threshold": threshold,
         "decision_type": decision_type,
@@ -91,6 +94,20 @@ def test_ledger_hand_calc_per_item_context_gain():
     assert per_item["B"]["context_split_count"] == 0
 
 
+def test_context_split_isolated_count():
+    """私有 context 切點數（該 item 唯一可達時的 context 切點）——與
+    context_gain_isolated 對稱的計數版。tree0 的 S3（reachable={D}，gain2）是
+    唯一的私有 context 切點。"""
+    trees = _df(_tree0_rows())
+    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    pi = result["per_item"]
+    assert pi["D"]["context_split_isolated"] == 1
+    assert pi["A"]["context_split_isolated"] == 0
+    assert pi["B"]["context_split_isolated"] == 0
+    # 與 gain 版一致：有私有 gain 才有私有 split
+    assert (pi["D"]["context_gain_isolated"] > 0) == (pi["D"]["context_split_isolated"] > 0)
+
+
 def test_ledger_hand_calc_isolating_split_count():
     trees = _df(_tree0_rows())
     result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
@@ -123,6 +140,85 @@ def test_unconditioned_root_split_not_booked():
     assert result["per_item"]["A"]["context_gain"] == pytest.approx(6.0)
     assert result["context"]["gain_sum"] == pytest.approx(8.0)  # 不含 tree1 的 9.0
     assert result["total_gain"] == pytest.approx(31.0)  # 22 + 9
+
+
+# ---- 新輸出：total_split_count（Route A，補三分表的 split 總數）----
+
+def test_total_split_count_counts_all_non_leaf_nodes():
+    """tree0 有 4 個切點（S0/S1/S2/S3），葉不算。"""
+    trees = _df(_tree0_rows())
+    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    assert result["total_split_count"] == 4
+    # 未分配 split ＝ total − item_id − context（分帳殘差）
+    unacc = (result["total_split_count"]
+             - result["item_id"]["split_count"]
+             - result["context"]["split_count"])
+    assert unacc == 0  # tree0 全部切點都歸到 item 或 context
+
+
+def test_coarse_ledger_still_has_total_split_count():
+    """粗帳本降級沒有 reachable 走訪，但總 split 數只需數非葉節點，仍要有。"""
+    trees = _df(_tree0_rows())
+    result = gain_ledger._coarse_ledger(trees, ITEM_COL, n_trees=1)
+    assert result["total_split_count"] == 4
+    assert result["pre_item"] is None            # 需走訪，粗帳本無從算
+    assert result["first_item_split_depth"] is None
+
+
+# ---- 新輸出：pre_item 按特徵拆解（Q3-#1）----
+
+def test_pre_item_breakdown_reconciles_to_unaccounted():
+    """未分配（pre-item）＝item 切點之前的非 item 切點。其 gain 加總必須等於
+    total − item_id − context（分帳殘差），且按特徵記得出是誰。tree1 的 root
+    context f_region(gain9) 是唯一的 pre-item 切點。"""
+    trees = _df(_tree0_rows() + _tree1_unconditioned_context_root())
+    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    pre = result["pre_item"]
+    unacc_gain = (result["total_gain"]
+                  - result["item_id"]["gain_sum"]
+                  - result["context"]["gain_sum"])
+    assert pre["gain_sum"] == pytest.approx(unacc_gain)   # 9.0
+    assert pre["gain_sum"] == pytest.approx(9.0)
+    assert pre["split_count"] == 1
+    assert pre["by_feature"]["f_region"]["gain"] == pytest.approx(9.0)
+    assert pre["by_feature"]["f_region"]["split_count"] == 1
+
+
+def test_pre_item_by_feature_sorted_by_gain_desc():
+    """兩個 pre-item 特徵時，by_feature 要 gain 遞減排序（讀者先看吃最多的）。"""
+    rows = [
+        # 兩棵各一個 pre-item root context 切點，gain 3 與 9
+        _split(0, "0-S0", np.nan, "0-L0", "0-L1", "f_small", 3.0, 0.5, "<="),
+        _leaf(0, "0-L0", "0-S0"), _leaf(0, "0-L1", "0-S0"),
+        _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_big", 9.0, 0.5, "<="),
+        _leaf(1, "1-L0", "1-S0"), _leaf(1, "1-L1", "1-S0"),
+    ]
+    result = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    feats = list(result["pre_item"]["by_feature"].keys())
+    assert feats == ["f_big", "f_small"], f"未按 gain 遞減：{feats}"
+
+
+# ---- 新輸出：first_item_split_depth（Q3-#2）----
+
+def test_first_item_split_depth_summary():
+    """每棵樹最淺 item 切點的深度（node_depth，root=1）。
+    treeA：item 切點在 root（depth1）。treeB：root 是 context（depth1），item
+    切點在 depth2。→ 兩棵的最淺 item 深度 [1, 2]，且只算「有 item 切點」的樹。"""
+    rows = [
+        # treeA: 根就是 item 切點（depth1）
+        _split(0, "0-S0", np.nan, "0-L0", "0-L1", ITEM_COL, 5.0, "0", "==", node_depth=1),
+        _leaf(0, "0-L0", "0-S0", node_depth=2), _leaf(0, "0-L1", "0-S0", node_depth=2),
+        # treeB: root 是 context(depth1)，其下才有 item 切點(depth2)
+        _split(1, "1-S0", np.nan, "1-S1", "1-L2", "f_age", 4.0, 0.5, "<=", node_depth=1),
+        _split(1, "1-S1", "1-S0", "1-L0", "1-L1", ITEM_COL, 3.0, "1", "==", node_depth=2),
+        _leaf(1, "1-L0", "1-S1", node_depth=3), _leaf(1, "1-L1", "1-S1", node_depth=3),
+        _leaf(1, "1-L2", "1-S0", node_depth=2),
+    ]
+    result = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    d = result["first_item_split_depth"]
+    assert d["min"] == 1 and d["max"] == 2
+    assert d["p50"] == pytest.approx(1.5)
+    assert d["n_trees_with_item_split"] == 2
 
 
 # ---- 追加測試 2：未知碼忽略但不炸 ----
