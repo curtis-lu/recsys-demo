@@ -106,6 +106,23 @@ def fmt_count(x: Any) -> str:
     return f"{round(v):,}"
 
 
+def fmt_gain(x: Any) -> str:
+    """split gain 量級（大而無界的非負浮點，如 LightGBM 的 split_gain 加總）：
+    千分位＋1 位小數。
+
+    與 ``fmt_count`` 的區別是語意而非位數：gain 是連續量、不是計數，保留一位
+    小數讓它在視覺上與整數計數分得開（``7,799.0`` vs ``7,799``，同 ``fmt_
+    weighted_count`` 的理由）。與 ``fmt_weighted_count`` 格式恰好相同但語意不同
+    （一個是 split gain、一個是 inclusion_weight 之和）——本模組按量的語意命名
+    格式器，格式偶合不代表可以共用一個名字（同 ``fmt_percent`` vs ``fmt_auc``
+    的取捨）。千分位是必要的：gain 常在數萬到數十萬量級，沒有分位很難讀。
+    """
+    v = _to_finite_float(x)
+    if v is None:
+        return ""
+    return f"{v:,.1f}"
+
+
 def fmt_weighted_count(x: Any) -> str:
     """加權計數（inclusion_weight 之和）：千分位＋1 位小數。
 

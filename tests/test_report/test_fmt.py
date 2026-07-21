@@ -9,6 +9,7 @@ from recsys_tfb.report.fmt import (
     fmt_auc,
     fmt_count,
     fmt_delta,
+    fmt_gain,
     fmt_logodds,
     fmt_mean,
     fmt_percent,
@@ -20,7 +21,7 @@ from recsys_tfb.report.fmt import (
 _BAD_VALUES = [None, float("nan"), float("inf"), float("-inf"), "not-a-number", object()]
 _ALL_FMTS = [
     fmt_logodds, fmt_auc, fmt_ap, fmt_delta, fmt_ratio, fmt_count,
-    fmt_weighted_count, fmt_percent, fmt_mean,
+    fmt_weighted_count, fmt_percent, fmt_mean, fmt_gain,
 ]
 
 
@@ -126,6 +127,19 @@ class TestFmtWeightedCount:
         assert fmt_count(61.5) != fmt_count(28.5) + ""  # 前提：兩者都是 .5
         assert fmt_weighted_count(61.5).endswith(".5")
         assert fmt_weighted_count(28.5).endswith(".5")
+
+
+class TestFmtGain:
+    """split gain 量級：千分位＋1 位小數，語意上與整數計數分開。"""
+
+    def test_thousands_separator_one_decimal(self):
+        assert fmt_gain(140895.75539) == "140,895.8"
+        assert fmt_gain(7798.980126) == "7,799.0"
+
+    def test_distinguishes_from_fmt_count(self):
+        """gain 是連續量、不是計數——保留小數，才不會被讀成精確整數計數。"""
+        assert fmt_gain(556) == "556.0"
+        assert fmt_count(556) == "556"
 
 
 def test_module_uses_math_isfinite_consistently():

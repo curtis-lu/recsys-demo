@@ -77,6 +77,7 @@ per-item context_gain_share 的分母
 """
 from __future__ import annotations
 
+from statistics import median_high
 from typing import Any, Optional
 
 from recsys_tfb.diagnosis.metric._common import diag_cfg
@@ -110,6 +111,105 @@ FIELD_NOTES: dict[str, str] = {
         "同一次執行的 item_ability 診斷算出的 query-centered AUC；item_ability "
         "缺席或被關閉時為 None。"
     ),
+    "summary.n_trees": "booster 的樹數（來自 gain_ledger.n_trees）。",
+    "summary.item_id_split_count": (
+        "item-id 切點的總筆數（來自 gain_ledger.item_id.split_count；含所有 "
+        "item 欄切點，與路徑可達性無關）。"
+    ),
+    "summary.context_split_count": (
+        "post-item context 切點的全域筆數（來自 gain_ledger.context.split_count；"
+        "每個切點只算一次，不依可達 item 數重複計）。"
+    ),
+    "summary.sum_allocated_context_gain": (
+        "各 item 的 context_gain 加總——per-item context_gain_share 的分母。"
+        "因共用切點的 gain 被記給每個可達 item，此加總大於全域 context_gain。"
+    ),
+    "summary.sum_allocated_context_split": (
+        "各 item 的 context_split_count 加總——per-item context_split_share 的"
+        "分母。同理，因共用切點被記給每個可達 item，大於全域 context_split_count。"
+    ),
+    "per_item.context_split_count": (
+        "該 item 可達時的 post-item context 切點數（來自 gain_ledger.per_item"
+        "[item].context_split_count；共用切點記給每個可達 item）。"
+    ),
+    "per_item.context_split_share": (
+        "該 item 的 context_split_count 占 sum_allocated_context_split 的比例"
+        "（分母是這批 item 的加總，不是全域）。"
+    ),
+    "per_item.gain_per_split": (
+        "context_gain / context_split_count——該 item 每個 context 切點平均分到"
+        "的 gain（密度）。"
+    ),
+    "per_item.context_gain_isolated": (
+        "該 item 是「唯一可達 item」時的 context 切點 gain 加總（來自 "
+        "gain_ledger.per_item[item].context_gain_isolated）——專屬於此 item、"
+        "非與他 item 共用的 context gain。"
+    ),
+    "per_item.context_gain_isolated_share": (
+        "context_gain_isolated / context_gain——該 item 的 context gain 中，"
+        "屬於私有（非共用）的比例。"
+    ),
+    "per_item.isolating_split_count": (
+        "該 item 尚可達時發生的 item-id 切點數（來自 gain_ledger.per_item[item]."
+        "isolating_split_count）——反映該 item 在 item 路由結構裡被隔離的深度。"
+    ),
+    "per_item.first_tree_index": (
+        "該 item 首次出現（作為 item 切點可達）的 boosting 樹序（來自 "
+        "gain_ledger.per_item[item].first_tree_index）。"
+    ),
+    "per_item.n_trees_touched": (
+        "該 item 被觸及（item 切點可達或被記 context gain）的樹數（來自 "
+        "len(gain_ledger.per_item[item].trees_touched)）。"
+    ),
+    "per_item.gain_share_vs_max": (
+        "context_gain_share / 各 item 佔比的最大值——相對第一名的集中度。"
+        "第一名自己＝1.0。是 context_gain_share 的縮放，非獨立訊號。"
+    ),
+    "per_item.gain_share_vs_median": (
+        "context_gain_share / 各 item 佔比的中位數（median_high，取實際存在的"
+        "中位 item）——相對中位 item 的集中度。是 context_gain_share 的縮放，"
+        "非獨立訊號。"
+    ),
+    "per_item.context_gain_vs_total": (
+        "context_gain / total_gain——該 item 被切到的 context 容量相當於全模型"
+        "總 gain 的多少（涵蓋量，跨 item 加總>100%，因共用切點重計）。"
+    ),
+    "per_item.context_gain_isolated_vs_total": (
+        "context_gain_isolated / total_gain——該 item 的私有（非共用）context "
+        "gain 相當於全模型的多少（獨佔量，不重計）。"
+    ),
+    "per_item.context_split_isolated": (
+        "該 item 是唯一可達 item 時的 context 切點數（來自 gain_ledger.per_item"
+        "[item].context_split_isolated）——context_gain_isolated 的計數版。"
+    ),
+    "per_item.context_split_vs_total": (
+        "context_split_count / total_split_count——該 item 可達的 context 切點數"
+        "相當於全模型切點總數的多少（涵蓋量，跨 item 加總>100%，共用切點重計）。"
+    ),
+    "per_item.context_split_isolated_vs_total": (
+        "context_split_isolated / total_split_count——該 item 的私有 context 切點"
+        "數相當於全模型切點總數的多少（獨佔量，不重計）。"
+    ),
+    "summary.total_split_count": (
+        "全模型非葉節點總數（來自 gain_ledger.total_split_count）——split 三分"
+        "的分母。"
+    ),
+    "summary.unaccounted_split_count": (
+        "total_split_count − item_id_split_count − context_split_count——item 切點"
+        "之前的切點數（殘差，與 unaccounted_gain 對稱）。"
+    ),
+    "summary.item_id_split_share": "item_id_split_count / total_split_count。",
+    "summary.context_split_share": "context_split_count / total_split_count。",
+    "summary.unaccounted_split_share": "unaccounted_split_count / total_split_count。",
+    "pre_item": (
+        "未分配（item 切點之前的未 conditioned 切點）按特徵拆解：{gain_sum, "
+        "split_count, by_feature:{feat:{gain, split_count}}}，gain 遞減。其 "
+        "gain_sum 恆等於 summary.unaccounted_gain。舊版 ledger／粗帳本為 None。"
+    ),
+    "first_item_split_depth": (
+        "每棵樹最淺 item 切點的 node_depth 分位摘要（root=1）：{min,p25,p50,p75,"
+        "max,n_trees_with_item_split}。量 item 條件化坐落多深。舊版／粗帳本為 None。"
+    ),
 }
 
 #: 未計算時的 ``summary`` 形狀——三條以上 return 路徑的 key set 必須完全相同，
@@ -123,6 +223,16 @@ _EMPTY_SUMMARY: dict[str, Any] = {
     "context_gain_share": None,
     "unaccounted_gain_share": None,
     "n_items": None,
+    "n_trees": None,
+    "item_id_split_count": None,
+    "context_split_count": None,
+    "total_split_count": None,
+    "unaccounted_split_count": None,
+    "item_id_split_share": None,
+    "context_split_share": None,
+    "unaccounted_split_share": None,
+    "sum_allocated_context_gain": None,
+    "sum_allocated_context_split": None,
 }
 
 
@@ -136,6 +246,17 @@ def _gain_sum(ledger: dict, nested_key: str) -> Optional[float]:
     nested = ledger.get(nested_key)
     if isinstance(nested, dict) and nested.get("gain_sum") is not None:
         return float(nested["gain_sum"])
+    return None
+
+
+def _split_count(ledger: dict, nested_key: str) -> Optional[int]:
+    """讀 ``ledger[nested_key]["split_count"]``——同 :func:`_gain_sum` 只認正式
+    巢狀 schema。粗帳本降級時 ``context`` 為 ``None``，這裡回 ``None``（不假裝
+    算出 0：0 會被讀成「沒有 context 切點」，那是錯的）。
+    """
+    nested = ledger.get(nested_key)
+    if isinstance(nested, dict) and nested.get("split_count") is not None:
+        return int(nested["split_count"])
     return None
 
 
@@ -217,6 +338,11 @@ def compute(
         "reason": None,
         "summary": dict(_EMPTY_SUMMARY),
         "per_item": [],
+        # 未分配（pre-item）按特徵拆解 ＋ item 切點深度摘要——由 gain_ledger 直接
+        # 帶入（Q3-#1/#2）。舊版 ledger／粗帳本降級為 None。必須在**每條** return
+        # 路徑都存在（key-set 契約），故放在 out 初始化。
+        "pre_item": None,
+        "first_item_split_depth": None,
         "field_notes": FIELD_NOTES,
         "notes": [],
     }
@@ -262,11 +388,21 @@ def compute(
     ability_by_item, ability_notes = _ability_lookup(item_ability)
     out["notes"].extend(ability_notes)
 
+    # total_split_count 供 per-item 的 split「vs 全模型」欄用（Q2）；舊版 ledger
+    # 缺它時 split 涵蓋／獨佔留 None。
+    total_split_for_row = gain_ledger.get("total_split_count")
+    total_split_for_row = None if total_split_for_row is None else int(total_split_for_row)
+
     per_item_raw = gain_ledger.get("per_item") or {}
     allocated_sum = sum(
         float(v.get("context_gain"))
         for v in per_item_raw.values()
         if isinstance(v, dict) and v.get("context_gain") is not None
+    )
+    allocated_split_sum = sum(
+        int(v.get("context_split_count"))
+        for v in per_item_raw.values()
+        if isinstance(v, dict) and v.get("context_split_count") is not None
     )
 
     per_item: list[dict[str, Any]] = []
@@ -278,11 +414,62 @@ def compute(
             None if cg is None or allocated_sum <= 0.0
             else cg / allocated_sum
         )
+        csc = entry.get("context_split_count")
+        csc = None if csc is None else int(csc)
+        split_share = (
+            None if csc is None or allocated_split_sum <= 0
+            else csc / allocated_split_sum
+        )
+        # gain ÷ split：兩者任一缺席或 split 為 0 → None，不製造 inf。
+        gain_per_split = None if cg is None or not csc else cg / csc
+        isolated = entry.get("context_gain_isolated")
+        isolated = None if isolated is None else float(isolated)
+        # 私有 gain 占該 item 自己 context gain 的比例——分母是 cg，不是全域。
+        isolated_share = (
+            None if isolated is None or cg in (None, 0.0) else isolated / cg
+        )
+        isc = entry.get("isolating_split_count")
+        isc = None if isc is None else int(isc)
+        trees_touched = entry.get("trees_touched")
+        n_trees_touched = None if trees_touched is None else len(trees_touched)
+        # 跟全模型比（Q2/(b)）：涵蓋＝context_gain 相對全模型 total_gain（會>100%
+        # 加總，因共用切點重計）；獨佔＝私有 context gain 相對 total_gain（不重計）。
+        vs_total = (
+            None if cg is None or total_gain in (None, 0.0) else cg / total_gain
+        )
+        isolated_vs_total = (
+            None if isolated is None or total_gain in (None, 0.0)
+            else isolated / total_gain
+        )
+        # split 版的 vs 全模型（Q2）：分母是全模型 total_split_count（不重計）。
+        csi = entry.get("context_split_isolated")
+        csi = None if csi is None else int(csi)
+        split_vs_total = (
+            None if csc is None or not total_split_for_row
+            else csc / total_split_for_row
+        )
+        split_isolated_vs_total = (
+            None if csi is None or not total_split_for_row
+            else csi / total_split_for_row
+        )
         ability_row = ability_by_item.get(str(item), {})
         per_item.append({
             "item": str(item),
             "context_gain": cg,
             "context_gain_share": share,
+            "context_gain_vs_total": vs_total,
+            "context_split_count": csc,
+            "context_split_share": split_share,
+            "context_split_vs_total": split_vs_total,
+            "gain_per_split": gain_per_split,
+            "context_gain_isolated": isolated,
+            "context_gain_isolated_share": isolated_share,
+            "context_gain_isolated_vs_total": isolated_vs_total,
+            "context_split_isolated": csi,
+            "context_split_isolated_vs_total": split_isolated_vs_total,
+            "isolating_split_count": isc,
+            "first_tree_index": entry.get("first_tree_index"),
+            "n_trees_touched": n_trees_touched,
             "query_centered_auc": ability_row.get("query_centered_auc"),
         })
     # 排序後（依配置容量份額遞減）——per-item 分配條圖直接吃這個順序，不在
@@ -293,6 +480,24 @@ def compute(
         r["item"],
     ))
 
+    # 相對集中度視角（codex §6 的 /max、/median item）：gain 佔比相對「第一名」
+    # 與「中位數 item」的倍率。median_high 選實際存在的那個 item（偶數 item 數
+    # 取上中位），符合「median item」＝某個真實 item 的語意。兩欄都是 gain 佔比
+    # 的縮放、非獨立訊號（呈現層 bullet 明講），保留是因為集中度用「相對第一名／
+    # 中位」讀比絕對份額直覺。
+    _shares = [r["context_gain_share"] for r in per_item
+               if r["context_gain_share"] is not None]
+    _max_share = max(_shares) if _shares else None
+    _median_share = median_high(_shares) if _shares else None
+    for r in per_item:
+        cs = r["context_gain_share"]
+        r["gain_share_vs_max"] = (
+            None if cs is None or not _max_share else cs / _max_share
+        )
+        r["gain_share_vs_median"] = (
+            None if cs is None or not _median_share else cs / _median_share
+        )
+
     unaccounted_gain = (
         None if total_gain is None or item_id_gain is None or context_gain is None
         else total_gain - item_id_gain - context_gain
@@ -300,6 +505,20 @@ def compute(
 
     def _share(x: Optional[float]) -> Optional[float]:
         return None if x is None or total_gain in (None, 0.0) else x / total_gain
+
+    # split 三分（c）：total_split_count 在→未分配 split ＝ total−item−context
+    # （殘差，與 gain 三分對稱）。舊版 ledger 缺 total_split_count → 全留 None。
+    item_id_split = _split_count(gain_ledger, "item_id")
+    context_split = _split_count(gain_ledger, "context")
+    total_split = gain_ledger.get("total_split_count")
+    total_split = None if total_split is None else int(total_split)
+    unaccounted_split = (
+        None if total_split is None or item_id_split is None or context_split is None
+        else total_split - item_id_split - context_split
+    )
+
+    def _split_share(x: Optional[int]) -> Optional[float]:
+        return None if x is None or not total_split else x / total_split
 
     out["summary"] = {
         "total_gain": total_gain,
@@ -310,6 +529,20 @@ def compute(
         "context_gain_share": _share(context_gain),
         "unaccounted_gain_share": _share(unaccounted_gain),
         "n_items": len(per_item),
+        "n_trees": gain_ledger.get("n_trees"),
+        "item_id_split_count": item_id_split,
+        "context_split_count": context_split,
+        "total_split_count": total_split,
+        "unaccounted_split_count": unaccounted_split,
+        "item_id_split_share": _split_share(item_id_split),
+        "context_split_share": _split_share(context_split),
+        "unaccounted_split_share": _split_share(unaccounted_split),
+        # 分配分母：per_item 為空（粗帳本降級）時留 None，不假裝算出 0。
+        "sum_allocated_context_gain": allocated_sum if per_item_raw else None,
+        "sum_allocated_context_split": allocated_split_sum if per_item_raw else None,
     }
     out["per_item"] = per_item
+    # pre-item 拆解與 item 切點深度：gain_ledger 直接帶入（可能 None＝舊版/粗帳本）。
+    out["pre_item"] = gain_ledger.get("pre_item")
+    out["first_item_split_depth"] = gain_ledger.get("first_item_split_depth")
     return out
