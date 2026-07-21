@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
-import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 
@@ -401,104 +400,6 @@ def _per_item_recall_table(
     )
 
 
-_SWEEP_BLUE = "#1565c0"
-_SWEEP_ORANGE = "#e65100"
-
-
-def _offset_sweep_waterfall(sweep: dict) -> go.Figure | None:
-    """分流 waterfall：折外 mAP(0) → 各 item 的 LOO 貢獻 → mAP(δ*)。
-
-    顏色語意沿手冊 fig6-offset-sweep-split：藍＝offset 收復（水準缺口）、
-    橘＝負向；mAP(δ*) 與可及上限之間收不回的部分＝條件判別力缺口（上限
-    未知，圖上不畫）。原圖為 matplotlib，此處依 spec 修訂以 plotly 重刻。
-    """
-    mh = sweep.get("map_holdout", {}) or {}
-    if mh.get("zero") is None or mh.get("star") is None:
-        return None
-    per_item = sweep.get("per_item", {}) or {}
-    moved = {
-        it: v["loo_contribution_holdout"]
-        for it, v in per_item.items()
-        if v.get("delta_star") and v.get("loo_contribution_holdout") is not None
-    }
-    if not moved:
-        return None
-    order = sorted(moved, key=lambda it: -abs(moved[it]))
-    x = ["mAP(0) 折外"] + [f"δ*({it})" for it in order]
-    y = [mh["zero"]] + [moved[it] for it in order]
-    measure = ["absolute"] + ["relative"] * len(order)
-    residual = sweep.get("interaction_residual_holdout")
-    if residual is not None:
-        x.append("交互殘差")
-        y.append(residual)
-        measure.append("relative")
-    x.append("mAP(δ*) 折外")
-    y.append(mh["star"])
-    measure.append("total")
-    fig = go.Figure(go.Waterfall(
-        x=x, y=y, measure=measure,
-        increasing={"marker": {"color": _SWEEP_BLUE}},
-        decreasing={"marker": {"color": _SWEEP_ORANGE}},
-        totals={"marker": {"color": "#9e9e9e"}},
-    ))
-    fig.update_layout(
-        title="水準分流：per-item 平移（δ*）可收復的指標缺口（折外）",
-        yaxis_title="macro per-item mAP",
-        showlegend=False,
-    )
-    return fig
-
-
-def build_offset_sweep_section(
-    sweep: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "offset_sweep"):
-        return None
-    if not sweep or not sweep.get("enabled"):
-        return None
-    mf = sweep.get("map_fit", {}) or {}
-    mh = sweep.get("map_holdout", {}) or {}
-
-    def _gap(zero, star):
-        return (star - zero) if (zero is not None and star is not None) else None
-
-    summary = pd.DataFrame(
-        {
-            "mAP(0)": [mf.get("zero"), mh.get("zero")],
-            "mAP(δ*)": [mf.get("star"), mh.get("star")],
-            "收復量": [_gap(mf.get("zero"), mf.get("star")),
-                       _gap(mh.get("zero"), mh.get("star"))],
-        },
-        index=["折內（fit）", "折外（holdout）"],
-    )
-    per_item = sweep.get("per_item", {}) or {}
-    cols = ["delta_star", "delta_star_centered", "loo_contribution_holdout"]
-    tbl = pd.DataFrame(
-        {c: [per_item[it].get(c) for it in per_item] for c in cols},
-        index=list(per_item),
-    )
-    fig = _offset_sweep_waterfall(sweep)
-    desc = (
-        "分流閥：對每個 item 的 logit 分數加常數 δ（不重訓）能收復多少 "
-        "macro mAP。判讀順序：(1) 看折外收復量——大＝缺口主要在水準（配置"
-        "／再平衡可修）、小＝缺口在條件判別力（必須動訓練）；(2) 看 δ* 大"
-        "的 item 是誰；(3) waterfall 看收復量怎"
-        "麼分攤到各 item。δ* 單位＝log-odds。完整"
-        "判讀：docs/pipelines/evaluation-diagnosis.md。"
-    )
-    notes = sweep.get("notes") or []
-    if notes:
-        desc += "⚠ " + "／".join(notes)
-    return ReportSection(
-        title="分流 Offset sweep（水準 vs 條件判別力）",
-        description=desc,
-        figures=[fig] if fig is not None else [],
-        tables=[summary, tbl],
-        table_titles=["mAP 收復摘要（折內／折外）",
-                      "per-item δ* 與折外 LOO 貢獻"],
-    )
-
-
 def _families_by_k_table(overall: dict, ks: list, n_prod: int) -> pd.DataFrame:
     """單一 per-query aggregate → rows=[map, precision, recall]、cols=@k。
 
@@ -881,9 +782,9 @@ def build_glossary_section(parameters: dict) -> ReportSection:
 # **這一段刻意不認識任何單一診斷。** 走的是
 # ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
 # ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
-# registry 補一行，本檔零改動。舊的 ``build_offset_sweep_section`` 不在這個
-# 規則的管轄範圍——它服務的是尚未被取代的既有診斷 node，會在整個
-# diag-redesign 收尾時一起清掉。
+# registry 補一行，本檔零改動。（offset_sweep 這項既有診斷仍在計算層產出
+# offset_sweep.json，但其主報表呈現段已移除——後繼 score_shift 走
+# ``build_diagnosis_links_section`` 連出的獨立診斷報表。）
 #
 # 為什麼數字不複製一份到主報表：主報表只放入口
 # （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
