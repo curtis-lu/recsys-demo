@@ -305,6 +305,25 @@ def test_each_number_the_reader_asked_about_is_defined_in_its_own_section():
                 )
 
 
+def test_no_literal_markdown_asterisks_in_rendered_strings():
+    """第三輪 reader P2：報表是純 HTML、bullets 經 _escape，不轉譯 markdown——
+    渲染字串出現 ** 會顯示成字面星號、看起來像模板壞掉。"""
+    for s in suppression.render(_result(), {}):
+        blob = _section_text(s)
+        assert "**" not in blob, f"{s.title} 區有字面 **（markdown 不會被轉譯）"
+
+
+def test_per_item_table_sorted_by_severity_not_total_loss():
+    """第三輪 reader P1（＋使用者提議）：主表要依每列嚴重度（AP gap from
+    suppressors）降冪，把排得最差的 item 放最前，而非依筆數加權的總損失。"""
+    section = _section(suppression.render(_result(), {}), _SUMMARY_TITLE)
+    col = list(section.tables[-1]["AP gap from suppressors"])
+    vals = [float(x) for x in col if x]
+    assert len(vals) >= 2 and vals == sorted(vals, reverse=True), (
+        f"per-item 沒有依嚴重度降冪：{vals}"
+    )
+
+
 def test_per_item_warns_gap_share_sort_is_volume_weighted():
     """reader 反饋：主表依 overall gap share 排序會把排得不錯的大宗 item 頂到
     最前、把真正壞掉的小宗 item 沉到後面。必須明講這個陷阱、並指向嚴重度欄。"""
