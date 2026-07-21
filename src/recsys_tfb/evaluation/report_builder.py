@@ -954,6 +954,86 @@ def build_diagnostics_section(
     )
 
 
+def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
+    """欄正規化：每個 rank 欄 ÷ 欄和 → 各 item 在該 rank 位置的佔比。
+
+    每個 rank 欄加總=1（誰佔據該名次）。全 0 欄（0/0）得 NaN、render 端空白。
+    依 §二，正規化後的矩陣用「按欄讀的數字表」呈現，不掛全域色階 heatmap。
+    """
+    col_sums = counts_frame.sum(axis=0)
+    return counts_frame.divide(col_sums, axis=1)
+
+
+def build_item_detail_section(
+    report_aggregates: dict | None, parameters: dict
+) -> ReportSection | None:
+    """per-item 細部拆解（原診斷區升為頂層）。
+
+    同一批排名的分數／名次分布側面。沿用 score 分布圖與 rank 計數 heatmap；
+    新增 item-share-by-rank（欄正規化，數字表，G#1）＋ positive rate by rank
+    數字表。依「排序不是校準」，calibration 曲線移到獨立診斷報表、本段不畫
+    （即使 payload 有 calibration 鍵）。升為頂層（collapsible=False）。
+    """
+    if not _section_on(parameters, "diagnostics"):
+        return None
+    # 與 build_diagnostics_figures 同一個「有沒有 score_histogram 家族」判斷；
+    # 只有 calibration 沒有分布家族時，本段不畫。
+    if not report_aggregates or "score_histogram" not in report_aggregates:
+        return None
+
+    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
+    from recsys_tfb.evaluation.distributions import (
+        plot_positive_rank_heatmap,
+        plot_rank_heatmap,
+        plot_score_boxplot_by_label,
+        plot_score_histogram,
+    )
+
+    cols = report_aggregates["columns"]
+    item_col, label_col = cols["item"], cols["label"]
+    figs = [
+        plot_score_histogram(
+            frame_from_json(report_aggregates["score_histogram"]),
+            item_col=item_col),
+        plot_score_boxplot_by_label(
+            frame_from_json(report_aggregates["score_box_by_label"]),
+            item_col=item_col, label_col=label_col),
+        plot_rank_heatmap(
+            frame_from_json(report_aggregates["rank_counts"])),
+        plot_positive_rank_heatmap(
+            frame_from_json(report_aggregates["positive_rank_counts"])),
+    ]
+
+    rank_counts = frame_from_json(report_aggregates["rank_counts"])
+    pos_rank_counts = frame_from_json(report_aggregates["positive_rank_counts"])
+    pos_rate = frame_from_json(report_aggregates["positive_rate"])
+    tables = [
+        _item_share_by_rank(rank_counts),
+        _item_share_by_rank(pos_rank_counts),
+        pos_rate,
+    ]
+    titles = [
+        "item share by rank（query 數，欄正規化：每 rank 各 item 佔比，欄和=1）",
+        "item share by rank（positive query 數，欄正規化）",
+        "positive rate by rank（每格＝positive query 數 ÷ query 數）",
+    ]
+    return ReportSection(
+        title="per-item 細部拆解",
+        description=(
+            "同一批排名的分數與名次分布側面：score 分布、score by label、rank "
+            "分布 heatmap（原始計數）、item share by rank（欄正規化，看誰佔據各"
+            "名次）、positive rate by rank。依「排序不是校準」，校準曲線移到獨立"
+            "診斷報表、本段不畫。item share 每個 rank 欄加總=1；rank 計數的欄和"
+            "＝總 query 數。明細數字表點標題展開。"
+        ),
+        figures=figs,
+        tables=tables,
+        table_titles=titles,
+        collapsed_tables=[True, True, True],
+        collapsible=False,
+    )
+
+
 def build_baseline_section(
     metrics: dict, baseline_metrics: dict | None, parameters: dict
 ) -> ReportSection | None:

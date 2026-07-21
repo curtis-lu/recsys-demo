@@ -1,5 +1,7 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
+import pandas as pd
+
 from recsys_tfb.evaluation import report_builder as rb
 
 
@@ -219,6 +221,68 @@ def test_metrics_section_none_when_off():
     p = _params()
     p["evaluation"]["report"]["sections"] = {"primary_map": False}
     assert rb.build_metrics_section(_metrics(), p, metric_ci=_metric_ci()) is None
+
+
+# ---- Task 6: per-item 細部拆解 ----
+
+def _report_aggregates():
+    """手建的 report_aggregates payload（frame_from_json 格式；含 calibration
+    以驗證本段刻意不畫它）。"""
+    return {
+        "columns": {"item": "prod_name", "score": "score",
+                    "rank": "rank", "label": "label"},
+        "score_histogram": {
+            "kind": "long",
+            "columns": ["prod_name", "bin_center", "count", "bin_width"],
+            "data": [["A", 0.1, 10, 0.2], ["A", 0.3, 10, 0.2],
+                     ["B", 0.2, 8, 0.2], ["B", 0.4, 8, 0.2]]},
+        "score_box_by_label": {
+            "kind": "long",
+            "columns": ["prod_name", "label", "q1", "median", "q3",
+                        "lowerfence", "upperfence"],
+            "data": [["A", 0, 0.1, 0.2, 0.3, 0.05, 0.35],
+                     ["A", 1, 0.5, 0.6, 0.7, 0.45, 0.75],
+                     ["B", 0, 0.1, 0.15, 0.2, 0.05, 0.25],
+                     ["B", 1, 0.4, 0.5, 0.6, 0.35, 0.65]]},
+        "rank_counts": {"kind": "matrix", "index": ["A", "B"],
+                        "columns": [1, 2], "data": [[30, 10], [10, 30]]},
+        "positive_rank_counts": {"kind": "matrix", "index": ["A", "B"],
+                                 "columns": [1, 2], "data": [[6, 2], [2, 6]]},
+        "positive_rate": {"kind": "matrix", "index": ["A", "B"],
+                          "columns": [1, 2], "data": [[0.2, 0.2], [0.2, 0.2]]},
+        "calibration": {"kind": "long",
+                        "columns": ["prod_name", "bin", "mean_pred", "frac_pos"],
+                        "data": [["A", 0, 0.2, 0.15], ["B", 0, 0.3, 0.25]]},
+    }
+
+
+def test_item_share_by_rank_columns_sum_to_one():
+    # 欄正規化：每個 rank 欄 ÷ 欄和，每欄加總=1（render 端純算術，G#1）。
+    # ★用非對稱矩陣：對稱矩陣下列正規化也會讓欄和=1，測不出「走哪條」，
+    # 這裡兩列和不同（40 vs 20），故列正規化會讓欄和≠1（mutation 咬得住）。
+    counts = pd.DataFrame([[30, 10], [10, 10]], index=["A", "B"], columns=[1, 2])
+    share = rb._item_share_by_rank(counts)
+    assert (abs(share.sum(axis=0) - 1.0) < 1e-6).all()
+
+
+def test_item_detail_drops_calibration():
+    # fixture 含 calibration，但本段刻意不畫（排序不是校準）→ 只有 4 張分布圖
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert len(s.figures) == 4
+
+
+def test_item_detail_is_top_level_not_collapsible():
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert s.collapsible is False   # 升為頂層，不再整段收合
+
+
+def test_item_detail_has_item_share_tables():
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    joined = " ".join(s.table_titles)
+    assert "item share by rank" in joined
+    # share 表逐欄加總=1（手算可核對）
+    share_tbl = s.tables[0]
+    assert (abs(share_tbl.sum(axis=0) - 1.0) < 1e-6).all()
 
 
 class TestVisibleMetricKeys:
