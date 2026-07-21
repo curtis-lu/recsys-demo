@@ -78,33 +78,6 @@ def _n_products(metrics: dict) -> int:
     )
 
 
-def build_headline_section(metrics: dict, parameters: dict) -> ReportSection:
-    overall = metrics.get("overall", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
-    )
-    card = {
-        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_prod)}")
-        for k in ks
-    }
-    meta = {
-        "n_queries": metrics.get("n_queries"),
-        "n_excluded_queries": metrics.get("n_excluded_queries"),
-    }
-    t1 = pd.DataFrame([card]).T
-    t1.columns = ["value"]
-    t2 = pd.DataFrame([meta]).T
-    t2.columns = ["value"]
-    return ReportSection(
-        title="摘要 Headline",
-        description="主指標 mAP@k（細產品 overall）與 run 概況。",
-        tables=[t1, t2],
-        table_titles=["主指標 mAP@k", "Run 概況"],
-    )
-
-
 def build_overview_section(
     metrics: dict, parameters: dict, metric_ci: dict | None = None
 ) -> ReportSection:
@@ -321,48 +294,6 @@ def build_dataset_overview_section(
     )
 
 
-def build_primary_map_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
-) -> ReportSection | None:
-    if not _section_on(parameters, "primary_map"):
-        return None
-    overall = metrics.get("overall", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), _n_products(metrics)
-    )
-    rows = {}
-    n_prod = _n_products(metrics)
-    for fam in ("map", "precision", "recall"):
-        rows[fam] = {
-            f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
-            for k in ks
-        }
-    table = pd.DataFrame(rows).T
-    tables = [table]
-    table_titles = ["per-query 指標 @k"]
-    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
-        m = metric_ci["macro"]
-        sample_meta = metric_ci.get("sample", {}) or {}
-        ci_tbl = pd.DataFrame(
-            [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
-              "CI 97.5%": m.get("ci_high"),
-              "樣本 query 數": sample_meta.get("n_queries_sampled")}],
-            index=["macro per-item mAP"],
-        )
-        tables.append(ci_tbl)
-        table_titles.append("macro per-item mAP 的 CI（抽樣估計）")
-    return ReportSection(
-        title="主指標 mAP@k（細產品 per-query）",
-        description=(
-            "overall mAP@k 為主軸；precision/recall@k 作脈絡。"
-            "K = 產品數時 precision 退化為 base rate、recall 恆為 1。"
-        ),
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
 def _per_item_metric_table(
     per_item: dict,
     ks: list,
@@ -397,37 +328,6 @@ def _per_item_metric_table(
     for item, m in per_item.items():
         data[item] = _row(m)
     return pd.DataFrame(data).T
-
-
-def _per_item_heatmap(
-    table: pd.DataFrame,
-    per_item: dict,
-    ks: list,
-    n_prod: int,
-    metric_key: str,
-    x_fmt: str,
-    title: str,
-    zmin: float | None = None,
-    zmax: float | None = None,
-) -> go.Figure:
-    """RdYlGn heatmap; z from ``per_item[item][f"{metric_key}@{lookup(k)}"]``,
-    rows ordered by ``table.index``. ``zmin``/``zmax`` left None -> Plotly
-    autoscales the colour range.
-    """
-    z = [
-        [per_item.get(it, {}).get(f"{metric_key}@{_k_to_lookup(k, n_prod)}")
-         for k in ks]
-        for it in table.index
-    ]
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z, x=[x_fmt.format(k=k) for k in ks], y=list(table.index),
-            zmin=zmin, zmax=zmax,
-            colorscale="RdYlGn", texttemplate="%{z:.3f}",
-        )
-    )
-    fig.update_layout(title=title, yaxis_title="產品")
-    return fig
 
 
 def _per_item_metric_compare_table(
@@ -494,118 +394,6 @@ def _per_item_recall_table(
     return _per_item_metric_table(
         per_item, ks, n_prod, "hit_rate", "recall@{k} (per-item)",
         extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
-    )
-
-
-def build_guardrail_recall_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "guardrail_recall"):
-        return None
-    per_item = metrics.get("per_item", {})
-    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
-    )
-    # heatmap uses the table without the macro row; display uses the one with it
-    table_plain = _per_item_recall_table(per_item, ks, n_prod)
-    cs = disp.get("recall_colorscale", {}) or {}
-    fig = _per_item_heatmap(
-        table_plain, per_item, ks, n_prod, "hit_rate", "recall@{k}",
-        "per-item recall@k 色階",
-        zmin=cs.get("low", 0.0), zmax=cs.get("high", 1.0),
-    )
-    table = _per_item_recall_table(per_item, ks, n_prod, macro_metrics=macro_item)
-    return ReportSection(
-        title="護欄 per_item recall@k（細產品）",
-        description=(
-            "每產品 recall@k（per-item，即 hit_rate@k 正名）＋色階。"
-            "頂列「Macro 平均」為各產品等權平均。"
-            "純判讀、無 pass/fail 閾值。完整資料統計見「資料概況」。"
-        ),
-        figures=[fig],
-        tables=[table],
-        table_titles=["per-item recall@k"],
-    )
-
-
-def build_per_item_attr_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
-) -> ReportSection | None:
-    if not _section_on(parameters, "per_item_attr"):
-        return None
-    per_item = metrics.get("per_item", {})
-    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
-    ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod
-    )
-    # heatmap uses the table without the macro row; display uses the one with it
-    map_tbl_plain = _per_item_metric_table(
-        per_item, ks, n_prod, "map_attr", "map_attr@{k}"
-    )
-    map_fig = _per_item_heatmap(
-        map_tbl_plain, per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        "per-item map_attr@k 色階",
-    )
-    map_tbl = _per_item_metric_table(
-        per_item, ks, n_prod, "map_attr", "map_attr@{k}",
-        macro_metrics=macro_item,
-    )
-
-    description_extra = ""
-    if metric_ci and metric_ci.get("enabled"):
-        ci_items = metric_ci.get("per_item", {}) or {}
-        ci_macro = metric_ci.get("macro") or {}
-        sample_meta = metric_ci.get("sample", {}) or {}
-
-        def _ci_val(idx: str, field: str):
-            src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
-            return src.get(field)
-
-        for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
-                           ("CI 97.5%", "ci_high"), ("n_pos(抽樣)", "n_pos")):
-            map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
-        ci_k_label = metric_ci.get("k") or "all"
-        description_extra = (
-            f"AP(抽樣)/CI 欄為抽樣估計（{sample_meta.get('n_queries_sampled')} "
-            f"個正例 query、bootstrap n_boot={metric_ci.get('n_boot')}，"
-            f"cluster=客戶），非全量值；其截斷 k={ci_k_label}，點估計以全量欄 "
-            f"map_attr@{ci_k_label} 為準（不要拿去對其他 @k 欄）。"
-            f"n_pos(抽樣) 為該 item 進入 CI 估計的正例列數——太小的值代表"
-            f"該列 CI 不可靠，判讀時先看這欄。"
-        )
-
-    tables = [map_tbl]
-    table_titles = ["per-item map_attr@k"]
-    observation_items = metrics.get("observation_items", []) or []
-    if observation_items:
-        per_item_all = metrics.get("per_item", {})
-        obs_tbl = pd.DataFrame(
-            {"n_pos": [per_item_all.get(it, {}).get("n_pos")
-                       for it in observation_items]},
-            index=observation_items,
-        )
-        tables.append(obs_tbl)
-        table_titles.append("觀察名單（n_pos < min_positives，已移出 macro）")
-
-    return ReportSection(
-        title="per_item 歸因 Attribution（細產品）",
-        description=(
-            "每個產品對主指標 mAP@k 各貢獻多少。算法：對每筆"
-            "「(客戶, 產品) 且該產品是這位客戶的正解」的紀錄，先算單筆貢獻 "
-            "ap_contrib@k = 該產品排名進前 k 時的累積精度（排越前、前面混入"
-            "的非正解越少 → 越高；沒進前 k → 0）。一位客戶的 AP@k = 他所有"
-            "正解產品的 ap_contrib@k 加總 ÷ 正解數 total_rel。map_attr@k = "
-            "某產品在「它為該客戶正解」的所有客戶上，ap_contrib@k 的平均 → "
-            "即這個產品平均替 AP@k 加了多少分。頂列「Macro 平均」為各產品等權平均。"
-        ) + description_extra,
-        figures=[map_fig],
-        tables=tables,
-        table_titles=table_titles,
     )
 
 
@@ -704,84 +492,6 @@ def build_offset_sweep_section(
         tables=[summary, tbl],
         table_titles=["mAP 收復摘要（折內／折外）",
                       "per-item δ* 與折外 LOO 貢獻"],
-    )
-
-
-def build_category_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "category"):
-        return None
-    cat = metrics.get("category")
-    if not cat:
-        return None
-    disp = _report_cfg(parameters).get("display", {}) or {}
-    n_cat = int(cat.get("dataset_overview", {}).get("totals", {})
-                .get("n_products", 0))
-    map_ks = _resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
-    rec_ks = _resolve_display_k(
-        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_cat)
-    overall = cat.get("overall", {})
-    map_tbl = pd.DataFrame(
-        [{f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_cat)}")
-          for k in map_ks}]
-    ).T
-    map_tbl.columns = ["value"]
-    cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
-    rec_tbl = _per_item_recall_table(
-        cat.get("per_item", {}), rec_ks, n_cat, macro_metrics=cat_macro_item
-    )
-    mapping = (((parameters.get("evaluation", {}) or {})
-               .get("product_categories", {}) or {}).get("mapping", {})) or {}
-    tables = [map_tbl, rec_tbl]
-    table_titles = ["大類 mAP@k", "大類 per-item recall@k"]
-    if mapping:
-        comp_tbl = pd.DataFrame(
-            [{"子產品": ", ".join(v)} for v in mapping.values()],
-            index=list(mapping.keys()),
-        )
-        tables.append(comp_tbl)
-        table_titles.append("大類組成")
-    return ReportSection(
-        title="大類層級 Category",
-        description=(
-            "大類粒度 mAP@k 與 per-item recall@k（大類=子產品最佳 rank）。"
-            "recall@k 表頂列「Macro 平均」為各大類等權平均。"
-        ),
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
-def build_segment_section(
-    metrics: dict, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "per_segment"):
-        return None
-    per_segment = metrics.get("per_segment", {})
-    if not per_segment:
-        return None
-    macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
-    rows = (
-        {_MACRO_LABEL: macro_seg, **per_segment}
-        if macro_seg
-        else dict(per_segment)
-    )
-    rows = {
-        seg: {k: (m or {}).get(k)
-              for k in _visible_metric_keys(list((m or {}).keys()))}
-        for seg, m in rows.items()
-    }
-    table = pd.DataFrame(rows).T
-    return ReportSection(
-        title="分群 Per-Segment",
-        description=(
-            "per-query 指標依 segment 切分。"
-            "頂列「Macro 平均」為各 segment 等權平均。"
-        ),
-        tables=[table],
-        table_titles=["per-segment 指標"],
     )
 
 
@@ -924,71 +634,6 @@ def build_metrics_section(
         tables=tables,
         table_titles=titles,
         collapsed_tables=collapsed,
-    )
-
-
-def build_diagnostics_figures(report_aggregates: dict | None) -> list:
-    """把 ``aggregate_report_diagnostics`` 的 payload 還原成圖。
-
-    純函式、不碰 Spark——這是主報表能離線重繪的那一半。缺席的家族直接跳過
-    （見該函式：關掉的家族不放進 payload）。
-    """
-    from recsys_tfb.evaluation.calibration import plot_calibration_curves
-    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
-    from recsys_tfb.evaluation.distributions import (
-        plot_positive_rank_heatmap,
-        plot_positive_rate_rank_heatmap,
-        plot_rank_heatmap,
-        plot_score_boxplot_by_label,
-        plot_score_histogram,
-    )
-
-    # 用「有沒有家族鍵」判斷，**不看 ``enabled`` 旗標**。旗標是 node 設的、
-    # 聚合函式不設，所以看旗標的話 build_diagnostics_figures(
-    # aggregate_report_diagnostics(...)) 會靜默回空——直接呼叫的人（測試、
-    # 未來的離線重繪）拿到 [] 卻沒有任何線索。停用時的 stub 是
-    # {"enabled": False}，沒有任何家族鍵，這個判斷自然回 []。
-    families = ("score_histogram", "calibration")
-    if not report_aggregates or not any(
-        k in report_aggregates for k in families
-    ):
-        return []
-    cols = report_aggregates["columns"]
-    item_col, label_col = cols["item"], cols["label"]
-    figs = []
-    if "score_histogram" in report_aggregates:
-        figs.append(plot_score_histogram(
-            frame_from_json(report_aggregates["score_histogram"]),
-            item_col=item_col))
-        figs.append(plot_score_boxplot_by_label(
-            frame_from_json(report_aggregates["score_box_by_label"]),
-            item_col=item_col, label_col=label_col))
-        figs.append(plot_rank_heatmap(
-            frame_from_json(report_aggregates["rank_counts"])))
-        figs.append(plot_positive_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rank_counts"])))
-        figs.append(plot_positive_rate_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rate"])))
-    if "calibration" in report_aggregates:
-        figs.append(plot_calibration_curves(
-            frame_from_json(report_aggregates["calibration"]),
-            item_col=item_col))
-    return figs
-
-
-def build_diagnostics_section(
-    diagnostics_frames: dict | None, parameters: dict
-) -> ReportSection | None:
-    if not _section_on(parameters, "diagnostics") or not diagnostics_frames:
-        return None
-    figs = diagnostics_frames.get("figures", [])
-    if not figs:
-        return None
-    return ReportSection(
-        title="診斷 Diagnostics",
-        description="score 分布／rank heatmap／calibration（預設收合）。",
-        figures=figs,
-        collapsible=True,
     )
 
 
