@@ -242,23 +242,47 @@ def build_dataset_overview_section(
     if not _section_on(parameters, "dataset_overview"):
         return None
     ov = metrics.get("dataset_overview", {})
-    totals = pd.DataFrame([ov.get("totals", {})]).T
+    totals_d = ov.get("totals", {}) or {}
+    totals = pd.DataFrame([totals_d]).T
     totals.columns = ["value"]
     by_snap = pd.DataFrame(ov.get("by_snap_date", {})).T
-    by_item = pd.DataFrame(ov.get("by_item", {})).T
+
+    # per-item 正例組成：正例數 / 正樣本率 / 正例佔比（＝n_positives÷總正例，
+    # render 端純算術、無 Spark）。密集候選下三欄同序，ScopeNote 於 description。
+    total_pos = totals_d.get("n_positives") or 0
+    by_item_rows: dict = {}
+    for item, d in (ov.get("by_item", {}) or {}).items():
+        n_pos = d.get("n_positives")
+        by_item_rows[item] = {
+            "正例數": n_pos,
+            "正樣本率": d.get("positive_rate"),
+            "正例佔比": (n_pos / total_pos)
+            if (n_pos is not None and total_pos) else None,
+        }
+    by_item = pd.DataFrame(by_item_rows).T
+
     tables = [totals, by_snap, by_item]
-    titles = ["總覽", "by snap_date", "by 產品"]
+    titles = ["整體 totals", "各期 by snap_date", "per-item 正例組成"]
+    collapsed = [False, True, False]   # 各期單 snap 時＝totals，預設收合
     cat = metrics.get("category")
     if cat:
         cat_by_item = (cat.get("dataset_overview", {}) or {}).get("by_item", {})
         if cat_by_item:
             tables.append(pd.DataFrame(cat_by_item).T)
             titles.append("by 大類")
+            collapsed.append(False)
     return ReportSection(
-        title="資料概況 Dataset Overview",
-        description="總覽、依 snap_date、依產品（及大類）的筆數／正樣本數／客戶數。",
+        title="基本統計 — 資料集",
+        description=(
+            "整體規模與 per-item 的正例組成。per-item 三欄（正例數／正樣本率／"
+            "正例佔比）在密集候選集下同序（僅換分母或讀法），非三個獨立軸；候選"
+            "覆蓋率因每 item 覆蓋全部 query 恆為 100%，故不列。per-segment 樣本"
+            "統計與每-query 正例數分佈為後續階段（需新增 by_segment／per-query "
+            "聚合）。"
+        ),
         tables=tables,
         table_titles=titles,
+        collapsed_tables=collapsed,
     )
 
 

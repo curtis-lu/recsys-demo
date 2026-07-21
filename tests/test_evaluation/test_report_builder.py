@@ -128,6 +128,31 @@ def test_dataset_overview_section_tables():
     assert s.title
 
 
+def test_dataset_section_per_item_has_three_cols_with_share():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    by_item = next(
+        t for t, tt in zip(s.tables, s.table_titles)
+        if "per-item" in tt or "產品" in tt
+    )
+    cols = " ".join(map(str, by_item.columns))
+    assert "正例數" in cols and "正樣本率" in cols and "正例佔比" in cols
+
+
+def test_dataset_section_share_reconciles():
+    # 正例佔比 = n_positives / 總正例，逐列加總 ≈ 1（手算可核對）
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    by_item = next(
+        t for t in s.tables
+        if "正例佔比" in " ".join(map(str, t.columns))
+    )
+    assert abs(by_item["正例佔比"].astype(float).sum() - 1.0) < 1e-6
+
+
+def test_dataset_section_flags_phase2_stub():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    assert "後續" in s.description or "per-segment" in s.description.lower()
+
+
 class TestVisibleMetricKeys:
     def test_drops_ndcg_keys(self):
         keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]

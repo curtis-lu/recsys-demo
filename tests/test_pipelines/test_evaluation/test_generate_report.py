@@ -61,7 +61,9 @@ def test_generate_report_html_no_diagnostics(spark):
                             None, None, None, aggregates, None)
     assert html.startswith("<!DOCTYPE html>")
     assert "摘要 Headline" in html
-    assert "<details" not in html      # diagnostics off
+    # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
+    # 注意：明細表級收合 <details class="table-collapse"> 與診斷無關，不在此斷言。
+    assert '<details class="section"' not in html
 
 
 def test_generate_report_with_diagnostics(spark):
@@ -69,7 +71,7 @@ def test_generate_report_with_diagnostics(spark):
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
     html = generate_report(_metrics(), params,
                             None, None, None, aggregates, None)
-    assert "<details" in html          # collapsible diagnostics present
+    assert '<details class="section"' in html   # collapsible diagnostics section present
 
 
 def _params_diag_full():
