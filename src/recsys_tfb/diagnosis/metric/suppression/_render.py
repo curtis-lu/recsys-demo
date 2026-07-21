@@ -4,22 +4,27 @@
 pyspark、不讀檔、不做計算——出現在報表上的每個數字都必須已經在 JSON 裡。
 停用時回空 tuple；最後一節固定是「本次執行的完整性檢查」。
 
-**版面（2026-07-21 第二輪，依使用者反饋重排）**：抽屜式下鑽，兩個對稱視角
-（受害者／壓制者）各自「分布圖＋明細表」，中間夾一張誰壓誰的矩陣：
+**版面（2026-07-21 第三輪，依使用者「整體邏輯架構」要求重排）**：整份診斷只有
+一個基礎量 ``allocated_ap_gap``（逐列原子），其餘全是它加總到不同粒度。頂部兩塊
+是定向：概覽（規模＋關鍵數字＋如何讀）→ 核心概念（把基礎量講清楚一次），後面
+每區只說「這是它加總到 X」：
 
-1. **per-item 壓制彙總**（受害者明細表）——每個受害 item 一列。主表。
-2. **壓制矩陣：誰壓誰**——**可讀的百分比數字表，按列看**（不用熱圖：
-   target gap share 每列自成一個分布、橫著加＝1，熱圖的全域色階會誘導跨列
-   比色而誤讀）。
-3. **壓制者明細**（壓制者視角表）＋兩個視角的**缺口分布長條圖**。
+* **概覽**——一眼看規模、整體排序品質、壓制多普遍/多深、被歸因的總損失，外加
+  「想回答什麼問題 → 看哪一區」的中性導覽（不替讀者判斷誰最該查，守不下結論）。
+0. **核心概念**——``allocated_ap_gap`` 是什麼、怎麼把一列的 AP 缺口按 severity
+   拆給上方各負例（含拆分公式與例子），以及全體總量（所有 gap share 的分母）與
+   「下面每區＝它加總到什麼粒度」的地圖。
+1. **per-item 壓制彙總**（受害者明細表）——加總到 item 當受害者。主表。
+2. **壓制矩陣：誰壓誰**——加總到 (受害, 壓制者) pair，按列看的百分比數字表
+   （不用熱圖：每列自成一個分布、橫加＝1，全域色階會誘導跨列比色而誤讀）。
+3. **壓制者明細**＋兩個視角的**缺口分布長條圖**——加總到 item 當壓制者。
 4. **交叉購買 lift**——只用圖（軸標清楚 j／k），與模型排序無關的對照組。
-5. **具體案例表**。
+5. **具體案例表**——不加總的單列 ``allocated_ap_gap`` 值。
 6. **完整性檢查**（固定殿後，印出 metric k 與 allocated 總量）。
 
-**每個數字的定義貼在它出現的那一區**（每區第一張表就是「本區數字定義」），
-不放頁首總表要人滾回去查。定義文字集中在 :data:`_DEFS`（單一真實來源），
-各區用 :func:`_defs_table` 只取自己用到的鍵——同一數字出現在多區就各帶一次，
-是刻意的在地化。
+**基礎量在開頭講一次**（核心概念區）；**各區只補自己專屬的數字**（每區第一張表
+「本區數字定義」只放該區新出現的量，``allocated_ap_gap`` 一律回指開頭，不再重述
+整條拆分公式）。定義文字集中在 :data:`_DEFS`（單一真實來源）。
 
 ⚠ **圖形點數預算**：長條圖是 1D（item 數，遠低於上限）；矩陣改成表格後也不受
 ``figures.MAX_FIGURE_POINTS`` 限制。唯一的 |item|² 圖是交叉購買泡泡圖，item 太多
@@ -50,14 +55,12 @@ _N_AXIS_MAX = math.isqrt(MAX_FIGURE_POINTS)
 #: （見 :func:`_defs_table`）：定義貼在數字旁邊，而非頁首一張總表。
 _DEFS: dict[str, str] = {
     "allocated_ap_gap":
-        "**基礎量（逐列）**：某一個正例列的 AP 缺口，按上方各負例的 severity 比例，"
-        "分給每個負例的那一份。公式：分給負例 s 的份 = row_ap_gap × severity(s) ÷ "
-        "Σ severity；其中 row_ap_gap = 1 − 該正例列目前的 AP 貢獻，severity(s) = "
-        "把正例提到負例 s 的名次、它的 AP 貢獻會多出多少（負例排得越高、提上去越賺 "
-        "→ severity 越大）。例：正例在 rank 3（目前貢獻 1/3），上方兩個負例在 rank 1、2；"
-        "提到 rank 1 貢獻變 1（多 2/3）、提到 rank 2 變 1/2（多 1/6），severity 比 2/3:1/6"
-        "＝4:1，於是 row_ap_gap 0.667 拆成 0.533 與 0.133。案例表顯示的就是這個未加總的"
-        "單列值；壓制矩陣與 gap share 則是把它**跨列加總**。分帳、非因果。",
+        "整份報表的**基礎量（逐列）**：正例列的 AP 缺口，分給排在它上方各負例的一份。"
+        "完整拆分公式與例子見開頭「核心概念」區；這裡出現的數字都是它加總到不同粒度"
+        "的結果。分帳、非因果。",
+    "全體 allocated_ap_gap 總量":
+        "所有 (受害, 壓制者) 的 allocated_ap_gap 全部加總＝所有 gap share 的**共同分母**。"
+        "見開頭「核心概念」區；受害者側全部 gap share 加起來＝100%、壓制者側也是。",
     "AP": "該 item 在它自己的正例列上的 average precision（0–1）；越高＝正例越常被排在前面。",
     "AP gap": "1 − AP。離「正例全部排最前」還差多少（每列平均）。",
     "AP gap from suppressors":
@@ -67,12 +70,12 @@ _DEFS: dict[str, str] = {
         "AP gap − AP gap from suppressors：缺口裡沒有負例壓在上面的部分。**本次 k=all 時它結構上恆為 0**"
         "（一個正例只要沒排最前、上方必有負例）；只有把 k 設成有限值、正例落到 top-k 之外時才會 > 0。",
     "gap share（受害者）":
-        "該 item **作為受害者**、攤在它頭上的 allocated_ap_gap 加總 ÷ 全體總量。"
-        "＝（AP gap from suppressors × n_pos）÷ 全體總量（總量印在本區說明，可自行驗算）。",
+        "該 item **作為受害者**、攤在它頭上的 allocated_ap_gap 加總 ÷ 全體 allocated_ap_gap 總量"
+        "（見開頭「核心概念」）。＝（AP gap from suppressors × n_pos）÷ 該總量，可自行驗算。",
     "gap share（壓制者）":
-        "該 item **作為壓制者**、它造成的 allocated_ap_gap 加總 ÷ 全體總量。"
-        "⚠ 與『受害者側』同樣是佔全體的比例、但加總的是不同一批列——同一個 item "
-        "兩者可以差很多（很少被壓、卻常壓別人），不要當同一個數。",
+        "該 item **作為壓制者**、它造成的 allocated_ap_gap 加總 ÷ 全體 allocated_ap_gap 總量"
+        "（同一個分母）。⚠ 與『受害者側』同樣是佔全體的比例、但加總的是不同一批列——同一個 "
+        "item 兩者可以差很多（很少被壓、卻常壓別人），不要當同一個數。",
     "suppressed pos / n_pos":
         "至少被一個負例壓過的正例列 ÷ 該 item 全部正例列（n_pos）；被壓制有多普遍（與 k 無關）。",
     "n_pos": "該 item 的正例列數（label=1 的列數）。",
@@ -110,6 +113,100 @@ def _k_display(result: dict) -> str:
     """metric k 的人話版：None＝不設截斷。"""
     k = (result.get("metric_params") or {}).get("k")
     return "all（不設截斷，整個排序都納入）" if k is None else str(k)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 概覽——一眼看規模＋關鍵數字，以及「如何讀這頁」的導覽
+# ─────────────────────────────────────────────────────────────────────────
+
+def _summary_section(result: dict) -> ReportSection:
+    """概覽——放什麼由整體邏輯判斷：整體排序品質、壓制多普遍/多深、被歸因的
+    總損失、規模；再加一段中性導覽（想回答什麼問題 → 看哪一區）。"""
+    n_sup = result.get("n_suppressed_positive_rows")
+    n_pos = result.get("n_positive_rows")
+    scorecard = pd.DataFrame(
+        [
+            {"指標": "整體排序品質 macro per-item mAP",
+             "值": f"{fmt_ap(result.get('macro_per_item_map'))}（0–1，越高越好）"},
+            {"指標": "被壓制的正例（至少一個負例排在上面）",
+             "值": f"{fmt_count(n_sup)} / {fmt_count(n_pos)}"
+                   f"（{fmt_percent(result.get('suppressed_positive_rate'))}）"},
+            {"指標": "每個正例上方平均負例數 mean neg above",
+             "值": fmt_mean(result.get("mean_negatives_above_positive"))},
+            {"指標": "全體 allocated_ap_gap 總量（所有 gap share 的分母）",
+             "值": fmt_mean(result.get("total_ap_gap_allocated_to_suppressors"))},
+            {"指標": "規模",
+             "值": f"{fmt_count(result.get('n_queries'))} queries · "
+                   f"{fmt_count(result.get('n_items'))} items · "
+                   f"{fmt_count(n_pos)} 正例列"},
+        ],
+        columns=["指標", "值"],
+    )
+    return ReportSection(
+        title="概覽",
+        description="這份診斷回答：同一個 query 內，哪些負例（label=0）排在正例（label=1）之上、造成多少排序損失。",
+        bullets=[
+            "**如何讀這頁**（想回答什麼 → 看哪一區，順序不必照排）：",
+            "· 想從 item 角度看誰被壓、被壓多少 → 「per-item 壓制彙總」"
+            "（注意它預設按總損失排、不是每-query 嚴重度）。",
+            "· 想知道某個受害 item 是被誰壓的 → 「壓制矩陣」（按列看）。",
+            "· 想知道某個 item 多常去壓別人 → 「壓制者明細與缺口分布」。",
+            "· 想確認一對 item 是不是本來就常一起買（可能不是模型排錯）→ 「交叉購買 lift」。",
+            "· 想核對具體某一筆 → 「具體案例」。",
+            "每個數字的定義就貼在它出現的那一區；貫穿全報表的基礎量 allocated_ap_gap "
+            "與總量，完整說明在下一節「核心概念」。",
+        ],
+        tables=[scorecard],
+        table_titles=["本次執行的關鍵數字"],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 0. 核心概念——整份報表的兩塊地基：allocated_ap_gap（逐列原子）＋全體總量
+# ─────────────────────────────────────────────────────────────────────────
+
+def _foundation_section(result: dict) -> ReportSection:
+    """0. 核心概念——先把 allocated_ap_gap 與全體總量講清楚一次。"""
+    total = result.get("total_ap_gap_allocated_to_suppressors")
+    illustration = pd.DataFrame(
+        [
+            {"角色": "正例", "名次": "rank 3（目前 AP 貢獻 = 1/3）",
+             "severity": "—", "分到的 allocated_ap_gap": "—"},
+            {"角色": "壓制者 A", "名次": "rank 1",
+             "severity": "1 − 1/3 = 2/3", "分到的 allocated_ap_gap": "0.533"},
+            {"角色": "壓制者 B", "名次": "rank 2",
+             "severity": "1/2 − 1/3 = 1/6", "分到的 allocated_ap_gap": "0.133"},
+            {"角色": "合計", "名次": "",
+             "severity": "比 4 : 1", "分到的 allocated_ap_gap": "0.667 = row_ap_gap"},
+        ],
+        columns=["角色", "名次", "severity", "分到的 allocated_ap_gap"],
+    )
+    return ReportSection(
+        title="核心概念：allocated_ap_gap 與全體總量",
+        description=(
+            "整份診斷只有一個基礎量 allocated_ap_gap，其餘每張表、每張圖都是它"
+            "加總到不同粒度的結果。先看懂這一節，後面都是同一個數換個切法。"
+        ),
+        formula="allocated_ap_gap(某正例列, 負例 s) = row_ap_gap × severity(s) ÷ Σ severity",
+        bullets=[
+            f"「壓制」＝同一個 query 內，負例（label=0）排在正例（label=1）之上。"
+            f"本次 metric k = {_k_display(result)}——壓制的計數（mean neg above、被壓率）"
+            "與 k 無關；AP 缺口與其分攤才在 top-k 內衡量。",
+            "row_ap_gap = 1 − 該正例列目前的 AP 貢獻（這一列離「排最前」還差多少）。",
+            "severity(s) = 把正例提到負例 s 的名次、它的 AP 貢獻會多出多少——負例排得"
+            "越高、提上去越賺，severity 越大。一列的缺口就按各負例的 severity 比例分下去"
+            "（見下方示意表）。",
+            "**這是分帳、不是因果**：把某壓制者分到的份加起來，不代表「拿掉它就會賺回這麼多」。",
+            f"**全體 allocated_ap_gap 總量 = {fmt_mean(total)}**：所有 (受害, 壓制者) 的份"
+            "全部加總。它是後面**所有 gap share 的共同分母**——受害者側全部 gap share "
+            "加起來＝100%、壓制者側也是 100%（同一筆總量的兩種切法）。",
+            "**下面每一區都是這個數的加總**：具體案例＝不加總的單列值；壓制矩陣＝加總到 "
+            "(受害, 壓制者) 組合；per-item 受害者側＝加總到 item 當受害者；壓制者明細＝"
+            "加總到 item 當壓制者。理解這一個數＋這一個總量，其餘只是「加總到什麼粒度」。",
+        ],
+        tables=[illustration],
+        table_titles=["示意：正例在 rank 3、上方兩個負例，缺口 0.667 按 severity 4:1 拆成 0.533 / 0.133"],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -159,22 +256,19 @@ def _target_summary_section(result: dict) -> ReportSection | None:
         ),
         formula="AP gap = 1 − AP；AP gap from suppressors + unexplained AP gap = AP gap",
         bullets=[
-            f"「壓制」＝同一個 query 內，負例（label=0）排在正例（label=1）之上。"
-            f"本次 metric k = {_k_display(result)}。",
-            "被壓制的計數（mean neg above、suppressed pos / n_pos）與 k 無關；"
-            "AP 缺口與其分攤才在 top-k 內衡量。",
+            "這是把 allocated_ap_gap 加總到「item 當受害者」（見開頭核心概念）。",
             "⚠ 這張表**預設依 gap share（受害者）降冪**，而它是**總損失**（筆數加權）："
             "正例列數多、但其實排得不錯的 item 會排在前面，正例列數少、但排得很差的 "
             "item 會沉在後面。要看**每個 query 的嚴重度**（與筆數無關）請改看 AP（越低"
             "越差）與 median pos rank（越接近 b of b 越常墊底）。哪個角度重要由你決定。",
-            "gap share（受害者）可自行驗算：（AP gap from suppressors × n_pos）÷ "
-            f"全體 allocated_ap_gap 總量 {fmt_mean(total)}。",
+            f"gap share（受害者）＝（AP gap from suppressors × n_pos）÷ 全體總量 "
+            f"{fmt_mean(total)}（見開頭），可自行驗算。",
             "unexplained AP gap 這欄本次全為 0，是 k=all 的結構性結果（見定義），不是表壞了。",
             "「頭號壓制者」就是壓制矩陣裡這一列 target gap share 最大的那一欄。",
         ],
         tables=[
             _defs_table(
-                "allocated_ap_gap", "AP", "AP gap", "AP gap from suppressors",
+                "AP", "AP gap", "AP gap from suppressors",
                 "unexplained AP gap", "gap share（受害者）", "n_pos",
                 "suppressed pos / n_pos", "median pos rank", "mean neg above",
             ),
@@ -234,7 +328,7 @@ def _matrix_section(result: dict) -> ReportSection | None:
     ]
     if n_all > n_shown:
         bullets.append(
-            f"item 共 {n_all} 個，此表只列 overall gap share 最大的 {n_shown} 個"
+            f"item 共 {n_all} 個，此表只列 gap share（受害者）最大的 {n_shown} 個"
             "（列與欄同一組），完整成對資料見 JSON 產物的 pair_ledger。"
         )
 
@@ -316,7 +410,7 @@ def _by_suppressor_section(result: dict) -> ReportSection | None:
             ],
             columns=_BY_SUPPRESSOR_COLUMNS,
         ))
-        table_titles.append("壓制者明細（依 overall gap share 降冪）")
+        table_titles.append("壓制者明細（依 gap share 壓制者側降冪）")
 
     return ReportSection(
         title="壓制者明細與缺口分布",
@@ -400,7 +494,7 @@ def _cross_purchase_section(result: dict) -> ReportSection | None:
     ]
     if n_all > n_shown:
         bullets.append(
-            f"item 共 {n_all} 個，此圖只畫 overall gap share 最大的 {n_shown} 個。"
+            f"item 共 {n_all} 個，此圖只畫 gap share（受害者）最大的 {n_shown} 個。"
         )
 
     return ReportSection(
@@ -422,7 +516,7 @@ _EXAMPLE_COLUMNS = [
     "query", "positive_item", "suppressor_item",
     "positive_rank", "suppressor_rank",
     "positive_score (logit)", "suppressor_score (logit)", "score_margin",
-    "此列分攤缺口",
+    "allocated_ap_gap（此列值）",
 ]
 
 
@@ -443,7 +537,7 @@ def _examples_section(result: dict) -> ReportSection | None:
                 "positive_score (logit)": fmt_logodds(e.get("positive_score")),
                 "suppressor_score (logit)": fmt_logodds(e.get("suppressor_score")),
                 "score_margin": fmt_logodds(e.get("score_margin")),
-                "此列分攤缺口": fmt_ap(e.get("allocated_ap_gap")),
+                "allocated_ap_gap（此列值）": fmt_ap(e.get("allocated_ap_gap")),
             }
             for e in examples
         ],
@@ -452,27 +546,17 @@ def _examples_section(result: dict) -> ReportSection | None:
 
     return ReportSection(
         title="具體案例：被壓制的正例列",
-        description="分攤缺口最大的單列 (正例, 壓制者) 案例，逐列列出供核對。",
+        description="這是不加總的單列 allocated_ap_gap（見開頭核心概念），分攤缺口最大的幾列，逐案核對用。",
         formula="score_margin = suppressor_score − positive_score（兩者都已是 logit 分數，直接相減）",
         bullets=[
-            "「此列分攤缺口」是 allocated_ap_gap 的**單列原子值**（不是前面幾區的加總值）——"
-            "同一個 (受害, 壓制者) 組合在很多列出現，前面矩陣／分布是把這些單列值加總後的結果。",
+            "「allocated_ap_gap（此列值）」是開頭那個基礎量的**單列原子值**——前面矩陣／"
+            "分布是把同一個 (受害, 壓制者) 組合的這些單列值加總後的結果。",
             "分數欄已經是 logit 分數；score_margin 就是兩者相減，正值代表壓制者分數確實較高。",
-            "依此列分攤缺口由大到小排；資料很規律時前幾名可能同值（同一種名次配置重複很多列）。",
+            "依此列值由大到小排；資料很規律時前幾名可能同值（同一種名次配置重複很多列）。",
             "逐列核對用，不作聚合證據——聚合看前面幾區。",
         ],
-        tables=[
-            pd.DataFrame(
-                [
-                    {"數字": "score_margin", "定義": _DEFS["score_margin"]},
-                    {"數字": "此列分攤缺口（allocated_ap_gap 單列值）",
-                     "定義": _DEFS["allocated_ap_gap"]},
-                ],
-                columns=["數字", "定義"],
-            ),
-            table,
-        ],
-        table_titles=[_DEFS_TITLE, "案例（依此列分攤缺口降冪）"],
+        tables=[_defs_table("score_margin", "allocated_ap_gap"), table],
+        table_titles=[_DEFS_TITLE, "案例（依 allocated_ap_gap 此列值降冪）"],
     )
 
 
@@ -489,7 +573,7 @@ def _completeness_section(result: dict) -> ReportSection:
     bullets = [
         f"metric k = {_k_display(result)}；"
         f"全體 allocated_ap_gap 總量 = {fmt_mean(result.get('total_ap_gap_allocated_to_suppressors'))}"
-        "（overall gap share 的分母）。",
+        "（所有 gap share 的分母，另見概覽與核心概念）。",
         "計算層 notes（含 logit 轉換的觀測）："
         + (f"{len(notes)} 則，列於下方" if notes else "無"),
         "axis_order 涵蓋的 item 數（出現在壓制成對表裡，才會進矩陣與泡泡圖）："
@@ -517,13 +601,16 @@ def _completeness_section(result: dict) -> ReportSection:
 def render(result: dict, parameters: dict) -> tuple[ReportSection, ...]:
     """把 ``compute`` 的輸出轉成一串報表章節；停用時回空 tuple。
 
-    順序即閱讀順序：受害者明細 → 誰壓誰（矩陣）→ 壓制者明細與分布 →
-    交叉購買（對照組）→ 具體案例 → 完整性檢查。
+    順序即閱讀順序：概覽 → 核心概念（allocated_ap_gap ＋ 全體總量）→ 受害者明細
+    → 誰壓誰（矩陣）→ 壓制者明細與分布 → 交叉購買（對照組）→ 具體案例 →
+    完整性檢查。概覽與核心概念永遠在最前、完整性檢查永遠殿後。
     """
     if not result.get("enabled"):
         return ()
 
     sections = [
+        _summary_section(result),
+        _foundation_section(result),
         _target_summary_section(result),
         _matrix_section(result),
         _by_suppressor_section(result),

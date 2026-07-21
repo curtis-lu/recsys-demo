@@ -332,12 +332,11 @@ def test_examples_score_margin_formula_is_not_double_logit():
 
 
 def test_examples_column_marks_the_single_row_atomic_value():
-    """reader 反饋：allocated_ap_gap 定義說『跨列加總』，案例表卻是單列值。
+    """reader 反饋：allocated_ap_gap 一詞在別處是加總值，案例表卻是單列值。
     案例欄要標成單列值，並在說明裡點出它與加總值的關係。"""
     section = _section(suppression.render(_result(), {}), _EXAMPLES_TITLE)
     data = section.tables[-1]
-    assert "此列分攤缺口" in data.columns, "案例欄沒有標成單列值"
-    assert "allocated_ap_gap" not in data.columns, "案例欄仍用會誤解的加總名"
+    assert "allocated_ap_gap（此列值）" in data.columns, "案例欄沒有標成單列值"
     assert "單列" in _section_text(section) and "加總" in _section_text(section)
 
 
@@ -468,13 +467,40 @@ def test_victim_and_suppressor_gap_share_are_named_and_defined_distinctly():
     )
 
 
-def test_allocated_ap_gap_definition_carries_the_split_formula():
-    """第二輪 reader：allocated_ap_gap 是全頁地基量卻沒有公式，0.5333 無從驗算。
-    定義要含拆分公式（row_ap_gap × severity 比例）。"""
+def test_foundation_section_is_first_and_carries_the_split_formula():
+    """第三輪重排：allocated_ap_gap 是全頁地基量，拆分公式與例子集中在開頭
+    「核心概念」區講一次（不再各區重述），且該區排在最前面（概覽之後）。"""
+    sections = suppression.render(_result(), {})
+    found = _section(sections, "核心概念")
+    text = _section_text(found)
+    assert "row_ap_gap" in text and "severity" in text, "核心概念沒有拆分公式"
+    assert "4:1" in text or "4 : 1" in text, "核心概念沒有 0.533/0.133 的例子"
+    # 核心概念在概覽之後、所有加總區之前
+    titles = [s.title for s in sections]
+    i_found = next(i for i, t in enumerate(titles) if "核心概念" in t)
+    i_peritem = next(i for i, t in enumerate(titles) if _SUMMARY_TITLE in t)
+    assert i_found < i_peritem, f"核心概念沒有排在各加總區之前：{titles}"
+
+
+def test_summary_section_is_the_very_first_with_scorecard_and_navigation():
+    """使用者要求 codex 式的概覽區塊：第一節、含關鍵數字表＋如何讀導覽，
+    但導覽是中性的（不替讀者判斷誰最該查）。"""
+    sections = suppression.render(_result(), {})
+    assert "概覽" in sections[0].title, f"第一節不是概覽：{sections[0].title}"
+    text = _section_text(sections[0])
+    assert "macro per-item mAP" in text and "總量" in text, "概覽缺關鍵數字"
+    assert "如何讀這頁" in text, "概覽沒有導覽"
+    # 不下結論：不得出現「該先查」「最該」這類替讀者判斷的字
+    assert "該先查" not in text and "最該查" not in text, "概覽越界替讀者下判斷"
+
+
+def test_allocated_ap_gap_short_defs_point_back_to_the_foundation():
+    """各加總區的 allocated_ap_gap 定義是短版、回指核心概念，不再各自重述整條公式。"""
     sections = suppression.render(_result(), {})
     matrix_defs = _section(sections, _MATRIX_TITLE).tables[0]
     d = matrix_defs.loc[matrix_defs["數字"] == "allocated_ap_gap", "定義"].iloc[0]
-    assert "row_ap_gap" in d and "severity" in d, "allocated_ap_gap 定義沒有拆分公式"
+    assert "核心概念" in d, "各區 allocated_ap_gap 沒有回指核心概念"
+    assert "severity(s) = " not in d, "各區又重述了完整拆分公式（應集中在核心概念）"
 
 
 def test_bubble_explains_diagonal_is_self_pairing_not_zero():
