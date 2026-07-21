@@ -369,7 +369,7 @@ def test_per_item_summary_has_the_core_columns():
     assert section.tables, "per-item 彙總沒有表格"
     cols = list(section.tables[-1].columns)
     for col in ("受害 item", "AP gap from suppressors", "unexplained AP gap",
-                "overall gap share", "suppressed pos / n_pos", "mean neg above",
+                "gap share（受害者）", "suppressed pos / n_pos", "mean neg above",
                 "頭號壓制者"):
         assert col in cols, f"per-item 表缺欄位 {col!r}"
 
@@ -449,6 +449,38 @@ def test_distribution_bars_cover_both_victim_and_suppressor_views():
     assert "誰承受" in joined and "誰造成" in joined, (
         f"缺口分布長條圖不齊全（受害者／壓制者）：{bar_titles}"
     )
+
+
+def test_victim_and_suppressor_gap_share_are_named_and_defined_distinctly():
+    """第二輪 reader 抓到的真 bug：受害者側與壓制者側的 gap share 同名同定義、
+    卻是不同的數（exchange_usd 6.9% vs 43.9%），且受害者的驗算式對壓制者不成立。
+    兩者的欄名與定義必須分開。"""
+    sections = suppression.render(_result(), {})
+    victim = _section(sections, _SUMMARY_TITLE)
+    supp = _section(sections, _BY_SUPPRESSOR_TITLE)
+    assert "gap share（受害者）" in victim.tables[-1].columns
+    assert "gap share（壓制者）" in supp.tables[-1].columns
+    # 受害者的驗算式（AP gap from suppressors × n_pos）不該出現在壓制者側定義
+    supp_defs = supp.tables[0]
+    supp_gap_def = supp_defs.loc[supp_defs["數字"] == "gap share（壓制者）", "定義"].iloc[0]
+    assert "AP gap from suppressors × n_pos" not in supp_gap_def, (
+        "壓制者側 gap share 沿用了受害者的驗算式（對它不成立）"
+    )
+
+
+def test_allocated_ap_gap_definition_carries_the_split_formula():
+    """第二輪 reader：allocated_ap_gap 是全頁地基量卻沒有公式，0.5333 無從驗算。
+    定義要含拆分公式（row_ap_gap × severity 比例）。"""
+    sections = suppression.render(_result(), {})
+    matrix_defs = _section(sections, _MATRIX_TITLE).tables[0]
+    d = matrix_defs.loc[matrix_defs["數字"] == "allocated_ap_gap", "定義"].iloc[0]
+    assert "row_ap_gap" in d and "severity" in d, "allocated_ap_gap 定義沒有拆分公式"
+
+
+def test_bubble_explains_diagonal_is_self_pairing_not_zero():
+    """第二輪 reader：對角線空白是排除自我配對、不是 n_joint=0。兩種空白要分開講。"""
+    text = _section_text(_section(suppression.render(_result(), {}), _BUBBLE_TITLE))
+    assert "自我配對" in text and "對角線" in text
 
 
 def test_suppressor_table_drops_mean_logit_margin():
