@@ -171,9 +171,36 @@ def test_dataset_section_flags_phase2_stub():
 # ---- Task 5: 衡量指標（合併 primary_map/guardrail/attr/segment/category）----
 
 def test_metrics_section_overall_orientation_locked():
-    # families（map/precision/recall）是 overall 表的 row index，非欄（方向鎖）
+    # families（map/precision/recall）是 overall 彙總表的 row index，非欄（方向鎖）
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
-    assert "map" in s.tables[0].index
+    fam_tbl = next(t for t in s.tables
+                   if set(["map", "precision", "recall"]).issubset(set(t.index)))
+    assert "map" in fam_tbl.index and "recall" in fam_tbl.index
+
+
+def test_metrics_section_two_family_blocks_consistent():
+    m = _metrics()
+    m["per_segment"] = {"seg1": {"map@1": 0.5, "precision@1": 0.4, "recall@1": 0.3}}
+    m["category"] = {
+        "overall": {"map@1": 0.4, "precision@1": 0.3, "recall@1": 0.2},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "map_attr@1": 0.5,
+                                  "mean_pos": 2.0}},
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    tt = s.table_titles
+    # A 塊 per-segment 拆成 map/precision/recall 三張
+    assert sum(1 for x in tt if "per-segment" in x and "map@k" in x) == 1
+    assert sum(1 for x in tt if "per-segment" in x and "precision@k" in x) == 1
+    assert sum(1 for x in tt if "per-segment" in x and "recall@k" in x) == 1
+    # A 塊 大類 overall 有 precision（families 表含 precision 列）
+    cat_ov = next(t for t, x in zip(s.tables, tt)
+                  if "大類 overall" in x)
+    assert "precision" in cat_ov.index
+    # B 塊 大類 per-item 補了 map_attr（與 per-item 對稱）
+    assert any("大類 per-item" in x and "map_attr@k" in x for x in tt)
+    assert any("大類 per-item" in x and "recall@k" in x for x in tt)
 
 
 def test_metrics_section_macro_is_headline():
@@ -279,9 +306,17 @@ def test_item_share_by_rank_columns_sum_to_one():
 
 
 def test_item_detail_drops_calibration():
-    # fixture 含 calibration，但本段刻意不畫（排序不是校準）→ 只有 4 張分布圖
+    # fixture 含 calibration，但本段刻意不畫（排序不是校準）。5 張圖＝score 分布 2
+    # ＋rank 矩陣 heatmap 3（含 positive rate），無 calibration 第 6 張。
     s = rb.build_item_detail_section(_report_aggregates(), _params())
-    assert len(s.figures) == 4
+    assert len(s.figures) == 5
+
+
+def test_item_detail_positive_rate_is_figure_not_table():
+    # positive rate 改成 heatmap（圖），item-share 仍是數字表；圖群組在前
+    s = rb.build_item_detail_section(_report_aggregates(), _params())
+    assert len(s.tables) == 2   # 只剩兩張 item-share 數字表
+    assert all("item share by rank" in tt for tt in s.table_titles)
 
 
 def test_item_detail_is_top_level_not_collapsible():
