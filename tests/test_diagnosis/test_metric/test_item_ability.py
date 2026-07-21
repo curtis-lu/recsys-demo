@@ -72,6 +72,49 @@ def test_ties_and_distinct_scores_differ():
     assert tied != dist
 
 
+def _weighted_auc_reference(labels, weights, tie_starts):
+    """逐同分組的參考實作（＝向量化前的原版邏輯），只給等價性測試用。"""
+    n = len(labels)
+    if n == 0:
+        return None
+    yy = np.asarray(labels, np.int64)
+    w = np.asarray(weights, np.float64)
+    pos_total = float(w[yy == 1].sum())
+    neg_total = float(w[yy == 0].sum())
+    if pos_total <= 0 or neg_total <= 0:
+        return None
+    numer = 0.0
+    neg_before = 0.0
+    for i in range(len(tie_starts) - 1):
+        s, e = int(tie_starts[i]), int(tie_starts[i + 1])
+        pos_w = float(w[s:e][yy[s:e] == 1].sum())
+        neg_w = float(w[s:e][yy[s:e] == 0].sum())
+        numer += pos_w * (neg_before + 0.5 * neg_w)
+        neg_before += neg_w
+    return float(numer / (pos_total * neg_total))
+
+
+def test_weighted_auc_vectorized_matches_reference():
+    """效能修正（reduceat 向量化）不得改變輸出：對隨機資料（含大量同分與加權）
+    與逐同分組的參考實作一致到浮點精度。破壞向量化（例如 neg_before 忘了做成
+    獨佔前綴和）這條會紅。"""
+    rng = np.random.default_rng(7)
+    for trial in range(30):
+        n = int(rng.integers(1, 400))
+        # 整數分數製造大量同分組；連續分數則 tie group ≈ n
+        score = rng.integers(0, max(2, n // 3), size=n).astype(float)
+        labels = (rng.random(n) < 0.4).astype(np.int64)
+        w = rng.uniform(0.1, 5.0, size=n)
+        order, ts = presort_by_score(score)
+        yy, ww = labels[order], w[order]
+        ref = _weighted_auc_reference(yy, ww, ts)
+        vec = weighted_auc_presorted(yy, ww, ts)
+        if ref is None:
+            assert vec is None
+        else:
+            assert vec == pytest.approx(ref, abs=1e-12), f"trial {trial}: {vec} != {ref}"
+
+
 def test_bootstrap_sorts_once_per_item_regardless_of_n_boot(monkeypatch):
     """效能契約：排序次數 ＝ item 數，與 n_boot 無關。
 
