@@ -103,6 +103,25 @@ def test_overview_no_verdict_vocabulary():
         assert bad not in text
 
 
+def test_core_concept_section_defines_atomic_unit():
+    s = rb.build_core_concept_section(_params())
+    assert s.title.startswith("核心概念")
+    # 有公式（AP@k 定義）
+    assert s.formula
+    # 用一個具體數字走一遍（bullets 內含數例）
+    assert any(any(ch.isdigit() for ch in b) for b in s.bullets)
+    # 有「每區＝同一數換切法」的地圖字樣
+    joined = s.description + " ".join(s.bullets)
+    assert "粒度" in joined or "加總" in joined
+
+
+def test_core_concept_section_no_verdict_vocabulary():
+    s = rb.build_core_concept_section(_params())
+    text = s.description + s.formula + " ".join(s.bullets)
+    for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
+        assert bad not in text
+
+
 def test_dataset_overview_section_tables():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     assert len(s.tables) == 3   # totals / by_snap_date / by_item

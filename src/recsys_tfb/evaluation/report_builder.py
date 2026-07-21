@@ -192,6 +192,50 @@ def build_overview_section(
     )
 
 
+def build_core_concept_section(parameters: dict) -> ReportSection:
+    """核心概念（地基）：講清一次原子量，後面各區都是它換切法。
+
+    presentation §一.2：定義 ＋ 用一個具體數字走一遍 ＋「下面每區＝它加總到
+    什麼粒度」的地圖。不各區重複這條定義（會漂移）。
+    """
+    cols = ((parameters.get("schema", {}) or {}).get("columns", {}) or {})
+    time_col = cols.get("time", "snap_date")
+    entity = cols.get("entity", ["cust_id"])
+    entity_str = "×".join(entity) if isinstance(entity, list) else str(entity)
+    item_col = cols.get("item", "prod_name")
+    score_col = cols.get("score", "score")
+    label_col = cols.get("label", "label")
+
+    description = (
+        f"一個 query＝一組（{time_col} × {entity_str}）。query 內的候選 "
+        f"{item_col} 依模型分數 {score_col} 由高到低排名；{label_col}=1 的是"
+        f"正例。下面每一個數字都是「這個 per-query 排序結果」加總到不同粒度——"
+        "同一個量，換一種切法。"
+    )
+    formula = (
+        "AP@k = (1 / min(k, R)) · Σ(i=1..k) rel_i · P@i\n"
+        "  P@i = 前 i 名中的正例數 / i　（前 i 名的精確率）\n"
+        "  rel_i = 第 i 名是正例則 1、否則 0；R = 該 query 的正例數"
+    )
+    bullets = [
+        f"例：某 query 有 4 個候選 {item_col}、2 個正例，排名後正例落在第 1、"
+        "第 3 名。",
+        "P@1 = 1/1 = 1.0、P@2 = 1/2 = 0.5、P@3 = 2/3 ≈ 0.667。",
+        "AP@3 = (1/min(3,2)) · (1·1.0 + 0·0.5 + 1·0.667) ≈ 0.83——只在正例"
+        "出現的名次上累加精確率，再除以正例數 R。",
+        "地圖（下面每區＝這個 per-query AP 加總到不同粒度）："
+        "overall＝跨 query 等權平均；per-item＝把 AP 歸因到正例所屬的 "
+        f"{item_col} 後 item 等權（macro）；per-segment＝依 segment 分組平均；"
+        "per-item 細部拆解＝同一批排名的分數／名次分布側面。",
+    ]
+    return ReportSection(
+        title="核心概念 — 一個 query 的排序",
+        description=description,
+        formula=formula,
+        bullets=bullets,
+    )
+
+
 def build_dataset_overview_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
