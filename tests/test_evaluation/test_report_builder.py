@@ -153,6 +153,74 @@ def test_dataset_section_flags_phase2_stub():
     assert "後續" in s.description or "per-segment" in s.description.lower()
 
 
+# ---- Task 5: 衡量指標（合併 primary_map/guardrail/attr/segment/category）----
+
+def test_metrics_section_overall_orientation_locked():
+    # families（map/precision/recall）是 overall 表的 row index，非欄（方向鎖）
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert "map" in s.tables[0].index
+
+
+def test_metrics_section_macro_is_headline():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert any("macro per-item mAP" in tt and "頭號" in tt
+               for tt in s.table_titles)
+
+
+def test_metrics_section_per_item_has_attr_and_recall():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    cols = " ".join(" ".join(map(str, t.columns)) for t in s.tables)
+    assert "map_attr@1" in cols
+    assert "recall@1 (per-item)" in cols
+
+
+def test_metrics_section_no_guardrail_verdict():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    text = (s.description + " ".join(s.table_titles)
+            + " ".join(t.to_string() for t in s.tables))
+    for bad in ("護欄", "pass/fail", "達標", "未達標", "偏高", "偏低",
+                "不足", "異常", "嚴重", "良好"):
+        assert bad not in text
+
+
+def test_metrics_section_hides_ndcg():
+    m = _metrics()
+    m["per_segment"] = {"seg1": {"map@1": 0.5, "ndcg@1": 0.6, "recall@1": 0.3}}
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
+
+
+def test_metrics_section_detail_tables_collapsed():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    assert any(s.collapsed_tables)      # 明細收合
+    assert not s.collapsed_tables[0]    # overall 頂線可見
+
+
+def test_metrics_section_has_macro_rows():
+    s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
+    map_tbl = next(t for t in s.tables
+                   if "map_attr@1" in " ".join(map(str, t.columns)))
+    assert rb._MACRO_LABEL in map_tbl.index
+
+
+def test_metrics_section_category_present_when_key():
+    m = _metrics()
+    m["category"] = {
+        "overall": {"map@1": 0.4, "map@2": 0.45},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "dataset_overview": {"totals": {"n_products": 2}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    assert any("大類" in tt for tt in s.table_titles)
+
+
+def test_metrics_section_none_when_off():
+    p = _params()
+    p["evaluation"]["report"]["sections"] = {"primary_map": False}
+    assert rb.build_metrics_section(_metrics(), p, metric_ci=_metric_ci()) is None
+
+
 class TestVisibleMetricKeys:
     def test_drops_ndcg_keys(self):
         keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]

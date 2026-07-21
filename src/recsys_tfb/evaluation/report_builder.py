@@ -750,6 +750,145 @@ def build_segment_section(
     )
 
 
+def build_metrics_section(
+    metrics: dict, parameters: dict, metric_ci: dict | None = None
+) -> ReportSection | None:
+    """衡量指標：由粗到細——overall → per-item → per-segment → per-category。
+
+    合併原 primary_map / guardrail_recall / per_item_attr / per_segment /
+    category 五段（沿用同一批私有 helper，helper 不改，故方向鎖與 ndcg 濾一
+    併保留）。全克制：recall@k 是 map_attr@k 的互補角度（正例有沒有進 top-k），
+    不下 pass/fail；overall per-query 與 macro per-item 並列為兩種加權。頭號
+    指標＝macro per-item mAP。明細表預設收合（點標題展開）。依 §二，正規化的
+    per-item 表用數字表、不掛全域色階 heatmap（原 recall 色階 heatmap 移除）。
+    """
+    if not _section_on(parameters, "primary_map"):
+        return None
+    overall = metrics.get("overall", {})
+    per_item = metrics.get("per_item", {})
+    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
+    disp = _report_cfg(parameters).get("display", {}) or {}
+    n_prod = _n_products(metrics)
+    map_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
+    rec_ks = _resolve_display_k(
+        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
+    )
+
+    tables: list[pd.DataFrame] = []
+    titles: list[str] = []
+    collapsed: list[bool] = []
+
+    def _add(tbl, title, is_collapsed):
+        tables.append(tbl)
+        titles.append(title)
+        collapsed.append(is_collapsed)
+
+    # (1) overall（由粗）：families 為 row index（方向鎖）＋ macro per-item mAP CI（頭號）
+    rows = {}
+    for fam in ("map", "precision", "recall"):
+        rows[fam] = {
+            f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_prod)}")
+            for k in map_ks
+        }
+    _add(pd.DataFrame(rows).T, "overall per-query 指標 @k（另一種加權）", False)
+    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
+        m = metric_ci["macro"]
+        sm = metric_ci.get("sample", {}) or {}
+        _add(
+            pd.DataFrame(
+                [{"AP(抽樣)": m.get("ap"), "CI 2.5%": m.get("ci_low"),
+                  "CI 97.5%": m.get("ci_high"),
+                  "樣本 query 數": sm.get("n_queries_sampled")}],
+                index=["macro per-item mAP"],
+            ),
+            "頭號指標：macro per-item mAP（item 等權，抽樣估計）",
+            False,
+        )
+
+    # (2) per-item（中細）：map_attr@k（+CI 欄）與 recall@k 互補角度，明細收合
+    map_tbl = _per_item_metric_table(
+        per_item, map_ks, n_prod, "map_attr", "map_attr@{k}",
+        macro_metrics=macro_item,
+    )
+    if metric_ci and metric_ci.get("enabled"):
+        ci_items = metric_ci.get("per_item", {}) or {}
+        ci_macro = metric_ci.get("macro") or {}
+
+        def _ci_val(idx, field):
+            src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
+            return src.get(field)
+
+        for col, field in (("AP(抽樣)", "ap"), ("CI 2.5%", "ci_low"),
+                           ("CI 97.5%", "ci_high"), ("n_pos(抽樣)", "n_pos")):
+            map_tbl[col] = [_ci_val(idx, field) for idx in map_tbl.index]
+    _add(map_tbl, "per-item map_attr@k（排序品質）", True)
+    _add(
+        _per_item_recall_table(per_item, rec_ks, n_prod, macro_metrics=macro_item),
+        "per-item recall@k（互補角度：正例有沒有進 top-k）",
+        True,
+    )
+
+    # (3) per-segment：ndcg 濾、macro 頂列，明細收合
+    per_segment = metrics.get("per_segment", {})
+    if per_segment:
+        macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
+        seg_rows = (
+            {_MACRO_LABEL: macro_seg, **per_segment}
+            if macro_seg else dict(per_segment)
+        )
+        seg_rows = {
+            seg: {k: (mm or {}).get(k)
+                  for k in _visible_metric_keys(list((mm or {}).keys()))}
+            for seg, mm in seg_rows.items()
+        }
+        _add(pd.DataFrame(seg_rows).T, "per-segment per-query 指標", True)
+
+    # (4) per-category（大類，選 b 收進本段）：明細收合
+    cat = metrics.get("category")
+    if cat:
+        n_cat = int(
+            cat.get("dataset_overview", {}).get("totals", {}).get("n_products", 0)
+        )
+        cat_map_ks = _resolve_display_k(
+            disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat
+        )
+        cat_rec_ks = _resolve_display_k(
+            disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_cat
+        )
+        cat_overall = cat.get("overall", {})
+        cat_map = pd.DataFrame(
+            [{f"map@{k}": cat_overall.get(f"map@{_k_to_lookup(k, n_cat)}")
+              for k in cat_map_ks}]
+        ).T
+        cat_map.columns = ["value"]
+        _add(cat_map, "大類 mAP@k", True)
+        cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
+        _add(
+            _per_item_recall_table(
+                cat.get("per_item", {}), cat_rec_ks, n_cat,
+                macro_metrics=cat_macro_item,
+            ),
+            "大類 per-item recall@k",
+            True,
+        )
+
+    return ReportSection(
+        title="衡量指標",
+        description=(
+            "由粗到細看模型的排序表現：overall（跨 query 等權）→ per-item"
+            "（歸因到正例 item、item 等權）→ per-segment → per-category。頭號"
+            "指標為 macro per-item mAP；overall per-query mAP 是另一種加權，兩者"
+            "並列、不比高下。recall@k 與 map_attr@k 互補：map_attr@k 看排序品質"
+            "（正例排得多前），recall@k 看正例有沒有進 top-k；兩者並列一起看，"
+            "判斷留給你。明細表點標題展開。K = 產品數時 precision 退化為 base "
+            "rate、recall 恆為 1。"
+        ),
+        tables=tables,
+        table_titles=titles,
+        collapsed_tables=collapsed,
+    )
+
+
 def build_diagnostics_figures(report_aggregates: dict | None) -> list:
     """把 ``aggregate_report_diagnostics`` 的 payload 還原成圖。
 
