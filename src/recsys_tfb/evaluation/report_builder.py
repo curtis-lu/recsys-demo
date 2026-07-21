@@ -1326,11 +1326,12 @@ def build_diagnosis_links_section(
         if str(p).endswith(".html") and not str(p).endswith("index.html")
     )
     return ReportSection(
-        title="排序診斷（獨立頁面）",
+        title="排序診斷（獨立報表）",
         description=(
             '<a href="diagnosis/index.html">診斷索引 diagnosis/index.html</a>'
             f"　—　本次寫出 {n_pages} 頁。索引頁說明每一項回答什麼、排除"
             "什麼，各頁的數字與範圍說明都留在該頁，這裡不複製一份。"
+            "（分流分析的後繼 score_shift 為獨立診斷報表，日後於此連出。）"
         ),
     )
 
