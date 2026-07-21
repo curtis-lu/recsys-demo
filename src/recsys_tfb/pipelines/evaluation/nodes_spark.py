@@ -12,7 +12,6 @@ from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
-    build_diagnostics_figures,
 )
 
 logger = logging.getLogger(__name__)
@@ -619,13 +618,10 @@ def generate_report(
     診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
     的路徑清單、放一個連結進主報表。
     """
-    figures = build_diagnostics_figures(report_aggregates)
-    diagnostics_frames = {"figures": figures} if figures else None
-
     return assemble_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
-        diagnostics_frames=diagnostics_frames,
+        report_aggregates=report_aggregates,
         metric_ci=metric_ci,
         offset_sweep=offset_sweep,
         diagnosis_pages=diagnosis_pages,

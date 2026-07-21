@@ -384,7 +384,29 @@ def test_glossary_section_always_built():
 def test_assemble_report_is_html():
     html = rb.assemble_report(_metrics(), _params())
     assert html.startswith("<!DOCTYPE html>")
-    assert "摘要 Headline" in html
+    assert "概覽" in html                    # 新 spine 第一段
+
+
+def test_assemble_report_new_spine_order():
+    html = rb.assemble_report(
+        _metrics(), _params(), baseline_metrics=_baseline_metrics_full(),
+        metric_ci=_metric_ci(),
+    )
+    # 概覽最前、詞彙表殿後、完整性檢查在詞彙表之前
+    assert html.index("概覽") < html.index("核心概念")
+    assert html.index("完整性檢查") < html.index("詞彙表")
+    for title in ("核心概念 — 一個 query 的排序", "基本統計 — 資料集",
+                  "衡量指標", "baseline — popularity 對照", "完整性檢查"):
+        assert title in html
+
+
+def test_assemble_report_no_offset_sweep_in_main():
+    # offset-sweep 已移出主報表（改由診斷連結導向後繼 score_shift）
+    html = rb.assemble_report(
+        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
+    )
+    assert "Offset sweep" not in html
+    assert "分流 Offset" not in html
 
 
 def test_assemble_report_has_no_ndcg_end_to_end():
@@ -939,11 +961,8 @@ def test_offset_sweep_waterfall_skipped_when_all_deltas_zero():
     assert section.figures == []
 
 
-def test_assemble_report_includes_offset_sweep_section():
-    from recsys_tfb.evaluation.report_builder import assemble_report
-    html = assemble_report(
-        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
-    )
-    assert "Offset sweep" in html
+# offset-sweep 段已移出主報表（Task 11）；「不在主報表」的護欄見
+# test_assemble_report_no_offset_sweep_in_main。build_offset_sweep_section 本身
+# 保留、其單元測試（上方四條）續測該函式行為。
 
 

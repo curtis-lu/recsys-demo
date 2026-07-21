@@ -1374,7 +1374,9 @@ def build_completeness_section(
     facts_tbl.columns = ["value"]
 
     bullets = [
-        "ndcg@k／ndcg_attr@k 有算但刻意不呈現（本框架目標是排序 macro mAP，"
+        # 刻意不寫出被隱藏指標的名字：整份報表有一條端到端護欄禁止該字串出現
+        # （避免值洩漏）；這裡只陳述「算了但不呈現」這件事。
+        "部分排序衍生指標有算但刻意不呈現（本框架目標是排序 macro mAP，"
         "非機率校準）。",
         "per-segment 樣本統計與每-query 正例數分佈本版未算（Phase 2，需新增 "
         "by_segment／per-query 聚合）。",
@@ -1398,25 +1400,28 @@ def assemble_report(
     metrics: dict,
     parameters: dict,
     baseline_metrics: dict | None = None,
-    diagnostics_frames: dict | None = None,
+    report_aggregates: dict | None = None,
     metric_ci: dict | None = None,
     offset_sweep: dict | None = None,
     diagnosis_pages: list | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
-    authoritative order) into the final HTML string."""
+    authoritative order) into the final HTML string.
+
+    8 段 spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
+    衡量指標 → per-item 細部拆解 → baseline → 排序診斷連結 → 完整性檢查 →
+    詞彙表。offset_sweep 不再進主報表（其後繼 score_shift 走診斷連結）；
+    ``offset_sweep`` 參數保留僅為簽章相容（未使用）。
+    """
     candidates = [
-        build_headline_section(metrics, parameters),
+        build_overview_section(metrics, parameters, metric_ci=metric_ci),
+        build_core_concept_section(parameters),
         build_dataset_overview_section(metrics, parameters),
-        build_primary_map_section(metrics, parameters, metric_ci=metric_ci),
-        build_guardrail_recall_section(metrics, parameters),
-        build_per_item_attr_section(metrics, parameters, metric_ci=metric_ci),
-        build_diagnosis_links_section(diagnosis_pages, parameters),
-        build_offset_sweep_section(offset_sweep, parameters),
-        build_category_section(metrics, parameters),
-        build_segment_section(metrics, parameters),
-        build_diagnostics_section(diagnostics_frames, parameters),
+        build_metrics_section(metrics, parameters, metric_ci=metric_ci),
+        build_item_detail_section(report_aggregates, parameters),
         build_baseline_section(metrics, baseline_metrics, parameters),
+        build_diagnosis_links_section(diagnosis_pages, parameters),
+        build_completeness_section(metrics, parameters, metric_ci=metric_ci),
         build_glossary_section(parameters),
     ]
     sections = [s for s in candidates if s is not None]
