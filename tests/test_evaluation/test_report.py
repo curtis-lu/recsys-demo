@@ -193,6 +193,39 @@ class TestGenerateHtmlReport:
         # JS handler exists that sets .open = true on <details> target
         assert ".open = true" in html or ".open=true" in html
 
+    def test_collapsed_table_wrapped_in_details(self):
+        """單張明細表可預設收合（點標題才展開），粒度是表而非整段。
+
+        用獨立 class ``table-collapse`` 與 section 級收合（``class="section"``）
+        區隔，避免動到既有 section 收合測試。
+        """
+        sec = ReportSection(
+            title="T", description="d",
+            tables=[pd.DataFrame({"a": [1]}), pd.DataFrame({"b": [2]})],
+            table_titles=["表一", "表二"],
+            collapsed_tables=[False, True],   # 只有第二張收合
+        )
+        html = generate_html_report([sec])
+        # 收合的表包在 <details class="table-collapse">，summary = 表標題
+        assert '<details class="table-collapse">' in html
+        assert "<summary>表二</summary>" in html
+        # 未收合的表照舊出 <h3>、不被包進 table-collapse
+        assert "<h3>表一</h3>" in html
+        # 只有一張表收合（第二張），不是整段
+        assert html.count('<details class="table-collapse">') == 1
+
+    def test_collapsed_tables_empty_by_default_no_table_details(self):
+        """未指定 collapsed_tables 的 section 不得產生逐表 <details>
+        （既有 13 個 build_* 的輸出逐位元不變）。"""
+        sec = ReportSection(
+            title="T", description="d",
+            tables=[pd.DataFrame({"a": [1]})],
+            table_titles=["表一"],
+        )
+        html = generate_html_report([sec])
+        assert 'class="table-collapse"' not in html
+        assert "<h3>表一</h3>" in html
+
 
 class TestFmtNoSci:
     """Number -> string with no scientific notation (report tables)."""
