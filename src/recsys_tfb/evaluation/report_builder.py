@@ -252,19 +252,23 @@ def build_dataset_overview_section(
     tables = [totals, by_snap, by_item]
     titles = ["整體 totals", "各期 by snap_date", "per-item 正例組成"]
     collapsed = [False, True, False]   # 各期單 snap 時＝totals，預設收合
-    # per-segment 正例組成：版面預覽。數字要 Phase 2 的 by_segment 聚合才有
-    # （目前 artifact 沒有 by_segment 計數），此處用 per_segment 的 segment 名
-    # 當列、值先留「待補」，讓 整體／per-item／per-segment 三者版面對稱、可檢視。
-    per_seg = metrics.get("per_segment", {}) or {}
-    if per_seg:
-        seg_ph = {
-            seg: {"正例數": "待補",
-                  "正樣本率(÷此segment候選列)": "待補",
-                  "query 數佔比": "待補"}
-            for seg in per_seg
-        }
-        tables.append(pd.DataFrame(seg_ph).T)
-        titles.append("per-segment 正例組成（版面預覽·數字待 Phase 2 補）")
+    # per-segment 正例組成：正例數／正樣本率（÷該 segment 候選列）／query 數佔比。
+    # 第 3 欄用「query 數佔比」（該 segment 佔多少 query，反映 segment 大小）——
+    # segment 分的是 query、per-item 分的是正例，兩者不同軸，故不與 per-item 的
+    # 「正例佔比」互換。by_segment 由 compute_dataset_overview 依 active_seg_col
+    # 聚合；缺席（舊 artifact 或無 segment 欄）則不呈現此表。
+    by_seg = ov.get("by_segment", {}) or {}
+    if by_seg:
+        seg_rows = {}
+        for seg, d in sorted(by_seg.items()):
+            seg_rows[seg] = {
+                "正例數": d.get("n_positives"),
+                "候選列數": d.get("n_rows"),
+                "正樣本率(÷此segment候選列)": d.get("positive_rate"),
+                "query 數佔比": d.get("query_share"),
+            }
+        tables.append(pd.DataFrame(seg_rows).T)
+        titles.append("per-segment 正例組成")
         collapsed.append(False)
     cat = metrics.get("category")
     if cat:
@@ -272,7 +276,8 @@ def build_dataset_overview_section(
         if cat_by_item:
             tables.append(pd.DataFrame(cat_by_item).T)
             titles.append("by 大類（大類粒度，不與整體相加）")
-            collapsed.append(True)
+            collapsed.append(False)   # 大類表預設展開（與 totals/by_item/by_segment 一致）
+
     return ReportSection(
         title="基本統計 — 資料集",
         description=(
@@ -283,9 +288,9 @@ def build_dataset_overview_section(
             "此處 per-item 那欄除以「該 item 自己的候選列數」（此 run 每 item 654），"
             "量級不同。「by 大類」是大類粒度（每客戶每大類一列、label＝該大類任一"
             "子產品為正例、大類分數＝子產品最佳分數），故其正例數 ≤ item 粒度合計、"
-            "不與整體 n_positives 相加。per-segment 正例組成表為「版面預覽」——數字"
-            "待 Phase 2 的 by_segment 聚合補（目前 artifact 沒有 by_segment 計數）；"
-            "每-query 正例數分佈同為後續階段。"
+            "不與整體 n_positives 相加。per-segment 正例組成：正例數、候選列數、"
+            "正樣本率、query 數佔比（該 segment 佔多少 query）。每-query 正例數"
+            "分佈為後續階段。"
         ),
         tables=tables,
         table_titles=titles,
@@ -976,8 +981,7 @@ def build_completeness_section(
         # （避免值洩漏）；這裡只陳述「算了但不呈現」這件事。
         "部分排序衍生指標有算但刻意不呈現（本框架目標是排序 macro mAP，"
         "非機率校準）。",
-        "per-segment 樣本統計與每-query 正例數分佈本版未算（Phase 2，需新增 "
-        "by_segment／per-query 聚合）。",
+        "每-query 正例數分佈本版未算（Phase 2，需新增 per-query 聚合）。",
         "baseline 各月明細與趨勢未落地（Phase 2，需保留逐月計數）。",
         "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
         "同序，非獨立軸。",

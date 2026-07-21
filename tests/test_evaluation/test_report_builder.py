@@ -42,7 +42,14 @@ def _metrics():
             "by_item": {"A": {"n_rows": 50, "n_positives": 12,
                               "n_customers": 10, "positive_rate": 0.24},
                         "B": {"n_rows": 50, "n_positives": 8,
-                              "n_customers": 10, "positive_rate": 0.16}}},
+                              "n_customers": 10, "positive_rate": 0.16}},
+            "by_segment": {
+                "X": {"n_rows": 60, "n_positives": 14, "n_customers": 6,
+                      "positive_rate": 14 / 60, "n_queries": 6,
+                      "query_share": 0.6},
+                "Y": {"n_rows": 40, "n_positives": 6, "n_customers": 4,
+                      "positive_rate": 6 / 40, "n_queries": 4,
+                      "query_share": 0.4}}},
         "macro_avg": {
             "by_item": {
                 "hit_rate@1": 0.15, "hit_rate@2": 0.35, "mean_pos": 4.0,
@@ -132,8 +139,32 @@ def test_core_concept_formula_normalizes_by_R_not_min():
 
 def test_dataset_overview_section_tables():
     s = rb.build_dataset_overview_section(_metrics(), _params())
-    assert len(s.tables) == 3   # totals / by_snap_date / by_item
+    assert len(s.tables) == 4   # totals / by_snap_date / by_item / by_segment
     assert s.title
+
+
+def test_dataset_section_per_segment_real_numbers():
+    """per-segment 表顯示真數字（正例數/正樣本率/query 數佔比），無「待補」。
+
+    防退化：欄名或 query_share 讀錯、或退回 placeholder，都該紅。
+    """
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    seg = next(t for t, tt in zip(s.tables, s.table_titles)
+               if "per-segment" in tt)
+    cols = list(map(str, seg.columns))
+    assert "正例數" in cols and "query 數佔比" in cols
+    assert "待補" not in " ".join(map(str, seg.values.ravel()))
+    # query 數佔比逐列加總≈1（X=0.6、Y=0.4）
+    assert abs(seg["query 數佔比"].astype(float).sum() - 1.0) < 1e-6
+    # 第 3 欄不是「正例佔比」（防止被誤改成 per-item 那一軸）
+    assert "正例佔比" not in cols
+
+
+def test_dataset_section_per_segment_has_candidate_col():
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    idx = next(i for i, tt in enumerate(s.table_titles) if "per-segment" in tt)
+    cols = list(map(str, s.tables[idx].columns))
+    assert "候選列數" in cols          # 讓正樣本率可手算核對（正例數÷候選列數）
 
 
 def test_dataset_section_per_item_has_three_cols_with_share():
@@ -156,9 +187,10 @@ def test_dataset_section_share_reconciles():
     assert abs(by_item["正例佔比"].astype(float).sum() - 1.0) < 1e-6
 
 
-def test_dataset_section_flags_phase2_stub():
+def test_dataset_section_flags_remaining_phase2():
     s = rb.build_dataset_overview_section(_metrics(), _params())
-    assert "後續" in s.description or "per-segment" in s.description.lower()
+    # per-segment 已補真數字；仍待的是每-query 正例數分佈
+    assert "每-query" in s.description or "per-query" in s.description.lower()
 
 
 # ---- Task 5: 衡量指標（合併 primary_map/guardrail/attr/segment/category）----
@@ -476,7 +508,9 @@ def test_dataset_overview_adds_by_category_when_present():
         "fund": {"n_rows": 10, "n_positives": 3, "n_customers": 5,
                  "positive_rate": 0.3}}}}
     s = rb.build_dataset_overview_section(m, _params())
-    assert any(tt.startswith("by 大類") for tt in s.table_titles)
+    idx = next(i for i, tt in enumerate(s.table_titles)
+               if tt.startswith("by 大類"))
+    assert s.collapsed_tables[idx] is False   # 大類表預設展開，不收合
 
 
 def test_baseline_section_no_per_item_delta_omits_table():
