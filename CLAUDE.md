@@ -45,6 +45,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 ```bash
 cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name> && pwd          # 在 worktree root
 readlink .venv && /Users/curtislu/projects/recsys_tfb/.venv/bin/python -V   # venv 對齊（Python 3.10.9）
+export SPARK_CONF_DIR=$PWD/conf/spark-local                              # --check-isolation 讀此變數，未設會 FAIL: SPARK_CONF_DIR=''
 PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python scripts/local_spark_setup.py --check-isolation  # data/ 隔離閘
 grep -n "你這次改的鍵:" conf/base/parameters_*.yaml                      # 換成實際改的鍵名，確認印出的是 worktree 的新值
 # （注意：鍵多為巢狀縮排，grep 不要加 ^ 行首錨定——舊版此行用 ^(objective|metric|snap_date) 永遠零命中，等於沒檢查）
