@@ -5,7 +5,7 @@
 ``min_pos_queries_per_item`` 的 item 整批全取（take-all），其餘 query 用
 CRC32 hash-ratio（``utils.hashing``）抽到補滿 ``max_queries``。被抽中的
 query 帶回全部候選列（含負例，排序需要），``toPandas()`` 落到 driver 供
-numpy 迭代計算（bootstrap／offset sweep／成對帳本）重複使用。
+numpy 迭代計算（bootstrap／成對帳本）重複使用。
 
 兩層的納入機率不同（take-all π=1、hash-ratio π=ratio），所以樣本**不是**
 簡單隨機樣本：``sample_pdf`` 帶出 ``stratum`` 與 ``inclusion_weight``
