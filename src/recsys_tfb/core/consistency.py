@@ -83,7 +83,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.ci.n_boot`` ≥ 1; ``diagnosis.ci.enabled`` and every
+  ``diagnosis.ci.n_boot`` ≥ 1; ``diagnosis.item_ability.top_n`` ≥ 0;
+  ``diagnosis.ci.enabled`` and every
   ``diagnosis.<name>.enabled`` for ``name`` in
   ``diagnosis.metric.contract.DIAGNOSES`` must be a real bool (a quoted YAML
   ``"false"`` is truthy and would silently enable the node); and
@@ -560,6 +561,8 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
         ("evaluation.diagnosis.sample.min_pos_queries_per_item",
          sample.get("min_pos_queries_per_item", 50), 1),
         ("evaluation.diagnosis.ci.n_boot", ci.get("n_boot", 200), 1),
+        ("evaluation.diagnosis.item_ability.top_n",
+         (diag.get("item_ability", {}) or {}).get("top_n", 30), 0),
     ):
         if not (isinstance(val, int) and not isinstance(val, bool)
                 and val >= floor):
