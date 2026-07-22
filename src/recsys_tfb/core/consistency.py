@@ -149,8 +149,6 @@ the plan doc for the full table:
 
 from __future__ import annotations
 
-import math
-
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
 

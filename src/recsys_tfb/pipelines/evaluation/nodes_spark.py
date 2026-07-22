@@ -45,7 +45,7 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     測試會轉紅、也不會有錯誤訊息，pipeline 只是安靜地變慢。
 
     鍵與預設值必須跟各消費節點自己讀的完全一致（``enabled``，預設 True），
-    否則閘門與消費端會漂移：使用者關掉舊三項、只開一項吃抽樣的 registry 診斷
+    否則閘門與消費端會漂移：使用者關掉 ci、只開一項吃抽樣的 registry 診斷
     時，樣本不會被抽，消費節點拿到 None 而 fail-loud。
 
     ``contract.DIAGNOSES`` 走**模組屬性**存取（``contract.DIAGNOSES``），不是
