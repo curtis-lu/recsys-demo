@@ -1,21 +1,14 @@
 """Metric-diagnosis 家族共用私有 helper。
 
-Scope（2026-07-20 更新，取代原「僅分流層兩個 leaf 節點」的說法——那句話
-在 ``config_shift``／``item_ability`` 開始 import ``diag_cfg``／
-``metric_params``／``to_logit`` 之後就已經過時，卻沒人回頭改）：本檔案是
-**整個 metric-diagnosis 家族**（``offset_sweep``、``config_shift``、
-``item_ability``、``suppression``）的共用 helper，不限分流層。新增函式前
-先確認是「兩個以上實例逐字相同」才抽——見 :func:`query_key`／
-:func:`sample_arrays`／:func:`ci_for_corrected_minus_baseline` 各自的
-docstring 交代「為什麼這是真的共用、什麼刻意沒抽」。
-
-抽出 ``debug_inject_offsets`` 注入語意的動機不變：它是分流層閘門的已知
-答案來源，必須在家族內完全一致，不允許兩份複製品各自漂移。
+本檔案是 metric-diagnosis 家族（``config_shift``、``item_ability``、
+``suppression``）的共用 helper。新增函式前先確認是「兩個以上實例逐字相同」
+才抽——見 :func:`query_key`／:func:`sample_arrays`／
+:func:`ci_for_corrected_minus_baseline` 各自的 docstring 交代「為什麼這是
+真的共用、什麼刻意沒抽」。
 
 ``_HASH_BUCKETS`` 與 ``utils.hashing.HASH_BUCKETS`` 同值（100_000）——
-該模組 top-level import pyspark，而分流層家族的 numpy-leaf 模組
-（offset_sweep／本檔）刻意保持 pyspark-free 以利無 Spark
-單元測試，故本地重申而不 import。
+該模組 top-level import pyspark，而家族的 numpy-leaf 模組刻意保持
+pyspark-free 以利無 Spark 單元測試，故本地重申而不 import。
 """
 from __future__ import annotations
 
@@ -55,29 +48,6 @@ def to_logit(scores: np.ndarray) -> tuple[np.ndarray, list[str]]:
         ]
     z = np.clip(s, _CLIP_EPS, 1.0 - _CLIP_EPS)
     return np.log(z / (1.0 - z)), []
-
-
-def parse_injection(parameters: dict) -> dict:
-    return {
-        str(k): float(v)
-        for k, v in (diag_cfg(parameters)
-                     .get("debug_inject_offsets", {}) or {}).items()
-    }
-
-
-def apply_injection(
-    z: np.ndarray, items: np.ndarray, inject: dict,
-) -> tuple[np.ndarray, list[str]]:
-    if not inject:
-        return z, []
-    notes = [
-        f"debug_inject_offsets 生效（僅分流層節點；基準指標為注入後現狀）："
-        f"{inject}"
-    ]
-    unknown = sorted(set(inject) - set(items.tolist()))
-    if unknown:
-        notes.append(f"注入鍵不在抽樣 item 中（無作用）：{unknown}")
-    return z + pd.Series(items).map(inject).fillna(0.0).to_numpy(), notes
 
 
 def query_key(pdf: pd.DataFrame, cols: list[str]) -> pd.Series:

@@ -28,7 +28,6 @@ def create_pipeline(
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
-        compute_offset_sweep,
         compute_report_aggregates,
         draw_diagnosis_sample_node,
         generate_report,
@@ -84,9 +83,9 @@ def create_pipeline(
             inputs=[predictions_input, "label_table", "parameters"],
             outputs="eval_predictions",
         ),
-        # Draw the driver-side diagnosis sample ONCE; the two diagnosis
-        # consumers below read this shared in-memory output instead of each
-        # re-drawing it (same seed -> identical content).
+        # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and
+        # the registry diagnoses read this shared in-memory output instead of
+        # each re-drawing it (same seed -> identical content).
         Node(
             draw_diagnosis_sample_node,
             inputs=["eval_predictions", "parameters"],
@@ -112,12 +111,7 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_metric_ci",
         ),
-        Node(
-            compute_offset_sweep,
-            inputs=["diagnosis_sample", "parameters"],
-            outputs="evaluation_offset_sweep",
-        ),
-        # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
+        # 各診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
         # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
         # inputs 不是寫死的 ["diagnosis_sample", "parameters"]：每項診斷宣告
         # 自己的 INPUTS（contract.inputs_for），多數診斷沒宣告就落回吃共用
@@ -149,7 +143,7 @@ def create_pipeline(
         Node(
             generate_report,
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
-                    "evaluation_metric_ci", "evaluation_offset_sweep",
+                    "evaluation_metric_ci",
                     "evaluation_report_aggregates",
                     "evaluation_diagnosis_pages"],
             outputs="evaluation_report",

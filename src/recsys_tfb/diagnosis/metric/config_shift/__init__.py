@@ -28,7 +28,7 @@ TITLE = "配置引入的排序偏移"
 #:
 #: ``sampling`` 刻意留空：它是每次執行才知道的事實，寫進模組層級的常數會讓
 #: import 到的 SCOPE 帶著上一次執行的抽樣描述。填值的是**組裝層**
-#: （Task 2.5 的 ``assemble_diagnosis_pages``）——五項診斷共用同一份
+#: （Task 2.5 的 ``assemble_diagnosis_pages``）——各診斷共用同一份
 #: ``diagnosis_sample``、``sampling_description`` 永遠在 ``result["sample_meta"]``
 #: 同一個位置，所以那裡一句 ``dataclasses.replace`` 就涵蓋全部。**不要在每項
 #: 診斷各放一個填值 helper**：五份做同一件事的程式碼只會一起漂移。

@@ -101,11 +101,9 @@ Layer 1 — config-static (implemented here; aggregated by
   The code is NOT renumbered: existing docs and plans cite invariants by
   number, so reusing A17 or shifting A18+ would silently repoint those
   references.
-* A18 — ``evaluation.diagnosis.{offset_sweep,debug_inject_offsets}``
-  parameter domains: ``holdout_fraction`` ∈ (0,1); ``shrink_lambda`` >= 0;
-  ``grid`` {lo,hi,step} with lo < hi, 0 ∈ [lo,hi], step > 0; ``max_rounds``
-  integer >= 1; ``enabled`` bool; ``debug_inject_offsets`` values finite
-  numbers. Predicate: ``offset_sweep_param_errors``.
+* A18 — retired 2026-07-22 with the offset_sweep diagnosis layer. The code is
+  NOT renumbered: existing docs and plans cite invariants by number, so reusing
+  A18 or shifting A19+ would silently repoint those references.
 * A19 — evaluation.diagnosis.suppression.top_examples must be a non-negative
   int (enabled is covered by A15). Predicate: ``suppression_param_errors``.
 * A20 — training-side ``diagnostics.*`` parameter domains:
@@ -150,8 +148,6 @@ the plan doc for the full table:
 """
 
 from __future__ import annotations
-
-import math
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
@@ -618,76 +614,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def offset_sweep_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.{offset_sweep,debug_inject_offsets} domains (A18)."""
-    errors: list[str] = []
-    diag = (
-        (parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {}
-    )
-    cfg = diag.get("offset_sweep", {}) or {}
-
-    f = cfg.get("holdout_fraction", 0.5)
-    if not (_is_number(f) and 0.0 < float(f) < 1.0):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.holdout_fraction={f!r} must "
-            f"be a number in (0, 1) — 0 leaves no holdout fold (out-of-fold "
-            f"mAP undefined), 1 leaves nothing to fit on."
-        )
-    lam = cfg.get("shrink_lambda", 0.1)
-    if not (_is_number(lam) and float(lam) >= 0.0):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.shrink_lambda={lam!r} must "
-            f"be a number >= 0."
-        )
-    grid = cfg.get("grid", {}) or {}
-    lo = grid.get("lo", -2.0)
-    hi = grid.get("hi", 2.0)
-    step = grid.get("step", 0.05)
-    if not (_is_number(lo) and _is_number(hi) and float(lo) < float(hi)):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
-            f".grid.hi={hi!r} must be numbers with lo < hi."
-        )
-    elif not (float(lo) <= 0.0 <= float(hi)):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.grid.lo={lo!r} / "
-            f".grid.hi={hi!r}: [lo, hi] must contain 0 — δ=0 (no shift) "
-            f"must stay reachable so the "
-            f"sweep can report a clean baseline."
-        )
-    if not (_is_number(step) and float(step) > 0.0):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.grid.step={step!r} must be "
-            f"a number > 0."
-        )
-    r = cfg.get("max_rounds", 5)
-    if not (isinstance(r, int) and not isinstance(r, bool) and r >= 1):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.max_rounds={r!r} must be an "
-            f"integer >= 1."
-        )
-    en = cfg.get("enabled", True)
-    if not isinstance(en, bool):
-        errors.append(
-            f"evaluation.diagnosis.offset_sweep.enabled={en!r} must be a "
-            f"bool (true/false without quotes in YAML)."
-        )
-    inj = diag.get("debug_inject_offsets", {}) or {}
-    if not isinstance(inj, dict):
-        errors.append(
-            f"evaluation.diagnosis.debug_inject_offsets={inj!r} must be a "
-            f"mapping item -> finite number (log-odds units)."
-        )
-    else:
-        for key, v in inj.items():
-            if not (_is_number(v) and math.isfinite(float(v))):
-                errors.append(
-                    f"evaluation.diagnosis.debug_inject_offsets[{key!r}]="
-                    f"{v!r} must be a finite number (log-odds units)."
-                )
-    return errors
-
-
 def suppression_param_errors(parameters: dict) -> list[str]:
     """evaluation.diagnosis.suppression.top_examples parameter domain (A19).
 
@@ -861,8 +787,6 @@ def validate_config_consistency(parameters: dict) -> None:
         )
 
     errors.extend(diagnosis_metric_param_errors(parameters))
-
-    errors.extend(offset_sweep_param_errors(parameters))
 
     errors.extend(suppression_param_errors(parameters))
 

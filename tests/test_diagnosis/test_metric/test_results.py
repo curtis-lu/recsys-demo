@@ -41,10 +41,10 @@ def test_absent_file_is_reported_as_missing_not_raised(tmp_path):
 
 def test_json_outside_the_registry_is_reported_as_unknown(tmp_path):
     _write(tmp_path, "config_shift", {"delta": 0.25})
-    _write(tmp_path, "offset_sweep", {"per_item": {}})
+    _write(tmp_path, "metric_ci", {"per_item": {}})
     out, missing, unknown = results.load_results(tmp_path)
     assert list(out) == ["config_shift"]
-    assert unknown == ["offset_sweep"]
+    assert unknown == ["metric_ci"]
 
 
 def test_registry_is_read_at_call_time_not_import_time(tmp_path, monkeypatch):

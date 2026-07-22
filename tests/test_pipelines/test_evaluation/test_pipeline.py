@@ -25,7 +25,6 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_offset_sweep",
             "evaluation_config_shift", "evaluation_item_ability",
             "evaluation_model_capacity", "evaluation_suppression",
             "evaluation_diagnosis_pages",
@@ -41,7 +40,7 @@ class TestEvaluationPipelineDefault:
             "compute_metrics", "compute_baseline_metrics",
             "compute_report_aggregates",
             "persist_eval_predictions",
-            "compute_metric_ci", "compute_offset_sweep",
+            "compute_metric_ci",
             "diagnose_config_shift",
             "diagnose_item_ability",
             "diagnose_suppression",
@@ -62,7 +61,7 @@ class TestEvaluationPipelinePostTraining:
             "compute_metrics", "compute_baseline_metrics",
             "compute_report_aggregates",
             "persist_eval_predictions",
-            "compute_metric_ci", "compute_offset_sweep",
+            "compute_metric_ci",
             "diagnose_config_shift",
             "diagnose_item_ability",
             "diagnose_suppression",
@@ -82,7 +81,6 @@ class TestEvaluationPipelinePostTraining:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_offset_sweep",
             "evaluation_config_shift", "evaluation_item_ability",
             "evaluation_model_capacity", "evaluation_suppression",
             "evaluation_diagnosis_pages",
@@ -103,7 +101,6 @@ class TestEvaluationPipelineCompareMode:
             "compute_baseline_metrics", "compute_report_aggregates",
             "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
-            "compute_offset_sweep",
             "diagnose_config_shift", "diagnose_item_ability",
             "diagnose_suppression",
             "generate_comparison_report",
@@ -352,10 +349,10 @@ class TestGenerateComparisonReportNodeWiring:
 
 
 class TestConfigShiftNodeWiring:
-    """診斷 1／5（config_shift）接上 evaluation pipeline。
+    """診斷 1／4（config_shift）接上 evaluation pipeline。
 
     只驗接線，不驗計算——計算層的測試在 tests/test_diagnosis/。這裡要釘的是
-    「它真的吃到共用的 diagnosis_sample」：五項診斷共用同一份樣本是一致性
+    「它真的吃到共用的 diagnosis_sample」：各診斷共用同一份樣本是一致性
     保證（不同母體的數字並排解讀會錯），一旦哪天有人把 inputs 改成
     eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
     """
