@@ -449,15 +449,6 @@ def test_assemble_report_new_spine_order():
         assert title in html
 
 
-def test_assemble_report_no_offset_sweep_in_main():
-    # offset-sweep 已移出主報表（改由診斷連結導向後繼 score_shift）
-    html = rb.assemble_report(
-        _metrics_min(), _params_min(), offset_sweep=_SWEEP_FIXTURE
-    )
-    assert "Offset sweep" not in html
-    assert "分流 Offset" not in html
-
-
 def test_assemble_report_has_no_ndcg_end_to_end():
     """端到端護欄：完整 report.html 整份不得出現 ndcg。fixture 刻意讓
     per_segment 與 baseline 兩條 key-agnostic 路徑都被走到——它們把 metrics
@@ -887,25 +878,4 @@ def test_assemble_report_has_no_reconciliation_section():
     html = assemble_report(_metrics_min(), _params_min())
     assert "對帳" not in html
     assert "Reconciliation" not in html
-
-
-_SWEEP_FIXTURE = {
-    "enabled": True,
-    "map_fit": {"zero": 0.50, "star": 0.58},
-    "map_holdout": {"zero": 0.51, "star": 0.56},
-    "recovered_gap_holdout": 0.05,
-    "interaction_residual_holdout": -0.01,
-    "delta_star": {"A": -1.0, "B": 0.0},
-    "delta_star_centered": {"A": -0.5, "B": 0.5},
-    "per_item": {
-        "A": {"delta_star": -1.0, "delta_star_centered": -0.5,
-              "loo_contribution_holdout": 0.06},
-        "B": {"delta_star": 0.0, "delta_star_centered": 0.5,
-              "loo_contribution_holdout": None},
-    },
-    "params": {"shrink_lambda": 0.1, "holdout_fraction": 0.5,
-               "max_rounds": 5,
-               "grid": {"lo": -2.0, "hi": 2.0, "step": 0.05}},
-    "notes": [],
-}
 

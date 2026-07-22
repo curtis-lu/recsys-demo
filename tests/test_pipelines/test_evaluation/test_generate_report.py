@@ -58,7 +58,7 @@ def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
     html = generate_report(_metrics(), params,
-                            None, None, None, aggregates, None)
+                            None, None, aggregates, None)
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
     # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
@@ -70,7 +70,7 @@ def test_generate_report_with_diagnostics(spark):
     params = _params(True)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
     html = generate_report(_metrics(), params,
-                            None, None, None, aggregates, None)
+                            None, None, aggregates, None)
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
     # 逐表收合 <details class="table-collapse">。
     assert "per-item 細部拆解" in html
@@ -113,10 +113,10 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
     large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
     small = generate_report(
-        _metrics(), params, None, None, None, small_aggregates, None,
+        _metrics(), params, None, None, small_aggregates, None,
     )
     large = generate_report(
-        _metrics(), params, None, None, None, large_aggregates, None,
+        _metrics(), params, None, None, large_aggregates, None,
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -177,8 +177,6 @@ def test_report_builder_has_no_per_diagnosis_builders():
     """報表層不得認識任何 registry 診斷——這是解耦的驗收條件。
 
     禁用清單動態從 DIAGNOSES 導出：Plan 2-5 每加一項診斷這條自動收緊。
-    舊的 offset_sweep builder 不在管轄範圍（它服務的是尚未被取代的既有
-    診斷，Plan 5 收尾才清）。
     """
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
     from recsys_tfb.evaluation import report_builder

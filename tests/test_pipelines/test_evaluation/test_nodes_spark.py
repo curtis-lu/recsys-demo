@@ -581,30 +581,6 @@ def test_compute_metric_ci_end_to_end_small(spark):
     assert out["sample"]["n_queries_sampled"] == 2
 
 
-def test_compute_offset_sweep_disabled_writes_stub(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": False}}},
-    }
-    assert compute_offset_sweep(None, params) == {"enabled": False}
-
-
-def test_compute_offset_sweep_requires_eval_predictions_when_enabled(spark):
-    import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_offset_sweep
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"offset_sweep": {"enabled": True}}},
-    }
-    with _pytest.raises(ValueError, match="compute_offset_sweep"):
-        compute_offset_sweep(None, params)
-
-
 def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
     import pytest as _pytest
     from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
@@ -620,22 +596,19 @@ def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
         compute_metric_ci(None, params)
 
 
-class TestSampleConsumerFlags:
-    def test_defaults_all_true(self):
+class TestCiConsumerEnabled:
+    def test_default_true(self):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
-            _sample_consumer_flags,
+            _ci_consumer_enabled,
         )
-        assert _sample_consumer_flags({}) == (True, True)
+        assert _ci_consumer_enabled({}) is True
 
     def test_respects_disabled(self):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
-            _sample_consumer_flags,
+            _ci_consumer_enabled,
         )
-        params = {"evaluation": {"diagnosis": {
-            "ci": {"enabled": False},
-            "offset_sweep": {"enabled": True},
-        }}}
-        assert _sample_consumer_flags(params) == (False, True)
+        params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        assert _ci_consumer_enabled(params) is False
 
 
 class TestDrawDiagnosisSampleNode:
@@ -670,9 +643,8 @@ class TestDrawDiagnosisSampleNode:
         params = self._params()
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": False},
-            "offset_sweep": {"enabled": False},
             # registry 診斷（contract.DIAGNOSES）預設也是 enabled，所以「全部
-            # 停用」必須連它們一起關——只關舊兩項的話樣本仍然該抽。
+            # 停用」必須連它們一起關——只關 ci 的話樣本仍然該抽。
             **{name: {"enabled": False} for name in DIAGNOSES},
         })
         with patch(
@@ -691,7 +663,6 @@ class TestDrawDiagnosisSampleNode:
         params = self._params()
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": True},
-            "offset_sweep": {"enabled": False},
         })
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
@@ -724,11 +695,11 @@ class TestDrawDiagnosisSampleNode:
             )
         )
 
-    def test_draw_diagnosis_sample_called_once_across_two_consumers(self):
+    def test_draw_diagnosis_sample_called_once_across_consumers(self):
         from unittest.mock import patch
         import pandas as pd
         from recsys_tfb.pipelines.evaluation import nodes_spark
-        params = self._params()  # both default-enabled
+        params = self._params()  # ci default-enabled
         stub_pdf = pd.DataFrame({
             "snap_date": ["20240331"], "cust_id": ["H1"],
             "prod_name": ["hot"], "score": [0.9], "label": [1],
@@ -740,14 +711,11 @@ class TestDrawDiagnosisSampleNode:
         ) as spy, patch(
             "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
-        ), patch(
-            "recsys_tfb.diagnosis.metric.offset_sweep.sweep", return_value={},
         ):
             sample = nodes_spark.draw_diagnosis_sample_node(None, params)
             nodes_spark.compute_metric_ci(sample, params)
-            nodes_spark.compute_offset_sweep(sample, params)
-        # exactly one draw, with the node's own inputs — the two consumers
-        # must NOT re-draw (they consume the shared sample).
+        # exactly one draw, with the node's own inputs — the consumer must NOT
+        # re-draw (it consumes the shared sample).
         spy.assert_called_once_with(None, params)
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
@@ -772,10 +740,10 @@ class TestDrawDiagnosisSampleNode:
 class TestRegistryDiagnosisEnabled:
     """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。
 
-    為什麼跟 ``_sample_consumer_flags`` 分開而不是把 2-tuple 擴成 3-tuple：
-    舊兩項（ci／offset_sweep）是即將被取代的既有診斷，新五項走
-    ``contract.DIAGNOSES``。合在一個 tuple 裡的話，registry 每加一項診斷都要
-    改所有解包點——而「新增診斷不必改接線」正是 registry 存在的目的。
+    為什麼跟 ``_ci_consumer_enabled`` 分開：既有的 ci 是非 registry 的消費者、
+    新五項走 ``contract.DIAGNOSES``，兩組生命週期不同。合在一起的話，registry
+    每加一項診斷都要改解包點——而「新增診斷不必改接線」正是 registry 存在的
+    目的。
     """
 
     def test_defaults_true(self):
@@ -828,9 +796,9 @@ class TestRegistryDiagnosisEnabled:
 
 
 def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
-    """關掉舊兩項、只開 config_shift → 仍然必須抽樣。
+    """關掉 ci、只開 config_shift → 仍然必須抽樣。
 
-    這是本次接線最容易靜默失效的地方：抽樣閘門若只看舊三項，使用者關掉它們
+    這是本次接線最容易靜默失效的地方：抽樣閘門若只看舊的 ci，使用者關掉它
     之後 ``diagnosis_sample`` 是 None，config_shift 節點就撞 fail-loud 的
     ValueError——一個純粹由接線遺漏造成、使用者無從自救的失敗。
     """
@@ -846,7 +814,6 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
             "sample": {"max_queries": 10, "min_pos_queries_per_item": 2,
                        "seed": 42},
             "ci": {"enabled": False},
-            "offset_sweep": {"enabled": False},
             "config_shift": {"enabled": True},
         }},
     }
@@ -899,7 +866,6 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
         }},
         "evaluation": {"diagnosis": {
             "ci": {"enabled": False},
-            "offset_sweep": {"enabled": False},
             "fake_capacity": {"enabled": True},
         }},
     }

@@ -854,9 +854,7 @@ def build_glossary_section(parameters: dict) -> ReportSection:
 # **這一段刻意不認識任何單一診斷。** 走的是
 # ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
 # ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
-# registry 補一行，本檔零改動。（offset_sweep 這項既有診斷仍在計算層產出
-# offset_sweep.json，但其主報表呈現段已移除——後繼 score_shift 走
-# ``build_diagnosis_links_section`` 連出的獨立診斷報表。）
+# registry 補一行，本檔零改動。
 #
 # 為什麼數字不複製一份到主報表：主報表只放入口
 # （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
@@ -1070,7 +1068,6 @@ def assemble_report(
     baseline_metrics: dict | None = None,
     report_aggregates: dict | None = None,
     metric_ci: dict | None = None,
-    offset_sweep: dict | None = None,
     diagnosis_pages: list | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
@@ -1078,8 +1075,7 @@ def assemble_report(
 
     8 段 spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
     衡量指標 → per-item 細部拆解 → baseline → 排序診斷連結 → 完整性檢查 →
-    詞彙表。offset_sweep 不再進主報表（其後繼 score_shift 走診斷連結）；
-    ``offset_sweep`` 參數保留僅為簽章相容（未使用）。
+    詞彙表。
     """
     candidates = [
         build_overview_section(metrics, parameters, metric_ci=metric_ci),
