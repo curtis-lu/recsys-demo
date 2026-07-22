@@ -34,7 +34,7 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
     與 ``_ci_consumer_enabled`` 分開的理由：既有的 ci（非 registry 消費者）
-    與新五項的 registry 生命週期不同。合在一起
+    與 registry 診斷的生命週期不同。合在一起
     的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
     registry 要消除的東西——所以這裡回一個 bool，不回擴增的 tuple。
 

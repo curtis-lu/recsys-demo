@@ -26,7 +26,7 @@ TITLE = "item 排序能力（raw vs query-centered AUC）"
 #: macro mAP 的 proxy 而非分解、母體限定在有正例的 query 因此不能跨模型／
 #: 跨資料集比較、AUC 高不保證 mAP 高。
 #:
-#: ``sampling`` 刻意留空——理由與 ``config_shift.SCOPE`` 相同：五項診斷共用
+#: ``sampling`` 刻意留空——理由與 ``config_shift.SCOPE`` 相同：各診斷共用
 #: 同一份 ``diagnosis_sample``，執行期才知道的抽樣描述由組裝層統一填入。
 SCOPE = ScopeNote(
     measures=(

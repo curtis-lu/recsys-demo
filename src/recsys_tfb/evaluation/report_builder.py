@@ -860,11 +860,11 @@ def build_glossary_section(parameters: dict) -> ReportSection:
 # （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
 # 各自演化的格式與措辭，而讀者無從得知哪一份是後改的。
 
-#: 索引頁的邏輯架構：五項診斷各回答什麼、各排除什麼，以及編號代表的意思。
+#: 索引頁的邏輯架構：每項診斷各回答什麼、各排除什麼，以及編號代表的意思。
 #:
-#: **這張表是規劃層級的敘述**（五項診斷的分工），不是 registry。哪些項目真的
+#: **這張表是規劃層級的敘述**（各診斷的分工），不是 registry。哪些項目真的
 #: 存在由 ``DIAGNOSES`` 決定，見 :func:`_diagnosis_index_intro` 的狀態欄——
-#: 兩者分開，索引頁才不會在後四項尚未落地時假裝它們都在。
+#: 兩者分開，索引頁才不會在有項目尚未落地時假裝它都在。
 _DIAGNOSIS_PLAN = (
     ("config_shift", "配置引入的排序偏移",
      "抽樣比例與 sample weight 有沒有在每個 item 上引入 log-odds 偏移。",
@@ -878,9 +878,6 @@ _DIAGNOSIS_PLAN = (
     ("suppression", "壓制帳本",
      "哪些 label=0 排在 label=1 之前，造成多少 AP 缺口。",
      "把「模型排錯」與「商品本來就競爭」分開。"),
-    ("score_shift", "per-item 分數位移",
-     "不重訓、只加 per-item 常數位移，holdout mAP 能不能提升。",
-     "把「偏 item 水準」與「偏辨識力／特徵表達」分開。"),
 )
 
 
@@ -892,9 +889,9 @@ def _diagnosis_index_intro() -> str:
     的是那個邏輯架構——每項診斷回答什麼、排除什麼、為什麼是這個順序——讀者
     據此自己判斷，而報表本身一個結論都不下。
 
-    狀態欄從 ``DIAGNOSES`` 動態導出，不寫死：後四項診斷分別在後續計畫落地，
-    寫死的話這頁會在它們落地前就宣稱五項都在（而那種錯看不出來，因為字串
-    長得很合理）。
+    狀態欄從 ``DIAGNOSES`` 動態導出，不寫死：``_DIAGNOSIS_PLAN`` 若列入尚未
+    落地的診斷，寫死的話這頁會在它落地前就宣稱它在（而那種錯看不出來，因為
+    字串長得很合理）。目前列出的診斷皆已落地。
     """
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
@@ -915,7 +912,7 @@ def _diagnosis_index_intro() -> str:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     )
     return (
-        "<p>這裡把排序結果拆成五個彼此不重疊的提問。每一頁只呈現它量到的"
+        "<p>這裡把排序結果拆成彼此不重疊的幾個提問。每一頁只呈現它量到的"
         "數字，並在頁首用「範圍說明」寫出這些數字量的是什麼、算在哪批列上、"
         "看不見什麼。判讀留給讀者。</p>"
         + table
@@ -924,8 +921,8 @@ def _diagnosis_index_intro() -> str:
         "後一層就不必重複歸因——這是歸因的優先權，也是預設的閱讀順序。</p>"
         "<p><strong>編號不是硬閘門</strong>：已實作的項目每次都會跑、都會"
         "呈現，前一項的結果不會擋掉後一項；任何一頁都可以單獨打開來讀。</p>"
-        "<p>狀態欄標「尚未進 registry」的項目還沒有實作，這次執行不會有"
-        "它們的頁面；下方清單列出的就是本次實際寫出的全部頁面。</p>"
+        "<p>狀態欄若標「尚未進 registry」，代表該項還沒有實作、這次執行不會"
+        "有它的頁面；下方清單列出的就是本次實際寫出的全部頁面。</p>"
     )
 
 
@@ -960,9 +957,9 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
         if not sections:
             continue
         slug = f"{i:02d}-{name.replace('_', '-')}"   # 數字前綴＝閱讀順序
-        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：五項共用同一份
+        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：各診斷共用同一份
         # diagnosis_sample，sampling_description 永遠在同一個位置。讓各診斷
-        # 各帶一個 hook 等於同一段 replace 被抄五次。
+        # 各帶一個 hook 等於同一段 replace 被逐項重抄。
         scope = dataclasses.replace(
             mod.SCOPE,
             sampling=(result.get("sample_meta", {}) or {}).get(
@@ -971,7 +968,7 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
         pages.append(Page(slug=slug, title=mod.TITLE,
                           scope=scope, sections=tuple(sections)))
     if not pages:
-        # 一頁都沒有就完全不落地。否則會留下一個「index.html 說有五項、清單
+        # 一頁都沒有就完全不落地。否則會留下一個「index.html 列了診斷、清單
         # 是空的、外加 3.5MB plotly.min.js」的目錄，看起來像跑過但什麼都沒
         # 量到——那是本重構要避免的誤讀，不是「誠實地呈現沒有資料」。
         return []
@@ -1004,7 +1001,6 @@ def build_diagnosis_links_section(
             '<a href="diagnosis/index.html">診斷索引 diagnosis/index.html</a>'
             f"　—　本次寫出 {n_pages} 頁。索引頁說明每一項回答什麼、排除"
             "什麼，各頁的數字與範圍說明都留在該頁，這裡不複製一份。"
-            "（分流分析的後繼 score_shift 為獨立診斷報表，日後於此連出。）"
         ),
     )
 

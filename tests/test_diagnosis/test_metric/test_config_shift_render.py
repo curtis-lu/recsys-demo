@@ -288,7 +288,7 @@ def test_module_level_scope_carries_no_run_specific_facts():
 
     這條守的是「別把執行期事實寫死進模組常數」——寫死的話，import 到的 SCOPE
     會帶著上一次執行的抽樣描述，而那是個看不出來的錯（字串長得很合理）。
-    填值那一步本身不在這裡測：它屬於組裝層，五項診斷共用一份實作。
+    填值那一步本身不在這裡測：它屬於組裝層，各診斷共用一份實作。
     """
     assert config_shift.SCOPE.sampling == ""
 

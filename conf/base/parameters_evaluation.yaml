@@ -100,8 +100,8 @@ evaluation:
     # 從「未抽樣」改口。**不會靜默偏差**，但普查的解讀更乾淨，發現超過時
     # 優先調高這個值而不是靠加權。
     #
-    # 這個值不是控制運算成本的旋鈕——貴的診斷各自有自己的預算旋鈕
-    # （見下方 score_shift 一帶），原則是「搜尋用子樣本、量測用全樣本」。
+    # 這個值不是控制運算成本的旋鈕——貴的診斷各自有自己的預算旋鈕，
+    # 原則是「搜尋用子樣本、量測用全樣本」。
     # 用縮小共用樣本來省錢會讓便宜的診斷也一起失去母體性。
     sample:
       max_queries: 250000
@@ -113,13 +113,13 @@ evaluation:
       enabled: true
       n_boot: 200
 
-    # 診斷 1／5：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
+    # 診斷 1／4：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
     # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
     # 校準層是後貼的）。
     config_shift:
       enabled: true
 
-    # 診斷 2／5：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
+    # 診斷 2／4：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
     # raw（原始分數）與 query_centered（扣掉各自 query 平均後）各算一次；
     # 差值即客戶活躍度被誤計入 item 推薦能力的量。用 score_uncalibrated（與
     # config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
@@ -128,7 +128,7 @@ evaluation:
       enabled: true
       top_n: 30
 
-    # 診斷 3／5：模型容量分配——全模型 split gain 分成 Item Prior（item-id
+    # 診斷 3／4：模型容量分配——全模型 split gain 分成 Item Prior（item-id
     # 切點）、Post-Item Context（item 切點之後的 context 切點，逐 item 分配）
     # 與未分配三份；用來分辨「學到互動訊號」與「只記住 item prior」。不吃
     # 診斷抽樣，只讀訓練側的 gain_ledger（optional，可能缺席）＋同一次執行
@@ -136,7 +136,7 @@ evaluation:
     model_capacity:
       enabled: true
 
-    # 診斷 4／5：壓制帳本與交叉購買——同一 query 內，label=0 的 item 排在
+    # 診斷 4／4：壓制帳本與交叉購買——同一 query 內，label=0 的 item 排在
     # label=1 之前時，把該正例列的 AP 缺口依比例分攤給排在它上面的每個負例
     # （壓制矩陣熱圖）；並列出同一批 query 單位上的實際標籤共買 lift（泡泡
     # 格圖，同軸序對照）。top_examples＝具體案例表最多列出幾筆。

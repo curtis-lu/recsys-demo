@@ -247,7 +247,7 @@ evaluation_metric_ci:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json
 
-# registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／5
+# registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／4
 evaluation_config_shift:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/config_shift.json

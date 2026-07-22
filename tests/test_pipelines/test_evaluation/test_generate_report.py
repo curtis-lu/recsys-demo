@@ -198,7 +198,7 @@ def test_diagnosis_pages_written(tmp_path):
 
 
 def test_index_intro_states_order_is_not_a_gate():
-    """閱讀順序不是硬閘門——五項都會跑、都會呈現，前一項擋不掉後一項。
+    """閱讀順序不是硬閘門——各診斷都會跑、都會呈現，前一項擋不掉後一項。
 
     沒有這句，編號會被讀成「第 1 項沒事就不必看後面」，而那正是這份索引
     要避免的誤讀。

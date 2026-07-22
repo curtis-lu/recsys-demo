@@ -349,10 +349,10 @@ class TestGenerateComparisonReportNodeWiring:
 
 
 class TestConfigShiftNodeWiring:
-    """診斷 1／5（config_shift）接上 evaluation pipeline。
+    """診斷 1／4（config_shift）接上 evaluation pipeline。
 
     只驗接線，不驗計算——計算層的測試在 tests/test_diagnosis/。這裡要釘的是
-    「它真的吃到共用的 diagnosis_sample」：五項診斷共用同一份樣本是一致性
+    「它真的吃到共用的 diagnosis_sample」：各診斷共用同一份樣本是一致性
     保證（不同母體的數字並排解讀會錯），一旦哪天有人把 inputs 改成
     eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
     """

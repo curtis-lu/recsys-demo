@@ -111,7 +111,7 @@ def create_pipeline(
             inputs=["diagnosis_sample", "parameters"],
             outputs="evaluation_metric_ci",
         ),
-        # 五項診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
+        # 各診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
         # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
         # inputs 不是寫死的 ["diagnosis_sample", "parameters"]：每項診斷宣告
         # 自己的 INPUTS（contract.inputs_for），多數診斷沒宣告就落回吃共用

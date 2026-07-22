@@ -741,7 +741,7 @@ class TestRegistryDiagnosisEnabled:
     """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。
 
     為什麼跟 ``_ci_consumer_enabled`` 分開：既有的 ci 是非 registry 的消費者、
-    新五項走 ``contract.DIAGNOSES``，兩組生命週期不同。合在一起的話，registry
+    各診斷走 ``contract.DIAGNOSES``，兩組生命週期不同。合在一起的話，registry
     每加一項診斷都要改解包點——而「新增診斷不必改接線」正是 registry 存在的
     目的。
     """
