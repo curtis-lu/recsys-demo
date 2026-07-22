@@ -605,7 +605,7 @@ class TestCategoricalDtypeErrors:
 
 
 class TestDiagnosisMetricParamsA15:
-    def _params(self, metric=None, sample=None, ci=None):
+    def _params(self, metric=None, sample=None, ci=None, item_ability=None):
         ev = {}
         if metric is not None:
             ev["metric"] = metric
@@ -614,6 +614,8 @@ class TestDiagnosisMetricParamsA15:
             diag["sample"] = sample
         if ci is not None:
             diag["ci"] = ci
+        if item_ability is not None:
+            diag["item_ability"] = item_ability
         if diag:
             ev["diagnosis"] = diag
         return {"evaluation": ev}
@@ -641,17 +643,43 @@ class TestDiagnosisMetricParamsA15:
                     "shrinkage_k": -0.1},
             sample={"max_queries": 0, "min_pos_queries_per_item": 0},
             ci={"n_boot": 0},
+            item_ability={"top_n": -1},
         )
         errors = diagnosis_metric_param_errors(p)
         joined = "\n".join(errors)
         # Token check first: if a predicate is dropped, the failure message
         # then names *which* key stopped being validated, instead of only
-        # reporting a count that went from 7 to 6.
+        # reporting a count that went from 8 to 7.
         for token in ["weight_alpha", "metric.k", "min_positives",
                       "shrinkage_k", "max_queries",
-                      "min_pos_queries_per_item", "n_boot"]:
+                      "min_pos_queries_per_item", "n_boot",
+                      "item_ability.top_n"]:
             assert token in joined, f"{token} is no longer validated"
-        assert len(errors) == 7
+        assert len(errors) == 8
+
+    def test_top_n_negative_or_non_int_rejected(self):
+        """A15 自己就要擋 item_ability.top_n < 0 / bool / 非 int。
+
+        top_n = 0 是良性退化（不顯示任何 item），所以 floor 是 0，與 sibling
+        suppression.top_examples（A19）一致。真正的危害是負數（Python 會從尾端
+        切片）與 bool（True == 1 會溜過一個天真的 >= 0 檢查）。
+        """
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        for bad in (-1, True, "30", 1.5):
+            errors = diagnosis_metric_param_errors(
+                self._params(item_ability={"top_n": bad})
+            )
+            assert len(errors) == 1, errors
+            assert "item_ability.top_n" in errors[0]
+
+    def test_top_n_zero_and_default_are_clean(self):
+        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        assert diagnosis_metric_param_errors(
+            self._params(item_ability={"top_n": 0})
+        ) == []
+        assert diagnosis_metric_param_errors(
+            self._params(item_ability={"top_n": 30})
+        ) == []
 
     def test_max_queries_below_one_rejected(self):
         """A15 must reject ``max_queries <= 0`` on its own.
