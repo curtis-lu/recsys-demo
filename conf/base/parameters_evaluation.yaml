@@ -58,7 +58,6 @@ evaluation:
       per_segment: true
       diagnostics: true
       baseline: true
-      offset_sweep: true
     display:
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
@@ -114,19 +113,6 @@ evaluation:
       enabled: true
       n_boot: 200
 
-    # 分流層（A18）：offset sweep——在診斷抽樣上（driver 端 numpy）對每個
-    # item 的 logit 分數加常數 δ、座標下降搜尋讓參數化 macro mAP 最大的
-    # δ*。δ 單位 log-odds。holdout_fraction 切
-    # query 折、折外報告防擬合雜訊；shrink_lambda 把 δ 向 0 收縮（座標目
-    # 標 = mAP_fit − λ·δ²/M）。成本 ≈ rounds×items×grid點數 次 mAP 評估，
-    # 大樣本時先調粗 grid.step。
-    offset_sweep:
-      enabled: true
-      shrink_lambda: 0.1
-      holdout_fraction: 0.5
-      max_rounds: 5
-      grid: {lo: -2.0, hi: 2.0, step: 0.05}
-
     # 診斷 1／5：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
     # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
     # 校準層是後貼的）。
@@ -157,11 +143,6 @@ evaluation:
     suppression:
       enabled: true
       top_examples: 50
-
-    # 驗收/測試專用：在計算前對指定 item 的 logit 分數加常數
-    # （例 {ccard_ins: 1.0}）。只影響分流層節點（offset_sweep）；
-    # 正式評估必須留空。
-    debug_inject_offsets: {}
 
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）
