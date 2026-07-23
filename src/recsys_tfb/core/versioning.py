@@ -142,6 +142,12 @@ def _model_version_payload(params: dict) -> dict:
     if isinstance(ap, dict):
         for key in MODEL_VERSION_IRRELEVANT_PARAMS:
             ap.pop(key, None)
+    # Staged-mode keys fold into the hash ONLY when the structure is staged.
+    # Popping them for shared keeps every pre-existing shared model_version
+    # byte-identical across this feature's rollout (pure-additive upgrade).
+    if training.get("model_structure", "shared") == "shared":
+        training.pop("model_structure", None)
+        training.pop("staged", None)
     return {"training": training}
 
 

@@ -1059,3 +1059,81 @@ class TestNonnumericFeatureErrors:
         )
         assert len(errs) == 2
         assert "aaa" in errs[0] and "zzz" in errs[1]
+
+
+class TestStagedConfigA21:
+    # 計畫原文的 `_make_parameters` helper在本檔不存在；本檔既有的合法 shared
+    # 全套 params helper 是 `_base()`（見 test_clean_config_passes 的用法），改沿用它。
+    def _staged_params(self, **stage1_over):
+        p = _base()  # 既有 helper：回傳合法 shared 全套 params
+        stage1 = {"partition_keys": ["prod_name"], "objective": "binary",
+                  "hpo": {"n_trials": 0, "metric": "auc", "search_space": []},
+                  "params": {}, "gates": {"max_groups": 200, "min_rows": 200,
+                                          "min_positives": 20, "min_negatives": 20},
+                  "max_workers": 1}
+        stage1.update(stage1_over)
+        p["training"] = {
+            "model_structure": "staged",
+            "staged": {"stage1": stage1, "stage2": {"mode": "none"}},
+            "calibration": {"enabled": False},
+        }
+        return p
+
+    def test_valid_staged_config_passes(self):
+        validate_config_consistency(self._staged_params())
+
+    def test_unknown_model_structure_rejected(self):
+        p = self._staged_params()
+        p["training"]["model_structure"] = "composite"
+        with pytest.raises(ConfigConsistencyError, match="model_structure"):
+            validate_config_consistency(p)
+
+    def test_partition_key_label_rejected(self):
+        p = self._staged_params(partition_keys=["label"])
+        with pytest.raises(ConfigConsistencyError, match="partition_keys.*label"):
+            validate_config_consistency(p)
+
+    def test_partition_key_not_in_allowlist_rejected(self):
+        p = self._staged_params(partition_keys=["no_such_col"])
+        with pytest.raises(ConfigConsistencyError, match="no_such_col"):
+            validate_config_consistency(p)
+
+    def test_carry_column_partition_key_allowed(self):
+        p = self._staged_params(partition_keys=["seg_col"])
+        p["dataset"]["carry_columns"] = ["seg_col"]
+        validate_config_consistency(p)
+
+    def test_calibration_must_be_disabled(self):
+        p = self._staged_params()
+        p["training"]["calibration"] = {"enabled": True}
+        with pytest.raises(ConfigConsistencyError, match="calibration"):
+            validate_config_consistency(p)
+
+    def test_stage2_mode_only_none_in_pr_a(self):
+        p = self._staged_params()
+        p["training"]["staged"]["stage2"]["mode"] = "lambdarank"
+        with pytest.raises(ConfigConsistencyError, match="stage2"):
+            validate_config_consistency(p)
+
+    def test_stage1_objective_only_binary(self):
+        p = self._staged_params(objective="lambdarank")
+        with pytest.raises(ConfigConsistencyError, match="objective"):
+            validate_config_consistency(p)
+
+    def test_hpo_metric_allowlist(self):
+        p = self._staged_params(
+            hpo={"n_trials": 5, "metric": "rmse", "search_space": []})
+        with pytest.raises(ConfigConsistencyError, match="metric"):
+            validate_config_consistency(p)
+
+    def test_negative_n_trials_rejected(self):
+        p = self._staged_params(
+            hpo={"n_trials": -1, "metric": "auc", "search_space": []})
+        with pytest.raises(ConfigConsistencyError, match="n_trials"):
+            validate_config_consistency(p)
+
+    def test_shared_ignores_staged_block(self):
+        p = self._staged_params()
+        p["training"]["model_structure"] = "shared"
+        p["training"]["staged"]["stage1"]["partition_keys"] = ["label"]
+        validate_config_consistency(p)  # shared 時 staged 區塊不驗
