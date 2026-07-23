@@ -27,9 +27,20 @@ from recsys_tfb.pipelines.training.nodes import (
     select_features,
     tune_hyperparameters,
 )
+from recsys_tfb.pipelines.training.staged import train_staged_model
 
 
-def create_pipeline(enable_calibration: bool = False) -> Pipeline:
+def create_pipeline(
+    enable_calibration: bool = False, model_structure: str = "shared",
+) -> Pipeline:
+    if model_structure == "staged":
+        if enable_calibration:
+            raise ValueError(
+                "staged model_structure requires calibration disabled "
+                "(A21 blocks this at CLI entry; direct callers get the "
+                "same contract here)"
+            )
+        return _create_staged_pipeline()
     # finalize_model produces the trained model; under calibration it lands in
     # `trained_model` so calibrate_model can wrap it. Strategy
     # (hpo_best / refit_on_full) is read from parameters at runtime — not a
@@ -209,3 +220,67 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     ])
 
     return Pipeline(nodes)
+
+
+def _create_staged_pipeline() -> Pipeline:
+    """Staged (stage2=none) training DAG — PR-A scope.
+
+    Shared-path nodes reused verbatim: select_features, cache_{train,
+    train_dev,test}_model_input, persist_sample_weight_report,
+    predict_and_write_test_predictions, compute_test_mAP_spark.
+    Excluded (PR-B/PR-C): prepare_lgb_train_inputs, tune_hyperparameters,
+    finalize_model, calibrate_model, all diagnostics nodes, log_experiment
+    (its inputs depend on diagnostics outputs). cache_val_model_input is also
+    excluded — val is only consumed by tune_hyperparameters, unused when
+    stage2=none.
+    """
+    return Pipeline([
+        Node(
+            select_features,
+            inputs=["preprocessor", "parameters"],
+            outputs="preprocessor_view",
+        ),
+        Node(
+            cache_train_model_input,
+            inputs=["train_model_input", "parameters"],
+            outputs="train_parquet_handle",
+        ),
+        Node(
+            cache_train_dev_model_input,
+            inputs=["train_dev_model_input", "parameters"],
+            outputs="train_dev_parquet_handle",
+        ),
+        Node(
+            cache_test_model_input,
+            inputs=["test_model_input", "parameters"],
+            outputs="test_parquet_handle",
+        ),
+        Node(
+            persist_sample_weight_report,
+            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
+            outputs="sample_weight_report",
+        ),
+        Node(
+            train_staged_model,
+            inputs=[
+                "train_parquet_handle", "train_dev_parquet_handle",
+                "preprocessor_view", "parameters",
+            ],
+            outputs=["model", "stage1_groups_report"],
+            name="train_staged_model",
+        ),
+        Node(
+            predict_and_write_test_predictions,
+            inputs=[
+                "model", "test_parquet_handle",
+                "preprocessor_view", "parameters",
+                "@training_eval_predictions",  # catalog handle for chunked save
+            ],
+            outputs="predict_manifest",
+        ),
+        Node(
+            compute_test_mAP_spark,
+            inputs=["training_eval_predictions", "predict_manifest", "parameters"],
+            outputs="evaluation_results",
+        ),
+    ])

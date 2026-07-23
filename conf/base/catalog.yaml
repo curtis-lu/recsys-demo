@@ -192,6 +192,12 @@ model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/model.txt
 
+# staged model_structure 第二輸出（Task 7 修訂）：每群 rows/pos/best_params/score/
+# train_seconds，免載 bundle 可查，亦為 PR-C 總覽表資料源。shared 路徑不產生此檔。
+stage1_groups_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/stage1_groups.json
+
 best_params:
   type: JSONDataset
   filepath: data/models/${model_version}/best_params.json

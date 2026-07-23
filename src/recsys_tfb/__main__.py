@@ -726,6 +726,8 @@ def training(
     enable_calibration = (
         params_training.get("training", {}).get("calibration", {}).get("enabled", False)
     )
+    model_structure = params_training.get("training", {}).get(
+        "model_structure", "shared")
     cal_v = (
         resolve_variant_id(base_dir, "calibration", calibration_variant)
         if enable_calibration
@@ -751,7 +753,10 @@ def training(
         "snap_date": _NONE_PLACEHOLDER,
     }
 
-    pipeline_kwargs = {"enable_calibration": enable_calibration}
+    pipeline_kwargs = {
+        "enable_calibration": enable_calibration,
+        "model_structure": model_structure,
+    }
 
     # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the
     # post-run write below upgrades it to status=completed + artifacts.
