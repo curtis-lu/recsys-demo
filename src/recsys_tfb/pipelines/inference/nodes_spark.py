@@ -152,6 +152,25 @@ def _predict_chunk_staged(model, X, features_pdf):
     return scores, keep, dict(model.last_missing_stats)
 
 
+def _raise_if_all_rows_skipped(result_pdf: pd.DataFrame, missing_stats: dict) -> None:
+    """Fail loud when the concatenated score table has zero rows.
+
+    ``all_results`` (one entry per (time, item) chunk) can be non-empty
+    while every entry contributed zero rows — staged routing's
+    on_missing="skip" drops a chunk's rows entirely when no stage-1 model
+    covers the group(s) present. The pre-existing ``if not all_results``
+    guard never catches this (the list itself is non-empty), so without
+    this check ``result_pdf[score_col].mean()`` silently returns NaN and a
+    zero-row score table would propagate downstream unnoticed.
+    """
+    if result_pdf.empty:
+        raise ValueError(
+            "all rows skipped — no stage-1 model covers any partition "
+            "group in the scoring data; missing_groups="
+            f"{dict(sorted(missing_stats.items()))}"
+        )
+
+
 def predict_scores(
     model: ModelAdapter,
     X_score: DataFrame,
@@ -244,6 +263,7 @@ def predict_scores(
                 "No scoring rows found for inference.snap_dates and products"
             )
         result_pdf = pd.concat(all_results, ignore_index=True)
+        _raise_if_all_rows_skipped(result_pdf, missing_stats)
 
     logger.info(
         "Predicted %d scores, mean=%.4f",

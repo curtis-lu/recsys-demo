@@ -21,15 +21,6 @@ def _tiny_lgb(seed=0):
     return a
 
 
-PARAMS = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                                 "item": "prod_name", "label": "label",
-                                 "score": "score", "rank": "rank"},
-                     "categorical_values": {"prod_name": ["p1"]}},
-          "training": {"model_structure": "staged",
-                       "staged": {"stage1": {"partition_keys": ["seg"]},
-                                  "stage2": {"mode": "none"}}}}
-
-
 class TestPredictForPartition:
     def _staged(self):
         m = StagedModelAdapter()
@@ -40,18 +31,18 @@ class TestPredictForPartition:
     def test_shared_adapter_uses_plain_predict(self):
         pdf = pd.DataFrame({"f1": [0.1], "f2": [0.2], "seg": ["A"]})
         X = pdf[["f1", "f2"]].values
-        scores = _predict_for_partition(_tiny_lgb(), X, pdf, {})
+        scores = _predict_for_partition(_tiny_lgb(), X, pdf)
         assert scores.shape == (1,)
 
     def test_staged_adapter_routes_by_partition_keys(self):
         pdf = pd.DataFrame({"f1": [0.1, 0.3], "f2": [0.2, 0.1],
                             "seg": ["A", "A"]})
         X = pdf[["f1", "f2"]].values
-        scores = _predict_for_partition(self._staged(), X, pdf, PARAMS)
+        scores = _predict_for_partition(self._staged(), X, pdf)
         assert scores.shape == (2,) and np.isfinite(scores).all()
 
     def test_staged_missing_group_raises(self):
         pdf = pd.DataFrame({"f1": [0.1], "f2": [0.2], "seg": ["ZZ"]})
         X = pdf[["f1", "f2"]].values
         with pytest.raises(StagedMissingGroupError, match="'ZZ'"):
-            _predict_for_partition(self._staged(), X, pdf, PARAMS)
+            _predict_for_partition(self._staged(), X, pdf)

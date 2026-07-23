@@ -4,7 +4,10 @@ import pytest
 
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 from recsys_tfb.models.staged.adapter import StagedModelAdapter
-from recsys_tfb.pipelines.inference.nodes_spark import _predict_chunk_staged
+from recsys_tfb.pipelines.inference.nodes_spark import (
+    _predict_chunk_staged,
+    _raise_if_all_rows_skipped,
+)
 
 
 def _tiny_lgb(seed=0):
@@ -48,3 +51,36 @@ class TestPredictChunkStaged:
         X = pdf[["f1", "f2"]].values
         with pytest.raises(KeyError, match="seg"):
             _predict_chunk_staged(_staged(), X, pdf)
+
+
+class TestRaiseIfAllRowsSkipped:
+    """predict_scores' guard: concat over all-skipped chunks must fail loud,
+    not silently produce a zero-row score table (mean() would be NaN)."""
+
+    def test_all_rows_skipped_raises(self):
+        # Only group "A" is known to the model; every scoring row is "ZZ".
+        pdf = pd.DataFrame({"f1": [0.1, 0.2, 0.3], "f2": [0.0] * 3,
+                            "seg": ["ZZ", "ZZ", "ZZ"]})
+        X = pdf[["f1", "f2"]].values
+        scores, keep, missing = _predict_chunk_staged(_staged(), X, pdf)
+        assert not keep.any()
+        identity_pdf = pdf[["seg"]].copy()
+        identity_pdf["score"] = scores
+        result_pdf = identity_pdf.iloc[keep.nonzero()[0]].reset_index(drop=True)
+        assert result_pdf.empty
+
+        with pytest.raises(ValueError, match="all rows skipped"):
+            _raise_if_all_rows_skipped(result_pdf, missing)
+
+    def test_some_rows_scored_does_not_raise(self):
+        # Mixed: one row routes to known group "A", two miss — must NOT raise.
+        pdf = pd.DataFrame({"f1": [0.1, 0.2, 0.3], "f2": [0.0] * 3,
+                            "seg": ["A", "ZZ", "ZZ"]})
+        X = pdf[["f1", "f2"]].values
+        scores, keep, missing = _predict_chunk_staged(_staged(), X, pdf)
+        identity_pdf = pdf[["seg"]].copy()
+        identity_pdf["score"] = scores
+        result_pdf = identity_pdf.iloc[keep.nonzero()[0]].reset_index(drop=True)
+        assert not result_pdf.empty
+
+        _raise_if_all_rows_skipped(result_pdf, missing)  # must not raise

@@ -804,12 +804,16 @@ def calibrate_model(
 
 
 
-def _predict_for_partition(model, X, pdf, parameters):
+def _predict_for_partition(model, X, pdf):
     """Shared: plain predict. Staged: route by per-row partition keys.
 
     Evaluation path uses on_missing="raise" (spec D11 分流): the test split
     shares the training sample_pool build, so an unseen group here signals
     drift or a wrong model_version — never silently drop scored rows.
+
+    Routing keys are read from the adapter's own ``partition_keys``
+    (set at training time), not from ``parameters`` — config is
+    deliberately not consulted here.
     """
     # lazy import 避免 pipelines→models.staged 在非 staged 部署的載入成本
     from recsys_tfb.models.staged.adapter import StagedModelAdapter
@@ -912,7 +916,7 @@ def predict_and_write_test_predictions(
             prods_seen.add(prod_name)
 
             X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
-            y_score = _predict_for_partition(model, X, part_pdf, parameters)
+            y_score = _predict_for_partition(model, X, part_pdf)
             score_uncalibrated = (
                 model.predict_uncalibrated(X) if is_calibrated else y_score
             )
