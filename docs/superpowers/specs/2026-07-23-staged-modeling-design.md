@@ -5,6 +5,9 @@
 > 且其單一大 PR 的審查負擔過重。本 spec 以 main `42e4083` 為基準重新推導；
 > PR #68 分支保留於 remote 供實作細節參考（CompositeModelAdapter、OOF 編排、
 > consistency predicate），**不 cherry-pick**。
+>
+> 2026-07-23（同日稍晚）：經 Codex 對抗審查修訂——7 項發現逐條經使用者裁決，
+> 修訂處均以「2026-07-23 審查」字樣標註。
 
 ## 0. 一句話定位
 
@@ -19,16 +22,16 @@ shared 路徑零 regression。
 | # | 決策點 | 定案 |
 |---|---|---|
 | D1 | 重設計動機 | main 演進使 PR #68 脫節＋其 diff 過大，兩者皆是；以現行 main 重推、變更足跡小＋可分段落地為設計目標 |
-| D2 | Stage-1 分群 | 以 sample_pool 的**任意欄位組合**當分群鍵（例：`prod_name`、`cust_segment`、`prod_name＋cust_segment`），先以 item 為主要情境；分群是**資料驅動**（distinct 值），無外部 mapping 檔 |
+| D2 | Stage-1 分群 | 以 sample_pool 的欄位組合當分群鍵（例：`prod_name`、`cust_segment`、`prod_name＋cust_segment`），先以 item 為主要情境；分群是**資料驅動**（distinct 值），無外部 mapping 檔。**2026-07-23 審查修訂**：欄位須過 allowlist（§9 predicate 4），排除 label／score／rank／time／entity |
 | D3 | stage2=none 定位 | 允許，文件化警告（見 §2.3 分數可比性） |
 | D4 | Stage-2 輸入 | Stage-1 分數＋**全部原始特徵**（可用既有 feature selection 縮減）＋分群鍵欄位當 categorical |
 | D5 | OOF | 沿用 PR #68：entity 雜湊（crc32）互斥 K 折、OOF 分數餵 Stage-2、serving 用全量 refit；K 可設（缺省 5）；stage2=none 時完全跳過 OOF |
 | D6 | Stage-1 objective | 本期固定 binary；config 預留 `stage1.objective`（只收 `binary`），日後擴充不破 schema |
 | D7 | HPO | **Stage-1：各群獨立搜超參**（共用同一 search space 定義與 n_trials），**不支援 resume**（in-memory study，中斷即重搜），訓練效率必須極高；**Stage-2：比照現行 shared 機制**（persistent study、崩潰復原 resume、搜尋診斷） |
 | D8 | Stage-1 trial 評分 | 各群自己的 validation 子集上的 binary 指標（AUC/logloss） |
-| D9 | 抽樣/權重 | 完全沿用既有機制（同一份 dataset 產物、`sample_group_keys`＋overrides 控各群平衡、權重照既有 lookup 繼承）＋**對齊提醒**：分群鍵與 `sample_group_keys` 不一致時 consistency WARN |
+| D9 | 抽樣/權重 | 完全沿用既有機制（同一份 dataset 產物、`sample_group_keys`＋overrides 控各群平衡、權重照既有 lookup 繼承）＋**對齊提醒**：分群鍵與 `sample_group_keys` 不一致時 consistency WARN。**2026-07-23 審查修訂**：「dataset 不動」僅限分群鍵⊆identity（per-item）；entity 側欄位需入 `carry_columns`（既有機制，觸發 dataset 重建，§5） |
 | D10 | 診斷 | stage2 存在：booster 類診斷（SHAP/importance/gain ledger）掛 Stage-2、Stage-1 出精簡總覽表；**stage2=none：Stage-1 每群各自做一份完整 training 側診斷**；eval 側診斷不動（驗證相容即可） |
-| D11 | 未見分群值 | **跳過＋WARN**：缺模型的列不評分、排除於輸出，大聲統計缺哪些群、影響幾列 |
+| D11 | 未見分群值 | **跳過＋WARN**：缺模型的列不評分、排除於輸出，大聲統計缺哪些群、影響幾列。**2026-07-23 審查修訂為分流**：僅 inference 路徑如此；evaluation 路徑缺群＝異常，fail-fast；缺群統計為必做結構化產物（§7） |
 | D12 | 規模量級 | N（群數）＝十～百；**單群萬～百萬列**（2026-07-23 更正：上看百萬）；設計不得假設單群小 |
 | D13 | PR #68 處置 | 關閉 PR（留註連結新 spec）；remote 分支保留當參考 |
 | D14 | 交付切法 | 3～4 個**連續** PR（一個 merge 進 main 才開下一個，不疊 stacked PR），每個可獨立 merge、shared 路徑零 regression |
@@ -43,13 +46,18 @@ training:
   model_structure: shared          # shared | staged（缺省 shared）
   staged:                          # 只在 staged 時讀取
     stage1:
-      partition_keys: [prod_name]  # sample_pool 欄位組合，資料驅動分群
+      partition_keys: [prod_name]  # 過 allowlist 的欄位組合（§9），資料驅動分群
       objective: binary            # 本期只收 binary（預留擴充）
       hpo:
         n_trials: 30               # 每群獨立搜；0 = 不搜、用 params 固定值
         metric: auc                # auc | logloss
         search_space: {...}        # 全群共用同一份定義
       params: {...}                # 基底參數（HPO 之外的固定鍵；n_trials=0 時全用它）
+      gates:                       # 訓練時資料閘（§9），fail-fast、門檻可調
+        max_groups: 200
+        min_rows: 1000
+        min_positives: 50
+        min_negatives: 50
     stage2:
       mode: lambdarank             # binary | lambdarank | none
       oof_folds: 5                 # stage2!=none 時生效
@@ -70,7 +78,15 @@ training:
 5. `stage2≠none`：各群以最佳參數做 entity-hash K 折 OOF fit（訓練資料的 Stage-1 分數
    由「不含該 entity 的折模型」產生）＋全量 refit（serving 用）；Stage-2 以
    「原始特徵＋OOF Stage-1 分數＋分群鍵 categorical」訓練，early stop 於 val
-   （val/test 的 Stage-1 分數用全量 refit 模型產生——entity 不重疊，無 leakage）。
+   （val/test 的 Stage-1 分數用全量 refit 模型產生）。
+
+**泛化契約（2026-07-23 審查修正——原稿「val/test entity 不重疊，無 leakage」是錯的）**：
+val/test 與 train 是**時間切分**（`select_val_keys`／`select_test_keys` 只按 snap_date
+選，entity 可重疊；entity 互斥的只有 train vs train_dev 的 cust bucket 切分）。
+契約＝temporal generalization，與現行 shared 模式完全相同；leakage 防護依賴
+時間切分＋point-in-time 特徵契約，**不是** entity 不重疊。已知取捨（stacking 標準）：
+Stage-2 訓練吃 OOF 分數、val／serving 吃 full-refit 分數，兩者 regime 不同；
+但 val 與 serving 同 regime，故選參評分與上線行為一致。
 
 ### 2.3 stage2=none 的分數可比性（文件化警告）
 
@@ -80,7 +96,9 @@ training:
 - 分群鍵**只含 entity 側欄位**（如 `cust_segment`）：同 query 所有候選落同一模型，無可比性問題。
 - 分群鍵**含 item**：同 query 的候選由不同模型評分。各模型都在估 P(y=1|x)，概念上同尺，
   但**各群負樣本下採比例不同時機率估計會系統性歪掉**，跨模型比較有偏。
-  此模式定位為實驗對照組——允許使用、評估指標自己說話；文件與（視實作）log WARN 明示此風險。
+  此模式定位為**實驗對照模式**——允許使用、評估指標自己說話；文件與 log WARN 明示此風險，
+  **promote 前由人工確認可比性風險**（本專案 promote 本為人工觸發，此句將該把關明文化；
+  2026-07-23 審查後補）。
 
 ## 3. HPO
 
@@ -88,6 +106,12 @@ training:
 
 - 每群一個 **in-memory** Optuna study（不落 SQLite）：中斷即整段重搜，換取零 resume
   契約負擔（刻意不碰 RESUME_CONTRACTS）。
+- **確定性（2026-07-23 審查後補）**：無 resume ≠ 不可重現——resume 省的是重算成本，
+  與重現性無關。每群 sampler 種子由 `random_seed`＋分群鍵值派生（每群固定、群間不同）；
+  **群內 trial 序列執行**（平行只在跨群層面，§8）——TPE 依賴前序 trial 結果，群內平行
+  會讓軌跡依完成順序漂移。同 config＋同 dataset ⇒ 同搜尋軌跡 ⇒ 同最佳參數。
+  數值邊界：LightGBM 多執行緒浮點累加非 bitwise 確定（`versioning.py` 對 `num_threads`
+  的既有取捨）——設計上確定、數值上盡力，與現行 shared HPO 同級。
 - search space 定義全群共用一份；各群獨立搜、各自出最佳參數。
 - trial 評分：該群 validation 子集的 binary 指標（缺省 auc）。
 - **split 衛生（設計決定，標註給審者）**：Stage-1 HPO 的評分子集用 **train_dev**
@@ -109,7 +133,9 @@ training:
 - **機制零修改**：`compute_model_version` 雜湊 `training:` 區塊（減
   `MODEL_VERSION_IRRELEVANT_PARAMS`），新增的 `model_structure`／`staged.*` 鍵自動折入。
 - 分群資料驅動 → 無 PR #68 `product_categories` 式的頂層 mapping 折入問題。
-- `base_dataset_version`／`train_variant_id`／dataset pipeline 完全不受影響（§5）。
+- 分群鍵⊆identity（per-item）時 `base_dataset_version`／`train_variant_id`／dataset
+  pipeline 完全不受影響；entity 側分群鍵需入 `carry_columns` → 觸發 dataset 重建與
+  `base_dataset_version` 更新（既有機制；2026-07-23 審查修正，詳見 §5）。
 - Artifact 布局（單一 model_version 目錄＝完整 bundle）：
   ```
   data/models/<model_version>/
@@ -119,12 +145,23 @@ training:
     stage2/model.txt               # stage2!=none 時
   ```
   載入端由 adapter 的 save/load 封裝（§7），對 `ModelAdapterDataset` 呈現單一模型介面。
+- **Bundle 原子性（2026-07-23 審查後補，低成本三件）**：staged 一個版本寫數十個檔案，
+  中斷重跑的殘檔暴露面遠大於 shared 的單一 model.txt，故：(1) 整個 bundle 先寫
+  model_version 暫存目錄，全部寫完後 atomic rename 發布——殘檔只留在暫存目錄、
+  不會被讀到；(2) completed manifest 最後寫；(3) adapter load 時驗 `groups_index.json`
+  宣告的群集合 vs 目錄實際模型檔，不符即 fail-fast（擋混合 bundle 被靜默使用）。
+  鎖／checksum／併發競態防護刻意不做（§11）。
 - Stage-1 各群搜參不可重現（無 resume、不進 config）→ 與現行 HPO 相同的既有語意：
   model_version 標識「config 意圖」，實際搜出參數記錄在 manifest／groups_index。
 
 ## 5. 抽樣與樣本權重
 
 - staged 模式吃同一份 dataset 產物；Stage-1 各群子集訓練時從記憶體切出。
+- **分群鍵欄位可得性（2026-07-23 審查修正）**：model_input 只含 identity ∪ label ∪
+  `carry_columns` ∪ 編碼特徵（`core/consistency.py` 既有契約，weight-key predicate 同源）。
+  分群鍵⊆identity（如 `prod_name`）→ dataset 零變更；entity 側欄位（如 `cust_segment`）
+  → 必須入 `dataset.carry_columns` 並重跑 dataset——沿用 sample_weight_keys 的同型
+  契約與錯誤訊息（「Add them to dataset.carry_columns and re-run the dataset pipeline」）。
 - 各群正負平衡：靠既有 `sample_group_keys`＋sampling overrides（editor 調），
   **不新增 staged 專屬抽樣機制**。
 - 列權重：既有 `sample_weight_keys` lookup 產生的權重跟著列走——各群繼承自己子集的
@@ -154,9 +191,14 @@ training:
 - 推論 chunk 粒度（snap_date, prod_name）與 per-item 分群天然相容；entity 側分群鍵
   需要 scoring dataset 帶該欄位 → 前置檢查：`partition_keys ⊆ scoring dataset 欄位`，
   缺欄 fail-fast（這是 schema 問題，不是資料漂移，不適用跳過）。
-- **未見分群值（D11）**：評分前比對 scoring 資料分群值集合 vs 已訓群集合；
-  缺模型的列**跳過＋WARN**（不評分、排除於輸出），log 大聲列出缺哪些群、各影響幾列、
-  佔比。候選宇宙縮水必須在 log 與（視實作）manifest 可見，不得靜默。
+- **未見分群值（D11；2026-07-23 審查修訂為分流）**：評分前比對 scoring 資料分群值集合
+  vs 已訓群集合（`groups_index.json`），依路徑分流：
+  - **evaluation 路徑（test 預測）**：test 與 train 出自同一份 sample_pool build，
+    理論上不缺群；真缺＝異常訊號，**fail-fast**——評估指標不得因刪列靜默失真。
+  - **inference 路徑（`inference_population`）**：新群值是自然事件，缺模型的列
+    **跳過＋WARN**（不評分、排除於輸出）。
+  - 兩路徑的缺群統計（逐群缺失、影響列／query 數、候選 coverage）為**必做的結構化
+    產物**寫入對應 manifest，不只 log。候選宇宙縮水不得靜默。
 - inference 尚未在公司環境部署（issue #63 背景）→ 無 backward-compat 包袱；
   公司規模 e2e 驗證照既有慣例列為 deferred。
 
@@ -166,7 +208,8 @@ training:
 
 - 單次 extract 後記憶體切群，避免 N 次重讀。
 - 跨群平行：stdlib（`concurrent.futures`）pool，**依群大小排程**——大群（十萬～百萬列）
-  序列或低併發跑、小群打包平行；每 worker 的 LightGBM `num_threads` 配額化避免超訂。
+  序列或低併發跑、小群打包平行；**群內 trial 一律序列**（§3.1 確定性要求，平行度
+  只來自跨群維度）；每 worker 的 LightGBM `num_threads` 配額化避免超訂。
   生產限制（no additional packages、CPU-only、no UDF）下只用現有依賴。
 - 單群 HPO 總成本 ≈ n_trials 次小模型訓練；n_trials 是使用者的成本旋鈕（`0`＝跳過）。
 - ⚠ 開放項（實作計畫時實測定案）：百萬列大群 × 併發下的峰值記憶體；是否需要
@@ -178,8 +221,11 @@ training:
 1. `model_structure ∈ {shared, staged}`；staged 時 `staged` 區塊必備。
 2. `stage1.objective == binary`（預留鍵，本期只收 binary）。
 3. `stage2.mode ∈ {binary, lambdarank, none}`；`oof_folds >= 2`（stage2≠none 時）。
-4. `partition_keys` 非空、皆為 sample_pool 欄位（Layer-1 查 schema config；
-   欄位實存性由 Layer-2 資料閘慣例補）。
+4. `partition_keys` 非空且過 **allowlist**（2026-07-23 審查修正）：每欄 ∈ item identity
+   ∪ `dataset.carry_columns` ∪ 宣告 categorical（比照 sample_weight_keys 的同型
+   predicate，`consistency.py:434-446`），且**明確排除** label／score／rank／time／
+   entity 欄位——依 label 分群＝target leakage；依 time／entity 分群＝推論時必缺群
+   或基數爆炸。欄位實存性由 Layer-2 資料閘慣例補。
 5. staged 時 calibration 必須關閉（D15）。
 6. Stage-1 HPO：`n_trials >= 0`、`metric ∈ {auc, logloss}`。
 
@@ -187,11 +233,20 @@ WARN 級：
 7. `partition_keys != sample_group_keys`（D9 對齊提醒）。
 8. `stage2.mode == none` 且 partition_keys 含 item 欄位（§2.3 可比性警告）。
 
+訓練時資料閘（2026-07-23 審查後補；fail-fast、門檻可調、需資料故屬訓練 pipeline
+前置檢查而非 Layer-1）：
+9. 群數 ≤ `gates.max_groups`（防組合鍵手滑爆出巨量群）。
+10. 每群的 train／train_dev 子集：列數 ≥ `min_rows`、正例 ≥ `min_positives`、
+    負例 ≥ `min_negatives`（缺任一類 → AUC 未定義、LightGBM 單類別退化）。
+11. `stage2 != none` 時：每群每個 OOF fold 內仍有正負例（fold 可訓練）。
+任一群未達門檻即中斷，並**collect-all 列出全部不合格群**（比照 Layer-1 慣例）；
+門檻設寬鬆即近似不擋。
+
 ## 10. 交付切法（D14：連續 PR，前一個 merge 進 main 才開下一個）
 
 | PR | 內容 | 驗收重點 |
 |---|---|---|
-| **PR-A：Stage-1 引擎** | 分群切分、per-group 訓練＋per-group HPO（in-memory）、adapter（save/load/predict 路由）、`stage2=none` 端到端可跑、consistency 新 predicate、artifact 布局、未見群跳過＋WARN | shared 路徑 baseline 零 diff；staged(none) 本機 e2e；效率量測（單群百萬列） |
+| **PR-A：Stage-1 引擎** | 分群切分、per-group 訓練＋per-group HPO（in-memory、確定性種子）、adapter（save/load/predict 路由）、`stage2=none` 端到端可跑、consistency allowlist＋訓練時資料閘、artifact 布局（含原子性三件）、未見群分流（eval fail-fast／inference 跳過＋WARN） | shared 路徑 baseline 零 diff；staged(none) 本機 e2e；效率量測（單群百萬列） |
 | **PR-B：Stage-2** | OOF K 折編排、stage2 binary／lambdarank、Stage-2 HPO 接現行機制（persistent study/resume/搜尋診斷） | OOF leakage-clean 測試（fold 互斥）；staged(lambdarank) 本機 e2e；HPO resume 實測 |
 | **PR-C：診斷** | Stage-1 總覽表、stage2=none 每群完整診斷、stage2 存在時掛 Stage-2、eval 側相容驗證 | 兩種 mode 的診斷產物 real-run 驗證 |
 | **PR-D：文件** | training.md 章節、README、design-principles、相關手冊交叉引用 | fresh 讀者驗收（handbook 風格規範） |
@@ -207,6 +262,10 @@ WARN 級：
 - stage2 存在時的 per-group 完整診斷（D10 只在 none 時做）。
 - staged 校準支援（D15；校準功能本身預計移除）。
 - Stage-1 各群 n_trials 差異化、共享先驗／warm-start（規模若上千群再議，D12 註記）。
+- 模型品質 go/no-go 自動驗收（2026-07-23 使用者裁決「不補」——驗收只管工程正確性，
+  staged vs shared 的品質比較留給日後實驗與人工判讀；審查曾提出的便宜對照組＝
+  「shared＋分群鍵當特徵」，此處記錄供實驗時參考）。
+- bundle 鎖／checksum／併發競態防護（單操作者批次環境；只做 §4 原子性三件）。
 
 ## 12. 實作計畫前的待驗證清單（寫各 PR plan 時逐項核實，不憑本 spec 記憶）
 
@@ -217,3 +276,5 @@ WARN 級：
 - [ ] evaluation `--post-training`／compare pipeline 對 staged 預測的實跑相容。
 - [ ] consistency 現行編號 legend（A15 之後排到哪）。
 - [ ] Stage-1 併發＋大群的記憶體實測（§8 開放項）。
+- [ ] 分群鍵當 Stage-2 categorical 特徵的編碼路徑（preprocessor 不自動編任意
+      carry 欄位；PR-B 計畫時定案作法，2026-07-23 審查發現）。
