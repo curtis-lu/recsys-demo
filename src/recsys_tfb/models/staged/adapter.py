@@ -71,6 +71,16 @@ class StagedModelAdapter(ModelAdapter):
         Returns (scores, valid_mask); missing-group rows get NaN score and
         False mask. on_missing: "raise" (evaluation path) | "skip"
         (inference path; stats in self.last_missing_stats).
+
+        Precondition: ``keys`` must be a pre-stringified, non-null object
+        array — every production call site builds it via
+        ``models.staged.partition.routing_keys`` (
+        ``io.extract._composite_key_series(...).astype(str)`` under the
+        hood), so lookups against ``self._groups`` (keyed by the same
+        str-joined convention) match byte-for-byte. Passing an array with
+        NaN/None entries or mixed types directly (bypassing
+        ``routing_keys``) is undefined behavior — this method does not
+        normalize or validate key contents beyond the length check below.
         """
         if on_missing not in ("raise", "skip"):
             raise ValueError(f"on_missing must be raise|skip, got {on_missing!r}")

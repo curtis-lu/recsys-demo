@@ -114,12 +114,18 @@ Layer 1 — config-static (implemented here; aggregated by
   ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
 * A21 — staged model-structure config (Layer-1).  model_structure ∈ {shared,
-  staged}; when staged: stage1.objective == "binary"; stage2.mode == "none"
+  staged}; when staged: a non-empty ``training.staged`` block is required
+  (explicit error — no longer inferred indirectly via an empty
+  partition_keys); stage1.objective == "binary"; stage2.mode == "none"
   (binary/lambdarank arrive with PR-B); calibration.enabled must be false;
   hpo.metric ∈ {auc, logloss}; hpo.n_trials >= 0; partition_keys non-empty,
-  each ∈ {schema.item} ∪ dataset.carry_columns (mirrors A9a availability)
-  and NOT a label/score/rank/time/entity role column (label-partitioning is
-  target leakage; time/entity partitioning cannot route at inference).
+  each ∈ {schema.item} ∪ dataset.carry_columns ∪ declared categorical
+  columns (mirrors A9a availability) and NOT a label/score/rank/time/entity
+  role column (label-partitioning is target leakage; time/entity
+  partitioning cannot route at inference). Known quirk: a partition key
+  that is a declared categorical column is int-encoded in model_input, so
+  the per-group report key surfaces as that integer code's string form
+  (e.g. "3"), not the raw category label — expected, not decoded here.
   Alignment/comparability advisories are WARN-level (logged, not raised):
   partition_keys != sample_group_keys; stage2 none with item in keys.
 
@@ -485,6 +491,12 @@ def staged_config_errors(parameters: dict) -> list[str]:
     if structure == "shared":
         return errors  # staged 區塊在 shared 下不驗（版本化守衛同一語意）
     staged = training.get("staged") or {}
+    if not staged:
+        errors.append(
+            "A21: training.model_structure=staged requires a non-empty "
+            "training.staged block (stage1/stage2 config)"
+        )
+        return errors
     stage1 = staged.get("stage1") or {}
     stage2 = staged.get("stage2") or {}
     if stage1.get("objective", "binary") != "binary":
@@ -536,7 +548,20 @@ def staged_partition_key_errors(parameters: dict) -> list[str]:
         schema["rank"]: "rank", schema["time"]: "time",
         **{c: "entity" for c in schema["entity"]},
     }
-    allowed = {schema["item"]} | set(dataset_cfg.get("carry_columns") or [])
+    # Declared categorical columns are integer-encoded in model_input at
+    # train/predict time (mirrors A9a's weight_key_columns_unavailable
+    # availability rule), so they are physically present and usable as a
+    # partition key just like carry_columns. NOTE: because the value is the
+    # int code, not the raw category label, the per-group report key for a
+    # categorical partition key surfaces as that code's string form (e.g.
+    # "3") rather than the human-readable category — expected, no decode.
+    declared_cats = _prepare_model_input(parameters).get("categorical_columns")
+    categorical_cols = declared_cats if declared_cats is not None else [schema["item"]]
+    allowed = (
+        {schema["item"]}
+        | set(dataset_cfg.get("carry_columns") or [])
+        | set(categorical_cols)
+    )
     errors: list[str] = []
     for k in keys:
         if k in forbidden:
@@ -550,8 +575,10 @@ def staged_partition_key_errors(parameters: dict) -> list[str]:
             errors.append(
                 f"A21: staged.stage1.partition_keys column {k!r} is not "
                 "available in model_input — allowed: the item column "
-                f"({schema['item']!r}) or dataset.carry_columns. Add it to "
-                "dataset.carry_columns and re-run the dataset pipeline."
+                f"({schema['item']!r}), dataset.carry_columns, or a "
+                "declared categorical column. Add it to dataset."
+                "carry_columns (or dataset.prepare_model_input."
+                "categorical_columns) and re-run the dataset pipeline."
             )
     return errors
 

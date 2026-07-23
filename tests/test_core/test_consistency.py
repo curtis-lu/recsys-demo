@@ -1103,6 +1103,25 @@ class TestStagedConfigA21:
         p["dataset"]["carry_columns"] = ["seg_col"]
         validate_config_consistency(p)
 
+    def test_declared_categorical_partition_key_allowed(self):
+        # 分群鍵＝宣告 categorical 特徵欄（不在 carry_columns、非 item）→ 應通過
+        p = self._staged_params(partition_keys=["cust_segment_typ_2a"])
+        p["dataset"]["prepare_model_input"]["categorical_columns"] = [
+            "prod_name", "cust_segment_typ_2a"]
+        validate_config_consistency(p)
+
+    def test_missing_staged_block_rejected(self):
+        p = self._staged_params()
+        del p["training"]["staged"]
+        with pytest.raises(ConfigConsistencyError, match="training\\.staged block"):
+            validate_config_consistency(p)
+
+    def test_empty_staged_block_rejected(self):
+        p = self._staged_params()
+        p["training"]["staged"] = {}
+        with pytest.raises(ConfigConsistencyError, match="training\\.staged block"):
+            validate_config_consistency(p)
+
     def test_calibration_must_be_disabled(self):
         p = self._staged_params()
         p["training"]["calibration"] = {"enabled": True}
