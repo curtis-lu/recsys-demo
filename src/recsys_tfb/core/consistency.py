@@ -113,6 +113,21 @@ Layer 1 — config-static (implemented here; aggregated by
   quadrant_enabled`` are bool; ``diagnostics.shap.quadrant_top_k_decision`` /
   ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
+* A21 — staged model-structure config (Layer-1).  model_structure ∈ {shared,
+  staged}; when staged: a non-empty ``training.staged`` block is required
+  (explicit error — no longer inferred indirectly via an empty
+  partition_keys); stage1.objective == "binary"; stage2.mode == "none"
+  (binary/lambdarank arrive with PR-B); calibration.enabled must be false;
+  hpo.metric ∈ {auc, logloss}; hpo.n_trials >= 0; partition_keys non-empty,
+  each ∈ {schema.item} ∪ dataset.carry_columns ∪ declared categorical
+  columns (mirrors A9a availability) and NOT a label/score/rank/time/entity
+  role column (label-partitioning is target leakage; time/entity
+  partitioning cannot route at inference). Known quirk: a partition key
+  that is a declared categorical column is int-encoded in model_input, so
+  the per-group report key surfaces as that integer code's string form
+  (e.g. "3"), not the raw category label — expected, not decoded here.
+  Alignment/comparability advisories are WARN-level (logged, not raised):
+  partition_keys != sample_group_keys; stage2 none with item in keys.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -150,8 +165,12 @@ the plan doc for the full table:
 
 from __future__ import annotations
 
+import logging
+
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
+
+logger = logging.getLogger(__name__)
 
 
 class ConsistencyError(ValueError):
@@ -456,6 +475,140 @@ def weight_key_columns_unavailable(parameters: dict) -> list[str]:
     )
     keys = (parameters.get("training", {}) or {}).get("sample_weight_keys") or []
     return sorted(k for k in keys if k not in available)
+
+
+def staged_config_errors(parameters: dict) -> list[str]:
+    """A21: staged model-structure config invariants (structure subset)."""
+    training = parameters.get("training", {}) or {}
+    structure = training.get("model_structure", "shared")
+    errors: list[str] = []
+    if structure not in ("shared", "staged"):
+        errors.append(
+            f"A21: training.model_structure must be 'shared' or 'staged', "
+            f"got {structure!r}"
+        )
+        return errors
+    if structure == "shared":
+        return errors  # staged 區塊在 shared 下不驗（版本化守衛同一語意）
+    staged = training.get("staged") or {}
+    if not staged:
+        errors.append(
+            "A21: training.model_structure=staged requires a non-empty "
+            "training.staged block (stage1/stage2 config)"
+        )
+        return errors
+    stage1 = staged.get("stage1") or {}
+    stage2 = staged.get("stage2") or {}
+    if stage1.get("objective", "binary") != "binary":
+        errors.append(
+            "A21: staged.stage1.objective only accepts 'binary' "
+            f"(got {stage1.get('objective')!r}; reserved key for future use)"
+        )
+    if stage2.get("mode", "none") != "none":
+        errors.append(
+            "A21: staged.stage2.mode only accepts 'none' in this release "
+            f"(got {stage2.get('mode')!r}; binary/lambdarank arrive with the "
+            "Stage-2 PR)"
+        )
+    if (training.get("calibration") or {}).get("enabled", False):
+        errors.append(
+            "A21: training.calibration.enabled must be false when "
+            "model_structure is staged (lambdarank/staged scores are not "
+            "calibrated probabilities; calibration is slated for removal)"
+        )
+    hpo = stage1.get("hpo") or {}
+    metric = hpo.get("metric", "auc")
+    if metric not in ("auc", "logloss"):
+        errors.append(
+            f"A21: staged.stage1.hpo.metric must be 'auc' or 'logloss', "
+            f"got {metric!r}"
+        )
+    n_trials = hpo.get("n_trials", 0)
+    if not isinstance(n_trials, int) or isinstance(n_trials, bool) or n_trials < 0:
+        errors.append(
+            f"A21: staged.stage1.hpo.n_trials must be a non-negative int, "
+            f"got {n_trials!r}"
+        )
+    return errors
+
+
+def staged_partition_key_errors(parameters: dict) -> list[str]:
+    """A21: partition_keys allowlist (mirrors A9a availability semantics)."""
+    training = parameters.get("training", {}) or {}
+    if training.get("model_structure", "shared") != "staged":
+        return []
+    keys = (((training.get("staged") or {}).get("stage1") or {})
+            .get("partition_keys") or [])
+    if not keys:
+        return ["A21: staged.stage1.partition_keys must be a non-empty list"]
+    schema = get_schema(parameters)
+    dataset_cfg = parameters.get("dataset", {}) or {}
+    forbidden = {
+        schema["label"]: "label", schema["score"]: "score",
+        schema["rank"]: "rank", schema["time"]: "time",
+        **{c: "entity" for c in schema["entity"]},
+    }
+    # Declared categorical columns are integer-encoded in model_input at
+    # train/predict time (mirrors A9a's weight_key_columns_unavailable
+    # availability rule), so they are physically present and usable as a
+    # partition key just like carry_columns. NOTE: because the value is the
+    # int code, not the raw category label, the per-group report key for a
+    # categorical partition key surfaces as that code's string form (e.g.
+    # "3") rather than the human-readable category — expected, no decode.
+    declared_cats = _prepare_model_input(parameters).get("categorical_columns")
+    categorical_cols = declared_cats if declared_cats is not None else [schema["item"]]
+    allowed = (
+        {schema["item"]}
+        | set(dataset_cfg.get("carry_columns") or [])
+        | set(categorical_cols)
+    )
+    errors: list[str] = []
+    for k in keys:
+        if k in forbidden:
+            errors.append(
+                f"A21: staged.stage1.partition_keys contains {k!r} which is "
+                f"the {forbidden[k]} role column — partitioning by "
+                f"{forbidden[k]} is forbidden (label => target leakage; "
+                "time/entity => unroutable at inference)"
+            )
+        elif k not in allowed:
+            errors.append(
+                f"A21: staged.stage1.partition_keys column {k!r} is not "
+                "available in model_input — allowed: the item column "
+                f"({schema['item']!r}), dataset.carry_columns, or a "
+                "declared categorical column. Add it to dataset."
+                "carry_columns (or dataset.prepare_model_input."
+                "categorical_columns) and re-run the dataset pipeline."
+            )
+    return errors
+
+
+def staged_alignment_warnings(parameters: dict) -> list[str]:
+    """A21 WARN-level advisories (returned as strings; caller logs, not raises)."""
+    training = parameters.get("training", {}) or {}
+    if training.get("model_structure", "shared") != "staged":
+        return []
+    staged = training.get("staged") or {}
+    stage1 = staged.get("stage1") or {}
+    keys = stage1.get("partition_keys") or []
+    warnings: list[str] = []
+    group_keys = parameters.get("dataset", {}).get("sample_group_keys") or []
+    if group_keys and list(keys) != list(group_keys):
+        warnings.append(
+            f"A21-WARN: staged.stage1.partition_keys {keys} != "
+            f"dataset.sample_group_keys {group_keys} — per-group sampling "
+            "ratios may be non-uniform inside a stage-1 partition"
+        )
+    schema = get_schema(parameters)
+    if (staged.get("stage2") or {}).get("mode", "none") == "none" \
+            and schema["item"] in keys:
+        warnings.append(
+            "A21-WARN: stage2=none with an item-bearing partition key — "
+            "cross-model scores are ranked within a query without a fusing "
+            "stage; differing per-group sampling ratios bias comparability "
+            "(experimental-comparison mode; see spec §2.3)"
+        )
+    return warnings
 
 
 def weight_key_arity_mismatch(parameters: dict) -> list[str]:
@@ -794,6 +947,11 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(suppression_param_errors(parameters))
 
     errors.extend(training_diagnostics_param_errors(parameters))
+
+    errors.extend(staged_config_errors(parameters))
+    errors.extend(staged_partition_key_errors(parameters))
+    for w in staged_alignment_warnings(parameters):
+        logger.warning(w)
 
     if errors:
         raise ConfigConsistencyError(

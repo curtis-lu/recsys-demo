@@ -192,6 +192,12 @@ model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/model.txt
 
+# staged model_structure 第二輸出（Task 7 修訂）：每群 rows/pos/best_params/score/
+# train_seconds，免載 bundle 可查，亦為 PR-C 總覽表資料源。shared 路徑不產生此檔。
+stage1_groups_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/stage1_groups.json
+
 best_params:
   type: JSONDataset
   filepath: data/models/${model_version}/best_params.json
@@ -338,6 +344,13 @@ score_table:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
+
+# predict_scores 第二輸出（Task 10）：staged 路由 skip 掉的 partition group 統計
+# （on_missing="skip"，見 nodes_spark._predict_chunk_staged）。shared 模型是
+# no-op 摘要（missing_groups 空字典）。
+staged_missing_groups_report:
+  type: JSONDataset
+  filepath: data/inference/${model_version}/missing_groups.json
 
 # --- Inference pipeline — 發布前 staging（managed Hive table）---
 # rank_predictions 先把排名寫進 staging；validate_predictions 讀此表跑 sanity

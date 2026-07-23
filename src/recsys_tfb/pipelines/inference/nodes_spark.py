@@ -135,13 +135,55 @@ def apply_preprocessor(
     return _apply_preprocessor(scoring_dataset, preprocessor, parameters)
 
 
+def _predict_chunk_staged(model, X, features_pdf):
+    """Staged inference chunk: route, skip missing groups, count them.
+
+    Returns (scores, keep_mask, missing_stats). ``scores`` is the full,
+    per-row array straight from predict_routed (NaN at skipped rows) —
+    callers apply ``keep_mask`` themselves to align with other per-row
+    frames (e.g. identity columns) before combining. Inference path uses
+    on_missing="skip" (spec D11 分流): new partition values are a natural
+    event for inference_population — drop, WARN, and report.
+    """
+    from recsys_tfb.models.staged.partition import routing_keys
+
+    keys = routing_keys(features_pdf, model.partition_keys)
+    scores, keep = model.predict_routed(X, keys, on_missing="skip")
+    return scores, keep, dict(model.last_missing_stats)
+
+
+def _raise_if_all_rows_skipped(result_pdf: pd.DataFrame, missing_stats: dict) -> None:
+    """Fail loud when the concatenated score table has zero rows.
+
+    ``all_results`` (one entry per (time, item) chunk) can be non-empty
+    while every entry contributed zero rows — staged routing's
+    on_missing="skip" drops a chunk's rows entirely when no stage-1 model
+    covers the group(s) present. The pre-existing ``if not all_results``
+    guard never catches this (the list itself is non-empty), so without
+    this check ``result_pdf[score_col].mean()`` silently returns NaN and a
+    zero-row score table would propagate downstream unnoticed.
+    """
+    if result_pdf.empty:
+        raise ValueError(
+            "all rows skipped — no stage-1 model covers any partition "
+            "group in the scoring data; missing_groups="
+            f"{dict(sorted(missing_stats.items()))}"
+        )
+
+
 def predict_scores(
     model: ModelAdapter,
     X_score: DataFrame,
     scoring_dataset: DataFrame,
     parameters: dict,
-) -> DataFrame:
-    """Predict probability scores, chunked by (snap_date, prod_name) to control memory."""
+) -> tuple[DataFrame, dict]:
+    """Predict probability scores, chunked by (snap_date, prod_name) to control memory.
+
+    Returns (score_table, staged_missing_groups_report). The report is a
+    no-op summary ({"model_structure": "shared", "missing_groups": {}, ...})
+    for shared models; only StagedModelAdapter can skip rows (D11 分流：
+    inference 用 on_missing="skip"，見 _predict_chunk_staged)。
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
     item_col = schema["item"]
@@ -169,11 +211,18 @@ def predict_scores(
 
     spark = X_score.sparkSession
 
+    from recsys_tfb.models.staged.adapter import StagedModelAdapter
+
+    is_staged = isinstance(model, StagedModelAdapter)
+
     use_calibration = parameters.get("inference", {}).get("use_calibration", True)
     use_uncalibrated = not use_calibration and isinstance(model, CalibratedModelAdapter)
 
     if use_uncalibrated:
         logger.info("Calibration disabled by config, using uncalibrated scores")
+
+    missing_stats: dict = {}
+    total_rows = 0
 
     with log_step(logger, "model_predict"):
         # Process by (snap_date, prod_name) to minimize per-chunk memory
@@ -193,7 +242,16 @@ def predict_scores(
             chunk_pdf = chunk.select(*collection_columns).toPandas()
             features_pdf = chunk_pdf[feature_columns]
             identity_pdf = chunk_pdf[identity_cols].copy()
-            if use_uncalibrated:
+            total_rows += len(chunk_pdf)
+            if is_staged:
+                chunk_scores, keep_mask, chunk_missing = _predict_chunk_staged(
+                    model, features_pdf.values, chunk_pdf)
+                scores = chunk_scores[keep_mask]
+                if not keep_mask.all():
+                    identity_pdf = identity_pdf.iloc[keep_mask.nonzero()[0]]
+                for g, n in chunk_missing.items():
+                    missing_stats[g] = missing_stats.get(g, 0) + n
+            elif use_uncalibrated:
                 scores = model.predict_uncalibrated(features_pdf)
             else:
                 scores = model.predict(features_pdf)
@@ -205,6 +263,7 @@ def predict_scores(
                 "No scoring rows found for inference.snap_dates and products"
             )
         result_pdf = pd.concat(all_results, ignore_index=True)
+        _raise_if_all_rows_skipped(result_pdf, missing_stats)
 
     logger.info(
         "Predicted %d scores, mean=%.4f",
@@ -218,7 +277,22 @@ def predict_scores(
     if model_version:
         result = result.withColumn("model_version", F.lit(model_version))
 
-    return result
+    report = {
+        "model_structure": "staged" if is_staged else "shared",
+        "missing_groups": missing_stats,
+        "rows_skipped": int(sum(missing_stats.values())),
+        "rows_total": int(total_rows),
+    }
+    if missing_stats:
+        logger.warning(
+            "predict_scores: %d group(s) had no stage-1 model — skipped %d/%d "
+            "row(s): %s — the candidate universe SHRANK for affected "
+            "entities; retrain to cover new groups",
+            len(missing_stats), report["rows_skipped"], report["rows_total"],
+            dict(sorted(missing_stats.items())),
+        )
+
+    return result, report
 
 
 def rank_predictions(

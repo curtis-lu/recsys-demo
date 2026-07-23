@@ -29,7 +29,7 @@ def create_pipeline() -> Pipeline:
             Node(
                 predict_scores,
                 inputs=["model", "X_score", "scoring_dataset", "parameters"],
-                outputs="score_table",
+                outputs=["score_table", "staged_missing_groups_report"],
             ),
             Node(
                 rank_predictions,

@@ -129,6 +129,27 @@ training:
       type: float
       low: 0.6
       high: 1.0
+  # --- Staged modeling（兩階段建模；spec: docs/superpowers/specs/2026-07-23-staged-modeling-design.md）---
+  # shared（現況單一模型）| staged（Stage-1 分群模型；stage2 本期僅 none）。
+  # shared 時 staged 區塊完全忽略（不進 model_version hash，A21 不驗其內容）。
+  model_structure: shared
+  staged:
+    stage1:
+      partition_keys: [prod_name]   # 允許：schema.item 或 dataset.carry_columns 欄位（A21）
+      objective: binary             # 預留鍵，本期只收 binary
+      hpo:
+        n_trials: 0                 # 0 = 不搜，直接用 params；每群獨立、確定性種子、無 resume
+        metric: auc                 # auc | logloss（每群 train_dev 子集上評分）
+        search_space: []            # 同 training.search_space 的 ParamSpec 格式
+      params: {}                    # 覆蓋 algorithm_params 的每群基底參數
+      gates:                        # 訓練時資料閘（fail-fast、collect-all；spec §9）
+        max_groups: 200
+        min_rows: 200
+        min_positives: 20
+        min_negatives: 20
+      max_workers: 1                # 跨群平行度（群內 trial 一律序列）
+    stage2:
+      mode: none                    # 本期僅 none；binary | lambdarank 隨 PR-B
 
 mlflow:
   experiment_name: recsys_tfb

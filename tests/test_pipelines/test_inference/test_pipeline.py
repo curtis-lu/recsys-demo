@@ -16,6 +16,7 @@ class TestInferencePipeline:
         pipeline = create_pipeline()
         expected = {
             "scoring_dataset", "X_score", "score_table",
+            "staged_missing_groups_report",
             "ranked_staging", "validated_predictions", "ranked_predictions",
         }
         assert pipeline.outputs == expected

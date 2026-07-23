@@ -796,3 +796,32 @@ class TestFindLatestCompletedModelVersion:
         from recsys_tfb.core.versioning import find_latest_completed_model_version
         assert find_latest_completed_model_version(tmp_path) is None
         assert find_latest_completed_model_version(tmp_path / "missing") is None
+
+
+class TestStagedModelVersionStability:
+    def _params(self, extra_training=None):
+        training = {"algorithm": "lightgbm",
+                    "algorithm_params": {"objective": "binary"}}
+        if extra_training:
+            training.update(extra_training)
+        return {"training": training}
+
+    def test_shared_payload_unchanged_by_staged_defaults(self):
+        from recsys_tfb.core.versioning import _model_version_payload
+        base = _model_version_payload(self._params())
+        with_defaults = _model_version_payload(self._params({
+            "model_structure": "shared",
+            "staged": {"stage1": {"partition_keys": ["prod_name"]},
+                       "stage2": {"mode": "none"}},
+        }))
+        assert base == with_defaults  # shared 時 staged 鍵不得進 hash payload
+
+    def test_staged_payload_includes_staged_block(self):
+        from recsys_tfb.core.versioning import _model_version_payload
+        p = _model_version_payload(self._params({
+            "model_structure": "staged",
+            "staged": {"stage1": {"partition_keys": ["prod_name"]},
+                       "stage2": {"mode": "none"}},
+        }))
+        assert p["training"]["model_structure"] == "staged"
+        assert "staged" in p["training"]
