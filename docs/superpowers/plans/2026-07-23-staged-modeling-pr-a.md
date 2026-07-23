@@ -12,6 +12,18 @@
 
 ---
 
+## 修訂（2026-07-24，使用者指示：考量中斷重來成本的持久化設計）
+
+1. **群級 checkpoint（非 catalog，先例＝`_hpo/`）**：`train_staged_model` 每群訓完即寫
+   `data/models/_staged_wip/<model_version>/<slug>/`（`model.txt`＋`meta.json`＋`_SUCCESS`），
+   重跑跳過有 `_SUCCESS` 的群。安全性：model_version 同時涵蓋 config＋dataset 版本；
+   訓練確定性（D7 種子）使「跳過＝重算同結果」。**D7 邊界不變**：群內 search 中斷仍整群重搜，
+   checkpoint 粒度＝完成的群。wip 目錄不自動清（體積小、keyed by mv；文件註明可手刪）。
+2. **`train_staged_model` 增加第二輸出 `stage1_groups_report`**（catalog JSONDataset →
+   `data/models/${model_version}/stage1_groups.json`）：每群 rows/pos/best_params/score/
+   train_seconds；免載 bundle 可查，亦為 PR-C 總覽表資料源。
+3. Task 7 實作碼、Task 8 outputs 斷言、Task 11 預期已同步下修訂。
+
 ## 與 spec 的兩處已核實偏差（執行者照本計畫做即可，偏差已回報使用者）
 
 1. **spec §7「inference/evaluation 呼叫點不動」不成立**：兩個 predict 節點只把 numpy `X` 餵進 `model.predict(X)`，carry 欄位不在 `X` 內、無法 per-row 路由。修正＝兩個節點各加一個顯式 routed 分支（Task 9/10），DAG／catalog／`rank_predictions` 不動。
@@ -1653,7 +1665,8 @@ class TestTrainStagedModel:
     def test_returns_adapter_with_one_model_per_group(self, tmp_path):
         tr = _write_parquet(tmp_path, "train", _pdf(seed=0))
         dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
-        model = train_staged_model(tr, dev, PREPROC, _parameters())
+        model, _report = train_staged_model(tr, dev, PREPROC, _parameters(),
+                                            wip_root=tmp_path / "wip")
         assert isinstance(model, StagedModelAdapter)
         assert model.group_keys == ["A", "B"]
         assert model.partition_keys == ["seg"]
@@ -1664,17 +1677,48 @@ class TestTrainStagedModel:
         tr = _write_parquet(tmp_path, "train", pdf)
         dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
         with pytest.raises(StagedGateError, match="'B'"):
-            train_staged_model(tr, dev, PREPROC, _parameters())
+            train_staged_model(tr, dev, PREPROC, _parameters(),
+                               wip_root=tmp_path / "wip")
+
+    def test_returns_groups_report(self, tmp_path):
+        tr = _write_parquet(tmp_path, "train", _pdf(seed=0))
+        dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
+        _model, report = train_staged_model(tr, dev, PREPROC, _parameters(),
+                                            wip_root=tmp_path / "wip")
+        assert set(report["groups"]) == {"A", "B"}
+        for meta in report["groups"].values():
+            assert {"n_rows", "n_pos", "best_params", "score", "metric",
+                    "train_seconds"} <= set(meta)
+
+    def test_checkpoint_skips_completed_groups(self, tmp_path, caplog):
+        tr = _write_parquet(tmp_path, "train", _pdf(seed=0))
+        dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
+        wip = tmp_path / "wip"
+        m1, _ = train_staged_model(tr, dev, PREPROC, _parameters(),
+                                   wip_root=wip)
+        import logging
+        with caplog.at_level(logging.INFO):
+            m2, _ = train_staged_model(tr, dev, PREPROC, _parameters(),
+                                       wip_root=wip)
+        assert "checkpoint" in caplog.text  # 第二次跑必須報告跳過
+        X = np.random.default_rng(3).normal(size=(4, 2))
+        keys = np.array(["A", "B"] * 2, dtype=object)
+        s1, _ = m1.predict_routed(X, keys, on_missing="raise")
+        s2, _ = m2.predict_routed(X, keys, on_missing="raise")
+        np.testing.assert_allclose(s1, s2)  # checkpoint 載回＝重訓同結果
 
     def test_parallel_equals_sequential(self, tmp_path):
         tr = _write_parquet(tmp_path, "train",
                             _pdf(groups=("A", "B", "C"), seed=0))
         dev = _write_parquet(tmp_path, "dev",
                              _pdf(n_per_group=30, groups=("A", "B", "C"), seed=1))
-        m_seq = train_staged_model(tr, dev, PREPROC,
-                                   _parameters(max_workers=1))
-        m_par = train_staged_model(tr, dev, PREPROC,
-                                   _parameters(max_workers=3))
+        # 分開的 wip root——共用會讓第二跑直接載 checkpoint，測不到平行度
+        m_seq, _ = train_staged_model(tr, dev, PREPROC,
+                                      _parameters(max_workers=1),
+                                      wip_root=tmp_path / "wip1")
+        m_par, _ = train_staged_model(tr, dev, PREPROC,
+                                      _parameters(max_workers=3),
+                                      wip_root=tmp_path / "wip2")
         X = np.random.default_rng(3).normal(size=(6, 2))
         keys = np.array(["A", "B", "C"] * 2, dtype=object)
         s1, _ = m_seq.predict_routed(X, keys, on_missing="raise")
@@ -1738,16 +1782,54 @@ def _label_col(parameters: dict) -> str:
     return get_schema(parameters)["label"]
 
 
+def _wip_dir(parameters: dict, wip_root) -> "Path":
+    from pathlib import Path
+
+    if wip_root is not None:
+        return Path(wip_root)
+    # model_version 由 runtime_params 併入 parameters（同 catalog 模板機制）。
+    # 若執行時發現 parameters 無此鍵，停下回報，不要用 fallback 硬跑。
+    mv = parameters.get("model_version", "adhoc")
+    return Path("data/models/_staged_wip") / str(mv)
+
+
+def _load_checkpoint(gdir, key: str):
+    import json
+
+    if not (gdir / "_SUCCESS").exists():
+        return None
+    meta = json.loads((gdir / "meta.json").read_text())
+    adapter = LightGBMAdapter()
+    adapter.load(str(gdir / "model.txt"))
+    return key, adapter, meta
+
+
+def _write_checkpoint(gdir, result) -> None:
+    import json
+
+    gdir.mkdir(parents=True, exist_ok=True)
+    result.adapter.save(str(gdir / "model.txt"))
+    (gdir / "meta.json").write_text(json.dumps({
+        "best_params": result.best_params, "score": result.score,
+        "metric": result.metric, "n_rows": result.n_rows,
+        "n_pos": result.n_pos,
+        "train_seconds": round(result.train_seconds, 3),
+    }, indent=2, ensure_ascii=False))
+    (gdir / "_SUCCESS").touch()
+
+
 def train_staged_model(
     train_parquet_handle,
     train_dev_parquet_handle,
     preprocessor_view: dict,
     parameters: dict,
-) -> StagedModelAdapter:
+    wip_root=None,
+) -> tuple[StagedModelAdapter, dict]:
     training = parameters["training"]
     stage1 = training["staged"]["stage1"]
     partition_keys = list(stage1["partition_keys"])
     base_seed = int(parameters.get("random_seed", 42))
+    wip = _wip_dir(parameters, wip_root)
 
     pdf_tr = train_parquet_handle.to_pandas()
     pdf_dev = train_dev_parquet_handle.to_pandas()
@@ -1785,27 +1867,56 @@ def train_staged_model(
             dict(stage1.get("hpo") or {}), cat_idx, base_seed,
         )
 
+    # 群級 checkpoint：有 _SUCCESS 的群直接載回（確定性保證「載回＝重算同結果」；
+    # model_version 涵蓋 config＋dataset 版本，路徑即失效機制）。D7 邊界不變：
+    # 群內 search 中斷＝該群整段重搜。
+    from recsys_tfb.models.staged.partition import group_slug
+
+    completed: dict[str, tuple] = {}
+    todo: list[str] = []
+    for k in group_keys:
+        loaded = _load_checkpoint(wip / group_slug(k), k)
+        if loaded is not None:
+            completed[k] = loaded
+        else:
+            todo.append(k)
+    if completed:
+        logger.info(
+            "train_staged_model: %d/%d group(s) restored from checkpoint %s",
+            len(completed), len(group_keys), wip,
+        )
+
+    def _train_and_checkpoint(key: str):
+        r = _train(key)
+        _write_checkpoint(wip / group_slug(key), r)
+        return r
+
     max_workers = max(1, int(stage1.get("max_workers", 1)))
     if max_workers == 1:
-        results = [_train(k) for k in group_keys]
+        results = [_train_and_checkpoint(k) for k in todo]
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            results = list(pool.map(_train, group_keys))
+            results = list(pool.map(_train_and_checkpoint, todo))
 
     model = StagedModelAdapter()
+    report_groups: dict[str, dict] = {}
     for r in results:
-        model.add_group(r.group_key, r.adapter, meta={
-            "best_params": r.best_params, "score": r.score,
-            "metric": r.metric, "n_rows": r.n_rows, "n_pos": r.n_pos,
-            "train_seconds": round(r.train_seconds, 3),
-        })
+        meta = {"best_params": r.best_params, "score": r.score,
+                "metric": r.metric, "n_rows": r.n_rows, "n_pos": r.n_pos,
+                "train_seconds": round(r.train_seconds, 3)}
+        model.add_group(r.group_key, r.adapter, meta=meta)
+        report_groups[r.group_key] = meta
         logger.info(
             "stage1 group %r: rows=%d pos=%d %s=%.5f best_params=%s (%.1fs)",
             r.group_key, r.n_rows, r.n_pos, r.metric, r.score,
             r.best_params, r.train_seconds,
         )
+    for key, (k, adapter, meta) in completed.items():
+        model.add_group(k, adapter, meta=meta)
+        report_groups[k] = meta
     model.set_partition_keys(partition_keys)
-    return model
+    report = {"partition_keys": partition_keys, "groups": report_groups}
+    return model, report
 ```
 
 （實作時把 `_group_arrays` 的 label 取值統一走 `_label_col`——上面測試的 parameters 直接餵 `schema.columns` 結構，與 `get_schema` 消費一致；若 `get_schema` 需要完整 schema 區塊，以現檔 `core/schema.py:23` 的實際契約為準微調測試 fixture，**不得**改 `get_schema`。）
@@ -1830,6 +1941,13 @@ git commit -m "feat(staged): train_staged_model node — gates, size-aware threa
 **Files:**
 - Modify: `src/recsys_tfb/pipelines/training/pipeline.py:32`（`create_pipeline`）
 - Modify: `src/recsys_tfb/__main__.py`（training() 於 :723–:754 一帶）
+- Modify: `conf/base/catalog.yaml`（新 entry，仿既有 JSONDataset 風格）：
+
+```yaml
+stage1_groups_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/stage1_groups.json
+```
 - Test: `tests/test_pipelines/test_training/test_staged_pipeline.py`
 
 - [ ] **Step 1: 寫 failing test**
@@ -1863,11 +1981,11 @@ class TestStagedPipelineStructure:
         assert "predict_and_write_test_predictions" in names
         assert "compute_test_mAP_spark" in names
 
-    def test_staged_model_output_is_model(self):
+    def test_staged_model_outputs_model_and_report(self):
         p = create_pipeline(enable_calibration=False, model_structure="staged")
         staged_node = next(n for n in p.nodes
                            if n.name == "train_staged_model")
-        assert staged_node.outputs == ["model"]
+        assert staged_node.outputs == ["model", "stage1_groups_report"]
 
     def test_staged_with_calibration_raises(self):
         import pytest
@@ -1922,7 +2040,7 @@ def _create_staged_pipeline() -> Pipeline:
                 "train_parquet_handle", "train_dev_parquet_handle",
                 "preprocessor_view", "parameters",
             ],
-            outputs=["model"],
+            outputs=["model", "stage1_groups_report"],
             name="train_staged_model",
         ),
         # …predict_and_write_test_predictions / compute_test_mAP_spark 複製區塊…
@@ -2300,7 +2418,11 @@ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tf
 - `data/models/<新mv>/stage1/` 含 8 個 `*.txt`＋`.bundle_id`；`model.txt` 是 groups index JSON；
 - `predict_and_write_test_predictions` 正常完成（routed，無 missing）；
 - `compute_test_mAP_spark` 產出 evaluation_results；
-- 新 model_version ≠ Step 2 的 shared model_version。
+- 新 model_version ≠ Step 2 的 shared model_version；
+- `data/models/<新mv>/stage1_groups.json` 存在且含 8 群 meta；
+- `data/models/_staged_wip/<新mv>/` 有 8 個 slug 目錄（各含 `_SUCCESS`）；
+  **checkpoint 實跑驗證**：立刻重跑同一 training 指令，log 應出現
+  `8/8 group(s) restored from checkpoint` 且總時間顯著縮短。
 
 - [ ] **Step 4: evaluation --post-training 相容 smoke**
 
