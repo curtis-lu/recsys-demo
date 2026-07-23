@@ -194,9 +194,10 @@ class TestPredictScores:
             def predict(self, X):
                 return np.random.rand(len(X))
 
-        result = predict_scores(MockModel(), X_score, scoring, parameters)
+        result, report = predict_scores(MockModel(), X_score, scoring, parameters)
         from pyspark.sql import DataFrame
         assert isinstance(result, DataFrame)
+        assert report["model_structure"] == "shared"
 
     def test_output_columns(self, inference_population, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(inference_population, feature_table, parameters)
@@ -206,7 +207,7 @@ class TestPredictScores:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring, parameters)
+        result, _report = predict_scores(MockModel(), X_score, scoring, parameters)
         assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
     def test_row_count_matches(self, inference_population, feature_table, parameters, preprocessor):
@@ -217,7 +218,7 @@ class TestPredictScores:
             def predict(self, X):
                 return np.full(len(X), 0.5)
 
-        result = predict_scores(MockModel(), X_score, scoring, parameters)
+        result, _report = predict_scores(MockModel(), X_score, scoring, parameters)
         assert result.count() == 9  # 3 customers x 3 products
 
     def test_uses_model_feature_names_for_training_feature_selection(
@@ -237,7 +238,7 @@ class TestPredictScores:
                 return np.full(len(X), 0.5)
 
         model = MockModel()
-        result = predict_scores(
+        result, _report = predict_scores(
             model, X_score, scoring, parameters
         )
 

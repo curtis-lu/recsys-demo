@@ -345,6 +345,13 @@ score_table:
     - {name: prod_name, type: STRING}
     - {name: model_version, type: STRING}
 
+# predict_scores 第二輸出（Task 10）：staged 路由 skip 掉的 partition group 統計
+# （on_missing="skip"，見 nodes_spark._predict_chunk_staged）。shared 模型是
+# no-op 摘要（missing_groups 空字典）。
+staged_missing_groups_report:
+  type: JSONDataset
+  filepath: data/inference/${model_version}/missing_groups.json
+
 # --- Inference pipeline — 發布前 staging（managed Hive table）---
 # rank_predictions 先把排名寫進 staging；validate_predictions 讀此表跑 sanity
 # checks（raise 即整批中止）。驗證通過後才由 publish_predictions 寫入 production
