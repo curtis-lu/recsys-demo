@@ -215,3 +215,157 @@ def tune_stage2(
             "score": float(best_state["score"]),
             "best_iteration": int(best_state["iteration"])}
     return dict(best_state["params"]), best_state["model"], meta
+
+
+def train_stage2_model(
+    stage1_model,
+    stage1_groups_report: dict,
+    train_parquet_handle,
+    train_dev_parquet_handle,
+    val_parquet_handle,
+    preprocessor_view: dict,
+    parameters: dict,
+    wip_root=None,
+):
+    """Attach a stage-2 booster to the stage-1 adapter -> (model, report)."""
+    # HPO 可能數小時；比照 tune_hyperparameters 首行主動釋放 Spark，
+    # 由 predict 節點依 canonical configs 重建（nodes.py:408-419 同一理由）。
+    release_spark_session(parameters)
+
+    training = parameters["training"]
+    staged_cfg = training["staged"]
+    stage2_cfg = staged_cfg["stage2"]
+    stage1_cfg = staged_cfg["stage1"]
+    mode = stage2_cfg["mode"]
+    n_folds = int(stage2_cfg.get("oof_folds", 5))
+    partition_keys = stage1_model.partition_keys
+    seed = int(parameters.get("random_seed", 42))
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    wip = _wip_dir(parameters, wip_root)
+
+    with log_step(logger, "stage2.load_train_frames"):
+        pdf_tr = train_parquet_handle.to_pandas()
+        pdf_dev = train_dev_parquet_handle.to_pandas()
+    log_data_volume(logger, "stage2.pdf_tr", pdf_tr)
+    log_data_volume(logger, "stage2.pdf_dev", pdf_dev)
+    log_peak_rss(logger, "stage2.after_load_train_frames")
+    labels_tr = group_labels(pdf_tr, partition_keys)
+    labels_dev = group_labels(pdf_dev, partition_keys)
+    y_tr_full = pdf_tr[label_col].values
+    entity_tr = _composite_key_series(
+        pdf_tr, list(schema["entity"])).to_numpy(dtype=object)
+    folds = assign_folds(entity_tr, n_folds, seed)
+    check_oof_gates(labels_tr, y_tr_full, folds, n_folds)
+
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    cat_idx = LightGBMAdapter._categorical_indices(preprocessor_view)
+    algorithm_params = {
+        **(training.get("algorithm_params") or {}),
+        "num_iterations": training.get("num_iterations", 500),
+        "early_stopping_rounds": training.get("early_stopping_rounds", 50),
+    }
+    best_by_group = {
+        k: (v.get("best_params") or {})
+        for k, v in (stage1_groups_report.get("groups") or {}).items()
+    }
+    group_keys = sorted(stage1_model.group_keys)
+    tr_masks = {k: (labels_tr == k).to_numpy() for k in group_keys}
+    dev_masks = {k: (labels_dev == k).to_numpy() for k in group_keys}
+
+    def _one_group(key):
+        odir = wip / group_slug(key) / "oof"
+        g_mask = tr_masks[key]
+        n_rows = int(g_mask.sum())
+        cached = _load_oof_checkpoint(odir, n_rows, n_folds, seed)
+        if cached is not None:
+            return key, cached
+        sub = pdf_tr.loc[g_mask]
+        X_g = _pdf_to_X(sub, preprocessor_view, parameters)
+        y_g = sub[label_col].values
+        w_g = _row_weights_from_pdf(sub, parameters, preprocessor_view)
+        sub_dev = pdf_dev.loc[dev_masks[key]]
+        X_dev_g = _pdf_to_X(sub_dev, preprocessor_view, parameters)
+        y_dev_g = sub_dev[label_col].values
+        params = {**algorithm_params, **(stage1_cfg.get("params") or {}),
+                  **best_by_group.get(key, {}),
+                  "objective": "binary", "seed": group_seed(seed, key)}
+        scores = _group_oof(key, X_g, y_g, w_g, folds[g_mask],
+                            X_dev_g, y_dev_g, params, cat_idx, n_folds)
+        _write_oof_checkpoint(odir, scores, n_rows, n_folds, seed)
+        return key, scores
+
+    max_workers = max(1, int(stage1_cfg.get("max_workers", 1)))
+    logger.info("train_stage2_model: OOF %d group(s) x %d fold(s), "
+                "max_workers=%d", len(group_keys), n_folds, max_workers)
+    with log_step(logger, "stage2.oof"):
+        if max_workers == 1:
+            pairs = [_one_group(k) for k in group_keys]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                pairs = list(pool.map(_one_group, group_keys))
+    oof = np.full(len(pdf_tr), np.nan, dtype=np.float64)
+    for key, scores in pairs:
+        oof[tr_masks[key]] = scores
+    log_peak_rss(logger, "stage2.after_oof")
+
+    # ---- stage-2 訓練矩陣（[X | oof_s1 | gcode]，spec D4）----
+    with log_step(logger, "stage2.build_matrices"):
+        X_tr = _pdf_to_X(pdf_tr, preprocessor_view, parameters)
+        w_tr = _row_weights_from_pdf(pdf_tr, parameters, preprocessor_view)
+        lookup = group_code_lookup(group_keys)
+        g_tr = encode_group_codes(routing_keys(pdf_tr, partition_keys), lookup)
+        X2_tr = stage2_matrix(X_tr, oof, g_tr)
+        n_base = X_tr.shape[1]
+        del X_tr  # X2 已複製，釋放一份全量矩陣（spec §8 記憶體注意）
+        qcols = [schema["time"], *schema["entity"]]
+        qg_tr = pdf_tr.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
+
+        pdf_val = val_parquet_handle.to_pandas()
+        log_data_volume(logger, "stage2.pdf_val", pdf_val)
+        X_v = _pdf_to_X(pdf_val, preprocessor_view, parameters)
+        rk_val = routing_keys(pdf_val, partition_keys)
+        # val 缺群＝異常（評估語意，spec D11 分流）→ on_missing="raise"
+        s1_v, _mask = stage1_model.predict_routed(X_v, rk_val,
+                                                  on_missing="raise")
+        X2_v = stage2_matrix(X_v, s1_v, encode_group_codes(rk_val, lookup))
+        del X_v
+        y_v = pdf_val[label_col].values
+        qg_v = pdf_val.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
+        items_v = pdf_val[schema["item"]].to_numpy()
+    log_data_volume(logger, "stage2.X2_tr", X2_tr)
+    log_data_volume(logger, "stage2.X2_val", X2_v)
+    log_peak_rss(logger, "stage2.after_train_matrix")
+
+    from recsys_tfb.core.group_utils import default_metric_for_objective
+    objective_name = "binary" if mode == "binary" else "lambdarank"
+    stage2_params = dict(stage2_cfg.get("params") or {})
+    base2 = {**algorithm_params, **stage2_params,
+             "objective": objective_name, "seed": seed}
+    # stage2.mode 是 objective 的唯一真實來源（與 stage-1 覆蓋行為對稱）；
+    # ranking 下沿用 binary metric 會讓 early stopping 靜默失義 → 補 ndcg。
+    base2["metric"] = default_metric_for_objective(
+        objective_name, stage2_params.get("metric"))
+    if not base2["metric"]:
+        base2["metric"] = algorithm_params.get("metric")
+
+    # stage2_categorical_indices（stage2.py，非本檔管轄）用 list(base_cat_idx)
+    # 組合——_categorical_indices 無類別欄時回傳 None（lgb.Dataset 接受 None，
+    # stage-1/OOF 路徑因此安全），此處須先正規化成 [] 才不會 TypeError。
+    cat_idx2 = stage2_categorical_indices(cat_idx or [], n_base)
+    with log_step(logger, "stage2.tune"):
+        best_params2, s2_adapter, hpo_meta = tune_stage2(
+            mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,
+            X2_v, y_v, qg_v, items_v, parameters)
+    log_peak_rss(logger, "stage2.after_tune")
+
+    stage2_meta = {"mode": mode, "oof_folds": n_folds,
+                   "best_params": best_params2, **hpo_meta}
+    stage1_model.set_stage2(s2_adapter, stage2_meta)
+    report = {"mode": mode, "oof_folds": n_folds,
+              "oof_rows": int(len(oof)),
+              "n_groups": len(group_keys),
+              "best_params": best_params2, **hpo_meta}
+    logger.info("train_stage2_model: mode=%s folds=%d best_params=%s",
+                mode, n_folds, best_params2)
+    return stage1_model, report
