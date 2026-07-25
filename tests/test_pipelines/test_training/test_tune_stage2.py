@@ -58,6 +58,25 @@ class TestTuneStage2:
         assert (study_dir / "checkpoint" / "model.txt").exists()
         assert "num_leaves" in best and meta["score"] > -1.0
 
+    def test_resume_with_missing_checkpoint_rebuilds_model(self, tmp_path,
+                                                           monkeypatch):
+        # 最終審查 nit #1：last-resort 分支——resume 時 remaining=0 但
+        # checkpoint 遺失/損毀 → enqueue study.best_params 補跑一次，
+        # 仍要交出可用模型與 best_params
+        import shutil
+        monkeypatch.chdir(tmp_path)
+        X2, y, qg, items = _toy()
+        tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
+                    X2, y, None, qg, items, _params(2, tmp_path))
+        shutil.rmtree(tmp_path / "data" / "models" / "_hpo" / "s2test01"
+                      / "checkpoint")
+        best, adapter, meta = tune_stage2(
+            "binary", dict(BASE), [3], X2, y, None, qg,
+            X2, y, None, qg, items, _params(2, tmp_path))
+        assert adapter is not None
+        assert np.isfinite(adapter.predict(X2)).all()
+        assert "num_leaves" in best  # best_params 由 study 補齊
+
     def test_resume_runs_only_remaining_trials(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         X2, y, qg, items = _toy()

@@ -308,6 +308,12 @@ def train_stage2_model(
     oof = np.full(len(pdf_tr), np.nan, dtype=np.float64)
     for key, scores in pairs:
         oof[tr_masks[key]] = scores
+    if np.isnan(oof).any():
+        # 不變量顯式化（最終審查建議）：train 每列的群都該在 group_keys 內；
+        # NaN 流進 stage2_matrix 會被 LightGBM 當 missing value 靜默吞掉。
+        raise RuntimeError(
+            "OOF assembly left NaN rows — some train rows belong to no "
+            "stage-1 group (group set drifted between nodes?)")
     log_peak_rss(logger, "stage2.after_oof")
 
     # ---- stage-2 訓練矩陣（[X | oof_s1 | gcode]，spec D4）----
