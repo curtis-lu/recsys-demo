@@ -336,3 +336,30 @@ class TestLogDataVolume:
 
         assert not self._vol_records(caplog)
         assert any("path missing" in r.getMessage() for r in caplog.records)
+
+
+class TestLogPeakRss:
+    def test_emits_event_with_positive_bytes(self, caplog):
+        from recsys_tfb.core.logging import log_peak_rss
+
+        logger = logging.getLogger("test_peak_rss")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "after_load")
+        rec = next(r for r in caplog.records
+                   if getattr(r, "event", "") == "peak_rss")
+        assert rec.tag == "after_load"
+        assert rec.peak_rss_bytes > 0
+        assert "peak RSS" in caplog.text and "after_load" in caplog.text
+
+    def test_high_water_mark_is_monotonic(self, caplog):
+        from recsys_tfb.core.logging import log_peak_rss
+        import numpy as np
+        logger = logging.getLogger("test_peak_rss2")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "t1")
+            ballast = np.ones((64, 1024 * 1024 // 8))  # ~64MB，推高水位
+            ballast[0, 0] = 2.0  # 確保實際觸碰記憶體
+            log_peak_rss(logger, "t2")
+        vals = [r.peak_rss_bytes for r in caplog.records
+                if getattr(r, "event", "") == "peak_rss"]
+        assert len(vals) == 2 and vals[1] >= vals[0]
