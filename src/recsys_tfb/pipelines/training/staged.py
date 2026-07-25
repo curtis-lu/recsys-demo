@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from recsys_tfb.core.logging import log_data_volume, log_peak_rss
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.extract import _pdf_to_X, _row_weights_from_pdf
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
@@ -99,6 +100,9 @@ def train_staged_model(
 
     pdf_tr = train_parquet_handle.to_pandas()
     pdf_dev = train_dev_parquet_handle.to_pandas()
+    log_data_volume(logger, "stage1.pdf_tr", pdf_tr)
+    log_data_volume(logger, "stage1.pdf_dev", pdf_dev)
+    log_peak_rss(logger, "stage1.after_load_train_frames")
     labels_tr = group_labels(pdf_tr, partition_keys)
     labels_dev = group_labels(pdf_dev, partition_keys)
     label_col = _label_col(parameters)
@@ -151,6 +155,11 @@ def train_staged_model(
         )
 
     def _train_and_checkpoint(key: str):
+        logger.info(
+            "stage1 group %r: start rows=%d hpo_trials=%d",
+            key, tr_stats[key][0],
+            int((stage1.get("hpo") or {}).get("n_trials", 0)),
+        )
         r = _train(key)
         _write_checkpoint(wip / group_slug(key), r)
         return r
@@ -178,6 +187,7 @@ def train_staged_model(
     for key, (k, adapter, meta) in completed.items():
         model.add_group(k, adapter, meta=meta)
         report_groups[k] = meta
+    log_peak_rss(logger, "stage1.after_groups")
     model.set_partition_keys(partition_keys)
     report = {"partition_keys": partition_keys, "groups": report_groups}
     return model, report
