@@ -42,7 +42,7 @@ class TestTuneStage2:
         X2, y, qg, items = _toy()
         best, adapter, meta = tune_stage2(
             "binary", dict(BASE), [3], X2, y, None, qg,
-            X2, y, qg, items, _params(0, tmp_path))
+            X2, y, None, qg, items, _params(0, tmp_path))
         assert best == {} and meta["n_trials"] == 0
         assert np.isfinite(adapter.predict(X2)).all()
         assert not (tmp_path / "data").exists()  # 零 trial 不落 study
@@ -52,7 +52,7 @@ class TestTuneStage2:
         X2, y, qg, items = _toy()
         best, adapter, meta = tune_stage2(
             "binary", dict(BASE), [3], X2, y, None, qg,
-            X2, y, qg, items, _params(2, tmp_path))
+            X2, y, None, qg, items, _params(2, tmp_path))
         study_dir = tmp_path / "data" / "models" / "_hpo" / "s2test01"
         assert (study_dir / "study_journal.log").exists()
         assert (study_dir / "checkpoint" / "model.txt").exists()
@@ -62,7 +62,7 @@ class TestTuneStage2:
         monkeypatch.chdir(tmp_path)
         X2, y, qg, items = _toy()
         tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                    X2, y, qg, items, _params(2, tmp_path))
+                    X2, y, None, qg, items, _params(2, tmp_path))
         import recsys_tfb.pipelines.training.staged_stage2 as mod
         calls = {"n": 0}
         real = mod.fit_stage2
@@ -71,14 +71,14 @@ class TestTuneStage2:
             return real(*a, **kw)
         monkeypatch.setattr(mod, "fit_stage2", spy)
         tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                    X2, y, qg, items, _params(3, tmp_path))
+                    X2, y, None, qg, items, _params(3, tmp_path))
         assert calls["n"] == 1  # 已完成 2，目標 3 → 只補 1 trial
 
     def test_fresh_hpo_clears_study(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         X2, y, qg, items = _toy()
         tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                    X2, y, qg, items, _params(2, tmp_path))
+                    X2, y, None, qg, items, _params(2, tmp_path))
         import recsys_tfb.pipelines.training.staged_stage2 as mod
         calls = {"n": 0}
         real = mod.fit_stage2
@@ -87,7 +87,7 @@ class TestTuneStage2:
             return real(*a, **kw)
         monkeypatch.setattr(mod, "fit_stage2", spy)
         tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                    X2, y, qg, items,
+                    X2, y, None, qg, items,
                     _params(2, tmp_path, _fresh_hpo=True))
         assert calls["n"] == 2  # 清掉重搜
 
@@ -98,7 +98,7 @@ class TestTuneStage2:
         p["training"]["hpo_objective"] = "auc"
         with pytest.raises(ValueError, match="hpo_objective"):
             tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                        X2, y, qg, items, p)
+                        X2, y, None, qg, items, p)
 
     def test_trial_start_and_completed_logged(self, tmp_path, monkeypatch,
                                               caplog):
@@ -108,7 +108,7 @@ class TestTuneStage2:
         X2, y, qg, items = _toy()
         with caplog.at_level(logging.INFO):
             tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
-                        X2, y, qg, items, _params(2, tmp_path))
+                        X2, y, None, qg, items, _params(2, tmp_path))
         assert caplog.text.count("tune_stage2: trial=") >= 4  # 2 trial × 起訖
         assert "start params=" in caplog.text
         assert "completed score=" in caplog.text

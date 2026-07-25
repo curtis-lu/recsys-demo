@@ -44,7 +44,7 @@ def stage2_categorical_indices(base_cat_idx, n_base_features: int) -> list:
 def fit_stage2(
     mode: str,
     X2_tr, y_tr, w_tr, qgroups_tr,
-    X2_val, y_val, qgroups_val,
+    X2_val, y_val, w_val, qgroups_val,
     params: dict, categorical_indices,
 ) -> LightGBMAdapter:
     """One stage-2 fit, early-stopped on the provided validation set.
@@ -52,6 +52,9 @@ def fit_stage2(
     ``qgroups_*``: per-row query-group ids (``extract_Xy_with_groups``
     convention); only consumed for lambdarank. Weights ride per-row and are
     perm-aligned for the ranking branch (mirrors the shared prepare layer).
+    ``w_val`` rides the same way as ``w_tr`` — ``None`` means unweighted,
+    matching the shared prepare layer where both train and val (dev) get
+    weight= (lightgbm_adapter.py's ``ds_train``/``ds_dev``).
     """
     if mode == "lambdarank":
         perm, counts = to_contiguous_groups(np.asarray(qgroups_tr))
@@ -63,8 +66,9 @@ def fit_stage2(
         )
         permv, countsv = to_contiguous_groups(np.asarray(qgroups_val))
         val_ds = lgb.Dataset(
-            X2_val[permv], label=np.asarray(y_val)[permv], group=countsv,
-            reference=train_ds, free_raw_data=False,
+            X2_val[permv], label=np.asarray(y_val)[permv],
+            weight=None if w_val is None else np.asarray(w_val)[permv],
+            group=countsv, reference=train_ds, free_raw_data=False,
         )
     elif mode == "binary":
         train_ds = lgb.Dataset(
@@ -73,7 +77,8 @@ def fit_stage2(
             free_raw_data=False,
         )
         val_ds = lgb.Dataset(
-            X2_val, label=y_val, reference=train_ds, free_raw_data=False,
+            X2_val, label=y_val, weight=w_val,
+            reference=train_ds, free_raw_data=False,
         )
     else:
         raise ValueError(

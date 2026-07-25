@@ -104,7 +104,7 @@ def _write_oof_checkpoint(odir: Path, scores, n_rows, n_folds, seed) -> None:
 def tune_stage2(
     mode: str, base_params: dict, cat_idx2,
     X2_tr, y_tr, w_tr, qg_tr,
-    X2_val, y_val, qg_val, items_val,
+    X2_val, y_val, w_val, qg_val, items_val,
     parameters: dict,
 ):
     """Persistent-study HPO for stage-2, or a single fit when n_trials==0.
@@ -124,7 +124,8 @@ def tune_stage2(
     n_trials = int(training.get("n_trials", 0))
     if n_trials <= 0:
         adapter = fit_stage2(mode, X2_tr, y_tr, w_tr, qg_tr,
-                             X2_val, y_val, qg_val, base_params, cat_idx2)
+                             X2_val, y_val, w_val, qg_val, base_params,
+                             cat_idx2)
         return {}, adapter, {"n_trials": 0}
 
     hpo_objective = training.get("hpo_objective", "mean_ap")
@@ -147,7 +148,7 @@ def tune_stage2(
                     trial.number, n_trials, trial_params)
         t0 = time.monotonic()
         adapter = fit_stage2(
-            mode, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, qg_val,
+            mode, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, w_val, qg_val,
             {**base_params, **trial_params}, cat_idx2)
         score = _hpo_score(hpo_objective, qg_val, items_val, y_val,
                            adapter.predict(X2_val))
@@ -331,6 +332,7 @@ def train_stage2_model(
         X2_v = stage2_matrix(X_v, s1_v, encode_group_codes(rk_val, lookup))
         del X_v
         y_v = pdf_val[label_col].values
+        w_v = _row_weights_from_pdf(pdf_val, parameters, preprocessor_view)
         qg_v = pdf_val.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
         items_v = pdf_val[schema["item"]].to_numpy()
     log_data_volume(logger, "stage2.X2_tr", X2_tr)
@@ -356,7 +358,7 @@ def train_stage2_model(
     with log_step(logger, "stage2.tune"):
         best_params2, s2_adapter, hpo_meta = tune_stage2(
             mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,
-            X2_v, y_v, qg_v, items_v, parameters)
+            X2_v, y_v, w_v, qg_v, items_v, parameters)
     log_peak_rss(logger, "stage2.after_tune")
 
     stage2_meta = {"mode": mode, "oof_folds": n_folds,

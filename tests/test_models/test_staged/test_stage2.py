@@ -53,7 +53,7 @@ class TestFitStage2:
     def test_binary_trains_and_predicts_finite(self):
         X2, y, qg = _toy("binary")
         params = {**PARAMS, "objective": "binary", "metric": "binary_logloss"}
-        adapter = fit_stage2("binary", X2, y, None, qg, X2, y, qg,
+        adapter = fit_stage2("binary", X2, y, None, qg, X2, y, None, qg,
                              params, [3])
         preds = adapter.predict(X2)
         assert np.isfinite(preds).all() and len(preds) == len(y)
@@ -61,7 +61,7 @@ class TestFitStage2:
     def test_lambdarank_trains_with_query_groups(self):
         X2, y, qg = _toy("lambdarank")
         params = {**PARAMS, "objective": "lambdarank", "metric": "ndcg"}
-        adapter = fit_stage2("lambdarank", X2, y, None, qg, X2, y, qg,
+        adapter = fit_stage2("lambdarank", X2, y, None, qg, X2, y, None, qg,
                              params, [3])
         preds = adapter.predict(X2)
         assert np.isfinite(preds).all() and len(preds) == len(y)
@@ -93,11 +93,61 @@ class TestFitStage2:
         X2, y, qg = X2[shuffle], y[shuffle], qg[shuffle]
         w = y * 10.0 + 1.0  # weight 與 label 完全相關 → 可驗對齊
         params = {**PARAMS, "objective": "lambdarank", "metric": "ndcg"}
-        fit_stage2("lambdarank", X2, y, w, qg, X2, y, qg, params, [3])
+        fit_stage2("lambdarank", X2, y, w, qg, X2, y, None, qg, params, [3])
         np.testing.assert_allclose(
             captured["weight"], captured["label"] * 10.0 + 1.0)
+
+    def test_lambdarank_val_weight_perm_aligned(self, monkeypatch):
+        # 審查 Important #1：val_ds（early-stop 集）也必須帶 weight，且同
+        # 樣跟著 perm 重排——修前 val_ds 根本沒有 weight kw，捕獲值恆為
+        # None，這個斷言在修前應該是 RED。
+        import lightgbm as lgb
+        captured = {}
+        real_dataset = lgb.Dataset
+
+        def spy(data, label=None, weight=None, group=None, **kw):
+            if group is not None and "reference" in kw:  # 只抓 val ds
+                captured["label"] = np.asarray(label)
+                captured["weight"] = None if weight is None else np.asarray(weight)
+            return real_dataset(data, label=label, weight=weight,
+                                group=group, **kw)
+
+        monkeypatch.setattr(
+            "recsys_tfb.models.staged.stage2.lgb.Dataset", spy)
+        X2, y, qg = _toy("lambdarank")
+        shuffle = np.random.default_rng(11).permutation(len(y))
+        X2, y, qg = X2[shuffle], y[shuffle], qg[shuffle]
+        w_val = y * 5.0 + 1.0  # weight 與 label 完全相關 → 可驗對齊
+        params = {**PARAMS, "objective": "lambdarank", "metric": "ndcg"}
+        fit_stage2("lambdarank", X2, y, None, qg, X2, y, w_val, qg,
+                  params, [3])
+        assert captured["weight"] is not None
+        np.testing.assert_allclose(
+            captured["weight"], captured["label"] * 5.0 + 1.0)
+
+    def test_binary_val_weight_passed(self, monkeypatch):
+        # binary 分支同款：val_ds 收到的 weight 不得是 None。
+        import lightgbm as lgb
+        captured = {}
+        real_dataset = lgb.Dataset
+
+        def spy(data, label=None, weight=None, group=None, **kw):
+            if "reference" in kw:  # 只有 val ds 帶 reference
+                captured["weight"] = weight
+            return real_dataset(data, label=label, weight=weight,
+                                group=group, **kw)
+
+        monkeypatch.setattr(
+            "recsys_tfb.models.staged.stage2.lgb.Dataset", spy)
+        X2, y, qg = _toy("binary")
+        w_val = np.ones(len(y)) * 2.0
+        params = {**PARAMS, "objective": "binary", "metric": "binary_logloss"}
+        fit_stage2("binary", X2, y, None, qg, X2, y, w_val, qg, params, [3])
+        assert captured["weight"] is not None
+        np.testing.assert_array_equal(captured["weight"], w_val)
 
     def test_unknown_mode_raises(self):
         X2, y, qg = _toy("binary")
         with pytest.raises(ValueError, match="binary|lambdarank"):
-            fit_stage2("rank_xendcg", X2, y, None, qg, X2, y, qg, PARAMS, [])
+            fit_stage2("rank_xendcg", X2, y, None, qg, X2, y, None, qg,
+                      PARAMS, [])
