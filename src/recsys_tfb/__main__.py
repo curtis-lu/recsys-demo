@@ -728,6 +728,11 @@ def training(
     )
     model_structure = params_training.get("training", {}).get(
         "model_structure", "shared")
+    staged_cfg = (
+        (params_training.get("training", {}).get("staged") or {})
+        if model_structure == "staged" else {}
+    )
+    stage2_mode = (staged_cfg.get("stage2") or {}).get("mode", "none")
     cal_v = (
         resolve_variant_id(base_dir, "calibration", calibration_variant)
         if enable_calibration
@@ -756,6 +761,7 @@ def training(
     pipeline_kwargs = {
         "enable_calibration": enable_calibration,
         "model_structure": model_structure,
+        "stage2_mode": stage2_mode,
     }
 
     # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the

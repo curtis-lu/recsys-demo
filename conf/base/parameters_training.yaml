@@ -149,7 +149,9 @@ training:
         min_negatives: 20
       max_workers: 1                # 跨群平行度（群內 trial 一律序列）
     stage2:
-      mode: none                    # 本期僅 none；binary | lambdarank 隨 PR-B
+      mode: none                    # none | binary | lambdarank（PR-B 起）
+      oof_folds: 5                  # stage2!=none 時生效；entity-hash 互斥 K 折（>=2）
+      params: {}                    # 覆蓋 algorithm_params 的 stage-2 基底參數（objective 由 mode 決定）
 
 mlflow:
   experiment_name: recsys_tfb

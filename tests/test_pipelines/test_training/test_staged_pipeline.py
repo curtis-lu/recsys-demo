@@ -36,3 +36,33 @@ class TestStagedPipelineStructure:
         import pytest
         with pytest.raises(ValueError, match="calibration"):
             create_pipeline(enable_calibration=True, model_structure="staged")
+
+
+class TestStagedStage2Pipeline:
+    def test_stage2_dag_adds_val_cache_and_stage2_node(self):
+        p = create_pipeline(model_structure="staged", stage2_mode="lambdarank")
+        names = [n.func.__name__ for n in p.nodes]
+        assert "cache_val_model_input" in names
+        assert "train_stage2_model" in names
+        s1 = next(n for n in p.nodes if n.func.__name__ == "train_staged_model")
+        assert s1.outputs == ["stage1_model", "stage1_groups_report"]
+        s2 = next(n for n in p.nodes if n.func.__name__ == "train_stage2_model")
+        assert s2.outputs == ["model", "stage2_report"]
+        assert s2.inputs == [
+            "stage1_model", "stage1_groups_report", "train_parquet_handle",
+            "train_dev_parquet_handle", "val_parquet_handle",
+            "preprocessor_view", "parameters"]
+
+    def test_stage2_none_dag_unchanged(self):
+        p = create_pipeline(model_structure="staged", stage2_mode="none")
+        names = [n.func.__name__ for n in p.nodes]
+        assert "train_stage2_model" not in names
+        assert "cache_val_model_input" not in names
+        s1 = next(n for n in p.nodes if n.func.__name__ == "train_staged_model")
+        assert s1.outputs == ["model", "stage1_groups_report"]
+
+    def test_shared_dag_ignores_stage2_mode(self):
+        a = create_pipeline(model_structure="shared")
+        b = create_pipeline(model_structure="shared", stage2_mode="lambdarank")
+        assert [n.func.__name__ for n in a.nodes] == \
+               [n.func.__name__ for n in b.nodes]

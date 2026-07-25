@@ -28,10 +28,12 @@ from recsys_tfb.pipelines.training.nodes import (
     tune_hyperparameters,
 )
 from recsys_tfb.pipelines.training.staged import train_staged_model
+from recsys_tfb.pipelines.training.staged_stage2 import train_stage2_model
 
 
 def create_pipeline(
     enable_calibration: bool = False, model_structure: str = "shared",
+    stage2_mode: str = "none",
 ) -> Pipeline:
     if model_structure == "staged":
         if enable_calibration:
@@ -40,7 +42,7 @@ def create_pipeline(
                 "(A21 blocks this at CLI entry; direct callers get the "
                 "same contract here)"
             )
-        return _create_staged_pipeline()
+        return _create_staged_pipeline(stage2_mode)
     # finalize_model produces the trained model; under calibration it lands in
     # `trained_model` so calibrate_model can wrap it. Strategy
     # (hpo_best / refit_on_full) is read from parameters at runtime — not a
@@ -222,19 +224,19 @@ def create_pipeline(
     return Pipeline(nodes)
 
 
-def _create_staged_pipeline() -> Pipeline:
-    """Staged (stage2=none) training DAG — PR-A scope.
+def _create_staged_pipeline(stage2_mode: str = "none") -> Pipeline:
+    """Staged training DAG.
 
-    Shared-path nodes reused verbatim: select_features, cache_{train,
-    train_dev,test}_model_input, persist_sample_weight_report,
-    predict_and_write_test_predictions, compute_test_mAP_spark.
-    Excluded (PR-B/PR-C): prepare_lgb_train_inputs, tune_hyperparameters,
-    finalize_model, calibrate_model, all diagnostics nodes, log_experiment
-    (its inputs depend on diagnostics outputs). cache_val_model_input is also
-    excluded — val is only consumed by tune_hyperparameters, unused when
-    stage2=none.
+    stage2=none（PR-A 形狀）: train_staged_model 直接產出 "model"。
+    stage2 in {binary, lambdarank}（PR-B）: train_staged_model 產出
+    "stage1_model"，train_stage2_model 做 OOF＋stage-2 後產出 "model"；
+    cache_val_model_input 拉回 DAG（val＝stage-2 early stop＋HPO 評分集，
+    spec §2.2/§3.1）。predict/mAP 節點兩種形狀共用（吃 "model"）。
+    Excluded (PR-C): diagnostics nodes、log_experiment、calibrate；
+    shared 的 prepare_lgb/tune/finalize 由 staged_stage2.tune_stage2 取代。
     """
-    return Pipeline([
+    with_stage2 = stage2_mode != "none"
+    nodes = [
         Node(
             select_features,
             inputs=["preprocessor", "parameters"],
@@ -250,6 +252,16 @@ def _create_staged_pipeline() -> Pipeline:
             inputs=["train_dev_model_input", "parameters"],
             outputs="train_dev_parquet_handle",
         ),
+    ]
+    if with_stage2:
+        nodes.append(
+            Node(
+                cache_val_model_input,
+                inputs=["val_model_input", "parameters"],
+                outputs="val_parquet_handle",
+            ),
+        )
+    nodes.extend([
         Node(
             cache_test_model_input,
             inputs=["test_model_input", "parameters"],
@@ -266,9 +278,25 @@ def _create_staged_pipeline() -> Pipeline:
                 "train_parquet_handle", "train_dev_parquet_handle",
                 "preprocessor_view", "parameters",
             ],
-            outputs=["model", "stage1_groups_report"],
+            outputs=(["stage1_model", "stage1_groups_report"] if with_stage2
+                     else ["model", "stage1_groups_report"]),
             name="train_staged_model",
         ),
+    ])
+    if with_stage2:
+        nodes.append(
+            Node(
+                train_stage2_model,
+                inputs=[
+                    "stage1_model", "stage1_groups_report",
+                    "train_parquet_handle", "train_dev_parquet_handle",
+                    "val_parquet_handle", "preprocessor_view", "parameters",
+                ],
+                outputs=["model", "stage2_report"],
+                name="train_stage2_model",
+            ),
+        )
+    nodes.extend([
         Node(
             predict_and_write_test_predictions,
             inputs=[
@@ -284,3 +312,4 @@ def _create_staged_pipeline() -> Pipeline:
             outputs="evaluation_results",
         ),
     ])
+    return Pipeline(nodes)
