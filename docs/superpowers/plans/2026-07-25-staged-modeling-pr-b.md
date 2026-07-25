@@ -39,6 +39,8 @@
 | `src/recsys_tfb/models/staged/stage2.py` | Create | group code、`stage2_matrix`、categorical 索引、`fit_stage2` 單次訓練 |
 | `src/recsys_tfb/models/staged/adapter.py` | Modify | stage-2 booster：`set_stage2`／predict 合成／save/load 原子性與完整性 |
 | `src/recsys_tfb/pipelines/training/staged_stage2.py` | Create | OOF 編排＋checkpoint、`tune_stage2` persistent HPO、`train_stage2_model` node |
+| `src/recsys_tfb/core/logging.py` | Modify | 追加 `log_peak_rss` 高水位打點（Observability 要求） |
+| `src/recsys_tfb/pipelines/training/staged.py` | Modify | Stage-1 側觀測補強（每群 start 心跳＋volume＋RSS；Task 8b） |
 | `src/recsys_tfb/core/consistency.py` | Modify | A21 放寬 stage2.mode＋`oof_folds` predicate（:507-512 一帶） |
 | `src/recsys_tfb/pipelines/training/pipeline.py` | Modify | `_create_staged_pipeline(stage2_mode)` 分支接線 |
 | `src/recsys_tfb/__main__.py` | Modify | 傳 `stage2_mode` pipeline kwarg |
@@ -53,6 +55,29 @@
 - main 既知 fail（**不得歸因本 PR、不得修**）：`tests/test_models/test_adapter.py::TestPrepareTrainInputsWeight` ×2、`tests/test_pipelines/test_inference/test_pipeline.py::test_pipeline_inputs`。
 - TDD：先 RED（預期失敗訊息與計畫不符 → 停下回報）、GREEN、每 task 過後做 mutation check（弄壞因果鏈上不可省的一步，對應測試須轉紅）。
 - 註解／訊息全繁體中文或英文，不出現簡體字。
+
+## Observability 要求（橫切；2026-07-25 使用者指示，各 task 的程式碼塊已內嵌，不得省略）
+
+**動機**：公司環境資料量大，OOF（每群 K 次訓練）與 Stage-2 HPO（每 trial 一次全量 fit）是新的長靜默段——沒有心跳就分不清「在跑」與「卡住」；且本 node 同時持有 pdf_tr＋pdf_dev＋X2_tr 等多份大物件，記憶體峰值需要能從 log 事後歸因，不能靠猜。
+
+**工具（全部既有或本計畫新增，不得另造）**：
+
+| 工具 | 用途 | 出處 |
+|---|---|---|
+| `log_step(logger, name)` | 階段起訖＋耗時（step_started/step_completed 事件） | `core/logging.py:177` |
+| `log_data_volume(logger, name, obj)` | 單一大物件的 rows/cols/bytes（pandas/numpy/lgb 自動分派） | `core/logging.py:229` |
+| `log_peak_rss(logger, tag)` | process 峰值 RSS 高水位打點——在各階段邊界呼叫，**第一個數字跳升的 tag ＝ 峰值屬於哪段** | Task 5b 新增 |
+
+**必打點清單**（實作時對照；漏打＝spec 審查 FAIL 項）：
+
+1. **逐折心跳**：`_group_oof` 每折 fit 完一條 `stage2 OOF group=… fold=k/K fit_rows=… pred_rows=… (秒)`（Task 6）。
+2. **逐 trial 起訖**：`tune_stage2` 每 trial start（含參數）與 completed（含 score/耗時）各一條——與 shared `tune_hyperparameters` 同格式慣例（Task 7）。
+3. **階段計時**：`train_stage2_model` 的 載入 frames／OOF 全段／矩陣組裝／tune 各包一層 `log_step`（Task 8）。
+4. **data volume**：pdf_tr／pdf_dev／pdf_val／X2_tr／X2_v 各一條 `log_data_volume`（Task 8）。
+5. **峰值 RSS 打點**：`after_load_train_frames`→`after_oof`→`after_train_matrix`→`after_tune` 序列（Task 8）；Stage-1 側補 `after_load_train_frames`／`after_groups`（Task 8b）。
+6. **Stage-1 每群 start 心跳**：現行只 log 完成行，大群訓練中無訊號；補 start 行（Task 8b）。
+
+每個打點都有對應 caplog 測試（斷言用 `caplog.text`，刪掉 log 行測試須轉紅——觀測性也走 mutation check）。
 
 ---
 
@@ -728,6 +753,77 @@ class TestStage2Persistence:
 
 ---
 
+### Task 5b: `log_peak_rss` 觀測 helper（`core/logging.py`）
+
+**Files:**
+- Modify: `src/recsys_tfb/core/logging.py`（檔尾追加，沿用 `log_data_volume` 的「觀測絕不打斷計算」慣例）
+- Test: `tests/test_core/test_logging.py`（追加 class；先讀該檔既有測試慣例）
+
+- [ ] **Step 1: 寫失敗測試**
+
+```python
+class TestLogPeakRss:
+    def test_emits_event_with_positive_bytes(self, caplog):
+        logger = logging.getLogger("test_peak_rss")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "after_load")
+        rec = next(r for r in caplog.records
+                   if getattr(r, "event", "") == "peak_rss")
+        assert rec.tag == "after_load"
+        assert rec.peak_rss_bytes > 0
+        assert "peak RSS" in caplog.text and "after_load" in caplog.text
+
+    def test_high_water_mark_is_monotonic(self, caplog):
+        import numpy as np
+        logger = logging.getLogger("test_peak_rss2")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "t1")
+            ballast = np.ones((64, 1024 * 1024 // 8))  # ~64MB，推高水位
+            ballast[0, 0] = 2.0  # 確保實際觸碰記憶體
+            log_peak_rss(logger, "t2")
+        vals = [r.peak_rss_bytes for r in caplog.records
+                if getattr(r, "event", "") == "peak_rss"]
+        assert len(vals) == 2 and vals[1] >= vals[0]
+```
+
+- [ ] **Step 2: RED** — 預期 `ImportError: cannot import name 'log_peak_rss'`（或 `NameError`，視該測試檔 import 慣例）。
+- [ ] **Step 3: 實作**（core/logging.py 檔尾追加）
+
+```python
+def log_peak_rss(logger, tag: str) -> None:
+    """Log the process's peak RSS so far (``ru_maxrss`` high-water mark).
+
+    Call at phase boundaries: the first tag whose value jumps identifies the
+    phase that owns the peak — the cheapest way to attribute memory spikes
+    from logs alone at production scale. Unit quirk: macOS reports bytes,
+    Linux kilobytes — normalized to bytes here. Best-effort like
+    ``log_data_volume``: observation must never break the real computation.
+    """
+    try:
+        import resource
+        import sys
+
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        if sys.platform != "darwin":
+            peak *= 1024
+        logger.info(
+            "peak RSS so far: %s (at %s)", _human_bytes(peak), tag,
+            extra={"event": "peak_rss", "tag": tag,
+                   "peak_rss_bytes": peak},
+        )
+    except Exception as e:  # noqa: BLE001 — observation must not raise
+        logger.warning(
+            "log_peak_rss failed at %s: %s", tag, repr(e)[:200],
+            extra={"event": "peak_rss_skipped"},
+        )
+```
+
+- [ ] **Step 4: GREEN** — `pytest tests/test_core/test_logging.py -q` 整檔綠。
+- [ ] **Step 5: mutation check**：把 `extra={"event": "peak_rss", ...}` 的 event 值改成 `"rss"` → 兩個測試都轉紅（records 過濾不到）。改回。
+- [ ] **Step 6: Commit** `feat(logging): log_peak_rss 高水位打點——階段邊界歸因記憶體峰值`
+
+---
+
 ### Task 6: OOF 編排＋群級 checkpoint（`staged_stage2.py` 前半）
 
 **Files:**
@@ -781,6 +877,15 @@ class TestGroupOof:
             # n_folds=2 但 folds 含 2 → fold-2 的列沒人評 → guard 炸
             _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 2)
 
+    def test_per_fold_heartbeat_logged(self, caplog):
+        # Observability 要求 #1：公司規模單折可達分鐘級，逐折必須留時間戳
+        import logging
+        X, y, w, folds = _toy_group()
+        with caplog.at_level(logging.INFO):
+            _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
+        assert caplog.text.count("OOF group='A' fold=") == 3  # 每折一條
+        assert "fold=1/3" in caplog.text and "fit_rows=" in caplog.text
+
 
 class TestOofCheckpoint:
     def test_roundtrip(self, tmp_path):
@@ -829,12 +934,14 @@ all match.
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import optuna
 
+from recsys_tfb.core.logging import log_data_volume, log_peak_rss, log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.extract import (
     _composite_key_series, _pdf_to_X, _row_weights_from_pdf,
@@ -868,12 +975,20 @@ def _group_oof(
         if not pred_mask.any():
             continue
         fit_mask = ~pred_mask
+        t0 = time.monotonic()
         adapter = _fit_adapter(
             X_g[fit_mask], y_g[fit_mask], w_g[fit_mask],
             X_dev_g, y_dev_g, dict(params), cat_idx,
         )
         oof[pred_mask] = adapter.predict(X_g[pred_mask])
         producing[pred_mask] = k
+        # 心跳（Observability 要求 #1）：公司規模單折可達分鐘級，逐折留
+        # 時間戳，長靜默段才能歸因到「哪群哪折」而不是被當成卡住。
+        logger.info(
+            "stage2 OOF group=%r fold=%d/%d fit_rows=%d pred_rows=%d (%.1fs)",
+            key, k + 1, int(n_folds), int(fit_mask.sum()),
+            int(pred_mask.sum()), time.monotonic() - t0,
+        )
     if np.isnan(oof).any() or not oof_is_leakage_clean(folds_g, producing):
         raise RuntimeError(
             f"OOF integrity failed in group {key!r}: unscored rows or a row "
@@ -1017,6 +1132,19 @@ class TestTuneStage2:
         with pytest.raises(ValueError, match="hpo_objective"):
             tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
                         X2, y, qg, items, p)
+
+    def test_trial_start_and_completed_logged(self, tmp_path, monkeypatch,
+                                              caplog):
+        # Observability 要求 #2：每 trial 起訖各一條
+        import logging
+        monkeypatch.chdir(tmp_path)
+        X2, y, qg, items = _toy()
+        with caplog.at_level(logging.INFO):
+            tune_stage2("binary", dict(BASE), [3], X2, y, None, qg,
+                        X2, y, qg, items, _params(2, tmp_path))
+        assert caplog.text.count("tune_stage2: trial=") >= 4  # 2 trial × 起訖
+        assert "start params=" in caplog.text
+        assert "completed score=" in caplog.text
 ```
 
 - [ ] **Step 2: RED** — 預期 `ImportError: cannot import name 'tune_stage2'`。
@@ -1063,6 +1191,11 @@ def tune_stage2(
 
     def objective(trial):
         trial_params = build_trial_params(trial, search_space)
+        # 起訖各一條（Observability 要求 #2；同 tune_hyperparameters 格式慣例）：
+        # 公司規模單 trial＝一次全量 stage-2 訓練，start 行讓靜默段可歸因。
+        logger.info("tune_stage2: trial=%d/%d start params=%s",
+                    trial.number, n_trials, trial_params)
+        t0 = time.monotonic()
         adapter = fit_stage2(
             mode, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, qg_val,
             {**base_params, **trial_params}, cat_idx2)
@@ -1078,8 +1211,10 @@ def tune_stage2(
                     best_iteration=adapter.booster.best_iteration,
                     best_params=trial_params, trial_number=trial.number,
                     search_id=search_id)
-        logger.info("tune_stage2: trial=%d score=%.4f best=%.4f",
-                    trial.number, score, best_state["score"])
+        logger.info(
+            "tune_stage2: trial=%d/%d completed score=%.4f best=%.4f (%.1fs)",
+            trial.number, n_trials, score, best_state["score"],
+            time.monotonic() - t0)
         return score
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1293,6 +1428,29 @@ class TestTrainStage2Model:
             train_stage2_model(m1, rep1, tr, dev, val, PREPROC, params,
                                wip_root=tmp_path / "wip2")
 
+    def test_observability_events_emitted(self, tmp_path, monkeypatch,
+                                          caplog):
+        # Observability 要求 #3/#4/#5：階段計時＋data volume＋峰值 RSS 打點
+        import logging
+        monkeypatch.chdir(tmp_path)
+        params = _parameters()
+        m1, rep1 = _stage1(tmp_path, params)
+        tr, dev, val = _handles(tmp_path)
+        with caplog.at_level(logging.INFO):
+            train_stage2_model(m1, rep1, tr, dev, val, PREPROC, params,
+                               wip_root=tmp_path / "wip")
+        for expected in (
+            "Step completed: stage2.load_train_frames",
+            "Step completed: stage2.oof",
+            "Step completed: stage2.build_matrices",
+            "Step completed: stage2.tune",
+            "stage2.pdf_tr",          # data volume
+            "stage2.X2_tr",
+            "peak RSS",               # 高水位打點
+            "stage2.after_oof",
+        ):
+            assert expected in caplog.text, f"缺觀測點: {expected}"
+
     def test_val_missing_group_raises(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         params = _parameters()
@@ -1340,8 +1498,12 @@ def train_stage2_model(
     label_col = schema["label"]
     wip = _wip_dir(parameters, wip_root)
 
-    pdf_tr = train_parquet_handle.to_pandas()
-    pdf_dev = train_dev_parquet_handle.to_pandas()
+    with log_step(logger, "stage2.load_train_frames"):
+        pdf_tr = train_parquet_handle.to_pandas()
+        pdf_dev = train_dev_parquet_handle.to_pandas()
+    log_data_volume(logger, "stage2.pdf_tr", pdf_tr)
+    log_data_volume(logger, "stage2.pdf_dev", pdf_dev)
+    log_peak_rss(logger, "stage2.after_load_train_frames")
     labels_tr = group_labels(pdf_tr, partition_keys)
     labels_dev = group_labels(pdf_dev, partition_keys)
     y_tr_full = pdf_tr[label_col].values
@@ -1390,36 +1552,44 @@ def train_stage2_model(
     max_workers = max(1, int(stage1_cfg.get("max_workers", 1)))
     logger.info("train_stage2_model: OOF %d group(s) x %d fold(s), "
                 "max_workers=%d", len(group_keys), n_folds, max_workers)
-    if max_workers == 1:
-        pairs = [_one_group(k) for k in group_keys]
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            pairs = list(pool.map(_one_group, group_keys))
+    with log_step(logger, "stage2.oof"):
+        if max_workers == 1:
+            pairs = [_one_group(k) for k in group_keys]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                pairs = list(pool.map(_one_group, group_keys))
     oof = np.full(len(pdf_tr), np.nan, dtype=np.float64)
     for key, scores in pairs:
         oof[tr_masks[key]] = scores
+    log_peak_rss(logger, "stage2.after_oof")
 
     # ---- stage-2 訓練矩陣（[X | oof_s1 | gcode]，spec D4）----
-    X_tr = _pdf_to_X(pdf_tr, preprocessor_view, parameters)
-    w_tr = _row_weights_from_pdf(pdf_tr, parameters, preprocessor_view)
-    lookup = group_code_lookup(group_keys)
-    g_tr = encode_group_codes(routing_keys(pdf_tr, partition_keys), lookup)
-    X2_tr = stage2_matrix(X_tr, oof, g_tr)
-    n_base = X_tr.shape[1]
-    del X_tr  # X2 已複製，釋放一份全量矩陣（spec §8 記憶體注意）
-    qcols = [schema["time"], *schema["entity"]]
-    qg_tr = pdf_tr.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
+    with log_step(logger, "stage2.build_matrices"):
+        X_tr = _pdf_to_X(pdf_tr, preprocessor_view, parameters)
+        w_tr = _row_weights_from_pdf(pdf_tr, parameters, preprocessor_view)
+        lookup = group_code_lookup(group_keys)
+        g_tr = encode_group_codes(routing_keys(pdf_tr, partition_keys), lookup)
+        X2_tr = stage2_matrix(X_tr, oof, g_tr)
+        n_base = X_tr.shape[1]
+        del X_tr  # X2 已複製，釋放一份全量矩陣（spec §8 記憶體注意）
+        qcols = [schema["time"], *schema["entity"]]
+        qg_tr = pdf_tr.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
 
-    pdf_val = val_parquet_handle.to_pandas()
-    X_v = _pdf_to_X(pdf_val, preprocessor_view, parameters)
-    rk_val = routing_keys(pdf_val, partition_keys)
-    # val 缺群＝異常（評估語意，spec D11 分流）→ on_missing="raise"
-    s1_v, _mask = stage1_model.predict_routed(X_v, rk_val, on_missing="raise")
-    X2_v = stage2_matrix(X_v, s1_v, encode_group_codes(rk_val, lookup))
-    del X_v
-    y_v = pdf_val[label_col].values
-    qg_v = pdf_val.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
-    items_v = pdf_val[schema["item"]].to_numpy()
+        pdf_val = val_parquet_handle.to_pandas()
+        log_data_volume(logger, "stage2.pdf_val", pdf_val)
+        X_v = _pdf_to_X(pdf_val, preprocessor_view, parameters)
+        rk_val = routing_keys(pdf_val, partition_keys)
+        # val 缺群＝異常（評估語意，spec D11 分流）→ on_missing="raise"
+        s1_v, _mask = stage1_model.predict_routed(X_v, rk_val,
+                                                  on_missing="raise")
+        X2_v = stage2_matrix(X_v, s1_v, encode_group_codes(rk_val, lookup))
+        del X_v
+        y_v = pdf_val[label_col].values
+        qg_v = pdf_val.groupby(qcols, sort=False).ngroup().to_numpy(np.int64)
+        items_v = pdf_val[schema["item"]].to_numpy()
+    log_data_volume(logger, "stage2.X2_tr", X2_tr)
+    log_data_volume(logger, "stage2.X2_val", X2_v)
+    log_peak_rss(logger, "stage2.after_train_matrix")
 
     from recsys_tfb.core.group_utils import default_metric_for_objective
     objective_name = "binary" if mode == "binary" else "lambdarank"
@@ -1434,9 +1604,11 @@ def train_stage2_model(
         base2["metric"] = algorithm_params.get("metric")
 
     cat_idx2 = stage2_categorical_indices(cat_idx, n_base)
-    best_params2, s2_adapter, hpo_meta = tune_stage2(
-        mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,
-        X2_v, y_v, qg_v, items_v, parameters)
+    with log_step(logger, "stage2.tune"):
+        best_params2, s2_adapter, hpo_meta = tune_stage2(
+            mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,
+            X2_v, y_v, qg_v, items_v, parameters)
+    log_peak_rss(logger, "stage2.after_tune")
 
     stage2_meta = {"mode": mode, "oof_folds": n_folds,
                    "best_params": best_params2, **hpo_meta}
@@ -1455,6 +1627,64 @@ def train_stage2_model(
 - [ ] **Step 4: GREEN** — `pytest tests/test_pipelines/test_training/test_staged_stage2_node.py -q`（lambdarank／binary／checkpoint／gate／missing-val 五案全過）
 - [ ] **Step 5: mutation check**：把 `X2_tr = stage2_matrix(X_tr, oof, g_tr)` 的 `oof` 換成 `np.zeros(len(oof))` → `test_oof_checkpoint_restored_on_rerun` **不會**抓到（它只驗還原路徑）；正確 mutation 是拿掉 `s1_v` 改餵 zeros → `test_attaches_stage2_and_reports` 的 predict 不受影響……結論：**本 task 的行為級 mutation 由 Task 10 的 e2e 對照兜底**（stage-2 特徵重要度在 PR-C 才可見）；此處只驗 `check_oof_gates` 呼叫：註掉該行 → `test_oof_gate_failure_fails_fast` 轉紅。改回。
 - [ ] **Step 6: Commit** `feat(staged): train_stage2_model node——OOF 編排＋stage-2 HPO＋adapter 掛載`
+
+---
+
+### Task 8b: Stage-1 側觀測補強（`staged.py`）
+
+**Files:**
+- Modify: `src/recsys_tfb/pipelines/training/staged.py`
+- Test: `tests/test_pipelines/test_training/test_staged_node.py`（追加）
+
+**背景**：PR-A 的 `train_staged_model` 只在每群**完成後** log 一行——公司規模大群訓練中（含 per-group HPO 全程）完全無訊號；pdf 載入也沒有 volume 記錄。PR #117 凍結中（等公司測試），本改動落在 PR-B 的 stacked diff，**不 amend PR-A**。
+
+- [ ] **Step 1: 寫失敗測試**（追加到既有 test_staged_node.py）
+
+```python
+    def test_stage1_heartbeat_and_memory_logs(self, tmp_path, caplog):
+        # Observability 要求 #5/#6：每群 start 心跳＋pdf volume＋峰值 RSS
+        import logging
+        tr = _write_parquet(tmp_path, "train", _pdf(seed=0))
+        dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
+        with caplog.at_level(logging.INFO):
+            train_staged_model(tr, dev, PREPROC, _parameters(),
+                               wip_root=tmp_path / "wip")
+        assert caplog.text.count("stage1 group") >= 4  # A/B 各 start＋完成
+        assert "start rows=" in caplog.text and "hpo_trials=" in caplog.text
+        assert "stage1.pdf_tr" in caplog.text          # data volume
+        assert "peak RSS" in caplog.text               # 高水位打點
+```
+
+- [ ] **Step 2: RED** — 預期 `AssertionError`（`start rows=` 不在 caplog.text——現行只有完成行）。
+- [ ] **Step 3: 實作**（staged.py 三處；import 補 `from recsys_tfb.core.logging import log_data_volume, log_peak_rss`）
+
+(a) `pdf_tr = train_parquet_handle.to_pandas()` 兩行之後追加：
+
+```python
+    log_data_volume(logger, "stage1.pdf_tr", pdf_tr)
+    log_data_volume(logger, "stage1.pdf_dev", pdf_dev)
+    log_peak_rss(logger, "stage1.after_load_train_frames")
+```
+
+(b) `_train_and_checkpoint` 開頭補 start 心跳（大群訓練中才有訊號可對時）：
+
+```python
+    def _train_and_checkpoint(key: str):
+        logger.info(
+            "stage1 group %r: start rows=%d hpo_trials=%d",
+            key, tr_stats[key][0],
+            int((stage1.get("hpo") or {}).get("n_trials", 0)),
+        )
+        r = _train(key)
+        _write_checkpoint(wip / group_slug(key), r)
+        return r
+```
+
+(c) `model.set_partition_keys(partition_keys)` 之前補：`log_peak_rss(logger, "stage1.after_groups")`
+
+- [ ] **Step 4: GREEN** — `pytest tests/test_pipelines/test_training/test_staged_node.py -q` 整檔（既有測試不得轉紅）。
+- [ ] **Step 5: mutation check**：刪掉 (b) 的 start 心跳 log 行 → 測試轉紅（`start rows=` 消失）。改回。
+- [ ] **Step 6: Commit** `feat(staged): stage-1 觀測補強——每群 start 心跳＋pdf volume＋峰值 RSS 打點`
 
 ---
 
@@ -1605,12 +1835,12 @@ def _create_staged_pipeline(stage2_mode: str = "none") -> Pipeline:
 
 - [ ] **Step 1: pre-flight**（CLAUDE.md §Worktree 指令塊照抄，grep 鍵換 `mode:`／`oof_folds:`）
 - [ ] **Step 2: config 切換**：`parameters_training.yaml` 設 `model_structure: staged`、`stage2.mode: lambdarank`、`oof_folds: 3`、`training.n_trials: 2`、`search_space` 給一條 `num_leaves`（int 4–16）、`calibration.enabled: false`（A21）。
-- [ ] **Step 3: 訓練 real-run**（background）：`SPARK_CONF_DIR=$PWD/conf/spark-local PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local`。驗：新 model_version 目錄含 `model.txt`（index 有 `"stage2"` 鍵）＋`stage1/`＋`stage2/model.txt`＋`stage2.json`；log 有 `tune_stage2: trial=` 與 mAP 數字；`data/models/_hpo/<search_id>/study_journal.log` 存在。
+- [ ] **Step 3: 訓練 real-run**（background）：`SPARK_CONF_DIR=$PWD/conf/spark-local PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local`。驗：新 model_version 目錄含 `model.txt`（index 有 `"stage2"` 鍵）＋`stage1/`＋`stage2/model.txt`＋`stage2.json`；log 有 `tune_stage2: trial=` 與 mAP 數字；`data/models/_hpo/<search_id>/study_journal.log` 存在。**觀測性驗收**：run log 必須看得到 (a) `stage2 OOF group=... fold=k/K` 逐折心跳、(b) `Step completed: stage2.{load_train_frames,oof,build_matrices,tune}` 四段計時、(c) `peak RSS so far` 打點序列、(d) `stage2.pdf_tr`／`stage2.X2_tr` 的 data volume——缺任一項＝觀測性 FAIL，回頭修。
 - [ ] **Step 4: checkpoint rerun**：同指令重跑 → log 應見 stage-1 `restored from checkpoint` 且 OOF 不重算（總時長顯著縮短）；model_version 不變。
 - [ ] **Step 5: HPO resume 實測**：`n_trials` 2→4（search_id 不變＝去 n_trials 語意）重跑 → log 應見 `stage-2 HPO resume: 2 completed... running 2 more`。
 - [ ] **Step 6: binary mode smoke**：`stage2.mode: binary` 跑一次 training，成功即可（產物鍵 `"mode": "binary"`）。
 - [ ] **Step 7: evaluation 相容**：`python -m recsys_tfb evaluation --env local --post-training --model-version <新mv>`（不 promote——promote 是人工保留步驟）。
-- [ ] **Step 8: 效率抽測**（spec §8 開放項）：記下 Step 3 的 OOF 段耗時與峰值記憶體觀察（`log_data_volume` 或 `/usr/bin/time -l`），寫進 PR 描述；不達標不擋 merge，是量測記錄。
+- [ ] **Step 8: 效率抽測**（spec §8 開放項）：直接從 Step 3 的 run log 摘錄——(a) `Step completed: stage2.oof` 的 duration；(b) `peak RSS` 序列的最大值＋**哪個 tag 之後跳升**（＝峰值歸屬階段）；(c) `stage2.X2_tr` 的 bytes（估算公司規模的線性外推基準）。寫進 PR 描述；不達標不擋 merge，是量測記錄。
 - [ ] **Step 9: config 還原**：`model_structure: shared`、`stage2.mode: none`、`oof_folds: 5`、`n_trials`／`search_space`／`calibration.enabled: true` 全數還原；`git diff conf/` 確認乾淨。
 - [ ] **Step 10: 回歸**（background）：全量 `pytest tests/ -q --deselect ...`（沿 PR-A 收尾同款；baseline＝684 passed／3 known fails：`test_adapter.py::TestPrepareTrainInputsWeight` ×2、`test_inference/test_pipeline.py::test_pipeline_inputs`）。新 fail 數必須為 0。
 - [ ] **Step 11: graphify rebuild**：`.venv/bin/python -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"`
@@ -1623,3 +1853,4 @@ def _create_staged_pipeline(stage2_mode: str = "none") -> Pipeline:
 - **Spec 覆蓋**：§10 PR-B 三項（OOF 編排＝Task 2/3/6/8；stage2 binary/lambdarank＝Task 4/8；HPO 接現行機制＝Task 7）；§9 item 11＝Task 3；A21 放寬＝Task 1；驗收三件（leakage 測試／lambdarank e2e／resume 實測）＝Task 2/6/10。§12 待驗證項「分群鍵當 Stage-2 categorical 的編碼路徑」已核實並定案（D-B3，group code 自算）。
 - **型別/簽名一致性**：`fit_stage2(mode, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, qg_val, params, cat_idx)` 在 Task 4 定義、Task 7/8 呼叫同序；`tune_stage2(mode, base_params, cat_idx2, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, qg_val, items_val, parameters)` Task 7 定義、Task 8 呼叫同序；`_group_oof(key, X_g, y_g, w_g, folds_g, X_dev_g, y_dev_g, params, cat_idx, n_folds)` Task 6 定義、Task 8 呼叫同序。
 - **已知風險（實作時遇到即停下回報）**：(1) `release_spark_session` 在無 Spark 測試環境的行為（Task 8 註記）；(2) `Node` 物件屬性名（Task 9 註記）；(3) `__main__.py` search_id 注入是否覆蓋 staged 分支（Task 9 (b)）；(4) `_composite_key_series` 對數值 entity 欄的字串化與 PR-A routing 慣例一致（同一函式，風險低）。
+- **Observability（2026-07-25 使用者指示追加）**：橫切要求六點見「Observability 要求」節；落點＝Task 5b（`log_peak_rss` helper）、Task 6（逐折心跳）、Task 7（逐 trial 起訖）、Task 8（階段計時＋volume＋RSS 序列）、Task 8b（Stage-1 側補強，落 PR-B stacked diff、不 amend 凍結中的 PR #117）；每個打點都有 caplog 測試，Task 10 Step 3 對 real-run log 做最終驗收、Step 8 直接用這些 log 產出效率量測。
