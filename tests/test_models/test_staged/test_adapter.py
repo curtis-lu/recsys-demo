@@ -54,7 +54,7 @@ def real_stage2_adapter():
               "verbosity": -1, "num_threads": 1, "num_leaves": 5,
               "learning_rate": 0.2, "num_iterations": 20,
               "early_stopping_rounds": 5}
-    return fit_stage2("binary", X2, y, None, qg, X2, y, qg, params, [3])
+    return fit_stage2("binary", X2, y, None, qg, X2, y, None, qg, params, [3])
 
 
 class TestPredictRouted:

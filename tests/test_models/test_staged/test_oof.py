@@ -31,6 +31,13 @@ class TestAssignFolds:
         counts = np.bincount(f, minlength=5)
         assert counts.min() > 0.5 * (2000 / 5)  # crc32 均勻性的寬鬆下界
 
+    def test_n_folds_below_two_raises(self):
+        ids = np.array(["c1", "c2", "c3"], dtype=object)
+        with pytest.raises(ValueError, match="n_folds"):
+            assign_folds(ids, n_folds=1, seed=42)
+        with pytest.raises(ValueError, match="n_folds"):
+            assign_folds(ids, n_folds=0, seed=42)
+
 
 class TestLeakageClean:
     def test_clean(self):

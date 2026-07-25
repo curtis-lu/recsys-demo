@@ -351,10 +351,10 @@ def train_stage2_model(
     if not base2["metric"]:
         base2["metric"] = algorithm_params.get("metric")
 
-    # stage2_categorical_indices（stage2.py，非本檔管轄）用 list(base_cat_idx)
-    # 組合——_categorical_indices 無類別欄時回傳 None（lgb.Dataset 接受 None，
-    # stage-1/OOF 路徑因此安全），此處須先正規化成 [] 才不會 TypeError。
-    cat_idx2 = stage2_categorical_indices(cat_idx or [], n_base)
+    # _categorical_indices 無類別欄時回傳 None（lgb.Dataset 接受 None，
+    # stage-1/OOF 路徑因此安全）；stage2_categorical_indices 自己處理
+    # None（視同空列表），呼叫端不必再正規化。
+    cat_idx2 = stage2_categorical_indices(cat_idx, n_base)
     with log_step(logger, "stage2.tune"):
         best_params2, s2_adapter, hpo_meta = tune_stage2(
             mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,

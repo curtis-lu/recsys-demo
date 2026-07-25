@@ -21,6 +21,9 @@ def assign_folds(entity_keys: np.ndarray, n_folds: int, seed: int) -> np.ndarray
     Hash computed once per distinct entity then broadcast —
     len(unique) << len(rows) at our scale (spec D12).
     """
+    if int(n_folds) < 2:
+        raise ValueError(
+            f"n_folds must be >= 2 for OOF cross-fitting, got {n_folds!r}")
     keys = np.asarray(entity_keys)
     uniq, inv = np.unique(keys, return_inverse=True)
     fold_of = np.array(

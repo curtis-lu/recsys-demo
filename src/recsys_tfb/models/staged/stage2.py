@@ -37,8 +37,11 @@ def stage2_matrix(X, s1_scores, gcodes) -> np.ndarray:
 
 def stage2_categorical_indices(base_cat_idx, n_base_features: int) -> list:
     """Stage-1 categorical indices stay valid; add the gcode column.
-    Column order: [0..n_base-1]=X, n_base=s1 score, n_base+1=gcode."""
-    return list(base_cat_idx) + [int(n_base_features) + 1]
+    Column order: [0..n_base-1]=X, n_base=s1 score, n_base+1=gcode.
+    ``base_cat_idx=None`` means no stage-1 categoricals (the shape returned
+    by ``LightGBMAdapter._categorical_indices`` when there are none) —
+    treated the same as an empty list."""
+    return list(base_cat_idx or []) + [int(n_base_features) + 1]
 
 
 def fit_stage2(

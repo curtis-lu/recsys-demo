@@ -34,6 +34,11 @@ class TestStage2Matrix:
     def test_categorical_indices_append_gcode(self):
         assert stage2_categorical_indices([0, 3], n_base_features=5) == [0, 3, 6]
 
+    def test_categorical_indices_none_means_no_stage1_categoricals(self):
+        # _categorical_indices（LightGBMAdapter）無類別欄時回傳 None，此函式
+        # 須把它視同空列表，不得 TypeError（批次 C 發現，防禦下沉到定義處）。
+        assert stage2_categorical_indices(None, 5) == [6]
+
 
 def _toy(mode, n=240, seed=0):
     rng = np.random.default_rng(seed)
