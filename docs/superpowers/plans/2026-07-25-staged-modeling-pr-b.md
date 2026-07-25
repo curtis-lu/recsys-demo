@@ -354,7 +354,7 @@ def check_oof_gates(labels, y, folds, n_folds: int) -> None:
 ```
 
 - [ ] **Step 4: GREEN** — `pytest tests/test_models/test_staged/test_gates.py -q` 全檔綠。
-- [ ] **Step 5: mutation check**：刪掉 `if not held.any(): continue` → `test_empty_heldout_fold_is_skipped` 仍綠？會——fold 2 的 fit set 有正負例。正確 mutation：把 `folds != k` 改成 `folds == k` → `test_pass_when_every_fit_set_trainable` 或 `test_fail...` 轉紅（fit/held 顛倒）。驗證後改回。
+- [ ] **Step 5: mutation check**：~~`folds != k` 改 `folds == k`~~（**2026-07-25 實測為假陰性**：本 task 的 fixtures 對 fit/held 顛倒對稱，9 測全綠——執行 agent 追因後確認）。有效 mutation＝`n_pos < 1` 改 `n_pos < 0` → `test_fail_when_fit_set_loses_all_positives` 與 `test_collect_all_lists_every_failure` 轉紅。驗證後改回。
 - [ ] **Step 6: Commit** `feat(staged): OOF 資料閘——每群每折 fit set 須可訓練（spec §9 item 11）`
 
 ---
