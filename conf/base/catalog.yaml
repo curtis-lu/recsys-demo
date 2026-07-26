@@ -255,6 +255,10 @@ gain_ledger:
   # （見 diagnosis/metric/model_capacity/_compute.py 的三種拿不到資料路徑）。
   optional: true
 
+stage1_overview:
+  type: JSONDataset
+  filepath: data/models/${model_version}/diagnostics/stage1_overview.json
+
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
 evaluation_metric_ci:
   type: JSONDataset
