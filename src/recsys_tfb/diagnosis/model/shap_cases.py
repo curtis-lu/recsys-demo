@@ -9,6 +9,7 @@ from recsys_tfb.core.logging import log_data_volume
 
 from .attribution import feature_attributions
 from .shap_per_item import _signed_profile
+from .staged import resolve_attribution_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parame
     try:
         pdf = shap_population.reset_index(drop=True)
         X = _pdf_to_X(pdf, preprocessor, parameters)
+        X, feature_cols = resolve_attribution_inputs(model, pdf, X, feature_cols)
         log_data_volume(logger, "quadrant.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
         items = pdf[item_col].values
@@ -150,6 +152,7 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
     try:
         pdf = case_rows.reset_index(drop=True)
         X = _pdf_to_X(pdf, preprocessor, parameters)
+        X, feature_cols = resolve_attribution_inputs(model, pdf, X, feature_cols)
         log_data_volume(logger, "cases.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
 
