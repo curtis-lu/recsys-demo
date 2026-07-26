@@ -143,9 +143,26 @@ class _FakeStage2:
     """記錄輸入矩陣的假 stage-2 adapter（save/load 走真 LightGBM 的測試另計）。"""
     def __init__(self):
         self.seen = None
+        self.booster = "FAKE_BOOSTER"
     def predict(self, X2):
         self.seen = np.asarray(X2)
         return np.full(len(X2), 7.0)
+    def feature_importance(self, kind="split"):
+        return {"f": 1.0}
+
+
+@pytest.fixture
+def staged_with_stage2(two_group_adapter):
+    """two_group_adapter + 假 stage-2（記錄輸入矩陣供 compose 對照）。"""
+    fake = _FakeStage2()
+    two_group_adapter.set_stage2(fake, {"mode": "binary"})
+    return two_group_adapter
+
+
+@pytest.fixture
+def staged_no_stage2():
+    """無 stage-2 的 staged adapter（per-group-only 分支）。"""
+    return _staged()
 
 
 class TestStage2Composition:
@@ -224,3 +241,36 @@ class TestStage2Persistence:
         loaded = StagedModelAdapter()
         loaded.load(str(fp))                  # 不因 index 無 stage2 而炸
         assert loaded.stage2_mode == "none"
+
+
+class TestDiagnosticsSurface:
+    def test_booster_property_delegates_to_stage2(self, staged_with_stage2):
+        assert staged_with_stage2.booster is staged_with_stage2._stage2.booster
+
+    def test_booster_property_raises_when_no_stage2(self, staged_no_stage2):
+        with pytest.raises(NotImplementedError, match="per-group"):
+            _ = staged_no_stage2.booster
+
+    def test_feature_importance_delegates_to_stage2(self, staged_with_stage2):
+        assert staged_with_stage2.feature_importance("gain") == {"f": 1.0}
+
+    def test_feature_importance_raises_when_no_stage2(self, staged_no_stage2):
+        with pytest.raises(NotImplementedError, match="per-group"):
+            staged_no_stage2.feature_importance("gain")
+
+    def test_stage2_matrix_for_matches_predict_routed_compose(
+            self, staged_with_stage2):
+        model = staged_with_stage2
+        X = np.random.default_rng(0).normal(size=(6, 2))
+        keys = np.array(["A", "B", "A", "B", "A", "B"], dtype=object)
+        model.predict_routed(X, keys, on_missing="raise")
+        expected = model._stage2.seen  # predict_routed 實際餵給 stage-2 的矩陣
+        X2 = model.stage2_matrix_for(X, keys)
+        assert X2.shape == (len(X), X.shape[1] + 2)
+        np.testing.assert_allclose(X2, expected)
+
+    def test_stage2_matrix_for_raises_on_missing_group(self, staged_with_stage2):
+        X = np.zeros((2, 2))
+        keys = np.array(["A", "ZZ"], dtype=object)
+        with pytest.raises(StagedMissingGroupError):
+            staged_with_stage2.stage2_matrix_for(X, keys)
