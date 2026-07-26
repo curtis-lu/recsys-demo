@@ -815,6 +815,99 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     assert len(logged_artifacts) == 1  # whole diagnostics dir uploaded once
 
 
+# ---- Tests: log_staged_experiment (Task 8) ----
+
+
+class _StagedModelStub:
+    def __init__(self):
+        self.logged_to_mlflow = False
+
+    def log_to_mlflow(self):
+        self.logged_to_mlflow = True
+
+
+class TestLogStagedExperiment:
+    def _spy_mlflow(self, monkeypatch, nodes_mod):
+        logged_params, logged_metrics, logged_artifacts = {}, {}, []
+        monkeypatch.setattr(nodes_mod.mlflow, "set_tracking_uri", lambda *a, **k: None)
+        monkeypatch.setattr(nodes_mod.mlflow, "set_experiment", lambda *a, **k: None)
+
+        class _Run:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(nodes_mod.mlflow, "start_run", lambda *a, **k: _Run())
+        monkeypatch.setattr(nodes_mod.mlflow, "log_param",
+                            lambda k, v: logged_params.__setitem__(k, v))
+        monkeypatch.setattr(nodes_mod.mlflow, "log_params", lambda d: logged_params.update(d))
+        monkeypatch.setattr(nodes_mod.mlflow, "log_metric",
+                            lambda k, v: logged_metrics.__setitem__(k, v))
+        monkeypatch.setattr(nodes_mod.mlflow, "log_artifacts",
+                            lambda d, *a, **k: logged_artifacts.append(d))
+        return logged_params, logged_metrics, logged_artifacts
+
+    def test_single_run_params_metrics_artifacts(self, monkeypatch, tmp_path):
+        import recsys_tfb.pipelines.training.nodes as nodes_mod
+        monkeypatch.chdir(tmp_path)
+        logged_params, logged_metrics, logged_artifacts = self._spy_mlflow(monkeypatch, nodes_mod)
+
+        model = _StagedModelStub()
+        overview = {"partition_keys": ["grp"], "n_groups": 2,
+                    "stage2": {"mode": "binary", "best_params": {"num_leaves": 7}}}
+        eval_results = {"overall_map": 0.5, "n_queries": 10,
+                        "n_excluded_queries": 0, "per_item_map_attr": {"p": 0.1}}
+        params = {"model_version": "mv_staged1", "mlflow": {}, "training": {}}
+
+        nodes_mod.log_staged_experiment(model, {"groups": {}}, eval_results, overview, params)
+
+        assert logged_params["model_structure"] == "staged"
+        assert logged_params["stage2_mode"] == "binary"
+        assert logged_params["num_leaves"] == 7
+        assert logged_params["partition_keys"] == "grp"
+        assert logged_params["n_groups"] == 2
+        assert logged_metrics["overall_map"] == 0.5
+        assert logged_metrics["map_attr_p"] == 0.1
+        assert logged_metrics["n_queries"] == 10
+        assert logged_metrics["n_excluded_queries"] == 0
+        assert model.logged_to_mlflow is True
+        assert len(logged_artifacts) == 1
+        assert logged_artifacts[0].endswith("diagnostics")
+
+    def test_stage2_absent_logs_mode_none(self, monkeypatch, tmp_path):
+        import recsys_tfb.pipelines.training.nodes as nodes_mod
+        monkeypatch.chdir(tmp_path)
+        logged_params, logged_metrics, _ = self._spy_mlflow(monkeypatch, nodes_mod)
+
+        model = _StagedModelStub()
+        overview = {"partition_keys": ["grp"], "n_groups": 1}  # no "stage2" key
+        eval_results = {"overall_map": 0.4, "n_queries": 5,
+                        "n_excluded_queries": 1, "per_item_map_attr": {}}
+        params = {"model_version": "mv_staged2", "mlflow": {}, "training": {}}
+
+        nodes_mod.log_staged_experiment(model, {"groups": {}}, eval_results, overview, params)
+
+        assert logged_params["stage2_mode"] == "none"
+        assert "num_leaves" not in logged_params
+
+    def test_best_effort_swallow_when_not_strict(self, monkeypatch, tmp_path):
+        import recsys_tfb.pipelines.training.nodes as nodes_mod
+        monkeypatch.chdir(tmp_path)
+
+        def _boom(*a, **k):
+            raise RuntimeError("tracking server unreachable")
+
+        monkeypatch.setattr(nodes_mod.mlflow, "set_tracking_uri", _boom)
+
+        model = _StagedModelStub()
+        overview = {"partition_keys": ["grp"], "n_groups": 1}
+        eval_results = {"overall_map": 0.4, "n_queries": 5,
+                        "n_excluded_queries": 1, "per_item_map_attr": {}}
+        params = {"model_version": "mv_staged3", "mlflow": {}, "training": {}}
+
+        # 不應 raise（strict 預設 False）
+        nodes_mod.log_staged_experiment(model, {"groups": {}}, eval_results, overview, params)
+
+
 # ---- Tests: calibrate_model ----
 
 
