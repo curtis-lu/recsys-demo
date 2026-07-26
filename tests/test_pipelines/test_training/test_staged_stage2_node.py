@@ -157,6 +157,19 @@ class TestTrainStage2Model:
             train_stage2_model(m1, rep1, tr, dev, val, PREPROC, params,
                                wip_root=tmp_path / "wip")
 
+    def test_stage2_booster_carries_assembled_feature_names(self, tmp_path,
+                                                             monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        params = _parameters()
+        m1, rep1 = _stage1(tmp_path, params)
+        tr, dev, val = _handles(tmp_path)
+        model, report = train_stage2_model(
+            m1, rep1, tr, dev, val, PREPROC, params,
+            wip_root=tmp_path / "wip")
+        names = model._stage2.booster.feature_name()
+        assert names[-2:] == ["stage1_score", "partition_gcode"]
+        assert names[:-2] == list(PREPROC["feature_columns"])
+
     def test_observability_events_emitted(self, tmp_path, monkeypatch,
                                           caplog):
         # Observability 要求 #3/#4/#5：階段計時＋data volume＋峰值 RSS 打點

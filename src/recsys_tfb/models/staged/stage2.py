@@ -17,6 +17,15 @@ from recsys_tfb.core.group_utils import to_contiguous_groups
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
 
+STAGE2_EXTRA_FEATURES = ("stage1_score", "partition_gcode")
+
+
+def stage2_feature_names(base_feature_cols) -> list:
+    """[X | s1 | gcode] 對應的特徵名（與 stage2_matrix 欄序一致）。
+    使用者特徵撞名時 lgb 以重複特徵名 fail-loud，屬 config 錯誤不防護。"""
+    return list(base_feature_cols) + list(STAGE2_EXTRA_FEATURES)
+
+
 def group_code_lookup(group_keys) -> dict:
     return {k: i for i, k in enumerate(sorted(group_keys))}
 
@@ -49,6 +58,7 @@ def fit_stage2(
     X2_tr, y_tr, w_tr, qgroups_tr,
     X2_val, y_val, w_val, qgroups_val,
     params: dict, categorical_indices,
+    feature_names=None,
 ) -> LightGBMAdapter:
     """One stage-2 fit, early-stopped on the provided validation set.
 
@@ -59,13 +69,16 @@ def fit_stage2(
     matching the shared prepare layer where both train and val (dev) get
     weight= (lightgbm_adapter.py's ``ds_train``/``ds_dev``).
     """
+    ds_kwargs = {}
+    if feature_names is not None:
+        ds_kwargs["feature_name"] = list(feature_names)
     if mode == "lambdarank":
         perm, counts = to_contiguous_groups(np.asarray(qgroups_tr))
         train_ds = lgb.Dataset(
             X2_tr[perm], label=np.asarray(y_tr)[perm],
             weight=None if w_tr is None else np.asarray(w_tr)[perm],
             group=counts, categorical_feature=list(categorical_indices),
-            free_raw_data=False,
+            free_raw_data=False, **ds_kwargs,
         )
         permv, countsv = to_contiguous_groups(np.asarray(qgroups_val))
         val_ds = lgb.Dataset(
@@ -77,7 +90,7 @@ def fit_stage2(
         train_ds = lgb.Dataset(
             X2_tr, label=y_tr, weight=w_tr,
             categorical_feature=list(categorical_indices),
-            free_raw_data=False,
+            free_raw_data=False, **ds_kwargs,
         )
         val_ds = lgb.Dataset(
             X2_val, label=y_val, weight=w_val,
