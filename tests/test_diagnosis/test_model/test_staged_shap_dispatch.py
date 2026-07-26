@@ -83,3 +83,52 @@ class TestShapNodeUsesResolvedInputs:
         n_base = len(preprocessor["feature_columns"])
         assert seen["shape"][1] == n_base + 2
         assert seen["feature_cols"][-2:] == ["stage1_score", "partition_gcode"]
+
+    def test_positive_profiles_not_double_resolved(self, tmp_path, monkeypatch):
+        # 回歸鎖（controller 修復 2026-07-26）：主函式 resolve 後若把「已擴充」
+        # 名單傳進 _positive_profiles，函式內再 resolve 會二次擴充——
+        # n+4 名單對 n+2 矩陣。斷言：每一次 feature_attributions 呼叫的
+        # 名單長度都等於矩陣欄數（全域 pass＋正例 pass 都要成立）。
+        monkeypatch.chdir(tmp_path)
+        import recsys_tfb.diagnosis.model.shap_per_item as spi
+
+        rng = np.random.RandomState(0)
+        n = 40
+        f0 = rng.randn(n)
+        f1 = rng.randn(n)
+        prod = np.array(["A"] * 20 + ["B"] * 20)
+        grp = np.array(["g1"] * 20 + ["g2"] * 20)
+        label = (f0 + f1 > 0).astype(int)
+        pdf = pd.DataFrame({"f0": f0, "f1": f1, "prod_name": prod,
+                            "grp": grp, "label": label})
+        path = str(tmp_path / "test.parquet")
+        pq.write_table(pa.Table.from_pandas(pdf), path)
+        handle = ParquetHandle(path=path)
+
+        model = _FakeStaged()
+        calls = []
+
+        def spy_attr(m, X, feature_cols, **kwargs):
+            calls.append((X.shape[1], list(feature_cols)))
+            return np.zeros((X.shape[0], X.shape[1]))
+
+        monkeypatch.setattr(spi, "feature_attributions", spy_attr)
+        monkeypatch.setattr(spi, "attribution_budget_units", lambda m: 10)
+
+        preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
+                        "category_mappings": {}}
+        parameters = {
+            "model_version": "testmv_staged_shap_pos",
+            "diagnostics": {"shap": {"enabled": True, "top_k": 2,
+                                     "min_rows_per_item": 5, "sample_rows": 40,
+                                     "max_budget": 4_000_000,
+                                     "profile_positive": True,
+                                     "positive_min_rows": 3,
+                                     "positive_sample_per_item": 10}},
+        }
+        spi.compute_shap_diagnostics(model, handle, preprocessor, parameters)
+
+        assert len(calls) >= 2  # 全域一次＋正例一次
+        for width, cols in calls:
+            assert len(cols) == width
+            assert cols[-2:] == ["stage1_score", "partition_gcode"]

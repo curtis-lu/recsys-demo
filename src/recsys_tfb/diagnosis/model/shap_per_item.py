@@ -167,6 +167,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     X_base = _pdf_to_X(sample_pdf, preprocessor, parameters)
     scores = model_scores(model, sample_pdf, X_base)
+    # base 名單另存：_positive_profiles 自己會 resolve 一次，傳擴充版進去
+    # 會二次擴充（n+4 名單對 n+2 矩陣）——見 test_staged_shap_dispatch 回歸鎖。
+    base_feature_cols = feature_cols
     X, feature_cols = resolve_attribution_inputs(model, sample_pdf, X_base, feature_cols)
 
     with log_step(logger, "shap_values"):
@@ -204,8 +207,8 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         positive_profiles = {}
     else:
         positive_profiles = _positive_profiles(
-            model, path, item_values, item_col, label_col, feature_cols, take_cols,
-            preprocessor, parameters, profile_positive=profile_positive,
+            model, path, item_values, item_col, label_col, base_feature_cols,
+            take_cols, preprocessor, parameters, profile_positive=profile_positive,
             per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
