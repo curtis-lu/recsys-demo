@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from recsys_tfb.models.staged.train_stage1 import GroupResult, train_one_group
+from recsys_tfb.models.staged.train_stage1 import (
+    GroupResult, _fit_adapter, train_one_group,
+)
 
 ALGO = {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
         "num_threads": 1, "num_leaves": 7, "learning_rate": 0.2,
@@ -16,6 +18,19 @@ def _data(seed=0, n=200):
     X = np.column_stack([rng.normal(loc=y, scale=1.0, size=n), rng.normal(size=n)])
     w = np.ones(n)
     return X, y, w
+
+
+def _toy_arrays(seed=0, n=60):
+    """60x3 toy train/dev arrays（無 sample weight），供 _fit_adapter 直測用。"""
+    rng = np.random.default_rng(seed)
+    y_tr = (rng.random(n) < 0.3).astype(int)
+    X_tr = np.column_stack(
+        [rng.normal(loc=y_tr, scale=1.0, size=n) for _ in range(3)])
+    rng_dev = np.random.default_rng(seed + 1)
+    y_dev = (rng_dev.random(n) < 0.3).astype(int)
+    X_dev = np.column_stack(
+        [rng_dev.normal(loc=y_dev, scale=1.0, size=n) for _ in range(3)])
+    return X_tr, y_tr, X_dev, y_dev
 
 
 class TestTrainOneGroupFixedParams:
@@ -84,3 +99,22 @@ class TestTrainOneGroupHpo:
         r = self._run()
         assert set(r.best_params) == {"num_leaves"}
         assert 3 <= r.best_params["num_leaves"] <= 15
+
+
+class TestFeatureNames:
+    def test_booster_reports_real_feature_names(self):
+        X_tr, y_tr, X_dev, y_dev = _toy_arrays()
+        names = ["f_alpha", "f_beta", "f_gamma"]
+        adapter = _fit_adapter(X_tr, y_tr, None, X_dev, y_dev,
+                               {"objective": "binary", "verbosity": -1,
+                                "num_iterations": 5, "early_stopping_rounds": 0},
+                               None, feature_names=names)
+        assert adapter.booster.feature_name() == names
+
+    def test_feature_names_omitted_keeps_old_behavior(self):
+        X_tr, y_tr, X_dev, y_dev = _toy_arrays()
+        adapter = _fit_adapter(X_tr, y_tr, None, X_dev, y_dev,
+                               {"objective": "binary", "verbosity": -1,
+                                "num_iterations": 5, "early_stopping_rounds": 0},
+                               None)
+        assert adapter.booster.feature_name()[0].startswith("Column_")

@@ -37,10 +37,15 @@ class GroupResult:
     trial_values: list = field(default_factory=list)
 
 
-def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices):
+def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices,
+                  feature_names=None):
+    ds_kwargs = {}
+    if feature_names is not None:
+        ds_kwargs["feature_name"] = list(feature_names)
     train_ds = lgb.Dataset(
         X_tr, label=y_tr, weight=w_tr,
         categorical_feature=categorical_indices, free_raw_data=False,
+        **ds_kwargs,
     )
     dev_ds = lgb.Dataset(
         X_dev, label=y_dev, reference=train_ds, free_raw_data=False,
@@ -68,6 +73,7 @@ def train_one_group(
     hpo_cfg: dict,
     categorical_indices,
     base_seed: int,
+    feature_names=None,
 ) -> GroupResult:
     """Fixed-params train (n_trials=0) or sequential in-memory HPO then refit."""
     t0 = time.monotonic()
@@ -92,6 +98,7 @@ def train_one_group(
             adapter = _fit_adapter(
                 X_tr, y_tr, w_tr, X_dev, y_dev,
                 {**base_params, **trial_params}, categorical_indices,
+                feature_names=feature_names,
             )
             return sign * _score(metric, y_dev, adapter.predict(X_dev))
 
@@ -106,6 +113,7 @@ def train_one_group(
     adapter = _fit_adapter(
         X_tr, y_tr, w_tr, X_dev, y_dev,
         {**base_params, **best_params}, categorical_indices,
+        feature_names=feature_names,
     )
     score = _score(metric, y_dev, adapter.predict(X_dev))
     return GroupResult(

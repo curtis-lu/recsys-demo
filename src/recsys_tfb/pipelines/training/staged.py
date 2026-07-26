@@ -135,6 +135,7 @@ def train_staged_model(
             key, X_tr, y_tr, w_tr, X_dev, y_dev, w_dev,
             dict(algorithm_params), dict(stage1.get("params") or {}),
             dict(stage1.get("hpo") or {}), cat_idx, base_seed,
+            feature_names=list(preprocessor_view["feature_columns"]),
         )
 
     # 群級 checkpoint：有 _SUCCESS 的群直接載回（確定性保證「載回＝重算同結果」；
