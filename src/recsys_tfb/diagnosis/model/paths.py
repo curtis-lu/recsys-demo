@@ -34,6 +34,13 @@ def cases_dir(parameters: dict) -> Path:
     return d
 
 
+def staged_group_dir(parameters: dict, slug: str) -> Path:
+    """Resolve（並建立）diagnostics/groups/<slug>/ —— stage2=none 每群診斷產物。"""
+    d = diagnostics_dir(parameters) / "groups" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def safe_name(s: object) -> str:
     """檔名安全化（item 值可能含空白/斜線）。"""
     return re.sub(r"[^0-9A-Za-z._-]+", "_", str(s))
