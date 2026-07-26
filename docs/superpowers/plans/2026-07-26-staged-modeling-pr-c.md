@@ -363,7 +363,7 @@ git add -A && git commit -m "feat(staged): adapter diagnostics surface (booster/
 **Files:**
 - Create: `src/recsys_tfb/diagnosis/model/staged.py`
 - Modify: `conf/base/catalog.yaml`（`gain_ledger` 條目後加 `stage1_overview`）
-- Test: `tests/test_diagnosis/test_staged_overview.py`（新檔；目錄名以 `ls tests/` 對齊既有 diagnosis 測試位置——若既有慣例是 `tests/test_diagnosis/` 就用它，否則跟著 `compute_gain_ledger` 測試檔所在目錄放）
+- Test: `tests/test_diagnosis/test_model/test_staged_overview.py`（新檔；目錄名以 `ls tests/` 對齊既有 diagnosis 測試位置——若既有慣例是 `tests/test_diagnosis/` 就用它，否則跟著 `compute_gain_ledger` 測試檔所在目錄放）
 
 - [ ] **Step 1: 失敗測試**
 
@@ -541,7 +541,7 @@ git add -A && git commit -m "feat(diagnosis): staged dispatch helpers + stage1 o
 **Files:**
 - Modify: `src/recsys_tfb/diagnosis/model/shap_per_item.py`
 - Modify: `src/recsys_tfb/diagnosis/model/shap_cases.py`
-- Test: `tests/test_diagnosis/test_staged_shap_dispatch.py`（新檔，跟 Task 4 同目錄）
+- Test: `tests/test_diagnosis/test_model/test_staged_shap_dispatch.py`（新檔，跟 Task 4 同目錄）
 
 **行為不變宣稱：shared 路徑（`LightGBMAdapter`）逐位元不變**——分派 helper 對非 staged 模型是恆等通過；本 task 結束後既有 shap／quadrant 測試必須原樣全綠。
 
@@ -713,7 +713,7 @@ git add -A && git commit -m "refactor(diagnosis): extract _stats_from_pdf for pe
 - Modify: `src/recsys_tfb/diagnosis/model/paths.py`（加 `staged_group_dir`）
 - Modify: `src/recsys_tfb/diagnosis/model/staged.py`（加 runner）
 - Modify: `conf/base/catalog.yaml`（加 `staged_group_diagnostics`）
-- Test: `tests/test_diagnosis/test_staged_group_diagnostics.py`（新檔）
+- Test: `tests/test_diagnosis/test_model/test_staged_group_diagnostics.py`（新檔）
 
 - [ ] **Step 1: 失敗測試**
 
