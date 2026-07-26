@@ -66,3 +66,35 @@ class TestStagedStage2Pipeline:
         b = create_pipeline(model_structure="shared", stage2_mode="lambdarank")
         assert [n.func.__name__ for n in a.nodes] == \
                [n.func.__name__ for n in b.nodes]
+
+
+class TestStagedDiagnosticsShape:
+    def test_none_shape_has_overview_stats_group_runner_and_mlflow(self):
+        p = create_pipeline(model_structure="staged", stage2_mode="none")
+        names = [n.func.__name__ for n in p.nodes]
+        assert "compute_stage1_overview" in names
+        assert "compute_feature_statistics" in names
+        assert "compute_staged_group_diagnostics" in names
+        assert "log_staged_experiment" in names
+        assert "compute_shap_diagnostics" not in names
+        assert "compute_quadrant_profiles" not in names
+        log_node = next(n for n in p.nodes
+                        if n.func.__name__ == "log_staged_experiment")
+        assert "staged_group_diagnostics" in log_node.inputs
+
+    def test_stage2_shape_reuses_booster_diagnostics_nodes(self):
+        p = create_pipeline(model_structure="staged", stage2_mode="lambdarank")
+        names = [n.func.__name__ for n in p.nodes]
+        for expected in ("compute_stage1_overview", "compute_feature_statistics",
+                         "compute_feature_importance", "compute_gain_ledger",
+                         "compute_shap_diagnostics", "select_shap_population",
+                         "compute_quadrant_profiles", "compute_quadrant_cases",
+                         "log_staged_experiment"):
+            assert expected in names
+        assert "compute_staged_group_diagnostics" not in names
+        assert "log_experiment" not in names
+
+    def test_shared_shape_unchanged(self):
+        p = create_pipeline()
+        names = [n.func.__name__ for n in p.nodes]
+        assert "log_experiment" in names and "log_staged_experiment" not in names

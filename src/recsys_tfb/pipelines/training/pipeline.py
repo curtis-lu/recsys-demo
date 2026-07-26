@@ -11,6 +11,10 @@ from recsys_tfb.diagnosis.model import (
 )
 from recsys_tfb.diagnosis.model.gain_ledger import compute_gain_ledger
 from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+from recsys_tfb.diagnosis.model.staged import (
+    compute_stage1_overview,
+    compute_staged_group_diagnostics,
+)
 from recsys_tfb.pipelines.training.nodes import (
     cache_calibration_model_input,
     cache_test_model_input,
@@ -21,6 +25,7 @@ from recsys_tfb.pipelines.training.nodes import (
     compute_test_mAP_spark,
     finalize_model,
     log_experiment,
+    log_staged_experiment,
     persist_sample_weight_report,
     predict_and_write_test_predictions,
     prepare_lgb_train_inputs,
@@ -232,7 +237,15 @@ def _create_staged_pipeline(stage2_mode: str = "none") -> Pipeline:
     "stage1_model"，train_stage2_model 做 OOF＋stage-2 後產出 "model"；
     cache_val_model_input 拉回 DAG（val＝stage-2 early stop＋HPO 評分集，
     spec §2.2/§3.1）。predict/mAP 節點兩種形狀共用（吃 "model"）。
-    Excluded (PR-C): diagnostics nodes、log_experiment、calibrate；
+
+    診斷（PR-C Task 9）：兩形狀共通 compute_feature_statistics／
+    compute_stage1_overview；stage2=none 另跑 compute_staged_group_diagnostics
+    （per-group 核心四件，範圍裁決見該函式 docstring）；stage2 存在則沿用
+    booster 診斷全套（compute_feature_importance／compute_gain_ledger／
+    SHAP／象限 profile／cases，經 resolve_attribution_inputs 分派吃
+    staged 矩陣，見 diagnosis/model/shap_per_item.py、shap_cases.py）。
+    兩形狀都收斂到 log_staged_experiment（單一 MLflow run，非 log_experiment）。
+    Excluded：calibrate（A21 已在 CLI entry 擋，見上方 create_pipeline）；
     shared 的 prepare_lgb/tune/finalize 由 staged_stage2.tune_stage2 取代。
     """
     with_stage2 = stage2_mode != "none"
@@ -312,4 +325,84 @@ def _create_staged_pipeline(stage2_mode: str = "none") -> Pipeline:
             outputs="evaluation_results",
         ),
     ])
+
+    # ---- PR-C 診斷（兩形狀共通）----
+    nodes.append(
+        Node(
+            compute_feature_statistics,
+            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
+            outputs="feature_statistics",
+        ),
+    )
+    nodes.append(
+        Node(
+            compute_stage1_overview,
+            # stage2_report 走 trailing-default（log_experiment 同慣例）
+            inputs=(["stage1_groups_report", "parameters", "stage2_report"]
+                    if with_stage2 else ["stage1_groups_report", "parameters"]),
+            outputs="stage1_overview",
+        ),
+    )
+    if with_stage2:
+        nodes.extend([
+            Node(
+                compute_feature_importance,
+                inputs=["model", "parameters"],
+                outputs="feature_importance",
+            ),
+            Node(
+                compute_gain_ledger,
+                inputs=["model", "preprocessor_view", "parameters"],
+                outputs="gain_ledger",
+            ),
+            Node(
+                compute_shap_diagnostics,
+                inputs=["model", "test_parquet_handle", "preprocessor_view",
+                        "parameters"],
+                outputs="shap_diagnostics",
+            ),
+            Node(
+                select_shap_population,
+                # predict_manifest：ordering-only（shared DAG 同註解）
+                inputs=["training_eval_predictions", "test_model_input",
+                        "parameters", "predict_manifest"],
+                outputs=["shap_population", "case_rows"],
+            ),
+            Node(
+                compute_quadrant_profiles,
+                inputs=["model", "shap_population", "preprocessor_view",
+                        "parameters"],
+                outputs="quadrant_profiles",
+            ),
+            Node(
+                compute_quadrant_cases,
+                inputs=["model", "case_rows", "preprocessor_view", "parameters"],
+                outputs="cases_manifest",
+            ),
+            Node(
+                log_staged_experiment,
+                # 第 6 位起=*diag_deps（ordering-only：保證 catalog 先落檔）
+                inputs=["model", "stage1_groups_report", "evaluation_results",
+                        "stage1_overview", "parameters", "feature_statistics",
+                        "feature_importance", "gain_ledger", "shap_diagnostics",
+                        "quadrant_profiles", "cases_manifest"],
+                outputs=None,
+            ),
+        ])
+    else:
+        nodes.extend([
+            Node(
+                compute_staged_group_diagnostics,
+                inputs=["model", "train_parquet_handle", "test_parquet_handle",
+                        "preprocessor_view", "parameters"],
+                outputs="staged_group_diagnostics",
+            ),
+            Node(
+                log_staged_experiment,
+                inputs=["model", "stage1_groups_report", "evaluation_results",
+                        "stage1_overview", "parameters", "feature_statistics",
+                        "staged_group_diagnostics"],
+                outputs=None,
+            ),
+        ])
     return Pipeline(nodes)
