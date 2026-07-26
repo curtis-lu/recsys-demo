@@ -108,7 +108,7 @@ def compute_staged_group_diagnostics(model, train_parquet_handle,
     from recsys_tfb.models.staged.partition import group_slug, routing_keys
 
     from . import data_access
-    from .attribution import feature_attributions
+    from .attribution import attribution_budget_units, feature_attributions
     from .feature_stats import _stats_from_pdf
     from .gain_ledger import compute_gain_ledger
     from .importance import compute_feature_importance
@@ -119,6 +119,7 @@ def compute_staged_group_diagnostics(model, train_parquet_handle,
     fs_cfg = parameters.get("diagnostics", {}).get("feature_stats", {})
     top_k = int(shap_cfg.get("top_k", 30))
     shap_rows = int(shap_cfg.get("sample_rows", 2000))
+    max_budget = int(shap_cfg.get("max_budget", 4_000_000))
     fs_rows = int(fs_cfg.get("sample_rows", 500000))
     high_null = float(fs_cfg.get("high_null_threshold", 0.5))
     feature_cols = list(preprocessor["feature_columns"])
@@ -163,11 +164,22 @@ def compute_staged_group_diagnostics(model, train_parquet_handle,
                 stats = _stats_from_pdf(pdf_tr, feature_cols, high_null)
                 (gdir / "feature_statistics.json").write_text(
                     json.dumps(stats, ensure_ascii=False, indent=1))
-                # 4) SHAP summary（test 側、該群列；每群上限 shap.sample_rows）
+                # 4) SHAP summary（test 側、該群列；每群上限 shap.sample_rows，
+                #    再受 max_budget 樹數預算閘限制——比照 shared 版
+                #    compute_shap_diagnostics 的公式，見 shap_per_item.py:136-143）
+                n_trees = attribution_budget_units(adapter)
+                eff_shap_rows = shap_rows
+                if eff_shap_rows * max(1, n_trees) > max_budget:
+                    eff_shap_rows = max(1, max_budget // max(1, n_trees))
+                    logger.warning(
+                        "staged shap budget guard: group=%s sample_rows %d * "
+                        "n_trees %d > max_budget %d -> reduce to %d",
+                        slug, shap_rows, n_trees, max_budget, eff_shap_rows,
+                    )
                 te_idx = np.flatnonzero(keys_te == key)
-                if te_idx.size > shap_rows:
+                if te_idx.size > eff_shap_rows:
                     te_idx = np.sort(np.random.RandomState(42).choice(
-                        te_idx, size=shap_rows, replace=False))
+                        te_idx, size=eff_shap_rows, replace=False))
                 entry["n_shap_sampled"] = int(te_idx.size)
                 if te_idx.size:
                     pdf_te = data_access.take_rows(test_path, te_idx,

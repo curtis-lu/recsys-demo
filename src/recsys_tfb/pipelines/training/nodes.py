@@ -1095,8 +1095,11 @@ def log_staged_experiment(
                 mlflow.log_metric("n_excluded_queries",
                                   evaluation_results["n_excluded_queries"])
                 model.log_to_mlflow()
+                # --- diagnostics artifacts（JSON written by per-group runner,
+                #     PNG by shap node; upload the whole dir） ---
                 diag_dir = diagnostics_dir(parameters)
-                mlflow.log_artifacts(str(diag_dir))
+                if diag_dir.exists():
+                    mlflow.log_artifacts(str(diag_dir))
         logger.info("staged experiment logged to MLflow (%s)", experiment_name)
     except Exception as e:
         if strict:
