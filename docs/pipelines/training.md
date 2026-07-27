@@ -648,7 +648,7 @@ training 預設是一個跨全體 item 共用的模型（見 §1）。當某些 
 1. **Stage-1**：依設定的欄位把 train／train-dev 依值切成互斥子集，每個子集各自訓練一個 LightGBM 模型（可選每群獨立做超參數搜尋）。
 2. **Stage-2（可選）**：在全體資料上再疊一層模型，把 Stage-1 的分數當作一個額外特徵，連同原始特徵與群鍵本身一起訓練，目的是把多個群模型的分數校準到同一把尺上，讓最終排序可以跨群比較。
 
-什麼時候值得考慮 staged：SHAP 診斷（§3.7）的 `item_idiosyncrasy` 若顯示某個 item 明顯偏離全域重要特徵排序、且**該 item 自己的離線指標（如其 mAP）也偏弱**（見 §6.2 第 7 點），才是評估分群建模是否有幫助的起點——單純偏離度高、指標沒受影響，通常只代表該 item 依賴不同訊號，不必然是問題。
+什麼時候值得考慮 staged：SHAP 診斷（§3.7）的 `item_idiosyncrasy` 若顯示某個 item 明顯偏離全域重要特徵排序、且**該 item 自己的離線指標（如其 mAP）也偏弱**（per-item mAP attribution 見 §6.2 第 6 點、偏離度見第 7 點），才是評估分群建模是否有幫助的起點——單純偏離度高、指標沒受影響，通常只代表該 item 依賴不同訊號，不必然是問題。
 
 ### 10.2 設定方式
 
@@ -708,6 +708,8 @@ Stage-1 資料閘（`gates`）：
 
 閘門在真正開始訓練前一次檢查完所有群，採 collect-all：一次性 raise，錯誤訊息列出**每一個**未過閘的群與具體原因（哪個 split、哪個門檻、實際值），不是抓到第一個問題就中止。只出現在 train-dev、train 完全沒有對應資料的群（orphan）同樣視為錯誤。門檻設得夠寬即等於停用這道檢查。啟用 Stage-2 時另有一道 OOF 閘：每個「群 × held-out 折」扣掉該折之後剩下的訓練資料，必須至少各有一筆正例與一筆負例，否則同樣 collect-all 後 raise。
 
+執行方式與 shared 模式完全相同：§4 的 CLI 選項與版本旗標照用，沒有 staged 專屬的指令或旗標——切到 `model_structure: staged` 之後直接 `python -m recsys_tfb training` 即可。
+
 ### 10.3 訓練流程
 
 staged 依 `stage2.mode` 分成兩種 DAG 形狀：
@@ -731,7 +733,7 @@ shared 專屬的 `prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize
 
 **Split 衛生**：staged 讀取的是與 shared 完全相同的一份 train／train-dev／val／test model input，不會另外重建 dataset。Stage-1 只是把同一份 train／train-dev 依 `partition_keys` 在記憶體中切成互斥子集，分別餵給各群自己的模型；沒有另外抽樣或切分。泛化契約也與 shared 相同，是 temporal generalization：val、test 是時間切分，entity 可以與 train 重疊；entity 之間互斥只存在於 train 與 train-dev 這一組切分的邊界內，不是分群之間的邊界。
 
-**OOF 與 Stage-2 特徵組裝**：Stage-2 若啟用，會把 Stage-1 的分數當作一個額外特徵。如果直接拿「每群自己的模型對自己訓練資料的預測分數」當特徵，這個分數會系統性偏高——模型已經看過這些列的答案。Out-of-fold（OOF）是這個問題的標準解法：把每群的 train 列再切成 entity-hash 互斥的 K 折（`oof_folds`，需 `>= 2`），每一列的 Stage-1 分數改由「沒看過這個 entity 所在折」的臨時模型產生，用來近似 Stage-1 在未見資料上的真實表現。因此 Stage-2 的訓練矩陣裡，Stage-1 分數這一欄用的是 OOF 分數；但 val 與正式推論用的是全量重訓（拿全部 train＋train-dev 重新訓練）之後的 Stage-1 分數——兩者是不同的分數 regime，這是 stacking 方法的標準取捨，不是設計疏漏：重點在於 val 與正式推論兩者用的是同一個 regime，所以拿 val 選出來的最佳超參數、和上線後的實際打分行為是同一套分數分佈，可以放心比較；唯一不能直接比的是「Stage-2 訓練當下看到的 OOF 分數」跟「上線後的分數」。
+**OOF 與 Stage-2 特徵組裝**：Stage-2 若啟用，會把 Stage-1 的分數當作一個額外特徵。如果直接拿「每群自己的模型對自己訓練資料的預測分數」當特徵，這個分數會系統性偏高——模型已經看過這些列的答案。Out-of-fold（OOF）是這個問題的標準解法：把每群的 train 列再切成 entity-hash 互斥的 K 折（`oof_folds`，需 `>= 2`），每一列的 Stage-1 分數改由「沒看過這個 entity 所在折」的臨時模型產生，用來近似 Stage-1 在未見資料上的真實表現。因此有兩種 Stage-1 分數並存。Stage-2 的**訓練**矩陣裡，Stage-1 分數這一欄用的是 OOF 分數（每列來自「缺其所在折」的臨時模型）；val 評分與正式推論用的則是各群的**正式 Stage-1 模型**——就是 `train_staged_model` 產出、以該群全部 train 列訓練（train-dev 僅作 early stopping）的那一個，沒有額外的重訓步驟。兩者是不同的分數 regime，這是 stacking 方法的標準取捨，不是設計疏漏。能放心比較的原因是：val 與正式推論用的是同一個 regime，拿 val 選出的最佳超參數、和上線後的實際打分行為是同一套分數分佈；唯一不能直接比的是「Stage-2 訓練當下看到的 OOF 分數」與「上線後的分數」。
 
 Stage-2 的訓練矩陣欄位順序是 `[原始特徵 | stage1_score | partition_gcode]`——新欄接在尾端，不打亂 Stage-1 已宣告的 categorical 欄位索引。`partition_gcode` 不是任意編碼，而是群鍵在排序後的群鍵清單中的名次（sorted-rank），不落地存一份對照表，靠訓練與載入都用同一個排序規則來保證兩邊編碼一致；`partition_gcode` 宣告為 categorical 特徵，`stage1_score` 則不宣告（是連續值）。Stage-2 的 HPO 比照 shared 模式：一樣有 persistent study、可恢復、`--fresh-hpo` 與搜尋診斷（見 §7.3、§10.6）。
 
@@ -766,7 +768,11 @@ data/models/<model_version>/
 
 群級 checkpoint 寫在 `data/models/_staged_wip/<model_version>/<slug>/`（`model.txt`＋`meta.json`＋`_SUCCESS` 標記完成）。同一個 `model_version` 重跑時，已經有 `_SUCCESS` 的群直接載回、不重新訓練——這是安全的，因為 `model_version` 本身已經涵蓋了設定與上游 dataset 版本，加上每群的訓練是確定性的（種子只由 `random_seed` 與群鍵決定），所以「載回」與「重新跑一次」在理論上會得到同一個結果。群內的 HPO 搜尋如果中斷，重跑時是整段重搜；checkpoint 的粒度是「一個群訓練完成」，不是「一個 trial 完成」。啟用 Stage-2 時，OOF 分數另有自己的 checkpoint（`<slug>/oof/`：`scores.npy`＋`meta.json`＋`_SUCCESS`），只有當列數、折數、種子三者都與這次執行完全相符時才會被重用，否則視同沒有 checkpoint、重新計算。`_staged_wip` 目錄不是 catalog 追蹤的產物，框架不會自動清理；確認某個 `model_version` 的 bundle 已經正式產出後，可以手動刪除對應的子目錄。
 
-`search_id` 與 `model_version` 的計算範圍，遵循 §7.1／§7.2 描述的既有機制：整個 hashed 的 `training:` 區塊都算在內（staged 下即包含 `staged.stage1` 與 `staged.stage2` 全部設定），只排除 `algorithm_params` 底下的 logging／threading 鍵；`search_id` 再多排除頂層 `training.n_trials` 一項。這代表改動 Stage-1 的任何設定（`partition_keys`、`stage1.hpo.n_trials`、`gates.*`、`stage1.params` 等）同樣會讓 `search_id` 連動改變，跟改 Stage-2 設定沒有差別待遇——不要誤以為 `search_id` 只追蹤 Stage-2 那一半設定。但 Stage-1 的群內搜尋本身是純記憶體、沒有 persistent study，所以 `search_id` 實際上只用來鍵定 Stage-2 的持久化 HPO 產物（`data/models/_hpo/<search_id>/` 下的 study journal 與 checkpoint，機制同 §7.3）：只調整頂層 `training.n_trials`（即 Stage-2 的目標 trial 數）時，`model_version` 會更新但 `search_id` 不變，可以沿用既有的 Stage-2 study 補跑更多 trial，`--fresh-hpo` 也只清除 Stage-2 的這份 study 與 checkpoint、不影響 Stage-1 的群級 checkpoint——語意與 shared 模式完全一致。Stage-1 本身沒有可恢復的持久化搜尋歷程，想稽核某次訓練實際跑出的每群最佳參數與分數，看 `stage1_groups.json`（或整理過的 `diagnostics/stage1_overview.json`，見 §10.7）即可。
+`search_id` 與 `model_version` 的計算範圍，遵循 §7.1／§7.2 描述的既有機制：整個 hashed 的 `training:` 區塊都算在內（staged 下即包含 `staged.stage1` 與 `staged.stage2` 全部設定），只排除 `algorithm_params` 底下的 logging／threading 鍵；`search_id` 再多排除頂層 `training.n_trials` 一項。這代表改動 Stage-1 的任何設定（`partition_keys`、`stage1.hpo.n_trials`、`gates.*`、`stage1.params` 等）同樣會讓 `search_id` 連動改變，跟改 Stage-2 設定沒有差別待遇——不要誤以為 `search_id` 只追蹤 Stage-2 那一半設定。
+
+但 Stage-1 的群內搜尋本身是純記憶體、沒有 persistent study，所以 `search_id` 實際上只用來鍵定 Stage-2 的持久化 HPO 產物（`data/models/_hpo/<search_id>/` 下的 study journal 與 checkpoint，機制同 §7.3）：只調整頂層 `training.n_trials`（即 Stage-2 的目標 trial 數）時，`model_version` 會更新但 `search_id` 不變，可以沿用既有的 Stage-2 study 補跑更多 trial，`--fresh-hpo` 也只清除 Stage-2 的這份 study 與 checkpoint、不影響 Stage-1 的群級 checkpoint——語意與 shared 模式完全一致。操作上的結論：只想延長 Stage-2 的搜尋，就只改頂層 `training.n_trials`、其他鍵都不動。
+
+Stage-1 本身沒有可恢復的持久化搜尋歷程，想稽核某次訓練實際跑出的每群最佳參數與分數，看 `stage1_groups.json`（或整理過的 `diagnostics/stage1_overview.json`，見 §10.7）即可。
 
 ### 10.7 診斷產物
 
