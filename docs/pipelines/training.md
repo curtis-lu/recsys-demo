@@ -723,7 +723,7 @@ staged 依 `stage2.mode` 分成兩種 DAG 形狀：
 | Test 指標 | `compute_test_mAP_spark` | 共通 | `evaluation_results` |
 | 特徵統計 | `compute_feature_statistics` | 共通 | `feature_statistics` |
 | Stage-1 總覽 | `compute_stage1_overview` | 共通；啟用 Stage-2 時內含 `stage2` 摘要子區塊 | `stage1_overview` |
-| 模型重要性／Gain 帳本／SHAP／象限 profile／象限案例 | `compute_feature_importance`、`compute_gain_ledger`、`compute_shap_diagnostics`、`select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` | 只在啟用 Stage-2 時執行，掛在 Stage-2 booster 上 | 對應 §7 既有產物 |
+| 模型重要性／Gain 帳本／SHAP／象限 profile／象限案例 | `compute_feature_importance`、`compute_gain_ledger`、`compute_shap_diagnostics`、`select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` | 只在啟用 Stage-2 時執行，掛在 Stage-2 booster 上 | 對應 §3.7／§6.1 既有產物 |
 | Per-group 診斷 | `compute_staged_group_diagnostics` | 只在 `stage2=none` 時執行 | `staged_group_diagnostics` |
 | 實驗記錄 | `log_staged_experiment` | 共通（單一 MLflow run，取代 `log_experiment`） | 無 |
 
@@ -741,7 +741,7 @@ Stage-2 的訓練矩陣欄位順序是 `[原始特徵 | stage1_score | partition
 
 最終的排序行為，是在同一個 query（同一個 time × entity）內，把候選 item 依分數高低排列。如果 `partition_keys` 只含 entity 側欄位（例如客群），同一個 query 永遠落在同一個群、由同一個模型評分，不存在跨模型比較的問題。
 
-如果 `partition_keys` 含 item（例如本節例子的 `prod_name`），同一個 query 裡不同候選 item 就會落在不同群，各自由不同的模型評分——這些分數本來就來自不同的模型，各群訓練時的負樣本下採比例、資料量、特徵分布都可能不一樣，直接放進同一個 query 裡比大小，機率估計的偏移方向與幅度並沒有共同的尺度保證。框架不會擋這個設定（A21 只給 WARN），把它定位為**實驗對照模式**：適合逐群獨立檢視效果，而不是產生一個可以直接上線做最終排序的分數。要拿掉這個問題，需要啟用 Stage-2——用 Stage-2 的統一輸出做最終排序。這個設定是否可以接受、要不要在此設定下 promote，交由人工在 promote 前確認（promote 本來就是使用者的人工步驟，見 CLAUDE.md 不變量）。
+如果 `partition_keys` 含 item（例如本節例子的 `prod_name`），同一個 query 裡不同候選 item 就會落在不同群，各自由不同的模型評分——這些分數本來就來自不同的模型，各群訓練時的負樣本下採比例、資料量、特徵分布都可能不一樣，直接放進同一個 query 裡比大小，機率估計的偏移方向與幅度並沒有共同的尺度保證。框架不會擋這個設定（A21 只給 WARN），把它定位為**實驗對照模式**：適合逐群獨立檢視效果，而不是產生一個可以直接上線做最終排序的分數。要拿掉這個問題，需要啟用 Stage-2——用 Stage-2 的統一輸出做最終排序。這個設定是否可以接受、要不要在此設定下 promote，交由人工在 promote 前確認（promote 本來就是人工審核後才執行的步驟，見 §6.1）。
 
 ### 10.5 產物布局與載入
 
