@@ -38,7 +38,7 @@ class GroupResult:
 
 
 def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices,
-                  feature_names=None):
+                  feature_names=None, w_dev=None):
     ds_kwargs = {}
     if feature_names is not None:
         ds_kwargs["feature_name"] = list(feature_names)
@@ -47,8 +47,11 @@ def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices,
         categorical_feature=categorical_indices, free_raw_data=False,
         **ds_kwargs,
     )
+    # dev 帶權重：early stopping 監控的指標必須與 train 的加權目標同尺
+    # （shared adapter 對 train-dev 同樣帶權重；trial 選參的 _score 維持未加權）
     dev_ds = lgb.Dataset(
-        X_dev, label=y_dev, reference=train_ds, free_raw_data=False,
+        X_dev, label=y_dev, weight=w_dev, reference=train_ds,
+        free_raw_data=False,
     )
     adapter = LightGBMAdapter()
     adapter.train(
@@ -99,6 +102,7 @@ def train_one_group(
                 X_tr, y_tr, w_tr, X_dev, y_dev,
                 {**base_params, **trial_params}, categorical_indices,
                 feature_names=feature_names,
+                w_dev=w_dev,
             )
             return sign * _score(metric, y_dev, adapter.predict(X_dev))
 
@@ -114,6 +118,7 @@ def train_one_group(
         X_tr, y_tr, w_tr, X_dev, y_dev,
         {**base_params, **best_params}, categorical_indices,
         feature_names=feature_names,
+        w_dev=w_dev,
     )
     score = _score(metric, y_dev, adapter.predict(X_dev))
     return GroupResult(
