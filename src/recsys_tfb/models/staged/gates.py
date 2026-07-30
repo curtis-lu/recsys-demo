@@ -1,4 +1,4 @@
-"""Stage-1 training-time data gates (spec §9 items 9-11; PR-A subset).
+"""Stage-1 training-time data gates (spec §9 items 9-11; PR-A/PR-B subset).
 
 Fail-fast with a collect-all error listing EVERY failing group — mirrors the
 Layer-1 consistency convention. Thresholds are config (gates.*); set them
@@ -77,3 +77,39 @@ def check_stage1_gates(
             + "\n- ".join(errors)
         )
     return tr_stats
+
+
+def check_oof_gates(labels, y, folds, n_folds: int) -> None:
+    """Spec §9 item 11: every (group × held-out fold) must leave a trainable
+    fit set — >= 1 positive AND >= 1 negative among that group's rows in the
+    OTHER folds. Collect-all then raise ``StagedGateError``. A fold holding
+    no rows of a group needs no booster for it and is skipped.
+    """
+    g = labels.to_numpy() if hasattr(labels, "to_numpy") else np.asarray(labels)
+    y = np.asarray(y)
+    folds = np.asarray(folds)
+    errors: list[str] = []
+    for key in np.unique(g):
+        g_mask = g == key
+        for k in range(int(n_folds)):
+            held = g_mask & (folds == k)
+            if not held.any():
+                continue
+            fit = g_mask & (folds != k)
+            n_pos = int(y[fit].sum())
+            n_neg = int(fit.sum()) - n_pos
+            problems = []
+            if n_pos < 1:
+                problems.append("no positives")
+            if n_neg < 1:
+                problems.append("no negatives")
+            if problems:
+                errors.append(
+                    f"group {key!r} OOF fold {k}: fit set has "
+                    + ", ".join(problems)
+                )
+    if errors:
+        raise StagedGateError(
+            f"stage-2 OOF data gates failed ({len(errors)} issue(s)):\n- "
+            + "\n- ".join(errors)
+        )

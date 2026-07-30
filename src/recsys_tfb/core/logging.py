@@ -301,3 +301,31 @@ def log_data_volume(logger, name, obj, *, deep: bool = True, **fields) -> None:
         cols, _human_bytes(n_bytes), dtype,
         extra={"event": "data_volume", "volume": volume},
     )
+
+
+def log_peak_rss(logger, tag: str) -> None:
+    """Log the process's peak RSS so far (``ru_maxrss`` high-water mark).
+
+    Call at phase boundaries: the first tag whose value jumps identifies the
+    phase that owns the peak — the cheapest way to attribute memory spikes
+    from logs alone at production scale. Unit quirk: macOS reports bytes,
+    Linux kilobytes — normalized to bytes here. Best-effort like
+    ``log_data_volume``: observation must never break the real computation.
+    """
+    try:
+        import resource
+        import sys
+
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        if sys.platform != "darwin":
+            peak *= 1024
+        logger.info(
+            "peak RSS so far: %s (at %s)", _human_bytes(peak), tag,
+            extra={"event": "peak_rss", "tag": tag,
+                   "peak_rss_bytes": peak},
+        )
+    except Exception as e:  # noqa: BLE001 — observation must not raise
+        logger.warning(
+            "log_peak_rss failed at %s: %s", tag, repr(e)[:200],
+            extra={"event": "peak_rss_skipped"},
+        )

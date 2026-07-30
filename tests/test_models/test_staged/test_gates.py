@@ -2,7 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.models.staged.gates import StagedGateError, check_stage1_gates
+from recsys_tfb.models.staged.gates import (
+    StagedGateError,
+    check_oof_gates,
+    check_stage1_gates,
+)
 
 GATES = {"max_groups": 3, "min_rows": 4, "min_positives": 1, "min_negatives": 1}
 
@@ -48,3 +52,36 @@ class TestCheckStage1Gates:
         dev = _split(["a", "z"], [0, 1])
         with pytest.raises(StagedGateError, match="'z'"):
             check_stage1_gates(tr, dev, GATES)
+
+
+class TestCheckOofGates:
+    def _mk(self, groups, y, folds):
+        return pd.Series(groups), np.array(y), np.array(folds)
+
+    def test_pass_when_every_fit_set_trainable(self):
+        labels, y, folds = self._mk(
+            ["A"] * 6, [1, 0, 1, 0, 1, 0], [0, 0, 1, 1, 2, 2])
+        check_oof_gates(labels, y, folds, n_folds=3)  # 不 raise
+
+    def test_fail_when_fit_set_loses_all_positives(self):
+        # A 群唯一正例在 fold 0 → 評 fold 0 時 fit set（fold1+2）無正例
+        labels, y, folds = self._mk(
+            ["A"] * 6, [1, 0, 0, 0, 0, 0], [0, 0, 1, 1, 2, 2])
+        with pytest.raises(StagedGateError, match="no positives"):
+            check_oof_gates(labels, y, folds, n_folds=3)
+
+    def test_empty_heldout_fold_is_skipped(self):
+        # fold 2 沒有 A 群的列 → 不需要 fold-2 模型，不算失敗
+        labels, y, folds = self._mk(
+            ["A"] * 4, [1, 0, 1, 0], [0, 0, 1, 1])
+        check_oof_gates(labels, y, folds, n_folds=3)  # 不 raise
+
+    def test_collect_all_lists_every_failure(self):
+        labels, y, folds = self._mk(
+            ["A"] * 4 + ["B"] * 4,
+            [1, 0, 0, 0] + [0, 1, 1, 1],
+            [0, 0, 1, 1] + [0, 0, 1, 1])
+        with pytest.raises(StagedGateError) as ei:
+            check_oof_gates(labels, y, folds, n_folds=2)
+        msg = str(ei.value)
+        assert "'A'" in msg and "'B'" in msg  # 兩群的失敗都列出

@@ -198,6 +198,13 @@ stage1_groups_report:
   type: JSONDataset
   filepath: data/models/${model_version}/stage1_groups.json
 
+# staged model_structure + stage2!=none 第二輸出（Task 9）：stage-2 OOF/HPO 摘要
+# （mode/oof_folds/best_params/score 等，見 staged_stage2.train_stage2_model）。
+# stage2=none 或 shared 路徑不產生此檔。
+stage2_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/stage2.json
+
 best_params:
   type: JSONDataset
   filepath: data/models/${model_version}/best_params.json

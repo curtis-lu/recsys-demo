@@ -116,8 +116,10 @@ Layer 1 — config-static (implemented here; aggregated by
 * A21 — staged model-structure config (Layer-1).  model_structure ∈ {shared,
   staged}; when staged: a non-empty ``training.staged`` block is required
   (explicit error — no longer inferred indirectly via an empty
-  partition_keys); stage1.objective == "binary"; stage2.mode == "none"
-  (binary/lambdarank arrive with PR-B); calibration.enabled must be false;
+  partition_keys); stage1.objective == "binary"; stage2.mode ∈ {none, binary,
+  lambdarank} (PR-B onward); when stage2.mode != "none",
+  stage2.oof_folds must be an int >= 2 (default 5); calibration.enabled
+  must be false;
   hpo.metric ∈ {auc, logloss}; hpo.n_trials >= 0; partition_keys non-empty,
   each ∈ {schema.item} ∪ dataset.carry_columns ∪ declared categorical
   columns (mirrors A9a availability) and NOT a label/score/rank/time/entity
@@ -504,12 +506,20 @@ def staged_config_errors(parameters: dict) -> list[str]:
             "A21: staged.stage1.objective only accepts 'binary' "
             f"(got {stage1.get('objective')!r}; reserved key for future use)"
         )
-    if stage2.get("mode", "none") != "none":
+    mode = stage2.get("mode", "none")
+    if mode not in ("none", "binary", "lambdarank"):
         errors.append(
-            "A21: staged.stage2.mode only accepts 'none' in this release "
-            f"(got {stage2.get('mode')!r}; binary/lambdarank arrive with the "
-            "Stage-2 PR)"
+            f"A21: staged.stage2.mode must be 'none', 'binary' or "
+            f"'lambdarank', got {mode!r}"
         )
+    elif mode != "none":
+        oof_folds = stage2.get("oof_folds", 5)
+        if (not isinstance(oof_folds, int) or isinstance(oof_folds, bool)
+                or oof_folds < 2):
+            errors.append(
+                f"A21: staged.stage2.oof_folds must be an int >= 2 when "
+                f"stage2.mode != 'none', got {oof_folds!r}"
+            )
     if (training.get("calibration") or {}).get("enabled", False):
         errors.append(
             "A21: training.calibration.enabled must be false when "

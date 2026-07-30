@@ -123,3 +123,16 @@ class TestTrainStagedModel:
         s1, _ = m_seq.predict_routed(X, keys, on_missing="raise")
         s2, _ = m_par.predict_routed(X, keys, on_missing="raise")
         np.testing.assert_allclose(s1, s2)  # 平行度不得影響結果（確定性）
+
+    def test_stage1_heartbeat_and_memory_logs(self, tmp_path, caplog):
+        # Observability：每群 start 心跳＋pdf volume＋峰值 RSS
+        import logging
+        tr = _write_parquet(tmp_path, "train", _pdf(seed=0))
+        dev = _write_parquet(tmp_path, "dev", _pdf(n_per_group=30, seed=1))
+        with caplog.at_level(logging.INFO):
+            train_staged_model(tr, dev, PREPROC, _parameters(),
+                               wip_root=tmp_path / "wip")
+        assert caplog.text.count("stage1 group") >= 4  # A/B 各 start＋完成
+        assert "start rows=" in caplog.text and "hpo_trials=" in caplog.text
+        assert "stage1.pdf_tr" in caplog.text          # data volume
+        assert "peak RSS" in caplog.text               # 高水位打點

@@ -1061,6 +1061,9 @@ class TestNonnumericFeatureErrors:
         assert "aaa" in errs[0] and "zzz" in errs[1]
 
 
+from recsys_tfb.core.consistency import staged_config_errors
+
+
 class TestStagedConfigA21:
     # 計畫原文的 `_make_parameters` helper在本檔不存在；本檔既有的合法 shared
     # 全套 params helper 是 `_base()`（見 test_clean_config_passes 的用法），改沿用它。
@@ -1128,9 +1131,12 @@ class TestStagedConfigA21:
         with pytest.raises(ConfigConsistencyError, match="calibration"):
             validate_config_consistency(p)
 
-    def test_stage2_mode_only_none_in_pr_a(self):
+    def test_stage2_unknown_mode_still_rejected(self):
+        # PR-B 放寬 stage2.mode 收 binary/lambdarank（見下方 A21 test 群組）；
+        # 本測試改為守「未知 mode 仍須被拒」，取代舊版「lambdarank 必拒」的
+        # 前提（該前提已被本次改動明確推翻——見 known-pitfalls.md §40 矛盾處理）。
         p = self._staged_params()
-        p["training"]["staged"]["stage2"]["mode"] = "lambdarank"
+        p["training"]["staged"]["stage2"]["mode"] = "rank_xendcg"
         with pytest.raises(ConfigConsistencyError, match="stage2"):
             validate_config_consistency(p)
 
@@ -1156,3 +1162,28 @@ class TestStagedConfigA21:
         p["training"]["model_structure"] = "shared"
         p["training"]["staged"]["stage1"]["partition_keys"] = ["label"]
         validate_config_consistency(p)  # shared 時 staged 區塊不驗
+
+    def test_stage2_binary_and_lambdarank_accepted(self):
+        for mode in ("binary", "lambdarank"):
+            params = self._staged_params()
+            params["training"]["staged"]["stage2"] = {"mode": mode, "oof_folds": 5}
+            assert staged_config_errors(params) == []
+
+    def test_stage2_unknown_mode_rejected(self):
+        params = self._staged_params()
+        params["training"]["staged"]["stage2"] = {"mode": "rank_xendcg"}
+        errs = staged_config_errors(params)
+        assert any("stage2.mode" in e and "rank_xendcg" in e for e in errs)
+
+    def test_oof_folds_must_be_int_ge_2_when_stage2_active(self):
+        for bad in (1, 0, -3, True, "5", 2.0):
+            params = self._staged_params()
+            params["training"]["staged"]["stage2"] = {"mode": "binary",
+                                                      "oof_folds": bad}
+            errs = staged_config_errors(params)
+            assert any("oof_folds" in e for e in errs), f"missed {bad!r}"
+
+    def test_oof_folds_ignored_when_stage2_none(self):
+        params = self._staged_params()
+        params["training"]["staged"]["stage2"] = {"mode": "none", "oof_folds": 0}
+        assert staged_config_errors(params) == []

@@ -336,3 +336,54 @@ class TestLogDataVolume:
 
         assert not self._vol_records(caplog)
         assert any("path missing" in r.getMessage() for r in caplog.records)
+
+
+class TestLogPeakRss:
+    def test_emits_event_with_positive_bytes(self, caplog):
+        from recsys_tfb.core.logging import log_peak_rss
+
+        logger = logging.getLogger("test_peak_rss")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "after_load")
+        rec = next(r for r in caplog.records
+                   if getattr(r, "event", "") == "peak_rss")
+        assert rec.tag == "after_load"
+        # 保守下限（非 mutation 護欄 >0）：載著 numpy/pytest 的 Python
+        # process 峰值 RSS 不可能低於 10MB——連「回傳固定常數」都測不到的
+        # `>0` 換成這個實際下限，才擋得住把 peak 改成小常數的 mutation。
+        assert rec.peak_rss_bytes > 10_000_000
+        assert "peak RSS" in caplog.text and "after_load" in caplog.text
+
+    def test_high_water_mark_is_monotonic(self, caplog):
+        from recsys_tfb.core.logging import log_peak_rss
+        import numpy as np
+        logger = logging.getLogger("test_peak_rss2")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "t1")
+            ballast = np.ones((64, 1024 * 1024 // 8))  # ~64MB，推高水位
+            ballast[0, 0] = 2.0  # 確保實際觸碰記憶體
+            log_peak_rss(logger, "t2")
+        vals = [r.peak_rss_bytes for r in caplog.records
+                if getattr(r, "event", "") == "peak_rss"]
+        assert len(vals) == 2 and vals[1] >= vals[0]
+
+    def test_linux_normalization_multiplies_kb(self, caplog, monkeypatch):
+        # log_peak_rss 函式內是 `import resource, sys`——函式內 import 拿到
+        # 的是同一個模組物件，monkeypatch.setattr 打在模組屬性上仍然有效。
+        # darwin 上永遠不會走到 `*= 1024` 分支，這裡直接偽造 linux 環境。
+        import resource
+        import sys
+        import types
+
+        from recsys_tfb.core.logging import log_peak_rss
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(
+            resource, "getrusage",
+            lambda who: types.SimpleNamespace(ru_maxrss=12345))
+        logger = logging.getLogger("test_peak_rss_linux")
+        with caplog.at_level(logging.INFO):
+            log_peak_rss(logger, "linux_tag")
+        rec = next(r for r in caplog.records
+                   if getattr(r, "event", "") == "peak_rss")
+        assert rec.peak_rss_bytes == 12345 * 1024
