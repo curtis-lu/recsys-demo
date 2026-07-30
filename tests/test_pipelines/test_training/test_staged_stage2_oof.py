@@ -22,8 +22,8 @@ def _toy_group(n=120, seed=0):
 class TestGroupOof:
     def test_every_row_scored_and_deterministic(self):
         X, y, w, folds = _toy_group()
-        a = _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
-        b = _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
+        a = _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 3)
+        b = _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 3)
         assert np.isfinite(a).all() and len(a) == len(y)
         np.testing.assert_allclose(a, b)
 
@@ -32,7 +32,7 @@ class TestGroupOof:
         # （若 fold 遮罩沒生效，兩者位元相同）
         from recsys_tfb.models.staged.train_stage1 import _fit_adapter
         X, y, w, folds = _toy_group()
-        oof = _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
+        oof = _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 3)
         full = _fit_adapter(X, y, w, X[:30], y[:30], dict(PARAMS), [])
         assert not np.allclose(oof, full.predict(X))
 
@@ -40,14 +40,14 @@ class TestGroupOof:
         X, y, w, folds = _toy_group()
         with pytest.raises(RuntimeError, match="OOF"):
             # n_folds=2 但 folds 含 2 → fold-2 的列沒人評 → guard 炸
-            _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 2)
+            _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 2)
 
     def test_per_fold_heartbeat_logged(self, caplog):
         # Observability 要求 #1：逐折必須留時間戳
         import logging
         X, y, w, folds = _toy_group()
         with caplog.at_level(logging.INFO):
-            _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
+            _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 3)
         assert caplog.text.count("OOF group='A' fold=") == 3  # 每折一條
         assert "fold=1/3" in caplog.text and "fit_rows=" in caplog.text
 
@@ -64,12 +64,13 @@ class TestGroupOof:
         fit_sizes = []
         real = mod._fit_adapter
 
-        def spy(X_tr, y_tr, w_tr, X_dev, y_dev, params, cat_idx):
+        def spy(X_tr, y_tr, w_tr, X_dev, y_dev, params, cat_idx, w_dev=None):
             fit_sizes.append(len(y_tr))
-            return real(X_tr, y_tr, w_tr, X_dev, y_dev, params, cat_idx)
+            return real(X_tr, y_tr, w_tr, X_dev, y_dev, params, cat_idx,
+                        w_dev=w_dev)
 
         monkeypatch.setattr(mod, "_fit_adapter", spy)
-        _group_oof("A", X, y, w, folds, X[:30], y[:30], PARAMS, [], 3)
+        _group_oof("A", X, y, w, folds, X[:30], y[:30], np.ones(30), PARAMS, [], 3)
         fold_sizes = [int(c) for c in np.bincount(folds, minlength=3) if c > 0]
         expected = sorted(len(y) - c for c in fold_sizes)
         assert sorted(fit_sizes) == expected

@@ -113,6 +113,36 @@ class TestTrainStage2Model:
             wip_root=tmp_path / "wip")
         assert model.stage2_mode == "binary"
 
+    def test_oof_fold_fits_receive_dev_weights(self, tmp_path, monkeypatch):
+        # 因果鏈：_one_group 對 dev 子集算權重 → _group_oof 轉交 → _fit_adapter
+        # 的 dev Dataset 帶權（最後一段由 train_stage1 側的 spy 測試把關）。
+        # 用 seg 權重表讓 dev 權重非全 1，斷言每個 fold fit 都收到對的值。
+        import recsys_tfb.pipelines.training.staged_stage2 as mod
+
+        monkeypatch.chdir(tmp_path)
+        params = _parameters()
+        params["training"]["sample_weight_keys"] = ["seg"]
+        params["training"]["sample_weights"] = {"A": 2.0}
+        m1, rep1 = _stage1(tmp_path, params)
+        tr, dev, val = _handles(tmp_path)
+
+        calls = []
+        real = mod._fit_adapter
+
+        def spy(*args, **kwargs):
+            calls.append(dict(kwargs))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_fit_adapter", spy)
+        train_stage2_model(m1, rep1, tr, dev, val, PREPROC, params,
+                           wip_root=tmp_path / "wip")
+        assert calls, "OOF 路徑沒有呼叫 _fit_adapter"
+        weights = [k.get("w_dev") for k in calls]
+        assert all(w is not None for w in weights), \
+            "OOF fold fit 未帶 dev 權重（w_dev）"
+        uniq = {float(v) for w in weights for v in np.unique(np.asarray(w))}
+        assert uniq == {1.0, 2.0}  # seg=A 群 dev 全 2.0、seg=B 全 1.0
+
     def test_oof_checkpoint_restored_on_rerun(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         params = _parameters()

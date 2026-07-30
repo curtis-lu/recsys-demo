@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 def _group_oof(
-    key, X_g, y_g, w_g, folds_g, X_dev_g, y_dev_g,
+    key, X_g, y_g, w_g, folds_g, X_dev_g, y_dev_g, w_dev_g,
     params: dict, cat_idx, n_folds: int,
 ) -> np.ndarray:
     """OOF scores for ONE group's rows (group row order): each row scored by
@@ -66,6 +66,7 @@ def _group_oof(
         adapter = _fit_adapter(
             X_g[fit_mask], y_g[fit_mask], w_g[fit_mask],
             X_dev_g, y_dev_g, dict(params), cat_idx,
+            w_dev=w_dev_g,
         )
         oof[pred_mask] = adapter.predict(X_g[pred_mask])
         producing[pred_mask] = k
@@ -288,11 +289,13 @@ def train_stage2_model(
         sub_dev = pdf_dev.loc[dev_masks[key]]
         X_dev_g = _pdf_to_X(sub_dev, preprocessor_view, parameters)
         y_dev_g = sub_dev[label_col].values
+        w_dev_g = _row_weights_from_pdf(sub_dev, parameters, preprocessor_view)
         params = {**algorithm_params, **(stage1_cfg.get("params") or {}),
                   **best_by_group.get(key, {}),
                   "objective": "binary", "seed": group_seed(seed, key)}
         scores = _group_oof(key, X_g, y_g, w_g, folds[g_mask],
-                            X_dev_g, y_dev_g, params, cat_idx, n_folds)
+                            X_dev_g, y_dev_g, w_dev_g, params, cat_idx,
+                            n_folds)
         _write_oof_checkpoint(odir, scores, n_rows, n_folds, seed)
         return key, scores
 
