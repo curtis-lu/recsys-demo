@@ -37,13 +37,17 @@ class GroupResult:
     trial_values: list = field(default_factory=list)
 
 
-def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices):
+def _fit_adapter(X_tr, y_tr, w_tr, X_dev, y_dev, params, categorical_indices,
+                  w_dev=None):
     train_ds = lgb.Dataset(
         X_tr, label=y_tr, weight=w_tr,
         categorical_feature=categorical_indices, free_raw_data=False,
     )
+    # dev 帶權重：early stopping 監控的指標必須與 train 的加權目標同尺
+    # （shared adapter 對 train-dev 同樣帶權重；trial 選參的 _score 維持未加權）
     dev_ds = lgb.Dataset(
-        X_dev, label=y_dev, reference=train_ds, free_raw_data=False,
+        X_dev, label=y_dev, weight=w_dev, reference=train_ds,
+        free_raw_data=False,
     )
     adapter = LightGBMAdapter()
     adapter.train(
@@ -92,6 +96,7 @@ def train_one_group(
             adapter = _fit_adapter(
                 X_tr, y_tr, w_tr, X_dev, y_dev,
                 {**base_params, **trial_params}, categorical_indices,
+                w_dev=w_dev,
             )
             return sign * _score(metric, y_dev, adapter.predict(X_dev))
 
@@ -106,6 +111,7 @@ def train_one_group(
     adapter = _fit_adapter(
         X_tr, y_tr, w_tr, X_dev, y_dev,
         {**base_params, **best_params}, categorical_indices,
+        w_dev=w_dev,
     )
     score = _score(metric, y_dev, adapter.predict(X_dev))
     return GroupResult(
