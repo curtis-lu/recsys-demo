@@ -65,6 +65,41 @@ class TestTrainOneGroupFixedParams:
         p_boost = r_boost.adapter.predict(X[pos_idx:pos_idx + 1])[0]
         assert p_boost > p_plain  # 放大該正例權重 → 該點預測機率上升
 
+    def test_dev_weights_reach_lgb_dataset(self, monkeypatch):
+        # 結構性 spy：dev 權重只影響 early-stopping 指標，數值行為間接且脆弱，
+        # 故直接斷言 dev Dataset 建構時收到 weight=w_dev（與 shared adapter
+        # lightgbm_adapter.py 對 train-dev 帶權重的行為一致）。
+        import recsys_tfb.models.staged.train_stage1 as m
+
+        captured = []
+        real_dataset = m.lgb.Dataset
+
+        class SpyDataset(real_dataset):
+            def __init__(self, *args, **kwargs):
+                captured.append(dict(kwargs))
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(m.lgb, "Dataset", SpyDataset)
+        X, y, w = _data()
+        Xd, yd, _ = _data(seed=1, n=80)
+        wd = np.full(len(yd), 3.0)
+        train_one_group("a", X, y, w, Xd, yd, wd, dict(ALGO), {},
+                        {"n_trials": 0}, None, 42)
+        dev_calls = [k for k in captured if k.get("reference") is not None]
+        assert dev_calls, "找不到 dev Dataset（以 reference= 識別）"
+        assert dev_calls[0].get("weight") is not None, \
+            "dev Dataset 未帶 weight——train_dev 權重沒有進 early stopping"
+        np.testing.assert_array_equal(np.asarray(dev_calls[0]["weight"]), wd)
+
+        # HPO 路徑（trial objective 內的 _fit_adapter 呼叫點）同樣必須帶 dev 權重
+        captured.clear()
+        train_one_group("a", X, y, w, Xd, yd, wd, dict(ALGO), {},
+                        {"n_trials": 2, "metric": "auc",
+                         "search_space": list(SPACE)}, None, 42)
+        dev_calls = [k for k in captured if k.get("reference") is not None]
+        assert dev_calls and all(k.get("weight") is not None for k in dev_calls), \
+            "HPO trial 的 dev Dataset 未帶 weight"
+
 
 class TestTrainOneGroupHpo:
     def _run(self, base_seed=42, group_key="a"):
