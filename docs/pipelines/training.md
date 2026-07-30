@@ -731,7 +731,9 @@ staged 依 `stage2.mode` 分成兩種 DAG 形狀：
 
 shared 專屬的 `prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model`、`calibrate_model`、`log_experiment` 在 staged 下不會出現（calibration 在 staged 下本就必須關閉，見 §3.6）。
 
-**Split 衛生**：staged 讀取的是與 shared 完全相同的一份 train／train-dev／val／test model input，不會另外重建 dataset。Stage-1 只是把同一份 train／train-dev 依 `partition_keys` 在記憶體中切成互斥子集，分別餵給各群自己的模型；沒有另外抽樣或切分。泛化契約也與 shared 相同，是 temporal generalization：val、test 是時間切分，entity 可以與 train 重疊；entity 之間互斥只存在於 train 與 train-dev 這一組切分的邊界內，不是分群之間的邊界。
+**Split 衛生**：staged 讀取的是與 shared 完全相同的一份 train／train-dev／val／test model input，不會另外重建 dataset。Stage-1 只是把同一份 train／train-dev 依 `partition_keys` 在記憶體中切成互斥子集，分別餵給各群自己的模型；沒有另外抽樣或切分。
+
+**Sample weights**：staged 沿用 §3.5 的既有權重機制，沒有 staged 專屬的權重設定，`persist_sample_weight_report` 也照常產出。Stage-1 每群繼承自己子集查表得到的列權重，套用於該群的 train 與 train-dev——與 shared 相同，early stopping 監控的指標因此與加權後的訓練目標在同一把尺上；但每群 trial 選參與總覽表回報的 AUC／logloss 是**未加權**的（比照 shared 模式選模指標不加權的慣例，也讓各群分數可以直接互相比較）。啟用 Stage-2 時，OOF 折模型用該群子集的權重，Stage-2 最終訓練與 val early stopping 則繼承全量權重。泛化契約也與 shared 相同，是 temporal generalization：val、test 是時間切分，entity 可以與 train 重疊；entity 之間互斥只存在於 train 與 train-dev 這一組切分的邊界內，不是分群之間的邊界。
 
 **OOF 與 Stage-2 特徵組裝**：Stage-2 若啟用，會把 Stage-1 的分數當作一個額外特徵。如果直接拿「每群自己的模型對自己訓練資料的預測分數」當特徵，這個分數會系統性偏高——模型已經看過這些列的答案。Out-of-fold（OOF）是這個問題的標準解法：把每群的 train 列再切成 entity-hash 互斥的 K 折（`oof_folds`，需 `>= 2`），每一列的 Stage-1 分數改由「沒看過這個 entity 所在折」的臨時模型產生，用來近似 Stage-1 在未見資料上的真實表現。因此有兩種 Stage-1 分數並存。Stage-2 的**訓練**矩陣裡，Stage-1 分數這一欄用的是 OOF 分數（每列來自「缺其所在折」的臨時模型）；val 評分與正式推論用的則是各群的**正式 Stage-1 模型**——就是 `train_staged_model` 產出、以該群全部 train 列訓練（train-dev 僅作 early stopping）的那一個，沒有額外的重訓步驟。兩者是不同的分數 regime，這是 stacking 方法的標準取捨，不是設計疏漏。能放心比較的原因是：val 與正式推論用的是同一個 regime，拿 val 選出的最佳超參數、和上線後的實際打分行為是同一套分數分佈；唯一不能直接比的是「Stage-2 訓練當下看到的 OOF 分數」與「上線後的分數」。
 
