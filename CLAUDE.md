@@ -80,3 +80,19 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
 - 架構/重構/探索任務：先讀 `graphify-out/GRAPH_REPORT.md`（見路由表，強制）。
 - 本 session 改過 code 檔案後，跑 `.venv/bin/python -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` 讓圖保持最新（graphify 裝在 .venv 的 dev extras；裸 `python3` 在非 pyenv shell 會是 3.12 且無此套件）。
 - 歷史上 hook 曾擋 checkout，**已修**（61ee9ac）；殘留通用規則見 known-pitfalls.md §2。
+
+## Agent skills
+
+供 `mattpocock-skills` 系列（`/to-tickets`／`/triage`／`/implement` 等）讀取的 per-repo 設定；細節在指向的檔案，本段只路由。
+
+### Issue tracker
+
+GitHub Issues（`curtis-lu/recsys-demo`），用 `gh` CLI 操作。見 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五個角色沿用預設字串（`wontfix` 已存在，其餘四個首次 `/triage` 時建立）。見 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+Single-context，**刻意不設 `CONTEXT.md`**——詞彙的真實來源是 `docs/pipelines/dataset.md` §7 與 `core/consistency.py` 的 legend。見 `docs/agents/domain.md`。
