@@ -104,9 +104,21 @@ def persist_sample_weight_report(
 # Cache helpers
 # ---------------------------------------------------------------------------
 
+# Path token that resolves to the literal test-month window (see
+# _cache_test_window_id). Not a `parameters` key — _resolve_cache_path derives
+# it from dataset.test_snap_dates.
+_TEST_WINDOW_TOKEN = "<test_window>"
+
+# Tokens written into the path verbatim rather than looked up in `parameters`.
+_CACHE_LITERAL_TOKENS = frozenset(
+    {"train_variants", "calibration_variants", "test_windows"}
+)
+
 _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
     "val_model_input": ("base_dataset_version",),
-    "test_model_input": ("base_dataset_version",),
+    # test carries an extra window layer so the cache is invalidated by a change
+    # to dataset.test_snap_dates alone — see _cache_test_window_id.
+    "test_model_input": ("base_dataset_version", "test_windows", _TEST_WINDOW_TOKEN),
     "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "calibration_model_input": (
@@ -115,6 +127,11 @@ _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
         "calibration_variant_id",
     ),
 }
+
+# Path component used when no test month is configured at all. Spelled out
+# rather than left empty so an operator reading `ls` sees a statement, not a
+# gap that could equally mean "the layer is missing".
+_NO_TEST_DATES = "no_test_dates"
 
 
 # cache name → source Hive table (under parameters["hive"]["db"])
@@ -196,11 +213,42 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
         parameters["_cache_source_tables"] = auto
 
 
+def _cache_test_window_id(parameters: dict) -> str:
+    """Literal directory name for the configured test months.
+
+    ``["2026-02-28", "2026-01-31"]`` → ``"20260131_20260228"``: sorted, hyphens
+    stripped (the ``YYYYMMDD`` convention evaluation report paths already use),
+    joined with ``_``. Deliberately **not** hashed — the input is one short date
+    list, so a digest would only cost readability, and reading the month list
+    off ``ls`` is the point (an 8-char hash exists elsewhere because it has to
+    compress dozens of heterogeneous params). A 255-char path component holds
+    ~28 months, so no length fallback is needed.
+
+    Duplicate dates collapse: the same window is the same cache.
+
+    The name records **the configured window that produced this cache**, which
+    is what makes it a correct cache key. It is not a manifest of the directory
+    contents: _populate_cache_from_hive copies ``snap_date=*`` under the base
+    version, so a cache built after a month was *removed* from the config still
+    holds that month's partition. The documented flow is cumulative (months are
+    only added, and dataset runs first), where name and contents agree.
+    """
+    dataset_cfg = parameters.get("dataset") or {}
+    configured = dataset_cfg.get("test_snap_dates") or []
+    months = sorted({str(d).replace("-", "") for d in configured})
+    return "_".join(months) if months else _NO_TEST_DATES
+
+
 def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     """Compose the local-cache parquet directory path for a model_input dataset.
 
     Mirrors the layered structure used by production catalog filepaths:
       <root>/<base_dataset_version>/[train_variants/<train_variant_id>/]<name>.parquet
+
+    ``test_model_input`` additionally nests under
+    ``test_windows/<literal test months>/`` so that changing
+    ``dataset.test_snap_dates`` — on its own — lands on a different directory
+    and forces a re-copy.
     """
     if dataset_name not in _CACHE_PATH_LAYOUT:
         raise ValueError(f"unknown dataset for cache path: {dataset_name!r}")
@@ -208,8 +256,10 @@ def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     root = Path(cache_cfg.get("root", "/tmp/recsys_cache"))
     parts = [root]
     for token in _CACHE_PATH_LAYOUT[dataset_name]:
-        if token in ("train_variants", "calibration_variants"):
+        if token in _CACHE_LITERAL_TOKENS:
             parts.append(Path(token))
+        elif token == _TEST_WINDOW_TOKEN:
+            parts.append(Path(_cache_test_window_id(parameters)))
         else:
             value = parameters[token]
             parts.append(Path(value))

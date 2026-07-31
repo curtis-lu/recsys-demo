@@ -140,7 +140,11 @@ mlflow:
 
 # Driver-local parquet cache：materialize 後的 model inputs，重跑時可跳過 Hive
 # scan。由 base_dataset_version / train_variant_id / calibration_variant_id 三
-# 層 key 決定。`cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
+# 層 key 決定；`test_model_input` 另多一層 test_windows/<字面 test 月份>/
+# （排序後的 YYYYMMDD 以底線串接，例 20260131_20260228），使「只改
+# dataset.test_snap_dates」也必然換路徑、必然重新複製。刻意用字面日期而非
+# hash：一眼看得出這份 cache 涵蓋哪幾個月。
+# `cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
 # （存在性檢查）與 _populate_cache_from_hive()（hadoop fs copyToLocal 目的地）
 # 都從這裡讀。persistence 由 training/nodes.py::_materialize_parquet_handle
 # 負責，不經 catalog dataset。所有環境都會寫 parquet 到 disk 並在 DAG 中以
