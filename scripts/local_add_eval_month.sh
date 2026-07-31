@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 「多看一個月」的動線，包成單一指令（本機 local[*]）。
 #
-# 四步動線（spec: issue #123）：
+# 四步動線（spec: issue #123）中，腳本**實跑第 2–4 步，第 1 步只核對**：
 #   1. 把新月份加進 dataset.test_snap_dates，並把 evaluation.snap_date 指到它
 #      —— 這一步是**你的意圖**，腳本不代你決定，只在開跑前檢查你做了沒有；
 #   2. dataset                                    → 產出該月的 test 產物；
@@ -58,9 +58,14 @@ if problems:
     sys.stderr.write("設定尚未指向目標月份（動線第 1 步）：\n" + "\n".join(problems) + "\n")
     raise SystemExit(1)
 
+# 第二行印 cache.root：`cache.root` 是 cache 路徑的唯一真實來源
+# （見 parameters_training.yaml），腳本不得自己再硬寫一份路徑。
 print(target)
+print((params.get("cache") or {}).get("root", "data/recsys_cache"))
 PY
 )"
+CACHE_ROOT="$(printf '%s\n' "${TARGET}" | sed -n '2p')"
+TARGET="$(printf '%s\n' "${TARGET}" | sed -n '1p')"
 # ${...} 一律加大括號：後接全形字元時，裸 $VAR 會把多位元組字元的首位元組
 # 吃進變數名，在 set -u 下炸成 "unbound variable"。
 echo "目標月份：${TARGET}（dataset.test_snap_dates ✓  evaluation.snap_date ✓）"
@@ -73,12 +78,15 @@ run "$VENV" -m recsys_tfb dataset --env local
 # 既有模型直接從落地讀。若計畫裡出現 [retrain] 警告，代表 model_version 漂移了
 # ——那不是本動線該發生的事，看警告訊息裡的 diff 提示。
 TRAIN_LOG="$(mktemp -t recsys_add_eval_month_train)"
+trap 'rm -f "$TRAIN_LOG"' EXIT
 echo
 echo "▶ $VENV -m recsys_tfb training --env local --only-node predict_and_write_test_predictions"
 "$VENV" -m recsys_tfb training --env local \
     --only-node predict_and_write_test_predictions 2>&1 | tee "$TRAIN_LOG"
 
-MODEL_VERSION="$(sed -n 's/.*Model version: *\([0-9a-f][0-9a-f]*\).*/\1/p' "$TRAIN_LOG" | head -1)"
+# 用 sed 自己的 `q` 取第一筆，不接 `| head -1`：後者在 pipefail 下讓 sed 收到
+# SIGPIPE、回 141，會繞過下面那句友善錯誤直接讓 set -e 靜默終止。
+MODEL_VERSION="$(sed -n 's/.*Model version: *\([0-9a-f][0-9a-f]*\).*/\1/p;/Model version:/q' "$TRAIN_LOG")"
 if [ -z "$MODEL_VERSION" ]; then
     echo "無法從 training 輸出解析出 model_version（找不到 'Model version:' 行）" >&2
     exit 1
@@ -93,6 +101,8 @@ run "$VENV" -m recsys_tfb evaluation --env local \
 SNAP_DIR="${TARGET//-/}"
 echo
 echo "✅ 完成：${TARGET} 的報表在 data/evaluation/${MODEL_VERSION}/${SNAP_DIR}/（舊月份報表原封不動）"
-echo "ℹ️  本機 test cache 的月份分層（目錄名即涵蓋月份）："
-find data/recsys_cache -type d -name 'test_windows' -maxdepth 2 -exec ls -1 {} \; 2>/dev/null \
-    | sed 's/^/      /' || true
+echo "ℹ️  本機 test cache 的月份分層（目錄名＝產生這份 cache 的設定月份）："
+# 印完整路徑而非 `-exec ls`：不同 base_dataset_version 底下的視窗目錄同名時，
+# 只印目錄名會混在一起無從分辨。
+find "${CACHE_ROOT}" -mindepth 3 -maxdepth 3 -type d -path '*/test_windows/*' 2>/dev/null \
+    | sort | sed 's/^/      /' || true

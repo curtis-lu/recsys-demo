@@ -104,10 +104,12 @@ def persist_sample_weight_report(
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-# Path token that resolves to the literal test-month window (see
-# _cache_test_window_id). Not a `parameters` key — _resolve_cache_path derives
-# it from dataset.test_snap_dates.
-_TEST_WINDOW_TOKEN = "<test_window>"
+# Sentinel layout token that resolves to the literal test-month window (see
+# _cache_test_window_id). Not a `parameters` key and not a directory name —
+# _resolve_cache_path derives its value from dataset.test_snap_dates. The
+# "!" prefix keeps it from being misread as the sibling literal directory
+# component "test_windows", which it otherwise nearly matches.
+_TEST_WINDOW_ID_TOKEN = "!test_window_id"
 
 # Tokens written into the path verbatim rather than looked up in `parameters`.
 _CACHE_LITERAL_TOKENS = frozenset(
@@ -118,7 +120,7 @@ _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
     "val_model_input": ("base_dataset_version",),
     # test carries an extra window layer so the cache is invalidated by a change
     # to dataset.test_snap_dates alone — see _cache_test_window_id.
-    "test_model_input": ("base_dataset_version", "test_windows", _TEST_WINDOW_TOKEN),
+    "test_model_input": ("base_dataset_version", "test_windows", _TEST_WINDOW_ID_TOKEN),
     "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "calibration_model_input": (
@@ -229,9 +231,17 @@ def _cache_test_window_id(parameters: dict) -> str:
     The name records **the configured window that produced this cache**, which
     is what makes it a correct cache key. It is not a manifest of the directory
     contents: _populate_cache_from_hive copies ``snap_date=*`` under the base
-    version, so a cache built after a month was *removed* from the config still
-    holds that month's partition. The documented flow is cumulative (months are
-    only added, and dataset runs first), where name and contents agree.
+    version, so name and contents can diverge in both directions —
+
+      * month *removed* from config → its partition is still in the copy;
+      * month *added* to config but ``dataset`` not re-run yet → the directory
+        is named for a month Hive does not have, gets its ``_SUCCESS`` anyway,
+        and every later run hits that under-covered cache silently.
+
+    The second one is why the documented flow runs ``dataset`` before
+    ``training`` (scripts/local_add_eval_month.sh enforces the order). Making
+    the copy verify its own coverage is deliberately left out of this change;
+    see the ticket discussion.
     """
     dataset_cfg = parameters.get("dataset") or {}
     configured = dataset_cfg.get("test_snap_dates") or []
@@ -258,7 +268,7 @@ def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     for token in _CACHE_PATH_LAYOUT[dataset_name]:
         if token in _CACHE_LITERAL_TOKENS:
             parts.append(Path(token))
-        elif token == _TEST_WINDOW_TOKEN:
+        elif token == _TEST_WINDOW_ID_TOKEN:
             parts.append(Path(_cache_test_window_id(parameters)))
         else:
             value = parameters[token]

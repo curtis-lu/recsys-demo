@@ -160,7 +160,23 @@ class TestTestWindowCacheKey:
 
         parts = Path(_resolve_cache_path("test_model_input", params)).parts
 
-        assert "20260131_20260228" in parts
+        # Assert the adjacent PAIR, not just the month component: the spec fixes
+        # the shape as `<base>/test_windows/<months>/`, and asserting the months
+        # alone leaves the `test_windows` grouping layer with no contract (it
+        # could be deleted and every test would stay green).
+        assert (*parts[-3:-1],) == ("test_windows", "20260131_20260228")
+
+    def test_duplicate_months_collapse_to_one_window(self, tmp_path):
+        """Same window ⇒ same cache; a repeated date is not a different window."""
+        from recsys_tfb.pipelines.training.nodes import _resolve_cache_path
+
+        once = _params_with_test_dates(tmp_path, ["2026-01-31"])
+        twice = _params_with_test_dates(tmp_path, ["2026-01-31", "2026-01-31"])
+
+        assert _resolve_cache_path("test_model_input", twice) == _resolve_cache_path(
+            "test_model_input", once
+        )
+        assert Path(_resolve_cache_path("test_model_input", twice)).parts[-2] == "20260131"
 
     def test_other_splits_layout_untouched_by_test_dates(self, tmp_path):
         from recsys_tfb.pipelines.training.nodes import _resolve_cache_path

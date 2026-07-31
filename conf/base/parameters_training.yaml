@@ -144,6 +144,10 @@ mlflow:
 # （排序後的 YYYYMMDD 以底線串接，例 20260131_20260228），使「只改
 # dataset.test_snap_dates」也必然換路徑、必然重新複製。刻意用字面日期而非
 # hash：一眼看得出這份 cache 涵蓋哪幾個月。
+# ⚠ 代價：重新複製的是**全部** test 月份（複製層仍是 snap_date=* 整包抓），
+# 不是只補新增的那個月；舊視窗目錄也不會自動回收，需自行清理。連續累積月份
+# 時磁碟與複製成本成長比月份數更快。只補缺月的 per-snap_date cache 標記是
+# 日後複製成本真的咬人時的升級路徑（見 issue #123 Out of Scope）。
 # `cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
 # （存在性檢查）與 _populate_cache_from_hive()（hadoop fs copyToLocal 目的地）
 # 都從這裡讀。persistence 由 training/nodes.py::_materialize_parquet_handle

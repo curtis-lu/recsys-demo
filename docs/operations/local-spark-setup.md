@@ -29,9 +29,10 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py <args>
 
 端到端一鍵：`bash scripts/local_e2e.sh`（環境證明：`local_spark_setup --reset` → dataset → training）。
 
-多評估一個月份一鍵：`bash scripts/local_add_eval_month.sh [YYYY-MM-DD]`——先自己把該月份加進
-`dataset.test_snap_dates` 並把 `evaluation.snap_date` 指到它（腳本會在開跑前核對，沒對齊就
-fail loud），接著它跑 dataset → training 的 predict 節點切片（不重訓）→
+多評估一個月份一鍵：`bash scripts/local_add_eval_month.sh [YYYY-MM-DD]`——四步動線裡它**實跑
+第 2–4 步、第 1 步只核對**：你得先自己把該月份加進 `dataset.test_snap_dates` 並把
+`evaluation.snap_date` 指到它（改設定是你的意圖，腳本不代你決定；沒對齊會在開跑前 fail
+loud），接著它跑 dataset → training 的 predict 節點切片（不重訓）→
 `evaluation --post-training --model-version`，並印出所用的 `model_version`。
 
 ## 重置
