@@ -197,6 +197,46 @@ class HiveTableDataset(AbstractDataset):
         spark = self._get_spark()
         return self._table_exists(spark)
 
+    def existing_partition_values(self) -> list[dict[str, str]]:
+        """Partition specs already present, restricted by ``partition_filter``.
+
+        Returns one dict per partition, holding the ``partition_cols`` values
+        (the ``partition_filter`` keys are dropped: they are constant by
+        construction, exactly as ``load()`` drops them from the data columns).
+        ``[]`` when the table or database does not exist yet.
+
+        Metadata-only — ``SHOW PARTITIONS`` never touches the data files, so
+        the cost is independent of table size. Exists so a caller with no
+        SparkSession of its own (the training predict node) can ask "what have
+        I already written for this ``model_version``"; the partition_filter is
+        what makes the answer scoped to that version rather than the whole
+        table. Deliberately unit-test-free: it is a thin query wrapper, and
+        every judgement built on it is covered at the predict seam.
+        """
+        from pyspark.sql.utils import AnalysisException
+
+        spark = self._get_spark()
+        try:
+            rows = spark.sql(f"SHOW PARTITIONS {self._qualified_name}").collect()
+        except AnalysisException as exc:
+            logger.debug(
+                "No partitions listed for %s (%s)", self._qualified_name, exc
+            )
+            return []
+
+        keep = [c["name"] for c in self._partition_cols]
+        out: list[dict[str, str]] = []
+        for row in rows:
+            spec = dict(
+                part.split("=", 1)
+                for part in str(row[0]).split("/")
+                if "=" in part
+            )
+            if any(spec.get(k) != v for k, v in self._partition_filter.items()):
+                continue
+            out.append({k: spec[k] for k in keep if k in spec})
+        return out
+
     # ---------- helpers ----------
 
     @property

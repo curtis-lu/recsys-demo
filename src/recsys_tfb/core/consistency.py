@@ -113,14 +113,15 @@ Layer 1 — config-static (implemented here; aggregated by
   quadrant_enabled`` are bool; ``diagnostics.shap.quadrant_top_k_decision`` /
   ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
-* A21 — every ``dataset --rebuild-dates`` value is a well-formed ISO date AND
-  a member of ``dataset.test_snap_dates``. The dataset pipeline only ever
-  processes configured months (ADR-0002), so an unconfigured value would
-  silently do nothing and leave the operator believing a month was recomputed.
-  Predicate: ``resolved_rebuild_dates`` (raises ``ConfigConsistencyError``
-  directly and returns the normalised list; not aggregated by ``validate`` —
-  it reads a CLI flag, which ``validate_config_consistency`` never sees.
-  Mirrors A12).
+* A21 — every ``--rebuild-dates`` value is a well-formed ISO date AND a member
+  of ``dataset.test_snap_dates``. Both ``dataset`` and ``training`` take the
+  flag and share this one predicate: each pipeline only ever processes
+  configured months (ADR-0002 for dataset partitions, #130 for predictions),
+  so an unconfigured value would silently do nothing and leave the operator
+  believing a month was recomputed. Predicate: ``resolved_rebuild_dates``
+  (raises ``ConfigConsistencyError`` directly and returns the normalised list;
+  not aggregated by ``validate`` — it reads a CLI flag, which
+  ``validate_config_consistency`` never sees. Mirrors A12).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -162,6 +163,13 @@ import datetime as _datetime
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
+
+#: ``parameters`` key the CLI hands the A21-validated ``--rebuild-dates`` value
+#: to nodes under (values normalised to ``YYYY-MM-DD`` by
+#: :func:`resolved_rebuild_dates`). It lives beside the predicate that produces
+#: the value because two pipelines read it — dataset's test-branch nodes and
+#: training's cache/predict nodes — and pipelines never import each other.
+REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
 
 
 class ConsistencyError(ValueError):

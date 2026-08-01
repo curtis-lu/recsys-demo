@@ -56,9 +56,17 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local \
 
 **用 `--only-node`，不要用 `--from-node`。** `--from-node cache_test_model_input` 會把該 node 之後的所有下游一起拉進來（實測 21 of 21 nodes，含 `tune_hyperparameters`）＝ 重訓。`--only-node` 只跑 predict，自動擴張補上兩個記憶體輸入（`cache_test_model_input`、`select_features`），模型從既有 `model_version` 目錄讀 —— 實測 **3 of 21 nodes**。跑之前可加 `--dry-run` 看計畫確認。
 
-log 對每個月份各印一行：既有月份 `cache_hit name=test_model_input path=.../test_months/20260131/...`，新月份 `cache_miss ...` 並實際複製。
+這一步同樣**只做新月份**：已經預測完整的月份會被跳過。log 兩層各講一次——cache 層對每個月份各印一行（既有月份 `cache_hit name=test_model_input path=.../test_months/20260131/...`，新月份 `cache_miss ...` 並實際複製），predict 層印它對每個設定月份的決定：
 
-> predict 目前會對**所有**設定的月份重算預測（既有月份寫回相同 partition、內容相同）。逐月跳過已完成的月份是後續工作。
+```
+[months] predict: processed=2026-02-28 skipped=2026-01-31 rebuilt=-
+```
+
+同一份資訊也在 `predict_manifest` 的 `months_processed` / `months_skipped` / `months_rebuilt` 三份清單裡。
+
+**能跳過的理由**：`(model_version, snap_date)` 的預測是不可變產物——`model_version` 已經把定義模型的一切雜湊進去，同一個模型對同一份該月 model_input 的預測必然逐位元相同，重算不會得到不同的數字。**判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」**，不是「有 partition 就算數」：後者會把寫到一半就中斷的月份永久當成完成，也看不出新增了一個 item。所以「predict 到一半掛掉」與「新增產品」兩種情況重跑都會自動補上。
+
+**它的對價**跟步驟 2 一樣：存在 ≠ 新鮮。上游回補舊月份之後要用 `--rebuild-dates` 指名重算（見下一節）。
 
 新月份的 `cache_miss` 之後若拋 `FileNotFoundError`，是步驟 2 沒跑或沒成功——來源表沒有該月份，逐月複製的 glob 零命中。這是機制自帶的 fail-loud，不是 bug。
 
@@ -80,25 +88,37 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb evaluation --env local \
 
 ## 重算某個既有月份（上游回補時）
 
-上游對某個已經跑過的月份回補或修正了 `feature_table`／`label_table` 之後，只加月份的動線幫不了你——那個月的 partition 已經存在，步驟 2 會跳過它。用 `--rebuild-dates` 指名要重算的月份：
+上游對某個已經跑過的月份回補或修正了 `feature_table`／`label_table` 之後，只加月份的動線幫不了你——那個月在兩層都已經是「完成」狀態：dataset 的 partition 存在（步驟 2 跳過它），predict 的 item partition 也齊全（步驟 3 跳過它）。**兩層都要指名重算，只做一層數字不會動。**
+
+一條指令做完兩層：
+
+```bash
+bash scripts/rebuild_eval_month.sh 2026-01-31            # 多個月份用逗號分隔
+bash scripts/rebuild_eval_month.sh 2026-01-31 --env local  # 預設就是 local
+```
+
+它就是把同一個 `--rebuild-dates` 轉送給 dataset 與 training 的 predict 切片（想自己下也可以）：
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m recsys_tfb dataset --env local \
-  --rebuild-dates 2026-01-31          # 多個月份用逗號分隔
+  --rebuild-dates 2026-01-31
+PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local \
+  --only-node predict_and_write_test_predictions --rebuild-dates 2026-01-31
 ```
 
 ```
 [months] test branch: processed=2026-01-31 skipped=2026-02-28 rebuild=2026-01-31
+[months] predict: processed=2026-01-31 skipped=2026-02-28 rebuilt=2026-01-31
 ```
 
 四件要知道的事：
 
-1. **值必須是 `dataset.test_snap_dates` 的子集**，否則在 Spark 起來之前就報錯退出（一致性不變量 A21）。這條之所以要 fail loud：pipeline 從來不處理設定沒列的月份，靜默放行等於讓你以為重算過了。
-2. **重算的是整條 test 鏈**（前處理編碼 → test keys → test model input），不是只有最後一段。
-3. **接著要刪該月的本機 cache 再跑 predict**，否則 predict 會命中舊 parquet——見 [known-pitfalls §15](known-pitfalls.md)。這是兩個獨立的快取層，dataset 重算不會通知 training 的 cache。
-4. **與 `--from-node`／`--only-node` 併用會印 WARN**。兩者正交（切片選 node、rebuild 選月份）且併用是支援的，但只有被選中的 node 會重算，未選中的上游 partition 仍然是舊的。要整條鏈重算就別帶切片旗標。
+1. **值必須是 `dataset.test_snap_dates` 的子集**，兩個 pipeline 共用同一條檢查，否則在 Spark 起來之前就報錯退出（一致性不變量 A21）。這條之所以要 fail loud：pipeline 從來不處理設定沒列的月份，靜默放行等於讓你以為重算過了。
+2. **dataset 重算的是整條 test 鏈**（前處理編碼 → test keys → test model input），不是只有最後一段。
+3. **training 帶這個旗標時會順手丟掉該月的本機 parquet cache**（log 印 `cache_rebuild name=test_model_input path=...`）再重新複製。cache 命中只看 `_SUCCESS`、不看新鮮度，不丟就會拿回補前的舊資料重算出逐位元相同的數字——見 [known-pitfalls §15](known-pitfalls.md)。**只有被指名的月份會被丟**，其他月份仍是 `cache_hit`。
+4. **與切片旗標併用是正常的**（步驟 3 本來就是 `--only-node`）。只有當切片把 `predict_and_write_test_predictions` 排除在外、旗標因此完全沒作用時，training 才會印 `[rebuild] WARNING`。dataset 那側的規則不同（併用一律 WARN，因為未選中的上游 partition 會留在舊狀態）。
 
-重算之後回到步驟 3、4 重跑 predict 與 evaluation，該月的報表才會更新。
+重算之後回到步驟 4 重跑 evaluation，該月的報表才會更新。
 
 ## 驗收
 
@@ -136,9 +156,11 @@ SHOW PARTITIONS ml_recsys.training_eval_predictions;   -- 這張沒有 recsys_pr
 | dataset 印出的 `base_dataset_version` 翻號了 | 同時改到了其他 dataset 設定 | 對照 [dataset.md §7.2](../pipelines/dataset.md) 找出改到哪個 key；只加月份不會翻號 |
 | predict 拋 `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑或沒成功，來源表沒有該月 | 回去跑 dataset，再重跑步驟 3 |
 | evaluation 報 `No predictions found for evaluation.snap_date` | 步驟 3 沒跑，該月沒有預測 | 回去跑步驟 3 |
-| 該月數字與上次逐位相同（重算既有月份時） | 兩層各有一個快取：dataset 跳過既有 partition、predict 命中舊 parquet cache | 依序排除：先用 `--rebuild-dates` 重算 dataset，再依 [known-pitfalls §15](known-pitfalls.md) 刪該月 cache 目錄 |
-| dataset log 印 `skipped=<你要重算的月份>` | 沒帶 `--rebuild-dates`；partition 存在就會被跳過 | 加上 `--rebuild-dates <該月>` 重跑 |
+| 該月數字與上次逐位相同（重算既有月份時） | 只重算了其中一層：dataset 跳過既有 partition，或 predict 跳過已完整的月份／命中舊 parquet cache | 用 `bash scripts/rebuild_eval_month.sh <該月>` 一次做完兩層；細節見 [known-pitfalls §15](known-pitfalls.md) |
+| dataset log 印 `skipped=<你要重算的月份>`，或 predict 印 `skipped=<該月>` | 沒帶 `--rebuild-dates`；產物存在就會被跳過 | 加上 `--rebuild-dates <該月>` 重跑（兩個 pipeline 都要） |
 | `--rebuild-dates` 直接報錯退出、還沒起 Spark | 該月份不在 `test_snap_dates`（不變量 A21） | 先把月份加進 `dataset.test_snap_dates`，或修正旗標的值 |
+| training 印 `[rebuild] WARNING: ... had no effect` | 切片把 `predict_and_write_test_predictions` 排除了，旗標無事可做 | 改用 `--only-node predict_and_write_test_predictions`，或不帶切片旗標 |
+| predict 拋 `test month '<月份>' ... has no rows in the test cache` | 該月在 `test_snap_dates` 裡但 dataset 沒產出它 | 先跑步驟 2（把該月當成沒事發生地跳過，會讓你拿到一份空報表，所以這裡直接報錯） |
 
 ## 相關文件
 

@@ -63,6 +63,31 @@ def _make_parameters() -> dict:
     }
 
 
+def _write_ds(existing=()) -> MagicMock:
+    """Mock of the ``training_eval_predictions`` catalog dataset.
+
+    ``existing``: ``(snap_date, prod_name)`` pairs already written for this
+    model_version — what ``HiveTableDataset.existing_partition_values()``
+    reports. Supplying it explicitly is the point of the seam: predict decides
+    what to skip from this list alone, so every test states the on-disk
+    starting position rather than inheriting a default.
+    """
+    ds = MagicMock()
+    ds.save.side_effect = lambda df: ds.saved.append(df)
+    ds.saved = []
+    ds.existing_partition_values.return_value = [
+        {"snap_date": snap, "prod_name": prod} for snap, prod in existing
+    ]
+    return ds
+
+
+def _saved_partitions(write_ds) -> set:
+    return {
+        (str(df["snap_date"].iloc[0]), str(df["prod_name"].iloc[0]))
+        for df in write_ds.saved
+    }
+
+
 def test_predict_and_write_emits_one_save_per_partition(tmp_path):
     """One save() call per (snap_date, prod_name) partition; every row in
     the input parquet appears in some save (no row-level filtering at this
@@ -93,6 +118,9 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
 
     write_ds = MagicMock()
     write_ds.save.side_effect = capture_save
+    # Nothing written yet, so every configured month is incomplete and gets
+    # predicted — the pre-incremental behaviour this test was written against.
+    write_ds.existing_partition_values.return_value = []
 
     manifest = predict_and_write_test_predictions(
         model=model,
@@ -145,6 +173,7 @@ def test_predict_and_write_score_uncalibrated_equals_score_when_not_calibrated(t
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
     write_ds.save.side_effect = lambda df: saves.append(df)
+    write_ds.existing_partition_values.return_value = []  # nothing written yet
 
     predict_and_write_test_predictions(
         model=model,
@@ -179,6 +208,7 @@ def test_predict_and_write_calibrated_branch_calls_predict_uncalibrated(tmp_path
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
     write_ds.save.side_effect = lambda df: saves.append(df)
+    write_ds.existing_partition_values.return_value = []  # nothing written yet
 
     predict_and_write_test_predictions(
         model=model,
@@ -238,6 +268,7 @@ def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
     saves: list = []
     write_ds = MagicMock()
     write_ds.save.side_effect = lambda df: saves.append(df)
+    write_ds.existing_partition_values.return_value = []  # nothing written yet
 
     manifest = predict_and_write_test_predictions(
         model=model,
@@ -253,3 +284,219 @@ def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
     written = pd.concat(saves, ignore_index=True)
     assert len(written) == 4
     assert sorted(set(written["snap_date"].astype(str))) == ["2025-01-31", "2025-02-28"]
+
+
+# ---------------------------------------------------------------------------
+# Per-month incremental predict (issue #130)
+#
+# Every failure mode here is silent: skipping too much, skipping too little and
+# predicting a month nobody asked for all produce a green run and a plausible
+# report. So each test states the on-disk starting position explicitly and
+# asserts on what the manifest *says*, not merely on which saves happened —
+# "no save for January" is satisfied just as well by "never knew January
+# existed", which is the exact bug this feature could introduce.
+# ---------------------------------------------------------------------------
+
+
+def _month_handle(tmp_path, snap_date: str, items=("prod_A", "prod_B")):
+    """One month's cache root, hive-partitioned exactly like the real cache."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.io.handles import ParquetHandle
+
+    df = pd.DataFrame(
+        {
+            "cust_id": [f"c{i}" for i in range(len(items))],
+            "snap_date": [snap_date] * len(items),
+            "prod_name": list(items),
+            "feat_a": [float(i) for i in range(len(items))],
+            "label": [1] + [0] * (len(items) - 1),
+        }
+    )
+    root = tmp_path / snap_date.replace("-", "") / "test_model_input.parquet"
+    pq.write_to_dataset(
+        pa.Table.from_pandas(df, preserve_index=False),
+        root_path=str(root),
+        partition_cols=["snap_date", "prod_name"],
+    )
+    return ParquetHandle(str(root))
+
+
+def _model() -> MagicMock:
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.full(len(X), 0.5)
+    return model
+
+
+def _params_with_test_dates(test_snap_dates, rebuild=None) -> dict:
+    """Merged parameters as the CLI hands them to nodes.
+
+    ``dataset.test_snap_dates`` is the authoritative month list; ``rebuild``
+    lands under the same runtime key the ``--rebuild-dates`` flag writes.
+    """
+    from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": list(test_snap_dates)}
+    if rebuild is not None:
+        params[REBUILD_SNAP_DATES_KEY] = list(rebuild)
+    return params
+
+
+def _predict(handles, params, write_ds):
+    from recsys_tfb.pipelines.training.nodes import predict_and_write_test_predictions
+
+    return predict_and_write_test_predictions(
+        model=_model(),
+        test_parquet_handle=handles,
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=params,
+        training_eval_predictions=write_ds,
+    )
+
+
+def test_a_brand_new_month_is_predicted_and_the_finished_one_is_skipped(tmp_path):
+    """Degenerate input 1+2: a month with no predictions runs; a month whose
+    written partitions already match the cache is skipped.
+    """
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),
+    }
+    write_ds = _write_ds(
+        existing=[("2025-01-31", "prod_A"), ("2025-01-31", "prod_B")]
+    )
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    assert manifest["months_processed"] == ["2025-02-28"]
+    assert manifest["months_skipped"] == ["2025-01-31"]
+    assert manifest["months_rebuilt"] == []
+    assert _saved_partitions(write_ds) == {
+        ("2025-02-28", "prod_A"), ("2025-02-28", "prod_B"),
+    }
+
+
+def test_every_month_complete_writes_nothing_at_all(tmp_path):
+    """The all-skipped case: re-running predict with no config change must
+    cost zero saves and still name both months as skipped.
+    """
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),
+    }
+    write_ds = _write_ds(
+        existing=[
+            (month, prod)
+            for month in ("2025-01-31", "2025-02-28")
+            for prod in ("prod_A", "prod_B")
+        ]
+    )
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    assert manifest["months_processed"] == []
+    assert manifest["months_skipped"] == ["2025-01-31", "2025-02-28"]
+    assert write_ds.save.call_count == 0
+
+
+def test_a_half_written_month_is_finished_off(tmp_path):
+    """Degenerate input 3: predict died after one item's partition. "Any
+    partition exists" would call that month done and leave prod_B missing
+    forever; the item-set criterion re-runs it.
+    """
+    handles = {"2025-01-31": _month_handle(tmp_path, "2025-01-31")}
+    write_ds = _write_ds(existing=[("2025-01-31", "prod_A")])
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    assert manifest["months_processed"] == ["2025-01-31"]
+    assert manifest["months_skipped"] == []
+    assert ("2025-01-31", "prod_B") in _saved_partitions(write_ds)
+
+
+def test_an_old_month_that_gained_an_item_is_recomputed(tmp_path):
+    """Degenerate input 4: the month was complete until a new item entered the
+    catalogue. Its predictions no longer cover every item, so it is no longer
+    complete — even though nothing about that month's own run went wrong.
+    """
+    handles = {
+        "2025-01-31": _month_handle(
+            tmp_path, "2025-01-31", items=("prod_A", "prod_B", "prod_C")
+        ),
+    }
+    write_ds = _write_ds(
+        existing=[("2025-01-31", "prod_A"), ("2025-01-31", "prod_B")]
+    )
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    assert manifest["months_processed"] == ["2025-01-31"]
+    assert ("2025-01-31", "prod_C") in _saved_partitions(write_ds)
+
+
+def test_rebuild_flag_forces_a_complete_month_and_says_so(tmp_path):
+    """The escape hatch: after an upstream backfill the month's partitions are
+    complete but stale, so completeness cannot be the last word. The forced
+    month is reported separately from the ones that merely had work left.
+    """
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),
+    }
+    write_ds = _write_ds(
+        existing=[
+            (month, prod)
+            for month in ("2025-01-31", "2025-02-28")
+            for prod in ("prod_A", "prod_B")
+        ]
+    )
+
+    manifest = _predict(
+        handles,
+        _params_with_test_dates(handles, rebuild=["2025-01-31"]),
+        write_ds,
+    )
+
+    assert manifest["months_processed"] == ["2025-01-31"]
+    assert manifest["months_rebuilt"] == ["2025-01-31"]
+    assert manifest["months_skipped"] == ["2025-02-28"]
+    assert _saved_partitions(write_ds) == {
+        ("2025-01-31", "prod_A"), ("2025-01-31", "prod_B"),
+    }
+
+
+def test_configured_months_are_authoritative_not_whatever_the_cache_holds(tmp_path):
+    """A month left over in the cache after being dropped from
+    ``test_snap_dates`` must not be predicted. Driving the loop off the cache
+    would silently resurrect it — with no written partitions it even looks
+    like honest work.
+    """
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),  # dropped from config
+    }
+    write_ds = _write_ds()
+
+    manifest = _predict(
+        handles, _params_with_test_dates(["2025-01-31"]), write_ds
+    )
+
+    assert manifest["months_processed"] == ["2025-01-31"]
+    assert manifest["months_skipped"] == []
+    assert {snap for snap, _ in _saved_partitions(write_ds)} == {"2025-01-31"}
+
+
+def test_a_configured_month_missing_from_the_cache_fails_loud(tmp_path):
+    """Configured but not cached means dataset never produced it. Treating an
+    empty month as "complete" would skip it forever and hand evaluation an
+    empty report, so it raises instead.
+    """
+    import pytest
+
+    handles = {"2025-01-31": _month_handle(tmp_path, "2025-01-31")}
+    params = _params_with_test_dates(["2025-01-31", "2025-02-28"])
+
+    with pytest.raises(ValueError, match="2025-02-28"):
+        _predict(handles, params, _write_ds())

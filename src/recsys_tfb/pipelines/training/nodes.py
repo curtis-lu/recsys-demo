@@ -5,13 +5,14 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, NamedTuple, Optional
 
 import mlflow
 import numpy as np
 import optuna
 import pandas as pd
 
+from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import (
@@ -107,10 +108,13 @@ def persist_sample_weight_report(
 def _test_month_dir(snap_date: str) -> str:
     """Directory-name form of a test month (``2026-01-31`` → ``20260131``).
 
-    Single definition shared by the path builder and the caller that dedupes
-    configured months, so the two cannot drift apart.
+    Single definition shared by the path builder, the caller that dedupes
+    configured months, and the predict-side month matching, so they cannot
+    drift apart. Doubling as the comparison key means a month is the same month
+    however it was spelled — config value, cache directory name, Hive partition
+    value — which is what the incremental decisions compare.
     """
-    return str(snap_date).replace("-", "")
+    return str(snap_date).strip().replace("-", "")
 
 
 # Sentinel layout token resolved from the ``snap_date`` argument of
@@ -269,16 +273,24 @@ def _resolve_cache_path(
 
 
 def _materialize_parquet_handle(
-    df, dataset_name: str, parameters: dict, snap_date: Optional[str] = None
+    df, dataset_name: str, parameters: dict, snap_date: Optional[str] = None,
+    force_refresh: bool = False,
 ) -> ParquetHandle:
     """Skip-if-exists local-parquet cache for a single model_input.
 
     Behaviour:
       - df is not a Spark DataFrame  → TypeError (pandas-passthrough removed)
+      - ``force_refresh``  → drop whatever is cached, then take the miss path
       - target path has _SUCCESS  → return ParquetHandle pointing at it
       - target path exists but no _SUCCESS  → rmtree and rebuild
       - cache miss  → hadoop fs copyToLocal HDFS subtree to driver-local;
                       touch _SUCCESS; return ParquetHandle
+
+    ``force_refresh`` exists because cache hits are decided by "_SUCCESS is
+    present", never by freshness. After an upstream backfill the month's cached
+    parquet is stale but complete, so without it ``--rebuild-dates`` would
+    re-predict from the old rows and produce byte-identical numbers — the
+    escape hatch would run and change nothing.
     """
     if not hasattr(df, "sql_ctx"):
         raise TypeError(
@@ -290,6 +302,14 @@ def _materialize_parquet_handle(
 
     local_path = _resolve_cache_path(dataset_name, parameters, snap_date)
     success_marker = Path(local_path) / "_SUCCESS"
+
+    if force_refresh and Path(local_path).exists():
+        logger.info(
+            "cache_rebuild name=%s path=%s — named by --rebuild-dates, "
+            "dropping the cached copy so the refreshed source is re-read",
+            dataset_name, local_path,
+        )
+        shutil.rmtree(local_path, ignore_errors=True)
 
     if Path(local_path).exists() and not success_marker.exists():
         logger.warning(
@@ -343,8 +363,15 @@ def cache_test_model_input(
     interrupted is rebuilt without disturbing its siblings.
 
     Duplicate dates in config collapse — the same month is the same cache entry.
+
+    A month named by ``--rebuild-dates`` is re-copied even on a hit: its cached
+    parquet predates the upstream backfill that motivated the flag, and cache
+    hits never look at freshness.
     """
     configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
+    rebuild = {
+        _test_month_dir(d) for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
+    }
 
     # Dedupe on the *directory* form, not the raw string: the two must agree or
     # a config carrying both "2026-01-31" and "20260131" would yield two keys
@@ -364,7 +391,8 @@ def cache_test_model_input(
 
     return {
         month: _materialize_parquet_handle(
-            test_model_input, "test_model_input", parameters, snap_date=month
+            test_model_input, "test_model_input", parameters, snap_date=month,
+            force_refresh=_test_month_dir(month) in rebuild,
         )
         for month in sorted(by_dir.values())
     }
@@ -888,6 +916,127 @@ def calibrate_model(
 
 
 
+class _PredictMonthPlan(NamedTuple):
+    """Which test months this predict run will write, and which it will not.
+
+    ``to_process`` and ``skipped`` partition the configured months (disjoint,
+    union == configured). ``rebuilt`` is the subset of ``to_process`` that was
+    already complete and is being redone only because ``--rebuild-dates``
+    named it.
+    """
+
+    to_process: list[str]
+    skipped: list[str]
+    rebuilt: list[str]
+
+
+def _plan_predict_months(
+    configured: Iterable,
+    cache_items: dict[str, set[str]],
+    written_items: dict[str, set[str]],
+    rebuild: set[str],
+) -> _PredictMonthPlan:
+    """Decide, per configured month, whether its predictions still need writing.
+
+    A ``(model_version, snap_date)`` prediction set is an immutable product:
+    ``model_version`` hashes everything that defines the model, so the same
+    model over the same month's model_input predicts bit-identically. Recomputing
+    it buys nothing — hence skipping, and hence ``rebuild`` as the price of that
+    (an upstream backfill changes the input without changing any version).
+
+    Completeness is "the item partitions written for this month are exactly the
+    distinct items the month's cache holds", not "some partition exists". The
+    weaker test would call a run that died halfway complete and leave the
+    missing items absent forever, and would miss a newly added item entirely.
+
+    Args:
+        configured: ``dataset.test_snap_dates`` — the authority on which months
+            exist. The cache is only a data source; a month lingering there
+            after being dropped from config must not be predicted.
+        cache_items: month key → distinct items present in that month's cache.
+        written_items: month key → item partitions already written for this
+            model_version.
+        rebuild: month keys named by ``--rebuild-dates``.
+
+    Raises:
+        ValueError: a configured month has no rows in the cache — dataset never
+            produced it. Calling it complete (∅ == ∅) would skip it silently
+            and hand evaluation an empty report for that month.
+    """
+    to_process: list[str] = []
+    skipped: list[str] = []
+    rebuilt: list[str] = []
+
+    by_key: dict[str, str] = {}
+    for raw in configured:
+        by_key.setdefault(_test_month_dir(raw), str(raw).strip())
+
+    for key in sorted(by_key):
+        label = by_key[key]
+        if key not in cache_items:
+            raise ValueError(
+                f"test month {label!r} is in dataset.test_snap_dates but has no "
+                "rows in the test cache. Run the dataset pipeline for that "
+                "month first (predict cannot invent it, and treating it as "
+                "already-done would silently produce an empty report)."
+            )
+        already = written_items.get(key, set())
+        if key in rebuild:
+            rebuilt.append(label)
+            to_process.append(label)
+            continue
+        if already == cache_items[key]:
+            skipped.append(label)
+            continue
+        if already > cache_items[key]:
+            # Re-predicting cannot delete the surplus partition, so this month
+            # will be reprocessed on every run until it is dropped by hand.
+            logger.warning(
+                "[months] predict: %s has prediction partitions for items no "
+                "longer in the cache (%s); it will be re-predicted every run "
+                "until those partitions are dropped.",
+                label, sorted(already - cache_items[key]),
+            )
+        to_process.append(label)
+
+    return _PredictMonthPlan(
+        to_process=to_process, skipped=skipped, rebuilt=rebuilt
+    )
+
+
+def _written_prediction_partitions(
+    predictions_dataset, time_col: str, item_col: str
+) -> dict[str, set[str]]:
+    """Item partitions already written per month, from the catalog dataset.
+
+    predict never receives a SparkSession — its inputs are the model, the cache
+    handles, the preprocessor, parameters and the predictions dataset object —
+    so that object is the only route to the metastore. It already scopes itself
+    to this ``model_version`` through its ``partition_filter``, which is exactly
+    the scope the completeness question is asked in.
+
+    A dataset type that cannot list partitions makes every month look
+    incomplete: that re-predicts (wasteful) rather than skips (silently stale),
+    which is the direction this decision must fail in.
+    """
+    lister = getattr(predictions_dataset, "existing_partition_values", None)
+    if lister is None:
+        logger.warning(
+            "[months] predict: %s cannot list partitions, so no month can be "
+            "shown complete; every configured month will be predicted.",
+            type(predictions_dataset).__name__,
+        )
+        return {}
+
+    written: dict[str, set[str]] = {}
+    for spec in lister():
+        month, item = spec.get(time_col), spec.get(item_col)
+        if month is None or item is None:
+            continue
+        written.setdefault(_test_month_dir(month), set()).add(str(item))
+    return written
+
+
 def predict_and_write_test_predictions(
     model: ModelAdapter,
     test_parquet_handle: dict[str, ParquetHandle],
@@ -895,9 +1044,16 @@ def predict_and_write_test_predictions(
     parameters: dict,
     training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
 ) -> dict:
-    """Per-partition test prediction + Hive write.
+    """Per-partition test prediction + Hive write, one month at a time.
 
-    For each (snap_date, prod_name) partition of the parquet:
+    Months whose predictions are already complete are skipped (see
+    :func:`_plan_predict_months`), so adding a test month costs one month of
+    prediction rather than re-predicting every accumulated month. The manifest
+    names what was processed, skipped and rebuilt: a node that decides to do
+    less work has to say what it decided not to do, or a silently stale month
+    is indistinguishable from a correctly skipped one.
+
+    For each (snap_date, prod_name) partition of the months being processed:
         - load only that partition's rows via pyarrow filter
         - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
         - build a pandas DataFrame with (cust_id, score, score_uncalibrated,
@@ -951,6 +1107,42 @@ def predict_and_write_test_predictions(
     partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
     log_data_volume(logger, "predict.partition_pdf_unique", partition_pdf, deep=False)
 
+    cache_items: dict[str, set[str]] = {}
+    for _, row in partition_pdf.iterrows():
+        cache_items.setdefault(_test_month_dir(row[time_col]), set()).add(
+            str(row[item_col])
+        )
+
+    # The config is the authority on which months exist; the cache is only
+    # where their rows come from. The fallback keeps non-CLI callers (tests,
+    # notebooks) at the pre-incremental behaviour of "predict what you were
+    # handed" instead of silently predicting nothing.
+    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or sorted(
+        {str(v) for v in partition_pdf[time_col]}
+    )
+    plan = _plan_predict_months(
+        configured,
+        cache_items,
+        _written_prediction_partitions(
+            training_eval_predictions, time_col, item_col
+        ),
+        {
+            _test_month_dir(d)
+            for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
+        },
+    )
+    logger.info(
+        "[months] predict: processed=%s skipped=%s rebuilt=%s",
+        ",".join(plan.to_process) or "-",
+        ",".join(plan.skipped) or "-",
+        ",".join(plan.rebuilt) or "-",
+    )
+
+    process_keys = {_test_month_dir(m) for m in plan.to_process}
+    partition_pdf = partition_pdf[
+        [_test_month_dir(v) in process_keys for v in partition_pdf[time_col]]
+    ]
+
     snap_dates_seen: set[str] = set()
     prods_seen: set[str] = set()
     n_rows_written = 0
@@ -1000,12 +1192,20 @@ def predict_and_write_test_predictions(
         "prods": sorted(prods_seen),
         "model_version": model_version,
         "n_rows_written": n_rows_written,
+        # What this run decided about every configured month, not just the ones
+        # it touched: `snap_dates` above cannot distinguish "skipped because
+        # complete" from "never knew about it".
+        "months_processed": plan.to_process,
+        "months_skipped": plan.skipped,
+        "months_rebuilt": plan.rebuilt,
     }
     logger.info(
         "predict_and_write_test_predictions: done — "
-        "snap_dates=%d prods=%d n_rows_written=%d model_version=%s",
+        "snap_dates=%d prods=%d n_rows_written=%d model_version=%s "
+        "months_processed=%d months_skipped=%d months_rebuilt=%d",
         len(manifest["snap_dates"]), len(manifest["prods"]),
         manifest["n_rows_written"], manifest["model_version"],
+        len(plan.to_process), len(plan.skipped), len(plan.rebuilt),
     )
     return manifest
 
