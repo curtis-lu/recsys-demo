@@ -15,6 +15,7 @@ from recsys_tfb.core.consistency import (
     compare_source_key_exists,
     resolved_rebuild_dates,
     ConfigConsistencyError,
+    REBUILD_SNAP_DATES_KEY,
 )
 from recsys_tfb.core.schema import (
     get_schema,
@@ -41,7 +42,6 @@ from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.helpers_spark import existing_snap_date_partitions
 from recsys_tfb.pipelines.dataset.nodes_shared import (
     EXISTING_SNAP_DATES_KEY,
-    REBUILD_SNAP_DATES_KEY,
     plan_incremental_snap_dates,
 )
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
@@ -256,6 +256,42 @@ def _fmt_months(dates) -> str:
     return ",".join(str(d) for d in dates) or "-"
 
 
+#: The training nodes ``--rebuild-dates`` acts on: one drops the named month's
+#: local cache, the other re-predicts it. A slice keeping either one still does
+#: part of what the flag asked for, so the warning fires only when both are
+#: gone — that is the case where the flag is accepted and nothing happens.
+_REBUILD_TARGET_NODES = (
+    "cache_test_model_input",
+    "predict_and_write_test_predictions",
+)
+_REBUILD_PREDICT_NODE = "predict_and_write_test_predictions"
+
+
+def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
+    """WARN lines when ``--rebuild-dates`` was passed but no node it drives is
+    in this run, else ``[]``.
+
+    Combining ``--rebuild-dates`` with slicing is the *normal* path here — the
+    documented way to re-predict without retraining is
+    ``--only-node predict_and_write_test_predictions`` — so the combination
+    itself is not worth a warning (unlike the dataset side, where slicing leaves
+    part of the test chain stale). What is worth one is a slice that drops the
+    nodes it drives: then the flag is accepted, the run succeeds, and nothing it
+    asked for happens.
+    """
+    if not rebuild_advice or not rebuild_advice.get("rebuild"):
+        return []
+    if any(node.name in _REBUILD_TARGET_NODES for node in pipe.nodes):
+        return []
+    return [
+        f"[rebuild] WARNING: --rebuild-dates {_fmt_months(rebuild_advice['rebuild'])} "
+        f"had no effect — this slice includes neither of the nodes it drives "
+        f"({', '.join(_REBUILD_TARGET_NODES)}).",
+        "[rebuild] 要重算既有月份的預測，請跑 "
+        f"--only-node {_REBUILD_PREDICT_NODE}（不帶切片旗標的完整 run 也可以）。",
+    ]
+
+
 def _format_rebuild_slice_warning(rebuild: list[str]) -> list[str]:
     """WARN lines for --rebuild-dates combined with a slicing flag.
 
@@ -285,6 +321,7 @@ def _execute_pipeline(
     dry_run: bool = False,
     list_nodes: bool = False,
     retrain_advice: Optional[dict] = None,
+    rebuild_advice: Optional[dict] = None,
 ) -> bool:
     """Run the pipeline; returns False when nothing was executed
     (--dry-run / --list-nodes early exits) so callers skip post-run
@@ -345,6 +382,8 @@ def _execute_pipeline(
         for line in _format_slice_plan(plan, total):
             logger.info(line)
     for line in _maybe_warn_retrain(plan, retrain_advice):
+        logger.warning(line)
+    for line in _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice):
         logger.warning(line)
     if dry_run:
         if plan is None:
@@ -801,6 +840,14 @@ def training(
         help="Calibration variant ID (default: latest under base dataset; "
              "only used when training.calibration.enabled=true)",
     ),
+    rebuild_dates: Optional[str] = typer.Option(
+        None, "--rebuild-dates",
+        help="Comma-separated snap_dates to re-predict even though their "
+             "predictions are already complete (use after an upstream backfill "
+             "of an old month, together with the same flag on dataset). Also "
+             "drops those months' local parquet cache. Must be a subset of "
+             "dataset.test_snap_dates.",
+    ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
         help="Start from this node (topological position); missing upstream "
@@ -826,6 +873,20 @@ def training(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("training", env)
+
+    # (A21) --rebuild-dates ⊆ dataset.test_snap_dates — the same predicate the
+    # dataset command uses, so the two halves of a backfill cannot disagree
+    # about which months are nameable. Checked before Spark starts: a typo here
+    # would otherwise cost a cold start before failing.
+    try:
+        rebuild = resolved_rebuild_dates(
+            params,
+            [d.strip() for d in rebuild_dates.split(",")] if rebuild_dates else None,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1)
+
     get_or_create_spark_session(_load_spark_config(config, "training"))
     data_dir = _find_data_dir()
 
@@ -869,6 +930,9 @@ def training(
         "search_id": sid,
         "_fresh_hpo": fresh_hpo,
         "snap_date": _NONE_PLACEHOLDER,
+        # Read by cache_test_model_input (drop the stale month) and by
+        # predict_and_write_test_predictions (re-predict it).
+        REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
@@ -896,6 +960,7 @@ def training(
         # Always passed; _maybe_warn_retrain is a no-op under --list-nodes
         # (it returns early before plan exists) and only fires on sliced runs.
         retrain_advice={"models_dir": data_dir / "models", "model_version": mv},
+        rebuild_advice={"rebuild": rebuild},
     )
     if not executed:
         return

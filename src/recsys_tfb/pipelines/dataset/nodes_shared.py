@@ -5,13 +5,17 @@ from typing import Iterable, NamedTuple
 
 import pandas as pd
 
+# Re-exported so the dataset nodes and their callers keep a single import site;
+# the definition lives in core because training reads the same key and the two
+# pipelines never import each other.
+from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
-#: ``parameters`` keys injected by the dataset CLI entry point. The metastore
+#: ``parameters`` key injected by the dataset CLI entry point. The metastore
 #: partition listing is done once, up front, by the caller (``__main__``) and
 #: handed to the nodes — see :func:`resolve_snap_date_plan` for why.
 EXISTING_SNAP_DATES_KEY = "_existing_snap_dates"
-REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
 
 
 def validate_date_splits(parameters: dict) -> None:

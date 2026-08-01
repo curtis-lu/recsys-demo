@@ -315,13 +315,14 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 | `--base-dataset-version <id>` | `latest` | 指定 base dataset version |
 | `--train-variant <id>` | 該 base 下的 train `latest` | 指定 train variant |
 | `--calibration-variant <id>` | 該 base 下的 calibration `latest` | calibration 啟用時指定 calibration variant |
+| `--rebuild-dates <d1,d2>` | 無 | 指名重算這些 test 月份的預測（丟掉該月本機 cache ＋ 忽略「已完整」而重新預測）。值須為 `dataset.test_snap_dates` 子集（A21）；上游回補時與 dataset 的同名旗標成對使用 |
 | `--from-node <name>` | 無 | 從指定 node 的拓撲位置開始，並執行其後 nodes |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--fresh-hpo` | 關閉 | 清除目前 `search_id` 的 HPO study 與 checkpoint，從 trial 0 重搜 |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開 |
 | `--list-nodes` | 關閉 | 列出 node 名稱與接續成本 |
 
-`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--calibration-variant` 只有在 `training.calibration.enabled: true` 時使用。
+`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--calibration-variant` 只有在 `training.calibration.enabled: true` 時使用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除、旗標因此無事可做時才會印 `[rebuild] WARNING`。
 
 `--dry-run` 與 `--list-nodes` 不會執行 nodes、寫模型或建立 manifest，但 CLI 仍會載入設定、初始化 Spark、解析 dataset versions、計算 `model_version`／`search_id`，並查詢 catalog 產物是否存在。
 
@@ -434,7 +435,7 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 排序指標選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | 未校準模型 |
 | 機率校準 | `calibrate_model` | 未校準模型、calibration handle | fit sigmoid 或 isotonic calibrator | 最終 `model` |
-| Test 預測 | `predict_and_write_test_predictions` | model、test handle | 逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
+| Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_mAP_spark` | test 預測 | 使用 Spark 計算整體 mAP 與 per-item attribution | `evaluation_results` |
 | 特徵統計 | `compute_feature_statistics` | train handle、preprocessor view | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
@@ -446,6 +447,10 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
 寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。calibration 關閉時，`score_uncalibrated` 與 `score` 相同。
+
+**逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
+
+`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/adding-an-eval-month.md)。
 
 `compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。若模型已校準，也會平行計算原始未校準 score 的結果，讓使用者確認 calibration 是否改變排序表現。
 

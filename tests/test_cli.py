@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -819,3 +820,130 @@ class TestRebuildSliceWarning:
         assert "--rebuild-dates" in lines
         assert "--only-node" in lines
         assert "2026-01-31" in lines
+
+
+# --- #130: training also takes --rebuild-dates (same A21 predicate) ---
+
+class TestTrainingRebuildDatesFlag:
+    def test_training_help_advertises_rebuild_dates(self):
+        result = runner.invoke(app, ["training", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--rebuild-dates" in result.output
+
+    def test_unconfigured_month_exits_before_spark_starts(self, tmp_path):
+        """Same guard, same predicate, same timing as the dataset command: a
+        month the config never listed cannot be rebuilt, and finding that out
+        must not cost a Spark cold start.
+        """
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "test_snap_dates": ["2026-01-31"],
+            }},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["training", "--rebuild-dates", "2026-09-30"]
+                )
+            assert result.exit_code == 1
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_rebuild_months_reach_node_parameters(self, tmp_path):
+        """The cache and predict nodes read the months off ``parameters``;
+        without this wiring the flag parses, validates, and does nothing.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "test_snap_dates": ["2026-01-31", "2026-02-28"],
+            }},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        captured = {}
+
+        def _capture(data=None):
+            captured["params"] = data
+            return MagicMock()
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch("recsys_tfb.__main__.MemoryDataset", side_effect=_capture), \
+                    patch("recsys_tfb.__main__.Runner"):
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda *a, **kw: None
+                runner.invoke(app, ["training", "--rebuild-dates", "2026-02-28"])
+        finally:
+            os.chdir(old_cwd)
+
+        assert captured["params"][REBUILD_SNAP_DATES_KEY] == ["2026-02-28"]
+
+
+class TestRebuildSlicedAwayWarning:
+    """``--rebuild-dates`` with a slicing flag is the normal path here, so it
+    warns only when the slice drops the node the flag drives — the one case
+    where the run succeeds and silently does nothing it was asked to do.
+    """
+
+    @staticmethod
+    def _pipe(*node_names):
+        return SimpleNamespace(
+            nodes=[SimpleNamespace(name=n) for n in node_names]
+        )
+
+    def test_silent_when_the_predict_node_is_in_the_slice(self):
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
+
+        pipe = self._pipe("cache_test_model_input", "predict_and_write_test_predictions")
+        assert _maybe_warn_rebuild_sliced_away(
+            pipe, {"rebuild": ["2026-01-31"]}
+        ) == []
+
+    def test_warns_and_names_the_months_when_predict_is_sliced_away(self):
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
+
+        lines = "\n".join(
+            _maybe_warn_rebuild_sliced_away(
+                self._pipe("compute_feature_importance"),
+                {"rebuild": ["2026-01-31"]},
+            )
+        )
+        assert "--rebuild-dates" in lines
+        assert "2026-01-31" in lines
+        assert "predict_and_write_test_predictions" in lines
+
+    def test_silent_when_the_flag_was_not_passed(self):
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
+
+        assert _maybe_warn_rebuild_sliced_away(
+            self._pipe("compute_feature_importance"), {"rebuild": []}
+        ) == []
+
+    def test_the_named_nodes_exist_in_the_real_training_pipeline(self):
+        """The tests above hand it a fake pipeline, so a node rename would
+        leave them green while the warning silently never fires again (and the
+        runbook's `--only-node` command stops matching anything). Pin the names
+        against the pipeline itself.
+        """
+        from recsys_tfb.__main__ import _REBUILD_TARGET_NODES
+        from recsys_tfb.pipelines import get_pipeline
+
+        real = {node.name for node in get_pipeline("training").nodes}
+        assert set(_REBUILD_TARGET_NODES) <= real

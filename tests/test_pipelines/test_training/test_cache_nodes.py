@@ -203,6 +203,66 @@ class TestPerMonthTestCache:
         # prevent (predict would never see that month).
         assert sorted(second) == ["2026-01-31", "2026-02-28"]
 
+    def test_rebuild_dates_drops_and_recopies_only_the_named_month(
+        self, tmp_path, monkeypatch
+    ):
+        """Cache hits are decided by ``_SUCCESS``, never by freshness, so after
+        an upstream backfill the named month's cached parquet is stale but
+        complete. Without this it survives, predict reads it, and the numbers
+        come out byte-identical — the rebuild would run and change nothing.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        copy_calls: list = []
+        _recording_hdfs(monkeypatch, copy_calls)
+        months = ["2026-01-31", "2026-02-28"]
+
+        first = cache_test_model_input(
+            _spark_df(), _params_with_test_dates(tmp_path, months)
+        )
+        # A file only the first copy could have produced: if the directory is
+        # merely written over rather than cleared, it survives.
+        stale = Path(first["2026-01-31"].path) / "stale-part-0.parquet"
+        stale.touch()
+        copy_calls.clear()
+
+        params = _params_with_test_dates(tmp_path, months)
+        params[REBUILD_SNAP_DATES_KEY] = ["2026-01-31"]
+        second = cache_test_model_input(_spark_df(), params)
+
+        assert copy_calls == [second["2026-01-31"].path]
+        assert not stale.exists()
+        assert (Path(second["2026-01-31"].path) / "_SUCCESS").exists()
+        # February was not named, so it stays a hit and keeps its handle.
+        assert second["2026-02-28"].path == first["2026-02-28"].path
+
+    def test_rebuild_that_cannot_clear_the_directory_fails_loud(
+        self, tmp_path, monkeypatch
+    ):
+        """If the drop silently fails, the surviving ``_SUCCESS`` is read as a
+        hit two lines later and the rebuild degrades into the stale-cache run it
+        exists to prevent — succeeding, and producing identical numbers.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+        from recsys_tfb.pipelines.training import nodes as training_nodes
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        copy_calls: list = []
+        _recording_hdfs(monkeypatch, copy_calls)
+        params = _params_with_test_dates(tmp_path, ["2026-01-31"])
+        cache_test_model_input(_spark_df(), params)
+
+        monkeypatch.setattr(
+            training_nodes.shutil, "rmtree", lambda *a, **kw: None
+        )
+        params[REBUILD_SNAP_DATES_KEY] = ["2026-01-31"]
+        copy_calls.clear()
+
+        with pytest.raises(RuntimeError, match="could not clear the cached month"):
+            cache_test_model_input(_spark_df(), params)
+        assert copy_calls == []
+
     def test_month_absent_from_source_fails_loud(self, tmp_path, monkeypatch):
         """Configured a month but never ran dataset → the copy glob matches
         nothing and FileNotFoundError propagates. This guard is inherent to
