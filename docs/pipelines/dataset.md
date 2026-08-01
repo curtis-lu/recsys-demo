@@ -293,6 +293,13 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor | left join label 與 feature，補齊缺失 label，選取欄位並轉 float32 | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
 
+model input 的組裝規則：
+
+1. keys 與 `label_table` 依 `time + entity + item` left join；沒有 label row 時補為 `0`。
+2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
+3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
+4. val/test 才會移除零正例 query groups；train、train-dev 與 calibration 保留所有 rows。
+
 ### 5.1 test 分支是增量的
 
 `apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input`、`filter_test_model_input` 四個 node 只處理**尚未落地**的月份：差集由 metastore 的 partition 清單（零掃描）得出，四者共用 `nodes_shared.plan_incremental_snap_dates` 這一個純函式，沒有任何一處自行計算。train／train-dev／val／calibration **不是**增量的，每次都整批重算。
@@ -300,13 +307,6 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows 與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
 
 代價、`--rebuild-dates` 逃生口與完整理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)。
-
-model input 的組裝規則：
-
-1. keys 與 `label_table` 依 `time + entity + item` left join；沒有 label row 時補為 `0`。
-2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
-3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
-4. val/test 才會移除零正例 query groups；train、train-dev 與 calibration 保留所有 rows。
 
 ## 6. 產物與驗收
 

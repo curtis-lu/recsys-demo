@@ -1088,10 +1088,17 @@ def _iso_date(value) -> str | None:
     if isinstance(value, _datetime.date):
         return value.isoformat()
     if isinstance(value, str):
-        try:
-            return _datetime.date.fromisoformat(value.strip()).isoformat()
-        except ValueError:
-            return None
+        text = value.strip()
+        for parse in (_datetime.date.fromisoformat, _datetime.datetime.fromisoformat):
+            try:
+                return _iso_date(parse(text))
+            except ValueError:
+                continue
+        # ``datetime.fromisoformat`` is the wider of the two on Python 3.10 and
+        # covers "2026-01-31T00:00:00" / "2026-01-31 00:00:00" — forms that
+        # ``pd.Timestamp`` accepts everywhere else in the pipeline, so rejecting
+        # them here would make A21 stricter than the code it guards.
+        return None
     return None
 
 
@@ -1111,14 +1118,18 @@ def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
     if not rebuild_dates:
         return []
 
-    configured = {
-        iso
-        for iso in (
-            _iso_date(d)
-            for d in ((parameters.get("dataset", {}) or {}).get("test_snap_dates") or [])
+    declared = (parameters.get("dataset", {}) or {}).get("test_snap_dates") or []
+    # Silently dropping an unparseable configured value would make the subset
+    # check below compare against an incomplete set, and the resulting message
+    # ("configured: []") would point the operator at the flag when the fault is
+    # in the yaml. Name the real culprit instead.
+    unreadable = [d for d in declared if _iso_date(d) is None]
+    if unreadable:
+        raise ConfigConsistencyError(
+            f"(A21) dataset.test_snap_dates holds unreadable date(s) "
+            f"{unreadable!r}. Expected YYYY-MM-DD."
         )
-        if iso is not None
-    }
+    configured = {_iso_date(d) for d in declared}
 
     malformed = [d for d in rebuild_dates if _iso_date(d) is None]
     if malformed:

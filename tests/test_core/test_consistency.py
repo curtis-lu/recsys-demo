@@ -1127,8 +1127,29 @@ class TestResolvedRebuildDatesA21:
             resolved_rebuild_dates({"dataset": {}}, ["2026-01-31"])
 
     def test_malformed_date_raises(self):
-        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+        # match on "non-ISO value", NOT on "--rebuild-dates": both raise
+        # branches of this predicate mention the flag name, so the flag name
+        # alone cannot tell them apart — deleting the malformed guard entirely
+        # would still leave this passing (the value falls through to the
+        # unknown-month branch as None).
+        with pytest.raises(ConfigConsistencyError, match=r"non-ISO value"):
             resolved_rebuild_dates(_ds("2026-01-31"), ["31/01/2026"])
+
+    def test_valid_and_malformed_mixed_still_reports_malformed(self):
+        # A good month must not mask a malformed one; without the guard this
+        # input crashes in sorted() on a None instead of reporting anything.
+        with pytest.raises(ConfigConsistencyError, match=r"non-ISO value"):
+            resolved_rebuild_dates(_ds("2026-01-31"), ["2026-01-31", "31/01/2026"])
+
+    def test_datetime_shaped_config_value_is_accepted(self):
+        # pd.Timestamp accepts these everywhere else in the pipeline, so A21
+        # must not be stricter than the code it guards.
+        params = _ds("2026-01-31 00:00:00")
+        assert resolved_rebuild_dates(params, ["2026-01-31"]) == ["2026-01-31"]
+
+    def test_unreadable_config_value_blames_the_config_not_the_flag(self):
+        with pytest.raises(ConfigConsistencyError, match=r"unreadable date"):
+            resolved_rebuild_dates(_ds("not-a-date"), ["2026-01-31"])
 
     def test_unquoted_yaml_dates_compare_equal(self):
         # PyYAML parses an unquoted 2026-01-31 into datetime.date; a string from

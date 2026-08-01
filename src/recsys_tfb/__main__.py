@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
     ConfigConsistencyError,
 )
 from recsys_tfb.core.schema import (
+    get_schema,
     get_schema_for_hash,
     validate_schema_config,
 )
@@ -223,21 +224,30 @@ _INCREMENTAL_DATASETS = (
 
 
 def _collect_existing_snap_dates(
-    spark, catalog_config: dict, base_dataset_version: str
+    spark, catalog_config: dict, base_dataset_version: str, time_col: str = "snap_date"
 ) -> dict[str, list[str]]:
     """Metastore partition listing for every incrementally-built dataset.
 
     Taken once, before any node runs, so all four test-branch nodes and the
     manifest agree on what had already landed when this run started (ADR-0002).
     Metadata-only: no data is scanned.
+
+    ``time_col`` comes from ``schema.time`` rather than being hardcoded: the
+    partition column is whatever the pipeline writes as its time column, and
+    this repo is a configurable ranking framework, not a snap_date-only one.
     """
     existing: dict[str, list[str]] = {}
     for name in _INCREMENTAL_DATASETS:
         entry = catalog_config.get(name) or {}
         if entry.get("type") != "HiveTableDataset":
+            logger.warning(
+                "[months] %s is not a HiveTableDataset; its months cannot be "
+                "listed, so it will be rebuilt in full.", name,
+            )
             continue
         existing[name] = existing_snap_date_partitions(
             spark, entry["database"], entry["table"], base_dataset_version,
+            time_col=time_col,
         )
     return existing
 
@@ -657,7 +667,9 @@ def dataset(
     # Incremental plan (ADR-0002): one metastore listing, handed to every
     # test-branch node so they and the manifest cannot disagree about which
     # months this run covered.
-    existing_snap_dates = _collect_existing_snap_dates(spark, catalog_config, base_v)
+    existing_snap_dates = _collect_existing_snap_dates(
+        spark, catalog_config, base_v, time_col=get_schema(params)["time"],
+    )
     month_plan = plan_incremental_snap_dates(
         (params.get("dataset", {}) or {}).get("test_snap_dates", []),
         existing_snap_dates.get("test_model_input", []),

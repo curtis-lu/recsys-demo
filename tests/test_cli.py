@@ -794,13 +794,19 @@ class TestCollectExistingSnapDates:
         }
         with patch(
             "recsys_tfb.__main__.existing_snap_date_partitions",
-            side_effect=lambda spark, db, table, base: [f"{table}-{base}"],
+            side_effect=lambda spark, db, table, base, time_col="snap_date": [
+                f"{table}-{base}-{time_col}"
+            ],
         ):
-            out = _collect_existing_snap_dates(MagicMock(), catalog, "abc12345")
+            out = _collect_existing_snap_dates(
+                MagicMock(), catalog, "abc12345", time_col="as_of",
+            )
 
+        # time_col is threaded through, not hardcoded: the framework's time
+        # column is configurable via schema.time.
         assert out == {
-            "test_keys": ["t_keys-abc12345"],
-            "test_model_input": ["t_mi-abc12345"],
+            "test_keys": ["t_keys-abc12345-as_of"],
+            "test_model_input": ["t_mi-abc12345-as_of"],
         }
         assert "preprocessed_feature_table" not in out
 

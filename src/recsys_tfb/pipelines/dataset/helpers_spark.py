@@ -1,5 +1,6 @@
 """Helper functions for the dataset building pipeline (Spark backend)."""
 
+import datetime
 import logging
 
 import pandas as pd
@@ -10,6 +11,14 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import HASH_BUCKETS, spark_bucket
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_iso_date(value: str) -> bool:
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def existing_snap_date_partitions(
@@ -56,8 +65,21 @@ def existing_snap_date_partitions(
         if spec.get("base_dataset_version") != base_dataset_version:
             continue
         value = spec.get(time_col)
-        if value:
-            found.add(value)
+        if not value:
+            continue
+        if not _looks_like_iso_date(value):
+            # Hive writes NULL partition values as __HIVE_DEFAULT_PARTITION__.
+            # Passing that on would blow up in pd.Timestamp() far downstream
+            # with a message that names neither this table nor this column, so
+            # drop it here and say which partition was unreadable. Dropping is
+            # the safe direction: the month is then treated as not-yet-landed
+            # and gets reprocessed.
+            logger.warning(
+                "Ignoring unreadable %s partition value %r in %s",
+                time_col, value, fqn,
+            )
+            continue
+        found.add(value)
     return sorted(found)
 
 

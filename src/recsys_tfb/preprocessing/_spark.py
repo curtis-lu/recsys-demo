@@ -409,8 +409,17 @@ def apply_preprocessor_to_features(
     # short-circuiting: Hive's dynamic partition overwrite only touches
     # partitions present in the written data, so an empty write leaves the
     # existing partitions intact — but only if the schema still matches.
+    # Both sides pinned to DATE. feature_table is a source table whose time
+    # column is a real DATE/TIMESTAMP today, so a bare isin() would work — but
+    # if it ever arrives as a string, isin() against timestamp literals matches
+    # zero rows and raises nothing, and this node's empty output is now a
+    # *documented normal state* (see the comment above) rather than an obvious
+    # anomaly. That combination would turn a type mismatch into silent data
+    # loss, so normalise here too.
     date_filter = (
-        F.col(time_col).isin(needed_dates) if needed_dates else F.lit(False)
+        F.to_date(F.col(time_col)).isin([pd.Timestamp(d).date() for d in needed_dates])
+        if needed_dates
+        else F.lit(False)
     )
     with log_step(logger, "select_columns"):
         result = feature_table.filter(date_filter).select(*keep_cols)
