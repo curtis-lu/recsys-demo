@@ -711,3 +711,193 @@ class TestValidateDataConsistencyB6:
             validate_data_consistency(sample_pool, label_table, with_bool, parameters)
             is None
         )
+
+
+# --- ADR-0002: the test branch only processes months that have not landed ---
+
+from recsys_tfb.pipelines.dataset.nodes_shared import (
+    EXISTING_SNAP_DATES_KEY,
+    REBUILD_SNAP_DATES_KEY,
+)
+from recsys_tfb.pipelines.dataset.nodes_spark import (
+    build_test_model_input,
+    filter_test_model_input,
+)
+
+_TEST_MONTHS = ["2024-04-30", "2024-05-31"]
+
+
+def _incremental_params(parameters, existing=None, rebuild=None):
+    """parameters with two test months and an injected partition listing."""
+    params = {
+        **parameters,
+        "dataset": {
+            **parameters["dataset"],
+            "val_snap_dates": [],          # keep splits disjoint
+            "test_snap_dates": list(_TEST_MONTHS),
+        },
+    }
+    if existing is not None:
+        params[EXISTING_SNAP_DATES_KEY] = existing
+    if rebuild is not None:
+        params[REBUILD_SNAP_DATES_KEY] = rebuild
+    return params
+
+
+def _months(df):
+    return sorted(str(d.date()) for d in df.select("snap_date").distinct().toPandas()["snap_date"])
+
+
+class TestSelectTestKeysIncremental:
+    def test_processes_only_the_month_that_has_not_landed(self, label_table, parameters):
+        params = _incremental_params(
+            parameters, existing={"test_keys": ["2024-04-30"]},
+        )
+        assert _months(select_test_keys(label_table, params)) == ["2024-05-31"]
+
+    def test_all_months_landed_yields_nothing(self, label_table, parameters):
+        params = _incremental_params(
+            parameters, existing={"test_keys": list(_TEST_MONTHS)},
+        )
+        assert select_test_keys(label_table, params).count() == 0
+
+    def test_rebuild_reprocesses_a_landed_month(self, label_table, parameters):
+        params = _incremental_params(
+            parameters,
+            existing={"test_keys": list(_TEST_MONTHS)},
+            rebuild=["2024-04-30"],
+        )
+        assert _months(select_test_keys(label_table, params)) == ["2024-04-30"]
+
+    def test_no_injected_listing_processes_everything(self, label_table, parameters):
+        # Backwards-compatible default: driven outside the CLI, nothing is known
+        # to exist, so every configured month is processed.
+        params = _incremental_params(parameters)
+        assert _months(select_test_keys(label_table, params)) == _TEST_MONTHS
+
+    def test_reads_its_own_dataset_key_not_another(self, label_table, parameters):
+        # A listing for a *different* dataset must not silence this node — each
+        # node is gated on the partitions of the artifact it produces.
+        params = _incremental_params(
+            parameters, existing={"test_model_input": list(_TEST_MONTHS)},
+        )
+        assert _months(select_test_keys(label_table, params)) == _TEST_MONTHS
+
+
+class TestBuildTestModelInputIncremental:
+    def test_filters_keys_that_already_landed(
+        self, feature_table, label_table, parameters
+    ):
+        # test_keys is a persistent Hive table: reading it back yields every
+        # month, including ones select_test_keys did not rewrite. This node must
+        # re-apply the diff itself rather than trust its input.
+        params = _incremental_params(
+            parameters, existing={"test_model_input": ["2024-04-30"]},
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        all_month_keys = label_table.select(
+            "snap_date", "cust_id", "prod_name"
+        ).dropDuplicates()
+
+        result = build_test_model_input(
+            all_month_keys, encoded, label_table, preprocessor, params,
+        )
+        assert _months(result) == ["2024-05-31"]
+
+    def test_rebuild_reprocesses_a_landed_month(
+        self, feature_table, label_table, parameters
+    ):
+        params = _incremental_params(
+            parameters,
+            existing={"test_model_input": list(_TEST_MONTHS)},
+            rebuild=["2024-05-31"],
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        all_month_keys = label_table.select(
+            "snap_date", "cust_id", "prod_name"
+        ).dropDuplicates()
+
+        result = build_test_model_input(
+            all_month_keys, encoded, label_table, preprocessor, params,
+        )
+        assert _months(result) == ["2024-05-31"]
+
+
+class TestFilterTestModelInputIncremental:
+    def test_filters_months_that_already_landed(
+        self, feature_table, label_table, parameters
+    ):
+        params = _incremental_params(
+            parameters, existing={"test_model_input": ["2024-04-30"]},
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        all_month_keys = label_table.select(
+            "snap_date", "cust_id", "prod_name"
+        ).dropDuplicates()
+        # Feed it an unfiltered frame on purpose (the sliced-resume scenario).
+        unfiltered = build_test_model_input(
+            all_month_keys, encoded, label_table, preprocessor,
+            _incremental_params(parameters),
+        )
+        assert _months(unfiltered) == _TEST_MONTHS
+
+        result = filter_test_model_input(unfiltered, params)
+        assert _months(result) == ["2024-05-31"]
+
+
+class TestApplyPreprocessorIncremental:
+    def test_skips_months_that_already_landed(self, feature_table, parameters):
+        params = _incremental_params(
+            parameters,
+            existing={"preprocessed_feature_table": ["2024-01-31", "2024-04-30"]},
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        result = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        # configured union = train(01,02,03) + test(04,05); 01 and 04 landed.
+        assert _months(result) == ["2024-02-29", "2024-03-31", "2024-05-31"]
+
+    def test_all_months_landed_yields_an_empty_but_typed_frame(
+        self, feature_table, parameters
+    ):
+        params = _incremental_params(parameters)
+        full = apply_preprocessor_to_features(
+            feature_table, fit_preprocessor_metadata(feature_table, params)[0], params,
+        )
+        landed = {
+            "preprocessed_feature_table": [
+                "2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31",
+            ]
+        }
+        params_all_landed = _incremental_params(parameters, existing=landed)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params_all_landed)
+        result = apply_preprocessor_to_features(
+            feature_table, preprocessor, params_all_landed,
+        )
+        assert result.count() == 0
+        # Schema must survive the empty case: an empty write with a drifted
+        # schema is how a dynamic-partition overwrite corrupts a live table.
+        assert result.dtypes == full.dtypes
+
+    def test_missing_feature_table_month_is_only_checked_when_processed(
+        self, feature_table, parameters
+    ):
+        # A month absent from feature_table but already landed must NOT raise —
+        # this run does not read it.
+        params = _incremental_params(parameters)
+        params["dataset"] = {
+            **params["dataset"],
+            "test_snap_dates": ["2024-04-30", "2024-05-31", "2024-12-31"],
+        }
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+
+        with pytest.raises(ValueError, match="2024-12-31"):
+            apply_preprocessor_to_features(feature_table, preprocessor, params)
+
+        params_landed = {
+            **params,
+            EXISTING_SNAP_DATES_KEY: {"preprocessed_feature_table": ["2024-12-31"]},
+        }
+        apply_preprocessor_to_features(feature_table, preprocessor, params_landed)

@@ -347,11 +347,19 @@ def apply_preprocessor_to_features(
     feature_table: DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
+    snap_dates: list | None = None,
 ) -> DataFrame:
     """Encode non-identity categoricals in Spark feature_table at customer-month granularity.
 
-    Filters feature_table to the union of all dataset snap_dates (train ∪ cal ∪ val ∪ test).
-    Raises ``ValueError`` if any required snap_date is missing from feature_table.
+    Filters feature_table to ``snap_dates``, defaulting to the union of all
+    dataset snap_dates (train ∪ cal ∪ val ∪ test). The dataset pipeline passes
+    an explicit list so that months whose partition already landed are not
+    re-encoded into a bit-identical result (ADR-0002).
+
+    Raises ``ValueError`` if any snap_date about to be processed is missing from
+    feature_table. Months that are *not* being processed are deliberately not
+    checked — this run does not read them, so requiring feature_table to retain
+    them forever would be a false alarm.
 
     Output: (time + entity) + feature_columns that live in feature_table.
     """
@@ -375,26 +383,37 @@ def apply_preprocessor_to_features(
         raise ValueError(f"feature_table missing base-key columns: {missing_base}")
     _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
 
-    needed_dates = collect_dataset_snap_dates(parameters)
+    needed_dates = (
+        [pd.Timestamp(d) for d in snap_dates]
+        if snap_dates is not None
+        else collect_dataset_snap_dates(parameters)
+    )
 
-    # Fail-loud if feature_table is missing any required snap_date.
-    ft_dates = {
-        row[time_col]
-        for row in feature_table.select(time_col).distinct().collect()
-    }
-    ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
-    missing = sorted(set(needed_dates) - ft_dates)
-    if missing:
-        raise ValueError(
-            "feature_table missing required snap_dates: "
-            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
-        )
+    # Fail-loud if feature_table is missing any snap_date we are about to
+    # process. Skipped months are not checked: this run never reads them.
+    if needed_dates:
+        ft_dates = {
+            row[time_col]
+            for row in feature_table.select(time_col).distinct().collect()
+        }
+        ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
+        missing = sorted(set(needed_dates) - ft_dates)
+        if missing:
+            raise ValueError(
+                "feature_table missing required snap_dates: "
+                f"{[d.strftime('%Y-%m-%d') for d in missing]}"
+            )
 
+    # An empty date list means every configured month already landed. The node
+    # still returns a properly-typed empty frame (encoding included) rather than
+    # short-circuiting: Hive's dynamic partition overwrite only touches
+    # partitions present in the written data, so an empty write leaves the
+    # existing partitions intact — but only if the schema still matches.
+    date_filter = (
+        F.col(time_col).isin(needed_dates) if needed_dates else F.lit(False)
+    )
     with log_step(logger, "select_columns"):
-        result = (
-            feature_table.filter(F.col(time_col).isin(needed_dates))
-            .select(*keep_cols)
-        )
+        result = feature_table.filter(date_filter).select(*keep_cols)
 
     with log_step(logger, "encode_categoricals"):
         encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]

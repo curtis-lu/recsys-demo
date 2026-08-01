@@ -8,7 +8,9 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     from recsys_tfb.pipelines.dataset.nodes_spark import (
         apply_preprocessor_to_features,
         build_model_input,
+        build_test_model_input,
         filter_groups_with_positives,
+        filter_test_model_input,
         fit_preprocessor_metadata,
         select_calibration_keys,
         select_test_keys,
@@ -93,8 +95,11 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             outputs="val_model_input_unfiltered",
             name="build_val_model_input",
         ),
+        # test uses its own wrapper: the four test-branch nodes are incremental
+        # (only months that have not landed yet), which train/val/calibration
+        # are not. See ADR-0002.
         Node(
-            build_model_input,
+            build_test_model_input,
             inputs=[
                 "test_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
@@ -114,7 +119,7 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             name="filter_val_model_input",
         ),
         Node(
-            filter_groups_with_positives,
+            filter_test_model_input,
             inputs=["test_model_input_unfiltered", "parameters"],
             outputs="test_model_input",
             name="filter_test_model_input",
