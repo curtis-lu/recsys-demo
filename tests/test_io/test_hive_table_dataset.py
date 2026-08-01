@@ -980,3 +980,88 @@ class TestSchemaEvolutionIntegration:
         finally:
             spark.sql("DROP TABLE IF EXISTS evo_test.model_input")
             spark.sql("DROP DATABASE IF EXISTS evo_test CASCADE")
+
+
+class TestPartialWriteLeavesPartitionsIntact:
+    """The two write shapes the incremental dataset branch depends on.
+
+    ADR-0002 lets a node write only the months it processed. Everything rests
+    on a write that names a subset of partitions leaving the rest alone, and on
+    a zero-row write being a no-op rather than a truncation. Both are Spark /
+    Hive behaviours rather than ours, so these are characterization tests:
+    their job is to fail loudly if a Spark upgrade changes the contract, not to
+    catch a bug in our own code.
+
+    Measured, not assumed (Spark 3.3.2, local Hive metastore): flipping
+    ``save()``'s ``spark.sql.sources.partitionOverwriteMode`` from ``dynamic``
+    to ``static`` leaves **both** tests green. That conf governs DataSource
+    writes; these are Hive-serde tables written via ``insertInto``, where
+    per-partition overwrite is the engine's own behaviour. So do not read these
+    tests as covering that setting — no mutation inside this repo makes them
+    red, which is exactly what a characterization test looks like.
+    """
+
+    def _make_ds(self) -> HiveTableDataset:
+        return HiveTableDataset(
+            database="empty_write_test",
+            table="model_input",
+            columns="auto",
+            partition_filter={"base_dataset_version": "v1"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+    def test_empty_frame_does_not_clear_existing_partitions(self, spark):
+        spark.sql("CREATE DATABASE IF NOT EXISTS empty_write_test")
+        spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+        try:
+            populated = spark.createDataFrame(
+                [("c1", 0.5, "2024-01-31"), ("c2", 0.7, "2024-02-29")],
+                ["cust_id", "score", "snap_date"],
+            )
+            self._make_ds().save(populated)
+
+            before = spark.sql(
+                "SHOW PARTITIONS empty_write_test.model_input"
+            ).collect()
+            assert len(before) == 2
+
+            # Same schema, zero rows — what the node emits when nothing is new.
+            from pyspark.sql import functions as F
+
+            self._make_ds().save(populated.filter(F.lit(False)))
+
+            after = spark.sql(
+                "SHOW PARTITIONS empty_write_test.model_input"
+            ).collect()
+            assert [r[0] for r in after] == [r[0] for r in before]
+            assert self._make_ds().load().count() == 2
+        finally:
+            spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+            spark.sql("DROP DATABASE IF EXISTS empty_write_test CASCADE")
+
+    def test_writing_one_month_leaves_the_other_months_alone(self, spark):
+        """The actual incremental write: only the new month is in the frame."""
+        spark.sql("CREATE DATABASE IF NOT EXISTS empty_write_test")
+        spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+        try:
+            self._make_ds().save(spark.createDataFrame(
+                [("c1", 0.5, "2024-01-31"), ("c2", 0.7, "2024-02-29")],
+                ["cust_id", "score", "snap_date"],
+            ))
+            # A later run that processed only March writes only March.
+            self._make_ds().save(spark.createDataFrame(
+                [("c3", 0.9, "2024-03-31")], ["cust_id", "score", "snap_date"],
+            ))
+
+            months = sorted(
+                r[0].split("snap_date=")[1]
+                for r in spark.sql(
+                    "SHOW PARTITIONS empty_write_test.model_input"
+                ).collect()
+            )
+            assert months == ["2024-01-31", "2024-02-29", "2024-03-31"]
+            assert self._make_ds().load().count() == 3
+        finally:
+            spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+            spark.sql("DROP DATABASE IF EXISTS empty_write_test CASCADE")

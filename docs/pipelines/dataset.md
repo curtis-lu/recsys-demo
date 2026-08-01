@@ -204,12 +204,15 @@ model input 寫出前，Decimal 與 Double 類型的 feature 會轉成 Spark `fl
 | 選項 | 預設 | 說明 |
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇設定環境 |
+| `--rebuild-dates <d1,d2>` | 無 | 強制重算指定 test 月份（即使 partition 已存在）；值必須是 `test_snap_dates` 的子集 |
 | `--from-node <name>` | 無 | 從指定 node 與其後的 nodes 開始執行 |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開，不執行 pipeline |
 | `--list-nodes` | 關閉 | 列出 node 名稱與從該處接續時的自動補跑成本 |
 
 dataset 不接受版本旗標。每次啟動都會依目前設定、schema 與 `feature_table` schema 重新計算版本；指定既有 dataset 版本是下游 training 的責任。
+
+`--rebuild-dates` 的值不是 `test_snap_dates` 的子集時，在 Spark 啟動之前就報錯退出（一致性不變量 A21）。它與 `--from-node`／`--only-node` **可以併用**（切片選 node、rebuild 選月份，兩者正交），但併用時會印一段 WARN：未被選中的上游 node 不會重算，那些 partition 仍是舊的。用法與時機見 [新增一個評估月份](../operations/adding-an-eval-month.md)。
 
 `--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--dry-run` 可單獨使用表示 full-run 計畫，也可搭配切片選項檢視部分重跑計畫。
 
@@ -283,10 +286,10 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | 資料閘 | `validate_data_consistency` | 三張來源表、parameters | 檢查 item coverage 與 categorical feature 型別，收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys`、`train_dev_keys` |
-| Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool` | 建立 val 與 test identity keys；val 可依 entity 縮減 | `val_keys`、`test_keys` |
+| Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool` | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理尚未落地的月份 | `val_keys`、`test_keys` |
 | Calibration keys | `select_calibration_keys` | `sample_pool` | 依 calibration 日期與比例抽樣 | `calibration_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
-| 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor` | 篩選所有 split 日期、編碼 feature categoricals | `preprocessed_feature_table` |
+| 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor` | 編碼 feature categoricals；只處理尚未落地的月份 | `preprocessed_feature_table` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor | left join label 與 feature，補齊缺失 label，選取欄位並轉 float32 | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
 
@@ -296,6 +299,14 @@ model input 的組裝規則：
 2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
 3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
 4. val/test 才會移除零正例 query groups；train、train-dev 與 calibration 保留所有 rows。
+
+### 5.1 test 分支是增量的
+
+`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input`、`filter_test_model_input` 四個 node 只處理**尚未落地**的月份：差集由 metastore 的 partition 清單（零掃描）得出，四者共用 `nodes_shared.plan_incremental_snap_dates` 這一個純函式，沒有任何一處自行計算。train／train-dev／val／calibration **不是**增量的，每次都整批重算。
+
+之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows 與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
+
+代價、`--rebuild-dates` 逃生口與完整理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)。
 
 ## 6. 產物與驗收
 
@@ -458,7 +469,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 ### 7.5 部分重跑的安全邊界
 
-- catalog 的 `exists()` 只能確認產物存在，不能證明內容由目前參數或來源資料產生。
+- catalog 的 `exists()` 只能確認產物存在，不能證明內容由目前參數或來源資料產生。**test 分支的增量跳過把這件事變成了正常執行路徑的預設行為**：`feature_table` 對某個舊 test 月份回補之後，該月 partition 不會自動更新且不報錯，得用 `--rebuild-dates` 指名重算（[ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)）。
 - dataset 的主要 Hive 產物具有版本 partitions，可降低設定改變後誤讀舊資料的風險；來源資料值回補與 seed 變更仍需人工判斷。
 - `validate_data_consistency` 沒有輸出，若它位於切片起點之前便不會自動重跑。source tables 或 item 資料有變時應執行 full run。
 - `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。
