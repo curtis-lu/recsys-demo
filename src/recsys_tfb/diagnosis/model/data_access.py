@@ -2,7 +2,10 @@
 
 I/O layer: the only place in diagnostics that touches ``pyarrow.dataset``.
 Reads operate on the hive-partitioned ``*_model_input`` caches
-(``…/snap_date=…/prod_name=…/``) written by the training cache nodes.
+(``…/snap_date=…/prod_name=…/``) written by the training cache nodes. A path
+may be a list of roots (test is cached one directory per month); pyarrow
+treats them as one dataset, and fragment order stays deterministic as long as
+the list itself is (see ``io.handles.handle_paths``).
 
 Row order is the deterministic path-sorted fragment order (``use_threads=False``),
 identical to ``pyarrow.parquet.read_table``. So positional indices computed
@@ -20,23 +23,23 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def _dataset(path: str):
-    import pyarrow.dataset as pads
+def _dataset(path: str | list[str]):
+    from recsys_tfb.io.handles import parquet_dataset
 
-    return pads.dataset(path, format="parquet", partitioning="hive")
+    return parquet_dataset(path)
 
 
-def count_rows(path: str) -> int:
+def count_rows(path: str | list[str]) -> int:
     """Total row count from parquet metadata (no data scan)."""
     return int(_dataset(path).count_rows())
 
 
-def schema_names(path: str) -> list:
+def schema_names(path: str | list[str]) -> list:
     """All column names (including hive partition columns)."""
     return list(_dataset(path).schema.names)
 
 
-def read_column(path: str, col: str) -> np.ndarray:
+def read_column(path: str | list[str], col: str) -> np.ndarray:
     """Read a single column (incl. a hive partition column) as a 1-D numpy array.
 
     Returns all N values in deterministic fragment order. Used to stratify the
@@ -46,7 +49,7 @@ def read_column(path: str, col: str) -> np.ndarray:
     return table.column(col).to_numpy(zero_copy_only=False)
 
 
-def take_rows(path: str, indices, columns: list) -> pd.DataFrame:
+def take_rows(path: str | list[str], indices, columns: list) -> pd.DataFrame:
     """Read only the rows at positional ``indices``, projected to ``columns``.
 
     Memory is bounded to the output plus one row-group batch — the full table is

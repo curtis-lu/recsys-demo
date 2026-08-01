@@ -464,7 +464,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
-| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...` |
+| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`），加一個月只複製那一個月、既有月份不動；設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。

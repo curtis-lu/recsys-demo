@@ -18,7 +18,7 @@ from recsys_tfb.evaluation.metrics import (
     compute_macro_per_item_map,
     compute_mean_ap,
 )
-from recsys_tfb.io.handles import ParquetHandle
+from recsys_tfb.io.handles import ParquetHandle, handle_paths, parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
@@ -104,9 +104,23 @@ def persist_sample_weight_report(
 # Cache helpers
 # ---------------------------------------------------------------------------
 
+# Sentinel layout token resolved from the ``snap_date`` argument of
+# _resolve_cache_path — not a `parameters` key and not a directory name. The
+# "!" prefix keeps it from being misread as the sibling literal directory
+# component "test_months".
+_TEST_MONTH_TOKEN = "!test_month"
+
+# Tokens written into the path verbatim rather than looked up in `parameters`.
+_CACHE_LITERAL_TOKENS = frozenset(
+    {"train_variants", "calibration_variants", "test_months"}
+)
+
 _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
     "val_model_input": ("base_dataset_version",),
-    "test_model_input": ("base_dataset_version",),
+    # test is cached one directory per month: each month is its own cache entry
+    # with its own _SUCCESS, so adding a month adds a directory and leaves every
+    # existing month untouched.
+    "test_model_input": ("base_dataset_version", "test_months", _TEST_MONTH_TOKEN),
     "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "calibration_model_input": (
@@ -139,12 +153,21 @@ _CACHE_OUTER_PARTITIONS: dict[str, tuple[str, ...]] = {
 
 
 def _populate_cache_from_hive(
-    spark, dataset_name: str, parameters: dict, local_dst: str
+    spark, dataset_name: str, parameters: dict, local_dst: str,
+    snap_date: Optional[str] = None,
 ) -> None:
     """Copy the relevant Hive partition subtree to driver-local fs.
 
     Local layout after copy:
         <local_dst>/snap_date=.../prod_name=.../*.parquet
+
+    ``snap_date`` narrows the copy to a single month (test caching). A month
+    the source table does not hold makes the glob match nothing, and
+    ``copy_hdfs_to_local`` raises FileNotFoundError — that is how "configured a
+    month but never ran dataset" surfaces, so no separate coverage check exists.
+    That path leaves an empty destination directory behind (the copier mkdirs
+    before globbing); it carries no ``_SUCCESS``, so the partial-cache branch of
+    _materialize_parquet_handle clears and rebuilds it on the next run.
 
     Source-table resolution:
       1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
@@ -162,7 +185,8 @@ def _populate_cache_from_hive(
         f"{tok}={parameters[tok]}"
         for tok in _CACHE_OUTER_PARTITIONS[dataset_name]
     )
-    src_glob = f"{location.rstrip('/')}/{outer}/snap_date=*"
+    inner = "snap_date=*" if snap_date is None else f"snap_date={snap_date}"
+    src_glob = f"{location.rstrip('/')}/{outer}/{inner}"
     copy_hdfs_to_local(spark, src_glob, local_dst, glob=True)
 
 
@@ -196,11 +220,19 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
         parameters["_cache_source_tables"] = auto
 
 
-def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
+def _resolve_cache_path(
+    dataset_name: str, parameters: dict, snap_date: Optional[str] = None
+) -> str:
     """Compose the local-cache parquet directory path for a model_input dataset.
 
     Mirrors the layered structure used by production catalog filepaths:
       <root>/<base_dataset_version>/[train_variants/<train_variant_id>/]<name>.parquet
+
+    ``test_model_input`` additionally nests under ``test_months/<YYYYMMDD>/`` and
+    therefore requires ``snap_date``. The month is written literally (the
+    ``YYYYMMDD`` convention evaluation report paths already use) rather than
+    hashed: a directory naming exactly one month is readable off ``ls`` and
+    cannot disagree with its own contents.
     """
     if dataset_name not in _CACHE_PATH_LAYOUT:
         raise ValueError(f"unknown dataset for cache path: {dataset_name!r}")
@@ -208,8 +240,15 @@ def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
     root = Path(cache_cfg.get("root", "/tmp/recsys_cache"))
     parts = [root]
     for token in _CACHE_PATH_LAYOUT[dataset_name]:
-        if token in ("train_variants", "calibration_variants"):
+        if token in _CACHE_LITERAL_TOKENS:
             parts.append(Path(token))
+        elif token == _TEST_MONTH_TOKEN:
+            if snap_date is None:
+                raise ValueError(
+                    f"{dataset_name} cache path requires a snap_date "
+                    "(it is cached one directory per test month)"
+                )
+            parts.append(Path(str(snap_date).replace("-", "")))
         else:
             value = parameters[token]
             parts.append(Path(value))
@@ -221,7 +260,7 @@ def _resolve_cache_path(dataset_name: str, parameters: dict) -> str:
 
 
 def _materialize_parquet_handle(
-    df, dataset_name: str, parameters: dict
+    df, dataset_name: str, parameters: dict, snap_date: Optional[str] = None
 ) -> ParquetHandle:
     """Skip-if-exists local-parquet cache for a single model_input.
 
@@ -240,7 +279,7 @@ def _materialize_parquet_handle(
             "writable cache.root."
         )
 
-    local_path = _resolve_cache_path(dataset_name, parameters)
+    local_path = _resolve_cache_path(dataset_name, parameters, snap_date)
     success_marker = Path(local_path) / "_SUCCESS"
 
     if Path(local_path).exists() and not success_marker.exists():
@@ -252,7 +291,9 @@ def _materialize_parquet_handle(
     if not success_marker.exists():
         spark = df.sql_ctx.sparkSession
         logger.info("cache_miss name=%s path=%s", dataset_name, local_path)
-        _populate_cache_from_hive(spark, dataset_name, parameters, local_path)
+        _populate_cache_from_hive(
+            spark, dataset_name, parameters, local_path, snap_date
+        )
         success_marker.touch()
     else:
         logger.info("cache_hit name=%s path=%s", dataset_name, local_path)
@@ -281,9 +322,27 @@ def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
     return _materialize_parquet_handle(val_model_input, "val_model_input", parameters)
 
 
-def cache_test_model_input(test_model_input, parameters: dict) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for test_model_input."""
-    return _materialize_parquet_handle(test_model_input, "test_model_input", parameters)
+def cache_test_model_input(
+    test_model_input, parameters: dict
+) -> dict[str, ParquetHandle]:
+    """Skip-if-exists local-parquet cache for test_model_input, one dir per month.
+
+    Returns ``{snap_date: handle}`` keyed by the **verbatim**
+    ``dataset.test_snap_dates`` values (no format conversion), sorted so the
+    mapping is deterministic. Each month is cached and invalidated on its own:
+    adding a month copies only that month, and a month whose copy was
+    interrupted is rebuilt without disturbing its siblings.
+
+    Duplicate dates in config collapse — the same month is the same cache entry.
+    """
+    months = sorted({str(d) for d in (parameters.get("dataset") or {}).get(
+        "test_snap_dates") or []})
+    return {
+        month: _materialize_parquet_handle(
+            test_model_input, "test_model_input", parameters, snap_date=month
+        )
+        for month in months
+    }
 
 
 def cache_calibration_model_input(calibration_model_input, parameters: dict) -> ParquetHandle:
@@ -806,7 +865,7 @@ def calibrate_model(
 
 def predict_and_write_test_predictions(
     model: ModelAdapter,
-    test_parquet_handle: ParquetHandle,
+    test_parquet_handle: dict[str, ParquetHandle],
     preprocessor_metadata: dict,
     parameters: dict,
     training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
@@ -850,7 +909,7 @@ def predict_and_write_test_predictions(
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
     # columns from the snap_date=*/prod_name=* directory tree produced by
     # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
-    ds = pads.dataset(test_parquet_handle.path, format="parquet", partitioning="hive")
+    ds = parquet_dataset(handle_paths(test_parquet_handle))
 
     # Enumerate distinct (snap_date, prod_name) values by projecting just the
     # two partition columns and de-duplicating. Note: select-on-partition-cols

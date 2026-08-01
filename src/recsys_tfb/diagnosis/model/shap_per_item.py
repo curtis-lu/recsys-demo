@@ -129,7 +129,11 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     item_col, label_col = schema["item"], schema["label"]
     feature_cols = list(preprocessor["feature_columns"])
 
-    path = test_parquet_handle.path
+    # 讀所有設定月份的聯集——與本次改動前的語意完全相同（同樣的列、同樣的分層）。
+    # 依月份切分診斷是 Phase B 的題目，見 issue #128 Out of Scope。
+    from recsys_tfb.io.handles import handle_paths
+
+    path = handle_paths(test_parquet_handle)
 
     n_trees = attribution_budget_units(model)
     eff_sample = sample_rows
