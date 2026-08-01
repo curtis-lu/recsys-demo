@@ -40,7 +40,10 @@ def test_a22_wired_into_evaluation_command_before_spark():
     # real needs a config tree and would build a Spark session on the happy
     # path. It catches deletion of the call, not misuse of its result.
     src = inspect.getsource(m.evaluation)
-    assert "post_training_snap_date_errors(" in src
+    # The flag must be forwarded, not hardcoded: `post_training=True` would
+    # break monitoring, `post_training=False` would disable A22 entirely, and
+    # both keep the unit tests green because they call the predicate directly.
+    assert "post_training_snap_date_errors(params, post_training=post_training)" in src
     assert src.index("post_training_snap_date_errors(") < src.index(
         "get_or_create_spark_session("
     ), "A22 must fail before the Spark cold start, like A21"

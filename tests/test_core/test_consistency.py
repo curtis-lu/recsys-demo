@@ -1163,7 +1163,7 @@ class TestResolvedRebuildDatesA21:
 from recsys_tfb.core.consistency import post_training_snap_date_errors
 
 
-def _eval_ds(snap_date, *test_dates) -> dict:
+def _eval_params(snap_date, *test_dates) -> dict:
     """Merged-parameters shape: evaluation.snap_date + dataset.test_snap_dates."""
     params = _ds(*test_dates)
     params["evaluation"] = {"snap_date": snap_date}
@@ -1180,7 +1180,7 @@ class TestPostTrainingSnapDateA22:
         # THE point of wiring this by flag instead of as a plain predicate:
         # default mode reads inference output, whose month need not be a test
         # month. Same config as test_post_training_rejects_non_test_month.
-        params = _eval_ds("2026-09-30", "2026-01-31", "2026-02-28")
+        params = _eval_params("2026-09-30", "2026-01-31", "2026-02-28")
         assert post_training_snap_date_errors(params, post_training=False) == []
 
     def test_monitoring_mode_ignores_an_unset_snap_date(self):
@@ -1189,40 +1189,51 @@ class TestPostTrainingSnapDateA22:
         ) == []
 
     def test_post_training_accepts_a_configured_month(self):
-        params = _eval_ds("2026-02-28", "2026-01-31", "2026-02-28")
+        params = _eval_params("2026-02-28", "2026-01-31", "2026-02-28")
         assert post_training_snap_date_errors(params, post_training=True) == []
 
     def test_post_training_rejects_non_test_month(self):
-        params = _eval_ds("2026-09-30", "2026-01-31", "2026-02-28")
+        params = _eval_params("2026-09-30", "2026-01-31", "2026-02-28")
         errs = post_training_snap_date_errors(params, post_training=True)
         assert len(errs) == 1
         assert "is not a test month" in errs[0]
 
     def test_error_names_the_configured_value_and_the_available_months(self):
-        params = _eval_ds("2026-09-30", "2026-01-31", "2026-02-28")
+        params = _eval_params("2026-09-30", "2026-01-31", "2026-02-28")
         msg = post_training_snap_date_errors(params, post_training=True)[0]
         assert "2026-09-30" in msg          # what was asked for
         assert "2026-01-31" in msg          # what IS available
         assert "2026-02-28" in msg
         assert "dataset.test_snap_dates" in msg  # where to fix it
 
-    def test_empty_test_snap_dates_rejects(self):
-        params = _eval_ds("2026-09-30")
-        errs = post_training_snap_date_errors(params, post_training=True)
+    def test_empty_test_snap_dates_rejects_with_its_own_wording(self):
+        # Match on the empty-config wording, NOT "is not a test month": "you
+        # configured no test months" and "you picked the wrong one of several"
+        # need different fixes, so one message must not stand in for the other.
+        errs = post_training_snap_date_errors(
+            _eval_params("2026-09-30"), post_training=True
+        )
         assert len(errs) == 1
-        assert "is not a test month" in errs[0]
+        assert "dataset.test_snap_dates is empty" in errs[0]
+
+    def test_missing_dataset_section_rejects_as_empty(self):
+        errs = post_training_snap_date_errors(
+            {"evaluation": {"snap_date": "2026-09-30"}}, post_training=True
+        )
+        assert len(errs) == 1
+        assert "dataset.test_snap_dates is empty" in errs[0]
 
     def test_unset_snap_date_rejects_under_post_training(self):
         # Match on the readability wording, NOT "is not a test month": an unset
         # value must not be reported as "some other month" — it never reached
         # the membership test.
-        params = {"dataset": {"test_snap_dates": ["2026-01-31"]}}
+        params = {"dataset": {"test_snap_dates": ["2026-01-31"]}, "evaluation": {}}
         errs = post_training_snap_date_errors(params, post_training=True)
         assert len(errs) == 1
         assert "not a readable ISO date" in errs[0]
 
     def test_malformed_snap_date_rejects_with_readability_wording(self):
-        params = _eval_ds("31/01/2026", "2026-01-31")
+        params = _eval_params("31/01/2026", "2026-01-31")
         errs = post_training_snap_date_errors(params, post_training=True)
         assert len(errs) == 1
         assert "not a readable ISO date" in errs[0]
@@ -1231,7 +1242,7 @@ class TestPostTrainingSnapDateA22:
     def test_unreadable_configured_month_blames_the_config(self):
         # Mirrors A21: a broken test_snap_dates entry must not surface as
         # "your snap_date is wrong" with a truncated available-months list.
-        params = _eval_ds("2026-01-31", "2026-01-31", "not-a-date")
+        params = _eval_params("2026-01-31", "2026-01-31", "not-a-date")
         errs = post_training_snap_date_errors(params, post_training=True)
         assert len(errs) == 1
         assert "unreadable date" in errs[0]
@@ -1239,17 +1250,17 @@ class TestPostTrainingSnapDateA22:
 
     def test_unquoted_yaml_date_in_config_matches_string_snap_date(self):
         # PyYAML turns an unquoted 2026-01-31 into datetime.date on either side.
-        params = _eval_ds("2026-01-31", _dt.date(2026, 1, 31))
+        params = _eval_params("2026-01-31", _dt.date(2026, 1, 31))
         assert post_training_snap_date_errors(params, post_training=True) == []
 
     def test_unquoted_yaml_date_as_snap_date_matches_string_config(self):
-        params = _eval_ds(_dt.date(2026, 1, 31), "2026-01-31")
+        params = _eval_params(_dt.date(2026, 1, 31), "2026-01-31")
         assert post_training_snap_date_errors(params, post_training=True) == []
 
     def test_datetime_shaped_snap_date_is_accepted(self):
         # pd.Timestamp accepts these everywhere else in the pipeline, so A22
         # must not be stricter than the code it guards.
-        params = _eval_ds("2026-01-31 00:00:00", "2026-01-31")
+        params = _eval_params("2026-01-31 00:00:00", "2026-01-31")
         assert post_training_snap_date_errors(params, post_training=True) == []
 
     def test_datetime_shaped_configured_month_is_accepted(self):
@@ -1258,14 +1269,17 @@ class TestPostTrainingSnapDateA22:
         # so dropping _iso_date there leaves them green. These two forms are
         # the ones where str() and the ISO normal form actually differ.
         assert post_training_snap_date_errors(
-            _eval_ds("2026-01-31", "2026-01-31 00:00:00"), post_training=True
+            _eval_params("2026-01-31", "2026-01-31 00:00:00"), post_training=True
         ) == []
         assert post_training_snap_date_errors(
-            _eval_ds("2026-01-31", _dt.datetime(2026, 1, 31, 0, 0)),
+            _eval_params("2026-01-31", _dt.datetime(2026, 1, 31, 0, 0)),
             post_training=True,
         ) == []
 
     def test_missing_evaluation_section_does_not_crash(self):
-        errs = post_training_snap_date_errors({"dataset": {}}, post_training=True)
+        # No `evaluation` key at all — guards the defensive `or {}` read.
+        errs = post_training_snap_date_errors(
+            {"dataset": {"test_snap_dates": ["2026-01-31"]}}, post_training=True
+        )
         assert len(errs) == 1
         assert "not a readable ISO date" in errs[0]

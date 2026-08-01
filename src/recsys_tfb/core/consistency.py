@@ -127,12 +127,18 @@ Layer 1 — config-static (implemented here; aggregated by
   ``training_eval_predictions``, which accumulates every month ever predicted
   for a ``model_version`` (test dates left the version identity in ADR-0001),
   so an unlisted month can still return rows and produce a normal-looking
-  report for a month the current config does not evaluate. Predicate:
-  ``post_training_snap_date_errors`` (returns errors; the evaluation command
-  raises). NOT aggregated by ``validate_config_consistency``: that runs at CLI
-  entry and cannot see ``--post-training``, and the default monitoring mode
-  reads inference output whose month legitimately need not be a test month —
-  wiring it there would block valid monitoring runs. Mirrors A13.
+  report for a month the current config does not evaluate. An unset or
+  unparseable ``evaluation.snap_date``, and an empty ``test_snap_dates``, are
+  rejected by the same predicate (each with its own wording — they need
+  different fixes). Applies to every ``--post-training`` run including
+  ``--compare-only``: that mode re-reads ``enriched_eval_predictions``, which
+  is partition-filtered by ``model_version`` alone and so accumulates months
+  the same way. Predicate: ``post_training_snap_date_errors`` (returns errors;
+  the evaluation command raises). NOT aggregated by
+  ``validate_config_consistency``: that runs at CLI entry and cannot see
+  ``--post-training``, and the default monitoring mode reads inference output
+  whose month legitimately need not be a test month — wiring it there would
+  block valid monitoring runs. Wired like A13.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -1184,13 +1190,18 @@ def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | Non
 def post_training_snap_date_errors(parameters: dict, post_training: bool) -> list[str]:
     """(A22) Under ``--post-training``, evaluation.snap_date must be a test month.
 
-    Returns error strings (empty list when fine); the CLI raises. Shaped like
+    Returns error strings (empty list when fine); the CLI raises. Wired like
     A13 — it lives here, but the evaluation command calls it explicitly and
-    hands it the mode flag. It is deliberately NOT aggregated by
-    ``validate_config_consistency``: that runs at CLI entry and never sees
-    ``--post-training``, and the default monitoring mode reads inference output
-    whose month legitimately need not be a test month, so an unconditional
-    predicate would block a valid run.
+    hands it the mode flag; the date handling mirrors A21. It is deliberately
+    NOT aggregated by ``validate_config_consistency``: that runs at CLI entry
+    and never sees ``--post-training``, and the default monitoring mode reads
+    inference output whose month legitimately need not be a test month, so an
+    unconditional predicate would block a valid run.
+
+    Reads the nested ``parameters['evaluation']['snap_date']`` — the same shape
+    ``evaluation.nodes_spark.prepare_eval_data`` reads, deliberately without
+    the CLI's flat-config fallback, so the value this guard checks cannot
+    diverge from the value the run filters on.
 
     Why this must fail loud rather than lean on the downstream empty-result
     guard in ``prepare_eval_data``: post-training evaluation reads
@@ -1215,6 +1226,16 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
         return [
             f"(A22) dataset.test_snap_dates holds unreadable date(s) "
             f"{unreadable!r}. Expected YYYY-MM-DD."
+        ]
+    if not declared:
+        # Distinct wording from the membership branch below: "you configured no
+        # test months at all" and "you picked the wrong one of several" call for
+        # different fixes, and the membership message would render the useless
+        # "dataset.test_snap_dates: []".
+        return [
+            "(A22) --post-training needs a configured test month, but "
+            "dataset.test_snap_dates is empty. Add the month you want to "
+            "evaluate and run dataset + predict for it first."
         ]
     configured = sorted({_iso_date(d) for d in declared})
 

@@ -1163,19 +1163,16 @@ def evaluation(
     # not in validate_config_consistency: that runs at CLI entry and cannot see
     # this flag, and monitoring mode (no flag) reads inference output whose
     # month need not be a test month. Checked before Spark starts, like A21.
-    # --compare-only is exempt: it never reads training_eval_predictions (it
-    # re-reads the already-persisted enriched_eval_predictions), so
-    # --post-training is inert on that path and blocking it would be a false
-    # positive on a month since dropped from test_snap_dates.
-    # `not compare_only` (not `is None`): the pipeline itself decides the mode
-    # with bool(compare_only) below, and the exemption must agree with it.
-    if not compare_only:
-        snap_date_errs = post_training_snap_date_errors(
-            params, post_training=post_training
-        )
-        if snap_date_errs:
-            logger.error("\n".join(snap_date_errs))
-            raise typer.Exit(code=1)
+    # No --compare-only carve-out: that mode re-reads enriched_eval_predictions,
+    # which is filtered by model_version alone and so accumulates months across
+    # config edits exactly like training_eval_predictions — the same exposure.
+    # And --post-training is inert on that path (create_pipeline returns the
+    # compare-only branch before it is read), so anyone this blocks gets an
+    # identical run by dropping the flag.
+    snap_date_errs = post_training_snap_date_errors(params, post_training=post_training)
+    if snap_date_errs:
+        logger.error("\n".join(snap_date_errs))
+        raise typer.Exit(code=1)
 
     get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
