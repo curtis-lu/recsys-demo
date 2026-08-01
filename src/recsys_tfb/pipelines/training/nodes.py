@@ -18,7 +18,7 @@ from recsys_tfb.evaluation.metrics import (
     compute_macro_per_item_map,
     compute_mean_ap,
 )
-from recsys_tfb.io.handles import ParquetHandle, handle_paths, parquet_dataset
+from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
@@ -103,6 +103,15 @@ def persist_sample_weight_report(
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
+
+def _test_month_dir(snap_date: str) -> str:
+    """Directory-name form of a test month (``2026-01-31`` → ``20260131``).
+
+    Single definition shared by the path builder and the caller that dedupes
+    configured months, so the two cannot drift apart.
+    """
+    return str(snap_date).replace("-", "")
+
 
 # Sentinel layout token resolved from the ``snap_date`` argument of
 # _resolve_cache_path — not a `parameters` key and not a directory name. The
@@ -248,7 +257,7 @@ def _resolve_cache_path(
                     f"{dataset_name} cache path requires a snap_date "
                     "(it is cached one directory per test month)"
                 )
-            parts.append(Path(str(snap_date).replace("-", "")))
+            parts.append(Path(_test_month_dir(str(snap_date))))
         else:
             value = parameters[token]
             parts.append(Path(value))
@@ -335,13 +344,29 @@ def cache_test_model_input(
 
     Duplicate dates in config collapse — the same month is the same cache entry.
     """
-    months = sorted({str(d) for d in (parameters.get("dataset") or {}).get(
-        "test_snap_dates") or []})
+    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
+
+    # Dedupe on the *directory* form, not the raw string: the two must agree or
+    # a config carrying both "2026-01-31" and "20260131" would yield two keys
+    # pointing at one directory — handle_paths would then hand the same root to
+    # pyarrow twice and silently double every row.
+    by_dir: dict[str, str] = {}
+    for raw in configured:
+        month = str(raw)
+        key = _test_month_dir(month)
+        if by_dir.setdefault(key, month) != month:
+            raise ValueError(
+                f"dataset.test_snap_dates has two spellings of the same month: "
+                f"{by_dir[key]!r} and {month!r} (both resolve to {key!r}). "
+                "The Hive partition value differs between them, so only one can "
+                "be right — keep the ISO form."
+            )
+
     return {
         month: _materialize_parquet_handle(
             test_model_input, "test_model_input", parameters, snap_date=month
         )
-        for month in months
+        for month in sorted(by_dir.values())
     }
 
 
@@ -909,7 +934,7 @@ def predict_and_write_test_predictions(
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
     # columns from the snap_date=*/prod_name=* directory tree produced by
     # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
-    ds = parquet_dataset(handle_paths(test_parquet_handle))
+    ds = open_parquet_dataset(handle_paths(test_parquet_handle))
 
     # Enumerate distinct (snap_date, prod_name) values by projecting just the
     # two partition columns and de-duplicating. Note: select-on-partition-cols

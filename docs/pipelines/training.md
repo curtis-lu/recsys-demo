@@ -427,7 +427,7 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 特徵選擇 | `select_features` | `preprocessor`、parameters | 套用 training-stage feature exclusion | `preprocessor_view` |
-| Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle` |
+| Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
 | Calibration cache | `cache_calibration_model_input` | calibration Hive table | 啟用時建立 calibration local cache | calibration `ParquetHandle` |
 | 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
 | 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值 | sample weight report |
@@ -464,7 +464,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
-| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`），加一個月只複製那一個月、既有月份不動；設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
+| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）；「加一個月只複製那一個月」須待 test 日期退出 `base_dataset_version`（ADR-0001）後才成立，在那之前加月份仍翻號、全月重抄（本層是先架好的護欄，見 ADR-0003）；設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。

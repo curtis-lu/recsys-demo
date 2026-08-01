@@ -4,6 +4,11 @@ These dataclasses flow through the pipeline DAG as references to on-disk
 artifacts. Consumers call ``.to_pandas()`` / ``.load()`` to materialize the
 underlying data lazily inside their own scope, allowing GC to release memory
 between pipeline nodes.
+
+``handle_paths`` / ``open_parquet_dataset`` are the read side of that contract:
+a cache node may shard a split by key (``test_model_input`` is one directory per
+month), and these turn either shape into something pyarrow can open as one
+dataset.
 """
 
 from dataclasses import dataclass
@@ -42,7 +47,7 @@ def handle_paths(
     return [handles[key].path for key in sorted(handles)]
 
 
-def parquet_dataset(paths: Union[str, list[str]]):
+def open_parquet_dataset(paths: Union[str, list[str]]):
     """One ``pyarrow.dataset`` over one or many hive-partitioned parquet roots.
 
     A list of *directories* cannot be handed to ``pads.dataset`` directly — it
@@ -54,12 +59,19 @@ def parquet_dataset(paths: Union[str, list[str]]):
     Fragment order follows the given path order, then path-sort within each
     root — deterministic as long as the caller's list is (``handle_paths``
     sorts by key).
+
+    Caveats of the multi-root form, both absent when everything lived under one
+    root: hive partition types are inferred per root, so two months whose
+    partition values infer differently (all-numeric item codes in one, strings
+    in the other) fail to merge with an ArrowTypeError rather than being
+    coerced to a common string type; and the return is a UnionDataset, which
+    lacks ``.files``. Nothing downstream uses ``.files`` today.
     """
     import pyarrow.dataset as pads
 
     roots = [paths] if isinstance(paths, str) else list(paths)
     if not roots:
-        raise ValueError("parquet_dataset needs at least one parquet root")
+        raise ValueError("open_parquet_dataset needs at least one parquet root")
     children = [
         pads.dataset(root, format="parquet", partitioning="hive") for root in roots
     ]

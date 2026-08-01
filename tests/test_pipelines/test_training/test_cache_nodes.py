@@ -194,9 +194,14 @@ class TestPerMonthTestCache:
 
         cache_test_model_input(_spark_df(), params)
         copy_calls.clear()
-        cache_test_model_input(_spark_df(), params)
+        second = cache_test_model_input(_spark_df(), params)
 
         assert copy_calls == []
+        # A cache hit must still yield the month's handle. Asserting only "no
+        # copies" is satisfied just as well by dropping hit months from the
+        # mapping — which is precisely the silent gap this ticket exists to
+        # prevent (predict would never see that month).
+        assert sorted(second) == ["2026-01-31", "2026-02-28"]
 
     def test_month_absent_from_source_fails_loud(self, tmp_path, monkeypatch):
         """Configured a month but never ran dataset → the copy glob matches
@@ -209,6 +214,44 @@ class TestPerMonthTestCache:
         params = _params_with_test_dates(tmp_path, ["2026-01-31", "2026-02-28"])
 
         with pytest.raises(FileNotFoundError, match="2026-02-28"):
+            cache_test_model_input(_spark_df(), params)
+
+    def test_failed_month_leaves_no_success_marker_and_recovers(
+        self, tmp_path, monkeypatch
+    ):
+        """The fail-loud path mkdirs before it globs, so it leaves an empty
+        directory behind. It must carry no _SUCCESS, or the next run would
+        treat that empty month as complete and silently serve nothing."""
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        copy_calls: list = []
+        _recording_hdfs(monkeypatch, copy_calls, available={"2026-01-31"})
+        params = _params_with_test_dates(tmp_path, ["2026-01-31", "2026-02-28"])
+
+        with pytest.raises(FileNotFoundError):
+            cache_test_model_input(_spark_df(), params)
+
+        feb = tmp_path / "deadbeef" / "test_months" / "20260228"
+        if feb.exists():
+            assert not any(feb.rglob("_SUCCESS"))
+
+        # once the source has the month, the next run completes it
+        copy_calls.clear()
+        _recording_hdfs(monkeypatch, copy_calls,
+                        available={"2026-01-31", "2026-02-28"})
+        handles = cache_test_model_input(_spark_df(), params)
+        assert sorted(handles) == ["2026-01-31", "2026-02-28"]
+        assert (Path(handles["2026-02-28"].path) / "_SUCCESS").exists()
+
+    def test_ambiguous_month_spellings_are_rejected(self, tmp_path, monkeypatch):
+        """Two spellings of one month would key one directory twice, and
+        handle_paths would hand pyarrow the same root twice — doubling rows."""
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        _stub_hdfs(monkeypatch)
+        params = _params_with_test_dates(tmp_path, ["2026-01-31", "20260131"])
+
+        with pytest.raises(ValueError, match="two spellings of the same month"):
             cache_test_model_input(_spark_df(), params)
 
     def test_partial_month_rebuilds_without_touching_siblings(self, tmp_path, monkeypatch):

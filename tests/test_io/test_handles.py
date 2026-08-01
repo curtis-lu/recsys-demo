@@ -111,7 +111,7 @@ class TestHandlePaths:
         assert handle_paths(out_of_order) == ["/jan", "/feb"]
 
 
-class TestParquetDatasetOverManyRoots:
+class TestOpenParquetDatasetOverManyRoots:
     def test_reads_every_root_and_keeps_hive_partition_columns(
         self, tmp_path: Path
     ) -> None:
@@ -119,29 +119,29 @@ class TestParquetDatasetOverManyRoots:
         enumerates partitions from the reconstructed snap_date / prod_name
         columns. If a union dropped them it would see no partitions at all and
         silently predict nothing."""
-        from recsys_tfb.io.handles import parquet_dataset
+        from recsys_tfb.io.handles import open_parquet_dataset
 
         jan = _write_month(tmp_path, "2026-01-31", ["prod_a", "prod_b"])
         feb = _write_month(tmp_path, "2026-02-28", ["prod_a"])
 
-        pdf = parquet_dataset([jan, feb]).to_table().to_pandas()
+        pdf = open_parquet_dataset([jan, feb]).to_table().to_pandas()
 
         assert sorted(set(pdf["snap_date"].astype(str))) == ["2026-01-31", "2026-02-28"]
         assert sorted(set(pdf["prod_name"].astype(str))) == ["prod_a", "prod_b"]
         assert len(pdf) == 3
 
     def test_single_root_matches_a_plain_read(self, tmp_path: Path) -> None:
-        from recsys_tfb.io.handles import parquet_dataset
+        from recsys_tfb.io.handles import open_parquet_dataset
 
         jan = _write_month(tmp_path, "2026-01-31", ["prod_a", "prod_b"])
 
-        one = parquet_dataset([jan]).to_table().to_pandas()
-        bare = parquet_dataset(jan).to_table().to_pandas()
+        one = open_parquet_dataset([jan]).to_table().to_pandas()
+        bare = open_parquet_dataset(jan).to_table().to_pandas()
 
         pd.testing.assert_frame_equal(one, bare)
 
     def test_empty_root_list_is_rejected(self) -> None:
-        from recsys_tfb.io.handles import parquet_dataset
+        from recsys_tfb.io.handles import open_parquet_dataset
 
         with pytest.raises(ValueError, match="at least one parquet root"):
-            parquet_dataset([])
+            open_parquet_dataset([])

@@ -1,6 +1,8 @@
 """Bounded, memory-frugal parquet reads for training diagnostics.
 
-I/O layer: the only place in diagnostics that touches ``pyarrow.dataset``.
+I/O layer: the only place in diagnostics that reads parquet. Dataset construction
+itself now lives in ``io.handles.open_parquet_dataset`` (it is shared with the
+training predict node); this module owns the read patterns built on top of it.
 Reads operate on the hive-partitioned ``*_model_input`` caches
 (``…/snap_date=…/prod_name=…/``) written by the training cache nodes. A path
 may be a list of roots (test is cached one directory per month); pyarrow
@@ -24,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 def _dataset(path: str | list[str]):
-    from recsys_tfb.io.handles import parquet_dataset
+    from recsys_tfb.io.handles import open_parquet_dataset
 
-    return parquet_dataset(path)
+    return open_parquet_dataset(path)
 
 
 def count_rows(path: str | list[str]) -> int:

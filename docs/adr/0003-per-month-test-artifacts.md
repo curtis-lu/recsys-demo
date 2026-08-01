@@ -36,6 +36,12 @@ date: 2026-08-01
 第三列是關鍵：兩者一樣壞，都得靠強制重算旗標（[ADR-0002](0002-preprocessed-feature-table-incremental.md)
 的 `--rebuild-dates`）。per-month 完全涵蓋視窗模型要解的問題，並把複製成本從 ∝N 變成 ∝1。
 
+原本的 spec（issue #123）把 per-snap_date 粒度的 cache 列為 Out of Scope，理由兩條，現在
+都不成立：「多出半完成的月份等中間狀態」——當時設想的是「單一大目錄內做 per-month 標記」，
+改成一月一目錄、各自 `_SUCCESS` 之後，半完成的月份反而比原設計更容易辨識，既有的
+partial-cache recovery 直接適用；「省下的只是一次本機複製」——低估了，當時沒把 predict
+也 ∝N 算進去。#123 已於 2026-07-31 據此修訂。
+
 視窗模型還有一個 per-month 沒有的失敗模式：**目錄名可能撒謊**。複製層抓的是來源表底下的所有
 `snap_date`，而目錄名來自設定，兩者從不比對。設定加了月份但還沒跑 dataset 時，會建出一個名為
 `20260131_20260228`、實際只有 1 月的目錄並蓋上 `_SUCCESS`，之後永遠命中它。per-month 下每個
@@ -59,8 +65,8 @@ partition。per-month 不必做這個取捨。
 
 依上面那條身分規則，它應該搬到 evaluation pipeline 並以 `(model_version, snap_date)` 為鍵。這是
 一次 pipeline 邊界重構（牽涉 MLflow 語意、evaluation 的模式分支、以及 SHAP 需要的 driver-local
-parquet 該由誰提供），**刻意不併入本次改動**。前期調查見
-`docs/superpowers/specs/2026-07-31-per-month-test-artifacts-design.md`。
+parquet 該由誰提供），**刻意不併入本次改動**。範圍界定見 issue #128 的 Out of Scope；
+前期調查（接縫分堆、`--from-node` 為何走不通、成本盤點）見 PR #129 帶進來的設計記錄。
 
 在那之前的緩解：包裝好的動線只跑 predict 節點切片，不會觸發診斷；**不建議重跑 full training**。
 
