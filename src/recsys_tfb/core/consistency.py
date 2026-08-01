@@ -113,6 +113,14 @@ Layer 1 — config-static (implemented here; aggregated by
   quadrant_enabled`` are bool; ``diagnostics.shap.quadrant_top_k_decision`` /
   ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
+* A21 — every ``dataset --rebuild-dates`` value is a well-formed ISO date AND
+  a member of ``dataset.test_snap_dates``. The dataset pipeline only ever
+  processes configured months (ADR-0002), so an unconfigured value would
+  silently do nothing and leave the operator believing a month was recomputed.
+  Predicate: ``resolved_rebuild_dates`` (raises ``ConfigConsistencyError``
+  directly and returns the normalised list; not aggregated by ``validate`` —
+  it reads a CLI flag, which ``validate_config_consistency`` never sees.
+  Mirrors A12).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -149,6 +157,8 @@ the plan doc for the full table:
 """
 
 from __future__ import annotations
+
+import datetime as _datetime
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
@@ -1064,6 +1074,71 @@ def compare_source_key_exists(parameters: dict, key: str | None) -> dict | None:
             f"evaluation.compare_sources. Available: {available}"
         )
     return sources[key]
+
+
+def _iso_date(value) -> str | None:
+    """Normalise a snap_date to ``YYYY-MM-DD``; ``None`` when unparseable.
+
+    Handles the three forms a snap_date reaches us in: a quoted yaml string, an
+    unquoted yaml scalar (PyYAML builds a ``datetime.date``), and a
+    ``pd.Timestamp`` (a ``datetime`` subclass) held by a caller.
+    """
+    if isinstance(value, _datetime.datetime):
+        return value.date().isoformat()
+    if isinstance(value, _datetime.date):
+        return value.isoformat()
+    if isinstance(value, str):
+        try:
+            return _datetime.date.fromisoformat(value.strip()).isoformat()
+        except ValueError:
+            return None
+    return None
+
+
+def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
+    """(A21) Normalise ``--rebuild-dates`` against ``dataset.test_snap_dates``.
+
+    Returns the sorted, deduplicated, ``YYYY-MM-DD`` list, or ``[]`` when the
+    flag was not passed. Raises ``ConfigConsistencyError`` when any value is
+    malformed or names a month the config does not list.
+
+    Why fail loud rather than ignore: the dataset pipeline only ever processes
+    configured months, so an unconfigured ``--rebuild-dates`` value would be a
+    silent no-op — the operator would come away believing a stale month had
+    been recomputed. That is the exact failure mode ADR-0002's escape hatch
+    exists to prevent, so it must not have a silent edge.
+    """
+    if not rebuild_dates:
+        return []
+
+    configured = {
+        iso
+        for iso in (
+            _iso_date(d)
+            for d in ((parameters.get("dataset", {}) or {}).get("test_snap_dates") or [])
+        )
+        if iso is not None
+    }
+
+    malformed = [d for d in rebuild_dates if _iso_date(d) is None]
+    if malformed:
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates got non-ISO value(s) {malformed!r}. "
+            "Expected YYYY-MM-DD."
+        )
+
+    requested = sorted({_iso_date(d) for d in rebuild_dates})
+    unknown = [d for d in requested if d not in configured]
+    if unknown:
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates names month(s) {unknown} that are not in "
+            f"dataset.test_snap_dates (configured: {sorted(configured)}). "
+            "Only a configured test month can be rebuilt — the pipeline never "
+            "processes a month the config does not list, so this would have "
+            "been a silent no-op. Add it to dataset.test_snap_dates first, or "
+            "drop it from --rebuild-dates."
+        )
+    return requested
 
 
 def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | None) -> list[str]:

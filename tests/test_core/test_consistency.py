@@ -1059,3 +1059,79 @@ class TestNonnumericFeatureErrors:
         )
         assert len(errs) == 2
         assert "aaa" in errs[0] and "zzz" in errs[1]
+
+
+# --- A21: --rebuild-dates must be a subset of dataset.test_snap_dates ---
+
+import datetime as _dt
+
+from recsys_tfb.core.consistency import ConfigConsistencyError, resolved_rebuild_dates
+
+
+def _ds(*test_dates) -> dict:
+    return {"dataset": {"test_snap_dates": list(test_dates)}}
+
+
+class TestResolvedRebuildDatesA21:
+    def test_none_returns_empty(self):
+        assert resolved_rebuild_dates(_ds("2026-01-31"), None) == []
+
+    def test_empty_returns_empty(self):
+        assert resolved_rebuild_dates(_ds("2026-01-31"), []) == []
+
+    def test_proper_subset_is_normalised_and_sorted(self):
+        params = _ds("2026-01-31", "2026-02-28", "2026-03-31")
+        assert resolved_rebuild_dates(params, ["2026-03-31", "2026-01-31"]) == [
+            "2026-01-31",
+            "2026-03-31",
+        ]
+
+    def test_full_overlap_with_configured_is_allowed(self):
+        params = _ds("2026-01-31", "2026-02-28")
+        assert resolved_rebuild_dates(params, ["2026-01-31", "2026-02-28"]) == [
+            "2026-01-31",
+            "2026-02-28",
+        ]
+
+    def test_duplicates_collapse(self):
+        params = _ds("2026-01-31")
+        assert resolved_rebuild_dates(params, ["2026-01-31", "2026-01-31"]) == [
+            "2026-01-31"
+        ]
+
+    def test_unconfigured_month_raises(self):
+        # The match string is the flag name itself: no other predicate in this
+        # module mentions --rebuild-dates, so this cannot be satisfied by an
+        # unrelated rule firing on the same config.
+        params = _ds("2026-01-31", "2026-02-28")
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_rebuild_dates(params, ["2026-09-30"])
+
+    def test_error_names_the_offending_month_and_the_configured_set(self):
+        params = _ds("2026-01-31", "2026-02-28")
+        with pytest.raises(ConfigConsistencyError) as exc:
+            resolved_rebuild_dates(params, ["2026-09-30"])
+        msg = str(exc.value)
+        assert "2026-09-30" in msg
+        assert "test_snap_dates" in msg
+        assert "2026-01-31" in msg  # what IS available
+
+    def test_partially_valid_list_still_raises(self):
+        # One good month must not mask a bad one.
+        params = _ds("2026-01-31")
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_rebuild_dates(params, ["2026-01-31", "2026-09-30"])
+
+    def test_no_test_snap_dates_configured_raises(self):
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_rebuild_dates({"dataset": {}}, ["2026-01-31"])
+
+    def test_malformed_date_raises(self):
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_rebuild_dates(_ds("2026-01-31"), ["31/01/2026"])
+
+    def test_unquoted_yaml_dates_compare_equal(self):
+        # PyYAML parses an unquoted 2026-01-31 into datetime.date; a string from
+        # the CLI must still match it.
+        params = _ds(_dt.date(2026, 1, 31))
+        assert resolved_rebuild_dates(params, ["2026-01-31"]) == ["2026-01-31"]
