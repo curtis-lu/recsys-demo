@@ -21,6 +21,7 @@
 
 - **(R1) 絕對路徑要含 `.worktrees/<name>`**：用 main repo 的絕對路徑 `Edit`/`Write` worktree 的 config —— 改錯邊，worktree 那份沒動、pipeline 讀的還是舊的。**徵兆：訓練出來的 `model_version` / best params 跟 baseline 完全相同。**
 - **(R2) `cd` 在 Bash tool 呼叫之間會持續**（system prompt 明文；但 skill 執行後 cwd 可能 reset，是兩回事）。`cd <wt>/data && ln -s ...` 後沒回 worktree root，下一個 training 指令 `Path.cwd()/"data"` 看到雙重 `data/data/dataset` → FileNotFoundError after Spark started。**規則：Bash 指令以 `cd <worktree-root> && ...` 開頭、或全用絕對路徑。**
+- **(R2b) cwd 漂移同樣會騙過「讀」指令（2026-08-01）**：heredoc／skill 執行後 cwd 可能 reset 回 main root，此時相對路徑的 `grep`／`sed` 讀到的是 **main 那份檔案**，於是剛寫好的改動看起來像**憑空消失**（`grep` 零命中、`sed` 範圍抓不到），很容易誤判成「工具把我的改動洗掉了」而開始亂修。**徵兆：改動明明剛驗證過，下一個 grep 卻找不到。規則：懷疑改動消失時先 `pwd`，或直接用 `git -C <abs-worktree> diff` 判定——它不受 cwd 影響。**
 - **(R3) Worktree `data/` 隔離**：每個 worktree 用**自己的真 `data/` 樹**，**不 symlink 到 main**（`cache.root` 已相對化＝`data/recsys_cache`、warehouse/metastore 也相對）。首次進 worktree 跑 `PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py` 重建本機資料；隔離驗證用 `scripts/local_spark_setup.py --check-isolation`。
 
 完整 SOP：`docs/operations/worktree-venv-setup.md`。
