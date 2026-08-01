@@ -13,6 +13,7 @@ from recsys_tfb.core.consistency import (
     validate_config_consistency,
     compare_mutual_exclusive_errors,
     compare_source_key_exists,
+    post_training_snap_date_errors,
     resolved_rebuild_dates,
     ConfigConsistencyError,
     REBUILD_SNAP_DATES_KEY,
@@ -1157,6 +1158,25 @@ def evaluation(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("evaluation", env)
+
+    # (A22) --post-training evaluates one configured test month. Wired here,
+    # not in validate_config_consistency: that runs at CLI entry and cannot see
+    # this flag, and monitoring mode (no flag) reads inference output whose
+    # month need not be a test month. Checked before Spark starts, like A21.
+    # --compare-only is exempt: it never reads training_eval_predictions (it
+    # re-reads the already-persisted enriched_eval_predictions), so
+    # --post-training is inert on that path and blocking it would be a false
+    # positive on a month since dropped from test_snap_dates.
+    # `not compare_only` (not `is None`): the pipeline itself decides the mode
+    # with bool(compare_only) below, and the exemption must agree with it.
+    if not compare_only:
+        snap_date_errs = post_training_snap_date_errors(
+            params, post_training=post_training
+        )
+        if snap_date_errs:
+            logger.error("\n".join(snap_date_errs))
+            raise typer.Exit(code=1)
+
     get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
 

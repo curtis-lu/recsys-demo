@@ -122,6 +122,17 @@ Layer 1 — config-static (implemented here; aggregated by
   (raises ``ConfigConsistencyError`` directly and returns the normalised list;
   not aggregated by ``validate`` — it reads a CLI flag, which
   ``validate_config_consistency`` never sees. Mirrors A12).
+* A22 — under ``--post-training``, ``evaluation.snap_date`` must be a member of
+  ``dataset.test_snap_dates``. Post-training evaluation reads
+  ``training_eval_predictions``, which accumulates every month ever predicted
+  for a ``model_version`` (test dates left the version identity in ADR-0001),
+  so an unlisted month can still return rows and produce a normal-looking
+  report for a month the current config does not evaluate. Predicate:
+  ``post_training_snap_date_errors`` (returns errors; the evaluation command
+  raises). NOT aggregated by ``validate_config_consistency``: that runs at CLI
+  entry and cannot see ``--post-training``, and the default monitoring mode
+  reads inference output whose month legitimately need not be a test month —
+  wiring it there would block valid monitoring runs. Mirrors A13.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
 
@@ -1166,5 +1177,66 @@ def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | Non
         return [
             f"(A13) --compare={compare!r} and --compare-only={compare_only!r} "
             "are mutually exclusive — pass at most one"
+        ]
+    return []
+
+
+def post_training_snap_date_errors(parameters: dict, post_training: bool) -> list[str]:
+    """(A22) Under ``--post-training``, evaluation.snap_date must be a test month.
+
+    Returns error strings (empty list when fine); the CLI raises. Shaped like
+    A13 — it lives here, but the evaluation command calls it explicitly and
+    hands it the mode flag. It is deliberately NOT aggregated by
+    ``validate_config_consistency``: that runs at CLI entry and never sees
+    ``--post-training``, and the default monitoring mode reads inference output
+    whose month legitimately need not be a test month, so an unconditional
+    predicate would block a valid run.
+
+    Why this must fail loud rather than lean on the downstream empty-result
+    guard in ``prepare_eval_data``: post-training evaluation reads
+    ``training_eval_predictions``, which holds every month ever predicted for
+    this ``model_version`` — and since ADR-0001 took test dates out of the
+    version identity, months accumulate there across config edits. A snap_date
+    the config no longer lists therefore still finds rows, and the run produces
+    a report that looks entirely normal while measuring a month the current
+    config does not evaluate. The empty-result guard only fires on zero rows,
+    and only after a Spark session and a full table read.
+    """
+    if not post_training:
+        return []
+
+    declared = (parameters.get("dataset", {}) or {}).get("test_snap_dates") or []
+    # Same reasoning as A21: silently dropping an unparseable configured value
+    # would make the membership test below compare against an incomplete set
+    # and point the operator at evaluation.snap_date when the fault is in the
+    # dataset yaml. Name the real culprit instead.
+    unreadable = [d for d in declared if _iso_date(d) is None]
+    if unreadable:
+        return [
+            f"(A22) dataset.test_snap_dates holds unreadable date(s) "
+            f"{unreadable!r}. Expected YYYY-MM-DD."
+        ]
+    configured = sorted({_iso_date(d) for d in declared})
+
+    raw = (parameters.get("evaluation", {}) or {}).get("snap_date")
+    snap = _iso_date(raw)
+    if snap is None:
+        return [
+            f"(A22) evaluation.snap_date={raw!r} is not a readable ISO date "
+            f"(YYYY-MM-DD). --post-training evaluates exactly one configured "
+            f"test month; set it to one of {configured}."
+        ]
+
+    if snap not in configured:
+        return [
+            f"(A22) evaluation.snap_date={snap!r} is not a test month "
+            f"(dataset.test_snap_dates: {configured}). --post-training reads "
+            "training_eval_predictions, which accumulates every month ever "
+            "predicted for this model_version, so an unlisted month can still "
+            "return rows and yield a normal-looking report for a month this "
+            "config does not evaluate. Add it to dataset.test_snap_dates and "
+            "rerun dataset + predict, or point evaluation.snap_date at a "
+            "configured month. (Monitoring mode — no --post-training — is not "
+            "subject to this rule.)"
         ]
     return []

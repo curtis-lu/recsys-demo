@@ -71,6 +71,8 @@ evaluation:
 
 pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。日期沒有任何資料時會列出該模型實際存在的日期後中止，不會退回整張表計算。
 
+帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
+
 `k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。
 
 主要指標包括：
@@ -535,6 +537,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 找不到 `best` | 尚未 promotion，卻省略 `--model-version` | 對候選模型明確傳入版本，或先完成人工 promotion |
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date` | 日期錯誤、模式用錯、對應 partition 未產生 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
+| `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
 | segment source table 無法讀取 | table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |
