@@ -494,6 +494,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 修改內容 | 建議執行方式 | 原因 |
 |---|---|---|
 | `snap_date` | 標準 full run | 使用新的報表目錄與 Hive partition |
+| 想評估一個尚未產出預測的新月份（`dataset.test_snap_dates` 尚未列入） | 先補資料再評估：dataset → training 的 predict 切片 → 本 pipeline 標準 full run | `model_version` 不變（`test_snap_dates` 不進版本 hash），因此**不重訓**；新舊月份報表並存於同一模型身分之下。步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md) |
 | `k_values` | 標準 full run | 需要重新計算所有 metrics |
 | `segment_columns`／`segment_sources` | 標準 full run | 需要重新 join 並更新 enriched schema/data |
 | `product_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
