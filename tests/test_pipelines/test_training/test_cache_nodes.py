@@ -237,6 +237,32 @@ class TestPerMonthTestCache:
         # February was not named, so it stays a hit and keeps its handle.
         assert second["2026-02-28"].path == first["2026-02-28"].path
 
+    def test_rebuild_that_cannot_clear_the_directory_fails_loud(
+        self, tmp_path, monkeypatch
+    ):
+        """If the drop silently fails, the surviving ``_SUCCESS`` is read as a
+        hit two lines later and the rebuild degrades into the stale-cache run it
+        exists to prevent — succeeding, and producing identical numbers.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+        from recsys_tfb.pipelines.training import nodes as training_nodes
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        copy_calls: list = []
+        _recording_hdfs(monkeypatch, copy_calls)
+        params = _params_with_test_dates(tmp_path, ["2026-01-31"])
+        cache_test_model_input(_spark_df(), params)
+
+        monkeypatch.setattr(
+            training_nodes.shutil, "rmtree", lambda *a, **kw: None
+        )
+        params[REBUILD_SNAP_DATES_KEY] = ["2026-01-31"]
+        copy_calls.clear()
+
+        with pytest.raises(RuntimeError, match="could not clear the cached month"):
+            cache_test_model_input(_spark_df(), params)
+        assert copy_calls == []
+
     def test_month_absent_from_source_fails_loud(self, tmp_path, monkeypatch):
         """Configured a month but never ran dataset → the copy glob matches
         nothing and FileNotFoundError propagates. This guard is inherent to

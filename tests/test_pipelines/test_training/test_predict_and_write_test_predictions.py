@@ -51,6 +51,11 @@ def _make_parameters() -> dict:
     return {
         "model_version": "v_test_001",
         "hive": {"db": "ml_recsys"},
+        # The months the fixtures below hold. Not optional: predict takes
+        # dataset.test_snap_dates as the authority on which months exist and
+        # predicts nothing without it — there is deliberately no "fall back to
+        # whatever the cache holds" path to lean on.
+        "dataset": {"test_snap_dates": ["2025-01-31", "2025-02-28"]},
         "schema": {
             "time": "snap_date",
             "entity": ["cust_id"],
@@ -338,7 +343,7 @@ def _params_with_test_dates(test_snap_dates, rebuild=None) -> dict:
     from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
 
     params = _make_parameters()
-    params["dataset"] = {"test_snap_dates": list(test_snap_dates)}
+    params["dataset"]["test_snap_dates"] = list(test_snap_dates)
     if rebuild is not None:
         params[REBUILD_SNAP_DATES_KEY] = list(rebuild)
     return params
@@ -420,6 +425,11 @@ def test_an_old_month_that_gained_an_item_is_recomputed(tmp_path):
     """Degenerate input 4: the month was complete until a new item entered the
     catalogue. Its predictions no longer cover every item, so it is no longer
     complete — even though nothing about that month's own run went wrong.
+
+    Shares a code path with the half-written case above (both are "written is a
+    proper subset of cached"), so no mutation kills one and spares the other.
+    It is kept because it states the second situation that path exists for; do
+    not read it as an independent guard.
     """
     handles = {
         "2025-01-31": _month_handle(
@@ -498,5 +508,7 @@ def test_a_configured_month_missing_from_the_cache_fails_loud(tmp_path):
     handles = {"2025-01-31": _month_handle(tmp_path, "2025-01-31")}
     params = _params_with_test_dates(["2025-01-31", "2025-02-28"])
 
-    with pytest.raises(ValueError, match="2025-02-28"):
+    # Match on wording only this rule produces: the month alone also appears in
+    # the duplicate-spelling error raised a few lines away in the cache node.
+    with pytest.raises(ValueError, match="no rows in the test cache"):
         _predict(handles, params, _write_ds())

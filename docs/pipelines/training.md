@@ -450,7 +450,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
-`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/adding-an-eval-month.md)。
+`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/adding-an-eval-month.md)。
 
 `compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。若模型已校準，也會平行計算原始未校準 score 的結果，讓使用者確認 calibration 是否改變排序表現。
 

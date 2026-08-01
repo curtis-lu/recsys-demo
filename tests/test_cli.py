@@ -935,3 +935,15 @@ class TestRebuildSlicedAwayWarning:
         assert _maybe_warn_rebuild_sliced_away(
             self._pipe("compute_feature_importance"), {"rebuild": []}
         ) == []
+
+    def test_the_named_nodes_exist_in_the_real_training_pipeline(self):
+        """The tests above hand it a fake pipeline, so a node rename would
+        leave them green while the warning silently never fires again (and the
+        runbook's `--only-node` command stops matching anything). Pin the names
+        against the pipeline itself.
+        """
+        from recsys_tfb.__main__ import _REBUILD_TARGET_NODES
+        from recsys_tfb.pipelines import get_pipeline
+
+        real = {node.name for node in get_pipeline("training").nodes}
+        assert set(_REBUILD_TARGET_NODES) <= real

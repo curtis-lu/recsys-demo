@@ -291,6 +291,12 @@ def _materialize_parquet_handle(
     parquet is stale but complete, so without it ``--rebuild-dates`` would
     re-predict from the old rows and produce byte-identical numbers — the
     escape hatch would run and change nothing.
+
+    A forced refresh that then fails to copy leaves the month uncached (no
+    ``_SUCCESS``), not corrupted: the next run takes the miss path and copies
+    it again. That is the deliberate direction — the cache is a copy of Hive,
+    so losing it costs one copy, whereas keeping a stale copy costs a wrong
+    number nobody can see.
     """
     if not hasattr(df, "sql_ctx"):
         raise TypeError(
@@ -310,6 +316,19 @@ def _materialize_parquet_handle(
             dataset_name, local_path,
         )
         shutil.rmtree(local_path, ignore_errors=True)
+        # ignore_errors is right for the partial-cache branch below (that copy
+        # is unusable either way) but not here: a surviving _SUCCESS would be
+        # read as a hit two lines down, and the rebuild would quietly degrade
+        # into the exact stale-cache re-run it was invoked to prevent.
+        if success_marker.exists():
+            raise RuntimeError(
+                f"could not clear the cached month at {local_path} "
+                "(--rebuild-dates named it). Refusing to continue: the "
+                "surviving _SUCCESS would be taken as a cache hit and this "
+                "month would be re-predicted from the pre-backfill rows, "
+                "producing identical numbers. Remove the directory by hand "
+                "and re-run."
+            )
 
     if Path(local_path).exists() and not success_marker.exists():
         logger.warning(
@@ -916,6 +935,10 @@ def calibrate_model(
 
 
 
+#: Hive's stand-in for a NULL partition value.
+_HIVE_NULL_PARTITION = "__HIVE_DEFAULT_PARTITION__"
+
+
 class _PredictMonthPlan(NamedTuple):
     """Which test months this predict run will write, and which it will not.
 
@@ -988,14 +1011,20 @@ def _plan_predict_months(
         if already == cache_items[key]:
             skipped.append(label)
             continue
-        if already > cache_items[key]:
-            # Re-predicting cannot delete the surplus partition, so this month
-            # will be reprocessed on every run until it is dropped by hand.
+        surplus = already - cache_items[key]
+        if surplus:
+            # Set difference, not a superset test: an item renamed between runs
+            # leaves both a surplus and a missing partition, and a superset test
+            # sees neither. Re-predicting cannot delete the surplus one, so it
+            # survives every run — and compute_test_mAP_spark reads the whole
+            # model_version, so a stale item's rows keep landing in the metric.
             logger.warning(
-                "[months] predict: %s has prediction partitions for items no "
-                "longer in the cache (%s); it will be re-predicted every run "
-                "until those partitions are dropped.",
-                label, sorted(already - cache_items[key]),
+                "[months] predict: %s has prediction partitions for items that "
+                "are not in the cache (%s). Re-predicting cannot remove them, "
+                "so they will keep contributing rows to this model_version's "
+                "metrics until they are dropped by hand, and this month will "
+                "be re-predicted on every run.",
+                label, sorted(surplus),
             )
         to_process.append(label)
 
@@ -1032,6 +1061,19 @@ def _written_prediction_partitions(
     for spec in lister():
         month, item = spec.get(time_col), spec.get(item_col)
         if month is None or item is None:
+            continue
+        if _HIVE_NULL_PARTITION in (month, item):
+            # Hive writes a NULL partition value as this literal, while the
+            # parquet side reconstructs it as None -> "None"; the two spellings
+            # would never match, so this month would look permanently
+            # incomplete. Drop it and say so: dropping means "not written yet",
+            # which re-predicts rather than skips. Mirrors the same guard on the
+            # dataset side (pipelines/dataset/helpers_spark.py).
+            logger.warning(
+                "[months] predict: ignoring prediction partition with a NULL "
+                "value (%s=%r, %s=%r); that month will be treated as not yet "
+                "written.", time_col, month, item_col, item,
+            )
             continue
         written.setdefault(_test_month_dir(month), set()).add(str(item))
     return written
@@ -1114,12 +1156,10 @@ def predict_and_write_test_predictions(
         )
 
     # The config is the authority on which months exist; the cache is only
-    # where their rows come from. The fallback keeps non-CLI callers (tests,
-    # notebooks) at the pre-incremental behaviour of "predict what you were
-    # handed" instead of silently predicting nothing.
-    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or sorted(
-        {str(v) for v in partition_pdf[time_col]}
-    )
+    # where their rows come from. Deliberately no "fall back to whatever the
+    # cache holds": that would resurrect a month dropped from the config, which
+    # is the one thing the authority rule exists to prevent.
+    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
     plan = _plan_predict_months(
         configured,
         cache_items,
@@ -1139,8 +1179,11 @@ def predict_and_write_test_predictions(
     )
 
     process_keys = {_test_month_dir(m) for m in plan.to_process}
+    # .map keeps this a row mask even when the frame is empty; a list
+    # comprehension would degrade into `pdf[[]]`, which pandas reads as
+    # "select these zero *columns*".
     partition_pdf = partition_pdf[
-        [_test_month_dir(v) in process_keys for v in partition_pdf[time_col]]
+        partition_pdf[time_col].map(lambda v: _test_month_dir(v) in process_keys)
     ]
 
     snap_dates_seen: set[str] = set()

@@ -64,7 +64,9 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local \
 
 同一份資訊也在 `predict_manifest` 的 `months_processed` / `months_skipped` / `months_rebuilt` 三份清單裡。
 
-**能跳過的理由**：`(model_version, snap_date)` 的預測是不可變產物——`model_version` 已經把定義模型的一切雜湊進去，同一個模型對同一份該月 model_input 的預測必然逐位元相同，重算不會得到不同的數字。**判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」**，不是「有 partition 就算數」：後者會把寫到一半就中斷的月份永久當成完成，也看不出新增了一個 item。所以「predict 到一半掛掉」與「新增產品」兩種情況重跑都會自動補上。
+**能跳過的理由**：`(model_version, snap_date)` 的預測是不可變產物——`model_version` 已經把定義模型的一切雜湊進去，同一個模型對同一份該月 model_input 的預測必然逐位元相同，重算不會得到不同的數字。**判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」**，不是「有 partition 就算數」：後者會把寫到一半就中斷的月份永久當成完成，也看不出該月的 model_input 多了一個 item。
+
+所以 **predict 寫到一半掛掉，重跑會自動補完**。但「上游新增了一個產品」不會自動被看到——判準比的是**這一層 cache 裡有什麼**，而該月的 cache 是回補前複製的，裡面同樣沒有新產品，兩邊一樣就是「完成」。要讓新產品進到舊月份，走下一節的重算動線（dataset 重算該月 → cache 重新複製 → predict 這時才看得到多出來的 item）。
 
 **它的對價**跟步驟 2 一樣：存在 ≠ 新鮮。上游回補舊月份之後要用 `--rebuild-dates` 指名重算（見下一節）。
 
@@ -110,6 +112,8 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local \
 [months] test branch: processed=2026-01-31 skipped=2026-02-28 rebuild=2026-01-31
 [months] predict: processed=2026-01-31 skipped=2026-02-28 rebuilt=2026-01-31
 ```
+
+兩行的最後一欄拼法不同是刻意的：dataset 的 `rebuild=` 是**你要求了什麼**（旗標原值），predict 的 `rebuilt=` 是**它實際重做了哪些月**（本來會被跳過、因旗標而重做的那些）。要一次抓兩行就 grep `[months]`。
 
 四件要知道的事：
 
@@ -160,7 +164,7 @@ SHOW PARTITIONS ml_recsys.training_eval_predictions;   -- 這張沒有 recsys_pr
 | dataset log 印 `skipped=<你要重算的月份>`，或 predict 印 `skipped=<該月>` | 沒帶 `--rebuild-dates`；產物存在就會被跳過 | 加上 `--rebuild-dates <該月>` 重跑（兩個 pipeline 都要） |
 | `--rebuild-dates` 直接報錯退出、還沒起 Spark | 該月份不在 `test_snap_dates`（不變量 A21） | 先把月份加進 `dataset.test_snap_dates`，或修正旗標的值 |
 | training 印 `[rebuild] WARNING: ... had no effect` | 切片把 `predict_and_write_test_predictions` 排除了，旗標無事可做 | 改用 `--only-node predict_and_write_test_predictions`，或不帶切片旗標 |
-| predict 拋 `test month '<月份>' ... has no rows in the test cache` | 該月在 `test_snap_dates` 裡但 dataset 沒產出它 | 先跑步驟 2（把該月當成沒事發生地跳過，會讓你拿到一份空報表，所以這裡直接報錯） |
+| predict 拋 `test month '<月份>' ... has no rows in the test cache` | 該月在 `test_snap_dates` 裡但 dataset 沒產出它 | 先跑步驟 2 產出該月。predict 之所以直接報錯而不安靜跳過：跳過會讓你拿到一份空報表 |
 
 ## 相關文件
 

@@ -205,6 +205,16 @@ class HiveTableDataset(AbstractDataset):
         construction, exactly as ``load()`` drops them from the data columns).
         ``[]`` when the table or database does not exist yet.
 
+        Values are URL-unescaped, because ``SHOW PARTITIONS`` reports the
+        directory name verbatim while every other reader hands back the decoded
+        value. Measured on PySpark 3.3.2 + local metastore: an item value
+        ``a/b`` lists as ``a%2Fb`` here and reads back as ``a/b`` through
+        pyarrow, so a caller comparing the two sets would never see a match for
+        any value containing ``/ % =`` and friends. Unescaping here is what
+        makes this method's output comparable with the data. (Escaping is also
+        why splitting on ``/`` and ``=`` is safe: both are escaped inside
+        values.)
+
         Metadata-only — ``SHOW PARTITIONS`` never touches the data files, so
         the cost is independent of table size. Exists so a caller with no
         SparkSession of its own (the training predict node) can ask "what have
@@ -213,6 +223,8 @@ class HiveTableDataset(AbstractDataset):
         table. Deliberately unit-test-free: it is a thin query wrapper, and
         every judgement built on it is covered at the predict seam.
         """
+        from urllib.parse import unquote
+
         from pyspark.sql.utils import AnalysisException
 
         spark = self._get_spark()
@@ -227,14 +239,26 @@ class HiveTableDataset(AbstractDataset):
         keep = [c["name"] for c in self._partition_cols]
         out: list[dict[str, str]] = []
         for row in rows:
-            spec = dict(
-                part.split("=", 1)
-                for part in str(row[0]).split("/")
-                if "=" in part
-            )
-            if any(spec.get(k) != v for k, v in self._partition_filter.items()):
+            # Lower-cased keys: the declared case is what this table was created
+            # with, but nothing in the contract promises the metastore echoes it
+            # back unchanged, and a case mismatch here would silently drop every
+            # partition (an empty answer reads as "nothing written yet").
+            spec = {
+                k.lower(): unquote(v)
+                for k, v in (
+                    part.split("=", 1)
+                    for part in str(row[0]).split("/")
+                    if "=" in part
+                )
+            }
+            if any(
+                spec.get(k.lower()) != v
+                for k, v in self._partition_filter.items()
+            ):
                 continue
-            out.append({k: spec[k] for k in keep if k in spec})
+            out.append(
+                {k: spec[k.lower()] for k in keep if k.lower() in spec}
+            )
         return out
 
     # ---------- helpers ----------
