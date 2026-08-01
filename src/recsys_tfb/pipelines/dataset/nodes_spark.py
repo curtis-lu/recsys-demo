@@ -129,13 +129,24 @@ def select_val_keys(
 
 
 def _date_filter(time_col: str, dates: list):
-    """``time_col IN dates``, or a constant false when ``dates`` is empty.
+    """``time_col IN dates``, normalised to DATE on both sides.
 
-    ``Column.isin([])`` is not a reliable "match nothing" in Spark, and an empty
-    plan is a normal state here (every configured month already landed), so the
-    degenerate case gets its own explicit predicate.
+    ``time_col`` reaches these nodes with two different types depending on where
+    the frame came from: a real DATE/TIMESTAMP when read from a source table,
+    but a **string** when read back from a Hive table where snap_date is a
+    partition column (``partition_cols: {name: snap_date, type: STRING}``) —
+    which is what the runner does, since it reloads every node input through the
+    catalog. ``F.col(snap_date).isin([pd.Timestamp(...)])`` matches **zero** rows
+    against the string form while raising nothing, so the comparison must be
+    pinned to DATE on both sides.
+
+    An empty ``dates`` list is a normal state here (every configured month
+    already landed) and gets an explicit constant-false predicate: ``isin([])``
+    is not a dependable "match nothing".
     """
-    return F.col(time_col).isin(dates) if dates else F.lit(False)
+    if not dates:
+        return F.lit(False)
+    return F.to_date(F.col(time_col)).isin([pd.Timestamp(d).date() for d in dates])
 
 
 def select_test_keys(

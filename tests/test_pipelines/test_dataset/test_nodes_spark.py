@@ -745,7 +745,12 @@ def _incremental_params(parameters, existing=None, rebuild=None):
 
 
 def _months(df):
-    return sorted(str(d.date()) for d in df.select("snap_date").distinct().toPandas()["snap_date"])
+    # snap_date is a timestamp when built from pandas, a string when it came
+    # back through a Hive partition column — normalise both.
+    return sorted(
+        str(pd.Timestamp(d).date())
+        for d in df.select("snap_date").distinct().toPandas()["snap_date"]
+    )
 
 
 class TestSelectTestKeysIncremental:
@@ -901,3 +906,68 @@ class TestApplyPreprocessorIncremental:
             EXISTING_SNAP_DATES_KEY: {"preprocessed_feature_table": ["2024-12-31"]},
         }
         apply_preprocessor_to_features(feature_table, preprocessor, params_landed)
+
+
+class TestIncrementalFilterHandlesHiveStringDates:
+    """snap_date comes back from Hive as a STRING partition column.
+
+    The runner reloads every node input through the catalog, so
+    build/filter_test_model_input see ``snap_date: string``, not the timestamp
+    dtype a pandas-built fixture produces. Comparing that string column against
+    ``pd.Timestamp`` literals matches zero rows and raises nothing — the frame
+    silently empties and the Hive write touches no partitions. Caught by a
+    real run, not by the pandas-typed fixtures above.
+    """
+
+    @pytest.fixture
+    def string_dated_keys(self, spark, label_table):
+        # Mirror HiveTableDataset.load: snap_date arrives as 'YYYY-MM-DD'.
+        return (
+            label_table.select("snap_date", "cust_id", "prod_name")
+            .dropDuplicates()
+            .withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
+        )
+
+    def test_string_snap_date_still_matches(
+        self, spark, feature_table, label_table, string_dated_keys, parameters
+    ):
+        assert dict(string_dated_keys.dtypes)["snap_date"] == "string"
+        params = _incremental_params(
+            parameters, existing={"test_model_input": ["2024-04-30"]},
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+
+        result = build_test_model_input(
+            string_dated_keys, encoded, label_table, preprocessor, params,
+        )
+        assert result.count() > 0, "string-typed snap_date silently matched nothing"
+        assert _months(result) == ["2024-05-31"]
+
+    def test_filter_node_also_handles_string_snap_date(
+        self, spark, feature_table, label_table, string_dated_keys, parameters
+    ):
+        params = _incremental_params(
+            parameters, existing={"test_model_input": ["2024-04-30"]},
+        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        unfiltered = build_test_model_input(
+            string_dated_keys, encoded, label_table, preprocessor,
+            _incremental_params(parameters),
+        ).withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
+
+        result = filter_test_model_input(unfiltered, params)
+        assert result.count() > 0, "string-typed snap_date silently matched nothing"
+        assert _months(result) == ["2024-05-31"]
+
+    def test_select_test_keys_still_works_on_date_typed_source(
+        self, label_table, parameters
+    ):
+        # The other direction: sample_pool/label_table keep a real date dtype.
+        # Normalising to DATE must not break that path.
+        assert dict(label_table.dtypes)["snap_date"].startswith("timestamp")
+        params = _incremental_params(
+            parameters, existing={"test_keys": ["2024-04-30"]},
+        )
+        assert _months(select_test_keys(label_table, params)) == ["2024-05-31"]
