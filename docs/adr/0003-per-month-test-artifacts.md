@@ -66,7 +66,8 @@ partition。per-month 不必做這個取捨。
 依上面那條身分規則，它應該搬到 evaluation pipeline 並以 `(model_version, snap_date)` 為鍵。這是
 一次 pipeline 邊界重構（牽涉 MLflow 語意、evaluation 的模式分支、以及 SHAP 需要的 driver-local
 parquet 該由誰提供），**刻意不併入本次改動**。範圍界定見 issue #128 的 Out of Scope；
-前期調查（接縫分堆、`--from-node` 為何走不通、成本盤點）見 PR #129 帶進來的設計記錄。
+前期調查（接縫分堆、`--from-node` 為何走不通、四項成本盤點）見
+`docs/superpowers/specs/2026-07-31-per-month-test-artifacts-design.md`。
 
 在那之前的緩解：包裝好的動線只跑 predict 節點切片，不會觸發診斷；**不建議重跑 full training**。
 
