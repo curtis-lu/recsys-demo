@@ -52,7 +52,7 @@
 | `enable_calibration` | 選填 | 是否建立 calibration keys 與 model input | `base_dataset_version` |
 | `calibration_snap_dates` | 啟用時必填 | calibration 使用的日期 | `base_dataset_version` |
 | `val_snap_dates` | 必填 | HPO validation 日期 | `base_dataset_version` |
-| `test_snap_dates` | 必填 | 最終 test 日期 | `base_dataset_version` |
+| `test_snap_dates` | 必填 | 最終 test 日期 | 不影響任何版本（見 7.1） |
 
 ```yaml
 dataset:
@@ -349,7 +349,7 @@ dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個抽樣 keys 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
 | `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio` | train/train-dev keys 與 inputs |
 | `calibration_variant_id` | 只包含 `calibration_sample_ratio`、`calibration_sample_ratio_overrides`、`sample_group_keys` | calibration keys 與 input |
 
@@ -364,7 +364,21 @@ calibration_sample_ratio
 calibration_sample_ratio_overrides
 ```
 
-除了這六個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
+除了這六個 keys，還有第七個被排除的 key —— `test_snap_dates`：
+
+```text
+test_snap_dates
+```
+
+它被排除的理由與抽樣 keys 不同。抽樣 keys 是因為「另有一層 variant ID 承接」；`test_snap_dates` 則是因為**它不定義產物身分，只定義資料覆蓋範圍**。test 資料不進任何模型擬合（`val` 驅動 early stopping、`calibration` 決定校準後輸出，兩者都留在 base payload 裡），所以在 `test_snap_dates` 加一個月份時：
+
+- `base_dataset_version` 與 `model_version` 都不變，因此**不需要重訓**；
+- 新月份的 test 產物以 dynamic partition 寫入，既有月份的產物與評估報表原封不動（累積語意）；
+- 新舊月份的評估報表並存於同一個模型身分之下，可直接比較。
+
+代價是 `parameters_dataset.yaml` 不再是 test 覆蓋範圍的唯一真實來源 —— 同一個 `base_dataset_version` 底下的月份會隨時間累積，**實際有哪些月份要以 Hive partition 為準**（`SHOW PARTITIONS`）；manifest 只記錄**最後一次執行**當下的設定，每次執行覆寫，因此讀不出累積的覆蓋範圍。完整推導與否決過的選項見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；操作步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md)。
+
+除了上述七個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
 
 每層使用 canonical YAML 計算 8 碼 SHA-256 hash。mapping 的 key 排列順序不影響 hash，但 list 的內容與順序會影響，例如重新排列 `sample_group_keys`、日期清單或 `categorical_values` 都會產生不同版本。
 
@@ -388,7 +402,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `calibration_sample_ratio_overrides` |  |  | ✓ | 只改變 calibration 各分層抽樣 |
 | `val_snap_dates` | ✓ |  |  | 改變 validation 資料 |
 | `val_sample_ratio` | ✓ |  |  | val 屬於 base layer，不屬於 train sampling |
-| `test_snap_dates` | ✓ |  |  | 改變 test 資料 |
+| `test_snap_dates` |  |  |  | 只改變 test 覆蓋範圍，不改變任何產物身分（見 7.1） |
 | `prepare_model_input.drop_columns` | ✓ |  |  | 改變 feature 清單與 model input |
 | `prepare_model_input.categorical_columns` | ✓ |  |  | 改變 category mappings、encoding 與 feature 清單 |
 
@@ -397,6 +411,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - `enable_calibration: false` 時，CLI 不會計算或建立 `calibration_variant_id`。此時只修改 `calibration_sample_ratio` 或 `calibration_sample_ratio_overrides`，不會改變任何實際產生的 dataset version。
 - 即使 `enable_calibration: false`，`calibration_snap_dates` 仍位於 base payload；修改它仍會翻新 `base_dataset_version`。
 - `sample_group_keys` 同時進入 train 與 calibration variant；calibration 關閉時只會翻新 train variant。
+- `test_snap_dates` 是唯一一個「改了卻不翻新任何版本」的日期設定。改動它之後 dataset 會在**同一個** `base_dataset_version` 底下補上新月份的 partition；既有月份不受影響，也不需要重訓。
 
 ### 7.3 設定檔外的版本因素
 
@@ -430,7 +445,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 |---|---|---|
 | train ratio、override、分層 keys、train-dev ratio | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
 | calibration ratio 或 override | 新 calibration variant，base/train version 不變 | 完整執行最安全；熟悉切片者可只重建 calibration 路徑 |
-| 日期、calibration 開關、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
+| train／val／calibration 日期、calibration 開關、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
+| 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
 | `feature_table` 欄名、型別或順序 | 新 base version | 完整執行 dataset |
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |

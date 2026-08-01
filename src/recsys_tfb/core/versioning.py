@@ -3,8 +3,10 @@
 Provides three-layer hash-based version IDs for dataset pipeline:
 
 - ``base_dataset_version``: derived from non-sampling dataset params + full
-  schema. Keys outputs that are invariant under sampling changes (preprocessor,
-  category_mappings, preprocessed_feature_table, val/test model_input).
+  schema, minus the coverage-only keys (``test_snap_dates``). Keys outputs that
+  are invariant under sampling changes (preprocessor, category_mappings,
+  preprocessed_feature_table, val/test model_input). Test months accumulate
+  *under* one version rather than minting a new one.
 - ``train_variant_id``: derived from train-sampling params only. Keys
   train/train_dev model_input under the base dataset directory.
 - ``calibration_variant_id``: derived from calibration-sampling params only.
@@ -45,6 +47,15 @@ CALIBRATION_SAMPLING_KEYS: frozenset[str] = frozenset({
     "sample_group_keys",
 })
 ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
+
+# Dataset keys that define data *coverage* only, never artifact identity.
+# ``test_snap_dates`` is the model's audience, not its input: it feeds no fit
+# step, so adding an evaluation month must not bust ``base_dataset_version``
+# (and, transitively, ``model_version``). ``val_snap_dates`` /
+# ``calibration_snap_dates`` deliberately stay in the payload — they drive
+# early stopping and calibration respectively, i.e. they define the model.
+# See docs/adr/0001-test-dates-out-of-dataset-version-identity.md.
+COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 
 
 # Keys under training.algorithm_params that do NOT affect the trained model
@@ -88,7 +99,9 @@ def compute_base_dataset_version(
     changes. ``params`` is the ``parameters_dataset`` dict; any keys in
     ``ALL_SAMPLING_KEYS`` under ``params["dataset"]`` are stripped before
     hashing so train/calibration sampling experiments do not invalidate
-    val/test/preprocessor artifacts.
+    val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
+    same way so adding an evaluation month is O(1): coverage grows, identity
+    (and therefore ``model_version``) does not change.
 
     ``feature_table_fingerprint`` (optional) reflects the actual
     ``feature_table`` schema (column name + dtype, ordered). When provided it
@@ -99,7 +112,7 @@ def compute_base_dataset_version(
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
     if isinstance(ds, dict):
-        for key in ALL_SAMPLING_KEYS:
+        for key in ALL_SAMPLING_KEYS | COVERAGE_ONLY_KEYS:
             ds.pop(key, None)
     payload: dict = {"dataset": stripped, "schema": schema}
     if feature_table_fingerprint is not None:

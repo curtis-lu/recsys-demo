@@ -150,6 +150,32 @@ class TestComputeBaseDatasetVersion:
         assert compute_base_dataset_version(p1, _sample_schema()) != \
             compute_base_dataset_version(p2, _sample_schema())
 
+    def test_test_snap_dates_does_not_affect_base(self):
+        # 加一個評估月份不改變產物身分：test 日期只定義資料覆蓋範圍，不進任何
+        # 模型擬合，因此從 payload 剝除（ADR-0001）。
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["test_snap_dates"] = ["2024-02-29", "2024-03-31"]
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_val_snap_dates_affects_base(self):
+        # val 的資料驅動 LightGBM early stopping、決定實際迭代數 → 是模型的輸入，
+        # 必須留在 hash 裡。與上一條配對，防「整個 dataset 區塊都不進 hash」的假綠。
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["val_snap_dates"] = ["2024-01-31", "2024-02-29"]
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_calibration_snap_dates_affects_base(self):
+        # calibration 決定校準後的輸出 → 同樣是模型的輸入，必須留在 hash 裡。
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["calibration_snap_dates"] = ["2024-03-31"]
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+
     # NOTE: that training.feature_selection does not trigger a dataset rebuild
     # is an integration property (the dataset pipeline loads parameters_dataset
     # only — no `training:` block — and training resolves base_dataset_version

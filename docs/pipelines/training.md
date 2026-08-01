@@ -464,7 +464,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
-| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）；「加一個月只複製那一個月」須待 test 日期退出 `base_dataset_version`（ADR-0001）後才成立，在那之前加月份仍翻號、全月重抄（本層是先架好的護欄，見 ADR-0003）；設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
+| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）。test 日期已退出 `base_dataset_version`（ADR-0001），因此**加一個月只複製那一個月**，既有月份 `cache_hit` 原封不動（見 ADR-0003；操作見 [新增一個評估月份](../operations/adding-an-eval-month.md)）。代價是同一個 base version 底下**重算**既有月份時 cache 不會失效（只看 `_SUCCESS`、不看新鮮度），須手動刪該月目錄——見 known-pitfalls §15。設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
@@ -523,7 +523,7 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 
 | 設定或因素 | `model_version` | `search_id` | 說明 |
 |---|:---:|:---:|---|
-| `base_dataset_version` | ✓ | ✓ | val、test、preprocessor 或基礎 model input 改變 |
+| `base_dataset_version` | ✓ | ✓ | val、preprocessor 或基礎 model input 改變（**test 月份的增減不在其中**——它已退出 base 的 hash payload，見 ADR-0001） |
 | `train_variant_id` | ✓ | ✓ | train/train-dev 抽樣或切分改變 |
 | `calibration_variant_id` | ✓ | ✓ | 僅 calibration 啟用時加入 |
 | `training.algorithm` | ✓ | ✓ | 演算法改變 |
