@@ -656,3 +656,160 @@ def test_maybe_warn_retrain_silent_without_advice():
 def test_maybe_warn_retrain_silent_when_plan_none():
     from recsys_tfb.__main__ import _maybe_warn_retrain
     assert _maybe_warn_retrain(None, {"models_dir": ".", "model_version": "x"}) == []
+
+
+# --- ADR-0002: incremental months + --rebuild-dates ---
+
+class TestRebuildDatesFlag:
+    def test_dataset_help_advertises_rebuild_dates(self):
+        result = runner.invoke(app, ["dataset", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--rebuild-dates" in result.output
+
+    def test_unconfigured_month_exits_before_spark_starts(self, tmp_path):
+        # A21 runs before the session is created: a typo must not cost a
+        # 2-4 minute Spark cold start before it is reported.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "test_snap_dates": ["2026-01-31"],
+            }},
+        )
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["dataset", "--rebuild-dates", "2026-09-30"]
+                )
+            assert result.exit_code == 1
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_configured_month_is_accepted(self, tmp_path):
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "test_snap_dates": ["2026-01-31"],
+            }},
+        )
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["dataset", "--rebuild-dates", "2026-01-31"])
+            # Got past A21 and reached session creation.
+            assert mock_spark.called
+        finally:
+            os.chdir(old_cwd)
+
+
+class TestIncrementalPlanReachesNodes:
+    def test_existing_and_rebuild_are_injected_into_node_parameters(self, tmp_path):
+        """The nodes read the plan off ``parameters``; assert it lands there.
+
+        This is the seam the whole feature hangs on — without it every node
+        falls back to "nothing exists" and silently processes every month.
+        """
+        from recsys_tfb.pipelines.dataset.nodes_shared import (
+            EXISTING_SNAP_DATES_KEY,
+            REBUILD_SNAP_DATES_KEY,
+        )
+
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "test_snap_dates": ["2026-01-31", "2026-02-28"],
+            }},
+        )
+        catalog_path = tmp_path / "conf" / "base" / "catalog.yaml"
+        with open(catalog_path) as f:
+            catalog = yaml.safe_load(f)
+        catalog["test_model_input"] = {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": "recsys_prod_test_model_input",
+        }
+        with open(catalog_path, "w") as f:
+            yaml.dump(catalog, f)
+        captured = {}
+
+        def _capture(data=None):
+            captured["params"] = data
+            return MagicMock()
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch("recsys_tfb.__main__.MemoryDataset", side_effect=_capture), \
+                    patch(
+                        "recsys_tfb.utils.spark.get_or_create_spark_session",
+                        return_value=_mock_spark_with_feature_table_schema(),
+                    ), \
+                    patch(
+                        "recsys_tfb.__main__.existing_snap_date_partitions",
+                        return_value=["2026-01-31"],
+                    ), \
+                    patch("recsys_tfb.__main__.Runner"):
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda *a, **kw: None
+                runner.invoke(app, ["dataset", "--rebuild-dates", "2026-01-31"])
+        finally:
+            os.chdir(old_cwd)
+
+        node_params = captured["params"]
+        assert node_params[REBUILD_SNAP_DATES_KEY] == ["2026-01-31"]
+        assert node_params[EXISTING_SNAP_DATES_KEY] == {
+            "test_model_input": ["2026-01-31"],
+        }
+
+
+class TestCollectExistingSnapDates:
+    def test_maps_each_hive_dataset_to_its_partitions(self):
+        from recsys_tfb.__main__ import _collect_existing_snap_dates
+
+        catalog = {
+            "test_keys": {
+                "type": "HiveTableDataset", "database": "db", "table": "t_keys",
+            },
+            "test_model_input": {
+                "type": "HiveTableDataset", "database": "db", "table": "t_mi",
+            },
+            # not a Hive table -> no partitions to list
+            "preprocessed_feature_table": {
+                "type": "ParquetDataset", "filepath": "x.parquet",
+            },
+        }
+        with patch(
+            "recsys_tfb.__main__.existing_snap_date_partitions",
+            side_effect=lambda spark, db, table, base: [f"{table}-{base}"],
+        ):
+            out = _collect_existing_snap_dates(MagicMock(), catalog, "abc12345")
+
+        assert out == {
+            "test_keys": ["t_keys-abc12345"],
+            "test_model_input": ["t_mi-abc12345"],
+        }
+        assert "preprocessed_feature_table" not in out
+
+
+class TestRebuildSliceWarning:
+    def test_names_both_flags_and_the_months(self):
+        from recsys_tfb.__main__ import _format_rebuild_slice_warning
+
+        lines = "\n".join(_format_rebuild_slice_warning(["2026-01-31"]))
+        assert "--rebuild-dates" in lines
+        assert "--only-node" in lines
+        assert "2026-01-31" in lines

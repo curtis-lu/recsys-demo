@@ -13,6 +13,7 @@ from recsys_tfb.core.consistency import (
     validate_config_consistency,
     compare_mutual_exclusive_errors,
     compare_source_key_exists,
+    resolved_rebuild_dates,
     ConfigConsistencyError,
 )
 from recsys_tfb.core.schema import (
@@ -36,6 +37,12 @@ from recsys_tfb.core.versioning import (
     write_manifest,
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
+from recsys_tfb.pipelines.dataset.helpers_spark import existing_snap_date_partitions
+from recsys_tfb.pipelines.dataset.nodes_shared import (
+    EXISTING_SNAP_DATES_KEY,
+    REBUILD_SNAP_DATES_KEY,
+    plan_incremental_snap_dates,
+)
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
@@ -202,6 +209,57 @@ def _slice_extra(from_node, only_node):
     if only_node:
         return {"only_node": only_node}
     return None
+
+
+#: dataset outputs whose snap_date partitions gate incremental processing.
+#: Key = catalog dataset name (the nodes look themselves up by this name);
+#: the four test-branch nodes map onto three artifacts because
+#: build/filter_test_model_input are two stages producing one table.
+_INCREMENTAL_DATASETS = (
+    "preprocessed_feature_table",
+    "test_keys",
+    "test_model_input",
+)
+
+
+def _collect_existing_snap_dates(
+    spark, catalog_config: dict, base_dataset_version: str
+) -> dict[str, list[str]]:
+    """Metastore partition listing for every incrementally-built dataset.
+
+    Taken once, before any node runs, so all four test-branch nodes and the
+    manifest agree on what had already landed when this run started (ADR-0002).
+    Metadata-only: no data is scanned.
+    """
+    existing: dict[str, list[str]] = {}
+    for name in _INCREMENTAL_DATASETS:
+        entry = catalog_config.get(name) or {}
+        if entry.get("type") != "HiveTableDataset":
+            continue
+        existing[name] = existing_snap_date_partitions(
+            spark, entry["database"], entry["table"], base_dataset_version,
+        )
+    return existing
+
+
+def _fmt_months(dates) -> str:
+    return ",".join(str(d) for d in dates) or "-"
+
+
+def _format_rebuild_slice_warning(rebuild: list[str]) -> list[str]:
+    """WARN lines for --rebuild-dates combined with a slicing flag.
+
+    The two flags are orthogonal by design (slicing picks nodes, rebuild picks
+    months) and combining them is a supported expert path — but only part of
+    the test chain gets recomputed, and the untouched upstream partitions stay
+    stale without complaint. Say so rather than let it pass silently.
+    """
+    return [
+        "[rebuild] WARNING: --rebuild-dates 與切片旗標（--from-node/--only-node）併用；",
+        "[rebuild] 本次只重算被選中的 node，未被選中的上游 partition "
+        f"（月份 {_fmt_months(rebuild)}）不會刷新（exists() ≠ fresh）。",
+        "[rebuild] 要整條 test 鏈都重算，請不帶切片旗標再跑一次。",
+    ]
 
 
 def _execute_pipeline(
@@ -516,6 +574,12 @@ def inference_population_etl(
 @app.command(name="dataset")
 def dataset(
     env: str = typer.Option("local", "--env", "-e", help="Config environment"),
+    rebuild_dates: Optional[str] = typer.Option(
+        None, "--rebuild-dates",
+        help="Comma-separated snap_dates to recompute even though their "
+             "partitions already exist (use after an upstream backfill of an "
+             "old month). Must be a subset of dataset.test_snap_dates.",
+    ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
         help="Start from this node (topological position); missing upstream "
@@ -537,6 +601,21 @@ def dataset(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("dataset", env)
+
+    # (A21) --rebuild-dates ⊆ dataset.test_snap_dates. Checked before Spark
+    # starts: a typo here would otherwise cost a cold start before failing.
+    try:
+        rebuild = resolved_rebuild_dates(
+            params,
+            [d.strip() for d in rebuild_dates.split(",")] if rebuild_dates else None,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1)
+    if rebuild and (from_node or only_node):
+        for line in _format_rebuild_slice_warning(rebuild):
+            logger.warning(line)
+
     get_or_create_spark_session(_load_spark_config(config, "dataset"))
     data_dir = _find_data_dir()
 
@@ -550,7 +629,8 @@ def dataset(
     )
 
     spark = get_or_create_spark_session()
-    feature_table_cfg = config.get_catalog_config(runtime_params=params)["feature_table"]
+    catalog_config = config.get_catalog_config(runtime_params=params)
+    feature_table_cfg = catalog_config["feature_table"]
     feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
     feature_table_columns = [
         (f.name, f.dataType.simpleString())
@@ -574,12 +654,30 @@ def dataset(
     if cal_v is not None:
         logger.info("calibration_variant_id: %s", cal_v)
 
+    # Incremental plan (ADR-0002): one metastore listing, handed to every
+    # test-branch node so they and the manifest cannot disagree about which
+    # months this run covered.
+    existing_snap_dates = _collect_existing_snap_dates(spark, catalog_config, base_v)
+    month_plan = plan_incremental_snap_dates(
+        (params.get("dataset", {}) or {}).get("test_snap_dates", []),
+        existing_snap_dates.get("test_model_input", []),
+        rebuild,
+    )
+    logger.info(
+        "[months] test branch: processed=%s skipped=%s rebuild=%s",
+        _fmt_months(d.strftime("%Y-%m-%d") for d in month_plan.to_process),
+        _fmt_months(d.strftime("%Y-%m-%d") for d in month_plan.skipped),
+        _fmt_months(rebuild),
+    )
+
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
+        EXISTING_SNAP_DATES_KEY: existing_snap_dates,
+        REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
@@ -625,7 +723,17 @@ def dataset(
             "artifacts": _dir_artifacts(base_dir),
         },
         run_id=run_context.run_id,
-        extra_metadata=_slice_extra(from_node, only_node),
+        extra_metadata={
+            **(_slice_extra(from_node, only_node) or {}),
+            # A pipeline that decides to do less work has to record what it
+            # decided not to do — otherwise ADR-0002's "exists() ≠ fresh" is
+            # invisible after the fact.
+            "test_snap_dates_plan": {
+                "processed": [d.strftime("%Y-%m-%d") for d in month_plan.to_process],
+                "skipped": [d.strftime("%Y-%m-%d") for d in month_plan.skipped],
+                "rebuild_requested": list(rebuild),
+            },
+        },
         symlink_target=data_dir / "dataset" / "latest",
         params_name="parameters_dataset",
         params_dict=params_dataset,
