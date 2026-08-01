@@ -194,3 +194,62 @@ def test_predict_and_write_calibrated_branch_calls_predict_uncalibrated(tmp_path
     for df in saves:
         assert (df["score"] == 0.9).all()
         assert (df["score_uncalibrated"] == 0.1).all()
+
+
+def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
+    """The cache node now hands predict ``{snap_date: ParquetHandle}`` — one
+    root per month. Every other test in this module passes a bare handle (still
+    supported), so without this one the mapping shape predict actually receives
+    in production would never be exercised: a union that dropped a root, or
+    partition filtering that broke across roots, would stay green.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import predict_and_write_test_predictions
+
+    def _month_root(snap_date: str) -> str:
+        df = pd.DataFrame(
+            {
+                "cust_id": ["c1", "c2"],
+                "snap_date": [snap_date] * 2,
+                "prod_name": ["prod_A", "prod_B"],
+                "feat_a": [1.0, 2.0],
+                "label": [1, 0],
+            }
+        )
+        root = tmp_path / snap_date.replace("-", "") / "test_model_input.parquet"
+        pq.write_to_dataset(
+            pa.Table.from_pandas(df, preserve_index=False),
+            root_path=str(root),
+            partition_cols=["snap_date", "prod_name"],
+        )
+        return str(root)
+
+    handles = {
+        "2025-01-31": ParquetHandle(_month_root("2025-01-31")),
+        "2025-02-28": ParquetHandle(_month_root("2025-02-28")),
+    }
+
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.full(len(X), 0.5)
+
+    saves: list = []
+    write_ds = MagicMock()
+    write_ds.save.side_effect = lambda df: saves.append(df)
+
+    manifest = predict_and_write_test_predictions(
+        model=model,
+        test_parquet_handle=handles,
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=_make_parameters(),
+        training_eval_predictions=write_ds,
+    )
+
+    # 2 months x 2 products, each written as its own partition
+    assert write_ds.save.call_count == 4
+    assert sorted(manifest["snap_dates"]) == ["2025-01-31", "2025-02-28"]
+    written = pd.concat(saves, ignore_index=True)
+    assert len(written) == 4
+    assert sorted(set(written["snap_date"].astype(str))) == ["2025-01-31", "2025-02-28"]

@@ -140,7 +140,17 @@ mlflow:
 
 # Driver-local parquet cache：materialize 後的 model inputs，重跑時可跳過 Hive
 # scan。由 base_dataset_version / train_variant_id / calibration_variant_id 三
-# 層 key 決定。`cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
+# 層 key 決定；`test_model_input` 例外——它**一個 test 月份一個目錄**
+# （test_months/<YYYYMMDD>/，各自持有自己的 _SUCCESS）。目錄名只宣稱它自己那
+# 一個月，名字與內容不會分歧。
+# ⚠ 「加一個月只複製那一個月」要等 test 日期退出 base_dataset_version
+# （ADR-0001）之後才成立：在那之前加月份仍會翻號，路徑第一層就換掉，所有月份
+# 照樣重抄。本層是為那一刻先架好的護欄——順序反了會出現「加了月份、cache 命中
+# 舊資料、新月份從未被 predict、而且不報錯」（見 ADR-0003）。
+# 另一個效果：設定列了某月但來源表沒有（典型：加了月份卻忘了先跑 dataset），
+# 逐月複製的 glob 零命中即 raise FileNotFoundError——這道 fail-loud 是機制自帶
+# 的，不需要另外寫覆蓋檢查。
+# `cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
 # （存在性檢查）與 _populate_cache_from_hive()（hadoop fs copyToLocal 目的地）
 # 都從這裡讀。persistence 由 training/nodes.py::_materialize_parquet_handle
 # 負責，不經 catalog dataset。所有環境都會寫 parquet 到 disk 並在 DAG 中以
