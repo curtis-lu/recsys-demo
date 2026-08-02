@@ -65,7 +65,12 @@ def _is_positive(cid: str, prod: str) -> bool:
 
 
 def _n_items(parameters) -> int:
-    """Declared item count. The schema is the source of truth, not the fixture."""
+    """Declared item count, read from the schema the node under test also reads.
+
+    The fixture builds its items from the same list `parameters` declares, so
+    this is one list expressed once rather than a second constant to keep in
+    sync — not an independent oracle.
+    """
     schema = get_schema(parameters)
     return len(parameters["schema"]["categorical_values"][schema["item"]])
 
@@ -88,9 +93,20 @@ def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
     """model_input's column set, derived from the rule build_model_input follows.
 
     identity ∪ {label} ∪ feature_columns ∪ (whatever else the keys carried in).
-    Used as an equality so an *extra* column — a leaked join column, a carry
-    column that should have been dropped — fails the assertion too; ``in`` /
-    ``isdisjoint`` only ever catch missing ones.
+    Used as an equality so an *extra* column — a join column leaking through
+    from label_table — fails the assertion too; ``in`` / ``isdisjoint`` only
+    ever catch missing ones.
+
+    Two limits worth knowing before trusting a green:
+
+    - Every keys frame in this module is exactly identity_columns, so the
+      ``keys.columns`` term adds nothing here. The carry branch of the rule is
+      covered in tests/test_preprocessing/test_spark.py instead.
+    - ``feature_columns`` comes from the preprocessor, so this checks that
+      build_model_input honours the metadata handed to it — not that the
+      metadata is correct. Whether _compute_feature_columns selected the right
+      columns is a separate contract (#140 D3) with its own tests; drop a
+      feature there and this equality follows it down without complaining.
     """
     schema = get_schema(parameters)
     return (
@@ -216,11 +232,15 @@ class TestSplitTrainKeys:
     def test_both_sides_are_non_empty(self, sample_pool, parameters):
         """D21: the fixture is big enough that the split actually splits.
 
-        Without this the other three tests in this class are vacuous — at the
-        old 4-entity size the dev side was always empty, and replacing the whole
-        function with ``return sample_keys, sample_keys.limit(0)`` kept them
-        green. Asserted on distinct entities (not rows) because that is the unit
-        the split is defined on.
+        Without this the other three tests in this class are vacuous. Verified
+        by reconstructing the pre-#141 state — 4 entities, no empty-dev guard,
+        and the body replaced by ``return sample_keys, sample_keys.limit(0)``:
+        the other three stayed green for a split that did nothing. (Under the
+        guard added in this same change that mutation now raises instead, so the
+        demonstration only reproduces with the guard removed too.)
+
+        Asserted on distinct entities, not rows, because that is the unit the
+        split is defined on.
         """
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         entity_col = get_schema(params)["entity"][0]
@@ -317,6 +337,36 @@ class TestSplitTrainKeysEmptyTrainDev:
         assert train_dev.count() == 0
         assert train.count() == keys.count()
 
+    def test_negative_ratio_raises(self, spark, parameters):
+        """A negative ratio reaches the same silent state by a different route.
+
+        ratio_to_threshold(-0.1) is negative, so `_bucket < threshold` is empty
+        and `_bucket >= threshold` takes everything — dev is empty exactly as in
+        the too-small-ratio case. A `> 0` guard would wave it through, so one
+        stray minus sign would resurrect the whole failure mode.
+        """
+        params = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "train_dev_ratio": -0.1},
+        }
+        with pytest.raises(ValueError, match="empty train-dev split") as ei:
+            split_train_keys(self._keys(spark), params)
+        assert "train_dev_ratio=-0.1" in str(ei.value)
+
+    def test_empty_sample_keys_blames_upstream(self, spark, parameters):
+        """Empty *input* is a different fault, and must not be misreported.
+
+        With no keys at all both sides are empty, so "puts every entity on the
+        train side" would be false and "raise train_dev_ratio" would be useless
+        advice — no ratio produces a non-empty split from nothing.
+        """
+        empty = self._keys(spark).limit(0)
+        with pytest.raises(ValueError, match="no sampled keys at all") as ei:
+            split_train_keys(empty, parameters)
+        msg = str(ei.value)
+        assert "sample_ratio" in msg
+        assert "puts every entity on the train side" not in msg
+
 
 class TestSelectValKeys:
     def test_full_population(self, sample_pool, parameters):
@@ -357,7 +407,10 @@ class TestBuildModelInput:
             })
         )
         result = build_model_input(keys, pft, label_table, preprocessor, parameters)
-        # keys' grain is model_input's grain: no fan-out, no drop.
+        # keys' grain is model_input's grain. Note this catches fan-out only:
+        # label_table covers every key in these fixtures, so it cannot tell a
+        # LEFT join from an INNER one. Pinning the join side needs a key with no
+        # label row (#140 D10/D14), which is not this ticket.
         assert result.count() == keys.count()
         assert set(result.columns) == _expected_model_input_columns(
             keys, preprocessor, parameters
@@ -403,8 +456,6 @@ class TestFitAndBuild:
         production node produces, and the only shape that exercised the
         base-key-join branch that ADR-0005 removed.
         """
-        from pyspark.sql import DataFrame
-
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
@@ -416,7 +467,6 @@ class TestFitAndBuild:
         for split, keys in splits.items():
             mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
             n_keys = keys.count()
-            assert isinstance(mi, DataFrame)
             assert n_keys == _expected_key_count(parameters, split), split
             assert mi.count() == n_keys, split
             assert set(mi.columns) == _expected_model_input_columns(
@@ -769,6 +819,10 @@ class TestValidateDataConsistency:
 
 
 class TestSplitTrainKeysCarry:
+    # NOTE: this frame's 6 entities and ratio 0.3 must leave the dev side
+    # non-empty or the empty-dev guard fires and this test dies for a reason
+    # unrelated to carry columns. Two of the six bucket below the threshold
+    # today. Resizing this frame means re-checking that, not just the count.
     def test_carry_column_survives_split(self, spark):
         keys = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
