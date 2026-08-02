@@ -33,6 +33,14 @@ dataset:
   # parquet 的欄位清單（供 training.sample_weights 分群；權重實際只套 train/train_dev）。
   # 寬鬆超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
   # 重產 dataset。⚠改此清單會 bust base_dataset_version（parquet schema 變、整批重算）。
+  #
+  # ★配對規則：此處的欄若**也存在於 feature_table**，必須同時列進下面的
+  #   prepare_model_input.drop_columns（cust_segment_typ 正是這個情況——兩處都有它是
+  #   刻意的，不是矛盾，別「順手修掉」）。否則 build_model_input 的 join 兩側各帶一份
+  #   同名欄，Spark 會報 `Reference 'x' is ambiguous`。反向修法（從 carry_columns 拿掉）
+  #   也合法：差別是保 carry 棄特徵 vs 保特徵棄 carry。不變量 B7 會在 dataset 第一個
+  #   node 擋下並同時給出兩種修法。identity 欄與 label 不受此規則約束。
+  #   詳見 docs/adr/0004-carry-drop-columns-intersection.md
   carry_columns:
     - cust_segment_typ
 

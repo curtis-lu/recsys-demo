@@ -138,7 +138,17 @@ dataset:
 注意事項：
 
 - 欄位必須實際存在於 `sample_pool`。
-- val 與 test keys 不會攜帶這些欄位。
+- val 與 test keys 不會攜帶這些欄位。這不是疏漏：train／train-dev／calibration 走
+  `select_keys`（會帶 carry），val／test 只取 identity。sample weights 只作用於
+  train 側，而 per-segment 評估是在 evaluation 階段另外從 `sample_pool` 取 segment，
+  所以 val／test 不需要這些欄位。
+- **若同一欄也存在於 `feature_table`，必須同時列入 `prepare_model_input.drop_columns`**
+  ——否則 `build_model_input` 的 join 兩側各帶一份同名欄，Spark 會報一句看不出設定
+  在哪寫錯的 `Reference 'x' is ambiguous`。反方向的修法（把該欄從 `carry_columns`
+  拿掉）同樣合法，差別是前者保 carry 棄特徵、後者保特徵棄 carry。不變量 B7 會在
+  dataset 的第一個 node 擋下並同時給出兩種修法（見
+  [ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。identity 欄與 label
+  不適用此規則——它們不會被複製第二份。
 - sample weights 只套用於 train 與 train-dev；calibration 即使帶有欄位也不加權。
 - 修改 `carry_columns` 會改變 model input schema，因此會更新 `base_dataset_version`。
 
@@ -171,6 +181,7 @@ dataset:
 - `schema.item` 必須列在 `categorical_columns`，否則模型無法區分 query group 內的 items。
 - 同一欄不可同時出現在 `categorical_columns` 與 `drop_columns`。
 - 字串／非數值欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（成因見 `docs/operations/training-oom-object-matrix.md`）。
+  - ⚠ **該欄若同時列在 `carry_columns`，上面兩個選項只有 `drop_columns` 可用。** B6 的錯誤訊息會建議「宣告成 categorical 或 drop」，但對 carry 欄選前者只是把 B6 換成下一個錯誤：欄位留在 `feature_table` 側，`build_model_input` 兩側各帶一份，改撞 `Reference 'x' is ambiguous`。B7 會同時報出來（collect-all），但 B6 那則排在前面，由上往下照做會先繞一圈。判斷方式見 §3.4 的配對規則。
 - 真正的連續數值特徵不需列入任一清單。
 - 宣告為 categorical 的 feature 欄位不可是 Decimal、Double 或 Float；數字代碼應先在 source ETL 轉為 string 或 integer。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。
@@ -196,6 +207,38 @@ terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 c
 preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、calibration、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
 
 model input 寫出前，Decimal 與 Double 類型的 feature 會轉成 Spark `float`，降低後續 driver 讀取與模型訓練的記憶體成本。
+
+### 3.6 三個欄位清單各自作用在哪張表
+
+`carry_columns`、`drop_columns`、`feature_columns` 常被當成同一件事的三種寫法，其實
+**三者作用在不同的來源表、也在不同的 node 生效**。所以同一個欄名同時出現在
+`carry_columns` 與 `drop_columns` 不是自相矛盾——當該欄同時存在於 `sample_pool` 與
+`feature_table` 時，那是唯一可行的寫法（見 §3.4）。
+
+| 設定鍵 | 作用對象 | 生效處 | 語意 |
+|---|---|---|---|
+| `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns` | 黑名單：不得成為模型特徵 |
+| `carry_columns` | **`sample_pool`** 的欄 | `select_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
+| `feature_columns` | 推導結果，存進 `preprocessor.json` | `_compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
+
+`feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來
+的結果。想增減特徵就改 `drop_columns` 或 `categorical_columns`。
+
+**`drop_columns` 會物理刪欄，不只是「不當特徵」。** `apply_preprocessor_to_features`
+只保留 `base_key ＋ 有出現在 feature_table 的 feature_columns`，所以被擋在
+`feature_columns` 之外的欄根本不會寫進 `preprocessed_feature_table`。這正是同時
+`carry` 又 `drop` 一個欄能運作的原因：`feature_table` 那一份被刪掉，只剩 keys 帶進來
+的那一份，join 時就不會撞名。
+
+各 split 最後拿到哪些欄，是一條推導規則而不是逐 split 的清單：
+
+```
+model_input.columns == identity ∪ {label} ∪ feature_columns ∪ (carry_columns ∩ 該 split keys 的欄)
+```
+
+train／train-dev／calibration 的 keys 帶 carry，val／test 不帶，所以同一條規則在不同
+split 展開出不同的欄位集合（見 §3.4 與
+[ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。
 
 ## 4. 使用方式
 
@@ -299,6 +342,24 @@ model input 的組裝規則：
 2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
 3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
 4. val/test 才會移除零正例 query groups；train、train-dev 與 calibration 保留所有 rows。
+
+#### 兩個 left join 各自的契約
+
+兩個 join 都是 left，而且**列數恆等於 keys 的列數**——keys 的 grain 就是 model input
+的 grain。這一點是後續所有列數斷言的地基，改成 inner join 會靜默改變列數，也會讓 mAP
+的候選集跟著變。
+
+| join miss | 產生什麼 | 為什麼這是預期行為 |
+|---|---|---|
+| `label_table` 沒有這筆 | `label` 補 `0` | label table 是稀疏的：只有發生過交易的 entity 才有 row，沒有 row 就是負例 |
+| `preprocessed_feature_table` 沒有這筆 | 該列的 feature 欄全為 NULL，**列仍保留** | `sample_pool` 與 `feature_table` 的母體來自不同上游，miss 是結構性的常態；LightGBM 自行處理 missing |
+
+**全 NULL 特徵列是合法輸出，不是 bug。** 看到它不代表資料壞了，代表這個
+`(time, entity)` 在 `feature_table` 裡沒有對應 row。目前刻意不加覆蓋率閘門：真實
+miss 率只有在生產跑過一次才知道，本機量不到，所以「先量再決定」這一輪無法執行。日後
+要量，量測點在 `build_model_input` 產出之後（量實際進了 model input 的東西），而不是
+在 `sample_pool` 的 ETL 端取代理值。完整理由與被否決的替代方案見
+[ADR-0005](../adr/0005-model-input-degenerate-state-contracts.md)。
 
 ### 5.1 test 分支是增量的
 
@@ -506,7 +567,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - 版本 hash 包含 `feature_table` schema fingerprint，不包含 source rows 的資料值或 source ETL SQL。
 - `sample_pool` identity 唯一性由 source ETL 品質檢查負責；dataset 不會在抽樣前再次 deduplicate。
 - label left join 不到時會視為負例 `0`；必須確定 sparse label table 的語意確實如此。
-- feature left join 不到時可能留下 NULL feature，dataset 不會將其視為缺少 entity 的硬錯誤。
+- feature left join 不到時會留下全 NULL feature 的列，dataset 不會將其視為缺少 entity 的硬錯誤。這是明文契約而非容忍，代價是「特徵缺失」與「特徵值真的是 NULL」在 model input 裡無法區分；契約與量測點見 §5。
 - val/test 會排除零正例 query groups，因此產物不代表完整上線母體。
 - 多月份資料仍由 Spark lazy execution、shuffle spill 與 Hive partitions 處理；尖峰資源通常取決於單一 shuffle partition 與資料偏斜，而不是月份數本身。
 

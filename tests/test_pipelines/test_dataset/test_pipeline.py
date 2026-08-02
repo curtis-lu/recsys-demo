@@ -1,6 +1,7 @@
 """Tests for dataset building pipeline definition."""
 
 from recsys_tfb.pipelines.dataset import create_pipeline
+from recsys_tfb.pipelines.dataset import nodes_spark as nodes
 
 
 class TestDatasetPipeline:
@@ -108,3 +109,78 @@ class TestDatasetPipeline:
         for n in build_nodes:
             assert "preprocessed_feature_table" in n.inputs
             assert "preprocessor" in n.inputs
+
+
+class TestNodeNameToFunctionBinding:
+    """D22 — which function each node name actually runs.
+
+    Node names are plain strings and are what ``--from-node`` / ``--only-node``
+    address, what the runner logs, and what ADR-0002's incremental branch is
+    reasoned about by name. The existing name tests assert membership, so a name
+    attached to the *wrong function* passes them — as does a rename that silently
+    moves a slicing entry point. This pins the pairing instead.
+
+    Two pairings here are deliberately not identities and are the ones most
+    likely to be "corrected" by mistake:
+
+    - ``select_sample_keys`` runs ``select_train_keys``;
+    - ``build_test_model_input`` / ``filter_test_model_input`` run the *test*
+      wrappers, not the shared ``build_model_input`` /
+      ``filter_groups_with_positives`` the other splits use, because the test
+      branch is incremental (ADR-0002).
+    """
+
+    BASE_BINDINGS = {
+        "validate_data_consistency": nodes.validate_data_consistency,
+        "select_sample_keys": nodes.select_train_keys,
+        "split_train_keys": nodes.split_train_keys,
+        "select_val_keys": nodes.select_val_keys,
+        "select_test_keys": nodes.select_test_keys,
+        "fit_preprocessor_metadata": nodes.fit_preprocessor_metadata,
+        "apply_preprocessor_to_features": nodes.apply_preprocessor_to_features,
+        "build_train_model_input": nodes.build_model_input,
+        "build_train_dev_model_input": nodes.build_model_input,
+        "build_val_model_input": nodes.build_model_input,
+        "build_test_model_input": nodes.build_test_model_input,
+        "filter_val_model_input": nodes.filter_groups_with_positives,
+        "filter_test_model_input": nodes.filter_test_model_input,
+    }
+    CALIBRATION_BINDINGS = {
+        "select_calibration_keys": nodes.select_calibration_keys,
+        "build_calibration_model_input": nodes.build_model_input,
+    }
+
+    def _bindings(self, pipeline):
+        names = [n.name for n in pipeline.nodes]
+        # Node names address slicing entry points, so a duplicate would make
+        # --only-node ambiguous; assert uniqueness before collapsing to a dict.
+        assert len(names) == len(set(names)), f"duplicate node names: {names}"
+        return {n.name: n.func for n in pipeline.nodes}
+
+    def test_every_node_name_runs_the_expected_function(self):
+        # Equality, not per-key lookups: an added node, a removed one and a
+        # renamed one all fail, where `in` checks only ever catch removal.
+        assert self._bindings(create_pipeline()) == self.BASE_BINDINGS
+
+    def test_calibration_adds_exactly_two_bound_nodes(self):
+        assert self._bindings(create_pipeline(enable_calibration=True)) == {
+            **self.BASE_BINDINGS, **self.CALIBRATION_BINDINGS,
+        }
+
+    def test_the_four_build_nodes_share_one_function(self):
+        """Not a restatement of the table: it is *why* names carry the meaning.
+
+        train / train_dev / val / calibration all run the same
+        ``build_model_input``, so the node name is the only thing distinguishing
+        them — which is what makes a typo in one a silent topology change rather
+        than an import error.
+        """
+        bindings = self._bindings(create_pipeline(enable_calibration=True))
+        shared = {
+            name for name, func in bindings.items()
+            if func is nodes.build_model_input
+        }
+        assert shared == {
+            "build_train_model_input", "build_train_dev_model_input",
+            "build_val_model_input", "build_calibration_model_input",
+        }
