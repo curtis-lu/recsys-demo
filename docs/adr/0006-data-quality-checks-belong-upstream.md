@@ -27,11 +27,31 @@ date: 2026-08-02
 `feature_table` 若有重複 `(snap_date, cust_id)`，`build_model_input` 的 feature join
 會靜默把 model_input 列數乘開。
 
-→ **在 `parameters_feature_etl.yaml` 的 6 張表補
+→ **在 `parameters_feature_etl.yaml` 的 `feature_table` 補
 `quality_checks: {max_duplicate_key_ratio: 0.0}`**，不在 Layer-2 加閘。
 
 理由：修的是真的洞、用既有機制、在資料還熱的 ETL 時點付一次成本（**每月一次**，而不是
 每次 dataset run 一次），而且讓上面那句註解變成真的。
+
+### 為什麼只掛終點表，不掛餵給它的那五張
+
+> 修訂於 2026-08-02（原文為「6 張表都補」）。證據：`conf/sql/etl/feature/feature_table.sql`
+> 是 `SELECT * FROM feature_concat`，而 `feature_concat` 由四張來源表 join 而成。
+
+上游任何一張表的重複鍵都會**經由 join fan-out 傳播到 `feature_table`**，所以單一終點檢查
+抓得到全部——而 `feature_table` 正是 dataset pipeline 實際讀的那張，也就是這條不變量真正
+要守的地方。
+
+代價是**歸因精度**：檢查爆掉時只知道「終點有重複」，不知道是哪一張上游造成的，得自己往
+回查。換到的是六次聚合變一次。
+
+這與 `parameters_label_etl.yaml` 的做法不同（那邊四張全掛）。**這個不對稱是本次選擇的結果，
+不是有意設計的對照**——label 那份設定早於本次決策，沒有一併重新評估。若日後要統一，方向
+應該是把 label 也收斂成只檢查終點的 `label_table`（它是三張來源表的 `UNION ALL`，重複鍵
+同樣 1:1 傳到終點），而不是把 feature 補回全掛。
+
+**若日後 `feature_table.sql` 從直通改成含 fan-out 的轉換，這個推論失效**——屆時終點檢查
+不再等價於上游檢查，要重新評估是否補回中間層。
 
 ## query group 完整性 → 不設閘，只加測試
 
