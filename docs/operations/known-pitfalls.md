@@ -150,3 +150,12 @@
 - **⚠ 2026-08-01 追加：這個症狀現在有三層可能成因，要一起排除。** dataset 與 predict 都變成增量的了（[ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)、issue #130）：dataset 的既有 partition 只要存在就跳過，predict 的既有月份只要 item partition 齊全就跳過，parquet cache 只要有 `_SUCCESS` 就命中。三層都只認「存在」，都不認「新鮮」。
 - **規則**：重算既有月份用 `bash scripts/rebuild_eval_month.sh <該月>`——它把同一個 `--rebuild-dates` 同時給 dataset 與 training，training 那側再順手丟掉該月的 cache 目錄。**不要只跑其中一半**。手動等價指令與 log 對照見 [adding-an-eval-month.md](adding-an-eval-month.md#重算某個既有月份上游回補時)。單純**新增**月份不受此坑影響——新月份三層都沒有東西，必然重做；而且若忘了先跑 dataset，逐月複製的 glob 零命中會 raise `FileNotFoundError`，是 fail-loud 而非靜默。
 - **驗證方式**：`ls -d data/recsys_cache/<base_dataset_version>/test_months/*` 看目前 cache 了哪幾個月。重算時該月的三行 log 應該是 `[months] test branch: processed=<該月>`、`cache_rebuild name=test_model_input path=...`（緊接著 `cache_miss` 與實際複製）、`[months] predict: processed=<該月> ... rebuilt=<該月>`。該月出現在任何一行的 `skipped=` 或印成 `cache_hit`，就是那一層沒被重算。
+
+## 16. PR 開好後再推 commit：GitHub 的 PR 物件會落後，merge 到的是舊版本（2026-08-02，PR #146 實例）
+
+- **症狀（第一分鐘認出它）**：`git push` 成功且印出 `<舊sha>..<新sha>`，`git ls-remote origin refs/heads/<branch>` 也確實指向新 sha——但 `gh pr view <n> --json headRefOid` 仍回舊 sha，PR 頁面的檔案清單少了新 commit 動到的檔。**重推會顯示 `Everything up-to-date`**（因為 remote 真的已經是新的），很容易被當成「已經同步了」而放行。
+- **根因**：remote ref 與 GitHub 的 **PR 物件**是兩個東西。PR 的 `head.sha` / `changed_files` 由 GitHub 端非同步重算，正常是秒級，但會卡住（實測卡超過 2 分鐘）。`gh api` 直接打也一樣——不是 `gh` 的本地快取問題。
+- **後果**：在卡住期間按 merge，**進 main 的是 PR 物件認得的那個舊 commit**，後推的 commit 留在分支上沒進去。實例：PR #146 推了範圍收斂的 commit，PR 卡在前一個 sha，merge 之後 main 拿到的是被收斂前的版本，得再開 #148 補。
+- **規則**：**PR 開好之後又推過 commit → merge 前先確認 `gh api repos/<owner>/<repo>/pulls/<n> --jq .head.sha` 等於 `git rev-parse HEAD`**。不相等就等，別 merge。要提醒使用者時把這句放在訊息**最前面**——放在結尾會被略過（#146 就是這樣被 merge 的）。
+- **補救**（若已經 merge 錯版本）：原分支通常還在且尖端仍是新 sha，此時它相對新 main 剛好只剩沒進去的那些 commit ——**直接從同一條分支開新 PR 即可，不需要 cherry-pick**。先用 `git show origin/main:<檔案>` 確認 main 的實際內容，不要憑 PR 頁面判斷。
+- **驗證方式**：`gh api repos/<owner>/<repo>/pulls/<n> --jq '.head.sha, .changed_files'` 對照 `git rev-parse HEAD` 與 `git diff --stat origin/main..HEAD`。三者一致才是真的同步。
