@@ -28,11 +28,11 @@ pytestmark = pytest.mark.spark
 # stops matching the fixture can no longer make an assertion vacuous.
 #
 # Entity count (24) is chosen so train / train-dev actually split: at the old
-# size of 4, train_dev_ratio=0.2 rounded the dev side to empty and every
-# assertion in TestSplitTrainKeys held for a `split` that did nothing (replacing
-# it with "return sample_keys, sample_keys.limit(0)" kept them green). Item
-# count stays at 3 and is deliberately NOT aligned with the 8 in conf/ — that
-# gap is orthogonal to this one (see #140).
+# size of 4, train_dev_ratio=0.2 rounded the dev side to empty, and every
+# assertion in TestSplitTrainKeys held for a `split` that did nothing. See
+# TestSplitTrainKeys.test_both_sides_are_non_empty for how that was verified.
+# Item count stays at 3 and is deliberately NOT aligned with the 8 in conf/ —
+# that gap is orthogonal to this one (see #140).
 _ENTITIES = [f"C{i:03d}" for i in range(1, 25)]
 _PRODUCTS = ["exchange_fx", "exchange_usd", "fund_stock"]
 _SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
@@ -97,11 +97,16 @@ def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
     from label_table — fails the assertion too; ``in`` / ``isdisjoint`` only
     ever catch missing ones.
 
-    Two limits worth knowing before trusting a green:
+    Three limits worth knowing before trusting a green:
 
     - Every keys frame in this module is exactly identity_columns, so the
       ``keys.columns`` term adds nothing here. The carry branch of the rule is
       covered in tests/test_preprocessing/test_spark.py instead.
+    - That term mirrors what the code does (carry = anything in keys that is
+      not identity/feature/label), not what ADR-0004 states the rule to be
+      (``carry_columns ∩ keys``). So it cannot catch a key column that gets
+      carried but should not have been — the implementation never consults
+      ``carry_columns``. Reconciling the two is #140 D4, not this ticket.
     - ``feature_columns`` comes from the preprocessor, so this checks that
       build_model_input honours the metadata handed to it — not that the
       metadata is correct. Whether _compute_feature_columns selected the right
@@ -318,13 +323,17 @@ class TestSplitTrainKeysEmptyTrainDev:
             **parameters,
             "dataset": {**parameters["dataset"], "train_dev_ratio": 1e-7},
         }
+        keys = self._keys(spark)
+        entity_col = get_schema(params)["entity"][0]
+        n_entities = keys.select(entity_col).distinct().count()
+
         with pytest.raises(ValueError, match="empty train-dev split") as ei:
-            split_train_keys(self._keys(spark), params)
+            split_train_keys(keys, params)
         msg = str(ei.value)
         # The message has to name both halves of the cause: a ratio alone does
         # not tell you whether to change the ratio or the sample size.
         assert "train_dev_ratio=1e-07" in msg
-        assert "2 distinct cust_id" in msg
+        assert f"{n_entities} distinct {entity_col}" in msg
 
     def test_zero_ratio_permits_empty_train_dev(self, spark, parameters):
         """train_dev_ratio == 0 asks for no dev split; that is not the bug."""
@@ -819,10 +828,6 @@ class TestValidateDataConsistency:
 
 
 class TestSplitTrainKeysCarry:
-    # NOTE: this frame's 6 entities and ratio 0.3 must leave the dev side
-    # non-empty or the empty-dev guard fires and this test dies for a reason
-    # unrelated to carry columns. Two of the six bucket below the threshold
-    # today. Resizing this frame means re-checking that, not just the count.
     def test_carry_column_survives_split(self, spark):
         keys = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
@@ -833,6 +838,13 @@ class TestSplitTrainKeysCarry:
             "item": "prod_name", "label": "label"}},
             "dataset": {"train_dev_ratio": 0.3}, "random_seed": 42}
         tr, dv = split_train_keys(keys, params)
+        # This frame has to keep both sides non-empty or the empty-dev guard
+        # fires and the test dies for a reason unrelated to carry columns —
+        # a dependency on where six particular ids hash. Asserted rather than
+        # left in a comment, so resizing the frame reports the problem instead
+        # of relying on someone reading a note first.
+        assert dv.count() > 0
+        assert tr.count() > 0
         assert "cust_segment_typ" in tr.columns
         assert "cust_segment_typ" in dv.columns
 
@@ -946,7 +958,7 @@ def _incremental_params(parameters, existing=None, rebuild=None):
     return params
 
 
-def _key_rows_in(keys, months):
+def _count_key_rows_in(keys, months):
     """Rows of ``keys`` inside ``months``.
 
     The row count build_test_model_input owes for those months — its output
@@ -1024,7 +1036,7 @@ class TestBuildTestModelInputIncremental:
             all_month_keys, encoded, label_table, preprocessor, params,
         )
         assert _months(result) == ["2024-05-31"]
-        assert result.count() == _key_rows_in(all_month_keys, ["2024-05-31"])
+        assert result.count() == _count_key_rows_in(all_month_keys, ["2024-05-31"])
 
     def test_rebuild_reprocesses_a_landed_month(
         self, feature_table, label_table, parameters
@@ -1044,7 +1056,7 @@ class TestBuildTestModelInputIncremental:
             all_month_keys, encoded, label_table, preprocessor, params,
         )
         assert _months(result) == ["2024-05-31"]
-        assert result.count() == _key_rows_in(all_month_keys, ["2024-05-31"])
+        assert result.count() == _count_key_rows_in(all_month_keys, ["2024-05-31"])
 
 
 class TestFilterTestModelInputIncremental:
@@ -1065,6 +1077,7 @@ class TestFilterTestModelInputIncremental:
             _incremental_params(parameters),
         )
         assert _months(unfiltered) == _TEST_MONTHS
+        assert unfiltered.count() == _count_key_rows_in(all_month_keys, _TEST_MONTHS)
 
         result = filter_test_model_input(unfiltered, params)
         assert _months(result) == ["2024-05-31"]
@@ -1156,7 +1169,7 @@ class TestIncrementalFilterHandlesHiveStringDates:
         )
         assert result.count() > 0, "string-typed snap_date silently matched nothing"
         assert _months(result) == ["2024-05-31"]
-        assert result.count() == _key_rows_in(string_dated_keys, ["2024-05-31"])
+        assert result.count() == _count_key_rows_in(string_dated_keys, ["2024-05-31"])
 
     def test_filter_node_also_handles_string_snap_date(
         self, spark, feature_table, label_table, string_dated_keys, parameters
@@ -1170,6 +1183,9 @@ class TestIncrementalFilterHandlesHiveStringDates:
             string_dated_keys, encoded, label_table, preprocessor,
             _incremental_params(parameters),
         ).withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
+        assert unfiltered.count() == _count_key_rows_in(
+            string_dated_keys, _TEST_MONTHS
+        )
 
         result = filter_test_model_input(unfiltered, params)
         assert result.count() > 0, "string-typed snap_date silently matched nothing"
