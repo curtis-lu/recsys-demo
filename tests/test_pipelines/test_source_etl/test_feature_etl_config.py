@@ -8,8 +8,10 @@ CONF = Path(__file__).resolve().parents[3] / "conf" / "base"
 def test_feature_etl_tables_enforce_their_primary_key():
     """Every feature ETL output must actually enforce its declared primary key.
 
-    ``SourceChecker`` runs the duplicate-key check only when BOTH
+    ``OutputChecker`` runs the duplicate-key check only when BOTH
     ``primary_key`` and ``quality_checks.max_duplicate_key_ratio`` are present.
+    (``SourceChecker`` is the sibling class for pre-ETL upstream freshness and
+    does not touch duplicate keys.)
     Declaring the key alone enforces nothing, which is how ``feature_table``
     ended up with an unverified grain while ``sample_pool`` and ``label_table``
     were covered — see docs/adr/0006-data-quality-checks-belong-upstream.md.
