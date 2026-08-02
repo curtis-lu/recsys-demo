@@ -284,6 +284,169 @@ class TestBuildModelInputCarry:
         assert out.count() == keys.count()
 
 
+class TestBuildModelInputJoinContract:
+    """D14/D13/D10/D11 — what the two LEFT joins promise (ADR-0005 §3).
+
+    Both joins are LEFT on purpose, and the reasons differ:
+
+    - **label_table is sparse.** Only entities with a transaction have a row, so
+      a key with no label row is the normal case and means "negative". The
+      ``coalesce(label, 0)`` is that decision.
+    - **feature_table has a different upstream population than sample_pool.**
+      A key whose ``(time, entity)`` is absent produces an all-NULL *feature*
+      row that stays in model_input; LightGBM handles the missing values. This
+      is a legal output, not a bug — which is why the assertion is the contract
+      itself rather than the fail-loud "no NULL features" the audit first
+      proposed.
+
+    Both are pinned by row count, so turning either join INNER turns this red —
+    the mutation #140 names as currently passing 115 tests.
+
+    The frame is built so the four miss/hit combinations are all present and
+    separable. ``cust_id=9`` is absent from the *feature* frame but still has a
+    label row on product "a" — that pairing is the point: it is what lets
+    ``test_label_join_miss_becomes_a_negative`` show a feature miss does not
+    cost a row its real label, which "fill 0 everywhere" would also satisfy if
+    every feature-missing row happened to be label-missing too.
+    """
+
+    PREP = {
+        "feature_columns": ["prod_name", "f1"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["a", "b"]},
+        "drop_columns": [],
+    }
+    PARAMS = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"],
+        "item": "prod_name", "label": "label"}}}
+
+    @pytest.fixture
+    def built(self, spark):
+        keys = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+            # cust 1 is in feature_table, cust 9 is not.
+            "cust_id": [1, 1, 9, 9],
+            "prod_name": ["a", "b", "a", "b"],
+        }))
+        # Labels exist only for the "a" rows: the "b" rows are label-join misses.
+        labels = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "cust_id": [1, 9], "prod_name": ["a", "a"], "label": [1, 1],
+        }))
+        feats = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"]),
+            "cust_id": [1], "f1": [0.5],
+        }))
+        out = build_model_input(keys, feats, labels, self.PREP, self.PARAMS)
+        return keys, out.orderBy("cust_id", "prod_name").toPandas()
+
+    def test_row_count_equals_keys_regardless_of_either_miss(self, built):
+        """D14 — keys' grain is the output's grain even when both joins miss.
+
+        This is the single assertion that turns red for INNER on either side:
+        INNER on features drops the cust 9 rows, INNER on labels drops the "b"
+        rows.
+        """
+        keys, pdf = built
+        assert len(pdf) == keys.count() == 4
+
+    def test_feature_join_miss_yields_null_features_not_a_dropped_row(self, built):
+        """D14 — the all-NULL feature row is the contract, not a defect.
+
+        Asserted only on the feature_table-sourced column: ``prod_name`` is also
+        in ``feature_columns`` but arrives from *keys*, so "every feature column
+        is NULL" would be false here and would misstate the contract.
+        """
+        _, pdf = built
+        missing = pdf[pdf["cust_id"] == 9]
+        assert len(missing) == 2
+        assert missing["f1"].isna().all()
+        # The identity-sourced feature is untouched by the miss.
+        assert missing["prod_name"].tolist() == ["a", "b"]
+        # ...and the entity that *is* present did get its feature, so this is
+        # evidence about the join rather than about f1 being NULL everywhere.
+        assert pdf[pdf["cust_id"] == 1]["f1"].notna().all()
+
+    def test_label_join_miss_becomes_a_negative(self, built):
+        """D13 — "sparse label_table, a miss is a negative" is a contract.
+
+        Both halves matter: the misses become 0 *and* the hits keep their 1. An
+        implementation that dropped the label join entirely and filled 0
+        everywhere would satisfy the first half alone.
+        """
+        _, pdf = built
+        by_key = {(r.cust_id, r.prod_name): r.label for r in pdf.itertuples()}
+        assert by_key[(1, "b")] == 0
+        assert by_key[(9, "b")] == 0
+        assert by_key[(1, "a")] == 1
+        # A feature-join miss must not cost the row its real label.
+        assert by_key[(9, "a")] == 1
+
+    def test_label_is_never_null(self, built):
+        """D10 — training must not see a NULL label; coalesce is what stops it."""
+        _, pdf = built
+        assert pdf["label"].notna().all()
+
+    def test_label_domain_is_zero_or_one(self, built):
+        """D11 — a binary label column, asserted as a set so a stray 2 fails."""
+        _, pdf = built
+        assert set(pdf["label"].unique()) <= {0, 1}
+
+
+class TestEncodeCategoricalsEmptyMapping:
+    """D15 — the whole-column-unknown branch of ``_encode_categoricals``.
+
+    A category with no values fit (e.g. every row NULL in the train window)
+    encodes the entire column to -1. The branch is not a shortcut for the
+    general path: ``F.create_map()`` with no pairs is typed ``map<void,void>``
+    and indexing it raises ``cannot resolve 'map()[col]' ... requires void
+    type``, so deleting the branch fails loudly rather than producing the same
+    answer more slowly. Verified by running the branchless form against both a
+    string and a bigint column.
+    """
+
+    def test_empty_mapping_encodes_every_row_to_unknown(self, spark):
+        from recsys_tfb.preprocessing._spark import _encode_categoricals
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["c1", "c2", "c3"],
+            "risk_attr": ["low", "high", None],
+        }))
+        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
+        assert [r.risk_attr for r in out.orderBy("cust_id").collect()] == [-1, -1, -1]
+
+    def test_empty_mapping_output_is_integer_typed(self, spark):
+        """The encoded column must be an int like every other encoded column.
+
+        Compared against the type object, not ``dtypes``' string form: a
+        substring or repr comparison is satisfied by whatever ``simpleString``
+        happens to emit and would survive a change of width.
+        """
+        from pyspark.sql import types as T
+
+        from recsys_tfb.preprocessing._spark import _encode_categoricals
+
+        df = spark.createDataFrame(pd.DataFrame({"risk_attr": ["low", "high"]}))
+        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
+        assert out.schema["risk_attr"].dataType == T.IntegerType()
+
+    def test_populated_mapping_still_encodes_by_position(self, spark):
+        """The paired half: with values present the column is *not* all -1.
+
+        Without this, "everything is -1" would also pass for an implementation
+        that ignored ``category_mappings`` altogether.
+        """
+        from recsys_tfb.preprocessing._spark import _encode_categoricals
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["c1", "c2", "c3"],
+            "risk_attr": ["low", "high", "unseen"],
+        }))
+        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": ["low", "high"]})
+        # Index in the mapping list: low->0, high->1, anything else -> -1.
+        assert [r.risk_attr for r in out.orderBy("cust_id").collect()] == [0, 1, -1]
+
+
 class TestComputeFeatureColumnsDrops:
     """``drop_columns`` keeps a feature_table column out of ``feature_columns``.
 

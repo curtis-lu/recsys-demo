@@ -56,9 +56,32 @@ def _channel(cid: str) -> str:
     return _CHANNELS[_entity_index(cid) % len(_CHANNELS)]
 
 
+# The one entity with no positive on any product. Keeps a zero-positive query
+# group in the fixture (so the group filter still has something to drop) while
+# every other entity carries one.
+_ALL_NEGATIVE_ENTITY = _ENTITIES[-1]
+
+
 def _is_positive(cid: str, prod: str) -> bool:
-    """One positive cell: the first entity on the first product."""
-    return cid == _ENTITIES[0] and prod == _PRODUCTS[0]
+    """Positive on the first product for every entity but one.
+
+    Not concentrated on a single entity, because the train / train-dev split
+    partitions **by entity**: one positive entity lands wholly on one side and
+    leaves the other with an all-zero label column — the state
+    ``TestModelInputSchemaPerSplit.test_positive_rate_is_strictly_inside_its_bounds``
+    exists to reject, and train_dev is the worst place to tolerate it since it
+    is every HPO trial's early-stopping set (ADR-0005 §2). Verified by narrowing
+    this back to ``_ENTITIES[0]``: train_dev then holds 0 positives in 18 rows.
+    Spreading it over every *third* entity was not enough either — train_dev's
+    three entities happened to miss all of them, and "which entities land in
+    dev" is a hash detail no assertion should depend on.
+
+    Two properties this shape guarantees for any split, whatever the hash does:
+
+    - at most one positive per query group, so no group is all-positive;
+    - at least one positive in any split holding two or more entities.
+    """
+    return cid != _ALL_NEGATIVE_ENTITY and prod == _PRODUCTS[0]
 
 
 # --- derivations used by assertions ------------------------------------------
@@ -1384,3 +1407,591 @@ class TestIncrementalFilterHandlesHiveStringDates:
             parameters, existing={"test_keys": ["2024-04-30"]},
         )
         assert _months(select_test_keys(label_table, params)) == ["2024-05-31"]
+
+
+# =============================================================================
+# T3 (#144) — ML-semantics contracts the pre-#140 suite never asserted.
+#
+# Everything below builds on the module fixtures above. Where a test needs a
+# different split layout it derives one from ``_SNAP_DATES`` rather than adding
+# a second fixture, so the "resize in one place" property of the fixture block
+# survives.
+# =============================================================================
+
+from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
+from recsys_tfb.pipelines.dataset.nodes_spark import (
+    filter_groups_with_positives,
+    select_calibration_keys,
+)
+
+
+def _four_split_params(parameters, **overrides):
+    """``parameters`` reshaped so all four key-selecting splits are populated.
+
+    The module fixture spends all five months on train/val/test, leaving none
+    for calibration — and ``select_train_keys`` calls ``validate_date_splits``,
+    so overlapping months raise rather than silently sharing. Train gives up its
+    third month to calibration; every month still comes from ``_SNAP_DATES``, so
+    resizing the fixture still resizes this.
+    """
+    dataset = {
+        **parameters["dataset"],
+        "sample_ratio": 1.0,
+        "train_snap_dates": _SNAP_DATES[:2],
+        "calibration_snap_dates": _SNAP_DATES[2:3],
+        "enable_calibration": True,
+        "val_snap_dates": _SNAP_DATES[3:4],
+        "test_snap_dates": _SNAP_DATES[4:5],
+    }
+    dataset.update(overrides)
+    return {**parameters, "dataset": dataset}
+
+
+def _columns_by_derivation_rule(keys, preprocessor, params) -> set[str]:
+    """ADR-0004's rule for a split's model_input columns.
+
+    ``identity ∪ {label} ∪ feature_columns ∪ (carry_columns ∩ that split's keys)``
+
+    Deliberately phrased in terms of the **config** key ``carry_columns``, not
+    in terms of ``keys.columns``. The module-level ``_expected_model_input_columns``
+    uses the latter, which mirrors what ``build_model_input`` computes (carry =
+    anything in keys that is not identity/feature/label) — self-consistent, and
+    therefore blind to a key frame that carries a column nobody asked to carry.
+    Stating the rule against the config is what closes that gap (#140 D4).
+    """
+    schema = get_schema(params)
+    carry = set(params["dataset"].get("carry_columns") or [])
+    return (
+        set(schema["identity_columns"])
+        | {schema["label"]}
+        | set(preprocessor["feature_columns"])
+        | (carry & set(keys.columns))
+    )
+
+
+class TestModelInputSchemaPerSplit:
+    """D4 — every split's schema follows one derivation rule (ADR-0004).
+
+    train / train_dev / calibration go through ``select_keys`` and so carry
+    ``carry_columns``; val / test select identity only. ADR-0004 records that
+    asymmetry as a *derived* result — sample weights only apply to train-side
+    splits, and per-segment evaluation reads segments from ``sample_pool`` later
+    — so the assertion is the rule, not "train has it, val does not". Changing
+    ``carry_columns`` then needs no edit here.
+    """
+
+    @pytest.fixture
+    def built(self, feature_table, label_table, sample_pool, parameters):
+        params = _four_split_params(parameters, carry_columns=["channel_preference"])
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, params)
+
+        sample_keys = select_train_keys(sample_pool, params)
+        train_keys, train_dev_keys = split_train_keys(sample_keys, params)
+        keys_by_split = {
+            "train": train_keys,
+            "train_dev": train_dev_keys,
+            "calibration": select_calibration_keys(sample_pool, params),
+            "val": select_val_keys(sample_pool, params),
+            "test": select_test_keys(sample_pool, params),
+        }
+        built = {
+            split: build_model_input(keys, pft, label_table, preprocessor, params)
+            for split, keys in keys_by_split.items()
+        }
+        return params, preprocessor, keys_by_split, built
+
+    def test_every_split_matches_the_derivation_rule(self, built):
+        params, preprocessor, keys_by_split, built_by_split = built
+        for split, mi in built_by_split.items():
+            assert set(mi.columns) == _columns_by_derivation_rule(
+                keys_by_split[split], preprocessor, params
+            ), split
+
+    def test_the_fixture_exercises_both_sides_of_the_carry_term(self, built):
+        """Without this the rule above is satisfiable by a vacuous carry term.
+
+        ``carry_columns ∩ keys`` is empty for every split if ``select_keys``
+        stops carrying at all — and the rule stays true, because both sides lose
+        the column together. This asserts the fixture actually distinguishes the
+        two cases, without naming which split is which.
+        """
+        params, _, keys_by_split, _ = built
+        carry = set(params["dataset"]["carry_columns"])
+        carried = {
+            split for split, keys in keys_by_split.items()
+            if carry & set(keys.columns)
+        }
+        assert carried, "no split carried anything — the rule's carry term is vacuous"
+        assert carried != set(keys_by_split), (
+            "every split carried — the asymmetry the rule describes is untested"
+        )
+
+    def test_positive_rate_is_strictly_inside_its_bounds(self, built):
+        """D12 — an all-zero (or all-one) label column must not pass silently.
+
+        A dataset with no positives trains a model that cannot rank, and every
+        mAP downstream is 0 — but nothing raises. Bounds are strict on both
+        sides and expressed in rows, so a label column that stopped joining
+        (all 0) and one that got overwritten with a constant 1 both fail.
+        """
+        _, _, _, built_by_split = built
+        for split, mi in built_by_split.items():
+            n_rows = mi.count()
+            n_pos = mi.filter(F.col("label") == 1).count()
+            assert n_rows > 0, split
+            assert 0 < n_pos < n_rows, f"{split}: {n_pos} positives in {n_rows} rows"
+
+
+class TestQueryGroupCompleteness:
+    """D18 — every query group carries the full candidate set.
+
+    mAP's denominator is the number of relevant items within a query group, so
+    a group that lost candidates reports a metric computed over a different
+    population than the one that will be served. ADR-0006 declines to spend a
+    full scan on a data gate for this because in this repo it is a structural
+    guarantee — ``sample_pool`` is a literal cross join, val/test take the whole
+    population, and the group filter only ever drops whole groups. A test is
+    what holds that structure in place.
+    """
+
+    def _group_sizes(self, mi, params):
+        schema = get_schema(params)
+        group_cols = [schema["time"]] + schema["entity"]
+        return mi.groupBy(*group_cols).count().toPandas()["count"].tolist()
+
+    def test_val_and_test_groups_hold_every_declared_item(
+        self, feature_table, label_table, sample_pool, parameters
+    ):
+        params = _four_split_params(parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        pft = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        schema = get_schema(params)
+        declared = set(params["schema"]["categorical_values"][schema["item"]])
+
+        for split, keys in {
+            "val": select_val_keys(sample_pool, params),
+            "test": select_test_keys(sample_pool, params),
+        }.items():
+            mi = build_model_input(keys, pft, label_table, preprocessor, params)
+            sizes = self._group_sizes(mi, params)
+            assert sizes, split
+            # Every group is the same size *and* that size is the declared item
+            # count — "all equal" alone would hold for a set uniformly missing
+            # the same item.
+            assert set(sizes) == {_n_items(params)}, split
+            items = {r[schema["item"]] for r in mi.select(schema["item"]).distinct().collect()}
+            assert items == declared, split
+
+    def test_group_filter_drops_whole_groups_only(self, spark, parameters):
+        """D19 — the group key is (time, *entity); adding item guts the filter.
+
+        With item in the key each row is its own group, so "drop groups whose
+        label sum is 0" degenerates into "keep only positive rows" — every
+        negative candidate disappears and the surviving groups have exactly one
+        row each. #140 records that mutation passing all 16 existing tests,
+        because they call the private helper with an explicit ``group_cols``
+        and so never exercise the node wrapper's derivation.
+
+        Both directions are asserted: the mixed group keeps all its rows, and
+        the all-zero group is dropped entirely. Without the second half a filter
+        that does nothing at all would also pass.
+        """
+        mi = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 6),
+            "cust_id": ["C001"] * 3 + ["C002"] * 3,
+            "prod_name": _PRODUCTS * 2,
+            # C001 has one positive; C002 has none.
+            "label": [1, 0, 0, 0, 0, 0],
+        }))
+        out = filter_groups_with_positives(mi, parameters).toPandas()
+
+        assert sorted(out["cust_id"].unique()) == ["C001"]
+        # All three of C001's candidates survive — negatives included.
+        assert len(out) == _n_items(parameters)
+        assert set(out["prod_name"]) == set(_PRODUCTS)
+
+
+class TestFitUsesTrainMonthsOnly:
+    """D20 — category mappings are fit on train months, asserted at the fit.
+
+    The apply side already had coverage, but "no leakage" is a property of the
+    *fit*: if ``fit_preprocessor_metadata`` looked at every month, the mapping
+    would contain a category the model can only have learned from val/test, and
+    the apply side would encode it perfectly happily — no unknown, no warning,
+    nothing red.
+    """
+
+    @pytest.fixture
+    def ft_with_val_only_category(self, spark, feature_table):
+        """feature_table plus a categorical whose 'digital_v2' value is val-only."""
+        val_month = pd.Timestamp(_SNAP_DATES[3])
+        return feature_table.withColumn(
+            "risk_attr",
+            F.when(F.col("snap_date") == F.lit(val_month), F.lit("digital_v2"))
+             .otherwise(F.lit("standard")),
+        )
+
+    def _params(self, parameters):
+        return _gate_params(parameters, categorical_extra=["risk_attr"])
+
+    def test_val_only_category_never_enters_the_mapping(
+        self, ft_with_val_only_category, parameters
+    ):
+        params = self._params(parameters)
+        preprocessor, mappings = fit_preprocessor_metadata(
+            ft_with_val_only_category, params
+        )
+        assert mappings["risk_attr"] == ["standard"]
+        assert "digital_v2" not in mappings["risk_attr"]
+
+    def test_the_val_only_value_really_is_in_the_source_table(
+        self, ft_with_val_only_category
+    ):
+        """The paired half: the value exists, it was excluded on purpose.
+
+        Without it, an empty-or-missing 'digital_v2' would be explained just as
+        well by a fixture that never had the value.
+        """
+        values = {
+            r.risk_attr for r in
+            ft_with_val_only_category.select("risk_attr").distinct().collect()
+        }
+        assert values == {"standard", "digital_v2"}
+
+    def test_apply_encodes_the_unseen_value_as_unknown(
+        self, ft_with_val_only_category, parameters
+    ):
+        """The downstream consequence, so the fit-side rule is grounded.
+
+        A value absent from the mapping becomes -1 at encode time — that is what
+        "the model never saw it" looks like in the data.
+        """
+        params = self._params(parameters)
+        preprocessor, _ = fit_preprocessor_metadata(ft_with_val_only_category, params)
+        out = apply_preprocessor_to_features(
+            ft_with_val_only_category, preprocessor, params
+        )
+        val_month = pd.Timestamp(_SNAP_DATES[3])
+        encoded = out.filter(F.col("snap_date") == F.lit(val_month))
+        assert encoded.count() > 0
+        assert {r.risk_attr for r in encoded.select("risk_attr").distinct().collect()} == {-1}
+
+
+class TestIdentityCategoricalNotEncoded:
+    """D16 — identity categoricals are deliberately left un-encoded here.
+
+    ``prod_name`` is declared categorical *and* is an identity column. Encoding
+    is deferred to training (extract_Xy), so ``apply_preprocessor_to_features``
+    excludes identity columns from its encode list. It is easy to "tidy up" that
+    exclusion into uniform encoding, which would turn identity values into
+    integers in ``preprocessed_feature_table`` and break every downstream join
+    that matches on them.
+
+    The fixture's feature_table has no ``prod_name`` column, so the exclusion is
+    unreachable there — this one adds it, which is what makes the test capable
+    of failing.
+    """
+
+    @pytest.fixture
+    def ft_with_item_column(self, feature_table):
+        return feature_table.withColumn("prod_name", F.lit(_PRODUCTS[0]))
+
+    def test_identity_categorical_stays_its_original_type(
+        self, ft_with_item_column, parameters
+    ):
+        """Asserted against the type object, not ``dtypes``' string form.
+
+        ``dtypes`` yields ``simpleString()`` output; comparing substrings of a
+        repr this test does not own is how a type assertion silently stops
+        testing anything.
+        """
+        from pyspark.sql import types as T
+
+        preprocessor, _ = fit_preprocessor_metadata(ft_with_item_column, parameters)
+        out = apply_preprocessor_to_features(ft_with_item_column, preprocessor, parameters)
+
+        assert "prod_name" in out.columns
+        assert out.schema["prod_name"].dataType == T.StringType()
+        assert {r.prod_name for r in out.select("prod_name").distinct().collect()} == {
+            _PRODUCTS[0]
+        }
+
+    def test_it_is_declared_categorical_all_the_same(
+        self, ft_with_item_column, parameters
+    ):
+        """The exclusion is about being *identity*, not about being undeclared.
+
+        If prod_name were simply missing from categorical_columns the type would
+        also survive, and this test would be evidence for the wrong rule.
+        """
+        preprocessor, _ = fit_preprocessor_metadata(ft_with_item_column, parameters)
+        assert "prod_name" in preprocessor["categorical_columns"]
+
+
+class TestUnknownEncodingRateIsAssertable:
+    """D17 — the unknown(-1) share is readable off the returned frame.
+
+    #140 asks for the unknown rate to be assertable rather than log-only. It is
+    asserted here as a property of ``apply_preprocessor_to_features``'s output,
+    which needs no signature change: the encoded column *is* the measurement.
+    (The node's return type is unchanged on purpose — this ticket adds tests;
+    the parent's four product changes are all elsewhere.)
+    """
+
+    @pytest.fixture
+    def encoded(self, spark):
+        ft = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 4),
+            "cust_id": ["C001", "C002", "C003", "C004"],
+            "total_aum": [100.0, 200.0, 300.0, 400.0],
+            "channel_preference": ["digital", "branch", "unseen_a", "unseen_b"],
+        }))
+        preprocessor = {
+            "feature_columns": ["channel_preference", "total_aum"],
+            "categorical_columns": ["channel_preference"],
+            "category_mappings": {"channel_preference": ["digital", "branch"]},
+            "drop_columns": [],
+        }
+        params = {
+            "schema": {"categorical_values": {"prod_name": [_PRODUCTS[0]]}},
+            "dataset": {
+                "train_snap_dates": [_SNAP_DATES[0]],
+                "calibration_snap_dates": [], "val_snap_dates": [], "test_snap_dates": [],
+            },
+        }
+        return apply_preprocessor_to_features(ft, preprocessor, params)
+
+    def test_unknown_share_is_the_expected_fraction(self, encoded):
+        total = encoded.count()
+        n_unknown = encoded.filter(F.col("channel_preference") == -1).count()
+        assert total == 4
+        # Two of four values were absent from the mapping. Asserted as a number,
+        # not as "> 0": a rate assertion that only checks non-emptiness cannot
+        # tell 2 unknowns from 4.
+        assert n_unknown == 2
+        assert n_unknown / total == 0.5
+
+    def test_known_values_keep_their_mapped_positions(self, encoded):
+        """So the rate above is a measurement, not the whole column collapsing."""
+        by_cust = {
+            r.cust_id: r.channel_preference
+            for r in encoded.select("cust_id", "channel_preference").collect()
+        }
+        assert by_cust["C001"] == 0
+        assert by_cust["C002"] == 1
+
+
+class TestSelectKeysDeduplication:
+    """D7 — val/test key selection deduplicates its input.
+
+    ``select_keys`` (train side) leans on sample_pool's primary key being
+    enforced upstream and does not dedup; val/test call ``dropDuplicates``
+    explicitly. That difference is invisible until sample_pool actually contains
+    a duplicate, which the clean fixture never does.
+    """
+
+    @pytest.fixture
+    def duplicated_pool(self, sample_pool):
+        # Every row twice: a duplicate key ratio of 1.0, not a single stray row,
+        # so a partially-working dedup fails too.
+        return sample_pool.unionByName(sample_pool)
+
+    def test_val_keys_are_unique_despite_duplicate_input(
+        self, duplicated_pool, sample_pool, parameters
+    ):
+        assert duplicated_pool.count() == 2 * sample_pool.count()
+        result = select_val_keys(duplicated_pool, parameters)
+        assert result.count() == _expected_key_count(parameters, "val")
+        identity = get_schema(parameters)["identity_columns"]
+        assert result.count() == result.dropDuplicates(identity).count()
+
+    def test_test_keys_are_unique_despite_duplicate_input(
+        self, duplicated_pool, parameters
+    ):
+        result = select_test_keys(duplicated_pool, parameters)
+        assert result.count() == _expected_key_count(parameters, "test")
+        identity = get_schema(parameters)["identity_columns"]
+        assert result.count() == result.dropDuplicates(identity).count()
+
+
+class TestSelectKeysOverridePath:
+    """D8 — the override lookup must not change the row count.
+
+    ``select_keys`` maps group key -> ratio with a broadcast LEFT join. The
+    comment in ``helpers_spark.py`` claims it "never fans out rows" (the lookup
+    has unique keys) and that unmatched groups fall back to ``sample_ratio``
+    via coalesce. Both halves are row-count claims, and neither was tested: a
+    lookup with a duplicate key silently multiplies rows, and an INNER join
+    silently drops every group without an override.
+    """
+
+    def _params(self, parameters, overrides):
+        return {
+            **parameters,
+            "dataset": {
+                **parameters["dataset"],
+                "sample_ratio": 1.0,
+                "sample_group_keys": ["cust_segment_typ"],
+                "sample_ratio_overrides": overrides,
+            },
+        }
+
+    def test_partial_overrides_keep_every_row(self, sample_pool, parameters):
+        """Ratios all 1.0, and only some groups listed.
+
+        Keeping every row is then the correct answer by two separate routes —
+        matched groups at ratio 1.0 and unmatched groups falling back to
+        sample_ratio 1.0 — so a count below the full population means either the
+        join dropped unmatched groups or the coalesce stopped defaulting.
+        """
+        params = self._params(parameters, {"mass": 1.0})
+        result = select_train_keys(sample_pool, params)
+        assert result.count() == _expected_key_count(params, "train")
+
+    def test_full_overrides_keep_every_row(self, sample_pool, parameters):
+        """Every group listed, so nothing relies on the fallback.
+
+        Paired with the test above: this one still fails if the lookup fans out,
+        but passes if only the fallback broke — which is what separates the two
+        failure modes.
+        """
+        params = self._params(
+            parameters, {seg: 1.0 for seg in _SEGMENTS},
+        )
+        result = select_train_keys(sample_pool, params)
+        assert result.count() == _expected_key_count(params, "train")
+
+    def test_override_actually_reduces_the_targeted_group(
+        self, sample_pool, parameters
+    ):
+        """The negative control: the override path is doing something.
+
+        Without this, 'row count unchanged' would also hold for an override
+        mechanism that was never wired up at all.
+        """
+        params = self._params(parameters, {"mass": 0.0})
+        result = select_train_keys(sample_pool, params)
+        segments = {
+            r.cust_segment_typ for r in
+            sample_pool.select("cust_id", "cust_segment_typ").distinct().collect()
+        }
+        assert "mass" in segments  # the group being zeroed really exists
+        assert 0 < result.count() < _expected_key_count(params, "train")
+
+
+class TestSelectCalibrationKeys:
+    """D23 — the calibration node, and its independence from the train draw.
+
+    ``select_calibration_keys`` registers as a pipeline node whenever
+    ``enable_calibration`` is set, and had no unit test of its own.
+    """
+
+    def test_selects_the_calibration_months_at_full_population(
+        self, sample_pool, parameters
+    ):
+        params = _four_split_params(parameters)
+        result = select_calibration_keys(sample_pool, params)
+        assert result.count() == _expected_key_count(params, "calibration")
+        assert sorted(result.columns) == _identity_columns(params)
+        months = {
+            str(pd.Timestamp(d).date())
+            for d in result.select("snap_date").distinct().toPandas()["snap_date"]
+        }
+        assert months == set(params["dataset"]["calibration_snap_dates"])
+
+    def test_carry_columns_reach_calibration_keys(self, sample_pool, parameters):
+        """Calibration goes through ``select_keys``, so it carries like train."""
+        params = _four_split_params(parameters, carry_columns=["channel_preference"])
+        result = select_calibration_keys(sample_pool, params)
+        assert "channel_preference" in result.columns
+
+    def test_the_two_nodes_pass_different_sampling_sites(
+        self, sample_pool, parameters, monkeypatch
+    ):
+        """The wiring, asserted structurally rather than through the draw.
+
+        Whether two hash sites happen to produce different key sets depends on
+        where 24 particular entities land; whether the two nodes *ask* for
+        different sites does not. A spy answers the actual question — #140's
+        concern is that the two share a seed and would otherwise draw the same
+        rows.
+        """
+        import recsys_tfb.pipelines.dataset.nodes_spark as nodes
+
+        seen = {}
+
+        def _spy(pool, params, dates, ratio, overrides=None, *, site="sample_keys"):
+            seen[site] = seen.get(site, 0) + 1
+            return select_keys(pool, params, dates, ratio, overrides, site=site)
+
+        monkeypatch.setattr(nodes, "select_keys", _spy)
+        params = _four_split_params(parameters)
+        select_train_keys(sample_pool, params)
+        select_calibration_keys(sample_pool, params)
+
+        assert len(seen) == 2, f"both nodes used the same sampling site: {seen}"
+        assert set(seen.values()) == {1}
+
+    def test_different_sites_draw_different_rows(self, sample_pool, parameters):
+        """And the site argument is what makes the draws differ.
+
+        Same pool, same months, same ratio, same seed — only ``site`` differs.
+        Paired with the spy above: that one pins the wiring, this one pins that
+        the wiring matters.
+        """
+        params = _four_split_params(parameters, sample_ratio=0.5)
+        dates = [pd.Timestamp(d) for d in _SNAP_DATES[:2]]
+
+        def _draw(site):
+            keys = select_keys(sample_pool, params, dates, 0.5, {}, site=site)
+            return {tuple(r) for r in keys.toPandas().itertuples(index=False)}
+
+        train_draw = _draw("sample_keys")
+        cal_draw = _draw("calibration_keys")
+        assert train_draw and cal_draw
+        assert train_draw != cal_draw
+
+
+class TestSelectValKeysSampling:
+    """D24 — the ``val_sample_ratio < 1.0`` branch, which had no coverage.
+
+    Val sampling is per-*entity* on purpose: a query group must keep all of its
+    candidates or the mAP computed over it answers a different question (see
+    TestQueryGroupCompleteness). Sampling rows instead would be invisible in a
+    row count alone.
+    """
+
+    def _params(self, parameters, ratio):
+        return {
+            **parameters,
+            "dataset": {**parameters["dataset"], "val_sample_ratio": ratio},
+        }
+
+    def test_sampling_reduces_the_population(self, sample_pool, parameters):
+        params = self._params(parameters, 0.5)
+        full = _expected_key_count(parameters, "val")
+        result = select_val_keys(sample_pool, params)
+        assert 0 < result.count() < full
+
+    def test_sampling_keeps_whole_entities(self, sample_pool, parameters):
+        """Every surviving entity keeps its full candidate set."""
+        params = self._params(parameters, 0.5)
+        pdf = select_val_keys(sample_pool, params).toPandas()
+        sizes = pdf.groupby(["snap_date", "cust_id"]).size().unique().tolist()
+        assert sizes == [_n_items(parameters)]
+
+    def test_sampling_is_deterministic(self, sample_pool, parameters):
+        params = self._params(parameters, 0.5)
+        first = {tuple(r) for r in select_val_keys(sample_pool, params)
+                 .toPandas().itertuples(index=False)}
+        second = {tuple(r) for r in select_val_keys(sample_pool, params)
+                  .toPandas().itertuples(index=False)}
+        assert first == second
+
+    def test_full_ratio_skips_sampling_entirely(self, sample_pool, parameters):
+        """The other side of the branch, so 'reduced' is attributable to ratio."""
+        params = self._params(parameters, 1.0)
+        assert select_val_keys(sample_pool, params).count() == _expected_key_count(
+            parameters, "val"
+        )
