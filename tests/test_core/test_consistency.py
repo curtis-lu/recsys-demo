@@ -1061,6 +1061,70 @@ class TestNonnumericFeatureErrors:
         assert "aaa" in errs[0] and "zzz" in errs[1]
 
 
+# --- B7: a carry column that also lives in feature_table must be dropped ---
+
+from recsys_tfb.core.consistency import carry_column_collision_errors
+
+
+class TestCarryColumnCollisionErrors:
+    FT = {"snap_date", "cust_id", "cust_segment_typ", "total_aum"}
+
+    def test_carry_column_in_feature_table_and_not_dropped_is_flagged(self):
+        errs = carry_column_collision_errors(
+            ["cust_segment_typ"], self.FT, ["snap_date", "cust_id", "label"]
+        )
+        assert len(errs) == 1
+        assert "cust_segment_typ" in errs[0]
+        # The message has to name both keys: which one the column is in today,
+        # and which one it is missing from.
+        assert "carry_columns" in errs[0]
+        assert "drop_columns" in errs[0]
+
+    def test_carry_column_in_feature_table_and_dropped_is_ok(self):
+        # The intentional pairing ADR-0004 documents: listed in both keys.
+        assert carry_column_collision_errors(
+            ["cust_segment_typ"], self.FT, ["cust_segment_typ"]
+        ) == []
+
+    def test_carry_column_absent_from_feature_table_is_ok(self):
+        # Nothing to be ambiguous with, so drop_columns is irrelevant here —
+        # this is the common case (carry columns usually live only in
+        # sample_pool) and must not be flagged.
+        assert carry_column_collision_errors(
+            ["marketing_flag"], self.FT, []
+        ) == []
+
+    def test_no_carry_columns_is_ok(self):
+        assert carry_column_collision_errors([], self.FT, []) == []
+
+    def test_empty_feature_table_is_ok(self):
+        assert carry_column_collision_errors(["cust_segment_typ"], set(), []) == []
+
+    def test_multiple_offenders_sorted_by_column(self):
+        errs = carry_column_collision_errors(
+            ["total_aum", "cust_segment_typ"], self.FT, []
+        )
+        assert len(errs) == 2
+        assert "cust_segment_typ" in errs[0]
+        assert "total_aum" in errs[1]
+
+    def test_only_the_undropped_offender_is_flagged(self):
+        errs = carry_column_collision_errors(
+            ["total_aum", "cust_segment_typ"], self.FT, ["cust_segment_typ"]
+        )
+        assert len(errs) == 1
+        assert "total_aum" in errs[0]
+        assert "cust_segment_typ" not in errs[0]
+
+    def test_feature_table_columns_accepts_a_list(self):
+        # The gate passes whatever it already has in hand (a dict's keys / a
+        # list of column names); membership must not depend on the container.
+        errs = carry_column_collision_errors(
+            ["cust_segment_typ"], sorted(self.FT), []
+        )
+        assert len(errs) == 1
+
+
 # --- A21: --rebuild-dates must be a subset of dataset.test_snap_dates ---
 
 import datetime as _dt

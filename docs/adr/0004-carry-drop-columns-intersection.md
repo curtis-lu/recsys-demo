@@ -47,6 +47,20 @@ date: 2026-08-02
 設定註解只說它給 `training.sample_weights` 用，完全沒提「若這欄也在 feature_table 裡，
 你必須另外去 `drop_columns` 補一筆」。踩中的症狀是一句看不懂的 `Reference 'x' is ambiguous`。
 
+### 補充（2026-08-02，實作 B7 時追 code path 發現）
+
+上面那句「症狀是 ambiguous reference」對**沒有閘門**的世界成立，但 B6 已經上線，
+所以實際分兩種情況——B7 真正獨佔的是第二種：
+
+| 漏掉 drop 的 carry 欄 | 現況（B7 之前） |
+|---|---|
+| **字串**（如 `cust_segment_typ`） | 它會進 `feature_columns`、是非數值、又沒宣告 categorical → **B6 先擋下**。但 B6 的建議是「宣告成 categorical 或 drop」，選前者的人會保留碰撞、下一步撞 ambiguous |
+| **數值 或 已宣告 categorical** | B6 不適用（數值不觸發／已宣告視為會被編碼）→ 直落 `Reference 'x' is ambiguous` |
+
+所以 B7 一方面補上第二格的空洞，一方面把第一格的錯誤訊息換成能直接照做的那一句。
+上面的兩情境實跑是**直接呼叫 `build_model_input`**（繞過閘門）產生的，仍然有效：
+它證明的是 join 本身的行為，不是閘門的行為。
+
 ## 為什麼不清那 3 個結構性 no-op 項
 
 `snap_date` / `cust_id` / `label` 被 `_compute_feature_columns` 自己的

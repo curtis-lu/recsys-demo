@@ -258,7 +258,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Layer-2 data gate (B1 + B5 + B6). Side-effect only: raises
+    """Layer-2 data gate (B1 + B5 + B6 + B7). Side-effect only: raises
     ``DataConsistencyError`` on violation, returns ``None`` on success. Wired
     as the first node of the dataset pipeline.
 
@@ -277,6 +277,12 @@ def validate_data_consistency(
     un-encoded object-dtype model feature (training OOM at ``_pdf_to_X``). Also
     read off ``feature_table.dtypes`` (no scan) via ``spark_dtype_is_numeric``.
 
+    B7 — a ``dataset.carry_columns`` entry that is also a feature_table column
+    must be listed in ``drop_columns``, or ``build_model_input`` joins two
+    frames that both carry it and Spark raises ``Reference 'x' is ambiguous``.
+    Reads the same ``feature_table.dtypes`` mapping as B5/B6 — no extra lookup,
+    no scan (ADR-0004).
+
     All errors are collected and raised once so a single fix pass clears them.
     """
     # Local import: keep lazy to avoid an import cycle
@@ -284,6 +290,7 @@ def validate_data_consistency(
     # local-import pattern inside fit_preprocessor_metadata.
     from recsys_tfb.core.consistency import (
         DataConsistencyError,
+        carry_column_collision_errors,
         categorical_dtype_errors,
         item_coverage_errors,
         nonnumeric_feature_errors,
@@ -333,6 +340,13 @@ def validate_data_consistency(
         )
         + categorical_dtype_errors(categorical_cols, ft_dtypes)
         + nonnumeric_feature_errors(feature_kinds, set(categorical_cols))
+        + carry_column_collision_errors(
+            parameters.get("dataset", {}).get("carry_columns") or [],
+            # Reuses the dtypes mapping B5/B6 already read — same metastore
+            # metadata lookup, so B7 costs no extra call and no scan.
+            set(ft_dtypes),
+            drop_cols,
+        )
     )
     if errors:
         raise DataConsistencyError(
