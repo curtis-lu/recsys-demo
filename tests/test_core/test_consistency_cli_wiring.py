@@ -32,6 +32,23 @@ def test_a7_ranking_conflict_surfaces_via_validate():
         validate_config_consistency(params)
 
 
+def test_a22_wired_into_evaluation_command_before_spark():
+    # A22 cannot be aggregated by validate_config_consistency (it needs the
+    # --post-training flag), so the only thing standing between a mis-set
+    # evaluation.snap_date and a normal-looking report is this one call site.
+    # Source inspection rather than a CliRunner run: invoking the command for
+    # real needs a config tree and would build a Spark session on the happy
+    # path. It catches deletion of the call, not misuse of its result.
+    src = inspect.getsource(m.evaluation)
+    # The flag must be forwarded, not hardcoded: `post_training=True` would
+    # break monitoring, `post_training=False` would disable A22 entirely, and
+    # both keep the unit tests green because they call the predicate directly.
+    assert "post_training_snap_date_errors(params, post_training=post_training)" in src
+    assert src.index("post_training_snap_date_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A22 must fail before the Spark cold start, like A21"
+
+
 def test_a8_search_space_schema_surfaces_via_validate():
     import pytest
 
