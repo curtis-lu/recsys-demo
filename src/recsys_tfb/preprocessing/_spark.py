@@ -280,8 +280,9 @@ def validate_data_consistency(
     B7 — a ``dataset.carry_columns`` entry that is also a feature_table column
     must be listed in ``drop_columns``, or ``build_model_input`` joins two
     frames that both carry it and Spark raises ``Reference 'x' is ambiguous``.
-    Reads the same ``feature_table.dtypes`` mapping as B5/B6 — no extra lookup,
-    no scan (ADR-0004).
+    Identity columns and the label are exempt (they cannot collide whatever the
+    config says). Reads the same ``feature_table.dtypes`` mapping as B5/B6 — no
+    extra lookup, no scan (ADR-0004).
 
     All errors are collected and raised once so a single fix pass clears them.
     """
@@ -346,6 +347,8 @@ def validate_data_consistency(
             # metadata lookup, so B7 costs no extra call and no scan.
             set(ft_dtypes),
             drop_cols,
+            identity_cols,
+            label_col,
         )
     )
     if errors:

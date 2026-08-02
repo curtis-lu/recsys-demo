@@ -330,3 +330,12 @@ class TestComputeFeatureColumnsDrops:
         assert self._compute(
             ["snap_date", "cust_id", "label", "cust_segment_typ", "tenure_months"]
         ) == ["prod_name", "total_aum"]
+
+    def test_label_is_excluded_even_when_drop_columns_omits_it(self):
+        # The label has its own exclusion rule, separate from the blacklist.
+        # Every other case here lists "label" in drop, which would keep passing
+        # if that rule were deleted — the blacklist alone already covers it.
+        assert "label" in self.FT_COLS
+        assert self._compute(["snap_date", "cust_id"]) == [
+            "prod_name", "cust_segment_typ", "total_aum", "tenure_months",
+        ]

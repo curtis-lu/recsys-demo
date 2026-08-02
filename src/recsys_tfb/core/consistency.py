@@ -171,9 +171,12 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   sides of the ``build_model_input`` join carry it and Spark raises
   ``Reference 'x' is ambiguous``. The pairing rule is stated nowhere in the
   config, and B6 does not cover it (B6 only fires on non-numeric undeclared
-  feature columns). Predicate: ``carry_column_collision_errors`` (pure, no
-  Spark); wired via ``validate_data_consistency`` alongside B1/B5/B6, reusing
-  the same ``feature_table.dtypes`` read (metastore metadata — no scan).
+  feature columns). Identity columns and the label are exempt — they cannot
+  collide however they are configured, so flagging them would force a
+  version-busting config edit that changes nothing. Predicate:
+  ``carry_column_collision_errors`` (pure, no Spark); wired via
+  ``validate_data_consistency`` alongside B1/B5/B6, reusing the same
+  ``feature_table.dtypes`` read (metastore metadata — no scan).
   Numbering continues past the unused B4 rather than backfilling it, so a
   future reader never sees B4 reappear and wonders whether it was revived.
   See ADR-0004.
@@ -1023,6 +1026,8 @@ def carry_column_collision_errors(
     carry_columns: list[str],
     feature_table_columns: set[str] | list[str],
     drop_columns: list[str],
+    identity_columns: list[str],
+    label_column: str,
 ) -> list[str]:
     """B7 invariant — the single definition.
 
@@ -1034,14 +1039,29 @@ def carry_column_collision_errors(
     ``drop_columns`` is **mandatory**: otherwise ``build_model_input`` joins a
     keys frame and a preprocessed feature frame that each carry that column and
     Spark fails with an opaque ``Reference 'x' is ambiguous``. That pairing rule
-    is written nowhere in the config, which is why it is a gate. See
-    ADR-0004.
+    is written nowhere in the config, which is why it is a gate. See ADR-0004.
 
     Not covered by B6: B6 only fires on a *non-numeric* undeclared feature
     column, so a numeric carry column (or one declared categorical) sails past
     it and hits the ambiguous-reference crash instead. Where B6 does happen to
     fire on the same column its advice is actively misleading — it offers
     "declare it categorical" as a fix, which keeps the collision.
+
+    ``identity_columns`` and ``label_column`` are excluded because they cannot
+    collide however they are configured, so flagging them would demand a
+    config edit that changes nothing while busting ``base_dataset_version``:
+
+    - an identity column named in ``carry_columns`` is *not* copied a second
+      time — ``select_keys`` only appends carry entries that are not already in
+      the identity key (``pipelines/dataset/helpers_spark.py``), and the base
+      key is coalesced by the join itself.
+    - the label and non-categorical identity columns are excluded from
+      ``feature_columns`` by ``_compute_feature_columns`` regardless of
+      ``drop_columns``, so they never reach the feature side of the join.
+
+    Verified by running the real ``build_model_input`` both ways: with an
+    identity column carried and undropped it completes normally, with a
+    non-identity one it raises ``Reference 'cust_segment_typ' is ambiguous``.
 
     ``feature_table_columns`` is any container of feature_table's column names
     (the gate hands in the keys of the ``feature_table.dtypes`` mapping it has
@@ -1050,8 +1070,9 @@ def carry_column_collision_errors(
     """
     dropped = set(drop_columns)
     in_feature_table = set(feature_table_columns)
+    cannot_collide = set(identity_columns) | {label_column}
     errors: list[str] = []
-    for col in sorted(set(carry_columns) & in_feature_table):
+    for col in sorted((set(carry_columns) & in_feature_table) - cannot_collide):
         if col in dropped:
             continue
         errors.append(
@@ -1063,7 +1084,10 @@ def carry_column_collision_errors(
             f"dataset.prepare_model_input.drop_columns in parameters_dataset.yaml "
             f"and keep it in dataset.carry_columns — appearing in both keys is "
             f"the intended configuration (carry selects it from sample_pool, drop "
-            f"keeps it out of the feature columns), not a contradiction."
+            f"keeps it out of the feature columns), not a contradiction. If "
+            f"instead you need {col!r} as a *model feature*, it cannot also be "
+            f"carried: drop it from dataset.carry_columns and source any "
+            f"sample-weight key that needed it from another column."
         )
     return errors
 

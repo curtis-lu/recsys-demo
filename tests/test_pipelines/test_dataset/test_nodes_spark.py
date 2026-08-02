@@ -715,19 +715,40 @@ def test_build_model_input_casts_float_features_to_float32(
     assert out_dtypes["out_amt_ratio_l1m"] == "float"
 
 
-def _gate_params(parameters, *, drop=None, categorical=None, carry=None) -> dict:
-    """``parameters`` with the three keys the Layer-2 gate reads spelled out.
+# --- where Layer-2 gate tests live -------------------------------------------
+# #140 assigns `preprocessing/_spark.py` behaviour to
+# tests/test_preprocessing/test_spark.py. `validate_data_consistency` is defined
+# there but re-exported as a dataset *node* (pipelines/dataset/nodes_spark.py),
+# which is how this module imports it — so its integration tests stay here, next
+# to the existing B1/B5/B6 ones and the fixtures they all need. The pure helpers
+# it calls (`_compute_feature_columns`) are tested in test_preprocessing/. Split
+# by "gate wiring vs pure helper", not by which file the symbol happens to live
+# in, so a behaviour still has exactly one home.
+
+
+def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None) -> dict:
+    """``parameters`` with the keys the Layer-2 gate reads made explicit.
 
     The fixture leaves ``prepare_model_input`` unset, so the gate falls back to
-    defaults that happen to mention columns this module's feature_table does not
-    have. Every gate test below depends on exactly which columns are dropped or
-    declared, so it states them rather than inheriting that fallback.
+    the defaults in ``preprocessing/_common.py``. Those defaults are read from
+    that module rather than restated here: a hand-written copy would be equal to
+    the real list only as long as feature_table happens to lack the columns
+    where the two differ (``apply_start_date`` / ``apply_end_date`` /
+    ``cust_segment_typ``), and would then silently stop dropping them the day a
+    fixture grows one — turning every count assertion below into a different
+    question without turning anything red.
+
+    Callers add to the defaults rather than replacing them, so a test says which
+    columns *it* cares about and inherits the rest.
     """
+    from recsys_tfb.preprocessing._common import _get_preprocessing_config
+
+    default_drop, default_categorical = _get_preprocessing_config(parameters)
     dataset = {
         **parameters["dataset"],
         "prepare_model_input": {
-            "drop_columns": list(drop if drop is not None else ["snap_date", "cust_id", "label"]),
-            "categorical_columns": list(categorical if categorical is not None else ["prod_name"]),
+            "drop_columns": [*default_drop, *drop_extra],
+            "categorical_columns": [*default_categorical, *categorical_extra],
         },
     }
     if carry is not None:
@@ -741,17 +762,21 @@ class TestValidateDataConsistency:
     ):
         """The gate must not misfire on a fixture that violates nothing.
 
-        This is the module's single false-positive guard, covering B1/B5/B6/B7
-        at once — it replaces three verbatim-identical ``is None`` assertions
-        that were filed under three different invariants and so promised a
-        discrimination none of them had. Each invariant's raise side is covered
-        by its own test below; this one only says "no false alarm".
+        Covers B1/B5/B6 — it replaces three verbatim-identical ``is None``
+        assertions that were filed under three different invariants and so
+        promised a discrimination none of them had. Each invariant's raise side
+        is covered by its own test below; this one only says "no false alarm".
+
+        **Not** a B7 guard: the fixture configures no ``carry_columns``, so B7's
+        input here is empty and unflagging it proves nothing. B7's false-positive
+        side is covered by
+        ``TestValidateDataConsistencyB7.test_carry_column_absent_from_feature_table_is_not_flagged``.
 
         Fixture properties it rests on: prod_name values ==
         schema.categorical_values.prod_name and every snap inside the configured
         windows (B1); feature_table's feature columns are all numeric and the
         lone declared categorical (prod_name) is an identity column absent from
-        feature_table (B5/B6); no carry_columns are configured (B7).
+        feature_table (B5/B6).
         """
         assert validate_data_consistency(
             sample_pool, label_table, feature_table, parameters) is None
@@ -957,9 +982,7 @@ class TestValidateDataConsistencyB6:
             .withColumn("channel_preference", F.lit("digital"))
             .withColumn("rogue_str", F.lit("free_text"))
         )
-        params = _gate_params(
-            parameters, categorical=["prod_name", "channel_preference"]
-        )
+        params = _gate_params(parameters, categorical_extra=["channel_preference"])
         with pytest.raises(DataConsistencyError) as ei:
             validate_data_consistency(sample_pool, label_table, ft, params)
         msg = str(ei.value)
@@ -981,9 +1004,7 @@ class TestValidateDataConsistencyB6:
             .withColumn("legacy_note", F.lit("free_text"))
             .withColumn("rogue_str", F.lit("free_text"))
         )
-        params = _gate_params(
-            parameters, drop=["snap_date", "cust_id", "label", "legacy_note"]
-        )
+        params = _gate_params(parameters, drop_extra=["legacy_note"])
         with pytest.raises(DataConsistencyError) as ei:
             validate_data_consistency(sample_pool, label_table, ft, params)
         msg = str(ei.value)
@@ -1014,7 +1035,7 @@ class TestValidateDataConsistencyB7:
         )
         params = _gate_params(
             parameters,
-            drop=["snap_date", "cust_id", "label", "acct_age_months"],
+            drop_extra=["acct_age_months"],
             carry=["tenure_months", "acct_age_months"],
         )
         with pytest.raises(DataConsistencyError) as ei:
@@ -1032,11 +1053,34 @@ class TestValidateDataConsistencyB7:
     ):
         """The ordinary case: carry columns usually live only in sample_pool.
 
-        ``cust_segment_typ`` is carried by conf/base and is not a feature_table
-        column here, so there is nothing to be ambiguous with and drop_columns
-        is irrelevant. Flagging it would make the shipped config unrunnable.
+        ``channel_preference`` is a sample_pool column and not a feature_table
+        one, so there is nothing to be ambiguous with. It is deliberately not
+        ``cust_segment_typ`` — that one is in the default drop_columns, so an
+        unflagged result there would be explained by the drop just as well as by
+        the absence, and removing the feature_table check would not turn it red.
         """
-        params = _gate_params(parameters, carry=["cust_segment_typ"])
+        assert "channel_preference" not in feature_table.columns
+        params = _gate_params(parameters, carry=["channel_preference"])
+        assert validate_data_consistency(
+            sample_pool, label_table, feature_table, params) is None
+
+    def test_identity_column_in_carry_is_not_flagged(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        """The gate has to tell B7 which columns are identity.
+
+        ``cust_id`` is in feature_table and not in drop_columns, so the naive
+        rule flags it — but ``select_keys`` never copies an identity column a
+        second time, and running the real ``build_model_input`` this way
+        completes normally. Flagging it would demand a drop_columns edit that
+        changes no behaviour while busting base_dataset_version.
+        """
+        assert "cust_id" in feature_table.columns
+        params = _gate_params(parameters, carry=["cust_id"])
+        params["dataset"]["prepare_model_input"]["drop_columns"] = [
+            c for c in params["dataset"]["prepare_model_input"]["drop_columns"]
+            if c != "cust_id"
+        ]
         assert validate_data_consistency(
             sample_pool, label_table, feature_table, params) is None
 
