@@ -128,6 +128,7 @@ def test_cast_mixed_decimal_and_double(spark):
 
 
 import pandas as pd
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.preprocessing._spark import build_model_input
 
 
@@ -239,12 +240,31 @@ class TestBuildModelInputCarry:
             "cust_id": [1, 2], "f1": [0.1, 0.2]}))
         return keys, feats, labels
 
+    def _expected_columns(self, keys):
+        """identity ∪ {label} ∪ feature_columns ∪ whatever the keys carried in.
+
+        Asserted as an equality rather than ``in`` / ``not in`` so an extra
+        column — a join column leaking through, a carry column that should have
+        been filtered out — fails too.
+        """
+        schema = get_schema(self._params())
+        return (
+            set(schema["identity_columns"])
+            | {schema["label"]}
+            | set(self._prep()["feature_columns"])
+            | set(keys.columns)
+        )
+
     def test_carry_in_output_when_present_in_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=True)
         out = build_model_input(keys, feats, labels, self._prep(), self._params())
         assert "cust_segment_typ" in out.columns
+        assert set(out.columns) == self._expected_columns(keys)
+        assert out.count() == keys.count()
 
     def test_no_carry_when_absent_from_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=False)
         out = build_model_input(keys, feats, labels, self._prep(), self._params())
         assert "cust_segment_typ" not in out.columns
+        assert set(out.columns) == self._expected_columns(keys)
+        assert out.count() == keys.count()

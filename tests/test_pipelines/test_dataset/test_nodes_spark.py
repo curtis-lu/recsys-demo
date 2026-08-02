@@ -5,6 +5,7 @@ import pytest
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     apply_preprocessor_to_features,
     build_model_input,
@@ -19,46 +20,114 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
 pytestmark = pytest.mark.spark
 
 
+# --- fixture shape -----------------------------------------------------------
+# Every fixture in this module is generated from these three lists, and every
+# count assertion is derived from them (or from ``parameters``) instead of being
+# written as a literal. Resizing the fixture is then a one-line edit here rather
+# than a hunt for a dozen hand-computed constants — and a constant that silently
+# stops matching the fixture can no longer make an assertion vacuous.
+_ENTITIES = [f"C{i:03d}" for i in range(1, 5)]
+_PRODUCTS = ["exchange_fx", "exchange_usd", "fund_stock"]
+_SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
+
+# Per-entity attribute values, cycled so any fixture size stays covered. These
+# are inert with respect to every assertion below (they are neither identity nor
+# feature columns); they exist so the frames look like the real tables.
+_SEGMENTS = ["mass", "affluent", "hnw"]
+_CHANNELS = ["digital", "branch", "both"]
+
+
+def _entity_index(cid: str) -> int:
+    return _ENTITIES.index(cid)
+
+
+def _segment(cid: str) -> str:
+    return _SEGMENTS[_entity_index(cid) % len(_SEGMENTS)]
+
+
+def _channel(cid: str) -> str:
+    return _CHANNELS[_entity_index(cid) % len(_CHANNELS)]
+
+
+def _is_positive(cid: str, prod: str) -> bool:
+    """One positive cell: the first entity on the first product."""
+    return cid == _ENTITIES[0] and prod == _PRODUCTS[0]
+
+
+# --- derivations used by assertions ------------------------------------------
+
+
+def _n_items(parameters) -> int:
+    """Declared item count. The schema is the source of truth, not the fixture."""
+    schema = get_schema(parameters)
+    return len(parameters["schema"]["categorical_values"][schema["item"]])
+
+
+def _expected_key_count(parameters, split: str) -> int:
+    """Row count of a full-population key selection for ``split``.
+
+    sample_pool is a literal cross join, so a full-population selection is
+    entities x items x that split's months.
+    """
+    n_dates = len(parameters["dataset"][f"{split}_snap_dates"])
+    return len(_ENTITIES) * _n_items(parameters) * n_dates
+
+
+def _identity_columns(parameters) -> list[str]:
+    return sorted(get_schema(parameters)["identity_columns"])
+
+
+def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
+    """model_input's column set, derived from the rule build_model_input follows.
+
+    identity ∪ {label} ∪ feature_columns ∪ (whatever else the keys carried in).
+    Used as an equality so an *extra* column — a leaked join column, a carry
+    column that should have been dropped — fails the assertion too; ``in`` /
+    ``isdisjoint`` only ever catch missing ones.
+    """
+    schema = get_schema(parameters)
+    return (
+        set(schema["identity_columns"])
+        | {schema["label"]}
+        | set(preprocessor["feature_columns"])
+        | set(keys.columns)
+    )
+
+
 @pytest.fixture
 def feature_table(spark):
-    pdf = pd.DataFrame(
-        {
-            "snap_date": pd.to_datetime(
-                ["2024-01-31"] * 4
-                + ["2024-02-29"] * 4
-                + ["2024-03-31"] * 4
-                + ["2024-04-30"] * 4
-                + ["2024-05-31"] * 4
-            ),
-            "cust_id": ["C001", "C002", "C003", "C004"] * 5,
-            "total_aum": [100.0, 200.0, 300.0, 400.0] * 5,
-            "fund_aum": [10.0, 20.0, 30.0, 40.0] * 5,
-            "in_amt_sum_l1m": [5.0] * 20,
-            "out_amt_sum_l1m": [3.0] * 20,
-            "in_amt_ratio_l1m": [0.05] * 20,
-            "out_amt_ratio_l1m": [0.03] * 20,
-        }
-    )
-    return spark.createDataFrame(pdf)
+    rows = []
+    for snap in _SNAP_DATES:
+        for cid in _ENTITIES:
+            aum = 100.0 * (_entity_index(cid) + 1)
+            rows.append({
+                "snap_date": pd.Timestamp(snap),
+                "cust_id": cid,
+                "total_aum": aum,
+                "fund_aum": aum / 10.0,
+                "in_amt_sum_l1m": 5.0,
+                "out_amt_sum_l1m": 3.0,
+                "in_amt_ratio_l1m": 0.05,
+                "out_amt_ratio_l1m": 0.03,
+            })
+    return spark.createDataFrame(pd.DataFrame(rows))
 
 
 @pytest.fixture
 def label_table(spark):
-    products = ["exchange_fx", "exchange_usd", "fund_stock"]
-    segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
     rows = []
-    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
+    for snap in _SNAP_DATES:
         snap_dt = pd.Timestamp(snap)
-        for cid in ["C001", "C002", "C003", "C004"]:
-            for prod in products:
+        for cid in _ENTITIES:
+            for prod in _PRODUCTS:
                 rows.append(
                     {
                         "snap_date": snap_dt,
                         "cust_id": cid,
-                        "cust_segment_typ": segments[cid],
+                        "cust_segment_typ": _segment(cid),
                         "apply_start_date": snap_dt + pd.Timedelta(days=1),
                         "apply_end_date": snap_dt + pd.Timedelta(days=30),
-                        "label": 1 if cid == "C001" and prod == "exchange_fx" else 0,
+                        "label": 1 if _is_positive(cid, prod) else 0,
                         "prod_name": prod,
                     }
                 )
@@ -67,23 +136,19 @@ def label_table(spark):
 
 @pytest.fixture
 def sample_pool(spark):
-    products = ["exchange_fx", "exchange_usd", "fund_stock"]
-    segments = {"C001": "mass", "C002": "affluent", "C003": "hnw", "C004": "mass"}
-    tenure = {"C001": 12, "C002": 36, "C003": 60, "C004": 24}
-    channel = {"C001": "digital", "C002": "branch", "C003": "both", "C004": "digital"}
     rows = []
-    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
+    for snap in _SNAP_DATES:
         snap_dt = pd.Timestamp(snap)
-        for cid in ["C001", "C002", "C003", "C004"]:
-            for prod in products:
+        for cid in _ENTITIES:
+            for prod in _PRODUCTS:
                 rows.append({
                     "snap_date": snap_dt,
                     "cust_id": cid,
-                    "cust_segment_typ": segments[cid],
+                    "cust_segment_typ": _segment(cid),
                     "prod_name": prod,
-                    "label": 1 if cid == "C001" and prod == "exchange_fx" else 0,
-                    "tenure_months": tenure[cid],
-                    "channel_preference": channel[cid],
+                    "label": 1 if _is_positive(cid, prod) else 0,
+                    "tenure_months": 12 * (_entity_index(cid) % 5 + 1),
+                    "channel_preference": _channel(cid),
                 })
     return spark.createDataFrame(pd.DataFrame(rows))
 
@@ -94,11 +159,11 @@ def parameters():
         "random_seed": 42,
         "schema": {
             "categorical_values": {
-                "prod_name": ["exchange_fx", "exchange_usd", "fund_stock"],
+                "prod_name": list(_PRODUCTS),
             },
         },
         "dataset": {
-            "train_snap_dates": ["2024-01-31", "2024-02-29", "2024-03-31"],
+            "train_snap_dates": _SNAP_DATES[:3],
             "sample_ratio": 0.5,
             "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
@@ -106,9 +171,9 @@ def parameters():
             "enable_calibration": False,
             "calibration_snap_dates": [],
             "calibration_sample_ratio": 1.0,
-            "val_snap_dates": ["2024-04-30"],
+            "val_snap_dates": _SNAP_DATES[3:4],
             "val_sample_ratio": 1.0,
-            "test_snap_dates": ["2024-05-31"],
+            "test_snap_dates": _SNAP_DATES[4:5],
         },
     }
 
@@ -116,7 +181,7 @@ def parameters():
 class TestSelectTrainKeys:
     def test_returns_correct_columns(self, sample_pool, parameters):
         result = select_train_keys(sample_pool, parameters)
-        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
+        assert sorted(result.columns) == _identity_columns(parameters)
 
     def test_filters_to_train_dates(self, sample_pool, parameters):
         result = select_train_keys(sample_pool, parameters)
@@ -132,12 +197,12 @@ class TestSelectTrainKeys:
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         result = select_train_keys(sample_pool, params)
-        # 4 customers x 3 train dates x 3 products = 36
-        assert result.count() == 36
+        assert result.count() == _expected_key_count(params, "train")
 
     def test_no_duplicates(self, sample_pool, parameters):
         result = select_train_keys(sample_pool, parameters)
-        assert result.count() == result.dropDuplicates(["snap_date", "cust_id", "prod_name"]).count()
+        identity = get_schema(parameters)["identity_columns"]
+        assert result.count() == result.dropDuplicates(identity).count()
 
 
 class TestSplitTrainKeys:
@@ -182,19 +247,17 @@ class TestSplitTrainKeys:
 
 
 class TestSelectValKeys:
-    def test_full_population(self, label_table, parameters):
-        result = select_val_keys(label_table, parameters)
-        # identity_columns includes prod_name → 4 cust × 3 prod for val date
-        assert result.count() == 12
-        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
+    def test_full_population(self, sample_pool, parameters):
+        result = select_val_keys(sample_pool, parameters)
+        assert result.count() == _expected_key_count(parameters, "val")
+        assert sorted(result.columns) == _identity_columns(parameters)
 
 
 class TestSelectTestKeys:
-    def test_full_population(self, label_table, parameters):
-        result = select_test_keys(label_table, parameters)
-        # identity_columns includes prod_name → 4 cust × 3 prod for test date
-        assert result.count() == 12
-        assert sorted(result.columns) == ["cust_id", "prod_name", "snap_date"]
+    def test_full_population(self, sample_pool, parameters):
+        result = select_test_keys(sample_pool, parameters)
+        assert result.count() == _expected_key_count(parameters, "test")
+        assert sorted(result.columns) == _identity_columns(parameters)
 
 
 class TestBuildModelInput:
@@ -216,15 +279,17 @@ class TestBuildModelInput:
 
         keys = spark.createDataFrame(
             pd.DataFrame({
-                "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
-                "cust_id": ["C001", "C002"],
-                "prod_name": ["exchange_fx", "exchange_fx"],
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 2),
+                "cust_id": _ENTITIES[:2],
+                "prod_name": [_PRODUCTS[0]] * 2,
             })
         )
         result = build_model_input(keys, pft, label_table, preprocessor, parameters)
-        assert result.count() == 2
-        assert "total_aum" in result.columns
-        assert "label" in result.columns
+        # keys' grain is model_input's grain: no fan-out, no drop.
+        assert result.count() == keys.count()
+        assert set(result.columns) == _expected_model_input_columns(
+            keys, preprocessor, parameters
+        )
 
     def test_joins_without_product_keys(
         self, spark, feature_table, label_table, sample_pool, parameters
@@ -290,6 +355,12 @@ class TestFitAndBuild:
 
         forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
         assert forbidden.isdisjoint(set(train_mi.columns))
+        # Equality, so a *new* leaked column fails here too — `isdisjoint` only
+        # ever catches the three names spelled out above.
+        assert set(train_mi.columns) == _expected_model_input_columns(
+            train_keys, preprocessor, parameters
+        )
+        assert train_mi.count() == train_keys.count()
 
     def test_prod_name_preserved_as_identity(
         self, spark, feature_table, label_table, sample_pool, parameters
@@ -301,6 +372,7 @@ class TestFitAndBuild:
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
         train_pdf = train_mi.toPandas()
 
+        assert train_mi.count() == train_keys.count()
         assert train_pdf["prod_name"].dtype == object
 
 
@@ -373,15 +445,16 @@ class TestApplyPreprocessorFilter:
     ):
         """Test A: when feature_table contains mid-week rows, the filter must drop them."""
         # Add a "mid-week" row that isn't in any split's snap_dates
+        n = len(_ENTITIES)
         midweek_pdf = pd.DataFrame({
-            "snap_date": pd.to_datetime(["2024-01-15"] * 4),
-            "cust_id": ["C001", "C002", "C003", "C004"],
-            "total_aum": [999.0] * 4,
-            "fund_aum": [99.0] * 4,
-            "in_amt_sum_l1m": [9.0] * 4,
-            "out_amt_sum_l1m": [9.0] * 4,
-            "in_amt_ratio_l1m": [0.99] * 4,
-            "out_amt_ratio_l1m": [0.99] * 4,
+            "snap_date": pd.to_datetime(["2024-01-15"] * n),
+            "cust_id": list(_ENTITIES),
+            "total_aum": [999.0] * n,
+            "fund_aum": [99.0] * n,
+            "in_amt_sum_l1m": [9.0] * n,
+            "out_amt_sum_l1m": [9.0] * n,
+            "in_amt_ratio_l1m": [0.99] * n,
+            "out_amt_ratio_l1m": [0.99] * n,
         })
         ft_with_midweek = feature_table.unionByName(spark.createDataFrame(midweek_pdf))
 
@@ -454,17 +527,12 @@ def test_build_model_input_casts_float_features_to_float32(
         T.StructField("out_amt_ratio_l1m", T.DoubleType()),
     ])
     rows = []
-    for snap in ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]:
+    for snap in _SNAP_DATES:
         snap_ts = pd.Timestamp(snap).to_pydatetime()
-        for cid, aum in [
-            ("C001", "100.0"),
-            ("C002", "200.0"),
-            ("C003", "300.0"),
-            ("C004", "400.0"),
-        ]:
+        for cid in _ENTITIES:
             rows.append((
-                snap_ts, cid, Decimal(aum), 10.0, Decimal("5"),
-                3.0, 0.05, 0.03,
+                snap_ts, cid, Decimal(f"{100.0 * (_entity_index(cid) + 1)}"),
+                10.0, Decimal("5"), 3.0, 0.05, 0.03,
             ))
     feature_table_decimal = spark.createDataFrame(rows, schema=schema)
 
@@ -473,17 +541,19 @@ def test_build_model_input_casts_float_features_to_float32(
 
     # Build train keys directly (cust × prod × train_snap_dates) — independent of
     # sample_pool fixture; the test is about dtype, not sampling.
+    train_dates = parameters["dataset"]["train_snap_dates"]
     train_keys = spark.createDataFrame(
         pd.DataFrame({
             "snap_date": pd.to_datetime(
-                ["2024-01-31"] * 4 + ["2024-02-29"] * 4 + ["2024-03-31"] * 4
+                [d for d in train_dates for _ in _ENTITIES]
             ),
-            "cust_id": ["C001", "C002", "C003", "C004"] * 3,
-            "prod_name": ["exchange_fx"] * 12,
+            "cust_id": _ENTITIES * len(train_dates),
+            "prod_name": [_PRODUCTS[0]] * (len(_ENTITIES) * len(train_dates)),
         })
     )
 
     result = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+    assert result.count() == train_keys.count()
 
     feature_cols = preprocessor["feature_columns"]
     out_dtypes = dict(result.dtypes)
@@ -724,7 +794,7 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     filter_test_model_input,
 )
 
-_TEST_MONTHS = ["2024-04-30", "2024-05-31"]
+_TEST_MONTHS = _SNAP_DATES[3:5]
 
 
 def _incremental_params(parameters, existing=None, rebuild=None):
@@ -871,11 +941,7 @@ class TestApplyPreprocessorIncremental:
         full = apply_preprocessor_to_features(
             feature_table, fit_preprocessor_metadata(feature_table, params)[0], params,
         )
-        landed = {
-            "preprocessed_feature_table": [
-                "2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31",
-            ]
-        }
+        landed = {"preprocessed_feature_table": list(_SNAP_DATES)}
         params_all_landed = _incremental_params(parameters, existing=landed)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params_all_landed)
         result = apply_preprocessor_to_features(
