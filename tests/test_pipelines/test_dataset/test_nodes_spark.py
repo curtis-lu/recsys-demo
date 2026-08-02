@@ -26,7 +26,14 @@ pytestmark = pytest.mark.spark
 # written as a literal. Resizing the fixture is then a one-line edit here rather
 # than a hunt for a dozen hand-computed constants — and a constant that silently
 # stops matching the fixture can no longer make an assertion vacuous.
-_ENTITIES = [f"C{i:03d}" for i in range(1, 5)]
+#
+# Entity count (24) is chosen so train / train-dev actually split: at the old
+# size of 4, train_dev_ratio=0.2 rounded the dev side to empty and every
+# assertion in TestSplitTrainKeys held for a `split` that did nothing (replacing
+# it with "return sample_keys, sample_keys.limit(0)" kept them green). Item
+# count stays at 3 and is deliberately NOT aligned with the 8 in conf/ — that
+# gap is orthogonal to this one (see #140).
+_ENTITIES = [f"C{i:03d}" for i in range(1, 25)]
 _PRODUCTS = ["exchange_fx", "exchange_usd", "fund_stock"]
 _SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
 
@@ -206,6 +213,28 @@ class TestSelectTrainKeys:
 
 
 class TestSplitTrainKeys:
+    def test_both_sides_are_non_empty(self, sample_pool, parameters):
+        """D21: the fixture is big enough that the split actually splits.
+
+        Without this the other three tests in this class are vacuous — at the
+        old 4-entity size the dev side was always empty, and replacing the whole
+        function with ``return sample_keys, sample_keys.limit(0)`` kept them
+        green. Asserted on distinct entities (not rows) because that is the unit
+        the split is defined on.
+        """
+        params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        entity_col = get_schema(params)["entity"][0]
+        sample_keys = select_train_keys(sample_pool, params)
+        train, train_dev = split_train_keys(sample_keys, params)
+
+        n_total = sample_keys.select(entity_col).distinct().count()
+        n_dev = train_dev.select(entity_col).distinct().count()
+        n_train = train.select(entity_col).distinct().count()
+
+        assert n_total == len(_ENTITIES)
+        assert 0 < n_dev < n_total
+        assert n_train + n_dev == n_total
+
     def test_no_cust_overlap(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         sample_keys = select_train_keys(sample_pool, params)
@@ -244,6 +273,49 @@ class TestSplitTrainKeys:
         d2_custs = set(d2.select("cust_id").distinct().toPandas()["cust_id"])
         assert t1_custs == t2_custs
         assert d1_custs == d2_custs
+
+
+class TestSplitTrainKeysEmptyTrainDev:
+    """``train_dev_ratio > 0`` that yields an empty dev split must raise.
+
+    train_dev is the early-stopping validation set handed to every HPO trial.
+    Empty means early stopping never fires: each trial burns its full round
+    budget and the search reports nothing unusual. See ADR-0005.
+    """
+
+    def _keys(self, spark):
+        return spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 2),
+            "cust_id": _ENTITIES[:2],
+            "prod_name": _PRODUCTS[:2],
+        }))
+
+    def test_empty_train_dev_raises(self, spark, parameters):
+        # ratio_to_threshold(1e-7) rounds to a bucket threshold of 0, so the dev
+        # side is empty by construction — the test does not depend on where two
+        # particular cust_ids happen to hash.
+        params = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "train_dev_ratio": 1e-7},
+        }
+        with pytest.raises(ValueError, match="empty train-dev split") as ei:
+            split_train_keys(self._keys(spark), params)
+        msg = str(ei.value)
+        # The message has to name both halves of the cause: a ratio alone does
+        # not tell you whether to change the ratio or the sample size.
+        assert "train_dev_ratio=1e-07" in msg
+        assert "2 distinct cust_id" in msg
+
+    def test_zero_ratio_permits_empty_train_dev(self, spark, parameters):
+        """train_dev_ratio == 0 asks for no dev split; that is not the bug."""
+        params = {
+            **parameters,
+            "dataset": {**parameters["dataset"], "train_dev_ratio": 0.0},
+        }
+        keys = self._keys(spark)
+        train, train_dev = split_train_keys(keys, params)
+        assert train_dev.count() == 0
+        assert train.count() == keys.count()
 
 
 class TestSelectValKeys:
@@ -291,23 +363,32 @@ class TestBuildModelInput:
             keys, preprocessor, parameters
         )
 
-    def test_joins_without_product_keys(
+    def test_keys_missing_item_raises(
         self, spark, feature_table, label_table, sample_pool, parameters
     ):
-        """When keys don't include prod_name, expand to all products."""
+        """keys without the item column is an error, not a mode (ADR-0005).
+
+        It used to fall back to a base-key label join, which fanned each
+        (snap_date, cust_id) out to one row per item in label_table and took
+        prod_name's values from there — a model_input silently N times too
+        large, with no error anywhere.
+        """
         _, preprocessor, pft = self._pft(feature_table, sample_pool, parameters)
+        item_col = get_schema(parameters)["item"]
 
         keys = spark.createDataFrame(
             pd.DataFrame({
-                "snap_date": pd.to_datetime(["2024-01-31", "2024-01-31"]),
-                "cust_id": ["C001", "C002"],
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 2),
+                "cust_id": _ENTITIES[:2],
             })
         )
-        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
-        assert result.count() == 6
-        assert "total_aum" in result.columns
-        assert "label" in result.columns
-        assert "prod_name" in result.columns
+        # "build_model_input keys" (not bare "build_model_input") — the other
+        # _validate_columns call in this function reports the latter, and this
+        # pattern must not be satisfiable by it.
+        with pytest.raises(
+            ValueError, match=rf"build_model_input keys: \['{item_col}'\]"
+        ):
+            build_model_input(keys, pft, label_table, preprocessor, parameters)
 
 
 class TestFitAndBuild:
@@ -315,35 +396,32 @@ class TestFitAndBuild:
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         return select_train_keys(sample_pool, params)
 
-    def _label_only_keys(self, spark, label_table, snap):
-        from pyspark.sql import functions as F
-
-        return (
-            label_table.filter(F.col("snap_date") == pd.Timestamp(snap))
-            .select("snap_date", "cust_id")
-            .dropDuplicates()
-        )
-
     def test_output_format(self, spark, feature_table, label_table, sample_pool, parameters):
+        """Every split's model_input, built from the real key-selection nodes.
+
+        val/test keys used to be hand-built as (snap_date, cust_id) — a shape no
+        production node produces, and the only shape that exercised the
+        base-key-join branch that ADR-0005 removed.
+        """
         from pyspark.sql import DataFrame
 
-        train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, cat_mappings = fit_preprocessor_metadata(
-            feature_table, parameters
-        )
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
 
-        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
-        val_keys = self._label_only_keys(spark, label_table, "2024-04-30")
-        test_keys = self._label_only_keys(spark, label_table, "2024-05-31")
-        val_mi = build_model_input(val_keys, pft, label_table, preprocessor, parameters)
-        test_mi = build_model_input(test_keys, pft, label_table, preprocessor, parameters)
-
-        assert isinstance(train_mi, DataFrame)
-        assert "label" in train_mi.columns
-        assert train_mi.count() > 0
-        assert val_mi.count() > 0
-        assert test_mi.count() > 0
+        splits = {
+            "train": self._train_keys(sample_pool, parameters),
+            "val": select_val_keys(sample_pool, parameters),
+            "test": select_test_keys(sample_pool, parameters),
+        }
+        for split, keys in splits.items():
+            mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
+            n_keys = keys.count()
+            assert isinstance(mi, DataFrame)
+            assert n_keys == _expected_key_count(parameters, split), split
+            assert mi.count() == n_keys, split
+            assert set(mi.columns) == _expected_model_input_columns(
+                keys, preprocessor, parameters
+            ), split
 
     def test_excludes_drop_columns(
         self, spark, feature_table, label_table, sample_pool, parameters

@@ -85,6 +85,23 @@ def split_train_keys(
     train_keys = sample_keys.join(train_custs, on=cust_col, how="inner")
     train_dev_keys = sample_keys.join(dev_custs, on=cust_col, how="inner")
 
+    # An empty train_dev is invisible downstream: it is the early-stopping
+    # validation set for every HPO trial (training/nodes.py passes
+    # train_dev_lgb_handle as val_dataset), so an empty one means each trial
+    # silently runs its full round budget with early stopping never firing —
+    # no error, no warning, just worse models and a longer search. Costs one
+    # Spark action; see ADR-0005 for the fallback if that ever matters at scale.
+    if train_dev_ratio > 0 and train_dev_keys.isEmpty():
+        raise ValueError(
+            f"split_train_keys produced an empty train-dev split: "
+            f"train_dev_ratio={train_dev_ratio} applied to "
+            f"{cust_df.count()} distinct {cust_col} value(s) puts every entity "
+            f"on the train side. train_dev is the early-stopping validation set "
+            f"for every HPO trial, so an empty one disables early stopping "
+            f"without raising. Raise dataset.train_dev_ratio, or widen the "
+            f"sample (dataset.sample_ratio / train_snap_dates)."
+        )
+
     logger.info(
         "Split train keys (ratio=%.2f)",
         train_dev_ratio,

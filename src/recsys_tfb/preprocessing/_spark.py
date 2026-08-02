@@ -473,7 +473,15 @@ def build_model_input(
 
     feature_columns = preprocessor_metadata["feature_columns"]
 
-    label_join_key = base_key + [item_col] if item_col in keys.columns else base_key
+    # keys' grain IS model_input's grain (ADR-0005). This used to fall back to a
+    # base-key-only label join when item was absent, which silently multiplied
+    # every (time, entity) by label_table's item count and took `item`'s values
+    # from label_table. No caller can reach that branch — identity_columns is
+    # derived ([time] + entity + [item], core/schema.py) and all five call sites
+    # feed it — but its failure mode is a silently N-times-too-large dataset, so
+    # the missing column is an error rather than a mode.
+    label_join_key = base_key + [item_col]
+    _validate_columns(keys.columns, label_join_key, "build_model_input keys")
     with log_step(logger, "merge_labels"):
         dataset = keys.join(label_table, on=label_join_key, how="left")
         # sample_pool is dense (cust × prod fully expanded); label_table is
