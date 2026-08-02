@@ -1,0 +1,85 @@
+---
+status: accepted
+date: 2026-08-02
+---
+
+# `carry_columns` 與 `drop_columns` 的交集是必要設定，不是矛盾
+
+`conf/base/parameters_dataset.yaml` 把 `cust_segment_typ` 同時列進 `carry_columns`
+與 `prepare_model_input.drop_columns`。讀起來像「一個欄位被下了兩個相反的指令」，
+下一個維護者會想把它「修好」。**它是必要的**，理由是這兩個鍵作用在不同的表：
+
+| 設定鍵 | 作用對象 | 生效處 | 語意 |
+|---|---|---|---|
+| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`preprocessing/_spark.py:110-132`） | 黑名單：不得進 `feature_columns` |
+| `carry_columns` | **`sample_pool`** 的欄 | `select_keys`（`pipelines/dataset/helpers_spark.py:124-125`） | 白名單：keys 除 identity 外還要多帶 |
+| `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
+
+而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 的
+`keep_cols = base_key + [c for c in feature_columns if c in feature_table.columns]`
+（`preprocessing/_spark.py:379-380`），被擋在 `feature_columns` 之外的欄不會進
+`preprocessed_feature_table`。
+
+所以當某欄**同時**存在於 `sample_pool`（要 carry）與 `feature_table` 時，它必須列進
+`drop_columns`，否則 `build_model_input` 的兩側各帶一份同名欄，`select` 撞 ambiguous。
+實跑真函式的兩情境對照：
+
+```
+(1) cust_segment_typ IN drop_columns   [= 現行 conf/base]
+  preprocessed_ft cols : ['snap_date','cust_id','tenure_months','gender']   ← 已刪
+  model_input cols     : [...,'gender','cust_segment_typ']                  ← 只剩 keys 那份
+  rows                 : cust_segment_typ='mass'                            ✅
+
+(2) cust_segment_typ NOT in drop_columns
+  preprocessed_ft cols : ['snap_date','cust_id','cust_segment_typ',...]     ← 留著
+  AnalysisException: Reference 'cust_segment_typ' is ambiguous              ❌
+```
+
+## 決定
+
+1. **交集合法**，語意是「帶進 model_input 但不當特徵」。不加禁止交集的 predicate。
+2. **新增 Layer-2 不變量 B7**：`carry_columns ∩ feature_table.columns` 中任何欄若不在
+   `drop_columns` → `DataConsistencyError`。掛在 `validate_data_consistency`，與 B5/B6
+   共用同一次 `feature_table.dtypes` 讀取，**零掃描**。
+3. `drop_columns` **不改名**（它確實刪欄，`drop` 是準確的），也**不清理**裡面的冗餘項。
+
+加 B7 的理由不是多一層保險，是**這條規則目前沒有任何地方寫下來**：`carry_columns` 的
+設定註解只說它給 `training.sample_weights` 用，完全沒提「若這欄也在 feature_table 裡，
+你必須另外去 `drop_columns` 補一筆」。踩中的症狀是一句看不懂的 `Reference 'x' is ambiguous`。
+
+## 為什麼不清那 3 個結構性 no-op 項
+
+`snap_date` / `cust_id` / `label` 被 `_compute_feature_columns` 自己的
+`(identity − categorical) | {label}` 保證排除，列不列都一樣。但
+`dataset.prepare_model_input` 進 `base_dataset_version` 的 hash
+（`core/versioning.py:112-117` 只剝 `ALL_SAMPLING_KEYS` 與 `COVERAGE_ONLY_KEYS`），
+**清理一次＝整批重算**，換到的是零行為改變。留著也不是純粹的雜訊：它讓設定自我說明
+「這些不是特徵」。
+
+`apply_start_date` / `apply_end_date` **不算冗餘**。它們對這份 `feature_table` 沒作用，
+但對另一份部署可能是承重的——「來源表由使用者自定義」是這個框架的前提，設定不該假設
+`feature_table` 的形狀。同理，`_warn_missing_drop_columns` 那個 WARNING 是誠實地說
+「這張表沒有這欄」，不是缺陷的自白。
+
+## split 之間的 schema 不對稱是推導結果，不是疏漏
+
+train / train_dev / calibration 走 `select_keys` 因此帶 carry；val / test 只 select
+identity（`pipelines/dataset/nodes_spark.py:112`、`:171`）。這個不對稱與需求對齊：
+`sample_weights` 只作用於 train/train_dev，per-segment 評估在 evaluation 階段從
+`sample_pool` 取 segment，val/test 不需要 carry。多出來的欄也不會被誤讀——`extract_Xy`
+按 `preprocessor_metadata["feature_columns"]` 切欄（`io/extract.py:352`）。
+
+因此測試斷言的是**推導規則**：
+
+> 每個 split 的 `model_input.columns` == identity ∪ {label} ∪ `feature_columns` ∪
+> (`carry_columns` ∩ 該 split keys 的欄)
+
+不寫死「train 有、val 沒有」——那會把一個推導結果記成巧合，且改 `carry_columns` 就得改測試。
+
+## 這條 ADR 沒有解決的事
+
+- 生產環境的 `feature_table` 是否真的有 `cust_segment_typ`，**無第一手證據**（repo 的
+  `conf/sql/etl/feature/*.sql` 沒有這欄；memory 條目說生產有）。B7 的價值不依賴這個答案，
+  它守的是規則本身。
+- `core/consistency.py` 的 legend 把 B4 標為 unused。本次沿序號往後取 **B7**，不回填 B4，
+  避免未來讀者看到 B4 重新出現而懷疑它被復活。
