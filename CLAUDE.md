@@ -86,6 +86,8 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
 
 供 `mattpocock-skills` 系列（`/to-tickets`／`/triage`／`/implement` 等）讀取的 per-repo 設定；細節在指向的檔案，本段只路由。
 
+**產出路徑（硬規則）**：本系列 skill 的產物只寫進 `docs/adr/`、`docs/agents/`，路徑未指定的長文產出（如 `/research`）寫進 `docs/notes/`。**`docs/superpowers/` 是 superpowers skill 寫死的專屬存檔區（`plans/`／`specs/`），本系列一律不得寫入**——兩套 skill 的命名慣例相反（前者用工具名 namespace、後者用產物類型），混寫會讓目錄名再也對不上內容。
+
 ### Issue tracker
 
 GitHub Issues（`curtis-lu/recsys-demo`），用 `gh` CLI 操作。見 `docs/agents/issue-tracker.md`。
@@ -96,4 +98,4 @@ GitHub Issues（`curtis-lu/recsys-demo`），用 `gh` CLI 操作。見 `docs/age
 
 ### Domain docs
 
-Single-context，**刻意不設 `CONTEXT.md`**——詞彙的真實來源是 `docs/pipelines/dataset.md` §7 與 `core/consistency.py` 的 legend。見 `docs/agents/domain.md`。
+Single-context，**刻意不設 `CONTEXT.md`**——詞彙定義一律在程式碼旁的 docstring（`core/versioning.py`＝版本 ID、`core/consistency.py`＝不變量代號），`docs/` 只做白話解釋。見 `docs/agents/domain.md`。
