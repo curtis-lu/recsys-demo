@@ -277,12 +277,15 @@ def validate_data_consistency(
     un-encoded object-dtype model feature (training OOM at ``_pdf_to_X``). Also
     read off ``feature_table.dtypes`` (no scan) via ``spark_dtype_is_numeric``.
 
-    B7 — a ``dataset.carry_columns`` entry that is also a feature_table column
-    must be listed in ``drop_columns``, or ``build_model_input`` joins two
-    frames that both carry it and Spark raises ``Reference 'x' is ambiguous``.
-    Identity columns and the label are exempt (they cannot collide whatever the
-    config says). Reads the same ``feature_table.dtypes`` mapping as B5/B6 — no
-    extra lookup, no scan (ADR-0004).
+    B7 — a column may be carried or be a model feature, never both. A
+    ``dataset.carry_columns`` entry that is also a feature_table column puts a
+    copy on each side of the ``build_model_input`` join and Spark raises
+    ``Reference 'x' is ambiguous``; either adding it to ``drop_columns`` or
+    removing it from ``carry_columns`` resolves that, and they mean different
+    things, so the error states both rather than picking. Identity columns and
+    the label are exempt (they cannot collide whatever the config says). Reads
+    the same ``feature_table.dtypes`` mapping as B5/B6 — no extra lookup, no
+    scan (ADR-0004).
 
     All errors are collected and raised once so a single fix pass clears them.
     """

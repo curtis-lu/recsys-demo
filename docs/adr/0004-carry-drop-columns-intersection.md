@@ -42,6 +42,9 @@ date: 2026-08-02
    `drop_columns` → `DataConsistencyError`。掛在 `validate_data_consistency`，與 B5/B6
    共用同一次 `feature_table.dtypes` 讀取，**零掃描**。
    （⚠ 這個條件實作時經實跑修正為再扣掉 identity 欄與 label，否則會誤報；見下方補充 (2)。）
+   **B7 是互斥而非義務**：撞到時「加進 `drop_columns`」與「從 `carry_columns` 拿掉」都合法，
+   前者保 carry 棄特徵、後者保特徵棄 carry。閘門不替使用者選——只指名「加進 drop」會讓
+   每個讀到的人默默少一個特徵、還為此重建整批 dataset。錯誤訊息兩條都給。
 3. `drop_columns` **不改名**（它確實刪欄，`drop` 是準確的），也**不清理**裡面的冗餘項。
 
 加 B7 的理由不是多一層保險，是**這條規則目前沒有任何地方寫下來**：`carry_columns` 的
