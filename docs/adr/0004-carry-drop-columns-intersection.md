@@ -17,7 +17,7 @@ date: 2026-08-02
 
 而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 的
 `keep_cols = base_key + [c for c in feature_columns if c in feature_table.columns]`
-（`preprocessing/_spark.py:379-380`），被擋在 `feature_columns` 之外的欄不會進
+（`preprocessing/_spark.py:396-397`），被擋在 `feature_columns` 之外的欄不會進
 `preprocessed_feature_table`。
 
 所以當某欄**同時**存在於 `sample_pool`（要 carry）與 `feature_table` 時，它必須列進
@@ -41,11 +41,52 @@ date: 2026-08-02
 2. **新增 Layer-2 不變量 B7**：`carry_columns ∩ feature_table.columns` 中任何欄若不在
    `drop_columns` → `DataConsistencyError`。掛在 `validate_data_consistency`，與 B5/B6
    共用同一次 `feature_table.dtypes` 讀取，**零掃描**。
+   （⚠ 這個條件實作時經實跑修正為再扣掉 identity 欄與 label，否則會誤報；見下方補充 (2)。）
+   **B7 是互斥而非義務**：撞到時「加進 `drop_columns`」與「從 `carry_columns` 拿掉」都合法，
+   前者保 carry 棄特徵、後者保特徵棄 carry。閘門不替使用者選——只指名「加進 drop」會讓
+   每個讀到的人默默少一個特徵、還為此重建整批 dataset。錯誤訊息兩條都給。
 3. `drop_columns` **不改名**（它確實刪欄，`drop` 是準確的），也**不清理**裡面的冗餘項。
 
 加 B7 的理由不是多一層保險，是**這條規則目前沒有任何地方寫下來**：`carry_columns` 的
 設定註解只說它給 `training.sample_weights` 用，完全沒提「若這欄也在 feature_table 裡，
 你必須另外去 `drop_columns` 補一筆」。踩中的症狀是一句看不懂的 `Reference 'x' is ambiguous`。
+
+### 補充（2026-08-02，實作 B7 時追 code path ＋實跑發現）
+
+**(1) 「症狀是 ambiguous reference」要分兩種情況看。** 那句對**沒有閘門**的世界成立，
+但 B6 已經上線，所以 B7 真正獨佔的是第二格：
+
+| 漏掉 drop 的 carry 欄 | 現況（B7 之前） |
+|---|---|
+| **字串**（如 `cust_segment_typ`） | 它會進 `feature_columns`、是非數值、又沒宣告 categorical → **B6 先擋下**。但 B6 的建議是「宣告成 categorical 或 drop」，選前者的人會保留碰撞、下一步撞 ambiguous |
+| **數值 或 已宣告 categorical** | B6 不適用（數值不觸發／已宣告視為會被編碼）→ 直落 `Reference 'x' is ambiguous` |
+
+第一格 B7 **不是取代 B6 的訊息，是多加一則**：閘門是 collect-all 且串接順序為
+B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它的第一個建議
+（宣告成 categorical）對 carry 欄不適用。由上往下照做的人會先繞一圈。
+若要讓訊息順序符合修法順序，得改閘門的串接次序——那不屬於本 ADR 的決定。
+
+**(2) 決定 2 的 predicate 條件要再扣掉 identity 與 label。** 原文寫
+「`carry_columns ∩ feature_table.columns` 中任何欄若不在 `drop_columns` → raise」，
+實作時發現這個條件**過寬會誤報**。實跑真的 `build_model_input` 兩情境：
+
+```
+(a) carry=[cust_id]（identity 欄，在 feature_table、未列 drop）
+    keys.columns : ['snap_date','cust_id','prod_name']   ← 沒有第二份 cust_id
+    build_model_input: OK，無 ambiguity                    ← 但原條件會 raise ❌
+(b) carry=[cust_segment_typ]（非 identity，同樣未列 drop）
+    keys.columns : [...,'cust_segment_typ']
+    AnalysisException: Reference 'cust_segment_typ' is ambiguous  ✅
+```
+
+原因：`select_keys` 只把**不在 identity key 裡**的 carry 欄另外附加
+（`pipelines/dataset/helpers_spark.py`），base key 又被 join 本身併攏；而 label 與
+非 categorical 的 identity 欄一律被 `_compute_feature_columns` 排除在 `feature_columns`
+之外，與 `drop_columns` 無關。對這些欄報錯，等於要求使用者做一次
+**零行為改變、卻會 bust `base_dataset_version` 的設定修改**——正是本 ADR 前面反對的那種代價。
+
+因此實際實作的條件是：`(carry_columns ∩ feature_table.columns) − identity_columns − {label}`
+中任何欄若不在 `drop_columns` → raise。
 
 ## 為什麼不清那 3 個結構性 no-op 項
 

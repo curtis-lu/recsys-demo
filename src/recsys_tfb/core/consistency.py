@@ -140,7 +140,7 @@ Layer 1 — config-static (implemented here; aggregated by
   whose month legitimately need not be a test month — wiring it there would
   block valid monitoring runs. Wired like A13.
 
-Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
+Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -166,6 +166,28 @@ Layer 2 — data-stage validation (B1 + B5 + B6 implemented and wired):
   dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
   in) and a training-read backstop in ``io/extract.py`` (fails fast on an
   already-built parquet, before the expensive pandas read). B4 is unused.
+* B7 — a column cannot be both carried and a model feature. When one is named in
+  ``dataset.carry_columns`` and also exists in feature_table, the keys frame and
+  the preprocessed feature frame each bring a copy into the
+  ``build_model_input`` join and Spark raises ``Reference 'x' is ambiguous``.
+  Two resolutions are valid and they are not interchangeable: adding it to
+  ``dataset.prepare_model_input.drop_columns`` keeps the carry and gives up the
+  feature, while removing it from ``dataset.carry_columns`` keeps the feature
+  and forces any sample-weight key to come from elsewhere. Only the config
+  author knows which the column is for, so the gate reports the collision
+  instead of prescribing one fix — naming only the drop would steer every
+  reader into silently losing a feature and rebuilding the dataset for it. The
+  rule is stated nowhere in the config, and B6 does not cover it (B6 only fires
+  on non-numeric undeclared feature columns). Identity columns and the label are
+  exempt — they cannot
+  collide however they are configured, so flagging them would force a
+  version-busting config edit that changes nothing. Predicate:
+  ``carry_column_collision_errors`` (pure, no Spark); wired via
+  ``validate_data_consistency`` alongside B1/B5/B6, reusing the same
+  ``feature_table.dtypes`` read (metastore metadata — no scan).
+  Numbering continues past the unused B4 rather than backfilling it, so a
+  future reader never sees B4 reappear and wonders whether it was revived.
+  See ADR-0004.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -1000,6 +1022,95 @@ def nonnumeric_feature_errors(
                 f"integer-encoded); if it is not a model feature, add it to "
                 f"dataset.prepare_model_input.drop_columns."
             )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# B7 — a carry column that also lives in feature_table must be dropped
+# ---------------------------------------------------------------------------
+
+
+def carry_column_collision_errors(
+    carry_columns: list[str],
+    feature_table_columns: set[str] | list[str],
+    drop_columns: list[str],
+    identity_columns: list[str],
+    label_column: str,
+) -> list[str]:
+    """B7 invariant — the single definition.
+
+    ``dataset.carry_columns`` names columns ``select_keys`` pulls out of
+    **sample_pool** on top of the identity key; ``prepare_model_input.
+    drop_columns`` is a blacklist over **feature_table** columns. They act on
+    different tables, so listing one name in both is not a contradiction — but
+    a column that is carried *and* exists in feature_table ends up on both sides
+    of the ``build_model_input`` join, and Spark fails with an opaque
+    ``Reference 'x' is ambiguous``.
+
+    The invariant is therefore an **exclusion, not an obligation**: a column may
+    be carried or may be a model feature, never both. Two edits satisfy it and
+    they mean different things —
+
+    - add it to ``drop_columns``: still carried, no longer a feature;
+    - remove it from ``carry_columns``: still a feature, and whatever
+      sample-weight key needed it must come from another column.
+
+    Which one is right depends on what the column is *for*, which this predicate
+    cannot know, so the error states both. Prescribing only the drop (the way
+    this rule was first written) would push every reader into quietly dropping a
+    model feature and rebuilding the dataset to do it. The rule is written
+    nowhere in the config, which is why it is a gate. See ADR-0004.
+
+    Not covered by B6: B6 only fires on a *non-numeric* undeclared feature
+    column, so a numeric carry column (or one declared categorical) sails past
+    it and hits the ambiguous-reference crash instead. Where B6 does happen to
+    fire on the same column its advice is actively misleading — it offers
+    "declare it categorical" as a fix, which keeps the collision.
+
+    ``identity_columns`` and ``label_column`` are excluded because they cannot
+    collide however they are configured, so flagging them would demand a
+    config edit that changes nothing while busting ``base_dataset_version``:
+
+    - an identity column named in ``carry_columns`` is *not* copied a second
+      time — ``select_keys`` only appends carry entries that are not already in
+      the identity key (``pipelines/dataset/helpers_spark.py``), and the base
+      key is coalesced by the join itself.
+    - the label and non-categorical identity columns are excluded from
+      ``feature_columns`` by ``_compute_feature_columns`` regardless of
+      ``drop_columns``, so they never reach the feature side of the join.
+
+    Verified by running the real ``build_model_input`` both ways: with an
+    identity column carried and undropped it completes normally, with a
+    non-identity one it raises ``Reference 'cust_segment_typ' is ambiguous``.
+
+    ``feature_table_columns`` is any container of feature_table's column names
+    (the gate hands in the keys of the ``feature_table.dtypes`` mapping it has
+    already read — metastore metadata, no scan). Pure (no Spark). Returns
+    collect-all error strings sorted by column; empty list means OK.
+    """
+    dropped = set(drop_columns)
+    in_feature_table = set(feature_table_columns)
+    cannot_collide = set(identity_columns) | {label_column}
+    errors: list[str] = []
+    for col in sorted((set(carry_columns) & in_feature_table) - cannot_collide):
+        if col in dropped:
+            continue
+        errors.append(
+            f"column {col!r} is in dataset.carry_columns and is also a column of "
+            f"feature_table, so build_model_input would join two frames that "
+            f"both carry {col!r} and Spark fails with "
+            f"\"Reference '{col}' is ambiguous\". A column can be carried or be "
+            f"a model feature, not both — pick one, in parameters_dataset.yaml: "
+            f"(a) if {col!r} is metadata you weight by, add it to "
+            f"dataset.prepare_model_input.drop_columns and keep it in "
+            f"dataset.carry_columns — appearing in both keys is then the "
+            f"intended configuration, not a contradiction; "
+            f"(b) if {col!r} is a model feature, remove it from "
+            f"dataset.carry_columns and source any sample-weight key that needed "
+            f"it from another column. Choosing (a) for a column you actually "
+            f"wanted as a feature silently drops it from the model and rebuilds "
+            f"the dataset, so check which one {col!r} is before editing."
+        )
     return errors
 
 

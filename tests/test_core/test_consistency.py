@@ -1061,6 +1061,92 @@ class TestNonnumericFeatureErrors:
         assert "aaa" in errs[0] and "zzz" in errs[1]
 
 
+# --- B7: a carry column that also lives in feature_table must be dropped ---
+
+from recsys_tfb.core.consistency import carry_column_collision_errors
+
+
+class TestCarryColumnCollisionErrors:
+    FT = {"snap_date", "cust_id", "cust_segment_typ", "total_aum", "label"}
+    IDENTITY = ["snap_date", "cust_id", "prod_name"]
+
+    def _errors(self, carry, drop):
+        return carry_column_collision_errors(
+            carry, self.FT, drop, self.IDENTITY, "label"
+        )
+
+    def test_carry_column_in_feature_table_and_not_dropped_is_flagged(self):
+        errs = self._errors(["cust_segment_typ"], ["snap_date", "cust_id", "label"])
+        assert len(errs) == 1
+        assert "cust_segment_typ" in errs[0]
+        # The message has to name both keys: which one the column is in today,
+        # and which one it is missing from.
+        assert "carry_columns" in errs[0]
+        assert "drop_columns" in errs[0]
+
+    def test_carry_column_in_feature_table_and_dropped_is_ok(self):
+        # The intentional pairing ADR-0004 documents: listed in both keys.
+        assert self._errors(["cust_segment_typ"], ["cust_segment_typ"]) == []
+
+    def test_carry_column_absent_from_feature_table_is_ok(self):
+        # Nothing to be ambiguous with, so drop_columns is irrelevant here —
+        # this is the common case (carry columns usually live only in
+        # sample_pool) and must not be flagged.
+        assert self._errors(["marketing_flag"], []) == []
+
+    def test_no_carry_columns_is_ok(self):
+        assert self._errors([], []) == []
+
+    def test_empty_feature_table_is_ok(self):
+        assert carry_column_collision_errors(
+            ["cust_segment_typ"], set(), [], self.IDENTITY, "label"
+        ) == []
+
+    def test_multiple_offenders_sorted_by_column(self):
+        errs = self._errors(["total_aum", "cust_segment_typ"], [])
+        assert len(errs) == 2
+        assert "cust_segment_typ" in errs[0]
+        assert "total_aum" in errs[1]
+
+    def test_only_the_undropped_offender_is_flagged(self):
+        errs = self._errors(["total_aum", "cust_segment_typ"], ["cust_segment_typ"])
+        assert len(errs) == 1
+        assert "total_aum" in errs[0]
+        assert "cust_segment_typ" not in errs[0]
+
+    def test_feature_table_columns_accepts_a_list(self):
+        # The gate passes whatever it already has in hand (a dict's keys / a
+        # list of column names); membership must not depend on the container.
+        errs = carry_column_collision_errors(
+            ["cust_segment_typ"], sorted(self.FT), [], self.IDENTITY, "label"
+        )
+        assert len(errs) == 1
+
+    # --- exemptions: columns that cannot collide however they are configured ---
+    #
+    # Both are undropped feature_table columns named in carry_columns, i.e. they
+    # satisfy the naive rule and would be flagged without the exemption. Running
+    # the real build_model_input with an identity column configured this way
+    # completes normally, so a flag here would demand a config edit that changes
+    # nothing while busting base_dataset_version.
+
+    def test_identity_column_in_carry_is_exempt(self):
+        # select_keys appends only carry entries that are not already in the
+        # identity key, so no second copy exists to be ambiguous with.
+        assert self._errors(["cust_id"], []) == []
+
+    def test_label_column_in_carry_is_exempt(self):
+        # _compute_feature_columns excludes the label from feature_columns
+        # whatever drop_columns says, so it never reaches the feature side.
+        assert self._errors(["label"], []) == []
+
+    def test_exemption_does_not_mask_a_real_collision_in_the_same_config(self):
+        # The exemption is per-column, not a whole-config escape hatch.
+        errs = self._errors(["cust_id", "label", "cust_segment_typ"], [])
+        assert len(errs) == 1
+        assert "cust_segment_typ" in errs[0]
+
+
 # --- A21: --rebuild-dates must be a subset of dataset.test_snap_dates ---
 
 import datetime as _dt
