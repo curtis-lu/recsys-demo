@@ -892,6 +892,19 @@ def _incremental_params(parameters, existing=None, rebuild=None):
     return params
 
 
+def _key_rows_in(keys, months):
+    """Rows of ``keys`` inside ``months``.
+
+    The row count build_test_model_input owes for those months — its output
+    grain is its (filtered) keys' grain just like build_model_input's, so this
+    is the D9 identity for the incremental branch. date_format normalises the
+    timestamp and Hive-string forms of snap_date alike.
+    """
+    return keys.filter(
+        F.date_format(F.col("snap_date"), "yyyy-MM-dd").isin(list(months))
+    ).count()
+
+
 def _months(df):
     # snap_date is a timestamp when built from pandas, a string when it came
     # back through a Hive partition column — normalise both.
@@ -957,6 +970,7 @@ class TestBuildTestModelInputIncremental:
             all_month_keys, encoded, label_table, preprocessor, params,
         )
         assert _months(result) == ["2024-05-31"]
+        assert result.count() == _key_rows_in(all_month_keys, ["2024-05-31"])
 
     def test_rebuild_reprocesses_a_landed_month(
         self, feature_table, label_table, parameters
@@ -976,6 +990,7 @@ class TestBuildTestModelInputIncremental:
             all_month_keys, encoded, label_table, preprocessor, params,
         )
         assert _months(result) == ["2024-05-31"]
+        assert result.count() == _key_rows_in(all_month_keys, ["2024-05-31"])
 
 
 class TestFilterTestModelInputIncremental:
@@ -1087,6 +1102,7 @@ class TestIncrementalFilterHandlesHiveStringDates:
         )
         assert result.count() > 0, "string-typed snap_date silently matched nothing"
         assert _months(result) == ["2024-05-31"]
+        assert result.count() == _key_rows_in(string_dated_keys, ["2024-05-31"])
 
     def test_filter_node_also_handles_string_snap_date(
         self, spark, feature_table, label_table, string_dated_keys, parameters
