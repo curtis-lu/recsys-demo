@@ -61,7 +61,8 @@ def split_train_keys(
     """Split sampled keys into train and train-dev by cust_id ratio.
 
     All rows for a given cust_id are assigned to the same split.
-    No .count() action triggered for logging.
+    Logging still triggers no action; the empty-dev guard below does — one
+    ``isEmpty`` always, plus one ``count`` on the failing path only.
     """
     schema = get_schema(parameters)
     entity_cols = schema["entity"]
@@ -84,6 +85,36 @@ def split_train_keys(
 
     train_keys = sample_keys.join(train_custs, on=cust_col, how="inner")
     train_dev_keys = sample_keys.join(dev_custs, on=cust_col, how="inner")
+
+    # An empty train_dev is invisible downstream: it is the early-stopping
+    # validation set for every HPO trial (training/nodes.py passes
+    # train_dev_lgb_handle as val_dataset), so an empty one means each trial
+    # silently runs its full round budget with early stopping never firing —
+    # no error, no warning, just worse models and a longer search. Costs one
+    # Spark action; see ADR-0005 for the fallback if that ever matters at scale.
+    # `!= 0`, not `> 0`: a negative ratio makes ratio_to_threshold return a
+    # negative threshold, so `_bucket < threshold` is empty and
+    # `_bucket >= threshold` takes everything — the same silent state, reached
+    # by one stray minus sign. Only an exact 0 means "no dev split wanted".
+    if train_dev_ratio != 0 and train_dev_keys.isEmpty():
+        n_entities = cust_df.count()
+        if n_entities == 0:
+            raise ValueError(
+                f"split_train_keys received no sampled keys at all "
+                f"(train_dev_ratio={train_dev_ratio}), so train and train-dev "
+                f"are both empty. The cause is upstream of the split — check "
+                f"dataset.sample_ratio, dataset.train_snap_dates, and any "
+                f"partition filter applied when sample_keys was read back."
+            )
+        raise ValueError(
+            f"split_train_keys produced an empty train-dev split: "
+            f"train_dev_ratio={train_dev_ratio} applied to "
+            f"{n_entities} distinct {cust_col} value(s) puts every entity "
+            f"on the train side. train_dev is the early-stopping validation set "
+            f"for every HPO trial, so an empty one disables early stopping "
+            f"without raising. Raise dataset.train_dev_ratio, or widen the "
+            f"sample (dataset.sample_ratio / train_snap_dates)."
+        )
 
     logger.info(
         "Split train keys (ratio=%.2f)",

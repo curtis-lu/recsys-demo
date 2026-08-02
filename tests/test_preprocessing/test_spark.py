@@ -128,6 +128,7 @@ def test_cast_mixed_decimal_and_double(spark):
 
 
 import pandas as pd
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.preprocessing._spark import build_model_input
 
 
@@ -231,20 +232,53 @@ class TestBuildModelInputCarry:
         if with_carry:
             kcols["cust_segment_typ"] = ["mass", "hnw"]
         keys = spark.createDataFrame(pd.DataFrame(kcols))
+        # apply_start_date is here to be *dropped*: it is not identity, not a
+        # feature, not the label, and not in keys, so the output rule excludes
+        # it. Without such a column the expected set degenerates into "the union
+        # of every input column" — which is what `dataset` already is, so the
+        # equality below could not tell a correct selection apart from no
+        # selection at all. (label_table really does carry these; see the
+        # label_table fixture in test_nodes_spark.py.)
         labels = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
-            "cust_id": [1, 2], "prod_name": ["a", "b"], "label": [1, 0]}))
+            "cust_id": [1, 2], "prod_name": ["a", "b"], "label": [1, 0],
+            "apply_start_date": pd.to_datetime(["2025-02-01"] * 2)}))
         feats = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
             "cust_id": [1, 2], "f1": [0.1, 0.2]}))
         return keys, feats, labels
 
+    def _expected_columns(self, keys):
+        """identity ∪ {label} ∪ feature_columns ∪ whatever the keys carried in.
+
+        Asserted as an equality rather than ``in`` / ``not in`` so an extra
+        column — a join column leaking through, a carry column that should have
+        been filtered out — fails too. Only has that power because the label
+        frame carries a column the rule must drop; see ``_frames``.
+
+        Takes ``feature_columns`` from the preprocessor, so it checks that
+        build_model_input honours the metadata it was handed — NOT that the
+        metadata itself is right. Whether _compute_feature_columns picked the
+        correct columns is a separate contract with its own tests.
+        """
+        schema = get_schema(self._params())
+        return (
+            set(schema["identity_columns"])
+            | {schema["label"]}
+            | set(self._prep()["feature_columns"])
+            | set(keys.columns)
+        )
+
     def test_carry_in_output_when_present_in_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=True)
         out = build_model_input(keys, feats, labels, self._prep(), self._params())
         assert "cust_segment_typ" in out.columns
+        assert set(out.columns) == self._expected_columns(keys)
+        assert out.count() == keys.count()
 
     def test_no_carry_when_absent_from_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=False)
         out = build_model_input(keys, feats, labels, self._prep(), self._params())
         assert "cust_segment_typ" not in out.columns
+        assert set(out.columns) == self._expected_columns(keys)
+        assert out.count() == keys.count()

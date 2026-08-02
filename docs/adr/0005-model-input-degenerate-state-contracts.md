@@ -11,19 +11,27 @@ date: 2026-08-02
 
 ## 一、keys 不含 item → fail-loud
 
-`preprocessing/_spark.py:476` 的三元式在 keys 缺 item 時退回只用 `base_key` join label，
+`preprocessing/_spark.py` 的三元式在 keys 缺 item 時退回只用 `base_key` join label，
 於是每個 `(time, entity)` 被 label_table 的產品數乘開，`item` 的值從 label_table 帶進來。
 
 生產不可能發生：`identity_columns` 是推導欄位（`core/schema.py:55`，恆為
-`[time] + entity + [item]`），使用者無法讓它不含 item；五個呼叫點餵的全是 identity
-（`pipelines/dataset/pipeline.py:72/81/90/137`、`pipelines/dataset/nodes_spark.py:200`）。
+`[time] + entity + [item]`），使用者無法讓它不含 item。`_build_model_input` 有兩個直接
+呼叫者（`pipelines/dataset/nodes_spark.py` 的 `build_model_input` 與 `build_test_model_input`
+兩個 wrapper），這兩個 wrapper 合計註冊成五個 pipeline 節點
+（`pipelines/dataset/pipeline.py` 的 train / train_dev / val / test / calibration，
+最後一個只在 `enable_calibration` 時註冊），五個餵進去的 keys 全是 identity。
 `preprocessing/__init__.py` 不 export 任何東西，`_spark` 是私有模組，也沒有「外部 API 彈性」
 需要保留。
 
 而它的失效模式是**靜默列膨脹 ×N_products**。
 
-→ 移除三元式，改 `_validate_columns(keys.columns, base_key + [item_col], "build_model_input")`。
+→ 移除三元式，改 `_validate_columns(keys.columns, base_key + [item_col], ...)`。
 這讓「**keys 的 grain 就是 model_input 的 grain**」成為可依賴的不變量。
+
+實作時的一處出入（2026-08-02，#141）：context 字串用 `"build_model_input keys"` 而非
+`"build_model_input"`。同一個函式稍後還有一次 `_validate_columns(dataset.columns, ...)`，
+兩者若共用 context，測試的 `pytest.raises(match=...)` 會被另一條規則的訊息滿足——那正是
+#140 列為禁止的假綠形式之一。
 
 ## 二、`train_dev_ratio > 0` 但切出來的 dev 為空 → raise
 
@@ -32,7 +40,21 @@ date: 2026-08-02
 `early_stopping_rounds` 預設 50，`:559`）。空的 dev ＝ early stopping 沒有訊號、每個 trial
 跑滿輪數，而且不會有任何錯誤訊息。
 
-→ `split_train_keys` 在 `train_dev_ratio > 0` 且 dev 為空時 raise。
+→ `split_train_keys` 在「設定要了 dev」且 dev 為空時 raise。
+
+實作時的兩處出入（2026-08-02，#141）：
+
+- 條件寫成 `train_dev_ratio != 0`，不是本節標題的 `> 0`。負值會讓 `ratio_to_threshold`
+  算出負的門檻，於是 `bucket < threshold` 恆空、`bucket >= threshold` 收全部——夠不到
+  `> 0` 的守衛，卻正是本節要殺掉的那個無聲狀態。`0` 仍是合法設定（不做 HPO），照樣放行。
+- 這個判斷留在 `split_train_keys` 內部，沒有照 CLAUDE.md 的通則搬進 `core/consistency.py`。
+  理由：A/B 系列不變量都在兩個既定閘門（Layer-1 CLI entry、Layer-2 dataset 首節點）求值，
+  而這一條要看的是**抽樣之後**的 keys，兩個閘門都拿不到。同檔 `fit_preprocessor_metadata`
+  對缺 snap_date 的 raise 是同一種形狀（node 後置條件，非一致性不變量），有前例可循。
+
+**還沒關掉的鏡像缺口**：`train_dev_ratio > 1` 會讓 dev 收全部、**train** 靜默變空。
+本輪不處理（#141 的範圍只到 dev），但它跟本節的失效模式對稱，值得一併收進
+`train_dev_ratio` 的值域驗證——目前 `core/consistency.py` 對這個鍵零命中。
 
 ## 三、feature join miss → 合法契約，維持 LEFT
 
