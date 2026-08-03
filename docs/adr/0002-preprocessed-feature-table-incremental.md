@@ -18,6 +18,8 @@ dataset pipeline 原本把「config 列出的全部 snap_date」整批重算一�
 
 差集邏輯集中在 `pipelines/dataset/nodes_shared.py` 的單一 helper（`collect_dataset_snap_dates` 的鄰居），由 test 分支的四個 node 共同使用：`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input`、`filter_test_model_input`。散在各 node 會讓「這次跳過了什麼」長出四種格式，也讓逃生口要穿過四個簽章。
 
+> **本段的實作位置已過時（2026-08-03）**：差集邏輯（`plan_incremental_snap_dates`）與上述取捨不變，但**套用**方式改了——計畫由 CLI 算一次、以具名 dataset 進 catalog，節點把它當一般 input 收下，而不是各自從 `parameters` 重算；`filter_test_model_input` 的防禦性過濾已刪除（它守的情境進不來）。現行實作與理由見 [ADR-0007](0007-month-plans-travel-through-the-catalog.md)。
+
 ## 考慮過但否決的選項
 
 **只在 `apply_preprocessor_to_features` 做差集。** 改動最小，但下游三個 node 仍按完整 `test_snap_dates` 重算 ── 結果冪等、正確，只是白做。代價是**加第 N 個月的成本 ∝ N 而非 ∝ 1**：累積到 12 個月時，每加一個月要重算 12 個月的 keys 與 model_input。而 `select_test_keys` 是 full population、沒有抽樣（`pipelines/dataset/nodes_spark.py:127-130`），這條鏈不便宜。半套的增量會在幾個月後被迫重做。

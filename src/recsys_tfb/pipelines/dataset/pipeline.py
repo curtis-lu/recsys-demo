@@ -10,7 +10,6 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         build_model_input,
         build_test_model_input,
         filter_groups_with_positives,
-        filter_test_model_input,
         fit_preprocessor_metadata,
         select_calibration_keys,
         select_test_keys,
@@ -48,9 +47,14 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=["sample_pool", "parameters"],
             outputs="val_keys",
         ),
+        # A `*_month_plan` input marks an incremental node: it processes only
+        # the months in that plan (ADR-0002/0007). The plans are built once by
+        # the caller and injected into the catalog, so nodes that share an
+        # artifact cannot disagree about which months this run covers — and the
+        # nodes that have no plan are exactly the ones that rebuild in full.
         Node(
             select_test_keys,
-            inputs=["sample_pool", "parameters"],
+            inputs=["sample_pool", "test_keys_month_plan", "parameters"],
             outputs="test_keys",
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
@@ -63,7 +67,10 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         # --- Encode non-identity categoricals once; all splits reuse this ---
         Node(
             apply_preprocessor_to_features,
-            inputs=["feature_table", "preprocessor", "parameters"],
+            inputs=[
+                "feature_table", "preprocessor",
+                "preprocessed_feature_table_month_plan", "parameters",
+            ],
             outputs="preprocessed_feature_table",
             name="apply_preprocessor_to_features",
         ),
@@ -95,14 +102,15 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             outputs="val_model_input_unfiltered",
             name="build_val_model_input",
         ),
-        # test uses its own wrapper: the four test-branch nodes are incremental
-        # (only months that have not landed yet), which train/val/calibration
-        # are not. See ADR-0002.
+        # test uses its own wrapper: `test_keys` is a persistent Hive table
+        # holding every month, so reading it back has to be re-scoped to this
+        # run's months. train/val/calibration read keys written by this run and
+        # need no such wrapper.
         Node(
             build_test_model_input,
             inputs=[
                 "test_keys", "preprocessed_feature_table", "label_table",
-                "preprocessor", "parameters",
+                "preprocessor", "test_model_input_month_plan", "parameters",
             ],
             outputs="test_model_input_unfiltered",
             name="build_test_model_input",
@@ -118,8 +126,11 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             outputs="val_model_input",
             name="filter_val_model_input",
         ),
+        # No month plan here: its input is produced by build_test_model_input,
+        # which is already scoped. Re-filtering would only re-state the line
+        # above. See ADR-0007 for the slicing scenario that was considered.
         Node(
-            filter_test_model_input,
+            filter_groups_with_positives,
             inputs=["test_model_input_unfiltered", "parameters"],
             outputs="test_model_input",
             name="filter_test_model_input",

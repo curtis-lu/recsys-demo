@@ -174,6 +174,9 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.models.base import ModelAdapter
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
+        from recsys_tfb.pipelines.dataset.month_plans import (
+            build_month_plans, month_plan_input,
+        )
 
         # -- Synthetic source tables --
         # Use ≥20 customers so that hash-based train/train_dev split (ratio=0.2)
@@ -276,6 +279,11 @@ class TestTrainingPipelineE2E:
         catalog.add("label_table", MemoryDataset(label_table_sdf))
         catalog.add("sample_pool", MemoryDataset(sample_pool_sdf))
         catalog.add("parameters", MemoryDataset(parameters))
+        # Driving the dataset pipeline outside the CLI: nothing has landed, so
+        # every configured month is processed. Omitting this does not silently
+        # rebuild everything — the runner refuses to start (ADR-0007).
+        for _name, _plan in build_month_plans(parameters).items():
+            catalog.add(month_plan_input(_name), MemoryDataset(_plan))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",

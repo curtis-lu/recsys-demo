@@ -329,11 +329,11 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | 資料閘 | `validate_data_consistency` | 三張來源表、parameters | 檢查 item coverage 與 categorical feature 型別，收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys`、`train_dev_keys` |
-| Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool` | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理尚未落地的月份 | `val_keys`、`test_keys` |
+| Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
 | Calibration keys | `select_calibration_keys` | `sample_pool` | 依 calibration 日期與比例抽樣 | `calibration_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
-| 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor` | 編碼 feature categoricals；只處理尚未落地的月份 | `preprocessed_feature_table` |
-| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor | left join label 與 feature，補齊缺失 label，選取欄位並轉 float32 | 各 split 的 model input |
+| 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
+| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並轉 float32 | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
 
 model input 的組裝規則：
@@ -363,11 +363,19 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 ### 5.1 test 分支是增量的
 
-`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input`、`filter_test_model_input` 四個 node 只處理**尚未落地**的月份：差集由 metastore 的 partition 清單（零掃描）得出，四者共用 `nodes_shared.plan_incremental_snap_dates` 這一個純函式，沒有任何一處自行計算。train／train-dev／val／calibration **不是**增量的，每次都整批重算。
+`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input` 三個 node 只處理**尚未落地**的月份。train／train-dev／val／calibration **不是**增量的，每次都整批重算。
+
+怎麼看出誰是增量的：**pipeline 定義上有 `*_month_plan` input 的就是**。CLI 在任何 Spark 工作開始之前列一次 metastore partition（零掃描）、算出三份計畫（`month_plans.build_month_plans`），以 `<產物名>_month_plan` 這三個名字放進 catalog；節點把它當一般 input 收下。所以：
+
+- 「這次處理／跳過哪些月」在 pipeline 開跑前就以三行 `[months]` log 印出來，範圍設錯可以在花掉時間之前發現；
+- 忘記提供計畫不會靜默全量重建——runner 在第一個節點執行前就 raise；
+- 每張表吃自己那份計畫（`test_keys` 已寫、`test_model_input` 還沒，是正常狀態）。
+
+`test_model_input` 的過濾節點（`filter_test_model_input`）**沒有**月份範圍檢查，跟 val 用同一個節點函式：它的上游已經 scoped 過了。
 
 之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows 與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
 
-代價、`--rebuild-dates` 逃生口與完整理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)。
+代價、`--rebuild-dates` 逃生口與完整理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)；計畫為什麼走 catalog 而不是 `parameters`，以及過濾節點為什麼沒有防禦性檢查，見 [ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)。
 
 ## 6. 產物與驗收
 

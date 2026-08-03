@@ -6,6 +6,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset.month_plans import build_month_plans
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     apply_preprocessor_to_features,
     build_model_input,
@@ -42,6 +43,19 @@ _SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-
 # feature columns); they exist so the frames look like the real tables.
 _SEGMENTS = ["mass", "affluent", "hnw"]
 _CHANNELS = ["digital", "branch", "both"]
+
+
+# The month plan an incremental node would receive from the CLI. Omitting
+# ``existing`` means "nothing has landed", i.e. process every configured month —
+# what every test outside the incremental block below is asserting against.
+def _encode_plan(parameters, existing=None):
+    return build_month_plans(parameters, existing=existing)[
+        "preprocessed_feature_table"
+    ]
+
+
+def _test_keys_plan(parameters, existing=None):
+    return build_month_plans(parameters, existing=existing)["test_keys"]
 
 
 def _entity_index(cid: str) -> int:
@@ -409,7 +423,7 @@ class TestSelectValKeys:
 
 class TestSelectTestKeys:
     def test_full_population(self, sample_pool, parameters):
-        result = select_test_keys(sample_pool, parameters)
+        result = select_test_keys(sample_pool, _test_keys_plan(parameters), parameters)
         assert result.count() == _expected_key_count(parameters, "test")
         assert sorted(result.columns) == _identity_columns(parameters)
 
@@ -422,7 +436,9 @@ class TestBuildModelInput:
     def _pft(self, feature_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
         return train_keys, preprocessor, pft
 
     def test_joins_with_product_keys(
@@ -489,12 +505,14 @@ class TestFitAndBuild:
         base-key-join branch that ADR-0005 removed.
         """
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
 
         splits = {
             "train": self._train_keys(sample_pool, parameters),
             "val": select_val_keys(sample_pool, parameters),
-            "test": select_test_keys(sample_pool, parameters),
+            "test": select_test_keys(sample_pool, _test_keys_plan(parameters), parameters),
         }
         for split, keys in splits.items():
             mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
@@ -510,7 +528,9 @@ class TestFitAndBuild:
     ):
         train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
 
         forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
@@ -528,7 +548,9 @@ class TestFitAndBuild:
         """prod_name is an identity column — encoding is deferred to training."""
         train_keys = self._train_keys(sample_pool, parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
         train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
         train_pdf = train_mi.toPandas()
 
@@ -619,7 +641,9 @@ class TestApplyPreprocessorFilter:
         ft_with_midweek = feature_table.unionByName(spark.createDataFrame(midweek_pdf))
 
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        result = apply_preprocessor_to_features(ft_with_midweek, preprocessor, parameters)
+        result = apply_preprocessor_to_features(
+            ft_with_midweek, preprocessor, _encode_plan(parameters), parameters,
+        )
         result_dates = {
             row.snap_date for row in result.select("snap_date").distinct().collect()
         }
@@ -634,7 +658,9 @@ class TestApplyPreprocessorFilter:
 
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         with pytest.raises(ValueError, match="missing required snap_dates"):
-            apply_preprocessor_to_features(ft_short, preprocessor, parameters)
+            apply_preprocessor_to_features(
+                ft_short, preprocessor, _encode_plan(parameters), parameters,
+            )
 
 
 class TestFitApplyFilterScopes:
@@ -643,7 +669,9 @@ class TestFitApplyFilterScopes:
     ):
         """Test B: fit sees train; apply sees train ∪ cal ∪ val ∪ test."""
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
-        result = apply_preprocessor_to_features(feature_table, preprocessor, parameters)
+        result = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
 
         result_dates = {
             row.snap_date for row in result.select("snap_date").distinct().collect()
@@ -697,7 +725,9 @@ def test_build_model_input_casts_float_features_to_float32(
     feature_table_decimal = spark.createDataFrame(rows, schema=schema)
 
     preprocessor, _ = fit_preprocessor_metadata(feature_table_decimal, parameters)
-    pft = apply_preprocessor_to_features(feature_table_decimal, preprocessor, parameters)
+    pft = apply_preprocessor_to_features(
+        feature_table_decimal, preprocessor, _encode_plan(parameters), parameters,
+    )
 
     # Build train keys directly (cust × prod × train_snap_dates) — independent of
     # sample_pool fixture; the test is about dtype, not sampling.
@@ -958,7 +988,9 @@ class TestApplyPreprocessorUnknownWarning:
         }
 
         with caplog.at_level(logging.WARNING):
-            result = apply_preprocessor_to_features(ft, preprocessor, parameters)
+            result = apply_preprocessor_to_features(
+                ft, preprocessor, _encode_plan(parameters), parameters,
+            )
             pdf = result.orderBy("cust_id").toPandas()
 
         # digital->0, branch->1, unseen_channel->-1
@@ -1133,23 +1165,20 @@ class TestValidateDataConsistencyCollectAll:
         assert "rogue_str" in msg
 
 
-# --- ADR-0002: the test branch only processes months that have not landed ---
+# --- ADR-0002 / ADR-0007: the test branch processes only the months it is
+# handed. The plan arrives as a node argument, so a test states the months
+# directly instead of assembling the CLI's partition listing; which listing
+# produces which plan is asserted without Spark in test_month_plans.py. ---
 
-from recsys_tfb.pipelines.dataset.nodes_shared import (
-    EXISTING_SNAP_DATES_KEY,
-    REBUILD_SNAP_DATES_KEY,
-)
-from recsys_tfb.pipelines.dataset.nodes_spark import (
-    build_test_model_input,
-    filter_test_model_input,
-)
+from recsys_tfb.pipelines.dataset.nodes_shared import SnapDatePlan
+from recsys_tfb.pipelines.dataset.nodes_spark import build_test_model_input
 
 _TEST_MONTHS = _SNAP_DATES[3:5]
 
 
-def _incremental_params(parameters, existing=None, rebuild=None):
-    """parameters with two test months and an injected partition listing."""
-    params = {
+def _incremental_params(parameters):
+    """parameters whose test split is the last two fixture months."""
+    return {
         **parameters,
         "dataset": {
             **parameters["dataset"],
@@ -1157,11 +1186,23 @@ def _incremental_params(parameters, existing=None, rebuild=None):
             "test_snap_dates": list(_TEST_MONTHS),
         },
     }
-    if existing is not None:
-        params[EXISTING_SNAP_DATES_KEY] = existing
-    if rebuild is not None:
-        params[REBUILD_SNAP_DATES_KEY] = rebuild
-    return params
+
+
+def _plan(*to_process) -> SnapDatePlan:
+    """A month plan for ``to_process``; everything else in the fixture skipped.
+
+    ``skipped`` is filled in for realism only — no node reads it, and no
+    assertion below depends on it. What every assertion does depend on is that
+    the fixtures hold months this plan leaves out (see
+    ``test_fixtures_hold_months_outside_a_partial_plan``): without that, "the
+    node filtered to the plan" and "the fixture had nothing else" are the same
+    observation and the whole block is vacuously green.
+    """
+    keep = [pd.Timestamp(d) for d in to_process]
+    return SnapDatePlan(
+        to_process=keep,
+        skipped=[pd.Timestamp(d) for d in _SNAP_DATES if pd.Timestamp(d) not in keep],
+    )
 
 
 def _count_key_rows_in(keys, months):
@@ -1186,169 +1227,111 @@ def _months(df):
     )
 
 
-class TestSelectTestKeysIncremental:
-    def test_processes_only_the_month_that_has_not_landed(self, label_table, parameters):
-        params = _incremental_params(
-            parameters, existing={"test_keys": ["2024-04-30"]},
-        )
-        assert _months(select_test_keys(label_table, params)) == ["2024-05-31"]
+def test_fixtures_hold_months_outside_a_partial_plan(label_table, feature_table):
+    """The precondition every scoping assertion in this block rests on."""
+    partial = {str(d.date()) for d in _plan("2024-05-31").to_process}
+    assert set(_months(label_table)) - partial
+    assert set(_months(feature_table)) - partial
 
-    def test_all_months_landed_yields_nothing(self, label_table, parameters):
-        params = _incremental_params(
-            parameters, existing={"test_keys": list(_TEST_MONTHS)},
-        )
-        assert select_test_keys(label_table, params).count() == 0
 
-    def test_rebuild_reprocesses_a_landed_month(self, label_table, parameters):
-        params = _incremental_params(
-            parameters,
-            existing={"test_keys": list(_TEST_MONTHS)},
-            rebuild=["2024-04-30"],
-        )
-        assert _months(select_test_keys(label_table, params)) == ["2024-04-30"]
-
-    def test_no_injected_listing_processes_everything(self, label_table, parameters):
-        # Backwards-compatible default: driven outside the CLI, nothing is known
-        # to exist, so every configured month is processed.
+class TestSelectTestKeysScoping:
+    def test_processes_only_the_months_in_the_plan(self, label_table, parameters):
         params = _incremental_params(parameters)
-        assert _months(select_test_keys(label_table, params)) == _TEST_MONTHS
+        result = select_test_keys(label_table, _plan("2024-05-31"), params)
+        assert _months(result) == ["2024-05-31"]
 
-    def test_reads_its_own_dataset_key_not_another(self, label_table, parameters):
-        # A listing for a *different* dataset must not silence this node — each
-        # node is gated on the partitions of the artifact it produces.
-        params = _incremental_params(
-            parameters, existing={"test_model_input": list(_TEST_MONTHS)},
-        )
-        assert _months(select_test_keys(label_table, params)) == _TEST_MONTHS
+    def test_empty_plan_yields_nothing(self, label_table, parameters):
+        # Every configured month already landed: a normal state, not an error.
+        params = _incremental_params(parameters)
+        assert select_test_keys(label_table, _plan(), params).count() == 0
+
+    def test_full_plan_yields_every_test_month(self, label_table, parameters):
+        params = _incremental_params(parameters)
+        result = select_test_keys(label_table, _plan(*_TEST_MONTHS), params)
+        assert _months(result) == _TEST_MONTHS
 
 
-class TestBuildTestModelInputIncremental:
-    def test_filters_keys_that_already_landed(
+class TestBuildTestModelInputScoping:
+    def test_filters_keys_outside_the_plan(
         self, feature_table, label_table, parameters
     ):
         # test_keys is a persistent Hive table: reading it back yields every
         # month, including ones select_test_keys did not rewrite. This node must
-        # re-apply the diff itself rather than trust its input.
-        params = _incremental_params(
-            parameters, existing={"test_model_input": ["2024-04-30"]},
-        )
+        # apply the plan itself rather than trust its input.
+        params = _incremental_params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        encoded = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
         all_month_keys = label_table.select(
             "snap_date", "cust_id", "prod_name"
         ).dropDuplicates()
 
         result = build_test_model_input(
-            all_month_keys, encoded, label_table, preprocessor, params,
-        )
-        assert _months(result) == ["2024-05-31"]
-        assert result.count() == _count_key_rows_in(all_month_keys, ["2024-05-31"])
-
-    def test_rebuild_reprocesses_a_landed_month(
-        self, feature_table, label_table, parameters
-    ):
-        params = _incremental_params(
-            parameters,
-            existing={"test_model_input": list(_TEST_MONTHS)},
-            rebuild=["2024-05-31"],
-        )
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
-        all_month_keys = label_table.select(
-            "snap_date", "cust_id", "prod_name"
-        ).dropDuplicates()
-
-        result = build_test_model_input(
-            all_month_keys, encoded, label_table, preprocessor, params,
-        )
-        assert _months(result) == ["2024-05-31"]
-        assert result.count() == _count_key_rows_in(all_month_keys, ["2024-05-31"])
-
-
-class TestFilterTestModelInputIncremental:
-    def test_filters_months_that_already_landed(
-        self, feature_table, label_table, parameters
-    ):
-        params = _incremental_params(
-            parameters, existing={"test_model_input": ["2024-04-30"]},
-        )
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
-        all_month_keys = label_table.select(
-            "snap_date", "cust_id", "prod_name"
-        ).dropDuplicates()
-        # Feed it an unfiltered frame on purpose (the sliced-resume scenario).
-        unfiltered = build_test_model_input(
             all_month_keys, encoded, label_table, preprocessor,
-            _incremental_params(parameters),
+            _plan("2024-05-31"), params,
         )
-        assert _months(unfiltered) == _TEST_MONTHS
-        assert unfiltered.count() == _count_key_rows_in(all_month_keys, _TEST_MONTHS)
-
-        result = filter_test_model_input(unfiltered, params)
         assert _months(result) == ["2024-05-31"]
+        assert result.count() == _count_key_rows_in(all_month_keys, ["2024-05-31"])
 
 
-class TestApplyPreprocessorIncremental:
-    def test_skips_months_that_already_landed(self, feature_table, parameters):
-        params = _incremental_params(
-            parameters,
-            existing={"preprocessed_feature_table": ["2024-01-31", "2024-04-30"]},
-        )
+class TestApplyPreprocessorScoping:
+    def test_encodes_only_the_months_in_the_plan(self, feature_table, parameters):
+        params = _incremental_params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        result = apply_preprocessor_to_features(feature_table, preprocessor, params)
-        # configured union = train(01,02,03) + test(04,05); 01 and 04 landed.
+        result = apply_preprocessor_to_features(
+            feature_table, preprocessor,
+            _plan("2024-02-29", "2024-03-31", "2024-05-31"), params,
+        )
         assert _months(result) == ["2024-02-29", "2024-03-31", "2024-05-31"]
 
-    def test_all_months_landed_yields_an_empty_but_typed_frame(
+    def test_empty_plan_yields_an_empty_but_typed_frame(
         self, feature_table, parameters
     ):
         params = _incremental_params(parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
         full = apply_preprocessor_to_features(
-            feature_table, fit_preprocessor_metadata(feature_table, params)[0], params,
+            feature_table, preprocessor, _encode_plan(params), params,
         )
-        landed = {"preprocessed_feature_table": list(_SNAP_DATES)}
-        params_all_landed = _incremental_params(parameters, existing=landed)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params_all_landed)
         result = apply_preprocessor_to_features(
-            feature_table, preprocessor, params_all_landed,
+            feature_table, preprocessor, _plan(), params,
         )
         assert result.count() == 0
         # Schema must survive the empty case: an empty write with a drifted
         # schema is how a dynamic-partition overwrite corrupts a live table.
         assert result.dtypes == full.dtypes
 
-    def test_missing_feature_table_month_is_only_checked_when_processed(
+    def test_a_month_missing_from_feature_table_raises_only_when_planned(
         self, feature_table, parameters
     ):
-        # A month absent from feature_table but already landed must NOT raise —
-        # this run does not read it.
+        # Why the node hands preprocessing the month *list* and not a
+        # pre-filtered frame: preprocessing owns the "you asked for a month
+        # feature_table does not have" check, and it can only fire on months
+        # this run actually intends to read.
         params = _incremental_params(parameters)
-        params["dataset"] = {
-            **params["dataset"],
-            "test_snap_dates": ["2024-04-30", "2024-05-31", "2024-12-31"],
-        }
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
 
         with pytest.raises(ValueError, match="2024-12-31"):
-            apply_preprocessor_to_features(feature_table, preprocessor, params)
+            apply_preprocessor_to_features(
+                feature_table, preprocessor,
+                _plan(*_SNAP_DATES, "2024-12-31"), params,
+            )
 
-        params_landed = {
-            **params,
-            EXISTING_SNAP_DATES_KEY: {"preprocessed_feature_table": ["2024-12-31"]},
-        }
-        apply_preprocessor_to_features(feature_table, preprocessor, params_landed)
+        # Same absent month, this time already landed -> not read, not checked.
+        apply_preprocessor_to_features(
+            feature_table, preprocessor, _plan(*_SNAP_DATES), params,
+        )
 
 
-class TestIncrementalFilterHandlesHiveStringDates:
+class TestScopedNodesHandleHiveStringDates:
     """snap_date comes back from Hive as a STRING partition column.
 
     The runner reloads every node input through the catalog, so
-    build/filter_test_model_input see ``snap_date: string``, not the timestamp
-    dtype a pandas-built fixture produces. Comparing that string column against
+    build_test_model_input sees ``snap_date: string``, not the timestamp dtype a
+    pandas-built fixture produces. Comparing that string column against
     ``pd.Timestamp`` literals matches zero rows and raises nothing — the frame
-    silently empties and the Hive write touches no partitions. Caught by a
-    real run, not by the pandas-typed fixtures above.
+    silently empties and the Hive write touches no partitions. Caught by a real
+    run, not by the pandas-typed fixtures above.
     """
 
     @pytest.fixture
@@ -1364,38 +1347,19 @@ class TestIncrementalFilterHandlesHiveStringDates:
         self, spark, feature_table, label_table, string_dated_keys, parameters
     ):
         assert dict(string_dated_keys.dtypes)["snap_date"] == "string"
-        params = _incremental_params(
-            parameters, existing={"test_model_input": ["2024-04-30"]},
-        )
+        params = _incremental_params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        encoded = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
 
         result = build_test_model_input(
-            string_dated_keys, encoded, label_table, preprocessor, params,
+            string_dated_keys, encoded, label_table, preprocessor,
+            _plan("2024-05-31"), params,
         )
         assert result.count() > 0, "string-typed snap_date silently matched nothing"
         assert _months(result) == ["2024-05-31"]
         assert result.count() == _count_key_rows_in(string_dated_keys, ["2024-05-31"])
-
-    def test_filter_node_also_handles_string_snap_date(
-        self, spark, feature_table, label_table, string_dated_keys, parameters
-    ):
-        params = _incremental_params(
-            parameters, existing={"test_model_input": ["2024-04-30"]},
-        )
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        encoded = apply_preprocessor_to_features(feature_table, preprocessor, params)
-        unfiltered = build_test_model_input(
-            string_dated_keys, encoded, label_table, preprocessor,
-            _incremental_params(parameters),
-        ).withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
-        assert unfiltered.count() == _count_key_rows_in(
-            string_dated_keys, _TEST_MONTHS
-        )
-
-        result = filter_test_model_input(unfiltered, params)
-        assert result.count() > 0, "string-typed snap_date silently matched nothing"
-        assert _months(result) == ["2024-05-31"]
 
     def test_select_test_keys_still_works_on_date_typed_source(
         self, label_table, parameters
@@ -1403,10 +1367,9 @@ class TestIncrementalFilterHandlesHiveStringDates:
         # The other direction: sample_pool/label_table keep a real date dtype.
         # Normalising to DATE must not break that path.
         assert dict(label_table.dtypes)["snap_date"].startswith("timestamp")
-        params = _incremental_params(
-            parameters, existing={"test_keys": ["2024-04-30"]},
-        )
-        assert _months(select_test_keys(label_table, params)) == ["2024-05-31"]
+        params = _incremental_params(parameters)
+        result = select_test_keys(label_table, _plan("2024-05-31"), params)
+        assert _months(result) == ["2024-05-31"]
 
 
 # =============================================================================
@@ -1484,7 +1447,9 @@ class TestModelInputSchemaPerSplit:
     def built(self, feature_table, label_table, sample_pool, parameters):
         params = _four_split_params(parameters, carry_columns=["channel_preference"])
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
 
         sample_keys = select_train_keys(sample_pool, params)
         train_keys, train_dev_keys = split_train_keys(sample_keys, params)
@@ -1493,7 +1458,7 @@ class TestModelInputSchemaPerSplit:
             "train_dev": train_dev_keys,
             "calibration": select_calibration_keys(sample_pool, params),
             "val": select_val_keys(sample_pool, params),
-            "test": select_test_keys(sample_pool, params),
+            "test": select_test_keys(sample_pool, _test_keys_plan(params), params),
         }
         built = {
             split: build_model_input(keys, pft, label_table, preprocessor, params)
@@ -1565,13 +1530,15 @@ class TestQueryGroupCompleteness:
     ):
         params = _four_split_params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        pft = apply_preprocessor_to_features(feature_table, preprocessor, params)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
         schema = get_schema(params)
         declared = set(params["schema"]["categorical_values"][schema["item"]])
 
         for split, keys in {
             "val": select_val_keys(sample_pool, params),
-            "test": select_test_keys(sample_pool, params),
+            "test": select_test_keys(sample_pool, _test_keys_plan(params), params),
         }.items():
             mi = build_model_input(keys, pft, label_table, preprocessor, params)
             sizes = self._group_sizes(mi, params)
@@ -1670,7 +1637,7 @@ class TestFitUsesTrainMonthsOnly:
         params = self._params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(ft_with_val_only_category, params)
         out = apply_preprocessor_to_features(
-            ft_with_val_only_category, preprocessor, params
+            ft_with_val_only_category, preprocessor, _encode_plan(params), params,
         )
         val_month = pd.Timestamp(_SNAP_DATES[3])
         encoded = out.filter(F.col("snap_date") == F.lit(val_month))
@@ -1709,7 +1676,9 @@ class TestIdentityCategoricalNotEncoded:
         from pyspark.sql import types as T
 
         preprocessor, _ = fit_preprocessor_metadata(ft_with_item_column, parameters)
-        out = apply_preprocessor_to_features(ft_with_item_column, preprocessor, parameters)
+        out = apply_preprocessor_to_features(
+            ft_with_item_column, preprocessor, _encode_plan(parameters), parameters,
+        )
 
         assert "prod_name" in out.columns
         assert out.schema["prod_name"].dataType == T.StringType()
@@ -1760,7 +1729,7 @@ class TestUnknownEncodingRateIsAssertable:
                 "calibration_snap_dates": [], "val_snap_dates": [], "test_snap_dates": [],
             },
         }
-        return apply_preprocessor_to_features(ft, preprocessor, params)
+        return apply_preprocessor_to_features(ft, preprocessor, _encode_plan(params), params)
 
     def test_unknown_share_is_the_expected_fraction(self, encoded):
         total = encoded.count()
@@ -1809,7 +1778,7 @@ class TestSelectKeysDeduplication:
     def test_test_keys_are_unique_despite_duplicate_input(
         self, duplicated_pool, parameters
     ):
-        result = select_test_keys(duplicated_pool, parameters)
+        result = select_test_keys(duplicated_pool, _test_keys_plan(parameters), parameters)
         assert result.count() == _expected_key_count(parameters, "test")
         identity = get_schema(parameters)["identity_columns"]
         assert result.count() == result.dropDuplicates(identity).count()
