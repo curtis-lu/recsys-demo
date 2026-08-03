@@ -502,3 +502,26 @@ class TestComputeFeatureColumnsDrops:
         assert self._compute(["snap_date", "cust_id"]) == [
             "prod_name", "cust_segment_typ", "total_aum", "tenure_months",
         ]
+
+
+class TestApplyPreprocessorToFeaturesRequiresSnapDates:
+    """``snap_dates`` is required — the caller owns "which months is this run for".
+
+    It used to default to ``None`` and fall back to
+    ``collect_dataset_snap_dates(parameters)`` (the union of every configured
+    month). Since the month plans moved into the catalog (#152) the node always
+    passes ``month_plan.to_process``, so that fallback was unreachable. Pinning
+    the argument as required is what keeps it unreachable: a future caller that
+    forgets it now fails at the call, instead of silently re-encoding every
+    configured month and quietly undoing the incremental behaviour of ADR-0002.
+    """
+
+    def test_omitting_snap_dates_raises_instead_of_defaulting(self):
+        from recsys_tfb.preprocessing._spark import apply_preprocessor_to_features
+
+        # Binding fails before the body runs, so the placeholder arguments are
+        # never dereferenced. Were the default restored, this call would get
+        # past binding and die on the placeholders instead (KeyError), so this
+        # assertion is about the signature and not about the placeholders.
+        with pytest.raises(TypeError, match="snap_dates"):
+            apply_preprocessor_to_features(None, {}, {})
