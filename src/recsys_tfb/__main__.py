@@ -41,9 +41,10 @@ from recsys_tfb.core.versioning import (
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.helpers_spark import existing_snap_date_partitions
-from recsys_tfb.pipelines.dataset.nodes_shared import (
-    EXISTING_SNAP_DATES_KEY,
-    plan_incremental_snap_dates,
+from recsys_tfb.pipelines.dataset.month_plans import (
+    INCREMENTAL_DATASETS,
+    build_month_plans,
+    month_plan_input,
 )
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
 
@@ -213,23 +214,12 @@ def _slice_extra(from_node, only_node):
     return None
 
 
-#: dataset outputs whose snap_date partitions gate incremental processing.
-#: Key = catalog dataset name (the nodes look themselves up by this name);
-#: the four test-branch nodes map onto three artifacts because
-#: build/filter_test_model_input are two stages producing one table.
-_INCREMENTAL_DATASETS = (
-    "preprocessed_feature_table",
-    "test_keys",
-    "test_model_input",
-)
-
-
 def _collect_existing_snap_dates(
     spark, catalog_config: dict, base_dataset_version: str, time_col: str = "snap_date"
 ) -> dict[str, list[str]]:
     """Metastore partition listing for every incrementally-built dataset.
 
-    Taken once, before any node runs, so all four test-branch nodes and the
+    Taken once, before any node runs, so every incremental node and the
     manifest agree on what had already landed when this run started (ADR-0002).
     Metadata-only: no data is scanned.
 
@@ -238,7 +228,7 @@ def _collect_existing_snap_dates(
     this repo is a configurable ranking framework, not a snap_date-only one.
     """
     existing: dict[str, list[str]] = {}
-    for name in _INCREMENTAL_DATASETS:
+    for name in INCREMENTAL_DATASETS:
         entry = catalog_config.get(name) or {}
         if entry.get("type") != "HiveTableDataset":
             logger.warning(
@@ -323,10 +313,18 @@ def _execute_pipeline(
     list_nodes: bool = False,
     retrain_advice: Optional[dict] = None,
     rebuild_advice: Optional[dict] = None,
+    extra_datasets: Optional[dict] = None,
 ) -> bool:
     """Run the pipeline; returns False when nothing was executed
     (--dry-run / --list-nodes early exits) so callers skip post-run
-    manifest writing."""
+    manifest writing.
+
+    ``extra_datasets`` is ``{catalog name: value}`` for run-scoped values a node
+    declares as an ordinary input — the dataset month plans. Same mechanism
+    ``parameters`` itself uses, so a node cannot tell them apart, and the
+    runner's input check turns a forgotten one into a startup error rather than
+    a silent full rebuild.
+    """
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
     except KeyError:
@@ -354,6 +352,8 @@ def _execute_pipeline(
 
     catalog = DataCatalog(catalog_config)
     catalog.add("parameters", MemoryDataset(data=substitution_params))
+    for name, value in (extra_datasets or {}).items():
+        catalog.add(name, MemoryDataset(data=value))
 
     # Memoize exists(): slice probing re-checks the same datasets repeatedly
     # (per-node listing ~6x); each check can be a Hive metastore round-trip.
@@ -704,22 +704,16 @@ def dataset(
     if cal_v is not None:
         logger.info("calibration_variant_id: %s", cal_v)
 
-    # Incremental plan (ADR-0002): one metastore listing, handed to every
-    # test-branch node so they and the manifest cannot disagree about which
-    # months this run covered.
+    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
+    # per incremental artifact, decided here — before any Spark work — so the
+    # nodes, this log and the manifest cannot disagree about which months this
+    # run covered. The nodes receive them through the catalog (below), not
+    # through `parameters`.
     existing_snap_dates = _collect_existing_snap_dates(
         spark, catalog_config, base_v, time_col=get_schema(params)["time"],
     )
-    month_plan = plan_incremental_snap_dates(
-        (params.get("dataset", {}) or {}).get("test_snap_dates", []),
-        existing_snap_dates.get("test_model_input", []),
-        rebuild,
-    )
-    logger.info(
-        "[months] test branch: processed=%s skipped=%s rebuild=%s",
-        _fmt_months(d.strftime("%Y-%m-%d") for d in month_plan.to_process),
-        _fmt_months(d.strftime("%Y-%m-%d") for d in month_plan.skipped),
-        _fmt_months(rebuild),
+    month_plans = build_month_plans(
+        params, existing=existing_snap_dates, rebuild=rebuild,
     )
 
     runtime_params = {
@@ -728,7 +722,8 @@ def dataset(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
-        EXISTING_SNAP_DATES_KEY: existing_snap_dates,
+        # A user-supplied setting, unlike the listing above: it stays in
+        # parameters, where the training pipeline reads the same key.
         REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
@@ -758,6 +753,12 @@ def dataset(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        # A loop over the plans, not three hand-written lines: registering a
+        # fourth incremental artifact in month_plans.py is enough, and the
+        # injection follows.
+        extra_datasets={
+            month_plan_input(name): plan for name, plan in month_plans.items()
+        },
     )
     if not executed:
         return
@@ -781,8 +782,14 @@ def dataset(
             # decided not to do — otherwise ADR-0002's "exists() ≠ fresh" is
             # invisible after the fact.
             "test_snap_dates_plan": {
-                "processed": [d.strftime("%Y-%m-%d") for d in month_plan.to_process],
-                "skipped": [d.strftime("%Y-%m-%d") for d in month_plan.skipped],
+                "processed": [
+                    d.strftime("%Y-%m-%d")
+                    for d in month_plans["test_model_input"].to_process
+                ],
+                "skipped": [
+                    d.strftime("%Y-%m-%d")
+                    for d in month_plans["test_model_input"].skipped
+                ],
                 "rebuild_requested": list(rebuild),
             },
         },

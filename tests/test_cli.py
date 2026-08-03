@@ -4,6 +4,7 @@ import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import yaml
 from typer.testing import CliRunner
 
@@ -126,7 +127,14 @@ class TestCLI:
         """Dataset pipeline computes hash-based base_dataset_version and train_variant_id."""
         _setup_conf(
             tmp_path,
-            params_dataset={"dataset": {"sample_ratio": 0.1, "train_dev_ratio": 0.2}},
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                # train_snap_dates is not optional: the month plans are built
+                # before the pipeline runs and preprocessed_feature_table's is
+                # derived from the union of every split.
+                "train_snap_dates": ["2026-01-31"],
+            }},
         )
 
         old_cwd = os.getcwd()
@@ -714,23 +722,29 @@ class TestRebuildDatesFlag:
             os.chdir(old_cwd)
 
 
-class TestIncrementalPlanReachesNodes:
-    def test_existing_and_rebuild_are_injected_into_node_parameters(self, tmp_path):
-        """The nodes read the plan off ``parameters``; assert it lands there.
+class TestMonthPlansReachTheCatalog:
+    """#152 — the plans travel as catalog datasets, not as ``parameters`` keys.
 
-        This is the seam the whole feature hangs on — without it every node
-        falls back to "nothing exists" and silently processes every month.
+    This is the seam the whole feature hangs on. Forgetting it no longer fails
+    silently (the runner refuses to start a node whose input is absent), but a
+    plan wired to the *wrong* dataset name would still start — so assert the
+    three by name and by content.
+    """
+
+    def _run_dataset(self, tmp_path, argv, existing=("2026-01-31",)):
+        """Invoke the dataset command far enough to build the catalog.
+
+        Only ``test_model_input`` is a Hive table in this catalog, so it is the
+        only artifact with a partition listing; the other two fall back to
+        "nothing has landed". That asymmetry is the point — it makes the three
+        plans differ, so a test cannot pass by handing out the same plan thrice.
         """
-        from recsys_tfb.pipelines.dataset.nodes_shared import (
-            EXISTING_SNAP_DATES_KEY,
-            REBUILD_SNAP_DATES_KEY,
-        )
-
         _setup_conf(
             tmp_path,
             params_dataset={"dataset": {
                 "sample_ratio": 0.1,
                 "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2025-12-31"],
                 "test_snap_dates": ["2026-01-31", "2026-02-28"],
             }},
         )
@@ -744,37 +758,73 @@ class TestIncrementalPlanReachesNodes:
         }
         with open(catalog_path, "w") as f:
             yaml.dump(catalog, f)
-        captured = {}
 
-        def _capture(data=None):
-            captured["params"] = data
-            return MagicMock()
-
+        added = {}
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
-                    patch("recsys_tfb.__main__.MemoryDataset", side_effect=_capture), \
                     patch(
                         "recsys_tfb.utils.spark.get_or_create_spark_session",
                         return_value=_mock_spark_with_feature_table_schema(),
                     ), \
                     patch(
                         "recsys_tfb.__main__.existing_snap_date_partitions",
-                        return_value=["2026-01-31"],
+                        return_value=list(existing),
                     ), \
                     patch("recsys_tfb.__main__.Runner"):
                 mock_catalog_cls.return_value = mock_catalog_cls
-                mock_catalog_cls.add = lambda *a, **kw: None
-                runner.invoke(app, ["dataset", "--rebuild-dates", "2026-01-31"])
+                mock_catalog_cls.add = lambda name, ds: added.__setitem__(name, ds)
+                runner.invoke(app, argv)
         finally:
             os.chdir(old_cwd)
+        return {name: ds.load() for name, ds in added.items()}
 
-        node_params = captured["params"]
-        assert node_params[REBUILD_SNAP_DATES_KEY] == ["2026-01-31"]
-        assert node_params[EXISTING_SNAP_DATES_KEY] == {
-            "test_model_input": ["2026-01-31"],
-        }
+    def test_every_incremental_dataset_gets_its_own_plan(self, tmp_path):
+        from recsys_tfb.pipelines.dataset.month_plans import (
+            INCREMENTAL_DATASETS, month_plan_input,
+        )
+
+        loaded = self._run_dataset(tmp_path, ["dataset"])
+
+        assert {month_plan_input(d) for d in INCREMENTAL_DATASETS} <= set(loaded)
+        # test_model_input's month landed -> skipped; test_keys was never listed
+        # -> both months; preprocessed_feature_table spans train ∪ test.
+        assert loaded["test_model_input_month_plan"].to_process == [
+            pd.Timestamp("2026-02-28")
+        ]
+        assert loaded["test_keys_month_plan"].to_process == [
+            pd.Timestamp("2026-01-31"), pd.Timestamp("2026-02-28"),
+        ]
+        assert loaded["preprocessed_feature_table_month_plan"].to_process == [
+            pd.Timestamp("2025-12-31"),
+            pd.Timestamp("2026-01-31"),
+            pd.Timestamp("2026-02-28"),
+        ]
+
+    def test_rebuild_dates_reach_the_plan(self, tmp_path):
+        loaded = self._run_dataset(
+            tmp_path, ["dataset", "--rebuild-dates", "2026-01-31"],
+        )
+        assert loaded["test_model_input_month_plan"].to_process == [
+            pd.Timestamp("2026-01-31"), pd.Timestamp("2026-02-28"),
+        ]
+        assert loaded["test_model_input_month_plan"].skipped == []
+
+    def test_parameters_carry_settings_only(self, tmp_path):
+        """The ``_existing_snap_dates`` side channel is gone.
+
+        ``_rebuild_snap_dates`` stays: it is a user-supplied setting (and the
+        training pipeline reads it), unlike a metastore listing.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+
+        loaded = self._run_dataset(
+            tmp_path, ["dataset", "--rebuild-dates", "2026-01-31"],
+        )
+        params = loaded["parameters"]
+        assert params[REBUILD_SNAP_DATES_KEY] == ["2026-01-31"]
+        assert not [k for k in params if "existing" in k.lower()]
 
 
 class TestCollectExistingSnapDates:

@@ -2,6 +2,10 @@
 
 from recsys_tfb.pipelines.dataset import create_pipeline
 from recsys_tfb.pipelines.dataset import nodes_spark as nodes
+from recsys_tfb.pipelines.dataset.month_plans import (
+    INCREMENTAL_DATASETS,
+    month_plan_input,
+)
 
 
 class TestDatasetPipeline:
@@ -19,7 +23,12 @@ class TestDatasetPipeline:
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
-        assert pipeline.inputs == {"feature_table", "label_table", "sample_pool", "parameters"}
+        assert pipeline.inputs == {
+            "feature_table", "label_table", "sample_pool", "parameters",
+            "preprocessed_feature_table_month_plan",
+            "test_keys_month_plan",
+            "test_model_input_month_plan",
+        }
 
     def test_pipeline_outputs_without_calibration(self):
         pipeline = create_pipeline()
@@ -124,10 +133,12 @@ class TestNodeNameToFunctionBinding:
     likely to be "corrected" by mistake:
 
     - ``select_sample_keys`` runs ``select_train_keys``;
-    - ``build_test_model_input`` / ``filter_test_model_input`` run the *test*
-      wrappers, not the shared ``build_model_input`` /
-      ``filter_groups_with_positives`` the other splits use, because the test
-      branch is incremental (ADR-0002).
+    - ``build_test_model_input`` runs the *test* wrapper, not the shared
+      ``build_model_input`` the other splits use, because it has to re-scope
+      the keys it reads back from a persistent Hive table (ADR-0002);
+    - ``filter_test_model_input``, by contrast, runs the *same*
+      ``filter_groups_with_positives`` as val — the month scoping is already
+      done by then and repeating it would guard nothing (ADR-0007).
     """
 
     BASE_BINDINGS = {
@@ -143,7 +154,7 @@ class TestNodeNameToFunctionBinding:
         "build_val_model_input": nodes.build_model_input,
         "build_test_model_input": nodes.build_test_model_input,
         "filter_val_model_input": nodes.filter_groups_with_positives,
-        "filter_test_model_input": nodes.filter_test_model_input,
+        "filter_test_model_input": nodes.filter_groups_with_positives,
     }
     CALIBRATION_BINDINGS = {
         "select_calibration_keys": nodes.select_calibration_keys,
@@ -184,3 +195,72 @@ class TestNodeNameToFunctionBinding:
             "build_train_model_input", "build_train_dev_model_input",
             "build_val_model_input", "build_calibration_model_input",
         }
+
+
+class TestMonthPlanWiring:
+    """#152 — which node follows which month plan, read off the definition.
+
+    Being incremental used to be invisible here: the decision lived inside four
+    node bodies, keyed off a magic ``parameters`` entry, so the only way to see
+    that ``select_test_keys`` and ``build_test_model_input`` follow *different*
+    plans was to read both functions. Now it is one line of ``inputs`` each —
+    and mis-wiring one to the other's plan is a same-shaped, still-runnable
+    pipeline, so eyeballing the diff is not enough. This is the test that fails.
+    """
+
+    #: node name -> the artifact whose plan scopes it. Not derivable from the
+    #: node's own output: build_test_model_input writes
+    #: ``test_model_input_unfiltered`` but is gated on ``test_model_input``,
+    #: the persistent table the pair of nodes ultimately produces.
+    EXPECTED_PLAN = {
+        "apply_preprocessor_to_features": "preprocessed_feature_table",
+        "select_test_keys": "test_keys",
+        "build_test_model_input": "test_model_input",
+    }
+
+    @staticmethod
+    def _plan_inputs(node):
+        return {i for i in node.inputs if i.endswith("_month_plan")}
+
+    def test_each_incremental_node_follows_its_own_artifacts_plan(self):
+        by_name = {n.name: n for n in create_pipeline(enable_calibration=True).nodes}
+        for node_name, artifact in self.EXPECTED_PLAN.items():
+            assert self._plan_inputs(by_name[node_name]) == {
+                month_plan_input(artifact)
+            }, f"{node_name} follows the wrong month plan"
+
+    def test_no_other_node_takes_a_month_plan(self):
+        # The complement of the table above: a plan handed to a non-incremental
+        # node would silently start skipping months of train / val / calibration.
+        by_name = {n.name: n for n in create_pipeline(enable_calibration=True).nodes}
+        assert {
+            name for name, node in by_name.items() if self._plan_inputs(node)
+        } == set(self.EXPECTED_PLAN)
+
+    def test_every_declared_plan_is_one_the_cli_injects(self):
+        # A typo'd plan name is caught by the runner's input check at run time;
+        # this catches it in a second, without Spark.
+        pipeline = create_pipeline(enable_calibration=True)
+        declared = {i for n in pipeline.nodes for i in self._plan_inputs(n)}
+        assert declared <= {month_plan_input(d) for d in INCREMENTAL_DATASETS}
+
+    def test_plans_are_pipeline_inputs_not_node_outputs(self):
+        # They enter through the catalog. If some node ever produced one, the
+        # runner's "is this input available" check would stop failing loud when
+        # the CLI forgets to inject — and a forgotten plan means a silent full
+        # rebuild, which is the expensive direction to fail in.
+        pipeline = create_pipeline(enable_calibration=True)
+        for name in INCREMENTAL_DATASETS:
+            assert month_plan_input(name) in pipeline.inputs
+            assert month_plan_input(name) not in pipeline.outputs
+
+    def test_the_test_filter_is_the_same_node_function_as_val(self):
+        # ADR-0007: the defensive month filter that used to live in
+        # filter_test_model_input is gone, so the two filter nodes differ only
+        # in which frame they read.
+        by_name = {n.name: n for n in create_pipeline().nodes}
+        assert (
+            by_name["filter_test_model_input"].func
+            is by_name["filter_val_model_input"].func
+        )
+        assert self._plan_inputs(by_name["filter_test_model_input"]) == set()

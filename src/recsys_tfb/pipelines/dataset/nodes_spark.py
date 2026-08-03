@@ -11,8 +11,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
 from recsys_tfb.pipelines.dataset.nodes_shared import (
-    collect_dataset_snap_dates,
-    resolve_snap_date_plan,
+    SnapDatePlan,
     validate_date_splits,
 )
 from recsys_tfb.preprocessing._spark import (
@@ -182,23 +181,20 @@ def _date_filter(time_col: str, dates: list):
 
 def select_test_keys(
     sample_pool: DataFrame,
+    month_plan: SnapDatePlan,
     parameters: dict,
 ) -> DataFrame:
     """Select test identity keys (full population, no sampling).
 
-    Restricted to the months this run is processing (ADR-0002). Months that
-    already landed are left alone: the write is a dynamic partition overwrite,
-    so an absent month means "untouched", not "deleted".
+    Restricted to ``month_plan.to_process`` (ADR-0002). Months that already
+    landed are left alone: the write is a dynamic partition overwrite, so an
+    absent month means "untouched", not "deleted".
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
 
-    ds = parameters["dataset"]
-    test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]
-    plan = resolve_snap_date_plan(parameters, "test_keys", test_dates)
-
-    test_labels = sample_pool.filter(_date_filter(time_col, plan.to_process))
+    test_labels = sample_pool.filter(_date_filter(time_col, month_plan.to_process))
     all_keys = test_labels.select(*identity_key).dropDuplicates()
 
     logger.info("Test keys (full population)")
@@ -210,48 +206,22 @@ def build_test_model_input(
     preprocessed_feature_table: DataFrame,
     label_table: DataFrame,
     preprocessor_metadata: dict,
+    month_plan: SnapDatePlan,
     parameters: dict,
 ) -> DataFrame:
-    """build_model_input for the test split, restricted to this run's months.
+    """build_model_input for the test split, scoped to ``month_plan``.
 
-    ``test_keys`` is a persistent Hive table holding *every* month under this
-    base version, so reading it back gives the full history even when
-    ``select_test_keys`` only wrote the new month. Without this filter the
-    downstream join would rebuild every month — the ∝N cost ADR-0002 exists to
-    remove.
+    The one thing this adds over the shared ``build_model_input``: ``test_keys``
+    is a persistent Hive table holding *every* month under this base version, so
+    reading it back gives the full history even when ``select_test_keys`` only
+    wrote the new month. Without this filter the downstream join would rebuild
+    every month — the ∝N cost ADR-0002 exists to remove.
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
-
-    ds = parameters["dataset"]
-    test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]
-    plan = resolve_snap_date_plan(parameters, "test_model_input", test_dates)
-
-    keys = keys.filter(_date_filter(time_col, plan.to_process))
+    keys = keys.filter(_date_filter(schema["time"], month_plan.to_process))
     return _build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
     )
-
-
-def filter_test_model_input(
-    model_input: DataFrame,
-    parameters: dict,
-) -> DataFrame:
-    """filter_groups_with_positives for the test split, restricted to this run's months.
-
-    Asks the same helper as ``build_test_model_input`` rather than trusting its
-    upstream to have filtered already: under pipeline slicing this node can be
-    fed a frame that was materialised by an earlier, differently-scoped run.
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-
-    ds = parameters["dataset"]
-    test_dates = [pd.Timestamp(d) for d in ds.get("test_snap_dates", [])]
-    plan = resolve_snap_date_plan(parameters, "test_model_input", test_dates)
-
-    model_input = model_input.filter(_date_filter(time_col, plan.to_process))
-    return filter_groups_with_positives(model_input, parameters)
 
 
 def validate_data_consistency(
@@ -280,23 +250,25 @@ def fit_preprocessor_metadata(
 def apply_preprocessor_to_features(
     feature_table: DataFrame,
     preprocessor_metadata: dict,
+    month_plan: SnapDatePlan,
     parameters: dict,
 ) -> DataFrame:
     """Encode non-identity categoricals in Spark feature_table once for all splits.
 
-    Only the months that have not landed yet are encoded (ADR-0002). Skipping an
+    Only the months in ``month_plan`` are encoded (ADR-0002). Skipping an
     existing month is safe because a partition's content is
     f(that month's feature_table rows, category_mappings) and the mappings are
     fit on train months only — no cross-month term, so a re-encode would
     reproduce the same bits.
+
+    Passes the month *list* down, not the plan: preprocessing uses it to raise
+    when a month it is about to process is missing from ``feature_table``.
+    Pre-filtering here would make that check vacuously true — and preprocessing
+    stays unaware that "incremental" is a concept.
     """
-    plan = resolve_snap_date_plan(
-        parameters,
-        "preprocessed_feature_table",
-        collect_dataset_snap_dates(parameters),
-    )
     return _apply_preprocessor_to_features(
-        feature_table, preprocessor_metadata, parameters, snap_dates=plan.to_process,
+        feature_table, preprocessor_metadata, parameters,
+        snap_dates=month_plan.to_process,
     )
 
 
