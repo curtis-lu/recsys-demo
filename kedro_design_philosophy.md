@@ -10,7 +10,7 @@
 > | 給 AI agent 的架構約束、框架事實、例外登記 | `docs/agents/architecture-constraints.md` |
 > | 設計取捨的白話背景（給人讀） | `docs/design-principles.md` |
 > | 程式碼現在長什麼樣 | `graphify-out/GRAPH_REPORT.md` |
-> | 「Claude 該怎麼跟這個 repo 協作」（本檔第 120-149、344-376 行的主題） | `CLAUDE.md` 與 `~/.claude/rules/` |
+> | 「Claude 該怎麼跟這個 repo 協作」（本檔的 `## How Claude Should Think When Making Changes`、`## Preferred Collaboration Style`、`## Output Standard for Claude` 三節） | `CLAUDE.md` 與 `~/.claude/rules/` |
 >
 > 本檔內容經逐條核對（過程見 `docs/notes/2026-08-03-day1-doc-triage.md`）：
 > 大部分已由上表接替，6 條「現況做對了但沒寫下來」已搶救進

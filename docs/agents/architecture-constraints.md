@@ -35,7 +35,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 所以：**新增 node 時不需要自己寫「開始了／完成了」的 log**，Runner 已經記了。你該記的是 node 內部的業務判斷（跳過了什麼、選了哪條分支、處理了幾列）。
 
-另有兩層執行中繼資料：`core/logging.py` 的 `RunContext`（run_id／pipeline／env／dataset_version／model_version）掛在每筆結構化 log 上；`core/versioning.py:330-358` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
+另有兩層執行中繼資料：`core/logging.py` 的 `RunContext`（run_id／pipeline／env／dataset_version／model_version）掛在每筆結構化 log 上；`core/versioning.py:330-377` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
 
 ## F3. 只有 sequential runner
 
@@ -61,11 +61,11 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 
-**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py:31`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py:28`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
 
 ## F6. `--env` 的覆蓋層語意會靜默退化
 
-`ConfigLoader._load()`（`core/config.py:140-147`）讀 `conf/base` 再深度合併 `conf/<env>`。而 `_load_yaml_dir` 在目錄不存在時**靜默回傳空 dict**（`core/config.py:131-132`），`--env` 本身是自由字串、沒有任何驗證（`__main__.py:531`）。
+`ConfigLoader._load()`（`core/config.py:140-147`）讀 `conf/base` 再深度合併 `conf/<env>`。而 `_load_yaml_dir` 在目錄不存在時**靜默回傳空 dict**（`core/config.py:131-132`），`--env` 本身是自由字串、沒有任何驗證——8 個 CLI command 各自宣告 `env: str = typer.Option("local", "--env", "-e", …)`，沒有一個帶 enum 或事後檢查（`grep -n 'env: str = typer.Option' src/recsys_tfb/__main__.py`）。
 
 所以現況是：
 
@@ -129,24 +129,37 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 # 節二 · 約束（新增或修改 node、catalog 條目之前先讀）
 
-七條全部可機械檢查，且**目前全綠**。檢查由 `tests/test_core/test_architecture_constraints.py` 執行。
+檢查由 `tests/test_core/test_architecture_constraints.py` 執行（12 個測試，約 0.5 秒）。
 
-### A1. node 函式不得自己做 I/O
+**這些約束的管轄範圍**：A1、A2、A5、A6、A7 只管 `src/recsys_tfb/pipelines/` 底下的 node 函式與 `Node(...)` 定義；
+A3、A4 管整個 `src/recsys_tfb/`。**CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——
+那幾層本來就負責 I/O 與程序級資源。
 
-I/O 由 catalog 條目宣告，node 只做輸入到輸出的轉換。
+**檢查看得到什麼、看不到什麼**（不要把「測試綠」讀成「一定沒問題」）：
 
-- **例外**：input 名稱加 `@` 前綴時，Runner 交給 node 的是 catalog dataset **handle** 而非載入後的資料（`core/runner.py:79-87`），node 可以自己呼叫 `.save()`。
+- 登記清單比對的是 **Counter**，所以「多一個同名站點」會被抓到；但不釘行號，所以站點上方的一般編輯不會誤報。
+- A5／A6 對**動態組出來的** `inputs`／`outputs` 無法判定，59 個 `Node` 中有 4 個是這種。
+  `test_static_coverage_floor` 把「59 個裡有 55 個可判定」釘住，這個盲區不會悄悄變大。
+- A1 的寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的間接寫入它看不到——
+  `tune_hyperparameters` 正是這種，靠人工登記在 R4。
+
+### A1. 資料流產物一律經 catalog；node 不得自己讀寫它們
+
+pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）一律由 catalog 條目宣告，node 只做輸入到輸出的轉換。
+
+- **例外一（資料流產物）**：input 名稱加 `@` 前綴時，Runner 交給 node 的是 catalog dataset **handle** 而非載入後的資料（`core/runner.py:79-87`）。拿到 handle 的 node 可以自行管理**這個 dataset 的分區寫入生命週期**——包含 `.save()` 寫入，以及查詢哪些分區已存在（`existing_partition_values()`）。**不含**把它當一般資料來源整批讀取（那該用普通 input）。
 - 這個例外**必須寫在 pipeline 定義的 `inputs` 裡**，不得在函式體內自己取得 catalog。理由與 Kedro 的 `confirms` 一致：**side effect 要用宣告的，不能藏在函式體裡**。
-- 已核准的使用點見節三登記。**要新增一筆必須先問使用者。**
+- **例外二（診斷副產物）**：有 3 個 node 會自己寫診斷／稽核檔（JSON 報表、HPO 診斷、MLflow artifact）。這些**不是資料流產物**——沒有任何 node 消費它們，它們寫進 model version 目錄或 MLflow。這是既有慣例，見 R4 登記。
+- 兩類例外的已核准清單都在節三。**要新增一筆必須先問使用者。**
 
-**檢查**：`pipelines/*/pipeline.py` 中 `"@…"` 字串的出現位置與數量，必須與節三登記清單完全相符。
+**檢查**：三項——(a) `Node(...)` 的 `inputs` 中 `"@…"` 字串必須與 R1 登記相符；(b) node 模組不得出現 `DataCatalog` 或 `catalog.load()`／`catalog.save()`（AST 比對，不是文字比對——這些字眼在註解裡合法出現）；(c) node 模組裡有直接寫檔呼叫的函式必須與 R4 登記相符。
 
 ### A2. node 函式不得依賴可變全域狀態
 
-`pipelines/*/nodes*.py` 不得出現 `global` 宣告。
+`pipelines/` 底下不得出現 `global` 宣告。
 
-- **例外**：框架基礎設施層（SparkSession 生命週期管理、run context）的 5 處，見節三登記。
-- 這條的界線是**層**而不是**檔案**：`core/` 與 `utils/` 管理程序級資源，pipeline node 不管。
+- 這條的界線是**層**而不是檔案：`core/` 與 `utils/` 管理程序級資源（一個 JVM、一份 run context），pipeline node 不管。
+- 框架層那 5 處**不是 A2 的豁免例外，是根本不在 A2 的掃描範圍內**。它們另外由 R2 登記盯著——那份登記的作用是「框架層的全域狀態不會悄悄變多」，不是「A2 允許 5 個」。
 
 **檢查**：`src/recsys_tfb/pipelines/` 底下 `global` 宣告數必須為 0。
 
@@ -159,6 +172,8 @@ I/O 由 catalog 條目宣告，node 只做輸入到輸出的轉換。
 ### A4. `src/` 不得 import `notebooks/`
 
 生產程式碼與探索程式碼單向隔離：notebook 可以 import `src/`，反過來不行。
+
+**誠實說明**：`notebooks/` 目前只有兩個 `.ipynb`、沒有任何 `.py`、也沒有 `__init__.py`，所以 `import notebooks` 現在**根本不可能成立**——這條是預防性守衛（成本近乎零），不是在擋一個現存風險。真正該注意的是別把探索性程式碼搬進 `src/`，那個機械檢查抓不到。
 
 **檢查**：`src/recsys_tfb/` 底下不得出現 `import notebooks` 或 `from notebooks`。
 
@@ -194,9 +209,18 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 |---|---|---|
 | `pipelines/training/pipeline.py:140` | `training_eval_predictions` | 逐 partition 存檔：每次 `.save()` 恰好寫一個 partition 的列，讓 dynamic-partition overwrite 乾淨覆蓋單一分區，避免整表重寫。改成由 catalog 統一寫入就得先把所有 partition 物化在記憶體裡，正好抵銷這個設計要省的東西。消費端在 `pipelines/training/nodes.py:1082-1253` |
 
+**這個 handle 上被用到的方法（不只 `.save()`）**：
+
+| 方法 | 用途 | 位置 |
+|---|---|---|
+| `.save(pdf)` | 寫入單一 partition | `pipelines/training/nodes.py:1230` |
+| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供增量計畫判斷跳過哪些月份 | 呼叫在 `pipelines/training/nodes.py:1051`（經 `_written_prediction_partitions`），方法定義在 `io/hive_table_dataset.py:200` |
+
+兩者都屬於「這個 node 自行管理這個 dataset 的分區寫入生命週期」，是同一個例外的範圍內。**把它當一般資料來源整批讀取不在此列**——那該用普通 input 讓 catalog 載入。
+
 > **待辦**：目前 `@` 是混在 `inputs` 清單裡靠 sigil 辨識，看起來像個輸入。比照 Kedro 的 `confirms`，更好的形狀是在 `Node` 上開一個獨立參數（例如 `writes=[...]`），讓「這個 node 會寫什麼」在定義上一眼可見。這是框架變更，已另開 **issue #154**。
 
-## R2. 框架層可變全域狀態（A2 的例外）── 5 筆
+## R2. 框架層可變全域狀態（**不在 A2 掃描範圍內**，非豁免）── 5 筆
 
 | 位置 | 變數 | 用途 |
 |---|---|---|
@@ -212,8 +236,22 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
-| `pipelines/dataset/pipeline.py:31` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查 |
+| `pipelines/dataset/pipeline.py:28` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查 |
 | `pipelines/training/pipeline.py:196` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
+
+（兩列的行號都指 `Node(` 那一行。）
+
+## R4. 自己寫診斷副產物的 node（A1 的例外二）── 3 筆
+
+這些寫的**不是資料流產物**——沒有任何 node 消費它們，所以不經 catalog。它們落在 model version 目錄或 MLflow。
+
+| 函式 | 寫什麼 | 檢查看得到嗎 |
+|---|---|---|
+| `persist_sample_weight_report`（`pipelines/training/nodes.py:78`，註冊於 `pipelines/training/pipeline.py:93`） | `sample_weight_report.json` 進 model version 目錄（`mkdir`＋`open(w)`＋`json.dump`，`nodes.py:93-96`） | ✅ 直接呼叫，掃得到 |
+| `log_experiment`（`pipelines/training/nodes.py:1256`） | MLflow params／metrics／artifacts（`mlflow.log_artifacts`，`nodes.py:1339`） | ✅ 直接呼叫，掃得到 |
+| `tune_hyperparameters`（`pipelines/training/nodes.py:520`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（呼叫在 `nodes.py:739`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
+
+另有一個非 node 的內部 helper 也會直接動檔案系統：`_materialize_parquet_handle`（`pipelines/training/nodes.py:275`，`shutil.rmtree` 於 `:318`／`:337`），管理本機 parquet cache。它在稽核清單裡，但不是 `Node(...)` 註冊的函式。
 
 ---
 
