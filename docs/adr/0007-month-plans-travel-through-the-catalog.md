@@ -24,7 +24,7 @@ catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(nam
 
 否決 **一份 `dict[str, SnapDatePlan]`**：那樣節點仍得在函式體內寫死自己的資料集名字，沒有型別擋、呼叫端看不見，測試同樣得知道那個字串。具名輸入把它換成 pipeline 定義上的一行。
 
-「哪張表要哪些月」的規則收斂到 `pipelines/dataset/month_plans.py` 的 `build_month_plans`：test 兩張吃 `dataset.test_snap_dates`，`preprocessed_feature_table` 吃全 split 聯集。新增第四張增量表＝該檔加一個條目。
+「哪張表要哪些月」的規則收斂到 `pipelines/dataset/month_plans.py` 的 `_CONFIGURED_SNAP_DATES`：test 兩張吃 `dataset.test_snap_dates`，`preprocessed_feature_table` 吃全 split 聯集。權威清單 `INCREMENTAL_DATASETS` 由它推導而非另寫一份，所以**新增第四張增量表＝該表加一個條目**（＋ pipeline 定義上那個節點的一行 input），兩邊不可能對不起來。
 
 **ADR-0002 的取捨全部不變**：差集邏輯（`plan_incremental_snap_dates`）一行沒動，`--rebuild-dates` 語意不變，A21 不變，`exists() ≠ fresh` 這筆帳仍然掛在那邊。變的只有「決定在哪裡套用」。ADR-0002 §「差集邏輯集中在單一 helper，由四個 node 共用」那段描述的實作位置到此為止。
 

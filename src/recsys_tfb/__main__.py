@@ -753,9 +753,9 @@ def dataset(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
-        # A loop over the plans, not three hand-written lines: adding a fourth
-        # incremental artifact means one entry in INCREMENTAL_DATASETS, and the
-        # wiring follows.
+        # A loop over the plans, not three hand-written lines: registering a
+        # fourth incremental artifact in month_plans.py is enough, and the
+        # injection follows.
         extra_datasets={
             month_plan_input(name): plan for name, plan in month_plans.items()
         },

@@ -133,10 +133,18 @@ class TestRebuild:
 
 
 class TestPlanSetShape:
-    def test_one_plan_per_incremental_artifact(self):
-        # Equality, not membership: a fourth incremental artifact added to the
-        # authoritative list without a rule here fails, and so does a stale one.
-        assert set(build_month_plans(PARAMS)) == set(INCREMENTAL_DATASETS)
+    # Deliberately absent: `set(build_month_plans(...)) == set(INCREMENTAL_DATASETS)`.
+    # INCREMENTAL_DATASETS is derived from the rule table and build_month_plans
+    # loops over it, so that equality holds by construction and no edit can
+    # break it — a green there would mean nothing. The property it used to
+    # guard (a name registered without a rule) is now a KeyError at build time,
+    # which test_every_artifact_has_a_usable_rule below exercises.
+
+    def test_every_artifact_has_a_usable_rule(self):
+        # Not vacuous: a rule entry that reads the wrong shape of `parameters`
+        # raises here rather than silently yielding an empty plan.
+        plans = build_month_plans(PARAMS)
+        assert all(plans[name].to_process for name in INCREMENTAL_DATASETS)
 
     def test_the_authoritative_list_is_the_three_artifacts(self):
         assert set(INCREMENTAL_DATASETS) == {

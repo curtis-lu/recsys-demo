@@ -5,8 +5,8 @@ time: a run touches only the configured months that have not landed yet, plus
 whatever ``--rebuild-dates`` names (ADR-0002). This module owns that whole
 decision — which configured months each artifact is entitled to, and how the
 landed ones are subtracted — so adding a fourth incremental artifact is one
-entry here plus one input on the pipeline definition, not a fourth node body
-that derives its own answer.
+entry in :data:`_CONFIGURED_SNAP_DATES` plus one input on the pipeline
+definition, not a fourth node body that derives its own answer.
 
 The resulting plans reach the nodes through the **catalog**, as named datasets
 (``<artifact>_month_plan``), not through ``parameters``: a plan is runtime data
@@ -25,15 +25,6 @@ from recsys_tfb.pipelines.dataset.nodes_shared import (
 
 logger = logging.getLogger(__name__)
 
-#: Dataset names whose ``snap_date`` partitions gate incremental processing.
-#: Authoritative: the CLI lists partitions for exactly these, builds one plan
-#: per entry, and injects them under :func:`month_plan_input` names.
-INCREMENTAL_DATASETS = (
-    "preprocessed_feature_table",
-    "test_keys",
-    "test_model_input",
-)
-
 
 def month_plan_input(dataset_name: str) -> str:
     """Catalog name of the month plan that scopes ``dataset_name``."""
@@ -44,15 +35,29 @@ def _test_snap_dates(parameters: dict) -> list:
     return (parameters.get("dataset") or {}).get("test_snap_dates", [])
 
 
-#: The per-artifact answer to "which months does the config ask for". The two
-#: test artifacts cover the test months only; ``preprocessed_feature_table``
-#: feeds every split, so it covers the union (train ∪ cal ∪ val ∪ test) — and
-#: unlike the other two it is fail-loud about ``train_snap_dates`` being absent.
+#: The per-artifact answer to "which months does the config ask for", and the
+#: only place a new incremental artifact has to be registered. The two test
+#: artifacts cover the test months only; ``preprocessed_feature_table`` feeds
+#: every split, so it covers the union (train ∪ cal ∪ val ∪ test) — and unlike
+#: the other two it is fail-loud about ``train_snap_dates`` being absent.
+#:
+#: Element type is deliberately loose: config gives ``str``,
+#: ``collect_dataset_snap_dates`` gives ``pd.Timestamp``, and
+#: :func:`plan_incremental_snap_dates` normalises either.
 _CONFIGURED_SNAP_DATES = {
     "preprocessed_feature_table": collect_dataset_snap_dates,
     "test_keys": _test_snap_dates,
     "test_model_input": _test_snap_dates,
 }
+
+
+#: Dataset names whose ``snap_date`` partitions gate incremental processing.
+#: Authoritative: the CLI lists partitions for exactly these, builds one plan
+#: per entry, and injects them under :func:`month_plan_input` names.
+#:
+#: Derived, not written out a second time — a name here without a rule above
+#: would raise ``KeyError`` mid-build, so the two cannot drift apart.
+INCREMENTAL_DATASETS = tuple(_CONFIGURED_SNAP_DATES)
 
 
 def _fmt(dates) -> str:
