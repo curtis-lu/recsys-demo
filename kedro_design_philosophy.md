@@ -1,3 +1,23 @@
+> # ⚠ DEPRECATED（2026-08-03）
+>
+> **不要照這份文件做事。** 它寫於 `3a3f696`（本 repo 第一個框架 skeleton commit），
+> 是框架**尚未存在時**寫下的期望清單，此後從未更新，也沒有任何文件連結到它。
+>
+> 現行的接替者：
+>
+> | 你要找的東西 | 去讀 |
+> |---|---|
+> | 給 AI agent 的架構約束、框架事實、例外登記 | `docs/agents/architecture-constraints.md` |
+> | 設計取捨的白話背景（給人讀） | `docs/design-principles.md` |
+> | 程式碼現在長什麼樣 | `graphify-out/GRAPH_REPORT.md` |
+> | 「Claude 該怎麼跟這個 repo 協作」（本檔的 `## How Claude Should Think When Making Changes`、`## Preferred Collaboration Style`、`## Output Standard for Claude` 三節） | `CLAUDE.md` 與 `~/.claude/rules/` |
+>
+> 本檔內容經逐條核對（過程見 `docs/notes/2026-08-03-day1-doc-triage.md`）：
+> 大部分已由上表接替，6 條「現況做對了但沒寫下來」已搶救進
+> `docs/agents/architecture-constraints.md`，1 條（"build small, composable
+> processing units"）**與程式碼現況不符**——最核心的三個 training 函式分別是
+> 228／172／155 行。保留本檔僅為存查，待使用者決定刪除。
+
 # Kedro Design Philosophy
 
 ## Purpose

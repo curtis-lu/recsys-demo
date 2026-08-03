@@ -22,6 +22,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 任務 | 先讀 |
 |---|---|
 | 架構 / 重構 / 探索 codebase | `graphify-out/GRAPH_REPORT.md`（**強制**，不得用 Explore agent 替代這一步；有 `graphify-out/wiki/index.md` 就導航 wiki 而非讀原始檔） |
+| 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋7 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | worktree / venv 任何操作 | `docs/operations/worktree-venv-setup.md` ＋ 下方 pre-flight |
 | 本機跑 Spark pipeline | `docs/operations/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
 | pipeline 部分執行 | `docs/operations/pipeline-slicing.md`（`--from-node`/`--only-node`/`--dry-run`/`--list-nodes`） |
