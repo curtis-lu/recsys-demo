@@ -10,8 +10,8 @@ All errors subclass ValueError so existing ``except ValueError`` call sites
 Invariant legend
 ----------------
 Code comments across this module, ``core/schema.py`` and
-``preprocessing/_spark.py`` reference invariants by ID. This docstring is the
-canonical legend.
+``pipelines/dataset/data_gate.py`` reference invariants by ID. This docstring is
+the canonical legend.
 
 Layer 1 — config-static (implemented here; aggregated by
 ``validate_config_consistency``, run at CLI entry):
@@ -145,8 +145,8 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
   Predicate: ``item_coverage_errors`` (pure, no Spark); wired via
-  ``validate_data_consistency`` (``preprocessing/_spark.py``) as the first
-  node of the dataset pipeline. B3 — a declared item has zero positives over
+  ``validate_data_consistency`` (``pipelines/dataset/data_gate.py``) as the
+  first node of the dataset pipeline. B3 — a declared item has zero positives over
   the train window — intentionally NOT reported by ``item_coverage_errors``
   (deferred).
 * B2 — label-window leakage columns reach features (specified but DEFERRED).

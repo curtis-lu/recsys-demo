@@ -467,7 +467,7 @@ class TestComputeFeatureColumnsDrops:
     IDENTITY = ["snap_date", "cust_id", "prod_name"]
 
     def _compute(self, drop):
-        from recsys_tfb.preprocessing._spark import _compute_feature_columns
+        from recsys_tfb.preprocessing._common import _compute_feature_columns
 
         return _compute_feature_columns(
             self.FT_COLS, self.IDENTITY, ["prod_name"], drop, "label"

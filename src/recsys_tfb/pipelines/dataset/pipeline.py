@@ -5,6 +5,7 @@ from recsys_tfb.core.pipeline import Pipeline
 
 
 def create_pipeline(enable_calibration: bool = False) -> Pipeline:
+    from recsys_tfb.pipelines.dataset.data_gate import validate_data_consistency
     from recsys_tfb.pipelines.dataset.nodes_spark import (
         apply_preprocessor_to_features,
         build_model_input,
@@ -16,12 +17,11 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         select_train_keys,
         select_val_keys,
         split_train_keys,
-        validate_data_consistency,
     )
 
     nodes = [
         # --- Layer-2 data gate (B1 item coverage + B5 categorical dtype
-        #     + B6 non-numeric feature column):
+        #     + B6 non-numeric feature column + B7 carry/feature collision):
         # runs first (insertion-order Kahn seed), side-effect only
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
