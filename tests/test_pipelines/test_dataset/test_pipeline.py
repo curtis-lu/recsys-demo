@@ -1,6 +1,7 @@
 """Tests for dataset building pipeline definition."""
 
 from recsys_tfb.pipelines.dataset import create_pipeline
+from recsys_tfb.pipelines.dataset import nodes_data_gate
 from recsys_tfb.pipelines.dataset import nodes_spark as nodes
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
@@ -142,7 +143,10 @@ class TestNodeNameToFunctionBinding:
     """
 
     BASE_BINDINGS = {
-        "validate_data_consistency": nodes.validate_data_consistency,
+        # The one binding not sourced from nodes_spark: the Layer-2 gate is its
+        # own module (it feeds core/consistency.py predicates, not preprocessing
+        # transforms), so a re-export back into nodes_spark would fail here.
+        "validate_data_consistency": nodes_data_gate.validate_data_consistency,
         "select_sample_keys": nodes.select_train_keys,
         "split_train_keys": nodes.split_train_keys,
         "select_val_keys": nodes.select_val_keys,

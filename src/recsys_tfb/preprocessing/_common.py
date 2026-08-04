@@ -27,6 +27,38 @@ def _get_preprocessing_config(parameters: dict) -> tuple[list[str], list[str]]:
     return drop_cols, categorical_cols
 
 
+def _compute_feature_columns(
+    feature_table_cols: list[str],
+    identity_cols: list[str],
+    categorical_cols: list[str],
+    drop_cols: list[str],
+    label_col: str,
+) -> list[str]:
+    """Compute feature_columns list preserving original post-join column order.
+
+    Order: identity categoricals first (in identity_cols order), then
+    feature_table columns minus drops / non-categorical identity / label.
+
+    Lives here rather than in ``_spark`` because it is pure column-name
+    bookkeeping with no Spark in it, and it has two callers on opposite sides
+    of the package boundary: ``_spark.fit_preprocessor_metadata``, which turns
+    the answer into ``preprocessor_metadata``, and the Layer-2 data gate
+    (``pipelines/dataset/nodes_data_gate.py``), which must classify *the same*
+    prospective feature set for B6. A second implementation of this rule would
+    let the gate pass a column the preprocessor then treats as a feature.
+    """
+    non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {label_col}
+    feature_columns: list[str] = []
+    for c in identity_cols:
+        if c in categorical_cols and c not in feature_columns:
+            feature_columns.append(c)
+    for c in feature_table_cols:
+        if c in non_feature or c in feature_columns:
+            continue
+        feature_columns.append(c)
+    return feature_columns
+
+
 def _validate_columns(
     columns: list[str],
     required: list[str],

@@ -15,34 +15,25 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     select_train_keys,
     select_val_keys,
     split_train_keys,
-    validate_data_consistency,
+)
+from tests.test_pipelines.test_dataset.fixture_shape import (
+    _ENTITIES,
+    _PRODUCTS,
+    _SEGMENTS,
+    _SNAP_DATES,
+    _entity_index,
+    _explicit_preprocessing_params,
 )
 
 pytestmark = pytest.mark.spark
 
 
-# --- fixture shape -----------------------------------------------------------
-# Every fixture in this module is generated from these three lists, and every
-# count assertion is derived from them (or from ``parameters``) instead of being
-# written as a literal. Resizing the fixture is then a one-line edit here rather
-# than a hunt for a dozen hand-computed constants — and a constant that silently
-# stops matching the fixture can no longer make an assertion vacuous.
-#
-# Entity count (24) is chosen so train / train-dev actually split: at the old
-# size of 4, train_dev_ratio=0.2 rounded the dev side to empty, and every
-# assertion in TestSplitTrainKeys held for a `split` that did nothing. See
-# TestSplitTrainKeys.test_both_sides_are_non_empty for how that was verified.
-# Item count stays at 3 and is deliberately NOT aligned with the 8 in conf/ —
-# that gap is orthogonal to this one (see #140).
-_ENTITIES = [f"C{i:03d}" for i in range(1, 25)]
-_PRODUCTS = ["exchange_fx", "exchange_usd", "fund_stock"]
-_SNAP_DATES = ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30", "2024-05-31"]
-
-# Per-entity attribute values, cycled so any fixture size stays covered. These
-# are inert with respect to every assertion below (they are neither identity nor
-# feature columns); they exist so the frames look like the real tables.
-_SEGMENTS = ["mass", "affluent", "hnw"]
-_CHANNELS = ["digital", "branch", "both"]
+# The frames these tests run against are fixtures in conftest.py; the lists and
+# row rules they are generated from are in fixture_shape.py (imported above and
+# shared with test_data_gate.py). Every count assertion below is derived from
+# those constants or from ``parameters``, never written as a literal — a
+# constant that silently stops matching the fixture cannot make an assertion
+# vacuous.
 
 
 # The month plan an incremental node would receive from the CLI. Omitting
@@ -56,46 +47,6 @@ def _encode_plan(parameters, existing=None):
 
 def _test_keys_plan(parameters, existing=None):
     return build_month_plans(parameters, existing=existing)["test_keys"]
-
-
-def _entity_index(cid: str) -> int:
-    return _ENTITIES.index(cid)
-
-
-def _segment(cid: str) -> str:
-    return _SEGMENTS[_entity_index(cid) % len(_SEGMENTS)]
-
-
-def _channel(cid: str) -> str:
-    return _CHANNELS[_entity_index(cid) % len(_CHANNELS)]
-
-
-# The one entity with no positive on any product. Keeps a zero-positive query
-# group in the fixture (so the group filter still has something to drop) while
-# every other entity carries one.
-_ALL_NEGATIVE_ENTITY = _ENTITIES[-1]
-
-
-def _is_positive(cid: str, prod: str) -> bool:
-    """Positive on the first product for every entity but one.
-
-    Not concentrated on a single entity, because the train / train-dev split
-    partitions **by entity**: one positive entity lands wholly on one side and
-    leaves the other with an all-zero label column — the state
-    ``TestModelInputSchemaPerSplit.test_positive_rate_is_strictly_inside_its_bounds``
-    exists to reject, and train_dev is the worst place to tolerate it since it
-    is every HPO trial's early-stopping set (ADR-0005 §2). Verified by narrowing
-    this back to ``_ENTITIES[0]``: train_dev then holds 0 positives in 18 rows.
-    Spreading it over every *third* entity was not enough either — train_dev's
-    three entities happened to miss all of them, and "which entities land in
-    dev" is a hash detail no assertion should depend on.
-
-    Two properties this shape guarantees for any split, whatever the hash does:
-
-    - at most one positive per query group, so no group is all-positive;
-    - at least one positive in any split holding two or more entities.
-    """
-    return cid != _ALL_NEGATIVE_ENTITY and prod == _PRODUCTS[0]
 
 
 # --- derivations used by assertions ------------------------------------------
@@ -157,90 +108,6 @@ def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
         | set(preprocessor["feature_columns"])
         | set(keys.columns)
     )
-
-
-@pytest.fixture
-def feature_table(spark):
-    rows = []
-    for snap in _SNAP_DATES:
-        for cid in _ENTITIES:
-            aum = 100.0 * (_entity_index(cid) + 1)
-            rows.append({
-                "snap_date": pd.Timestamp(snap),
-                "cust_id": cid,
-                "total_aum": aum,
-                "fund_aum": aum / 10.0,
-                "in_amt_sum_l1m": 5.0,
-                "out_amt_sum_l1m": 3.0,
-                "in_amt_ratio_l1m": 0.05,
-                "out_amt_ratio_l1m": 0.03,
-            })
-    return spark.createDataFrame(pd.DataFrame(rows))
-
-
-@pytest.fixture
-def label_table(spark):
-    rows = []
-    for snap in _SNAP_DATES:
-        snap_dt = pd.Timestamp(snap)
-        for cid in _ENTITIES:
-            for prod in _PRODUCTS:
-                rows.append(
-                    {
-                        "snap_date": snap_dt,
-                        "cust_id": cid,
-                        "cust_segment_typ": _segment(cid),
-                        "apply_start_date": snap_dt + pd.Timedelta(days=1),
-                        "apply_end_date": snap_dt + pd.Timedelta(days=30),
-                        "label": 1 if _is_positive(cid, prod) else 0,
-                        "prod_name": prod,
-                    }
-                )
-    return spark.createDataFrame(pd.DataFrame(rows))
-
-
-@pytest.fixture
-def sample_pool(spark):
-    rows = []
-    for snap in _SNAP_DATES:
-        snap_dt = pd.Timestamp(snap)
-        for cid in _ENTITIES:
-            for prod in _PRODUCTS:
-                rows.append({
-                    "snap_date": snap_dt,
-                    "cust_id": cid,
-                    "cust_segment_typ": _segment(cid),
-                    "prod_name": prod,
-                    "label": 1 if _is_positive(cid, prod) else 0,
-                    "tenure_months": 12 * (_entity_index(cid) % 5 + 1),
-                    "channel_preference": _channel(cid),
-                })
-    return spark.createDataFrame(pd.DataFrame(rows))
-
-
-@pytest.fixture
-def parameters():
-    return {
-        "random_seed": 42,
-        "schema": {
-            "categorical_values": {
-                "prod_name": list(_PRODUCTS),
-            },
-        },
-        "dataset": {
-            "train_snap_dates": _SNAP_DATES[:3],
-            "sample_ratio": 0.5,
-            "sample_group_keys": ["cust_segment_typ", "prod_name"],
-            "sample_ratio_overrides": {},
-            "train_dev_ratio": 0.2,
-            "enable_calibration": False,
-            "calibration_snap_dates": [],
-            "calibration_sample_ratio": 1.0,
-            "val_snap_dates": _SNAP_DATES[3:4],
-            "val_sample_ratio": 1.0,
-            "test_snap_dates": _SNAP_DATES[4:5],
-        },
-    }
 
 
 class TestSelectTrainKeys:
@@ -768,166 +635,6 @@ def test_build_model_input_casts_float_features_to_float32(
     assert out_dtypes["out_amt_ratio_l1m"] == "float"
 
 
-# --- where Layer-2 gate tests live -------------------------------------------
-# #140 assigns `preprocessing/_spark.py` behaviour to
-# tests/test_preprocessing/test_spark.py. `validate_data_consistency` is defined
-# there but re-exported as a dataset *node* (pipelines/dataset/nodes_spark.py),
-# which is how this module imports it — so its integration tests stay here, next
-# to the existing B1/B5/B6 ones and the fixtures they all need. The pure helpers
-# it calls (`_compute_feature_columns`) are tested in test_preprocessing/. Split
-# by "gate wiring vs pure helper", not by which file the symbol happens to live
-# in, so a behaviour still has exactly one home.
-
-
-def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None) -> dict:
-    """``parameters`` with the keys the Layer-2 gate reads made explicit.
-
-    The fixture leaves ``prepare_model_input`` unset, so the gate falls back to
-    the defaults in ``preprocessing/_common.py``. Those defaults are read from
-    that module rather than restated here: a hand-written copy would be equal to
-    the real list only as long as feature_table happens to lack the columns
-    where the two differ (``apply_start_date`` / ``apply_end_date`` /
-    ``cust_segment_typ``), and would then silently stop dropping them the day a
-    fixture grows one — turning every count assertion below into a different
-    question without turning anything red.
-
-    Callers add to the defaults rather than replacing them, so a test says which
-    columns *it* cares about and inherits the rest.
-    """
-    from recsys_tfb.preprocessing._common import _get_preprocessing_config
-
-    default_drop, default_categorical = _get_preprocessing_config(parameters)
-    dataset = {
-        **parameters["dataset"],
-        "prepare_model_input": {
-            "drop_columns": [*default_drop, *drop_extra],
-            "categorical_columns": [*default_categorical, *categorical_extra],
-        },
-    }
-    if carry is not None:
-        dataset["carry_columns"] = list(carry)
-    return {**parameters, "dataset": dataset}
-
-
-class TestValidateDataConsistency:
-    def test_clean_fixture_is_not_flagged_by_any_gate(
-        self, sample_pool, label_table, feature_table, parameters
-    ):
-        """The gate must not misfire on a fixture that violates nothing.
-
-        Covers B1/B5/B6 — it replaces three verbatim-identical ``is None``
-        assertions that were filed under three different invariants and so
-        promised a discrimination none of them had. Each invariant's raise side
-        is covered by its own test below; this one only says "no false alarm".
-
-        **Not** a B7 guard: the fixture configures no ``carry_columns``, so B7's
-        input here is empty and unflagging it proves nothing. B7's false-positive
-        side is covered by
-        ``TestValidateDataConsistencyB7.test_carry_column_absent_from_feature_table_is_not_flagged``.
-
-        Fixture properties it rests on: prod_name values ==
-        schema.categorical_values.prod_name and every snap inside the configured
-        windows (B1); feature_table's feature columns are all numeric and the
-        lone declared categorical (prod_name) is an identity column absent from
-        feature_table (B5/B6).
-        """
-        assert validate_data_consistency(
-            sample_pool, label_table, feature_table, parameters) is None
-
-    def test_undeclared_value_raises(
-        self, sample_pool, label_table, feature_table, parameters
-    ):
-        # Shrink declared set so fund_stock (present in data) is undeclared.
-        params = {
-            **parameters,
-            "schema": {
-                **parameters["schema"],
-                "categorical_values": {"prod_name": ["exchange_fx", "exchange_usd"]},
-            },
-        }
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, feature_table, params)
-        msg = str(ei.value)
-        assert "fund_stock" in msg
-        assert "sample_pool" in msg
-
-    def test_declared_value_absent_from_sample_pool_raises(
-        self, sample_pool, label_table, feature_table, parameters
-    ):
-        # 'ploan' is declared but never appears in sample_pool/label data ->
-        # sp_missing direction (D3 second direction). declared-label is B3,
-        # deferred, so the only error is the sample_pool "never produces" one.
-        params = {
-            **parameters,
-            "schema": {
-                **parameters["schema"],
-                "categorical_values": {
-                    "prod_name": [
-                        "exchange_fx", "exchange_usd", "fund_stock", "ploan",
-                    ]
-                },
-            },
-        }
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, feature_table, params)
-        msg = str(ei.value)
-        assert "ploan" in msg
-        assert "never produces" in msg
-
-    def test_value_only_in_non_window_snap_is_ignored(
-        self, spark, sample_pool, label_table, feature_table, parameters
-    ):
-        # 2024-12-31 is outside collect_dataset_snap_dates (train Jan-Mar,
-        # val Apr, test May). An undeclared 'ploan' there must be filtered out.
-        extra = spark.createDataFrame(
-            pd.DataFrame([{
-                "snap_date": pd.Timestamp("2024-12-31"),
-                "cust_id": "C001",
-                "cust_segment_typ": "mass",
-                "prod_name": "ploan",
-                "label": 0,
-                "tenure_months": 12,
-                "channel_preference": "digital",
-            }])
-        )
-        sp = sample_pool.unionByName(extra)
-        assert validate_data_consistency(sp, label_table, feature_table, parameters) is None
-
-    def test_decimal_categorical_in_feature_table_raises(
-        self, spark, sample_pool, label_table, parameters
-    ):
-        # B5: a column declared in categorical_columns is DecimalType in
-        # feature_table -> fail fast at the gate (instead of the opaque
-        # JSON-serialization crash 141s into fit_preprocessor_metadata).
-        from decimal import Decimal
-
-        from pyspark.sql import types as T
-
-        ft_schema = T.StructType([
-            T.StructField("snap_date", T.TimestampType()),
-            T.StructField("cust_id", T.StringType()),
-            T.StructField("industry_code", T.DecimalType(15, 0)),
-        ])
-        feature_table = spark.createDataFrame(
-            [(pd.Timestamp("2024-01-31").to_pydatetime(), "C001", Decimal("1001"))],
-            schema=ft_schema,
-        )
-        params = {
-            **parameters,
-            "dataset": {
-                **parameters["dataset"],
-                "prepare_model_input": {
-                    "categorical_columns": ["prod_name", "industry_code"],
-                },
-            },
-        }
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, feature_table, params)
-        msg = str(ei.value)
-        assert "industry_code" in msg
-        assert "decimal" in msg
-
-
 class TestSplitTrainKeysCarry:
     def test_carry_column_survives_split(self, spark):
         keys = spark.createDataFrame(pd.DataFrame({
@@ -999,170 +706,6 @@ class TestApplyPreprocessorUnknownWarning:
         assert any(
             "1 unknowns in column 'channel_preference'" in m for m in warnings
         ), warnings
-
-
-class TestValidateDataConsistencyB6:
-    def test_unencoded_string_feature_raises(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        # 注入一個未宣告 categorical、也未 drop 的字串特徵欄
-        rogue = feature_table.withColumn("rogue_str", F.lit("free_text"))
-        with pytest.raises(DataConsistencyError, match="rogue_str"):
-            validate_data_consistency(sample_pool, label_table, rogue, parameters)
-
-    def test_boolean_feature_not_flagged(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        # 布林特徵欄是數值（bool→numeric），B6 不得誤報
-        with_bool = feature_table.withColumn("flag_bool", F.lit(True))
-        assert (
-            validate_data_consistency(sample_pool, label_table, with_bool, parameters)
-            is None
-        )
-
-    def test_declared_categorical_string_feature_is_not_flagged(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """B6 must be told which columns get encoded downstream.
-
-        A string feature column that *is* declared categorical becomes an
-        integer at encode time, so it is not the object-dtype footgun B6 guards
-        — the gate has to hand the declared set to the predicate for that to
-        hold. The rogue column is here so the assertion is "raised, and named
-        only the rogue one" rather than "did not raise": a silently dead gate
-        fails this test instead of passing it.
-        """
-        ft = (
-            feature_table
-            .withColumn("channel_preference", F.lit("digital"))
-            .withColumn("rogue_str", F.lit("free_text"))
-        )
-        params = _gate_params(parameters, categorical_extra=["channel_preference"])
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, ft, params)
-        msg = str(ei.value)
-        assert "rogue_str" in msg
-        assert "channel_preference" not in msg
-
-    def test_dropped_string_column_is_not_flagged(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """B6 looks at *prospective feature* columns, not raw feature_table ones.
-
-        A dropped column never reaches the model, so flagging it would be a
-        false alarm that no valid config could clear — the gate has to classify
-        the ``_compute_feature_columns`` output. Same rogue-column anchor as
-        above so a dead gate cannot pass.
-        """
-        ft = (
-            feature_table
-            .withColumn("legacy_note", F.lit("free_text"))
-            .withColumn("rogue_str", F.lit("free_text"))
-        )
-        params = _gate_params(parameters, drop_extra=["legacy_note"])
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, ft, params)
-        msg = str(ei.value)
-        assert "rogue_str" in msg
-        assert "legacy_note" not in msg
-
-
-class TestValidateDataConsistencyB7:
-    """B7 — a carry column that also lives in feature_table must be dropped."""
-
-    def test_undropped_carry_column_raises(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """Numeric on purpose: this is the case only B7 catches.
-
-        B6 already rejects a *string* carry column that was left out of
-        drop_columns (as an un-encoded object feature), so a string here would
-        not prove B7 is wired — the raise could come from B6. A numeric one
-        sails past B6 straight into ``Reference 'x' is ambiguous`` at
-        build_model_input, which is the crash B7 exists to pre-empt.
-        ``acct_age_months`` is the negative control: same collision, correctly
-        dropped, must not be named.
-        """
-        ft = (
-            feature_table
-            .withColumn("tenure_months", F.lit(12))
-            .withColumn("acct_age_months", F.lit(24))
-        )
-        params = _gate_params(
-            parameters,
-            drop_extra=["acct_age_months"],
-            carry=["tenure_months", "acct_age_months"],
-        )
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, ft, params)
-        msg = str(ei.value)
-        assert "1 issue(s)" in msg
-        assert "tenure_months" in msg
-        # "carry_columns" appears in no other message this gate can emit, so it
-        # pins the raise to B7 rather than to whichever rule fires first.
-        assert "carry_columns" in msg
-        assert "acct_age_months" not in msg
-
-    def test_carry_column_absent_from_feature_table_is_not_flagged(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """The ordinary case: carry columns usually live only in sample_pool.
-
-        ``channel_preference`` is a sample_pool column and not a feature_table
-        one, so there is nothing to be ambiguous with. It is deliberately not
-        ``cust_segment_typ`` — that one is in the default drop_columns, so an
-        unflagged result there would be explained by the drop just as well as by
-        the absence, and removing the feature_table check would not turn it red.
-        """
-        assert "channel_preference" not in feature_table.columns
-        params = _gate_params(parameters, carry=["channel_preference"])
-        assert validate_data_consistency(
-            sample_pool, label_table, feature_table, params) is None
-
-    def test_identity_column_in_carry_is_not_flagged(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """The gate has to tell B7 which columns are identity.
-
-        ``cust_id`` is in feature_table and not in drop_columns, so the naive
-        rule flags it — but ``select_keys`` never copies an identity column a
-        second time, and running the real ``build_model_input`` this way
-        completes normally. Flagging it would demand a drop_columns edit that
-        changes no behaviour while busting base_dataset_version.
-        """
-        assert "cust_id" in feature_table.columns
-        params = _gate_params(parameters, carry=["cust_id"])
-        params["dataset"]["prepare_model_input"]["drop_columns"] = [
-            c for c in params["dataset"]["prepare_model_input"]["drop_columns"]
-            if c != "cust_id"
-        ]
-        assert validate_data_consistency(
-            sample_pool, label_table, feature_table, params) is None
-
-
-class TestValidateDataConsistencyCollectAll:
-    def test_two_unrelated_violations_raise_once_naming_both(
-        self, spark, feature_table, sample_pool, label_table, parameters
-    ):
-        """One raise listing every violation, so one fix pass clears them all.
-
-        Two different invariants on purpose (B7 numeric collision + B6 rogue
-        string): a gate that stopped at the first non-empty error list would
-        still report one of them, and the count in the header is what separates
-        that from reporting both.
-        """
-        ft = (
-            feature_table
-            .withColumn("tenure_months", F.lit(12))
-            .withColumn("rogue_str", F.lit("free_text"))
-        )
-        params = _gate_params(parameters, carry=["tenure_months"])
-        with pytest.raises(DataConsistencyError) as ei:
-            validate_data_consistency(sample_pool, label_table, ft, params)
-        msg = str(ei.value)
-        assert "2 issue(s)" in msg
-        assert "tenure_months" in msg
-        assert "rogue_str" in msg
 
 
 # --- ADR-0002 / ADR-0007: the test branch processes only the months it is
@@ -1600,7 +1143,8 @@ class TestFitUsesTrainMonthsOnly:
         )
 
     def _params(self, parameters):
-        return _gate_params(parameters, categorical_extra=["risk_attr"])
+        return _explicit_preprocessing_params(
+            parameters, categorical_extra=["risk_attr"])
 
     def test_val_only_category_never_enters_the_mapping(
         self, ft_with_val_only_category, parameters

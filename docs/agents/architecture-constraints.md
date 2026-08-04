@@ -61,7 +61,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 
-**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py:28`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（註冊於 `pipelines/dataset/pipeline.py:27`，實作在 `pipelines/dataset/nodes_data_gate.py`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
 
 ## F6. `--env` 的覆蓋層語意會靜默退化
 
@@ -142,6 +142,12 @@ A3、A4 管整個 `src/recsys_tfb/`。**CLI 層（`__main__.py`）、`core/`、`
   `test_static_coverage_floor` 把「59 個裡有 55 個可判定」釘住，這個盲區不會悄悄變大。
 - A1 的寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的間接寫入它看不到——
   `tune_hyperparameters` 正是這種，靠人工登記在 R4。
+- **A1 兩項掃描是靠檔名 pattern 找 node 模組的**（`pipelines/**/nodes*.py`，`test_architecture_constraints.py:151,169`），
+  不是靠「這個函式有沒有被註冊成 Node」。所以**把 node 函式放進不叫 `nodes*.py` 的檔案，等於讓它靜默退出 A1 的管轄**，
+  而測試仍然全綠（A2–A7 用的是 `rglob("*.py")` 或 `Node(...)` AST，不受影響）。新增放 node 函式的模組時，
+  檔名必須以 `nodes` 開頭。把掃描放寬到整個 `pipelines/` 不是等價替代——那會多抓到 5 個 HPO checkpoint helper
+  （`open_study`／`write_checkpoint`／`load_checkpoint`／`clear_study_dir` 與 `source_etl` 的一處 module-level 寫入），
+  等於改寫 R4「node 函式寫診斷副產物」的語意，需要另外決定。
 
 ### A1. 資料流產物一律經 catalog；node 不得自己讀寫它們
 
@@ -236,7 +242,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
-| `pipelines/dataset/pipeline.py:28` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查 |
+| `pipelines/dataset/pipeline.py:27` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查（實作在 `pipelines/dataset/nodes_data_gate.py`） |
 | `pipelines/training/pipeline.py:196` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 
 （兩列的行號都指 `Node(` 那一行。）

@@ -11,7 +11,7 @@ date: 2026-08-02
 
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
-| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`preprocessing/_spark.py:110-132`） | 黑名單：不得進 `feature_columns` |
+| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`preprocessing/_common.py:30-59`） | 黑名單：不得進 `feature_columns` |
 | `carry_columns` | **`sample_pool`** 的欄 | `select_keys`（`pipelines/dataset/helpers_spark.py:124-125`） | 白名單：keys 除 identity 外還要多帶 |
 | `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
 
