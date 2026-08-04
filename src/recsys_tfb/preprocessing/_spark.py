@@ -9,6 +9,15 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+from recsys_tfb.core.consistency import (
+    DataConsistencyError,
+    carry_column_collision_errors,
+    categorical_dtype_errors,
+    item_coverage_errors,
+    nonnumeric_feature_errors,
+    resolved_item_values,
+    spark_dtype_is_numeric,
+)
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.nodes_shared import collect_dataset_snap_dates
@@ -184,10 +193,6 @@ def fit_preprocessor_metadata(
     feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
     identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
 
-    # Local import: keep this lazy to avoid an import cycle
-    # (_spark -> core.schema -> core.consistency). Do not hoist to module level.
-    from recsys_tfb.core.consistency import DataConsistencyError
-
     cat_values = schema.get("categorical_values", {})
     missing_cats = [c for c in identity_cat_cols if c not in cat_values]
     if missing_cats:
@@ -289,19 +294,6 @@ def validate_data_consistency(
 
     All errors are collected and raised once so a single fix pass clears them.
     """
-    # Local import: keep lazy to avoid an import cycle
-    # (_spark -> core.schema -> core.consistency). Matches the existing
-    # local-import pattern inside fit_preprocessor_metadata.
-    from recsys_tfb.core.consistency import (
-        DataConsistencyError,
-        carry_column_collision_errors,
-        categorical_dtype_errors,
-        item_coverage_errors,
-        nonnumeric_feature_errors,
-        resolved_item_values,
-        spark_dtype_is_numeric,
-    )
-
     schema = get_schema(parameters)
     item = schema["item"]
     time_col = schema["time"]
@@ -367,14 +359,15 @@ def apply_preprocessor_to_features(
     feature_table: DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
-    snap_dates: list | None = None,
+    snap_dates: list,
 ) -> DataFrame:
     """Encode non-identity categoricals in Spark feature_table at customer-month granularity.
 
-    Filters feature_table to ``snap_dates``, defaulting to the union of all
-    dataset snap_dates (train ∪ cal ∪ val ∪ test). The dataset pipeline passes
-    an explicit list so that months whose partition already landed are not
-    re-encoded into a bit-identical result (ADR-0002).
+    Filters feature_table to ``snap_dates``, which the caller must supply — it
+    is the caller that knows which months this run is for. The dataset pipeline
+    passes its incremental month plan, so months whose partition already landed
+    are not re-encoded into a bit-identical result (ADR-0002). An empty list is
+    a legitimate value (nothing left to process); see the empty-frame note below.
 
     Raises ``ValueError`` if any snap_date about to be processed is missing from
     feature_table. Months that are *not* being processed are deliberately not
@@ -403,11 +396,7 @@ def apply_preprocessor_to_features(
         raise ValueError(f"feature_table missing base-key columns: {missing_base}")
     _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
 
-    needed_dates = (
-        [pd.Timestamp(d) for d in snap_dates]
-        if snap_dates is not None
-        else collect_dataset_snap_dates(parameters)
-    )
+    needed_dates = [pd.Timestamp(d) for d in snap_dates]
 
     # Fail-loud if feature_table is missing any snap_date we are about to
     # process. Skipped months are not checked: this run never reads them.
