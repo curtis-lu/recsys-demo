@@ -19,7 +19,6 @@ from recsys_tfb.preprocessing._spark import (
     build_model_input as _build_model_input,
     filter_groups_with_positives as _filter_groups_with_positives,
     fit_preprocessor_metadata as _fit_preprocessor_metadata,
-    validate_data_consistency as _validate_data_consistency,
 )
 
 logger = logging.getLogger(__name__)
@@ -221,18 +220,6 @@ def build_test_model_input(
     keys = keys.filter(_date_filter(schema["time"], month_plan.to_process))
     return _build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
-    )
-
-
-def validate_data_consistency(
-    sample_pool: DataFrame,
-    label_table: DataFrame,
-    feature_table: DataFrame,
-    parameters: dict,
-) -> None:
-    """Layer-2 data gate (B1 + B5); first node of the dataset pipeline."""
-    return _validate_data_consistency(
-        sample_pool, label_table, feature_table, parameters
     )
 
 

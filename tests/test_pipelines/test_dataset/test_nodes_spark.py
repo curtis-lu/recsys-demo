@@ -6,6 +6,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.dataset.data_gate import validate_data_consistency
 from recsys_tfb.pipelines.dataset.month_plans import build_month_plans
 from recsys_tfb.pipelines.dataset.nodes_spark import (
     apply_preprocessor_to_features,
@@ -15,7 +16,6 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     select_train_keys,
     select_val_keys,
     split_train_keys,
-    validate_data_consistency,
 )
 
 pytestmark = pytest.mark.spark
@@ -769,14 +769,12 @@ def test_build_model_input_casts_float_features_to_float32(
 
 
 # --- where Layer-2 gate tests live -------------------------------------------
-# #140 assigns `preprocessing/_spark.py` behaviour to
-# tests/test_preprocessing/test_spark.py. `validate_data_consistency` is defined
-# there but re-exported as a dataset *node* (pipelines/dataset/nodes_spark.py),
-# which is how this module imports it — so its integration tests stay here, next
-# to the existing B1/B5/B6 ones and the fixtures they all need. The pure helpers
-# it calls (`_compute_feature_columns`) are tested in test_preprocessing/. Split
-# by "gate wiring vs pure helper", not by which file the symbol happens to live
-# in, so a behaviour still has exactly one home.
+# `validate_data_consistency` now lives in `pipelines/dataset/data_gate.py`
+# (#161), which is how this module imports it. Its integration tests stay here,
+# next to the existing B1/B5/B6/B7 ones and the fixtures they all need. The pure
+# helpers it calls (`_compute_feature_columns`) are tested in
+# test_preprocessing/. Split by "gate wiring vs pure helper", not by which file
+# the symbol happens to live in, so a behaviour still has exactly one home.
 
 
 def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None) -> dict:
