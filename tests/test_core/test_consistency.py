@@ -1131,7 +1131,7 @@ class TestCarryColumnCollisionErrors:
     # nothing while busting base_dataset_version.
 
     def test_identity_column_in_carry_is_exempt(self):
-        # select_keys appends only carry entries that are not already in the
+        # A split's keys append only carry entries not already in the
         # identity key, so no second copy exists to be ambiguous with.
         assert self._errors(["cust_id"], []) == []
 

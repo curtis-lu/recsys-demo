@@ -1,22 +1,21 @@
-"""Assembling a split's ``model_input``: the two joins, the output column rule,
-and the column-existence guards that back them.
+"""The mechanics a split's ``model_input`` is assembled from: the two joins, the
+output column rule, the zero-positive group filter, and the column guard behind
+them.
+
+Each function here carries at most one mechanism. Which of them a split runs,
+and why each is the right answer for this task, is the story
+``nodes.build_model_input`` tells (ADR-0008 §2).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
+from pyspark.sql import Window
 from pyspark.sql import functions as F
-
-from recsys_tfb.core.logging import log_step
-from recsys_tfb.core.schema import get_schema
-from recsys_tfb.preprocessing import _cast_feature_floats_to_float32
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
-
-logger = logging.getLogger(__name__)
 
 
 def _validate_columns(
@@ -30,67 +29,70 @@ def _validate_columns(
         raise ValueError(f"Missing columns in {context}: {sorted(missing)}")
 
 
-def build_model_input(
+def join_labels_missing_as_negative(
     keys: DataFrame,
-    preprocessed_feature_table: DataFrame,
     label_table: DataFrame,
-    preprocessor_metadata: dict,
-    parameters: dict,
+    join_key: list[str],
+    label_col: str,
 ) -> DataFrame:
-    """Merge Spark keys + labels + pre-encoded features into model_input.
+    """LEFT join ``label_table`` onto ``keys``; a miss becomes label 0.
 
-    Equivalent to (build_dataset + transform_to_model_input) but encoding is
-    already applied to feature_table once, so splits share the work.
+    LEFT + COALESCE, never INNER: an INNER join would silently drop the misses,
+    which is most of the frame.
     """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
-    label_col = schema["label"]
-    identity_cols = schema["identity_columns"]
-    base_key = [time_col] + entity_cols
+    joined = keys.join(label_table, on=join_key, how="left")
+    return joined.withColumn(label_col, F.coalesce(F.col(label_col), F.lit(0)))
 
-    feature_columns = preprocessor_metadata["feature_columns"]
 
-    # keys' grain IS model_input's grain (ADR-0005). This used to fall back to a
-    # base-key-only label join when item was absent, which silently multiplied
-    # every (time, entity) by label_table's item count and took `item`'s values
-    # from label_table. No caller can reach that branch — identity_columns is
-    # derived ([time] + entity + [item], core/schema.py) and both wrappers in
-    # pipelines/dataset/nodes.py feed it, across all five pipeline nodes
-    # they register — but its failure mode is a silently N-times-too-large
-    # dataset, so the missing column is an error rather than a mode.
-    label_join_key = base_key + [item_col]
-    _validate_columns(keys.columns, label_join_key, "build_model_input keys")
-    with log_step(logger, "merge_labels"):
-        dataset = keys.join(label_table, on=label_join_key, how="left")
-        # sample_pool is dense (cust × prod fully expanded); label_table is
-        # sparse (only customers with category transactions). Join misses are
-        # treated as negatives.
-        dataset = dataset.withColumn(label_col, F.coalesce(F.col(label_col), F.lit(0)))
-    with log_step(logger, "merge_features"):
-        dataset = dataset.join(preprocessed_feature_table, on=base_key, how="left")
+def join_features_missing_as_null(
+    dataset: DataFrame,
+    preprocessed_feature_table: DataFrame,
+    base_key: list[str],
+) -> DataFrame:
+    """LEFT join the encoded features on ``base_key``; a miss leaves them NULL.
 
-    with log_step(logger, "select_output_columns"):
-        required = list(set(identity_cols + [label_col] + feature_columns))
-        _validate_columns(dataset.columns, required, "build_model_input")
+    LEFT, never INNER: the row survives with an all-NULL feature block rather
+    than disappearing, which is what keeps the output's grain equal to ``keys``'.
+    """
+    return dataset.join(preprocessed_feature_table, on=base_key, how="left")
 
-        carry_present = [
-            c for c in keys.columns
-            if c not in identity_cols and c not in feature_columns
-            and c != label_col and c in dataset.columns
-        ]
-        output_cols = list(dict.fromkeys(
-            identity_cols + [label_col] + feature_columns + carry_present
-        ))
-        result = dataset.select(*output_cols)
 
-    with log_step(logger, "cast_features_to_float32"):
-        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
-    logger.info(
-        "build_model_input: %d features, cast %d float-like feature columns to float32",
-        len(feature_columns), len(casted),
+def model_input_columns(
+    key_columns: list[str],
+    available_columns: list[str],
+    identity_cols: list[str],
+    label_col: str,
+    feature_columns: list[str],
+) -> list[str]:
+    """The output column list: identity, label, features, then carried columns.
+
+    A carried column is one the *keys* brought in that is not already identity,
+    a feature, or the label — the join width is otherwise wider than this
+    (label_table and feature_table both carry columns nothing downstream reads).
+    """
+    carry_present = [
+        c for c in key_columns
+        if c not in identity_cols and c not in feature_columns
+        and c != label_col and c in available_columns
+    ]
+    return list(dict.fromkeys(
+        identity_cols + [label_col] + feature_columns + carry_present
+    ))
+
+
+def drop_groups_without_positives(
+    df: DataFrame,
+    group_cols: list[str],
+    label_col: str,
+) -> DataFrame:
+    """Drop rows whose ``group_cols`` partition has ``sum(label_col) == 0``.
+
+    A window sum rather than a semi-join against an aggregate: one pass, and the
+    partitioning is the same one the caller means by "query group".
+    """
+    w = Window.partitionBy(*group_cols)
+    return (
+        df.withColumn("__grp_pos", F.sum(F.col(label_col)).over(w))
+          .filter(F.col("__grp_pos") > 0)
+          .drop("__grp_pos")
     )
-    if casted:
-        logger.debug("build_model_input: casted columns = %s", casted)
-    return result

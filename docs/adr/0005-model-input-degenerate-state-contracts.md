@@ -15,9 +15,9 @@ date: 2026-08-02
 於是每個 `(time, entity)` 被 label_table 的產品數乘開，`item` 的值從 label_table 帶進來。
 
 生產不可能發生：`identity_columns` 是推導欄位（`core/schema.py:55`，恆為
-`[time] + entity + [item]`），使用者無法讓它不含 item。`_build_model_input` 有兩個直接
-呼叫者（`pipelines/dataset/nodes_spark.py` 的 `build_model_input` 與 `build_test_model_input`
-兩個 wrapper），這兩個 wrapper 合計註冊成五個 pipeline 節點
+`[time] + entity + [item]`），使用者無法讓它不含 item。組裝只有一份實作
+（`build_model_input`，`pipelines/dataset/nodes.py`；`build_test_model_input` 先把 keys
+限縮到當次月份再呼叫它），合計註冊成五個 pipeline 節點
 （`pipelines/dataset/pipeline.py` 的 train / train_dev / val / test / calibration，
 最後一個只在 `enable_calibration` 時註冊），五個餵進去的 keys 全是 identity。
 `pipelines/dataset/model_input.py` 只被同套件內部引用，也沒有「外部 API 彈性」需要保留。

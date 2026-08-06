@@ -12,12 +12,12 @@ date: 2026-08-02
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
 | `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`pipelines/dataset/feature_columns.py:33-62`） | 黑名單：不得進 `feature_columns` |
-| `carry_columns` | **`sample_pool`** 的欄 | `select_keys`（`pipelines/dataset/helpers_spark.py:124-125`） | 白名單：keys 除 identity 外還要多帶 |
+| `carry_columns` | **`sample_pool`** 的欄 | `key_output_columns`（`pipelines/dataset/sampling.py`），由 `select_train_keys`／`select_calibration_keys` 呼叫 | 白名單：keys 除 identity 外還要多帶 |
 | `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
 
-而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 的
-`keep_cols = base_key + [c for c in feature_columns if c in feature_table.columns]`
-（`pipelines/dataset/nodes_spark.py:396-397`），被擋在 `feature_columns` 之外的欄不會進
+而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 選出的欄是
+base key ＋ 落在 feature_table 裡的 `feature_columns`（`encoded_frame_columns`，
+`pipelines/dataset/feature_columns.py`），被擋在 `feature_columns` 之外的欄不會進
 `preprocessed_feature_table`。
 
 所以當某欄**同時**存在於 `sample_pool`（要 carry）與 `feature_table` 時，它必須列進
@@ -79,8 +79,8 @@ B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它�
     AnalysisException: Reference 'cust_segment_typ' is ambiguous  ✅
 ```
 
-原因：`select_keys` 只把**不在 identity key 裡**的 carry 欄另外附加
-（`pipelines/dataset/helpers_spark.py`），base key 又被 join 本身併攏；而 label 與
+原因：key 選取只把**不在 identity key 裡**的 carry 欄另外附加
+（`key_output_columns`，`pipelines/dataset/sampling.py`），base key 又被 join 本身併攏；而 label 與
 非 categorical 的 identity 欄一律被 `_compute_feature_columns` 排除在 `feature_columns`
 之外，與 `drop_columns` 無關。對這些欄報錯，等於要求使用者做一次
 **零行為改變、卻會 bust `base_dataset_version` 的設定修改**——正是本 ADR 前面反對的那種代價。
@@ -104,8 +104,8 @@ B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它�
 
 ## split 之間的 schema 不對稱是推導結果，不是疏漏
 
-train / train_dev / calibration 走 `select_keys` 因此帶 carry；val / test 只 select
-identity（`pipelines/dataset/nodes_spark.py:112`、`:171`）。這個不對稱與需求對齊：
+train / train_dev / calibration 走抽樣式的 key 選取因此帶 carry；val / test 只 select
+identity（`select_val_keys`／`select_test_keys`，`pipelines/dataset/nodes.py`）。這個不對稱與需求對齊：
 `sample_weights` 只作用於 train/train_dev，per-segment 評估在 evaluation 階段從
 `sample_pool` 取 segment，val/test 不需要 carry。多出來的欄也不會被誤讀——`extract_Xy`
 按 `preprocessor_metadata["feature_columns"]` 切欄（`io/extract.py:352`）。

@@ -1064,7 +1064,7 @@ def carry_column_collision_errors(
 ) -> list[str]:
     """B7 invariant — the single definition.
 
-    ``dataset.carry_columns`` names columns ``select_keys`` pulls out of
+    ``dataset.carry_columns`` names columns the key-selecting nodes pull out of
     **sample_pool** on top of the identity key; ``prepare_model_input.
     drop_columns`` is a blacklist over **feature_table** columns. They act on
     different tables, so listing one name in both is not a contradiction — but
@@ -1097,8 +1097,9 @@ def carry_column_collision_errors(
     config edit that changes nothing while busting ``base_dataset_version``:
 
     - an identity column named in ``carry_columns`` is *not* copied a second
-      time — ``select_keys`` only appends carry entries that are not already in
-      the identity key (``pipelines/dataset/sampling.py``), and the base
+      time — a split's output columns are the identity key plus only the
+      carry entries not already in it (``key_output_columns``,
+      ``pipelines/dataset/sampling.py``), and the base
       key is coalesced by the join itself.
     - the label and non-categorical identity columns are excluded from
       ``feature_columns`` by ``_compute_feature_columns`` regardless of

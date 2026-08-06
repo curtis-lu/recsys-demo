@@ -112,7 +112,7 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
 
     The ratio surface is keyed by ``ratio_dims`` = ``sample_group_keys`` minus
     the label column (order preserved); it may be any length (0, 1, or many) —
-    matching what the framework's ``select_keys`` supports. ``label`` MUST be a
+    matching what the framework's key-selecting nodes support. ``label`` MUST be a
     ``sample_group_key``: the editor splits each cell into n_pos/n_neg via
     sum(label) and fixes the label component to "0" on export, so a group-key
     set without label is incompatible (hand-write those overrides instead).

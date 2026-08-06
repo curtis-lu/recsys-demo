@@ -356,7 +356,7 @@ class TestS1DatasetNodesAreDefinedInNodesModule:
     """S1: every dataset node is ``def``-ed in ``pipelines/dataset/nodes.py``.
 
     Defined-here, not imported-here, and that difference is the whole point:
-    ``nodes.py`` gaining one ``from .sampling import select_keys`` line would
+    ``nodes.py`` gaining one ``from .sampling import some_step`` line would
     satisfy "the pipeline imports it from nodes.py" while the function body
     still lived elsewhere -- which is the shape ADR-0008 exists to remove.
     """

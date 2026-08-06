@@ -4,15 +4,20 @@ This module is the one home of the pipeline's ML story: a reader who opens it
 sees each decision this pipeline makes about the data, without jumping files.
 The mechanisms those decisions are expressed in live in sibling modules named
 after the concern they implement (``sampling``, ``scoping``, ``feature_columns``,
-``model_input``, ``month_plans``) — see ADR-0008 §2 for the two criteria that
-draw that line, and ``docs/agents/architecture-constraints.md`` S1, which pins
-"every node registered in ``pipeline.py`` is ``def``-defined here".
+``categoricals``, ``model_input``, ``month_plans``) — see ADR-0008 §2 for the two
+criteria that draw that line, and ``docs/agents/architecture-constraints.md`` S1,
+which pins "every node registered in ``pipeline.py`` is ``def``-defined here".
+
+Reading a node here, the decisions are the named steps; the constants and dtype
+details those steps are made of (the unknown-category sentinel, the float32
+cast) stay in the helpers. That is why these functions are longer than the
+repo's usual — a node is a sequence of decisions, not a call.
 """
 
 import logging
 
 import pandas as pd
-from pyspark.sql import DataFrame, Window
+from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
@@ -27,20 +32,52 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
+from recsys_tfb.pipelines.dataset.categoricals import (
+    collect_vocabularies_from_data,
+    read_declared_vocabularies,
+    require_declared_categoricals,
+    warn_unknown_encodings,
+)
 from recsys_tfb.pipelines.dataset.feature_columns import (
     _compute_feature_columns,
     _get_preprocessing_config,
+    _warn_missing_drop_columns,
+    encodable_categoricals,
+    encoded_frame_columns,
+    require_base_key_columns,
+    require_item_is_a_feature,
+    split_categorical_sources,
 )
 from recsys_tfb.pipelines.dataset.model_input import (
-    build_model_input as _build_model_input,
+    _validate_columns,
+    drop_groups_without_positives,
+    join_features_missing_as_null,
+    join_labels_missing_as_negative,
+    model_input_columns,
 )
 from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
     collect_dataset_snap_dates,
 )
-from recsys_tfb.pipelines.dataset.sampling import select_keys
-from recsys_tfb.pipelines.dataset.scoping import _date_filter
-from recsys_tfb.preprocessing import _encode_categoricals
+from recsys_tfb.pipelines.dataset.sampling import (
+    draw_can_drop_rows,
+    keep_entities_drawn_under_ratio,
+    keep_rows_drawn_under_ratio,
+    key_output_columns,
+    log_sampled_keys,
+    sampling_columns,
+    with_effective_sample_ratio,
+)
+from recsys_tfb.pipelines.dataset.scoping import (
+    _date_filter,
+    require_months_present,
+    restrict_to_months,
+    restrict_to_months_or_all,
+)
+from recsys_tfb.preprocessing import (
+    _cast_feature_floats_to_float32,
+    _encode_categoricals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,28 +169,103 @@ def validate_data_consistency(
 
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
-    """Select train identity keys using explicit train_snap_dates list."""
-    ds = parameters["dataset"]
-    train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+    """Select train identity keys: which rows are eligible, and which are drawn.
 
+    ``sample_pool`` is at (time, entity, item) granularity and is the widest
+    frame this pipeline reads, which is why each step below narrows before the
+    next one runs.
+
+    The same four decisions appear in ``select_calibration_keys``, spelled out
+    there rather than shared through a helper: a helper holding four decisions
+    is what ADR-0008 §2 forbids, and the duplication is what makes each node
+    readable on its own.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    identity_key = schema["identity_columns"]
+
+    ds = parameters["dataset"]
+    seed = parameters.get("random_seed", 42)
+    group_keys = ds.get("sample_group_keys", [time_col])
+    carry_columns = ds.get("carry_columns", []) or []
+    sample_ratio = ds["sample_ratio"]
     overrides = ds.get("sample_ratio_overrides", {})
-    return select_keys(
-        sample_pool, parameters, train_dates, ds["sample_ratio"], overrides,
-        site="sample_keys",
-    )
+    train_months = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+
+    # Decision — eligibility: only rows in the configured train months can be
+    # drawn. A month belongs to exactly one split (A24), so this is also what
+    # keeps train disjoint from val / test / calibration. The "_or_all" is not
+    # a shorthand: an empty month list leaves the pool *whole* rather than
+    # empty. Unreachable today (``train_snap_dates`` is a required key), and
+    # preserved rather than tightened because tightening it would change
+    # behaviour — which is why it is spelled out here and not read off the name.
+    pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+    # sample_pool's primary key IS the identity key, enforced upstream by
+    # source_etl's max_duplicate_key_ratio check, so nothing dedups here.
+    keys = pool.select(*sampling_columns(group_keys, identity_key, carry_columns))
+
+    if draw_can_drop_rows(sample_ratio, overrides):
+        # Decision — how much of each stratum to keep: a per-group override
+        # outranks the split's default ratio; a group with no override falls
+        # back to it.
+        keys = with_effective_sample_ratio(keys, group_keys, sample_ratio, overrides)
+        # Decision — who survives: the draw is on the identity key, so the same
+        # key is kept or dropped identically on every rerun.
+        keys = keep_rows_drawn_under_ratio(
+            keys, identity_key, seed, site="sample_keys",
+        )
+        log_sampled_keys(sample_ratio, group_keys, overrides, "sample_keys")
+    else:
+        # A full ratio with no overrides can drop nothing, so the draw is
+        # skipped rather than computed over the whole pool and then trivially
+        # satisfied.
+        log_sampled_keys(sample_ratio, group_keys, overrides, site=None)
+
+    # Decision — what a split's keys are: the identity key, plus the carry
+    # columns that travel on to model_input for downstream weighting. The draw's
+    # working columns are dropped here.
+    return keys.select(*key_output_columns(identity_key, carry_columns))
 
 
 def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
-    """Select calibration identity keys using calibration_snap_dates from parameters."""
+    """Select calibration identity keys: same four decisions as the train split.
+
+    One thing differs beyond the config keys: the sampling ``site``. It is what
+    stops calibration drawing the same rows as train — the two share
+    ``random_seed``, so without a distinct namespace the calibration set would
+    be a subset of the train draw (#140).
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    identity_key = schema["identity_columns"]
+
     ds = parameters["dataset"]
-    cal_dates = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
+    seed = parameters.get("random_seed", 42)
+    group_keys = ds.get("sample_group_keys", [time_col])
+    carry_columns = ds.get("carry_columns", []) or []
     cal_ratio = ds.get("calibration_sample_ratio", 1.0)
     cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
+    cal_months = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
 
-    return select_keys(
-        sample_pool, parameters, cal_dates, cal_ratio, cal_overrides,
-        site="calibration_keys",
-    )
+    # Decision — eligibility: only rows in the configured calibration months —
+    # except that an empty month list leaves the pool whole, as it does for
+    # train. See ``select_train_keys`` for why that asymmetry is preserved.
+    pool = restrict_to_months_or_all(sample_pool, time_col, cal_months)
+    keys = pool.select(*sampling_columns(group_keys, identity_key, carry_columns))
+
+    if draw_can_drop_rows(cal_ratio, cal_overrides):
+        # Decision — how much of each stratum to keep.
+        keys = with_effective_sample_ratio(keys, group_keys, cal_ratio, cal_overrides)
+        # Decision — who survives, drawn under calibration's own site.
+        keys = keep_rows_drawn_under_ratio(
+            keys, identity_key, seed, site="calibration_keys",
+        )
+        log_sampled_keys(cal_ratio, group_keys, cal_overrides, "calibration_keys")
+    else:
+        log_sampled_keys(cal_ratio, group_keys, cal_overrides, site=None)
+
+    # Decision — identity key plus carry columns.
+    return keys.select(*key_output_columns(identity_key, carry_columns))
 
 
 def split_train_keys(
@@ -229,7 +341,7 @@ def select_val_keys(
     sample_pool: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Select validation identity keys (full population, optional random cust_id sampling)."""
+    """Select validation identity keys (full population, optional entity sampling)."""
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
@@ -241,22 +353,22 @@ def select_val_keys(
     val_sample_ratio = ds.get("val_sample_ratio", 1.0)
     seed = parameters.get("random_seed", 42)
 
-    val_labels = sample_pool.filter(F.col(time_col).isin(val_dates))
+    # Decision — eligibility: only the configured val months.
+    val_labels = restrict_to_months(sample_pool, time_col, val_dates)
+    # Decision — the val population is every distinct key, not a draw over rows:
+    # unlike the train side this does not lean on sample_pool's primary key.
     all_keys = val_labels.select(*identity_key).dropDuplicates()
 
     if val_sample_ratio >= 1.0:
         logger.info("Val keys (full population)")
         return all_keys
 
-    # Deterministic cust_id sampling
-    custs = all_keys.select(cust_col).distinct()
-    sampled_custs = custs.withColumn(
-        "_bucket", spark_bucket(custs, [cust_col], seed, site="val_keys"),
-    ).filter(
-        F.col("_bucket") < F.lit(ratio_to_threshold(val_sample_ratio))
-    ).select(cust_col)
-
-    sampled = all_keys.join(sampled_custs, on=cust_col, how="inner")
+    # Decision — when val is sampled, it is sampled per *entity*, never per row:
+    # mAP is computed over a query group, so a group must keep all of its
+    # candidates or the metric answers a different question.
+    sampled = keep_entities_drawn_under_ratio(
+        all_keys, cust_col, val_sample_ratio, seed, site="val_keys",
+    )
     logger.info("Val keys (ratio=%.2f)", val_sample_ratio)
     return sampled
 
@@ -300,27 +412,27 @@ def build_test_model_input(
     every month — the ∝N cost ADR-0002 exists to remove.
     """
     schema = get_schema(parameters)
+    # Decision — scope: this run's months only. Everything after it is the same
+    # assembly every other split gets, which is why it is the sibling node
+    # rather than a copy.
     keys = keys.filter(_date_filter(schema["time"], month_plan.to_process))
-    return _build_model_input(
+    return build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
     )
 
 
-def _fit_preprocessor_metadata(
+def fit_preprocessor_metadata(
     feature_table: DataFrame,
     parameters: dict,
 ) -> tuple[dict, dict]:
-    """Build preprocessor metadata at customer-month granularity, decoupled from sampling.
+    """Fit the preprocessor: each categorical's vocabulary, and what a feature is.
 
-    Feature-categorical distinct values come from feature_table rows whose
-    ``time`` falls in ``train_snap_dates``. Identity categoricals (not present
-    in feature_table) come from ``parameters["schema"]["categorical_values"][col]``;
-    missing declarations raise ``ValueError``.
+    Pre-checks (inputs, ADR-0008 §3): ``feature_table`` must carry every
+    ``train_snap_dates`` month, and every identity categorical must be declared
+    in ``schema.categorical_values``. Registered backstop: ``schema.item`` must
+    survive into ``feature_columns``.
 
-    Raises ``ValueError`` if feature_table is missing any required train_snap_date
-    (fail-loud principle: dataset must be reproducible from feature_table).
-
-    Only small metadata (distinct category values) is collected to driver.
+    Only small metadata (distinct category values) reaches the driver.
 
     Returns:
         (preprocessor_metadata, category_mappings) — the first matching
@@ -333,51 +445,40 @@ def _fit_preprocessor_metadata(
     label_col = schema["label"]
 
     ds = parameters.get("dataset", {})
-    train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+    train_months = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 
-    # Fail-loud if feature_table is missing any required train_snap_date.
-    # Cardinality is small (typically 12-52 dates); .distinct().collect() is cheap.
-    ft_dates = {
-        row[time_col]
-        for row in feature_table.select(time_col).distinct().collect()
-    }
-    ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
-    missing = sorted(set(train_dates) - ft_dates)
-    if missing:
-        raise ValueError(
-            "feature_table missing required train_snap_dates: "
-            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
-        )
+    # Pre-check: a dataset must be reproducible from feature_table, so a train
+    # month that is not there is an error rather than a smaller fit.
+    require_months_present(feature_table, time_col, train_months, "train_snap_dates")
 
+    # Decision — no leakage: vocabularies are fit on the train months only. A
+    # category that only ever appears in val/test therefore has no index of its
+    # own and encodes to the unknown sentinel, exactly as it would in production
+    # on a value the model never trained on.
+    #
+    # The un-normalised restriction, not ``_date_filter``: this node reads
+    # feature_table straight from the source table, where the time column is a
+    # real DATE. The normalised form is for the frames read back from Hive with
+    # a string partition column — see ``scoping``.
     with log_step(logger, "filter_train_window"):
-        train_features = feature_table.filter(F.col(time_col).isin(train_dates))
+        train_features = restrict_to_months(feature_table, time_col, train_months)
 
-    ft_cols = set(feature_table.columns)
-    feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
-    identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
-
+    # Decision — where a vocabulary comes from: a categorical that is a
+    # feature_table column has its domain in the data; an identity categorical
+    # is not in feature_table at all, so its domain has to be declared. Reading
+    # a declared one from the data would silently shrink it to the values this
+    # snapshot happens to contain.
+    from_data, from_schema = split_categorical_sources(
+        categorical_cols, feature_table.columns,
+    )
+    # Pre-check: nothing downstream can supply a vocabulary the schema owes.
     cat_values = schema.get("categorical_values", {})
-    missing_cats = [c for c in identity_cat_cols if c not in cat_values]
-    if missing_cats:
-        raise DataConsistencyError(
-            "Identity categorical columns missing declarations in "
-            f"schema.categorical_values: {missing_cats}. Add them to "
-            "parameters.yaml under schema.categorical_values."
-        )
-
+    require_declared_categoricals(cat_values, from_schema)
     with log_step(logger, "collect_category_mappings"):
-        category_mappings: dict[str, list] = {}
-        for col in feature_cat_cols:
-            distinct_rows = (
-                train_features.select(col)
-                .filter(F.col(col).isNotNull())
-                .distinct()
-                .orderBy(col)
-                .collect()
-            )
-            category_mappings[col] = [row[col] for row in distinct_rows]
-        for col in identity_cat_cols:
-            category_mappings[col] = list(cat_values[col])
+        category_mappings = {
+            **collect_vocabularies_from_data(train_features, from_data),
+            **read_declared_vocabularies(cat_values, from_schema),
+        }
 
     with log_step(logger, "compute_feature_columns"):
         feature_columns = _compute_feature_columns(
@@ -388,23 +489,10 @@ def _fit_preprocessor_metadata(
             label_col,
         )
 
-    # Ranking-task invariant: schema.item must end up in feature_columns. The
-    # most common way to lose it is omitting it from
-    # `dataset.prepare_model_input.categorical_columns` in yaml — silently
-    # makes X miss the item dimension, predictions collapse to constant within
-    # each query group, and HPO reports a flat mAP across every trial.
-    item_col = schema.get("item")
-    if item_col and item_col not in feature_columns:
-        raise DataConsistencyError(
-            f"schema.item='{item_col}' is missing from derived feature_columns. "
-            f"For a ranking task the item column must be a model feature; "
-            f"otherwise the booster cannot differentiate items within a query "
-            f"group and HPO mAP collapses to a constant across trials. "
-            f"Fix: add '{item_col}' to "
-            f"dataset.prepare_model_input.categorical_columns in "
-            f"parameters_dataset.yaml. "
-            f"(current categorical_columns={categorical_cols})"
-        )
+    # Registered backstop: for a ranking task the item column must be a feature.
+    require_item_is_a_feature(
+        schema.get("item"), feature_columns, categorical_cols,
+    )
 
     preprocessor_metadata = {
         "feature_columns": feature_columns,
@@ -420,51 +508,20 @@ def _fit_preprocessor_metadata(
     return preprocessor_metadata, category_mappings
 
 
-def fit_preprocessor_metadata(
-    feature_table: DataFrame,
-    parameters: dict,
-) -> tuple[dict, dict]:
-    """Fit Spark preprocessor at customer-month granularity, decoupled from sampling.
-
-    Only collects small metadata (distinct category values) to driver.
-    """
-    return _fit_preprocessor_metadata(feature_table, parameters)
-
-
-def _warn_missing_drop_columns(
-    columns: list[str],
-    drop_cols: list[str],
-    context: str,
-) -> None:
-    """Log warning for drop_columns that don't exist in the DataFrame."""
-    missing = [c for c in drop_cols if c not in columns]
-    if missing:
-        logger.warning(
-            "drop_columns not found in %s (will be ignored): %s",
-            context, missing,
-        )
-
-
-def _apply_preprocessor_to_features(
+def apply_preprocessor_to_features(
     feature_table: DataFrame,
     preprocessor_metadata: dict,
+    month_plan: SnapDatePlan,
     parameters: dict,
-    snap_dates: list,
 ) -> DataFrame:
-    """Encode non-identity categoricals in Spark feature_table at customer-month granularity.
+    """Encode feature_table's categoricals once, for every split to share.
 
-    Filters feature_table to ``snap_dates``, which the caller must supply — it
-    is the caller that knows which months this run is for. The dataset pipeline
-    passes its incremental month plan, so months whose partition already landed
-    are not re-encoded into a bit-identical result (ADR-0002). An empty list is
-    a legitimate value (nothing left to process); see the empty-frame note below.
+    Pre-checks (inputs, ADR-0008 §3): ``feature_table`` must carry the base key,
+    and every month this run is about to encode. Months the plan skips are
+    deliberately *not* checked — this run never reads them, so requiring
+    feature_table to retain them forever would be a false alarm.
 
-    Raises ``ValueError`` if any snap_date about to be processed is missing from
-    feature_table. Months that are *not* being processed are deliberately not
-    checked — this run does not read them, so requiring feature_table to retain
-    them forever would be a false alarm.
-
-    Output: (time + entity) + feature_columns that live in feature_table.
+    Output: (time + entity) + the feature_columns that live in feature_table.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -477,100 +534,47 @@ def _apply_preprocessor_to_features(
     drop_cols = preprocessor_metadata["drop_columns"]
 
     base_key = [time_col] + entity_cols
-    ft_feature_cols = [c for c in feature_columns if c in feature_table.columns]
-    keep_cols = list(dict.fromkeys(base_key + ft_feature_cols))
-    missing_base = [c for c in base_key if c not in feature_table.columns]
-    if missing_base:
-        raise ValueError(f"feature_table missing base-key columns: {missing_base}")
+    months = month_plan.to_process
+
+    # Pre-checks. The drop_columns one only warns: a stale name in that list
+    # changes nothing about the output.
+    require_base_key_columns(feature_table.columns, base_key)
     _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
+    if months:
+        require_months_present(feature_table, time_col, months, "snap_dates")
 
-    needed_dates = [pd.Timestamp(d) for d in snap_dates]
-
-    # Fail-loud if feature_table is missing any snap_date we are about to
-    # process. Skipped months are not checked: this run never reads them.
-    if needed_dates:
-        ft_dates = {
-            row[time_col]
-            for row in feature_table.select(time_col).distinct().collect()
-        }
-        ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
-        missing = sorted(set(needed_dates) - ft_dates)
-        if missing:
-            raise ValueError(
-                "feature_table missing required snap_dates: "
-                f"{[d.strftime('%Y-%m-%d') for d in missing]}"
-            )
-
-    # An empty date list means every configured month already landed. The node
-    # still returns a properly-typed empty frame (encoding included) rather than
-    # short-circuiting: Hive's dynamic partition overwrite only touches
-    # partitions present in the written data, so an empty write leaves the
-    # existing partitions intact — but only if the schema still matches.
-    # Both sides pinned to DATE. feature_table is a source table whose time
-    # column is a real DATE/TIMESTAMP today, so a bare isin() would work — but
-    # if it ever arrives as a string, isin() against timestamp literals matches
-    # zero rows and raises nothing, and this node's empty output is now a
-    # *documented normal state* (see the comment above) rather than an obvious
-    # anomaly. That combination would turn a type mismatch into silent data
-    # loss, so normalise here too.
-    date_filter = (
-        F.to_date(F.col(time_col)).isin([pd.Timestamp(d).date() for d in needed_dates])
-        if needed_dates
-        else F.lit(False)
-    )
+    # Decision — only the months this run owns are encoded (ADR-0002). Skipping
+    # a month that already landed is safe because a partition's content is
+    # f(that month's rows, category_mappings) and the mappings were fit on train
+    # months only: no cross-month term, so a re-encode would reproduce the same
+    # bits. An empty plan is a normal state — every configured month already
+    # landed — and still produces a properly-typed empty frame rather than
+    # short-circuiting, because Hive's dynamic partition overwrite leaves
+    # existing partitions intact only when the written schema still matches.
+    #
+    # Decision — the output width: the base key plus the features that actually
+    # live in feature_table. Identity-sourced features arrive later, from keys.
     with log_step(logger, "select_columns"):
-        result = feature_table.filter(date_filter).select(*keep_cols)
+        result = feature_table.filter(_date_filter(time_col, months)).select(
+            *encoded_frame_columns(base_key, feature_columns, feature_table.columns)
+        )
 
+    # Decision — a value the train months never showed becomes the unknown
+    # sentinel, not a new index: the fit is the vocabulary's only source, and an
+    # index invented here would mean something different to every month.
     with log_step(logger, "encode_categoricals"):
-        encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
+        encode_cols = encodable_categoricals(
+            categorical_cols, result.columns, identity_cols,
+        )
         if encode_cols:
             result = _encode_categoricals(result, encode_cols, category_mappings)
-            # Single pass: one aggregation returns the unknown (-1) count for
-            # every encoded column at once. The previous per-column .count()
-            # re-scanned the full multi-month feature_table once per categorical
-            # (N actions); this collapses it to a single scan.
-            unknown_counts = result.agg(*[
-                F.sum(F.when(F.col(c) == -1, 1).otherwise(0)).alias(c)
-                for c in encode_cols
-            ]).collect()[0]
-            for col in encode_cols:
-                n_unknown = unknown_counts[col] or 0
-                if n_unknown > 0:
-                    logger.warning(
-                        "apply_preprocessor_to_features: %d unknowns in column '%s'",
-                        n_unknown, col,
-                    )
+            warn_unknown_encodings(result, encode_cols)
 
     logger.info(
         "Preprocessed feature_table (Spark): %d cols (encoded=%d)",
         len(result.columns), len(encode_cols),
     )
     return result
-
-
-def apply_preprocessor_to_features(
-    feature_table: DataFrame,
-    preprocessor_metadata: dict,
-    month_plan: SnapDatePlan,
-    parameters: dict,
-) -> DataFrame:
-    """Encode non-identity categoricals in Spark feature_table once for all splits.
-
-    Only the months in ``month_plan`` are encoded (ADR-0002). Skipping an
-    existing month is safe because a partition's content is
-    f(that month's feature_table rows, category_mappings) and the mappings are
-    fit on train months only — no cross-month term, so a re-encode would
-    reproduce the same bits.
-
-    Passes the month *list* down, not the plan: the encoding step uses it to
-    raise when a month it is about to process is missing from ``feature_table``.
-    Pre-filtering here would make that check vacuously true — and the encoding
-    step stays unaware that "incremental" is a concept.
-    """
-    return _apply_preprocessor_to_features(
-        feature_table, preprocessor_metadata, parameters,
-        snap_dates=month_plan.to_process,
-    )
 
 
 def build_model_input(
@@ -580,44 +584,87 @@ def build_model_input(
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> DataFrame:
-    """Merge Spark keys + labels + encoded features into model_input for a split."""
-    return _build_model_input(
-        keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
-    )
+    """Assemble a split's model_input from its keys, the labels and the features.
 
-
-def _filter_groups_with_positives(
-    df: DataFrame,
-    group_cols: list[str],
-    label_col: str,
-) -> DataFrame:
-    """Drop rows whose ``group_cols`` partition has ``sum(label_col) == 0``.
-
-    A query group is ``(time, *entity)``; pushing this filter to Spark
-    write-time keeps val_model_input / test_model_input Hive tables tight —
-    customers with no positives in a snap_date contribute nothing to mAP
-    (metrics_spark filters them again) and only waste predict time.
+    Pre-check (input, ADR-0008 §3): ``keys`` must be at item grain.
+    Post-condition: identity, label and every feature column survive the joins.
     """
-    w = Window.partitionBy(*group_cols)
-    return (
-        df.withColumn("__grp_pos", F.sum(F.col(label_col)).over(w))
-          .filter(F.col("__grp_pos") > 0)
-          .drop("__grp_pos")
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    identity_cols = schema["identity_columns"]
+    base_key = [time_col] + entity_cols
+
+    feature_columns = preprocessor_metadata["feature_columns"]
+
+    # Pre-check: keys' grain IS model_input's grain (ADR-0005). This used to
+    # fall back to a base-key-only label join when item was absent, which
+    # silently multiplied every (time, entity) by label_table's item count and
+    # took `item`'s values from label_table. No caller can reach that branch —
+    # identity_columns is derived ([time] + entity + [item], core/schema.py) and
+    # every node feeding this one passes it — but its failure mode is a silently
+    # N-times-too-large dataset, so a missing column is an error, not a mode.
+    label_join_key = base_key + [item_col]
+    _validate_columns(keys.columns, label_join_key, "build_model_input keys")
+
+    # Decision — a key with no label row is a negative, not a gap. sample_pool
+    # is dense (entity x item fully expanded) while label_table is sparse (only
+    # entities with a transaction), so the misses are most of the frame.
+    with log_step(logger, "merge_labels"):
+        dataset = join_labels_missing_as_negative(
+            keys, label_table, label_join_key, label_col,
+        )
+
+    # Decision — a key with no feature row keeps its row and gets an all-NULL
+    # feature block. feature_table's upstream population differs from
+    # sample_pool's; LightGBM handles missing values, and dropping the row would
+    # instead change which query groups exist (ADR-0005 §3).
+    with log_step(logger, "merge_features"):
+        dataset = join_features_missing_as_null(
+            dataset, preprocessed_feature_table, base_key,
+        )
+
+    # Decision — what a model_input row is made of: identity, the label, every
+    # feature, and the columns the keys carried in for downstream weighting.
+    # Everything else the two joins brought along is dropped here.
+    with log_step(logger, "select_output_columns"):
+        required = list(set(identity_cols + [label_col] + feature_columns))
+        _validate_columns(dataset.columns, required, "build_model_input")
+        result = dataset.select(*model_input_columns(
+            keys.columns, dataset.columns, identity_cols, label_col, feature_columns,
+        ))
+
+    # Decision — numeric features converge on one storage type. LightGBM is
+    # histogram-based, so float32's precision is already beyond what binning can
+    # use; decimal128 in particular materialises as Python Decimal objects and
+    # was what OOM-killed the val read. Which types get cast, and to what, is
+    # the helper's business.
+    with log_step(logger, "cast_features_to_float32"):
+        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
+    logger.info(
+        "build_model_input: %d features, cast %d float-like feature columns to float32",
+        len(feature_columns), len(casted),
     )
+    if casted:
+        logger.debug("build_model_input: casted columns = %s", casted)
+    return result
 
 
 def filter_groups_with_positives(
     model_input: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Drop (time, *entity) groups whose label sum is zero.
+    """Drop (time, *entity) query groups whose label sum is zero.
 
-    Pipeline-node wrapper over ``_filter_groups_with_positives``;
-    resolves group_cols / label_col from schema. Used for val / test only —
-    groups without any positive contribute nothing to mAP (metrics_spark
-    re-applies the same filter) and would only waste predict time.
+    Decision — a query group with no positive is dropped rather than scored.
+    Applied to val / test only: mAP is undefined over such a group and
+    metrics_spark filters them again anyway, so keeping them only inflates the
+    Hive table and wastes predict time. train / train_dev / calibration are NOT
+    filtered — their losses use every row.
     """
     schema = get_schema(parameters)
     group_cols = [schema["time"]] + schema["entity"]
     label_col = schema["label"]
-    return _filter_groups_with_positives(model_input, group_cols, label_col)
+    return drop_groups_without_positives(model_input, group_cols, label_col)
