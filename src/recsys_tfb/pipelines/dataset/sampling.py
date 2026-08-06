@@ -1,7 +1,14 @@
 """How a split's keys get sampled: effective-ratio resolution and bucket filter.
 
-The mechanism only — which rows a split is entitled to, and at what ratio, is the
-calling node's decision (ADR-0008 §2).
+Named for the concern it implements, not for its backend — the ``_spark`` suffix
+this module used to carry pointed at a pandas/Spark dual track that no longer
+exists.
+
+Honest about its current state: ADR-0008 §1 counts four decisions inside
+``select_keys`` (month filter, override precedence, keep/drop by identity key,
+output columns = identity + carry) and calls that shape illegal under §2's "one
+helper carries at most one decision". Lifting them into the calling node is
+issue #170; #169 moved this file without touching its shape.
 """
 
 import logging

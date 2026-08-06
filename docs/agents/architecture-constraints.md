@@ -129,10 +129,10 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 # 節二 · 約束（新增或修改 node、catalog 條目之前先讀）
 
-檢查由 `tests/test_core/test_architecture_constraints.py` 執行（14 個測試，約 0.5 秒）。
+檢查由 `tests/test_core/test_architecture_constraints.py` 執行（15 個測試，約 0.5 秒）。
 
 **兩個 A 系列不是同一套編號。** 本檔的 A1–A7 是**結構約束**（node 與 catalog 該長什麼樣，AST 稽核）；
-`core/consistency.py` 的 A1–A22 是**設定不變量 predicate**（config 值彼此矛不矛盾，執行期 raise）。
+`core/consistency.py` 的 A1–A24 是**設定不變量 predicate**（config 值彼此矛不矛盾，執行期 raise）。
 兩邊的 A5、A7 已經在撞車、意思完全不同。**本 repo 不重編號**——重編號會讓既有文件與 commit message 的引用
 全部指錯，理由同 A16/A17/A18 退休不回填（見 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 第四節）。
 引用時請連模組一起寫（「consistency 的 A5」／「本檔的 A5」）。S 系列（structure）是為了不再增加撞車面而另起的前綴。
@@ -221,9 +221,14 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 
 守的不是風格，是**檔案切分的承重前提**：`scoping.py` 之所以不能併進 `month_plans.py`，唯一理由就是這條純度；
 而該模組 436 行的測試（`tests/test_pipelines/test_dataset/test_month_plans.py`）不需要 SparkSession 也是靠它——這個 repo 的 Spark cold start 是 2–4 分鐘。
-一句沒有機制強制的「必須」會漂移（ADR-0002:67 那段三天就過時的補釘是前例）。
+一句沒有機制強制的「必須」會漂移（ADR-0002:21 那段三天就過時的補釘是前例）。
 
-**檢查**：AST 掃該模組所有 `Import`／`ImportFrom`（用 `ast.walk`，所以函式體內的延遲 import 一樣掃得到），root package 不得為 `pyspark`。
+**檢查**：兩個測試，缺一不可。
+
+1. **直接掃描**——AST 掃該模組所有 `Import`／`ImportFrom`（用 `ast.walk`，所以**函式體內的延遲 import** 一樣掃得到），root package 不得為 `pyspark`。
+2. **可達性**——沿 `pipelines/dataset/` 的同層 import 遞迴一跳以上，任何路徑都不得抵達 pyspark。缺了這條，`from recsys_tfb.pipelines.dataset.scoping import _date_filter` 會被第 1 條讀成「import 了 `recsys_tfb`」而放行，但該模組已經是 Spark-typed 了——而這正是本 repo 實際在用的 import 寫法。
+
+**刻意不驗**「`pyspark` 不進 `sys.modules`」。那才是真正想要的性質，但它因為與本模組無關的理由不可能成立：`pipelines/__init__.py` → `core` → `io` → `models` → `mlflow`，終點是 `mlflow/types/schema.py` 自己那行 `import pyspark`。S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
 
 ### 動 dataset 的 node 之前：先讀 ADR-0008 第二節
 

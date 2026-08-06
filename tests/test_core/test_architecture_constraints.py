@@ -294,6 +294,10 @@ def _imported_roots(path):
     ``ast.walk`` rather than ``tree.body``: a deferred ``import pyspark`` inside
     a function body is the exact form S2 has to catch, and it is the form that
     would otherwise look like "this module has no Spark dependency".
+
+    A relative import is recorded under a leading-dot key (``".scoping"``) --
+    skipping it would make the one import form this scan cannot resolve also the
+    one it never mentions.
     """
     tree = ast.parse(path.read_text())
     found = {}
@@ -301,13 +305,51 @@ def _imported_roots(path):
         if isinstance(node, ast.Import):
             roots = [a.name.split(".")[0] for a in node.names]
         elif isinstance(node, ast.ImportFrom):
-            # level > 0 is a relative import: no root package name to read.
-            roots = [node.module.split(".")[0]] if node.module and not node.level else []
+            module = node.module or ""
+            roots = ["." * node.level + module.split(".")[0] if node.level
+                     else module.split(".")[0]] if module or node.level else []
         else:
             continue
         for root in roots:
             found.setdefault(root, []).append(node.lineno)
     return found
+
+
+def _spark_reachable_from(path, _seen=None):
+    """First chain of dataset-sibling imports from ``path`` that reaches pyspark.
+
+    Returns e.g. ``["month_plans.py", "scoping.py"]``, or None. Only siblings in
+    ``pipelines/dataset/`` are followed -- the point is the purity of one module,
+    not a whole-tree dependency audit.
+
+    This hop is what makes S2 mean anything. A direct-import scan reads
+    ``from recsys_tfb.pipelines.dataset.scoping import _date_filter`` as an
+    import of ``recsys_tfb`` and says nothing, while the module it just pulled in
+    is the Spark-typed one -- and absolute-within-package is the import form this
+    repo actually writes.
+    """
+    _seen = _seen if _seen is not None else set()
+    if path in _seen or not path.exists():
+        return None
+    _seen.add(path)
+
+    siblings = []
+    for root, _ in _imported_roots(path).items():
+        if root.lstrip(".") == "pyspark":
+            return [path.name]
+        if root.startswith("."):
+            siblings.append(root.lstrip("."))
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            prefix = "recsys_tfb.pipelines.dataset."
+            if node.module.startswith(prefix):
+                siblings.append(node.module[len(prefix):].split(".")[0])
+
+    for sibling in siblings:
+        chain = _spark_reachable_from(path.parent / f"{sibling}.py", _seen)
+        if chain:
+            return [path.name] + chain
+    return None
 
 
 class TestS1DatasetNodesAreDefinedInNodesModule:
@@ -344,6 +386,20 @@ class TestS2MonthPlansStaysPure:
     Load-bearing, not stylistic: it is the only reason ``scoping.py`` is a
     separate file, and the condition under which that module's tests run without
     paying this repo's 2-4 minute Spark cold start (ADR-0008 section 4).
+
+    Two checks, because neither alone covers the property. The direct scan sees a
+    **deferred** ``import pyspark`` inside a function body. The reachability
+    check sees a **transitive** one: importing a Spark-typed sibling makes
+    month_plans Spark-typed too, and that import names ``recsys_tfb``, not
+    ``pyspark``, so the direct scan reads it as innocent.
+
+    Deliberately not asserted: that ``pyspark`` stays out of ``sys.modules``.
+    That would be the property one wants, and it is unreachable for reasons that
+    have nothing to do with this module -- ``pipelines/__init__.py`` -> ``core``
+    -> ``io`` -> ``models`` -> ``mlflow`` ends at ``mlflow/types/schema.py``'s own
+    ``import pyspark``. What S2 buys is a **structural** boundary: month_plans
+    stays free of Spark *types*, so its tests never need a SparkSession -- and
+    the session, not the import, is the 2-4 minutes.
     """
 
     def test_month_plans_does_not_import_pyspark(self):
@@ -352,6 +408,14 @@ class TestS2MonthPlansStaysPure:
             "month_plans.py imported pyspark at line(s) "
             f"{found.get('pyspark')} (S2). Spark-typed work belongs in "
             "scoping.py; see docs/agents/architecture-constraints.md."
+        )
+
+    def test_month_plans_reaches_no_spark_typed_sibling(self):
+        chain = _spark_reachable_from(DATASET / "month_plans.py")
+        assert chain is None, (
+            f"month_plans.py reaches pyspark via {' -> '.join(chain or [])} (S2). "
+            "It imported a Spark-typed sibling, so its purity is gone even "
+            "though no pyspark import appears in the file itself."
         )
 
 

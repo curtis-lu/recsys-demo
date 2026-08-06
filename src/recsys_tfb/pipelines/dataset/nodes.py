@@ -56,8 +56,9 @@ def validate_data_consistency(
     Side-effect only: raises ``DataConsistencyError`` on violation, returns
     ``None`` when everything holds. Each invariant's meaning lives with its
     predicate in ``core/consistency.py`` — this node only asks the config and
-    Spark for facts and hands them to the predicates. Deciding anything here
-    would put a second, drifting copy of the rule next to the real one.
+    Spark for facts and hands them to the predicates. Adding an invariant means
+    adding a predicate there and one term to the sum below; deciding anything
+    here would put a second, drifting copy of the rule next to the real one.
 
     All errors are collected and raised once so a single fix pass clears them.
 

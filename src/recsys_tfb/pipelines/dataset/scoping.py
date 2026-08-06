@@ -2,7 +2,7 @@
 
 Split out from the month-plan module rather than living beside it: this returns
 a Spark :class:`~pyspark.sql.Column`, and ``month_plans.py`` is pinned to zero
-pyspark imports (S2) so its 400-odd tests stay off the 2-4 minute Spark cold
+pyspark imports (S2) so its test module stays off the 2-4 minute Spark cold
 start. Deriving *which* months a run touches is pure; turning that answer into a
 filter is not.
 """
