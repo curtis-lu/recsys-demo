@@ -31,7 +31,7 @@ class TestPreprocessorMetadataContract:
     shared a file. This is the definition half of the guard — the other half is
     ``test_nodes_spark.py::TestFitPreprocessorMetadataKeyContract``, which
     asserts the real fit output against these same annotations, so a key renamed
-    on the dataset side turns red here rather than in the company environment.
+    on the dataset side turns red there rather than in the company environment.
     """
 
     def test_the_contract_is_exactly_these_four_keys(self):
@@ -45,43 +45,13 @@ class TestPreprocessorMetadataContract:
             "drop_columns",
         }
 
-    def test_the_reader_side_reads_no_key_outside_the_contract(self):
-        """``apply_preprocessor`` subscripts the artifact only with declared keys.
-
-        Read off the source rather than by running the node: the point is which
-        key *names* the reader is hard-coded to, and a Spark run only exercises
-        the ones a particular fixture happens to reach.
-
-        Subset, not equality: a key may legitimately be written for one consumer
-        and not read by inference, so requiring inference to read all four would
-        make a future addition fail here for no reason. The direction that
-        matters is the other one — inference reaching for a name the artifact
-        does not promise. The paired guard against a *renamed* key is on the
-        writer side, in ``TestFitPreprocessorMetadataKeyContract``.
-
-        ``assert read`` first: if the reader is ever rewritten to unpack or alias
-        the dict, this scan finds nothing and the subset check would pass
-        vacuously.
-        """
-        import ast
-        import inspect
-        import textwrap
-
-        from recsys_tfb.pipelines.inference import nodes_spark
-
-        tree = ast.parse(
-            textwrap.dedent(inspect.getsource(nodes_spark.apply_preprocessor))
-        )
-        read = {
-            node.slice.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "preprocessor"
-            and isinstance(node.slice, ast.Constant)
-        }
-        assert read, "no `preprocessor[...]` reads found — the scan is stale"
-        assert read <= set(PreprocessorMetadata.__annotations__)
+    # No reader-side test here on purpose. An earlier draft scanned
+    # ``apply_preprocessor``'s AST for the keys it subscripts, which asserted on
+    # syntax rather than behaviour and would have gone red on a legal rewrite to
+    # ``.get()`` or destructuring. It was also redundant: renaming a key the
+    # reader uses turns 8 tests in test_pipelines/test_inference/test_nodes_spark.py
+    # red already (measured, not assumed). The reader side is covered; the writer
+    # side is what had no guard, and that is TestFitPreprocessorMetadataKeyContract.
 
 
 @pytest.fixture
