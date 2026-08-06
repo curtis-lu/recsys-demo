@@ -769,11 +769,21 @@ class TestRebuildDatesFlag:
             os.chdir(old_cwd)
 
 
-def _run_dataset_command(tmp_path, argv, existing=("2026-01-31",)):
+#: A base_dataset_version that is never this run's. Partitions stamped with it
+#: stand in for months left behind by an earlier, differently-configured run.
+_FOREIGN_VERSION = "deadbeef"
+
+
+def _run_dataset_command(
+    tmp_path, argv, existing=("2026-01-31",), foreign=("2026-02-28",),
+):
     """Invoke the dataset command far enough to build the catalog.
 
     Returns ``(loaded, seen)``: everything added to the catalog, already
     ``load()``-ed, and the substitution params the catalog was built from.
+
+    ``existing`` months are listed under this run's version, ``foreign`` ones
+    under :data:`_FOREIGN_VERSION`; only the former may count as landed.
 
     Only ``test_model_input`` is a Hive table in this catalog, so it is the only
     artifact whose partitions can be listed; the other two fall back to "nothing
@@ -814,14 +824,24 @@ def _run_dataset_command(tmp_path, argv, existing=("2026-01-31",)):
 
     seen = _CatalogSubstitutionSpy()
     spark = _mock_spark_with_feature_table_schema()
-    # The landed partitions are stamped with whatever base_dataset_version the
-    # CLI actually substituted into the catalog — so a CLI that built this
-    # catalog before computing the version keeps none of them.
+
     def _show_partitions(_query):
         seen.note_listing()
         return _partition_rows(
-            f"base_dataset_version={seen.base_dataset_version}/snap_date={d}"
-            for d in existing
+            # Stamped with whatever base_dataset_version the CLI actually
+            # substituted into the catalog, so a CLI that built this catalog
+            # before computing the version keeps none of these.
+            [
+                f"base_dataset_version={seen.base_dataset_version}/snap_date={d}"
+                for d in existing
+            ]
+            # A month that landed under a DIFFERENT base version. Reporting it
+            # as landed is the unsafe direction — that month would be skipped
+            # although nothing was ever written for *this* version. Kept in the
+            # listing for every run here so the plan assertions below all carry
+            # the guarantee, not just the one test named for it.
+            + [f"base_dataset_version={_FOREIGN_VERSION}/snap_date={d}"
+               for d in foreign]
         )
 
     spark.sql.side_effect = _show_partitions
@@ -859,8 +879,8 @@ class TestMonthPlansReachTheCatalog:
     three by name and by content.
     """
 
-    def _run_dataset(self, tmp_path, argv, existing=("2026-01-31",)):
-        loaded, _ = _run_dataset_command(tmp_path, argv, existing=existing)
+    def _run_dataset(self, tmp_path, argv, **kwargs):
+        loaded, _ = _run_dataset_command(tmp_path, argv, **kwargs)
         return loaded
 
     def test_every_incremental_dataset_gets_its_own_plan(self, tmp_path):
@@ -910,19 +930,22 @@ class TestMonthPlansReachTheCatalog:
         assert not [k for k in params if "existing" in k.lower()]
 
 
-class TestCatalogIsBuiltAfterTheVersion:
-    """The ordering constraint from ADR-0008 §2, which fails silently if broken.
+class TestThePartitionListingIsVersionScoped:
+    """Both directions of "which version did this month land under".
 
-    Substitution is a plain string ``.replace()``: an unfilled
-    ``${base_dataset_version}`` survives as that literal and raises nothing, so
-    a catalog built before the version is computed lists zero partitions and
-    every month looks unlanded. Nothing else catches it — the config diff is
-    empty, the DAG is unchanged, and the other tests here would still pass.
+    Nothing else in the suite catches either one: the config diff is empty, the
+    DAG is unchanged, and every other test here passes both ways. The listing no
+    longer filters by version itself — the catalog entry's ``partition_filter``
+    does — so what is asserted is that the CLI hands that entry a resolved
+    version and that the resulting scope actually holds.
     """
 
     def test_substitution_params_carry_the_resolved_version(self, tmp_path):
-        loaded, seen = _run_dataset_command(tmp_path, ["dataset"])
-        assert loaded  # the run got far enough to build the catalog
+        # ADR-0008 §2's ordering constraint. Substitution is a plain string
+        # .replace(), so an unfilled ${base_dataset_version} survives as that
+        # literal and raises nothing; a catalog built before the version exists
+        # lists zero partitions and every month looks unlanded.
+        _, seen = _run_dataset_command(tmp_path, ["dataset"])
 
         # The config the partition listing was asked through — not merely some
         # config this run built — carried a resolved 8-hex version, rather than
@@ -933,15 +956,26 @@ class TestCatalogIsBuiltAfterTheVersion:
         ), seen.at_listing
 
     def test_a_landed_month_is_skipped_not_rebuilt(self, tmp_path):
-        # The consequence, asserted end to end: the listed partition is stamped
-        # with the version the CLI substituted, so it only survives the entry's
-        # partition_filter if that substitution resolved. An unresolved one
-        # drops every partition and this plan reports nothing skipped.
-        loaded, _ = _run_dataset_command(
-            tmp_path, ["dataset"], existing=("2026-01-31",),
-        )
+        # The consequence of the above, end to end: the listed partition is
+        # stamped with the version the CLI substituted, so it survives the
+        # entry's partition_filter only if that substitution resolved. An
+        # unresolved one drops every partition and reports nothing skipped.
+        loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
         assert loaded["test_model_input_month_plan"].skipped == [
             pd.Timestamp("2026-01-31")
+        ]
+
+    def test_a_month_under_another_version_does_not_count_as_landed(self, tmp_path):
+        # The unsafe direction, and the one this ticket's deletions put at risk:
+        # a month written by an earlier, differently-configured run must still
+        # be processed, not skipped as though it existed for this version.
+        loaded, _ = _run_dataset_command(
+            tmp_path, ["dataset"], existing=(), foreign=("2026-01-31", "2026-02-28"),
+        )
+        plan = loaded["test_model_input_month_plan"]
+        assert plan.skipped == []
+        assert plan.to_process == [
+            pd.Timestamp("2026-01-31"), pd.Timestamp("2026-02-28"),
         ]
 
 
@@ -985,10 +1019,14 @@ class TestCollectExistingSnapDates:
         with caplog.at_level(logging.WARNING):
             out = _collect_existing_snap_dates(catalog)
 
-        assert "preprocessed_feature_table" not in out
+        # Exact, not "not in": an absent key and a `[]` value are the same
+        # answer to build_month_plans but not the same behaviour here, and
+        # `test_model_input` (registered nowhere at all) must take the same
+        # route rather than raising.
+        assert out == {"test_keys": ["2026-01-31"]}
+        # Asserted because a silent skip is what makes this dangerous: the run
+        # rebuilds a whole artifact and only this line says why.
         assert "preprocessed_feature_table" in caplog.text
-        # Unregistered names take the same route rather than raising.
-        assert "test_model_input" not in out
 
 
 class TestRebuildSliceWarning:

@@ -206,6 +206,25 @@ def _maybe_warn_retrain(plan, retrain_advice):
     )
 
 
+def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
+    """The substitution params and the catalog config they resolve.
+
+    One function because there is exactly one right answer to "what fills the
+    ``${...}`` in catalog.yaml", and getting it wrong is silent: substitution is
+    a plain string ``.replace()`` (:func:`recsys_tfb.core.config._apply`), so a
+    placeholder nobody supplied survives as its own literal text and raises
+    nothing. A dataset built from such a config points at a table named after
+    the template, or filters partitions against it and keeps none.
+
+    The practical consequence for callers: ``runtime_params`` must already hold
+    every version this run computed before this is called.
+    """
+    substitution_params = {**params, **runtime_params}
+    return substitution_params, config.get_catalog_config(
+        runtime_params=substitution_params
+    )
+
+
 def _slice_extra(from_node, only_node):
     """Manifest extra_metadata breadcrumb for sliced runs."""
     if from_node:
@@ -249,7 +268,9 @@ def _collect_existing_snap_dates(
                 "be listed and it will be rebuilt in full.", name,
             )
             continue
-        existing[name] = landed_months(lister(), time_col, name)
+        existing[name] = landed_months(
+            lister(), time_col=time_col, dataset_name=name,
+        )
     return existing
 
 
@@ -343,8 +364,9 @@ def _execute_pipeline(
         raise typer.Exit(code=1)
 
     source_model_version = runtime_params.pop("source_model_version", None)
-    substitution_params = {**params, **runtime_params}
-    catalog_config = config.get_catalog_config(runtime_params=substitution_params)
+    substitution_params, catalog_config = _resolve_catalog(
+        config, params, runtime_params
+    )
 
     # Auto-inject cache source_tables from catalog config so cache nodes don't
     # need a parallel parameters yaml mapping. Catalog.yaml's HiveTableDataset
@@ -746,16 +768,15 @@ def dataset(
     # run covered. The nodes receive them through the catalog (below), not
     # through `parameters`.
     #
-    # This catalog is built *after* base_v exists and from substitution params
-    # that carry it, and that ordering is load-bearing rather than tidy:
-    # substitution is a plain string .replace() (core/config.py:_apply), so an
-    # unfilled ${base_dataset_version} survives as that literal and raises
-    # nothing. A HiveTableDataset built from it would compare every partition
-    # against the literal, keep none, and answer "nothing has landed" for every
-    # month — a full rebuild, silently, with no failing test and no config diff.
-    substitution_params = {**params, **runtime_params}
+    # Built here rather than earlier because _resolve_catalog needs base_v to
+    # already be in runtime_params, and that ordering is load-bearing rather
+    # than tidy: a catalog resolved without it would compare every partition
+    # against the literal `${base_dataset_version}`, keep none, and answer
+    # "nothing has landed" for every month — a full rebuild, silently, with no
+    # failing test and no config diff.
+    _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
     existing_snap_dates = _collect_existing_snap_dates(
-        DataCatalog(config.get_catalog_config(runtime_params=substitution_params)),
+        DataCatalog(listing_catalog_config),
         time_col=get_schema(params)["time"],
     )
     month_plans = build_month_plans(

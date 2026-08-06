@@ -147,7 +147,7 @@ class TestLandedMonths:
     def test_reads_the_time_column_out_of_each_spec(self):
         assert landed_months(
             [{"snap_date": "2026-04-30"}, {"snap_date": "2026-05-31"}],
-            "snap_date", "test_keys",
+            time_col="snap_date", dataset_name="test_keys",
         ) == ["2026-04-30", "2026-05-31"]
 
     def test_multi_column_partitions_deduplicate_to_months(self):
@@ -159,7 +159,7 @@ class TestLandedMonths:
                 {"snap_date": "2026-04-30", "prod_name": "fund_stock"},
                 {"snap_date": "2026-04-30", "prod_name": "exchange_fx"},
             ],
-            "snap_date", "test_model_input",
+            time_col="snap_date", dataset_name="test_model_input",
         ) == ["2026-04-30"]
 
     def test_hive_null_partition_sentinel_is_dropped_not_propagated(self, caplog):
@@ -173,7 +173,7 @@ class TestLandedMonths:
                     {"snap_date": "__HIVE_DEFAULT_PARTITION__"},
                     {"snap_date": "2026-04-30"},
                 ],
-                "snap_date", "test_keys",
+                time_col="snap_date", dataset_name="test_keys",
             ) == ["2026-04-30"]
         # The warning has to name the value and the artifact: without them the
         # reader cannot tell which table needs fixing.
@@ -188,7 +188,7 @@ class TestLandedMonths:
                 {"snap_date": "__HIVE_DEFAULT_PARTITION__"},
                 {"snap_date": "2026-04-30"},
             ],
-            "snap_date", "test_keys",
+            time_col="snap_date", dataset_name="test_keys",
         )
         plans = build_month_plans(PARAMS, existing={"test_keys": existing})
         assert plans["test_keys"].to_process == _ts("2026-05-31")
@@ -198,14 +198,17 @@ class TestLandedMonths:
         # schema.time is configurable; snap_date is this instantiation's name
         # for it, not the framework's.
         assert landed_months(
-            [{"as_of_date": "2026-04-30"}], "as_of_date", "test_keys",
+            [{"as_of_date": "2026-04-30"}],
+            time_col="as_of_date", dataset_name="test_keys",
         ) == ["2026-04-30"]
 
     def test_specs_without_the_time_column_are_ignored(self):
-        assert landed_months([{"prod_name": "fund_stock"}], "snap_date", "t") == []
+        assert landed_months(
+            [{"prod_name": "fund_stock"}], time_col="snap_date", dataset_name="t",
+        ) == []
 
     def test_no_partitions_reads_as_nothing_landed(self):
-        assert landed_months([], "snap_date", "test_keys") == []
+        assert landed_months([], time_col="snap_date", dataset_name="test_keys") == []
 
 
 class TestPlanSetShape:

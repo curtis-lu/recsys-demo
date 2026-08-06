@@ -36,7 +36,9 @@ def month_plan_input(dataset_name: str) -> str:
 _HIVE_NULL_PARTITION = "__HIVE_DEFAULT_PARTITION__"
 
 
-def landed_months(partition_specs, time_col: str, dataset_name: str) -> list[str]:
+def landed_months(
+    partition_specs, *, time_col: str, dataset_name: str
+) -> list[str]:
     """The months already landed, read off a catalog dataset's partition specs.
 
     ``partition_specs`` is what
@@ -47,10 +49,18 @@ def landed_months(partition_specs, time_col: str, dataset_name: str) -> list[str
     month *and* item (``test_model_input``) lists one spec per item per month,
     and the question here is only which months exist.
 
-    Dropping an unreadable value is a decision, not a detail: it means that
-    month counts as not-yet-landed and will be reprocessed. That is the safe
-    direction — the alternative is ``pd.Timestamp()`` raising much further
-    downstream, with a message naming neither this artifact nor this column.
+    Dropping the Hive NULL placeholder is a decision, not a detail: it means
+    that month counts as not-yet-landed and will be reprocessed. That is the
+    safe direction, and it is worth a named case because the placeholder is a
+    value this pipeline can *produce* — a partition column that went NULL on a
+    write — where the failure it would otherwise cause (``pd.Timestamp()``
+    raising, much further downstream, naming neither this artifact nor this
+    column) is far from the cause.
+
+    Deliberately narrow: any *other* unparseable value raises downstream rather
+    than being dropped here. Silently reprocessing on data nobody can explain
+    would hide it; this pipeline writes ISO dates, so anything else is corrupt
+    rather than merely NULL, and corrupt input should stop the run.
     """
     found: set[str] = set()
     for spec in partition_specs:
