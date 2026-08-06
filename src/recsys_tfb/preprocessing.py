@@ -69,6 +69,16 @@ class PreprocessorMetadata(TypedDict):
     drop_columns: list[str]
 
 
+UNKNOWN_CATEGORY_CODE = -1
+"""The encoded value of a category the fit never saw.
+
+Defined once, here, because both halves of the round trip depend on it: the
+encoder writes it, and the dataset pipeline counts it to report how much of a
+month fell outside its vocabulary. Negative on purpose — every real category
+gets its index in ``category_mappings``, so no valid value can collide with it.
+"""
+
+
 def _encode_categoricals(
     df: DataFrame,
     categorical_cols: list[str],
@@ -84,14 +94,19 @@ def _encode_categoricals(
     for col in categorical_cols:
         categories = category_mappings[col]
         if not categories:
-            result = result.withColumn(col, F.lit(-1).cast("integer"))
+            result = result.withColumn(
+                col, F.lit(UNKNOWN_CATEGORY_CODE).cast("integer"),
+            )
             continue
         pairs: list = []
         for idx, cat in enumerate(categories):
             pairs.extend([F.lit(cat), F.lit(idx)])
         map_col = F.create_map(*pairs)
         result = result.withColumn(
-            col, F.coalesce(map_col[F.col(col)], F.lit(-1)).cast("integer")
+            col,
+            F.coalesce(
+                map_col[F.col(col)], F.lit(UNKNOWN_CATEGORY_CODE),
+            ).cast("integer"),
         )
     return result
 

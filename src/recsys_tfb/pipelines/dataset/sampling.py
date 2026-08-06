@@ -1,126 +1,143 @@
-"""How a split's keys get sampled: effective-ratio resolution and bucket filter.
+"""Sampling mechanics for key selection: the columns a draw needs, the effective
+per-row ratio, the draw itself, and the columns a split's keys come out with.
 
 Named for the concern it implements, not for its backend — the ``_spark`` suffix
 this module used to carry pointed at a pandas/Spark dual track that no longer
 exists.
 
-Honest about its current state: ADR-0008 §1 counts four decisions inside
-``select_keys`` (month filter, override precedence, keep/drop by identity key,
-output columns = identity + carry) and calls that shape illegal under §2's "one
-helper carries at most one decision". Lifting them into the calling node is
-issue #170; #169 moved this file without touching its shape.
+Each function here carries at most one mechanism. The four decisions ADR-0008 §1
+counted inside the old ``select_keys`` — month filter, override precedence,
+keep/drop by identity key, output columns = identity + carry — are now named
+steps in the key-selecting nodes (``nodes.py``); this module holds only how each
+step is computed on Spark.
 """
 
-import logging
+from __future__ import annotations
 
-import pandas as pd
-from pyspark.sql import DataFrame
+from typing import TYPE_CHECKING
+
 from pyspark.sql import functions as F
 
-from recsys_tfb.core.schema import get_schema
-from recsys_tfb.utils.hashing import HASH_BUCKETS, spark_bucket
+from recsys_tfb.utils.hashing import HASH_BUCKETS, ratio_to_threshold, spark_bucket
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame
+
+EFFECTIVE_RATIO_COL = "_effective_ratio"
 
 
-def select_keys(
-    sample_pool: DataFrame,
-    parameters: dict,
-    snap_dates: list,
-    sample_ratio: float,
-    sample_ratio_overrides: dict | None = None,
-    *,
-    site: str = "sample_keys",
-) -> DataFrame:
-    """Stratified sampling by configurable group keys, returning unique identity keys.
+def sampling_columns(
+    group_keys: list[str],
+    identity_key: list[str],
+    carry_columns: list[str],
+) -> list[str]:
+    """Columns the draw has to see, deduplicated and in that precedence order.
 
-    Filters sample_pool to the given snap_dates and applies stratified sampling
-    with per-group ratio overrides. Identity key is (snap_date, cust_id, prod_name).
-
-    Sampling is deterministic: a row is kept when
-    ``crc32(identity_key | site | seed) % HASH_BUCKETS < ratio * HASH_BUCKETS``.
-
-    Args:
-        sample_pool: Full sample pool at customer-month-product granularity.
-        parameters: Full parameters dict.
-        snap_dates: List of snap_dates to filter to.
-        sample_ratio: Default sampling ratio for this split.
-        sample_ratio_overrides: Per-group ratio overrides. If None, falls back to
-            parameters["dataset"]["sample_ratio_overrides"].
-        site: Stable label that namespaces this sampling site so two callers
-            sharing the same seed (e.g. train vs calibration) draw independent
-            buckets.
+    Projecting down to these before the draw is what keeps the widest frame in
+    the pipeline from being carried through the hash and the override join.
     """
-    schema = get_schema(parameters)
-    identity_key = schema["identity_columns"]  # [snap_date, cust_id, prod_name]
-    time_col = schema["time"]
+    return list(dict.fromkeys(
+        list(group_keys) + list(identity_key) + list(carry_columns)
+    ))
 
-    ds = parameters["dataset"]
-    seed = parameters.get("random_seed", 42)
-    group_keys = ds.get("sample_group_keys", [time_col])
-    if sample_ratio_overrides is None:
-        sample_ratio_overrides = ds.get("sample_ratio_overrides", {})
 
-    carry_columns = ds.get("carry_columns", []) or []
-    return_cols = identity_key + [c for c in carry_columns if c not in identity_key]
+def key_output_columns(
+    identity_key: list[str],
+    carry_columns: list[str],
+) -> list[str]:
+    """The identity key, plus carried columns that are not already part of it."""
+    return list(identity_key) + [c for c in carry_columns if c not in identity_key]
 
-    # Filter to specified snap_dates
-    target_dates = [pd.Timestamp(d) for d in snap_dates]
-    if target_dates:
-        pool = sample_pool.filter(F.col(time_col).isin(target_dates))
+
+def draw_can_drop_rows(sample_ratio: float, sample_ratio_overrides: dict | None) -> bool:
+    """Whether a draw could remove anything at all.
+
+    A full ratio with no overrides cannot: every bucket is under the threshold.
+    Callers use this to skip the draw rather than compute a crc32 over the whole
+    pool only to satisfy it trivially.
+    """
+    return sample_ratio < 1.0 or bool(sample_ratio_overrides)
+
+
+def with_effective_sample_ratio(
+    keys: DataFrame,
+    group_keys: list[str],
+    sample_ratio: float,
+    sample_ratio_overrides: dict | None,
+) -> DataFrame:
+    """Attach ``_effective_ratio``: a matching group's override, else the default.
+
+    The group key is the ``group_keys`` values joined with ``"|"``, every part
+    cast to string so it matches the override dict's keys byte-for-byte.
+
+    Mapping is a broadcast hash-join: one O(1) probe per row, versus the linear
+    CASE-WHEN chain it replaced (O(n_overrides) string compares per row, which
+    dominated CPU at ~10^2 overrides x ~10^8 rows). Row-for-row identical:
+    matched key -> override ratio, unmatched -> ``sample_ratio``. The dict has
+    unique keys, so the left join is 1:1 and never fans out rows.
+    """
+    if not sample_ratio_overrides:
+        return keys.withColumn(EFFECTIVE_RATIO_COL, F.lit(sample_ratio))
+
+    if len(group_keys) == 1:
+        group_key_col = F.col(group_keys[0]).cast("string")
     else:
-        pool = sample_pool
+        group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
 
-    # Extract identity + group columns. sample_pool PK = identity_key is enforced
-    # by source_etl's max_duplicate_key_ratio check, so no dedup needed here.
-    extract_cols = list(dict.fromkeys(group_keys + identity_key + carry_columns))
-    keys = pool.select(*extract_cols)
-
-    if sample_ratio >= 1.0 and not sample_ratio_overrides:
-        sampled = keys.select(*return_cols)
-        logger.info("Sampled keys (ratio=1.0, no sampling)")
-        return sampled
-
-    # Resolve the effective per-row sampling ratio.
-    if sample_ratio_overrides:
-        # Group-key column: concat parts with "|", every part cast to string so
-        # it matches the override dict keys byte-for-byte (same as the keys).
-        if len(group_keys) == 1:
-            group_key_col = F.col(group_keys[0]).cast("string")
-        else:
-            group_key_col = F.concat_ws("|", *[F.col(k).cast("string") for k in group_keys])
-
-        # Map group key -> override ratio via a broadcast hash-join: one O(1)
-        # probe per row, vs the previous linear CASE-WHEN chain (O(n_overrides)
-        # string compares per row, which dominated CPU at ~10^2 overrides x
-        # ~10^8 rows). Output is row-for-row identical: matched key -> override
-        # ratio, unmatched -> sample_ratio. The dict has unique keys, so the
-        # left join is 1:1 and never fans out rows.
-        ratio_df = _ratio_lookup_df(sample_pool.sparkSession, sample_ratio_overrides)
-        keys = (
-            keys.withColumn("_gk", group_key_col)
-            .join(F.broadcast(ratio_df), on="_gk", how="left")
-            .withColumn(
-                "_effective_ratio",
-                F.coalesce(F.col("_override_ratio"), F.lit(sample_ratio)),
-            )
+    ratio_df = _ratio_lookup_df(keys.sparkSession, sample_ratio_overrides)
+    return (
+        keys.withColumn("_gk", group_key_col)
+        .join(F.broadcast(ratio_df), on="_gk", how="left")
+        .withColumn(
+            EFFECTIVE_RATIO_COL,
+            F.coalesce(F.col("_override_ratio"), F.lit(sample_ratio)),
         )
-    else:
-        keys = keys.withColumn("_effective_ratio", F.lit(sample_ratio))
-
-    # Deterministic sampling: bucket(identity_key | site | seed) < threshold
-    keys = keys.withColumn("_bucket", spark_bucket(keys, identity_key, seed, site=site))
-    threshold_expr = (F.col("_effective_ratio") * F.lit(HASH_BUCKETS)).cast("int")
-    sampled = keys.filter(F.col("_bucket") < threshold_expr).select(*return_cols)
-
-    logger.info(
-        "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
-        sample_ratio,
-        group_keys,
-        sample_ratio_overrides,
-        site,
     )
-    return sampled
+
+
+def keep_rows_drawn_under_ratio(
+    keys: DataFrame,
+    identity_key: list[str],
+    seed: int,
+    *,
+    site: str,
+) -> DataFrame:
+    """Keep the rows whose identity key's deterministic draw lands under its ratio.
+
+    ``crc32(identity_key | site | seed) % HASH_BUCKETS < _effective_ratio *
+    HASH_BUCKETS``, so the same key draws the same way across reruns and
+    partition layouts. ``site`` namespaces the draw: two callers sharing a seed
+    (train vs calibration) would otherwise select the same rows.
+
+    Requires the frame to already carry ``_effective_ratio``
+    (:func:`with_effective_sample_ratio`), and leaves its working columns on the
+    frame for the caller's output-column step to drop.
+    """
+    keys = keys.withColumn("_bucket", spark_bucket(keys, identity_key, seed, site=site))
+    threshold_expr = (F.col(EFFECTIVE_RATIO_COL) * F.lit(HASH_BUCKETS)).cast("int")
+    return keys.filter(F.col("_bucket") < threshold_expr)
+
+
+def keep_entities_drawn_under_ratio(
+    keys: DataFrame,
+    entity_col: str,
+    ratio: float,
+    seed: int,
+    *,
+    site: str,
+) -> DataFrame:
+    """Keep every row of the entities whose own draw lands under ``ratio``.
+
+    The draw is on the entity, not the row, so an entity is kept whole or not at
+    all — which is what :func:`keep_rows_drawn_under_ratio` does *not* promise.
+    """
+    entities = keys.select(entity_col).distinct()
+    sampled_entities = entities.withColumn(
+        "_bucket", spark_bucket(entities, [entity_col], seed, site=site),
+    ).filter(
+        F.col("_bucket") < F.lit(ratio_to_threshold(ratio))
+    ).select(entity_col)
+    return keys.join(sampled_entities, on=entity_col, how="inner")
 
 
 def _ratio_lookup_df(spark, sample_ratio_overrides: dict) -> DataFrame:

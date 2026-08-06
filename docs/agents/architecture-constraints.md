@@ -207,7 +207,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 
 `pipelines/dataset/pipeline.py` 中每個 `Node(...)` 的第一參數，必須是 `pipelines/dataset/nodes.py` 裡以 `def` 定義的名稱。
 
-**是「def 定義」而不是「從 nodes.py import」**：後者有 re-export 漏洞——`nodes.py` 加一行 `from .sampling import select_keys`，
+**是「def 定義」而不是「從 nodes.py import」**：後者有 re-export 漏洞——`nodes.py` 加一行 `from .sampling import some_step`，
 `pipeline.py` 照樣「來自 nodes.py」、檢查全綠，而函式定義在別的檔，正是 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 要消滅的形狀。
 
 **S1 只擋位置，擋不住內容。** 一個 12 行的轉手 node 加一個裝著四個決策的 helper 完全滿足 S1。

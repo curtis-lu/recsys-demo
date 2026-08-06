@@ -139,7 +139,7 @@ dataset:
 
 - 欄位必須實際存在於 `sample_pool`。
 - val 與 test keys 不會攜帶這些欄位。這不是疏漏：train／train-dev／calibration 走
-  `select_keys`（會帶 carry），val／test 只取 identity。sample weights 只作用於
+  抽樣式的 key 選取（會帶 carry），val／test 只取 identity。sample weights 只作用於
   train 側，而 per-segment 評估是在 evaluation 階段另外從 `sample_pool` 取 segment，
   所以 val／test 不需要這些欄位。
 - **若同一欄也存在於 `feature_table`，必須同時列入 `prepare_model_input.drop_columns`**
@@ -218,7 +218,7 @@ model input 寫出前，Decimal 與 Double 類型的 feature 會轉成 Spark `fl
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
 | `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns` | 黑名單：不得成為模型特徵 |
-| `carry_columns` | **`sample_pool`** 的欄 | `select_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
+| `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys`／`select_calibration_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
 | `feature_columns` | 推導結果，存進 `preprocessor.json` | `_compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
 
 `feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來

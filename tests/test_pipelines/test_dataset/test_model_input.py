@@ -1,15 +1,19 @@
-"""Tests for ``pipelines/dataset/model_input.py``: the two joins, the output
-column rule, and the column-existence guard behind both.
+"""Tests for the assembly of a split's ``model_input``: the two joins, the
+output column rule, and the column-existence guard behind both.
+
+The assembly itself is the ``build_model_input`` *node* (#170 lifted it out of
+``model_input.py``, which now holds only the mechanisms each step is made of);
+the guard is still a mechanism, so the two imports point at different modules.
+Only the imports moved — every assertion below is the one that was written
+against the helper.
 """
 
 import pandas as pd
 import pytest
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset.model_input import (
-    _validate_columns,
-    build_model_input,
-)
+from recsys_tfb.pipelines.dataset.model_input import _validate_columns
+from recsys_tfb.pipelines.dataset.nodes import build_model_input
 
 
 class TestValidateColumns:

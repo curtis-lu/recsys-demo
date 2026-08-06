@@ -1123,7 +1123,7 @@ class TestValidateDataConsistencyB7:
         """The gate has to tell B7 which columns are identity.
 
         ``cust_id`` is in feature_table and not in drop_columns, so the naive
-        rule flags it — but ``select_keys`` never copies an identity column a
+        rule flags it — but the key-selecting nodes never copy an identity column a
         second time, and running the real ``build_model_input`` this way
         completes normally. Flagging it would demand a drop_columns edit that
         changes no behaviour while busting base_dataset_version.
@@ -1383,7 +1383,6 @@ from recsys_tfb.pipelines.dataset.nodes import (
     filter_groups_with_positives,
     select_calibration_keys,
 )
-from recsys_tfb.pipelines.dataset.sampling import select_keys
 
 
 def _four_split_params(parameters, **overrides):
@@ -1433,7 +1432,7 @@ def _columns_by_derivation_rule(keys, preprocessor, params) -> set[str]:
 class TestModelInputSchemaPerSplit:
     """D4 — every split's schema follows one derivation rule (ADR-0004).
 
-    train / train_dev / calibration go through ``select_keys`` and so carry
+    train / train_dev / calibration are sampled with carry columns and so carry
     ``carry_columns``; val / test select identity only. ADR-0004 records that
     asymmetry as a *derived* result — sample weights only apply to train-side
     splits, and per-segment evaluation reads segments from ``sample_pool`` later
@@ -1474,7 +1473,7 @@ class TestModelInputSchemaPerSplit:
     def test_the_fixture_exercises_both_sides_of_the_carry_term(self, built):
         """Without this the rule above is satisfiable by a vacuous carry term.
 
-        ``carry_columns ∩ keys`` is empty for every split if ``select_keys``
+        ``carry_columns ∩ keys`` is empty for every split if the key selection
         stops carrying at all — and the rule stays true, because both sides lose
         the column together. This asserts the fixture actually distinguishes the
         two cases, without naming which split is which.
@@ -1752,7 +1751,7 @@ class TestUnknownEncodingRateIsAssertable:
 class TestSelectKeysDeduplication:
     """D7 — val/test key selection deduplicates its input.
 
-    ``select_keys`` (train side) leans on sample_pool's primary key being
+    The sampled splits lean on sample_pool's primary key being
     enforced upstream and does not dedup; val/test call ``dropDuplicates``
     explicitly. That difference is invisible until sample_pool actually contains
     a duplicate, which the clean fixture never does.
@@ -1785,7 +1784,8 @@ class TestSelectKeysDeduplication:
 class TestSelectKeysOverridePath:
     """D8 — the override lookup must not change the row count.
 
-    ``select_keys`` maps group key -> ratio with a broadcast LEFT join. The
+    ``with_effective_sample_ratio`` maps group key -> ratio with a broadcast
+    LEFT join. The
     comment in ``sampling.py`` claims it "never fans out rows" (the lookup
     has unique keys) and that unmatched groups fall back to ``sample_ratio``
     via coalesce. Both halves are row-count claims, and neither was tested: a
@@ -1868,7 +1868,7 @@ class TestSelectCalibrationKeys:
         assert months == set(params["dataset"]["calibration_snap_dates"])
 
     def test_carry_columns_reach_calibration_keys(self, sample_pool, parameters):
-        """Calibration goes through ``select_keys``, so it carries like train."""
+        """Calibration makes the same carry decision train does."""
         params = _four_split_params(parameters, carry_columns=["channel_preference"])
         result = select_calibration_keys(sample_pool, params)
         assert "channel_preference" in result.columns
@@ -1885,15 +1885,21 @@ class TestSelectCalibrationKeys:
         rows.
         """
         import recsys_tfb.pipelines.dataset.nodes as nodes
+        from recsys_tfb.pipelines.dataset.sampling import keep_rows_drawn_under_ratio
 
         seen = {}
 
-        def _spy(pool, params, dates, ratio, overrides=None, *, site="sample_keys"):
+        def _spy(keys, identity_key, seed, *, site):
             seen[site] = seen.get(site, 0) + 1
-            return select_keys(pool, params, dates, ratio, overrides, site=site)
+            return keep_rows_drawn_under_ratio(keys, identity_key, seed, site=site)
 
-        monkeypatch.setattr(nodes, "select_keys", _spy)
-        params = _four_split_params(parameters)
+        # The draw is the step that takes ``site``; spying on it is spying on
+        # the wiring. Both splits must sample for it to be reached at all, so
+        # the ratios below are what put each node on its drawing path.
+        monkeypatch.setattr(nodes, "keep_rows_drawn_under_ratio", _spy)
+        params = _four_split_params(
+            parameters, sample_ratio=0.5, calibration_sample_ratio=0.5,
+        )
         select_train_keys(sample_pool, params)
         select_calibration_keys(sample_pool, params)
 
@@ -1907,15 +1913,25 @@ class TestSelectCalibrationKeys:
         Paired with the spy above: that one pins the wiring, this one pins that
         the wiring matters.
         """
-        params = _four_split_params(parameters, sample_ratio=0.5)
-        dates = [pd.Timestamp(d) for d in _SNAP_DATES[:2]]
+        # The two splits are given the *same* months here so ``site`` is the
+        # only thing left that can differ. A24 forbids that overlap on the
+        # ``dataset`` command, not in the node — which is what makes it usable
+        # as an isolating fixture and useless as a config.
+        months = list(_SNAP_DATES[:2])
+        params = _four_split_params(
+            parameters,
+            sample_ratio=0.5,
+            calibration_sample_ratio=0.5,
+            train_snap_dates=months,
+            calibration_snap_dates=months,
+        )
 
-        def _draw(site):
-            keys = select_keys(sample_pool, params, dates, 0.5, {}, site=site)
+        def _draw(node):
+            keys = node(sample_pool, params)
             return {tuple(r) for r in keys.toPandas().itertuples(index=False)}
 
-        train_draw = _draw("sample_keys")
-        cal_draw = _draw("calibration_keys")
+        train_draw = _draw(select_train_keys)
+        cal_draw = _draw(select_calibration_keys)
         assert train_draw and cal_draw
         assert train_draw != cal_draw
 
@@ -1980,7 +1996,7 @@ class TestFilterGroupsWithPositives:
     """
 
     def test_drops_all_zero_groups(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
@@ -1989,7 +2005,7 @@ class TestFilterGroupsWithPositives:
             "label": [1, 0, 0, 1, 0, 0],
             "feat": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         }))
-        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        out = drop_groups_without_positives(df, ["snap_date", "cust_id"], "label")
         rows = out.orderBy("cust_id", "prod_name").collect()
         # c3 dropped, c1 and c2 retained entirely (2 rows each)
         assert len(rows) == 4
@@ -1997,7 +2013,7 @@ class TestFilterGroupsWithPositives:
 
     def test_keeps_all_rows_of_positive_groups(self, spark):
         """Group with even one positive row keeps every row in that group."""
-        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 4),
@@ -2005,13 +2021,13 @@ class TestFilterGroupsWithPositives:
             "prod_name": ["a", "b", "c", "d"],
             "label": [0, 0, 1, 0],
         }))
-        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        out = drop_groups_without_positives(df, ["snap_date", "cust_id"], "label")
         assert out.count() == 4
 
     def test_groups_split_across_snap_dates(self, spark):
         """(snap_date, cust_id) is the group key — same cust across two snaps
         is two separate groups."""
-        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(
@@ -2021,14 +2037,14 @@ class TestFilterGroupsWithPositives:
             "prod_name": ["a", "b", "a", "b"],
             "label": [1, 0, 0, 0],
         }))
-        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        out = drop_groups_without_positives(df, ["snap_date", "cust_id"], "label")
         rows = out.orderBy("snap_date", "prod_name").collect()
         # 2025-01 has positive → keep both rows; 2025-02 all-zero → drop
         assert len(rows) == 2
         assert all(str(r.snap_date).startswith("2025-01") for r in rows)
 
     def test_preserves_column_schema(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"]),
@@ -2037,11 +2053,11 @@ class TestFilterGroupsWithPositives:
             "label": [1],
             "feat": [3.14],
         }))
-        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        out = drop_groups_without_positives(df, ["snap_date", "cust_id"], "label")
         assert out.columns == df.columns
 
     def test_empty_when_no_positives(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
@@ -2049,33 +2065,37 @@ class TestFilterGroupsWithPositives:
             "prod_name": ["a", "b"],
             "label": [0, 0],
         }))
-        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        out = drop_groups_without_positives(df, ["snap_date", "cust_id"], "label")
         assert out.count() == 0
 
 
 class TestApplyPreprocessorToFeaturesRequiresSnapDates:
-    """``snap_dates`` is required — the caller owns "which months is this run for".
+    """The month scope is required — the caller owns "which months is this run for".
 
     It used to default to ``None`` and fall back to
     ``collect_dataset_snap_dates(parameters)`` (the union of every configured
-    month). Since the month plans moved into the catalog (#152) the node always
-    passes ``month_plan.to_process``, so that fallback was unreachable. Pinning
-    the argument as required is what keeps it unreachable: a future caller that
-    forgets it now fails at the call, instead of silently re-encoding every
-    configured month and quietly undoing the incremental behaviour of ADR-0002.
+    month). Since the month plans moved into the catalog (#152) the caller
+    always supplies one, so that fallback was unreachable. Pinning the argument
+    as required is what keeps it unreachable: a future caller that forgets it
+    now fails at the call, instead of silently re-encoding every configured
+    month and quietly undoing the incremental behaviour of ADR-0002.
+
+    #170 dissolved the private twin this used to guard, so the assertion moved
+    to the node that absorbed it: ``month_plan`` is the argument that now
+    carries the scope, and it is equally required.
     """
 
-    def test_omitting_snap_dates_raises_instead_of_defaulting(self):
+    def test_omitting_the_month_plan_raises_instead_of_defaulting(self):
         from recsys_tfb.pipelines.dataset.nodes import (
-            _apply_preprocessor_to_features,
+            apply_preprocessor_to_features,
         )
 
         # Binding fails before the body runs, so the placeholder arguments are
-        # never dereferenced. Were the default restored, this call would get
-        # past binding and die on the placeholders instead (KeyError), so this
+        # never dereferenced. Were a default restored, this call would get past
+        # binding and die on the placeholders instead (KeyError), so this
         # assertion is about the signature and not about the placeholders.
-        with pytest.raises(TypeError, match="snap_dates"):
-            _apply_preprocessor_to_features(None, {}, {})
+        with pytest.raises(TypeError, match="month_plan"):
+            apply_preprocessor_to_features(None, {}, parameters={})
 
 
 class TestFitPreprocessorMetadataKeyContract:
@@ -2102,22 +2122,25 @@ class TestFitPreprocessorMetadataKeyContract:
 
 
 # =============================================================================
-# Moved up from ``test_helpers_spark.py`` (#169). ``select_keys`` is the
-# mechanism the key-selection nodes are made of; its tests sit at the node
-# layer so that #170 can rewrite them to go through ``select_train_keys``
-# without moving files a second time. Local fixtures are prefixed
-# ``_sampling_`` to stay clear of the module fixture block above.
+# Moved up from ``test_helpers_spark.py`` (#169), then rewritten by #170 to go
+# through ``select_train_keys``: the four decisions these tests pin are now
+# steps in the node, and ``select_keys`` — the helper that used to hold all four
+# — no longer exists. Every assertion is the one that was written against the
+# helper; only the call moved. Local fixtures are prefixed ``_sampling_`` to
+# stay clear of the module fixture block above.
 # =============================================================================
 
 
-def _sampling_params(carry=None, group_keys=None):
+def _sampling_params(carry=None, group_keys=None, ratio=1.0, overrides=None):
     p = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"],
             "item": "prod_name", "label": "label"}},
         "dataset": {
             "sample_group_keys": group_keys or ["cust_segment_typ", "prod_name", "label"],
-            "sample_ratio": 1.0},
+            "train_snap_dates": ["2025-01-31"],
+            "sample_ratio_overrides": overrides if overrides is not None else {},
+            "sample_ratio": ratio},
         "random_seed": 42}
     if carry is not None:
         p["dataset"]["carry_columns"] = carry
@@ -2135,19 +2158,19 @@ def _sampling_pool(spark):
 
 class TestSelectKeysCarry:
     def test_carry_present_no_sampling_path(self, spark):
-        df = select_keys(_sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]),
-                          [pd.Timestamp("2025-01-31")], 1.0, {})
+        df = select_train_keys(
+            _sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]))
         assert set(df.columns) == {"snap_date", "cust_id", "prod_name",
                                    "cust_segment_typ"}
 
     def test_carry_present_overrides_path(self, spark):
-        df = select_keys(_sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]),
-                          [pd.Timestamp("2025-01-31")], 1.0, {"mass|a|1": 1.0})
+        df = select_train_keys(
+            _sampling_pool(spark),
+            _sampling_params(carry=["cust_segment_typ"], overrides={"mass|a|1": 1.0}))
         assert "cust_segment_typ" in df.columns
 
     def test_no_carry_returns_identity_only(self, spark):
-        df = select_keys(_sampling_pool(spark), _sampling_params(),
-                         [pd.Timestamp("2025-01-31")], 1.0, {})
+        df = select_train_keys(_sampling_pool(spark), _sampling_params())
         assert set(df.columns) == {"snap_date", "cust_id", "prod_name"}
 
 
@@ -2165,27 +2188,29 @@ class TestSelectKeysOverrideLookup:
 
     def test_override_zero_drops_only_that_group(self, spark):
         # default 1.0 keeps all; the single override drops just its group.
-        df = select_keys(_sampling_pool(spark), _sampling_params(),
-                         [pd.Timestamp("2025-01-31")], 1.0, {"mass|a|1": 0.0})
+        df = select_train_keys(
+            _sampling_pool(spark), _sampling_params(overrides={"mass|a|1": 0.0}))
         assert self._survivors(df) == {2, 4}
 
     def test_unmatched_falls_back_to_default(self, spark):
         # default 0.0 drops all; only the overridden group survives (coalesce
         # fallback path for the unmatched rows).
-        df = select_keys(_sampling_pool(spark), _sampling_params(),
-                         [pd.Timestamp("2025-01-31")], 0.0, {"mass|a|1": 1.0})
+        df = select_train_keys(
+            _sampling_pool(spark),
+            _sampling_params(ratio=0.0, overrides={"mass|a|1": 1.0}))
         assert self._survivors(df) == {1, 3}
 
     def test_multiple_overrides(self, spark):
         # two groups overridden in one lookup table; default 1.0 keeps the rest.
-        df = select_keys(_sampling_pool(spark), _sampling_params(),
-                         [pd.Timestamp("2025-01-31")], 1.0,
-                         {"mass|a|1": 0.0, "aff|b|0": 0.0})
+        df = select_train_keys(
+            _sampling_pool(spark),
+            _sampling_params(overrides={"mass|a|1": 0.0, "aff|b|0": 0.0}))
         assert self._survivors(df) == {2}
 
     def test_single_group_key_no_concat(self, spark):
         # group_keys == [label] exercises the len==1 (no concat_ws) path; the
         # override key is the string-cast label value.
-        df = select_keys(_sampling_pool(spark), _sampling_params(group_keys=["label"]),
-                         [pd.Timestamp("2025-01-31")], 1.0, {"0": 0.0})
+        df = select_train_keys(
+            _sampling_pool(spark),
+            _sampling_params(group_keys=["label"], overrides={"0": 0.0}))
         assert self._survivors(df) == {1, 3}
