@@ -40,7 +40,7 @@ from recsys_tfb.models.staged.partition import (
 )
 from recsys_tfb.models.staged.stage2 import (
     encode_group_codes, fit_stage2, group_code_lookup,
-    stage2_categorical_indices, stage2_matrix,
+    stage2_categorical_indices, stage2_feature_names, stage2_matrix,
 )
 from recsys_tfb.models.staged.train_stage1 import _fit_adapter
 from recsys_tfb.pipelines.training.staged import _wip_dir
@@ -107,6 +107,7 @@ def tune_stage2(
     X2_tr, y_tr, w_tr, qg_tr,
     X2_val, y_val, w_val, qg_val, items_val,
     parameters: dict,
+    *, feature_names2=None,
 ):
     """Persistent-study HPO for stage-2, or a single fit when n_trials==0.
 
@@ -126,7 +127,7 @@ def tune_stage2(
     if n_trials <= 0:
         adapter = fit_stage2(mode, X2_tr, y_tr, w_tr, qg_tr,
                              X2_val, y_val, w_val, qg_val, base_params,
-                             cat_idx2)
+                             cat_idx2, feature_names=feature_names2)
         return {}, adapter, {"n_trials": 0}
 
     hpo_objective = training.get("hpo_objective", "mean_ap")
@@ -150,7 +151,8 @@ def tune_stage2(
         t0 = time.monotonic()
         adapter = fit_stage2(
             mode, X2_tr, y_tr, w_tr, qg_tr, X2_val, y_val, w_val, qg_val,
-            {**base_params, **trial_params}, cat_idx2)
+            {**base_params, **trial_params}, cat_idx2,
+            feature_names=feature_names2)
         score = _hpo_score(hpo_objective, qg_val, items_val, y_val,
                            adapter.predict(X2_val))
         if score > best_state["score"]:
@@ -367,7 +369,9 @@ def train_stage2_model(
     with log_step(logger, "stage2.tune"):
         best_params2, s2_adapter, hpo_meta = tune_stage2(
             mode, base2, cat_idx2, X2_tr, y_tr_full, w_tr, qg_tr,
-            X2_v, y_v, w_v, qg_v, items_v, parameters)
+            X2_v, y_v, w_v, qg_v, items_v, parameters,
+            feature_names2=stage2_feature_names(
+                list(preprocessor_view["feature_columns"])))
     log_peak_rss(logger, "stage2.after_tune")
 
     stage2_meta = {"mode": mode, "oof_folds": n_folds,

@@ -84,27 +84,15 @@ class StagedModelAdapter(ModelAdapter):
             "key values (see pipelines' staged branches)."
         )
 
-    def predict_routed(
-        self, X: np.ndarray, keys: np.ndarray, on_missing: str = "raise",
+    def _stage1_scores(
+        self, X: np.ndarray, keys: np.ndarray, on_missing: str,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Route rows to their group's booster.
+        """Route rows to their group's stage-1 booster (no stage-2 compose).
 
-        Returns (scores, valid_mask); missing-group rows get NaN score and
-        False mask. on_missing: "raise" (evaluation path) | "skip"
-        (inference path; stats in self.last_missing_stats).
-
-        Precondition: ``keys`` must be a pre-stringified, non-null object
-        array — every production call site builds it via
-        ``models.staged.partition.routing_keys`` (
-        ``io.extract._composite_key_series(...).astype(str)`` under the
-        hood), so lookups against ``self._groups`` (keyed by the same
-        str-joined convention) match byte-for-byte. Passing an array with
-        NaN/None entries or mixed types directly (bypassing
-        ``routing_keys``) is undefined behavior — this method does not
-        normalize or validate key contents beyond the length check below.
+        Shared by ``predict_routed`` and ``stage2_matrix_for``: keys length
+        check, per-group scoring loop, missing-group bookkeeping and the
+        raise/skip branch — verbatim extraction, no behavior change.
         """
-        if on_missing not in ("raise", "skip"):
-            raise ValueError(f"on_missing must be raise|skip, got {on_missing!r}")
         keys = np.asarray(keys, dtype=object)
         if len(keys) != len(X):
             raise ValueError(
@@ -136,6 +124,31 @@ class StagedModelAdapter(ModelAdapter):
                 "model: %s",
                 len(missing), sum(missing.values()), sorted(missing),
             )
+        return scores, mask
+
+    def predict_routed(
+        self, X: np.ndarray, keys: np.ndarray, on_missing: str = "raise",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Route rows to their group's booster.
+
+        Returns (scores, valid_mask); missing-group rows get NaN score and
+        False mask. on_missing: "raise" (evaluation path) | "skip"
+        (inference path; stats in self.last_missing_stats).
+
+        Precondition: ``keys`` must be a pre-stringified, non-null object
+        array — every production call site builds it via
+        ``models.staged.partition.routing_keys`` (
+        ``io.extract._composite_key_series(...).astype(str)`` under the
+        hood), so lookups against ``self._groups`` (keyed by the same
+        str-joined convention) match byte-for-byte. Passing an array with
+        NaN/None entries or mixed types directly (bypassing
+        ``routing_keys``) is undefined behavior — this method does not
+        normalize or validate key contents beyond the length check below.
+        """
+        if on_missing not in ("raise", "skip"):
+            raise ValueError(f"on_missing must be raise|skip, got {on_missing!r}")
+        keys = np.asarray(keys, dtype=object)
+        scores, mask = self._stage1_scores(X, keys, on_missing)
         if self._stage2 is not None:
             # lazy import：見模組頂部關於 stage2.py 循環匯入的註解
             from recsys_tfb.models.staged.stage2 import (
@@ -149,6 +162,21 @@ class StagedModelAdapter(ModelAdapter):
                 X2 = stage2_matrix(X[valid], scores[valid], gcodes)
                 scores[valid] = self._stage2.predict(X2)
         return scores, mask
+
+    def stage2_matrix_for(self, X: np.ndarray, keys: np.ndarray) -> np.ndarray:
+        """診斷用：全列 [X | stage-1 分數 | gcode]（missing group 一律 raise）。
+        與 predict_routed 的 compose 塊同一套 stage2.py helper，欄序同
+        stage2_matrix。"""
+        from recsys_tfb.models.staged.stage2 import (
+            encode_group_codes, group_code_lookup, stage2_matrix,
+        )
+
+        if self._stage2 is None:
+            raise NotImplementedError("stage2_matrix_for requires a stage-2 model")
+        scores, _ = self._stage1_scores(X, np.asarray(keys, dtype=object), "raise")
+        lookup = group_code_lookup(self._groups)
+        gcodes = encode_group_codes(np.asarray(keys, dtype=object), lookup)
+        return stage2_matrix(X, scores, gcodes)
 
     # ---- persistence ----
     def save(self, filepath: str) -> None:
@@ -259,16 +287,29 @@ class StagedModelAdapter(ModelAdapter):
             "not the adapter (needs per-row partition keys)."
         )
 
+    @property
+    def booster(self):
+        """attribution._resolve_booster 契約：stage2 存在＝診斷掛 Stage-2 booster。"""
+        if self._stage2 is None:
+            raise NotImplementedError(
+                "staged(stage2=none) has no single booster; per-group "
+                "diagnostics iterate the group adapters instead")
+        return self._stage2.booster
+
     def feature_importance(self, kind: str = "split") -> dict[str, float]:
-        raise NotImplementedError(
-            "per-group diagnostics arrive with the diagnostics PR (PR-C)."
-        )
+        if self._stage2 is None:
+            raise NotImplementedError(
+                "staged(stage2=none) importance is per-group; see "
+                "compute_staged_group_diagnostics")
+        return self._stage2.feature_importance(kind)
 
     def log_to_mlflow(self) -> None:
-        logger.info(
-            "staged adapter: mlflow model logging deferred to PR-C "
-            "(%d group(s))", len(self._groups),
-        )
+        if self._stage2 is not None:
+            self._stage2.log_to_mlflow()
+        else:
+            logger.info(
+                "staged(stage2=none): per-group boosters live in the model "
+                "bundle; no single MLflow model is logged")
 
     def prepare_train_inputs(self, *args, **kwargs):
         raise NotImplementedError(

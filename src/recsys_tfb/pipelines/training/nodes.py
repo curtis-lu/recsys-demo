@@ -1047,6 +1047,66 @@ def log_experiment(
         )
 
 
+def log_staged_experiment(
+    model: ModelAdapter,
+    stage1_groups_report: dict,
+    evaluation_results: dict,
+    stage1_overview: dict,
+    parameters: dict,
+    *diag_deps,
+) -> None:
+    """staged 版 MLflow logging：單一 run（2026-07-26 使用者裁決）。
+
+    per-group 細節不進 params（會爆 UI）——隨 diagnostics/ artifacts 上傳
+    （stage1_overview.json 就是總覽表）。``*diag_deps`` 是 ordering-only 依賴
+    （Runner 位置展開，core/runner.py:92）：保證 catalog 已把診斷 JSON 寫進
+    diagnostics/ 後才 log_artifacts，值本身不使用。stage2 資訊讀
+    ``stage1_overview["stage2"]``（兩種 DAG 形狀共用本函式的關鍵）。
+    """
+    from recsys_tfb.diagnosis.model import diagnostics_dir
+    mlflow_params = parameters.get("mlflow", {})
+    tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
+    experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
+    strict = mlflow_params.get("strict", False)
+    training_cfg = parameters.get("training", {})
+    stage2_info = stage1_overview.get("stage2") or {}
+
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        with log_step(logger, "mlflow_log_staged"):
+            with mlflow.start_run():
+                mlflow.log_param("model_structure", "staged")
+                mlflow.log_param("algorithm",
+                                 training_cfg.get("algorithm", "lightgbm"))
+                mlflow.log_param("partition_keys", ",".join(
+                    stage1_overview.get("partition_keys") or []))
+                mlflow.log_param("n_groups", stage1_overview.get("n_groups"))
+                mlflow.log_param("stage2_mode",
+                                 stage2_info.get("mode", "none"))
+                if stage2_info.get("best_params"):
+                    mlflow.log_params(stage2_info["best_params"])
+                mlflow.log_metric("overall_map",
+                                  evaluation_results["overall_map"])
+                for item, attr in evaluation_results.get(
+                        "per_item_map_attr", {}).items():
+                    mlflow.log_metric(f"map_attr_{item}", attr)
+                mlflow.log_metric("n_queries", evaluation_results["n_queries"])
+                mlflow.log_metric("n_excluded_queries",
+                                  evaluation_results["n_excluded_queries"])
+                model.log_to_mlflow()
+                # --- diagnostics artifacts（JSON written by per-group runner,
+                #     PNG by shap node; upload the whole dir） ---
+                diag_dir = diagnostics_dir(parameters)
+                if diag_dir.exists():
+                    mlflow.log_artifacts(str(diag_dir))
+        logger.info("staged experiment logged to MLflow (%s)", experiment_name)
+    except Exception as e:
+        if strict:
+            raise
+        logger.warning("staged MLflow logging skipped (best-effort): %s", e)
+
+
 def compute_test_mAP_spark(
     training_eval_predictions,  # Spark DataFrame, loaded by catalog (filtered to current model_version)
     predict_manifest: dict,

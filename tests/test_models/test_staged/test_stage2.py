@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 
 from recsys_tfb.models.staged.stage2 import (
-    encode_group_codes, fit_stage2, group_code_lookup,
-    stage2_categorical_indices, stage2_matrix,
+    STAGE2_EXTRA_FEATURES, encode_group_codes, fit_stage2, group_code_lookup,
+    stage2_categorical_indices, stage2_feature_names, stage2_matrix,
 )
 
 
@@ -52,6 +52,34 @@ def _toy(mode, n=240, seed=0):
 PARAMS = {"objective": None, "verbosity": -1, "num_threads": 1,
           "num_leaves": 5, "learning_rate": 0.2,
           "num_iterations": 20, "early_stopping_rounds": 5}
+
+
+class TestStage2FeatureNames:
+    def test_names_are_base_plus_extras_in_matrix_order(self):
+        assert stage2_feature_names(["a", "b"]) == [
+            "a", "b", "stage1_score", "partition_gcode"]
+        assert list(STAGE2_EXTRA_FEATURES) == ["stage1_score", "partition_gcode"]
+
+    def test_fit_stage2_booster_reports_assembled_names(self):
+        # X2：1 個 base 特徵 + stage1_score + gcode = 3 欄，對齊
+        # stage2_feature_names(["base_f"]) 的長度與欄序。
+        rng = np.random.default_rng(5)
+        n = 100
+        y = (rng.random(n) < 0.3).astype(int)
+        X2 = np.column_stack([
+            rng.normal(loc=y, size=n),           # base_f
+            rng.random(n),                       # stage1_score
+            rng.integers(0, 2, n).astype(float),  # gcode
+        ])
+        qg = np.repeat(np.arange(n // 4), 4)
+        names = stage2_feature_names(["base_f"])
+        params = {**PARAMS, "objective": "binary", "metric": "binary_logloss"}
+        adapter = fit_stage2(
+            "binary", X2, y, None, qg, X2, y, None, qg,
+            params, stage2_categorical_indices(None, 1),
+            feature_names=names,
+        )
+        assert adapter.booster.feature_name() == names
 
 
 class TestFitStage2:

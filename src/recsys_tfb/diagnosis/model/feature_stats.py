@@ -13,6 +13,28 @@ from ._util import _to_native
 logger = logging.getLogger(__name__)
 
 
+def _stats_from_pdf(pdf, feature_cols, high_null_threshold: float) -> dict:
+    """統計核心（per-group runner 共用；輸出與抽出前逐位元相同）。"""
+    stats: dict = {}
+    for col in feature_cols:
+        s = pdf[col]
+        null_rate = float(s.isna().mean())
+        n_distinct = int(s.nunique(dropna=True))
+        entry = {
+            "null_rate": null_rate,
+            "n_distinct": n_distinct,
+            "single_value": n_distinct <= 1,
+            "high_null": null_rate >= high_null_threshold,
+        }
+        if pd.api.types.is_numeric_dtype(s):
+            entry["mean"] = _to_native(s.mean())
+            entry["std"] = _to_native(s.std())
+            entry["min"] = _to_native(s.min())
+            entry["max"] = _to_native(s.max())
+        stats[col] = entry
+    return stats
+
+
 def compute_feature_statistics(train_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
     """逐特徵 null_rate / mean,std,min,max（數值）/ n_distinct + single_value,high_null 旗標。
 
@@ -38,22 +60,6 @@ def compute_feature_statistics(train_parquet_handle, preprocessor: dict, paramet
     pdf = data_access.take_rows(path, idx, columns=feature_cols)
     log_data_volume(logger, "feature_statistics.sample", pdf, deep=True)
 
-    stats: dict = {}
-    for col in feature_cols:
-        s = pdf[col]
-        null_rate = float(s.isna().mean())
-        n_distinct = int(s.nunique(dropna=True))
-        entry = {
-            "null_rate": null_rate,
-            "n_distinct": n_distinct,
-            "single_value": n_distinct <= 1,
-            "high_null": null_rate >= high_null_threshold,
-        }
-        if pd.api.types.is_numeric_dtype(s):
-            entry["mean"] = _to_native(s.mean())
-            entry["std"] = _to_native(s.std())
-            entry["min"] = _to_native(s.min())
-            entry["max"] = _to_native(s.max())
-        stats[col] = entry
+    stats = _stats_from_pdf(pdf, feature_cols, high_null_threshold)
     logger.info("feature_statistics: %d features summarized", len(stats))
     return stats

@@ -12,6 +12,7 @@ from ._util import _to_native
 from .attribution import attribution_budget_units, feature_attributions
 from .paths import per_item_summary_dir, safe_name, summary_dir
 from .sampling import _positive_item_sample, _stratified_item_sample
+from .staged import model_scores, resolve_attribution_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
     pos_pdf = data_access.take_rows(path, pos_idx, columns=take_cols).reset_index(drop=True)
     log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
     X_pos = _pdf_to_X(pos_pdf, preprocessor, parameters)
+    X_pos, feature_cols = resolve_attribution_inputs(model, pos_pdf, X_pos, feature_cols)
     with log_step(logger, "shap_values_positive"):
         shap_pos = feature_attributions(model, X_pos, feature_cols)
     pos_items = pos_pdf[item_col].values
@@ -155,13 +157,20 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     for col in (item_col, label_col):
         if col in names and col not in take_cols:
             take_cols.append(col)
+    for col in (getattr(model, "partition_keys", None) or []):
+        if col in names and col not in take_cols:
+            take_cols.append(col)
     sample_pdf = data_access.take_rows(path, idx, columns=take_cols).reset_index(drop=True)
     logger.info("shap diagnostics: n_total=%d n_sampled=%d n_cols=%d",
                 len(item_values), len(sample_pdf), len(take_cols))
     log_data_volume(logger, "shap.sample_pdf", sample_pdf, deep=True)
 
-    X = _pdf_to_X(sample_pdf, preprocessor, parameters)
-    scores = model.predict(X)
+    X_base = _pdf_to_X(sample_pdf, preprocessor, parameters)
+    scores = model_scores(model, sample_pdf, X_base)
+    # base 名單另存：_positive_profiles 自己會 resolve 一次，傳擴充版進去
+    # 會二次擴充（n+4 名單對 n+2 矩陣）——見 test_staged_shap_dispatch 回歸鎖。
+    base_feature_cols = feature_cols
+    X, feature_cols = resolve_attribution_inputs(model, sample_pdf, X_base, feature_cols)
 
     with log_step(logger, "shap_values"):
         shap_values = feature_attributions(model, X, feature_cols)
@@ -198,8 +207,8 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         positive_profiles = {}
     else:
         positive_profiles = _positive_profiles(
-            model, path, item_values, item_col, label_col, feature_cols, take_cols,
-            preprocessor, parameters, profile_positive=profile_positive,
+            model, path, item_values, item_col, label_col, base_feature_cols,
+            take_cols, preprocessor, parameters, profile_positive=profile_positive,
             per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
