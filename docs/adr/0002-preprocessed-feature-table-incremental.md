@@ -11,7 +11,7 @@ dataset pipeline 原本把「config 列出的全部 snap_date」整批重算一�
 
 每個 `snap_date` partition 的內容 = f(該月 `feature_table` rows, `category_mappings`)，**與其他月份無關**：
 
-- 編碼是純逐列的 map lookup（`preprocessing/_spark.py:85-109`），查表對象 `category_mappings` 只在 `train_snap_dates` 上 fit（`nodes_shared.py:31-33`、`preprocessing/_spark.py:164,180`）。
+- 編碼是純逐列的 map lookup（`preprocessing.py:68-92`），查表對象 `category_mappings` 只在 `train_snap_dates` 上 fit（`nodes_shared.py:31-33`、`pipelines/dataset/nodes_spark.py:269,288`）。
 - `apply_preprocessor_to_features` 裡唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。
 
 所以日期過濾從來就不是產物身分的一部分，只是**工作量限制**（`feature_table` 可能存了十年，不能每次全編碼）。把它從「config 列出的全部」改成「尚未落地的」，不改變任何 partition 的內容，只改變這次要做多少工。

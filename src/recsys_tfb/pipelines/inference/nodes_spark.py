@@ -11,7 +11,10 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.validation import ValidationError
-from recsys_tfb.preprocessing._spark import apply_preprocessor as _apply_preprocessor
+from recsys_tfb.preprocessing import (
+    _cast_feature_floats_to_float32,
+    _encode_categoricals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +134,47 @@ def apply_preprocessor(
     preprocessor: dict,
     parameters: dict,
 ) -> DataFrame:
-    """Apply training preprocessor to scoring dataset, preserving identity columns."""
-    return _apply_preprocessor(scoring_dataset, preprocessor, parameters)
+    """Apply training preprocessor to scoring dataset, preserving identity columns.
+
+    Reads all four ``PreprocessorMetadata`` keys off the landed artifact and
+    touches ``parameters`` only for the schema — this is the reader half of that
+    contract, the writer being the dataset pipeline's fit node.
+
+    Returns identity + feature columns for model prediction.
+    """
+    schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
+
+    feature_columns = preprocessor["feature_columns"]
+    categorical_cols = preprocessor["categorical_columns"]
+    category_mappings = preprocessor["category_mappings"]
+    drop_cols = preprocessor["drop_columns"]
+
+    # Drop non-feature columns (except identity and categorical)
+    cols_to_drop = [
+        c for c in drop_cols
+        if c in scoring_dataset.columns and c not in identity_cols
+    ]
+    result = scoring_dataset.drop(*cols_to_drop)
+
+    with log_step(logger, "encode_categoricals"):
+        result = _encode_categoricals(result, categorical_cols, category_mappings)
+
+    with log_step(logger, "select_feature_columns"):
+        missing = set(feature_columns) - set(result.columns)
+        if missing:
+            raise ValueError(f"Missing feature columns in scoring dataset: {sorted(missing)}")
+        result = result.select(*identity_cols, *feature_columns)
+
+    with log_step(logger, "cast_features_to_float32"):
+        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
+    logger.info(
+        "apply_preprocessor: %d columns, cast %d float-like feature columns to float32",
+        len(result.columns), len(casted),
+    )
+    if casted:
+        logger.debug("apply_preprocessor: casted columns = %s", casted)
+    return result
 
 
 def predict_scores(

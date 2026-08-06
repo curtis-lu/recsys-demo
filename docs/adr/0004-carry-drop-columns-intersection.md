@@ -11,13 +11,13 @@ date: 2026-08-02
 
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
-| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`preprocessing/_common.py:30-59`） | 黑名單：不得進 `feature_columns` |
+| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`pipelines/dataset/feature_columns.py:33-62`） | 黑名單：不得進 `feature_columns` |
 | `carry_columns` | **`sample_pool`** 的欄 | `select_keys`（`pipelines/dataset/helpers_spark.py:124-125`） | 白名單：keys 除 identity 外還要多帶 |
 | `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
 
 而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 的
 `keep_cols = base_key + [c for c in feature_columns if c in feature_table.columns]`
-（`preprocessing/_spark.py:396-397`），被擋在 `feature_columns` 之外的欄不會進
+（`pipelines/dataset/nodes_spark.py:396-397`），被擋在 `feature_columns` 之外的欄不會進
 `preprocessed_feature_table`。
 
 所以當某欄**同時**存在於 `sample_pool`（要 carry）與 `feature_table` 時，它必須列進

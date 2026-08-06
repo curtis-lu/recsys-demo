@@ -36,7 +36,7 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.nodes_shared import collect_dataset_snap_dates
-from recsys_tfb.preprocessing._common import (
+from recsys_tfb.pipelines.dataset.feature_columns import (
     _compute_feature_columns,
     _get_preprocessing_config,
 )
