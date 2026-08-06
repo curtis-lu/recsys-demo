@@ -163,6 +163,7 @@ SHOW PARTITIONS ml_recsys.training_eval_predictions;   -- 這張沒有 recsys_pr
 | 該月數字與上次逐位相同（重算既有月份時） | 只重算了其中一層：dataset 跳過既有 partition，或 predict 跳過已完整的月份／命中舊 parquet cache | 用 `bash scripts/rebuild_eval_month.sh <該月>` 一次做完兩層；細節見 [known-pitfalls §15](known-pitfalls.md) |
 | dataset log 印 `skipped=<你要重算的月份>`，或 predict 印 `skipped=<該月>` | 沒帶 `--rebuild-dates`；產物存在就會被跳過 | 加上 `--rebuild-dates <該月>` 重跑（兩個 pipeline 都要） |
 | `--rebuild-dates` 直接報錯退出、還沒起 Spark | 該月份不在 `test_snap_dates`（不變量 A21） | 先把月份加進 `dataset.test_snap_dates`，或修正旗標的值 |
+| dataset 報 `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day`、還沒起 Spark | 步驟 1 加的月份已經在 train／calibration／val 裡了（不變量 A24） | 從不該擁有它的那一組移除。訊息會分別印出兩邊**各自的原始寫法**，因為比對是按日、不是按字面（月份仍必須寫成 `YYYY-MM-DD`，其他寫法會被 A21／A22 擋下）。這條之所以要擋：同一個月同時訓練又評估，該月的指標會靜默變成 in-sample 數字，報表看起來完全正常 |
 | evaluation 報 `(A22) evaluation.snap_date=... is not a test month`、還沒起 Spark | 步驟 4 的 `evaluation.snap_date` 指到不在 `test_snap_dates` 的月份（漏了步驟 1） | 補做步驟 1–3，或把 `evaluation.snap_date` 指回已設定的月份。這條之所以要擋：`training_eval_predictions` 累積歷來每一個月，已移除的月份照樣抓得到 rows，會跑出一份看起來正常、卻不是目前設定要評估的報表 |
 | training 印 `[rebuild] WARNING: ... had no effect` | 切片把 `predict_and_write_test_predictions` 排除了，旗標無事可做 | 改用 `--only-node predict_and_write_test_predictions`，或不帶切片旗標 |
 | predict 拋 `test month '<月份>' ... has no rows in the test cache` | 該月在 `test_snap_dates` 裡但 dataset 沒產出它 | 先跑步驟 2 產出該月。predict 之所以直接報錯而不安靜跳過：跳過會讓你拿到一份空報表 |

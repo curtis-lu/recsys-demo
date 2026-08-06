@@ -8,7 +8,6 @@ import pytest
 from recsys_tfb.pipelines.dataset.nodes_shared import (
     collect_dataset_snap_dates,
     plan_incremental_snap_dates,
-    validate_date_splits,
 )
 
 
@@ -37,7 +36,7 @@ class TestCollectDatasetSnapDates:
         ]
 
     def test_deduplicates_overlapping_entries(self):
-        # Different splits must not duplicate; the helper does not check overlap (that's validate_date_splits)
+        # Different splits must not duplicate; the helper does not check overlap (that's A24, core/consistency.py)
         params = {
             "dataset": {
                 "train_snap_dates": ["2025-01-31", "2025-02-28"],
@@ -196,96 +195,3 @@ class TestPlanIncrementalSnapDates:
         )
         assert plan.to_process == []
         assert plan.skipped == _ts("2026-01-31")
-
-
-class TestValidateDateSplits:
-    def test_non_overlapping_passes(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31", "2025-02-28"],
-                "calibration_snap_dates": ["2025-03-31"],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        validate_date_splits(params)  # should not raise
-
-    def test_train_cal_overlap_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31", "2025-02-28"],
-                "calibration_snap_dates": ["2025-02-28"],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="train & calibration"):
-            validate_date_splits(params)
-
-    def test_train_val_overlap_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31", "2025-04-30"],
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="train & val"):
-            validate_date_splits(params)
-
-    def test_cal_val_overlap_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31"],
-                "calibration_snap_dates": ["2025-04-30"],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="calibration & val"):
-            validate_date_splits(params)
-
-    def test_val_test_overlap_raises(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31"],
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2025-05-31"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        with pytest.raises(ValueError, match="val & test"):
-            validate_date_splits(params)
-
-    def test_three_way_overlap_reports_all_pairs(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-04-30"],
-                "calibration_snap_dates": ["2025-04-30"],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        with pytest.raises(ValueError) as exc_info:
-            validate_date_splits(params)
-        msg = str(exc_info.value)
-        assert "train & calibration" in msg
-        assert "train & val" in msg
-        assert "calibration & val" in msg
-
-    def test_empty_calibration_passes(self):
-        params = {
-            "dataset": {
-                "train_snap_dates": ["2025-01-31"],
-                "calibration_snap_dates": [],
-                "val_snap_dates": ["2025-04-30"],
-                "test_snap_dates": ["2025-05-31"],
-            }
-        }
-        validate_date_splits(params)  # should not raise
-
-    def test_missing_optional_keys_pass(self):
-        # Omitting cal/val/test entirely must also pass (via .get(..., []))
-        params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
-        validate_date_splits(params)  # should not raise

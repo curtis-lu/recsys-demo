@@ -139,6 +139,29 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--post-training``, and the default monitoring mode reads inference output
   whose month legitimately need not be a test month — wiring it there would
   block valid monitoring runs. Wired like A13.
+* A23 — ``dataset.train_snap_dates`` required and non-empty (specified but
+  DEFERRED, issue #158). The number is claimed here so the next invariant does
+  not reuse it.
+* A24 — the four ``dataset.{train,calibration,val,test}_snap_dates`` splits
+  must be mutually disjoint. A month in two splits trains the model and then
+  measures it, so every metric from the second split silently becomes an
+  in-sample number and nothing downstream notices. Dates are compared as
+  calendar days (``pd.Timestamp``), so ``"2026-1-31"`` and ``"2026-01-31"``
+  collide — a deliberate tightening over the string comparison this replaced
+  (ADR-0008 section 3). Note this is only about *comparison*: a snap_date
+  still has to be written ``YYYY-MM-DD`` to satisfy A21/A22, which reject
+  anything ``_iso_date`` cannot read. Predicate: ``date_split_overlap_errors``
+  (returns errors; the dataset command raises). NOT aggregated by
+  ``validate_config_consistency``: that runs at the entry of every command
+  while only the dataset pipeline reads these keys — the precedent, and the
+  9-blocked-test measurement behind it, is issue #158. Wired like A21/A22.
+  Deliberately has NO runtime backstop, unlike A2/A3/B6: this is a pure
+  config predicate with nothing data-dependent to re-check, and the node-body
+  call it replaced is exactly what ADR-0008 section 3 set out to remove.
+
+Layer 1 invariants that hang off a single command instead of the aggregator,
+because they need context the aggregator never sees: A12/A13 and A21 (CLI
+flags), A22 (``--post-training``), A24 (config keys only one pipeline reads).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
@@ -199,6 +222,8 @@ the plan doc for the full table:
 from __future__ import annotations
 
 import datetime as _datetime
+
+import pandas as pd
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
@@ -1372,3 +1397,88 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
             "subject to this rule.)"
         ]
     return []
+
+
+#: The four ``dataset.*_snap_dates`` splits A24 keeps disjoint, in the order
+#: their pairs are reported.
+_DATE_SPLIT_NAMES = ("train", "calibration", "val", "test")
+
+
+def _split_day_labels(values) -> dict:
+    """Map each configured snap_date to the calendar day it names.
+
+    Returns ``{comparison key: literal as written}``. The key is a
+    midnight-normalised ``pd.Timestamp``, so two literals naming the same day
+    compare equal however they were spelled; the value keeps the operator's own
+    text, because that is what they will search their yaml for.
+
+    Parsing is ``pd.Timestamp`` rather than this module's ``_iso_date`` because
+    on Python 3.10 ``date.fromisoformat`` rejects ``"2026-1-31"`` outright, and
+    A24 has to be able to see that it means the same day as ``"2026-01-31"``.
+    Note this makes A24 no *looser* than A21/A22 — they truncate to the
+    calendar day too (``_iso_date`` returns ``YYYY-MM-DD``), so a snap_date
+    carrying a time-of-day is one day to all three.
+
+    Only the forms ``_iso_date`` accepts may reach the parser. ``pd.Timestamp``
+    reads a bare int as NANOSECONDS since the epoch, so an unquoted yaml
+    ``20260131`` would silently become 1970-01-01 — and two different months
+    written that way would both land there and be reported as an overlap that
+    does not exist. Anything else keeps its raw text as the key, tagged so it
+    can never collide with a real day: two unreadable literals then overlap
+    only when byte-identical, which is what the string comparison this
+    predicate replaced would have said. Judging a literal *malformed* belongs
+    to the per-key predicates (A21/A23), not to a disjointness check.
+    """
+    labels: dict = {}
+    for value in values:
+        day = None
+        if isinstance(value, (str, _datetime.date)):
+            # _datetime.date also covers datetime and pd.Timestamp (subclasses).
+            try:
+                day = pd.Timestamp(value)
+            except (ValueError, TypeError, OverflowError):
+                day = None
+        if day is None or day is pd.NaT:
+            labels[("unparsed", str(value))] = str(value)
+        else:
+            labels[day.normalize()] = str(value)
+    return labels
+
+
+def date_split_overlap_errors(parameters: dict) -> list[str]:
+    """(A24) The four dataset snap_date splits must be mutually disjoint.
+
+    Returns error strings (empty list when fine); the dataset command raises.
+    One error per overlapping pair, so a config with several collisions gets
+    fixed in one pass rather than one run per pair.
+
+    A month in two splits is not a config the pipeline can honour: the same
+    rows would train the model and then measure it, and every metric computed
+    from the second split silently becomes an in-sample number. Nothing
+    downstream notices — the run succeeds and the report looks normal.
+    """
+    ds = parameters.get("dataset", {}) or {}
+    days = {
+        name: _split_day_labels(ds.get(f"{name}_snap_dates") or [])
+        for name in _DATE_SPLIT_NAMES
+    }
+
+    errors: list[str] = []
+    for i, a in enumerate(_DATE_SPLIT_NAMES):
+        for b in _DATE_SPLIT_NAMES[i + 1:]:
+            common = days[a].keys() & days[b].keys()
+            if common:
+                # Each side's OWN literal, not the shared normalised form: the
+                # operator's next move is to grep their yaml, and a config that
+                # wrote "2026-1-31" contains no "2026-01-31" to find.
+                in_a = sorted(days[a][key] for key in common)
+                in_b = sorted(days[b][key] for key in common)
+                errors.append(
+                    f"(A24) dataset.{a}_snap_dates {in_a} and "
+                    f"dataset.{b}_snap_dates {in_b} name the same calendar "
+                    f"day — a snap_date belongs to exactly one split. The "
+                    f"comparison is by day, not by text, so the same date "
+                    f"spelled two ways still collides. Drop it from whichever "
+                    f"split should not own it."
+                )
+    return errors

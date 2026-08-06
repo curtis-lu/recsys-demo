@@ -65,3 +65,22 @@ def test_a8_search_space_schema_surfaces_via_validate():
     }
     with pytest.raises(ConfigConsistencyError, match="must be a list"):
         validate_config_consistency(params)
+
+
+def test_a24_wired_into_dataset_command_before_spark():
+    # A24 reads dataset-only config keys, so it must NOT be aggregated by
+    # validate_config_consistency (that gate runs at the entry of every
+    # command — issue #158 measured 9 unrelated tests blocked by exactly this
+    # mistake). The behavioural half of this rule is in tests/test_cli.py
+    # TestDateSplitOverlapA24; here we pin the two structural halves.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "date_split_overlap_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A24 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.dataset)
+    assert "date_split_overlap_errors(params)" in src
+    assert src.index("date_split_overlap_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A24 must fail before the Spark cold start, like A21"

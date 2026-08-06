@@ -29,6 +29,7 @@
 **混合證據，主判定 (c) 已被推翻或從未實現落實為強制規範（部分屬實，需拆解）。** 檔 B 沒有專門討論函式大小/單一職責的段落。程式碼證據顯示落實不一致：
 
 - 遵守（小而單一職責、易獨測）：`pipelines/dataset/nodes_spark.py:30-41`（`select_train_keys`，12 行，純轉呼）、`pipelines/dataset/nodes_spark.py:162-182`（`_date_filter`，純函式）、`pipelines/training/nodes.py:356-368`（`cache_train_model_input` 等單行 wrapper）、`pipelines/dataset/nodes_shared.py:108-127`（`validate_date_splits`，20 行純驗證）。
+  ↑ 本檔是 2026-08-03 的當日快照，不追著程式碼更新；唯一例外註記：`validate_date_splits` 已於 issue #166 移除，改為 `core/consistency.py` 的不變量 A24（`date_split_overlap_errors`）。
 - 違反（>80 行、明顯混雜多階段職責）：`pipelines/training/nodes.py:1082-1253`（`predict_and_write_test_predictions`，174 行，同時做 partition 枚舉＋增量計畫＋讀取＋特徵轉換＋預測＋Hive 寫入＋manifest 組裝）、`pipelines/training/nodes.py:750-904`（`finalize_model`，157 行，策略分派＋特徵抽取＋numpy 運算＋`lgb.Dataset` 構造＋呼叫 adapter）、`pipelines/training/nodes.py:520-749`（`tune_hyperparameters`，Optuna 搜尋迴圈與每 trial 建模評分邏輯全內嵌一個閉包，無法獨立測試）、`pipelines/evaluation/nodes_spark.py:74-215`（`prepare_eval_data`，142 行）、`pipelines/inference/nodes_spark.py:246-381`（`validate_predictions`，136 行）。
 
 **判定理由**：違反案例集中且明確落在最核心的 training pipeline（訓練、預測、超參數搜尋這三個對正確性影響最大的環節），代表這條原則從未被落實為強制規範，不是零星意外。同一份反模式清單裡「giant training functions that do everything」也直接對應這個發現（見下方 Anti-Patterns 段）。因此**不建議搶救成一條規範性陳述**，但這個發現本身值得記錄在別處（例如未來重構 backlog），不是這次「文件退役」任務的範圍。

@@ -1390,10 +1390,10 @@ def _four_split_params(parameters, **overrides):
     """``parameters`` reshaped so all four key-selecting splits are populated.
 
     The module fixture spends all five months on train/val/test, leaving none
-    for calibration — and ``select_train_keys`` calls ``validate_date_splits``,
-    so overlapping months raise rather than silently sharing. Train gives up its
-    third month to calibration; every month still comes from ``_SNAP_DATES``, so
-    resizing the fixture still resizes this.
+    for calibration — and a month may belong to exactly one split (invariant
+    A24, enforced on the ``dataset`` command), so they cannot silently share
+    one. Train gives up its third month to calibration; every month still comes
+    from ``_SNAP_DATES``, so resizing the fixture still resizes this.
     """
     dataset = {
         **parameters["dataset"],

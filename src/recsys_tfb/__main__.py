@@ -13,6 +13,7 @@ from recsys_tfb.core.consistency import (
     validate_config_consistency,
     compare_mutual_exclusive_errors,
     compare_source_key_exists,
+    date_split_overlap_errors,
     post_training_snap_date_errors,
     resolved_rebuild_dates,
     ConfigConsistencyError,
@@ -651,6 +652,18 @@ def dataset(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("dataset", env)
+
+    # (A24) The four dataset snap_date splits must be disjoint. Deliberately
+    # not aggregated by validate_config_consistency: that gate runs inside
+    # _load_config_and_setup, i.e. at the entry of EVERY command, while only
+    # this pipeline reads these keys — and #158 measured what a dataset-only
+    # predicate does there (9 unrelated tests blocked). Same reason A21/A22
+    # hang off their own command.
+    split_errors = date_split_overlap_errors(params)
+    if split_errors:
+        for line in split_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
 
     # (A21) --rebuild-dates ⊆ dataset.test_snap_dates. Checked before Spark
     # starts: a typo here would otherwise cost a cold start before failing.

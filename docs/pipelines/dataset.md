@@ -72,7 +72,7 @@ dataset:
     - "2026-01-31"
 ```
 
-train、calibration、val、test 日期集合必須互斥。`train_dev_ratio` 不會切日期，而是依第一個 entity 欄位將該 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
+train、calibration、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是依第一個 entity 欄位將該 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
 
 ### 3.2 Train 分層抽樣
 
@@ -555,7 +555,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
 | categorical dtype 為 decimal/double/float | 連續值誤標類別，或代碼欄型別不適合 | 真正連續特徵移出 categorical；代碼欄在 source ETL cast 為 string/int |
-| `Date splits overlap` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥 |
+| `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
 | identity categorical missing declarations | item 等 identity 類別無法從 feature table fit | 在 `schema.categorical_values` 提供完整值域 |
 | log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理 |
