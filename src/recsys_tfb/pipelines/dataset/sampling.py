@@ -1,4 +1,8 @@
-"""Helper functions for the dataset building pipeline (Spark backend)."""
+"""How a split's keys get sampled: effective-ratio resolution and bucket filter.
+
+The mechanism only — which rows a split is entitled to, and at what ratio, is the
+calling node's decision (ADR-0008 §2).
+"""
 
 import logging
 

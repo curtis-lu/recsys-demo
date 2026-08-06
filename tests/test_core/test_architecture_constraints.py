@@ -1,9 +1,9 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7) or exception registry
-(R1-R4) in that document. When a test fails, the fix is either to change the
-code back, or to update the document AND get the exception registered -- never
-to loosen the test quietly.
+Each test corresponds to one numbered constraint (A1-A7, S1-S2) or exception
+registry (R1-R4) in that document. When a test fails, the fix is either to
+change the code back, or to update the document AND get the exception
+registered -- never to loosen the test quietly.
 
 What these tests can and cannot see, stated plainly so the document does not
 overclaim:
@@ -272,6 +272,86 @@ class TestA7ZeroOutputNodesRegistered:
         }), (
             "zero-output side-effect nodes changed. Registered in R3 of "
             "docs/agents/architecture-constraints.md; slicing skips these."
+        )
+
+
+DATASET = PIPELINES / "dataset"
+
+
+def _function_def_names(path):
+    """Names ``def``-ed at any depth in ``path`` -- imports deliberately excluded."""
+    tree = ast.parse(path.read_text())
+    return {
+        n.name
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _imported_roots(path):
+    """{root package: [lineno]} for every import in ``path``, nested ones included.
+
+    ``ast.walk`` rather than ``tree.body``: a deferred ``import pyspark`` inside
+    a function body is the exact form S2 has to catch, and it is the form that
+    would otherwise look like "this module has no Spark dependency".
+    """
+    tree = ast.parse(path.read_text())
+    found = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots = [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            # level > 0 is a relative import: no root package name to read.
+            roots = [node.module.split(".")[0]] if node.module and not node.level else []
+        else:
+            continue
+        for root in roots:
+            found.setdefault(root, []).append(node.lineno)
+    return found
+
+
+class TestS1DatasetNodesAreDefinedInNodesModule:
+    """S1: every dataset node is ``def``-ed in ``pipelines/dataset/nodes.py``.
+
+    Defined-here, not imported-here, and that difference is the whole point:
+    ``nodes.py`` gaining one ``from .sampling import select_keys`` line would
+    satisfy "the pipeline imports it from nodes.py" while the function body
+    still lived elsewhere -- which is the shape ADR-0008 exists to remove.
+    """
+
+    def test_every_registered_node_is_defined_in_nodes_py(self):
+        defined = _function_def_names(DATASET / "nodes.py")
+        registered = [
+            (call.lineno, _node_func_name(call))
+            for path, call in _node_calls()
+            if path == DATASET / "pipeline.py"
+        ]
+        assert registered, "no Node(...) found in pipelines/dataset/pipeline.py"
+        offenders = [
+            f"pipelines/dataset/pipeline.py:{lineno} {name}"
+            for lineno, name in registered
+            if name not in defined
+        ]
+        assert offenders == [], (
+            "dataset nodes not defined in pipelines/dataset/nodes.py "
+            f"(S1): {offenders}"
+        )
+
+
+class TestS2MonthPlansStaysPure:
+    """S2: ``pipelines/dataset/month_plans.py`` must not import pyspark.
+
+    Load-bearing, not stylistic: it is the only reason ``scoping.py`` is a
+    separate file, and the condition under which that module's tests run without
+    paying this repo's 2-4 minute Spark cold start (ADR-0008 section 4).
+    """
+
+    def test_month_plans_does_not_import_pyspark(self):
+        found = _imported_roots(DATASET / "month_plans.py")
+        assert "pyspark" not in found, (
+            "month_plans.py imported pyspark at line(s) "
+            f"{found.get('pyspark')} (S2). Spark-typed work belongs in "
+            "scoping.py; see docs/agents/architecture-constraints.md."
         )
 
 

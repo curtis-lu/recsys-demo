@@ -22,7 +22,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 任務 | 先讀 |
 |---|---|
 | 架構 / 重構 / 探索 codebase | `graphify-out/GRAPH_REPORT.md`（**強制**，不得用 Explore agent 替代這一步；有 `graphify-out/wiki/index.md` 就導航 wiki 而非讀原始檔） |
-| 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋7 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
+| 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋9 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | worktree / venv 任何操作 | `docs/operations/worktree-venv-setup.md` ＋ 下方 pre-flight |
 | 本機跑 Spark pipeline | `docs/operations/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
 | pipeline 部分執行 | `docs/operations/pipeline-slicing.md`（`--from-node`/`--only-node`/`--dry-run`/`--list-nodes`） |
@@ -75,7 +75,7 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
 
 ## Config consistency gate
 
-不變量（Layer-1 的 A 系列 ＋ 資料閘的 B 系列）的**唯一真實來源＝`src/recsys_tfb/core/consistency.py`**，各代號意義見該檔模組 docstring 的 Invariant legend。**新增一致性不變量必須在該模組加 predicate，不得在各 pipeline ad-hoc 散落**。Layer-1 `validate_config_consistency` 在 CLI entry 執行、collect-all 一次 raise；Layer-2 `validate_data_consistency`（`pipelines/dataset/data_gate.py`）是 dataset pipeline 第一個 side-effect 節點。改動這一帶之前先讀該模組 docstring，不要依賴本段的摘要。
+不變量（Layer-1 的 A 系列 ＋ 資料閘的 B 系列）的**唯一真實來源＝`src/recsys_tfb/core/consistency.py`**，各代號意義見該檔模組 docstring 的 Invariant legend。**新增一致性不變量必須在該模組加 predicate，不得在各 pipeline ad-hoc 散落**。Layer-1 `validate_config_consistency` 在 CLI entry 執行、collect-all 一次 raise；Layer-2 `validate_data_consistency`（`pipelines/dataset/nodes.py`）是 dataset pipeline 第一個 side-effect 節點。改動這一帶之前先讀該模組 docstring，不要依賴本段的摘要。
 
 ## graphify
 

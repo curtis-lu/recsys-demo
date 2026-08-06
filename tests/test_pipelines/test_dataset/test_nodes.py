@@ -1,4 +1,4 @@
-"""Tests for dataset building pipeline Spark nodes."""
+"""Tests for the dataset pipeline's node functions, Layer-2 gate included."""
 
 import pandas as pd
 import pytest
@@ -6,9 +6,8 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset.data_gate import validate_data_consistency
 from recsys_tfb.pipelines.dataset.month_plans import build_month_plans
-from recsys_tfb.pipelines.dataset.nodes_spark import (
+from recsys_tfb.pipelines.dataset.nodes import (
     apply_preprocessor_to_features,
     build_model_input,
     fit_preprocessor_metadata,
@@ -16,6 +15,7 @@ from recsys_tfb.pipelines.dataset.nodes_spark import (
     select_train_keys,
     select_val_keys,
     split_train_keys,
+    validate_data_consistency,
 )
 
 pytestmark = pytest.mark.spark
@@ -769,8 +769,8 @@ def test_build_model_input_casts_float_features_to_float32(
 
 
 # --- where Layer-2 gate tests live -------------------------------------------
-# `validate_data_consistency` now lives in `pipelines/dataset/data_gate.py`
-# (#161), which is how this module imports it. Its integration tests stay here,
+# `validate_data_consistency` is a node like any other, so it lives in
+# `pipelines/dataset/nodes.py` (#169). Its integration tests stay here,
 # next to the existing B1/B5/B6/B7 ones and the fixtures they all need. The pure
 # helpers it calls (`_compute_feature_columns`) are tested in
 # test_feature_columns.py. Split by "gate wiring vs pure helper", not by which
@@ -1168,8 +1168,8 @@ class TestValidateDataConsistencyCollectAll:
 # directly instead of assembling the CLI's partition listing; which listing
 # produces which plan is asserted without Spark in test_month_plans.py. ---
 
-from recsys_tfb.pipelines.dataset.nodes_shared import SnapDatePlan
-from recsys_tfb.pipelines.dataset.nodes_spark import build_test_model_input
+from recsys_tfb.pipelines.dataset.month_plans import SnapDatePlan
+from recsys_tfb.pipelines.dataset.nodes import build_test_model_input
 
 _TEST_MONTHS = _SNAP_DATES[3:5]
 
@@ -1379,11 +1379,11 @@ class TestScopedNodesHandleHiveStringDates:
 # survives.
 # =============================================================================
 
-from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
-from recsys_tfb.pipelines.dataset.nodes_spark import (
+from recsys_tfb.pipelines.dataset.nodes import (
     filter_groups_with_positives,
     select_calibration_keys,
 )
+from recsys_tfb.pipelines.dataset.sampling import select_keys
 
 
 def _four_split_params(parameters, **overrides):
@@ -1786,7 +1786,7 @@ class TestSelectKeysOverridePath:
     """D8 — the override lookup must not change the row count.
 
     ``select_keys`` maps group key -> ratio with a broadcast LEFT join. The
-    comment in ``helpers_spark.py`` claims it "never fans out rows" (the lookup
+    comment in ``sampling.py`` claims it "never fans out rows" (the lookup
     has unique keys) and that unmatched groups fall back to ``sample_ratio``
     via coalesce. Both halves are row-count claims, and neither was tested: a
     lookup with a duplicate key silently multiplies rows, and an INNER join
@@ -1884,7 +1884,7 @@ class TestSelectCalibrationKeys:
         concern is that the two share a seed and would otherwise draw the same
         rows.
         """
-        import recsys_tfb.pipelines.dataset.nodes_spark as nodes
+        import recsys_tfb.pipelines.dataset.nodes as nodes
 
         seen = {}
 
@@ -1980,7 +1980,7 @@ class TestFilterGroupsWithPositives:
     """
 
     def test_drops_all_zero_groups(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
@@ -1997,7 +1997,7 @@ class TestFilterGroupsWithPositives:
 
     def test_keeps_all_rows_of_positive_groups(self, spark):
         """Group with even one positive row keeps every row in that group."""
-        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 4),
@@ -2011,7 +2011,7 @@ class TestFilterGroupsWithPositives:
     def test_groups_split_across_snap_dates(self, spark):
         """(snap_date, cust_id) is the group key — same cust across two snaps
         is two separate groups."""
-        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(
@@ -2028,7 +2028,7 @@ class TestFilterGroupsWithPositives:
         assert all(str(r.snap_date).startswith("2025-01") for r in rows)
 
     def test_preserves_column_schema(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"]),
@@ -2041,7 +2041,7 @@ class TestFilterGroupsWithPositives:
         assert out.columns == df.columns
 
     def test_empty_when_no_positives(self, spark):
-        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+        from recsys_tfb.pipelines.dataset.nodes import _filter_groups_with_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
@@ -2066,7 +2066,7 @@ class TestApplyPreprocessorToFeaturesRequiresSnapDates:
     """
 
     def test_omitting_snap_dates_raises_instead_of_defaulting(self):
-        from recsys_tfb.pipelines.dataset.nodes_spark import (
+        from recsys_tfb.pipelines.dataset.nodes import (
             _apply_preprocessor_to_features,
         )
 
@@ -2099,3 +2099,93 @@ class TestFitPreprocessorMetadataKeyContract:
 
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
         assert set(preprocessor) == set(PreprocessorMetadata.__annotations__)
+
+
+# =============================================================================
+# Moved up from ``test_helpers_spark.py`` (#169). ``select_keys`` is the
+# mechanism the key-selection nodes are made of; its tests sit at the node
+# layer so that #170 can rewrite them to go through ``select_train_keys``
+# without moving files a second time. Local fixtures are prefixed
+# ``_sampling_`` to stay clear of the module fixture block above.
+# =============================================================================
+
+
+def _sampling_params(carry=None, group_keys=None):
+    p = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label"}},
+        "dataset": {
+            "sample_group_keys": group_keys or ["cust_segment_typ", "prod_name", "label"],
+            "sample_ratio": 1.0},
+        "random_seed": 42}
+    if carry is not None:
+        p["dataset"]["carry_columns"] = carry
+    return p
+
+
+def _sampling_pool(spark):
+    return spark.createDataFrame(pd.DataFrame({
+        "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+        "cust_id": [1, 2, 3, 4],
+        "prod_name": ["a", "b", "a", "b"],
+        "cust_segment_typ": ["mass", "hnw", "mass", "aff"],
+        "label": [1, 0, 1, 0]}))
+
+
+class TestSelectKeysCarry:
+    def test_carry_present_no_sampling_path(self, spark):
+        df = select_keys(_sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]),
+                          [pd.Timestamp("2025-01-31")], 1.0, {})
+        assert set(df.columns) == {"snap_date", "cust_id", "prod_name",
+                                   "cust_segment_typ"}
+
+    def test_carry_present_overrides_path(self, spark):
+        df = select_keys(_sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]),
+                          [pd.Timestamp("2025-01-31")], 1.0, {"mass|a|1": 1.0})
+        assert "cust_segment_typ" in df.columns
+
+    def test_no_carry_returns_identity_only(self, spark):
+        df = select_keys(_sampling_pool(spark), _sampling_params(),
+                         [pd.Timestamp("2025-01-31")], 1.0, {})
+        assert set(df.columns) == {"snap_date", "cust_id", "prod_name"}
+
+
+class TestSelectKeysOverrideLookup:
+    """Broadcast-join override lookup. Using ratios in {0.0, 1.0} makes the
+    crc32 bucket irrelevant (threshold 0 drops all, threshold HASH_BUCKETS keeps
+    all), so these assert the group_key -> ratio mapping itself — the part the
+    broadcast join replaced. In _pool: custs 1 & 3 are (mass, a, label=1),
+    custs 2 & 4 are (hnw, b, 0) and (aff, b, 0).
+    """
+
+    @staticmethod
+    def _survivors(df):
+        return {r["cust_id"] for r in df.collect()}
+
+    def test_override_zero_drops_only_that_group(self, spark):
+        # default 1.0 keeps all; the single override drops just its group.
+        df = select_keys(_sampling_pool(spark), _sampling_params(),
+                         [pd.Timestamp("2025-01-31")], 1.0, {"mass|a|1": 0.0})
+        assert self._survivors(df) == {2, 4}
+
+    def test_unmatched_falls_back_to_default(self, spark):
+        # default 0.0 drops all; only the overridden group survives (coalesce
+        # fallback path for the unmatched rows).
+        df = select_keys(_sampling_pool(spark), _sampling_params(),
+                         [pd.Timestamp("2025-01-31")], 0.0, {"mass|a|1": 1.0})
+        assert self._survivors(df) == {1, 3}
+
+    def test_multiple_overrides(self, spark):
+        # two groups overridden in one lookup table; default 1.0 keeps the rest.
+        df = select_keys(_sampling_pool(spark), _sampling_params(),
+                         [pd.Timestamp("2025-01-31")], 1.0,
+                         {"mass|a|1": 0.0, "aff|b|0": 0.0})
+        assert self._survivors(df) == {2}
+
+    def test_single_group_key_no_concat(self, spark):
+        # group_keys == [label] exercises the len==1 (no concat_ws) path; the
+        # override key is the string-cast label value.
+        df = select_keys(_sampling_pool(spark), _sampling_params(group_keys=["label"]),
+                         [pd.Timestamp("2025-01-31")], 1.0, {"0": 0.0})
+        assert self._survivors(df) == {1, 3}

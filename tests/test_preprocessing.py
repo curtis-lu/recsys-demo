@@ -29,7 +29,7 @@ class TestPreprocessorMetadataContract:
     The writer is the dataset pipeline's fit node and the reader is the
     inference pipeline's apply node; before #168 they agreed only because they
     shared a file. This is the definition half of the guard — the other half is
-    ``test_nodes_spark.py::TestFitPreprocessorMetadataKeyContract``, which
+    ``test_dataset/test_nodes.py::TestFitPreprocessorMetadataKeyContract``, which
     asserts the real fit output against these same annotations, so a key renamed
     on the dataset side turns red there rather than in the company environment.
     """

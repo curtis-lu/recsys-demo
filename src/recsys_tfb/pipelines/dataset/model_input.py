@@ -57,7 +57,7 @@ def build_model_input(
     # every (time, entity) by label_table's item count and took `item`'s values
     # from label_table. No caller can reach that branch — identity_columns is
     # derived ([time] + entity + [item], core/schema.py) and both wrappers in
-    # pipelines/dataset/nodes_spark.py feed it, across all five pipeline nodes
+    # pipelines/dataset/nodes.py feed it, across all five pipeline nodes
     # they register — but its failure mode is a silently N-times-too-large
     # dataset, so the missing column is an error rather than a mode.
     label_join_key = base_key + [item_col]
