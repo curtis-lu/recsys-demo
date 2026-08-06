@@ -1482,3 +1482,34 @@ class TestDateSplitOverlapA24:
         assert len(date_split_overlap_errors(
             _split_params(train=[None], val=[None])
         )) == 1
+
+    def test_a_non_date_scalar_does_not_collapse_distinct_months(self):
+        # An unquoted yaml 20260131 is an int, and pd.Timestamp reads a bare
+        # int as NANOSECONDS since the epoch — so two different months would
+        # both normalise to 1970-01-01 and A24 would invent an overlap that
+        # blocks a legitimate run. Only the forms _iso_date accepts (str /
+        # date / datetime / pd.Timestamp) may reach the parser.
+        assert date_split_overlap_errors(
+            _split_params(train=[20260131], val=[20260228])
+        ) == []
+
+    def test_a_time_of_day_does_not_hide_a_collision(self):
+        # .normalize() truncates to midnight. Without it these are two
+        # distinct Timestamps and the overlap goes unreported — and the
+        # same-spelling tests above cannot catch that, since
+        # pd.Timestamp("2026-1-31") already equals pd.Timestamp("2026-01-31").
+        # A21/A22 truncate to the day too (_iso_date returns YYYY-MM-DD), so
+        # this keeps the three invariants reading a snap_date the same way.
+        errs = date_split_overlap_errors(
+            _split_params(train=["2026-01-31 09:00:00"], test=["2026-01-31"])
+        )
+        assert len(errs) == 1
+
+    def test_message_shows_each_split_its_own_literal(self):
+        # The operator's next move is to grep the yaml; printing only the
+        # normalised day sends them looking for text that is not in the file.
+        errs = date_split_overlap_errors(
+            _split_params(train=["2026-1-31"], test=["2026-01-31"])
+        )
+        assert "2026-1-31" in errs[0], errs[0]
+        assert "2026-01-31" in errs[0], errs[0]

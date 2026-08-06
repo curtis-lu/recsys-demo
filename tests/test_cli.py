@@ -1033,6 +1033,13 @@ class TestDateSplitOverlapA24:
         # treat four absent splits as disjoint, not as something to complain
         # about — the required-key question is A23's (issue #158), and letting
         # it leak in here would block every non-dataset command.
+        #
+        # Honest about its power: this is a scenario guard, not a
+        # mutation-sensitive one. feature_etl never calls A24, so no change to
+        # the predicate alone can redden it. The test that actually
+        # discriminates is its sibling below (an overlapping dataset block
+        # still lets feature_etl run) — that one goes red the moment A24 is
+        # aggregated into validate_config_consistency.
         _setup_etl_conf(tmp_path)
         assert not (tmp_path / "conf" / "base" / "parameters_dataset.yaml").exists()
         old = os.getcwd(); os.chdir(tmp_path)

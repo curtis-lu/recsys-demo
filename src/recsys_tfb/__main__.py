@@ -654,10 +654,11 @@ def dataset(
     config, params, run_context = _load_config_and_setup("dataset", env)
 
     # (A24) The four dataset snap_date splits must be disjoint. Deliberately
-    # not aggregated by validate_config_consistency: that gate runs at the
-    # entry of EVERY command (:102) while only this pipeline reads these keys,
-    # and #158 measured what a dataset-only predicate does there (9 unrelated
-    # tests blocked). Same reason A21/A22 hang off their own command.
+    # not aggregated by validate_config_consistency: that gate runs inside
+    # _load_config_and_setup, i.e. at the entry of EVERY command, while only
+    # this pipeline reads these keys — and #158 measured what a dataset-only
+    # predicate does there (9 unrelated tests blocked). Same reason A21/A22
+    # hang off their own command.
     split_errors = date_split_overlap_errors(params)
     if split_errors:
         for line in split_errors:
