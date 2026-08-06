@@ -41,10 +41,10 @@ from recsys_tfb.core.versioning import (
     write_manifest,
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
-from recsys_tfb.pipelines.dataset.helpers_spark import existing_snap_date_partitions
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     build_month_plans,
+    landed_months,
     month_plan_input,
 )
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
@@ -206,6 +206,25 @@ def _maybe_warn_retrain(plan, retrain_advice):
     )
 
 
+def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
+    """The substitution params and the catalog config they resolve.
+
+    One function because there is exactly one right answer to "what fills the
+    ``${...}`` in catalog.yaml", and getting it wrong is silent: substitution is
+    a plain string ``.replace()`` (:func:`recsys_tfb.core.config._apply`), so a
+    placeholder nobody supplied survives as its own literal text and raises
+    nothing. A dataset built from such a config points at a table named after
+    the template, or filters partitions against it and keeps none.
+
+    The practical consequence for callers: ``runtime_params`` must already hold
+    every version this run computed before this is called.
+    """
+    substitution_params = {**params, **runtime_params}
+    return substitution_params, config.get_catalog_config(
+        runtime_params=substitution_params
+    )
+
+
 def _slice_extra(from_node, only_node):
     """Manifest extra_metadata breadcrumb for sliced runs."""
     if from_node:
@@ -216,13 +235,25 @@ def _slice_extra(from_node, only_node):
 
 
 def _collect_existing_snap_dates(
-    spark, catalog_config: dict, base_dataset_version: str, time_col: str = "snap_date"
+    catalog: DataCatalog, time_col: str = "snap_date"
 ) -> dict[str, list[str]]:
-    """Metastore partition listing for every incrementally-built dataset.
+    """Ask the catalog which months each incrementally-built dataset already has.
 
     Taken once, before any node runs, so every incremental node and the
     manifest agree on what had already landed when this run started (ADR-0002).
     Metadata-only: no data is scanned.
+
+    The question goes to the *dataset object*, not to its config entry: where an
+    artifact is stored and how its partitions are listed is the catalog's
+    knowledge. The CLI knowing that a ``HiveTableDataset`` has ``database`` and
+    ``table`` fields, and how to turn those into a metastore query, is exactly
+    the leak ADR-0008 §5 closes. The entry's ``partition_filter`` already scopes
+    the answer to this run's ``base_dataset_version``, so the version is not a
+    parameter here — see the caller for why that is load-bearing.
+
+    A dataset that cannot list partitions makes every month look not-yet-landed:
+    that rebuilds (wasteful) rather than skips (silently stale), which is the
+    direction this decision must fail in.
 
     ``time_col`` comes from ``schema.time`` rather than being hardcoded: the
     partition column is whatever the pipeline writes as its time column, and
@@ -230,16 +261,15 @@ def _collect_existing_snap_dates(
     """
     existing: dict[str, list[str]] = {}
     for name in INCREMENTAL_DATASETS:
-        entry = catalog_config.get(name) or {}
-        if entry.get("type") != "HiveTableDataset":
+        lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
+        if lister is None:
             logger.warning(
-                "[months] %s is not a HiveTableDataset; its months cannot be "
-                "listed, so it will be rebuilt in full.", name,
+                "[months] %s cannot list its partitions, so its months cannot "
+                "be listed and it will be rebuilt in full.", name,
             )
             continue
-        existing[name] = existing_snap_date_partitions(
-            spark, entry["database"], entry["table"], base_dataset_version,
-            time_col=time_col,
+        existing[name] = landed_months(
+            lister(), time_col=time_col, dataset_name=name,
         )
     return existing
 
@@ -334,8 +364,9 @@ def _execute_pipeline(
         raise typer.Exit(code=1)
 
     source_model_version = runtime_params.pop("source_model_version", None)
-    substitution_params = {**params, **runtime_params}
-    catalog_config = config.get_catalog_config(runtime_params=substitution_params)
+    substitution_params, catalog_config = _resolve_catalog(
+        config, params, runtime_params
+    )
 
     # Auto-inject cache source_tables from catalog config so cache nodes don't
     # need a parallel parameters yaml mapping. Catalog.yaml's HiveTableDataset
@@ -692,8 +723,11 @@ def dataset(
     )
 
     spark = get_or_create_spark_session()
-    catalog_config = config.get_catalog_config(runtime_params=params)
-    feature_table_cfg = catalog_config["feature_table"]
+    # Version-free on purpose: the source tables are the only entries readable
+    # before the versions below exist, because they carry no ${...} placeholder.
+    # Nothing version-scoped may be built from this config — see below.
+    source_catalog_config = config.get_catalog_config(runtime_params=params)
+    feature_table_cfg = source_catalog_config["feature_table"]
     feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
     feature_table_columns = [
         (f.name, f.dataType.simpleString())
@@ -717,28 +751,37 @@ def dataset(
     if cal_v is not None:
         logger.info("calibration_variant_id: %s", cal_v)
 
-    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
-    # per incremental artifact, decided here — before any Spark work — so the
-    # nodes, this log and the manifest cannot disagree about which months this
-    # run covered. The nodes receive them through the catalog (below), not
-    # through `parameters`.
-    existing_snap_dates = _collect_existing_snap_dates(
-        spark, catalog_config, base_v, time_col=get_schema(params)["time"],
-    )
-    month_plans = build_month_plans(
-        params, existing=existing_snap_dates, rebuild=rebuild,
-    )
-
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
-        # A user-supplied setting, unlike the listing above: it stays in
+        # A user-supplied setting, unlike the listing below: it stays in
         # parameters, where the training pipeline reads the same key.
         REBUILD_SNAP_DATES_KEY: rebuild,
     }
+
+    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
+    # per incremental artifact, decided here — before any Spark work — so the
+    # nodes, this log and the manifest cannot disagree about which months this
+    # run covered. The nodes receive them through the catalog (below), not
+    # through `parameters`.
+    #
+    # Built here rather than earlier because _resolve_catalog needs base_v to
+    # already be in runtime_params, and that ordering is load-bearing rather
+    # than tidy: a catalog resolved without it would compare every partition
+    # against the literal `${base_dataset_version}`, keep none, and answer
+    # "nothing has landed" for every month — a full rebuild, silently, with no
+    # failing test and no config diff.
+    _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
+    existing_snap_dates = _collect_existing_snap_dates(
+        DataCatalog(listing_catalog_config),
+        time_col=get_schema(params)["time"],
+    )
+    month_plans = build_month_plans(
+        params, existing=existing_snap_dates, rebuild=rebuild,
+    )
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 

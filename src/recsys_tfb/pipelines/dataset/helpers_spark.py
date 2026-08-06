@@ -1,6 +1,5 @@
 """Helper functions for the dataset building pipeline (Spark backend)."""
 
-import datetime
 import logging
 
 import pandas as pd
@@ -11,76 +10,6 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import HASH_BUCKETS, spark_bucket
 
 logger = logging.getLogger(__name__)
-
-
-def _looks_like_iso_date(value: str) -> bool:
-    try:
-        datetime.date.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
-
-
-def existing_snap_date_partitions(
-    spark,
-    database: str,
-    table: str,
-    base_dataset_version: str,
-    *,
-    time_col: str = "snap_date",
-) -> list[str]:
-    """List the snap_dates already landed for ``base_dataset_version``.
-
-    Reads the Hive metastore partition listing only — ``SHOW PARTITIONS`` never
-    touches the data files, so the cost is independent of table size. This is
-    the *whole* Spark-side contribution to the incremental diff (ADR-0002); the
-    decision itself lives in the pure
-    :func:`~recsys_tfb.pipelines.dataset.nodes_shared.plan_incremental_snap_dates`.
-
-    ``SHOW PARTITIONS`` is used in preference to
-    ``SHOW PARTITIONS ... PARTITION(base_dataset_version=...)`` because the
-    spec'd form's behaviour on a non-matching spec differs between Hive and
-    Spark (empty result vs. exception); filtering client-side is unambiguous
-    and the row count here is metadata-small.
-
-    Returns ``[]`` when the table or database does not exist yet, or when the
-    table is not partitioned — all three mean "nothing has landed".
-    """
-    from pyspark.sql.utils import AnalysisException
-
-    fqn = f"{database}.{table}"
-    try:
-        rows = spark.sql(f"SHOW PARTITIONS {fqn}").collect()
-    except AnalysisException as exc:
-        logger.debug("No partitions listed for %s (%s)", fqn, exc)
-        return []
-
-    found: set[str] = set()
-    for row in rows:
-        spec = dict(
-            part.split("=", 1)
-            for part in str(row[0]).split("/")
-            if "=" in part
-        )
-        if spec.get("base_dataset_version") != base_dataset_version:
-            continue
-        value = spec.get(time_col)
-        if not value:
-            continue
-        if not _looks_like_iso_date(value):
-            # Hive writes NULL partition values as __HIVE_DEFAULT_PARTITION__.
-            # Passing that on would blow up in pd.Timestamp() far downstream
-            # with a message that names neither this table nor this column, so
-            # drop it here and say which partition was unreadable. Dropping is
-            # the safe direction: the month is then treated as not-yet-landed
-            # and gets reprocessed.
-            logger.warning(
-                "Ignoring unreadable %s partition value %r in %s",
-                time_col, value, fqn,
-            )
-            continue
-        found.add(value)
-    return sorted(found)
 
 
 def select_keys(
