@@ -27,7 +27,7 @@ date: 2026-07-31
 
 驗證過的支撐事實：
 
-- 前處理的編碼是**純逐列** map lookup（`preprocessing/_spark.py:85-109`），查的是只在 train 上 fit 的 `category_mappings`；整個 `apply_preprocessor_to_features` 唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。因此 test 日期不改變任何既有產物的**內容**。
+- 前處理的編碼是**純逐列** map lookup（`preprocessing.py:71-95`），查的是只在 train 上 fit 的 `category_mappings`；整個 `apply_preprocessor_to_features` 唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。因此 test 日期不改變任何既有產物的**內容**。
 - `HiveTableDataset` 以 `partitionOverwriteMode=dynamic` 寫入（`io/hive_table_dataset.py:172-177`），只覆蓋 DataFrame 裡出現的 partition。因此新增月份是 **append**，既有月份的產物與評估報表原封不動。
 - 下游 `build_model_input` 一律以 keys 為驅動端 join features，而 keys 已按各 split 的日期過濾 ── 多出來的月份是惰性的，不會汙染任何 split。
 

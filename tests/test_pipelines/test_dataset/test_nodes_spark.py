@@ -138,7 +138,7 @@ def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
 
     - Every keys frame in this module is exactly identity_columns, so the
       ``keys.columns`` term adds nothing here. The carry branch of the rule is
-      covered in tests/test_preprocessing/test_spark.py instead.
+      covered in tests/test_pipelines/test_dataset/test_model_input.py instead.
     - That term mirrors what the code does (carry = anything in keys that is
       not identity/feature/label), not what ADR-0004 states the rule to be
       (``carry_columns ∩ keys``). So it cannot catch a key column that gets
@@ -773,15 +773,15 @@ def test_build_model_input_casts_float_features_to_float32(
 # (#161), which is how this module imports it. Its integration tests stay here,
 # next to the existing B1/B5/B6/B7 ones and the fixtures they all need. The pure
 # helpers it calls (`_compute_feature_columns`) are tested in
-# test_preprocessing/. Split by "gate wiring vs pure helper", not by which file
-# the symbol happens to live in, so a behaviour still has exactly one home.
+# test_feature_columns.py. Split by "gate wiring vs pure helper", not by which
+# file the symbol happens to live in, so a behaviour still has exactly one home.
 
 
 def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None) -> dict:
     """``parameters`` with the keys the Layer-2 gate reads made explicit.
 
     The fixture leaves ``prepare_model_input`` unset, so the gate falls back to
-    the defaults in ``preprocessing/_common.py``. Those defaults are read from
+    the defaults in ``pipelines/dataset/feature_columns.py``. Those are read from
     that module rather than restated here: a hand-written copy would be equal to
     the real list only as long as feature_table happens to lack the columns
     where the two differ (``apply_start_date`` / ``apply_end_date`` /
@@ -792,7 +792,7 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     Callers add to the defaults rather than replacing them, so a test says which
     columns *it* cares about and inherits the rest.
     """
-    from recsys_tfb.preprocessing._common import _get_preprocessing_config
+    from recsys_tfb.pipelines.dataset.feature_columns import _get_preprocessing_config
 
     default_drop, default_categorical = _get_preprocessing_config(parameters)
     dataset = {
@@ -1962,3 +1962,140 @@ class TestSelectValKeysSampling:
         assert select_val_keys(sample_pool, params).count() == _expected_key_count(
             parameters, "val"
         )
+
+
+# =============================================================================
+# Moved here by #168, when preprocessing/ was dissolved and these two
+# implementations came to live in this module. Assertions are unchanged from
+# the old tests/test_preprocessing/test_spark.py; only the import paths moved.
+# =============================================================================
+
+
+class TestFilterGroupsWithPositives:
+    """Spark-side group-positive filter for val/test_model_input.
+
+    A (time, *entity) group is dropped iff every label in that group is 0.
+    Used at dataset-write time so val_model_input / test_model_input on Hive
+    only contain customers with at least one positive label per snap_date.
+    """
+
+    def test_drops_all_zero_groups(self, spark):
+        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+            "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+            "prod_name": ["a", "b"] * 3,
+            "label": [1, 0, 0, 1, 0, 0],
+            "feat": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }))
+        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        rows = out.orderBy("cust_id", "prod_name").collect()
+        # c3 dropped, c1 and c2 retained entirely (2 rows each)
+        assert len(rows) == 4
+        assert {r.cust_id for r in rows} == {"c1", "c2"}
+
+    def test_keeps_all_rows_of_positive_groups(self, spark):
+        """Group with even one positive row keeps every row in that group."""
+        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+            "cust_id": ["c1"] * 4,
+            "prod_name": ["a", "b", "c", "d"],
+            "label": [0, 0, 1, 0],
+        }))
+        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.count() == 4
+
+    def test_groups_split_across_snap_dates(self, spark):
+        """(snap_date, cust_id) is the group key — same cust across two snaps
+        is two separate groups."""
+        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(
+                ["2025-01-31", "2025-01-31", "2025-02-28", "2025-02-28"]
+            ),
+            "cust_id": ["c1", "c1", "c1", "c1"],
+            "prod_name": ["a", "b", "a", "b"],
+            "label": [1, 0, 0, 0],
+        }))
+        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        rows = out.orderBy("snap_date", "prod_name").collect()
+        # 2025-01 has positive → keep both rows; 2025-02 all-zero → drop
+        assert len(rows) == 2
+        assert all(str(r.snap_date).startswith("2025-01") for r in rows)
+
+    def test_preserves_column_schema(self, spark):
+        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"]),
+            "cust_id": ["c1"],
+            "prod_name": ["a"],
+            "label": [1],
+            "feat": [3.14],
+        }))
+        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.columns == df.columns
+
+    def test_empty_when_no_positives(self, spark):
+        from recsys_tfb.pipelines.dataset.nodes_spark import _filter_groups_with_positives
+
+        df = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 2),
+            "cust_id": ["c1", "c2"],
+            "prod_name": ["a", "b"],
+            "label": [0, 0],
+        }))
+        out = _filter_groups_with_positives(df, ["snap_date", "cust_id"], "label")
+        assert out.count() == 0
+
+
+class TestApplyPreprocessorToFeaturesRequiresSnapDates:
+    """``snap_dates`` is required — the caller owns "which months is this run for".
+
+    It used to default to ``None`` and fall back to
+    ``collect_dataset_snap_dates(parameters)`` (the union of every configured
+    month). Since the month plans moved into the catalog (#152) the node always
+    passes ``month_plan.to_process``, so that fallback was unreachable. Pinning
+    the argument as required is what keeps it unreachable: a future caller that
+    forgets it now fails at the call, instead of silently re-encoding every
+    configured month and quietly undoing the incremental behaviour of ADR-0002.
+    """
+
+    def test_omitting_snap_dates_raises_instead_of_defaulting(self):
+        from recsys_tfb.pipelines.dataset.nodes_spark import (
+            _apply_preprocessor_to_features,
+        )
+
+        # Binding fails before the body runs, so the placeholder arguments are
+        # never dereferenced. Were the default restored, this call would get
+        # past binding and die on the placeholders instead (KeyError), so this
+        # assertion is about the signature and not about the placeholders.
+        with pytest.raises(TypeError, match="snap_dates"):
+            _apply_preprocessor_to_features(None, {}, {})
+
+
+class TestFitPreprocessorMetadataKeyContract:
+    """The writer half of the ``preprocessor.json`` key contract (#168).
+
+    ``PreprocessorMetadata`` is the definition point; this is the assertion that
+    the dataset side actually writes those keys and no others. It is the guard
+    the acceptance criteria asks for: after the dissolution the reader lives in
+    the inference pipeline, which this repo cannot exercise end-to-end locally
+    (#63), so a key renamed here would otherwise surface only in the company
+    environment — or worse, be read as a silently-missing key.
+
+    Equality, not ``issuperset``: an *added* key is exactly as much of a contract
+    change as a renamed one, and the reader side has no way to learn about it.
+    """
+
+    def test_fit_output_keys_are_the_declared_contract(
+        self, feature_table, parameters
+    ):
+        from recsys_tfb.preprocessing import PreprocessorMetadata
+
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        assert set(preprocessor) == set(PreprocessorMetadata.__annotations__)

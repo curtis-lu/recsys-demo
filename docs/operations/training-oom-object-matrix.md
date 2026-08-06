@@ -148,7 +148,7 @@ numpy 要找一個「都裝得下、又不失真」的格子。整數最大要 8
 
 ## 5. 文字欄是怎麼混進特徵欄的
 
-`_compute_feature_columns`（`src/recsys_tfb/preprocessing/_common.py:30`）：
+`_compute_feature_columns`（`src/recsys_tfb/pipelines/dataset/feature_columns.py:33`）：
 
 ```python
 non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {label_col}
@@ -156,7 +156,7 @@ non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {l
 
 **凡是不在 `drop_columns`、不在 `identity_columns`、又不是 `label` 的欄，一律變成特徵——不管它是不是文字。**
 
-而 `_encode_categoricals`（`src/recsys_tfb/preprocessing/_spark.py:85`）只會把 `categorical_columns` 裡**明確列出**的欄轉成整數編碼（`cast("integer")`）。
+而 `_encode_categoricals`（`src/recsys_tfb/preprocessing.py:71`）只會把 `categorical_columns` 裡**明確列出**的欄轉成整數編碼（`cast("integer")`）。
 
 所以：一個生產 `feature_table` 有、但既沒被宣告成 `categorical_columns`、也沒被 `drop_columns` 擋掉的文字欄，會原封不動穿過整條 dataset pipeline，成為 `feature_columns` 的一員。
 

@@ -11,7 +11,7 @@ date: 2026-08-02
 
 ## 一、keys 不含 item → fail-loud
 
-`preprocessing/_spark.py` 的三元式在 keys 缺 item 時退回只用 `base_key` join label，
+`build_model_input` 的三元式在 keys 缺 item 時退回只用 `base_key` join label，
 於是每個 `(time, entity)` 被 label_table 的產品數乘開，`item` 的值從 label_table 帶進來。
 
 生產不可能發生：`identity_columns` 是推導欄位（`core/schema.py:55`，恆為
@@ -20,8 +20,7 @@ date: 2026-08-02
 兩個 wrapper），這兩個 wrapper 合計註冊成五個 pipeline 節點
 （`pipelines/dataset/pipeline.py` 的 train / train_dev / val / test / calibration，
 最後一個只在 `enable_calibration` 時註冊），五個餵進去的 keys 全是 identity。
-`preprocessing/__init__.py` 不 export 任何東西，`_spark` 是私有模組，也沒有「外部 API 彈性」
-需要保留。
+`pipelines/dataset/model_input.py` 只被同套件內部引用，也沒有「外部 API 彈性」需要保留。
 
 而它的失效模式是**靜默列膨脹 ×N_products**。
 

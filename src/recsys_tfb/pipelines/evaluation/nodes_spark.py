@@ -174,7 +174,7 @@ def prepare_eval_data(
     # their per-group sub-products, collapsing baseline / mAP metrics to a
     # per-group framing the business model never asked for. Missing labels are
     # filled with 0 ("not bought"), matching the existing build_model_input
-    # convention (preprocessing/_spark.py:369-372 LEFT + COALESCE(0)).
+    # convention (pipelines/dataset/model_input.py, LEFT + COALESCE(0)).
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
     if label_col in eval_predictions.columns:
         eval_predictions = eval_predictions.fillna({label_col: 0})

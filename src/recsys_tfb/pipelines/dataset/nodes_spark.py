@@ -7,16 +7,20 @@ import pandas as pd
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.consistency import DataConsistencyError
+from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
-from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
-from recsys_tfb.pipelines.dataset.nodes_shared import SnapDatePlan
-from recsys_tfb.preprocessing._spark import (
-    apply_preprocessor_to_features as _apply_preprocessor_to_features,
-    build_model_input as _build_model_input,
-    filter_groups_with_positives as _filter_groups_with_positives,
-    fit_preprocessor_metadata as _fit_preprocessor_metadata,
+from recsys_tfb.pipelines.dataset.feature_columns import (
+    _compute_feature_columns,
+    _get_preprocessing_config,
 )
+from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
+from recsys_tfb.pipelines.dataset.model_input import (
+    build_model_input as _build_model_input,
+)
+from recsys_tfb.pipelines.dataset.nodes_shared import SnapDatePlan
+from recsys_tfb.preprocessing import _encode_categoricals
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +222,120 @@ def build_test_model_input(
     )
 
 
+def _fit_preprocessor_metadata(
+    feature_table: DataFrame,
+    parameters: dict,
+) -> tuple[dict, dict]:
+    """Build preprocessor metadata at customer-month granularity, decoupled from sampling.
+
+    Feature-categorical distinct values come from feature_table rows whose
+    ``time`` falls in ``train_snap_dates``. Identity categoricals (not present
+    in feature_table) come from ``parameters["schema"]["categorical_values"][col]``;
+    missing declarations raise ``ValueError``.
+
+    Raises ``ValueError`` if feature_table is missing any required train_snap_date
+    (fail-loud principle: dataset must be reproducible from feature_table).
+
+    Only small metadata (distinct category values) is collected to driver.
+
+    Returns:
+        (preprocessor_metadata, category_mappings) — the first matching
+        ``PreprocessorMetadata``'s four keys.
+    """
+    schema = get_schema(parameters)
+    drop_cols, categorical_cols = _get_preprocessing_config(parameters)
+    identity_cols = schema["identity_columns"]
+    time_col = schema["time"]
+    label_col = schema["label"]
+
+    ds = parameters.get("dataset", {})
+    train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+
+    # Fail-loud if feature_table is missing any required train_snap_date.
+    # Cardinality is small (typically 12-52 dates); .distinct().collect() is cheap.
+    ft_dates = {
+        row[time_col]
+        for row in feature_table.select(time_col).distinct().collect()
+    }
+    ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
+    missing = sorted(set(train_dates) - ft_dates)
+    if missing:
+        raise ValueError(
+            "feature_table missing required train_snap_dates: "
+            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
+        )
+
+    with log_step(logger, "filter_train_window"):
+        train_features = feature_table.filter(F.col(time_col).isin(train_dates))
+
+    ft_cols = set(feature_table.columns)
+    feature_cat_cols = [c for c in categorical_cols if c in ft_cols]
+    identity_cat_cols = [c for c in categorical_cols if c not in ft_cols]
+
+    cat_values = schema.get("categorical_values", {})
+    missing_cats = [c for c in identity_cat_cols if c not in cat_values]
+    if missing_cats:
+        raise DataConsistencyError(
+            "Identity categorical columns missing declarations in "
+            f"schema.categorical_values: {missing_cats}. Add them to "
+            "parameters.yaml under schema.categorical_values."
+        )
+
+    with log_step(logger, "collect_category_mappings"):
+        category_mappings: dict[str, list] = {}
+        for col in feature_cat_cols:
+            distinct_rows = (
+                train_features.select(col)
+                .filter(F.col(col).isNotNull())
+                .distinct()
+                .orderBy(col)
+                .collect()
+            )
+            category_mappings[col] = [row[col] for row in distinct_rows]
+        for col in identity_cat_cols:
+            category_mappings[col] = list(cat_values[col])
+
+    with log_step(logger, "compute_feature_columns"):
+        feature_columns = _compute_feature_columns(
+            feature_table.columns,
+            identity_cols,
+            categorical_cols,
+            drop_cols,
+            label_col,
+        )
+
+    # Ranking-task invariant: schema.item must end up in feature_columns. The
+    # most common way to lose it is omitting it from
+    # `dataset.prepare_model_input.categorical_columns` in yaml — silently
+    # makes X miss the item dimension, predictions collapse to constant within
+    # each query group, and HPO reports a flat mAP across every trial.
+    item_col = schema.get("item")
+    if item_col and item_col not in feature_columns:
+        raise DataConsistencyError(
+            f"schema.item='{item_col}' is missing from derived feature_columns. "
+            f"For a ranking task the item column must be a model feature; "
+            f"otherwise the booster cannot differentiate items within a query "
+            f"group and HPO mAP collapses to a constant across trials. "
+            f"Fix: add '{item_col}' to "
+            f"dataset.prepare_model_input.categorical_columns in "
+            f"parameters_dataset.yaml. "
+            f"(current categorical_columns={categorical_cols})"
+        )
+
+    preprocessor_metadata = {
+        "feature_columns": feature_columns,
+        "categorical_columns": categorical_cols,
+        "category_mappings": category_mappings,
+        "drop_columns": drop_cols,
+    }
+
+    logger.info(
+        "Fit preprocessor (Spark): %d features, %d categorical, %d drop",
+        len(feature_columns), len(categorical_cols), len(drop_cols),
+    )
+    return preprocessor_metadata, category_mappings
+
+
 def fit_preprocessor_metadata(
     feature_table: DataFrame,
     parameters: dict,
@@ -227,6 +345,123 @@ def fit_preprocessor_metadata(
     Only collects small metadata (distinct category values) to driver.
     """
     return _fit_preprocessor_metadata(feature_table, parameters)
+
+
+def _warn_missing_drop_columns(
+    columns: list[str],
+    drop_cols: list[str],
+    context: str,
+) -> None:
+    """Log warning for drop_columns that don't exist in the DataFrame."""
+    missing = [c for c in drop_cols if c not in columns]
+    if missing:
+        logger.warning(
+            "drop_columns not found in %s (will be ignored): %s",
+            context, missing,
+        )
+
+
+def _apply_preprocessor_to_features(
+    feature_table: DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    snap_dates: list,
+) -> DataFrame:
+    """Encode non-identity categoricals in Spark feature_table at customer-month granularity.
+
+    Filters feature_table to ``snap_dates``, which the caller must supply — it
+    is the caller that knows which months this run is for. The dataset pipeline
+    passes its incremental month plan, so months whose partition already landed
+    are not re-encoded into a bit-identical result (ADR-0002). An empty list is
+    a legitimate value (nothing left to process); see the empty-frame note below.
+
+    Raises ``ValueError`` if any snap_date about to be processed is missing from
+    feature_table. Months that are *not* being processed are deliberately not
+    checked — this run does not read them, so requiring feature_table to retain
+    them forever would be a false alarm.
+
+    Output: (time + entity) + feature_columns that live in feature_table.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_cols = schema["entity"]
+    identity_cols = schema["identity_columns"]
+
+    feature_columns = preprocessor_metadata["feature_columns"]
+    categorical_cols = preprocessor_metadata["categorical_columns"]
+    category_mappings = preprocessor_metadata["category_mappings"]
+    drop_cols = preprocessor_metadata["drop_columns"]
+
+    base_key = [time_col] + entity_cols
+    ft_feature_cols = [c for c in feature_columns if c in feature_table.columns]
+    keep_cols = list(dict.fromkeys(base_key + ft_feature_cols))
+    missing_base = [c for c in base_key if c not in feature_table.columns]
+    if missing_base:
+        raise ValueError(f"feature_table missing base-key columns: {missing_base}")
+    _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
+
+    needed_dates = [pd.Timestamp(d) for d in snap_dates]
+
+    # Fail-loud if feature_table is missing any snap_date we are about to
+    # process. Skipped months are not checked: this run never reads them.
+    if needed_dates:
+        ft_dates = {
+            row[time_col]
+            for row in feature_table.select(time_col).distinct().collect()
+        }
+        ft_dates = {pd.Timestamp(d) for d in ft_dates if d is not None}
+        missing = sorted(set(needed_dates) - ft_dates)
+        if missing:
+            raise ValueError(
+                "feature_table missing required snap_dates: "
+                f"{[d.strftime('%Y-%m-%d') for d in missing]}"
+            )
+
+    # An empty date list means every configured month already landed. The node
+    # still returns a properly-typed empty frame (encoding included) rather than
+    # short-circuiting: Hive's dynamic partition overwrite only touches
+    # partitions present in the written data, so an empty write leaves the
+    # existing partitions intact — but only if the schema still matches.
+    # Both sides pinned to DATE. feature_table is a source table whose time
+    # column is a real DATE/TIMESTAMP today, so a bare isin() would work — but
+    # if it ever arrives as a string, isin() against timestamp literals matches
+    # zero rows and raises nothing, and this node's empty output is now a
+    # *documented normal state* (see the comment above) rather than an obvious
+    # anomaly. That combination would turn a type mismatch into silent data
+    # loss, so normalise here too.
+    date_filter = (
+        F.to_date(F.col(time_col)).isin([pd.Timestamp(d).date() for d in needed_dates])
+        if needed_dates
+        else F.lit(False)
+    )
+    with log_step(logger, "select_columns"):
+        result = feature_table.filter(date_filter).select(*keep_cols)
+
+    with log_step(logger, "encode_categoricals"):
+        encode_cols = [c for c in categorical_cols if c in result.columns and c not in identity_cols]
+        if encode_cols:
+            result = _encode_categoricals(result, encode_cols, category_mappings)
+            # Single pass: one aggregation returns the unknown (-1) count for
+            # every encoded column at once. The previous per-column .count()
+            # re-scanned the full multi-month feature_table once per categorical
+            # (N actions); this collapses it to a single scan.
+            unknown_counts = result.agg(*[
+                F.sum(F.when(F.col(c) == -1, 1).otherwise(0)).alias(c)
+                for c in encode_cols
+            ]).collect()[0]
+            for col in encode_cols:
+                n_unknown = unknown_counts[col] or 0
+                if n_unknown > 0:
+                    logger.warning(
+                        "apply_preprocessor_to_features: %d unknowns in column '%s'",
+                        n_unknown, col,
+                    )
+
+    logger.info(
+        "Preprocessed feature_table (Spark): %d cols (encoded=%d)",
+        len(result.columns), len(encode_cols),
+    )
+    return result
 
 
 def apply_preprocessor_to_features(
@@ -243,10 +478,10 @@ def apply_preprocessor_to_features(
     fit on train months only — no cross-month term, so a re-encode would
     reproduce the same bits.
 
-    Passes the month *list* down, not the plan: preprocessing uses it to raise
-    when a month it is about to process is missing from ``feature_table``.
-    Pre-filtering here would make that check vacuously true — and preprocessing
-    stays unaware that "incremental" is a concept.
+    Passes the month *list* down, not the plan: the encoding step uses it to
+    raise when a month it is about to process is missing from ``feature_table``.
+    Pre-filtering here would make that check vacuously true — and the encoding
+    step stays unaware that "incremental" is a concept.
     """
     return _apply_preprocessor_to_features(
         feature_table, preprocessor_metadata, parameters,
@@ -267,13 +502,33 @@ def build_model_input(
     )
 
 
+def _filter_groups_with_positives(
+    df: DataFrame,
+    group_cols: list[str],
+    label_col: str,
+) -> DataFrame:
+    """Drop rows whose ``group_cols`` partition has ``sum(label_col) == 0``.
+
+    A query group is ``(time, *entity)``; pushing this filter to Spark
+    write-time keeps val_model_input / test_model_input Hive tables tight —
+    customers with no positives in a snap_date contribute nothing to mAP
+    (metrics_spark filters them again) and only waste predict time.
+    """
+    w = Window.partitionBy(*group_cols)
+    return (
+        df.withColumn("__grp_pos", F.sum(F.col(label_col)).over(w))
+          .filter(F.col("__grp_pos") > 0)
+          .drop("__grp_pos")
+    )
+
+
 def filter_groups_with_positives(
     model_input: DataFrame,
     parameters: dict,
 ) -> DataFrame:
     """Drop (time, *entity) groups whose label sum is zero.
 
-    Pipeline-node wrapper over preprocessing._spark.filter_groups_with_positives;
+    Pipeline-node wrapper over ``_filter_groups_with_positives``;
     resolves group_cols / label_col from schema. Used for val / test only —
     groups without any positive contribute nothing to mAP (metrics_spark
     re-applies the same filter) and would only waste predict time.

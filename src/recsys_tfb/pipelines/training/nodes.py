@@ -434,7 +434,7 @@ def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     calibration, test scoring, and diagnostics. Empty/absent selection returns
     the input unchanged, so non-selection runs are byte-identical.
     """
-    from recsys_tfb.preprocessing._common import apply_feature_selection
+    from recsys_tfb.models.feature_selection import apply_feature_selection
 
     return apply_feature_selection(preprocessor_metadata, parameters)
 

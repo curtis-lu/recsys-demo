@@ -35,7 +35,7 @@ def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> 
     the same base/train_variant/family dir, which would otherwise collide and
     silently reuse a stale full-feature binary.
     """
-    from recsys_tfb.preprocessing._common import feature_selection_exclude
+    from recsys_tfb.models.feature_selection import feature_selection_exclude
 
     if not feature_selection_exclude(parameters):
         return ""
