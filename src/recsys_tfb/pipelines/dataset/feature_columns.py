@@ -1,7 +1,8 @@
 """Pure column-name derivation for the dataset pipeline, and the guards over it.
 
-No Spark: everything here is arithmetic over column-name lists and the config
-that decides which names are features. Two callers on opposite ends of the
+No Spark, and no frame: everything here is arithmetic over column-name lists and
+the config that decides which names are features — plus the guards that raise or
+warn when that arithmetic comes out wrong. Two callers on opposite ends of the
 pipeline ask these questions — the preprocessor fit node, which bakes the answer
 into ``preprocessor.json``, and the Layer-2 data gate, which must get the same
 answer from the same config.

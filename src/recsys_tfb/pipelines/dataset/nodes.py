@@ -35,6 +35,7 @@ from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.categoricals import (
     collect_vocabularies_from_data,
     read_declared_vocabularies,
+    require_declared_categoricals,
     warn_unknown_encodings,
 )
 from recsys_tfb.pipelines.dataset.feature_columns import (
@@ -63,6 +64,7 @@ from recsys_tfb.pipelines.dataset.sampling import (
     keep_entities_drawn_under_ratio,
     keep_rows_drawn_under_ratio,
     key_output_columns,
+    log_sampled_keys,
     sampling_columns,
     with_effective_sample_ratio,
 )
@@ -192,7 +194,11 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
 
     # Decision — eligibility: only rows in the configured train months can be
     # drawn. A month belongs to exactly one split (A24), so this is also what
-    # keeps train disjoint from val / test / calibration.
+    # keeps train disjoint from val / test / calibration. The "_or_all" is not
+    # a shorthand: an empty month list leaves the pool *whole* rather than
+    # empty. Unreachable today (``train_snap_dates`` is a required key), and
+    # preserved rather than tightened because tightening it would change
+    # behaviour — which is why it is spelled out here and not read off the name.
     pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
     # sample_pool's primary key IS the identity key, enforced upstream by
     # source_etl's max_duplicate_key_ratio check, so nothing dedups here.
@@ -208,15 +214,12 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
         keys = keep_rows_drawn_under_ratio(
             keys, identity_key, seed, site="sample_keys",
         )
-        logger.info(
-            "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
-            sample_ratio, group_keys, overrides, "sample_keys",
-        )
+        log_sampled_keys(sample_ratio, group_keys, overrides, "sample_keys")
     else:
         # A full ratio with no overrides can drop nothing, so the draw is
         # skipped rather than computed over the whole pool and then trivially
         # satisfied.
-        logger.info("Sampled keys (ratio=1.0, no sampling)")
+        log_sampled_keys(sample_ratio, group_keys, overrides, site=None)
 
     # Decision — what a split's keys are: the identity key, plus the carry
     # columns that travel on to model_input for downstream weighting. The draw's
@@ -244,7 +247,9 @@ def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFra
     cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
     cal_months = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
 
-    # Decision — eligibility: only rows in the configured calibration months.
+    # Decision — eligibility: only rows in the configured calibration months —
+    # except that an empty month list leaves the pool whole, as it does for
+    # train. See ``select_train_keys`` for why that asymmetry is preserved.
     pool = restrict_to_months_or_all(sample_pool, time_col, cal_months)
     keys = pool.select(*sampling_columns(group_keys, identity_key, carry_columns))
 
@@ -255,12 +260,9 @@ def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFra
         keys = keep_rows_drawn_under_ratio(
             keys, identity_key, seed, site="calibration_keys",
         )
-        logger.info(
-            "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
-            cal_ratio, group_keys, cal_overrides, "calibration_keys",
-        )
+        log_sampled_keys(cal_ratio, group_keys, cal_overrides, "calibration_keys")
     else:
-        logger.info("Sampled keys (ratio=1.0, no sampling)")
+        log_sampled_keys(cal_ratio, group_keys, cal_overrides, site=None)
 
     # Decision — identity key plus carry columns.
     return keys.select(*key_output_columns(identity_key, carry_columns))
@@ -453,6 +455,11 @@ def fit_preprocessor_metadata(
     # category that only ever appears in val/test therefore has no index of its
     # own and encodes to the unknown sentinel, exactly as it would in production
     # on a value the model never trained on.
+    #
+    # The un-normalised restriction, not ``_date_filter``: this node reads
+    # feature_table straight from the source table, where the time column is a
+    # real DATE. The normalised form is for the frames read back from Hive with
+    # a string partition column — see ``scoping``.
     with log_step(logger, "filter_train_window"):
         train_features = restrict_to_months(feature_table, time_col, train_months)
 
@@ -464,13 +471,13 @@ def fit_preprocessor_metadata(
     from_data, from_schema = split_categorical_sources(
         categorical_cols, feature_table.columns,
     )
-    declared_vocabularies = read_declared_vocabularies(
-        schema.get("categorical_values", {}), from_schema,
-    )
+    # Pre-check: nothing downstream can supply a vocabulary the schema owes.
+    cat_values = schema.get("categorical_values", {})
+    require_declared_categoricals(cat_values, from_schema)
     with log_step(logger, "collect_category_mappings"):
         category_mappings = {
             **collect_vocabularies_from_data(train_features, from_data),
-            **declared_vocabularies,
+            **read_declared_vocabularies(cat_values, from_schema),
         }
 
     with log_step(logger, "compute_feature_columns"):

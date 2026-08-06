@@ -57,17 +57,16 @@ def collect_vocabularies_from_data(
     return vocabularies
 
 
-def read_declared_vocabularies(
+def require_declared_categoricals(
     categorical_values: dict,
     columns: list[str],
-) -> dict[str, list]:
-    """Each column's vocabulary as declared in ``schema.categorical_values``.
+) -> None:
+    """Pre-check: every column whose vocabulary must be declared, is.
 
-    Raises ``DataConsistencyError`` naming every undeclared column at once.
-    There is no fallback to "collect it from the data": these columns are not in
-    ``feature_table``, so the data cannot answer — an undeclared one would get
-    an empty vocabulary and encode every row to the unknown sentinel, losing the
-    dimension without raising.
+    Names every undeclared column at once. There is no fallback to "collect it
+    from the data": these columns are not in ``feature_table``, so the data
+    cannot answer — an undeclared one would get an empty vocabulary and encode
+    every row to the unknown sentinel, losing the dimension without raising.
     """
     missing = [c for c in columns if c not in categorical_values]
     if missing:
@@ -76,6 +75,17 @@ def read_declared_vocabularies(
             f"schema.categorical_values: {missing}. Add them to "
             "parameters.yaml under schema.categorical_values."
         )
+
+
+def read_declared_vocabularies(
+    categorical_values: dict,
+    columns: list[str],
+) -> dict[str, list]:
+    """Each column's vocabulary as declared in ``schema.categorical_values``.
+
+    Assumes the declarations exist — :func:`require_declared_categoricals` is
+    the step that says so, and the caller runs it first.
+    """
     return {col: list(categorical_values[col]) for col in columns}
 
 

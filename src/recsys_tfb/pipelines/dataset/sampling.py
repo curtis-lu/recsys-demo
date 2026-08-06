@@ -1,5 +1,6 @@
 """Sampling mechanics for key selection: the columns a draw needs, the effective
-per-row ratio, the draw itself, and the columns a split's keys come out with.
+per-row ratio, the draw itself (per row or per entity), the columns a split's
+keys come out with, and how a draw reports itself.
 
 Named for the concern it implements, not for its backend — the ``_spark`` suffix
 this module used to carry pointed at a pandas/Spark dual track that no longer
@@ -14,6 +15,7 @@ step is computed on Spark.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
@@ -23,7 +25,30 @@ from recsys_tfb.utils.hashing import HASH_BUCKETS, ratio_to_threshold, spark_buc
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
+logger = logging.getLogger(__name__)
+
 EFFECTIVE_RATIO_COL = "_effective_ratio"
+
+
+def log_sampled_keys(
+    sample_ratio: float,
+    group_keys: list[str],
+    sample_ratio_overrides: dict | None,
+    site: str | None,
+) -> None:
+    """Report a draw. ``site=None`` means no draw ran — nothing could be dropped.
+
+    Written once and called from each key-selecting node: the nodes duplicate
+    their *decisions* on purpose (ADR-0008 §2), but a log line is mechanism, and
+    two copies of a format string drift.
+    """
+    if site is None:
+        logger.info("Sampled keys (ratio=1.0, no sampling)")
+        return
+    logger.info(
+        "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
+        sample_ratio, group_keys, sample_ratio_overrides, site,
+    )
 
 
 def sampling_columns(
