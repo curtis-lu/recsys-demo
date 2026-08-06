@@ -1068,7 +1068,7 @@ def _written_prediction_partitions(
             # would never match, so this month would look permanently
             # incomplete. Drop it and say so: dropping means "not written yet",
             # which re-predicts rather than skips. Mirrors the same guard on the
-            # dataset side (pipelines/dataset/helpers_spark.py).
+            # dataset side (pipelines/dataset/month_plans.py).
             logger.warning(
                 "[months] predict: ignoring prediction partition with a NULL "
                 "value (%s=%r, %s=%r); that month will be treated as not yet "

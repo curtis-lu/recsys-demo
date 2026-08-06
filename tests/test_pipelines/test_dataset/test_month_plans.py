@@ -15,12 +15,15 @@ Every assertion lands on the returned plans. Deliberately not asserted: log
 lines, and the catalog names (those belong to the pipeline-wiring tests).
 """
 
+import logging
+
 import pandas as pd
 import pytest
 
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     build_month_plans,
+    landed_months,
     month_plan_input,
 )
 
@@ -130,6 +133,79 @@ class TestRebuild:
             PARAMS, existing={"test_keys": ["2026-04-30", "2026-05-31"]},
         )
         assert plans["test_keys"].to_process == []
+
+
+class TestLandedMonths:
+    """Reading a catalog dataset's partition specs into "which months landed".
+
+    Not asserted here: that the specs are scoped to this run's
+    ``base_dataset_version``, or that escaped values are decoded. Both are the
+    catalog entry's ``partition_filter`` and ``HiveTableDataset``'s job, and
+    duplicating them here is what this ticket deleted.
+    """
+
+    def test_reads_the_time_column_out_of_each_spec(self):
+        assert landed_months(
+            [{"snap_date": "2026-04-30"}, {"snap_date": "2026-05-31"}],
+            "snap_date", "test_keys",
+        ) == ["2026-04-30", "2026-05-31"]
+
+    def test_multi_column_partitions_deduplicate_to_months(self):
+        # test_model_input is partitioned by snap_date AND the item column, so
+        # one month lists once per item; the question asked here is only which
+        # months exist.
+        assert landed_months(
+            [
+                {"snap_date": "2026-04-30", "prod_name": "fund_stock"},
+                {"snap_date": "2026-04-30", "prod_name": "exchange_fx"},
+            ],
+            "snap_date", "test_model_input",
+        ) == ["2026-04-30"]
+
+    def test_hive_null_partition_sentinel_is_dropped_not_propagated(self, caplog):
+        # Hive writes a NULL partition value as __HIVE_DEFAULT_PARTITION__.
+        # Propagating it blows up later inside pd.Timestamp() with a message
+        # that names neither the artifact nor the column. Dropping is the safe
+        # direction: that month is then reprocessed rather than skipped.
+        with caplog.at_level(logging.WARNING):
+            assert landed_months(
+                [
+                    {"snap_date": "__HIVE_DEFAULT_PARTITION__"},
+                    {"snap_date": "2026-04-30"},
+                ],
+                "snap_date", "test_keys",
+            ) == ["2026-04-30"]
+        # The warning has to name the value and the artifact: without them the
+        # reader cannot tell which table needs fixing.
+        assert "__HIVE_DEFAULT_PARTITION__" in caplog.text
+        assert "test_keys" in caplog.text
+
+    def test_a_dropped_month_is_replanned_end_to_end(self):
+        # The guard is a decision, not a formatting detail: what it buys is that
+        # the month comes back as to_process rather than skipped.
+        existing = landed_months(
+            [
+                {"snap_date": "__HIVE_DEFAULT_PARTITION__"},
+                {"snap_date": "2026-04-30"},
+            ],
+            "snap_date", "test_keys",
+        )
+        plans = build_month_plans(PARAMS, existing={"test_keys": existing})
+        assert plans["test_keys"].to_process == _ts("2026-05-31")
+        assert plans["test_keys"].skipped == _ts("2026-04-30")
+
+    def test_honours_a_non_default_time_column(self):
+        # schema.time is configurable; snap_date is this instantiation's name
+        # for it, not the framework's.
+        assert landed_months(
+            [{"as_of_date": "2026-04-30"}], "as_of_date", "test_keys",
+        ) == ["2026-04-30"]
+
+    def test_specs_without_the_time_column_are_ignored(self):
+        assert landed_months([{"prod_name": "fund_stock"}], "snap_date", "t") == []
+
+    def test_no_partitions_reads_as_nothing_landed(self):
+        assert landed_months([], "snap_date", "test_keys") == []
 
 
 class TestPlanSetShape:

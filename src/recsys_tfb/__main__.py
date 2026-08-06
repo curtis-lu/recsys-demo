@@ -41,10 +41,10 @@ from recsys_tfb.core.versioning import (
     write_manifest,
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
-from recsys_tfb.pipelines.dataset.helpers_spark import existing_snap_date_partitions
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     build_month_plans,
+    landed_months,
     month_plan_input,
 )
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
@@ -216,13 +216,25 @@ def _slice_extra(from_node, only_node):
 
 
 def _collect_existing_snap_dates(
-    spark, catalog_config: dict, base_dataset_version: str, time_col: str = "snap_date"
+    catalog: DataCatalog, time_col: str = "snap_date"
 ) -> dict[str, list[str]]:
-    """Metastore partition listing for every incrementally-built dataset.
+    """Ask the catalog which months each incrementally-built dataset already has.
 
     Taken once, before any node runs, so every incremental node and the
     manifest agree on what had already landed when this run started (ADR-0002).
     Metadata-only: no data is scanned.
+
+    The question goes to the *dataset object*, not to its config entry: where an
+    artifact is stored and how its partitions are listed is the catalog's
+    knowledge. The CLI knowing that a ``HiveTableDataset`` has ``database`` and
+    ``table`` fields, and how to turn those into a metastore query, is exactly
+    the leak ADR-0008 §5 closes. The entry's ``partition_filter`` already scopes
+    the answer to this run's ``base_dataset_version``, so the version is not a
+    parameter here — see the caller for why that is load-bearing.
+
+    A dataset that cannot list partitions makes every month look not-yet-landed:
+    that rebuilds (wasteful) rather than skips (silently stale), which is the
+    direction this decision must fail in.
 
     ``time_col`` comes from ``schema.time`` rather than being hardcoded: the
     partition column is whatever the pipeline writes as its time column, and
@@ -230,17 +242,14 @@ def _collect_existing_snap_dates(
     """
     existing: dict[str, list[str]] = {}
     for name in INCREMENTAL_DATASETS:
-        entry = catalog_config.get(name) or {}
-        if entry.get("type") != "HiveTableDataset":
+        lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
+        if lister is None:
             logger.warning(
-                "[months] %s is not a HiveTableDataset; its months cannot be "
-                "listed, so it will be rebuilt in full.", name,
+                "[months] %s cannot list its partitions, so its months cannot "
+                "be listed and it will be rebuilt in full.", name,
             )
             continue
-        existing[name] = existing_snap_date_partitions(
-            spark, entry["database"], entry["table"], base_dataset_version,
-            time_col=time_col,
-        )
+        existing[name] = landed_months(lister(), time_col, name)
     return existing
 
 
@@ -692,8 +701,11 @@ def dataset(
     )
 
     spark = get_or_create_spark_session()
-    catalog_config = config.get_catalog_config(runtime_params=params)
-    feature_table_cfg = catalog_config["feature_table"]
+    # Version-free on purpose: the source tables are the only entries readable
+    # before the versions below exist, because they carry no ${...} placeholder.
+    # Nothing version-scoped may be built from this config — see below.
+    source_catalog_config = config.get_catalog_config(runtime_params=params)
+    feature_table_cfg = source_catalog_config["feature_table"]
     feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
     feature_table_columns = [
         (f.name, f.dataType.simpleString())
@@ -717,28 +729,38 @@ def dataset(
     if cal_v is not None:
         logger.info("calibration_variant_id: %s", cal_v)
 
-    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
-    # per incremental artifact, decided here — before any Spark work — so the
-    # nodes, this log and the manifest cannot disagree about which months this
-    # run covered. The nodes receive them through the catalog (below), not
-    # through `parameters`.
-    existing_snap_dates = _collect_existing_snap_dates(
-        spark, catalog_config, base_v, time_col=get_schema(params)["time"],
-    )
-    month_plans = build_month_plans(
-        params, existing=existing_snap_dates, rebuild=rebuild,
-    )
-
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
-        # A user-supplied setting, unlike the listing above: it stays in
+        # A user-supplied setting, unlike the listing below: it stays in
         # parameters, where the training pipeline reads the same key.
         REBUILD_SNAP_DATES_KEY: rebuild,
     }
+
+    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
+    # per incremental artifact, decided here — before any Spark work — so the
+    # nodes, this log and the manifest cannot disagree about which months this
+    # run covered. The nodes receive them through the catalog (below), not
+    # through `parameters`.
+    #
+    # This catalog is built *after* base_v exists and from substitution params
+    # that carry it, and that ordering is load-bearing rather than tidy:
+    # substitution is a plain string .replace() (core/config.py:_apply), so an
+    # unfilled ${base_dataset_version} survives as that literal and raises
+    # nothing. A HiveTableDataset built from it would compare every partition
+    # against the literal, keep none, and answer "nothing has landed" for every
+    # month — a full rebuild, silently, with no failing test and no config diff.
+    substitution_params = {**params, **runtime_params}
+    existing_snap_dates = _collect_existing_snap_dates(
+        DataCatalog(config.get_catalog_config(runtime_params=substitution_params)),
+        time_col=get_schema(params)["time"],
+    )
+    month_plans = build_month_plans(
+        params, existing=existing_snap_dates, rebuild=rebuild,
+    )
 
     pipeline_kwargs = {"enable_calibration": enable_calibration}
 
