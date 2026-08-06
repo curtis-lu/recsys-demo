@@ -10,10 +10,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.helpers_spark import select_keys
-from recsys_tfb.pipelines.dataset.nodes_shared import (
-    SnapDatePlan,
-    validate_date_splits,
-)
+from recsys_tfb.pipelines.dataset.nodes_shared import SnapDatePlan
 from recsys_tfb.preprocessing._spark import (
     apply_preprocessor_to_features as _apply_preprocessor_to_features,
     build_model_input as _build_model_input,
@@ -27,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     """Select train identity keys using explicit train_snap_dates list."""
-    validate_date_splits(parameters)
-
     ds = parameters["dataset"]
     train_dates = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 

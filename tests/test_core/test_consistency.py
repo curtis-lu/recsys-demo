@@ -1369,3 +1369,116 @@ class TestPostTrainingSnapDateA22:
         )
         assert len(errs) == 1
         assert "not a readable ISO date" in errs[0]
+
+
+# =============================================================================
+# A24 — date splits must be mutually disjoint (dataset command)
+# =============================================================================
+
+from recsys_tfb.core.consistency import date_split_overlap_errors
+
+
+def _split_params(**splits) -> dict:
+    """A ``parameters`` dict carrying only the four snap_date split keys."""
+    return {"dataset": {f"{name}_snap_dates": dates for name, dates in splits.items()}}
+
+
+class TestDateSplitOverlapA24:
+    def test_disjoint_splits_pass(self):
+        params = _split_params(
+            train=["2026-01-31", "2026-02-28"],
+            calibration=["2026-03-31"],
+            val=["2026-04-30"],
+            test=["2026-05-31"],
+        )
+        assert date_split_overlap_errors(params) == []
+
+    def test_overlap_names_both_splits_and_the_shared_dates(self):
+        params = _split_params(
+            train=["2026-01-31", "2026-02-28"],
+            calibration=["2026-02-28"],
+            val=["2026-04-30"],
+            test=["2026-05-31"],
+        )
+        errs = date_split_overlap_errors(params)
+        assert len(errs) == 1
+        assert "train" in errs[0] and "calibration" in errs[0]
+        assert "2026-02-28" in errs[0]
+        # The clean pair must not be dragged into the message.
+        assert "val" not in errs[0]
+
+    def test_same_day_written_differently_is_an_overlap(self):
+        # Deliberate tightening (ADR-0008 section 3): the comparison is by
+        # calendar day, not by literal. The predecessor compared str(), so
+        # this config used to pass.
+        params = _split_params(train=["2026-01-31"], test=["2026-1-31"])
+        errs = date_split_overlap_errors(params)
+        assert len(errs) == 1
+        assert "train" in errs[0] and "test" in errs[0]
+
+    def test_datetime_shaped_literal_is_the_same_day(self):
+        # Only forms whose str() differs from the ISO day can discriminate:
+        # str(datetime.date(2026, 1, 31)) is already "2026-01-31", so a
+        # date-vs-string pair stays green with or without normalisation.
+        assert len(date_split_overlap_errors(
+            _split_params(train=["2026-01-31 00:00:00"], val=["2026-01-31"])
+        )) == 1
+        assert len(date_split_overlap_errors(
+            _split_params(train=[_dt.datetime(2026, 1, 31, 0, 0)], val=["2026-01-31"])
+        )) == 1
+
+    def test_different_days_still_pass_after_normalisation(self):
+        # Guards the tightening from overshooting into "everything overlaps".
+        assert date_split_overlap_errors(
+            _split_params(train=["2026-1-31"], test=["2026-2-28"])
+        ) == []
+
+    def test_three_way_overlap_reports_every_pair(self):
+        # Collect-all, like validate_config_consistency: one run per pair would
+        # make a three-way collision take three edit-rerun cycles to clear.
+        params = _split_params(
+            train=["2026-04-30"],
+            calibration=["2026-04-30"],
+            val=["2026-04-30"],
+            test=["2026-05-31"],
+        )
+        errs = date_split_overlap_errors(params)
+        assert len(errs) == 3
+        joined = " ".join(errs)
+        for a, b in (("train", "calibration"), ("train", "val"),
+                     ("calibration", "val")):
+            assert any(a in e and b in e for e in errs), (a, b, joined)
+
+    def test_only_train_configured_passes(self):
+        # The other three splits are optional; absent keys are not an overlap.
+        assert date_split_overlap_errors(
+            {"dataset": {"train_snap_dates": ["2026-01-31"]}}
+        ) == []
+
+    def test_config_without_a_dataset_block_passes(self):
+        # A source_etl / inference config never sets these keys.
+        assert date_split_overlap_errors({}) == []
+        assert date_split_overlap_errors({"dataset": None}) == []
+
+    def test_unparseable_literals_do_not_collapse_into_one_day(self):
+        # Both are unreadable; reporting them as the same month would be a lie
+        # (and pd.NaT == pd.NaT is False, so a naive port gets this wrong).
+        assert date_split_overlap_errors(
+            _split_params(train=["not-a-date"], test=["also-not-a-date"])
+        ) == []
+        # Identical unreadable literals are still literally the same entry —
+        # the string comparison this replaced said so too.
+        assert len(date_split_overlap_errors(
+            _split_params(train=["not-a-date"], test=["not-a-date"])
+        )) == 1
+
+    def test_a_null_yaml_entry_does_not_crash_the_check(self):
+        # A trailing "-" in the yaml list gives None, and pd.Timestamp(None)
+        # is NaT rather than an exception — a separate branch from the
+        # unparseable-string one above.
+        assert date_split_overlap_errors(
+            _split_params(train=[None, "2026-01-31"], val=["2026-02-28"])
+        ) == []
+        assert len(date_split_overlap_errors(
+            _split_params(train=[None], val=[None])
+        )) == 1

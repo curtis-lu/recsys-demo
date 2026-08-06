@@ -139,6 +139,24 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--post-training``, and the default monitoring mode reads inference output
   whose month legitimately need not be a test month — wiring it there would
   block valid monitoring runs. Wired like A13.
+* A23 — reserved for ``dataset.train_snap_dates`` required-and-non-empty
+  (issue #158). Not implemented here yet; the number is taken so the next
+  invariant does not claim it.
+* A24 — the four ``dataset.{train,calibration,val,test}_snap_dates`` splits
+  must be mutually disjoint. A month in two splits trains the model and then
+  measures it, so every metric from the second split silently becomes an
+  in-sample number and nothing downstream notices. Dates are compared as
+  calendar days (``pd.Timestamp``), so ``"2026-1-31"`` and ``"2026-01-31"``
+  collide — a deliberate tightening over the string comparison this replaced
+  (ADR-0008 section 3). Predicate: ``date_split_overlap_errors`` (returns
+  errors; the dataset command raises). NOT aggregated by
+  ``validate_config_consistency``: that runs at the entry of every command
+  while only the dataset pipeline reads these keys — the precedent, and the
+  9-blocked-test measurement behind it, is issue #158. Wired like A21/A22.
+
+Layer 1 invariants that hang off a single command instead of the aggregator,
+because they need context the aggregator never sees: A12/A13 and A21 (CLI
+flags), A22 (``--post-training``), A24 (config keys only one pipeline reads).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
@@ -199,6 +217,8 @@ the plan doc for the full table:
 from __future__ import annotations
 
 import datetime as _datetime
+
+import pandas as pd
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import get_schema
@@ -1372,3 +1392,72 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
             "subject to this rule.)"
         ]
     return []
+
+
+#: The four ``dataset.*_snap_dates`` splits A24 keeps disjoint, in the order
+#: their pairs are reported.
+_DATE_SPLIT_NAMES = ("train", "calibration", "val", "test")
+
+
+def _split_day_labels(values) -> dict:
+    """Map each configured snap_date to its calendar day.
+
+    Returns ``{comparison key: label}``. The key is a midnight-normalised
+    ``pd.Timestamp``, so two literals naming the same day compare equal
+    whatever form they were written in. Deliberately ``pd.Timestamp`` and not
+    this module's ``_iso_date``: on Python 3.10 ``date.fromisoformat`` rejects
+    ``"2026-1-31"``, and ``pd.Timestamp`` is what the dataset pipeline itself
+    parses these keys with, so A24 stays no stricter than the code it guards.
+
+    A literal pandas cannot read keeps the raw string as its key, tagged so it
+    can never collide with a real day. Two unparseable literals then overlap
+    only when they are byte-identical — which is what the string comparison
+    this predicate replaced would have said. Reporting them as malformed
+    belongs to the per-key predicates (A21/A23), not to a disjointness check.
+    """
+    labels: dict = {}
+    for value in values:
+        try:
+            day = pd.Timestamp(value)
+        except (ValueError, TypeError, OverflowError):
+            day = None
+        if day is None or day is pd.NaT:
+            labels[("unparsed", str(value))] = str(value)
+        else:
+            day = day.normalize()
+            labels[day] = day.date().isoformat()
+    return labels
+
+
+def date_split_overlap_errors(parameters: dict) -> list[str]:
+    """(A24) The four dataset snap_date splits must be mutually disjoint.
+
+    Returns error strings (empty list when fine); the dataset command raises.
+    One error per overlapping pair, so a config with several collisions gets
+    fixed in one pass rather than one run per pair.
+
+    A month in two splits is not a config the pipeline can honour: the same
+    rows would train the model and then measure it, and every metric computed
+    from the second split silently becomes an in-sample number. Nothing
+    downstream notices — the run succeeds and the report looks normal.
+    """
+    ds = parameters.get("dataset", {}) or {}
+    days = {
+        name: _split_day_labels(ds.get(f"{name}_snap_dates") or [])
+        for name in _DATE_SPLIT_NAMES
+    }
+
+    errors: list[str] = []
+    for i, a in enumerate(_DATE_SPLIT_NAMES):
+        for b in _DATE_SPLIT_NAMES[i + 1:]:
+            common = days[a].keys() & days[b].keys()
+            if common:
+                shared = sorted(days[a][key] for key in common)
+                errors.append(
+                    f"(A24) dataset.{a}_snap_dates and dataset.{b}_snap_dates "
+                    f"both contain {shared} — a snap_date belongs to exactly "
+                    f"one split. Dates are compared by calendar day, so the "
+                    f"same month written two ways still collides. Drop it "
+                    f"from whichever split should not own it."
+                )
+    return errors

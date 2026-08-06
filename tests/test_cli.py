@@ -997,3 +997,77 @@ class TestRebuildSlicedAwayWarning:
 
         real = {node.name for node in get_pipeline("training").nodes}
         assert set(_REBUILD_TARGET_NODES) <= real
+
+
+class TestDateSplitOverlapA24:
+    """A24 is wired to the dataset command, not to the global aggregator."""
+
+    def test_overlapping_splits_exit_before_spark_starts(self, tmp_path):
+        # Like A21: a config error must not cost a 2-4 minute cold start.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2026-01-31", "2026-02-28"],
+                "val_snap_dates": ["2026-02-28"],
+                "test_snap_dates": ["2026-03-31"],
+            }},
+        )
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["dataset"])
+            assert result.exit_code == 1
+            # The load-bearing assertion: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command.
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_command_whose_config_has_no_dataset_block_is_unaffected(self, tmp_path):
+        # source_etl / inference configs never set these keys at all. A24 must
+        # treat four absent splits as disjoint, not as something to complain
+        # about — the required-key question is A23's (issue #158), and letting
+        # it leak in here would block every non-dataset command.
+        _setup_etl_conf(tmp_path)
+        assert not (tmp_path / "conf" / "base" / "parameters_dataset.yaml").exists()
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                MockRunner.return_value.run_source_checks.return_value = None
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+        finally:
+            os.chdir(old)
+
+    def test_other_commands_run_with_an_overlapping_dataset_block(self, tmp_path):
+        # ConfigLoader merges every file in conf/base, so a feature_etl run
+        # sees the dataset params too. A24 must not reach it: #158 measured
+        # what putting a dataset-only predicate in the global aggregator does
+        # (9 unrelated tests blocked). This config would fail `dataset`.
+        _setup_etl_conf(tmp_path)
+        with open(tmp_path / "conf" / "base" / "parameters_dataset.yaml", "w") as f:
+            yaml.dump({"dataset": {
+                "train_snap_dates": ["2026-01-31"],
+                "val_snap_dates": ["2026-01-31"],
+            }}, f)
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                MockRunner.return_value.run_source_checks.return_value = None
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+        finally:
+            os.chdir(old)
