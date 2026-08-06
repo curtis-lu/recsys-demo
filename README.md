@@ -142,6 +142,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 - **HPO 崩潰恢復**：啟用 `hpo_checkpointing` 時會保存 Optuna study 與目前最佳模型，訓練中斷後可只補跑剩餘 trials；若要放棄既有搜尋結果，可使用 `--fresh-hpo` 從頭開始。
 - **最終模型與機率校準**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練；若下游需要將 score 解讀為機率，可選擇使用獨立 calibration split 執行 sigmoid 或 isotonic calibration。
 - **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷（含 per-item 帶方向的特徵 profile、採購者對照與跨 item 偏離度 `item_idiosyncrasy`、象限（TP/FP/FN/TN）per-(item×象限) 聚合 profile 與極值案例 SHAP 圖）；模型、參數、指標與診斷也可記錄至 MLflow。
+- **可切換的兩階段建模（staged）**：設定 `training.model_structure: staged` 時，依指定欄位把候選分群，每群獨立訓練與搜參；可選第二階段（`binary` 或 `lambdarank`）把各群分數融合回同一把尺，或不接第二階段、直接用第一階段分數排序。預設的 `shared`（單一共用模型）行為完全不變。設定與細節見 [`docs/pipelines/training.md`](docs/pipelines/training.md) §10。
 - **版本化但不自動上線**：模型與其上游 `base_dataset_version`、`train_variant_id`、可選的 `calibration_variant_id` 及有效 training 設定共同決定 `model_version`。training 完成後不會自動供 inference 使用，仍須人工檢視評估結果並透過 `scripts/promote_model.py` 將核准版本設為 `best`。
 
 ### evaluation pipeline
@@ -411,7 +412,7 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 - 這裡問「對這位客戶，所有候選產品該怎麼**排先後**」，評估一律是 per query group 的排序指標 mAP（mAP 怎麼算見 [`docs/metrics/metrics.html`](docs/metrics/metrics.html)）。
 - 你還可以把訓練目標從 `binary` 換成 learning-to-rank（`lambdarank` / `rank_xendcg`），讓模型直接優化排序。
 
-排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt_learning_to_rank.md)。
+排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
 **Q2. 為什麼資料要切成 train / train_dev / val / calibration / test 五份？各做什麼？**
 
@@ -430,17 +431,21 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 - `binary` 是建議的第一版 baseline：逐筆預測後再排序，流程較容易驗證，而且仍以排序指標評估。
 - `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並確認 score 是否需要 calibration。
 
-pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt_learning_to_rank.md)。
+pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
-**Q4. 排序只看相對名次，為什麼還要做機率校準？**
+**Q4. 什麼時候考慮 staged（每群一個模型）而不是單一共用模型？**
+
+預設就用 `shared`：單一共用模型讓各群可以互相借用訊號，資料量較小的群也能受惠於整體樣本。考慮切到 staged 的訊號，是 SHAP 診斷的 `item_idiosyncrasy` 顯示某個 item 明顯偏離全域重要特徵排序、且該 item 自己的離線指標（如其 mAP）也偏弱——單純偏離度高但指標沒受影響，通常不代表需要分群。取捨很直接：分群可以讓每群專注自己的資料分布、不被其他群的訊號稀釋，但也放棄了群之間可能存在的正向遷移。設定方式與完整機制見 [`docs/pipelines/training.md`](docs/pipelines/training.md) §10；pointwise／pairwise／listwise 與 per-group 建模的一般原理見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
+
+**Q5. 排序只看相對名次，為什麼還要做機率校準？**
 
 純排序不需要校準。只有下游要將 `score` 解讀為機率，例如計算期望收益或跨日期比較絕對水準時才需要。啟用時，dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled` 必須一起設定。
 
-**Q5. 模型訓練好後怎麼上線？**
+**Q6. 模型訓練好後怎麼上線？**
 
 用 `scripts/promote_model.py` 將通過人工審核的 `model_version` 設為 `best`；training 不會自動發布模型，inference 預設只使用 `best`。可先加 `--dry-run` 查看候選版本而不實際升版。
 
-**Q6. evaluation 的兩個情境怎麼選？**
+**Q7. evaluation 的兩個情境怎麼選？**
 
 | 情境 | 指令 | 資料來源 | 使用時機 |
 |---|---|---|---|
@@ -460,7 +465,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
 | 理解 mAP、NDCG、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
 | 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md)、[`behavior-diagrams.html`](docs/behavior-diagrams.html) |
-| 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt_learning_to_rank.md) |
+| 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
 | 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/pipeline-slicing.md)、[`hpo-resume.md`](docs/operations/hpo-resume.md) |
 | 排查訓練 OOM（字串特徵欄 → object 矩陣） | [`training-oom-object-matrix.md`](docs/operations/training-oom-object-matrix.md)、[`known-pitfalls.md`](docs/operations/known-pitfalls.md) |
 

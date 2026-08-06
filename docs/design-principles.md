@@ -121,7 +121,7 @@ cache 以 `_SUCCESS` marker 判斷是否完整。若路徑存在但 marker 不�
 
 新增演算法時，應新增並註冊 adapter，而不是在 training pipeline 中加入大量演算法分支。pipeline 保持演算法無關，演算法特有的資料準備與 artifact 格式則留在 adapter。
 
-SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_names)` 這個模型結構無關的接縫存取，診斷層不直接依賴 `model.booster`；日後擴充至 composite（兩階段）模型時，只需在此接縫修改，上層診斷邏輯不需調整。
+SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_names)` 這個模型結構無關的接縫存取，診斷層不直接依賴 `model.booster`；staged（兩階段）模型即透過此接縫掛上診斷（第二階段 booster 與 staged 專屬的輸入組裝都處理在接縫內），上層診斷邏輯不需調整。見 [`pipelines/training.md`](pipelines/training.md) §10.7。
 
 ### 生產限制反映在架構中
 
@@ -225,7 +225,7 @@ training 會產生版本化模型、test 預測、排序指標與診斷，但不
 - 整體與 @K 排序指標
 - per-item 與 per-segment 表現
 - popularity baseline 比較
-- feature importance、SHAP 與其他診斷（訓練診斷以 per-item 預測能力與驅動特徵為重心：`top_features_positive` 呈現採購者與整體的驅動特徵對照，`item_idiosyncrasy` 依偏離度排序各 item，指向 per-item 或兩階段模型的優化方向）
+- feature importance、SHAP 與其他診斷（訓練診斷以 per-item 預測能力與驅動特徵為重心：`top_features_positive` 呈現採購者與整體的驅動特徵對照，`item_idiosyncrasy` 依偏離度排序各 item，指向 per-item 或兩階段模型的優化方向；框架已內建 staged 模式，見 [`pipelines/training.md`](pipelines/training.md) §10）
 - 產品資格、法遵與業務限制
 
 核准後，再以 `scripts/promote_model.py` 將指定 `model_version` 設為 `best`。這將「產生模型」與「承擔發布決策」分成兩個明確步驟。
@@ -326,6 +326,10 @@ pipeline 切片只能在完整 node 邊界恢復。若 `tune_hyperparameters` �
 `search_id` 使用與 model version 相同的 model-defining 輸入，但排除 `n_trials`。因此改變 search space、資料版本、objective 或其他會改變 trial 意義的設定時，會自動建立新的 search；只改目標 trial 數則沿用既有 search。
 
 詳細行為見 [`operations/hpo-resume.md`](operations/hpo-resume.md)。
+
+### staged 模式另有群級 checkpoint
+
+staged 模式（見 [`pipelines/training.md`](pipelines/training.md) §10）除了上述機制外，另有自己的群級訓練 checkpoint（`data/models/_staged_wip/`）：同一個 `model_version` 重跑時，已完成的群直接載回、不重新訓練。詳見 §10.6。
 
 ### 恢復能力來自持久化邊界
 

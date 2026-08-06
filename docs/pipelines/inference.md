@@ -289,6 +289,10 @@ identity 與 feature 會在同一次 collect 中取得，以維持每筆分數�
 
 `model_version` 會在評分結果中注入，供後續 staging、production 與 evaluation partition 使用。
 
+### 5.4 staged 模型的分群路由
+
+載入的 staged 模型會依每列的分群鍵值路由到對應的第一階段模型（若設定了第二階段，再疊加其分數）。scoring 資料缺少分群鍵欄位屬於 schema 錯誤，會立即中止；出現訓練時沒見過的分群值，則該群的列跳過不評分並記警告（adapter 與打分節點各一次），缺群統計寫入 `data/inference/<model_version>/missing_groups.json`（`missing_groups`／`rows_skipped`／`rows_total`；shared 模型也會寫這份檔案，`missing_groups` 為空）。若一整批列全部被跳過，視為異常直接中止。細節與設計理由見 [`training.md`](training.md) §10.8。
+
 ## 6. 發布驗證與產物
 
 ### 6.1 六項 sanity checks
