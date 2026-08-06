@@ -10,7 +10,7 @@ All errors subclass ValueError so existing ``except ValueError`` call sites
 Invariant legend
 ----------------
 Code comments across this module, ``core/schema.py`` and
-``pipelines/dataset/data_gate.py`` reference invariants by ID. This docstring is
+``pipelines/dataset/nodes.py`` reference invariants by ID. This docstring is
 the canonical legend.
 
 Layer 1 — config-static (implemented here; aggregated by
@@ -168,7 +168,7 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
   Predicate: ``item_coverage_errors`` (pure, no Spark); wired via
-  ``validate_data_consistency`` (``pipelines/dataset/data_gate.py``) as the
+  ``validate_data_consistency`` (``pipelines/dataset/nodes.py``) as the
   first node of the dataset pipeline. B3 — a declared item has zero positives over
   the train window — intentionally NOT reported by ``item_coverage_errors``
   (deferred).
@@ -1098,7 +1098,7 @@ def carry_column_collision_errors(
 
     - an identity column named in ``carry_columns`` is *not* copied a second
       time — ``select_keys`` only appends carry entries that are not already in
-      the identity key (``pipelines/dataset/helpers_spark.py``), and the base
+      the identity key (``pipelines/dataset/sampling.py``), and the base
       key is coalesced by the join itself.
     - the label and non-categorical identity columns are excluded from
       ``feature_columns`` by ``_compute_feature_columns`` regardless of

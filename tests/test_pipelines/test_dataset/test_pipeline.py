@@ -1,8 +1,7 @@
 """Tests for dataset building pipeline definition."""
 
 from recsys_tfb.pipelines.dataset import create_pipeline
-from recsys_tfb.pipelines.dataset import data_gate
-from recsys_tfb.pipelines.dataset import nodes_spark as nodes
+from recsys_tfb.pipelines.dataset import nodes
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     month_plan_input,
@@ -143,7 +142,7 @@ class TestNodeNameToFunctionBinding:
     """
 
     BASE_BINDINGS = {
-        "validate_data_consistency": data_gate.validate_data_consistency,
+        "validate_data_consistency": nodes.validate_data_consistency,
         "select_sample_keys": nodes.select_train_keys,
         "split_train_keys": nodes.split_train_keys,
         "select_val_keys": nodes.select_val_keys,

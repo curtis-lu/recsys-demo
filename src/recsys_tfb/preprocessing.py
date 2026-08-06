@@ -57,7 +57,7 @@ class PreprocessorMetadata(TypedDict):
     Not enforced at runtime: ``TypedDict`` is erased at import time and this repo
     runs no type checker. Two tests are what keep it honest —
     ``tests/test_preprocessing.py::TestPreprocessorMetadataContract`` pins these
-    key names, and ``test_nodes_spark.py::TestFitPreprocessorMetadataKeyContract``
+    key names, and ``test_dataset/test_nodes.py::TestFitPreprocessorMetadataKeyContract``
     asserts the real fit output's key set against ``__annotations__``. The reader
     side needs no test of its own: renaming a key it uses already turns the
     inference node tests red.

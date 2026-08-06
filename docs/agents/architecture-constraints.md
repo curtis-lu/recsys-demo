@@ -129,11 +129,17 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 # 節二 · 約束（新增或修改 node、catalog 條目之前先讀）
 
-檢查由 `tests/test_core/test_architecture_constraints.py` 執行（12 個測試，約 0.5 秒）。
+檢查由 `tests/test_core/test_architecture_constraints.py` 執行（15 個測試，約 0.5 秒）。
+
+**兩個 A 系列不是同一套編號。** 本檔的 A1–A7 是**結構約束**（node 與 catalog 該長什麼樣，AST 稽核）；
+`core/consistency.py` 的 A1–A24 是**設定不變量 predicate**（config 值彼此矛不矛盾，執行期 raise）。
+兩邊的 A5、A7 已經在撞車、意思完全不同。**本 repo 不重編號**——重編號會讓既有文件與 commit message 的引用
+全部指錯，理由同 A16/A17/A18 退休不回填（見 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 第四節）。
+引用時請連模組一起寫（「consistency 的 A5」／「本檔的 A5」）。S 系列（structure）是為了不再增加撞車面而另起的前綴。
 
 **這些約束的管轄範圍**：A1、A2、A5、A6、A7 只管 `src/recsys_tfb/pipelines/` 底下的 node 函式與 `Node(...)` 定義；
-A3、A4 管整個 `src/recsys_tfb/`。**CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——
-那幾層本來就負責 I/O 與程序級資源。
+A3、A4 管整個 `src/recsys_tfb/`；S1、S2 只管 `pipelines/dataset/`。
+**CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
 **檢查看得到什麼、看不到什麼**（不要把「測試綠」讀成「一定沒問題」）：
 
@@ -196,6 +202,44 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 因為切片會跳過它們（見 F5），新增一個零輸出 node 等於新增一個「接續執行時會靜默不跑」的東西。這需要是有意識的決定。
 
 **檢查**：`pipelines/*/pipeline.py` 中 `outputs=None` 的 `Node` 定義，必須與節三登記清單相符。
+
+### S1. dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py`
+
+`pipelines/dataset/pipeline.py` 中每個 `Node(...)` 的第一參數，必須是 `pipelines/dataset/nodes.py` 裡以 `def` 定義的名稱。
+
+**是「def 定義」而不是「從 nodes.py import」**：後者有 re-export 漏洞——`nodes.py` 加一行 `from .sampling import select_keys`，
+`pipeline.py` 照樣「來自 nodes.py」、檢查全綠，而函式定義在別的檔，正是 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 要消滅的形狀。
+
+**S1 只擋位置，擋不住內容。** 一個 12 行的轉手 node 加一個裝著四個決策的 helper 完全滿足 S1。
+內容那一半沒有機械檢查，靠下方的判定程序 ＋ code review（這是 ADR-0008 已知的最大殘留風險，不是疏漏）。
+
+**檢查**：AST 取 `nodes.py` 的 `FunctionDef` 名稱集合（不含 import），比對 `pipeline.py` 中所有 `Node(...)` 的第一參數。
+
+### S2. `pipelines/dataset/month_plans.py` 不得 import pyspark
+
+含函式體內的延遲 import。
+
+守的不是風格，是**檔案切分的承重前提**：`scoping.py` 之所以不能併進 `month_plans.py`，唯一理由就是這條純度；
+而該模組 436 行的測試（`tests/test_pipelines/test_dataset/test_month_plans.py`）不需要 SparkSession 也是靠它——這個 repo 的 Spark cold start 是 2–4 分鐘。
+一句沒有機制強制的「必須」會漂移（ADR-0002:21 那段三天就過時的補釘是前例）。
+
+**檢查**：兩個測試，缺一不可。
+
+1. **直接掃描**——AST 掃該模組所有 `Import`／`ImportFrom`（用 `ast.walk`，所以**函式體內的延遲 import** 一樣掃得到），root package 不得為 `pyspark`。
+2. **可達性**——沿 `pipelines/dataset/` 的同層 import 遞迴一跳以上，任何路徑都不得抵達 pyspark。缺了這條，`from recsys_tfb.pipelines.dataset.scoping import _date_filter` 會被第 1 條讀成「import 了 `recsys_tfb`」而放行，但該模組已經是 Spark-typed 了——而這正是本 repo 實際在用的 import 寫法。
+
+**刻意不驗**「`pyspark` 不進 `sys.modules`」。那才是真正想要的性質，但它因為與本模組無關的理由不可能成立：`pipelines/__init__.py` → `core` → `io` → `models` → `mlflow`，終點是 `mlflow/types/schema.py` 自己那行 `import pyspark`。S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
+
+### 動 dataset 的 node 之前：先讀 ADR-0008 第二節
+
+S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得出它做了什麼 ML 決定」。
+那條線由 [ADR-0008 第二節](../adr/0008-dataset-modules-split-by-role.md) 的**兩條判準**與**判定程序**定義：
+
+1. node body ＝ 具名步驟的組合，每個步驟名就是一個 ML 決策；
+2. 一個 helper 至多承載一個決策。
+
+判定程序（把 helper 的名字換成純機械的名字，看 node 是否仍講得完整個 ML 故事）也在那一節。
+**新增或修改 dataset node 前先讀那一節**——判準只活在 ADR 裡等於對執行者不可見，而這份檔案才是路由表指定的必讀檔。
 
 ---
 

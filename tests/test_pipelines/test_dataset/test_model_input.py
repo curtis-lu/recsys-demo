@@ -83,7 +83,7 @@ class TestBuildModelInputCarry:
         # of every input column" — which is what `dataset` already is, so the
         # equality below could not tell a correct selection apart from no
         # selection at all. (label_table really does carry these; see the
-        # label_table fixture in test_nodes_spark.py.)
+        # label_table fixture in test_nodes.py.)
         labels = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
             "cust_id": [1, 2], "prod_name": ["a", "b"], "label": [1, 0],
