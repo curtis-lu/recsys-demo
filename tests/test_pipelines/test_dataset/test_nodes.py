@@ -146,7 +146,7 @@ def _expected_model_input_columns(keys, preprocessor, parameters) -> set[str]:
       ``carry_columns``. Reconciling the two is #140 D4, not this ticket.
     - ``feature_columns`` comes from the preprocessor, so this checks that
       build_model_input honours the metadata handed to it — not that the
-      metadata is correct. Whether _compute_feature_columns selected the right
+      metadata is correct. Whether compute_feature_columns selected the right
       columns is a separate contract (#140 D3) with its own tests; drop a
       feature there and this equality follows it down without complaining.
     """
@@ -484,7 +484,7 @@ class TestBuildModelInput:
             })
         )
         # "build_model_input keys" (not bare "build_model_input") — the other
-        # _validate_columns call in this function reports the latter, and this
+        # require_columns_present call in this function reports the latter, and this
         # pattern must not be satisfiable by it.
         with pytest.raises(
             ValueError, match=rf"build_model_input keys: \['{item_col}'\]"
@@ -614,7 +614,7 @@ class TestFitPreprocessorItemMissingFromFeatures:
     def test_default_categorical_columns_passes(
         self, spark, feature_table, parameters
     ):
-        # When prepare_model_input is not supplied, _get_preprocessing_config
+        # When prepare_model_input is not supplied, preprocessing_config
         # defaults categorical_columns=[schema.item], so prod_name lands in
         # feature_columns automatically.
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
@@ -772,7 +772,7 @@ def test_build_model_input_casts_float_features_to_float32(
 # `validate_data_consistency` is a node like any other, so it lives in
 # `pipelines/dataset/nodes.py` (#169). Its integration tests stay here,
 # next to the existing B1/B5/B6/B7 ones and the fixtures they all need. The pure
-# helpers it calls (`_compute_feature_columns`) are tested in
+# helpers it calls (`compute_feature_columns`) are tested in
 # test_feature_columns.py. Split by "gate wiring vs pure helper", not by which
 # file the symbol happens to live in, so a behaviour still has exactly one home.
 
@@ -792,9 +792,9 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     Callers add to the defaults rather than replacing them, so a test says which
     columns *it* cares about and inherits the rest.
     """
-    from recsys_tfb.pipelines.dataset.steps.feature_columns import _get_preprocessing_config
+    from recsys_tfb.pipelines.dataset.steps.feature_columns import preprocessing_config
 
-    default_drop, default_categorical = _get_preprocessing_config(parameters)
+    default_drop, default_categorical = preprocessing_config(parameters)
     dataset = {
         **parameters["dataset"],
         "prepare_model_input": {
@@ -1049,7 +1049,7 @@ class TestValidateDataConsistencyB6:
 
         A dropped column never reaches the model, so flagging it would be a
         false alarm that no valid config could clear — the gate has to classify
-        the ``_compute_feature_columns`` output. Same rogue-column anchor as
+        the ``compute_feature_columns`` output. Same rogue-column anchor as
         above so a dead gate cannot pass.
         """
         ft = (

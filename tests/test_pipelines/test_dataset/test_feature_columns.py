@@ -4,7 +4,7 @@ No Spark anywhere in this file, by construction: the module it covers is the
 dataset pipeline's pure half.
 """
 
-from recsys_tfb.pipelines.dataset.steps.feature_columns import _compute_feature_columns
+from recsys_tfb.pipelines.dataset.steps.feature_columns import compute_feature_columns
 
 
 class TestComputeFeatureColumnsDrops:
@@ -27,7 +27,7 @@ class TestComputeFeatureColumnsDrops:
     IDENTITY = ["snap_date", "cust_id", "prod_name"]
 
     def _compute(self, drop):
-        return _compute_feature_columns(
+        return compute_feature_columns(
             self.FT_COLS, self.IDENTITY, ["prod_name"], drop, "label"
         )
 

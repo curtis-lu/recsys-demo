@@ -39,21 +39,21 @@ from recsys_tfb.pipelines.dataset.steps.categoricals import (
     warn_unknown_encodings,
 )
 from recsys_tfb.pipelines.dataset.steps.feature_columns import (
-    _compute_feature_columns,
-    _get_preprocessing_config,
-    _warn_missing_drop_columns,
+    compute_feature_columns,
     encodable_categoricals,
     encoded_frame_columns,
+    preprocessing_config,
     require_base_key_columns,
     require_item_is_a_feature,
     split_categorical_sources,
+    warn_missing_drop_columns,
 )
 from recsys_tfb.pipelines.dataset.steps.model_input import (
-    _validate_columns,
     drop_groups_without_positives,
     join_features_missing_as_null,
     join_labels_missing_as_negative,
     model_input_columns,
+    require_columns_present,
 )
 from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
@@ -69,7 +69,7 @@ from recsys_tfb.pipelines.dataset.steps.sampling import (
     with_effective_sample_ratio,
 )
 from recsys_tfb.pipelines.dataset.steps.scoping import (
-    _date_filter,
+    months_filter_as_date,
     require_months_present,
     restrict_to_months,
     restrict_to_months_or_all,
@@ -123,9 +123,9 @@ def validate_data_consistency(
         )
         return {r[item] for r in rows if r[item] is not None}
 
-    drop_cols, categorical_cols = _get_preprocessing_config(parameters)
+    drop_cols, categorical_cols = preprocessing_config(parameters)
     ft_dtypes = dict(feature_table.dtypes)
-    feature_cols = _compute_feature_columns(
+    feature_cols = compute_feature_columns(
         list(feature_table.columns),
         identity_cols,
         categorical_cols,
@@ -388,7 +388,7 @@ def select_test_keys(
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
 
-    test_labels = sample_pool.filter(_date_filter(time_col, month_plan.to_process))
+    test_labels = sample_pool.filter(months_filter_as_date(time_col, month_plan.to_process))
     all_keys = test_labels.select(*identity_key).dropDuplicates()
 
     logger.info("Test keys (full population)")
@@ -415,7 +415,7 @@ def build_test_model_input(
     # Decision — scope: this run's months only. Everything after it is the same
     # assembly every other split gets, which is why it is the sibling node
     # rather than a copy.
-    keys = keys.filter(_date_filter(schema["time"], month_plan.to_process))
+    keys = keys.filter(months_filter_as_date(schema["time"], month_plan.to_process))
     return build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
     )
@@ -439,7 +439,7 @@ def fit_preprocessor_metadata(
         ``PreprocessorMetadata``'s four keys.
     """
     schema = get_schema(parameters)
-    drop_cols, categorical_cols = _get_preprocessing_config(parameters)
+    drop_cols, categorical_cols = preprocessing_config(parameters)
     identity_cols = schema["identity_columns"]
     time_col = schema["time"]
     label_col = schema["label"]
@@ -456,7 +456,7 @@ def fit_preprocessor_metadata(
     # own and encodes to the unknown sentinel, exactly as it would in production
     # on a value the model never trained on.
     #
-    # The un-normalised restriction, not ``_date_filter``: this node reads
+    # The un-normalised restriction, not ``months_filter_as_date``: this node reads
     # feature_table straight from the source table, where the time column is a
     # real DATE. The normalised form is for the frames read back from Hive with
     # a string partition column — see ``scoping``.
@@ -481,7 +481,7 @@ def fit_preprocessor_metadata(
         }
 
     with log_step(logger, "compute_feature_columns"):
-        feature_columns = _compute_feature_columns(
+        feature_columns = compute_feature_columns(
             feature_table.columns,
             identity_cols,
             categorical_cols,
@@ -539,7 +539,7 @@ def apply_preprocessor_to_features(
     # Pre-checks. The drop_columns one only warns: a stale name in that list
     # changes nothing about the output.
     require_base_key_columns(feature_table.columns, base_key)
-    _warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
+    warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
     if months:
         require_months_present(feature_table, time_col, months, "snap_dates")
 
@@ -555,7 +555,7 @@ def apply_preprocessor_to_features(
     # Decision — the output width: the base key plus the features that actually
     # live in feature_table. Identity-sourced features arrive later, from keys.
     with log_step(logger, "select_columns"):
-        result = feature_table.filter(_date_filter(time_col, months)).select(
+        result = feature_table.filter(months_filter_as_date(time_col, months)).select(
             *encoded_frame_columns(base_key, feature_columns, feature_table.columns)
         )
 
@@ -607,7 +607,7 @@ def build_model_input(
     # every node feeding this one passes it — but its failure mode is a silently
     # N-times-too-large dataset, so a missing column is an error, not a mode.
     label_join_key = base_key + [item_col]
-    _validate_columns(keys.columns, label_join_key, "build_model_input keys")
+    require_columns_present(keys.columns, label_join_key, "build_model_input keys")
 
     # Decision — a key with no label row is a negative, not a gap. sample_pool
     # is dense (entity x item fully expanded) while label_table is sparse (only
@@ -631,7 +631,7 @@ def build_model_input(
     # Everything else the two joins brought along is dropped here.
     with log_step(logger, "select_output_columns"):
         required = list(set(identity_cols + [label_col] + feature_columns))
-        _validate_columns(dataset.columns, required, "build_model_input")
+        require_columns_present(dataset.columns, required, "build_model_input")
         result = dataset.select(*model_input_columns(
             keys.columns, dataset.columns, identity_cols, label_col, feature_columns,
         ))

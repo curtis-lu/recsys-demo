@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset.steps.model_input import _validate_columns
+from recsys_tfb.pipelines.dataset.steps.model_input import require_columns_present
 from recsys_tfb.pipelines.dataset.nodes import build_model_input
 
 
@@ -28,7 +28,7 @@ class TestValidateColumns:
 
     def test_missing_columns_raise_naming_all_of_them(self):
         with pytest.raises(ValueError) as ei:
-            _validate_columns(["a", "b"], ["a", "b", "c", "d"], "some_node")
+            require_columns_present(["a", "b"], ["a", "b", "c", "d"], "some_node")
         msg = str(ei.value)
         # Sorted, so the text is stable across set-iteration order rather than
         # matching whatever order this particular run produced.
@@ -43,7 +43,7 @@ class TestValidateColumns:
         name.
         """
         with pytest.raises(ValueError, match=r"build_model_input keys: \['prod_name'\]"):
-            _validate_columns(
+            require_columns_present(
                 ["snap_date", "cust_id"],
                 ["snap_date", "cust_id", "prod_name"],
                 "build_model_input keys",
@@ -56,10 +56,10 @@ class TestValidateColumns:
         columns, ``dataset`` carries the whole joined width), so a subset check
         in the other direction would reject every real call.
         """
-        assert _validate_columns(["a", "b", "c"], ["a"], "ctx") is None
+        assert require_columns_present(["a", "b", "c"], ["a"], "ctx") is None
 
     def test_exact_match_passes(self):
-        assert _validate_columns(["a", "b"], ["a", "b"], "ctx") is None
+        assert require_columns_present(["a", "b"], ["a", "b"], "ctx") is None
 
 
 @pytest.mark.spark
@@ -107,7 +107,7 @@ class TestBuildModelInputCarry:
 
         Takes ``feature_columns`` from the preprocessor, so it checks that
         build_model_input honours the metadata it was handed — NOT that the
-        metadata itself is right. Whether _compute_feature_columns picked the
+        metadata itself is right. Whether compute_feature_columns picked the
         correct columns is a separate contract with its own tests.
         """
         schema = get_schema(self._params())

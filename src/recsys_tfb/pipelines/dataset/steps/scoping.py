@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 
-def _date_filter(time_col: str, dates: list):
+def months_filter_as_date(time_col: str, dates: list):
     """``time_col IN dates``, normalised to DATE on both sides.
 
     ``time_col`` reaches these nodes with two different types depending on where
@@ -54,7 +54,7 @@ def _date_filter(time_col: str, dates: list):
 def restrict_to_months(df: DataFrame, time_col: str, months: list) -> DataFrame:
     """``df`` restricted to ``months``, compared in the source-table form.
 
-    Deliberately *not* :func:`_date_filter`: the callers are the nodes reading
+    Deliberately *not* :func:`months_filter_as_date`: the callers are the nodes reading
     ``sample_pool`` / ``feature_table``, source tables whose time column is a
     real DATE. Normalising here would silently widen what matches, which is not
     a change a behaviour-preserving refactor may make; the normalised form stays

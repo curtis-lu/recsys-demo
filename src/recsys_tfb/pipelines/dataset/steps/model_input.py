@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 
-def _validate_columns(
+def require_columns_present(
     columns: list[str],
     required: list[str],
     context: str,

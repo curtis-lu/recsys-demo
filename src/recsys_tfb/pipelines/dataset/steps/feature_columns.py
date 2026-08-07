@@ -21,7 +21,7 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-def _get_preprocessing_config(parameters: dict) -> tuple[list[str], list[str]]:
+def preprocessing_config(parameters: dict) -> tuple[list[str], list[str]]:
     """Extract drop_columns and categorical_columns from parameters.
 
     Returns:
@@ -39,7 +39,7 @@ def _get_preprocessing_config(parameters: dict) -> tuple[list[str], list[str]]:
     return drop_cols, categorical_cols
 
 
-def _compute_feature_columns(
+def compute_feature_columns(
     feature_table_cols: list[str],
     identity_cols: list[str],
     categorical_cols: list[str],
@@ -161,7 +161,7 @@ def require_base_key_columns(columns: list[str], base_key: list[str]) -> None:
         raise ValueError(f"feature_table missing base-key columns: {missing}")
 
 
-def _warn_missing_drop_columns(
+def warn_missing_drop_columns(
     columns: list[str],
     drop_cols: list[str],
     context: str,

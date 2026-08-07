@@ -1136,7 +1136,7 @@ class TestCarryColumnCollisionErrors:
         assert self._errors(["cust_id"], []) == []
 
     def test_label_column_in_carry_is_exempt(self):
-        # _compute_feature_columns excludes the label from feature_columns
+        # compute_feature_columns excludes the label from feature_columns
         # whatever drop_columns says, so it never reaches the feature side.
         assert self._errors(["label"], []) == []
 
