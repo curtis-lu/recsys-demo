@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.dataset.model_input import _validate_columns
+from recsys_tfb.pipelines.dataset.steps.model_input import _validate_columns
 from recsys_tfb.pipelines.dataset.nodes import build_model_input
 
 

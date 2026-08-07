@@ -1,10 +1,10 @@
-"""Tests for ``pipelines/dataset/feature_columns.py`` — pure column-name derivation.
+"""Tests for ``pipelines/dataset/steps/feature_columns.py`` — pure column-name derivation.
 
 No Spark anywhere in this file, by construction: the module it covers is the
 dataset pipeline's pure half.
 """
 
-from recsys_tfb.pipelines.dataset.feature_columns import _compute_feature_columns
+from recsys_tfb.pipelines.dataset.steps.feature_columns import _compute_feature_columns
 
 
 class TestComputeFeatureColumnsDrops:

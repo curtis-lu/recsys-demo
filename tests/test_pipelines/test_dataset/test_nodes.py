@@ -781,7 +781,7 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     """``parameters`` with the keys the Layer-2 gate reads made explicit.
 
     The fixture leaves ``prepare_model_input`` unset, so the gate falls back to
-    the defaults in ``pipelines/dataset/feature_columns.py``. Those are read from
+    the defaults in ``pipelines/dataset/steps/feature_columns.py``. Those are read from
     that module rather than restated here: a hand-written copy would be equal to
     the real list only as long as feature_table happens to lack the columns
     where the two differ (``apply_start_date`` / ``apply_end_date`` /
@@ -792,7 +792,7 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     Callers add to the defaults rather than replacing them, so a test says which
     columns *it* cares about and inherits the rest.
     """
-    from recsys_tfb.pipelines.dataset.feature_columns import _get_preprocessing_config
+    from recsys_tfb.pipelines.dataset.steps.feature_columns import _get_preprocessing_config
 
     default_drop, default_categorical = _get_preprocessing_config(parameters)
     dataset = {
@@ -1885,7 +1885,7 @@ class TestSelectCalibrationKeys:
         rows.
         """
         import recsys_tfb.pipelines.dataset.nodes as nodes
-        from recsys_tfb.pipelines.dataset.sampling import keep_rows_drawn_under_ratio
+        from recsys_tfb.pipelines.dataset.steps.sampling import keep_rows_drawn_under_ratio
 
         seen = {}
 
@@ -1996,7 +1996,7 @@ class TestFilterGroupsWithPositives:
     """
 
     def test_drops_all_zero_groups(self, spark):
-        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
+        from recsys_tfb.pipelines.dataset.steps.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
@@ -2013,7 +2013,7 @@ class TestFilterGroupsWithPositives:
 
     def test_keeps_all_rows_of_positive_groups(self, spark):
         """Group with even one positive row keeps every row in that group."""
-        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
+        from recsys_tfb.pipelines.dataset.steps.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 4),
@@ -2027,7 +2027,7 @@ class TestFilterGroupsWithPositives:
     def test_groups_split_across_snap_dates(self, spark):
         """(snap_date, cust_id) is the group key — same cust across two snaps
         is two separate groups."""
-        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
+        from recsys_tfb.pipelines.dataset.steps.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(
@@ -2044,7 +2044,7 @@ class TestFilterGroupsWithPositives:
         assert all(str(r.snap_date).startswith("2025-01") for r in rows)
 
     def test_preserves_column_schema(self, spark):
-        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
+        from recsys_tfb.pipelines.dataset.steps.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"]),
@@ -2057,7 +2057,7 @@ class TestFilterGroupsWithPositives:
         assert out.columns == df.columns
 
     def test_empty_when_no_positives(self, spark):
-        from recsys_tfb.pipelines.dataset.model_input import drop_groups_without_positives
+        from recsys_tfb.pipelines.dataset.steps.model_input import drop_groups_without_positives
 
         df = spark.createDataFrame(pd.DataFrame({
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),

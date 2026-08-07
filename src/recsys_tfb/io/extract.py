@@ -28,7 +28,7 @@ def _composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
 
     Single source for the lookup-key construction so the weight mapping and the
     zero-match diagnostic agree byte-for-byte. Mirrors the dataset sampler's
-    ``sample_ratio_overrides`` key in pipelines/dataset/sampling.py.
+    ``sample_ratio_overrides`` key in pipelines/dataset/steps/sampling.py.
     """
     keys = pdf[weight_keys[0]].astype(str)
     for k in weight_keys[1:]:
@@ -96,7 +96,7 @@ def _compute_row_weights(
 
     Pure: no Spark, no I/O. Each row's lookup key is its ``weight_keys``
     column values joined with '|' (mirrors the dataset sampler's
-    ``sample_ratio_overrides`` key in pipelines/dataset/sampling.py).
+    ``sample_ratio_overrides`` key in pipelines/dataset/steps/sampling.py).
     Rows whose key is absent from ``sample_weights`` get weight 1.0
     (sparse-emit: only adjusted groups are written to the table).
     """

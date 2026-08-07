@@ -1099,7 +1099,7 @@ def carry_column_collision_errors(
     - an identity column named in ``carry_columns`` is *not* copied a second
       time — a split's output columns are the identity key plus only the
       carry entries not already in it (``key_output_columns``,
-      ``pipelines/dataset/sampling.py``), and the base
+      ``pipelines/dataset/steps/sampling.py``), and the base
       key is coalesced by the join itself.
     - the label and non-categorical identity columns are excluded from
       ``feature_columns`` by ``_compute_feature_columns`` regardless of

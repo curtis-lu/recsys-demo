@@ -32,13 +32,13 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
-from recsys_tfb.pipelines.dataset.categoricals import (
+from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     read_declared_vocabularies,
     require_declared_categoricals,
     warn_unknown_encodings,
 )
-from recsys_tfb.pipelines.dataset.feature_columns import (
+from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     _compute_feature_columns,
     _get_preprocessing_config,
     _warn_missing_drop_columns,
@@ -48,7 +48,7 @@ from recsys_tfb.pipelines.dataset.feature_columns import (
     require_item_is_a_feature,
     split_categorical_sources,
 )
-from recsys_tfb.pipelines.dataset.model_input import (
+from recsys_tfb.pipelines.dataset.steps.model_input import (
     _validate_columns,
     drop_groups_without_positives,
     join_features_missing_as_null,
@@ -59,7 +59,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
     collect_dataset_snap_dates,
 )
-from recsys_tfb.pipelines.dataset.sampling import (
+from recsys_tfb.pipelines.dataset.steps.sampling import (
     draw_can_drop_rows,
     keep_entities_drawn_under_ratio,
     keep_rows_drawn_under_ratio,
@@ -68,7 +68,7 @@ from recsys_tfb.pipelines.dataset.sampling import (
     sampling_columns,
     with_effective_sample_ratio,
 )
-from recsys_tfb.pipelines.dataset.scoping import (
+from recsys_tfb.pipelines.dataset.steps.scoping import (
     _date_filter,
     require_months_present,
     restrict_to_months,
