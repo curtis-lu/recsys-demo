@@ -148,7 +148,7 @@ numpy 要找一個「都裝得下、又不失真」的格子。整數最大要 8
 
 ## 5. 文字欄是怎麼混進特徵欄的
 
-`_compute_feature_columns`（`src/recsys_tfb/pipelines/dataset/feature_columns.py:33`）：
+`compute_feature_columns`（`src/recsys_tfb/pipelines/dataset/steps/feature_columns.py`）：
 
 ```python
 non_feature = set(drop_cols) | (set(identity_cols) - set(categorical_cols)) | {label_col}

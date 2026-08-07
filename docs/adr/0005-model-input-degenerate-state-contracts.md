@@ -20,7 +20,7 @@ date: 2026-08-02
 限縮到當次月份再呼叫它），合計註冊成五個 pipeline 節點
 （`pipelines/dataset/pipeline.py` 的 train / train_dev / val / test / calibration，
 最後一個只在 `enable_calibration` 時註冊），五個餵進去的 keys 全是 identity。
-`pipelines/dataset/model_input.py` 只被同套件內部引用，也沒有「外部 API 彈性」需要保留。
+`pipelines/dataset/steps/model_input.py` 只被同套件內部引用，也沒有「外部 API 彈性」需要保留。
 
 而它的失效模式是**靜默列膨脹 ×N_products**。
 
