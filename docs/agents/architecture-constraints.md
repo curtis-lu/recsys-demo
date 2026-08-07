@@ -237,7 +237,7 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 
 1. node body ＝ 具名步驟的組合，每個步驟名就是一個 ML 決策；
 2. 一個 helper 至多承載一個決策；
-3. 底線前綴 ＝ 只有本模組呼叫——`nodes.py` 呼叫得到的一律無底線（同節「底線前綴的判準」，同樣沒有機械檢查）。
+3. 底線前綴 ＝ 只有本模組呼叫——`nodes.py` 呼叫得到的一律無底線（同節「底線前綴的判準」，同樣沒有機械檢查）。判準的範圍是 `pipelines/dataset/` 內部；**已知的界外違例**是 `nodes.py:77-80` 從 `recsys_tfb.preprocessing` import 的兩個底線函式，那個模組被 dataset 與 inference 共用，動它會碰到 inference（登記在 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 的「這條 ADR 沒有解決的事」）。看到它不必以為判準是裝飾。
 
 判定程序（把 helper 的名字換成純機械的名字，看 node 是否仍講得完整個 ML 故事）也在那一節。
 **新增或修改 dataset node 前先讀那一節**——判準只活在 ADR 裡等於對執行者不可見，而這份檔案才是路由表指定的必讀檔。

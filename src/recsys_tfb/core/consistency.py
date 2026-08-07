@@ -526,7 +526,7 @@ def weight_key_columns_unavailable(parameters: dict) -> list[str]:
     dataset_cfg = parameters.get("dataset", {}) or {}
     # Route through the file's own _prepare_model_input helper (as sibling
     # predicates do) and default only when the key is absent — matching
-    # preprocessing_config, so an explicit `categorical_columns: []`
+    # prepare_model_input_config, so an explicit `categorical_columns: []`
     # is honoured rather than silently coerced to [schema["item"]].
     declared_cats = _prepare_model_input(parameters).get("categorical_columns")
     categorical_cols = declared_cats if declared_cats is not None else [schema["item"]]

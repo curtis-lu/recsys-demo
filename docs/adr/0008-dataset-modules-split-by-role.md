@@ -48,7 +48,8 @@ pandas 只在「必須於 driver 處理」時才出現——而 dataset 一帶�
 
 用現況驗這條線：`select_keys` 一個呼叫裡有四個決策（月份過濾／有效抽樣率的覆寫優先序／
 依 identity key 決定去留／輸出欄＝identity＋carry），名字一個都沒說 → 非法。
-`_compute_feature_columns`（`preprocessing/_common.py:30`）只有一個決策、名字也說出來了 → 合法，
+`_compute_feature_columns`（當時的 `preprocessing/_common.py:30`；今日
+`steps/feature_columns.py` 的 `compute_feature_columns`）只有一個決策、名字也說出來了 → 合法，
 即使它被兩個 node 呼叫。
 
 ### 檔案清單
@@ -135,7 +136,7 @@ repo 的 Spark cold start 是 2–4 分鐘。所以 `scoping.py` 不能併進去
 
 | 舊名 | 新名 | 為什麼 |
 |---|---|---|
-| `_get_preprocessing_config` | `preprocessing_config` | 純去底線 |
+| `_get_preprocessing_config` | `prepare_model_input_config` | **不只去底線**：舊名指向一個不存在的設定鍵。它讀的是 `dataset.prepare_model_input`（`steps/feature_columns.py:31`，區域變數就叫 `pmi_config`），config 裡沒有 `preprocessing` 這個鍵 |
 | `_compute_feature_columns` | `compute_feature_columns` | 純去底線（不縮成 `feature_columns`，那會與模組名相撞） |
 | `_warn_missing_drop_columns` | `warn_missing_drop_columns` | 純去底線，接上 `warn_unknown_encodings` |
 | `_validate_columns` | `require_columns_present` | 接上既有的 `require_*` 家族（`require_months_present`／`require_base_key_columns`／`require_item_is_a_feature`／`require_declared_categoricals`） |
@@ -154,6 +155,13 @@ import），「底線＝守衛或實作細節」也對不上（`_validate_column
 會靜默放寬命中範圍；從 Hive 分區欄讀回來是字串，不正規化則靜默零命中（`steps/scoping.py` 的
 docstring 論證過這兩個方向）。名字若丟掉這個區別，兩個函式在呼叫端看起來就可以互換，而選錯
 一邊的兩種後果都是靜默的。
+
+**上一段的一處更正（fresh-context 審查抓到）**：「來源表 vs Hive 分區欄」說的是兩個失效方向
+為何都靜默，**不是呼叫點的分界線**。`feature_table` 今天同時出現在兩側——`nodes.py:464` 用
+不正規化的 `restrict_to_months`、`nodes.py:558` 用正規化的 `months_filter_as_date`，而
+`conf/base/catalog.yaml:11-15` 的 `feature_table` 沒有 `partition_cols`，時間欄是真 DATE。
+所以正規化與否是**逐呼叫點**的選擇，不是逐表的；那個不一致早於本次改動，而 rename 不改行為
+也就沒有動它。要帶 `as_date` 的結論不變：兩個函式真的只差正規化，兩種選錯都不會有錯誤訊息。
 
 ## 三、驗證邏輯的歸屬
 
@@ -209,8 +217,10 @@ raise，屬於票 1 的預期效果，不進版本 hash。
 > `pipelines/dataset/nodes.py` 裡以 `def` **定義**的名稱。檢查：AST 取 `nodes.py` 的
 > `FunctionDef` 名稱集合，比對 `pipeline.py` 中所有 `Node(...)` 第一參數。
 >
-> **S2** — `pipelines/dataset/month_plans.py` 不得 import pyspark。檢查：AST 掃該模組的
-> `Import`／`ImportFrom`（含函式體內的延遲 import）。
+> **S2** — `pipelines/dataset/month_plans.py` 不得 import pyspark。檢查兩條，缺一不可：
+> ① AST 掃該模組的 `Import`／`ImportFrom`（含函式體內的延遲 import）；② 沿 dataset 套件內的
+> import 遞迴一跳以上，任何路徑都不得抵達 pyspark。條文與失效理由見
+> `architecture-constraints.md` 的 S2 節。
 
 S2 守的不是風格，是**檔案切分的承重前提**：第二節說 `month_plans.py` 必須維持零 pyspark，
 而那正是 `scoping.py` 不能併進去的唯一理由，也是 451 行免 Spark 測試存活的條件。一句沒有
@@ -365,7 +375,7 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
 - **兩套 A 系列編號的撞車**：`architecture-constraints.md` A1–A7 與 `core/consistency.py`
   A1–A22。本次只加一句說明，不重編號——重編號會讓既有文件的引用全部指錯，理由同
   A16/A17/A18 退休不回填。
-- **inference 無法自我檢查「載入的 preprocessor 是否與現行 config 相符」**：`_compute_feature_columns`
+- **inference 無法自我檢查「載入的 preprocessor 是否與現行 config 相符」**：`compute_feature_columns`
   搬進 `pipelines/dataset/` 之後，「什麼算特徵」這條規則只在 dataset 裡。這不是本次弄丟的
   能力——inference 現在的把關本來就是 artifact 對 artifact（model 的 `feature_names()` vs
   `X_score` 欄位，`pipelines/inference/nodes_spark.py:151-168`），不是 artifact 對 config。
@@ -374,6 +384,9 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
   `_encode_categoricals`）：依第二節的底線判準它們也該去底線——被 dataset 與 inference
   兩條 pipeline import，比 dataset 內那五個更明顯。不在本次範圍，因為它不在
   `pipelines/dataset/` 內，而該模組的改動會同時碰到 inference（本機難驗，撞既有 #63）。
+- **`feature_table` 同時被正規化與不正規化的月份過濾**（`nodes.py:464` vs `:558`）：兩個呼叫點
+  對同一個 catalog 條目做了不同選擇。這個不一致早於本次改動，rename 不改行為也就沒有動它；
+  第二節的命名論證已更正為「正規化與否是逐呼叫點的選擇」，但**哪一邊才對還沒有人判定**。
 - **底線判準沒有機械檢查**：可以寫（AST 掃 `steps/` 下被外部 import 的名字有無 `_` 開頭），
   刻意不寫——這次的目的是目錄可讀性，加稽核會讓一個純結構搬移長出新的約束面。復發成本低：
   下一次有人加底線名字給 `nodes.py` 呼叫時，判準就寫在同一節裡。

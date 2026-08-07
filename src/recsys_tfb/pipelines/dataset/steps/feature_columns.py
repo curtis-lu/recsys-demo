@@ -21,7 +21,7 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-def preprocessing_config(parameters: dict) -> tuple[list[str], list[str]]:
+def prepare_model_input_config(parameters: dict) -> tuple[list[str], list[str]]:
     """Extract drop_columns and categorical_columns from parameters.
 
     Returns:

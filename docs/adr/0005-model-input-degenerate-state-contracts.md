@@ -24,11 +24,11 @@ date: 2026-08-02
 
 而它的失效模式是**靜默列膨脹 ×N_products**。
 
-→ 移除三元式，改 `_validate_columns(keys.columns, base_key + [item_col], ...)`。
+→ 移除三元式，改 `require_columns_present(keys.columns, base_key + [item_col], ...)`。
 這讓「**keys 的 grain 就是 model_input 的 grain**」成為可依賴的不變量。
 
 實作時的一處出入（2026-08-02，#141）：context 字串用 `"build_model_input keys"` 而非
-`"build_model_input"`。同一個函式稍後還有一次 `_validate_columns(dataset.columns, ...)`，
+`"build_model_input"`。同一個函式稍後還有一次 `require_columns_present(dataset.columns, ...)`，
 兩者若共用 context，測試的 `pytest.raises(match=...)` 會被另一條規則的訊息滿足——那正是
 #140 列為禁止的假綠形式之一。
 

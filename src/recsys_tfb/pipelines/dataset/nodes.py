@@ -2,11 +2,12 @@
 
 This module is the one home of the pipeline's ML story: a reader who opens it
 sees each decision this pipeline makes about the data, without jumping files.
-The mechanisms those decisions are expressed in live in sibling modules named
-after the concern they implement (``sampling``, ``scoping``, ``feature_columns``,
-``categoricals``, ``model_input``, ``month_plans``) — see ADR-0008 §2 for the two
-criteria that draw that line, and ``docs/agents/architecture-constraints.md`` S1,
-which pins "every node registered in ``pipeline.py`` is ``def``-defined here".
+The mechanisms those decisions are expressed in live in ``steps/``, one module per
+concern (``sampling``, ``scoping``, ``feature_columns``, ``categoricals``,
+``model_input``). ``month_plans`` stays beside this file instead, because
+``__main__.py`` reads it too — see ADR-0008 §2 for the criteria that draw both
+lines, and ``docs/agents/architecture-constraints.md`` S1, which pins "every node
+registered in ``pipeline.py`` is ``def``-defined here".
 
 Reading a node here, the decisions are the named steps; the constants and dtype
 details those steps are made of (the unknown-category sentinel, the float32
@@ -42,7 +43,7 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     compute_feature_columns,
     encodable_categoricals,
     encoded_frame_columns,
-    preprocessing_config,
+    prepare_model_input_config,
     require_base_key_columns,
     require_item_is_a_feature,
     split_categorical_sources,
@@ -123,7 +124,7 @@ def validate_data_consistency(
         )
         return {r[item] for r in rows if r[item] is not None}
 
-    drop_cols, categorical_cols = preprocessing_config(parameters)
+    drop_cols, categorical_cols = prepare_model_input_config(parameters)
     ft_dtypes = dict(feature_table.dtypes)
     feature_cols = compute_feature_columns(
         list(feature_table.columns),
@@ -439,7 +440,7 @@ def fit_preprocessor_metadata(
         ``PreprocessorMetadata``'s four keys.
     """
     schema = get_schema(parameters)
-    drop_cols, categorical_cols = preprocessing_config(parameters)
+    drop_cols, categorical_cols = prepare_model_input_config(parameters)
     identity_cols = schema["identity_columns"]
     time_col = schema["time"]
     label_col = schema["label"]

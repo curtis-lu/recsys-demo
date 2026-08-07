@@ -614,7 +614,7 @@ class TestFitPreprocessorItemMissingFromFeatures:
     def test_default_categorical_columns_passes(
         self, spark, feature_table, parameters
     ):
-        # When prepare_model_input is not supplied, preprocessing_config
+        # When prepare_model_input is not supplied, prepare_model_input_config
         # defaults categorical_columns=[schema.item], so prod_name lands in
         # feature_columns automatically.
         preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
@@ -792,9 +792,9 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     Callers add to the defaults rather than replacing them, so a test says which
     columns *it* cares about and inherits the rest.
     """
-    from recsys_tfb.pipelines.dataset.steps.feature_columns import preprocessing_config
+    from recsys_tfb.pipelines.dataset.steps.feature_columns import prepare_model_input_config
 
-    default_drop, default_categorical = preprocessing_config(parameters)
+    default_drop, default_categorical = prepare_model_input_config(parameters)
     dataset = {
         **parameters["dataset"],
         "prepare_model_input": {
