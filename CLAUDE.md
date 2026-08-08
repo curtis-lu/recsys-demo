@@ -68,7 +68,8 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有
 
 ## 測試（跑快，不是少跑）
 
-- 單次改動只跑相關測試檔；全量 `tests/test_evaluation` ~33 分鐘，**不要拿來驗小改動**。
+- 單次改動只跑相關測試檔——理由是聚焦，**不是耗時**：全量 `tests/test_evaluation`（302 個測試）實測 **54 秒**（2026-08-08）。
+- **寫耗時要連量測環境一起寫。** 本檔曾長期寫「~33 分鐘」——那是 Docker 時代量的，2026-06-09 換成 `local[*]` 之後就失效了，但沒人回頭重量，還被 10 份以上的 plan／spec 轉引當作跳過測試的理由。原委與規則：known-pitfalls.md §4。
 - 可能 >2 分鐘的指令一律 background 執行（曾因 foreground 重跑全量空轉整晚）。
 - 驗證優先 `git diff <base>..<head>`（SHA-based、秒級）＋針對性 grep；不重跑 subagent 已驗過的。
 - **main 上有既知 failing/互擾測試，改動前先建 baseline**——清單見 known-pitfalls.md §5。
