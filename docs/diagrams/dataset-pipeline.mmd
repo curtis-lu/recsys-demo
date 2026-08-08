@@ -1,0 +1,108 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei', sans-serif", "fontSize": "13px", "lineColor": "#8a97a0", "textColor": "#1f2328", "clusterBkg": "#fbfcfd", "clusterBorder": "#d0d7de", "edgeLabelBackground": "#ffffff"}, "flowchart": {"curve": "basis", "nodeSpacing": 26, "rankSpacing": 58, "htmlLabels": true, "padding": 8}} }%%
+%% ===========================================================================
+%% dataset pipeline node graph
+%% 唯一真實來源：src/recsys_tfb/pipelines/dataset/pipeline.py::create_pipeline
+
+%% 圖例
+%%   [( 圓柱 )]  來源表（catalog 外部輸入）
+%%   [ 方框 ]    node，框內是 node name（可直接餵給 --from-node / --only-node）
+%%   ([ 膠囊 ])  dataset（node 的輸出，catalog 條目）
+%%   {{ 六角 }}  side-effect only 的閘（outputs=None）
+%%   [A][B][C]  接點記號：build node 框內的「+ A · B · C」代表它同時吃這三個
+%%              輸入。三個輸入各連四個 build node ＝ 12 條橫貫線，改用接點記號
+%%              表示，lineage 一條不少但圖不打結。
+
+%% 刻意不畫
+%%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
+%%   - calibration 分支（enable_calibration: true 才存在）。
+%%   - 函式名：四個 build node 共用 build_model_input、filter_val_model_input
+%%     的函式是 filter_groups_with_positives、select_sample_keys 的函式是
+%%     select_train_keys。圖上一律用 node name。
+
+%% 編輯方式：改這個檔，然後重新渲染成 SVG 貼回 dataset-pipeline.html。
+%%   - 線上：https://mermaid.live 貼上全文 → Actions → SVG
+%%   - VS Code：Mermaid 系列外掛可直接預覽與匯出
+%%   - 貼進 .md 的 ```mermaid 區塊，GitHub 會直接渲染
+%%   - CLI（指令見 dataset-pipeline.html 末段）
+
+%% 兩個實測過的坑
+%%   1. 不要留「只有 %%、後面沒有字」的空註解行：mermaid 不會把它當註解剝掉，
+%%      會黏到下一行變成 %%flowchart，parse error 指向第 1 行、很難聯想。
+%%      要空行就用真正的空行。
+%%   2. 渲染用 mermaid-cli@10，不要用 @11：同一張圖 v11 的新 renderer 會產出
+%%      666 KB 的 SVG（形狀改用 rough.js 畫，path 灌到 30 KB 一條），v10 是 43 KB。
+%% ===========================================================================
+
+flowchart LR
+
+  %% --------------------------- 來源表 ---------------------------
+  subgraph SRC[" 來源表 "]
+    direction TB
+    sample_pool[("sample_pool")]
+    feature_table[("feature_table")]
+    label_table[("label_table　<b>[B]</b>")]
+  end
+
+  %% ------------------------ 資料閘（Layer-2）---------------------
+  gate{{"validate_data_consistency<br/><small>B1 / B5 / B6 · 只做檢查不產出</small>"}}
+  sample_pool --> gate
+  feature_table --> gate
+  label_table --> gate
+
+  %% ------------------------- Key 選取 ---------------------------
+  subgraph KEYS[" Key 選取：決定每個 split 收哪些 (time, entity, item) "]
+    direction TB
+    n_sel_test["select_test_keys<br/><small>增量</small>"] --> d_test_keys(["test_keys"])
+    n_sel_val["select_val_keys"] --> d_val_keys(["val_keys"])
+    n_sel_sample["select_sample_keys"] --> d_sample_keys(["sample_keys"])
+    d_sample_keys --> n_split["split_train_keys"]
+    n_split --> d_train_dev_keys(["train_dev_keys"])
+    n_split --> d_train_keys(["train_keys"])
+  end
+
+  sample_pool --> n_sel_sample
+  sample_pool --> n_sel_val
+  sample_pool --> n_sel_test
+
+  %% -------------------------- 前處理 ----------------------------
+  subgraph PREP[" 前處理：只用 train 月份 fit，編碼一次供所有 split 共用 "]
+    direction TB
+    n_fit["fit_preprocessor_metadata"] --> d_preprocessor(["preprocessor　<b>[C]</b>"])
+    n_fit --> d_catmap(["category_mappings"])
+    n_apply["apply_preprocessor_to_features<br/><small>增量</small>"] --> d_pft(["preprocessed_feature_table　<b>[A]</b>"])
+  end
+
+  feature_table --> n_fit
+  feature_table --> n_apply
+  d_preprocessor --> n_apply
+
+  %% ---------------------- 組裝 model input -----------------------
+  subgraph BUILD[" 組裝 model input：keys ⨝ label ⨝ 編碼後 features "]
+    direction TB
+    n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C</small>"] --> d_test_unf(["test_model_input_unfiltered"])
+    d_test_unf --> n_f_test["filter_test_model_input<br/><small>增量 ・ 去掉零正例</small>"]
+    n_f_test --> o_test(["test_model_input"])
+    n_b_val["build_val_model_input<br/><small>＋ A · B · C</small>"] --> d_val_unf(["val_model_input_unfiltered"])
+    d_val_unf --> n_f_val["filter_val_model_input<br/><small>去掉零正例 query group</small>"]
+    n_f_val --> o_val(["val_model_input"])
+    n_b_traindev["build_train_dev_model_input<br/><small>＋ A · B · C</small>"] --> o_traindev(["train_dev_model_input"])
+    n_b_train["build_train_model_input<br/><small>＋ A · B · C</small>"] --> o_train(["train_model_input"])
+  end
+
+  d_test_keys --> n_b_test
+  d_val_keys --> n_b_val
+  d_train_dev_keys --> n_b_traindev
+  d_train_keys --> n_b_train
+
+  %% ---------------------------- 樣式 -----------------------------
+  classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b
+  classDef nd fill:#ffffff,stroke:#57606a,stroke-width:1.5px,color:#1f2328
+  classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
+  classDef out fill:#b2f2bb,stroke:#2f9e44,stroke-width:1.5px,color:#14532d
+  classDef gt fill:#ffec99,stroke:#f08c00,stroke-width:1.5px,color:#7a4a00
+
+  class sample_pool,feature_table,label_table src
+  class n_sel_sample,n_split,n_sel_val,n_sel_test,n_fit,n_apply,n_b_train,n_b_traindev,n_b_val,n_b_test,n_f_val,n_f_test nd
+  class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_preprocessor,d_catmap,d_pft,d_val_unf,d_test_unf data
+  class o_train,o_traindev,o_val,o_test out
+  class gate gt

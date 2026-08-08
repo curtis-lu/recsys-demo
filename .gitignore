@@ -41,3 +41,14 @@ graphify-out/
 
 # 手冊審稿 subagent 即時日誌（審稿過程鷹架，非手冊產品，不入版控）
 docs/handbooks/spark-tuning/.reviews/
+
+# 專利簡報（Slidev）與 slidev skill — 刻意與 recsys_tfb 分離，不一起入版控。
+# presentation/ 含原始截圖、slides.md 與 Slidev 專案（node_modules 等）。
+# .agents/、.claude/skills/ 是 `skills add slidevjs/slidev` 裝進來的 skill 本體與符號連結。
+# 註：.claude/settings.json 仍為已追蹤的專案設定，不受影響（此處只忽略 .claude/skills/）。
+# skills-lock.json 一併忽略：skill 本體既然不在 repo 裡，單獨留一份 lockfile 只會讓
+# 下一個人以為 `skills add` 是這個 repo 的一部分。
+presentation/
+.agents/
+.claude/skills/
+skills-lock.json

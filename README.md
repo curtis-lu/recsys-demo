@@ -456,6 +456,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 需求 | 建議文件 |
 |---|---|
 | 查看資料流、各表 schema 與範例 | [`data-lineage.html`](docs/data-lineage.html) |
+| 查看 dataset pipeline 的 node 流程圖 | [`dataset-pipeline.html`](docs/diagrams/dataset-pipeline.html) |
 | 深入某一條 pipeline | [`source_etl.md`](docs/pipelines/source_etl.md)、[`dataset.md`](docs/pipelines/dataset.md)、[`training.md`](docs/pipelines/training.md)、[`inference.md`](docs/pipelines/inference.md)、[`evaluation.md`](docs/pipelines/evaluation.md) |
 | 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
 | 理解 mAP、NDCG、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
