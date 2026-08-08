@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recsys_tfb — inference pipeline 流程圖</title>
+<style>
+  :root{
+    --src-bg:#a5d8ff; --src-bd:#1971c2;
+    --cfg-bg:#e5dbff; --cfg-bd:#7048e8;
+    --art-bg:#c3fae8; --art-bd:#0ca678;
+    --node-bg:#ffffff; --node-bd:#57606a;
+    --data-bg:#f1f3f5; --data-bd:#adb5bd;
+    --out-bg:#b2f2bb; --out-bd:#2f9e44;
+    --gate-bg:#ffec99; --gate-bd:#f08c00;
+    --abort-bg:#ffe3e3; --abort-bd:#e03131;
+  }
+  body{font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
+    max-width:1080px;margin:0 auto;padding:24px 34px;color:#1f2328;line-height:1.65;background:#fff}
+  h1{font-size:23px;margin-bottom:2px}
+  h2{font-size:19px;border-bottom:1px solid #d0d7de;padding-bottom:6px;margin-top:34px}
+  h3{font-size:15px;margin:22px 0 4px}
+  .sub{color:#59636e;font-size:13px;margin-top:0}
+  code{background:#eff1f3;padding:1px 5px;border-radius:5px;font-size:84%;
+    font-family:"SF Mono",Menlo,Consolas,monospace}
+  a{color:#0969da;text-decoration:none}
+  a:hover{text-decoration:underline}
+  .note{font-size:12.5px;background:#fff8e6;border-left:3px solid #f0a000;padding:7px 11px;
+    border-radius:4px;margin:10px 0}
+  /* 圖例 */
+  .legend{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:12.5px;margin:10px 0 4px;align-items:center}
+  .lg{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:15px;height:15px;border-radius:4px;border:1.5px solid #888;display:inline-block;flex:none}
+  .sw.round{border-radius:8px}
+  .sw.dash{border-style:dashed}
+  .sw.skew{transform:skewX(-18deg)}
+  .sw.dbl{box-shadow:inset 0 0 0 1.5px #fff,inset 0 0 0 3px var(--art-bd)}
+  .tag{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;font-weight:700;
+    border:1px solid #adb5bd;background:#f1f3f5;border-radius:5px;padding:0 5px}
+  /* 圖本體：圖寬 960px，放得進版面，不必做整頁滿版出血 */
+  .plate{border:1px solid #d0d7de;background:#fff;border-radius:8px;
+    padding:16px 20px;margin:12px 0 6px;overflow-x:auto;
+    background-image:linear-gradient(to right,rgba(25,113,194,.05) 1px,transparent 1px),
+                     linear-gradient(to bottom,rgba(25,113,194,.05) 1px,transparent 1px);
+    background-size:24px 24px}
+  .plate svg{display:block;margin:0 auto;height:auto;max-width:none}
+  /* 節點文字在 foreignObject 裡，會被本頁的 body 樣式串進去；還原成 mermaid
+     量測時的行高與邊距，否則兩行的節點第二行會被切掉 */
+  .plate svg foreignObject div,.plate svg foreignObject span,.plate svg foreignObject p{
+    line-height:1.25;margin:0}
+  .cap{font-size:12px;color:#59636e;margin:0 0 18px}
+  /* 對照表 */
+  table.nodes{border-collapse:collapse;width:100%;font-size:12.5px;margin:8px 0}
+  table.nodes th,table.nodes td{border:1px solid #e1e4e8;padding:4px 9px;text-align:left;vertical-align:top}
+  table.nodes th{background:#f6f8fa;white-space:nowrap}
+  table.nodes td:first-child,table.nodes td:nth-child(2),table.nodes td:nth-child(3){
+    font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px}
+  table.nodes tr.stage td{background:#f6f8fa;font-weight:600;font-family:inherit;font-size:12px}
+  .warn{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:9px;margin-left:5px;
+    background:var(--abort-bg);border:1px solid var(--abort-bd);color:#8c1c1c;white-space:nowrap}
+  ul.pts{padding-left:20px;font-size:13.5px}
+  ul.pts li{margin:7px 0}
+  pre.sh{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;background:#0d1117;color:#e6edf3;
+    padding:9px 12px;border-radius:7px;overflow:auto;white-space:pre;line-height:1.55}
+  pre.sh .c{color:#8b949e}
+</style>
+</head>
+<body>
+
+<h1>inference pipeline 流程圖</h1>
+<p class="sub">node 層級的 DAG：誰產出什麼、誰吃什麼。對照
+<code>src/recsys_tfb/pipelines/inference/pipeline.py::create_pipeline</code>。
+姊妹圖 <a href="dataset-pipeline.html">dataset-pipeline.html</a>；
+跨 pipeline 的完整 lineage 見 <a href="../data-lineage.html">data-lineage.html</a>，
+各 node 的設定與執行前檢查見 <a href="../pipelines/inference.md">inference.md</a>。</p>
+
+<div class="note">
+框內是 <b>node name</b>，可以直接餵給 <code>--from-node</code> / <code>--only-node</code>（<code>--list-nodes</code> 印的也是這個名字）。
+這條 pipeline 的六個 node name 都與函式名相同。<b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>
+（唯一例外是 <code>inference.products</code>，理由見圖例）、<code>use_calibration</code> 的校準開關
+（它只是 <code>predict_scores</code> 內部一次 if，不改變任何一條邊）、以及
+<code>build_scoring_dataset</code> 只寫 log 不下推的特徵覆蓋率報表。
+</div>
+
+<h2>圖例</h2>
+<div class="legend">
+  <span class="lg"><span class="sw round" style="background:var(--src-bg);border-color:var(--src-bd)"></span>來源表（<code>read_only</code>）</span>
+  <span class="lg"><span class="sw skew" style="background:var(--cfg-bg);border-color:var(--cfg-bd)"></span>被造成資料列的 config 值</span>
+  <span class="lg"><span class="sw dbl" style="background:var(--art-bg);border-color:var(--art-bd)"></span>上游 pipeline 落地的版本化 artifact</span>
+  <span class="lg"><span class="sw" style="background:var(--node-bg);border-color:var(--node-bd)"></span>node（框內為 node name）</span>
+  <span class="lg"><span class="sw" style="background:var(--gate-bg);border-color:var(--gate-bd)"></span>閘：不轉換資料，只決定放不放行</span>
+</div>
+<div class="legend" style="margin-top:8px">
+  <span class="lg"><span class="sw round" style="background:var(--data-bg);border-color:var(--data-bd)"></span><b>落地的</b> catalog 條目（Hive table）</span>
+  <span class="lg"><span class="sw round dash" style="background:#fff;border-color:var(--data-bd)"></span><code>MemoryDataset</code>：catalog 沒這個名字，只活在這次 run 的記憶體</span>
+  <span class="lg"><span class="sw round" style="background:var(--out-bg);border-color:var(--out-bd)"></span>production 產物</span>
+  <span class="lg"><span class="sw dash" style="background:var(--abort-bg);border-color:var(--abort-bd)"></span>失敗路徑的終點（沒有東西被寫出去）</span>
+</div>
+<p class="sub" style="margin-top:8px">
+<b>只有一種 config 入圖。</b><code>inference.products</code> 不是「被讀取的設定值」，而是被
+<code>spark.createDataFrame</code> 造成一張表、再 <code>crossJoin</code> 進評分母體的<b>資料列</b>
+（<code>nodes_spark.py:113-115</code>）——評分列數 = entity 數 × 日期數 × products 數。
+<code>inference.snap_dates</code> 這種純過濾條件仍然不畫。<br>
+<b>虛線邊 = 不是資料流</b>：宣告了但函式沒讀（<code>scoring_dataset → predict_scores</code>），
+或版本解析的相依（<code>model ⇢ preprocessor</code>）。
+</p>
+
+<h2>流程圖</h2>
+<div class="plate">
+<svg id="my-svg" width="960" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="max-width: none; background-color: transparent;" viewBox="-8 -8 960.0078125 1577.4168701171875" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#000000;}#my-svg .error-icon{fill:#552222;}#my-svg .error-text{fill:#552222;stroke:#552222;}#my-svg .edge-thickness-normal{stroke-width:2px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#666;stroke:#666;}#my-svg .marker.cross{stroke:#666;}#my-svg svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#my-svg .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#000000;}#my-svg .cluster-label text{fill:#333;}#my-svg .cluster-label span,#my-svg p{color:#333;}#my-svg .label text,#my-svg span,#my-svg p{fill:#000000;color:#000000;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#eee;stroke:#999;stroke-width:1px;}#my-svg .flowchart-label text{text-anchor:middle;}#my-svg .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#my-svg .node .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .arrowheadPath{fill:#333333;}#my-svg .edgePath .path{stroke:#666;stroke-width:2.0px;}#my-svg .flowchart-link{stroke:#666;fill:none;}#my-svg .edgeLabel{background-color:white;text-align:center;}#my-svg .edgeLabel rect{opacity:0.5;background-color:white;fill:white;}#my-svg .labelBkg{background-color:rgba(255, 255, 255, 0.5);}#my-svg .cluster rect{fill:hsl(0, 0%, 98.9215686275%);stroke:#707070;stroke-width:1px;}#my-svg .cluster text{fill:#333;}#my-svg .cluster span,#my-svg p{color:#333;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(-160, 0%, 93.3333333333%);border:1px solid #707070;border-radius:2px;pointer-events:none;z-index:100;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#000000;}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}#my-svg .src&gt;*{fill:rgb(165, 216, 255)!important;stroke:rgb(25, 113, 194)!important;stroke-width:1.5px!important;color:rgb(11, 61, 107)!important;}#my-svg .src span{fill:rgb(165, 216, 255)!important;stroke:rgb(25, 113, 194)!important;stroke-width:1.5px!important;color:rgb(11, 61, 107)!important;}#my-svg .src tspan{fill:rgb(11, 61, 107)!important;}#my-svg .cfg&gt;*{fill:rgb(229, 219, 255)!important;stroke:rgb(112, 72, 232)!important;stroke-width:1.5px!important;color:rgb(59, 42, 122)!important;}#my-svg .cfg span{fill:rgb(229, 219, 255)!important;stroke:rgb(112, 72, 232)!important;stroke-width:1.5px!important;color:rgb(59, 42, 122)!important;}#my-svg .cfg tspan{fill:rgb(59, 42, 122)!important;}#my-svg .art&gt;*{fill:rgb(195, 250, 232)!important;stroke:rgb(12, 166, 120)!important;stroke-width:1.5px!important;color:rgb(11, 79, 63)!important;}#my-svg .art span{fill:rgb(195, 250, 232)!important;stroke:rgb(12, 166, 120)!important;stroke-width:1.5px!important;color:rgb(11, 79, 63)!important;}#my-svg .art tspan{fill:rgb(11, 79, 63)!important;}#my-svg .nd&gt;*{fill:rgb(255, 255, 255)!important;stroke:rgb(87, 96, 106)!important;stroke-width:1.5px!important;color:rgb(31, 35, 40)!important;}#my-svg .nd span{fill:rgb(255, 255, 255)!important;stroke:rgb(87, 96, 106)!important;stroke-width:1.5px!important;color:rgb(31, 35, 40)!important;}#my-svg .nd tspan{fill:rgb(31, 35, 40)!important;}#my-svg .data&gt;*{fill:rgb(241, 243, 245)!important;stroke:rgb(173, 181, 189)!important;stroke-width:1px!important;color:rgb(52, 58, 64)!important;}#my-svg .data span{fill:rgb(241, 243, 245)!important;stroke:rgb(173, 181, 189)!important;stroke-width:1px!important;color:rgb(52, 58, 64)!important;}#my-svg .data tspan{fill:rgb(52, 58, 64)!important;}#my-svg .mem&gt;*{fill:rgb(255, 255, 255)!important;stroke:rgb(173, 181, 189)!important;stroke-width:1px!important;stroke-dasharray:5,3!important;color:rgb(106, 115, 125)!important;}#my-svg .mem span{fill:rgb(255, 255, 255)!important;stroke:rgb(173, 181, 189)!important;stroke-width:1px!important;stroke-dasharray:5,3!important;color:rgb(106, 115, 125)!important;}#my-svg .mem tspan{fill:rgb(106, 115, 125)!important;}#my-svg .out&gt;*{fill:rgb(178, 242, 187)!important;stroke:rgb(47, 158, 68)!important;stroke-width:1.5px!important;color:rgb(20, 83, 45)!important;}#my-svg .out span{fill:rgb(178, 242, 187)!important;stroke:rgb(47, 158, 68)!important;stroke-width:1.5px!important;color:rgb(20, 83, 45)!important;}#my-svg .out tspan{fill:rgb(20, 83, 45)!important;}#my-svg .gt&gt;*{fill:rgb(255, 236, 153)!important;stroke:rgb(240, 140, 0)!important;stroke-width:1.5px!important;color:rgb(122, 74, 0)!important;}#my-svg .gt span{fill:rgb(255, 236, 153)!important;stroke:rgb(240, 140, 0)!important;stroke-width:1.5px!important;color:rgb(122, 74, 0)!important;}#my-svg .gt tspan{fill:rgb(122, 74, 0)!important;}#my-svg .abort&gt;*{fill:rgb(255, 227, 227)!important;stroke:rgb(224, 49, 49)!important;stroke-width:1.5px!important;stroke-dasharray:5,3!important;color:rgb(140, 28, 28)!important;}#my-svg .abort span{fill:rgb(255, 227, 227)!important;stroke:rgb(224, 49, 49)!important;stroke-width:1.5px!important;stroke-dasharray:5,3!important;color:rgb(140, 28, 28)!important;}#my-svg .abort tspan{fill:rgb(140, 28, 28)!important;}</style><g><marker id="my-svg_flowchart-pointEnd" class="marker flowchart" viewBox="0 0 10 10" refX="6" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-pointStart" class="marker flowchart" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-circleEnd" class="marker flowchart" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-circleStart" class="marker flowchart" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-crossEnd" class="marker cross flowchart" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-crossStart" class="marker cross flowchart" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"><g class="cluster default flowchart-label" id="SRC"><rect style="" rx="0" ry="0" x="145.5390625" y="0" width="798.46875" height="153.4169158935547"/><g class="cluster-label" transform="translate(472.7734375, 0)"><foreignObject width="144" height="22"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">評分母體的三個來源</span></div></foreignObject></g></g></g><g class="edgePaths"><path d="M174.441,267.917L169.624,277.334C164.807,286.75,155.173,305.584,150.43,322.034C145.687,338.484,145.835,352.55,145.909,359.584L145.983,366.617" id="L-art_model-art_prep-0" class="edge-thickness-normal edge-pattern-dotted flowchart-link LS-art_model LE-art_prep" style="fill:none;stroke-width:2px;stroke-dasharray:3;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M301.266,128.417L301.266,132.584C301.266,136.75,301.266,145.084,301.266,153.417C301.266,161.75,301.266,170.084,322.563,179.18C343.86,188.277,386.454,198.138,407.751,203.068L429.047,207.998" id="L-src_pop-n_build-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-src_pop LE-n_build" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M569.086,126.523L569.086,131.005C569.086,135.487,569.086,144.452,569.086,153.101C569.086,161.75,569.086,170.084,569.086,177.534C569.086,184.984,569.086,191.55,569.086,194.834L569.086,198.117" id="L-src_ft-n_build-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-src_ft LE-n_build" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M813.094,104.208L813.01,112.41C812.927,120.611,812.76,137.014,812.677,149.382C812.594,161.75,812.594,170.084,795.344,178.642C778.095,187.201,743.596,195.985,726.347,200.376L709.097,204.768" id="L-cfg_prod-n_build-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-cfg_prod LE-n_build" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M569.086,277.417L569.086,285.25C569.086,293.084,569.086,308.75,569.086,325.117C569.086,341.484,569.086,358.55,569.086,367.084L569.086,375.617" id="L-n_build-d_scoring-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-n_build LE-d_scoring" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M530.899,414.917L517.983,420.667C505.067,426.417,479.235,437.917,440.135,448.089C401.036,458.262,348.67,467.107,322.487,471.529L296.304,475.952" id="L-d_scoring-n_apply-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_scoring LE-n_apply" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M146.039,424.917L145.956,429C145.872,433.084,145.706,441.25,145.622,448.617C145.539,455.984,145.539,462.55,145.539,465.834L145.539,469.117" id="L-art_prep-n_apply-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-art_prep LE-n_apply" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M145.539,528.417L145.539,534.417C145.539,540.417,145.539,552.417,145.539,563.534C145.539,574.65,145.539,584.884,145.539,590L145.539,595.117" id="L-n_apply-d_xscore-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-n_apply LE-d_xscore" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M145.539,634.417L145.539,638.584C145.539,642.75,145.539,651.084,155.304,659.093C165.069,667.103,184.599,674.79,194.364,678.633L204.129,682.476" id="L-d_xscore-n_predict-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_xscore LE-n_predict" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M241.515,267.917L260.299,277.334C279.082,286.75,316.648,305.584,335.432,327.25C354.215,348.917,354.215,373.417,354.215,394.25C354.215,415.084,354.215,432.25,354.215,449.5C354.215,466.75,354.215,484.084,354.215,503.25C354.215,522.417,354.215,543.417,354.215,562.75C354.215,582.084,354.215,599.75,354.215,615.584C354.215,631.417,354.215,645.417,348.812,656.087C343.408,666.758,332.602,674.098,327.199,677.768L321.796,681.439" id="L-art_model-n_predict-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-art_model LE-n_predict" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M558.571,414.917L555.014,420.667C551.457,426.417,544.344,437.917,540.787,452.334C537.23,466.75,537.23,484.084,537.23,503.25C537.23,522.417,537.23,543.417,537.23,562.75C537.23,582.084,537.23,599.75,537.23,615.584C537.23,631.417,537.23,645.417,517.298,656.41C497.366,667.403,457.501,675.39,437.568,679.383L417.636,683.376" id="L-d_scoring-n_predict-0" class="edge-thickness-normal edge-pattern-dotted flowchart-link LS-d_scoring LE-n_predict" style="fill:none;stroke-width:2px;stroke-dasharray:3;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M277.664,738.417L277.664,746C277.664,753.584,277.664,768.75,277.664,783.034C277.664,797.317,277.664,810.717,277.664,817.417L277.664,824.117" id="L-n_predict-d_score-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-n_predict LE-d_score" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M277.664,863.417L277.664,871.25C277.664,879.084,277.664,894.75,277.664,909.534C277.664,924.317,277.664,938.217,277.664,945.167L277.664,952.117" id="L-d_score-n_rank-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_score LE-n_rank" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M277.664,1011.417L277.664,1015.584C277.664,1019.75,277.664,1028.084,277.664,1035.534C277.664,1042.984,277.664,1049.55,277.664,1052.834L277.664,1056.117" id="L-n_rank-d_staging-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-n_rank LE-d_staging" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M277.664,1095.417L277.664,1101.417C277.664,1107.417,277.664,1119.417,293.103,1131.191C308.541,1142.965,339.419,1154.513,354.857,1160.286L370.296,1166.06" id="L-d_staging-gate-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_staging LE-gate" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M582.29,414.917L586.756,420.667C591.222,426.417,600.154,437.917,604.62,452.334C609.086,466.75,609.086,484.084,609.086,503.25C609.086,522.417,609.086,543.417,609.086,562.75C609.086,582.084,609.086,599.75,609.086,615.584C609.086,631.417,609.086,645.417,609.086,661.084C609.086,676.75,609.086,694.084,609.086,714.834C609.086,735.584,609.086,759.75,609.086,782.25C609.086,804.75,609.086,825.584,609.086,846.667C609.086,867.75,609.086,889.084,609.086,912.084C609.086,935.084,609.086,959.75,609.086,980.75C609.086,1001.75,609.086,1019.084,609.086,1034.75C609.086,1050.417,609.086,1064.417,609.086,1080.25C609.086,1096.084,609.086,1113.75,594.609,1128.341C580.132,1142.931,551.177,1154.445,536.7,1160.202L522.223,1165.959" id="L-d_scoring-gate-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_scoring LE-gate" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M385.005,1221.917L370.905,1227.834C356.804,1233.75,328.603,1245.584,314.503,1260.2C300.402,1274.817,300.402,1292.217,300.402,1300.917L300.402,1309.617" id="L-gate-d_validated-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-gate LE-d_validated" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M511.159,1221.917L525.093,1227.834C539.027,1233.75,566.894,1245.584,580.899,1256.7C594.904,1267.817,595.047,1278.217,595.118,1283.417L595.189,1288.617" id="L-gate-x_abort-0" class="edge-thickness-normal edge-pattern-dotted flowchart-link LS-gate LE-x_abort" style="fill:none;stroke-width:2px;stroke-dasharray:3;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M300.402,1348.917L300.402,1356.667C300.402,1364.417,300.402,1379.917,300.402,1390.95C300.402,1401.984,300.402,1408.55,300.402,1411.834L300.402,1415.117" id="L-d_validated-n_publish-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-d_validated LE-n_publish" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/><path d="M300.402,1474.417L300.402,1478.584C300.402,1482.75,300.402,1491.084,300.402,1498.534C300.402,1505.984,300.402,1512.55,300.402,1515.834L300.402,1519.117" id="L-n_publish-o_ranked-0" class="edge-thickness-normal edge-pattern-solid flowchart-link LS-n_publish LE-o_ranked" style="fill:none;" marker-end="url(#my-svg_flowchart-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(145.5390625, 324.4169158935547)"><g class="label" transform="translate(-129.0859375, -22)"><foreignObject width="258.171875" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">manifest 回溯 base_dataset_version<br />（模型決定配哪份前處理）</span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(537.23046875, 564.4169158935547)"><g class="label" transform="translate(-40, -11)"><foreignObject width="80" height="22"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">宣告未使用</span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(277.6640625, 910.4169158935547)"><g class="label" transform="translate(-151.2109375, -22)"><foreignObject width="302.421875" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">全表讀回<br />節點自行過濾 model_version × snap_dates</span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(277.6640625, 1131.4169158935547)"><g class="label" transform="translate(-64, -11)"><foreignObject width="128" height="22"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">全表讀回（同上）</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(609.0859375, 783.9169158935547)"><g class="label" transform="translate(-64.265625, -20.5)"><foreignObject width="128.53125" height="41"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">對照列數<br />row_count_match</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(300.40234375, 1257.4169158935547)"><g class="label" transform="translate(-15.140625, -9.5)"><foreignObject width="30.28125" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">pass</span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(594.76171875, 1257.4169158935547)"><g class="label" transform="translate(-93.0078125, -11)"><foreignObject width="186.015625" height="22"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel">fail：raise ValidationError</span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default src flowchart-label" id="flowchart-src_pop-0" data-node="true" data-id="src_pop" transform="translate(301.265625, 76.70845794677734)"><path style="" d="M 0,16.472306314757173 a 120.7265625,16.472306314757173 0,0,0 241.453125 0 a 120.7265625,16.472306314757173 0,0,0 -241.453125 0 l 0,70.47230631475718 a 120.7265625,16.472306314757173 0,0,0 241.453125 0 l 0,-70.47230631475718" transform="translate(-120.7265625,-51.70845947213576)"/><g class="label" style="" transform="translate(-113.2265625, -19.5)"><rect/><foreignObject width="226.453125" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">inference_population<br /><small>read_only ・ grain (time, entity) 唯一</small></span></div></foreignObject></g></g><g class="node default src flowchart-label" id="flowchart-src_ft-1" data-node="true" data-id="src_ft" transform="translate(569.0859375, 76.70845794677734)"><path style="" d="M 0,15.209516350107695 a 97.09375,15.209516350107695 0,0,0 194.1875 0 a 97.09375,15.209516350107695 0,0,0 -194.1875 0 l 0,69.20951635010769 a 97.09375,15.209516350107695 0,0,0 194.1875 0 l 0,-69.20951635010769" transform="translate(-97.09375,-49.81427452516154)"/><g class="label" style="" transform="translate(-89.59375, -19.5)"><rect/><foreignObject width="179.1875" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">feature_table<br /><small>read_only ・ 只作 enrichment</small></span></div></foreignObject></g></g><g class="node default cfg flowchart-label" id="flowchart-cfg_prod-2" data-node="true" data-id="cfg_prod" transform="translate(812.59375, 76.70845794677734)"><polygon points="-18,0 147.828125,0 174.828125,-54 9,-54" class="label-container" transform="translate(-78.4140625,27)" style=""/><g class="label" style="" transform="translate(-70.9140625, -19.5)"><rect/><foreignObject width="141.828125" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">inference.products<br /><small>config 值 → 造成資料列</small></span></div></foreignObject></g></g><g class="node default art flowchart-label" id="flowchart-art_model-3" data-node="true" data-id="art_model" transform="translate(187.39453125, 240.4169158935547)"><polygon points="0,0 293.921875,0 293.921875,-54 0,-54 0,0 -8,0 301.921875,0 301.921875,-54 -8,-54 -8,0" class="label-container" transform="translate(-146.9609375,27)" style=""/><g class="label" style="" transform="translate(-139.4609375, -19.5)"><rect/><foreignObject width="278.921875" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">model<br /><small>data/models/best　★人工 promote_model.py</small></span></div></foreignObject></g></g><g class="node default art flowchart-label" id="flowchart-art_prep-4" data-node="true" data-id="art_prep" transform="translate(145.5390625, 397.9169158935547)"><polygon points="0,0 249.703125,0 249.703125,-53 0,-53 0,0 -8,0 257.703125,0 257.703125,-53 -8,-53 -8,0" class="label-container" transform="translate(-124.8515625,26.5)" style=""/><g class="label" style="" transform="translate(-117.3515625, -19)"><rect/><foreignObject width="234.703125" height="38"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">preprocessor<br /><small>data/dataset/&lt;base_dataset_version&gt;/</small></span></div></foreignObject></g></g><g class="node default nd flowchart-label" id="flowchart-n_build-7" data-node="true" data-id="n_build" transform="translate(569.0859375, 240.4169158935547)"><rect class="basic label-container" style="" rx="0" ry="0" x="-134.875" y="-37" width="269.75" height="74"/><g class="label" style="" transform="translate(-127.375, -29.5)"><rect/><foreignObject width="254.75" height="59"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">build_scoring_dataset<br /><small>母體 (time, entity) × products ・ crossJoin<br />缺特徵者保留，標 feature_present</small></span></div></foreignObject></g></g><g class="node default mem flowchart-label" id="flowchart-d_scoring-8" data-node="true" data-id="d_scoring" transform="translate(569.0859375, 397.9169158935547)"><rect style="" rx="17" ry="17" x="-68.0234375" y="-17" width="136.046875" height="34"/><g class="label" style="" transform="translate(-56.2734375, -9.5)"><rect/><foreignObject width="112.546875" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">scoring_dataset</span></div></foreignObject></g></g><g class="node default nd flowchart-label" id="flowchart-n_apply-9" data-node="true" data-id="n_apply" transform="translate(145.5390625, 501.4169158935547)"><rect class="basic label-container" style="" rx="0" ry="0" x="-145.5390625" y="-27" width="291.078125" height="54"/><g class="label" style="" transform="translate(-138.0390625, -19.5)"><rect/><foreignObject width="276.078125" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">apply_preprocessor<br /><small>套訓練時的編碼與欄位選取 ・ 保留 identity 欄</small></span></div></foreignObject></g></g><g class="node default mem flowchart-label" id="flowchart-d_xscore-10" data-node="true" data-id="d_xscore" transform="translate(145.5390625, 617.4169158935547)"><rect style="" rx="17" ry="17" x="-39.3671875" y="-17" width="78.734375" height="34"/><g class="label" style="" transform="translate(-27.6171875, -9.5)"><rect/><foreignObject width="55.234375" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">X_score</span></div></foreignObject></g></g><g class="node default nd flowchart-label" id="flowchart-n_predict-11" data-node="true" data-id="n_predict" transform="translate(277.6640625, 711.4169158935547)"><rect class="basic label-container" style="" rx="0" ry="0" x="-147.3515625" y="-27" width="294.703125" height="54"/><g class="label" style="" transform="translate(-139.8515625, -19.5)"><rect/><foreignObject width="279.703125" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">predict_scores<br /><small>按 (time, item) 分批 toPandas ・ driver 端合併</small></span></div></foreignObject></g></g><g class="node default data flowchart-label" id="flowchart-d_score-12" data-node="true" data-id="d_score" transform="translate(277.6640625, 846.4169158935547)"><rect style="" rx="17" ry="17" x="-53.46875" y="-17" width="106.9375" height="34"/><g class="label" style="" transform="translate(-41.71875, -9.5)"><rect/><foreignObject width="83.4375" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">score_table</span></div></foreignObject></g></g><g class="node default nd flowchart-label" id="flowchart-n_rank-13" data-node="true" data-id="n_rank" transform="translate(277.6640625, 984.4169158935547)"><rect class="basic label-container" style="" rx="0" ry="0" x="-147.7421875" y="-27" width="295.484375" height="54"/><g class="label" style="" transform="translate(-140.2421875, -19.5)"><rect/><foreignObject width="280.484375" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">rank_predictions<br /><small>(time, entity) 組內依 score 遞減 row_number()</small></span></div></foreignObject></g></g><g class="node default data flowchart-label" id="flowchart-d_staging-14" data-node="true" data-id="d_staging" transform="translate(277.6640625, 1078.4169158935547)"><rect style="" rx="17" ry="17" x="-65.78125" y="-17" width="131.5625" height="34"/><g class="label" style="" transform="translate(-54.03125, -9.5)"><rect/><foreignObject width="108.0625" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">ranked_staging</span></div></foreignObject></g></g><g class="node default gt flowchart-label" id="flowchart-gate-15" data-node="true" data-id="gate" transform="translate(447.58203125, 1194.4169158935547)"><polygon points="13.5,0 325.34375,0 338.84375,-27 325.34375,-54 13.5,-54 0,-27" class="label-container" transform="translate(-169.421875,27)" style=""/><g class="label" style="" transform="translate(-148.421875, -19.5)"><rect/><foreignObject width="296.84375" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">validate_predictions<br /><small>6 項 sanity check ・ 不轉換資料，只決定放不放行</small></span></div></foreignObject></g></g><g class="node default mem flowchart-label" id="flowchart-d_validated-16" data-node="true" data-id="d_validated" transform="translate(300.40234375, 1331.9169158935547)"><rect style="" rx="17" ry="17" x="-89.34375" y="-17" width="178.6875" height="34"/><g class="label" style="" transform="translate(-77.59375, -9.5)"><rect/><foreignObject width="155.1875" height="19"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">validated_predictions</span></div></foreignObject></g></g><g class="node default nd flowchart-label" id="flowchart-n_publish-17" data-node="true" data-id="n_publish" transform="translate(300.40234375, 1447.4169158935547)"><rect class="basic label-container" style="" rx="0" ry="0" x="-150.7734375" y="-27" width="301.546875" height="54"/><g class="label" style="" transform="translate(-143.2734375, -19.5)"><rect/><foreignObject width="286.546875" height="39"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">publish_predictions<br /><small>函式是 identity；production 寫入＝catalog save</small></span></div></foreignObject></g></g><g class="node default out flowchart-label" id="flowchart-o_ranked-18" data-node="true" data-id="o_ranked" transform="translate(300.40234375, 1542.9169158935547)"><rect style="" rx="18.5" ry="18.5" x="-135.609375" y="-18.5" width="271.21875" height="37"/><g class="label" style="" transform="translate(-123.484375, -11)"><rect/><foreignObject width="246.96875" height="22"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">ranked_predictions　★production</span></div></foreignObject></g></g><g class="node default abort flowchart-label" id="flowchart-x_abort-19" data-node="true" data-id="x_abort" transform="translate(594.76171875, 1331.9169158935547)"><polygon points="-38.5,0 233.03125,0 233.03125,-77 -38.5,-77 0,-38.5" class="label-container" transform="translate(-116.515625,38.5)" style=""/><g class="label" style="" transform="translate(-109.015625, -31)"><rect/><foreignObject width="218.03125" height="62"><div xmlns="http://www.w3.org/1999/xhtml" style="display: inline-block; white-space: nowrap;"><span class="nodeLabel">整批中止<br /><small>production 未被觸碰<br />失敗批次留在 ranked_staging 供排查</small></span></div></foreignObject></g></g></g></g></g></svg>
+</div>
+<p class="cap">來源：<code>docs/diagrams/inference-pipeline.mmd</code>。node 順序以 <code>pipeline.py</code> 的插入順序為準。</p>
+
+<h2>三件圖上看得到、只讀程式碼容易漏掉的事</h2>
+
+<h3>1. node 之間不是傳 DataFrame，是走 Hive round-trip</h3>
+<p class="sub">runner 對每個 input 都呼叫 <code>catalog.load()</code>（<code>core/runner.py:87</code>）。
+<code>score_table</code> 與 <code>ranked_staging</code> 是 Hive managed table，而且 catalog 條目<b>沒有設
+<code>partition_filter</code></b>（對照組：<code>enriched_eval_predictions</code> 有），所以讀回來的是
+<b>含歷史 partition 的全表</b>——別的 <code>model_version</code>、別的日期都在裡面。
+這就是 <code>rank_predictions</code> 與 <code>validate_predictions</code> 都先呼叫
+<code>_filter_current_inference_scope</code> 的理由：把資料限縮回本次的
+<code>model_version × inference.snap_dates</code>。圖上標「全表讀回」的那兩條邊就是這件事。</p>
+
+<h3>2. <code>ranked_staging</code> 存在的唯一理由是失敗路徑</h3>
+<p class="sub">驗證失敗時 <code>validate_predictions</code> 直接 <code>raise ValidationError</code>，整批中止：
+production 的 <code>ranked_predictions</code> 完全不被觸碰，失敗批次留在 staging 供事後排查。
+<code>publish_predictions</code> 的函式體只有一行 <code>return validated_predictions</code>——
+真正的 production 寫入是 catalog 對這個 node 輸出做的 save。
+把紅色那條路徑遮掉，staging → validate → publish 會被讀成三個沒必要的步驟。</p>
+
+<h3>3. 模型決定了配哪份前處理，而模型由人決定</h3>
+<p class="sub">inference 預設解析 <code>data/models/best</code> symlink（<code>core/versioning.py:301</code>），
+該 symlink 只能由使用者跑 <code>scripts/promote_model.py</code> 設定——這是整條 pipeline 唯一的人工介入點。
+選中的模型再從自己的 manifest 回溯 <code>base_dataset_version</code>，決定要載
+<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code>。
+所以 <code>model</code> 與 <code>preprocessor</code> <b>不是兩個獨立輸入</b>；圖上那條點線就是這個相依。
+manifest 缺欄時 CLI 會 warning 並 fallback 到 dataset 的 <code>latest</code>——
+那是舊產物相容機制，不是正式流程（見 <a href="../pipelines/inference.md">inference.md</a> §2）。</p>
+
+<h2>節點對照表</h2>
+<p class="sub">每個 node 都額外吃 <code>parameters</code>，下表省略。輸入輸出一律寫 <b>catalog 名</b>，
+不是函式的參數名——兩者有一處不一致，見備註。</p>
+<table class="nodes">
+  <thead>
+    <tr><th>node name（＝函式名）</th><th>inputs</th><th>outputs</th><th>備註</th></tr>
+  </thead>
+  <tbody>
+    <tr class="stage"><td colspan="4">建評分母體</td></tr>
+    <tr>
+      <td>build_scoring_dataset</td>
+      <td>inference_population, feature_table<br>＋ <i>config</i> inference.products</td>
+      <td>scoring_dataset<br><i>（MemoryDataset）</i></td>
+      <td>母體 <code>(time, entity)</code> 與 products 做 crossJoin；<code>feature_table</code> 只作 left-join enrichment。
+          缺特徵的母體成員<b>保留</b>並標 <code>feature_present=false</code>，覆蓋率只寫 log。
+          任一 <code>snap_dates</code> 在母體中完全缺席即 fail-fast。</td>
+    </tr>
+    <tr>
+      <td>apply_preprocessor</td>
+      <td>scoring_dataset, preprocessor</td>
+      <td>X_score<br><i>（MemoryDataset）</i></td>
+      <td>讀 <code>PreprocessorMetadata</code> 四個鍵套訓練時的編碼，只碰 <code>parameters</code> 拿 schema。
+          輸出 = identity 欄 ＋ feature 欄，float-like 欄轉 float32。</td>
+    </tr>
+    <tr class="stage"><td colspan="4">評分與排名</td></tr>
+    <tr>
+      <td>predict_scores</td>
+      <td>model, X_score, <s>scoring_dataset</s></td>
+      <td>score_table<br><i>（Hive，落地）</i></td>
+      <td><span class="warn">宣告未使用</span> <code>pipeline.py:31</code> 宣告吃 <code>scoring_dataset</code>，
+          但函式體從頭到尾沒讀它（AST 查證）。拓樸順序本來就由 <code>X_score</code> 保證，記憶體釋放時機由
+          <code>validate_predictions</code> 決定，所以不影響行為。<br>
+          按 <code>(time, item)</code> 分批 <code>toPandas()</code> 評分，最後在 <b>driver</b> 上
+          <code>pd.concat</code> 再轉回 Spark——這是全程唯一離開分散式執行的地方，容量要照
+          entity 數 × 日期數 × item 數估。</td>
+    </tr>
+    <tr>
+      <td>rank_predictions</td>
+      <td>score_table <i>（全表讀回）</i></td>
+      <td>ranked_staging<br><i>（Hive，落地）</i></td>
+      <td>先 <code>_filter_current_inference_scope</code> 限縮本次 scope，再用
+          <code>row_number()</code> 在 <code>(time, entity)</code> 組內依 score 遞減編名次。</td>
+    </tr>
+    <tr class="stage"><td colspan="4">發布閘</td></tr>
+    <tr>
+      <td>validate_predictions</td>
+      <td>ranked_staging <i>（全表讀回）</i>, scoring_dataset</td>
+      <td>validated_predictions<br><i>（MemoryDataset）</i></td>
+      <td><span class="warn">參數名不符</span> 函式第一個參數<b>叫</b> <code>ranked_predictions</code>，
+          但 <code>pipeline.py:41</code> 餵進去的是 <code>ranked_staging</code>；圖與本表一律用 catalog 名。<br>
+          六項 check：<code>row_count_match</code>（對照 <code>scoring_dataset</code> 列數）、
+          <code>score_range</code>（固定要求 <code>[0, 1]</code>）、<code>no_missing</code>、
+          <code>completeness</code>（每組恰好 <code>len(products)</code> 筆）、
+          <code>rank_consistency</code>、<code>no_duplicates</code>。任一項失敗即 <code>raise</code>，
+          回傳值就是輸入本身。</td>
+    </tr>
+    <tr>
+      <td>publish_predictions</td>
+      <td>validated_predictions</td>
+      <td>ranked_predictions<br><i>（Hive，production）</i></td>
+      <td>函式體是 identity；production 寫入是 catalog 對這個輸出做的 save。
+          走到這裡代表閘已通過，所以這是整條 pipeline <b>唯一一次</b> production 寫入。</td>
+    </tr>
+  </tbody>
+</table>
+<p class="sub">實際執行序由 runner 依相依性決定（<code>--list-nodes</code> 可印出這次會跑哪些）。
+三張 Hive 表都採 dynamic partition overwrite，partition 為
+<code>snap_date × prod_name × model_version</code>。</p>
+
+<h2>怎麼改這張圖</h2>
+<p class="sub">圖的真實來源是 <code>docs/diagrams/inference-pipeline.mmd</code>（Mermaid，純文字）。
+這頁內嵌的是它渲染出來的 SVG——<b>改圖請改 .mmd，不要直接動這頁的 SVG</b>，否則兩邊會分岔。</p>
+<pre class="sh"><span class="c"># 1. 編輯源檔</span>
+vim docs/diagrams/inference-pipeline.mmd
+
+<span class="c"># 2. 重新渲染（用系統 Chrome，不另外下載 chromium）</span>
+cd docs/diagrams
+PUPPETEER_SKIP_DOWNLOAD=1 \
+PUPPETEER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+npx -y @mermaid-js/mermaid-cli@10 -t neutral \
+  -i inference-pipeline.mmd -o inference-pipeline.svg -b transparent
+
+<span class="c"># 3. 把產出的 SVG 內容貼回這頁 &lt;div class="plate"&gt; 之間</span>
+<span class="c">#    （width 改成 viewBox 的實際寬度、max-width 改 none，文字才不會被縮小）</span>
+</pre>
+<div class="note">
+兩個實測過的坑：<b>(1)</b> <code>.mmd</code> 裡不要留「只有 <code>%%</code>、後面沒有字」的空註解行——
+mermaid 不會把它當註解剝掉，會黏成 <code>%%flowchart</code> 然後報 parse error 在第 1 行，很難聯想；要空行就用真正的空行。
+<b>(2)</b> 用 <code>mermaid-cli@10</code> 不要用 <code>@11</code>：v11 的新 renderer 改用 rough.js 畫形狀，
+同一張圖會從幾十 KB 灌到數百 KB。
+</div>
+<div class="note">
+<b>版面上的一個取捨</b>：<code>model</code> 與 <code>preprocessor</code> 刻意<b>不</b>包進 subgraph。
+包起來 dagre 會把整個 cluster 當一個整體擺到側邊，主鏈會被拉成右→左→中的鋸齒；
+讓這兩個節點自由落在各自消費者的上方，主鏈才是一條可以一路讀下來的直線。
+</div>
+<p class="sub">不想裝工具的話：把 .mmd 全文貼到 <a href="https://mermaid.live">mermaid.live</a>，
+或貼進任何 <code>.md</code> 的 <code>```mermaid</code> 區塊讓 GitHub 直接渲染。</p>
+
+</body>
+</html>

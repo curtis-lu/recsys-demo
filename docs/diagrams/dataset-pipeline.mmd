@@ -2,22 +2,56 @@
 %% ===========================================================================
 %% dataset pipeline node graph
 %% 唯一真實來源：src/recsys_tfb/pipelines/dataset/pipeline.py::create_pipeline
+%% 姊妹圖：inference-pipeline.mmd（同一套圖例）
 
 %% 圖例
-%%   [( 圓柱 )]  來源表（catalog 外部輸入）
-%%   [ 方框 ]    node，框內是 node name（可直接餵給 --from-node / --only-node）
-%%   ([ 膠囊 ])  dataset（node 的輸出，catalog 條目）
-%%   {{ 六角 }}  side-effect only 的閘（outputs=None）
-%%   [A][B][C]  接點記號：build node 框內的「+ A · B · C」代表它同時吃這三個
-%%              輸入。三個輸入各連四個 build node ＝ 12 條橫貫線，改用接點記號
-%%              表示，lineage 一條不少但圖不打結。
+%%   [( 圓柱 )]     來源表（catalog 外部輸入）
+%%   [/ 斜角 /]     不是表的輸入：run 前就決定好、注入 catalog 的值。
+%%                  本圖是 *_month_plan（見下）；inference 圖是 inference.products。
+%%   [ 方框 ]       node，框內是 node name（可直接餵給 --from-node / --only-node）
+%%   ([ 實線膠囊 ])  落地的 catalog 條目（Hive table / JSON 檔）
+%%   ([ 虛線膠囊 ])  MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
+%%   ([ 綠膠囊 ])    別的 pipeline 會吃的產物
+%%   {{ 六角 }}     閘：不轉換資料，只決定放不放行（本圖這個閘 outputs=None；
+%%                  inference-pipeline.mmd 的閘有回傳值，但回傳的就是輸入本身）
+%%   [A][B][C][P]   接點記號：node 框內的「+ A · B · C」代表它同時吃這幾個輸入。
+%%                  A/B/C 各連四個 build node ＝ 12 條橫貫線，P 再連三個跨 subgraph
+%%                  的 node；改用接點記號，lineage 一條不少但圖不打結。
+%%   「跨月讀回」    這條邊讀回來的不只是這次寫的月份（見下）。inference 圖用同一種
+%%                  邊標記，但那邊連 model_version 都會讀回來，成因不同。
+
+%% 「增量」是怎麼來的：月份計畫
+%%   三個標「增量」的 node 之所以只處理部分月份，是因為它們各吃一個
+%%   *_month_plan 輸入。這些 plan 由 __main__.py:782 的 build_month_plans() 在
+%%   run 開始前一次算好（比對設定的月份 vs Hive 裡已落地的月份），再注入 catalog
+%%   （__main__.py:816）。一次算好是為了讓共用同一份 artifact 的 node 不可能對
+%%   「這次涵蓋哪些月份」有不同看法。
+%%   它們是 pipeline.py 宣告的真實 inputs，不是設定值——舊版這張圖漏畫了這三條邊。
+
+%% 為什麼 test_keys → build_test_model_input 要標「跨月讀回」
+%%   test_keys 的 catalog 條目只有 partition_filter: base_dataset_version，
+%%   沒有鎖月份，所以讀回來是**同一個 base version 底下的所有月份**——即使
+%%   select_test_keys 這次只寫了新的那個月（dynamic partition overwrite）。
+%%   build_test_model_input 因此必須自己再過濾一次 month_plan.to_process，
+%%   否則下游 join 會把每個月都重建一遍，正好是 ADR-0002 要消掉的 ∝N 成本。
+%%   train / val / calibration 讀的 keys 是這次 run 自己寫的，沒有這個問題，
+%%   所以它們共用 build_model_input，只有 test 有自己的 wrapper node。
+
+%% 落地與否為什麼要分開畫
+%%   圖上十四個產出裡只有兩個不落地（開 calibration 是十六個）：val_model_input_unfiltered 與
+%%   test_model_input_unfiltered。零正例 query group 會被 ranking metric 排除，
+%%   留著只是浪費 Hive 儲存與下游記憶體，所以只有 filter 過的版本落地。
+%%   圖上實線／虛線膠囊就是這件事。
 
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
+%%     *_month_plan 不屬於這一類——它是 pipeline.py 宣告的 input，是真實的邊。
 %%   - calibration 分支（enable_calibration: true 才存在）。
 %%   - 函式名：四個 build node 共用 build_model_input、filter_val_model_input
 %%     的函式是 filter_groups_with_positives、select_sample_keys 的函式是
 %%     select_train_keys。圖上一律用 node name。
+%%   - AST 掃過，本 pipeline 的 node 沒有「宣告了但函式沒讀」的參數
+%%     （inference 圖上那種虛線邊，這裡沒有對應物）。
 
 %% 編輯方式：改這個檔，然後重新渲染成 SVG 貼回 dataset-pipeline.html。
 %%   - 線上：https://mermaid.live 貼上全文 → Actions → SVG
@@ -43,8 +77,14 @@ flowchart LR
     label_table[("label_table　<b>[B]</b>")]
   end
 
+  %% ------------------ run 前注入的非表輸入 -----------------------
+  subgraph PLAN[" run 前算好、注入 catalog "]
+    direction TB
+    plan[/"月份計畫　<b>[P]</b><br/><small>test_keys_month_plan<br/>preprocessed_feature_table_month_plan<br/>test_model_input_month_plan</small>"/]
+  end
+
   %% ------------------------ 資料閘（Layer-2）---------------------
-  gate{{"validate_data_consistency<br/><small>B1 / B5 / B6 · 只做檢查不產出</small>"}}
+  gate{{"validate_data_consistency<br/><small>B1 / B5 / B6 / B7 · 只做檢查不產出</small>"}}
   sample_pool --> gate
   feature_table --> gate
   label_table --> gate
@@ -52,7 +92,7 @@ flowchart LR
   %% ------------------------- Key 選取 ---------------------------
   subgraph KEYS[" Key 選取：決定每個 split 收哪些 (time, entity, item) "]
     direction TB
-    n_sel_test["select_test_keys<br/><small>增量</small>"] --> d_test_keys(["test_keys"])
+    n_sel_test["select_test_keys<br/><small>增量 ・ ＋ P</small>"] --> d_test_keys(["test_keys"])
     n_sel_val["select_val_keys"] --> d_val_keys(["val_keys"])
     n_sel_sample["select_sample_keys"] --> d_sample_keys(["sample_keys"])
     d_sample_keys --> n_split["split_train_keys"]
@@ -67,9 +107,9 @@ flowchart LR
   %% -------------------------- 前處理 ----------------------------
   subgraph PREP[" 前處理：只用 train 月份 fit，編碼一次供所有 split 共用 "]
     direction TB
-    n_fit["fit_preprocessor_metadata"] --> d_preprocessor(["preprocessor　<b>[C]</b>"])
-    n_fit --> d_catmap(["category_mappings"])
-    n_apply["apply_preprocessor_to_features<br/><small>增量</small>"] --> d_pft(["preprocessed_feature_table　<b>[A]</b>"])
+    n_fit["fit_preprocessor_metadata"] --> d_preprocessor(["preprocessor　<b>[C]</b><br/><small>training / inference 也吃</small>"])
+    n_fit --> d_catmap(["category_mappings<br/><small>無 pipeline 消費者</small>"])
+    n_apply["apply_preprocessor_to_features<br/><small>增量 ・ ＋ P ・ 只編碼本次月份</small>"] --> d_pft(["preprocessed_feature_table　<b>[A]</b>"])
   end
 
   feature_table --> n_fit
@@ -79,7 +119,7 @@ flowchart LR
   %% ---------------------- 組裝 model input -----------------------
   subgraph BUILD[" 組裝 model input：keys ⨝ label ⨝ 編碼後 features "]
     direction TB
-    n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C</small>"] --> d_test_unf(["test_model_input_unfiltered"])
+    n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C · P<br/>test_keys 含全部月份，先過濾本次 to_process</small>"] --> d_test_unf(["test_model_input_unfiltered"])
     d_test_unf --> n_f_test["filter_test_model_input<br/><small>增量 ・ 去掉零正例</small>"]
     n_f_test --> o_test(["test_model_input"])
     n_b_val["build_val_model_input<br/><small>＋ A · B · C</small>"] --> d_val_unf(["val_model_input_unfiltered"])
@@ -89,20 +129,24 @@ flowchart LR
     n_b_train["build_train_model_input<br/><small>＋ A · B · C</small>"] --> o_train(["train_model_input"])
   end
 
-  d_test_keys --> n_b_test
+  d_test_keys -- "跨月讀回" --> n_b_test
   d_val_keys --> n_b_val
   d_train_dev_keys --> n_b_traindev
   d_train_keys --> n_b_train
 
   %% ---------------------------- 樣式 -----------------------------
   classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b
+  classDef cfg fill:#e5dbff,stroke:#7048e8,stroke-width:1.5px,color:#3b2a7a
   classDef nd fill:#ffffff,stroke:#57606a,stroke-width:1.5px,color:#1f2328
   classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
+  classDef mem fill:#ffffff,stroke:#adb5bd,stroke-width:1px,stroke-dasharray:5 3,color:#6a737d
   classDef out fill:#b2f2bb,stroke:#2f9e44,stroke-width:1.5px,color:#14532d
   classDef gt fill:#ffec99,stroke:#f08c00,stroke-width:1.5px,color:#7a4a00
 
   class sample_pool,feature_table,label_table src
+  class plan cfg
   class n_sel_sample,n_split,n_sel_val,n_sel_test,n_fit,n_apply,n_b_train,n_b_traindev,n_b_val,n_b_test,n_f_val,n_f_test nd
-  class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_preprocessor,d_catmap,d_pft,d_val_unf,d_test_unf data
-  class o_train,o_traindev,o_val,o_test out
+  class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_catmap,d_pft data
+  class d_val_unf,d_test_unf mem
+  class o_train,o_traindev,o_val,o_test,d_preprocessor out
   class gate gt
