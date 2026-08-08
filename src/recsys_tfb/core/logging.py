@@ -66,6 +66,27 @@ def get_current_context() -> Optional[RunContext]:
     return _current_context
 
 
+# Which ``extra=`` keys survive into the JSON line. This is a whitelist, and
+# the failure mode of forgetting to extend it is one-sided and quiet: the field
+# still reaches the console handler, so a terminal shows it and the JSONL file
+# — the one production reads — never has it. ``test_logging.py`` walks every
+# ``extra={...}`` literal under ``src/`` and requires this tuple to cover it.
+JSON_EXTRA_FIELDS = (
+    # Runner / node execution
+    "event", "node", "step",
+    "duration_seconds", "load_seconds", "func_seconds", "save_seconds",
+    "input_names", "output_names", "status", "error_message",
+    "exception_type", "node_count", "dataset_name", "volume",
+    # Hive writes
+    "insert_seconds", "partition_count", "new_partitions",
+    # source_etl audit / quality checks
+    "snap_date", "table_name", "passed",
+    # SparkSession lifecycle
+    "application_id", "app_name", "last_application_id",
+    "seconds_since_last_use",
+)
+
+
 class JsonFormatter(logging.Formatter):
     """Emit one JSON object per log record (JSON lines format)."""
 
@@ -85,10 +106,9 @@ class JsonFormatter(logging.Formatter):
             log_entry["run_id"] = ctx.run_id
             log_entry["pipeline"] = ctx.pipeline
 
-        # Merge extra fields attached by callers (e.g. event, node, step, duration)
-        for key in ("event", "node", "step", "duration_seconds", "input_names",
-                     "output_names", "status", "error_message",
-                     "exception_type", "node_count", "dataset_name", "volume"):
+        # Merge extra fields attached by callers, filtered by the whitelist
+        # above (see JSON_EXTRA_FIELDS for why that filter is dangerous).
+        for key in JSON_EXTRA_FIELDS:
             val = getattr(record, key, None)
             if val is not None:
                 log_entry[key] = val

@@ -13,6 +13,17 @@ Reading a node here, the decisions are the named steps; the constants and dtype
 details those steps are made of (the unknown-category sentinel, the float32
 cast) stay in the helpers. That is why these functions are longer than the
 repo's usual — a node is a sequence of decisions, not a call.
+
+``log_step`` goes only around a block that fires a Spark action. Everything
+else in this module is lazy: the joins, the filters, the column selects and the
+float32 cast all return a plan in microseconds, and the computation they
+describe runs later, inside ``catalog.save()``. Timing such a block reports a
+guaranteed ~0.00s that reads exactly like "this step was fast", and mixing the
+two kinds under one event name leaves nobody able to tell which zero means
+which. The blocks that remain wrapped are the ones that collect to the driver:
+the vocabulary fit, the unknown-encoding count, and the two month-presence
+pre-checks. Where a node's *time* actually goes is a question for the Runner's
+``load``/``func``/``save`` split (``core/runner.py``), not for this module.
 """
 
 import logging
@@ -449,8 +460,13 @@ def fit_preprocessor_metadata(
     train_months = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
 
     # Pre-check: a dataset must be reproducible from feature_table, so a train
-    # month that is not there is an error rather than a smaller fit.
-    require_months_present(feature_table, time_col, train_months, "train_snap_dates")
+    # month that is not there is an error rather than a smaller fit. Timed
+    # because it collects the time column's distinct values — one of the few
+    # blocks in this module that costs anything (see the module docstring).
+    with log_step(logger, "require_months_present(train_snap_dates)"):
+        require_months_present(
+            feature_table, time_col, train_months, "train_snap_dates",
+        )
 
     # Decision — no leakage: vocabularies are fit on the train months only. A
     # category that only ever appears in val/test therefore has no index of its
@@ -461,8 +477,7 @@ def fit_preprocessor_metadata(
     # feature_table straight from the source table, where the time column is a
     # real DATE. The normalised form is for the frames read back from Hive with
     # a string partition column — see ``scoping``.
-    with log_step(logger, "filter_train_window"):
-        train_features = restrict_to_months(feature_table, time_col, train_months)
+    train_features = restrict_to_months(feature_table, time_col, train_months)
 
     # Decision — where a vocabulary comes from: a categorical that is a
     # feature_table column has its domain in the data; an identity categorical
@@ -481,14 +496,13 @@ def fit_preprocessor_metadata(
             **read_declared_vocabularies(cat_values, from_schema),
         }
 
-    with log_step(logger, "compute_feature_columns"):
-        feature_columns = compute_feature_columns(
-            feature_table.columns,
-            identity_cols,
-            categorical_cols,
-            drop_cols,
-            label_col,
-        )
+    feature_columns = compute_feature_columns(
+        feature_table.columns,
+        identity_cols,
+        categorical_cols,
+        drop_cols,
+        label_col,
+    )
 
     # Registered backstop: for a ranking task the item column must be a feature.
     require_item_is_a_feature(
@@ -542,7 +556,9 @@ def apply_preprocessor_to_features(
     require_base_key_columns(feature_table.columns, base_key)
     warn_missing_drop_columns(feature_table.columns, drop_cols, "feature_table")
     if months:
-        require_months_present(feature_table, time_col, months, "snap_dates")
+        # Timed for the same reason as the fit's copy: it collects.
+        with log_step(logger, "require_months_present(snap_dates)"):
+            require_months_present(feature_table, time_col, months, "snap_dates")
 
     # Decision — only the months this run owns are encoded (ADR-0002). Skipping
     # a month that already landed is safe because a partition's content is
@@ -555,10 +571,9 @@ def apply_preprocessor_to_features(
     #
     # Decision — the output width: the base key plus the features that actually
     # live in feature_table. Identity-sourced features arrive later, from keys.
-    with log_step(logger, "select_columns"):
-        result = feature_table.filter(months_filter_as_date(time_col, months)).select(
-            *encoded_frame_columns(base_key, feature_columns, feature_table.columns)
-        )
+    result = feature_table.filter(months_filter_as_date(time_col, months)).select(
+        *encoded_frame_columns(base_key, feature_columns, feature_table.columns)
+    )
 
     # Decision — a value the train months never showed becomes the unknown
     # sentinel, not a new index: the fit is the vocabulary's only source, and an
@@ -613,37 +628,33 @@ def build_model_input(
     # Decision — a key with no label row is a negative, not a gap. sample_pool
     # is dense (entity x item fully expanded) while label_table is sparse (only
     # entities with a transaction), so the misses are most of the frame.
-    with log_step(logger, "merge_labels"):
-        dataset = join_labels_missing_as_negative(
-            keys, label_table, label_join_key, label_col,
-        )
+    dataset = join_labels_missing_as_negative(
+        keys, label_table, label_join_key, label_col,
+    )
 
     # Decision — a key with no feature row keeps its row and gets an all-NULL
     # feature block. feature_table's upstream population differs from
     # sample_pool's; LightGBM handles missing values, and dropping the row would
     # instead change which query groups exist (ADR-0005 §3).
-    with log_step(logger, "merge_features"):
-        dataset = join_features_missing_as_null(
-            dataset, preprocessed_feature_table, base_key,
-        )
+    dataset = join_features_missing_as_null(
+        dataset, preprocessed_feature_table, base_key,
+    )
 
     # Decision — what a model_input row is made of: identity, the label, every
     # feature, and the columns the keys carried in for downstream weighting.
     # Everything else the two joins brought along is dropped here.
-    with log_step(logger, "select_output_columns"):
-        required = list(set(identity_cols + [label_col] + feature_columns))
-        require_columns_present(dataset.columns, required, "build_model_input")
-        result = dataset.select(*model_input_columns(
-            keys.columns, dataset.columns, identity_cols, label_col, feature_columns,
-        ))
+    required = list(set(identity_cols + [label_col] + feature_columns))
+    require_columns_present(dataset.columns, required, "build_model_input")
+    result = dataset.select(*model_input_columns(
+        keys.columns, dataset.columns, identity_cols, label_col, feature_columns,
+    ))
 
     # Decision — numeric features converge on one storage type. LightGBM is
     # histogram-based, so float32's precision is already beyond what binning can
     # use; decimal128 in particular materialises as Python Decimal objects and
     # was what OOM-killed the val read. Which types get cast, and to what, is
     # the helper's business.
-    with log_step(logger, "cast_features_to_float32"):
-        result, casted = _cast_feature_floats_to_float32(result, feature_columns)
+    result, casted = _cast_feature_floats_to_float32(result, feature_columns)
     logger.info(
         "build_model_input: %d features, cast %d float-like feature columns to float32",
         len(feature_columns), len(casted),

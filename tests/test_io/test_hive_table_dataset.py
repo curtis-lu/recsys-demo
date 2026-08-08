@@ -30,11 +30,16 @@ def _patch_spark(spark: MagicMock):
 
 
 def _ddl_sqls(spark) -> list[str]:
-    """spark.sql 呼叫中排除 _table_exists 的 SHOW TABLES 基礎呼叫後的 DDL 清單。"""
+    """spark.sql 呼叫中排除純查詢後的 DDL 清單。
+
+    `SHOW TABLES` 來自 `_table_exists`、`SHOW PARTITIONS` 來自 save 前後各一次的
+    分區快照——兩者都只讀 metastore，不改結構，所以斷言「這次沒有下 DDL」時要把
+    它們排除掉。
+    """
     return [
         c[0][0]
         for c in spark.sql.call_args_list
-        if not c[0][0].lstrip().upper().startswith("SHOW TABLES")
+        if not c[0][0].lstrip().upper().startswith(("SHOW TABLES", "SHOW PARTITIONS"))
     ]
 
 
@@ -1065,3 +1070,208 @@ class TestPartialWriteLeavesPartitionsIntact:
         finally:
             spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
             spark.sql("DROP DATABASE IF EXISTS empty_write_test CASCADE")
+
+
+def _partition_rows(specs: list[str]) -> list:
+    """Rows shaped like ``SHOW PARTITIONS`` output — ``row[0]`` is the spec."""
+    return [[spec] for spec in specs]
+
+
+def _wire_partition_state(
+    spark: MagicMock, df: MagicMock, before: list[str], after: list[str],
+) -> MagicMock:
+    """``SHOW PARTITIONS`` answers ``before`` until ``insertInto`` runs.
+
+    Keyed on the write, not on call order. Stubbing two successive answers
+    cannot tell "snapshot taken before the write" from "snapshot taken after
+    it" — both make the same two calls in the same order, so the diff would
+    come out right either way and the test would be blind to the one ordering
+    that carries the meaning.
+    """
+    state = {"written": False}
+
+    writer = MagicMock()
+    writer.insertInto.side_effect = lambda *_: state.__setitem__("written", True)
+    df.write.mode.return_value = writer
+
+    _original_sql = spark.sql.side_effect
+
+    def _sql_side_effect(query, *args, **kwargs):
+        if query.lstrip().upper().startswith("SHOW PARTITIONS"):
+            result = MagicMock()
+            result.collect.return_value = _partition_rows(
+                after if state["written"] else before
+            )
+            return result
+        if _original_sql is not None:
+            return _original_sql(query, *args, **kwargs)
+        return MagicMock()
+
+    spark.sql.side_effect = _sql_side_effect
+    return writer
+
+
+def _patch_lit():
+    """``F.lit`` needs a live SparkContext; the rest of save() does not."""
+    return patch("pyspark.sql.functions.lit", return_value="LIT")
+
+
+def _action_free_df() -> MagicMock:
+    """A DataFrame that fails the test if anything asks it to compute.
+
+    ``select`` returns itself, so ``df.select(...).collect()`` trips the same
+    trap as ``df.collect()``.
+    """
+    df = MagicMock(name="DataFrame")
+    df.columns = ["cust_id", "snap_date"]
+    df.select.return_value = df
+    df.withColumn.return_value = df
+    for action in ("collect", "count", "distinct", "toPandas", "first", "take",
+                   "head", "isEmpty"):
+        getattr(df, action).side_effect = AssertionError(
+            f"save() called df.{action}() — that re-executes the whole lineage"
+        )
+    return df
+
+
+class TestSaveReportsPartitionsWithoutRecomputing:
+    """The write's partition list comes from the metastore, not from the frame.
+
+    The partition values of the frame just written are also the answer to
+    "what did this write touch", and asking the DataFrame is one line. But a
+    DataFrame is a plan, not a result: ``insertInto`` does not materialise it,
+    so ``df.select(part_cols).distinct().collect()`` builds a fresh query
+    execution and re-runs the entire lineage — source scans, joins, shuffles
+    and all — to print one log line. ``SHOW PARTITIONS`` answers the same
+    question from metadata alone. ADR-0009 owns the measurement and the
+    exactness this trades away; this class only pins the resulting contract.
+    """
+
+    def _make_ds(self) -> HiveTableDataset:
+        return HiveTableDataset(
+            database="ml_recsys",
+            table="train_model_input",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_filter={"base_dataset_version": "v9"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+    def test_save_does_not_trigger_a_second_action_on_the_frame(self):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        _configure_mock_table_exists(spark, "ml_recsys", "train_model_input")
+        df = _action_free_df()
+        _wire_partition_state(
+            spark, df,
+            before=["base_dataset_version=v9/snap_date=2026-06-30"],
+            after=["base_dataset_version=v9/snap_date=2026-06-30",
+                   "base_dataset_version=v9/snap_date=2026-07-31"],
+        )
+
+        with _patch_spark(spark), _patch_lit():
+            ds.save(df)  # must not raise
+
+    def test_log_names_the_new_partition_and_the_resulting_state(self, caplog):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        _configure_mock_table_exists(spark, "ml_recsys", "train_model_input")
+        df = _action_free_df()
+        _wire_partition_state(
+            spark, df,
+            before=["base_dataset_version=v9/snap_date=2026-06-30"],
+            after=["base_dataset_version=v9/snap_date=2026-06-30",
+                   "base_dataset_version=v9/snap_date=2026-07-31"],
+        )
+
+        with caplog.at_level("INFO"):
+            with _patch_spark(spark), _patch_lit():
+                ds.save(df)
+
+        written = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "partitions_written"
+        ]
+        assert len(written) == 1, caplog.text
+        assert written[0].new_partitions == [{"snap_date": "2026-07-31"}]
+        assert written[0].partition_count == 2
+
+    def test_full_rebuild_overwrites_everything_and_reports_no_new(self, caplog):
+        """A node with no month plan rewrites its months every run.
+
+        The diff is then empty by construction, and a log that printed only
+        "0 new" would read as "nothing was written". The resulting state is
+        what carries the information for these nodes.
+        """
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        _configure_mock_table_exists(spark, "ml_recsys", "train_model_input")
+        same = ["base_dataset_version=v9/snap_date=2026-06-30",
+                "base_dataset_version=v9/snap_date=2026-07-31"]
+        df = _action_free_df()
+        _wire_partition_state(spark, df, before=same, after=same)
+
+        with caplog.at_level("INFO"):
+            with _patch_spark(spark), _patch_lit():
+                ds.save(df)
+
+        written = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "partitions_written"
+        ]
+        assert len(written) == 1
+        assert written[0].new_partitions == []
+        assert written[0].partition_count == 2
+
+
+class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
+    """No ``partition_filter`` means the metastore cannot answer for one run.
+
+    ``existing_partition_values()`` scopes its answer with the filter; with an
+    empty filter it returns every partition in the table, accumulated across
+    every run that ever wrote it. A before/after diff over that cannot tell an
+    overwritten partition from an untouched one, so a re-publish would report
+    "0 new" and a partition count unrelated to this write. These tables
+    therefore keep the old frame query, cost and all — see ADR-0009 and #179.
+    """
+
+    def _make_ds(self) -> HiveTableDataset:
+        # Shaped like catalog.yaml's score_table / ranked_predictions.
+        return HiveTableDataset(
+            database="ml_recsys",
+            table="score_table",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_cols=[
+                {"name": "snap_date", "type": "STRING"},
+                {"name": "model_version", "type": "STRING"},
+            ],
+            external=False,
+        )
+
+    def test_partitions_come_from_the_frame_not_the_metastore(self, caplog):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        _configure_mock_table_exists(spark, "ml_recsys", "score_table")
+
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "snap_date", "model_version"]
+        df.select.return_value = df
+        df.write.mode.return_value = MagicMock()
+        row = {"snap_date": "2026-07-31", "model_version": "m1"}
+        df.distinct.return_value.collect.return_value = [row]
+
+        with caplog.at_level("INFO"):
+            with _patch_spark(spark):
+                ds.save(df)
+
+        assert "Wrote 1 partitions to ml_recsys.score_table" in caplog.text
+        # No metastore snapshot was taken — it could not have answered.
+        assert not [
+            c for c in spark.sql.call_args_list
+            if c[0][0].lstrip().upper().startswith("SHOW PARTITIONS")
+        ]
+        # And the metastore-snapshot event is deliberately absent here.
+        assert not [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "partitions_written"
+        ]
