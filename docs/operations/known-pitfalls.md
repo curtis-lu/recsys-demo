@@ -26,9 +26,45 @@
 
 完整 SOP：`docs/operations/worktree-venv-setup.md`。
 
-## 4. 測試效能：待評估的加速手段 backlog
+## 4. 測試效能：一個活過了它的量測環境的數字
 
-整包 `tests/test_evaluation` 約 33 分鐘，主因是大量 Spark 測試逐一執行 Spark action（conftest `spark` fixture：`spark.master=local[1]`、`shuffle.partitions=1`；fixture 是 function-scoped，但 `get_or_create_spark_session` 會重用仍存活的 session，並非每測試都重啟）。**正確方向是把測試跑快，不是略過測試。** 採用任何手段前先實測（`pytest --durations=20` 找最慢的），勿臆測：
+> **2026-08-08 更正。** 本節原本的第一句是「整包 `tests/test_evaluation` 約 33 分鐘」。實測：
+
+```
+# 乾淨 worktree，main @ 783e645，2026-08-08
+$ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest tests/test_evaluation/ -q
+================= 1 failed, 301 passed, 247 warnings in 54.76s =================
+```
+
+**54 秒，不是 33 分鐘——差約 37 倍。** 302 個測試函式全數收集、全數執行（`--collect-only` 為 302），`addopts` 只有 `-v --tb=short`，沒有 marker 過濾、沒有 skip、沒有 deselect。那 1 個 fail 是 §5 記載的既有問題。
+
+耗時分布（`--durations=15`）：最慢的單一測試 **4.19s**，前 15 名合計約 27s。
+
+**這個數字怎麼來的**（時間線是關鍵）：
+
+| 日期 | 事件 |
+|---|---|
+| 2026-05-06 | `1cfdacb` 「run from host venv (**not docker exec**)」——當時 Spark 跑在 Docker 裡 |
+| 2026-05-17 | `ac5a89b` 把「~33 分鐘」寫進 CLAUDE.md |
+| **2026-06-09** | `cba152b` merge `feat/local-spark-rebuild`（PR #69）——執行環境改成 `local[*]` ＋內嵌 Derby ＋本機 warehouse，Docker 退場 |
+| 2026-07-04 | `21987ce` 把這句話搬進本檔 §4 |
+| 2026-08-08 | 實測 54 秒 |
+
+**所以 33 分鐘當時很可能是真的量過的**——只是量的是 Docker 裡的 Spark。三週後執行環境整個換掉，那個數字就失效了，但沒有任何人重量，它反而被搬進了「常駐提醒」的位置，又被 10 份以上的 plan／spec 轉引，當作「不要跑這包」的理由。
+
+### 教訓（這才是本節值得留下的部分）
+
+**一個量過的數字，只在它被量的那個環境裡有效。** 這裡的失效原因不是「當初隨便估」，而是**執行環境換了、沒有任何機制會回頭把文件裡的耗時失效掉**。Docker → `local[*]` 是一次刻意的、有 PR 的遷移，遷移清單裡沒有「重量所有寫進文件的耗時」這一項。
+
+實務規則：
+
+- 文件裡寫耗時，**連同量測環境與日期一起寫**（本節上面那個 code block 就是格式）。沒寫環境的耗時等於沒寫。
+- **換執行環境時（容器化、Spark 模式、機器）把文件裡的耗時當成待失效清單**掃一遍，不是等下一個人踩到。
+- 引用別人寫的耗時之前先看它的量測日期與環境；對不上就自己 `time pytest <path> -q` 跑一次再引用。
+
+### 加速手段 backlog（保留，但在目前環境下不值得做）
+
+以下是在 Docker 時代、「33 分鐘」的前提下開的。以 `local[*]` 環境 54 秒的實測，**這幾項都不值得做**——保留在此僅供未來測試量顯著成長、或執行環境再次改變、且**重新量過**之後參考。conftest `spark` fixture 目前是 `spark.master=local[1]`、`shuffle.partitions=1`，function-scoped，但 `get_or_create_spark_session` 會重用仍存活的 session，並非每測試都重啟。
 
 - conftest `spark` fixture 改 `local[*]` 或調並行度是否有感（小資料下未必，需量測）。
 - 全程重用單一 SparkSession（注意 `tune_hyperparameters` 會 `.stop()`，見 conftest 註解需妥善處理）。
