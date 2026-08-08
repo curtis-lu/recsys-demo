@@ -1142,9 +1142,9 @@ class TestSaveReportsPartitionsWithoutRecomputing:
     DataFrame is a plan, not a result: ``insertInto`` does not materialise it,
     so ``df.select(part_cols).distinct().collect()`` builds a fresh query
     execution and re-runs the entire lineage — source scans, joins, shuffles
-    and all — to print one log line. Measured on a faithful two-LEFT-JOIN +
-    Window repro: 4 extra jobs / 17 extra tasks against the write's own 3 / 11.
-    ``SHOW PARTITIONS`` answers the same question from metadata alone.
+    and all — to print one log line. ``SHOW PARTITIONS`` answers the same
+    question from metadata alone. ADR-0009 owns the measurement and the
+    exactness this trades away; this class only pins the resulting contract.
     """
 
     def _make_ds(self) -> HiveTableDataset:
@@ -1222,3 +1222,56 @@ class TestSaveReportsPartitionsWithoutRecomputing:
         assert len(written) == 1
         assert written[0].new_partitions == []
         assert written[0].partition_count == 2
+
+
+class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
+    """No ``partition_filter`` means the metastore cannot answer for one run.
+
+    ``existing_partition_values()`` scopes its answer with the filter; with an
+    empty filter it returns every partition in the table, accumulated across
+    every run that ever wrote it. A before/after diff over that cannot tell an
+    overwritten partition from an untouched one, so a re-publish would report
+    "0 new" and a partition count unrelated to this write. These tables
+    therefore keep the old frame query, cost and all — see ADR-0009 and #179.
+    """
+
+    def _make_ds(self) -> HiveTableDataset:
+        # Shaped like catalog.yaml's score_table / ranked_predictions.
+        return HiveTableDataset(
+            database="ml_recsys",
+            table="score_table",
+            columns=[{"name": "cust_id", "type": "STRING"}],
+            partition_cols=[
+                {"name": "snap_date", "type": "STRING"},
+                {"name": "model_version", "type": "STRING"},
+            ],
+            external=False,
+        )
+
+    def test_partitions_come_from_the_frame_not_the_metastore(self, caplog):
+        ds = self._make_ds()
+        spark = _make_spark_mock()
+        _configure_mock_table_exists(spark, "ml_recsys", "score_table")
+
+        df = MagicMock(name="DataFrame")
+        df.columns = ["cust_id", "snap_date", "model_version"]
+        df.select.return_value = df
+        df.write.mode.return_value = MagicMock()
+        row = {"snap_date": "2026-07-31", "model_version": "m1"}
+        df.distinct.return_value.collect.return_value = [row]
+
+        with caplog.at_level("INFO"):
+            with _patch_spark(spark):
+                ds.save(df)
+
+        assert "Wrote 1 partitions to ml_recsys.score_table" in caplog.text
+        # No metastore snapshot was taken — it could not have answered.
+        assert not [
+            c for c in spark.sql.call_args_list
+            if c[0][0].lstrip().upper().startswith("SHOW PARTITIONS")
+        ]
+        # And the metastore-snapshot event is deliberately absent here.
+        assert not [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "partitions_written"
+        ]

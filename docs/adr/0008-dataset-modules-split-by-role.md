@@ -107,7 +107,7 @@ repo 的 Spark cold start 是 2–4 分鐘。所以 `scoping.py` 不能併進去
 的**原始設定 dict**（`entry.get("type") != "HiveTableDataset"`、`entry["database"]`、
 `entry["table"]`），自己知道 HiveTableDataset 長什麼樣、怎麼列分區。三個增量表都有
 `partition_filter: {base_dataset_version: ...}`（`conf/base/catalog.yaml:55`／`:77`／`:134`），
-所以 `HiveTableDataset.existing_partition_values()`（`io/hive_table_dataset.py:200`）回傳的
+所以 `HiveTableDataset.existing_partition_values()`（`io/hive_table_dataset.py:277`）回傳的
 就是已按當前版本篩過的答案。`helpers_spark.py:24` 的 `existing_snap_date_partitions` 刪除
 ——它是同一件事的第二份實作。`__HIVE_DEFAULT_PARTITION__` 的丟棄守衛不能跟著消失，它是個
 決策（丟棄＝該月視為未落地、會被重做），移進 `month_plans.py`。
@@ -117,7 +117,7 @@ repo 的 Spark cold start 是 2–4 分鐘。所以 `scoping.py` 不能併進去
 `:692` 才算出、`:719` 才進 runtime_params。而 `core/config.py:111-115` 的替換是字串
 `.replace()`，**未解析的 placeholder 靜默留成字面 `${base_dataset_version}`、不 raise**。
 若拿 `:682` 那份 config 建 dataset 物件去問 `existing_partition_values()`，
-`io/hive_table_dataset.py:254-257` 會用那個字面字串逐一比對 partition spec、**丟掉全部**，
+`io/hive_table_dataset.py:331-335` 會用那個字面字串逐一比對 partition spec、**丟掉全部**，
 回傳 `[]` → 每個月都視為未落地 → 全量重建，而且不報錯。現行實作把 `base_v` 當函式參數
 顯式傳進去，正是繞開了這件事。
 

@@ -31,7 +31,7 @@
 
 ## F2. Observability 是強制的，不是可選的
 
-Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以不裝。本框架把它做進 Runner：每個 node 執行時必定記錄 `node_started`／`node_completed`／`node_failed` 結構化事件（`core/runner.py:60-181`），失敗時帶 `exc_info=True`。
+Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以不裝。本框架把它做進 Runner：每個 node 執行時必定記錄 `node_started`／`node_completed`／`node_failed` 結構化事件（`core/runner.py:82-224`），失敗時帶 `exc_info=True`。
 
 所以：**新增 node 時不需要自己寫「開始了／完成了」的 log**，Runner 已經記了。你該記的是 node 內部的業務判斷（跳過了什麼、選了哪條分支、處理了幾列）。
 
@@ -153,7 +153,7 @@ A3、A4 管整個 `src/recsys_tfb/`；S1、S2 只管 `pipelines/dataset/`。
 
 pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）一律由 catalog 條目宣告，node 只做輸入到輸出的轉換。
 
-- **例外一（資料流產物）**：input 名稱加 `@` 前綴時，Runner 交給 node 的是 catalog dataset **handle** 而非載入後的資料（`core/runner.py:79-87`）。拿到 handle 的 node 可以自行管理**這個 dataset 的分區寫入生命週期**——包含 `.save()` 寫入，以及查詢哪些分區已存在（`existing_partition_values()`）。**不含**把它當一般資料來源整批讀取（那該用普通 input）。
+- **例外一（資料流產物）**：input 名稱加 `@` 前綴時，Runner 交給 node 的是 catalog dataset **handle** 而非載入後的資料（`core/runner.py:110-117`）。拿到 handle 的 node 可以自行管理**這個 dataset 的分區寫入生命週期**——包含 `.save()` 寫入，以及查詢哪些分區已存在（`existing_partition_values()`）。**不含**把它當一般資料來源整批讀取（那該用普通 input）。
 - 這個例外**必須寫在 pipeline 定義的 `inputs` 裡**，不得在函式體內自己取得 catalog。理由與 Kedro 的 `confirms` 一致：**side effect 要用宣告的，不能藏在函式體裡**。
 - **例外二（診斷副產物）**：有 3 個 node 會自己寫診斷／稽核檔（JSON 報表、HPO 診斷、MLflow artifact）。這些**不是資料流產物**——沒有任何 node 消費它們，它們寫進 model version 目錄或 MLflow。這是既有慣例，見 R4 登記。
 - 兩類例外的已核准清單都在節三。**要新增一筆必須先問使用者。**
@@ -193,7 +193,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 ### A6. 同一 node 的 input 名不得與 output 名相同
 
-Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99`）。名稱相同代表你打算原地覆寫一個 dataset，而執行順序讓這件事的語意不明確。要覆寫就用不同的 catalog 條目名，或明確走 `@` handle（見 A1）。
+Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:110-129`）。名稱相同代表你打算原地覆寫一個 dataset，而執行順序讓這件事的語意不明確。要覆寫就用不同的 catalog 條目名，或明確走 `@` handle（見 A1）。
 
 **檢查**：同上 AST 掃描；比對時 `@` 前綴會被去除後再比。
 
@@ -261,7 +261,7 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 | 方法 | 用途 | 位置 |
 |---|---|---|
 | `.save(pdf)` | 寫入單一 partition | `pipelines/training/nodes.py:1230` |
-| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供增量計畫判斷跳過哪些月份 | 呼叫在 `pipelines/training/nodes.py:1051`（經 `_written_prediction_partitions`），方法定義在 `io/hive_table_dataset.py:200` |
+| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供增量計畫判斷跳過哪些月份 | 呼叫在 `pipelines/training/nodes.py:1051`（經 `_written_prediction_partitions`），方法定義在 `io/hive_table_dataset.py:277` |
 
 兩者都屬於「這個 node 自行管理這個 dataset 的分區寫入生命週期」，是同一個例外的範圍內。**把它當一般資料來源整批讀取不在此列**——那該用普通 input 讓 catalog 載入。
 
@@ -271,7 +271,7 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 
 | 位置 | 變數 | 用途 |
 |---|---|---|
-| `core/logging.py:139` | `_current_context` | run context 的程序級單例 |
+| `core/logging.py:159` | `_current_context` | run context 的程序級單例 |
 | `utils/spark.py:49` | `_canonical_configs`, `_canonical_enable_hive`, `_last_app_id`, `_last_alive_ts` | SparkSession 生命週期 |
 | `utils/spark.py:87` | `_canonical_configs`, `_canonical_enable_hive` | 同上 |
 | `utils/spark.py:161` | `_last_alive_ts` | 同上 |

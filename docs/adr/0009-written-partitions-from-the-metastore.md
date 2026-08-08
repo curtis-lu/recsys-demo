@@ -42,7 +42,7 @@ QueryExecution，從頭再跑一次整條 lineage。
 的條目、**沒有一個覆寫 `write_mode`**（全吃預設 `"overwrite"`），所以條件恆真。其中 12 個屬
 dataset pipeline，含最貴的三個 `model_input`。
 
-## 決定：寫入前後各拍一次 metastore 快照
+## 決定：**有 `partition_filter` 的表**，寫入前後各拍一次 metastore 快照
 
 ```python
 before = {_partition_key(p) for p in self.existing_partition_values()}
@@ -52,10 +52,23 @@ new    = [p for p in after if _partition_key(p) not in before]
 ```
 
 `existing_partition_values()`（同 class，本來就存在、predict node 已在用）走
-`SHOW PARTITIONS`：純 metastore，成本與表大小無關，且已按 `partition_filter` 限定在這個
-`base_dataset_version`。
+`SHOW PARTITIONS`：純 metastore，成本與表大小無關。
+
+**「有 `partition_filter`」是這個做法能成立的條件，不是巧合。** 它的過濾條件是
+`any(spec.get(k) != v for k, v in self._partition_filter.items())`——空 dict 時
+`any([])` 恆為 `False`，**一筆都不濾掉**，回傳的是整張表跨所有 run 累積的全部分區。
+那種情況下 before／after 差集分不出「這次覆寫的」與「早就在那、這次沒動的」，`new` 在
+重新發布時為空、`partition_count` 也與這次寫入無關。
+
+17 個可寫且帶 `partition_cols` 的條目裡，**14 個有 `partition_filter`**
+（`base_dataset_version` 或 `model_version`），走上面這條路；**3 個沒有**——
+`score_table`、`ranked_staging`、`ranked_predictions`，全在 inference／publish 路徑上——
+維持原本問 DataFrame 的做法，輸出與改動前逐字相同。理由與後續見
+[#179](https://github.com/curtis-lu/recsys-demo/issues/179)。
 
 ## 代價：不再逐位精確，而且盲點打在哪要說清楚
+
+以下只談走 metastore 快照的那 14 個條目。
 
 | 節點類型 | 每次寫入的分區 | `new` 是否精確 |
 |---|---|---|
@@ -70,7 +83,7 @@ new    = [p for p in after if _partition_key(p) not in before]
 個數字都說不出「這次重算了哪幾個月」。接受它，因為那次要重算哪幾個月是 CLI 旗標的值，入口已
 經有 log（見 `docs/operations/adding-an-eval-month.md` 的重算流程）。
 
-## 考慮過但沒選的
+## 考慮過但否決的選項
 
 - **由呼叫端傳 `month_plan.to_process`**：成本同樣是零且對月份精確，但要改 `save()` 的介面或
   改走 `@` handle（[ADR-0007](0007-month-plans-travel-through-the-catalog.md)），動的是框架
@@ -88,6 +101,18 @@ new    = [p for p in after if _partition_key(p) not in before]
   若失效，本 ADR 的成本論證跟著失效。
 - **出現需要逐位精確 `new` 的下游消費者**：目前那行 log 沒有任何文件或測試依賴（本次改動前
   grep 過），所以它是純資訊性的。一旦有程式讀它，就得重新評估。
+
+## 這條 ADR 沒有解決的事
+
+- **那 3 張沒有 `partition_filter` 的 inference 表**（`score_table`、`ranked_staging`、
+  `ranked_predictions`）仍然每次寫入都把整條 lineage 跑第二次。本 ADR 只把它們**排除**在新
+  做法之外、保住原行為，沒有修好它們。要修得先決定 inference 的輸出怎麼分區
+  （[#179](https://github.com/curtis-lu/recsys-demo/issues/179)），那屬於 inference pipeline
+  的重構，不屬於這裡。
+- **`--rebuild-dates` 重算既有月份時**，`new` 為空、`after` 又含沒動的月，兩個數字都說不出
+  這次重算了哪幾個月。見上一節。
+- **哪個 node 的時間花在哪**不是這條 ADR 的題目。它由 Runner 的 `load`／`func`／`save` 分段
+  回答（`core/runner.py`），本 ADR 只是讓 `save` 那一段不再包含一趟白做的重算。
 
 ## 稽核
 

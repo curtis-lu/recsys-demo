@@ -58,6 +58,18 @@ class _SlowLoadDataset(MemoryDataset):
         return super().load()
 
 
+class _FailingSaveDataset(MemoryDataset):
+    """A write that dies partway — the shape of an OOM during insertInto."""
+
+    def __init__(self, delay: float):
+        super().__init__()
+        self._delay = delay
+
+    def save(self, data) -> None:
+        time.sleep(self._delay)
+        raise RuntimeError("write blew up")
+
+
 class TestRunner:
     def test_successful_run(self):
         catalog = DataCatalog()
@@ -317,6 +329,51 @@ class TestNodePhaseTiming:
         rec = self._node_completed(caplog)
         assert rec.load_seconds >= SLOW
         assert rec.func_seconds < SLOW
+
+    @staticmethod
+    def _node_failed(caplog):
+        records = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "node_failed"
+        ]
+        assert len(records) == 1, f"expected one node_failed, got {len(records)}"
+        return records[0]
+
+    def test_failure_in_save_is_charged_to_save(self, caplog):
+        """The case the split exists for: a write that dies partway."""
+        catalog = DataCatalog()
+        catalog.add("x", MemoryDataset(data=1))
+        catalog.add("result", _FailingSaveDataset(delay=SLOW))
+
+        node = Node(func=double, inputs=["x"], outputs=["result"], name="n")
+        runner = Runner()
+        with pytest.raises(RuntimeError, match="write blew up"):
+            with caplog.at_level(logging.INFO):
+                runner.run(Pipeline([node]), catalog)
+
+        rec = self._node_failed(caplog)
+        assert rec.save_seconds >= SLOW
+        assert rec.func_seconds < SLOW
+
+    def test_failure_in_func_reports_no_save_phase_at_all(self, caplog):
+        """An unreached phase is absent, not zero.
+
+        ``save_seconds: 0.0`` on a node that died in its function would read
+        as "the save was instant" rather than "the save never ran".
+        """
+        catalog = DataCatalog()
+        catalog.add("x", MemoryDataset(data=1))
+
+        node = Node(func=failing_func, inputs=["x"], outputs=["result"], name="n")
+        runner = Runner()
+        with pytest.raises(RuntimeError, match="intentional failure"):
+            with caplog.at_level(logging.INFO):
+                runner.run(Pipeline([node]), catalog)
+
+        rec = self._node_failed(caplog)
+        assert hasattr(rec, "load_seconds")
+        assert hasattr(rec, "func_seconds")
+        assert not hasattr(rec, "save_seconds")
 
     def test_phase_timings_reach_the_jsonl_file(self, tmp_path):
         """The phases must survive the trip to the file, not just to caplog.

@@ -7,6 +7,28 @@ from recsys_tfb.core.logging import get_current_context
 logger = logging.getLogger(__name__)
 
 
+def _phase_durations(node_start, load_end, func_end, now) -> dict:
+    """Seconds spent per phase, for the phases that were actually reached.
+
+    A phase the node never got to is **absent**, not zero: on a node that died
+    inside its function, a ``save_seconds: 0.0`` would read as "the save was
+    instant" when the save never ran at all — and telling those two apart is
+    the whole point of the split.
+    """
+    if load_end is None:
+        return {"load_seconds": round(now - node_start, 3)}
+    if func_end is None:
+        return {
+            "load_seconds": round(load_end - node_start, 3),
+            "func_seconds": round(now - load_end, 3),
+        }
+    return {
+        "load_seconds": round(load_end - node_start, 3),
+        "func_seconds": round(func_end - load_end, 3),
+        "save_seconds": round(now - func_end, 3),
+    }
+
+
 class Runner:
     """Execute pipeline nodes sequentially using a DataCatalog."""
 
@@ -76,8 +98,9 @@ class Runner:
             # Phase boundaries. With a lazy engine the node function returns a
             # plan in milliseconds and the whole computation runs inside
             # catalog.save(), so a single node duration cannot say which of the
-            # two is slow. These two marks are what separate them.
-            load_end = func_end = node_start
+            # two is slow. These two marks are what separate them; None means
+            # "not reached", which is what the failure path reports.
+            load_end = func_end = None
             _ctx = get_current_context()
 
             try:
@@ -108,7 +131,8 @@ class Runner:
             except Exception as exc:
                 if _ctx is not None:
                     _ctx.current_node = ""
-                duration = time.time() - node_start
+                failed_at = time.time()
+                duration = failed_at - node_start
                 logger.error(
                     "Node '%s' failed after %.2fs: %s",
                     node.name, duration, exc,
@@ -117,6 +141,13 @@ class Runner:
                         "event": "node_failed",
                         "node": node.name,
                         "duration_seconds": round(duration, 3),
+                        # Which phase it died in, and how long it survived
+                        # there. A node killed by an OOM during the write is
+                        # the case this feature exists to locate, so the
+                        # failure path carries the split too.
+                        **_phase_durations(
+                            node_start, load_end, func_end, failed_at,
+                        ),
                         "status": "failed",
                         "error_message": str(exc),
                         "exception_type": type(exc).__name__,
@@ -144,19 +175,16 @@ class Runner:
                 _ctx.current_node = ""
             node_end = time.time()
             duration = node_end - node_start
-            load_seconds = load_end - node_start
-            func_seconds = func_end - load_end
-            save_seconds = node_end - func_end
+            phases = _phase_durations(node_start, load_end, func_end, node_end)
             logger.info(
                 "Node %s completed in %.2fs (load %.2fs, func %.2fs, save %.2fs)",
-                node.name, duration, load_seconds, func_seconds, save_seconds,
+                node.name, duration, phases["load_seconds"],
+                phases["func_seconds"], phases["save_seconds"],
                 extra={
                     "event": "node_completed",
                     "node": node.name,
                     "duration_seconds": round(duration, 3),
-                    "load_seconds": round(load_seconds, 3),
-                    "func_seconds": round(func_seconds, 3),
-                    "save_seconds": round(save_seconds, 3),
+                    **phases,
                     "status": "success",
                     "input_names": list(node.inputs),
                     "output_names": list(node.outputs),
