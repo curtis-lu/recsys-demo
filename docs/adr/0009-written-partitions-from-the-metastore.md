@@ -60,8 +60,16 @@ new    = [p for p in after if _partition_key(p) not in before]
 那種情況下 before／after 差集分不出「這次覆寫的」與「早就在那、這次沒動的」，`new` 在
 重新發布時為空、`partition_count` 也與這次寫入無關。
 
-17 個可寫且帶 `partition_cols` 的條目裡，**14 個有 `partition_filter`**
-（`base_dataset_version` 或 `model_version`），走上面這條路；**3 個沒有**——
+17 個可寫且帶 `partition_cols` 的條目裡，**14 個有 `partition_filter`**，走上面這條路：
+
+| `partition_filter` 的鍵 | 條目數 |
+|---|---|
+| `base_dataset_version` | 5 |
+| `base_dataset_version` ＋ `train_variant_id` | 5 |
+| `base_dataset_version` ＋ `calibration_variant_id` | 2 |
+| `model_version` | 2 |
+
+剩下 **3 個沒有**——
 `score_table`、`ranked_staging`、`ranked_predictions`，全在 inference／publish 路徑上——
 維持原本問 DataFrame 的做法，輸出與改動前逐字相同。理由與後續見
 [#179](https://github.com/curtis-lu/recsys-demo/issues/179)。
