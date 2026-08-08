@@ -8,10 +8,16 @@ across pipelines (source_etl, dataset, inference).
 from __future__ import annotations
 
 import logging
+import time
 
 from recsys_tfb.io.base import AbstractDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _partition_key(spec: dict) -> tuple:
+    """A hashable identity for a partition spec, order-independent."""
+    return tuple(sorted(spec.items()))
 
 
 _VALID_WRITE_MODES = ("overwrite", "append")
@@ -174,24 +180,63 @@ class HiveTableDataset(AbstractDataset):
             )
 
         df = df.select(*self._insert_column_order())
-        df.write.mode(self._write_mode).insertInto(self._qualified_name)
 
-        if (
+        # What this write touched is answerable from the metastore, and it has
+        # to be: `df` is a plan, not a result. `insertInto` does not
+        # materialise it, so asking the frame itself —
+        # `df.select(part_cols).distinct().collect()`, which this used to do —
+        # builds a second query execution with every source scan, join and
+        # shuffle still in it, and runs the whole lineage again to print one
+        # log line. `SHOW PARTITIONS` answers from metadata alone, at a cost
+        # independent of table size. What that costs in exactness is written
+        # down in ADR-0009.
+        report_partitions = bool(
             (self._partition_cols or self._partition_filter)
             and self._write_mode == "overwrite"
-        ):
-            part_cols = list(self._partition_filter.keys()) + [
-                c["name"] for c in self._partition_cols
-            ]
-            written = (
-                df.select(*part_cols).distinct().collect()
-            )
+        )
+        before = (
+            {_partition_key(p) for p in self.existing_partition_values()}
+            if report_partitions
+            else set()
+        )
+
+        insert_start = time.time()
+        df.write.mode(self._write_mode).insertInto(self._qualified_name)
+        insert_seconds = time.time() - insert_start
+
+        if not report_partitions:
             logger.info(
-                "Wrote %d partitions to %s: %s",
-                len(written),
-                self._qualified_name,
-                [{c: row[c] for c in part_cols} for row in written],
+                "Wrote %s in %.2fs", self._qualified_name, insert_seconds,
+                extra={
+                    "event": "table_written",
+                    "dataset_name": self._qualified_name,
+                    "insert_seconds": round(insert_seconds, 3),
+                },
             )
+            return
+
+        after = self.existing_partition_values()
+        new = [p for p in after if _partition_key(p) not in before]
+        # Both numbers, always. `new` alone would read as "nothing was
+        # written" for every node that rebuilds its months in full — it
+        # overwrites partitions that already existed, so the diff is empty by
+        # construction. `after` is what carries the information for those.
+        logger.info(
+            "Wrote %s in %.2fs: %d partition(s) now present under %s, %d new: %s",
+            self._qualified_name,
+            insert_seconds,
+            len(after),
+            self._partition_filter or "(no partition_filter)",
+            len(new),
+            new,
+            extra={
+                "event": "partitions_written",
+                "dataset_name": self._qualified_name,
+                "insert_seconds": round(insert_seconds, 3),
+                "partition_count": len(after),
+                "new_partitions": new,
+            },
+        )
 
     def exists(self) -> bool:
         spark = self._get_spark()

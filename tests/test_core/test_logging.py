@@ -336,3 +336,49 @@ class TestLogDataVolume:
 
         assert not self._vol_records(caplog)
         assert any("path missing" in r.getMessage() for r in caplog.records)
+
+
+class TestJsonExtraFieldWhitelist:
+    """Every ``extra=`` key a caller uses must be named in the whitelist.
+
+    ``JsonFormatter`` copies ``extra`` fields through a fixed tuple. Forgetting
+    to extend it fails one-sidedly and quietly: the field still reaches the
+    console handler, so a terminal shows it and the JSONL file — the one
+    production reads — never has it. Nothing raises, and the gap is invisible
+    to any test that only inspects ``caplog``.
+    """
+
+    def test_every_extra_key_in_src_survives_into_the_json_line(self):
+        import ast
+        from pathlib import Path
+
+        from recsys_tfb.core.logging import JSON_EXTRA_FIELDS
+
+        src = Path(__file__).resolve().parents[2] / "src" / "recsys_tfb"
+        assert src.is_dir(), f"source tree not found at {src}"
+
+        missing: dict[str, list[str]] = {}
+        scanned = 0
+        for py in sorted(src.rglob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for kw in node.keywords:
+                    if kw.arg != "extra" or not isinstance(kw.value, ast.Dict):
+                        continue
+                    scanned += 1
+                    for key in kw.value.keys:
+                        if not (isinstance(key, ast.Constant)
+                                and isinstance(key.value, str)):
+                            continue
+                        if key.value not in JSON_EXTRA_FIELDS:
+                            missing.setdefault(key.value, []).append(
+                                f"{py.relative_to(src)}:{key.lineno}"
+                            )
+
+        assert scanned > 0, "found no `extra={...}` literals — scanner is broken"
+        assert not missing, (
+            "these `extra=` keys never reach the JSONL file because "
+            f"JSON_EXTRA_FIELDS does not name them: {missing}"
+        )
