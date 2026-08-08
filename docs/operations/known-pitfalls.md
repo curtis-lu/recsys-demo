@@ -1,7 +1,7 @@
 # Known pitfalls（已踩過的坑與既有問題）
 
 > 從 CLAUDE.md 抽出的完整細節（2026-07-04）。CLAUDE.md 只留鐵則，事故的來龍去脈在這裡。
-> 新增條目的格式與時機見 `~/.claude/rules/40-maintenance-protocol.md`。
+> 新增條目的格式與時機：載入 `maintain-agent-rules` skill。
 
 ## 1. `.venv` self-symlink ELOOP（已修，規則仍有效）
 

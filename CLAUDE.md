@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session 都需要的不變量、指令塊、路由」；細節一律在指向的檔案裡，**不在此複述**（發現重複或矛盾時的處理見 `~/.claude/rules/40-maintenance-protocol.md`）。
+Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session 都需要的不變量、指令塊、路由」；細節一律在指向的檔案裡，**不在此複述**（發現重複或矛盾時的處理，載入 `maintain-agent-rules` skill）。
 
 ## 這個專案是什麼
 
@@ -32,7 +32,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
 | 抽樣權重設定 | `docs/operations/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
 | 做／改診斷報表的呈現層（表格、圖、定義、編排） | `docs/operations/diagnosis-report-presentation.md`（每段資訊扣回目的、地基量開頭講一次、選最能凸顯重點的媒介、判斷留給讀者） |
-| 派 subagent / 選模型 / 驗收 | `~/.claude/rules/10-model-dispatch.md`（全域制度，已由全域 CLAUDE.md 載入路由） |
+| 派 subagent / 選模型 / 驗收 | 判準已常駐於 `~/.claude/rules/00-core.md`；寫派工 prompt 前載入 `dispatch-subagents` skill |
 
 ## Worktree 鐵則（細節與事故記錄：known-pitfalls.md §3）
 
