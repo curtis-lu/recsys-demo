@@ -1,0 +1,142 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei', sans-serif", "fontSize": "13px", "lineColor": "#8a97a0", "textColor": "#1f2328", "clusterBkg": "#fbfcfd", "clusterBorder": "#d0d7de", "edgeLabelBackground": "#ffffff"}, "flowchart": {"curve": "basis", "nodeSpacing": 30, "rankSpacing": 46, "htmlLabels": true, "padding": 8}} }%%
+%% ===========================================================================
+%% inference pipeline node graph
+%% 唯一真實來源：src/recsys_tfb/pipelines/inference/pipeline.py::create_pipeline
+%% 姊妹圖：dataset-pipeline.mmd（同一套圖例，多出的形狀見下）
+
+%% 圖例
+%%   [( 圓柱 )]    來源表（catalog 的 read_only Hive table）
+%%   [/ 斜角 /]    直接被造成「資料列」的 config 值。只有這一種 config 入圖，
+%%                 過濾條件類的（inference.snap_dates）不畫——理由見「刻意不畫」。
+%%   [[ 雙框 ]]    別的 pipeline 落地的版本化 artifact（不是表，是檔案）
+%%   [ 方框 ]      node，框內是 node name（可直接餵給 --from-node / --only-node）
+%%   ([ 實線膠囊 ]) 落地的 catalog 條目（Hive table）
+%%   ([ 虛線膠囊 ]) MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
+%%   {{ 六角 }}    閘：不轉換資料，只決定放不放行
+%%   > 旗標 ]      失敗路徑的終點（不是 dataset，沒有東西被寫出去）
+%%   虛線邊         非資料流：宣告了但函式沒讀、或版本解析的相依
+%%   「全表讀回」   這條邊走 Hive round-trip，不是記憶體直傳（見下）
+
+%% 為什麼要標「全表讀回」
+%%   node 之間不是直接傳 DataFrame——runner 對每個 input 都走 catalog.load()
+%%   （core/runner.py:87）。score_table / ranked_staging 是 Hive managed table 且
+%%   catalog 沒設 partition_filter（對照組：enriched_eval_predictions 有），所以
+%%   讀回來的是**含歷史 partition 的全表**。這就是 rank_predictions 與
+%%   validate_predictions 都先呼叫 _filter_current_inference_scope 的理由：
+%%   把資料限縮回本次的 model_version × inference.snap_dates。
+
+%% 為什麼 ranked_staging 要單獨存在
+%%   validate 失敗時 raise ValidationError，整批中止，production 的
+%%   ranked_predictions 完全不被觸碰，而失敗批次留在 staging 供事後排查。
+%%   圖上的紅色終點就是這條路徑；沒有它，staging → validate → publish
+%%   會被讀成三個沒必要的步驟。
+
+%% 兩個「圖跟程式碼對不上」的地方，已在圖上標出，不要當成畫錯
+%%   1. predict_scores 宣告吃 scoring_dataset，函式體從頭到尾沒讀它
+%%      （AST 查證過）。拓樸順序本來就由 X_score 保證，記憶體釋放時機由
+%%      validate_predictions 決定，所以這個參數不影響任何行為。圖上畫成虛線。
+%%   2. validate_predictions 的第一個參數**叫** ranked_predictions，但
+%%      pipeline.py:41 餵給它的是 ranked_staging。圖上一律用 catalog 名。
+
+%% 刻意不畫
+%%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
+%%     唯一例外是 inference.products——它不是「被讀取的設定值」，而是被
+%%     spark.createDataFrame 造成一張表再 crossJoin 進來的資料列
+%%     （nodes_spark.py:113-115），評分列數 = entity 數 × 日期數 × products 數。
+%%     inference.snap_dates 只是過濾條件，仍然不畫。
+%%   - calibration：inference.use_calibration 只是 predict_scores 內部一次 if
+%%     （model.predict() vs model.predict_uncalibrated()），不改變任何一條邊。
+%%     這跟 dataset 圖的 calibration 分支（會多出節點）性質不同，所以那邊寫
+%%     「不畫這個分支」，這邊是「根本沒有分支可畫」。
+%%   - build_scoring_dataset 的 feature coverage 報表：只算數字寫 log，不下推
+%%     成資料，缺特徵的母體成員一律保留並標 feature_present。
+%%   - 上游 pipeline 本身（dataset / training / source ETL）：跨 pipeline 的
+%%     完整 lineage 見 docs/data-lineage.html。
+
+%% 編輯方式：改這個檔，然後重新渲染成 SVG 貼回 inference-pipeline.html。
+%%   - 線上：https://mermaid.live 貼上全文 → Actions → SVG
+%%   - VS Code：Mermaid 系列外掛可直接預覽與匯出
+%%   - 貼進 .md 的 ```mermaid 區塊，GitHub 會直接渲染
+%%   - CLI（指令見 inference-pipeline.html 末段）
+
+%% 兩個實測過的坑
+%%   1. 不要留「只有 %%、後面沒有字」的空註解行：mermaid 不會把它當註解剝掉，
+%%      會黏到下一行變成 %%flowchart，parse error 指向第 1 行、很難聯想。
+%%      要空行就用真正的空行。
+%%   2. 渲染用 mermaid-cli@10，不要用 @11：同一張圖 v11 的新 renderer 會產出
+%%      數百 KB 的 SVG（形狀改用 rough.js 畫，path 灌到 30 KB 一條）。
+%% ===========================================================================
+
+flowchart TB
+
+  %% ------------------- 來源：兩張表 ＋ 一份 config -------------------
+  subgraph SRC[" 評分母體的三個來源 "]
+    direction LR
+    src_pop[("inference_population<br/><small>read_only ・ grain (time, entity) 唯一</small>")]
+    src_ft[("feature_table<br/><small>read_only ・ 只作 enrichment</small>")]
+    cfg_prod[/"inference.products<br/><small>config 值 → 造成資料列</small>"/]
+  end
+
+  %% --------------- 上游 pipeline 落地的版本化 artifact ----------------
+  %% 不放進 subgraph：包起來會被 dagre 當成一個整體擺到側邊，把主鏈拉成鋸齒。
+  %% 讓這兩個節點自由落在各自的消費者上方，主鏈才是一條直線。
+  art_model[["model<br/><small>data/models/best　★人工 promote_model.py</small>"]]
+  art_prep[["preprocessor<br/><small>data/dataset/&lt;base_dataset_version&gt;/</small>"]]
+
+  art_model -. "manifest 回溯 base_dataset_version<br/>（模型決定配哪份前處理）" .-> art_prep
+
+  %% ---------------------------- 主鏈 ------------------------------
+  n_build["build_scoring_dataset<br/><small>母體 (time, entity) × products ・ crossJoin<br/>缺特徵者保留，標 feature_present</small>"]
+  d_scoring(["scoring_dataset"])
+  n_apply["apply_preprocessor<br/><small>套訓練時的編碼與欄位選取 ・ 保留 identity 欄</small>"]
+  d_xscore(["X_score"])
+  n_predict["predict_scores<br/><small>按 (time, item) 分批 toPandas ・ driver 端合併</small>"]
+  d_score(["score_table"])
+  n_rank["rank_predictions<br/><small>(time, entity) 組內依 score 遞減 row_number()</small>"]
+  d_staging(["ranked_staging"])
+  gate{{"validate_predictions<br/><small>6 項 sanity check ・ 不轉換資料，只決定放不放行</small>"}}
+  d_validated(["validated_predictions"])
+  n_publish["publish_predictions<br/><small>函式是 identity；production 寫入＝catalog save</small>"]
+  o_ranked(["ranked_predictions　★production"])
+  x_abort>"整批中止<br/><small>production 未被觸碰<br/>失敗批次留在 ranked_staging 供排查</small>"]
+
+  src_pop --> n_build
+  src_ft --> n_build
+  cfg_prod --> n_build
+  n_build --> d_scoring
+  d_scoring --> n_apply
+  art_prep --> n_apply
+  n_apply --> d_xscore
+  d_xscore --> n_predict
+  art_model --> n_predict
+  d_scoring -. "宣告未使用" .-> n_predict
+  n_predict --> d_score
+  d_score -- "全表讀回<br/>節點自行過濾 model_version × snap_dates" --> n_rank
+  n_rank --> d_staging
+  d_staging -- "全表讀回（同上）" --> gate
+  d_scoring -- "對照列數<br/>row_count_match" --> gate
+  gate -- "pass" --> d_validated
+  gate -. "fail：raise ValidationError" .-> x_abort
+  d_validated --> n_publish
+  n_publish --> o_ranked
+
+  %% ---------------------------- 樣式 -------------------------------
+  classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b
+  classDef cfg fill:#e5dbff,stroke:#7048e8,stroke-width:1.5px,color:#3b2a7a
+  classDef art fill:#c3fae8,stroke:#0ca678,stroke-width:1.5px,color:#0b4f3f
+  classDef nd fill:#ffffff,stroke:#57606a,stroke-width:1.5px,color:#1f2328
+  classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
+  classDef mem fill:#ffffff,stroke:#adb5bd,stroke-width:1px,stroke-dasharray:5 3,color:#6a737d
+  classDef out fill:#b2f2bb,stroke:#2f9e44,stroke-width:1.5px,color:#14532d
+  classDef gt fill:#ffec99,stroke:#f08c00,stroke-width:1.5px,color:#7a4a00
+  classDef abort fill:#ffe3e3,stroke:#e03131,stroke-width:1.5px,stroke-dasharray:5 3,color:#8c1c1c
+
+  class src_pop,src_ft src
+  class cfg_prod cfg
+  class art_model,art_prep art
+  class n_build,n_apply,n_predict,n_rank,n_publish nd
+  class d_score,d_staging data
+  class d_scoring,d_xscore,d_validated mem
+  class o_ranked out
+  class gate gt
+  class x_abort abort
