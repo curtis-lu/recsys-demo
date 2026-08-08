@@ -22,7 +22,7 @@ date: 2026-08-02
 `if "max_duplicate_key_ratio" in qc and table_config.primary_key`
 ——**光宣告 `primary_key` 不會跑任何檢查**。
 
-所以 `pipelines/dataset/helpers_spark.py:134-135` 那句「PK 由 `source_etl` 的
+所以 `select_train_keys`（`pipelines/dataset/nodes.py`）裡那句「PK 由 `source_etl` 的
 `max_duplicate_key_ratio` 保證」對 `sample_pool` 為真、**對 `feature_table` 為假**。
 `feature_table` 若有重複 `(snap_date, cust_id)`，`build_model_input` 的 feature join
 會靜默把 model_input 列數乘開。
@@ -59,9 +59,9 @@ date: 2026-08-02
 
 - `conf/sql/etl/sample_pool/sample_pool.sql` 的 `cross_pop` 是字面 cross join
   （`cust_snap LEFT JOIN prod ON 1=1`）
-- `select_test_keys` 取全母體、不抽樣（`pipelines/dataset/nodes_spark.py:171`）
+- `select_test_keys` 取全母體、不抽樣（`pipelines/dataset/nodes.py`）
 - `filter_groups_with_positives` 只丟整組、不丟組內 item
-  （`pipelines/dataset/nodes_spark.py:285-299`）
+  （`pipelines/dataset/nodes.py`）
 
 所以「mAP 的分母不可信」這個風險在現行部署下不存在，加閘是為一個結構上不會發生的狀況付
 全掃成本。

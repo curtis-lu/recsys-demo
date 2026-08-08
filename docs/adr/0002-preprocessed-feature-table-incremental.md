@@ -11,18 +11,18 @@ dataset pipeline 原本把「config 列出的全部 snap_date」整批重算一�
 
 每個 `snap_date` partition 的內容 = f(該月 `feature_table` rows, `category_mappings`)，**與其他月份無關**：
 
-- 編碼是純逐列的 map lookup（`preprocessing.py:71-95`），查表對象 `category_mappings` 只在 `train_snap_dates` 上 fit（`nodes_shared.py:31-33`、`pipelines/dataset/nodes_spark.py:269,288`）。
+- 編碼是純逐列的 map lookup（`preprocessing.py` 的 `_encode_categoricals`），查表對象 `category_mappings` 只在 `train_snap_dates` 上 fit（`collect_dataset_snap_dates` 的 docstring，`pipelines/dataset/month_plans.py`；實際的 fit 在 `fit_preprocessor_metadata`，`pipelines/dataset/nodes.py`）。
 - `apply_preprocessor_to_features` 裡唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。
 
 所以日期過濾從來就不是產物身分的一部分，只是**工作量限制**（`feature_table` 可能存了十年，不能每次全編碼）。把它從「config 列出的全部」改成「尚未落地的」，不改變任何 partition 的內容，只改變這次要做多少工。
 
 差集邏輯集中在 `pipelines/dataset/nodes_shared.py` 的單一 helper（`collect_dataset_snap_dates` 的鄰居），由 test 分支的四個 node 共同使用：`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input`、`filter_test_model_input`。散在各 node 會讓「這次跳過了什麼」長出四種格式，也讓逃生口要穿過四個簽章。
 
-> **本段的實作位置已過時（2026-08-03）**：差集邏輯（`plan_incremental_snap_dates`）與上述取捨不變，但**套用**方式改了——計畫由 CLI 算一次、以具名 dataset 進 catalog，節點把它當一般 input 收下，而不是各自從 `parameters` 重算；`filter_test_model_input` 的防禦性過濾已刪除（它守的情境進不來）。現行實作與理由見 [ADR-0007](0007-month-plans-travel-through-the-catalog.md)。
+> **本段的實作位置已過時（2026-08-03）**：上一段寫的 `nodes_shared.py` 已於 #169 消失，差集邏輯（`plan_incremental_snap_dates`）與 `collect_dataset_snap_dates` 一併併入 `pipelines/dataset/month_plans.py`。取捨不變，但**套用**方式改了——計畫由 CLI 算一次、以具名 dataset 進 catalog，節點把它當一般 input 收下，而不是各自從 `parameters` 重算；`filter_test_model_input` 的防禦性過濾已刪除（它守的情境進不來）。現行實作與理由見 [ADR-0007](0007-month-plans-travel-through-the-catalog.md)。
 
 ## 考慮過但否決的選項
 
-**只在 `apply_preprocessor_to_features` 做差集。** 改動最小，但下游三個 node 仍按完整 `test_snap_dates` 重算 ── 結果冪等、正確，只是白做。代價是**加第 N 個月的成本 ∝ N 而非 ∝ 1**：累積到 12 個月時，每加一個月要重算 12 個月的 keys 與 model_input。而 `select_test_keys` 是 full population、沒有抽樣（`pipelines/dataset/nodes_spark.py:127-130`），這條鏈不便宜。半套的增量會在幾個月後被迫重做。
+**只在 `apply_preprocessor_to_features` 做差集。** 改動最小，但下游三個 node 仍按完整 `test_snap_dates` 重算 ── 結果冪等、正確，只是白做。代價是**加第 N 個月的成本 ∝ N 而非 ∝ 1**：累積到 12 個月時，每加一個月要重算 12 個月的 keys 與 model_input。而 `select_test_keys` 是 full population、沒有抽樣（`pipelines/dataset/nodes.py`），這條鏈不便宜。半套的增量會在幾個月後被迫重做。
 
 ## 後果
 
