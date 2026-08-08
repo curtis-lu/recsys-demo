@@ -217,9 +217,9 @@ model input 寫出前，Decimal 與 Double 類型的 feature 會轉成 Spark `fl
 
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
-| `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns` | 黑名單：不得成為模型特徵 |
+| `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `compute_feature_columns` | 黑名單：不得成為模型特徵 |
 | `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys`／`select_calibration_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
-| `feature_columns` | 推導結果，存進 `preprocessor.json` | `_compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
+| `feature_columns` | 推導結果，存進 `preprocessor.json` | `compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
 
 `feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來
 的結果。想增減特徵就改 `drop_columns` 或 `categorical_columns`。

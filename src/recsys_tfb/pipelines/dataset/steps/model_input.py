@@ -18,12 +18,23 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 
-def _validate_columns(
+def require_columns_present(
     columns: list[str],
     required: list[str],
     context: str,
 ) -> None:
-    """Check that all required columns exist. Raises ValueError if missing."""
+    """Post-condition: ``columns`` carries every name in ``required``.
+
+    Generic on purpose, and ``context`` is the part that carries the meaning:
+    ``build_model_input`` calls this twice about different things, and the two
+    calls pass different context strings because sharing one would let a test's
+    ``pytest.raises(match=...)`` be satisfied by the other rule's message
+    (ADR-0005 §1).
+
+    Same shape as ``feature_columns.require_base_key_columns``, different job:
+    that one is a *pre*-check with a fixed subject (``feature_table`` must carry
+    time + entity) and says so in its message.
+    """
     missing = set(required) - set(columns)
     if missing:
         raise ValueError(f"Missing columns in {context}: {sorted(missing)}")

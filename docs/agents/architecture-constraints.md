@@ -219,14 +219,14 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:82-99
 
 含函式體內的延遲 import。
 
-守的不是風格，是**檔案切分的承重前提**：`scoping.py` 之所以不能併進 `month_plans.py`，唯一理由就是這條純度；
+守的不是風格，是**檔案切分的承重前提**：`steps/scoping.py` 之所以不能併進 `month_plans.py`，唯一理由就是這條純度；
 而該模組 436 行的測試（`tests/test_pipelines/test_dataset/test_month_plans.py`）不需要 SparkSession 也是靠它——這個 repo 的 Spark cold start 是 2–4 分鐘。
 一句沒有機制強制的「必須」會漂移（ADR-0002:21 那段三天就過時的補釘是前例）。
 
 **檢查**：兩個測試，缺一不可。
 
 1. **直接掃描**——AST 掃該模組所有 `Import`／`ImportFrom`（用 `ast.walk`，所以**函式體內的延遲 import** 一樣掃得到），root package 不得為 `pyspark`。
-2. **可達性**——沿 `pipelines/dataset/` 的同層 import 遞迴一跳以上，任何路徑都不得抵達 pyspark。缺了這條，`from recsys_tfb.pipelines.dataset.scoping import _date_filter` 會被第 1 條讀成「import 了 `recsys_tfb`」而放行，但該模組已經是 Spark-typed 了——而這正是本 repo 實際在用的 import 寫法。
+2. **可達性**——沿 `pipelines/dataset/` 的 import 遞迴一跳以上，任何路徑都不得抵達 pyspark。缺了這條，`from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date` 會被第 1 條讀成「import 了 `recsys_tfb`」而放行，但該模組已經是 Spark-typed 了——而這正是本 repo 實際在用的 import 寫法。**模組路徑必須按 `.` 展開成子路徑**（`...dataset.steps.scoping` → `dataset/steps/scoping.py`）：只取第一段會找到不存在的 `dataset/steps.py`，遞迴回傳「查無」，於是靜默放行——失效方向剛好是它要守的那一個。這條由一個「解析器跨得進子套件」的測試釘住，見 ADR-0008 第四節 2026-08-07 那段。
 
 **刻意不驗**「`pyspark` 不進 `sys.modules`」。那才是真正想要的性質，但它因為與本模組無關的理由不可能成立：`pipelines/__init__.py` → `core` → `io` → `models` → `mlflow`，終點是 `mlflow/types/schema.py` 自己那行 `import pyspark`。S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
 
@@ -236,10 +236,13 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 那條線由 [ADR-0008 第二節](../adr/0008-dataset-modules-split-by-role.md) 的**兩條判準**與**判定程序**定義：
 
 1. node body ＝ 具名步驟的組合，每個步驟名就是一個 ML 決策；
-2. 一個 helper 至多承載一個決策。
+2. 一個 helper 至多承載一個決策；
+3. 底線前綴 ＝ 只有本模組呼叫——`nodes.py` 呼叫得到的一律無底線（同節「底線前綴的判準」，同樣沒有機械檢查）。判準的範圍是 `pipelines/dataset/` 內部；**已知的界外違例**是 `nodes.py:77-80` 從 `recsys_tfb.preprocessing` import 的兩個底線函式，那個模組被 dataset 與 inference 共用，動它會碰到 inference（登記在 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 的「這條 ADR 沒有解決的事」）。看到它不必以為判準是裝飾。
 
 判定程序（把 helper 的名字換成純機械的名字，看 node 是否仍講得完整個 ML 故事）也在那一節。
 **新增或修改 dataset node 前先讀那一節**——判準只活在 ADR 裡等於對執行者不可見，而這份檔案才是路由表指定的必讀檔。
+
+**新模組放 `steps/` 還是根層**：只有 `nodes.py` 呼叫 → `steps/`；有 `pipelines/dataset/` 以外的 src 側消費者 → 根層（現況只有 `month_plans.py`，消費者是 `__main__.py`）。
 
 ---
 

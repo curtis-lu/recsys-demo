@@ -526,7 +526,7 @@ def weight_key_columns_unavailable(parameters: dict) -> list[str]:
     dataset_cfg = parameters.get("dataset", {}) or {}
     # Route through the file's own _prepare_model_input helper (as sibling
     # predicates do) and default only when the key is absent — matching
-    # _get_preprocessing_config, so an explicit `categorical_columns: []`
+    # prepare_model_input_config, so an explicit `categorical_columns: []`
     # is honoured rather than silently coerced to [schema["item"]].
     declared_cats = _prepare_model_input(parameters).get("categorical_columns")
     categorical_cols = declared_cats if declared_cats is not None else [schema["item"]]
@@ -1099,10 +1099,10 @@ def carry_column_collision_errors(
     - an identity column named in ``carry_columns`` is *not* copied a second
       time — a split's output columns are the identity key plus only the
       carry entries not already in it (``key_output_columns``,
-      ``pipelines/dataset/sampling.py``), and the base
+      ``pipelines/dataset/steps/sampling.py``), and the base
       key is coalesced by the join itself.
     - the label and non-categorical identity columns are excluded from
-      ``feature_columns`` by ``_compute_feature_columns`` regardless of
+      ``feature_columns`` by ``compute_feature_columns`` regardless of
       ``drop_columns``, so they never reach the feature side of the join.
 
     Verified by running the real ``build_model_input`` both ways: with an

@@ -11,13 +11,13 @@ date: 2026-08-02
 
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
-| `drop_columns` | **`feature_table`** 的欄 | `_compute_feature_columns`（`pipelines/dataset/feature_columns.py:33-62`） | 黑名單：不得進 `feature_columns` |
-| `carry_columns` | **`sample_pool`** 的欄 | `key_output_columns`（`pipelines/dataset/sampling.py`），由 `select_train_keys`／`select_calibration_keys` 呼叫 | 白名單：keys 除 identity 外還要多帶 |
+| `drop_columns` | **`feature_table`** 的欄 | `compute_feature_columns`（`pipelines/dataset/steps/feature_columns.py`） | 黑名單：不得進 `feature_columns` |
+| `carry_columns` | **`sample_pool`** 的欄 | `key_output_columns`（`pipelines/dataset/steps/sampling.py`），由 `select_train_keys`／`select_calibration_keys` 呼叫 | 白名單：keys 除 identity 外還要多帶 |
 | `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
 
 而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 選出的欄是
 base key ＋ 落在 feature_table 裡的 `feature_columns`（`encoded_frame_columns`，
-`pipelines/dataset/feature_columns.py`），被擋在 `feature_columns` 之外的欄不會進
+`pipelines/dataset/steps/feature_columns.py`），被擋在 `feature_columns` 之外的欄不會進
 `preprocessed_feature_table`。
 
 所以當某欄**同時**存在於 `sample_pool`（要 carry）與 `feature_table` 時，它必須列進
@@ -80,8 +80,8 @@ B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它�
 ```
 
 原因：key 選取只把**不在 identity key 裡**的 carry 欄另外附加
-（`key_output_columns`，`pipelines/dataset/sampling.py`），base key 又被 join 本身併攏；而 label 與
-非 categorical 的 identity 欄一律被 `_compute_feature_columns` 排除在 `feature_columns`
+（`key_output_columns`，`pipelines/dataset/steps/sampling.py`），base key 又被 join 本身併攏；而 label 與
+非 categorical 的 identity 欄一律被 `compute_feature_columns` 排除在 `feature_columns`
 之外，與 `drop_columns` 無關。對這些欄報錯，等於要求使用者做一次
 **零行為改變、卻會 bust `base_dataset_version` 的設定修改**——正是本 ADR 前面反對的那種代價。
 
@@ -90,7 +90,7 @@ B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它�
 
 ## 為什麼不清那 3 個結構性 no-op 項
 
-`snap_date` / `cust_id` / `label` 被 `_compute_feature_columns` 自己的
+`snap_date` / `cust_id` / `label` 被 `compute_feature_columns` 自己的
 `(identity − categorical) | {label}` 保證排除，列不列都一樣。但
 `dataset.prepare_model_input` 進 `base_dataset_version` 的 hash
 （`core/versioning.py:112-117` 只剝 `ALL_SAMPLING_KEYS` 與 `COVERAGE_ONLY_KEYS`），
@@ -99,7 +99,7 @@ B1+B5+B6+B7，所以兩則會同時出現、**B6 那則排在前面**，而它�
 
 `apply_start_date` / `apply_end_date` **不算冗餘**。它們對這份 `feature_table` 沒作用，
 但對另一份部署可能是承重的——「來源表由使用者自定義」是這個框架的前提，設定不該假設
-`feature_table` 的形狀。同理，`_warn_missing_drop_columns` 那個 WARNING 是誠實地說
+`feature_table` 的形狀。同理，`warn_missing_drop_columns` 那個 WARNING 是誠實地說
 「這張表沒有這欄」，不是缺陷的自白。
 
 ## split 之間的 schema 不對稱是推導結果，不是疏漏

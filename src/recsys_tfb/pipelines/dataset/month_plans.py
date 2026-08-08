@@ -18,8 +18,8 @@ definition where a reviewer can see it. See ADR-0007.
 ``docs/agents/architecture-constraints.md``. Every question here is answered from
 config and a zero-scan partition listing, so its tests need no SparkSession, and
 this repo's Spark cold start is 2-4 minutes. Turning a plan into a filter needs a
-Spark ``Column`` and therefore lives next door in ``scoping.py``; that split is
-the whole reason S2 exists.
+Spark ``Column`` and therefore lives in ``steps/scoping.py``; that split is the
+whole reason S2 exists.
 """
 
 import logging

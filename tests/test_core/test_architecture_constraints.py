@@ -315,38 +315,84 @@ def _imported_roots(path):
     return found
 
 
-def _spark_reachable_from(path, _seen=None):
-    """First chain of dataset-sibling imports from ``path`` that reaches pyspark.
+def _dataset_module_targets(path, package_root):
+    """Files inside the dataset package that ``path`` imports.
 
-    Returns e.g. ``["month_plans.py", "scoping.py"]``, or None. Only siblings in
-    ``pipelines/dataset/`` are followed -- the point is the purity of one module,
-    not a whole-tree dependency audit.
+    Each import form is resolved against the base it was written against:
+    a relative name from the importer's own directory (one level up per extra
+    dot), an absolute-within-package name from ``package_root``.
+
+    Three things a first-segment-only scan gets wrong once a subpackage exists.
+    All three fail the same way -- a path that does not exist reads as "reaches
+    nothing", so S2 passes on a module that does reach Spark (ADR-0008 §4):
+
+    * **every dotted segment is kept**: ``...dataset.steps.scoping`` is
+      ``steps/scoping.py``, not ``steps.py``;
+    * **the imported names are candidate modules too**: ``from .steps import
+      scoping`` puts the module in ``node.names``, not in ``node.module``;
+    * **the package itself is a valid module value**: ``from
+      recsys_tfb.pipelines.dataset import month_plans`` has no trailing dot to
+      match on.
+
+    Both candidates are emitted for every ``from X import y`` because only the
+    filesystem can say whether ``y`` is a module inside package ``X`` or a name
+    inside module ``X``. Candidates that do not exist are skipped by the caller,
+    so over-emitting costs nothing and under-emitting is a false green.
+    """
+    prefix = "recsys_tfb.pipelines.dataset."
+    pairs = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            pairs += [(package_root, a.name[len(prefix):]) for a in node.names
+                      if a.name.startswith(prefix)]
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            base, inner = path.parents[node.level - 1], node.module or ""
+        elif node.module == prefix.rstrip("."):
+            base, inner = package_root, ""
+        elif node.module and node.module.startswith(prefix):
+            base, inner = package_root, node.module[len(prefix):]
+        else:
+            continue
+        if inner:
+            pairs.append((base, inner))
+        pairs += [(base, f"{inner}.{a.name}" if inner else a.name)
+                  for a in node.names]
+    return [base.joinpath(*name.split(".")).with_suffix(".py")
+            for base, name in pairs]
+
+
+def _spark_reachable_from(path, package_root=None, _seen=None):
+    """First chain of dataset-package imports from ``path`` that reaches pyspark.
+
+    Returns e.g. ``["month_plans.py", "scoping.py"]``, or None. Only modules
+    under ``pipelines/dataset/`` are followed -- the point is the purity of one
+    module, not a whole-tree dependency audit.
 
     This hop is what makes S2 mean anything. A direct-import scan reads
-    ``from recsys_tfb.pipelines.dataset.scoping import _date_filter`` as an
-    import of ``recsys_tfb`` and says nothing, while the module it just pulled in
-    is the Spark-typed one -- and absolute-within-package is the import form this
-    repo actually writes.
+    ``from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date``
+    as an import of ``recsys_tfb`` and says nothing, while the module it just
+    pulled in is the Spark-typed one -- and absolute-within-package is the import
+    form this repo actually writes.
+
+    ``package_root`` is where an absolute-within-package name resolves from; it
+    defaults to the real dataset package and is overridden only by the tmp-tree
+    test that pins the subpackage hop.
     """
+    package_root = DATASET if package_root is None else package_root
     _seen = _seen if _seen is not None else set()
     if path in _seen or not path.exists():
         return None
     _seen.add(path)
 
-    siblings = []
-    for root, _ in _imported_roots(path).items():
+    for root in _imported_roots(path):
         if root.lstrip(".") == "pyspark":
             return [path.name]
-        if root.startswith("."):
-            siblings.append(root.lstrip("."))
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            prefix = "recsys_tfb.pipelines.dataset."
-            if node.module.startswith(prefix):
-                siblings.append(node.module[len(prefix):].split(".")[0])
 
-    for sibling in siblings:
-        chain = _spark_reachable_from(path.parent / f"{sibling}.py", _seen)
+    for target in _dataset_module_targets(path, package_root):
+        chain = _spark_reachable_from(target, package_root, _seen)
         if chain:
             return [path.name] + chain
     return None
@@ -356,7 +402,7 @@ class TestS1DatasetNodesAreDefinedInNodesModule:
     """S1: every dataset node is ``def``-ed in ``pipelines/dataset/nodes.py``.
 
     Defined-here, not imported-here, and that difference is the whole point:
-    ``nodes.py`` gaining one ``from .sampling import some_step`` line would
+    ``nodes.py`` gaining one ``from .steps.sampling import some_step`` line would
     satisfy "the pipeline imports it from nodes.py" while the function body
     still lived elsewhere -- which is the shape ADR-0008 exists to remove.
     """
@@ -383,7 +429,7 @@ class TestS1DatasetNodesAreDefinedInNodesModule:
 class TestS2MonthPlansStaysPure:
     """S2: ``pipelines/dataset/month_plans.py`` must not import pyspark.
 
-    Load-bearing, not stylistic: it is the only reason ``scoping.py`` is a
+    Load-bearing, not stylistic: it is the only reason ``steps/scoping.py`` is a
     separate file, and the condition under which that module's tests run without
     paying this repo's 2-4 minute Spark cold start (ADR-0008 section 4).
 
@@ -407,7 +453,7 @@ class TestS2MonthPlansStaysPure:
         assert "pyspark" not in found, (
             "month_plans.py imported pyspark at line(s) "
             f"{found.get('pyspark')} (S2). Spark-typed work belongs in "
-            "scoping.py; see docs/agents/architecture-constraints.md."
+            "steps/scoping.py; see docs/agents/architecture-constraints.md."
         )
 
     def test_month_plans_reaches_no_spark_typed_sibling(self):
@@ -417,6 +463,45 @@ class TestS2MonthPlansStaysPure:
             "It imported a Spark-typed sibling, so its purity is gone even "
             "though no pyspark import appears in the file itself."
         )
+
+    def test_reachability_crosses_into_a_subpackage(self, tmp_path):
+        """The hop must enter ``steps/``, not look for a ``steps.py``.
+
+        Without this, the check above is decoration: resolving only the first
+        dotted segment points ``...dataset.steps.scoping`` at ``dataset/steps.py``,
+        a file that does not exist, so the recursion reports "nothing found" and
+        the assertion passes on a module that *does* reach Spark. The failure
+        direction is exactly the one S2 exists to catch, and no other test in this
+        file would go red for it (ADR-0008 section 4).
+
+        Four import forms are pinned, because they fail for two different
+        reasons. ``...steps.scoping`` hides the module in a dotted
+        ``node.module``; ``from .steps import scoping`` hides it in
+        ``node.names`` instead, and that form only becomes writable once a
+        subpackage exists -- so this move is what created it.
+        """
+        (tmp_path / "steps").mkdir()
+        (tmp_path / "steps" / "scoping.py").write_text(
+            "from pyspark.sql import functions as F\n"
+        )
+        cases = {
+            "abs_module.py":
+                "from recsys_tfb.pipelines.dataset.steps.scoping import "
+                "months_filter_as_date\n",
+            "rel_module.py":
+                "from .steps.scoping import months_filter_as_date\n",
+            "abs_package.py":
+                "from recsys_tfb.pipelines.dataset.steps import scoping\n",
+            "rel_package.py":
+                "from .steps import scoping\n",
+        }
+        for name, source in cases.items():
+            (tmp_path / name).write_text(source)
+
+        for name in cases:
+            assert _spark_reachable_from(
+                tmp_path / name, package_root=tmp_path,
+            ) == [name, "scoping.py"], f"{name}: the hop did not enter steps/"
 
 
 class TestR2FrameworkGlobalsRegistry:
