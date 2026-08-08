@@ -14,6 +14,11 @@
     python scripts/export_sanitized_artifacts.py --model-version 6059dcef \\
         [--eval-snap 20260131] [--out data/export_sanitized] \\
         [--id-pattern 'C\\d{6}'] [--mask-keep 2] [--dry-run] [--force]
+
+⚠ 上關前一定先跑 ``--dry-run`` 確認報告裡的 ``total_masked_hits > 0``。
+成敗完全綁在 ``--id-pattern`` 對不對得上真實格式：對不上就會遮 0 筆，而兜底掃描
+同樣抓 0 筆、**exit 0 靜默放行**——看起來成功，實際上個資原封不動被搬出去。
+遮罩數為 0 卻預期有值時，先確認 id 格式（例：外籍舊式居留證是 2 英文＋8 數字）。
 """
 
 from __future__ import annotations
