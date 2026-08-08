@@ -23,11 +23,11 @@ date: 2026-07-31
 
 - `val_snap_dates` 的資料經 `val_parquet_handle` 進入 LightGBM 的 `valid_sets` 並驅動 `early_stopping`（`models/lightgbm_adapter.py:81-102`），直接決定 `num_iterations` ── 決定模型本身。
 - `calibration_snap_dates` 決定校準後的模型輸出。
-- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`nodes_shared.py:31-33` 的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。
+- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`collect_dataset_snap_dates`（`pipelines/dataset/month_plans.py`）的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。（#170 之後，`fit_preprocessor_metadata` 自己也把這件事寫成具名決策——`pipelines/dataset/nodes.py` 的 `Decision — no leakage` 註解。）
 
 驗證過的支撐事實：
 
-- 前處理的編碼是**純逐列** map lookup（`preprocessing.py:71-95`），查的是只在 train 上 fit 的 `category_mappings`；整個 `apply_preprocessor_to_features` 唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。因此 test 日期不改變任何既有產物的**內容**。
+- 前處理的編碼是**純逐列** map lookup（`preprocessing.py` 的 `_encode_categoricals`），查的是只在 train 上 fit 的 `category_mappings`；整個 `apply_preprocessor_to_features` 唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。因此 test 日期不改變任何既有產物的**內容**。
 - `HiveTableDataset` 以 `partitionOverwriteMode=dynamic` 寫入（`io/hive_table_dataset.py:172-177`），只覆蓋 DataFrame 裡出現的 partition。因此新增月份是 **append**，既有月份的產物與評估報表原封不動。
 - 下游 `build_model_input` 一律以 keys 為驅動端 join features，而 keys 已按各 split 的日期過濾 ── 多出來的月份是惰性的，不會汙染任何 split。
 
