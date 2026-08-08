@@ -2214,3 +2214,49 @@ class TestSelectKeysOverrideLookup:
             _sampling_pool(spark),
             _sampling_params(group_keys=["label"], overrides={"0": 0.0}))
         assert self._survivors(df) == {1, 3}
+
+
+class TestDatasetStepTiming:
+    """``log_step`` marks the blocks that really cost time, not every block.
+
+    Spark is lazy: a block that only chains transformations builds a plan in
+    microseconds and the whole computation runs later, at the write. Timing
+    such a block reports a guaranteed ~0.00s, which reads exactly like "this
+    step was fast" — so only blocks that fire a Spark action carry a
+    ``log_step``.
+
+    The month-presence pre-check fires one (``distinct().collect()`` over the
+    time column, ``steps/scoping.py``), which is why it is timed.
+    """
+
+    @staticmethod
+    def _timed_steps(caplog) -> set:
+        return {
+            getattr(r, "step", None)
+            for r in caplog.records
+            if getattr(r, "event", None) == "step_completed"
+        }
+
+    def test_fit_times_its_month_presence_check(
+        self, spark, feature_table, parameters, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            fit_preprocessor_metadata(feature_table, parameters)
+
+        assert "require_months_present(train_snap_dates)" in self._timed_steps(caplog)
+
+    def test_apply_times_its_month_presence_check(
+        self, spark, feature_table, parameters, caplog
+    ):
+        import logging
+
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            apply_preprocessor_to_features(
+                feature_table, preprocessor, _encode_plan(parameters), parameters,
+            )
+
+        assert "require_months_present(snap_dates)" in self._timed_steps(caplog)

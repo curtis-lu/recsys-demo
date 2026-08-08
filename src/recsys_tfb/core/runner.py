@@ -73,6 +73,11 @@ class Runner:
                 },
             )
             node_start = time.time()
+            # Phase boundaries. With a lazy engine the node function returns a
+            # plan in milliseconds and the whole computation runs inside
+            # catalog.save(), so a single node duration cannot say which of the
+            # two is slow. These two marks are what separate them.
+            load_end = func_end = node_start
             _ctx = get_current_context()
 
             try:
@@ -85,11 +90,13 @@ class Runner:
                         inputs.append(catalog.get_dataset(name[1:]))
                     else:
                         inputs.append(catalog.load(name))
+                load_end = time.time()
 
                 # Execute
                 if _ctx is not None:
                     _ctx.current_node = node.name
                 result = node.func(*inputs)
+                func_end = time.time()
 
                 # Save outputs
                 if len(node.outputs) == 1:
@@ -135,13 +142,21 @@ class Runner:
 
             if _ctx is not None:
                 _ctx.current_node = ""
-            duration = time.time() - node_start
+            node_end = time.time()
+            duration = node_end - node_start
+            load_seconds = load_end - node_start
+            func_seconds = func_end - load_end
+            save_seconds = node_end - func_end
             logger.info(
-                "Node %s completed in %.2fs", node.name, duration,
+                "Node %s completed in %.2fs (load %.2fs, func %.2fs, save %.2fs)",
+                node.name, duration, load_seconds, func_seconds, save_seconds,
                 extra={
                     "event": "node_completed",
                     "node": node.name,
                     "duration_seconds": round(duration, 3),
+                    "load_seconds": round(load_seconds, 3),
+                    "func_seconds": round(func_seconds, 3),
+                    "save_seconds": round(save_seconds, 3),
                     "status": "success",
                     "input_names": list(node.inputs),
                     "output_names": list(node.outputs),

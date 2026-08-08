@@ -85,8 +85,14 @@ class JsonFormatter(logging.Formatter):
             log_entry["run_id"] = ctx.run_id
             log_entry["pipeline"] = ctx.pipeline
 
-        # Merge extra fields attached by callers (e.g. event, node, step, duration)
-        for key in ("event", "node", "step", "duration_seconds", "input_names",
+        # Merge extra fields attached by callers (e.g. event, node, step,
+        # duration). This is a whitelist: a field a caller sets but this tuple
+        # does not name reaches the console and never reaches the file, which
+        # is the one production reads. Adding an `extra` key means adding it
+        # here too.
+        for key in ("event", "node", "step", "duration_seconds",
+                     "load_seconds", "func_seconds", "save_seconds",
+                     "input_names",
                      "output_names", "status", "error_message",
                      "exception_type", "node_count", "dataset_name", "volume"):
             val = getattr(record, key, None)
