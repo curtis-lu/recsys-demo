@@ -356,7 +356,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 | Check | 驗證內容 | 常見失敗原因 |
 |---|---|---|
-| `chunk_row_count` | 算出來的列數等於讀進來的 entity 數 | 評分迴圈與它讀進來的 frame 不同步 |
+| `chunk_row_count` | 算出來的列數等於讀進來的 entity 數 | **設定造不出來**——長度不符時 pandas 在建構 `out_pdf` 就先 raise。這是對「建構保持列數不變」的迴歸防護，不是資料檢查 |
 | `no_missing` | entity identity、item、time、score 不可為 NULL | 上游 key／feature 異常或模型輸出缺值 |
 | `no_duplicates` | `time + entity + item` 不可重複 | 中間表的顆粒度不是 `(time, entity)` |
 | `item_values_are_known` | 寫出去的 identity item 值必須落在 `inference.products` 裡 | identity 欄被寫成整數 code（ADR-0010 §6 實跑重現過） |
@@ -368,7 +368,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 | `partition_completeness` | 評分節點說「應該存在」的分區集合，與 metastore 說「存在」的分區集合逐一相同 | 連續 save 互相覆蓋（缺分區）；`entity_buckets` 改過留下的舊桶（多分區） |
 | `completeness` | 每個 query group 恰有 `len(products)` 列 | feature join fan-out、候選遺漏 |
 | `rank_consistency` | rank 整體範圍為 `1..N`，且沿 rank 增加時 score 不可上升 | rank 被改寫或排序方向錯誤 |
-| `score_varies_within_group` | 每個 query group 內 `max(score) > min(score)` | 餵給模型的 item 值退化成常數，同一 entity 的所有 item 拿到相同分數 |
+| `score_varies_within_group` | 全平手的 query group **佔比**不得超過 `CONSTANT_GROUP_FAILURE_RATIO`（0.5）；未超過則只記 log | 餵給模型的 item 值退化成常數，同一 entity 的所有 item 拿到相同分數 |
 
 **為什麼要分：主要理由是失敗得更早，不是省成本。** 分數算錯若等到整批層才抓，代價是全部 chunk 算完、rank 也跑完——單月數小時的 pipeline 上，這是「十分鐘知道」與「四小時後知道」的差別。省成本是附帶的：塊層的資料本來就在 driver 的 pandas frame 上，而整批層每一條檢查都是對整張 Hive 表的一次掃描。整批層的 Spark action 因此從七次降到**兩次**（一次分組聚合同時回答 `completeness`、`score_varies_within_group` 與 rank 範圍；一次 window pass 看 score 與 rank 的順序），`partition_completeness` 一次都不用——它比的是 manifest 已經帶著的兩份清單。
 
@@ -376,7 +376,11 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 **`score_varies_within_group` 補的是資料層那一半。** `require_item_is_a_feature`（`pipelines/dataset/steps/feature_columns.py`）擋的是「設定漏了 item」，擋不住「設定對，但 pipeline 沒把正確的值餵進去」，而逐 chunk 評分把後者變成 driver 裡的一行。三層合起來是：config 層 `require_item_is_a_feature` → 塊層 `item_values_are_known` → 整批層 `score_varies_within_group`。
 
-它有一個**知情的**誤報空間：一個從不對 item 分裂的模型本來就會讓同一組的分數合法地相同。刻意沒有用「模型的 item feature importance > 0」的啟動斷言把它關掉——真的遇到時，它報的是一個應該有人看的模型品質問題。
+**它為什麼是比例而不是「有一組就紅」。** 平手不是只有這個 bug 才生得出來：`IsotonicRegression` 擬出來的是帶**平台**的單調函數，同一組的 raw score 全落在同一段平台時，校準後就完全相等——而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測（5 萬列校準資料、正例率約 5%、20 萬 entity × 8 item）：**20 萬組中有 61 組全平手（0.03%），未校準則是 0 組**。所以「有一組就紅」會讓每一次**正確**的 isotonic 執行都擋在發布前——正是乘積形式在小母體上誤報的同一種形狀。
+
+它要抓的故障在四個數量級之外：item 值退化是**程式碼**寫的，套用到每一個 chunk，會讓 **100%** 的組全平手。門檻取一半，是「大多數組」這個說法最粗的邊界。未超過門檻的平手仍然記 warning——那些組的組內排名確實是任意的，沉默會讓它無從查起。
+
+另一個**知情的**誤報空間：一個從不對 item 分裂的模型本來就會讓同一組的分數合法地相同。刻意沒有用「模型的 item feature importance > 0」的啟動斷言把它關掉——真的遇到時，它報的是一個應該有人看的模型品質問題。
 
 **`score_range`（分數介於 `[0, 1]`）已刪除，而且是刪除不是搬家。** 套了校準的路徑上，`[0, 1]` 由校準器的建構方式保證，這條斷言結構上不可能紅；未校準的 ranking objective（A7 允許、`inference.use_calibration: false` 明文支援）輸出的是無界實數，這條斷言是誤報。裝飾品或錯的，沒有第三種情形（ADR-0011 §2）。`tests/test_pipelines/test_inference/test_validation.py::TestScoreRangeIsGone` 釘住它保持刪除狀態。
 

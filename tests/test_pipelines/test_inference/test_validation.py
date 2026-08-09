@@ -5,6 +5,7 @@ The other layer's tests are in ``test_chunk_validation.py`` and need no Spark.
 has to run here.
 """
 
+import logging
 from datetime import date
 
 import pytest
@@ -88,6 +89,10 @@ class ActionCountingFrame:
     asked for yet.
     """
 
+    #: Broader than what the node uses today, deliberately. The point is to
+    #: notice an action the node *starts* using — a list narrowed to `count`
+    #: and `collect` would let a new `toPandas()` through silently, which is
+    #: the regression this class exists to catch.
     _ACTIONS = frozenset({
         "count", "collect", "toPandas", "take", "first", "head", "show",
         "foreach", "toLocalIterator",
@@ -285,23 +290,46 @@ class TestScoreVariesWithinGroup:
     two).
     """
 
-    def test_a_group_that_scores_every_product_identically(self, spark, parameters):
+    def test_every_group_scoring_every_product_identically(self, spark, parameters):
         """Every other check stays green on this frame, which is the point.
 
-        The group is complete, the ranks are 1..3, and the lag check compares
+        The groups are complete, the ranks are 1..3, and the lag check compares
         with ``>`` so a tie does not violate it. Only this check sees it.
         """
         ranked, manifest = _make_valid_data(spark)
-        ranked = ranked.withColumn(
-            "score",
-            F.when(F.col("cust_id") == "C001", F.lit(0.5))
-            .otherwise(F.col("score")),
-        )
+        ranked = ranked.withColumn("score", F.lit(0.5))
         with pytest.raises(ValidationError) as exc_info:
             validate_predictions(ranked, manifest, parameters)
         assert [f["check"] for f in exc_info.value.failures] == [
             "score_varies_within_group"
         ]
+
+    def test_a_few_tied_groups_are_logged_and_published(
+        self, spark, parameters, caplog
+    ):
+        """A correct isotonic run looks like this, so it must not block publication.
+
+        ``IsotonicRegression`` fits a monotone function with plateaus: a group
+        whose raw scores all land on one plateau comes out exactly tied with
+        nothing wrong upstream. Measured on a synthetic fit — 61 of 200,000
+        groups (0.03%) tied, against zero uncalibrated. A ``> 0`` rule would
+        fail every correct run at production scale, which is the false alarm
+        the product-form partition count was rejected for.
+
+        Still logged: a tied group's internal ranking really is arbitrary, and
+        silence would make it unfindable.
+        """
+        ranked, manifest = _make_valid_data(spark, n_customers=10)
+        ranked = ranked.withColumn(
+            "score",
+            F.when(F.col("cust_id") == "C001", F.lit(0.5))
+            .otherwise(F.col("score")),
+        )
+        with caplog.at_level(logging.WARNING):
+            result = validate_predictions(ranked, manifest, parameters)
+
+        assert result.count() == 30
+        assert "1 of 10 query group(s)" in caplog.text
 
     def test_a_single_item_configuration_is_not_a_failure(self, spark):
         """A group of one cannot vary, so flagging it would be a false alarm.
@@ -378,11 +406,7 @@ class TestMultipleFailures:
                 (F.col("cust_id") == "C001")
                 & (F.col("prod_name") == "exchange_fx")
             )
-        ).withColumn(
-            "score",
-            F.when(F.col("cust_id") == "C002", F.lit(0.5))
-            .otherwise(F.col("score")),
-        )
+        ).withColumn("score", F.lit(0.5))
         with pytest.raises(ValidationError) as exc_info:
             validate_predictions(ranked, manifest, parameters)
         assert {f["check"] for f in exc_info.value.failures} == {
@@ -438,6 +462,10 @@ class TestWhichLayerEachCheckLivesIn:
         )
 
         assert triggered == set(BATCH_CHECKS)
+        # Equality, not a subset: it is also the "reports nothing from the
+        # chunk register" half. `no_missing` and `no_duplicates` reappearing
+        # here would mean the two layers had drifted back into one.
+        assert triggered.isdisjoint(CHUNK_CHECKS)
 
     def test_a_null_score_is_the_chunk_layer_s_problem(self, spark, parameters):
         """Nulls are checked where they are cheap and early, not here.
@@ -472,12 +500,9 @@ class TestWhichLayerEachCheckLivesIn:
         )
         assert _failed_checks(duplicated, manifest, parameters) == {"completeness"}
 
-    def test_the_two_registers_stay_disjoint(self):
-        assert set(BATCH_CHECKS).isdisjoint(CHUNK_CHECKS)
-
 
 class TestBatchLayerActionBudget:
-    """AC: the whole-table layer costs 2-3 Spark actions, down from seven.
+    """AC: the whole-table layer costs 2-3 Spark actions. It landed at 2.
 
     Nothing in the validation *result* can see this number, so it needs its own
     assertion — see :class:`ActionCountingFrame`.

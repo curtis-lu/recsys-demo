@@ -166,7 +166,21 @@ chunk 層   item_values_are_known       ← 值不是產品名（已實跑重現
 **刻意不加 `score_finite`（非 NaN／±inf）**：它是 `score_range` 唯一真正在防的東西，但抓不到
 上面任何一種故障。
 
-> **三則更正（#190 實作時）。**
+> **四則更正（#190 實作時）。**
+>
+> **零、`score_varies_within_group` 不能是「有一組全平手就 raise」——那會擋掉每一次正確的
+> isotonic 執行。** 平手不是只有本節那個 bug 生得出來：`IsotonicRegression` 擬的是帶**平台**的
+> 單調函數（`models/calibrated_adapter.py:56-59`），同一組的 raw score 全落在同一段平台時，
+> 校準輸出就完全相等，而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測
+> （5 萬列校準資料、正例率約 5%、20 萬 entity × 8 item）：**20 萬組中 61 組全平手（0.03%），
+> 未校準則是 0 組**。本節第二段用「小母體上必然誤報」否決了乘積形式——同一把尺沒有拿起來量這條，
+> 是本 ADR 初稿的漏洞。
+>
+> 落地形式是**比例門檻**（`validation.CONSTANT_GROUP_FAILURE_RATIO = 0.5`）＋未超過門檻仍記
+> warning。它分開的是兩個實測相距四個數量級的區間：良性平手 0.03%，而 item 值退化是**程式碼**
+> 寫的、套用到每一個 chunk，會讓 **100%** 的組全平手。代價是誠實的：**部分**污染（例如續跑
+> 混到舊的壞 chunk）本來就看不見——那種情況下同一組裡有些 item 分數對、有些錯，組不會全平手，
+> 任何門檻都抓不到。
 >
 > **一、`score_varies_within_group` 要排除「組大小 1」，否則單 item 設定必然誤報。** 一組只有
 > 一列時 `max == min` 恆真，`len(products) == 1` 的設定於是每一次**正確**執行都會紅——與第三節
@@ -178,10 +192,21 @@ chunk 層   item_values_are_known       ← 值不是產品名（已實跑重現
 > `score_range` 同類，只是本 ADR 初稿沒發現。塊層的版本因此讀「進來的」frame 而不是「寫出去的」
 > frame，這也是 `validate_scored_chunk` 為什麼收兩個 frame。
 >
-> **三、`item_values_are_known` 沒有任何設定能讓它紅。** 寫出去的 identity item 就是迴圈變數，
-> 而迴圈變數來自 `inference.products`。它是**對那一行賦值的迴歸防護**（那一行這個 repo 已經寫
-> 錯過一次，ADR-0010 §6），不是資料層檢查——所以它的證據只能是 mutation 檢查，不會有設定層的
-> 測試。這跟第二節刪掉的 `score_range` 不同：`score_range` 是不管**程式碼**怎麼改都不可能紅。
+> 同一條檢查還有**一半是淨刪除、不是搬家**：舊版整批 `no_missing` 也看 `rank` 欄，而 rank 是
+> 排名節點才算出來的，塊層根本沒有它。判斷是可以刪（`row_number()` 不可能回傳 null），但這是
+> 刪除而不是下沉，記在這裡免得後人以為塊層接住了它。
+>
+> **三、`item_values_are_known` 與 `chunk_row_count` 都沒有任何設定能讓它們紅。**
+> 寫出去的 identity item 就是迴圈變數，而迴圈變數來自 `inference.products`；`out_pdf` 的列數由
+> 建構時一起餵進去的 entity 陣列與 score 陣列決定，長度不符時 pandas 先丟
+> `All arrays must be of the same length`，而 `entity` 不可能為空（A7）。兩條都是**對那幾行
+> 建構的迴歸防護**（identity item 那一行這個 repo 已經寫錯過一次，ADR-0010 §6），不是資料層
+> 檢查——所以它們的證據只能是 mutation 檢查，不會有設定層的測試。這跟第二節刪掉的 `score_range`
+> 不同：`score_range` 是不管**程式碼**怎麼改都不可能紅。
+>
+> 連帶的誠實話：**沒有任何一層看得見「一個 chunk 少了幾列」**。`partition_completeness` 比的是
+> 分區集合，看不到分區存在但內容短少；`completeness` 只看得到在場的組。第三節那條「桶有分區
+> 卻讀回零列就 raise」守的是整桶消失，不是部分消失。
 
 **刻意不加 `feature_importance()["prod_name"] > 0` 的啟動斷言**：它驗的是**模型**會不會用 item
 特徵。有它的話 `score_varies_within_group` 的誤報空間會被關掉（一個從不對 item 分裂的模型，
@@ -280,7 +305,11 @@ view = {**preprocessor, "feature_columns": model.feature_names()}
 驗完後才被觸碰」不衝突——下沉的檢查是額外的早期攔截，不是取代閘門。但**文件上必須明說哪些
 檢查在哪一層**，否則下一個人加檢查時不知道該加哪邊。第三節那張表就是那份說明。
 
-**六個檢查變成七個**（刪 1、加 2），而整批層的 Spark action 從 8 降到 2–3。
+**六個檢查變成八個**，而整批層的 Spark action 從 **7** 降到 **2**（起點不是 8，見第三節的更正）。
+落地的帳：刪 `score_range`；`no_missing`、`no_duplicates` 下沉；原本的列數檢查裂成兩條——
+chunk 版的 `chunk_row_count`（第三節的表本來就規劃了它）與整批版的 `partition_completeness`
+（#188 已做）；新增 `item_values_are_known` 與 `score_varies_within_group`。初稿寫的「刪 1、加 2」
+沒算到那次分裂。
 
 **`no_duplicates` 從「220M 列的 shuffle 去重」降級成「結構保證 ＋ 一行 pandas 斷言」。** 這個
 降級依賴 ADR-0010 的分區設計（bucket 對 entity 互斥）——那條 ADR 若被推翻，這條要跟著回頭。

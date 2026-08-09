@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.inference.validation import (
     BATCH_CHECKS,
     CHUNK_CHECKS,
@@ -17,8 +18,7 @@ from recsys_tfb.pipelines.inference.validation import (
     validate_scored_chunk,
 )
 
-IDENTITY_COLS = ["snap_date", "cust_id", "prod_name"]
-ENTITY_COLS = ["cust_id"]
+SCHEMA = get_schema({})
 PRODUCTS = ["exchange_fx", "fund_stock", "fund_bond"]
 SNAP_DATE = "2024-03-31"
 
@@ -45,13 +45,7 @@ def _chunk(cust_ids=("C001", "C002", "C003"), scores=None, item="exchange_fx"):
 
 
 def _validate(out, source, **overrides):
-    kwargs = {
-        "identity_cols": IDENTITY_COLS,
-        "entity_cols": ENTITY_COLS,
-        "item_col": "prod_name",
-        "score_col": "score",
-        "known_items": PRODUCTS,
-    }
+    kwargs = {"schema": SCHEMA, "known_items": PRODUCTS}
     kwargs.update(overrides)
     validate_scored_chunk(out, source, **kwargs)
 
@@ -121,6 +115,28 @@ class TestNoDuplicates:
         assert _failed_checks(out, source) == {"no_duplicates"}
 
 
+class TestChunkRowCountIsAConstructionGuard:
+    """Named honestly: the node cannot produce a short chunk.
+
+    ``out_pdf`` is built by handing pandas the entity arrays and the score
+    array in one call, so a length disagreement raises ``All arrays must be of
+    the same length`` before this check runs, and ``entity`` cannot be empty
+    (A7). Like ``item_values_are_known`` it guards the construction, not the
+    data — this test exists so nobody reads it as protection against a chunk
+    that silently lost rows. Nothing in either layer sees one.
+    """
+
+    def test_pandas_refuses_the_mismatch_before_validation_can_see_it(self):
+        source = pd.DataFrame({"cust_id": ["C001", "C002", "C003"]})
+        with pytest.raises(ValueError, match="All arrays must be of the same"):
+            pd.DataFrame({
+                "cust_id": source["cust_id"].astype(str).values,
+                "score": [0.5, 0.6],
+                "snap_date": SNAP_DATE,
+                "prod_name": "exchange_fx",
+            })
+
+
 class TestItemValuesAreKnown:
     def test_an_integer_code_in_the_identity_column(self):
         """The failure ADR-0011 §1 reproduced on a real run.
@@ -178,14 +194,7 @@ class TestWhichLayerEachCheckLivesIn:
         out, source = _chunk(item="not_a_product")
         triggered |= _failed_checks(out, source)
         assert triggered == set(CHUNK_CHECKS)
-
-    def test_the_chunk_layer_reports_nothing_from_the_batch_register(self):
-        """A chunk cannot answer a batch question: it holds exactly one item.
-
-        ``completeness``, ``rank_consistency`` and ``score_varies_within_group``
-        all compare a query group's items against each other, and there is only
-        ever one here — so a chunk check named after any of them would be
-        checking something it cannot see.
-        """
-        out, source = _chunk(scores=[np.nan, 0.5, 0.6], item="not_a_product")
-        assert _failed_checks(out.iloc[:2], source).isdisjoint(BATCH_CHECKS)
+        # Equality, not a subset: it is also the "reports nothing from the
+        # batch register" assertion. A chunk holds one item, so a check named
+        # `completeness` or `score_varies_within_group` here would be checking
+        # something it structurally cannot see — and this would go red.

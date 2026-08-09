@@ -18,6 +18,7 @@ from recsys_tfb.pipelines.inference.chunk_plans import (
 )
 from recsys_tfb.pipelines.inference.validation import (
     BATCH_CHECKS,
+    CONSTANT_GROUP_FAILURE_RATIO,
     ValidationError,
     validate_scored_chunk,
 )
@@ -664,13 +665,7 @@ def predict_and_write_scores(
                 # first chunk stops the run in minutes instead of surviving
                 # until `validate_predictions` hours later.
                 validate_scored_chunk(
-                    out_pdf,
-                    bucket_pdf,
-                    identity_cols=identity_cols,
-                    entity_cols=entity_cols,
-                    item_col=item_col,
-                    score_col=score_col,
-                    known_items=items,
+                    out_pdf, bucket_pdf, schema=schema, known_items=items,
                 )
                 # No model_version column: `partition_filter` owns it. The
                 # catalog's save injects it from the same
@@ -926,15 +921,31 @@ def validate_predictions(
         # `row_number` happened to pick. Every shape check stays green through
         # that: the group is complete, the ranks are 1..N, and the lag check's
         # `>` is false on a tie (ADR-0011 §1, example two).
+        #
+        # A *proportion*, not `> 0`, and that is load-bearing — see
+        # CONSTANT_GROUP_FAILURE_RATIO. A handful of tied groups is what a
+        # correct isotonic run looks like; it is logged, not raised.
         if summary["n_constant"] > 0:
-            failures.append({
-                "check": "score_varies_within_group",
-                "detail": (
-                    f"{summary['n_constant']} of {summary['n_groups']} groups "
-                    f"score every product identically; ranking within them is "
-                    f"arbitrary"
-                ),
-            })
+            constant_ratio = summary["n_constant"] / max(summary["n_groups"], 1)
+            logger.warning(
+                "%d of %d query group(s) (%.3f%%) score every product "
+                "identically; their internal ranking is arbitrary. Ties are "
+                "expected in small numbers when a calibrator maps a group's "
+                "raw scores onto one plateau.",
+                summary["n_constant"], summary["n_groups"],
+                100 * constant_ratio,
+            )
+            if constant_ratio > CONSTANT_GROUP_FAILURE_RATIO:
+                failures.append({
+                    "check": "score_varies_within_group",
+                    "detail": (
+                        f"{summary['n_constant']} of {summary['n_groups']} "
+                        f"groups ({100 * constant_ratio:.1f}%) score every "
+                        f"product identically, above the "
+                        f"{100 * CONSTANT_GROUP_FAILURE_RATIO:.0f}% threshold; "
+                        f"the item value reaching the model is likely constant"
+                    ),
+                })
 
         # 4. rank_consistency — ranks are 1..N and ordered by score desc
         if summary["min_rank"] != 1 or summary["max_rank"] != n_products:

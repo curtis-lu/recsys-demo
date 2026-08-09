@@ -20,9 +20,12 @@ minutes and four hours.
 A check belongs to the batch layer when it needs rows a single chunk cannot
 hold — one chunk is one item, so anything that compares a query group's items
 against each other has to wait for the whole table. Everything else belongs to
-the chunk layer. ``tests/test_pipelines/test_inference/test_validation.py``
-pins the two lists behaviourally, so a check that drifts back into the wrong
-layer turns something red.
+the chunk layer.
+
+The two lists are pinned behaviourally, one file per layer, so a check that
+drifts into the wrong one turns something red:
+``tests/test_pipelines/test_inference/test_chunk_validation.py`` covers the
+chunk half, ``…/test_validation.py`` the batch half.
 """
 
 from collections.abc import Collection
@@ -58,6 +61,29 @@ BATCH_CHECKS = (
     "score_varies_within_group",
 )
 
+#: What fraction of query groups may score every item identically before
+#: ``score_varies_within_group`` fails the run. Below it, the tied groups are
+#: logged and publication continues.
+#:
+#: **Not a tuning knob — it separates two measured regimes.** A tie is not
+#: only produced by the bug this check hunts. ``IsotonicRegression`` fits a
+#: monotone function with *plateaus*, so a group whose raw scores all land on
+#: one plateau comes out exactly tied even though everything upstream is
+#: correct — and ``training.calibration.method: isotonic`` is a supported
+#: setting. Measured on a synthetic fit (50k calibration rows at a ~5%
+#: positive rate, 200k entities x 8 items): **61 of 200,000 groups tied
+#: (0.03%)**, against **zero** on the uncalibrated scores. At production scale
+#: a ``> 0`` rule would therefore block every correct isotonic run — the same
+#: shape of false alarm that sank the product-form partition count on small
+#: populations (ADR-0011 §3).
+#:
+#: The failure it does have to catch sits four orders of magnitude away: a
+#: degenerate item value is written by *code*, so it applies to every chunk and
+#: ties **100%** of groups. Anywhere between the two regimes works; a half is
+#: the coarsest boundary that names "most groups", which is what the failure
+#: looks like and what no benign mechanism produces.
+CONSTANT_GROUP_FAILURE_RATIO = 0.5
+
 
 class ValidationError(Exception):
     """Raised when inference output fails sanity checks."""
@@ -75,10 +101,7 @@ def validate_scored_chunk(
     out_pdf: pd.DataFrame,
     source_pdf: pd.DataFrame,
     *,
-    identity_cols: list[str],
-    entity_cols: list[str],
-    item_col: str,
-    score_col: str,
+    schema: dict,
     known_items: Collection[str],
 ) -> None:
     """Check one chunk's scores before it is written. Raises :class:`ValidationError`.
@@ -104,17 +127,29 @@ def validate_scored_chunk(
     demonstrates it. That is a different thing from the ``score_range`` check
     ADR-0011 §2 deleted, which was unreddable no matter what the *code* did.
 
+    ``chunk_row_count`` is in the same category, and more weakly so. The caller
+    builds ``out_pdf`` by handing pandas the entity arrays and the score array
+    together, so a length disagreement raises ``All arrays must be of the same
+    length`` at construction, before this ever runs — and ``entity`` cannot be
+    empty (A7). It is a guard on that construction staying row-preserving, not
+    a check on the data. Do not read it as protection against a short chunk;
+    nothing in either layer sees one.
+
     Args:
         out_pdf: the frame about to be handed to ``save()``.
         source_pdf: the bucket's features this chunk was scored from, before any
             string coercion.
-        identity_cols: ``[time] + entity + [item]``; the duplicate key.
-        entity_cols: the identity columns whose nulls have to be read off
-            ``source_pdf``.
-        item_col: the identity item column.
-        score_col: the score column.
+        schema: ``core.schema.get_schema(parameters)``. Taken whole rather than
+            unpacked into four column arguments that would always travel
+            together — every other node in this pipeline reads its column roles
+            the same way.
         known_items: the items this run is configured to score.
     """
+    identity_cols = schema["identity_columns"]
+    entity_cols = schema["entity"]
+    item_col = schema["item"]
+    score_col = schema["score"]
+
     failures: list[dict] = []
 
     n_in, n_out = len(source_pdf), len(out_pdf)
@@ -146,8 +181,14 @@ def validate_scored_chunk(
             "detail": f"{n_dupes} duplicate rows on {identity_cols}",
         })
 
+    # ``str`` on both sides. The item column comes back from pandas with
+    # whatever dtype the frame carries, while ``inference.products`` is
+    # whatever YAML parsed — and the schema is configurable, so an integer item
+    # is a legal instantiation of this framework. Comparing 3 against "3" would
+    # fail every correct run of one.
     unknown = sorted(
-        {str(value) for value in out_pdf[item_col].unique()} - set(known_items)
+        {str(value) for value in out_pdf[item_col].unique()}
+        - {str(value) for value in known_items}
     )
     if unknown:
         failures.append({
