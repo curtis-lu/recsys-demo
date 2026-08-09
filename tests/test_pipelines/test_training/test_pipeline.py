@@ -27,16 +27,25 @@ class TestTrainingPipeline:
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
-        # @training_eval_predictions: catalog handle for predict_and_write_test_predictions
-        # training_eval_predictions: Spark-loaded by compute_test_mAP_spark
+        # training_eval_predictions: Spark-loaded by compute_test_mAP_spark.
+        # The same table is also written by predict_and_write_test_predictions,
+        # but that is a `writes` declaration, not an input -- see
+        # test_predict_node_declares_its_write_target.
         expected = {
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
             "preprocessor", "parameters",
-            "@training_eval_predictions",
             "training_eval_predictions",
         }
         assert pipeline.inputs == expected
+
+    def test_predict_node_declares_its_write_target(self):
+        """R1's one registered write site, visible on the node definition."""
+        pipeline = create_pipeline()
+        writes = {n.name: n.writes for n in pipeline.nodes if n.writes}
+        assert writes == {
+            "predict_and_write_test_predictions": ["training_eval_predictions"],
+        }
 
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()

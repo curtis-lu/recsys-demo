@@ -10,8 +10,11 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 
-def _n(name, inputs=None, outputs=None):
-    return Node(func=lambda *a: None, inputs=inputs, outputs=outputs, name=name)
+def _n(name, inputs=None, outputs=None, writes=None):
+    return Node(
+        func=lambda *a: None,
+        inputs=inputs, outputs=outputs, writes=writes, name=name,
+    )
 
 
 def _chain():
@@ -101,16 +104,31 @@ class TestSliceFrom:
         assert [n.name for n in pipe.nodes] == ["B", "C"]
         assert plan.skipped == ("A",)
 
-    def test_at_handle_input_stripped(self):
-        # "@x" resolves dataset name x for can_load / producer lookup.
+    def test_write_target_expands_its_upstream_producer(self):
+        # A declared write target counts for can_load / producer lookup: the
+        # node reads back what is already there before deciding what to write,
+        # so an unloadable one still has to pull its producer in.
         nodes = [
             _n("P", outputs="x"),
-            _n("Q", inputs=["@x"], outputs="q"),
+            _n("Q", writes=["x"], outputs="q"),
         ]
         can_load = lambda name: name != "x"
         pipe, plan = Pipeline(nodes).slice_from("Q", can_load)
         assert [n.name for n in pipe.nodes] == ["P", "Q"]
         assert plan.auto_included == {"P": ("x",)}
+
+    def test_loadable_write_target_does_not_expand(self):
+        # Expansion is driven by can_load, not by the mere presence of
+        # `writes`. (This does not double as a check that `writes` is read at
+        # all -- dropping it from the scan leaves this one green; its
+        # counterpart above is what pins that.)
+        nodes = [
+            _n("P", outputs="x"),
+            _n("Q", writes=["x"], outputs="q"),
+        ]
+        pipe, plan = Pipeline(nodes).slice_from("Q", ALL_LOADABLE)
+        assert [n.name for n in pipe.nodes] == ["Q"]
+        assert plan.auto_included == {}
 
     def test_unknown_node_raises_with_available_names(self):
         with pytest.raises(ValueError, match="Unknown node 'nope'"):

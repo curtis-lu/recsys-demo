@@ -439,33 +439,237 @@ class TestNodePhaseTiming:
         assert phases >= rec.duration_seconds - 0.05
 
 
-def test_runner_resolves_at_prefix_input_to_dataset_handle():
-    """An input name starting with '@' should be resolved to the catalog
-    dataset INSTANCE (not the loaded data), so write-target nodes can call
-    `.save()` per-batch.
+class TestNodeWrites:
+    """``Node(writes=[...])`` — declared write targets (A1 / R1).
+
+    The node is handed the catalog dataset OBJECT rather than loaded data, so
+    it can drive its own partition write lifecycle: ``.save()`` per partition
+    and ``.existing_partition_values()`` to decide what to skip on a resume.
     """
-    from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
-    from recsys_tfb.core.node import Node
-    from recsys_tfb.core.pipeline import Pipeline
-    from recsys_tfb.core.runner import Runner
 
-    captured: dict = {}
+    @staticmethod
+    def _catalog(**datasets):
+        catalog = DataCatalog()
+        for name, ds in datasets.items():
+            catalog.add(name, ds)
+        return catalog
 
-    def node_fn(payload, write_ds):
-        captured["payload"] = payload
-        captured["write_ds"] = write_ds
-        return {"ok": True}
+    def test_write_target_is_handed_over_as_the_catalog_dataset_object(self):
+        captured: dict = {}
 
-    catalog = DataCatalog()
-    catalog.add("payload", MemoryDataset(data={"hello": "world"}))
-    sentinel_ds = MemoryDataset(data="sentinel-data")
-    catalog.add("sink", sentinel_ds)
+        def node_fn(payload, sink):
+            captured["payload"] = payload
+            captured["sink"] = sink
+            return {"ok": True}
 
-    pipeline = Pipeline([
-        Node(node_fn, inputs=["payload", "@sink"], outputs="manifest"),
-    ])
-    Runner().run(pipeline, catalog)
+        sentinel_ds = MemoryDataset(data="sentinel-data")
+        catalog = self._catalog(
+            payload=MemoryDataset(data={"hello": "world"}), sink=sentinel_ds,
+        )
 
-    assert captured["payload"] == {"hello": "world"}
-    # @sink resolves to the dataset HANDLE, not its data
-    assert captured["write_ds"] is sentinel_ds
+        Runner().run(
+            Pipeline([
+                Node(node_fn, inputs=["payload"], writes=["sink"], outputs="manifest"),
+            ]),
+            catalog,
+        )
+
+        assert captured["payload"] == {"hello": "world"}
+        # Identity, not equality: a write-only proxy wrapping the dataset would
+        # satisfy "can call .save()" but fail here -- and a resume needs to ask
+        # the real dataset what is already there.
+        assert captured["sink"] is sentinel_ds
+        assert captured["sink"].load() == "sentinel-data"
+
+    def test_write_targets_bind_by_keyword_not_position(self):
+        """The parameter name must equal the dataset name.
+
+        Positional binding would pin write targets to the tail of the
+        signature, colliding with this repo's "append a new optional input
+        last" convention.
+        """
+        captured: dict = {}
+
+        # Write parameters in the REVERSE of their `writes` order: positional
+        # binding would swap them (both are dataset objects, so nothing would
+        # raise); only keyword binding gets this right.
+        def node_fn(a, b, second_sink, first_sink):
+            captured.update(a=a, b=b,
+                            first_sink=first_sink, second_sink=second_sink)
+            return "done"
+
+        sink1, sink2 = MemoryDataset(data="one"), MemoryDataset(data="two")
+        catalog = self._catalog(
+            a=MemoryDataset(data="A"), b=MemoryDataset(data="B"),
+            first_sink=sink1, second_sink=sink2,
+        )
+
+        Runner().run(
+            Pipeline([
+                Node(
+                    node_fn,
+                    inputs=["a", "b"],
+                    writes=["first_sink", "second_sink"],
+                    outputs="manifest",
+                ),
+            ]),
+            catalog,
+        )
+
+        assert captured == {
+            "a": "A", "b": "B", "first_sink": sink1, "second_sink": sink2,
+        }
+
+    def test_displacing_a_write_target_fails_loudly(self):
+        """The regression this repo's own convention would otherwise cause.
+
+        `log_experiment` documents "new optional inputs go last, because the
+        Runner binds inputs positionally". Follow that on a writing node
+        without moving the write parameter and the extra input lands in the
+        write slot. Under POSITIONAL write binding that is silent -- the
+        trailing `=None` absorbs the arity error and the node gets a dict
+        where it expected a dataset. Keyword binding makes the same mistake
+        raise before the node body runs.
+        """
+        ran = []
+
+        def node_fn(model, sink, gate=None):
+            ran.append(True)
+            return "done"
+
+        catalog = self._catalog(
+            model=MemoryDataset(data="MODEL"),
+            gate_manifest=MemoryDataset(data={"gate": "GATE"}),
+            sink=MemoryDataset(data="hive"),
+        )
+        pipeline = Pipeline([
+            Node(
+                node_fn,
+                inputs=["model", "gate_manifest"],  # appended, write not moved
+                writes=["sink"],
+                outputs="manifest",
+            ),
+        ])
+
+        with pytest.raises(TypeError, match="multiple values for argument 'sink'"):
+            Runner().run(pipeline, catalog)
+        assert ran == []
+
+    def test_write_target_must_be_a_registered_catalog_entry(self):
+        ran = []
+
+        def node_fn(payload, nowhere):
+            ran.append(True)
+
+        catalog = self._catalog(payload=MemoryDataset(data=1))
+        pipeline = Pipeline([
+            Node(node_fn, inputs=["payload"], writes=["nowhere"], outputs="m"),
+        ])
+
+        with pytest.raises(ValueError, match="declares a write to 'nowhere'"):
+            Runner().run(pipeline, catalog)
+        assert ran == []
+
+    def test_a_node_output_is_not_enough_to_satisfy_a_write_target(self):
+        """Order-blindness made concrete.
+
+        `writes` carries no topological edge, so a producer declared later
+        would still run later -- and the writer would be handed the `None`
+        that `get_dataset` returns for an unregistered name. Rejecting this
+        up front is what keeps that silent failure unreachable.
+        """
+        got: dict = {}
+
+        catalog = self._catalog(seed=MemoryDataset(data="s"))
+        pipeline = Pipeline([
+            Node(lambda seed, shared: got.update(shared=shared) or "w",
+                 inputs=["seed"], writes=["shared"], outputs="wout", name="W"),
+            Node(lambda seed: "REAL", inputs=["seed"], outputs="shared",
+                 name="P"),
+        ])
+
+        with pytest.raises(ValueError, match="not a registered catalog entry"):
+            Runner().run(pipeline, catalog)
+        assert got == {}
+
+    def test_a_writer_can_read_back_and_its_save_persists(self):
+        """The round trip a resume depends on: read what is there, then save.
+
+        Note what this does NOT pin: a write target is structurally ineligible
+        for eviction (that needs ``_auto_created``, which only holds names
+        absent from the catalog, and a write target must be registered), so
+        adding `writes` to the eviction loop changes nothing and no assertion
+        here can catch it. The rule that makes it unreachable is the
+        registration check, which `test_a_node_output_is_not_enough...` pins.
+        """
+        seen: dict = {}
+        sink = MemoryDataset(data="before")
+
+        catalog = self._catalog(seed=MemoryDataset(data="payload"), sink=sink)
+        pipeline = Pipeline([
+            Node(lambda seed: seed, inputs=["seed"], outputs="mid", name="produce"),
+            Node(lambda mid, sink: seen.update(read_back=sink.load())
+                 or sink.save("after") or "w",
+                 inputs=["mid"], writes=["sink"], outputs="wout", name="write"),
+        ])
+
+        Runner().run(pipeline, catalog)
+
+        assert seen == {"read_back": "before"}      # readable when it ran
+        assert catalog.load("sink") == "after"      # and the save survived
+
+    def test_at_prefix_is_no_longer_a_handle_sigil(self):
+        """``writes`` replaces ``@``; a leftover ``@x`` must fail loudly.
+
+        Two spellings for one thing is the shape this ticket removes, so the
+        old one has to stop working -- visibly, and with a message that names
+        the replacement. Without the hint, the two most intuitive "fixes"
+        (register a catalog entry literally named ``@sink``, or drop the
+        ``@``) both silently load the whole table into the driver instead.
+        """
+        catalog = self._catalog(
+            payload=MemoryDataset(data=1), sink=MemoryDataset(data=2),
+        )
+        pipeline = Pipeline([
+            Node(lambda *a: None, inputs=["payload", "@sink"], outputs="m", name="n"),
+        ])
+
+        with pytest.raises(ValueError, match=r"requires input '@sink'") as exc:
+            Runner().run(pipeline, catalog)
+        assert "Node(writes=" in str(exc.value)
+        assert "#186" in str(exc.value)
+
+    def test_write_names_are_logged_on_every_node_event(self, caplog):
+        """F2: the Runner's structured log is where a node's I/O surfaces.
+
+        node_failed included: the phase split exists to locate a node killed
+        during its write, so the failure path has to say what it was writing.
+        """
+        catalog = self._catalog(
+            payload=MemoryDataset(data=1), sink=MemoryDataset(data=2),
+        )
+
+        def boom(payload, sink):
+            raise RuntimeError("kaboom")
+
+        ok = Pipeline([
+            Node(lambda payload, sink: "m", inputs=["payload"], writes=["sink"],
+                 outputs="manifest", name="ok"),
+        ])
+        bad = Pipeline([
+            Node(boom, inputs=["payload"], writes=["sink"], outputs="manifest",
+                 name="bad"),
+        ])
+
+        with caplog.at_level(logging.INFO):
+            Runner().run(ok, catalog)
+            with pytest.raises(RuntimeError):
+                Runner().run(bad, catalog)
+
+        events = {}
+        for r in caplog.records:
+            if getattr(r, "event", None):
+                events.setdefault(r.event, r)
+        assert events["node_started"].write_names == ["sink"]
+        assert events["node_completed"].write_names == ["sink"]
+        assert events["node_failed"].write_names == ["sink"]

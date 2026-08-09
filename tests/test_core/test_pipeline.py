@@ -47,10 +47,32 @@ class TestPipeline:
         assert "B" in names
         assert "C" not in names
 
+    def test_only_nodes_with_outputs_follows_write_targets(self):
+        """Counterpart of _slice_with_expansion, so it must agree with it.
+
+        B writes `x` and nothing else reads it, so counting only `inputs`
+        would drop A -- and the two "find my upstream" APIs would answer
+        differently for the same pipeline.
+        """
+        node_a = Node(func=source, outputs=["x"], name="A")
+        node_b = Node(func=source, writes=["x"], outputs=["y"], name="B")
+        filtered = Pipeline([node_a, node_b]).only_nodes_with_outputs(["y"])
+        assert sorted(n.name for n in filtered.nodes) == ["A", "B"]
+
     def test_inputs_property(self):
         node = Node(func=identity, inputs=["external"], outputs=["result"])
         pipe = Pipeline([node])
         assert pipe.inputs == {"external"}
+
+    def test_inputs_property_excludes_write_targets(self):
+        """A write target is not an input; the Runner validates it separately.
+
+        `sink` has no reader here, so if `writes` leaked into this property
+        it would show up -- which is what makes this assertion able to fail.
+        """
+        node = Node(func=identity, inputs=["external"], writes=["sink"],
+                    outputs=["result"])
+        assert Pipeline([node]).inputs == {"external"}
 
     def test_outputs_property(self):
         node = Node(func=source, outputs=["x", "y"])

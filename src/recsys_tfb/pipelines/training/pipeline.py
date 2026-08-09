@@ -137,8 +137,14 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=[
                 "model", "test_parquet_handle",
                 "preprocessor_view", "parameters",
-                "@training_eval_predictions",  # catalog handle for chunked save
             ],
+            # Chunked save: this node writes training_eval_predictions itself,
+            # one partition per .save(). Registered in R1 of
+            # docs/agents/architecture-constraints.md. The Runner binds write
+            # targets BY KEYWORD, so the signature's parameter name must stay
+            # `training_eval_predictions` -- and unlike the `quadrant_profiles`
+            # case below, a new optional input must NOT be appended after it.
+            writes=["training_eval_predictions"],
             outputs="predict_manifest",
         ),
         Node(

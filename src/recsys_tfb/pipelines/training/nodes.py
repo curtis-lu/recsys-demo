@@ -1084,7 +1084,7 @@ def predict_and_write_test_predictions(
     test_parquet_handle: dict[str, ParquetHandle],
     preprocessor_metadata: dict,
     parameters: dict,
-    training_eval_predictions,  # HiveTableDataset, supplied via @ runner prefix
+    training_eval_predictions,  # HiveTableDataset, supplied via Node(writes=...)
 ) -> dict:
     """Per-partition test prediction + Hive write, one month at a time.
 
