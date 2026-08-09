@@ -190,11 +190,11 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
   <text x="200" y="642" font-size="10.5" fill="#59636e">評分 → 排名</text>
   <g font-size="10.5" text-anchor="middle">
     <rect x="132" y="652" width="120" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
-    <text x="192" y="669">score_table</text>
+    <text x="192" y="669">unranked_pred</text>
     <rect x="262" y="652" width="146" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <text x="335" y="669">ranked_predictions</text>
   </g>
-  <text x="132" y="697" font-size="10" fill="#495057">score_table → rank_predictions → ranked_staging → validate_predictions → publish_predictions → ranked_predictions</text>
+  <text x="132" y="697" font-size="10" fill="#495057">unranked_predictions → rank_predictions → ranked_staging → validate_predictions → publish_predictions → ranked_predictions</text>
 
   <!-- inference -> evaluation 情境2 -->
   <polyline points="420,666 470,666 470,820 600,820" fill="none" stroke="#e8590c" stroke-width="1.6" marker-end="url(#ar)"/>
@@ -248,7 +248,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
   <a href="#evaluation_results">evaluation_results</a>
   <a href="#diagnostics">診斷 JSON ×3</a>
   <b>inference：</b>
-  <a href="#score_table">score_table</a>
+  <a href="#unranked_predictions">unranked_predictions</a>
   <a href="#ranked_predictions">ranked_staging / ranked_predictions</a>
   <b>evaluation：</b>
   <a href="#evaluation_report">evaluation_report</a>
@@ -498,17 +498,17 @@ C000010   0.83    1.92                1      （示意）</div>
 <!-- ===================== inference ===================== -->
 <h3>inference — model_version 層</h3>
 
-<div class="card" id="score_table">
-  <h4>score_table <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
+<div class="card" id="unranked_predictions">
+  <h4>unranked_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
   <div class="meta"><b>產生</b>：inference · predict_scores（model 對 X_score 評分；X_score 來自 feature_table → build_scoring_dataset → apply_preprocessor）　|
   <b>下游</b>：inference（rank_predictions）　|
-  <b>partition</b>：snap_date, prod_name, model_version</div>
+  <b>partition</b>：model_version（partition_filter）/ snap_date, prod_name</div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
   </table>
-  <div class="ex">snap_date=2026-02-28 / prod_name=prod_A / model_version=&lt;mv&gt;（partition）
+  <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
 cust_id   score
 C000010   0.83   （示意）</div>
 </div>
@@ -518,7 +518,7 @@ C000010   0.83   （示意）</div>
     <span style="font-size:11px;color:#59636e">（rank 後的 production 表；發布前 staging = ranked_staging）</span></h4>
   <div class="meta"><b>產生</b>：inference · rank_predictions → ranked_staging → validate_predictions（sanity checks）→ publish_predictions　|
   <b>下游</b>：evaluation 情境 2（prepare_eval_data，預設監控）　|
-  <b>partition</b>：snap_date, prod_name, model_version</div>
+  <b>partition</b>：model_version（partition_filter）/ snap_date, prod_name</div>
   <p class="note">production 由 <code>publish_predictions</code> 寫入，且只在 <code>validate_predictions</code> 通過後才執行：<code>rank_predictions</code> 先寫 <code>ranked_staging</code>，validate 讀它跑 sanity check，失敗即中止、production 不被寫（失敗批次留在 staging 供排查）。<code>ranked_predictions</code> 顯式宣告讓 evaluation 不跑 inference 也能 standalone 讀，避免 MemoryDataset fallback 靜默壞掉。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
@@ -526,7 +526,7 @@ C000010   0.83   （示意）</div>
     <tr><td>score</td><td>double</td><td><span class="role">score</span></td></tr>
     <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次）</td></tr>
   </table>
-  <div class="ex">snap_date=2026-02-28 / prod_name=prod_A / model_version=&lt;mv&gt;（partition）
+  <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
 cust_id   score   rank
 C000010   0.83    1      （示意）</div>
 </div>

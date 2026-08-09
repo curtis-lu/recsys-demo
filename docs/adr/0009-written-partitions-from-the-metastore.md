@@ -80,7 +80,7 @@ new    = [p for p in after if _partition_key(p) not in before]
 
 ## 代價：不再逐位精確，而且盲點打在哪要說清楚
 
-以下只談走 metastore 快照的那 14 個條目。
+以下只談走 metastore 快照的那 14 個條目（本 ADR 當下的數字；#187 之後是 17 個，見上方註記）。
 
 | 節點類型 | 每次寫入的分區 | `new` 是否精確 |
 |---|---|---|

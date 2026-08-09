@@ -349,7 +349,7 @@ unranked_predictions
 | `parameters_inference.json` | driver-local JSON | 同上 | 保存本次 inference 設定 |
 | `latest` | symlink | `data/inference/latest` | 指向最近成功完成的 inference run 目錄 |
 
-三張表的分區欄都是 `model_version, snap_date, item`（實體目錄順序即此順序），斜線前的 `model_version` 是 catalog 的 `partition_filter`、後面兩個是 `partition_cols`。這個形狀與 training 的 `training_eval_predictions` 相同。
+三張表的分區欄都是 `model_version, snap_date, item`（實體目錄順序即此順序），斜線前的 `model_version` 是 catalog 的 `partition_filter`、後面兩個是 `partition_cols`。`partition_filter` 這一半與 training 的 `training_eval_predictions` 相同。
 Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際包含的 `snap_date + item` partitions（`model_version` 由 filter 固定），其他模型與日期不受影響。
 表格中的 `snap_date` 與 `item` 表示 schema 角色；實際 partition 欄名以 `catalog.yaml` 為準。
 

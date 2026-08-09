@@ -327,7 +327,10 @@ enriched_eval_predictions:
 # --- Inference pipeline — 三張輸出表共用的分區形狀 ---
 # 三張都是 `partition_filter: model_version` 加上 `partition_cols: snap_date,
 # prod_name`，與 training_eval_predictions 同構。那不是巧合——同一個問題已經被
-# 解過一次（ADR-0009 §「那 3 張沒有 partition_filter 的 inference 表」）。
+# 解過一次（ADR-0009，其「這條 ADR 沒有解決的事」那條就是這三張表，#187 把它劃掉）。
+#
+# 注意 partition_cols 這一半在票 D 會再動：`unranked_predictions` 屆時多一個
+# entity_bucket（ADR-0010 §5 的表），另外兩張不變。
 #
 # 為什麼 model_version 是 filter 而不是 partition_col：一次 publish 就是一個
 # model_version，所以 load 可以直接發 `WHERE model_version = '…'`，而 save 之後

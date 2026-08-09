@@ -91,20 +91,32 @@ class TestInferenceTablesPartitionByModelVersionFilter:
             part_names = [c["name"] for c in d[name]["partition_cols"]]
             assert "model_version" not in part_names, name
 
-    def test_partition_cols_are_snap_date_then_prod_name(self):
+    def test_partition_cols_start_with_snap_date_then_prod_name(self):
+        """前兩欄釘死；**尾巴刻意不釘**。
+
+        ADR-0010 §5 的表給 `unranked_predictions` 第三個 partition_col
+        `entity_bucket`，那是票 D（逐 chunk 評分）的東西，不在本票範圍。斷言寫成
+        「開頭是這兩欄」而不是「就是這兩欄」，票 D 加欄時這條不必改也不會假綠——
+        它守的是 model_version 沒有偷偷混回 partition_cols。
+        """
         d = _load_catalog()
         for name in INFERENCE_OUTPUT_TABLES:
-            assert [
-                (c["name"], c["type"]) for c in d[name]["partition_cols"]
-            ] == [("snap_date", "STRING"), ("prod_name", "STRING")], name
+            head = [(c["name"], c["type"]) for c in d[name]["partition_cols"]][:2]
+            assert head == [
+                ("snap_date", "STRING"), ("prod_name", "STRING")
+            ], name
 
-    def test_shape_matches_training_eval_predictions(self):
-        """三張表修完之後與訓練端的預測表同構——那不是巧合，是同一個問題。"""
+    def test_model_version_filter_matches_training_eval_predictions(self):
+        """與訓練端的預測表同構——那不是巧合，是同一個問題被解過第二次。
+
+        只比 `partition_filter`：那是 ADR-0010 §5 主張的那一半。`partition_cols`
+        今天恰好也相同，但票 D 會讓 `unranked_predictions` 岔開，所以不拿它當
+        同構的判準。
+        """
         d = _load_catalog()
         reference = d["training_eval_predictions"]
         for name in INFERENCE_OUTPUT_TABLES:
             assert d[name]["partition_filter"] == reference["partition_filter"], name
-            assert d[name]["partition_cols"] == reference["partition_cols"], name
 
 
 class TestNoWritableTableIsLeftOnTheFrameRescanPath:
