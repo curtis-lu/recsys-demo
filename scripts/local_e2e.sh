@@ -41,17 +41,20 @@ PY
 echo "▶ inference model_version=$MODEL_VERSION"
 run "$VENV" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION"
 
-# 分區目錄名必須是產品名。用 conf 的 inference.products 當期望值，不是 hard-code：
-# 這條 assert 要在「編碼值取錯清單」時也會紅，而 hard-code 的清單會跟著 conf 一起漂。
+# 分區目錄名必須是產品名。期望值從 conf 讀、不是 hard-code：hard-code 的清單會
+# 跟著 conf 一起漂，而這條 assert 要在「編碼值取錯清單」時仍然會紅。
+# 走 ConfigLoader 而不是直接讀 conf/base/*.yaml——pipeline 跑的是 --env local，
+# 要比對的就是它實際看到的那份值（今天 conf/local/ 不存在，兩者相同；哪天存在了，
+# 直接讀 base 會靜默比錯對象）。
 echo
 echo "▶ assert：三張推論表的 item 分區目錄名是產品名而非整數 code"
 "$VENV" - <<'PY'
 import sys
 from pathlib import Path
 
-import yaml
+from recsys_tfb.core.config import ConfigLoader
 
-params = yaml.safe_load(Path("conf/base/parameters_inference.yaml").read_text())
+params = ConfigLoader("conf", env="local").get_parameters()
 products = set(params["inference"]["products"])
 db = Path("data/local_warehouse/ml_recsys.db")
 

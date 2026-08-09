@@ -162,12 +162,17 @@ def apply_preprocessor(
     ]
     result = scoring_dataset.drop(*cols_to_drop)
 
-    # Decision — identity categoricals are not this frame's to encode, the same
-    # rule the dataset pipeline applies (nodes.py, apply_preprocessor_to_features).
-    # Encoding schema.item here would put its integer code in the identity
-    # position too, and that position is what becomes the partition directory
-    # name of all three inference tables: `prod_name=0` instead of
-    # `prod_name=exchange_fx`, with every sanity check still green (ADR-0010 §6).
+    # Decision — the item reaches the model as a code and the output as a name,
+    # so the encoding of identity categoricals waits for the driver, where it can
+    # be applied to a copy. Doing it here writes the code into the identity
+    # position as well, and that position becomes the partition directory name of
+    # all three inference tables: `prod_name=0` instead of `prod_name=exchange_fx`,
+    # with every sanity check still green (ADR-0010 §6).
+    #
+    # Cost, for ticket D: this frame is already exploded by |products|, so the
+    # warning's aggregation scans ~22x more rows than the values it reports need.
+    # The un-exploded frame does not exist yet at this point in the pipeline; when
+    # `inference_population_features` lands, this call moves onto it.
     with log_step(logger, "encode_categoricals"):
         encode_cols = encodable_categoricals(
             categorical_cols, result.columns, identity_cols,
@@ -251,12 +256,21 @@ def predict_scores(
     model_feature_names = (
         feature_names_fn() if callable(feature_names_fn) else None
     )
-    feature_columns = (
-        list(model_feature_names)
-        if model_feature_names
-        else artifact_feature_columns
-    )
-    require_ordered_subsequence(feature_columns, artifact_feature_columns)
+    if model_feature_names:
+        feature_columns = list(model_feature_names)
+        require_ordered_subsequence(feature_columns, artifact_feature_columns)
+    else:
+        # No declaration, so there is no second opinion to check the artifact
+        # against and the assertion is skipped rather than run against itself.
+        # Every adapter in this repo declares one once it holds a fitted model
+        # (LightGBMAdapter returns None only before load(); CalibratedModelAdapter
+        # forwards to its base), so this branch is doubles in tests, not
+        # production — and it is logged rather than silent for that reason.
+        feature_columns = list(artifact_feature_columns)
+        logger.info(
+            "Model declares no feature_names(); falling back to the "
+            "preprocessor's %d feature columns", len(feature_columns),
+        )
     missing_features = sorted(set(feature_columns) - set(X_score.columns))
     if missing_features:
         raise ValueError(
