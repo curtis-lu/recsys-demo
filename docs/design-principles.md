@@ -267,7 +267,9 @@ Fail-fast 的目的不是盡快拋出第一個 exception，而是把錯誤放在
 
 ### 發布前採 staging／validate／publish
 
-inference 不會直接將排名結果寫入 production `ranked_predictions`。流程先產生 `ranked_staging`，接著執行六項 sanity checks，全部通過後才由 `publish_predictions` 回傳並寫入 production table。
+inference 不會直接將排名結果寫入 production `ranked_predictions`。流程先產生 `ranked_staging`，接著執行整批層 sanity checks，全部通過後才由 `publish_predictions` 回傳並寫入 production table。
+
+驗證分兩層：塊層在評分迴圈裡逐 chunk 跑（缺值、重複、列數、item 值域），整批層在 staging 上跑一次（分區完整性、組完整性、名次一致性、組內分數變異）。分兩層是為了**早失敗**——分數算錯不必等全部 chunk 算完才知道；staging／validate／publish 這道閘門本身沒有變，塊層是額外的早期攔截而不是取代它。哪一條在哪一層見 `docs/pipelines/inference.md` §6.1。
 
 驗證失敗時：
 

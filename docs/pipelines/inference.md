@@ -278,9 +278,9 @@ python -m recsys_tfb inference \
 | 階段 | Node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 母體 × 特徵 | `build_inference_population_features` | `inference_population`、`feature_table`、`preprocessor`、parameters | 篩日期取母體 `(time, entity)`、left-join 接回 feature columns、分 entity 桶、套用訓練時的 categorical mappings 與 float32 casting。**不含 item 展開；identity 類別欄不在此編碼** | `inference_population_features`（Hive） |
-| 逐 chunk 評分 | `predict_and_write_scores` | `model`、`inference_population_features`、`preprocessor`、parameters | 外層迴圈桶、內層迴圈 item；一桶的特徵讀進 driver 一次，內層就地覆寫 item 那一欄重複使用。每個 `(桶, item)` 算完立刻寫成**恰好一個分區**。分區已存在的 chunk 跳過 | `score_manifest`（記憶體）；資料經 `writes=` 落地到 `unranked_predictions` |
+| 逐 chunk 評分 | `predict_and_write_scores` | `model`、`inference_population_features`、`preprocessor`、parameters | 外層迴圈桶、內層迴圈 item；一桶的特徵讀進 driver 一次，內層就地覆寫 item 那一欄重複使用。每個 `(桶, item)` 算完先跑塊層 sanity checks（§6.1），通過才寫成**恰好一個分區**。分區已存在的 chunk 跳過 | `score_manifest`（記憶體）；資料經 `writes=` 落地到 `unranked_predictions` |
 | 組內排名 | `rank_predictions` | `unranked_predictions`、`score_manifest` | 先 `restrict_to_snap_dates` 裁掉歷史月份（模型版本由 catalog 的 `partition_filter` 擋掉），丟掉 `entity_bucket`，再依 `(time, entity)` 內 score 降冪產生 rank | `ranked_staging` |
-| 發布驗證 | `validate_predictions` | staging、`score_manifest` | 執行六項 sanity checks，任一失敗即拋出 `ValidationError` | `validated_predictions` |
+| 發布驗證 | `validate_predictions` | staging、`score_manifest` | 執行整批層 sanity checks（塊層在評分時已逐 chunk 跑過），任一失敗即拋出 `ValidationError` | `validated_predictions` |
 | 正式發布 | `publish_predictions` | validated rows | 將已驗證結果交由 catalog 寫入 production table | `ranked_predictions` |
 
 **評分節點的輸出是 manifest，不是資料。** 資料由節點自己逐分區 `save()` 到 `unranked_predictions`（`Node(writes=[...])`，登記在 `docs/agents/architecture-constraints.md` 的 R1）。`writes=` 刻意不建立拓樸相依邊，所以 manifest 就是那條邊：沒有它，排名可能被排在它要讀的分區存在之前。
@@ -348,20 +348,41 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 ## 6. 發布驗證與產物
 
-### 6.1 六項 sanity checks
+### 6.1 驗證分兩層
 
-`validate_predictions` 會收集本次執行範圍內的所有失敗，再以單一 `ValidationError` 中止：
+驗證跑在兩個地方。分界只有一條規則：**一個 chunk 只有一個 item，所以要把同一組的 item 互相比較的檢查在 chunk 內根本問不出來，其餘的都問得出來。** 哪一條在哪一層的唯一真實來源是 `src/recsys_tfb/pipelines/inference/validation.py` 的 `CHUNK_CHECKS` 與 `BATCH_CHECKS`；下面兩張表是它的白話版。兩層都是 collect-all——收集該層所有失敗，再以單一 `ValidationError` 中止，`failures` 帶著每個 check 的名稱與細節。
+
+**塊層**（`validate_scored_chunk`，每個 `(time, 桶, item)` chunk 寫出**前**跑一次；純 pandas、零 Spark action）：
+
+| Check | 驗證內容 | 常見失敗原因 |
+|---|---|---|
+| `chunk_row_count` | 算出來的列數等於讀進來的 entity 數 | **設定造不出來**——長度不符時 pandas 在建構 `out_pdf` 就先 raise。這是對「建構保持列數不變」的迴歸防護，不是資料檢查 |
+| `no_missing` | entity identity、item、time、score 不可為 NULL | 上游 key／feature 異常或模型輸出缺值 |
+| `no_duplicates` | `time + entity + item` 不可重複 | 中間表的顆粒度不是 `(time, entity)` |
+| `item_values_are_known` | 寫出去的 identity item 值必須落在 `inference.products` 裡 | identity 欄被寫成整數 code（ADR-0010 §6 實跑重現過） |
+
+**整批層**（`validate_predictions`，對 `ranked_staging` 全表跑一次）：
 
 | Check | 驗證內容 | 常見失敗原因 |
 |---|---|---|
 | `partition_completeness` | 評分節點說「應該存在」的分區集合，與 metastore 說「存在」的分區集合逐一相同 | 連續 save 互相覆蓋（缺分區）；`entity_buckets` 改過留下的舊桶（多分區） |
-| `score_range` | 所有 score 介於 `[0, 1]` | raw LTR score、模型輸出異常 |
-| `no_missing` | identity、score、rank 不可為 NULL | 上游 key／feature 異常或模型輸出缺值 |
 | `completeness` | 每個 query group 恰有 `len(products)` 列 | feature join fan-out、候選遺漏 |
 | `rank_consistency` | rank 整體範圍為 `1..N`，且沿 rank 增加時 score 不可上升 | rank 被改寫或排序方向錯誤 |
-| `no_duplicates` | `time + entity + item` 不可重複 | feature identity 重複、join fan-out |
+| `score_varies_within_group` | 全平手的 query group **佔比**不得超過 `CONSTANT_GROUP_FAILURE_RATIO`（0.5）；未超過則只記 log | 餵給模型的 item 值退化成常數，同一 entity 的所有 item 拿到相同分數 |
 
-錯誤物件的 `failures` 會保存每個 check 的名稱與細節，log 也會一次列出所有已發現問題。
+**為什麼要分：主要理由是失敗得更早，不是省成本。** 分數算錯若等到整批層才抓，代價是全部 chunk 算完、rank 也跑完——單月數小時的 pipeline 上，這是「十分鐘知道」與「四小時後知道」的差別。省成本是附帶的：塊層的資料本來就在 driver 的 pandas frame 上，而整批層每一條檢查都是對整張 Hive 表的一次掃描。整批層的 Spark action 因此從七次降到**兩次**（一次分組聚合同時回答 `completeness`、`score_varies_within_group` 與 rank 範圍；一次 window pass 看 score 與 rank 的順序），`partition_completeness` 一次都不用——它比的是 manifest 已經帶著的兩份清單。
+
+**`no_missing` 的 entity 那一半讀的是「進來的」frame，不是「寫出去的」frame。** 寫出去的 entity identity 經過 `astype(str)`，NULL 會變成字串 `"None"`——對著輸出檢查等於一條結構上不可能紅的斷言。
+
+**`score_varies_within_group` 補的是資料層那一半。** `require_item_is_a_feature`（`pipelines/dataset/steps/feature_columns.py`）擋的是「設定漏了 item」，擋不住「設定對，但 pipeline 沒把正確的值餵進去」，而逐 chunk 評分把後者變成 driver 裡的一行。三層合起來是：config 層 `require_item_is_a_feature` → 塊層 `item_values_are_known` → 整批層 `score_varies_within_group`。
+
+**它為什麼是比例而不是「有一組就紅」。** 平手不是只有這個 bug 才生得出來：`IsotonicRegression` 擬出來的是帶**平台**的單調函數，同一組的 raw score 全落在同一段平台時，校準後就完全相等——而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測（5 萬列校準資料、正例率約 5%、20 萬 entity × 8 item）：**20 萬組中有 61 組全平手（0.03%），未校準則是 0 組**。所以「有一組就紅」會讓每一次**正確**的 isotonic 執行都擋在發布前——正是乘積形式在小母體上誤報的同一種形狀。
+
+它要抓的故障在四個數量級之外：item 值退化是**程式碼**寫的，套用到每一個 chunk，會讓 **100%** 的組全平手。門檻取一半，是「大多數組」這個說法最粗的邊界。未超過門檻的平手仍然記 warning——那些組的組內排名確實是任意的，沉默會讓它無從查起。
+
+另一個**知情的**誤報空間：一個從不對 item 分裂的模型本來就會讓同一組的分數合法地相同。刻意沒有用「模型的 item feature importance > 0」的啟動斷言把它關掉——真的遇到時，它報的是一個應該有人看的模型品質問題。
+
+**`score_range`（分數介於 `[0, 1]`）已刪除，而且是刪除不是搬家。** 套了校準的路徑上，`[0, 1]` 由校準器的建構方式保證，這條斷言結構上不可能紅；未校準的 ranking objective（A7 允許、`inference.use_calibration: false` 明文支援）輸出的是無界實數，這條斷言是誤報。裝飾品或錯的，沒有第三種情形（ADR-0011 §2）。`tests/test_pipelines/test_inference/test_validation.py::TestScoreRangeIsGone` 釘住它保持刪除狀態。
 
 **`partition_completeness` 取代了 #188 之前的 `row_count_match`**，因為後者的兩邊在新結構下都沒了：它比的是 ranked 列數對 `scoring_dataset` 列數，而未展開的 `inference_population_features` 比 ranked 輸出短 `len(products)` 倍，這個比較在每一次**正確**的執行上都會 fail；而且它讀的那個 frame 每次都要重跑一遍母體與特徵的 join。
 
