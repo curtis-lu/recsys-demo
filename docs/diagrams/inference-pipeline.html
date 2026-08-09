@@ -102,7 +102,11 @@
 （<code>nodes_spark.py:113-115</code>）——評分列數 = entity 數 × 日期數 × products 數。
 <code>inference.snap_dates</code> 這種純過濾條件仍然不畫。<br>
 <b>虛線邊 = 不是資料流</b>：宣告了但函式沒讀（<code>scoring_dataset → predict_scores</code>），
-或版本解析的相依（<code>model ⇢ preprocessor</code>）。
+或版本解析的相依（<code>model ⇢ preprocessor</code>）。<br>
+<b>⚠ 下面這張 SVG 停在 #185 之前。</b>來源 <code>inference-pipeline.mmd</code> 已更新，SVG 沒有——
+重繪需要 mermaid CLI，本環境不裝額外套件。差在兩處：<code>preprocessor</code> 現在<b>也</b>是
+<code>predict_scores</code> 的輸入（item 的整數 code 取自它的 <code>category_mappings</code>），
+而 <code>apply_preprocessor</code> 不再編碼 identity 類別欄。以 <code>.mmd</code> 為準。
 </p>
 
 <h2>流程圖</h2>

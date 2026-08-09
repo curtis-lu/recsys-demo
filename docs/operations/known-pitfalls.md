@@ -75,7 +75,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
 - core+cli+io+pipelines **組合跑**時有 2 個 Spark 整合測試互相干擾 fail；**單獨跑皆過**。看到只在組合跑才出現的 fail，先單獨重跑確認。
-- 【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs` 在 main 本來就 failing（單獨跑也紅、確定性）：PR#85 給 inference pipeline 加了 `inference_population` input，該 exact-set 斷言未同步。待獨立修（一行 additive）。
+- ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
 
 - 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。待獨立修。
 

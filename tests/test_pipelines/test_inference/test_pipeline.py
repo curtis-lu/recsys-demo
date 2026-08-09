@@ -10,7 +10,10 @@ class TestInferencePipeline:
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
-        assert pipeline.inputs == {"feature_table", "parameters", "preprocessor", "model"}
+        assert pipeline.inputs == {
+            "inference_population", "feature_table",
+            "preprocessor", "model", "parameters",
+        }
 
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
@@ -35,6 +38,10 @@ class TestInferencePipeline:
         production ranked_predictions 在驗證閘門的下游。"""
         pipeline = create_pipeline()
         by_output = {out: n for n in pipeline.nodes for out in n.outputs}
+        # predict_scores reads the preprocessor directly: the encoding of the
+        # identity categoricals apply_preprocessor deferred is applied per chunk,
+        # against a view built from the model's own declaration (ADR-0011 §5).
+        assert "preprocessor" in by_output["score_table"].inputs
         # rank_predictions: score_table -> ranked_staging
         assert by_output["ranked_staging"].name == "rank_predictions"
         assert "score_table" in by_output["ranked_staging"].inputs

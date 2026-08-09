@@ -58,12 +58,12 @@
 | HPO 搜尋診斷寫在 `tune_hyperparameters` **尾端**、不是新 DAG node | 這樣對 `RESUME_CONTRACTS` 隱形，`--from-node finalize_model` 跳過 HPO 的行為不變 |
 | `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
 | 已退場的診斷項目：`triage`／`quadrant`／`discrimination`／`pair_ledger`／`cross_purchase`／`offset_sweep`／`occupancy` | 勿復活 |
-| `pipelines/dataset/nodes.py` 與 `pipelines/inference/nodes_spark.py` 從 `recsys_tfb.preprocessing` import 帶底線的私有名（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 審查會建議改成公開名。#176 已把 `steps/` 內五個底線名去掉，**刻意沒動這兩個**——它們不在 `pipelines/dataset/` 內，改動會同時碰到 inference（本機難驗、撞既有 #63）。理由見 ADR-0008「這條 ADR 沒有解決的事」。不要順手改 |
+| `pipelines/dataset/nodes.py` 與 `pipelines/inference/nodes_spark.py` 從 `recsys_tfb.preprocessing` import 帶底線的私有名（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 審查會建議改成公開名。#176 已把 `steps/` 內五個底線名去掉，**刻意沒動這兩個**——rename 要同時改兩條 pipeline 的呼叫點，而它本身不修任何行為。同模組後來加入的 `encodable_categoricals`／`warn_unknown_encodings`（#185 從 `steps/` 搬來）用的是公開名，所以這個模組現在是混合命名的：那是刻意的現況，不是「還沒改完」。理由見 ADR-0008「這條 ADR 沒有解決的事」。不要順手改 |
 | 診斷報表的鐵則：**只呈現資料、不下結論** | 禁 severity／verdict／「該先查誰」／「偏高低」等替讀者詮釋或評級的字。完整原則見 `docs/operations/diagnosis-report-presentation.md` |
 
 ## 四、還沒有結論、卡住其他事的
 
-- **issue #63**（外部 inference `predict_scores` 對 `prod_name` 的特徵欄落差：item 同時是 identity 又是 feature，`apply_preprocessor` 的 `select(*identity, *feature)` 讓它出現兩次，`predict_scores` 取非 identity 欄時把它整個排除）。這是**既有落差**，不是哪次改動造成的，卡住本機 inference e2e 與 staged modeling 的 categorical 分群鍵編碼一致性。**用本機 local Spark 就能測**，不需要 Docker。
+- ~~**issue #63**（inference 的 item 特徵欄落差）~~ **已有結論**：由 #183 的票 A（issue #185）取代並修掉——item 在塊內佔兩個位置（identity 留字串、特徵放整數 code），特徵順序與子集的權威改為 `model.feature_names()`。論證見 ADR-0010 §4／§6 與 ADR-0011 §5；本機 local Spark 的實跑斷言在 `scripts/local_e2e.sh` 末段。**這一條留在這裡只是為了讓「#63 卡住 inference」這個舊說法有反駁；它不再卡任何東西。**
 - **HPO 後 SparkContext 被誰停掉（Layer 1）** 仍未證實。復原機制已修（偵測到死亡先清 Python 端單例再重建），但根因要叢集端證據，使用者只拿得到應用層 stdout/stderr。**下次失敗時怎麼判讀 `spark_context_dead` 事件，寫在 `src/recsys_tfb/utils/spark.py` 的模組註解**（含為什麼預設設定下該事件本身就排除了閒置回收）——不要憑本條摘要，去讀那段。另一個未驗證的取捨：重建＝在 YARN 上重新提交新 application，公司環境若對此有稽核限制，設計需調整。
 - **A1 稽核用 `nodes*.py` glob 當「模組含不含 node」的代理**（`tests/test_core/test_architecture_constraints.py:151`、`:169`），兩個方向都失準。**issue #163，仍 OPEN。**
   - 原本觸發這條的 `data_gate.py` 已在 #169 消失（它的 node 併進 `pipelines/dataset/nodes.py`），dataset 一帶改由 S1 守（要求每個 `Node(...)` 的第一參數必須 `def` 在 `nodes.py`），**#163 的 Q1 因此被繞開而非解決**——回報已留言在 #163。

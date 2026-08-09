@@ -1,12 +1,20 @@
 """Encoding and dtype mechanics shared by the dataset and inference pipelines.
 
 This module is what is left of the old ``preprocessing/`` package after #168:
-the two mechanisms that genuinely have callers on both sides of a pipeline
+the mechanisms that genuinely have callers on both sides of a pipeline
 boundary, plus the key contract of the artifact those two sides exchange.
 Everything else in that package had exactly one consumer and now lives with it.
 
-Both mechanisms are pure mechanism, not decision: ``_encode_categoricals``
-implements "unknown category -> sentinel" once the sentinel is chosen, and
+Membership follows that "callers on both sides" test, not history:
+``encodable_categoricals`` and ``warn_unknown_encodings`` moved here from
+``pipelines/dataset/steps/`` in #185, when the inference pipeline stopped
+encoding identity categoricals on the Spark side and became their second
+caller. Until then they had one consumer, and the same rule put them there.
+
+Everything here is mechanism, not decision: ``_encode_categoricals``
+implements "unknown category -> sentinel" once the sentinel is chosen,
+``encodable_categoricals`` implements "an identity categorical is not this
+frame's to encode" once identity is defined, and
 ``_cast_feature_floats_to_float32`` implements "numeric features converge on
 float32" once that convergence is decided. The decisions themselves are named
 by the callers' steps; see ADR-0008 section 2 for where that line is drawn.
@@ -14,6 +22,7 @@ by the callers' steps; see ADR-0008 section 2 for where that line is drawn.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, TypedDict
 
 from pyspark.sql import functions as F
@@ -21,6 +30,8 @@ from pyspark.sql import types as T
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
+
+logger = logging.getLogger(__name__)
 
 
 class PreprocessorMetadata(TypedDict):
@@ -79,6 +90,28 @@ gets its index in ``category_mappings``, so no valid value can collide with it.
 """
 
 
+def encodable_categoricals(
+    categorical_cols: list[str],
+    frame_cols: list[str],
+    identity_cols: list[str],
+) -> list[str]:
+    """The categoricals a Spark-side frame is entitled to encode itself.
+
+    Present in the frame, and not an identity column. An identity categorical
+    (``schema.item`` and friends) has a second life as an output key — the
+    dataset pipeline replaces it from ``keys`` at join time, and the inference
+    pipeline writes it to a partition column — so encoding it here either
+    encodes a column that is about to be replaced or, worse, ships the integer
+    code into a partition directory name (ADR-0010 section 6). Both pipelines
+    defer it to the driver instead, where ``io/extract.py::_pdf_to_X`` encodes
+    a *copy* and leaves the identity value alone.
+    """
+    return [
+        c for c in categorical_cols
+        if c in frame_cols and c not in identity_cols
+    ]
+
+
 def _encode_categoricals(
     df: DataFrame,
     categorical_cols: list[str],
@@ -109,6 +142,38 @@ def _encode_categoricals(
             ).cast("integer"),
         )
     return result
+
+
+def warn_unknown_encodings(
+    df: DataFrame,
+    columns: list[str],
+    *,
+    context: str,
+) -> None:
+    """Warn once per column that encoded any value to the unknown sentinel.
+
+    Single pass: one aggregation returns the sentinel count for every encoded
+    column at once. The per-column ``.count()`` this replaced re-scanned the
+    full multi-month feature_table once per categorical (N actions).
+
+    ``context`` names the calling node, because the two callers report on
+    different populations: the dataset side sees a value the *train months*
+    never showed, the inference side a value the *scoring population* holds but
+    the fit never saw. Both are the same sentinel and the same question — how
+    much of this frame fell outside the vocabulary — asked of different data.
+    """
+    if not columns:
+        return
+    unknown_counts = df.agg(*[
+        F.sum(F.when(F.col(c) == UNKNOWN_CATEGORY_CODE, 1).otherwise(0)).alias(c)
+        for c in columns
+    ]).collect()[0]
+    for col in columns:
+        n_unknown = unknown_counts[col] or 0
+        if n_unknown > 0:
+            logger.warning(
+                "%s: %d unknowns in column '%s'", context, n_unknown, col,
+            )
 
 
 def _cast_feature_floats_to_float32(
