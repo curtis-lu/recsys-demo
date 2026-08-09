@@ -15,9 +15,8 @@ milliseconds rather than behind a 2-4 minute SparkSession. Same reason
 this one follows.
 
 Translating the metastore's answer into :class:`ScoringChunk` tuples is the
-caller's job (``pipelines/inference/nodes_spark.py``), because that is where
-the schema's column names live and where a malformed partition value has to be
-logged.
+caller's job (``steps/partitions.py``), because that is where the schema's
+column names live and where a malformed partition value has to be logged.
 """
 
 from __future__ import annotations
@@ -172,3 +171,17 @@ def plan_scoring_chunks(
         rebuilt=tuple(rebuilt),
         surplus=tuple(surplus),
     )
+
+
+def as_rows(chunks) -> list[list]:
+    """Chunks as sorted plain lists, so the manifest stays JSON-shaped.
+
+    :class:`ScoringChunk` is a ``NamedTuple``, which survives a round trip
+    through this pipeline's in-memory catalog but not through anything that
+    serialises the manifest. Lists are what ``validate_predictions`` compares,
+    so the conversion happens once, here, rather than at each reader.
+
+    Sorted for the same reason the plan is: two runs that did the same work must
+    produce the same manifest, and a set's iteration order is not that.
+    """
+    return sorted(list(chunk) for chunk in chunks)

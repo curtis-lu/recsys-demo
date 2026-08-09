@@ -1,4 +1,4 @@
-"""Tests for inference pipeline Spark nodes."""
+"""Tests for the inference pipeline's nodes."""
 
 import logging
 
@@ -6,15 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.pipelines.inference.chunk_plans import ScoringChunk
-from recsys_tfb.pipelines.inference.nodes_spark import (
-    ENTITY_BUCKET_COL,
+from recsys_tfb.pipelines.inference.steps.chunk_plans import ScoringChunk
+from recsys_tfb.pipelines.inference.nodes import (
     build_inference_population_features,
     predict_and_write_scores,
     rank_predictions,
     validate_predictions,
 )
-from recsys_tfb.pipelines.inference.validation import ValidationError
+from recsys_tfb.pipelines.inference.steps.partitions import ENTITY_BUCKET_COL
+from recsys_tfb.pipelines.inference.steps.validation import ValidationError
 
 pytestmark = pytest.mark.spark
 
@@ -94,7 +94,7 @@ class FakeScoreTable:
 
     Note the whole double needs no Spark: the node hands ``save()`` a pandas
     frame it just built in the driver, which is also why
-    ``_require_single_partition`` can check the partition spread for free.
+    ``require_single_partition`` can check the partition spread for free.
     """
 
     def __init__(self, existing=()):
@@ -268,7 +268,7 @@ class TestBuildInferencePopulationFeatures:
     def test_feature_coverage_is_logged_per_month(self, spark, caplog):
         """The durable record of how many members had no features."""
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.inference.nodes_spark"
+            logging.INFO, logger="recsys_tfb.pipelines.inference.steps.population"
         ):
             build_inference_population_features(
                 _population(spark), _features(spark), _population_preprocessor(),
@@ -599,8 +599,8 @@ class TestPredictAndWriteScores:
         assert table.partitions_per_save() == [1, 1, 1]
 
     def test_a_frame_spanning_two_partitions_is_refused(self):
-        from recsys_tfb.pipelines.inference.nodes_spark import (
-            _require_single_partition,
+        from recsys_tfb.pipelines.inference.steps.partitions import (
+            require_single_partition,
         )
 
         pdf = pd.DataFrame({
@@ -611,7 +611,7 @@ class TestPredictAndWriteScores:
             ENTITY_BUCKET_COL: ["0", "0"],
         })
         with pytest.raises(ValueError, match="exactly one partition"):
-            _require_single_partition(pdf, PARTITION_COLS)
+            require_single_partition(pdf, PARTITION_COLS)
 
     def test_saved_columns_are_entity_score_and_partition_cols(
         self, population_features, preprocessor, parameters
@@ -1326,7 +1326,7 @@ class TestRestrictToSnapDates:
         }))
 
     def test_keeps_only_configured_snap_dates(self, spark, parameters):
-        from recsys_tfb.pipelines.inference.nodes_spark import (
+        from recsys_tfb.pipelines.inference.steps.scoping import (
             restrict_to_snap_dates,
         )
         out = restrict_to_snap_dates(self._frame(spark), parameters)
@@ -1336,7 +1336,7 @@ class TestRestrictToSnapDates:
 
     def test_does_not_touch_model_version(self, spark, parameters):
         """它不認得 model_version——兩種過濾合在一個 helper 正是被拆掉的東西。"""
-        from recsys_tfb.pipelines.inference.nodes_spark import (
+        from recsys_tfb.pipelines.inference.steps.scoping import (
             restrict_to_snap_dates,
         )
         parameters["model_version"] = "current"
@@ -1352,7 +1352,7 @@ class TestRestrictToSnapDates:
 
     def test_missing_snap_dates_raises(self, spark, parameters):
         """空的 scope 不得靜默退化成「全部留下」——那正是它要防的失效。"""
-        from recsys_tfb.pipelines.inference.nodes_spark import (
+        from recsys_tfb.pipelines.inference.steps.scoping import (
             restrict_to_snap_dates,
         )
         parameters["inference"]["snap_dates"] = []
@@ -1360,7 +1360,7 @@ class TestRestrictToSnapDates:
             restrict_to_snap_dates(self._frame(spark), parameters)
 
     def test_missing_time_column_raises(self, spark, parameters):
-        from recsys_tfb.pipelines.inference.nodes_spark import (
+        from recsys_tfb.pipelines.inference.steps.scoping import (
             restrict_to_snap_dates,
         )
         pdf = pd.DataFrame({"cust_id": ["C001"], "score": [0.5]})

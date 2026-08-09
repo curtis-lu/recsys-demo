@@ -94,7 +94,7 @@ class TestInferencePipeline:
         """
         import inspect
 
-        from recsys_tfb.pipelines.inference.nodes_spark import (
+        from recsys_tfb.pipelines.inference.nodes import (
             predict_and_write_scores,
         )
 

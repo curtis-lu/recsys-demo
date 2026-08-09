@@ -95,7 +95,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-09 量測共 65 個。這個數字每次改 node 都會變，所以**別引用它，重量一次**：
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-09 量測共 57 個。這個數字每次改 node 都會變，所以**別引用它，重量一次**：
 
 ```bash
 .venv/bin/python -c "
@@ -112,13 +112,15 @@ print(n, dict(b))"
 
 | 行數 | 個數 |
 |---|---|
-| ≤ 40 | 40 |
-| 41–80 | 13 |
+| ≤ 40 | 33 |
+| 41–80 | 12 |
 | 81–120 | 5 |
-| 121–160 | 2 |
-| > 160 | 5 |
+| 121–160 | 4 |
+| > 160 | 3 |
 
-最長的五個：`tune_hyperparameters` 228 行（`training/nodes.py`）、`predict_and_write_scores` 206 行（`inference/nodes_spark.py`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py`）、`validate_predictions` 171 行（`inference/nodes_spark.py`）、`build_inference_population_features` 169 行（`inference/nodes_spark.py`）。
+最長的五個：`predict_and_write_scores` 253 行（`inference/nodes.py`）、`tune_hyperparameters` 228 行（`training/nodes.py`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
+
+（總數從 #197 之前的 65 掉到 57，是因為 inference 的 8 個模組私有機制與 2 個公開非 node 函式搬進 `pipelines/inference/steps/`，那個掃描只看 `*nodes*.py`。同一次改動讓 `predict_and_write_scores` 從 206 行長到 253——`pipeline-node-design.md` G2 明說照判準寫的 node 會比一般長，因為 node 是一串決策而不是一個呼叫。）
 
 **這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（六成的 node 函式在 40 行內），下次寫一個新的時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
 
@@ -165,6 +167,12 @@ A3、A4 管整個 `src/recsys_tfb/`；S1、S2 只管 `pipelines/dataset/`。
   `test_static_coverage_floor` 把「58 個裡有 54 個可判定」釘住，這個盲區不會悄悄變大。
 - A1 的寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的間接寫入它看不到——
   `tune_hyperparameters` 正是這種，靠人工登記在 R4。
+- **A1 的 catalog 掃描與 R4 的寫入站點比對只讀 `pipelines/**/nodes*.py`**（`test_architecture_constraints.py:172`、`:190`
+  的 `rglob("nodes*.py")`）。所以**搬進 `steps/` 的程式碼不在這兩條的稽核範圍內**——`pipelines/dataset/steps/`
+  自 #176 起、`pipelines/inference/steps/` 自 #197 起（約 500 行）都是。
+  這不是豁免：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。
+  #197 當下實查過 `pipelines/inference/steps/` 零命中。要不要把 glob 放寬到 `pipelines/**/*.py`
+  是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）。
 
 ### A1. 資料流產物一律經 catalog；node 不得自己讀寫它們
 
@@ -252,19 +260,18 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 
 **刻意不驗**「`pyspark` 不進 `sys.modules`」。那才是真正想要的性質，但它因為與本模組無關的理由不可能成立：`pipelines/__init__.py` → `core` → `io` → `models` → `mlflow`，終點是 `mlflow/types/schema.py` 自己那行 `import pyspark`。S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
 
-### 動 dataset 的 node 之前：先讀 ADR-0008 第二節
+### 動任何一條 pipeline 的 node 之前：先讀 `pipeline-node-design.md`
 
-S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得出它做了什麼 ML 決定」。
-那條線由 [ADR-0008 第二節](../adr/0008-dataset-modules-split-by-role.md) 的**兩條判準**與**判定程序**定義：
+S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得出它做了什麼 ML 決定」——
+**一個 12 行的轉手 node 加一個裝著四個決策的 helper 完全滿足 S1**。那條線由
+[`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、
+決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring。全部沒有機械檢查，
+靠該檔節三的 checklist ＋ code review。
 
-1. node body ＝ 具名步驟的組合，每個步驟名就是一個 ML 決策；
-2. 一個 helper 至多承載一個決策；
-3. 底線前綴 ＝ 只有本模組呼叫——`nodes.py` 呼叫得到的一律無底線（同節「底線前綴的判準」，同樣沒有機械檢查）。判準的範圍是 `pipelines/dataset/` 內部；**已知的界外違例**是 `nodes.py` 從 `recsys_tfb.preprocessing` import 的兩個底線函式（`_encode_categoricals`、`_cast_feature_floats_to_float32`；同一個 import 區塊裡的另外兩個是公開名），那個模組被 dataset 與 inference 共用，rename 要同時改兩條 pipeline 的呼叫點（登記在 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 的「這條 ADR 沒有解決的事」，以及 `deliberate-non-goals.md`）。看到它不必以為判準是裝飾。
-
-判定程序（把 helper 的名字換成純機械的名字，看 node 是否仍講得完整個 ML 故事）也在那一節。
-**新增或修改 dataset node 前先讀那一節**——判準只活在 ADR 裡等於對執行者不可見，而這份檔案才是路由表指定的必讀檔。
-
-**新模組放 `steps/` 還是根層**：只有 `nodes.py` 呼叫 → `steps/`；有 `pipelines/dataset/` 以外的 src 側消費者 → 根層（現況只有 `month_plans.py`，消費者是 `__main__.py`）。
+那份是判準的唯一真實來源，適用於每一條 pipeline；
+[ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 保留為 dataset 那次裁決的記錄與完整論證。
+**已知的界外違例登記在該檔節五**（evaluation 與 training 兩條尚未依判準重整、
+`recsys_tfb.preprocessing` 的兩個底線名），看到它們不必以為判準是裝飾。
 
 ---
 

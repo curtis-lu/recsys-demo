@@ -5,6 +5,11 @@ date: 2026-08-05
 
 # dataset pipeline 依角色切模組：node 講 ML 決策，機制在具名 helper
 
+> **第二、三節的判準已一般化成跨 pipeline 的判準，真實來源改為
+> [`docs/agents/pipeline-node-design.md`](../agents/pipeline-node-design.md)**（#197 把同一組判準套到
+> inference 時搬出去的）。本 ADR 保留為 2026-08-05 那次決策的記錄與完整論證——要照著做，讀那份；
+> 要知道當初為什麼這樣決定，讀這份。兩者衝突時以那份為準。
+
 dataset 一帶已經改過三次（#152 月份計畫走 catalog、#159 preprocessing import 清理、
 #162 Layer-2 資料閘搬進 `pipelines/dataset/data_gate.py`），每一次都是對的，但沒有一次
 是朝著一個講得出來的形狀走——所以沒有「做完了」這個狀態。本 ADR 定義那個形狀，以及

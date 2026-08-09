@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.pipelines.inference.validation import (
+from recsys_tfb.pipelines.inference.steps.validation import (
     BATCH_CHECKS,
     CHUNK_CHECKS,
     ValidationError,
