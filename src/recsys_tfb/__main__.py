@@ -129,7 +129,9 @@ def _format_slice_plan(plan, total: int) -> list[str]:
         f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}",
     ]
     if plan.auto_included:
-        lines.append("[plan] auto-included (missing input -> producer re-run):")
+        lines.append(
+            "[plan] auto-included (missing input/write target -> producer re-run):"
+        )
         for name, missing in plan.auto_included.items():
             lines.append(f"[plan]   {name}  <- {', '.join(missing)}")
     if plan.skipped:

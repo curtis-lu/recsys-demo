@@ -38,11 +38,14 @@ class Runner:
 
         Since *nodes* are in topological order, iterating forward means
         the last assignment wins — which is exactly the last consumer.
+
+        Write targets are deliberately absent: a node that writes a dataset is
+        its producer, not its consumer, so treating the write as "last use"
+        would evict the very data the node just saved.
         """
         last_consumer: dict[str, object] = {}
         for node in nodes:
-            for inp in node.inputs:
-                name = inp[1:] if inp.startswith("@") else inp
+            for name in node.inputs:
                 last_consumer[name] = node
         return last_consumer
 
@@ -54,14 +57,34 @@ class Runner:
             available.add(name)
         for node in pipeline.nodes:
             available.update(node.outputs)
+        registered = set(catalog.list())
 
         for node in pipeline.nodes:
-            for inp in node.inputs:
-                name = inp[1:] if inp.startswith("@") else inp
+            for name in node.inputs:
                 if name not in available and not catalog.exists(name):
+                    hint = (
+                        " (the '@' handle sigil was removed in issue #186 —"
+                        " declare it as Node(writes=[...]) instead)"
+                        if name.startswith("@") else ""
+                    )
                     raise ValueError(
-                        f"Node '{node.name}' requires input '{inp}' "
-                        f"which is not in the catalog and not produced by any prior node"
+                        f"Node '{node.name}' requires input '{name}' "
+                        f"which is not in the catalog and not produced by "
+                        f"any prior node{hint}"
+                    )
+            # A write target must be a REGISTERED catalog entry, not merely
+            # something a node declares as an output. `available` above is
+            # order-blind, and `writes` carries no topological edge, so
+            # accepting a producer's output here would hand the node whatever
+            # get_dataset() happened to find — `None` if the producer has not
+            # run yet, silently.
+            for name in node.writes:
+                if name not in registered:
+                    raise ValueError(
+                        f"Node '{node.name}' declares a write to '{name}', "
+                        f"which is not a registered catalog entry. A write "
+                        f"target must exist in the catalog before the run "
+                        f"starts (a node output is not enough)."
                     )
 
         node_count = len(pipeline.nodes)
@@ -74,9 +97,7 @@ class Runner:
         consumed = set()
         for node in pipeline.nodes:
             produced.update(node.outputs)
-            consumed.update(
-                inp[1:] if inp.startswith("@") else inp for inp in node.inputs
-            )
+            consumed.update(node.inputs)
         intermediates = produced & consumed
 
         logger.info(
@@ -92,6 +113,7 @@ class Runner:
                     "node": node.name,
                     "input_names": list(node.inputs),
                     "output_names": list(node.outputs),
+                    "write_names": list(node.writes),
                 },
             )
             node_start = time.time()
@@ -104,21 +126,27 @@ class Runner:
             _ctx = get_current_context()
 
             try:
-                # Load inputs. An input name starting with '@' is resolved to
-                # the catalog dataset HANDLE (not loaded data), used by nodes
-                # that need to call .save() on the dataset themselves.
-                inputs = []
-                for name in node.inputs:
-                    if name.startswith("@"):
-                        inputs.append(catalog.get_dataset(name[1:]))
-                    else:
-                        inputs.append(catalog.load(name))
+                # Inputs bind positionally; write targets bind BY KEYWORD, so
+                # the parameter name must equal the dataset name. Positional
+                # would pin writes to the tail of the signature, which
+                # collides with this repo's "append a new optional input last"
+                # convention (see pipelines/training/pipeline.py): adding one
+                # input would shift the dataset object into the wrong slot
+                # and a trailing `param=None` would swallow the arity error.
+                # Each write target is the catalog dataset OBJECT — not loaded
+                # data, and not a write-only proxy: the node manages that
+                # dataset's partition write lifecycle, which includes asking
+                # it which partitions already exist.
+                inputs = [catalog.load(name) for name in node.inputs]
+                write_handles = {
+                    name: catalog.get_dataset(name) for name in node.writes
+                }
                 load_end = time.time()
 
                 # Execute
                 if _ctx is not None:
                     _ctx.current_node = node.name
-                result = node.func(*inputs)
+                result = node.func(*inputs, **write_handles)
                 func_end = time.time()
 
                 # Save outputs
@@ -153,6 +181,7 @@ class Runner:
                         "exception_type": type(exc).__name__,
                         "input_names": list(node.inputs),
                         "output_names": list(node.outputs),
+                        "write_names": list(node.writes),
                     },
                 )
 
@@ -188,6 +217,7 @@ class Runner:
                     "status": "success",
                     "input_names": list(node.inputs),
                     "output_names": list(node.outputs),
+                    "write_names": list(node.writes),
                 },
             )
 
@@ -195,8 +225,12 @@ class Runner:
             # Only release true intermediates (produced AND consumed within this
             # pipeline) that were auto-created. External inputs and terminal outputs
             # are preserved for cross-pipeline use.
-            for inp in node.inputs:
-                name = inp[1:] if inp.startswith("@") else inp
+            # Write targets cannot appear here at all: eviction requires
+            # ``_auto_created`` (catalog.py, populated only for names absent
+            # from the catalog), while a write target must be registered
+            # before the run starts. Keep those two rules together — loosen
+            # the validation and a writer would start evicting its own save.
+            for name in node.inputs:
                 if (last_consumer.get(name) is node
                         and name in intermediates
                         and name in catalog._auto_created):

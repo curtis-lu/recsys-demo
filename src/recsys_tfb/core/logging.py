@@ -75,7 +75,7 @@ JSON_EXTRA_FIELDS = (
     # Runner / node execution
     "event", "node", "step",
     "duration_seconds", "load_seconds", "func_seconds", "save_seconds",
-    "input_names", "output_names", "status", "error_message",
+    "input_names", "output_names", "write_names", "status", "error_message",
     "exception_type", "node_count", "dataset_name", "volume",
     # Hive writes
     "insert_seconds", "partition_count", "new_partitions",

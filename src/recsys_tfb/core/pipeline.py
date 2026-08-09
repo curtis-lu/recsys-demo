@@ -12,7 +12,7 @@ class SlicePlan:
     Pure description — printing and assertions only, no runtime behavior.
     ``auto_included`` records, per pulled-in node, the missing dataset(s)
     that triggered inclusion (first trigger only when one node feeds the
-    same producer twice).
+    same producer twice). A trigger can be an input or a write target.
     """
 
     mode: str                                  # "from" | "only"
@@ -36,7 +36,13 @@ class Pipeline:
 
     @property
     def inputs(self) -> set[str]:
-        """Dataset names required but not produced by any node."""
+        """Dataset names read as input but not produced by any node.
+
+        Write targets are **not** included: they are not inputs, and the
+        Runner validates them separately against the catalog (a write target
+        must already be a registered entry). A dataset that is both written
+        and read shows up here because of the read.
+        """
         all_outputs = set()
         for node in self._nodes:
             all_outputs.update(node.outputs)
@@ -111,8 +117,11 @@ class Pipeline:
 
         while queue:
             node = queue.popleft()
-            for inp in node.inputs:
-                producer = output_to_node.get(inp)
+            # Write targets count as upstream here too, matching
+            # _slice_with_expansion — the two are counterparts and must give
+            # the same answer to "what does this node depend on".
+            for name in (*node.inputs, *node.writes):
+                producer = output_to_node.get(name)
                 if producer is not None and producer not in needed:
                     needed.add(producer)
                     queue.append(producer)
@@ -164,8 +173,10 @@ class Pipeline:
         queue = deque(requested)
         while queue:
             node = queue.popleft()
-            for inp in node.inputs:
-                name = inp[1:] if inp.startswith("@") else inp
+            # Write targets count alongside inputs: a node that manages a
+            # dataset's partition writes reads back what is already there
+            # before deciding what to save.
+            for name in (*node.inputs, *node.writes):
                 p = producer.get(name)
                 if p is None or p in keep:
                     continue

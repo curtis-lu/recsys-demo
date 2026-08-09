@@ -11,7 +11,7 @@ overclaim:
 * Registries compare **Counters** of (directory, name), so adding a second site
   with an already-registered name is caught. They do not pin line numbers, so
   ordinary edits above a registered site do not break them.
-* ``_literal_names`` returns None for a dynamically-built inputs/outputs
+* ``_literal_names`` returns None for a dynamically-built inputs/outputs/writes
   argument; those nodes are skipped by A5/A6. ``test_static_coverage_floor``
   pins how many nodes that is, so the blind spot cannot silently grow.
 * The A1 I/O scan only sees **direct** calls (``open``, ``mkdir``, ...). A node
@@ -103,9 +103,10 @@ def _judgeable_nodes():
         kw = _kwargs(call)
         ins = _literal_names(kw.get("inputs"))
         outs = _literal_names(kw.get("outputs"))
-        if ins is None or outs is None:
+        writes = _literal_names(kw.get("writes"))
+        if ins is None or outs is None or writes is None:
             continue
-        yield path, call, ins, outs
+        yield path, call, ins, outs, writes
 
 
 def _global_stmts(directory):
@@ -133,16 +134,33 @@ def test_static_coverage_floor():
 class TestA1NodeIO:
     """A1: data-flow artifacts go through the catalog; side artifacts are registered."""
 
-    def test_at_handle_usage_matches_registry(self):
+    def test_writes_declarations_match_registry(self):
         found = Counter()
         for path, call in _node_calls():
-            for name in _literal_names(_kwargs(call).get("inputs")) or []:
-                if name.startswith("@"):
-                    found[(path.parent.name, name)] += 1
+            for name in _literal_names(_kwargs(call).get("writes")) or []:
+                found[(path.parent.name, name)] += 1
 
-        assert found == Counter({("training", "@training_eval_predictions"): 1}), (
-            "@ handle usage changed. Registered in R1 of "
+        assert found == Counter({("training", "training_eval_predictions"): 1}), (
+            "Node(writes=...) usage changed. Registered in R1 of "
             "docs/agents/architecture-constraints.md; adding one needs sign-off."
+        )
+
+    def test_no_node_still_spells_a_write_target_with_an_at_prefix(self):
+        """The ``@`` sigil was replaced by ``writes=`` (issue #186).
+
+        A leftover ``"@x"`` in ``inputs`` is no longer a handle -- the Runner
+        reads it as an ordinary dataset name and the pipeline fails at
+        validation. Catch it here, where the message names the file, rather
+        than at run time.
+        """
+        offenders = [
+            f"{path.relative_to(SRC)}:{call.lineno} {name}"
+            for path, call in _node_calls()
+            for name in _literal_names(_kwargs(call).get("inputs")) or []
+            if name.startswith("@")
+        ]
+        assert offenders == [], (
+            f"'@' handle sigil is gone; use Node(writes=[...]): {offenders}"
         )
 
     def test_node_modules_do_not_touch_the_catalog(self):
@@ -231,27 +249,28 @@ class TestA4NotebookIsolation:
 class TestA5NodeHasInputOrOutput:
     """A5: core/node.py does not validate this (F4); this test does."""
 
-    def test_every_node_has_an_input_or_an_output(self):
+    def test_every_node_has_an_input_an_output_or_a_write_target(self):
         offenders = [
             f"{path.relative_to(SRC)}:{call.lineno}"
-            for path, call, ins, outs in _judgeable_nodes()
-            if not ins and not outs
+            for path, call, ins, outs, writes in _judgeable_nodes()
+            if not ins and not outs and not writes
         ]
-        assert offenders == [], f"nodes with neither input nor output: {offenders}"
+        assert offenders == [], (
+            f"nodes with no input, no output and no write target: {offenders}"
+        )
 
 
 class TestA6NoInputOutputNameCollision:
     """A6: same name on both sides makes the load/execute/save order ambiguous."""
 
-    def test_no_node_reuses_an_input_name_as_output(self):
+    def test_no_node_reuses_an_input_or_write_name_as_output(self):
         offenders = []
-        for path, call, ins, outs in _judgeable_nodes():
-            stripped = {n[1:] if n.startswith("@") else n for n in ins}
-            overlap = stripped & set(outs)
+        for path, call, ins, outs, writes in _judgeable_nodes():
+            overlap = (set(ins) | set(writes)) & set(outs)
             if overlap:
                 offenders.append(
                     f"{path.relative_to(SRC)}:{call.lineno} {sorted(overlap)}")
-        assert offenders == [], f"input name reused as output: {offenders}"
+        assert offenders == [], f"input/write name reused as output: {offenders}"
 
 
 class TestA7ZeroOutputNodesRegistered:
