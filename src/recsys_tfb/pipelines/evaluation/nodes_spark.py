@@ -106,9 +106,12 @@ def prepare_eval_data(
         )
     else:
         # HiveTableDataset drops partition_filter columns after applying the
-        # WHERE clause. training_eval_predictions uses model_version as a
-        # static partition_filter, so its CLI-loaded DataFrame is already
-        # pruned even though the constant column is no longer present.
+        # WHERE clause. Both of this node's sources declare model_version as a
+        # static partition_filter — training_eval_predictions always did,
+        # ranked_predictions since #187 — so a CLI-loaded DataFrame is already
+        # pruned even though the constant column is no longer present. The
+        # branch above survives for callers that hand this node a frame they
+        # built themselves (tests, --compare paths reading via spark.table).
         logger.info(
             "Predictions input has no model_version column; assuming catalog "
             "partition_filter already selected model_version=%s",

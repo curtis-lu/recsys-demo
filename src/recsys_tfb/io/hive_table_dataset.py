@@ -200,6 +200,14 @@ class HiveTableDataset(AbstractDataset):
         # untouched one — a re-publish would report "0 new" and a partition
         # count unrelated to this write. Those tables keep asking the frame,
         # at the cost above. See ADR-0009 and issue #179.
+        #
+        # As of #187 no entry in `conf/base/catalog.yaml` takes that branch:
+        # the last three (the inference outputs) moved `model_version` from
+        # `partition_cols` to `partition_filter`. The branch stays because
+        # nothing in this class requires a filter — a future entry declared
+        # without one gets the slow-but-correct report rather than none — and
+        # `tests/test_core/test_catalog_inference_entries.py` is what keeps the
+        # catalog from quietly growing one back.
         scoped_to_this_run = bool(self._partition_filter)
         before = (
             {_partition_key(p) for p in self.existing_partition_values()}
@@ -254,10 +262,13 @@ class HiveTableDataset(AbstractDataset):
 
         The pre-ADR-0009 path, byte-for-byte, kept only for tables with no
         `partition_filter`. It re-executes the frame's whole lineage — that is
-        the cost ADR-0009 measures and removes everywhere else. It survives
-        here because the metastore cannot scope its answer to this run for
-        these tables, and rescoping them means changing how the inference
-        pipeline partitions its output (issue #179).
+        the cost ADR-0009 measures and removes everywhere else.
+
+        Since #187 no catalog entry reaches it: the three inference tables that
+        did were the last ones, and rescoping them was exactly what that issue
+        did. This is now the fallback for a hypothetical future entry, not a
+        live path — which is why the only thing exercising it is
+        `TestSaveWithoutPartitionFilterKeepsTheFrameQuery`.
         """
         part_cols = list(self._partition_filter.keys()) + [
             c["name"] for c in self._partition_cols

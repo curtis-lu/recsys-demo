@@ -18,7 +18,7 @@ class TestInferencePipeline:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
-            "scoring_dataset", "X_score", "score_table",
+            "scoring_dataset", "X_score", "unranked_predictions",
             "ranked_staging", "validated_predictions", "ranked_predictions",
         }
         assert pipeline.outputs == expected
@@ -41,10 +41,10 @@ class TestInferencePipeline:
         # predict_scores reads the preprocessor directly: the encoding of the
         # identity categoricals apply_preprocessor deferred is applied per chunk,
         # against a view built from the model's own declaration (ADR-0011 §5).
-        assert "preprocessor" in by_output["score_table"].inputs
-        # rank_predictions: score_table -> ranked_staging
+        assert "preprocessor" in by_output["unranked_predictions"].inputs
+        # rank_predictions: unranked_predictions -> ranked_staging
         assert by_output["ranked_staging"].name == "rank_predictions"
-        assert "score_table" in by_output["ranked_staging"].inputs
+        assert "unranked_predictions" in by_output["ranked_staging"].inputs
         # validate_predictions: ranked_staging -> validated_predictions
         assert by_output["validated_predictions"].name == "validate_predictions"
         assert "ranked_staging" in by_output["validated_predictions"].inputs

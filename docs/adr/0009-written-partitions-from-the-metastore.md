@@ -74,6 +74,10 @@ new    = [p for p in after if _partition_key(p) not in before]
 維持原本問 DataFrame 的做法，輸出與改動前逐字相同。理由與後續見
 [#179](https://github.com/curtis-lu/recsys-demo/issues/179)。
 
+> **本段自 issue #187 起是歷史紀錄。** 那三張已經改成有 `partition_filter`
+> （`score_table` 同時改名 `unranked_predictions`），17 個 `partition_filter` 條目全部走
+> metastore 快照。詳見下方「這條 ADR 沒有解決的事」。
+
 ## 代價：不再逐位精確，而且盲點打在哪要說清楚
 
 以下只談走 metastore 快照的那 14 個條目。
@@ -112,11 +116,16 @@ new    = [p for p in after if _partition_key(p) not in before]
 
 ## 這條 ADR 沒有解決的事
 
-- **那 3 張沒有 `partition_filter` 的 inference 表**（`score_table`、`ranked_staging`、
+- ~~**那 3 張沒有 `partition_filter` 的 inference 表**（`score_table`、`ranked_staging`、
   `ranked_predictions`）仍然每次寫入都把整條 lineage 跑第二次。本 ADR 只把它們**排除**在新
   做法之外、保住原行為，沒有修好它們。要修得先決定 inference 的輸出怎麼分區
   （[#179](https://github.com/curtis-lu/recsys-demo/issues/179)），那屬於 inference pipeline
-  的重構，不屬於這裡。
+  的重構，不屬於這裡。~~ **已解決**（issue #187，論證見
+  [ADR-0010](0010-inference-chunked-scoring-shape.md) §5）：三張表的 `model_version` 提為
+  `partition_filter`（`score_table` 同時改名為 `unranked_predictions`），走的就是本 ADR 的
+  metastore 快照路徑。**上表「剩下 3 個沒有」那句自此失效——現在是 17 個條目全部有
+  `partition_filter`**，`_log_partitions_from_frame()` 不再被任何 catalog 條目觸及。那是一次
+  破壞性遷移（三張表必須先 DROP 再重建），步驟見 `docs/pipelines/inference.md` §6.5。
 - **`--rebuild-dates` 重算既有月份時**，`new` 為空、`after` 又含沒動的月，兩個數字都說不出
   這次重算了哪幾個月。見上一節。
 - **哪個 node 的時間花在哪**不是這條 ADR 的題目。它由 Runner 的 `load`／`func`／`save` 分段

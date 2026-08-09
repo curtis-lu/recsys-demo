@@ -21,30 +21,45 @@ from recsys_tfb.preprocessing import (
 logger = logging.getLogger(__name__)
 
 
-def _filter_current_inference_scope(
-    df: DataFrame,
-    parameters: dict,
-) -> DataFrame:
-    """Limit a persisted inference table to the model and dates of this run."""
+def restrict_to_snap_dates(df: DataFrame, parameters: dict) -> DataFrame:
+    """Cut a persisted inference table down to the months this run scores.
+
+    ``unranked_predictions`` and ``ranked_staging`` accumulate across months
+    while ``inference.snap_dates`` names one run's worth, so a node that reads
+    either one back has to say which months it means. Without this cut the
+    second month reads back every historical month, re-ranks it, and republishes
+    it — silently, because a re-publish of an unchanged month looks exactly like
+    a correct one (ADR-0010 section 5).
+
+    The model-version half of the old ``_filter_current_inference_scope`` is
+    **gone, not moved**: ``partition_filter: model_version`` makes the catalog's
+    load emit ``WHERE model_version = '…'`` and drop the column, so a comparison
+    here would be dead code against a column the frame no longer has.
+
+    Both failure modes raise rather than pass the frame through. An empty scope
+    that quietly means "keep everything" is the exact behaviour this exists to
+    prevent, and it would show up downstream as a republished month rather than
+    as an error.
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
-    inference = parameters.get("inference", {})
-
-    model_version = parameters.get("model_version")
-    if not model_version:
-        return df
-
-    if "model_version" in df.columns:
-        df = df.filter(F.col("model_version") == model_version)
 
     snap_dates = [
         pd.Timestamp(value).date()
-        for value in inference.get("snap_dates", [])
+        for value in (parameters.get("inference", {}) or {}).get("snap_dates", [])
     ]
-    if snap_dates and time_col in df.columns:
-        df = df.filter(F.col(time_col).cast("date").isin(snap_dates))
+    if not snap_dates:
+        raise ValueError(
+            "inference.snap_dates is empty; refusing to rank or validate an "
+            "unrestricted table (every historical month would be republished)"
+        )
+    if time_col not in df.columns:
+        raise ValueError(
+            f"cannot restrict to inference.snap_dates: no {time_col!r} column "
+            f"in {sorted(df.columns)}"
+        )
 
-    return df
+    return df.filter(F.col(time_col).cast("date").isin(snap_dates))
 
 
 def build_scoring_dataset(
@@ -329,22 +344,24 @@ def predict_scores(
         len(result_pdf),
         result_pdf[score_col].mean(),
     )
-    result = spark.createDataFrame(result_pdf)
-
-    # Inject model_version for partitioned output in production
-    model_version = parameters.get("model_version")
-    if model_version:
-        result = result.withColumn("model_version", F.lit(model_version))
-
-    return result
+    # No model_version column: `partition_filter` owns it now. The catalog's
+    # save injects it from the same `parameters["model_version"]` this node
+    # would have read, and injecting it here only makes that injection take the
+    # "column already present" branch, which pays a `distinct()` action to check
+    # the value it just wrote. training_eval_predictions has always been shaped
+    # this way (ADR-0010 section 5).
+    return spark.createDataFrame(result_pdf)
 
 
 def rank_predictions(
-    score_table: DataFrame,
+    unranked_predictions: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Rank products by score within each query group."""
-    score_table = _filter_current_inference_scope(score_table, parameters)
+    """Rank items by score within each query group."""
+    with log_step(logger, "restrict_to_snap_dates"):
+        unranked_predictions = restrict_to_snap_dates(
+            unranked_predictions, parameters
+        )
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -355,7 +372,7 @@ def rank_predictions(
 
     with log_step(logger, "rank_scores"):
         w = Window.partitionBy(*group_cols).orderBy(F.desc(score_col))
-        ranked = score_table.withColumn(rank_col, F.row_number().over(w))
+        ranked = unranked_predictions.withColumn(rank_col, F.row_number().over(w))
 
     logger.info("Ranked predictions by %s", group_cols)
     return ranked
@@ -366,13 +383,18 @@ def validate_predictions(
     scoring_dataset: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Validate inference output with sanity checks. Raises ValidationError on failure."""
-    ranked_predictions = _filter_current_inference_scope(
-        ranked_predictions, parameters
-    )
-    scoring_dataset = _filter_current_inference_scope(
-        scoring_dataset, parameters
-    )
+    """Validate inference output with sanity checks. Raises ValidationError on failure.
+
+    Only the staging frame gets restricted: it comes back from Hive holding
+    every month this model version has ever published, while ``scoring_dataset``
+    is this run's in-memory frame, already built against ``inference.snap_dates``
+    by :func:`build_scoring_dataset`. Restricting both would hide a real
+    disagreement between them behind a filter applied to each side.
+    """
+    with log_step(logger, "restrict_to_snap_dates"):
+        ranked_predictions = restrict_to_snap_dates(
+            ranked_predictions, parameters
+        )
 
     schema = get_schema(parameters)
     identity_cols = schema["identity_columns"]
