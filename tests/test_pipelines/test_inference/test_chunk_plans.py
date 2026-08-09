@@ -12,8 +12,8 @@ free of pyspark and this file asserts that too
 import ast
 from pathlib import Path
 
-from recsys_tfb.pipelines.inference import chunk_plans
-from recsys_tfb.pipelines.inference.chunk_plans import (
+from recsys_tfb.pipelines.inference.steps import chunk_plans
+from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     HEALTHY_BUCKET_RANGE,
     ScoringChunk,
     plan_scoring_chunks,

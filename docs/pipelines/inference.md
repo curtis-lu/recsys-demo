@@ -336,7 +336,7 @@ for 每個 (snap_date, entity_bucket):        ← 一次 toPandas()，只讀這�
 
 item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。切 X 的是 `io/extract.py` 的 `_pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
 
-**續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。log 與 manifest 都報出 processed／skipped／rebuilt／empty 四份清單——**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/chunk_plans.py`），所以它的測試在毫秒級。
+**續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。log 與 manifest 都報出 processed／skipped／rebuilt／empty 四份清單——**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/steps/chunk_plans.py`），所以它的測試在毫秒級。
 
 **空桶，以及「不該是空的空桶」。** 母體比桶數還小時會有桶完全沒有 entity，而 `insertInto` 對空 frame 不會建立分區。這是正常狀態，不是錯誤：manifest 把它們記在 `chunks_empty`，並且從「應該存在的分區」裡扣掉，所以 §6.1 的 `partition_completeness` 不會對小母體誤報。
 
@@ -350,7 +350,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 ### 6.1 驗證分兩層
 
-驗證跑在兩個地方。分界只有一條規則：**一個 chunk 只有一個 item，所以要把同一組的 item 互相比較的檢查在 chunk 內根本問不出來，其餘的都問得出來。** 哪一條在哪一層的唯一真實來源是 `src/recsys_tfb/pipelines/inference/validation.py` 的 `CHUNK_CHECKS` 與 `BATCH_CHECKS`；下面兩張表是它的白話版。兩層都是 collect-all——收集該層所有失敗，再以單一 `ValidationError` 中止，`failures` 帶著每個 check 的名稱與細節。
+驗證跑在兩個地方。分界只有一條規則：**一個 chunk 只有一個 item，所以要把同一組的 item 互相比較的檢查在 chunk 內根本問不出來，其餘的都問得出來。** 哪一條在哪一層的唯一真實來源是 `src/recsys_tfb/pipelines/inference/steps/validation.py` 的 `CHUNK_CHECKS` 與 `BATCH_CHECKS`；下面兩張表是它的白話版。兩層都是 collect-all——收集該層所有失敗，再以單一 `ValidationError` 中止，`failures` 帶著每個 check 的名稱與細節。
 
 **塊層**（`validate_scored_chunk`，每個 `(time, 桶, item)` chunk 寫出**前**跑一次；純 pandas、零 Spark action）：
 

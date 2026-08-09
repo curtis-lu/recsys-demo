@@ -8,7 +8,7 @@ itself is a pure pass-through; the production write is the catalog save of its
 ranked_predictions output. These are pure-Python tests — no Spark needed.
 """
 
-from recsys_tfb.pipelines.inference.nodes_spark import publish_predictions
+from recsys_tfb.pipelines.inference.nodes import publish_predictions
 
 
 def test_publish_returns_input_unchanged():

@@ -5,7 +5,7 @@ from recsys_tfb.core.pipeline import Pipeline
 
 
 def create_pipeline() -> Pipeline:
-    from recsys_tfb.pipelines.inference.nodes_spark import (
+    from recsys_tfb.pipelines.inference.nodes import (
         build_inference_population_features,
         predict_and_write_scores,
         publish_predictions,

@@ -1086,7 +1086,7 @@ class TestPartialWriteLeavesPartitionsIntact:
         Characterization, like its siblings: the behaviour is Hive's, and the
         caller-side half (the frame handed to ``save()`` covers exactly one
         partition) is pinned where it can be violated, in
-        ``tests/test_pipelines/test_inference/test_nodes_spark.py``.
+        ``tests/test_pipelines/test_inference/test_nodes.py``.
         """
         spark.sql("CREATE DATABASE IF NOT EXISTS empty_write_test")
         spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")

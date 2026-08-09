@@ -26,11 +26,27 @@ The two lists are pinned behaviourally, one file per layer, so a check that
 drifts into the wrong one turns something red:
 ``tests/test_pipelines/test_inference/test_chunk_validation.py`` covers the
 chunk half, ``…/test_validation.py`` the batch half.
+
+**Both registers resolve to code in this module.** The chunk register's four
+checks are the four blocks of :func:`validate_scored_chunk`; the batch
+register's four are one ``<name>_failure`` function each, so a reader who finds
+a name in :data:`BATCH_CHECKS` finds its implementation by that name without
+leaving the file. What stays in ``nodes.py`` is the Spark that produces the
+facts — the grouped aggregation and the windowed scan — because that is
+mechanism, and because the two-action budget is a property of the node, not of
+any single check.
+
+**No pyspark, deliberately.** The batch predicates read an already-collected
+summary row by key, so this module imports no Spark and neither layer's tests
+have to wait for a SparkSession.
 """
 
+import logging
 from collections.abc import Collection
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 #: Checks that run per chunk, in the driver, with no Spark involvement.
 #:
@@ -48,6 +64,11 @@ CHUNK_CHECKS = (
 )
 
 #: Checks that need the whole ranked table, run once before publication.
+#:
+#: Each name resolves to ``<name>_failure`` in this module, which returns the
+#: failure dict or ``None``. The register and the implementations move together
+#: because a name here with no function is a check that silently stopped
+#: running — and the layering assertions would keep passing.
 #:
 #: ``score_range`` is deliberately absent: on every path that applies a
 #: calibrator the ``[0, 1]`` bound holds by construction and the check cannot
@@ -201,3 +222,146 @@ def validate_scored_chunk(
 
     if failures:
         raise ValidationError(failures)
+
+
+def partition_completeness_failure(
+    expected_partitions: Collection, written_partitions: Collection,
+) -> dict | None:
+    """Does every scored chunk have a partition, and every partition a chunk?
+
+    Replaces the old ``row_count_match``, whose two halves are both gone: the
+    un-exploded ``inference_population_features`` is ``|items|`` times shorter
+    than the ranked output, so that comparison would fail on every correct run,
+    and reading the frame cost a full re-run of the population-to-feature join
+    every time.
+
+    Comparing the manifest's *row* count instead would fail on every resume — it
+    counts only what this run wrote, and a resumed run writes a fraction
+    (ADR-0011 §3). So the comparison is over partition sets, and it catches both
+    directions: a partition a successive save deleted, and a stale one left
+    behind by an ``entity_buckets`` change that re-scoring can never remove.
+
+    **Zero scans.** Both arguments are lists the manifest already carries, which
+    is why this one runs before the aggregation rather than reading from it.
+
+    The caller subscripts the manifest rather than using ``.get(..., [])``: two
+    absent keys would compare equal and this check would pass vacuously, and a
+    vacuous pass here is indistinguishable from a real one.
+    """
+    expected = {tuple(row) for row in expected_partitions}
+    written = {tuple(row) for row in written_partitions}
+    if expected == written:
+        return None
+    missing = sorted(expected - written)
+    stale = sorted(written - expected)
+    return {
+        "check": "partition_completeness",
+        "detail": (
+            f"{len(missing)} scored chunk(s) have no partition "
+            f"({missing[:10]}) and {len(stale)} partition(s) belong to "
+            f"no scored chunk ({stale[:10]}); "
+            f"expected {len(expected)}, "
+            f"found {len(written)}"
+        ),
+    }
+
+
+def completeness_failure(summary, n_products: int) -> dict | None:
+    """Does every query group hold exactly one row per configured item?
+
+    The batch layer's reason for existing: one chunk is one item, so nothing
+    inside a chunk can see that a group is short. It is also where a duplicate
+    row surfaces — as a group of the wrong size — which is why ``no_duplicates``
+    lives in the chunk layer only rather than in both.
+    """
+    if summary["n_incomplete"] <= 0:
+        return None
+    return {
+        "check": "completeness",
+        "detail": (
+            f"{summary['n_incomplete']} groups do not have exactly "
+            f"{n_products} products, sizes: min={summary['min_size']}, "
+            f"max={summary['max_size']}"
+        ),
+    }
+
+
+def score_varies_within_group_failure(summary) -> dict | None:
+    """Do too many groups score every item identically?
+
+    The data-layer half of a backstop that ``require_item_is_a_feature`` only
+    holds up at the config layer. If the item value fed to the model degenerates
+    to a constant, an entity's items all score identically and the ranking is
+    whatever order ``row_number`` happened to pick — while every shape check
+    stays green: the group is complete, the ranks are 1..N, and the lag check's
+    ``>`` is false on a tie (ADR-0011 §1, example two).
+
+    **A proportion, not ``> 0``**, and that is load-bearing — see
+    :data:`CONSTANT_GROUP_FAILURE_RATIO` for the two measured regimes it
+    separates. Ties below the threshold are what a correct isotonic run looks
+    like, so they are warned about and published; silence would make an
+    arbitrary internal ranking unfindable, and raising would block a supported
+    calibration setting.
+
+    Groups of size one are excluded upstream, in the aggregation: a group of one
+    cannot vary, and a single-item configuration would otherwise make every
+    group look constant. Group size is :func:`completeness_failure`'s question.
+    """
+    if summary["n_constant"] <= 0:
+        return None
+    constant_ratio = summary["n_constant"] / max(summary["n_groups"], 1)
+    logger.warning(
+        "%d of %d query group(s) (%.3f%%) score every product "
+        "identically; their internal ranking is arbitrary. Ties are "
+        "expected in small numbers when a calibrator maps a group's "
+        "raw scores onto one plateau.",
+        summary["n_constant"], summary["n_groups"], 100 * constant_ratio,
+    )
+    if constant_ratio <= CONSTANT_GROUP_FAILURE_RATIO:
+        return None
+    return {
+        "check": "score_varies_within_group",
+        "detail": (
+            f"{summary['n_constant']} of {summary['n_groups']} "
+            f"groups ({100 * constant_ratio:.1f}%) score every "
+            f"product identically, above the "
+            f"{100 * CONSTANT_GROUP_FAILURE_RATIO:.0f}% threshold; "
+            f"the item value reaching the model is likely constant"
+        ),
+    }
+
+
+def rank_consistency_failure(
+    summary, n_products: int, count_score_order_violations,
+) -> dict | None:
+    """Are the ranks 1..N, and do they run in descending score order?
+
+    One check with two questions, because the second only means anything once
+    the first holds — and because answering it costs a Spark action. So the
+    counter arrives as a **thunk** the caller has already bound to its frame,
+    and it is called only on the path that needs it. Handing in the count
+    instead would spend that action on every run whose ranks are already
+    provably wrong, and report the same check twice.
+
+    The range is a global min-of-mins and max-of-maxes rather than a per-group
+    range, so a group ranked ``[1, 2, 3]`` beside one ranked ``[1..22]`` passes.
+    :func:`completeness_failure`'s group-size check stands in for it, and
+    ADR-0011's "what this ADR did not solve" records the pair as roughly
+    sufficient — the weakness predates the two-layer split and was not fixed
+    there or here.
+    """
+    if summary["min_rank"] != 1 or summary["max_rank"] != n_products:
+        return {
+            "check": "rank_consistency",
+            "detail": (
+                f"Rank range [{summary['min_rank']}, {summary['max_rank']}] "
+                f"expected [1, {n_products}]"
+            ),
+        }
+    violations = count_score_order_violations()
+    if violations > 0:
+        return {
+            "check": "rank_consistency",
+            "detail": f"{violations} rows where score increases with rank",
+        }
+    return None

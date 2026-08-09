@@ -49,7 +49,7 @@ class TestPreprocessorMetadataContract:
     # ``apply_preprocessor``'s AST for the keys it subscripts, which asserted on
     # syntax rather than behaviour and would have gone red on a legal rewrite to
     # ``.get()`` or destructuring. It was also redundant: renaming a key the
-    # reader uses turns 8 tests in test_pipelines/test_inference/test_nodes_spark.py
+    # reader uses turns 8 tests in test_pipelines/test_inference/test_nodes.py
     # red already (measured, not assumed). The reader side is covered; the writer
     # side is what had no guard, and that is TestFitPreprocessorMetadataKeyContract.
 

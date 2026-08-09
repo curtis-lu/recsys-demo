@@ -14,8 +14,8 @@ from pyspark.sql import GroupedData
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from recsys_tfb.pipelines.inference.nodes_spark import validate_predictions
-from recsys_tfb.pipelines.inference.validation import (
+from recsys_tfb.pipelines.inference.nodes import validate_predictions
+from recsys_tfb.pipelines.inference.steps.validation import (
     BATCH_CHECKS,
     CHUNK_CHECKS,
     ValidationError,
@@ -80,7 +80,7 @@ class ActionCountingFrame:
     nothing about the *result* of validation can see it: a re-added
     whole-table check passes its own test, changes no output, and quietly
     costs another full scan of a Hive table. Same reasoning — and same shape —
-    as ``ReadCountingFrame`` in ``test_nodes_spark.py``, which pins the loop
+    as ``ReadCountingFrame`` in ``test_nodes.py``, which pins the loop
     order for ADR-0010.
 
     Every DataFrame-returning call is re-wrapped so the counter follows the
