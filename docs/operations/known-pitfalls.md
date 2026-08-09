@@ -74,7 +74,9 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 5. main 上既有的測試問題（不是你造成的，勿浪費時間歸因給自己的改動）
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
-- core+cli+io+pipelines **組合跑**時有 2 個 Spark 整合測試互相干擾 fail；**單獨跑皆過**。看到只在組合跑才出現的 fail，先單獨重跑確認。
+- 全量 `pytest tests/` **組合跑**時有 4 個 Spark 整合測試互相干擾 fail；**單獨跑皆過**。看到只在組合跑才出現的 fail，先單獨重跑確認。
+  - 清單（更新於 2026-08-09，證據：於 `091acd2` 在同一個 worktree、同一份 `data/` 跑全量，8 failed / 2377 passed；同四項單獨跑 `pytest tests/test_io/test_hive_table_dataset.py tests/test_pipelines/test_evaluation_compare_pipeline.py` 為 62 passed）：`test_io/test_hive_table_dataset.py` 的 `TestSchemaEvolutionIntegration::test_add_then_drop_column_across_versions`、`TestPartialWriteLeavesPartitionsIntact` 兩項，以及 `test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`。
+  - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算：那份沒有本機 warehouse 狀態，這四項不會出現（實測只有 5 failed），會讓人誤以為是自己改出來的。
 - ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
 
 - 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。待獨立修。
