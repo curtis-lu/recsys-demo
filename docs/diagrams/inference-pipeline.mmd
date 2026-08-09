@@ -88,9 +88,9 @@ flowchart TB
   %% ---------------------------- 主鏈 ------------------------------
   n_build["build_scoring_dataset<br/><small>母體 (time, entity) × products ・ crossJoin<br/>缺特徵者保留，標 feature_present</small>"]
   d_scoring(["scoring_dataset"])
-  n_apply["apply_preprocessor<br/><small>套訓練時的編碼與欄位選取 ・ 保留 identity 欄</small>"]
+  n_apply["apply_preprocessor<br/><small>套訓練時的編碼與欄位選取 ・ 保留 identity 欄<br/>identity 類別欄不編碼，延後到 driver</small>"]
   d_xscore(["X_score"])
-  n_predict["predict_scores<br/><small>按 (time, item) 分批 toPandas ・ driver 端合併</small>"]
+  n_predict["predict_scores<br/><small>按 (time, item) 分批 toPandas ・ driver 端合併<br/>item 兩個位置：identity 留字串、特徵放 code</small>"]
   d_score(["score_table"])
   n_rank["rank_predictions<br/><small>(time, entity) 組內依 score 遞減 row_number()</small>"]
   d_staging(["ranked_staging"])
@@ -108,7 +108,8 @@ flowchart TB
   art_prep --> n_apply
   n_apply --> d_xscore
   d_xscore --> n_predict
-  art_model --> n_predict
+  art_model -- "feature_names() 決定取哪些欄、什麼順序" --> n_predict
+  art_prep -- "category_mappings 決定 item 的整數 code" --> n_predict
   d_scoring -. "宣告未使用" .-> n_predict
   n_predict --> d_score
   d_score -- "全表讀回<br/>節點自行過濾 model_version × snap_dates" --> n_rank

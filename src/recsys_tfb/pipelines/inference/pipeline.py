@@ -28,7 +28,10 @@ def create_pipeline() -> Pipeline:
             ),
             Node(
                 predict_scores,
-                inputs=["model", "X_score", "scoring_dataset", "parameters"],
+                inputs=[
+                    "model", "X_score", "scoring_dataset",
+                    "preprocessor", "parameters",
+                ],
                 outputs="score_table",
             ),
             Node(

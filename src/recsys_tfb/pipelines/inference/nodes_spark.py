@@ -14,6 +14,8 @@ from recsys_tfb.pipelines.inference.validation import ValidationError
 from recsys_tfb.preprocessing import (
     _cast_feature_floats_to_float32,
     _encode_categoricals,
+    encodable_categoricals,
+    warn_unknown_encodings,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,7 +142,10 @@ def apply_preprocessor(
     touches ``parameters`` only for the schema — this is the reader half of that
     contract, the writer being the dataset pipeline's fit node.
 
-    Returns identity + feature columns for model prediction.
+    Returns identity + feature columns for model prediction. ``schema.item``
+    appears in both blocks and stays a **raw string in both**: the integer code
+    it needs as a feature is applied in the driver, per chunk, by
+    :func:`predict_scores`. See ADR-0010 section 4.
     """
     schema = get_schema(parameters)
     identity_cols = schema["identity_columns"]
@@ -157,8 +162,26 @@ def apply_preprocessor(
     ]
     result = scoring_dataset.drop(*cols_to_drop)
 
+    # Decision — the item reaches the model as a code and the output as a name,
+    # so the encoding of identity categoricals waits for the driver, where it can
+    # be applied to a copy. Doing it here writes the code into the identity
+    # position as well, and that position becomes the partition directory name of
+    # all three inference tables: `prod_name=0` instead of `prod_name=exchange_fx`,
+    # with every sanity check still green (ADR-0010 §6).
+    #
+    # Cost, for ticket D: this frame is already exploded by |products|, so the
+    # warning's aggregation scans ~22x more rows than the values it reports need.
+    # The un-exploded frame does not exist yet at this point in the pipeline; when
+    # `inference_population_features` lands, this call moves onto it.
     with log_step(logger, "encode_categoricals"):
-        result = _encode_categoricals(result, categorical_cols, category_mappings)
+        encode_cols = encodable_categoricals(
+            categorical_cols, result.columns, identity_cols,
+        )
+        if encode_cols:
+            result = _encode_categoricals(result, encode_cols, category_mappings)
+            warn_unknown_encodings(
+                result, encode_cols, context="apply_preprocessor",
+            )
 
     with log_step(logger, "select_feature_columns"):
         missing = set(feature_columns) - set(result.columns)
@@ -177,37 +200,90 @@ def apply_preprocessor(
     return result
 
 
+def require_ordered_subsequence(
+    model_features: list[str],
+    artifact_features: list[str],
+) -> None:
+    """Raise unless ``model_features`` is an order-preserving subsequence.
+
+    The model is the authority on *which* features and in *what order*; the
+    preprocessor artifact is the authority on how they are *encoded*
+    (ADR-0011 §5). Only the model records which view of the full feature set a
+    given training run actually used — ``preprocessor.json`` is the full set and
+    cannot tell whether ``training.feature_selection.exclude`` was in play.
+
+    So the artifact is allowed to hold *more* columns, in the same relative
+    order, and nothing else. A stale artifact (model has a column the artifact
+    lacks) and a mismatched model (same columns, permuted) both raise. No
+    automatic realignment: an intersection here would silently slice X by the
+    full set and hand it to a booster that expects a subset.
+    """
+    remaining = iter(artifact_features)
+    for name in model_features:
+        if name not in remaining:
+            raise ValueError(
+                "model.feature_names() is not an order-preserving subsequence of "
+                f"the preprocessor's feature_columns: stuck at {name!r}. "
+                f"model={list(model_features)} artifact={list(artifact_features)}"
+            )
+
+
 def predict_scores(
     model: ModelAdapter,
     X_score: DataFrame,
     scoring_dataset: DataFrame,
+    preprocessor: dict,
     parameters: dict,
 ) -> DataFrame:
-    """Predict probability scores, chunked by (snap_date, prod_name) to control memory."""
+    """Predict probability scores, chunked by (snap_date, prod_name) to control memory.
+
+    Assembles each chunk's feature matrix through :func:`_pdf_to_X`, the same
+    slicing helper training's per-partition prediction uses, so the identity
+    categoricals ``apply_preprocessor`` deliberately left as raw strings get
+    their integer codes here — in a copy, leaving the identity columns that
+    become partition values alone (ADR-0010 §4).
+    """
+    from recsys_tfb.io.extract import _pdf_to_X
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     item_col = schema["item"]
     identity_cols = schema["identity_columns"]
     score_col = schema["score"]
 
-    available_feature_columns = [
-        c for c in X_score.columns if c not in identity_cols
-    ]
+    artifact_feature_columns = list(preprocessor["feature_columns"])
     feature_names_fn = getattr(model, "feature_names", None)
     model_feature_names = (
         feature_names_fn() if callable(feature_names_fn) else None
     )
-    feature_columns = (
-        list(model_feature_names)
-        if model_feature_names
-        else available_feature_columns
-    )
+    if model_feature_names:
+        feature_columns = list(model_feature_names)
+        require_ordered_subsequence(feature_columns, artifact_feature_columns)
+    else:
+        # No declaration, so there is no second opinion to check the artifact
+        # against and the assertion is skipped rather than run against itself.
+        # Every adapter in this repo declares one once it holds a fitted model
+        # (LightGBMAdapter returns None only before load(); CalibratedModelAdapter
+        # forwards to its base), so this branch is doubles in tests, not
+        # production — and it is logged rather than silent for that reason.
+        feature_columns = list(artifact_feature_columns)
+        logger.info(
+            "Model declares no feature_names(); falling back to the "
+            "preprocessor's %d feature columns", len(feature_columns),
+        )
     missing_features = sorted(set(feature_columns) - set(X_score.columns))
     if missing_features:
         raise ValueError(
             "Scoring data is missing feature columns required by the model: "
             f"{missing_features}"
         )
+
+    # The view _pdf_to_X slices by. Built from the model's declaration, never
+    # from apply_feature_selection(preprocessor, parameters): that reads the
+    # *current* config's training.feature_selection.exclude, and model_version
+    # can point at a model trained under a different one. Same-length excludes
+    # over different columns would then misalign X silently (ADR-0011 §5).
+    preprocessor_view = {**preprocessor, "feature_columns": feature_columns}
 
     spark = X_score.sparkSession
 
@@ -233,12 +309,12 @@ def predict_scores(
                 if column not in identity_cols
             ]
             chunk_pdf = chunk.select(*collection_columns).toPandas()
-            features_pdf = chunk_pdf[feature_columns]
+            X = _pdf_to_X(chunk_pdf, preprocessor_view, parameters)
             identity_pdf = chunk_pdf[identity_cols].copy()
             if use_uncalibrated:
-                scores = model.predict_uncalibrated(features_pdf)
+                scores = model.predict_uncalibrated(X)
             else:
-                scores = model.predict(features_pdf)
+                scores = model.predict(X)
             identity_pdf[score_col] = scores
             all_results.append(identity_pdf)
 

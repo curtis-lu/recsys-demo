@@ -254,8 +254,8 @@ python -m recsys_tfb inference \
 | 階段 | Node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 建立母體 | `build_scoring_dataset` | `inference_population`、`feature_table`、parameters | 篩日期取母體 `(time, entity)`、與 products cross join、left-join 接回 feature columns（標記 `feature_present`） | `scoring_dataset` |
-| 前處理 | `apply_preprocessor` | scoring data、`preprocessor` | 套用 training 時的 categorical mappings、欄位順序與 float32 casting | `X_score` |
-| 模型評分 | `predict_scores` | `model`、`X_score` | 依模型保存的 feature names 取欄，以 `(time, item)` 分批轉 pandas 並評分 | `score_table` |
+| 前處理 | `apply_preprocessor` | scoring data、`preprocessor` | 套用 training 時的 categorical mappings、欄位順序與 float32 casting；**identity 類別欄不在此編碼** | `X_score` |
+| 模型評分 | `predict_scores` | `model`、`X_score`、`preprocessor` | 依模型保存的 feature names 取欄，以 `(time, item)` 分批轉 pandas，在 driver 端補上 identity 類別欄的編碼後評分 | `score_table` |
 | 組內排名 | `rank_predictions` | `score_table` | 限制目前 model/date，依 `(time, entity)` 內 score 降冪產生 rank | `ranked_staging` |
 | 發布驗證 | `validate_predictions` | staging、scoring data | 執行六項 sanity checks，任一失敗即拋出 `ValidationError` | `validated_predictions` |
 | 正式發布 | `publish_predictions` | validated rows | 將已驗證結果交由 catalog 寫入 production table | `ranked_predictions` |
@@ -275,9 +275,18 @@ python -m recsys_tfb inference \
 
 ### 5.2 前處理與模型 feature contract
 
-inference 使用模型 manifest 指向的 base dataset preprocessor，不會重新 fit categorical encoding。未知類別值會依共用 preprocessor 邏輯編碼為 `-1`。
+inference 使用模型 manifest 指向的 base dataset preprocessor，不會重新 fit categorical encoding。未知類別值會依共用 preprocessor 邏輯編碼為 `-1`，並在 log 留下 `apply_preprocessor: N unknowns in column '…'` 的 WARNING——評分母體不是訓練母體，類別詞彙漂移在這裡是會真的發生的事。
 
-模型評分時會優先使用模型本身保存的 ordered feature names。這讓 training-stage `feature_selection.exclude` 不需重建 dataset，也能確保 inference 只傳入模型實際訓練使用的欄位與順序。
+**item 在塊內佔兩個位置。** `schema.item` 同時是 identity 欄與特徵欄，兩者的值形態不同：
+
+| 位置 | 值 | 去向 |
+|---|---|---|
+| identity 欄 | 原始字串（`exchange_usd`） | 三張推論表的 `prod_name` 分區欄 |
+| 特徵欄 | 整數 code（`category_mappings[item]` 的位置） | 餵進模型 |
+
+所以 Spark 側的 `apply_preprocessor` **只編碼非 identity 的類別欄**，identity 類別欄延後到 driver，由 `_pdf_to_X` 對一份 copy 編碼。編碼值取自前處理產物的 `category_mappings`，**不是** `inference.products`：兩者內容由 A4 保證相同，順序不保證，取錯清單會讓所有 item 的分數整組錯位而每一項 sanity check 都照樣通過。論證見 ADR-0010 §4／§6。
+
+**特徵順序與子集的權威是模型，編碼語意的權威是前處理產物。** 模型評分時使用模型本身保存的 ordered feature names（`model.feature_names()`），這讓 training-stage `feature_selection.exclude` 不需重建 dataset。`preprocessor.json` 存的是全集，它不知道有沒有做過特徵選擇，所以兩者的關係是：**模型宣告的欄位必須是產物 `feature_columns` 的保序子序列**，否則直接失敗、不做自動對齊。這一條同時抓到 stale 的產物（模型有的欄產物沒有）與不匹配的模型（順序被打亂）。論證見 ADR-0011 §5。
 
 若模型要求的 feature 不在 scoring data 中，pipeline 會明確列出缺少欄位後中止。
 
@@ -285,7 +294,7 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 
 `predict_scores` 依 distinct `(time, item)` 切分 Spark DataFrame，每一批只將該日期與 item 的 rows 收集到 pandas，再呼叫 `ModelAdapter.predict()`。
 
-identity 與 feature 會在同一次 collect 中取得，以維持每筆分數與 `(time, entity, item)` 的列對齊。所有批次完成後，driver 會合併 pandas 結果並轉回 Spark DataFrame。
+identity 與 feature 會在同一次 collect 中取得，以維持每筆分數與 `(time, entity, item)` 的列對齊。切 X 的是 `io/extract.py` 的 `_pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。所有批次完成後，driver 會合併 pandas 結果並轉回 Spark DataFrame。
 
 `model_version` 會在評分結果中注入，供後續 staging、production 與 evaluation partition 使用。
 

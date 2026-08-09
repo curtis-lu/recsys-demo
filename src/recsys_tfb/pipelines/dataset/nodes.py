@@ -48,11 +48,9 @@ from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     read_declared_vocabularies,
     require_declared_categoricals,
-    warn_unknown_encodings,
 )
 from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     compute_feature_columns,
-    encodable_categoricals,
     encoded_frame_columns,
     prepare_model_input_config,
     require_base_key_columns,
@@ -89,6 +87,8 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
 from recsys_tfb.preprocessing import (
     _cast_feature_floats_to_float32,
     _encode_categoricals,
+    encodable_categoricals,
+    warn_unknown_encodings,
 )
 
 logger = logging.getLogger(__name__)
@@ -584,7 +584,9 @@ def apply_preprocessor_to_features(
         )
         if encode_cols:
             result = _encode_categoricals(result, encode_cols, category_mappings)
-            warn_unknown_encodings(result, encode_cols)
+            warn_unknown_encodings(
+                result, encode_cols, context="apply_preprocessor_to_features",
+            )
 
     logger.info(
         "Preprocessed feature_table (Spark): %d cols (encoded=%d)",

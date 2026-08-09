@@ -91,23 +91,6 @@ def split_categorical_sources(
     return from_data, from_schema
 
 
-def encodable_categoricals(
-    categorical_cols: list[str],
-    frame_cols: list[str],
-    identity_cols: list[str],
-) -> list[str]:
-    """The categoricals a ``feature_table``-shaped frame can encode itself.
-
-    Present in the frame, and not an identity column: identity categoricals
-    arrive from ``keys`` at join time, not from this frame, so encoding them
-    here would encode a column that is about to be replaced.
-    """
-    return [
-        c for c in categorical_cols
-        if c in frame_cols and c not in identity_cols
-    ]
-
-
 def encoded_frame_columns(
     base_key: list[str],
     feature_columns: list[str],

@@ -1,10 +1,13 @@
-"""Category vocabularies: how one gets built, and how unknowns get reported.
+"""Category vocabularies: where one comes from.
 
-The dataset pipeline's half of categorical encoding. The *encoding* itself —
-"a value outside the vocabulary becomes the sentinel" — is shared with the
-inference pipeline and lives in ``recsys_tfb.preprocessing``; what is only ever
-a dataset concern is where a vocabulary comes from (the fit) and how many values
-fell outside it (the apply-side warning).
+The dataset pipeline's half of categorical encoding. What is only ever a
+dataset concern is where a vocabulary comes from — the leakage-free fit over
+the train months, and the schema declaration that supplies a domain the data
+cannot. Everything downstream of the vocabulary is shared with the inference
+pipeline and lives in ``recsys_tfb.preprocessing``: the encoding itself
+("a value outside the vocabulary becomes the sentinel"), which categoricals a
+frame may encode, and the count of how many fell outside. The last of those
+lived here until #185, when inference acquired the same warning.
 
 Named per ADR-0008 §2 for the concern it implements. Each function is one
 mechanism; the decisions they serve — leakage-free fit, vocabulary source —
@@ -13,18 +16,14 @@ are named at the call sites in ``nodes.py``.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
-from recsys_tfb.preprocessing import UNKNOWN_CATEGORY_CODE
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
-
-logger = logging.getLogger(__name__)
 
 
 def collect_vocabularies_from_data(
@@ -87,25 +86,3 @@ def read_declared_vocabularies(
     the step that says so, and the caller runs it first.
     """
     return {col: list(categorical_values[col]) for col in columns}
-
-
-def warn_unknown_encodings(df: DataFrame, columns: list[str]) -> None:
-    """Warn once per column that encoded any value to the unknown sentinel.
-
-    Single pass: one aggregation returns the sentinel count for every encoded
-    column at once. The per-column ``.count()`` this replaced re-scanned the
-    full multi-month feature_table once per categorical (N actions).
-    """
-    if not columns:
-        return
-    unknown_counts = df.agg(*[
-        F.sum(F.when(F.col(c) == UNKNOWN_CATEGORY_CODE, 1).otherwise(0)).alias(c)
-        for c in columns
-    ]).collect()[0]
-    for col in columns:
-        n_unknown = unknown_counts[col] or 0
-        if n_unknown > 0:
-            logger.warning(
-                "apply_preprocessor_to_features: %d unknowns in column '%s'",
-                n_unknown, col,
-            )
