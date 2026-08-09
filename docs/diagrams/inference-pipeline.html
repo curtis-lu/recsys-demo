@@ -76,10 +76,11 @@
 
 <div class="note">
 框內是 <b>node name</b>，可以直接餵給 <code>--from-node</code> / <code>--only-node</code>（<code>--list-nodes</code> 印的也是這個名字）。
-這條 pipeline 的六個 node name 都與函式名相同。<b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>
-（唯一例外是 <code>inference.products</code>，理由見圖例）、<code>use_calibration</code> 的校準開關
-（它只是 <code>predict_scores</code> 內部一次 if，不改變任何一條邊）、以及
-<code>build_scoring_dataset</code> 只寫 log 不下推的特徵覆蓋率報表。
+這條 pipeline 的五個 node name 都與函式名相同。<b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>
+（例外是 <code>inference.products</code> 與 <code>inference.entity_buckets</code>，理由見圖例）、
+<code>use_calibration</code> 的校準開關（它只是評分節點內部一次 if，不改變任何一條邊）、
+續跑的 chunk 規劃（它決定跑幾個 chunk，但跳過的與寫出的走同一條線）、以及
+<code>build_inference_population_features</code> 只寫 log 不下推的特徵覆蓋率報表。
 </div>
 
 <h2>圖例</h2>
@@ -97,16 +98,27 @@
   <span class="lg"><span class="sw dash" style="background:var(--abort-bg);border-color:var(--abort-bd)"></span>失敗路徑的終點（沒有東西被寫出去）</span>
 </div>
 <p class="sub" style="margin-top:8px">
-<b>只有一種 config 入圖。</b><code>inference.products</code> 不是「被讀取的設定值」，而是被
-<code>spark.createDataFrame</code> 造成一張表、再 <code>crossJoin</code> 進評分母體的<b>資料列</b>
-（<code>nodes_spark.py:113-115</code>）——評分列數 = entity 數 × 日期數 × products 數。
+<b>只有兩種 config 入圖。</b><code>inference.products</code> 決定內層迴圈跑幾圈（每個 entity 配幾個 item），
+<code>inference.entity_buckets</code> 決定外層迴圈跑幾圈（driver 峰值與落地的分區數）。
 <code>inference.snap_dates</code> 這種純過濾條件仍然不畫。<br>
-<b>虛線邊 = 不是資料流</b>：宣告了但函式沒讀（<code>scoring_dataset → predict_scores</code>），
-或版本解析的相依（<code>model ⇢ preprocessor</code>）。<br>
-<b>⚠ 下面這張 SVG 停在 #185 之前。</b>來源 <code>inference-pipeline.mmd</code> 已更新，SVG 沒有——
-它是用 repo 外的 mermaid CLI 產生的，不在本 repo 的工具鏈裡。差在兩處：<code>preprocessor</code> 現在<b>也</b>是
-<code>predict_scores</code> 的輸入（item 的整數 code 取自它的 <code>category_mappings</code>），
-而 <code>apply_preprocessor</code> 不再編碼 identity 類別欄。以 <code>.mmd</code> 為準。
+<b>粗虛線邊 = node 自己寫的表</b>（<code>Node(writes=…)</code>），而且它<b>不是</b>拓樸相依邊——
+所以 <code>score_manifest</code> 才要存在，它是唯一保證排名跑在分區寫完之後的東西。
+細虛線邊是版本解析的相依（<code>model ⇢ preprocessor</code>）。<br>
+<b>⚠ 下面這張 SVG 停在 #185 之前，已經落後兩次改動（#187、#188）。</b>
+來源 <code>inference-pipeline.mmd</code> 是唯一真實來源，SVG 沒有跟上——它是用 repo 外的 mermaid CLI
+產生的，不在本 repo 的工具鏈裡（生產環境禁網路、禁加套件）。已知差異：
+<ul>
+<li>節點集合從 6 個變 5 個：<code>build_scoring_dataset</code> ＋ <code>apply_preprocessor</code>
+合併成 <code>build_inference_population_features</code>，<code>predict_scores</code> 改名
+<code>predict_and_write_scores</code>。</li>
+<li>新增落地的中間表 <code>inference_population_features</code>（顆粒度 <code>(time, entity)</code>，不含 item 展開）；
+記憶體中繼 <code>scoring_dataset</code> 與 <code>X_score</code> 消失。</li>
+<li>評分節點的 output 是 <code>score_manifest</code>，資料走 <code>writes=</code> 逐分區落地。</li>
+<li><code>unranked_predictions</code> 多一個 <code>entity_bucket</code> 分區欄；對外兩張表沒有。</li>
+<li>三張輸出表的 <code>model_version</code> 是 <code>partition_filter</code> 而不是 <code>partition_col</code>（#187）。</li>
+<li><code>row_count_match</code> 換成 <code>partition_completeness</code>。</li>
+</ul>
+以 <code>.mmd</code> 為準。
 </p>
 
 <h2>流程圖</h2>

@@ -32,7 +32,7 @@
 | `label_table` | 客戶是否承作某產品的 ground truth（`label` 0/1） | `time, entity, item` |
 | `sample_pool` | 要納入建模與排名的候選範圍，並可帶有供分層抽樣使用的欄位 | `time, entity, item` |
 
-> 上列三張是**建模**用的來源表。inference 另用一張 `inference_population` 母體表（同由 `source ETL` 維護，主鍵 `time, entity`），定義每個快照日「哪些 entity 該被推論」——對應 training 端的 `sample_pool`，把「誰被推論（membership）」與「他有什麼特徵（`feature_table` enrichment）」分開；缺特徵的母體成員仍會被評分，並以 `feature_present`（in-memory + log，不寫入輸出表）標記。
+> 上列三張是**建模**用的來源表。inference 另用一張 `inference_population` 母體表（同由 `source ETL` 維護，主鍵 `time, entity`），定義每個快照日「哪些 entity 該被推論」——對應 training 端的 `sample_pool`，把「誰被推論（membership）」與「他有什麼特徵（`feature_table` enrichment）」分開；缺特徵的母體成員仍會被評分，缺特徵成員數只在 log 留下每期一行的紀錄、不寫入任何表。
 
 **訓練輸出** —— training pipeline 會依資料版本與模型設定產生 `model_version`，並在對應版本目錄中保存模型、最佳參數、最佳迭代次數與訓練診斷等產物。框架也會保存 test set 的預測結果 `training_eval_predictions` 與評估指標，供模型比較及上線前審核；訓練完成不會自動將模型發布為 inference 預設版本。
 
@@ -186,9 +186,9 @@ evaluation 可用於訓練完成後的 test set 評估，也可在模型上線�
 - **明確的 query group**：每個 `time + entity` 下有多個候選 `item`，且分數只需要在同一組內比較。
 - **可觀察的 label**：能定義快照日之後一段固定觀察窗內的正負結果，例如「未來 7 天是否點擊該功能」。
 - **時間正確的特徵**：所有特徵在 `time` 當下已經存在，不能使用觀察窗內或更晚才產生的資訊。
-- **固定候選集合**：目前 inference 會將每個 `entity` 與 `inference.products` 的完整 item 清單做 cross join，預設每個對象共享同一組候選 item。
+- **固定候選集合**：目前 inference 會讓每個 `entity` 配上 `inference.products` 的完整 item 清單（在 driver 的內層迴圈展開，不是落地一張展開後的表），預設每個對象共享同一組候選 item。
 
-> 若不同客戶可見或可使用的功能不同，例如只有完成風險屬性評估的客戶才能看到基金申購，需先在 inference 的 `build_scoring_dataset` 加入 eligibility filter，不能只靠模型把不適用的功能排到後面。
+> 若不同客戶可見或可使用的功能不同，例如只有完成風險屬性評估的客戶才能看到基金申購，需先在 inference 的 `build_inference_population_features` 加入 eligibility filter，不能只靠模型把不適用的功能排到後面。
 
 ### 定義排序契約
 

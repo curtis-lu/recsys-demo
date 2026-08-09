@@ -125,7 +125,7 @@ def test_static_coverage_floor():
     """A5/A6 skip dynamically-built nodes. Pin how many, so it cannot grow."""
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
-    assert (total, judgeable) == (59, 55), (
+    assert (total, judgeable) == (58, 54), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -140,7 +140,10 @@ class TestA1NodeIO:
             for name in _literal_names(_kwargs(call).get("writes")) or []:
                 found[(path.parent.name, name)] += 1
 
-        assert found == Counter({("training", "training_eval_predictions"): 1}), (
+        assert found == Counter({
+            ("training", "training_eval_predictions"): 1,
+            ("inference", "unranked_predictions"): 1,
+        }), (
             "Node(writes=...) usage changed. Registered in R1 of "
             "docs/agents/architecture-constraints.md; adding one needs sign-off."
         )

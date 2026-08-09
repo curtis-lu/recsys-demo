@@ -1071,6 +1071,48 @@ class TestPartialWriteLeavesPartitionsIntact:
             spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
             spark.sql("DROP DATABASE IF EXISTS empty_write_test CASCADE")
 
+    def test_rewriting_a_partition_replaces_its_rows_rather_than_appending(
+        self, spark
+    ):
+        """Why "one save, one partition" is a correctness rule, not a style one.
+
+        The two tests above show what a partial write *leaves alone*. This one
+        shows what it *destroys*: a named partition is replaced wholesale. So a
+        frame spanning two chunks' partitions means the second chunk's save
+        deletes the first chunk's rows, with no error and no missing column —
+        constraint C of ADR-0010, and the reason ``unranked_predictions``
+        partitions by ``entity_bucket``.
+
+        Characterization, like its siblings: the behaviour is Hive's, and the
+        caller-side half (the frame handed to ``save()`` covers exactly one
+        partition) is pinned where it can be violated, in
+        ``tests/test_pipelines/test_inference/test_nodes_spark.py``.
+        """
+        spark.sql("CREATE DATABASE IF NOT EXISTS empty_write_test")
+        spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+        try:
+            self._make_ds().save(spark.createDataFrame(
+                [("c1", 0.5, "2024-01-31"), ("c2", 0.7, "2024-01-31")],
+                ["cust_id", "score", "snap_date"],
+            ))
+            assert self._make_ds().load().count() == 2
+
+            # Same partition, different rows — as a colliding second chunk would.
+            self._make_ds().save(spark.createDataFrame(
+                [("c3", 0.9, "2024-01-31")], ["cust_id", "score", "snap_date"],
+            ))
+
+            survivors = {
+                row["cust_id"] for row in self._make_ds().load().collect()
+            }
+            assert survivors == {"c3"}, (
+                "insertInto appended instead of replacing; the by-chunk write "
+                "design assumes replacement"
+            )
+        finally:
+            spark.sql("DROP TABLE IF EXISTS empty_write_test.model_input")
+            spark.sql("DROP DATABASE IF EXISTS empty_write_test CASCADE")
+
 
 def _partition_rows(specs: list[str]) -> list:
     """Rows shaped like ``SHOW PARTITIONS`` output — ``row[0]`` is the spec."""

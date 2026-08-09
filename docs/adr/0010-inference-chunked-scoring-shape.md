@@ -305,9 +305,24 @@ diff 為空」當驗收，本次不能：表結構改了、節點集合從 6 個
 
    **刻意不用「寫入前後 `existing_partition_values()` 差集」**：`io/hive_table_dataset.py:231-234`
    的註解已經記過，那個差集對「重新發布既有分區」by construction 為空——而約束 C 談的正是連續
-   save 互相覆蓋，覆蓋時前後差集都是 0，斷言看不到它要守的那件事。改成在 `save()` 的入口斷言
-   傳入 df 的分區欄 distinct 組合數 ＝ 1，用 DataFrame double 測（比照既有的
+   save 互相覆蓋，覆蓋時前後差集都是 0，斷言看不到它要守的那件事。改成斷言傳入 df 的分區欄
+   distinct 組合數 ＝ 1，用 double 測（比照既有的
    `tests/test_io/test_hive_table_dataset.py::TestSaveReportsPartitionsWithoutRecomputing`）。
+
+   > **一則更正（#188 實作時）：這條斷言不能放在 `save()` 的入口。** 本節初稿寫「在 `save()`
+   > 的入口斷言」，那是錯的，而且有兩個各自獨立的理由：
+   >
+   > 1. **這個不變量在 `save()` 這一層是假的。** 第四節新增的
+   >    `build_inference_population_features` 本來就會交出一個橫跨全部 `entity_buckets` 個分區
+   >    的 frame，那完全正確——它不是逐 chunk 寫的節點。放在 `save()` 入口的斷言會擋掉本設計
+   >    自己的第一個節點。約束 C 約束的是**逐 chunk 寫入的呼叫方**，不是 `HiveTableDataset`。
+   > 2. **對 Spark frame 而言那個斷言要付一個 action**，正好違反 ADR-0009 的成本契約，並且會
+   >    弄紅 `TestSaveReportsPartitionsWithoutRecomputing`（它的 double 對所有 action 一律 raise）。
+   >
+   > 實作改成：在 `predict_and_write_scores` 交出 frame **之前**對那個 pandas frame 斷言
+   > （已在 driver 記憶體裡，免費），並在節點接縫用 dataset double 釘住「每次 save 恰好一種
+   > 分區欄組合」與 save 次數。io 側另補一條 characterization 測試證明「重寫一個分區是替換而
+   > 不是追加」——那是這條規則之所以是正確性規則而非風格偏好的根據。
 
 驗收量**次數**不量**秒數**：本機合成資料的規模與生產差好幾個數量級，wall clock 外推不了，
 而上面三個計數是規模無關的。ADR-0009 的量測表（`:27-31`）是同一種思路——那張表是

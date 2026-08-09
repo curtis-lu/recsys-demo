@@ -6,9 +6,8 @@ from recsys_tfb.core.pipeline import Pipeline
 
 def create_pipeline() -> Pipeline:
     from recsys_tfb.pipelines.inference.nodes_spark import (
-        apply_preprocessor,
-        build_scoring_dataset,
-        predict_scores,
+        build_inference_population_features,
+        predict_and_write_scores,
         publish_predictions,
         rank_predictions,
         validate_predictions,
@@ -17,31 +16,37 @@ def create_pipeline() -> Pipeline:
     return Pipeline(
         [
             Node(
-                build_scoring_dataset,
-                inputs=["inference_population", "feature_table", "parameters"],
-                outputs="scoring_dataset",
-            ),
-            Node(
-                apply_preprocessor,
-                inputs=["scoring_dataset", "preprocessor", "parameters"],
-                outputs="X_score",
-            ),
-            Node(
-                predict_scores,
+                build_inference_population_features,
                 inputs=[
-                    "model", "X_score", "scoring_dataset",
+                    "inference_population", "feature_table",
                     "preprocessor", "parameters",
                 ],
-                outputs="unranked_predictions",
+                outputs="inference_population_features",
+            ),
+            Node(
+                predict_and_write_scores,
+                inputs=["model", "inference_population_features",
+                        "preprocessor", "parameters"],
+                # Chunked save: this node writes unranked_predictions itself,
+                # one partition per .save(). Registered in R1 of
+                # docs/agents/architecture-constraints.md. The Runner binds
+                # write targets BY KEYWORD, so the signature's parameter name
+                # must stay `unranked_predictions` -- and a new optional input
+                # must NOT be appended after it.
+                writes=["unranked_predictions"],
+                outputs="score_manifest",
             ),
             Node(
                 rank_predictions,
-                inputs=["unranked_predictions", "parameters"],
+                # score_manifest is an ordering-only dependency: `writes=`
+                # creates no topological edge, so without it this node could be
+                # scheduled before the partitions it reads exist.
+                inputs=["unranked_predictions", "score_manifest", "parameters"],
                 outputs="ranked_staging",
             ),
             Node(
                 validate_predictions,
-                inputs=["ranked_staging", "scoring_dataset", "parameters"],
+                inputs=["ranked_staging", "score_manifest", "parameters"],
                 outputs="validated_predictions",
             ),
             Node(

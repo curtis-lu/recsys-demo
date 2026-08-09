@@ -56,8 +56,16 @@ RESUME_CONTRACTS = {
         },
     },
     ("inference", ()): {
-        # scoring_dataset is memory-only by design (cheap Spark transform)
-        "rank_predictions": {"build_scoring_dataset"},
+        # score_manifest is memory-only, so resuming at rank re-runs the
+        # scoring node. That is cheap *because* scoring resumes: every chunk's
+        # partition already exists, so it lists the metastore once and writes
+        # nothing. Same shape as training's predict_manifest feeding
+        # compute_test_mAP_spark.
+        "rank_predictions": {"predict_and_write_scores"},
+        # The resume point the landed intermediate table buys (ADR-0010's
+        # "consequences"): scoring reads a persisted feature table, so nothing
+        # upstream has to re-run — no population/feature join, no preprocessing.
+        "predict_and_write_scores": set(),
     },
     ("evaluation", ()): {
         # eval_predictions/metrics are memory-only: report regeneration

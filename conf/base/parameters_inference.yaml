@@ -6,6 +6,14 @@ spark:
 
 inference:
   use_calibration: true   # bool；★是否套用校準後模型輸出（需該 model 有 calibration）
+  # 評分的切塊數：母體依 entity 確定性雜湊分成這麼多桶，外層迴圈跑桶、內層跑 item，
+  # 每個 (桶, item) 算完立刻落地成恰好一個分區。這是控制 driver 峰值的旋鈕——
+  # 一桶約 (母體 / entity_buckets) × 特徵數 進 driver。
+  # 健康窗口 5–20（ADR-0010 §4 兩端各一個約束夾出來：桶太少單一 chunk 吃掉 driver
+  # 一半以上，桶太多每個分區檔遠小於一個 HDFS block），超出只警告不阻止。
+  # ⚠ 改這個值不是零成本：它是 unranked_predictions 的 partition col，改了等於該
+  # model_version 的該表要重建（舊桶的分區沒人清，validate 會擋下來）。
+  entity_buckets: 10
   snap_dates:             # ★要評分的時間切點清單（你的資料）
     - "2025-12-31"
   products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）

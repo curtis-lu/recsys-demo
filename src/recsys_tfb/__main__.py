@@ -15,6 +15,7 @@ from recsys_tfb.core.consistency import (
     compare_source_key_exists,
     date_split_overlap_errors,
     post_training_snap_date_errors,
+    resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     ConfigConsistencyError,
     REBUILD_SNAP_DATES_KEY,
@@ -290,6 +291,11 @@ _REBUILD_TARGET_NODES = (
 )
 _REBUILD_PREDICT_NODE = "predict_and_write_test_predictions"
 
+#: The inference side of the same idea: one node reads the flag, and it is the
+#: node that decides which scoring chunks to redo.
+_INFERENCE_REBUILD_TARGET_NODES = ("predict_and_write_scores",)
+_INFERENCE_REBUILD_PREDICT_NODE = "predict_and_write_scores"
+
 
 def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     """WARN lines when ``--rebuild-dates`` was passed but no node it drives is
@@ -302,33 +308,48 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     part of the test chain stale). What is worth one is a slice that drops the
     nodes it drives: then the flag is accepted, the run succeeds, and nothing it
     asked for happens.
+
+    Which nodes those are is per-pipeline, so the caller may override the pair
+    through ``rebuild_advice``. Naming the wrong pipeline's nodes in this
+    message would send the operator to a node their pipeline does not have.
     """
     if not rebuild_advice or not rebuild_advice.get("rebuild"):
         return []
-    if any(node.name in _REBUILD_TARGET_NODES for node in pipe.nodes):
+    targets = rebuild_advice.get("targets") or _REBUILD_TARGET_NODES
+    predict_node = rebuild_advice.get("predict_node") or _REBUILD_PREDICT_NODE
+    if any(node.name in targets for node in pipe.nodes):
         return []
     return [
         f"[rebuild] WARNING: --rebuild-dates {_fmt_months(rebuild_advice['rebuild'])} "
-        f"had no effect — this slice includes neither of the nodes it drives "
-        f"({', '.join(_REBUILD_TARGET_NODES)}).",
+        f"had no effect — this slice includes none of the nodes it drives "
+        f"({', '.join(targets)}).",
         "[rebuild] 要重算既有月份的預測，請跑 "
-        f"--only-node {_REBUILD_PREDICT_NODE}（不帶切片旗標的完整 run 也可以）。",
+        f"--only-node {predict_node}（不帶切片旗標的完整 run 也可以）。",
     ]
 
 
-def _format_rebuild_slice_warning(rebuild: list[str]) -> list[str]:
+def _format_rebuild_slice_warning(
+    rebuild: list[str], chain: str = "test 鏈"
+) -> list[str]:
     """WARN lines for --rebuild-dates combined with a slicing flag.
 
     The two flags are orthogonal by design (slicing picks nodes, rebuild picks
     months) and combining them is a supported expert path — but only part of
-    the test chain gets recomputed, and the untouched upstream partitions stay
-    stale without complaint. Say so rather than let it pass silently.
+    the chain gets recomputed, and the untouched upstream partitions stay stale
+    without complaint. Say so rather than let it pass silently.
+
+    ``chain`` names what the operator would be re-running, because the two
+    callers mean different things by it: the dataset/training side means the
+    test chain, inference means the scoring chain. The same reason
+    :func:`_maybe_warn_rebuild_sliced_away` takes its target nodes as a
+    parameter — a message describing the wrong pipeline sends the operator
+    looking for something their run does not have.
     """
     return [
         "[rebuild] WARNING: --rebuild-dates 與切片旗標（--from-node/--only-node）併用；",
         "[rebuild] 本次只重算被選中的 node，未被選中的上游 partition "
         f"（月份 {_fmt_months(rebuild)}）不會刷新（exists() ≠ fresh）。",
-        "[rebuild] 要整條 test 鏈都重算，請不帶切片旗標再跑一次。",
+        f"[rebuild] 要整條 {chain} 都重算，請不帶切片旗標再跑一次。",
     ]
 
 
@@ -1095,6 +1116,12 @@ def inference(
     model_version: Optional[str] = typer.Option(
         None, "--model-version", help="Model version to use for inference (default: best symlink)"
     ),
+    rebuild_dates: Optional[str] = typer.Option(
+        None, "--rebuild-dates",
+        help="Comma-separated snap_dates to re-score even though their "
+             "unranked_predictions partitions already exist (use after an "
+             "upstream backfill). Must be a subset of inference.snap_dates.",
+    ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
         help="Start from this node (topological position); missing upstream "
@@ -1116,6 +1143,21 @@ def inference(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("inference", env)
+
+    # (A21) --rebuild-dates ⊆ inference.snap_dates. Checked before Spark starts:
+    # a typo here would otherwise cost a cold start before failing.
+    try:
+        rebuild = resolved_inference_rebuild_dates(
+            params,
+            [d.strip() for d in rebuild_dates.split(",")] if rebuild_dates else None,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1)
+    if rebuild and (from_node or only_node):
+        for line in _format_rebuild_slice_warning(rebuild, chain="評分鏈"):
+            logger.warning(line)
+
     get_or_create_spark_session(_load_spark_config(config, "inference"))
     data_dir = _find_data_dir()
 
@@ -1151,12 +1193,20 @@ def inference(
         "model_version": mv,
         "snap_date": snap_date,
         "source_model_version": model_version,
+        # Read by predict_and_write_scores: a month named here has all its
+        # scoring chunks re-scored even though their partitions exist.
+        REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
     executed = _execute_pipeline(
         "inference", {}, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        rebuild_advice={
+            "rebuild": rebuild,
+            "targets": _INFERENCE_REBUILD_TARGET_NODES,
+            "predict_node": _INFERENCE_REBUILD_PREDICT_NODE,
+        },
     )
     if not executed:
         return

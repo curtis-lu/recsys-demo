@@ -1244,6 +1244,62 @@ class TestResolvedRebuildDatesA21:
         assert resolved_rebuild_dates(params, ["2026-01-31"]) == ["2026-01-31"]
 
 
+from recsys_tfb.core.consistency import resolved_inference_rebuild_dates
+
+
+def _inf(*snap_dates) -> dict:
+    return {"inference": {"snap_dates": list(snap_dates)}}
+
+
+class TestResolvedInferenceRebuildDatesA21:
+    """The same invariant, scoped to the months inference can score at all.
+
+    The inference command's resume unit is a ``(snap_date, entity_bucket,
+    item)`` partition, and it only ever touches ``inference.snap_dates``. A
+    month outside that list is the same silent no-op A21 exists to reject.
+    """
+
+    def test_none_returns_empty(self):
+        assert resolved_inference_rebuild_dates(_inf("2025-12-31"), None) == []
+
+    def test_configured_month_is_normalised(self):
+        params = _inf("2025-12-31", "2025-11-30")
+        assert resolved_inference_rebuild_dates(
+            params, ["2025-12-31", "2025-11-30"]
+        ) == ["2025-11-30", "2025-12-31"]
+
+    def test_unconfigured_month_raises(self):
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_inference_rebuild_dates(_inf("2025-12-31"), ["2025-09-30"])
+
+    def test_error_names_the_inference_key_not_the_dataset_one(self):
+        """A message naming the wrong key sends the operator to the wrong yaml."""
+        with pytest.raises(ConfigConsistencyError) as exc:
+            resolved_inference_rebuild_dates(_inf("2025-12-31"), ["2025-09-30"])
+        msg = str(exc.value)
+        assert "inference.snap_dates" in msg
+        assert "test_snap_dates" not in msg
+
+    def test_a_dataset_test_month_is_not_automatically_scorable(self):
+        """The two flags read two different keys; sharing one would cross them."""
+        params = {
+            "inference": {"snap_dates": ["2025-12-31"]},
+            "dataset": {"test_snap_dates": ["2025-09-30"]},
+        }
+        with pytest.raises(ConfigConsistencyError, match=r"--rebuild-dates"):
+            resolved_inference_rebuild_dates(params, ["2025-09-30"])
+
+    def test_malformed_date_raises(self):
+        with pytest.raises(ConfigConsistencyError, match=r"non-ISO value"):
+            resolved_inference_rebuild_dates(_inf("2025-12-31"), ["31/12/2025"])
+
+    def test_unquoted_yaml_dates_compare_equal(self):
+        params = _inf(_dt.date(2025, 12, 31))
+        assert resolved_inference_rebuild_dates(params, ["2025-12-31"]) == [
+            "2025-12-31"
+        ]
+
+
 # --- A22: under --post-training, evaluation.snap_date must be a test month ---
 
 from recsys_tfb.core.consistency import post_training_snap_date_errors
