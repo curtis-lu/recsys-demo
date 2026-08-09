@@ -32,11 +32,11 @@ def create_pipeline() -> Pipeline:
                     "model", "X_score", "scoring_dataset",
                     "preprocessor", "parameters",
                 ],
-                outputs="score_table",
+                outputs="unranked_predictions",
             ),
             Node(
                 rank_predictions,
-                inputs=["score_table", "parameters"],
+                inputs=["unranked_predictions", "parameters"],
                 outputs="ranked_staging",
             ),
             Node(

@@ -51,41 +51,44 @@ def _make_valid_data(spark, n_customers=3):
 
 class TestValidatePredictionsPass:
     def test_valid_data_passes(self, spark, parameters):
+        """回傳的是裁過月份的 frame，不是原物件。
+
+        publish 寫的就是這個回傳值，所以它必須只含本次的月份；`is` 比對在
+        `_filter_current_inference_scope` 時代之所以成立，只是因為測試沒設
+        `model_version`、整個 helper 直接 early-return。
+        """
         ranked, scoring = _make_valid_data(spark)
         result = validate_predictions(ranked, scoring, parameters)
-        assert result is ranked
+        assert sorted(result.columns) == sorted(ranked.columns)
+        assert result.collect() == ranked.collect()
 
     def test_valid_data_multiple_customers(self, spark, parameters):
         ranked, scoring = _make_valid_data(spark, n_customers=10)
         result = validate_predictions(ranked, scoring, parameters)
         assert result.count() == 30
 
-    def test_ignores_other_model_and_date_partitions(
-        self, spark, parameters
-    ):
-        parameters["model_version"] = "current"
-        ranked, scoring = _make_valid_data(spark)
-        ranked = ranked.withColumn("model_version", F.lit("current"))
+    def test_ignores_other_snap_date_partitions(self, spark, parameters):
+        """`ranked_staging` 跨月份累積，驗證只該看本次的月份。
 
-        other_model = (
-            ranked.withColumn("model_version", F.lit("previous"))
-            .withColumn("score", F.lit(2.0))
-        )
+        模型版本那一半不在這裡了：catalog 的 `partition_filter: model_version`
+        讓 load 發 `WHERE model_version = '…'` 並把該欄 drop 掉，所以節點看到的
+        frame 本來就只剩本次模型（ADR-0010 §5）。月份沒有任何東西擋，不自己裁
+        的話 `row_count_match` 會拿「全部歷史月份」去比「本月的 scoring_dataset」。
+        """
+        ranked, scoring = _make_valid_data(spark)
         other_date = (
             ranked.withColumn("snap_date", F.lit("2024-01-31").cast("date"))
             .withColumn("score", F.lit(2.0))
         )
-        persisted_staging = ranked.unionByName(other_model).unionByName(other_date)
+        persisted_staging = ranked.unionByName(other_date)
 
-        result = validate_predictions(
-            persisted_staging, scoring, parameters
-        )
+        result = validate_predictions(persisted_staging, scoring, parameters)
 
         assert result.count() == ranked.count()
         assert {
-            row["model_version"]
-            for row in result.select("model_version").distinct().collect()
-        } == {"current"}
+            row["snap_date"].strftime("%Y-%m-%d")
+            for row in result.select("snap_date").distinct().collect()
+        } == {"2024-03-31"}
 
 
 class TestRowCountMatch:

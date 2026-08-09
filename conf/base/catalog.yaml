@@ -324,20 +324,44 @@ enriched_eval_predictions:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Inference pipeline — Hive managed table，採 dynamic partition overwrite ---
-# 每次 run 只覆寫 DataFrame 內存在的 partition（snap_date × prod_name × model_version）。
-score_table:
+# --- Inference pipeline — 三張輸出表共用的分區形狀 ---
+# 三張都是 `partition_filter: model_version` 加上 `partition_cols: snap_date,
+# prod_name`，與 training_eval_predictions 同構。那不是巧合——同一個問題已經被
+# 解過一次（ADR-0009，其「這條 ADR 沒有解決的事」那條就是這三張表，#187 把它劃掉）。
+#
+# 注意 partition_cols 這一半在票 D 會再動：`unranked_predictions` 屆時多一個
+# entity_bucket（ADR-0010 §5 的表），另外兩張不變。
+#
+# 為什麼 model_version 是 filter 而不是 partition_col：一次 publish 就是一個
+# model_version，所以 load 可以直接發 `WHERE model_version = '…'`，而 save 之後
+# 可以拿 metastore 快照的 before／after 差集報出「這次寫了哪些分區」。留在
+# partition_cols 時 existing_partition_values() 答的是整張表跨所有 run 的累積，
+# 差集分不出「這次覆寫的」與「早就在那的」——重新發布會印出「0 new」
+# （issue #179／ADR-0010 §5）。
+#
+# ⚠ 這三張表的分區形狀在 #187 改過，那是一次**破壞性遷移**：partition_filter 的
+# 鍵在實體分區順序上排在 partition_cols 之前，而 CREATE TABLE IF NOT EXISTS 不會
+# 修改既有表、insertInto 又是位置對應。就地套用新設定會把 model_version 的值寫進
+# snap_date 分區欄，且零錯誤訊息。既有環境必須先 DROP 再重建——步驟見
+# docs/pipelines/inference.md §6.5。
+
+# --- Inference pipeline — 未排名分數（managed Hive table）---
+# predict_scores 的輸出。`_table` 後綴在本 repo 只用於來源表（feature_table／
+# label_table／sample_pool），所以這張中間產物叫 unranked_predictions
+# （#187 之前叫 score_table）。
+unranked_predictions:
   type: HiveTableDataset
   database: ${hive.db}
-  table: score_table
+  table: unranked_predictions
   external: false
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
+  partition_filter:
+    model_version: ${model_version}
   partition_cols:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
-    - {name: model_version, type: STRING}
 
 # --- Inference pipeline — 發布前 staging（managed Hive table）---
 # rank_predictions 先把排名寫進 staging；validate_predictions 讀此表跑 sanity
@@ -352,10 +376,11 @@ ranked_staging:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
     - {name: rank, type: BIGINT}
+  partition_filter:
+    model_version: ${model_version}
   partition_cols:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
-    - {name: model_version, type: STRING}
 
 # --- Inference pipeline（續）— production 輸出 + Evaluation 讀取端入口 ---
 # 由 publish_predictions 寫入（唯一一次 production 寫入，且只在 validate 通過後執行）。
@@ -371,7 +396,8 @@ ranked_predictions:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
     - {name: rank, type: BIGINT}
+  partition_filter:
+    model_version: ${model_version}
   partition_cols:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
-    - {name: model_version, type: STRING}

@@ -10,7 +10,7 @@
 | 主要用途 | 產生批次排序結果，供下游行銷、推薦版位或其他資源分配流程使用 |
 | 執行指令 | `python -m recsys_tfb inference` |
 | 主要輸入 | `inference_population`（評分母體）、`feature_table`（特徵）、版本化 `preprocessor`、版本化 `model` |
-| 主要輸出 | `score_table`、`ranked_staging`、production `ranked_predictions` |
+| 主要輸出 | `unranked_predictions`、`ranked_staging`、production `ranked_predictions` |
 | 設定檔 | `conf/base/parameters_inference.yaml` |
 | I/O 設定 | `conf/base/catalog.yaml` |
 | 上游 pipeline | `source ETL`、`dataset`、`training`、人工 model promotion |
@@ -239,15 +239,15 @@ python -m recsys_tfb inference \
 
 | 指令 | 實際行為 |
 |---|---|
-| `--from-node rank_predictions` | 重用 `score_table`，重建 memory-only `scoring_dataset`，重新排名、驗證並發布 |
+| `--from-node rank_predictions` | 重用 `unranked_predictions`，重建 memory-only `scoring_dataset`，重新排名、驗證並發布 |
 | `--from-node validate_predictions` | 重用 `ranked_staging`，重建 `scoring_dataset`，重新驗證並發布 |
 | `--only-node rank_predictions` | 只重寫 `ranked_staging`，不驗證、不發布 |
 | `--only-node validate_predictions` | 重建 `scoring_dataset` 並驗證 staging，但不發布 |
 | `--only-node publish_predictions` | 因 `validated_predictions` 是 memory-only，會自動補跑 validation 與 `scoring_dataset`，再發布 |
 
-`score_table` 與 `ranked_staging` 是可持久化接續點；`scoring_dataset`、`X_score` 與 `validated_predictions` 是記憶體中間結果。
+`unranked_predictions` 與 `ranked_staging` 是可持久化接續點；`scoring_dataset`、`X_score` 與 `validated_predictions` 是記憶體中間結果。
 
-切片的 `exists()` 只能確認 Hive table 存在，不能保證本次 model/date partitions 已經產生。實際 node 會再限制在目前 `model_version + snap_dates`；若該範圍沒有資料，仍會在執行時失敗。
+切片的 `exists()` 只能確認 Hive table 存在，不能保證本次 model/date partitions 已經產生。實際讀取會再限制在目前的 `model_version`（catalog 的 `partition_filter`）與 `snap_dates`（節點內的 `restrict_to_snap_dates`）；若該範圍沒有資料，仍會在執行時失敗。
 
 ## 5. 執行流程
 
@@ -255,8 +255,8 @@ python -m recsys_tfb inference \
 |---|---|---|---|---|
 | 建立母體 | `build_scoring_dataset` | `inference_population`、`feature_table`、parameters | 篩日期取母體 `(time, entity)`、與 products cross join、left-join 接回 feature columns（標記 `feature_present`） | `scoring_dataset` |
 | 前處理 | `apply_preprocessor` | scoring data、`preprocessor` | 套用 training 時的 categorical mappings、欄位順序與 float32 casting；**identity 類別欄不在此編碼** | `X_score` |
-| 模型評分 | `predict_scores` | `model`、`X_score`、`preprocessor` | 依模型保存的 feature names 取欄，以 `(time, item)` 分批轉 pandas，在 driver 端補上 identity 類別欄的編碼後評分 | `score_table` |
-| 組內排名 | `rank_predictions` | `score_table` | 限制目前 model/date，依 `(time, entity)` 內 score 降冪產生 rank | `ranked_staging` |
+| 模型評分 | `predict_scores` | `model`、`X_score`、`preprocessor` | 依模型保存的 feature names 取欄，以 `(time, item)` 分批轉 pandas，在 driver 端補上 identity 類別欄的編碼後評分 | `unranked_predictions` |
+| 組內排名 | `rank_predictions` | `unranked_predictions` | 先 `restrict_to_snap_dates` 裁掉歷史月份（模型版本由 catalog 的 `partition_filter` 擋掉），再依 `(time, entity)` 內 score 降冪產生 rank | `ranked_staging` |
 | 發布驗證 | `validate_predictions` | staging、scoring data | 執行六項 sanity checks，任一失敗即拋出 `ValidationError` | `validated_predictions` |
 | 正式發布 | `publish_predictions` | validated rows | 將已驗證結果交由 catalog 寫入 production table | `ranked_predictions` |
 
@@ -270,7 +270,7 @@ python -m recsys_tfb inference \
 - 母體 grain 由其 ETL 保證唯一，因此不需 `dropDuplicates`。
 - item 本身不需要存在於 `feature_table`。
 - 每個 entity 預設會得到全部 products。
-- 母體成員若在 `feature_table` 缺特徵，仍保留於評分母體並標記 `feature_present=false`（不中止）。`feature_present` 只存在於 in-memory 的 `scoring_dataset`，**不**寫入 `score_table` / `ranked_predictions` 等 Hive 輸出表；`build_scoring_dataset` 另會 log 每個日期的缺特徵成員數，作為持久的可觀測紀錄。
+- 母體成員若在 `feature_table` 缺特徵，仍保留於評分母體並標記 `feature_present=false`（不中止）。`feature_present` 只存在於 in-memory 的 `scoring_dataset`，**不**寫入 `unranked_predictions` / `ranked_predictions` 等 Hive 輸出表；`build_scoring_dataset` 另會 log 每個日期的缺特徵成員數，作為持久的可觀測紀錄。
 - `feature_table` 的 `time + entity` 重複列仍會造成 enrichment 的 join fan-out，應在 source ETL 或資料驗收階段先排除。
 
 ### 5.2 前處理與模型 feature contract
@@ -296,7 +296,7 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 
 identity 與 feature 會在同一次 collect 中取得，以維持每筆分數與 `(time, entity, item)` 的列對齊。切 X 的是 `io/extract.py` 的 `_pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。所有批次完成後，driver 會合併 pandas 結果並轉回 Spark DataFrame。
 
-`model_version` 會在評分結果中注入，供後續 staging、production 與 evaluation partition 使用。
+`model_version` **不由節點注入**：三張輸出表都宣告 `partition_filter: model_version`，值由 catalog 在 `save()` 時從 `parameters["model_version"]` 補上。讀回來時同樣由 catalog 發 `WHERE model_version = '…'` 並把該欄 drop 掉，所以節點看到的 frame 沒有這一欄。
 
 ## 6. 發布驗證與產物
 
@@ -320,7 +320,7 @@ identity 與 feature 會在同一次 collect 中取得，以維持每筆分數�
 發布順序固定為：
 
 ```text
-score_table
+unranked_predictions
 → ranked_staging
 → validate_predictions
 → validated_predictions
@@ -342,14 +342,15 @@ score_table
 
 | 產物 | 儲存方式 | Partition／路徑 | 用途 |
 |---|---|---|---|
-| `score_table` | Hive managed table | `snap_date, item, model_version` | 可重用的未排名分數 |
-| `ranked_staging` | Hive managed table | `snap_date, item, model_version` | 發布前結果與失敗排查 |
-| `ranked_predictions` | Hive managed table | `snap_date, item, model_version` | 正式 production 排序結果 |
+| `unranked_predictions` | Hive managed table | `model_version / snap_date, item` | 可重用的未排名分數 |
+| `ranked_staging` | Hive managed table | `model_version / snap_date, item` | 發布前結果與失敗排查 |
+| `ranked_predictions` | Hive managed table | `model_version / snap_date, item` | 正式 production 排序結果 |
 | `manifest.json` | driver-local JSON | `data/inference/<model_version>/<first_snap_date>/` | 記錄模型、dataset IDs、參數、run ID 與 git commit |
 | `parameters_inference.json` | driver-local JSON | 同上 | 保存本次 inference 設定 |
 | `latest` | symlink | `data/inference/latest` | 指向最近成功完成的 inference run 目錄 |
 
-Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際包含的 `snap_date + item + model_version` partitions，其他模型與日期不受影響。
+三張表的分區欄都是 `model_version, snap_date, item`（實體目錄順序即此順序），斜線前的 `model_version` 是 catalog 的 `partition_filter`、後面兩個是 `partition_cols`。`partition_filter` 這一半與 training 的 `training_eval_predictions` 相同。
+Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際包含的 `snap_date + item` partitions（`model_version` 由 filter 固定），其他模型與日期不受影響。
 表格中的 `snap_date` 與 `item` 表示 schema 角色；實際 partition 欄名以 `catalog.yaml` 為準。
 
 ### 6.4 驗收重點
@@ -385,6 +386,48 @@ GROUP BY snap_date, model_version;
 
 實際 database 與欄位名稱以 `conf/base/catalog.yaml` 和 schema 設定為準。
 
+### 6.5 分區結構遷移（一次性、破壞性）
+
+**適用對象**：在 issue #187 之前跑過 inference、Hive 裡已經有這三張表的環境。全新環境不需要做任何事——表是第一次被建出來的，形狀就是新的。
+
+Issue #187 把三張表的 `model_version` 從 `partition_cols` 提為 `partition_filter`，並把 `score_table` 改名為 `unranked_predictions`。**這不能就地套用**：
+
+- `partition_filter` 的鍵在實體分區順序上排在 `partition_cols` **之前**（`HiveTableDataset._insert_column_order`），所以新的目錄結構是 `model_version=… / snap_date=… / prod_name=…`，舊的是 `snap_date=… / prod_name=… / model_version=…`。
+- 建表語句是 `CREATE TABLE IF NOT EXISTS`（`HiveTableDataset._build_create_ddl`），**對已存在的表不做任何事**，不會改分區順序。
+- `insertInto` 是**位置對應**，不是名稱對應。
+
+三者疊起來的後果是：舊表照舊以 `snap_date` 為第一個分區欄，而新程式碼送進來的第一欄是 `model_version`。於是 `model_version` 的值被寫進 `snap_date` 分區、`snap_date` 寫進 `prod_name`……三個分區欄都是 `STRING`，**型別檢查不會擋，零錯誤訊息，六項 sanity check 全綠**。
+
+因此遷移只有一條路：**先 DROP 再讓 pipeline 重建**。
+
+```sql
+-- 三張都是 managed table，DROP 會一併刪掉資料檔。
+DROP TABLE IF EXISTS <db>.score_table;          -- 舊名，改名後不再被任何東西寫入
+DROP TABLE IF EXISTS <db>.ranked_staging;
+DROP TABLE IF EXISTS <db>.ranked_predictions;
+```
+
+本機（`--env local`，內嵌 Derby ＋ `data/local_warehouse/`）：
+
+```bash
+export SPARK_CONF_DIR=$PWD/conf/spark-local
+bash scripts/local_spark_shell.sh sql -e "
+  DROP TABLE IF EXISTS ml_recsys.score_table;
+  DROP TABLE IF EXISTS ml_recsys.ranked_staging;
+  DROP TABLE IF EXISTS ml_recsys.ranked_predictions;"
+```
+
+DROP 之後重跑一次 inference，三張表會以新形狀重建。**這一步會丟掉歷史分區**：`ranked_predictions` 裡其他 `model_version` 的既有結果不會自動搬過來。需要保留的話，先把要留的版本讀出來另存，重建後再依新結構寫回去；或者接受重跑那些版本的成本。
+
+驗收（實體目錄名是唯一看得到錯位的地方）：
+
+```bash
+ls data/local_warehouse/ml_recsys.db/ranked_predictions/
+# 期望：model_version=<版本>/ ；若看到 snap_date=... 在最外層，就是沒 DROP 就套了新設定
+```
+
+`scripts/local_e2e.sh` 末段的 assert 把這條釘住：它要求最外層是 `model_version=` 且值等於這次跑的版本。
+
 ## 7. 版本、重跑與恢復
 
 ### 7.1 Inference 沒有獨立版本 hash
@@ -416,7 +459,7 @@ manifest 保存最後一次成功 run 的 inference parameters，但 Hive partit
 | `use_calibration` | full inference | score 內容改變，但 partition key 不變 |
 | promotion 到新 `best` | full inference | promotion 只更新 symlink，不會自動產生預測 |
 | 指定另一個 model version | full inference | 載入不同模型與 preprocessor，寫入新 model partitions |
-| 只修改 ranking node | `--from-node rank_predictions` | 可重用目前 model/date 的 `score_table` |
+| 只修改 ranking node | `--from-node rank_predictions` | 可重用目前 model/date 的 `unranked_predictions` |
 | 只想重新驗證 staging 並發布 | `--from-node validate_predictions` | 重用 staging，重建 scoring 母體後再驗證 |
 | 只檢查 staging，不發布 | `--only-node validate_predictions` | validation 成功後即結束 |
 | 修改 products | 先依 item 變更流程重建上游，再 full inference | products 必須與 schema item 集合一致 |
@@ -434,7 +477,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 
 ### 7.4 接續執行的安全邊界
 
-- `score_table` 與 `ranked_staging` 會保留歷史 partitions；rank 與 validation nodes 會先限制目前 `model_version + snap_dates`，避免混入舊批次。
+- `unranked_predictions` 與 `ranked_staging` 會保留歷史 partitions，rank 與 validation nodes 兩層都要擋掉舊批次：`model_version` 由 catalog 的 `partition_filter` 在 load 時就過濾掉，`snap_dates` 由節點內的 `restrict_to_snap_dates` 裁掉。後者拿掉的話，第二個月起會讀回全部歷史月份、重算、把舊月份無聲重新發布。
 - slicing planner 的 `exists()` 只檢查 table 是否存在，不驗證指定 partition 是否存在或是否由相同參數產生。
 - `scoring_dataset` 必須重建，因為 validation 需要用本次 feature table 與 products 定義檢查 row count 和 completeness。
 - `--only-node rank_predictions` 不會越過 validation gate，不能視為已發布。

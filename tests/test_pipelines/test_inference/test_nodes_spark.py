@@ -292,6 +292,27 @@ class TestPredictScores:
         result = predict_scores(MockModel(), X_score, scoring, preprocessor, parameters)
         assert set(result.columns) == {"snap_date", "cust_id", "prod_name", "score"}
 
+    def test_model_version_column_is_left_to_the_catalog(
+        self, inference_population, feature_table, parameters, preprocessor
+    ):
+        """節點不再自己塞 `model_version`——那是 `partition_filter` 的工作。
+
+        `HiveTableDataset.save()` 的 `_apply_partition_filter_cols` 缺欄就補、
+        有欄就先 `distinct()` 核對值；節點先塞好等於白付一次 action，而值來源
+        還是同一個 `parameters["model_version"]`。訓練端的 `training_eval_predictions`
+        本來就是這個形狀。
+        """
+        parameters["model_version"] = "mv-abc123"
+        scoring = build_scoring_dataset(inference_population, feature_table, parameters)
+        X_score = apply_preprocessor(scoring, preprocessor, parameters)
+
+        class MockModel:
+            def predict(self, X):
+                return np.full(len(X), 0.5)
+
+        result = predict_scores(MockModel(), X_score, scoring, preprocessor, parameters)
+        assert "model_version" not in result.columns
+
     def test_row_count_matches(self, inference_population, feature_table, parameters, preprocessor):
         scoring = build_scoring_dataset(inference_population, feature_table, parameters)
         X_score = apply_preprocessor(scoring, preprocessor, parameters)
@@ -501,8 +522,8 @@ class TestRankPredictions:
             "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
-        score_table = spark.createDataFrame(score_pdf)
-        result = rank_predictions(score_table, parameters)
+        unranked = spark.createDataFrame(score_pdf)
+        result = rank_predictions(unranked, parameters)
         assert "rank" in result.columns
 
     def test_rank_order(self, spark, parameters):
@@ -512,8 +533,8 @@ class TestRankPredictions:
             "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
             "score": [0.9, 0.3, 0.6],
         })
-        score_table = spark.createDataFrame(score_pdf)
-        result = rank_predictions(score_table, parameters)
+        unranked = spark.createDataFrame(score_pdf)
+        result = rank_predictions(unranked, parameters)
         pdf = result.toPandas()
         fx_rank = pdf.loc[pdf["prod_name"] == "exchange_fx", "rank"].iloc[0]
         bond_rank = pdf.loc[pdf["prod_name"] == "fund_bond", "rank"].iloc[0]
@@ -529,39 +550,110 @@ class TestRankPredictions:
             "prod_name": ["exchange_fx", "fund_stock", "fund_bond"] * 2,
             "score": [0.9, 0.3, 0.6, 0.1, 0.8, 0.5],
         })
-        score_table = spark.createDataFrame(score_pdf)
-        result = rank_predictions(score_table, parameters)
+        unranked = spark.createDataFrame(score_pdf)
+        result = rank_predictions(unranked, parameters)
         pdf = result.toPandas()
         for cid in ["C001", "C002"]:
             cust_ranks = sorted(pdf.loc[pdf["cust_id"] == cid, "rank"].tolist())
             assert cust_ranks == [1, 2, 3]
 
-    def test_filters_persisted_history_to_current_model_and_dates(
+    def test_restricts_persisted_history_to_this_run_snap_dates(
         self, spark, parameters
     ):
-        parameters["model_version"] = "current"
+        """表跨月份累積，而 `inference.snap_dates` 每次只有一個月。
+
+        不限縮的話第二個月起會讀回全部歷史月份、重新排名、把舊月份無聲重新
+        發布——`model_version` 提為 `partition_filter` 之後 catalog 只擋掉
+        模型那一半，月份這一半沒有任何東西擋（ADR-0010 §5）。
+        """
         score_pdf = pd.DataFrame({
             "snap_date": pd.to_datetime(
-                ["2024-03-31"] * 3
-                + ["2024-01-31"] * 3
-                + ["2024-03-31"] * 3
+                ["2024-03-31"] * 3 + ["2024-01-31"] * 3
             ),
-            "cust_id": ["C001"] * 9,
-            "prod_name": [
-                "exchange_fx", "fund_stock", "fund_bond",
-            ] * 3,
-            "score": [0.9, 0.3, 0.6] * 3,
-            "model_version": (
-                ["current"] * 3 + ["current"] * 3 + ["previous"] * 3
-            ),
+            "cust_id": ["C001"] * 6,
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"] * 2,
+            "score": [0.9, 0.3, 0.6] * 2,
         })
 
         result = rank_predictions(spark.createDataFrame(score_pdf), parameters)
-        rows = result.select("snap_date", "model_version", "rank").collect()
+        rows = result.select("snap_date", "rank").collect()
 
         assert len(rows) == 3
-        assert {row["model_version"] for row in rows} == {"current"}
         assert {
             row["snap_date"].strftime("%Y-%m-%d") for row in rows
         } == {"2024-03-31"}
         assert sorted(row["rank"] for row in rows) == [1, 2, 3]
+
+    def test_accepts_a_frame_with_no_model_version_column(
+        self, spark, parameters
+    ):
+        """catalog 的 load 在有 `partition_filter` 時會把該欄 drop 掉。
+
+        所以節點看到的就是沒有 `model_version` 的 frame；舊的比對式過濾在
+        這種輸入上是死碼，這條釘住「拿掉它之後仍然跑得動」。
+        """
+        parameters["model_version"] = "current"
+        score_pdf = pd.DataFrame({
+            "snap_date": pd.to_datetime(["2024-03-31"] * 3),
+            "cust_id": ["C001"] * 3,
+            "prod_name": ["exchange_fx", "fund_stock", "fund_bond"],
+            "score": [0.9, 0.3, 0.6],
+        })
+
+        result = rank_predictions(spark.createDataFrame(score_pdf), parameters)
+
+        assert "model_version" not in result.columns
+        assert result.count() == 3
+
+
+class TestRestrictToSnapDates:
+    """單一職責：只裁月份。模型版本那一半由 catalog 的 partition_filter 負責。"""
+
+    def _frame(self, spark):
+        return spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2024-03-31", "2024-01-31"]),
+            "cust_id": ["C001", "C001"],
+            "score": [0.9, 0.1],
+        }))
+
+    def test_keeps_only_configured_snap_dates(self, spark, parameters):
+        from recsys_tfb.pipelines.inference.nodes_spark import (
+            restrict_to_snap_dates,
+        )
+        out = restrict_to_snap_dates(self._frame(spark), parameters)
+        assert [
+            r["snap_date"].strftime("%Y-%m-%d") for r in out.collect()
+        ] == ["2024-03-31"]
+
+    def test_does_not_touch_model_version(self, spark, parameters):
+        """它不認得 model_version——兩種過濾合在一個 helper 正是被拆掉的東西。"""
+        from recsys_tfb.pipelines.inference.nodes_spark import (
+            restrict_to_snap_dates,
+        )
+        parameters["model_version"] = "current"
+        pdf = pd.DataFrame({
+            "snap_date": pd.to_datetime(["2024-03-31"] * 2),
+            "cust_id": ["C001", "C002"],
+            "model_version": ["current", "previous"],
+        })
+        out = restrict_to_snap_dates(spark.createDataFrame(pdf), parameters)
+        assert {r["model_version"] for r in out.collect()} == {
+            "current", "previous"
+        }
+
+    def test_missing_snap_dates_raises(self, spark, parameters):
+        """空的 scope 不得靜默退化成「全部留下」——那正是它要防的失效。"""
+        from recsys_tfb.pipelines.inference.nodes_spark import (
+            restrict_to_snap_dates,
+        )
+        parameters["inference"]["snap_dates"] = []
+        with pytest.raises(ValueError, match="inference.snap_dates"):
+            restrict_to_snap_dates(self._frame(spark), parameters)
+
+    def test_missing_time_column_raises(self, spark, parameters):
+        from recsys_tfb.pipelines.inference.nodes_spark import (
+            restrict_to_snap_dates,
+        )
+        pdf = pd.DataFrame({"cust_id": ["C001"], "score": [0.5]})
+        with pytest.raises(ValueError, match="snap_date"):
+            restrict_to_snap_dates(spark.createDataFrame(pdf), parameters)

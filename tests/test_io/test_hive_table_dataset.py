@@ -190,7 +190,7 @@ class TestDDLExternalPartitioned:
     def _make_ds(self) -> HiveTableDataset:
         return HiveTableDataset(
             database="ml_recsys",
-            table="score_table",
+            table="unranked_predictions",
             columns=[
                 {"name": "cust_id", "type": "STRING"},
                 {"name": "score", "type": "DOUBLE"},
@@ -201,13 +201,13 @@ class TestDDLExternalPartitioned:
                 {"name": "model_version", "type": "STRING"},
             ],
             external=True,
-            location="hdfs:///data/recsys/inference/score_table",
+            location="hdfs:///data/recsys/inference/unranked_predictions",
         )
 
     def test_ddl_has_external_and_location(self):
         ddl = self._make_ds()._build_create_ddl()
-        assert "CREATE EXTERNAL TABLE IF NOT EXISTS ml_recsys.score_table" in ddl
-        assert "LOCATION 'hdfs:///data/recsys/inference/score_table'" in ddl
+        assert "CREATE EXTERNAL TABLE IF NOT EXISTS ml_recsys.unranked_predictions" in ddl
+        assert "LOCATION 'hdfs:///data/recsys/inference/unranked_predictions'" in ddl
 
     def test_ddl_has_partitioned_by(self):
         ddl = self._make_ds()._build_create_ddl()
@@ -333,7 +333,7 @@ class TestSaveExternalPartitioned:
     def _make_ds(self) -> HiveTableDataset:
         return HiveTableDataset(
             database="ml_recsys",
-            table="score_table",
+            table="unranked_predictions",
             columns=[
                 {"name": "cust_id", "type": "STRING"},
                 {"name": "score", "type": "DOUBLE"},
@@ -343,7 +343,7 @@ class TestSaveExternalPartitioned:
                 {"name": "prod_name", "type": "STRING"},
             ],
             external=True,
-            location="hdfs:///tmp/score_table",
+            location="hdfs:///tmp/unranked_predictions",
         )
 
     def test_save_runs_ddl_sets_dynamic_mode_and_insertInto(self):
@@ -361,7 +361,7 @@ class TestSaveExternalPartitioned:
 
         # DDL executed
         ddl_sql = spark.sql.call_args_list[0][0][0]
-        assert "CREATE EXTERNAL TABLE IF NOT EXISTS ml_recsys.score_table" in ddl_sql
+        assert "CREATE EXTERNAL TABLE IF NOT EXISTS ml_recsys.unranked_predictions" in ddl_sql
 
         # Dynamic partition mode set
         spark.conf.set.assert_any_call(
@@ -373,7 +373,7 @@ class TestSaveExternalPartitioned:
 
         # insertInto with overwrite
         df.write.mode.assert_called_with("overwrite")
-        writer.insertInto.assert_called_once_with("ml_recsys.score_table")
+        writer.insertInto.assert_called_once_with("ml_recsys.unranked_predictions")
 
 
 class TestSaveManagedNonPartitioned:
@@ -1231,15 +1231,21 @@ class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
     empty filter it returns every partition in the table, accumulated across
     every run that ever wrote it. A before/after diff over that cannot tell an
     overwritten partition from an untouched one, so a re-publish would report
-    "0 new" and a partition count unrelated to this write. These tables
-    therefore keep the old frame query, cost and all — see ADR-0009 and #179.
+    "0 new" and a partition count unrelated to this write. Such a table
+    therefore keeps the old frame query, cost and all — see ADR-0009 and #179.
+
+    No entry in ``catalog.yaml`` is shaped like this any more (#187 moved the
+    last three), so this class is the only thing holding the fallback branch
+    down. The catalog side of that pairing —"nothing grows a partition_filter-less
+    writable entry back" — lives in
+    ``tests/test_core/test_catalog_inference_entries.py``.
     """
 
     def _make_ds(self) -> HiveTableDataset:
-        # Shaped like catalog.yaml's score_table / ranked_predictions.
+        # A writable partitioned table declared without a partition_filter.
         return HiveTableDataset(
             database="ml_recsys",
-            table="score_table",
+            table="unranked_predictions",
             columns=[{"name": "cust_id", "type": "STRING"}],
             partition_cols=[
                 {"name": "snap_date", "type": "STRING"},
@@ -1251,7 +1257,7 @@ class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
     def test_partitions_come_from_the_frame_not_the_metastore(self, caplog):
         ds = self._make_ds()
         spark = _make_spark_mock()
-        _configure_mock_table_exists(spark, "ml_recsys", "score_table")
+        _configure_mock_table_exists(spark, "ml_recsys", "unranked_predictions")
 
         df = MagicMock(name="DataFrame")
         df.columns = ["cust_id", "snap_date", "model_version"]
@@ -1264,7 +1270,7 @@ class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
             with _patch_spark(spark):
                 ds.save(df)
 
-        assert "Wrote 1 partitions to ml_recsys.score_table" in caplog.text
+        assert "Wrote 1 partitions to ml_recsys.unranked_predictions" in caplog.text
         # No metastore snapshot was taken — it could not have answered.
         assert not [
             c for c in spark.sql.call_args_list

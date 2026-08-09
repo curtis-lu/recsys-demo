@@ -50,7 +50,7 @@
 | 事實 | 為什麼要知道 |
 |---|---|
 | `etl_audit_log` 在 `SIGTERM`/`SIGKILL` 下會遺失**整批** audit（紀錄在 flush 前只活在記憶體 buffer） | 這是「用無小碎檔換掉逐筆持久化」的刻意取捨，**不是 regression**。terminal 與 `logs/<pipeline>_<run_id>.jsonl` 仍有逐筆紀錄可當 fallback |
-| inference 的 `feature_present`（缺特徵母體成員標記）刻意留 in-memory＋log，**不下推**到 `score_table`/`ranked_predictions` | 使用者先說下推、後反轉為不下推 |
+| inference 的 `feature_present`（缺特徵母體成員標記）刻意留 in-memory＋log，**不下推**到 `unranked_predictions`/`ranked_predictions` | 使用者先說下推、後反轉為不下推 |
 | `inference_population` 的 grain 唯一性靠 source_etl 的 `primary_key`＋`quality_checks`，**刻意不動 `consistency.py`** | 這正是「當初 source_etl 沒保證 feature_table 當母體」那個缺口的修法 |
 | per-item 指標**沒有 precision** | precision 是 per-query 量，無法歸因到單一 item。刻意的，不是漏掉 |
 | 診斷家族計數一律 count-free（寫「各診斷／N」不寫「五項」） | 避免增刪診斷時留下 5-vs-4 的矛盾 |
