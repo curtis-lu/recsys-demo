@@ -16,7 +16,11 @@ from recsys_tfb.pipelines.inference.chunk_plans import (
     ScoringChunk,
     plan_scoring_chunks,
 )
-from recsys_tfb.pipelines.inference.validation import ValidationError
+from recsys_tfb.pipelines.inference.validation import (
+    BATCH_CHECKS,
+    ValidationError,
+    validate_scored_chunk,
+)
 from recsys_tfb.preprocessing import (
     _cast_feature_floats_to_float32,
     _encode_categoricals,
@@ -653,6 +657,21 @@ def predict_and_write_scores(
                     ENTITY_BUCKET_COL: str(bucket),
                 })
                 _require_single_partition(out_pdf, partition_cols)
+                # The chunk half of validation, before the write rather than
+                # after the whole table is ranked: nulls, duplicates, the row
+                # count and the item value domain are all answerable from the
+                # two frames already in the driver (ADR-0011 section 3). A bad
+                # first chunk stops the run in minutes instead of surviving
+                # until `validate_predictions` hours later.
+                validate_scored_chunk(
+                    out_pdf,
+                    bucket_pdf,
+                    identity_cols=identity_cols,
+                    entity_cols=entity_cols,
+                    item_col=item_col,
+                    score_col=score_col,
+                    known_items=items,
+                )
                 # No model_version column: `partition_filter` owns it. The
                 # catalog's save injects it from the same
                 # `parameters["model_version"]` this node would have read
@@ -763,7 +782,22 @@ def validate_predictions(
     score_manifest: dict,
     parameters: dict,
 ) -> DataFrame:
-    """Validate inference output with sanity checks. Raises ValidationError on failure.
+    """The batch layer of validation. Raises ValidationError on failure.
+
+    Only the checks that a single chunk cannot answer live here — one chunk is
+    one item, so anything comparing a query group's items against each other has
+    to wait for the whole table (ADR-0011 section 3). Nulls, duplicates, the
+    per-chunk row count and the item value domain are checked in the driver as
+    each chunk is scored (:func:`validate_scored_chunk`), which is both free and
+    hours earlier. ``validation.BATCH_CHECKS`` is the register of what belongs
+    here.
+
+    **Two Spark actions on the success path**, down from seven — eight counting
+    the ``scoring_dataset`` re-scan ADR-0011 §3 measured, which #188 had already
+    removed. One grouped aggregation answers ``completeness``,
+    ``score_varies_within_group`` and the rank range together, and one windowed
+    pass covers the score-versus-rank ordering. ``partition_completeness`` needs
+    no action at all — it compares two lists the manifest already carries.
 
     The staging frame gets restricted because it comes back from Hive holding
     every month this model version has ever published, while the checks are
@@ -775,7 +809,6 @@ def validate_predictions(
         )
 
     schema = get_schema(parameters)
-    identity_cols = schema["identity_columns"]
     time_col = schema["time"]
     entity_cols = schema["entity"]
     score_col = schema["score"]
@@ -828,73 +861,87 @@ def validate_predictions(
                 ),
             })
 
-        n_ranked = ranked_predictions.count()
-
-        # 2. score_range
-        out_of_range = ranked_predictions.filter(
-            ~F.col(score_col).between(0.0, 1.0)
-        ).count()
-        if out_of_range > 0:
-            stats = ranked_predictions.agg(
-                F.min(score_col).alias("min_score"),
-                F.max(score_col).alias("max_score"),
-            ).collect()[0]
-            failures.append({
-                "check": "score_range",
-                "detail": (
-                    f"{out_of_range} scores outside [0, 1], "
-                    f"min={stats['min_score']:.6f}, max={stats['max_score']:.6f}"
+        # One grouped pass, three checks. `completeness`, the rank range and
+        # `score_varies_within_group` all want per-group facts, and the shuffle
+        # behind `groupBy` is the expensive part — a min and a max added to an
+        # aggregation that is already happening cost nothing (ADR-0011 §4).
+        # The previous shape paid a separate action for each, every one of them
+        # a fresh read of a Hive table.
+        group_stats = ranked_predictions.groupBy(*group_cols).agg(
+            F.count(F.lit(1)).alias("_size"),
+            F.min(score_col).alias("_min_score"),
+            F.max(score_col).alias("_max_score"),
+            F.min(rank_col).alias("_min_rank"),
+            F.max(rank_col).alias("_max_rank"),
+        )
+        # Rolled up to one row, so the whole grouped result stays in the
+        # cluster: collecting it would pull one row per entity into the driver.
+        # The rank bounds are min-of-mins and max-of-maxes, which is exactly the
+        # global range the old separate aggregation produced. Deliberately *not*
+        # upgraded to a per-group range while passing through: that weakness
+        # predates this change and ADR-0011 records it as unsolved, so tightening
+        # it here would land an unreviewed behaviour change inside a refactor.
+        summary = group_stats.agg(
+            F.coalesce(F.sum("_size"), F.lit(0)).alias("n_rows"),
+            F.count(F.lit(1)).alias("n_groups"),
+            F.coalesce(
+                F.sum(F.when(F.col("_size") != n_products, 1).otherwise(0)),
+                F.lit(0),
+            ).alias("n_incomplete"),
+            F.min("_size").alias("min_size"),
+            F.max("_size").alias("max_size"),
+            F.coalesce(
+                F.sum(
+                    F.when(
+                        # A group of one cannot vary, and a config with a single
+                        # item makes every group look constant; group size is
+                        # `completeness`'s question, not this one's.
+                        (F.col("_size") > 1)
+                        & (F.col("_max_score") <= F.col("_min_score")),
+                        1,
+                    ).otherwise(0)
                 ),
-            })
+                F.lit(0),
+            ).alias("n_constant"),
+            F.min("_min_rank").alias("min_rank"),
+            F.max("_max_rank").alias("max_rank"),
+        ).collect()[0]
+        n_ranked = summary["n_rows"]
 
-        # 3. no_missing
-        check_cols = identity_cols + [score_col, rank_col]
-        null_conditions = [F.isnull(F.col(c)) for c in check_cols]
-        null_rows = ranked_predictions.filter(
-            null_conditions[0] if len(null_conditions) == 1
-            else null_conditions[0].__or__(null_conditions[1])
-            if len(null_conditions) == 2
-            else F.greatest(*[F.when(cond, F.lit(1)).otherwise(F.lit(0)) for cond in null_conditions]) > 0
-        ).count()
-        if null_rows > 0:
-            null_exprs = [
-                F.sum(F.when(F.isnull(F.col(c)), 1).otherwise(0)).alias(c)
-                for c in check_cols
-            ]
-            null_counts = ranked_predictions.agg(*null_exprs).collect()[0]
-            cols_with_nulls = {c: null_counts[c] for c in check_cols if null_counts[c] > 0}
-            failures.append({
-                "check": "no_missing",
-                "detail": f"NaN values found: {cols_with_nulls}",
-            })
-
-        # 4. completeness
-        group_counts = ranked_predictions.groupBy(*group_cols).count()
-        incomplete = group_counts.filter(F.col("count") != n_products)
-        n_incomplete = incomplete.count()
-        if n_incomplete > 0:
-            stats = group_counts.agg(
-                F.min("count").alias("min_size"),
-                F.max("count").alias("max_size"),
-            ).collect()[0]
+        # 2. completeness
+        if summary["n_incomplete"] > 0:
             failures.append({
                 "check": "completeness",
                 "detail": (
-                    f"{n_incomplete} groups do not have exactly {n_products} products, "
-                    f"sizes: min={stats['min_size']}, max={stats['max_size']}"
+                    f"{summary['n_incomplete']} groups do not have exactly "
+                    f"{n_products} products, sizes: min={summary['min_size']}, "
+                    f"max={summary['max_size']}"
                 ),
             })
 
-        # 5. rank_consistency — check ranks are 1..N and ordered by score desc
-        rank_stats = ranked_predictions.agg(
-            F.min(rank_col).alias("min_rank"),
-            F.max(rank_col).alias("max_rank"),
-        ).collect()[0]
-        if rank_stats["min_rank"] != 1 or rank_stats["max_rank"] != n_products:
+        # 3. score_varies_within_group — the data-layer half of the backstop
+        # `require_item_is_a_feature` only holds up at the config layer. If the
+        # item value fed to the model degenerates to a constant, an entity's
+        # items all score identically and the ranking is whatever order
+        # `row_number` happened to pick. Every shape check stays green through
+        # that: the group is complete, the ranks are 1..N, and the lag check's
+        # `>` is false on a tie (ADR-0011 §1, example two).
+        if summary["n_constant"] > 0:
+            failures.append({
+                "check": "score_varies_within_group",
+                "detail": (
+                    f"{summary['n_constant']} of {summary['n_groups']} groups "
+                    f"score every product identically; ranking within them is "
+                    f"arbitrary"
+                ),
+            })
+
+        # 4. rank_consistency — ranks are 1..N and ordered by score desc
+        if summary["min_rank"] != 1 or summary["max_rank"] != n_products:
             failures.append({
                 "check": "rank_consistency",
                 "detail": (
-                    f"Rank range [{rank_stats['min_rank']}, {rank_stats['max_rank']}] "
+                    f"Rank range [{summary['min_rank']}, {summary['max_rank']}] "
                     f"expected [1, {n_products}]"
                 ),
             })
@@ -913,21 +960,14 @@ def validate_predictions(
                     "detail": f"{violations} rows where score increases with rank",
                 })
 
-        # 6. no_duplicates
-        n_total = n_ranked
-        n_distinct = ranked_predictions.dropDuplicates(identity_cols).count()
-        n_dupes = n_total - n_distinct
-        if n_dupes > 0:
-            failures.append({
-                "check": "no_duplicates",
-                "detail": f"{n_dupes} duplicate rows on {identity_cols}",
-            })
-
         if failures:
             logger.error("Validation failed: %s", failures)
             raise ValidationError(failures)
 
-    logger.info("All %d sanity checks passed (%d rows)", 6, n_ranked)
+    logger.info(
+        "All %d batch sanity checks passed (%d rows); the chunk-layer checks "
+        "ran during scoring", len(BATCH_CHECKS), n_ranked,
+    )
     return ranked_predictions
 
 

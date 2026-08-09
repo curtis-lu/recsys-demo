@@ -98,6 +98,13 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 
 整批層的 Spark action 從 8 降到 2–3；下沉的那幾個變成每 chunk 一次 pandas 斷言，成本可忽略。
 
+> **一則更正（#190 實作時）：起點是 7，不是 8。** 上面那個 8 含 `:316` 的
+> `scoring_dataset.count()`，而那一條連同它所屬的 `row_count_match` 已經被 #188 換成
+> `partition_completeness`（零 action）。所以本票動手前的實測起點是 **7**，落地後是 **2**——
+> 一次分組聚合（`completeness` ＋ `score_varies_within_group` ＋ rank 範圍）加一次 window pass
+> （score 對 rank 的順序）。這個數字由 `TestBatchLayerActionBudget` 釘住，因為驗證的**結果**
+> 看不出它：多加一條整批檢查會通過它自己的測試、不改變任何輸出，只是安靜地多掃一次整張表。
+
 **但主要理由不是成本，是失敗得更早。** 今天分數算錯要等全部 chunk 算完、rank 也跑完才會在
 `validate_predictions` 被抓到。下沉之後第一個 chunk 就爆。在一個單月要跑數小時的 pipeline 上，
 這是「十分鐘知道」與「四小時後知道」的差別。
@@ -158,6 +165,23 @@ chunk 層   item_values_are_known       ← 值不是產品名（已實跑重現
 
 **刻意不加 `score_finite`（非 NaN／±inf）**：它是 `score_range` 唯一真正在防的東西，但抓不到
 上面任何一種故障。
+
+> **三則更正（#190 實作時）。**
+>
+> **一、`score_varies_within_group` 要排除「組大小 1」，否則單 item 設定必然誤報。** 一組只有
+> 一列時 `max == min` 恆真，`len(products) == 1` 的設定於是每一次**正確**執行都會紅——與第三節
+> 那個乘積形式在小母體上誤報是同一種形狀（斷言了一個不必成立的前提）。實作的條件因此是
+> `_size > 1 AND max <= min`；組大小本來就是 `completeness` 的問題，不是這條的。
+>
+> **二、`no_missing` 的 identity 那一半，在整批層本來就不可能紅。** 節點寫出去的 entity
+> identity 經過 `astype(str)`，NULL 變成字串 `"None"`——所以它在整批層是裝飾品，跟
+> `score_range` 同類，只是本 ADR 初稿沒發現。塊層的版本因此讀「進來的」frame 而不是「寫出去的」
+> frame，這也是 `validate_scored_chunk` 為什麼收兩個 frame。
+>
+> **三、`item_values_are_known` 沒有任何設定能讓它紅。** 寫出去的 identity item 就是迴圈變數，
+> 而迴圈變數來自 `inference.products`。它是**對那一行賦值的迴歸防護**（那一行這個 repo 已經寫
+> 錯過一次，ADR-0010 §6），不是資料層檢查——所以它的證據只能是 mutation 檢查，不會有設定層的
+> 測試。這跟第二節刪掉的 `score_range` 不同：`score_range` 是不管**程式碼**怎麼改都不可能紅。
 
 **刻意不加 `feature_importance()["prod_name"] > 0` 的啟動斷言**：它驗的是**模型**會不會用 item
 特徵。有它的話 `score_varies_within_group` 的誤報空間會被關掉（一個從不對 item 分裂的模型，

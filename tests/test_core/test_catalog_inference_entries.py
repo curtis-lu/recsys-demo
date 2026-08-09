@@ -105,6 +105,18 @@ class TestInferenceTablesPartitionByModelVersionFilter:
                 ("snap_date", "STRING"), ("prod_name", "STRING")
             ], name
 
+    def test_model_version_filter_matches_training_eval_predictions(self):
+        """與訓練端的預測表同構——那不是巧合，是同一個問題被解過第二次。
+
+        只比 `partition_filter`：那是 ADR-0010 §5 主張的那一半。`partition_cols`
+        今天恰好也相同，但票 D 會讓 `unranked_predictions` 岔開，所以不拿它當
+        同構的判準。
+        """
+        d = _load_catalog()
+        reference = d["training_eval_predictions"]
+        for name in INFERENCE_OUTPUT_TABLES:
+            assert d[name]["partition_filter"] == reference["partition_filter"], name
+
 
 class TestEntityBucketStaysInternal:
     """`entity_bucket` 是機制欄，不是對外契約的一部分（ADR-0010 §5）。
@@ -186,18 +198,6 @@ class TestInferencePopulationFeatures:
             c["name"] for c in d["inference_population_features"]["partition_cols"]
         ]
         assert "prod_name" not in part_names
-
-    def test_model_version_filter_matches_training_eval_predictions(self):
-        """與訓練端的預測表同構——那不是巧合，是同一個問題被解過第二次。
-
-        只比 `partition_filter`：那是 ADR-0010 §5 主張的那一半。`partition_cols`
-        今天恰好也相同，但票 D 會讓 `unranked_predictions` 岔開，所以不拿它當
-        同構的判準。
-        """
-        d = _load_catalog()
-        reference = d["training_eval_predictions"]
-        for name in INFERENCE_OUTPUT_TABLES:
-            assert d[name]["partition_filter"] == reference["partition_filter"], name
 
 
 class TestNoWritableTableIsLeftOnTheFrameRescanPath:

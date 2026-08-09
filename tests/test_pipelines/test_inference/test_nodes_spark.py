@@ -12,7 +12,9 @@ from recsys_tfb.pipelines.inference.nodes_spark import (
     build_inference_population_features,
     predict_and_write_scores,
     rank_predictions,
+    validate_predictions,
 )
+from recsys_tfb.pipelines.inference.validation import ValidationError
 
 pytestmark = pytest.mark.spark
 
@@ -185,6 +187,21 @@ class ReadCountingFrame:
 class ConstantModel:
     def predict(self, X):
         return np.full(len(X), 0.5)
+
+
+class ItemSensitiveModel:
+    """Scores by the item code, so an entity's items get different scores.
+
+    ``ConstantModel`` cannot be used where a *valid* run is the premise: every
+    query group would score identically, which is a real failure
+    (``score_varies_within_group``) rather than fixture noise.
+    """
+
+    def feature_names(self):
+        return ["prod_name", "total_aum"]
+
+    def predict(self, X):
+        return X[:, 0].astype(float)
 
 
 class TestBuildInferencePopulationFeatures:
@@ -954,6 +971,119 @@ class TestPredictAndWriteScores:
                 ModelWantingMore(), population_features, preprocessor, parameters,
                 unranked_predictions=FakeScoreTable(),
             )
+
+
+class TestScoredChunksThroughToValidation:
+    """ADR-0011's audit needs the chain, not the node.
+
+    Both failures in that audit table are one-line mistakes inside the scoring
+    loop, and neither is visible in the loop's own output. The item-domain one
+    stops at the chunk layer; the score-variance one cannot be seen until an
+    entity's items sit next to each other, which is only true after every chunk
+    has landed and been ranked. Testing ``predict_and_write_scores`` alone would
+    show one and miss the other.
+    """
+
+    def _score_rank_validate(
+        self, spark, model, population_features, preprocessor, parameters
+    ):
+        table = FakeScoreTable()
+        manifest = predict_and_write_scores(
+            model, population_features, preprocessor, parameters,
+            unranked_predictions=table,
+        )
+        unranked = spark.createDataFrame(
+            pd.concat(table.saved, ignore_index=True)
+        )
+        ranked = rank_predictions(unranked, manifest, parameters)
+        return validate_predictions(ranked, manifest, parameters)
+
+    def test_a_correctly_scored_run_passes_both_layers(
+        self, spark, population_features, preprocessor, parameters
+    ):
+        """The acquitting half: a run that is right must survive both layers.
+
+        Without it the two checks below could be passing because validation is
+        red on everything.
+        """
+        result = self._score_rank_validate(
+            spark, ItemSensitiveModel(), population_features, preprocessor,
+            parameters,
+        )
+        assert result.count() == 9
+
+    def test_scores_that_do_not_move_with_the_item_are_caught_at_the_batch_layer(
+        self, spark, population_features, preprocessor, parameters
+    ):
+        """Row two of the audit table, and the reason the check is at the batch layer.
+
+        A scorer whose output does not depend on the item is what a degenerate
+        item feature *looks like* downstream — the two are indistinguishable
+        once the scores exist, which is exactly why the check has to live where
+        a whole query group is visible. A chunk holds one item and cannot ask
+        the question at all.
+
+        The failure must be this check and no other: every shape check is green
+        on this frame (complete groups, ranks 1..3, no rank/score inversion
+        because the lag comparison is ``>`` and every pair is a tie).
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            self._score_rank_validate(
+                spark, ConstantModel(), population_features, preprocessor,
+                parameters,
+            )
+        assert [f["check"] for f in exc_info.value.failures] == [
+            "score_varies_within_group"
+        ]
+
+    def test_a_nan_score_stops_the_chunk_before_it_is_written(
+        self, spark, population_features, preprocessor, parameters
+    ):
+        """The chunk layer is wired into the loop, and it fires before ``save()``.
+
+        Deleting the call would leave every other test here green: the frames
+        the node writes are unchanged, and the batch layer cannot see a null
+        score (``min``/``max`` skip it, the lag comparison is false against it).
+        Nothing reaching the table is the other half — a chunk that failed must
+        not be published for a later run's resume to then skip.
+
+        Row one of the audit table (``item_values_are_known``) has no test in
+        this class on purpose: the identity item is the loop variable, so no
+        configuration can put an unknown value there. It is a guard on that
+        assignment line, and the mutation audit is what demonstrates it.
+        """
+
+        class NaNScoringModel:
+            def predict(self, X):
+                return np.full(len(X), np.nan)
+
+        table = FakeScoreTable()
+        with pytest.raises(ValidationError) as exc_info:
+            predict_and_write_scores(
+                NaNScoringModel(), population_features, preprocessor,
+                parameters, unranked_predictions=table,
+            )
+        assert [f["check"] for f in exc_info.value.failures] == ["no_missing"]
+        assert not table.saved, "a failed chunk must not reach the table"
+
+    def test_a_repeated_entity_in_the_landed_table_stops_the_chunk(
+        self, spark, population_features, preprocessor, parameters
+    ):
+        """``no_duplicates`` at its new home, on a frame that can really produce it.
+
+        The landed table's grain is meant to be ``(time, entity)``; nothing at
+        read time enforces it. One row per entity per chunk is what makes the
+        whole-table ``dropDuplicates`` shuffle unnecessary, so the assumption
+        has to be checked where it is free.
+        """
+        table = FakeScoreTable()
+        with pytest.raises(ValidationError) as exc_info:
+            predict_and_write_scores(
+                ItemSensitiveModel(),
+                population_features.unionByName(population_features),
+                preprocessor, parameters, unranked_predictions=table,
+            )
+        assert [f["check"] for f in exc_info.value.failures] == ["no_duplicates"]
 
 
 class TestPredictResume:
