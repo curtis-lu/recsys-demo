@@ -114,11 +114,13 @@ Layer 1 — config-static (implemented here; aggregated by
   ``quadrant_sample_per_cell`` / ``quadrant_min_rows`` are integers >= 1.
   Predicate: ``training_diagnostics_param_errors``.
 * A21 — every ``--rebuild-dates`` value is a well-formed ISO date AND a member
-  of ``dataset.test_snap_dates``. Both ``dataset`` and ``training`` take the
-  flag and share this one predicate: each pipeline only ever processes
-  configured months (ADR-0002 for dataset partitions, #130 for predictions),
-  so an unconfigured value would silently do nothing and leave the operator
-  believing a month was recomputed. Predicate: ``resolved_rebuild_dates``
+  of the month list the command it was passed to can process:
+  ``dataset.test_snap_dates`` for ``dataset`` and ``training``,
+  ``inference.snap_dates`` for ``inference``. Every pipeline only ever
+  processes configured months (ADR-0002 for dataset partitions, #130 for
+  predictions, ADR-0010 for scoring chunks), so an unconfigured value would
+  silently do nothing and leave the operator believing a month was recomputed.
+  Predicates: ``resolved_rebuild_dates`` / ``resolved_inference_rebuild_dates``
   (raises ``ConfigConsistencyError`` directly and returns the normalised list;
   not aggregated by ``validate`` — it reads a CLI flag, which
   ``validate_config_consistency`` never sees. Mirrors A12).
@@ -1264,23 +1266,31 @@ def _iso_date(value) -> str | None:
     return None
 
 
-def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
-    """(A21) Normalise ``--rebuild-dates`` against ``dataset.test_snap_dates``.
+def _resolved_rebuild_dates(
+    declared, rebuild_dates, source: str
+) -> list[str]:
+    """(A21) Normalise ``--rebuild-dates`` against a configured month list.
 
     Returns the sorted, deduplicated, ``YYYY-MM-DD`` list, or ``[]`` when the
     flag was not passed. Raises ``ConfigConsistencyError`` when any value is
-    malformed or names a month the config does not list.
+    malformed or names a month ``declared`` does not list.
 
-    Why fail loud rather than ignore: the dataset pipeline only ever processes
-    configured months, so an unconfigured ``--rebuild-dates`` value would be a
-    silent no-op — the operator would come away believing a stale month had
-    been recomputed. That is the exact failure mode ADR-0002's escape hatch
-    exists to prevent, so it must not have a silent edge.
+    Why fail loud rather than ignore: a pipeline only ever processes configured
+    months, so an unconfigured ``--rebuild-dates`` value would be a silent
+    no-op — the operator would come away believing a stale month had been
+    recomputed. That is the exact failure mode ADR-0002's escape hatch exists
+    to prevent, so it must not have a silent edge.
+
+    ``source`` names the config key in the error messages. Three commands take
+    this flag against two different keys (``dataset`` and ``training`` against
+    ``dataset.test_snap_dates``, ``inference`` against ``inference.snap_dates``
+    — the two wrappers below), and a message naming the wrong one sends the
+    operator to the wrong yaml block.
     """
     if not rebuild_dates:
         return []
 
-    declared = (parameters.get("dataset", {}) or {}).get("test_snap_dates") or []
+    declared = declared or []
     # Silently dropping an unparseable configured value would make the subset
     # check below compare against an incomplete set, and the resulting message
     # ("configured: []") would point the operator at the flag when the fault is
@@ -1288,7 +1298,7 @@ def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
     unreadable = [d for d in declared if _iso_date(d) is None]
     if unreadable:
         raise ConfigConsistencyError(
-            f"(A21) dataset.test_snap_dates holds unreadable date(s) "
+            f"(A21) {source} holds unreadable date(s) "
             f"{unreadable!r}. Expected YYYY-MM-DD."
         )
     configured = {_iso_date(d) for d in declared}
@@ -1305,13 +1315,38 @@ def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
     if unknown:
         raise ConfigConsistencyError(
             f"(A21) --rebuild-dates names month(s) {unknown} that are not in "
-            f"dataset.test_snap_dates (configured: {sorted(configured)}). "
-            "Only a configured test month can be rebuilt — the pipeline never "
-            "processes a month the config does not list, so this would have "
-            "been a silent no-op. Add it to dataset.test_snap_dates first, or "
+            f"{source} (configured: {sorted(configured)}). "
+            "Only a configured month can be rebuilt — the pipeline never "
+            f"processes a month the config does not list, so this would have "
+            f"been a silent no-op. Add it to {source} first, or "
             "drop it from --rebuild-dates."
         )
     return requested
+
+
+def resolved_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
+    """(A21) ``--rebuild-dates`` for the dataset and training commands."""
+    return _resolved_rebuild_dates(
+        (parameters.get("dataset", {}) or {}).get("test_snap_dates"),
+        rebuild_dates,
+        "dataset.test_snap_dates",
+    )
+
+
+def resolved_inference_rebuild_dates(parameters: dict, rebuild_dates) -> list[str]:
+    """(A21) ``--rebuild-dates`` for the inference command.
+
+    Scoped to ``inference.snap_dates`` rather than ``dataset.test_snap_dates``:
+    inference's resume unit is a ``(snap_date, entity_bucket, item)`` partition
+    of ``unranked_predictions``, and the months it can touch at all are the ones
+    it is configured to score. Naming a month outside that list would be the
+    same silent no-op A21 exists to reject.
+    """
+    return _resolved_rebuild_dates(
+        (parameters.get("inference", {}) or {}).get("snap_dates"),
+        rebuild_dates,
+        "inference.snap_dates",
+    )
 
 
 def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | None) -> list[str]:

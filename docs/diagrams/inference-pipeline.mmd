@@ -6,50 +6,73 @@
 
 %% 圖例
 %%   [( 圓柱 )]    來源表（catalog 的 read_only Hive table）
-%%   [/ 斜角 /]    直接被造成「資料列」的 config 值。只有這一種 config 入圖，
-%%                 過濾條件類的（inference.snap_dates）不畫——理由見「刻意不畫」。
+%%   [/ 斜角 /]    直接被造成「資料列」或決定「切幾塊」的 config 值。只有這兩種
+%%                 config 入圖，過濾條件類的（inference.snap_dates）不畫。
 %%   [[ 雙框 ]]    別的 pipeline 落地的版本化 artifact（不是表，是檔案）
 %%   [ 方框 ]      node，框內是 node name（可直接餵給 --from-node / --only-node）
 %%   ([ 實線膠囊 ]) 落地的 catalog 條目（Hive table）
 %%   ([ 虛線膠囊 ]) MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
 %%   {{ 六角 }}    閘：不轉換資料，只決定放不放行
 %%   > 旗標 ]      失敗路徑的終點（不是 dataset，沒有東西被寫出去）
-%%   虛線邊         非資料流：宣告了但函式沒讀、或版本解析的相依
+%%   粗虛線邊       node 自己寫的表（Node(writes=…)），**不是**拓樸相依邊
+%%   虛線邊         非資料流：版本解析的相依
 %%   「全表讀回」   這條邊走 Hive round-trip，不是記憶體直傳（見下）
 
+%% 這張圖最違反直覺的一件事：資料流與相依邊在 predict 這裡分岔
+%%   predict_and_write_scores 的 catalog output 是 score_manifest（記憶體），
+%%   資料則由節點**自己**逐分區 save() 到 unranked_predictions（pipeline.py 的
+%%   writes=[...]，登記在 docs/agents/architecture-constraints.md 的 R1）。
+%%   而 writes= 刻意不建立拓樸相依邊——所以 manifest 就是那條邊：沒有它，
+%%   rank_predictions 可能被排在它要讀的分區存在之前。圖上因此有兩條線離開
+%%   predict：一條粗虛線指向它寫的表，一條實線指向 manifest。
+
+%% 為什麼中間那張表不含 item 展開
+%%   (entity, item) 的特徵向量 = 該 entity 的特徵 + 一個類別純量。展開就是把
+%%   同一列客戶特徵抄 |products| 遍去配 |products| 個純量，那 |products|-1 份
+%%   副本零資訊。展開發生在 driver 的內層迴圈，不在表上。落地不展開的版本讓
+%%   feature_table 的完整掃描從每月 |products| 次降到 1 次（ADR-0010 §4）。
+
+%% 為什麼多一個 entity_bucket 分區欄
+%%   評分必須在 driver（生產禁 UDF），所以要切塊；而 save() 是 insertInto +
+%%   partitionOverwriteMode=dynamic，語意是「只動這次 frame 裡出現的分區，但
+%%   對出現的那些是整個刪掉重建」。所以塊的邊界必須等於分區的邊界，否則第 2 個
+%%   bucket 的 save 會把第 1 個 bucket 剛寫的分區整個換掉——資料少 (B-1)/B
+%%   且零錯誤訊息（ADR-0010 §3 約束 C）。
+%%   它是機制欄不是契約欄：rank_predictions 讀完就丟，不進對外表。
+
 %% 為什麼要標「全表讀回」
-%%   node 之間不是直接傳 DataFrame——runner 對每個 input 都走 catalog.load()
-%%   （core/runner.py:87）。score_table / ranked_staging 是 Hive managed table 且
-%%   catalog 沒設 partition_filter（對照組：enriched_eval_predictions 有），所以
-%%   讀回來的是**含歷史 partition 的全表**。這就是 rank_predictions 與
-%%   validate_predictions 都先呼叫 _filter_current_inference_scope 的理由：
-%%   把資料限縮回本次的 model_version × inference.snap_dates。
+%%   node 之間不是直接傳 DataFrame——runner 對每個 input 都走 catalog.load()。
+%%   unranked_predictions / ranked_staging 是 Hive managed table 且跨月份累積，
+%%   catalog 的 partition_filter 只擋掉 model_version 那一半（load 發
+%%   WHERE model_version = '…' 並把該欄 drop 掉），月份沒有任何東西擋。這就是
+%%   rank_predictions 與 validate_predictions 都先呼叫 restrict_to_snap_dates
+%%   的理由：不裁的話第二個月起會讀回全部歷史月份、重算、無聲重新發布。
 
 %% 為什麼 ranked_staging 要單獨存在
 %%   validate 失敗時 raise ValidationError，整批中止，production 的
 %%   ranked_predictions 完全不被觸碰，而失敗批次留在 staging 供事後排查。
 %%   圖上的紅色終點就是這條路徑；沒有它，staging → validate → publish
 %%   會被讀成三個沒必要的步驟。
+%%   注意這道閘買到的是**順序**不是**原子性**：publish 的寫入同樣是 insertInto，
+%%   跨分區的 commit 不是全有全無（ADR-0010 §7）。
 
-%% 兩個「圖跟程式碼對不上」的地方，已在圖上標出，不要當成畫錯
-%%   1. predict_scores 宣告吃 scoring_dataset，函式體從頭到尾沒讀它
-%%      （AST 查證過）。拓樸順序本來就由 X_score 保證，記憶體釋放時機由
-%%      validate_predictions 決定，所以這個參數不影響任何行為。圖上畫成虛線。
-%%   2. validate_predictions 的第一個參數**叫** ranked_predictions，但
-%%      pipeline.py:41 餵給它的是 ranked_staging。圖上一律用 catalog 名。
+%% 一個「圖跟程式碼對不上」的地方，已在圖上標出，不要當成畫錯
+%%   validate_predictions 的第一個參數**叫** ranked_predictions，但 pipeline.py
+%%   餵給它的是 ranked_staging。圖上一律用 catalog 名。
 
 %% 刻意不畫
-%%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
-%%     唯一例外是 inference.products——它不是「被讀取的設定值」，而是被
-%%     spark.createDataFrame 造成一張表再 crossJoin 進來的資料列
-%%     （nodes_spark.py:113-115），評分列數 = entity 數 × 日期數 × products 數。
-%%     inference.snap_dates 只是過濾條件，仍然不畫。
-%%   - calibration：inference.use_calibration 只是 predict_scores 內部一次 if
+%%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。兩個例外是
+%%     inference.products（決定內層迴圈跑幾圈，也就是每個 entity 配幾個 item）
+%%     與 inference.entity_buckets（決定外層迴圈跑幾圈，也就是 driver 峰值與
+%%     落地的分區數）。inference.snap_dates 只是過濾條件，仍然不畫。
+%%   - calibration：inference.use_calibration 只是評分節點內部一次 if
 %%     （model.predict() vs model.predict_uncalibrated()），不改變任何一條邊。
 %%     這跟 dataset 圖的 calibration 分支（會多出節點）性質不同，所以那邊寫
 %%     「不畫這個分支」，這邊是「根本沒有分支可畫」。
-%%   - build_scoring_dataset 的 feature coverage 報表：只算數字寫 log，不下推
-%%     成資料，缺特徵的母體成員一律保留並標 feature_present。
+%%   - 續跑的規劃（chunk_plans.plan_scoring_chunks）：它決定評分節點跑幾個
+%%     chunk，但不改變任何一條邊——跳過的 chunk 與寫出的 chunk 走同一條線。
+%%   - build_inference_population_features 的 feature coverage 報表：只算數字
+%%     寫 log，不下推成資料，缺特徵的母體成員一律保留。
 %%   - 上游 pipeline 本身（dataset / training / source ETL）：跨 pipeline 的
 %%     完整 lineage 見 docs/data-lineage.html。
 
@@ -69,12 +92,13 @@
 
 flowchart TB
 
-  %% ------------------- 來源：兩張表 ＋ 一份 config -------------------
-  subgraph SRC[" 評分母體的三個來源 "]
+  %% ------------------- 來源：兩張表 ＋ 兩個 config -------------------
+  subgraph SRC[" 評分母體的來源 "]
     direction LR
     src_pop[("inference_population<br/><small>read_only ・ grain (time, entity) 唯一</small>")]
     src_ft[("feature_table<br/><small>read_only ・ 只作 enrichment</small>")]
-    cfg_prod[/"inference.products<br/><small>config 值 → 造成資料列</small>"/]
+    cfg_bucket[/"inference.entity_buckets<br/><small>切幾塊 → driver 峰值＋分區數</small>"/]
+    cfg_prod[/"inference.products<br/><small>內層迴圈跑幾圈 → 造成資料列</small>"/]
   end
 
   %% --------------- 上游 pipeline 落地的版本化 artifact ----------------
@@ -86,36 +110,36 @@ flowchart TB
   art_model -. "manifest 回溯 base_dataset_version<br/>（模型決定配哪份前處理）" .-> art_prep
 
   %% ---------------------------- 主鏈 ------------------------------
-  n_build["build_scoring_dataset<br/><small>母體 (time, entity) × products ・ crossJoin<br/>缺特徵者保留，標 feature_present</small>"]
-  d_scoring(["scoring_dataset"])
-  n_apply["apply_preprocessor<br/><small>套訓練時的編碼與欄位選取 ・ 保留 identity 欄<br/>identity 類別欄不編碼，延後到 driver</small>"]
-  d_xscore(["X_score"])
-  n_predict["predict_scores<br/><small>按 (time, item) 分批 toPandas ・ driver 端合併<br/>item 兩個位置：identity 留字串、特徵放 code</small>"]
-  d_score(["score_table"])
-  n_rank["rank_predictions<br/><small>(time, entity) 組內依 score 遞減 row_number()</small>"]
-  d_staging(["ranked_staging"])
+  n_build["build_inference_population_features<br/><small>母體 (time, entity) ⋈ 特徵 ・ 分 entity 桶 ・ 套編碼與 float32<br/><b>不含 item 展開</b>；identity 類別欄不編碼，延後到 driver</small>"]
+  d_popfeat(["inference_population_features<br/><small>base_dataset_version / snap_date, entity_bucket<br/>存特徵全集（扣掉 item）→ 換模型可整張重用</small>"])
+  n_predict["predict_and_write_scores<br/><small>外層迴圈桶、內層迴圈 item ・ 一桶讀進 driver 一次<br/>每個 (桶, item) 算完立刻寫成<b>恰好一個分區</b><br/>分區已存在即跳過（--rebuild-dates 可推翻）</small>"]
+  d_manifest(["score_manifest<br/><small>processed／skipped／rebuilt／empty<br/>＋分區帳（供 partition_completeness）</small>"])
+  d_unranked(["unranked_predictions<br/><small>model_version / snap_date, item, entity_bucket</small>"])
+  n_rank["rank_predictions<br/><small>裁月份 → 丟掉 entity_bucket → (time, entity) 組內 row_number()</small>"]
+  d_staging(["ranked_staging<br/><small>model_version / snap_date, item</small>"])
   gate{{"validate_predictions<br/><small>6 項 sanity check ・ 不轉換資料，只決定放不放行</small>"}}
   d_validated(["validated_predictions"])
   n_publish["publish_predictions<br/><small>函式是 identity；production 寫入＝catalog save</small>"]
-  o_ranked(["ranked_predictions　★production"])
+  o_ranked(["ranked_predictions　★production<br/><small>model_version / snap_date, item ・ 無 entity_bucket</small>"])
   x_abort>"整批中止<br/><small>production 未被觸碰<br/>失敗批次留在 ranked_staging 供排查</small>"]
 
   src_pop --> n_build
   src_ft --> n_build
-  cfg_prod --> n_build
-  n_build --> d_scoring
-  d_scoring --> n_apply
-  art_prep --> n_apply
-  n_apply --> d_xscore
-  d_xscore --> n_predict
-  art_model -- "feature_names() 決定取哪些欄、什麼順序" --> n_predict
+  cfg_bucket --> n_build
+  art_prep -- "編碼語意：category_mappings／drop_columns" --> n_build
+  n_build --> d_popfeat
+  d_popfeat -- "每桶讀一次<br/>（分區裁剪，來源特徵表零掃描）" --> n_predict
+  cfg_prod --> n_predict
+  art_model -- "feature_names() 決定取哪些欄、什麼順序" --> art_prep
+  art_model --> n_predict
   art_prep -- "category_mappings 決定 item 的整數 code" --> n_predict
-  d_scoring -. "宣告未使用" .-> n_predict
-  n_predict --> d_score
-  d_score -- "全表讀回<br/>節點自行過濾 model_version × snap_dates" --> n_rank
+  n_predict --> d_manifest
+  n_predict == "writes=：節點自己逐分區 save()<br/><b>不是</b>拓樸相依邊" ==> d_unranked
+  d_unranked -- "全表讀回<br/>節點自行裁 snap_dates" --> n_rank
+  d_manifest -- "拓樸邊：確保排名在分區寫完之後" --> n_rank
   n_rank --> d_staging
   d_staging -- "全表讀回（同上）" --> gate
-  d_scoring -- "對照列數<br/>row_count_match" --> gate
+  d_manifest -- "分區帳對照<br/>partition_completeness" --> gate
   gate -- "pass" --> d_validated
   gate -. "fail：raise ValidationError" .-> x_abort
   d_validated --> n_publish
@@ -133,11 +157,11 @@ flowchart TB
   classDef abort fill:#ffe3e3,stroke:#e03131,stroke-width:1.5px,stroke-dasharray:5 3,color:#8c1c1c
 
   class src_pop,src_ft src
-  class cfg_prod cfg
+  class cfg_prod,cfg_bucket cfg
   class art_model,art_prep art
-  class n_build,n_apply,n_predict,n_rank,n_publish nd
-  class d_score,d_staging data
-  class d_scoring,d_xscore,d_validated mem
+  class n_build,n_predict,n_rank,n_publish nd
+  class d_popfeat,d_unranked,d_staging data
+  class d_manifest,d_validated mem
   class o_ranked out
   class gate gt
   class x_abort abort

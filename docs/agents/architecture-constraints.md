@@ -95,19 +95,34 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/*/nodes*.py` 共 61 個頂層函式：
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-09 量測共 65 個。這個數字每次改 node 都會變，所以**別引用它，重量一次**：
+
+```bash
+.venv/bin/python -c "
+import ast, pathlib
+from collections import Counter
+b = Counter(); n = 0
+for p in pathlib.Path('src/recsys_tfb/pipelines').rglob('*nodes*.py'):
+    for f in ast.parse(p.read_text()).body:
+        if isinstance(f, ast.FunctionDef):
+            L = f.end_lineno - f.lineno + 1; n += 1
+            b['<=40' if L<=40 else '41-80' if L<=80 else '81-120' if L<=120 else '121-160' if L<=160 else '>160'] += 1
+print(n, dict(b))"
+```
 
 | 行數 | 個數 |
 |---|---|
-| ≤ 40 | 43 |
-| 41–80 | 8 |
+| ≤ 40 | 40 |
+| 41–80 | 13 |
 | 81–120 | 5 |
-| 121–160 | 3 |
-| > 160 | 2 |
+| 121–160 | 2 |
+| > 160 | 5 |
 
-最長的五個：`tune_hyperparameters` 228 行（`training/nodes.py:520`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py:1082`）、`finalize_model` 155 行（`training/nodes.py:750`）、`prepare_eval_data` 140 行（`evaluation/nodes_spark.py:74`）、`validate_predictions` 134 行（`inference/nodes_spark.py:246`）。
+最長的五個：`tune_hyperparameters` 228 行（`training/nodes.py`）、`predict_and_write_scores` 206 行（`inference/nodes_spark.py`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py`）、`validate_predictions` 171 行（`inference/nodes_spark.py`）、`build_inference_population_features` 169 行（`inference/nodes_spark.py`）。
 
-**這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（七成的 node 函式在 40 行內），寫出第 62 個函式時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
+**這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（六成的 node 函式在 40 行內），下次寫一個新的時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
+
+（本表在 #188 之前寫「61 個、43/8/5/3/2」，但用上面那段量出來是「60 個、36/12/7/3/2」——舊數字的量法沒被記下來，所以無法判斷是量法不同還是已經腐爛。這次把指令一起寫上，就是為了下一個人不必再猜。）
 
 ## F9. 測試的三個層次
 
@@ -123,7 +138,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F10. 中介產物命名
 
-`conf/base/catalog.yaml` 目前 42 個條目，命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
+`conf/base/catalog.yaml` 目前 43 個條目，命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
 
 新增 catalog 條目時對齊既有命名感覺即可——**這是事實不是約束**，因為禁用字清單只抓得到最粗糙的一類命名問題，真正的「有業務語意」是判斷題，機械檢查給不了。
 
@@ -146,8 +161,8 @@ A3、A4 管整個 `src/recsys_tfb/`；S1、S2 只管 `pipelines/dataset/`。
 **檢查看得到什麼、看不到什麼**（不要把「測試綠」讀成「一定沒問題」）：
 
 - 登記清單比對的是 **Counter**，所以「多一個同名站點」會被抓到；但不釘行號，所以站點上方的一般編輯不會誤報。
-- A5／A6 對**動態組出來的** `inputs`／`outputs`／`writes` 無法判定，59 個 `Node` 中有 4 個是這種。
-  `test_static_coverage_floor` 把「59 個裡有 55 個可判定」釘住，這個盲區不會悄悄變大。
+- A5／A6 對**動態組出來的** `inputs`／`outputs`／`writes` 無法判定，58 個 `Node` 中有 4 個是這種。
+  `test_static_coverage_floor` 把「58 個裡有 54 個可判定」釘住，這個盲區不會悄悄變大。
 - A1 的寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的間接寫入它看不到——
   `tune_hyperparameters` 正是這種，靠人工登記在 R4。
 
@@ -257,18 +272,19 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 
 **清單內的既有案例合法。要新增任何一筆，必須先取得使用者同意——不得自行擴充。**
 
-## R1. `Node(writes=[...])`（A1 的例外）── 1 筆
+## R1. `Node(writes=[...])`（A1 的例外）── 2 筆
 
 | 位置 | dataset | 理由 |
 |---|---|---|
-| `pipelines/training/pipeline.py:146`（`writes=` 那一行） | `training_eval_predictions` | 逐 partition 存檔：每次 `.save()` 恰好寫一個 partition 的列，讓 dynamic-partition overwrite 乾淨覆蓋單一分區，避免整表重寫。改成由 catalog 統一寫入就得先把所有 partition 物化在記憶體裡，正好抵銷這個設計要省的東西。消費端在 `pipelines/training/nodes.py:1082-1253` |
+| `pipelines/training/pipeline.py`（`predict_and_write_test_predictions` 的 `writes=` 那一行） | `training_eval_predictions` | 逐 partition 存檔：每次 `.save()` 恰好寫一個 partition 的列，讓 dynamic-partition overwrite 乾淨覆蓋單一分區，避免整表重寫。改成由 catalog 統一寫入就得先把所有 partition 物化在記憶體裡，正好抵銷這個設計要省的東西。消費端在 `pipelines/training/nodes.py` 的同名函式 |
+| `pipelines/inference/pipeline.py`（`predict_and_write_scores` 的 `writes=` 那一行） | `unranked_predictions` | 同一個理由，但這裡是**正確性**而不只是省記憶體：生產母體單一 `(time, item)` 塊要把約 60 GB 拉進 driver，所以塊必須按 entity 切；而 `save()` 的 dynamic overwrite 會把 frame 裡出現的分區整個替換，所以塊的邊界必須等於分區的邊界。由 catalog 統一寫入等於先把整批預測物化在 driver 上——那正是本設計要消掉的東西（ADR-0010 §3 約束 C、#188） |
 
-**這個 dataset 物件上被用到的方法（不只 `.save()`）**：
+**這兩個 dataset 物件上被用到的方法（不只 `.save()`）**：
 
-| 方法 | 用途 | 位置 |
-|---|---|---|
-| `.save(pdf)` | 寫入單一 partition | `pipelines/training/nodes.py:1230` |
-| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供增量計畫判斷跳過哪些月份 | 呼叫在 `pipelines/training/nodes.py:1051`（經 `_written_prediction_partitions`），方法定義在 `io/hive_table_dataset.py:277` |
+| 方法 | 用途 |
+|---|---|
+| `.save(pdf)` | 寫入單一 partition（training 逐月份，inference 逐 `(桶, item)`） |
+| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供續跑計畫判斷跳過哪些單位（training 經 `_written_prediction_partitions`，inference 經 `_written_score_partitions`）；方法定義在 `io/hive_table_dataset.py` |
 
 兩者都屬於「這個 node 自行管理這個 dataset 的分區寫入生命週期」，是同一個例外的範圍內。**把它當一般資料來源整批讀取不在此列**——那該用普通 input 讓 catalog 載入。
 

@@ -92,12 +92,11 @@ class TestInferenceTablesPartitionByModelVersionFilter:
             assert "model_version" not in part_names, name
 
     def test_partition_cols_start_with_snap_date_then_prod_name(self):
-        """前兩欄釘死；**尾巴刻意不釘**。
+        """前兩欄釘死；尾巴由 ``TestEntityBucketStaysInternal`` 分開管。
 
-        ADR-0010 §5 的表給 `unranked_predictions` 第三個 partition_col
-        `entity_bucket`，那是票 D（逐 chunk 評分）的東西，不在本票範圍。斷言寫成
-        「開頭是這兩欄」而不是「就是這兩欄」，票 D 加欄時這條不必改也不會假綠——
-        它守的是 model_version 沒有偷偷混回 partition_cols。
+        這條守的是 model_version 沒有偷偷混回 partition_cols；第三欄
+        `entity_bucket` 只有 `unranked_predictions` 有（#188／ADR-0010 §5），
+        那件事是另一條斷言。
         """
         d = _load_catalog()
         for name in INFERENCE_OUTPUT_TABLES:
@@ -105,6 +104,88 @@ class TestInferenceTablesPartitionByModelVersionFilter:
             assert head == [
                 ("snap_date", "STRING"), ("prod_name", "STRING")
             ], name
+
+
+class TestEntityBucketStaysInternal:
+    """`entity_bucket` 是機制欄，不是對外契約的一部分（ADR-0010 §5）。
+
+    它存在的唯一理由是讓一次 save 恰好碰一個分區（約束 C）。它進 `unranked_predictions`
+    是**正確性需求**：少了它，第 2 個 bucket 的 save 會用 dynamic overwrite 把第 1 個
+    bucket 剛寫的分區整個換掉，資料少 (B-1)/B 且零錯誤訊息。
+    它不進對外表也是硬要求：所有下游讀取路徑都要跟著改，而且不可逆。
+    """
+
+    def test_unranked_predictions_partitions_by_entity_bucket(self):
+        d = _load_catalog()
+        part_names = [c["name"] for c in d["unranked_predictions"]["partition_cols"]]
+        assert part_names == ["snap_date", "prod_name", "entity_bucket"]
+
+    def test_the_published_tables_do_not(self):
+        d = _load_catalog()
+        for name in ("ranked_staging", "ranked_predictions"):
+            part_names = [c["name"] for c in d[name]["partition_cols"]]
+            assert part_names == ["snap_date", "prod_name"], name
+
+    def test_it_is_not_a_data_column_of_any_published_table(self):
+        """釘住的是「一欄都沒有」，不只是分區欄。
+
+        `ranked_staging` 與 `ranked_predictions` 都是列舉式 `columns`，所以把它
+        當普通資料欄偷偷帶下去也是可能的失效。
+        """
+        d = _load_catalog()
+        for name in ("ranked_staging", "ranked_predictions"):
+            col_names = [c["name"] for c in d[name]["columns"]]
+            assert "entity_bucket" not in col_names, name
+
+
+class TestInferencePopulationFeatures:
+    """評分讀的中間表：不含 item 展開、存全集、以 base 版本 scope。"""
+
+    def test_entry_present(self):
+        d = _load_catalog()
+        assert d["inference_population_features"]["type"] == "HiveTableDataset"
+        assert (
+            d["inference_population_features"]["table"]
+            == "inference_population_features"
+        )
+
+    def test_scoped_by_base_dataset_version_not_model_version(self):
+        """這是「同一個 base 版本下換模型可以整張重用」的前提。
+
+        它只依賴來源表與 preprocessor.json，與模型無關。改成 model_version 會讓
+        每次換模型都要重算整張表，而且沒有任何檢查會紅。
+        """
+        d = _load_catalog()
+        entry = d["inference_population_features"]
+        assert entry["partition_filter"] == {
+            "base_dataset_version": "${base_dataset_version}"
+        }
+        assert "model_version" not in entry["partition_filter"]
+
+    def test_columns_are_inferred_not_enumerated(self):
+        """存的是 preprocessor.json 特徵欄的全集（扣掉 item）。
+
+        列舉式 `columns` 等於把某一組特徵寫進 catalog，而全集會隨
+        base_dataset_version 變。`auto` ＋ append-only schema evolution 是
+        `preprocessed_feature_table` 已經在用的形狀。
+        """
+        d = _load_catalog()
+        assert d["inference_population_features"]["columns"] == "auto"
+
+    def test_partitioned_by_time_then_entity_bucket(self):
+        d = _load_catalog()
+        assert [
+            (c["name"], c["type"])
+            for c in d["inference_population_features"]["partition_cols"]
+        ] == [("snap_date", "STRING"), ("entity_bucket", "STRING")]
+
+    def test_item_is_not_a_partition_column(self):
+        """顆粒度是 (time, entity)：沒有 item 展開，所以沒有 item 分區。"""
+        d = _load_catalog()
+        part_names = [
+            c["name"] for c in d["inference_population_features"]["partition_cols"]
+        ]
+        assert "prod_name" not in part_names
 
     def test_model_version_filter_matches_training_eval_predictions(self):
         """與訓練端的預測表同構——那不是巧合，是同一個問題被解過第二次。

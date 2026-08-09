@@ -110,9 +110,12 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
             "type": "ParquetDataset",
             "filepath": "data/dataset/${base_dataset_version}/train_variants/${train_variant_id}/train_model_input.parquet",
         },
-        "scoring_dataset": {
+        # A synthetic entry, not a real catalog name: it exists so the
+        # assertions below can pin that the inference command resolves
+        # ${model_version} (to the hash, never "best") and ${snap_date}.
+        "inference_scratch": {
             "type": "ParquetDataset",
-            "filepath": "data/inference/${model_version}/${snap_date}/scoring_dataset.parquet",
+            "filepath": "data/inference/${model_version}/${snap_date}/scratch.parquet",
         },
     }
     with open(base_dir / "catalog.yaml", "w") as f:
@@ -348,8 +351,8 @@ class TestCLI:
                     # preprocessor read via base hash
                     pp = call_args["preprocessor"]["filepath"]
                     assert "deadbeef" in pp
-                    # scoring_dataset output uses actual model hash
-                    sd = call_args["scoring_dataset"]["filepath"]
+                    # a ${model_version} path resolves to the actual model hash
+                    sd = call_args["inference_scratch"]["filepath"]
                     assert "a1b2c3d4" in sd
                     assert "best" not in sd
                     assert "20240331" in sd
@@ -765,6 +768,71 @@ class TestRebuildDatesFlag:
                 runner.invoke(app, ["dataset", "--rebuild-dates", "2026-01-31"])
             # Got past A21 and reached session creation.
             assert mock_spark.called
+        finally:
+            os.chdir(old_cwd)
+
+    def test_inference_help_advertises_rebuild_dates(self):
+        result = runner.invoke(app, ["inference", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--rebuild-dates" in result.output
+
+    def test_inference_unconfigured_month_exits_before_spark_starts(self, tmp_path):
+        """Scoped to ``inference.snap_dates``, and checked before the cold start."""
+        _setup_conf(
+            tmp_path,
+            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
+        )
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["inference", "--rebuild-dates", "2026-09-30"]
+                )
+            assert result.exit_code == 1
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_inference_rebuild_dates_reach_the_pipeline_parameters(self, tmp_path):
+        """The flag has to arrive as ``_rebuild_snap_dates`` or it does nothing.
+
+        ``predict_and_write_scores`` reads that key to decide which chunks to
+        redo; accepted-but-not-forwarded is the silent no-op A21 guards the
+        other half of.
+        """
+        from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+
+        _setup_conf(
+            tmp_path,
+            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
+        )
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps({
+            "version": "a1b2c3d4",
+            "base_dataset_version": "deadbeef",
+            "train_variant_id": "cafef00d",
+        }))
+        (models_dir / "best").symlink_to(version_dir.resolve())
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            added: dict = {}
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda name, ds: added.__setitem__(name, ds)
+                with patch("recsys_tfb.__main__.Runner"):
+                    result = runner.invoke(
+                        app, ["inference", "--rebuild-dates", "2024-03-31"]
+                    )
+            assert result.exit_code == 0, result.output
+            params = added["parameters"].load()
+            assert params[REBUILD_SNAP_DATES_KEY] == ["2024-03-31"]
         finally:
             os.chdir(old_cwd)
 

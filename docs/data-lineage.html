@@ -262,7 +262,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
 <div class="card" id="feature_table">
   <h4>feature_table <span class="badge b-hive">Hive</span><span class="vl vl-src">source</span></h4>
   <div class="meta"><b>產生</b>：source_etl · feature_etl（aum → sav → ccard → info → concat → feature_table，多支 SQL <code>INSERT OVERWRITE</code>）　|
-  <b>下游</b>：dataset（fit_preprocessor_metadata、apply_preprocessor_to_features）、inference（build_scoring_dataset）　|
+  <b>下游</b>：dataset（fit_preprocessor_metadata、apply_preprocessor_to_features）、inference（build_inference_population_features）　|
   <b>partition</b>：snap_date</div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
@@ -318,7 +318,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
 <div class="card" id="preprocessor">
   <h4>preprocessor <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
   <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（在 train 期 feature_table 上 fit，與抽樣解耦）　|
-  <b>下游</b>：dataset（apply_preprocessor_to_features、build_model_input）、training（prepare_lgb_train_inputs、tune、finalize、calibrate、predict、診斷）、inference（apply_preprocessor）　|
+  <b>下游</b>：dataset（apply_preprocessor_to_features、build_model_input）、training（prepare_lgb_train_inputs、tune、finalize、calibrate、predict、診斷）、inference（build_inference_population_features、predict_and_write_scores）　|
   <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code></div>
   <p class="sub">類別欄編碼字典與前處理 metadata（transform 時用）。是跨 dataset / training / inference <b>共用</b>的前處理合約。</p>
   <div class="ex">{ "categorical_columns": [&lt;item&gt;, &lt;cat_col&gt;, ...],
@@ -446,7 +446,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
 <div class="card" id="model">
   <h4>model <span class="badge b-model">模型</span><span class="vl vl-mv">model_version</span></h4>
   <div class="meta"><b>產生</b>：training · finalize_model（→ 校準時再經 calibrate_model 包裝）　|
-  <b>下游</b>：training（predict_and_write_test_predictions、compute_feature_importance、compute_shap_diagnostics、log_experiment）、inference（predict_scores）　|
+  <b>下游</b>：training（predict_and_write_test_predictions、compute_feature_importance、compute_shap_diagnostics、log_experiment）、inference（predict_and_write_scores）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/model.txt</code>（driver-local，Python open() 寫，不認 hdfs://）</div>
   <p class="sub">單一共用 LightGBM booster（pointwise <code>binary</code> 或 LTR <code>lambdarank</code>/<code>rank_xendcg</code>，由 parameters_training.yaml 決定）。校準開啟時 model 是校準後包裝（calibrate_model 的輸出仍命名 <code>model</code>）。</p>
 </div>
@@ -496,21 +496,40 @@ C000010   0.83    1.92                1      （示意）</div>
 </div>
 
 <!-- ===================== inference ===================== -->
+<h3>inference — base_dataset_version 層</h3>
+
+<div class="card" id="inference_population_features">
+  <h4>inference_population_features <span class="badge b-hive">Hive</span><span class="vl vl-base">base_dataset_version</span></h4>
+  <div class="meta"><b>產生</b>：inference · build_inference_population_features（inference_population ⋈ feature_table，套 preprocessor 的編碼與 float32）　|
+  <b>下游</b>：inference（predict_and_write_scores）　|
+  <b>partition</b>：base_dataset_version（partition_filter）/ snap_date, entity_bucket</div>
+  <p class="sub">顆粒度 <code>(time, entity)</code>，<b>刻意不含 item 展開</b>——<code>(entity, item)</code> 的特徵向量就是該 entity 的特徵
+  加一個類別純量，展開等於抄 |products| 遍去配 |products| 個純量。落地不展開的版本讓 <code>feature_table</code> 的完整掃描
+  從每月 |products| 次降到 1 次。<br>
+  存的是 <code>preprocessor.json</code> 特徵欄的<b>全集</b>（扣掉 item），不是任何模型的子集；子集只在評分的 chunk 內由
+  <code>model.feature_names()</code> 切出來。這是它以 <code>base_dataset_version</code> 為 scope、能跨 <code>model_version</code>
+  整張重用的前提。</p>
+</div>
+
 <h3>inference — model_version 層</h3>
 
 <div class="card" id="unranked_predictions">
   <h4>unranked_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：inference · predict_scores（model 對 X_score 評分；X_score 來自 feature_table → build_scoring_dataset → apply_preprocessor）　|
+  <div class="meta"><b>產生</b>：inference · predict_and_write_scores（節點自己逐 (entity 桶, item) 分區寫入；特徵來自 feature_table → build_inference_population_features 落地的 inference_population_features）　|
   <b>下游</b>：inference（rank_predictions）　|
-  <b>partition</b>：model_version（partition_filter）/ snap_date, prod_name</div>
+  <b>partition</b>：model_version（partition_filter）/ snap_date, prod_name, entity_bucket</div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
   </table>
-  <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
+  <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A / entity_bucket=3（partition）
 cust_id   score
 C000010   0.83   （示意）</div>
+  <p class="sub"><code>entity_bucket</code> 是機制欄不是契約欄：評分必須在 driver（禁 UDF），所以按 entity 雜湊切塊；
+  而 <code>insertInto</code> ＋ dynamic overwrite 會把 frame 裡出現的分區整個替換，所以塊的邊界必須等於分區的邊界，
+  否則後一個桶的寫入會刪掉前一個桶的列且零錯誤訊息。<code>rank_predictions</code> 讀完就丟，
+  <b>不進 ranked_staging／ranked_predictions</b>。</p>
 </div>
 
 <div class="card" id="ranked_predictions">
@@ -559,7 +578,7 @@ C000010   0.83    1      （示意）</div>
 </div>
 
 <p class="sub" style="margin-top:30px;color:#9198a1">
-未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：scoring_dataset · X_score · eval_predictions ·
+未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：score_manifest · validated_predictions · eval_predictions ·
 evaluation_metrics · baseline_metrics · predict_manifest · *_parquet_handle · *_lgb_handle · sample_weight_report ·
 *_model_input_unfiltered。這些只在單次 DAG 內銜接，不持久化。
 </p>

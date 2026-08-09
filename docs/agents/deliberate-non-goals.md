@@ -50,7 +50,7 @@
 | 事實 | 為什麼要知道 |
 |---|---|
 | `etl_audit_log` 在 `SIGTERM`/`SIGKILL` 下會遺失**整批** audit（紀錄在 flush 前只活在記憶體 buffer） | 這是「用無小碎檔換掉逐筆持久化」的刻意取捨，**不是 regression**。terminal 與 `logs/<pipeline>_<run_id>.jsonl` 仍有逐筆紀錄可當 fallback |
-| inference 的 `feature_present`（缺特徵母體成員標記）刻意留 in-memory＋log，**不下推**到 `unranked_predictions`/`ranked_predictions` | 使用者先說下推、後反轉為不下推 |
+| inference 的缺特徵母體成員標記刻意**只留 log**，不下推到任何表 | 使用者先說下推、後反轉為不下推。#188 之後連那個 in-memory 欄位也不存在了——它原本活在被合併掉的 `scoring_dataset` 上，而 `inference_population_features` 存的是「特徵全集扣掉 item」，多一個布林旗標會破壞那個定義。留下的是 `build_inference_population_features` 每月一行的缺特徵成員數 log |
 | `inference_population` 的 grain 唯一性靠 source_etl 的 `primary_key`＋`quality_checks`，**刻意不動 `consistency.py`** | 這正是「當初 source_etl 沒保證 feature_table 當母體」那個缺口的修法 |
 | per-item 指標**沒有 precision** | precision 是 per-query 量，無法歸因到單一 item。刻意的，不是漏掉 |
 | 診斷家族計數一律 count-free（寫「各診斷／N」不寫「五項」） | 避免增刪診斷時留下 5-vs-4 的矛盾 |
@@ -58,6 +58,9 @@
 | HPO 搜尋診斷寫在 `tune_hyperparameters` **尾端**、不是新 DAG node | 這樣對 `RESUME_CONTRACTS` 隱形，`--from-node finalize_model` 跳過 HPO 的行為不變 |
 | `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
 | 已退場的診斷項目：`triage`／`quadrant`／`discrimination`／`pair_ledger`／`cross_purchase`／`offset_sweep`／`occupancy` | 勿復活 |
+| inference 的 `entity_bucket` 分區欄**刻意不做「讀的桶數與寫的桶數分開」**（讀 40 桶控 driver、每 4 桶存一次維持分區檔大小） | 技術上可行且保留為逃生口，但它讓「一個 chunk」變成兩個不同的東西，spec 與續跑判準都要跟著分裂。目前預設 10 桶落在健康窗口（5–20）中間，不需要這個自由度。論證見 ADR-0010「考慮過但否決的選項」 |
+| inference 的 driver 峰值**只有下界推算，沒有實測** | `_pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定：只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步多吃一倍。所以文件上的數字是下界不是估計值，實際值取決於生產 `feature_table` 的 dtype 分佈 |
+| `pipelines/inference/` 的模組佈局**刻意沒照 ADR-0008 切**（`nodes.py` ＋ `steps/`、消 `_spark` 後綴、inference 版的 S1／S2） | #188 已經把這些函式重寫過一遍，形狀該跟著新的 node 主體長出來，而不是照 dataset 的檔案清單搬。#188 只新增了一個純函式模組（`chunk_plans.py`，因為續跑判準需要毫秒級測試），沒有動整體佈局。要動先問 |
 | `pipelines/dataset/nodes.py` 與 `pipelines/inference/nodes_spark.py` 從 `recsys_tfb.preprocessing` import 帶底線的私有名（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 審查會建議改成公開名。#176 已把 `steps/` 內五個底線名去掉，**刻意沒動這兩個**——rename 要同時改兩條 pipeline 的呼叫點，而它本身不修任何行為。同模組後來加入的 `encodable_categoricals`／`warn_unknown_encodings`（#185 從 `steps/` 搬來）用的是公開名，所以這個模組現在是混合命名的：那是刻意的現況，不是「還沒改完」。理由見 ADR-0008「這條 ADR 沒有解決的事」。不要順手改 |
 | 診斷報表的鐵則：**只呈現資料、不下結論** | 禁 severity／verdict／「該先查誰」／「偏高低」等替讀者詮釋或評級的字。完整原則見 `docs/operations/diagnosis-report-presentation.md` |
 
