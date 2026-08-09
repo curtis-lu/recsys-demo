@@ -201,7 +201,7 @@ def require_feature_columns_present(
         )
 
 
-def population_view_columns(
+def stored_population_columns(
     keep_identity: list[str], feature_columns: list[str],
 ) -> list[str]:
     """The landed table's width: identity (item excluded), features, bucket.

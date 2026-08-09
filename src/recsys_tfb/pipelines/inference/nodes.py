@@ -21,9 +21,15 @@ two kinds under one event name leaves nobody able to tell which zero means
 which. Where a node's *time* actually goes is a question for the Runner's
 ``load``/``func``/``save`` split (``core/runner.py``), not for this module.
 
-The two underscore-prefixed imports from ``recsys_tfb.preprocessing`` are a
-registered exception, not an oversight: renaming them means touching the dataset
-pipeline's call sites in the same change (``docs/agents/deliberate-non-goals.md``).
+This module imports **three** underscore-prefixed names from elsewhere, which
+S-E otherwise forbids. Two of them — ``_encode_categoricals`` and
+``_cast_feature_floats_to_float32`` from ``recsys_tfb.preprocessing`` — are a
+registered exception: renaming means touching the dataset pipeline's call sites
+in the same change (``docs/agents/deliberate-non-goals.md``). The third,
+``_pdf_to_X`` from ``recsys_tfb.io.extract`` (imported inside
+:func:`predict_and_write_scores`), is **not** registered anywhere; it predates
+#197, which left it alone rather than adding an exception row, since that
+register needs the user's approval.
 """
 
 import itertools
@@ -40,16 +46,16 @@ from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     ScoringChunk,
+    as_rows,
     plan_scoring_chunks,
 )
 from recsys_tfb.pipelines.inference.steps.feature_view import (
-    columns_to_collect,
+    model_columns_to_collect,
     model_feature_columns,
     require_population_has_model_columns,
 )
 from recsys_tfb.pipelines.inference.steps.partitions import (
     ENTITY_BUCKET_COL,
-    as_rows,
     populated_buckets,
     require_single_partition,
     written_score_partitions,
@@ -58,10 +64,10 @@ from recsys_tfb.pipelines.inference.steps.population import (
     drop_excluded_columns_keeping_identity,
     join_features_keeping_all_members,
     population_members,
-    population_view_columns,
     report_feature_coverage,
     require_feature_columns_present,
     require_population_covers_snap_dates,
+    stored_population_columns,
     with_entity_bucket,
     with_time_as_partition_string,
 )
@@ -194,7 +200,7 @@ def build_inference_population_features(
     # (ADR-0010 section 5).
     require_feature_columns_present(result.columns, feature_columns)
     result = result.select(
-        *population_view_columns(keep_identity, feature_columns)
+        *stored_population_columns(keep_identity, feature_columns)
     )
 
     # Decision — numeric features converge on one storage type; which types get
@@ -248,8 +254,18 @@ def predict_and_write_scores(
     skipped one.
 
     Pre-check (input): the landed population table holds every column the model
-    declares. Post-condition: each frame handed to ``save()`` covers exactly one
-    partition, and each chunk passes the chunk layer of validation.
+    declares.
+
+    Post-conditions, all four on what this node itself computed — a failure
+    points at this node's filter or at a stale
+    ``inference_population_features``, never at the operator's config:
+
+    * each frame handed to ``save()`` covers exactly one partition;
+    * each chunk passes the chunk layer of validation;
+    * a bucket the landed table has a partition for reads back non-empty
+      (otherwise those entities would silently vanish from the ranking);
+    * the run scored *something*, unless every chunk was skipped as already
+      present.
 
     Returns:
         manifest dict. It is the DAG edge — the data itself travels through the
@@ -284,7 +300,7 @@ def predict_and_write_scores(
     # not the table's. The item is excluded from both sides — it is assigned per
     # inner iteration rather than read.
     keep_identity = [c for c in identity_cols if c != item_col]
-    collection_columns = columns_to_collect(
+    collection_columns = model_columns_to_collect(
         keep_identity, feature_columns, identity_cols,
     )
     require_population_has_model_columns(
@@ -645,6 +661,14 @@ def validate_predictions(
         # Decision — ranks are 1..N and run in descending score order. The order
         # half is passed as a thunk so its Spark action is spent only when the
         # range already holds; the two questions report as one check.
+        #
+        # A nested def, which S-B otherwise rules out for a *step*. This is not
+        # a step, it is an argument: the predicate owns the decision, this owns
+        # the Spark. It stays here rather than moving to `steps/` because the
+        # only module that would own it — `steps/validation.py` — is deliberately
+        # pyspark-free so both layers' tests skip the SparkSession, and a
+        # seventh module holding one function reads worse than this does. If
+        # this pattern recurs, that is the point to reopen the question.
         def count_score_order_violations() -> int:
             w = Window.partitionBy(*group_cols).orderBy(F.col(rank_col))
             with_prev = ranked_predictions.withColumn(

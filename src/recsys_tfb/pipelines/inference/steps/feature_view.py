@@ -78,7 +78,7 @@ def model_feature_columns(model: ModelAdapter, preprocessor: dict) -> list[str]:
     return artifact_feature_columns
 
 
-def columns_to_collect(
+def model_columns_to_collect(
     keep_identity: list[str],
     feature_columns: list[str],
     identity_cols: list[str],

@@ -174,14 +174,3 @@ def require_single_partition(pdf: pd.DataFrame, partition_cols: list[str]) -> No
             "replaces whole partitions, so successive saves would delete each "
             "other's rows without an error."
         )
-
-
-def as_rows(chunks) -> list[list]:
-    """Chunks as sorted plain lists, so the manifest stays JSON-shaped.
-
-    ``ScoringChunk`` is a ``NamedTuple``, which survives a round trip through
-    this pipeline's in-memory catalog but not through anything that serialises
-    the manifest. Lists are what ``validate_predictions`` compares, so the
-    conversion happens once, here, rather than at each reader.
-    """
-    return sorted(list(chunk) for chunk in chunks)
