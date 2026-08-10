@@ -125,8 +125,10 @@ CLI entry 跑完（Layer-1 的 <code>validate_config_consistency</code>、A21 �
 <p class="sub">四個 <code>cache_*</code> node 的宣告輸入是 dataset 落地的 Hive 表，runner 會把它 <code>load()</code>
 成 Spark DataFrame 餵進去——然後<b>沒有一個 node 讀它的資料</b>。
 <code>_materialize_parquet_handle</code>（<code>nodes.py:275</code>）只拿 <code>df.sql_ctx.sparkSession</code>
-取得 session，資料走 <code>hadoop fs copyToLocal</code> 從 Hive table location 直接搬到 driver-local parquet
-（<code>nodes.py:168</code>）。<code>df</code> 不是 Spark DataFrame 時 <code>raise TypeError</code>——
+取得 session，資料走 Hadoop <code>FileSystem.copyToLocalFile</code> 從 Hive table location 直接搬到
+driver-local parquet（<code>nodes.py:168</code> → <code>utils/hdfs.py:39</code>：經 <code>spark._jvm</code>
+的 JVM bridge，<b>不</b>依賴 PATH 上的 <code>hadoop</code> CLI，也<b>不</b>起 Spark job）。
+<code>df</code> 不是 Spark DataFrame 時 <code>raise TypeError</code>——
 它是 session 的把手，不是資料的入口。</p>
 <p class="sub">跨出 Spark 之後，<code>tune_hyperparameters</code> 的<b>函式體第一行</b>就呼叫
 <code>release_spark_session()</code>（<code>nodes.py:550</code>）：HPO 到 finalize 可能跑數小時，閒置的

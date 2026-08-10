@@ -28,7 +28,8 @@
 %% 這張圖最違反直覺的一件事：Spark 在中間被刻意關掉
 %%   四個 cache node 收到的是 Spark DataFrame，但**沒有一個 node 讀它的資料**：
 %%   _materialize_parquet_handle 只拿 df.sql_ctx.sparkSession 取得 session，資料
-%%   走 hadoop fs copyToLocal 從 Hive table location 直接搬到 driver-local parquet
+%%   走 Hadoop FileSystem 的 copyToLocalFile 從 Hive table location 直接搬到 driver-local
+%%   parquet（經 spark._jvm 的 JVM bridge，不依賴 PATH 上的 hadoop CLI，也不起 Spark job）
 %%   （nodes.py:275 / :168）。df 不是 Spark DataFrame 時 raise TypeError——它是
 %%   session 的把手，不是資料的入口。
 %%   跨出 Spark 之後，tune_hyperparameters 的**函式體第一行**就呼叫
