@@ -36,21 +36,25 @@ date: 2026-08-10
 
 執行層**不是**沒有靜默 stale 的可能，只是要主動觸發。具體路徑：同一次編輯裡既加了 test 月、又改了 `sample_ratio`。後者只翻 `train_variant_id`（`core/versioning.py`），不翻 `base_dataset_version`，所以 `--only-test-months` 選中的節點不會建立新 variant 底下的 train 產物；而 `HiveTableDataset.exists()` 走的是 `SHOW TABLES`（`io/hive_table_dataset.py` 的 `_table_exists`），**表級判定、完全不看 `partition_filter`**，所以 `core/runner.py` 開跑前的輸入檢查也不會報錯。training 隨後讀到 0 列。
 
+而且**沒有任何一層會擋下它**：`core/runner.py` 開跑前那道輸入檢查因短路而根本不發問（見下節），`load()` 帶著 `partition_filter` 發出的 `SELECT * FROM ... WHERE base_dataset_version=... AND train_variant_id=...`（`io/hive_table_dataset.py`）對不存在的 variant 安靜回 0 列。
+
 這條路徑成立，決定仍然維持——因為它需要使用者主動宣告縮小範圍，而產物層的對應失效不需要任何人做任何事。但**「方向相反」是過度宣稱，正確的說法是「主動觸發 vs 被動預設」**。
 
 同理，`base_dataset_version` 的定義是「扣掉 `test_snap_dates` 的一切」（`core/versioning.py` 的 `COVERAGE_ONLY_KEYS`）這件事，**只覆蓋 base 層**；`train_variant_id` 與 `calibration_variant_id` 不在它的保護範圍內。
 
-## 為什麼是 `_can_load`，不是 `catalog.exists()`
+## 為什麼是 `_can_load`，不是 `HiveTableDataset.exists()`
 
-`exists()` 回答「這張表在不在」，而切片需要的是「不跑生產者，消費者拿不拿得到它要的東西」。對增量產物，這兩個問題的答案不同。
+先排除一個看似成立、實際查不到的理由：**不是因為改 `exists()` 會波及別人。** `core/runner.py` 開跑前那道輸入檢查看起來是第二個呼叫者，實際上不是——它先把 `catalog.list()` 整批灌進 `available`，所以對任何已註冊的 catalog 條目，`catalog.exists` 因短路而**永不求值**；能求值時名字必然未註冊，`core/catalog.py` 直接回 `False`、碰不到 dataset 物件。（`save()` 走的也不是 `exists()`，是 `_table_exists`。）`HiveTableDataset.exists()` 在實務上只有 `_can_load` 一個活呼叫者。
 
-`catalog.exists` 全 repo 只有兩個呼叫點：`core/runner.py` 開跑前的輸入驗證，與切片用的 `_can_load`。（`save()` 呼叫的是 `_table_exists`，不經過 `exists()`，所以不受影響。）不把月份感知下沉到 `HiveTableDataset.exists()` 的理由因此不是「波及面大」，而是**兩個呼叫點問的是不同問題**：runner 問「這個輸入完全不存在嗎」，切片問「這次要的內容齊了嗎」。把後者塞進前者，會讓一張缺月份的表被判定成不存在而直接 raise。
+真正的理由是**分層**。「這個產物**有**哪些 partition」已經住在 dataset 物件上（`existing_partition_values()`），而且該住在那裡——ADR-0008 §5 關掉的正是「CLI 自己知道 `HiveTableDataset` 有 `database`／`table` 欄位、自己組 metastore 查詢」那個洩漏。
 
-切片的收邊條件只有一處（`core/pipeline.py` 的 `_slice_with_expansion`），改在那條路徑上的 `_can_load` 是最小切面。
+但「這次執行**要**哪些月份」不是產物的性質：它由 config、開跑時的 metastore 列舉、以及 `--rebuild-dates` 三者算出來，是 run 層的決定，以 `<name>_month_plan` 這個 CLI 建的 `MemoryDataset` 進 catalog（ADR-0007）。**兩者相減的那一步屬於 run 層。** 要讓 `exists()` 自己回答，就得把 run 層的計畫注射進 io 物件——那是把 ADR-0008 §5 的洩漏反向再開一次。
+
+切片的收邊條件只有一處（`core/pipeline.py` 的 `_slice_with_expansion`），改在那條路徑上的 `_can_load` 因此既是最小切面，也是分層上唯一正確的位置。
 
 ## 這同時關掉一個靜默缺陷
 
-在現行的月份盲 `can_load` 下，`--only-node filter_test_model_input`（**正是本 ADR 的 preset 目標節點**）加了新月份之後：中間產物 `test_model_input_unfiltered` 不在 `conf/base/catalog.yaml`、是 runner 自動建的 MemoryDataset → `build_test_model_input` 被拉回；但 `test_keys` 是持久化 Hive 表、`can_load` 回 `True` → `select_test_keys` **不**被拉回 → 新月份的 keys 從未寫入 → 濾出 0 列 → `pipelines/dataset/steps/model_input.py` 沒有任何空值守衛 → dynamic partition overwrite 對 0 列的 frame 決定不出任何 partition。
+在現行的月份盲 `can_load` 下，`--only-node filter_test_model_input`（**正是本 ADR 的 preset 目標節點**）加了新月份之後：中間產物 `test_model_input_unfiltered` 不在 `conf/base/catalog.yaml`、是 runner 自動建的 MemoryDataset → `build_test_model_input` 被拉回；但 `test_keys` 與 `preprocessed_feature_table` 都是持久化 Hive 表、`can_load` 對兩者都回 `True` → `select_test_keys` 與 `apply_preprocessor_to_features` **都不**被拉回 → 新月份的 keys 與編碼特徵從未寫入 → 濾出 0 列 → `pipelines/dataset/steps/model_input.py` 沒有任何空值守衛 → dynamic partition overwrite 對 0 列的 frame 決定不出任何 partition。
 
 **結果是什麼都沒寫、沒有任何錯誤**，而 `[months]` log 早在 `__main__.py` 建月份計畫時（切片決策**之前**）就無條件印了 `processed=<新月份>`。症狀不是「寫錯」，是「什麼都沒做卻宣稱做了」。
 
@@ -70,7 +74,9 @@ ADR-0007 刪掉 `filter_test_model_input` 的防禦性月份過濾時，論證�
 
 - **資料閘要顯式進 preset。** `validate_data_consistency` 的 `outputs=None`，而 `_slice_with_expansion` 的 producer map 只由 `node.outputs` 建——**沒有輸出的節點結構上永遠不會被自動拉回**。切片一旦成為加月份的建議動線，這個閘就從偶爾被跳過變成每次被跳過，而 B1（item 覆蓋）對新月份正是有意義的檢查。這是 preset 需要硬寫的第二個、也是最後一個節點名。相關：issue #157。
 - **「test 鏈是哪些節點」成為單一常數。** preset 與 `_format_rebuild_slice_warning` 的觸發條件都要用到它。dataset 側原本只要「切片 ＋ `--rebuild-dates`」就無條件 WARN，而 preset 選中的就是整條鏈，那句警告會變成假警報、建議還相反（叫人拿掉旗標重跑）。改成條件式：鏈完整就不警告。
-- **`scripts/rebuild_eval_month.sh` 改用新旗標。** 重算既有月份與新增月份需要的節點集完全相同，差別只在 month plan 把哪些月放進 `to_process`。這會**移除該腳本目前附帶的一層自癒**（它現在跑完整 dataset，順帶重建 train/val/calibration）。可以接受，因為那層自癒與腳本的職責無關：不變量 A21 要求 `--rebuild-dates` 的值必須是 `test_snap_dates` 的子集，所以它重算的永遠是 test 月份，而 train/val/calibration 產物本來就不由 test 月份決定。改完之後 `--rebuild-dates` 的語意回歸單一職責：**只決定哪些月份，不決定跑哪些節點**。
+- **`scripts/rebuild_eval_month.sh` 改用新旗標。** 重算既有月份與新增月份需要的節點集完全相同，差別只在 month plan 把哪些月放進 `to_process`。這會**移除該腳本目前附帶的一層自癒**：它現在跑的是完整 dataset，順帶把 train/val/calibration 在當前 variant 底下重建一次，因此會意外修好上一節那條 variant 漂移。改用新旗標之後這層消失，**而且沒有東西補上**。
+
+仍然接受，但理由不是有別的機制頂上——是那層自癒從來不是這個腳本的職責、沒有任何文件宣稱過它，而且移除之後的曝險與 `--only-test-months` 主動線**完全相同**：腳本只是不再意外遮掩一個既已存在的風險，不是新增一類風險。改完之後 `--rebuild-dates` 的語意回歸單一職責：**只決定哪些月份，不決定跑哪些節點**。
 - **驗收看 partition 有沒有被寫，不看 wall-clock。** 本機 `local[*]` 與叢集的時間結構不同、會隨負載漂移，是不可重現的證據（`docs/operations/known-pitfalls.md` §4 記著同一個教訓）。判準：加月份後 train／val／calibration 的 model_input partition mtime 與加之前完全相同，輔以 `[plan] running N of M nodes`。這與 PR #135 用過的證據形式相同。
 
 ## 為什麼是現在，不是 #123 那一輪
