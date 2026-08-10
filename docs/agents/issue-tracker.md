@@ -17,6 +17,13 @@ Infer the repo from `git remote -v` — `gh` does this automatically when run in
 > Issue 用得不密集，目前主要記錄跨 session 的待辦與已知落差（例：#63 外部 inference 特徵欄落差）。
 > 開 issue 前先掃一眼既有的，避免重複開同一件事。
 
+## 票的範圍宣告（本 repo 規則）
+
+這兩條是 issue #123 的事後修補。那張票的 Out of Scope 有數項只是把結論換句話說、沒給理由，而其中一項（「train／val／calibration 分支的增量化」）排除掉的**正好是同一張票的 Problem Statement 已經指認為浪費的東西**——票面沒有任何一處解釋這個前後不一致。票關掉之後它就沉沒：沒有人判斷得出它是刻意排除還是漏掉，而 runbook 讀起來像是已經涵蓋，落差過了半年才被發現。
+
+- **Out of Scope 的每一項都要附理由。** 只寫「本次不做 X」不算，要寫「因為 Y，所以本次不做 X」。理由的作用不是說服讀者，是讓日後的人能自己判斷「Y 現在還成立嗎」。判準：一個沒參與這輪討論的人，讀完能不能自行決定要不要重開這件事。
+- **關票時，Out of Scope 中仍未解決的項目要搬進 `docs/agents/deliberate-non-goals.md`。** 票一關，它的 Out of Scope 就不會再被任何人讀到；那份地雷圖才是 repo 指定收「看起來該修、但刻意不修」的地方（見 `CLAUDE.md` 路由表）。沒搬過去的排除項會從「刻意不做」退化成「無人知道」。
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_

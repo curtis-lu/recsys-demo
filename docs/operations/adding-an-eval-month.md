@@ -36,7 +36,11 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb dataset --env local
 
 log 印出的 `base_dataset_version` 應與上次**完全相同**。翻號了就停下來——代表你同時改到了其他設定（對照 [dataset.md §7.2 設定版本矩陣](../pipelines/dataset.md)）。
 
-這一步只處理**尚未落地**的月份，既有月份的 partition 完全不動，所以加第 N 個月的成本正比於「新月份」而不是累積的總月份數。log 會明講它做了什麼、沒做什麼：
+這一步只處理**尚未落地**的月份，既有月份的 partition 完全不動，所以加第 N 個月的成本正比於「新月份」而不是累積的總月份數。
+
+**但這句話只涵蓋 test 鏈。** 增量的是 `select_test_keys`、`apply_preprocessor_to_features`、`build_test_model_input` 三個 node（判準：pipeline 定義上有 `*_month_plan` input 的就是）。其餘十個——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`，以及 `enable_calibration: true`（`conf/base/parameters_dataset.yaml` 的出廠設定）帶進來的 `select_calibration_keys`、`build_calibration_model_input`——**每次執行都會全量重算並覆寫同一批 partition**——多一個 test 月不會改變它們的內容，所以那是純粹的重做。這是 issue #123 明文把範圍限縮在 test 分支的結果（同一件事在 [dataset.md §5.1](../pipelines/dataset.md) 有記錄）：**「成本正比於新月份」講的是隨月份累積的部分，不是這一步的總成本。**
+
+log 會明講它做了什麼、沒做什麼：
 
 ```
 [months] test branch: processed=2026-02-28 skipped=2026-01-31 rebuild=-
