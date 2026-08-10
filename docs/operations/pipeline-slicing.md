@@ -28,6 +28,17 @@ python -m recsys_tfb dataset  --only-node build_train_model_input # 只跑單一
 直到全部輸入可得。最壞情況退化成 full run——任何起點都合法，絕不靜默缺料。
 昂貴 node 若被拉回，會出現在計畫的 auto-included 清單，跑之前看得到。
 
+**dataset 的三個增量產物多問一件事**：`preprocessed_feature_table`、`test_keys`、
+`test_model_input` 是逐月延伸的，表從第一次跑完就一直在，所以「存在」對它們永遠是真，
+會缺的是**這次要的月份**。它們的判準因此是「這次的月份計畫還有沒有要處理的月」——
+`[months]` 那幾行印的就是這個計畫（[ADR-0012](../adr/0012-month-aware-slicing-not-per-artifact-skip.md)）。
+加了一個 `test_snap_dates` 月份之後 `--only-node filter_test_model_input`，
+auto-included 會列出三個：`build_test_model_input`（上一段那條規則——中間產物
+`test_model_input_unfiltered` 是 memory-only），以及月份判準拉回來的
+`select_test_keys` 與 `apply_preprocessor_to_features`。
+`fit_preprocessor_metadata` 不在其中（`preprocessor` 是落地的 JSON，沒有月份）。
+其餘三個 pipeline 沒有增量產物，判準仍是 `exists()` 一個。
+
 ## 使用前提與限制
 
 - **參數未變**才能接續：`exists()` 不驗證落地產物是否由當前參數產生。版本化路徑
