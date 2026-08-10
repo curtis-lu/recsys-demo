@@ -2,6 +2,8 @@
 %% ===========================================================================
 %% inference pipeline node graph
 %% 唯一真實來源：src/recsys_tfb/pipelines/inference/pipeline.py::create_pipeline
+%% node 函式在 nodes.py，機制在 steps/（#197 之後的佈局；判準見
+%% docs/agents/pipeline-node-design.md）
 %% 姊妹圖：dataset-pipeline.mmd（同一套圖例，多出的形狀見下）
 
 %% 圖例
@@ -12,7 +14,7 @@
 %%   [ 方框 ]      node，框內是 node name（可直接餵給 --from-node / --only-node）
 %%   ([ 實線膠囊 ]) 落地的 catalog 條目（Hive table）
 %%   ([ 虛線膠囊 ]) MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
-%%   {{ 六角 }}    閘：不轉換資料，只決定放不放行
+%%   {{ 六角 }}    閘：主要工作是決定放不放行（唯一的資料變動見下方「閘也會裁月份」）
 %%   > 旗標 ]      失敗路徑的終點（不是 dataset，沒有東西被寫出去）
 %%   粗虛線邊       node 自己寫的表（Node(writes=…)），**不是**拓樸相依邊
 %%   虛線邊         非資料流：版本解析的相依
@@ -45,8 +47,21 @@
 %%   unranked_predictions / ranked_staging 是 Hive managed table 且跨月份累積，
 %%   catalog 的 partition_filter 只擋掉 model_version 那一半（load 發
 %%   WHERE model_version = '…' 並把該欄 drop 掉），月份沒有任何東西擋。這就是
-%%   rank_predictions 與 validate_predictions 都先呼叫 restrict_to_snap_dates
+%%   rank_predictions 與 validate_predictions 都先呼叫 steps/scoping.restrict_to_snap_dates
 %%   的理由：不裁的話第二個月起會讀回全部歷史月份、重算、無聲重新發布。
+
+%% 閘也會裁月份——它不是純粹的 pass-through
+%%   validate_predictions 回傳的是 restrict_to_snap_dates 之後的 frame，不是它收到的
+%%   那一份。所以 validated_predictions ⊆ ranked_staging，publish 寫出去的是「本次
+%%   月份」那一塊。這是對的（不裁就會重新發布歷史月份），但別把六角形讀成「零資料變動」。
+
+%% 驗證是兩層，圖上只有一個六角形
+%%   塊層（validate_scored_chunk）在評分節點內、每個 chunk save() 之前跑，純 pandas、
+%%   零 Spark action：缺值、重複、列數、item 值域。整批層（validate_predictions）是圖上
+%%   那個閘，跑同一組 item 互相比較才問得出來的四項。分層的理由是**早失敗**——分數算錯
+%%   不必等全部 chunk 算完、rank 也跑完才知道（ADR-0011 §3）。
+%%   塊層沒有自己的形狀，因為它不改變任何一條邊：它擋下來的 chunk 是整批中止，不是分岔。
+%%   哪一條在哪一層的唯一真實來源是 steps/validation.py 的 CHUNK_CHECKS / BATCH_CHECKS。
 
 %% 為什麼 ranked_staging 要單獨存在
 %%   validate 失敗時 raise ValidationError，整批中止，production 的
@@ -69,7 +84,7 @@
 %%     （model.predict() vs model.predict_uncalibrated()），不改變任何一條邊。
 %%     這跟 dataset 圖的 calibration 分支（會多出節點）性質不同，所以那邊寫
 %%     「不畫這個分支」，這邊是「根本沒有分支可畫」。
-%%   - 續跑的規劃（chunk_plans.plan_scoring_chunks）：它決定評分節點跑幾個
+%%   - 續跑的規劃（steps/chunk_plans.plan_scoring_chunks）：它決定評分節點跑幾個
 %%     chunk，但不改變任何一條邊——跳過的 chunk 與寫出的 chunk 走同一條線。
 %%   - build_inference_population_features 的 feature coverage 報表：只算數字
 %%     寫 log，不下推成資料，缺特徵的母體成員一律保留。
@@ -112,13 +127,13 @@ flowchart TB
   %% ---------------------------- 主鏈 ------------------------------
   n_build["build_inference_population_features<br/><small>母體 (time, entity) ⋈ 特徵 ・ 分 entity 桶 ・ 套編碼與 float32<br/><b>不含 item 展開</b>；identity 類別欄不編碼，延後到 driver</small>"]
   d_popfeat(["inference_population_features<br/><small>base_dataset_version / snap_date, entity_bucket<br/>存特徵全集（扣掉 item）→ 換模型可整張重用</small>"])
-  n_predict["predict_and_write_scores<br/><small>外層迴圈桶、內層迴圈 item ・ 一桶讀進 driver 一次<br/>每個 (桶, item) 算完立刻寫成<b>恰好一個分區</b><br/>分區已存在即跳過（--rebuild-dates 可推翻）</small>"]
+  n_predict["predict_and_write_scores<br/><small>外層迴圈桶、內層迴圈 item ・ 一桶讀進 driver 一次<br/>每個 (桶, item) 算完先過<b>塊層 4 項檢查</b>，再寫成<b>恰好一個分區</b><br/>分區已存在即跳過（--rebuild-dates 可推翻）</small>"]
   d_manifest(["score_manifest<br/><small>processed／skipped／rebuilt／empty<br/>＋分區帳（供 partition_completeness）</small>"])
   d_unranked(["unranked_predictions<br/><small>model_version / snap_date, item, entity_bucket</small>"])
   n_rank["rank_predictions<br/><small>裁月份 → 丟掉 entity_bucket → (time, entity) 組內 row_number()</small>"]
   d_staging(["ranked_staging<br/><small>model_version / snap_date, item</small>"])
-  gate{{"validate_predictions<br/><small>6 項 sanity check ・ 不轉換資料，只決定放不放行</small>"}}
-  d_validated(["validated_predictions"])
+  gate{{"validate_predictions<br/><small><b>整批層</b> 4 項檢查（塊層那 4 項已在評分時跑過）<br/>成功路徑 2 個 Spark action ・ 回傳的是裁完月份的 frame</small>"}}
+  d_validated(["validated_predictions<br/><small>＝ ranked_staging 裁到本次月份</small>"])
   n_publish["publish_predictions<br/><small>函式是 identity；production 寫入＝catalog save</small>"]
   o_ranked(["ranked_predictions　★production<br/><small>model_version / snap_date, item ・ 無 entity_bucket</small>"])
   x_abort>"整批中止<br/><small>production 未被觸碰<br/>失敗批次留在 ranked_staging 供排查</small>"]
