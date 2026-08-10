@@ -48,7 +48,10 @@ date: 2026-08-10
 
 真正的理由是**分層**。「這個產物**有**哪些 partition」已經住在 dataset 物件上（`existing_partition_values()`），而且該住在那裡——ADR-0008 §5 關掉的正是「CLI 自己知道 `HiveTableDataset` 有 `database`／`table` 欄位、自己組 metastore 查詢」那個洩漏。
 
-但「這次執行**要**哪些月份」不是產物的性質：它由 config、開跑時的 metastore 列舉、以及 `--rebuild-dates` 三者算出來，是 run 層的決定，以 `<name>_month_plan` 這個 CLI 建的 `MemoryDataset` 進 catalog（ADR-0007）。**兩者相減的那一步屬於 run 層。** 要讓 `exists()` 自己回答，就得把 run 層的計畫注射進 io 物件——那是把 ADR-0008 §5 的洩漏反向再開一次。
+但「這次執行**要**哪些月份」不是產物的性質：它由 config、開跑時的 metastore 列舉、以及 `--rebuild-dates` 三者算出來，是 run 層的決定，以 `<name>_month_plan` 這個 CLI 建的 `MemoryDataset` 進 catalog（ADR-0007）。**兩者相減的那一步屬於 run 層。** 但理由**不是**「run 層算出的東西不能進 io 物件」——`conf/base/catalog.yaml` 裡 `partition_filter` 的 `base_dataset_version` 正是這樣進去的，那是既有且被認可的機制，ADR-0008 §5 擋的是反方向（CLI 伸手進 io 的內部）。擋住月份感知下沉的是兩件更具體的事：
+
+1. **循環。** 算月份計畫本身需要一個**已經解析過**的 catalog 去列 partition：`__main__.py` 為此另建一個拋棄式的 `DataCatalog`，而且那裡的註解明說順序是 load-bearing——沒有 `base_dataset_version` 就會拿字面的 `${base_dataset_version}` 去比對每個 partition、答出「什麼都沒落地」。讓 `exists()` 月份感知，等於讓同一個物件的答案取決於它自己上一輪的回報。
+2. **`--rebuild-dates` 在 catalog config 裡沒有任何表示**（`conf/base/catalog.yaml` 對它零命中），所以計畫沒辦法像 `partition_filter` 那樣宣告式地進 io 物件。
 
 切片的收邊條件只有一處（`core/pipeline.py` 的 `_slice_with_expansion`），改在那條路徑上的 `_can_load` 因此既是最小切面，也是分層上唯一正確的位置。
 
