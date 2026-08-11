@@ -15,7 +15,7 @@ date: 2026-08-10
 
 **增量是「這次執行要做什麼」的性質，不是「這個產物新不新」的性質。**
 
-具體：切片的收邊條件 `_can_load`（`__main__.py`）對三個增量產物改問月份——名字在 `INCREMENTAL_DATASETS` 裡就去 catalog 取對應的 `<name>_month_plan`，`to_process` 非空即回 `False`。加上一個具名切片旗標 `--only-test-months`，內部等價於 `--only-node filter_test_model_input` 再加上資料閘。
+具體：切片的收邊條件 `_can_load`（`__main__.py`）對三個增量產物改問月份——手上有那個產物的月份計畫、且 `to_process` 非空，就回 `False`。計畫由 `dataset` 指令注入（`_make_can_load(catalog, month_plans)`），與經 catalog 交給節點的是同一份。**收邊條件自己不查 `INCREMENTAL_DATASETS`**：它住在四個指令共用的 `_execute_pipeline` 上，讓共用路徑 import 一個 pipeline 專屬的常數，是把該不該有月份的判斷從「這個指令有沒有注入計畫」偷偷換成「這個名字在不在那份清單裡」；而 `retrain_advice` / `rebuild_advice` 已經是「per-pipeline 覆寫，由該指令注入」的既定形狀。加上一個具名切片旗標 `--only-test-months`，內部等價於 `--only-node filter_test_model_input` 再加上資料閘。
 
 於是 DAG 自己推出正確的節點集：`preprocessor` 是落地的 JSON、載得到 → `fit_preprocessor_metadata` 不進來；`test_keys` 與 `preprocessed_feature_table` 缺新月份 → 兩個生產者被拉回；train/val/calibration 的 build 不在上游閉包裡 → 不進來。
 
