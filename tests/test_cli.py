@@ -1558,3 +1558,288 @@ class TestDateSplitOverlapA24:
             assert result.exit_code == 0, result.output
         finally:
             os.chdir(old)
+
+
+# --- #203: --only-test-months, the named slice for adding an eval month ---
+
+from recsys_tfb.__main__ import _maybe_warn_rebuild_partial_chain  # noqa: E402
+from recsys_tfb.pipelines.dataset.pipeline import (  # noqa: E402
+    ONLY_TEST_MONTHS_NODES,
+)
+
+#: What ``--only-test-months`` must come out to: the test chain (#202's four)
+#: plus the Layer-2 data gate. Spelled out rather than derived — a derivation
+#: would be the same walk the code under test performs.
+_ONLY_TEST_MONTHS_SLICE = _TEST_CHAIN | {"validate_data_consistency"}
+
+#: "argument not given", so a test can pass ``advice=None`` and mean it.
+_UNSET = object()
+
+
+def _dataset_pipe():
+    return get_pipeline("dataset", enable_calibration=True)
+
+
+def _pending_can_load(pending=(_A_MONTH,)):
+    """The stopping condition of a run that has a month left to process."""
+    return _make_can_load(
+        _FakeCatalog(_LANDED),
+        {name: _plan(pending) for name in INCREMENTAL_DATASETS},
+    )
+
+
+class TestOnlyTestMonthsPreset:
+    """The preset names two nodes; the DAG supplies the rest.
+
+    Hard-coding the five would make the preset a second list to keep in step
+    with the pipeline definition — the failure #202 was about, one layer up.
+    """
+
+    def test_the_preset_names_two_nodes_the_pipeline_actually_has(self):
+        # Guard the names themselves: every assertion below is about a slice
+        # taken *through* them, and `_node_index` raising on a stale name would
+        # be an error, not a red assertion.
+        assert len(ONLY_TEST_MONTHS_NODES) == 2
+        assert set(ONLY_TEST_MONTHS_NODES) <= {n.name for n in _dataset_pipe().nodes}
+
+    def test_it_expands_to_the_test_chain_plus_the_data_gate(self):
+        sliced, plan = _dataset_pipe().slice_nodes(
+            ONLY_TEST_MONTHS_NODES, _pending_can_load()
+        )
+
+        assert {n.name for n in sliced.nodes} == _ONLY_TEST_MONTHS_SLICE
+        assert len(sliced.nodes) == 5
+        # Exact set, so it pins what stays out too: the ten nodes that would
+        # recompute train/val/calibration byte-for-byte are the whole point.
+        assert "fit_preprocessor_metadata" not in {n.name for n in sliced.nodes}
+        assert plan.auto_included["select_test_keys"] == ("test_keys",)
+
+    def test_the_zero_output_data_gate_only_gets_in_by_being_named(self):
+        """Why the gate is the second hard-coded name and not derived.
+
+        ``_slice_with_expansion`` builds its producer map from ``node.outputs``,
+        so a node with none can never be pulled back by expansion — no input is
+        ever missing "because ``validate_data_consistency`` did not run". Being
+        requested is the only way in, and leaving it out would quietly take the
+        Layer-2 data gate off the new eval-month path (#157).
+        """
+        sliced, plan = _dataset_pipe().slice_nodes(
+            ONLY_TEST_MONTHS_NODES, _pending_can_load()
+        )
+
+        assert "validate_data_consistency" in plan.requested
+        assert "validate_data_consistency" in {n.name for n in sliced.nodes}
+        assert "validate_data_consistency" not in plan.skipped_side_effect
+
+    def test_with_nothing_pending_it_stops_at_the_landed_tables(self):
+        """The negative control: the preset is not a disguised full run."""
+        sliced, _ = _dataset_pipe().slice_nodes(
+            ONLY_TEST_MONTHS_NODES, _pending_can_load(())
+        )
+
+        assert {n.name for n in sliced.nodes} == {
+            "validate_data_consistency",
+            "build_test_model_input",
+            "filter_test_model_input",
+        }
+
+
+class TestSlicingFlagsAreThreeWayExclusive:
+    """``--from-node`` / ``--only-node`` / ``--only-test-months``.
+
+    Two of the three were already exclusive. A third selector that silently
+    lost to one of the others would run a node set nobody asked for.
+    """
+
+    def test_every_pair_is_rejected(self):
+        import pytest
+
+        pipe = _slice_test_pipe()
+        for from_node, only_node, preset in (
+            ("B", "C", None),
+            ("B", None, ("A",)),
+            (None, "C", ("A",)),
+            ("B", "C", ("A",)),
+        ):
+            with pytest.raises(ValueError, match="mutually exclusive"):
+                _slice_pipeline(
+                    pipe, lambda n: True, from_node, only_node, preset_nodes=preset
+                )
+
+    def test_the_preset_alone_slices(self):
+        out, plan = _slice_pipeline(
+            _slice_test_pipe(), lambda n: True, None, None, preset_nodes=("A", "C"),
+        )
+        assert [n.name for n in out.nodes] == ["A", "C"]
+        assert plan.mode == "preset"
+
+    def test_the_manifest_records_which_selector_ran(self):
+        assert _slice_extra(None, None, preset_label="only-test-months") == {
+            "preset": "only-test-months"
+        }
+        assert _slice_extra("X", None) == {"resumed_from": "X"}
+        assert _slice_extra(None, None) is None
+
+
+class TestRebuildWarningIsConditionalOnTheChain:
+    """#203 — the dataset side warned on "sliced at all", which the preset makes
+    a false alarm: the slice it selects *is* the whole chain, and the message
+    told the operator to re-run without the flag, i.e. to do the ten nodes of
+    pure rework the flag exists to skip. The condition is now "is any of the
+    chain missing from this run".
+    """
+
+    def _advice(self, rebuild=("2026-01-31",)):
+        return {
+            "rebuild": list(rebuild),
+            "nodes": ONLY_TEST_MONTHS_NODES,
+            "chain": "test 鏈",
+        }
+
+    def _warn(self, from_node=None, only_node=None, preset=None, advice=_UNSET):
+        pipe = _dataset_pipe()
+        can_load = _pending_can_load()
+        sliced, plan = _slice_pipeline(
+            pipe, can_load, from_node, only_node, preset_nodes=preset
+        )
+        return _maybe_warn_rebuild_partial_chain(
+            pipe, sliced, plan, can_load,
+            self._advice() if advice is _UNSET else advice,
+        )
+
+    def test_the_preset_covers_the_chain_so_it_stays_quiet(self):
+        assert self._warn(preset=ONLY_TEST_MONTHS_NODES) == []
+
+    def test_a_from_node_that_covers_the_chain_stays_quiet_too(self):
+        # The same correctness, arrived at differently: --from-node on the
+        # first node selects everything, so nothing in the chain is stale.
+        assert self._warn(from_node="validate_data_consistency") == []
+
+    def test_a_slice_that_drops_part_of_the_chain_still_warns(self):
+        lines = "\n".join(self._warn(only_node="build_test_model_input"))
+
+        assert "--rebuild-dates" in lines
+        assert "2026-01-31" in lines
+        assert "test 鏈" in lines
+
+    def test_a_slice_missing_only_the_gate_stays_quiet(self):
+        """The gate lands no partition, so its absence cannot make one stale.
+
+        ``--from-node filter_test_model_input`` pulls back all four data nodes
+        of the chain but not the zero-output gate (nothing can). Warning there
+        would restate this ticket's own bug one node over: a message about
+        stale partitions, fired by a node that writes none. The skipped gate is
+        already reported accurately, by the ``skipped side-effect`` line.
+        """
+        assert self._warn(from_node="filter_test_model_input") == []
+
+    def test_an_unsliced_run_never_warns(self):
+        assert self._warn() == []
+
+    def test_no_rebuild_dates_means_nothing_to_warn_about(self):
+        assert self._warn(
+            only_node="build_test_model_input", advice=self._advice(rebuild=())
+        ) == []
+
+    def test_other_pipelines_pass_no_advice_and_are_untouched(self):
+        assert self._warn(only_node="build_test_model_input", advice=None) == []
+
+
+class TestOnlyTestMonthsCLI:
+    def test_only_the_dataset_command_advertises_it(self):
+        for cmd in ("dataset", "training", "inference", "evaluation"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0, result.output
+            out = re.sub(r"\s+", " ", result.output)
+            assert ("--only-test-months" in out) is (cmd == "dataset"), cmd
+
+    def test_it_plans_five_of_fifteen_nodes(self, tmp_path):
+        """The ticket's ``--dry-run`` criterion, against the real command.
+
+        The unit tests above slice a pipeline object; this one pins the wiring
+        that carries the preset from the flag to the slice, which no amount of
+        node-set assertion can catch.
+        """
+        captured = {}
+        real = _format_slice_plan
+
+        def spy(plan, total):
+            captured["plan"] = plan
+            captured["total"] = total
+            return real(plan, total)
+
+        with patch.object(
+            DataCatalog, "exists", lambda self, name: name in _LANDED
+        ), patch("recsys_tfb.__main__._format_slice_plan", spy):
+            _run_dataset_command(
+                tmp_path,
+                ["dataset", "--only-test-months", "--dry-run"],
+                existing=("2026-01-31",),
+                foreign=(),
+            )
+
+        plan = captured["plan"]
+        assert set(plan.requested) | set(plan.auto_included) == _ONLY_TEST_MONTHS_SLICE
+        assert plan.mode == "only-test-months"
+
+    def test_the_shipped_config_makes_that_five_of_fifteen(self):
+        """The ticket's headline number, tied to the config that produces it.
+
+        ``enable_calibration`` is what makes the pipeline fifteen nodes rather
+        than thirteen, and it is on in ``conf/base`` — so the two thirds of the
+        run this flag skips is the shipped default, not a scenario. The CLI test
+        above uses a fixture with calibration off; asserting 15 there would pin
+        the fixture, not the claim.
+        """
+        params = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / "conf" / "base" / "parameters_dataset.yaml").read_text()
+        )
+        assert params["dataset"]["enable_calibration"] is True
+
+        pipe = _dataset_pipe()
+        sliced, _ = pipe.slice_nodes(ONLY_TEST_MONTHS_NODES, _pending_can_load())
+        assert (len(sliced.nodes), len(pipe.nodes)) == (5, 15)
+
+    def _rejected(self, tmp_path, argv):
+        """Run the dataset command far enough to reach the flag guards.
+
+        Returns the output. ``exit_code == 1`` on its own would be satisfied by
+        any crash on the way there — the mocked Spark session gives plenty of
+        opportunity — so the caller asserts on the message, which only the
+        intended guard emits.
+        """
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1, "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2025-12-31"],
+                "test_snap_dates": ["2026-01-31"],
+            }},
+        )
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()), \
+                 patch("recsys_tfb.__main__.Runner"):
+                result = runner.invoke(app, argv)
+        finally:
+            os.chdir(old)
+        assert result.exit_code == 1, result.output
+        return result.output
+
+    def test_it_is_rejected_together_with_only_node(self, tmp_path):
+        out = self._rejected(tmp_path, [
+            "dataset", "--only-test-months",
+            "--only-node", "filter_test_model_input",
+        ])
+        assert "--only-node, --only-test-months are mutually exclusive" in out
+
+    def test_it_is_rejected_together_with_list_nodes(self, tmp_path):
+        out = self._rejected(
+            tmp_path, ["dataset", "--only-test-months", "--list-nodes"]
+        )
+        # Names the flag the operator actually typed. The guard is shared with
+        # three commands that have no preset, so a message built from the
+        # label alone would send them looking for a `--preset` flag.
+        assert "--list-nodes cannot be combined with --only-test-months" in out

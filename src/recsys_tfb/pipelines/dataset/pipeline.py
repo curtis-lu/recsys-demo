@@ -3,6 +3,22 @@
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
+#: The two nodes ``--only-test-months`` names; everything else it runs is
+#: derived from the DAG by :meth:`Pipeline.slice_nodes` (#203).
+#:
+#: - ``filter_test_model_input`` is the test chain's last node. Naming the
+#:   endpoint and letting expansion walk up means a chain that grows a node
+#:   later needs no edit here.
+#: - ``validate_data_consistency`` is the Layer-2 data gate, and it is listed
+#:   for a structural reason rather than a policy one: expansion reaches a node
+#:   only through the producer map, which is built from ``node.outputs``, and
+#:   this node has none. Nothing can ever pull it back, so leaving it out would
+#:   take the gate off the add-an-eval-month path entirely (#157, ADR-0012).
+#:
+#: One tuple rather than two lists because the rebuild warning asks the same
+#: question of the same chain — see ``__main__._maybe_warn_rebuild_partial_chain``.
+ONLY_TEST_MONTHS_NODES = ("validate_data_consistency", "filter_test_model_input")
+
 
 def create_pipeline(enable_calibration: bool = False) -> Pipeline:
     from recsys_tfb.pipelines.dataset.nodes import (

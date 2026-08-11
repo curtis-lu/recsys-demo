@@ -1,13 +1,13 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable
 
 from recsys_tfb.core.node import Node
 
 
 @dataclass(frozen=True)
 class SlicePlan:
-    """Execution plan produced by Pipeline.slice_from / slice_only.
+    """Execution plan produced by Pipeline.slice_from / slice_only / slice_nodes.
 
     Pure description — printing and assertions only, no runtime behavior.
     ``auto_included`` records, per pulled-in node, the missing dataset(s)
@@ -150,6 +150,33 @@ class Pipeline:
         """Slice down to a single node plus its minimal upstream closure."""
         idx = self._node_index(node_name)
         return self._slice_with_expansion("only", [self._sorted[idx]], can_load)
+
+    def slice_nodes(
+        self,
+        node_names: Iterable[str],
+        can_load: Callable[[str], bool],
+        *,
+        mode: str = "nodes",
+    ) -> tuple["Pipeline", SlicePlan]:
+        """Slice down to several named nodes plus their minimal upstream closure.
+
+        ``slice_only`` for more than one endpoint. A caller that wants a *named*
+        slice ("the test chain") names its endpoints here and lets the same
+        expansion supply the rest, so the slice tracks the DAG instead of being
+        a second node list to keep in step with it.
+
+        Two endpoints are not always one endpoint's closure: expansion walks
+        ``node.inputs``/``node.writes`` back through the producer map, which is
+        built from ``node.outputs``, so **a node with no outputs is unreachable
+        by expansion** and can only enter by being named. dataset's Layer-2 data
+        gate is exactly that node (ADR-0012, #157).
+
+        ``mode`` is the label the plan reports; callers pass the name their
+        operator typed, because ``[plan] mode=...`` is read by someone checking
+        that the flag they used did what they meant.
+        """
+        requested = [self._sorted[self._node_index(n)] for n in node_names]
+        return self._slice_with_expansion(mode, requested, can_load)
 
     def _node_index(self, name: str) -> int:
         for i, node in enumerate(self._sorted):

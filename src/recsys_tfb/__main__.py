@@ -48,6 +48,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     landed_months,
     month_plan_input,
 )
+from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
@@ -150,18 +151,48 @@ def _make_can_load(catalog, month_plans=None):
     return can_load
 
 
-def _slice_pipeline(pipe, can_load, from_node, only_node):
-    """Apply --from-node/--only-node slicing. Returns (pipeline, plan|None).
+def _given_slice_flags(from_node, only_node, preset_nodes, preset_label) -> list[str]:
+    """The slicing flags this invocation actually passed, named as typed.
+
+    Shared by the two places that have to talk about them, so an error message
+    never names a flag the command it came from does not offer: ``preset_label``
+    is per-command, and three of the four commands have no preset at all.
+    """
+    return [
+        flag
+        for flag, given in (
+            ("--from-node", from_node),
+            ("--only-node", only_node),
+            (f"--{preset_label}", preset_nodes),
+        )
+        if given
+    ]
+
+
+def _slice_pipeline(
+    pipe, can_load, from_node, only_node, preset_nodes=None, preset_label="preset"
+):
+    """Apply the slicing flags. Returns (pipeline, plan|None).
+
+    ``preset_nodes`` is a named slice a command offers as one flag — the node
+    set is the command's (dataset's ``--only-test-months``), the expansion is
+    the same one the other two get.
 
     Raises ValueError on conflicting flags or unknown node names (the
-    Pipeline methods list available node names in their message).
+    Pipeline methods list available node names in their message). All three
+    selectors are mutually exclusive: they each answer "which nodes run", and a
+    run that silently honoured one and dropped another would execute a node set
+    nobody asked for.
     """
-    if from_node and only_node:
-        raise ValueError("--from-node and --only-node are mutually exclusive")
+    selected = _given_slice_flags(from_node, only_node, preset_nodes, preset_label)
+    if len(selected) > 1:
+        raise ValueError(f"{', '.join(selected)} are mutually exclusive")
     if from_node:
         return pipe.slice_from(from_node, can_load)
     if only_node:
         return pipe.slice_only(only_node, can_load)
+    if preset_nodes:
+        return pipe.slice_nodes(preset_nodes, can_load, mode=preset_label)
     return pipe, None
 
 
@@ -269,12 +300,20 @@ def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
     )
 
 
-def _slice_extra(from_node, only_node):
-    """Manifest extra_metadata breadcrumb for sliced runs."""
+def _slice_extra(from_node, only_node, preset_label=None):
+    """Manifest extra_metadata breadcrumb for sliced runs.
+
+    ``preset_label`` records the flag rather than the node set it expanded to:
+    the set is a function of the DAG and the month plans at run time, and the
+    plan output already logs it. What the manifest has to answer later is "which
+    selector did this run use".
+    """
     if from_node:
         return {"resumed_from": from_node}
     if only_node:
         return {"only_node": only_node}
+    if preset_label:
+        return {"preset": preset_label}
     return None
 
 
@@ -394,6 +433,53 @@ def _format_rebuild_slice_warning(
     ]
 
 
+def _maybe_warn_rebuild_partial_chain(
+    unsliced, sliced, plan, can_load, chain_advice
+) -> list[str]:
+    """WARN lines when ``--rebuild-dates`` ran under a slice that covers only
+    part of the chain it names, else ``[]``.
+
+    The condition used to be "sliced at all", which was right while every slice
+    was one node wide and wrong the moment a flag could select the whole chain:
+    ``--only-test-months`` picks exactly the nodes that recompute the named
+    months, so the old message fired as a false alarm *and* told the operator to
+    re-run without the flag — the ten nodes of pure rework the flag exists to
+    skip. Ask what the message actually claims instead: is any of the chain
+    missing from this run. That also stops the warning for a ``--from-node``
+    that happens to cover the chain, which was equally a false alarm.
+
+    The chain is derived, not listed: the same ``slice_nodes`` expansion the
+    preset uses, from the same two node names and the same stopping condition,
+    so the two answers cannot drift apart. ``chain_advice`` is
+    ``{"rebuild": [...], "nodes": (...), "chain": str}``, supplied by the one
+    command that has an incremental chain — the per-pipeline override shape
+    ``retrain_advice`` / ``rebuild_advice`` already use, for the reason spelled
+    out in :func:`_maybe_warn_rebuild_sliced_away`.
+    """
+    if plan is None or not chain_advice or not chain_advice.get("rebuild"):
+        return []
+    chain, _ = unsliced.slice_nodes(chain_advice["nodes"], can_load)
+    if _landing_nodes(chain) <= _landing_nodes(sliced):
+        return []
+    return _format_rebuild_slice_warning(
+        chain_advice["rebuild"], chain=chain_advice["chain"]
+    )
+
+
+def _landing_nodes(pipe) -> set[str]:
+    """The names of the nodes in ``pipe`` that put data somewhere.
+
+    What the rebuild warning claims is that partitions are left stale, so the
+    nodes it compares are the ones that can leave a partition: a node with
+    neither ``outputs`` nor ``writes`` refreshes nothing, and letting its
+    absence fire the warning would re-create the false alarm one node over.
+    (dataset's gate is exactly such a node — that it was skipped is already
+    reported, by the ``skipped side-effect nodes`` line, which says so
+    accurately.)
+    """
+    return {n.name for n in pipe.nodes if n.outputs or n.writes}
+
+
 def _execute_pipeline(
     pipeline_name: str,
     pipeline_kwargs: dict,
@@ -404,10 +490,13 @@ def _execute_pipeline(
     *,
     from_node: Optional[str] = None,
     only_node: Optional[str] = None,
+    preset_nodes: Optional[tuple] = None,
+    preset_label: str = "preset",
     dry_run: bool = False,
     list_nodes: bool = False,
     retrain_advice: Optional[dict] = None,
     rebuild_advice: Optional[dict] = None,
+    chain_advice: Optional[dict] = None,
     extra_datasets: Optional[dict] = None,
     month_plans: Optional[dict] = None,
 ) -> bool:
@@ -428,6 +517,12 @@ def _execute_pipeline(
     process", the slice asks "is this artifact complete for this run". Only the
     dataset command has incremental artifacts, so for every other pipeline this
     is ``None`` and slicing behaves exactly as it did before.
+
+    ``preset_nodes`` / ``preset_label`` are a command's named slice (dataset's
+    ``--only-test-months``); ``chain_advice`` lets the same node names decide
+    whether the ``--rebuild-dates`` warning is a real one. Both are per-pipeline
+    injections rather than imports, for the reason ADR-0012 gives: this function
+    serves four commands and must not know any one of them by name.
     """
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
@@ -463,16 +558,22 @@ def _execute_pipeline(
     _can_load = _make_can_load(catalog, month_plans)
 
     if list_nodes:
-        if from_node or only_node:
-            logger.error("--list-nodes cannot be combined with --from-node/--only-node")
+        given = _given_slice_flags(from_node, only_node, preset_nodes, preset_label)
+        if given:
+            logger.error(
+                f"--list-nodes cannot be combined with {'/'.join(given)}"
+            )
             raise typer.Exit(code=1)
         for line in _format_node_list(pipe, _can_load):
             logger.info(line)
         return False
 
     total = len(pipe.nodes)
+    unsliced = pipe
     try:
-        pipe, plan = _slice_pipeline(pipe, _can_load, from_node, only_node)
+        pipe, plan = _slice_pipeline(
+            pipe, _can_load, from_node, only_node, preset_nodes, preset_label
+        )
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
@@ -483,6 +584,10 @@ def _execute_pipeline(
     for line in _maybe_warn_retrain(plan, retrain_advice):
         logger.warning(line)
     for line in _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice):
+        logger.warning(line)
+    for line in _maybe_warn_rebuild_partial_chain(
+        unsliced, pipe, plan, _can_load, chain_advice
+    ):
         logger.warning(line)
     if dry_run:
         if plan is None:
@@ -737,6 +842,12 @@ def dataset(
         None, "--only-node",
         help="Run a single node (plus minimal upstream re-runs for missing inputs)",
     ),
+    only_test_months: bool = typer.Option(
+        False, "--only-test-months",
+        help="Declare that this run only adds evaluation months: run the data "
+             "gate plus the test chain, and skip the ten nodes that would "
+             "recompute train/val/calibration to identical partitions.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the slice execution plan and exit"
     ),
@@ -772,9 +883,9 @@ def dataset(
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
-    if rebuild and (from_node or only_node):
-        for line in _format_rebuild_slice_warning(rebuild):
-            logger.warning(line)
+    # The --rebuild-dates × slicing warning is decided after slicing, not here:
+    # its claim is about which chain nodes this run leaves stale, and that is
+    # not knowable from the flags alone. See _maybe_warn_rebuild_partial_chain.
 
     get_or_create_spark_session(_load_spark_config(config, "dataset"))
     data_dir = _find_data_dir()
@@ -874,6 +985,17 @@ def dataset(
     executed = _execute_pipeline(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
+        # The flag selects the node set; the node set itself belongs to the
+        # pipeline that defines those nodes, so a rename travels with them.
+        preset_nodes=ONLY_TEST_MONTHS_NODES if only_test_months else None,
+        preset_label="only-test-months",
+        # Same two names again, for the warning that asks whether this run
+        # leaves part of that chain stale — one constant, two readers.
+        chain_advice={
+            "rebuild": rebuild,
+            "nodes": ONLY_TEST_MONTHS_NODES,
+            "chain": "test 鏈",
+        },
         dry_run=dry_run, list_nodes=list_nodes,
         # A loop over the plans, not three hand-written lines: registering a
         # fourth incremental artifact in month_plans.py is enough, and the
@@ -903,7 +1025,10 @@ def dataset(
         },
         run_id=run_context.run_id,
         extra_metadata={
-            **(_slice_extra(from_node, only_node) or {}),
+            **(_slice_extra(
+                from_node, only_node,
+                preset_label="only-test-months" if only_test_months else None,
+            ) or {}),
             # A pipeline that decides to do less work has to record what it
             # decided not to do — otherwise ADR-0002's "exists() ≠ fresh" is
             # invisible after the fact.

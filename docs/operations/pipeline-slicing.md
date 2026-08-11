@@ -11,13 +11,44 @@ python -m recsys_tfb training --list-nodes                       # 看 node 名�
 python -m recsys_tfb training --from-node finalize_model --dry-run   # 只印執行計畫
 python -m recsys_tfb training --from-node finalize_model         # 從該 node（含其後全部）接續
 python -m recsys_tfb dataset  --only-node build_train_model_input # 只跑單一 node
+python -m recsys_tfb dataset  --only-test-months                  # 具名切片：只加評估月份
 ```
 
 - `--from-node X`：X 與拓撲序在其後的全部 node。涵蓋失敗接續／改了下游程式碼重跑／跳過昂貴上游。
 - `--only-node X`：只跑 X。單獨 debug 某 node 用。
-- 兩者互斥；皆會在開跑前印 `[plan]` 執行計畫（skipped / auto-included / 警語）。
+- `--only-test-months`（**只有 `dataset` 有**）：宣告「這次只加評估月份」，跑資料閘 ＋ 整條 test 鏈。見下節。
+- 三者互斥；皆會在開跑前印 `[plan]` 執行計畫（skipped / auto-included / 警語）。
 - `--dry-run`：印計畫即退，不執行、不寫任何 pipeline 產物（run log 照常寫）。
-- `--list-nodes`：列出 node 與各自的接續成本即退；不可與 `--from-node`/`--only-node` 並用。
+- `--list-nodes`：列出 node 與各自的接續成本即退；不可與上述三個切片旗標並用。
+
+## `--only-test-months`：具名切片（dataset）
+
+新增一個 `test_snap_dates` 月份時，dataset 的 15 個 node 有十個會全量重算，再把**逐位元相同**的內容覆寫回同一批 partition——多一個 test 月不改變它們的內容。這個旗標讓你把「這次只加評估月份」講出來，於是只跑五個：
+
+```
+[plan] mode=only-test-months; requested: validate_data_consistency, filter_test_model_input
+[plan] auto-included (missing input/write target -> producer re-run):
+[plan]   select_test_keys  <- test_keys
+[plan]   apply_preprocessor_to_features  <- preprocessed_feature_table
+[plan]   build_test_model_input  <- test_model_input_unfiltered
+[plan] running 5 of 15 nodes
+```
+
+**旗標只寫死兩個 node 名**（`__main__.py` 由 `pipelines/dataset/pipeline.py` 的
+`ONLY_TEST_MONTHS_NODES` 取得），其餘三個是上一節那套 DAG 擴張推出來的——test 鏈日後多一個
+node 不必回頭改這個旗標。兩個名字各有各的理由：
+
+- `filter_test_model_input` 是**終點**，上游由擴張反推。
+- `validate_data_consistency` 是 Layer-2 資料閘，列它是**結構性的必要**而非政策選擇：擴張只
+  沿著 producer map 走，而那張表由 `node.outputs` 建，**零輸出的 node 永遠不可能被自動拉回**。
+  不列＝新動線上沒有資料閘。
+
+`--rebuild-dates` 可以併用（`--only-test-months --rebuild-dates 2026-01-31` 重算既有月份），
+且**不會**再印「請不帶切片旗標再跑一次」——那句警語現在的條件是「這次的切片少了 test 鏈的某個
+node」，而不是「有沒有帶切片旗標」。`--from-node` 剛好選滿整條鏈時同樣不印。
+
+manifest 的 `extra_metadata` 留 `preset: only-test-months` 的痕跡（對應
+`--from-node` 的 `resumed_from` 與 `--only-node` 的 `only_node`）。
 
 > 這是**節點邊界**接續：整個 `tune_hyperparameters` 跑完並落地後，才能用 `--from-node finalize_model` 跳過它。HPO **跑到一半** crash 的接續（只補跑剩餘 trial）是另一層，由 `hpo_checkpointing` 機制處理，見 [`hpo-resume.md`](hpo-resume.md)。
 
@@ -55,6 +86,7 @@ auto-included 會列出三個：`build_test_model_input`（上一段那條規則
 - **side-effect node（outputs=None）不重跑**：位於起點前的守門 node
   （如 dataset 的 `validate_data_consistency` B1/B5 資料閘）在接續時跳過、
   不重新驗證，計畫輸出會列出。資料有變請跑 full run。
+  例外是**被明確點名**的時候——`--only-test-months` 就是這樣把資料閘留在切片裡的。
 - manifest 照常寫（開跑前先落一份 `status: running` stub 供崩潰溯源，完成後覆寫為
   `status: completed`；既有 manifest 採 skip-if-present，stub 不會覆蓋它），metadata 多
   `resumed_from` / `only_node` 留痕。

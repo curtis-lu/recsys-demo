@@ -55,15 +55,17 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 節二的 A5／A6 兩條約束就是為了補上 Node 沒做的驗證——它們由稽核測試在測試期把關，不是由 `Node.__init__` 在建構期擋。
 
-## F5. 切片語意：單一起點、自動上游擴張、**跳過零輸出 node**
+## F5. 切片語意：三個互斥選擇器、自動上游擴張、**跳過零輸出 node**
 
-- `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py:159`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
-- 切片會透過 `can_load` 詢問 catalog：缺少的輸入會**自動把上游生產者拉回來執行**（`core/pipeline.py` 的 `_slice_with_expansion`），並在 `SlicePlan.auto_included` 回報。
-- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py:183-187`）。
+- 三個選擇器**互斥**（`_slice_pipeline`）：`--from-node` 與 `--only-node` 各只吃**一個** node 名稱；`--only-test-months` 是 `dataset` 專屬的**具名切片**，吃一組固定 node 名（`pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES`，兩個）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
+- 切片會透過 `can_load` 詢問 catalog：缺少的輸入會**自動把上游生產者拉回來執行**（`core/pipeline.py` 的 `_slice_with_expansion`），並在 `SlicePlan.auto_included` 回報。`slice_from` / `slice_only` / `slice_nodes` 三個入口共用它，只差在初始的 requested 集合。
+- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`_format_slice_plan`）。
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 
-**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py:28`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+
+**擴張永遠救不了它**：producer map 由 `node.outputs` 建，零輸出的 node 不在裡面，所以沒有任何缺料能把它拉回來——**唯一的進場方式是被明確點名**。`ONLY_TEST_MONTHS_NODES` 把它列為兩個硬寫名稱之一就是為此（#203、#157）。新增具名切片時這是必須各自處理的一件事，不是預設會繼承的行為。
 
 ## F6. `--env` 的覆蓋層語意會靜默退化
 
