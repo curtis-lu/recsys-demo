@@ -43,6 +43,12 @@ node 不必回頭改這個旗標。兩個名字各有各的理由：
   沿著 producer map 走，而那張表由 `node.outputs` 建，**零輸出的 node 永遠不可能被自動拉回**。
   不列＝新動線上沒有資料閘。
 
+**旗標的前提有一個已知破口**：那十個 node 的內容不隨 test 月份改變，靠的是它們各自被自己那一份
+`*_snap_dates` 圈住。但 `select_train_keys` 與 `select_calibration_keys` 用的是
+`restrict_to_months_or_all`——月份清單**為空時整池不過濾**，此時它們的內容就會隨新加的 test 月而變，
+而旗標跳過它們。目前沒有不變量擋得住空清單（A23 已規格化但延後，issue #158）。判斷與例外說明見
+[adding-an-eval-month.md](adding-an-eval-month.md) 的「什麼時候不要用它」。
+
 `--rebuild-dates` 可以併用（`--only-test-months --rebuild-dates 2026-01-31` 重算既有月份），
 且**不會**再印「請不帶切片旗標再跑一次」——那句警語現在的條件是「這次的切片少了 test 鏈的某個
 node」，而不是「有沒有帶切片旗標」。`--from-node` 剛好選滿整條鏈時同樣不印。

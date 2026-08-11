@@ -317,10 +317,10 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
-| `pipelines/dataset/pipeline.py:28` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查 |
-| `pipelines/training/pipeline.py:202` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
+| `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被具名切片明確點名時會跑**——`--only-test-months` 就是這樣把它留在切片裡的（見 F5） |
+| `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 
-（兩列的行號都指 `Node(...)` 第一參數、也就是函式名那一行，與 F5 的引用一致。）
+（位置只給檔案、不給行號：兩個 node 名都是 `Node(name=...)` 的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——2026-08-12 就發生過一次，`ONLY_TEST_MONTHS_NODES` 那段註解把上面那列從 `:28` 推到 `:44`，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。）
 
 ## R4. 自己寫診斷副產物的 node（A1 的例外二）── 3 筆
 

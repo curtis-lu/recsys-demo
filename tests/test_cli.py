@@ -1562,10 +1562,13 @@ class TestDateSplitOverlapA24:
 
 # --- #203: --only-test-months, the named slice for adding an eval month ---
 
-from recsys_tfb.__main__ import _maybe_warn_rebuild_partial_chain  # noqa: E402
-from recsys_tfb.pipelines.dataset.pipeline import (  # noqa: E402
-    ONLY_TEST_MONTHS_NODES,
+from recsys_tfb.__main__ import (
+    _ONLY_TEST_MONTHS,
+    _landing_nodes,
+    _maybe_warn_rebuild_partial_chain,
+    NamedSlice,
 )
+from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 
 #: What ``--only-test-months`` must come out to: the test chain (#202's four)
 #: plus the Layer-2 data gate. Spelled out rather than derived — a derivation
@@ -1655,30 +1658,59 @@ class TestSlicingFlagsAreThreeWayExclusive:
         import pytest
 
         pipe = _slice_test_pipe()
-        for from_node, only_node, preset in (
+        preset = NamedSlice("demo-preset", ("A",))
+        for from_node, only_node, given in (
             ("B", "C", None),
-            ("B", None, ("A",)),
-            (None, "C", ("A",)),
-            ("B", "C", ("A",)),
+            ("B", None, preset),
+            (None, "C", preset),
+            ("B", "C", preset),
         ):
-            with pytest.raises(ValueError, match="mutually exclusive"):
-                _slice_pipeline(
-                    pipe, lambda n: True, from_node, only_node, preset_nodes=preset
-                )
+            with pytest.raises(ValueError, match="mutually exclusive") as exc:
+                _slice_pipeline(pipe, lambda n: True, from_node, only_node, given)
+            # Names only the flags actually passed. Three of the four commands
+            # have no preset at all, so a message assembled from a default
+            # would send their operators after a flag that does not exist.
+            named = str(exc.value)
+            assert ("--demo-preset" in named) is (given is not None)
 
     def test_the_preset_alone_slices(self):
         out, plan = _slice_pipeline(
-            _slice_test_pipe(), lambda n: True, None, None, preset_nodes=("A", "C"),
+            _slice_test_pipe(), lambda n: True, None, None,
+            NamedSlice("demo-preset", ("A", "C")),
         )
         assert [n.name for n in out.nodes] == ["A", "C"]
-        assert plan.mode == "preset"
+        # The mode is the flag as typed, because `[plan] mode=...` is read by
+        # someone checking that the flag they used did what they meant.
+        assert plan.mode == "demo-preset"
 
     def test_the_manifest_records_which_selector_ran(self):
-        assert _slice_extra(None, None, preset_label="only-test-months") == {
+        assert _slice_extra(None, None, _ONLY_TEST_MONTHS) == {
             "preset": "only-test-months"
         }
         assert _slice_extra("X", None) == {"resumed_from": "X"}
         assert _slice_extra(None, None) is None
+
+
+class TestLandingNodes:
+    """Which nodes the rebuild warning counts as "can leave a partition".
+
+    ``dataset`` has no ``writes=`` node, so on that pipeline alone the
+    ``or n.writes`` half of the predicate is dead and deleting it stays green.
+    The helper is reached with whatever pipeline the calling command has, and
+    two of them do have such nodes (architecture-constraints R1), so the case
+    is pinned here on a pipeline built for it.
+    """
+
+    def test_a_writes_only_node_counts_as_landing(self):
+        pipe = Pipeline([
+            Node(func=lambda: None, outputs="a", name="produces"),
+            Node(func=lambda a, t: None, inputs=["a"], writes=["t"], name="saves"),
+            Node(func=lambda a: None, inputs=["a"], outputs=None, name="gate"),
+        ])
+
+        # `saves` returns nothing for the Runner to store but writes `t` itself;
+        # counting it with `gate` would let a genuinely stale partition pass.
+        assert _landing_nodes(pipe) == {"produces", "saves"}
 
 
 class TestRebuildWarningIsConditionalOnTheChain:
@@ -1700,7 +1732,7 @@ class TestRebuildWarningIsConditionalOnTheChain:
         pipe = _dataset_pipe()
         can_load = _pending_can_load()
         sliced, plan = _slice_pipeline(
-            pipe, can_load, from_node, only_node, preset_nodes=preset
+            pipe, can_load, from_node, only_node, preset
         )
         return _maybe_warn_rebuild_partial_chain(
             pipe, sliced, plan, can_load,
@@ -1708,7 +1740,7 @@ class TestRebuildWarningIsConditionalOnTheChain:
         )
 
     def test_the_preset_covers_the_chain_so_it_stays_quiet(self):
-        assert self._warn(preset=ONLY_TEST_MONTHS_NODES) == []
+        assert self._warn(preset=_ONLY_TEST_MONTHS) == []
 
     def test_a_from_node_that_covers_the_chain_stays_quiet_too(self):
         # The same correctness, arrived at differently: --from-node on the
@@ -1798,8 +1830,13 @@ class TestOnlyTestMonthsCLI:
         assert params["dataset"]["enable_calibration"] is True
 
         pipe = _dataset_pipe()
-        sliced, _ = pipe.slice_nodes(ONLY_TEST_MONTHS_NODES, _pending_can_load())
+        sliced, plan = pipe.slice_nodes(ONLY_TEST_MONTHS_NODES, _pending_can_load())
         assert (len(sliced.nodes), len(pipe.nodes)) == (5, 15)
+        # The literal line the ticket names, not just the arithmetic behind it:
+        # that string is what an operator checks before committing to the run.
+        assert "[plan] running 5 of 15 nodes" in _format_slice_plan(
+            plan, total=len(pipe.nodes)
+        )
 
     def _rejected(self, tmp_path, argv):
         """Run the dataset command far enough to reach the flag guards.

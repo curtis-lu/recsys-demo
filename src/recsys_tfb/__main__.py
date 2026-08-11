@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import typer
 
@@ -151,30 +151,47 @@ def _make_can_load(catalog, month_plans=None):
     return can_load
 
 
-def _given_slice_flags(from_node, only_node, preset_nodes, preset_label) -> list[str]:
+class NamedSlice(NamedTuple):
+    """A command's named slice: the flag as the operator types it, and the
+    nodes it selects.
+
+    One type rather than two parameters because neither half is usable alone —
+    nodes with no flag name produce error messages naming a flag that does not
+    exist, and a flag name with no nodes selects nothing.
+    """
+
+    flag: str
+    nodes: tuple[str, ...]
+
+
+#: dataset's named slice (#203). The node names come from the pipeline that
+#: defines those nodes so a rename travels with them; the flag name is the
+#: CLI's, and lives here next to the command that declares it.
+_ONLY_TEST_MONTHS = NamedSlice("only-test-months", ONLY_TEST_MONTHS_NODES)
+
+
+def _given_slice_flags(from_node, only_node, preset) -> list[str]:
     """The slicing flags this invocation actually passed, named as typed.
 
     Shared by the two places that have to talk about them, so an error message
-    never names a flag the command it came from does not offer: ``preset_label``
-    is per-command, and three of the four commands have no preset at all.
+    never names a flag the command it came from does not offer: the preset is
+    per-command, and three of the four commands have none at all.
     """
     return [
         flag
         for flag, given in (
             ("--from-node", from_node),
             ("--only-node", only_node),
-            (f"--{preset_label}", preset_nodes),
+            (f"--{preset.flag}" if preset else None, preset),
         )
         if given
     ]
 
 
-def _slice_pipeline(
-    pipe, can_load, from_node, only_node, preset_nodes=None, preset_label="preset"
-):
+def _slice_pipeline(pipe, can_load, from_node, only_node, preset=None):
     """Apply the slicing flags. Returns (pipeline, plan|None).
 
-    ``preset_nodes`` is a named slice a command offers as one flag — the node
+    ``preset`` is a :class:`NamedSlice` a command offers as one flag — the node
     set is the command's (dataset's ``--only-test-months``), the expansion is
     the same one the other two get.
 
@@ -184,15 +201,15 @@ def _slice_pipeline(
     run that silently honoured one and dropped another would execute a node set
     nobody asked for.
     """
-    selected = _given_slice_flags(from_node, only_node, preset_nodes, preset_label)
+    selected = _given_slice_flags(from_node, only_node, preset)
     if len(selected) > 1:
         raise ValueError(f"{', '.join(selected)} are mutually exclusive")
     if from_node:
         return pipe.slice_from(from_node, can_load)
     if only_node:
         return pipe.slice_only(only_node, can_load)
-    if preset_nodes:
-        return pipe.slice_nodes(preset_nodes, can_load, mode=preset_label)
+    if preset:
+        return pipe.slice_nodes(preset.nodes, can_load, mode=preset.flag)
     return pipe, None
 
 
@@ -300,20 +317,20 @@ def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
     )
 
 
-def _slice_extra(from_node, only_node, preset_label=None):
+def _slice_extra(from_node, only_node, preset=None):
     """Manifest extra_metadata breadcrumb for sliced runs.
 
-    ``preset_label`` records the flag rather than the node set it expanded to:
-    the set is a function of the DAG and the month plans at run time, and the
-    plan output already logs it. What the manifest has to answer later is "which
+    A preset records its flag rather than the node set it expanded to: the set
+    is a function of the DAG and the month plans at run time, and the plan
+    output already logs it. What the manifest has to answer later is "which
     selector did this run use".
     """
     if from_node:
         return {"resumed_from": from_node}
     if only_node:
         return {"only_node": only_node}
-    if preset_label:
-        return {"preset": preset_label}
+    if preset:
+        return {"preset": preset.flag}
     return None
 
 
@@ -490,8 +507,7 @@ def _execute_pipeline(
     *,
     from_node: Optional[str] = None,
     only_node: Optional[str] = None,
-    preset_nodes: Optional[tuple] = None,
-    preset_label: str = "preset",
+    preset: Optional[NamedSlice] = None,
     dry_run: bool = False,
     list_nodes: bool = False,
     retrain_advice: Optional[dict] = None,
@@ -518,11 +534,11 @@ def _execute_pipeline(
     dataset command has incremental artifacts, so for every other pipeline this
     is ``None`` and slicing behaves exactly as it did before.
 
-    ``preset_nodes`` / ``preset_label`` are a command's named slice (dataset's
-    ``--only-test-months``); ``chain_advice`` lets the same node names decide
-    whether the ``--rebuild-dates`` warning is a real one. Both are per-pipeline
-    injections rather than imports, for the reason ADR-0012 gives: this function
-    serves four commands and must not know any one of them by name.
+    ``preset`` is a command's named slice (dataset's ``--only-test-months``);
+    ``chain_advice`` lets the same node names decide whether the
+    ``--rebuild-dates`` warning is a real one. Both are per-pipeline injections
+    rather than imports, for the reason ADR-0012 gives: this function serves
+    four commands and must not know any one of them by name.
     """
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
@@ -558,7 +574,7 @@ def _execute_pipeline(
     _can_load = _make_can_load(catalog, month_plans)
 
     if list_nodes:
-        given = _given_slice_flags(from_node, only_node, preset_nodes, preset_label)
+        given = _given_slice_flags(from_node, only_node, preset)
         if given:
             logger.error(
                 f"--list-nodes cannot be combined with {'/'.join(given)}"
@@ -571,9 +587,7 @@ def _execute_pipeline(
     total = len(pipe.nodes)
     unsliced = pipe
     try:
-        pipe, plan = _slice_pipeline(
-            pipe, _can_load, from_node, only_node, preset_nodes, preset_label
-        )
+        pipe, plan = _slice_pipeline(pipe, _can_load, from_node, only_node, preset)
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
@@ -985,12 +999,9 @@ def dataset(
     executed = _execute_pipeline(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
-        # The flag selects the node set; the node set itself belongs to the
-        # pipeline that defines those nodes, so a rename travels with them.
-        preset_nodes=ONLY_TEST_MONTHS_NODES if only_test_months else None,
-        preset_label="only-test-months",
-        # Same two names again, for the warning that asks whether this run
-        # leaves part of that chain stale — one constant, two readers.
+        preset=_ONLY_TEST_MONTHS if only_test_months else None,
+        # The same two node names again, for the warning that asks whether this
+        # run leaves part of that chain stale — one constant, two readers.
         chain_advice={
             "rebuild": rebuild,
             "nodes": ONLY_TEST_MONTHS_NODES,
@@ -1027,7 +1038,7 @@ def dataset(
         extra_metadata={
             **(_slice_extra(
                 from_node, only_node,
-                preset_label="only-test-months" if only_test_months else None,
+                _ONLY_TEST_MONTHS if only_test_months else None,
             ) or {}),
             # A pipeline that decides to do less work has to record what it
             # decided not to do — otherwise ADR-0002's "exists() ≠ fresh" is
