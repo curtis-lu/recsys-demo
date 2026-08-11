@@ -109,6 +109,47 @@ def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict,
     return config, params, run_context
 
 
+def _make_can_load(catalog, month_plans=None):
+    """The slice's stopping condition: is this input already satisfied?
+
+    ``catalog.exists`` answers "is the artifact there", which is the whole
+    question for an artifact a run either writes or does not. It is the *wrong*
+    question for one that is extended a month at a time: the table is there from
+    the first run onwards, and what a later run can be missing is **its own
+    months**. Asking only the table lets a slice stop one hop short of the
+    producer that owns the new month, run to completion, and write nothing
+    (ADR-0012).
+
+    ``month_plans`` is ``{dataset name: SnapDatePlan}`` for the artifacts that
+    have months — a per-pipeline override in the shape of ``retrain_advice`` /
+    ``rebuild_advice``, injected by the one command that has any. Absent (every
+    other pipeline, and every dataset with no plan) the answer is ``exists``
+    alone.
+
+    The plans are the ones the nodes themselves receive, so the slice and the
+    nodes cannot disagree about which months this run covers. The subtraction
+    lives here rather than in ``HiveTableDataset.exists()`` because "which
+    months does this run want" is computed from config, a metastore listing and
+    ``--rebuild-dates`` — a run-level answer the io object would have to ask the
+    catalog for, which is the cycle ADR-0012 declines to build.
+
+    Memoized: slice probing re-checks the same names once per node (~6x), and
+    each check can be a metastore round-trip.
+    """
+    plans = month_plans or {}
+    memo: dict = {}
+
+    def can_load(name: str) -> bool:
+        plan = plans.get(name)
+        if plan is not None and plan.to_process:
+            return False
+        if name not in memo:
+            memo[name] = catalog.exists(name)
+        return memo[name]
+
+    return can_load
+
+
 def _slice_pipeline(pipe, can_load, from_node, only_node):
     """Apply --from-node/--only-node slicing. Returns (pipeline, plan|None).
 
@@ -368,6 +409,7 @@ def _execute_pipeline(
     retrain_advice: Optional[dict] = None,
     rebuild_advice: Optional[dict] = None,
     extra_datasets: Optional[dict] = None,
+    month_plans: Optional[dict] = None,
 ) -> bool:
     """Run the pipeline; returns False when nothing was executed
     (--dry-run / --list-nodes early exits) so callers skip post-run
@@ -378,6 +420,14 @@ def _execute_pipeline(
     ``parameters`` itself uses, so a node cannot tell them apart, and the
     runner's input check turns a forgotten one into a startup error rather than
     a silent full rebuild.
+
+    ``month_plans`` is ``{dataset name: SnapDatePlan}`` — the same plans, keyed
+    by the artifact they scope rather than by their catalog name, for
+    :func:`_make_can_load`. Two parameters for one set of plans because the two
+    consumers ask different questions of them: a node asks "which months do I
+    process", the slice asks "is this artifact complete for this run". Only the
+    dataset command has incremental artifacts, so for every other pipeline this
+    is ``None`` and slicing behaves exactly as it did before.
     """
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
@@ -410,14 +460,7 @@ def _execute_pipeline(
     for name, value in (extra_datasets or {}).items():
         catalog.add(name, MemoryDataset(data=value))
 
-    # Memoize exists(): slice probing re-checks the same datasets repeatedly
-    # (per-node listing ~6x); each check can be a Hive metastore round-trip.
-    _exists_memo: dict = {}
-
-    def _can_load(name: str) -> bool:
-        if name not in _exists_memo:
-            _exists_memo[name] = catalog.exists(name)
-        return _exists_memo[name]
+    _can_load = _make_can_load(catalog, month_plans)
 
     if list_nodes:
         if from_node or only_node:
@@ -838,6 +881,10 @@ def dataset(
         extra_datasets={
             month_plan_input(name): plan for name, plan in month_plans.items()
         },
+        # The same plans again, keyed by artifact: a slice has to stop at
+        # "complete for this run", and for these three that is a month
+        # question, not an exists() question (ADR-0012).
+        month_plans=month_plans,
     )
     if not executed:
         return

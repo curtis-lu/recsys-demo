@@ -57,9 +57,9 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F5. 切片語意：單一起點、自動上游擴張、**跳過零輸出 node**
 
-- `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py:116`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
+- `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py:159`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
 - 切片會透過 `can_load` 詢問 catalog：缺少的輸入會**自動把上游生產者拉回來執行**（`core/pipeline.py` 的 `_slice_with_expansion`），並在 `SlicePlan.auto_included` 回報。
-- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py:137-141`）。
+- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py:183-187`）。
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 

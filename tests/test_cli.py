@@ -1,7 +1,9 @@
+import ast
 import json
 import logging
 import os
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -544,6 +546,7 @@ def test_write_manifest_stub_skips_if_present(tmp_path):
 from recsys_tfb.__main__ import (
     _format_node_list,
     _format_slice_plan,
+    _make_can_load,
     _slice_extra,
     _slice_pipeline,
 )
@@ -996,6 +999,248 @@ class TestMonthPlansReachTheCatalog:
         params = loaded["parameters"]
         assert params[REBUILD_SNAP_DATES_KEY] == ["2026-01-31"]
         assert not [k for k in params if "existing" in k.lower()]
+
+
+from recsys_tfb.pipelines import get_pipeline
+from recsys_tfb.pipelines.dataset.month_plans import (
+    INCREMENTAL_DATASETS,
+    SnapDatePlan,
+    month_plan_input,
+)
+
+
+class _FakeCatalog:
+    """A catalog that answers ``exists`` from a fixed set of names.
+
+    Records every call so memoization can be asserted on: the real
+    ``HiveTableDataset.exists`` is a metastore round-trip and slice probing asks
+    the same names once per node.
+    """
+
+    def __init__(self, present):
+        self.present = set(present)
+        self.calls = []
+
+    def exists(self, name):
+        self.calls.append(name)
+        return name in self.present
+
+
+def _plan(to_process=(), skipped=()):
+    return SnapDatePlan(to_process=list(to_process), skipped=list(skipped))
+
+
+_A_MONTH = pd.Timestamp("2026-02-28")
+
+
+class TestMonthAwareCanLoad:
+    """#202 — the slice's stopping condition asks the right question.
+
+    ``exists()`` answers "is the table there", and for the three incremental
+    artifacts the answer is always yes: they are extended a month at a time, so
+    what a run can be missing is *this run's months*, not the table. See
+    ADR-0012 for why the month is asked here rather than inside the io object.
+    """
+
+    def test_pending_months_make_an_existing_artifact_unloadable(self):
+        catalog = _FakeCatalog(["test_keys"])
+        can_load = _make_can_load(catalog, {"test_keys": _plan([_A_MONTH])})
+        assert can_load("test_keys") is False
+
+    def test_nothing_pending_falls_back_to_exists(self):
+        catalog = _FakeCatalog(["test_keys"])
+        can_load = _make_can_load(catalog, {"test_keys": _plan(skipped=[_A_MONTH])})
+        assert can_load("test_keys") is True
+
+    def test_an_empty_plan_cannot_conjure_an_artifact_that_is_not_there(self):
+        """The month check only ever *subtracts* from what ``exists`` allows."""
+        catalog = _FakeCatalog([])
+        can_load = _make_can_load(catalog, {"test_keys": _plan(skipped=[_A_MONTH])})
+        assert can_load("test_keys") is False
+
+    def test_a_dataset_with_no_plan_is_answered_by_exists_alone(self):
+        catalog = _FakeCatalog(["preprocessor"])
+        can_load = _make_can_load(catalog, {"test_keys": _plan([_A_MONTH])})
+        assert can_load("preprocessor") is True
+        assert can_load("train_model_input") is False
+
+    def test_no_plans_at_all_is_exactly_exists(self):
+        """training / inference / evaluation pass none — their behaviour is the
+        pre-#202 behaviour, byte for byte."""
+        catalog = _FakeCatalog(["model"])
+        can_load = _make_can_load(catalog)
+        assert can_load("model") is True
+        assert can_load("test_keys") is False
+
+    def test_exists_is_asked_once_per_name(self):
+        catalog = _FakeCatalog(["model"])
+        can_load = _make_can_load(catalog)
+        assert [can_load("model"), can_load("model")] == [True, True]
+        assert catalog.calls == ["model"]
+
+
+#: Every dataset name ``conf/base/catalog.yaml`` persists — read from the real
+#: file rather than listed here, because the whole question below is which
+#: inputs a slice can satisfy from storage, and a hand-written list that drifts
+#: from the catalog would answer it wrongly while staying green.
+_PERSISTED = set(
+    yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "conf" / "base" / "catalog.yaml")
+        .read_text()
+    )
+)
+
+#: What a run of the dataset pipeline can satisfy from storage after a previous
+#: full run: everything the catalog persists, plus the two kinds of entry the
+#: CLI adds itself (``parameters`` and one month plan per incremental artifact).
+_LANDED = (
+    _PERSISTED
+    | {"parameters"}
+    | {month_plan_input(name) for name in INCREMENTAL_DATASETS}
+)
+
+#: The node set issue #202 names: the test chain's four nodes. Spelled out
+#: rather than derived, because a derivation would be the same walk the code
+#: under test performs.
+_TEST_CHAIN = {
+    "filter_test_model_input",
+    "build_test_model_input",
+    "select_test_keys",
+    "apply_preprocessor_to_features",
+}
+
+
+class TestANewMonthPullsBackTheProducersThatOwnIt:
+    """The node set ``--only-node filter_test_model_input`` derives (#202).
+
+    Same pipeline definition and same slicing code the real run uses, with a
+    catalog stubbed to the truth of ``catalog.yaml`` — a fast proxy for the
+    ticket's real-run criterion, not a substitute for it (that run is recorded
+    in the PR). What changes between the two cases is only the month plan.
+    """
+
+    def _sliced(self, pending):
+        pipe = get_pipeline("dataset", enable_calibration=True)
+        plans = {name: _plan(pending) for name in INCREMENTAL_DATASETS}
+        _, plan = pipe.slice_only(
+            "filter_test_model_input", _make_can_load(_FakeCatalog(_LANDED), plans)
+        )
+        return plan
+
+    def test_a_pending_month_reaches_the_two_persistent_producers(self):
+        plan = self._sliced([_A_MONTH])
+
+        # Exact set, so it also pins what stays out: `fit_preprocessor_metadata`
+        # is absent because `preprocessor` is a landed JSON with no months of
+        # its own. A bare `not in` for that would pass even if the slice
+        # collapsed entirely.
+        assert set(plan.requested) | set(plan.auto_included) == _TEST_CHAIN
+        # Named per producer: the artifact that pulled it back is what the
+        # [plan] line shows the operator.
+        assert plan.auto_included["select_test_keys"] == ("test_keys",)
+        assert plan.auto_included["apply_preprocessor_to_features"] == (
+            "preprocessed_feature_table",
+        )
+
+    def test_with_no_pending_month_the_chain_stops_one_hop_up(self):
+        """The pre-#202 behaviour, kept as the negative control.
+
+        ``test_model_input_unfiltered`` is not in ``catalog.yaml`` (the runner
+        makes it a MemoryDataset), so its producer is always pulled back; the
+        chain then stopped at ``test_keys``, a persistent Hive table that
+        ``exists()`` reports as present whatever months it holds.
+        """
+        plan = self._sliced([])
+
+        assert set(plan.requested) | set(plan.auto_included) == {
+            "filter_test_model_input",
+            "build_test_model_input",
+        }
+
+
+class TestTheDatasetCommandWiresThePlansIntoTheSlice:
+    """The seam between the plans and the stopping condition.
+
+    ``_make_can_load`` can be right and this can still be wrong: the plans are
+    built for the *nodes* (ADR-0007) and passing them to the slice as well is a
+    separate line. Without this test, forgetting it leaves every unit test above
+    green and the silent defect intact.
+    """
+
+    def test_only_node_filter_test_model_input_pulls_back_both_producers(
+        self, tmp_path
+    ):
+        captured = {}
+        real = _format_slice_plan
+
+        def spy(plan, total):
+            captured["plan"] = plan
+            return real(plan, total)
+
+        # Every persistent artifact is present, including the two incremental
+        # Hive tables: without the month check there is nothing left to pull
+        # their producers back with, which is the defect under test.
+        with patch.object(
+            DataCatalog, "exists", lambda self, name: name in _LANDED
+        ), patch("recsys_tfb.__main__._format_slice_plan", spy):
+            _run_dataset_command(
+                tmp_path,
+                ["dataset", "--only-node", "filter_test_model_input", "--dry-run"],
+                # Only `test_model_input` is a Hive table in that fixture's
+                # catalog, so only its plan reflects `existing` — the other two
+                # have every configured month pending regardless. So this is the
+                # eval-month scenario for one artifact and a first run for the
+                # other two; what it pins is the wiring, not the arithmetic
+                # (the plans themselves are asserted in
+                # TestMonthPlansReachTheCatalog).
+                existing=("2026-01-31",),
+                foreign=(),
+            )
+
+        plan = captured["plan"]
+        assert set(plan.requested) | set(plan.auto_included) == _TEST_CHAIN
+
+
+def _execute_pipeline_call_sites() -> dict[str, set[str]]:
+    """``{enclosing function: keyword names}`` for every ``_execute_pipeline``
+    call in ``__main__.py``, read off the AST."""
+    tree = ast.parse(
+        (Path(__file__).resolve().parents[1] / "src" / "recsys_tfb" / "__main__.py")
+        .read_text()
+    )
+    sites: dict[str, set[str]] = {}
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        for call in ast.walk(func):
+            if (
+                isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "_execute_pipeline"
+            ):
+                sites[func.name] = {kw.arg for kw in call.keywords}
+    return sites
+
+
+class TestOnlyTheDatasetCommandIsMonthAware:
+    """#202's "其他三個 pipeline 的行為完全不變", pinned at the call sites.
+
+    ``_make_can_load`` defaulting to ``month_plans=None`` is not the guarantee —
+    it is only what makes the guarantee cheap to keep. Handing plans to another
+    command would narrow that command's slices for a reason its operator never
+    declared, and every other test in this file stays green when you do
+    (verified: injecting a plan into the ``training`` call site changes nothing
+    else). So assert the call sites themselves.
+    """
+
+    def test_month_plans_is_passed_by_the_dataset_command_alone(self):
+        sites = _execute_pipeline_call_sites()
+
+        # Guard the walk before trusting its answer: a rename that made the
+        # search find nothing would satisfy the assertion below vacuously.
+        assert set(sites) == {"dataset", "training", "inference", "evaluation"}
+        assert {
+            name for name, kwargs in sites.items() if "month_plans" in kwargs
+        } == {"dataset"}
 
 
 class TestThePartitionListingIsVersionScoped:
