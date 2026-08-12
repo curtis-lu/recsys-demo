@@ -5,6 +5,12 @@ date: 2026-08-10
 
 # 增量掛在「執行」上，不掛在「產物」上：`can_load` 對月份感知
 
+> **部分被 [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md) 推翻（2026-08-13）。**
+> 仍然成立：收邊條件 `_can_load` 對月份感知，以及它關掉的那個靜默缺陷。
+> 已推翻：把 `--only-test-months` 做成**具名切片 preset** 的整套設計——它現在是
+> `create_pipeline` 的**模式**參數，與切片正交、可組合。下文凡提到 preset、「兩個硬寫
+> 節點名」、「test 鏈是哪些節點成為單一常數」者，均已不是現況；各處另有標記。
+
 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 讓 dataset 只處理「設定列出、但尚未落地」的月份，[ADR-0007](0007-month-plans-travel-through-the-catalog.md) 把那個決定搬上 pipeline 定義。兩者都只服務 **test 鏈**的三個節點。
 
 `conf/base/parameters_dataset.yaml` 的 `enable_calibration: true` 是出廠設定，所以 pipeline 實際有 15 個節點（`tests/test_pipelines/test_dataset/test_pipeline.py:20`）。加一個 `test_snap_dates` 月份時，其中**十個**節點——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`、`select_calibration_keys`、`build_calibration_model_input`——全量重算，並把逐位元相同的內容覆寫回同一批 partition（`io/hive_table_dataset.py` 的 `save()` 沒有 skip 分支）。
@@ -15,7 +21,7 @@ date: 2026-08-10
 
 **增量是「這次執行要做什麼」的性質，不是「這個產物新不新」的性質。**
 
-具體：切片的收邊條件 `_can_load`（`__main__.py`）對三個增量產物改問月份——手上有那個產物的月份計畫、且 `to_process` 非空，就回 `False`。計畫由 `dataset` 指令注入（`_make_can_load(catalog, month_plans)`），與經 catalog 交給節點的是同一份。**收邊條件自己不查 `INCREMENTAL_DATASETS`**：它住在四個指令共用的 `_execute_pipeline` 上，讓共用路徑 import 一個 pipeline 專屬的常數，是把該不該有月份的判斷從「這個指令有沒有注入計畫」偷偷換成「這個名字在不在那份清單裡」；而 `retrain_advice` / `rebuild_advice` 已經是「per-pipeline 覆寫，由該指令注入」的既定形狀。加上一個具名切片旗標 `--only-test-months`，內部等價於 `--only-node filter_test_model_input` 再加上資料閘。
+具體：切片的收邊條件 `_can_load`（`__main__.py`）對三個增量產物改問月份——手上有那個產物的月份計畫、且 `to_process` 非空，就回 `False`。計畫由 `dataset` 指令注入（`_make_can_load(catalog, month_plans)`），與經 catalog 交給節點的是同一份。**收邊條件自己不查 `INCREMENTAL_DATASETS`**：它住在四個指令共用的 `_execute_pipeline` 上，讓共用路徑 import 一個 pipeline 專屬的常數，是把該不該有月份的判斷從「這個指令有沒有注入計畫」偷偷換成「這個名字在不在那份清單裡」；而 `retrain_advice` / `rebuild_advice` 已經是「per-pipeline 覆寫，由該指令注入」的既定形狀。加上一個具名切片旗標 `--only-test-months`，內部等價於 `--only-node filter_test_model_input` 再加上資料閘。〔**ADR-0013 推翻**：旗標改為 `create_pipeline` 模式，不做上游擴張，因此不再等價。〕
 
 於是 DAG 自己推出正確的節點集：`preprocessor` 是落地的 JSON、載得到 → `fit_preprocessor_metadata` 不進來；`test_keys` 與 `preprocessed_feature_table` 缺新月份 → 兩個生產者被拉回；train/val/calibration 的 build 不在上游閉包裡 → 不進來。
 
@@ -57,7 +63,7 @@ date: 2026-08-10
 
 ## 這同時關掉一個靜默缺陷
 
-在現行的月份盲 `can_load` 下，`--only-node filter_test_model_input`（**正是本 ADR 的 preset 目標節點**）加了新月份之後：中間產物 `test_model_input_unfiltered` 不在 `conf/base/catalog.yaml`、是 runner 自動建的 MemoryDataset → `build_test_model_input` 被拉回；但 `test_keys` 與 `preprocessed_feature_table` 都是持久化 Hive 表、`can_load` 對兩者都回 `True` → `select_test_keys` 與 `apply_preprocessor_to_features` **都不**被拉回 → 新月份的 keys 與編碼特徵從未寫入 → 濾出 0 列 → `pipelines/dataset/steps/model_input.py` 沒有任何空值守衛 → dynamic partition overwrite 對 0 列的 frame 決定不出任何 partition。
+在現行的月份盲 `can_load` 下，`--only-node filter_test_model_input`（當初的 preset 目標節點；**ADR-0013 之後這是手動切片的動線、不再是加月份的建議動線**——缺陷與修法都不受影響）加了新月份之後：中間產物 `test_model_input_unfiltered` 不在 `conf/base/catalog.yaml`、是 runner 自動建的 MemoryDataset → `build_test_model_input` 被拉回；但 `test_keys` 與 `preprocessed_feature_table` 都是持久化 Hive 表、`can_load` 對兩者都回 `True` → `select_test_keys` 與 `apply_preprocessor_to_features` **都不**被拉回 → 新月份的 keys 與編碼特徵從未寫入 → 濾出 0 列 → `pipelines/dataset/steps/model_input.py` 沒有任何空值守衛 → dynamic partition overwrite 對 0 列的 frame 決定不出任何 partition。
 
 **結果是什麼都沒寫、沒有任何錯誤**，而 `[months]` log 早在 `__main__.py` 建月份計畫時（切片決策**之前**）就無條件印了 `processed=<新月份>`。症狀不是「寫錯」，是「什麼都沒做卻宣稱做了」。
 
@@ -71,11 +77,13 @@ ADR-0007 刪掉 `filter_test_model_input` 的防禦性月份過濾時，論證�
 
 **preset 硬寫 test 鏈的節點清單。** 日後鏈上多一個節點時，preset 會安靜地漏掉它。改成硬寫**一個終點**（`filter_test_model_input`）＋ DAG 反推，清單就不存在。該節點名在函式被刪之後仍保留可定址，ADR-0007 已確保。
 
-**命名 `--incremental-test-month`。**「incremental」在本 repo 已是精確的既有詞（`INCREMENTAL_DATASETS`、`plan_incremental_snap_dates`），那三個產物**帶不帶旗標都是增量的**——旗標做的是縮小節點集，不是改變增量性。而且它與 `--rebuild-dates` 併用時字面打架（「增量新增」＋「重算既有」），而那是合法組合。`--only-*` 家族則自帶「這是切片、與 `--from-node`／`--only-node` 互斥」的提示。
+〔**ADR-0013 推翻此項否決**：清單現在明確列出五個名字。原本的擔憂（漏掉新節點）由一條防漂移測試承接，而清單寫在 `create_pipeline` 旁邊，省掉整套 preset 機制與它的解釋成本。〕
+
+**命名 `--incremental-test-month`。**「incremental」在本 repo 已是精確的既有詞（`INCREMENTAL_DATASETS`、`plan_incremental_snap_dates`），那三個產物**帶不帶旗標都是增量的**——旗標做的是縮小節點集，不是改變增量性。而且它與 `--rebuild-dates` 併用時字面打架（「增量新增」＋「重算既有」），而那是合法組合。`--only-*` 家族則自帶「這次只跑一部分」的提示。〔**ADR-0013 更正**：原文此處寫的是「這是切片、與 `--from-node`／`--only-node` 互斥」；旗標名沿用，但它是模式、與切片**正交可組合**。不用 `--incremental-*` 的理由不變。〕
 
 ## 後果
 
-- **資料閘要顯式進 preset。** `validate_data_consistency` 的 `outputs=None`，而 `_slice_with_expansion` 的 producer map 只由 `node.outputs` 建——**沒有輸出的節點結構上永遠不會被自動拉回**。切片一旦成為加月份的建議動線，這個閘就從偶爾被跳過變成每次被跳過，而 B1（item 覆蓋）對新月份正是有意義的檢查。這是 preset 需要硬寫的第二個、也是最後一個節點名。相關：issue #157。
+- 〔**以下兩條已被 ADR-0013 移除適用**——它們是 preset 機制的衍生需求，機制不存在後也不存在。保留原文供追溯。〕**資料閘要顯式進 preset。** `validate_data_consistency` 的 `outputs=None`，而 `_slice_with_expansion` 的 producer map 只由 `node.outputs` 建——**沒有輸出的節點結構上永遠不會被自動拉回**。切片一旦成為加月份的建議動線，這個閘就從偶爾被跳過變成每次被跳過，而 B1（item 覆蓋）對新月份正是有意義的檢查。這是 preset 需要硬寫的第二個、也是最後一個節點名。相關：issue #157。
 - **「test 鏈是哪些節點」成為單一常數。** preset 與 `_format_rebuild_slice_warning` 的觸發條件都要用到它。dataset 側原本只要「切片 ＋ `--rebuild-dates`」就無條件 WARN，而 preset 選中的就是整條鏈，那句警告會變成假警報、建議還相反（叫人拿掉旗標重跑）。改成條件式：鏈完整就不警告。
 - **`scripts/rebuild_eval_month.sh` 改用新旗標。** 重算既有月份與新增月份需要的節點集完全相同，差別只在 month plan 把哪些月放進 `to_process`。這會**移除該腳本目前附帶的一層自癒**：它現在跑的是完整 dataset，順帶把 train/val/calibration 在當前 variant 底下重建一次，因此會意外修好上一節那條 variant 漂移。改用新旗標之後這層消失，**而且沒有東西補上**。
 
