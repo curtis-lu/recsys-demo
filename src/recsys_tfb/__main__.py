@@ -356,13 +356,21 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     their pipeline does not have. A caller that names none stays silent — that
     is how the dataset command, whose ``--rebuild-dates`` drives the whole test
     chain rather than one node, opts out of this half.
+
+    ``targets`` and ``predict_node`` are a **pair**, both caller-supplied. A
+    default for either one is the same footgun in a smaller disguise: naming
+    targets while inheriting training's ``predict_node`` prints an
+    ``--only-node`` command for a node the operator's pipeline has not got.
+    So the second lookup is a subscript, not a ``.get`` — a caller that names
+    one and forgets the other fails in its own test rather than in an
+    operator's terminal.
     """
     if not rebuild_advice or not rebuild_advice.get("rebuild"):
         return []
     targets = rebuild_advice.get("targets")
     if not targets:
         return []
-    predict_node = rebuild_advice.get("predict_node") or _REBUILD_PREDICT_NODE
+    predict_node = rebuild_advice["predict_node"]
     if any(node.name in targets for node in pipe.nodes):
         return []
     return [

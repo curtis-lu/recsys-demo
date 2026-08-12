@@ -28,7 +28,11 @@ ONLY_TEST_MONTHS_NODES = (
 
 
 def _keep_named(nodes: list[Node], names: tuple[str, ...]) -> list[Node]:
-    """``nodes`` filtered down to ``names``, keeping declaration order.
+    """``nodes`` filtered down to ``names``.
+
+    Order is not this function's business and no caller should read one into
+    the result: ``Pipeline.__init__`` topologically re-sorts whatever it is
+    handed, so the order here never survives.
 
     Raises when a name is absent instead of returning whatever matched: a
     dataset run that writes nothing still exits 0, so a node renamed out from

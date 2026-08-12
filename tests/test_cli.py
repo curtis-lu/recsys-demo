@@ -1705,6 +1705,31 @@ class TestOnlyTestMonthsFlag:
         # whole of what this run is, and the slice subsets *that*.
         assert f"of {len(ONLY_TEST_MONTHS_NODES)} nodes" in result.output
 
+    def test_from_node_composes_and_counts_against_the_short_pipeline(self, tmp_path):
+        # The third composition the issue names. --from-node keeps its start
+        # node and everything topologically after it *within the mode*, so the
+        # count is against 5 — the same M as --only-node.
+        self._conf(tmp_path)
+        result, _ = self._run_dataset(tmp_path, [
+            "--only-test-months",
+            "--from-node", "build_test_model_input",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0, result.output
+        assert f"of {len(ONLY_TEST_MONTHS_NODES)} nodes" in result.output
+        # "and everything after it" is scoped to the mode: the requested set is
+        # the two test-chain nodes, not the full pipeline's downstream. Read the
+        # requested line rather than the whole output — the mode's own
+        # "[plan] left out:" line legitimately names every node it dropped.
+        requested = [
+            line for line in result.output.splitlines()
+            if "[plan] mode=from; requested:" in line
+        ]
+        assert len(requested) == 1, result.output
+        assert requested[0].split("requested:")[1].strip() == (
+            "build_test_model_input, filter_test_model_input"
+        )
+
     def test_a_node_name_outside_the_mode_is_rejected_by_name(self, tmp_path):
         """Slicing to a node the mode left out fails loud, and the message
         lists what is actually available — otherwise the operator reads
