@@ -1,11 +1,19 @@
 """Tests for dataset building pipeline definition."""
 
+from pathlib import Path
+
+import pytest
+import yaml
+
 from recsys_tfb.pipelines.dataset import create_pipeline
 from recsys_tfb.pipelines.dataset import nodes
+from recsys_tfb.pipelines.dataset import pipeline as dataset_pipeline
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     month_plan_input,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestDatasetPipeline:
@@ -264,3 +272,96 @@ class TestMonthPlanWiring:
             is by_name["filter_val_model_input"].func
         )
         assert self._plan_inputs(by_name["filter_test_model_input"]) == set()
+
+
+class TestOnlyTestMonthsMode:
+    """``--only-test-months``: the data gate plus the test chain (ADR-0013).
+
+    A **mode** parameter on ``create_pipeline``, not a slice. It decides which
+    nodes get built; ``--from-node`` / ``--only-node`` subset whatever was
+    built. The two are orthogonal and compose, which is why the node set is
+    asserted here (on the pipeline definition) and the composition is asserted
+    in ``tests/test_cli.py``.
+
+    Why a listed set rather than one derived from the DAG: ADR-0013. The list
+    costs exactly one drift test —
+    :meth:`test_the_list_matches_the_dag_derived_test_chain` — which is
+    cheaper than the producer-map reasoning a two-name derivation needs.
+    """
+
+    EXPECTED = [
+        "validate_data_consistency",
+        "select_test_keys",
+        "apply_preprocessor_to_features",
+        "build_test_model_input",
+        "filter_test_model_input",
+    ]
+
+    def test_mode_keeps_exactly_the_data_gate_and_test_chain(self):
+        # Ordered, not a set: node order is what the runner executes and what
+        # `[plan] N of M` counts against, and the gate running first is the
+        # whole point of it being in the list.
+        pipeline = create_pipeline(only_test_months=True)
+        assert [n.name for n in pipeline.nodes] == self.EXPECTED
+
+    def test_calibration_does_not_interact_with_the_mode(self):
+        # enable_calibration adds two nodes, neither on the test chain. The
+        # factory default is `true` (conf/base/parameters_dataset.yaml), so
+        # this is the combination the CLI actually builds.
+        pipeline = create_pipeline(enable_calibration=True, only_test_months=True)
+        assert [n.name for n in pipeline.nodes] == self.EXPECTED
+
+    def test_default_shape_is_unchanged_by_the_new_parameter(self):
+        # Not covered by TestDatasetPipeline's 13/15: those call create_pipeline
+        # without the new kwarg, so they would still pass if False were not the
+        # default. Spell the default out.
+        assert len(create_pipeline(only_test_months=False).nodes) == 13
+        assert len(
+            create_pipeline(enable_calibration=True, only_test_months=False).nodes
+        ) == 15
+
+    def test_the_list_matches_the_dag_derived_test_chain(self):
+        """Drift guard: the list == what the DAG says the test chain is.
+
+        Derivation mirrors what a month-aware ``can_load`` reports mid-run
+        (ADR-0012): a persisted artifact that is missing *this run's* months
+        answers "no", so its producer is upstream of the test chain.
+
+        The data gate is added separately, and that is not a fudge — it is the
+        one structural fact this test cannot derive. ``_slice_with_expansion``
+        builds its producer map from ``node.outputs``, so a node with
+        ``outputs=None`` is never reachable by expansion, no matter what it
+        validates.
+
+        Fails when a node is added to the test chain and the list does not
+        follow: the mode would then silently skip it.
+        """
+        catalog_defined = set(
+            yaml.safe_load((REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text())
+        ) | {"parameters"}
+
+        def can_load(name: str) -> bool:
+            if name in INCREMENTAL_DATASETS:
+                return False  # this run adds a month these do not have yet
+            return name in catalog_defined
+
+        full = create_pipeline(enable_calibration=True)
+        sliced, _ = full.slice_only("filter_test_model_input", can_load)
+        derived = {n.name for n in sliced.nodes} | {"validate_data_consistency"}
+
+        assert derived == set(dataset_pipeline.ONLY_TEST_MONTHS_NODES)
+
+    def test_a_name_the_pipeline_no_longer_has_fails_loud(self, monkeypatch):
+        """A renamed node must raise, not quietly yield a shorter pipeline.
+
+        dataset writing nothing still exits 0 (ADR-0012's opening failure
+        mode), so "filter to whatever matches" would turn a rename into a
+        silent no-op run that claims success.
+        """
+        monkeypatch.setattr(
+            dataset_pipeline,
+            "ONLY_TEST_MONTHS_NODES",
+            ("validate_data_consistency", "select_test_keys_renamed"),
+        )
+        with pytest.raises(ValueError, match="select_test_keys_renamed"):
+            create_pipeline(only_test_months=True)

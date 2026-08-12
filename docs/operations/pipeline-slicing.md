@@ -2,6 +2,20 @@
 
 設計 spec：`docs/superpowers/specs/2026-06-10-pipeline-node-slicing-design.md`
 
+## 先分清楚：模式不是切片
+
+「這次少跑一些 node」在本 repo 有**兩個**機制。它們正交、可以併用，而且回答的是不同的問題（[ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)）：
+
+| | **模式** | **切片**（本文其餘部分講的） |
+|---|---|---|
+| 旗標 | `--only-test-months`（dataset）、`--compare-only`（evaluation）…… | `--from-node` / `--only-node` |
+| 問題 | 這次要跑**哪一條動線** | 這次要**從哪裡接續** |
+| 誰決定 node 集 | `create_pipeline(**kwargs)`，**明確列出**在 pipeline 定義旁 | 起點 ＋ DAG 反推 |
+| 缺料時 | 照常 `catalog.load()`，缺了當場 raise | `can_load` 判斷後自動補跑上游 |
+| 零輸出 node | 在清單裡就會跑 | **一定**被跳過 |
+
+併用的順序是「模式先組出短 pipeline，切片再對它取子集」，所以 `[plan] running N of M nodes` 的 **M 是模式的 node 數**，不是完整 pipeline 的。想加一個評估月份就用模式（見 [adding-an-eval-month.md](adding-an-eval-month.md) 步驟 2），本文其餘部分講的是手動接續。
+
 ## 使用
 
 四個 pipeline 指令（`dataset` / `training` / `inference` / `evaluation`）皆支援：
@@ -38,6 +52,8 @@ auto-included 會列出三個：`build_test_model_input`（上一段那條規則
 `select_test_keys` 與 `apply_preprocessor_to_features`。
 `fit_preprocessor_metadata` 不在其中（`preprocessor` 是落地的 JSON，沒有月份）。
 其餘三個 pipeline 沒有增量產物，判準仍是 `exists()` 一個。
+
+> 上一段那條 `--only-node` 是**手動接續**的路，不是加月份的建議做法——它少跑資料閘（零輸出 node 一定被跳過）。加月份請用 `--only-test-months` 模式，它把資料閘明確列在清單裡。
 
 ## 使用前提與限制
 

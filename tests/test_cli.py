@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from recsys_tfb.__main__ import app
 from recsys_tfb.core.catalog import DataCatalog
 from recsys_tfb.core.config import ConfigLoader
+from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 
 runner = CliRunner()
 
@@ -1438,12 +1439,29 @@ class TestRebuildSlicedAwayWarning:
             nodes=[SimpleNamespace(name=n) for n in node_names]
         )
 
+    @staticmethod
+    def _training_advice(rebuild):
+        """The advice dict the training command builds.
+
+        Spelled out rather than relying on a default: ``targets`` is now
+        required, so a test omitting it would pass for the wrong reason (the
+        early return), not because the node was in the slice.
+        """
+        from recsys_tfb.__main__ import (
+            _REBUILD_PREDICT_NODE, _REBUILD_TARGET_NODES,
+        )
+        return {
+            "rebuild": rebuild,
+            "targets": _REBUILD_TARGET_NODES,
+            "predict_node": _REBUILD_PREDICT_NODE,
+        }
+
     def test_silent_when_the_predict_node_is_in_the_slice(self):
         from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
 
         pipe = self._pipe("cache_test_model_input", "predict_and_write_test_predictions")
         assert _maybe_warn_rebuild_sliced_away(
-            pipe, {"rebuild": ["2026-01-31"]}
+            pipe, self._training_advice(["2026-01-31"])
         ) == []
 
     def test_warns_and_names_the_months_when_predict_is_sliced_away(self):
@@ -1452,7 +1470,7 @@ class TestRebuildSlicedAwayWarning:
         lines = "\n".join(
             _maybe_warn_rebuild_sliced_away(
                 self._pipe("compute_feature_importance"),
-                {"rebuild": ["2026-01-31"]},
+                self._training_advice(["2026-01-31"]),
             )
         )
         assert "--rebuild-dates" in lines
@@ -1463,7 +1481,20 @@ class TestRebuildSlicedAwayWarning:
         from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
 
         assert _maybe_warn_rebuild_sliced_away(
-            self._pipe("compute_feature_importance"), {"rebuild": []}
+            self._pipe("compute_feature_importance"), self._training_advice([])
+        ) == []
+
+    def test_silent_when_the_caller_names_no_target_nodes(self):
+        """The dataset command's shape: --rebuild-dates drives its whole test
+        chain, so there is no single node to say was "sliced away". Falling
+        back to a default would print training's node names to a dataset
+        operator.
+        """
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
+
+        assert _maybe_warn_rebuild_sliced_away(
+            self._pipe("filter_test_model_input"),
+            {"rebuild": ["2026-01-31"], "chain": "test 鏈"},
         ) == []
 
     def test_the_named_nodes_exist_in_the_real_training_pipeline(self):
@@ -1558,3 +1589,168 @@ class TestDateSplitOverlapA24:
             assert result.exit_code == 0, result.output
         finally:
             os.chdir(old)
+
+
+# --- #203: --only-test-months is a create_pipeline mode, not a slice ---
+
+class TestOnlyTestMonthsFlag:
+    """ADR-0013: the flag picks which line of work runs; --from-node /
+    --only-node still pick where it resumes. Orthogonal, composable."""
+
+    @staticmethod
+    def _conf(tmp_path):
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2026-01-31"],
+                "test_snap_dates": ["2026-02-28"],
+                "enable_calibration": True,
+            }},
+        )
+
+    @staticmethod
+    def _run_dataset(tmp_path, argv):
+        """Invoke the dataset command with Spark, the catalog and the runner
+        mocked; returns (result, the Pipeline the Runner was handed or None).
+        """
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch(
+                        "recsys_tfb.utils.spark.get_or_create_spark_session",
+                        return_value=_mock_spark_with_feature_table_schema(),
+                    ), \
+                    patch("recsys_tfb.__main__.Runner") as mock_runner_cls:
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda *a, **kw: None
+                result = runner.invoke(app, ["dataset", *argv])
+                run_calls = mock_runner_cls.return_value.run.call_args
+                return result, (run_calls[0][0] if run_calls else None)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_dataset_help_advertises_the_flag(self):
+        result = runner.invoke(app, ["dataset", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--only-test-months" in result.output
+
+    def test_it_is_a_dataset_only_flag(self):
+        # The other pipelines have no test chain to scope to; advertising it
+        # there would be a mode that does nothing.
+        for cmd in ("training", "inference", "evaluation"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert "--only-test-months" not in result.output, cmd
+
+    def test_the_runner_is_handed_the_short_pipeline(self, tmp_path):
+        """The end that matters: not "the kwarg was forwarded" but "the run
+        executed five nodes". Accepted-but-not-forwarded is the silent no-op.
+        """
+        self._conf(tmp_path)
+        _, pipe = self._run_dataset(tmp_path, ["--only-test-months"])
+        assert pipe is not None, "pipeline never reached the Runner"
+        assert [n.name for n in pipe.nodes] == list(ONLY_TEST_MONTHS_NODES)
+
+    def test_without_the_flag_the_runner_still_gets_all_fifteen(self, tmp_path):
+        self._conf(tmp_path)
+        _, pipe = self._run_dataset(tmp_path, [])
+        assert pipe is not None
+        assert len(pipe.nodes) == 15
+
+    def test_plan_line_counts_and_names_what_it_left_out(self, tmp_path):
+        from recsys_tfb.__main__ import _format_only_test_months_plan
+        from recsys_tfb.pipelines import get_pipeline
+
+        lines = _format_only_test_months_plan(enable_calibration=True)
+        assert "5 of the dataset pipeline's 15 nodes" in lines[0]
+        assert "10 left out" in lines[0]
+
+        # The names, compared against the pipelines themselves: a message that
+        # carried its own copy of the list could disagree with what ran.
+        full = [n.name for n in get_pipeline("dataset", enable_calibration=True).nodes]
+        kept = {
+            n.name for n in get_pipeline(
+                "dataset", enable_calibration=True, only_test_months=True
+            ).nodes
+        }
+        listed = lines[1].split(":", 1)[1].strip().split(", ")
+        assert listed == [name for name in full if name not in kept]
+
+    def test_list_nodes_composes_and_lists_only_the_short_pipeline(self, tmp_path):
+        # Read back from result.output, not caplog: setup_logging clears the
+        # root handlers, caplog's included, so caplog is blind to anything a
+        # command logs after that point.
+        self._conf(tmp_path)
+        result, pipe = self._run_dataset(
+            tmp_path, ["--only-test-months", "--list-nodes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert pipe is None  # --list-nodes exits before running
+        listed = [
+            line for line in result.output.splitlines() if "[nodes] " in line
+        ]
+        assert len(listed) == 1 + len(ONLY_TEST_MONTHS_NODES)  # header + 5
+
+    def test_only_node_composes_and_counts_against_the_short_pipeline(self, tmp_path):
+        self._conf(tmp_path)
+        result, _ = self._run_dataset(tmp_path, [
+            "--only-test-months",
+            "--only-node", "filter_test_model_input",
+            "--dry-run",
+        ])
+        assert result.exit_code == 0, result.output
+        # M is the mode's node count, not the full pipeline's: the mode is the
+        # whole of what this run is, and the slice subsets *that*.
+        assert f"of {len(ONLY_TEST_MONTHS_NODES)} nodes" in result.output
+
+    def test_a_node_name_outside_the_mode_is_rejected_by_name(self, tmp_path):
+        """Slicing to a node the mode left out fails loud, and the message
+        lists what is actually available — otherwise the operator reads
+        "unknown node" about a node the pipeline plainly has.
+        """
+        self._conf(tmp_path)
+        result, pipe = self._run_dataset(tmp_path, [
+            "--only-test-months", "--only-node", "build_train_model_input",
+        ])
+        assert result.exit_code == 1
+        assert pipe is None
+
+
+class TestRebuildPartialChainWarning:
+    """The condition is "did this run drop nodes", not "was a flag passed"."""
+
+    @staticmethod
+    def _lines(kept, total, advice):
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_partial_chain
+        return _maybe_warn_rebuild_partial_chain(kept, total, advice)
+
+    ADVICE = {"rebuild": ["2026-01-31"], "chain": "test 鏈"}
+
+    def test_fires_when_the_slice_actually_dropped_nodes(self):
+        lines = "\n".join(self._lines(3, 15, self.ADVICE))
+        assert "--rebuild-dates" in lines
+        assert "2026-01-31" in lines
+        assert "test 鏈" in lines
+
+    def test_silent_when_every_node_was_kept(self):
+        """The false alarm this replaces: `--from-node <first node>` selects
+        15 of 15, and the old condition still claimed the unselected upstream
+        would stay stale and told the operator to re-run without the flag —
+        which produced bit-identical output.
+        """
+        assert self._lines(15, 15, self.ADVICE) == []
+
+    def test_silent_for_a_mode_that_built_a_short_pipeline(self):
+        # --only-test-months --rebuild-dates <an existing test month> is the
+        # supported recompute path, not a partial chain: total is the mode's 5.
+        assert self._lines(5, 5, self.ADVICE) == []
+
+    def test_silent_without_the_flag(self):
+        assert self._lines(3, 15, {"rebuild": [], "chain": "test 鏈"}) == []
+
+    def test_silent_when_the_caller_names_no_chain(self):
+        # training's shape: its --rebuild-dates drives two named nodes, so the
+        # other warning applies and this one would name a chain it has not got.
+        assert self._lines(3, 21, {"rebuild": ["2026-01-31"]}) == []
