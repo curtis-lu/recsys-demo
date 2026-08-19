@@ -737,6 +737,10 @@ class TestRebuildDatesFlag:
             params_dataset={"dataset": {
                 "sample_ratio": 0.1,
                 "train_dev_ratio": 0.2,
+                # Required by A23 (#158). Without it A23 fires first and the
+                # assertions below are satisfied by the wrong invariant: both
+                # tests only check exit 1 / no Spark, which A23 also produces.
+                "train_snap_dates": ["2025-12-31"],
                 "test_snap_dates": ["2026-01-31"],
             }},
         )
@@ -760,6 +764,10 @@ class TestRebuildDatesFlag:
             params_dataset={"dataset": {
                 "sample_ratio": 0.1,
                 "train_dev_ratio": 0.2,
+                # Required by A23 (#158). Without it A23 fires first and the
+                # assertions below are satisfied by the wrong invariant: both
+                # tests only check exit 1 / no Spark, which A23 also produces.
+                "train_snap_dates": ["2025-12-31"],
                 "test_snap_dates": ["2026-01-31"],
             }},
         )
@@ -1779,3 +1787,64 @@ class TestRebuildPartialChainWarning:
         # training's shape: its --rebuild-dates drives two named nodes, so the
         # other warning applies and this one would name a chain it has not got.
         assert self._lines(3, 21, {"rebuild": ["2026-01-31"]}) == []
+
+
+class TestTrainSnapDatesA23:
+    """A23 is wired to the dataset command, not to the global aggregator (#158)."""
+
+    @staticmethod
+    def _run(tmp_path, params_dataset):
+        _setup_conf(tmp_path, params_dataset=params_dataset)
+        old = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["dataset"])
+            return result, mock_spark
+        finally:
+            os.chdir(old)
+
+    def test_empty_list_exits_before_spark_starts(self, tmp_path):
+        # The branch with no downstream guard: an empty list is not "train on
+        # nothing", it skips the month filter entirely.
+        result, mock_spark = self._run(
+            tmp_path,
+            {"dataset": {"sample_ratio": 0.1, "train_snap_dates": []}},
+        )
+        assert result.exit_code == 1
+        mock_spark.assert_not_called()
+        assert "A23" in result.output
+
+    def test_absent_key_exits_before_spark_starts(self, tmp_path):
+        result, mock_spark = self._run(tmp_path, {"dataset": {"sample_ratio": 0.1}})
+        assert result.exit_code == 1
+        mock_spark.assert_not_called()
+        assert "A23" in result.output
+
+    def test_a_configured_list_reaches_spark(self, tmp_path):
+        _, mock_spark = self._run(
+            tmp_path,
+            {"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2025-12-31"],
+            }},
+        )
+        assert mock_spark.called
+
+    def test_other_commands_are_not_blocked_by_a_missing_key(self, tmp_path):
+        # The whole point of not aggregating it: feature_etl has no business
+        # with dataset.train_snap_dates, and #158 measured 9 tests blocked by
+        # putting this on the global gate.
+        _setup_etl_conf(tmp_path)
+        old = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["feature_etl", "--help"])
+            assert result.exit_code == 0
+            result = runner.invoke(app, ["training", "--help"])
+            assert result.exit_code == 0
+        finally:
+            os.chdir(old)

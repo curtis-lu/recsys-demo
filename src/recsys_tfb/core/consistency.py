@@ -141,9 +141,10 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--post-training``, and the default monitoring mode reads inference output
   whose month legitimately need not be a test month — wiring it there would
   block valid monitoring runs. Wired like A13.
-* A23 — ``dataset.train_snap_dates`` required and non-empty (specified but
-  DEFERRED, issue #158). The number is claimed here so the next invariant does
-  not reuse it.
+* A23 — ``dataset.train_snap_dates`` required, a list, and non-empty. Only
+  the dataset pipeline reads the key, so this is wired on the dataset command
+  rather than aggregated (see the predicate for what aggregating it costs).
+  Predicate: ``train_snap_dates_errors``.
 * A24 — the four ``dataset.{train,calibration,val,test}_snap_dates`` splits
   must be mutually disjoint. A month in two splits trains the model and then
   measures it, so every metric from the second split silently becomes an
@@ -1479,6 +1480,77 @@ def _split_day_labels(values) -> dict:
         else:
             labels[day.normalize()] = str(value)
     return labels
+
+
+def train_snap_dates_errors(parameters: dict) -> list[str]:
+    """(A23) ``dataset.train_snap_dates`` must be present, a list, and non-empty.
+
+    Returns error strings (empty list when fine); the dataset command raises.
+    Not aggregated by :func:`validate_config_consistency` — that gate runs at
+    the entry of *every* command, and only the dataset pipeline reads this key,
+    so aggregating it rejects a perfectly good ``feature_etl`` / ``source_etl``
+    / ``inference`` config (issue #158 measured 9 unrelated tests blocked by
+    exactly that). Wired on the dataset command like A21/A24.
+
+    Four branches because they are four different fixes, and each carries
+    wording the others do not:
+
+    * **absent** — three sites index this key bare
+      (``select_train_keys``, ``collect_dataset_snap_dates``,
+      ``fit_preprocessor_metadata``), so today it is a raw ``KeyError`` raised
+      inside a Spark node: 2-4 minutes of cold start before a message that
+      names neither the config key nor the fix.
+    * **not a list** — a bare string is iterable, so none of those three sites
+      raise. They walk it character by character and try to read ``"2"`` as a
+      date.
+    * **empty** — the branch with no downstream guard at all. ``select_train_keys``
+      calls ``restrict_to_months_or_all``, which leaves the pool **whole**
+      rather than empty, so training silently draws from every month in
+      ``sample_pool`` — the test months included, which turns their metrics
+      into in-sample numbers. A24 cannot see it: an empty set overlaps nothing.
+      ``split_train_keys``' degenerate guard (ADR-0005) only fires when
+      ``train_dev_ratio != 0``, and ``0`` is a legal setting.
+    * **unparseable entry** — fix that one entry, so the message names the
+      offending literals and not the good ones.
+    """
+    ds = parameters.get("dataset", {}) or {}
+    if "train_snap_dates" not in ds:
+        return [
+            "(A23) dataset.train_snap_dates is absent — it is required. Add "
+            "the months to train on to conf/base/parameters_dataset.yaml; "
+            "without it the run fails inside a Spark node minutes later."
+        ]
+
+    configured = ds["train_snap_dates"]
+    if isinstance(configured, str) or not isinstance(configured, (list, tuple)):
+        return [
+            f"(A23) dataset.train_snap_dates must be a list of dates, got "
+            f"{type(configured).__name__} {configured!r}. A bare string is "
+            f"iterable, so nothing downstream raises — it is read one "
+            f"character at a time."
+        ]
+
+    if not configured:
+        return [
+            "(A23) dataset.train_snap_dates is empty. That is not 'train on "
+            "nothing': the month filter is skipped entirely and training draws "
+            "from every month in sample_pool, test months included, which "
+            "makes their metrics in-sample. Name the months to train on."
+        ]
+
+    # Named `unparseable_entries`, not `unreadable`: A21 already binds that
+    # name in this module, and a mutation script anchoring on it would hit two
+    # places (#158).
+    unparseable_entries = [
+        entry for entry in configured if _iso_date(entry) is None
+    ]
+    if unparseable_entries:
+        return [
+            f"(A23) dataset.train_snap_dates has {len(unparseable_entries)} "
+            f"entry/entries that are not dates: {unparseable_entries!r}. "
+            f"Write each as YYYY-MM-DD."
+        ]
+    return []
 
 
 def date_split_overlap_errors(parameters: dict) -> list[str]:
