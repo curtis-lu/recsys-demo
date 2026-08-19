@@ -3,8 +3,76 @@
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
+#: The nodes ``--only-test-months`` keeps: the Layer-2 data gate plus the four
+#: nodes on the test chain. Adding a ``test_snap_dates`` month cannot change
+#: what any other node writes, so the other ten recompute bit-identical content
+#: over the same partitions (ADR-0012's opening paragraph).
+#:
+#: Listed rather than derived from the DAG — ADR-0013 overturned the derived
+#: design. The cost of listing is one drift test
+#: (``test_the_list_matches_the_dag_derived_test_chain``); the cost of deriving
+#: was a paragraph of producer-map reasoning to explain why the constant held
+#: two names.
+#:
+#: ``fit_preprocessor_metadata`` is deliberately absent: ``preprocessor`` is a
+#: landed JSON, so the two nodes that read it load it from the catalog. If it is
+#: not there, they raise — which is the right answer, because at that point this
+#: run is not "just adding an eval month" (ADR-0013 consequences).
+ONLY_TEST_MONTHS_NODES = (
+    "validate_data_consistency",
+    "select_test_keys",
+    "apply_preprocessor_to_features",
+    "build_test_model_input",
+    "filter_test_model_input",
+)
 
-def create_pipeline(enable_calibration: bool = False) -> Pipeline:
+
+def _keep_named(nodes: list[Node], names: tuple[str, ...]) -> list[Node]:
+    """``nodes`` filtered down to ``names``.
+
+    Order is not this function's business and no caller should read one into
+    the result: ``Pipeline.__init__`` topologically re-sorts whatever it is
+    handed, so the order here never survives.
+
+    Raises when a name is absent instead of returning whatever matched: a
+    dataset run that writes nothing still exits 0, so a node renamed out from
+    under this list would turn the mode into a silent no-op that reports
+    success — the exact failure shape ADR-0012 opens with.
+
+    Filtering rather than re-declaring the nodes is also what keeps the AST
+    audit honest: ``test_static_coverage_floor`` and
+    ``test_zero_output_nodes_match_registry`` count every ``Node(`` call in
+    ``pipelines/**/*.py``, ``if`` branches included, so a second declaration of
+    the data gate would make A7's registry hold two.
+    """
+    by_name = {node.name: node for node in nodes}
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise ValueError(
+            f"--only-test-months names node(s) this pipeline does not have: "
+            f"{', '.join(missing)}. Available: {', '.join(sorted(by_name))}. "
+            f"A node was renamed — update ONLY_TEST_MONTHS_NODES in "
+            f"{__name__}."
+        )
+    wanted = set(names)
+    return [node for node in nodes if node.name in wanted]
+
+
+def create_pipeline(
+    enable_calibration: bool = False, only_test_months: bool = False
+) -> Pipeline:
+    """Build the dataset pipeline.
+
+    Modes:
+      * default — the full DAG (13 nodes, or 15 with calibration).
+      * ``--only-test-months`` — the data gate plus the test chain, for a run
+        that only adds ``test_snap_dates`` months. See
+        :data:`ONLY_TEST_MONTHS_NODES`.
+
+    A mode decides *which line of work* this run does; ``--from-node`` /
+    ``--only-node`` decide *where it resumes*. They are orthogonal and compose:
+    the CLI slices whatever the mode built (ADR-0013).
+    """
     from recsys_tfb.pipelines.dataset.nodes import (
         apply_preprocessor_to_features,
         build_model_input,
@@ -154,5 +222,12 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 name="build_calibration_model_input",
             ),
         ])
+
+    # After the calibration branch, so the mode is decided against the full
+    # node list however it was built. Neither calibration node is on the test
+    # chain, so the two flags do not interact — pinned by a test rather than
+    # left to be re-derived.
+    if only_test_months:
+        nodes = _keep_named(nodes, ONLY_TEST_MONTHS_NODES)
 
     return Pipeline(nodes)

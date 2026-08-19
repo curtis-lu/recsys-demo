@@ -57,13 +57,15 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F5. 切片語意：單一起點、自動上游擴張、**跳過零輸出 node**
 
-- `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py:159`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
+- `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py` 的 `_slice_pipeline`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
 - 切片會透過 `can_load` 詢問 catalog：缺少的輸入會**自動把上游生產者拉回來執行**（`core/pipeline.py` 的 `_slice_with_expansion`），並在 `SlicePlan.auto_included` 回報。
-- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py:183-187`）。
+- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py` 的 `_format_slice_plan`）。
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 
-**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py:28`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+
+**擴張永遠救不了它**：producer map 由 `node.outputs` 建，零輸出的 node 不在裡面，所以沒有任何缺料能把它拉回來。**唯一的進場方式是被明確點名**——而點名只有「模式」做得到，切片做不到（[ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)）。`--only-test-months` 的 `ONLY_TEST_MONTHS_NODES` 把它列為清單第一個成員就是為此（#203、#157）。新增模式時這是必須各自處理的一件事，不是預設會繼承的行為。
 
 ## F6. `--env` 的覆蓋層語意會靜默退化
 
@@ -315,10 +317,10 @@ S1／S2 管得到位置與純度，管不到「這個 node 讀起來說不說得
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
-| `pipelines/dataset/pipeline.py:28` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查 |
-| `pipelines/training/pipeline.py:202` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
+| `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
+| `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 
-（兩列的行號都指 `Node(...)` 第一參數、也就是函式名那一行，與 F5 的引用一致。）
+（位置只給檔案、不給行號：兩個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。）
 
 ## R4. 自己寫診斷副產物的 node（A1 的例外二）── 3 筆
 

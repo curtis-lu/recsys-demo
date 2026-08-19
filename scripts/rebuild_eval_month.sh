@@ -47,7 +47,18 @@ fi
 run() { echo; echo "▶ $*"; "$@"; }
 
 # 1) dataset：重算該月的 preprocessed_feature_table / test_keys / test_model_input
-run "$PYTHON" -m recsys_tfb dataset --env "$ENV_NAME" --rebuild-dates "$MONTHS"
+#    --only-test-months：重算一個既有月份要跑的 node 集，跟新增一個月份完全
+#    相同——差別只在 month plan 把哪些月放進 to_process。train/val/calibration
+#    不在其中，它們的內容與 test 月份無關。
+#
+#    這裡有一層自癒因此消失了，記在這裡而不是留給人發現：本腳本原本跑完整
+#    dataset，順帶把 train/val/calibration 在當前 variant 底下重建一次，於是會
+#    意外修好「同一次編輯既加了 test 月、又改了 sample_ratio」造成的 variant
+#    漂移（ADR-0012「這個論證的已知反例」）。**沒有東西補上它。** 仍然接受：
+#    那層自癒從來不是這個腳本的職責、沒有任何文件宣稱過，而移除之後的曝險與
+#    --only-test-months 主動線完全相同。
+run "$PYTHON" -m recsys_tfb dataset --env "$ENV_NAME" \
+  --only-test-months --rebuild-dates "$MONTHS"
 
 # 2) training：只跑 predict 切片（不重訓；模型從既有 model_version 讀）。
 #    同一個旗標在這裡做兩件事：丟掉該月的本機 parquet cache（命中只看

@@ -34,6 +34,15 @@ RESUME_CONTRACTS = {
         "fit_preprocessor_metadata": set(),
         "build_train_model_input": set(),
     },
+    # --only-test-months builds a different pipeline, so it gets its own
+    # contract: a mode is not a slice, and the resume costs inside it are not
+    # the ones above. The pairing that matters is the second line — the
+    # unfiltered frame is memory-only, so resuming at the filter re-runs the
+    # expensive build. Pinned so that stays a deliberate cost.
+    ("dataset", (("only_test_months", True),)): {
+        "build_test_model_input": set(),
+        "filter_test_model_input": {"build_test_model_input"},
+    },
     ("training", ()): {
         # the "skip HPO, retrain final model" scenario: only cheap
         # view/handle builders may re-run, never tune_hyperparameters

@@ -48,6 +48,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     landed_months,
     month_plan_input,
 )
+from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
@@ -350,14 +351,26 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     nodes it drives: then the flag is accepted, the run succeeds, and nothing it
     asked for happens.
 
-    Which nodes those are is per-pipeline, so the caller may override the pair
-    through ``rebuild_advice``. Naming the wrong pipeline's nodes in this
-    message would send the operator to a node their pipeline does not have.
+    Which nodes those are is per-pipeline, and the caller must say: naming the
+    wrong pipeline's nodes in this message would send the operator to a node
+    their pipeline does not have. A caller that names none stays silent — that
+    is how the dataset command, whose ``--rebuild-dates`` drives the whole test
+    chain rather than one node, opts out of this half.
+
+    ``targets`` and ``predict_node`` are a **pair**, both caller-supplied. A
+    default for either one is the same footgun in a smaller disguise: naming
+    targets while inheriting training's ``predict_node`` prints an
+    ``--only-node`` command for a node the operator's pipeline has not got.
+    So the second lookup is a subscript, not a ``.get`` — a caller that names
+    one and forgets the other fails in its own test rather than in an
+    operator's terminal.
     """
     if not rebuild_advice or not rebuild_advice.get("rebuild"):
         return []
-    targets = rebuild_advice.get("targets") or _REBUILD_TARGET_NODES
-    predict_node = rebuild_advice.get("predict_node") or _REBUILD_PREDICT_NODE
+    targets = rebuild_advice.get("targets")
+    if not targets:
+        return []
+    predict_node = rebuild_advice["predict_node"]
     if any(node.name in targets for node in pipe.nodes):
         return []
     return [
@@ -369,22 +382,77 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     ]
 
 
+def _format_only_test_months_plan(enable_calibration: bool) -> list[str]:
+    """``[plan]`` lines naming what ``--only-test-months`` left out.
+
+    Diffed against the full pipeline rather than restated from a second list:
+    the mode is defined by ``ONLY_TEST_MONTHS_NODES``, and a message carrying
+    its own copy could disagree with what actually runs — which is the one
+    thing this message exists to prevent, since a dataset run that does less
+    than the operator expected still exits 0.
+
+    Names the nodes rather than counting them: "10 left out" tells an operator
+    nothing they can check, and checking is the point at the moment they are
+    deciding whether this run really is "just adding an eval month".
+    """
+    full = [
+        node.name
+        for node in get_pipeline(
+            "dataset", enable_calibration=enable_calibration
+        ).nodes
+    ]
+    kept = set(ONLY_TEST_MONTHS_NODES)
+    left_out = [name for name in full if name not in kept]
+    return [
+        f"[plan] only-test-months: {len(full) - len(left_out)} of the dataset "
+        f"pipeline's {len(full)} nodes; the {len(left_out)} left out rebuild "
+        f"artifacts a new test month cannot change.",
+        f"[plan] left out: {', '.join(left_out)}",
+    ]
+
+
+def _maybe_warn_rebuild_partial_chain(
+    kept: int, total: int, rebuild_advice
+) -> list[str]:
+    """WARN lines when ``--rebuild-dates`` ran against a run that actually
+    dropped nodes, else ``[]``.
+
+    The condition is ``kept < total`` — did this run exclude anything — not
+    "was a slicing flag passed". Those differ, and the old spelling made a
+    false claim in the gap: ``--from-node <the first node>`` selects every
+    node, yet still printed "the upstream this run did not select will not be
+    refreshed" and told the operator to re-run without the flag, which produces
+    bit-identical output (ADR-0013 consequences).
+
+    ``total`` is the node count of whatever ``create_pipeline`` built, so a
+    **mode** never trips this: a short pipeline is the whole of what the run
+    is, not a part of it left out. Only slicing can make ``kept`` smaller.
+
+    ``chain`` names what the operator would be re-running and the caller must
+    supply it, because callers mean different things by it: dataset means the
+    test chain, inference the scoring chain. Same rule as
+    :func:`_maybe_warn_rebuild_sliced_away`'s target nodes — a message
+    describing the wrong pipeline sends the operator looking for something
+    their run does not have.
+    """
+    if not rebuild_advice or not rebuild_advice.get("rebuild"):
+        return []
+    chain = rebuild_advice.get("chain")
+    if not chain or kept >= total:
+        return []
+    return _format_rebuild_slice_warning(rebuild_advice["rebuild"], chain=chain)
+
+
 def _format_rebuild_slice_warning(
     rebuild: list[str], chain: str = "test 鏈"
 ) -> list[str]:
-    """WARN lines for --rebuild-dates combined with a slicing flag.
+    """The WARN lines themselves; see :func:`_maybe_warn_rebuild_partial_chain`
+    for when they fire.
 
     The two flags are orthogonal by design (slicing picks nodes, rebuild picks
     months) and combining them is a supported expert path — but only part of
     the chain gets recomputed, and the untouched upstream partitions stay stale
     without complaint. Say so rather than let it pass silently.
-
-    ``chain`` names what the operator would be re-running, because the two
-    callers mean different things by it: the dataset/training side means the
-    test chain, inference means the scoring chain. The same reason
-    :func:`_maybe_warn_rebuild_sliced_away` takes its target nodes as a
-    parameter — a message describing the wrong pipeline sends the operator
-    looking for something their run does not have.
     """
     return [
         "[rebuild] WARNING: --rebuild-dates 與切片旗標（--from-node/--only-node）併用；",
@@ -483,6 +551,10 @@ def _execute_pipeline(
     for line in _maybe_warn_retrain(plan, retrain_advice):
         logger.warning(line)
     for line in _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice):
+        logger.warning(line)
+    for line in _maybe_warn_rebuild_partial_chain(
+        len(pipe.nodes), total, rebuild_advice
+    ):
         logger.warning(line)
     if dry_run:
         if plan is None:
@@ -728,6 +800,12 @@ def dataset(
              "partitions already exist (use after an upstream backfill of an "
              "old month). Must be a subset of dataset.test_snap_dates.",
     ),
+    only_test_months: bool = typer.Option(
+        False, "--only-test-months",
+        help="宣告「這次只加評估月份」：只跑資料閘與 test 鏈。train／val／"
+             "calibration 的產物不重算——多一個 test 月不會改變它們的內容。"
+             "與 --from-node／--only-node 正交，可併用。上游缺料時當場報錯。",
+    ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
         help="Start from this node (topological position); missing upstream "
@@ -772,9 +850,6 @@ def dataset(
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
-    if rebuild and (from_node or only_node):
-        for line in _format_rebuild_slice_warning(rebuild):
-            logger.warning(line)
 
     get_or_create_spark_session(_load_spark_config(config, "dataset"))
     data_dir = _find_data_dir()
@@ -849,7 +924,13 @@ def dataset(
         params, existing=existing_snap_dates, rebuild=rebuild,
     )
 
-    pipeline_kwargs = {"enable_calibration": enable_calibration}
+    pipeline_kwargs = {
+        "enable_calibration": enable_calibration,
+        "only_test_months": only_test_months,
+    }
+    if only_test_months:
+        for line in _format_only_test_months_plan(enable_calibration):
+            logger.info(line)
 
     # Pre-run crash-safe provenance stubs (skip-if-present, no `latest` symlink);
     # the post-run writes below upgrade these to status=completed + artifacts.
@@ -885,6 +966,10 @@ def dataset(
         # "complete for this run", and for these three that is a month
         # question, not an exists() question (ADR-0012).
         month_plans=month_plans,
+        # No `targets`: --rebuild-dates here drives the whole test chain, not
+        # one node, so the "sliced away entirely" half does not apply and would
+        # have to name training's nodes to say anything at all.
+        rebuild_advice={"rebuild": rebuild, "chain": "test 鏈"},
     )
     if not executed:
         return
@@ -1094,7 +1179,14 @@ def training(
         # Always passed; _maybe_warn_retrain is a no-op under --list-nodes
         # (it returns early before plan exists) and only fires on sliced runs.
         retrain_advice={"models_dir": data_dir / "models", "model_version": mv},
-        rebuild_advice={"rebuild": rebuild},
+        # No `chain`: training's --rebuild-dates drives two specific nodes, so
+        # "the slice dropped them entirely" is the failure worth naming, not
+        # "part of a chain is stale".
+        rebuild_advice={
+            "rebuild": rebuild,
+            "targets": _REBUILD_TARGET_NODES,
+            "predict_node": _REBUILD_PREDICT_NODE,
+        },
     )
     if not executed:
         return
@@ -1201,9 +1293,6 @@ def inference(
     except ValueError as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1)
-    if rebuild and (from_node or only_node):
-        for line in _format_rebuild_slice_warning(rebuild, chain="評分鏈"):
-            logger.warning(line)
 
     get_or_create_spark_session(_load_spark_config(config, "inference"))
     data_dir = _find_data_dir()
@@ -1249,10 +1338,14 @@ def inference(
         "inference", {}, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        # Both halves apply here: the flag drives one node (so it can be sliced
+        # away entirely) and that node sits on a chain (so a slice can leave
+        # part of it stale).
         rebuild_advice={
             "rebuild": rebuild,
             "targets": _INFERENCE_REBUILD_TARGET_NODES,
             "predict_node": _INFERENCE_REBUILD_PREDICT_NODE,
+            "chain": "評分鏈",
         },
     )
     if not executed:
