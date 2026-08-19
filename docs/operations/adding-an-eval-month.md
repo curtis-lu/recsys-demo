@@ -54,7 +54,7 @@ log 印出的 `base_dataset_version` 應與上次**完全相同**。翻號了就
 **什麼時候不要用它**：
 
 1. **這一次除了加月份還改了別的設定**（抽樣比例、特徵、`train_snap_dates`……）。那些設定改動要靠被跳過的那十個 node 重算才會生效，「只加評估月份」就不成立了——而且 `base_dataset_version` 多半也會翻號，上面那個檢查會先擋住你。翻號時 `preprocessor` 在新版本目錄下還不存在，`apply_preprocessor_to_features` 會**當場報錯**而不是默默重建一個只有 test 產物的半套版本目錄。
-2. **`train_snap_dates` 或 `calibration_snap_dates` 是空清單**（後者要配 `enable_calibration: true` 才有影響）。這是旗標前提唯一一個會失效的情況，而且目前**沒有任何不變量擋得住它**，所以寫在這裡：`select_sample_keys`（node 名；它跑的函式叫 `select_train_keys`）與 `select_calibration_keys` 走的是 `restrict_to_months_or_all`（`pipelines/dataset/steps/scoping.py`），月份清單為空時**不過濾、整池照收**。於是這兩個 node 改成從 `sample_pool` 的**每一個月**抽樣，而 `sample_pool` 是上游 ETL 一個月一個月加進去的來源表——它多一個月，它們抽出來的 keys 就多一批。所以帶旗標安不安全，不再由你的 config 決定，而是由「上次跑完整 dataset 之後 ETL 有沒有再加月份」決定：加過，被跳過的 keys 就停在舊的；沒加過，其實沒事。**沒有任何東西在追蹤這件事，你從 log 也看不出來是哪一種。**（`select_val_keys` 走的是嚴格的 `restrict_to_months`，不受影響。）
+2. **`train_snap_dates` 或 `calibration_snap_dates` 是空清單**（後者要配 `enable_calibration: true` 才有影響）。這是旗標前提唯一一個會失效的情況，而且目前**沒有任何不變量擋得住它**，所以寫在這裡：`select_sample_keys`（node 名；它跑的函式叫 `select_train_keys`）與 `select_calibration_keys` 走的是 `restrict_to_months_or_all`（`pipelines/dataset/steps/scoping.py`），月份清單為空時**不過濾、整池照收**。那一刻這兩個 node 的內容就會隨 `sample_pool` 裡的每一個月份而變——包括你剛加的 test 月——而旗標正好跳過它們，於是靜默變舊。（`select_val_keys` 走的是嚴格的 `restrict_to_months`，不受影響。）
    **但先注意**：真的把月份清單設成空的，那份 config 在別的地方已經先壞了——calibration 會抽到 train 月份的 row，校準集變成 in-sample，而 A24 的互斥檢查對空集合永遠成立、不會出聲。這不是這支旗標造成的，旗標只是讓它從「每次重算的錯」變成「不重算的錯」。相關：A23（`train_snap_dates` 必填且非空）已規格化但**刻意延後**，見 issue #158。
 
 不確定就不要帶旗標——跑完整的 15 個 node 永遠是安全的那一邊。
