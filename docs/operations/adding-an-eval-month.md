@@ -53,11 +53,15 @@ log 印出的 `base_dataset_version` 應與上次**完全相同**。翻號了就
 
 **什麼時候不要用它**：
 
-1. **這一次除了加月份還改了別的設定**（抽樣比例、特徵、`train_snap_dates`……）。那些設定改動要靠被跳過的那十個 node 重算才會生效，「只加評估月份」就不成立了——而且 `base_dataset_version` 多半也會翻號，上面那個檢查會先擋住你。翻號時 `preprocessor` 在新版本目錄下還不存在，`apply_preprocessor_to_features` 會**當場報錯**而不是默默重建一個只有 test 產物的半套版本目錄。
-2. **`train_snap_dates` 或 `calibration_snap_dates` 是空清單**（後者要配 `enable_calibration: true` 才有影響）。這是旗標前提唯一一個會失效的情況，而且目前**沒有任何不變量擋得住它**，所以寫在這裡：`select_sample_keys`（node 名；它跑的函式叫 `select_train_keys`）與 `select_calibration_keys` 走的是 `restrict_to_months_or_all`（`pipelines/dataset/steps/scoping.py`），月份清單為空時**不過濾、整池照收**。那一刻這兩個 node 的內容就會隨 `sample_pool` 裡的每一個月份而變——包括你剛加的 test 月——而旗標正好跳過它們，於是靜默變舊。（`select_val_keys` 走的是嚴格的 `restrict_to_months`，不受影響。）
-   **但先注意**：真的把月份清單設成空的，那份 config 在別的地方已經先壞了——calibration 會抽到 train 月份的 row，校準集變成 in-sample，而 A24 的互斥檢查對空集合永遠成立、不會出聲。這不是這支旗標造成的，旗標只是讓它從「每次重算的錯」變成「不重算的錯」。相關：A23（`train_snap_dates` 必填且非空）已規格化但**刻意延後**，見 issue #158。
+**這一次除了加月份還改了別的設定**（抽樣比例、特徵、`train_snap_dates`……）。那些設定改動要靠被跳過的那十個 node 重算才會生效，「只加評估月份」就不成立了——而且 `base_dataset_version` 多半也會翻號，上面那個檢查會先擋住你。翻號時 `preprocessor` 在新版本目錄下還不存在，`apply_preprocessor_to_features` 會**當場報錯**而不是默默重建一個只有 test 產物的半套版本目錄。
 
 不確定就不要帶旗標——跑完整的 15 個 node 永遠是安全的那一邊。
+
+> **另一件事，但它不是「不要用旗標」，是「不要這樣設定」**：`train_snap_dates`（或 `calibration_snap_dates`，要配 `enable_calibration: true`）設成空清單 `[]` 時，`select_sample_keys` 與 `select_calibration_keys` 走的 `restrict_to_months_or_all` **不做月份過濾、整池照收**（`pipelines/dataset/steps/scoping.py`）。於是它們會把 `sample_pool` 裡每一個月都收進去——**包括你剛加的那個 test 月**。該月同時被拿去訓練又拿去評估，指標變成 in-sample，數字漂亮但沒意義；而 A24 的互斥檢查對空集合永遠成立、不會出聲。（`select_val_keys` 走嚴格的 `restrict_to_months`，不受影響。）
+>
+> **這跟帶不帶 `--only-test-months` 無關，而且旗標是比較安全的那一邊**——它跳過那兩個 node，所以這一次不會撞上；不帶旗標全量跑才會真的把該月收進 train。但旗標只是延後，哪天跑一次全量還是會撞。要修的是設定，不是旗標。
+>
+> 相關：A23（`train_snap_dates` 必填且非空）已規格化但**刻意延後**，見 issue #158。
 
 log 會明講它做了什麼、沒做什麼：
 
