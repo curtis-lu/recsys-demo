@@ -5,15 +5,24 @@ date: 2026-08-09
 
 # inference 的驗證分兩層、移除 score_range、特徵順序改由模型決定
 
+> **實作狀態（2026-08-19 核對）**：三項決定**已全部落地**——#185（特徵順序權威）、#188（分區
+> 完整性與塊層檢查）、#190（兩層驗證、刪 `score_range`、補兩條會紅的）。驗證邏輯現住
+> `pipelines/inference/steps/validation.py`。
+>
+> **讀法**：第一、二節寫的是 **2026-08-09 決策當時**的程式碼。當時的 `nodes_spark.py` 已在 #188
+> 拆成 `nodes.py` ＋ `steps/`，測試檔 `test_nodes_spark.py` 也已改名為 `test_nodes.py`；本檔保留
+> 舊檔名與行號只為指認**被改掉的舊碼**，不要拿去對照現在的檔案。文中標著「更正」的段落是實作
+> 期間回填的，記錄初稿哪裡錯了。
+
 `validate_predictions` 有六個 sanity check，看起來覆蓋得很完整。本 ADR 記錄三件事：這六個
 檢查有一個共同的盲區、其中一條在每一種合法設定下都沒有資訊量、以及「誰決定餵給模型的欄位」
 這個問題本來的答案是錯的。
 
 ## 一、六個檢查只驗形狀，不驗值
 
-逐條看它們在驗什麼：列數對不對（`nodes_spark.py:315-317`）、分數在不在範圍內（`:324`）、
-有沒有 null（`:343`）、每組是不是 22 列（`:362-364`）、名次是不是 1..22 且與分數同序
-（`:379`、`:396-399`）、identity 有沒有重複（`:408`）。
+逐條看它們在驗什麼（行號皆為當時的 `nodes_spark.py`）：列數對不對（`:315-317`）、分數在不在
+範圍內（`:324`）、有沒有 null（`:343`）、每組是不是 22 列（`:362-364`）、名次是不是 1..22 且與
+分數同序（`:379`、`:396-399`）、identity 有沒有重複（`:408`）。
 
 **六條全是形狀，沒有一條問「值對不對」。** 兩個具體後果：
 
@@ -45,15 +54,15 @@ Pipeline completed in 11.09s
 （feature count mismatch 會 raise）幫不上忙。
 
 > **一則更正，避免後人誤引**：本節初稿把實例二寫成 issue #63 的實際後果。那是錯的。
-> `nodes_spark.py:196-204` 早已優先採用 `model.feature_names()`（commit `a220cb6`，行為由
-> `tests/test_pipelines/test_inference/test_nodes_spark.py:223-250` 釘住），#63 描述的 fallback
-> 不是預設路徑；即使走上 fallback，欄數不符會被 LightGBM raise 而不是靜默同分。實例二是
-> **新設計新開的洞**，不是舊 bug 的重述。
+> 當時的 `nodes_spark.py:196-204` 早已優先採用 `model.feature_names()`（commit `a220cb6`，行為由
+> 當時的 `test_nodes_spark.py:223-250` 釘住），#63 描述的 fallback 不是預設路徑；即使走上
+> fallback，欄數不符會被 LightGBM raise 而不是靜默同分。實例二是**新設計新開的洞**，不是舊 bug
+> 的重述。
 
 ### repo 已經認得這個故障模式，但只守了一半
 
-`require_item_is_a_feature` 的 docstring（`pipelines/dataset/steps/feature_columns.py:131-136`）
-逐字寫著：漏掉 item 會「silently makes X miss the item dimension, **collapses predictions to a
+`require_item_is_a_feature` 的 docstring（`pipelines/dataset/steps/feature_columns.py:109`）逐字
+寫著：漏掉 item 會「silently makes X miss the item dimension, **collapses predictions to a
 constant within each query group**, and produces a flat mAP across every HPO trial」。那條
 backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不住「設定對，但 pipeline 沒把正確的
 值餵進去」。**資料層那一半今天沒有人守。**
@@ -70,9 +79,10 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 | 未校準、`objective: lambdarank`／`rank_xendcg` | **無界實數** | 原始 booster 輸出 |
 
 前三條路上 `[0, 1]` **由建構方式保證，檢查結構上不可能紅**。第四條路上它是**誤報**，而那條路
-是合法的：consistency 的 A7（`core/consistency.py:37-40`、`ranking_objective_conflicts` 於
-`:368-400`）只要求 ranking objective 配 ranking metric 與非空 `entity`，**沒有**要求開啟校準；
-`inference.use_calibration: false` 也是明文支援的設定（`conf/base/parameters_inference.yaml:8`）。
+是合法的：consistency 的 A7（`core/consistency.py:37-40`，predicate 是同檔的
+`ranking_objective_conflicts`）只要求 ranking objective 配 ranking metric 與非空 `entity`，
+**沒有**要求開啟校準；`inference.use_calibration: false` 也是明文支援的設定
+（`conf/base/parameters_inference.yaml`）。
 
 所以這條檢查**要嘛是裝飾品、要嘛是錯的，沒有第三種情形**。ADR-0008 拒絕用
 「`base_dataset_version` 逐字相同」當驗收，用的是同一把尺：那是一個結構上不可能失敗的斷言，
@@ -81,7 +91,7 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 ## 三、決定一：驗證分兩層
 
 關鍵不對稱是——**在 chunk 裡驗，資料已經在 driver 的 pandas frame 上，成本近乎零；在整批驗，
-每個檢查都是一次對 220M 列的 Spark 全掃。** 現行成功路徑是 **8 次獨立 Spark action**
+每個檢查都是一次對 220M 列的 Spark 全掃。** 決策當時的成功路徑是 **8 次獨立 Spark action**
 （`nodes_spark.py:315, 316, 326, 348, 364, 382, 399, 408`；`:331`／`:354`／`:369` 三個
 `.collect()` 都在失敗分支內），其中 3 次帶 shuffle，而 `ranked_staging` 是 Hive 表、每次都重讀；
 `:316` 的 `scoring_dataset.count()` 更貴，它重跑 `inference_population ⋈ feature_table` 整條 join。
@@ -102,8 +112,9 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 > `scoring_dataset.count()`，而那一條連同它所屬的 `row_count_match` 已經被 #188 換成
 > `partition_completeness`（零 action）。所以本票動手前的實測起點是 **7**，落地後是 **2**——
 > 一次分組聚合（`completeness` ＋ `score_varies_within_group` ＋ rank 範圍）加一次 window pass
-> （score 對 rank 的順序）。這個數字由 `TestBatchLayerActionBudget` 釘住，因為驗證的**結果**
-> 看不出它：多加一條整批檢查會通過它自己的測試、不改變任何輸出，只是安靜地多掃一次整張表。
+> （score 對 rank 的順序）。這個數字由 `TestBatchLayerActionBudget`
+> （`tests/test_pipelines/test_inference/test_validation.py`）釘住，因為驗證的**結果**看不出它：
+> 多加一條整批檢查會通過它自己的測試、不改變任何輸出，只是安靜地多掃一次整張表。
 
 **但主要理由不是成本，是失敗得更早。** 今天分數算錯要等全部 chunk 算完、rank 也跑完才會在
 `validate_predictions` 被抓到。下沉之後第一個 chunk 就爆。在一個單月要跑數小時的 pipeline 上，
@@ -121,25 +132,27 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 
 **改成：`unranked_predictions.existing_partition_values()` 在本次 `model_version` ＋ 本月底下的
 分區數，必須等於 `len(inference.products) × N_BUCKETS`。** 純 metastore、零掃描
-（`io/hive_table_dataset.py:277` 的成本契約），resume 之後仍然正確，而且它同時驗了「該有的分區
-都在」與「沒有多餘的」。逐組列數由 `completeness` 從另一個角度守。
+（`io/hive_table_dataset.py:288` 的 `existing_partition_values()` 帶著這條成本契約），resume 之後
+仍然正確，而且它同時驗了「該有的分區都在」與「沒有多餘的」。逐組列數由 `completeness` 從另一個
+角度守。
 
-> **一則更正（#188 實作時）：乘積形式在小母體上會誤報，實作改成集合比對。**
-> `len(products) × N_BUCKETS` 假設每個桶都有 entity。母體小於桶數時（本機合成資料、以及任何
-> 小規模試跑）雜湊必然留下空桶，而 `insertInto` 對空 frame 不建立分區——於是這條檢查在每一次
-> **正確**的小母體執行上都會紅。
->
-> 落地的形式是**集合比對**：評分節點報出「應該存在的分區集合」（這次寫的 ∪ 這次跳過的），
-> validate 拿它跟 metastore 說「存在的」比。純 Python、零掃描、resume 後仍正確，而且兩個方向
-> 都抓（缺分區＝連續 save 互相覆蓋；多分區＝`entity_buckets` 改過留下的舊桶）。
->
-> **代價，以及怎麼補回來。** 集合的「應該存在」把空桶扣掉了，所以「一個**不該**是空的桶回傳
-> 零列」原本會從乘積形式的紅變成無聲——而那正是「資料少 1/N_BUCKETS 且零錯誤訊息」的同一類
-> 失效，`completeness` 也看不到它（缺席的 entity 不構成任何 query group）。補法不是回到乘積：
-> 評分節點改成先問中間表**哪些桶真的有分區**（一次 metastore 級的 distinct，每月一次），
-> 桶有分區卻讀回零列就 raise，桶沒有分區才算合法的空桶。這樣「空桶」是有證據的判定而不是假設。
-> 殘留的是「中間表本身就是舊的」——那條由 resume 的既有殘留承擔（判準是分區存在、不是分區
-> 新鮮，`--rebuild-dates` 是覆寫手段），不是本條新增的。
+### 實作時的更正（#188）：乘積形式在小母體上會誤報，改成集合比對
+
+`len(products) × N_BUCKETS` 假設每個桶都有 entity。母體小於桶數時（本機合成資料、以及任何小規模
+試跑）雜湊必然留下空桶，而 `insertInto` 對空 frame 不建立分區——於是這條檢查在每一次**正確**的
+小母體執行上都會紅。
+
+落地的形式是**集合比對**：評分節點報出「應該存在的分區集合」（這次寫的 ∪ 這次跳過的），validate
+拿它跟 metastore 說「存在的」比。純 Python、零掃描、resume 後仍正確，而且兩個方向都抓（缺分區
+＝連續 save 互相覆蓋；多分區＝`entity_buckets` 改過留下的舊桶）。
+
+**代價，以及怎麼補回來。** 集合的「應該存在」把空桶扣掉了，所以「一個**不該**是空的桶回傳零列」
+原本會從乘積形式的紅變成無聲——而那正是「資料少 1/N_BUCKETS 且零錯誤訊息」的同一類失效，
+`completeness` 也看不到它（缺席的 entity 不構成任何 query group）。補法不是回到乘積：評分節點改成
+先問中間表**哪些桶真的有分區**（一次 metastore 級的 distinct，每月一次），桶有分區卻讀回零列就
+raise，桶沒有分區才算合法的空桶。這樣「空桶」是有證據的判定而不是假設。殘留的是「中間表本身就是
+舊的」——那條由 resume 的既有殘留承擔（判準是分區存在、不是分區新鮮，`--rebuild-dates` 是覆寫
+手段），不是本條新增的。
 
 ## 四、決定二：刪 `score_range`，補兩條會紅的
 
@@ -166,52 +179,50 @@ chunk 層   item_values_are_known       ← 值不是產品名（已實跑重現
 **刻意不加 `score_finite`（非 NaN／±inf）**：它是 `score_range` 唯一真正在防的東西，但抓不到
 上面任何一種故障。
 
-> **四則更正（#190 實作時）。**
->
-> **零、`score_varies_within_group` 不能是「有一組全平手就 raise」——那會擋掉每一次正確的
-> isotonic 執行。** 平手不是只有本節那個 bug 生得出來：`IsotonicRegression` 擬的是帶**平台**的
-> 單調函數（`models/calibrated_adapter.py:56-59`），同一組的 raw score 全落在同一段平台時，
-> 校準輸出就完全相等，而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測
-> （5 萬列校準資料、正例率約 5%、20 萬 entity × 8 item）：**20 萬組中 61 組全平手（0.03%），
-> 未校準則是 0 組**。本節第二段用「小母體上必然誤報」否決了乘積形式——同一把尺沒有拿起來量這條，
-> 是本 ADR 初稿的漏洞。
->
-> 落地形式是**比例門檻**（`validation.CONSTANT_GROUP_FAILURE_RATIO = 0.5`）＋未超過門檻仍記
-> warning。它分開的是兩個實測相距四個數量級的區間：良性平手 0.03%，而 item 值退化是**程式碼**
-> 寫的、套用到每一個 chunk，會讓 **100%** 的組全平手。代價是誠實的：**部分**污染（例如續跑
-> 混到舊的壞 chunk）本來就看不見——那種情況下同一組裡有些 item 分數對、有些錯，組不會全平手，
-> 任何門檻都抓不到。
->
-> **一、`score_varies_within_group` 要排除「組大小 1」，否則單 item 設定必然誤報。** 一組只有
-> 一列時 `max == min` 恆真，`len(products) == 1` 的設定於是每一次**正確**執行都會紅——與第三節
-> 那個乘積形式在小母體上誤報是同一種形狀（斷言了一個不必成立的前提）。實作的條件因此是
-> `_size > 1 AND max <= min`；組大小本來就是 `completeness` 的問題，不是這條的。
->
-> **二、`no_missing` 的 identity 那一半，在整批層本來就不可能紅。** 節點寫出去的 entity
-> identity 經過 `astype(str)`，NULL 變成字串 `"None"`——所以它在整批層是裝飾品，跟
-> `score_range` 同類，只是本 ADR 初稿沒發現。塊層的版本因此讀「進來的」frame 而不是「寫出去的」
-> frame，這也是 `validate_scored_chunk` 為什麼收兩個 frame。
->
-> 同一條檢查還有**一半是淨刪除、不是搬家**：舊版整批 `no_missing` 也看 `rank` 欄，而 rank 是
-> 排名節點才算出來的，塊層根本沒有它。判斷是可以刪（`row_number()` 不可能回傳 null），但這是
-> 刪除而不是下沉，記在這裡免得後人以為塊層接住了它。
->
-> **三、`item_values_are_known` 與 `chunk_row_count` 都沒有任何設定能讓它們紅。**
-> 寫出去的 identity item 就是迴圈變數，而迴圈變數來自 `inference.products`；`out_pdf` 的列數由
-> 建構時一起餵進去的 entity 陣列與 score 陣列決定，長度不符時 pandas 先丟
-> `All arrays must be of the same length`，而 `entity` 不可能為空（A7）。兩條都是**對那幾行
-> 建構的迴歸防護**（identity item 那一行這個 repo 已經寫錯過一次，ADR-0010 §6），不是資料層
-> 檢查——所以它們的證據只能是 mutation 檢查，不會有設定層的測試。這跟第二節刪掉的 `score_range`
-> 不同：`score_range` 是不管**程式碼**怎麼改都不可能紅。
->
-> 連帶的誠實話：**沒有任何一層看得見「一個 chunk 少了幾列」**。`partition_completeness` 比的是
-> 分區集合，看不到分區存在但內容短少；`completeness` 只看得到在場的組。第三節那條「桶有分區
-> 卻讀回零列就 raise」守的是整桶消失，不是部分消失。
-
 **刻意不加 `feature_importance()["prod_name"] > 0` 的啟動斷言**：它驗的是**模型**會不會用 item
 特徵。有它的話 `score_varies_within_group` 的誤報空間會被關掉（一個從不對 item 分裂的模型，
 本來就會讓 22 個分數合法地相同）。沒加，所以那個誤報空間是**知情的殘留**：真的遇到時，它報的是
 一個應該有人看的模型品質問題，不是假警報。
+
+### 實作時的四則更正（#190）
+
+**零、`score_varies_within_group` 不能是「有一組全平手就 raise」——那會擋掉每一次正確的 isotonic
+執行。** 平手不是只有本節那個 bug 生得出來：`IsotonicRegression` 擬的是帶**平台**的單調函數
+（`models/calibrated_adapter.py:56-59`），同一組的 raw score 全落在同一段平台時，校準輸出就完全
+相等，而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測（5 萬列校準資料、
+正例率約 5%、20 萬 entity × 8 item）：**20 萬組中 61 組全平手（0.03%），未校準則是 0 組**。
+第三節用「小母體上必然誤報」否決了乘積形式——同一把尺沒有拿起來量這條，是本 ADR 初稿的漏洞。
+
+落地形式是**比例門檻**（`CONSTANT_GROUP_FAILURE_RATIO = 0.5`，
+`pipelines/inference/steps/validation.py:106`）＋未超過門檻仍記 warning。它分開的是兩個實測相距
+四個數量級的區間：良性平手 0.03%，而 item 值退化是**程式碼**寫的、套用到每一個 chunk，會讓
+**100%** 的組全平手。代價是誠實的：**部分**污染（例如續跑混到舊的壞 chunk）本來就看不見——那種
+情況下同一組裡有些 item 分數對、有些錯，組不會全平手，任何門檻都抓不到。
+
+**一、`score_varies_within_group` 要排除「組大小 1」，否則單 item 設定必然誤報。** 一組只有一列時
+`max == min` 恆真，`len(products) == 1` 的設定於是每一次**正確**執行都會紅——與乘積形式在小母體上
+誤報是同一種形狀（斷言了一個不必成立的前提）。實作的條件因此是 `_size > 1 AND max <= min`；組大小
+本來就是 `completeness` 的問題，不是這條的。
+
+**二、`no_missing` 的 identity 那一半，在整批層本來就不可能紅。** 節點寫出去的 entity identity
+經過 `astype(str)`，NULL 變成字串 `"None"`——所以它在整批層是裝飾品，跟 `score_range` 同類，只是
+本 ADR 初稿沒發現。塊層的版本因此讀「進來的」frame 而不是「寫出去的」frame，這也是
+`validate_scored_chunk`（`pipelines/inference/steps/validation.py:121`）為什麼收兩個 frame。
+
+同一條檢查還有**一半是淨刪除、不是搬家**：舊版整批 `no_missing` 也看 `rank` 欄，而 rank 是排名
+節點才算出來的，塊層根本沒有它。判斷是可以刪（`row_number()` 不可能回傳 null），但這是刪除而不是
+下沉，記在這裡免得後人以為塊層接住了它。
+
+**三、`item_values_are_known` 與 `chunk_row_count` 都沒有任何設定能讓它們紅。** 寫出去的 identity
+item 就是迴圈變數，而迴圈變數來自 `inference.products`；`out_pdf` 的列數由建構時一起餵進去的
+entity 陣列與 score 陣列決定，長度不符時 pandas 先丟 `All arrays must be of the same length`，而
+`entity` 不可能為空（A7）。兩條都是**對那幾行建構的迴歸防護**（identity item 那一行這個 repo 已經
+寫錯過一次，ADR-0010 §6），不是資料層檢查——所以它們的證據只能是 mutation 檢查，不會有設定層的
+測試。這跟第二節刪掉的 `score_range` 不同：`score_range` 是不管**程式碼**怎麼改都不可能紅。
+
+連帶的誠實話：**沒有任何一層看得見「一個 chunk 少了幾列」**。`partition_completeness` 比的是分區
+集合，看不到分區存在但內容短少；`completeness` 只看得到在場的組。第三節那條「桶有分區卻讀回零列
+就 raise」守的是整桶消失，不是部分消失。
 
 ## 五、決定三：特徵順序與子集由**模型**決定
 
@@ -230,8 +241,8 @@ repo 裡有兩份「特徵欄清單」，而它們**不保證相同**：
 
 而 `pipelines/training/pipeline.py:47` 產出 `preprocessor_view`（已扣除
 `training.feature_selection.exclude`），**所有碰模型的節點吃的都是 view**，包含 training 自己的
-逐分區預測（`:166`）。`exclude` 非空是合法設定，並且有 consistency 的 A14
-（`core/consistency.py:78-81`、`:297-306`）守著「item 永遠不得被排除」。
+逐分區預測。`exclude` 非空是合法設定，並且有 consistency 的 A14（`core/consistency.py:78-81`）
+守著「item 永遠不得被排除」。
 
 **決定：**
 
@@ -247,6 +258,12 @@ repo 裡有兩份「特徵欄清單」，而它們**不保證相同**：
 它不知道有沒有做過特徵選擇；把它當權威、要求兩者逐字相等，會讓一個有 A14 守著的合法設定在
 inference 端直接 raise，而後人把斷言放寬成「取交集」之後，就會照全集切 X 餵給只吃子集的
 booster。
+
+> **本 ADR 初稿把這個結論寫反了**（`preprocessor.json` 是權威、逐字相等否則 raise）。那不只是
+> 選錯一邊，而是**往回退**：`a220cb6`（2026-06-14）已經讓 `predict_scores` 優先採用
+> `model.feature_names()`，issue #63 的待辦第 3 點本來就規劃「adapter 暴露 `feature_names()` ＋
+> `predict_scores` 選子集」。記在這裡，因為「用正本不用抄本」這個直覺在這個 repo 是錯的，下一個
+> 人很可能會再犯一次。
 
 ### 實作形式：view 從模型建，**不要**呼叫 `apply_feature_selection`
 
@@ -269,12 +286,6 @@ view = {**preprocessor, "feature_columns": model.feature_names()}
 
 `inference_population_features` 存的是**全集**（見 [ADR-0010](0010-inference-chunked-scoring-shape.md) §5），
 子集只在 chunk 內由這一行切出來——這是那張表能跨 `model_version` 重用的前提。
-
-> **本 ADR 初稿把這個結論寫反了**（`preprocessor.json` 是權威、逐字相等否則 raise）。那不只是
-> 選錯一邊，而是**往回退**：`a220cb6`（2026-06-14）已經讓 `predict_scores` 優先採用
-> `model.feature_names()`，issue #63 的待辦第 3 點本來就規劃「adapter 暴露 `feature_names()` ＋
-> `predict_scores` 選子集」。記在這裡，因為「用正本不用抄本」這個直覺在這個 repo 是錯的，下一個
-> 人很可能會再犯一次。
 
 保序子序列的斷言同時保住了原本要的東西：它會抓到 stale 的 `preprocessor.json`（模型有的欄
 正本沒有）與不匹配的模型（順序被打亂）。ADR-0008 記錄過，artifact 對 artifact 是 inference
@@ -314,15 +325,16 @@ chunk 版的 `chunk_row_count`（第三節的表本來就規劃了它）與整�
 **`no_duplicates` 從「220M 列的 shuffle 去重」降級成「結構保證 ＋ 一行 pandas 斷言」。** 這個
 降級依賴 ADR-0010 的分區設計（bucket 對 entity 互斥）——那條 ADR 若被推翻，這條要跟著回頭。
 
-**第五節與第一節實例一合併成同一張實作票**（ADR-0010「後果」的票 A），因為兩者動的是同一段
-程式碼：誰決定取哪些欄、誰負責編碼。
+**第五節與第一節實例一合併成同一張實作票**（ADR-0010「後果」的票 A，即 #185），因為兩者動的是
+同一段程式碼：誰決定取哪些欄、誰負責編碼。
 
 ## 這條 ADR 沒有解決的事
 
-- **`score_varies_within_group` 的誤報空間沒關掉**，見第四節末。
-- **`rank_consistency` 的 min／max 是全域聚合而非逐組**（`nodes_spark.py:379-390`）。一組
-  `[1,2,3]` 與另一組 `[1..22]` 並存時全域 min=1、max=22 照樣通過。今天由 `completeness`（組大小）
-  補位，兩條合起來大致足夠，但**這個弱點早於本次改動，本次也沒有修**。
+- **`score_varies_within_group` 的誤報空間沒關掉**，見第四節末的「刻意不加」。
+- **`rank_consistency` 的 min／max 是全域聚合而非逐組。** 一組 `[1,2,3]` 與另一組 `[1..22]` 並存
+  時全域 min=1、max=22 照樣通過。今天由 `completeness`（組大小）補位，兩條合起來大致足夠，但
+  **這個弱點早於本次改動，本次也沒有修**（落地後仍然如此，`steps/validation.py` 的
+  `rank_consistency_failure` docstring 自己記著這件事）。
 - **inference 仍然無法自我檢查「載入的 `preprocessor` 是否與現行 config 相符」**：第五節的斷言
   是 artifact 對 artifact，不是 artifact 對 config。ADR-0008 列的那一項只被縮小，沒有被消掉。
 - **`item_values_are_known` 只驗 identity 欄的值域，不驗它與特徵欄那個整數 code 的對應關係。**

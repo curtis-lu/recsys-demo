@@ -5,6 +5,15 @@ date: 2026-08-08
 
 # 寫入後的分區回報改問 metastore，不問 DataFrame
 
+> **狀態（2026-08-19 核對）**：決策當時，17 個帶 `partition_cols` 的 catalog 條目裡有 **3 個
+> 沒有 `partition_filter`**，被排除在新做法之外。#187 之後那 3 個也有了（`score_table` 同時
+> 改名 `unranked_predictions`），#188 又新增一張 `inference_population_features`——**今日 18 個
+> 帶 `partition_cols` 的條目全部有 `partition_filter`**，`save()` 裡
+> `_log_partitions_from_frame()` 那條分支已經沒有任何 catalog 條目走得到。
+>
+> 下文的「3 個沒有」「14 個有」是 2026-08-08 當時的分佈，保留是因為**那個排除本身就是決定的
+> 一部分**（它劃出了這個做法成立的邊界）。
+
 `HiveTableDataset.save()` 寫完之後會印一行「寫了哪些分區」。原本的取得方式是回頭問剛寫出去的
 那個 `df`：
 
@@ -34,13 +43,13 @@ QueryExecution，從頭再跑一次整條 lineage。
 `Scan parquet` 原封不動全在。欄位裁剪只砍到剩 partition 欄，**砍不掉 join**——Spark 3.3
 無法證明右表 join key 唯一、join 不改變列數重複度，所以消不掉。
 
-控制組排除了「它是不是佔了寫入的便宜」：同一個 df 在**完全沒寫過**的 session 裡跑同一句是
+**控制組排除了「它是不是佔了寫入的便宜」**：同一個 df 在**完全沒寫過**的 session 裡跑同一句是
 5.94s（冷）／3.38s（暖），與寫入後那次的 3.25s 同一量級。**沒有 shuffle 重用，它是一次完整
 獨立的重跑。**
 
-影響面不只 dataset：這段在 `io/`，`conf/base/catalog.yaml` 有 17 個可寫且帶 `partition_cols`
-的條目、**沒有一個覆寫 `write_mode`**（全吃預設 `"overwrite"`），所以條件恆真。其中 12 個屬
-dataset pipeline，含最貴的三個 `model_input`。
+影響面不只 dataset：這段在 `io/`，當時 `conf/base/catalog.yaml` 有 17 個可寫且帶
+`partition_cols` 的條目、**沒有一個覆寫 `write_mode`**（全吃預設 `"overwrite"`），所以條件恆真。
+其中 12 個屬 dataset pipeline，含最貴的三個 `model_input`。
 
 ## 決定：**有 `partition_filter` 的表**，寫入前後各拍一次 metastore 快照
 
@@ -54,13 +63,16 @@ new    = [p for p in after if _partition_key(p) not in before]
 `existing_partition_values()`（同 class，本來就存在、predict node 已在用）走
 `SHOW PARTITIONS`：純 metastore，成本與表大小無關。
 
-**「有 `partition_filter`」是這個做法能成立的條件，不是巧合。** 它的過濾條件是
-`any(spec.get(k) != v for k, v in self._partition_filter.items())`——空 dict 時
-`any([])` 恆為 `False`，**一筆都不濾掉**，回傳的是整張表跨所有 run 累積的全部分區。
-那種情況下 before／after 差集分不出「這次覆寫的」與「早就在那、這次沒動的」，`new` 在
-重新發布時為空、`partition_count` 也與這次寫入無關。
+### 為什麼「有 `partition_filter`」是成立條件，不是巧合
 
-17 個可寫且帶 `partition_cols` 的條目裡，**14 個有 `partition_filter`**，走上面這條路：
+它的過濾條件是 `any(spec.get(k) != v for k, v in self._partition_filter.items())`——空 dict 時
+`any([])` 恆為 `False`，**一筆都不濾掉**，回傳的是整張表跨所有 run 累積的全部分區。
+
+那種情況下 before／after 差集分不出「這次覆寫的」與「早就在那、這次沒動的」：`new` 在重新發布
+時為空、`partition_count` 也與這次寫入無關。所以沒有 `partition_filter` 的表**維持原本問
+DataFrame 的做法**，輸出與改動前逐字相同。
+
+當時 17 個可寫且帶 `partition_cols` 的條目裡，**14 個有 `partition_filter`**，走上面這條路：
 
 | `partition_filter` 的鍵 | 條目數 |
 |---|---|
@@ -69,18 +81,14 @@ new    = [p for p in after if _partition_key(p) not in before]
 | `base_dataset_version` ＋ `calibration_variant_id` | 2 |
 | `model_version` | 2 |
 
-剩下 **3 個沒有**——
-`score_table`、`ranked_staging`、`ranked_predictions`，全在 inference／publish 路徑上——
-維持原本問 DataFrame 的做法，輸出與改動前逐字相同。理由與後續見
-[#179](https://github.com/curtis-lu/recsys-demo/issues/179)。
-
-> **本段自 issue #187 起是歷史紀錄。** 那三張已經改成有 `partition_filter`
-> （`score_table` 同時改名 `unranked_predictions`），17 個 `partition_filter` 條目全部走
-> metastore 快照。詳見下方「這條 ADR 沒有解決的事」。
+剩下 **3 個沒有**——`score_table`、`ranked_staging`、`ranked_predictions`，全在 inference／
+publish 路徑上——當時被排除在外。理由與後續見
+[#179](https://github.com/curtis-lu/recsys-demo/issues/179)；那三張後來的下場見頂部狀態註記與
+下方「這條 ADR 沒有解決的事」。
 
 ## 代價：不再逐位精確，而且盲點打在哪要說清楚
 
-以下只談走 metastore 快照的那 14 個條目（本 ADR 當下的數字；#187 之後是 17 個，見上方註記）。
+以下只談走 metastore 快照的那 14 個條目：
 
 | 節點類型 | 每次寫入的分區 | `new` 是否精確 |
 |---|---|---|
@@ -122,10 +130,8 @@ new    = [p for p in after if _partition_key(p) not in before]
   （[#179](https://github.com/curtis-lu/recsys-demo/issues/179)），那屬於 inference pipeline
   的重構，不屬於這裡。~~ **已解決**（issue #187，論證見
   [ADR-0010](0010-inference-chunked-scoring-shape.md) §5）：三張表的 `model_version` 提為
-  `partition_filter`（`score_table` 同時改名為 `unranked_predictions`），走的就是本 ADR 的
-  metastore 快照路徑。**上表「剩下 3 個沒有」那句自此失效——現在是 17 個條目全部有
-  `partition_filter`**，`_log_partitions_from_frame()` 不再被任何 catalog 條目觸及。那是一次
-  破壞性遷移（三張表必須先 DROP 再重建），步驟見 `docs/pipelines/inference.md` §6.5。
+  `partition_filter`，走的就是本 ADR 的 metastore 快照路徑。那是一次破壞性遷移（三張表必須先
+  DROP 再重建），步驟見 `docs/pipelines/inference.md` §6.5。
 - **`--rebuild-dates` 重算既有月份時**，`new` 為空、`after` 又含沒動的月，兩個數字都說不出
   這次重算了哪幾個月。見上一節。
 - **哪個 node 的時間花在哪**不是這條 ADR 的題目。它由 Runner 的 `load`／`func`／`save` 分段

@@ -5,6 +5,10 @@ date: 2026-08-03
 
 # 月份計畫走 catalog，不走 `parameters`
 
+> **實作狀態（2026-08-19 核對）**：已落地。三份計畫由 `__main__.py` 的 `build_month_plans` 在
+> 開跑前算好，「哪張表要哪些月」的規則收斂在 `pipelines/dataset/month_plans.py` 的
+> `_CONFIGURED_SNAP_DATES`（`:174`），`INCREMENTAL_DATASETS` 由它推導（`:187`）。
+
 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 讓 dataset 只處理「設定列出、但尚未落地」的月份。差集**決定**當時就集中在一個 helper，但**套用**沒有：CLI 開跑時算過一次差集（列 partition、印 log），算完丟掉；四個節點在執行期各自從 `parameters` 的 `_existing_snap_dates` 這個底線開頭的 key 重算一次。
 
 代價不是效能，是**可讀性**：`pipeline.py` 上看不出哪些節點是增量的——那個資訊藏在四個函式的前四行。想知道這次 run 要做多少工，得讀節點內文。
@@ -15,7 +19,7 @@ date: 2026-08-03
 
 `parameters` 是設定；`_existing_snap_dates` 裝的是執行期從 metastore 查出來的資料。**鍵名的底線前綴就是這段設計自己的招供**——它需要一個「使用者不會寫、但節點讀得到」的通道，而 `parameters` 剛好被傳給每個節點。
 
-catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(name, MemoryDataset(...))` 進去的。改走 catalog 後：
+catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(name, MemoryDataset(...))` 進去的。改走 catalog 後買到四件事：
 
 - **增量性寫在 pipeline 定義上。** 有 `*_month_plan` input 的節點是增量的，沒有的不是——一行 `inputs` 就看得出來，接錯線在 diff 上看得見。
 - **「哪個節點吃哪份計畫」變成可審閱的事實。** `select_test_keys` 吃 `test_keys_month_plan`、`build_test_model_input` 吃 `test_model_input_month_plan`——兩份不同的計畫（keys 可能已寫、model input 還沒），過去這件事只有讀完兩個函式才知道。
@@ -23,6 +27,8 @@ catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(nam
 - **測試不必再組 magic key。** 節點收一個 `SnapDatePlan`，測試就傳一個。
 
 否決 **一份 `dict[str, SnapDatePlan]`**：那樣節點仍得在函式體內寫死自己的資料集名字，沒有型別擋、呼叫端看不見，測試同樣得知道那個字串。具名輸入把它換成 pipeline 定義上的一行。
+
+### 規則收斂在單一常數，所以兩邊不可能對不起來
 
 「哪張表要哪些月」的規則收斂到 `pipelines/dataset/month_plans.py` 的 `_CONFIGURED_SNAP_DATES`：test 兩張吃 `dataset.test_snap_dates`，`preprocessed_feature_table` 吃全 split 聯集。權威清單 `INCREMENTAL_DATASETS` 由它推導而非另寫一份，所以**新增第四張增量表＝該表加一個條目**（＋ pipeline 定義上那個節點的一行 input），兩邊不可能對不起來。
 
@@ -42,9 +48,11 @@ catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(nam
 
 否決 **改成 fail-loud 斷言**（「發現計畫外的月份就 raise」）：要多付一次 Spark 掃描才知道有沒有計畫外月份，與 [ADR-0006](0006-data-quality-checks-belong-upstream.md)「dataset 閘門維持零掃描」的取捨不一致。
 
-所以 test 的過濾節點改用與 val **相同**的節點函式，`filter_test_model_input` 這個函式刪除。節點名字保留（`--only-node filter_test_model_input` 仍可定址）。
+所以 test 的過濾改用與 val **相同**的節點函式，`filter_test_model_input` 這個函式刪除。**節點名字保留**（`--only-node filter_test_model_input` 仍可定址，今日仍在 `pipelines/dataset/pipeline.py`）。
 
 > **給未來的維護者**：看到「test 的過濾沒有月份範圍檢查、val 也沒有」時，那不是漏掉的。它的上游已經 scoped，這裡再過一次只是重述同一件事；真要防的狀態需要一次全掃才驗得到，而這個 pipeline 的閘門刻意不付那個成本。
+
+**這一段後來被 [ADR-0012](0012-month-aware-slicing-not-per-artifact-skip.md) 補了一跳**：上面的論證對它檢查的那一跳（`test_model_input_unfiltered` 是 `MemoryDataset`）成立，但沒有再往上追一跳——`test_keys` 是持久化 Hive 表，鏈就在那裡斷了。ADR-0012 修的是收邊條件 `_can_load`，**本節的其餘結論不變**。
 
 ## 這條 ADR 沒有解決的事
 

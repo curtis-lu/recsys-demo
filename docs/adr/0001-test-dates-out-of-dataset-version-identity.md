@@ -5,7 +5,19 @@ date: 2026-07-31
 
 # `test_snap_dates` 退出 dataset 版本身分
 
-`dataset.test_snap_dates` 原本進 `compute_base_dataset_version` 的 hash payload，於是「多評估一個月」＝ `base_dataset_version` 翻號 ＝ 整條 dataset 重建，且因為 `model_version` 把 `base_dataset_version` 併進 hash（`core/versioning.py:148-171`），連帶必須重訓一個實質相同的模型。**我們把 `test_snap_dates` 從該 payload 剝除**：test 日期不再定義產物身分，只定義資料覆蓋範圍。
+> **實作狀態（2026-08-19 核對）**：已落地。`core/versioning.py` 的
+> `COVERAGE_ONLY_KEYS = frozenset({"test_snap_dates"})` 就是這個決定，剝除發生在
+> `compute_base_dataset_version` 組 payload 之前。
+>
+> **落地順序是硬性的**：本 ADR 必須排在 [ADR-0003](0003-per-month-test-artifacts.md)（cache 改
+> per-month）**之後**，理由見下方「後果」最後一條。
+
+`dataset.test_snap_dates` 原本進 `compute_base_dataset_version` 的 hash payload。後果是一條連鎖：
+「多評估一個月」＝ `base_dataset_version` 翻號 ＝ 整條 dataset 重建；而 `model_version` 又把
+`base_dataset_version` 併進自己的 hash（`compute_model_version`，`core/versioning.py`），所以連帶
+必須重訓一個實質相同的模型。
+
+**我們把 `test_snap_dates` 從該 payload 剝除**：test 日期不再定義產物身分，只定義資料覆蓋範圍。
 
 ## 根本問題：一個 hash 兼任了三件事
 
@@ -15,7 +27,7 @@ date: 2026-07-31
 | **覆蓋範圍**（表裡有哪些月份） | config 列出的日期 | 也是 `base_dataset_version` |
 | **快取有效性**（本機 parquet cache 該不該重建） | 上游資料是否變動 | 也是 `base_dataset_version`（副作用地） |
 
-三者過去由同一個 hash 兼任，所以任何一個變動都會付出全部三者的代價。本 ADR 拆開前兩者；第三者的接手見 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 與 `pipelines/training/nodes.py` 的 cache 路徑分層。
+三者過去由同一個 hash 兼任，所以任何一個變動都會付出全部三者的代價。本 ADR 拆開前兩者；第三者的接手見 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 與 `pipelines/training/nodes.py` 的 cache 路徑分層（`_CACHE_PATH_LAYOUT`）。
 
 ## 為什麼 test 可以剝、train／val／calibration 不行
 
@@ -23,12 +35,12 @@ date: 2026-07-31
 
 - `val_snap_dates` 的資料經 `val_parquet_handle` 進入 LightGBM 的 `valid_sets` 並驅動 `early_stopping`（`models/lightgbm_adapter.py:81-102`），直接決定 `num_iterations` ── 決定模型本身。
 - `calibration_snap_dates` 決定校準後的模型輸出。
-- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`collect_dataset_snap_dates`（`pipelines/dataset/month_plans.py`）的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。（#170 之後，`fit_preprocessor_metadata` 自己也把這件事寫成具名決策——`pipelines/dataset/nodes.py` 的 `Decision — no leakage` 註解。）
+- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`collect_dataset_snap_dates`（`pipelines/dataset/month_plans.py`）的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。（#170 之後，`fit_preprocessor_metadata` 自己也把這件事寫成具名決策——`pipelines/dataset/nodes.py:471` 的 `Decision — no leakage` 註解。）
 
 驗證過的支撐事實：
 
 - 前處理的編碼是**純逐列** map lookup（`preprocessing.py` 的 `_encode_categoricals`），查的是只在 train 上 fit 的 `category_mappings`；整個 `apply_preprocessor_to_features` 唯一的聚合是未知值計數，只餵給 `logger`，不進輸出。因此 test 日期不改變任何既有產物的**內容**。
-- `HiveTableDataset` 以 `partitionOverwriteMode=dynamic` 寫入（`io/hive_table_dataset.py:177-211`），只覆蓋 DataFrame 裡出現的 partition。因此新增月份是 **append**，既有月份的產物與評估報表原封不動。
+- `HiveTableDataset.save()` 以 `partitionOverwriteMode=dynamic` 寫入（`io/hive_table_dataset.py`），只覆蓋 DataFrame 裡出現的 partition。因此新增月份是 **append**，既有月份的產物與評估報表原封不動。
 - 下游 `build_model_input` 一律以 keys 為驅動端 join features，而 keys 已按各 split 的日期過濾 ── 多出來的月份是惰性的，不會汙染任何 split。
 
 ## 考慮過但否決的選項
@@ -39,6 +51,16 @@ date: 2026-07-31
 
 ## 後果
 
-- **上線即一次性翻號。** 用本 repo 當時的 `conf/base/` 設定實測，`base_dataset_version` `d89353a8 → f9f5e578`、`model_version` `aa107215 → 6a91a7b4`。（此組數值是在 `feature_table_fingerprint=None` 的條件下計算；實際執行時 `__main__.py:dataset()` 會傳入真實指紋，因此各環境看到的字面值不同 ── 這裡要記住的是「必然改變」與改變的傳染路徑，不是這四個字串本身。）既有產物的檔案還在舊路徑下、能繼續服務，但**不再能從當前 config 重現**。沒有「不翻號」的做法 ── 任何對 hash payload 的改動都會改變輸出。決定直接吃這筆成本，疊在一次本來就要做的重訓上。
+- **上線即一次性翻號。** 用本 repo 當時的 `conf/base/` 設定實測，`base_dataset_version` `d89353a8 → f9f5e578`、`model_version` `aa107215 → 6a91a7b4`。（此組數值是在 `feature_table_fingerprint=None` 的條件下計算；實際執行時 `__main__.py` 的 `dataset()` 會傳入真實指紋，因此各環境看到的字面值不同 ── 這裡要記住的是「必然改變」與改變的傳染路徑，不是這四個字串本身。）既有產物的檔案還在舊路徑下、能繼續服務，但**不再能從當前 config 重現**。沒有「不翻號」的做法 ── 任何對 hash payload 的改動都會改變輸出。決定直接吃這筆成本，疊在一次本來就要做的重訓上。
+
 - **`parameters_dataset.yaml` 不再是 dataset 內容的唯一真實來源。** 同一個 `base_dataset_version` 底下的 test 覆蓋範圍會隨時間累積；表裡實際有哪些月份要看 manifest 與 partition。這是接受累積語意的直接代價。
-- **快取有效性失去了原本的免費保險。** 過去改 test 日期會翻號、連帶讓本機 parquet cache 必然 miss；剝除之後這個保險消失，責任移交給 cache 路徑本身（`pipelines/training/nodes.py` 的 `_CACHE_PATH_LAYOUT`）。**本 ADR 的實作若在 cache 路徑改動之前落地，會製造一個靜默 bug** ── 加了月份、cache 命中舊資料、新月份從未被 predict、且不報錯。因此兩者的落地順序是硬性的。
+
+- **快取有效性失去了原本的免費保險。** 過去改 test 日期會翻號、連帶讓本機 parquet cache 必然 miss；剝除之後這個保險消失，責任移交給 cache 路徑本身（`pipelines/training/nodes.py` 的 `_CACHE_PATH_LAYOUT`）。
+
+  **所以本 ADR 的實作若在 cache 路徑改動（[ADR-0003](0003-per-month-test-artifacts.md)）之前落地，會製造一個靜默 bug**：
+
+  1. 加月份不再翻 `base_dataset_version` → cache 路徑不變。
+  2. `_SUCCESS` 還在 → cache 命中。
+  3. 新月份從未被複製進來 → predict 從未看到它，**而且不報錯**。
+
+  因此兩者的落地順序是硬性的：先架護欄（ADR-0003），再拆牆（本 ADR）。
