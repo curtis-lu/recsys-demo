@@ -66,7 +66,7 @@
 <h1>dataset pipeline 流程圖</h1>
 <p class="sub">node 層級的 DAG：誰產出什麼、誰吃什麼。對照
 <code>src/recsys_tfb/pipelines/dataset/pipeline.py::create_pipeline</code>。
-姊妹圖 <a href="inference-pipeline.html">inference-pipeline.html</a>；
+姊妹圖 <a href="training-pipeline.html">training-pipeline.html</a>、<a href="inference-pipeline.html">inference-pipeline.html</a>；
 資料表 schema 與跨 pipeline 的完整 lineage 見 <a href="../data-lineage.html">data-lineage.html</a>，
 各 node 的設定與重跑範圍見 <a href="../pipelines/dataset.md">dataset.md</a>。</p>
 
@@ -100,7 +100,7 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
 </div>
 <p class="sub" style="margin-top:6px">A/B/C 各連四個 build node ＝ 12 條橫貫整張圖的線，P 再連三個跨 subgraph 的 node；
 改用接點記號後 lineage 一條不少，但圖不會打結。<br>
-姊妹圖 <a href="inference-pipeline.html">inference-pipeline.html</a> 用同一套圖例。
+姊妹圖 <a href="training-pipeline.html">training-pipeline.html</a> 與 <a href="inference-pipeline.html">inference-pipeline.html</a> 用同一套圖例。
 兩處刻意的差異：那邊多一種「失敗路徑終點」的形狀（本 pipeline 的閘 <code>outputs=None</code>，中止就是中止，沒有分歧要畫），
 而那邊的「全表讀回」連別的 <code>model_version</code> 都會讀回來，本圖的「跨月讀回」只跨月——成因不同，見下。</p>
 
