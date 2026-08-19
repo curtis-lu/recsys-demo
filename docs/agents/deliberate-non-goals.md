@@ -26,7 +26,7 @@
 | 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」 | 別因為讀者 subagent 提了意見就動 |
 | `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
 | shaprx（SHAP-on-loss 開源套件構想） | 使用者 2026-07-07 明示未定案、擱置。規劃記錄在 `~/projects/shaprx` | 任何新規劃**不得引用它當既有資產或邊界** |
-| `--only-test-months` 遇到月份清單設成 `[]` 不擋 | 使用者 2026-08-13 明示不加護欄（calibration 未來要移除）。`train_snap_dates` 或 `calibration_snap_dates` 設成 `[]` 時，`select_sample_keys` 與 `select_calibration_keys` 走的 `restrict_to_months_or_all` 會回傳**整個 `sample_pool`**，於是它們的內容綁在那張表上——而它是上游 ETL 逐月長大的來源表（`read_only: true`）。跳過它們安不安全，因此不由 config 決定，而由「上次跑完整 dataset 之後 ETL 有沒有再加月份」決定，**而那件事沒有任何東西在追蹤** | 別加檢查、也別讓旗標拒跑。設成 `[]` 的 config 本來就壞了：calibration 會抽到 train 月份的資料，而 A24 對空集合永遠成立、不會出聲 |
+| `--only-test-months` 遇到月份清單設成 `[]` 不擋 | 使用者 2026-08-13 明示不加護欄（calibration 未來要移除）。`train_snap_dates` 或 `calibration_snap_dates` 設成 `[]` 時，`select_sample_keys` 與 `select_calibration_keys` 走的 `restrict_to_months_or_all` 不做月份過濾，於是它們改成從 `sample_pool` 的**每一個月**抽——包括上游 ETL 之後才加進去的月份。所以「跳過它們安不安全」不由 config 決定，而由「上次跑完整 dataset 之後 ETL 有沒有再加月份」決定：加過就停在舊的，沒加過就沒事，**而沒有任何東西在追蹤那件事** | 別加檢查、也別讓旗標拒跑。設成 `[]` 的 config 本來就壞了：calibration 會抽到 train 月份的資料，而 A24 對空集合永遠成立、不會出聲 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
 
 ## 二、延後中，且延後條件明確
