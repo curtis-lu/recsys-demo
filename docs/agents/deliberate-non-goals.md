@@ -26,7 +26,7 @@
 | 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」 | 別因為讀者 subagent 提了意見就動 |
 | `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
 | shaprx（SHAP-on-loss 開源套件構想） | 使用者 2026-07-07 明示未定案、擱置。規劃記錄在 `~/projects/shaprx` | 任何新規劃**不得引用它當既有資產或邊界** |
-| `train_snap_dates: []` / `calibration_snap_dates: []` 的內容漂移 | `restrict_to_months_or_all` 對空清單**整池照收**，所以 train／calibration 的內容會隨上游 ETL 加月份而變，但 `train_variant_id` 只由 config 算（`core/versioning.py`）、不會翻號——同一個版本 ID 對到兩份不同內容。使用者 2026-08-13 決定不修（calibration 未來要移除） | **別記到 `--only-test-months` 頭上**：加一個 test 月不會改到那兩個 node，改到它們的是 ETL，跟帶不帶旗標無關。而且 `[]` 時帶旗標反而不會出事——全跑才會把新 test 月一起收進 train，讓該月的評估變成 in-sample。別為此在旗標上加護欄或讓它拒跑 |
+| 不為 `train_snap_dates: []` 在 `--only-test-months` 上加護欄 | `[]` 會讓 `select_sample_keys`／`select_calibration_keys` 整池照收（`restrict_to_months_or_all`），內容隨上游 ETL 漂而 `train_variant_id` 不翻號。**這個設定要擋，但擋在 A23（#158）**：加一個 test 月不會改到那兩個 node，改到它們的是 ETL；而且 `[]` 時帶旗標反而避開 train/test 撞月，全量跑才會真的撞 | 別在旗標上加檢查、也別讓它拒跑——那是修錯對象。A23 落地後 `[]` 不可能存在，這條就可以刪 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
 
 ## 二、延後中，且延後條件明確
