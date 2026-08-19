@@ -11,7 +11,9 @@
 %%   [[ 雙框 ]]     別的 pipeline 落地的版本化 artifact（不是表，是檔案）
 %%   [ 方框 ]       node，框內是 node name（可直接餵給 --from-node / --only-node）
 %%   [/ 梯形 \]     side-effect sink：outputs=None，產物寫到 catalog 以外的地方
-%%                  （本圖只有 log_experiment 一個；姊妹圖沒有這個形狀）
+%%                  （本圖只有 log_experiment 一個；姊妹圖沒有這個形狀）。刻意**不用**
+%%                  姊妹圖六角閘的黃色——同一個顏色在三張圖裡只能有一種意思。
+%%   ★              下游或人工流程的重點產物（沿用姊妹圖的裸星用法）
 %%   ([ 實線膠囊 ])  落地的 catalog 條目（Hive table / JSON 檔）
 %%   ([ 虛線膠囊 ])  MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
 %%   ([ 綠膠囊 ])    別的 pipeline 會吃的產物
@@ -64,6 +66,10 @@
 %%      同一場搜尋。
 %%   三者共同的代價是 --rebuild-dates / --fresh-hpo：上游回填會改變輸入而不改變任何
 %%   版本號，所以必須有一個「明說要重來」的出口。
+%%   ADR-0012 把產物層的 skip-if-exists 標為「預設值站錯邊」的那一種，並否決了把它擴到
+%%   dataset 全部產物。上面三項裡只有第 1 項（parquet 快取）真的落在那個靶心——predict
+%%   以 model_version、HPO 以 search_id 為鍵，兩者都是雜湊過的版本 ID，不是「版本號完全
+%%   不參與」。第 1 項是刻意付這筆帳，代價就是上面那個出口。
 
 %% 為什麼 best_params / best_iteration / hpo_best_model 要落地
 %%   它們是 HPO 唯一的產出。落地之後 `training --from-node finalize_model` 可以整段
@@ -87,7 +93,8 @@
 %%   一份空報表。
 
 %% node 函式不全在 training/nodes.py
-%%   19 個 node 裡有 7 個的函式在 diagnosis/ 底下：compute_feature_statistics、
+%%   關掉 calibration 的 19 個 node 裡有 7 個的函式在 diagnosis/ 底下（開啟時 21 個，多出的
+%%   兩個函式都在 training/nodes.py）：compute_feature_statistics、
 %%   compute_feature_importance、compute_shap_diagnostics、compute_quadrant_profiles、
 %%   compute_quadrant_cases（diagnosis.model）、compute_gain_ledger
 %%   （diagnosis.model.gain_ledger）、select_shap_population
@@ -105,7 +112,11 @@
 
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
-%%   - calibration 分支（training.calibration.enabled: true 才存在）：會多出
+%%   - calibration 分支——注意**出廠設定就是開的**（conf/base/parameters_training.yaml
+%%     的 training.calibration.enabled: true，由 __main__.py 的 training command 讀取），
+%%     所以照出廠設定跑，DAG 實際是 21 個 node、8 個碰 Spark。本圖畫的是關掉它的 19
+%%     node 形狀，理由是它未來要移除（docs/agents/deliberate-non-goals.md 有登記）。
+%%     開啟時會多出
 %%     cache_calibration_model_input，且 finalize_model 的輸出改名為 trained_model、
 %%     中間插入 calibrate_model 才產出 `model`。這比 dataset 圖不畫的那個分支更動主鏈
 %%     ——`model` 這個頭牌產物換了生產者——但下游每一條邊都不變（大家還是吃 `model`），
@@ -177,7 +188,7 @@ flowchart TB
     d_besti(["best_iteration　<b>[L]</b>"])
     d_hpomodel(["hpo_best_model<br/><small>落地在 hpo/ 子目錄（sidecar 會撞名）</small>"])
     n_final["finalize_model<br/><small>＋ V ・ T 與 train_dev 只有 refit_on_full 策略會讀<br/>hpo_best（預設）＝把 HPO 冠軍原樣傳出</small>"]
-    o_model(["model　★<br/><small>inference / evaluation 也吃</small>"])
+    o_model(["model　★　<b>[M]</b><br/><small>inference / evaluation 也吃</small>"])
   end
 
   d_view -- "其餘 9 個消費者見 [V] 記號" --> n_preplgb
@@ -259,7 +270,7 @@ flowchart TB
   classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
   classDef mem fill:#ffffff,stroke:#adb5bd,stroke-width:1px,stroke-dasharray:5 3,color:#6a737d
   classDef out fill:#b2f2bb,stroke:#2f9e44,stroke-width:1.5px,color:#14532d
-  classDef sink fill:#ffec99,stroke:#f08c00,stroke-width:1.5px,color:#7a4a00
+  classDef sink fill:#f3d9fa,stroke:#ae3ec9,stroke-width:1.5px,color:#6a2072
 
   class src_train,src_traindev,src_val,src_test src
   class art_prep art
