@@ -4,6 +4,7 @@
 > 方法：**只採信程式碼證據**，不採信任一文件怎麼描述。逐條分類為 (a) 已收錄／(b) 活著未寫下／(c) 已推翻或從未實現／(d) 與檔B衝突／(e) 不是架構原則／(f) 無法判定。
 > 檔案路徑：檔 A = `/Users/curtislu/projects/recsys_tfb/kedro_design_philosophy.md`；檔 B = `/Users/curtislu/projects/recsys_tfb/docs/design-principles.md`。行號皆指這兩份檔案讀取當下（2026-08-03）的內容。
 > **⚠ 檔 A 的行號已位移**：同一次交付在檔 A 頂部加了 20 行的 deprecated banner，因此本文所有指向檔 A 的行號都要 **+20**。檔 B 的行號不受影響。
+> **⚠ 檔 A 已於 2026-08-19 刪除**（本文即該次退役的依據，#158）。本文所有指向 `kedro_design_philosophy.md` 的路徑與行號都是**歷史座標**，現在的 repo 裡開不到；要對照原文請翻 git history。檔 B 仍然存在。
 
 ## 結論摘要
 
