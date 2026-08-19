@@ -26,6 +26,7 @@
 | 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」 | 別因為讀者 subagent 提了意見就動 |
 | `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
 | shaprx（SHAP-on-loss 開源套件構想） | 使用者 2026-07-07 明示未定案、擱置。規劃記錄在 `~/projects/shaprx` | 任何新規劃**不得引用它當既有資產或邊界** |
+| `--only-test-months` 對「月份清單為空」的護欄 | 使用者 2026-08-13 明示不加（calibration 未來要移除，不值得為它加不變量）。機制：`select_sample_keys` 與 `select_calibration_keys` 走 `restrict_to_months_or_all`，`train_snap_dates` 或 `calibration_snap_dates` 為空時**整池不過濾**，於是它們的內容會隨新 test 月而變——而該旗標正好跳過它們，靜默變舊。這是旗標前提唯一會失效的情況 | 別因為「發現一個靜默 stale 路徑」就加檢查或讓旗標拒跑。使用者面的警告已寫在 `docs/operations/adding-an-eval-month.md` 的「什麼時候不要用它」。**先確認一件事再談**：真設成空清單的 config 在別處已經先壞了（calibration 會抽到 train 月份的 row，而 A24 對空集合永遠成立），旗標只是讓它從「每次重算的錯」變成「不重算的錯」 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
 
 ## 二、延後中，且延後條件明確
