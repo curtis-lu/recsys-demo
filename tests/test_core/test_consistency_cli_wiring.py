@@ -84,3 +84,32 @@ def test_a24_wired_into_dataset_command_before_spark():
     assert src.index("date_split_overlap_errors(") < src.index(
         "get_or_create_spark_session("
     ), "A24 must fail before the Spark cold start, like A21"
+
+
+def test_a23_wired_into_dataset_command_before_spark():
+    # Same rule as A24, and #158's decision is the reason it exists: only the
+    # dataset pipeline reads train_snap_dates, so aggregating this rejects a
+    # valid feature_etl / source_etl / inference config. Without a test on it,
+    # the next person tidies it into the aggregator and blocks 9 unrelated
+    # tests again.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "train_snap_dates_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A23 must stay off the global aggregator (#158's decision)"
+
+    src = inspect.getsource(m.dataset)
+    assert "train_snap_dates_errors(params)" in src
+    assert src.index("train_snap_dates_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A23 must fail before the Spark cold start, like A21/A24"
+
+
+def test_a23_is_checked_before_a24():
+    # A24 reads an absent list as empty and an empty set overlaps nothing, so
+    # a config missing the key entirely would otherwise be told "your splits
+    # are fine" and nothing else.
+    src = inspect.getsource(m.dataset)
+    assert src.index("train_snap_dates_errors(") < src.index(
+        "date_split_overlap_errors("
+    )

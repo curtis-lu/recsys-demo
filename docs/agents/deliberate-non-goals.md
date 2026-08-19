@@ -26,6 +26,7 @@
 | 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」 | 別因為讀者 subagent 提了意見就動 |
 | `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
 | shaprx（SHAP-on-loss 開源套件構想） | 使用者 2026-07-07 明示未定案、擱置。規劃記錄在 `~/projects/shaprx` | 任何新規劃**不得引用它當既有資產或邊界** |
+| `calibration_snap_dates: []` 不比照 A23 擋掉 | 空清單時 `select_calibration_keys` 整池照收（`restrict_to_months_or_all`），校準集會收進 train 與 test 月份、該 test 月的評估變成 in-sample，而 A24 對空集合永遠成立、不出聲。與 A23 擋掉的 `train_snap_dates: []` 是同一個洞。使用者 2026-08-19 決定不擴，理由是 calibration 未來要移除 | 別順手把 calibration 加進 `train_snap_dates_errors`。也別記到 `--only-test-months` 頭上——旗標跳過那個 node，反而是比較安全的一邊，全量跑才會真的撞。calibration 移除後這條就可以刪 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
 
 ## 二、延後中，且延後條件明確

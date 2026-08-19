@@ -1569,3 +1569,81 @@ class TestDateSplitOverlapA24:
         )
         assert "2026-1-31" in errs[0], errs[0]
         assert "2026-01-31" in errs[0], errs[0]
+
+
+# --- A23: dataset.train_snap_dates required and non-empty (#158) ---
+
+from recsys_tfb.core.consistency import train_snap_dates_errors
+
+
+class TestTrainSnapDatesA23:
+    """A23 — ``dataset.train_snap_dates`` required and non-empty (#158).
+
+    Four branches, four messages, because they are four different fixes. Each
+    test matches on wording unique to its branch: every message contains
+    ``train_snap_dates``, so matching on that would let any branch satisfy any
+    test.
+    """
+
+    def test_a_configured_list_passes(self):
+        assert train_snap_dates_errors(
+            _split_params(train=["2026-01-31", "2026-02-28"])
+        ) == []
+
+    def test_unquoted_yaml_dates_pass(self):
+        # PyYAML builds datetime.date for an unquoted scalar; _iso_date handles
+        # it everywhere else, and A23 must not be the one place that rejects a
+        # config the rest of the pipeline reads fine.
+        assert train_snap_dates_errors(
+            {"dataset": {"train_snap_dates": [_dt.date(2026, 1, 31)]}}
+        ) == []
+
+    def test_absent_key_is_reported(self):
+        errs = train_snap_dates_errors({"dataset": {}})
+        assert len(errs) == 1
+        assert "absent" in errs[0]
+        assert "dataset.train_snap_dates" in errs[0]
+
+    def test_absent_dataset_block_is_reported_the_same_way(self):
+        assert "absent" in train_snap_dates_errors({})[0]
+
+    def test_empty_list_is_reported(self):
+        # The branch that matters most: an empty list raises nothing today.
+        # `restrict_to_months_or_all` leaves the pool WHOLE rather than empty,
+        # so train silently draws from every month in sample_pool — including
+        # the test months, which makes their metrics in-sample. A24 cannot see
+        # it (an empty set overlaps nothing).
+        errs = train_snap_dates_errors(_split_params(train=[]))
+        assert len(errs) == 1
+        assert "empty" in errs[0]
+
+    def test_a_bare_string_is_reported_as_not_a_list(self):
+        # A string is iterable, so none of the three index sites raise: they
+        # walk it character by character and try to parse "2" as a date.
+        errs = train_snap_dates_errors(_split_params(train="2026-01-31"))
+        assert len(errs) == 1
+        assert "list" in errs[0]
+
+    def test_an_unparseable_entry_is_reported_with_its_own_literal(self):
+        errs = train_snap_dates_errors(_split_params(train=["2026-01-31", "31/01/2026"]))
+        assert len(errs) == 1
+        assert "31/01/2026" in errs[0]
+        # The good entry is not dragged into the message.
+        assert "2026-01-31" not in errs[0]
+
+    def test_every_unparseable_entry_is_named_in_one_pass(self):
+        errs = train_snap_dates_errors(_split_params(train=["nope", "also-nope"]))
+        assert len(errs) == 1
+        assert "nope" in errs[0] and "also-nope" in errs[0]
+
+    def test_the_four_branches_have_distinguishable_messages(self):
+        # Guards the premise of every test above: if two branches ever share
+        # wording, those tests stop telling the branches apart and a swapped
+        # `if` goes unnoticed.
+        messages = [
+            train_snap_dates_errors({"dataset": {}})[0],
+            train_snap_dates_errors(_split_params(train=[]))[0],
+            train_snap_dates_errors(_split_params(train="2026-01-31"))[0],
+            train_snap_dates_errors(_split_params(train=["nope"]))[0],
+        ]
+        assert len(set(messages)) == 4

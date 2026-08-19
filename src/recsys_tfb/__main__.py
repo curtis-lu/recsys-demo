@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
+    train_snap_dates_errors,
     ConfigConsistencyError,
     REBUILD_SNAP_DATES_KEY,
 )
@@ -834,6 +835,18 @@ def dataset(
     # this pipeline reads these keys — and #158 measured what a dataset-only
     # predicate does there (9 unrelated tests blocked). Same reason A21/A22
     # hang off their own command.
+    # (A23) train_snap_dates required / a list / non-empty. Same reason A24
+    # hangs off this command rather than the aggregator: only this pipeline
+    # reads the key, and aggregating it rejects a valid feature_etl config
+    # (#158 measured 9 unrelated tests blocked). Before A24 because "the key is
+    # missing" should be reported ahead of "the splits overlap" — the latter
+    # reads an absent list as empty and finds nothing to say.
+    train_months_errors = train_snap_dates_errors(params)
+    if train_months_errors:
+        for line in train_months_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
+
     split_errors = date_split_overlap_errors(params)
     if split_errors:
         for line in split_errors:
