@@ -180,7 +180,7 @@ pandas 拼出最終矩陣時，是**一個型別群組一個型別群組**地填
 ## 〔待補〕寫成正式章節前要做的事
 
 - [ ] 章節編號與檔名（暫定 `12-when-spark-hands-off-to-pandas.md`）
-- [ ] 依 `docs/handbooks/handbook-writing-guide.md` 對齊語感與結構
+- [ ] 依 `docs/agents/handbook-writing-guide.md` 對齊語感與結構
 - [ ] 補一個**可自己跑**的最小重現腳本（造一個含一欄字串的 DataFrame，量 RSS 對照）
 - [ ] 補 pandas 2.x / pyarrow-backed dtype 的情況：`dtype_backend="pyarrow"` 之後這個坑還在不在
 - [ ] 補 Spark 側的交接選項對照（`toPandas()` vs `mapInPandas` vs 寫 parquet 再讀）
