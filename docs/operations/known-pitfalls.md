@@ -9,7 +9,7 @@
 
 **規則：`.venv` 永不進版控**。`git ls-files | grep -x .venv` 一旦出現被追蹤就停下、`git rm --cached .venv`、commit 並**進 main**（否則各分支/worktree 一直繼承）。已追蹤的檔案無視 `.gitignore`。
 
-## 2. graphify hook 擋 git checkout/merge（**已修 2026-06，殘留規則仍有效**）
+## 2. graphify hook 擋 git checkout/merge（**已修 2026-05，殘留規則仍有效**）
 
 歷史問題：graphify 的 post-checkout/post-commit hook 會把當時 **tracked** 的 `graphify-out/GRAPH_REPORT.md` 改髒，使隨後的 `git checkout` / `git merge --ff-only` 被「local changes would be overwritten」擋住；若指令用 `&&`+`set -e`+`>/dev/null` 串接，因 `set -e` 的 AND-list 例外會**靜默失敗、HEAD 沒動**而你以為成功了。
 
@@ -74,12 +74,22 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 5. main 上既有的測試問題（不是你造成的，勿浪費時間歸因給自己的改動）
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
-- 全量 `pytest tests/` **組合跑**時有 4 個 Spark 整合測試互相干擾 fail；**單獨跑皆過**。看到只在組合跑才出現的 fail，先單獨重跑確認。
-  - 清單（更新於 2026-08-09，證據：於 `091acd2` 在同一個 worktree、同一份 `data/` 跑全量，8 failed / 2377 passed；同四項單獨跑 `pytest tests/test_io/test_hive_table_dataset.py tests/test_pipelines/test_evaluation_compare_pipeline.py` 為 62 passed）：`test_io/test_hive_table_dataset.py` 的 `TestSchemaEvolutionIntegration::test_add_then_drop_column_across_versions`、`TestPartialWriteLeavesPartitionsIntact` 兩項，以及 `test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`。
-  - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算：那份沒有本機 warehouse 狀態，這四項不會出現（實測只有 5 failed），會讓人誤以為是自己改出來的。
+- **全量的既有 fail 就是上面那兩個，沒有別的。** 實測：
+
+  ```
+  # main @ 227d9e6，同一 worktree 的同一份 data/，2026-08-25
+  $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest tests/ -q
+  ========== 3 failed, 2557 passed, 2462 warnings in 273.16s (0:04:33) ===========
+  ```
+
+  三個 fail ＝ `TestPrepareTrainInputsWeight` 兩項 ＋ 下面那項 `test_serialisation_round_trip_…`。
+
+- **「組合跑才互擾」的那 4 項已經消失了（2026-08-25 實測）。** 成因是 §14 那個測試在共用的 `data/local_warehouse` 上 `DROP TABLE` ＋ `rmtree`，污染同一份 warehouse；`812a12c` 把它隔離進自己的 test DB 之後，互擾跟著沒了。當時點名的三項（`test_hive_table_dataset.py` 的 `test_add_then_drop_column_across_versions`、`TestPartialWriteLeavesPartitionsIntact`，以及 `test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`）本次全量**全部 PASSED**。
+  - **規則仍有效**：看到只在組合跑才出現的 fail，先單獨重跑確認。
+  - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算——那份沒有本機 warehouse 狀態，warehouse 相關的失效模式整類都不會出現，會讓人誤以為是自己改出來的。
 - ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
 
-- 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。待獨立修。
+- 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。**2026-08-25 覆核仍紅**，現行失敗原因是 `ImportError: cannot import name 'build_diagnostics_figures' from 'recsys_tfb.evaluation.report_builder'`——測試引用的函式已不存在，不是斷言不合。待獨立修。
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 
@@ -95,7 +105,6 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - PySpark 3.3.2 `tableExists("db.t")` 兩段式寫法永遠回 False（實證於 PR#74），要用 `tableExists("t", "db")` 或先 `USE db`。
 - local[*] 下 stderr 的 `RpcEndpointNotFoundException: CoarseGrainedScheduler` 是 by-design 噪音，不是錯誤。
 - catalog deep-merge 對 type-discriminator 有 bug：workaround＝base 檔完整定義該 entry，不要依賴 env overlay 局部覆蓋 type。
-- 【2026-07-08】本機跑 evaluation 必帶 `--post-training`：default 模式讀 inference 產物 `ml_recsys.ranked_predictions`，本機（只跑過 training）沒有這張表。徵兆＝第一個 node `prepare_eval_data` 秒炸 `Table or view not found: ml_recsys.ranked_predictions`——這不是 Spark/catalog 壞掉，是模式選錯。正解：`python -m recsys_tfb evaluation --env local --model-version <mv> --post-training`（讀 `training_eval_predictions`）。
 - 【2026-07-07】取 model_version 不要用 `ls -t data/models`：目錄 mtime 不隨「內容檔被覆寫」更新（重訓寫回既有 mv 目錄時，該目錄不會浮到最上面），且 `data/models/` 混有測試殘留目錄（e2e_test_mv、mvx…）。徵兆＝抓到的 mv 與 config 語意矛盾（還原 config 後「新 mv」竟等於注入版）。正解：從 training log 的 `Wrote manifest: .../data/models/<mv>/manifest.json` 行取，或 `python -c "import json; print(json.load(open('data/models/<候選>/manifest.json'))['model_version'])"` 核對。驗證方式：取到 mv 後 grep training log 確認同一 run 寫的就是它。
 
 ## 7. macOS 換網路後 Spark 起不來：hostname 解析到過期 IP（2026-07-07）
@@ -114,15 +123,15 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 ## 9. 本機跑 evaluation 必須兩個旗標，少一個就跑不動（2026-07-19）
 
-- **症狀（第一分鐘認出它）**：不帶 `--post-training` → 卡在讀不到 `ranked_predictions`（inference 產物）；不帶 `--model-version` → `FileNotFoundError: No 'best' symlink found in .../data/models`。
-- **根因**：兩個獨立原因。(a) evaluation 預設模式讀 inference 產出的 `ranked_predictions`，而本機 inference 撞既有 issue #63（`scripts/local_e2e.sh:6-9` 明寫本機 e2e 只收斂到 training）；`--post-training` 改讀 training 自己產出的 `training_eval_predictions`（分歧點在 `pipelines/evaluation/pipeline.py` 的三元式）。(b) 不指定 model_version 會解析 `data/models/best` symlink，而那要 promote 才有——**promote 是使用者保留的人工步驟，Claude 不得自行執行**。
+- **症狀（第一分鐘認出它）**：不帶 `--post-training` → 第一個 node `prepare_eval_data` **秒炸** `Table or view not found: ml_recsys.ranked_predictions`——**這不是 Spark/catalog 壞掉，是模式選錯**（此分支首見 2026-07-08）；不帶 `--model-version` → `FileNotFoundError: No 'best' symlink found in .../data/models`。
+- **根因**：兩個獨立原因。(a) evaluation 預設模式讀 `ranked_predictions`——那是 **inference pipeline 的產物**，本機 warehouse 只有在實際跑過 `recsys_tfb inference --env local` 之後才有它；只跑 dataset→training 的 session 一定沒有。`--post-training` 改讀 training 自己產出的 `training_eval_predictions`（分歧點在 `pipelines/evaluation/pipeline.py` 的三元式）。（**2026-08-25 更正**：本條原寫「本機 inference 撞既有 issue #63」並引 `scripts/local_e2e.sh:6-9` 為證，兩者都已失效——#63 於 2026-08-09 CLOSED（NOT_PLANNED，由 #185 取代），而 `local_e2e.sh` 現在跑到 inference，其開頭註解正是在解釋這件事並註明舊說法過期。反駁見 [deliberate-non-goals.md](../agents/deliberate-non-goals.md) 的 #63 條：「它不再卡任何東西」。**本機不能跑 inference 從來不是本條的理由，缺產物才是。**）(b) 不指定 model_version 會解析 `data/models/best` symlink，而那要 promote 才有——**promote 是使用者保留的人工步驟，Claude 不得自行執行**。
 - **規則**：本機一律 `python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`，`<mv>` 用 training 那步印出的值。**不要為了讓它跑起來而去 promote。**
 - **驗證方式**：先跑 `dataset` → `training`（training log 尾端會印 model_version 與 manifest 路徑），再帶入。完整建置鏈見 `docs/superpowers/plans/diag-redesign/00-shared-context.md` 的環境前置段。
 
 ## 10. 用 grep report.html 當驗收會假陽性：內嵌 plotly.js 含大量常見英文字（2026-07-19）
 
 - **症狀（第一分鐘認出它）**：明明原始碼已清乾淨，`grep -c "<某個字>" report.html` 仍有命中，看起來像刪除不完整。實例：清掉 quadrant 診斷後，report.html 仍 grep 到 2 個 `quadrant`。
-- **根因**：`generate_html_report`（`evaluation/report.py:85,118`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
+- **根因**：`generate_html_report`（`evaluation/report.py:82,129`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
 - **規則**：驗證「某個功能的字樣是否清乾淨」一律 **grep 產生 HTML 的原始碼**（`src/recsys_tfb/evaluation/`、`src/recsys_tfb/pipelines/evaluation/`），不要 grep 產物 HTML。
 - **驗證方式**：命中時用 `grep -o ".\{100\}<字>.\{100\}" report.html` 看上下文——落在 minified JS 裡（無空白、大量單字母變數）即為假陽性。決定性檢查是 `grep -rn "<字>" src/recsys_tfb/evaluation/` 為零。
 
@@ -176,10 +185,10 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 14. 跑到 `test_evaluation_compare_pipeline.py` 會 DROP 掉本機真表 `enriched_eval_predictions`（2026-07-22）
 
 - **症狀（第一分鐘認出它）**：重繪報表時 per-segment 相關數字**整批空掉**——基本統計的「per-segment 正例組成」表不見、衡量指標的 per_segment 三張表不見、baseline per-segment/大類 對照不見；查 `enriched_eval_predictions` 只剩 **1 列**、內容是 `("c1","p1",0.9,1,1)`、**無 `cust_segment_typ` 欄**。但 golden `data/evaluation/<mv>/<snap>/report.html` 仍有 per-segment 內容（那是舊的富資料產的，靜態檔沒被動到）——這個「產物有、活表沒有」的落差就是指紋。
-- **根因**：`tests/test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`（:159-186）在測試**開頭**就 `DROP TABLE IF EXISTS ml_recsys.enriched_eval_predictions` ＋ `shutil.rmtree(table_dir)`，再寫入一列 fixture `("c1","2026-01-31","p1",0.9,1,1)`。它用的是**共用的** `data/local_warehouse`（讀 `spark.sql.warehouse.dir`），**無 temp warehouse 隔離、無 teardown 還原**。所以**任何人跑到這個測試（全測試套件，或 safety-net batch 恰好帶到它）本機那張富 `enriched_eval_predictions` 就被洗成 1 列**。這不是 #63、不是「資料自己退化」——是**測試副作用洗掉真表**。
-- **規則**：(a) 需要「本機重繪 / 驗 per-segment」前，先確認 `enriched_eval_predictions` 是富的（count 遠大於 1、且有 `cust_segment_typ` 欄）；被洗掉就重建，別把空 per-segment 誤判成程式 bug 或 #63。(b) 重建＝`python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`（走 `training_eval_predictions` 繞過 #63；`persist_eval_predictions` 會重寫這張表；segment 欄由 `prepare_eval_data`→`join_segment_sources` 從 `ml_recsys.sample_pool` 依 `[cust_id, snap_date]` join 進來）。(c) 跑重繪/驗收的 session 不要順手跑 `test_evaluation_compare_pipeline.py`；跑了就要重建。
+- **根因**：`tests/test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`（**fix 前**）在測試**開頭**就 `DROP TABLE IF EXISTS ml_recsys.enriched_eval_predictions` ＋ `shutil.rmtree(table_dir)`，再寫入一列 fixture `("c1","2026-01-31","p1",0.9,1,1)`。它用的是**共用的** `data/local_warehouse`（讀 `spark.sql.warehouse.dir`），**無 temp warehouse 隔離、無 teardown 還原**。所以**任何人跑到這個測試（全測試套件，或 safety-net batch 恰好帶到它）本機那張富 `enriched_eval_predictions` 就被洗成 1 列**。這不是「資料自己退化」——是**測試副作用洗掉真表**。
+- **規則**：(a) 需要「本機重繪 / 驗 per-segment」前，先確認 `enriched_eval_predictions` 是富的（count 遠大於 1、且有 `cust_segment_typ` 欄）；被洗掉就重建，別把空 per-segment 誤判成程式 bug。(b) 重建＝`python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`（走 `training_eval_predictions`，不需要 inference 產物；`persist_eval_predictions` 會重寫這張表；segment 欄由 `prepare_eval_data`→`join_segment_sources` 從 `ml_recsys.sample_pool` 依 `[cust_id, snap_date]` join 進來）。(c) 跑重繪/驗收的 session 不要順手跑 `test_evaluation_compare_pipeline.py`；跑了就要重建。
 - **驗證方式**：`python3 -c "import pyarrow.parquet as pq,glob; f=glob.glob('data/local_warehouse/ml_recsys.db/enriched_eval_predictions/**/*.parquet',recursive=True); print(sum(pq.read_metadata(x).num_rows for x in f),'rows')"`——印 `1 rows` 即被洗過；重建後應是數百～上千列。或 `spark.table('ml_recsys.enriched_eval_predictions').columns` 應含 `cust_segment_typ`。
-- **已修（2026-07-22，本 branch `feat/report-restructure`）**：`test_persist_and_catalog_load_roundtrip` 改跑在隔離的 **test DB `test_persist_roundtrip`**（round-trip 行為與表名無關，走的是同一條 HiveTableDataset code path），並加 `finally` teardown。驗證：跑完整檔後真表 `ml_recsys.enriched_eval_predictions` 仍為 5232 列（fix 前會被洗成 1 列）。**舊 branch/commit（fix 之前）仍會踩**——辨識指紋與重建法同上。此檔其餘測試都用 in-memory `createDataFrame`、不落 warehouse，無此問題。
+- **已修（`812a12c`，2026-07-22）**：`test_persist_and_catalog_load_roundtrip` 改跑在隔離的 **test DB `test_persist_roundtrip`**（round-trip 行為與表名無關，走的是同一條 HiveTableDataset code path），並加 `finally` teardown。驗證：跑完整檔後真表 `ml_recsys.enriched_eval_predictions` 仍為 5232 列（fix 前會被洗成 1 列）。**舊 branch/commit（fix 之前）仍會踩**——辨識指紋與重建法同上。此檔其餘測試都用 in-memory `createDataFrame`、不落 warehouse，無此問題。
 
 ## 15. 加了 test 月份、報表數字卻沒變：先查本機 cache 的月份目錄（2026-08-01）
 
@@ -208,6 +217,6 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 18. 報表的 AP@k 分母是 R，不是 min(k, R)——所以 `map@1` 恆等於 `recall@1`
 
 - **症狀（第一分鐘認出它）**：寫報表定義或解釋數字時，照 AP@k 的教科書慣例（分母 `min(k, R)`）寫下公式，然後發現 `map@1` 與 `precision@1` 對不上，卻與 `recall@1` 逐位相同。
-- **根因**：`src/recsys_tfb/evaluation/metrics_spark.py:382` 是 `map@K = sum(ap_contrib@K) / total_rel`，`total_rel` ＝該 query 的正例總數 R，**沒有 `min(k, R)` 截斷**。同檔 :412 的 `recall@K` 分母也是 `total_rel`。K=1 時兩者分子恰好相等，於是 `map@1 == recall@1`。（檔內確實有 `min(total_rel, K)`，但那是 nDCG 的 iDCG 正規化，與 AP 分母無關。）
+- **根因**：`src/recsys_tfb/evaluation/metrics_spark.py:409` 是 `map@K = _ap_sum / total_rel`，`total_rel` ＝該 query 的正例總數 R，**沒有 `min(k, R)` 截斷**。同檔 :412 的 `recall@K` 分母也是 `total_rel`。K=1 時兩者分子恰好相等，於是 `map@1 == recall@1`。（檔內確實有 `min(total_rel, K)`，但那是 nDCG 的 iDCG 正規化，與 AP 分母無關。）
 - **規則**：**寫地基公式一律照 code 追一次，別照領域慣例寫**。這條同時是「拿具體數字驗算定義」的範例：憑記憶寫的定義一問就破。
 - **驗證方式**：同一份報表裡比對 `map@1` 與 `recall@1`、`precision@1` 三個數字；前兩者相同即確認。
