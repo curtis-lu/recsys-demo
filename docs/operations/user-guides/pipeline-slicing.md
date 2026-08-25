@@ -85,5 +85,5 @@ filter 指向一個不存在的 partition → `exists()` 自然為假。**這一
 
 ## 相關
 
-- **要改 pipeline 結構**（新增 node、決定產物落不落地）→ [`pipeline-node-design.md` G7](../../agents/pipeline-node-design.md)：接續點是會被新增 node 默默破壞的契約，`RESUME_CONTRACTS` 釘住它。
+- **要改 pipeline 結構**（新增 node、決定產物落不落地）→ [`pipeline-node-design.md` 規則 7](../../agents/pipeline-node-design.md)：接續點是會被新增 node 默默破壞的契約，`RESUME_CONTRACTS` 釘住它。
 - **`hpo_best_model` 為什麼落地、落在 `hpo/` 子目錄** → [`training.md`](../../pipelines/training.md) §6.1 與 §7.4。
