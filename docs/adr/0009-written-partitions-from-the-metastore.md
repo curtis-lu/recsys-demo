@@ -101,7 +101,7 @@ publish 路徑上——當時被排除在外。理由與後續見
 
 **真盲點只有一個**：`--rebuild-dates` 重算既有月份時 `new` 為空、`after` 又包含沒動的月，兩
 個數字都說不出「這次重算了哪幾個月」。接受它，因為那次要重算哪幾個月是 CLI 旗標的值，入口已
-經有 log（見 `docs/operations/adding-an-eval-month.md` 的重算流程）。
+經有 log（見 `docs/operations/user-guides/adding-an-eval-month.md` 的重算流程）。
 
 ## 考慮過但否決的選項
 

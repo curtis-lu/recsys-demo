@@ -67,7 +67,7 @@
 
 框架依據 `parameters.yaml`、`parameters_*.yaml` 中會影響產物的設定內容，以及各層上游版本的關聯，計算 8 碼 hash，讓資料集、前處理器、模型與預測結果能互相對齊，也讓不同抽樣或模型實驗可以並存。純執行環境、logging 或監控類設定不會改變產物版本。
 
-- `base_dataset_version`：由 train／val／calibration 日期、前處理設定、schema，以及 `feature_table` 的欄位名稱、型別與順序決定；對應前處理器、共用特徵表與 val/test 資料。**`test_snap_dates` 不在其中**——它只定義評估的覆蓋範圍，加一個評估月份不翻版本、不需要重訓（見 [`adding-an-eval-month.md`](docs/operations/adding-an-eval-month.md)）。
+- `base_dataset_version`：由 train／val／calibration 日期、前處理設定、schema，以及 `feature_table` 的欄位名稱、型別與順序決定；對應前處理器、共用特徵表與 val/test 資料。**`test_snap_dates` 不在其中**——它只定義評估的覆蓋範圍，加一個評估月份不翻版本、不需要重訓（見 [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md)）。
 - `train_variant_id`：由 train 的抽樣比例、分層 override 與 `train_dev_ratio` 決定；對應 train/train_dev 資料。
 - `calibration_variant_id`：啟用機率校準時，由 calibration 的抽樣設定決定。
 - `model_version`：由上述資料版本及會影響模型的 training 設定決定，包含演算法參數、HPO、特徵選擇、機率校準與樣本權重等。
@@ -299,7 +299,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 ### 執行第一個端到端版本
 
-指令格式為 `python -m recsys_tfb <pipeline> [選項]`。以下假設執行環境已能連線 Spark／Hive；本機環境建置見 [`docs/operations/local-spark-setup.md`](docs/operations/local-spark-setup.md)。
+指令格式為 `python -m recsys_tfb <pipeline> [選項]`。以下假設執行環境已能連線 Spark／Hive；本機環境建置見 [`docs/operations/dev-setup/local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)。
 
 ```bash
 # 1. 建立版本化資料集
@@ -411,7 +411,7 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 - 這裡問「對這位客戶，所有候選產品該怎麼**排先後**」，評估一律是 per query group 的排序指標 mAP（mAP 怎麼算見 [`docs/metrics/metrics.html`](docs/metrics/metrics.html)）。
 - 你還可以把訓練目標從 `binary` 換成 learning-to-rank（`lambdarank` / `rank_xendcg`），讓模型直接優化排序。
 
-排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt_learning_to_rank.md)。
+排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
 **Q2. 為什麼資料要切成 train / train_dev / val / calibration / test 五份？各做什麼？**
 
@@ -430,7 +430,7 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 - `binary` 是建議的第一版 baseline：逐筆預測後再排序，流程較容易驗證，而且仍以排序指標評估。
 - `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並確認 score 是否需要 calibration。
 
-pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt_learning_to_rank.md)。
+pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
 **Q4. 排序只看相對名次，為什麼還要做機率校準？**
 
@@ -460,10 +460,10 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 深入某一條 pipeline | [`source_etl.md`](docs/pipelines/source_etl.md)、[`dataset.md`](docs/pipelines/dataset.md)、[`training.md`](docs/pipelines/training.md)、[`inference.md`](docs/pipelines/inference.md)、[`evaluation.md`](docs/pipelines/evaluation.md) |
 | 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
 | 理解 mAP、NDCG、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
-| 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md)、[`behavior-diagrams.html`](docs/behavior-diagrams.html) |
-| 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt_learning_to_rank.md) |
-| 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/pipeline-slicing.md)、[`hpo-resume.md`](docs/operations/hpo-resume.md) |
-| 多評估一個月份（不重訓） | [`adding-an-eval-month.md`](docs/operations/adding-an-eval-month.md) |
-| 排查訓練 OOM（字串特徵欄 → object 矩陣） | [`training-oom-object-matrix.md`](docs/operations/training-oom-object-matrix.md)、[`known-pitfalls.md`](docs/operations/known-pitfalls.md) |
+| 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md) |
+| 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
+| 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、[`training.md` §4.7／§7.3（HPO 中斷接續）](docs/pipelines/training.md) |
+| 多評估一個月份（不重訓） | [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md) |
+| 排查訓練 OOM（非數值特徵欄 → object 矩陣） | [`known-pitfalls.md` §8](docs/operations/known-pitfalls.md)（怎麼認出）、[`dataset.md` §8.1](docs/pipelines/dataset.md)（怎麼修）、[`training.md` §9.1](docs/pipelines/training.md)（修完仍不夠時） |
 
-> 公司生產環境的 Spark／Hive 連線已配置好；只有本機開發或排查連線問題時，才需要閱讀 [`spark-connection-architecture.md`](docs/operations/spark-connection-architecture.md) 與 [`worktree-venv-setup.md`](docs/operations/worktree-venv-setup.md)。概念手冊另提供 `*_offline.html`，可在無網路環境直接開啟。
+> 公司生產環境的 Spark／Hive 連線已配置好；只有本機開發或排查連線問題時，才需要閱讀 [`spark-connection-architecture.md`](docs/operations/dev-setup/spark-connection-architecture.md) 與 [`worktree-venv-setup.md`](docs/operations/dev-setup/worktree-venv-setup.md)。概念手冊另提供 `*_offline.html`，可在無網路環境直接開啟。

@@ -202,7 +202,7 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 
 <p><a id="top"></a></p>
 <h1>二元分類 GBDT：多 item 共享模型下的冷熱門不平衡</h1>
-<p>這份手冊接續《<a href="gbdt_binary_classification.md">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>主手冊</strong>）與《<a href="gbdt_class_imbalance.md">二元分類 GBDT：類別不平衡的數學影響與處理</a>》（下稱<strong>手冊2</strong>）。主手冊回答「一個訓練好的 GBDT 怎麼算出 $p(x)$」；手冊2 回答「當訓練集正類比例 $\bar y$ 很小時，單一目標的不平衡改變了什麼」。本文把場景再推一步：</p>
+<p>這份手冊接續《<a href="gbdt_binary_classification_offline.html">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>主手冊</strong>）與《<a href="gbdt_class_imbalance_offline.html">二元分類 GBDT：類別不平衡的數學影響與處理</a>》（下稱<strong>手冊2</strong>）。主手冊回答「一個訓練好的 GBDT 怎麼算出 $p(x)$」；手冊2 回答「當訓練集正類比例 $\bar y$ 很小時，單一目標的不平衡改變了什麼」。本文把場景再推一步：</p>
 <blockquote>
 <p><strong>當同一個 GBDT 二元模型同時服務多個 item，而這些 item 的冷熱門差距懸殊時（換匯每月 4 萬人申購，理財型保單卻只有 100 人），冷熱門差異在訓練的數學運算裡到底改變了什麼？在「一個共享模型」的框架內，又能處理到什麼程度？</strong></p>
 </blockquote>

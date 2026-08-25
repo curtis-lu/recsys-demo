@@ -202,7 +202,7 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 
 <p><a id="top"></a></p>
 <h1>二元分類 GBDT：類別不平衡的數學影響與處理</h1>
-<p>這份手冊接續《<a href="gbdt_binary_classification.md">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>主手冊</strong>）。主手冊回答「給定一個樣本 $x$，訓練好的 GBDT 怎麼算出預測機率 $p(x)$」；本文站在那套機制之上，只追問一件事：</p>
+<p>這份手冊接續《<a href="gbdt_binary_classification_offline.html">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>主手冊</strong>）。主手冊回答「給定一個樣本 $x$，訓練好的 GBDT 怎麼算出預測機率 $p(x)$」；本文站在那套機制之上，只追問一件事：</p>
 <blockquote>
 <p><strong>當訓練資料的正類比例 $\bar y$ 很小（類別不平衡）時，這件事在 GBDT 的數學運算裡到底改變了什麼？又該如何有效處理？</strong></p>
 </blockquote>
@@ -767,7 +767,7 @@ $$F_0 = \log\frac{\bar y_s}{1 - \bar y_s}$$
 <blockquote>
 <p>先用排序指標分清你遇到的是<strong>判讀問題</strong>（便宜：調門檻 + 換指標）還是<strong>學習問題</strong>（棘手：稀有正類根本沒學起來）。判讀問題幾下就能解；學習問題要動訓練，而且越往極端不平衡，越要承認演算法層有天花板、答案可能在資料層。<strong>把力氣花在對的那一層，是處理不平衡最重要的一件事。</strong></p>
 </blockquote>
-<p>延伸回主手冊：<a href="gbdt_binary_classification.md">二元分類 GBDT 數學推導手冊</a>。</p>
+<p>延伸回主手冊：<a href="gbdt_binary_classification_offline.html">二元分類 GBDT 數學推導手冊</a>。</p>
 <nav class="nav"><a href="#ch14">← Ch 14</a></nav>
 
 <a href="#top" class="back-to-top" id="backToTop" aria-label="回到最上方" title="回到最上方">↑</a>

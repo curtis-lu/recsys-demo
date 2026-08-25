@@ -97,7 +97,7 @@ pipeline 邊界重構，牽涉三件本次範圍外的事：MLflow 的記錄語�
 `docs/superpowers/specs/2026-07-31-per-month-test-artifacts-design.md`。
 
 **在那之前的緩解**：加月份的動線只跑 `--only-node predict_and_write_test_predictions`
-（`docs/operations/adding-an-eval-month.md` §3，實測 3 of 21 nodes），不會執行到這個診斷節點，
+（`docs/operations/user-guides/adding-an-eval-month.md` §3，實測 3 of 21 nodes），不會執行到這個診斷節點，
 既有 SHAP 不會被覆寫。**所以不建議為了加月份重跑 full training**——那就會踩到上面第 3 步。
 
 ## 順序約束：本改動必須早於 ADR-0001 的實作

@@ -25,7 +25,7 @@
 <body>
 
 <h1>指標說明：mAP / NDCG / per-item</h1>
-<p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。</p>
+<p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <a href="../handbooks/gbdt/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。</p>
 
 <div class="note">
 評估<b>永遠</b>在 <b>query group</b> 內進行：query group ＝ 同一個 (time, entity) 下所有候選 item。模型分數只在組內比大小、指標也是<b>每組各算、再平均</b>。這和「逐筆算 AUC」的二元分類根本不同（見 README §0）。
@@ -57,7 +57,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <span class="c">AP = Σ( prec_at_pos × label ) / Σ label</span>
 </div>
 <p class="sub">直覺：只在「命中正例的名次」上取精確率、再平均。正例都排在前面 → AP 接近 1；排在後面 → AP 低。</p>
-<div class="note"><b>zero-positive group 回傳 <code>None</code>、不計入 mAP</b>：一組裡完全沒有正例時 AP 沒有意義（分母 0）。這也是 dataset 的 <code>filter_groups_with_positives</code> 只對 val/test 丟掉這種組的原因（見 <a href="pipelines/dataset.md">dataset.md</a>）。</p>
+<div class="note"><b>zero-positive group 回傳 <code>None</code>、不計入 mAP</b>：一組裡完全沒有正例時 AP 沒有意義（分母 0）。這也是 dataset 的 <code>filter_groups_with_positives</code> 只對 val/test 丟掉這種組的原因（見 <a href="../pipelines/dataset.md">dataset.md</a>）。</p>
 
 <h3>mAP（跨 group）— <code>compute_mean_ap</code></h3>
 <div class="f"><span class="c">mAP = mean( AP_g  for g in groups if AP_g is not None )</span></div>
@@ -86,7 +86,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 </table>
 <p class="sub">聚合採「row-equal-weight：對 P-positive 列取等權平均」（<code>aggregate_per_item</code>）。</p>
 
-<div class="note ok"><b>HPO 用哪個指標選超參？</b> training 的 <code>tune_hyperparameters</code> 在 <b>val</b> 上算的分數由 <code>hpo_objective</code> 決定。本 repo 的 config（<code>parameters_training.yaml</code>）設成 <b>macro per-item mAP</b>（<code>compute_macro_per_item_map</code>，即這節的 per-item 巨觀平均，避免熱門 item 主導調參）；config 沒設時程式碼預設回退到一般 <code>mean_ap</code>。見 <a href="pipelines/training.md">training.md</a>。</p>
+<div class="note ok"><b>HPO 用哪個指標選超參？</b> training 的 <code>tune_hyperparameters</code> 在 <b>val</b> 上算的分數由 <code>hpo_objective</code> 決定。本 repo 的 config（<code>parameters_training.yaml</code>）設成 <b>macro per-item mAP</b>（<code>compute_macro_per_item_map</code>，即這節的 per-item 巨觀平均，避免熱門 item 主導調參）；config 沒設時程式碼預設回退到一般 <code>mean_ap</code>。見 <a href="../pipelines/training.md">training.md</a>。</p>
 
 <h2>4. baseline 對照</h2>
 <p><code>compute_baseline_metrics</code> 算一個 <b>popularity baseline</b>：用「近期最常被選的 item」（逐 snap_date 在回溯窗內統計人氣）當不看個人特徵的基準排序，套同一組指標。模型要有價值，得明顯贏過它。報表會把模型與 baseline 並列。</p>
@@ -98,7 +98,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
   <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / ndcg@K / precision@K / recall@K，與 baseline 並列</td></tr>
   <tr><td>per-item</td><td>各 item 的 map_attr@K / ndcg_attr@K / hit_rate@K / mean_pos</td></tr>
   <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（需 <code>segment_sources</code> 提供欄；否則該段不出現，見 README §4）</td></tr>
-  <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="pipelines/evaluation.md">evaluation.md</a>）</td></tr>
+  <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="../pipelines/evaluation.md">evaluation.md</a>）</td></tr>
 </table>
 <p class="sub">可選：<code>product_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>
 
@@ -113,9 +113,8 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 
 <h2>接下來</h2>
 <p class="sub">
-評估兩情境與三模式 → <a href="pipelines/evaluation.md">pipelines/evaluation.md</a>；
-程式行為圖解 → <a href="behavior-diagrams.html">behavior-diagrams.html</a>；
-排序 vs 分類的數學 → 手冊 <a href="handbooks/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。
+評估兩情境與三模式 → <a href="../pipelines/evaluation.md">pipelines/evaluation.md</a>；
+排序 vs 分類的數學 → 手冊 <a href="../handbooks/gbdt/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。
 </p>
 
 </body>

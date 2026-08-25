@@ -366,7 +366,7 @@ python -m recsys_tfb evaluation \
   --dry-run
 ```
 
-`generate_report` 本身已不直接吃 `eval_predictions`（Plan 1.5 把它拆成純函式，6 個參數全部是別的 node 算好的產物，見 5.1 節的表）。但這 6 個裡 `evaluation_metrics`、`baseline_metrics`、`evaluation_diagnosis_pages` 三個仍是記憶體中間結果（`catalog.yaml` 沒有對應 entry）；其餘（`evaluation_metric_ci`／`evaluation_report_aggregates`，以及每項 registry 診斷各自的 JSON，如 `evaluation_config_shift`）都已落地成 `JSONDataset`。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時只會自動補跑：
+`generate_report` 本身已不直接吃 `eval_predictions`（Plan 1.5 把它拆成純函式，6 個參數全部是別的 node 算好的產物，見 5.1 節的表）。但這 6 個裡 `evaluation_metrics`、`baseline_metrics`、`evaluation_diagnosis_pages` 三個仍是記憶體中間結果（`catalog.yaml` 沒有對應 entry）；其餘（`evaluation_metric_ci`／`evaluation_report_aggregates`，以及每項 registry 診斷各自的 JSON，如 `evaluation_config_shift`）都已落地成 `JSONDataset`。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時只會自動補跑：
 
 - `prepare_eval_data`（`eval_predictions` 沒地方讀，得重算）
 - `compute_metrics`
@@ -496,7 +496,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 修改內容 | 建議執行方式 | 原因 |
 |---|---|---|
 | `snap_date` | 標準 full run | 使用新的報表目錄與 Hive partition |
-| 想評估一個尚未產出預測的新月份（`dataset.test_snap_dates` 尚未列入） | 先補資料再評估：dataset → training 的 predict 切片 → 本 pipeline 標準 full run | `model_version` 不變（`test_snap_dates` 不進版本 hash），因此**不重訓**；新舊月份報表並存於同一模型身分之下。步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md) |
+| 想評估一個尚未產出預測的新月份（`dataset.test_snap_dates` 尚未列入） | 先補資料再評估：dataset → training 的 predict 切片 → 本 pipeline 標準 full run | `model_version` 不變（`test_snap_dates` 不進版本 hash），因此**不重訓**；新舊月份報表並存於同一模型身分之下。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | `k_values` | 標準 full run | 需要重新計算所有 metrics |
 | `segment_columns`／`segment_sources` | 標準 full run | 需要重新 join 並更新 enriched schema/data |
 | `product_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
@@ -537,7 +537,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 找不到 `best` | 尚未 promotion，卻省略 `--model-version` | 對候選模型明確傳入版本，或先完成人工 promotion |
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date` | 日期錯誤、模式用錯、對應 partition 未產生 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
-| `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
+| `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
 | segment source table 無法讀取 | table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |

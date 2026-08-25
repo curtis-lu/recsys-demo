@@ -30,9 +30,10 @@ Single-context repo:
 /
 ├── docs/
 │   ├── adr/                  ← 架構決策紀錄
-│   ├── agents/               ← 本系列 skill 的 per-repo 設定
+│   ├── agents/               ← 給 agent 的判準與紀律，以及本系列 skill 的 per-repo 設定
+│   ├── handbooks/            ← 給讀者自學的技術手冊（寫作判準在 agents/）
 │   ├── pipelines/            ← 各 pipeline 的說明（版本語意的白話解釋）
-│   ├── operations/           ← runbook 與踩坑紀錄
+│   ├── operations/           ← 跨 pipeline 工作流（user-guides/）、開發環境（dev-setup/）與踩坑紀錄
 │   ├── notes/                ← 長文分析／研究產出
 │   └── superpowers/          ← superpowers skill 專屬存檔，本系列不寫入（見 CLAUDE.md §Agent skills）
 └── src/recsys_tfb/           ← 詞彙定義所在（見上：versioning.py / consistency.py docstring）

@@ -167,7 +167,7 @@ training:
 
 `sample_weight_keys` 的順序就是 `sample_weights` key 使用 `|` 串接的順序。未列出的組合權重為 `1.0`；大於 `1` 代表提高影響力，小於 `1` 代表降低影響力。
 
-上例是手填的覆寫；要從實際樣本量**推導**這張表（雙因子地板 `v` ＋ 注意力 `A`，並一併處理 ratio 面下採），用 `scripts/sampling_overrides_editor.py`。概念框架、公式、`w_pos`/`w_neg` 與 key 組法、邊界情況見 [`../operations/sampling-overrides-editor.md`](../operations/sampling-overrides-editor.md)。
+上例是手填的覆寫；要從實際樣本量**推導**這張表（雙因子地板 `v` ＋ 注意力 `A`，並一併處理 ratio 面下採），用 `scripts/sampling_overrides_editor.py`。概念框架、公式、`w_pos`/`w_neg` 與 key 組法、邊界情況見 [`../operations/user-guides/sampling-overrides-editor.md`](../operations/user-guides/sampling-overrides-editor.md)。
 
 權重只套用於 train 與 train-dev，不套用於 val、calibration、test 或 evaluation。
 類別欄位可在設定中使用人類可讀值，runtime 會依 preprocessor 的 category mappings 轉為實際 encoding 後比對；identity、label 與 carry columns 則保留原始值語意。
@@ -410,6 +410,8 @@ python -m recsys_tfb training \
   --train-variant <train_variant>
 ```
 
+接續生效時 log 會印 `HPO resume: N completed trial(s) found; best so far score=... running M more`（`nodes.py::tune_hyperparameters`）；沒看到這行就是沒接上，先查 `search_id` 與 `data/models/_hpo/<search_id>/` 是否存在。
+
 若要放棄目前搜尋紀錄並從 trial 0 開始：
 
 ```bash
@@ -450,7 +452,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
-`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/adding-an-eval-month.md)。
+`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
 
 `compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。若模型已校準，也會平行計算原始未校準 score 的結果，讓使用者確認 calibration 是否改變排序表現。
 
@@ -469,10 +471,12 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
-| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）。test 日期已退出 `base_dataset_version`（ADR-0001），因此**加一個月只複製那一個月**，既有月份 `cache_hit` 原封不動（見 ADR-0003；操作見 [新增一個評估月份](../operations/adding-an-eval-month.md)）。代價是同一個 base version 底下**重算**既有月份時 cache 不會失效（只看 `_SUCCESS`、不看新鮮度），須手動刪該月目錄——見 known-pitfalls §15。設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
+| Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）。test 日期已退出 `base_dataset_version`（ADR-0001），因此**加一個月只複製那一個月**，既有月份 `cache_hit` 原封不動（見 ADR-0003；操作見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)）。代價是同一個 base version 底下**重算**既有月份時 cache 不會失效（只看 `_SUCCESS`、不看新鮮度），須手動刪該月目錄——見 known-pitfalls §15。設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
+
+`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`）——稽核 manifest 時請知悉。
 
 `model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 放在獨立 `hpo/` 子目錄，避免它的 sidecar 與最終模型互相覆寫。
 
@@ -569,6 +573,8 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 
 HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若每次排程取得全新的暫存主機，或該路徑會被清除，checkpoint 機制便無法跨程序生效。
 
+`data/models/_hpo/<search_id>/` 在成功完成後**刻意保留**（很小、可稽核、重跑秒收）。它以 `search_id` 為單位、**跨 `model_version` 共用**，因此刪除某個 `data/models/<model_version>/` 目錄不會連帶清掉它。要清理：單一搜尋用 `--fresh-hpo`（下次該 `search_id` 執行時清）或手動刪該子目錄；全部清空則 `rm -rf data/models/_hpo/`。
+
 ### 7.4 Pipeline slicing 的安全邊界
 
 - catalog 的 `exists()` 只能證明檔案或 partition 存在，不能證明它仍與目前程式碼、來源資料或未納入 hash 的設定一致。
@@ -577,7 +583,9 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 - cache node 的輸出 handle 是記憶體物件，因此接續時會重新執行；底層 local Parquet 有 `_SUCCESS` 時只建立 handle，不會重新從 HDFS 複製。
 - 沒有輸出的設定閘或 sink node，在切片起點之前不會自動重跑。資料或設定來源有疑慮時應使用 full run。
 - slicing manifest 會記錄 `resumed_from` 或 `only_node`，但 partial run 不代表整個 model version 已重新完成所有驗收步驟。
-- 若改了 model-defining 參數後再 `--from-node` 接續，`model_version` 會漂移到一個尚無模型的新版本目錄，切片會把 `finalize_model` 等上游拉回＝重新訓練。CLI 在這種情況會於開跑前印 `[retrain]` 警告（含最接近的既有 `completed` 版本與 diff 提示）但仍照跑；想沿用既有模型請先還原 `training:` 設定。詳見 [`../operations/pipeline-slicing.md`](../operations/pipeline-slicing.md)。
+- 若改了 model-defining 參數後再 `--from-node` 接續，`model_version` 會漂移到一個尚無模型的新版本目錄，切片會把 `finalize_model` 等上游拉回＝重新訓練。CLI 在這種情況會於開跑前印 `[retrain]` 警告（含最接近的既有 `completed` 版本與 diff 提示）但仍照跑；想沿用既有模型請先還原 `training:` 設定。詳見 [`../operations/user-guides/pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md)。
+- `hpo_best_model` **不做 None 防護**：HPO 第一個 trial 必然寫入 best model（score ≥ 0 > 初始 -1.0）；`n_trials=0` 會在 `study.best_params` 就先炸。
+- 落地 `hpo_best_model` 後，full run 的 `finalize_model` 也會吃到磁碟 round-trip 的 adapter。行為不變：LightGBM `save_model` 預設截斷至 best_iteration，預測結果一致；`best_iteration` 另以 JSON 落地顯式傳遞。
 - 開跑前 CLI 會先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用），成功完成後覆寫為 `status: completed`；用 `--dry-run` / `--list-nodes` 時不寫 stub。
 
 ### 7.5 修改設定時要重跑什麼
@@ -608,7 +616,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | `training.search_space` 格式錯誤 | 使用舊 dict 格式、重複 name、bound 不合法或用了尚未支援的 `when` | 改為 ParamSpec 有序 list，依錯誤訊息逐項修正 |
 | feature selection excludes item | item 被列入 `training.feature_selection.exclude` | 移除 item；item 必須保留為模型特徵 |
 | weight key column unavailable | 權重維度未存在於 model input | 將欄位加入 dataset `carry_columns` 或 categorical features，重跑 dataset |
-| weight key arity mismatch | `sample_weights` key 的 `|` 段數與 `sample_weight_keys` 不同 | 依欄位順序重建 key，建議使用 [sampling editor](../operations/sampling-overrides-editor.md) |
+| weight key arity mismatch | `sample_weights` key 的 `|` 段數與 `sample_weight_keys` 不同 | 依欄位順序重建 key，建議使用 [sampling editor](../operations/user-guides/sampling-overrides-editor.md) |
 | `sample_weight_report` 出現 unmatched keys | 設定值拼錯、該組合在 train 期間不存在或 encoding 不一致 | 查 train distinct values 與 category mappings，修正權重設定 |
 | cache input must be Spark DataFrame | catalog input 不是預期 Hive/Spark dataset，或自行呼叫 node 傳入 pandas | 確認 catalog dataset type 與正常 CLI 執行路徑 |
 | partial cache detected | 上次 copyToLocal 中斷，目錄沒有 `_SUCCESS` | 框架會自動清除並重建；若持續發生，檢查 disk、HDFS 權限與 copy 失敗訊息 |
@@ -630,6 +638,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
+- **`prepare_lgb_train_inputs` 的 `to_numpy` 是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
 - HPO study 不支援同一 `search_id` 由多個 training processes 同時寫入；應避免並行啟動相同搜尋。
 - HPO resume 可延續 completed trials，但重新建立的 TPE sampler 狀態不保證與完全不中斷的單次執行 bitwise identical。
 - `random_seed` 會影響模型與 HPO，但目前不納入 `model_version` 或 `search_id`。
@@ -637,6 +646,35 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - test evaluation 使用 dataset 已排除零正例 query groups 的母體，不代表 inference 的完整 entity 母體。
 - calibration 只能改善 score 的機率解讀，不保證提升排序指標；對 LTR score 的機率化也需以獨立資料與業務用途驗證。
 - training 成功不代表模型已核准上線。仍需檢查 test 指標、per-item 表現、診斷與業務限制，再人工 promotion。
+
+### 9.1 `to_numpy` 這一步的峰值與兩個觀測陷阱
+
+**陷阱一：`nbytes` 會低報，觀測性在這裡是瞎的。** `src/recsys_tfb/io/extract.py:321` 的
+`log_data_volume(logger, "extract_Xy.X", X)` 問的是 numpy「這張矩陣多大」，而 numpy 對 `object` 矩陣
+**只算指標、不算指向的物件**。實測中 object 與 float64 兩種矩陣回報的數字完全一樣（皆 0.49 GiB @ 100k 列），
+真實記憶體卻差 4.3 倍——生產規模上它會把 95.9 GiB 報成 22.4 GiB。**不要用這行 log 判斷記憶體是否安全。**
+
+**陷阱二：非數值欄不只是慢和肥，它根本不合法。** LightGBM 拿到 object 矩陣後會嘗試
+`np.asarray(mat, dtype=np.float32)`（`lightgbm/basic.py:192` 的 `_np2d_to_np1d`），碰到真的是字串的格子直接
+`ValueError: could not convert string to float`。**記憶體不足只是先發生的症狀**，病根是非數值欄進了特徵集
+（由 dataset 的 B6 閘擋，見 [`dataset.md` §8.1](dataset.md)）。
+
+**修掉非數值欄是必要條件，不是充分條件。** 2026-07 那次事故的實測：移除文字欄後需求仍是 **54.7 GiB**，
+而從 log 框出的機器上限落在 **48.3 GiB 與致死點之間**——很可能還是會死。若仍不足，後續選項（成本由低到高）：
+
+| 做法 | `to_numpy` 時的峰值 | 代價 |
+|---|---|---|
+| 現況（有非數值欄） | ~142 GiB | — |
+| 移除非數值欄 | ~54.7 GiB | 改 config、重建 dataset |
+| ＋ 提早釋放 `pdf`、拿掉多餘的 `.copy()` | ~38.7 GiB | 改 `extract_Xy` 的取值順序（`extract.py:258` 的 `.copy()` 是多餘的：pandas 1.5.3 的 `pdf[feature_cols]` 已回傳獨立副本） |
+| ＋ 矩陣改用 4 bytes 格子（`to_numpy(dtype=np.float32)`） | ~27.5 GiB | ⚠ int64 欄若有值 > 2²⁴ 會失真，套用前必須驗值域 |
+| 讓 LightGBM 直接讀 Arrow，不經過 pandas／numpy | ~18.5 GiB | 需要 `cffi`（**不是** pyarrow 或 lightgbm 的相依套件，生產環境未必有） |
+| 一次只讀一小段、邊讀邊餵（`lightgbm.Sequence`） | ~4 GiB | 需自寫約 25 行的 `ParquetSequence`；只需要 numpy |
+
+最後一列的 `~4 GiB` 裡有 2.8 GiB 是 LightGBM 分箱後的資料集本身（要存下來的 `train.bin`），那是跑不掉的下限。
+
+上表的數字是 2026-07 生產事故的實測與外推，**其推導與未證實之處**見
+[2026-07 調查紀錄](../notes/2026-07-11-training-oom-investigation.md)。
 
 ## 10. 相關文件
 

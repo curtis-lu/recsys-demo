@@ -2,13 +2,13 @@
 
 想知道模型在**新的一個月**上表現如何時，把該月份加進 `dataset.test_snap_dates`。
 
-`base_dataset_version` 與 `model_version` 都**不會改變**，因此**不需要重訓**：新月份的評估報表與既有月份並存於同一個模型身分底下，可以直接互相比較。理由（為什麼 test 日期可以退出版本身分，而 `val` / `calibration` 不行）見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；版本語意見 [dataset.md §7.1](../pipelines/dataset.md)。
+`base_dataset_version` 與 `model_version` 都**不會改變**，因此**不需要重訓**：新月份的評估報表與既有月份並存於同一個模型身分底下，可以直接互相比較。理由（為什麼 test 日期可以退出版本身分，而 `val` / `calibration` 不行）見 [ADR-0001](../../adr/0001-test-dates-out-of-dataset-version-identity.md)；版本語意見 [dataset.md §7.1](../../pipelines/dataset.md)。
 
 ## 開始前確認
 
 1. 新月份的 `feature_table` 與 `sample_pool` 已就緒，且 `label_table` 的觀察窗已成熟。**沒有任何閘門會擋下未成熟的 label**（consistency 的資料閘 B1 只驗 item 集合關係，不驗 label 數量），指標會安靜地偏低；完全沒有 label 時該月的正例為零，報表數字沒有意義。
 2. 手上有目前的 `model_version`（training 執行時印出，或查 `data/models/<model_version>/manifest.json`）。**動手前先把目前的 `base_dataset_version` 與 `model_version` 抄下來**——驗收要拿它們比對。
-3. 你要做的是**新增**月份。若是**重算既有月份**（上游回補、修了 preprocessing），先讀 [known-pitfalls §15](known-pitfalls.md)：本機 parquet cache 對既有月份只看 `_SUCCESS`、不看新鮮度，得先刪掉該月的 cache 目錄。
+3. 你要做的是**新增**月份。若是**重算既有月份**（上游回補、修了 preprocessing），先讀 [known-pitfalls §15](../known-pitfalls.md)：本機 parquet cache 對既有月份只看 `_SUCCESS`、不看新鮮度，得先刪掉該月的 cache 目錄。
 
 ## 四個步驟
 
@@ -34,11 +34,11 @@ export SPARK_CONF_DIR=$PWD/conf/spark-local
 PYTHONPATH=src .venv/bin/python -m recsys_tfb dataset --env local --only-test-months
 ```
 
-log 印出的 `base_dataset_version` 應與上次**完全相同**。翻號了就停下來——代表你同時改到了其他設定（對照 [dataset.md §7.2 設定版本矩陣](../pipelines/dataset.md)）。
+log 印出的 `base_dataset_version` 應與上次**完全相同**。翻號了就停下來——代表你同時改到了其他設定（對照 [dataset.md §7.2 設定版本矩陣](../../pipelines/dataset.md)）。
 
 這一步只處理**尚未落地**的月份，既有月份的 partition 完全不動，所以加第 N 個月的成本正比於「新月份」而不是累積的總月份數。
 
-**但這句話只涵蓋 test 鏈，而 `--only-test-months` 就是為此存在的。** 增量的是 `select_test_keys`、`apply_preprocessor_to_features`、`build_test_model_input` 三個 node（判準：pipeline 定義上有 `*_month_plan` input 的就是）。其餘十個——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`，以及 `enable_calibration: true`（`conf/base/parameters_dataset.yaml` 的出廠設定）帶進來的 `select_calibration_keys`、`build_calibration_model_input`——**不帶旗標時每次執行都會全量重算並覆寫同一批 partition**，而多一個 test 月不會改變它們的內容，所以那是純粹的重做。這是 issue #123 明文把範圍限縮在 test 分支的結果（同一件事在 [dataset.md §5.1](../pipelines/dataset.md) 有記錄）。
+**但這句話只涵蓋 test 鏈，而 `--only-test-months` 就是為此存在的。** 增量的是 `select_test_keys`、`apply_preprocessor_to_features`、`build_test_model_input` 三個 node（判準：pipeline 定義上有 `*_month_plan` input 的就是）。其餘十個——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`，以及 `enable_calibration: true`（`conf/base/parameters_dataset.yaml` 的出廠設定）帶進來的 `select_calibration_keys`、`build_calibration_model_input`——**不帶旗標時每次執行都會全量重算並覆寫同一批 partition**，而多一個 test 月不會改變它們的內容，所以那是純粹的重做。這是 issue #123 明文把範圍限縮在 test 分支的結果（同一件事在 [dataset.md §5.1](../../pipelines/dataset.md) 有記錄）。
 
 `--only-test-months` 讓你把「這次只加評估月份」宣告出來，於是只跑資料閘 ＋ test 鏈五個 node：
 
@@ -70,7 +70,7 @@ log 會明講它做了什麼、沒做什麼：
 各個 node 另有自己的一行（`[months] dataset=test_keys …`）。同一份資訊也寫進
 `data/dataset/<base_dataset_version>/manifest.json` 的 `test_snap_dates_plan`，事後追溯不必去翻 Hive partition。
 
-**這裡有一個必須知道的代價**：跳過的判準是「partition 存在」，不是「partition 新鮮」。`feature_table` 對某個舊月份回補資料之後，該月**不會**自動更新，而且不報錯。要重算舊月份請走下一節，理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)。
+**這裡有一個必須知道的代價**：跳過的判準是「partition 存在」，不是「partition 新鮮」。`feature_table` 對某個舊月份回補資料之後，該月**不會**自動更新，而且不報錯。要重算舊月份請走下一節，理由見 [ADR-0002](../../adr/0002-preprocessed-feature-table-incremental.md)。
 
 ### 3. predict：用既有模型對新月份產生預測（不重訓）
 
@@ -111,7 +111,7 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb evaluation --env local \
   --post-training --model-version <model_version>
 ```
 
-`--post-training` 讀 training 產出的 `training_eval_predictions`；`--model-version` 是必要的，否則會去解析需要人工 promote 的 `best` symlink（見 [known-pitfalls §9](known-pitfalls.md)）。
+`--post-training` 讀 training 產出的 `training_eval_predictions`；`--model-version` 是必要的，否則會去解析需要人工 promote 的 `best` symlink（見 [known-pitfalls §9](../known-pitfalls.md)）。
 
 ## 重算某個既有月份（上游回補時）
 
@@ -144,7 +144,7 @@ PYTHONPATH=src .venv/bin/python -m recsys_tfb training --env local \
 
 1. **值必須是 `dataset.test_snap_dates` 的子集**，兩個 pipeline 共用同一條檢查，否則在 Spark 起來之前就報錯退出（一致性不變量 A21）。這條之所以要 fail loud：pipeline 從來不處理設定沒列的月份，靜默放行等於讓你以為重算過了。
 2. **dataset 重算的是整條 test 鏈**（前處理編碼 → test keys → test model input），不是只有最後一段。
-3. **training 帶這個旗標時會順手丟掉該月的本機 parquet cache**（log 印 `cache_rebuild name=test_model_input path=...`）再重新複製。cache 命中只看 `_SUCCESS`、不看新鮮度，不丟就會拿回補前的舊資料重算出逐位元相同的數字——見 [known-pitfalls §15](known-pitfalls.md)。**只有被指名的月份會被丟**，其他月份仍是 `cache_hit`。
+3. **training 帶這個旗標時會順手丟掉該月的本機 parquet cache**（log 印 `cache_rebuild name=test_model_input path=...`）再重新複製。cache 命中只看 `_SUCCESS`、不看新鮮度，不丟就會拿回補前的舊資料重算出逐位元相同的數字——見 [known-pitfalls §15](../known-pitfalls.md)。**只有被指名的月份會被丟**，其他月份仍是 `cache_hit`。
 4. **與切片旗標併用是正常的**（步驟 3 本來就是 `--only-node`）。只有當切片把 `predict_and_write_test_predictions` 排除在外、旗標因此完全沒作用時，training 才會印 `[rebuild] WARNING`。dataset 那側的規則不同（併用一律 WARN，因為未選中的上游 partition 會留在舊狀態）。
 
 重算之後回到步驟 4 重跑 evaluation，該月的報表才會更新。
@@ -182,10 +182,10 @@ SHOW PARTITIONS ml_recsys.training_eval_predictions;   -- 這張沒有 recsys_pr
 
 | 症狀 | 原因 | 處理 |
 |---|---|---|
-| dataset 印出的 `base_dataset_version` 翻號了 | 同時改到了其他 dataset 設定 | 對照 [dataset.md §7.2](../pipelines/dataset.md) 找出改到哪個 key；只加月份不會翻號 |
+| dataset 印出的 `base_dataset_version` 翻號了 | 同時改到了其他 dataset 設定 | 對照 [dataset.md §7.2](../../pipelines/dataset.md) 找出改到哪個 key；只加月份不會翻號 |
 | predict 拋 `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑或沒成功，來源表沒有該月 | 回去跑 dataset，再重跑步驟 3 |
 | evaluation 報 `No predictions found for evaluation.snap_date` | 步驟 3 沒跑，該月沒有預測 | 回去跑步驟 3 |
-| 該月數字與上次逐位相同（重算既有月份時） | 只重算了其中一層：dataset 跳過既有 partition，或 predict 跳過已完整的月份／命中舊 parquet cache | 用 `bash scripts/rebuild_eval_month.sh <該月>` 一次做完兩層；細節見 [known-pitfalls §15](known-pitfalls.md) |
+| 該月數字與上次逐位相同（重算既有月份時） | 只重算了其中一層：dataset 跳過既有 partition，或 predict 跳過已完整的月份／命中舊 parquet cache | 用 `bash scripts/rebuild_eval_month.sh <該月>` 一次做完兩層；細節見 [known-pitfalls §15](../known-pitfalls.md) |
 | dataset log 印 `skipped=<你要重算的月份>`，或 predict 印 `skipped=<該月>` | 沒帶 `--rebuild-dates`；產物存在就會被跳過 | 加上 `--rebuild-dates <該月>` 重跑（兩個 pipeline 都要） |
 | `--rebuild-dates` 直接報錯退出、還沒起 Spark | 該月份不在 `test_snap_dates`（不變量 A21） | 先把月份加進 `dataset.test_snap_dates`，或修正旗標的值 |
 | dataset 報 `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day`、還沒起 Spark | 步驟 1 加的月份已經在 train／calibration／val 裡了（不變量 A24） | 從不該擁有它的那一組移除。訊息會分別印出兩邊**各自的原始寫法**，因為比對是按日、不是按字面（月份仍必須寫成 `YYYY-MM-DD`，其他寫法會被 A21／A22 擋下）。這條之所以要擋：同一個月同時訓練又評估，該月的指標會靜默變成 in-sample 數字，報表看起來完全正常 |
@@ -195,7 +195,7 @@ SHOW PARTITIONS ml_recsys.training_eval_predictions;   -- 這張沒有 recsys_pr
 
 ## 相關文件
 
-- [ADR-0001：`test_snap_dates` 退出 dataset 版本身分](../adr/0001-test-dates-out-of-dataset-version-identity.md)
-- [dataset pipeline](../pipelines/dataset.md) §7 版本、重跑與恢復
-- [evaluation pipeline](../pipelines/evaluation.md) §7.2 設定與重跑矩陣
+- [ADR-0001：`test_snap_dates` 退出 dataset 版本身分](../../adr/0001-test-dates-out-of-dataset-version-identity.md)
+- [dataset pipeline](../../pipelines/dataset.md) §7 版本、重跑與恢復
+- [evaluation pipeline](../../pipelines/evaluation.md) §7.2 設定與重跑矩陣
 - [pipeline 切片](pipeline-slicing.md)
