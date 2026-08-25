@@ -9,9 +9,31 @@
 ## 怎麼用這份檔案
 
 - **動到某一區之前掃一眼該區**。命中條目 → 那件事要先問，不要自己做。
-- **狀態、票號、進度不在這裡**。那些查 `gh issue list` / `gh pr list`（見 `docs/agents/issue-tracker.md`）。
-  這份檔案只寫「為什麼不做」，不寫「做到哪了」——寫了就會腐爛。
 - **條目失效就刪**。使用者改變主意、或延後條件達成後，這條就沒有存在意義了。
+
+### 寫進來之前的唯一檢查
+
+**問一句：「這句話會不會因為別的地方改了、而變成假的？」會 → 不准寫進來。**
+
+這份檔案沒有任何測試或 hook 守著。唯一的防線就是這一問。
+
+| 不准寫 | 改成 |
+|---|---|
+| 「PR 未開」「#140 仍 OPEN」「票尚未開」 | 查 `gh`；這裡連提都不提 |
+| 「規劃記錄在 `~/projects/foo`」 | 只寫裁決本身；路徑會死 |
+| 「`bar.py:151`」 | 只寫檔名＋要搜什麼字串 |
+| 「這些模組已退場：A、B、C」 | 指向 code 旁的 docstring；名單一定會漂 |
+| 「等公司資料出來再做」（放在本檔） | 開一張 issue，這裡不留 |
+
+**2026-08-25 的證據**：一次體檢抓到 5 條爛掉的條目，5 條全部沒通過上面這一問——
+`~/projects/shaprx` 已刪、`:151/:169` 行號早漂到 `:172/:190`、「PR 未開」的 PR #90
+兩個月前就 merged、「`quadrant`／`pair_ledger`／`cross_purchase` 已退場」而三個都活著、
+#63 早已 CLOSED。**規則當時就寫在這一節，照樣被違反 5 次**——所以它現在寫成可以逐格對照的表，
+不是一句原則。
+
+**離 code 越近的越不會爛。** 同一件事若能寫在函式的 docstring 裡，就寫在那裡，
+這份檔案只留一行路由。（實例：診斷域退場那條，`src/recsys_tfb/diagnosis/__init__.py`
+的 docstring 版本是對的，複製到這裡的版本是錯的。）
 
 ---
 
@@ -25,7 +47,6 @@
 | 評估報表「每-query 正例數分佈」 | 使用者明示跳過 | — |
 | 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」 | 別因為讀者 subagent 提了意見就動 |
 | `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
-| shaprx（SHAP-on-loss 開源套件構想） | 使用者 2026-07-07 明示未定案、擱置。規劃記錄在 `~/projects/shaprx` | 任何新規劃**不得引用它當既有資產或邊界** |
 | `calibration_snap_dates: []` 不比照 A23 擋掉 | 空清單時 `select_calibration_keys` 整池照收（`restrict_to_months_or_all`），校準集會收進 train 與 test 月份、該 test 月的評估變成 in-sample，而 A24 對空集合永遠成立、不出聲。與 A23 擋掉的 `train_snap_dates: []` 是同一個洞。使用者 2026-08-19 決定不擴，理由是 calibration 未來要移除 | 別順手把 calibration 加進 `train_snap_dates_errors`。也別記到 `--only-test-months` 頭上——旗標跳過那個 node，反而是比較安全的一邊，全量跑才會真的撞。calibration 移除後這條就可以刪 |
 | `kedro_design_philosophy.md`（repo 根目錄）留著不刪 | 使用者 2026-08-19 裁決：保留，當作**給人自行參考**的舊文件，靠檔頭既有的 DEPRECATED banner 標示它不是現行依據。#158 原本把「刪掉它」列為待辦，該條已改為裁決不做 | 別刪它，也別刪唯一指向它的 `docs/notes/2026-08-03-day1-doc-triage.md`（那是逐條比對的記錄）。看到「一份 403 行、開頭明說不要照著做的文件躺在根目錄」而想清掉之前，先看這一列——2026-08-19 就有人走到開 PR 才被攔下來 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
@@ -59,7 +80,7 @@
 | `diagnostics` config 必須是 top-level（與 `mlflow`/`cache` 同層），不可進 `training:` | `compute_model_version` 只雜湊 `training:` block；放進去會讓診斷旋鈕 bust model_version。`tests/test_core/test_versioning.py` 守著 |
 | HPO 搜尋診斷寫在 `tune_hyperparameters` **尾端**、不是新 DAG node | 這樣對 `RESUME_CONTRACTS` 隱形，`--from-node finalize_model` 跳過 HPO 的行為不變 |
 | `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
-| 已退場的診斷項目：`triage`／`quadrant`／`discrimination`／`pair_ledger`／`cross_purchase`／`offset_sweep`／`occupancy` | 勿復活 |
+| 診斷域退場過整層的模組（`triage`、早期的門檻式 `quadrant`），理由是「不得產生判定、不得用門檻把連續量切成類別」 | 這條的權威來源＝`src/recsys_tfb/diagnosis/__init__.py` 模組 docstring，**去讀那份、不要憑本列**。這裡刻意不列名單：現存的 `compute_quadrant_profiles`／`pair_ledger`／`cross_purchase` 都是活的，列名單只會再一次被讀成「這些是死碼」（2026-08-25 就發生過） |
 | inference 的 `entity_bucket` 分區欄**刻意不做「讀的桶數與寫的桶數分開」**（讀 40 桶控 driver、每 4 桶存一次維持分區檔大小） | 技術上可行且保留為逃生口，但它讓「一個 chunk」變成兩個不同的東西，spec 與續跑判準都要跟著分裂。目前預設 10 桶落在健康窗口（5–20）中間，不需要這個自由度。論證見 ADR-0010「考慮過但否決的選項」 |
 | inference 的 driver 峰值**只有下界推算，沒有實測** | `_pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定：只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步多吃一倍。所以文件上的數字是下界不是估計值，實際值取決於生產 `feature_table` 的 dtype 分佈 |
 | `pipelines/dataset/nodes.py` 與 `pipelines/inference/nodes.py` 從 `recsys_tfb.preprocessing` import 帶底線的私有名（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 審查會建議改成公開名。#176 已把 `steps/` 內五個底線名去掉，**刻意沒動這兩個**——rename 要同時改兩條 pipeline 的呼叫點，而它本身不修任何行為。同模組後來加入的 `encodable_categoricals`／`warn_unknown_encodings`（#185 從 `steps/` 搬來）用的是公開名，所以這個模組現在是混合命名的：那是刻意的現況，不是「還沒改完」。理由見 ADR-0008「這條 ADR 沒有解決的事」。不要順手改 |
@@ -67,15 +88,7 @@
 
 ## 四、還沒有結論、卡住其他事的
 
-- ~~**issue #63**（inference 的 item 特徵欄落差）~~ **已有結論**：由 #183 的票 A（issue #185）取代並修掉——item 在塊內佔兩個位置（identity 留字串、特徵放整數 code），特徵順序與子集的權威改為 `model.feature_names()`。論證見 ADR-0010 §4／§6 與 ADR-0011 §5；本機 local Spark 的實跑斷言在 `scripts/local_e2e.sh` 末段。**這一條留在這裡只是為了讓「#63 卡住 inference」這個舊說法有反駁；它不再卡任何東西。**
 - **HPO 後 SparkContext 被誰停掉（Layer 1）** 仍未證實。復原機制已修（偵測到死亡先清 Python 端單例再重建），但根因要叢集端證據，使用者只拿得到應用層 stdout/stderr。**下次失敗時怎麼判讀 `spark_context_dead` 事件，寫在 `src/recsys_tfb/utils/spark.py` 的模組註解**（含為什麼預設設定下該事件本身就排除了閒置回收）——不要憑本條摘要，去讀那段。另一個未驗證的取捨：重建＝在 YARN 上重新提交新 application，公司環境若對此有稽核限制，設計需調整。
-- **A1 稽核用 `nodes*.py` glob 當「模組含不含 node」的代理**（`tests/test_core/test_architecture_constraints.py:151`、`:169`），兩個方向都失準。**issue #163，仍 OPEN。**
+- **A1 稽核用 `nodes*.py` glob 當「模組含不含 node」的代理**（`tests/test_core/test_architecture_constraints.py`，搜 `rglob("nodes*.py")`），兩個方向都失準。**issue #163**（狀態查 `gh`）。
   - 原本觸發這條的 `data_gate.py` 已在 #169 消失（它的 node 併進 `pipelines/dataset/nodes.py`），dataset 一帶改由 S1 守（要求每個 `Node(...)` 的第一參數必須 `def` 在 `nodes.py`），**#163 的 Q1 因此被繞開而非解決**——回報已留言在 #163。
   - **glob 對 dataset 以外仍然失準**（例：`pipelines/evaluation/comparison_nodes.py` 不符 `nodes*` 前綴）。等使用者裁決；**不得靠改檔名迴避，也不得新增一條讓自己合規的規則**。
-
-## 五、文件與手冊線
-
-- **Spark 優化手冊**：ch9（reverse ETL）與 ch10（PySpark）內容偏薄，是下一輪內容補強的候選；全書 `.md` 審定後才轉離線 HTML。
-- **GBDT 手冊系列**：手冊 5＝完整機率校準（Platt/isotonic、LTR 分數校回機率、跨 item 分數可比性）待寫。
-- **README／docs 重構**：已出貨，等使用者 dogfood 反饋後再做修訂輪。
-- **`writing-technical-handbooks` skill**：已部署到 `~/.claude/skills/`，tracked 源在 `feat/handbook-writing-skill`；PR 未開，待使用者決定。
