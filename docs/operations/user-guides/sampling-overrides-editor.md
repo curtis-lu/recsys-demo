@@ -170,7 +170,7 @@ A_COLD = (300/300)^0.5 = 1.000     A_HOT = (300/6000)^0.5 = 0.224
   weight 端權重中性（`w_pos=w_neg=1`）。
 - **未命中的 key**：`sample_weights` / `sample_ratio_overrides` 裡打錯或資料期間不存在的值 →
   該筆不中、權重 `1.0`。training 會把這些列進 `sample_weight_report.json` 的 `unmatched_keys`
-  （見 [`../pipelines/training.md`](../pipelines/training.md) §3.5）。
+  （見 [`../pipelines/training.md`](../../pipelines/training.md) §3.5）。
 - **`label` 必須在 `sample_weight_keys`（非空時）**：`label` 是雙因子模型 `w_pos` vs `w_neg`
   的正/負切分軸；少了它 profile 會在啟動 Spark 前就報錯。要嘛加上 `label`，要嘛把
   `sample_weight_keys` 設空跳過 weight 面。**`label` 放在 keys 哪個位置都行**（它不進分組維度），
@@ -198,7 +198,7 @@ sample_weight_keys: [prod_name, label]  →  "ccard_ins|1"、"ccard_ins|0"
 
 > 改 `sample_weight_keys` 或 `sample_weights` 會 bump `model_version`（屬 training block），
 > 不動 `train_variant_id`；一致性檢查 A9a/A9b/A9c 驗欄位、段數、item 分量。詳見
-> [`../pipelines/training.md`](../pipelines/training.md) §3.5、§7。
+> [`../pipelines/training.md`](../../pipelines/training.md) §3.5、§7。
 
 ---
 
@@ -244,6 +244,6 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py profile <db
 
 ## 相關文件
 
-- [`../pipelines/training.md`](../pipelines/training.md) §3.5 — `sample_weights` 設定、一致性檢查、`unmatched_keys` 報告
-- [`../pipelines/dataset.md`](../pipelines/dataset.md) — `sample_ratio_overrides` 在 dataset 抽樣的落點
-- [`local-spark-setup.md`](local-spark-setup.md) — 本機跑 `profile` 的 Spark 環境
+- [`../pipelines/training.md`](../../pipelines/training.md) §3.5 — `sample_weights` 設定、一致性檢查、`unmatched_keys` 報告
+- [`../pipelines/dataset.md`](../../pipelines/dataset.md) — `sample_ratio_overrides` 在 dataset 抽樣的落點
+- [`local-spark-setup.md`](../dev-setup/local-spark-setup.md) — 本機跑 `profile` 的 Spark 環境

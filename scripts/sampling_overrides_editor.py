@@ -400,8 +400,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 ratio 面保留率 <code>= clamp(倍率·n_pos/n_neg, 0, 1)</code>；<code>n_pos=0</code> 的格在 ratio 欄直接填保留率。<br>
 負樣本基數：<b>連動</b>(預設) 用下採後 <code>n_neg</code> → 套用後 pos-rate 精確 = <code>t</code>；<b>不連動</b>用原始 <code>n_neg × φ</code>。</p>
 </details>
-<p><b>完整概念與範例</b>：<code>docs/operations/sampling-overrides-editor.md</code>
-（<a href="../../docs/operations/sampling-overrides-editor.md">相對連結</a>，若從 repo 的
+<p><b>完整概念與範例</b>：<code>docs/operations/user-guides/sampling-overrides-editor.md</code>
+（<a href="../../docs/operations/user-guides/sampling-overrides-editor.md">相對連結</a>，若從 repo 的
 <code>data/profiling/</code> 開啟此頁可直接點開）。</p>
 </details>
 <div id="tabs">

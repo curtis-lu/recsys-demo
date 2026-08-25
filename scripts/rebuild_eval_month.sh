@@ -15,7 +15,7 @@
 # 一致性不變量 A21 擋下（兩個 pipeline 共用同一條 predicate）。
 #
 # 只「新增」一個月份不需要這個腳本——新月份沒有任何既有產物，
-# 兩邊都會自動處理它。完整動線見 docs/operations/adding-an-eval-month.md。
+# 兩邊都會自動處理它。完整動線見 docs/operations/user-guides/adding-an-eval-month.md。
 set -euo pipefail
 
 MONTHS="${1:-}"

@@ -24,7 +24,7 @@
 - **(R2b) cwd 漂移同樣會騙過「讀」指令（2026-08-01）**：heredoc／skill 執行後 cwd 可能 reset 回 main root，此時相對路徑的 `grep`／`sed` 讀到的是 **main 那份檔案**，於是剛寫好的改動看起來像**憑空消失**（`grep` 零命中、`sed` 範圍抓不到），很容易誤判成「工具把我的改動洗掉了」而開始亂修。**徵兆：改動明明剛驗證過，下一個 grep 卻找不到。規則：懷疑改動消失時先 `pwd`，或直接用 `git -C <abs-worktree> diff` 判定——它不受 cwd 影響。**
 - **(R3) Worktree `data/` 隔離**：每個 worktree 用**自己的真 `data/` 樹**，**不 symlink 到 main**（`cache.root` 已相對化＝`data/recsys_cache`、warehouse/metastore 也相對）。首次進 worktree 跑 `PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py` 重建本機資料；隔離驗證用 `scripts/local_spark_setup.py --check-isolation`。
 
-完整 SOP：`docs/operations/worktree-venv-setup.md`。
+完整 SOP：`docs/operations/dev-setup/worktree-venv-setup.md`。
 
 ## 4. 測試效能：一個活過了它的量測環境的數字
 
@@ -109,7 +109,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 - **症狀（第一分鐘認出它）**：training `prepare_lgb_train_inputs` 在 `_pdf_to_X` 的 `to_numpy` 步被 `Killed`（OOM）；或（B6 上線後）在讀 parquet 前秒級 `DataConsistencyError: ... un-encoded non-numeric type(s)`。本機合成資料永不重現（合成 feature_table 無此欄）。
 - **根因**：生產 `feature_table` 有字串欄，未宣告 `categorical_columns`、也未 `drop_columns` → `compute_feature_columns` 收它為特徵 → `_encode_categoricals` 不編它 → `X_df.values` 塌縮成 object 矩陣（每格 ~34 B vs float64 8 B，公司規模 22→96 GiB）。錯誤在 training（下游），根因在 dataset schema 設定（上游）——R 系列同款形態。
-- **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。詳見 `docs/operations/training-oom-object-matrix.md`。
+- **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。修法見 `docs/pipelines/dataset.md` §8.1；修完仍 OOM 的後續選項見 `docs/pipelines/training.md` §9.1。
 - **驗證方式**：`python -c "import pyarrow.parquet as pq, pyarrow as pa; s=pq.read_schema('<train_model_input.parquet>'); print([f.name for f in s if pa.types.is_string(f.type)])"` 對照 `preprocessor.json` 的 `feature_columns`／`categorical_columns`；差集非空即中招。
 
 ## 9. 本機跑 evaluation 必須兩個旗標，少一個就跑不動（2026-07-19）
@@ -186,7 +186,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **症狀（第一分鐘認出它）**：重算某個既有 test 月份（上游回補、修了 preprocessing）之後重跑 predict 與 evaluation，該月的數字與上次**逐位相同**。注意此時 `base_dataset_version` 與 `model_version` 也沒變——但那是**預期行為**（`test_snap_dates` 已退出版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以「版本沒變」在這裡不是線索，別拿它當證據往版本層查。
 - **根因**：test 的 driver-local parquet cache 是**一個月一個目錄**（`<cache.root>/<base_dataset_version>/test_months/<YYYYMMDD>/test_model_input.parquet/`），各自持有自己的 `_SUCCESS`。命中判定只看「`_SUCCESS` 在不在」，**不看內容新不新鮮**（`pipelines/training/nodes.py::_materialize_parquet_handle`）。過去改 test 日期會翻 `base_dataset_version`、cache 路徑第一層跟著換掉，等於一道免費的失效保險；把 test 日期剝出版本身分之後這道保險消失了：**同一個 base version 底下重算某月，cache 不會知道**。
 - **⚠ 2026-08-01 追加：這個症狀現在有三層可能成因，要一起排除。** dataset 與 predict 都變成增量的了（[ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)、issue #130）：dataset 的既有 partition 只要存在就跳過，predict 的既有月份只要 item partition 齊全就跳過，parquet cache 只要有 `_SUCCESS` 就命中。三層都只認「存在」，都不認「新鮮」。
-- **規則**：重算既有月份用 `bash scripts/rebuild_eval_month.sh <該月>`——它把同一個 `--rebuild-dates` 同時給 dataset 與 training，training 那側再順手丟掉該月的 cache 目錄。**不要只跑其中一半**。手動等價指令與 log 對照見 [adding-an-eval-month.md](adding-an-eval-month.md#重算某個既有月份上游回補時)。單純**新增**月份不受此坑影響——新月份三層都沒有東西，必然重做；而且若忘了先跑 dataset，逐月複製的 glob 零命中會 raise `FileNotFoundError`，是 fail-loud 而非靜默。
+- **規則**：重算既有月份用 `bash scripts/rebuild_eval_month.sh <該月>`——它把同一個 `--rebuild-dates` 同時給 dataset 與 training，training 那側再順手丟掉該月的 cache 目錄。**不要只跑其中一半**。手動等價指令與 log 對照見 [adding-an-eval-month.md](user-guides/adding-an-eval-month.md#重算某個既有月份上游回補時)。單純**新增**月份不受此坑影響——新月份三層都沒有東西，必然重做；而且若忘了先跑 dataset，逐月複製的 glob 零命中會 raise `FileNotFoundError`，是 fail-loud 而非靜默。
 - **驗證方式**：`ls -d data/recsys_cache/<base_dataset_version>/test_months/*` 看目前 cache 了哪幾個月。重算時該月的三行 log 應該是 `[months] test branch: processed=<該月>`、`cache_rebuild name=test_model_input path=...`（緊接著 `cache_miss` 與實際複製）、`[months] predict: processed=<該月> ... rebuilt=<該月>`。該月出現在任何一行的 `skipped=` 或印成 `cache_hit`，就是那一層沒被重算。
 
 ## 16. PR 開好後再推 commit：GitHub 的 PR 物件會落後，merge 到的是舊版本（2026-08-02，PR #146 實例）

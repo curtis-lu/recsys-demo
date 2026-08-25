@@ -380,7 +380,7 @@ import 掃描沒有假陽性面。
 
 **每張票的驗收條件**：`conf/` 的 `git diff` 為空；catalog 條目名、`Node(name=...)`、
 pipeline DAG 全部不變（`--only-node` 的可定址性是既有介面，見
-`docs/operations/pipeline-slicing.md`）；相關測試綠且 main 既有 fail 先建 baseline。
+`docs/operations/user-guides/pipeline-slicing.md`）；相關測試綠且 main 既有 fail 先建 baseline。
 票 4 另加：跑一次本機 dataset pipeline，**各 split 的 row count 與 manifest 的
 processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
 

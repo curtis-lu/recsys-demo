@@ -149,7 +149,7 @@ SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_name
 
 版本以設定內容的 canonical representation 計算 8 碼 SHA-256 hash。相同版本輸入會得到相同版本 ID，不同實驗可以在相同 Hive table 或 artifact root 下並存。
 
-同一個原則往下推一層，得到一個刻意的例外：**`test_snap_dates` 不進 `base_dataset_version`**。test 資料不進任何模型擬合（`val` 驅動 early stopping、`calibration` 決定校準後輸出，兩者都留著），因此它決定的是「評估看了哪幾個月」這個**覆蓋範圍**，不是產物身分。多評估一個月因而不翻版本、不需要重訓，新舊月份的報表並存於同一個模型身分底下。理由與否決過的選項見 [ADR-0001](adr/0001-test-dates-out-of-dataset-version-identity.md)；操作見 [新增一個評估月份](operations/adding-an-eval-month.md)。
+同一個原則往下推一層，得到一個刻意的例外：**`test_snap_dates` 不進 `base_dataset_version`**。test 資料不進任何模型擬合（`val` 驅動 early stopping、`calibration` 決定校準後輸出，兩者都留著），因此它決定的是「評估看了哪幾個月」這個**覆蓋範圍**，不是產物身分。多評估一個月因而不翻版本、不需要重訓，新舊月份的報表並存於同一個模型身分底下。理由與否決過的選項見 [ADR-0001](adr/0001-test-dates-out-of-dataset-version-identity.md)；操作見 [新增一個評估月份](operations/user-guides/adding-an-eval-month.md)。
 
 ### 只讓真正影響產物的設定翻版
 
@@ -313,7 +313,7 @@ dataset、training、inference 與 evaluation 支援：
 1. 位於切片起點之前、沒有輸出的 side-effect guard 不會自動重跑；資料已變更時應執行完整 pipeline。
 2. `exists()` 只能確認產物存在，無法證明未版本化產物與目前參數完全一致；版本化路徑與 manifest 才是主要防線。
 
-詳細行為見 [`operations/pipeline-slicing.md`](operations/pipeline-slicing.md)。
+詳細行為見 [`pipelines/training.md` §7.4](pipelines/training.md)（切片安全邊界逐條）與 [`operations/user-guides/pipeline-slicing.md`](operations/user-guides/pipeline-slicing.md)（模式與切片的差別、dataset 增量產物的月份判準）。
 
 ### HPO 以 search checkpoint 接續
 
@@ -329,7 +329,7 @@ pipeline 切片只能在完整 node 邊界恢復。若 `tune_hyperparameters` �
 
 `search_id` 使用與 model version 相同的 model-defining 輸入，但排除 `n_trials`。因此改變 search space、資料版本、objective 或其他會改變 trial 意義的設定時，會自動建立新的 search；只改目標 trial 數則沿用既有 search。
 
-詳細行為見 [`operations/hpo-resume.md`](operations/hpo-resume.md)。
+詳細行為見 [`pipelines/training.md` §7.3](pipelines/training.md)。
 
 ### 恢復能力來自持久化邊界
 

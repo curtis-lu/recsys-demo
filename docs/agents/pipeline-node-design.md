@@ -64,6 +64,19 @@
 
 ---
 
+## G7. 落地還是 memory-only ＝ 接續成本的決定
+
+G1 決定「這條邊界該不該存在」；這一條決定**邊界上的產物要不要進 catalog 落地**。兩個問題不同：G1 問「出事時撈不撈得出來」，這條問「**下次要從這裡接續，得付多少**」。
+
+判準＝「是不是某個宣告接續點的必要輸入」×「重算貴不貴」：
+
+- **便宜的留 memory-only**（view、handle、cheap transform）——切片的自動擴張會把生產者拉回來重跑，代價可接受。
+- **貴的落地**（HPO 輸出）——否則 `--from-node finalize_model` 會一路補跑回 `tune_hyperparameters`，等於重訓一次。
+
+**接續點品質是會被新增 node 默默破壞的契約。** `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS` 釘住各 pipeline（含 calibration-enabled training 變體）承諾的接續點與允許補跑集合。改壞會紅燈——要嘛給新產物補 catalog 條目，要嘛修改契約並在 PR 說明為什麼接受變貴。
+
+改完跑 `python -m recsys_tfb <pipeline> --list-nodes` 肉眼確認各 node 的接續成本。切片機制本身見 [`../operations/user-guides/pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md)。
+
 # 節二 · 在這個 repo 的形狀
 
 ## S-A. 檔案角色四分
@@ -156,6 +169,7 @@ Spark 的 join、filter、select、withColumn、cast 全都是 lazy：它們在�
 改或加一個 node 之前，逐條打勾：
 
 - [ ] **邊界**：這個 node 的產物撈得出來看嗎？（catalog 條目／測試／log 至少一個）中間物撈不出來 → 合併（G1）。
+- [ ] **接續成本**：新產物該落地還是 memory-only？貴的落地、便宜的讓自動擴張補跑；改完跑 `--list-nodes` 確認，並看 `RESUME_CONTRACTS` 有沒有紅（G7）。
 - [ ] **步驟**：node body 從上到下讀，每一行具名呼叫上面有一段 `# Decision —` 說出決策與選錯的後果（G2、S-B）。
 - [ ] **判定程序**：把每個 helper 名字換成機械名，重讀 node body。還講得完 ML 故事嗎（G4）？
 - [ ] **helper**：每個新 helper 只承載一個決策或一個機制（G3）。

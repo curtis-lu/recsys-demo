@@ -99,7 +99,7 @@ dataset:
 
 抽樣使用 identity key、sampling site 與 `random_seed` 計算固定 CRC32 bucket。同一份資料與設定重跑會選出相同資料，不受 Spark partition 排列影響。未出現在 `sample_ratio_overrides` 的分層使用 `sample_ratio`。
 
-override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_editor.py` 可減少欄位順序、字串格式或不存在 item 導致規則沒有命中的風險。用法、概念與 key 組法見 [`../operations/sampling-overrides-editor.md`](../operations/sampling-overrides-editor.md)。
+override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_editor.py` 可減少欄位順序、字串格式或不存在 item 導致規則沒有命中的風險。用法、概念與 key 組法見 [`../operations/user-guides/sampling-overrides-editor.md`](../operations/user-guides/sampling-overrides-editor.md)。
 
 #### Sample group key 的欄位來源
 
@@ -180,7 +180,7 @@ dataset:
 
 - `schema.item` 必須列在 `categorical_columns`，否則模型無法區分 query group 內的 items。
 - 同一欄不可同時出現在 `categorical_columns` 與 `drop_columns`。
-- 字串／非數值欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（成因見 `docs/operations/training-oom-object-matrix.md`）。
+- 字串／非數值欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（被點名之後怎麼決定，見 §8.1）。
   - ⚠ **該欄若同時列在 `carry_columns`，上面兩個選項只有 `drop_columns` 可用。** B6 的錯誤訊息會建議「宣告成 categorical 或 drop」，但對 carry 欄選前者只是把 B6 換成下一個錯誤：欄位留在 `feature_table` 側，`build_model_input` 兩側各帶一份，改撞 `Reference 'x' is ambiguous`。B7 會同時報出來（collect-all），但 B6 那則排在前面，由上往下照做會先繞一圈。判斷方式見 §3.4 的配對規則。
 - 真正的連續數值特徵不需列入任一清單。
 - 宣告為 categorical 的 feature 欄位不可是 Decimal、Double 或 Float；數字代碼應先在 source ETL 轉為 string 或 integer。
@@ -192,7 +192,7 @@ dataset:
 工具吃一個 Hive 表或 parquet 路徑，把 YAML 片段寫到 `data/profiling/<stem>_categorical.yaml`（供人工貼回上面的設定，不會自動改 config）。它把**每一個**欄位分類，不靜默漏欄：
 
 - 低 cardinality 欄 → `categorical_columns:`；高 cardinality 字串欄 → `drop_columns:`（附 nunique）；
-- date／timestamp／binary／複合型 → 一個**註解式 review 區塊**：這些同屬 object-dtype OOM 兇手（見上一則設定原則與 `docs/operations/training-oom-object-matrix.md`），但工具無法判該當 categorical 還是 drop，故只列出、由你把每欄搬進上面兩塊之一；
+- date／timestamp／binary／複合型 → 一個**註解式 review 區塊**：這些同屬 object-dtype OOM 兇手（見上一則設定原則與 §8.1），但工具無法判該當 categorical 還是 drop，故只列出、由你把每欄搬進上面兩塊之一；
 - 高 cardinality 數值欄留作連續特徵（不列入任一清單）。
 
 terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 columns = 2 categorical + 1 numeric-feature + 1 drop-suggested + 4 review`），可據此確認沒有欄位被漏掉。
@@ -255,7 +255,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 
 dataset 不接受版本旗標。每次啟動都會依目前設定、schema 與 `feature_table` schema 重新計算版本；指定既有 dataset 版本是下游 training 的責任。
 
-`--rebuild-dates` 的值不是 `test_snap_dates` 的子集時，在 Spark 啟動之前就報錯退出（一致性不變量 A21）。它與 `--from-node`／`--only-node` **可以併用**（切片選 node、rebuild 選月份，兩者正交），但併用時會印一段 WARN：未被選中的上游 node 不會重算，那些 partition 仍是舊的。用法與時機見 [新增一個評估月份](../operations/adding-an-eval-month.md)。
+`--rebuild-dates` 的值不是 `test_snap_dates` 的子集時，在 Spark 啟動之前就報錯退出（一致性不變量 A21）。它與 `--from-node`／`--only-node` **可以併用**（切片選 node、rebuild 選月份，兩者正交），但併用時會印一段 WARN：未被選中的上游 node 不會重算，那些 partition 仍是舊的。用法與時機見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
 `--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--dry-run` 可單獨使用表示 full-run 計畫，也可搭配切片選項檢視部分重跑計畫。
 
@@ -456,7 +456,7 @@ test_snap_dates
 - 新月份的 test 產物以 dynamic partition 寫入，既有月份的產物與評估報表原封不動（累積語意）；
 - 新舊月份的評估報表並存於同一個模型身分之下，可直接比較。
 
-代價是 `parameters_dataset.yaml` 不再是 test 覆蓋範圍的唯一真實來源 —— 同一個 `base_dataset_version` 底下的月份會隨時間累積，**實際有哪些月份要以 Hive partition 為準**（`SHOW PARTITIONS`）；manifest 只記錄**最後一次執行**當下的設定，每次執行覆寫，因此讀不出累積的覆蓋範圍。完整推導與否決過的選項見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；操作步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md)。
+代價是 `parameters_dataset.yaml` 不再是 test 覆蓋範圍的唯一真實來源 —— 同一個 `base_dataset_version` 底下的月份會隨時間累積，**實際有哪些月份要以 Hive partition 為準**（`SHOW PARTITIONS`）；manifest 只記錄**最後一次執行**當下的設定，每次執行覆寫，因此讀不出累積的覆蓋範圍。完整推導與否決過的選項見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；操作步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
 除了上述七個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
 
@@ -526,7 +526,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | train ratio、override、分層 keys、train-dev ratio | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
 | calibration ratio 或 override | 新 calibration variant，base/train version 不變 | 完整執行最安全；熟悉切片者可只重建 calibration 路徑 |
 | train／val／calibration 日期、calibration 開關、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
-| 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/adding-an-eval-month.md) |
+| 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
 | `feature_table` 欄名、型別或順序 | 新 base version | 完整執行 dataset |
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |
@@ -554,6 +554,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | override references unknown item | override key 中的 item 未宣告或拼錯 | 用 sampling editor 重建 key，並對齊 `schema.categorical_values` |
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
+| `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄二選一，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
 | categorical dtype 為 decimal/double/float | 連續值誤標類別，或代碼欄型別不適合 | 真正連續特徵移出 categorical；代碼欄在 source ETL cast 為 string/int |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
@@ -566,6 +567,19 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | 切片計畫出現昂貴的 `auto-included` | 必要 artifact 不存在或 catalog 無法載入 | 先確認版本 partition 與檔案；不接受補跑成本時先停止修復 |
 | 部分重跑後結果與設定不一致 | skipped artifacts 已過期，或資料閘被跳過 | 使用 full run，並比較 manifest、版本與 source data 更新時間 |
 | Spark shuffle 或記憶體壓力過高 | 單一 partition 太大或 join shuffle 過重 | 檢查 `spark.sql.shuffle.partitions`、AQE、資料偏斜與 executor memory |
+
+### 8.1 B6 點名之後，怎麼決定每一欄
+
+B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segment' is non-numeric and is not declared categorical...`）。對每一個被點名的欄，二選一：
+
+- **是有用的類別特徵**（例：客群別、通路）→ 加進 `dataset.prepare_model_input.categorical_columns`。它會在 Spark 端就被編成整數，仍是模型特徵。
+- **不是模型特徵**（例：ID、自由文字）→ 加進 `dataset.prepare_model_input.drop_columns`。
+
+> ⚠ **這會 bump `base_dataset_version`，需要重建整個 dataset**——兩個鍵都參與 dataset 版本雜湊。閘門本身只讓你**知道是哪幾欄**、並防止未來重建時再犯，不會替你改 config。
+
+`scripts/suggest_categorical_cols.py` 可以加速這個決定（用法見 §3）：它把高 cardinality 字串欄建議進 `drop_columns`，並把 date／timestamp／binary／複合型欄放進待人工判斷的 review 區塊——那些同屬 object-dtype OOM 兇手，但工具不替你決定該 categorical 還是 drop。
+
+**不處理會怎樣**：該欄會原封不動穿過整條 dataset pipeline 成為特徵，training 讀取時整張矩陣塌縮成 object dtype（每格 ~34 B vs float64 8 B），在 `to_numpy` 被 OOM killer 殺掉。合成資料不含這類欄位，所以**本機永遠不會重現，生產環境必爆**。事故全貌見 [2026-07 調查紀錄](../notes/2026-07-11-training-oom-investigation.md)。
 
 ## 9. 限制與注意事項
 

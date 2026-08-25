@@ -24,15 +24,15 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 架構 / 重構 / 探索 codebase | `graphify-out/GRAPH_REPORT.md`（**強制**，不得用 Explore agent 替代這一步；有 `graphify-out/wiki/index.md` 就導航 wiki 而非讀原始檔） |
 | 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋9 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，**全部沒有機械檢查**——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其節五，要加一筆先問使用者） |
-| worktree / venv 任何操作 | `docs/operations/worktree-venv-setup.md` ＋ 下方 pre-flight |
-| 本機跑 Spark pipeline | `docs/operations/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
-| pipeline 部分執行 | `docs/operations/pipeline-slicing.md`（`--from-node`/`--only-node`/`--dry-run`/`--list-nodes`） |
+| worktree / venv 任何操作 | `docs/operations/dev-setup/worktree-venv-setup.md` ＋ 下方 pre-flight |
+| 本機跑 Spark pipeline | `docs/operations/dev-setup/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
+| pipeline 部分執行（模式 vs 切片、加月份的 auto-included、接續前提） | `docs/operations/user-guides/pipeline-slicing.md`；旗標本身的用法在該 pipeline 文件 §4 |
 | 踩到怪錯誤（ELOOP / 改了沒生效 / 組合跑才 fail） | `docs/operations/known-pitfalls.md` |
 | 覺得某處「該修但沒修」、或準備順手做掉一個延後項 | `docs/agents/deliberate-non-goals.md`（刻意不做的事＋理由。**票號與進度不在裡面**，查 `gh`） |
-| HPO 中斷接續 | `docs/operations/hpo-resume.md` |
-| 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
-| 抽樣權重設定 | `docs/operations/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
-| 做／改診斷報表的呈現層（表格、圖、定義、編排） | `docs/operations/diagnosis-report-presentation.md`（每段資訊扣回目的、地基量開頭講一次、選最能凸顯重點的媒介、判斷留給讀者） |
+| HPO 中斷接續 | `docs/pipelines/training.md` §4.7（操作）＋ §7.3（恢復語意與 `_hpo/` 清理） |
+| 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/user-guides/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
+| 抽樣權重設定 | `docs/operations/user-guides/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
+| 做／改診斷報表的呈現層（表格、圖、定義、編排） | `docs/agents/diagnosis-report-presentation.md`（每段資訊扣回目的、地基量開頭講一次、選最能凸顯重點的媒介、判斷留給讀者） |
 | 派 subagent / 選模型 / 驗收 | 判準已常駐於 `~/.claude/rules/00-core.md`；寫派工 prompt 前載入 `dispatch-subagents` skill |
 
 ## Worktree 鐵則（細節與事故記錄：known-pitfalls.md §3）

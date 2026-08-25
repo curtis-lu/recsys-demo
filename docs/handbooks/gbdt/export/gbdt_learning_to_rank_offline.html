@@ -202,7 +202,7 @@ window.addEventListener('DOMContentLoaded', function() { renderMathInElement(doc
 
 <p><a id="top"></a></p>
 <h1>從二元分類到排序學習：learning-to-rank vs pointwise GBDT，與多 item 冷熱門</h1>
-<p>這份手冊接續《<a href="gbdt_binary_classification.md">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>手冊1</strong>）、《<a href="gbdt_class_imbalance.md">二元分類 GBDT：類別不平衡的數學影響與處理</a>》（<strong>手冊2</strong>）、《<a href="gbdt_multiitem_imbalance.md">多 item 共享模型下的冷熱門不平衡</a>》（<strong>手冊3</strong>）。前三冊從頭到尾都站在同一塊地基上：<strong>pointwise 二元分類</strong>——每一列 $(\text{客戶}, \text{item})$ 是一道獨立的二元題，loss 是 <code>binary_logloss</code>。本文要問的是：</p>
+<p>這份手冊接續《<a href="gbdt_binary_classification_offline.html">二元分類 GBDT 數學推導手冊</a>》（下稱<strong>手冊1</strong>）、《<a href="gbdt_class_imbalance_offline.html">二元分類 GBDT：類別不平衡的數學影響與處理</a>》（<strong>手冊2</strong>）、《<a href="gbdt_multiitem_imbalance_offline.html">多 item 共享模型下的冷熱門不平衡</a>》（<strong>手冊3</strong>）。前三冊從頭到尾都站在同一塊地基上：<strong>pointwise 二元分類</strong>——每一列 $(\text{客戶}, \text{item})$ 是一道獨立的二元題，loss 是 <code>binary_logloss</code>。本文要問的是：</p>
 <blockquote>
 <p><strong>如果把這塊地基換掉，會怎麼樣？</strong> 把訓練目標從 pointwise 的 <code>binary_logloss</code> 換成<strong>按客戶分組的排序損失</strong>（learning-to-rank，lambdarank）——因為目標不同，樹怎麼切、葉子輸出什麼，都跟著變。這對冷熱門 item 又意味著什麼？另一條路是不換目標、只<strong>換結構</strong>：每個 item 各訓一個模型。本文把這兩條路講清楚。</p>
 </blockquote>

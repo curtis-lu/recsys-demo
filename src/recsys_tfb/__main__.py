@@ -188,9 +188,9 @@ def _format_slice_plan(plan, total: int) -> list[str]:
             + ", ".join(plan.skipped_side_effect)
         )
     lines.append(
-        "[plan] WARNING: resume assumes parameters are unchanged since the "
-        "skipped artifacts were produced (overwrite-style Hive tables are not "
-        "version-stamped)."
+        "[plan] WARNING: resume assumes the skipped artifacts are still valid. "
+        "exists() proves presence, not freshness — version IDs cover config "
+        "only, not code changes or backfilled source data."
     )
     running = len(plan.requested) + len(plan.auto_included)
     lines.append(f"[plan] running {running} of {total} nodes")
