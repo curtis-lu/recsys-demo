@@ -56,7 +56,7 @@ training:
   #   類別欄填人類可讀字串即可（runtime encode-aware 翻 code）；機制與 edge case 見
   #   docs/pipelines/training.md。可用 scripts/sampling_overrides_editor.py 從實際資料推導
   #   （雙因子地板＋注意力權重）；概念框架、公式與範例見
-  #   docs/operations/sampling-overrides-editor.md。
+  #   docs/operations/user-guides/sampling-overrides-editor.md。
   sample_weight_keys:
     - prod_name
   # sample_weights: ★key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數
@@ -202,5 +202,5 @@ diagnostics:
 # HPO 崩潰復原開關（ops 旗標，刻意放頂層不影響 model_version）。
 # true（預設）：tune_hyperparameters 持久化 Optuna study + 每次刷新最佳 checkpoint
 # 模型到 data/models/_hpo/<search_id>/，crash 後重跑只補跑剩餘 trial。
-# false：退回純記憶體、不落地（debug 用）。詳見 docs/operations/hpo-resume.md。
+# false：退回純記憶體、不落地（debug 用）。詳見 docs/pipelines/training.md §7.3。
 hpo_checkpointing: true
