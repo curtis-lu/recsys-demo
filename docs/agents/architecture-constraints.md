@@ -102,7 +102,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 連帶後果：Kedro 為多行程而設的一整組約束（dataset 與 node 必須可 pickle、不得用 lambda／巢狀函式／closure、不能並用多行程的 dataset 要標記屬性）在本 repo **不適用**。
 
-**但這是「現在不適用」，不是「永遠不必管」。** 若未來要加平行執行，第一個擋路的**不是**「可不可 pickle」，而是**贏家模型只活在 driver 的記憶體裡**：`pipelines/training/steps/hpo_scoring.py` 的 `TrialScorer.best["model"]` 存的是訓練好的 booster 物件。多行程時每個 worker 刷新的是自己那一份，主行程結束時拿到的仍是 `None`，`finalize_model` 沒有模型可用。
+**但這是「現在不適用」，不是「永遠不必管」。** 若未來要加平行執行，第一個擋路的**不是**「可不可 pickle」，而是**贏家模型只活在 driver 的記憶體裡**：`pipelines/training/steps/hpo_scoring.py` 的 `TrialScorer.best["model"]` 存的是訓練好的 `ModelAdapter` 物件本身（LightGBM booster 掛在它的 `.booster` 上）。多行程時每個 worker 刷新的是自己那一份，主行程那一份始終是 `None`，於是 `tune_hyperparameters` 的 last-resort 分支會靜靜地把 `study.best_params` 重訓一次——**每跑一次就白付一輪完整訓練，而平行化的目的正是省時間**，而且沒有任何錯誤訊息。
 
 而 Optuna 的兩種平行化**都不需要**把 objective 送過行程邊界：`study.optimize(..., n_jobs=N)` 用執行緒、共用記憶體（但 `TrialScorer.best` 的「比大小再寫回」不是原子操作，那條路要自己加鎖）；多行程做法是各行程自己建 objective、共用一個 storage——本 repo 已經在用後者的基礎設施（`pipelines/training/hpo_resume.py` 的 `JournalStorage` ＋ `JournalFileBackend`）。
 
@@ -162,7 +162,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-09 量測共 57 個。
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 56 個。
 
 **這個數字每次改 node 都會變，所以別引用它，重量一次**：
 
@@ -182,12 +182,14 @@ print(n, dict(b))"
 | 行數 | 個數 |
 |---|---|
 | ≤ 40 | 33 |
-| 41–80 | 12 |
+| 41–80 | 11 |
 | 81–120 | 5 |
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 253 行（`inference/nodes.py`）、`tune_hyperparameters` 228 行（`training/nodes.py`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 172 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）。
+
+> **2026-08-30 重量的原委，以及腐爛了什麼**（#229）。該次改動把 `_hpo_score` 與 HPO trial 的評分搬進 `pipelines/training/steps/hpo_scoring.py`，所以總數 57 → 56、≤40 少一個，`tune_hyperparameters` 228 → 185、`finalize_model` 156 → 155。**重量時發現另外三個數字早就腐爛了，跟這次改動無關**：41–80 原寫 12（當時實為 11）、`predict_and_write_scores` 原寫 253（實為 263）、第五名原寫 `prepare_eval_data` 143（實為 `validate_predictions` 146）。三者都是 2026-08-09 之後沒人回頭重量。**這正是上面那句「別引用它，重量一次」的實例**——引用了就會像這樣把三個過期的數字一起帶下去。
 
 **這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（六成的 node 函式在 40 行內），下次寫一個新的時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
 

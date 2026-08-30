@@ -8,12 +8,15 @@ what changes is that the search state is an attribute of the object named for
 owning it, so a reader can see from the signature what the search carries.
 
 **Nothing here unlocks parallel HPO, and the closure was never what blocked
-it.** ``best["model"]`` is a trained booster sitting in the driver's Python
-heap: under multiprocessing each worker would refresh its own copy and the
-parent would still hand ``None`` to ``finalize_model``. The real blocker, and
-the route around it (read the winner back from the on-disk checkpoint rather
-than out of memory), are recorded in ``docs/agents/architecture-constraints.md``
-F3 — including why today's checkpoint cannot carry that weight as written.
+it.** ``best["model"]`` is the trained ``ModelAdapter`` itself (the LightGBM
+booster hangs off its ``.booster``), sitting in the driver's Python heap: under
+multiprocessing each worker would refresh its own copy while the parent's stays
+``None``, and ``tune_hyperparameters``'s last-resort branch would then quietly
+refit ``study.best_params`` once — a whole extra training run, every run, in
+the one setup whose point was to be faster. The real blocker, and the route
+around it (read the winner back from the on-disk checkpoint rather than out of
+memory), are recorded in ``docs/agents/architecture-constraints.md`` F3 —
+including why today's checkpoint cannot carry that weight as written.
 """
 
 import logging

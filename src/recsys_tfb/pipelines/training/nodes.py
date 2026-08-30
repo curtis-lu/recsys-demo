@@ -593,11 +593,11 @@ def tune_hyperparameters(
         )
         remaining = n_trials
 
-    # Decision — the winning trial's model belongs to the scorer, not to this
-    # function. Optuna only ever sees the float a trial returns, so the model
-    # has to be kept on the callable itself; making that ownership explicit is
-    # the whole point of the class. `study_dir=None` doubles as "do not
-    # checkpoint" — the checkpointing branch is the only one that sets it.
+    # Optuna only ever sees the float a trial returns, so the winning model has
+    # to be kept on the callable itself — that is what `scorer.best` is for.
+    # Built here rather than above the branch because `study_dir` is one of its
+    # arguments: `None` means "do not checkpoint", and the checkpointing branch
+    # is the only one that sets it.
     scorer = TrialScorer(
         train_lgb_handle=train_lgb_handle,
         train_dev_lgb_handle=train_dev_lgb_handle,
