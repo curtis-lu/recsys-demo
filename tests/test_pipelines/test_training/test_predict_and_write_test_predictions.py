@@ -68,7 +68,20 @@ def _make_parameters() -> dict:
     }
 
 
-def _write_ds(existing=()) -> MagicMock:
+#: A single-entity declaration in the shape ``HiveTableDataset.declared_columns``
+#: reports it (data columns + partition_filter key + partition_cols). It is
+#: modelled on the ``training_eval_predictions`` entry in
+#: ``conf/base/catalog.yaml`` but is deliberately NOT pinned to it: what these
+#: tests are about is the entity columns, and a stand-in that has to be updated
+#: whenever an unrelated column is added to the catalog would fail for reasons
+#: none of them are testing.
+_DECLARED_COLUMNS = (
+    "cust_id", "score", "score_uncalibrated", "label",
+    "model_version", "snap_date", "prod_name",
+)
+
+
+def _write_ds(existing=(), declared=None) -> MagicMock:
     """Mock of the ``training_eval_predictions`` catalog dataset.
 
     ``existing``: ``(snap_date, prod_name)`` pairs already written for this
@@ -76,10 +89,16 @@ def _write_ds(existing=()) -> MagicMock:
     reports. Supplying it explicitly is the point of the seam: predict decides
     what to skip from this list alone, so every test states the on-disk
     starting position rather than inheriting a default.
+
+    ``declared``: the column names the catalog entry declares — what
+    ``HiveTableDataset.declared_columns`` reports. Defaults to the real
+    ``training_eval_predictions`` declaration.
     """
+    declared = _DECLARED_COLUMNS if declared is None else declared
     ds = MagicMock()
     ds.save.side_effect = lambda df: ds.saved.append(df)
     ds.saved = []
+    ds.declared_columns = list(declared)
     ds.existing_partition_values.return_value = [
         {"snap_date": snap, "prod_name": prod} for snap, prod in existing
     ]
@@ -122,6 +141,7 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
         saves.append(df)
 
     write_ds = MagicMock()
+    write_ds.declared_columns = list(_DECLARED_COLUMNS)
     write_ds.save.side_effect = capture_save
     # Nothing written yet, so every configured month is incomplete and gets
     # predicted — the pre-incremental behaviour this test was written against.
@@ -177,6 +197,7 @@ def test_predict_and_write_score_uncalibrated_equals_score_when_not_calibrated(t
 
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
+    write_ds.declared_columns = list(_DECLARED_COLUMNS)
     write_ds.save.side_effect = lambda df: saves.append(df)
     write_ds.existing_partition_values.return_value = []  # nothing written yet
 
@@ -212,6 +233,7 @@ def test_predict_and_write_calibrated_branch_calls_predict_uncalibrated(tmp_path
 
     saves: list[pd.DataFrame] = []
     write_ds = MagicMock()
+    write_ds.declared_columns = list(_DECLARED_COLUMNS)
     write_ds.save.side_effect = lambda df: saves.append(df)
     write_ds.existing_partition_values.return_value = []  # nothing written yet
 
@@ -272,6 +294,7 @@ def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
 
     saves: list = []
     write_ds = MagicMock()
+    write_ds.declared_columns = list(_DECLARED_COLUMNS)
     write_ds.save.side_effect = lambda df: saves.append(df)
     write_ds.existing_partition_values.return_value = []  # nothing written yet
 
@@ -512,3 +535,103 @@ def test_a_configured_month_missing_from_the_cache_fails_loud(tmp_path):
     # the duplicate-spelling error raised a few lines away in the cache node.
     with pytest.raises(ValueError, match="no rows in the test cache"):
         _predict(handles, params, _write_ds())
+
+
+# ---------------------------------------------------------------------------
+# Two-column entity — the framework promises `schema.entity` is a list, and
+# these are what make that promise cost something if it stops being true.
+#
+# Note the nesting: `get_schema` reads `parameters["schema"]["columns"]`, so a
+# schema block written one level up (as `_make_parameters` does) is inert and
+# silently falls back to the single-entity defaults. Both tests below would
+# pass for the wrong reason if written that way.
+# ---------------------------------------------------------------------------
+
+
+def _two_entity_params(declared_entity=("cust_id", "acct_id")) -> dict:
+    params = _make_parameters()
+    params["schema"] = {
+        "columns": {
+            "time": "snap_date",
+            "entity": list(declared_entity),
+            "item": "prod_name",
+            "label": "label",
+        }
+    }
+    params["dataset"]["test_snap_dates"] = ["2025-01-31"]
+    return params
+
+
+def _two_entity_handle(tmp_path):
+    """One month of cache carrying two entity columns."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.io.handles import ParquetHandle
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c1", "c2", "c2"],
+            "acct_id": ["a1", "a1", "a2", "a2"],
+            "snap_date": ["2025-01-31"] * 4,
+            "prod_name": ["prod_A", "prod_B", "prod_A", "prod_B"],
+            "feat_a": [1.0, 1.1, 2.0, 2.1],
+            "label": [1, 0, 0, 1],
+        }
+    )
+    root = tmp_path / "two_entity" / "test_model_input.parquet"
+    pq.write_to_dataset(
+        pa.Table.from_pandas(df, preserve_index=False),
+        root_path=str(root),
+        partition_cols=["snap_date", "prod_name"],
+    )
+    return ParquetHandle(str(root))
+
+
+def test_both_entity_columns_are_written_when_the_catalog_declares_both(tmp_path):
+    """`schema.entity` with two columns writes two entity columns.
+
+    The failure this guards against is not an exception — it is a frame that
+    looks fine and identifies the wrong thing, because only the first entity
+    column survived.
+    """
+    write_ds = _write_ds(
+        declared=(
+            "cust_id", "acct_id", "score", "score_uncalibrated", "label",
+            "model_version", "snap_date", "prod_name",
+        )
+    )
+
+    manifest = _predict(
+        _two_entity_handle(tmp_path), _two_entity_params(), write_ds
+    )
+
+    written = pd.concat(write_ds.saved, ignore_index=True)
+    assert set(written.columns) == {
+        "cust_id", "acct_id", "score", "score_uncalibrated", "label",
+        "snap_date", "prod_name",
+    }
+    # Values, not just presence: a column of the right name filled from the
+    # wrong source would pass a presence-only assertion.
+    assert set(zip(written["cust_id"], written["acct_id"])) == {
+        ("c1", "a1"), ("c2", "a2"),
+    }
+    assert manifest["n_rows_written"] == 4
+
+
+def test_an_entity_column_the_catalog_never_declared_raises(tmp_path):
+    """Pre-check: catalog declares one entity column, schema names two.
+
+    Without this the run succeeds and `acct_id` is dropped by
+    `HiveTableDataset.save`'s `df.select(*declared)` — a whole identity column
+    missing from the published table, with nothing in the log to say so.
+    """
+    import pytest
+
+    # The real single-entity declaration, unchanged, against a two-column schema.
+    write_ds = _write_ds()
+
+    with pytest.raises(ValueError, match="does not declare entity column"):
+        _predict(_two_entity_handle(tmp_path), _two_entity_params(), write_ds)
+
+    assert write_ds.save.call_count == 0
