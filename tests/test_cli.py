@@ -1435,6 +1435,86 @@ class TestTrainingRebuildDatesFlag:
         assert captured["params"][REBUILD_SNAP_DATES_KEY] == ["2026-02-28"]
 
 
+class TestDuplicateTestMonthA26:
+    """A26 is wired to the training command, not to the global aggregator."""
+
+    def test_two_spellings_of_one_month_exit_before_spark_starts(self, tmp_path):
+        # Like A21/A24: a config error must not cost a 2-4 minute cold start.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "test_snap_dates": ["2026-01-31", "20260131"],
+            }},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["training"])
+            assert result.exit_code == 1
+            # The load-bearing assertion: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command.
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_the_same_month_spelled_one_way_is_not_blocked(self, tmp_path):
+        # The discriminating half: without it the test above is also passed by
+        # an A26 that rejects every training config outright.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "test_snap_dates": ["2026-01-31", "2026-02-28"],
+            }},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["training"])
+            # It got past A26 and reached the cold start it is allowed to reach.
+            mock_spark.assert_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_a_dataset_run_with_the_same_config_is_unaffected(self, tmp_path):
+        # A26 hangs off training on purpose: the dataset pipeline normalises
+        # its months through pd.Timestamp into a set, so two spellings collapse
+        # there. This goes red the moment A26 is tidied into
+        # validate_config_consistency, which every command runs.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_snap_dates": ["2026-01-31"],
+                "test_snap_dates": ["2026-02-28", "20260228"],
+            }},
+        )
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["feature_etl"])
+            mock_spark.assert_called()
+        finally:
+            os.chdir(old_cwd)
+
+
 class TestRebuildSlicedAwayWarning:
     """``--rebuild-dates`` with a slicing flag is the normal path here, so it
     warns only when the slice drops the node the flag drives — the one case

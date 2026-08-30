@@ -626,25 +626,6 @@ class TestFinalizeModel:
         )
         assert final.booster.feature_name() == preprocessor_metadata["feature_columns"]
 
-    def test_unknown_strategy_raises(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        train_h, train_dev_h, *_ = synthetic_model_inputs
-        best_params, best_iteration, hpo_best_model = self._hpo_outputs(
-            lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
-        )
-
-        params = {**training_parameters,
-                  "training": {**training_parameters["training"],
-                               "final_model_strategy": "bogus"}}
-
-        with pytest.raises(ValueError, match="final_model_strategy"):
-            finalize_model(
-                train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
-                preprocessor_metadata, params,
-            )
-
-
 # ---- Tests: log_experiment ----
 
 

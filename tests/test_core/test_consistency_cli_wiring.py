@@ -113,3 +113,33 @@ def test_a23_is_checked_before_a24():
     assert src.index("train_snap_dates_errors(") < src.index(
         "date_split_overlap_errors("
     )
+
+
+def test_a26_wired_into_training_command_before_spark():
+    # Same rule as A23/A24, and the same failure mode if someone tidies it
+    # into the aggregator: validate_config_consistency runs at the entry of
+    # EVERY command, while the harm A26 front-runs (two cache entries on one
+    # directory -> that month's rows counted twice) exists only in training.
+    # The dataset pipeline normalises its months through pd.Timestamp into a
+    # set, so the same config is harmless there.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "duplicate_test_month_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A26 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.training)
+    assert "duplicate_test_month_errors(params)" in src
+    assert src.index("duplicate_test_month_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A26 must fail before the Spark cold start, like A21/A23/A24"
+
+
+def test_a26_is_checked_before_a21():
+    # A21 resolves --rebuild-dates against dataset.test_snap_dates. If the
+    # month is spelled two ways, "is this flag value a configured month" has
+    # two different answers, so the ambiguity should be reported first.
+    src = inspect.getsource(m.training)
+    assert src.index("duplicate_test_month_errors(") < src.index(
+        "resolved_rebuild_dates("
+    )

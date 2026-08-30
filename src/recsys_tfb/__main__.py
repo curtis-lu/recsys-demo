@@ -14,6 +14,7 @@ from recsys_tfb.core.consistency import (
     compare_mutual_exclusive_errors,
     compare_source_key_exists,
     date_split_overlap_errors,
+    duplicate_test_month_errors,
     post_training_snap_date_errors,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
@@ -1105,6 +1106,20 @@ def training(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("training", env)
+
+    # (A26) dataset.test_snap_dates must not spell one month two ways. Wired
+    # here rather than aggregated by validate_config_consistency for A24's
+    # reason: that gate runs at the entry of EVERY command, while the harm is
+    # training-only — the dataset pipeline normalises its months through
+    # pd.Timestamp into a set (month_plans.plan_incremental_snap_dates), so two
+    # spellings collapse there, whereas the training cache keys on the YYYYMMDD
+    # directory name and would count that month's rows twice. Before A21 so
+    # "this month is named twice" is reported ahead of anything about the flag.
+    month_spelling_errors = duplicate_test_month_errors(params)
+    if month_spelling_errors:
+        for line in month_spelling_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
 
     # (A21) --rebuild-dates ⊆ dataset.test_snap_dates — the same predicate the
     # dataset command uses, so the two halves of a backfill cannot disagree

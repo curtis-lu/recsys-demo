@@ -12,7 +12,7 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import (
@@ -392,21 +392,15 @@ def cache_test_model_input(
         _test_month_dir(d) for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
     }
 
-    # Dedupe on the *directory* form, not the raw string: the two must agree or
-    # a config carrying both "2026-01-31" and "20260131" would yield two keys
-    # pointing at one directory — handle_paths would then hand the same root to
-    # pyarrow twice and silently double every row.
+    # Dedupe on the *directory* form, not the raw string: the same month is
+    # the same cache entry however it was spelled. Two DIFFERENT spellings of
+    # one month would yield two keys pointing at one directory (handle_paths
+    # would hand the same root to pyarrow twice and silently double every row)
+    # — that config is rejected at CLI entry by A26, so by the time this runs
+    # a key can only be carrying repeats of one literal.
     by_dir: dict[str, str] = {}
     for raw in configured:
-        month = str(raw)
-        key = _test_month_dir(month)
-        if by_dir.setdefault(key, month) != month:
-            raise ValueError(
-                f"dataset.test_snap_dates has two spellings of the same month: "
-                f"{by_dir[key]!r} and {month!r} (both resolve to {key!r}). "
-                "The Hive partition value differs between them, so only one can "
-                "be right — keep the ISO form."
-            )
+        by_dir.setdefault(_test_month_dir(str(raw)), str(raw))
 
     return {
         month: _materialize_parquet_handle(
@@ -488,9 +482,6 @@ def _resolve_search_id(parameters: dict) -> str:
         str(parameters.get("train_variant_id", "")),
         cvi,
     )
-
-
-HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
 
 
 def _hpo_score(
@@ -775,11 +766,12 @@ def finalize_model(
         logger.info("final_model_strategy=hpo_best (passthrough; best_iteration=%d)", best_iteration)
         return hpo_best_model
 
-    if strategy != "refit_on_full":
-        raise ValueError(
-            f"Unknown training.final_model_strategy={strategy!r}. "
-            "Expected 'hpo_best' or 'refit_on_full'."
-        )
+    # refit_on_full — the only other value A25 admits, so there is nothing left
+    # to reject here. The domain check lives at CLI entry on purpose: this node
+    # runs after the whole HPO search, and a typo used to cost that search.
+    # A25 rejects an explicit `final_model_strategy:` (yaml null) too, which
+    # matters here: .get would hand this line None, not "hpo_best", and None
+    # would fall through to a silent full refit.
 
     import lightgbm as lgb
     import numpy as np

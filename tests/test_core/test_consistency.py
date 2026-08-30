@@ -1647,3 +1647,173 @@ class TestTrainSnapDatesA23:
             train_snap_dates_errors(_split_params(train=["nope"]))[0],
         ]
         assert len(set(messages)) == 4
+
+
+# =============================================================================
+# A25 — training HPO / finalize parameter domains (aggregated at CLI entry)
+# =============================================================================
+
+from recsys_tfb.core.consistency import (
+    FINAL_MODEL_STRATEGIES,
+    HPO_OBJECTIVES,
+    training_hpo_finalize_param_errors,
+)
+
+
+class TestTrainingHpoFinalizeParamsA25:
+    def _params(self, **training) -> dict:
+        return {"training": training}
+
+    def test_absent_keys_are_clean(self):
+        # Both keys default in the node bodies (mean_ap / hpo_best), so a
+        # config that never names them is valid and must stay valid.
+        assert training_hpo_finalize_param_errors({}) == []
+        assert training_hpo_finalize_param_errors(self._params()) == []
+
+    def test_every_admitted_value_is_accepted(self):
+        for objective in HPO_OBJECTIVES:
+            assert training_hpo_finalize_param_errors(
+                self._params(hpo_objective=objective)) == [], objective
+        for strategy in FINAL_MODEL_STRATEGIES:
+            assert training_hpo_finalize_param_errors(
+                self._params(final_model_strategy=strategy)) == [], strategy
+
+    def test_bad_hpo_objective_rejected(self):
+        errs = training_hpo_finalize_param_errors(
+            self._params(hpo_objective="mean_apk"))
+        assert len(errs) == 1
+        assert "A25" in errs[0]
+        assert "training.hpo_objective" in errs[0]
+        assert "mean_apk" in errs[0]
+        # The admitted values belong in the message: the operator's next move
+        # is to retype the value, not to go read the source.
+        assert "macro_per_item_map" in errs[0]
+
+    def test_bad_final_model_strategy_rejected(self):
+        errs = training_hpo_finalize_param_errors(
+            self._params(final_model_strategy="refit"))
+        assert len(errs) == 1
+        assert "A25" in errs[0]
+        assert "training.final_model_strategy" in errs[0]
+        assert "refit" in errs[0]
+        assert "refit_on_full" in errs[0]
+
+    def test_an_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
+        # An absent key and a key written `final_model_strategy:` with no value
+        # are NOT the same thing, and the difference is silent:
+        # dict.get(key, default) returns None when the key is present and null,
+        # so the node's default never applies. finalize_model then reads None,
+        # fails its `== "hpo_best"` test, and runs a full refit_on_full without
+        # saying anything — which is what this gate exists to stop. Skipping on
+        # `value is None` would map null and "refit_on_full" onto one outcome.
+        for key in ("hpo_objective", "final_model_strategy"):
+            errs = training_hpo_finalize_param_errors(self._params(**{key: None}))
+            assert len(errs) == 1, (key, errs)
+            assert key in errs[0]
+
+    def test_the_node_default_really_does_not_cover_an_explicit_null(self):
+        # Premise guard for the test above. If dict.get ever did fall back to
+        # the default for a present-but-null key, rejecting null would be
+        # over-strict — this pins the reason rather than leaving it in a comment.
+        present_null = {"final_model_strategy": None}
+        assert present_null.get("final_model_strategy", "hpo_best") is None
+        assert {}.get("final_model_strategy", "hpo_best") == "hpo_best"
+
+    def test_both_keys_reported_in_one_pass(self):
+        # Collect-all is the whole point of the entry gate: fixing one typo
+        # must not cost another run to discover the second.
+        errs = training_hpo_finalize_param_errors(
+            self._params(hpo_objective="nope", final_model_strategy="also-nope"))
+        assert len(errs) == 2
+
+    def test_registered_in_validate_config_consistency(self):
+        # A25 is aggregated (unlike A26): a typo here costs a full HPO search
+        # to discover at the node, and every command can afford the check —
+        # the keys are optional, so a config that omits them stays clean.
+        from recsys_tfb.core.consistency import validate_config_consistency
+        with pytest.raises(ConfigConsistencyError, match="A25"):
+            validate_config_consistency(self._params(final_model_strategy="refit"))
+
+
+# =============================================================================
+# A26 — dataset.test_snap_dates must not spell one month two ways
+#       (wired on the training command)
+# =============================================================================
+
+from recsys_tfb.core.consistency import duplicate_test_month_errors
+
+
+def _test_months(*dates) -> dict:
+    return {"dataset": {"test_snap_dates": list(dates)}}
+
+
+class TestTestSnapDatesSpellingA26:
+    def test_distinct_months_pass(self):
+        assert duplicate_test_month_errors(
+            _test_months("2026-01-31", "2026-02-28")) == []
+
+    def test_absent_or_empty_key_is_clean(self):
+        assert duplicate_test_month_errors({}) == []
+        assert duplicate_test_month_errors({"dataset": {}}) == []
+        assert duplicate_test_month_errors(_test_months()) == []
+
+    def test_the_same_literal_twice_is_not_an_error(self):
+        # Deliberate, and it is the behaviour the node body had: the training
+        # cache keys on the month, so a repeated literal collapses to one
+        # entry and changes nothing. Only two DIFFERENT spellings are
+        # ambiguous, because then the Hive partition value differs between
+        # them and only one of the two can be right.
+        assert duplicate_test_month_errors(
+            _test_months("2026-01-31", "2026-01-31")) == []
+
+    def test_iso_and_compact_spelling_collide(self):
+        errs = duplicate_test_month_errors(
+            _test_months("2026-01-31", "20260131"))
+        assert len(errs) == 1
+        assert "A26" in errs[0]
+        # Both literals, because the operator's next move is to grep their yaml.
+        assert "2026-01-31" in errs[0] and "20260131" in errs[0]
+
+    def test_surrounding_whitespace_is_the_same_month(self):
+        errs = duplicate_test_month_errors(
+            _test_months("2026-01-31", " 2026-01-31 "))
+        assert len(errs) == 1
+
+    def test_each_colliding_month_is_reported_once(self):
+        errs = duplicate_test_month_errors(_test_months(
+            "2026-01-31", "20260131", "2026-02-28", "20260228"))
+        assert len(errs) == 2
+        # A clean pair is never dragged into the other month's message.
+        assert "2026-02-28" not in errs[0]
+
+    def test_three_spellings_of_one_month_are_one_error_naming_all_three(self):
+        errs = duplicate_test_month_errors(
+            _test_months("2026-01-31", "20260131", " 20260131"))
+        assert len(errs) == 1
+        assert errs[0].count("2026") >= 3
+
+    def test_different_months_written_the_short_way_do_not_collide(self):
+        # The guard that keeps this predicate from inventing collisions: the
+        # key must stay per-month, so two distinct compact literals are two
+        # distinct months.
+        assert duplicate_test_month_errors(
+            _test_months(20260131, 20260228)) == []
+        assert duplicate_test_month_errors(
+            _test_months("20260131", "20260228")) == []
+
+    def test_the_key_is_the_one_the_training_cache_uses(self):
+        # Premise guard: A26 is only worth anything if it groups literals the
+        # way the cache does. If _test_month_dir ever changes, this fails
+        # instead of A26 silently going stale.
+        from recsys_tfb.core.consistency import _test_month_key
+        from recsys_tfb.pipelines.training.nodes import _test_month_dir
+        for literal in ("2026-01-31", "20260131", " 2026-01-31 ", "2026-1-31"):
+            assert _test_month_key(literal) == _test_month_dir(literal), literal
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        # Wired on the training command, like A24 on dataset: the aggregator
+        # runs at the entry of EVERY command, while the harm this predicate
+        # front-runs (two cache entries pointing at one directory → every row
+        # of that month counted twice) only exists in the training pipeline.
+        from recsys_tfb.core.consistency import validate_config_consistency
+        validate_config_consistency(_test_months("2026-01-31", "20260131"))

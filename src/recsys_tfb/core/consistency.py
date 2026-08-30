@@ -162,9 +162,38 @@ Layer 1 — config-static (implemented here; aggregated by
   config predicate with nothing data-dependent to re-check, and the node-body
   call it replaced is exactly what ADR-0008 section 3 set out to remove.
 
+* A25 — training-side HPO / finalize parameter domains:
+  ``training.hpo_objective`` ∈ ``HPO_OBJECTIVES`` and
+  ``training.final_model_strategy`` ∈ ``FINAL_MODEL_STRATEGIES``; an absent key
+  keeps the node's own default and is clean, but an explicit YAML ``null`` is
+  rejected (``dict.get`` hands the node ``None``, not the default). Predicate:
+  ``training_hpo_finalize_param_errors``. Aggregated like A20 (one code per
+  parameter family): both keys are optional, so the check costs a config that
+  never names them nothing, while a typo in either is otherwise only found by
+  the node that reads it — and ``final_model_strategy`` is read *after* the
+  whole HPO search has run, so a typo there costs the entire search. The two
+  value tuples are defined in this module rather than in the training pipeline
+  so the gate and the node that dispatches on the value cannot drift apart.
+* A26 — ``dataset.test_snap_dates`` must not spell one month two ways.
+  ``"2026-01-31"`` and ``"20260131"`` are one month to the training cache
+  (which keys on the ``YYYYMMDD`` directory name) but two different Hive
+  partition values, so at most one of them can be right: the run produces two
+  cache entries pointing at one directory, hands that directory to pyarrow
+  twice, and every row of the month is counted twice in the predictions.
+  Repeats of the *same* literal stay legal — they collapse to one entry and
+  change nothing. Predicate: ``duplicate_test_month_errors`` (returns errors;
+  the training command raises). NOT aggregated by
+  ``validate_config_consistency``, for A24's reason: that gate runs at the
+  entry of every command while the harm is training-only — the dataset
+  pipeline normalises its months through ``pd.Timestamp`` into a set
+  (``pipelines/dataset/month_plans.plan_incremental_snap_dates``), so two
+  spellings collapse there harmlessly. Replaces the node-body check in
+  ``cache_test_model_input`` (ADR-0014).
+
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A24 (config keys only one pipeline reads).
+flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
+to one pipeline).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
@@ -778,6 +807,62 @@ def training_diagnostics_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+#: Values ``training.hpo_objective`` may take (A25). Defined here rather than
+#: in the training pipeline because the entry gate and the node that dispatches
+#: on the value must not be able to disagree about what is admissible:
+#: ``pipelines/training/nodes.py`` imports this tuple for its own fail-loud
+#: dispatch, so adding an objective is one edit rather than two.
+HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
+
+#: Values ``training.final_model_strategy`` may take (A25). ``hpo_best`` passes
+#: the HPO winner through unchanged; ``refit_on_full`` retrains on
+#: train + train_dev at the winner's best_iteration.
+FINAL_MODEL_STRATEGIES = ("hpo_best", "refit_on_full")
+
+
+def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
+    """A25 — training-side HPO / finalize parameter domains.
+
+    Covers the two ``training.*`` keys whose value is a name the pipeline
+    dispatches on: ``hpo_objective`` (which score an HPO trial is judged by)
+    and ``final_model_strategy`` (how the shipped model is produced from the
+    HPO winner). Neither is data-dependent, so both are decidable at CLI entry.
+
+    Why they are worth a code of their own rather than being left to the nodes
+    that read them: ``final_model_strategy`` is read by ``finalize_model``,
+    which runs *after* the whole Optuna search — so a typo costs the entire
+    search before it is reported. ``hpo_objective`` is read at the top of
+    ``tune_hyperparameters``, which is cheap by comparison, but it belongs to
+    the same family and shares the fix (retype the value), so splitting them
+    across two codes would only make the config author read two messages.
+
+    An *absent* key is clean: both nodes read it with a behaviour-preserving
+    default (``mean_ap`` / ``hpo_best``). An explicit YAML ``null`` is NOT the
+    same thing and is rejected — ``dict.get(key, default)`` returns ``None``
+    when the key is present and null, so the default never applies, and
+    ``finalize_model`` would read ``None``, fail its ``== "hpo_best"`` test and
+    silently run a full ``refit_on_full``. Skipping on ``value is None`` would
+    map null and ``"refit_on_full"`` onto one outcome, which is exactly the
+    collision this gate exists to prevent. Returns collect-all error strings;
+    empty means OK.
+    """
+    errors: list[str] = []
+    training = parameters.get("training", {}) or {}
+    for key, admitted in (
+        ("hpo_objective", HPO_OBJECTIVES),
+        ("final_model_strategy", FINAL_MODEL_STRATEGIES),
+    ):
+        if key not in training:
+            continue
+        value = training[key]
+        if value not in admitted:
+            errors.append(
+                f"A25: training.{key}={value!r} is not a value this pipeline "
+                f"can run. Allowed: {', '.join(admitted)}."
+            )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -879,6 +964,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(suppression_param_errors(parameters))
 
     errors.extend(training_diagnostics_param_errors(parameters))
+
+    errors.extend(training_hpo_finalize_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
@@ -1589,4 +1676,74 @@ def date_split_overlap_errors(parameters: dict) -> list[str]:
                     f"spelled two ways still collides. Drop it from whichever "
                     f"split should not own it."
                 )
+    return errors
+
+
+def _test_month_key(value) -> str:
+    """The month key the training cache uses, for one configured literal.
+
+    Mirrors ``pipelines/training/nodes.py::_test_month_dir``. Two routes were
+    available and both were rejected, so the copy is a choice, not an
+    oversight: importing the original back is a cycle (that module already
+    imports this one), and moving the original *here* would put a cache-path
+    helper in the invariants module — the directory layout is the training
+    pipeline's concern, and this module only has to agree with it. (Contrast
+    ``HPO_OBJECTIVES`` just above, which is imported rather than copied: a
+    value domain *is* an invariant, so it belongs here.) The agreement is
+    pinned by a test that runs both over the same literals, so a change to the
+    cache's notion of "same month" fails loudly instead of leaving A26 quietly
+    checking the wrong thing.
+
+    Comparison is by this key and not by calendar day on purpose. A day-based
+    key would also group ``"2026-1-31"`` with ``"2026-01-31"``, but those two
+    produce *different* cache directories, so the second one finds no rows in
+    Hive and the existing per-month precheck in ``_plan_predict_months``
+    reports it by name. That failure is loud already; this predicate exists for
+    the silent one.
+    """
+    return str(value).strip().replace("-", "")
+
+
+def duplicate_test_month_errors(parameters: dict) -> list[str]:
+    """(A26) ``dataset.test_snap_dates`` must not spell one month two ways.
+
+    Returns error strings (empty list when fine); the training command raises.
+    One error per colliding month, naming every spelling of it, so a config
+    with several collisions is fixed in one pass.
+
+    Two different literals that resolve to one cache month are a config the
+    pipeline cannot honour: ``cache_test_model_input`` would key two entries on
+    one directory and ``handle_paths`` would hand that directory to pyarrow
+    twice, doubling every row of that month in the predictions — and
+    ``_plan_predict_months`` would silently keep whichever literal it met
+    first. Nothing downstream notices: the run succeeds and the report looks
+    normal, just with one month's numbers computed off doubled rows.
+
+    Repeats of the *same* literal are legal and stay legal — they collapse to
+    one cache entry and change nothing. Only a difference in spelling is
+    ambiguous, because then the Hive partition value differs between them and
+    at most one of the two can be the month that was actually written.
+    """
+    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
+
+    spellings_by_month: dict[str, list[str]] = {}
+    for value in configured:
+        literal = str(value)
+        spellings = spellings_by_month.setdefault(_test_month_key(value), [])
+        if literal not in spellings:
+            spellings.append(literal)
+
+    errors: list[str] = []
+    for month in sorted(spellings_by_month):
+        spellings = sorted(spellings_by_month[month])
+        if len(spellings) < 2:
+            continue
+        errors.append(
+            f"(A26) dataset.test_snap_dates spells one month more than one "
+            f"way: {spellings} all resolve to {month!r}. The Hive partition "
+            f"value differs between them, so only one can be right, and the "
+            f"local cache would hand the same directory to pyarrow once per "
+            f"spelling — doubling that month's rows. Keep the ISO form "
+            f"(YYYY-MM-DD) and drop the others."
+        )
     return errors
