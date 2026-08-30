@@ -1803,12 +1803,14 @@ class TestTestSnapDatesSpellingA26:
 
     def test_the_key_is_the_one_the_training_cache_uses(self):
         # Premise guard: A26 is only worth anything if it groups literals the
-        # way the cache does. If _test_month_dir ever changes, this fails
+        # way the cache does. If month_dir ever changes, this fails
         # instead of A26 silently going stale.
         from recsys_tfb.core.consistency import _test_month_key
-        from recsys_tfb.pipelines.training.nodes import _test_month_dir
+        from recsys_tfb.pipelines.training.steps.predict_months import (
+            month_dir,
+        )
         for literal in ("2026-01-31", "20260131", " 2026-01-31 ", "2026-1-31"):
-            assert _test_month_key(literal) == _test_month_dir(literal), literal
+            assert _test_month_key(literal) == month_dir(literal), literal
 
     def test_not_aggregated_by_validate_config_consistency(self):
         # Wired on the training command, like A24 on dataset: the aggregator

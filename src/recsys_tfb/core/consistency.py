@@ -1700,7 +1700,8 @@ def date_split_overlap_errors(parameters: dict) -> list[str]:
 def _test_month_key(value) -> str:
     """The month key the training cache uses, for one configured literal.
 
-    Mirrors ``pipelines/training/nodes.py::_test_month_dir``. Two routes were
+    Mirrors ``pipelines/training/steps/predict_months.py::month_dir``. Two
+    routes were
     available and both were rejected, so the copy is a choice, not an
     oversight: importing the original back is a cycle (that module already
     imports this one), and moving the original *here* would put a cache-path
@@ -1715,7 +1716,7 @@ def _test_month_key(value) -> str:
     Comparison is by this key and not by calendar day on purpose. A day-based
     key would also group ``"2026-1-31"`` with ``"2026-01-31"``, but those two
     produce *different* cache directories, so the second one finds no rows in
-    Hive and the existing per-month precheck in ``_plan_predict_months``
+    Hive and the existing per-month precheck (``require_months_are_cached``)
     reports it by name. That failure is loud already; this predicate exists for
     the silent one.
     """
@@ -1733,7 +1734,7 @@ def duplicate_test_month_errors(parameters: dict) -> list[str]:
     pipeline cannot honour: ``cache_test_model_input`` would key two entries on
     one directory and ``handle_paths`` would hand that directory to pyarrow
     twice, doubling every row of that month in the predictions — and
-    ``_plan_predict_months`` would silently keep whichever literal it met
+    ``configured_months`` would silently keep whichever literal it met
     first. Nothing downstream notices: the run succeeds and the report looks
     normal, just with one month's numbers computed off doubled rows.
 

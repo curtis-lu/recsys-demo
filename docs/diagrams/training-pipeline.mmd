@@ -88,7 +88,7 @@
 %%   dataset 有 Layer-2 資料閘、inference 有發布閘，training 一個都沒有：檢查全部在
 %%   CLI entry（Layer-1 A 系列的 validate_config_consistency、A21 的
 %%   --rebuild-dates ⊆ dataset.test_snap_dates），在 Spark 冷啟動之前就跑完，不是 node。
-%%   DAG 裡唯一會擋下整條 pipeline 的是 _plan_predict_months 的 raise：設定了某個月
+%%   DAG 裡唯一會擋下整條 pipeline 的是 require_months_are_cached 的 raise：設定了某個月
 %%   但快取裡沒有它的列，代表 dataset 從沒產過那個月——當成「已完成」跳過會靜靜交出
 %%   一份空報表。
 
