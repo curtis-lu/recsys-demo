@@ -1323,3 +1323,68 @@ class TestSaveWithoutPartitionFilterKeepsTheFrameQuery:
             r for r in caplog.records
             if getattr(r, "event", None) == "partitions_written"
         ]
+
+
+class TestDeclaredColumns:
+    """What ``save()`` will keep, asked before anything is written.
+
+    ``save()`` ends with ``df.select(*_insert_column_order())``, so a column
+    the catalog never declared is dropped without a word. This property is how
+    a caller finds that out while it can still refuse to run.
+    """
+
+    def test_declared_columns_lists_data_filter_and_partition_columns(self):
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="training_eval_predictions",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "score", "type": "DOUBLE"},
+            ],
+            partition_filter={"model_version": "v1"},
+            partition_cols=[
+                {"name": "snap_date", "type": "STRING"},
+                {"name": "prod_name", "type": "STRING"},
+            ],
+            external=False,
+        )
+
+        # Every name here survives the select in save(); anything else is
+        # dropped, which is what makes this the answer to "will my column
+        # arrive?" rather than just "what are the data columns?".
+        assert ds.declared_columns == [
+            "cust_id", "score", "model_version", "snap_date", "prod_name",
+        ]
+
+    def test_declared_columns_is_none_when_columns_are_inferred(self):
+        """``columns: "auto"`` declares nothing, so nothing can be dropped.
+
+        Returning ``[]`` here would read as "declares no columns" and fail
+        every caller checking for coverage — the opposite of the truth.
+        """
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="enriched_eval_predictions",
+            columns="auto",
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+        assert ds.declared_columns is None
+
+    def test_declared_columns_reflects_a_two_entity_declaration(self):
+        """A second entity column is visible here only if the catalog declared it."""
+        ds = HiveTableDataset(
+            database="ml_recsys",
+            table="training_eval_predictions",
+            columns=[
+                {"name": "cust_id", "type": "STRING"},
+                {"name": "acct_id", "type": "STRING"},
+                {"name": "score", "type": "DOUBLE"},
+            ],
+            partition_filter={"model_version": "v1"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+
+        assert "acct_id" in ds.declared_columns

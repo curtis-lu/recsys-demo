@@ -249,7 +249,7 @@ cust_id_col = entity_cols[0]
 
 改成比照 `pipelines/inference/nodes.py` 用整個 list（inference 用 `identity_cols`，即 `core/schema.py` 推出來的 `[time] + entity + [item]`），**並拿掉那個 `raise`**。
 
-**為什麼不加一個 A 系列代號擋著。** 原本考慮加 A27「`schema.entity` 恰好一欄」。查證後撤掉：
+**為什麼不加「entity 恰好一欄」的 A 系列代號。** 原本考慮加 A27「`schema.entity` 恰好一欄」。查證後撤掉：
 
 - `conf/base/parameters.yaml` 把 `entity` 宣告成 list（`entity: [cust_id]`），框架的設計就是多欄。
 - catalog 的欄位由使用者按自己的情境設定，要兩欄就宣告兩欄——**問題不在 catalog**。
@@ -266,9 +266,30 @@ cust_id_col = entity_cols[0]
 因此：
 
 - `io/hive_table_dataset.py` 加一個公開的 `declared_columns` property（形狀比照既有的 `existing_partition_values()`：dataset 物件回答關於自己的問題）。
-- `nodes.py` 加 `require_entity_columns_declared(...)`，docstring 標明是**前置檢查**。node 透過 `Node(writes=...)` 本來就拿得到那個 dataset 物件。
+- 加一個 **A28** 不變量擋這件事。
 
 **為什麼不讓 node 直接讀 `self._columns`。** 那是私有屬性，而「node 讀別人的底線私有名」正是這次要清的東西（見〈刻意不做〉的 #199）。
+
+### 修訂（2026-08-30，實作 #224 時）：守衛從 node 移到一致性層
+
+**本節原本寫的是**「`nodes.py` 加 `require_entity_columns_declared(...)`，docstring 標明是**前置檢查**。node 透過 `Node(writes=...)` 本來就拿得到那個 dataset 物件」。實作時審查指出這個結論不成立，改掉。
+
+**原推論的洞。** 上面「`core/consistency.py` 只讀 parameters、從不讀 catalog」這個**事實仍然成立**，但它只證明了「總閘 `validate_config_consistency` 擋不到」，不等於「只能放 node」。該模組自己的 legend 寫著另一條路：
+
+> Layer 1 invariants that hang off a single command instead of the aggregator, because they need context the aggregator never sees: A12/A13 和 A21（CLI flags）、A22（`--post-training`）、A24/A26（config keys whose harm belongs to one pipeline）
+
+**看不到的東西掛在「指令」上，不掛總閘**——已經有 6 個代號在用這招。而 `__main__.py` 早就在向 catalog 的 dataset 物件問問題（`_collect_existing_snap_dates` 走 `catalog.get_dataset(name).existing_partition_values`），`declared_columns` 正是照那個形狀做的。
+
+**代價是實際的，不只是分類潔癖。** `pipeline.py` 的順序是 HPO → `train_model` → `calibrate_model` → …… → `predict_and_write_test_predictions`。守衛放 node 裡，catalog 少宣告一欄要等**整輪搜尋跑完**才報——那正是決定 3 為了 `final_model_strategy` 立 A25 的同一個理由（本 ADR 自己的 User Story 4）。放在指令上則連 Spark cold start 都還沒付。
+
+**改成怎樣。**
+
+- `core/consistency.py` 加 predicate `entity_columns_declared_errors(parameters, declared_columns, target_name)`，登記為 **A28**。
+- 它**仍然不讀 catalog**：呼叫端讀好 `declared_columns` 傳進來，predicate 保持純函式。這才是「consistency.py 從不讀 catalog」與「這條不變量住在一致性層」可以同時成立的原因。
+- `__main__.py` 的 `training` 指令在 `get_or_create_spark_session` **之前**呼叫它。`runtime_params` 刻意傳 `{}`：替換填的是分區**值**（`${model_version}`），而這裡只讀欄位**名**，等版本算完只會白付一次 cold start。
+- node 端**不留 runtime backstop**，理由同 A24：純 config 判準，沒有資料相依的東西可以再驗一次。
+
+**代號用 A28 不用 A27。** A27 已在 #222 的切票留給 #200；而本節上面那段「考慮過 A27＝entity 恰好一欄、已撤掉」也還在，同一個號碼再指第三件事只會讓引用它的人讀錯。`consistency.py` 的 legend 對 A16/A17/A18 已經立過同一條規矩：**號碼只退役、不回收**。
 
 **同一批發現、處置不同的兩處**：
 
@@ -399,7 +420,7 @@ cust_id_col = entity_cols[0]
 | `nodes.py:324` | `rmtree` 之後 `_SUCCESS` 還在 | **後置條件** | 留 node |
 | `nodes.py:404` | `test_snap_dates` 兩種拼法 | 前置檢查 | **搬去 A26** |
 | `nodes.py:1000` | 設定的月份在 cache 裡沒有列 | 前置檢查 | 留 node（要看 cache，不是純 config） |
-| `nodes.py:1125` | `schema.entity` 不只一欄 | — | **刪掉**（見決定 5） |
+| `nodes.py:1125` | `schema.entity` 不只一欄 | — | **刪掉**（見決定 5；取而代之的 A28 住在一致性層，不在 node） |
 
 另按**規則 12**（不是規則 11）：守衛一律改名 `require_*`，只警告不 raise 的用 `warn_*`。training 現在一個都沒有。
 

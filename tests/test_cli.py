@@ -231,6 +231,12 @@ class TestCLI:
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
+                # A real DataCatalog built from this conf answers None here —
+                # it declares no training_eval_predictions — and A28 passes on
+                # None. Left as a bare MagicMock the gate reads an attribute
+                # that answers "in" for nothing, rejects the run, and this
+                # test fails (or worse, passes) for a reason it is not about.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
                     runner.invoke(app, ["training"])
                     call_args = mock_catalog_cls.call_args[0][0]
@@ -269,6 +275,12 @@ class TestCLI:
                     ) as mock_inject:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
+                # A real DataCatalog built from this conf answers None here —
+                # it declares no training_eval_predictions — and A28 passes on
+                # None. Left as a bare MagicMock the gate reads an attribute
+                # that answers "in" for nothing, rejects the run, and this
+                # test fails (or worse, passes) for a reason it is not about.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
                     runner.invoke(app, ["training"])
 
@@ -303,6 +315,12 @@ class TestCLI:
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
+                # A real DataCatalog built from this conf answers None here —
+                # it declares no training_eval_predictions — and A28 passes on
+                # None. Left as a bare MagicMock the gate reads an attribute
+                # that answers "in" for nothing, rejects the run, and this
+                # test fails (or worse, passes) for a reason it is not about.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
                 with patch("recsys_tfb.__main__.Runner"):
                     runner.invoke(
                         app,
@@ -1428,6 +1446,12 @@ class TestTrainingRebuildDatesFlag:
                     patch("recsys_tfb.__main__.Runner"):
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
+                # A real DataCatalog built from this conf answers None here —
+                # it declares no training_eval_predictions — and A28 passes on
+                # None. Left as a bare MagicMock the gate reads an attribute
+                # that answers "in" for nothing, rejects the run, and this
+                # test fails (or worse, passes) for a reason it is not about.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
                 runner.invoke(app, ["training", "--rebuild-dates", "2026-02-28"])
         finally:
             os.chdir(old_cwd)
@@ -1714,6 +1738,12 @@ class TestOnlyTestMonthsFlag:
                     patch("recsys_tfb.__main__.Runner") as mock_runner_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
+                # A real DataCatalog built from this conf answers None here —
+                # it declares no training_eval_predictions — and A28 passes on
+                # None. Left as a bare MagicMock the gate reads an attribute
+                # that answers "in" for nothing, rejects the run, and this
+                # test fails (or worse, passes) for a reason it is not about.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
                 result = runner.invoke(app, ["dataset", *argv])
                 run_calls = mock_runner_cls.return_value.run.call_args
                 return result, (run_calls[0][0] if run_calls else None)
@@ -1928,3 +1958,74 @@ class TestTrainSnapDatesA23:
             assert result.exit_code == 0
         finally:
             os.chdir(old)
+
+
+class TestEntityColumnsDeclaredA28:
+    """A28 is wired to the training command, and fires before Spark starts.
+
+    Placement is the point: the node that writes these columns runs after HPO,
+    train_model and calibrate_model, so the same check inside it would report a
+    one-word catalog typo only after the whole search had been paid for.
+    """
+
+    @staticmethod
+    def _conf_with(tmp_path, declared_columns):
+        _setup_conf(
+            tmp_path,
+            params_dataset={
+                "dataset": {"sample_ratio": 0.1},
+                "schema": {"columns": {"entity": ["cust_id", "acct_id"]}},
+            },
+            params_training={"lr": 0.01},
+        )
+        catalog_path = tmp_path / "conf" / "base" / "catalog.yaml"
+        with open(catalog_path) as f:
+            catalog = yaml.safe_load(f)
+        catalog["training_eval_predictions"] = {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": "training_eval_predictions",
+            "external": False,
+            "columns": [{"name": c, "type": "STRING"} for c in declared_columns],
+            "partition_filter": {"model_version": "${model_version}"},
+            "partition_cols": [{"name": "snap_date", "type": "STRING"}],
+        }
+        with open(catalog_path, "w") as f:
+            yaml.dump(catalog, f)
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+    def test_an_undeclared_entity_column_exits_before_spark_starts(self, tmp_path):
+        # schema.entity names two columns; the catalog entry declares one. The
+        # second would be dropped by save()'s select with no error at all.
+        self._conf_with(tmp_path, ["cust_id", "score"])
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["training"])
+            assert result.exit_code == 1
+            # The load-bearing assertion: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command.
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_declaring_both_entity_columns_is_not_blocked(self, tmp_path):
+        # The discriminating half: without it the test above is also passed by
+        # an A28 that rejects every training config outright.
+        self._conf_with(tmp_path, ["cust_id", "acct_id", "score"])
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["training"])
+            # It got past A28 and reached the cold start it is allowed to reach.
+            mock_spark.assert_called()
+        finally:
+            os.chdir(old_cwd)
