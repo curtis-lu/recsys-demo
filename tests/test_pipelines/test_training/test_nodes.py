@@ -279,7 +279,7 @@ class TestTuneHyperparameters:
         n_trials = training_parameters["training"]["n_trials"]
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -319,7 +319,7 @@ class TestTuneHyperparameters:
         _, _, val_h, *_ = synthetic_model_inputs
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -358,7 +358,7 @@ class TestTuneHyperparameters:
         _, _, val_h, *_ = synthetic_model_inputs
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -396,7 +396,7 @@ class TestTuneHyperparameters:
         expected_steps = {"prepare_datasets", "train", "predict", "score"}
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -491,21 +491,133 @@ class TestTuneHyperparameters:
         assert not (Path("data") / "models" / "_hpo" / "nocp").exists()
 
     def test_resume_recovers_best_model_without_retrain(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
     ):
         # After a 2-trial run, a re-run that adds 0 trials (same n_trials) must
         # still return a usable model loaded from checkpoint (remaining==0 path).
+        from recsys_tfb.pipelines.training import hpo_resume
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         p = {
             **training_parameters, "search_id": "recoversid",
             "training": {**training_parameters["training"], "n_trials": 2},
         }
-        tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
-        bp, bi, bm = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        bp0, bi0, _ = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+        )
+        with caplog.at_level(logging.WARNING):
+            bp, bi, bm = tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+            )
         assert bm is not None
         import numpy as np
         assert bm.predict(np.zeros((3, len(preprocessor_metadata["feature_columns"])))).shape == (3,)
+
+        # "without retrain" is the whole point of the name, so assert it. The
+        # checkpoint has to be adopted as the best-so-far; if it is not, the
+        # last-resort branch fires instead and silently pays for another full
+        # trial — same return shape, no error, just a wasted training run and
+        # an extra trial appended to a study that was already complete.
+        assert (bp, bi) == (bp0, bi0)
+        assert hpo_resume.count_completed(
+            hpo_resume.open_study(hpo_resume.hpo_study_dir("recoversid"), "recoversid", 42)
+        ) == 2
+        assert not [
+            r for r in caplog.records if "No usable best model" in r.getMessage()
+        ]
+
+
+class TestTrialScorer:
+    """The scorer owns the search state; these pin who wins and who survives.
+
+    Driven with fakes on purpose: the questions here are about bookkeeping
+    across trials, and a real LightGBM fit would only make the same assertions
+    slower and the scripted scores impossible to choose.
+    """
+
+    def _scorer(self, monkeypatch, scores):
+        import numpy as np
+        from recsys_tfb.pipelines.training.steps import hpo_scoring
+
+        adapters = []
+
+        class FakeAdapter:
+            def __init__(self, tag):
+                self.booster = type("B", (), {"best_iteration": 10 + tag})()
+
+            def train(self, **kw):
+                pass
+
+            def predict(self, X):
+                return np.zeros(len(X))
+
+        class FakeHandle:
+            def load(self, reference=None, params=None):
+                return type("D", (), {"construct": lambda self_inner: self_inner})()
+
+        def fake_get_adapter(algorithm):
+            adapters.append(FakeAdapter(len(adapters)))
+            return adapters[-1]
+
+        calls = {"n": 0}
+
+        def fake_score(*args, **kwargs):
+            value = scores[calls["n"]]
+            calls["n"] += 1
+            return value
+
+        monkeypatch.setattr(hpo_scoring, "get_adapter", fake_get_adapter)
+        monkeypatch.setattr(
+            hpo_scoring, "build_trial_params",
+            lambda trial, search_space: {"n": trial.number},
+        )
+        monkeypatch.setattr(hpo_scoring, "_hpo_score", fake_score)
+
+        scorer = hpo_scoring.TrialScorer(
+            train_lgb_handle=FakeHandle(), train_dev_lgb_handle=FakeHandle(),
+            X_val=np.zeros((4, 2)), y_val=np.array([1, 0, 1, 0]),
+            groups_val=np.array([0, 0, 1, 1], dtype=np.int64), items_val=None,
+            algorithm="lightgbm", algorithm_params={}, search_space=[],
+            hpo_objective="mean_ap", seed=42, num_iterations=5,
+            early_stopping_rounds=2, n_trials=len(scores),
+            search_id="unit", study_dir=None,  # None = do not checkpoint
+        )
+        return scorer, adapters
+
+    def test_winner_is_the_highest_scoring_trial_not_the_last(self, monkeypatch):
+        """A later, worse trial must not displace the winner. Nothing would
+        report it: a worse model is still a valid model, so the only symptom
+        would be quietly shipping the wrong one."""
+        import types
+        scorer, adapters = self._scorer(monkeypatch, [0.10, 0.90, 0.50])
+
+        for i in range(3):
+            scorer(types.SimpleNamespace(number=i))
+
+        assert scorer.best["score"] == pytest.approx(0.90)
+        assert scorer.best["params"] == {"n": 1}
+        assert scorer.best["model"] is adapters[1]
+        assert scorer.best["iteration"] == 11
+
+    def test_adopted_checkpoint_survives_a_worse_trial(self, monkeypatch):
+        """What `adopt_checkpoint` is for: a resumed search must not let its
+        first trial win by default over the previous run's better model — and
+        then checkpoint over it."""
+        import types
+        scorer, _ = self._scorer(monkeypatch, [0.40])
+        from_disk = object()
+        scorer.adopt_checkpoint(
+            {"score": 0.95, "model": from_disk, "iteration": 7,
+             "params": {"n": "from-checkpoint"}}
+        )
+
+        scorer(types.SimpleNamespace(number=0))
+
+        assert scorer.best["model"] is from_disk
+        assert scorer.best["score"] == pytest.approx(0.95)
+        assert scorer.best["params"] == {"n": "from-checkpoint"}
+        assert scorer.best["iteration"] == 7
 
 
 # ---- Tests: finalize_model ----
@@ -848,6 +960,7 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     passed to adapter.train carry metric='ndcg'."""
     import numpy as np
     from recsys_tfb.pipelines.training import nodes
+    from recsys_tfb.pipelines.training.steps import hpo_scoring
 
     captured = {}
 
@@ -860,8 +973,11 @@ def test_tune_defaults_ranking_metric(monkeypatch):
         def predict(self, X):
             return np.zeros(len(X))
 
-    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
-    monkeypatch.setattr(nodes, "compute_mean_ap", lambda g, y, p: 0.5)
+    # The trial itself now runs in steps/hpo_scoring.py, so both seams are
+    # patched there; nodes.get_adapter still exists but the HPO path no
+    # longer reads it.
+    monkeypatch.setattr(hpo_scoring, "get_adapter", lambda algo: FakeAdapter())
+    monkeypatch.setattr(hpo_scoring, "compute_mean_ap", lambda g, y, p: 0.5)
 
     def fake_extract(handle, meta, params, **kw):
         X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])
@@ -1013,7 +1129,7 @@ class TestHpoScore:
 
     def test_mean_ap_matches_compute_mean_ap(self):
         from recsys_tfb.evaluation.metrics import compute_mean_ap
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
+        from recsys_tfb.pipelines.training.steps.hpo_scoring import _hpo_score
 
         expected = compute_mean_ap(self.GROUPS, self.Y, self.SCORE)
         result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
@@ -1022,7 +1138,7 @@ class TestHpoScore:
 
     def test_macro_per_item_map_matches_primitive(self):
         from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
+        from recsys_tfb.pipelines.training.steps.hpo_scoring import _hpo_score
 
         expected = compute_macro_per_item_map(
             self.GROUPS, self.ITEMS, self.Y, self.SCORE
@@ -1033,7 +1149,7 @@ class TestHpoScore:
         assert result == pytest.approx(expected)
 
     def test_unknown_objective_raises_valueerror(self):
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
+        from recsys_tfb.pipelines.training.steps.hpo_scoring import _hpo_score
 
         with pytest.raises(ValueError, match="hpo_objective"):
             _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)

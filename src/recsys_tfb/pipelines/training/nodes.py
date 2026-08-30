@@ -2,7 +2,6 @@
 
 import logging
 import shutil
-import time
 from pathlib import Path
 from typing import Iterable, NamedTuple, Optional
 
@@ -14,13 +13,10 @@ import pandas as pd
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import (
-    compute_macro_per_item_map,
-    compute_mean_ap,
-)
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
 from recsys_tfb.utils.spark import release_spark_session
 
@@ -480,30 +476,6 @@ def _resolve_search_id(parameters: dict) -> str:
     )
 
 
-def _hpo_score(
-    objective_name: str,
-    groups: np.ndarray,
-    items: Optional[np.ndarray],
-    y_true: np.ndarray,
-    y_score: np.ndarray,
-) -> float:
-    """Score val predictions for one HPO trial under the chosen objective.
-
-    ``mean_ap``            — per-query mAP (``items`` unused).
-    ``macro_per_item_map`` — macro average of per-item attributed mAP.
-
-    Unknown ``objective_name`` raises ``ValueError`` (fail-loud).
-    """
-    if objective_name == "mean_ap":
-        return compute_mean_ap(groups, y_true, y_score)
-    if objective_name == "macro_per_item_map":
-        return compute_macro_per_item_map(groups, items, y_true, y_score)
-    raise ValueError(
-        f"unknown training.hpo_objective {objective_name!r}; "
-        f"allowed: {', '.join(HPO_OBJECTIVES)}"
-    )
-
-
 def tune_hyperparameters(
     train_lgb_handle,
     train_dev_lgb_handle,
@@ -554,7 +526,6 @@ def tune_hyperparameters(
         )
 
     from recsys_tfb.core.group_utils import default_metric_for_objective
-    from recsys_tfb.pipelines.training.search_space import build_trial_params
 
     # Local copy: defaulting the ranking metric must not mutate the shared
     # `parameters` dict (it is still written verbatim to manifest.json).
@@ -583,77 +554,10 @@ def tune_hyperparameters(
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)
-    study_dir = None  # set in the checkpointing branch; referenced by objective
-
-    best_state: dict = {"score": -1.0, "model": None, "iteration": 0, "params": {}}
-
-    def objective(trial: optuna.Trial) -> float:
-        trial_idx = trial.number
-        trial_params = build_trial_params(trial, search_space)
-
-        params = {
-            **algorithm_params,
-            "seed": seed,
-            "feature_pre_filter": False,
-            **trial_params,
-            "num_iterations": num_iterations,
-            "early_stopping_rounds": early_stopping_rounds,
-        }
-
-        logger.info(
-            "tune_hyperparameters: trial=%d/%d start params=%s",
-            trial_idx, n_trials, trial_params,
-        )
-        t0 = time.monotonic()
-
-        adapter = get_adapter(algorithm)
-        construct_params = {"feature_pre_filter": False}
-        with log_step(logger, "prepare_datasets"):
-            ds_train = train_lgb_handle.load(params=construct_params).construct()
-            ds_dev = train_dev_lgb_handle.load(
-                reference=ds_train, params=construct_params
-            ).construct()
-        log_data_volume(logger, "tune.ds_train", ds_train)
-        log_data_volume(logger, "tune.ds_dev", ds_dev)
-
-        with log_step(logger, "train"):
-            adapter.train(
-                X_train=None, y_train=None, X_val=None, y_val=None,
-                params=params,
-                train_dataset=ds_train, val_dataset=ds_dev,
-            )
-
-        with log_step(logger, "predict"):
-            y_pred = adapter.predict(X_v)
-
-        with log_step(logger, "score"):
-            score = _hpo_score(hpo_objective, groups_v, items_v, y_v, y_pred)
-
-        if score > best_state["score"]:
-            best_state["score"] = score
-            best_state["model"] = adapter
-            best_state["iteration"] = adapter.booster.best_iteration
-            best_state["params"] = trial_params
-            if checkpointing and study_dir is not None:
-                hpo_resume.write_checkpoint(
-                    study_dir, adapter,
-                    score=score, best_iteration=adapter.booster.best_iteration,
-                    best_params=trial_params, trial_number=trial_idx,
-                    search_id=search_id,
-                )
-
-        duration = time.monotonic() - t0
-        logger.info(
-            "tune_hyperparameters: trial=%d/%d completed score=%.4f "
-            "best_iteration=%d duration=%.1fs best_so_far=%.4f",
-            trial_idx, n_trials, score,
-            adapter.booster.best_iteration, duration, best_state["score"],
-        )
-
-        return score
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    ckpt = None
     if checkpointing:
         study_dir = hpo_resume.hpo_study_dir(search_id)
         if parameters.get("_fresh_hpo", False):
@@ -675,10 +579,6 @@ def tune_hyperparameters(
         done = hpo_resume.count_completed(study)
         ckpt = hpo_resume.load_checkpoint(study_dir, algorithm)
         if ckpt is not None:
-            best_state.update(
-                score=ckpt["score"], model=ckpt["model"],
-                iteration=ckpt["iteration"], params=ckpt["params"],
-            )
             logger.info(
                 "HPO resume: %d completed trial(s) found; best so far score=%.4f "
                 "(trial #%d); running %d more (target=%d)",
@@ -687,33 +587,62 @@ def tune_hyperparameters(
             )
         remaining = max(0, n_trials - done)
     else:
+        study_dir = None
         study = optuna.create_study(
             direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed)
         )
         remaining = n_trials
 
+    # Decision — the winning trial's model belongs to the scorer, not to this
+    # function. Optuna only ever sees the float a trial returns, so the model
+    # has to be kept on the callable itself; making that ownership explicit is
+    # the whole point of the class. `study_dir=None` doubles as "do not
+    # checkpoint" — the checkpointing branch is the only one that sets it.
+    scorer = TrialScorer(
+        train_lgb_handle=train_lgb_handle,
+        train_dev_lgb_handle=train_dev_lgb_handle,
+        X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
+        algorithm=algorithm,
+        algorithm_params=algorithm_params,
+        search_space=search_space,
+        hpo_objective=hpo_objective,
+        seed=seed,
+        num_iterations=num_iterations,
+        early_stopping_rounds=early_stopping_rounds,
+        n_trials=n_trials,
+        search_id=search_id,
+        study_dir=study_dir,
+    )
+
+    # Decision — a resumed search inherits the previous run's winner before it
+    # scores anything. Skip this and the first new trial wins by default
+    # (best-so-far starts at -1.0), silently shipping a worse model and
+    # checkpointing over the better one.
+    if ckpt is not None:
+        scorer.adopt_checkpoint(ckpt)
+
     if remaining > 0:
         with log_step(logger, "optuna_optimize"):
-            study.optimize(objective, n_trials=remaining)
+            study.optimize(scorer, n_trials=remaining)
     else:
         logger.info("HPO target already met (done>=%d); skipping optimize", n_trials)
 
     # last-resort: study has trials but no usable checkpoint model — refit best_params once.
-    if best_state["model"] is None:
+    if scorer.best["model"] is None:
         logger.warning(
             "No usable best model from memory/checkpoint; "
             "refitting study.best_params once (last-resort recovery)"
         )
         study.enqueue_trial(study.best_params)
         with log_step(logger, "last_resort_refit"):
-            study.optimize(objective, n_trials=1)
+            study.optimize(scorer, n_trials=1)
 
-    best_params = best_state["params"] or study.best_params
-    best_model = best_state["model"]
-    best_iteration = best_state["iteration"]
+    best_params = scorer.best["params"] or study.best_params
+    best_model = scorer.best["model"]
+    best_iteration = scorer.best["iteration"]
     logger.info(
         "Best trial score (%s): %.4f, best_iteration: %d, params: %s",
-        hpo_objective, best_state["score"], best_iteration, best_params,
+        hpo_objective, scorer.best["score"], best_iteration, best_params,
     )
 
     # HPO 搜尋診斷：best-effort 側輸出，衍生自本地 study。失敗只 warning、絕不影響
@@ -770,7 +699,6 @@ def finalize_model(
     # would fall through to a silent full refit.
 
     import lightgbm as lgb
-    import numpy as np
 
     from recsys_tfb.core.group_utils import (
         default_metric_for_objective,
