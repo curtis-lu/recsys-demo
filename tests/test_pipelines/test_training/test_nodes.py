@@ -430,7 +430,7 @@ class TestTuneHyperparameters:
     def test_resume_only_runs_remaining(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
     ):
-        from recsys_tfb.pipelines.training import hpo_resume
+        from recsys_tfb.pipelines.training.steps import hpo_resume
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
 
@@ -453,7 +453,7 @@ class TestTuneHyperparameters:
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
         training_parameters, caplog,
     ):
-        from recsys_tfb.pipelines.training import hpo_resume
+        from recsys_tfb.pipelines.training.steps import hpo_resume
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         base = {
@@ -496,7 +496,7 @@ class TestTuneHyperparameters:
     ):
         # After a 2-trial run, a re-run that adds 0 trials (same n_trials) must
         # still return a usable model loaded from checkpoint (remaining==0 path).
-        from recsys_tfb.pipelines.training import hpo_resume
+        from recsys_tfb.pipelines.training.steps import hpo_resume
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         p = {

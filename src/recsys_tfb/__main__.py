@@ -52,7 +52,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     month_plan_input,
 )
 from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
-from recsys_tfb.pipelines.training.nodes import inject_cache_source_tables
+from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
 

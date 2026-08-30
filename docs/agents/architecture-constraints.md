@@ -38,9 +38,9 @@
 
 ---
 
-## 9 條約束一覽
+## 10 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**17 個測試，0.62 秒**（2026-08-25 實測）。
+`tests/test_core/test_architecture_constraints.py` 執行，**20 個測試，1.4–1.7 秒**（2026-08-31 連跑三次；#234 加入 S3 的三個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上 main 的 17 個測試量到 1.25 秒，而本檔原本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -53,6 +53,7 @@
 | [A7](#a7-零輸出的-side-effect-node-必須登記) | 零輸出的 side-effect node 必須登記 | 同上 | — |
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
+| [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -104,7 +105,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 **但這是「現在不適用」，不是「永遠不必管」。** 若未來要加平行執行，第一個擋路的**不是**「可不可 pickle」，而是**贏家模型只活在 driver 的記憶體裡**：`pipelines/training/steps/hpo_scoring.py` 的 `TrialScorer.best["model"]` 存的是訓練好的 `ModelAdapter` 物件本身（LightGBM booster 掛在它的 `.booster` 上）。多行程時每個 worker 刷新的是自己那一份，主行程那一份始終是 `None`，於是 `tune_hyperparameters` 的 last-resort 分支會靜靜地把 `study.best_params` 重訓一次——**每跑一次就白付一輪完整訓練，而平行化的目的正是省時間**，而且沒有任何錯誤訊息。
 
-而 Optuna 的兩種平行化**都不需要**把 objective 送過行程邊界：`study.optimize(..., n_jobs=N)` 用執行緒、共用記憶體（但 `TrialScorer.best` 的「比大小再寫回」不是原子操作，那條路要自己加鎖）；多行程做法是各行程自己建 objective、共用一個 storage——本 repo 已經在用後者的基礎設施（`pipelines/training/hpo_resume.py` 的 `JournalStorage` ＋ `JournalFileBackend`）。
+而 Optuna 的兩種平行化**都不需要**把 objective 送過行程邊界：`study.optimize(..., n_jobs=N)` 用執行緒、共用記憶體（但 `TrialScorer.best` 的「比大小再寫回」不是原子操作，那條路要自己加鎖）；多行程做法是各行程自己建 objective、共用一個 storage——本 repo 已經在用後者的基礎設施（`pipelines/training/steps/hpo_resume.py` 的 `JournalStorage` ＋ `JournalFileBackend`）。
 
 **方向是「跑完從磁碟讀回贏家」**，不是「讓 callable 可 pickle」：`hpo_resume.write_checkpoint` 每次刷新最佳成績就已經把模型存到磁碟。⚠ **但現況的 checkpoint 不能直接多行程用**——模型（`model.txt`）與 meta（`best_meta.json`）是兩個獨立檔案、兩次獨立的 `os.replace`，中間沒有跨檔鎖、也沒有版本指標，多個 writer 同時刷新時讀者可能拿到 A worker 的模型配 B worker 的 score／params（`JournalStorage` 保護的是 study 的 trial 記錄，不保護這對檔案）。啟用平行前必須先解決其一：單一 writer、檔案鎖，或版本化的 checkpoint 目錄 ＋ 一個原子寫入的 manifest 指向當前贏家。
 
@@ -372,6 +373,42 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 **`pyspark` 有沒有進 `sys.modules`。** 那才是真正想要的性質，但它因為與本模組無關的理由不可能成立：`pipelines/__init__.py` → `core` → `io` → `models` → `mlflow`，終點是 `mlflow/types/schema.py` 自己那行 `import pyspark`。
 
 S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
+
+## S3. pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/`
+
+`pipelines/<name>/steps/` 底下的模組，只有 `pipelines/<name>/` 內的 src 模組可以 import。
+
+守的是 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 8 買到的那一件事：**讀一次目錄列表就分得出對外契約與內部步驟**。根層放的是別人會呼叫的（`pipelines/dataset/month_plans.py`、`pipelines/training/cache_sources.py`），`steps/` 放的是這條 pipeline 自己呼叫的。外部模組一旦越過根層直接伸進 `steps/`，那個列表就開始說謊——而且是靜靜地說謊，沒有任何東西會壞。
+
+**測試不在掃描範圍內，這是刻意的。** 規則 8 明說測試 import 不移動任何模組的位置：判準管的是生產端呼叫圖。`tests/test_pipelines/test_training/test_hpo_resume.py` 直接 import `steps.hpo_resume` 是對的，必須維持合法。
+
+**檢查**：兩個測試。
+
+1. **掃描**——AST 走過 `src/recsys_tfb/**/*.py` 的每個 import，把相對 import 依所在套件還原成絕對路徑，並且 `from X import Y` 的**兩半都算**（`X` 與 `X.Y`）；模組路徑形如 `recsys_tfb.pipelines.<name>.steps...` 而檔案不在 `pipelines/<name>/` 底下就是違例。
+2. **掃描抓得到每一種寫法**——`test_the_scan_sees_every_spelling_of_the_import`，在 `tmp_path` 上建五種 import 寫法並確認五種都被抓。`steps` 藏的位置各不相同，解析器的三個零件各自只被其中一種撐住：
+
+   | 寫法 | `steps` 藏在哪 | 少了什麼就漏掉 |
+   |---|---|---|
+   | `from ...training.steps.hpo_resume import open_study` | `node.module` | — |
+   | `from ...training.steps import hpo_resume` | `node.module` | — |
+   | `import recsys_tfb.pipelines.training.steps.hpo_resume` | `alias.name` | `ast.Import` 那一支 |
+   | `from recsys_tfb.pipelines.training import steps` | `alias.name` | `node.names` 那一半 |
+   | `from .pipelines.training import steps` | `alias.name`（相對） | 上面兩者都要 |
+
+   所以只讀 `ImportFrom` 的 `node.module` 會漏掉其中**三種**而永遠全綠。三個變異各自實測：拿掉 `node.names` 那一半 → 第四種轉紅；拿掉 `ast.Import` 那一支 → 第三種轉紅；拿掉相對還原 → 第五種轉紅。
+
+   前三種**是 #234 才寫得出來的**——在那之前 `hpo_resume` 在根層，沒有任何寫法能把它掛在 `steps` 底下。後兩種指的是套件而不是模組，本來就寫得出來（`steps/` 早就有 `hpo_scoring` 與 `local_cache`）。
+
+附帶一條同源的檢查：`steps/__init__.py` **不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
+
+### 這個檢查看不到
+
+它讀的是 AST 裡的 import 語句，所以兩類東西走得過去：
+
+- **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
+- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有六處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes_spark.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
+
+現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
 ---
 

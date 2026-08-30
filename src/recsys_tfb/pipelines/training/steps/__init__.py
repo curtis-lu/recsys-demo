@@ -7,14 +7,16 @@ these directly and that moves nothing — the criterion is about production
 callers, because what it buys is a reader telling this pipeline's outward
 contract from its internals by reading one directory listing.
 
-**This package's listing does not say that yet.** ``search_space.py`` and
-``hpo_resume.py`` still sit at the package root although every src-side caller
-of both is already inside ``pipelines/training/`` (``nodes.py`` and
-``steps/hpo_scoring.py``). Moving them is issue #234, deliberately a separate
-change: a pure move is proved by byte-identity, and any behaviour change
-landing in the same commit would void that proof. Until it lands, root-level
-placement here means "not moved yet", not "outward contract" — do not read the
-listing as the criterion until #234 closes.
+**The listing now says it** (issue #234). ``search_space.py`` and
+``hpo_resume.py`` moved in from the package root, where they had been sitting
+even though every src-side caller of both was already inside
+``pipelines/training/`` (``nodes.py`` and ``steps/hpo_scoring.py``); what stayed
+at the root is ``cache_sources.py``, whose caller — ``__main__.py``, before the
+``DataCatalog`` exists — is the outward one. So the two-line reading of the
+directory is now true: root is what other people call, ``steps/`` is what this
+pipeline calls itself. **S3** in ``docs/agents/architecture-constraints.md``
+keeps it true by failing when any module outside this pipeline imports from
+here.
 
 Purity is a module-level property, not a placement one: ``predict_months`` imports
 no pyspark and nothing from this project, so the month decisions predict makes are
@@ -27,5 +29,7 @@ direction: ``local_cache`` imports ``month_dir`` from ``predict_months`` and nev
 the reverse.
 
 Nothing is re-exported here on purpose: ``nodes.py`` imports each module by
-name, so the import line says which concern a step came from.
+name, so the import line says which concern a step came from. That too is S3 —
+``from .steps import build_trial_params`` would compile and tell the reader
+nothing, so the audit fails on an ``__init__.py`` that holds an import at all.
 """

@@ -23,7 +23,7 @@
 | [6](#6-名字要說出選錯不會報錯的那個差別) | 名字要說出「選錯不會報錯」的那個差別 | 兩個相近的函式，選錯會有錯誤訊息嗎？沒有就要寫進名字 | 沒人，只能人看 |
 | [7](#7-產物落不落地是接續成本的決定) | 產物落不落地，是接續成本的決定 | 跑 `--list-nodes` 看接續成本；跑 `test_resume_contracts.py` | **部分**：`RESUME_CONTRACTS` |
 | **這個 repo 的形狀** ||||
-| [8](#8-模組放根層還是-steps看-src-側呼叫端在不在本-pipeline-內) | 模組放根層還是 `steps/`，看 src 側呼叫端在不在本 pipeline 內 | 這個模組有沒有本 pipeline 以外的 src 側消費者 | **部分**：只擋得住 dataset 與兩個登記過的純模組 |
+| [8](#8-模組放根層還是-steps看-src-側呼叫端在不在本-pipeline-內) | 模組放根層還是 `steps/`，看 src 側呼叫端在不在本 pipeline 內 | 這個模組有沒有本 pipeline 以外的 src 側消費者 | **部分**：S3 擋得住「外部伸進 `steps/`」這一個方向 |
 | [9](#9-步驟寫在註解與-helper-名上不寫在-log_step-上) | 步驟寫在註解與 helper 名上，不寫在 `log_step` 上 | 每個具名呼叫上面有沒有一段 `# Decision —` | 沒人，只能人看 |
 | [10](#10-log_step-只包會觸發-spark-action-的區塊) | `log_step` 只包會觸發 Spark action 的區塊 | 區塊裡的具名呼叫，追一層進去找得到 action 嗎 | 沒人，只能人看 |
 | [11](#11-驗證放哪由它需要看到什麼決定) | 驗證放哪，由「它需要看到什麼」決定 | 只看 config → 進 `core/consistency.py`；留在 node 的要標「前置檢查」或「後置條件」 | 沒人，只能人看 |
@@ -226,11 +226,15 @@ pipelines/<name>/
 兩個容易誤用的推論：
 
 - **「純模組（零 pyspark）」不是根層的判準。** `pipelines/dataset/steps/feature_columns.py` 是零 pyspark 的純模組，而它在 `steps/` 裡。純度是**模組層級**的性質、跟位置無關，要釘就用 AST 測試釘那一個模組。現況兩個純模組用了兩種掛法：`month_plans.py` 由 `architecture-constraints.md` S2 釘在 `tests/test_core/test_architecture_constraints.py`（直接掃描 ＋ 可達性，兩個測試缺一不可），`chunk_plans.py` 由自己的測試檔 `tests/test_pipelines/test_inference/test_chunk_plans.py` 釘（`test_no_pyspark_import` ＋ `test_no_project_import`）。
-- **一條 pipeline 根層可以沒有任何契約模組。** 那代表它沒有 pipeline 開跑前的對外契約，是資訊不是缺陷。dataset 有 `month_plans.py` 在根層，是因為 `__main__.py` 在 pipeline 開跑前就要算好月份計畫再注進 catalog（[ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)）；inference 的分塊計畫發生在 node 內，所以它根層只有 `pipeline.py` 與 `nodes.py`。
+- **一條 pipeline 根層可以沒有任何契約模組。** 那代表它沒有 pipeline 開跑前的對外契約，是資訊不是缺陷。dataset 有 `month_plans.py` 在根層，是因為 `__main__.py` 在 pipeline 開跑前就要算好月份計畫再注進 catalog（[ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)）；training 有 `cache_sources.py`，同一個理由、同一個呼叫端（[ADR-0014](../adr/0014-training-modules-split-by-role.md)）；inference 的分塊計畫發生在 node 內，所以它根層只有 `pipeline.py` 與 `nodes.py`。
 
-`steps/__init__.py` **不 re-export 任何東西**：`nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。
+`steps/__init__.py` **不 re-export 任何東西**：`nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。這條自 #234 起由 S3 的 `test_steps_packages_re_export_nothing` 擋著——三個 `steps/__init__.py` 只能有 docstring。
 
-**誰擋得住**：**部分擋得住。** `architecture-constraints.md` 的 S1 只管 `pipelines/dataset/`；純度只有 `month_plans.py` 與 `chunk_plans.py` 兩個登記過的模組有測試。其餘靠 code review。
+**誰擋得住**：**部分擋得住，而且只有一個方向。**
+
+- 擋得住的那個方向是 **S3**（`architecture-constraints.md`，#234 加入）：本 pipeline 以外的 `src/` 模組 import 了 `steps/` 底下的東西就轉紅——也就是「該放根層的被藏進 `steps/`」。同一條 S3 也擋住 `steps/__init__.py` 出現 re-export。
+- **擋不住反過來那個方向**：一個模組明明只有本 pipeline 在呼叫、卻留在根層，S3 看不到——沒有外部呼叫端可以觸發它。`search_space.py` 與 `hpo_resume.py` 在根層待到 #234 才被搬走，正是這個盲點的實例，發現它的是人不是測試。
+- S1 只管 `pipelines/dataset/` 的 node 定義位置；純度只有 `month_plans.py` 與 `chunk_plans.py` 兩個登記過的模組有測試。其餘靠 code review。
 
 ## 9. 步驟寫在註解與 helper 名上，不寫在 `log_step` 上
 

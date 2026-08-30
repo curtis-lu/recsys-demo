@@ -1,6 +1,6 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7, S1-S2) or exception
+Each test corresponds to one numbered constraint (A1-A7, S1-S3) or exception
 registry (R1-R4) in that document. When a test fails, the fix is either to
 change the code back, or to update the document AND get the exception
 registered -- never to loosen the test quietly.
@@ -539,6 +539,178 @@ class TestS2MonthPlansStaysPure:
             assert _spark_reachable_from(
                 tmp_path / name, package_root=tmp_path,
             ) == [name, "scoping.py"], f"{name}: the hop did not enter steps/"
+
+
+def _module_paths_imported(path, root):
+    """Every module path a file imports, spelled absolutely.
+
+    Two things this does that a plain read of ``node.module`` does not:
+
+    * **Relative imports are resolved** against the file's own package, so
+      ``from ..pipelines.training import steps`` written from elsewhere in
+      ``src/`` is not invisible.
+    * **Both halves of a ``from X import Y`` are yielded** (``X`` and ``X.Y``),
+      because a subpackage hides on either side depending on spelling:
+      ``from ...training.steps import hpo_resume`` names it in ``node.module``,
+      ``from ...training import steps`` names it in ``node.names``.
+    """
+    package = ("recsys_tfb",) + path.relative_to(root).parts[:-1]
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = list(package[: len(package) - node.level + 1])
+            else:
+                base = []
+            prefix = base + (node.module.split(".") if node.module else [])
+            if not prefix:
+                continue
+            yield ".".join(prefix)
+            for alias in node.names:
+                yield ".".join(prefix + [alias.name])
+
+
+def _steps_imports_from_outside(root):
+    """``file: module`` for every import of a pipeline's ``steps/`` made from
+    outside that pipeline. Empty means every ``steps/`` module is internal."""
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        for module in _module_paths_imported(path, root):
+            parts = module.split(".")
+            if parts[:2] != ["recsys_tfb", "pipelines"] or parts[3:4] != ["steps"]:
+                continue
+            if rel.parts[:2] != ("pipelines", parts[2]):
+                offenders.append(f"{rel}: {module}")
+    return sorted(set(offenders))
+
+
+class TestS3StepsPackagesStayInternal:
+    """S3: nothing in ``src/`` outside ``pipelines/<name>/`` may import that
+    pipeline's ``steps/``.
+
+    This is the mechanical half of rule 8 in ``pipeline-node-design.md``: root
+    level vs ``steps/`` is decided by whether every **src-side** caller sits
+    inside the pipeline. The rule's whole payoff is that one directory listing
+    separates a pipeline's outward contract from its internals, and that payoff
+    is gone the moment an outside module reaches past the root into ``steps/`` --
+    at which point the listing lies, and it lies silently.
+
+    Scope and blind spot, stated so the document does not overclaim:
+
+    * All three pipelines, not just training. ``cache_sources.py`` was moved out
+      of ``nodes.py`` to the training root under this same rule (issue #234), and
+      pinning only training would leave the two pipelines that got there first
+      (``dataset`` since #176, ``inference`` since #197) unguarded.
+    * **Tests are not scanned, on purpose.** Rule 8 says test imports move
+      nothing, because what the criterion protects is the production caller
+      graph. ``tests/test_pipelines/test_training/test_hpo_resume.py`` importing
+      ``steps.hpo_resume`` directly is correct and must stay legal.
+    * It sees imports, not attribute access: a module that imports the pipeline
+      package and then reads ``training.steps.hpo_resume`` off it walks past this
+      scan. Nothing in the tree does that today, and the import is the form worth
+      pinning because it is the one that gets written by accident.
+    """
+
+    def test_no_src_module_outside_a_pipeline_imports_its_steps(self):
+        offenders = _steps_imports_from_outside(SRC)
+        assert offenders == [], (
+            "a module outside the pipeline imported its steps/ package (S3): "
+            f"{offenders}. Either the step belongs at the pipeline root as an "
+            "outward contract (as cache_sources.py does), or the caller should "
+            "not be reaching into another pipeline's internals; see "
+            "docs/agents/architecture-constraints.md."
+        )
+
+    def test_the_scan_sees_every_spelling_of_the_import(self, tmp_path):
+        """Without this, the check above is decoration.
+
+        Each spelling hides the subpackage somewhere different, and each of the
+        resolver's three parts is load-bearing for a different one:
+
+        ======================  =========================  ====================
+        spelling                where ``steps`` hides      needs
+        ======================  =========================  ====================
+        ``abs_module.py``       ``node.module``            --
+        ``abs_package.py``      ``node.module``            --
+        ``plain_import.py``     ``alias.name``             ``ast.Import`` arm
+        ``abs_names.py``        ``alias.name``             ``node.names`` half
+        ``rel_package.py``      ``alias.name``, relative   both of the above
+        ======================  =========================  ====================
+
+        So a scan that reads only ``node.module`` of ``ImportFrom`` passes on
+        three of the five, and each of the last three fails for its own reason
+        -- which is why ``abs_names.py`` is here even though ``rel_package.py``
+        would already catch a resolver missing both parts at once.
+
+        The first three are **new with this structure**: until ``hpo_resume``
+        moved into ``steps/`` (issue #234) it was at the package root, so no
+        spelling could name it under ``steps``. The last two name the package
+        rather than the module and were always writable -- ``steps/`` already
+        held ``hpo_scoring`` and ``local_cache``.
+        """
+        inside = tmp_path / "pipelines" / "training"
+        inside.mkdir(parents=True)
+        (inside / "nodes.py").write_text(
+            "from recsys_tfb.pipelines.training.steps import hpo_resume\n"
+        )
+        cases = {
+            "abs_module.py":
+                "from recsys_tfb.pipelines.training.steps.hpo_resume import "
+                "open_study\n",
+            "abs_package.py":
+                "from recsys_tfb.pipelines.training.steps import hpo_resume\n",
+            "plain_import.py":
+                "import recsys_tfb.pipelines.training.steps.hpo_resume\n",
+            "abs_names.py":
+                "from recsys_tfb.pipelines.training import steps\n",
+            "rel_package.py":
+                "from .pipelines.training import steps\n",
+        }
+        for name, source in cases.items():
+            (tmp_path / name).write_text(source)
+
+        found = _steps_imports_from_outside(tmp_path)
+        for name in cases:
+            assert any(line.startswith(f"{name}: ") for line in found), (
+                f"{name}: this spelling escaped the scan"
+            )
+        assert not any(line.startswith("pipelines/") for line in found), (
+            f"the pipeline's own module was reported as an outsider: {found}"
+        )
+
+    def test_steps_packages_re_export_nothing(self):
+        """``steps/__init__.py`` holds no imports and no ``__all__``.
+
+        The import line in ``nodes.py`` is what says which concern a step came
+        from, and a re-export erases that: ``from .steps import build_trial_params``
+        would compile fine and tell the reader nothing. Docstring-only is the
+        shape all three packages have; this keeps it that way.
+        """
+        offenders = {}
+        for init in sorted(PIPELINES.glob("*/steps/__init__.py")):
+            tree = ast.parse(init.read_text())
+            names = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names += [f"import {a.name}" for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    where = "." * node.level + (node.module or "")
+                    names += [f"from {where} import {a.name}" for a in node.names]
+                elif isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "__all__"
+                    for t in node.targets
+                ):
+                    names.append("__all__")
+            if names:
+                offenders[str(init.relative_to(SRC))] = sorted(names)
+        assert offenders == {}, (
+            f"steps/__init__.py re-exports something (S3): {offenders}. "
+            "Node modules import each step module by name so the import line "
+            "names the concern."
+        )
 
 
 class TestR2FrameworkGlobalsRegistry:

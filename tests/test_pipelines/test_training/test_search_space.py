@@ -2,7 +2,7 @@
 
 import pytest
 
-from recsys_tfb.pipelines.training.search_space import (
+from recsys_tfb.pipelines.training.steps.search_space import (
     ParamSpec,
     build_trial_params,
     parse_search_space,
