@@ -1082,8 +1082,7 @@ def test_resolve_weight_diagnostics_disabled(tmp_path):
                     "n_weight_entries": 0, "unmatched_keys": []}
 
 
-def test_persist_sample_weight_report_writes_json(tmp_path, monkeypatch):
-    import json
+def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
@@ -1091,14 +1090,6 @@ def test_persist_sample_weight_report_writes_json(tmp_path, monkeypatch):
     p = tmp_path / "train.parquet"
     pd.DataFrame({"cust_segment_typ_2a": [0, 1], "prod_name": ["a", "a"],
                   "label": [1, 0]}).to_parquet(p)
-    version_dir = tmp_path / "models" / "abc123"
-    # node resolves the model version dir via diagnostics_dir(...).parent;
-    # patch the SOURCE module so the node's lazy import picks up the fake.
-    monkeypatch.setattr(
-        "recsys_tfb.diagnosis.model.diagnostics_dir",
-        lambda params: version_dir / "diagnostics",
-    )
-
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
               "item": "prod_name", "label": "label"}},
               "training": {"sample_weight_keys": ["cust_segment_typ_2a"],
@@ -1106,15 +1097,34 @@ def test_persist_sample_weight_report_writes_json(tmp_path, monkeypatch):
     prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw"]}}
 
     diag = persist_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
-    report = json.loads((version_dir / "sample_weight_report.json").read_text())
-    assert report == diag
-    assert report["enabled"] is True and report["unmatched_keys"] == []
+    assert diag["enabled"] is True and diag["unmatched_keys"] == []
 
 
-def test_persist_sample_weight_report_writes_when_disabled(tmp_path, monkeypatch):
-    # Empty sample_weights -> report still written, enabled=False (so the
-    # manifest always records what sample_weight did this run).
-    import json
+def test_persist_sample_weight_report_returns_a_report_when_disabled(tmp_path):
+    # Empty sample_weights -> still a report, enabled=False (so the manifest
+    # always records what sample_weight did this run).
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+
+    p = tmp_path / "train.parquet"
+    pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
+    params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+              "item": "prod_name", "label": "label"}}, "training": {}}
+
+    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
+    assert diag["enabled"] is False and diag["unmatched_keys"] == []
+
+
+def test_persist_sample_weight_report_writes_no_file(tmp_path, monkeypatch):
+    """The catalog owns the write now (conf/base/catalog.yaml).
+
+    The monkeypatch below is a TRAP, not a fixture: it is the only path the
+    node ever had to the model version dir, so if someone re-adds a direct
+    write it lands inside tmp_path and this assertion catches it. Leaving the
+    node's write in place would also put it back in the R4 direct-write
+    registry (tests/test_core/test_architecture_constraints.py).
+    """
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
@@ -1129,9 +1139,11 @@ def test_persist_sample_weight_report_writes_when_disabled(tmp_path, monkeypatch
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
               "item": "prod_name", "label": "label"}}, "training": {}}
 
-    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
-    report = json.loads((version_dir / "sample_weight_report.json").read_text())
-    assert report == diag
-    assert report["enabled"] is False and report["unmatched_keys"] == []
+    persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
+
+    assert not version_dir.exists(), (
+        f"node wrote into the model version dir: "
+        f"{sorted(q.name for q in version_dir.rglob('*'))}"
+    )
 
 

@@ -231,9 +231,9 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 ### 例外二：診斷副產物
 
-有 3 個 node 會自己寫診斷／稽核檔（JSON 報表、HPO 診斷、MLflow artifact）。這些**不是資料流產物**——沒有任何 node 消費它們，它們寫進 model version 目錄或 MLflow。這是既有慣例。
+有 2 個 node 會自己寫診斷／稽核檔（HPO 診斷、MLflow artifact）。這些**不是資料流產物**——沒有任何 node 消費它們，它們寫進 model version 目錄或 MLflow。這是既有慣例。
 
-已核准清單：**R4（3 筆）**。
+已核准清單：**R4（2 筆）**。
 
 **兩類例外要新增一筆，都必須先問使用者。**
 
@@ -405,19 +405,20 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 **位置只給檔案、不給行號**：兩個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。
 
-## R4. 自己寫診斷副產物的 node（A1 的例外二）── 3 筆
+## R4. 自己寫診斷副產物的 node（A1 的例外二）── 2 筆
 
 這些寫的**不是資料流產物**——沒有任何 node 消費它們，所以不經 catalog。它們落在 model version 目錄或 MLflow。
 
 | 函式 | 寫什麼 | 檢查看得到嗎 |
 |---|---|---|
-| `persist_sample_weight_report`（`pipelines/training/nodes.py:78`，註冊於 `pipelines/training/pipeline.py:93`） | `sample_weight_report.json` 進 model version 目錄（`mkdir`＋`open(w)`＋`json.dump`，`nodes.py:93-96`） | ✅ 直接呼叫，掃得到 |
-| `log_experiment`（`pipelines/training/nodes.py:1256`） | MLflow params／metrics／artifacts（`mlflow.log_artifacts`，`nodes.py:1339`） | ✅ 直接呼叫，掃得到 |
-| `tune_hyperparameters`（`pipelines/training/nodes.py:520`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（呼叫在 `nodes.py:739`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
+| `log_experiment`（`pipelines/training/nodes.py:1252`） | MLflow params／metrics／artifacts（`mlflow.log_artifacts`，`nodes.py:1335`） | ✅ 直接呼叫，掃得到 |
+| `tune_hyperparameters`（`pipelines/training/nodes.py:516`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（呼叫在 `nodes.py:735`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
 
-> ⚠ **這張表的 3 筆，跟測試釘的 3 筆不是同一組。**
-> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `persist_sample_weight_report`、`log_experiment`、`_materialize_parquet_handle`。
-> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；`_materialize_parquet_handle` 在測試裡、不在表上（它是內部 helper，不是 `Node(...)` 註冊的函式，`pipelines/training/nodes.py:275`，`shutil.rmtree` 於 `:318`／`:337`，管理本機 parquet cache）。
+**離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2、使用者已簽核）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
+
+> ⚠ **這張表的 2 筆，跟測試釘的 2 筆不是同一組。**
+> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment`、`_materialize_parquet_handle`。
+> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；`_materialize_parquet_handle` 在測試裡、不在表上（它是內部 helper，不是 `Node(...)` 註冊的函式，`pipelines/training/nodes.py:271`，`shutil.rmtree` 於 `:314`／`:333`，管理本機 parquet cache）。
 
 ---
 

@@ -63,6 +63,20 @@ RESUME_CONTRACTS = {
             "cache_test_model_input",
             "cache_calibration_model_input",
         },
+        # The resume point `trained_model`'s catalog entry buys (ADR-0014,
+        # "two resume points that got cheaper"): only cheap view/handle
+        # builders may re-run. Un-land `trained_model` and finalize_model
+        # comes back -- under final_model_strategy: refit_on_full that is a
+        # full refit, which is exactly the cost this contract exists to see.
+        # cache_test_model_input is here for a different reason than the two
+        # above it: the forward slice keeps every node AFTER calibrate_model
+        # too, so the test handle is pulled in by predict_and_write_test_
+        # predictions downstream, not by anything calibrate_model needs.
+        "calibrate_model": {
+            "select_features",
+            "cache_calibration_model_input",
+            "cache_test_model_input",
+        },
     },
     ("inference", ()): {
         # score_manifest is memory-only, so resuming at rank re-runs the

@@ -209,9 +209,28 @@ hpo_best_model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/hpo/model.txt
 
+# calibration 開啟時 finalize_model 的輸出（calibrate_model 再把它包成 `model`）。
+# 落地買的是「`--from-node calibrate_model` 不會把 finalize_model 拉回重跑」——
+# 在 final_model_strategy: refit_on_full 下那是一次完整 refit。契約釘在
+# tests/test_pipelines/test_resume_contracts.py 的 calibration 變體。
+# trained/ 子目錄同 hpo/ 的理由：ModelAdapterDataset 會在 filepath 旁寫
+# model_meta.json sidecar，與 `model` 共用目錄會互相覆寫 calibration 旗標。
+trained_model:
+  type: ModelAdapterDataset
+  filepath: data/models/${model_version}/trained/model.txt
+
 evaluation_results:
   type: JSONDataset
   filepath: data/models/${model_version}/evaluation_results.json
+
+# 診斷副產物，零下游消費者——條目在這裡是為了讓它撈得出來看（規則 1），不是
+# 為了餵誰。persist_sample_weight_report 只回傳 dict，寫檔由這個條目負責。
+# 檔名與位置是契約的一部分：__main__.py 的 _sample_weight_extra 讀
+# <version dir>/sample_weight_report.json 放進 manifest 的 extra_metadata，而
+# artifacts 清單只列版本目錄第一層——放進 diagnostics/ 兩者都會靜默失去。
+sample_weight_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/sample_weight_report.json
 
 feature_statistics:
   type: JSONDataset

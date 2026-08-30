@@ -389,6 +389,15 @@ python -m recsys_tfb training \
 
 若 HPO 的三個必要產物有任何一個不存在，slice planner 會自動補跑其 producer，可能一路回到 `prepare_lgb_train_inputs` 與 `tune_hyperparameters`。是否真的跳過 HPO，應以 `--dry-run` 當次顯示的計畫為準。
 
+啟用 calibration 時另有一個更後面的接續點：
+
+```bash
+python -m recsys_tfb training \
+  --from-node calibrate_model
+```
+
+只想換 calibration 方法、或重做 calibration 之後的預測與診斷時用它。`finalize_model` 的未校準模型已落地成 `trained_model`，所以**不會**被拉回重跑——`final_model_strategy: refit_on_full` 下那會是一次完整 refit。自動補跑的只有 `select_features` 與 calibration／test 的 cache handle nodes（test handle 是被後面的 `predict_and_write_test_predictions` 需要的，不是 calibration 需要）。這組允許集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
+
 ### 4.6 只執行單一 node
 
 ```bash
@@ -433,7 +442,7 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 | Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
 | Calibration cache | `cache_calibration_model_input` | calibration Hive table | 啟用時建立 calibration local cache | calibration `ParquetHandle` |
 | 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
-| 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值 | sample weight report |
+| 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 排序指標選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | 未校準模型 |
 | 機率校準 | `calibrate_model` | 未校準模型、calibration handle | fit sigmoid 或 isotonic calibrator | 最終 `model` |
@@ -465,6 +474,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 最終模型 | `model.txt`、`model_meta.json` | `data/models/<model_version>/` |
 | HPO 結果 | `best_params.json`、`best_iteration.json` | `data/models/<model_version>/` |
 | HPO best model | `hpo/model.txt`、`hpo/model_meta.json` | `data/models/<model_version>/hpo/` |
+| 未校準模型（僅 calibration 啟用時） | `trained/model.txt`、`trained/model_meta.json` | `data/models/<model_version>/trained/` |
 | Test 指標 | `evaluation_results.json` | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
 | 模型診斷 | feature statistics、importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
@@ -476,9 +486,9 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
 
-`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`）——稽核 manifest 時請知悉。
+`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/`、`trained/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`、`trained/model.txt`、`trained/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 在第一層，所以它在清單裡。
 
-`model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 放在獨立 `hpo/` 子目錄，避免它的 sidecar 與最終模型互相覆寫。
+`model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 與（calibration 啟用時的）`trained_model` 各自放在獨立的 `hpo/`／`trained/` 子目錄，避免它們的 sidecar 與最終模型互相覆寫——sidecar 帶著 `calibrated` 旗標，覆寫會決定模型之後被怎麼**載入**。
 
 training 不會建立或更新 `best` model alias。模型必須通過人工審核後，才由 `scripts/promote_model.py` 將指定 `model_version` 設為 inference 預設版本。
 
@@ -579,6 +589,7 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 
 - catalog 的 `exists()` 只能證明檔案或 partition 存在，不能證明它仍與目前程式碼、來源資料或未納入 hash 的設定一致。
 - `--from-node finalize_model` 要跳過 HPO，必須同時存在 `best_params`、`best_iteration` 與 `hpo_best_model`；缺少任一項都可能自動補跑 HPO。
+- 同理，`--from-node calibrate_model` 要跳過 final model，必須存在 `trained_model`（`trained/model.txt` ＋ `trained/model_meta.json`）；缺了就會把 `finalize_model` 拉回重跑。
 - HPO 跑到一半的恢復由 `search_id` journal/checkpoint 處理；HPO node 已完成後跳到 `finalize_model` 則由 catalog-persisted outputs 處理。兩者是不同層次的恢復機制。
 - cache node 的輸出 handle 是記憶體物件，因此接續時會重新執行；底層 local Parquet 有 `_SUCCESS` 時只建立 handle，不會重新從 HDFS 複製。
 - 沒有輸出的設定閘或 sink node，在切片起點之前不會自動重跑。資料或設定來源有疑慮時應使用 full run。
