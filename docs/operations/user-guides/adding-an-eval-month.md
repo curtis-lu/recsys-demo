@@ -184,7 +184,7 @@ ls -d data/evaluation/<model_version>/*/
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
 | 重算之後數字跟上次逐位相同 | 只重算了其中一層。改用 `bash scripts/rebuild_eval_month.sh <月份>`，它一次做完兩層 |
-| `[rebuild] WARNING: ... had no effect` | 你選的步驟範圍把預測那一步排除掉了，旗標無事可做。改用 `--only-node predict_and_write_test_predictions` |
+| `[rebuild] WARNING: ... had no effect` 或 `... is only half applied` | 你選的步驟範圍把預測那一步排除掉了。前者是一步都沒選到、旗標完全無事可做；後者是選到了「丟掉舊 cache」那一步、但沒選到重新預測那一步，所以 cache 重建了、預測沒重做。兩者都改用 `--only-node predict_and_write_test_predictions` |
 
 ## 相關文件
 

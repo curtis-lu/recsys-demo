@@ -53,19 +53,33 @@ RESUME_CONTRACTS = {
         # regenerate a JSON of null rates. The edge moved it after finalize_model
         # and the slice fell to 13.
         #
-        # What is left is the honest remainder, all memory-only and none of it
-        # fixed here: predict_manifest drags the predict node back, which drags
-        # select_features (predict *applies* a model, so preprocessor_view is the
-        # right input for it), and the two parquet handles drag their cache
-        # nodes. Removing those is blocked on cache.root being a relative path
-        # (ADR-0014 decision 7, second gap). Pinned so the next reduction shows
-        # up as a diff.
+        # What is left is the two memory-only parquet handles dragging their
+        # cache nodes, blocked on cache.root being a relative path (ADR-0014
+        # decision 7, second gap). Pinned so the next reduction shows up as a
+        # diff.
+        #
+        # `predict_and_write_test_predictions` and `select_features` used to be
+        # in this set too. predict_manifest was memory-only, so a diagnosis
+        # resume re-ran the predict node -- which, even with every month
+        # skipped, first pulls ~220M rows x 2 string columns into the driver to
+        # list its partitions -- and that node dragged select_features with it,
+        # because predict *applies* a model and so needs preprocessor_view.
+        # Landing predict_manifest (issue #233) removed both.
         "compute_feature_statistics": {
-            "select_features",
             "cache_train_model_input",
             "cache_test_model_input",
-            "predict_and_write_test_predictions",
         },
+        # A resume point that only exists because predict_manifest lands:
+        # recomputing the test metric now re-runs nothing at all. Both inputs
+        # are loadable -- the Hive prediction table and the manifest -- so this
+        # line is where removing the catalog entry turns red.
+        "compute_test_mAP_spark": set(),
+        # Same unlock, and the one ADR-0014 decision 7 names: a failed
+        # diagnosis is recovered with `--from-node select_shap_population`,
+        # and that recovery is only worth recommending while it re-runs
+        # nothing. Its three data inputs are all landed datasets, so the
+        # manifest was the last thing standing between it and zero.
+        "select_shap_population": set(),
         # the "skip HPO, retrain final model" scenario: only cheap
         # view/handle builders may re-run, never tune_hyperparameters
         "finalize_model": {
@@ -114,8 +128,10 @@ RESUME_CONTRACTS = {
         # score_manifest is memory-only, so resuming at rank re-runs the
         # scoring node. That is cheap *because* scoring resumes: every chunk's
         # partition already exists, so it lists the metastore once and writes
-        # nothing. Same shape as training's predict_manifest feeding
-        # compute_test_mAP_spark.
+        # nothing. Training's twin of this, predict_manifest feeding
+        # compute_test_mAP_spark, was landed in issue #233 because its predict
+        # node is *not* cheap to resume; the inference half is issue #195 and
+        # still open, so the two are deliberately different today.
         "rank_predictions": {"predict_and_write_scores"},
         # The resume point the landed intermediate table buys (ADR-0010's
         # "consequences"): scoring reads a persisted feature table, so nothing
@@ -176,6 +192,23 @@ class TestResumeContracts:
         )
         assert "trained_model" in cfg
         assert cfg["trained_model"]["type"] == "ModelAdapterDataset"
+
+    def test_predict_manifest_lands_in_the_version_directory(self):
+        # The catalog half of the compute_test_mAP_spark contract above, plus
+        # where it lands. First level of the model version directory, not a
+        # subdirectory: __main__._dir_artifacts lists that level only, so a
+        # manifest under diagnostics/ would be missing from the `artifacts`
+        # list of manifest.json -- the place someone looks to find out what a
+        # run produced (same reasoning as the sample_weight_report entry).
+        cfg = yaml.safe_load(
+            (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()
+        )
+        assert "predict_manifest" in cfg
+        assert cfg["predict_manifest"]["type"] == "JSONDataset"
+        assert (
+            Path(cfg["predict_manifest"]["filepath"]).parent
+            == Path("data/models/${model_version}")
+        )
 
     def test_model_adapter_sidecars_do_not_share_a_directory(self):
         # ModelAdapterDataset writes model_meta.json next to its filepath, and

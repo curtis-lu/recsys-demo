@@ -1589,6 +1589,33 @@ class TestRebuildSlicedAwayWarning:
         assert "2026-01-31" in lines
         assert "predict_and_write_test_predictions" in lines
 
+    def test_warns_when_only_the_cache_target_survives_the_slice(self):
+        """The gap landing predict_manifest opened (issue #233).
+
+        ``--rebuild-dates`` drives two nodes, but only one of them produces
+        anything: dropping the stale cache is a means, re-predicting is the
+        end. While predict_manifest was memory-only the two always travelled
+        together in a forward slice, so "some target is here" happened to imply
+        "predict is here". Now that the manifest loads from disk,
+        ``--from-node compute_feature_statistics --rebuild-dates ...`` keeps
+        cache_test_model_input and drops the predict node — the cache is
+        rebuilt, nothing is re-predicted, and the run exits 0.
+        """
+        from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
+
+        lines = "\n".join(
+            _maybe_warn_rebuild_sliced_away(
+                self._pipe("cache_test_model_input", "compute_feature_statistics"),
+                self._training_advice(["2026-01-31"]),
+            )
+        )
+        assert "2026-01-31" in lines
+        # Names both halves: which node this slice did run, and the one it did
+        # not. A message that only named the missing node would read as "the
+        # flag did nothing", which is not what happened.
+        assert "cache_test_model_input" in lines
+        assert "predict_and_write_test_predictions" in lines
+
     def test_silent_when_the_flag_was_not_passed(self):
         from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
 

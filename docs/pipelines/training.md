@@ -322,7 +322,7 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開 |
 | `--list-nodes` | 關閉 | 列出 node 名稱與接續成本 |
 
-`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--calibration-variant` 只有在 `training.calibration.enabled: true` 時使用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除、旗標因此無事可做時才會印 `[rebuild] WARNING`。
+`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--calibration-variant` 只有在 `training.calibration.enabled: true` 時使用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除時才會印 `[rebuild] WARNING`——兩種措辭：一步都沒選到是 `had no effect`，選到了「丟舊 cache」那一步卻沒選到預測那一步是 `is only half applied`。
 
 `--dry-run` 與 `--list-nodes` 不會執行 nodes、寫模型或建立 manifest，但 CLI 仍會載入設定、初始化 Spark、解析 dataset versions、計算 `model_version`／`search_id`，並查詢 catalog 產物是否存在。
 
@@ -459,9 +459,15 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 
 **診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這五條邊因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
 
-**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。
+**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local`、calibration 啟用的 21 節點 pipeline 上跑 `--from-node compute_feature_statistics --dry-run` 量的，輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
 
-**還沒省下的**：`predict_manifest` 與兩個 `*_parquet_handle` 都還是 memory-only，所以切片仍會補跑 `predict_and_write_test_predictions`（它會連帶把 `select_features` 拉回來——predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的）以及兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
+**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_mAP_spark` 與 `select_shap_population` 因此變成**零補跑**的接續點。
+
+**還沒省下的**：兩個 `*_parquet_handle` 仍是 memory-only，所以切片仍會補跑兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
+
+**落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_mAP_spark` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
+
+**還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_statistics.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
 
 代價是 `compute_feature_statistics` 多了一個 `model` 輸入——資料層診斷因此綁上模型 artifact。之所以接受：`feature_statistics` 本來就寫在 `data/models/<model_version>/` 底下，替一個不存在的模型算診斷本來就不成立。
 
@@ -483,7 +489,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
-`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
+`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集），落地在 `data/models/<model_version>/predict_manifest.json`——log 留下的是計數，而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣，所以清單要事後查得到（issue #233）。同一份 manifest 的 `snap_dates`／`prods`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
 
 `compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。若模型已校準，也會平行計算原始未校準 score 的結果，讓使用者確認 calibration 是否改變排序表現。
 
@@ -499,6 +505,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 未校準模型（僅 calibration 啟用時） | `trained/model.txt`、`trained/model_meta.json` | `data/models/<model_version>/trained/` |
 | Test 指標 | `evaluation_results.json` | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
+| Test 預測的月份決定 | `predict_manifest.json`（`months_processed`／`months_skipped`／`months_rebuilt` 三份清單） | `data/models/<model_version>/` |
 | 模型診斷 | feature statistics、importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
@@ -508,7 +515,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
 
-`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/`、`trained/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`、`trained/model.txt`、`trained/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 在第一層，所以它在清單裡。
+`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/`、`trained/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`、`trained/model.txt`、`trained/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 與 `predict_manifest.json` 在第一層，所以它們在清單裡。
 
 `model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 與（calibration 啟用時的）`trained_model` 各自放在獨立的 `hpo/`／`trained/` 子目錄，避免它們的 sidecar 與最終模型互相覆寫——sidecar 帶著 `calibrated` 旗標，覆寫會決定模型之後被怎麼**載入**。
 
