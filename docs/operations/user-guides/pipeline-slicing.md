@@ -63,7 +63,7 @@ filter 指向一個不存在的 partition → `exists()` 自然為假。**這一
    **所以改了 code 之後不要用 `--from-node` 接續**——切片會把上游的舊產物直接讀進來。
    跑 full run 也不一定夠：dataset 的既有月份要 `--rebuild-dates` 才會重算；driver-local parquet 與
    LightGBM `.bin` cache 的判準同樣只有「`_SUCCESS` 在不在」
-   （`pipelines/training/nodes.py::_materialize_parquet_handle`），其中 test 月份可由 `--rebuild-dates`
+   （`pipelines/training/nodes.py` 的 5 個 `cache_*_model_input` node），其中 test 月份可由 `--rebuild-dates`
    帶到，**train／val／calibration 那幾份只能手動 `rm -rf <cache.root>/<base_dataset_version>/...`**。
    `data/models/<model_version>/` 反而不用刪——full run 會覆寫它。
    相關：[`training.md` §7.5](../../pipelines/training.md) 最後一列、[`known-pitfalls.md` §17](../known-pitfalls.md)。

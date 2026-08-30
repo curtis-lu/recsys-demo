@@ -34,11 +34,11 @@ def _params_with_test_dates(cache_root: Path, test_snap_dates: list[str]) -> dic
 
 def _stub_hdfs(monkeypatch, location: str = "hdfs:/some/path") -> None:
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+        "recsys_tfb.pipelines.training.steps.local_cache.get_hive_table_location",
         lambda spark, db, table: location,
     )
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local",
+        "recsys_tfb.pipelines.training.steps.local_cache.copy_hdfs_to_local",
         lambda spark, src_glob, dst, glob: Path(dst).mkdir(parents=True, exist_ok=True),
     )
 
@@ -52,7 +52,7 @@ def _recording_hdfs(monkeypatch, copy_calls: list, available: set | None = None)
     into the "you forgot to run dataset" guard.
     """
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+        "recsys_tfb.pipelines.training.steps.local_cache.get_hive_table_location",
         lambda *a, **kw: "hdfs:/some/path",
     )
 
@@ -65,7 +65,7 @@ def _recording_hdfs(monkeypatch, copy_calls: list, available: set | None = None)
         Path(dst).mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(
-        "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local", _copy
+        "recsys_tfb.pipelines.training.steps.local_cache.copy_hdfs_to_local", _copy
     )
 
 
@@ -106,23 +106,21 @@ class TestCacheNodeReturnHandle:
 
 class TestCacheHit:
     def test_skip_copy_when_success_marker_present(self, tmp_path, monkeypatch):
-        from recsys_tfb.pipelines.training.nodes import (
-            _resolve_cache_path,
-            cache_train_model_input,
-        )
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+        from recsys_tfb.pipelines.training.steps.local_cache import resolve_cache_path
 
         params = _params_with_cache_root(tmp_path)
-        cache_path = Path(_resolve_cache_path("train_model_input", params))
+        cache_path = Path(resolve_cache_path("train_model_input", params))
         cache_path.mkdir(parents=True, exist_ok=True)
         (cache_path / "_SUCCESS").touch()
 
         copy_calls = []
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.training.nodes.copy_hdfs_to_local",
+            "recsys_tfb.pipelines.training.steps.local_cache.copy_hdfs_to_local",
             lambda *a, **kw: copy_calls.append(1),
         )
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.training.nodes.get_hive_table_location",
+            "recsys_tfb.pipelines.training.steps.local_cache.get_hive_table_location",
             lambda *a, **kw: "hdfs:/some/path",
         )
 
@@ -344,7 +342,7 @@ class TestPerMonthTestCache:
         assert (feb / "_SUCCESS").exists()
 
     def test_other_splits_layout_untouched_by_test_dates(self, tmp_path):
-        from recsys_tfb.pipelines.training.nodes import _resolve_cache_path
+        from recsys_tfb.pipelines.training.steps.local_cache import resolve_cache_path
 
         one = _params_with_test_dates(tmp_path, ["2026-01-31"])
         two = _params_with_test_dates(tmp_path, ["2026-01-31", "2026-02-28"])
@@ -355,25 +353,23 @@ class TestPerMonthTestCache:
             "val_model_input",
             "calibration_model_input",
         ):
-            assert _resolve_cache_path(name, one) == _resolve_cache_path(name, two)
+            assert resolve_cache_path(name, one) == resolve_cache_path(name, two)
 
         # val is test's structural twin (single-layer before this change); pin
         # its literal path so "the month layer landed on the wrong split"
         # cannot pass as "both sides moved together".
-        assert _resolve_cache_path("val_model_input", two) == str(
+        assert resolve_cache_path("val_model_input", two) == str(
             tmp_path / "deadbeef" / "val_model_input.parquet"
         )
 
 
 class TestPartialCacheRecovery:
     def test_rmtree_when_dir_exists_without_success(self, tmp_path, monkeypatch):
-        from recsys_tfb.pipelines.training.nodes import (
-            _resolve_cache_path,
-            cache_train_model_input,
-        )
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+        from recsys_tfb.pipelines.training.steps.local_cache import resolve_cache_path
 
         params = _params_with_cache_root(tmp_path)
-        cache_path = Path(_resolve_cache_path("train_model_input", params))
+        cache_path = Path(resolve_cache_path("train_model_input", params))
         cache_path.mkdir(parents=True, exist_ok=True)
         (cache_path / "stale_partial.parquet").touch()
 
