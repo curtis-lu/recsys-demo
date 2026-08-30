@@ -257,6 +257,8 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 ### 這個檢查看不到
 
 - **間接寫入。** 寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的寫入它看不到——`tune_hyperparameters` 正是這種，靠人工登記在 R4。
+
+  **另一個掃不到的寫入，刻意不進 R4**：`pipelines/training/steps/local_cache.py` 的 `populate_cache_from_hive`，經 `utils/hdfs.copy_hdfs_to_local` 把 Hive 分區複製到 driver 本機。不登記的理由是 R4 收的是「**診斷副產物**」，而一份 Hive 表的本機複本不是診斷副產物（使用者 2026-08-30 裁決，ADR-0014 閘門 G2）。記在這一段，是因為「掃描看不到它」這件事仍然為真——它只是該被記在這裡，而不是被塞進一張語意不合的表。
 - **`steps/` 底下的程式碼。** (c) 與 (d) 只讀 `pipelines/**/nodes*.py`（`test_architecture_constraints.py:172`、`:190` 的 `rglob("nodes*.py")`）。所以搬進 `steps/` 的程式碼不在稽核範圍內——`pipelines/dataset/steps/` 自 #176 起、`pipelines/inference/steps/` 自 #197 起（約 500 行）都是。
 
   **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。#197 當下實查過 `pipelines/inference/steps/` 零命中。要不要把 glob 放寬到 `pipelines/**/*.py` 是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）。
@@ -426,9 +428,12 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 **離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2；G1 簽核記錄在 issue #222 的切票留言與 #226 票面）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
 
-> ⚠ **這張表的 2 筆，跟測試釘的 2 筆不是同一組。**
-> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment`、`_materialize_parquet_handle`。
-> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；`_materialize_parquet_handle` 在測試裡、不在表上（它是內部 helper，不是 `Node(...)` 註冊的函式，住在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見兩處呼叫，管理本機 parquet cache）。
+> ⚠ **這張表的 2 筆，跟測試釘的 6 筆不是同一組。**
+> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment` ＋ 5 個 cache node（`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input`、`cache_calibration_model_input`，都在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見）。
+> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；5 個 cache node 在測試裡、不在表上（它們刪的是本機 parquet cache，不是診斷副產物）。
+>
+> **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准）。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：5 個 node 真的各自會刪檔，登記變大是誠實的。
+> 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是時序問題不是規則問題：等把 glob 放寬到 `pipelines/**/*.py` 那張票（#163 一帶）做完，這個決定該重新檢討。
 
 ---
 

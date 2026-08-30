@@ -55,7 +55,7 @@ def require_complete_cache(
     Pre-check on an input, run before the first read.
 
     A cache node writes the marker last, so a directory without one is a copy
-    that died partway — ``_populate_cache_from_hive`` says as much in its own
+    that died partway — ``populate_cache_from_hive`` says as much in its own
     docstring. Reading such a directory does not fail: pyarrow opens whatever
     fragments landed, and the caller computes over a silent subset of the split.
 

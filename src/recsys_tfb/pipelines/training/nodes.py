@@ -3,7 +3,7 @@
 import logging
 import shutil
 from pathlib import Path
-from typing import Iterable, NamedTuple, Optional
+from typing import Iterable, NamedTuple
 
 import mlflow
 import numpy as np
@@ -17,7 +17,13 @@ from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_data
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
-from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
+from recsys_tfb.pipelines.training.steps.local_cache import (
+    CACHE_SOURCE_TABLES,
+    populate_cache_from_hive,
+    require_spark_input,
+    resolve_cache_path,
+    success_marker,
+)
 from recsys_tfb.utils.spark import release_spark_session
 
 logger = logging.getLogger(__name__)
@@ -105,94 +111,14 @@ def _test_month_dir(snap_date: str) -> str:
     drift apart. Doubling as the comparison key means a month is the same month
     however it was spelled — config value, cache directory name, Hive partition
     value — which is what the incremental decisions compare.
+
+    Kept here rather than in ``steps/local_cache.py`` with the rest of the cache
+    mechanism: issue #231 moves it into ``steps/predict_months.py``, a module
+    that has to stay importable with zero project dependencies, and a copy in
+    the cache module would have to be imported back. ``resolve_cache_path``
+    takes the directory name as an argument for exactly this reason.
     """
     return str(snap_date).strip().replace("-", "")
-
-
-# Sentinel layout token resolved from the ``snap_date`` argument of
-# _resolve_cache_path — not a `parameters` key and not a directory name. The
-# "!" prefix keeps it from being misread as the sibling literal directory
-# component "test_months".
-_TEST_MONTH_TOKEN = "!test_month"
-
-# Tokens written into the path verbatim rather than looked up in `parameters`.
-_CACHE_LITERAL_TOKENS = frozenset(
-    {"train_variants", "calibration_variants", "test_months"}
-)
-
-_CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
-    "val_model_input": ("base_dataset_version",),
-    # test is cached one directory per month: each month is its own cache entry
-    # with its own _SUCCESS, so adding a month adds a directory and leaves every
-    # existing month untouched.
-    "test_model_input": ("base_dataset_version", "test_months", _TEST_MONTH_TOKEN),
-    "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
-    "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
-    "calibration_model_input": (
-        "base_dataset_version",
-        "calibration_variants",
-        "calibration_variant_id",
-    ),
-}
-
-
-# cache name → source Hive table (under parameters["hive"]["db"])
-_CACHE_SOURCE_TABLE: dict[str, str] = {
-    "val_model_input": "val_model_input",
-    "test_model_input": "test_model_input",
-    "train_model_input": "train_model_input",
-    "train_dev_model_input": "train_dev_model_input",
-    "calibration_model_input": "calibration_model_input",
-}
-
-# Outer (string) Hive partitions encoding the variant boundaries.
-# Mirrors catalog.yaml's `partition_filter` keys; copy these as the
-# subtree root, then `snap_date=*` is the inner glob pattern.
-_CACHE_OUTER_PARTITIONS: dict[str, tuple[str, ...]] = {
-    "val_model_input": ("base_dataset_version",),
-    "test_model_input": ("base_dataset_version",),
-    "train_model_input": ("base_dataset_version", "train_variant_id"),
-    "train_dev_model_input": ("base_dataset_version", "train_variant_id"),
-    "calibration_model_input": ("base_dataset_version", "calibration_variant_id"),
-}
-
-
-def _populate_cache_from_hive(
-    spark, dataset_name: str, parameters: dict, local_dst: str,
-    snap_date: Optional[str] = None,
-) -> None:
-    """Copy the relevant Hive partition subtree to driver-local fs.
-
-    Local layout after copy:
-        <local_dst>/snap_date=.../prod_name=.../*.parquet
-
-    ``snap_date`` narrows the copy to a single month (test caching). A month
-    the source table does not hold makes the glob match nothing, and
-    ``copy_hdfs_to_local`` raises FileNotFoundError — that is how "configured a
-    month but never ran dataset" surfaces, so no separate coverage check exists.
-    That path leaves an empty destination directory behind (the copier mkdirs
-    before globbing); it carries no ``_SUCCESS``, so the partial-cache branch of
-    _materialize_parquet_handle clears and rebuilds it on the next run.
-
-    Source-table resolution:
-      1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
-         __main__.py:_run_pipeline from catalog_config (HiveTableDataset.table).
-         This is the production path and works across envs that prefix table
-         names (e.g. 'recsys_prod_train_model_input').
-      2. _CACHE_SOURCE_TABLE[dataset_name] — fallback used by unit tests that
-         don't go through __main__.py and therefore have no auto-injection.
-    """
-    db = parameters["hive"]["db"]
-    source_tables = parameters.get("_cache_source_tables", {})
-    table = source_tables.get(dataset_name, _CACHE_SOURCE_TABLE[dataset_name])
-    location = get_hive_table_location(spark, db, table)
-    outer = "/".join(
-        f"{tok}={parameters[tok]}"
-        for tok in _CACHE_OUTER_PARTITIONS[dataset_name]
-    )
-    inner = "snap_date=*" if snap_date is None else f"snap_date={snap_date}"
-    src_glob = f"{location.rstrip('/')}/{outer}/{inner}"
-    copy_hdfs_to_local(spark, src_glob, local_dst, glob=True)
 
 
 def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
@@ -200,9 +126,9 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
 
     Mutates `parameters` to add `_cache_source_tables` mapping (cache logical
     name → actual Hive table name). Cache nodes read this in
-    _populate_cache_from_hive.
+    steps.local_cache.populate_cache_from_hive.
 
-    For each known cache name in _CACHE_SOURCE_TABLE, look up the catalog entry.
+    For each known cache name in CACHE_SOURCE_TABLES, look up the catalog entry.
     If present and `type: HiveTableDataset`, take its `table` field. Skips
     entries that aren't HiveTableDataset and missing entries.
 
@@ -215,7 +141,7 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
     cache nodes see the auto-derived mapping at runtime.
     """
     auto: dict[str, str] = {}
-    for cache_name in _CACHE_SOURCE_TABLE:
+    for cache_name in CACHE_SOURCE_TABLES:
         entry = catalog_config.get(cache_name)
         if entry and entry.get("type") == "HiveTableDataset":
             table = entry.get("table")
@@ -225,189 +151,290 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
         parameters["_cache_source_tables"] = auto
 
 
-def _resolve_cache_path(
-    dataset_name: str, parameters: dict, snap_date: Optional[str] = None
-) -> str:
-    """Compose the local-cache parquet directory path for a model_input dataset.
+# ---------------------------------------------------------------------------
+# Cache nodes
+# ---------------------------------------------------------------------------
+#
+# Five nodes, each writing out its own cache decisions rather than calling one
+# shared ``_cache(split_name, parameters)``. That helper is the shape ADR-0008
+# §2 forbids and ADR-0014 decision 1 re-affirms: it held four decisions, so
+# reading any of the five nodes above it told you nothing about what the cache
+# had decided. The duplication below is the point; what is shared is the
+# mechanism, in ``steps/local_cache.py``.
+#
+# The ``shutil.rmtree`` calls stay in this module on purpose — see that module's
+# docstring for which audit stops seeing them if they move.
 
-    Mirrors the layered structure used by production catalog filepaths:
-      <root>/<base_dataset_version>/[train_variants/<train_variant_id>/]<name>.parquet
 
-    ``test_model_input`` additionally nests under ``test_months/<YYYYMMDD>/`` and
-    therefore requires ``snap_date``. The month is written literally (the
-    ``YYYYMMDD`` convention evaluation report paths already use) rather than
-    hashed: a directory naming exactly one month is readable off ``ls`` and
-    cannot disagree with its own contents.
+def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandle:
+    """Driver-local parquet copy of the train split, keyed by its sampling variant.
+
+    The cache directory carries ``train_variant_id``, so changing the sampling
+    settings writes a *new* directory rather than overwriting the old one — which
+    is what makes a sweep over those settings resumable. Keyed by
+    ``base_dataset_version`` alone, the second variant would find the first one's
+    ``_SUCCESS``, read its bytes, and train on the wrong draw without a word.
     """
-    if dataset_name not in _CACHE_PATH_LAYOUT:
-        raise ValueError(f"unknown dataset for cache path: {dataset_name!r}")
-    cache_cfg = parameters.get("cache", {})
-    root = Path(cache_cfg.get("root", "/tmp/recsys_cache"))
-    parts = [root]
-    for token in _CACHE_PATH_LAYOUT[dataset_name]:
-        if token in _CACHE_LITERAL_TOKENS:
-            parts.append(Path(token))
-        elif token == _TEST_MONTH_TOKEN:
-            if snap_date is None:
-                raise ValueError(
-                    f"{dataset_name} cache path requires a snap_date "
-                    "(it is cached one directory per test month)"
-                )
-            parts.append(Path(_test_month_dir(str(snap_date))))
-        else:
-            value = parameters[token]
-            parts.append(Path(value))
-    parts.append(Path(f"{dataset_name}.parquet"))
-    full = parts[0]
-    for p in parts[1:]:
-        full = full / p
-    return str(full)
+    require_spark_input(train_model_input, "train_model_input")
+    local_path = resolve_cache_path("train_model_input", parameters)
+    marker = success_marker(local_path)
 
-
-def _materialize_parquet_handle(
-    df, dataset_name: str, parameters: dict, snap_date: Optional[str] = None,
-    force_refresh: bool = False,
-) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for a single model_input.
-
-    Behaviour:
-      - df is not a Spark DataFrame  → TypeError (pandas-passthrough removed)
-      - ``force_refresh``  → drop whatever is cached, then take the miss path
-      - target path has _SUCCESS  → return ParquetHandle pointing at it
-      - target path exists but no _SUCCESS  → rmtree and rebuild
-      - cache miss  → hadoop fs copyToLocal HDFS subtree to driver-local;
-                      touch _SUCCESS; return ParquetHandle
-
-    ``force_refresh`` exists because cache hits are decided by "_SUCCESS is
-    present", never by freshness. After an upstream backfill the month's cached
-    parquet is stale but complete, so without it ``--rebuild-dates`` would
-    re-predict from the old rows and produce byte-identical numbers — the
-    escape hatch would run and change nothing.
-
-    A forced refresh that then fails to copy leaves the month uncached (no
-    ``_SUCCESS``), not corrupted: the next run takes the miss path and copies
-    it again. That is the deliberate direction — the cache is a copy of Hive,
-    so losing it costs one copy, whereas keeping a stale copy costs a wrong
-    number nobody can see.
-    """
-    if not hasattr(df, "sql_ctx"):
-        raise TypeError(
-            f"{dataset_name} input must be a Spark DataFrame; got "
-            f"{type(df).__name__}. cache.enabled=false passthrough has been "
-            "removed; all environments (including dev/test) must use a "
-            "writable cache.root."
-        )
-
-    local_path = _resolve_cache_path(dataset_name, parameters, snap_date)
-    success_marker = Path(local_path) / "_SUCCESS"
-
-    if force_refresh and Path(local_path).exists():
-        logger.info(
-            "cache_rebuild name=%s path=%s — named by --rebuild-dates, "
-            "dropping the cached copy so the refreshed source is re-read",
-            dataset_name, local_path,
-        )
-        shutil.rmtree(local_path, ignore_errors=True)
-        # ignore_errors is right for the partial-cache branch below (that copy
-        # is unusable either way) but not here: a surviving _SUCCESS would be
-        # read as a hit two lines down, and the rebuild would quietly degrade
-        # into the exact stale-cache re-run it was invoked to prevent.
-        if success_marker.exists():
-            raise RuntimeError(
-                f"could not clear the cached month at {local_path} "
-                "(--rebuild-dates named it). Refusing to continue: the "
-                "surviving _SUCCESS would be taken as a cache hit and this "
-                "month would be re-predicted from the pre-backfill rows, "
-                "producing identical numbers. Remove the directory by hand "
-                "and re-run."
-            )
-
-    if Path(local_path).exists() and not success_marker.exists():
+    # Decision — a directory with no marker is an interrupted copy, not a cache
+    # entry: drop it and copy again. Reading it is the dangerous alternative —
+    # pyarrow opens whatever fragments landed and every number downstream is
+    # computed over a silent subset. Rebuilding is only right here because the
+    # Hive source is still in reach; a consumer holding nothing but the handle
+    # cannot rebuild, which is why io.handles.require_complete_cache refuses
+    # instead of recovering.
+    if Path(local_path).exists() and not marker.exists():
         logger.warning(
             "Partial cache detected at %s, clearing before retry", local_path
         )
         shutil.rmtree(local_path, ignore_errors=True)
 
-    if not success_marker.exists():
-        spark = df.sql_ctx.sparkSession
-        logger.info("cache_miss name=%s path=%s", dataset_name, local_path)
-        _populate_cache_from_hive(
-            spark, dataset_name, parameters, local_path, snap_date
-        )
-        success_marker.touch()
-    else:
-        logger.info("cache_hit name=%s path=%s", dataset_name, local_path)
+    # Decision — a hit is "the marker is present", never freshness. Checking
+    # freshness would cost a Hive metadata query per split per run; the price of
+    # the marker rule is that an upstream backfill leaves a stale-but-complete
+    # copy in place and nothing warns. No escape hatch reaches this split:
+    # ``--rebuild-dates`` is constrained to ``dataset.test_snap_dates`` (A21), so
+    # clearing this one after a backfill is a manual ``rm -rf`` (see
+    # ``docs/operations/user-guides/pipeline-slicing.md``).
+    if marker.exists():
+        logger.info("cache_hit name=%s path=%s", "train_model_input", local_path)
+        return ParquetHandle(path=local_path)
 
+    logger.info("cache_miss name=%s path=%s", "train_model_input", local_path)
+    populate_cache_from_hive(
+        train_model_input.sql_ctx.sparkSession,
+        "train_model_input", parameters, local_path,
+    )
+    marker.touch()
     return ParquetHandle(path=local_path)
 
 
-# ---------------------------------------------------------------------------
-# Cache nodes
-# ---------------------------------------------------------------------------
-
-def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for train_model_input."""
-    return _materialize_parquet_handle(train_model_input, "train_model_input", parameters)
-
-
 def cache_train_dev_model_input(train_dev_model_input, parameters: dict) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for train_dev_model_input."""
-    return _materialize_parquet_handle(
-        train_dev_model_input, "train_dev_model_input", parameters
+    """Driver-local parquet copy of the early-stopping split, beside its train split.
+
+    Same ``train_variants/<train_variant_id>`` level as ``train_model_input``,
+    because one draw produced both: change the sampling settings and the pair
+    retires together. Drop the variant level from this path and re-sampling train
+    would leave train_dev on the *old* draw — every HPO trial would early-stop
+    against rows from a different sample than the one it was fit on, and the only
+    symptom would be scores that look slightly off.
+    """
+    require_spark_input(train_dev_model_input, "train_dev_model_input")
+    local_path = resolve_cache_path("train_dev_model_input", parameters)
+    marker = success_marker(local_path)
+
+    # Decision — a directory with no marker is an interrupted copy: drop it and
+    # copy again rather than read a silent subset of the split. Safe here only
+    # because Hive can still be re-read; the consumer-side guard
+    # (io.handles.require_complete_cache) refuses instead, having no source.
+    if Path(local_path).exists() and not marker.exists():
+        logger.warning(
+            "Partial cache detected at %s, clearing before retry", local_path
+        )
+        shutil.rmtree(local_path, ignore_errors=True)
+
+    # Decision — a hit is "the marker is present", never freshness. Same trade as
+    # the train split, and with the same gap: ``train_variant_id`` is derived from
+    # the sampling config, not from the rows, so a backfill that adds rows under
+    # an unchanged config leaves this copy stale-but-complete. Only test months
+    # have an escape hatch (``--rebuild-dates``).
+    if marker.exists():
+        logger.info("cache_hit name=%s path=%s", "train_dev_model_input", local_path)
+        return ParquetHandle(path=local_path)
+
+    logger.info("cache_miss name=%s path=%s", "train_dev_model_input", local_path)
+    populate_cache_from_hive(
+        train_dev_model_input.sql_ctx.sparkSession,
+        "train_dev_model_input", parameters, local_path,
     )
+    marker.touch()
+    return ParquetHandle(path=local_path)
 
 
 def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for val_model_input."""
-    return _materialize_parquet_handle(val_model_input, "val_model_input", parameters)
+    """Driver-local parquet copy of the val split, keyed by dataset version only.
+
+    No variant level in the path, deliberately: val is the yardstick every train
+    variant is scored against, so it must *not* move when the train draw changes.
+    Put ``train_variant_id`` in this path and each variant would be measured on
+    its own val rows — the comparison that picks a winner would be between two
+    numbers computed on different data, and it would look perfectly normal.
+    """
+    require_spark_input(val_model_input, "val_model_input")
+    local_path = resolve_cache_path("val_model_input", parameters)
+    marker = success_marker(local_path)
+
+    # Decision — a directory with no marker is an interrupted copy: drop it and
+    # copy again rather than read a silent subset. Recovery is available here
+    # because Hive is still in reach; a consumer handed only the handle cannot
+    # rebuild, so io.handles.require_complete_cache fails instead.
+    if Path(local_path).exists() and not marker.exists():
+        logger.warning(
+            "Partial cache detected at %s, clearing before retry", local_path
+        )
+        shutil.rmtree(local_path, ignore_errors=True)
+
+    # Decision — a hit is "the marker is present", never freshness. This split's
+    # copy is the longest-lived of the five (nothing but a new
+    # ``base_dataset_version`` retires it), which is exactly what makes a stale
+    # copy after an upstream backfill worth knowing about: nothing warns.
+    if marker.exists():
+        logger.info("cache_hit name=%s path=%s", "val_model_input", local_path)
+        return ParquetHandle(path=local_path)
+
+    logger.info("cache_miss name=%s path=%s", "val_model_input", local_path)
+    populate_cache_from_hive(
+        val_model_input.sql_ctx.sparkSession,
+        "val_model_input", parameters, local_path,
+    )
+    marker.touch()
+    return ParquetHandle(path=local_path)
 
 
 def cache_test_model_input(
     test_model_input, parameters: dict
 ) -> dict[str, ParquetHandle]:
-    """Skip-if-exists local-parquet cache for test_model_input, one dir per month.
+    """Driver-local parquet copy of the test split, one directory per month.
 
     Returns ``{snap_date: handle}`` keyed by the **verbatim**
     ``dataset.test_snap_dates`` values (no format conversion), sorted so the
-    mapping is deterministic. Each month is cached and invalidated on its own:
-    adding a month copies only that month, and a month whose copy was
-    interrupted is rebuilt without disturbing its siblings.
+    mapping is deterministic. One month per directory is what lets each month be
+    cached and invalidated on its own: adding a month copies only that month, and
+    a month whose copy was interrupted is rebuilt without disturbing its siblings.
 
-    Duplicate dates in config collapse — the same month is the same cache entry.
+    This is the only one of the five that can be told to drop a *complete* copy.
+    Not because the other four never go stale — a backfill under an unchanged
+    config leaves any of them stale-but-complete — but because ``--rebuild-dates``
+    is constrained to ``dataset.test_snap_dates`` (A21). Clearing the other four
+    is a manual ``rm -rf``.
 
-    A month named by ``--rebuild-dates`` is re-copied even on a hit: its cached
-    parquet predates the upstream backfill that motivated the flag, and cache
-    hits never look at freshness.
+    The input type check runs once here rather than once per month, so a
+    misconfigured environment is rejected even when no months are configured —
+    the one behavioural difference from the per-month helper this replaced, and
+    it only tightens a path that could not have produced a usable handle anyway.
     """
+    require_spark_input(test_model_input, "test_model_input")
+
     configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
     rebuild = {
         _test_month_dir(d) for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
     }
 
-    # Dedupe on the *directory* form, not the raw string: the same month is
-    # the same cache entry however it was spelled. Two DIFFERENT spellings of
-    # one month would yield two keys pointing at one directory (handle_paths
-    # would hand the same root to pyarrow twice and silently double every row)
-    # — that config is rejected at CLI entry by A26, so by the time this runs
-    # a key can only be carrying repeats of one literal.
+    # Decision — what counts as one month. Dedupe on the *directory* form, not
+    # the raw string: the same month is the same cache entry however it was
+    # spelled. Two DIFFERENT spellings of one month would yield two keys pointing
+    # at one directory (handle_paths would hand the same root to pyarrow twice
+    # and silently double every row) — that config is rejected at CLI entry by
+    # A26, so by the time this runs a key can only be carrying repeats of one
+    # literal.
     by_dir: dict[str, str] = {}
     for raw in configured:
         by_dir.setdefault(_test_month_dir(str(raw)), str(raw))
 
-    return {
-        month: _materialize_parquet_handle(
-            test_model_input, "test_model_input", parameters, snap_date=month,
-            force_refresh=_test_month_dir(month) in rebuild,
-        )
-        for month in sorted(by_dir.values())
-    }
+    handles: dict[str, ParquetHandle] = {}
+    for month in sorted(by_dir.values()):
+        month_dir = _test_month_dir(month)
+        local_path = resolve_cache_path("test_model_input", parameters, month_dir)
+        marker = success_marker(local_path)
+
+        # Decision — a month named by ``--rebuild-dates`` is dropped even on a
+        # hit. Cache hits never look at freshness, so after an upstream backfill
+        # the month's cached parquet is stale but complete; without this the
+        # escape hatch would run, re-predict from the pre-backfill rows, and
+        # produce byte-identical numbers.
+        if month_dir in rebuild and Path(local_path).exists():
+            logger.info(
+                "cache_rebuild name=%s path=%s — named by --rebuild-dates, "
+                "dropping the cached copy so the refreshed source is re-read",
+                "test_model_input", local_path,
+            )
+            shutil.rmtree(local_path, ignore_errors=True)
+            # Decision — a drop that did not take is fatal, not a warning.
+            # ``ignore_errors`` is right for the partial-cache branch below (that
+            # copy is unusable either way) but not here: a surviving marker would
+            # be read as a hit three lines down, and the rebuild would degrade
+            # into the exact stale-cache re-run it was invoked to prevent.
+            if marker.exists():
+                raise RuntimeError(
+                    f"could not clear the cached month at {local_path} "
+                    "(--rebuild-dates named it). Refusing to continue: the "
+                    "surviving _SUCCESS would be taken as a cache hit and this "
+                    "month would be re-predicted from the pre-backfill rows, "
+                    "producing identical numbers. Remove the directory by hand "
+                    "and re-run."
+                )
+
+        # Decision — a directory with no marker is an interrupted copy: drop it
+        # and copy that month again. A failed copy leaves an empty directory
+        # behind (``populate_cache_from_hive`` says so in its own docstring), and
+        # reading it would put a month's worth of missing rows into the test
+        # metric without an error. Rebuilding is right only while Hive is in
+        # reach — a diagnosis node handed the finished handle cannot rebuild, so
+        # io.handles.require_complete_cache refuses there instead.
+        if Path(local_path).exists() and not marker.exists():
+            logger.warning(
+                "Partial cache detected at %s, clearing before retry", local_path
+            )
+            shutil.rmtree(local_path, ignore_errors=True)
+
+        # Decision — a hit is "the marker is present", never freshness; the
+        # months this misses are exactly the ones ``--rebuild-dates`` names.
+        if marker.exists():
+            logger.info("cache_hit name=%s path=%s", "test_model_input", local_path)
+        else:
+            logger.info("cache_miss name=%s path=%s", "test_model_input", local_path)
+            populate_cache_from_hive(
+                test_model_input.sql_ctx.sparkSession,
+                "test_model_input", parameters, local_path, snap_date=month,
+            )
+            marker.touch()
+
+        handles[month] = ParquetHandle(path=local_path)
+
+    return handles
 
 
 def cache_calibration_model_input(calibration_model_input, parameters: dict) -> ParquetHandle:
-    """Skip-if-exists local-parquet cache for calibration_model_input."""
-    return _materialize_parquet_handle(
-        calibration_model_input, "calibration_model_input", parameters
+    """Driver-local parquet copy of the calibration split, keyed by its own variant.
+
+    ``calibration_variant_id``, not ``train_variant_id``: the calibration draw
+    has its own ratio and its own sampling site, so it retires on its own
+    schedule. Share the train variant's directory and re-sampling calibration
+    alone would keep hitting the old copy — the calibrator would be fitted on the
+    draw the config no longer asks for, and every downstream probability would be
+    quietly calibrated against it.
+    """
+    require_spark_input(calibration_model_input, "calibration_model_input")
+    local_path = resolve_cache_path("calibration_model_input", parameters)
+    marker = success_marker(local_path)
+
+    # Decision — a directory with no marker is an interrupted copy: drop it and
+    # copy again rather than fit a calibrator on a silent subset. Rebuilding is
+    # the right move only while Hive is reachable; the consumer-side guard
+    # (io.handles.require_complete_cache) refuses instead.
+    if Path(local_path).exists() and not marker.exists():
+        logger.warning(
+            "Partial cache detected at %s, clearing before retry", local_path
+        )
+        shutil.rmtree(local_path, ignore_errors=True)
+
+    # Decision — a hit is "the marker is present", never freshness. Same trade as
+    # the other splits: no metadata query per run, at the price of a
+    # stale-but-complete copy surviving an upstream backfill unannounced.
+    if marker.exists():
+        logger.info("cache_hit name=%s path=%s", "calibration_model_input", local_path)
+        return ParquetHandle(path=local_path)
+
+    logger.info("cache_miss name=%s path=%s", "calibration_model_input", local_path)
+    populate_cache_from_hive(
+        calibration_model_input.sql_ctx.sparkSession,
+        "calibration_model_input", parameters, local_path,
     )
+    marker.touch()
+    return ParquetHandle(path=local_path)
 
 
 def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
