@@ -1698,6 +1698,27 @@ class TestTrainingHpoFinalizeParamsA25:
         assert "refit" in errs[0]
         assert "refit_on_full" in errs[0]
 
+    def test_an_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
+        # An absent key and a key written `final_model_strategy:` with no value
+        # are NOT the same thing, and the difference is silent:
+        # dict.get(key, default) returns None when the key is present and null,
+        # so the node's default never applies. finalize_model then reads None,
+        # fails its `== "hpo_best"` test, and runs a full refit_on_full without
+        # saying anything — which is what this gate exists to stop. Skipping on
+        # `value is None` would map null and "refit_on_full" onto one outcome.
+        for key in ("hpo_objective", "final_model_strategy"):
+            errs = training_hpo_finalize_param_errors(self._params(**{key: None}))
+            assert len(errs) == 1, (key, errs)
+            assert key in errs[0]
+
+    def test_the_node_default_really_does_not_cover_an_explicit_null(self):
+        # Premise guard for the test above. If dict.get ever did fall back to
+        # the default for a present-but-null key, rejecting null would be
+        # over-strict — this pins the reason rather than leaving it in a comment.
+        present_null = {"final_model_strategy": None}
+        assert present_null.get("final_model_strategy", "hpo_best") is None
+        assert {}.get("final_model_strategy", "hpo_best") == "hpo_best"
+
     def test_both_keys_reported_in_one_pass(self):
         # Collect-all is the whole point of the entry gate: fixing one typo
         # must not cost another run to discover the second.

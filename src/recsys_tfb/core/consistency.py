@@ -165,7 +165,8 @@ Layer 1 — config-static (implemented here; aggregated by
 * A25 — training-side HPO / finalize parameter domains:
   ``training.hpo_objective`` ∈ ``HPO_OBJECTIVES`` and
   ``training.final_model_strategy`` ∈ ``FINAL_MODEL_STRATEGIES``; an absent key
-  keeps the node's own default and is clean. Predicate:
+  keeps the node's own default and is clean, but an explicit YAML ``null`` is
+  rejected (``dict.get`` hands the node ``None``, not the default). Predicate:
   ``training_hpo_finalize_param_errors``. Aggregated like A20 (one code per
   parameter family): both keys are optional, so the check costs a config that
   never names them nothing, while a typo in either is otherwise only found by
@@ -835,9 +836,15 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
     the same family and shares the fix (retype the value), so splitting them
     across two codes would only make the config author read two messages.
 
-    An absent key is clean: both have behaviour-preserving defaults in the
-    nodes (``mean_ap`` / ``hpo_best``), and an explicit YAML ``null`` is read
-    the same way. Returns collect-all error strings; empty means OK.
+    An *absent* key is clean: both nodes read it with a behaviour-preserving
+    default (``mean_ap`` / ``hpo_best``). An explicit YAML ``null`` is NOT the
+    same thing and is rejected — ``dict.get(key, default)`` returns ``None``
+    when the key is present and null, so the default never applies, and
+    ``finalize_model`` would read ``None``, fail its ``== "hpo_best"`` test and
+    silently run a full ``refit_on_full``. Skipping on ``value is None`` would
+    map null and ``"refit_on_full"`` onto one outcome, which is exactly the
+    collision this gate exists to prevent. Returns collect-all error strings;
+    empty means OK.
     """
     errors: list[str] = []
     training = parameters.get("training", {}) or {}
@@ -845,9 +852,9 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
         ("hpo_objective", HPO_OBJECTIVES),
         ("final_model_strategy", FINAL_MODEL_STRATEGIES),
     ):
-        value = training.get(key)
-        if value is None:
+        if key not in training:
             continue
+        value = training[key]
         if value not in admitted:
             errors.append(
                 f"A25: training.{key}={value!r} is not a value this pipeline "
@@ -1675,13 +1682,17 @@ def date_split_overlap_errors(parameters: dict) -> list[str]:
 def _test_month_key(value) -> str:
     """The month key the training cache uses, for one configured literal.
 
-    Mirrors ``pipelines/training/nodes.py::_test_month_dir`` — a rewritten copy
-    rather than an import, because that module already imports this one, so
-    importing it back would be a cycle. (A8 makes the same call about
-    ``search_space``.) The copy is held to the original by a test that runs
-    both over the same literals, so a change to the cache's notion of "same
-    month" fails loudly instead of leaving A26 quietly checking the wrong
-    thing.
+    Mirrors ``pipelines/training/nodes.py::_test_month_dir``. Two routes were
+    available and both were rejected, so the copy is a choice, not an
+    oversight: importing the original back is a cycle (that module already
+    imports this one), and moving the original *here* would put a cache-path
+    helper in the invariants module — the directory layout is the training
+    pipeline's concern, and this module only has to agree with it. (Contrast
+    ``HPO_OBJECTIVES`` just above, which is imported rather than copied: a
+    value domain *is* an invariant, so it belongs here.) The agreement is
+    pinned by a test that runs both over the same literals, so a change to the
+    cache's notion of "same month" fails loudly instead of leaving A26 quietly
+    checking the wrong thing.
 
     Comparison is by this key and not by calendar day on purpose. A day-based
     key would also group ``"2026-1-31"`` with ``"2026-01-31"``, but those two

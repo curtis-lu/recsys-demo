@@ -769,6 +769,9 @@ def finalize_model(
     # refit_on_full — the only other value A25 admits, so there is nothing left
     # to reject here. The domain check lives at CLI entry on purpose: this node
     # runs after the whole HPO search, and a typo used to cost that search.
+    # A25 rejects an explicit `final_model_strategy:` (yaml null) too, which
+    # matters here: .get would hand this line None, not "hpo_best", and None
+    # would fall through to a silent full refit.
 
     import lightgbm as lgb
     import numpy as np
