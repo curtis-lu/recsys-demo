@@ -61,6 +61,10 @@ def build_trial_params(trial, search_space: list) -> dict:
 
     Returns ``{spec.name: value}``; ``spec.name`` is also the Optuna suggest
     name so ``study.best_params`` keys flow unchanged into the final refit.
+
+    The ``raise`` in the final branch is a **pre-check** on the spec that got
+    here. It is unreachable from the CLI, where ``search_space_errors`` has
+    already rejected an unknown ``type``.
     """
     specs = parse_search_space(search_space)
     out: dict = {}

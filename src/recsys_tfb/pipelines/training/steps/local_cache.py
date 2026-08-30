@@ -132,6 +132,11 @@ def resolve_cache_path(
     ``conf/base/parameters_training.yaml``, so every path out of here is
     CWD-relative. Fine while one run holds one CWD; it is the recorded blocker
     for splitting diagnosis into a second pipeline (ADR-0014 decision 7).
+
+    Both ``raise``s are **pre-checks** on the arguments — an unknown dataset
+    name, and a test month that was not supplied. Neither is reachable from a
+    correctly wired pipeline, so both name the caller's mistake rather than
+    quietly composing a path with ``None`` in it.
     """
     if dataset_name not in _CACHE_PATH_LAYOUT:
         raise ValueError(f"unknown dataset for cache path: {dataset_name!r}")

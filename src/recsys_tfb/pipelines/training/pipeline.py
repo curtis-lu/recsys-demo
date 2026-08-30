@@ -189,8 +189,10 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
             outputs="shap_diagnostics",
         ),
-        # P2b 象限診斷:Spark 選樣(top@1 象限 + 每格抽樣)→ pandas per-(item×象限)
-        # signed profile,獨立寫 per_quadrant.json。compute_shap_diagnostics 不動。
+        # P2b quadrant diagnostics: Spark picks the population (top@1 quadrant
+        # plus a draw from every cell), then pandas builds a per-(item x
+        # quadrant) signed profile and writes per_quadrant.json on its own.
+        # compute_shap_diagnostics is untouched.
         Node(
             select_shap_population,
             # predict_manifest is an ordering-only dependency (same convention as
@@ -209,8 +211,10 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=["model", "shap_population", "preprocessor", "parameters"],
             outputs="quadrant_profiles",
         ),
-        # P2b-2 象限案例:每 (item×象限) 全格極值案例的單列 signed SHAP 圖 + manifest。
-        # 與 profile 依目的解耦(讀 case_rows,自己一次小 SHAP);compute_quadrant_profiles 不動。
+        # P2b-2 quadrant cases: for each (item x quadrant), a single-row signed
+        # SHAP plot of that cell's extreme case, plus a manifest. Kept separate
+        # from the profile by purpose — it reads case_rows and runs its own small
+        # SHAP. compute_quadrant_profiles is untouched.
         Node(
             compute_quadrant_cases,
             inputs=["model", "case_rows", "preprocessor", "parameters"],
@@ -218,10 +222,14 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             log_experiment,
-            # quadrant_profiles 置末:log_experiment 簽名新參數有 default None（在
-            # parameters 之後），Runner 以 node.inputs 位置對應傳參,故此處順序須與簽名
-            # 一致。此依賴也保證 per_quadrant.json 已由 catalog 寫入後才 log_artifacts。
-            # cases_manifest 亦置末(default None),保證 cases PNG/manifest 於 log_artifacts 前寫好。
+            # quadrant_profiles goes last: the parameters log_experiment gained
+            # default to None and sit after `parameters` in the signature, and
+            # the Runner passes arguments by position from node.inputs — so the
+            # order here has to match the signature. That dependency is also
+            # what guarantees the catalog has written per_quadrant.json before
+            # log_artifacts runs. cases_manifest goes last for the same reason
+            # (default None), which is what gets the cases PNGs and manifest
+            # written before log_artifacts.
             inputs=[
                 "model", "best_params", "best_iteration", "evaluation_results",
                 "feature_statistics", "feature_importance", "shap_diagnostics",
