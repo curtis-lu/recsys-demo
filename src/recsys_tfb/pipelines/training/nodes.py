@@ -1067,37 +1067,6 @@ def _written_prediction_partitions(
     return written
 
 
-def require_entity_columns_declared(
-    write_target, entity_cols: list[str], target_name: str
-) -> None:
-    """Pre-check: the write target declares every column in ``schema.entity``.
-
-    Pre-check, not post-condition: what it inspects is the catalog entry the
-    run was handed, so a failure means the *configuration* is short of the
-    schema — the caller has not computed anything wrong yet.
-
-    Why it has to exist at all: an entity column the write target never
-    declared is dropped silently (see
-    :attr:`~recsys_tfb.io.hive_table_dataset.HiveTableDataset.declared_columns`
-    for the mechanism and for what ``None`` means). Nothing else catches it —
-    ``core/consistency.py`` reads the parameters YAML and never the catalog,
-    so the A series cannot see a column declaration, and the table itself is
-    perfectly valid with the column gone. The published rows would simply
-    identify the wrong thing.
-    """
-    declared = write_target.declared_columns
-    if declared is None:
-        return
-    missing = [c for c in entity_cols if c not in declared]
-    if missing:
-        raise ValueError(
-            f"catalog entry '{target_name}' does not declare entity column(s) "
-            f"{missing}; schema.entity is {entity_cols}. Add them to that "
-            f"entry's `columns:` — a Hive save keeps only declared columns, so "
-            f"they would be dropped from the written rows without an error."
-        )
-
-
 def predict_and_write_test_predictions(
     model: ModelAdapter,
     test_parquet_handle: dict[str, ParquetHandle],
@@ -1127,11 +1096,6 @@ def predict_and_write_test_predictions(
     in dataset pipeline) so every (snap_date, cust_id) group already has
     at least one positive label.
 
-    Raises: one **pre-check**, :func:`require_entity_columns_declared` — the
-    write target has to declare every ``schema.entity`` column. A failure
-    means the catalog entry is short of the schema, not that anything computed
-    here went wrong.
-
     Returns:
         manifest dict for downstream compute_test_mAP_spark to depend on
         (DAG ordering — the actual data is read back from Hive there).
@@ -1146,13 +1110,6 @@ def predict_and_write_test_predictions(
     item_col = schema_cfg["item"]
     label_col = schema_cfg["label"]
     model_version = parameters["model_version"]
-
-    # Pre-check before any I/O: every entity column has to survive the write.
-    # `schema.entity` is a list by design, and the frame below carries all of
-    # it — but a Hive save keeps only the columns its catalog entry declares.
-    require_entity_columns_declared(
-        training_eval_predictions, entity_cols, "training_eval_predictions"
-    )
 
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
     # columns from the snap_date=*/prod_name=* directory tree produced by
@@ -1246,7 +1203,9 @@ def predict_and_write_test_predictions(
             out_pdf = pd.DataFrame({
                 # Every entity column, not just the first: the identity of a
                 # scored row is the whole tuple. `str` for all of them matches
-                # what the ranking side compares on.
+                # what the ranking side compares on. That the write target
+                # declares all of them is A28, checked at CLI entry — a column
+                # it never declared is dropped by `save` in silence.
                 **{c: part_pdf[c].astype(str).values for c in entity_cols},
                 "score": y_score,
                 "score_uncalibrated": score_uncalibrated,
