@@ -279,7 +279,7 @@ class TestTuneHyperparameters:
         n_trials = training_parameters["training"]["n_trials"]
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -319,7 +319,7 @@ class TestTuneHyperparameters:
         _, _, val_h, *_ = synthetic_model_inputs
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -358,7 +358,7 @@ class TestTuneHyperparameters:
         _, _, val_h, *_ = synthetic_model_inputs
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -396,7 +396,7 @@ class TestTuneHyperparameters:
         expected_steps = {"prepare_datasets", "train", "predict", "score"}
 
         with caplog.at_level(
-            logging.INFO, logger="recsys_tfb.pipelines.training.nodes"
+            logging.INFO, logger="recsys_tfb.pipelines.training.steps.hpo_scoring"
         ):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h,
@@ -491,21 +491,41 @@ class TestTuneHyperparameters:
         assert not (Path("data") / "models" / "_hpo" / "nocp").exists()
 
     def test_resume_recovers_best_model_without_retrain(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
+        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, caplog,
     ):
         # After a 2-trial run, a re-run that adds 0 trials (same n_trials) must
         # still return a usable model loaded from checkpoint (remaining==0 path).
+        from recsys_tfb.pipelines.training import hpo_resume
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         p = {
             **training_parameters, "search_id": "recoversid",
             "training": {**training_parameters["training"], "n_trials": 2},
         }
-        tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
-        bp, bi, bm = tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        bp0, bi0, _ = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+        )
+        with caplog.at_level(logging.WARNING):
+            bp, bi, bm = tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+            )
         assert bm is not None
         import numpy as np
         assert bm.predict(np.zeros((3, len(preprocessor_metadata["feature_columns"])))).shape == (3,)
+
+        # "without retrain" is the whole point of the name, so assert it. The
+        # checkpoint has to be adopted as the best-so-far; if it is not, the
+        # last-resort branch fires instead and silently pays for another full
+        # trial — same return shape, no error, just a wasted training run and
+        # an extra trial appended to a study that was already complete.
+        assert (bp, bi) == (bp0, bi0)
+        assert hpo_resume.count_completed(
+            hpo_resume.open_study(hpo_resume.hpo_study_dir("recoversid"), "recoversid", 42)
+        ) == 2
+        assert not [
+            r for r in caplog.records if "No usable best model" in r.getMessage()
+        ]
 
 
 # ---- Tests: finalize_model ----
@@ -848,6 +868,7 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     passed to adapter.train carry metric='ndcg'."""
     import numpy as np
     from recsys_tfb.pipelines.training import nodes
+    from recsys_tfb.pipelines.training.steps import hpo_scoring
 
     captured = {}
 
@@ -860,8 +881,11 @@ def test_tune_defaults_ranking_metric(monkeypatch):
         def predict(self, X):
             return np.zeros(len(X))
 
-    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
-    monkeypatch.setattr(nodes, "compute_mean_ap", lambda g, y, p: 0.5)
+    # The trial itself now runs in steps/hpo_scoring.py, so both seams are
+    # patched there; nodes.get_adapter still exists but the HPO path no
+    # longer reads it.
+    monkeypatch.setattr(hpo_scoring, "get_adapter", lambda algo: FakeAdapter())
+    monkeypatch.setattr(hpo_scoring, "compute_mean_ap", lambda g, y, p: 0.5)
 
     def fake_extract(handle, meta, params, **kw):
         X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])
@@ -1003,40 +1027,6 @@ class TestTuneHyperparametersObjective:
                 train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
                 params,
             )
-
-
-class TestHpoScore:
-    GROUPS = np.array([0, 0, 0, 1, 1, 1])
-    ITEMS = np.array(["A", "B", "C", "A", "B", "C"])
-    Y = np.array([1, 0, 1, 0, 1, 0])
-    SCORE = np.array([0.9, 0.5, 0.1, 0.3, 0.8, 0.6])
-
-    def test_mean_ap_matches_compute_mean_ap(self):
-        from recsys_tfb.evaluation.metrics import compute_mean_ap
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
-
-        expected = compute_mean_ap(self.GROUPS, self.Y, self.SCORE)
-        result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
-        assert result == pytest.approx(expected)
-
-
-    def test_macro_per_item_map_matches_primitive(self):
-        from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
-
-        expected = compute_macro_per_item_map(
-            self.GROUPS, self.ITEMS, self.Y, self.SCORE
-        )
-        result = _hpo_score(
-            "macro_per_item_map", self.GROUPS, self.ITEMS, self.Y, self.SCORE
-        )
-        assert result == pytest.approx(expected)
-
-    def test_unknown_objective_raises_valueerror(self):
-        from recsys_tfb.pipelines.training.nodes import _hpo_score
-
-        with pytest.raises(ValueError, match="hpo_objective"):
-            _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
 
 
 def test_resolve_weight_diagnostics_unmatched(tmp_path):
