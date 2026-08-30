@@ -1105,7 +1105,13 @@ def predict_and_write_test_predictions(
         snap_date = str(row[time_col])
         prod_name = str(row[item_col])
 
-        with log_step(logger, f"partition_{snap_date}_{prod_name}"):
+        # A step name built from the data gives the log aggregator one name
+        # per (month, item) pair; the values travel as structured fields
+        # instead, and the console message still carries them.
+        with log_step(
+            logger, "predict_partition",
+            snap_date=snap_date, prod_name=prod_name,
+        ):
             part_table = ds.to_table(
                 filter=(pads.field(time_col) == snap_date)
                 & (pads.field(item_col) == prod_name)
@@ -1297,7 +1303,11 @@ def compute_test_mAP_spark(
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
 
-    n_prods = training_eval_predictions.select(item_col).distinct().count()
+    # Every block below reads the *whole* test prediction table — all months,
+    # all items — which makes this node one of the likelier places for the
+    # tail of the pipeline to get slow. Without these it has no timing at all.
+    with log_step(logger, "count_distinct_items"):
+        n_prods = training_eval_predictions.select(item_col).distinct().count()
     overall_map_key = f"map@{n_prods}"
     item_map_attr_key = f"map_attr@{n_prods}"
 
@@ -1306,16 +1316,22 @@ def compute_test_mAP_spark(
         n_prods, overall_map_key, item_map_attr_key, predict_manifest,
     )
 
-    calibration_applied = (
-        training_eval_predictions.filter(
-            F.col("score") != F.col("score_uncalibrated")
+    with log_step(logger, "detect_calibration"):
+        calibration_applied = (
+            training_eval_predictions.filter(
+                F.col("score") != F.col("score_uncalibrated")
+            )
+            .limit(1)
+            .count()
+            > 0
         )
-        .limit(1)
-        .count()
-        > 0
-    )
 
-    cal = compute_all_metrics(training_eval_predictions, parameters)
+    # The action is not on this line: compute_all_metrics counts and collects
+    # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
+    # level" applies — this is the expensive block, not a lazy plan.
+    with log_step(logger, "compute_metrics"):
+        cal = compute_all_metrics(training_eval_predictions, parameters)
+
     result = {
         "overall_map": float(cal["overall"].get(overall_map_key, 0.0)),
         "per_item_map_attr": {
@@ -1327,12 +1343,14 @@ def compute_test_mAP_spark(
     }
 
     if calibration_applied:
+        # The renames are lazy, so they stay outside the timed block.
         uncal_df = (
             training_eval_predictions
             .withColumnRenamed("score", "_score_calibrated")
             .withColumnRenamed("score_uncalibrated", "score")
         )
-        uncal = compute_all_metrics(uncal_df, parameters)
+        with log_step(logger, "compute_metrics_uncalibrated"):
+            uncal = compute_all_metrics(uncal_df, parameters)
         result["uncalibrated"] = {
             "overall_map": float(uncal["overall"].get(overall_map_key, 0.0)),
             "per_item_map_attr": {
