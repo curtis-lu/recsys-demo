@@ -161,3 +161,106 @@ def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch
     tp = manifest["A"]["TP"]["high"]     # metadata 須經 seam 完整帶到
     assert tp["rendered"] and tp["cust_id"] == "c1" and tp["label"] == 1 and tp["rank"] == 1
     assert (tmp_path / "data/models/mv_integ/diagnostics/cases/A/TP_high.png").exists()
+
+
+# ---- persist / unpersist(T5):cache 不得留在 executor 上 ----------------------
+
+def _persistent_rdd_ids(spark):
+    """SparkSession 目前掛著的 Spark cache。
+
+    外部觀察 Spark 自己的狀態,不是斷言「``unpersist()`` 有沒有被呼叫過」——
+    後者換個寫法就繞過去了,前者繞不過。
+    """
+    return set(spark.sparkContext._jsc.getPersistentRDDs().keySet().toArray())
+
+
+def _preds_and_feats(spark):
+    preds = spark.createDataFrame(
+        [("2024-01-31", "c1", "A", 0.9, 1), ("2024-01-31", "c1", "B", 0.2, 0),
+         ("2024-01-31", "c2", "A", 0.8, 0), ("2024-01-31", "c2", "B", 0.3, 1)],
+        _PRED_COLS)
+    feats = spark.createDataFrame(
+        [("2024-01-31", "c1", "A", 1.0, 2.0), ("2024-01-31", "c1", "B", 1.1, 2.1),
+         ("2024-01-31", "c2", "A", 1.2, 2.2), ("2024-01-31", "c2", "B", 1.3, 2.3)],
+        _FEAT_COLS)
+    return preds, feats
+
+
+def test_success_path_leaves_no_spark_cache(spark):
+    """成功跑完後 SparkSession 不得留下這個 node 的 cache。
+
+    Runner 只釋放 MemoryDataset,不碰 Spark DataFrame 的 storage——少了
+    unpersist,那份 cache 會佔著 executor 直到 SparkSession 結束。
+    """
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    preds, feats = _preds_and_feats(spark)
+    before = _persistent_rdd_ids(spark)
+    pop, cases = select_shap_population(preds, feats, _params())
+    assert pop is not None and cases is not None      # 兩條分支真的都跑到了
+    assert _persistent_rdd_ids(spark) - before == set()
+
+
+def test_failure_path_leaves_no_spark_cache_and_stays_best_effort(spark, monkeypatch):
+    """第一條分支跑完、第二條炸掉:cache 仍要釋放,且契約不變(只 warn)。
+
+    這是 try/finally 而非「只在成功路徑釋放」的理由;失敗路徑同樣會離開這個函式。
+    """
+    from pyspark.sql import DataFrame
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    def _boom(self, other, allowMissingColumns=False):
+        raise RuntimeError("injected failure after the first toPandas()")
+
+    monkeypatch.setattr(DataFrame, "unionByName", _boom)
+    preds, feats = _preds_and_feats(spark)
+    before = _persistent_rdd_ids(spark)
+    out = select_shap_population(preds, feats, _params())
+    assert out == (None, None)                        # best-effort:不中斷訓練
+    assert _persistent_rdd_ids(spark) - before == set()
+
+
+def test_ranked_frame_is_persisted_with_explicit_memory_and_disk(spark, monkeypatch):
+    """排名＋象限標記那份結果真的被 persist,且 StorageLevel 是顯式指定的。
+
+    沒有這條的話,上面兩條「不得留下 cache」在「根本沒 persist」時也會綠
+    (假綠形態:不存在斷言同時被「正確釋放」與「根本沒嘗試」滿足)。
+    斷言讀的是 Spark 自己記的 storage level,不是呼叫紀錄。
+    """
+    from pyspark.sql import DataFrame
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    original_unpersist = DataFrame.unpersist
+    observed = []
+
+    def _spy(self, blocking=False):
+        observed.append(self.storageLevel)            # 釋放前先問 Spark 現在存哪
+        return original_unpersist(self, blocking)
+
+    monkeypatch.setattr(DataFrame, "unpersist", _spy)
+    preds, feats = _preds_and_feats(spark)
+    pop, _cases = select_shap_population(preds, feats, _params())
+    assert pop is not None
+    assert observed, "node 沒有釋放任何 persist 的 DataFrame"
+    level = observed[0]
+    assert (level.useMemory, level.useDisk) == (True, True)   # MEMORY_AND_DISK
+
+
+def test_unpersist_failure_does_not_break_best_effort(spark, monkeypatch):
+    """釋放失敗(例如 SparkSession 已死)不得把 best-effort 變成硬失敗。
+
+    persist 之前,``except`` 之後沒有任何會 raise 的東西;persist 帶進了一個新的
+    失敗來源,而 ``finally`` 裡的 raise 會蓋掉上面的 return。
+    """
+    from pyspark.sql import DataFrame
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    def _boom(self, blocking=False):
+        raise RuntimeError("simulated dead SparkSession on release")
+
+    monkeypatch.setattr(DataFrame, "unpersist", _boom)
+    preds, feats = _preds_and_feats(spark)
+    pop, cases = select_shap_population(preds, feats, _params())
+    assert pop is not None and cases is not None      # 成功路徑仍回得了結果

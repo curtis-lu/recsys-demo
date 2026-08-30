@@ -26,6 +26,7 @@ def select_shap_population(
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
+    from pyspark.storagelevel import StorageLevel
 
     from recsys_tfb.core.schema import get_schema
 
@@ -44,6 +45,7 @@ def select_shap_population(
     label_col = schema["label"]
     group_cols = [time_col] + entity_cols
 
+    labeled = None
     try:
         # rank:item_col 作 tie-break,讓象限指派在同分時可重現。
         w_rank = Window.partitionBy(*group_cols).orderBy(
@@ -59,7 +61,11 @@ def select_shap_population(
             .otherwise(F.lit("TN"))
         )
         ck = F.concat_ws("|", *[F.col(c).cast("string") for c in group_cols + [item_col]])
-        labeled = ranked.withColumn("quadrant", quadrant).withColumn("_ck", ck)
+        # 下面兩條分支各自 toPandas() 一次(兩個 action)。不 persist 的話,rank 的
+        # shuffle 會整個重跑一遍。StorageLevel 顯式寫出、不靠預設:這份中間結果在生產
+        # 資料量下裝不進 executor 記憶體時要能落磁碟,而不是被丟掉重算。
+        labeled = (ranked.withColumn("quadrant", quadrant).withColumn("_ck", ck)
+                   .persist(StorageLevel.MEMORY_AND_DISK))
 
         # ---- 輸出 1:profile 抽樣(crc32 每格取 <= per_cell;P2b-1 行為不變)----
         w_cell = Window.partitionBy(item_col, "quadrant").orderBy(
@@ -94,6 +100,19 @@ def select_shap_population(
     except Exception as e:  # best-effort:選樣失敗不中斷訓練(spec §12)
         logger.warning("select_shap_population failed: %s", e)
         return None, None
+    finally:
+        # Runner 只釋放 MemoryDataset,不碰 Spark DataFrame 的 storage(core/runner.py
+        # 與 core/catalog.py 都沒有 unpersist)。少了這裡,這份 cache 會佔著
+        # executor 直到 SparkSession 結束。finally 而非成功路徑:這個 node 是
+        # best-effort,上面的 except 同樣會離開這個函式。
+        if labeled is not None:
+            try:
+                labeled.unpersist()
+            except Exception as release_error:
+                # 這一行是 persist 帶進來的新失敗來源:在 finally 裡 raise 會蓋掉
+                # 上面的 return,把 best-effort 變成硬失敗。釋放不掉只能記下來。
+                logger.warning(
+                    "select_shap_population: unpersist failed: %s", release_error)
 
     logger.info(
         "select_shap_population: pop_rows=%d case_rows=%d items=%d per_cell=%d",
