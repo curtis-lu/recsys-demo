@@ -255,7 +255,7 @@ class TestCLI:
             os.chdir(old_cwd)
 
     def test_training_auto_injects_cache_source_tables_from_catalog(self, tmp_path):
-        """_run_pipeline calls inject_cache_source_tables with substitution_params
+        """_execute_pipeline calls inject_cache_source_tables with substitution_params
         and catalog_config before constructing DataCatalog. Helper itself is
         unit-tested in TestInjectCacheSourceTables; this test only pins the wiring.
         """

@@ -6,6 +6,9 @@ again — is written out in each of the five cache nodes in ``nodes.py``, one no
 at a time (``docs/agents/pipeline-node-design.md`` rules 4, 5 and 9). Read a
 cache node to find out what it decided; read here to find out where the bytes go.
 
+The log lines live here too, for the reason rule 5 gives: the nodes repeat their
+decisions on purpose, but a format string repeated five times drifts.
+
 ``shutil.rmtree`` is deliberately **not** in this module, although the paths it
 deletes are composed here. The architecture audit
 (``tests/test_core/test_architecture_constraints.py::test_direct_writes_match_registry``)
@@ -28,10 +31,13 @@ a copy of a Hive table is not one (decided 2026-08-30, ADR-0014 gate G2). What
 watches it is A1's "what this check cannot see" note.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
+
+logger = logging.getLogger(__name__)
 
 # Sentinel layout token resolved from the ``month_dir`` argument of
 # resolve_cache_path — not a `parameters` key and not a directory name. The
@@ -134,7 +140,7 @@ def resolve_cache_path(
         elif token == _TEST_MONTH_TOKEN:
             if month_dir is None:
                 raise ValueError(
-                    f"{dataset_name} cache path requires a snap_date "
+                    f"{dataset_name} cache path requires month_dir "
                     "(it is cached one directory per test month)"
                 )
             parts.append(Path(month_dir))
@@ -148,16 +154,100 @@ def resolve_cache_path(
     return str(full)
 
 
-def success_marker(local_path: str) -> Path:
+def _success_marker(local_path: str) -> Path:
     """The completion marker file for a cache directory.
 
-    One definition, so the node that touches it last and the node that reads it
-    as a hit cannot drift apart on the name, and so
-    ``io.handles.require_complete_cache`` is checking for the same file from the
-    consumer's side. Getting the two names out of step would not raise: one side
-    would simply stop finding hits, or stop noticing partial copies.
+    ⚠ **Not the only place this name is written.** ``io.handles`` hardcodes the
+    same ``"_SUCCESS"`` for the consumer-side check, and
+    ``models/lightgbm_adapter.py`` has a third copy for the LightGBM ``.bin``
+    cache — neither can import this module (``io/`` sits below ``pipelines/``,
+    and a shared constant is a change none of these three tickets asked for). So
+    the three literals are a real drift risk that nothing prevents: rename the
+    marker on one side and that side simply stops finding hits, with no error.
     """
     return Path(local_path) / "_SUCCESS"
+
+
+def cache_exists(local_path: str) -> bool:
+    """Is there anything at all at this cache path?
+
+    Says nothing about whether it is usable — that is ``cache_is_complete``.
+    Separate because dropping a *complete* copy (``--rebuild-dates``) and
+    dropping an *interrupted* one are different decisions with different
+    consequences, and each cache node writes them out separately.
+    """
+    return Path(local_path).exists()
+
+
+def cache_is_complete(local_path: str) -> bool:
+    """Did the copy that wrote this directory finish?
+
+    The marker goes down last, so its presence is the only evidence a copy ran to
+    the end. Nothing here looks at *when* it was written: freshness is not part
+    of the answer, which is the trade each cache node spells out.
+    """
+    return _success_marker(local_path).exists()
+
+
+def is_partial_cache(local_path: str) -> bool:
+    """Is there a directory here that no copy ever finished writing?
+
+    The two halves matter separately. "Nothing here" is an ordinary miss. "A
+    directory with no marker" is debris from a copy that died — pyarrow will open
+    it and read whatever fragments landed, without complaining, which is the
+    silent-subset failure every caller of this is guarding against.
+    """
+    return cache_exists(local_path) and not cache_is_complete(local_path)
+
+
+def mark_cache_complete(local_path: str) -> None:
+    """Declare the copy finished — call this only after the last byte landed.
+
+    Touching it early is the failure this whole protocol exists to avoid: a
+    half-copied directory carrying the marker reads as a hit forever, and every
+    number computed from it is computed over a silent subset.
+    """
+    _success_marker(local_path).touch()
+
+
+# ---------------------------------------------------------------------------
+# Log lines
+#
+# Written once and called from each cache node. The nodes duplicate their
+# *decisions* on purpose (``docs/agents/pipeline-node-design.md`` rule 5), but a
+# log line is mechanism, and five copies of a format string drift. Same shape as
+# ``pipelines/dataset/steps/sampling.py::log_sampled_keys``.
+#
+# These emit under this module's logger, not the calling node's — the event
+# names (``cache_hit`` / ``cache_miss`` / ``cache_rebuild``) are what log
+# aggregation keys on, and they are unchanged.
+# ---------------------------------------------------------------------------
+
+
+def log_cache_hit(dataset_name: str, local_path: str) -> None:
+    """Report a hit."""
+    logger.info("cache_hit name=%s path=%s", dataset_name, local_path)
+
+
+def log_cache_miss(dataset_name: str, local_path: str) -> None:
+    """Report a miss — a copy from Hive is about to run."""
+    logger.info("cache_miss name=%s path=%s", dataset_name, local_path)
+
+
+def log_partial_cache_cleared(local_path: str) -> None:
+    """Report an interrupted copy being dropped. WARNING, not INFO: it means a
+    previous run died mid-copy, which is worth seeing even when the retry works.
+    """
+    logger.warning("Partial cache detected at %s, clearing before retry", local_path)
+
+
+def log_cache_dropped_for_rebuild(dataset_name: str, local_path: str) -> None:
+    """Report a *complete* copy being dropped because ``--rebuild-dates`` named it."""
+    logger.info(
+        "cache_rebuild name=%s path=%s — named by --rebuild-dates, "
+        "dropping the cached copy so the refreshed source is re-read",
+        dataset_name, local_path,
+    )
 
 
 def populate_cache_from_hive(
@@ -181,7 +271,7 @@ def populate_cache_from_hive(
 
     Source-table resolution:
       1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
-         __main__.py:_run_pipeline from catalog_config (HiveTableDataset.table).
+         __main__.py:_execute_pipeline from catalog_config (HiveTableDataset.table).
          This is the production path and works across envs that prefix table
          names (e.g. 'recsys_prod_train_model_input').
       2. CACHE_SOURCE_TABLES[dataset_name] — fallback used by unit tests that

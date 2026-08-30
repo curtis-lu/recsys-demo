@@ -19,10 +19,17 @@ from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
 from recsys_tfb.pipelines.training.steps.local_cache import (
     CACHE_SOURCE_TABLES,
+    cache_exists,
+    cache_is_complete,
+    is_partial_cache,
+    log_cache_dropped_for_rebuild,
+    log_cache_hit,
+    log_cache_miss,
+    log_partial_cache_cleared,
+    mark_cache_complete,
     populate_cache_from_hive,
     require_spark_input,
     resolve_cache_path,
-    success_marker,
 )
 from recsys_tfb.utils.spark import release_spark_session
 
@@ -137,7 +144,7 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
 
     No-op (does not write the key) when no cache entries match.
 
-    Called by __main__.py:_run_pipeline before DataCatalog construction so the
+    Called by __main__.py:_execute_pipeline before DataCatalog construction so the
     cache nodes see the auto-derived mapping at runtime.
     """
     auto: dict[str, str] = {}
@@ -175,9 +182,10 @@ def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandl
     ``base_dataset_version`` alone, the second variant would find the first one's
     ``_SUCCESS``, read its bytes, and train on the wrong draw without a word.
     """
+    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
+    # problem. Say so before a path is composed for it.
     require_spark_input(train_model_input, "train_model_input")
     local_path = resolve_cache_path("train_model_input", parameters)
-    marker = success_marker(local_path)
 
     # Decision — a directory with no marker is an interrupted copy, not a cache
     # entry: drop it and copy again. Reading it is the dangerous alternative —
@@ -186,10 +194,8 @@ def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandl
     # Hive source is still in reach; a consumer holding nothing but the handle
     # cannot rebuild, which is why io.handles.require_complete_cache refuses
     # instead of recovering.
-    if Path(local_path).exists() and not marker.exists():
-        logger.warning(
-            "Partial cache detected at %s, clearing before retry", local_path
-        )
+    if is_partial_cache(local_path):
+        log_partial_cache_cleared(local_path)
         shutil.rmtree(local_path, ignore_errors=True)
 
     # Decision — a hit is "the marker is present", never freshness. Checking
@@ -199,16 +205,16 @@ def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandl
     # ``--rebuild-dates`` is constrained to ``dataset.test_snap_dates`` (A21), so
     # clearing this one after a backfill is a manual ``rm -rf`` (see
     # ``docs/operations/user-guides/pipeline-slicing.md``).
-    if marker.exists():
-        logger.info("cache_hit name=%s path=%s", "train_model_input", local_path)
+    if cache_is_complete(local_path):
+        log_cache_hit("train_model_input", local_path)
         return ParquetHandle(path=local_path)
 
-    logger.info("cache_miss name=%s path=%s", "train_model_input", local_path)
+    log_cache_miss("train_model_input", local_path)
     populate_cache_from_hive(
         train_model_input.sql_ctx.sparkSession,
         "train_model_input", parameters, local_path,
     )
-    marker.touch()
+    mark_cache_complete(local_path)
     return ParquetHandle(path=local_path)
 
 
@@ -222,18 +228,17 @@ def cache_train_dev_model_input(train_dev_model_input, parameters: dict) -> Parq
     against rows from a different sample than the one it was fit on, and the only
     symptom would be scores that look slightly off.
     """
+    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
+    # problem. Say so before a path is composed for it.
     require_spark_input(train_dev_model_input, "train_dev_model_input")
     local_path = resolve_cache_path("train_dev_model_input", parameters)
-    marker = success_marker(local_path)
 
     # Decision — a directory with no marker is an interrupted copy: drop it and
     # copy again rather than read a silent subset of the split. Safe here only
     # because Hive can still be re-read; the consumer-side guard
     # (io.handles.require_complete_cache) refuses instead, having no source.
-    if Path(local_path).exists() and not marker.exists():
-        logger.warning(
-            "Partial cache detected at %s, clearing before retry", local_path
-        )
+    if is_partial_cache(local_path):
+        log_partial_cache_cleared(local_path)
         shutil.rmtree(local_path, ignore_errors=True)
 
     # Decision — a hit is "the marker is present", never freshness. Same trade as
@@ -241,16 +246,16 @@ def cache_train_dev_model_input(train_dev_model_input, parameters: dict) -> Parq
     # the sampling config, not from the rows, so a backfill that adds rows under
     # an unchanged config leaves this copy stale-but-complete. Only test months
     # have an escape hatch (``--rebuild-dates``).
-    if marker.exists():
-        logger.info("cache_hit name=%s path=%s", "train_dev_model_input", local_path)
+    if cache_is_complete(local_path):
+        log_cache_hit("train_dev_model_input", local_path)
         return ParquetHandle(path=local_path)
 
-    logger.info("cache_miss name=%s path=%s", "train_dev_model_input", local_path)
+    log_cache_miss("train_dev_model_input", local_path)
     populate_cache_from_hive(
         train_dev_model_input.sql_ctx.sparkSession,
         "train_dev_model_input", parameters, local_path,
     )
-    marker.touch()
+    mark_cache_complete(local_path)
     return ParquetHandle(path=local_path)
 
 
@@ -263,34 +268,33 @@ def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
     its own val rows — the comparison that picks a winner would be between two
     numbers computed on different data, and it would look perfectly normal.
     """
+    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
+    # problem. Say so before a path is composed for it.
     require_spark_input(val_model_input, "val_model_input")
     local_path = resolve_cache_path("val_model_input", parameters)
-    marker = success_marker(local_path)
 
     # Decision — a directory with no marker is an interrupted copy: drop it and
     # copy again rather than read a silent subset. Recovery is available here
     # because Hive is still in reach; a consumer handed only the handle cannot
     # rebuild, so io.handles.require_complete_cache fails instead.
-    if Path(local_path).exists() and not marker.exists():
-        logger.warning(
-            "Partial cache detected at %s, clearing before retry", local_path
-        )
+    if is_partial_cache(local_path):
+        log_partial_cache_cleared(local_path)
         shutil.rmtree(local_path, ignore_errors=True)
 
     # Decision — a hit is "the marker is present", never freshness. This split's
     # copy is the longest-lived of the five (nothing but a new
     # ``base_dataset_version`` retires it), which is exactly what makes a stale
     # copy after an upstream backfill worth knowing about: nothing warns.
-    if marker.exists():
-        logger.info("cache_hit name=%s path=%s", "val_model_input", local_path)
+    if cache_is_complete(local_path):
+        log_cache_hit("val_model_input", local_path)
         return ParquetHandle(path=local_path)
 
-    logger.info("cache_miss name=%s path=%s", "val_model_input", local_path)
+    log_cache_miss("val_model_input", local_path)
     populate_cache_from_hive(
         val_model_input.sql_ctx.sparkSession,
         "val_model_input", parameters, local_path,
     )
-    marker.touch()
+    mark_cache_complete(local_path)
     return ParquetHandle(path=local_path)
 
 
@@ -316,6 +320,8 @@ def cache_test_model_input(
     the one behavioural difference from the per-month helper this replaced, and
     it only tightens a path that could not have produced a usable handle anyway.
     """
+    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
+    # problem. Say so before a path is composed for it.
     require_spark_input(test_model_input, "test_model_input")
 
     configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
@@ -338,26 +344,21 @@ def cache_test_model_input(
     for month in sorted(by_dir.values()):
         month_dir = _test_month_dir(month)
         local_path = resolve_cache_path("test_model_input", parameters, month_dir)
-        marker = success_marker(local_path)
 
         # Decision — a month named by ``--rebuild-dates`` is dropped even on a
         # hit. Cache hits never look at freshness, so after an upstream backfill
         # the month's cached parquet is stale but complete; without this the
         # escape hatch would run, re-predict from the pre-backfill rows, and
         # produce byte-identical numbers.
-        if month_dir in rebuild and Path(local_path).exists():
-            logger.info(
-                "cache_rebuild name=%s path=%s — named by --rebuild-dates, "
-                "dropping the cached copy so the refreshed source is re-read",
-                "test_model_input", local_path,
-            )
+        if month_dir in rebuild and cache_exists(local_path):
+            log_cache_dropped_for_rebuild("test_model_input", local_path)
             shutil.rmtree(local_path, ignore_errors=True)
             # Decision — a drop that did not take is fatal, not a warning.
             # ``ignore_errors`` is right for the partial-cache branch below (that
             # copy is unusable either way) but not here: a surviving marker would
             # be read as a hit three lines down, and the rebuild would degrade
             # into the exact stale-cache re-run it was invoked to prevent.
-            if marker.exists():
+            if cache_is_complete(local_path):
                 raise RuntimeError(
                     f"could not clear the cached month at {local_path} "
                     "(--rebuild-dates named it). Refusing to continue: the "
@@ -374,23 +375,21 @@ def cache_test_model_input(
         # metric without an error. Rebuilding is right only while Hive is in
         # reach — a diagnosis node handed the finished handle cannot rebuild, so
         # io.handles.require_complete_cache refuses there instead.
-        if Path(local_path).exists() and not marker.exists():
-            logger.warning(
-                "Partial cache detected at %s, clearing before retry", local_path
-            )
+        if is_partial_cache(local_path):
+            log_partial_cache_cleared(local_path)
             shutil.rmtree(local_path, ignore_errors=True)
 
         # Decision — a hit is "the marker is present", never freshness; the
         # months this misses are exactly the ones ``--rebuild-dates`` names.
-        if marker.exists():
-            logger.info("cache_hit name=%s path=%s", "test_model_input", local_path)
+        if cache_is_complete(local_path):
+            log_cache_hit("test_model_input", local_path)
         else:
-            logger.info("cache_miss name=%s path=%s", "test_model_input", local_path)
+            log_cache_miss("test_model_input", local_path)
             populate_cache_from_hive(
                 test_model_input.sql_ctx.sparkSession,
                 "test_model_input", parameters, local_path, snap_date=month,
             )
-            marker.touch()
+            mark_cache_complete(local_path)
 
         handles[month] = ParquetHandle(path=local_path)
 
@@ -407,33 +406,32 @@ def cache_calibration_model_input(calibration_model_input, parameters: dict) -> 
     draw the config no longer asks for, and every downstream probability would be
     quietly calibrated against it.
     """
+    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
+    # problem. Say so before a path is composed for it.
     require_spark_input(calibration_model_input, "calibration_model_input")
     local_path = resolve_cache_path("calibration_model_input", parameters)
-    marker = success_marker(local_path)
 
     # Decision — a directory with no marker is an interrupted copy: drop it and
     # copy again rather than fit a calibrator on a silent subset. Rebuilding is
     # the right move only while Hive is reachable; the consumer-side guard
     # (io.handles.require_complete_cache) refuses instead.
-    if Path(local_path).exists() and not marker.exists():
-        logger.warning(
-            "Partial cache detected at %s, clearing before retry", local_path
-        )
+    if is_partial_cache(local_path):
+        log_partial_cache_cleared(local_path)
         shutil.rmtree(local_path, ignore_errors=True)
 
     # Decision — a hit is "the marker is present", never freshness. Same trade as
     # the other splits: no metadata query per run, at the price of a
     # stale-but-complete copy surviving an upstream backfill unannounced.
-    if marker.exists():
-        logger.info("cache_hit name=%s path=%s", "calibration_model_input", local_path)
+    if cache_is_complete(local_path):
+        log_cache_hit("calibration_model_input", local_path)
         return ParquetHandle(path=local_path)
 
-    logger.info("cache_miss name=%s path=%s", "calibration_model_input", local_path)
+    log_cache_miss("calibration_model_input", local_path)
     populate_cache_from_hive(
         calibration_model_input.sql_ctx.sparkSession,
         "calibration_model_input", parameters, local_path,
     )
-    marker.touch()
+    mark_cache_complete(local_path)
     return ParquetHandle(path=local_path)
 
 
