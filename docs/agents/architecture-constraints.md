@@ -162,7 +162,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 56 個。
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 55 個。
 
 **這個數字每次改 node 都會變，所以別引用它，重量一次**：
 
@@ -181,15 +181,17 @@ print(n, dict(b))"
 
 | 行數 | 個數 |
 |---|---|
-| ≤ 40 | 33 |
-| 41–80 | 11 |
+| ≤ 40 | 31 |
+| 41–80 | 12 |
 | 81–120 | 5 |
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 171 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 171 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
 
 > **2026-08-30 重量的原委，以及腐爛了什麼**（#229）。該次改動把 `_hpo_score` 與 HPO trial 的評分搬進 `pipelines/training/steps/hpo_scoring.py`，所以總數 57 → 56、≤40 少一個，`tune_hyperparameters` 228 → 185、`finalize_model` 156 → 155。**重量時發現另外三個數字早就腐爛了，跟這次改動無關**：41–80 原寫 12（當時實為 11）、`predict_and_write_scores` 原寫 253（實為 263）、第五名原寫 `prepare_eval_data` 143（實為 `validate_predictions` 146）。三者都是 2026-08-09 之後沒人回頭重量。**這正是上面那句「別引用它，重量一次」的實例**——引用了就會像這樣把三個過期的數字一起帶下去。
+
+> **2026-08-30 第二次重量**（#232）。sample_weight／refit／MLflow 三處機制搬進 `pipelines/training/steps/`，所以總數 56 → 55（`resolve_weight_diagnostics` 併回它唯一的呼叫端）、`finalize_model` 155 → 133 而掉出前五名，`prepare_eval_data` 143 遞補第五。≤40 少兩個、41–80 多一個，是因為 `persist_sample_weight_report` 吸收了那些決策而從 21 行長到 59 行——**這正是規則 2 說的「照判準寫的 node 會比較長」**，決策從 helper 浮回 node body，行數就記在 node 上。
 
 **這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（六成的 node 函式在 40 行內），下次寫一個新的時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
 

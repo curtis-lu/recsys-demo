@@ -958,6 +958,8 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     def spy_dataset(*a, **kw):
         if "group" in kw and kw["group"] is not None:
             captured["group"] = np.asarray(kw["group"])
+        captured["X"] = np.asarray(a[0])
+        captured["construct_params"] = kw.get("params")
         return real_dataset(*a, **kw)
 
     monkeypatch.setattr(lgb, "Dataset", spy_dataset)
@@ -991,6 +993,21 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     )
     assert int(captured["group"].sum()) == 6
     assert captured["metric"] == "ndcg"
+
+    # Rows and group ids are stacked by two separate calls now
+    # (steps/refit.py), so they can disagree without anything raising: dev rows
+    # would carry train's group ids and the refit would optimise a ranking over
+    # groups that never existed. Train rows are all zeros, dev rows all ones.
+    np.testing.assert_array_equal(
+        captured["X"], np.vstack([np.zeros((4, 2)), np.ones((2, 2))]),
+    )
+
+    # feature_pre_filter=False is an agreement with HPO's cached .bin binaries,
+    # which are binned with the same construct param. Letting it default drops
+    # features the winning trial could split on -- a different model reported
+    # under the search's hyperparameters, and nothing raises. The two sites are
+    # steps/refit.py and steps/hpo_scoring.py.
+    assert captured["construct_params"] == {"feature_pre_filter": False}
 
 
 class TestTuneHyperparametersObjective:
@@ -1029,10 +1046,16 @@ class TestTuneHyperparametersObjective:
             )
 
 
-def test_resolve_weight_diagnostics_unmatched(tmp_path):
+def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
+    """A configured weight whose key never appears in train is the finding.
+
+    Nothing else in the pipeline notices: `aff` is a real category in the
+    encoding, so the translation succeeds and the weight is simply never looked
+    up. Only this report says so.
+    """
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import resolve_weight_diagnostics
+    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
 
     # train parquet: feature seg stored as int codes (0=mass,1=hnw), prod raw.
     pdf = pd.DataFrame({
@@ -1052,24 +1075,11 @@ def test_resolve_weight_diagnostics_unmatched(tmp_path):
     }
     prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}}
 
-    diag = resolve_weight_diagnostics(handle, params, prep)
+    diag = persist_sample_weight_report(handle, prep, params)
     assert diag["enabled"] is True
     assert diag["weight_keys"] == ["cust_segment_typ_2a"]
     assert diag["n_weight_entries"] == 2
     assert diag["unmatched_keys"] == ["aff"]  # no row has segment 'aff'
-
-
-def test_resolve_weight_diagnostics_disabled(tmp_path):
-    import pandas as pd
-    from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import resolve_weight_diagnostics
-    p = tmp_path / "t.parquet"
-    pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
-    params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-              "item": "prod_name", "label": "label"}}, "training": {}}
-    diag = resolve_weight_diagnostics(ParquetHandle(path=str(p)), params, {})
-    assert diag == {"enabled": False, "weight_keys": ["prod_name"],
-                    "n_weight_entries": 0, "unmatched_keys": []}
 
 
 def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
@@ -1118,7 +1128,10 @@ def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
 
     diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
 
-    assert diag["enabled"] is False and diag["unmatched_keys"] == []
+    # weight_keys still reports the default (the item column) so the manifest
+    # records which key the run would have weighted by.
+    assert diag == {"enabled": False, "weight_keys": ["prod_name"],
+                    "n_weight_entries": 0, "unmatched_keys": []}
     assert not version_dir.exists(), (
         f"the catalog owns this write now, but the node wrote into the model "
         f"version dir: {sorted(q.name for q in version_dir.rglob('*'))}"
