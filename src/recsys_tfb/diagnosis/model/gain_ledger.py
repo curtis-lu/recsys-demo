@@ -344,6 +344,13 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
 
     ``diagnostics.gain_ledger.enabled``（預設 True）關閉時直接回 ``{"enabled": False}``，
     不觸碰 model。preprocessor 缺 ``category_mappings[item_col]`` 時降級為粗帳本。
+
+    ``preprocessor`` is the dataset-built artifact, not the training-stage view.
+    Unlike the other diagnosis nodes this one never slices X, so it needs only
+    the *encoding* half of the artifact: ``category_mappings`` is the code-to-item
+    lookup the booster's integer split thresholds have to be read through, and
+    feature selection passes it through untouched either way (ADR-0014
+    decision 7).
     """
     cfg = (parameters.get("diagnostics", {}) or {}).get("gain_ledger", {}) or {}
     if not cfg.get("enabled", True):

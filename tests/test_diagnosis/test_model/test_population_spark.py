@@ -129,6 +129,7 @@ def test_case_rows_tiebreak_same_score_picks_distinct_rows(spark):
 def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch):
     """整合:select_shap_population 的 case_rows 直接餵進 compute_quadrant_cases,
     守住 Spark 產出↔pandas 消費的欄位契約(任一側 alias 改名都會被此測試抓到)。"""
+    import lightgbm as lgb
     import numpy as np
 
     from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
@@ -139,10 +140,15 @@ def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch
     rng = np.random.RandomState(0)
     Xtr = rng.randn(200, 2)
     ytr = (Xtr[:, 0] > 0).astype(float)
+    # feature_name mirrors production: prepare_train_inputs always sets it, and
+    # compute_quadrant_cases now takes the model's declaration as authoritative.
+    ds = lgb.Dataset(Xtr, label=ytr, feature_name=["f0", "f1"], free_raw_data=False)
     adapter = LightGBMAdapter()
     adapter.train(Xtr, ytr, None, None,
                   {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 4, "seed": 1, "num_iterations": 10, "early_stopping_rounds": 0})
+                   "num_leaves": 4, "seed": 1, "num_iterations": 10,
+                   "early_stopping_rounds": 0},
+                  train_dataset=ds)
     prep = {"feature_columns": ["f0", "f1"], "categorical_columns": [], "category_mappings": {}}
     params = _params()
     params["model_version"] = "mv_integ"

@@ -146,7 +146,7 @@ training:
 ```
 
 `training.feature_selection.exclude` 會在 training 開始時建立 preprocessor view，從 `feature_columns` 排除指定欄位。
-HPO、最終訓練、calibration、test scoring 與診斷都使用同一份 feature view，inference 則依模型保存的 feature names 取欄，避免訓練與推論欄位不一致。
+HPO、最終訓練、calibration 與 test scoring 都使用同一份 feature view。**診斷與 inference 不看這份 view，改依模型保存的 feature names 取欄**——模型是唯一記得「這次訓練實際用了哪個子集」的產物，兩邊都因此不受事後改動 `exclude` 影響（見 §5 表後說明）。
 
 這是模型層的特徵實驗，因此修改後只會更新 `model_version`，不需要重建 dataset。`schema.item` 不可被排除；其他 exclude 名稱也應先確認存在於該 dataset 的 `feature_columns`。
 目前不存在的欄位名稱會被忽略，但仍會進入版本 hash，因此可能產生內容相同、ID 不同的 model version。
@@ -438,7 +438,7 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 特徵選擇 | `select_features` | `preprocessor`、parameters | 套用 training-stage feature exclusion | `preprocessor_view` |
+| 特徵選擇 | `select_features` | `preprocessor`、parameters | 套用 training-stage feature exclusion；只餵給下方**訓練**模型的 node，診斷 node 不吃（見表後說明） | `preprocessor_view` |
 | Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
 | Calibration cache | `cache_calibration_model_input` | calibration Hive table | 啟用時建立 calibration local cache | calibration `ParquetHandle` |
 | 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
@@ -448,13 +448,35 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 | 機率校準 | `calibrate_model` | 未校準模型、calibration handle | fit sigmoid 或 isotonic calibrator | 最終 `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_mAP_spark` | test 預測 | 使用 Spark 計算整體 mAP 與 per-item attribution | `evaluation_results` |
-| 特徵統計 | `compute_feature_statistics` | train handle、preprocessor view | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
+| 特徵統計 | `compute_feature_statistics` | train handle、model、`preprocessor` | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
-| SHAP | `compute_shap_diagnostics` | model、test handle | 依 item 分層抽樣後計算全域 beeswarm、per-item 帶方向 SHAP profile（含申辦客戶對照）與偏離度排名 | `shap_diagnostics`、PNG |
+| Gain 帳本 | `compute_gain_ledger` | model、`preprocessor` | 跨樹按 item 記帳（id 切點 vs context 切點的 Gain）；`preprocessor` 只用到 `category_mappings`，把整數切點還原成 item 值 | `gain_ledger` |
+| SHAP | `compute_shap_diagnostics` | model、test handle、`preprocessor` | 依 item 分層抽樣後計算全域 beeswarm、per-item 帶方向 SHAP profile（含申辦客戶對照）與偏離度排名 | `shap_diagnostics`、PNG |
 | 象限選樣 | `select_shap_population` | training_eval_predictions、test_model_input | top@1 象限 + 每格抽樣（profile）與全格極值（cases） | `shap_population`、`case_rows` |
-| 象限 profile | `compute_quadrant_profiles` | model、shap_population | per-(item×象限) 聚合 signed profile | `quadrant_profiles`（`per_quadrant.json`） |
-| 象限案例 | `compute_quadrant_cases` | model、case_rows | 每 (item×象限) 極值案例單列 SHAP 圖 | `cases_manifest`、PNG |
+| 象限 profile | `compute_quadrant_profiles` | model、shap_population、`preprocessor` | per-(item×象限) 聚合 signed profile | `quadrant_profiles`（`per_quadrant.json`） |
+| 象限案例 | `compute_quadrant_cases` | model、case_rows、`preprocessor` | 每 (item×象限) 極值案例單列 SHAP 圖 | `cases_manifest`、PNG |
 | 實驗記錄 | `log_experiment` | model、參數、指標、診斷 | 將實驗寫入 MLflow | 無 |
+
+**診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這五條邊因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
+
+**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。
+
+**還沒省下的**：`predict_manifest` 與兩個 `*_parquet_handle` 都還是 memory-only，所以切片仍會補跑 `predict_and_write_test_predictions`（它會連帶把 `select_features` 拉回來——predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的）以及兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
+
+代價是 `compute_feature_statistics` 多了一個 `model` 輸入——資料層診斷因此綁上模型 artifact。之所以接受：`feature_statistics` 本來就寫在 `data/models/<model_version>/` 底下，替一個不存在的模型算診斷本來就不成立。
+
+**這不是在修一個靜默錯誤。** 改由 config 推導欄集**不會**漂移：`training.feature_selection.exclude` 住在 `training:` block，改它會 bump `model_version` → model 的 catalog 路徑跟著變 → 整條訓練鏈被拉回重跑。ADR-0014 決定 7 對這點有明確的誠實標註。**這是把介接口弄乾淨**，理由是可定址性（catalog 條目）與拓撲位置，不是正確性。（inference 那邊的理由不同、且真的關乎正確性，見 [ADR-0011](../adr/0011-inference-validation-two-layers.md) §5。）
+
+**半成品 cache 現在會擋下來。** cache node 的 `_SUCCESS` marker 是最後才寫的，所以「有目錄、沒 marker」＝複製到一半斷了。同一個 marker 兩邊行為刻意相反：
+
+| 誰 | 拿到沒有 `_SUCCESS` 的目錄 | 為什麼 |
+|---|---|---|
+| `cache_train_model_input` 等 cache node | **清掉，從 Hive 重建** | 來源還在，重建是對的復原行為 |
+| `compute_feature_statistics`、`compute_shap_diagnostics` | **報錯**（`require_complete_cache`） | 它們只拿到 handle、重建不了；讀半成品不會報錯，統計會照算、MLflow 會照記，數字描述的是不知道多大的一部分資料 |
+
+（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7 的驗收條件，兩條分開測。）
+
+實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。另外 `--from-node calibrate_model` 會多重建一次 train local cache。
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
 寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。calibration 關閉時，`score_uncalibrated` 與 `score` 相同。
@@ -590,6 +612,7 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 - catalog 的 `exists()` 只能證明檔案或 partition 存在，不能證明它仍與目前程式碼、來源資料或未納入 hash 的設定一致。
 - `--from-node finalize_model` 要跳過 HPO，必須同時存在 `best_params`、`best_iteration` 與 `hpo_best_model`；缺少任一項都可能自動補跑 HPO。
 - 同理，`--from-node calibrate_model` 要跳過 final model，必須存在 `trained_model`（`trained/model.txt` ＋ `trained/model_meta.json`）；缺了就會把 `finalize_model` 拉回重跑。
+- `--from-node calibrate_model` 另外會重建 **train** local cache（`cache_train_model_input`）。原因是 `compute_feature_statistics` 現在吃 `model`，因而排在 `calibrate_model` 之後（先前它沒有 model 依賴，拓撲序可以把它排到模型產出之前），它的 train handle 就被帶進這個切片。成本是一次 Hive→本機複製，不是重訓。
 - HPO 跑到一半的恢復由 `search_id` journal/checkpoint 處理；HPO node 已完成後跳到 `finalize_model` 則由 catalog-persisted outputs 處理。兩者是不同層次的恢復機制。
 - cache node 的輸出 handle 是記憶體物件，因此接續時會重新執行；底層 local Parquet 有 `_SUCCESS` 時只建立 handle，不會重新從 HDFS 複製。
 - 沒有輸出的設定閘或 sink node，在切片起點之前不會自動重跑。資料或設定來源有疑慮時應使用 full run。

@@ -44,6 +44,7 @@ from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+from recsys_tfb.models.feature_view import model_feature_view
 from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     ScoringChunk,
     as_rows,
@@ -51,7 +52,6 @@ from recsys_tfb.pipelines.inference.steps.chunk_plans import (
 )
 from recsys_tfb.pipelines.inference.steps.feature_view import (
     model_columns_to_collect,
-    model_feature_columns,
     require_population_has_model_columns,
 )
 from recsys_tfb.pipelines.inference.steps.partitions import (
@@ -293,8 +293,8 @@ def predict_and_write_scores(
     # training.feature_selection.exclude, and model_version can point at a model
     # trained under a different one; same-length excludes over different columns
     # would then misalign X silently (ADR-0011 §5).
-    feature_columns = model_feature_columns(model, preprocessor)
-    preprocessor_view = {**preprocessor, "feature_columns": feature_columns}
+    model_view = model_feature_view(model, preprocessor)
+    feature_columns = model_view["feature_columns"]
 
     # Decision — what crosses into the driver per bucket: the model's columns,
     # not the table's. The item is excluded from both sides — it is assigned per
@@ -410,7 +410,7 @@ def predict_and_write_scores(
                 # name — _pdf_to_X applies the integer code to its own copy, so
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
-                X = _pdf_to_X(bucket_pdf, preprocessor_view, parameters)
+                X = _pdf_to_X(bucket_pdf, model_view, parameters)
                 scores = (
                     model.predict_uncalibrated(X) if use_uncalibrated
                     else model.predict(X)

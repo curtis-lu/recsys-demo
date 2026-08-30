@@ -47,6 +47,53 @@ def handle_paths(
     return [handles[key].path for key in sorted(handles)]
 
 
+def require_complete_cache(
+    handles: Union[ParquetHandle, Mapping[str, ParquetHandle]]
+) -> None:
+    """Raise unless every parquet root behind ``handles`` carries ``_SUCCESS``.
+
+    Pre-check on an input, run before the first read.
+
+    A cache node writes the marker last, so a directory without one is a copy
+    that died partway — ``_populate_cache_from_hive`` says as much in its own
+    docstring. Reading such a directory does not fail: pyarrow opens whatever
+    fragments landed, and the caller computes over a silent subset of the split.
+
+    Deliberately not the cache node's own behaviour. Handed a marker-less
+    directory *whose source is still available*, the right move is to clear it
+    and rebuild from Hive, and that recovery must stay. This is for the other
+    side of the same marker: a consumer handed a handle it cannot rebuild, where
+    the only choices left are failing and publishing a number computed over an
+    unknown fraction of the data.
+
+    Only directories are checked. A handle pointing at a single parquet file is
+    not a cache root — the marker is a property of the directories the cache
+    nodes write — so requiring one there would reject a shape the contract never
+    covered.
+    """
+    from pathlib import Path
+
+    if isinstance(handles, ParquetHandle):
+        labelled = [("", handles.path)]
+    else:
+        labelled = [(key, handles[key].path) for key in sorted(handles)]
+
+    incomplete = [
+        (key, root) for key, root in labelled
+        if Path(root).is_dir() and not (Path(root) / "_SUCCESS").exists()
+    ]
+    if incomplete:
+        detail = ", ".join(
+            f"{key}: {root}" if key else root for key, root in incomplete
+        )
+        raise ValueError(
+            "parquet cache is incomplete — no _SUCCESS marker, so the copy that "
+            f"wrote it did not finish and an unknown fraction of the split is "
+            f"missing: {detail}. Re-run the cache node for this split (its "
+            "source is what can rebuild it); do not compute over it."
+        )
+
+
 def open_parquet_dataset(paths: Union[str, list[str]]):
     """One ``pyarrow.dataset`` over one or many hive-partitioned parquet roots.
 

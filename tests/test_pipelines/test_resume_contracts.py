@@ -44,6 +44,28 @@ RESUME_CONTRACTS = {
         "filter_test_model_input": {"build_test_model_input"},
     },
     ("training", ()): {
+        # The diagnosis entry point (ADR-0014 decision 7). Before
+        # compute_feature_statistics took `model` it had no model dependency at
+        # all, so the topological sort placed a diagnosis of
+        # data/models/${model_version}/ *ahead* of the node producing the model —
+        # and "every node after it" then swept prepare_lgb_train_inputs,
+        # tune_hyperparameters and finalize_model back in. 18 nodes re-ran to
+        # regenerate a JSON of null rates. The edge moved it after finalize_model
+        # and the slice fell to 13.
+        #
+        # What is left is the honest remainder, all memory-only and none of it
+        # fixed here: predict_manifest drags the predict node back, which drags
+        # select_features (predict *applies* a model, so preprocessor_view is the
+        # right input for it), and the two parquet handles drag their cache
+        # nodes. Removing those is blocked on cache.root being a relative path
+        # (ADR-0014 decision 7, second gap). Pinned so the next reduction shows
+        # up as a diff.
+        "compute_feature_statistics": {
+            "select_features",
+            "cache_train_model_input",
+            "cache_test_model_input",
+            "predict_and_write_test_predictions",
+        },
         # the "skip HPO, retrain final model" scenario: only cheap
         # view/handle builders may re-run, never tune_hyperparameters
         "finalize_model": {
@@ -72,10 +94,20 @@ RESUME_CONTRACTS = {
         # above it: the forward slice keeps every node AFTER calibrate_model
         # too, so the test handle is pulled in by predict_and_write_test_
         # predictions downstream, not by anything calibrate_model needs.
+        # cache_train_model_input joined that second group when
+        # compute_feature_statistics gained its `model` input (ADR-0014
+        # decision 7). Before that edge existed the node had no model
+        # dependency at all, so the topological sort was free to place a
+        # diagnosis of `data/models/${model_version}/` *ahead* of the node that
+        # produces the model; it now lands after calibrate_model, where it
+        # belongs, and drags its train handle into this slice. Accepted rather
+        # than worked around: the ordering is the correct one, and the cost is a
+        # Hive-to-local copy on a resume path, not a retrain.
         "calibrate_model": {
             "select_features",
             "cache_calibration_model_input",
             "cache_test_model_input",
+            "cache_train_model_input",
         },
     },
     ("inference", ()): {

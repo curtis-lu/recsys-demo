@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume, log_step
+from recsys_tfb.io.handles import require_complete_cache
+from recsys_tfb.models.feature_view import model_feature_view
 
 from . import data_access
 from ._util import _to_native
@@ -66,7 +68,7 @@ def _divergence(item_abs, global_abs, metric, k, feature_cols):
 
 
 def _positive_profiles(model, path, item_values, item_col, label_col, feature_cols,
-                       take_cols, preprocessor, parameters, *, profile_positive,
+                       take_cols, model_view, parameters, *, profile_positive,
                        per_item, min_rows, top_k):
     """針對正樣本(label==1)抽樣、單獨跑一次 SHAP,回傳每 item 的正例 profile。
 
@@ -84,7 +86,7 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
         return {}
     pos_pdf = data_access.take_rows(path, pos_idx, columns=take_cols).reset_index(drop=True)
     log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
-    X_pos = _pdf_to_X(pos_pdf, preprocessor, parameters)
+    X_pos = _pdf_to_X(pos_pdf, model_view, parameters)
     with log_step(logger, "shap_values_positive"):
         shap_pos = feature_attributions(model, X_pos, feature_cols)
     pos_items = pos_pdf[item_col].values
@@ -127,11 +129,26 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     schema = get_schema(parameters)
     item_col, label_col = schema["item"], schema["label"]
-    feature_cols = list(preprocessor["feature_columns"])
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
 
     # 讀所有設定月份的聯集——與本次改動前的語意完全相同（同樣的列、同樣的分層）。
     # 依月份切分診斷是 Phase B 的題目，見 issue #128 Out of Scope。
     from recsys_tfb.io.handles import handle_paths
+
+    # Pre-check (input) — same contract as compute_feature_statistics: a
+    # half-copied month reads as a smaller month, so the stratified sample would
+    # be drawn from a split nobody knows the size of (ADR-0014 decision 7).
+    require_complete_cache(test_parquet_handle)
 
     path = handle_paths(test_parquet_handle)
 
@@ -164,7 +181,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
                 len(item_values), len(sample_pdf), len(take_cols))
     log_data_volume(logger, "shap.sample_pdf", sample_pdf, deep=True)
 
-    X = _pdf_to_X(sample_pdf, preprocessor, parameters)
+    X = _pdf_to_X(sample_pdf, model_view, parameters)
     scores = model.predict(X)
 
     with log_step(logger, "shap_values"):
@@ -203,7 +220,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     else:
         positive_profiles = _positive_profiles(
             model, path, item_values, item_col, label_col, feature_cols, take_cols,
-            preprocessor, parameters, profile_positive=profile_positive,
+            model_view, parameters, profile_positive=profile_positive,
             per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
