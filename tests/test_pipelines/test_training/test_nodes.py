@@ -1005,8 +1005,9 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     # feature_pre_filter=False is an agreement with HPO's cached .bin binaries,
     # which are binned with the same construct param. Letting it default drops
     # features the winning trial could split on -- a different model reported
-    # under the search's hyperparameters, and nothing raises. The two sites are
-    # steps/refit.py and steps/hpo_scoring.py.
+    # under the search's hyperparameters, and nothing raises. Three sites have
+    # to agree: steps/refit.py, steps/hpo_scoring.py and
+    # models/lightgbm_adapter.py (the one that bins the .bin).
     assert captured["construct_params"] == {"feature_pre_filter": False}
 
 

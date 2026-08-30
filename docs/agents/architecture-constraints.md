@@ -421,7 +421,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 | 函式 | 寫什麼 | 檢查看得到嗎 |
 |---|---|---|
-| `log_experiment`（`pipelines/training/nodes.py`） | MLflow params／metrics／artifacts（搜 `mlflow.log_artifacts`） | ✅ 直接呼叫，掃得到 |
+| `log_experiment`（`pipelines/training/nodes.py`） | MLflow artifacts——整個 `diagnostics_dir` 上傳（搜 `mlflow.log_artifacts`）。params／metrics 的欄位名自 #232 起在 `pipelines/training/steps/experiment_log.py`，**但那個上傳呼叫刻意留在 node 裡**：測試 (d) 只掃 `nodes*.py`，寫檔一搬進 `steps/` 就掉出登記（實測會讓該測試轉紅） | ✅ 直接呼叫，掃得到 |
 | `tune_hyperparameters`（`pipelines/training/nodes.py`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（搜 `write_hpo_diagnostics`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
 
 **位置只給檔案與要搜的字串、不給行號**，理由同 R3：本表原本寫 `nodes.py:1256`／`:1339`／`:520`／`:739`，光是 #226 從同檔刪掉 4 行就讓四個數字同時失準；而 (d) 只比對函式名的 Counter、抓不到行號腐爛。

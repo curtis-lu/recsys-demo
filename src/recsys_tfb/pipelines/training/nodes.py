@@ -12,7 +12,6 @@ import pandas as pd
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.diagnosis.model import diagnostics_dir
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -1165,6 +1164,7 @@ def log_experiment(
     names are read by people and dashboards outside this repo, and renaming one
     fails silently: the run still succeeds and a chart just stops having a line.
     """
+    from recsys_tfb.diagnosis.model import diagnostics_dir
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
@@ -1183,14 +1183,22 @@ def log_experiment(
 
         with log_step(logger, "mlflow_log"):
             with mlflow.start_run():
-                # Decision — one run records four things: the configuration
-                # that produced the model, how it scored, whether calibration
-                # was involved, and what the diagnostics found. A run missing
-                # any of them is still a valid MLflow run, which is why the
-                # list is written out here rather than inferred downstream.
+                # Decision — the run is keyed by what produced the model, not
+                # just its hyperparameters: `algorithm` and
+                # `final_model_strategy` are what let two runs with identical
+                # best_params still be told apart months later.
                 experiment_log.log_run_params(
                     best_params, algorithm, final_model_strategy, best_iteration)
+
+                # Decision — the scores recorded are the evaluation node's, not
+                # a re-derivation. Recomputing here would make MLflow and the
+                # evaluation report able to disagree with no way to tell which
+                # is right.
                 experiment_log.log_evaluation_metrics(evaluation_results)
+
+                # Decision — a calibrated run says so, and carries the
+                # uncalibrated score beside it. Without the pair, "did
+                # calibration help" is unanswerable from the run alone.
                 experiment_log.log_calibration_outcome(evaluation_results)
 
                 # The adapter logs its own artifact: only it knows the flavour.

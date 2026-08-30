@@ -28,6 +28,15 @@ def stack_splits(train: tuple, dev: tuple) -> tuple:
     The order is not free: ``offset_dev_group_ids`` concatenates group ids the
     same way, and a ranking refit whose rows and group ids disagree gets
     silently wrong query groups rather than an error.
+
+    The two ``finalize.*`` volume-record names are hard-coded rather than
+    passed in, and they name this module's only caller. That is deliberate:
+    they are an existing monitoring interface, and a refactor that renamed them
+    would break a dashboard filter with nothing to show for it. **Their
+    ``logger`` field did change** — these records used to be emitted under
+    ``…pipelines.training.nodes`` and now come from this module, the same shift
+    ``steps/hpo_scoring.py`` made in #229. A filter on the logger name, rather
+    than on the record name, needs updating.
     """
     X_train, y_train, w_train = train
     X_dev, y_dev, w_dev = dev
