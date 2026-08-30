@@ -202,8 +202,11 @@ class TestA1NodeIO:
                 if name in WRITE_CALLS or name in WRITE_ATTRS:
                     found[(path.parent.name, owner.get(call.lineno, "<module>"))] += 1
 
+        # persist_sample_weight_report left this set when the catalog took
+        # over its write (conf/base/catalog.yaml::sample_weight_report) --
+        # shrinking a registry, which is the direction that needs no new
+        # exception. Putting the write back in the node puts it back here.
         assert set(found) == {
-            ("training", "persist_sample_weight_report"),
             ("training", "log_experiment"),
             ("training", "_materialize_parquet_handle"),
         }, (

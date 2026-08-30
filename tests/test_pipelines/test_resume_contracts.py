@@ -63,6 +63,20 @@ RESUME_CONTRACTS = {
             "cache_test_model_input",
             "cache_calibration_model_input",
         },
+        # The resume point `trained_model`'s catalog entry buys (ADR-0014,
+        # "two resume points that got cheaper"): only cheap view/handle
+        # builders may re-run. Un-land `trained_model` and finalize_model
+        # comes back -- under final_model_strategy: refit_on_full that is a
+        # full refit, which is exactly the cost this contract exists to see.
+        # cache_test_model_input is here for a different reason than the two
+        # above it: the forward slice keeps every node AFTER calibrate_model
+        # too, so the test handle is pulled in by predict_and_write_test_
+        # predictions downstream, not by anything calibrate_model needs.
+        "calibrate_model": {
+            "select_features",
+            "cache_calibration_model_input",
+            "cache_test_model_input",
+        },
     },
     ("inference", ()): {
         # score_manifest is memory-only, so resuming at rank re-runs the
@@ -121,15 +135,29 @@ class TestResumeContracts:
         for name in ("best_params", "best_iteration", "hpo_best_model"):
             assert name in defined, f"{name} must stay defined in catalog.yaml"
 
-    def test_hpo_model_sidecar_isolated_from_final_model(self):
-        # ModelAdapterDataset writes model_meta.json next to its filepath;
-        # hpo_best_model must live in its own directory.
+    def test_training_skip_finalize_requires_persisted_trained_model(self):
+        # The catalog half of the calibrate_model contract above: without this
+        # entry the slice pulls finalize_model back, which under
+        # final_model_strategy: refit_on_full is a full refit.
         cfg = yaml.safe_load(
             (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()
         )
-        model_dir = Path(cfg["model"]["filepath"]).parent
-        hpo_dir = Path(cfg["hpo_best_model"]["filepath"]).parent
-        assert model_dir != hpo_dir
+        assert "trained_model" in cfg
+        assert cfg["trained_model"]["type"] == "ModelAdapterDataset"
+
+    def test_model_adapter_sidecars_do_not_share_a_directory(self):
+        # ModelAdapterDataset writes model_meta.json next to its filepath, and
+        # that sidecar carries the `calibrated` flag -- i.e. it decides how the
+        # model is later LOADED. Any two of these sharing a directory would
+        # overwrite each other's flag, so each needs its own.
+        cfg = yaml.safe_load(
+            (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()
+        )
+        dirs = {
+            name: Path(cfg[name]["filepath"]).parent
+            for name in ("model", "hpo_best_model", "trained_model")
+        }
+        assert len(set(dirs.values())) == len(dirs), dirs
 
     def test_node_names_unique_within_each_pipeline(self):
         # slice_from/_node_index resolve nodes BY NAME (first match wins);

@@ -1,5 +1,7 @@
 """Tests for training pipeline definition."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -170,6 +172,64 @@ class TestTrainingPipeline:
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
         assert names.index("finalize_model") < names.index("calibrate_model")
         assert names.index("calibrate_model") < names.index("predict_and_write_test_predictions")
+
+
+class TestSampleWeightReportIsACatalogArtifact:
+    """`sample_weight_report` stopped being a fake output (ADR-0014 決定 2).
+
+    The node returns the dict and the catalog writes the file, which makes the
+    *filepath* the load-bearing part: the manifest reader in ``__main__`` looks
+    for one exact name in one exact directory, and the artifacts listing only
+    walks the version dir's first level.
+    """
+
+    @staticmethod
+    def _catalog():
+        import yaml
+
+        root = Path(__file__).resolve().parents[3]
+        return yaml.safe_load((root / "conf" / "base" / "catalog.yaml").read_text())
+
+    def test_node_still_declares_the_output(self):
+        # NOT outputs=None: that route would grow the A7/R3 zero-output
+        # registry instead of shrinking the direct-write one.
+        pipeline = create_pipeline()
+        by_name = {n.name: n for n in pipeline.nodes}
+        assert by_name["persist_sample_weight_report"].outputs == [
+            "sample_weight_report"
+        ]
+
+    def test_entry_is_a_json_dataset(self):
+        cfg = self._catalog()
+        assert "sample_weight_report" in cfg, (
+            "without this entry the report is a fake output again: declared by "
+            "the node, absent from the catalog, consumed by nobody"
+        )
+        assert cfg["sample_weight_report"]["type"] == "JSONDataset"
+
+    def test_lands_where_the_manifest_reader_looks(self, tmp_path):
+        """Exercise the real reader against the real catalog path.
+
+        Move the entry into ``diagnostics/`` (or rename the file) and the
+        manifest's ``extra_metadata.sample_weight`` silently disappears. This
+        turns that into a red test instead.
+        """
+        from recsys_tfb.__main__ import _dir_artifacts, _sample_weight_extra
+
+        rel = Path(self._catalog()["sample_weight_report"]["filepath"])
+        assert rel.parts[:3] == ("data", "models", "${model_version}"), rel
+
+        version_dir = tmp_path / "models" / "v1"
+        target = version_dir / Path(*rel.parts[3:])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"enabled": true, "unmatched_keys": []}')
+
+        assert _sample_weight_extra(version_dir) == {
+            "sample_weight": {"enabled": True, "unmatched_keys": []}
+        }
+        # `artifacts` lists first-level files only, so a nested filepath would
+        # drop it off the manifest listing as well.
+        assert "sample_weight_report.json" in _dir_artifacts(version_dir)
 
 
 @pytest.mark.spark
