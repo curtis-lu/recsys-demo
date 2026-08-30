@@ -303,16 +303,25 @@ class TestPerMonthTestCache:
         assert sorted(handles) == ["2026-01-31", "2026-02-28"]
         assert (Path(handles["2026-02-28"].path) / "_SUCCESS").exists()
 
-    def test_ambiguous_month_spellings_are_rejected(self, tmp_path, monkeypatch):
-        """Two spellings of one month would key one directory twice, and
-        handle_paths would hand pyarrow the same root twice — doubling rows."""
+    def test_a_repeated_month_collapses_to_one_entry(self, tmp_path, monkeypatch):
+        """The same month listed twice is one cache entry, not two.
+
+        Two *different* spellings of one month are no longer this node's
+        problem: they are rejected at CLI entry by consistency invariant A26
+        (see tests/test_core/test_consistency.py). What stays here is the
+        dedupe itself — a repeated literal must not key the directory twice,
+        because handle_paths would then hand pyarrow the same root twice and
+        double every row of that month.
+        """
         from recsys_tfb.pipelines.training.nodes import cache_test_model_input
 
         _stub_hdfs(monkeypatch)
-        params = _params_with_test_dates(tmp_path, ["2026-01-31", "20260131"])
+        params = _params_with_test_dates(
+            tmp_path, ["2026-01-31", "2026-01-31", "2026-02-28"]
+        )
 
-        with pytest.raises(ValueError, match="two spellings of the same month"):
-            cache_test_model_input(_spark_df(), params)
+        handles = cache_test_model_input(_spark_df(), params)
+        assert sorted(handles) == ["2026-01-31", "2026-02-28"]
 
     def test_partial_month_rebuilds_without_touching_siblings(self, tmp_path, monkeypatch):
         from recsys_tfb.pipelines.training.nodes import cache_test_model_input

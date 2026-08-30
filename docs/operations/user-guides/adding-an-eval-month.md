@@ -180,6 +180,7 @@ ls -d data/evaluation/<model_version>/*/
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
 | `test month '<月份>' ... has no rows in the test cache` | 這個月在設定裡但 dataset 還沒產出它。先跑步驟 2 |
 | 訊息帶 `(A24) ... name the same calendar day` | 這個月份已經在 train／val／calibration 其中一組裡了。從不該擁有它的那一組移除 |
+| 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
 | 重算之後數字跟上次逐位相同 | 只重算了其中一層。改用 `bash scripts/rebuild_eval_month.sh <月份>`，它一次做完兩層 |
