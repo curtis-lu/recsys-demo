@@ -102,7 +102,13 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 連帶後果：Kedro 為多行程而設的一整組約束（dataset 與 node 必須可 pickle、不得用 lambda／巢狀函式／closure、不能並用多行程的 dataset 要標記屬性）在本 repo **不適用**。
 
-**但這是「現在不適用」，不是「永遠不必管」。** 若未來要加平行執行，`tune_hyperparameters`（`pipelines/training/nodes.py:520`）內嵌的 Optuna 閉包會是第一個擋路的東西——它不可 pickle。
+**但這是「現在不適用」，不是「永遠不必管」。** 若未來要加平行執行，第一個擋路的**不是**「可不可 pickle」，而是**贏家模型只活在 driver 的記憶體裡**：`pipelines/training/steps/hpo_scoring.py` 的 `TrialScorer.best["model"]` 存的是訓練好的 booster 物件。多行程時每個 worker 刷新的是自己那一份，主行程結束時拿到的仍是 `None`，`finalize_model` 沒有模型可用。
+
+而 Optuna 的兩種平行化**都不需要**把 objective 送過行程邊界：`study.optimize(..., n_jobs=N)` 用執行緒、共用記憶體（但 `TrialScorer.best` 的「比大小再寫回」不是原子操作，那條路要自己加鎖）；多行程做法是各行程自己建 objective、共用一個 storage——本 repo 已經在用後者的基礎設施（`pipelines/training/hpo_resume.py` 的 `JournalStorage` ＋ `JournalFileBackend`）。
+
+**方向是「跑完從磁碟讀回贏家」**，不是「讓 callable 可 pickle」：`hpo_resume.write_checkpoint` 每次刷新最佳成績就已經把模型存到磁碟。⚠ **但現況的 checkpoint 不能直接多行程用**——模型（`model.txt`）與 meta（`best_meta.json`）是兩個獨立檔案、兩次獨立的 `os.replace`，中間沒有跨檔鎖、也沒有版本指標，多個 writer 同時刷新時讀者可能拿到 A worker 的模型配 B worker 的 score／params（`JournalStorage` 保護的是 study 的 trial 記錄，不保護這對檔案）。啟用平行前必須先解決其一：單一 writer、檔案鎖，或版本化的 checkpoint 目錄 ＋ 一個原子寫入的 manifest 指向當前贏家。
+
+**目前沒有任何票或需求要求平行 HPO**（`deliberate-non-goals.md`），這條記的是「真要做的時候該解哪個問題」，不是待辦。**這一段在 2026-08-30（#229）改寫過**：舊版寫的是「內嵌的 Optuna 閉包不可 pickle，是第一個擋路的東西」，兩層都錯——pickle 送過去的是程式碼不是模型，而且兩種平行化模式都不需要 pickle objective。
 
 ## F4. Node 極薄：沒有 namespace、沒有 tags
 
