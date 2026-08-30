@@ -162,7 +162,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 56 個。
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 53 個。
 
 **這個數字每次改 node 都會變，所以別引用它，重量一次**：
 
@@ -181,13 +181,17 @@ print(n, dict(b))"
 
 | 行數 | 個數 |
 |---|---|
-| ≤ 40 | 33 |
+| ≤ 40 | 29 |
 | 41–80 | 11 |
-| 81–120 | 5 |
+| 81–120 | 6 |
 | 121–160 | 4 |
 | > 160 | 3 |
 
 最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 171 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）。
+
+> **2026-08-30 第二次重量**（#230）。`_materialize_parquet_handle`（75 行）、`_resolve_cache_path`、`_populate_cache_from_hive` 三個 helper 從 `training/nodes.py` 消失——前者拆掉、後兩者搬進 `pipelines/training/steps/local_cache.py`，而那個掃描只看 `*nodes*.py`。所以總數 56 → 53。
+> 桶子的移動要一起看才對得起來：≤40 掉 4 個 ＝ 走掉兩個 helper ＋ 兩個 cache node 從 3–5 行長到 40 行以上；41–80 淨值不變 ＝ 走掉一個 helper、`cache_test_model_input` 升上去，再由那兩個 cache node 補回；81–120 多 1 個就是升上去的 `cache_test_model_input`。**最長的五個沒變。**
+> **這是規則 2 的又一個實例**：五個 cache node 從各 3–5 行的轉手函式，長成各自寫完四個決策的 30–85 行——行數增加的地方，正是決策從 helper 浮回 node body 的地方。
 
 > **2026-08-30 重量的原委，以及腐爛了什麼**（#229）。該次改動把 `_hpo_score` 與 HPO trial 的評分搬進 `pipelines/training/steps/hpo_scoring.py`，所以總數 57 → 56、≤40 少一個，`tune_hyperparameters` 228 → 185、`finalize_model` 156 → 155。**重量時發現另外三個數字早就腐爛了，跟這次改動無關**：41–80 原寫 12（當時實為 11）、`predict_and_write_scores` 原寫 253（實為 263）、第五名原寫 `prepare_eval_data` 143（實為 `validate_predictions` 146）。三者都是 2026-08-09 之後沒人回頭重量。**這正是上面那句「別引用它，重量一次」的實例**——引用了就會像這樣把三個過期的數字一起帶下去。
 
