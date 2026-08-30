@@ -2,7 +2,7 @@
 
 import optuna
 
-from recsys_tfb.pipelines.training import hpo_resume
+from recsys_tfb.pipelines.training.steps import hpo_resume
 
 
 def _obj(trial):

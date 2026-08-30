@@ -34,8 +34,8 @@ from recsys_tfb.evaluation.metrics import (
     compute_mean_ap,
 )
 from recsys_tfb.models.base import get_adapter
-from recsys_tfb.pipelines.training.hpo_resume import write_checkpoint
-from recsys_tfb.pipelines.training.search_space import build_trial_params
+from recsys_tfb.pipelines.training.steps.hpo_resume import write_checkpoint
+from recsys_tfb.pipelines.training.steps.search_space import build_trial_params
 
 logger = logging.getLogger(__name__)
 

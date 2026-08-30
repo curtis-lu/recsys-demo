@@ -22,7 +22,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 任務 | 先讀 |
 |---|---|
 | 架構 / 重構 / 探索 codebase | `graphify-out/GRAPH_REPORT.md`（**強制**，不得用 Explore agent 替代這一步；有 `graphify-out/wiki/index.md` 就導航 wiki 而非讀原始檔） |
-| 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋9 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
+| 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋10 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，13 條裡**只有 2 條有部分機械檢查**——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其〈已登記的例外〉，要加一筆先問使用者） |
 | 重整一整條 pipeline（不是改單一 node）：排順序、切 PR、選驗證手段、收尾清掃 | `docs/agents/pipeline-refactor-process.md`（**流程**判準，上一列那份是形狀判準。dataset／inference 兩輪 18 個 PR 歸納，每條附得出證據的 PR 或 commit） |
 | worktree / venv 任何操作 | `docs/operations/dev-setup/worktree-venv-setup.md` ＋ 下方 pre-flight |

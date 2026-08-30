@@ -14,10 +14,14 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-from recsys_tfb.pipelines.training.steps import experiment_log, refit, sample_weights
+from recsys_tfb.pipelines.training.steps import (
+    experiment_log,
+    hpo_resume,
+    refit,
+    sample_weights,
+)
 from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
 from recsys_tfb.pipelines.training.steps.local_cache import (
-    CACHE_SOURCE_TABLES,
     cache_exists,
     cache_is_complete,
     is_partial_cache,
@@ -108,40 +112,6 @@ def persist_sample_weight_report(
         diag["enabled"], len(diag["unmatched_keys"]),
     )
     return diag
-
-
-# ---------------------------------------------------------------------------
-# Cache helpers
-# ---------------------------------------------------------------------------
-
-def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
-    """Auto-derive cache source_tables from catalog_config and write into parameters.
-
-    Mutates `parameters` to add `_cache_source_tables` mapping (cache logical
-    name → actual Hive table name). Cache nodes read this in
-    steps.local_cache.populate_cache_from_hive.
-
-    For each known cache name in CACHE_SOURCE_TABLES, look up the catalog entry.
-    If present and `type: HiveTableDataset`, take its `table` field. Skips
-    entries that aren't HiveTableDataset and missing entries.
-
-    Operates on raw catalog_config dict (not DataCatalog instance) — the yaml
-    schema is the public contract; we don't access dataset instance internals.
-
-    No-op (does not write the key) when no cache entries match.
-
-    Called by __main__.py:_execute_pipeline before DataCatalog construction so the
-    cache nodes see the auto-derived mapping at runtime.
-    """
-    auto: dict[str, str] = {}
-    for cache_name in CACHE_SOURCE_TABLES:
-        entry = catalog_config.get(cache_name)
-        if entry and entry.get("type") == "HiveTableDataset":
-            table = entry.get("table")
-            if table:
-                auto[cache_name] = table
-    if auto:
-        parameters["_cache_source_tables"] = auto
 
 
 # ---------------------------------------------------------------------------
@@ -560,8 +530,6 @@ def tune_hyperparameters(
                 val_parquet_handle, preprocessor_metadata, parameters,
             )
             items_v = None
-
-    from recsys_tfb.pipelines.training import hpo_resume
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)
