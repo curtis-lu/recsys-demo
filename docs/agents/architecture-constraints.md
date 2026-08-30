@@ -393,7 +393,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 | 方法 | 用途 |
 |---|---|
 | `.save(pdf)` | 寫入單一 partition（training 逐月份，inference 逐 `(桶, item)`） |
-| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供續跑計畫判斷跳過哪些單位（training 經 `_written_prediction_partitions`，inference 經 `_written_score_partitions`）；方法定義在 `io/hive_table_dataset.py` |
+| `.existing_partition_values()` | 查詢哪些 partition 已寫過，供續跑計畫判斷跳過哪些單位（training 經 `steps/predict_months.py` 的 `written_prediction_partitions`，inference 經 `_written_score_partitions`）；方法定義在 `io/hive_table_dataset.py` |
 
 兩者都屬於「這個 node 自行管理這個 dataset 的分區寫入生命週期」，是同一個例外的範圍內。**把它當一般資料來源整批讀取不在此列**——那該用普通 input 讓 catalog 載入。
 

@@ -156,7 +156,7 @@ Parquet 壓縮比在各方案間是公因數，會在比較中約掉。
 提升的理由是另外兩個：
 
 1. **照抄 training 規劃器的形狀會漏掉那一步。** training 的
-   `_written_prediction_partitions`（`pipelines/training/nodes.py:1060-1066`）不濾 `model_version`
+   `written_prediction_partitions`（`pipelines/training/steps/predict_months.py`）不濾 `model_version`
    ——因為它的表本來就有 `partition_filter: model_version`（`training_eval_predictions` 的 catalog
    條目），scope 由 catalog 保證。inference 若維持現狀又照抄那個形狀，就會**把上個模型版本寫的
    分區算成本次已完成**，跳過一個從未被現行模型評分過的 chunk，而 `completeness` 因為讀到舊分數

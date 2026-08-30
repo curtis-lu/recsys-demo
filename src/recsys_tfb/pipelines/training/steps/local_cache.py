@@ -18,11 +18,13 @@ decision 1 records this as a consequence of the audit's reach rather than a rule
 about deletes: widening the glob is issue #163, and once it lands the placement
 should be revisited.
 
-``_test_month_dir`` stays in ``nodes.py`` for the mirror-image reason. Issue #231
-moves it into ``steps/predict_months.py``, which is to be a zero-pyspark pure
-module forbidden to import anything else in the project; pulling it in here first
-would make that module impossible. So a month's directory name arrives as the
-``month_dir`` argument rather than being derived here.
+``month_dir`` is **imported** from ``steps/predict_months.py``, never copied
+here, and the direction is forced rather than preferred: that module may not
+import anything from this project, so owning the rule there and importing it here
+is the only arrangement in which one implementation serves both (issue #231). It
+has to be one implementation — a drift between "what this month's cache directory
+is called" and "which month counts as already predicted" caches a month under one
+name while the predict side looks for it under another, and neither side errors.
 
 ``populate_cache_from_hive`` writes, but only through ``utils.hdfs`` — the audit
 scans for direct calls, so it cannot see this one either way. It is registered in
@@ -35,11 +37,12 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from recsys_tfb.pipelines.training.steps.predict_months import month_dir
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
 
 logger = logging.getLogger(__name__)
 
-# Sentinel layout token resolved from the ``month_dir`` argument of
+# Sentinel layout token resolved from the ``month`` argument of
 # resolve_cache_path — not a `parameters` key and not a directory name. The
 # "!" prefix keeps it from being misread as the sibling literal directory
 # component "test_months".
@@ -107,7 +110,7 @@ def require_spark_input(df, dataset_name: str) -> None:
 
 
 def resolve_cache_path(
-    dataset_name: str, parameters: dict, month_dir: Optional[str] = None
+    dataset_name: str, parameters: dict, month: Optional[str] = None
 ) -> str:
     """Compose the local-cache parquet directory path for a model_input dataset.
 
@@ -115,14 +118,15 @@ def resolve_cache_path(
       <root>/<base_dataset_version>/[train_variants/<train_variant_id>/]<name>.parquet
 
     ``test_model_input`` additionally nests under ``test_months/<YYYYMMDD>/`` and
-    therefore requires ``month_dir``. The month is written literally (the
+    therefore requires ``month``. The month is written literally (the
     ``YYYYMMDD`` convention evaluation report paths already use) rather than
     hashed: a directory naming exactly one month is readable off ``ls`` and
     cannot disagree with its own contents.
 
-    ``month_dir`` arrives already in directory form rather than being normalised
-    here, because the normaliser (``nodes._test_month_dir``) is on its way to a
-    pure module this one may not import — see this module's docstring.
+    ``month`` arrives as the configured literal and is normalised here through
+    ``month_dir``, so a caller cannot hand this function a spelling the
+    predict side would not recognise as the same month. Passing an already
+    normalised value stays correct — the rule is idempotent.
 
     The path is composed, never resolved: ``cache.root`` is relative in
     ``conf/base/parameters_training.yaml``, so every path out of here is
@@ -138,12 +142,12 @@ def resolve_cache_path(
         if token in _CACHE_LITERAL_TOKENS:
             parts.append(Path(token))
         elif token == _TEST_MONTH_TOKEN:
-            if month_dir is None:
+            if month is None:
                 raise ValueError(
-                    f"{dataset_name} cache path requires month_dir "
+                    f"{dataset_name} cache path requires month "
                     "(it is cached one directory per test month)"
                 )
-            parts.append(Path(month_dir))
+            parts.append(Path(month_dir(month)))
         else:
             value = parameters[token]
             parts.append(Path(value))
