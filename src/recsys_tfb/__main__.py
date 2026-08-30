@@ -15,6 +15,7 @@ from recsys_tfb.core.consistency import (
     compare_source_key_exists,
     date_split_overlap_errors,
     duplicate_test_month_errors,
+    entity_columns_declared_errors,
     post_training_snap_date_errors,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
@@ -1132,6 +1133,45 @@ def training(
         )
     except ValueError as exc:
         logger.error(str(exc))
+        raise typer.Exit(code=1)
+
+    # (A28) training_eval_predictions must declare every schema.entity column.
+    # Asked of the dataset object, not of its config entry, for the reason
+    # _collect_existing_snap_dates gives: which columns an artifact keeps is
+    # the catalog's knowledge, not the CLI's.
+    #
+    # Before the cold start below, and long before the node that writes those
+    # columns — that node runs after HPO, train_model and calibrate_model, so
+    # the same check inside it would report a one-word catalog typo only after
+    # the whole search had been paid for. This compares two lists of names and
+    # touches no data.
+    #
+    # runtime_params is deliberately empty: substitution fills partition
+    # *values* (${model_version}), while this reads only column *names* —
+    # declared columns, partition_filter keys, partition_cols names — none of
+    # which a substitution touches. Waiting for the versions would buy nothing
+    # and cost exactly the cold start this is placed above to avoid.
+    #
+    # An absent entry (get_dataset -> None) is deliberately not this gate's
+    # business: "declared the wrong columns" and "not in the catalog at all"
+    # need different fixes, and the runner already refuses to build a pipeline
+    # whose outputs it cannot resolve. Reporting it here would only move that
+    # message somewhere it explains less.
+    _, gate_catalog_config = _resolve_catalog(config, params, {})
+    declaration_errors = entity_columns_declared_errors(
+        params,
+        getattr(
+            DataCatalog(gate_catalog_config).get_dataset(
+                "training_eval_predictions"
+            ),
+            "declared_columns",
+            None,
+        ),
+        "training_eval_predictions",
+    )
+    if declaration_errors:
+        for line in declaration_errors:
+            logger.error(line)
         raise typer.Exit(code=1)
 
     get_or_create_spark_session(_load_spark_config(config, "training"))

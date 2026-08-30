@@ -512,3 +512,85 @@ def test_a_configured_month_missing_from_the_cache_fails_loud(tmp_path):
     # the duplicate-spelling error raised a few lines away in the cache node.
     with pytest.raises(ValueError, match="no rows in the test cache"):
         _predict(handles, params, _write_ds())
+
+
+# ---------------------------------------------------------------------------
+# Two-column entity — the framework promises `schema.entity` is a list, and
+# this is what makes that promise cost something if it stops being true.
+#
+# That the write target actually declares those columns is A28's job, checked
+# at CLI entry (`tests/test_cli.py::TestEntityColumnsDeclaredA28`), not this
+# node's: a Hive save keeps only declared columns, and finding that out here
+# would mean finding it out after the whole HPO search had run.
+#
+# Note the nesting: `get_schema` reads `parameters["schema"]["columns"]`, so a
+# schema block written one level up (as `_make_parameters` does) is inert and
+# silently falls back to the single-entity defaults. Both tests below would
+# pass for the wrong reason if written that way.
+# ---------------------------------------------------------------------------
+
+
+def _two_entity_params(declared_entity=("cust_id", "acct_id")) -> dict:
+    params = _make_parameters()
+    params["schema"] = {
+        "columns": {
+            "time": "snap_date",
+            "entity": list(declared_entity),
+            "item": "prod_name",
+            "label": "label",
+        }
+    }
+    params["dataset"]["test_snap_dates"] = ["2025-01-31"]
+    return params
+
+
+def _two_entity_handle(tmp_path):
+    """One month of cache carrying two entity columns."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.io.handles import ParquetHandle
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c1", "c2", "c2"],
+            "acct_id": ["a1", "a1", "a2", "a2"],
+            "snap_date": ["2025-01-31"] * 4,
+            "prod_name": ["prod_A", "prod_B", "prod_A", "prod_B"],
+            "feat_a": [1.0, 1.1, 2.0, 2.1],
+            "label": [1, 0, 0, 1],
+        }
+    )
+    root = tmp_path / "two_entity" / "test_model_input.parquet"
+    pq.write_to_dataset(
+        pa.Table.from_pandas(df, preserve_index=False),
+        root_path=str(root),
+        partition_cols=["snap_date", "prod_name"],
+    )
+    return ParquetHandle(str(root))
+
+
+def test_both_entity_columns_are_written_when_the_catalog_declares_both(tmp_path):
+    """`schema.entity` with two columns writes two entity columns.
+
+    The failure this guards against is not an exception — it is a frame that
+    looks fine and identifies the wrong thing, because only the first entity
+    column survived.
+    """
+    write_ds = _write_ds()
+
+    manifest = _predict(
+        _two_entity_handle(tmp_path), _two_entity_params(), write_ds
+    )
+
+    written = pd.concat(write_ds.saved, ignore_index=True)
+    assert set(written.columns) == {
+        "cust_id", "acct_id", "score", "score_uncalibrated", "label",
+        "snap_date", "prod_name",
+    }
+    # Values, not just presence: a column of the right name filled from the
+    # wrong source would pass a presence-only assertion.
+    assert set(zip(written["cust_id"], written["acct_id"])) == {
+        ("c1", "a1"), ("c2", "a2"),
+    }
+    assert manifest["n_rows_written"] == 4

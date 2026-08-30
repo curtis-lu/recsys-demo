@@ -1817,3 +1817,75 @@ class TestTestSnapDatesSpellingA26:
         # of that month counted twice) only exists in the training pipeline.
         from recsys_tfb.core.consistency import validate_config_consistency
         validate_config_consistency(_test_months("2026-01-31", "20260131"))
+
+
+# =============================================================================
+# A28 — the prediction write target must declare every schema.entity column
+#       (wired on the training command)
+# =============================================================================
+
+from recsys_tfb.core.consistency import entity_columns_declared_errors
+
+
+def _entity_params(*entity) -> dict:
+    return {"schema": {"columns": {"entity": list(entity)}}}
+
+
+class TestEntityColumnsDeclaredA28:
+    def test_a_declaration_covering_every_entity_column_passes(self):
+        assert entity_columns_declared_errors(
+            _entity_params("cust_id", "acct_id"),
+            ["cust_id", "acct_id", "score", "model_version", "snap_date"],
+            "training_eval_predictions",
+        ) == []
+
+    def test_a_missing_entity_column_is_reported(self):
+        errs = entity_columns_declared_errors(
+            _entity_params("cust_id", "acct_id"),
+            ["cust_id", "score", "model_version", "snap_date"],
+            "training_eval_predictions",
+        )
+        assert len(errs) == 1
+        assert "A28" in errs[0]
+        # The column and the entry, because those are the two things the
+        # operator needs to open their yaml at the right line.
+        assert "acct_id" in errs[0]
+        assert "training_eval_predictions" in errs[0]
+
+    def test_every_missing_column_is_named_in_one_error(self):
+        # One error, not one per column: they are all fixed in the same edit.
+        errs = entity_columns_declared_errors(
+            _entity_params("cust_id", "acct_id", "sub_id"),
+            ["cust_id", "score"],
+            "training_eval_predictions",
+        )
+        assert len(errs) == 1
+        assert "acct_id" in errs[0] and "sub_id" in errs[0]
+
+    def test_none_means_the_entry_infers_its_schema_and_drops_nothing(self):
+        # `columns: "auto"` declares nothing, so there is no declaration to
+        # fall short of. Treating None as "declares no columns" would reject
+        # every auto entry — the opposite of the truth.
+        assert entity_columns_declared_errors(
+            _entity_params("cust_id", "acct_id"), None, "some_auto_table",
+        ) == []
+
+    def test_the_default_single_entity_schema_passes_the_real_declaration(self):
+        # The discriminating case: without it every test above is also passed
+        # by a predicate that rejects everything. This is the shape
+        # conf/base/catalog.yaml actually ships.
+        assert entity_columns_declared_errors(
+            {},
+            ["cust_id", "score", "score_uncalibrated", "label",
+             "model_version", "snap_date", "prod_name"],
+            "training_eval_predictions",
+        ) == []
+
+    def test_an_extra_declared_column_is_not_an_error(self):
+        # Coverage, not equality: a table may carry columns that are not
+        # entity columns — every real one does.
+        assert entity_columns_declared_errors(
+            _entity_params("cust_id"),
+            ["cust_id", "score", "label", "snap_date"],
+            "training_eval_predictions",
+        ) == []

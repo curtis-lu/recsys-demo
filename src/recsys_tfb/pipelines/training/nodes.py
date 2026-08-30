@@ -1014,8 +1014,8 @@ def predict_and_write_test_predictions(
     For each (snap_date, prod_name) partition of the months being processed:
         - load only that partition's rows via pyarrow filter
         - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
-        - build a pandas DataFrame with (cust_id, score, score_uncalibrated,
-          label) + partition cols snap_date, prod_name
+        - build a pandas DataFrame with (every schema.entity column, score,
+          score_uncalibrated, label) + partition cols snap_date, prod_name
         - training_eval_predictions.save(df) — exactly one partition's
           rows per save, so dynamic-partition overwrite cleanly overwrites
           a single partition and successive saves don't collide
@@ -1037,12 +1037,6 @@ def predict_and_write_test_predictions(
     entity_cols = schema_cfg["entity"]
     item_col = schema_cfg["item"]
     label_col = schema_cfg["label"]
-    if len(entity_cols) != 1:
-        raise ValueError(
-            f"predict_and_write_test_predictions expects single entity column; "
-            f"got {entity_cols}."
-        )
-    cust_id_col = entity_cols[0]
     model_version = parameters["model_version"]
 
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
@@ -1135,7 +1129,12 @@ def predict_and_write_test_predictions(
             )
 
             out_pdf = pd.DataFrame({
-                cust_id_col: part_pdf[cust_id_col].astype(str).values,
+                # Every entity column, not just the first: the identity of a
+                # scored row is the whole tuple. `str` for all of them matches
+                # what the ranking side compares on. That the write target
+                # declares all of them is A28, checked at CLI entry — a column
+                # it never declared is dropped by `save` in silence.
+                **{c: part_pdf[c].astype(str).values for c in entity_cols},
                 "score": y_score,
                 "score_uncalibrated": score_uncalibrated,
                 label_col: part_pdf[label_col].values,

@@ -189,11 +189,29 @@ Layer 1 — config-static (implemented here; aggregated by
   (``pipelines/dataset/month_plans.plan_incremental_snap_dates``), so two
   spellings collapse there harmlessly. Replaces the node-body check in
   ``cache_test_model_input`` (ADR-0014).
+* A27 — not allocated here. Reserved for issue #200 (inference's config-only
+  raise); see issue #222's ticket split. ADR-0014 also *considered* A27 for
+  "``schema.entity`` is exactly one column" and withdrew it — writing "not
+  finished" down as "not supported". Neither meaning is in force.
+* A28 — the prediction write target must declare every ``schema.entity``
+  column. ``HiveTableDataset.save`` ends with ``df.select(*declared)``, so an
+  entity column the catalog entry never declared is dropped there in silence:
+  the table stays valid and the published rows identify the wrong thing, while
+  every consumer downstream groups on the full entity tuple. Predicate:
+  ``entity_columns_declared_errors`` (returns errors; the training command
+  raises). **This module still never reads the catalog** — the command asks
+  the dataset object for its ``declared_columns`` and passes the answer in, so
+  the predicate stays pure. NOT aggregated by ``validate_config_consistency``,
+  for A24's reason: that gate takes parameters alone and runs at the entry of
+  every command, while this needs the resolved catalog and the harm is
+  training-only. Replaces the node-body guard ADR-0014 first placed in
+  ``predict_and_write_test_predictions``; wiring it at the command is what
+  makes a catalog typo cost a startup rather than a whole HPO search.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
-to one pipeline).
+to one pipeline), A28 (the resolved catalog).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
@@ -1747,3 +1765,57 @@ def duplicate_test_month_errors(parameters: dict) -> list[str]:
             f"(YYYY-MM-DD) and drop the others."
         )
     return errors
+
+
+def entity_columns_declared_errors(
+    parameters: dict,
+    declared_columns: list[str] | None,
+    target_name: str,
+) -> list[str]:
+    """(A28) the prediction write target must declare every ``schema.entity`` column.
+
+    Returns error strings (empty list when fine); the training command raises.
+
+    ``schema.entity`` is a list by design and the predict node writes all of
+    it, but ``HiveTableDataset.save`` ends with ``df.select(*declared)`` — an
+    entity column its catalog entry never declared is dropped there with no
+    error, no warning and no log line. The table stays perfectly valid; the
+    published rows just identify the wrong thing. Every downstream consumer
+    groups on the full entity tuple (``evaluation/metrics_spark`` uses
+    ``[time] + entity``), so the whole run's metrics silently answer a
+    different question.
+
+    **This module never reads the catalog** — the caller does, and passes what
+    it read. ``declared_columns`` is the answer from the dataset object's
+    :attr:`~recsys_tfb.io.hive_table_dataset.HiveTableDataset.declared_columns`
+    (the CLI already asks dataset objects about themselves this way for
+    ``existing_partition_values``). Keeping the predicate pure is what lets it
+    live here at all: the aggregator cannot see a catalog, but a command can,
+    exactly as A12/A13/A21/A22/A24/A26 see things the aggregator cannot.
+
+    ``None`` means the entry infers its schema from the DataFrame
+    (``columns: "auto"``), which drops nothing — there is no declaration to
+    fall short of, so there is nothing to report.
+
+    NOT aggregated by :func:`validate_config_consistency`: that gate takes
+    parameters alone and runs at the entry of every command, while this needs
+    the resolved catalog and the harm is training-only. Wired like A24/A26.
+
+    Deliberately has NO runtime backstop in the node (as A24): once the command
+    has compared the two declarations there is nothing data-dependent left to
+    re-check, and a node-body copy is exactly what ADR-0014 set out to remove.
+    """
+    if declared_columns is None:
+        return []
+
+    entity_cols = get_schema(parameters)["entity"]
+    missing = [c for c in entity_cols if c not in declared_columns]
+    if not missing:
+        return []
+    return [
+        f"(A28) catalog entry {target_name!r} does not declare entity "
+        f"column(s) {missing}; schema.entity is {entity_cols}. A Hive save "
+        f"keeps only declared columns, so those columns would be dropped from "
+        f"every written row without an error. Add them to that entry's "
+        f"`columns:`."
+    ]

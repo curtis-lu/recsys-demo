@@ -349,6 +349,33 @@ class HiveTableDataset(AbstractDataset):
             )
         return out
 
+    @property
+    def declared_columns(self) -> list[str] | None:
+        """Column names a ``save()`` will keep, or ``None`` when it keeps all.
+
+        ``save()`` ends with ``df.select(*self._insert_column_order())``, so a
+        column this table never declared is dropped there without an error, a
+        warning or a log line. That makes "does this table declare column X?"
+        a question a caller has to be able to ask *before* writing — and ask
+        of the dataset object, not of ``self._columns``, which is private
+        precisely so that callers do not reach into it.
+
+        ``None`` means ``columns: "auto"``: the schema is inferred from the
+        DataFrame, so nothing is dropped and there is no declaration to fall
+        short of. Returning ``[]`` instead would read as "declares nothing"
+        and fail every coverage check — the exact opposite of the truth.
+
+        Order matches the insert order (data columns, then ``partition_filter``
+        keys, then ``partition_cols``); callers that only test membership can
+        ignore it.
+
+        Metadata-only, and not even that: this answers from the catalog entry
+        alone, so it needs no SparkSession and works before the table exists.
+        """
+        if self._infer_columns:
+            return None
+        return self._insert_column_order()
+
     # ---------- helpers ----------
 
     @property
