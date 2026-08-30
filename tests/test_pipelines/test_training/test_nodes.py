@@ -1100,30 +1100,17 @@ def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
     assert diag["enabled"] is True and diag["unmatched_keys"] == []
 
 
-def test_persist_sample_weight_report_returns_a_report_when_disabled(tmp_path):
-    # Empty sample_weights -> still a report, enabled=False (so the manifest
-    # always records what sample_weight did this run).
-    import pandas as pd
-    from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
+    tmp_path, monkeypatch,
+):
+    """Empty sample_weights -> still a report, enabled=False (so the manifest
+    always records what sample_weight did this run) -- and no file either way.
 
-    p = tmp_path / "train.parquet"
-    pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
-    params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-              "item": "prod_name", "label": "label"}}, "training": {}}
-
-    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
-    assert diag["enabled"] is False and diag["unmatched_keys"] == []
-
-
-def test_persist_sample_weight_report_writes_no_file(tmp_path, monkeypatch):
-    """The catalog owns the write now (conf/base/catalog.yaml).
-
-    The monkeypatch below is a TRAP, not a fixture: it is the only path the
-    node ever had to the model version dir, so if someone re-adds a direct
-    write it lands inside tmp_path and this assertion catches it. Leaving the
-    node's write in place would also put it back in the R4 direct-write
-    registry (tests/test_core/test_architecture_constraints.py).
+    The monkeypatch is a TRAP, not a fixture: it was the node's only path to
+    the model version dir, so a re-added direct write lands inside tmp_path and
+    the second assertion catches it. Such a write would also put the function
+    back in the R4 direct-write registry
+    (tests/test_core/test_architecture_constraints.py).
     """
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
@@ -1139,11 +1126,12 @@ def test_persist_sample_weight_report_writes_no_file(tmp_path, monkeypatch):
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
               "item": "prod_name", "label": "label"}}, "training": {}}
 
-    persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
+    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
 
+    assert diag["enabled"] is False and diag["unmatched_keys"] == []
     assert not version_dir.exists(), (
-        f"node wrote into the model version dir: "
-        f"{sorted(q.name for q in version_dir.rglob('*'))}"
+        f"the catalog owns this write now, but the node wrote into the model "
+        f"version dir: {sorted(q.name for q in version_dir.rglob('*'))}"
     )
 
 

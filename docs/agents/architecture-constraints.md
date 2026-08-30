@@ -204,7 +204,7 @@ print(n, dict(b))"
 
 ## F10. 中介產物命名
 
-`conf/base/catalog.yaml` 目前 43 個條目，命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
+`conf/base/catalog.yaml` 目前 45 個條目（2026-08-30 量：`yaml.safe_load` 後的 top-level key 數），命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
 
 新增 catalog 條目時對齊既有命名感覺即可——**這是事實不是約束**，因為禁用字清單只抓得到最粗糙的一類命名問題，真正的「有業務語意」是判斷題，機械檢查給不了。
 
@@ -411,14 +411,16 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 | 函式 | 寫什麼 | 檢查看得到嗎 |
 |---|---|---|
-| `log_experiment`（`pipelines/training/nodes.py:1252`） | MLflow params／metrics／artifacts（`mlflow.log_artifacts`，`nodes.py:1335`） | ✅ 直接呼叫，掃得到 |
-| `tune_hyperparameters`（`pipelines/training/nodes.py:516`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（呼叫在 `nodes.py:735`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
+| `log_experiment`（`pipelines/training/nodes.py`） | MLflow params／metrics／artifacts（搜 `mlflow.log_artifacts`） | ✅ 直接呼叫，掃得到 |
+| `tune_hyperparameters`（`pipelines/training/nodes.py`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（搜 `write_hpo_diagnostics`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
 
-**離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2、使用者已簽核）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
+**位置只給檔案與要搜的字串、不給行號**，理由同 R3：本表原本寫 `nodes.py:1256`／`:1339`／`:520`／`:739`，光是 #226 從同檔刪掉 4 行就讓四個數字同時失準；而 (d) 只比對函式名的 Counter、抓不到行號腐爛。
+
+**離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2；G1 簽核記錄在 issue #222 的切票留言與 #226 票面）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
 
 > ⚠ **這張表的 2 筆，跟測試釘的 2 筆不是同一組。**
 > 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment`、`_materialize_parquet_handle`。
-> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；`_materialize_parquet_handle` 在測試裡、不在表上（它是內部 helper，不是 `Node(...)` 註冊的函式，`pipelines/training/nodes.py:271`，`shutil.rmtree` 於 `:314`／`:333`，管理本機 parquet cache）。
+> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；`_materialize_parquet_handle` 在測試裡、不在表上（它是內部 helper，不是 `Node(...)` 註冊的函式，住在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見兩處呼叫，管理本機 parquet cache）。
 
 ---
 
