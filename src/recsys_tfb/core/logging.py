@@ -81,8 +81,11 @@ JSON_EXTRA_FIELDS = (
     "insert_seconds", "partition_count", "new_partitions",
     # source_etl audit / quality checks
     "snap_date", "table_name", "passed",
-    # log_step(**fields): per-iteration values that keep the step name fixed
-    "prod_name",
+    # log_step(**fields): per-iteration values that keep the step name fixed.
+    # Named after the schema *role*, not the column: `schema.item` defaults to
+    # "prod_name" but any deployment may configure another column, and a key
+    # frozen to this repo's demo instantiation would then be a lie.
+    "item_name",
     # SparkSession lifecycle
     "application_id", "app_name", "last_application_id",
     "seconds_since_last_use",
@@ -223,7 +226,7 @@ def log_step(step_logger: logging.Logger, step_name: str, **fields):
             result = df.merge(other, on=key)
 
         with log_step(logger, "predict_partition",
-                      snap_date=snap_date, prod_name=prod_name):
+                      snap_date=snap_date, item_name=item):
             part_pdf = ds.to_table(filter=...).to_pandas()
     """
     ctx = _current_context

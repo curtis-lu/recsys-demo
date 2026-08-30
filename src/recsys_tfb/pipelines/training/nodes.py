@@ -1107,10 +1107,12 @@ def predict_and_write_test_predictions(
 
         # A step name built from the data gives the log aggregator one name
         # per (month, item) pair; the values travel as structured fields
-        # instead, and the console message still carries them.
+        # instead, and the console message still carries them. The field is
+        # keyed on the schema role (`item_name`), not on the local variable,
+        # which still carries this repo's default column name.
         with log_step(
             logger, "predict_partition",
-            snap_date=snap_date, prod_name=prod_name,
+            snap_date=snap_date, item_name=prod_name,
         ):
             part_table = ds.to_table(
                 filter=(pads.field(time_col) == snap_date)

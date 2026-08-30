@@ -172,15 +172,23 @@ class TestLogStep:
     """
 
     @staticmethod
-    def _run(*, raises: bool = False, **fields) -> list[dict]:
-        """Return the JSON lines one ``log_step`` block writes."""
+    def _logger_writing_to(formatter, name):
+        """A logger whose only handler formats into a returned buffer."""
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
-        handler.setFormatter(JsonFormatter())
-        step_logger = logging.getLogger("test_log_step")
+        handler.setFormatter(formatter)
+        step_logger = logging.getLogger(name)
         step_logger.handlers = [handler]
         step_logger.setLevel(logging.INFO)
         step_logger.propagate = False
+        return step_logger, stream
+
+    @classmethod
+    def _run(cls, *, raises: bool = False, **fields) -> list[dict]:
+        """Return the JSON lines one ``log_step`` block writes."""
+        step_logger, stream = cls._logger_writing_to(
+            JsonFormatter(), "test_log_step"
+        )
         try:
             with log_step(step_logger, "predict_partition", **fields):
                 if raises:
@@ -190,28 +198,28 @@ class TestLogStep:
         return [json.loads(line) for line in stream.getvalue().splitlines()]
 
     def test_fields_reach_the_json_line(self):
-        lines = self._run(snap_date="2024-01-31", prod_name="CARD")
+        lines = self._run(snap_date="2024-01-31", item_name="CARD")
         assert [line["event"] for line in lines] == [
             "step_started", "step_completed",
         ]
         for line in lines:
             assert line["step"] == "predict_partition"
             assert line["snap_date"] == "2024-01-31"
-            assert line["prod_name"] == "CARD"
+            assert line["item_name"] == "CARD"
 
     def test_fields_survive_the_failure_path(self):
-        lines = self._run(raises=True, snap_date="2024-01-31", prod_name="CARD")
+        lines = self._run(raises=True, snap_date="2024-01-31", item_name="CARD")
         assert lines[-1]["event"] == "step_failed"
         assert lines[-1]["snap_date"] == "2024-01-31"
-        assert lines[-1]["prod_name"] == "CARD"
+        assert lines[-1]["item_name"] == "CARD"
 
     def test_field_outside_the_whitelist_is_dropped(self):
         # Dropped as a *field*: it stays inside the human ``message`` string,
         # which is the honest half of the whitelist's one-sided failure — a
         # reader still sees the value, an aggregator cannot query it.
-        lines = self._run(prod_name="CARD", not_whitelisted="please-drop-me")
+        lines = self._run(item_name="CARD", not_whitelisted="please-drop-me")
         for line in lines:
-            assert line["prod_name"] == "CARD"
+            assert line["item_name"] == "CARD"
             assert "not_whitelisted" not in line
 
     def test_fields_cannot_shadow_the_frameworks_own_keys(self):
@@ -235,22 +243,17 @@ class TestLogStep:
         assert lines[0]["message"] == "Step started: predict_partition"
 
     def test_console_still_shows_the_values(self):
-        stream = io.StringIO()
-        handler = logging.StreamHandler(stream)
-        handler.setFormatter(ConsoleFormatter())
-        step_logger = logging.getLogger("test_log_step_console")
-        step_logger.handlers = [handler]
-        step_logger.setLevel(logging.INFO)
-        step_logger.propagate = False
-
+        step_logger, stream = self._logger_writing_to(
+            ConsoleFormatter(), "test_log_step_console"
+        )
         with log_step(step_logger, "predict_partition",
-                      snap_date="2024-01-31", prod_name="CARD"):
+                      snap_date="2024-01-31", item_name="CARD"):
             pass
 
         out = stream.getvalue()
         assert "predict_partition" in out
         assert "snap_date=2024-01-31" in out
-        assert "prod_name=CARD" in out
+        assert "item_name=CARD" in out
 
 
 class TestLogDataVolume:
@@ -469,7 +472,9 @@ class TestJsonExtraFieldWhitelist:
                 # so the scan has to know about it by name.
                 if _called_name(node) == "log_step":
                     for kw in node.keywords:
-                        if kw.arg is None:
+                        # log_step's own two parameters are not fields; a
+                        # caller is free to pass them by keyword.
+                        if kw.arg in (None, "step_logger", "step_name"):
                             continue
                         step_scanned += 1
                         if kw.arg not in JSON_EXTRA_FIELDS:
