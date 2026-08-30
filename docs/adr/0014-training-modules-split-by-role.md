@@ -580,7 +580,7 @@ cust_id_col = entity_cols[0]
 
 **但那個 warning 出現在一個跑了好幾小時的 log 尾端，實務上沒人會看到。** 硬失敗反而顯眼——而且 `model` 有 catalog 條目，`--from-node select_shap_population` 就救得回來，HPO 與 refit 都不用重跑。
 
-**為什麼這次不動**：改掉一個明文的行為契約不該是形狀重構的副作用。值得單獨開一題。（⚠ 接續不是免費的：`predict_manifest` 是 memory-only，切片擴張會把 `predict_and_write_test_predictions` 拉回來，它就算全月份 skip 也要把 2.2 億列 × 2 個字串欄拉進 driver 算 distinct。）
+**為什麼這次不動**：改掉一個明文的行為契約不該是形狀重構的副作用。值得單獨開一題。（⚠ 當時的但書：`predict_manifest` 是 memory-only，切片擴張會把 `predict_and_write_test_predictions` 拉回來，它就算全月份 skip 也要把 2.2 億列 × 2 個字串欄拉進 driver 算 distinct。**2026-08-30 更新：這個但書已經不成立**——issue #233 把 `predict_manifest` 落地了，`--from-node select_shap_population` 現在不會再拉回 predict node。）
 
 ## 8. `cache.root` 的相對路徑
 

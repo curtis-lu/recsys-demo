@@ -871,8 +871,12 @@ def predict_and_write_test_predictions(
     at least one positive label.
 
     Returns:
-        manifest dict for downstream compute_test_mAP_spark to depend on
-        (DAG ordering — the actual data is read back from Hive there).
+        The manifest. It has a catalog entry (issue #233), so it lands at
+        ``data/models/<model_version>/predict_manifest.json`` and the three
+        month lists stay answerable once the run is over. Downstream it is a
+        DAG-ordering dependency only — the predictions themselves are read
+        back from Hive — and landing it is also what lets a diagnosis-only
+        resume skip this node rather than pay its partition listing again.
     """
     import pyarrow.dataset as pads
 
@@ -1181,6 +1185,11 @@ def compute_test_mAP_spark(
     predict_manifest is an in-DAG dependency only — its content is logged
     for observability but the actual data is read back from
     training_eval_predictions (Spark-loaded via the catalog).
+
+    That it is only logged, never computed from, is load-bearing: the manifest
+    has a catalog entry, so a ``--from-node`` resume starting here loads the
+    *previous* run's copy rather than re-running predict. The trade is argued
+    once, at that entry in ``conf/base/catalog.yaml``.
     """
     from pyspark.sql import functions as F
 

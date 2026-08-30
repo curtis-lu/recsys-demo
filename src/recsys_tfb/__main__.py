@@ -343,16 +343,30 @@ _INFERENCE_REBUILD_PREDICT_NODE = "predict_and_write_scores"
 
 
 def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
-    """WARN lines when ``--rebuild-dates`` was passed but no node it drives is
-    in this run, else ``[]``.
+    """WARN lines when ``--rebuild-dates`` was passed but this run does not
+    include ``predict_node`` — the one node that turns the flag into new
+    predictions — else ``[]``.
 
     Combining ``--rebuild-dates`` with slicing is the *normal* path here — the
     documented way to re-predict without retraining is
     ``--only-node predict_and_write_test_predictions`` — so the combination
     itself is not worth a warning (unlike the dataset side, where slicing leaves
-    part of the test chain stale). What is worth one is a slice that drops the
-    nodes it drives: then the flag is accepted, the run succeeds, and nothing it
-    asked for happens.
+    part of the test chain stale). What is worth one is a slice that drops
+    ``predict_node``: then the flag is accepted, the run succeeds, and no month
+    is re-predicted.
+
+    **The condition is ``predict_node``, not "any of ``targets``".** The flag
+    drives two nodes on the training side, but only one of them produces what
+    the operator asked for: dropping the stale local cache is a means,
+    re-predicting is the end. An earlier spelling asked "is any target here",
+    which for a *forward* slice was the same question — ``predict_manifest``
+    was memory-only, so every forward slice that kept the cache node kept the
+    predict node too. Landing ``predict_manifest`` (issue #233) ends that:
+    ``--from-node compute_feature_statistics --rebuild-dates ...`` now keeps
+    the cache node and drops predict, so the named months drop and rebuild
+    their local cache and are never re-predicted. (The narrower version of the
+    same hole predates it: ``--only-node cache_test_model_input`` was always
+    exactly that run.)
 
     Which nodes those are is per-pipeline, and the caller must say: naming the
     wrong pipeline's nodes in this message would send the operator to a node
@@ -374,12 +388,26 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     if not targets:
         return []
     predict_node = rebuild_advice["predict_node"]
-    if any(node.name in targets for node in pipe.nodes):
+    node_names = {node.name for node in pipe.nodes}
+    if predict_node in node_names:
         return []
+    months = _fmt_months(rebuild_advice["rebuild"])
+    # Which of the other driven nodes DID survive, so the message describes the
+    # run the operator is about to get rather than a generic "nothing happened".
+    kept = [name for name in targets if name != predict_node and name in node_names]
+    if kept:
+        head = (
+            f"[rebuild] WARNING: --rebuild-dates {months} is only half applied — "
+            f"this slice runs {', '.join(kept)} but not {predict_node}, so those "
+            f"months rebuild their local cache and are never re-predicted."
+        )
+    else:
+        head = (
+            f"[rebuild] WARNING: --rebuild-dates {months} had no effect — this "
+            f"slice includes none of the nodes it drives ({', '.join(targets)})."
+        )
     return [
-        f"[rebuild] WARNING: --rebuild-dates {_fmt_months(rebuild_advice['rebuild'])} "
-        f"had no effect — this slice includes none of the nodes it drives "
-        f"({', '.join(targets)}).",
+        head,
         "[rebuild] 要重算既有月份的預測，請跑 "
         f"--only-node {predict_node}（不帶切片旗標的完整 run 也可以）。",
     ]

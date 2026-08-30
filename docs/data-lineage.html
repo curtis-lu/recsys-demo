@@ -462,7 +462,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
 
 <div class="card" id="training_eval_predictions">
   <h4>training_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：training · predict_and_write_test_predictions（對 test set 評分後 chunked 寫 Hive；節點宣告產出是 predict_manifest）　|
+  <div class="meta"><b>產生</b>：training · predict_and_write_test_predictions（對 test set 評分後 chunked 寫 Hive；節點宣告產出是 predict_manifest，落地在 <code>data/models/&lt;model_version&gt;/predict_manifest.json</code>）　|
   <b>下游</b>：training（compute_test_mAP_spark 讀回算 test mAP）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
   <b>partition</b>：snap_date, prod_name（外加 model_version）</div>
   <p class="sub">只有 test 窗內至少 1 個正例的客戶會被 scoring。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
@@ -579,7 +579,7 @@ C000010   0.83    1      （示意）</div>
 
 <p class="sub" style="margin-top:30px;color:#9198a1">
 未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：score_manifest · validated_predictions · eval_predictions ·
-evaluation_metrics · baseline_metrics · predict_manifest · *_parquet_handle · *_lgb_handle · sample_weight_report ·
+evaluation_metrics · baseline_metrics · *_parquet_handle · *_lgb_handle ·
 *_model_input_unfiltered。這些只在單次 DAG 內銜接，不持久化。
 </p>
 

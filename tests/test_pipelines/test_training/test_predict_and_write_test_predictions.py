@@ -594,3 +594,39 @@ def test_both_entity_columns_are_written_when_the_catalog_declares_both(tmp_path
         ("c1", "a1"), ("c2", "a2"),
     }
     assert manifest["n_rows_written"] == 4
+
+
+def test_the_manifest_survives_the_catalog_round_trip(tmp_path):
+    """What the node returns has to still be readable after the run ends.
+
+    ``predict_manifest`` has a catalog entry (issue #233) so the three month
+    lists can be answered afterwards, and that entry is a ``JSONDataset`` whose
+    ``json.dump`` carries no ``default=`` fallback. So a manifest value that is
+    a ``set`` or a ``Path`` — both natural things to reach for when adding a
+    field here — raises ``TypeError`` at the very end of a run that has already
+    spent hours. This asserts on the reloaded copy, not the returned one: an
+    assertion on the in-memory dict would pass for exactly the values that
+    cannot be written.
+    """
+    from recsys_tfb.io.json_dataset import JSONDataset
+
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),
+    }
+    write_ds = _write_ds(
+        existing=[("2025-01-31", "prod_A"), ("2025-01-31", "prod_B")]
+    )
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    ds = JSONDataset(str(tmp_path / "models" / "v_test_001" / "predict_manifest.json"))
+    ds.save(manifest)
+    reloaded = ds.load()
+
+    assert reloaded["months_processed"] == ["2025-02-28"]
+    assert reloaded["months_skipped"] == ["2025-01-31"]
+    assert reloaded["months_rebuilt"] == []
+    # The lists are the point, but a manifest that lost the rest of itself in
+    # the round trip is still a broken manifest.
+    assert reloaded == manifest

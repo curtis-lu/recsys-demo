@@ -221,7 +221,7 @@ print(n, dict(b))"
 
 ## F10. 中介產物命名
 
-`conf/base/catalog.yaml` 目前 45 個條目（2026-08-30 量：`yaml.safe_load` 後的 top-level key 數），命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
+`conf/base/catalog.yaml` 目前 46 個條目（2026-08-31 量：`yaml.safe_load` 後的 top-level key 數），命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
 
 新增 catalog 條目時對齊既有命名感覺即可——**這是事實不是約束**，因為禁用字清單只抓得到最粗糙的一類命名問題，真正的「有業務語意」是判斷題，機械檢查給不了。
 
