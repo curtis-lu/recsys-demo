@@ -1,5 +1,6 @@
 """Tests for core.logging — structured logging framework."""
 
+import io
 import json
 import logging
 import re
@@ -11,6 +12,7 @@ from recsys_tfb.core.logging import (
     JsonFormatter,
     RunContext,
     generate_run_id,
+    log_step,
     setup_logging,
 )
 
@@ -158,6 +160,100 @@ class TestSetupLogging:
         setup_logging({}, ctx)
         root = logging.getLogger()
         assert len(root.handlers) >= 1  # at least console
+
+
+class TestLogStep:
+    """``log_step(**fields)`` carries the values that vary per iteration.
+
+    A predict loop runs once per (snap_date, item) pair. Interpolating those
+    into ``step_name`` gives the log aggregator one step name per pair; the
+    values still have to arrive somewhere, so they travel as structured
+    fields on the JSON line and as plain text on the console.
+    """
+
+    @staticmethod
+    def _logger_writing_to(formatter, name):
+        """A logger whose only handler formats into a returned buffer."""
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(formatter)
+        step_logger = logging.getLogger(name)
+        step_logger.handlers = [handler]
+        step_logger.setLevel(logging.INFO)
+        step_logger.propagate = False
+        return step_logger, stream
+
+    @classmethod
+    def _run(cls, *, raises: bool = False, **fields) -> list[dict]:
+        """Return the JSON lines one ``log_step`` block writes."""
+        step_logger, stream = cls._logger_writing_to(
+            JsonFormatter(), "test_log_step"
+        )
+        try:
+            with log_step(step_logger, "predict_partition", **fields):
+                if raises:
+                    raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        return [json.loads(line) for line in stream.getvalue().splitlines()]
+
+    def test_fields_reach_the_json_line(self):
+        lines = self._run(snap_date="2024-01-31", item_name="CARD")
+        assert [line["event"] for line in lines] == [
+            "step_started", "step_completed",
+        ]
+        for line in lines:
+            assert line["step"] == "predict_partition"
+            assert line["snap_date"] == "2024-01-31"
+            assert line["item_name"] == "CARD"
+
+    def test_fields_survive_the_failure_path(self):
+        lines = self._run(raises=True, snap_date="2024-01-31", item_name="CARD")
+        assert lines[-1]["event"] == "step_failed"
+        assert lines[-1]["snap_date"] == "2024-01-31"
+        assert lines[-1]["item_name"] == "CARD"
+
+    def test_field_outside_the_whitelist_is_dropped(self):
+        # Dropped as a *field*: it stays inside the human ``message`` string,
+        # which is the honest half of the whitelist's one-sided failure — a
+        # reader still sees the value, an aggregator cannot query it.
+        lines = self._run(item_name="CARD", not_whitelisted="please-drop-me")
+        for line in lines:
+            assert line["item_name"] == "CARD"
+            assert "not_whitelisted" not in line
+
+    def test_fields_cannot_shadow_the_frameworks_own_keys(self):
+        # The fixed step name is the whole point of the parameter; a caller
+        # passing step=/event= must not be able to take it back.
+        lines = self._run(step="partition_2024-01-31_CARD", event="whatever")
+        assert [line["event"] for line in lines] == [
+            "step_started", "step_completed",
+        ]
+        assert all(line["step"] == "predict_partition" for line in lines)
+
+    def test_callers_that_pass_no_fields_are_unchanged(self):
+        lines = self._run()
+        allowed = {
+            "timestamp", "level", "logger", "message",  # JsonFormatter base
+            "run_id", "pipeline",                       # RunContext, if bound
+            "event", "step", "node", "duration_seconds",
+        }
+        for line in lines:
+            assert set(line) <= allowed, f"unexpected keys: {set(line) - allowed}"
+        assert lines[0]["message"] == "Step started: predict_partition"
+
+    def test_console_still_shows_the_values(self):
+        step_logger, stream = self._logger_writing_to(
+            ConsoleFormatter(), "test_log_step_console"
+        )
+        with log_step(step_logger, "predict_partition",
+                      snap_date="2024-01-31", item_name="CARD"):
+            pass
+
+        out = stream.getvalue()
+        assert "predict_partition" in out
+        assert "snap_date=2024-01-31" in out
+        assert "item_name=CARD" in out
 
 
 class TestLogDataVolume:
@@ -357,13 +453,34 @@ class TestJsonExtraFieldWhitelist:
         src = Path(__file__).resolve().parents[2] / "src" / "recsys_tfb"
         assert src.is_dir(), f"source tree not found at {src}"
 
+        def _called_name(call: ast.Call) -> str:
+            func = call.func
+            if isinstance(func, ast.Attribute):
+                return func.attr
+            return getattr(func, "id", "")
+
         missing: dict[str, list[str]] = {}
         scanned = 0
+        step_scanned = 0
         for py in sorted(src.rglob("*.py")):
             tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
+                # ``log_step(logger, name, **fields)`` reaches the same
+                # whitelist without ever writing an ``extra={...}`` literal,
+                # so the scan has to know about it by name.
+                if _called_name(node) == "log_step":
+                    for kw in node.keywords:
+                        # log_step's own two parameters are not fields; a
+                        # caller is free to pass them by keyword.
+                        if kw.arg in (None, "step_logger", "step_name"):
+                            continue
+                        step_scanned += 1
+                        if kw.arg not in JSON_EXTRA_FIELDS:
+                            missing.setdefault(kw.arg, []).append(
+                                f"{py.relative_to(src)}:{node.lineno}"
+                            )
                 for kw in node.keywords:
                     if kw.arg != "extra" or not isinstance(kw.value, ast.Dict):
                         continue
@@ -378,6 +495,9 @@ class TestJsonExtraFieldWhitelist:
                             )
 
         assert scanned > 0, "found no `extra={...}` literals — scanner is broken"
+        assert step_scanned > 0, (
+            "found no `log_step(..., field=...)` call — scanner is broken"
+        )
         assert not missing, (
             "these `extra=` keys never reach the JSONL file because "
             f"JSON_EXTRA_FIELDS does not name them: {missing}"

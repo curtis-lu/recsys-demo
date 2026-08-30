@@ -81,6 +81,11 @@ JSON_EXTRA_FIELDS = (
     "insert_seconds", "partition_count", "new_partitions",
     # source_etl audit / quality checks
     "snap_date", "table_name", "passed",
+    # log_step(**fields): per-iteration values that keep the step name fixed.
+    # Named after the schema *role*, not the column: `schema.item` defaults to
+    # "prod_name" but any deployment may configure another column, and a key
+    # frozen to this repo's demo instantiation would then be a lie.
+    "item_name",
     # SparkSession lifecycle
     "application_id", "app_name", "last_application_id",
     "seconds_since_last_use",
@@ -194,27 +199,57 @@ def setup_logging(
 
 
 @contextmanager
-def log_step(step_logger: logging.Logger, step_name: str):
+def log_step(step_logger: logging.Logger, step_name: str, **fields):
     """Emit step_started / step_completed events with wall-clock timing.
+
+    ``**fields`` carries the values that vary between iterations of the same
+    step, so ``step_name`` can stay a fixed string. A loop that scores one
+    partition per (month, item) pair and writes them into the name instead
+    gives the log aggregator ``n_months * n_items`` distinct step names, none
+    of which can be summed or compared against the others.
+
+    ``fields`` cannot shadow this function's own keys: the fixed step name is
+    the reason the parameter exists, so a caller passing ``step=`` or
+    ``event=`` loses to the framework rather than the other way round. Only
+    names listed in ``JSON_EXTRA_FIELDS`` reach the JSONL file — anything else
+    is dropped there in silence — but every field is appended to the console
+    message regardless, so a terminal always shows the values.
+
+    A field named after a ``LogRecord`` attribute (``module``, ``name``,
+    ``args``, ...) raises on the first call rather than failing quietly. The
+    whitelist scan in ``test_logging.py`` reads these kwargs too, so such a
+    name is caught in the test run and never reaches a pipeline.
 
     Usage::
 
         with log_step(logger, "merge_features"):
             result = df.merge(other, on=key)
+
+        with log_step(logger, "predict_partition",
+                      snap_date=snap_date, item_name=item):
+            part_pdf = ds.to_table(filter=...).to_pandas()
     """
     ctx = _current_context
     node_name = ctx.current_node if ctx else ""
+    # Console handlers print only the message, so the values have to be in it.
+    labelled = step_name + "".join(f" {k}={v}" for k, v in fields.items())
     step_logger.info(
-        "Step started: %s", step_name,
-        extra={"event": "step_started", "step": step_name, "node": node_name},
+        "Step started: %s", labelled,
+        extra={
+            **fields,
+            "event": "step_started",
+            "step": step_name,
+            "node": node_name,
+        },
     )
     t0 = time.monotonic()
     try:
         yield
         duration = time.monotonic() - t0
         step_logger.info(
-            "Step completed: %s (%.2fs)", step_name, duration,
+            "Step completed: %s (%.2fs)", labelled, duration,
             extra={
+                **fields,
                 "event": "step_completed",
                 "step": step_name,
                 "node": node_name,
@@ -224,8 +259,9 @@ def log_step(step_logger: logging.Logger, step_name: str):
     except Exception:
         duration = time.monotonic() - t0
         step_logger.info(
-            "Step failed: %s after %.2fs", step_name, duration,
+            "Step failed: %s after %.2fs", labelled, duration,
             extra={
+                **fields,
                 "event": "step_failed",
                 "step": step_name,
                 "node": node_name,

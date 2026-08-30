@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterable, NamedTuple
 
 import mlflow
-import numpy as np
 import optuna
 import pandas as pd
 
@@ -16,6 +15,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+from recsys_tfb.pipelines.training.steps import experiment_log, refit, sample_weights
 from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
 from recsys_tfb.pipelines.training.steps.local_cache import (
     CACHE_SOURCE_TABLES,
@@ -41,52 +41,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def resolve_weight_diagnostics(
-    train_handle, parameters: dict, preprocessor_metadata: dict,
-) -> dict:
-    """Data-driven sample_weight diagnostic for the model manifest.
-
-    Reports configured sample_weights entries that match zero train rows
-    (``unmatched_keys``) — covers label / identity / feature / encoding
-    mismatch + unknown-category typos. Reads only the weight-key columns of the
-    train parquet (cheap distinct).
-    """
-    import pyarrow.dataset as pads
-
-    from recsys_tfb.io.extract import _composite_key_series, _translate_weight_table
-
-    training = parameters.get("training", {}) or {}
-    sw = training.get("sample_weights") or {}
-    weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
-    diag = {"enabled": bool(sw), "weight_keys": list(weight_keys),
-            "n_weight_entries": len(sw), "unmatched_keys": []}
-    if not sw:
-        return diag
-
-    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
-    identity_cols = get_schema(parameters)["identity_columns"]
-
-    ds = pads.dataset(train_handle.path, format="parquet")
-    if any(k not in ds.schema.names for k in weight_keys):
-        diag["unmatched_keys"] = sorted(str(k) for k in sw)
-        return diag
-    pdf = ds.to_table(columns=list(weight_keys)).to_pandas().drop_duplicates()
-    present = set(_composite_key_series(pdf, weight_keys).tolist())
-
-    unmatched = []
-    for key in sw:
-        one, _ = _translate_weight_table(
-            {key: sw[key]}, weight_keys, category_mappings, identity_cols)
-        if not one or next(iter(one)) not in present:
-            unmatched.append(str(key))
-    diag["unmatched_keys"] = sorted(unmatched)
-    return diag
-
-
 def persist_sample_weight_report(
     train_parquet_handle, preprocessor_metadata: dict, parameters: dict,
 ) -> dict:
-    """Compute the sample_weight diagnostic; the catalog persists it.
+    """Report which configured sample_weights entries matched zero train rows.
+
+    A weight that matches nothing is the failure this node exists to surface:
+    nothing raises, nothing logs, the model just trains as if the weight had
+    never been configured. Label / identity / feature / encoding mismatches and
+    unknown-category typos all end up looking the same from the outside, so the
+    report names the entries rather than diagnosing the cause.
 
     Always runs (not gated by the lgb .bin cache) so the report reflects the
     current config every run.
@@ -97,8 +61,40 @@ def persist_sample_weight_report(
     ``extra_metadata.sample_weight``. Nobody downstream consumes it -- the entry
     exists so the report can be fetched and read on its own.
     """
-    diag = resolve_weight_diagnostics(
-        train_parquet_handle, parameters, preprocessor_metadata)
+    training = parameters.get("training", {}) or {}
+    sw = training.get("sample_weights") or {}
+
+    # Decision — what a weight key is made of: the configured
+    # `training.sample_weight_keys`, or the item column alone when unset. It has
+    # to be the same tuple io/extract.py looks weights up by; a report built on
+    # a different tuple vouches for lookups the trainer never made.
+    weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
+
+    diag = {"enabled": bool(sw), "weight_keys": list(weight_keys),
+            "n_weight_entries": len(sw), "unmatched_keys": []}
+    if not sw:
+        return diag
+
+    present = sample_weights.distinct_weight_keys(train_parquet_handle, weight_keys)
+
+    # Decision — what counts as unmatched, i.e. a weight that did nothing. Two
+    # ways in: the train parquet carries no column for the key at all, which
+    # condemns every entry at once (the weight key names a column model_input
+    # does not have); or this one entry's key is absent from the rows read,
+    # including the case where its value is not in the encoding at all.
+    if present is None:
+        unmatched = [str(key) for key in sw]
+    else:
+        category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
+        identity_cols = get_schema(parameters)["identity_columns"]
+        unmatched = []
+        for key in sw:
+            encoded = sample_weights.encoded_key(
+                key, sw[key], weight_keys, category_mappings, identity_cols)
+            if encoded is None or encoded not in present:
+                unmatched.append(str(key))
+    diag["unmatched_keys"] = sorted(unmatched)
+
     logger.info(
         "sample_weight report: enabled=%s unmatched=%d",
         diag["enabled"], len(diag["unmatched_keys"]),
@@ -723,8 +719,6 @@ def finalize_model(
     # matters here: .get would hand this line None, not "hpo_best", and None
     # would fall through to a silent full refit.
 
-    import lightgbm as lgb
-
     from recsys_tfb.core.group_utils import (
         default_metric_for_objective,
         is_ranking_objective,
@@ -763,31 +757,22 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        # train / train_dev are customer-disjoint by sampling design, so a
-        # query group never spans both splits — offset dev ids past train's
-        # max to keep them distinct after concatenation.
-        offset = (int(gid_tr.max()) + 1) if len(gid_tr) else 0
-        X_full = np.concatenate([X_tr, X_dv], axis=0)
-        y_full = np.concatenate([y_tr, y_dv], axis=0)
-        w_full = np.concatenate([w_tr, w_dv])
-        gid_full = np.concatenate([gid_tr, gid_dv + offset])
-        log_data_volume(logger, "finalize.X_full", X_full)
-        log_data_volume(logger, "finalize.y_full", y_full)
+        X_full, y_full, w_full = refit.stack_splits(
+            (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
+        # Decision — train / train_dev are customer-disjoint by sampling
+        # design, so a query group never spans both splits: dev ids are offset
+        # past train's max to keep them distinct after concatenation.
+        gid_full = refit.offset_dev_group_ids(gid_tr, gid_dv)
         del X_tr, y_tr, X_dv, y_dv, gid_tr, gid_dv, w_tr, w_dv
 
+        # Decision — group= makes this a ranking refit consistent with the
+        # objective, and the row order follows the groups: the permutation
+        # to_contiguous_groups returns has to be applied to X / y / weight too,
+        # or the labels no longer belong to the rows they came from.
         perm, grp = to_contiguous_groups(gid_full)
-        # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
-        # with the same construct param) so refit's splits use the same feature
-        # set. group= makes this a ranking refit consistent with the objective.
-        ds_full = lgb.Dataset(
-            X_full[perm],
-            label=y_full[perm],
-            weight=w_full[perm],
-            group=grp,
-            feature_name=feat_cols,
-            categorical_feature=cat_idx,
-            params={"feature_pre_filter": False},
-            free_raw_data=True,
+        ds_full = refit.build_dataset(
+            X_full[perm], y_full[perm], w_full[perm],
+            feat_cols, cat_idx, group=grp,
         )
     else:
         from recsys_tfb.io.extract import extract_Xy
@@ -801,25 +786,14 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        X_full = np.concatenate([X_tr, X_dv], axis=0)
-        y_full = np.concatenate([y_tr, y_dv], axis=0)
-        w_full = np.concatenate([w_tr, w_dv])
-        log_data_volume(logger, "finalize.X_full", X_full)
-        log_data_volume(logger, "finalize.y_full", y_full)
+        X_full, y_full, w_full = refit.stack_splits(
+            (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
         del X_tr, y_tr, X_dv, y_dv, w_tr, w_dv
 
-        # feature_pre_filter=False: matches HPO's lgb.Dataset binaries (binned
-        # with the same construct param) so refit's tree splits use the same
-        # feature set.
-        ds_full = lgb.Dataset(
-            X_full,
-            label=y_full,
-            weight=w_full,
-            feature_name=feat_cols,
-            categorical_feature=cat_idx,
-            params={"feature_pre_filter": False},
-            free_raw_data=True,
-        )
+        # Decision — no group=: a non-ranking objective scores each row on its
+        # own, so there is no query grouping to carry and no reordering to do.
+        ds_full = refit.build_dataset(
+            X_full, y_full, w_full, feat_cols, cat_idx)
 
     params = {
         **algorithm_params,
@@ -1130,7 +1104,15 @@ def predict_and_write_test_predictions(
         snap_date = str(row[time_col])
         prod_name = str(row[item_col])
 
-        with log_step(logger, f"partition_{snap_date}_{prod_name}"):
+        # A step name built from the data gives the log aggregator one name
+        # per (month, item) pair; the values travel as structured fields
+        # instead, and the console message still carries them. The field is
+        # keyed on the schema role (`item_name`), not on the local variable,
+        # which still carries this repo's default column name.
+        with log_step(
+            logger, "predict_partition",
+            snap_date=snap_date, item_name=prod_name,
+        ):
             part_table = ds.to_table(
                 filter=(pads.field(time_col) == snap_date)
                 & (pads.field(item_col) == prod_name)
@@ -1205,7 +1187,16 @@ def log_experiment(
     quadrant_profiles: dict = None,
     cases_manifest: dict = None,
 ) -> None:
-    """Log training results to MLflow."""
+    """Record this run in MLflow. The DAG's terminal sink.
+
+    Nothing downstream reads the run, so its whole value is being comparable to
+    other runs later — which is why a tracking failure is not allowed to take
+    the training with it (see the ``strict`` comment below for the trade).
+
+    What each field is *called* lives in ``steps/experiment_log.py``. Those
+    names are read by people and dashboards outside this repo, and renaming one
+    fails silently: the run still succeeds and a chart just stops having a line.
+    """
     from recsys_tfb.diagnosis.model import diagnostics_dir
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
@@ -1225,55 +1216,41 @@ def log_experiment(
 
         with log_step(logger, "mlflow_log"):
             with mlflow.start_run():
-                mlflow.log_params(best_params)
-                mlflow.log_param("algorithm", algorithm)
-                mlflow.log_param("final_model_strategy", final_model_strategy)
-                mlflow.log_metric("best_iteration", best_iteration)
-                mlflow.log_metric("overall_map", evaluation_results["overall_map"])
+                # Decision — the run is keyed by what produced the model, not
+                # just its hyperparameters: `algorithm` and
+                # `final_model_strategy` are what let two runs with identical
+                # best_params still be told apart months later.
+                experiment_log.log_run_params(
+                    best_params, algorithm, final_model_strategy, best_iteration)
 
-                for item, attr in evaluation_results.get("per_item_map_attr", {}).items():
-                    mlflow.log_metric(f"map_attr_{item}", attr)
+                # Decision — the scores recorded are the evaluation node's, not
+                # a re-derivation. Recomputing here would make MLflow and the
+                # evaluation report able to disagree with no way to tell which
+                # is right.
+                experiment_log.log_evaluation_metrics(evaluation_results)
 
-                mlflow.log_metric("n_queries", evaluation_results["n_queries"])
-                mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
+                # Decision — a calibrated run says so, and carries the
+                # uncalibrated score beside it. Without the pair, "did
+                # calibration help" is unanswerable from the run alone.
+                experiment_log.log_calibration_outcome(evaluation_results)
 
-                # Calibration info
-                if "uncalibrated" in evaluation_results:
-                    mlflow.log_param("calibrated", True)
-                    mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
-                    mlflow.log_metric(
-                        "uncalibrated_overall_map",
-                        evaluation_results["uncalibrated"]["overall_map"],
-                    )
-                else:
-                    mlflow.log_param("calibrated", False)
-
+                # The adapter logs its own artifact: only it knows the flavour.
                 model.log_to_mlflow()
 
-                # --- diagnostics scalar summary ---
-                if feature_importance:
-                    mlflow.log_metric("n_dead_features", len(feature_importance.get("dead_features", [])))
-                if feature_statistics:
-                    mlflow.log_metric(
-                        "n_single_value_features",
-                        sum(1 for s in feature_statistics.values() if s.get("single_value")),
-                    )
-                    mlflow.log_metric(
-                        "n_high_null_features",
-                        sum(1 for s in feature_statistics.values() if s.get("high_null")),
-                    )
-                if quadrant_profiles:
-                    n_cells = sum(len(v) for v in quadrant_profiles.values())
-                    mlflow.log_metric("n_quadrant_cells", n_cells)
-                if cases_manifest:
-                    n_cases = sum(
-                        1 for it in cases_manifest.values() for cell in it.values()
-                        for r in cell.values() if r.get("rendered")
-                    )
-                    mlflow.log_metric("n_cases_rendered", n_cases)
+                # Decision — diagnostics go in twice, as scalars and as files.
+                # The scalars are what makes runs comparable in the UI; the
+                # files are what someone opens once a scalar looks wrong.
+                experiment_log.log_diagnostics_summary(
+                    feature_statistics, feature_importance,
+                    quadrant_profiles, cases_manifest,
+                )
 
                 # --- diagnostics artifacts (JSON written by catalog, PNG by shap node;
                 #     upload the whole dir) ---
+                # This one write stays in nodes.py rather than moving to
+                # steps/experiment_log.py: the architecture audit only scans
+                # nodes*.py, so a write that moves out of this file stops being
+                # registered. Same call ADR-0014 decision 1 made for shutil.rmtree.
                 diag_dir = diagnostics_dir(parameters)
                 if diag_dir.exists():
                     mlflow.log_artifacts(str(diag_dir))
@@ -1322,7 +1299,11 @@ def compute_test_mAP_spark(
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
 
-    n_prods = training_eval_predictions.select(item_col).distinct().count()
+    # Every block below reads the *whole* test prediction table — all months,
+    # all items — which makes this node one of the likelier places for the
+    # tail of the pipeline to get slow. Without these it has no timing at all.
+    with log_step(logger, "count_distinct_items"):
+        n_prods = training_eval_predictions.select(item_col).distinct().count()
     overall_map_key = f"map@{n_prods}"
     item_map_attr_key = f"map_attr@{n_prods}"
 
@@ -1331,16 +1312,22 @@ def compute_test_mAP_spark(
         n_prods, overall_map_key, item_map_attr_key, predict_manifest,
     )
 
-    calibration_applied = (
-        training_eval_predictions.filter(
-            F.col("score") != F.col("score_uncalibrated")
+    with log_step(logger, "detect_calibration"):
+        calibration_applied = (
+            training_eval_predictions.filter(
+                F.col("score") != F.col("score_uncalibrated")
+            )
+            .limit(1)
+            .count()
+            > 0
         )
-        .limit(1)
-        .count()
-        > 0
-    )
 
-    cal = compute_all_metrics(training_eval_predictions, parameters)
+    # The action is not on this line: compute_all_metrics counts and collects
+    # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
+    # level" applies — this is the expensive block, not a lazy plan.
+    with log_step(logger, "compute_metrics"):
+        cal = compute_all_metrics(training_eval_predictions, parameters)
+
     result = {
         "overall_map": float(cal["overall"].get(overall_map_key, 0.0)),
         "per_item_map_attr": {
@@ -1352,12 +1339,14 @@ def compute_test_mAP_spark(
     }
 
     if calibration_applied:
+        # The renames are lazy, so they stay outside the timed block.
         uncal_df = (
             training_eval_predictions
             .withColumnRenamed("score", "_score_calibrated")
             .withColumnRenamed("score_uncalibrated", "score")
         )
-        uncal = compute_all_metrics(uncal_df, parameters)
+        with log_step(logger, "compute_metrics_uncalibrated"):
+            uncal = compute_all_metrics(uncal_df, parameters)
         result["uncalibrated"] = {
             "overall_map": float(uncal["overall"].get(overall_map_key, 0.0)),
             "per_item_map_attr": {

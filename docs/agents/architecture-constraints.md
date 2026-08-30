@@ -162,7 +162,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F8. Node 函式大小的現況分佈
 
-`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 53 個。
+`pipelines/**/*nodes*.py` 的頂層 `def`（不含巢狀），2026-08-30 量測共 52 個。
 
 **這個數字每次改 node 都會變，所以別引用它，重量一次**：
 
@@ -181,19 +181,24 @@ print(n, dict(b))"
 
 | 行數 | 個數 |
 |---|---|
-| ≤ 40 | 29 |
-| 41–80 | 11 |
+| ≤ 40 | 27 |
+| 41–80 | 12 |
 | 81–120 | 6 |
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 171 行（`training/nodes.py`）、`finalize_model` 155 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
 
-> **2026-08-30 第二次重量**（#230）。`_materialize_parquet_handle`（75 行）、`_resolve_cache_path`、`_populate_cache_from_hive` 三個 helper 從 `training/nodes.py` 消失——前者拆掉、後兩者搬進 `pipelines/training/steps/local_cache.py`，而那個掃描只看 `*nodes*.py`。所以總數 56 → 53。
-> 桶子的移動要一起看才對得起來：≤40 掉 4 個 ＝ 走掉兩個 helper ＋ 兩個 cache node 從 3–5 行長到 40 行以上；41–80 淨值不變 ＝ 走掉一個 helper、`cache_test_model_input` 升上去，再由那兩個 cache node 補回；81–120 多 1 個就是升上去的 `cache_test_model_input`。**最長的五個沒變。**
-> **這是規則 2 的又一個實例**：五個 cache node 從各 3–5 行的轉手函式，長成各自寫完四個決策的 30–85 行——行數增加的地方，正是決策從 helper 浮回 node body 的地方。
+> **⚠ 上面那組數字是三張票合併後重量的結果，不是任何一張單獨的結果。** #229、#232、#230 三次改動都從 57／56 那個基準分支出去，各自在自己的 PR 裡量過一次；**下面三段引言記的是各自的 delta，把它們相加會得到錯的數字**。合併後的真值只有一個來源：重跑上面那段指令。這正是「別引用它，重量一次」在同一天內就被驗證了一次的實例。
+>
+> **2026-08-30 第三次重量**（#230，合併 #232 之後）。`_materialize_parquet_handle`（75 行）、`_resolve_cache_path`、`_populate_cache_from_hive` 三個 helper 從 `training/nodes.py` 消失——前者拆掉、後兩者搬進 `pipelines/training/steps/local_cache.py`，而那個掃描只看 `*nodes*.py`。單獨看本票是 56 → 53；**與 #232 一起落地後的合併真值是 52**。
+> 桶子怎麼動的（以本票單獨計）：≤40 掉 4 個 ＝ 走掉兩個 helper ＋ 兩個 cache node 從 3–5 行長到 40 行以上；41–80 淨值不變 ＝ 走掉一個 helper、`cache_test_model_input` 升上去，再由那兩個 cache node 補回；81–120 多 1 個就是升上去的 `cache_test_model_input`。
+> **這是規則 2 的又一個實例**：五個 cache node 從各 3–5 行的轉手函式，長成各自寫完四個決策的 37–96 行——行數增加的地方，正是決策從 helper 浮回 node body 的地方。
+> **順手修掉一處腐爛**：最長的五個裡 `predict_and_write_test_predictions` 原寫 171，實為 **179**——#246 把它加長了但沒回頭重量。
 
 > **2026-08-30 重量的原委，以及腐爛了什麼**（#229）。該次改動把 `_hpo_score` 與 HPO trial 的評分搬進 `pipelines/training/steps/hpo_scoring.py`，所以總數 57 → 56、≤40 少一個，`tune_hyperparameters` 228 → 185、`finalize_model` 156 → 155。**重量時發現另外三個數字早就腐爛了，跟這次改動無關**：41–80 原寫 12（當時實為 11）、`predict_and_write_scores` 原寫 253（實為 263）、第五名原寫 `prepare_eval_data` 143（實為 `validate_predictions` 146）。三者都是 2026-08-09 之後沒人回頭重量。**這正是上面那句「別引用它，重量一次」的實例**——引用了就會像這樣把三個過期的數字一起帶下去。
+
+> **2026-08-30 第二次重量**（#232）。sample_weight／refit／MLflow 三處機制搬進 `pipelines/training/steps/`，所以總數 56 → 55（`resolve_weight_diagnostics` 併回它唯一的呼叫端）、`finalize_model` 155 → 133 而掉出前五名，`prepare_eval_data` 143 遞補第五。≤40 少兩個、41–80 多一個，是因為 `persist_sample_weight_report` 吸收了那些決策而從 21 行長到 59 行——**這正是規則 2 說的「照判準寫的 node 會比較長」**，決策從 helper 浮回 node body，行數就記在 node 上。
 
 **這是事實不是規則**——本檔不訂函式長度門檻。記錄它是為了讓你知道常態（六成的 node 函式在 40 行內），下次寫一個新的時心裡有個尺。行數本來就只是「這個函式只做一件事」的粗略代理，60 行可以混五種職責，130 行也可能只是一段長而平的轉換。
 
@@ -425,7 +430,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 | 函式 | 寫什麼 | 檢查看得到嗎 |
 |---|---|---|
-| `log_experiment`（`pipelines/training/nodes.py`） | MLflow params／metrics／artifacts（搜 `mlflow.log_artifacts`） | ✅ 直接呼叫，掃得到 |
+| `log_experiment`（`pipelines/training/nodes.py`） | MLflow artifacts——整個 `diagnostics_dir` 上傳（搜 `mlflow.log_artifacts`）。params／metrics 的欄位名自 #232 起在 `pipelines/training/steps/experiment_log.py`，**但那個上傳呼叫刻意留在 node 裡**：測試 (d) 只掃 `nodes*.py`，寫檔一搬進 `steps/` 就掉出登記（實測會讓該測試轉紅） | ✅ 直接呼叫，掃得到 |
 | `tune_hyperparameters`（`pipelines/training/nodes.py`） | HPO 搜尋診斷進 `diagnostics_dir/hpo/`，經 `recsys_tfb.diagnosis.hpo.write_hpo_diagnostics`（搜 `write_hpo_diagnostics`） | ❌ **間接寫入，掃描看不到**——靠這份登記人工盯著 |
 
 **位置只給檔案與要搜的字串、不給行號**，理由同 R3：本表原本寫 `nodes.py:1256`／`:1339`／`:520`／`:739`，光是 #226 從同檔刪掉 4 行就讓四個數字同時失準；而 (d) 只比對函式名的 Counter、抓不到行號腐爛。
