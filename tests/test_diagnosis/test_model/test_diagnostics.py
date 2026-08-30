@@ -1,5 +1,8 @@
 """Unit tests for training diagnostics (pure-python, no Spark)."""
 
+import pathlib
+
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -10,6 +13,38 @@ import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 from recsys_tfb.io.handles import ParquetHandle
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 from recsys_tfb.diagnosis import model as diag
+
+
+def _adapter_declaring(X, y, feature_name, **params):
+    """A fitted booster that declares its feature names, the way production does.
+
+    ``LightGBMAdapter.prepare_train_inputs`` always builds the ``lgb.Dataset``
+    with ``feature_name`` set, so a real model's ``feature_names()`` returns the
+    preprocessor's own column names. Training straight from a bare ndarray leaves
+    LightGBM's default ``Column_0``… names instead, which the diagnosis nodes now
+    reject rather than silently realign (``models/feature_view.py``) — so a
+    fixture that skips this is not a smaller version of production, it is a
+    different one.
+    """
+    ds = lgb.Dataset(X, label=y, feature_name=list(feature_name), free_raw_data=False)
+    adapter = LightGBMAdapter()
+    adapter.train(X, y, None, None, params, train_dataset=ds)
+    return adapter
+
+
+class DeclaredFeatures:
+    """Stands in for a fitted model where only its feature declaration matters.
+
+    ``compute_feature_statistics`` reads nothing else off the model: the coupling
+    it accepts is to the column list, not to the booster (ADR-0014 decision 7).
+    """
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def feature_names(self):
+        return list(self._names)
+
 
 
 @pytest.fixture
@@ -60,7 +95,9 @@ def test_compute_feature_statistics(tmp_path):
     preprocessor = {"feature_columns": ["f_num", "f_const", "f_cat"]}
     params = {"diagnostics": {"feature_stats": {"enabled": True, "high_null_threshold": 0.5}}}
 
-    out = diag.compute_feature_statistics(handle, preprocessor, params)
+    model = DeclaredFeatures(["f_num", "f_const", "f_cat"])
+
+    out = diag.compute_feature_statistics(handle, model, preprocessor, params)
 
     assert out["f_num"]["null_rate"] == 0.25
     assert out["f_num"]["n_distinct"] == 3
@@ -72,12 +109,110 @@ def test_compute_feature_statistics(tmp_path):
     assert "mean" not in out["f_cat"]
 
 
+def test_feature_statistics_columns_come_from_the_model_not_the_config(tmp_path):
+    """The model decides which columns get summarized — not the current config.
+
+    `f_dropped` is in the landed preprocessor but not in this model. Re-deriving
+    the column set from config instead (`apply_feature_selection`, which returns
+    all three when `exclude` is empty) would summarize a column the booster never
+    saw — this assertion is what turns that swap red.
+
+    Not a regression test for a bug that can happen in production: an `exclude`
+    edit bumps `model_version`, so the two answers cannot silently disagree here
+    (ADR-0014 decision 7). It is the mechanical guard that keeps the node wired to
+    the addressable authority rather than the memory-only one.
+    """
+    pdf = pd.DataFrame({
+        "f_a": [1.0, 2.0, 3.0, 4.0],
+        "f_dropped": [9.0, 9.0, 9.0, 9.0],
+        "f_b": [5.0, 6.0, 7.0, 8.0],
+    })
+    handle = _write_parquet(tmp_path, pdf)
+    preprocessor = {"feature_columns": ["f_a", "f_dropped", "f_b"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
+
+    out = diag.compute_feature_statistics(
+        handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
+
+    assert set(out) == {"f_a", "f_b"}
+
+
+def test_feature_statistics_rejects_a_model_the_preprocessor_cannot_serve(tmp_path):
+    """A model column the artifact lacks raises rather than silently narrowing."""
+    pdf = pd.DataFrame({"f_a": [1.0, 2.0]})
+    handle = _write_parquet(tmp_path, pdf)
+    preprocessor = {"feature_columns": ["f_a"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
+
+    with pytest.raises(ValueError, match="order-preserving subsequence"):
+        diag.compute_feature_statistics(
+            handle, DeclaredFeatures(["f_a", "f_gone"]), preprocessor, params)
+
+
+def _partial_cache(tmp_path, name="train"):
+    """A cache directory holding data but no ``_SUCCESS`` — an interrupted copy."""
+    root = tmp_path / name
+    (root / "snap_date=2026-01-31").mkdir(parents=True)
+    pd.DataFrame({"f_a": [1.0, 2.0], "f_b": [3.0, 4.0]}).to_parquet(
+        root / "snap_date=2026-01-31" / "part.parquet", engine="pyarrow"
+    )
+    return ParquetHandle(path=str(root))
+
+
+def test_feature_statistics_refuses_a_partial_cache_it_cannot_rebuild(tmp_path):
+    """Handed an interrupted copy, it must fail rather than publish numbers.
+
+    ADR-0014 decision 7 splits this from the cache node's own behaviour, which is
+    the opposite and correct: given the same marker-less directory *and a live
+    source*, `cache_train_model_input` clears it and rebuilds from Hive
+    (test_cache_nodes.py::TestPartialCacheRecovery). By the time the handle is
+    here the source is gone from the picture, and `count_rows` on a half-copied
+    directory returns a number without complaining — stats get computed over an
+    unknown fraction of the split and MLflow records them as if whole.
+    """
+    handle = _partial_cache(tmp_path)
+    preprocessor = {"feature_columns": ["f_a", "f_b"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
+
+    with pytest.raises(ValueError, match="_SUCCESS"):
+        diag.compute_feature_statistics(
+            handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
+
+
+def test_feature_statistics_accepts_the_same_cache_once_marked_complete(tmp_path):
+    """The negative's twin: only the marker separates the two runs."""
+    handle = _partial_cache(tmp_path)
+    (pathlib.Path(handle.path) / "_SUCCESS").touch()
+    preprocessor = {"feature_columns": ["f_a", "f_b"]}
+    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
+
+    out = diag.compute_feature_statistics(
+        handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
+
+    assert set(out) == {"f_a", "f_b"}
+
+
+def test_shap_diagnostics_refuses_a_partial_cache(tmp_path, shap_setup):
+    """Same contract on the other handle-reading diagnosis node.
+
+    Guarding only feature_statistics would leave the identical silent-subset read
+    open one node over: `read_column`/`take_rows` are as quiet on a half-copied
+    directory as `count_rows` is.
+    """
+    adapter, _handle, preprocessor, parameters = shap_setup
+
+    with pytest.raises(ValueError, match="_SUCCESS"):
+        diag.compute_shap_diagnostics(
+            adapter, _partial_cache(tmp_path, "test"), preprocessor, parameters)
+
+
 def test_compute_feature_statistics_sampling(tmp_path):
     pdf = pd.DataFrame({"f": list(range(100))})
     handle = _write_parquet(tmp_path, pdf)
     preprocessor = {"feature_columns": ["f"]}
     params = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 10}}}
-    out = diag.compute_feature_statistics(handle, preprocessor, params)
+    out = diag.compute_feature_statistics(
+        handle, DeclaredFeatures(["f"]), preprocessor, params)
     # 抽樣後仍回傳該特徵的統計（n_distinct 受抽樣上限約束）
     assert out["f"]["n_distinct"] <= 10
 
@@ -101,10 +236,10 @@ def shap_setup(tmp_path, monkeypatch):
     pq.write_table(pa.Table.from_pandas(pdf), path)
     handle = ParquetHandle(path=path)
 
-    adapter = LightGBMAdapter()
-    aparams = {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-               "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0}
-    adapter.train(np.c_[f0, f1], label.astype(float), None, None, aparams)
+    adapter = _adapter_declaring(
+        np.c_[f0, f1], label.astype(float), ["f0", "f1"],
+        objective="binary", metric="binary_logloss", verbosity=-1,
+        num_leaves=4, seed=1, num_iterations=15, early_stopping_rounds=0)
 
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [], "category_mappings": {}}
     parameters = {
@@ -377,10 +512,10 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
     path = str(tmp_path / "t4.parquet")
     pq.write_table(pa.Table.from_pandas(pdf), path)
     handle = ParquetHandle(path=path)
-    adapter = LightGBMAdapter()
-    adapter.train(X4, label.astype(float), None, None,
-                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 8, "seed": 7, "num_iterations": 30, "early_stopping_rounds": 0})
+    adapter = _adapter_declaring(
+        X4, label.astype(float), ["f0", "f1", "f2", "f3"],
+        objective="binary", metric="binary_logloss", verbosity=-1,
+        num_leaves=8, seed=7, num_iterations=30, early_stopping_rounds=0)
     preprocessor = {"feature_columns": ["f0", "f1", "f2", "f3"],
                     "categorical_columns": [], "category_mappings": {}}
     for metric in ("jaccard_topk", "spearman"):
@@ -423,7 +558,8 @@ def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
         return real_take(p, indices, columns)
 
     monkeypatch.setattr(data_access, "take_rows", spy_take)
-    stats = diag.compute_feature_statistics(handle, preprocessor, parameters)
+    stats = diag.compute_feature_statistics(
+        handle, DeclaredFeatures(["f0", "f1"]), preprocessor, parameters)
 
     # bounded: only sample_rows rows were taken, not the full 400
     assert seen["n_indices"] == 100
@@ -464,14 +600,18 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
         __import__("pyarrow").Table.from_pandas(pdf), base, format="parquet",
         partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
     )
+    # The marker a cache node writes last. Without it this fixture is an
+    # interrupted copy, which the diagnosis nodes now refuse (ADR-0014
+    # decision 7) — production always has it.
+    (pathlib.Path(base) / "_SUCCESS").touch()
     handle = ParquetHandle(path=base)
-    adapter = LightGBMAdapter()
     # prod_name is a declared categorical feature (feature_columns 含它)；_pdf_to_X 會把它
     # encode 成 code(A=0,B=1) 併入 X，故模型須以同樣 4 欄矩陣訓練（否則 predict 4!=3）。
     X_train = np.column_stack([X, (prod == "B").astype(float)])
-    adapter.train(X_train, label.astype(float), None, None,
-                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 8, "seed": 7, "num_iterations": 20, "early_stopping_rounds": 0})
+    adapter = _adapter_declaring(
+        X_train, label.astype(float), ["f0", "f1", "f2", "prod_name"],
+        objective="binary", metric="binary_logloss", verbosity=-1,
+        num_leaves=8, seed=7, num_iterations=20, early_stopping_rounds=0)
     preprocessor = {"feature_columns": ["f0", "f1", "f2", "prod_name"],
                     "categorical_columns": ["prod_name"],
                     "category_mappings": {"prod_name": ["A", "B"]}}
@@ -502,10 +642,10 @@ def test_positive_profile_covered_by_targeted_sampling(tmp_path, monkeypatch):
     pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=500)
     handle = ParquetHandle(path=path)
 
-    adapter = LightGBMAdapter()
-    adapter.train(np.c_[f0, f1], label.astype(float), None, None,
-                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0})
+    adapter = _adapter_declaring(
+        np.c_[f0, f1], label.astype(float), ["f0", "f1"],
+        objective="binary", metric="binary_logloss", verbosity=-1,
+        num_leaves=4, seed=1, num_iterations=15, early_stopping_rounds=0)
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
                     "category_mappings": {}}
     parameters = {"model_version": "mvpos",
@@ -559,10 +699,10 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     path = str(tmp_path / "t.parquet")
     pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=400)
     handle = ParquetHandle(path=path)
-    adapter = LightGBMAdapter()
-    adapter.train(np.c_[f0, f1], label.astype(float), None, None,
-                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0})
+    adapter = _adapter_declaring(
+        np.c_[f0, f1], label.astype(float), ["f0", "f1"],
+        objective="binary", metric="binary_logloss", verbosity=-1,
+        num_leaves=4, seed=1, num_iterations=15, early_stopping_rounds=0)
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
                     "category_mappings": {}}
     per_item = 40

@@ -38,9 +38,12 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
 
     nodes = [
         # Training-stage feature selection chokepoint: emit a (possibly subset)
-        # preprocessor view that every model-touching node below consumes, so
+        # preprocessor view that every node *training* a model consumes, so
         # `training.feature_selection.exclude` is applied once and stays
         # consistent. Empty selection -> view is the raw preprocessor unchanged.
+        # The diagnosis nodes deliberately do NOT read it: they run after the
+        # model exists and ask the model itself, so they do not depend on a
+        # memory-only artifact (ADR-0014 decision 7).
         Node(
             select_features,
             inputs=["preprocessor", "parameters"],
@@ -152,9 +155,23 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             inputs=["training_eval_predictions", "predict_manifest", "parameters"],
             outputs="evaluation_results",
         ),
+        # The diagnosis group below reads `preprocessor` (the landed dataset-built
+        # artifact) rather than the memory-only `preprocessor_view`, and asks
+        # `model` which columns it actually used. Both of those have catalog
+        # entries, so this group no longer drags `select_features` — and the whole
+        # training chain feeding it — into a diagnosis-only rerun. The
+        # `*_parquet_handle` inputs are still memory-only and deliberately left
+        # that way, so this is one edge removed, not a clean cut (ADR-0014
+        # decision 7 records the remaining blocker).
+        #
+        # `model` is a new input for compute_feature_statistics specifically — a
+        # deliberate coupling, argued in its docstring. It also moves that node
+        # after calibrate_model in the topological order; see the calibrate_model
+        # entry in tests/test_pipelines/test_resume_contracts.py for what that
+        # costs a resume.
         Node(
             compute_feature_statistics,
-            inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
+            inputs=["train_parquet_handle", "model", "preprocessor", "parameters"],
             outputs="feature_statistics",
         ),
         Node(
@@ -164,12 +181,12 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             compute_gain_ledger,
-            inputs=["model", "preprocessor_view", "parameters"],
+            inputs=["model", "preprocessor", "parameters"],
             outputs="gain_ledger",
         ),
         Node(
             compute_shap_diagnostics,
-            inputs=["model", "test_parquet_handle", "preprocessor_view", "parameters"],
+            inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
             outputs="shap_diagnostics",
         ),
         # P2b 象限診斷:Spark 選樣(top@1 象限 + 每格抽樣)→ pandas per-(item×象限)
@@ -189,14 +206,14 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         ),
         Node(
             compute_quadrant_profiles,
-            inputs=["model", "shap_population", "preprocessor_view", "parameters"],
+            inputs=["model", "shap_population", "preprocessor", "parameters"],
             outputs="quadrant_profiles",
         ),
         # P2b-2 象限案例:每 (item×象限) 全格極值案例的單列 signed SHAP 圖 + manifest。
         # 與 profile 依目的解耦(讀 case_rows,自己一次小 SHAP);compute_quadrant_profiles 不動。
         Node(
             compute_quadrant_cases,
-            inputs=["model", "case_rows", "preprocessor_view", "parameters"],
+            inputs=["model", "case_rows", "preprocessor", "parameters"],
             outputs="cases_manifest",
         ),
         Node(

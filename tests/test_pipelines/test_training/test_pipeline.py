@@ -112,25 +112,102 @@ class TestTrainingPipeline:
         assert names.index("predict_and_write_test_predictions") < names.index("compute_test_mAP_spark")
         assert names.index("compute_test_mAP_spark") < names.index("log_experiment")
 
-    def test_select_features_feeds_view_to_all_model_nodes(self):
-        """select_features is the single chokepoint: it consumes the dataset-built
-        `preprocessor` and emits `preprocessor_view`; every model-touching node
-        consumes the view so feature selection is applied exactly once."""
+    # The six nodes that build or apply a model during training. They run before
+    # (or as) the model exists, so the config-derived view is the only answer
+    # available to them.
+    TRAINING_VIEW_CONSUMERS = (
+        "prepare_lgb_train_inputs", "persist_sample_weight_report",
+        "tune_hyperparameters", "finalize_model",
+        "predict_and_write_test_predictions",
+    )
+
+    # The five diagnosis nodes that used to eat the view. They run after the
+    # model exists, so they ask it instead (ADR-0014 decision 7).
+    DIAGNOSIS_ARTIFACT_CONSUMERS = (
+        "compute_feature_statistics", "compute_gain_ledger",
+        "compute_shap_diagnostics", "compute_quadrant_profiles",
+        "compute_quadrant_cases",
+    )
+
+    def test_select_features_feeds_view_to_every_model_building_node(self):
+        """select_features is the training chokepoint: it consumes the dataset-built
+        `preprocessor` and emits `preprocessor_view`; every node that builds or
+        applies a model during training consumes the view, so feature selection is
+        applied exactly once."""
         pipeline = create_pipeline()
         by_name = {n.name: n for n in pipeline.nodes}
         assert "select_features" in by_name
         sf = by_name["select_features"]
         assert sf.inputs == ["preprocessor", "parameters"]
         assert sf.outputs == ["preprocessor_view"]
-        # downstream model nodes must read the view, not the raw preprocessor
-        for name in (
-            "prepare_lgb_train_inputs", "tune_hyperparameters", "finalize_model",
-            "predict_and_write_test_predictions",
-            "compute_feature_statistics", "compute_shap_diagnostics",
-            "persist_sample_weight_report",
-        ):
+        for name in self.TRAINING_VIEW_CONSUMERS:
             assert "preprocessor_view" in by_name[name].inputs, name
             assert "preprocessor" not in by_name[name].inputs, name
+
+    def test_select_features_survives_with_its_training_only_consumers(self):
+        """The node stays: dropping the diagnosis edges does not orphan it.
+
+        Its consumer list shrinking to zero would be the signal to delete it; the
+        training nodes above keep it alive — five by default, six once
+        calibration adds `calibrate_model`, which wraps a model and so needs the
+        same view the model was fitted under.
+        """
+        readers = {
+            n.name for n in create_pipeline().nodes
+            if "preprocessor_view" in n.inputs
+        }
+        assert readers == set(self.TRAINING_VIEW_CONSUMERS)
+
+        cal_readers = {
+            n.name for n in create_pipeline(enable_calibration=True).nodes
+            if "preprocessor_view" in n.inputs
+        }
+        assert cal_readers == set(self.TRAINING_VIEW_CONSUMERS) | {"calibrate_model"}
+
+    def test_diagnosis_nodes_read_landed_artifacts_not_the_memory_only_view(self):
+        """Every diagnosis input is addressable, which is what makes
+        `--from-node compute_feature_statistics` stand up and is the precondition
+        for splitting diagnosis into its own pipeline (ADR-0014 decision 7).
+
+        `preprocessor_view` is memory-only, so a node reading it can only be
+        reached by re-running its producer. `preprocessor` and `model` both have
+        catalog entries.
+        """
+        pipeline = create_pipeline()
+        by_name = {n.name: n for n in pipeline.nodes}
+        for name in self.DIAGNOSIS_ARTIFACT_CONSUMERS:
+            inputs = by_name[name].inputs
+            assert "preprocessor_view" not in inputs, name
+            assert "preprocessor" in inputs, name
+
+    def test_feature_statistics_takes_the_model_as_its_column_authority(self):
+        """The one accepted new coupling: a data-layer diagnosis gains a `model`
+        input so the column set comes from the fitted booster rather than from a
+        config key that can be edited after training (ADR-0014 decision 7)."""
+        pipeline = create_pipeline()
+        node = next(
+            n for n in pipeline.nodes if n.name == "compute_feature_statistics"
+        )
+        assert node.inputs == [
+            "train_parquet_handle", "model", "preprocessor", "parameters",
+        ]
+        names = [n.name for n in pipeline.nodes]
+        assert names.index("finalize_model") < names.index("compute_feature_statistics")
+
+    def test_feature_statistics_sits_after_the_model_it_diagnoses(self):
+        """Ordering, and the slice it buys.
+
+        The node writes into `data/models/${model_version}/`, so it belongs after
+        the node that makes the model. Before it took `model` it had no such
+        dependency and the topological sort put it *ahead* of HPO, so
+        `--from-node compute_feature_statistics` swept tune_hyperparameters and
+        finalize_model back in. The exact resume set is pinned in
+        tests/test_pipelines/test_resume_contracts.py; this pins the ordering
+        that produces it.
+        """
+        names = [n.name for n in create_pipeline().nodes]
+        for earlier in ("tune_hyperparameters", "finalize_model"):
+            assert names.index(earlier) < names.index("compute_feature_statistics")
 
     def test_select_features_runs_before_prepare(self):
         pipeline = create_pipeline()

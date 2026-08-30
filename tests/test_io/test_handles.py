@@ -145,3 +145,62 @@ class TestOpenParquetDatasetOverManyRoots:
 
         with pytest.raises(ValueError, match="at least one parquet root"):
             open_parquet_dataset([])
+
+
+class TestRequireCompleteCache:
+    """The `_SUCCESS` contract, checked from the consumer's side.
+
+    A cache node writes the marker last, so a directory without one is a copy
+    that died partway. The cache node's own recovery (rmtree + rebuild from
+    Hive) is tested in test_cache_nodes.py and must stay; this is the other
+    half — what a consumer handed such a directory should do when it cannot
+    rebuild it (ADR-0014 decision 7, 驗收條件 row 2).
+    """
+
+    def _cache_root(self, tmp_path: Path, name: str, *, complete: bool) -> Path:
+        root = tmp_path / name
+        (root / "snap_date=2026-01-31").mkdir(parents=True)
+        pd.DataFrame({"f": [1.0, 2.0]}).to_parquet(
+            root / "snap_date=2026-01-31" / "part.parquet", engine="pyarrow"
+        )
+        if complete:
+            (root / "_SUCCESS").touch()
+        return root
+
+    def test_a_complete_cache_passes(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.handles import ParquetHandle, require_complete_cache
+
+        root = self._cache_root(tmp_path, "train", complete=True)
+        require_complete_cache(ParquetHandle(path=str(root)))
+
+    def test_a_marker_less_directory_raises(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.handles import ParquetHandle, require_complete_cache
+
+        root = self._cache_root(tmp_path, "train", complete=False)
+        with pytest.raises(ValueError, match="_SUCCESS"):
+            require_complete_cache(ParquetHandle(path=str(root)))
+
+    def test_every_root_of_a_sharded_handle_is_checked(self, tmp_path: Path) -> None:
+        """test_model_input is one directory per month; one bad month is enough."""
+        from recsys_tfb.io.handles import ParquetHandle, require_complete_cache
+
+        good = self._cache_root(tmp_path, "2026-01-31", complete=True)
+        bad = self._cache_root(tmp_path, "2026-02-28", complete=False)
+        handles = {
+            "2026-01-31": ParquetHandle(path=str(good)),
+            "2026-02-28": ParquetHandle(path=str(bad)),
+        }
+        with pytest.raises(ValueError, match="2026-02-28"):
+            require_complete_cache(handles)
+
+    def test_a_single_parquet_file_is_not_a_cache_root(self, tmp_path: Path) -> None:
+        """The marker is a property of the directories cache nodes write.
+
+        A handle pointing at one parquet file carries no marker and never did,
+        so requiring one would reject a shape the contract never covered.
+        """
+        from recsys_tfb.io.handles import ParquetHandle, require_complete_cache
+
+        path = tmp_path / "one.parquet"
+        pd.DataFrame({"f": [1.0]}).to_parquet(path, engine="pyarrow")
+        require_complete_cache(ParquetHandle(path=str(path)))

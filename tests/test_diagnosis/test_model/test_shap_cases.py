@@ -1,4 +1,5 @@
 """Tests for compute_quadrant_profiles (per-item×quadrant signed profile,純 python)."""
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
@@ -6,14 +7,26 @@ from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_profiles
 
 
-def _trained_adapter(seed=1):
+def _trained_adapter(seed=1, feature_name=("f0", "f1")):
+    """A booster that declares its feature names, the way production does.
+
+    ``prepare_train_inputs`` always sets ``feature_name`` on the lgb.Dataset, so a
+    real model's ``feature_names()`` returns the preprocessor's column names.
+    Training from a bare ndarray would leave LightGBM's ``Column_0``… defaults,
+    which these nodes now reject rather than silently realign
+    (``models/feature_view.py``).
+    """
     rng = np.random.RandomState(seed)
-    Xtr = rng.randn(400, 2)
+    Xtr = rng.randn(400, len(feature_name))
     ytr = (Xtr[:, 0] > 0).astype(float)
+    ds = lgb.Dataset(Xtr, label=ytr, feature_name=list(feature_name),
+                     free_raw_data=False)
     adapter = LightGBMAdapter()
     adapter.train(Xtr, ytr, None, None,
                   {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 4, "seed": 1, "num_iterations": 15, "early_stopping_rounds": 0})
+                   "num_leaves": 4, "seed": 1, "num_iterations": 15,
+                   "early_stopping_rounds": 0},
+                  train_dataset=ds)
     return adapter
 
 
@@ -50,6 +63,24 @@ def test_quadrant_profiles_structure():
             assert len(cell["top_features"]) == 2
             assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
                        for r in cell["top_features"])
+
+
+def test_quadrant_profiles_attribute_over_the_model_columns_not_the_artifact():
+    """The booster's own column list decides what gets attributed.
+
+    The population and the landed preprocessor both carry `f0` and `f1`; this
+    model was fitted on `f0` alone. Deriving the view from config instead would
+    hand a 2-column X to a 1-column booster — LightGBM raises on the shape, and
+    that raise is the mutation signal. What must NOT happen is `f1` quietly
+    appearing in a profile.
+    """
+    adapter = _trained_adapter(feature_name=("f0",))
+    pop = _pop_from_counts({("A", q): 15 for q in ("TP", "FP", "FN", "TN")})
+
+    out = compute_quadrant_profiles(adapter, pop, _PREP, _params())
+
+    named = {f["feature"] for q in out["A"].values() for f in q["top_features"]}
+    assert named == {"f0"}
 
 
 def test_quadrant_profiles_low_coverage_and_empty_cell():

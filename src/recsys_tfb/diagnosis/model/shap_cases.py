@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume
+from recsys_tfb.models.feature_view import model_feature_view
 
 from .attribution import feature_attributions
 from .shap_per_item import _signed_profile
@@ -36,11 +37,21 @@ def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parame
     top_k = int(cfg.get("top_k", 30))
     quadrant_min_rows = int(cfg.get("quadrant_min_rows", 10))
     item_col = get_schema(parameters)["item"]
-    feature_cols = list(preprocessor["feature_columns"])
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
 
     try:
         pdf = shap_population.reset_index(drop=True)
-        X = _pdf_to_X(pdf, preprocessor, parameters)
+        X = _pdf_to_X(pdf, model_view, parameters)
         log_data_volume(logger, "quadrant.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
         items = pdf[item_col].values
@@ -145,11 +156,21 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
     item_col = schema["item"]
     time_col = schema["time"]
     entity_cols = schema["entity"]
-    feature_cols = list(preprocessor["feature_columns"])
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
 
     try:
         pdf = case_rows.reset_index(drop=True)
-        X = _pdf_to_X(pdf, preprocessor, parameters)
+        X = _pdf_to_X(pdf, model_view, parameters)
         log_data_volume(logger, "cases.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
 
