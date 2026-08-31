@@ -8,7 +8,7 @@
 作法：對評估月 test_model_input 取「目標 item label=1」的 query，抓同
 query 的目標列與壓制者列，各自 ``booster.predict(pred_contrib=True)``
 （raw/logit 空間＝score_uncalibrated 同一把尺），逐特徵相減後跨 query
-彙總。特徵切片走 ``recsys_tfb.io.extract._pdf_to_X``，與生產 predict
+彙總。特徵切片走 ``recsys_tfb.io.extract.pdf_to_X``，與生產 predict
 路徑逐位元一致。
 
 用法（公司環境用 --hive-table；需 PYTHONPATH=src）：
@@ -36,7 +36,7 @@ import yaml
 
 
 def load_parameters(conf_dir: str) -> dict:
-    """deep-merge conf/base/*.yaml（只為 get_schema/_pdf_to_X 所需的 schema）。"""
+    """deep-merge conf/base/*.yaml（只為 get_schema/pdf_to_X 所需的 schema）。"""
     merged: dict = {}
 
     def _merge(a: dict, b: dict) -> dict:
@@ -93,7 +93,7 @@ def main() -> None:
 
     import json
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.io.extract import pdf_to_X
 
     parameters = load_parameters(args.conf_dir)
     schema = get_schema(parameters)
@@ -123,7 +123,7 @@ def main() -> None:
     print(f"target={args.target} 正例 query 數 = {len(pos_custs)}；取回列數 = {len(pdf)}")
 
     booster = lgb.Booster(model_file=args.model_file)
-    X = _pdf_to_X(pdf, preproc, parameters)
+    X = pdf_to_X(pdf, preproc, parameters)
     contrib = booster.predict(X, pred_contrib=True)  # (n, F+1)，末欄 bias
     feat_names = list(booster.feature_name())
     assert contrib.shape[1] == len(feat_names) + 1, "contrib 欄數與特徵數不符"

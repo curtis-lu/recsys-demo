@@ -41,20 +41,6 @@ shape rule 3 exists to forbid; making them real nodes instead would mean
 floating that module's decisions up first, a separate piece of work. And a
 shell is one more file to open when chasing a bug — the cost this list is
 meant to pay off, not to add to.
-
-This module imports one underscore-prefixed name from elsewhere: ``_pdf_to_X``
-from ``recsys_tfb.io.extract``, inside :func:`predict_and_write_test_predictions`.
-It is not registered as an exception anywhere. Five src modules import or
-call it — ``io/extract.py`` where it is defined, this file,
-``inference/nodes.py``, and ``diagnosis/model/shap_per_item.py`` and
-``shap_cases.py`` — and four more name it in prose that a rename would
-leave pointing at nothing (``preprocessing.py``, ``core/consistency.py``,
-``models/feature_view.py``, ``inference/steps/feature_view.py``). That
-blast radius is why it is issue #199 and not this file's business;
-``inference/nodes.py`` keeps the same import and says the same thing. The
-import stays in the function body so that the one name breaking the rule is
-read next to the call that needs it, rather than sitting in the module
-header looking approved.
 """
 
 import logging
@@ -79,7 +65,7 @@ from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
 from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
-from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
+from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups, pdf_to_X
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -909,7 +895,7 @@ def predict_and_write_test_predictions(
 
     For each (snap_date, prod_name) partition of the months being processed:
         - load only that partition's rows via pyarrow filter
-        - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
+        - slice X via pdf_to_X; predict; (predict_uncalibrated if Calibrated)
         - build a pandas DataFrame with (every schema.entity column, score,
           score_uncalibrated, label) + partition cols snap_date, prod_name
         - training_eval_predictions.save(df) — exactly one partition's
@@ -928,8 +914,6 @@ def predict_and_write_test_predictions(
         back from Hive — and landing it is also what lets a diagnosis-only
         resume skip this node rather than pay its partition listing again.
     """
-    from recsys_tfb.io.extract import _pdf_to_X
-
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]
     entity_cols = schema_cfg["entity"]
@@ -1071,7 +1055,7 @@ def predict_and_write_test_predictions(
             snap_dates_seen.add(snap_date)
             prods_seen.add(prod_name)
 
-            X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
+            X = pdf_to_X(part_pdf, preprocessor_metadata, parameters)
             y_score = model.predict(X)
             score_uncalibrated = (
                 model.predict_uncalibrated(X) if is_calibrated else y_score

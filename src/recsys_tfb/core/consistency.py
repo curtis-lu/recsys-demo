@@ -233,7 +233,7 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   metastore metadata only — no scan).
 * B6 — a feature column that is non-numeric (string / binary / date / timestamp /
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
-  an ``object``-dtype model feature → driver OOM at ``_pdf_to_X`` ``to_numpy`` and
+  an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and
   a downstream LightGBM float-cast error. Predicate: ``nonnumeric_feature_errors``
   (with the ``spark_dtype_is_numeric`` classifier). Wired at TWO call sites — the
   dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
@@ -1131,7 +1131,7 @@ def nonnumeric_feature_errors(
     A *feature* column that is non-numeric AND will not be encoded to numeric
     downstream forces ``DataFrame.values`` into ``object`` dtype: every cell
     becomes a boxed Python object (~34 B/cell vs 8 B for float64), exploding
-    driver memory (OOM at ``_pdf_to_X`` ``to_numpy``) and later failing
+    driver memory (OOM at ``pdf_to_X`` ``to_numpy``) and later failing
     LightGBM's float cast. Prevented by declaring the column categorical (so it
     is integer-encoded) or dropping it.
 
@@ -1149,7 +1149,7 @@ def nonnumeric_feature_errors(
             errors.append(
                 f"feature column {col!r} is non-numeric and is not declared "
                 f"categorical, so it would become an un-encoded object-dtype "
-                f"model feature (OOM at _pdf_to_X.to_numpy, then a LightGBM "
+                f"model feature (OOM at pdf_to_X.to_numpy, then a LightGBM "
                 f"float-cast error). If {col!r} is a categorical feature, add it "
                 f"to dataset.prepare_model_input.categorical_columns (it is then "
                 f"integer-encoded); if it is not a model feature, add it to "

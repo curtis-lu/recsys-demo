@@ -605,7 +605,7 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
     # decision 7) — production always has it.
     (pathlib.Path(base) / "_SUCCESS").touch()
     handle = ParquetHandle(path=base)
-    # prod_name is a declared categorical feature (feature_columns 含它)；_pdf_to_X 會把它
+    # prod_name is a declared categorical feature (feature_columns 含它)；pdf_to_X 會把它
     # encode 成 code(A=0,B=1) 併入 X，故模型須以同樣 4 欄矩陣訓練（否則 predict 4!=3）。
     X_train = np.column_stack([X, (prod == "B").astype(float)])
     adapter = _adapter_declaring(

@@ -132,9 +132,9 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
     assert vol["extract_Xy.pdf"]["rows"] == 3
     assert vol["extract_Xy.pdf"]["deep"] is True
     # retrofit: X_df via helper, deep=True (was deep=False)
-    assert vol["_pdf_to_X.X_df"]["rows"] == 3
-    assert vol["_pdf_to_X.X_df"]["cols"] == 3
-    assert vol["_pdf_to_X.X_df"]["deep"] is True
+    assert vol["pdf_to_X.X_df"]["rows"] == 3
+    assert vol["pdf_to_X.X_df"]["cols"] == 3
+    assert vol["pdf_to_X.X_df"]["deep"] is True
     # encode_categoricals summary (preserve existing domain log)
     assert any(
         "deferred_cats=" in m and "prod_name" in m and "count=1" in m for m in messages
@@ -324,11 +324,11 @@ def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
 
 
 def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
-    """_pdf_to_X turns an already-loaded pdf into X numpy, applying the
+    """pdf_to_X turns an already-loaded pdf into X numpy, applying the
     same slice_features + encode_categoricals + to_numpy logic that
     extract_Xy uses after its read_parquet step.
     """
-    from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.io.extract import pdf_to_X
 
     pdf = pd.DataFrame({
         "cust_id": ["c1", "c2", "c3"],
@@ -350,7 +350,7 @@ def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
         }
     }
 
-    X = _pdf_to_X(pdf, prep_meta, parameters)
+    X = pdf_to_X(pdf, prep_meta, parameters)
 
     assert X.shape == (3, 3)
     # prod_name int-coded: fund=0, ccard=1, fund=0
@@ -364,7 +364,7 @@ def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
     """When no categorical_columns overlap with identity_columns, the
     encode_categoricals step is skipped (mirrors extract_Xy behavior).
     """
-    from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.io.extract import pdf_to_X
 
     pdf = pd.DataFrame({
         "cust_id": ["c1", "c2"],
@@ -384,7 +384,7 @@ def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
         }
     }
 
-    X = _pdf_to_X(pdf, prep_meta, parameters)
+    X = pdf_to_X(pdf, prep_meta, parameters)
 
     assert X.shape == (2, 1)
     assert list(X[:, 0]) == [1.0, 2.0]

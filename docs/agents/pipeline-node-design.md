@@ -377,7 +377,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 |---|---|---|
 | `nodes.py` 從 `recsys_tfb.preprocessing` import 兩個底線函式（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 12 | 該模組被 dataset 與 inference 共用，rename 要同時改兩條 pipeline 的呼叫點。登記在 ADR-0008「這條 ADR 沒有解決的事」與 `deliberate-non-goals.md` |
 | `pipelines/evaluation/nodes_spark.py` 帶 backend 後綴 | 12 | evaluation pipeline 尚未依本檔重整；`pipeline.py` 同時從 `nodes_spark.py` 與 `comparison_nodes.py` 取 node，還有一個動態 `importlib.import_module` |
-| `pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下 | 8 | 同上，training 尚未依本檔重整。這也是 S1 無法一般化到所有 pipeline 的原因 |
+| `pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下 | 8 | #222 重整 training 時**刻意不搬**（ADR-0014 決定 6）：搬進來會生出 7 個違反規則 3 的薄殼，而且這 7 個 node 未來要搬去 evaluation，現在搬等於白做。這也是 S1 無法一般化到所有 pipeline 的原因 |
 
 要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。
 

@@ -242,11 +242,11 @@ def _assert_feature_dtypes_numeric(
 ) -> None:
     """B6 training-read backstop — raise before the expensive pandas read if any
     model feature column is a non-numeric parquet type that will NOT be encoded
-    downstream (would OOM at ``_pdf_to_X`` ``to_numpy``, then fail LightGBM's
+    downstream (would OOM at ``pdf_to_X`` ``to_numpy``, then fail LightGBM's
     float cast).
 
     Reads parquet schema only (pyarrow metadata, no data). Deferred identity
-    categoricals (e.g. ``prod_name``, encoded later in ``_pdf_to_X``) are exempt.
+    categoricals (e.g. ``prod_name``, encoded later in ``pdf_to_X``) are exempt.
     """
     import pyarrow.dataset as pads
     import pyarrow.types as pat
@@ -288,7 +288,7 @@ def _assert_feature_dtypes_numeric(
         )
 
 
-def _pdf_to_X(
+def pdf_to_X(
     pdf: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
@@ -309,7 +309,7 @@ def _pdf_to_X(
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
-    log_data_volume(logger, "_pdf_to_X.X_df", X_df, deep=True)
+    log_data_volume(logger, "pdf_to_X.X_df", X_df, deep=True)
 
     deferred_cats = [
         c for c in categorical_cols if c in identity_cols and c in X_df.columns
@@ -320,7 +320,7 @@ def _pdf_to_X(
                 known = category_mappings[col]
                 X_df[col] = pd.Categorical(X_df[col], categories=known).codes
         logger.info(
-            "_pdf_to_X: encoded deferred_cats=%s count=%d",
+            "pdf_to_X: encoded deferred_cats=%s count=%d",
             deferred_cats, len(deferred_cats),
         )
 
@@ -345,7 +345,7 @@ def extract_Xy(
     ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
     per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
     Step A (read_parquet) lives here; Step B (pdf -> X) is delegated to
-    :func:`_pdf_to_X`. A pre-read parquet metadata INFO is emitted before
+    :func:`pdf_to_X`. A pre-read parquet metadata INFO is emitted before
     ``read_parquet`` so shape/uncompressed-size are visible even if the pandas
     read OOMs.
     """
@@ -369,7 +369,7 @@ def extract_Xy(
         pdf = handle.to_pandas()
     log_data_volume(logger, "extract_Xy.pdf", pdf, deep=True)
 
-    X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
+    X = pdf_to_X(pdf, preprocessor_metadata, parameters)
     y = pdf[label_col].values
 
     log_data_volume(logger, "extract_Xy.X", X)

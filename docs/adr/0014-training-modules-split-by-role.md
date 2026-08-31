@@ -576,6 +576,31 @@ cust_id_col = entity_cols[0]
   `models/feature_view.py`、`pipelines/inference/steps/feature_view.py`），改名不一併處理
   就會留下 4 處指向不存在識別字的假引用。#199 的範圍要按 9 個模組估，不是 5 個。
 
+### 修訂（2026-08-31，實作 #199 時）
+
+**上表第三列已落地，閘門 G4 解除。**
+
+- `_pdf_to_X` 已改名為 `pdf_to_X`，純去底線、**不留別名**。原本 #222 的切票紀錄寫「走
+  expand–contract」，理由是 `feat/staged-modeling` 那疊（#117–#120）會撞；使用者
+  2026-08-31 決定關掉那疊重做，唯一需要別名的理由消失。
+- **import ／呼叫端實際是 6 個消費者，不是本節寫的 5 個。** 漏算的是
+  `scripts/shap_margin_summary.py`——它同樣 `from recsys_tfb.io.extract import _pdf_to_X`
+  並呼叫，而且**沒有任何測試覆蓋**，所以漏掉它時測試會全綠、腳本下次在公司環境跑才爆。
+- 加上上一節修訂點名的 4 個「只在散文提到」的模組，含舊名的檔案共 12 個
+  （src 9 ＋ tests 2 ＋ scripts 1），外加一個測試檔補斷言（見下）。
+- **不新增測試檔，但補了一條斷言。** `core/consistency.py` 那句使用者可見錯誤訊息裡的
+  函式名原本沒有任何測試守著——改壞不會轉紅。斷言下在既有 seam
+  （`tests/test_core/test_consistency.py::TestNonnumericFeatureErrors`）。
+- 四個 src 檔的函式內 import 一併收到模組層：`training/nodes.py` 與 `inference/nodes.py`
+  （〈21 處函式體內 import 收到模組層〉那節刻意保留的兩處），加上 `diagnosis/model/` 的
+  `shap_cases.py` 與 `shap_per_item.py`（那節沒點名，但留著會變成全 repo 只剩這裡還躲在
+  函式裡，而躲的理由已經沒了）。`scripts/shap_margin_summary.py`
+  的延後 import **不動**——那是為了讓 `--help` 不必先載入重依賴，與可見性無關。
+- 三處對外字串跟著改：`io/extract.py` 的 `log_data_volume` 標籤與 INFO 前綴，以及
+  `core/consistency.py` 的 `DataConsistencyError` 訊息。它們是 `log_data_volume` 的
+  **site 標籤**，不是 `steps/experiment_log.py` 說的那種被儀表板讀的 `log_step` 事件名；
+  同檔兄弟標籤（`extract_Xy.pdf`／`.X`／`.y`）本來就是照函式名取的。
+
 ## 5. `_REQUIRED_COLUMNS`（issue #220）
 
 見決定 5。動到 A11、跨 evaluation。

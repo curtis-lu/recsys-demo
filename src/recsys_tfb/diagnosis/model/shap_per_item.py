@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume, log_step
+from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.io.handles import require_complete_cache
 from recsys_tfb.models.feature_view import model_feature_view
 
@@ -76,8 +77,6 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
     profile_positive 關閉或資料無 label 欄 → 回傳 {}(呼叫端以預設處理)。與全域
     item 分層樣本解耦,避免稀疏正樣本 coverage 不足。
     """
-    from recsys_tfb.io.extract import _pdf_to_X
-
     if not profile_positive or label_col not in data_access.schema_names(path):
         return {}
     all_labels = data_access.read_column(path, label_col)
@@ -86,7 +85,7 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
         return {}
     pos_pdf = data_access.take_rows(path, pos_idx, columns=take_cols).reset_index(drop=True)
     log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
-    X_pos = _pdf_to_X(pos_pdf, model_view, parameters)
+    X_pos = pdf_to_X(pos_pdf, model_view, parameters)
     with log_step(logger, "shap_values_positive"):
         shap_pos = feature_attributions(model, X_pos, feature_cols)
     pos_items = pos_pdf[item_col].values
@@ -114,7 +113,6 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     import shap
 
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.io.extract import _pdf_to_X
 
     top_k = int(cfg.get("top_k", 30))
     min_per_item = int(cfg.get("min_rows_per_item", 30))
@@ -181,7 +179,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
                 len(item_values), len(sample_pdf), len(take_cols))
     log_data_volume(logger, "shap.sample_pdf", sample_pdf, deep=True)
 
-    X = _pdf_to_X(sample_pdf, model_view, parameters)
+    X = pdf_to_X(sample_pdf, model_view, parameters)
     scores = model.predict(X)
 
     with log_step(logger, "shap_values"):
