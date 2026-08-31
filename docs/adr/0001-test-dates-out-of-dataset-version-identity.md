@@ -27,7 +27,7 @@ date: 2026-07-31
 | **覆蓋範圍**（表裡有哪些月份） | config 列出的日期 | 也是 `base_dataset_version` |
 | **快取有效性**（本機 parquet cache 該不該重建） | 上游資料是否變動 | 也是 `base_dataset_version`（副作用地） |
 
-三者過去由同一個 hash 兼任，所以任何一個變動都會付出全部三者的代價。本 ADR 拆開前兩者；第三者的接手見 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 與 `pipelines/training/nodes.py` 的 cache 路徑分層（`_CACHE_PATH_LAYOUT`）。
+三者過去由同一個 hash 兼任，所以任何一個變動都會付出全部三者的代價。本 ADR 拆開前兩者；第三者的接手見 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 與 `pipelines/training/steps/local_cache.py` 的 cache 路徑分層（`_CACHE_PATH_LAYOUT`）。
 
 ## 為什麼 test 可以剝、train／val／calibration 不行
 
@@ -55,7 +55,7 @@ date: 2026-07-31
 
 - **`parameters_dataset.yaml` 不再是 dataset 內容的唯一真實來源。** 同一個 `base_dataset_version` 底下的 test 覆蓋範圍會隨時間累積；表裡實際有哪些月份要看 manifest 與 partition。這是接受累積語意的直接代價。
 
-- **快取有效性失去了原本的免費保險。** 過去改 test 日期會翻號、連帶讓本機 parquet cache 必然 miss；剝除之後這個保險消失，責任移交給 cache 路徑本身（`pipelines/training/nodes.py` 的 `_CACHE_PATH_LAYOUT`）。
+- **快取有效性失去了原本的免費保險。** 過去改 test 日期會翻號、連帶讓本機 parquet cache 必然 miss；剝除之後這個保險消失，責任移交給 cache 路徑本身（`pipelines/training/steps/local_cache.py` 的 `_CACHE_PATH_LAYOUT`）。
 
   **所以本 ADR 的實作若在 cache 路徑改動（[ADR-0003](0003-per-month-test-artifacts.md)）之前落地，會製造一個靜默 bug**：
 

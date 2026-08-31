@@ -9,7 +9,7 @@ date: 2026-08-01
 `_SUCCESS`，裡面裝所有設定月份。於是 cache 一旦失效，「多評估一個月份」就得整批重抄——包含
 完全沒變的舊月份。
 
-**改為一個 test 月份一個目錄**（`test_months/<YYYYMMDD>/`，見 `pipelines/training/nodes.py`
+**改為一個 test 月份一個目錄**（`test_months/<YYYYMMDD>/`，見 `pipelines/training/steps/local_cache.py`
 的 `_CACHE_PATH_LAYOUT`），各自持有自己的 `_SUCCESS`。加一個月＝多一個目錄，既有月份原封不動，
 複製成本從 ∝N 變成 ∝1。
 
