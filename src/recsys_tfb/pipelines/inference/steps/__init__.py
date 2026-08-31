@@ -1,11 +1,11 @@
 """Mechanism modules the inference nodes call: one concern per module.
 
-Placement criterion, one sentence (``docs/agents/pipeline-node-design.md`` S-A
-is where it is written down): a module lives here when every **src-side** caller
-is inside ``pipelines/inference/``. Test modules import these directly and that
-moves nothing — the criterion is about production callers, because what it buys
-is a reader telling this pipeline's outward contract from its internals by
-looking at one directory listing.
+Placement criterion, one sentence (``docs/agents/pipeline-node-design.md``
+rule 8 is where it is written down): a module lives here when every
+**src-side** caller is inside ``pipelines/inference/``. Test modules import
+these directly and that moves nothing — the criterion is about production
+callers, because what it buys is a reader telling this pipeline's outward
+contract from its internals by looking at one directory listing.
 
 **This package's root holds no contract module, and that is information rather
 than an omission.** ``pipelines/dataset`` keeps ``month_plans.py`` beside its
