@@ -82,7 +82,7 @@
 | `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
 | 診斷域退場過整層的模組（`triage`、早期的門檻式 `quadrant`），理由是「不得產生判定、不得用門檻把連續量切成類別」 | 這條的權威來源＝`src/recsys_tfb/diagnosis/__init__.py` 模組 docstring，**去讀那份、不要憑本列**。這裡刻意不列名單：現存的 `compute_quadrant_profiles`／`pair_ledger`／`cross_purchase` 都是活的，列名單只會再一次被讀成「這些是死碼」（2026-08-25 就發生過） |
 | inference 的 `entity_bucket` 分區欄**刻意不做「讀的桶數與寫的桶數分開」**（讀 40 桶控 driver、每 4 桶存一次維持分區檔大小） | 技術上可行且保留為逃生口，但它讓「一個 chunk」變成兩個不同的東西，spec 與續跑判準都要跟著分裂。目前預設 10 桶落在健康窗口（5–20）中間，不需要這個自由度。論證見 ADR-0010「考慮過但否決的選項」 |
-| inference 的 driver 峰值**只有下界推算，沒有實測** | `_pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定：只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步多吃一倍。所以文件上的數字是下界不是估計值，實際值取決於生產 `feature_table` 的 dtype 分佈 |
+| inference 的 driver 峰值**只有下界推算，沒有實測** | `pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定：只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步多吃一倍。所以文件上的數字是下界不是估計值，實際值取決於生產 `feature_table` 的 dtype 分佈 |
 | `pipelines/dataset/nodes.py` 與 `pipelines/inference/nodes.py` 從 `recsys_tfb.preprocessing` import 帶底線的私有名（`_encode_categoricals`、`_cast_feature_floats_to_float32`） | 審查會建議改成公開名。#176 已把 `steps/` 內五個底線名去掉，**刻意沒動這兩個**——rename 要同時改兩條 pipeline 的呼叫點，而它本身不修任何行為。同模組後來加入的 `encodable_categoricals`／`warn_unknown_encodings`（#185 從 `steps/` 搬來）用的是公開名，所以這個模組現在是混合命名的：那是刻意的現況，不是「還沒改完」。理由見 ADR-0008「這條 ADR 沒有解決的事」。不要順手改 |
 | 診斷報表的鐵則：**只呈現資料，判斷留給讀者** | 給數字、對照點與範圍說明，把角度攤開讓讀者自己選。哪些用字會越線、以及整份報表怎麼編排，見 [`diagnosis-report-presentation.md`](diagnosis-report-presentation.md) |
 

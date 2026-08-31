@@ -89,11 +89,11 @@ def model_feature_view(model: ModelAdapter, preprocessor: dict) -> dict:
     """The preprocessor artifact with the model's own column list swapped in.
 
     Callers hand the result to anything that reads ``feature_columns`` to slice
-    X (``io.extract._pdf_to_X``) — the model answers *which* columns, the
+    X (``io.extract.pdf_to_X``) — the model answers *which* columns, the
     artifact keeps answering *how* they are encoded.
 
     ``categorical_columns`` is deliberately left at the artifact's full set
-    rather than narrowed to match. ``_pdf_to_X`` intersects it with the sliced
+    rather than narrowed to match. ``pdf_to_X`` intersects it with the sliced
     frame's own columns, so extra names there cannot reach the output; copying
     the narrowing here would add a second place to keep in step with no
     observable difference.

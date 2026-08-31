@@ -21,15 +21,11 @@ two kinds under one event name leaves nobody able to tell which zero means
 which. Where a node's *time* actually goes is a question for the Runner's
 ``load``/``func``/``save`` split (``core/runner.py``), not for this module.
 
-This module imports **three** underscore-prefixed names from elsewhere, which
-S-E otherwise forbids. Two of them — ``_encode_categoricals`` and
-``_cast_feature_floats_to_float32`` from ``recsys_tfb.preprocessing`` — are a
-registered exception: renaming means touching the dataset pipeline's call sites
-in the same change (``docs/agents/deliberate-non-goals.md``). The third,
-``_pdf_to_X`` from ``recsys_tfb.io.extract`` (imported inside
-:func:`predict_and_write_scores`), is **not** registered anywhere; it predates
-#197, which left it alone rather than adding an exception row, since that
-register needs the user's approval.
+This module imports **two** underscore-prefixed names from elsewhere, which
+S-E otherwise forbids: ``_encode_categoricals`` and
+``_cast_feature_floats_to_float32`` from ``recsys_tfb.preprocessing``. Both are
+a registered exception: renaming means touching the dataset pipeline's call
+sites in the same change (``docs/agents/deliberate-non-goals.md``).
 """
 
 import itertools
@@ -406,7 +402,7 @@ def predict_and_write_scores(
             with log_step(logger, f"score_{snap_date}_{bucket}_{item}"):
                 # In place, on the frame already in the driver: this is the
                 # reuse the loop order buys. The value written is the raw item
-                # name — _pdf_to_X applies the integer code to its own copy, so
+                # name — pdf_to_X applies the integer code to its own copy, so
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
                 X = pdf_to_X(bucket_pdf, model_view, parameters)

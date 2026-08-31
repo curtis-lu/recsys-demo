@@ -41,20 +41,6 @@ shape rule 3 exists to forbid; making them real nodes instead would mean
 floating that module's decisions up first, a separate piece of work. And a
 shell is one more file to open when chasing a bug — the cost this list is
 meant to pay off, not to add to.
-
-This module imports one underscore-prefixed name from elsewhere: ``_pdf_to_X``
-from ``recsys_tfb.io.extract``, inside :func:`predict_and_write_test_predictions`.
-It is not registered as an exception anywhere. Five src modules import or
-call it — ``io/extract.py`` where it is defined, this file,
-``inference/nodes.py``, and ``diagnosis/model/shap_per_item.py`` and
-``shap_cases.py`` — and four more name it in prose that a rename would
-leave pointing at nothing (``preprocessing.py``, ``core/consistency.py``,
-``models/feature_view.py``, ``inference/steps/feature_view.py``). That
-blast radius is why it is issue #199 and not this file's business;
-``inference/nodes.py`` keeps the same import and says the same thing. The
-import stays in the function body so that the one name breaking the rule is
-read next to the call that needs it, rather than sitting in the module
-header looking approved.
 """
 
 import logging
@@ -909,7 +895,7 @@ def predict_and_write_test_predictions(
 
     For each (snap_date, prod_name) partition of the months being processed:
         - load only that partition's rows via pyarrow filter
-        - slice X via _pdf_to_X; predict; (predict_uncalibrated if Calibrated)
+        - slice X via pdf_to_X; predict; (predict_uncalibrated if Calibrated)
         - build a pandas DataFrame with (every schema.entity column, score,
           score_uncalibrated, label) + partition cols snap_date, prod_name
         - training_eval_predictions.save(df) — exactly one partition's

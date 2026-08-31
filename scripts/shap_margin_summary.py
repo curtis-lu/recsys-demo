@@ -8,7 +8,7 @@
 作法：對評估月 test_model_input 取「目標 item label=1」的 query，抓同
 query 的目標列與壓制者列，各自 ``booster.predict(pred_contrib=True)``
 （raw/logit 空間＝score_uncalibrated 同一把尺），逐特徵相減後跨 query
-彙總。特徵切片走 ``recsys_tfb.io.extract._pdf_to_X``，與生產 predict
+彙總。特徵切片走 ``recsys_tfb.io.extract.pdf_to_X``，與生產 predict
 路徑逐位元一致。
 
 用法（公司環境用 --hive-table；需 PYTHONPATH=src）：
@@ -36,7 +36,7 @@ import yaml
 
 
 def load_parameters(conf_dir: str) -> dict:
-    """deep-merge conf/base/*.yaml（只為 get_schema/_pdf_to_X 所需的 schema）。"""
+    """deep-merge conf/base/*.yaml（只為 get_schema/pdf_to_X 所需的 schema）。"""
     merged: dict = {}
 
     def _merge(a: dict, b: dict) -> dict:

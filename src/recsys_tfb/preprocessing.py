@@ -103,7 +103,7 @@ def encodable_categoricals(
     pipeline writes it to a partition column — so encoding it here either
     encodes a column that is about to be replaced or, worse, ships the integer
     code into a partition directory name (ADR-0010 section 6). Both pipelines
-    defer it to the driver instead, where ``io/extract.py::_pdf_to_X`` encodes
+    defer it to the driver instead, where ``io/extract.py::pdf_to_X`` encodes
     a *copy* and leaves the identity value alone.
     """
     return [

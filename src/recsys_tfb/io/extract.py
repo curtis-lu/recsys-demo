@@ -242,11 +242,11 @@ def _assert_feature_dtypes_numeric(
 ) -> None:
     """B6 training-read backstop — raise before the expensive pandas read if any
     model feature column is a non-numeric parquet type that will NOT be encoded
-    downstream (would OOM at ``_pdf_to_X`` ``to_numpy``, then fail LightGBM's
+    downstream (would OOM at ``pdf_to_X`` ``to_numpy``, then fail LightGBM's
     float cast).
 
     Reads parquet schema only (pyarrow metadata, no data). Deferred identity
-    categoricals (e.g. ``prod_name``, encoded later in ``_pdf_to_X``) are exempt.
+    categoricals (e.g. ``prod_name``, encoded later in ``pdf_to_X``) are exempt.
     """
     import pyarrow.dataset as pads
     import pyarrow.types as pat
@@ -345,7 +345,7 @@ def extract_Xy(
     ``encode_categoricals`` (skipped when no deferred cats) → ``to_numpy``) and
     per-step INFO size summaries so OOM-killed runs can be diagnosed from log.
     Step A (read_parquet) lives here; Step B (pdf -> X) is delegated to
-    :func:`_pdf_to_X`. A pre-read parquet metadata INFO is emitted before
+    :func:`pdf_to_X`. A pre-read parquet metadata INFO is emitted before
     ``read_parquet`` so shape/uncompressed-size are visible even if the pandas
     read OOMs.
     """

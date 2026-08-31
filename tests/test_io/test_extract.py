@@ -324,7 +324,7 @@ def test_extract_xy_metadata_probe_failure_logs_warning_but_does_not_block(
 
 
 def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
-    """_pdf_to_X turns an already-loaded pdf into X numpy, applying the
+    """pdf_to_X turns an already-loaded pdf into X numpy, applying the
     same slice_features + encode_categoricals + to_numpy logic that
     extract_Xy uses after its read_parquet step.
     """

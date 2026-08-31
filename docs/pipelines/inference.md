@@ -314,7 +314,7 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 | identity 欄 | 原始字串（`exchange_usd`） | 三張推論表的 `prod_name` 分區欄 |
 | 特徵欄 | 整數 code（`category_mappings[item]` 的位置） | 餵進模型 |
 
-所以 Spark 側的 `build_inference_population_features` **只編碼非 identity 的類別欄**（item 在那張表上根本不存在），identity 類別欄延後到 driver，由 `_pdf_to_X` 對一份 copy 編碼。編碼值取自前處理產物的 `category_mappings`，**不是** `inference.products`：兩者內容由 A4 保證相同，順序不保證，取錯清單會讓所有 item 的分數整組錯位而每一項 sanity check 都照樣通過。論證見 ADR-0010 §4／§6。
+所以 Spark 側的 `build_inference_population_features` **只編碼非 identity 的類別欄**（item 在那張表上根本不存在），identity 類別欄延後到 driver，由 `pdf_to_X` 對一份 copy 編碼。編碼值取自前處理產物的 `category_mappings`，**不是** `inference.products`：兩者內容由 A4 保證相同，順序不保證，取錯清單會讓所有 item 的分數整組錯位而每一項 sanity check 都照樣通過。論證見 ADR-0010 §4／§6。
 
 **特徵順序與子集的權威是模型，編碼語意的權威是前處理產物。** 模型評分時使用模型本身保存的 ordered feature names（`model.feature_names()`），這讓 training-stage `feature_selection.exclude` 不需重建 dataset。`preprocessor.json` 存的是全集，它不知道有沒有做過特徵選擇，所以兩者的關係是：**模型宣告的欄位必須是產物 `feature_columns` 的保序子序列**，否則直接失敗、不做自動對齊。這一條同時抓到 stale 的產物（模型有的欄產物沒有）與不匹配的模型（順序被打亂）。論證見 ADR-0011 §5。
 
@@ -327,14 +327,14 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 ```text
 for 每個 (snap_date, entity_bucket):        ← 一次 toPandas()，只讀這一個分區
     for 每個 item:                          ← 就地覆寫 item 那一欄，重複使用同一份特徵
-        _pdf_to_X → model.predict → save()  ← 恰好一個分區
+        pdf_to_X → model.predict → save()   ← 恰好一個分區
 ```
 
 **迴圈順序這一項單獨值 `len(products)` 倍。** 反過來寫（外層 item、內層桶）功能完全正確、分數一模一樣，只是把整個母體讀 `len(products)` 遍——它省的不只是磁碟讀，還有 executor→driver 的 Arrow 序列化搬運。因為輸出無法分辨兩者，這件事由測試的**讀取次數**斷言守著，而不是靠 review 記得。
 
 **每個 `(桶, item)` 算完立刻寫，一次 `save()` 恰好碰一個分區。** 這是硬約束而不是偏好：`HiveTableDataset.save()` 是 `insertInto` ＋ `partitionOverwriteMode=dynamic`，語意是「只動這次 frame 裡出現的分區，但對出現的那些是整個刪掉重建」。所以送進去的 frame 若跨兩個 chunk 的分區，第二次 save 會刪掉第一個 chunk 的列，**零錯誤訊息**。節點在交出 frame 前就地斷言它只含一種分區欄組合（在 pandas 上做，免費），而 `entity_bucket` 進 `unranked_predictions` 的分區欄就是為了讓不同桶的 save 不會互相覆蓋。
 
-item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。切 X 的是 `io/extract.py` 的 `_pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
+item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。切 X 的是 `io/extract.py` 的 `pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
 
 **續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。log 與 manifest 都報出 processed／skipped／rebuilt／empty 四份清單——**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/steps/chunk_plans.py`），所以它的測試在毫秒級。
 
@@ -615,7 +615,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - 目前每個 entity 共用同一份 products 清單，不支援 per-entity eligibility。
 - score 必須位於 `[0, 1]`；這對未校準的 ranking objective 是額外限制。
 - 模型評分必須在 driver（生產禁 UDF），所以每個 `(entity 桶, item)` chunk 的特徵會被收集到 pandas，不是完全 distributed inference。與 #188 之前的差別是**不再累積**：算完就落地，driver 上同時只有一個桶。
-- **driver 峰值只有下界推算，沒有實測。** `_pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定：特徵全 float32 時不膨脹，但只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步就多吃一倍。實際值取決於生產 `feature_table` 的 dtype 分佈。
+- **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定：特徵全 float32 時不膨脹，但只要有一欄 int32／int64 特徵（`_cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步就多吃一倍。實際值取決於生產 `feature_table` 的 dtype 分佈。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。
 - **跨 chunk 的一致性沒有機制保證。** 一次 run 裡不同 chunk 用的是同一個模型與同一張中間表，但如果中間表在 run 進行中被另一個 process 改寫，前後 chunk 會基於不同的特徵。這個情況今天沒有任何檢查會紅。
 - score 相同時沒有額外 tie-break key，Spark `row_number` 對同分 items 的相對名次不保證穩定。

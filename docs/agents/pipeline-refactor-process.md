@@ -4,7 +4,7 @@
 
 **與 [`pipeline-node-design.md`](pipeline-node-design.md) 的分工**：那份回答「重整成什麼形狀」，是形狀判準；本檔回答「怎麼把它跑完」，是流程判準。照著形狀判準改、卻用錯流程，代價是同一件事做兩遍——dataset 就是這樣把結構搬移做了兩遍。
 
-**證據來源**：dataset（PR #162–#180）與 inference（PR #184–#198）兩輪重構的實際軌跡，每條規則都附得出證據的 PR 或 commit。**還沒依形狀判準重整過的是 training 與 evaluation**，所以這份下一輪還會再用。
+**證據來源**：dataset（PR #162–#180）與 inference（PR #184–#198）兩輪重構的實際軌跡，每條規則都附得出證據的 PR 或 commit。**還沒依形狀判準重整過的只剩 evaluation**（training 已於 #222／#235／#199 那一輪重整），所以這份下一輪還會再用。
 
 > **軌跡在哪**：GitHub 上幾乎沒有 review comment。審查全部是本機 `/code-review` 雙軸 fresh-context subagent，證據在 **PR body** 與 **`fix:`／`review:` 收尾 commit** 的訊息裡（形如「收兩軸審查抓到的 N 件事——最重的是 X」）。
 
