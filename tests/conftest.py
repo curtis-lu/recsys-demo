@@ -43,7 +43,10 @@ def spark():
     emits ``STORED AS PARQUET`` (Hive DDL); the round-trip test in
     ``test_evaluation_compare_pipeline.py`` exercises that path.
     """
-    from recsys_tfb.utils.spark import get_or_create_spark_session
+    from recsys_tfb.utils.spark import (
+        get_or_create_spark_session,
+        stop_spark_session,
+    )
 
     test_configs = {
         "app_name": "recsys_tfb_test",
@@ -53,4 +56,18 @@ def spark():
         "spark.ui.enabled": "false",
         "spark.driver.memory": "1g",
     }
-    return get_or_create_spark_session(test_configs, enable_hive=True)
+    session = get_or_create_spark_session(test_configs, enable_hive=True)
+    if session.conf.get("spark.sql.catalogImplementation") != "hive":
+        # `getOrCreate()` hands back the process's existing session, so the
+        # `enableHiveSupport()` above is a silent no-op whenever a CLI
+        # entrypoint test built the first one with the production default
+        # `enable_hive=False`; every Hive DDL test that follows then fails with
+        # "Hive support is required to CREATE Hive TABLE". Stopping is what
+        # actually clears the choice — the catalog comes from the
+        # SparkContext's SparkConf, so rebuilding the session object alone
+        # would change nothing. Repairing here rather than in the leaking test
+        # file covers every test that takes this fixture.
+        # (#242; docs/operations/known-pitfalls.md 5a)
+        stop_spark_session()
+        session = get_or_create_spark_session(test_configs, enable_hive=True)
+    return session

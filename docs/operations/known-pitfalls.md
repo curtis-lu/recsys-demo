@@ -74,7 +74,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 5. main 上既有的測試問題（不是你造成的，勿浪費時間歸因給自己的改動）
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
-- ~~**全量的既有 fail 就是上面那兩個，沒有別的。**~~ **2026-08-31 起是 8 個**，見下面那條。當時（2026-08-25）的實測：
+- ~~**全量的既有 fail 就是上面那兩個，沒有別的。**~~ **2026-08-31 一度變成 8 個，2026-09-01 修回 3 個**，見下面那條。當時（2026-08-25）的實測：
 
   ```
   # main @ 227d9e6，同一 worktree 的同一份 data/，2026-08-25
@@ -92,7 +92,14 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
   8 ＝ 上面那 3 個 ＋ §5a 那 5 個。
 
-- ~~**「組合跑才互擾」的那 4 項已經消失了（2026-08-25 實測）。**~~ **2026-08-31 更正：它們回來了，而且根因跟 2026-08-25 寫的那個不是同一個。** 原文保留在下面，因為那次的排除仍然有效——`812a12c` 修掉的是 warehouse 污染，這次是另一件事。
+  **2026-09-01 更正：§5a 已修（#242），全量回到 3 個。** 修後實測
+  （`fix/spark-hive-session` worktree，同一份 `data/`，未設 `SPARK_CONF_DIR`）：
+
+  ```
+  ========== 3 failed, 2668 passed, 2481 warnings in 185.99s (0:03:05) ===========
+  ```
+
+- ~~**「組合跑才互擾」的那 4 項已經消失了（2026-08-25 實測）。**~~ **2026-08-31 更正：它們回來了，而且根因跟 2026-08-25 寫的那個不是同一個**（**2026-09-01 已修，見 §5a**）。原文保留在下面，因為那次的排除仍然有效——`812a12c` 修掉的是 warehouse 污染，這次是另一件事。
 
   <details><summary>2026-08-25 的原文（成因已不適用）</summary>
 
@@ -110,7 +117,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 
-## 5a. 組合跑時 SparkSession 掉成 in-memory catalog（2026-08-31）
+## 5a. 組合跑時 SparkSession 掉成 in-memory catalog（2026-08-31 發現，2026-09-01 已修）
 
 - **症狀（第一分鐘認出它）**：全量跑時這 5 項紅、單獨跑全綠，錯誤一律是
   `pyspark.sql.utils.AnalysisException: Hive support is required to CREATE Hive TABLE (AS SELECT);`。
@@ -151,8 +158,41 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   看起來很像兇手，但單獨接在前面跑 80 passed 全綠）、`tests/test_core`、`tests/test_diagnosis`、
   `tests/test_evaluation`、`tests/test_cli.py::TestSourceCheckCLI`。二分軌跡見本條的量測日期。
 
-- **待修**，尚未開票。修法方向是讓 CLI 那條路徑也 `enable_hive=True`，或讓測試用的 session
-  在 CLI 測試之後強制重建——但兩者都會動到 `utils/spark.py` 的單例語意，要另外評估。
+- **驗證這條時的假綠陷阱**：重現指令**不能**在設了 `SPARK_CONF_DIR` 的 shell 裡跑。
+  `conf/spark-local/spark-defaults.conf` 有 `spark.sql.catalogImplementation hive`，
+  有它的話 CLI 建的那個 session 也自帶 Hive，症狀整個消失。下面是**修法前**的同一份 code、
+  同一個 worktree，跑 **#242 那條**重現指令（`test_training_pipeline_fails_without_inputs`
+  ＋ `test_hive_table_dataset.py`，共 58 項；注意上面那條 `TestRebuildDatesFlag` 版本是 63 項）：
+
+  ```
+  有設 SPARK_CONF_DIR  → 58 passed              ← 看起來像沒事
+  沒設 SPARK_CONF_DIR  →  4 failed, 54 passed
+  ```
+
+  **CLAUDE.md 的 worktree pre-flight 就叫你 `export SPARK_CONF_DIR`**，所以很容易在同一個 shell
+  裡踩到——會誤以為「這條已經修好了」或「我的修法有效」。
+
+- ~~**待修**，尚未開票。修法方向是讓 CLI 那條路徑也 `enable_hive=True`，或讓測試用的 session
+  在 CLI 測試之後強制重建——但兩者都會動到 `utils/spark.py` 的單例語意，要另外評估。~~
+  **2026-08-31 開了 #242；2026-09-01 已修，見下一條。**
+
+- **已修（2026-09-01，採 #242 的修法 1）**：`tests/conftest.py` 的 `spark` fixture 拿到 session
+  之後檢查 `spark.sql.catalogImplementation`，不是 `hive` 就 `stop_spark_session()` 再建一次。
+  **停掉 context 才是關鍵**——catalog 由 SparkContext 的 SparkConf 決定，只重建 SparkSession
+  物件不會改變它。
+
+  - **擋得住的範圍＝吃 `spark` fixture 的測試**，不是全部。`utils/spark.py` 沒動，所以直接呼叫
+    `get_or_create_spark_session(..., enable_hive=True)` 的呼叫端仍會靜默拿到降級的 session。
+    目前 `src/` 沒有任何呼叫端傳 `True`（實查：只有 `tests/conftest.py` 與
+    `tests/test_utils/test_spark.py` 傳），所以無實害；要根治得補 #242 的修法 2
+    （在 `_build` 尾端加 post-condition），與本修法不衝突。
+  - **為什麼不採 #242 自己傾向的修法 2**：那條要改 `utils/spark.py` 的 session 建立語意，
+    是四條 pipeline 共用的接縫；而這個失效模式只在測試行程裡出現（生產路徑一律
+    `enable_hive=False`）。用改生產程式碼去修一個生產上不存在的情境，風險不對價。
+  - **回歸測試**＝`tests/test_utils/test_spark.py::TestTheSparkFixtureAlwaysHasHiveSupport`。
+    它擋掉**兩種**假綠：把 `catalogImplementation` 釘成 `in-memory`（否則 `SPARK_CONF_DIR`
+    會蓋掉症狀），並且斷言那個釘法真的生效——static conf 在已有 session 時會被 `getOrCreate`
+    靜默丟掉，少了這個斷言，修法被拿掉時測試照樣全綠。
 
 ## 5b. 弄壞驗證（break-it check）在未提交檔案上的還原坑（2026-07-08）
 
