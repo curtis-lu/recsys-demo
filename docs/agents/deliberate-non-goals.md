@@ -50,6 +50,7 @@
 | `calibration_snap_dates: []` 不比照 A23 擋掉 | 空清單時 `select_calibration_keys` 整池照收（`restrict_to_months_or_all`），校準集會收進 train 與 test 月份、該 test 月的評估變成 in-sample，而 A24 對空集合永遠成立、不出聲。與 A23 擋掉的 `train_snap_dates: []` 是同一個洞。使用者 2026-08-19 決定不擴，理由是 calibration 未來要移除 | 別順手把 calibration 加進 `train_snap_dates_errors`。也別記到 `--only-test-months` 頭上——旗標跳過那個 node，反而是比較安全的一邊，全量跑才會真的撞。calibration 移除後這條就可以刪 |
 | `kedro_design_philosophy.md`（repo 根目錄）留著不刪 | 使用者 2026-08-19 裁決：保留，當作**給人自行參考**的舊文件，靠檔頭既有的 DEPRECATED banner 標示它不是現行依據。#158 原本把「刪掉它」列為待辦，該條已改為裁決不做 | 別刪它，也別刪唯一指向它的 `docs/notes/2026-08-03-day1-doc-triage.md`（那是逐條比對的記錄）。看到「一份 403 行、開頭明說不要照著做的文件躺在根目錄」而想清掉之前，先看這一列——2026-08-19 就有人走到開 PR 才被攔下來 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
+| training cache 路徑的 token（`pipelines/training/steps/local_cache.py` 的 `_CACHE_PATH_LAYOUT`）留成裸字串，不換成會自己渲染的 tagged 物件 | 使用者 2026-08-31 裁決：先不動。審查（PR #132）判它 Primitive Obsession ＋ Repeated Switches，理由是「一個 token 的種類拆在兩處——成員判定（`_CACHE_LITERAL_TOKENS` 與 sentinel 常數）與渲染（`resolve_cache_path` 的 if/elif）——加第四種要同時改兩邊，而沒有東西把兩邊綁在一起」。**但該審查「忘一邊會靜默出錯」的判斷已被實測推翻**：一定會 raise（未登記的 token → `KeyError`；名字撞到值為 dict 的 `parameters` 鍵 → `TypeError`）。靜默寫錯路徑要撞到值為**字串**的頂層鍵，而那種鍵只有一個。所以這是可讀性問題（訊息指錯人），不是安全問題 | 別因為「不夠漂亮」就改。要動之前先確認第四種 token 真的出現了——第三種是最近才加進來的第一個，「加第四種會痛」目前仍是推測而非已發生的痛 |
 
 ## 二、延後中，且延後條件明確
 
