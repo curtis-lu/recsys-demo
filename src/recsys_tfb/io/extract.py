@@ -288,7 +288,7 @@ def _assert_feature_dtypes_numeric(
         )
 
 
-def _pdf_to_X(
+def pdf_to_X(
     pdf: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
@@ -369,7 +369,7 @@ def extract_Xy(
         pdf = handle.to_pandas()
     log_data_volume(logger, "extract_Xy.pdf", pdf, deep=True)
 
-    X = _pdf_to_X(pdf, preprocessor_metadata, parameters)
+    X = pdf_to_X(pdf, preprocessor_metadata, parameters)
     y = pdf[label_col].values
 
     log_data_volume(logger, "extract_Xy.X", X)

@@ -79,7 +79,7 @@ from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
 from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
-from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
+from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups, pdf_to_X
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -928,8 +928,6 @@ def predict_and_write_test_predictions(
         back from Hive — and landing it is also what lets a diagnosis-only
         resume skip this node rather than pay its partition listing again.
     """
-    from recsys_tfb.io.extract import _pdf_to_X
-
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]
     entity_cols = schema_cfg["entity"]
@@ -1071,7 +1069,7 @@ def predict_and_write_test_predictions(
             snap_dates_seen.add(snap_date)
             prods_seen.add(prod_name)
 
-            X = _pdf_to_X(part_pdf, preprocessor_metadata, parameters)
+            X = pdf_to_X(part_pdf, preprocessor_metadata, parameters)
             y_score = model.predict(X)
             score_uncalibrated = (
                 model.predict_uncalibrated(X) if is_calibrated else y_score

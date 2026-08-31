@@ -93,7 +93,7 @@ def main() -> None:
 
     import json
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.io.extract import _pdf_to_X
+    from recsys_tfb.io.extract import pdf_to_X
 
     parameters = load_parameters(args.conf_dir)
     schema = get_schema(parameters)
@@ -123,7 +123,7 @@ def main() -> None:
     print(f"target={args.target} 正例 query 數 = {len(pos_custs)}；取回列數 = {len(pdf)}")
 
     booster = lgb.Booster(model_file=args.model_file)
-    X = _pdf_to_X(pdf, preproc, parameters)
+    X = pdf_to_X(pdf, preproc, parameters)
     contrib = booster.predict(X, pred_contrib=True)  # (n, F+1)，末欄 bias
     feat_names = list(booster.feature_name())
     assert contrib.shape[1] == len(feat_names) + 1, "contrib 欄數與特徵數不符"

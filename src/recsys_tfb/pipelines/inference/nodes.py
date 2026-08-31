@@ -42,6 +42,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.models.feature_view import model_feature_view
@@ -273,8 +274,6 @@ def predict_and_write_scores(
         carries the partition bookkeeping ``validate_predictions`` needs to
         answer "is every chunk present" without scanning anything.
     """
-    from recsys_tfb.io.extract import _pdf_to_X
-
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
@@ -410,7 +409,7 @@ def predict_and_write_scores(
                 # name — _pdf_to_X applies the integer code to its own copy, so
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
-                X = _pdf_to_X(bucket_pdf, model_view, parameters)
+                X = pdf_to_X(bucket_pdf, model_view, parameters)
                 scores = (
                     model.predict_uncalibrated(X) if use_uncalibrated
                     else model.predict(X)

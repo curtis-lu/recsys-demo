@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.logging import log_data_volume
+from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.models.feature_view import model_feature_view
 
 from .attribution import feature_attributions
@@ -32,7 +33,6 @@ def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parame
         return {}
 
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.io.extract import _pdf_to_X
 
     top_k = int(cfg.get("top_k", 30))
     quadrant_min_rows = int(cfg.get("quadrant_min_rows", 10))
@@ -51,7 +51,7 @@ def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parame
 
     try:
         pdf = shap_population.reset_index(drop=True)
-        X = _pdf_to_X(pdf, model_view, parameters)
+        X = pdf_to_X(pdf, model_view, parameters)
         log_data_volume(logger, "quadrant.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
         items = pdf[item_col].values
@@ -147,7 +147,6 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
         return {}
 
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.io.extract import _pdf_to_X
 
     from .paths import cases_dir, diagnostics_dir
 
@@ -170,7 +169,7 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
 
     try:
         pdf = case_rows.reset_index(drop=True)
-        X = _pdf_to_X(pdf, model_view, parameters)
+        X = pdf_to_X(pdf, model_view, parameters)
         log_data_volume(logger, "cases.X", X)
         shap_values = feature_attributions(model, X, feature_cols)
 
