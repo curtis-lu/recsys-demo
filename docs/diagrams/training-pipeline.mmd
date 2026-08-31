@@ -19,29 +19,51 @@
 %%   ([ 綠膠囊 ])    別的 pipeline 會吃的產物
 %%   粗虛線邊        node 自己寫的表（Node(writes=…)），**不是**拓樸相依邊
 %%   虛線邊          宣告了但函式根本沒讀的參數：純排序用（本圖只有一條，見下）
-%%   [V][M][T][L]   接點記號，兩種方向：
-%%                  V/M/T 標在**產物**上，node 框內的「＋ V · M」代表它同時吃這幾個；
+%%   [V][P][M][T][L] 接點記號，兩種方向：
+%%                  V/P/M/T 標在**產物**上，node 框內的「＋ P · M」代表它同時吃這幾個；
 %%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃九個
 %%                  輸入，九條線畫出來會蓋掉整張圖。
-%%                  V=preprocessor_view（10 個消費者）、M=model（7 個）、
-%%                  T=train_parquet_handle（4 個）。
+%%                  V=preprocessor_view（5 個消費者）、P=preprocessor（6 個）、
+%%                  M=model（8 個）、T=train_parquet_handle（4 個）。
+%%                  **V 與 P 是兩份不同的東西，不是同一份的兩個名字**——見下方
+%%                  「為什麼有 V 也有 P」。
 %%   「全月讀回」    這條邊讀回來的是這個 model_version 底下**所有**月份（見下）。
 
+%% 為什麼有 V 也有 P——這是本圖第二違反直覺的一件事
+%%   preprocessor_view [V] 與 preprocessor [P] 是**兩份不同的東西**：
+%%   [P] 是 dataset pipeline 落地的 JSON；[V] 是 select_features 對它套一次
+%%   training.feature_selection.exclude 之後的產物，memory-only、不在 catalog 裡。
+%%   吃 [V] 的是**訓練鏈**（prepare_lgb_train_inputs、persist_sample_weight_report、
+%%   tune_hyperparameters、finalize_model、predict_and_write_test_predictions；
+%%   開 calibration 時多一個 calibrate_model，共 6 個）。
+%%   吃 [P] 的是 select_features 自己，加上**五個 diagnosis node**
+%%   （feature_statistics、gain_ledger、shap_diagnostics、quadrant_profiles、
+%%   quadrant_cases）。
+%%   **這個切分是刻意的，不是漏接線**：diagnosis 改吃落地的 [P] 之後，只跑診斷的
+%%   接續執行不會再把 select_features 與整條訓練鏈拉回來——那正是這次改動要買的東西。
+%%   代價寫在 compute_feature_statistics 的框裡：它同時也吃 model，於是被推到
+%%   calibrate_model 之後。
+%%   哪個 node 才是特徵欄的權威，答案是模型自己：diagnosis 從 model.feature_names()
+%%   建 view，[P] 只提供其餘 metadata。
+
 %% 這張圖最違反直覺的一件事：Spark 在中間被刻意關掉
-%%   四個 cache node 收到的是 Spark DataFrame，但**沒有一個 node 讀它的資料**：
-%%   _materialize_parquet_handle 只拿 df.sql_ctx.sparkSession 取得 session，資料
-%%   走 Hadoop FileSystem 的 copyToLocalFile 從 Hive table location 直接搬到 driver-local
-%%   parquet（經 spark._jvm 的 JVM bridge，不依賴 PATH 上的 hadoop CLI，也不起 Spark job）
-%%   （nodes.py:275 / :168）。df 不是 Spark DataFrame 時 raise TypeError——它是
-%%   session 的把手，不是資料的入口。
-%%   跨出 Spark 之後，tune_hyperparameters 的**函式體第一行**就呼叫
-%%   release_spark_session()（nodes.py:550）：HPO 到 finalize 可能跑數小時，閒置的
+%%   四個 cache node 收到的是 Spark DataFrame，但**沒有一個 node 讀它的資料**：只拿
+%%   df.sql_ctx.sparkSession 取得 session，資料走 Hadoop FileSystem 的 copyToLocalFile
+%%   從 Hive table location 直接搬到 driver-local parquet（經 spark._jvm 的 JVM bridge，
+%%   不依賴 PATH 上的 hadoop CLI，也不起 Spark job）。
+%%   df 不是 Spark DataFrame 時 raise TypeError——它是 session 的把手，不是資料的入口。
+%%   機制在 pipelines/training/steps/local_cache.py：型別守衛＝require_spark_input，
+%%   搬運＝populate_cache_from_hive → utils/hdfs.py::copy_hdfs_to_local；
+%%   「什麼算 cache hit」這個**決策**則刻意留在 nodes.py 的四個 cache_*_model_input
+%%   node body 裡（ADR-0014 決定 1，把舊的 _materialize_parquet_handle 拆掉的那次）。
+%%   跨出 Spark 之後，tune_hyperparameters 的**函式體第一個敘述**就呼叫
+%%   release_spark_session()（utils/spark.py）：HPO 到 finalize 可能跑數小時，閒置的
 %%   application 會被叢集回收、context 在 JVM 端死掉，之後寫 Hive 就撞
 %%   IllegalStateException。放第一行而不是新增一個 DAG 節點，是因為 Runner 循序
 %%   執行，「函式第一行」在構造上等於「前面的節點都跑完了」；零入度節點的排序取決於
 %%   宣告位置，靠不住。
 %%   session 由第一個再碰 Hive 的呼叫自動重建（HiveTableDataset 走
-%%   get_or_create_spark_session() 無參數版 → _rebuild_or_active，utils/spark.py:159），
+%%   get_or_create_spark_session() 無參數版 → utils/spark.py::_rebuild_or_active），
 %%   實際上就是 predict 節點查「哪些分區已經寫過」的那一刻。
 %%   所以圖上三個 subgraph 的分界不是美觀分組，是 Spark 活著／死著的分界。
 
@@ -51,8 +73,9 @@
 %%   的是這個 model_version 累積過的**所有** test 月份。
 %%   inference 圖上同樣標記的邊，兩個消費者都會自己呼叫 restrict_to_snap_dates 裁掉
 %%   歷史月份；這裡**刻意不裁**——那個 mAP 本來就是要涵蓋這個模型評估過的全部月份。
-%%   代價寫在 nodes.py:1014-1028：item 改名留下的 surplus 分區重跑也刪不掉，會一直
-%%   混進這個 model_version 的 metric，所以那裡發 warning 而不是靜靜跳過。
+%%   代價由 steps/predict_months.py::warn_about_surplus_partitions 說出來：item 改名
+%%   留下的 surplus 分區重跑也刪不掉，會一直混進這個 model_version 的 metric，所以
+%%   那裡發 warning 而不是靜靜跳過。
 
 %% 增量在這條 pipeline 出現三次，三種機制
 %%   1. parquet 快取（cache_* 四個 node）：命中與否只看 _SUCCESS 在不在，**不看新舊**。
@@ -60,7 +83,7 @@
 %%   2. 預測（predict）：一個 (model_version, snap_date) 的預測是不可變產品——
 %%      model_version 雜湊了所有定義模型的東西，同模型同月份預測逐位元相同，重算沒有
 %%      收益。「完整」的定義是「這個月已寫的 item 分區恰好等於快取裡的 item 集合」，
-%%      不是「有分區就算數」（nodes.py:956）。
+%%      不是「有分區就算數」（steps/predict_months.py::months_already_written）。
 %%   3. HPO（tune_hyperparameters）：Optuna study 以 search_id 為鍵持久化在
 %%      data/models/_hpo/<search_id>/，崩潰後只補剩下的 trial，調高 n_trials 是延長
 %%      同一場搜尋。
@@ -82,7 +105,7 @@
 %%   docstring）。掛它的理由是排序：那個 node 的三個資料輸入都沒有 node producer，
 %%   Kahn 拓樸排序會把它浮到 predict 之前，讀到還沒寫入的預測。
 %%   compute_test_mAP_spark 的同名輸入不是虛線——它真的被讀了，但只進 logger
-%%   （nodes.py:1391），資料一樣是從 Hive 讀回來的。
+%%   （該函式開頭的 logger.info(... manifest=%s)），資料一樣是從 Hive 讀回來的。
 
 %% 為什麼這張圖沒有六角形
 %%   dataset 有 Layer-2 資料閘、inference 有發布閘，training 一個都沒有：檢查全部在
@@ -106,7 +129,7 @@
 %%   quadrant 那一支（select_shap_population → profiles / cases）在
 %%   diagnostics.shap.quadrant_enabled=false 時回 (None, None)，選樣或畫圖失敗也只
 %%   log 不中斷訓練。邊照樣存在，只是流的是 None。
-%%   tune_hyperparameters 的 HPO 搜尋診斷（write_hpo_diagnostics，nodes.py:739）同理：
+%%   tune_hyperparameters 的 HPO 搜尋診斷（diagnosis.hpo::write_hpo_diagnostics）同理：
 %%   失敗只 warning。它寫進 diagnostics_dir/hpo/、由 log_experiment 的 log_artifacts
 %%   撿走，是 architecture-constraints.md R4 登記裡唯一「間接寫入、AST 掃不到」的一筆。
 
@@ -120,7 +143,8 @@
 %%     cache_calibration_model_input，且 finalize_model 的輸出改名為 trained_model、
 %%     中間插入 calibrate_model 才產出 `model`。這比 dataset 圖不畫的那個分支更動主鏈
 %%     ——`model` 這個頭牌產物換了生產者——但下游每一條邊都不變（大家還是吃 `model`），
-%%     所以仍然不畫，改在這裡明說。要看它的形狀請直接讀 pipeline.py:71-132。
+%%     所以仍然不畫，改在這裡明說。要看它的形狀請直接讀 pipeline.py::create_pipeline
+%%     裡的兩個 `if enable_calibration:` 區塊與 final_model_output。
 %%   - --rebuild-dates / --fresh-hpo：只推翻「跳過」的決定，跳過的與重算的走同一條線。
 %%   - HPO 的 journal / checkpoint 檔案（data/models/_hpo/<search_id>/）：node 內部的
 %%     續跑機制，不是 catalog 條目，也不改變任何一條邊。
@@ -154,11 +178,11 @@ flowchart TB
     src_test[("test_model_input")]
   end
 
-  art_prep[["preprocessor<br/><small>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</small>"]]
+  art_prep[["preprocessor　<b>[P]</b><br/><small>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json<br/>落地：5 個 diagnosis node 直接吃它，不經 select_features</small>"]]
 
   %% ---------------- 特徵選取：唯一的 chokepoint -------------------
   n_selfeat["select_features<br/><small>套一次 training.feature_selection.exclude<br/>空選取＝原樣傳出，非選取的 run 逐位元不變</small>"]
-  d_view(["preprocessor_view　<b>[V]</b><br/><small>10 個碰模型的 node 都吃這一份</small>"])
+  d_view(["preprocessor_view　<b>[V]</b><br/><small>memory-only：訓練鏈的 5 個 node 吃這一份</small>"])
 
   art_prep --> n_selfeat
   n_selfeat --> d_view
@@ -191,7 +215,7 @@ flowchart TB
     o_model(["model　★　<b>[M]</b><br/><small>inference / evaluation 也吃</small>"])
   end
 
-  d_view -- "其餘 9 個消費者見 [V] 記號" --> n_preplgb
+  d_view -- "其餘 4 個消費者見 [V] 記號" --> n_preplgb
   d_h_train --> n_preplgb
   d_h_traindev --> n_preplgb
   n_preplgb --> d_lgb_train
@@ -209,8 +233,8 @@ flowchart TB
   n_final --> o_model
 
   %% ------------- 樣本權重診斷：自己寫檔，沒有 pipeline 消費者 -------------
-  n_sw["persist_sample_weight_report<br/><small>＋ T · V ・ 每次都跑（不受 lgb bin 快取影響）<br/>自己寫 sample_weight_report.json 進模型版本目錄</small>"]
-  d_sw(["sample_weight_report<br/><small>無 pipeline 消費者；CLI 於 run 後讀檔併進 manifest</small>"])
+  n_sw["persist_sample_weight_report<br/><small>＋ T · V ・ 每次都跑（不受 lgb bin 快取影響）<br/>node 只 return dict，落地交給 catalog</small>"]
+  d_sw(["sample_weight_report<br/><small>catalog 條目（JSONDataset）・ 無 pipeline 消費者<br/>CLI 於 run 後讀檔併進 manifest</small>"])
 
   d_h_train --> n_sw
   n_sw --> d_sw
@@ -244,12 +268,12 @@ flowchart TB
   %% -------------------------- 診斷產物 ---------------------------
   subgraph DIAG[" 診斷產物：driver-local pandas；quadrant 兩支是 best-effort "]
     direction TB
-    n_fstat["compute_feature_statistics<br/><small>＋ T · V ・ 只讀抽中的列</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
+    n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 calibrate_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])
-    n_gain["compute_gain_ledger<br/><small>＋ M · V ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger<br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>唯一不進 MLflow 的診斷</small>"])
-    n_shap["compute_shap_diagnostics<br/><small>＋ M · V ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])
-    n_qprof["compute_quadrant_profiles<br/><small>＋ M · V ・ per-(item×象限) 平均 signed profile</small>"] --> o_qprof(["quadrant_profiles　<b>[L]</b>"])
-    n_qcase["compute_quadrant_cases<br/><small>＋ M · V ・ 每格極值案例單列圖</small>"] --> o_qcase(["cases_manifest　<b>[L]</b>"])
+    n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger<br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>唯一不是 log_experiment 輸入的診斷（沒有 scalar 進 MLflow）<br/>檔案本身仍隨 log_artifacts 整個 diagnostics/ 上傳</small>"])
+    n_shap["compute_shap_diagnostics<br/><small>＋ M · P ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])
+    n_qprof["compute_quadrant_profiles<br/><small>＋ M · P ・ per-(item×象限) 平均 signed profile</small>"] --> o_qprof(["quadrant_profiles　<b>[L]</b>"])
+    n_qcase["compute_quadrant_cases<br/><small>＋ M · P ・ 每格極值案例單列圖</small>"] --> o_qcase(["cases_manifest　<b>[L]</b>"])
   end
 
   d_h_train --> n_fstat
@@ -275,7 +299,7 @@ flowchart TB
   class src_train,src_traindev,src_val,src_test src
   class art_prep art
   class n_selfeat,n_c_train,n_c_traindev,n_c_val,n_c_test,n_preplgb,n_tune,n_final,n_sw,n_predict,n_map,n_selpop,n_fstat,n_fimp,n_gain,n_shap,n_qprof,n_qcase nd
-  class d_bestp,d_besti,d_hpomodel,d_manifest,o_evalres,o_fstat,o_fimp,o_shap,o_qprof,o_qcase data
-  class d_view,d_h_train,d_h_traindev,d_h_val,d_h_test,d_lgb_train,d_lgb_traindev,d_sw,d_pop,d_cases mem
+  class d_bestp,d_besti,d_hpomodel,d_manifest,d_sw,o_evalres,o_fstat,o_fimp,o_shap,o_qprof,o_qcase data
+  class d_view,d_h_train,d_h_traindev,d_h_val,d_h_test,d_lgb_train,d_lgb_traindev,d_pop,d_cases mem
   class o_model,o_pred,o_gain out
   class n_log sink
