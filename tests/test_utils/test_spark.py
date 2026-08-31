@@ -1,4 +1,9 @@
-"""Tests for recsys_tfb.utils.spark.get_or_create_spark_session."""
+"""Tests for recsys_tfb.utils.spark.get_or_create_spark_session.
+
+Plus one guard on ``tests/conftest.py``'s ``spark`` fixture: it lives here
+because it turns on the same JVM-singleton semantics the rest of this file
+exercises (#242).
+"""
 
 import pytest
 from pyspark.sql import SparkSession
@@ -440,3 +445,35 @@ class TestReleaseSparkSession:
         from recsys_tfb.utils.spark import release_spark_session
 
         assert release_spark_session({}) is False
+
+
+class TestTheSparkFixtureAlwaysHasHiveSupport:
+    """Regression guard for #242: a leaked non-Hive session must not survive.
+
+    Why the repair exists is documented where it lives, in ``tests/conftest.py``'s
+    ``spark`` fixture. What matters here is that this test can go green for two
+    wrong reasons, so both are asserted away rather than assumed.
+    """
+
+    def test_fixture_rebuilds_when_the_live_session_has_no_hive(self, request):
+        """The two false greens, and what stops each.
+
+        1. ``spark.sql.catalogImplementation`` is pinned rather than left to
+           default: under ``SPARK_CONF_DIR=conf/spark-local`` the default is
+           already ``hive``, so omitting it would make this test pass without
+           exercising anything.
+        2. That pin only takes effect while no SparkContext is running — it is a
+           static conf, which ``getOrCreate`` drops silently when it hands back
+           an existing session. The autouse ``_stop_session_between_tests``
+           guarantees an empty process, but it does so invisibly; asserting on
+           ``leaked`` turns that hidden precondition into one that goes red.
+        """
+        leaked = get_or_create_spark_session(
+            _minimal_configs({"spark.sql.catalogImplementation": "in-memory"}),
+            enable_hive=False,
+        )
+        assert leaked.conf.get("spark.sql.catalogImplementation") == "in-memory"
+
+        session = request.getfixturevalue("spark")
+
+        assert session.conf.get("spark.sql.catalogImplementation") == "hive"
