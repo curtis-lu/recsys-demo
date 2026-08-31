@@ -26,7 +26,7 @@ CHECKPOINT_META = "best_meta.json"
 
 
 def hpo_study_dir(search_id: str) -> Path:
-    """data/models/_hpo/<search_id>/ (relative; mirrors diagnostics_dir 慣例)."""
+    """data/models/_hpo/<search_id>/ (relative; mirrors the diagnostics_dir convention)."""
     return Path("data") / "models" / "_hpo" / str(search_id)
 
 
@@ -93,7 +93,8 @@ def load_checkpoint(study_dir: Path, algorithm: str) -> Optional[dict]:
     """Load best-so-far checkpoint; None if absent/unreadable.
 
     Returns {score, iteration, params, trial_number, model(ModelAdapter)}.
-    ``iteration`` 取自 meta（重載的 LightGBM booster 不保證保留 best_iteration）。
+    ``iteration`` comes from the meta file: a reloaded LightGBM booster is not
+    guaranteed to have kept its ``best_iteration``.
     """
     from recsys_tfb.models.base import get_adapter
 

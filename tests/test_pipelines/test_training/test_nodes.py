@@ -893,7 +893,7 @@ def test_tune_defaults_ranking_metric(monkeypatch):
         return X, y, g
 
     monkeypatch.setattr(
-        "recsys_tfb.io.extract.extract_Xy_with_groups", fake_extract
+        nodes, "extract_Xy_with_groups", fake_extract
     )
 
     class FakeLgbHandle:
@@ -950,7 +950,7 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
         return X, y, g
 
     monkeypatch.setattr(
-        "recsys_tfb.io.extract.extract_Xy_with_groups", fake_extract_groups
+        nodes, "extract_Xy_with_groups", fake_extract_groups
     )
 
     real_dataset = lgb.Dataset
@@ -1112,16 +1112,23 @@ def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
     the second assertion catches it. Such a write would also put the function
     back in the R4 direct-write registry
     (tests/test_core/test_architecture_constraints.py).
+
+    It patches the attribute on ``nodes`` rather than on ``diagnosis.model``
+    because that is the name a re-added write would resolve: ``nodes`` binds
+    ``diagnostics_dir`` at import time. Patch the defining module instead and
+    the trap springs on nothing -- the write would go to the real version dir,
+    ``version_dir`` would stay absent, and the assertion below would pass.
     """
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training import nodes as nodes_mod
     from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
 
     p = tmp_path / "train.parquet"
     pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
     version_dir = tmp_path / "models" / "abc123"
     monkeypatch.setattr(
-        "recsys_tfb.diagnosis.model.diagnostics_dir",
+        nodes_mod, "diagnostics_dir",
         lambda params: version_dir / "diagnostics",
     )
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],

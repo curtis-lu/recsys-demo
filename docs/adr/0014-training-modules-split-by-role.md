@@ -564,6 +564,18 @@ cust_id_col = entity_cols[0]
 
 **但 #199 列入 training 重構的完成定義**（使用者 2026-08-29）：不做完不算重構完成，只是它是獨立的最後一張票。動它要同時改 5 個模組，塞進重構 PR 會讓 diff 讀不動。
 
+### 修訂（2026-08-31，實作 #235 時）
+
+**上表前兩列已落地，第三列的擴散範圍被低估了。**
+
+- `_composite_key_series` ／ `_translate_weight_table` 已改名為 `composite_key_series` ／
+  `translate_weight_table`。「誰在用」那一欄的 `training/nodes.py:48` 也已過期——#232 把跨模組的
+  src 消費者搬到 `pipelines/training/steps/sample_weights.py`，改名同時動的是那裡。
+- `_pdf_to_X` 那一列的「動它要同時改 5 個模組」只算了 import ／呼叫端。**另有 4 個模組在
+  docstring 或註解裡提到這個名字**（`preprocessing.py`、`core/consistency.py`、
+  `models/feature_view.py`、`pipelines/inference/steps/feature_view.py`），改名不一併處理
+  就會留下 4 處指向不存在識別字的假引用。#199 的範圍要按 9 個模組估，不是 5 個。
+
 ## 5. `_REQUIRED_COLUMNS`（issue #220）
 
 見決定 5。動到 A11、跨 evaluation。

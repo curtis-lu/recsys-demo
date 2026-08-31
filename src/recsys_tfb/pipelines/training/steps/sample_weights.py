@@ -22,7 +22,7 @@ from typing import Optional
 
 import pyarrow.dataset as pads
 
-from recsys_tfb.io.extract import _composite_key_series, _translate_weight_table
+from recsys_tfb.io.extract import composite_key_series, translate_weight_table
 
 
 def distinct_weight_keys(train_handle, weight_keys: list) -> Optional[set]:
@@ -38,7 +38,7 @@ def distinct_weight_keys(train_handle, weight_keys: list) -> Optional[set]:
     if any(k not in ds.schema.names for k in weight_keys):
         return None
     pdf = ds.to_table(columns=list(weight_keys)).to_pandas().drop_duplicates()
-    return set(_composite_key_series(pdf, weight_keys).tolist())
+    return set(composite_key_series(pdf, weight_keys).tolist())
 
 
 def encoded_key(
@@ -56,6 +56,6 @@ def encoded_key(
     such an entry from the weight table for the same reason, so ``None`` here
     and "no weight applied" there are the same event.
     """
-    translated, _ = _translate_weight_table(
+    translated, _ = translate_weight_table(
         {key: weight}, weight_keys, category_mappings, identity_columns)
     return next(iter(translated), None)

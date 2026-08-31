@@ -23,7 +23,7 @@ from recsys_tfb.io.handles import ParquetHandle
 logger = logging.getLogger(__name__)
 
 
-def _composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
+def composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
     """Per-row '|'-joined composite key from ``weight_keys`` columns (str-cast).
 
     Single source for the lookup-key construction so the weight mapping and the
@@ -36,7 +36,7 @@ def _composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
     return keys
 
 
-def _translate_weight_table(
+def translate_weight_table(
     sample_weights: dict,
     weight_keys: list,
     category_mappings: dict,
@@ -102,7 +102,7 @@ def _compute_row_weights(
     """
     if not sample_weights or not weight_keys:
         return np.ones(len(pdf), dtype=np.float64)
-    keys = _composite_key_series(pdf, weight_keys)
+    keys = composite_key_series(pdf, weight_keys)
     return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
 
 
@@ -119,7 +119,7 @@ def _row_weights_from_pdf(
     Encode-aware: weight-key columns that are *encoded features* (present in
     ``preprocessor_metadata["category_mappings"]`` and NOT identity columns)
     are stored as int codes in the parquet.  The config table is translated
-    via ``_translate_weight_table`` before matching, so callers can write
+    via ``translate_weight_table`` before matching, so callers can write
     human-readable values (e.g. ``"hnw"``) in the YAML and still get correct
     per-row weights.  Keys with unknown category values are dropped (cannot
     match any row) and a WARNING is emitted.
@@ -156,7 +156,7 @@ def _row_weights_from_pdf(
 
     category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
     identity_cols = get_schema(parameters)["identity_columns"]
-    translated, unknown = _translate_weight_table(
+    translated, unknown = translate_weight_table(
         sw, weight_keys, category_mappings, identity_cols)
     if unknown:
         logger.warning(
@@ -172,7 +172,7 @@ def _row_weights_from_pdf(
     n_adjusted = int((w != 1.0).sum())
     if n_adjusted == 0:
         sample_data_keys = (
-            _composite_key_series(pdf, weight_keys).drop_duplicates().head(5).tolist()
+            composite_key_series(pdf, weight_keys).drop_duplicates().head(5).tolist()
         )
         logger.warning(
             "sample_weight matched 0 of %d rows — weight_keys=%s; sample "

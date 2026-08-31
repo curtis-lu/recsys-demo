@@ -1,4 +1,61 @@
-"""Pure functions for the training pipeline."""
+"""Fourteen of the training pipeline's twenty-one nodes; the other seven below.
+
+This module is the home of the pipeline's ML story: a reader who opens it sees
+each decision this pipeline makes about the data, without jumping files. The
+mechanisms those decisions are expressed in live in ``steps/``, one module per
+concern (``local_cache``, ``predict_months``, ``search_space``, ``hpo_resume``,
+``hpo_scoring``, ``refit``, ``sample_weights``, ``experiment_log``).
+``cache_sources`` sits beside this file instead, because ``__main__.py`` reads
+it before the pipeline starts. ADR-0014 draws both lines and
+``docs/agents/pipeline-node-design.md`` is where the placement criterion and
+the node-body shape are written down.
+
+**Nothing in here is a pure function**, and the import list is the tell: these
+nodes delete cache directories (``shutil.rmtree``), copy Hive partitions onto
+driver-local disk, stop the SparkSession in the middle of the DAG, write Hive
+one partition at a time, and open an MLflow run. Each of those is argued at its
+own call site. What the module promises is not purity but legibility: the
+*decision* behind every side effect is readable here rather than buried in a
+helper.
+
+Where the other seven nodes are
+-------------------------------
+``pipeline.py`` registers 21 nodes. Fourteen are ``def``-ed in this file. The
+seven diagnosis nodes are ``def``-ed under ``recsys_tfb.diagnosis.model``:
+
+- ``compute_feature_statistics``  -> ``diagnosis/model/feature_stats.py``
+- ``compute_feature_importance``  -> ``diagnosis/model/importance.py``
+- ``compute_gain_ledger``         -> ``diagnosis/model/gain_ledger.py``
+- ``compute_shap_diagnostics``    -> ``diagnosis/model/shap_per_item.py``
+- ``select_shap_population``      -> ``diagnosis/model/population_spark.py``
+- ``compute_quadrant_profiles``   -> ``diagnosis/model/shap_cases.py``
+- ``compute_quadrant_cases``      -> ``diagnosis/model/shap_cases.py``
+
+They stay there deliberately, and this list is the price of that: the usual
+rule -- one pipeline, one ``nodes.py`` -- does not hold here, so the way back
+has to be written down. Three reasons they are not moved (ADR-0014 decision
+6). Their home is undecided: splitting diagnosis into a pipeline of its own
+is an open question, and a move now would be undone by it. Moving them means
+seven pass-through shells over ~1400 lines of helper, which is precisely the
+shape rule 3 exists to forbid; making them real nodes instead would mean
+floating that module's decisions up first, a separate piece of work. And a
+shell is one more file to open when chasing a bug — the cost this list is
+meant to pay off, not to add to.
+
+This module imports one underscore-prefixed name from elsewhere: ``_pdf_to_X``
+from ``recsys_tfb.io.extract``, inside :func:`predict_and_write_test_predictions`.
+It is not registered as an exception anywhere. Five src modules import or
+call it — ``io/extract.py`` where it is defined, this file,
+``inference/nodes.py``, and ``diagnosis/model/shap_per_item.py`` and
+``shap_cases.py`` — and four more name it in prose that a rename would
+leave pointing at nothing (``preprocessing.py``, ``core/consistency.py``,
+``models/feature_view.py``, ``inference/steps/feature_view.py``). That
+blast radius is why it is issue #199 and not this file's business;
+``inference/nodes.py`` keeps the same import and says the same thing. The
+import stays in the function body so that the one name breaking the rule is
+read next to the call that needs it, rather than sitting in the module
+header looking approved.
+"""
 
 import logging
 import shutil
@@ -7,13 +64,26 @@ from pathlib import Path
 import mlflow
 import optuna
 import pandas as pd
+import pyarrow.dataset as pads
+from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
+from recsys_tfb.core.group_utils import (
+    default_metric_for_objective,
+    is_ranking_objective,
+    to_contiguous_groups,
+)
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.versioning import compute_search_id
+from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
+from recsys_tfb.diagnosis.model import diagnostics_dir
+from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+from recsys_tfb.models.feature_selection import apply_feature_selection
 from recsys_tfb.pipelines.training.steps import (
     experiment_log,
     hpo_resume,
@@ -275,6 +345,13 @@ def cache_test_model_input(
     misconfigured environment is rejected even when no months are configured —
     the one behavioural difference from the per-month helper this replaced, and
     it only tightens a path that could not have produced a usable handle anyway.
+
+    The ``raise`` in the body is a **post-condition**, not a pre-check: it runs
+    after this node has removed a directory and asks whether the removal took.
+    Nothing upstream can be at fault for it, so it is not a "the producer did
+    not run" report — a surviving ``_SUCCESS`` means the drop this node just
+    performed did not happen, and the person to find owns the local disk, not
+    the input.
     """
     # Pre-check — a non-Spark input is a misconfigured environment, not a cache
     # problem. Say so before a path is composed for it.
@@ -401,8 +478,6 @@ def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     calibration, test scoring, and diagnostics. Empty/absent selection returns
     the input unchanged, so non-selection runs are byte-identical.
     """
-    from recsys_tfb.models.feature_selection import apply_feature_selection
-
     return apply_feature_selection(preprocessor_metadata, parameters)
 
 
@@ -440,12 +515,14 @@ def prepare_lgb_train_inputs(
 # ---------------------------------------------------------------------------
 
 def _resolve_search_id(parameters: dict) -> str:
-    """HPO search_id：production 由 __main__ 注入；單測/直呼則就地計算。"""
+    """The HPO ``search_id``: injected by ``__main__`` in production.
+
+    Computed here only for unit tests and direct calls, which have no
+    ``__main__`` to inject it.
+    """
     sid = parameters.get("search_id")
     if sid:
         return str(sid)
-    from recsys_tfb.core.versioning import compute_search_id
-
     cvi = parameters.get("calibration_variant_id")
     if not isinstance(cvi, str) or cvi.startswith("__"):  # "__none__" placeholder
         cvi = None
@@ -475,21 +552,32 @@ def tune_hyperparameters(
     triggered, otherwise the iteration with the lowest val loss within
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
-    """
-    # HPO 與其後的 finalize/calibrate 全是 driver-local:Spark 從這裡到
-    # predict_and_write_test_predictions 完全閒置,可能數小時。閒置的 application
-    # 會被叢集端回收,context 在 JVM 端死掉,之後寫 Hive 就撞 IllegalStateException。
-    # 主動釋放,由 predict 節點依 canonical configs 重建。
-    #
-    # 放在函式體第一行(而非新增 DAG 節點):Runner 循序執行,「第一行」在構造上就等於
-    # 「前面的節點都跑完」;零入度節點的排序則取決於宣告位置,靠不住。
-    #
-    # 注意:fb0d4c4 也曾在此 stop 過 session,並在 85b28699 被移除——那次是誤診效能
-    # 問題(真因是 OMP thread oversubscription),且當時的重建路徑無法處理 JVM 端
-    # 死亡(只處理 Python 端 stop)。這次不同:釋放是目的,且重建對兩種死法都有效。
-    release_spark_session(parameters)
 
-    from recsys_tfb.io.extract import extract_Xy_with_groups
+    The ``raise`` in the body is a **pre-check** on config: ``hpo_objective``
+    has to name a score this pipeline can compute. A25 rejects the same value
+    at CLI entry, so a run that reaches this line built ``parameters`` without
+    passing that gate (tests, direct calls). It is a runtime backstop, and the
+    person to find is whoever wrote the config, not whoever produced the data.
+    """
+    # HPO and everything after it (finalize / calibrate) is driver-local: Spark
+    # sits completely idle from here until predict_and_write_test_predictions,
+    # possibly for hours. An idle application gets reclaimed by the cluster, the
+    # context dies on the JVM side, and the Hive write that comes later hits
+    # IllegalStateException. Release it deliberately; the predict node rebuilds
+    # it from the canonical configs.
+    #
+    # On the first line of the function body (rather than as a new DAG node):
+    # the Runner runs sequentially, so "first line" is structurally the same as
+    # "every preceding node has finished"; the ordering among zero-in-degree
+    # nodes depends on declaration position and cannot be relied on.
+    #
+    # Note: fb0d4c4 also stopped the session here, and 85b28699 removed it —
+    # that time was a misdiagnosed performance problem (the real cause was OMP
+    # thread oversubscription), and the rebuild path of the day could not handle
+    # a JVM-side death (it only handled a Python-side stop). This time is
+    # different: releasing is the point, and the rebuild works for both ways of
+    # dying.
+    release_spark_session(parameters)
 
     training_params = parameters["training"]
     n_trials = training_params["n_trials"]
@@ -505,8 +593,6 @@ def tune_hyperparameters(
             f"unknown training.hpo_objective {hpo_objective!r}; "
             f"allowed: {', '.join(HPO_OBJECTIVES)}"
         )
-
-    from recsys_tfb.core.group_utils import default_metric_for_objective
 
     # Local copy: defaulting the ranking metric must not mutate the shared
     # `parameters` dict (it is still written verbatim to manifest.json).
@@ -624,13 +710,21 @@ def tune_hyperparameters(
         hpo_objective, scorer.best["score"], best_iteration, best_params,
     )
 
-    # HPO 搜尋診斷：best-effort 側輸出，衍生自本地 study。失敗只 warning、絕不影響
-    # 回傳（診斷 bug 不得逼你重跑 HPO）。不新增 DAG node、不改本函式 outputs → 對
-    # RESUME_CONTRACTS 隱形。產物寫進 diagnostics_dir/hpo/，由 log_experiment 的
-    # log_artifacts 撿走。見 docs/superpowers/specs/2026-07-15-hpo-search-diagnostics-design.md
+    # HPO search diagnostics: a best-effort side output derived from the local
+    # study. Every failure of the call below only warns and never touches the
+    # return value — a bug in the diagnostics must not be able to force an HPO
+    # re-run. What the guard does NOT cover is importing the subtree: that
+    # import sits at module level (see the header), so an ImportError there
+    # stops the run before the first trial instead of after the whole search —
+    # the better side to fail on, and free today: recsys_tfb.diagnosis.hpo
+    # imports optuna (already imported here), the stdlib, and one internal
+    # paths module, and defers its plotting import into a function body.
+    # It adds no DAG node and does not change this function's outputs, so it
+    # is invisible to RESUME_CONTRACTS. The artifacts land in
+    # diagnostics_dir/hpo/ and are picked up by log_experiment's log_artifacts.
+    # See
+    # docs/superpowers/specs/2026-07-15-hpo-search-diagnostics-design.md
     try:
-        from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
-
         write_hpo_diagnostics(
             study, search_space, parameters,
             search_id=search_id, hpo_objective=hpo_objective, seed=seed,
@@ -677,12 +771,6 @@ def finalize_model(
     # matters here: .get would hand this line None, not "hpo_best", and None
     # would fall through to a silent full refit.
 
-    from recsys_tfb.core.group_utils import (
-        default_metric_for_objective,
-        is_ranking_objective,
-        to_contiguous_groups,
-    )
-
     training_params = parameters["training"]
     seed = parameters.get("random_seed", 42)
     algorithm = training_params.get("algorithm", "lightgbm")
@@ -704,8 +792,6 @@ def finalize_model(
     cat_idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols] or None
 
     if is_ranking_objective(objective):
-        from recsys_tfb.io.extract import extract_Xy_with_groups
-
         with log_step(logger, "extract_features"):
             X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
                 train_parquet_handle, preprocessor_metadata, parameters,
@@ -733,8 +819,6 @@ def finalize_model(
             feat_cols, cat_idx, group=grp,
         )
     else:
-        from recsys_tfb.io.extract import extract_Xy
-
         with log_step(logger, "extract_features"):
             X_tr, y_tr, w_tr = extract_Xy(
                 train_parquet_handle, preprocessor_metadata, parameters,
@@ -784,8 +868,6 @@ def calibrate_model(
     parameters: dict,
 ) -> ModelAdapter:
     """Wrap model with probability calibration."""
-    from recsys_tfb.io.extract import extract_Xy
-
     method = (
         parameters.get("training", {})
         .get("calibration", {})
@@ -846,8 +928,6 @@ def predict_and_write_test_predictions(
         back from Hive — and landing it is also what lets a diagnosis-only
         resume skip this node rather than pay its partition listing again.
     """
-    import pyarrow.dataset as pads
-
     from recsys_tfb.io.extract import _pdf_to_X
 
     schema_cfg = get_schema(parameters)
@@ -1059,14 +1139,15 @@ def log_experiment(
     names are read by people and dashboards outside this repo, and renaming one
     fails silently: the run still succeeds and a chart just stops having a line.
     """
-    from recsys_tfb.diagnosis.model import diagnostics_dir
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")
     experiment_name = mlflow_params.get("experiment_name", "recsys_tfb")
-    # MLflow logging 是 best-effort 的 sink node（DAG 終端、無下游依賴）。
-    # tracking server 不可用或版本不相容（例如 client 3.x 對舊 server 呼叫
-    # /api/2.0/mlflow/logged-models 收到 404）時，預設記 warning 後讓 pipeline
-    # 跑完，不讓 experiment logging 拖垮整個 training。需硬失敗時設 strict: true。
+    # MLflow logging is a best-effort sink node (terminal in the DAG, nothing
+    # downstream depends on it). When the tracking server is unavailable or
+    # version-incompatible — a 3.x client calling /api/2.0/mlflow/logged-models
+    # on an older server gets a 404 — the default is to warn and let the
+    # pipeline finish, rather than let experiment logging take the whole
+    # training down with it. Set strict: true to fail hard instead.
     strict = mlflow_params.get("strict", False)
     training_cfg = parameters.get("training", {})
     algorithm = training_cfg.get("algorithm", "lightgbm")
@@ -1159,10 +1240,6 @@ def compute_test_mAP_spark(
     *previous* run's copy rather than re-running predict. The trade is argued
     once, at that entry in ``conf/base/catalog.yaml``.
     """
-    from pyspark.sql import functions as F
-
-    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
-
     schema_cfg = get_schema(parameters)
     item_col = schema_cfg["item"]
 

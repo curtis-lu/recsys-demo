@@ -52,7 +52,9 @@ def _hpo_score(
     ``mean_ap``            — per-query mAP (``items`` unused).
     ``macro_per_item_map`` — macro average of per-item attributed mAP.
 
-    Unknown ``objective_name`` raises ``ValueError`` (fail-loud).
+    Unknown ``objective_name`` raises ``ValueError``: a **pre-check** on the
+    value handed in. A25 rejects the same value at CLI entry, so reaching this
+    line means the caller assembled ``parameters`` without passing that gate.
     """
     if objective_name == "mean_ap":
         return compute_mean_ap(groups, y_true, y_score)
