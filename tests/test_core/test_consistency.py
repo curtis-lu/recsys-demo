@@ -1037,6 +1037,8 @@ class TestNonnumericFeatureErrors:
         )
         assert len(errs) == 1
         assert "cust_segment" in errs[0]
+        # 訊息點名的函式名要在 repo 裡 grep 得到，使用者才追得下去
+        assert "pdf_to_X.to_numpy" in errs[0]
         assert "categorical_columns" in errs[0]
         assert "drop_columns" in errs[0]
 

@@ -132,9 +132,9 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
     assert vol["extract_Xy.pdf"]["rows"] == 3
     assert vol["extract_Xy.pdf"]["deep"] is True
     # retrofit: X_df via helper, deep=True (was deep=False)
-    assert vol["_pdf_to_X.X_df"]["rows"] == 3
-    assert vol["_pdf_to_X.X_df"]["cols"] == 3
-    assert vol["_pdf_to_X.X_df"]["deep"] is True
+    assert vol["pdf_to_X.X_df"]["rows"] == 3
+    assert vol["pdf_to_X.X_df"]["cols"] == 3
+    assert vol["pdf_to_X.X_df"]["deep"] is True
     # encode_categoricals summary (preserve existing domain log)
     assert any(
         "deferred_cats=" in m and "prod_name" in m and "count=1" in m for m in messages

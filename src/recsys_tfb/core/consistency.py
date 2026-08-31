@@ -1149,7 +1149,7 @@ def nonnumeric_feature_errors(
             errors.append(
                 f"feature column {col!r} is non-numeric and is not declared "
                 f"categorical, so it would become an un-encoded object-dtype "
-                f"model feature (OOM at _pdf_to_X.to_numpy, then a LightGBM "
+                f"model feature (OOM at pdf_to_X.to_numpy, then a LightGBM "
                 f"float-cast error). If {col!r} is a categorical feature, add it "
                 f"to dataset.prepare_model_input.categorical_columns (it is then "
                 f"integer-encoded); if it is not a model feature, add it to "

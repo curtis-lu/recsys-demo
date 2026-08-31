@@ -309,7 +309,7 @@ def pdf_to_X(
 
     with log_step(logger, "slice_features"):
         X_df = pdf[feature_cols].copy()
-    log_data_volume(logger, "_pdf_to_X.X_df", X_df, deep=True)
+    log_data_volume(logger, "pdf_to_X.X_df", X_df, deep=True)
 
     deferred_cats = [
         c for c in categorical_cols if c in identity_cols and c in X_df.columns
@@ -320,7 +320,7 @@ def pdf_to_X(
                 known = category_mappings[col]
                 X_df[col] = pd.Categorical(X_df[col], categories=known).codes
         logger.info(
-            "_pdf_to_X: encoded deferred_cats=%s count=%d",
+            "pdf_to_X: encoded deferred_cats=%s count=%d",
             deferred_cats, len(deferred_cats),
         )
 
