@@ -22,10 +22,11 @@ which. Where a node's *time* actually goes is a question for the Runner's
 ``load``/``func``/``save`` split (``core/runner.py``), not for this module.
 
 This module imports **two** underscore-prefixed names from elsewhere, which
-S-E otherwise forbids: ``_encode_categoricals`` and
-``_cast_feature_floats_to_float32`` from ``recsys_tfb.preprocessing``. Both are
-a registered exception: renaming means touching the dataset pipeline's call
-sites in the same change (``docs/agents/deliberate-non-goals.md``).
+``docs/agents/pipeline-node-design.md`` rule 12 otherwise forbids:
+``_encode_categoricals`` and ``_cast_feature_floats_to_float32`` from
+``recsys_tfb.preprocessing``. Both are a registered exception: renaming means
+touching the dataset pipeline's call sites in the same change
+(``docs/agents/deliberate-non-goals.md``).
 """
 
 import itertools
@@ -657,13 +658,14 @@ def validate_predictions(
         # half is passed as a thunk so its Spark action is spent only when the
         # range already holds; the two questions report as one check.
         #
-        # A nested def, which S-B otherwise rules out for a *step*. This is not
-        # a step, it is an argument: the predicate owns the decision, this owns
-        # the Spark. It stays here rather than moving to `steps/` because the
-        # only module that would own it — `steps/validation.py` — is deliberately
-        # pyspark-free so both layers' tests skip the SparkSession, and a
-        # seventh module holding one function reads worse than this does. If
-        # this pattern recurs, that is the point to reopen the question.
+        # A nested def, which `pipeline-node-design.md` rule 9 otherwise rules
+        # out for a *step*. This is not a step, it is an argument: the predicate
+        # owns the decision, this owns the Spark. It stays here rather than
+        # moving to `steps/` because the only module that would own it —
+        # `steps/validation.py` — is deliberately pyspark-free so both layers'
+        # tests skip the SparkSession, and a seventh module holding one function
+        # reads worse than this does. If this pattern recurs, that is the point
+        # to reopen the question.
         def count_score_order_violations() -> int:
             w = Window.partitionBy(*group_cols).orderBy(F.col(rank_col))
             with_prev = ranked_predictions.withColumn(

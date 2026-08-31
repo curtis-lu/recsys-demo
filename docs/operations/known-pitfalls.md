@@ -74,7 +74,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 5. main 上既有的測試問題（不是你造成的，勿浪費時間歸因給自己的改動）
 
 - `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
-- **全量的既有 fail 就是上面那兩個，沒有別的。** 實測：
+- ~~**全量的既有 fail 就是上面那兩個，沒有別的。**~~ **2026-08-31 起是 8 個**，見下面那條。當時（2026-08-25）的實測：
 
   ```
   # main @ 227d9e6，同一 worktree 的同一份 data/，2026-08-25
@@ -84,7 +84,24 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
   三個 fail ＝ `TestPrepareTrainInputsWeight` 兩項 ＋ 下面那項 `test_serialisation_round_trip_…`。
 
-- **「組合跑才互擾」的那 4 項已經消失了（2026-08-25 實測）。** 成因是 §14 那個測試在共用的 `data/local_warehouse` 上 `DROP TABLE` ＋ `rmtree`，污染同一份 warehouse；`812a12c` 把它隔離進自己的 test DB 之後，互擾跟著沒了。當時點名的三項（`test_hive_table_dataset.py` 的 `test_add_then_drop_column_across_versions`、`TestPartialWriteLeavesPartitionsIntact`，以及 `test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`）本次全量**全部 PASSED**。
+  **2026-08-31 的實測（main @ 49e5a8e，同一 worktree 的同一份 `data/`）是 8 個**：
+
+  ```
+  ========== 8 failed, 2662 passed, 2481 warnings in 215.51s (0:03:35) ===========
+  ```
+
+  8 ＝ 上面那 3 個 ＋ §5a 那 5 個。
+
+- ~~**「組合跑才互擾」的那 4 項已經消失了（2026-08-25 實測）。**~~ **2026-08-31 更正：它們回來了，而且根因跟 2026-08-25 寫的那個不是同一個。** 原文保留在下面，因為那次的排除仍然有效——`812a12c` 修掉的是 warehouse 污染，這次是另一件事。
+
+  <details><summary>2026-08-25 的原文（成因已不適用）</summary>
+
+  > 成因是 §14 那個測試在共用的 `data/local_warehouse` 上 `DROP TABLE` ＋ `rmtree`，污染同一份 warehouse；`812a12c` 把它隔離進自己的 test DB 之後，互擾跟著沒了。當時點名的三項（`test_hive_table_dataset.py` 的 `test_add_then_drop_column_across_versions`、`TestPartialWriteLeavesPartitionsIntact`，以及 `test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip`）本次全量**全部 PASSED**。
+
+  </details>
+
+  新的根因與最小重現見下面的 **§5a**。
+
   - **規則仍有效**：看到只在組合跑才出現的 fail，先單獨重跑確認。
   - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算——那份沒有本機 warehouse 狀態，warehouse 相關的失效模式整類都不會出現，會讓人誤以為是自己改出來的。
 - ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
@@ -92,6 +109,50 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。**2026-08-25 覆核仍紅**，現行失敗原因是 `ImportError: cannot import name 'build_diagnostics_figures' from 'recsys_tfb.evaluation.report_builder'`——測試引用的函式已不存在，不是斷言不合。待獨立修。
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
+
+## 5a. 組合跑時 SparkSession 掉成 in-memory catalog（2026-08-31）
+
+- **症狀（第一分鐘認出它）**：全量跑時這 5 項紅、單獨跑全綠，錯誤一律是
+  `pyspark.sql.utils.AnalysisException: Hive support is required to CREATE Hive TABLE (AS SELECT);`。
+  而且那批 Hive 測試**跑得異常快**——`test_hive_table_dataset.py` 單獨跑是 `57 passed in 11.93s`，
+  接在肇事者後面時整批（含肇事的 6 個 CLI 測試）只花 `4.70s`。因為根本沒建起 Hive session，DDL 立刻炸。
+
+  ```
+  tests/test_io/test_hive_table_dataset.py::TestSchemaEvolutionIntegration::test_add_then_drop_column_across_versions
+  tests/test_io/test_hive_table_dataset.py::TestPartialWriteLeavesPartitionsIntact::（三項）
+  tests/test_pipelines/test_evaluation_compare_pipeline.py::test_persist_and_catalog_load_roundtrip
+  ```
+
+- **根因**：`tests/test_cli.py` 的 `TestCLI` 與 `TestRebuildDatesFlag` 會實際走到 CLI 進入點建 SparkSession。
+  `__main__.py` 各處呼叫的是 `get_or_create_spark_session(spark_configs)`，**沒有傳 `enable_hive=True`**，
+  而該參數預設就是 `False`（`src/recsys_tfb/utils/spark.py`）。**SparkSession 是 JVM 單例**，
+  第一個建起來的就定案——`tests/conftest.py` 的 fixture 雖然寫 `enable_hive=True`，事後也升不回來。
+
+  直接證據（同一個 python 行程內量的）：
+
+  ```
+  跑 test_cli 之前 →: 沒有活著的 session
+  ============================== 6 passed in 2.80s ===============================
+  跑 test_cli 之後 →: catalogImplementation=in-memory      ← 不是 hive
+  ```
+
+- **最小重現（4.7 秒，不必跑全量）**：
+
+  ```bash
+  PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest \
+    tests/test_cli.py::TestRebuildDatesFlag tests/test_io/test_hive_table_dataset.py -q -p no:randomly
+  # → 4 failed, 59 passed in 4.70s
+  ```
+
+- **不是測試順序造成的**（這條先被否證過，別再試）：隨機順序（預設 `pytest-randomly`）與
+  `-p no:randomly` 兩種跑法，全量的 FAILED 清單**逐項相同**，都是 8 failed / 2662 passed。
+
+- **已排除、不必重跑的路線**：`tests/test_utils/test_spark.py`（它覆寫 `_canonical_enable_hive`，
+  看起來很像兇手，但單獨接在前面跑 80 passed 全綠）、`tests/test_core`、`tests/test_diagnosis`、
+  `tests/test_evaluation`、`tests/test_cli.py::TestSourceCheckCLI`。二分軌跡見本條的量測日期。
+
+- **待修**，尚未開票。修法方向是讓 CLI 那條路徑也 `enable_hive=True`，或讓測試用的 session
+  在 CLI 測試之後強制重建——但兩者都會動到 `utils/spark.py` 的單例語意，要另外評估。
 
 ## 5b. 弄壞驗證（break-it check）在未提交檔案上的還原坑（2026-07-08）
 
