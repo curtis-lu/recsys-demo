@@ -126,7 +126,10 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
     <code>build_test_model_input</code>、<code>filter_test_model_input</code>
     只處理尚未落地的月份，差集由 metastore 的 partition 清單得出（<code>landed_months()</code> 讀
     <code>existing_partition_values()</code>，零掃描）。
-    train / train-dev / val <b>不是</b>增量，每次整批重算。理由與逃生口見
+    train / train-dev / val <b>不是</b>增量，一旦被執行就整批重算。加評估月份時省掉那次重算，
+    靠的是 <code>--only-test-months</code> 讓它們<b>不被執行</b>（它是 <code>create_pipeline</code> 的模式、
+    不是切片，見 <a href="../adr/0013-pipeline-modes-and-slicing-are-separate.md">ADR-0013</a>），
+    不是讓它們變成增量的。上面四個 node 則帶不帶旗標都是增量的。理由與逃生口見
     <a href="../adr/0002-preprocessed-feature-table-incremental.md">ADR-0002</a>。</li>
   <li><b>增量是從哪來的：月份計畫。</b>前三個 node 之所以只處理部分月份，是因為它們各吃一個
     <code>*_month_plan</code> 輸入（圖上的 <code>[P]</code>）。這些 plan 由
