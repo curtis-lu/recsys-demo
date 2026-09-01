@@ -29,7 +29,7 @@ HTML 內只放「操作當下必要的提醒＋公式速查」；**完整概念�
 
 | 面 | 管什麼 | 匯出到 | key 來源 | 機制 |
 |---|---|---|---|---|
-| **ratio 面** | 訓練**成本**（下採負樣本） | `parameters_dataset.yaml` 的 `sample_ratio_overrides` | `dataset.sample_group_keys` | 保留率 = `clamp(倍率 × n_pos/n_neg, 0, 1)` |
+| **ratio 面** | 訓練**成本**（下採正、負樣本） | `parameters_dataset.yaml` 的 `sample_ratio_overrides` | `dataset.sample_group_keys` | 正樣本：直接填保留率；負樣本：`clamp(倍率 × n_pos(後)/n_neg, 0, 1)` |
 | **weight 面** | 排序**抬升**（樣本權重） | `parameters_training.yaml` 的 `sample_weights` | `training.sample_weight_keys` | 雙因子 `v`（地板）× `A`（注意力） |
 
 **關鍵設計（解耦）**：早期常用「下採冷門 item 的負樣本」同時達成省成本＋墊高冷門 item。
@@ -46,34 +46,61 @@ HTML 內只放「操作當下必要的提醒＋公式速查」；**完整概念�
 
 ### 2.1 通用原理
 
-對某一格，若正樣本 `n_pos`、負樣本 `n_neg`，想把負樣本下採到「目標 neg:pos = m」，
-要保留的負樣本比例：
+一格有兩個**各自獨立**的下採旋鈕，兩個都只為省訓練成本，都不帶排序意圖：
 
 ```
-保留率 = clamp(m × n_pos / n_neg, 0, 1)
+n_pos(後) = round(n_pos × 正樣本保留率)          ← 先算這個
+負樣本保留率 = clamp(倍率 m × n_pos(後) / n_neg, 0, 1)
 ```
 
-`m=5` 表示「每個正樣本配 5 個負樣本」。若該格本來就沒那麼多負樣本（`m×n_pos ≥ n_neg`），
-保留率夾在 1（全留），不會無中生有。
+`m=5` 表示「每個**留下來的**正樣本配 5 個負樣本」。**倍率的分子是下採後的正樣本數**，
+所以你把正樣本砍一半，負樣本會跟著砍一半，實際 neg:pos 仍等於你填的 `m`——「實際倍率」欄
+就是拿來核對這件事的。若該格本來就沒那麼多負樣本（`m × n_pos(後) ≥ n_neg`），保留率夾在
+1（全留），不會無中生有。
+
+> **為什麼砍正樣本不算「調排序」**：砍掉正樣本只是讓模型看到的樣本變少，並不會讓某個 item
+> 在 loss 裡的相對分量變高。要抬升冷門 item 請用 weight 面的 `A` 因子（§3）——那才是設計來
+> 做這件事的旋鈕，而且不必犧牲資料。
 
 ### 2.2 在本框架
 
 - key＝`dataset.sample_group_keys`（label 以外的任意維度）；`label` 是該 key 的**正/負切分軸**，
-  不是分組維度，匯出時 label 分量固定填 `0`（見 §5）。
-- **預設留空＝全留負樣本（成本旋鈕關閉）**。只在某些格負樣本真的爆量、想省訓練成本時才填。
-- 兩種輸入模式（上方切換，兩欄值切換時互不洗掉）：
+  不是分組維度。一格最多匯出兩筆：label 分量 `1`＝正樣本保留率、`0`＝負樣本保留率（見 §5）。
+- **兩欄的預設值都＝設定檔的 `dataset.sample_ratio`**，不是 1.0。理由：pipeline 對一個沒有
+  override 的 key 就是套 `sample_ratio`，兩欄若預設 1.0，`sample_ratio < 1` 時整張表的試算
+  會比實際多算一倍以上的資料量。
+- 正樣本欄**永遠是直接填保留率**（0~1）。正樣本沒有「倍率」可言（倍率是相對正樣本算的），
+  所以它不受下面的模式切換影響。
+- 負樣本有兩種輸入模式（上方切換，兩欄值切換時互不洗掉）：
   - **依負樣本倍率**：填目標 neg:pos 倍率 `m`，工具算保留率。
-  - **依保留率**：直接填保留率（全列一致、也涵蓋 `n_pos=0` 的格）。
-- 群組/批次選取：勾選列後可「依群組選取（維度＝值）」再「批次套用」把同一個值套到整組。
+  - **依保留率**：直接填保留率（`n_pos(後)=0` 的格一律走這個，因為倍率無定義）。
+- 群組/批次選取：勾選列後可「依群組選取（維度＝值）」，再用批次框一次設定正樣本保留率與
+  負樣本值（兩個輸入框，有填的才套）。
+- **`n_pos(後)` 欄會標色**：低於警告門檻（`--pos-warn-min`，瀏覽器裡可改）標黃、**歸零標紅**。
+  紅色是硬警告，理由見 §4。
 
 ### 2.3 範例
 
-某格 `n_pos=200`、`n_neg=4000`（pos-rate 5%）。填倍率 `m=5`：
+某格 `n_pos=200`、`n_neg=4000`（pos-rate 5%），`sample_ratio: 1.0`。
+
+只填倍率 `m=5`、正樣本全留：
 
 ```
-保留率 = clamp(5 × 200 / 4000, 0, 1) = clamp(0.25, 0,1) = 0.25
-→ 保留 1000 個負樣本，下採後該格 1200 筆、pos-rate 約 16.7%
+n_pos(後) = 200
+負樣本保留率 = clamp(5 × 200 / 4000, 0, 1) = 0.25
+→ 留 1000 個負樣本，該格 1200 筆、pos-rate 約 16.7%
 ```
+
+正樣本保留率再填 `0.5`（想再省一半成本）：
+
+```
+n_pos(後) = 100
+負樣本保留率 = clamp(5 × 100 / 4000, 0, 1) = 0.125
+→ 留 500 個負樣本，該格 600 筆、pos-rate 仍是 16.7%、實際倍率仍是 5
+```
+
+**成本減半，正負比例不變。** 這正是把倍率定義在 `n_pos(後)` 上的用意。分頁下方的「分組試算」
+會把這些逐格結果加總，最後一列「總計　訓練列數」直接給你 `原始 → 下採後（−XX%）`。
 
 匯出 → `sample_ratio_overrides`（見 §5）。
 
@@ -115,14 +142,17 @@ GBDT/LR 學到的分數，base-rate 越低的 item 整體被往下壓（`log(p/(
 
 ### 3.3 地板分母：連動 / 不連動（couple / decouple）
 
-`v` 的分母 `n_neg` 要用哪個負樣本數？
+`v = n_pos(1−t)/(t·n_neg)` 的兩個數要用下採前還是下採後的？這個開關**同時管正負兩邊**，
+所以它只有一個意思：weight 面到底看不看 ratio 面。
 
-- **連動 ratio 面（couple，預設）**：用**下採後**的負樣本數。好處是套用後實際正樣本率
-  **精確落在 `t`**（因為 weight 面知道 ratio 面下採了多少）。
-- **不連動（decouple）**：改用 `原始 n_neg × φ`（`φ` 為全域保留率旋鈕，`φ=1` 即原始），
-  與 ratio 面無關。此時若 ratio 面**同時**有下採，套用後實際正樣本率會**高於 `t`**（overshoot）。
+- **連動 ratio 面（couple，預設）**：正負都用**下採後**的數。好處是套用後實際正樣本率
+  **精確落在 `t`**（因為 weight 面知道 ratio 面砍了多少）。
+- **不連動（decouple）**：正負都回到**原始**數，負樣本再乘上全域旋鈕 `φ`（`φ=1` 即原始），
+  與 ratio 面無關。此時若 ratio 面**同時**有下採，套用後實際正樣本率會偏離 `t`。
 
-> 預設 couple。除非你有特別理由要 weight 面忽略 ratio 面的下採，否則維持連動。
+> 預設 couple。「不連動」是個 what-if 旋鈕（想在不決定 ratio 面的情況下先看地板長怎樣），
+> 不是給正式設定用的。特別注意：**你真的砍了正樣本又選不連動時，`v` 會算得太高**——因為它
+> 是拿沒被砍的正樣本數去算的。這是「不連動」的定義使然，不是 bug。
 
 ### 3.4 範例（兩個 item，`t = 1/6`、`α = 0.5`、全留負樣本）
 
@@ -166,8 +196,15 @@ A_COLD = (300/300)^0.5 = 1.000     A_HOT = (300/6000)^0.5 = 0.224
 
 ## 4. 邊界情況
 
-- **`n_pos = 0` 的格（冷門到該期沒有正樣本）**：neg:pos 倍率無定義；ratio 欄改為**直接填保留率**，
-  weight 端權重中性（`w_pos=w_neg=1`）。
+- **`n_pos(後) = 0` 的格**：可能是該期本來就沒正樣本，也可能是你把正樣本保留率設成 0
+  砍出來的。兩者行為相同：neg:pos 倍率無定義，負樣本欄改為**直接填保留率**（預設＝
+  `sample_ratio`，不是「全留」——沒有 `|0` override 的 key，pipeline 本來就會套 `sample_ratio`）。
+- **`n_pos(後) = 0` 在 weight 面會整格退出權重模型**，這是砍正樣本最大的地雷。該格的
+  `v = A = 1`、`w_pos = w_neg = 1`，在表上跟「這格不需要調權重」長得一模一樣，**不會報錯**。
+  所以 ratio 面把這種格標紅、weight 面的「狀態」欄直接寫「退出權重模型」。看到紅色就回頭
+  確認你是不是砍過頭了。
+- **正樣本剩太少（但不為 0）**：`--pos-warn-min` 以下標黃。這是個**經驗值、不是推導值**，
+  預設 30 只是個起點，請依你的資料自己設；工具不會替你決定多少算夠。
 - **未命中的 key**：`sample_weights` / `sample_ratio_overrides` 裡打錯或資料期間不存在的值 →
   該筆不中、權重 `1.0`。training 會把這些列進 `sample_weight_report.json` 的 `unmatched_keys`
   （見 [`../pipelines/training.md`](../../pipelines/training.md) §3.5）。
@@ -184,7 +221,7 @@ A_COLD = (300/300)^0.5 = 1.000     A_HOT = (300/6000)^0.5 = 0.224
 
 | 匯出 | 貼到 | key 組法 | value |
 |---|---|---|---|
-| `sample_ratio_overrides` | `parameters_dataset.yaml`（`dataset:` 下） | `sample_group_keys` 串接、label 分量＝`0` | 保留率 |
+| `sample_ratio_overrides` | `parameters_dataset.yaml`（`dataset:` 下） | `sample_group_keys` 串接，每格最多兩筆：label＝`1`→正樣本保留率、label＝`0`→負樣本保留率 | 保留率 |
 | `sample_weights` | `parameters_training.yaml`（`training:` 下） | `sample_weight_keys` 串接，每格出兩筆：label＝`1`→`w_pos`、label＝`0`→`w_neg` | 權重 |
 
 `label` 在 keys 的位置就是 `0`/`1` 在 key 字串的位置：
@@ -194,7 +231,11 @@ sample_weight_keys: [label, prod_name]  →  "1|ccard_ins"（w_pos）、"0|ccard
 sample_weight_keys: [prod_name, label]  →  "ccard_ins|1"、"ccard_ins|0"
 ```
 
-只有 `!= 1.0`（weight）/ `!= 預設保留率`（ratio）的格會被匯出（稀疏）。
+只有 `!= 1.0`（weight）/ `!= dataset.sample_ratio`（ratio）的格會被匯出（稀疏），**兩個 class
+各自判斷**：只砍正樣本的格就只出一筆 `…|1`。
+
+> 舊版（只能砍負樣本）匯出的 JSON 沒有 `ratio_pos` 欄。`to-yaml` 會把它讀成「正樣本沒動」，
+> 產出跟以前一樣的單筆 `…|0`，不會憑空生出 `…|1`。
 
 > 改 `sample_weight_keys` 或 `sample_weights` 會 bump `model_version`（屬 training block），
 > 不動 `train_variant_id`；一致性檢查 A9a/A9b/A9c 驗欄位、段數、item 分量。詳見
@@ -211,17 +252,18 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py profile <db
   [--params conf/base/parameters_dataset.yaml] \
   [--train-params conf/base/parameters_training.yaml] \
   [--base-params conf/base/parameters.yaml] \
-  [--t 0.1666] [--alpha 0.5] [--target-neg-pos 5.0]
+  [--t 0.1666] [--alpha 0.5] [--target-neg-pos 5.0] [--pos-warn-min 30]
 ```
 
 1. **profile**：對 `sample_group_keys ∪ sample_weight_keys`（去 label）的最細粒度，掃 `sample_pool`
    各格 `n_pos`/`n_neg`，產出 HTML。
-2. **編輯**：瀏覽器開 HTML，ratio 面調下採（預設全留）、weight 面轉旋鈕 `t`/`α` 看診斷欄。
+2. **編輯**：瀏覽器開 HTML，ratio 面調正/負兩個保留率（預設都＝`sample_ratio`）、看下方
+   「分組試算」的總計列確認省了多少；weight 面轉旋鈕 `t`/`α` 看診斷欄。
 3. **匯出**：按 Export JSON / Export YAML snippet。
 4. **貼回**：把片段貼進對應設定檔（§5），重跑 dataset / training。
 
-`--t`／`--alpha`／`--target-neg-pos` 只是 HTML 的**初始**旋鈕值，瀏覽器裡可即時改；真正落地的是
-你匯出貼回設定檔的數字。
+`--t`／`--alpha`／`--target-neg-pos`／`--pos-warn-min` 只是 HTML 的**初始**旋鈕值，瀏覽器裡可
+即時改；真正落地的是你匯出貼回設定檔的數字。
 
 ---
 
@@ -229,17 +271,19 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py profile <db
 
 | 詞 | 意義 |
 |---|---|
-| ratio 面 | 下採樣覆寫（成本）；→ `sample_ratio_overrides` |
+| ratio 面 | 下採樣覆寫（成本，正負各一個保留率）；→ `sample_ratio_overrides` |
 | weight 面 | 雙因子樣本權重（排序抬升）；→ `sample_weights` |
 | `n_pos` / `n_neg` | 某格的正/負樣本數（profile 掃出來的） |
-| 保留率 | 下採後保留的負樣本比例 `clamp(m·n_pos/n_neg,0,1)` |
+| 正樣本保留率 | 直接填的 0~1；`n_pos(後) = round(n_pos × 它)`。預設＝`dataset.sample_ratio` |
+| 負樣本保留率 | `clamp(m · n_pos(後) / n_neg, 0, 1)`，或在保留率模式直接填。預設同上 |
+| `n_pos(後)` | 下採後的正樣本數。歸零＝該格退出 weight 面的權重模型（標紅） |
 | `t` | 目標正樣本率（地板高度） |
 | `v` | 地板因子，降負樣本權重把有效 pos-rate 墊到 `t`；`v = n_pos(1−t)/(t·n_neg)` |
 | `α` | 注意力阻尼（0 關、1 等權） |
 | `A` | 注意力因子，拉平各 item 的 loss 佔比；`A = (m_min/m)^α` |
 | `m` | 加權後有效質量 `n_pos + n_neg·v` |
 | `w_pos` / `w_neg` | 匯出的正/負樣本權重；`w_pos=A`、`w_neg=A·v` |
-| couple / decouple | `v` 分母用下採後 `n_neg`（連動）/ 原始 `n_neg×φ`（不連動） |
+| couple / decouple | `v` 的正負兩邊都用下採後（連動）/ 都回原始、負樣本再 ×φ（不連動） |
 | `φ` | 不連動時的全域負樣本保留率旋鈕 |
 
 ## 相關文件
