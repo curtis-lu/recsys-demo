@@ -27,6 +27,7 @@ from pathlib import Path
 import recsys_tfb
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "recsys_tfb"
+TESTS = Path(__file__).resolve().parents[1]
 PIPELINES = SRC / "pipelines"
 
 # Direct filesystem / artifact writes the A1 scan can see.
@@ -713,6 +714,19 @@ class TestS3StepsPackagesStayInternal:
         )
 
 
+#: Trees S4 scans, ``label -> root``. The label prefixes every reported
+#: path, so an offender reads as a repo-relative location and the exception
+#: registry can key on one unambiguous string.
+#:
+#: ``tests`` is in here and ``scripts`` is not, and neither is arbitrary.
+#: A test that takes the first entity column stops testing what its own
+#: docstring says it tests -- a false green, which is the failure this file
+#: exists to prevent. (Note this is the opposite call from S3, which
+#: deliberately does not scan tests; S3 guards where a module *lives*, and
+#: a test import moves nothing.) ``scripts/`` holds hand-run demo tools
+#: that no production path imports -- see R5.
+ENTITY_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
+
 ENTITY_KEY = "entity"
 
 # Calls whose return value is a list of entity columns, so indexing the result
@@ -722,8 +736,9 @@ ENTITY_KEY = "entity"
 # the schema key it defaults to.
 ENTITY_LIST_CALLS = {"get_entity_grouping"}
 
-# (module path under src/recsys_tfb, enclosing function) pairs allowed to take
-# the first entity column. Empty, and it stays empty unless the user signs one
+# (repo-relative module path, enclosing function) pairs allowed to take the
+# first entity column, e.g. ("src/recsys_tfb/pipelines/dataset/nodes.py",
+# "split_train_keys"). Empty, and it stays empty unless the user signs one
 # off -- R5 in docs/agents/architecture-constraints.md.
 ENTITY_FIRST_COLUMN_EXCEPTIONS = frozenset()
 
@@ -853,12 +868,13 @@ def _entity_list_names(tree):
             return sorted(names)
 
 
-def _entity_first_column_offenders(root, exceptions=None):
+def _entity_first_column_offenders(root, exceptions=None, label=""):
     """``path:line in func(): expr`` for every take-the-first-entity-column.
 
-    ``root`` is scanned recursively; paths are reported relative to it so the
-    real run names ``pipelines/dataset/nodes.py`` and the tmp-tree tests can
-    assert on a bare filename.
+    ``root`` is scanned recursively; paths are reported relative to it, with
+    ``label`` prefixed. The real run passes the labels in
+    ``ENTITY_SCAN_ROOTS`` so an offender reads as a repo-relative path; the
+    tmp-tree tests pass none and assert on bare filenames.
     """
     exceptions = ENTITY_FIRST_COLUMN_EXCEPTIONS if exceptions is None else exceptions
     offenders = []
@@ -878,6 +894,7 @@ def _entity_first_column_offenders(root, exceptions=None):
                     continue
                 source = node.value.id
             rel = str(path.relative_to(root))
+            rel = f"{label}/{rel}" if label else rel
             func = owner.get(node.lineno, "<module>")
             if (rel, func) in exceptions:
                 continue
@@ -903,7 +920,11 @@ class TestS4NoFirstEntityColumn:
     """
 
     def test_no_module_takes_the_first_entity_column(self):
-        offenders = _entity_first_column_offenders(SRC)
+        offenders = [
+            line
+            for label, root in ENTITY_SCAN_ROOTS.items()
+            for line in _entity_first_column_offenders(root, label=label)
+        ]
         assert offenders == [], (
             "a module took the first column of schema.entity (S4): "
             f"{offenders}. An entity is every column in schema.entity taken "
@@ -913,6 +934,24 @@ class TestS4NoFirstEntityColumn:
             "Exceptions are registered in R5 of "
             "docs/agents/architecture-constraints.md and need sign-off."
         )
+
+    def test_the_scan_roots_are_real_and_pinned(self):
+        """Both trees are clean, so dropping one leaves the scan above green.
+
+        That is the same false green this class was written to stop: a fence
+        that scans nothing reports no violations. Pin the roots themselves, and
+        pin that each one really holds modules -- a root pointed at a path that
+        does not exist would also scan nothing, silently.
+        """
+        assert set(ENTITY_SCAN_ROOTS) == {"src/recsys_tfb", "tests"}, (
+            "S4's scan roots changed. tests/ is in scope on purpose: a test "
+            "that takes the first entity column stops testing what its "
+            "docstring claims. Removing a root needs the same sign-off as "
+            "registering an exception (R5)."
+        )
+        for label, root in ENTITY_SCAN_ROOTS.items():
+            found = sum(1 for _ in root.rglob("*.py"))
+            assert found > 50, f"{label} -> {root} holds {found} .py files"
 
     def test_the_scan_sees_every_spelling(self, tmp_path):
         """Without this, the check above is decoration.
@@ -1018,6 +1057,16 @@ class TestS4NoFirstEntityColumn:
             'at_module_level.py:1 in <module>: ...["entity"][0]',
             "comparison_nodes.py:3 in restrict_to_common(): entity_cols[0]",
         ]
+        # ...and with the label the real run passes, so an offender reads as a
+        # repo-relative path. Two roots are scanned; a bare "pipelines/..."
+        # would not say which tree it came from, and the exception registry
+        # keys on this exact string.
+        assert _entity_first_column_offenders(
+            tmp_path, exceptions=frozenset(), label="tests",
+        ) == [
+            'tests/at_module_level.py:1 in <module>: ...["entity"][0]',
+            "tests/comparison_nodes.py:3 in restrict_to_common(): entity_cols[0]",
+        ]
 
     def test_the_scan_leaves_honest_entity_use_alone(self, tmp_path):
         """False positives here cost real work, so pin the shapes that are fine.
@@ -1051,7 +1100,9 @@ class TestS4NoFirstEntityColumn:
             '    return schema["entity"][0]\n'
         )
         found = _entity_first_column_offenders(
-            tmp_path, exceptions=frozenset({("two.py", "allowed")}),
+            tmp_path,
+            exceptions=frozenset({("src/recsys_tfb/two.py", "allowed")}),
+            label="src/recsys_tfb",
         )
         assert len(found) == 1 and "forbidden" in found[0], (
             f"the exception registry did not filter exactly one site: {found}"
