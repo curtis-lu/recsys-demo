@@ -119,7 +119,7 @@
 <h2>三件圖上看得到、只讀程式碼容易漏掉的事</h2>
 
 <h3>1. node 之間不是傳 DataFrame，是走 Hive round-trip——而 catalog 只擋掉一半</h3>
-<p class="sub">runner 對每個 input 都呼叫 <code>catalog.load()</code>（<code>core/runner.py:140</code>）。
+<p class="sub">runner 對每個 input 都呼叫 <code>catalog.load()</code>（<code>core/runner.py::Runner.run</code>）。
 <code>unranked_predictions</code> 與 <code>ranked_staging</code> 是 Hive managed table，跨月份累積。
 catalog 條目<b>有</b> <code>partition_filter: model_version</code>（#187），所以 load 會發
 <code>WHERE model_version = '…'</code> 並把那一欄 drop 掉——<b>但月份沒有任何東西擋</b>。
@@ -138,7 +138,7 @@ production 的 <code>ranked_predictions</code> 完全不被觸碰，失敗批次
 把紅色那條路徑遮掉，staging → validate → publish 會被讀成三個沒必要的步驟。</p>
 
 <h3>3. 模型決定了配哪份前處理，而模型由人決定</h3>
-<p class="sub">inference 預設解析 <code>data/models/best</code> symlink（<code>core/versioning.py:301</code>），
+<p class="sub">inference 預設解析 <code>data/models/best</code> symlink（<code>core/versioning.py::resolve_model_version</code>），
 該 symlink 只能由使用者跑 <code>scripts/promote_model.py</code> 設定——這是整條 pipeline 唯一的人工介入點。
 選中的模型再從自己的 manifest 回溯 <code>base_dataset_version</code>，決定要載
 <code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code>。
