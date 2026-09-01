@@ -57,43 +57,59 @@ def _build_coverage_section(
         {
             label_a: [
                 cov.get("kind_a", ""), cov.get("model_version_a", "n/a"),
-                cov.get("table_a", "n/a"), cov.get("n_cust_A_full"),
-                cov.get("n_prod_A_full"),
+                cov.get("table_a", "n/a"), cov.get("n_query_group_A_full"),
+                cov.get("n_item_A_full"),
             ],
             label_b: [
                 cov.get("kind_b", ""), cov.get("model_version_b", "n/a"),
-                cov.get("table_b", "n/a"), cov.get("n_cust_B_full"),
-                cov.get("n_prod_B_full"),
+                cov.get("table_b", "n/a"), cov.get("n_query_group_B_full"),
+                cov.get("n_item_B_full"),
             ],
         },
-        index=["kind", "model_version", "Hive table", "n_cust (full)", "n_prod (full)"],
+        index=[
+            "kind", "model_version", "Hive table",
+            "n_query_group (full)", "n_item (full)",
+        ],
     )
     coverage = pd.DataFrame(
         {
-            "A_full": [cov.get("n_cust_A_full"), cov.get("n_prod_A_full")],
-            "B_full": [cov.get("n_cust_B_full"), cov.get("n_prod_B_full")],
-            "common (used)": [cov.get("n_cust_common"), cov.get("n_prod_common")],
+            "A_full": [
+                cov.get("n_query_group_A_full"), cov.get("n_item_A_full"),
+            ],
+            "B_full": [
+                cov.get("n_query_group_B_full"), cov.get("n_item_B_full"),
+            ],
+            "common (used)": [
+                cov.get("n_query_group_common"), cov.get("n_item_common"),
+            ],
         },
-        index=["n_cust", "n_prod"],
+        index=["n_query_group", "n_item"],
     )
     dropped = pd.DataFrame(
         {
-            f"{label_a} dropped prods": [
-                len(cov.get("dropped_prods_A", []) or []),
-                ", ".join(cov.get("dropped_prods_A", []) or []) or "(none)",
+            f"{label_a} dropped items": [
+                len(cov.get("dropped_items_A", []) or []),
+                ", ".join(cov.get("dropped_items_A", []) or []) or "(none)",
             ],
-            f"{label_b} dropped prods": [
-                len(cov.get("dropped_prods_B", []) or []),
-                ", ".join(cov.get("dropped_prods_B", []) or []) or "(none)",
+            f"{label_b} dropped items": [
+                len(cov.get("dropped_items_B", []) or []),
+                ", ".join(cov.get("dropped_items_B", []) or []) or "(none)",
             ],
         },
         index=["count", "list"],
     )
     return ReportSection(
         title="Compare 概頁",
-        description="兩個模型的來源、coverage、被剔除的細產品。後續章節皆在 common universe 上重排重算。",
+        description=(
+            "兩個模型的來源、coverage、被剔除的 item。"
+            "n_query_group ＝「一個時間 × 一個 entity」的相異組合數，也就是排名的單位；"
+            "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
+            "n_item ＝相異 item 數。後續章節皆在 common universe 上重排重算。"
+            "common 欄是兩邊的交集大小：某個 query group 若在裁切後一個共同 item 都不剩，"
+            "它仍計入這個交集，但不會出現在後續任何指標裡。"
+        ),
         tables=[meta, coverage, dropped],
-        table_titles=["雙方 metadata", "coverage", "被 drop 的 prods"],
+        table_titles=["雙方 metadata", "coverage", "被 drop 的 items"],
     )
 
 
@@ -115,7 +131,7 @@ def _build_overall_section(comparison: dict) -> ReportSection:
     )
     return ReportSection(
         title="overall metrics (M/B/Δ)",
-        description="per-query 指標在 common (cust × prod) universe 上重算。Δ = A − B。",
+        description="per-query 指標在 common (entity × item) universe 上重算。Δ = A − B。",
         tables=[tbl],
         table_titles=["overall"],
     )

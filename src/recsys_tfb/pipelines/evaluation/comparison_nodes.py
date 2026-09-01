@@ -14,7 +14,6 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.comparison.alignment import common_universe as _common_universe
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.comparison.restrict import restrict_to_common as _restrict
 from recsys_tfb.evaluation.comparison.sources import load_compare_predictions as _load_compare
@@ -40,26 +39,36 @@ def restrict_to_common(
     """Pipeline shim: call the pure restrict function + capture coverage dict.
 
     Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
-    carries full-universe sizes + dropped product lists so the report can
+    carries full-universe sizes + dropped item lists so the report can
     show what was filtered. Computed here because ``_restrict`` itself loses
     access to the originals after returning.
+
+    Population size is counted in **query groups** — distinct ``[time] +
+    entity`` combinations, every column of ``schema.entity`` — because that is
+    the unit mAP divides by. Reporting it in any other unit puts two different
+    scales side by side in one table with nothing telling the reader they
+    differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
     """
     schema = get_schema(parameters)
-    cust_col = schema["entity"][0]
+    entity_cols = schema["entity"]
     item_col = schema["item"]
+    time_col = schema["time"]
+    query_group_cols = [time_col, *entity_cols]
 
-    a_prods_full = {r[0] for r in eval_predictions.select(item_col).distinct().collect()}
-    b_prods_full = {r[0] for r in compare_predictions_raw.select(item_col).distinct().collect()}
-    a_cust_full = eval_predictions.select(cust_col).distinct().count()
-    b_cust_full = compare_predictions_raw.select(cust_col).distinct().count()
+    a_items_full = {r[0] for r in eval_predictions.select(item_col).distinct().collect()}
+    b_items_full = {r[0] for r in compare_predictions_raw.select(item_col).distinct().collect()}
 
-    # Compute the conceptual intersection sets for coverage — these are
-    # the "common universe" sizes (cust intersection × prod intersection).
-    # Post-restrict counts may be smaller when A/B don't fully cover the
-    # cross product.
-    common_cust, common_prod = _common_universe(
-        eval_predictions, compare_predictions_raw, cust_col, item_col
-    )
+    a_groups = eval_predictions.select(*query_group_cols).distinct()
+    b_groups = compare_predictions_raw.select(*query_group_cols).distinct()
+    a_groups_full = a_groups.count()
+    b_groups_full = b_groups.count()
+    groups_common = a_groups.intersect(b_groups).count()
+
+    # The item intersection falls out of the two sets already collected — no
+    # extra Spark work, and the same value ``_restrict`` derives internally.
+    # Post-restrict counts may be smaller than these intersection sizes when
+    # A/B don't fully cover the cross product.
+    common_items = a_items_full & b_items_full
 
     a_common, b_common = _restrict(
         eval_predictions, compare_predictions_raw, label_table, parameters
@@ -72,14 +81,14 @@ def restrict_to_common(
         "kind_b": src.get("kind", ""),
         "model_version_b": src.get("model_version", "n/a"),
         "table_b": src.get("table", "n/a"),
-        "n_cust_A_full": a_cust_full,
-        "n_cust_B_full": b_cust_full,
-        "n_prod_A_full": len(a_prods_full),
-        "n_prod_B_full": len(b_prods_full),
-        "n_cust_common": len(common_cust),
-        "n_prod_common": len(common_prod),
-        "dropped_prods_A": sorted(a_prods_full - common_prod),
-        "dropped_prods_B": sorted(b_prods_full - common_prod),
+        "n_query_group_A_full": a_groups_full,
+        "n_query_group_B_full": b_groups_full,
+        "n_query_group_common": groups_common,
+        "n_item_A_full": len(a_items_full),
+        "n_item_B_full": len(b_items_full),
+        "n_item_common": len(common_items),
+        "dropped_items_A": sorted(a_items_full - common_items),
+        "dropped_items_B": sorted(b_items_full - common_items),
     }
     return a_common, b_common, coverage_partial
 
