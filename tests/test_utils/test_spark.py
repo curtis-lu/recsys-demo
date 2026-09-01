@@ -211,6 +211,124 @@ class TestCanonicalConfigs:
             second.stop()
 
 
+class TestHivePostCondition:
+    """要了 Hive 卻拿到沒有 Hive 的 session，不得靜默降級（#259）。
+
+    ``getOrCreate()`` 對已存在的 active session 直接回傳它，builder 上的
+    ``enableHiveSupport()`` 於是變成 no-op。而 ``spark.sql.catalogImplementation``
+    由 SparkContext 的 SparkConf 決定——只重建 SparkSession 物件不會改變它，
+    **必須停掉 context**。少了這道 post-condition，呼叫端拿到的是一個不會抱怨
+    的降級 session，錯誤要到下游真的跑 Hive DDL 才炸在與成因無關的地方。
+
+    #242 已在消費端（``tests/conftest.py`` 的 ``spark`` fixture）修過同一個失效
+    模式；本類守的是接縫本身，兩層並存即 defence in depth。
+    """
+
+    def test_hive_requested_after_in_memory_session_is_upgraded(self):
+        """先有 in-memory session，再要 Hive → 拿到的必須真的是 hive。
+
+        前置條件寫死在 configs 裡而不是靠環境：``SPARK_CONF_DIR`` 指向
+        ``conf/spark-local`` 時，第一個 session 本來就會是 hive，前置條件不成立
+        而測試會紅在 setup——那種紅什麼都沒證明。
+        """
+        first = get_or_create_spark_session(
+            _minimal_configs({"spark.sql.catalogImplementation": "in-memory"})
+        )
+        assert first.conf.get("spark.sql.catalogImplementation") == "in-memory"
+
+        second = get_or_create_spark_session(
+            _minimal_configs(), enable_hive=True
+        )
+        try:
+            assert (
+                second.conf.get("spark.sql.catalogImplementation") == "hive"
+            )
+        finally:
+            second.stop()
+
+    def test_rebuild_still_not_hive_raises_spark_session_unavailable(
+        self, monkeypatch
+    ):
+        """重建後仍不是 hive → 丟 SparkSessionUnavailableError，不留給下游。
+
+        下游的表現會是 Hive DDL 的 ``AnalysisException``，出現在與成因無關的呼
+        叫點；這裡要求在接縫上就講清楚「要求 Hive 但拿到的 catalog 是 X」。
+        """
+        import recsys_tfb.utils.spark as spark_mod
+        from recsys_tfb.utils.spark import SparkSessionUnavailableError
+
+        stopped: list[object] = []
+
+        class _StubConf:
+            def get(self, key, default=None):
+                if key == "spark.sql.catalogImplementation":
+                    return "in-memory"
+                return default
+
+        class _StubSession:
+            conf = _StubConf()
+
+            def stop(self):
+                stopped.append(self)
+
+        class _NeverHiveBuilder:
+            def __init__(self):
+                self.build_count = 0
+
+            def appName(self, *_args):
+                return self
+
+            def config(self, *_args):
+                return self
+
+            def enableHiveSupport(self):
+                return self
+
+            def getOrCreate(self):
+                self.build_count += 1
+                return _StubSession()
+
+        builder = _NeverHiveBuilder()
+
+        class _FakeSparkSession:
+            builder = None
+            _instantiatedSession = None
+            _activeSession = None
+
+            @staticmethod
+            def getActiveSession():
+                return None
+
+        class _FakeSparkContext:
+            _active_spark_context = None
+
+        _FakeSparkSession.builder = builder
+        monkeypatch.setattr(spark_mod, "SparkSession", _FakeSparkSession)
+        # 也要換掉 SparkContext：``_stop_and_clear`` 會把
+        # ``SparkContext._active_spark_context`` 設成 None，打的是真的 class。
+        # 這個測試沒有真的 JVM context 可停，若不換掉，同一個 process 裡若有活著
+        # 的 session 就會被切成「JVM 還在、Python 端指標沒了」的孤兒態，下一個真
+        # 建 context 的測試會爆 "Only one SparkContext should be running"。
+        # 本 repo 對這類跨測試互擾有前科（known-pitfalls §5／§5a）。
+        monkeypatch.setattr(spark_mod, "SparkContext", _FakeSparkContext)
+
+        with pytest.raises(SparkSessionUnavailableError) as excinfo:
+            get_or_create_spark_session(_minimal_configs(), enable_hive=True)
+
+        message = str(excinfo.value)
+        assert "hive" in message.lower()
+        # 訊息要指出實際拿到的是什麼，否則讀者還是得自己去查
+        assert "in-memory" in message
+        # 真的重建過一次，不是看一眼就放棄。（這條只守「有沒有重建」；
+        # 「有沒有停掉」由下面那條守——兩件事分開斷言才知道紅的是哪一件。）
+        assert builder.build_count == 2
+        # 兩個都要被停掉：第一個是降級的原 session，第二個是重建後仍降級的那個。
+        # 少停第二個的話它仍掛在 PySpark 單例上，下一個 mode-2 呼叫會走
+        # ``_rebuild_or_active`` 的 active-session 捷徑把它交出去——等於這個
+        # raise 只是拒絕回傳，沒有拒絕外洩。
+        assert len(stopped) == 2
+
+
 class TestDeadContextRecovery:
     """JVM 端停掉 SparkContext(等同 cluster 端殺掉 app)後的復原。
 

@@ -79,10 +79,20 @@ def get_or_create_spark_session(
         False; the cluster session inherits Hive support from
         ``SPARK_CONF_DIR``'s ``hive-site.xml`` rather than this flag.
         Remembered alongside the configs so a rebuild keeps Hive support.
+        Enforced as a post-condition (``_ensure_hive_catalog``) on every
+        build, because ``getOrCreate()`` returns any existing session
+        untouched, which makes ``enableHiveSupport()`` a no-op. **The check
+        covers builds, not the mode-2 shortcut**: a mode-2 call ignores this
+        argument entirely and an alive active session is returned as-is
+        (only its rebuild path goes through ``_build``). Ask for Hive in the
+        mode-1 call that establishes the canonical configs.
 
     Raises:
         TypeError: ``spark_configs`` is not a dict.
         ValueError: any value is not str / int / bool.
+        SparkSessionUnavailableError: the session could not be built, or
+            ``enable_hive=True`` could not be satisfied even after stopping
+            the context and rebuilding.
     """
     global _canonical_configs, _canonical_enable_hive
 
@@ -104,7 +114,9 @@ def get_or_create_spark_session(
     elif active is not None:
         logger.warning(
             "Active SparkSession already exists; cluster-level configs "
-            "in spark_configs will be ignored by PySpark."
+            "in spark_configs will be ignored by PySpark (unless "
+            "enable_hive=True finds the session lacks Hive, in which case "
+            "_ensure_hive_catalog stops it and the rebuild does apply them)."
         )
 
     return _build(spark_configs, enable_hive)
@@ -201,8 +213,27 @@ def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
     if enable_hive:
         builder = builder.enableHiveSupport()
 
+    session = _get_or_create(builder, app_name)
+
+    if enable_hive:
+        session = _ensure_hive_catalog(session, builder, app_name)
+
+    _mark_alive(session)
+    logger.info(
+        "SparkSession ready (application_id=%s, app_name=%s)",
+        _last_app_id, app_name,
+        extra={
+            "event": "spark_session_created",
+            "application_id": _last_app_id,
+            "app_name": app_name,
+        },
+    )
+    return session
+
+
+def _get_or_create(builder: Any, app_name: str) -> SparkSession:
     try:
-        session = builder.getOrCreate()
+        return builder.getOrCreate()
     except Exception as exc:  # noqa: BLE001 — surface one readable error
         # Deliberately neutral: this also catches a first build failing on an
         # unreachable master, a port clash, or a queue rejection. The real cause
@@ -215,16 +246,70 @@ def _build(spark_configs: dict[str, Any], enable_hive: bool) -> SparkSession:
             "restarted."
         ) from exc
 
-    _mark_alive(session)
-    logger.info(
-        "SparkSession ready (application_id=%s, app_name=%s)",
-        _last_app_id, app_name,
+
+def _catalog_impl(session: SparkSession) -> str | None:
+    """The session's ``spark.sql.catalogImplementation``, or None if unreadable."""
+    try:
+        return session.conf.get("spark.sql.catalogImplementation", None)
+    except Exception:  # noqa: BLE001 — a dying session must not mask the check
+        return None
+
+
+def _ensure_hive_catalog(
+    session: SparkSession, builder: Any, app_name: str
+) -> SparkSession:
+    """Post-condition for ``enable_hive=True``: the session really has Hive.
+
+    ``getOrCreate()`` hands back the process's existing session untouched, so
+    the builder's ``enableHiveSupport()`` is a silent no-op whenever one is
+    already up — the caller asked for Hive, got a session without it, and
+    nothing said so. The failure then surfaces far away, as an
+    ``AnalysisException`` from the first Hive DDL.
+
+    Rebuilding the SparkSession object alone would not help:
+    ``spark.sql.catalogImplementation`` comes from the SparkContext's
+    SparkConf, so the context has to be stopped first. That is why this
+    goes through ``_stop_and_clear`` rather than another plain getOrCreate.
+
+    This is the framework-side half of the fix #242 made in
+    ``tests/conftest.py``'s consumer-side ``spark`` fixture; both layers stay
+    (defence in depth). See docs/operations/known-pitfalls.md 5a.
+    """
+    actual = _catalog_impl(session)
+    if actual == "hive":
+        return session
+
+    logger.warning(
+        "Hive support was requested but the session handed back has "
+        "catalogImplementation=%s; stopping the context and rebuilding "
+        "(app_name=%s)",
+        actual, app_name,
         extra={
-            "event": "spark_session_created",
-            "application_id": _last_app_id,
+            "event": "spark_hive_downgrade_repaired",
+            "catalog_implementation": actual,
             "app_name": app_name,
         },
     )
+    _stop_and_clear(session)
+    session = _get_or_create(builder, app_name)
+
+    rebuilt = _catalog_impl(session)
+    if rebuilt != "hive":
+        # Clear it before raising. A session left registered stays reachable:
+        # the next mode-2 call takes the `getActiveSession()` shortcut in
+        # `_rebuild_or_active` and hands back the very session this raise just
+        # refused, without ever re-entering this check. Refusing to return it
+        # is not the same as refusing to leak it.
+        _stop_and_clear(session)
+        raise SparkSessionUnavailableError(
+            f"Hive support was requested (enable_hive=True) but the "
+            f"SparkSession has catalogImplementation={rebuilt!r}, not 'hive' "
+            f"(app_name={app_name!r}) — even after stopping the context and "
+            "rebuilding. Refusing to hand back a downgraded session: the next "
+            "Hive DDL would fail with an unrelated AnalysisException. Check "
+            "that hive-site.xml is reachable via SPARK_CONF_DIR and that the "
+            "Spark build includes Hive support."
+        )
     return session
 
 

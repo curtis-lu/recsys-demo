@@ -181,18 +181,43 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   **停掉 context 才是關鍵**——catalog 由 SparkContext 的 SparkConf 決定，只重建 SparkSession
   物件不會改變它。
 
-  - **擋得住的範圍＝吃 `spark` fixture 的測試**，不是全部。`utils/spark.py` 沒動，所以直接呼叫
-    `get_or_create_spark_session(..., enable_hive=True)` 的呼叫端仍會靜默拿到降級的 session。
-    目前 `src/` 沒有任何呼叫端傳 `True`（實查：只有 `tests/conftest.py` 與
-    `tests/test_utils/test_spark.py` 傳），所以無實害；要根治得補 #242 的修法 2
-    （在 `_build` 尾端加 post-condition），與本修法不衝突。
-  - **為什麼不採 #242 自己傾向的修法 2**：那條要改 `utils/spark.py` 的 session 建立語意，
+  - **擋得住的範圍＝吃 `spark` fixture 的測試**，不是全部。當時 `utils/spark.py` 沒動，所以直接
+    呼叫 `get_or_create_spark_session(..., enable_hive=True)` 的呼叫端仍會靜默拿到降級的
+    session。**2026-09-01 已由 #259 補上框架側那一層**（見下一條），兩層並存。
+  - **為什麼當下不採 #242 自己傾向的修法 2**：那條要改 `utils/spark.py` 的 session 建立語意，
     是四條 pipeline 共用的接縫；而這個失效模式只在測試行程裡出現（生產路徑一律
-    `enable_hive=False`）。用改生產程式碼去修一個生產上不存在的情境，風險不對價。
+    `enable_hive=False`）。用改生產程式碼去修一個生產上不存在的情境，風險不對價——所以另開
+    #259 單獨處理，不夾在 #242 裡。
   - **回歸測試**＝`tests/test_utils/test_spark.py::TestTheSparkFixtureAlwaysHasHiveSupport`。
     它擋掉**兩種**假綠：把 `catalogImplementation` 釘成 `in-memory`（否則 `SPARK_CONF_DIR`
     會蓋掉症狀），並且斷言那個釘法真的生效——static conf 在已有 session 時會被 `getOrCreate`
     靜默丟掉，少了這個斷言，修法被拿掉時測試照樣全綠。
+
+- **框架側那一層（2026-09-01，#259，＝#242 的修法 2）**：`utils/spark.py` 的 `_build()` 在
+  `enable_hive=True` 時加了 post-condition `_ensure_hive_catalog`——catalog 不是 `hive` 就
+  `_stop_and_clear` 後重建一次，重建後仍不是就丟 `SparkSessionUnavailableError`，不把降級的
+  session 交出去。
+
+  - **這是 hardening，不是修 bug**：`src/` 至今沒有任何呼叫端傳 `enable_hive=True`（生產靠
+    `SPARK_CONF_DIR` 的 `hive-site.xml`）。補它的理由是「靜默降級」本身違反本 repo 對靜默
+    錯誤的立場——將來真有人在生產傳 `True`，錯誤會出現在完全無關的地方。
+  - **回歸測試**＝`tests/test_utils/test_spark.py::TestHivePostCondition`。三個弄壞驗證都實跑過：
+
+    | 弄壞哪一行 | 結果 | 它證明了什麼 |
+    |---|---|---|
+    | 拿掉 `_build` 裡的 `_ensure_hive_catalog` 呼叫 | 兩項都紅在目標斷言 | 這道 post-condition 真的在跑 |
+    | 拿掉重建**前**的 `_stop_and_clear`（留著重建） | 兩項都紅 | 「停掉 context 才是關鍵」——只重建 SparkSession 物件時 `getOrCreate` 把同一個 in-memory session 原封不動回傳 |
+    | 拿掉 raise **前**的 `_stop_and_clear` | 第二項紅在 `len(stopped) == 2` | 被拒絕的 session 沒被清掉的話仍掛在 PySpark 單例上 |
+
+  - **raise 之前也要清掉那個 session**。只 raise 不清，`SparkSession._instantiatedSession`
+    仍指向那個活著的降級 session，下一個 mode-2 呼叫走 `_rebuild_or_active` 的 active-session
+    捷徑就把它交出去了——**拒絕回傳不等於拒絕外洩**，而且完全繞過這道檢查。
+  - **擋得住的範圍＝走 `_build` 的路徑**。mode-2（`spark_configs=None`）若拿到活著的 active
+    session 會直接回傳，不經過這道檢查；mode-2 的 `enable_hive` 參數本來就被忽略（用的是記住的
+    `_canonical_enable_hive`）。要 Hive 就在建立 canonical configs 的那次 mode-1 呼叫要。
+  - **測試的前置條件寫死在 configs 裡**（`spark.sql.catalogImplementation: in-memory`），
+    不靠環境。理由見本條上面的「假綠陷阱」：設了 `SPARK_CONF_DIR` 的 shell 裡第一個 session
+    本來就是 hive，前置條件不成立，測試會紅在 setup 而什麼都沒證明。
 
 ## 5b. 弄壞驗證（break-it check）在未提交檔案上的還原坑（2026-07-08）
 
