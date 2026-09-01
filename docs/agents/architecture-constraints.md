@@ -11,6 +11,7 @@
 | 動 `core/`（Runner、Node、Catalog、io） | 節一全部（F1–F10） |
 | 新增或修改一個 node | A1、A2、A5、A6、A7 ＋ F4、F5 ＋ [`pipeline-node-design.md`](pipeline-node-design.md) |
 | 動 `pipelines/dataset/` 的 node | 上一列 ＋ S1、S2 |
+| 寫任何讀 `schema.entity` 的程式碼（分組、切分、抽樣、算母體） | S4 |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -38,9 +39,9 @@
 
 ---
 
-## 10 條約束一覽
+## 11 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**20 個測試，1.4–1.7 秒**（2026-08-31 連跑三次；#234 加入 S3 的三個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上 main 的 17 個測試量到 1.25 秒，而本檔原本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**26 個測試，1.05–1.07 秒**（2026-09-01 連跑三次；#265 加入 S4 的六個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔上一版量到的是 20 個測試 1.4–1.7 秒，多了六個測試反而更快；再上一版的 17 個測試量到 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -54,6 +55,7 @@
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
 | [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
+| [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | 整個 `src/recsys_tfb/` | `scripts/` 不在範圍內（**現有一處**）；解包等其他取法；值傳給別的模組之後才被索引 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -410,13 +412,56 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
+## S4. 不得取 `schema.entity` 的第一欄
+
+`schema.entity` 是一個**欄位清單**，清單裡的欄**共同**構成「一筆排序請求的擁有者」。取第 0 欄，等於把它讀成「第一欄是身分、其餘是附屬」——那是另一種讀法，而且在單欄設定下兩種讀法結果完全相同，所以寫錯了不會有任何症狀。
+
+這條**不是**預防性守衛（對照 A4）。它擋的是已經發生過**四次**的同一個錯（#262 的 spec）：比較報表的排名分組與母體大小（#263）、dataset 的 train／dev 切分與 val 抽樣（#264）。四處都取第一欄、四處都全綠，而其中兩處的產物是印在報表上給人做決策的數字。
+
+**該怎麼寫**：
+
+| 你要做的事 | 正確寫法 | 現成範例 |
+|---|---|---|
+| 依 query group 分組 | `[schema["time"], *schema["entity"]]` | `evaluation/metrics_spark.py::rank_within_query`、`diagnosis/model/population_spark.py` |
+| 依 entity 分組、算母體 | 整份 `schema["entity"]` | `evaluation/comparison/alignment.py::common_universe` |
+| 需要**比 query group 更粗**的單位（切分、抽樣） | 讓使用者宣告，不要自己挑一欄 | `core/schema.py::get_entity_grouping`（讀 `dataset.train_split_keys`／`val_sample_keys`，由 consistency 的 A29 驗證是 `schema.entity` 的非空子集） |
+
+**檢查**：AST 掃描 `src/recsys_tfb/` 底下**所有** `.py`（`rglob`）。三種形態都算違反：
+
+| 形態 | 例子 | 靠掃描的哪個零件抓到 |
+|---|---|---|
+| 直接索引 | `schema["entity"][0]` | subscript 的 value 本身又是一個 `["entity"]` subscript |
+| 先取出清單、再索引 | `entity_cols = schema["entity"]` … `entity_cols[0]` | 模組內的名稱綁定，遞移（`b = a` 也繼承）且含 `x: list[str] = ...` |
+| 索引「宣告出來的分組單位」 | `get_entity_grouping(...)` 的結果被 `[0]` | `ENTITY_LIST_CALLS` 名單 |
+
+前兩種就是那四處原本的寫法（見 #263、#264 的 diff）。`[:1]`／`[0:1]` 與 `[0]` 同罪——同一個讀法換個寫法。**左邊是什麼刻意不看**：`schema["entity"]`、`get_schema(parameters)["entity"]`、`params["schema"]["columns"]["entity"]` 對這條而言是同一個表達式，釘死任何一種寫法只會把盲區搬個位置。
+
+**失敗訊息會指出位置**——檔案、行號、所在函式（巢狀時取最內層的 def）、以及那個表達式：
+
+```
+pipelines/evaluation/comparison_nodes.py:54 in restrict_to_common(): entity_cols[0]
+```
+
+只轉紅、講不出在哪，等於下一個人還是得自己找。`test_the_report_names_a_location_not_just_a_count` 把這件事釘住。
+
+**例外登記機制**：測試檔的模組級常數 `ENTITY_FIRST_COLUMN_EXCEPTIONS`，內容是 `(相對 src 的模組路徑, 所在函式名)`。**現在是空的，而且該維持空的**——要加一筆必須先取得使用者同意，見 [R5](#r5-取-schemaentity-第一欄s4-的例外-0-筆)。
+
+空的登記表有一個它特有的假綠風險：一個「其實根本沒接上」的過濾器，看起來跟今天的全綠一模一樣。所以 `test_a_registered_exception_silences_exactly_one_site` 建了兩個違例站點、只登記其中一個，證明過濾器真的會動、而且只吃掉被登記的那一個。
+
+### 這個檢查看不到
+
+- **`scripts/` 不在掃描範圍內**（與 A3／A4 一樣只掃 `src/recsys_tfb/`）。⚠ **`scripts/shap_margin_summary.py` 現在就有一處** `cust_col = schema["entity"][0]`。它是一次性診斷腳本、不在生產路徑上，也不在 #262 認定的四處之內；把掃描範圍擴大到 `scripts/` 就得立刻登記一筆例外，而 #265 的驗收要求零例外。**要不要修那一處是一個還沒做的決定**，不是這條掃描已經處理掉的事。
+- **其他取第一欄的寫法**：解包（`first, *rest = schema["entity"]`）、`next(iter(...))`、`sorted(...)[0]`、`min(...)`、算出來的索引。釘死的是會被**順手寫出來**的那三種；其餘要刻意才寫得出來。
+- **跨模組的值傳遞。** 一個函式把 `schema["entity"]` 當參數傳出去、在另一個模組才被索引，掃描看不到——它判斷的是**模組內**的名稱綁定，不是跨模組的值追蹤。
+- **名稱綁定不分支**（flow-insensitive）：同一個名字先綁 entity 清單、後來改綁別的東西再索引，會被誤報。這個取捨的方向是**假陽性**（有人會看到、會來修），不是假陰性（安靜地出貨一個錯數字）。
+
 ---
 
 # 節三 · 例外登記
 
 **清單內的既有案例合法。要新增任何一筆，必須先取得使用者同意——不得自行擴充。**
 
-登記表怎麼比對：測試比的是 **Counter**（目錄 ＋ 名字），所以「多一個同名站點」會被抓到；但**不釘行號**，所以站點上方的一般編輯不會誤報。
+登記表怎麼比對：R1／R3／R4 比的是 **Counter**（目錄 ＋ 名字），所以「多一個同名站點」會被抓到；但**不釘行號**，所以站點上方的一般編輯不會誤報。**R5 不是 Counter 而是過濾器**，登記粒度是函式而非站點——差別見該條。
 
 ## R1. `Node(writes=[...])`（A1 的例外一）── 2 筆
 
@@ -480,6 +525,21 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 >
 > **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准）。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：5 個 node 真的各自會刪檔，登記變大是誠實的。
 > 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是時序問題不是規則問題：等把 glob 放寬到 `pipelines/**/*.py` 那張票（#163 一帶）做完，這個決定該重新檢討。
+
+
+## R5. 取 `schema.entity` 第一欄（S4 的例外）── 0 筆
+
+| 位置 | 函式 | 理由 |
+|---|---|---|
+| （空） | | |
+
+**空是驗收條件的一部分**（#265）：#263 與 #264 把四處都清乾淨了，所以 S4 一上線就是綠的，一筆例外都不需要。
+
+要加一筆：先在這張表寫下位置、函式與理由，**取得使用者同意之後**，再把 `(模組路徑, 函式名)` 加進 `tests/test_core/test_architecture_constraints.py` 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS`。`test_the_registry_is_empty` 會在第一筆被加入時轉紅，所以「悄悄放寬」這條路是走不通的。
+
+> ⚠ **這張表的比對方式跟 R1／R3／R4 不一樣。**
+> 那三張比的是 **Counter**——登記表列的是「現況有幾筆」，多一個同名站點就會被抓到。
+> 這張是**過濾器**——登記過的 `(模組, 函式)` 會被跳過，所以登記一筆會讓那個函式裡**所有**取第一欄的地方一起靜音。**登記的粒度是函式，不是行。** 要登記就把該函式為什麼整個豁免寫清楚。
 
 ---
 

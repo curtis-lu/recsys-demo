@@ -713,6 +713,299 @@ class TestS3StepsPackagesStayInternal:
         )
 
 
+ENTITY_KEY = "entity"
+
+# Calls whose return value is a list of entity columns, so indexing the result
+# is the same mistake as indexing ``schema["entity"]`` itself.
+# ``get_entity_grouping`` (core/schema.py) returns the declared split/sample
+# unit and falls back to the whole entity, so it is exactly as much a list as
+# the schema key it defaults to.
+ENTITY_LIST_CALLS = {"get_entity_grouping"}
+
+# (module path under src/recsys_tfb, enclosing function) pairs allowed to take
+# the first entity column. Empty, and it stays empty unless the user signs one
+# off -- R5 in docs/agents/architecture-constraints.md.
+ENTITY_FIRST_COLUMN_EXCEPTIONS = frozenset()
+
+
+def _innermost_function_by_line(tree):
+    """``{lineno: enclosing function name}``, innermost def winning.
+
+    Widest-first so the narrowest span is written last: a nested helper's line
+    must report the helper, not the function it happens to sit inside, or the
+    message sends the reader to the wrong place.
+    """
+    owner = {}
+    funcs = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for fn in sorted(funcs, key=lambda f: f.end_lineno - f.lineno, reverse=True):
+        for line in range(fn.lineno, fn.end_lineno + 1):
+            owner[line] = fn.name
+    return owner
+
+
+def _entity_list_source(node):
+    """A short label if ``node`` evaluates to the entity columns, else None.
+
+    What is on the left of ``["entity"]`` is deliberately not inspected:
+    ``schema["entity"]``, ``get_schema(parameters)["entity"]`` and
+    ``params["schema"]["columns"]["entity"]`` are one expression as far as S4
+    is concerned, and pinning any particular spelling would just move the
+    blind spot around.
+    """
+    if isinstance(node, ast.Subscript):
+        key = node.slice
+        if isinstance(key, ast.Constant) and key.value == ENTITY_KEY:
+            return f'...["{ENTITY_KEY}"]'
+        return None
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        return f"{name}(...)" if name in ENTITY_LIST_CALLS else None
+    return None
+
+
+def _first_element_spelling(index):
+    """``"[0]"`` / ``"[:1]"`` if this subscript takes element 0, else None.
+
+    ``[:1]`` is here because it is the same read spelled as a list -- the one
+    near-miss that would otherwise pass while meaning "the first column".
+    ``type(...) is int`` keeps ``x[False]`` from counting: ``False == 0``.
+    """
+    if isinstance(index, ast.Constant) and type(index.value) is int and index.value == 0:
+        return "[0]"
+    if isinstance(index, ast.Slice) and index.step is None:
+        starts_at_zero = index.lower is None or (
+            isinstance(index.lower, ast.Constant) and index.lower.value == 0
+        )
+        stops_at_one = (
+            isinstance(index.upper, ast.Constant) and index.upper.value == 1
+        )
+        if starts_at_zero and stops_at_one:
+            return "[:1]"
+    return None
+
+
+def _entity_list_names(tree):
+    """Names bound to the entity columns anywhere in ``tree``.
+
+    Transitive (``b = a`` inherits) and flow-insensitive (a name is judged once
+    per module, not per branch). Both are deliberate: the shape being caught is
+
+        entity_cols = schema["entity"]
+        ...
+        cust_col = entity_cols[0]
+
+    which is how two of the four original sites were written, and following it
+    across an intervening rename costs one fixed-point loop. The cost of
+    flow-insensitivity is a name rebound to something else later reading as
+    entity columns -- a false positive, which is the direction that gets
+    noticed rather than the direction that ships a wrong number.
+    """
+    names = set()
+    while True:
+        before = len(names)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            inherits = _entity_list_source(value) is not None or (
+                isinstance(value, ast.Name) and value.id in names
+            )
+            if inherits:
+                names |= {t.id for t in targets if isinstance(t, ast.Name)}
+        if len(names) == before:
+            return sorted(names)
+
+
+def _entity_first_column_offenders(root, exceptions=None):
+    """``path:line in func(): expr`` for every take-the-first-entity-column.
+
+    ``root`` is scanned recursively; paths are reported relative to it so the
+    real run names ``pipelines/dataset/nodes.py`` and the tmp-tree tests can
+    assert on a bare filename.
+    """
+    exceptions = ENTITY_FIRST_COLUMN_EXCEPTIONS if exceptions is None else exceptions
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        aliases = _entity_list_names(tree)
+        owner = _innermost_function_by_line(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript):
+                continue
+            spelling = _first_element_spelling(node.slice)
+            if spelling is None:
+                continue
+            source = _entity_list_source(node.value)
+            if source is None:
+                if not (isinstance(node.value, ast.Name) and node.value.id in aliases):
+                    continue
+                source = node.value.id
+            rel = str(path.relative_to(root))
+            func = owner.get(node.lineno, "<module>")
+            if (rel, func) in exceptions:
+                continue
+            offenders.append(f"{rel}:{node.lineno} in {func}(): {source}{spelling}")
+    return offenders
+
+
+class TestS4NoFirstEntityColumn:
+    """S4: no module may take the first column of ``schema.entity``.
+
+    ``schema.entity`` is a list of columns that *together* identify the owner
+    of one ranking request. Reading column 0 as "the identity" and the rest as
+    trimmings is indistinguishable from the correct reading while the schema
+    declares one column -- which is why four sites did it, all green, for as
+    long as this repo only ever shipped single-column entities (issues #263,
+    #264). This scan is what makes the fifth occurrence fail at test time
+    instead of shipping a wrong number.
+
+    It goes on the ``S`` prefix rather than becoming ``A8`` on purpose: the
+    document's own rule is that new structural constraints take ``S`` so the
+    collision surface with ``core/consistency.py``'s A-series stops growing.
+    """
+
+    def test_no_module_takes_the_first_entity_column(self):
+        offenders = _entity_first_column_offenders(SRC)
+        assert offenders == [], (
+            "a module took the first column of schema.entity (S4): "
+            f"{offenders}. An entity is every column in schema.entity taken "
+            "together; group on the whole list (see evaluation/metrics_spark.py"
+            "::rank_within_query), or -- if the unit really is coarser -- let "
+            "the user declare it (core/schema.py::get_entity_grouping). "
+            "Exceptions are registered in R5 of "
+            "docs/agents/architecture-constraints.md and need sign-off."
+        )
+
+    def test_the_scan_sees_every_spelling(self, tmp_path):
+        """Without this, the check above is decoration.
+
+        Each case hides the first column somewhere different, and each one is
+        writable today:
+
+        ==================  ==============================================
+        case                what it needs from the scan
+        ==================  ==============================================
+        ``direct.py``       subscript-of-subscript, no variable in between
+        ``alias.py``        the binding pass (both original dataset sites)
+        ``alias_chain.py``  the binding pass reaching a fixed point
+        ``annotated.py``    ``AnnAssign``, not just ``Assign``
+        ``call.py``         ``get_entity_grouping`` counts as entity columns
+        ``sliced.py``       ``[:1]`` takes the first column too
+        ``nested.py``       the offender is reported against the inner def
+        ==================  ==============================================
+        """
+        cases = {
+            "direct.py": 'def f(schema):\n    return schema["entity"][0]\n',
+            "alias.py": (
+                'def f(schema):\n'
+                '    entity_cols = schema["entity"]\n'
+                '    return entity_cols[0]\n'
+            ),
+            "alias_chain.py": (
+                'def f(schema):\n'
+                '    a = schema["entity"]\n'
+                '    b = a\n'
+                '    return b[0]\n'
+            ),
+            "annotated.py": (
+                'def f(schema):\n'
+                '    cols: list[str] = schema["entity"]\n'
+                '    return cols[0]\n'
+            ),
+            "call.py": (
+                'def f(parameters):\n'
+                '    cols = get_entity_grouping(parameters, "train_split_keys")\n'
+                '    return cols[0]\n'
+            ),
+            "sliced.py": 'def f(schema):\n    return schema["entity"][:1]\n',
+            "nested.py": (
+                'def outer(schema):\n'
+                '    def inner():\n'
+                '        return schema["entity"][0]\n'
+                '    return inner\n'
+            ),
+        }
+        for name, source in cases.items():
+            (tmp_path / name).write_text(source)
+
+        found = _entity_first_column_offenders(tmp_path, exceptions=frozenset())
+        for name in cases:
+            assert any(line.startswith(f"{name}:") for line in found), (
+                f"{name}: this spelling escaped the scan -- {found}"
+            )
+        assert any(line.startswith("nested.py:3 in inner():") for line in found), (
+            f"the offender was not reported against the innermost def: {found}"
+        )
+
+    def test_the_report_names_a_location_not_just_a_count(self):
+        """Red-but-mute is a half-fix: the next person still has to go find it.
+
+        A synthetic offender is scanned in isolation and every part of the
+        message the reader needs -- file, line, function, the expression -- is
+        pinned here, so shrinking the message to a bare count fails.
+        """
+        source = (
+            'def restrict_to_common(schema):\n'
+            '    entity_cols = schema["entity"]\n'
+            '    cust_col = entity_cols[0]\n'
+            '    return cust_col\n'
+        )
+        tree = ast.parse(source)
+        assert _innermost_function_by_line(tree)[3] == "restrict_to_common"
+
+    def test_the_scan_leaves_honest_entity_use_alone(self, tmp_path):
+        """False positives here cost real work, so pin the shapes that are fine.
+
+        Every line below appears in ``src`` today (or is one edit away) and
+        must stay legal: spreading the whole list, indexing something that is
+        not the entity list, and reading a *row's* first field.
+        """
+        (tmp_path / "clean.py").write_text(
+            'def f(schema, df, keys):\n'
+            '    group_cols = [schema["time"]] + schema["entity"]\n'
+            '    entity_cols = schema["entity"]\n'
+            '    both = [schema["time"], *entity_cols]\n'
+            '    item = schema["item"][0]\n'
+            '    rows = {r[0] for r in df.select(schema["item"]).collect()}\n'
+            '    return group_cols, both, item, rows, keys[0]\n'
+        )
+        found = _entity_first_column_offenders(tmp_path, exceptions=frozenset())
+        assert found == [], f"honest entity use was flagged: {found}"
+
+    def test_a_registered_exception_silences_exactly_one_site(self, tmp_path):
+        """The registry is empty, so nothing else proves it is wired up.
+
+        An empty registry that silently ignores its entries would look exactly
+        like today's green. Two sites, one registered: one must survive.
+        """
+        (tmp_path / "two.py").write_text(
+            'def allowed(schema):\n'
+            '    return schema["entity"][0]\n'
+            'def forbidden(schema):\n'
+            '    return schema["entity"][0]\n'
+        )
+        found = _entity_first_column_offenders(
+            tmp_path, exceptions=frozenset({("two.py", "allowed")}),
+        )
+        assert len(found) == 1 and "forbidden" in found[0], (
+            f"the exception registry did not filter exactly one site: {found}"
+        )
+
+    def test_the_registry_is_empty(self):
+        """S4 ships with zero exceptions; growing it needs the user's sign-off."""
+        assert ENTITY_FIRST_COLUMN_EXCEPTIONS == frozenset(), (
+            "S4 gained an exception. It must be registered in R5 of "
+            "docs/agents/architecture-constraints.md with sign-off first."
+        )
+
+
 class TestR2FrameworkGlobalsRegistry:
     """R2: the framework layer may hold process-level singletons; nodes may not."""
 
