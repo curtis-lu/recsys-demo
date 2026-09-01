@@ -544,7 +544,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |
 | 全域 `random_seed` | 目前 version ID 不會自動改變 | 視為抽樣版本變更，清楚記錄並完整重建相關產物 |
 
-三層版本描述的是產物身分與失效範圍，不是自動增量執行器。未使用切片旗標時，dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
+三層版本描述的是產物身分與失效範圍，不是自動增量執行器。未帶任何**模式**或**切片**旗標時（模式＝`--only-test-months`，切片＝`--from-node`／`--only-node`），dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
 
 任何 dataset ID 改變後，training 使用該組新版本時，`model_version` 也會隨之改變。`base_dataset_version` 翻新時，即使 `train_variant_id` 的 8 碼字串相同，它也會位於新的 base 目錄／partition 之下，兩者仍是不同的有效資料組合。
 

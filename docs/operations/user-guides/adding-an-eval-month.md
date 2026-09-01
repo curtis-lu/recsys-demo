@@ -40,13 +40,15 @@
 
 空清單不代表「不做校準」。它會讓校準集收進母體裡的**每一個**月份——包含你剛加的新月份。那個月的評估因此變成模型「先看過答案」的分數，會虛高。沒有任何檢查會擋你。
 
-**③ 抄下目前的兩個版本號。** 跑完要拿它們比對。
+**③ 抄下目前的三個版本號。** 跑完要拿它們比對。
 
 ```bash
 ls -1 data/models/          # 目錄名就是 model_version
 ```
 
-`base_dataset_version` 在上一次 dataset 執行的 log 裡（`base_dataset_version: …`），也可以從 `data/dataset/` 底下的目錄名讀到。
+`base_dataset_version` 與 `train_variant_id` 都在上一次 dataset 執行的 log 裡（`base_dataset_version: …` 與 `train_variant_id: …` 兩行相鄰）；前者也可以從 `data/dataset/` 底下的目錄名讀到。
+
+**`train_variant_id` 一定要一起抄。** 只比對 `base_dataset_version` 會漏掉一整類錯誤——原因寫在步驟 2。
 
 ## 步驟 1：把新月份加進設定
 
@@ -74,16 +76,21 @@ python -m recsys_tfb dataset \
 
 ```
 base_dataset_version: <跟你抄下來的一模一樣>
+train_variant_id:     <跟你抄下來的一模一樣>
 [plan] only-test-months: 5 of the dataset pipeline's 15 nodes; ...
 [months] dataset=test_keys         processed=2026-02-28 skipped=2026-01-31
 [months] dataset=test_model_input  processed=2026-02-28 skipped=2026-01-31
 ```
 
-`processed` 是新月份、`skipped` 是舊月份，就對了。（另外還有一行 `dataset=preprocessed_feature_table`，它涵蓋的月份範圍更廣，訓練月份也算在內，數字跟上面兩行不一樣是正常的。）
+`processed` 是新月份、`skipped` 是舊月份，就對了。兩個數字看起來不一樣不必緊張：`15 nodes` 是 `dataset.enable_calibration: true` 時的節點數（關掉是 13），而另外還有一行 `dataset=preprocessed_feature_table`，它涵蓋的月份範圍更廣、訓練月份也算在內。
 
 **最常壞的一種**：`base_dataset_version` 跟你抄下來的不一樣。
 
 代表你這次不只加月份，還改到了別的設定。**停下來**，不要跑步驟 3——模型會對不上新的資料版本。把其他改動還原，只留新增的月份。
+
+**第二常壞、而且完全不會報錯的一種**：`base_dataset_version` 一樣，但 `train_variant_id` 跟你抄下來的不一樣。
+
+代表你這次還改到了抽樣設定（`sample_ratio` 那一類）。**`base_dataset_version` 對抽樣改動是盲的**，所以它沒變不代表你沒改東西。而帶了 `--only-test-months` 的這一輪不會產出新 `train_variant_id` 底下的訓練資料，步驟 3 之後會讀到 0 列——**而且不會拋錯**。**停下來**，二選一：把抽樣改動還原、只留新增的月份，或是不帶旗標跑完整的一輪。
 
 ## 步驟 3：用現有模型對新月份產生預測
 
