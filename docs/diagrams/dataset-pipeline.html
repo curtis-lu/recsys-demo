@@ -130,12 +130,13 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
     <a href="../adr/0002-preprocessed-feature-table-incremental.md">ADR-0002</a>。</li>
   <li><b>增量是從哪來的：月份計畫。</b>前三個 node 之所以只處理部分月份，是因為它們各吃一個
     <code>*_month_plan</code> 輸入（圖上的 <code>[P]</code>）。這些 plan 由
-    <code>build_month_plans()</code> 在 run 開始前<b>一次</b>算好、注入 catalog
-    （<code>__main__.py:782</code> 與 <code>:816</code>）——一次算好，是為了讓共用同一份 artifact 的 node
+    <code>pipelines/dataset/month_plans.py::build_month_plans</code> 在 run 開始前<b>一次</b>算好、
+    注入 catalog（呼叫點是 <code>__main__.py</code> 的 <code>dataset()</code> 指令）——一次算好，是為了讓共用同一份 artifact 的 node
     不可能對「這次涵蓋哪些月份」有不同看法。<br>
     第四個 <code>filter_test_model_input</code> <b>沒有</b> <code>[P]</code>：它的輸入由
     <code>build_test_model_input</code> 產出、已經是本次月份，再過濾一次只是重述同一件事
-    （<code>pipeline.py:129-131</code>）。</li>
+    （見 <code>pipelines/dataset/pipeline.py</code> 裡 <code>filter_test_model_input</code> 那個
+    <code>Node(...)</code> 的 <code>inputs</code>：沒有 month plan）。</li>
   <li><b>只有一條邊標「跨月讀回」。</b><code>test_keys</code> 的 catalog 條目只有
     <code>partition_filter: base_dataset_version</code>，<b>沒有鎖月份</b>，所以讀回來是同一個
     base version 底下的<b>所有</b>月份——即使 <code>select_test_keys</code> 這次只寫了新的那個月

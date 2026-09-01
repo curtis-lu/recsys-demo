@@ -22,9 +22,9 @@
 
 %% 「增量」是怎麼來的：月份計畫
 %%   三個標「增量」的 node 之所以只處理部分月份，是因為它們各吃一個
-%%   *_month_plan 輸入。這些 plan 由 __main__.py:782 的 build_month_plans() 在
-%%   run 開始前一次算好（比對設定的月份 vs Hive 裡已落地的月份），再注入 catalog
-%%   （__main__.py:816）。一次算好是為了讓共用同一份 artifact 的 node 不可能對
+%%   *_month_plan 輸入。這些 plan 由 pipelines/dataset/month_plans.py::build_month_plans
+%%   在 run 開始前一次算好（比對設定的月份 vs Hive 裡已落地的月份），再注入 catalog；
+%%   呼叫點是 __main__.py 的 dataset() 指令。一次算好是為了讓共用同一份 artifact 的 node 不可能對
 %%   「這次涵蓋哪些月份」有不同看法。
 %%   它們是 pipeline.py 宣告的真實 inputs，不是設定值——舊版這張圖漏畫了這三條邊。
 
