@@ -44,8 +44,18 @@ dataset:
   carry_columns:
     - cust_segment_typ
 
-  # --- Train / Train-dev（共用日期，按 cust_id ratio 切分）---
+  # --- Train / Train-dev（共用日期，按 entity ratio 切分）---
   train_dev_ratio: 0.1
+
+  # 切分單位：train/dev 切分時，「同一個誰」必須整批落在同一邊。
+  # 預設（不宣告）＝完整 schema.entity，也就是一個 query group 的擁有者。
+  # 合法值＝schema.entity 的非空子集（不變量 A29 在 CLI 進入點秒級擋下）。
+  # 什麼時候要動它：你的洩漏單位比 query group 粗。例如 entity 是
+  # [cust_id, acct_id]，而同一客戶的多個帳戶不得跨切分邊界 → 填 [cust_id]。
+  # ⚠ 改此鍵會翻 train_variant_id（train／train_dev 重算），
+  #   base_dataset_version 不動（val／test 產物完全不受影響）。
+  # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 train_variant_id，即使值等同預設。
+  # train_split_keys: ["cust_id"]
 
   # --- Calibration（optional）---
   enable_calibration: true
@@ -60,6 +70,15 @@ dataset:
   val_snap_dates:
     - "2025-12-31"
   val_sample_ratio: 1.0
+
+  # 抽樣單位：val_sample_ratio < 1 時，抽中的 entity 會被整批保留。
+  # 預設（不宣告）＝完整 schema.entity；合法值同 train_split_keys（不變量 A29）。
+  # ⚠ 改此鍵會翻 base_dataset_version——val 產物只由這一個 ID 分割，
+  #   不翻它就會拿著新的抽樣單位靜默沿用舊的 val parquet。
+  #   代價是 preprocessor／val／test 整批重算，train 系列連坐。
+  # 保持註解狀態＝維持預設；為什麼這兩件事要用兩把尺而不是一把，見
+  #   docs/adr/0016-split-unit-declared-by-two-keys.md
+  # val_sample_keys: ["cust_id"]
 
   # --- Test（測試集）---
   test_snap_dates:

@@ -26,7 +26,7 @@
 ## ⚠ 兩套 A 系列不是同一套編號
 
 - **本檔的 A1–A7** ＝ 結構約束（node 與 catalog 該長什麼樣，AST 稽核，測試期抓）
-- **`core/consistency.py` 的 A1–A28** ＝ 設定不變量 predicate（config 值彼此矛不矛盾，執行期 raise）
+- **`core/consistency.py` 的 A1–A29** ＝ 設定不變量 predicate（config 值彼此矛不矛盾，執行期 raise）
 
 兩邊的 **A5、A7 已經在撞車**，意思完全不同。**本 repo 不重編號**——重編號會讓既有文件與 commit message 的引用全部指錯（理由同 A16/A17/A18 退休不回填，見 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 第四節）。
 

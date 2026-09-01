@@ -35,11 +35,21 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+# ``train_split_keys`` is registered here and ``val_sample_keys`` deliberately
+# is not, and that asymmetry is the whole point of there being two keys.
+# Registered => stripped from base_dataset_version, folded into
+# train_variant_id: retuning the train/dev split unit rebuilds train and
+# train_dev and leaves val/test artifacts untouched, because nothing about
+# them changed. ``val_sample_keys`` stays unregistered so it moves
+# base_dataset_version, which is the only ID val artifacts are keyed by —
+# registering it would let the val draw change its unit while silently reusing
+# the old val parquet. See docs/adr/0016-split-unit-declared-by-two-keys.md.
 TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "sample_ratio",
     "sample_ratio_overrides",
     "sample_group_keys",
     "train_dev_ratio",
+    "train_split_keys",
 })
 CALIBRATION_SAMPLING_KEYS: frozenset[str] = frozenset({
     "calibration_sample_ratio",

@@ -4,7 +4,11 @@ import copy
 
 import pytest
 
-from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.schema import (
+    ENTITY_GROUPING_KEYS,
+    get_entity_grouping,
+    get_schema,
+)
 
 
 class TestGetSchemaDefaults:
@@ -159,3 +163,28 @@ class TestTwoColumnEntityFixture:
         columns = two_column_entity_params["schema"]["columns"]
         mis_nested = {"schema": dict(columns)}
         assert get_schema(mis_nested)["entity"] == ["cust_id"]
+
+
+class TestGetEntityGrouping:
+    _PARAMS = {"schema": {"columns": {"entity": ["branch_id", "cust_id"]}}}
+
+    def test_undeclared_falls_back_to_the_whole_entity(self):
+        for key in ENTITY_GROUPING_KEYS:
+            assert get_entity_grouping(self._PARAMS, key) == ["branch_id", "cust_id"]
+
+    def test_declared_value_wins(self):
+        params = {**self._PARAMS, "dataset": {"train_split_keys": ["branch_id"]}}
+        assert get_entity_grouping(params, "train_split_keys") == ["branch_id"]
+        # The other key is unaffected — that separation is the whole point.
+        assert get_entity_grouping(params, "val_sample_keys") == ["branch_id", "cust_id"]
+
+    def test_duplicates_are_collapsed(self):
+        params = {**self._PARAMS, "dataset": {"val_sample_keys": ["cust_id", "cust_id"]}}
+        assert get_entity_grouping(params, "val_sample_keys") == ["cust_id"]
+
+    def test_an_unknown_key_name_raises_instead_of_defaulting(self):
+        # A typo at the call site would otherwise resolve to "nothing declared"
+        # and return the full entity: a plausible answer that ignores the user's
+        # config, from code A29 never inspects.
+        with pytest.raises(ValueError, match="not an entity-grouping key"):
+            get_entity_grouping(self._PARAMS, "train_split_key")

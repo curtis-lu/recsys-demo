@@ -49,6 +49,7 @@
 |---|---|---|---|
 | `train_snap_dates` | 必填 | fit preprocessor 與建立 train/train-dev 的日期 | `base_dataset_version` |
 | `train_dev_ratio` | 必填 | 從 train 日期內切給 train-dev 的 entity 比例 | `train_variant_id` |
+| `train_split_keys` | 選填 | 切分單位：`schema.entity` 的非空子集，預設完整 entity | `train_variant_id` |
 | `enable_calibration` | 選填 | 是否建立 calibration keys 與 model input | `base_dataset_version` |
 | `calibration_snap_dates` | 啟用時必填 | calibration 使用的日期 | `base_dataset_version` |
 | `val_snap_dates` | 必填 | HPO validation 日期 | `base_dataset_version` |
@@ -72,7 +73,9 @@ dataset:
     - "2026-01-31"
 ```
 
-train、calibration、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是依第一個 entity 欄位將該 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
+train、calibration、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
+
+「一個 entity」指哪些欄由 `train_split_keys` 宣告，**預設是完整的 `schema.entity`**。單欄 entity 下沒有第二種讀法；多欄時若你的洩漏單位比 query group 粗（例如 entity 是 `[cust_id, acct_id]`，而同一客戶的多個帳戶不得跨邊），就填上較粗的那個子集。填了不在 `entity` 裡的欄名會被不變量 A29 在 CLI 進入點擋下。為什麼這個鍵與 `val_sample_keys` 是兩個而不是一個，見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
 
 ### 3.2 Train 分層抽樣
 
@@ -122,6 +125,7 @@ override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_ed
 | `calibration_sample_ratio` | `1.0` | calibration 的預設抽樣比例 | `calibration_variant_id` |
 | `calibration_sample_ratio_overrides` | `{}` | calibration 的分層比例覆寫 | `calibration_variant_id` |
 | `val_sample_ratio` | `1.0` | 依 entity 縮減 val 母體 | `base_dataset_version` |
+| `val_sample_keys` | 完整 `entity` | 抽樣單位：`schema.entity` 的非空子集 | `base_dataset_version` |
 
 calibration 與 train 共用 `sample_group_keys`，但使用不同 sampling site，因此即使 seed 相同也不會刻意取得相同 bucket。test 不提供抽樣比例，會保留設定日期內的完整候選母體。
 
@@ -429,22 +433,25 @@ dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
-| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio` | train/train-dev keys 與 inputs |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了七個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
+| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys` | train/train-dev keys 與 inputs |
 | `calibration_variant_id` | 只包含 `calibration_sample_ratio`、`calibration_sample_ratio_overrides`、`sample_group_keys` | calibration keys 與 input |
 
-六個會從 base payload 排除的抽樣 keys 是：
+會從 base payload 排除的抽樣 keys 有七個：
 
 ```text
 sample_ratio
 sample_ratio_overrides
 sample_group_keys
 train_dev_ratio
+train_split_keys
 calibration_sample_ratio
 calibration_sample_ratio_overrides
 ```
 
-除了這六個 keys，還有第七個被排除的 key —— `test_snap_dates`：
+`val_sample_keys` **刻意不在這份清單裡**：val 產物只由 `base_dataset_version` 分割，把它排除掉就等於讓 val 的抽樣單位改了卻靜默沿用舊 parquet。推導見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
+
+除了這七個 keys，還有第八個被排除的 key —— `test_snap_dates`：
 
 ```text
 test_snap_dates
@@ -458,7 +465,7 @@ test_snap_dates
 
 代價是 `parameters_dataset.yaml` 不再是 test 覆蓋範圍的唯一真實來源 —— 同一個 `base_dataset_version` 底下的月份會隨時間累積，**實際有哪些月份要以 Hive partition 為準**（`SHOW PARTITIONS`）；manifest 只記錄**最後一次執行**當下的設定，每次執行覆寫，因此讀不出累積的覆蓋範圍。完整推導與否決過的選項見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；操作步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
-除了上述七個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
+除了上述八個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
 
 每層使用 canonical YAML 計算 8 碼 SHA-256 hash。mapping 的 key 排列順序不影響 hash，但 list 的內容與順序會影響，例如重新排列 `sample_group_keys`、日期清單或 `categorical_values` 都會產生不同版本。
 
@@ -476,12 +483,14 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `sample_group_keys` |  | ✓ | ✓ | train 與 calibration 共用分層 key，因此兩個 variant 都翻新 |
 | `carry_columns` | ✓ |  |  | 改變 model input schema |
 | `train_dev_ratio` |  | ✓ |  | 只改變 train/train-dev entity 切分 |
+| `train_split_keys` |  | ✓ |  | 只改變 train/train-dev 的切分單位；val/test 產物完全不動 |
 | `enable_calibration` | ✓ |  |  | 改變 pipeline 結構及是否建立 calibration 產物 |
 | `calibration_snap_dates` | ✓ |  |  | 日期範圍屬於 base；不是 calibration 抽樣 variant |
 | `calibration_sample_ratio` |  |  | ✓ | 只改變 calibration 抽樣 |
 | `calibration_sample_ratio_overrides` |  |  | ✓ | 只改變 calibration 各分層抽樣 |
 | `val_snap_dates` | ✓ |  |  | 改變 validation 資料 |
 | `val_sample_ratio` | ✓ |  |  | val 屬於 base layer，不屬於 train sampling |
+| `val_sample_keys` | ✓ |  |  | 同上；不登記進 train sampling，否則 val 會靜默沿用舊資料 |
 | `test_snap_dates` |  |  |  | 只改變 test 覆蓋範圍，不改變任何產物身分（見 7.1） |
 | `prepare_model_input.drop_columns` | ✓ |  |  | 改變 feature 清單與 model input |
 | `prepare_model_input.categorical_columns` | ✓ |  |  | 改變 category mappings、encoding 與 feature 清單 |

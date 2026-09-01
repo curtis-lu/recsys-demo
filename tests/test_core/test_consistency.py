@@ -1893,3 +1893,93 @@ class TestEntityColumnsDeclaredA28:
             ["cust_id", "score", "label", "snap_date"],
             "training_eval_predictions",
         ) == []
+
+
+# =============================================================================
+# A29 — dataset.train_split_keys / val_sample_keys shape (aggregated at CLI entry)
+# =============================================================================
+
+from recsys_tfb.core.consistency import entity_grouping_key_errors
+
+
+class TestEntityGroupingKeysA29:
+    def _params(self, entity=None, **dataset) -> dict:
+        return {
+            "schema": {"columns": {"entity": entity or ["branch_id", "cust_id"]}},
+            "dataset": dataset,
+        }
+
+    def test_absent_keys_are_clean(self):
+        # Neither key declared is the state every existing config is in, and
+        # the one this whole feature promises not to disturb.
+        assert entity_grouping_key_errors({}) == []
+        assert entity_grouping_key_errors(self._params()) == []
+
+    def test_full_entity_and_proper_subsets_are_accepted(self):
+        for value in (["branch_id", "cust_id"], ["branch_id"], ["cust_id"]):
+            assert entity_grouping_key_errors(
+                self._params(train_split_keys=value)) == [], value
+            assert entity_grouping_key_errors(
+                self._params(val_sample_keys=value)) == [], value
+
+    def test_column_outside_entity_is_rejected(self):
+        errs = entity_grouping_key_errors(self._params(train_split_keys=["region"]))
+        assert len(errs) == 1
+        assert "A29" in errs[0]
+        assert "dataset.train_split_keys" in errs[0]
+        assert "region" in errs[0]
+        # The legal set belongs in the message: the operator's next move is to
+        # retype the column, not to go read schema.py.
+        assert "branch_id" in errs[0] and "cust_id" in errs[0]
+
+    def test_a_typo_in_one_of_several_columns_is_rejected(self):
+        # The all-wrong case is the easy one. A list that is *mostly* right is
+        # where a subset check earns its keep: `["branch_id", "cust_di"]` still
+        # groups on something, so without this the run would succeed on a
+        # coarser unit than asked for.
+        errs = entity_grouping_key_errors(
+            self._params(val_sample_keys=["branch_id", "cust_di"]))
+        assert len(errs) == 1
+        # Only the offending column is named as unknown; the one that is fine
+        # must not be swept into the complaint.
+        assert "['cust_di']" in errs[0]
+
+    def test_empty_list_is_rejected(self):
+        errs = entity_grouping_key_errors(self._params(train_split_keys=[]))
+        assert len(errs) == 1
+        assert "A29" in errs[0]
+        assert "empty list" in errs[0]
+
+    def test_an_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
+        # Null and absent produce the same split, but not the same artifact:
+        # a present key joins the version payload, so the null form rebuilds
+        # everything under train_variant_id / base_dataset_version while
+        # changing no behaviour. Treating it as absent would hide that.
+        for key in ("train_split_keys", "val_sample_keys"):
+            errs = entity_grouping_key_errors(self._params(**{key: None}))
+            assert len(errs) == 1, (key, errs)
+            assert f"dataset.{key}" in errs[0]
+
+    def test_a_bare_string_is_rejected(self):
+        # schema.entity accepts a bare string and normalises it to a list, so
+        # `train_split_keys: cust_id` looks like it should work. It must not
+        # pass silently: a string is iterable, and a downstream select(*"cust_id")
+        # would ask for seven one-character columns.
+        errs = entity_grouping_key_errors(self._params(train_split_keys="cust_id"))
+        assert len(errs) == 1
+        assert "list of column names" in errs[0]
+
+    def test_both_keys_wrong_are_reported_together(self):
+        # Collect-all: fixing one key per run is exactly what this gate exists
+        # to avoid, and both keys sit in the same config block.
+        errs = entity_grouping_key_errors(
+            self._params(train_split_keys=["nope"], val_sample_keys=["also_nope"]))
+        assert len(errs) == 2
+        assert any("train_split_keys" in e for e in errs)
+        assert any("val_sample_keys" in e for e in errs)
+
+    def test_wired_into_validate_config_consistency(self):
+        # The predicate being correct is worth nothing if nothing calls it.
+        params = self._params(train_split_keys=["region"])
+        with pytest.raises(ConfigConsistencyError, match="A29"):
+            validate_config_consistency(params)

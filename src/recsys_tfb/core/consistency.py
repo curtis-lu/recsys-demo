@@ -207,6 +207,15 @@ Layer 1 — config-static (implemented here; aggregated by
   training-only. Replaces the node-body guard ADR-0014 first placed in
   ``predict_and_write_test_predictions``; wiring it at the command is what
   makes a catalog typo cost a startup rather than a whole HPO search.
+* A29 — ``dataset.train_split_keys`` / ``dataset.val_sample_keys``, when
+  declared, must each be a non-empty subset of ``schema.entity``. They declare
+  the unit the train/dev split and the val draw group on; undeclared means the
+  whole entity. Predicate: ``entity_grouping_key_errors``. Aggregated by
+  ``validate_config_consistency`` — unlike A24/A26 this is not one pipeline's
+  concern: ``train_split_keys`` also feeds ``train_variant_id``, so a typo
+  changes artifact paths for training and inference too. Why two keys rather
+  than one, and which version ID each moves:
+  docs/adr/0016-split-unit-declared-by-two-keys.md.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -276,7 +285,7 @@ import datetime as _datetime
 import pandas as pd
 
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
-from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema
 
 #: ``parameters`` key the CLI hands the A21-validated ``--rebuild-dates`` value
 #: to nodes under (values normalised to ``YYYY-MM-DD`` by
@@ -881,6 +890,72 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def entity_grouping_key_errors(parameters: dict) -> list[str]:
+    """A29 — ``dataset.train_split_keys`` / ``val_sample_keys`` shape.
+
+    Each, when declared, must be a non-empty subset of ``schema.entity``.
+    Order and duplicates are not policed: both keys only ever reach
+    ``spark_bucket``/``distinct``/a join key list, none of which read order,
+    and a repeated column changes no result.
+
+    Why a subset and not any column. Restricting to ``entity`` keeps these
+    keys a statement about *how coarse the entity is*. Admitting an arbitrary
+    column (split by ``region``, say) turns them into a general grouping
+    mechanism whose interaction with the query group nothing here checks —
+    a separate feature, not a looser bound on this one.
+
+    Why config-static rather than a node guard. A misspelled column name is
+    knowable from ``parameters`` alone, and the node that would notice sits
+    behind a two-to-four-minute Spark warm-up. Aggregated by
+    ``validate_config_consistency`` so a user who fumbles both keys sees both.
+    """
+    errors: list[str] = []
+    ds = parameters.get("dataset") or {}
+    entity = get_schema(parameters)["entity"]
+
+    for key in ENTITY_GROUPING_KEYS:
+        if key not in ds:
+            continue
+        value = ds[key]
+        if value is None:
+            # An absent key and a key written `train_split_keys:` with no value
+            # behave identically at runtime — both resolve to the whole entity —
+            # but they are NOT the same artifact. A present key is part of the
+            # version payload, so writing the null form moves train_variant_id
+            # (or base_dataset_version) and rebuilds everything under it while
+            # changing no behaviour at all. Rejecting it is what keeps "omit to
+            # get the default" the only spelling of the default.
+            errors.append(
+                f"A29: dataset.{key} is present but empty. Delete the line to "
+                f"use the whole schema.entity={entity}; leaving it null changes "
+                f"nothing about the split but still busts the version ID the "
+                f"key feeds, rebuilding artifacts for no reason."
+            )
+            continue
+        if not isinstance(value, list) or not all(isinstance(c, str) for c in value):
+            errors.append(
+                f"A29: dataset.{key}={value!r} must be a list of column names "
+                f"(a non-empty subset of schema.entity={entity})."
+            )
+            continue
+        if not value:
+            errors.append(
+                f"A29: dataset.{key} is an empty list. Omit the key to use the "
+                f"whole schema.entity={entity}; an empty list would ask for a "
+                f"split with no unit at all."
+            )
+            continue
+        unknown = [c for c in value if c not in entity]
+        if unknown:
+            errors.append(
+                f"A29: dataset.{key} names column(s) {unknown} that are not in "
+                f"schema.entity={entity}. This key declares how coarse the "
+                f"entity is, so it can only name entity columns — fix the "
+                f"spelling, or add the column to schema.entity."
+            )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -984,6 +1059,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(training_diagnostics_param_errors(parameters))
 
     errors.extend(training_hpo_finalize_param_errors(parameters))
+
+    errors.extend(entity_grouping_key_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

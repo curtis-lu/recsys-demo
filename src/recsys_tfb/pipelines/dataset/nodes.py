@@ -42,7 +42,7 @@ from recsys_tfb.core.consistency import (
     spark_dtype_is_numeric,
 )
 from recsys_tfb.core.logging import log_step
-from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.schema import get_entity_grouping, get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
@@ -284,33 +284,38 @@ def split_train_keys(
     sample_keys: DataFrame,
     parameters: dict,
 ) -> tuple[DataFrame, DataFrame]:
-    """Split sampled keys into train and train-dev by cust_id ratio.
+    """Split sampled keys into train and train-dev by entity ratio.
 
-    All rows for a given cust_id are assigned to the same split.
+    All rows of a given entity are assigned to the same split, so no entity
+    straddles the boundary. Which columns constitute "a given entity" here is
+    the user's to declare (``dataset.train_split_keys``, defaulting to the whole
+    ``schema.entity``): a leakage unit coarser than the query group is a real
+    situation — several accounts of one customer must not land on opposite
+    sides — and the framework has no way to know it from the data.
+
     Logging still triggers no action; the empty-dev guard below does — one
     ``isEmpty`` always, plus one ``count`` on the failing path only.
     """
-    schema = get_schema(parameters)
-    entity_cols = schema["entity"]
-    cust_col = entity_cols[0]
+    # Decision — the split unit: what the user declared, else the whole entity.
+    split_cols = get_entity_grouping(parameters, "train_split_keys")
 
     train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
     seed = parameters.get("random_seed", 42)
 
-    # Deterministic per-cust_id bucket; threshold is computed once so the two
+    # Deterministic per-entity bucket; threshold is computed once so the two
     # filters are guaranteed to be a complete and disjoint partition regardless
     # of how many actions Spark runs against this plan.
-    cust_df = sample_keys.select(cust_col).distinct()
-    cust_df = cust_df.withColumn(
-        "_bucket", spark_bucket(cust_df, [cust_col], seed, site="split_train_dev"),
+    entity_df = sample_keys.select(*split_cols).distinct()
+    entity_df = entity_df.withColumn(
+        "_bucket", spark_bucket(entity_df, split_cols, seed, site="split_train_dev"),
     )
     threshold = ratio_to_threshold(train_dev_ratio)
 
-    dev_custs = cust_df.filter(F.col("_bucket") < F.lit(threshold)).select(cust_col)
-    train_custs = cust_df.filter(F.col("_bucket") >= F.lit(threshold)).select(cust_col)
+    dev_entities = entity_df.filter(F.col("_bucket") < F.lit(threshold)).select(*split_cols)
+    train_entities = entity_df.filter(F.col("_bucket") >= F.lit(threshold)).select(*split_cols)
 
-    train_keys = sample_keys.join(train_custs, on=cust_col, how="inner")
-    train_dev_keys = sample_keys.join(dev_custs, on=cust_col, how="inner")
+    train_keys = sample_keys.join(train_entities, on=split_cols, how="inner")
+    train_dev_keys = sample_keys.join(dev_entities, on=split_cols, how="inner")
 
     # An empty train_dev is invisible downstream: it is the early-stopping
     # validation set for every HPO trial (training/nodes.py passes
@@ -323,7 +328,8 @@ def split_train_keys(
     # `_bucket >= threshold` takes everything — the same silent state, reached
     # by one stray minus sign. Only an exact 0 means "no dev split wanted".
     if train_dev_ratio != 0 and train_dev_keys.isEmpty():
-        n_entities = cust_df.count()
+        n_entities = entity_df.count()
+        split_unit = ", ".join(split_cols)
         if n_entities == 0:
             raise ValueError(
                 f"split_train_keys received no sampled keys at all "
@@ -335,11 +341,12 @@ def split_train_keys(
         raise ValueError(
             f"split_train_keys produced an empty train-dev split: "
             f"train_dev_ratio={train_dev_ratio} applied to "
-            f"{n_entities} distinct {cust_col} value(s) puts every entity "
+            f"{n_entities} distinct {split_unit} value(s) puts every entity "
             f"on the train side. train_dev is the early-stopping validation set "
             f"for every HPO trial, so an empty one disables early stopping "
-            f"without raising. Raise dataset.train_dev_ratio, or widen the "
-            f"sample (dataset.sample_ratio / train_snap_dates)."
+            f"without raising. Raise dataset.train_dev_ratio, widen the "
+            f"sample (dataset.sample_ratio / train_snap_dates), or split on a "
+            f"finer unit (dataset.train_split_keys)."
         )
 
     logger.info(
@@ -353,12 +360,20 @@ def select_val_keys(
     sample_pool: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Select validation identity keys (full population, optional entity sampling)."""
+    """Select validation identity keys (full population, optional entity sampling).
+
+    The draw unit is the user's to declare (``dataset.val_sample_keys``,
+    defaulting to the whole ``schema.entity``) for the same reason as the train
+    split — but with a sharper failure mode, because getting it wrong is
+    invisible. That key is deliberately absent from ``TRAIN_SAMPLING_KEYS``, so
+    changing it moves ``base_dataset_version``, which is the only ID val
+    artifacts are keyed by. Register it there and a new draw unit would read
+    back the val parquet drawn under the old one, silently. See
+    docs/adr/0016-split-unit-declared-by-two-keys.md.
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
-    entity_cols = schema["entity"]
     identity_key = schema["identity_columns"]
-    cust_col = entity_cols[0]
 
     ds = parameters["dataset"]
     val_dates = [pd.Timestamp(d) for d in ds.get("val_snap_dates", [])]
@@ -378,8 +393,10 @@ def select_val_keys(
     # Decision — when val is sampled, it is sampled per *entity*, never per row:
     # mAP is computed over a query group, so a group must keep all of its
     # candidates or the metric answers a different question.
+    # Decision — the draw unit: what the user declared, else the whole entity.
+    sample_cols = get_entity_grouping(parameters, "val_sample_keys")
     sampled = keep_entities_drawn_under_ratio(
-        all_keys, cust_col, val_sample_ratio, seed, site="val_keys",
+        all_keys, sample_cols, val_sample_ratio, seed, site="val_keys",
     )
     logger.info("Val keys (ratio=%.2f)", val_sample_ratio)
     return sampled
