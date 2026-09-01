@@ -1,7 +1,7 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7, S1-S3) or exception
-registry (R1-R4) in that document. When a test fails, the fix is either to
+Each test corresponds to one numbered constraint (A1-A7, S1-S4) or exception
+registry (R1-R5) in that document. When a test fails, the fix is either to
 change the code back, or to update the document AND get the exception
 registered -- never to loosen the test quietly.
 
@@ -788,6 +788,36 @@ def _first_element_spelling(index):
     return None
 
 
+def _bindings(targets, value):
+    """``(Name target, bound expression)`` pairs for one assignment.
+
+    Tuple targets are paired positionally, so
+    ``entity_cols, item_col = schema["entity"], schema["item"]`` binds only the
+    left name. That form is not hypothetical here: the line directly above the
+    known ``scripts/shap_margin_summary.py`` offender is
+    ``time_col, item_col, label_col = schema["time"], schema["item"], ...``, so
+    it is demonstrably how this repo unpacks a schema. A starred target
+    (``first, *rest = ...``) is skipped -- positions stop lining up, and that
+    spelling is listed as a blind spot rather than guessed at.
+    """
+    pairs = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            pairs.append((target, value))
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+            value, (ast.Tuple, ast.List)
+        ):
+            if len(target.elts) != len(value.elts):
+                continue
+            if any(isinstance(t, ast.Starred) for t in target.elts):
+                continue
+            pairs += [
+                (t, v) for t, v in zip(target.elts, value.elts)
+                if isinstance(t, ast.Name)
+            ]
+    return pairs
+
+
 def _entity_list_names(tree):
     """Names bound to the entity columns anywhere in ``tree``.
 
@@ -814,11 +844,11 @@ def _entity_list_names(tree):
                 targets, value = [node.target], node.value
             else:
                 continue
-            inherits = _entity_list_source(value) is not None or (
-                isinstance(value, ast.Name) and value.id in names
-            )
-            if inherits:
-                names |= {t.id for t in targets if isinstance(t, ast.Name)}
+            for target, bound in _bindings(targets, value):
+                if _entity_list_source(bound) is not None or (
+                    isinstance(bound, ast.Name) and bound.id in names
+                ):
+                    names.add(target.id)
         if len(names) == before:
             return sorted(names)
 
@@ -851,7 +881,8 @@ def _entity_first_column_offenders(root, exceptions=None):
             func = owner.get(node.lineno, "<module>")
             if (rel, func) in exceptions:
                 continue
-            offenders.append(f"{rel}:{node.lineno} in {func}(): {source}{spelling}")
+            where = func if func == "<module>" else f"{func}()"
+            offenders.append(f"{rel}:{node.lineno} in {where}: {source}{spelling}")
     return offenders
 
 
@@ -889,17 +920,31 @@ class TestS4NoFirstEntityColumn:
         Each case hides the first column somewhere different, and each one is
         writable today:
 
-        ==================  ==============================================
-        case                what it needs from the scan
-        ==================  ==============================================
-        ``direct.py``       subscript-of-subscript, no variable in between
-        ``alias.py``        the binding pass (both original dataset sites)
-        ``alias_chain.py``  the binding pass reaching a fixed point
-        ``annotated.py``    ``AnnAssign``, not just ``Assign``
-        ``call.py``         ``get_entity_grouping`` counts as entity columns
-        ``sliced.py``       ``[:1]`` takes the first column too
-        ``nested.py``       the offender is reported against the inner def
-        ==================  ==============================================
+        ====================  ============================================
+        case                  what it needs from the scan
+        ====================  ============================================
+        ``direct.py``         subscript-of-subscript, no variable between
+        ``alias.py``          the binding pass (both original dataset sites)
+        ``alias_chain.py``    the binding pass reaching a **fixed point**
+        ``annotated.py``      ``AnnAssign``, not just ``Assign``
+        ``tuple_target.py``   tuple targets paired positionally
+        ``call.py``           ``get_entity_grouping`` returns entity columns
+        ``sliced.py``         ``[:1]`` takes the first column too
+        ``nested.py``         reported against the innermost def
+        ``pkg/sub/deep.py``   ``rglob``, not ``glob``
+        ====================  ============================================
+
+        ``alias_chain.py`` writes the consumer **above** the producer on
+        purpose. ``ast.walk`` visits a module's statements in source order, so
+        the readable ordering (``a = ...`` then ``b = a``) is satisfied by a
+        single pass and pins nothing; this ordering binds ``a`` in pass one and
+        ``b`` only in pass two. Verified: cutting the loop to one pass turns
+        this case red and nothing else.
+
+        ``pkg/sub/deep.py`` is the only case not written flat into
+        ``tmp_path``. Verified: ``rglob`` -> ``glob`` leaves every other case
+        green while the real tree stops being scanned below its top level --
+        which would silently exempt all four historical sites.
         """
         cases = {
             "direct.py": 'def f(schema):\n    return schema["entity"][0]\n',
@@ -909,15 +954,20 @@ class TestS4NoFirstEntityColumn:
                 '    return entity_cols[0]\n'
             ),
             "alias_chain.py": (
-                'def f(schema):\n'
-                '    a = schema["entity"]\n'
-                '    b = a\n'
+                'def f():\n'
                 '    return b[0]\n'
+                'b = a\n'
+                'a = SCHEMA["entity"]\n'
             ),
             "annotated.py": (
                 'def f(schema):\n'
                 '    cols: list[str] = schema["entity"]\n'
                 '    return cols[0]\n'
+            ),
+            "tuple_target.py": (
+                'def f(schema):\n'
+                '    entity_cols, item_col = schema["entity"], schema["item"]\n'
+                '    return entity_cols[0]\n'
             ),
             "call.py": (
                 'def f(parameters):\n'
@@ -931,9 +981,12 @@ class TestS4NoFirstEntityColumn:
                 '        return schema["entity"][0]\n'
                 '    return inner\n'
             ),
+            "pkg/sub/deep.py": 'def f(schema):\n    return schema["entity"][0]\n',
         }
         for name, source in cases.items():
-            (tmp_path / name).write_text(source)
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source)
 
         found = _entity_first_column_offenders(tmp_path, exceptions=frozenset())
         for name in cases:
@@ -944,21 +997,27 @@ class TestS4NoFirstEntityColumn:
             f"the offender was not reported against the innermost def: {found}"
         )
 
-    def test_the_report_names_a_location_not_just_a_count(self):
+    def test_the_report_names_a_location_not_just_a_count(self, tmp_path):
         """Red-but-mute is a half-fix: the next person still has to go find it.
 
-        A synthetic offender is scanned in isolation and every part of the
-        message the reader needs -- file, line, function, the expression -- is
-        pinned here, so shrinking the message to a bare count fails.
+        The whole rendered line is pinned by equality, so dropping any part of
+        it -- the function, the expression, the line number -- fails here.
+        Verified: shrinking the message to ``f"{rel}:{node.lineno}"`` turns
+        this red. An offender outside any ``def`` is included because it is the
+        one case where the function slot is not a function name.
         """
-        source = (
+        (tmp_path / "comparison_nodes.py").write_text(
             'def restrict_to_common(schema):\n'
             '    entity_cols = schema["entity"]\n'
             '    cust_col = entity_cols[0]\n'
             '    return cust_col\n'
         )
-        tree = ast.parse(source)
-        assert _innermost_function_by_line(tree)[3] == "restrict_to_common"
+        (tmp_path / "at_module_level.py").write_text('COL = SCHEMA["entity"][0]\n')
+
+        assert _entity_first_column_offenders(tmp_path, exceptions=frozenset()) == [
+            'at_module_level.py:1 in <module>: ...["entity"][0]',
+            "comparison_nodes.py:3 in restrict_to_common(): entity_cols[0]",
+        ]
 
     def test_the_scan_leaves_honest_entity_use_alone(self, tmp_path):
         """False positives here cost real work, so pin the shapes that are fine.

@@ -41,7 +41,7 @@
 
 ## 11 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**26 個測試，1.05–1.07 秒**（2026-09-01 連跑三次；#265 加入 S4 的六個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔上一版量到的是 20 個測試 1.4–1.7 秒，多了六個測試反而更快；再上一版的 17 個測試量到 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**26 個測試，1.06–1.10 秒**（2026-09-01 連跑三次；#265 加入 S4 的六個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔上一版量到的是 20 個測試 1.4–1.7 秒，多了六個測試反而更快；再上一版的 17 個測試量到 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -431,7 +431,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 | 形態 | 例子 | 靠掃描的哪個零件抓到 |
 |---|---|---|
 | 直接索引 | `schema["entity"][0]` | subscript 的 value 本身又是一個 `["entity"]` subscript |
-| 先取出清單、再索引 | `entity_cols = schema["entity"]` … `entity_cols[0]` | 模組內的名稱綁定，遞移（`b = a` 也繼承）且含 `x: list[str] = ...` |
+| 先取出清單、再索引 | `entity_cols = schema["entity"]` … `entity_cols[0]` | 模組內的名稱綁定：遞移（`b = a` 也繼承、跑到不動點）、含 `x: list[str] = ...`，以及**逐位配對的 tuple 解包**（`entity_cols, item_col = schema["entity"], schema["item"]`——`scripts/shap_margin_summary.py` 的那處違例上一行就是這個寫法） |
 | 索引「宣告出來的分組單位」 | `get_entity_grouping(...)` 的結果被 `[0]` | `ENTITY_LIST_CALLS` 名單 |
 
 前兩種就是那四處原本的寫法（見 #263、#264 的 diff）。`[:1]`／`[0:1]` 與 `[0]` 同罪——同一個讀法換個寫法。**左邊是什麼刻意不看**：`schema["entity"]`、`get_schema(parameters)["entity"]`、`params["schema"]["columns"]["entity"]` 對這條而言是同一個表達式，釘死任何一種寫法只會把盲區搬個位置。
@@ -439,8 +439,10 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 **失敗訊息會指出位置**——檔案、行號、所在函式（巢狀時取最內層的 def）、以及那個表達式：
 
 ```
-pipelines/evaluation/comparison_nodes.py:54 in restrict_to_common(): entity_cols[0]
+pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity"][0]
 ```
+
+（這是**真的**跑出來的：把 `src/` 換成 #263 修好之前的那一版（`247f820^`）再掃一次，四處歷史違例全部被點名，含 `evaluation/comparison/restrict.py:30`、`pipelines/dataset/nodes.py:295`／`:361`。）
 
 只轉紅、講不出在哪，等於下一個人還是得自己找。`test_the_report_names_a_location_not_just_a_count` 把這件事釘住。
 
@@ -451,8 +453,15 @@ pipelines/evaluation/comparison_nodes.py:54 in restrict_to_common(): entity_cols
 ### 這個檢查看不到
 
 - **`scripts/` 不在掃描範圍內**（與 A3／A4 一樣只掃 `src/recsys_tfb/`）。⚠ **`scripts/shap_margin_summary.py` 現在就有一處** `cust_col = schema["entity"][0]`。它是一次性診斷腳本、不在生產路徑上，也不在 #262 認定的四處之內；把掃描範圍擴大到 `scripts/` 就得立刻登記一筆例外，而 #265 的驗收要求零例外。**要不要修那一處是一個還沒做的決定**，不是這條掃描已經處理掉的事。
-- **其他取第一欄的寫法**：解包（`first, *rest = schema["entity"]`）、`next(iter(...))`、`sorted(...)[0]`、`min(...)`、算出來的索引。釘死的是會被**順手寫出來**的那三種；其餘要刻意才寫得出來。
-- **跨模組的值傳遞。** 一個函式把 `schema["entity"]` 當參數傳出去、在另一個模組才被索引，掃描看不到——它判斷的是**模組內**的名稱綁定，不是跨模組的值追蹤。
+- **其他取第一欄的寫法**（皆實測會漏）：星號解包（`first, *rest = schema["entity"]`——位置對不齊，刻意不猜）、`next(iter(...))`、`sorted(...)[0]`、`min(...)`、`list(...)[0]`、`.copy()[0]`、`.get("entity")[0]`、算出來的索引。**`[-1]`（取最後一欄）也漏**——那是同一個錯，只是本條的「第一欄」框架講不到它。釘死的是會被**順手寫出來**的那幾種；其餘要刻意才寫得出來。
+- **值一旦離開綁定它的那個語句就看不到了——包含同一個模組內傳給 helper 的參數。** 掃描認的是**賦值**（`x = schema["entity"]`），不是函式參數，所以下面這段完全走得過去：
+  ```python
+  def _bucket(entity_cols):
+      return entity_cols[0]          # 掃不到
+  def node(schema):
+      return _bucket(schema["entity"])
+  ```
+  ⚠ **這在本 repo 不是假想的形狀，是主流寫法**：`src/` 有 14 個函式吃 entity 清單型的參數（`group_cols`、`identity_cols`、`entity_cols`），包含本條上面那張表推薦你去看的 `common_universe`，以及 `pipelines/dataset/steps/sampling.py::keep_entities_drawn_under_ratio`。#264 的修法還把切分邏輯**更往這個形狀推**（`get_entity_grouping(...)` → `split_cols` → 交給 `spark_bucket`）。**第五次違例掉在 `steps/` helper 裡的機率，比掉在 node 裡高。**
 - **名稱綁定不分支**（flow-insensitive）：同一個名字先綁 entity 清單、後來改綁別的東西再索引，會被誤報。這個取捨的方向是**假陽性**（有人會看到、會來修），不是假陰性（安靜地出貨一個錯數字）。
 
 ---
