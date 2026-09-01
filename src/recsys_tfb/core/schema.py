@@ -213,6 +213,16 @@ def get_entity_grouping(parameters: dict, dataset_key: str) -> list[str]:
     run, so this resolver stays a plain lookup rather than a second, silently
     diverging copy of that rule.
     """
+    if dataset_key not in ENTITY_GROUPING_KEYS:
+        # A mistyped key name would resolve to "nothing declared" and hand back
+        # the whole entity — a plausible-looking answer that silently ignores
+        # whatever the user configured, and that A29 never sees because it
+        # validates the real keys, not this call. Programmer error, so it
+        # raises here rather than joining the config gate.
+        raise ValueError(
+            f"{dataset_key!r} is not an entity-grouping key. "
+            f"Expected one of {list(ENTITY_GROUPING_KEYS)}."
+        )
     ds = parameters.get("dataset") or {}
     declared = ds.get(dataset_key)
     columns = declared if declared else get_schema(parameters)["entity"]

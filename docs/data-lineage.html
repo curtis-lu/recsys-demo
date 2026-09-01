@@ -402,7 +402,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
   <h4>train_keys · train_dev_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · split_train_keys（把 sample_keys 依 <code>train_split_keys</code>（預設完整 entity）hash，以 <code>train_dev_ratio</code> 切兩份）　|
   <b>下游</b>：dataset（build_train_model_input / build_train_dev_model_input）　|　<b>partition</b>：snap_date</div>
-  <p class="sub">schema 同 sample_keys（identity + carry 欄）。切分按 <code>cust_id</code> 分桶（同客戶整批分到同一邊，避免洩漏）。</p>
+  <p class="sub">schema 同 sample_keys（identity + carry 欄）。切分按 <code>train_split_keys</code>（預設完整 entity）分桶（同一個 entity 整批分到同一邊，避免洩漏）。</p>
 </div>
 
 <div class="card" id="train_model_input">

@@ -360,12 +360,20 @@ def select_val_keys(
     sample_pool: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Select validation identity keys (full population, optional entity sampling)."""
+    """Select validation identity keys (full population, optional entity sampling).
+
+    The draw unit is the user's to declare (``dataset.val_sample_keys``,
+    defaulting to the whole ``schema.entity``) for the same reason as the train
+    split — but with a sharper failure mode, because getting it wrong is
+    invisible. That key is deliberately absent from ``TRAIN_SAMPLING_KEYS``, so
+    changing it moves ``base_dataset_version``, which is the only ID val
+    artifacts are keyed by. Register it there and a new draw unit would read
+    back the val parquet drawn under the old one, silently. See
+    docs/adr/0016-split-unit-declared-by-two-keys.md.
+    """
     schema = get_schema(parameters)
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
-    # Decision — the draw unit: what the user declared, else the whole entity.
-    sample_cols = get_entity_grouping(parameters, "val_sample_keys")
 
     ds = parameters["dataset"]
     val_dates = [pd.Timestamp(d) for d in ds.get("val_snap_dates", [])]
@@ -385,6 +393,8 @@ def select_val_keys(
     # Decision — when val is sampled, it is sampled per *entity*, never per row:
     # mAP is computed over a query group, so a group must keep all of its
     # candidates or the metric answers a different question.
+    # Decision — the draw unit: what the user declared, else the whole entity.
+    sample_cols = get_entity_grouping(parameters, "val_sample_keys")
     sampled = keep_entities_drawn_under_ratio(
         all_keys, sample_cols, val_sample_ratio, seed, site="val_keys",
     )
