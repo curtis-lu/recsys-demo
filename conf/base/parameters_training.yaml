@@ -150,11 +150,12 @@ mlflow:
 # 另一個效果：設定列了某月但來源表沒有（典型：加了月份卻忘了先跑 dataset），
 # 逐月複製的 glob 零命中即 raise FileNotFoundError——這道 fail-loud 是機制自帶
 # 的，不需要另外寫覆蓋檢查。
-# `cache.root` 是 cache 路徑的唯一真實來源，_resolve_cache_path()
-# （存在性檢查）與 _populate_cache_from_hive()（hadoop fs copyToLocal 目的地）
-# 都從這裡讀。persistence 由 training/nodes.py::_materialize_parquet_handle
-# 負責，不經 catalog dataset。所有環境都會寫 parquet 到 disk 並在 DAG 中以
-# ParquetHandle 串接；dev/test 用一個臨時的 cache.root。
+# `cache.root` 是 cache 路徑的唯一真實來源，training/steps/local_cache.py 的
+# resolve_cache_path（存在性檢查）與 populate_cache_from_hive（hadoop fs
+# copyToLocal 目的地）都從這裡讀。persistence 由 training/nodes.py 的 5 個
+# cache_*_model_input node 各自負責，不經 catalog dataset。所有環境都會寫
+# parquet 到 disk 並在 DAG 中以 ParquetHandle 串接；dev/test 用一個臨時的
+# cache.root。
 cache:
   root: data/recsys_cache
 
