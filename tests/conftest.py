@@ -71,3 +71,34 @@ def spark():
         stop_spark_session()
         session = get_or_create_spark_session(test_configs, enable_hive=True)
     return session
+
+
+@pytest.fixture
+def two_column_entity_params():
+    """Parameters whose ``schema.entity`` really resolves to two columns.
+
+    Shared source of truth for every multi-column-entity test, because the
+    nesting is easy to get wrong and the mistake is silent:
+    :func:`recsys_tfb.core.schema.get_schema` reads ``schema`` → ``columns``,
+    so a dict that puts the column names directly under ``schema`` is ignored
+    wholesale and ``entity`` falls back to the one-column built-in default.
+    A test written on such a dict runs single-entity data against
+    single-entity code and passes no matter what.
+
+    ``tests/test_core/test_schema.py::TestTwoColumnEntityFixture`` is the meta
+    test that keeps this fixture honest — it asserts ``get_schema`` really
+    hands back both columns, and pins the mis-nested shape it guards against.
+    """
+    return {
+        "schema": {
+            "columns": {
+                "time": "snap_date",
+                "entity": ["branch_id", "cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
+            "categorical_values": {"prod_name": ["p1", "p2", "p3"]},
+        },
+    }

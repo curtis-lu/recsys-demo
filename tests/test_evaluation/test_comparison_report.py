@@ -45,10 +45,11 @@ def _params() -> dict:
 
 def _coverage() -> dict:
     return {
-        "n_cust_A_full": 10000, "n_cust_B_full": 5000, "n_cust_common": 4800,
-        "n_prod_A_full": 22, "n_prod_B_full": 18, "n_prod_common": 12,
-        "dropped_prods_A": ["fund_misc", "ext_etc"],
-        "dropped_prods_B": ["ext_yet_another"],
+        "n_query_group_A_full": 10000, "n_query_group_B_full": 5000,
+        "n_query_group_common": 4800,
+        "n_item_A_full": 22, "n_item_B_full": 18, "n_item_common": 12,
+        "dropped_items_A": ["fund_misc", "ext_etc"],
+        "dropped_items_B": ["ext_yet_another"],
         "kind_a": "model_version", "kind_b": "external_hive",
         "model_version_a": "2026-01-31_xxx_yyy",
         "table_b": "other_project.predictions",
@@ -76,7 +77,7 @@ def test_coverage_numbers_in_html():
     out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
     assert "4800" in out or "4,800" in out
     assert "10000" in out or "10,000" in out
-    assert "fund_misc" in out  # dropped prods listed
+    assert "fund_misc" in out  # dropped items listed
 
 
 def test_overall_metrics_have_delta():

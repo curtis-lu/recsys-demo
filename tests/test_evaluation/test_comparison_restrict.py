@@ -5,11 +5,21 @@ from recsys_tfb.evaluation.comparison.restrict import restrict_to_common
 
 
 def _params() -> dict:
+    """Single-column-entity parameters, nested where ``get_schema`` reads them.
+
+    The column names must sit under ``schema`` → ``columns``. They used to sit
+    directly under ``schema``, which ``get_schema`` ignores wholesale — the
+    values here happen to equal the built-in defaults, so nothing broke, but
+    anything copied from it that actually changed a column silently did not
+    take effect. Multi-column-entity tests use the shared
+    ``two_column_entity_params`` fixture in ``tests/conftest.py``.
+    """
     return {
         "schema": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "score": "score", "rank": "rank", "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "score": "score", "rank": "rank", "label": "label",
+            },
             "categorical_values": {"prod_name": ["p1", "p2", "p3", "p4"]},
         },
     }
@@ -60,7 +70,7 @@ def label_table(spark):
     )
 
 
-def test_restricts_to_common_cust_and_prod(a_df, b_df, label_table):
+def test_restricts_to_common_entities_and_items(a_df, b_df, label_table):
     a_c, b_c = restrict_to_common(a_df, b_df, label_table, _params())
     a_rows = sorted((r["cust_id"], r["prod_name"]) for r in a_c.collect())
     b_rows = sorted((r["cust_id"], r["prod_name"]) for r in b_c.collect())
