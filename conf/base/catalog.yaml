@@ -315,10 +315,10 @@ evaluation_comparison_report:
   type: TextDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report_comparison.html
 
-# Note: training cache 由 training/nodes.py::_materialize_parquet_handle
-# 直接從 Hive table location `copyToLocal` 搬到 driver-local parquet，不經
-# catalog 持久化；cache node outputs（ParquetHandle）走 framework
-# auto-MemoryDataset 在 DAG 中銜接。
+# Note: training cache 由 training/nodes.py 的 5 個 cache_*_model_input node
+# 經 training/steps/local_cache.py::populate_cache_from_hive 直接從 Hive table
+# location `copyToLocal` 搬到 driver-local parquet，不經 catalog 持久化；cache
+# node outputs（ParquetHandle）走 framework auto-MemoryDataset 在 DAG 中銜接。
 
 # --- Training pipeline — test-set 預測結果（供下游 evaluation 重複使用）---
 # 由 training/nodes.py::predict_and_write_test_predictions 寫入；同 pipeline
