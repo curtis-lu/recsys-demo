@@ -88,7 +88,7 @@ JSON_EXTRA_FIELDS = (
     "item_name",
     # SparkSession lifecycle
     "application_id", "app_name", "last_application_id",
-    "seconds_since_last_use",
+    "seconds_since_last_use", "catalog_implementation",
 )
 
 

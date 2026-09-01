@@ -444,9 +444,9 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 |---|---|---|
 | `core/logging.py:159` | `_current_context` | run context 的程序級單例 |
 | `utils/spark.py:49` | `_canonical_configs`, `_canonical_enable_hive`, `_last_app_id`, `_last_alive_ts` | SparkSession 生命週期 |
-| `utils/spark.py:87` | `_canonical_configs`, `_canonical_enable_hive` | 同上 |
-| `utils/spark.py:161` | `_last_alive_ts` | 同上 |
-| `utils/spark.py:232` | `_last_app_id`, `_last_alive_ts` | 同上 |
+| `utils/spark.py:97` | `_canonical_configs`, `_canonical_enable_hive` | 同上 |
+| `utils/spark.py:173` | `_last_alive_ts` | 同上 |
+| `utils/spark.py:317` | `_last_app_id`, `_last_alive_ts` | 同上 |
 
 這些管理的是程序級資源（一個 JVM、一份 run context），本質上就是單例。pipeline node 沒有這種需求。
 
