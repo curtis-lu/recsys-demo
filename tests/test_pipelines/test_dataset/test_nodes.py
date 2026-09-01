@@ -2260,3 +2260,173 @@ class TestDatasetStepTiming:
             )
 
         assert "require_months_present(snap_dates)" in self._timed_steps(caplog)
+
+
+# --- two-column entity -------------------------------------------------------
+# Every test below runs on ``two_column_entity_params`` (tests/conftest.py), the
+# shared fixture whose nesting is verified by
+# tests/test_core/test_schema.py::TestTwoColumnEntityFixture. Hand-rolling a
+# second schema dict here is the one thing that would make these tests vacuous:
+# mis-nest it and get_schema silently returns the one-column default, so
+# single-entity data would run against single-entity code and pass regardless.
+
+_BRANCHES = ["B1", "B2"]
+_TWO_COL_CUSTS = [f"C{i:03d}" for i in range(1, 13)]
+
+
+def _two_column_params(two_column_entity_params, **dataset_over):
+    """The shared two-column schema plus the dataset block these nodes read."""
+    dataset = {
+        "train_snap_dates": _SNAP_DATES[:1],
+        "sample_ratio": 1.0,
+        "sample_group_keys": ["prod_name"],
+        "sample_ratio_overrides": {},
+        "train_dev_ratio": 0.5,
+        "val_snap_dates": _SNAP_DATES[3:4],
+        "val_sample_ratio": 0.5,
+        "test_snap_dates": _SNAP_DATES[4:5],
+    }
+    dataset.update(dataset_over)
+    return {**two_column_entity_params, "random_seed": 42, "dataset": dataset}
+
+
+def _two_column_pool(spark, snap_dates):
+    """Every branch holds every customer, so the two columns disagree on purpose.
+
+    A branch is coarser than an entity here: grouping on ``branch_id`` alone
+    yields 2 groups where the entity yields 24. That gap is what every
+    assertion below reads.
+    """
+    rows = [
+        {
+            "snap_date": pd.Timestamp(snap),
+            "branch_id": branch,
+            "cust_id": cid,
+            "prod_name": _PRODUCTS[0],
+            "label": 0,
+        }
+        for snap in snap_dates
+        for branch in _BRANCHES
+        for cid in _TWO_COL_CUSTS
+    ]
+    return spark.createDataFrame(pd.DataFrame(rows))
+
+
+def _entity_pairs(df) -> set:
+    pdf = df.select("branch_id", "cust_id").distinct().toPandas()
+    return set(map(tuple, pdf.itertuples(index=False)))
+
+
+def _branches_split_across(left: set, right: set) -> set:
+    """Branches with at least one entity on each side."""
+    return {b for b, _ in left} & {b for b, _ in right}
+
+
+class TestSplitTrainKeysTwoColumnEntity:
+    def test_split_groups_on_the_whole_entity_not_its_first_column(
+        self, spark, two_column_entity_params
+    ):
+        """A branch must be able to straddle the train / train-dev boundary.
+
+        The split's unit is the entity, and here an entity is (branch, cust).
+        Grouping on ``branch_id`` alone would make the straddle structurally
+        impossible — every customer of a branch would be forced onto one side,
+        and with two branches the "split" would be a coin flip between two
+        blocks of twelve. Nothing errors in that state; it just isn't a split
+        on the unit the config declares.
+        """
+        params = _two_column_params(two_column_entity_params)
+        keys = _two_column_pool(spark, _SNAP_DATES[:1])
+
+        train, train_dev = split_train_keys(keys, params)
+        train_pairs, dev_pairs = _entity_pairs(train), _entity_pairs(train_dev)
+
+        assert _branches_split_across(train_pairs, dev_pairs) == set(_BRANCHES)
+
+    def test_split_is_still_a_clean_partition_of_the_entities(
+        self, spark, two_column_entity_params
+    ):
+        """Guards the straddle assertion above from a degenerate reading.
+
+        "Some branch appears on both sides" is also satisfied by a broken split
+        that duplicates or drops entities. Complete and disjoint is what makes
+        the straddle mean what it says.
+        """
+        params = _two_column_params(two_column_entity_params)
+        keys = _two_column_pool(spark, _SNAP_DATES[:1])
+
+        train, train_dev = split_train_keys(keys, params)
+        train_pairs, dev_pairs = _entity_pairs(train), _entity_pairs(train_dev)
+
+        assert train_pairs | dev_pairs == _entity_pairs(keys)
+        assert train_pairs & dev_pairs == set()
+        assert len(_entity_pairs(keys)) == len(_BRANCHES) * len(_TWO_COL_CUSTS)
+
+    def test_declared_train_split_keys_coarsen_the_unit(
+        self, spark, two_column_entity_params
+    ):
+        """``train_split_keys: [branch_id]`` must actually reach the node.
+
+        This is the user story the key exists for — a leakage unit coarser
+        than the query group — and it is the exact behaviour the default must
+        NOT have. Asserting it also pins the direction of the previous test:
+        the straddle there is a property of the default, not of the data.
+        """
+        params = _two_column_params(
+            two_column_entity_params, train_split_keys=["branch_id"])
+        keys = _two_column_pool(spark, _SNAP_DATES[:1])
+
+        train, train_dev = split_train_keys(keys, params)
+        train_pairs, dev_pairs = _entity_pairs(train), _entity_pairs(train_dev)
+
+        assert _branches_split_across(train_pairs, dev_pairs) == set()
+        assert train_pairs and dev_pairs
+
+
+class TestSelectValKeysTwoColumnEntity:
+    def test_draw_groups_on_the_whole_entity_not_its_first_column(
+        self, spark, two_column_entity_params
+    ):
+        """A branch must be able to be partially sampled.
+
+        The draw keeps an entity whole; with the entity being (branch, cust),
+        a branch is a bag of 12 entities and the draw runs on each. Drawing on
+        ``branch_id`` alone would keep or drop all twelve together, so
+        ``val_sample_ratio: 0.5`` would return 0, 12 or 24 entities instead of
+        roughly half of them — still a valid sample of *something*, which is
+        why nothing downstream would complain.
+        """
+        params = _two_column_params(two_column_entity_params)
+        pool = _two_column_pool(spark, _SNAP_DATES[3:4])
+
+        kept = _entity_pairs(select_val_keys(pool, params))
+        dropped = _entity_pairs(pool) - kept
+
+        assert _branches_split_across(kept, dropped) == set(_BRANCHES)
+
+    def test_the_draw_keeps_a_strict_non_empty_subset(
+        self, spark, two_column_entity_params
+    ):
+        """Guards the assertion above: it is vacuous if nothing was dropped."""
+        params = _two_column_params(two_column_entity_params)
+        pool = _two_column_pool(spark, _SNAP_DATES[3:4])
+
+        all_pairs = _entity_pairs(pool)
+        kept = _entity_pairs(select_val_keys(pool, params))
+
+        assert kept < all_pairs
+        assert kept
+
+    def test_declared_val_sample_keys_coarsen_the_unit(
+        self, spark, two_column_entity_params
+    ):
+        """``val_sample_keys: [branch_id]`` must actually reach the node."""
+        params = _two_column_params(
+            two_column_entity_params, val_sample_keys=["branch_id"])
+        pool = _two_column_pool(spark, _SNAP_DATES[3:4])
+
+        kept = _entity_pairs(select_val_keys(pool, params))
+        dropped = _entity_pairs(pool) - kept
+
+        assert _branches_split_across(kept, dropped) == set()
+        assert kept and dropped

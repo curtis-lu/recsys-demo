@@ -187,3 +187,36 @@ def validate_schema_config(parameters: dict) -> None:
     # extend resolved_item_values to cover them; until then the broader
     # post-feature_table case is caught by the _spark.py identity-cat guard.
     resolved_item_values(parameters)
+
+
+#: ``dataset`` keys that declare the unit a per-entity operation groups on.
+#: Both default to the full ``schema.entity``; both are validated by invariant
+#: A29 (:func:`recsys_tfb.core.consistency.entity_grouping_key_errors`).
+#: Deliberately NOT part of ``_DEFAULTS``: everything in that dict flows into
+#: :func:`get_schema_for_hash`, so adding a key there would move
+#: ``base_dataset_version`` for every existing user who has not asked for any
+#: of this. See docs/adr/0016-split-unit-declared-by-two-keys.md.
+ENTITY_GROUPING_KEYS: tuple[str, ...] = ("train_split_keys", "val_sample_keys")
+
+
+def get_entity_grouping(parameters: dict, dataset_key: str) -> list[str]:
+    """Columns a per-entity operation groups on, for one ``dataset`` key.
+
+    Returns the declared ``parameters["dataset"][dataset_key]`` when present,
+    otherwise the whole ``schema.entity``. The full entity is the default
+    because it is what the surrounding config already says a ranking request
+    belongs to; defaulting to ``entity[0]`` would promote a historical
+    implementation detail into the spec.
+
+    Shape is NOT re-checked here. A value that is not a non-empty subset of
+    ``schema.entity`` is rejected at the CLI entry by A29, seconds into the
+    run, so this resolver stays a plain lookup rather than a second, silently
+    diverging copy of that rule.
+    """
+    ds = parameters.get("dataset") or {}
+    declared = ds.get(dataset_key)
+    columns = declared if declared else get_schema(parameters)["entity"]
+    # Deduplicated so a repeated column name cannot reach a Spark join key list
+    # (where it is at best redundant) — and so A29 can say it does not police
+    # duplicates without that being a claim about Spark's behaviour.
+    return list(dict.fromkeys(columns))

@@ -822,3 +822,66 @@ class TestFindLatestCompletedModelVersion:
         from recsys_tfb.core.versioning import find_latest_completed_model_version
         assert find_latest_completed_model_version(tmp_path) is None
         assert find_latest_completed_model_version(tmp_path / "missing") is None
+
+
+class TestSplitUnitKeysVersionRouting:
+    """The two split-unit keys move different version IDs, by design.
+
+    This is the reason there are two keys rather than one, so it is asserted on
+    the IDs themselves rather than on ``TRAIN_SAMPLING_KEYS`` membership: the
+    membership is the mechanism, the routing is the promise.
+    See docs/adr/0016-split-unit-declared-by-two-keys.md.
+    """
+
+    def _versions(self, **dataset_over):
+        params = _base_params()
+        params["dataset"].update(dataset_over)
+        return (
+            compute_base_dataset_version(params, _sample_schema()),
+            compute_train_variant_id(params),
+        )
+
+    def test_train_split_keys_moves_only_the_train_variant(self):
+        base_before, train_before = self._versions()
+        base_after, train_after = self._versions(train_split_keys=["cust_id"])
+
+        assert train_after != train_before
+        # val / test artifacts hang off base_dataset_version alone. If this
+        # moved, retuning the train split would rebuild the preprocessor and
+        # every evaluation month — work that nothing about the change requires.
+        assert base_after == base_before
+
+    def test_val_sample_keys_moves_the_base_version(self):
+        base_before, train_before = self._versions()
+        base_after, train_after = self._versions(val_sample_keys=["cust_id"])
+
+        # base is the only ID val artifacts are split by. Not moving it here
+        # would mean a new draw unit silently reading the old val parquet.
+        assert base_after != base_before
+        # train_variant_id hashes the train-sampling subset only, and
+        # val_sample_keys is not in it. (Train artifacts still rebuild — their
+        # path contains base — but that is the price of the val guarantee, not
+        # a second variant.)
+        assert train_after == train_before
+
+    def test_declaring_neither_key_is_byte_for_byte_the_old_answer(self):
+        """Zero migration: an existing config must not move at all.
+
+        Pinned structurally rather than as literal hashes, so the assertion
+        keeps meaning after conf/ legitimately changes. The literal proof
+        against the real conf/base is in the PR body.
+        """
+        params = _base_params()
+        stripped = copy.deepcopy(params)
+        stripped["dataset"].pop("train_split_keys", None)
+        stripped["dataset"].pop("val_sample_keys", None)
+
+        assert compute_base_dataset_version(
+            params, _sample_schema()) == compute_base_dataset_version(
+            stripped, _sample_schema())
+        assert compute_train_variant_id(params) == compute_train_variant_id(stripped)
+
+    def test_train_split_keys_is_registered_and_val_sample_keys_is_not(self):
+        assert "train_split_keys" in TRAIN_SAMPLING_KEYS
+        assert "val_sample_keys" not in TRAIN_SAMPLING_KEYS
+        assert "val_sample_keys" not in ALL_SAMPLING_KEYS

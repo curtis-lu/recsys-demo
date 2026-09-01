@@ -143,7 +143,7 @@ SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_name
 | 版本 | 主要輸入 | 對應產物 |
 |---|---|---|
 | `base_dataset_version` | 非抽樣 dataset 設定（**`test_snap_dates` 除外**，見下）、完整 schema、`feature_table` 欄名／型別／順序 | `preprocessor`、共用特徵表、val／test 資料 |
-| `train_variant_id` | train 抽樣比例、override、分層 keys、`train_dev_ratio` | train／train_dev 資料 |
+| `train_variant_id` | train 抽樣比例、override、分層 keys、`train_dev_ratio`、`train_split_keys` | train／train_dev 資料 |
 | `calibration_variant_id` | calibration 抽樣比例、override、分層 keys | calibration 資料 |
 | `model_version` | 上述資料版本與 model-defining training 設定 | 模型、test 預測、inference／evaluation 結果 |
 

@@ -145,7 +145,7 @@ def keep_rows_drawn_under_ratio(
 
 def keep_entities_drawn_under_ratio(
     keys: DataFrame,
-    entity_col: str,
+    entity_cols: list[str],
     ratio: float,
     seed: int,
     *,
@@ -155,14 +155,21 @@ def keep_entities_drawn_under_ratio(
 
     The draw is on the entity, not the row, so an entity is kept whole or not at
     all — which is what :func:`keep_rows_drawn_under_ratio` does *not* promise.
+
+    ``entity_cols`` is a list, not a single column, because an entity is a
+    *tuple* of columns in this framework. Hashing one of them would draw at a
+    coarser unit than the caller asked for and keep or drop whole groups of
+    entities together — silently, since the result is still a valid sample of
+    something. The caller decides which columns those are (the whole entity, or
+    the coarser unit it declared); this only performs the draw.
     """
-    entities = keys.select(entity_col).distinct()
+    entities = keys.select(*entity_cols).distinct()
     sampled_entities = entities.withColumn(
-        "_bucket", spark_bucket(entities, [entity_col], seed, site=site),
+        "_bucket", spark_bucket(entities, entity_cols, seed, site=site),
     ).filter(
         F.col("_bucket") < F.lit(ratio_to_threshold(ratio))
-    ).select(entity_col)
-    return keys.join(sampled_entities, on=entity_col, how="inner")
+    ).select(*entity_cols)
+    return keys.join(sampled_entities, on=entity_cols, how="inner")
 
 
 def _ratio_lookup_df(spark, sample_ratio_overrides: dict) -> DataFrame:
