@@ -1,6 +1,8 @@
 """Tests for sampling_overrides_editor script."""
 
 import json
+import shutil
+import subprocess
 
 import pandas as pd
 import pytest
@@ -228,6 +230,57 @@ class TestGridToYaml:
         assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.5}}
         assert sw == {"sample_weights": {"b|1": 0.7, "b|0": 0.2}}
 
+    def test_positive_and_negative_keep_rates_emit_two_entries(self):
+        # One cell, two independent cost knobs -> two keys distinguished by the
+        # label component; each dropped when it equals the config default.
+        export = _export(
+            ratio_rows=[
+                {"keys": ["mass", "a"], "ratio": 0.25, "ratio_pos": 0.5},
+                {"keys": ["mass", "b"], "ratio": 1.0, "ratio_pos": 0.3}],
+            weight_rows=[])
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {
+            "mass|a|0": 0.25, "mass|a|1": 0.5, "mass|b|1": 0.3}}
+
+    def test_legacy_export_without_ratio_pos_leaves_positives_alone(self):
+        # A pre-two-class export means "positives untouched"; it must round-trip
+        # to the single-entry YAML it used to produce, not invent a |1 key.
+        export = _export(ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.5}],
+                         weight_rows=[])
+        out = grid_to_yaml(export, _params(), default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"mass|a|0": 0.5}}
+
+    def test_keep_rates_equal_to_default_are_not_emitted(self):
+        # Sparseness is per class: default_ratio is the config's sample_ratio,
+        # which the draw already applies to an un-overridden key.
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.5, "ratio_pos": 0.5}],
+            weight_rows=[])
+        out = grid_to_yaml(export, _params(), default_ratio=0.5)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {}}
+
+    def test_unknown_product_caught_on_positive_key_too(self):
+        # ratio == default so ONLY the |1 key is emitted; A5 must still see it.
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "zzz"], "ratio": 1.0, "ratio_pos": 0.5}],
+            weight_rows=[])
+        with pytest.raises(ValueError, match="unknown product"):
+            grid_to_yaml(export, _params(), default_ratio=1.0)
+
+    def test_both_label_components_placed_at_label_position(self):
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.25, "ratio_pos": 0.5}],
+            weight_rows=[],
+            group_keys=["label", "cust_segment_typ", "prod_name"])
+        out = grid_to_yaml(
+            export, _params(group_keys=("label", "cust_segment_typ", "prod_name")),
+            default_ratio=1.0)
+        ov = yaml.safe_load(out["sample_ratio_overrides_yaml"])
+        assert ov == {"sample_ratio_overrides": {"0|mass|a": 0.25, "1|mass|a": 0.5}}
+
     def test_weight_emits_pos_and_neg_per_cell(self):
         export = _export(
             ratio_rows=[],
@@ -362,22 +415,25 @@ class TestRenderHtml:
         assert "function buildRatio(" in html
         # keep-rate mirrors suggest_ratio: clamp(nm*n_pos/n_neg,0,1)
         assert "function keepRate(" in html
-        assert "nm*np/nn" in html
+        # numerator is the POST-positive-downsample count, so the realized
+        # neg:pos equals the multiplier the user typed (mirrors Python).
+        assert "nm*npPost/nn" in html
 
     def test_keep_rate_and_preview_guard_zero_positive_cell(self):
         # Mirrors Python aggregate_surfaces: a zero-positive cell keeps ALL
         # negatives (ratio 1.0) rather than deriving 0 from neg_mult*0/n_neg.
         html = render_html(self._STATS, **self._KW)
-        assert "np<=0" in html          # keepRate guard
-        assert "r.n_pos<=0" in html     # preview guard
+        assert "if(nn<=0||npPost<=0) return 1" in html   # keepRate guard
+        assert "(RMODE==='keep')||(npPost<=0)" in html   # preview guard
 
     def test_weight_tab_recomputes_post_downsample_from_ratio_edits(self):
         html = render_html(self._STATS, **self._KW)
         assert "function rebuildWeight(" in html
-        # per-(seg,item) effective ratio projected onto fine cells
-        assert "function ratioByKey(" in html
-        # n_neg_post accumulates n_neg * projected ratio (coupled branch)
-        assert "rbk.get(rk)" in html
+        # per-(seg,item) effective keep-rates projected onto fine cells
+        assert "function surfaceByKey(" in html
+        # BOTH classes accumulate post-downsample counts (coupled branch)
+        assert "s.n_neg*sbk.neg.get(rk)" in html
+        assert "s.n_pos*sbk.pos.get(rk)" in html
         # rebuildWeight runs when entering the weight tab
         assert "rebuildWeight()" in html
 
@@ -385,17 +441,20 @@ class TestRenderHtml:
         # Regression: default neg_mult is '' (keep-all). parseFloat('') is NaN;
         # without a guard keepRate returns NaN, poisoning the whole coupled
         # weight surface (every _nn / w_pos / w_neg becomes NaN on first open).
-        # keepRate must mirror preview()'s isNaN(nm) -> keep-all (1) branch.
+        # keepRate must fall back to the config default keep-rate (DR), which
+        # is what the draw applies to an un-overridden key.
         html = render_html(self._STATS, **self._KW)
-        assert "if(isNaN(nm)) return 1" in html
+        assert "if(isNaN(nm)) return DR" in html
 
     def test_couple_linkage_honors_keep_mode_ratio_direct(self):
-        # Regression: ratioByKey feeds the coupled weight surface. In keep mode
-        # (and for zero-positive rows) the user edits ratio_direct, not
-        # neg_mult, so the coupling must read ratio_direct there — mirroring
-        # preview()'s useDirect branch — instead of always reading neg_mult.
+        # Regression: surfaceByKey feeds the coupled weight surface. In keep
+        # mode (and for zero-positive rows) the user edits ratio_direct, not
+        # neg_mult, so the coupling must go through preview() — the one place
+        # that branch lives — instead of re-deriving the keep-rate from
+        # neg_mult and silently ignoring keep-mode edits.
         html = render_html(self._STATS, **self._KW)
-        assert "RMODE==='keep'||r.n_pos<=0" in html
+        assert "neg.set(k,preview(r).ratio)" in html
+        assert "pos.set(k,posRatio(r))" in html
 
     def test_neg_mult_is_primary_knob_ratio_readonly(self):
         html = render_html(self._STATS, **self._KW, target_neg_pos=5.0)
@@ -413,7 +472,10 @@ class TestRenderHtml:
         assert "function exp(" in html
         # cell ratio key reconstructed by walking GROUP_KEYS (label pos -> '0')
         assert "function ratioKey(" in html
-        assert "k===LABEL?'0'" in html
+        # ratio key's label slot is now a parameter: '1' = positive keep-rate,
+        # '0' = negative keep-rate, two entries per cell.
+        assert "k===LABEL?lbl" in html
+        assert "ratioKey(r.keys,'1')" in html and "ratioKey(r.keys,'0')" in html
         # weight key reconstructed via WKEYS with label slot -> |1 / |0
         assert "function weightKey(" in html
         assert "weightKey(r.keys,'1')" in html and "weightKey(r.keys,'0')" in html
@@ -456,7 +518,8 @@ class TestRenderHtml:
         # ratio_direct), the neg:pos multiplier column greys out.
         html = render_html(self._STATS, **self._KW)
         assert "data-k=ratio_direct" in html
-        assert "r.ratio_direct=1" in html  # buildRatio seeds the default
+        # buildRatio seeds BOTH keep-rates from the config default (DR)
+        assert "r.rpos=DR; r.suggested_neg_mult=''; r.ratio_direct=DR" in html
 
     def test_zero_pos_preview_reads_direct_keep_rate(self):
         # preview() noPos branch must derive ratio from r.ratio_direct, not
@@ -465,7 +528,7 @@ class TestRenderHtml:
         assert "parseFloat(r.ratio_direct)" in html
         # recalc must NOT write back into the ratio cell while it is the one
         # being edited (would wash the cursor).
-        assert "if(!editingRatio) tr.querySelector('td.rt')" in html
+        assert "if(!rt.isContentEditable) rt.textContent" in html
 
     def test_help_text_describes_zero_pos_editable_ratio(self):
         html = render_html(self._STATS, **self._KW)
@@ -490,9 +553,9 @@ class TestRenderHtml:
         assert "let RMODE='mult'" in html
         assert "依負樣本倍率" in html and "依保留率" in html
         assert 'name="rmode"' in html
-        # keep-mode editable column branch + n_pos=0 fallback preserved
+        # keep-mode editable column branch + n_pos(post)=0 fallback preserved
         assert "RMODE==='keep'" in html
-        assert "r.n_pos<=0" in html
+        assert "npPost<=0" in html
 
     def test_group_and_batch_select_present(self):
         html = render_html(self._STATS, **self._KW)
@@ -504,15 +567,57 @@ class TestRenderHtml:
         assert "function selectAllVisible(" in html
         assert "function toggleRow(" in html
 
+    def test_positive_keep_rate_column_present(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "function posRatio(" in html and "function nPosPost(" in html
+        assert "data-k=rpos" in html
+        assert "正樣本<br>保留率" in html and "n_pos<br>(後)" in html
+
+    def test_both_keep_rates_seed_from_config_sample_ratio(self):
+        # The draw falls back to dataset.sample_ratio for an un-overridden key,
+        # so seeding the columns at a hard 1.0 would make the preview disagree
+        # with the pipeline whenever sample_ratio < 1.
+        html = render_html(self._STATS, **dict(self._KW, default_ratio=0.5))
+        assert "const DR=0.5" in html
+        assert "r.rpos=DR" in html and "r.ratio_direct=DR" in html
+
+    def test_zero_positive_cell_flagged_and_named_in_weight_tab(self):
+        # A cell cut to zero positives goes v=A=1 -- indistinguishable from
+        # "needs no weighting" unless both surfaces say so out loud.
+        html = render_html(self._STATS, **self._KW)
+        assert "function posCls(" in html
+        assert "npPost<=0?'dead'" in html
+        assert "退出權重模型" in html
+
+    def test_pos_warn_threshold_threaded_and_editable(self):
+        html = render_html(self._STATS, **self._KW, pos_warn_min=250)
+        assert "let POSWARN=250" in html
+        assert "id=poswarn" in html and "function onPosWarn(" in html
+        assert "npPost<POSWARN" in html
+
+    def test_batch_box_has_one_input_per_class(self):
+        html = render_html(self._STATS, **self._KW)
+        assert 'id="rbatchpos"' in html and 'id="rbatchneg"' in html
+        # a multiplier typed onto a zero-positive row would land in the keep-rate
+        # column and read as a keep rate (5 -> clamp -> keep all); skip instead.
+        assert "else if(nPosPost(r)<=0) skipped++" in html
+
+    def test_summary_carries_post_downsample_positives_and_a_total(self):
+        html = render_html(self._STATS, **self._KW)
+        assert "n_pos(原)" in html and "n_pos(後)" in html
+        assert "id=totrow" in html and "總計　訓練列數" in html
+        assert "cut.toFixed(1)" in html
+
     def test_weight_neg_base_toggle_present(self):
         html = render_html(self._STATS, **self._KW)
         assert "function setWbase(" in html
         assert "let WBASE='couple'" in html
-        assert "負樣本基數" in html
+        assert "不連動（正負都回原始）" in html
         assert 'name=wbase' in html
         assert "id=wphi" in html
-        # decoupled branch in rebuildWeight mirrors Python aggregate_surfaces
-        assert "WBASE==='decouple'?PHI" in html
+        # decoupled branch mirrors Python aggregate_surfaces: BOTH classes fall
+        # back to raw counts, negatives scaled by the global phi.
+        assert "if(WBASE==='decouple'){ a._np+=s.n_pos; a._nn+=s.n_neg*PHI; }" in html
         # existing two-factor functions untouched
         assert "function twoFactor(" in html and "function floorWeight(" in html
 
@@ -666,6 +771,119 @@ class TestAggregateSurfaces:
         assert r["keys"] == []
         assert r["n_pos"] == 240 and r["n_neg"] == 11540
 
+    def test_positive_downsample_rebases_the_multiplier(self):
+        # The neg:pos multiplier is defined on the POST-downsample positive
+        # count, so the realized ratio is what the user typed. Reading the raw
+        # n_pos here would keep 1000 negatives and realize 10:1, not 5:1.
+        stats = [{"cust_segment_typ": "mass", "prod_name": "a",
+                  "n_pos": 200, "n_neg": 4000}]
+        out = aggregate_surfaces(
+            stats, {("mass", "a"): 5.0},
+            ratio_dims=["cust_segment_typ", "prod_name"], weight_dims=[],
+            alpha=0.5, t=self.T, default_neg_mult=5.0,
+            pos_ratios={("mass", "a"): 0.5})
+        r = out["ratio_rows"][0]
+        assert r["n_pos"] == 200 and r["n_pos_post"] == 100   # raw kept for ref
+        assert r["pos_ratio"] == 0.5
+        assert abs(r["ratio"] - 0.125) < 1e-9
+        assert r["kept_neg"] == 500
+        assert r["kept_neg"] / r["n_pos_post"] == 5.0
+        assert abs(r["new_pos_rate"] - self.T) < 1e-9
+
+    def test_default_pos_ratio_applies_to_unlisted_cells(self):
+        # default_pos_ratio is the config's sample_ratio: the fallback the draw
+        # itself uses, so an un-edited cell must preview as downsampled too.
+        stats = [
+            {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 100, "n_neg": 1000},
+            {"cust_segment_typ": "mass", "prod_name": "b", "n_pos": 50, "n_neg": 1000},
+        ]
+        out = aggregate_surfaces(
+            stats, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_dims=[], alpha=0.5, t=self.T, default_neg_mult=1e9,
+            pos_ratios={("mass", "a"): 1.0}, default_keep_rate=0.4)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass", "a")]["n_pos_post"] == 100     # explicit override
+        assert rr[("mass", "b")]["n_pos_post"] == 20      # 50 * 0.4
+
+    def test_positive_downsample_reaches_the_weight_surface(self):
+        # Two identical products; halving one's positives halves its floor v
+        # and makes it the attention reference (least positives -> A=1).
+        stats = [
+            {"prod_name": "a", "n_pos": 100, "n_neg": 1000},
+            {"prod_name": "b", "n_pos": 100, "n_neg": 1000},
+        ]
+        out = aggregate_surfaces(
+            stats, {}, ratio_dims=["prod_name"], weight_dims=["prod_name"],
+            alpha=0.5, t=self.T, default_neg_mult=1e9,
+            pos_ratios={("a",): 0.5})
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("a",)]["n_pos"] == 100 and wr[("a",)]["n_pos_post"] == 50
+        assert abs(wr[("a",)]["v"] - 0.25) < 1e-9   # 50*5/1000; raw would be 0.5
+        assert abs(wr[("b",)]["v"] - 0.5) < 1e-9
+        assert abs(wr[("a",)]["A"] - 1.0) < 1e-9    # m 300 vs 600 -> a is m_min
+        assert abs(wr[("b",)]["A"] - 0.5 ** 0.5) < 1e-9
+        for k in (("a",), ("b",)):
+            assert abs(wr[k]["eff_pos_rate"] - self.T) < 1e-9
+
+    _ZERO_POS_STATS = [
+        {"cust_segment_typ": "mass", "prod_name": "a", "n_pos": 80, "n_neg": 400},
+        {"cust_segment_typ": "mass", "prod_name": "z", "n_pos": 50, "n_neg": 400},
+    ]
+
+    def test_zero_pos_ratio_drops_cell_from_weight_model(self):
+        # r_pos=0 -> the guard is on n_pos_post, not raw n_pos: reading raw here
+        # would derive ratio 0 and delete the cell's negatives too.
+        out = aggregate_surfaces(
+            self._ZERO_POS_STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_dims=["prod_name"], alpha=0.5, t=self.T, default_neg_mult=5.0,
+            pos_ratios={("mass", "z"): 0.0})
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass", "z")]["n_pos_post"] == 0
+        assert rr[("mass", "z")]["ratio"] == 1.0     # default_keep_rate is 1.0 here
+        assert rr[("mass", "z")]["kept_neg"] == 400
+        wr = {tuple(r["keys"]): r for r in out["weight_rows"]}
+        assert wr[("z",)]["dropped_from_model"] is True
+        assert wr[("z",)]["v"] == 1.0 and wr[("z",)]["A"] == 1.0
+        assert wr[("z",)]["w_pos"] == 1.0 and wr[("z",)]["w_neg"] == 1.0
+        assert wr[("a",)]["dropped_from_model"] is False
+
+    def test_zero_pos_cell_negatives_follow_the_default_keep_rate(self):
+        # Regression (found by the Python-vs-JS cross-check): a zero-positive
+        # cell must NOT be pinned to "keep all". Its negatives get no |0
+        # override, so the draw applies sample_ratio to them -- pinning 1.0 here
+        # would over-report the cell's row count by 1/sample_ratio.
+        out = aggregate_surfaces(
+            self._ZERO_POS_STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_dims=[], alpha=0.5, t=self.T, default_neg_mult=5.0,
+            pos_ratios={("mass", "z"): 0.0}, default_keep_rate=0.5)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass", "z")]["ratio"] == 0.5
+        assert rr[("mass", "z")]["kept_neg"] == 200
+
+    def test_untyped_multiplier_falls_back_to_the_default_keep_rate(self):
+        # The editor's multiplier column starts empty on every row, so this is
+        # the state a freshly opened editor is in; both surfaces must preview it
+        # as sample_ratio, not as keep-all.
+        out = aggregate_surfaces(
+            self._ZERO_POS_STATS, {}, ratio_dims=["cust_segment_typ", "prod_name"],
+            weight_dims=[], alpha=0.5, t=self.T, default_neg_mult=None,
+            default_keep_rate=0.5)
+        rr = {tuple(r["keys"]): r for r in out["ratio_rows"]}
+        assert rr[("mass", "a")]["ratio"] == 0.5 and rr[("mass", "a")]["kept_neg"] == 200
+        assert rr[("mass", "a")]["n_pos_post"] == 40
+
+    def test_decoupled_ignores_positive_downsample_too(self):
+        # "decoupled" means the weight floor does not look at the ratio surface
+        # at all -- on BOTH sides, so the toggle keeps one meaning.
+        stats = [{"prod_name": "a", "n_pos": 100, "n_neg": 1000}]
+        out = aggregate_surfaces(
+            stats, {}, ratio_dims=["prod_name"], weight_dims=["prod_name"],
+            alpha=0.5, t=self.T, default_neg_mult=1e9,
+            pos_ratios={("a",): 0.1}, neg_base="decoupled", phi=1.0)
+        assert out["ratio_rows"][0]["n_pos_post"] == 10   # ratio surface obeys
+        w = out["weight_rows"][0]
+        assert w["n_pos_post"] == 100 and w["n_neg_post"] == 1000   # weight does not
+
     def test_decoupled_phi_one_uses_raw_negatives(self):
         # neg_mult would downsample under coupled; decoupled must ignore ratio and
         # use raw n_neg (phi=1) as the floor's negative base.
@@ -726,3 +944,136 @@ class TestToYamlCli:
         assert "sample_ratio_overrides:" in r.output and "mass|a|0" in r.output
         assert "sample_weights:" in r.output
         assert "b|1" in r.output and "b|0" in r.output
+
+
+# ---------------------------------------------------------------------------
+# The browser is the real implementation; aggregate_surfaces is its Python
+# mirror. Every other test in this file checks the JS by matching source
+# strings, which cannot catch the two sides *computing* different numbers --
+# and that is exactly what happened: the mirror pinned a zero-positive cell to
+# "keep all negatives" while the editor fell back to sample_ratio. This class
+# runs the shipped <script> block under node and diffs it against Python.
+# ---------------------------------------------------------------------------
+_NODE_DRIVER = r"""
+const fs = require('fs');
+const [htmlPath, editsPath] = process.argv.slice(2);
+const edits = JSON.parse(fs.readFileSync(editsPath, 'utf8'));
+const mk = id => ({id, value:'', textContent:'', innerHTML:'', className:'',
+  title:'', checked:false, disabled:false, dataset:{}, style:{},
+  isContentEditable:false, appendChild(){}, querySelector(){return mk('x')},
+  querySelectorAll(){return []},
+  closest(){return {querySelector(){return mk('td')}}}});
+const cache = {};
+global.document = {
+  getElementById: id => cache['#'+id] || (cache['#'+id] = mk(id)),
+  querySelector: s => cache[s] || (cache[s] = mk(s)),
+  querySelectorAll: () => [],
+  createElement: t => mk(t),
+};
+global.alert = () => {};
+global.Blob = function(){};
+global.URL = {createObjectURL: () => 'blob:x'};
+const html = fs.readFileSync(htmlPath, 'utf8');
+const body = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const api = new Function(body + `;return {RATIO, preview, posRatio,
+  rebuildWeight, setWbase, getWeight: () => WEIGHT, getDR: () => DR};`)();
+api.RATIO.forEach(r => {
+  const k = r.keys.join('|');
+  if (k in edits.pos_ratios) r.rpos = String(edits.pos_ratios[k]);
+  if (k in edits.neg_mults) r.suggested_neg_mult = String(edits.neg_mults[k]);
+});
+if (edits.neg_base === 'decoupled') api.setWbase('decouple');
+api.rebuildWeight();
+console.log(JSON.stringify({
+  dr: api.getDR(),
+  ratio: api.RATIO.map(r => {
+    const pv = api.preview(r);
+    return {keys: r.keys, n_pos_post: pv.npPost, ratio: pv.ratio,
+            kept_neg: pv.kn, new_pos_rate: pv.pr};
+  }),
+  weight: api.getWeight().map(c => ({
+    keys: c.keys, n_pos_post: c.n_pos_post, n_neg_post: c.n_neg_post,
+    v: c.v, A: c.A, w_pos: c.w_pos, w_neg: c.w_neg, dropped: c.dropped})),
+}));
+"""
+
+_MIRROR_STATS = [
+    {"cust_segment_typ": "mass", "prod_name": "ccard", "n_pos": 60000, "n_neg": 900000},
+    {"cust_segment_typ": "mass", "prod_name": "fund", "n_pos": 9000, "n_neg": 990000},
+    {"cust_segment_typ": "mass", "prod_name": "ins", "n_pos": 800, "n_neg": 999000},
+    {"cust_segment_typ": "affluent", "prod_name": "ccard", "n_pos": 12000, "n_neg": 180000},
+    {"cust_segment_typ": "affluent", "prod_name": "fund", "n_pos": 8500, "n_neg": 184000},
+    {"cust_segment_typ": "affluent", "prod_name": "ins", "n_pos": 1100, "n_neg": 191000},
+    {"cust_segment_typ": "private", "prod_name": "ccard", "n_pos": 900, "n_neg": 14000},
+    {"cust_segment_typ": "private", "prod_name": "fund", "n_pos": 2200, "n_neg": 12700},
+    # 60 positives: r_pos=0 wipes it out -> exercises the zero-positive branch
+    {"cust_segment_typ": "private", "prod_name": "ins", "n_pos": 60, "n_neg": 14900},
+]
+_MIRROR_KW = dict(
+    ratio_dims=["cust_segment_typ", "prod_name"],
+    group_keys=["cust_segment_typ", "prod_name", "label"],
+    label_col="label", weight_keys=["prod_name", "label"],
+    weight_dims=["prod_name"], t=1 / 6, alpha=0.5, target_neg_pos=5.0,
+)
+_POS_EDITS = {("mass", "ccard"): 0.5, ("private", "ins"): 0.0,
+              ("affluent", "fund"): 0.25}
+_NEG_EDITS = {("mass", "ccard"): 5.0, ("affluent", "fund"): 3.0}
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="needs node to execute the editor's <script> block")
+class TestJsMirrorMatchesPython:
+    @pytest.mark.parametrize(
+        "default_ratio,edited,neg_base",
+        [(1.0, False, "coupled"),     # freshly opened editor, sample_ratio=1
+         (1.0, True, "coupled"),      # both classes downsampled per cell
+         (0.5, False, "coupled"),     # sample_ratio<1: nothing typed yet
+         (0.5, True, "coupled"),      # sample_ratio<1 + per-cell edits
+         (1.0, True, "decoupled"),    # weight floor ignores the ratio surface
+         (0.5, True, "decoupled")])
+    def test_surfaces_agree(self, tmp_path, default_ratio, edited, neg_base):
+        pos = _POS_EDITS if edited else {}
+        neg = _NEG_EDITS if edited else {}
+        py = aggregate_surfaces(
+            _MIRROR_STATS, neg, ratio_dims=_MIRROR_KW["ratio_dims"],
+            weight_dims=_MIRROR_KW["weight_dims"], alpha=0.5, t=1 / 6,
+            default_neg_mult=None, pos_ratios=pos,
+            default_keep_rate=default_ratio, neg_base=neg_base, phi=1.0)
+        js = self._run_node(tmp_path, default_ratio, pos, neg, neg_base)
+
+        assert js["dr"] == default_ratio
+        jsr = {tuple(r["keys"]): r for r in js["ratio"]}
+        for row in py["ratio_rows"]:
+            j = jsr[tuple(row["keys"])]
+            for field, tol in (("n_pos_post", 1), ("ratio", 1e-9),
+                               ("kept_neg", 1), ("new_pos_rate", 1e-9)):
+                assert abs(j[field] - row[field]) <= tol, (
+                    f"ratio {row['keys']} {field}: js={j[field]} py={row[field]}")
+        jsw = {tuple(r["keys"]): r for r in js["weight"]}
+        for row in py["weight_rows"]:
+            j = jsw[tuple(row["keys"])]
+            assert j["dropped"] is row["dropped_from_model"]
+            for field, tol in (("n_pos_post", 1), ("n_neg_post", 1),
+                               ("v", 1e-9), ("A", 1e-9),
+                               ("w_pos", 1e-6), ("w_neg", 1e-6)):
+                assert abs(j[field] - row[field]) <= tol, (
+                    f"weight {row['keys']} {field}: js={j[field]} py={row[field]}")
+
+    @staticmethod
+    def _run_node(tmp_path, default_ratio, pos, neg, neg_base):
+        html = tmp_path / "editor.html"
+        html.write_text(render_html(_MIRROR_STATS, default_ratio=default_ratio,
+                                    **_MIRROR_KW))
+        driver = tmp_path / "driver.js"
+        driver.write_text(_NODE_DRIVER)
+        edits = tmp_path / "edits.json"
+        edits.write_text(json.dumps({
+            "pos_ratios": {"|".join(k): v for k, v in pos.items()},
+            "neg_mults": {"|".join(k): v for k, v in neg.items()},
+            "neg_base": neg_base}))
+        proc = subprocess.run(
+            ["node", str(driver), str(html), str(edits)],
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, (
+            f"node failed ({proc.returncode}):\n{proc.stderr[-3000:]}")
+        return json.loads(proc.stdout)
