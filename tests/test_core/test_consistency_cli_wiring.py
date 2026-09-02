@@ -204,3 +204,33 @@ def test_every_env_taking_command_reaches_the_a30_gate():
 
     missing = [name for name in commands if not reaches_gate(name, set())]
     assert not missing, f"command(s) take --env but never reach A30: {missing}"
+
+
+def test_a27_wired_into_inference_command_before_spark():
+    # Same rule as A23/A24/A26: the three keys A27 reads (inference.snap_dates
+    # / entity_buckets / products) are read by the inference pipeline alone,
+    # so aggregating this would reject a valid dataset or training config —
+    # #158 measured that cost at 9 blocked tests. And the order is the whole
+    # point of the ticket: every raise A27 replaces fired only after
+    # build_inference_population_features had already run a full Spark pass.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "inference_grid_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A27 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.inference)
+    assert "inference_grid_errors(params)" in src
+    assert src.index("inference_grid_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A27 must fail before the Spark cold start, like A21/A23/A24/A26"
+
+
+def test_a27_is_checked_before_a21():
+    # A21 resolves --rebuild-dates against inference.snap_dates. With that
+    # list empty, every flag value is "not a configured month" — a second-order
+    # message that sends the operator after the wrong key.
+    src = inspect.getsource(m.inference)
+    assert src.index("inference_grid_errors(") < src.index(
+        "resolved_inference_rebuild_dates("
+    )

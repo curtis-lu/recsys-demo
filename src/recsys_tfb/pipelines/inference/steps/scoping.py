@@ -91,6 +91,14 @@ def restrict_to_snap_dates(df: DataFrame, parameters: dict) -> DataFrame:
     that quietly means "keep everything" is the exact behaviour this exists to
     prevent, and it would show up downstream as a republished month rather than
     as an error.
+
+    Both are **pre-checks** — they fault the inputs, not this function's own
+    result — of two different kinds. The empty-``snap_dates`` one is a
+    **runtime backstop for A27**: the config it faults is rejected at CLI entry
+    by ``core.consistency.inference_grid_errors``, so reaching it means this
+    function was called outside the CLI (a test, a notebook) rather than that
+    an operator mis-set the key. The missing-column one has no Layer-1 twin —
+    it inspects the frame, so only the caller's upstream can be at fault.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]

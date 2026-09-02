@@ -343,7 +343,18 @@ class TestCLI:
         """Inference reads base/train_variant from model manifest; outputs under model hash."""
         _setup_conf(
             tmp_path,
-            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
+            # products is required by A27 (#200): the inference command
+            # refuses an empty scoring grid before it builds a session.
+            # Not a weakening of this test's subject — a config without it
+            # could never have scored anything.
+            params_inference={
+                "inference": {
+                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
+                # A4 wants inference.products == schema.categorical_values
+                # [item], so the two have to be declared together or the
+                # command exits on A4 instead of on this test's subject.
+                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
+            },
         )
 
         models_dir = tmp_path / "data" / "models"
@@ -854,7 +865,18 @@ class TestRebuildDatesFlag:
         """Scoped to ``inference.snap_dates``, and checked before the cold start."""
         _setup_conf(
             tmp_path,
-            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
+            # products is set so A27 (#200) does NOT fire: without it this
+            # test still exits 1 with Spark untouched, but on the empty
+            # grid rather than on the unconfigured month — it would stay
+            # green with A21 deleted. Same trap as A23 above.
+            params_inference={
+                "inference": {
+                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
+                # A4 wants inference.products == schema.categorical_values
+                # [item], so the two have to be declared together or the
+                # command exits on A4 instead of on this test's subject.
+                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
+            },
         )
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -881,7 +903,18 @@ class TestRebuildDatesFlag:
 
         _setup_conf(
             tmp_path,
-            params_inference={"inference": {"snap_dates": ["2024-03-31"]}},
+            # products is required by A27 (#200): the inference command
+            # refuses an empty scoring grid before it builds a session.
+            # Not a weakening of this test's subject — a config without it
+            # could never have scored anything.
+            params_inference={
+                "inference": {
+                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
+                # A4 wants inference.products == schema.categorical_values
+                # [item], so the two have to be declared together or the
+                # command exits on A4 instead of on this test's subject.
+                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
+            },
         )
         models_dir = tmp_path / "data" / "models"
         version_dir = models_dir / "a1b2c3d4"
@@ -2146,6 +2179,103 @@ class TestEntityColumnsDeclaredA28:
             ) as mock_spark:
                 runner.invoke(app, ["training"])
             # It got past A28 and reached the cold start it is allowed to reach.
+            mock_spark.assert_called()
+        finally:
+            os.chdir(old_cwd)
+
+
+class TestInferenceGridA27:
+    """A27 is wired to the inference command, not to the global aggregator.
+
+    The thing under test is *when* it fails. Every raise A27 replaces lived
+    downstream of ``build_inference_population_features``, so the four config
+    typos it now catches used to cost a 2-4 minute Spark cold start and an
+    intermediate table write before saying anything (issue #200).
+    """
+
+    def _conf_with(self, tmp_path, **inference):
+        params = {"inference": inference}
+        # A4 wants inference.products == schema.categorical_values[item], so
+        # they are declared together and A4 is never what fires here. Omitted
+        # entirely when products is empty: schema validation rejects an empty
+        # category list outright, and A4 reads two empty sets as agreeing —
+        # which is precisely the gap A27 closes.
+        if inference.get("products"):
+            params["schema"] = {
+                "categorical_values": {"prod_name": list(inference["products"])}}
+        _setup_conf(tmp_path, params_inference=params)
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps({
+            "version": "a1b2c3d4",
+            "base_dataset_version": "deadbeef",
+            "train_variant_id": "cafef00d",
+        }))
+        (models_dir / "best").symlink_to(version_dir.resolve())
+
+    def _invoke(self, tmp_path):
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["inference"])
+            return result, mock_spark
+        finally:
+            os.chdir(old_cwd)
+
+    def test_zero_buckets_exits_before_spark_starts(self, tmp_path):
+        self._conf_with(
+            tmp_path, snap_dates=["2024-03-31"], products=["p1"], entity_buckets=0)
+        result, mock_spark = self._invoke(tmp_path)
+        assert result.exit_code == 1
+        # The load-bearing assertion: exit_code alone is satisfied by the
+        # mocked session blowing up further down the command.
+        mock_spark.assert_not_called()
+        assert "A27" in result.output
+
+    def test_every_broken_axis_is_named_in_one_run(self, tmp_path):
+        # The other half of what moving these to Layer 1 buys: the node-side
+        # raises aborted on the first fault, so a config wrong in two places
+        # cost two cold starts to diagnose.
+        self._conf_with(tmp_path, snap_dates=[], products=[], entity_buckets=0)
+        result, mock_spark = self._invoke(tmp_path)
+        assert result.exit_code == 1
+        mock_spark.assert_not_called()
+        for key in ("snap_dates", "entity_buckets", "products"):
+            assert f"inference.{key}" in result.output
+
+    def test_a_valid_grid_is_not_blocked(self, tmp_path):
+        # The discriminating half: without it the tests above are also passed
+        # by an A27 that rejects every inference config outright.
+        self._conf_with(
+            tmp_path, snap_dates=["2024-03-31"], products=["p1"], entity_buckets=10)
+        _, mock_spark = self._invoke(tmp_path)
+        # It got past A27 and reached the cold start it is allowed to reach.
+        mock_spark.assert_called()
+
+    def test_a_dataset_config_is_unaffected(self, tmp_path):
+        # A27's three keys are inference-only, which is why it must stay off
+        # validate_config_consistency: aggregating it would reject every
+        # dataset/training/etl config that never names them (#158).
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2025-12-31"],
+                "test_snap_dates": ["2026-01-31"],
+            }},
+        )
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["dataset"])
             mock_spark.assert_called()
         finally:
             os.chdir(old_cwd)

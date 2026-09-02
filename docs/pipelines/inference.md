@@ -116,6 +116,8 @@ inference:
 
 **健康窗口 5–20**，兩端各由一個約束夾出來：桶太少，單一 chunk 可能吃掉 driver 一半以上；桶太多，每個分區檔遠小於一個 HDFS block。超出窗口只會 WARN，不會阻止。
 
+**但 0 或負數是硬性錯誤**（一致性不變量 A27，在 `inference` 指令啟動 Spark 前擋下）：零個桶等於零個 chunk，跑完會回報成功但一個 entity 都沒評分。1 是合法的——母體小的時候本來就該一桶跑完。整個鍵不寫則吃預設 10。
+
 **改這個值不是零成本。** 它是 `unranked_predictions` 的分區欄，所以調整桶數等於該 `model_version` 的該表要重建——舊桶的分區沒有任何東西會清掉，而它們會繼續貢獻列給排名。`validate_predictions` 的 `partition_completeness` 會擋下這個狀態（把舊桶報成「不屬於任何 chunk 的分區」），但它擋的是發布，不是清理；清理要手動 DROP 那些分區或整張表。
 
 雜湊只吃 entity 欄、不吃時間：排名的 query group 是 `(time, entity)`，桶必須是 group 的函數，否則同一個 entity 的不同 item 會落到不同桶、被獨立評分與驗證。同理，桶的指派在跑之間是穩定的——salt 寫死在程式碼裡而不是設定裡，因為「重新洗牌」會讓已寫的分區全部變成孤兒。
@@ -595,6 +597,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | `partition_completeness` | 缺分區＝連續 save 互相覆蓋；多分區＝`entity_buckets` 改過留下舊桶 | 前者查 `unranked_predictions` 的 `partition_cols` 是否還有 `entity_bucket`；後者 DROP 舊桶的分區或整張表重跑 |
 | `No scoring rows found` | 設定日期沒有 entity，或前處理後資料為空 | 查 feature table row count 與日期條件 |
 | A4 products mismatch | `inference.products` 與 schema item 清單不一致 | 同步兩處完整 item 集合 |
+| 訊息帶 `(A27) inference.snap_dates` / `entity_buckets` / `products` | 評分格點 `snap_dates × entity_buckets × products` 有一軸是空的或 0 | 在 `parameters_inference.yaml` 補上該鍵。**訊息會一次列出全部有問題的軸**，所以一輪就能改完；這一關在起 Spark 之前，看到它代表還沒有付任何 cold start |
 | `score_range` | raw score 小於 0 或大於 1 | 檢查 objective、calibration 與 `use_calibration` |
 | `no_missing` | identity、score 或 rank 出現 NULL | 查 staging 的欄位 NULL count 與上游 feature keys |
 | `completeness` | query group 候選數不是 products 數 | 查 feature key 重複、join fan-out 或候選遺漏 |
