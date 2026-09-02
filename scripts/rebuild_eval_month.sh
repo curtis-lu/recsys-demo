@@ -70,8 +70,10 @@ run "$PYTHON" -m recsys_tfb training --env "$ENV_NAME" \
 cat <<EOF
 
 ✅ dataset ＋ predict 已對 $MONTHS 重算完成。
-   驗收：上面兩段 log 各有一行
-     [months] test branch: processed=$MONTHS ...
+   驗收：上面兩段 log 應該有這幾行
+     [months] rebuild requested: $MONTHS
+     [months] dataset=test_keys         processed=$MONTHS ...
+     [months] dataset=test_model_input  processed=$MONTHS ...
      [months] predict: processed=$MONTHS ... rebuilt=$MONTHS
 
 下一步（evaluation 沒有對應的 CLI 旗標，逐月手動）：

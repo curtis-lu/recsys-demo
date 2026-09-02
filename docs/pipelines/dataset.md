@@ -252,6 +252,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇設定環境 |
 | `--rebuild-dates <d1,d2>` | 無 | 強制重算指定 test 月份（即使 partition 已存在）；值必須是 `test_snap_dates` 的子集 |
+| `--only-test-months` | 關閉 | 宣告「這次只加評估月份」：只跑資料閘與 test 鏈，train／val／calibration 的產物不重算。與 `--from-node`／`--only-node` 正交、可併用；上游缺料時當場報錯。它是**模式**不是切片，差別見 §5.1 |
 | `--from-node <name>` | 無 | 從指定 node 與其後的 nodes 開始執行 |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開，不執行 pipeline |
@@ -367,7 +368,9 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 ### 5.1 test 分支是增量的
 
-`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input` 三個 node 只處理**尚未落地**的月份。train／train-dev／val／calibration **不是**增量的，每次都整批重算。
+`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input` 三個 node 只處理**尚未落地**的月份。train／train-dev／val／calibration **不是**增量的：它們一旦被執行就整批重算，把逐位元相同的內容覆寫回同一批 partition。
+
+省掉那次重算的方法是**不執行它們**，不是讓它們變成增量的。`--only-test-months` 就是這樣做的——它是 `create_pipeline` 的**模式**參數（不是切片），只組出資料閘加上 test 鏈，其餘節點根本不進 pipeline；留下哪些節點以 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES` 為準。反過來說，**增量性與這個旗標無關**：上面三個 node 帶不帶旗標都只處理尚未落地的月份，旗標改的是節點集，不是增量性。模式與切片的分工見 [ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)，使用動線見[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
 怎麼看出誰是增量的：**pipeline 定義上有 `*_month_plan` input 的就是**。CLI 在任何 Spark 工作開始之前列一次 metastore partition（零掃描）、算出三份計畫（`month_plans.build_month_plans`），以 `<產物名>_month_plan` 這三個名字放進 catalog；節點把它當一般 input 收下。所以：
 
@@ -541,7 +544,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |
 | 全域 `random_seed` | 目前 version ID 不會自動改變 | 視為抽樣版本變更，清楚記錄並完整重建相關產物 |
 
-三層版本描述的是產物身分與失效範圍，不是自動增量執行器。未使用切片旗標時，dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
+三層版本描述的是產物身分與失效範圍，不是自動增量執行器。未帶任何**模式**或**切片**旗標時（模式＝`--only-test-months`，切片＝`--from-node`／`--only-node`），dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
 
 任何 dataset ID 改變後，training 使用該組新版本時，`model_version` 也會隨之改變。`base_dataset_version` 翻新時，即使 `train_variant_id` 的 8 碼字串相同，它也會位於新的 base 目錄／partition 之下，兩者仍是不同的有效資料組合。
 
