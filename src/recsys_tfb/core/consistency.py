@@ -191,10 +191,27 @@ Layer 1 — config-static (implemented here; aggregated by
   (``pipelines/dataset/month_plans.plan_incremental_snap_dates``), so two
   spellings collapse there harmlessly. Replaces the node-body check in
   ``cache_test_model_input`` (ADR-0014).
-* A27 — not allocated here. Reserved for issue #200 (inference's config-only
-  raise); see issue #222's ticket split. ADR-0014 also *considered* A27 for
-  "``schema.entity`` is exactly one column" and withdrew it — writing "not
-  finished" down as "not supported". Neither meaning is in force.
+* A27 — the inference scoring grid ``inference.snap_dates`` x
+  ``inference.entity_buckets`` x ``inference.products`` must not be
+  degenerate: the two lists non-empty, and ``entity_buckets`` — when the key
+  is present at all — a number >= 1. One code for three keys because they are
+  one parameter family (A25's precedent) and because a config that empties two
+  of them should cost one run to fix. Absent ``entity_buckets`` takes
+  ``scoping.DEFAULT_ENTITY_BUCKETS`` and is clean; an explicit YAML ``null``
+  is not absent and is rejected, mirroring A25. The healthy-window *bounds*
+  (ADR-0010 section 4) stay a ``chunk_plans`` warning — one bucket is legal.
+  Predicate: ``inference_grid_errors`` (returns errors; the inference command
+  raises). NOT aggregated by ``validate_config_consistency``, for A24's
+  reason: that gate runs at the entry of every command while these three keys
+  are read by the inference pipeline alone. Replaces four node-body raises
+  (``steps/scoping.py`` snap_dates, ``steps/chunk_plans.py`` entity_buckets /
+  snap_dates / products) that each fired only *after*
+  ``build_inference_population_features`` had run a full Spark pass, and that
+  aborted on the first one instead of collecting all three; those four stay as
+  runtime backstops, labelled in their docstrings (issue #200).
+  ADR-0014 also *considered* A27 for "``schema.entity`` is exactly one column"
+  and withdrew it — writing "not finished" down as "not supported". That
+  meaning is not in force and must not be revived here.
 * A28 — the prediction write target must declare every ``schema.entity``
   column. ``HiveTableDataset.save`` ends with ``df.select(*declared)``, so an
   entity column the catalog entry never declared is dropped there in silence:
@@ -1913,6 +1930,55 @@ def duplicate_test_month_errors(parameters: dict) -> list[str]:
             f"spelling — doubling that month's rows. Keep the ISO form "
             f"(YYYY-MM-DD) and drop the others."
         )
+    return errors
+
+
+def inference_grid_errors(parameters: dict) -> list[str]:
+    """(A27) the inference scoring grid must not be degenerate.
+
+    Returns error strings (empty list when fine); the inference command raises.
+    One error per degenerate axis, each naming the full config key path, since
+    the operator's next move is to grep their yaml. See the legend for why one
+    code covers three keys and why this is not aggregated.
+
+    Anything ``int()`` cannot read is *reported* rather than raised: raising
+    out of a collect-all predicate would hide the other two axes, which is the
+    behaviour this invariant exists to remove. The messages the node-body
+    raises used carry over near-verbatim, consequence clause included — the
+    grid is the same grid whichever layer notices it is empty.
+    """
+    inf = parameters.get("inference") or {}
+    errors: list[str] = []
+
+    if not (inf.get("snap_dates") or []):
+        errors.append(
+            "(A27) inference.snap_dates is empty; there is nothing to score. "
+            "Refusing to rank or validate an unrestricted table (every "
+            "historical month would be republished)."
+        )
+
+    if "entity_buckets" in inf:
+        try:
+            n_buckets = int(inf["entity_buckets"])
+        except (TypeError, ValueError):
+            errors.append(
+                f"(A27) inference.entity_buckets must be a whole number at "
+                f"least 1, got {inf['entity_buckets']!r}, which is not a "
+                f"number at all. Remove the key to take the default."
+            )
+        else:
+            if n_buckets < 1:
+                errors.append(
+                    f"(A27) inference.entity_buckets must be at least 1, got "
+                    f"{n_buckets}. Zero buckets means zero chunks, which "
+                    f"would look like a successful run that scored nobody."
+                )
+
+    if not (inf.get("products") or []):
+        errors.append(
+            "(A27) inference.products is empty; there is nothing to rank."
+        )
+
     return errors
 
 

@@ -1824,6 +1824,190 @@ class TestTestSnapDatesSpellingA26:
 
 
 # =============================================================================
+# A27 — the inference scoring grid (snap_dates x entity_buckets x products)
+#       must be non-degenerate (wired on the inference command)
+# =============================================================================
+
+from recsys_tfb.core.consistency import inference_grid_errors
+
+
+def _grid(**inference) -> dict:
+    return {"inference": dict(inference)}
+
+
+_OK_GRID = dict(snap_dates=["2025-12-31"], entity_buckets=10, products=["a", "b"])
+
+
+class TestInferenceGridA27:
+    def test_a_populated_grid_passes(self):
+        assert inference_grid_errors(_grid(**_OK_GRID)) == []
+
+    def test_empty_snap_dates_is_an_error(self):
+        # The raise this replaces lived in steps/scoping.py, and it only fired
+        # after build_inference_population_features had already run a full
+        # Spark pass. Naming the key, not the symptom: the operator's next
+        # move is to grep their yaml.
+        errs = inference_grid_errors(_grid(**{**_OK_GRID, "snap_dates": []}))
+        assert len(errs) == 1
+        assert "A27" in errs[0] and "inference.snap_dates" in errs[0]
+
+    def test_zero_entity_buckets_is_an_error(self):
+        # Zero buckets means zero chunks, which the run reports as a success
+        # that scored nobody — the failure shape an operator cannot see.
+        errs = inference_grid_errors(_grid(**{**_OK_GRID, "entity_buckets": 0}))
+        assert len(errs) == 1
+        assert "A27" in errs[0] and "inference.entity_buckets" in errs[0]
+
+    def test_negative_entity_buckets_is_an_error(self):
+        assert len(inference_grid_errors(
+            _grid(**{**_OK_GRID, "entity_buckets": -1}))) == 1
+
+    def test_one_bucket_is_legal(self):
+        # The healthy window (5-20) is a warning in chunk_plans, not a gate.
+        # A27 must not quietly promote that warning to an error: a small
+        # population legitimately runs in one bucket.
+        assert inference_grid_errors(
+            _grid(**{**_OK_GRID, "entity_buckets": 1})) == []
+        assert inference_grid_errors(
+            _grid(**{**_OK_GRID, "entity_buckets": 500})) == []
+
+    def test_absent_entity_buckets_is_clean(self):
+        # Absent means DEFAULT_ENTITY_BUCKETS, which is 10 — a valid grid.
+        # Only an explicit value can be degenerate.
+        params = _grid(**{k: v for k, v in _OK_GRID.items() if k != "entity_buckets"})
+        assert inference_grid_errors(params) == []
+
+    def test_unparseable_entity_buckets_is_reported_not_raised(self):
+        # The node does int(...), which would raise inside this predicate and
+        # abort the collect-all — the operator would then see one problem per
+        # run instead of all of them. Report it as an error string instead.
+        for value in ("ten", None, [10]):
+            errs = inference_grid_errors(
+                _grid(**{**_OK_GRID, "entity_buckets": value}))
+            assert len(errs) == 1, value
+            assert "inference.entity_buckets" in errs[0]
+
+    def test_empty_products_is_an_error(self):
+        errs = inference_grid_errors(_grid(**{**_OK_GRID, "products": []}))
+        assert len(errs) == 1
+        assert "A27" in errs[0] and "inference.products" in errs[0]
+
+    def test_every_broken_axis_is_reported_in_one_pass(self):
+        # The whole point of moving these to Layer 1: the node-side raises
+        # aborted on the first one, so a config wrong in two places cost two
+        # Spark cold starts to find out.
+        errs = inference_grid_errors(
+            _grid(snap_dates=[], entity_buckets=0, products=[]))
+        assert len(errs) == 3
+
+    def test_an_absent_inference_section_reports_the_two_axes_with_no_default(self):
+        # Reachable: the gate is wired on the inference command, so running
+        # `inference` against a config with no inference section lands here.
+        # Today that is a bare KeyError from nodes.py.
+        #
+        # Two errors, not three: entity_buckets is absent here like anywhere
+        # else, so it takes DEFAULT_ENTITY_BUCKETS and is not degenerate. Only
+        # snap_dates and products have no default to fall back on.
+        errs = inference_grid_errors({})
+        assert len(errs) == 2
+        assert "inference.entity_buckets" not in " ".join(errs)
+        assert inference_grid_errors({"inference": None}) == errs
+
+    def test_the_keys_are_the_ones_the_inference_pipeline_reads(self):
+        # Premise guard, A26's pattern: A27 is worth nothing if it inspects
+        # keys the pipeline no longer reads. Renaming a key in scoping.py
+        # would otherwise leave a gate that can never fire, with every test
+        # above still green. chunk_plans/scoping are the two readers.
+        from recsys_tfb.pipelines.inference.steps.scoping import (
+            DEFAULT_ENTITY_BUCKETS,
+            entity_buckets,
+            iso_snap_dates,
+        )
+
+        # Absent -> default, which is why A27 leaves an absent key alone.
+        assert entity_buckets({}) == DEFAULT_ENTITY_BUCKETS
+        assert DEFAULT_ENTITY_BUCKETS >= 1
+        # ... and the degenerate value A27 rejects is the one the helper reads
+        # from that same key. A rename fails here instead of going silent.
+        assert entity_buckets(_grid(entity_buckets=0)) == 0
+        assert iso_snap_dates(_grid(snap_dates=["2025-12-31"])) == ["2025-12-31"]
+        assert iso_snap_dates({}) == []
+
+    def test_the_shipped_config_passes(self):
+        # The other half of the premise: the keys A27 names must be the ones
+        # actually written in conf/base. Checked against the real tree, like
+        # A30's conf/local test — a gate that rejects the repo's own config
+        # is a gate nobody can run the pipeline behind.
+        from pathlib import Path
+
+        import yaml
+
+        import recsys_tfb
+
+        repo_root = Path(recsys_tfb.__file__).resolve().parents[2]
+        shipped = yaml.safe_load(
+            (repo_root / "conf" / "base" / "parameters_inference.yaml").read_text()
+        )
+        assert inference_grid_errors(shipped) == []
+
+    def test_the_node_backstops_still_say_what_a27_says(self):
+        # This module's docstring forbids message drift, and the repo's other
+        # registered backstops avoid it by CALLING the predicate (core/schema
+        # .py and pipelines/dataset/nodes.py both call resolved_item_values).
+        # plan_scoring_chunks cannot: it takes the expanded grid, not `parameters`. So
+        # the two copies are pinned here instead. Drop a consequence clause
+        # from either side and this fails, rather than the operator getting
+        # two different explanations of the same config mistake depending on
+        # which layer noticed.
+        import pytest as _pytest
+
+        from recsys_tfb.pipelines.inference.steps.chunk_plans import (
+            plan_scoring_chunks,
+        )
+
+        a27 = " ".join(inference_grid_errors(
+            _grid(snap_dates=[], entity_buckets=0, products=[])))
+
+        degenerate = [
+            dict(snap_dates=["2025-12-31"], items=["a"], n_buckets=0),
+            dict(snap_dates=[], items=["a"], n_buckets=1),
+            dict(snap_dates=["2025-12-31"], items=[], n_buckets=1),
+        ]
+        for kwargs in degenerate:
+            with _pytest.raises(ValueError) as exc:
+                plan_scoring_chunks(written=[], rebuild=[], **kwargs)
+            # The consequence clause, not the whole sentence: A27 prefixes its
+            # code and merges the two snap_dates raises, so the sentences are
+            # not identical by design.
+            consequence = str(exc.value).split("; ")[-1].split(". ", 1)[-1]
+            assert consequence.rstrip(".") in a27, consequence
+
+        # scoping.py's snap_dates raise is the fourth, and reaching it needs a
+        # Spark frame — pinned against the source line instead.
+        from pathlib import Path
+
+        from recsys_tfb.pipelines.inference.steps import scoping
+
+        assert "every historical month would be republished" in Path(
+            scoping.__file__).read_text()
+        assert "every historical month would be republished" in a27
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        # Wired on the inference command, like A23/A24 on dataset and A26 on
+        # training: the aggregator runs at the entry of EVERY command, and
+        # these three keys are read by the inference pipeline alone. Issue
+        # #158 measured what aggregating a one-pipeline key costs — 9
+        # unrelated tests blocked.
+        from recsys_tfb.core.consistency import validate_config_consistency
+
+        validate_config_consistency(
+            {"schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"],
+                "item": "prod_name", "label": "label"}}}
+        )
+
+
+# =============================================================================
 # A28 — the prediction write target must declare every schema.entity column
 #       (wired on the training command)
 # =============================================================================

@@ -151,13 +151,13 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 | 模組 | 行數 | 解決什麼 |
 |---|---|---|
-| `core/consistency.py` | 1970 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
+| `core/consistency.py` | 2036 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
 | `core/versioning.py` | 425 | 三層 hash 版本 ID |
 | `core/logging.py` | 359 | `RunContext` 與結構化日誌 |
 | `core/schema.py` | 232 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
-其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 1970 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
+其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 2036 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 

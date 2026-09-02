@@ -16,6 +16,7 @@ from recsys_tfb.core.consistency import (
     date_split_overlap_errors,
     duplicate_test_month_errors,
     entity_columns_declared_errors,
+    inference_grid_errors,
     post_training_snap_date_errors,
     resolved_env_dir,
     resolved_inference_rebuild_dates,
@@ -1408,6 +1409,20 @@ def inference(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("inference", env)
+
+    # (A27) the scoring grid (snap_dates x entity_buckets x products) must not
+    # be degenerate. Wired here rather than aggregated by
+    # validate_config_consistency for A23/A24/A26's reason: that gate runs at
+    # the entry of EVERY command while these three keys are read by the
+    # inference pipeline alone (#158 measured 9 unrelated tests blocked by
+    # exactly that mistake). Before A21 because A21 resolves --rebuild-dates
+    # against inference.snap_dates: with that list empty, every flag value is
+    # "not a configured month", which sends the operator after the wrong key.
+    grid_errors = inference_grid_errors(params)
+    if grid_errors:
+        for line in grid_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
 
     # (A21) --rebuild-dates ⊆ inference.snap_dates. Checked before Spark starts:
     # a typo here would otherwise cost a cold start before failing.

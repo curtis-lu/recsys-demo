@@ -95,6 +95,17 @@ def plan_scoring_chunks(
         ValueError: on an empty grid (no months, no items, or ``n_buckets < 1``).
             All three would make this function return an empty plan, and the
             run would then report success having scored nothing.
+
+            **Pre-checks, and runtime backstops for A27**: the three faults are
+            in this function's arguments, not in what it computes, and the
+            config that produces them is rejected at CLI entry by
+            ``core.consistency.inference_grid_errors`` — which reports all
+            three at once, where these abort on the first. Reaching one of
+            these means the function was called outside the CLI (a test, a
+            notebook), not that an operator mis-set the key. Kept rather than
+            deleted because this is a pure function with callers that do not
+            go through the gate, and an empty plan is the one output shape
+            nothing downstream can tell from a finished run.
     """
     if n_buckets < 1:
         raise ValueError(
