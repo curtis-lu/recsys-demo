@@ -18,11 +18,11 @@
 | 問題 | 這次要跑**哪一條動線** | 這次要**從哪裡接續** |
 | 誰決定 node 集 | `create_pipeline(**kwargs)`，**明確列出**在 pipeline 定義旁 | 起點 ＋ DAG 反推 |
 | 缺料時 | 照常 `catalog.load()`，缺了當場 raise | `can_load` 判斷後自動補跑上游 |
-| 零輸出 node | 在清單裡就會跑 | **一定**被跳過 |
+| 零輸出 node | 在清單裡就會跑 | **一定**被跳過（名單以 warning 印出） |
 
 併用的順序是「模式先組出短 pipeline，切片再對它取子集」，所以 `[plan] running N of M nodes` 的 **M 是模式的 node 數**，不是完整 pipeline 的。
 
-**選哪一個**：想加一個評估月份 → 用模式（見 [adding-an-eval-month.md](adding-an-eval-month.md) 步驟 2），它把資料閘明確列在清單裡；想從某個 node 手動接續 → 用切片，但要知道零輸出的資料閘一定被跳過。
+**選哪一個**：想加一個評估月份 → 用模式（見 [adding-an-eval-month.md](adding-an-eval-month.md) 步驟 2），它把資料閘明確列在清單裡；想從某個 node 手動接續 → 用切片，但要知道零輸出的資料閘一定被跳過。**被跳過的名單走 `logger.warning`**（`[plan] skipped side-effect nodes ...`），因為那代表「這一輪沒有檢查資料層不變量」——多數接續是上一輪中途掛掉、來源表沒變，重驗純浪費；會出事的是隔幾天才接續、來源表已經變了。
 
 ## 自動擴張補跑：dataset 為什麼多一道判準
 
@@ -76,7 +76,7 @@ filter 指向一個不存在的 partition → `exists()` 自然為假。**這一
    注意**新增**一個月份不受影響——新月份的 partition 不存在，必然被處理；出事的只有「既有月份、內容變了」。
    完整症狀與重算指令見 [`known-pitfalls.md` §15](../known-pitfalls.md)。
 
-> 切片計畫會**無條件**印一行警語（`src/recsys_tfb/__main__.py::_format_slice_plan`）：
+> 切片計畫會**無條件**印一行警語（`src/recsys_tfb/__main__.py::_format_slice_plan`，warning 等級）：
 > `resume assumes the skipped artifacts are still valid. exists() proves presence, not freshness — version IDs cover config only, not code changes or backfilled source data.`
 > 它每次都印，看到它不代表這次有問題；它提醒的就是上面那兩個洞。
 >

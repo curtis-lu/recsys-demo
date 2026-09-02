@@ -608,12 +608,56 @@ class TestSlicingHelpers:
             _slice_test_pipe(), lambda n: n == "a", "C", None
         )
         lines = _format_slice_plan(plan, total=3)
-        text = "\n".join(lines)
+        text = "\n".join(line for _, line in lines)
         assert "auto-included" in text
         assert "B" in text and "<- b" in text
         assert "skipped" in text and "A" not in plan.auto_included
         assert "WARNING" in text
         assert "running 2 of 3 nodes" in text
+
+    def test_format_slice_plan_marks_exactly_the_two_warning_lines(self):
+        """Level travels with the line, chosen where the line is written.
+
+        The formatter, not the caller, knows which lines are warnings, so it
+        hands back ``(level, line)`` rather than leaving the caller to sniff a
+        prefix. Two lines earn WARNING: the skipped data gate (a Layer-2
+        invariant went unchecked -- issue #157) and the resume caveat, which
+        already spelled "WARNING:" in its own text while going out at INFO.
+        Everything else is plan bookkeeping and stays INFO.
+        """
+        pipe = Pipeline([
+            Node(func=lambda: None, outputs="a", name="A"),
+            Node(func=lambda a: None, inputs=["a"], outputs=None, name="guard"),
+            Node(func=lambda a: None, inputs=["a"], outputs="b", name="B"),
+        ])
+        _, plan = _slice_pipeline(pipe, lambda n: True, "B", None)
+        assert plan.skipped_side_effect == ("guard",)
+
+        emitted = _format_slice_plan(plan, total=3)
+        warned = [line for level, line in emitted if level == logging.WARNING]
+        infoed = [line for level, line in emitted if level == logging.INFO]
+
+        assert len(warned) == 2, warned
+        assert any("skipped side-effect nodes" in line for line in warned)
+        assert any("resume assumes" in line for line in warned)
+        # No third level, and the rest really is the whole remainder.
+        assert len(warned) + len(infoed) == len(emitted)
+        assert all("skipped side-effect" not in line for line in infoed)
+
+    def test_format_slice_plan_omits_the_gate_warning_when_nothing_was_skipped(self):
+        """A plan that skipped no side-effect node must not warn about one.
+
+        Without this, an implementation that warns unconditionally would pass
+        the test above and cry wolf on every sliced run.
+        """
+        _, plan = _slice_pipeline(_slice_test_pipe(), lambda n: True, "C", None)
+        assert plan.skipped_side_effect == ()
+        warned = [
+            line for level, line in _format_slice_plan(plan, total=3)
+            if level == logging.WARNING
+        ]
+        assert len(warned) == 1
+        assert "resume assumes" in warned[0]
 
     def test_format_node_list_one_line_per_node(self):
         lines = _format_node_list(_slice_test_pipe(), lambda n: True)
@@ -1226,6 +1270,58 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
 
         plan = captured["plan"]
         assert set(plan.requested) | set(plan.auto_included) == _TEST_CHAIN
+
+    def test_the_skipped_data_gate_reaches_the_operator_as_a_warning(
+        self, tmp_path
+    ):
+        """The wiring, not the formatter: does the CLI honour the level?
+
+        ``_format_slice_plan`` can label the line WARNING and the command can
+        still push every line through ``logger.info`` -- that was the defect
+        (issue #157), and the unit test above it cannot see it. Patching the
+        module logger rather than reading ``caplog``: ``setup_logging`` clears
+        the root handlers this command's logs would otherwise land in.
+
+        ``--only-node filter_test_model_input`` skips
+        ``validate_data_consistency``, the Layer-2 data gate, which is the
+        whole reason the line exists.
+        """
+        emitted = []
+
+        class _Recorder:
+            def log(self, level, msg, *a, **kw):
+                emitted.append((level, msg % a if a else msg))
+
+            def info(self, msg, *a, **kw):
+                emitted.append((logging.INFO, msg % a if a else msg))
+
+            def warning(self, msg, *a, **kw):
+                emitted.append((logging.WARNING, msg % a if a else msg))
+
+            def error(self, msg, *a, **kw):
+                emitted.append((logging.ERROR, msg % a if a else msg))
+
+            def debug(self, msg, *a, **kw):
+                emitted.append((logging.DEBUG, msg % a if a else msg))
+
+        with patch.object(
+            DataCatalog, "exists", lambda self, name: name in _LANDED
+        ), patch("recsys_tfb.__main__.logger", _Recorder()):
+            _run_dataset_command(
+                tmp_path,
+                ["dataset", "--only-node", "filter_test_model_input", "--dry-run"],
+                existing=("2026-01-31",),
+                foreign=(),
+            )
+
+        gate_lines = [
+            (level, msg) for level, msg in emitted
+            if "skipped side-effect nodes" in str(msg)
+        ]
+        assert len(gate_lines) == 1, emitted
+        level, msg = gate_lines[0]
+        assert level == logging.WARNING
+        assert "validate_data_consistency" in msg
 
 
 def _execute_pipeline_call_sites() -> dict[str, set[str]]:
