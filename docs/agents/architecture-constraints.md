@@ -41,7 +41,7 @@
 
 ## 11 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**26 個測試，1.06–1.10 秒**（2026-09-01 連跑三次；#265 加入 S4 的六個測試後）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔上一版量到的是 20 個測試 1.4–1.7 秒，多了六個測試反而更快；再上一版的 17 個測試量到 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**27 個測試，1.63–1.74 秒**（2026-09-02 連跑三次；S4 的掃描範圍擴到 `tests/` 之後——掃描的檔案數從 141 變成 295，這 0.6 秒就是它的代價）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -55,7 +55,7 @@
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
 | [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
-| [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | 整個 `src/recsys_tfb/` | `scripts/` 不在範圍內（**現有一處**）；解包等其他取法；值傳給別的模組之後才被索引 |
+| [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | `src/recsys_tfb/` ＋ `tests/` | `scripts/` 不在範圍內（**現有一處，已裁決不修**）；解包等其他取法；值一離開綁定它的語句就看不到（含同模組的 helper 參數） |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -426,7 +426,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 | 依 entity 分組、算母體 | 整份 `schema["entity"]` | `evaluation/comparison/alignment.py::common_universe` |
 | 需要**比 query group 更粗**的單位（切分、抽樣） | 讓使用者宣告，不要自己挑一欄 | `core/schema.py::get_entity_grouping`（讀 `dataset.train_split_keys`／`val_sample_keys`，由 consistency 的 A29 驗證是 `schema.entity` 的非空子集） |
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 底下**所有** `.py`（`rglob`）。三種形態都算違反：
+**檢查**：AST 掃描 `src/recsys_tfb/` **與 `tests/`** 底下所有 `.py`（`rglob`）。三種形態都算違反：
 
 | 形態 | 例子 | 靠掃描的哪個零件抓到 |
 |---|---|---|
@@ -436,7 +436,11 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 前兩種就是那四處原本的寫法（見 #263、#264 的 diff）。`[:1]`／`[0:1]` 與 `[0]` 同罪——同一個讀法換個寫法。**左邊是什麼刻意不看**：`schema["entity"]`、`get_schema(parameters)["entity"]`、`params["schema"]["columns"]["entity"]` 對這條而言是同一個表達式，釘死任何一種寫法只會把盲區搬個位置。
 
-**失敗訊息會指出位置**——檔案、行號、所在函式（巢狀時取最內層的 def）、以及那個表達式：
+**為什麼掃 `tests/`，而 S3 刻意不掃。** 兩條擋的東西不同：S3 擋的是「模組住在哪」，而測試怎麼 import 不會移動任何模組的位置，所以掃測試沒有意義；S4 擋的是「這段程式碼把 entity 讀成什麼」，而**測試正是重災區**——一個取第一欄的斷言，在 entity 變兩欄時會安靜地不再測它 docstring 宣稱在測的東西，也就是這個檔案存在的理由：假綠。實例：`tests/test_pipelines/test_dataset/test_nodes.py` 的 `test_both_sides_are_non_empty` 與 `test_empty_train_dev_raises` 原本就是這樣寫的（前者的 docstring 甚至明講「asserted on distinct entities」），已隨本條擴大範圍一併修正。
+
+掃描範圍是 `ENTITY_SCAN_ROOTS` 這個字典，`test_the_scan_roots_are_real_and_pinned` 把它釘住——**兩棵樹現在都是乾淨的，所以拿掉任何一棵，主掃描依然全綠**，這正是本檔一再警告的那種假綠。該測試同時確認每個 root 底下真的有檔案（指到不存在的路徑一樣是「掃不到東西」）。
+
+**失敗訊息會指出位置**——檔案（含 `src/recsys_tfb/` 或 `tests/` 前綴的 repo 相對路徑）、行號、所在函式（巢狀時取最內層的 def）、以及那個表達式：
 
 ```
 pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity"][0]
@@ -446,13 +450,15 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 只轉紅、講不出在哪，等於下一個人還是得自己找。`test_the_report_names_a_location_not_just_a_count` 把這件事釘住。
 
-**例外登記機制**：測試檔的模組級常數 `ENTITY_FIRST_COLUMN_EXCEPTIONS`，內容是 `(相對 src 的模組路徑, 所在函式名)`。**現在是空的，而且該維持空的**——要加一筆必須先取得使用者同意，見 [R5](#r5-取-schemaentity-第一欄s4-的例外-0-筆)。
+**例外登記機制**：測試檔的模組級常數 `ENTITY_FIRST_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，例如 `("src/recsys_tfb/pipelines/dataset/nodes.py", "split_train_keys")`。**現在是空的，而且該維持空的**——要加一筆必須先取得使用者同意，見 [R5](#r5-取-schemaentity-第一欄s4-的例外-0-筆)。
 
 空的登記表有一個它特有的假綠風險：一個「其實根本沒接上」的過濾器，看起來跟今天的全綠一模一樣。所以 `test_a_registered_exception_silences_exactly_one_site` 建了兩個違例站點、只登記其中一個，證明過濾器真的會動、而且只吃掉被登記的那一個。
 
 ### 這個檢查看不到
 
-- **`scripts/` 不在掃描範圍內**（與 A3／A4 一樣只掃 `src/recsys_tfb/`）。⚠ **`scripts/shap_margin_summary.py` 現在就有一處** `cust_col = schema["entity"][0]`。它是一次性診斷腳本、不在生產路徑上，也不在 #262 認定的四處之內；把掃描範圍擴大到 `scripts/` 就得立刻登記一筆例外，而 #265 的驗收要求零例外。**要不要修那一處是一個還沒做的決定**，不是這條掃描已經處理掉的事。
+- **`scripts/` 不在掃描範圍內。** ⚠ **`scripts/shap_margin_summary.py::main` 現在就有一處** `cust_col = schema["entity"][0]`，而且它拿去做事了（篩選與分組），所以在多欄 entity 下它算的東西會是錯的。
+  **這一處已裁決不修**（使用者，2026-09-02）：那是一支示範性質的離線腳本，手動執行、`src/` 沒有任何東西 import 它，壞了不會污染任何生產產物。**不要再把它當成待辦重新「發現」一次**——要處理它請先問使用者。
+  連帶：`scripts/` 也就維持在掃描範圍外。擴進去只會逼出一筆例外登記，而登記的粒度是函式、代價比它擋下的東西大。
 - **其他取第一欄的寫法**（皆實測會漏）：星號解包（`first, *rest = schema["entity"]`——位置對不齊，刻意不猜）、`next(iter(...))`、`sorted(...)[0]`、`min(...)`、`list(...)[0]`、`.copy()[0]`、`.get("entity")[0]`、算出來的索引。**`[-1]`（取最後一欄）也漏**——那是同一個錯，只是本條的「第一欄」框架講不到它。釘死的是會被**順手寫出來**的那幾種；其餘要刻意才寫得出來。
 - **值一旦離開綁定它的那個語句就看不到了——包含同一個模組內傳給 helper 的參數。** 掃描認的是**賦值**（`x = schema["entity"]`），不是函式參數，所以下面這段完全走得過去：
   ```python

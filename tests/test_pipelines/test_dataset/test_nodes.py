@@ -5,7 +5,7 @@ import pytest
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
-from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.schema import get_entity_grouping, get_schema
 from recsys_tfb.pipelines.dataset.month_plans import build_month_plans
 from recsys_tfb.pipelines.dataset.nodes import (
     apply_preprocessor_to_features,
@@ -282,16 +282,21 @@ class TestSplitTrainKeys:
         demonstration only reproduces with the guard removed too.)
 
         Asserted on distinct entities, not rows, because that is the unit the
-        split is defined on.
+        split is defined on -- and an entity is *every* column of
+        ``schema.entity``, not its first one. Counting the first column alone
+        agrees with this only while the schema declares a single column; under
+        a two-column entity it would count something coarser than the thing
+        being split, and the assertions below would stop meaning what they say
+        without any of them going red (S4).
         """
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        entity_col = get_schema(params)["entity"][0]
+        entity_cols = get_schema(params)["entity"]
         sample_keys = select_train_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
-        n_total = sample_keys.select(entity_col).distinct().count()
-        n_dev = train_dev.select(entity_col).distinct().count()
-        n_train = train.select(entity_col).distinct().count()
+        n_total = sample_keys.select(*entity_cols).distinct().count()
+        n_dev = train_dev.select(*entity_cols).distinct().count()
+        n_train = train.select(*entity_cols).distinct().count()
 
         assert n_total == len(_ENTITIES)
         assert 0 < n_dev < n_total
@@ -361,8 +366,13 @@ class TestSplitTrainKeysEmptyTrainDev:
             "dataset": {**parameters["dataset"], "train_dev_ratio": 1e-7},
         }
         keys = self._keys(spark)
-        entity_col = get_schema(params)["entity"][0]
-        n_entities = keys.select(entity_col).distinct().count()
+        # The unit the node splits on: what the user declared, else the whole
+        # entity (``get_entity_grouping``) -- the same call the node makes, so
+        # this stays true if the split unit is ever declared coarser. Reading
+        # the first entity column instead would silently diverge from the node
+        # under a multi-column entity (S4).
+        split_cols = get_entity_grouping(params, "train_split_keys")
+        n_entities = keys.select(*split_cols).distinct().count()
 
         with pytest.raises(ValueError, match="empty train-dev split") as ei:
             split_train_keys(keys, params)
@@ -370,7 +380,7 @@ class TestSplitTrainKeysEmptyTrainDev:
         # The message has to name both halves of the cause: a ratio alone does
         # not tell you whether to change the ratio or the sample size.
         assert "train_dev_ratio=1e-07" in msg
-        assert f"{n_entities} distinct {entity_col}" in msg
+        assert f"{n_entities} distinct {', '.join(split_cols)}" in msg
 
     def test_zero_ratio_permits_empty_train_dev(self, spark, parameters):
         """train_dev_ratio == 0 asks for no dev split; that is not the bug."""
