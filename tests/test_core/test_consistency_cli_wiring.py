@@ -143,3 +143,64 @@ def test_a26_is_checked_before_a21():
     assert src.index("duplicate_test_month_errors(") < src.index(
         "resolved_rebuild_dates("
     )
+
+
+def test_a30_runs_before_the_config_loader():
+    # A30 cannot be aggregated by validate_config_consistency (it reads --env
+    # and the filesystem), so this one call site is the whole gate. Order
+    # matters as much as presence: ConfigLoader turns a missing conf/<env>
+    # into an empty overlay, after which nothing distinguishes "environment
+    # not found" from "environment had no overrides".
+    src = inspect.getsource(m._load_config_and_setup)
+    assert "resolved_env_dir(conf_dir, env)" in src
+    assert src.index("resolved_env_dir(") < src.index("ConfigLoader(")
+
+
+def test_a30_error_is_caught_and_exits_cleanly():
+    # ConfigConsistencyError subclasses ValueError, and the call sits inside
+    # the block whose `except ValueError` turns it into `typer.Exit(1)`. A
+    # raw traceback would be a regression, not a nicety: the message is the
+    # product here.
+    src = inspect.getsource(m._load_config_and_setup)
+    head = src.split("resolved_env_dir(")[0]
+    assert "try:" in head
+
+
+def test_every_env_taking_command_reaches_the_a30_gate():
+    # A30 lives at exactly one call site, which is only safe while every
+    # command that accepts --env actually reaches it. A ninth command that
+    # built its own ConfigLoader would restore the silent degradation with
+    # every unit test above still green. Four of the eight commands reach the
+    # gate indirectly (the *_etl commands delegate to _run_etl), so this walks
+    # the module's call graph rather than grepping each body.
+    import ast
+
+    src = inspect.getsource(m)
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def reaches_gate(name, seen):
+        if name in seen or name not in funcs:
+            return False
+        seen.add(name)
+        for call in ast.walk(funcs[name]):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id == "_load_config_and_setup":
+                return True
+            if reaches_gate(call.func.id, seen):
+                return True
+        return False
+
+    commands = [
+        n.name
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+        and '"--env"' in (ast.get_source_segment(src, n) or "")
+    ]
+    # Guard the guard: if the '--env' probe ever stops matching, the loop
+    # below would pass by finding nothing to check.
+    assert len(commands) >= 8, f"expected every CLI command, found {commands}"
+
+    missing = [name for name in commands if not reaches_gate(name, set())]
+    assert not missing, f"command(s) take --env but never reach A30: {missing}"

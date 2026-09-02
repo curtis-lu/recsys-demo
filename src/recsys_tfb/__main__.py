@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
     duplicate_test_month_errors,
     entity_columns_declared_errors,
     post_training_snap_date_errors,
+    resolved_env_dir,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     train_snap_dates_errors,
@@ -94,6 +95,10 @@ def _load_spark_config(config: ConfigLoader, pipeline: str) -> dict:
 def _load_config_and_setup(pipeline: str, env: str) -> tuple[ConfigLoader, dict, RunContext]:
     conf_dir = _find_conf_dir()
     try:
+        # A30 before the loader, not after: ConfigLoader treats a missing
+        # conf/<env> as an empty overlay, so once it has run there is no
+        # evidence left that the requested environment was never read.
+        resolved_env_dir(conf_dir, env)
         config = ConfigLoader(str(conf_dir), env=env)
         params = config.get_parameters()
     except ValueError as exc:
