@@ -361,7 +361,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 
 內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring。那份十三條裡只有兩條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
 
-那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（evaluation 尚未依判準重整、training 的 7 個 diagnosis node 刻意不搬、`recsys_tfb.preprocessing` 的兩個底線名），看到它們不必以為判準是裝飾。
+那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（evaluation 尚未依判準重整、training 的 7 個 diagnosis node 刻意不搬），看到它們不必以為判準是裝飾。
 
 ## S2. `pipelines/dataset/month_plans.py` 不得 import pyspark
 

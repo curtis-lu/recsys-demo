@@ -11,6 +11,11 @@
 > **識別字註記**：文中的 `_pdf_to_X` 已於 #199（2026-08-31）改名為 `pdf_to_X`。
 > 下面的 log 原文與記憶體帳**刻意保留舊名**——那是 2026-07-11 當天真的印出來的字，
 > 改掉等於把現場證據改成當天沒發生的樣子。
+>
+> 同理，文中的 `_encode_categoricals` 已於 #254（2026-09-03）改名為 `encode_categoricals`
+> （`_cast_feature_floats_to_float32` → `cast_feature_floats_to_float32` 同批）。**本文一律
+> 不改**：文中所附的行號早已腐爛（`preprocessing.py:71`），它記錄的是 2026-07-11 那天的
+> 座標，不是今天的。
 
 ## 1. 當時看到的樣子
 

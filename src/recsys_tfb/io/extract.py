@@ -47,7 +47,7 @@ def translate_weight_table(
     A component whose column is an *encoded feature* (in ``category_mappings``
     and NOT an identity column — identity cats are stored raw in model_input) is
     mapped from its human-readable value to ``str(index)`` in
-    ``category_mappings[col]`` (matching ``_encode_categoricals``). Identity /
+    ``category_mappings[col]`` (matching ``encode_categoricals``). Identity /
     label / carry / numeric components pass through unchanged. A key with any
     unknown feature value is dropped (cannot match) and recorded.
 

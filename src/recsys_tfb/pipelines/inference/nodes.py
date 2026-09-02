@@ -20,13 +20,6 @@ guaranteed ~0.00s that reads exactly like "this step was fast", and mixing the
 two kinds under one event name leaves nobody able to tell which zero means
 which. Where a node's *time* actually goes is a question for the Runner's
 ``load``/``func``/``save`` split (``core/runner.py``), not for this module.
-
-This module imports **two** underscore-prefixed names from elsewhere, which
-``docs/agents/pipeline-node-design.md`` rule 12 otherwise forbids:
-``_encode_categoricals`` and ``_cast_feature_floats_to_float32`` from
-``recsys_tfb.preprocessing``. Both are a registered exception: renaming means
-touching the dataset pipeline's call sites in the same change
-(``docs/agents/deliberate-non-goals.md``).
 """
 
 import itertools
@@ -85,9 +78,9 @@ from recsys_tfb.pipelines.inference.steps.validation import (
     validate_scored_chunk,
 )
 from recsys_tfb.preprocessing import (
-    _cast_feature_floats_to_float32,
-    _encode_categoricals,
+    cast_feature_floats_to_float32,
     encodable_categoricals,
+    encode_categoricals,
     warn_unknown_encodings,
 )
 
@@ -182,7 +175,7 @@ def build_inference_population_features(
             categorical_cols, result.columns, identity_cols,
         )
         if encode_cols:
-            result = _encode_categoricals(result, encode_cols, category_mappings)
+            result = encode_categoricals(result, encode_cols, category_mappings)
             warn_unknown_encodings(
                 result, encode_cols,
                 context="build_inference_population_features",
@@ -203,7 +196,7 @@ def build_inference_population_features(
 
     # Decision — numeric features converge on one storage type; which types get
     # cast, and to what, is the helper's business.
-    result, casted = _cast_feature_floats_to_float32(result, feature_columns)
+    result, casted = cast_feature_floats_to_float32(result, feature_columns)
 
     # Decision — the time partition value is spelled here, not left to Spark's
     # coercion inside insertInto: the resume planner compares directory names

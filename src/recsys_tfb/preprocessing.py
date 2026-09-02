@@ -11,11 +11,11 @@ Membership follows that "callers on both sides" test, not history:
 encoding identity categoricals on the Spark side and became their second
 caller. Until then they had one consumer, and the same rule put them there.
 
-Everything here is mechanism, not decision: ``_encode_categoricals``
+Everything here is mechanism, not decision: ``encode_categoricals``
 implements "unknown category -> sentinel" once the sentinel is chosen,
 ``encodable_categoricals`` implements "an identity categorical is not this
 frame's to encode" once identity is defined, and
-``_cast_feature_floats_to_float32`` implements "numeric features converge on
+``cast_feature_floats_to_float32`` implements "numeric features converge on
 float32" once that convergence is decided. The decisions themselves are named
 by the callers' steps; see ADR-0008 section 2 for where that line is drawn.
 """
@@ -60,7 +60,7 @@ class PreprocessorMetadata(TypedDict):
         category_mappings: Per categorical column, the ordered list of category
             values fit on the train months. A value's index in this list is its
             encoded value; anything absent encodes to the ``-1`` sentinel that
-            ``_encode_categoricals`` writes.
+            ``encode_categoricals`` writes.
         drop_columns: Columns excluded from ``feature_columns`` by configuration.
             Kept in the artifact because the inference side needs to drop them
             from its scoring frame too.
@@ -112,7 +112,7 @@ def encodable_categoricals(
     ]
 
 
-def _encode_categoricals(
+def encode_categoricals(
     df: DataFrame,
     categorical_cols: list[str],
     category_mappings: dict[str, list],
@@ -176,7 +176,7 @@ def warn_unknown_encodings(
             )
 
 
-def _cast_feature_floats_to_float32(
+def cast_feature_floats_to_float32(
     df: DataFrame,
     feature_cols: list[str],
 ) -> tuple[DataFrame, list[str]]:
