@@ -143,3 +143,24 @@ def test_a26_is_checked_before_a21():
     assert src.index("duplicate_test_month_errors(") < src.index(
         "resolved_rebuild_dates("
     )
+
+
+def test_a30_runs_before_the_config_loader():
+    # A30 cannot be aggregated by validate_config_consistency (it reads --env
+    # and the filesystem), so this one call site is the whole gate. Order
+    # matters as much as presence: ConfigLoader turns a missing conf/<env>
+    # into an empty overlay, after which nothing distinguishes "environment
+    # not found" from "environment had no overrides".
+    src = inspect.getsource(m._load_config_and_setup)
+    assert "resolved_env_dir(conf_dir, env)" in src
+    assert src.index("resolved_env_dir(") < src.index("ConfigLoader(")
+
+
+def test_a30_error_is_caught_and_exits_cleanly():
+    # ConfigConsistencyError subclasses ValueError, and the call sits inside
+    # the block whose `except ValueError` turns it into `typer.Exit(1)`. A
+    # raw traceback would be a regression, not a nicety: the message is the
+    # product here.
+    src = inspect.getsource(m._load_config_and_setup)
+    head = src.split("resolved_env_dir(")[0]
+    assert "try:" in head

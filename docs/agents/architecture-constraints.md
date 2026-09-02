@@ -72,7 +72,7 @@
 | [F3](#f3-只有-sequential-runner) | 只有 sequential runner |
 | [F4](#f4-node-極薄沒有-namespace沒有-tags) | Node 極薄：沒有 namespace、沒有 tags |
 | [F5](#f5-切片語意單一起點自動上游擴張跳過零輸出-node) | 切片語意：單一起點、自動上游擴張、**跳過零輸出 node** |
-| [F6](#f6---env-的覆蓋層語意會靜默退化) | `--env` 的覆蓋層語意會靜默退化 |
+| [F6](#f6---env-的覆蓋層語意) | `--env` 的覆蓋層語意（A30 擋掉打錯的環境名） |
 | [F7](#f7-我們有kedro-沒有的抽象) | 我們有、Kedro 沒有的抽象 |
 | [F8](#f8-node-函式大小的現況分佈) | Node 函式大小的現況分佈 |
 | [F9](#f9-測試的三個層次) | 測試的三個層次 |
@@ -135,17 +135,17 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 **擴張永遠救不了它**：producer map 由 `node.outputs` 建，零輸出的 node 不在裡面，所以沒有任何缺料能把它拉回來。**唯一的進場方式是被明確點名**——而點名只有「模式」做得到，切片做不到（[ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)）。`--only-test-months` 的 `ONLY_TEST_MONTHS_NODES` 把它列為清單第一個成員就是為此（#203、#157）。新增模式時這是必須各自處理的一件事，不是預設會繼承的行為。
 
-## F6. `--env` 的覆蓋層語意會靜默退化
+## F6. `--env` 的覆蓋層語意
 
-`ConfigLoader._load()`（`core/config.py:140-147`）讀 `conf/base` 再深度合併 `conf/<env>`。而 `_load_yaml_dir` 在目錄不存在時**靜默回傳空 dict**（`core/config.py:131-132`），`--env` 本身是自由字串、沒有任何驗證——8 個 CLI command 各自宣告 `env: str = typer.Option("local", "--env", "-e", …)`，沒有一個帶 enum 或事後檢查（`grep -n 'env: str = typer.Option' src/recsys_tfb/__main__.py`）。
+`ConfigLoader._load()`（`core/config.py:140-147`）讀 `conf/base` 再深度合併 `conf/<env>`。而 `_load_yaml_dir` 在目錄不存在時**靜默回傳空 dict**（`core/config.py:131-132`）——在 loader 眼裡，「環境不存在」與「環境沒有覆蓋任何鍵」是同一件事，且事後無從分辨。
+
+`--env` 本身仍是自由字串，8 個 CLI command 各自宣告 `env: str = typer.Option("local", "--env", "-e", …)`，沒有一個帶 enum（`grep -n 'env: str = typer.Option' src/recsys_tfb/__main__.py`）。擋掉打錯環境名的不是 typer，是 **A30**——`core/consistency.py` 的 `resolved_env_dir`，在 `_load_config_and_setup` 裡**先於** `ConfigLoader` 執行（#153）。順序本身就是設計的一部分：loader 一旦跑完，能證明環境沒讀到的跡證就已經被抹掉了。
 
 所以現況是：
 
-- `conf/` 底下只有 `base`／`spark-local`／`sql`，**沒有 `conf/local/`**。`--env local` 讀的是不存在的 `conf/local/`，實際效果等同「只用 base」。
-- **打錯環境名不會有任何錯誤訊息**，只會拿到 base 設定。被交代「用 `--env <某環境>` 跑」時，不要把「跑完沒報錯」當成「讀到那個環境的設定」。
-- `conf/spark-local/` **不是**環境覆蓋層。它只有 `spark-defaults.conf` 與 `spark-env.sh`，是給 Spark 自己讀的 `SPARK_CONF_DIR`。名字跟 Kedro 的 `conf/local`（使用者專屬、不進版控）很像但語意相反——**本 repo 的 `conf/spark-local` 是進版控的**。
-
-> 這個靜默退化是已知缺陷，修法（在 `core/consistency.py` 加一條 A 系列 predicate 檢查 `conf/<env>` 存在）已另開 **issue #153**，不在本檔範圍。
+- `conf/` 底下有 `base`／`local`／`spark-local`／`sql`。**`conf/local/` 是空的，只有 `.gitkeep`**，存在的唯一理由是預設值就是 `--env local`——少了這個目錄，A30 會擋掉每一次不帶 `--env` 的呼叫。它進版控，不要因為「裡面沒東西」而刪掉。
+- **打錯環境名現在會 exit 1**，訊息帶 `(A30)` 與 `conf/` 底下實際存在的目錄清單。反過來說：A30 只檢查目錄存在——`--env sql` 會通過（`conf/sql` 存在，但不是覆蓋層）。它擋的是手滑，不是刻意亂填。
+- `conf/spark-local/` **不是**環境覆蓋層。它只有 `spark-defaults.conf` 與 `spark-env.sh`，是給 Spark 自己讀的 `SPARK_CONF_DIR`。名字跟 Kedro 的 `conf/local`（使用者專屬、不進版控）很像但語意相反——**本 repo 的 `conf/spark-local` 與 `conf/local` 都進版控**。
 
 ## F7. 我們有、Kedro 沒有的抽象
 

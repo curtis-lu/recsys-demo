@@ -63,7 +63,7 @@ Kedro 在 **node 建構期就 raise** 的四條驗證，我們的 `core/node.py`
 | C-16 所有 dataset/node 必須可 pickle（不得 lambda／closure／巢狀函式） | `ParallelRunner` | `core/runner.py` 只有 sequential 一種 |
 | C-17 不能並用多行程的 dataset 要設 `_SINGLE_PROCESS = True` | 同上 | 同上 |
 | C-33 依賴 dataset/node 層 hook 時不得用 `ParallelRunner` | 同上＋hooks | 兩個前提都沒有 |
-| C-19 `conf/local/**` 不得進版控 | Kedro 的 `conf/local` ＝使用者專屬設定 | **我們沒有 `conf/local`**，但有 `conf/spark-local` 且**進版控**（`git ls-files conf/` 確認）——名字撞車、語意相反 |
+| C-19 `conf/local/**` 不得進版控 | Kedro 的 `conf/local` ＝使用者專屬設定 | 撰寫時我們沒有 `conf/local`；**2026-09-02（#153）起有了，且刻意進版控**（空目錄＋`.gitkeep`，讓預設的 `--env local` 通過 A30 存在性檢查），與 C-19 相反。`conf/spark-local` 同樣進版控——名字撞車、語意相反 |
 | C-15 node 級 namespace 不得用來分組執行 | Kedro 的 namespace 機制 | 我們的 `Node` 無 namespace 概念 |
 | C-8 dataset 名稱不得含 `.`（保留給 namespace） | 同上 | 前提不存在 |
 

@@ -216,11 +216,30 @@ Layer 1 — config-static (implemented here; aggregated by
   changes artifact paths for training and inference too. Why two keys rather
   than one, and which version ID each moves:
   docs/adr/0016-split-unit-declared-by-two-keys.md.
+* A30 — ``--env`` must name a directory that exists under ``conf/``.
+  ``ConfigLoader._load`` deep-merges ``conf/<env>`` over ``conf/base``, and
+  ``_load_yaml_dir`` returns an empty dict for a directory that is not there
+  (``core/config.py``), so a mistyped env name is not an error — it is an empty
+  overlay. The run proceeds on ``conf/base`` alone and prints nothing, which is
+  the one failure shape an operator (or an agent told to "run with ``--env X``")
+  cannot see: the run succeeds. Predicate: ``resolved_env_dir`` (raises
+  ``ConfigConsistencyError`` directly and returns the path; NOT aggregated by
+  ``validate_config_consistency`` — it reads the ``--env`` flag and the
+  filesystem, neither of which that gate is given. Mirrors A12/A21). Two limits
+  stated so nobody reads more into the gate than it does: (a) it checks
+  existence only, and ``conf/sql`` / ``conf/spark-local`` exist without being
+  overlay layers (F6 in docs/agents/architecture-constraints.md), so
+  ``--env sql`` still passes — the gate catches typos, not deliberate nonsense;
+  (b) an empty ``--env`` is rejected explicitly, because ``conf_dir / ""``
+  resolves back to ``conf/`` itself, which *is* a directory and would otherwise
+  pass while merging nothing — the exact silent degradation this invariant
+  exists to stop. ``conf/local/`` is committed (empty, ``.gitkeep``) so the
+  default ``--env local`` passes; see issue #153.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
-to one pipeline), A28 (the resolved catalog).
+to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the filesystem).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
 
@@ -281,6 +300,7 @@ the plan doc for the full table:
 from __future__ import annotations
 
 import datetime as _datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -1421,6 +1441,45 @@ def compare_source_key_exists(parameters: dict, key: str | None) -> dict | None:
             f"evaluation.compare_sources. Available: {available}"
         )
     return sources[key]
+
+
+def resolved_env_dir(conf_dir: Path | str, env: str) -> Path:
+    """(A30) Resolve the ``conf/<env>`` overlay directory or raise.
+
+    Returns the directory :class:`~recsys_tfb.core.config.ConfigLoader` will
+    deep-merge over ``conf/base``. Raises ``ConfigConsistencyError`` when it is
+    absent: the loader reads a missing overlay as an empty one, so without this
+    a typo'd ``--env`` runs the whole pipeline on base config and reports
+    nothing at all.
+
+    Takes ``conf_dir`` as an argument rather than resolving ``Path.cwd()``
+    itself so the predicate stays pure and testable — the CLI passes the same
+    path it then hands to ``ConfigLoader``, which is what makes the gate and the
+    loader unable to disagree about which directory is meant.
+    """
+    root = Path(conf_dir)
+    name = (env or "").strip()
+    if not name:
+        raise ConfigConsistencyError(
+            f"(A30) --env is empty. It must name a directory under {root} — "
+            f"the layer deep-merged over conf/base. An empty value resolves "
+            f"back to {root} itself, which merges nothing."
+        )
+    env_dir = root / name
+    if env_dir.is_dir():
+        return env_dir
+    existing = (
+        sorted(child.name for child in root.iterdir() if child.is_dir())
+        if root.is_dir()
+        else []
+    )
+    raise ConfigConsistencyError(
+        f"(A30) --env={env!r} points at {env_dir}, which does not exist. "
+        f"conf/<env> is deep-merged over conf/base and a missing directory "
+        f"merges nothing, so the run would silently use conf/base alone. "
+        f"Directories under {root}: {existing} (of these, only env overlays "
+        f"are valid here — conf/sql and conf/spark-local are not)."
+    )
 
 
 def _iso_date(value) -> str | None:

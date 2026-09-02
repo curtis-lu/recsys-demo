@@ -1983,3 +1983,96 @@ class TestEntityGroupingKeysA29:
         params = self._params(train_split_keys=["region"])
         with pytest.raises(ConfigConsistencyError, match="A29"):
             validate_config_consistency(params)
+
+
+class TestA30EnvDirExists:
+    """A30 — ``--env`` must name an existing ``conf/<env>`` directory.
+
+    The thing under test is a *silence*: ConfigLoader reads a missing overlay
+    as an empty one, so before this gate every assertion about a typo'd --env
+    was "the run succeeded". Each test below names the input that used to pass.
+    """
+
+    def _conf_tree(self, tmp_path, *names):
+        conf = tmp_path / "conf"
+        for name in ("base", *names):
+            (conf / name).mkdir(parents=True)
+        return conf
+
+    def test_existing_env_dir_returns_the_path(self, tmp_path):
+        from recsys_tfb.core.consistency import resolved_env_dir
+
+        conf = self._conf_tree(tmp_path, "local")
+        assert resolved_env_dir(conf, "local") == conf / "local"
+
+    def test_conf_local_exists_in_this_repo(self):
+        # The default is --env local, so if conf/local/ ever stops being
+        # committed this gate turns every default invocation into an error.
+        # Checked against the real tree, not a tmp fixture, on purpose.
+        from pathlib import Path
+
+        import recsys_tfb
+
+        repo_root = Path(recsys_tfb.__file__).resolve().parents[2]
+        assert (repo_root / "conf" / "local").is_dir()
+
+    def test_missing_env_dir_raises(self, tmp_path):
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            resolved_env_dir,
+        )
+
+        conf = self._conf_tree(tmp_path, "local")
+        with pytest.raises(ConfigConsistencyError, match="A30") as exc:
+            resolved_env_dir(conf, "prod")
+        assert "prod" in str(exc.value)
+
+    def test_message_lists_the_directories_that_do_exist(self, tmp_path):
+        # A typo is nearly always a near-miss of a real name; the fix is one
+        # word away and the message should hand the operator that word.
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            resolved_env_dir,
+        )
+
+        conf = self._conf_tree(tmp_path, "local", "prod")
+        with pytest.raises(ConfigConsistencyError) as exc:
+            resolved_env_dir(conf, "pord")
+        assert "'local'" in str(exc.value) and "'prod'" in str(exc.value)
+
+    def test_empty_env_is_rejected(self, tmp_path):
+        # conf_dir / "" resolves back to conf/ itself, which IS a directory:
+        # a bare existence check would pass it while merging nothing — the
+        # same silent degradation A30 exists to stop.
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            resolved_env_dir,
+        )
+
+        conf = self._conf_tree(tmp_path, "local")
+        for value in ("", "   ", None):
+            with pytest.raises(ConfigConsistencyError, match="A30"):
+                resolved_env_dir(conf, value)
+
+    def test_missing_conf_dir_raises_rather_than_crashing(self, tmp_path):
+        # Running from the wrong cwd means conf/ itself is absent. The error
+        # must still be the A30 message, not an iterdir FileNotFoundError.
+        from recsys_tfb.core.consistency import (
+            ConfigConsistencyError,
+            resolved_env_dir,
+        )
+
+        with pytest.raises(ConfigConsistencyError, match="A30"):
+            resolved_env_dir(tmp_path / "conf", "local")
+
+    def test_not_aggregated_by_validate_config_consistency(self, tmp_path):
+        # validate_config_consistency takes parameters alone; it never sees
+        # --env or the filesystem. Tidying A30 into it would need a fake
+        # argument and would fire on configs that are fine.
+        import inspect
+
+        from recsys_tfb.core import consistency
+
+        assert "resolved_env_dir" not in inspect.getsource(
+            consistency.validate_config_consistency
+        )
