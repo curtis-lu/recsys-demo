@@ -171,6 +171,8 @@ evaluation:
   #    kind: external_hive
   #    label: "External Project X"
   #    table: other_project.predictions
+  #    # 左邊的 key 是 schema 角色解析出的欄名（time/entity 各欄/item/score），
+  #    # 下面用的是預設 schema；改過 schema.columns 就要換成新欄名，否則 A11 擋下。
   #    columns: {cust_id: customer_id, snap_date: as_of_date, prod_name: item_code, score: pred_score}
   #    prod_mapping: {ext_fund_a: fund_stock, ext_fund_b: fund_bond}
   #    unmapped_policy: fail                   # fail（預設）| drop

@@ -65,8 +65,10 @@ Layer 1 — config-static (implemented here; aggregated by
   by-kind required fields (``model_version`` for model_version, optional
   ``source`` ∈ {enriched_eval_predictions, ranked_predictions,
   training_eval_predictions} — default ``enriched_eval_predictions``;
-  ``table`` + ``columns`` (cust_id/snap_date/prod_name/
-  score) + ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
+  ``table`` + ``columns`` (one key per schema role: every column in
+  ``identity_columns`` — time + entity + item — plus score, resolved via
+  ``get_schema``, NOT the literal cust_id/snap_date/prod_name names) +
+  ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
   external_hive); ``model_version`` kind must NOT declare
   ``columns``/``prod_mapping`` (config leak guard). Predicate:
   ``compare_source_well_formed_errors``.
@@ -1350,7 +1352,6 @@ def carry_column_collision_errors(
 # ---------------------------------------------------------------------------
 
 _COMPARE_KINDS = {"model_version", "external_hive"}
-_REQUIRED_COLUMNS = {"cust_id", "snap_date", "prod_name", "score"}
 _VALID_UNMAPPED = {"fail", "drop"}
 # Same-stack Hive tables a model_version compare source may read from.
 # Mirror of evaluation.comparison.sources.MODEL_VERSION_SOURCES; A11 is the
@@ -1360,6 +1361,17 @@ _VALID_MODEL_VERSION_SOURCES = {
     "ranked_predictions",
     "training_eval_predictions",
 }
+
+
+def _required_external_columns(parameters: dict) -> set[str]:
+    """Columns an ``external_hive`` compare source must declare, as schema roles.
+
+    Every entry is a *role* resolved through :func:`get_schema` — the identity
+    columns (time + entity + item) plus score — never a literal column name.
+    ``entity`` is a list, so a multi-column entity requires all of its columns.
+    """
+    schema = get_schema(parameters)
+    return set(schema["identity_columns"]) | {schema["score"]}
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:
@@ -1408,7 +1420,7 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
             if "table" not in src:
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'table'")
             cols = src.get("columns", {}) or {}
-            missing = _REQUIRED_COLUMNS - set(cols.keys())
+            missing = _required_external_columns(parameters) - set(cols.keys())
             if missing:
                 errs.append(
                     f"(A11) compare_sources[{key!r}].columns missing required keys: {sorted(missing)}"
