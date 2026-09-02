@@ -1,5 +1,7 @@
 """Tests for compare-source consistency predicates (A11/A12/A13)."""
 
+import ast
+
 import pytest
 from recsys_tfb.core.consistency import (
     ConfigConsistencyError,
@@ -11,6 +13,15 @@ from recsys_tfb.core.consistency import (
 
 def _base_params() -> dict:
     return {"evaluation": {"compare_sources": {}}}
+
+
+_MISSING_MARKER = "missing required keys: "
+
+
+def _missing_from(err: str) -> list[str]:
+    """Parse the sorted column list out of an A11 'missing required keys' message."""
+    assert _MISSING_MARKER in err, err
+    return ast.literal_eval(err.split(_MISSING_MARKER, 1)[1])
 
 
 class TestA11_WellFormed:
@@ -150,6 +161,70 @@ class TestA11_WellFormed:
         }
         errs = compare_source_well_formed_errors(p)
         assert any("source" in e and "score_table" in e for e in errs)
+
+
+
+class TestA11_SchemaRoles:
+    """A11 required columns are schema roles, not the banking instantiation's names."""
+
+    @staticmethod
+    def _params(columns: dict) -> dict:
+        return {
+            "schema": {"columns": columns},
+            "evaluation": {"compare_sources": {}},
+        }
+
+    @staticmethod
+    def _external(cols: dict) -> dict:
+        return {
+            "kind": "external_hive", "table": "t", "label": "X",
+            "columns": cols,
+            "prod_mapping": {"a": "fund_stock"}, "unmapped_policy": "fail",
+        }
+
+    def test_custom_schema_column_names_accepted(self):
+        p = self._params(
+            {"time": "dt", "entity": ["user_id"], "item": "sku", "score": "pred"}
+        )
+        p["evaluation"]["compare_sources"]["x"] = self._external(
+            {"dt": "a", "user_id": "b", "sku": "c", "pred": "d"}
+        )
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_default_column_names_rejected_under_custom_schema(self):
+        """The old literals must stop satisfying A11 once the schema is renamed."""
+        p = self._params(
+            {"time": "dt", "entity": ["user_id"], "item": "sku", "score": "pred"}
+        )
+        p["evaluation"]["compare_sources"]["x"] = self._external(
+            {"cust_id": "a", "snap_date": "b", "prod_name": "c", "score": "d"}
+        )
+        errs = compare_source_well_formed_errors(p)
+        assert len(errs) == 1
+        assert sorted(["dt", "user_id", "sku", "pred"]) == _missing_from(errs[0])
+
+    def test_multi_entity_all_columns_required(self):
+        p = self._params({"entity": ["cust_id", "channel"]})
+        p["evaluation"]["compare_sources"]["x"] = self._external(
+            {"cust_id": "a", "snap_date": "b", "prod_name": "c", "score": "d"}
+        )
+        errs = compare_source_well_formed_errors(p)
+        assert len(errs) == 1
+        assert _missing_from(errs[0]) == ["channel"]
+
+    def test_multi_entity_satisfied(self):
+        p = self._params({"entity": ["cust_id", "channel"]})
+        p["evaluation"]["compare_sources"]["x"] = self._external(
+            {"cust_id": "a", "channel": "z", "snap_date": "b", "prod_name": "c", "score": "d"}
+        )
+        assert compare_source_well_formed_errors(p) == []
+
+    def test_entity_as_bare_string_normalised(self):
+        p = self._params({"entity": "user_id"})
+        p["evaluation"]["compare_sources"]["x"] = self._external(
+            {"user_id": "a", "snap_date": "b", "prod_name": "c", "score": "d"}
+        )
+        assert compare_source_well_formed_errors(p) == []
 
 
 class TestA12_KeyExists:
