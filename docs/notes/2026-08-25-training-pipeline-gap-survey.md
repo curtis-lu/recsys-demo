@@ -4,6 +4,13 @@
 
 基準：`main` @ `55be018`。判準＝[`docs/agents/pipeline-node-design.md`](../agents/pipeline-node-design.md)（13 條規則，本檔用它的編號）。流程＝[`docs/agents/pipeline-refactor-process.md`](../agents/pipeline-refactor-process.md)。
 
+> **前提變更註記（本文正文一律不改，它是 2026-08-25 那天的快照）**：第 16 列
+> 「從 `recsys_tfb.io.extract` import 三個底線私有名，沒登記在任何例外表（既有豁免只
+> 涵蓋 `preprocessing` 的兩個名字…）」的**兩個前提今天都已失效**——`_pdf_to_X` 已於
+> #199（2026-08-31）改名，`preprocessing` 那兩個名字已於 #254（2026-09-03）改名、
+> 該筆豁免登記一併撤掉。〈已登記的例外〉現在是 2 筆，都與 `preprocessing` 無關。
+> 這條註記是 #254 補的：那次的識別字 grep 掃不到這一列，因為它描述豁免、沒有寫出名字。
+
 ---
 
 ## 結論先行
