@@ -1,10 +1,10 @@
 """Tests for compare-source consistency predicates (A11/A12/A13)."""
 
-import ast
-
 import pytest
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.core.consistency import (
     ConfigConsistencyError,
+    _required_external_columns,
     compare_source_well_formed_errors,
     compare_source_key_exists,
     compare_mutual_exclusive_errors,
@@ -13,15 +13,6 @@ from recsys_tfb.core.consistency import (
 
 def _base_params() -> dict:
     return {"evaluation": {"compare_sources": {}}}
-
-
-_MISSING_MARKER = "missing required keys: "
-
-
-def _missing_from(err: str) -> list[str]:
-    """Parse the sorted column list out of an A11 'missing required keys' message."""
-    assert _MISSING_MARKER in err, err
-    return ast.literal_eval(err.split(_MISSING_MARKER, 1)[1])
 
 
 class TestA11_WellFormed:
@@ -163,9 +154,8 @@ class TestA11_WellFormed:
         assert any("source" in e and "score_table" in e for e in errs)
 
 
-
 class TestA11_SchemaRoles:
-    """A11 required columns are schema roles, not the banking instantiation's names."""
+    """A11 required columns are schema roles, not one instantiation's column names."""
 
     @staticmethod
     def _params(columns: dict) -> dict:
@@ -182,6 +172,34 @@ class TestA11_SchemaRoles:
             "prod_mapping": {"a": "fund_stock"}, "unmapped_policy": "fail",
         }
 
+    # --- the required set itself ---
+
+    def test_required_set_follows_renamed_schema(self):
+        p = self._params(
+            {"time": "dt", "entity": ["user_id"], "item": "sku", "score": "pred"}
+        )
+        assert _required_external_columns(p) == {"dt", "user_id", "sku", "pred"}
+
+    def test_required_set_covers_every_entity_column(self):
+        p = self._params({"entity": ["cust_id", "channel"]})
+        assert _required_external_columns(p) == {
+            "snap_date", "cust_id", "channel", "prod_name", "score",
+        }
+
+    def test_required_set_matches_runtime_groupby_keys(self):
+        """_load_external_hive does groupBy(*identity_cols).agg(max(score));
+        A11 must demand exactly those, or the config passes and Spark fails."""
+        p = self._params({"time": "dt", "entity": ["a", "b"], "item": "sku", "score": "pred"})
+        schema = get_schema(p)
+        assert _required_external_columns(p) == set(schema["identity_columns"]) | {schema["score"]}
+
+    def test_required_set_defaults_unchanged(self):
+        assert _required_external_columns(_base_params()) == {
+            "snap_date", "cust_id", "prod_name", "score",
+        }
+
+    # --- A11 behaviour through the predicate ---
+
     def test_custom_schema_column_names_accepted(self):
         p = self._params(
             {"time": "dt", "entity": ["user_id"], "item": "sku", "score": "pred"}
@@ -192,7 +210,11 @@ class TestA11_SchemaRoles:
         assert compare_source_well_formed_errors(p) == []
 
     def test_default_column_names_rejected_under_custom_schema(self):
-        """The old literals must stop satisfying A11 once the schema is renamed."""
+        """The old literals must stop satisfying A11 once the schema is renamed.
+
+        Pins the negative half: a required set that merely unioned old and new
+        names would still pass test_custom_schema_column_names_accepted.
+        """
         p = self._params(
             {"time": "dt", "entity": ["user_id"], "item": "sku", "score": "pred"}
         )
@@ -201,16 +223,16 @@ class TestA11_SchemaRoles:
         )
         errs = compare_source_well_formed_errors(p)
         assert len(errs) == 1
-        assert sorted(["dt", "user_id", "sku", "pred"]) == _missing_from(errs[0])
+        assert "['dt', 'pred', 'sku', 'user_id']" in errs[0]
 
-    def test_multi_entity_all_columns_required(self):
+    def test_multi_entity_missing_column_rejected(self):
         p = self._params({"entity": ["cust_id", "channel"]})
         p["evaluation"]["compare_sources"]["x"] = self._external(
             {"cust_id": "a", "snap_date": "b", "prod_name": "c", "score": "d"}
         )
         errs = compare_source_well_formed_errors(p)
         assert len(errs) == 1
-        assert _missing_from(errs[0]) == ["channel"]
+        assert "['channel']" in errs[0]
 
     def test_multi_entity_satisfied(self):
         p = self._params({"entity": ["cust_id", "channel"]})

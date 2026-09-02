@@ -250,7 +250,7 @@ evaluation:
 ```
 
 `columns` 將外部欄位轉成框架使用的 entity、time、item 與 score 欄位。`prod_mapping` 將外部 item 值映射至本框架 item；多個外部 items 可映射到同一個內部 item，此時以最大 score 合併。
-目前 `columns` 的映射角色固定使用 `cust_id`、`snap_date`、`prod_name` 與 `score` 四個 key；若專案自訂 schema 欄位角色，外部比較功能仍需配合這組 canonical keys。
+`columns` 的 key 是**框架的 schema 角色欄名**，不是固定字面值：`schema.columns` 裡 `time`、`entity`（是 list，每一欄都要給）、`item`、`score` 解析出來的實際欄名。上例用的 `cust_id`／`snap_date`／`prod_name`／`score` 是預設 schema 的結果；若專案改過 `schema.columns`，這裡就要跟著改成新欄名，否則 A11 會在 CLI 進入點擋下。
 
 外部資料出現 mapping 未涵蓋的 item 時：
 
@@ -563,7 +563,6 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 - post-training 與 monitoring 共用同一 enriched partition 與報表路徑，無法同時保留兩種情境。
 - 目前 per-segment metrics 只使用 `segment_columns` 中第一個存在的欄位，不會在單次 run 中分別計算多個 segment dimensions。
 - comparison 目前以 `schema.entity` 的第一個欄位作為 customer 交集；複合 entity schema 需確認比較語意。
-- `external_hive.columns` 的角色 key 目前固定為 `cust_id`、`snap_date`、`prod_name` 與 `score`，尚未完全依 schema 角色動態解析。
 - comparison 先取 entity 集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 entity/item 集合相同，評估母體仍可能不完全一致。
 - Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。
 - score 相同時的排名 tie-break 沒有額外穩定鍵，Spark `row_number` 對同分 rows 的相對次序未定義。

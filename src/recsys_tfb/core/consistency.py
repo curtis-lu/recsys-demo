@@ -65,8 +65,10 @@ Layer 1 — config-static (implemented here; aggregated by
   by-kind required fields (``model_version`` for model_version, optional
   ``source`` ∈ {enriched_eval_predictions, ranked_predictions,
   training_eval_predictions} — default ``enriched_eval_predictions``;
-  ``table`` + ``columns`` (cust_id/snap_date/prod_name/
-  score) + ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
+  ``table`` + ``columns`` (one key per schema role: every column in
+  ``identity_columns`` — time + entity + item — plus score, resolved via
+  ``get_schema``, NOT the literal cust_id/snap_date/prod_name names) +
+  ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
   external_hive); ``model_version`` kind must NOT declare
   ``columns``/``prod_mapping`` (config leak guard). Predicate:
   ``compare_source_well_formed_errors``.
