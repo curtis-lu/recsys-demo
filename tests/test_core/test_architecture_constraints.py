@@ -12,8 +12,12 @@ overclaim:
   with an already-registered name is caught. They do not pin line numbers, so
   ordinary edits above a registered site do not break them.
 * ``_literal_names`` returns None for a dynamically-built inputs/outputs/writes
-  argument; those nodes are skipped by A5/A6. ``test_static_coverage_floor``
-  pins how many nodes that is, so the blind spot cannot silently grow.
+  argument, so this file's A5/A6 tests skip those nodes.
+  ``test_static_coverage_floor`` pins how many, so *this* scan cannot silently
+  get weaker. It is no longer the only line: since #157 ``Node.__init__``
+  raises on both, and the constructor sees the evaluated names -- including
+  the dynamic ones. What the AST scan still buys is a verdict without
+  constructing anything, reported at a file and line.
 * The A1 I/O scan only sees **direct** calls (``open``, ``mkdir``, ...). A node
   that writes through a project helper is invisible to it -- ``tune_hyper-
   parameters`` is exactly that case and is registered in R4 by hand.
@@ -123,7 +127,11 @@ def _global_stmts(directory):
 
 
 def test_static_coverage_floor():
-    """A5/A6 skip dynamically-built nodes. Pin how many, so it cannot grow."""
+    """This file's A5/A6 tests skip dynamically-built nodes. Pin how many.
+
+    ``Node.__init__`` covers those four (#157), so this floor guards the
+    static scan's own reach rather than the constraints' total coverage.
+    """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
     assert (total, judgeable) == (58, 54), (
@@ -266,7 +274,11 @@ class TestA4NotebookIsolation:
 
 
 class TestA5NodeHasInputOrOutput:
-    """A5: core/node.py does not validate this (F4); this test does."""
+    """A5, checked statically. ``Node.__init__`` raises on it too (#157).
+
+    Kept as a second line: it reads the source rather than running it, so it
+    names the offending file and line even for a node no test constructs.
+    """
 
     def test_every_node_has_an_input_an_output_or_a_write_target(self):
         offenders = [
@@ -280,7 +292,10 @@ class TestA5NodeHasInputOrOutput:
 
 
 class TestA6NoInputOutputNameCollision:
-    """A6: same name on both sides makes the load/execute/save order ambiguous."""
+    """A6: same name on both sides makes the load/execute/save order ambiguous.
+
+    Also raised by ``Node.__init__`` (#157); see A5 above for why both stay.
+    """
 
     def test_no_node_reuses_an_input_or_write_name_as_output(self):
         offenders = []

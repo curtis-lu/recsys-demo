@@ -49,7 +49,7 @@
 | [A2](#a2-node-函式不得依賴可變全域狀態) | node 函式不得依賴可變全域狀態 | 同上 | `core/`、`utils/` 不在掃描範圍（另由 R2 盯著） |
 | [A3](#a3-不得用-print) | 不得用 `print()` | 整個 `src/recsys_tfb/` | — |
 | [A4](#a4-src-不得-import-notebooks) | `src/` 不得 import `notebooks/` | 整個 `src/recsys_tfb/` | 「把探索性程式碼搬進 `src/`」抓不到 |
-| [A5](#a5-每個-node-至少要有一個-input一個-output或一個-writes) | 每個 node 至少要有一個 input、一個 output，或一個 `writes` | `pipelines/` 底下的 `Node(...)` | 動態組出來的參數（58 個裡有 4 個） |
+| [A5](#a5-每個-node-至少要有一個-input一個-output或一個-writes) | 每個 node 至少要有一個 input、一個 output，或一個 `writes` | **每個建構出來的 `Node`**（`Node.__init__` raise）＋ `pipelines/` 底下的 `Node(...)` AST 掃描 | 兩道盲區的**交集**：參數動態組出來（或在 `pipelines/` 之外）**且**沒被任何路徑建構到（現況為零） |
 | [A6](#a6-同一-node-的-inputwrites-名不得與-output-名相同) | 同一 node 的 `input`／`writes` 名不得與 `output` 名相同 | 同上 | 同上 |
 | [A7](#a7-零輸出的-side-effect-node-必須登記) | 零輸出的 side-effect node 必須登記 | 同上 | — |
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
@@ -115,23 +115,23 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F4. Node 極薄：沒有 namespace、沒有 tags
 
-`core/node.py` 全長 31 行，`Node` 只有 `func`／`inputs`／`outputs`／`writes`／`name` 五個屬性，**沒有任何驗證邏輯**（零 `raise`）。
+`core/node.py` 全長 69 行，`Node` 只有 `func`／`inputs`／`outputs`／`writes`／`name` 五個屬性，**驗證只有 A5／A6 兩條**（`_validate`，建構期 raise）——沒有型別檢查、沒有 catalog 查詢、沒有 namespace／tag 機制。
 
 `writes` 宣告「這個 node 自己會寫哪些 dataset」，語意對應 Kedro 的 `confirms`；機制與已核准清單見 A1 與 R1。
 
 連帶後果：Kedro 靠 namespace 與 tag 做的事（分組執行、模組化 pipeline、`.` 分隔的命名空間規則）在本 repo 都不存在。dataset 名稱可以自由使用 `.`，因為沒有東西保留它。
 
-**A5／A6 兩條約束就是為了補上 Node 沒做的驗證**——它們由稽核測試在測試期把關，不是由 `Node.__init__` 在建構期擋。
+**A5／A6 兩條約束由 `Node.__init__` 在建構期 raise**（#157 把它們從稽核測試搬進來；Kedro 也在建構期擋，見 `kedro/pipeline/node.py`）。稽核測試留著當第二道，職責不同：它還掃 `pipeline.py` 層級的登記清單（A7），那是任何建構函式都看不到的。
 
 ## F5. 切片語意：單一起點、自動上游擴張、**跳過零輸出 node**
 
 - `--from-node` 與 `--only-node` 各只吃**一個** node 名稱，且**互斥**（`__main__.py` 的 `_slice_pipeline`）。沒有多條件過濾，也沒有「只跑缺漏輸出」這種功能。
 - 切片會透過 `can_load` 詢問 catalog：缺少的輸入會**自動把上游生產者拉回來執行**（`core/pipeline.py` 的 `_slice_with_expansion`），並在 `SlicePlan.auto_included` 回報。
-- **零輸出的 side-effect node 會被跳過**，並印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py` 的 `_format_slice_plan`）。
+- **零輸出的 side-effect node 會被跳過**，並以 **warning** 印出 `[plan] skipped side-effect nodes (outputs=None, not re-validated)`（`__main__.py` 的 `_format_slice_plan`，它回傳的是 `(等級, 行)` 配對）。
 
 最後一條與 Kedro 相反——Kedro 的「只跑缺漏輸出」明文規定無 output 的 node **永遠跑**，因為沒有輸出可檢查、無法判斷 side effect 是否發生過。
 
-**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會印警告，但不會阻止。
+**這件事有現實後果**：`dataset` pipeline 的第一個節點 `validate_data_consistency`（`pipelines/dataset/pipeline.py`）就是零輸出 node，它是 Layer-2 資料一致性閘。用 `--from-node` 接續 dataset pipeline 時，**這道閘不會跑**。框架會以 `logger.warning` 印出被跳過的名單，但不會阻止（#157 之前這行走 `logger.info`，排在旁邊的 retrain advisory 之下——「資料層不變量沒被檢查」比「你可能需要重訓」還小聲，說不通）。
 
 **擴張永遠救不了它**：producer map 由 `node.outputs` 建，零輸出的 node 不在裡面，所以沒有任何缺料能把它拉回來。**唯一的進場方式是被明確點名**——而點名只有「模式」做得到，切片做不到（[ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)）。`--only-test-months` 的 `ONLY_TEST_MONTHS_NODES` 把它列為清單第一個成員就是為此（#203、#157）。新增模式時這是必須各自處理的一件事，不是預設會繼承的行為。
 
@@ -151,13 +151,13 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 | 模組 | 行數 | 解決什麼 |
 |---|---|---|
-| `core/consistency.py` | 1485 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
-| `core/versioning.py` | 415 | 三層 hash 版本 ID |
-| `core/logging.py` | 323 | `RunContext` 與結構化日誌 |
-| `core/schema.py` | 189 | 欄位角色集中定義 |
+| `core/consistency.py` | 1970 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
+| `core/versioning.py` | 425 | 三層 hash 版本 ID |
+| `core/logging.py` | 359 | `RunContext` 與結構化日誌 |
+| `core/schema.py` | 232 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
-其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 1485 行，`node.py` 31 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
+其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 1970 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 
@@ -313,14 +313,21 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 `writes` 算數：只宣告寫入目標的 node 拿得到 dataset 物件，也確實會產生效果，所以它不屬於「不可能有作用」那一類。
 
-`core/node.py` 不做這個檢查（見 F4），由稽核測試把關。
+**檢查（兩道）**：
 
-**檢查**：AST 掃描 `pipelines/` 底下**所有** `.py` 的 `Node(...)` 定義（`rglob`，不只 `pipeline.py`）。
+1. **`Node.__init__` 建構期 raise**（`core/node.py::_validate`）。判斷用**正規化後**的 `self.inputs`／`self.outputs`／`self.writes`，所以 `outputs=None`（本 repo 寫零輸出 node 的唯一方式）與 `outputs=[]` 一視同仁，有 inputs 就不算違反。
+2. **AST 掃描** `pipelines/` 底下**所有** `.py` 的 `Node(...)` 定義（`rglob`，不只 `pipeline.py`）。留著是因為它不必建構就能判定，違例訊息直接指到檔名行號。
 
 ### 這個檢查看不到
 
-- **動態組出來的 `inputs`／`outputs`／`writes`。** 讀不出字面值就跳過。目前 58 個 `Node` 中有 4 個是這種。`test_static_coverage_floor` 把「58 個裡有 54 個可判定」釘死，**所以這個盲區不會悄悄變大**——變大了測試就紅。
-- **`pipelines/` 以外的 `Node(...)`。** 掃描範圍止於該目錄（現況為零）。
+兩道檢查的盲區不同，**殘餘盲區是兩者的交集**：
+
+- **建構期檢查**要那一行真的被執行到，所以看不到「從沒被建構起來的 `Node(...)`」。
+- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（58 個 `Node` 中有 4 個是這種），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。
+
+**兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `training/pipeline.py` 的 `if enable_calibration:`）、參數又是動態組的 node。現況那 4 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
+
+`test_static_coverage_floor` 仍把「58 個裡有 54 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
 
 ## A6. 同一 node 的 `input`／`writes` 名不得與 `output` 名相同
 
@@ -328,11 +335,11 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 
 要覆寫就用不同的 catalog 條目名，或明確走 `writes`（見 A1）。
 
-**檢查**：同 A5 的 AST 掃描；`inputs` 與 `writes` 合起來跟 `outputs` 比對。
+**檢查**：同 A5 的兩道；`inputs` 與 `writes` 合起來跟 `outputs` 取交集，非空就 raise（建構期）或列為違例（AST）。
 
 ### 這個檢查看不到
 
-與 A5 相同的兩個盲區（動態參數、`pipelines/` 以外）。
+與 A5 相同（見上：兩道檢查的盲區與其交集）。
 
 ## A7. 零輸出的 side-effect node 必須登記
 

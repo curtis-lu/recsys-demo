@@ -294,7 +294,7 @@ python -m recsys_tfb dataset \
 - requested：使用者指定且預期執行的 nodes
 - auto-included：必要輸入不存在，框架自動補入的 producer nodes
 - skipped：輸出可從 catalog 載入，因此略過的 nodes
-- skipped side-effect：沒有輸出的守門 node，不會在接續時重新執行
+- skipped side-effect：沒有輸出的守門 node，不會在接續時重新執行。**這一行走 warning**（不是 info）——這條 pipeline 的第一個 node `validate_data_consistency` 就在裡面，被跳過代表這一輪沒有檢查 Layer-2 資料層不變量
 
 ### 4.4 從指定 node 接續
 

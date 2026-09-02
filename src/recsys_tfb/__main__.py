@@ -174,33 +174,58 @@ def _slice_pipeline(pipe, can_load, from_node, only_node):
     return pipe, None
 
 
-def _format_slice_plan(plan, total: int) -> list[str]:
-    """Render a SlicePlan as [plan]-prefixed lines for logging."""
+def _format_slice_plan(plan, total: int) -> list[tuple[int, str]]:
+    """Render a SlicePlan as ``(log level, [plan]-prefixed line)`` pairs.
+
+    The level rides with the line because only this function knows which
+    lines are bookkeeping and which are warnings; a caller would have to
+    re-derive that from the text, and prefix-sniffing rots the moment a line
+    is reworded. Two kinds of line carry ``WARNING``:
+
+    * **the skipped side-effect nodes** — emitted only when the plan skipped
+      any. For the ``dataset`` pipeline that set contains
+      ``validate_data_consistency``, the Layer-2 data gate, so the line means
+      "data-layer invariants went unchecked this run". At ``info`` it ranked
+      below the retrain advisory next to it (issue #157), which is backwards.
+      Slicing still skips them — the flag exists to skip upstream work, and
+      most resumes follow a crash with unchanged source tables, where
+      re-validating is pure cost. The danger is the resume days later against
+      changed sources, so the skip is made loud rather than impossible (see
+      F5 in ``docs/agents/architecture-constraints.md``).
+    * **the resume caveat** — unconditional. It spelled ``WARNING:`` in its
+      own text while going out at ``info``.
+    """
+    def info(text):
+        return (logging.INFO, text)
+
+    def warn(text):
+        return (logging.WARNING, text)
+
     lines = [
-        f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}",
+        info(f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}")
     ]
     if plan.auto_included:
-        lines.append(
+        lines.append(info(
             "[plan] auto-included (missing input/write target -> producer re-run):"
-        )
+        ))
         for name, missing in plan.auto_included.items():
-            lines.append(f"[plan]   {name}  <- {', '.join(missing)}")
+            lines.append(info(f"[plan]   {name}  <- {', '.join(missing)}"))
     if plan.skipped:
-        lines.append(
+        lines.append(info(
             f"[plan] skipped (inputs satisfied from catalog): {', '.join(plan.skipped)}"
-        )
+        ))
     if plan.skipped_side_effect:
-        lines.append(
+        lines.append(warn(
             "[plan] skipped side-effect nodes (outputs=None, not re-validated): "
             + ", ".join(plan.skipped_side_effect)
-        )
-    lines.append(
+        ))
+    lines.append(warn(
         "[plan] WARNING: resume assumes the skipped artifacts are still valid. "
         "exists() proves presence, not freshness — version IDs cover config "
         "only, not code changes or backfilled source data."
-    )
+    ))
     running = len(plan.requested) + len(plan.auto_included)
-    lines.append(f"[plan] running {running} of {total} nodes")
+    lines.append(info(f"[plan] running {running} of {total} nodes"))
     return lines
 
 
@@ -582,8 +607,8 @@ def _execute_pipeline(
         raise typer.Exit(code=1)
 
     if plan is not None:
-        for line in _format_slice_plan(plan, total):
-            logger.info(line)
+        for level, line in _format_slice_plan(plan, total):
+            logger.log(level, line)
     for line in _maybe_warn_retrain(plan, retrain_advice):
         logger.warning(line)
     for line in _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice):
