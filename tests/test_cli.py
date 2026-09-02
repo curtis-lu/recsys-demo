@@ -1288,25 +1288,22 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
         """
         emitted = []
 
-        class _Recorder:
-            def log(self, level, msg, *a, **kw):
-                emitted.append((level, msg % a if a else msg))
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                emitted.append((record.levelno, record.getMessage()))
 
-            def info(self, msg, *a, **kw):
-                emitted.append((logging.INFO, msg % a if a else msg))
-
-            def warning(self, msg, *a, **kw):
-                emitted.append((logging.WARNING, msg % a if a else msg))
-
-            def error(self, msg, *a, **kw):
-                emitted.append((logging.ERROR, msg % a if a else msg))
-
-            def debug(self, msg, *a, **kw):
-                emitted.append((logging.DEBUG, msg % a if a else msg))
+        # A real Logger, not a hand-rolled fake: the command reaches for
+        # whichever method it likes (`info`, `warning`, `log`, ...) and a fake
+        # has to grow a stub for each one. `propagate = False` keeps these
+        # records out of whatever pytest has attached to the root.
+        recorder = logging.getLogger("test_slice_plan_levels")
+        recorder.handlers = [_Capture()]
+        recorder.setLevel(logging.DEBUG)
+        recorder.propagate = False
 
         with patch.object(
             DataCatalog, "exists", lambda self, name: name in _LANDED
-        ), patch("recsys_tfb.__main__.logger", _Recorder()):
+        ), patch("recsys_tfb.__main__.logger", recorder):
             _run_dataset_command(
                 tmp_path,
                 ["dataset", "--only-node", "filter_test_model_input", "--dry-run"],

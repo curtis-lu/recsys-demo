@@ -180,52 +180,52 @@ def _format_slice_plan(plan, total: int) -> list[tuple[int, str]]:
     The level rides with the line because only this function knows which
     lines are bookkeeping and which are warnings; a caller would have to
     re-derive that from the text, and prefix-sniffing rots the moment a line
-    is reworded. Two lines are warnings:
+    is reworded. Two kinds of line carry ``WARNING``:
 
-    * **the skipped side-effect nodes.** For the ``dataset`` pipeline that
-      set contains ``validate_data_consistency``, the Layer-2 data gate, so
-      the line means "data-layer invariants went unchecked this run". At
-      ``info`` it ranked below the retrain advisory next to it (issue #157),
-      which is backwards. Slicing still skips them — the flag exists to skip
-      upstream work, and most resumes follow a crash with unchanged source
-      tables, where re-validating is pure cost. The danger is the resume
-      days later against changed sources, so the skip is made loud rather
-      than impossible (see F5 in ``docs/agents/architecture-constraints.md``).
-    * **the resume caveat**, which spelled ``WARNING:`` in its own text while
-      going out at ``info``.
+    * **the skipped side-effect nodes** — emitted only when the plan skipped
+      any. For the ``dataset`` pipeline that set contains
+      ``validate_data_consistency``, the Layer-2 data gate, so the line means
+      "data-layer invariants went unchecked this run". At ``info`` it ranked
+      below the retrain advisory next to it (issue #157), which is backwards.
+      Slicing still skips them — the flag exists to skip upstream work, and
+      most resumes follow a crash with unchanged source tables, where
+      re-validating is pure cost. The danger is the resume days later against
+      changed sources, so the skip is made loud rather than impossible (see
+      F5 in ``docs/agents/architecture-constraints.md``).
+    * **the resume caveat** — unconditional. It spelled ``WARNING:`` in its
+      own text while going out at ``info``.
     """
+    def info(text):
+        return (logging.INFO, text)
+
+    def warn(text):
+        return (logging.WARNING, text)
+
     lines = [
-        (logging.INFO,
-         f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}"),
+        info(f"[plan] mode={plan.mode}; requested: {', '.join(plan.requested)}")
     ]
     if plan.auto_included:
-        lines.append((
-            logging.INFO,
-            "[plan] auto-included (missing input/write target -> producer re-run):",
+        lines.append(info(
+            "[plan] auto-included (missing input/write target -> producer re-run):"
         ))
         for name, missing in plan.auto_included.items():
-            lines.append(
-                (logging.INFO, f"[plan]   {name}  <- {', '.join(missing)}")
-            )
+            lines.append(info(f"[plan]   {name}  <- {', '.join(missing)}"))
     if plan.skipped:
-        lines.append((
-            logging.INFO,
-            f"[plan] skipped (inputs satisfied from catalog): {', '.join(plan.skipped)}",
+        lines.append(info(
+            f"[plan] skipped (inputs satisfied from catalog): {', '.join(plan.skipped)}"
         ))
     if plan.skipped_side_effect:
-        lines.append((
-            logging.WARNING,
+        lines.append(warn(
             "[plan] skipped side-effect nodes (outputs=None, not re-validated): "
-            + ", ".join(plan.skipped_side_effect),
+            + ", ".join(plan.skipped_side_effect)
         ))
-    lines.append((
-        logging.WARNING,
+    lines.append(warn(
         "[plan] WARNING: resume assumes the skipped artifacts are still valid. "
         "exists() proves presence, not freshness — version IDs cover config "
-        "only, not code changes or backfilled source data.",
+        "only, not code changes or backfilled source data."
     ))
     running = len(plan.requested) + len(plan.auto_included)
-    lines.append((logging.INFO, f"[plan] running {running} of {total} nodes"))
+    lines.append(info(f"[plan] running {running} of {total} nodes"))
     return lines
 
 

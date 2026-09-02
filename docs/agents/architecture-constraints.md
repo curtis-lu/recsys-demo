@@ -49,7 +49,7 @@
 | [A2](#a2-node-函式不得依賴可變全域狀態) | node 函式不得依賴可變全域狀態 | 同上 | `core/`、`utils/` 不在掃描範圍（另由 R2 盯著） |
 | [A3](#a3-不得用-print) | 不得用 `print()` | 整個 `src/recsys_tfb/` | — |
 | [A4](#a4-src-不得-import-notebooks) | `src/` 不得 import `notebooks/` | 整個 `src/recsys_tfb/` | 「把探索性程式碼搬進 `src/`」抓不到 |
-| [A5](#a5-每個-node-至少要有一個-input一個-output或一個-writes) | 每個 node 至少要有一個 input、一個 output，或一個 `writes` | **每個建構出來的 `Node`**（`Node.__init__` raise）＋ `pipelines/` 底下的 `Node(...)` AST 掃描 | 從沒被建構、也不在 `pipelines/` 底下的 `Node(...)` |
+| [A5](#a5-每個-node-至少要有一個-input一個-output或一個-writes) | 每個 node 至少要有一個 input、一個 output，或一個 `writes` | **每個建構出來的 `Node`**（`Node.__init__` raise）＋ `pipelines/` 底下的 `Node(...)` AST 掃描 | 兩道盲區的**交集**：參數動態組出來（或在 `pipelines/` 之外）**且**沒被任何路徑建構到（現況為零） |
 | [A6](#a6-同一-node-的-inputwrites-名不得與-output-名相同) | 同一 node 的 `input`／`writes` 名不得與 `output` 名相同 | 同上 | 同上 |
 | [A7](#a7-零輸出的-side-effect-node-必須登記) | 零輸出的 side-effect node 必須登記 | 同上 | — |
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
@@ -151,13 +151,13 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 | 模組 | 行數 | 解決什麼 |
 |---|---|---|
-| `core/consistency.py` | 1485 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
-| `core/versioning.py` | 415 | 三層 hash 版本 ID |
-| `core/logging.py` | 323 | `RunContext` 與結構化日誌 |
-| `core/schema.py` | 189 | 欄位角色集中定義 |
+| `core/consistency.py` | 1970 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
+| `core/versioning.py` | 425 | 三層 hash 版本 ID |
+| `core/logging.py` | 359 | `RunContext` 與結構化日誌 |
+| `core/schema.py` | 232 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
-其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 1485 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
+其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 1970 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 
@@ -320,8 +320,14 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 ### 這個檢查看不到
 
-- **從沒被建構起來的 `Node(...)`。** 建構期檢查要那行真的執行到。AST 掃描補住 `pipelines/` 底下的部分，兩者相加的殘餘盲區是「`pipelines/` 以外、且沒有任何測試或執行路徑會建構到」的 `Node(...)`（現況為零）。
-- ~~**動態組出來的參數**~~：這曾是 AST 掃描的盲區（58 個 `Node` 中有 4 個讀不出字面值），**建構期檢查看得到它們**——它拿到的是求值後的實際名單。`test_static_coverage_floor` 仍把「58 個裡有 54 個可被 AST 判定」釘死，現在它守的是「AST 這一道別再退步」，不是「A5／A6 有多少沒人看」。
+兩道檢查的盲區不同，**殘餘盲區是兩者的交集**：
+
+- **建構期檢查**要那一行真的被執行到，所以看不到「從沒被建構起來的 `Node(...)`」。
+- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（58 個 `Node` 中有 4 個是這種），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。
+
+**兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `training/pipeline.py` 的 `if enable_calibration:`）、參數又是動態組的 node。現況那 4 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
+
+`test_static_coverage_floor` 仍把「58 個裡有 54 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
 
 ## A6. 同一 node 的 `input`／`writes` 名不得與 `output` 名相同
 
@@ -333,7 +339,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 
 ### 這個檢查看不到
 
-與 A5 相同：從沒被建構、也不在 `pipelines/` 底下的 `Node(...)`。
+與 A5 相同（見上：兩道檢查的盲區與其交集）。
 
 ## A7. 零輸出的 side-effect node 必須登記
 
