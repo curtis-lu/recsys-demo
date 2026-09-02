@@ -1936,42 +1936,25 @@ def duplicate_test_month_errors(parameters: dict) -> list[str]:
 def inference_grid_errors(parameters: dict) -> list[str]:
     """(A27) the inference scoring grid must not be degenerate.
 
-    The grid is ``snap_dates x entity_buckets x products`` (the three keys
-    ``pipelines/inference/steps/scoping.py`` reads). One code covers all three
-    because they are one parameter family — A25's precedent — and because a
-    config that empties two of them should cost one run to fix, not two.
-
     Returns error strings (empty list when fine); the inference command raises.
     One error per degenerate axis, each naming the full config key path, since
-    the operator's next move is to grep their yaml.
+    the operator's next move is to grep their yaml. See the legend for why one
+    code covers three keys and why this is not aggregated.
 
-    Why Layer 1 rather than the node bodies these replace: every one of them
-    fired only after ``build_inference_population_features`` had already run a
-    full Spark pass (read the population, compute coverage, join, bucket,
-    encode, land a table), so an empty ``products`` cost a two-to-four minute
-    cold start and an intermediate write before saying so. And they aborted on
-    the first one — the collect-all here is what makes a config wrong in two
-    places a single fix.
-
-    ``entity_buckets`` is checked only when the key is present: absent means
-    ``scoping.DEFAULT_ENTITY_BUCKETS``, a valid grid. An explicit YAML ``null``
-    is *not* absent (``dict.get`` hands the node ``None``, not the default) and
-    is rejected, mirroring A25. Anything ``int()`` cannot read is reported
-    rather than raised, because raising out of a collect-all predicate would
-    hide the other two axes — the exact behaviour this invariant removes.
-
-    Only the healthy-window *bounds* stay a warning in ``chunk_plans``
-    (ADR-0010 section 4): one bucket is legal, a small population legitimately
-    runs that way. A27 is about zero, not about small.
+    Anything ``int()`` cannot read is *reported* rather than raised: raising
+    out of a collect-all predicate would hide the other two axes, which is the
+    behaviour this invariant exists to remove. The messages the node-body
+    raises used carry over near-verbatim, consequence clause included — the
+    grid is the same grid whichever layer notices it is empty.
     """
     inf = parameters.get("inference") or {}
     errors: list[str] = []
 
     if not (inf.get("snap_dates") or []):
         errors.append(
-            "(A27) inference.snap_dates is empty; there is nothing to score, "
-            "and a run that got past this would be ranking or validating an "
-            "unrestricted table (every historical month republished)."
+            "(A27) inference.snap_dates is empty; there is nothing to score. "
+            "Refusing to rank or validate an unrestricted table (every "
+            "historical month would be republished)."
         )
 
     if "entity_buckets" in inf:

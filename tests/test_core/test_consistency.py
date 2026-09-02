@@ -1950,6 +1950,48 @@ class TestInferenceGridA27:
         )
         assert inference_grid_errors(shipped) == []
 
+    def test_the_node_backstops_still_say_what_a27_says(self):
+        # This module's docstring forbids message drift, and the repo's other
+        # registered backstops avoid it by CALLING the predicate (core/schema
+        # .py and pipelines/dataset/nodes.py both call resolved_item_values).
+        # plan_scoring_chunks cannot: it takes the expanded grid, not `parameters`. So
+        # the two copies are pinned here instead. Drop a consequence clause
+        # from either side and this fails, rather than the operator getting
+        # two different explanations of the same config mistake depending on
+        # which layer noticed.
+        import pytest as _pytest
+
+        from recsys_tfb.pipelines.inference.steps.chunk_plans import (
+            plan_scoring_chunks,
+        )
+
+        a27 = " ".join(inference_grid_errors(
+            _grid(snap_dates=[], entity_buckets=0, products=[])))
+
+        degenerate = [
+            dict(snap_dates=["2025-12-31"], items=["a"], n_buckets=0),
+            dict(snap_dates=[], items=["a"], n_buckets=1),
+            dict(snap_dates=["2025-12-31"], items=[], n_buckets=1),
+        ]
+        for kwargs in degenerate:
+            with _pytest.raises(ValueError) as exc:
+                plan_scoring_chunks(written=[], rebuild=[], **kwargs)
+            # The consequence clause, not the whole sentence: A27 prefixes its
+            # code and merges the two snap_dates raises, so the sentences are
+            # not identical by design.
+            consequence = str(exc.value).split("; ")[-1].split(". ", 1)[-1]
+            assert consequence.rstrip(".") in a27, consequence
+
+        # scoping.py's snap_dates raise is the fourth, and reaching it needs a
+        # Spark frame — pinned against the source line instead.
+        from pathlib import Path
+
+        from recsys_tfb.pipelines.inference.steps import scoping
+
+        assert "every historical month would be republished" in Path(
+            scoping.__file__).read_text()
+        assert "every historical month would be republished" in a27
+
     def test_not_aggregated_by_validate_config_consistency(self):
         # Wired on the inference command, like A23/A24 on dataset and A26 on
         # training: the aggregator runs at the entry of EVERY command, and

@@ -135,6 +135,20 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
             yaml.dump(params_inference, f)
 
 
+def _scoreable_inference_conf(tmp_path):
+    """A conf tree whose inference block can actually score something.
+
+    Two gates have to be satisfied together or a test about something else
+    exits on one of them: A27 (#200) rejects an empty scoring grid before the
+    command builds a Spark session, and A4 wants ``inference.products`` to
+    equal ``schema.categorical_values[item]``.
+    """
+    _setup_conf(tmp_path, params_inference={
+        "inference": {"snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
+        "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
+    })
+
+
 def _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111"):
     """Create base dataset dir with one train_variant and corresponding latest symlinks."""
     dataset_dir = tmp_path / "data" / "dataset"
@@ -341,21 +355,7 @@ class TestCLI:
 
     def test_inference_uses_actual_model_hash(self, tmp_path):
         """Inference reads base/train_variant from model manifest; outputs under model hash."""
-        _setup_conf(
-            tmp_path,
-            # products is required by A27 (#200): the inference command
-            # refuses an empty scoring grid before it builds a session.
-            # Not a weakening of this test's subject — a config without it
-            # could never have scored anything.
-            params_inference={
-                "inference": {
-                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
-                # A4 wants inference.products == schema.categorical_values
-                # [item], so the two have to be declared together or the
-                # command exits on A4 instead of on this test's subject.
-                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
-            },
-        )
+        _scoreable_inference_conf(tmp_path)
 
         models_dir = tmp_path / "data" / "models"
         version_dir = models_dir / "a1b2c3d4"
@@ -863,21 +863,10 @@ class TestRebuildDatesFlag:
 
     def test_inference_unconfigured_month_exits_before_spark_starts(self, tmp_path):
         """Scoped to ``inference.snap_dates``, and checked before the cold start."""
-        _setup_conf(
-            tmp_path,
-            # products is set so A27 (#200) does NOT fire: without it this
-            # test still exits 1 with Spark untouched, but on the empty
-            # grid rather than on the unconfigured month — it would stay
-            # green with A21 deleted. Same trap as A23 above.
-            params_inference={
-                "inference": {
-                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
-                # A4 wants inference.products == schema.categorical_values
-                # [item], so the two have to be declared together or the
-                # command exits on A4 instead of on this test's subject.
-                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
-            },
-        )
+        # Scoreable on purpose: with an empty grid this test still exits 1
+        # with Spark untouched, but on A27 rather than on the unconfigured
+        # month — it would stay green with A21 deleted. Same trap as A23.
+        _scoreable_inference_conf(tmp_path)
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
@@ -901,21 +890,7 @@ class TestRebuildDatesFlag:
         """
         from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
 
-        _setup_conf(
-            tmp_path,
-            # products is required by A27 (#200): the inference command
-            # refuses an empty scoring grid before it builds a session.
-            # Not a weakening of this test's subject — a config without it
-            # could never have scored anything.
-            params_inference={
-                "inference": {
-                    "snap_dates": ["2024-03-31"], "products": ["p1", "p2"]},
-                # A4 wants inference.products == schema.categorical_values
-                # [item], so the two have to be declared together or the
-                # command exits on A4 instead of on this test's subject.
-                "schema": {"categorical_values": {"prod_name": ["p1", "p2"]}},
-            },
-        )
+        _scoreable_inference_conf(tmp_path)
         models_dir = tmp_path / "data" / "models"
         version_dir = models_dir / "a1b2c3d4"
         version_dir.mkdir(parents=True)
