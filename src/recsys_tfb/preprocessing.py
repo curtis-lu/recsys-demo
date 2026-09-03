@@ -229,6 +229,29 @@ def cast_feature_floats_to_float32(
         ``feature_cols`` that were DecimalType or DoubleType.
     """
     casted_feature_cols = castable_numeric_feature_columns(df.schema, feature_cols)
-    for col in casted_feature_cols:
-        df = df.withColumn(col, F.col(col).cast("float"))
-    return df, casted_feature_cols
+
+    # One select, not the more readable ``for col in ...: df.withColumn(...)``.
+    # Every withColumn stacks another Projection onto the logical plan and
+    # Spark's analyzer is superlinear in that depth. Measured on Spark 3.3.2
+    # (local[2], plan construction only — nothing executed):
+    #
+    #    200 cols   withColumn   3.38s   select 0.12s    28x
+    #    500 cols   withColumn  37.21s   select 0.22s   169x
+    #  1,000 cols   withColumn 291.04s   select 0.43s   677x
+    #
+    # Execution was fast either way (1.73s vs 0.18s) — the whole cost is
+    # building the plan. ``build_model_input`` runs five times per dataset run
+    # (train / train_dev / val / test / calibration) and the inference pipeline
+    # shares the helper, so at production width (~1,000 feature columns) the
+    # loop form burned ~5 x 291s ~= 24 minutes per run before touching a row.
+    # Same shape as known-pitfalls.md section 20.
+    #
+    # What the select costs in exchange: it has to relist *every* column.
+    # withColumn replaced a column in place, so column order and the columns
+    # outside ``feature_cols`` came for free; here they are carried explicitly.
+    to_cast = set(casted_feature_cols)
+    projection = [
+        F.col(col).cast("float").alias(col) if col in to_cast else F.col(col)
+        for col in df.columns
+    ]
+    return df.select(*projection), casted_feature_cols

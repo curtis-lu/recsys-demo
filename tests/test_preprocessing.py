@@ -179,6 +179,98 @@ def test_cast_mixed_decimal_and_double(spark):
 
 
 @pytest.mark.spark
+def test_cast_preserves_column_order_and_untouched_columns(mixed_df):
+    """The rebuild must hand back the same frame shape it was given.
+
+    ``withColumn`` replaced a column in place, so order and the columns nobody
+    asked about came for free; a single ``select`` has to list every column, in
+    order, to match that. Expected values are spelled out from the fixture
+    rather than read back off ``mixed_df`` — a projection that quietly moves
+    the cast columns to the end, or drops the ones outside ``feature_cols``,
+    has to argue with this test.
+    """
+    feature_cols = ["feature_a", "feature_b", "feature_c"]
+    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
+
+    assert out.columns == [
+        "cust_id",
+        "label",
+        "feature_a",
+        "feature_b",
+        "feature_c",
+        "non_feature_decimal",
+    ]
+
+    untouched = ["cust_id", "label", "feature_b", "non_feature_decimal"]
+    rows = out.orderBy("cust_id").collect()
+    assert [[row[c] for c in untouched] for row in rows] == [
+        ["C001", 1, 10, Decimal("9.99")],
+        ["C002", 0, 20, Decimal("8.88")],
+    ]
+
+
+@pytest.mark.spark
+class TestCastBuildsOneProjectionNotOnePerColumn:
+    """#282 — the cast is one ``select``, not a ``withColumn`` per column.
+
+    Every ``withColumn`` stacks another Projection onto the logical plan and
+    Spark's analyzer is superlinear in that depth. Measured on Spark 3.3.2
+    (local[2], plan construction only — nothing executed): 200 cols 3.38s vs
+    0.12s, 500 cols 37.21s vs 0.22s, 1,000 cols 291.04s vs 0.43s. That last
+    one is 4m51s spent before a single row is touched, and
+    ``build_model_input`` calls this helper five times per dataset run.
+
+    The guard asserts structure, not elapsed time (#278 Out of Scope 9): a
+    "must finish in N seconds" test flakes on CI load and ends up skipped,
+    which is worse than no test because it still looks like a guard. What is
+    pinned here is the thing the analyzer actually charges for — how many
+    Project nodes the plan carries — and that it stays flat as columns grow.
+    """
+
+    @staticmethod
+    def _analyzed_project_count(df) -> int:
+        # The analyzed plan, deliberately not the optimized one: the optimizer's
+        # CollapseProject folds the stack back down, which is exactly the work
+        # this helper must not have created in the first place.
+        plan = df._jdf.queryExecution().analyzed().numberedTreeString()
+        return sum(1 for line in plan.splitlines() if "Project" in line)
+
+    @staticmethod
+    def _decimal_feature_frame(spark, n_features: int):
+        schema = T.StructType(
+            [T.StructField("cust_id", T.StringType())]
+            + [
+                T.StructField(f"feature_{i}", T.DecimalType(38, 6))
+                for i in range(n_features)
+            ]
+        )
+        return spark.createDataFrame(
+            [("C001", *([Decimal("1.5")] * n_features))], schema=schema
+        )
+
+    def test_plan_depth_is_flat_in_the_number_of_cast_columns(self, spark):
+        narrow = self._decimal_feature_frame(spark, 2)
+        wide = self._decimal_feature_frame(spark, 16)
+
+        narrow_out, narrow_casted = cast_feature_floats_to_float32(
+            narrow, [c for c in narrow.columns if c != "cust_id"]
+        )
+        wide_out, wide_casted = cast_feature_floats_to_float32(
+            wide, [c for c in wide.columns if c != "cust_id"]
+        )
+
+        # Guard the guard: if nothing were castable both counts would be equal
+        # for the wrong reason.
+        assert len(narrow_casted) == 2
+        assert len(wide_casted) == 16
+
+        # One Project for the whole cast, whatever the column count. The
+        # withColumn loop this replaced gave one per cast column: 2 and 16.
+        assert self._analyzed_project_count(narrow_out) == 1
+        assert self._analyzed_project_count(wide_out) == 1
+
+
+@pytest.mark.spark
 class TestEncodeCategoricalsEmptyMapping:
     """D15 — the whole-column-unknown branch of ``encode_categoricals``.
 
