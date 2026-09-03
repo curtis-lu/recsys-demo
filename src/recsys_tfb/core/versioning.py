@@ -31,10 +31,12 @@ produced":
   way. Hashing it would mean flipping the policy to inspect one column rebuilt
   every artifact under the version, which is why the declaration
   (``numeric_feature_storage_type``) and its gate live in two keys rather than
-  one. The declaration stays hashed because it is *about* the stored bytes —
-  though note that nothing honours it yet: the cast writes float32
-  unconditionally until issue #283, so declaring float64 today moves this ID
-  without changing a single stored value.
+  one. The declaration stays hashed because it is *about* the stored bytes, and
+  since issue #283 it genuinely decides them: ``cast_numeric_features_to_
+  storage_type`` reads the key and writes every numeric feature column at the
+  declared width. Before #283 the cast wrote float32 unconditionally, so
+  declaring float64 moved this ID without changing a single stored value —
+  which is why the two keys were split in the first place.
 
   Known limit of that exclusion, recorded rather than fixed: the dataset is
   built incrementally (ADR-0002), so a month admitted under ``truncate`` and a

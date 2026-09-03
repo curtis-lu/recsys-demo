@@ -29,7 +29,10 @@ import pandas as pd
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
-from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY
+from recsys_tfb.core.consistency import (
+    REBUILD_SNAP_DATES_KEY,
+    resolved_numeric_storage,
+)
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.extract import pdf_to_X
@@ -78,7 +81,7 @@ from recsys_tfb.pipelines.inference.steps.validation import (
     validate_scored_chunk,
 )
 from recsys_tfb.preprocessing import (
-    cast_feature_floats_to_float32,
+    cast_numeric_features_to_storage_type,
     encodable_categoricals,
     encode_categoricals,
     warn_unknown_encodings,
@@ -194,9 +197,14 @@ def build_inference_population_features(
         *stored_population_columns(keep_identity, feature_columns)
     )
 
-    # Decision — numeric features converge on one storage type; which types get
-    # cast, and to what, is the helper's business.
-    result, casted = cast_feature_floats_to_float32(result, feature_columns)
+    # Decision — numeric features converge on one storage type, the one
+    # ``dataset.numeric_feature_storage_type`` declares. Read here rather than
+    # baked in so the scoring population is stored exactly as the training
+    # frames were; which types get cast is the helper's business.
+    storage_type, _ = resolved_numeric_storage(parameters)
+    result, casted = cast_numeric_features_to_storage_type(
+        result, feature_columns, storage_type,
+    )
 
     # Decision — the time partition value is spelled here, not left to Spark's
     # coercion inside insertInto: the resume planner compares directory names
@@ -205,9 +213,10 @@ def build_inference_population_features(
 
     logger.info(
         "build_inference_population_features: %d columns "
-        "(%d features, item excluded), %d float-like cast to float32, "
+        "(%d features, item excluded), %d numeric cast to %s, "
         "%d entity buckets",
-        len(result.columns), len(feature_columns), len(casted), n_buckets,
+        len(result.columns), len(feature_columns), len(casted), storage_type,
+        n_buckets,
     )
     if casted:
         logger.debug(

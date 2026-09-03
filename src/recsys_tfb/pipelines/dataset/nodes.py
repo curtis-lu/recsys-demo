@@ -92,7 +92,7 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
 )
 from recsys_tfb.utils.parquet_stats import read_max_abs_stats
 from recsys_tfb.preprocessing import (
-    cast_feature_floats_to_float32,
+    cast_numeric_features_to_storage_type,
     castable_numeric_feature_columns,
     encodable_categoricals,
     encode_categoricals,
@@ -640,7 +640,7 @@ def validate_numeric_precision(
     the gate is the same numbers read as a verdict.
 
     **Why it sits between the write and the reads.** The values this node is
-    about are narrowed by ``cast_feature_floats_to_float32`` inside
+    about are narrowed by ``cast_numeric_features_to_storage_type`` inside
     ``build_model_input``, which is downstream; ``preprocessed_feature_table``
     itself keeps its source dtypes. So it reads a table that has already landed
     — the runner saves a node's output before the next node loads it — and still
@@ -861,15 +861,19 @@ def build_model_input(
         keys.columns, dataset.columns, identity_cols, label_col, feature_columns,
     ))
 
-    # Decision — numeric features converge on one storage type. LightGBM is
+    # Decision — numeric features converge on one storage type, the one
+    # ``dataset.numeric_feature_storage_type`` declares. LightGBM is
     # histogram-based, so float32's precision is already beyond what binning can
     # use; decimal128 in particular materialises as Python Decimal objects and
-    # was what OOM-killed the val read. Which types get cast, and to what, is
-    # the helper's business.
-    result, casted = cast_feature_floats_to_float32(result, feature_columns)
+    # was what OOM-killed the val read. Which types get cast, and why the answer
+    # is "every numeric one", is the helper's business.
+    storage_type, _ = resolved_numeric_storage(parameters)
+    result, casted = cast_numeric_features_to_storage_type(
+        result, feature_columns, storage_type,
+    )
     logger.info(
-        "build_model_input: %d features, cast %d float-like feature columns to float32",
-        len(feature_columns), len(casted),
+        "build_model_input: %d features, cast %d numeric feature columns to %s",
+        len(feature_columns), len(casted), storage_type,
     )
     if casted:
         logger.debug("build_model_input: casted columns = %s", casted)

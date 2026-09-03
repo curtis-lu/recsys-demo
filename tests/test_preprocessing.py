@@ -7,15 +7,19 @@ The dataset-only and inference-only behaviour that used to sit in
 feature-selection tests.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
+from datetime import datetime
 from decimal import Decimal
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+from recsys_tfb.core.consistency import NUMERIC_STORAGE_TYPES
 from recsys_tfb.preprocessing import (
+    SPARK_CAST_TARGET,
     PreprocessorMetadata,
-    cast_feature_floats_to_float32,
+    cast_numeric_features_to_storage_type,
     encode_categoricals,
 )
 
@@ -77,39 +81,53 @@ def _dtype(df, col):
 
 
 @pytest.mark.spark
-def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
-    feature_cols = ["feature_a", "feature_b", "feature_c"]
-    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
+def test_cast_covers_every_numeric_feature_column(mixed_df):
+    """#283 — every numeric feature type converges, not just the float-like ones.
 
-    assert _dtype(out, "feature_a") == "float"
-    assert _dtype(out, "feature_c") == "float"
-    # int feature untouched
-    assert _dtype(out, "feature_b") == "int"
+    ``feature_b`` is the column this test exists for: an IntegerType feature
+    used to pass through untouched, and one such column is enough to make
+    pandas pick float64 for the *whole* matrix (see
+    ``test_a_frame_of_mixed_numeric_features_flattens_to_one_numeric_dtype``).
+    """
+    feature_cols = ["feature_a", "feature_b", "feature_c"]
+    out, _ = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
+
+    assert _dtype(out, "feature_a") == "float"     # decimal
+    assert _dtype(out, "feature_c") == "float"     # decimal
+    assert _dtype(out, "feature_b") == "float"     # integer — new in #283
     # non-feature decimal untouched (not in feature_cols)
     assert _dtype(out, "non_feature_decimal").startswith("decimal")
-    # identity / label untouched
+    # identity / label untouched — they are not in feature_cols by construction
     assert _dtype(out, "cust_id") == "string"
     assert _dtype(out, "label") == "int"
 
 
 @pytest.mark.spark
-def test_cast_feature_decimals_returns_casted_list(mixed_df):
+def test_cast_returns_every_column_it_converted(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    _, casted = cast_feature_floats_to_float32(mixed_df, feature_cols)
-    assert sorted(casted) == ["feature_a", "feature_c"]
+    _, casted = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
+    assert sorted(casted) == ["feature_a", "feature_b", "feature_c"]
 
 
 @pytest.mark.spark
-def test_cast_features_noop_when_nothing_castable(spark):
-    """No-op when feature_cols contain no Decimal/Double — IntegerType and
-    FloatType (already float32) pass through with the schema unchanged."""
+def test_cast_leaves_a_non_numeric_feature_column_alone(spark):
+    """The selector is a whitelist: a type it does not recognise is not cast.
+
+    A string feature column is B6's business, not the cast's — feeding it to
+    ``.cast("float")`` would turn every value into NULL and hand LightGBM a
+    silently empty column where the gate would have named the problem.
+    """
     schema = T.StructType([
         T.StructField("cust_id", T.StringType()),
-        T.StructField("feature_a", T.IntegerType()),
-        T.StructField("feature_b", T.FloatType()),
+        T.StructField("feature_a", T.StringType()),
+        T.StructField("feature_b", T.TimestampType()),
     ])
-    df = spark.createDataFrame([("C001", 1, 2.5)], schema=schema)
-    out, casted = cast_feature_floats_to_float32(df, ["feature_a", "feature_b"])
+    df = spark.createDataFrame(
+        [("C001", "x", datetime(2026, 1, 31))], schema=schema
+    )
+    out, casted = cast_numeric_features_to_storage_type(
+        df, ["feature_a", "feature_b"], "float32",
+    )
 
     assert casted == []
     assert out.schema == df.schema
@@ -118,65 +136,127 @@ def test_cast_features_noop_when_nothing_castable(spark):
 @pytest.mark.spark
 def test_cast_feature_decimals_preserves_values(mixed_df):
     feature_cols = ["feature_a"]
-    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
+    out, _ = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
     rows = out.orderBy("cust_id").collect()
     assert rows[0].feature_a == pytest.approx(1.5)
     assert rows[1].feature_a == pytest.approx(2.25)
 
 
 @pytest.mark.spark
-def test_cast_feature_doubles_to_float32(spark):
-    """DoubleType feature cols must also be cast to float (float32).
+def test_cast_covers_the_whole_numeric_whitelist(spark):
+    """One frame holding every castable Spark type, all of them converged.
 
-    LightGBM is histogram-based (max_bin=256); float32's 7-digit precision
-    is well past binning resolution, so float64/DoubleType is wasted budget.
+    Spelled out per type rather than derived from ``CASTABLE_NUMERIC_TYPES``:
+    deriving it would make the test pass for whatever that tuple happens to
+    say, including a tuple that had quietly lost boolean again.
     """
     schema = T.StructType([
         T.StructField("cust_id", T.StringType()),
-        T.StructField("feature_a", T.DoubleType()),
-        T.StructField("feature_b", T.DoubleType()),
-        T.StructField("non_feature_double", T.DoubleType()),
-        T.StructField("feature_c", T.IntegerType()),
+        T.StructField("f_dec", T.DecimalType(38, 6)),
+        T.StructField("f_dbl", T.DoubleType()),
+        T.StructField("f_flt", T.FloatType()),
+        T.StructField("f_byte", T.ByteType()),
+        T.StructField("f_short", T.ShortType()),
+        T.StructField("f_int", T.IntegerType()),
+        T.StructField("f_long", T.LongType()),
+        T.StructField("f_bool", T.BooleanType()),
+        T.StructField("non_feature_dbl", T.DoubleType()),
     ])
     df = spark.createDataFrame(
-        [("C001", 1.5, 2.5, 9.99, 10)], schema=schema
+        [("C001", Decimal("1.5"), 2.5, 3.5, 1, 2, 3, 4, True, 9.99)],
+        schema=schema,
     )
-    out, casted = cast_feature_floats_to_float32(
-        df, ["feature_a", "feature_b", "feature_c"]
+    feature_cols = [c for c in df.columns
+                    if c.startswith("f_")]
+    out, casted = cast_numeric_features_to_storage_type(
+        df, feature_cols, "float32",
     )
-    # DoubleType feature cols cast to float
-    assert _dtype(out, "feature_a") == "float"
-    assert _dtype(out, "feature_b") == "float"
-    # int feature untouched
-    assert _dtype(out, "feature_c") == "int"
-    # non-feature DoubleType untouched (not in feature_cols)
-    assert _dtype(out, "non_feature_double") == "double"
-    # Returned list reports the casted DoubleType cols
-    assert sorted(casted) == ["feature_a", "feature_b"]
+
+    assert sorted(casted) == sorted(feature_cols)
+    assert [_dtype(out, c) for c in feature_cols] == ["float"] * len(feature_cols)
+    # Outside feature_cols, so not the cast's business however numeric it is.
+    assert _dtype(out, "non_feature_dbl") == "double"
+    assert _dtype(out, "cust_id") == "string"
 
 
 @pytest.mark.spark
-def test_cast_mixed_decimal_and_double(spark):
-    """Mixed feature_cols (DecimalType + DoubleType + FloatType + IntegerType):
-    Decimal and Double both → float; Float untouched (already float32);
-    Integer untouched."""
-    schema = T.StructType([
-        T.StructField("dec_col", T.DecimalType(38, 6)),
-        T.StructField("dbl_col", T.DoubleType()),
-        T.StructField("flt_col", T.FloatType()),
-        T.StructField("int_col", T.IntegerType()),
-    ])
-    df = spark.createDataFrame(
-        [(Decimal("1.23"), 4.56, 7.89, 10)], schema=schema
-    )
-    feature_cols = ["dec_col", "dbl_col", "flt_col", "int_col"]
-    out, casted = cast_feature_floats_to_float32(df, feature_cols)
+def test_a_frame_of_mixed_numeric_features_flattens_to_one_numeric_dtype(spark):
+    """The reason the cast covers integers and boolean, asserted end to end.
 
-    assert _dtype(out, "dec_col") == "float"
-    assert _dtype(out, "dbl_col") == "float"
-    assert _dtype(out, "flt_col") == "float"
-    assert _dtype(out, "int_col") == "int"
-    assert sorted(casted) == ["dbl_col", "dec_col"]
+    ``pdf_to_X`` flattens the feature frame with ``DataFrame.values``, and
+    pandas picks **one** dtype for the whole matrix. Measured on pandas 1.5.3
+    without the cast: float32 + int64 -> float64 (the matrix doubles for one
+    column's sake), float32 + bool -> ``object`` (the boxed-object OOM B6
+    exists to prevent, arriving through a dtype B6 admits).
+
+    Both halves are asserted: the un-cast frame really does degrade, and the
+    cast really does prevent it. Without the first half this would pass on a
+    day pandas stopped doing either, and a guard that cannot fail is worse than
+    none (known-pitfalls.md section 19).
+
+    The degraded half is built in pandas directly rather than by calling
+    ``toPandas()`` on the un-cast Spark frame. Not for convenience: pyspark
+    3.3.2's ``toPandas`` reaches for ``np.bool``, removed in this numpy, so a
+    BooleanType column raises there before pandas gets to choose a dtype at
+    all. The claim under test is pandas', so pandas is where it is asserted.
+    """
+    schema = T.StructType([
+        T.StructField("f_flt", T.FloatType()),
+        T.StructField("f_long", T.LongType()),
+        T.StructField("f_bool", T.BooleanType()),
+    ])
+    df = spark.createDataFrame([(1.5, 7, True)], schema=schema)
+    feature_cols = ["f_flt", "f_long", "f_bool"]
+
+    # Guard the guard: this is the frame the cast is preventing.
+    uncast = pd.DataFrame({
+        "f_flt": np.array([1.5], dtype=np.float32),
+        "f_long": np.array([7], dtype=np.int64),
+        "f_bool": np.array([True]),
+    })
+    assert uncast.values.dtype == object
+    # …and each degradation on its own, so neither is carried by the other.
+    assert uncast[["f_flt", "f_long"]].values.dtype == np.float64
+    assert uncast[["f_flt", "f_bool"]].values.dtype == object
+
+    out, _ = cast_numeric_features_to_storage_type(df, feature_cols, "float32")
+    assert out.toPandas()[feature_cols].values.dtype == np.float32
+
+
+@pytest.mark.spark
+def test_float64_is_declarable_and_reaches_the_frame(spark):
+    """The declaration is real (#283): float64 stores double, not float32.
+
+    Before #283 the helper wrote float32 unconditionally, so declaring float64
+    rebuilt every artifact and changed no stored value. A test that only
+    checked float32 would not have noticed.
+    """
+    schema = T.StructType([
+        T.StructField("f_dec", T.DecimalType(38, 6)),
+        T.StructField("f_flt", T.FloatType()),
+        T.StructField("f_int", T.IntegerType()),
+    ])
+    df = spark.createDataFrame([(Decimal("1.5"), 2.5, 3)], schema=schema)
+    feature_cols = ["f_dec", "f_flt", "f_int"]
+
+    out, casted = cast_numeric_features_to_storage_type(
+        df, feature_cols, "float64",
+    )
+
+    assert sorted(casted) == feature_cols
+    assert [_dtype(out, c) for c in feature_cols] == ["double"] * 3
+    assert out.toPandas()[feature_cols].values.dtype == np.float64
+
+
+def test_every_declarable_storage_type_has_a_spark_cast_target():
+    """``SPARK_CAST_TARGET`` and the declarable vocabulary cannot drift apart.
+
+    A31 decides what may be written in the config; this dict decides what the
+    cast does with it. A third storage type added to one and not the other
+    would pass A31 at CLI entry and then ``KeyError`` inside a Spark job, five
+    nodes into a run.
+    """
+    assert set(SPARK_CAST_TARGET) == set(NUMERIC_STORAGE_TYPES)
 
 
 @pytest.mark.spark
@@ -191,7 +271,7 @@ def test_cast_preserves_column_order_and_untouched_columns(mixed_df):
     has to argue with this test.
     """
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
+    out, _ = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
 
     assert out.columns == [
         "cust_id",
@@ -202,11 +282,15 @@ def test_cast_preserves_column_order_and_untouched_columns(mixed_df):
         "non_feature_decimal",
     ]
 
-    untouched = ["cust_id", "label", "feature_b", "non_feature_decimal"]
+    # ``feature_b`` is no longer in this list: since #283 an integer feature
+    # column is cast like any other numeric one. Identity, label and the
+    # non-feature decimal are what the projection must still carry through
+    # untouched.
+    untouched = ["cust_id", "label", "non_feature_decimal"]
     rows = out.orderBy("cust_id").collect()
     assert [[row[c] for c in untouched] for row in rows] == [
-        ["C001", 1, 10, Decimal("9.99")],
-        ["C002", 0, 20, Decimal("8.88")],
+        ["C001", 1, Decimal("9.99")],
+        ["C002", 0, Decimal("8.88")],
     ]
 
 
@@ -215,7 +299,7 @@ class TestCastBuildsOneProjectionNotOnePerColumn:
     """#282 — the cast is one ``select``, not a ``withColumn`` per column.
 
     Why that matters, with the measurements: see the comment in
-    ``cast_feature_floats_to_float32`` and known-pitfalls.md section 20. The
+    ``cast_numeric_features_to_storage_type`` and known-pitfalls.md section 20. The
     numbers are deliberately not repeated here — three copies of one table
     drift apart.
 
@@ -257,11 +341,13 @@ class TestCastBuildsOneProjectionNotOnePerColumn:
         narrow = self._decimal_feature_frame(spark, 2)
         wide = self._decimal_feature_frame(spark, 16)
 
-        narrow_out, narrow_casted = cast_feature_floats_to_float32(
-            narrow, [c for c in narrow.columns if c != "cust_id"]
+        narrow_out, narrow_casted = cast_numeric_features_to_storage_type(
+            narrow, [c for c in narrow.columns if c != "cust_id"],
+            "float32",
         )
-        wide_out, wide_casted = cast_feature_floats_to_float32(
-            wide, [c for c in wide.columns if c != "cust_id"]
+        wide_out, wide_casted = cast_numeric_features_to_storage_type(
+            wide, [c for c in wide.columns if c != "cust_id"],
+            "float32",
         )
 
         # Guard the guard: if nothing were castable both counts would be equal
@@ -303,7 +389,7 @@ def test_cast_leaves_a_dotted_passthrough_column_alone(spark):
     ])
     df = spark.createDataFrame([("x", Decimal("1.5"))], schema=schema)
 
-    out, casted = cast_feature_floats_to_float32(df, ["feature_a"])
+    out, casted = cast_numeric_features_to_storage_type(df, ["feature_a"], "float32")
 
     assert casted == ["feature_a"]
     assert out.columns == ["a.b", "feature_a"]
@@ -390,9 +476,12 @@ class TestCastableNumericFeatureColumns:
     def _feature_cols(self) -> list[str]:
         return ["dec", "dbl", "flt", "i32", "i64", "flag", "name"]
 
-    def test_selects_decimal_and_double_only(self):
+    def test_selects_every_numeric_feature_column(self):
+        # Frame order, and ``name`` (string) excluded: the selector is a
+        # whitelist of numeric types, not "everything but the identity".
         assert castable_numeric_feature_columns(
-            self._schema(), self._feature_cols()) == ["dec", "dbl"]
+            self._schema(), self._feature_cols()) == [
+                "dec", "dbl", "flt", "i32", "i64", "flag"]
 
     def test_a_column_outside_feature_cols_is_never_selected(self):
         # Identity, label and anything else the frame carries are not the
@@ -400,8 +489,22 @@ class TestCastableNumericFeatureColumns:
         assert "non_feature_dec" not in castable_numeric_feature_columns(
             self._schema(), self._feature_cols())
 
-    def test_float32_is_already_the_target_and_is_not_reselected(self):
-        assert "flt" not in castable_numeric_feature_columns(
+    def test_float32_is_selected_even_though_it_may_be_a_no_op(self):
+        # #283 — the selector answers "which columns converge", not "which
+        # columns shrink". Skipping FloatType would leave it float32 on a
+        # float64 run, which is the one case convergence exists to prevent.
+        assert "flt" in castable_numeric_feature_columns(
+            self._schema(), self._feature_cols())
+
+    def test_boolean_is_selected(self):
+        # The type B6 admits and pandas refuses to mix with float: it reaches
+        # the model as a number only because this selector names it. See
+        # ``core.consistency.spark_dtype_is_numeric``.
+        assert "flag" in castable_numeric_feature_columns(
+            self._schema(), self._feature_cols())
+
+    def test_a_non_numeric_feature_column_is_not_selected(self):
+        assert "name" not in castable_numeric_feature_columns(
             self._schema(), self._feature_cols())
 
     def test_a_declared_feature_absent_from_the_frame_is_skipped(self):
@@ -421,6 +524,6 @@ def test_cast_helper_and_selector_agree(mixed_df):
     """The cast converts exactly what the selector names — the property B8's
     scope rests on. Asserted against the real helper rather than assumed."""
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    _, casted = cast_feature_floats_to_float32(mixed_df, feature_cols)
+    _, casted = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
     assert casted == castable_numeric_feature_columns(
         mixed_df.schema, feature_cols)
