@@ -232,26 +232,30 @@ def cast_feature_floats_to_float32(
 
     # One select, not the more readable ``for col in ...: df.withColumn(...)``.
     # Every withColumn stacks another Projection onto the logical plan and
-    # Spark's analyzer is superlinear in that depth. Measured on Spark 3.3.2
-    # (local[2], plan construction only — nothing executed):
+    # Spark's analyzer is superlinear in that depth: at 1,000 columns, building
+    # the plan took 291.04s against 0.43s for a single select (677x), while
+    # execution stayed under 2s either way. Full measurement table and the
+    # general shape: known-pitfalls.md section 20.
     #
-    #    200 cols   withColumn   3.38s   select 0.12s    28x
-    #    500 cols   withColumn  37.21s   select 0.22s   169x
-    #  1,000 cols   withColumn 291.04s   select 0.43s   677x
+    # 1,000 columns is where this is headed, not where it is: today only
+    # Decimal and Double feature columns enter the projection, and #283 widens
+    # it to every numeric feature column. Whatever the width, ``build_model_input``
+    # runs five times per dataset run (train / train_dev / val / test /
+    # calibration) and the inference pipeline shares this helper.
     #
-    # Execution was fast either way (1.73s vs 0.18s) — the whole cost is
-    # building the plan. ``build_model_input`` runs five times per dataset run
-    # (train / train_dev / val / test / calibration) and the inference pipeline
-    # shares the helper, so at production width (~1,000 feature columns) the
-    # loop form burned ~5 x 291s ~= 24 minutes per run before touching a row.
-    # Same shape as known-pitfalls.md section 20.
-    #
-    # What the select costs in exchange: it has to relist *every* column.
-    # withColumn replaced a column in place, so column order and the columns
-    # outside ``feature_cols`` came for free; here they are carried explicitly.
+    # Two things the loop got for free that the select has to pay for, both
+    # pinned by tests in tests/test_preprocessing.py:
+    #   - Column order, and the columns outside ``feature_cols``. withColumn
+    #     replaced a column in place; the select has to relist all of
+    #     ``df.columns`` to end up with the same frame.
+    #   - Name resolution. F.col now parses *every* column name rather than
+    #     just the cast ones, and it reads an unquoted dot as nested-field
+    #     access — so a passthrough column named "a.b" raises here where the
+    #     loop never touched it. The backticks buy that parity back.
     to_cast = set(casted_feature_cols)
     projection = [
-        F.col(col).cast("float").alias(col) if col in to_cast else F.col(col)
+        F.col(f"`{col}`").cast("float").alias(col) if col in to_cast
+        else F.col(f"`{col}`")
         for col in df.columns
     ]
     return df.select(*projection), casted_feature_cols
