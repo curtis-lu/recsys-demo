@@ -2440,3 +2440,309 @@ class TestSelectValKeysTwoColumnEntity:
 
         assert _branches_split_across(kept, dropped) == set()
         assert kept and dropped
+
+
+# --- B8 numeric precision gate -----------------------------------------------
+# The gate reads footer statistics from the partitions ``apply_preprocessor_to_
+# features`` just wrote, so these tests write a real partitioned parquet table
+# and hand the node the frame read back from it. A hand-built stats mapping
+# would test ``numeric_precision_errors`` again (it already has its own tests in
+# test_core/test_consistency.py) and would prove nothing about the wiring
+# between a month plan, a set of files, and a footer. ---
+
+from unittest.mock import patch
+
+from pyspark.sql import types as T
+
+from recsys_tfb.pipelines.dataset import nodes as dataset_nodes
+from recsys_tfb.pipelines.dataset.nodes import validate_numeric_precision
+
+_BASE_VERSION = "ab12cd34"
+
+
+def _landed_features(spark, tmp_path, per_month: dict) -> "DataFrame":
+    """A preprocessed_feature_table as it lands: partitioned, read back.
+
+    ``per_month`` maps a snap_date to that month's ``big_int`` value, which is
+    the column every assertion below is about.
+    """
+    schema = T.StructType([
+        T.StructField("cust_id", T.StringType()),
+        T.StructField("big_int", T.LongType()),
+        T.StructField("dbl", T.DoubleType()),
+        T.StructField("base_dataset_version", T.StringType()),
+        T.StructField("snap_date", T.StringType()),
+    ])
+    rows = [
+        ("C001", int(value), 0.5, _BASE_VERSION, month)
+        for month, value in per_month.items()
+    ]
+    root = str(tmp_path / "pft")
+    spark.createDataFrame(rows, schema).write.partitionBy(
+        "base_dataset_version", "snap_date",
+    ).parquet(root)
+    return spark.read.parquet(root)
+
+
+def _precision_params(parameters, **dataset) -> dict:
+    return {
+        **parameters,
+        "base_dataset_version": _BASE_VERSION,
+        "dataset": {**parameters["dataset"], **dataset},
+    }
+
+
+_METADATA = {"feature_columns": ["big_int", "dbl"]}
+
+
+class TestValidateNumericPrecisionScope:
+    """What the gate checks today, with the real cast selector."""
+
+    def test_an_integer_column_over_the_bound_is_not_flagged_today(
+        self, spark, tmp_path, parameters,
+    ):
+        # The promise this ticket makes: landing the gate cannot make an
+        # existing config fail. The cast converts Decimal and Double only, so
+        # no integer column is in scope, however large it is.
+        landed = _landed_features(
+            spark, tmp_path, {"2024-01-31": 2 ** 40})
+        validate_numeric_precision(
+            landed, _METADATA, _plan("2024-01-31"),
+            _precision_params(parameters),
+        )
+
+    def test_scope_is_read_from_the_cast_not_restated(self):
+        # The structural claim behind the test above: the node asks the cast's
+        # own selector. If this import ever stops pointing at it, the gate and
+        # the cast can disagree without any test noticing.
+        from recsys_tfb.preprocessing import castable_numeric_feature_columns
+
+        assert (dataset_nodes.castable_numeric_feature_columns
+                is castable_numeric_feature_columns)
+
+
+class TestValidateNumericPrecisionGate:
+    """The firing path, with the cast standing in as it will be after #283.
+
+    ``castable_numeric_feature_columns`` is patched to name the integer column,
+    which is exactly what widening the cast to integers will make it return.
+    Without the patch every assertion here would be vacuously green — the gate
+    would report "nothing to check" and the raise below could never fire.
+    """
+
+    def _run(self, landed, params, plan_months=("2024-01-31",)):
+        with patch.object(
+            dataset_nodes, "castable_numeric_feature_columns",
+            return_value=["big_int"],
+        ):
+            validate_numeric_precision(
+                landed, _METADATA, _plan(*plan_months), params)
+
+    def test_max_exactly_at_the_bound_passes(self, spark, tmp_path, parameters):
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24})
+        self._run(landed, _precision_params(parameters))
+
+    def test_one_above_the_bound_raises_and_names_the_column(
+        self, spark, tmp_path, parameters,
+    ):
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24 + 1})
+        with pytest.raises(DataConsistencyError) as exc:
+            self._run(landed, _precision_params(parameters))
+        assert "big_int" in str(exc.value)
+        assert "B8" in str(exc.value)
+
+    def test_truncate_policy_logs_instead_of_raising(
+        self, spark, tmp_path, parameters, caplog,
+    ):
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24 + 1})
+        with caplog.at_level("WARNING"):
+            self._run(landed, _precision_params(
+                parameters, numeric_precision_policy="truncate"))
+        assert "big_int" in caplog.text
+
+    def test_float64_declared_widens_the_bound(self, spark, tmp_path, parameters):
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24 + 1})
+        self._run(landed, _precision_params(
+            parameters, numeric_feature_storage_type="float64"))
+
+    def test_only_the_months_in_the_plan_are_read(
+        self, spark, tmp_path, parameters,
+    ):
+        # The incremental property: a month that already landed is not re-read,
+        # so an offending value outside the plan does not stop this run. Without
+        # this the gate would re-fail every run over history it never wrote.
+        landed = _landed_features(spark, tmp_path, {
+            "2024-01-31": 2 ** 24,
+            "2024-02-29": 2 ** 40,
+        })
+        self._run(landed, _precision_params(parameters),
+                  plan_months=("2024-01-31",))
+
+    def test_a_month_added_to_the_plan_is_checked(
+        self, spark, tmp_path, parameters,
+    ):
+        # The other half of the pair: the same fixture, with the offending month
+        # now in the plan, must fail. Alone, the test above passes for a gate
+        # that reads nothing at all.
+        landed = _landed_features(spark, tmp_path, {
+            "2024-01-31": 2 ** 24,
+            "2024-02-29": 2 ** 40,
+        })
+        with pytest.raises(DataConsistencyError):
+            self._run(landed, _precision_params(parameters),
+                      plan_months=("2024-01-31", "2024-02-29"))
+
+    def test_an_empty_plan_checks_nothing(self, spark, tmp_path, parameters):
+        # Every configured month already landed — a normal state, not an error.
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 40})
+        self._run(landed, _precision_params(parameters), plan_months=())
+
+    def test_another_dataset_version_is_not_read(
+        self, spark, tmp_path, parameters,
+    ):
+        # inputFiles() answers for the whole relation, so the run's own version
+        # is selected back out of the paths. Asked for a version the table does
+        # not hold, the gate finds no files — and says so once, rather than
+        # reporting every column as unmeasurable.
+        landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 40})
+        with pytest.raises(DataConsistencyError) as exc:
+            self._run(landed, {**_precision_params(parameters),
+                               "base_dataset_version": "ffffffff"})
+        message = str(exc.value)
+        assert "found no parquet files" in message
+        assert message.count("B8:") == 1
+
+
+class TestValidateNumericPrecisionOnDecimal:
+    """The gate firing on today's cast, with nothing patched.
+
+    Decimal is what ``cast_feature_floats_to_float32`` converts right now, and
+    Spark's DecimalType is exact fixed-point — its values sit on a grid of
+    ``10**-scale``. So this is the one class here that exercises the whole path
+    (selector -> dtype step -> footer read -> bound) against the production
+    wiring. If it ever needs a patch to fire, the gate has stopped covering the
+    cast.
+    """
+
+    @staticmethod
+    def _landed_decimal(spark, tmp_path, value, scale=2):
+        from decimal import Decimal
+
+        schema = T.StructType([
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("bal", T.DecimalType(18, scale)),
+            T.StructField("base_dataset_version", T.StringType()),
+            T.StructField("snap_date", T.StringType()),
+        ])
+        rows = [("C001", Decimal(str(value)), _BASE_VERSION, "2024-01-31")]
+        root = str(tmp_path / "pft_dec")
+        spark.createDataFrame(rows, schema).write.partitionBy(
+            "base_dataset_version", "snap_date",
+        ).parquet(root)
+        return spark.read.parquet(root)
+
+    _META = {"feature_columns": ["bal"]}
+
+    def _run(self, landed, params):
+        validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"), params)
+
+    def test_a_decimal_column_within_its_bound_passes(
+        self, spark, tmp_path, parameters,
+    ):
+        # decimal(18,2) values are 0.01 apart, so float32 holds them intact up
+        # to 131,072 -- two orders of magnitude below the integer bound.
+        landed = self._landed_decimal(spark, tmp_path, "131072.00")
+        self._run(landed, _precision_params(parameters))
+
+    def test_a_decimal_column_past_its_bound_is_caught_unpatched(
+        self, spark, tmp_path, parameters,
+    ):
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with pytest.raises(DataConsistencyError) as exc:
+            self._run(landed, _precision_params(parameters))
+        message = str(exc.value)
+        assert "bal" in message
+        # The bound quoted must be the decimal one, not the integer one: a gate
+        # that ignored the column's scale would report 16,777,216 and pass.
+        assert "131,072" in message
+        assert "200,000" in message
+
+    def test_the_same_magnitude_passes_at_scale_zero(
+        self, spark, tmp_path, parameters,
+    ):
+        # Paired with the test above so neither is vacuous: 200,000 is fine on a
+        # grid of 1 and lossy on a grid of 0.01. Same value, same code path,
+        # opposite verdict -- which is the scale actually being read.
+        landed = self._landed_decimal(spark, tmp_path, "200000", scale=0)
+        self._run(landed, _precision_params(parameters))
+
+    def test_truncate_policy_lets_the_same_column_through(
+        self, spark, tmp_path, parameters, caplog,
+    ):
+        # The operator's switch, on the path that actually fires today.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with caplog.at_level("WARNING"):
+            self._run(landed, _precision_params(
+                parameters, numeric_precision_policy="truncate"))
+        assert "bal" in caplog.text
+
+    def test_a_passing_run_returns_a_report_row_for_the_column(
+        self, spark, tmp_path, parameters,
+    ):
+        # The artifact side: a gate that only says "fine" cannot tell an
+        # operator this column is at 99% of its limit. The report can.
+        landed = self._landed_decimal(spark, tmp_path, "65536.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"),
+            _precision_params(parameters),
+        )
+        assert report["storage_type"] == "float32"
+        assert report["policy"] == "block"
+        assert report["months"] == ["2024-01-31"]
+        assert report["breaches"] == 0
+        row, = report["columns"]
+        assert row["column"] == "bal"
+        assert row["dtype"] == "decimal(18,2)"
+        assert row["limit"] == 131072.0
+        # 131,072 over 65,536 -- one doubling of the column away from breaching.
+        assert row["headroom"] == pytest.approx(2.0)
+        assert row["verdict"] == "ok"
+
+    def test_a_truncated_run_still_returns_the_report(
+        self, spark, tmp_path, parameters,
+    ):
+        # The survey workflow: run once under truncate, read the artifact. Under
+        # block the run aborts and the catalog never writes it, which is why the
+        # table is logged too.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"),
+            _precision_params(parameters, numeric_precision_policy="truncate"),
+        )
+        assert report["breaches"] == 1
+        assert report["columns"][0]["verdict"] == "breach"
+
+    def test_the_logged_table_carries_the_numbers_when_block_aborts(
+        self, spark, tmp_path, parameters, caplog,
+    ):
+        # The one case the persisted report cannot cover. If this stops holding,
+        # a blocked run leaves the operator with no numbers at all.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with caplog.at_level("INFO"):
+            with pytest.raises(DataConsistencyError):
+                self._run(landed, _precision_params(parameters))
+        assert "headroom" in caplog.text
+        assert "200,000" in caplog.text and "131,072" in caplog.text
+
+    def test_nothing_to_check_still_returns_a_well_formed_report(
+        self, spark, tmp_path, parameters,
+    ):
+        # The catalog writes whatever this returns, so the early-exit path
+        # cannot hand it None.
+        landed = self._landed_decimal(spark, tmp_path, "1.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan(), _precision_params(parameters))
+        assert report["columns"] == []
+        assert report["checked_columns"] == 0
+        assert report["months"] == []

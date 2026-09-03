@@ -254,6 +254,19 @@ Layer 1 — config-static (implemented here; aggregated by
   pass while merging nothing — the exact silent degradation this invariant
   exists to stop. ``conf/local/`` is committed (empty, ``.gitkeep``) so the
   default ``--env local`` passes; see issue #153.
+* A31 — the two ``dataset`` numeric-storage keys hold declarable values:
+  ``numeric_feature_storage_type`` ∈ ``NUMERIC_STORAGE_TYPES`` (the storage type
+  every numeric model feature converges on) and ``numeric_precision_policy`` ∈
+  ``PRECISION_POLICIES`` (what B8 does when a column cannot survive it). An
+  absent key keeps the module's default and is clean; an explicit YAML ``null``
+  is rejected, because a present key is part of the version payload and the null
+  form would move ``base_dataset_version`` while changing no behaviour (A25/A29's
+  reasoning). One code for two keys: they are one parameter family (A25's
+  precedent). Predicate: ``numeric_storage_param_errors``. Aggregated by
+  ``validate_config_consistency`` rather than hung off the dataset command like
+  A24/A26 — ``numeric_feature_storage_type`` feeds ``base_dataset_version``, so a
+  typo in it moves the artifact paths training and inference resolve too, which
+  is A29's reason for aggregating.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -308,18 +321,89 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   Numbering continues past the unused B4 rather than backfilling it, so a
   future reader never sees B4 reappear and wonders whether it was revived.
   See ADR-0004.
+* B8 — a feature column whose ``max(|value|)`` is larger than the declared
+  ``dataset.numeric_feature_storage_type`` can hold at that column's own
+  resolution, so the cast in ``build_model_input`` would map two distinct inputs
+  onto one value and silently change the ranking. Predicate:
+  ``numeric_precision_errors`` (pure, no Spark — it takes a column →
+  ``ColumnPrecision`` mapping); classifier: ``spark_dtype_value_step``; bound:
+  ``exact_value_limit`` over ``SIGNIFICAND_BITS``. Wired in
+  ``validate_numeric_precision`` (``pipelines/dataset/nodes.py``), which runs
+  after ``preprocessed_feature_table`` lands and before any ``build_model_input``
+  reads it back — the cast is downstream, so gating after that write still gates
+  before any narrowed value is stored.
+
+  Two properties are deliberate rather than incidental. **Scope is whatever the
+  cast actually converts** — the node intersects
+  ``preprocessing.castable_numeric_feature_columns`` (the same selector the cast
+  itself uses) with the dtypes that state a grid step, so the gate widens by
+  itself the day the cast widens (issue #283) and there is never a window where
+  it covers less than the cast does. Today that intersection is the Decimal
+  columns: Double states no grid, so nothing can be claimed about it.
+  **The facts come from parquet footer statistics, not from an aggregation** —
+  the dataset gates' cost invariant is zero scans (ADR-0006, and its amendment
+  for this gate), and a ``max(abs(...))`` over the months would have changed
+  that.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
 
 * C1 — produced sample_pool/label distinct item ≠ config (source_etl
   runtime pre-flight).
+
+B8: where the bound comes from, and why "did anything collide" is wrong
+-----------------------------------------------------------------------
+A column's *dtype* already states how fine its values are. An integer column's
+values are 1 apart; a ``decimal(p, s)`` column's are ``10**-s`` apart — decimal
+is exact fixed-point, every value an integer multiple of that step, **not an
+approximate type**. Call that spacing the column's grid step ``g``. Narrowing is
+safe exactly while no two neighbours on that grid land on the same stored value.
+
+Representable neighbours sit ``ulp(x)`` apart, and ``ulp`` doubles at every power
+of two. So the bound is the top of the last binade whose spacing is still no
+wider than ``g``::
+
+    max(|x|) <= 2 ** (floor(log2(g)) + significand_bits)
+
+float32 carries 24 significand bits, float64 carries 53. For ``g = 1`` this is
+2^24 = 16,777,216 — the number issue #281 states, and equality passes because
+2^24 itself is representable and so is every integer below it. For
+``decimal(18,2)`` (``g = 0.01``) it is 131,072.
+
+The ``floor`` is the whole correction, not a rounding convenience. The obvious
+``g * 2**bits`` reads right and is wrong for every step that is not a power of
+two: it hands ``decimal(18,2)`` a bound of 167,772, where float32's spacing is
+already 0.015625 and two values 0.01 apart collided long ago. Measured, 200,000
+distinct values spaced 0.01 apart: at 167,772 only 128,000 survive
+``astype(float32)``; at 131,072 all 200,000 do, and one step above it they do
+not.
+
+That decimal is exact is the load-bearing fact. Reading it as "already
+approximate, therefore exempt" leaves the gate covering nothing at all, because
+decimal is what the cast converts. Measured: 2,000 distinct ``decimal(18,2)``
+values near 1e7 collapse to **21** after float32 — 1,979 rows that used to be
+different entities becoming one.
+
+**Why the gate is not "did any two values collide".** That test looks stricter
+and is in fact useless: a ``double`` ratio column on [0, 1] holds far more
+distinct values than float32 has, so it collapses too — 200,000 distinct values
+on [0, 1] keep 199,209. A collision test therefore fires on almost every
+approximate column in the table, and an alarm that is always on teaches the
+operator nothing. It also asks the wrong question. LightGBM is histogram-based
+(``max_bin=256``), so a column that was an approximation to begin with losing
+its low-order bits changes no split it would otherwise have made; what changes a
+split is a value from a known grid landing on a different grid point. That is
+what this bound detects and a collision test cannot separate from the harmless
+case.
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
+import math
+from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 
@@ -995,6 +1079,77 @@ def entity_grouping_key_errors(parameters: dict) -> list[str]:
     return errors
 
 
+#: Legal ``dataset.numeric_feature_storage_type`` values, and the default an
+#: absent key resolves to. Defined here rather than in the dataset pipeline so
+#: the gate (A31) and the node that dispatches on the value cannot drift apart
+#: — the reason A25 keeps ``HPO_OBJECTIVES`` in this module.
+NUMERIC_STORAGE_TYPES: tuple[str, ...] = ("float32", "float64")
+DEFAULT_NUMERIC_STORAGE_TYPE = "float32"
+
+#: Legal ``dataset.numeric_precision_policy`` values. ``block`` stops the run on
+#: a column that cannot survive the declared storage type; ``truncate`` logs a
+#: warning and proceeds, accepting the loss deliberately. Named for what happens
+#: to the *data*, not for the log level: the operator is choosing between a
+#: failed run and truncated values.
+PRECISION_POLICIES: tuple[str, ...] = ("block", "truncate")
+DEFAULT_PRECISION_POLICY = "block"
+
+
+def resolved_numeric_storage(parameters: dict) -> tuple[str, str]:
+    """``(storage_type, precision_policy)`` with the defaults applied.
+
+    One resolver rather than two ``dict.get`` calls at each reader, so "what an
+    absent key means" has a single definition. Callers may assume the values are
+    legal: A31 rejects anything else at CLI entry, including the explicit YAML
+    ``null`` that ``dict.get(key, default)`` would otherwise hand back as None.
+    """
+    ds = parameters.get("dataset") or {}
+    storage = ds.get("numeric_feature_storage_type") or DEFAULT_NUMERIC_STORAGE_TYPE
+    policy = ds.get("numeric_precision_policy") or DEFAULT_PRECISION_POLICY
+    return storage, policy
+
+
+def numeric_storage_param_errors(parameters: dict) -> list[str]:
+    """A31 — the two ``dataset`` numeric-storage keys hold declarable values.
+
+    Both keys are optional and an absent key is clean, so a config that never
+    names them pays nothing. An explicit YAML ``null`` is rejected rather than
+    read as absent: it is *present* in the version payload, so writing the null
+    form of ``numeric_feature_storage_type`` moves ``base_dataset_version`` and
+    rebuilds every artifact under it while changing no behaviour (A29's null
+    branch, same reasoning).
+
+    One code for two keys because they are one parameter family (A25's
+    precedent): the declaration and the gate that enforces it are read by the
+    same node, and a config that fumbles both should cost one run to fix.
+
+    Aggregated by ``validate_config_consistency`` rather than hung off the
+    dataset command like A24/A26. ``numeric_feature_storage_type`` feeds
+    ``base_dataset_version``, so a typo in it moves the artifact paths training
+    and inference resolve too — this is not one pipeline's concern (A29's
+    reasoning).
+    """
+    errors: list[str] = []
+    ds = parameters.get("dataset") or {}
+    for key, legal, default in (
+        ("numeric_feature_storage_type", NUMERIC_STORAGE_TYPES,
+         DEFAULT_NUMERIC_STORAGE_TYPE),
+        ("numeric_precision_policy", PRECISION_POLICIES,
+         DEFAULT_PRECISION_POLICY),
+    ):
+        if key not in ds:
+            continue
+        value = ds[key]
+        if value in legal:
+            continue
+        errors.append(
+            f"A31: dataset.{key}={value!r} is not a declarable value. Use one "
+            f"of {list(legal)}, or delete the line to take the default "
+            f"{default!r}."
+        )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -1100,6 +1255,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(training_hpo_finalize_param_errors(parameters))
 
     errors.extend(entity_grouping_key_errors(parameters))
+
+    errors.extend(numeric_storage_param_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
@@ -1236,6 +1393,206 @@ def spark_dtype_is_numeric(simple_string: str) -> bool:
     """
     dt = simple_string.strip().lower()
     return dt.startswith("decimal") or dt in _NUMERIC_SPARK_TYPES
+
+
+_UNIT_STEP_SPARK_TYPES = frozenset(
+    {"tinyint", "smallint", "int", "bigint", "boolean"}
+)
+
+
+def spark_dtype_value_step(simple_string: str) -> float | None:
+    """The smallest gap between two distinct values of a Spark dtype, or None.
+
+    This is the one fact B8 needs about a column's *type*: its values sit on a
+    grid, and the grid's spacing is what decides whether narrowing can make two
+    of them collide (see the module docstring's B8 section).
+
+    * integer types and ``boolean`` -> ``1.0``. Boolean's values are 0 and 1,
+      which is why the gate never has to special-case it.
+    * ``decimal(p, s)`` -> ``10 ** -s``. **Decimal is exact fixed-point, not an
+      approximate type** — every value is an integer multiple of ``10**-s``, so
+      it has a grid like any integer column, just a finer one. Reading it as
+      "already approximate, therefore exempt" is the mistake that would leave
+      the gate covering nothing at all: decimal is what the cast converts.
+    * ``float`` / ``double`` -> ``None``. These genuinely have no grid the
+      config knows about, so no bound can be stated and the gate says nothing
+      about them. Their values are already approximations of something else;
+      narrowing them loses low-order bits, which is the harmless case the gate
+      is deliberately not built to flag.
+    * every non-numeric type -> ``None`` (B5/B6 are what speak about those).
+
+    Pure string classification (no Spark import), mirroring
+    ``spark_dtype_is_numeric``.
+    """
+    dt = simple_string.strip().lower()
+    if dt in _UNIT_STEP_SPARK_TYPES:
+        return 1.0
+    if dt.startswith("decimal"):
+        # simpleString is always "decimal(p,s)"; a bare "decimal" would be
+        # decimal(10,0) by Spark's default, hence the scale-0 fallback.
+        scale = 0
+        if "," in dt and dt.endswith(")"):
+            scale = int(dt[dt.index(",") + 1:-1])
+        return 10.0 ** -scale
+    return None
+
+
+#: Significand width of each declarable storage type, in bits. Keyed by the same
+#: strings ``NUMERIC_STORAGE_TYPES`` declares, and a test pins the two sets equal
+#: so a third storage type cannot be declarable without a bound.
+SIGNIFICAND_BITS: dict[str, int] = {
+    "float32": 24,
+    "float64": 53,
+}
+
+
+def exact_value_limit(value_step: float, storage_type: str) -> float:
+    """Largest ``max(|x|)`` a column of this grid spacing survives intact.
+
+    Representable neighbours sit ``ulp(x)`` apart, and ``ulp`` doubles at every
+    power of two, so the answer is the top of the last binade whose spacing is
+    still no wider than the column's own step:
+    ``2 ** (floor(log2(step)) + significand_bits)``.
+
+    The floor is not a rounding convenience — it is the whole correction. A
+    plain ``step * 2**bits`` reads right and is wrong for every step that is not
+    a power of two: ``decimal(18,2)`` would get 167,772, where float32's spacing
+    is already 0.015625 and two values 0.01 apart have long since collided
+    (measured: 200,000 distinct values -> 128,000). The floor gives 131,072,
+    where the measurement is lossless and one step above it is not.
+
+    For ``value_step == 1`` this reduces to ``2 ** bits`` — 2^24 for float32,
+    the bound issue #281 states.
+    """
+    return 2.0 ** (math.floor(math.log2(value_step)) + SIGNIFICAND_BITS[storage_type])
+
+
+class ColumnPrecision(NamedTuple):
+    """What B8 needs to know about one column: how big it gets, how fine it is.
+
+    ``max_abs`` is the largest absolute value the column holds over the months
+    this run is about to add, or ``None`` when that could not be established.
+    A column with no non-null values reports ``0.0`` — a column with no values
+    cannot lose one. ``value_step`` is its dtype's grid spacing
+    (``spark_dtype_value_step``).
+
+    One type rather than two parallel mappings: the pair always travels
+    together, and a caller that got them out of step would produce a bound for
+    the wrong column silently.
+    """
+
+    max_abs: float | None
+    value_step: float
+
+
+def numeric_precision_rows(
+    by_column: Mapping[str, ColumnPrecision],
+    storage_type: str,
+) -> list[dict]:
+    """One row per checked column: what it holds, what it may hold, how close.
+
+    The companion to :func:`numeric_precision_errors`. That function answers
+    "which columns fail"; this one answers "how much room does each column have
+    left", which is the question an operator actually has *before* one fails —
+    a column at 0.99 of its limit passes today and stops the pipeline the month
+    a larger value arrives, and nothing in a pass/fail message says so.
+
+    ``headroom`` is ``limit / max_abs`` — how many times larger the column could
+    get before colliding. ``None`` when the column is empty (nothing to divide)
+    or unmeasured. Rows are sorted by headroom ascending, so the column closest
+    to breaching reads first whether the report is skimmed or truncated.
+
+    Pure, and separate from the errors predicate rather than folded into it: the
+    two have different audiences (a report that is always produced vs a message
+    that appears only on failure) and folding them would make the report's shape
+    a side effect of how the error strings are worded.
+    """
+    rows: list[dict] = []
+    for col in sorted(by_column):
+        max_abs, value_step = by_column[col]
+        limit = exact_value_limit(value_step, storage_type)
+        if max_abs is None:
+            verdict, headroom = "unmeasured", None
+        elif max_abs > limit:
+            verdict, headroom = "breach", (limit / max_abs)
+        else:
+            verdict = "ok"
+            headroom = None if max_abs == 0 else limit / max_abs
+        rows.append({
+            "column": col,
+            "value_step": value_step,
+            "max_abs": max_abs,
+            "limit": limit,
+            "headroom": headroom,
+            "verdict": verdict,
+        })
+    return sorted(
+        rows,
+        key=lambda r: (r["headroom"] is None, r["headroom"] or 0.0, r["column"]),
+    )
+
+
+def numeric_precision_errors(
+    by_column: Mapping[str, ColumnPrecision],
+    storage_type: str,
+) -> list[str]:
+    """B8 invariant — the single definition.
+
+    Pure — no Spark, no parquet, no filesystem. Everything data-dependent is the
+    caller's to gather, which is what makes the rule testable by handing it a
+    dict, and what keeps the "how do we get max(|x|) without scanning" question
+    out of the definition of what the rule *is*.
+
+    ``max_abs is None`` is an error, not a pass. The gate's promise is that a
+    column it lets through survives the cast; a column it cannot measure is one
+    it cannot make that promise about, and passing it would turn the gate into a
+    check that silently covers an unknown subset. The message names the policy
+    key because the alternative — an unrecoverable run for a reason unrelated to
+    correctness — is worse than an operator who deliberately accepts the risk.
+
+    The remedies the messages offer are deliberately **not** "declare float64".
+    Nothing reads ``numeric_feature_storage_type`` to widen the cast yet —
+    ``preprocessing.cast_feature_floats_to_float32`` writes float32
+    unconditionally, and issue #283 is what makes the declaration real. Until it
+    lands, taking that advice would rebuild every artifact, change no stored
+    value, and only raise this gate's own bound: it silences the alarm instead of
+    fixing the loss. See the module docstring's B8 section.
+
+    Collect-all and sorted by column: two runs of the same config read the same
+    way, and one fix pass clears every offender.
+    """
+    if storage_type not in SIGNIFICAND_BITS:
+        raise ConfigConsistencyError(
+            f"numeric_precision_errors got storage_type={storage_type!r}, which "
+            f"has no representability bound. A31 should have rejected it at CLI "
+            f"entry; reaching here means the gate was called around it."
+        )
+    errors: list[str] = []
+    for col in sorted(by_column):
+        max_abs, value_step = by_column[col]
+        if max_abs is None:
+            errors.append(
+                f"B8: feature column {col!r} carries no parquet min/max "
+                f"statistics, so this gate cannot prove its values survive "
+                f"{storage_type}. Either fix the writer so the column gets "
+                f"statistics, or set dataset.numeric_precision_policy: truncate "
+                f"to proceed without the proof."
+            )
+            continue
+        limit = exact_value_limit(value_step, storage_type)
+        if max_abs > limit:
+            errors.append(
+                f"B8: feature column {col!r} reaches max(|value|)={max_abs:,.10g}, "
+                f"above the {limit:,.10g} that {storage_type} can hold at this "
+                f"column's resolution (its values are {value_step:,.10g} apart). "
+                f"Two distinct values would collapse onto one, which can "
+                f"change the ranking. Two fixes: change the column's "
+                f"representation upstream so it needs fewer steps (drop unused "
+                f"decimal places, change the unit, bucket or difference it), or "
+                f"set dataset.numeric_precision_policy: truncate to accept the "
+                f"loss deliberately."
+            )
+    return errors
 
 
 def nonnumeric_feature_errors(

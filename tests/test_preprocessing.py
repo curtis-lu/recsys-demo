@@ -225,3 +225,68 @@ class TestEncodeCategoricalsEmptyMapping:
         out = encode_categoricals(df, ["risk_attr"], {"risk_attr": ["low", "high"]})
         # Index in the mapping list: low->0, high->1, anything else -> -1.
         assert [r.risk_attr for r in out.orderBy("cust_id").collect()] == [0, 1, -1]
+
+
+from recsys_tfb.preprocessing import castable_numeric_feature_columns
+
+
+class TestCastableNumericFeatureColumns:
+    """The selector both the cast and the B8 gate read, pinned once.
+
+    Sharing it is what makes "the gate checks exactly what the cast converts"
+    a structural property rather than a promise: widening the cast widens the
+    gate in the same edit. Takes a ``StructType`` rather than a DataFrame so the
+    rule can be tested without a SparkSession (cold start is minutes here).
+    """
+
+    def _schema(self) -> T.StructType:
+        return T.StructType([
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("label", T.IntegerType()),
+            T.StructField("dec", T.DecimalType(38, 10)),
+            T.StructField("dbl", T.DoubleType()),
+            T.StructField("flt", T.FloatType()),
+            T.StructField("i32", T.IntegerType()),
+            T.StructField("i64", T.LongType()),
+            T.StructField("flag", T.BooleanType()),
+            T.StructField("name", T.StringType()),
+            T.StructField("non_feature_dec", T.DecimalType(20, 2)),
+        ])
+
+    def _feature_cols(self) -> list[str]:
+        return ["dec", "dbl", "flt", "i32", "i64", "flag", "name"]
+
+    def test_selects_decimal_and_double_only(self):
+        assert castable_numeric_feature_columns(
+            self._schema(), self._feature_cols()) == ["dec", "dbl"]
+
+    def test_a_column_outside_feature_cols_is_never_selected(self):
+        # Identity, label and anything else the frame carries are not the
+        # cast's business, and must not become the gate's either.
+        assert "non_feature_dec" not in castable_numeric_feature_columns(
+            self._schema(), self._feature_cols())
+
+    def test_float32_is_already_the_target_and_is_not_reselected(self):
+        assert "flt" not in castable_numeric_feature_columns(
+            self._schema(), self._feature_cols())
+
+    def test_a_declared_feature_absent_from_the_frame_is_skipped(self):
+        assert castable_numeric_feature_columns(
+            self._schema(), ["dec", "not_here"]) == ["dec"]
+
+    def test_frame_order_not_feature_cols_order(self):
+        # The cast rebuilds columns in frame order; a selector that returned
+        # them in the caller's order would make the two disagree the day this
+        # feeds a positional select.
+        assert castable_numeric_feature_columns(
+            self._schema(), ["dbl", "dec"]) == ["dec", "dbl"]
+
+
+@pytest.mark.spark
+def test_cast_helper_and_selector_agree(mixed_df):
+    """The cast converts exactly what the selector names — the property B8's
+    scope rests on. Asserted against the real helper rather than assumed."""
+    feature_cols = ["feature_a", "feature_b", "feature_c"]
+    _, casted = cast_feature_floats_to_float32(mixed_df, feature_cols)
+    assert casted == castable_numeric_feature_columns(
+        mixed_df.schema, feature_cols)

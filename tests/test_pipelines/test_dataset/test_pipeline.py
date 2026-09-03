@@ -19,15 +19,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 class TestDatasetPipeline:
     def test_pipeline_without_calibration(self):
         pipeline = create_pipeline()
-        # 1 validate + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input
-        # + 2 filter (val/test) = 13
-        assert len(pipeline.nodes) == 13
+        # 2 validate (Layer-2 data gate + B8 precision gate) + 4 key-selection
+        # + 1 fit + 1 apply_features + 4 build_model_input
+        # + 2 filter (val/test) = 14
+        assert len(pipeline.nodes) == 14
 
     def test_pipeline_with_calibration(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 13 base + 1 select_calibration_keys + 1 build_calibration_model_input = 15
+        # 14 base + 1 select_calibration_keys + 1 build_calibration_model_input = 16
         # (calibration is NOT filtered — keep all rows)
-        assert len(pipeline.nodes) == 15
+        assert len(pipeline.nodes) == 16
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -45,7 +46,7 @@ class TestDatasetPipeline:
             "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
-            "preprocessed_feature_table",
+            "preprocessed_feature_table", "numeric_precision_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
         }
         assert pipeline.outputs == expected
@@ -58,7 +59,7 @@ class TestDatasetPipeline:
             "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
-            "preprocessed_feature_table",
+            "preprocessed_feature_table", "numeric_precision_report",
             "sample_keys", "train_keys", "train_dev_keys",
             "calibration_keys", "val_keys", "test_keys",
         }
@@ -89,7 +90,7 @@ class TestDatasetPipeline:
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 13
+        assert len(pipeline.nodes) == 14
 
     def test_filter_nodes_only_for_val_and_test(self):
         """train / train_dev / calibration go straight to *_model_input;
@@ -157,6 +158,7 @@ class TestNodeNameToFunctionBinding:
         "select_test_keys": nodes.select_test_keys,
         "fit_preprocessor_metadata": nodes.fit_preprocessor_metadata,
         "apply_preprocessor_to_features": nodes.apply_preprocessor_to_features,
+        "validate_numeric_precision": nodes.validate_numeric_precision,
         "build_train_model_input": nodes.build_model_input,
         "build_train_dev_model_input": nodes.build_model_input,
         "build_val_model_input": nodes.build_model_input,
@@ -222,6 +224,10 @@ class TestMonthPlanWiring:
     #: the persistent table the pair of nodes ultimately produces.
     EXPECTED_PLAN = {
         "apply_preprocessor_to_features": "preprocessed_feature_table",
+        # The B8 gate reads the same plan as the node that writes the table it
+        # checks — that shared plan is what makes "the months this run added get
+        # checked, and only those" true by construction rather than by comment.
+        "validate_numeric_precision": "preprocessed_feature_table",
         "select_test_keys": "test_keys",
         "build_test_model_input": "test_model_input",
     }
@@ -262,6 +268,25 @@ class TestMonthPlanWiring:
             assert month_plan_input(name) in pipeline.inputs
             assert month_plan_input(name) not in pipeline.outputs
 
+    def test_the_precision_gate_runs_before_every_model_input_build(self):
+        """Declaration order is what orders it, so a test has to hold the order.
+
+        The gate and the ``build_model_input`` nodes share
+        ``preprocessed_feature_table`` as their last unmet input, so Kahn queues
+        them together and breaks the tie by list position
+        (``core/pipeline.py``). Nothing in the DAG forces the gate first — it
+        produces no artifact anyone consumes — so moving its entry down the list
+        in ``pipeline.py`` would silently let a narrowed value land before the
+        check that exists to stop it. That edit passes every other test here.
+        """
+        names = [n.name for n in create_pipeline(enable_calibration=True).nodes]
+        gate = names.index("validate_numeric_precision")
+        builds = [i for i, n in enumerate(names) if n.startswith("build_")]
+        assert builds, "no build_* nodes found -- the guard would be vacuous"
+        assert gate < min(builds), (
+            f"precision gate at {gate} runs after a model_input build: {names}"
+        )
+
     def test_the_test_filter_is_the_same_node_function_as_val(self):
         # ADR-0007: the defensive month filter that used to live in
         # filter_test_model_input is gone, so the two filter nodes differ only
@@ -293,6 +318,7 @@ class TestOnlyTestMonthsMode:
         "validate_data_consistency",
         "select_test_keys",
         "apply_preprocessor_to_features",
+        "validate_numeric_precision",
         "build_test_model_input",
         "filter_test_model_input",
     ]
@@ -312,13 +338,13 @@ class TestOnlyTestMonthsMode:
         assert [n.name for n in pipeline.nodes] == self.EXPECTED
 
     def test_default_shape_is_unchanged_by_the_new_parameter(self):
-        # Not covered by TestDatasetPipeline's 13/15: those call create_pipeline
+        # Not covered by TestDatasetPipeline's 14/16: those call create_pipeline
         # without the new kwarg, so they would still pass if False were not the
         # default. Spell the default out.
-        assert len(create_pipeline(only_test_months=False).nodes) == 13
+        assert len(create_pipeline(only_test_months=False).nodes) == 14
         assert len(
             create_pipeline(enable_calibration=True, only_test_months=False).nodes
-        ) == 15
+        ) == 16
 
     def test_the_list_matches_the_dag_derived_test_chain(self):
         """Drift guard: the list == what the DAG says the test chain is.
@@ -327,11 +353,14 @@ class TestOnlyTestMonthsMode:
         (ADR-0012): a persisted artifact that is missing *this run's* months
         answers "no", so its producer is upstream of the test chain.
 
-        The data gate is added separately, and that is not a fudge — it is the
+        Both gates are added separately, and that is not a fudge — it is the
         one structural fact this test cannot derive. ``_slice_with_expansion``
-        builds its producer map from ``node.outputs``, so a node with
-        ``outputs=None`` is never reachable by expansion, no matter what it
-        validates.
+        walks *backwards* from an artifact somebody needs, so a node nothing
+        downstream consumes is unreachable however useful it is:
+        ``validate_data_consistency`` because it has no output at all, and
+        ``validate_numeric_precision`` because its output
+        (``numeric_precision_report``) is a diagnostic with no consumer. Both
+        therefore have to be named here.
 
         Fails when a node is added to the test chain and the list does not
         follow: the mode would then silently skip it.
@@ -347,7 +376,9 @@ class TestOnlyTestMonthsMode:
 
         full = create_pipeline(enable_calibration=True)
         sliced, _ = full.slice_only("filter_test_model_input", can_load)
-        derived = {n.name for n in sliced.nodes} | {"validate_data_consistency"}
+        derived = {n.name for n in sliced.nodes} | {
+            "validate_data_consistency", "validate_numeric_precision",
+        }
 
         assert derived == set(dataset_pipeline.ONLY_TEST_MONTHS_NODES)
 

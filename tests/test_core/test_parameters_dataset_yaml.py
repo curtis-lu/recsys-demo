@@ -1,10 +1,14 @@
-"""Regression: conf/base declares the split-unit keys without activating them.
+"""Regression: conf/base declares version-feeding keys without activating them.
 
-Both keys default to the whole ``schema.entity``, so writing either one into
-``conf/base`` — even at its default value — changes nothing about the split but
-does change the version payload it feeds, orphaning every artifact under it.
-The declaration therefore has to live in comments. That distinction is invisible
-in a diff review ("it's just the default"), so it is asserted here instead.
+Every key here defaults to something, and writing one into ``conf/base`` — even
+at its default value — changes nothing about behaviour but does change the
+version payload it feeds, orphaning every artifact under that ID. The
+declaration therefore has to live in comments. That distinction is invisible in
+a diff review ("it's just the default"), so it is asserted here instead.
+
+Two families, one failure mode: the split-unit keys (``train_split_keys`` /
+``val_sample_keys``, ADR-0016) and the numeric storage declaration
+(``numeric_feature_storage_type``, which feeds ``base_dataset_version``).
 """
 
 from pathlib import Path
@@ -36,3 +40,35 @@ def test_both_keys_are_documented_in_comments():
     text = _PATH.read_text()
     for key in ENTITY_GROUPING_KEYS:
         assert f"# {key}:" in text, f"{key} has no commented declaration"
+
+
+def test_the_numeric_storage_type_is_not_a_live_yaml_key():
+    # It feeds base_dataset_version, so writing it — at any value, the default
+    # included — rebuilds preprocessor / val / test and every train variant
+    # under them, for a config that behaves identically. Same trap as the
+    # split-unit keys above.
+    assert "numeric_feature_storage_type" not in _dataset_block(), (
+        "conf/base/parameters_dataset.yaml activates dataset."
+        "numeric_feature_storage_type. Even at its default this busts "
+        "base_dataset_version and orphans every existing dataset artifact. "
+        "Keep the declaration commented out."
+    )
+
+
+def test_the_storage_type_is_documented_in_comments():
+    assert "# numeric_feature_storage_type:" in _PATH.read_text(), (
+        "numeric_feature_storage_type has no commented declaration"
+    )
+
+
+def test_the_policy_key_is_live_and_that_is_the_point_of_two_keys():
+    # The gate policy is the operator's only switch between "stop the run" and
+    # "accept the truncation", so hiding it in a comment would make it
+    # unreachable. It can be live precisely because it is stripped from the
+    # version hash (GATE_POLICY_KEYS) — setting it rebuilds nothing. If that
+    # ever stops holding, splitting the pair into two keys has lost its point.
+    from recsys_tfb.core.versioning import GATE_POLICY_KEYS
+    from recsys_tfb.core.consistency import PRECISION_POLICIES
+
+    assert "numeric_precision_policy" in GATE_POLICY_KEYS
+    assert _dataset_block().get("numeric_precision_policy") in PRECISION_POLICIES

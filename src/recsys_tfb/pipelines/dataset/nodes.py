@@ -38,8 +38,13 @@ from recsys_tfb.core.consistency import (
     categorical_dtype_errors,
     item_coverage_errors,
     nonnumeric_feature_errors,
+    ColumnPrecision,
+    numeric_precision_errors,
+    numeric_precision_rows,
     resolved_item_values,
+    resolved_numeric_storage,
     spark_dtype_is_numeric,
+    spark_dtype_value_step,
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
@@ -58,6 +63,7 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     split_categorical_sources,
     warn_missing_drop_columns,
 )
+from recsys_tfb.pipelines.dataset.steps.precision import landed_partition_files
 from recsys_tfb.pipelines.dataset.steps.model_input import (
     drop_groups_without_positives,
     join_features_missing_as_null,
@@ -84,8 +90,10 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     restrict_to_months,
     restrict_to_months_or_all,
 )
+from recsys_tfb.utils.parquet_stats import read_max_abs_stats
 from recsys_tfb.preprocessing import (
     cast_feature_floats_to_float32,
+    castable_numeric_feature_columns,
     encodable_categoricals,
     encode_categoricals,
     warn_unknown_encodings,
@@ -610,6 +618,191 @@ def apply_preprocessor_to_features(
         len(result.columns), len(encode_cols),
     )
     return result
+
+
+def validate_numeric_precision(
+    preprocessed_feature_table: DataFrame,
+    preprocessor_metadata: dict,
+    month_plan: SnapDatePlan,
+    parameters: dict,
+) -> dict:
+    """Measure the precision headroom of the months just encoded, and gate on it.
+
+    Returns the report (catalog entry ``numeric_precision_report``); raises
+    ``DataConsistencyError`` on a breach under the default policy. The rule
+    itself lives with its predicates in ``core/consistency.py`` — this node
+    gathers facts, hands them over, and applies the configured policy.
+
+    **Why it reports rather than only gating.** A pass/fail answer tells an
+    operator nothing about the column sitting at 0.99 of its limit, which passes
+    today and stops the pipeline the month a larger value arrives. The report
+    carries every checked column with its headroom, closest-to-breaching first;
+    the gate is the same numbers read as a verdict.
+
+    **Why it sits between the write and the reads.** The values this node is
+    about are narrowed by ``cast_feature_floats_to_float32`` inside
+    ``build_model_input``, which is downstream; ``preprocessed_feature_table``
+    itself keeps its source dtypes. So it reads a table that has already landed
+    — the runner saves a node's output before the next node loads it — and still
+    stops the run before a single narrowed value is stored. Reading the landed
+    table rather than ``feature_table`` is what lets it assume parquet with
+    statistics: this repo writes that table, while ``feature_table`` is the
+    user's own and this framework does not dictate its format.
+
+    **Cost invariant (ADR-0006).** Facts come from parquet footers — a seek per
+    file, no rows read — so this node does not change the pipeline's cost
+    magnitude. An aggregation would have, which is why the shape of this gate is
+    a footer read and not a ``max(abs(...))``.
+
+    **Incremental with the node above it** (ADR-0002/ADR-0012): it reads the
+    months the same ``month_plan`` just encoded. A month that landed under an
+    earlier run is not re-read — the same coverage every other incremental
+    artifact has, and the reason adding an evaluation month checks that month.
+
+    Known limit: under ``block`` the run aborts, so the report never reaches the
+    catalog. The full table is logged before the raise for exactly that reason —
+    the survey workflow (run once under ``truncate``, read the artifact) is what
+    the persisted report is for.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    feature_columns = preprocessor_metadata["feature_columns"]
+    storage_type, policy = resolved_numeric_storage(parameters)
+    months = month_plan.to_process
+
+    # Decision — what this gate may complain about is exactly what the cast will
+    # convert, narrowed to the columns whose dtype states a grid spacing. The
+    # first half reads the cast's own selector, so widening the cast widens the
+    # gate in the same edit; the second half is the bound's domain — float and
+    # double declare no grid, so no bound can be stated for them.
+    castable = castable_numeric_feature_columns(
+        preprocessed_feature_table.schema, feature_columns,
+    )
+    dtypes = dict(preprocessed_feature_table.dtypes)
+    steps = {
+        c: spark_dtype_value_step(dtypes[c])
+        for c in castable
+        if spark_dtype_value_step(dtypes[c]) is not None
+    }
+    checked = sorted(steps)
+    report = _precision_report(storage_type, policy, months, {}, dtypes)
+
+    if not checked or not months:
+        logger.info(
+            "Numeric precision gate (%s): nothing to check "
+            "(castable=%d, with a value grid=%d, months=%d)",
+            storage_type, len(castable), len(checked), len(months),
+        )
+        return report
+
+    # Decision — the facts are read from the partitions this run just wrote,
+    # not from the whole table: inputFiles() answers for the relation, so the
+    # run's own version and months are selected back out of the paths.
+    files = landed_partition_files(
+        preprocessed_feature_table.inputFiles(),
+        base_version=parameters["base_dataset_version"],
+        time_col=time_col,
+        months=months,
+    )
+
+    errors: list[str] = []
+    if not files:
+        # Not folded into the per-column "no statistics" message: the fix is
+        # different (the gate could not find the data at all, rather than found
+        # it and learned nothing), and reporting it once beats reporting it
+        # once per column.
+        errors.append(
+            f"B8: found no parquet files for the {len(months)} month(s) this "
+            f"run wrote under base_dataset_version="
+            f"{parameters['base_dataset_version']}, so the precision of "
+            f"{len(checked)} feature column(s) could not be established. The "
+            f"gate reads footer statistics from the landed partitions; set "
+            f"dataset.numeric_precision_policy: truncate to proceed without "
+            f"that check."
+        )
+    else:
+        max_abs = read_max_abs_stats(
+            preprocessed_feature_table.sparkSession, files, checked,
+        )
+        by_column = {
+            c: ColumnPrecision(max_abs[c], steps[c]) for c in checked
+        }
+        report = _precision_report(
+            storage_type, policy, months, by_column, dtypes,
+        )
+        logger.info(
+            "Numeric precision gate (%s): %d column(s) over %d file(s) in "
+            "%d month(s)", storage_type, len(checked), len(files), len(months),
+        )
+        for line in _precision_report_lines(report):
+            logger.info("%s", line)
+        errors = numeric_precision_errors(by_column, storage_type)
+
+    if not errors:
+        return report
+
+    message = (
+        f"Numeric precision check failed for "
+        f"dataset.numeric_feature_storage_type={storage_type} "
+        f"({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
+    )
+    # Decision — the policy key is what turns a finding into a stop. `block`
+    # is the default because the failure it describes is silent everywhere
+    # else; `truncate` exists so an operator who has read the finding can accept
+    # the loss without editing the gate out.
+    if policy == "block":
+        raise DataConsistencyError(message)
+    logger.warning("%s", message)
+    return report
+
+
+def _precision_report(
+    storage_type: str,
+    policy: str,
+    months: list,
+    by_column: dict,
+    dtypes: dict,
+) -> dict:
+    """Assemble the persisted shape of the precision measurement.
+
+    Module-private: the shape is this node's output contract, not something a
+    second caller reuses. ``dtypes`` is carried into each row because a reader
+    asking "why is this column's limit so low" needs the scale, and looking it
+    up means finding the table this report is about.
+    """
+    rows = numeric_precision_rows(by_column, storage_type)
+    for row in rows:
+        row["dtype"] = dtypes.get(row["column"])
+    return {
+        "storage_type": storage_type,
+        "policy": policy,
+        "months": [pd.Timestamp(m).strftime("%Y-%m-%d") for m in months],
+        "checked_columns": len(rows),
+        "breaches": sum(1 for r in rows if r["verdict"] == "breach"),
+        "unmeasured": sum(1 for r in rows if r["verdict"] == "unmeasured"),
+        "columns": rows,
+    }
+
+
+def _precision_report_lines(report: dict) -> list[str]:
+    """The report as fixed-width log lines, closest-to-breaching first.
+
+    Logged as well as returned because ``block`` aborts the run before the
+    catalog can write the artifact — the one case where an operator most needs
+    the numbers is the one where the file does not exist.
+    """
+    lines = [
+        f"  {'column':<28} {'dtype':<16} {'max(|x|)':>18} "
+        f"{'limit':>18} {'headroom':>12}  verdict"
+    ]
+    for row in report["columns"]:
+        headroom = "-" if row["headroom"] is None else f"{row['headroom']:.3g}x"
+        max_abs = "-" if row["max_abs"] is None else f"{row['max_abs']:,.10g}"
+        lines.append(
+            f"  {row['column']:<28} {str(row['dtype']):<16} {max_abs:>18} "
+            f"{row['limit']:>18,.10g} {headroom:>12}  {row['verdict']}"
+        )
+    return lines
 
 
 def build_model_input(
