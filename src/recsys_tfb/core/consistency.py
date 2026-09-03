@@ -296,7 +296,8 @@ because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
 to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the filesystem).
 
-Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
+Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 implemented and
+wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -388,6 +389,24 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   the dataset gates' cost invariant is zero scans (ADR-0006, and its amendment
   for this gate), and a ``max(abs(...))`` over the months would have changed
   that.
+
+* B9 — a model feature column in ``train_model_input`` whose stored type is not
+  the one ``dataset.numeric_feature_storage_type`` declares, either because the
+  columns disagree with each other or because they agree on the wrong type. The
+  training read pre-allocates one matrix for all of them, so the widest column
+  sets the dtype of every column: one ``int64`` among 1,000 ``float32`` columns
+  doubles a 24,000,000-row matrix from 89 GiB to 179 GiB, which a 128 GiB driver
+  cannot allocate at all. Predicate: ``feature_storage_type_errors``; classifier:
+  ``_arrow_storage_name`` (``io/extract.py``, pyarrow types). Wired as a
+  training-read backstop in ``io/extract.py`` beside B6's, reading the parquet
+  schema only — no data. Deferred identity categoricals are exempt: they are
+  stored raw by contract and encoded per batch during the read.
+
+  **This is what B6's registered gap resolves to.** B6's backstop still admits a
+  ``boolean`` or ``decimal`` model_input feature column even though, since #283,
+  either can only mean the cast was skipped. B9 rejects both — not by tightening
+  B6's classifier, but by asking a different question (is it the declared type?)
+  whose honest remedy is the dataset rebuild B6 could not prescribe.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -1818,6 +1837,64 @@ def nonnumeric_feature_errors(
                 f"integer-encoded); if it is not a model feature, add it to "
                 f"dataset.prepare_model_input.drop_columns."
             )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# B9 — model_input feature columns must all be the declared storage type
+# ---------------------------------------------------------------------------
+
+
+def feature_storage_type_errors(
+    feature_types: dict[str, str],
+    declared: str,
+) -> list[str]:
+    """B9 invariant — the single definition.
+
+    Every model feature column in ``train_model_input`` must be stored as the
+    one type ``dataset.numeric_feature_storage_type`` declares. Two distinct
+    failures, one rule:
+
+    * **heterogeneous** — one ``int64`` column among ``float32`` ones. The
+      training read allocates *one* matrix, so a single wider column decides the
+      dtype of every other column: 1,000 float32 columns cost 4 B/cell, and the
+      same frame with one int64 among them costs 8 B/cell. At 24,000,000 rows
+      that is the difference between 89 GiB and 179 GiB on a 128 GiB driver —
+      not "OOMs partway", but cannot be allocated at all.
+    * **homogeneous but wrong** — every column ``float64`` under a ``float32``
+      declaration. Nothing collides and nothing is lost, so no value-level gate
+      can see it; it just silently costs twice the memory the declaration
+      promised, and makes the declaration a comment rather than a fact.
+
+    ``feature_types`` maps each feature column to its storage type spelled in
+    the *declaration's* vocabulary (``"float32"`` / ``"float64"`` / whatever
+    else the file actually holds); the caller classifies, as it does for B6.
+    Deferred identity categoricals are the caller's exemption to make — they
+    are stored raw (a string ``prod_name``) by contract and encoded per batch at
+    read time, so they are never in this mapping.
+
+    Why this is a *data* gate and not a config one: nothing in the config is
+    wrong when it fires. The parquet was built by an older dataset run, before
+    the declaration changed or before the cast covered that type — so the remedy
+    is always a dataset rebuild, and the message says so rather than naming a
+    key to edit.
+
+    Returns collect-all error strings sorted by column; empty means OK.
+    """
+    errors: list[str] = []
+    for col in sorted(feature_types):
+        actual = feature_types[col]
+        if actual == declared:
+            continue
+        errors.append(
+            f"B9: feature column {col!r} is stored as {actual} but "
+            f"dataset.numeric_feature_storage_type declares {declared}. The "
+            f"training read allocates one matrix for all feature columns, so a "
+            f"single column of another type sets the dtype for every column. "
+            f"Rebuild the dataset (the cast in build_model_input is what "
+            f"converges the types); do not widen the declaration to match a "
+            f"stale parquet."
+        )
     return errors
 
 

@@ -24,8 +24,8 @@ def test_extract_xy_returns_numpy_arrays(tmp_path: Path) -> None:
             "cust_id": ["c1", "c2", "c3"],
             "snap_date": pd.to_datetime(["2025-01-31"] * 3),
             "prod_name": ["fund", "ccard", "fund"],
-            "feat_a": [1.0, 2.0, 3.0],
-            "feat_b": [0.1, 0.2, 0.3],
+            "feat_a": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            "feat_b": np.array([0.1, 0.2, 0.3], dtype=np.float32),
             "label": [0, 1, 0],
         }
     )
@@ -68,8 +68,8 @@ def _make_df_with_cat():
             "cust_id": ["c1", "c2", "c3"],
             "snap_date": pd.to_datetime(["2025-01-31"] * 3),
             "prod_name": ["fund", "ccard", "fund"],
-            "feat_a": [1.0, 2.0, 3.0],
-            "feat_b": [0.1, 0.2, 0.3],
+            "feat_a": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            "feat_b": np.array([0.1, 0.2, 0.3], dtype=np.float32),
             "label": [0, 1, 0],
         }
     )
@@ -93,7 +93,9 @@ def test_extract_xy_emits_sub_step_events(tmp_path: Path, caplog) -> None:
         for r in caplog.records
         if getattr(r, "event", None) == "step_completed"
     }
-    expected = {"read_parquet", "slice_features", "encode_categoricals", "to_numpy"}
+    # #284 — the streamed read builds the matrix *as* it reads, so there is no
+    # frame to slice and no matrix to flatten: read_parquet is the whole build.
+    expected = {"read_parquet"}
     assert started == expected
     assert completed == expected
 
@@ -117,14 +119,20 @@ def test_extract_xy_logs_size_summaries(tmp_path: Path, caplog) -> None:
         "extract_Xy start" in m and "n_feature_cols=3" in m and "label=label" in m
         for m in messages
     )
-    # N1: full pdf sized via helper (deep=True)
-    assert vol["extract_Xy.pdf"]["kind"] == "pandas"
-    assert vol["extract_Xy.pdf"]["rows"] == 3
-    assert vol["extract_Xy.pdf"]["deep"] is True
-    # retrofit: X_df via helper, deep=True (was deep=False)
-    assert vol["pdf_to_X.X_df"]["rows"] == 3
-    assert vol["pdf_to_X.X_df"]["cols"] == 3
-    assert vol["pdf_to_X.X_df"]["deep"] is True
+    # #284 — no whole-frame read and no X_df copy exist to size any more. What
+    # is left in pandas is the narrow aux frame (label only here).
+    assert "extract_Xy.pdf" not in vol
+    assert "pdf_to_X.X_df" not in vol
+    assert vol["extract_Xy.aux"]["kind"] == "pandas"
+    assert vol["extract_Xy.aux"]["rows"] == 3
+    assert vol["extract_Xy.aux"]["cols"] == 1
+    assert vol["extract_Xy.aux"]["deep"] is True
+    # The matrix the read is about to allocate is announced before it happens,
+    # so a driver killed by that allocation still says how big it was.
+    assert any(
+        "streaming read" in m and "dtype=float32" in m and "batch_rows=" in m
+        for m in messages
+    )
     # encode_categoricals summary (preserve existing domain log)
     assert any(
         "deferred_cats=" in m and "prod_name" in m and "count=1" in m for m in messages
@@ -149,7 +157,7 @@ def test_extract_xy_skips_encode_step_when_no_deferred_cats(
         {
             "cust_id": ["c1", "c2"],
             "snap_date": pd.to_datetime(["2025-01-31"] * 2),
-            "feat_a": [1.0, 2.0],
+            "feat_a": np.array([1.0, 2.0], dtype=np.float32),
             "label": [0, 1],
         }
     )
@@ -169,13 +177,9 @@ def test_extract_xy_skips_encode_step_when_no_deferred_cats(
         for r in caplog.records
         if getattr(r, "event", None) == "step_started"
     }
-    # Other sub-steps still emit
+    # The read still emits
     assert "read_parquet" in started
-    assert "slice_features" in started
-    assert "to_numpy" in started
-    # Encode step is SKIPPED entirely
-    assert "encode_categoricals" not in started
-    # And there is no encode summary INFO line
+    # No encode step and no encode summary INFO line
     messages = [r.getMessage() for r in caplog.records]
     assert not any("deferred_cats=" in m for m in messages)
 
@@ -233,7 +237,7 @@ def _make_grouped_df():
             "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
             "snap_date": pd.to_datetime(["2025-01-31"] * 6),
             "prod_name": ["fund", "ccard", "fund", "ccard", "fund", "ccard"],
-            "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "feat_a": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=np.float32),
             "label": [1, 0, 0, 1, 0, 0],
         }
     )
@@ -493,7 +497,7 @@ def _wparquet(tmp_path):
         "prod_name": ["a", "b", "a", "b"],
         "cust_segment_typ": ["mass", "mass", "hnw", "hnw"],
         "label": [1, 0, 1, 0],
-        "f1": [0.1, 0.2, 0.3, 0.4]})
+        "f1": np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)})
     p = tmp_path / "mi.parquet"
     pdf.to_parquet(p)
     return ParquetHandle(path=str(p))
@@ -657,8 +661,13 @@ def _b6_df(with_string: bool) -> pd.DataFrame:
         "cust_id": ["c1", "c2", "c3"],
         "snap_date": pd.to_datetime(["2025-01-31"] * 3),
         "prod_name": ["fund", "ccard", "fund"],  # deferred identity cat (legit string)
-        "f_num": [1.0, 2.0, 3.0],
-        "flag_bool": [True, False, True],  # boolean feature — numeric, must NOT be flagged
+        "f_num": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        # Cast by build_model_input like every other numeric feature (#283), so
+        # it is float32 on disk here. That B6 would admit it *as a boolean* is
+        # pinned at the predicate level in test_consistency.py
+        # (TestB6AdmissionIsBackedByTheCast); an actual boolean column in
+        # model_input is what B9 rejects — see TestExtractXyB9Backstop.
+        "flag_bool": np.array([1.0, 0.0, 1.0], dtype=np.float32),
         "label": [0, 1, 0],
     }
     if with_string:
@@ -958,3 +967,348 @@ class TestZeroMatchDiagnosticKeys:
         pdf = pd.DataFrame({"x": np.array([1.0, np.nan, 2.0, 1.0])})
         want = composite_key_series(pdf, ["x"]).drop_duplicates().head(5).tolist()
         assert _sample_data_keys(pdf, ["x"]) == want
+
+
+# ---------------------------------------------------------------------------
+# Streamed read (#284) — one pre-allocated matrix, byte-budgeted batches, B9
+#
+# The old path materialised the feature data three times (the frame pandas
+# built, the ``pdf[feature_cols]`` copy, the matrix ``.values`` flattened it
+# into). The replacement must produce the *same* matrix, so the first test
+# below is a parity test against an inlined copy of that implementation; the
+# rest pin the properties that make the new one fit in the driver.
+# ---------------------------------------------------------------------------
+
+
+def _pre284_X(pdf: pd.DataFrame, prep_meta: dict, parameters: dict) -> np.ndarray:
+    """The pre-#284 matrix build, inlined: slice, encode, flatten."""
+    from recsys_tfb.core.schema import get_schema
+
+    feature_cols = prep_meta["feature_columns"]
+    identity_cols = get_schema(parameters)["identity_columns"]
+    X_df = pdf[feature_cols].copy()
+    deferred = [
+        c for c in prep_meta["categorical_columns"]
+        if c in identity_cols and c in X_df.columns
+    ]
+    for col in deferred:
+        X_df[col] = pd.Categorical(
+            X_df[col], categories=prep_meta["category_mappings"][col]
+        ).codes
+    return X_df.values
+
+
+def _wide_df(n_rows: int = 37, n_feats: int = 6, seed: int = 0) -> pd.DataFrame:
+    """A model_input-shaped frame: homogeneous float32 features + identity cols."""
+    rng = np.random.default_rng(seed)
+    cols = {
+        "snap_date": pd.to_datetime(["2025-01-31"] * n_rows),
+        "cust_id": [f"c{i // 2}" for i in range(n_rows)],
+        "prod_name": [["fund", "ccard"][i % 2] for i in range(n_rows)],
+        "label": (rng.random(n_rows) < 0.3).astype(np.int64),
+    }
+    for j in range(n_feats):
+        cols[f"f{j}"] = rng.random(n_rows).astype(np.float32)
+    return pd.DataFrame(cols)
+
+
+def _wide_meta(n_feats: int = 6) -> dict:
+    return {
+        "feature_columns": [f"f{j}" for j in range(n_feats)] + ["prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+
+
+_WIDE_PARAMS = {
+    "schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"],
+        "item": "prod_name", "label": "label"}}
+}
+
+
+class TestStreamedMatrixParity:
+    def test_bit_identical_to_the_pre_284_build(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        df = _wide_df()
+        X, y = extract_Xy(_make_handle(tmp_path, df), _wide_meta(), _WIDE_PARAMS)
+        expected = _pre284_X(df, _wide_meta(), _WIDE_PARAMS)
+
+        assert X.dtype == expected.dtype
+        assert X.tobytes() == expected.tobytes()
+        np.testing.assert_array_equal(y, df["label"].to_numpy())
+
+    def test_bit_identical_across_many_batches(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A budget of a few rows per batch must land the same bytes.
+
+        The one failure this shape has that a single-batch read cannot: an
+        off-by-one in the row offset the batch is written at.
+        """
+        import recsys_tfb.io.extract as extract_mod
+
+        df = _wide_df(n_rows=101)
+        handle = _make_handle(tmp_path, df)
+        one_shot, _ = extract_mod.extract_Xy(handle, _wide_meta(), _WIDE_PARAMS)
+
+        # 7 columns x 4 B = 28 B/row -> 3 rows per batch, so ~34 batches.
+        monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 100)
+        many, _ = extract_mod.extract_Xy(handle, _wide_meta(), _WIDE_PARAMS)
+
+        assert many.tobytes() == one_shot.tobytes()
+
+    def test_deferred_cat_is_coded_in_X_but_raw_in_items(
+        self, tmp_path: Path
+    ) -> None:
+        """prod_name is a feature *and* the item column, and they disagree.
+
+        The matrix needs its integer code; the caller writing partition names
+        needs the original string. Encoding per batch must not cost the raw
+        values — the inference side reads ``items`` to name its partitions.
+        """
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        df = _wide_df(n_rows=8)
+        X, y, g, items = extract_Xy_with_groups(
+            _make_handle(tmp_path, df), _wide_meta(), _WIDE_PARAMS,
+            with_items=True,
+        )
+        assert list(items) == list(df["prod_name"])
+        # last feature column is prod_name: fund=0, ccard=1
+        np.testing.assert_array_equal(
+            X[:, -1], np.array([0.0, 1.0] * 4, dtype=X.dtype)
+        )
+
+
+class TestStreamBatchRows:
+    def test_rows_come_from_the_byte_budget_and_the_width(self) -> None:
+        from recsys_tfb.io.extract import stream_batch_rows
+
+        budget = 64 * 1024**2
+        assert stream_batch_rows(1000, 4, budget) == budget // 4000
+        assert stream_batch_rows(50, 4, budget) == budget // 200
+
+    def test_twenty_times_the_columns_is_a_twentieth_of_the_rows(self) -> None:
+        """The property a hard-coded row count cannot have."""
+        from recsys_tfb.io.extract import stream_batch_rows
+
+        wide = stream_batch_rows(1000, 4)
+        narrow = stream_batch_rows(50, 4)
+        # Not exactly 20x: the budget floor-divides, so the wide case loses a
+        # partial row. Inverse proportionality is the property, not the integer.
+        assert 19.99 < narrow / wide < 20.01
+
+    def test_itemsize_halves_the_rows(self) -> None:
+        from recsys_tfb.io.extract import stream_batch_rows
+
+        assert stream_batch_rows(100, 8) == stream_batch_rows(100, 4) // 2
+
+    def test_never_zero_however_wide(self) -> None:
+        from recsys_tfb.io.extract import stream_batch_rows
+
+        assert stream_batch_rows(1_000_000, 8, budget=16) == 1
+
+
+class _SpyDataset:
+    """Proxy that records the read requests made through it."""
+
+    def __init__(self, ds, calls):
+        self._ds = ds
+        self._calls = calls
+
+    def __getattr__(self, name):
+        return getattr(self._ds, name)
+
+    def to_batches(self, **kwargs):
+        self._calls.append(kwargs)
+        return self._ds.to_batches(**kwargs)
+
+
+def _spy_on_reads(monkeypatch) -> list:
+    import pyarrow.dataset as pads
+
+    calls: list = []
+    real = pads.dataset
+    monkeypatch.setattr(
+        pads, "dataset", lambda *a, **k: _SpyDataset(real(*a, **k), calls)
+    )
+    return calls
+
+
+class TestStreamedReadRequestsOnlyWhatItUses:
+    def test_unused_columns_are_never_requested(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        df = _wide_df(n_rows=10)
+        df["ignored_a"] = np.arange(10, dtype=np.int64)
+        df["ignored_b"] = ["x"] * 10
+        calls = _spy_on_reads(monkeypatch)
+
+        extract_Xy_with_groups(
+            _make_handle(tmp_path, df), _wide_meta(), _WIDE_PARAMS
+        )
+
+        assert len(calls) == 1
+        requested = set(calls[0]["columns"])
+        assert requested == {
+            "f0", "f1", "f2", "f3", "f4", "f5", "prod_name",  # features
+            "label", "snap_date", "cust_id",                  # aux
+        }
+        assert "ignored_a" not in requested
+        assert "ignored_b" not in requested
+
+    def test_weight_keys_are_requested_only_when_asked_for(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        df = _wide_df(n_rows=10)
+        df["cust_segment_typ"] = ["mass"] * 10
+        params = {
+            **_WIDE_PARAMS,
+            "training": {
+                "sample_weights": {"mass": 2.0},
+                "sample_weight_keys": ["cust_segment_typ"],
+            },
+        }
+        handle = _make_handle(tmp_path, df)
+
+        calls = _spy_on_reads(monkeypatch)
+        extract_Xy(handle, _wide_meta(), params)
+        assert "cust_segment_typ" not in set(calls[0]["columns"])
+
+        calls.clear()
+        _, _, w = extract_Xy(handle, _wide_meta(), params, with_weights=True)
+        assert "cust_segment_typ" in set(calls[0]["columns"])
+        np.testing.assert_array_equal(w, np.full(10, 2.0))
+
+    def test_batch_size_tracks_the_column_count(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        calls = _spy_on_reads(monkeypatch)
+        for n_feats in (2, 20):
+            sub_dir = tmp_path / f"n{n_feats}"
+            sub_dir.mkdir()
+            extract_Xy(
+                _make_handle(sub_dir, _wide_df(n_feats=n_feats)),
+                _wide_meta(n_feats),
+                _WIDE_PARAMS,
+            )
+        narrow, wide = (c["batch_size"] for c in calls)
+        assert narrow > wide
+
+
+class TestStreamedMatrixDtype:
+    def test_dtype_is_the_declared_storage_type(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        X, _ = extract_Xy(
+            _make_handle(tmp_path, _wide_df()), _wide_meta(), _WIDE_PARAMS
+        )
+        assert X.dtype == np.dtype("float32")
+
+    def test_declared_float64_gives_a_float64_matrix(self, tmp_path: Path) -> None:
+        from recsys_tfb.io.extract import extract_Xy
+
+        df = _wide_df()
+        for c in [c for c in df.columns if c.startswith("f")]:
+            df[c] = df[c].astype(np.float64)
+        params = {
+            **_WIDE_PARAMS,
+            "dataset": {"numeric_feature_storage_type": "float64"},
+        }
+        X, _ = extract_Xy(_make_handle(tmp_path, df), _wide_meta(), params)
+        assert X.dtype == np.dtype("float64")
+
+    def test_dtype_survives_wider_non_feature_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """int64 label, string item, bool carry — none of them widen the matrix.
+
+        The pre-#284 build flattened a frame, so pandas picked one common dtype
+        across whatever happened to be in it. This one allocates from the
+        declaration, so only the *feature* columns can speak to it at all.
+        """
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        df = _wide_df()
+        df["label"] = df["label"].astype(np.int64)
+        df["some_flag"] = np.tile([True, False], len(df) // 2 + 1)[: len(df)]
+        X, y, _ = extract_Xy_with_groups(
+            _make_handle(tmp_path, df), _wide_meta(), _WIDE_PARAMS
+        )
+        assert X.dtype == np.dtype("float32")
+        assert y.dtype == np.dtype("int64")
+
+
+class TestExtractXyB9Backstop:
+    """A feature column that is not the declared storage type stops the read.
+
+    Every case here must fail *before* any data is read — that is the whole
+    point at production scale, where the matrix the read would allocate does not
+    fit in the driver at all.
+    """
+
+    def _handle_with(self, tmp_path: Path, mutate) -> "ParquetHandle":
+        df = _wide_df()
+        mutate(df)
+        return _make_handle(tmp_path, df)
+
+    @pytest.mark.parametrize(
+        "mutate, needle",
+        [
+            (lambda df: df.__setitem__("f2", df["f2"].astype(np.int64)), "int64"),
+            (lambda df: df.__setitem__("f2", df["f2"].astype(np.float64)),
+             "float64"),
+            (lambda df: df.__setitem__("f2", df["f2"] > 0.5), "bool"),
+        ],
+        ids=["heterogeneous_int64", "homogeneous_but_float64", "boolean"],
+    )
+    def test_wrong_storage_type_raises(
+        self, tmp_path: Path, monkeypatch, mutate, needle
+    ) -> None:
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.io.extract import extract_Xy
+
+        handle = self._handle_with(tmp_path, mutate)
+        calls = _spy_on_reads(monkeypatch)
+
+        with pytest.raises(DataConsistencyError) as excinfo:
+            extract_Xy(handle, _wide_meta(), _WIDE_PARAMS)
+
+        message = str(excinfo.value)
+        assert "B9" in message and "'f2'" in message and needle in message
+        # ... and nothing was read to find that out.
+        assert calls == []
+
+    def test_every_wrong_column_is_named_at_once(self, tmp_path: Path) -> None:
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.io.extract import extract_Xy
+
+        def mutate(df):
+            df["f1"] = df["f1"].astype(np.float64)
+            df["f3"] = df["f3"].astype(np.int64)
+
+        with pytest.raises(DataConsistencyError) as excinfo:
+            extract_Xy(self._handle_with(tmp_path, mutate), _wide_meta(),
+                       _WIDE_PARAMS)
+        message = str(excinfo.value)
+        assert "'f1'" in message and "'f3'" in message
+        assert "2 issue(s)" in message
+
+    def test_deferred_identity_categorical_is_exempt(
+        self, tmp_path: Path
+    ) -> None:
+        """prod_name is a string feature column by contract, not a violation."""
+        from recsys_tfb.io.extract import extract_Xy
+
+        X, _ = extract_Xy(
+            _make_handle(tmp_path, _wide_df()), _wide_meta(), _WIDE_PARAMS
+        )
+        assert X.shape == (37, 7)
