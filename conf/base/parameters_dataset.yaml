@@ -90,17 +90,21 @@ dataset:
   # 為什麼宣告在 dataset 而不在 training：精度是「存下來的資料」的性質，不是讀取端的。
   #   parquet 已經是 float32 時，在 training 端要一個 float64 的矩陣只是把尾數補零——
   #   多吃一倍記憶體換到零資訊，而且會多出第二個宣告點讓兩邊可以靜默不一致。
-  # ⚠ 改此鍵會翻 base_dataset_version（它改變 parquet 的內容，preprocessor／val／test
-  #   與 train 系列整批重算）。
+  # ⚠ **#283 之前不要宣告 float64。** cast helper 目前把目標寫死 float32
+  #   （preprocessing.cast_feature_floats_to_float32），還沒有人讀這個鍵；#283 才會兌現它。
+  #   在那之前宣告 float64 的實際效果是：翻掉 base_dataset_version（整批重算）＋ 把下面
+  #   那個精度閘門的上限從 2^24 放寬到 2^53（等於靜音），而 parquet 逐位元不變。
+  # ⚠ 改此鍵會翻 base_dataset_version（#283 之後它會真的改變 parquet 的內容）。
   # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 base_dataset_version，即使值等同預設。
   # numeric_feature_storage_type: float32
 
-  # 撐不過上面那個型別的欄怎麼處置：block（預設，擋下來）或 warn（記一行警告後放行，
-  # 等於刻意接受失真）。不變量 B8 的閘門 validate_numeric_precision 讀它。
-  # ⚠ 此鍵**不進**版本雜湊——它只決定失敗怎麼報，跑成功時產出的 parquet 逐位元相同
-  #   （core/versioning.py 的 GATE_POLICY_KEYS）。所以改它不會重算任何東西，這正是
-  #   它與上面那個鍵分成兩個鍵而不是一個的理由。
-  # numeric_precision_policy: block
+  # 撐不過上面那個型別的欄怎麼處置。不變量 B8 的閘門 validate_numeric_precision 讀它：
+  #   block    ——（預設）擋下來，dataset run 失敗，錯誤訊息列出欄名、實際最大值與上限。
+  #   truncate ——記一行 warning 後放行，等於刻意接受失真。
+  # 這是實鍵而不是註解，因為它**不進版本雜湊**（core/versioning.py 的 GATE_POLICY_KEYS）
+  # ——只決定失敗怎麼報，跑成功時產出的 parquet 逐位元相同，所以改它不會重算任何東西。
+  # 這正是它與上面那個鍵分成兩個鍵而不是一個的理由。
+  numeric_precision_policy: block
 
   prepare_model_input:
     drop_columns:

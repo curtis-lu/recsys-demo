@@ -38,11 +38,12 @@ from recsys_tfb.core.consistency import (
     categorical_dtype_errors,
     item_coverage_errors,
     nonnumeric_feature_errors,
+    ColumnPrecision,
     numeric_precision_errors,
     resolved_item_values,
     resolved_numeric_storage,
-    spark_dtype_is_exact_integer,
     spark_dtype_is_numeric,
+    spark_dtype_value_step,
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
@@ -658,20 +659,25 @@ def validate_numeric_precision(
     months = month_plan.to_process
 
     # Decision — what this gate may complain about is exactly what the cast will
-    # convert, narrowed to the columns whose values are exact integers. The
+    # convert, narrowed to the columns whose dtype states a grid spacing. The
     # first half reads the cast's own selector, so widening the cast widens the
-    # gate in the same edit; the second half is the bound's domain — an already
-    # approximate column has no exact values to lose.
+    # gate in the same edit; the second half is the bound's domain — float and
+    # double declare no grid, so no bound can be stated for them.
     castable = castable_numeric_feature_columns(
         preprocessed_feature_table.schema, feature_columns,
     )
     dtypes = dict(preprocessed_feature_table.dtypes)
-    checked = [c for c in castable if spark_dtype_is_exact_integer(dtypes[c])]
+    steps = {
+        c: spark_dtype_value_step(dtypes[c])
+        for c in castable
+        if spark_dtype_value_step(dtypes[c]) is not None
+    }
+    checked = sorted(steps)
 
     if not checked or not months:
         logger.info(
             "Numeric precision gate (%s): nothing to check "
-            "(castable=%d, exact-integer=%d, months=%d)",
+            "(castable=%d, with a value grid=%d, months=%d)",
             storage_type, len(castable), len(checked), len(months),
         )
         return
@@ -696,10 +702,10 @@ def validate_numeric_precision(
             f"B8: found no parquet files for the {len(months)} month(s) this "
             f"run wrote under base_dataset_version="
             f"{parameters['base_dataset_version']}, so the precision of "
-            f"{len(checked)} exact-integer feature column(s) could not be "
-            f"established. The gate reads footer statistics from the landed "
-            f"partitions; set dataset.numeric_precision_policy: warn to proceed "
-            f"without that check."
+            f"{len(checked)} feature column(s) could not be established. The "
+            f"gate reads footer statistics from the landed partitions; set "
+            f"dataset.numeric_precision_policy: truncate to proceed without "
+            f"that check."
         )
     else:
         max_abs = read_max_abs_stats(
@@ -709,7 +715,10 @@ def validate_numeric_precision(
             "Numeric precision gate (%s): %d column(s) over %d file(s) in "
             "%d month(s)", storage_type, len(checked), len(files), len(months),
         )
-        errors = numeric_precision_errors(max_abs, storage_type)
+        errors = numeric_precision_errors(
+            {c: ColumnPrecision(max_abs[c], steps[c]) for c in checked},
+            storage_type,
+        )
 
     if not errors:
         return
@@ -721,7 +730,7 @@ def validate_numeric_precision(
     )
     # Decision — the policy key is what turns a finding into a stop. `block`
     # is the default because the failure it describes is silent everywhere
-    # else; `warn` exists so an operator who has read the finding can accept
+    # else; `truncate` exists so an operator who has read the finding can accept
     # the loss without editing the gate out.
     if policy == "block":
         raise DataConsistencyError(message)

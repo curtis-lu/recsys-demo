@@ -2265,13 +2265,15 @@ class TestA30EnvDirExists:
 from recsys_tfb.core.consistency import (
     DEFAULT_NUMERIC_STORAGE_TYPE,
     DEFAULT_PRECISION_POLICY,
-    EXACT_INTEGER_LIMITS,
     NUMERIC_STORAGE_TYPES,
     PRECISION_POLICIES,
+    SIGNIFICAND_BITS,
+    ColumnPrecision,
+    exact_value_limit,
     numeric_precision_errors,
     numeric_storage_param_errors,
     resolved_numeric_storage,
-    spark_dtype_is_exact_integer,
+    spark_dtype_value_step,
     validate_config_consistency,
 )
 
@@ -2310,7 +2312,7 @@ class TestNumericStorageParamsA31:
             self._params(numeric_precision_policy="ignore"))
         assert len(errs) == 1
         assert "dataset.numeric_precision_policy" in errs[0]
-        assert "block" in errs[0] and "warn" in errs[0]
+        assert "block" in errs[0] and "truncate" in errs[0]
 
     def test_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
         # `key:` with no value is not the same artifact as an absent key: it is
@@ -2346,8 +2348,8 @@ class TestResolvedNumericStorage:
     def test_declared_values_win(self):
         assert resolved_numeric_storage({"dataset": {
             "numeric_feature_storage_type": "float64",
-            "numeric_precision_policy": "warn",
-        }}) == ("float64", "warn")
+            "numeric_precision_policy": "truncate",
+        }}) == ("float64", "truncate")
 
     def test_the_defaults_are_themselves_legal_values(self):
         # Guards the pair that A31 and this resolver would otherwise be free to
@@ -2357,24 +2359,60 @@ class TestResolvedNumericStorage:
         assert DEFAULT_PRECISION_POLICY in PRECISION_POLICIES
 
 
-class TestSparkDtypeIsExactInteger:
-    def test_integer_types_and_boolean_are_exact(self):
+class TestSparkDtypeValueStep:
+    """The grid spacing each dtype states. Getting this wrong is silent."""
+
+    def test_integer_types_and_boolean_step_by_one(self):
         for dtype in ("tinyint", "smallint", "int", "bigint", "boolean"):
-            assert spark_dtype_is_exact_integer(dtype) is True, dtype
+            assert spark_dtype_value_step(dtype) == 1.0, dtype
 
-    def test_floating_and_decimal_types_are_not(self):
-        # These are the columns the cast already converts today. They are
-        # approximate at the source, so the 2^24 rule says nothing about them —
-        # this is what stops the gate false-positiving on every double column.
-        for dtype in ("float", "double", "decimal(38,10)", "decimal(10,2)"):
-            assert spark_dtype_is_exact_integer(dtype) is False, dtype
+    def test_decimal_steps_by_ten_to_minus_scale(self):
+        # The correction this ticket's review turned up: Spark DecimalType is
+        # exact fixed-point, so it HAS a grid — reading it as "approximate,
+        # therefore exempt" leaves the gate covering nothing, because decimal is
+        # what the cast converts today.
+        assert spark_dtype_value_step("decimal(38,10)") == 10.0 ** -10
+        assert spark_dtype_value_step("decimal(18,2)") == 0.01
+        assert spark_dtype_value_step("decimal(10,0)") == 1.0
 
-    def test_non_numeric_types_are_not(self):
+    def test_float_and_double_state_no_grid(self):
+        # These are genuinely approximate: nothing in the config says how far
+        # apart their values are, so no bound can be stated and the gate stays
+        # silent about them. This is what stops a permanent false alarm.
+        for dtype in ("float", "double"):
+            assert spark_dtype_value_step(dtype) is None, dtype
+
+    def test_non_numeric_types_state_no_grid(self):
         for dtype in ("string", "date", "timestamp", "binary", "array<int>"):
-            assert spark_dtype_is_exact_integer(dtype) is False, dtype
+            assert spark_dtype_value_step(dtype) is None, dtype
+
+
+class TestExactValueLimit:
+    def test_unit_step_reduces_to_the_significand(self):
+        # The number issue #281 states, recovered from the general formula.
+        assert exact_value_limit(1.0, "float32") == float(2 ** 24)
+        assert exact_value_limit(1.0, "float64") == float(2 ** 53)
+
+    def test_a_non_power_of_two_step_floors_to_the_binade_below(self):
+        # The whole correction. `0.01 * 2**24` is 167,772.16 and is WRONG:
+        # float32's spacing there is already 0.015625, so values 0.01 apart have
+        # collided. Measured with numpy: 200k distinct values 0.01 apart keep
+        # 128,000 at 167,772 and all 200,000 at 131,072.
+        assert exact_value_limit(0.01, "float32") == 131072.0
+        assert exact_value_limit(0.01, "float32") < 0.01 * 2 ** 24
+
+    def test_a_power_of_two_step_needs_no_flooring(self):
+        assert exact_value_limit(0.5, "float32") == float(2 ** 23)
+
+    def test_bits_table_covers_every_declarable_storage_type(self):
+        assert set(SIGNIFICAND_BITS) == set(NUMERIC_STORAGE_TYPES)
 
 
 class TestNumericPrecisionErrorsB8:
+    @staticmethod
+    def _ints(**cols) -> dict:
+        return {c: ColumnPrecision(v, 1.0) for c, v in cols.items()}
+
     def test_no_columns_is_clean(self):
         assert numeric_precision_errors({}, "float32") == []
 
@@ -2382,36 +2420,62 @@ class TestNumericPrecisionErrorsB8:
         # 2^24 itself is representable; the first integer that is not is
         # 2^24 + 1. An off-by-one here either rebuilds a dataset nobody needed
         # to rebuild or lets a lossy column through.
-        assert numeric_precision_errors({"a": float(2 ** 24)}, "float32") == []
+        assert numeric_precision_errors(self._ints(a=float(2 ** 24)), "float32") == []
 
     def test_one_above_the_limit_is_rejected(self):
-        errs = numeric_precision_errors({"a": float(2 ** 24 + 1)}, "float32")
+        errs = numeric_precision_errors(self._ints(a=float(2 ** 24 + 1)), "float32")
         assert len(errs) == 1
         assert "B8" in errs[0]
         assert "'a'" in errs[0]
 
-    def test_message_names_the_column_the_value_and_both_fixes(self):
-        errs = numeric_precision_errors({"acct_bal": 33554433.0}, "float32")
+    def test_message_names_the_column_its_value_and_the_bound(self):
+        errs = numeric_precision_errors(self._ints(acct_bal=33554433.0), "float32")
         assert "acct_bal" in errs[0]
-        assert "33554433" in errs[0]
-        assert "16777216" in errs[0]
-        # Two fixes, both spelled out: change the column, or widen the type.
-        assert "float64" in errs[0]
-        assert "dataset.numeric_feature_storage_type" in errs[0]
+        assert "33,554,433" in errs[0]
+        assert "16,777,216" in errs[0]
+
+    def test_message_does_not_offer_float64_as_a_fix(self):
+        # Nothing reads numeric_feature_storage_type to widen the cast until
+        # #283, so "declare float64" would rebuild everything, change no stored
+        # value, and only raise this gate's own bound — it silences the alarm.
+        # The remedies offered have to be ones that work today.
+        errs = numeric_precision_errors(self._ints(a=float(2 ** 24 + 1)), "float32")
+        assert "float64" not in errs[0]
+        assert "numeric_precision_policy: truncate" in errs[0]
+
+    def test_a_decimal_column_is_bounded_by_its_own_resolution(self):
+        # The case the whole correction exists for: decimal(18,2) values 0.01
+        # apart cannot go past 131,072, far below the integer bound.
+        assert numeric_precision_errors(
+            {"bal": ColumnPrecision(131072.0, 0.01)}, "float32") == []
+        errs = numeric_precision_errors(
+            {"bal": ColumnPrecision(200000.0, 0.01)}, "float32")
+        assert len(errs) == 1
+        assert "131,072" in errs[0]
+        assert "0.01 apart" in errs[0]
+
+    def test_the_same_magnitude_passes_as_an_integer_and_fails_as_a_decimal(self):
+        # Paired so neither half can be vacuous: 200,000 is fine on a grid of 1
+        # and lossy on a grid of 0.01. A gate that ignored value_step would
+        # answer the same for both.
+        assert numeric_precision_errors(self._ints(a=200000.0), "float32") == []
+        assert len(numeric_precision_errors(
+            {"a": ColumnPrecision(200000.0, 0.01)}, "float32")) == 1
 
     def test_boolean_shaped_and_small_values_pass(self):
         assert numeric_precision_errors(
-            {"flag": 1.0, "zero": 0.0, "small": 99.0}, "float32") == []
+            self._ints(flag=1.0, zero=0.0, small=99.0), "float32") == []
 
     def test_all_null_column_reads_as_zero_and_passes(self):
         # The reader reports max(|x|) over zero non-null values as 0.0; a column
         # with no values cannot lose one.
-        assert numeric_precision_errors({"empty": 0.0}, "float32") == []
+        assert numeric_precision_errors(self._ints(empty=0.0), "float32") == []
 
     def test_missing_statistics_is_an_error_not_a_pass(self):
         # The decision recorded for this ticket: a column the gate cannot prove
         # safe is not a column it lets through.
-        errs = numeric_precision_errors({"mystery": None}, "float32")
+        errs = numeric_precision_errors(
+            {"mystery": ColumnPrecision(None, 1.0)}, "float32")
         assert len(errs) == 1
         assert "mystery" in errs[0]
         assert "statistic" in errs[0].lower()
@@ -2420,21 +2484,20 @@ class TestNumericPrecisionErrorsB8:
         assert "numeric_precision_policy" in errs[0]
 
     def test_float64_has_its_own_wider_limit(self):
-        # Recommending float64 as the fix is only honest if float64 is itself
-        # gated: an int64 above 2^53 collides there too.
-        assert numeric_precision_errors({"a": float(2 ** 53)}, "float64") == []
-        assert len(numeric_precision_errors({"a": 2.0 ** 53 * 4}, "float64")) == 1
+        assert numeric_precision_errors(self._ints(a=float(2 ** 53)), "float64") == []
+        assert len(numeric_precision_errors(
+            self._ints(a=2.0 ** 53 * 4), "float64")) == 1
 
     def test_multiple_offenders_are_collected_not_first_one_wins(self):
-        errs = numeric_precision_errors(
-            {"c": 2.0 ** 40, "a": 2.0 ** 30, "b": None}, "float32")
+        errs = numeric_precision_errors({
+            "c": ColumnPrecision(2.0 ** 40, 1.0),
+            "a": ColumnPrecision(2.0 ** 30, 1.0),
+            "b": ColumnPrecision(None, 1.0),
+        }, "float32")
         assert len(errs) == 3
         # Sorted by column so two runs of the same config read the same way.
         assert errs[0].index("'a'") > 0 and "'b'" in errs[1] and "'c'" in errs[2]
 
-    def test_limits_table_covers_every_declarable_storage_type(self):
-        assert set(EXACT_INTEGER_LIMITS) == set(NUMERIC_STORAGE_TYPES)
-
     def test_an_undeclarable_storage_type_raises_rather_than_passing(self):
         with pytest.raises(ConfigConsistencyError):
-            numeric_precision_errors({"a": 1.0}, "float16")
+            numeric_precision_errors(self._ints(a=1.0), "float16")

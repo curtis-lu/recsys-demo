@@ -7,19 +7,11 @@ hold, ``max(|value|)`` per column, and parquet already carries it: every row
 group's footer records a min and a max per column, written by the writer as it
 went. Reading them is a seek to the end of each file.
 
-The read goes through the Spark JVM's Hadoop ``FileSystem`` rather than through
-pyarrow. That is not a preference — it is the door this repo already uses for a
-Hive table's files. ``utils/hdfs.copy_hdfs_to_local`` takes the same one, and
-``io/handles.ParquetHandle`` is documented as *driver-local*: the training
-pipeline copies partitions down before pyarrow ever sees them.
-
-pyarrow does ship an HDFS client (``pyarrow.fs.HadoopFileSystem``), and it is
-not dismissed for being absent. It needs ``libjvm``/``libhdfs`` loaded into the
-*Python* process — a second JVM beside Spark's, found through ``JAVA_HOME`` and
-a Hadoop ``CLASSPATH`` — and it raises before it can be used at all where those
-are not set up (measured here: ``OSError: Unable to load libjvm``). Spark's JVM
-is already running, already holds the cluster's Hadoop configuration, and adds
-no dependency, which production forbids anyway.
+The read goes through the Spark JVM's Hadoop ``FileSystem`` — the door this repo
+already uses for a Hive table's files (``utils/hdfs.copy_hdfs_to_local``), and
+not pyarrow, whose own HDFS client needs a second JVM loaded into the Python
+process. Why that choice and not the alternatives: ADR-0006's 2026-09-03
+amendment.
 """
 
 from __future__ import annotations

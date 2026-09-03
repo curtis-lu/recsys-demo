@@ -524,7 +524,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
 | `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
-| `pipelines/dataset/pipeline.py` | `validate_numeric_precision` | **B8 精度閘不會跑**，這一輪不會有人確認被 cast 的整數欄撐得過宣告的 `numeric_feature_storage_type`。**例外同上：被模式明確點名時會跑**——它在 `ONLY_TEST_MONTHS_NODES` 裡，因為加一個評估月份會寫出一個新月份的 `preprocessed_feature_table` 分區，那個月份就該被檢查（2026-09-03 使用者裁決，issue #281） |
+| `pipelines/dataset/pipeline.py` | `validate_numeric_precision` | **B8 精度閘不會跑**，這一輪不會有人確認被 cast 的欄撐得過宣告的 `numeric_feature_storage_type`。**例外同上：被模式明確點名時會跑**——它在 `ONLY_TEST_MONTHS_NODES` 裡，因為加一個評估月份會寫出一個新月份的 `preprocessed_feature_table` 分區，那個月份就該被檢查（2026-09-03 使用者裁決，issue #281） |
 | `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 
 **位置只給檔案、不給行號**：三個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。

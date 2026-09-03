@@ -93,7 +93,7 @@ regression 風險，用測試守得住，零 production 成本。
 ## 修訂（2026-09-03，issue #281）：新增了一個需要「資料的事實」的閘門，零掃描仍然成立
 
 上面那段的界線是「**加一條 `groupBy` 全掃會改變這個節點的成本量級**」。#281 加的
-不變量 B8（被 cast narrow 的整數欄撐不撐得過宣告的 `numeric_feature_storage_type`）
+不變量 B8（被 cast narrow 的欄撐不撐得過宣告的 `numeric_feature_storage_type`）
 需要每欄的 `max(|x|)`——這是**資料的事實**，不是設定的事實，也不在 metastore 裡。
 所以它是這條 ADR 寫下後第一個逼問「零掃描到底是不是硬界線」的案子。
 
@@ -129,10 +129,18 @@ dataset 閘門的成本量級，這條 ADR 的決定原封不動。
    `CLASSPATH` 找），沒設好時連建構都會 raise（本機實測：`OSError: Unable to load
    libjvm`）。Spark 的 JVM 本來就在跑、本來就拿著叢集的 Hadoop 設定，而且不新增依賴
    ——生產環境本來就禁止新增套件。
-3. **footer 沒有統計值時不退回掃描，而是 raise**（`numeric_precision_policy: warn`
+3. **footer 沒有統計值時不退回掃描，而是 raise**（`numeric_precision_policy: truncate`
    可放行）。退回掃描會讓成本從零掃描**靜默**升級成一次實掃，正是這條 ADR 要避免的
    那件事；而且那條 fallback 幾乎不會被執行到，等於留一段沒人驗證過的程式碼。
    全 null 的欄別到安全邊（`num_nulls == row_count` 說明它沒有值可以失真），不 raise。
+
+> **同日補記（issue #281 的兩軸審查抓到）**：本票原本的判準是「**整數欄** `max(|x|) > 2^24`」，
+> 而 `decimal` 被當成「浮點、不受此判準約束」排除。那是事實錯誤——Spark 的 `DecimalType` 是
+> **精確定點**，值落在 `10^-scale` 的格點上。而 cast 今天**只轉 Decimal 與 Double**，所以照原判準
+> 做出來的閘門檢查集合恆為空：唯一該擋的型別正好被假前提排除。修正後的判準改讀「該欄 dtype 宣告的
+> 格點間距」（整數／boolean = 1、`decimal(p,s)` = `10^-s`、float／double 無格點故不設界），
+> 界＝`2^(floor(log2(step)) + 尾數位元)`。推導與實測數字在 `core/consistency.py` 的模組 docstring。
+> **這一段記在 ADR-0006 是因為它改變了閘門的作用範圍**，不是因為它改變了零掃描的結論——取值方式未變。
 
 ## 這條 ADR 沒有解決的事
 

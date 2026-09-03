@@ -30,8 +30,20 @@ produced":
   the declared storage type; a run that finishes writes the same parquet either
   way. Hashing it would mean flipping the policy to inspect one column rebuilt
   every artifact under the version, which is why the declaration
-  (``numeric_feature_storage_type``, which *does* change the parquet) and its
-  gate live in two keys rather than one.
+  (``numeric_feature_storage_type``) and its gate live in two keys rather than
+  one. The declaration stays hashed because it is *about* the stored bytes —
+  though note that nothing honours it yet: the cast writes float32
+  unconditionally until issue #283, so declaring float64 today moves this ID
+  without changing a single stored value.
+
+  Known limit of that exclusion, recorded rather than fixed: the dataset is
+  built incrementally (ADR-0002), so a month admitted under ``truncate`` and a
+  month admitted under ``block`` accumulate under the *same*
+  ``base_dataset_version``. Per run the exclusion holds — a run that finishes
+  writes the same bytes either way — but across runs the ID no longer says
+  whether every month in it was proved lossless. Hashing the policy would fix
+  that at the cost of rebuilding everything whenever an operator flips it to
+  inspect one column, which is the trade issue #281 decided against.
 
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.
@@ -84,14 +96,11 @@ ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_K
 COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 
 # Dataset keys that decide how a *failure* is reported, never what a *success*
-# produces. ``numeric_precision_policy`` chooses between raising and warning
-# when a feature column cannot round-trip through
-# ``numeric_feature_storage_type``; both spellings write identical parquet on
-# the runs that finish. Registered here rather than folded into
-# ``COVERAGE_ONLY_KEYS`` because the two exclusions answer different questions —
-# coverage is about which months exist, policy is about how a run ends — and a
-# reader who finds a gate flag under a name that says "coverage" learns the
-# wrong rule for the next key.
+# produces. Registered here rather than folded into ``COVERAGE_ONLY_KEYS``
+# because the two exclusions answer different questions — coverage is about
+# which months exist, policy is about how a run ends — and a reader who finds a
+# gate flag under a name that says "coverage" learns the wrong rule for the next
+# key. Why this one qualifies: module docstring.
 GATE_POLICY_KEYS: frozenset[str] = frozenset({"numeric_precision_policy"})
 
 
@@ -139,8 +148,7 @@ def compute_base_dataset_version(
     val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
     (and therefore ``model_version``) does not change. ``GATE_POLICY_KEYS`` is
-    stripped for the third reason in the module docstring: it changes how a
-    failing run reports, not what a finishing run writes.
+    stripped for the third reason in the module docstring.
 
     ``feature_table_fingerprint`` (optional) reflects the actual
     ``feature_table`` schema (column name + dtype, ordered). When provided it

@@ -55,17 +55,20 @@ def test_the_numeric_storage_type_is_not_a_live_yaml_key():
     )
 
 
-def test_the_numeric_storage_keys_are_documented_in_comments():
-    text = _PATH.read_text()
-    for key in ("numeric_feature_storage_type", "numeric_precision_policy"):
-        assert f"# {key}:" in text, f"{key} has no commented declaration"
+def test_the_storage_type_is_documented_in_comments():
+    assert "# numeric_feature_storage_type:" in _PATH.read_text(), (
+        "numeric_feature_storage_type has no commented declaration"
+    )
 
 
-def test_the_policy_key_is_the_one_that_could_have_been_live():
-    # Not a style assertion — it pins why the pair is two keys. The policy key
-    # is stripped from the hash (GATE_POLICY_KEYS), so activating it would cost
-    # nothing; it stays commented only so the pair reads as one block. If this
-    # ever stops holding, the split into two keys has lost its point.
+def test_the_policy_key_is_live_and_that_is_the_point_of_two_keys():
+    # The gate policy is the operator's only switch between "stop the run" and
+    # "accept the truncation", so hiding it in a comment would make it
+    # unreachable. It can be live precisely because it is stripped from the
+    # version hash (GATE_POLICY_KEYS) — setting it rebuilds nothing. If that
+    # ever stops holding, splitting the pair into two keys has lost its point.
     from recsys_tfb.core.versioning import GATE_POLICY_KEYS
+    from recsys_tfb.core.consistency import PRECISION_POLICIES
 
     assert "numeric_precision_policy" in GATE_POLICY_KEYS
+    assert _dataset_block().get("numeric_precision_policy") in PRECISION_POLICIES

@@ -2551,13 +2551,13 @@ class TestValidateNumericPrecisionGate:
         assert "big_int" in str(exc.value)
         assert "B8" in str(exc.value)
 
-    def test_warn_policy_logs_instead_of_raising(
+    def test_truncate_policy_logs_instead_of_raising(
         self, spark, tmp_path, parameters, caplog,
     ):
         landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24 + 1})
         with caplog.at_level("WARNING"):
             self._run(landed, _precision_params(
-                parameters, numeric_precision_policy="warn"))
+                parameters, numeric_precision_policy="truncate"))
         assert "big_int" in caplog.text
 
     def test_float64_declared_widens_the_bound(self, spark, tmp_path, parameters):
@@ -2611,3 +2611,78 @@ class TestValidateNumericPrecisionGate:
         message = str(exc.value)
         assert "found no parquet files" in message
         assert message.count("B8:") == 1
+
+
+class TestValidateNumericPrecisionOnDecimal:
+    """The gate firing on today's cast, with nothing patched.
+
+    Decimal is what ``cast_feature_floats_to_float32`` converts right now, and
+    Spark's DecimalType is exact fixed-point — its values sit on a grid of
+    ``10**-scale``. So this is the one class here that exercises the whole path
+    (selector -> dtype step -> footer read -> bound) against the production
+    wiring. If it ever needs a patch to fire, the gate has stopped covering the
+    cast.
+    """
+
+    @staticmethod
+    def _landed_decimal(spark, tmp_path, value, scale=2):
+        from decimal import Decimal
+
+        schema = T.StructType([
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("bal", T.DecimalType(18, scale)),
+            T.StructField("base_dataset_version", T.StringType()),
+            T.StructField("snap_date", T.StringType()),
+        ])
+        rows = [("C001", Decimal(str(value)), _BASE_VERSION, "2024-01-31")]
+        root = str(tmp_path / "pft_dec")
+        spark.createDataFrame(rows, schema).write.partitionBy(
+            "base_dataset_version", "snap_date",
+        ).parquet(root)
+        return spark.read.parquet(root)
+
+    _META = {"feature_columns": ["bal"]}
+
+    def _run(self, landed, params):
+        validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"), params)
+
+    def test_a_decimal_column_within_its_bound_passes(
+        self, spark, tmp_path, parameters,
+    ):
+        # decimal(18,2) values are 0.01 apart, so float32 holds them intact up
+        # to 131,072 -- two orders of magnitude below the integer bound.
+        landed = self._landed_decimal(spark, tmp_path, "131072.00")
+        self._run(landed, _precision_params(parameters))
+
+    def test_a_decimal_column_past_its_bound_is_caught_unpatched(
+        self, spark, tmp_path, parameters,
+    ):
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with pytest.raises(DataConsistencyError) as exc:
+            self._run(landed, _precision_params(parameters))
+        message = str(exc.value)
+        assert "bal" in message
+        # The bound quoted must be the decimal one, not the integer one: a gate
+        # that ignored the column's scale would report 16,777,216 and pass.
+        assert "131,072" in message
+        assert "200,000" in message
+
+    def test_the_same_magnitude_passes_at_scale_zero(
+        self, spark, tmp_path, parameters,
+    ):
+        # Paired with the test above so neither is vacuous: 200,000 is fine on a
+        # grid of 1 and lossy on a grid of 0.01. Same value, same code path,
+        # opposite verdict -- which is the scale actually being read.
+        landed = self._landed_decimal(spark, tmp_path, "200000", scale=0)
+        self._run(landed, _precision_params(parameters))
+
+    def test_truncate_policy_lets_the_same_column_through(
+        self, spark, tmp_path, parameters, caplog,
+    ):
+        # The operator's switch, on the path that actually fires today.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with caplog.at_level("WARNING"):
+            self._run(landed, _precision_params(
+                parameters, numeric_precision_policy="truncate"))
+        assert "bal" in caplog.text
