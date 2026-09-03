@@ -182,12 +182,7 @@ def test_lightgbm_prepare_train_inputs_writes_bins(tmp_path):
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     adapter = LightGBMAdapter()
     cache_dir = tmp_path / "variant"
@@ -233,12 +228,7 @@ def test_lightgbm_prepare_train_inputs_cache_hit(tmp_path, monkeypatch):
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
     adapter = LightGBMAdapter()
     cache_dir = tmp_path / "variant"
 
@@ -289,12 +279,7 @@ def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
     adapter = LightGBMAdapter()
     cache_dir = tmp_path / "variant"
 
@@ -441,12 +426,7 @@ def test_lightgbm_prepare_passes_categorical_feature(tmp_path, monkeypatch):
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     # Spy on lgb.Dataset.__init__ to capture categorical_feature args passed
     # during construction. lgb binary format does not persist categorical_feature,

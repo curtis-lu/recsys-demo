@@ -8,9 +8,10 @@ from recsys_tfb.evaluation.comparison.sources import load_compare_predictions
 def _params_for_mv(mv: str, snap: str = "2026-01-31") -> dict:
     return {
         "schema": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "score": "score", "rank": "rank", "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "score": "score", "rank": "rank", "label": "label",
+            },
             "categorical_values": {"prod_name": ["p1", "p2", "p3"]},
         },
         "evaluation": {
@@ -207,9 +208,10 @@ def test_model_version_hive_db_qualifies_enriched_table_name(spark, monkeypatch)
 def _params_for_ext(snap: str = "2026-01-31", policy: str = "fail") -> dict:
     return {
         "schema": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "score": "score", "rank": "rank", "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "score": "score", "rank": "rank", "label": "label",
+            },
             "categorical_values": {"prod_name": ["fund_stock", "fund_bond", "exchange_usd"]},
         },
         "evaluation": {

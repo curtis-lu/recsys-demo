@@ -2,8 +2,8 @@
 
 
 def _params(per_cell=30, top_k=1, enabled=True):
-    return {"schema": {"time": "snap_date", "entity": ["cust_id"],
-                       "item": "prod_name", "label": "label"},
+    return {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                                   "item": "prod_name", "label": "label"}},
             "diagnostics": {"shap": {"quadrant_enabled": enabled,
                                      "quadrant_top_k_decision": top_k,
                                      "quadrant_sample_per_cell": per_cell}}}

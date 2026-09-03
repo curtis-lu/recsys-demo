@@ -57,13 +57,14 @@ def _make_parameters() -> dict:
         # whatever the cache holds" path to lean on.
         "dataset": {"test_snap_dates": ["2025-01-31", "2025-02-28"]},
         "schema": {
-            "time": "snap_date",
-            "entity": ["cust_id"],
-            "item": "prod_name",
-            "label": "label",
-            "score": "score",
-            "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date",
+                "entity": ["cust_id"],
+                "item": "prod_name",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
         },
     }
 

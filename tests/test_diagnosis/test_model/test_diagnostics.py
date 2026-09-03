@@ -616,7 +616,8 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
                     "categorical_columns": ["prod_name"],
                     "category_mappings": {"prod_name": ["A", "B"]}}
     parameters = {"model_version": "mvpart",
-                  "schema": {"item": "prod_name", "label": "label"},
+                  "schema": {"columns": {"item": "prod_name",
+                                         "label": "label"}},
                   "diagnostics": {"shap": {"enabled": True, "top_k": 3,
                                            "min_rows_per_item": 10, "sample_rows": 120,
                                            "max_budget": 4000000}}}

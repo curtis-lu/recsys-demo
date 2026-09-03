@@ -128,8 +128,9 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
 SAMPLING_DESCRIPTION = "分層抽樣：正例 query 全取，負例 query 依 hash 取 40%。"
 
 _DIAG_PARAMS = {
-    "schema": {"time": "snap_date", "entity": ["cust_id"],
-               "item": "prod_name", "label": "label", "score": "score"},
+    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                           "item": "prod_name", "label": "label",
+                           "score": "score"}},
     "dataset": {
         "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
         "sample_ratio": 1.0,

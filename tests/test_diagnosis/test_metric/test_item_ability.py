@@ -203,8 +203,9 @@ def test_disabled_returns_stub_with_same_key_set():
 
 def _params(n_boot=20):
     return {
-        "schema": {"time": "snap_date", "entity": ["cust_id"],
-                   "item": "prod_name", "label": "label", "score": "score"},
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score"}},
         "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": n_boot},
                                      "sample": {"seed": 42},
                                      "item_ability": {"enabled": True, "top_n": 30}}},

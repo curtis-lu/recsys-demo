@@ -12,6 +12,7 @@
 | 新增或修改一個 node | A1、A2、A5、A6、A7 ＋ F4、F5 ＋ [`pipeline-node-design.md`](pipeline-node-design.md) |
 | 動 `pipelines/dataset/` 的 node | 上一列 ＋ S1、S2 |
 | 寫任何讀 `schema.entity` 的程式碼（分組、切分、抽樣、算母體） | S4 |
+| 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -39,9 +40,9 @@
 
 ---
 
-## 11 條約束一覽
+## 12 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**27 個測試，1.63–1.74 秒**（2026-09-02 連跑三次；S4 的掃描範圍擴到 `tests/` 之後——掃描的檔案數從 141 變成 295，這 0.6 秒就是它的代價）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**32 個測試，2.13–2.35 秒**（2026-09-03 分兩批各連跑三次；S5 加進來之後——它跟 S4 掃同樣的 299 個檔案，各自解析一次）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -56,6 +57,7 @@
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
 | [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
 | [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | `src/recsys_tfb/` ＋ `tests/` | `scripts/` 不在範圍內（**現有一處，已裁決不修**）；解包等其他取法；值一離開綁定它的語句就看不到（含同模組的 helper 參數） |
+| [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告-identity_columns) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns` | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -476,6 +478,58 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
   ```
   ⚠ **這在本 repo 不是假想的形狀，是主流寫法**：`src/` 有 14 個函式吃 entity 清單型的參數（`group_cols`、`identity_cols`、`entity_cols`），包含本條上面那張表推薦你去看的 `common_universe`，以及 `pipelines/dataset/steps/sampling.py::keep_entities_drawn_under_ratio`。#264 的修法還把切分邏輯**更往這個形狀推**（`get_entity_grouping(...)` → `split_cols` → 交給 `spark_bucket`）。**第五次違例掉在 `steps/` helper 裡的機率，比掉在 node 裡高。**
 - **名稱綁定不分支**（flow-insensitive）：同一個名字先綁 entity 清單、後來改綁別的東西再索引，會被誤報。這個取捨的方向是**假陽性**（有人會看到、會來修），不是假陰性（安靜地出貨一個錯數字）。
+
+---
+
+## S5. `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns`
+
+`get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、不會有警告、也不算錯誤**——它被整塊忽略，每個呼叫端拿到的都是 `_DEFAULTS`：
+
+```python
+{"schema": {"entity": ["branch_id", "cust_id"], "item": "sku"}}
+# get_schema -> {'entity': ['cust_id'], 'item': 'prod_name', ...}   ← 你寫的被丟掉
+
+{"schema": {"columns": {"entity": ["branch_id", "cust_id"], "item": "sku"}}}
+# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', ...}
+```
+
+這條**不是**預防性守衛。開票時（#274）`tests/` 有 **24 個定義點**是前一種寫法，而且**沒有一個因此測錯東西**——每一處寫下的值剛好都等於預設值。這正是它危險的地方：它不是 bug，是**照抄來源**。下一個要寫多欄 entity 測試的人隨手抄一處，第二欄無聲消失，測試對著不支援多欄的程式碼全綠。#263 一開工就撞到 `test_comparison_restrict.py::_params()` 正是這個形狀。
+
+**兩條規則，缺一不可**：
+
+| # | 規則 | 為什麼 |
+|---|---|---|
+| 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
+| 2 | 任何深度都不得宣告 `identity_columns` | 它是 `get_schema` **推導**出來的（`[time] + entity + [item]`），不是設定鍵 |
+
+**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _DEFAULTS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
+
+**`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
+
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_DEFAULTS`），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+
+```
+tests/params.py:3: schema.entity -- a role belongs under schema.columns
+tests/params.py:4: schema.identity_columns -- get_schema derives this; a declared one is dropped
+```
+
+（這是真的跑出來的。上線當下、24 處還沒改之前，這個掃描一次點名 **94 個鍵、15 個檔**——不是只紅在第一個。）
+
+`TestS5SchemaColumnsLayer::test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住；`TestS5SchemaColumnsLayer::test_the_scan_sees_every_spelling` 用六個 tmp 檔釘住六種寫法，其中 `half_fix.py` 就是上面那個「包進 `columns` 但照樣被丟掉」的形狀——刪掉掃描器的 `schema.columns` 分支，只有它會轉紅。
+
+**沒有例外登記表。** S5 是「寫設定的形狀」，不是「某個函式可以破例」；一個站點要嘛寫對要嘛寫錯，沒有值得豁免的情形。要放寬只能改掃描範圍，而範圍被 `TestS5SchemaColumnsLayer::test_the_scan_roots_are_real_and_pinned` 釘住。⚠ **S4 有一個同名的測試方法**（`TestS4NoFirstEntityColumn::test_the_scan_roots_are_real_and_pinned`），兩條的掃描範圍是各自釘各自的——引用時連類別名一起寫，不然指不清是哪一條。
+
+### 這個檢查看不到
+
+- **`scripts/` 不在掃描範圍內，而且那裡的 5 處同形是假陽性，不是缺陷。** `config_sorting_shift_diagnosis.py`、`item_ability_diagnosis.py`、`per_item_score_shift_diagnosis.py`、`per_item_score_shift_optuna_diagnosis.py`、`suppression_ledger_diagnosis.py` 各有一處 `report = {"schema": {"item": schema["item"]}, ...}`——那是**輸出報表的 metadata**，寫進 JSON 給人看的，從來不會餵進 `get_schema`。把 `scripts/` 擴進掃描範圍只會逼出一張全是假陽性的豁免表。**不要再把它當成待辦重新「發現」一次**（裁決日 2026-09-03，比照 S4 對 `scripts/shap_margin_summary.py` 的做法）。
+- **`conf/` 的 YAML 不在範圍內。** 掃的是 Python 字面值。`conf/base/parameters.yaml` 現在寫對（`schema.columns`），但一份寫錯層的 YAML 會用完全一樣的方式安靜失效，而這條擋不住它。
+- **`schema` 區塊先綁到變數再組進 parameters 就看不到了**：
+  ```python
+  SCHEMA = {"entity": ["cust_id"]}      # 掃不到
+  PARAMS = {"schema": SCHEMA}
+  ```
+  認的是 `{"schema": {...}}` 這個字面形狀。這個取捨是刻意的：**它同時是「不要誤報已解析 schema」的那道界線**——`get_schema` 的回傳值合法地帶著 `identity_columns`，`tests/test_core/test_versioning.py::_sample_schema` 就是那個形狀，必須維持合法。放寬到「任何含角色名的 dict」會把它一起打死。
+- **這條不保證呼叫端傳對東西。** 修 #274 時實測到：`test_config_shift.py` 與 `test_suppression.py` 共 5 個呼叫點把 `PARAMS["schema"]`（設定區塊）當成**已解析的 schema** 直接傳進 `build_offset_frame`／`cross_purchase_stats`——那只有在設定寫錯層、形狀剛好長得像已解析 schema 的時候才行得通。包上 `columns` 之後它們立刻 `KeyError`，已改走 `get_schema(...)`。**S5 抓不到這種「兩種形狀被混為一談」的呼叫**，它只管宣告端。
 
 ---
 
