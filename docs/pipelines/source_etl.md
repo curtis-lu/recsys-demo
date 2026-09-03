@@ -185,6 +185,7 @@ source_checks:
 | schema contract | 宣告 `primary_key` 後自動執行 | 確認 primary key 欄位實際存在於輸出表 |
 | 最少列數 | `min_row_count` | 目標 `snap_date` partition 至少應有多少列 |
 | 重複鍵比例 | `max_duplicate_key_ratio` | 依 `primary_key` 計算重複比例；設定 `0.0` 表示不允許重複 |
+| primary key 為 NULL | 隨 `max_duplicate_key_ratio` 一起執行 | `primary_key` 任一欄出現 NULL 就 fail，並點名是哪一欄、幾列 |
 | 整體 NULL 比例 | `max_null_ratio` | 計算該 partition 所有資料格的整體 NULL 比例 |
 
 ```yaml
@@ -195,6 +196,13 @@ quality_checks:
 ```
 
 零列資料會略過重複鍵與 NULL 比例檢查，因此若空 partition 不可接受，必須同時設定正數的 `min_row_count`。
+
+`max_duplicate_key_ratio` 是**整組 primary key 檢查的開關**：只宣告 `primary_key`
+不會跑任何值檢查（只跑 schema contract）。重複鍵與 NULL 兩個判定共用同一趟聚合、
+各自回報（`check` 欄位分別是 `max_duplicate_key_ratio` 與 `primary_key_not_null`），
+所以拿掉這個鍵會同時關掉兩者。dataset pipeline 讀的三張表——`sample_pool`、
+`label_table`、`feature_table`——由不變量 A32 在 CLI 進入點確保這個鍵還在，
+見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
 
 ### 3.7 建表與 schema evolution
 

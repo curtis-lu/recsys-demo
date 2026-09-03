@@ -427,9 +427,13 @@ def _setup_etl_conf(tmp_path, source_checks=None):
             "variables": {"target_db": "ml_recsys"},
             "source_checks": source_checks or {},
             "tables": [
+                # feature_table is one of the dataset pipeline's three source
+                # tables, so A32 requires the key check here the same way
+                # conf/base declares it.
                 {"name": "feature_table", "sql_file": "feature/feature_table.sql",
                  "partition_by": {"snap_date": "DATE"},
-                 "primary_key": ["snap_date", "cust_id"]},
+                 "primary_key": ["snap_date", "cust_id"],
+                 "quality_checks": {"max_duplicate_key_ratio": 0.0}},
             ],
         }
     }

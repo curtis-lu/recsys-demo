@@ -2571,3 +2571,156 @@ class TestNumericPrecisionRows:
         errors = numeric_precision_errors(by_column, "float32")
         assert flagged == {"bad", "none"}
         assert len(errors) == len(flagged)
+
+
+from recsys_tfb.core.consistency import (
+    DATASET_SOURCE_TABLES,
+    PRIMARY_KEY_CHECK,
+    dataset_source_quality_check_errors,
+)
+
+
+class TestDatasetSourceQualityChecksA32:
+    """A32 — the three tables the dataset pipeline reads must keep the key
+    that switches source_etl's primary-key check on (issue #289)."""
+
+    @staticmethod
+    def _table(name, **over):
+        t = {
+            "name": name,
+            "sql_file": f"{name}/{name}.sql",
+            "partition_by": {"snap_date": "DATE"},
+            "primary_key": ["snap_date", "cust_id"],
+            "quality_checks": {PRIMARY_KEY_CHECK: 0.0},
+        }
+        t.update(over)
+        return t
+
+    def _params(self, **table_over):
+        """conf/base's shape: three stages, the guarded table last in each."""
+        return {
+            "sample_pool_etl": {"tables": [
+                self._table("sample_pool", **table_over.get("sample_pool", {})),
+            ]},
+            "label_etl": {"tables": [
+                self._table("label_ccard", quality_checks={}),
+                self._table("label_table", **table_over.get("label_table", {})),
+            ]},
+            "feature_etl": {"tables": [
+                self._table("feature_aum", quality_checks={}),
+                self._table("feature_table", **table_over.get("feature_table", {})),
+            ]},
+        }
+
+    def test_the_three_guarded_tables_are_the_dataset_pipeline_inputs(self):
+        assert set(DATASET_SOURCE_TABLES) == {
+            "sample_pool", "label_table", "feature_table"
+        }
+
+    def test_compliant_config_is_clean(self):
+        assert dataset_source_quality_check_errors(self._params()) == []
+
+    def test_missing_key_names_the_table_and_the_key_to_add(self):
+        errs = dataset_source_quality_check_errors(
+            self._params(sample_pool={"quality_checks": {}}))
+        assert len(errs) == 1
+        assert "A32" in errs[0]
+        assert "sample_pool" in errs[0]
+        assert PRIMARY_KEY_CHECK in errs[0]
+        # The stage tells the operator which file to open.
+        assert "sample_pool_etl" in errs[0]
+
+    def test_absent_quality_checks_block_is_the_same_failure(self):
+        errs = dataset_source_quality_check_errors(
+            self._params(feature_table={"quality_checks": None}))
+        assert len(errs) == 1
+        assert "feature_table" in errs[0]
+
+    def test_several_missing_are_collected_not_raised_one_at_a_time(self):
+        errs = dataset_source_quality_check_errors(self._params(
+            sample_pool={"quality_checks": {}},
+            label_table={"quality_checks": {}},
+            feature_table={"quality_checks": {}},
+        ))
+        assert len(errs) == 3
+        assert {"sample_pool", "label_table", "feature_table"} == {
+            t for t in DATASET_SOURCE_TABLES
+            if any(t in e for e in errs)
+        }
+
+    def test_the_unguarded_five_are_left_alone(self):
+        # feature_aum/sav/ccard/info/concat declare a primary_key and no
+        # quality_checks on purpose (ADR-0006: check the terminal table only).
+        # A32 must not drag them in — that would buy five extra scans.
+        errs = dataset_source_quality_check_errors(self._params())
+        assert errs == []
+        assert not any("feature_aum" in e or "label_ccard" in e for e in errs)
+
+    def test_the_table_is_found_by_name_not_by_position(self):
+        params = self._params()
+        params["feature_etl"]["tables"].reverse()   # guarded table now first
+        assert dataset_source_quality_check_errors(params) == []
+        params["feature_etl"]["tables"][0]["quality_checks"] = {}
+        assert len(dataset_source_quality_check_errors(params)) == 1
+
+    def test_explicit_yaml_null_threshold_is_rejected(self):
+        # `max_duplicate_key_ratio:` with no value passes source_etl's `in`
+        # test and then blows up comparing a float to None, after the scan.
+        errs = dataset_source_quality_check_errors(
+            self._params(label_table={"quality_checks": {PRIMARY_KEY_CHECK: None}}))
+        assert len(errs) == 1
+        assert "label_table" in errs[0]
+
+    def test_a_threshold_that_can_never_fail_is_rejected(self):
+        # The measured ratio is always < 1, so >= 1 leaves the check declared
+        # and permanently off — A32's whole point.
+        for value in (1, 1.0, 2):
+            errs = dataset_source_quality_check_errors(
+                self._params(sample_pool={"quality_checks": {PRIMARY_KEY_CHECK: value}}))
+            assert len(errs) == 1, value
+            assert "sample_pool" in errs[0]
+
+    def test_a_threshold_that_can_never_pass_is_rejected(self):
+        errs = dataset_source_quality_check_errors(
+            self._params(sample_pool={"quality_checks": {PRIMARY_KEY_CHECK: -0.1}}))
+        assert len(errs) == 1
+
+    def test_a_tolerant_but_usable_threshold_is_accepted(self):
+        assert dataset_source_quality_check_errors(
+            self._params(sample_pool={"quality_checks": {PRIMARY_KEY_CHECK: 0.5}})) == []
+
+    def test_a_table_no_etl_stage_declares_is_not_this_gate(self):
+        # A32 reads a declaration's content. A source table nothing produces
+        # fails loudly at the Hive read instead, and every minimal test config
+        # in this repo omits the ETL stages entirely.
+        assert dataset_source_quality_check_errors({}) == []
+        assert dataset_source_quality_check_errors(
+            {"sample_pool_etl": {"tables": []}}) == []
+
+    def test_needs_no_spark_only_parameters(self):
+        import inspect
+        sig = inspect.signature(dataset_source_quality_check_errors)
+        assert list(sig.parameters) == ["parameters"]
+
+    def test_wired_into_validate_config_consistency(self):
+        params = self._params(sample_pool={"quality_checks": {}})
+        params["schema"] = {"columns": {"item": "prod_name"}}
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(params)
+        assert "A32" in str(exc.value)
+
+    def test_the_real_conf_passes_today(self):
+        # A32 is a no-op against conf/ as it stands: it exists to fire the day
+        # somebody deletes one of the three keys, not to demand a config edit.
+        from recsys_tfb.core.config import ConfigLoader
+
+        parameters = ConfigLoader("conf", env="local").get_parameters()
+        assert dataset_source_quality_check_errors(parameters) == []
+        # ...and it is actually looking at something: all three are declared.
+        for name in DATASET_SOURCE_TABLES:
+            assert any(
+                t.get("name") == name
+                for stage, block in parameters.items()
+                if stage.endswith("_etl")
+                for t in (block.get("tables") or [])
+            ), name

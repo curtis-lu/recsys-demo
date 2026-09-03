@@ -20,7 +20,8 @@ class CheckResult:
     # 報告用欄位（皆有預設，向後相容）
     table: str = ""
     check: str = ""          # source: partition_exists/row_count/schema_drift;
-    #                          output: min_row_count/max_duplicate_key_ratio/max_null_ratio/schema_contract
+    #                          output: min_row_count/primary_key_not_null/
+    #                          max_duplicate_key_ratio/max_null_ratio/schema_contract
     snap_date: str = ""
     expected: str = ""
     actual: str = ""
@@ -197,30 +198,127 @@ class OutputChecker:
             snap_date=snap_date, expected=f">= {min_count}", actual=str(count),
         )
 
-    def check_duplicate_keys(
+    def check_primary_key(
         self,
         db: str,
         table: str,
         snap_date: str,
         primary_key: list[str],
         max_ratio: float,
-    ) -> CheckResult:
-        """Check the ratio of duplicate keys."""
+    ) -> list[CheckResult]:
+        """Check the declared primary key: no NULLs, and no duplicates.
+
+        A primary key declaration always means both things at once, and Spark's
+        ``COUNT(DISTINCT ...)`` conflates them: it skips every row where any key
+        column is NULL, so NULL rows leave the distinct count and reappear as
+        "duplicates". Measured on a 5-row table with 2 NULL ``cust_id`` and not
+        one duplicated row, the single old verdict read ``duplicate key ratio:
+        0.4000`` and sent the operator looking for duplicate rows that do not
+        exist (issue #289). Hence two results, one per cause, each with its own
+        ``check`` name so the audit log can tell them apart.
+
+        **Still one scan.** The NULL counts are extra ``SUM(CASE WHEN ...)``
+        terms inside the aggregate the duplicate check already ran, not a second
+        pass over the table — ADR-0006 puts these checks upstream precisely
+        because they cost a scan, so splitting the diagnosis must not buy
+        another one.
+
+        The duplicate ratio is measured over ``keyed_total`` — the rows that
+        carry a non-NULL key, i.e. exactly the rows ``COUNT(DISTINCT ...)``
+        counts. On a table with no NULLs that is every row and the number is
+        identical to what this check reported before; on one with NULLs it stops
+        reporting them twice.
+
+        The SQL is built from ``primary_key`` column by column: the key comes
+        from config and ``schema.entity`` is a list, so no column name may be
+        spelled out here.
+        """
         pk_cols = ", ".join(primary_key)
+        any_null = " OR ".join(f"`{col}` IS NULL" for col in primary_key)
+        null_counts_sql = ", ".join(
+            f"SUM(CASE WHEN `{col}` IS NULL THEN 1 ELSE 0 END) AS `null_{col}`"
+            for col in primary_key
+        )
         sql = (
-            f"SELECT COUNT(*) AS total, COUNT(DISTINCT {pk_cols}) AS distinct_cnt "
+            f"SELECT COUNT(*) AS total, COUNT(DISTINCT {pk_cols}) AS distinct_cnt, "
+            f"SUM(CASE WHEN {any_null} THEN 0 ELSE 1 END) AS keyed_total, "
+            f"{null_counts_sql} "
             f"FROM {db}.{table} WHERE snap_date = '{snap_date}'"
         )
         row = self._spark.sql(sql).collect()[0]
+        # SUM over an empty partition is NULL, not 0.
         total = row["total"]
         distinct = row["distinct_cnt"]
-        if total == 0:
+        keyed_total = row["keyed_total"] or 0
+        null_counts = {
+            col: (row[f"null_{col}"] or 0) for col in primary_key
+        }
+
+        return [
+            self._null_key_result(
+                db, table, snap_date, primary_key, total, keyed_total, null_counts
+            ),
+            self._duplicate_key_result(
+                db, table, snap_date, total, keyed_total, distinct, max_ratio
+            ),
+        ]
+
+    @staticmethod
+    def _null_key_result(
+        db: str,
+        table: str,
+        snap_date: str,
+        primary_key: list[str],
+        total: int,
+        keyed_total: int,
+        null_counts: dict[str, int],
+    ) -> CheckResult:
+        """Verdict on "a primary key column is never NULL".
+
+        No threshold key configures this: it is not a ratio the operator tunes
+        but the other half of what ``primary_key`` already declares. Only the
+        offending columns are named — the operator is being pointed at what to
+        go fix.
+        """
+        offending = {col: n for col, n in null_counts.items() if n}
+        expected = f"no NULL in {primary_key}"
+        if not offending:
             return CheckResult(
-                True, f"{db}.{table} has 0 rows, skip dup check", metric_value=0.0,
-                table=table, check="max_duplicate_key_ratio",
-                snap_date=snap_date, expected=f"<= {max_ratio}", actual="0 rows",
+                True, f"{db}.{table} primary key has no NULLs ({', '.join(primary_key)})",
+                metric_value=0,
+                table=table, check="primary_key_not_null",
+                snap_date=snap_date, expected=expected, actual="none",
             )
-        ratio = (total - distinct) / total
+        detail = ", ".join(f"{col}={n}" for col, n in offending.items())
+        return CheckResult(
+            False,
+            f"{db}.{table} primary key column(s) contain NULL: {detail} "
+            f"(of {total} row(s)). A primary key column must never be NULL — "
+            f"fix the SQL producing {table} so it drops or fills those rows.",
+            metric_value=total - keyed_total,
+            table=table, check="primary_key_not_null",
+            snap_date=snap_date, expected=expected, actual=detail,
+        )
+
+    @staticmethod
+    def _duplicate_key_result(
+        db: str,
+        table: str,
+        snap_date: str,
+        total: int,
+        keyed_total: int,
+        distinct: int,
+        max_ratio: float,
+    ) -> CheckResult:
+        """Verdict on "the keyed rows are distinct", worded as before #289."""
+        if keyed_total == 0:
+            actual = "0 rows" if total == 0 else f"0 of {total} row(s) carry a key"
+            return CheckResult(
+                True, f"{db}.{table} has {actual}, skip dup check", metric_value=0.0,
+                table=table, check="max_duplicate_key_ratio",
+                snap_date=snap_date, expected=f"<= {max_ratio}", actual=actual,
+            )
+        ratio = (keyed_total - distinct) / keyed_total
         passed = ratio <= max_ratio
         return CheckResult(
             passed,
@@ -340,16 +438,19 @@ class OutputChecker:
             results.append(result)
             logger.info(result.message, extra={"event": "output_check", "passed": result.passed})
 
+        # A32 (core/consistency.py) is what keeps this key declared on the three
+        # tables the dataset pipeline reads: without it, deleting one line of
+        # config silently turns off the NULL diagnosis too.
         if "max_duplicate_key_ratio" in qc and table_config.primary_key:
-            result = self.check_duplicate_keys(
+            for result in self.check_primary_key(
                 target_db,
                 table_config.name,
                 snap_date,
                 table_config.primary_key,
                 qc["max_duplicate_key_ratio"],
-            )
-            results.append(result)
-            logger.info(result.message, extra={"event": "output_check", "passed": result.passed})
+            ):
+                results.append(result)
+                logger.info(result.message, extra={"event": "output_check", "passed": result.passed})
 
         if "max_null_ratio" in qc:
             result = self.check_null_ratio(
