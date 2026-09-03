@@ -390,8 +390,10 @@ class TestBuildInferencePopulationFeatures:
             "build_inference_population_features: 1 unknowns in column 'channel'"
         ]
 
-    def test_casts_float_features_to_float32(self, spark, parameters, preprocessor):
-        """Decimal AND Double feature columns must be cast to float (float32).
+    def test_casts_numeric_features_to_the_declared_type(
+        self, spark, parameters, preprocessor,
+    ):
+        """Numeric feature columns converge on the declared storage type.
 
         Mirror of build_model_input behaviour: this table is read back into
         pandas per chunk and would otherwise face the same memory cost
@@ -441,6 +443,24 @@ class TestBuildInferencePopulationFeatures:
         assert leftover == [], (
             f"feature_columns still contain decimal/double types: {leftover}"
         )
+
+        # #283 — and the target is the declared type, not a constant. The
+        # scoring population must be stored the way the training frames were:
+        # a node that ignored the key here would store float32 against a
+        # float64 model_input and nothing would go red until the two were
+        # compared, which nothing does.
+        float64_params = {
+            **parameters,
+            "dataset": {
+                **parameters.get("dataset", {}),
+                "numeric_feature_storage_type": "float64",
+            },
+        }
+        wide = build_inference_population_features(
+            population, features, preprocessor, float64_params
+        )
+        wide_dtypes = dict(wide.dtypes)
+        assert [wide_dtypes[c] for c in feature_cols] == ["double"] * len(feature_cols)
 
 
 def _population_params(entity_buckets: int = 1) -> dict:

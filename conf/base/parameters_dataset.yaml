@@ -69,7 +69,11 @@ dataset:
   # --- Validation（驗證集）---
   val_snap_dates:
     - "2025-12-31"
-  val_sample_ratio: 1.0
+  # 0.5（2026-09-04，#283）。原本是 1.0——val 完全不抽樣、吃下整個母體，而 train 有抽樣，
+  # 驗證集比訓練集大是反過來的（#278）。生產母體是百萬級 entity，抽一半仍是數十萬個
+  # query group，mAP 的穩定度綽綽有餘，換到的是 val 重算成本減半。
+  # 搭 #283 的便車改：兩者翻的是同一個 base_dataset_version，多付的成本是零。
+  val_sample_ratio: 0.5
 
   # 抽樣單位：val_sample_ratio < 1 時，抽中的 entity 會被整批保留。
   # 預設（不宣告）＝完整 schema.entity；合法值同 train_split_keys（不變量 A29）。
@@ -90,11 +94,14 @@ dataset:
   # 為什麼宣告在 dataset 而不在 training：精度是「存下來的資料」的性質，不是讀取端的。
   #   parquet 已經是 float32 時，在 training 端要一個 float64 的矩陣只是把尾數補零——
   #   多吃一倍記憶體換到零資訊，而且會多出第二個宣告點讓兩邊可以靜默不一致。
-  # ⚠ **#283 之前不要宣告 float64。** cast helper 目前把目標寫死 float32
-  #   （preprocessing.cast_feature_floats_to_float32），還沒有人讀這個鍵；#283 才會兌現它。
-  #   在那之前宣告 float64 的實際效果是：翻掉 base_dataset_version（整批重算）＋ 把下面
-  #   那個精度閘門的上限從 2^24 放寬到 2^53（等於靜音），而 parquet 逐位元不變。
-  # ⚠ 改此鍵會翻 base_dataset_version（#283 之後它會真的改變 parquet 的內容）。
+  # 收斂的範圍是**所有數值特徵欄**（decimal／double／float／整數族／boolean），不是只有
+  #   浮點的那幾種。理由是同質性：pdf_to_X 用 DataFrame.values 把整個 frame 攤平成一個
+  #   矩陣，pandas 只挑**一個**共同 dtype，所以一欄 int64 就讓整個矩陣變 float64（翻倍）、
+  #   一欄 boolean 就讓它變 object（就是 B6 要擋的那個 OOM）。實作與實測見
+  #   preprocessing.cast_numeric_features_to_storage_type 的 docstring。
+  # ⚠ 改此鍵會翻 base_dataset_version，而且會真的改變 parquet 的內容（#283 之後
+  #   cast helper 真的讀這個鍵；在那之前它把目標寫死 float32，宣告 float64 只會靜音
+  #   精度閘門而 parquet 逐位元不變）。
   # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 base_dataset_version，即使值等同預設。
   # numeric_feature_storage_type: float32
 

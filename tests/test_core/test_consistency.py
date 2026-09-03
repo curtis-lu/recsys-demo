@@ -1002,10 +1002,14 @@ class TestTrainingDiagnosticsParamsA20:
             validate_config_consistency(self._params(background="per_query"))
 
 
+from pyspark.sql import types as T
+
 from recsys_tfb.core.consistency import (
+    _NUMERIC_SPARK_TYPES,
     nonnumeric_feature_errors,
     spark_dtype_is_numeric,
 )
+from recsys_tfb.preprocessing import CASTABLE_NUMERIC_TYPES
 
 
 class TestSparkDtypeIsNumeric:
@@ -1028,6 +1032,65 @@ class TestSparkDtypeIsNumeric:
     )
     def test_classification(self, dt, expected):
         assert spark_dtype_is_numeric(dt) is expected
+
+
+class TestB6AdmissionIsBackedByTheCast:
+    """Every type B6 admits must be one the cast actually converts (#283).
+
+    ``spark_dtype_is_numeric`` used to say these types "survive
+    ``DataFrame.values`` into a numeric numpy matrix". That was false for two
+    of them — ``boolean`` mixed with float gives ``object`` in pandas, and
+    ``decimal`` gives boxed ``Decimal`` objects — i.e. precisely the OOM B6
+    exists to prevent, arriving through a dtype B6 waves through. What makes
+    the admission correct is not the type: it is that
+    ``preprocessing.cast_numeric_features_to_storage_type`` converts all of
+    them before any pandas frame exists.
+
+    That makes the classifier's correctness a *dependency* on the cast's
+    coverage, and this class is where the dependency is pinned. Shrink the
+    cast's whitelist and these go red, rather than the docstring going quietly
+    untrue again.
+
+    No SparkSession: ``pyspark.sql.types`` instances need none.
+    """
+
+    #: One instance per admitted dtype, so the string form and the Spark type
+    #: can be checked against each other. Hand-written rather than derived —
+    #: deriving both sides from one source is how a pair like this stops being
+    #: able to disagree.
+    _INSTANCES = {
+        "tinyint": T.ByteType(),
+        "smallint": T.ShortType(),
+        "int": T.IntegerType(),
+        "bigint": T.LongType(),
+        "float": T.FloatType(),
+        "double": T.DoubleType(),
+        "boolean": T.BooleanType(),
+        "decimal(18,2)": T.DecimalType(18, 2),
+    }
+
+    def test_the_instance_table_covers_every_admitted_simple_string(self):
+        # Guard the guard: without this, adding a type to the whitelist and
+        # not to the table would leave it untested rather than red.
+        assert set(_NUMERIC_SPARK_TYPES) | {"decimal(18,2)"} == set(self._INSTANCES)
+
+    @pytest.mark.parametrize("simple_string", sorted(_INSTANCES))
+    def test_every_admitted_type_is_one_the_cast_converts(self, simple_string):
+        dtype = self._INSTANCES[simple_string]
+        assert spark_dtype_is_numeric(simple_string) is True
+        assert isinstance(dtype, CASTABLE_NUMERIC_TYPES), (
+            f"B6 admits {simple_string!r} as reaching the model as a number, "
+            f"but the cast does not convert it — so it would reach pandas as "
+            f"itself. Either the cast must cover it or B6 must stop admitting "
+            f"it."
+        )
+
+    @pytest.mark.parametrize("simple_string", sorted(_INSTANCES))
+    def test_the_two_sides_agree_on_the_spelling(self, simple_string):
+        # The classifier reads simpleStrings; the cast reads Spark types. This
+        # is the only place the two vocabularies meet, so a Spark release that
+        # respelled one of them has to argue here.
+        assert self._INSTANCES[simple_string].simpleString() == simple_string
 
 
 class TestNonnumericFeatureErrors:
@@ -2435,14 +2498,23 @@ class TestNumericPrecisionErrorsB8:
         assert "33,554,433" in errs[0]
         assert "16,777,216" in errs[0]
 
-    def test_message_does_not_offer_float64_as_a_fix(self):
-        # Nothing reads numeric_feature_storage_type to widen the cast until
-        # #283, so "declare float64" would rebuild everything, change no stored
-        # value, and only raise this gate's own bound — it silences the alarm.
-        # The remedies offered have to be ones that work today.
+    def test_message_offers_float64_last_and_says_what_it_costs(self):
+        # #283 made the declaration real: the cast now reads
+        # numeric_feature_storage_type, so widening it genuinely stores wider
+        # values. Before that it was excluded on purpose — it would have
+        # rebuilt everything, changed no stored value, and only raised this
+        # gate's own bound, i.e. silenced the alarm.
+        #
+        # Offered last, and never bare: it widens every feature column to buy
+        # headroom for the few that need it, so a reader who sees only the
+        # remedy and not its price takes the expensive fix by default.
         errs = numeric_precision_errors(self._ints(a=float(2 ** 24 + 1)), "float32")
-        assert "float64" not in errs[0]
-        assert "numeric_precision_policy: truncate" in errs[0]
+        msg = errs[0]
+        assert "numeric_feature_storage_type: float64" in msg
+        assert "doubles" in msg
+        assert "numeric_precision_policy: truncate" in msg
+        assert msg.index("representation upstream") < msg.index("float64")
+        assert msg.index("float64") < msg.index("numeric_precision_policy")
 
     def test_a_decimal_column_is_bounded_by_its_own_resolution(self):
         # The case the whole correction exists for: decimal(18,2) values 0.01

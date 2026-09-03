@@ -124,7 +124,7 @@ override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_ed
 |---|---|---|---|
 | `calibration_sample_ratio` | `1.0` | calibration 的預設抽樣比例 | `calibration_variant_id` |
 | `calibration_sample_ratio_overrides` | `{}` | calibration 的分層比例覆寫 | `calibration_variant_id` |
-| `val_sample_ratio` | `1.0` | 依 entity 縮減 val 母體 | `base_dataset_version` |
+| `val_sample_ratio` | `0.5` | 依 entity 縮減 val 母體 | `base_dataset_version` |
 | `val_sample_keys` | 完整 `entity` | 抽樣單位：`schema.entity` 的非空子集 | `base_dataset_version` |
 
 calibration 與 train 共用 `sample_group_keys`，但使用不同 sampling site，因此即使 seed 相同也不會刻意取得相同 bucket。test 不提供抽樣比例，會保留設定日期內的完整候選母體。
@@ -338,8 +338,8 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | Calibration keys | `select_calibration_keys` | `sample_pool` | 依 calibration 日期與比例抽樣 | `calibration_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
-| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（今天是 decimal）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
-| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並轉 float32 | 各 split 的 model input |
+| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
+| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
 
 model input 的組裝規則：

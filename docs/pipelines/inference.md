@@ -618,7 +618,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - 目前每個 entity 共用同一份 products 清單，不支援 per-entity eligibility。
 - score 必須位於 `[0, 1]`；這對未校準的 ranking objective 是額外限制。
 - 模型評分必須在 driver（生產禁 UDF），所以每個 `(entity 桶, item)` chunk 的特徵會被收集到 pandas，不是完全 distributed inference。與 #188 之前的差別是**不再累積**：算完就落地，driver 上同時只有一個桶。
-- **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定：特徵全 float32 時不膨脹，但只要有一欄 int32／int64 特徵（`cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步就多吃一倍。實際值取決於生產 `feature_table` 的 dtype 分佈。
+- **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。
 - **跨 chunk 的一致性沒有機制保證。** 一次 run 裡不同 chunk 用的是同一個模型與同一張中間表，但如果中間表在 run 進行中被另一個 process 改寫，前後 chunk 會基於不同的特徵。這個情況今天沒有任何檢查會紅。
 - score 相同時沒有額外 tie-break key，Spark `row_number` 對同分 items 的相對名次不保證穩定。

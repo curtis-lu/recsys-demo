@@ -15,8 +15,8 @@ Everything here is mechanism, not decision: ``encode_categoricals``
 implements "unknown category -> sentinel" once the sentinel is chosen,
 ``encodable_categoricals`` implements "an identity categorical is not this
 frame's to encode" once identity is defined, and
-``cast_feature_floats_to_float32`` implements "numeric features converge on
-float32" once that convergence is decided. The decisions themselves are named
+``cast_numeric_features_to_storage_type`` implements "numeric features
+converge on one storage type" once that type is declared. The decisions themselves are named
 by the callers' steps; see ADR-0008 section 2 for where that line is drawn.
 """
 
@@ -176,11 +176,38 @@ def warn_unknown_encodings(
             )
 
 
+#: The Spark cast target for each declarable
+#: ``dataset.numeric_feature_storage_type``. Keyed by the same strings
+#: ``core.consistency.NUMERIC_STORAGE_TYPES`` declares, and a test pins the two
+#: sets equal so a third storage type cannot become declarable without a cast
+#: target. The config spells the types in numpy's vocabulary because a numpy
+#: matrix is where the values end up; Spark spells the same two "float" and
+#: "double", and this dict is the only place that translation lives.
+SPARK_CAST_TARGET: dict[str, str] = {
+    "float32": "float",
+    "float64": "double",
+}
+
+#: Every Spark type whose feature columns the cast converts. A whitelist, not
+#: "anything but string": an unrecognised type must be left alone rather than
+#: fed to ``.cast()`` on the guess that it is a number.
+CASTABLE_NUMERIC_TYPES: tuple[type, ...] = (
+    T.DecimalType,
+    T.DoubleType,
+    T.FloatType,
+    T.ByteType,
+    T.ShortType,
+    T.IntegerType,
+    T.LongType,
+    T.BooleanType,
+)
+
+
 def castable_numeric_feature_columns(
     schema: T.StructType,
     feature_cols: list[str],
 ) -> list[str]:
-    """The feature columns ``cast_feature_floats_to_float32`` would convert.
+    """The feature columns ``cast_numeric_features_to_storage_type`` converts.
 
     Split out from the cast itself because a second caller needs the answer
     *without* the conversion: the dataset pipeline's B8 precision gate
@@ -188,6 +215,12 @@ def castable_numeric_feature_columns(
     and reading the same selector is what makes that a structural fact instead
     of two lists that have to be kept in step by hand. Widening the cast is
     therefore one edit here, and the gate widens with it.
+
+    **Every numeric type is in scope, including the ones that are already
+    float32.** The point is a homogeneous frame, not a narrowing: a FloatType
+    column left alone is wrong the moment float64 is the declared type, and the
+    selector cannot depend on the target without the two halves of "converge on
+    one type" drifting apart.
 
     Takes a ``StructType`` rather than a DataFrame so the rule is testable
     without a SparkSession. Returns frame order, not ``feature_cols`` order —
@@ -197,38 +230,63 @@ def castable_numeric_feature_columns(
     return [
         f.name for f in schema.fields
         if f.name in feature_set
-        and isinstance(f.dataType, (T.DecimalType, T.DoubleType))
+        and isinstance(f.dataType, CASTABLE_NUMERIC_TYPES)
     ]
 
 
-def cast_feature_floats_to_float32(
+def cast_numeric_features_to_storage_type(
     df: DataFrame,
     feature_cols: list[str],
+    storage_type: str,
 ) -> tuple[DataFrame, list[str]]:
-    """Cast DecimalType and DoubleType columns within feature_cols to float (float32).
+    """Cast every numeric feature column to the declared storage type.
 
-    Invariant: model_input's numeric feature columns are stored as float32.
+    Decision — model_input's numeric feature columns converge on **one** storage
+    type, named by ``dataset.numeric_feature_storage_type`` and resolved by the
+    caller (``core.consistency.resolved_numeric_storage``).
 
-    LightGBM is histogram-based GBT (max_bin=256, so split decisions resolve
-    at log2(256)=8-bit granularity). float32's ~7-digit decimal precision is
-    far beyond what binning can use, making float64 / decimal128 pure waste:
+    **Why converge at all.** LightGBM is a histogram-based GBT (max_bin=256, so
+    split decisions resolve at log2(256)=8-bit granularity). float32's ~7-digit
+    precision is already far past what binning can use, so anything wider is
+    memory spent for no model:
 
-    - decimal128 is the disaster case: pandas/pyarrow materializes it as
-      Python ``decimal.Decimal`` objects (~70 B/value vs 4 B/float32), so
-      extract_Xy peak memory explodes (originally OOM-killed the val read).
-    - DoubleType is the silent case: ~2x the memory of float32 (8 vs 4 B)
-      and ~2x slower on SIMD-vectorized pandas ops, with zero compensating
-      benefit for the model.
+    - decimal128 is the disaster case: pandas/pyarrow materialises it as Python
+      ``decimal.Decimal`` objects (~70 B/value vs 4 B/float32), so extract_Xy
+      peak memory explodes (originally OOM-killed the val read).
+    - DoubleType is the silent case: ~2x the memory of float32 (8 vs 4 B) and
+      ~2x slower on SIMD-vectorized pandas ops.
 
-    Identity and label columns are intentionally NOT cast — they should not
-    be a numeric float type to begin with, and silent coercion of primary
-    keys / label dtype would mask a real schema bug.
+    **Why integers and boolean are in scope, not just the float-like types.**
+    Convergence is a property of the *frame*, not of each column on its own —
+    ``pdf_to_X`` flattens it with ``DataFrame.values``, and pandas picks one
+    common dtype for the whole matrix. A single un-cast column decides that
+    dtype for every other column:
+
+    - one int64 feature among float32 ones -> the common type is float64, so
+      **the entire matrix doubles** for that one column's sake.
+    - one boolean feature among float32 ones -> the common type is ``object``
+      (measured, pandas 1.5.3; pandas' ``find_common_type`` refuses to mix bool
+      with a numeric type, unlike numpy, which would give float32). That is the
+      boxed-object OOM invariant B6 exists to prevent, arriving through a dtype
+      B6 admits.
+
+    So the selector covers every numeric Spark type including FloatType, which
+    is a no-op at float32 and a real widening at float64. Narrowing is not the
+    goal; one dtype is.
+
+    **Why identity and label columns are never cast.** They are excluded by
+    construction — the caller passes ``feature_cols``, and identity/label are
+    not in it. That exclusion is deliberate rather than incidental: neither
+    should be a numeric float type to begin with, so silently coercing a
+    primary key or a label dtype would hide a real schema bug instead of
+    reporting it.
 
     Returns:
         (df, casted_cols) where ``casted_cols`` is the subset of
-        ``feature_cols`` that were DecimalType or DoubleType.
+        ``feature_cols`` this call put through ``.cast()``, in frame order.
     """
     casted_feature_cols = castable_numeric_feature_columns(df.schema, feature_cols)
+    target = SPARK_CAST_TARGET[storage_type]
 
     # One select, not the more readable ``for col in ...: df.withColumn(...)``.
     # Every withColumn stacks another Projection onto the logical plan and
@@ -237,11 +295,10 @@ def cast_feature_floats_to_float32(
     # execution stayed under 2s either way. Full measurement table and the
     # general shape: known-pitfalls.md section 20.
     #
-    # 1,000 columns is where this is headed, not where it is: today only
-    # Decimal and Double feature columns enter the projection, and #283 widens
-    # it to every numeric feature column. Whatever the width, ``build_model_input``
-    # runs five times per dataset run (train / train_dev / val / test /
-    # calibration) and the inference pipeline shares this helper.
+    # 1,000 columns is where this now is, not where it is headed: since #283
+    # every numeric feature column enters the projection, and
+    # ``build_model_input`` runs five times per dataset run (train / train_dev /
+    # val / test / calibration) with the inference pipeline sharing this helper.
     #
     # Two things the loop got for free that the select has to pay for, both
     # pinned by tests in tests/test_preprocessing.py:
@@ -254,7 +311,7 @@ def cast_feature_floats_to_float32(
     #     loop never touched it. The backticks buy that parity back.
     to_cast = set(casted_feature_cols)
     projection = [
-        F.col(f"`{col}`").cast("float").alias(col) if col in to_cast
+        F.col(f"`{col}`").cast(target).alias(col) if col in to_cast
         else F.col(f"`{col}`")
         for col in df.columns
     ]

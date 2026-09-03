@@ -295,7 +295,11 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
   an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and
   a downstream LightGBM float-cast error. Predicate: ``nonnumeric_feature_errors``
-  (with the ``spark_dtype_is_numeric`` classifier). Wired at TWO call sites — the
+  (with the ``spark_dtype_is_numeric`` classifier). What that classifier admits
+  is "the cast converts this to a number", not "this is already a number":
+  ``boolean`` and ``decimal`` both force ``object`` dtype if they reach pandas
+  un-cast, and are admitted only because
+  ``preprocessing.cast_numeric_features_to_storage_type`` covers them (#283). Wired at TWO call sites — the
   dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
   in) and a training-read backstop in ``io/extract.py`` (fails fast on an
   already-built parquet, before the expensive pandas read). B4 is unused.
@@ -337,9 +341,12 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   cast actually converts** — the node intersects
   ``preprocessing.castable_numeric_feature_columns`` (the same selector the cast
   itself uses) with the dtypes that state a grid step, so the gate widens by
-  itself the day the cast widens (issue #283) and there is never a window where
-  it covers less than the cast does. Today that intersection is the Decimal
-  columns: Double states no grid, so nothing can be claimed about it.
+  itself the day the cast widens and there is never a window where it covers
+  less than the cast does. Issue #283 is where that paid out: widening the cast
+  to every numeric feature column widened this gate to the integer and boolean
+  columns in the same edit, with no second list to update. That intersection is
+  now the Decimal, integer and boolean columns; Float and Double state no grid,
+  so nothing can be claimed about them.
   **The facts come from parquet footer statistics, not from an aggregation** —
   the dataset gates' cost invariant is zero scans (ADR-0006, and its amendment
   for this gate), and a ``max(abs(...))`` over the months would have changed
@@ -1374,11 +1381,12 @@ def categorical_dtype_errors(
 # B6 — non-numeric feature column that will not be encoded (object-dtype OOM)
 # ---------------------------------------------------------------------------
 
-# Spark ``DataFrame.dtypes`` simpleStrings for the numeric/boolean types that
-# survive ``DataFrame.values`` into a numeric numpy matrix. ``decimal(p,s)`` is
-# the only parametric one (special-cased below). Whitelist, NOT blacklist: an
-# unknown type (char/varchar/void/null/…) must be treated as non-numeric so it
-# is never silently passed by the B6 gate (fail-safe).
+# Spark ``DataFrame.dtypes`` simpleStrings for the types the cast in
+# ``build_model_input`` converts to the declared storage type, so that what
+# reaches pandas is a number. ``decimal(p,s)`` is the only parametric one
+# (special-cased below). Whitelist, NOT blacklist: an unknown type
+# (char/varchar/void/null/…) must be treated as non-numeric so it is never
+# silently passed by the B6 gate (fail-safe).
 _NUMERIC_SPARK_TYPES = frozenset(
     {"tinyint", "smallint", "int", "bigint", "float", "double", "boolean"}
 )
@@ -1386,10 +1394,30 @@ _NUMERIC_SPARK_TYPES = frozenset(
 
 def spark_dtype_is_numeric(simple_string: str) -> bool:
     """True iff a Spark ``DataFrame.dtypes`` simpleString denotes a type that
-    survives ``DataFrame.values`` into a numeric numpy matrix (int / float /
-    decimal / boolean). Every other type — string / binary / date / timestamp /
-    char / varchar / void / null / complex — forces ``object`` dtype (the B6
-    footgun) and returns False. Pure string classification (no Spark import).
+    reaches the model as a number (int / float / decimal / boolean). Every other
+    type — string / binary / date / timestamp / char / varchar / void / null /
+    complex — forces ``object`` dtype (the B6 footgun) and returns False. Pure
+    string classification (no Spark import).
+
+    **Read the admission as "the cast converts it", not "it is already safe".**
+    Two of the admitted types would poison a pandas frame if they arrived
+    un-cast, which is why the earlier wording here — that these types "survive
+    ``DataFrame.values`` into a numeric numpy matrix" — was false for them:
+
+    * ``boolean`` mixed with float32 gives ``object``, not a numeric matrix
+      (measured, pandas 1.5.3: pandas' ``find_common_type`` refuses to mix bool
+      with a numeric type — numpy on its own would give float32). That is
+      exactly the boxed-object OOM B6 exists to prevent.
+    * ``decimal`` materialises as Python ``decimal.Decimal`` objects, the case
+      that originally OOM-killed the val read.
+
+    What makes admitting them correct is downstream, not intrinsic:
+    ``preprocessing.cast_numeric_features_to_storage_type`` converts **every**
+    type in this whitelist to the declared storage type before any pandas frame
+    exists. The claim and the cast stand or fall together, which is what
+    ``tests/test_core/test_consistency.py::TestB6AdmissionIsBackedByTheCast``
+    pins: shrink the cast's coverage and this classifier's admission goes red
+    rather than becoming quietly untrue again (issue #283).
     """
     dt = simple_string.strip().lower()
     return dt.startswith("decimal") or dt in _NUMERIC_SPARK_TYPES
@@ -1550,13 +1578,16 @@ def numeric_precision_errors(
     key because the alternative — an unrecoverable run for a reason unrelated to
     correctness — is worse than an operator who deliberately accepts the risk.
 
-    The remedies the messages offer are deliberately **not** "declare float64".
-    Nothing reads ``numeric_feature_storage_type`` to widen the cast yet —
-    ``preprocessing.cast_feature_floats_to_float32`` writes float32
-    unconditionally, and issue #283 is what makes the declaration real. Until it
-    lands, taking that advice would rebuild every artifact, change no stored
-    value, and only raise this gate's own bound: it silences the alarm instead of
-    fixing the loss. See the module docstring's B8 section.
+    "Declare float64" became a real remedy in #283 and is offered last, not
+    first. Before #283 it was offered nowhere, because
+    the cast (then named ``cast_feature_floats_to_float32``, a name that no
+    longer exists) wrote float32 unconditionally: taking that
+    advice would have rebuilt every artifact, changed no stored value, and only
+    raised this gate's own bound — silencing the alarm instead of fixing the
+    loss. Now the cast reads the key, so the widening is real. It is still the
+    last resort: it doubles every feature column to buy headroom for the few
+    that need it, where changing the column's representation upstream costs
+    nothing per row. See the module docstring's B8 section.
 
     Collect-all and sorted by column: two runs of the same config read the same
     way, and one fix pass clears every offender.
@@ -1586,10 +1617,14 @@ def numeric_precision_errors(
                 f"above the {limit:,.10g} that {storage_type} can hold at this "
                 f"column's resolution (its values are {value_step:,.10g} apart). "
                 f"Two distinct values would collapse onto one, which can "
-                f"change the ranking. Two fixes: change the column's "
-                f"representation upstream so it needs fewer steps (drop unused "
-                f"decimal places, change the unit, bucket or difference it), or "
-                f"set dataset.numeric_precision_policy: truncate to accept the "
+                f"change the ranking. Three fixes, cheapest first: change "
+                f"the column's representation upstream so it needs fewer steps "
+                f"(drop unused decimal places, change the unit, bucket or "
+                f"difference it); declare "
+                f"dataset.numeric_feature_storage_type: float64, which widens "
+                f"every feature column and so doubles the model input for this "
+                f"one column's sake; or set "
+                f"dataset.numeric_precision_policy: truncate to accept the "
                 f"loss deliberately."
             )
     return errors

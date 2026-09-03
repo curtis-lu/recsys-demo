@@ -84,7 +84,7 @@
 | `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
 | 診斷域退場過整層的模組（`triage`、早期的門檻式 `quadrant`），理由是「不得產生判定、不得用門檻把連續量切成類別」 | 這條的權威來源＝`src/recsys_tfb/diagnosis/__init__.py` 模組 docstring，**去讀那份、不要憑本列**。這裡刻意不列名單：現存的 `compute_quadrant_profiles`／`pair_ledger`／`cross_purchase` 都是活的，列名單只會再一次被讀成「這些是死碼」（2026-08-25 就發生過） |
 | inference 的 `entity_bucket` 分區欄**刻意不做「讀的桶數與寫的桶數分開」**（讀 40 桶控 driver、每 4 桶存一次維持分區檔大小） | 技術上可行且保留為逃生口，但它讓「一個 chunk」變成兩個不同的東西，spec 與續跑判準都要跟著分裂。目前預設 10 桶落在健康窗口（5–20）中間，不需要這個自由度。論證見 ADR-0010「考慮過但否決的選項」 |
-| inference 的 driver 峰值**只有下界推算，沒有實測** | `pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定：只要有一欄 int32／int64 特徵（`cast_feature_floats_to_float32` 刻意只轉 Decimal 與 Double），共同型別升成 float64、那一步多吃一倍。所以文件上的數字是下界不是估計值，實際值取決於生產 `feature_table` 的 dtype 分佈 |
+| inference 的 driver 峰值**只有下界推算，沒有實測** | `pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定，所以文件上的數字是下界不是估計值。**2026-09-04（#283）更新：翻倍那條路已經堵住**——`cast_numeric_features_to_storage_type` 現在把**所有**數值特徵欄（含整數族與 boolean）轉成宣告的儲存型別，特徵側的共同 dtype 因此是宣告值本身（預設 float32），不再被單一 int64 欄拉成 float64。仍是下界的理由變成別的：**延後編碼的 identity 類別欄（如 `prod_name`）在 `pdf_to_X` 才變成 `Categorical.codes`**，不在 Spark 側 cast 的範圍內；實測 float32 ＋ int8／int16 codes 仍是 float32，但 codes 一旦成長到 int32（類別數 >32767）共同型別就會回到 float64。實際峰值仍取決於生產 `feature_table` 的欄數與 chunk 大小 |
 | 診斷報表的鐵則：**只呈現資料，判斷留給讀者** | 給數字、對照點與範圍說明，把角度攤開讓讀者自己選。哪些用字會越線、以及整份報表怎麼編排，見 [`diagnosis-report-presentation.md`](diagnosis-report-presentation.md) |
 
 ## 四、還沒有結論、卡住其他事的

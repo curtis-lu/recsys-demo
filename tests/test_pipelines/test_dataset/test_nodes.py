@@ -696,13 +696,14 @@ class TestFitApplyFilterScopes:
         assert test_dates.issubset(result_dates)
 
 
-def test_build_model_input_casts_float_features_to_float32(
+def test_build_model_input_casts_numeric_features_to_the_declared_type(
     spark, label_table, parameters
 ):
-    """Decimal AND Double feature columns must both be cast to float (float32)
-    inside build_model_input.
+    """Numeric feature columns converge on the declared storage type inside
+    build_model_input.
 
-    Invariant: model_input's numeric feature columns are stored as float32.
+    Invariant: model_input's numeric feature columns all share one dtype, the
+    one ``dataset.numeric_feature_storage_type`` names (default float32).
 
     LightGBM is histogram-based (max_bin=256) — float32's ~7-digit precision
     is far beyond the 8-bit binning resolution, so decimal128 and float64 are
@@ -776,6 +777,26 @@ def test_build_model_input_casts_float_features_to_float32(
     assert out_dtypes["out_amt_sum_l1m"] == "float"
     assert out_dtypes["in_amt_ratio_l1m"] == "float"
     assert out_dtypes["out_amt_ratio_l1m"] == "float"
+
+    # #283 — and the target is the declared type, not a constant. Asserted here
+    # rather than only on the helper: the helper taking a ``storage_type``
+    # argument proves nothing about whether this node passes the configured one
+    # in, which is the whole content of "the declaration is real". Before #283
+    # the node wrote float32 whatever the config said.
+    float64_params = {
+        **parameters,
+        "dataset": {
+            **parameters["dataset"], "numeric_feature_storage_type": "float64",
+        },
+    }
+    wide = build_model_input(
+        train_keys, pft, label_table, preprocessor, float64_params)
+    wide_dtypes = dict(wide.dtypes)
+    numeric_features = [
+        "total_aum", "in_amt_sum_l1m", "fund_aum",
+        "out_amt_sum_l1m", "in_amt_ratio_l1m", "out_amt_ratio_l1m",
+    ]
+    assert [wide_dtypes[c] for c in numeric_features] == ["double"] * 6
 
 
 # --- where Layer-2 gate tests live -------------------------------------------
@@ -2498,18 +2519,31 @@ _METADATA = {"feature_columns": ["big_int", "dbl"]}
 class TestValidateNumericPrecisionScope:
     """What the gate checks today, with the real cast selector."""
 
-    def test_an_integer_column_over_the_bound_is_not_flagged_today(
+    def test_an_integer_column_over_the_bound_is_flagged_since_283(
         self, spark, tmp_path, parameters,
     ):
-        # The promise this ticket makes: landing the gate cannot make an
-        # existing config fail. The cast converts Decimal and Double only, so
-        # no integer column is in scope, however large it is.
+        # Inverted by #283, deliberately. While the cast converted Decimal and
+        # Double only, no integer column was in scope however large it was, and
+        # this test pinned that as the gate's landing promise ("#281 cannot make
+        # an existing config fail"). #283 widened the cast to every numeric
+        # feature column, and the gate reads the cast's own selector — so the
+        # same column is now checked, and 2**40 is far past float32's 2**24.
+        #
+        # Kept as the inverse rather than deleted: this is the one assertion
+        # that goes red if the two are ever unwired again.
         landed = _landed_features(
             spark, tmp_path, {"2024-01-31": 2 ** 40})
-        validate_numeric_precision(
-            landed, _METADATA, _plan("2024-01-31"),
-            _precision_params(parameters),
-        )
+        with pytest.raises(DataConsistencyError) as exc:
+            validate_numeric_precision(
+                landed, _METADATA, _plan("2024-01-31"),
+                _precision_params(parameters),
+            )
+        message = str(exc.value)
+        assert "big_int" in message
+        assert "16,777,216" in message
+        # ``dbl`` stays out of scope: DoubleType states no grid, so no bound
+        # can be claimed for it. Widening the cast did not widen that.
+        assert "dbl" not in message
 
     def test_scope_is_read_from_the_cast_not_restated(self):
         # The structural claim behind the test above: the node asks the cast's
@@ -2522,21 +2556,20 @@ class TestValidateNumericPrecisionScope:
 
 
 class TestValidateNumericPrecisionGate:
-    """The firing path, with the cast standing in as it will be after #283.
+    """The firing path, on the real selector.
 
-    ``castable_numeric_feature_columns`` is patched to name the integer column,
-    which is exactly what widening the cast to integers will make it return.
-    Without the patch every assertion here would be vacuously green — the gate
-    would report "nothing to check" and the raise below could never fire.
+    These used to patch ``castable_numeric_feature_columns`` to return
+    ``["big_int"]``, because the cast converted Decimal and Double only and the
+    gate would otherwise have reported "nothing to check", making every
+    assertion here vacuously green. #283 widened the cast, so the real selector
+    now returns that column on its own and the patch is gone. ``dbl`` is
+    selected too but drops out a step later: DoubleType states no grid, so no
+    bound can be claimed for it.
     """
 
     def _run(self, landed, params, plan_months=("2024-01-31",)):
-        with patch.object(
-            dataset_nodes, "castable_numeric_feature_columns",
-            return_value=["big_int"],
-        ):
-            validate_numeric_precision(
-                landed, _METADATA, _plan(*plan_months), params)
+        validate_numeric_precision(
+            landed, _METADATA, _plan(*plan_months), params)
 
     def test_max_exactly_at_the_bound_passes(self, spark, tmp_path, parameters):
         landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 24})
@@ -2616,9 +2649,9 @@ class TestValidateNumericPrecisionGate:
 class TestValidateNumericPrecisionOnDecimal:
     """The gate firing on today's cast, with nothing patched.
 
-    Decimal is what ``cast_feature_floats_to_float32`` converts right now, and
-    Spark's DecimalType is exact fixed-point — its values sit on a grid of
-    ``10**-scale``. So this is the one class here that exercises the whole path
+    Decimal is one of the types ``cast_numeric_features_to_storage_type``
+    converts, and Spark's DecimalType is exact fixed-point — its values sit on
+    a grid of ``10**-scale``. So this is the one class here that exercises the whole path
     (selector -> dtype step -> footer read -> bound) against the production
     wiring. If it ever needs a patch to fire, the gate has stopped covering the
     cast.
@@ -2746,3 +2779,77 @@ class TestValidateNumericPrecisionOnDecimal:
         assert report["columns"] == []
         assert report["checked_columns"] == 0
         assert report["months"] == []
+
+
+class TestValidateNumericPrecisionCoversTheWidenedCast:
+    """#283 — widening the cast widened this gate, with no second edit.
+
+    The gate's scope is ``preprocessing.castable_numeric_feature_columns`` (the
+    cast's own selector) intersected with the dtypes that state a grid step. So
+    the claim under test is a wiring property, not a new rule: the day the cast
+    started converting integer and boolean columns, the gate started checking
+    them, and nothing in ``validate_numeric_precision`` had to be touched.
+
+    Asserted end to end against the real node rather than by reading the
+    selector, because "the two are wired together" is exactly what a unit test
+    of either half cannot see.
+    """
+
+    @staticmethod
+    def _landed(spark, tmp_path, name, value, dtype):
+        schema = T.StructType([
+            T.StructField("cust_id", T.StringType()),
+            T.StructField(name, dtype),
+            T.StructField("base_dataset_version", T.StringType()),
+            T.StructField("snap_date", T.StringType()),
+        ])
+        rows = [("C001", value, _BASE_VERSION, "2024-01-31")]
+        root = str(tmp_path / f"pft_{name}")
+        spark.createDataFrame(rows, schema).write.partitionBy(
+            "base_dataset_version", "snap_date",
+        ).parquet(root)
+        return spark.read.parquet(root)
+
+    def _run(self, landed, name, params):
+        return validate_numeric_precision(
+            landed, {"feature_columns": [name]}, _plan("2024-01-31"), params)
+
+    def test_a_bigint_feature_column_is_now_in_scope(
+        self, spark, tmp_path, parameters,
+    ):
+        # Grid spacing 1, so the float32 bound is 2**24 -- the number issue #283
+        # states. Before the cast widened, this column was not checked at all.
+        landed = self._landed(spark, tmp_path, "txn_cnt", 16777216, T.LongType())
+        report = self._run(landed, "txn_cnt", _precision_params(parameters))
+        row, = report["columns"]
+        assert row["column"] == "txn_cnt"
+        assert row["value_step"] == 1.0
+        assert row["limit"] == 16777216.0
+        assert row["verdict"] == "ok"
+
+    def test_a_bigint_past_2_to_the_24_is_caught_unpatched(
+        self, spark, tmp_path, parameters,
+    ):
+        # Paired with the test above so neither is vacuous: same column, same
+        # path, one step over the bound.
+        landed = self._landed(spark, tmp_path, "txn_cnt", 16777217, T.LongType())
+        with pytest.raises(DataConsistencyError) as exc:
+            self._run(landed, "txn_cnt", _precision_params(parameters))
+        message = str(exc.value)
+        assert "txn_cnt" in message
+        assert "16,777,216" in message
+        assert "16,777,217" in message
+
+    def test_a_boolean_feature_column_is_now_in_scope(
+        self, spark, tmp_path, parameters,
+    ):
+        # Boolean's values are 0 and 1 on a grid of 1, so it can never breach --
+        # which is the point. It is checked rather than exempt, so the gate's
+        # coverage is "everything the cast converts" without a carve-out that
+        # would have to be re-argued the next time the cast widens.
+        landed = self._landed(spark, tmp_path, "is_active", True, T.BooleanType())
+        report = self._run(landed, "is_active", _precision_params(parameters))
+        row, = report["columns"]
+        assert row["column"] == "is_active"
+        assert row["dtype"] == "boolean"
+        assert row["verdict"] == "ok"
