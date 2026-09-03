@@ -275,9 +275,10 @@ Layer 1 — config-static (implemented here; aggregated by
   being present — declaring ``primary_key`` alone runs no value check — so
   deleting one config line silently turns off both verdicts the check produces:
   duplicate keys and the NULL key columns whose diagnosis issue #289 added.
-  ADR-0006 records the accident already happening once (``feature_table`` had a
-  primary key and no ``quality_checks``, making a ``select_train_keys`` comment
-  false for half a year). Scope is those three tables and not "every table with
+  ADR-0006 records the accident already happening once: ``feature_table`` had a
+  primary key and no ``quality_checks``, so ``select_train_keys``'s comment
+  ("PK enforced upstream by source_etl's max_duplicate_key_ratio") was true for
+  ``sample_pool`` and false for ``feature_table``, unnoticed for half a year. Scope is those three tables and not "every table with
   a ``primary_key``": five feature tables omit ``quality_checks`` deliberately,
   and checking them would add five scans ADR-0006 decided against. Predicate:
   ``dataset_source_quality_check_errors`` (pure — parameters only, no Spark, no
@@ -1210,10 +1211,12 @@ def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
     ``"max_duplicate_key_ratio" in quality_checks``: declaring ``primary_key``
     alone runs no *value* check at all. So deleting one line of config turns off
     both the duplicate check and the NULL diagnosis (issue #289) with nothing to
-    show for it. ADR-0006 records this exact accident already happening once —
-    ``feature_table`` declared a primary key and no ``quality_checks``, which
-    made ``select_train_keys``'s comment ("PK guaranteed by source_etl's
-    max_duplicate_key_ratio") false for half a year.
+    show for it. ADR-0006 records this exact accident already happening once:
+    ``feature_table`` declared a primary key and no ``quality_checks``, so
+    ``select_train_keys``'s comment ("PK enforced upstream by source_etl's
+    max_duplicate_key_ratio", ``pipelines/dataset/nodes.py``) was true of
+    ``sample_pool`` — the table it is written about — and false of
+    ``feature_table``, for half a year.
 
     Scope is the three tables the dataset pipeline actually reads. The
     alternative — "a declared ``primary_key`` implies an unconditional check" —

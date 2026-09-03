@@ -246,13 +246,11 @@ class OutputChecker:
             f"FROM {db}.{table} WHERE snap_date = '{snap_date}'"
         )
         row = self._spark.sql(sql).collect()[0]
-        # SUM over an empty partition is NULL, not 0.
         total = row["total"]
         distinct = row["distinct_cnt"]
+        # ``or 0``: SUM over an empty partition returns NULL, not 0.
         keyed_total = row["keyed_total"] or 0
-        null_counts = {
-            col: (row[f"null_{col}"] or 0) for col in primary_key
-        }
+        null_counts = {col: (row[f"null_{col}"] or 0) for col in primary_key}
 
         return [
             self._null_key_result(
