@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from recsys_tfb.core.consistency import PRIMARY_KEY_CHECK
 from recsys_tfb.pipelines.source_etl.models import SourceCheckConfig, TableConfig
 
 logger = logging.getLogger(__name__)
@@ -438,14 +439,15 @@ class OutputChecker:
 
         # A32 (core/consistency.py) is what keeps this key declared on the three
         # tables the dataset pipeline reads: without it, deleting one line of
-        # config silently turns off the NULL diagnosis too.
-        if "max_duplicate_key_ratio" in qc and table_config.primary_key:
+        # config silently turns off the NULL diagnosis too. The key name comes
+        # from that module so the gate and the switch it guards cannot drift.
+        if PRIMARY_KEY_CHECK in qc and table_config.primary_key:
             for result in self.check_primary_key(
                 target_db,
                 table_config.name,
                 snap_date,
                 table_config.primary_key,
-                qc["max_duplicate_key_ratio"],
+                qc[PRIMARY_KEY_CHECK],
             ):
                 results.append(result)
                 logger.info(result.message, extra={"event": "output_check", "passed": result.passed})

@@ -2603,11 +2603,14 @@ class TestDatasetSourceQualityChecksA32:
                 self._table("sample_pool", **table_over.get("sample_pool", {})),
             ]},
             "label_etl": {"tables": [
-                self._table("label_ccard", quality_checks={}),
+                self._table("label_ccard"),
                 self._table("label_table", **table_over.get("label_table", {})),
             ]},
             "feature_etl": {"tables": [
+                # The two named here stand for the five that declare a
+                # primary_key and no quality_checks in conf/base.
                 self._table("feature_aum", quality_checks={}),
+                self._table("feature_concat", quality_checks={}),
                 self._table("feature_table", **table_over.get("feature_table", {})),
             ]},
         }
@@ -2648,13 +2651,17 @@ class TestDatasetSourceQualityChecksA32:
             if any(t in e for e in errs)
         }
 
-    def test_the_unguarded_five_are_left_alone(self):
+    def test_the_unguarded_feature_tables_are_left_alone(self):
         # feature_aum/sav/ccard/info/concat declare a primary_key and no
         # quality_checks on purpose (ADR-0006: check the terminal table only).
         # A32 must not drag them in — that would buy five extra scans.
-        errs = dataset_source_quality_check_errors(self._params())
-        assert errs == []
-        assert not any("feature_aum" in e or "label_ccard" in e for e in errs)
+        assert dataset_source_quality_check_errors(self._params()) == []
+        # ...and that clean result is not the gate skipping the stage: break
+        # the guarded table sitting in the same list and it fires.
+        errs = dataset_source_quality_check_errors(
+            self._params(feature_table={"quality_checks": {}}))
+        assert len(errs) == 1
+        assert "feature_table" in errs[0]
 
     def test_the_table_is_found_by_name_not_by_position(self):
         params = self._params()

@@ -9,9 +9,9 @@ All errors subclass ValueError so existing ``except ValueError`` call sites
 
 Invariant legend
 ----------------
-Code comments across this module, ``core/schema.py`` and
-``pipelines/dataset/nodes.py`` reference invariants by ID. This docstring is
-the canonical legend.
+Code comments across this module, ``core/schema.py``,
+``pipelines/dataset/nodes.py`` and ``pipelines/source_etl/checks.py`` reference
+invariants by ID. This docstring is the canonical legend.
 
 Layer 1 — config-static (implemented here; aggregated by
 ``validate_config_consistency``, run at CLI entry):
@@ -278,8 +278,9 @@ Layer 1 — config-static (implemented here; aggregated by
   ADR-0006 records the accident already happening once: ``feature_table`` had a
   primary key and no ``quality_checks``, so ``select_train_keys``'s comment
   ("PK enforced upstream by source_etl's max_duplicate_key_ratio") was true for
-  ``sample_pool`` and false for ``feature_table``, unnoticed for half a year. Scope is those three tables and not "every table with
-  a ``primary_key``": five feature tables omit ``quality_checks`` deliberately,
+  ``sample_pool`` and false for ``feature_table``, unnoticed for half a year.
+  Scope is those three tables and not "every table with a ``primary_key``":
+  five feature tables omit ``quality_checks`` deliberately,
   and checking them would add five scans ADR-0006 decided against. Predicate:
   ``dataset_source_quality_check_errors`` (pure — parameters only, no Spark, no
   new load path: ``ConfigLoader.get_parameters`` already merges every
@@ -1226,9 +1227,13 @@ def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
     would (ADR-0006). Making the check unconditional adds those five scans back
     and overturns that decision; it would have to change the ADR first.
 
-    A table no ``*_etl`` stage declares is not this gate's business: A32 checks
-    what a declaration says, and a source table nothing produces fails loudly at
-    the Hive read rather than silently. The threshold's *value* is in scope,
+    A table no ``*_etl`` stage declares is skipped, and that is the second known
+    residual: renaming or deleting one of the three entries escapes A32 the same
+    way. It is skipped rather than reported because the gate has to stay usable
+    on a config that declares one ETL stage and not the others (every minimal
+    parameters dict in the test suite is that shape), and because the escape is
+    not the silent failure A32 is for — a source table nothing produces stops
+    the dataset pipeline at the Hive read. The threshold's *value* is in scope,
     though — the failure A32 exists to stop is the check being off while looking
     on, and ``max_duplicate_key_ratio: 1.0`` is exactly that (the measured ratio
     is always below 1). An explicit YAML null passes ``run_all``'s ``in`` test
@@ -1240,9 +1245,10 @@ def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
     than hung off one command: all three tables feed the dataset pipeline, and
     the operator who broke the config should learn at the next CLI entry.
 
-    Known residual, deliberate: deleting ``primary_key`` as well escapes this
-    gate. That is retiring the key declaration outright, which is a visible
-    config edit rather than the silent shape above (issue #289).
+    Known residuals, both deliberate: deleting ``primary_key`` as well escapes
+    this gate (that is retiring the key declaration outright — a visible config
+    edit rather than the silent shape above, registered in issue #289), and so
+    does removing the table's whole declaration (paragraph above).
     """
     errors: list[str] = []
     declared = _etl_table_declarations(parameters)
