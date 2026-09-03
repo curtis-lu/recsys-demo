@@ -860,6 +860,16 @@ _WEIGHT_PARITY_CASES = {
     "single_row": (pd.DataFrame({"p": ["a"]}), ["p"], {"a": 2.0}),
     "empty_frame": (pd.DataFrame({"p": pd.Series([], dtype=object)}), ["p"], {"a": 2.0}),
     "no_key_matches": (pd.DataFrame({"p": ["a", "b"]}), ["p"], {"zzz": 2.0}),
+    "datetime_key_with_nat": (
+        pd.DataFrame({"d": pd.to_datetime(["2025-01-31", None, "2025-02-28", None])}),
+        ["d"],
+        {"2025-01-31": 2.0, "NaT": 8.0},
+    ),
+    "string_dtype_key": (
+        pd.DataFrame({"p": pd.array(["a", "b", "a"], dtype="string")}),
+        ["p"],
+        {"a": 3.0},
+    ),
     # two distinct value combinations that join to one string: the weight is
     # still whatever that single string maps to, for both rows.
     "separator_inside_value": (
@@ -902,12 +912,15 @@ class TestWeightKeyFastPathGuard:
             pd.Series([1, 2, 3]),
             pd.Series([True, False]),
             pd.Series(pd.array([1, None], dtype="Int64")),
+            pd.Series(["a", "b"], dtype="string"),
+            pd.Series(pd.to_datetime(["2025-01-31", "2025-02-28", None])),
+            pd.Series(pd.to_timedelta([1, 2], unit="D")),
         ],
     )
     def test_taken_for_faithful_columns(self, col):
-        from recsys_tfb.io.extract import _distinct_weight_keys
+        from recsys_tfb.io.extract import _weight_key_frame
 
-        assert _distinct_weight_keys(pd.DataFrame({"k": col}), ["k"]) is not None
+        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"]) is not None
 
     @pytest.mark.parametrize(
         "col",
@@ -919,15 +932,15 @@ class TestWeightKeyFastPathGuard:
         ],
     )
     def test_declined_for_unfaithful_columns(self, col):
-        from recsys_tfb.io.extract import _distinct_weight_keys
+        from recsys_tfb.io.extract import _weight_key_frame
 
-        assert _distinct_weight_keys(pd.DataFrame({"k": col}), ["k"]) is None
+        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"]) is None
 
     def test_declines_when_any_key_column_is_unfaithful(self):
-        from recsys_tfb.io.extract import _distinct_weight_keys
+        from recsys_tfb.io.extract import _weight_key_frame
 
         pdf = pd.DataFrame({"ok": ["a", "b"], "bad": [1.0, 2.0]})
-        assert _distinct_weight_keys(pdf, ["ok", "bad"]) is None
+        assert _weight_key_frame(pdf, ["ok", "bad"]) is None
 
 
 class TestZeroMatchDiagnosticKeys:
