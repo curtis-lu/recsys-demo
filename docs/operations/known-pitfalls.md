@@ -240,12 +240,14 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **規則**：本機一律 loopback——已固定在兩處：`tests/conftest.py` 的 `os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")`、`conf/spark-local/spark-env.sh` 的 `export SPARK_LOCAL_IP=127.0.0.1`（spark-submit 自動 source）。不要改設 `spark.driver.host`（spark-defaults.conf 註記過的 RpcEndpointNotFoundException 陷阱）。
 - **驗證方式**：`python3 -c "import socket; h=socket.gethostname(); print(socket.gethostbyname(h))"` 對照 `ifconfig | grep "inet "`——兩邊不含同一 IP 即中招；修復後單跑任一 Spark 測試應 pass（本次實證 1 passed in 3.81s）。
 
-## 8. 字串特徵欄靜默 → object 矩陣 OOM（已加 B6 閘，2026-07-11）
+## 8. 字串特徵欄靜默 → object 矩陣 OOM（已加 B6 閘，2026-07-11；型別同質性另由 B9 擋，2026-09-04）
 
 - **症狀（第一分鐘認出它）**：training `prepare_lgb_train_inputs` 在 `pdf_to_X` 的 `to_numpy` 步被 `Killed`（OOM）；或（B6 上線後）在讀 parquet 前秒級 `DataConsistencyError: ... un-encoded non-numeric type(s)`。本機合成資料永不重現（合成 feature_table 無此欄）。
 - **根因**：生產 `feature_table` 有字串欄，未宣告 `categorical_columns`、也未 `drop_columns` → `compute_feature_columns` 收它為特徵 → `encode_categoricals` 不編它 → `X_df.values` 塌縮成 object 矩陣（每格 ~34 B vs float64 8 B，公司規模 22→96 GiB）。錯誤在 training（下游），根因在 dataset schema 設定（上游）——R 系列同款形態。
 - **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。修法見 `docs/pipelines/dataset.md` §8.1；修完仍 OOM 的後續選項見 `docs/pipelines/training.md` §9.1。
 - **驗證方式**：`python -c "import pyarrow.parquet as pq, pyarrow as pa; s=pq.read_schema('<train_model_input.parquet>'); print([f.name for f in s if pa.types.is_string(f.type)])"` 對照 `preprocessor.json` 的 `feature_columns`／`categorical_columns`；差集非空即中招。
+- **同一家族的第二個閘：B9（2026-09-04 加）。** B6 問「這欄是不是數值」，B9 問「這欄**是不是宣告的那個型別**」——特徵欄必須逐欄等於 `dataset.numeric_feature_storage_type`（預設 float32），異質或同質但錯型別都擋。訊息長這樣：`DataConsistencyError: ... not stored as the declared numeric storage type`。**它幾乎一定代表那份 parquet 是舊 dataset 版本建的**（#283 之前 cast 只蓋浮點欄，整數與 boolean 沒收斂），解法是重建 dataset，**不是把宣告改寬去遷就舊 parquet**。predicate＝`core/consistency.py::feature_storage_type_errors`，backstop 在 `io/extract.py`（只讀 schema，不讀資料）。
+- **寫測試 fixture 時會踩到同一個閘。** 手寫 `pd.DataFrame({"feat_a": [1.0, 2.0]})` 出來是 float64，寫成 parquet 餵給 `extract_Xy` 就會被 B9 擋。**那不是閘門太嚴，是 fixture 不像真的 model_input**——`build_model_input` 會把數值特徵欄全部 cast 成宣告型別。修法見 `tests/test_models/test_adapter.py::_write_model_input`。
 
 ## 9. 本機跑 evaluation 必須兩個旗標，少一個就跑不動（2026-07-19）
 
