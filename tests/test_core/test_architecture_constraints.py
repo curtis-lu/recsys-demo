@@ -27,6 +27,7 @@ import ast
 import re
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 import recsys_tfb
 
@@ -1135,6 +1136,11 @@ class TestS4NoFirstEntityColumn:
 #: a *test* that declares a schema the framework then drops is the false green
 #: this file exists to stop. ``scripts/`` is deliberately out -- its "schema"
 #: dicts are report metadata, not parameters; see S5 in the constraints doc.
+#:
+#: Spelled out rather than aliased to ``ENTITY_SCAN_ROOTS``: the two are equal
+#: today by coincidence of judgement, not by rule, and each constraint's
+#: pinning test asserts its own set. Sharing one name would let a sign-off to
+#: narrow one constraint's scope silently narrow the other's.
 SCHEMA_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
 
 #: Column roles. ``get_schema`` reads these from ``schema.columns``; written one
@@ -1149,10 +1155,18 @@ SCHEMA_ROLE_KEYS = frozenset(
 DERIVED_SCHEMA_KEY = "identity_columns"
 
 
+class _KeyValue(NamedTuple):
+    """One dict entry's two AST nodes. Named because ``entry[1]`` at a call
+    site does not say "the value node", and both halves are read here."""
+
+    key: ast.AST
+    value: ast.AST
+
+
 def _string_keys(dict_node):
-    """``{key: (key node, value node)}`` for this dict's constant string keys."""
+    """``{key string: _KeyValue}`` for this dict's constant string keys."""
     return {
-        k.value: (k, v)
+        k.value: _KeyValue(k, v)
         for k, v in zip(dict_node.keys, dict_node.values)
         if isinstance(k, ast.Constant) and isinstance(k.value, str)
     }
@@ -1193,19 +1207,19 @@ def _schema_layer_offenders(root, label=""):
             entries = _string_keys(section)
             columns = entries.get("columns")
             nested = (
-                _string_keys(columns[1])
-                if columns is not None and isinstance(columns[1], ast.Dict)
+                _string_keys(columns.value)
+                if columns is not None and isinstance(columns.value, ast.Dict)
                 else {}
             )
             for role in sorted(SCHEMA_ROLE_KEYS & set(entries)):
                 offenders.append(
-                    f"{rel}:{entries[role][0].lineno}: schema.{role} -- a role "
+                    f"{rel}:{entries[role].key.lineno}: schema.{role} -- a role "
                     "belongs under schema.columns"
                 )
             for prefix, holder in (("schema", entries), ("schema.columns", nested)):
                 if DERIVED_SCHEMA_KEY in holder:
                     offenders.append(
-                        f"{rel}:{holder[DERIVED_SCHEMA_KEY][0].lineno}: "
+                        f"{rel}:{holder[DERIVED_SCHEMA_KEY].key.lineno}: "
                         f"{prefix}.{DERIVED_SCHEMA_KEY} -- get_schema derives "
                         "this; a declared one is dropped"
                     )
@@ -1243,7 +1257,7 @@ class TestS5SchemaColumnsLayer:
             for line in _schema_layer_offenders(root, label=label)
         ]
         assert offenders == [], (
-            "a schema config declared keys get_schema never reads (S5): "
+            "a schema config declared keys that get_schema never reads (S5): "
             f"{offenders}. Column roles go under schema.columns; "
             "identity_columns is derived by core/schema.py::get_schema as "
             "[time] + entity + [item] and must not be declared at any depth. "
@@ -1377,7 +1391,6 @@ class TestS5SchemaColumnsLayer:
         )
         found = _schema_layer_offenders(tmp_path)
         assert found == [], f"a correct schema declaration was flagged: {found}"
-
 
 
 class TestR2FrameworkGlobalsRegistry:

@@ -506,7 +506,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_DEFAULTS`），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
 
 ```
 tests/params.py:3: schema.entity -- a role belongs under schema.columns
@@ -515,9 +515,9 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 
 （這是真的跑出來的。上線當下、24 處還沒改之前，這個掃描一次點名 **94 個鍵、15 個檔**——不是只紅在第一個。）
 
-`test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住；`test_the_scan_sees_every_spelling` 用六個 tmp 檔釘住六種寫法，其中 `half_fix.py` 就是上面那個「包進 `columns` 但照樣被丟掉」的形狀——刪掉掃描器的 `schema.columns` 分支，只有它會轉紅。
+`TestS5SchemaColumnsLayer::test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住；`TestS5SchemaColumnsLayer::test_the_scan_sees_every_spelling` 用六個 tmp 檔釘住六種寫法，其中 `half_fix.py` 就是上面那個「包進 `columns` 但照樣被丟掉」的形狀——刪掉掃描器的 `schema.columns` 分支，只有它會轉紅。
 
-**沒有例外登記表。** S5 是「寫設定的形狀」，不是「某個函式可以破例」；一個站點要嘛寫對要嘛寫錯，沒有值得豁免的情形。要放寬只能改掃描範圍，而範圍被 `test_the_scan_roots_are_real_and_pinned` 釘住。
+**沒有例外登記表。** S5 是「寫設定的形狀」，不是「某個函式可以破例」；一個站點要嘛寫對要嘛寫錯，沒有值得豁免的情形。要放寬只能改掃描範圍，而範圍被 `TestS5SchemaColumnsLayer::test_the_scan_roots_are_real_and_pinned` 釘住。⚠ **S4 有一個同名的測試方法**（`TestS4NoFirstEntityColumn::test_the_scan_roots_are_real_and_pinned`），兩條的掃描範圍是各自釘各自的——引用時連類別名一起寫，不然指不清是哪一條。
 
 ### 這個檢查看不到
 
