@@ -323,7 +323,13 @@ class TestOutputCheckerPrimaryKey:
 
         sql = spark.sql.call_args[0][0]
         for col in pk:
-            assert f"`{col}` IS NULL" in sql, col
+            # Its own SUM term, aliased per column — asserting only "IS NULL"
+            # would be satisfied by the shared keyed_total expression, and the
+            # per-column counts could quietly stop being computed.
+            assert f"SUM(CASE WHEN `{col}` IS NULL THEN 1 ELSE 0 END) " \
+                   f"AS `null_{col}`" in sql, col
+            # ...and the row the ratio is measured over excludes it too.
+            assert f"`{col}` IS NULL" in sql.split("AS keyed_total")[0], col
         assert "cust_id" not in sql
 
     def test_zero_rows_skips_the_duplicate_check(self):
