@@ -59,13 +59,21 @@ def _group_ids(pdf: pd.DataFrame, group_cols: list) -> np.ndarray:
 
     ``dropna`` is left at its **default**, i.e. ``True``, because the replaced
     call used the default too and matching it is what makes the ids identical.
-    Be aware of what that default does, since ``group_cols`` are user-data
-    columns and so can be null: ``ngroup()`` yields ``NaN`` for those rows (the
-    Series becomes ``float64``), and casting that to ``int64`` is undefined —
-    numpy warns ``invalid value encountered in cast`` and, on the arm64 build
-    measured above, lands them on ``0``, silently merging every null-keyed row
-    into the *first* query group. Fixing that would change the returned ids, so
-    it is not this function's call to make. Related: known-pitfalls.md §11.
+    What that default costs, should a group column ever be null: ``ngroup()``
+    yields ``NaN`` for those rows (the Series becomes ``float64``), and casting
+    that to ``int64`` is undefined — numpy warns ``invalid value encountered in
+    cast`` and, on the arm64 build measured above, lands them on ``0``,
+    silently merging every null-keyed row into the *first* query group.
+
+    ``schema.time`` cannot get there: rows whose time is null are already gone,
+    dropped by the ``isin`` month filter in
+    ``pipelines/dataset/steps/scoping.py`` (SQL ``IN`` on NULL is NULL, not
+    true), and it is the Hive partition column of every ``*_model_input``
+    table. ``schema.entity`` has no such guard — it comes from the user's
+    ``sample_pool``, and both joins in ``pipelines/dataset/steps/model_input.py``
+    are LEFT joins keyed on it, so a null entity survives into the parquet.
+    Fixing that would change the returned ids, so it is not this function's
+    call to make. Related: known-pitfalls.md §11.
     """
     return (
         _narrow_frame(pdf, group_cols)
