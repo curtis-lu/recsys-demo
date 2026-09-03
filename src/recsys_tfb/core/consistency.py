@@ -295,14 +295,28 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 implemented and wired):
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
   an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and
   a downstream LightGBM float-cast error. Predicate: ``nonnumeric_feature_errors``
-  (with the ``spark_dtype_is_numeric`` classifier). What that classifier admits
-  is "the cast converts this to a number", not "this is already a number":
-  ``boolean`` and ``decimal`` both force ``object`` dtype if they reach pandas
-  un-cast, and are admitted only because
-  ``preprocessing.cast_numeric_features_to_storage_type`` covers them (#283). Wired at TWO call sites — the
+  (with the ``spark_dtype_is_numeric`` classifier). Wired at TWO call sites — the
   dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
   in) and a training-read backstop in ``io/extract.py`` (fails fast on an
   already-built parquet, before the expensive pandas read). B4 is unused.
+
+  **The two sites classify different frames, so what "numeric" buys differs.**
+  ``spark_dtype_is_numeric`` reads ``feature_table``, *before* the cast, so what
+  it admits is "the cast converts this to a number" — not "this is already a
+  number". ``boolean`` and ``decimal`` both force ``object`` dtype if they reach
+  pandas un-cast, and are admitted only because
+  ``preprocessing.cast_numeric_features_to_storage_type`` covers them (#283);
+  ``TestB6AdmissionIsBackedByTheCast`` is what keeps those two in step.
+
+  The backstop's own classifier (``_assert_feature_dtypes_numeric``,
+  ``io/extract.py``) reads model_input, *after* the cast, and there that
+  justification does not transfer: since #283 a ``boolean`` or ``decimal``
+  feature column in model_input can only mean the cast was skipped, i.e. exactly
+  the OOM this backstop exists to catch, yet it still classifies both as
+  numeric. **Registered, not fixed** — tightening it is a change to what the
+  gate rejects, and the remedies ``nonnumeric_feature_errors`` offers ("declare
+  it categorical", "drop it") are the wrong advice for a column whose real fix
+  is to rebuild the dataset. #283 deliberately left it alone.
 * B7 — a column cannot be both carried and a model feature. When one is named in
   ``dataset.carry_columns`` and also exists in feature_table, the keys frame and
   the preprocessed feature frame each bring a copy into the
