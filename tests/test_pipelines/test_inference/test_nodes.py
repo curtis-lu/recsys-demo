@@ -410,21 +410,41 @@ class TestBuildInferencePopulationFeatures:
         ]
         decimal_col = feature_cols[0]
 
+        # The three types that must all land on the same dtype: a Decimal, a
+        # Long and a Boolean among the Doubles. Before #283 the last two passed
+        # straight through, and one of them was enough to decide the dtype of
+        # the whole matrix in pdf_to_X.
+        int_col = feature_cols[1]
+        bool_col = feature_cols[2]
+        assert len({decimal_col, int_col, bool_col}) == 3, (
+            "fixture needs at least three non-categorical feature columns"
+        )
+
+        def _type(c):
+            if c == decimal_col:
+                return T.DecimalType(38, 6)
+            if c == int_col:
+                return T.LongType()
+            if c == bool_col:
+                return T.BooleanType()
+            return T.DoubleType()
+
         schema = T.StructType([
             T.StructField("snap_date", T.TimestampType()),
             T.StructField("cust_id", T.StringType()),
-            *[
-                T.StructField(
-                    c,
-                    T.DecimalType(38, 6) if c == decimal_col else T.DoubleType(),
-                )
-                for c in feature_cols
-            ],
+            *[T.StructField(c, _type(c)) for c in feature_cols],
         ])
         snap_ts = pd.Timestamp("2024-03-31").to_pydatetime()
         row_values: list = [snap_ts, "C001"]
         for c in feature_cols:
-            row_values.append(Decimal("1.5") if c == decimal_col else 0.5)
+            if c == decimal_col:
+                row_values.append(Decimal("1.5"))
+            elif c == int_col:
+                row_values.append(7)
+            elif c == bool_col:
+                row_values.append(True)
+            else:
+                row_values.append(0.5)
         features = spark.createDataFrame([tuple(row_values)], schema=schema)
         population = features.select("snap_date", "cust_id")
 
@@ -433,15 +453,17 @@ class TestBuildInferencePopulationFeatures:
         )
 
         out_dtypes = dict(result.dtypes)
-        assert out_dtypes[decimal_col] == "float", (
-            f"{decimal_col} still {out_dtypes[decimal_col]}, expected float"
-        )
-        leftover = [
-            c for c in feature_cols
-            if "decimal" in out_dtypes[c] or out_dtypes[c] == "double"
-        ]
+        assert out_dtypes[decimal_col] == "float"
+        # #283 — the integer and boolean columns too, on the *default* float32
+        # path, which is the behaviour this ticket changed.
+        assert out_dtypes[int_col] == "float"
+        assert out_dtypes[bool_col] == "float"
+        # …and nothing numeric escaped. By exclusion, so a column added to the
+        # fixture cannot quietly opt out.
+        leftover = [c for c in feature_cols if out_dtypes[c] != "float"]
         assert leftover == [], (
-            f"feature_columns still contain decimal/double types: {leftover}"
+            f"feature_columns are not homogeneous float32: "
+            f"{ {c: out_dtypes[c] for c in leftover} }"
         )
 
         # #283 — and the target is the declared type, not a constant. The

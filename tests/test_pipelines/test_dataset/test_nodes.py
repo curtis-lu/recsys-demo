@@ -724,6 +724,10 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
         T.StructField("out_amt_sum_l1m", T.DoubleType()),
         T.StructField("in_amt_ratio_l1m", T.DoubleType()),
         T.StructField("out_amt_ratio_l1m", T.DoubleType()),
+        # The two types #283 brought into scope. Without them the float32 path
+        # below asserts only what was already true before #283.
+        T.StructField("txn_cnt_l1m", T.LongType()),
+        T.StructField("is_revolving", T.BooleanType()),
     ])
     rows = []
     for snap in _SNAP_DATES:
@@ -731,7 +735,7 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
         for cid in _ENTITIES:
             rows.append((
                 snap_ts, cid, Decimal(f"{100.0 * (_entity_index(cid) + 1)}"),
-                10.0, Decimal("5"), 3.0, 0.05, 0.03,
+                10.0, Decimal("5"), 3.0, 0.05, 0.03, 7, True,
             ))
     feature_table_decimal = spark.createDataFrame(rows, schema=schema)
 
@@ -759,24 +763,34 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
     feature_cols = preprocessor["feature_columns"]
     out_dtypes = dict(result.dtypes)
 
-    # No decimal nor double feature columns remain — every float-like feature
-    # is float32.
+    # Every numeric feature column is float32 — the homogeneity claim, checked
+    # by exclusion rather than by listing, so a column added to the fixture
+    # cannot quietly escape it. ``prod_name`` is the one legitimate holdout: a
+    # deferred identity categorical, still a string here and encoded in
+    # ``pdf_to_X``.
     leftover = [
         c for c in feature_cols
-        if "decimal" in out_dtypes[c] or out_dtypes[c] == "double"
+        if c != "prod_name" and out_dtypes[c] != "float"
     ]
     assert leftover == [], (
-        f"feature_columns still contain decimal/double types: {leftover}"
+        f"feature_columns are not homogeneous float32: "
+        f"{ {c: out_dtypes[c] for c in leftover} }"
     )
 
     # DecimalType inputs are now float.
     assert out_dtypes["total_aum"] == "float"
     assert out_dtypes["in_amt_sum_l1m"] == "float"
-    # DoubleType inputs are also now float (this PR's addition).
+    # DoubleType inputs are also float.
     assert out_dtypes["fund_aum"] == "float"
     assert out_dtypes["out_amt_sum_l1m"] == "float"
     assert out_dtypes["in_amt_ratio_l1m"] == "float"
     assert out_dtypes["out_amt_ratio_l1m"] == "float"
+    # #283 — and so are the integer and boolean ones, on the *default* float32
+    # path. Named separately from the exclusion scan above: these two are the
+    # whole behaviour change, and an exclusion assertion goes green if the
+    # column ever drops out of ``feature_columns`` for an unrelated reason.
+    assert out_dtypes["txn_cnt_l1m"] == "float"
+    assert out_dtypes["is_revolving"] == "float"
 
     # #283 — and the target is the declared type, not a constant. Asserted here
     # rather than only on the helper: the helper taking a ``storage_type``
@@ -795,8 +809,9 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
     numeric_features = [
         "total_aum", "in_amt_sum_l1m", "fund_aum",
         "out_amt_sum_l1m", "in_amt_ratio_l1m", "out_amt_ratio_l1m",
+        "txn_cnt_l1m", "is_revolving",
     ]
-    assert [wide_dtypes[c] for c in numeric_features] == ["double"] * 6
+    assert [wide_dtypes[c] for c in numeric_features] == ["double"] * 8
 
 
 # --- where Layer-2 gate tests live -------------------------------------------

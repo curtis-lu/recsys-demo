@@ -124,7 +124,7 @@ override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_ed
 |---|---|---|---|
 | `calibration_sample_ratio` | `1.0` | calibration 的預設抽樣比例 | `calibration_variant_id` |
 | `calibration_sample_ratio_overrides` | `{}` | calibration 的分層比例覆寫 | `calibration_variant_id` |
-| `val_sample_ratio` | `0.5` | 依 entity 縮減 val 母體 | `base_dataset_version` |
+| `val_sample_ratio` | `1.0` | 依 entity 縮減 val 母體（`conf/base` 目前設 `0.5`；這一欄是**程式碼的 fallback**，不是 conf 的值） | `base_dataset_version` |
 | `val_sample_keys` | 完整 `entity` | 抽樣單位：`schema.entity` 的非空子集 | `base_dataset_version` |
 
 calibration 與 train 共用 `sample_group_keys`，但使用不同 sampling site，因此即使 seed 相同也不會刻意取得相同 bucket。test 不提供抽樣比例，會保留設定日期內的完整候選母體。
@@ -210,7 +210,7 @@ terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 c
 
 preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、calibration、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
 
-model input 寫出前，Decimal 與 Double 類型的 feature 會轉成 Spark `float`，降低後續 driver 讀取與模型訓練的記憶體成本。
+model input 寫出前，**所有數值 feature 欄**（decimal／double／float／整數族／boolean）都會轉成 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），降低後續 driver 讀取與模型訓練的記憶體成本。收斂範圍涵蓋整數與 boolean 的理由：`pdf_to_X` 用 `DataFrame.values` 攤平，pandas 只挑一個共同 dtype，所以一欄沒轉就決定了整個矩陣的型別。
 
 ### 3.6 三個欄位清單各自作用在哪張表
 

@@ -127,7 +127,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 - **互動式抽樣設定**：`scripts/sampling_overrides_editor.py` 會分析各分層的正負樣本分布，產出 `data/profiling/sampling_overrides_editor.html`，供使用者互動式調整下採樣比例，並匯出可寫入設定檔的 YAML。
 - **類別欄位建議**：`scripts/suggest_categorical_cols.py` 依欄位型別與 cardinality 產出 categorical 候選清單，再由使用者確認是否納入 encoding。
 - **避免前處理資料洩漏**：preprocessor 僅從訓練期間 fit，內容包含 `feature_columns`、`categorical_columns`、category encoding 對照與 `drop_columns`；訓練與推論共用相同 metadata，確保欄位順序與編碼一致。
-- **建立完整模型輸入**：`label_table` 未匹配到的候選項目視為負例 (`label = 0`)；數值特徵統一轉為 float32，以降低後續 driver 端訓練的記憶體用量。
+- **建立完整模型輸入**：`label_table` 未匹配到的候選項目視為負例 (`label = 0`)；所有數值特徵欄（含整數與 boolean）統一轉為 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），以降低後續 driver 端訓練的記憶體用量。
 - **移除無法評估的 query group**：僅針對 `val_model_input` 與 `test_model_input`，移除同一個 `(time, entity)` 下所有 item 的 label 皆為 0 的群組。這類群組沒有正例，無法衡量正例是否被排到前面，對 mAP、NDCG 等排序指標沒有貢獻；train、train_dev 與 calibration 則保留全部樣本。
 
 ### training pipeline
