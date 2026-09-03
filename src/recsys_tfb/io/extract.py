@@ -637,7 +637,11 @@ def _stream_matrix(
 
     n_rows = ds.count_rows()
     X = np.empty((n_rows, len(feature_cols)), dtype=dtype)
-    batch_rows = stream_batch_rows(len(read_cols), dtype.itemsize)
+    # Passed explicitly rather than left to the default: a default argument
+    # binds STREAM_BATCH_BYTES once at import, so a test (or an operator)
+    # that changes the module attribute would silently keep the old budget.
+    batch_rows = stream_batch_rows(
+        len(read_cols), dtype.itemsize, STREAM_BATCH_BYTES)
     logger.info(
         "%s: streaming read n_rows=%d n_read_columns=%d (of %d in file) "
         "dtype=%s batch_rows=%d matrix_mib=%.1f",

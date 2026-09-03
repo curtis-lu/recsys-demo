@@ -1044,8 +1044,11 @@ class TestStreamedMatrixParity:
     ) -> None:
         """A budget of a few rows per batch must land the same bytes.
 
-        The one failure this shape has that a single-batch read cannot: an
-        off-by-one in the row offset the batch is written at.
+        The failure this shape has that a single-batch read cannot: a batch
+        written at the wrong row offset. ``n_batches`` is asserted rather than
+        assumed — shrinking the budget proved to be a no-op once already (the
+        default argument had frozen it at import), and the test passed anyway
+        because one batch is trivially in the right place.
         """
         import recsys_tfb.io.extract as extract_mod
 
@@ -1055,8 +1058,11 @@ class TestStreamedMatrixParity:
 
         # 7 columns x 4 B = 28 B/row -> 3 rows per batch, so ~34 batches.
         monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 100)
+        calls = _spy_on_reads(monkeypatch)
         many, _ = extract_mod.extract_Xy(handle, _wide_meta(), _WIDE_PARAMS)
 
+        assert calls[0]["batch_size"] == 3
+        assert calls[0]["n_batches"] > 30
         assert many.tobytes() == one_shot.tobytes()
 
     def test_deferred_cat_is_coded_in_X_but_raw_in_items(
@@ -1122,8 +1128,15 @@ class _SpyDataset:
         return getattr(self._ds, name)
 
     def to_batches(self, **kwargs):
-        self._calls.append(kwargs)
-        return self._ds.to_batches(**kwargs)
+        record = dict(kwargs, n_batches=0)
+        self._calls.append(record)
+
+        def counted():
+            for batch in self._ds.to_batches(**kwargs):
+                record["n_batches"] += 1
+                yield batch
+
+        return counted()
 
 
 def _spy_on_reads(monkeypatch) -> list:
