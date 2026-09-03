@@ -102,7 +102,6 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
                 "label": "label",
                 "score": "score",
                 "rank": "rank",
-                "identity_columns": ["cust_id", "snap_date", "prod_name"],
             },
         },
         "model_version": "v1",
@@ -155,7 +154,6 @@ def test_prepare_eval_data_preserves_existing_rank_column(spark):
                 "label": "label",
                 "score": "score",
                 "rank": "rank",
-                "identity_columns": ["cust_id", "snap_date", "prod_name"],
             },
         },
         "model_version": "v1",
@@ -209,7 +207,6 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
                 "label": "label",
                 "score": "score",
                 "rank": "rank",
-                "identity_columns": ["cust_id", "snap_date", "prod_name"],
             },
         },
         "model_version": "v1",
@@ -259,8 +256,7 @@ def test_prepare_eval_data_joins_segment_sources(spark):
     parameters = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+            "label": "label", "score": "score", "rank": "rank"}},
         "model_version": "v1",
         "evaluation": {
             "snap_date": "2025-01-31",
@@ -300,8 +296,7 @@ def test_prepare_eval_data_filters_to_configured_snap_date(spark):
     parameters = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+            "label": "label", "score": "score", "rank": "rank"}},
         "model_version": "v1",
         "evaluation": {"snap_date": "2025-01-31"},
     }
@@ -336,8 +331,7 @@ def test_prepare_eval_data_raises_when_snap_date_absent(spark):
     parameters = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+            "label": "label", "score": "score", "rank": "rank"}},
         "model_version": "v1",
         "evaluation": {"snap_date": "2099-12-31"},
     }
@@ -365,8 +359,7 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
     parameters = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"]}},
+            "label": "label", "score": "score", "rank": "rank"}},
         "model_version": "v1",
         "evaluation": {},
     }
@@ -414,7 +407,6 @@ def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             "label": "label", "score": "score", "rank": "rank",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
         }},
         "model_version": "v1",
         "evaluation": {"snap_date": "2025-01-31"},

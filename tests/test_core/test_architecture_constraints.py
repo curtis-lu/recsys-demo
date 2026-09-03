@@ -1,6 +1,6 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7, S1-S4) or exception
+Each test corresponds to one numbered constraint (A1-A7, S1-S5) or exception
 registry (R1-R5) in that document. When a test fails, the fix is either to
 change the code back, or to update the document AND get the exception
 registered -- never to loosen the test quietly.
@@ -1129,6 +1129,255 @@ class TestS4NoFirstEntityColumn:
             "S4 gained an exception. It must be registered in R5 of "
             "docs/agents/architecture-constraints.md with sign-off first."
         )
+
+
+#: Trees S5 scans, ``label -> root``. Same pair as S4 and for the same reason:
+#: a *test* that declares a schema the framework then drops is the false green
+#: this file exists to stop. ``scripts/`` is deliberately out -- its "schema"
+#: dicts are report metadata, not parameters; see S5 in the constraints doc.
+SCHEMA_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
+
+#: Column roles. ``get_schema`` reads these from ``schema.columns``; written one
+#: level up they are silently ignored. Mirrors ``core/schema.py::_DEFAULTS``.
+SCHEMA_ROLE_KEYS = frozenset(
+    {"time", "entity", "item", "label", "score", "rank"}
+)
+
+#: ``get_schema`` *derives* this as ``[time] + entity + [item]``. It is not a
+#: settable key at any depth: under ``schema`` it misses the ``columns`` lookup,
+#: and under ``schema.columns`` the ``if k in _DEFAULTS`` filter drops it.
+DERIVED_SCHEMA_KEY = "identity_columns"
+
+
+def _string_keys(dict_node):
+    """``{key: (key node, value node)}`` for this dict's constant string keys."""
+    return {
+        k.value: (k, v)
+        for k, v in zip(dict_node.keys, dict_node.values)
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    }
+
+
+def _schema_sections(tree):
+    """Every dict literal bound to a ``"schema"`` key anywhere in ``tree``.
+
+    Keyed on the literal ``{"schema": {...}}`` shape on purpose: that is what a
+    parameters dict looks like, and it is what keeps a *resolved* schema (the
+    return of ``get_schema``, which legitimately carries ``identity_columns``)
+    out of scope. ``tests/test_core/test_versioning.py::_sample_schema`` is
+    exactly that, and must stay legal.
+    """
+    return [
+        value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant)
+        and key.value == "schema"
+        and isinstance(value, ast.Dict)
+    ]
+
+
+def _schema_layer_offenders(root, label=""):
+    """``path:line: schema.<key> -- why`` for every mis-declared schema key.
+
+    ``root`` is scanned recursively; paths are reported relative to it, with
+    ``label`` prefixed. Sorted, so the report is stable across filesystems.
+    """
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        rel = str(path.relative_to(root))
+        rel = f"{label}/{rel}" if label else rel
+        for section in _schema_sections(tree):
+            entries = _string_keys(section)
+            columns = entries.get("columns")
+            nested = (
+                _string_keys(columns[1])
+                if columns is not None and isinstance(columns[1], ast.Dict)
+                else {}
+            )
+            for role in sorted(SCHEMA_ROLE_KEYS & set(entries)):
+                offenders.append(
+                    f"{rel}:{entries[role][0].lineno}: schema.{role} -- a role "
+                    "belongs under schema.columns"
+                )
+            for prefix, holder in (("schema", entries), ("schema.columns", nested)):
+                if DERIVED_SCHEMA_KEY in holder:
+                    offenders.append(
+                        f"{rel}:{holder[DERIVED_SCHEMA_KEY][0].lineno}: "
+                        f"{prefix}.{DERIVED_SCHEMA_KEY} -- get_schema derives "
+                        "this; a declared one is dropped"
+                    )
+    return sorted(offenders)
+
+
+class TestS5SchemaColumnsLayer:
+    """S5: a schema config declares roles under ``columns``, and never derives.
+
+    ``get_schema`` (core/schema.py) reads ``parameters["schema"]["columns"]``.
+    A declaration written one level up -- ``{"schema": {"entity": [...]}}`` --
+    is not merged, not warned about, and not an error: the whole block is
+    ignored and every caller gets ``_DEFAULTS`` back. 24 sites in ``tests/``
+    were written that way (#274), and none of them was testing anything wrong,
+    because each happened to spell out the defaults. That is what makes it a
+    *copy source* rather than a bug: the next person to need a two-column
+    entity copies one, watches the second column vanish, and their test goes
+    green against code that does not handle it. Not hypothetical -- #263 hit
+    exactly this in ``test_comparison_restrict.py``.
+
+    The second rule exists because rule 1 alone blesses a half-fix. Wrapping
+    ``identity_columns`` into ``columns`` satisfies "roles live under columns"
+    while ``get_schema``'s ``if k in _DEFAULTS`` filter still drops it -- and
+    ``tests/test_pipelines/test_evaluation/test_nodes_spark.py`` had already
+    landed in that shape 8 times before this constraint existed.
+
+    ``S`` prefix rather than ``A8``: new structural constraints take ``S`` so
+    the collision surface with ``core/consistency.py``'s A-series stops growing.
+    """
+
+    def test_no_schema_declaration_skips_the_columns_layer(self):
+        offenders = [
+            line
+            for label, root in SCHEMA_SCAN_ROOTS.items()
+            for line in _schema_layer_offenders(root, label=label)
+        ]
+        assert offenders == [], (
+            "a schema config declared keys get_schema never reads (S5): "
+            f"{offenders}. Column roles go under schema.columns; "
+            "identity_columns is derived by core/schema.py::get_schema as "
+            "[time] + entity + [item] and must not be declared at any depth. "
+            "See S5 in docs/agents/architecture-constraints.md."
+        )
+
+    def test_the_scan_roots_are_real_and_pinned(self):
+        """Both trees are clean, so dropping one leaves the scan above green.
+
+        Same false green S4 pins: a fence that scans nothing reports nothing.
+        Each root is also checked to really hold modules -- a root pointed at a
+        missing path scans nothing just as silently.
+        """
+        assert set(SCHEMA_SCAN_ROOTS) == {"src/recsys_tfb", "tests"}, (
+            "S5's scan roots changed. tests/ is in scope on purpose -- every "
+            "one of the 24 original sites was a test. scripts/ is out because its "
+            "schema dicts are report metadata, not parameters. Changing this needs "
+            "the user's sign-off."
+        )
+        for label, root in SCHEMA_SCAN_ROOTS.items():
+            found = sum(1 for _ in root.rglob("*.py"))
+            assert found > 50, f"{label} -> {root} holds {found} .py files"
+
+    def test_the_scan_sees_every_spelling(self, tmp_path):
+        """Without this, the check above is decoration.
+
+        =========================  =======================================
+        case                       what it needs from the scan
+        =========================  =======================================
+        ``flat.py``                roles read off the ``schema`` dict itself
+        ``derived_at_schema.py``   rule 2 one level up
+        ``half_fix.py``            rule 2 *inside* a correct ``columns``
+        ``one_liner.py``           multiple keys sharing a source line
+        ``in_a_call.py``           a dict literal passed as an argument
+        ``pkg/sub/deep.py``        ``rglob``, not ``glob``
+        =========================  =======================================
+
+        ``half_fix.py`` is the case the second rule was written for: it passes
+        rule 1. Verified -- deleting the ``schema.columns`` branch of
+        ``_schema_layer_offenders`` leaves every other case here green.
+
+        ``pkg/sub/deep.py`` is the only case not written flat into
+        ``tmp_path``. Verified: ``rglob`` -> ``glob`` leaves the rest green
+        while the real tree stops being scanned below its top level.
+        """
+        cases = {
+            "flat.py": (
+                'PARAMS = {"schema": {\n'
+                '    "entity": ["branch_id", "cust_id"],\n'
+                '    "item": "sku",\n'
+                '}}\n'
+            ),
+            "derived_at_schema.py": (
+                'PARAMS = {"schema": {\n'
+                '    "label": "y",\n'
+                '    "identity_columns": ["snap_date", "cust_id"],\n'
+                '}}\n'
+            ),
+            "half_fix.py": (
+                'PARAMS = {"schema": {"columns": {\n'
+                '    "entity": ["cust_id"],\n'
+                '    "identity_columns": ["snap_date", "cust_id"],\n'
+                '}}}\n'
+            ),
+            "one_liner.py": 'P = {"schema": {"time": "d", "item": "p"}}\n',
+            "in_a_call.py": 'run(parameters={"schema": {"entity": ["cust_id"]}})\n',
+            "pkg/sub/deep.py": 'P = {"schema": {"label": "y"}}\n',
+        }
+        for name, source in cases.items():
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source)
+
+        found = _schema_layer_offenders(tmp_path)
+        for name in cases:
+            assert any(line.startswith(f"{name}:") for line in found), (
+                f"{name}: this spelling escaped the scan -- {found}"
+            )
+        assert any(
+            line.startswith("half_fix.py:3: schema.columns.identity_columns")
+            for line in found
+        ), f"the half-fix shape was not caught inside columns: {found}"
+
+    def test_the_report_names_a_location_not_just_a_count(self, tmp_path):
+        """Red-but-mute is a half-fix: the next person still has to go find it.
+
+        The whole rendered line is pinned by equality -- drop the line number,
+        the dotted key, or the reason and this fails. Each offending *key* is
+        reported at its own line, not at the line the ``schema`` dict opens on,
+        so a 40-line parameters block sends the reader to the right row.
+        """
+        (tmp_path / "params.py").write_text(
+            'PARAMS = {\n'
+            '    "schema": {\n'
+            '        "entity": ["cust_id"],\n'
+            '        "identity_columns": ["snap_date", "cust_id"],\n'
+            '    },\n'
+            '}\n'
+        )
+
+        assert _schema_layer_offenders(tmp_path, label="tests") == [
+            "tests/params.py:3: schema.entity -- a role belongs under "
+            "schema.columns",
+            "tests/params.py:4: schema.identity_columns -- get_schema derives "
+            "this; a declared one is dropped",
+        ]
+
+    def test_the_scan_leaves_a_correct_declaration_alone(self, tmp_path):
+        """False positives here cost real work, so pin the shapes that are fine.
+
+        ``categorical_values`` is a real sibling of ``columns`` under
+        ``schema`` (``get_schema`` reads it from there), so it must not be
+        mistaken for a stray role. ``resolved.py`` is the return shape of
+        ``get_schema`` itself, which carries ``identity_columns`` by design --
+        ``tests/test_core/test_versioning.py::_sample_schema`` is that shape
+        today. Reading ``schema["identity_columns"]`` is likewise not a
+        declaration.
+        """
+        (tmp_path / "clean.py").write_text(
+            'PARAMS = {"schema": {\n'
+            '    "columns": {"entity": ["cust_id"], "item": "prod_name"},\n'
+            '    "categorical_values": {"prod_name": ["a", "b"]},\n'
+            '}}\n'
+        )
+        (tmp_path / "resolved.py").write_text(
+            'def _sample_schema():\n'
+            '    return {"entity": ["cust_id"], '
+            '"identity_columns": ["snap_date", "cust_id"]}\n'
+            'def use(schema):\n'
+            '    return schema["identity_columns"]\n'
+        )
+        found = _schema_layer_offenders(tmp_path)
+        assert found == [], f"a correct schema declaration was flagged: {found}"
+
 
 
 class TestR2FrameworkGlobalsRegistry:

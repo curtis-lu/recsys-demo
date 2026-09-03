@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric.suppression._compute import (
     compute, cross_purchase_stats,
 )
@@ -11,8 +12,9 @@ from recsys_tfb.diagnosis.metric.suppression._compute import (
 
 def _params(top_examples=50):
     return {
-        "schema": {"time": "snap_date", "entity": ["cust_id"],
-                   "item": "prod_name", "label": "label", "score": "score"},
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label",
+                               "score": "score"}},
         "evaluation": {"diagnosis": {
             "sample": {"seed": 42},
             "suppression": {"enabled": True, "top_examples": top_examples},
@@ -152,7 +154,6 @@ def _reference_pair_ledger(sample: pd.DataFrame, params: dict) -> dict:
     對照向量化版本 ``compute`` 的正確性。刻意不重用 ``_compute.py`` 的任何
     聚合邏輯——共用了就測不出兩者是否一致。
     """
-    from recsys_tfb.core.schema import get_schema
     from recsys_tfb.diagnosis.metric._common import metric_params, query_key, to_logit
 
     schema = get_schema(params)
@@ -278,13 +279,13 @@ def test_axis_order_is_sorted_and_shared():
 def test_cross_purchase_reports_lift_not_only_conditional_probability():
     """熱門 item 對任何 j 的 P(k|j) 都高——只給條件機率會退化成
     『熱門那行整片亮』，那張圖畫的是熱門度不是關聯。"""
-    stats = cross_purchase_stats(_cross_sample(), _params()["schema"])
+    stats = cross_purchase_stats(_cross_sample(), get_schema(_params()))
     row = next(r for r in stats if r["item_j"] == "B" and r["item_k"] == "A")
     assert {"lift", "n_joint", "n_j", "n_k", "p_k_given_j"} <= set(row)
 
 
 def test_cross_purchase_lift_is_about_one_for_independent_items():
-    stats = cross_purchase_stats(_independent_sample(), _params()["schema"])
+    stats = cross_purchase_stats(_independent_sample(), get_schema(_params()))
     row = next(r for r in stats if r["item_j"] == "X" and r["item_k"] == "Y")
     assert row["lift"] == pytest.approx(1.0, abs=0.15)
 
@@ -292,7 +293,7 @@ def test_cross_purchase_lift_is_about_one_for_independent_items():
 def test_cross_purchase_lift_exceeds_one_for_items_bought_together():
     """反向釘住上一條：構造真的相關的一對，lift 必須明顯 > 1。
     只驗『獨立時 ≈ 1』的話，一個恆回 1.0 的實作也會綠。"""
-    stats = cross_purchase_stats(_coupled_sample(), _params()["schema"])
+    stats = cross_purchase_stats(_coupled_sample(), get_schema(_params()))
     row = next(r for r in stats if r["item_j"] == "P" and r["item_k"] == "Q")
     assert row["lift"] > 1.5
 

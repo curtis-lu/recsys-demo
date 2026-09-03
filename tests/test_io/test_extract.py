@@ -35,12 +35,7 @@ def test_extract_xy_returns_numpy_arrays(tmp_path: Path) -> None:
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     X, y = extract_Xy(handle, prep_meta, parameters)
 
@@ -64,12 +59,7 @@ def _make_prep_meta_with_cat():
 
 
 def _make_parameters_with_cat():
-    return {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    return {"schema": {"columns": {"label": "label"}}}
 
 
 def _make_df_with_cat():
@@ -169,12 +159,7 @@ def test_extract_xy_skips_encode_step_when_no_deferred_cats(
         "categorical_columns": [],
         "category_mappings": {},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
         extract_Xy(handle, prep_meta, parameters)
@@ -343,12 +328,7 @@ def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     X = pdf_to_X(pdf, prep_meta, parameters)
 
@@ -377,12 +357,7 @@ def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
         "categorical_columns": [],
         "category_mappings": {},
     }
-    parameters = {
-        "schema": {
-            "label": "label",
-            "identity_columns": ["cust_id", "snap_date"],
-        }
-    }
+    parameters = {"schema": {"columns": {"label": "label"}}}
 
     X = pdf_to_X(pdf, prep_meta, parameters)
 
@@ -701,7 +676,7 @@ def _b6_meta(with_string: bool) -> dict:
 
 
 _B6_PARAMS = {
-    "schema": {"label": "label", "identity_columns": ["cust_id", "snap_date", "prod_name"]}
+    "schema": {"columns": {"label": "label"}}
 }
 
 

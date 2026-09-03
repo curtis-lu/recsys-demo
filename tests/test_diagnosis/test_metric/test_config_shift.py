@@ -2,14 +2,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric.config_shift._compute import (
     build_offset_frame,
     compute,
 )
 
 PARAMS = {
-    "schema": {"time": "snap_date", "entity": ["cust_id"],
-               "item": "prod_name", "label": "label", "score": "score"},
+    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                           "item": "prod_name", "label": "label",
+                           "score": "score"}},
     "dataset": {
         "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
         "sample_ratio": 1.0,
@@ -41,7 +43,7 @@ def _sample():
 
 
 def test_offset_matches_hand_computed_log_ratio():
-    frame, _ = build_offset_frame(_sample(), PARAMS, PARAMS["schema"])
+    frame, _ = build_offset_frame(_sample(), PARAMS, get_schema(PARAMS))
     row = frame[(frame["cust_segment_typ"] == "mass")
                 & (frame["prod_name"] == "ccard_ins")].iloc[0]
     # r_pos = 1.0（無 override）, r_neg = 0.5 → ln(1.0/0.5) = ln 2
@@ -49,7 +51,7 @@ def test_offset_matches_hand_computed_log_ratio():
 
 
 def test_item_without_override_gets_zero_offset():
-    frame, _ = build_offset_frame(_sample(), PARAMS, PARAMS["schema"])
+    frame, _ = build_offset_frame(_sample(), PARAMS, get_schema(PARAMS))
     row = frame[(frame["cust_segment_typ"] == "mass")
                 & (frame["prod_name"] == "fund_bond")].iloc[0]
     assert row["offset"] == pytest.approx(0.0, abs=1e-12)

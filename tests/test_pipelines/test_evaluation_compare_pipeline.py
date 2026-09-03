@@ -77,9 +77,10 @@ def _base_params_for_validator():
     """Minimal params dict the validator needs."""
     return {
         "schema": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "score": "score", "rank": "rank", "label": "label",
-            "identity_columns": ["cust_id", "snap_date", "prod_name"],
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "score": "score", "rank": "rank", "label": "label",
+            },
             "categorical_values": {"prod_name": ["p1"]},
         },
         "evaluation": {"snap_date": "2026-01-31"},

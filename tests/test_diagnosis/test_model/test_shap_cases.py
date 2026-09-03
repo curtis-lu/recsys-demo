@@ -40,8 +40,8 @@ def _pop_from_counts(counts, seed=0):
 
 
 def _params(min_rows=10):
-    return {"schema": {"item": "prod_name", "label": "label",
-                       "time": "snap_date", "entity": ["cust_id"]},
+    return {"schema": {"columns": {"item": "prod_name", "label": "label",
+                                   "time": "snap_date", "entity": ["cust_id"]}},
             "diagnostics": {"shap": {"quadrant_enabled": True, "top_k": 2,
                                      "quadrant_min_rows": min_rows}}}
 
@@ -121,8 +121,8 @@ def _case_rows(specs):
 
 
 def _cases_params():
-    return {"schema": {"item": "prod_name", "label": "label",
-                       "time": "snap_date", "entity": ["cust_id"]},
+    return {"schema": {"columns": {"item": "prod_name", "label": "label",
+                                   "time": "snap_date", "entity": ["cust_id"]}},
             "model_version": "testmv_cases",
             "diagnostics": {"shap": {"quadrant_enabled": True, "case_top_k": 2}}}
 
