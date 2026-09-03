@@ -463,10 +463,14 @@ class SQLRunner:
         results = checker.run_all(table, self._target_db, snap_date)
         failed = [r for r in results if not r.passed]
 
-        # Get row count from results (first check is usually row_count)
+        # Pick the audit row count off the check that measured it, by identity
+        # rather than by what its message happens to say. Several results carry
+        # a metric_value (the duplicate ratio, the NULL key count added for
+        # #289), so a substring match on the message decides the audit number
+        # by wording, and a reworded message would silently log the wrong one.
         row_count = 0
         for r in results:
-            if r.metric_value is not None and "row count" in r.message:
+            if r.check == "min_row_count" and r.metric_value is not None:
                 row_count = int(r.metric_value)
                 break
 
