@@ -1485,6 +1485,53 @@ class ColumnPrecision(NamedTuple):
     value_step: float
 
 
+def numeric_precision_rows(
+    by_column: Mapping[str, ColumnPrecision],
+    storage_type: str,
+) -> list[dict]:
+    """One row per checked column: what it holds, what it may hold, how close.
+
+    The companion to :func:`numeric_precision_errors`. That function answers
+    "which columns fail"; this one answers "how much room does each column have
+    left", which is the question an operator actually has *before* one fails —
+    a column at 0.99 of its limit passes today and stops the pipeline the month
+    a larger value arrives, and nothing in a pass/fail message says so.
+
+    ``headroom`` is ``limit / max_abs`` — how many times larger the column could
+    get before colliding. ``None`` when the column is empty (nothing to divide)
+    or unmeasured. Rows are sorted by headroom ascending, so the column closest
+    to breaching reads first whether the report is skimmed or truncated.
+
+    Pure, and separate from the errors predicate rather than folded into it: the
+    two have different audiences (a report that is always produced vs a message
+    that appears only on failure) and folding them would make the report's shape
+    a side effect of how the error strings are worded.
+    """
+    rows: list[dict] = []
+    for col in sorted(by_column):
+        max_abs, value_step = by_column[col]
+        limit = exact_value_limit(value_step, storage_type)
+        if max_abs is None:
+            verdict, headroom = "unmeasured", None
+        elif max_abs > limit:
+            verdict, headroom = "breach", (limit / max_abs)
+        else:
+            verdict = "ok"
+            headroom = None if max_abs == 0 else limit / max_abs
+        rows.append({
+            "column": col,
+            "value_step": value_step,
+            "max_abs": max_abs,
+            "limit": limit,
+            "headroom": headroom,
+            "verdict": verdict,
+        })
+    return sorted(
+        rows,
+        key=lambda r: (r["headroom"] is None, r["headroom"] or 0.0, r["column"]),
+    )
+
+
 def numeric_precision_errors(
     by_column: Mapping[str, ColumnPrecision],
     storage_type: str,

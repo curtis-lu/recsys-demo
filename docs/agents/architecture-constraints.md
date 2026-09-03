@@ -519,15 +519,21 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 （測試比對的是「哪個檔、幾個 `global` 陳述、涉及哪些變數名」：`logging.py` 1 個、`spark.py` 4 個。行號只是給人看的。）
 
-## R3. 零輸出 side-effect node（A7 的例外）── 3 筆
+## R3. 零輸出 side-effect node（A7 的例外）── 2 筆
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
 | `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
-| `pipelines/dataset/pipeline.py` | `validate_numeric_precision` | **B8 精度閘不會跑**，這一輪不會有人確認被 cast 的欄撐得過宣告的 `numeric_feature_storage_type`。**例外同上：被模式明確點名時會跑**——它在 `ONLY_TEST_MONTHS_NODES` 裡，因為加一個評估月份會寫出一個新月份的 `preprocessed_feature_table` 分區，那個月份就該被檢查（2026-09-03 使用者裁決，issue #281） |
 | `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 
-**位置只給檔案、不給行號**：三個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。
+**位置只給檔案、不給行號**：兩個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。
+
+> **曾經考慮加入、最後沒有加的一筆（#281，2026-09-03）**：dataset 的精度閘
+> `validate_numeric_precision` 第一版是零輸出 node，使用者也同意登記了。實作後段改成
+> 讓它產出 `numeric_precision_report`（每個受檢欄的 headroom），於是它**不再是零輸出
+> node**，登記跟著撤掉——A7 只管 `outputs=None` 的 node。記在這裡是因為「登記縮小不
+> 需要新例外」這件事本身容易被讀成「有人偷偷拿掉一筆」（前例：R4 的
+> `persist_sample_weight_report`）。附帶收穫是它不再被切片靜默跳過（F5）。
 
 ## R4. 自己寫診斷副產物的 node（A1 的例外二）── 2 筆
 

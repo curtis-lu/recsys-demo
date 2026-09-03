@@ -46,7 +46,7 @@ class TestDatasetPipeline:
             "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
-            "preprocessed_feature_table",
+            "preprocessed_feature_table", "numeric_precision_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
         }
         assert pipeline.outputs == expected
@@ -59,7 +59,7 @@ class TestDatasetPipeline:
             "val_model_input_unfiltered", "test_model_input_unfiltered",
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
-            "preprocessed_feature_table",
+            "preprocessed_feature_table", "numeric_precision_report",
             "sample_keys", "train_keys", "train_dev_keys",
             "calibration_keys", "val_keys", "test_keys",
         }
@@ -355,11 +355,12 @@ class TestOnlyTestMonthsMode:
 
         Both gates are added separately, and that is not a fudge — it is the
         one structural fact this test cannot derive. ``_slice_with_expansion``
-        builds its producer map from ``node.outputs``, so a node with
-        ``outputs=None`` is never reachable by expansion, no matter what it
-        validates. Every zero-output node on the test chain therefore has to be
-        named here, and R3 in ``docs/agents/architecture-constraints.md`` is the
-        list of the ones that exist.
+        walks *backwards* from an artifact somebody needs, so a node nothing
+        downstream consumes is unreachable however useful it is:
+        ``validate_data_consistency`` because it has no output at all, and
+        ``validate_numeric_precision`` because its output
+        (``numeric_precision_report``) is a diagnostic with no consumer. Both
+        therefore have to be named here.
 
         Fails when a node is added to the test chain and the list does not
         follow: the mode would then silently skip it.

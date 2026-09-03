@@ -88,6 +88,21 @@ category_mappings:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/category_mappings.json
 
+# 診斷副產物，零下游消費者——條目在這裡是為了讓它撈得出來看（pipeline-node-design
+# 規則 1），不是為了餵誰，前例是 sample_weight_report。validate_numeric_precision
+# 只回傳 dict，寫檔由這個條目負責。
+#
+# 為什麼值得落地而不是只印 log：閘門的 pass/fail 答不出「哪一欄快要撐不住了」。
+# 這份報告每一欄都有 headroom（上限 ÷ 實際最大值），最接近爆掉的排最前面，所以
+# 「下個月會不會被擋」在被擋之前就看得到。
+#
+# ⚠ policy=block 且真的有欄超界時，run 會中止，這個檔**不會**落地（node 沒回傳，
+#   catalog 就沒東西可寫）。整張表在 raise 之前已經進 log；要拿到檔案就用
+#   numeric_precision_policy: truncate 跑一輪。
+numeric_precision_report:
+  type: JSONDataset
+  filepath: data/dataset/${base_dataset_version}/numeric_precision_report.json
+
 # --- Dataset train-variant layer（依 base + train_variant 區分）---
 sample_keys:
   type: HiveTableDataset

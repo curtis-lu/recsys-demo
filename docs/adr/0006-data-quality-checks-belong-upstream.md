@@ -115,9 +115,9 @@ dataset 閘門的成本量級，這條 ADR 的決定原封不動。
    來源表必須是 parquet 且帶統計值，是把框架的適用面縮小。自己寫的表則由
    `HiveTableDataset` 以 `STORED AS PARQUET` 建立，格式是我們自己保證的。
    代價：閘門必須站在那張表**落地之後**——node 自己不寫表，是 Runner 在 node return
-   之後 `catalog.save`——所以它是一個獨立的零輸出 node（登記在
-   `docs/agents/architecture-constraints.md` R3），排在 `apply_preprocessor_to_features`
-   與 `build_model_input` 之間。這仍然擋在失真之前：narrowing 發生在下游的
+   之後 `catalog.save`——所以它是一個獨立的 node，排在 `apply_preprocessor_to_features`
+   與 `build_model_input` 之間。它產出 `numeric_precision_report`（每個受檢欄的
+   headroom），所以不是零輸出 side-effect node，也就不在 A7／R3 的登記裡。這仍然擋在失真之前：narrowing 發生在下游的
    `build_model_input`，`preprocessed_feature_table` 保留來源 dtype。
 2. **footer 透過 Spark 的 JVM Hadoop `FileSystem` 讀，不是 pyarrow**
    （`utils/parquet_stats.py`，與 `utils/hdfs.copy_hdfs_to_local` 同一座橋）。這不是

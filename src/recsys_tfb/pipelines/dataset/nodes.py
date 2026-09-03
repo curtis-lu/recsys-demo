@@ -40,6 +40,7 @@ from recsys_tfb.core.consistency import (
     nonnumeric_feature_errors,
     ColumnPrecision,
     numeric_precision_errors,
+    numeric_precision_rows,
     resolved_item_values,
     resolved_numeric_storage,
     spark_dtype_is_numeric,
@@ -624,23 +625,29 @@ def validate_numeric_precision(
     preprocessor_metadata: dict,
     month_plan: SnapDatePlan,
     parameters: dict,
-) -> None:
-    """Run the B8 precision invariant over the months this run just encoded.
+) -> dict:
+    """Measure the precision headroom of the months just encoded, and gate on it.
 
-    Side-effect only: raises ``DataConsistencyError`` on violation under the
-    default policy, returns ``None`` when everything holds. The rule itself
-    lives with its predicate in ``core/consistency.py`` — this node gathers
-    facts and applies the configured policy to them.
+    Returns the report (catalog entry ``numeric_precision_report``); raises
+    ``DataConsistencyError`` on a breach under the default policy. The rule
+    itself lives with its predicates in ``core/consistency.py`` — this node
+    gathers facts, hands them over, and applies the configured policy.
 
-    **Why it sits between the write and the reads.** The values this gate is
+    **Why it reports rather than only gating.** A pass/fail answer tells an
+    operator nothing about the column sitting at 0.99 of its limit, which passes
+    today and stops the pipeline the month a larger value arrives. The report
+    carries every checked column with its headroom, closest-to-breaching first;
+    the gate is the same numbers read as a verdict.
+
+    **Why it sits between the write and the reads.** The values this node is
     about are narrowed by ``cast_feature_floats_to_float32`` inside
     ``build_model_input``, which is downstream; ``preprocessed_feature_table``
-    itself keeps its source dtypes. So the gate reads a table that has already
-    landed — the runner saves a node's output before the next node loads it —
-    and still stops the run before a single narrowed value is stored. Reading
-    the landed table rather than ``feature_table`` is what lets it assume
-    parquet with statistics: this repo writes that table, while ``feature_table``
-    is the user's own and this framework does not dictate its format.
+    itself keeps its source dtypes. So it reads a table that has already landed
+    — the runner saves a node's output before the next node loads it — and still
+    stops the run before a single narrowed value is stored. Reading the landed
+    table rather than ``feature_table`` is what lets it assume parquet with
+    statistics: this repo writes that table, while ``feature_table`` is the
+    user's own and this framework does not dictate its format.
 
     **Cost invariant (ADR-0006).** Facts come from parquet footers — a seek per
     file, no rows read — so this node does not change the pipeline's cost
@@ -651,6 +658,11 @@ def validate_numeric_precision(
     months the same ``month_plan`` just encoded. A month that landed under an
     earlier run is not re-read — the same coverage every other incremental
     artifact has, and the reason adding an evaluation month checks that month.
+
+    Known limit: under ``block`` the run aborts, so the report never reaches the
+    catalog. The full table is logged before the raise for exactly that reason —
+    the survey workflow (run once under ``truncate``, read the artifact) is what
+    the persisted report is for.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -673,6 +685,7 @@ def validate_numeric_precision(
         if spark_dtype_value_step(dtypes[c]) is not None
     }
     checked = sorted(steps)
+    report = _precision_report(storage_type, policy, months, {}, dtypes)
 
     if not checked or not months:
         logger.info(
@@ -680,7 +693,7 @@ def validate_numeric_precision(
             "(castable=%d, with a value grid=%d, months=%d)",
             storage_type, len(castable), len(checked), len(months),
         )
-        return
+        return report
 
     # Decision — the facts are read from the partitions this run just wrote,
     # not from the whole table: inputFiles() answers for the relation, so the
@@ -711,17 +724,22 @@ def validate_numeric_precision(
         max_abs = read_max_abs_stats(
             preprocessed_feature_table.sparkSession, files, checked,
         )
+        by_column = {
+            c: ColumnPrecision(max_abs[c], steps[c]) for c in checked
+        }
+        report = _precision_report(
+            storage_type, policy, months, by_column, dtypes,
+        )
         logger.info(
             "Numeric precision gate (%s): %d column(s) over %d file(s) in "
             "%d month(s)", storage_type, len(checked), len(files), len(months),
         )
-        errors = numeric_precision_errors(
-            {c: ColumnPrecision(max_abs[c], steps[c]) for c in checked},
-            storage_type,
-        )
+        for line in _precision_report_lines(report):
+            logger.info("%s", line)
+        errors = numeric_precision_errors(by_column, storage_type)
 
     if not errors:
-        return
+        return report
 
     message = (
         f"Numeric precision check failed for "
@@ -735,6 +753,56 @@ def validate_numeric_precision(
     if policy == "block":
         raise DataConsistencyError(message)
     logger.warning("%s", message)
+    return report
+
+
+def _precision_report(
+    storage_type: str,
+    policy: str,
+    months: list,
+    by_column: dict,
+    dtypes: dict,
+) -> dict:
+    """Assemble the persisted shape of the precision measurement.
+
+    Module-private: the shape is this node's output contract, not something a
+    second caller reuses. ``dtypes`` is carried into each row because a reader
+    asking "why is this column's limit so low" needs the scale, and looking it
+    up means finding the table this report is about.
+    """
+    rows = numeric_precision_rows(by_column, storage_type)
+    for row in rows:
+        row["dtype"] = dtypes.get(row["column"])
+    return {
+        "storage_type": storage_type,
+        "policy": policy,
+        "months": [pd.Timestamp(m).strftime("%Y-%m-%d") for m in months],
+        "checked_columns": len(rows),
+        "breaches": sum(1 for r in rows if r["verdict"] == "breach"),
+        "unmeasured": sum(1 for r in rows if r["verdict"] == "unmeasured"),
+        "columns": rows,
+    }
+
+
+def _precision_report_lines(report: dict) -> list[str]:
+    """The report as fixed-width log lines, closest-to-breaching first.
+
+    Logged as well as returned because ``block`` aborts the run before the
+    catalog can write the artifact — the one case where an operator most needs
+    the numbers is the one where the file does not exist.
+    """
+    lines = [
+        f"  {'column':<28} {'dtype':<16} {'max(|x|)':>18} "
+        f"{'limit':>18} {'headroom':>12}  verdict"
+    ]
+    for row in report["columns"]:
+        headroom = "-" if row["headroom"] is None else f"{row['headroom']:.3g}x"
+        max_abs = "-" if row["max_abs"] is None else f"{row['max_abs']:,.10g}"
+        lines.append(
+            f"  {row['column']:<28} {str(row['dtype']):<16} {max_abs:>18} "
+            f"{row['limit']:>18,.10g} {headroom:>12}  {row['verdict']}"
+        )
+    return lines
 
 
 def build_model_input(

@@ -321,7 +321,6 @@ class TestA7ZeroOutputNodesRegistered:
 
         assert found == Counter({
             ("dataset", "validate_data_consistency"): 1,
-            ("dataset", "validate_numeric_precision"): 1,
             ("training", "log_experiment"): 1,
         }), (
             "zero-output side-effect nodes changed. Registered in R3 of "

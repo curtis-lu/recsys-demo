@@ -2686,3 +2686,63 @@ class TestValidateNumericPrecisionOnDecimal:
             self._run(landed, _precision_params(
                 parameters, numeric_precision_policy="truncate"))
         assert "bal" in caplog.text
+
+    def test_a_passing_run_returns_a_report_row_for_the_column(
+        self, spark, tmp_path, parameters,
+    ):
+        # The artifact side: a gate that only says "fine" cannot tell an
+        # operator this column is at 99% of its limit. The report can.
+        landed = self._landed_decimal(spark, tmp_path, "65536.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"),
+            _precision_params(parameters),
+        )
+        assert report["storage_type"] == "float32"
+        assert report["policy"] == "block"
+        assert report["months"] == ["2024-01-31"]
+        assert report["breaches"] == 0
+        row, = report["columns"]
+        assert row["column"] == "bal"
+        assert row["dtype"] == "decimal(18,2)"
+        assert row["limit"] == 131072.0
+        # 131,072 over 65,536 -- one doubling of the column away from breaching.
+        assert row["headroom"] == pytest.approx(2.0)
+        assert row["verdict"] == "ok"
+
+    def test_a_truncated_run_still_returns_the_report(
+        self, spark, tmp_path, parameters,
+    ):
+        # The survey workflow: run once under truncate, read the artifact. Under
+        # block the run aborts and the catalog never writes it, which is why the
+        # table is logged too.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan("2024-01-31"),
+            _precision_params(parameters, numeric_precision_policy="truncate"),
+        )
+        assert report["breaches"] == 1
+        assert report["columns"][0]["verdict"] == "breach"
+
+    def test_the_logged_table_carries_the_numbers_when_block_aborts(
+        self, spark, tmp_path, parameters, caplog,
+    ):
+        # The one case the persisted report cannot cover. If this stops holding,
+        # a blocked run leaves the operator with no numbers at all.
+        landed = self._landed_decimal(spark, tmp_path, "200000.00")
+        with caplog.at_level("INFO"):
+            with pytest.raises(DataConsistencyError):
+                self._run(landed, _precision_params(parameters))
+        assert "headroom" in caplog.text
+        assert "200,000" in caplog.text and "131,072" in caplog.text
+
+    def test_nothing_to_check_still_returns_a_well_formed_report(
+        self, spark, tmp_path, parameters,
+    ):
+        # The catalog writes whatever this returns, so the early-exit path
+        # cannot hand it None.
+        landed = self._landed_decimal(spark, tmp_path, "1.00")
+        report = validate_numeric_precision(
+            landed, self._META, _plan(), _precision_params(parameters))
+        assert report["columns"] == []
+        assert report["checked_columns"] == 0
+        assert report["months"] == []

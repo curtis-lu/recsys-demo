@@ -2271,6 +2271,7 @@ from recsys_tfb.core.consistency import (
     ColumnPrecision,
     exact_value_limit,
     numeric_precision_errors,
+    numeric_precision_rows,
     numeric_storage_param_errors,
     resolved_numeric_storage,
     spark_dtype_value_step,
@@ -2501,3 +2502,72 @@ class TestNumericPrecisionErrorsB8:
     def test_an_undeclarable_storage_type_raises_rather_than_passing(self):
         with pytest.raises(ConfigConsistencyError):
             numeric_precision_errors(self._ints(a=1.0), "float16")
+
+
+class TestNumericPrecisionRows:
+    """The report shape: every checked column, not only the failing ones."""
+
+    def _rows(self, by_column, storage="float32"):
+        return {r["column"]: r for r in numeric_precision_rows(by_column, storage)}
+
+    def test_a_passing_column_still_gets_a_row(self):
+        # The difference between this and the errors predicate, and the reason
+        # both exist: a gate reports failures, a report reports state.
+        rows = self._rows({"cust_age": ColumnPrecision(97.0, 1.0)})
+        assert rows["cust_age"]["verdict"] == "ok"
+        assert rows["cust_age"]["limit"] == float(2 ** 24)
+
+    def test_headroom_says_how_much_larger_the_column_may_get(self):
+        rows = self._rows({"fee": ColumnPrecision(65536.0, 0.01)})
+        # limit 131,072 over max 65,536 -> exactly 2x room left.
+        assert rows["fee"]["headroom"] == pytest.approx(2.0)
+        assert rows["fee"]["verdict"] == "ok"
+
+    def test_a_breach_is_marked_and_keeps_a_sub_one_headroom(self):
+        rows = self._rows({"bal": ColumnPrecision(262144.0, 0.01)})
+        assert rows["bal"]["verdict"] == "breach"
+        assert rows["bal"]["headroom"] == pytest.approx(0.5)
+
+    def test_unmeasured_and_empty_columns_have_no_headroom(self):
+        rows = self._rows({
+            "mystery": ColumnPrecision(None, 1.0),
+            "empty": ColumnPrecision(0.0, 1.0),
+        })
+        assert rows["mystery"]["verdict"] == "unmeasured"
+        assert rows["mystery"]["headroom"] is None
+        # An empty column is safe, but "infinite room" is not a number.
+        assert rows["empty"]["verdict"] == "ok"
+        assert rows["empty"]["headroom"] is None
+
+    def test_sorted_closest_to_breaching_first(self):
+        # The ordering is the report's whole usefulness: skimmed or truncated,
+        # the column about to stop the pipeline is the one you read.
+        ordered = [r["column"] for r in numeric_precision_rows({
+            "roomy": ColumnPrecision(97.0, 1.0),
+            "tight": ColumnPrecision(130900.0, 0.01),
+            "broken": ColumnPrecision(262144.0, 0.01),
+            "unknown": ColumnPrecision(None, 1.0),
+        }, "float32")]
+        assert ordered[:3] == ["broken", "tight", "roomy"]
+        # No-headroom rows sort last rather than mixing into the ranking.
+        assert ordered[3] == "unknown"
+
+    def test_a_row_exists_for_every_column_handed_in(self):
+        by_column = {c: ColumnPrecision(1.0, 1.0) for c in ("a", "b", "c")}
+        assert len(numeric_precision_rows(by_column, "float32")) == 3
+
+    def test_verdicts_agree_with_the_errors_predicate(self):
+        # Two readings of the same numbers must not drift: every column the
+        # gate rejects is a column the report marks, and no other.
+        by_column = {
+            "ok": ColumnPrecision(1000.0, 1.0),
+            "bad": ColumnPrecision(2.0 ** 40, 1.0),
+            "none": ColumnPrecision(None, 1.0),
+        }
+        flagged = {
+            r["column"] for r in numeric_precision_rows(by_column, "float32")
+            if r["verdict"] != "ok"
+        }
+        errors = numeric_precision_errors(by_column, "float32")
+        assert flagged == {"bad", "none"}
+        assert len(errors) == len(flagged)
