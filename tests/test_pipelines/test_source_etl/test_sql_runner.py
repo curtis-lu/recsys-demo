@@ -629,6 +629,44 @@ class TestAuditFlush:
         audit.flush.assert_called_once()
 
 
+class TestAuditRowCountSource:
+    """The audit row count is taken from the check that measured it."""
+
+    _ONE_TABLE_CONFIG = TestAuditFlush._ONE_TABLE_CONFIG
+
+    def test_row_count_comes_from_min_row_count_not_from_message_wording(
+        self, sql_dir
+    ):
+        # A result that both carries a metric_value AND says "row count" sits
+        # ahead of the real one. Selecting by message wording picks 2 (issue
+        # #289 added exactly this shape: a NULL-key count with a metric_value).
+        def run_all(self, table_config, target_db, snap_date):
+            return [
+                CheckResult(
+                    True, "db.t primary key: 2 rows, row count irrelevant",
+                    metric_value=2, table=table_config.name,
+                    check="primary_key_not_null", snap_date=snap_date,
+                ),
+                CheckResult(
+                    True, "db.t row count: 200 (min: 100)", metric_value=200,
+                    table=table_config.name, check="min_row_count",
+                    snap_date=snap_date,
+                ),
+            ]
+
+        spark = _make_spark_mock(table_exists=False)
+        runner = SQLRunner(
+            self._ONE_TABLE_CONFIG, sql_dir, dry_run=False, stage="feature_etl"
+        )
+        audit = MagicMock()
+        with patch.object(runner, "_initialize_context", return_value=(spark, audit)), \
+             patch.object(OutputChecker, "run_all", run_all):
+            runner.run(["2026-03-31"], run_id="r1")
+
+        record = audit.write_record.call_args[0][0]
+        assert record.row_count == 200
+
+
 class TestSummaryStatus:
     def test_status_from_exc_helper(self):
         assert _snap_status_from_exc(None) == "success"

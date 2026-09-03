@@ -9,9 +9,9 @@ All errors subclass ValueError so existing ``except ValueError`` call sites
 
 Invariant legend
 ----------------
-Code comments across this module, ``core/schema.py`` and
-``pipelines/dataset/nodes.py`` reference invariants by ID. This docstring is
-the canonical legend.
+Code comments across this module, ``core/schema.py``,
+``pipelines/dataset/nodes.py`` and ``pipelines/source_etl/checks.py`` reference
+invariants by ID. This docstring is the canonical legend.
 
 Layer 1 — config-static (implemented here; aggregated by
 ``validate_config_consistency``, run at CLI entry):
@@ -267,6 +267,29 @@ Layer 1 — config-static (implemented here; aggregated by
   A24/A26 — ``numeric_feature_storage_type`` feeds ``base_dataset_version``, so a
   typo in it moves the artifact paths training and inference resolve too, which
   is A29's reason for aggregating.
+
+* A32 — each of the three source tables the dataset pipeline reads
+  (``DATASET_SOURCE_TABLES``: sample_pool / label_table / feature_table) must
+  declare ``quality_checks.max_duplicate_key_ratio``, at a value in [0, 1).
+  ``OutputChecker.run_all`` gates the entire primary-key check on that key
+  being present — declaring ``primary_key`` alone runs no value check — so
+  deleting one config line silently turns off both verdicts the check produces:
+  duplicate keys and the NULL key columns whose diagnosis issue #289 added.
+  ADR-0006 records the accident already happening once: ``feature_table`` had a
+  primary key and no ``quality_checks``, so ``select_train_keys``'s comment
+  ("PK enforced upstream by source_etl's max_duplicate_key_ratio") was true for
+  ``sample_pool`` and false for ``feature_table``, unnoticed for half a year.
+  Scope is those three tables and not "every table with a ``primary_key``":
+  five feature tables omit ``quality_checks`` deliberately,
+  and checking them would add five scans ADR-0006 decided against. Predicate:
+  ``dataset_source_quality_check_errors`` (pure — parameters only, no Spark, no
+  new load path: ``ConfigLoader.get_parameters`` already merges every
+  ``parameters*.yaml``). Aggregated by ``validate_config_consistency``, like
+  A29/A31, because all three tables feed one pipeline's inputs and the operator
+  should learn at the next CLI entry. Today it is a no-op — every one of the
+  three complies; it exists for the day one stops. Deliberate residual: deleting
+  ``primary_key`` too escapes the gate, which is a visible retirement of the key
+  rather than the silent shape above.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -1171,6 +1194,122 @@ def numeric_storage_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+#: The source tables the dataset pipeline reads — the three inputs of
+#: ``validate_data_consistency``. A32 requires each to keep the quality check
+#: below; the other tables the ETL stages produce are deliberately out of scope
+#: (ADR-0006 checks the terminal table only).
+DATASET_SOURCE_TABLES: tuple[str, ...] = ("sample_pool", "label_table", "feature_table")
+
+#: The ``quality_checks`` key that switches ``source_etl``'s primary-key check
+#: on. ``OutputChecker.run_all`` runs ``check_primary_key`` only when this key is
+#: present, so it gates BOTH verdicts the check produces — duplicate keys and
+#: NULL key columns (issue #289).
+PRIMARY_KEY_CHECK = "max_duplicate_key_ratio"
+
+
+def _etl_table_declarations(parameters: dict) -> list[tuple[str, Mapping]]:
+    """``(stage, table)`` for every table any ``*_etl`` stage declares.
+
+    Scanned by ``name`` rather than indexed: ``<stage>.tables[N]`` drifts the
+    moment a table is added or reordered, and the gate would then be reading
+    a different table than it reports on.
+    """
+    found: list[tuple[str, Mapping]] = []
+    for stage, block in parameters.items():
+        if not isinstance(stage, str) or not stage.endswith("_etl"):
+            continue
+        if not isinstance(block, Mapping):
+            continue
+        for entry in block.get("tables") or []:
+            if isinstance(entry, Mapping) and entry.get("name"):
+                found.append((stage, entry))
+    return found
+
+
+def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
+    """A32 — the dataset pipeline's three source tables keep their key check.
+
+    ``OutputChecker.run_all`` gates the whole primary-key check on
+    ``"max_duplicate_key_ratio" in quality_checks``: declaring ``primary_key``
+    alone runs no *value* check at all. So deleting one line of config turns off
+    both the duplicate check and the NULL diagnosis (issue #289) with nothing to
+    show for it. ADR-0006 records this exact accident already happening once:
+    ``feature_table`` declared a primary key and no ``quality_checks``, so
+    ``select_train_keys``'s comment ("PK enforced upstream by source_etl's
+    max_duplicate_key_ratio", ``pipelines/dataset/nodes.py``) was true of
+    ``sample_pool`` — the table it is written about — and false of
+    ``feature_table``, for half a year.
+
+    Scope is the three tables the dataset pipeline actually reads. The
+    alternative — "a declared ``primary_key`` implies an unconditional check" —
+    was measured and rejected: five feature tables declare a key with no
+    ``quality_checks`` *on purpose*, because duplicate keys reach the terminal
+    table through the join fan-out and one aggregation there catches what six
+    would (ADR-0006). Making the check unconditional adds those five scans back
+    and overturns that decision; it would have to change the ADR first.
+
+    A table no ``*_etl`` stage declares is skipped, and that is the second known
+    residual: renaming or deleting one of the three entries escapes A32 the same
+    way. It is skipped rather than reported because the gate has to stay usable
+    on a config that declares one ETL stage and not the others (every minimal
+    parameters dict in the test suite is that shape), and because the escape is
+    not the silent failure A32 is for — a source table nothing produces stops
+    the dataset pipeline at the Hive read. The threshold's *value* is in scope,
+    though — the failure A32 exists to stop is the check being off while looking
+    on, and ``max_duplicate_key_ratio: 1.0`` is exactly that (the measured ratio
+    is always below 1). An explicit YAML null passes ``run_all``'s ``in`` test
+    and then raises comparing a float to ``None`` — after the scan.
+
+    Pure: takes ``parameters`` only, so it costs no Spark and no new load path
+    (``ConfigLoader.get_parameters`` already merges every ``parameters*.yaml``,
+    ETL stages included). Aggregated by ``validate_config_consistency`` rather
+    than hung off one command: all three tables feed the dataset pipeline, and
+    the operator who broke the config should learn at the next CLI entry.
+
+    Known residuals, both deliberate: deleting ``primary_key`` as well escapes
+    this gate (that is retiring the key declaration outright — a visible config
+    edit rather than the silent shape above, registered in issue #289), and so
+    does removing the table's whole declaration (paragraph above).
+    """
+    errors: list[str] = []
+    declared = _etl_table_declarations(parameters)
+    for name in DATASET_SOURCE_TABLES:
+        for stage, entry in declared:
+            if entry.get("name") != name:
+                continue
+            where = f"{stage}.tables[name={name!r}]"
+            checks = entry.get("quality_checks") or {}
+            if PRIMARY_KEY_CHECK not in checks:
+                errors.append(
+                    f"A32: {where} declares no quality_checks."
+                    f"{PRIMARY_KEY_CHECK}. The dataset pipeline reads {name}, "
+                    f"and that key is what makes source_etl check the primary "
+                    f"key at all — without it neither duplicate keys nor NULL "
+                    f"key columns are looked at, and nothing says so. Add:\n"
+                    f"      quality_checks:\n"
+                    f"        {PRIMARY_KEY_CHECK}: 0.0"
+                )
+                continue
+            value = checks[PRIMARY_KEY_CHECK]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                errors.append(
+                    f"A32: {where} sets quality_checks.{PRIMARY_KEY_CHECK}="
+                    f"{value!r}, which is not a ratio. A key written with no "
+                    f"value is present enough for source_etl to run the check "
+                    f"and then fail comparing a float to it, after the scan. "
+                    f"Write a number in [0, 1) — normally 0.0."
+                )
+            elif not 0 <= value < 1:
+                errors.append(
+                    f"A32: {where} sets quality_checks.{PRIMARY_KEY_CHECK}="
+                    f"{value!r}, which no measured ratio can be judged against: "
+                    f"the ratio is always in [0, 1), so 1 or above never fails "
+                    f"(the check is off while still declared) and below 0 never "
+                    f"passes. Use a value in [0, 1) — normally 0.0."
+                )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -1278,6 +1417,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(entity_grouping_key_errors(parameters))
 
     errors.extend(numeric_storage_param_errors(parameters))
+
+    errors.extend(dataset_source_quality_check_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

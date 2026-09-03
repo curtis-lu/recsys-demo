@@ -194,32 +194,179 @@ class TestOutputCheckerRowCount:
         assert result.passed is False
 
 
-class TestOutputCheckerDuplicateKeys:
-    def test_no_duplicates(self):
-        row = MagicMock()
-        row.__getitem__ = lambda self, k: 100 if k == "total" else 100
-        spark = MagicMock()
-        spark.sql.return_value.collect.return_value = [row]
+_PK = ["snap_date", "cust_id", "prod_name"]
 
-        checker = OutputChecker(spark)
-        result = checker.check_duplicate_keys(
-            "db", "t", "2024-01-31", ["cust_id"], 0.0
+
+def _pk_aggregate(pk, total, distinct_cnt, keyed_total=None, nulls=None):
+    """The one aggregate row ``check_primary_key`` reads, stated column by column.
+
+    ``keyed_total`` defaults to ``total`` — the no-NULL table, where the
+    duplicate ratio is the same number the check reported before #289.
+    """
+    nulls = nulls or {}
+    values = {
+        "total": total,
+        "distinct_cnt": distinct_cnt,
+        "keyed_total": total if keyed_total is None else keyed_total,
+    }
+    for col in pk:
+        values[f"null_{col}"] = nulls.get(col, 0)
+    return values
+
+
+def _one_row_spark(values: dict):
+    """A mock SparkSession whose ``.sql()`` returns a single dict-backed Row."""
+    row = MagicMock()
+    row.__getitem__ = lambda self, k: values[k]
+    df = MagicMock()
+    df.collect.return_value = [row]
+    spark = MagicMock()
+    spark.sql.return_value = df
+    return spark
+
+
+class TestOutputCheckerPrimaryKey:
+    """One scan, two verdicts: NULL keys and duplicate keys (issue #289)."""
+
+    @staticmethod
+    def _by_check(results):
+        by = {r.check: r for r in results}
+        assert set(by) == {"primary_key_not_null", "max_duplicate_key_ratio"}, (
+            "audit records must be able to tell the two verdicts apart"
         )
-        assert result.passed is True
-        assert result.metric_value == 0.0
+        return by
 
-    def test_duplicates_above_threshold(self):
-        row = MagicMock()
-        row.__getitem__ = lambda self, k: 100 if k == "total" else 90
-        spark = MagicMock()
-        spark.sql.return_value.collect.return_value = [row]
+    def test_null_keys_are_reported_as_null_not_as_duplicates(self):
+        # The measured case from issue #289: 5 rows, 2 with a NULL cust_id,
+        # not one actually duplicated row. COUNT(DISTINCT ...) skips the NULL
+        # rows, so the old single verdict called this a 0.4 duplicate ratio.
+        spark = _one_row_spark(_pk_aggregate(
+            _PK, total=5, distinct_cnt=3, keyed_total=3, nulls={"cust_id": 2}))
 
-        checker = OutputChecker(spark)
-        result = checker.check_duplicate_keys(
-            "db", "t", "2024-01-31", ["cust_id"], 0.05
-        )
-        assert result.passed is False
-        assert result.metric_value == pytest.approx(0.1)
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "sample_pool", "2024-01-31", _PK, 0.0))
+
+        nulls = by["primary_key_not_null"]
+        assert nulls.passed is False
+        assert "cust_id" in nulls.message and "2" in nulls.message
+        assert "duplicate" not in nulls.message.lower()
+        # The columns that are fine must not be named — the operator is being
+        # pointed at one column to go fix.
+        assert "prod_name" not in nulls.actual
+
+        dup = by["max_duplicate_key_ratio"]
+        assert dup.passed is True
+        assert dup.metric_value == 0.0
+
+    def test_real_duplicates_report_exactly_as_before(self):
+        spark = _one_row_spark(_pk_aggregate(_PK, total=100, distinct_cnt=90))
+
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.05))
+
+        dup = by["max_duplicate_key_ratio"]
+        assert dup.passed is False
+        assert dup.metric_value == pytest.approx(0.1)
+        assert dup.message == "db.t duplicate key ratio: 0.1000 (max: 0.05)"
+        assert by["primary_key_not_null"].passed is True
+
+    def test_clean_table_passes_both(self):
+        spark = _one_row_spark(_pk_aggregate(_PK, total=100, distinct_cnt=100))
+
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0))
+
+        assert by["primary_key_not_null"].passed is True
+        assert by["max_duplicate_key_ratio"].passed is True
+        assert by["max_duplicate_key_ratio"].metric_value == 0.0
+
+    def test_nulls_and_duplicates_together_are_both_reported(self):
+        # 10 rows: 2 carry a NULL cust_id, and of the 8 that carry a key only
+        # 6 are distinct. Neither verdict may swallow the other.
+        spark = _one_row_spark(_pk_aggregate(
+            _PK, total=10, distinct_cnt=6, keyed_total=8, nulls={"cust_id": 2}))
+
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0))
+
+        assert by["primary_key_not_null"].passed is False
+        assert by["max_duplicate_key_ratio"].passed is False
+        # Ratio over the rows that actually carry a key, not over all 10.
+        assert by["max_duplicate_key_ratio"].metric_value == pytest.approx(0.25)
+
+    def test_every_null_column_is_named_with_its_count(self):
+        spark = _one_row_spark(_pk_aggregate(
+            _PK, total=6, distinct_cnt=2, keyed_total=2,
+            nulls={"cust_id": 3, "prod_name": 1}))
+
+        nulls = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0))["primary_key_not_null"]
+
+        assert "cust_id=3" in nulls.actual
+        assert "prod_name=1" in nulls.actual
+        assert "snap_date" not in nulls.actual
+
+    def test_it_stays_one_scan(self):
+        # ADR-0006's cost invariant: splitting the diagnosis must not buy a
+        # second aggregate over the table.
+        spark = _one_row_spark(_pk_aggregate(_PK, total=4, distinct_cnt=4))
+        OutputChecker(spark).check_primary_key("db", "t", "2024-01-31", _PK, 0.0)
+        assert spark.sql.call_count == 1
+
+    def test_sql_is_built_per_declared_key_column(self):
+        # schema.entity is a list and the key columns come from config, so
+        # nothing here may be spelled out in the query.
+        pk = ["as_of", "member_ref", "channel"]
+        spark = _one_row_spark(_pk_aggregate(pk, total=3, distinct_cnt=3))
+
+        OutputChecker(spark).check_primary_key("db", "t", "2024-01-31", pk, 0.0)
+
+        sql = spark.sql.call_args[0][0]
+        for col in pk:
+            # Its own SUM term, aliased per column — asserting only "IS NULL"
+            # would be satisfied by the shared keyed_total expression, and the
+            # per-column counts could quietly stop being computed.
+            assert f"SUM(CASE WHEN `{col}` IS NULL THEN 1 ELSE 0 END) " \
+                   f"AS `null_{col}`" in sql, col
+            # ...and the row the ratio is measured over excludes it too.
+            assert f"`{col}` IS NULL" in sql.split("AS keyed_total")[0], col
+        assert "cust_id" not in sql
+
+    def test_zero_rows_skips_the_duplicate_check(self):
+        spark = _one_row_spark(_pk_aggregate(_PK, total=0, distinct_cnt=0))
+
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0))
+
+        assert by["max_duplicate_key_ratio"].passed is True
+        assert by["max_duplicate_key_ratio"].message == (
+            "db.t has 0 rows, skip dup check")
+        assert by["primary_key_not_null"].passed is True
+
+    def test_every_row_missing_a_key_still_fails_on_null_only(self):
+        # No keyed row survives, so there is nothing to call a duplicate; the
+        # NULL verdict has to carry the whole report.
+        spark = _one_row_spark(_pk_aggregate(
+            _PK, total=4, distinct_cnt=0, keyed_total=0, nulls={"cust_id": 4}))
+
+        by = self._by_check(OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0))
+
+        assert by["primary_key_not_null"].passed is False
+        assert by["max_duplicate_key_ratio"].passed is True
+        assert "skip dup check" in by["max_duplicate_key_ratio"].message
+
+    def test_null_verdict_is_not_mistaken_for_the_row_count_result(self):
+        # sql_runner._run_output_checks picks the audit row_count out of the
+        # results by looking for "row count" in the message. A new result
+        # carrying a metric_value must not answer to that.
+        spark = _one_row_spark(_pk_aggregate(
+            _PK, total=5, distinct_cnt=3, keyed_total=3, nulls={"cust_id": 2}))
+
+        for r in OutputChecker(spark).check_primary_key(
+            "db", "t", "2024-01-31", _PK, 0.0
+        ):
+            assert "row count" not in r.message
 
 
 class TestOutputCheckerNullRatio:
@@ -366,20 +513,63 @@ class TestOutputCheckerRunAll:
 
         count_row = MagicMock()
         count_row.__getitem__ = lambda self, k: 200
-        dup_row = MagicMock()
-        dup_row.__getitem__ = lambda self, k: 200 if k == "total" else 200
+        pk_values = _pk_aggregate(cfg.primary_key, total=200, distinct_cnt=200)
+        pk_row = MagicMock()
+        pk_row.__getitem__ = lambda self, k: pk_values[k]
 
         spark = MagicMock()
         count_df = MagicMock()
         count_df.collect.return_value = [count_row]
-        dup_df = MagicMock()
-        dup_df.collect.return_value = [dup_row]
-        spark.sql.side_effect = [desc_df, count_df, dup_df]
+        pk_df = MagicMock()
+        pk_df.collect.return_value = [pk_row]
+        spark.sql.side_effect = [desc_df, count_df, pk_df]
 
         checker = OutputChecker(spark)
         results = checker.run_all(cfg, "ml_feature", "2024-01-31")
-        assert len(results) == 3
+        # schema_contract + min_row_count + the two primary-key verdicts, and
+        # still three queries: the key check reads one aggregate (#289).
+        assert [r.check for r in results] == [
+            "schema_contract",
+            "min_row_count",
+            "primary_key_not_null",
+            "max_duplicate_key_ratio",
+        ]
         assert all(r.passed for r in results)
+        assert spark.sql.call_count == 3
+
+    def test_null_key_fails_the_table_through_run_all(self):
+        # The wiring that matters: the NULL verdict has to reach the caller's
+        # failed-results list, not just exist inside check_primary_key.
+        cfg = TableConfig(
+            name="sample_pool",
+            sql_file="sample_pool/sample_pool.sql",
+            partition_by=["snap_date"],
+            primary_key=["snap_date", "cust_id"],
+            quality_checks={"max_duplicate_key_ratio": 0.0},
+        )
+        desc_rows = []
+        for col in ["snap_date", "cust_id"]:
+            r = MagicMock()
+            r.__getitem__ = lambda self, k, c=col: c if k == "col_name" else "string"
+            desc_rows.append(r)
+        desc_df = MagicMock()
+        desc_df.collect.return_value = desc_rows
+
+        pk_values = _pk_aggregate(
+            cfg.primary_key, total=5, distinct_cnt=3, keyed_total=3,
+            nulls={"cust_id": 2})
+        pk_row = MagicMock()
+        pk_row.__getitem__ = lambda self, k: pk_values[k]
+        pk_df = MagicMock()
+        pk_df.collect.return_value = [pk_row]
+
+        spark = MagicMock()
+        spark.sql.side_effect = [desc_df, pk_df]
+
+        results = OutputChecker(spark).run_all(cfg, "ml_recsys", "2024-01-31")
+        failed = [r for r in results if not r.passed]
+        assert [r.check for r in failed] == ["primary_key_not_null"]
+        assert "cust_id" in failed[0].message
 
     def test_schema_contract_runs_even_without_quality_checks(self):
         # Only primary_key declared, no quality_checks → schema contract still runs.
