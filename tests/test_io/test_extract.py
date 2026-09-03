@@ -721,3 +721,252 @@ class TestExtractXyB6Backstop:
         X, y = extract_Xy(handle, _b6_meta(False), _B6_PARAMS)
         assert X.shape[0] == 3
         assert list(y) == [0, 1, 0]
+
+
+# ---------------------------------------------------------------------------
+# Hot path (#280) — narrow-frame group ids and weight keys
+#
+# Both rewrites replace work done over the *whole* frame with work done over a
+# frame holding only the few columns involved.  They must stay bit-for-bit
+# identical to what they replaced, so every test below is a parity test against
+# an inlined copy of the pre-#280 implementation, plus the structural property
+# that makes them fast: the source frame's block count must not change.
+# ---------------------------------------------------------------------------
+
+
+def _fragmented_pdf(n_rows=40, n_feats=30, seed=0):
+    """Frame with one block per column.
+
+    Column-at-a-time assignment is what makes a frame fragmented; a whole-frame
+    ``groupby`` / ``pdf[list]`` consolidates it, copying every column.  The
+    block-count assertions below are vacuous unless the fixture starts
+    fragmented, so ``test_whole_frame_groupby_would_consolidate`` guards that.
+    """
+    rng = np.random.default_rng(seed)
+    pdf = pd.DataFrame({"snap_date": rng.choice(["2025-01-31", "2025-02-28"], n_rows)})
+    pdf["cust_id"] = rng.integers(0, 7, n_rows)
+    for i in range(n_feats):
+        pdf[f"f{i}"] = rng.random(n_rows)
+    return pdf
+
+
+class TestGroupIdsNarrowFrame:
+    GROUP_COLS = ["snap_date", "cust_id"]
+
+    def test_bit_identical_to_whole_frame_groupby(self):
+        from recsys_tfb.io.extract import _group_ids
+
+        pdf = _fragmented_pdf()
+        expected = (
+            pdf.copy()
+            .groupby(self.GROUP_COLS, sort=False)
+            .ngroup()
+            .to_numpy(dtype=np.int64)
+        )
+        assert np.array_equal(_group_ids(pdf, self.GROUP_COLS), expected)
+
+    def test_source_frame_is_not_consolidated(self):
+        from recsys_tfb.io.extract import _group_ids
+
+        pdf = _fragmented_pdf()
+        before = pdf._mgr.nblocks
+        _group_ids(pdf, self.GROUP_COLS)
+        assert pdf._mgr.nblocks == before
+
+    def test_whole_frame_groupby_would_consolidate(self):
+        """Keeps the assertion above honest: the property it checks is one the
+        replaced implementation genuinely violated."""
+        pdf = _fragmented_pdf()
+        before = pdf._mgr.nblocks
+        pdf.groupby(self.GROUP_COLS, sort=False).ngroup()
+        assert pdf._mgr.nblocks < before
+
+    def test_ids_number_groups_by_first_appearance(self):
+        from recsys_tfb.io.extract import _group_ids
+
+        pdf = pd.DataFrame({"t": ["b", "a", "b", "c"], "e": [1, 1, 1, 2]})
+        assert list(_group_ids(pdf, ["t", "e"])) == [0, 1, 0, 2]
+
+    def test_single_group_column(self):
+        from recsys_tfb.io.extract import _group_ids
+
+        pdf = _fragmented_pdf()
+        expected = (
+            pdf.copy().groupby(["cust_id"], sort=False).ngroup().to_numpy(np.int64)
+        )
+        assert np.array_equal(_group_ids(pdf, ["cust_id"]), expected)
+
+    def test_dtype_is_int64(self):
+        from recsys_tfb.io.extract import _group_ids
+
+        assert _group_ids(_fragmented_pdf(), self.GROUP_COLS).dtype == np.int64
+
+
+def _whole_frame_row_weights(pdf, weight_keys, sample_weights):
+    """The pre-#280 implementation, kept verbatim as the parity oracle."""
+    keys = pdf[weight_keys[0]].astype(str)
+    for k in weight_keys[1:]:
+        keys = keys.str.cat(pdf[k].astype(str), sep="|")
+    return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
+
+
+_WEIGHT_PARITY_CASES = {
+    # --- cases the dedup fast path handles ---
+    "str_and_int_keys": (
+        pd.DataFrame({"seg": ["mass", "hnw", "mass", "aff"], "n": [1, 1, 2, 1]}),
+        ["seg", "n"],
+        {"mass|1": 3.0, "hnw|1": 0.5},
+    ),
+    "many_rows_few_distinct": (
+        pd.DataFrame({"p": ["a", "b", "c"] * 50}),
+        ["p"],
+        {"a": 2.0, "c": 0.25},
+    ),
+    "bool_key": (
+        pd.DataFrame({"flag": np.array([True, False, True, False])}),
+        ["flag"],
+        {"True": 4.0},
+    ),
+    # pd.NA on the fast path: only nullable dtypes can carry a missing value
+    # there, and this is the case that fails if the groupby drops it.
+    "nullable_int_with_na": (
+        pd.DataFrame({"n": pd.array([1, None, 2, 1], dtype="Int64")}),
+        ["n"],
+        {"1": 5.0, "<NA>": 9.0},
+    ),
+    # --- cases where value-equality is coarser than string-equality, so the
+    # fast path must decline and fall back to the exact per-row build ---
+    "float_signed_zero": (
+        pd.DataFrame({"x": np.array([0.0, -0.0, 0.0, -0.0])}),
+        ["x"],
+        {"0.0": 2.0, "-0.0": 9.0},
+    ),
+    "object_none_and_nan": (
+        pd.DataFrame({"p": np.array(["p", None, np.nan, "p"], dtype=object)}),
+        ["p"],
+        {"None": 2.0, "nan": 9.0},
+    ),
+    "object_int_and_bool": (
+        pd.DataFrame({"v": np.array([1, True, 0, False], dtype=object)}),
+        ["v"],
+        {"1": 2.0, "True": 9.0},
+    ),
+    "float_with_nan": (
+        pd.DataFrame({"x": np.array([1.0, np.nan, 2.0, 1.0])}),
+        ["x"],
+        {"1.0": 3.0, "nan": 7.0},
+    ),
+    # --- edges ---
+    "single_row": (pd.DataFrame({"p": ["a"]}), ["p"], {"a": 2.0}),
+    "empty_frame": (pd.DataFrame({"p": pd.Series([], dtype=object)}), ["p"], {"a": 2.0}),
+    "no_key_matches": (pd.DataFrame({"p": ["a", "b"]}), ["p"], {"zzz": 2.0}),
+    # two distinct value combinations that join to one string: the weight is
+    # still whatever that single string maps to, for both rows.
+    "separator_inside_value": (
+        pd.DataFrame({"a": ["x|y", "x", "q"], "b": ["z", "y|z", "r"]}),
+        ["a", "b"],
+        {"x|y|z": 6.0},
+    ),
+}
+
+
+class TestRowWeightsParity:
+    @pytest.mark.parametrize("case", sorted(_WEIGHT_PARITY_CASES))
+    def test_matches_whole_frame_implementation(self, case):
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        pdf, keys, table = _WEIGHT_PARITY_CASES[case]
+        got = _compute_row_weights(pdf, keys, table)
+        want = _whole_frame_row_weights(pdf, keys, table)
+        np.testing.assert_array_equal(got, want)
+        assert got.dtype == np.float64
+
+    def test_source_frame_is_not_consolidated(self):
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        pdf = _fragmented_pdf()
+        pdf["prod_name"] = ["a", "b"] * (len(pdf) // 2)
+        before = pdf._mgr.nblocks
+        _compute_row_weights(pdf, ["prod_name"], {"a": 2.0})
+        assert pdf._mgr.nblocks == before
+
+
+class TestWeightKeyFastPathGuard:
+    """The fast path groups rows by *value* and builds one string key per
+    group, so it is only exact when equal values always stringify the same."""
+
+    @pytest.mark.parametrize(
+        "col",
+        [
+            pd.Series(["a", "b", "a"]),
+            pd.Series([1, 2, 3]),
+            pd.Series([True, False]),
+            pd.Series(pd.array([1, None], dtype="Int64")),
+        ],
+    )
+    def test_taken_for_faithful_columns(self, col):
+        from recsys_tfb.io.extract import _distinct_weight_keys
+
+        assert _distinct_weight_keys(pd.DataFrame({"k": col}), ["k"]) is not None
+
+    @pytest.mark.parametrize(
+        "col",
+        [
+            pd.Series([1.0, 2.0]),                                  # -0.0 vs 0.0
+            pd.Series(np.array(["a", None], dtype=object)),         # None vs nan
+            pd.Series(np.array([1, True], dtype=object)),           # 1 vs True
+            pd.Series(["a", "b"]).astype("category"),               # not scanned
+        ],
+    )
+    def test_declined_for_unfaithful_columns(self, col):
+        from recsys_tfb.io.extract import _distinct_weight_keys
+
+        assert _distinct_weight_keys(pd.DataFrame({"k": col}), ["k"]) is None
+
+    def test_declines_when_any_key_column_is_unfaithful(self):
+        from recsys_tfb.io.extract import _distinct_weight_keys
+
+        pdf = pd.DataFrame({"ok": ["a", "b"], "bad": [1.0, 2.0]})
+        assert _distinct_weight_keys(pdf, ["ok", "bad"]) is None
+
+
+class TestZeroMatchDiagnosticKeys:
+    """The zero-match WARNING must still name the same first five distinct data
+    keys, now derived from the deduped frame instead of a per-row string."""
+
+    def _pdf(self):
+        return pd.DataFrame({"p": ["e", "a", "b", "a", "c", "d", "e", "f"]})
+
+    def test_same_five_keys_as_whole_frame_build(self):
+        from recsys_tfb.io.extract import _sample_data_keys, composite_key_series
+
+        pdf = self._pdf()
+        want = composite_key_series(pdf, ["p"]).drop_duplicates().head(5).tolist()
+        assert _sample_data_keys(pdf, ["p"]) == want
+        assert want == ["e", "a", "b", "c", "d"]
+
+    def test_dedups_value_combinations_that_join_to_one_string(self):
+        """A key value containing '|' makes two distinct rows share a string;
+        the replaced code deduped on the string, so this one must too."""
+        from recsys_tfb.io.extract import _sample_data_keys, composite_key_series
+
+        pdf = pd.DataFrame({"a": ["x|y", "x", "q"], "b": ["z", "y|z", "r"]})
+        want = composite_key_series(pdf, ["a", "b"]).drop_duplicates().head(5).tolist()
+        assert want == ["x|y|z", "q|r"]
+        assert _sample_data_keys(pdf, ["a", "b"]) == want
+
+    def test_source_frame_is_not_consolidated(self):
+        from recsys_tfb.io.extract import _sample_data_keys
+
+        pdf = _fragmented_pdf()
+        pdf["prod_name"] = ["a", "b"] * (len(pdf) // 2)
+        before = pdf._mgr.nblocks
+        _sample_data_keys(pdf, ["prod_name"])
+        assert pdf._mgr.nblocks == before
+
+    def test_falls_back_for_unfaithful_column(self):
+        from recsys_tfb.io.extract import _sample_data_keys, composite_key_series
+
+        pdf = pd.DataFrame({"x": np.array([1.0, np.nan, 2.0, 1.0])})
+        want = composite_key_series(pdf, ["x"]).drop_duplicates().head(5).tolist()
+        assert _sample_data_keys(pdf, ["x"]) == want
