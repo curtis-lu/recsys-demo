@@ -346,3 +346,11 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **根因**：`src/recsys_tfb/evaluation/metrics_spark.py:409` 是 `map@K = _ap_sum / total_rel`，`total_rel` ＝該 query 的正例總數 R，**沒有 `min(k, R)` 截斷**。同檔 :412 的 `recall@K` 分母也是 `total_rel`。K=1 時兩者分子恰好相等，於是 `map@1 == recall@1`。（檔內確實有 `min(total_rel, K)`，但那是 nDCG 的 iDCG 正規化，與 AP 分母無關。）
 - **規則**：**寫地基公式一律照 code 追一次，別照領域慣例寫**。這條同時是「拿具體數字驗算定義」的範例：憑記憶寫的定義一問就破。
 - **驗證方式**：同一份報表裡比對 `map@1` 與 `recall@1`、`precision@1` 三個數字；前兩者相同即確認。
+
+## 19. 對整份 frame 做只需要少數欄的工作：成本跟著欄數走，不跟著你用到的欄走（2026-09-03）
+
+- **症狀（第一分鐘認出它）**：某一步「明明只碰 2–3 欄」，耗時或峰值記憶體卻隨**總欄數**放大。徵兆是那一步的成本跟輸出大小完全不成比例——回傳一個 int 陣列卻花掉整個抽取的三成時間、或吃掉 GB 級的暫時記憶體。實例：`extract_Xy_with_groups` 只需要 `(time, *entity)` 兩欄的 group id，在 1,002 欄的 frame 上量到 0.664s。
+- **根因（pandas BlockManager）**：`pdf[["a","b"]]`（list 取欄）與 `pdf.groupby(["a","b"])` 都會**就地整併來源 frame 的 block**——為了回答兩欄的問題，把整張表每一欄都複製一次。實測 150,000 列 × 1,002 欄：block 數 1,002 → 3。單欄取值 `pdf["a"]` 走的是另一條路徑，不整併。同一形態的第二種長相是**逐列建查表鍵**：相異組合只有幾十種時，每列建一個 `'|'` 串接字串是 N 倍的重複工。
+- **規則**：**在寬 frame 上只用到少數欄，就先用單欄 Series 組出窄 frame**（`pd.DataFrame({c: pdf[c] for c in cols}, copy=False)`），再對窄 frame 做事；查表類先在窄 frame 上 `drop_duplicates()` 再建鍵，然後用代碼散回每一列。實例見 `src/recsys_tfb/io/extract.py` 的 `_narrow_frame` / `_group_ids` / `_distinct_weight_keys`。
+- **改寫時最容易踩的陷阱**：**「值相等」比「字串相等」寬鬆**。先去重再建字串，只有在「值相等 ⇒ 字串相等」時才逐位元一致；pandas 的分組相等把 `0.0/-0.0`、object 欄裡的 `None/nan`、`1/True` 併成同一組，而 `astype(str)` 會給出不同字串。整數／布林／全 `str` 的 object 欄安全，其餘要退回逐列路徑（`_key_column_is_string_faithful`）。另外去重路徑的 `groupby` **必須** `dropna=False`，否則缺值拿到代碼 `-1`，靜默索引到查找表的最後一筆（與 §11 同源，但這裡的後果是取到錯值而不是整組消失）。
+- **驗證方式**：**斷言來源 frame 的 block 數不變**（`pdf._mgr.nblocks` 前後相同），並用另一個測試證明被取代的寫法**確實會**改變它——否則 fixture 一旦不是 fragmented，這個斷言就靜靜變成恆真。範例：`tests/test_io/test_extract.py::TestGroupIdsNarrowFrame`。fixture 必須用逐欄賦值造出來（一次建好的 frame 本來就只有幾個 block）。
