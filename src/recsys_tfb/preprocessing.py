@@ -229,6 +229,33 @@ def cast_feature_floats_to_float32(
         ``feature_cols`` that were DecimalType or DoubleType.
     """
     casted_feature_cols = castable_numeric_feature_columns(df.schema, feature_cols)
-    for col in casted_feature_cols:
-        df = df.withColumn(col, F.col(col).cast("float"))
-    return df, casted_feature_cols
+
+    # One select, not the more readable ``for col in ...: df.withColumn(...)``.
+    # Every withColumn stacks another Projection onto the logical plan and
+    # Spark's analyzer is superlinear in that depth: at 1,000 columns, building
+    # the plan took 291.04s against 0.43s for a single select (677x), while
+    # execution stayed under 2s either way. Full measurement table and the
+    # general shape: known-pitfalls.md section 20.
+    #
+    # 1,000 columns is where this is headed, not where it is: today only
+    # Decimal and Double feature columns enter the projection, and #283 widens
+    # it to every numeric feature column. Whatever the width, ``build_model_input``
+    # runs five times per dataset run (train / train_dev / val / test /
+    # calibration) and the inference pipeline shares this helper.
+    #
+    # Two things the loop got for free that the select has to pay for, both
+    # pinned by tests in tests/test_preprocessing.py:
+    #   - Column order, and the columns outside ``feature_cols``. withColumn
+    #     replaced a column in place; the select has to relist all of
+    #     ``df.columns`` to end up with the same frame.
+    #   - Name resolution. F.col now parses *every* column name rather than
+    #     just the cast ones, and it reads an unquoted dot as nested-field
+    #     access — so a passthrough column named "a.b" raises here where the
+    #     loop never touched it. The backticks buy that parity back.
+    to_cast = set(casted_feature_cols)
+    projection = [
+        F.col(f"`{col}`").cast("float").alias(col) if col in to_cast
+        else F.col(f"`{col}`")
+        for col in df.columns
+    ]
+    return df.select(*projection), casted_feature_cols

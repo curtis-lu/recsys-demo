@@ -10,6 +10,7 @@ feature-selection tests.
 import pandas as pd
 import pytest
 from decimal import Decimal
+from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
 from recsys_tfb.preprocessing import (
@@ -176,6 +177,139 @@ def test_cast_mixed_decimal_and_double(spark):
     assert _dtype(out, "flt_col") == "float"
     assert _dtype(out, "int_col") == "int"
     assert sorted(casted) == ["dbl_col", "dec_col"]
+
+
+@pytest.mark.spark
+def test_cast_preserves_column_order_and_untouched_columns(mixed_df):
+    """The rebuild must hand back the same frame shape it was given.
+
+    ``withColumn`` replaced a column in place, so order and the columns nobody
+    asked about came for free; a single ``select`` has to list every column, in
+    order, to match that. Expected values are spelled out from the fixture
+    rather than read back off ``mixed_df`` — a projection that quietly moves
+    the cast columns to the end, or drops the ones outside ``feature_cols``,
+    has to argue with this test.
+    """
+    feature_cols = ["feature_a", "feature_b", "feature_c"]
+    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
+
+    assert out.columns == [
+        "cust_id",
+        "label",
+        "feature_a",
+        "feature_b",
+        "feature_c",
+        "non_feature_decimal",
+    ]
+
+    untouched = ["cust_id", "label", "feature_b", "non_feature_decimal"]
+    rows = out.orderBy("cust_id").collect()
+    assert [[row[c] for c in untouched] for row in rows] == [
+        ["C001", 1, 10, Decimal("9.99")],
+        ["C002", 0, 20, Decimal("8.88")],
+    ]
+
+
+@pytest.mark.spark
+class TestCastBuildsOneProjectionNotOnePerColumn:
+    """#282 — the cast is one ``select``, not a ``withColumn`` per column.
+
+    Why that matters, with the measurements: see the comment in
+    ``cast_feature_floats_to_float32`` and known-pitfalls.md section 20. The
+    numbers are deliberately not repeated here — three copies of one table
+    drift apart.
+
+    The guard asserts structure, not elapsed time (#278 Out of Scope 9): a
+    "must finish in N seconds" test flakes on CI load and ends up skipped,
+    which is worse than no test because it still looks like a guard. What is
+    pinned here is the thing the analyzer actually charges for — how many
+    Project nodes the plan carries — and that it stays flat as columns grow.
+
+    ``test_the_withColumn_loop_this_replaced_does_grow_the_plan`` is not
+    decoration: without it, "the count is 1" would still pass on a day when
+    ``_analyzed_project_count`` had quietly stopped being able to see the
+    difference, and a silently-always-true guard is what section 19 of
+    known-pitfalls warns this exact style of test decays into.
+    """
+
+    @staticmethod
+    def _analyzed_project_count(df) -> int:
+        # The analyzed plan, deliberately not the optimized one: the optimizer's
+        # CollapseProject folds the stack back down, which is exactly the work
+        # this helper must not have created in the first place.
+        plan = df._jdf.queryExecution().analyzed().numberedTreeString()
+        return sum(1 for line in plan.splitlines() if "Project" in line)
+
+    @staticmethod
+    def _decimal_feature_frame(spark, n_features: int):
+        schema = T.StructType(
+            [T.StructField("cust_id", T.StringType())]
+            + [
+                T.StructField(f"feature_{i}", T.DecimalType(38, 6))
+                for i in range(n_features)
+            ]
+        )
+        return spark.createDataFrame(
+            [("C001", *([Decimal("1.5")] * n_features))], schema=schema
+        )
+
+    def test_plan_depth_is_flat_in_the_number_of_cast_columns(self, spark):
+        narrow = self._decimal_feature_frame(spark, 2)
+        wide = self._decimal_feature_frame(spark, 16)
+
+        narrow_out, narrow_casted = cast_feature_floats_to_float32(
+            narrow, [c for c in narrow.columns if c != "cust_id"]
+        )
+        wide_out, wide_casted = cast_feature_floats_to_float32(
+            wide, [c for c in wide.columns if c != "cust_id"]
+        )
+
+        # Guard the guard: if nothing were castable both counts would be equal
+        # for the wrong reason.
+        assert len(narrow_casted) == 2
+        assert len(wide_casted) == 16
+
+        # One Project for the whole cast, whatever the column count.
+        assert self._analyzed_project_count(narrow_out) == 1
+        assert self._analyzed_project_count(wide_out) == 1
+
+    def test_the_withColumn_loop_this_replaced_does_grow_the_plan(self, spark):
+        """Proves the assertion above can fail — one Project per cast column."""
+        for n_features in (2, 16):
+            df = self._decimal_feature_frame(spark, n_features)
+            looped = df
+            for col in (c for c in df.columns if c != "cust_id"):
+                looped = looped.withColumn(col, F.col(col).cast("float"))
+            assert self._analyzed_project_count(looped) == n_features
+
+
+@pytest.mark.spark
+def test_cast_leaves_a_dotted_passthrough_column_alone(spark):
+    """A column name with a dot must survive a cast it was never part of.
+
+    The ``withColumn`` loop never referenced the columns outside
+    ``feature_cols``; the single ``select`` has to name every one of them, and
+    ``F.col("a.b")`` means "field b of struct a" unless the name is backticked.
+    Without the backticks this raises ``AnalysisException: Column 'a.b' does
+    not exist. Did you mean one of the following? [a.b, ...]`` — the frame is
+    telling you it has the column it just refused to find.
+
+    Dotted names are not expected from the Hive tables this reads, which is
+    exactly why nothing else would catch the regression.
+    """
+    schema = T.StructType([
+        T.StructField("a.b", T.StringType()),
+        T.StructField("feature_a", T.DecimalType(38, 6)),
+    ])
+    df = spark.createDataFrame([("x", Decimal("1.5"))], schema=schema)
+
+    out, casted = cast_feature_floats_to_float32(df, ["feature_a"])
+
+    assert casted == ["feature_a"]
+    assert out.columns == ["a.b", "feature_a"]
+    assert _dtype(out, "a.b") == "string"
+    assert _dtype(out, "feature_a") == "float"
+    assert out.collect()[0]["a.b"] == "x"
 
 
 @pytest.mark.spark
