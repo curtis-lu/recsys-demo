@@ -419,3 +419,60 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
 - **底線判準沒有機械檢查**：可以寫（AST 掃 `steps/` 下被外部 import 的名字有無 `_` 開頭），
   刻意不寫——這次的目的是目錄可讀性，加稽核會讓一個純結構搬移長出新的約束面。復發成本低：
   下一次有人加底線名字給 `nodes.py` 呼叫時，判準就寫在同一節裡。
+
+### 修訂（2026-09-03，實作 #254 時）
+
+**本節「`recsys_tfb.preprocessing` 那兩個底線函式」那一列已落地。** 該列末尾的
+「（今日仍是底線名，`preprocessing.py:115`／`:179`。）」自此只剩行號還對——兩個 `def`
+恰好仍在同樣的行，但它們不再是底線名。
+
+- `_cast_feature_floats_to_float32` → `cast_feature_floats_to_float32`、
+  `_encode_categoricals` → `encode_categoricals`，純去底線、**不留別名**，語意零改動。
+  **證據是 AST 逐檔比對，而它需要三道正規化才成立**，寫清楚是因為少講一道就不是證明：
+  ① 把 main 版的舊名映射成新名（否則 `FunctionDef.name`／`Name.id` 必然不同）、
+  ② 去掉所有 docstring（本次確實改了散文）、③ 把 `from X import (…)` 的 alias 排序
+  （本次順手把 import 恢復成字母序，`encodable_` 在 `encode_` 之前）。三道之後
+  6 個 .py 的 `ast.dump` 完全相同。**沒做 ① ③ 直接比會 DIFF**——那不是語意改動，
+  但也不能拿沒正規化的比對當通過。
+- **這個模組自此全部是公開名。** `deliberate-non-goals.md` 原本登記「混合命名是刻意的
+  現況」——`encodable_categoricals`／`warn_unknown_encodings`（#185）已是公開名、這兩個
+  還不是。混合狀態消失，該列一併刪除。
+- **三處登記全部撤掉**：`pipeline-node-design.md`〈已登記的例外〉3 筆 → 2 筆；
+  `deliberate-non-goals.md` 刪該列；本節加這段修訂。另補一處本次才發現的連動——
+  `architecture-constraints.md` 節三導言逐項複述那張表的內容（「evaluation 尚未依判準
+  重整、training 的 7 個 diagnosis node 刻意不搬、`recsys_tfb.preprocessing` 的兩個
+  底線名」），不改就會跟只剩 2 筆的表直接打架。同款矛盾在 #199 也發生過一次。
+- `pipelines/inference/nodes.py` 模組 docstring 講「本模組 import 兩個底線私有名、是
+  登記過的例外」的**整段刪掉**。#199 才把它從 three 縮成 two；名字不再違例，那段話失去
+  存在理由。同 #199 對 `training/nodes.py` 的處置。
+- 改到的檔案共 15 個：src 5（`preprocessing.py`、兩條 pipeline 的 `nodes.py`、
+  `io/extract.py`、`pipelines/dataset/steps/sampling.py`）＋ tests 1
+  （`tests/test_preprocessing.py`）＋ docs 9（上列三處登記、`architecture-constraints.md`、
+  `docs/pipelines/inference.md`、`docs/operations/known-pitfalls.md`、ADR-0014 的一段修訂，
+  以及兩份 `docs/notes/` 的檔頭註記——**兩文正文一律不改**，比照 #199 對 OOM 調查紀錄的
+  處置）。
+- **只有 4 個檔改錯會讓測試轉紅**（`preprocessing.py` 的兩個 `def`、兩條 pipeline 的
+  import ／呼叫點、`tests/test_preprocessing.py`）。其餘 11 個都只在散文裡，
+  **改錯測試全綠**——所以這張票靠 grep ＋ 白名單驗收，不靠 CI。
+
+**識別字 grep 抓不到最後兩處，是 fresh-context 審查抓到的**，值得記下形態：
+
+| 漏網處 | 它為什麼躲得過 grep |
+|---|---|
+| `ADR-0014` §3「〈已登記的例外〉**第三筆**」 | 用**序數**指那張表。刪掉第一列之後 training 那列變第二筆，而這句話一個識別字都沒提到 |
+| `docs/notes/2026-08-25-training-pipeline-gap-survey.md` 第 16 列「既有豁免只涵蓋 `preprocessing` 的兩個名字」 | 描述**豁免這件事**，不寫被豁免的名字 |
+
+**通則：撤銷一筆登記時，只 grep 識別字會漏掉「談論這筆登記、但不寫出它名字」的引用。**
+序數引用（「第 N 筆」）尤其危險——表的長度一變就指錯，且沒有任何機械檢查擋得住。
+往那張表指要寫內容或規則編號，不要寫序號。
+- **票面驗收條件寫「`grep … src/ tests/ docs/` 應為 0 命中」，實際做不到、也不該做。**
+  repo 慣例是 ADR 原文與歷史紀錄一律不改（#199 已有前例），所以 `docs/` 必然有殘留。
+  改用白名單驗收，見下。
+
+**改名後 `docs/` 仍含舊名的白名單（全部是刻意保留的歷史紀錄）**：
+
+| 檔案 | 為什麼不改 |
+|---|---|
+| `docs/adr/0001`、`0002`、`0008`、`0010` | ADR 原文記錄的是當時的事實，一律只加標日期的修訂。0008 命中兩處：本節原文，以及這段修訂裡「舊名 → 新名」的箭頭左側——那是改名紀錄本身，不是待修的假引用 |
+| `docs/notes/2026-07-11-training-oom-investigation.md`、`2026-08-03-day1-doc-triage.md` | 當天的現場調查紀錄；後者引用的 `preprocessing/_spark.py` 早已不存在，本來就是歷史座標 |
+| `docs/superpowers/plans/`、`docs/superpowers/specs/` | 已封存的計畫與規格，不隨程式碼演進 |

@@ -182,7 +182,7 @@ def _ratio_lookup_df(spark, sample_ratio_overrides: dict) -> DataFrame:
     inline table is materialized entirely on the driver JVM and never touches
     Python workers, so the downstream broadcast hash-join is safe regardless of
     the cluster's worker Python. Mirrors the constraint documented in
-    ``preprocessing._encode_categoricals``.
+    ``preprocessing.encode_categoricals``.
     """
     def _esc(s) -> str:
         # Single-quote string literals: double embedded quotes, escape backslash.

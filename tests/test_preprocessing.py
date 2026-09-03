@@ -14,8 +14,8 @@ from pyspark.sql import types as T
 
 from recsys_tfb.preprocessing import (
     PreprocessorMetadata,
-    _cast_feature_floats_to_float32,
-    _encode_categoricals,
+    cast_feature_floats_to_float32,
+    encode_categoricals,
 )
 
 # Marked per item rather than for the module: the key contract below needs no
@@ -78,7 +78,7 @@ def _dtype(df, col):
 @pytest.mark.spark
 def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    out, _ = _cast_feature_floats_to_float32(mixed_df, feature_cols)
+    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
 
     assert _dtype(out, "feature_a") == "float"
     assert _dtype(out, "feature_c") == "float"
@@ -94,7 +94,7 @@ def test_cast_feature_decimals_casts_only_feature_decimals(mixed_df):
 @pytest.mark.spark
 def test_cast_feature_decimals_returns_casted_list(mixed_df):
     feature_cols = ["feature_a", "feature_b", "feature_c"]
-    _, casted = _cast_feature_floats_to_float32(mixed_df, feature_cols)
+    _, casted = cast_feature_floats_to_float32(mixed_df, feature_cols)
     assert sorted(casted) == ["feature_a", "feature_c"]
 
 
@@ -108,7 +108,7 @@ def test_cast_features_noop_when_nothing_castable(spark):
         T.StructField("feature_b", T.FloatType()),
     ])
     df = spark.createDataFrame([("C001", 1, 2.5)], schema=schema)
-    out, casted = _cast_feature_floats_to_float32(df, ["feature_a", "feature_b"])
+    out, casted = cast_feature_floats_to_float32(df, ["feature_a", "feature_b"])
 
     assert casted == []
     assert out.schema == df.schema
@@ -117,7 +117,7 @@ def test_cast_features_noop_when_nothing_castable(spark):
 @pytest.mark.spark
 def test_cast_feature_decimals_preserves_values(mixed_df):
     feature_cols = ["feature_a"]
-    out, _ = _cast_feature_floats_to_float32(mixed_df, feature_cols)
+    out, _ = cast_feature_floats_to_float32(mixed_df, feature_cols)
     rows = out.orderBy("cust_id").collect()
     assert rows[0].feature_a == pytest.approx(1.5)
     assert rows[1].feature_a == pytest.approx(2.25)
@@ -140,7 +140,7 @@ def test_cast_feature_doubles_to_float32(spark):
     df = spark.createDataFrame(
         [("C001", 1.5, 2.5, 9.99, 10)], schema=schema
     )
-    out, casted = _cast_feature_floats_to_float32(
+    out, casted = cast_feature_floats_to_float32(
         df, ["feature_a", "feature_b", "feature_c"]
     )
     # DoubleType feature cols cast to float
@@ -169,7 +169,7 @@ def test_cast_mixed_decimal_and_double(spark):
         [(Decimal("1.23"), 4.56, 7.89, 10)], schema=schema
     )
     feature_cols = ["dec_col", "dbl_col", "flt_col", "int_col"]
-    out, casted = _cast_feature_floats_to_float32(df, feature_cols)
+    out, casted = cast_feature_floats_to_float32(df, feature_cols)
 
     assert _dtype(out, "dec_col") == "float"
     assert _dtype(out, "dbl_col") == "float"
@@ -180,7 +180,7 @@ def test_cast_mixed_decimal_and_double(spark):
 
 @pytest.mark.spark
 class TestEncodeCategoricalsEmptyMapping:
-    """D15 — the whole-column-unknown branch of ``_encode_categoricals``.
+    """D15 — the whole-column-unknown branch of ``encode_categoricals``.
 
     A category with no values fit (e.g. every row NULL in the train window)
     encodes the entire column to -1. The branch is not a shortcut for the
@@ -196,7 +196,7 @@ class TestEncodeCategoricalsEmptyMapping:
             "cust_id": ["c1", "c2", "c3"],
             "risk_attr": ["low", "high", None],
         }))
-        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
+        out = encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
         assert [r.risk_attr for r in out.orderBy("cust_id").collect()] == [-1, -1, -1]
 
     def test_empty_mapping_output_is_integer_typed(self, spark):
@@ -209,7 +209,7 @@ class TestEncodeCategoricalsEmptyMapping:
         from pyspark.sql import types as T
 
         df = spark.createDataFrame(pd.DataFrame({"risk_attr": ["low", "high"]}))
-        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
+        out = encode_categoricals(df, ["risk_attr"], {"risk_attr": []})
         assert out.schema["risk_attr"].dataType == T.IntegerType()
 
     def test_populated_mapping_still_encodes_by_position(self, spark):
@@ -222,6 +222,6 @@ class TestEncodeCategoricalsEmptyMapping:
             "cust_id": ["c1", "c2", "c3"],
             "risk_attr": ["low", "high", "unseen"],
         }))
-        out = _encode_categoricals(df, ["risk_attr"], {"risk_attr": ["low", "high"]})
+        out = encode_categoricals(df, ["risk_attr"], {"risk_attr": ["low", "high"]})
         # Index in the mapping list: low->0, high->1, anything else -> -1.
         assert [r.risk_attr for r in out.orderBy("cust_id").collect()] == [0, 1, -1]

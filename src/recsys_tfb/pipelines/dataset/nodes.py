@@ -85,9 +85,9 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     restrict_to_months_or_all,
 )
 from recsys_tfb.preprocessing import (
-    _cast_feature_floats_to_float32,
-    _encode_categoricals,
+    cast_feature_floats_to_float32,
     encodable_categoricals,
+    encode_categoricals,
     warn_unknown_encodings,
 )
 
@@ -600,7 +600,7 @@ def apply_preprocessor_to_features(
             categorical_cols, result.columns, identity_cols,
         )
         if encode_cols:
-            result = _encode_categoricals(result, encode_cols, category_mappings)
+            result = encode_categoricals(result, encode_cols, category_mappings)
             warn_unknown_encodings(
                 result, encode_cols, context="apply_preprocessor_to_features",
             )
@@ -673,7 +673,7 @@ def build_model_input(
     # use; decimal128 in particular materialises as Python Decimal objects and
     # was what OOM-killed the val read. Which types get cast, and to what, is
     # the helper's business.
-    result, casted = _cast_feature_floats_to_float32(result, feature_columns)
+    result, casted = cast_feature_floats_to_float32(result, feature_columns)
     logger.info(
         "build_model_input: %d features, cast %d float-like feature columns to float32",
         len(feature_columns), len(casted),

@@ -601,6 +601,17 @@ cust_id_col = entity_cols[0]
   **site 標籤**，不是 `steps/experiment_log.py` 說的那種被儀表板讀的 `log_step` 事件名；
   同檔兄弟標籤（`extract_Xy.pdf`／`.X`／`.y`）本來就是照函式名取的。
 
+### 修訂（2026-09-03，實作 #254 時）
+
+**本節上方第 315 行的「〈已登記的例外〉第三筆」現在是第二筆。** #254 撤掉了那張表的
+第一列（`recsys_tfb.preprocessing` 的兩個底線名），training 那一列往前遞補。原文不改，
+但引用時請認**內容**（「`pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model`
+底下」），不要認序號。
+
+**教訓比這個修訂本身重要：用序數指向一張會增刪的表，遲早會指錯，而且沒有任何機械檢查
+擋得住。** 這次是 #254 的 grep 掃不到——它掃的是識別字，而這句話用序數描述那一列、
+一個字都沒提到被刪掉的名字。以後往那張表指，寫內容或寫規則編號。
+
 ## 5. `_REQUIRED_COLUMNS`（issue #220）
 
 見決定 5。動到 A11、跨 evaluation。
