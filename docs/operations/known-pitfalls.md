@@ -354,3 +354,22 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **規則**：**在寬 frame 上只用到少數欄，就先用單欄 Series 組出窄 frame**（`pd.DataFrame({c: pdf[c] for c in cols}, copy=False)`），再對窄 frame 做事；查表類先在窄 frame 上 `drop_duplicates()` 再建鍵，然後用代碼散回每一列。實例見 `src/recsys_tfb/io/extract.py` 的 `_narrow_frame` / `_group_ids` / `_distinct_weight_keys`。
 - **改寫時最容易踩的陷阱**：**「值相等」比「字串相等」寬鬆**。先去重再建字串，只有在「值相等 ⇒ 字串相等」時才逐位元一致；pandas 的分組相等把 `0.0/-0.0`、object 欄裡的 `None/nan`、`1/True` 併成同一組，而 `astype(str)` 會給出不同字串。整數／布林／全 `str` 的 object 欄安全，其餘要退回逐列路徑（`_key_column_is_string_faithful`）。另外去重路徑的 `groupby` **必須** `dropna=False`，否則缺值拿到代碼 `-1`，靜默索引到查找表的最後一筆（與 §11 同源，但這裡的後果是取到錯值而不是整組消失）。
 - **驗證方式**：**斷言來源 frame 的 block 數不變**（`pdf._mgr.nblocks` 前後相同），並用另一個測試證明被取代的寫法**確實會**改變它——否則 fixture 一旦不是 fragmented，這個斷言就靜靜變成恆真。範例：`tests/test_io/test_extract.py::TestGroupIdsNarrowFrame`。fixture 必須用逐欄賦值造出來（一次建好的 frame 本來就只有幾個 block）。
+
+## 20. 迴圈裡的 `withColumn` 讓 Spark 光是「建計畫」就花掉幾分鐘（2026-09-03）
+
+通則（「別在 Python 迴圈裡反覆 `withColumn`／`union`」）在手冊 `docs/handbooks/spark-tuning/10-pyspark-dataframe-api.md` §10.4；這裡記的是實測數字、以及怎麼在不寫計時測試的前提下守住它。與 §19 是同一類病的兩種面貌——成本跟著資料的**寬度**走，不跟著你真正要的東西走。
+
+- **症狀（第一分鐘認出它）**：一段「只是逐欄轉型／加幾個衍生欄」的程式，在**還沒碰到任何一列**的時候就卡住好幾分鐘。徵兆是耗時只跟**欄數**走、與列數無關——1 列的 DataFrame 跟一千萬列一樣慢——而且卡在 action 之前（`.explain()`／取 `.schema` 就已經慢了）。
+- **根因**：每個 `withColumn` 在邏輯計畫上疊一層 Projection，N 欄就是 N 層巢狀；analyzer 每加一層都要重新 resolve 整棵樹，成本對深度**超線性**。實測（Spark 3.3.2, local[2]，只量建計畫、未執行）：
+
+  | 欄數 | `withColumn` 迴圈 | 單次 `select` | 倍數 |
+  |---|---|---|---|
+  | 200 | 3.38s | 0.12s | 28x |
+  | 500 | 37.21s | 0.22s | 169x |
+  | 1,000 | 291.04s | 0.43s | 677x |
+
+  執行時間兩者都在 2 秒內（1.73s vs 0.18s）——成本 100% 在建計畫。
+
+- **規則**：**在迴圈裡呼叫 `withColumn`（同理 `withColumnRenamed`、`drop`）就當成 bug**，改成單次 `select`。代價要記得付：`withColumn` 是就地取代，欄序與「沒被指名的欄」本來免費，改成 `select` 之後必須自己把 `df.columns` 整份列進投影。實例見 `src/recsys_tfb/preprocessing.py` 的 `cast_feature_floats_to_float32`。
+- **驗證方式（不要寫計時測試）**：斷言 **analyzed plan 的 `Project` 節點數不隨欄數成長**——`df._jdf.queryExecution().analyzed().numberedTreeString()`，數含 `Project` 的行。範例 `tests/test_preprocessing.py::TestCastBuildsOneProjectionNotOnePerColumn`。計時斷言在 CI 上會隨機器負載誤紅，而常誤紅的測試最後一定被加 skip，比沒有更糟。
+- **這條驗證方式唯一會假綠的地方**：**必須讀 `analyzed()`，不能讀 `optimized()`**。optimizer 的 `CollapseProject` 會把疊起來的 Projection 折回一層，折完之後兩種寫法看起來一模一樣。實測 8 個轉型欄：`withColumn` 迴圈的 analyzed 是 8 個 Project、optimized 是 1 個；單次 `select` 兩者都是 1 個。斷言在 optimized plan 上會恆真——而恆真的斷言正是我們想擋的那個回歸溜回來的路。
