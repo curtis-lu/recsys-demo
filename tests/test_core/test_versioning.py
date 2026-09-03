@@ -11,6 +11,7 @@ from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema_for_hash
 
 from recsys_tfb.core.versioning import (
     ALL_SAMPLING_KEYS,
+    GATE_POLICY_KEYS,
     CALIBRATION_SAMPLING_KEYS,
     TRAIN_SAMPLING_KEYS,
     build_manifest_metadata,
@@ -176,6 +177,36 @@ class TestComputeBaseDatasetVersion:
         p2 = _base_params()
         p2["dataset"]["calibration_snap_dates"] = ["2024-03-31"]
         assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_numeric_feature_storage_type_affects_base(self):
+        # 宣告的儲存型別改變 model_input parquet 的內容（float32 vs float64），
+        # 所以它是產物身分的一部分。與下一條配對：兩個新鍵一個進 hash、一個不進，
+        # 只驗其中一條會讓「兩個都進」或「兩個都不進」的假綠溜過去。
+        p1 = _base_params()
+        p2 = _base_params()
+        p1["dataset"]["numeric_feature_storage_type"] = "float32"
+        p2["dataset"]["numeric_feature_storage_type"] = "float64"
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_numeric_precision_policy_does_not_affect_base(self):
+        # 閘門政策只決定「撐不過時要不要擋」，成功跑完的 parquet 逐位元相同。
+        # 進 hash 會讓「只改政策」變成整批重算（COVERAGE_ONLY_KEYS 同一個理由）。
+        p1 = _base_params()
+        p2 = _base_params()
+        p1["dataset"]["numeric_precision_policy"] = "block"
+        p2["dataset"]["numeric_precision_policy"] = "warn"
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    def test_numeric_precision_policy_absent_matches_declared_default(self):
+        # 沒宣告與宣告成預設值必須同一個 hash——否則第一次寫下這個鍵就會
+        # 無意義地翻版本，正是 A29 的 null 分支在擋的那個形狀。
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["numeric_precision_policy"] = "block"
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
             compute_base_dataset_version(p2, _sample_schema())
 
     # NOTE: that training.feature_selection does not trigger a dataset rebuild

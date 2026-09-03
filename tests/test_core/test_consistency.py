@@ -2260,3 +2260,181 @@ class TestA30EnvDirExists:
         assert "resolved_env_dir" not in inspect.getsource(
             consistency.validate_config_consistency
         )
+
+
+from recsys_tfb.core.consistency import (
+    DEFAULT_NUMERIC_STORAGE_TYPE,
+    DEFAULT_PRECISION_POLICY,
+    EXACT_INTEGER_LIMITS,
+    NUMERIC_STORAGE_TYPES,
+    PRECISION_POLICIES,
+    numeric_precision_errors,
+    numeric_storage_param_errors,
+    resolved_numeric_storage,
+    spark_dtype_is_exact_integer,
+    validate_config_consistency,
+)
+
+
+class TestNumericStorageParamsA31:
+    def _params(self, **dataset) -> dict:
+        return {"dataset": dataset}
+
+    def test_absent_keys_are_clean(self):
+        # Every config in the repo today is in this state; declaring the gate
+        # must not make them all fail.
+        assert numeric_storage_param_errors({}) == []
+        assert numeric_storage_param_errors(self._params()) == []
+
+    def test_declared_legal_values_are_accepted(self):
+        for storage in NUMERIC_STORAGE_TYPES:
+            for policy in PRECISION_POLICIES:
+                assert numeric_storage_param_errors(self._params(
+                    numeric_feature_storage_type=storage,
+                    numeric_precision_policy=policy,
+                )) == [], (storage, policy)
+
+    def test_unknown_storage_type_is_rejected_and_lists_the_legal_values(self):
+        errs = numeric_storage_param_errors(
+            self._params(numeric_feature_storage_type="float16"))
+        assert len(errs) == 1
+        assert "A31" in errs[0]
+        assert "dataset.numeric_feature_storage_type" in errs[0]
+        assert "float16" in errs[0]
+        # The operator's next move is to retype the value, so the legal set has
+        # to be in the message rather than in a doc they have to go find.
+        assert "float32" in errs[0] and "float64" in errs[0]
+
+    def test_unknown_policy_is_rejected(self):
+        errs = numeric_storage_param_errors(
+            self._params(numeric_precision_policy="ignore"))
+        assert len(errs) == 1
+        assert "dataset.numeric_precision_policy" in errs[0]
+        assert "block" in errs[0] and "warn" in errs[0]
+
+    def test_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
+        # `key:` with no value is not the same artifact as an absent key: it is
+        # present in the version payload. Mirrors A25/A29.
+        for key in ("numeric_feature_storage_type", "numeric_precision_policy"):
+            errs = numeric_storage_param_errors(self._params(**{key: None}))
+            assert len(errs) == 1, key
+            assert key in errs[0]
+
+    def test_both_keys_wrong_are_reported_together(self):
+        errs = numeric_storage_param_errors(self._params(
+            numeric_feature_storage_type="f32",
+            numeric_precision_policy="off",
+        ))
+        assert len(errs) == 2
+
+    def test_wired_into_validate_config_consistency(self):
+        params = {
+            "schema": {"columns": {"item": "prod_name"}},
+            "dataset": {"numeric_feature_storage_type": "float16"},
+        }
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(params)
+        assert "A31" in str(exc.value)
+
+
+class TestResolvedNumericStorage:
+    def test_absent_keys_resolve_to_the_declared_defaults(self):
+        assert resolved_numeric_storage({}) == (
+            DEFAULT_NUMERIC_STORAGE_TYPE, DEFAULT_PRECISION_POLICY,
+        )
+
+    def test_declared_values_win(self):
+        assert resolved_numeric_storage({"dataset": {
+            "numeric_feature_storage_type": "float64",
+            "numeric_precision_policy": "warn",
+        }}) == ("float64", "warn")
+
+    def test_the_defaults_are_themselves_legal_values(self):
+        # Guards the pair that A31 and this resolver would otherwise be free to
+        # drift apart on: a default outside NUMERIC_STORAGE_TYPES would make
+        # every untouched config fail its own gate.
+        assert DEFAULT_NUMERIC_STORAGE_TYPE in NUMERIC_STORAGE_TYPES
+        assert DEFAULT_PRECISION_POLICY in PRECISION_POLICIES
+
+
+class TestSparkDtypeIsExactInteger:
+    def test_integer_types_and_boolean_are_exact(self):
+        for dtype in ("tinyint", "smallint", "int", "bigint", "boolean"):
+            assert spark_dtype_is_exact_integer(dtype) is True, dtype
+
+    def test_floating_and_decimal_types_are_not(self):
+        # These are the columns the cast already converts today. They are
+        # approximate at the source, so the 2^24 rule says nothing about them —
+        # this is what stops the gate false-positiving on every double column.
+        for dtype in ("float", "double", "decimal(38,10)", "decimal(10,2)"):
+            assert spark_dtype_is_exact_integer(dtype) is False, dtype
+
+    def test_non_numeric_types_are_not(self):
+        for dtype in ("string", "date", "timestamp", "binary", "array<int>"):
+            assert spark_dtype_is_exact_integer(dtype) is False, dtype
+
+
+class TestNumericPrecisionErrorsB8:
+    def test_no_columns_is_clean(self):
+        assert numeric_precision_errors({}, "float32") == []
+
+    def test_max_exactly_at_the_limit_passes(self):
+        # 2^24 itself is representable; the first integer that is not is
+        # 2^24 + 1. An off-by-one here either rebuilds a dataset nobody needed
+        # to rebuild or lets a lossy column through.
+        assert numeric_precision_errors({"a": float(2 ** 24)}, "float32") == []
+
+    def test_one_above_the_limit_is_rejected(self):
+        errs = numeric_precision_errors({"a": float(2 ** 24 + 1)}, "float32")
+        assert len(errs) == 1
+        assert "B8" in errs[0]
+        assert "'a'" in errs[0]
+
+    def test_message_names_the_column_the_value_and_both_fixes(self):
+        errs = numeric_precision_errors({"acct_bal": 33554433.0}, "float32")
+        assert "acct_bal" in errs[0]
+        assert "33554433" in errs[0]
+        assert "16777216" in errs[0]
+        # Two fixes, both spelled out: change the column, or widen the type.
+        assert "float64" in errs[0]
+        assert "dataset.numeric_feature_storage_type" in errs[0]
+
+    def test_boolean_shaped_and_small_values_pass(self):
+        assert numeric_precision_errors(
+            {"flag": 1.0, "zero": 0.0, "small": 99.0}, "float32") == []
+
+    def test_all_null_column_reads_as_zero_and_passes(self):
+        # The reader reports max(|x|) over zero non-null values as 0.0; a column
+        # with no values cannot lose one.
+        assert numeric_precision_errors({"empty": 0.0}, "float32") == []
+
+    def test_missing_statistics_is_an_error_not_a_pass(self):
+        # The decision recorded for this ticket: a column the gate cannot prove
+        # safe is not a column it lets through.
+        errs = numeric_precision_errors({"mystery": None}, "float32")
+        assert len(errs) == 1
+        assert "mystery" in errs[0]
+        assert "statistic" in errs[0].lower()
+        # The escape hatch has to be in the message, or the run is unrecoverable
+        # for a data-format reason that has nothing to do with correctness.
+        assert "numeric_precision_policy" in errs[0]
+
+    def test_float64_has_its_own_wider_limit(self):
+        # Recommending float64 as the fix is only honest if float64 is itself
+        # gated: an int64 above 2^53 collides there too.
+        assert numeric_precision_errors({"a": float(2 ** 53)}, "float64") == []
+        assert len(numeric_precision_errors({"a": 2.0 ** 53 * 4}, "float64")) == 1
+
+    def test_multiple_offenders_are_collected_not_first_one_wins(self):
+        errs = numeric_precision_errors(
+            {"c": 2.0 ** 40, "a": 2.0 ** 30, "b": None}, "float32")
+        assert len(errs) == 3
+        # Sorted by column so two runs of the same config read the same way.
+        assert errs[0].index("'a'") > 0 and "'b'" in errs[1] and "'c'" in errs[2]
+
+    def test_limits_table_covers_every_declarable_storage_type(self):
+        assert set(EXACT_INTEGER_LIMITS) == set(NUMERIC_STORAGE_TYPES)
+
+    def test_an_undeclarable_storage_type_raises_rather_than_passing(self):
+        with pytest.raises(ConfigConsistencyError):
+            numeric_precision_errors({"a": 1.0}, "float16")

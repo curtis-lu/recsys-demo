@@ -22,6 +22,7 @@ ONLY_TEST_MONTHS_NODES = (
     "validate_data_consistency",
     "select_test_keys",
     "apply_preprocessor_to_features",
+    "validate_numeric_precision",
     "build_test_model_input",
     "filter_test_model_input",
 )
@@ -85,6 +86,7 @@ def create_pipeline(
         select_val_keys,
         split_train_keys,
         validate_data_consistency,
+        validate_numeric_precision,
     )
 
     nodes = [
@@ -141,6 +143,24 @@ def create_pipeline(
             ],
             outputs="preprocessed_feature_table",
             name="apply_preprocessor_to_features",
+        ),
+        # --- B8 precision gate: the months just encoded must survive the
+        #     declared numeric storage type. Side-effect only (outputs=None),
+        #     and declared HERE rather than anywhere later in this list because
+        #     list position is what orders it: it and the build_model_input
+        #     nodes below become runnable at the same moment (they share
+        #     `preprocessed_feature_table` as their last unmet input), and Kahn
+        #     queues them in declaration order (`core/pipeline.py`). Moving this
+        #     entry below them would let a narrowed value land before the gate
+        #     that exists to stop it ---
+        Node(
+            validate_numeric_precision,
+            inputs=[
+                "preprocessed_feature_table", "preprocessor",
+                "preprocessed_feature_table_month_plan", "parameters",
+            ],
+            outputs=None,
+            name="validate_numeric_precision",
         ),
         # --- Build model_input per split (join keys + labels + encoded features) ---
         Node(

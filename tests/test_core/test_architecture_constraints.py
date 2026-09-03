@@ -134,7 +134,7 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
-    assert (total, judgeable) == (58, 54), (
+    assert (total, judgeable) == (59, 55), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -321,6 +321,7 @@ class TestA7ZeroOutputNodesRegistered:
 
         assert found == Counter({
             ("dataset", "validate_data_consistency"): 1,
+            ("dataset", "validate_numeric_precision"): 1,
             ("training", "log_experiment"): 1,
         }), (
             "zero-output side-effect nodes changed. Registered in R3 of "

@@ -90,6 +90,50 @@ regression 風險，用測試守得住，零 production 成本。
 **這個閘門的定位是「設定與資料的矛盾」，不是資料品質稽核**。資料品質有它自己的家
 （`source_etl` 的 `quality_checks`）。
 
+## 修訂（2026-09-03，issue #281）：新增了一個需要「資料的事實」的閘門，零掃描仍然成立
+
+上面那段的界線是「**加一條 `groupBy` 全掃會改變這個節點的成本量級**」。#281 加的
+不變量 B8（被 cast narrow 的整數欄撐不撐得過宣告的 `numeric_feature_storage_type`）
+需要每欄的 `max(|x|)`——這是**資料的事實**，不是設定的事實，也不在 metastore 裡。
+所以它是這條 ADR 寫下後第一個逼問「零掃描到底是不是硬界線」的案子。
+
+**是硬界線。B8 沒有做聚合，它改讀 parquet footer 的 per-column 統計值。**
+
+| | B5／B6／B7 | ADR-0009 的分區回報 | B8 |
+|---|---|---|---|
+| 事實從哪來 | `feature_table.dtypes` | `SHOW PARTITIONS` | parquet footer 的 min／max |
+| 成本 | metastore metadata | metastore | 每個檔一次 seek |
+| 與列數的關係 | 無 | 無 | 無 |
+
+三者同一類：**成本由 metadata 的規模決定，不由資料的列數決定**。所以 B8 沒有改變
+dataset 閘門的成本量級，這條 ADR 的決定原封不動。
+
+三個實作上的選擇跟著這個結論走，各自都有替代方案被排除掉：
+
+1. **讀的是 `preprocessed_feature_table`（本 repo 自己寫的表），不是 `feature_table`。**
+   後者是使用者自備的 `read_only` 表，本框架不規定它的儲存格式；為了一個閘門去要求
+   來源表必須是 parquet 且帶統計值，是把框架的適用面縮小。自己寫的表則由
+   `HiveTableDataset` 以 `STORED AS PARQUET` 建立，格式是我們自己保證的。
+   代價：閘門必須站在那張表**落地之後**——node 自己不寫表，是 Runner 在 node return
+   之後 `catalog.save`——所以它是一個獨立的零輸出 node（登記在
+   `docs/agents/architecture-constraints.md` R3），排在 `apply_preprocessor_to_features`
+   與 `build_model_input` 之間。這仍然擋在失真之前：narrowing 發生在下游的
+   `build_model_input`，`preprocessed_feature_table` 保留來源 dtype。
+2. **footer 透過 Spark 的 JVM Hadoop `FileSystem` 讀，不是 pyarrow**
+   （`utils/parquet_stats.py`，與 `utils/hdfs.copy_hdfs_to_local` 同一座橋）。這不是
+   偏好：本 repo 從未在 driver 上直接讀過 Hive 表的檔案——training 是先
+   `copy_hdfs_to_local` 抄成本機複本再交給 pyarrow（`io/handles.ParquetHandle` 的
+   docstring 明寫 *driver-local*）。pyarrow **有** HDFS client
+   （`pyarrow.fs.HadoopFileSystem`），排除它不是因為它不存在：它要在 **Python 行程裡**
+   自己載入 `libjvm`／`libhdfs`（Spark 之外的第二個 JVM，靠 `JAVA_HOME` 與 Hadoop
+   `CLASSPATH` 找），沒設好時連建構都會 raise（本機實測：`OSError: Unable to load
+   libjvm`）。Spark 的 JVM 本來就在跑、本來就拿著叢集的 Hadoop 設定，而且不新增依賴
+   ——生產環境本來就禁止新增套件。
+3. **footer 沒有統計值時不退回掃描，而是 raise**（`numeric_precision_policy: warn`
+   可放行）。退回掃描會讓成本從零掃描**靜默**升級成一次實掃，正是這條 ADR 要避免的
+   那件事；而且那條 fallback 幾乎不會被執行到，等於留一段沒人驗證過的程式碼。
+   全 null 的欄別到安全邊（`num_nulls == row_count` 說明它沒有值可以失真），不 raise。
+
 ## 這條 ADR 沒有解決的事
 
 - 框架允許使用者自備 `feature_table`（不經本 repo 的 `source_etl`）。那種部署下上游 PK

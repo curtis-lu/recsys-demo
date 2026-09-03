@@ -3,10 +3,11 @@
 Provides three-layer hash-based version IDs for dataset pipeline:
 
 - ``base_dataset_version``: derived from non-sampling dataset params + full
-  schema, minus the coverage-only keys (``test_snap_dates``). Keys outputs that
-  are invariant under sampling changes (preprocessor, category_mappings,
-  preprocessed_feature_table, val/test model_input). Test months accumulate
-  *under* one version rather than minting a new one.
+  schema, minus the coverage-only keys (``test_snap_dates``) and the gate-policy
+  keys (``numeric_precision_policy``). Keys outputs that are invariant under
+  sampling changes (preprocessor, category_mappings, preprocessed_feature_table,
+  val/test model_input). Test months accumulate *under* one version rather than
+  minting a new one.
 - ``train_variant_id``: derived from train-sampling params only. Keys
   train/train_dev model_input under the base dataset directory.
 - ``calibration_variant_id``: derived from calibration-sampling params only.
@@ -16,6 +17,21 @@ Provides three-layer hash-based version IDs for dataset pipeline:
   knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS``. Ops-only config
   (``spark`` / ``mlflow`` / ``cache``) is excluded structurally so changing
   it does not orphan an otherwise-identical model.
+
+Two kinds of key are stripped from ``base_dataset_version``, for two different
+reasons, and the distinction is what keeps the ID meaning "the data this run
+produced":
+
+- **Coverage** (``COVERAGE_ONLY_KEYS``) — the key widens *which* months land,
+  never *what* a month contains.
+- **Gate policy** (``GATE_POLICY_KEYS``) — the key decides how a *failure* is
+  reported, never what a success produces. ``numeric_precision_policy`` picks
+  between stopping the run and logging a warning when a column cannot survive
+  the declared storage type; a run that finishes writes the same parquet either
+  way. Hashing it would mean flipping the policy to inspect one column rebuilt
+  every artifact under the version, which is why the declaration
+  (``numeric_feature_storage_type``, which *does* change the parquet) and its
+  gate live in two keys rather than one.
 
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.
@@ -67,6 +83,17 @@ ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_K
 # See docs/adr/0001-test-dates-out-of-dataset-version-identity.md.
 COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 
+# Dataset keys that decide how a *failure* is reported, never what a *success*
+# produces. ``numeric_precision_policy`` chooses between raising and warning
+# when a feature column cannot round-trip through
+# ``numeric_feature_storage_type``; both spellings write identical parquet on
+# the runs that finish. Registered here rather than folded into
+# ``COVERAGE_ONLY_KEYS`` because the two exclusions answer different questions —
+# coverage is about which months exist, policy is about how a run ends — and a
+# reader who finds a gate flag under a name that says "coverage" learns the
+# wrong rule for the next key.
+GATE_POLICY_KEYS: frozenset[str] = frozenset({"numeric_precision_policy"})
+
 
 # Keys under training.algorithm_params that do NOT affect the trained model
 # (pure logging / threading). Excluded from the model_version hash so changing
@@ -111,7 +138,9 @@ def compute_base_dataset_version(
     hashing so train/calibration sampling experiments do not invalidate
     val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
-    (and therefore ``model_version``) does not change.
+    (and therefore ``model_version``) does not change. ``GATE_POLICY_KEYS`` is
+    stripped for the third reason in the module docstring: it changes how a
+    failing run reports, not what a finishing run writes.
 
     ``feature_table_fingerprint`` (optional) reflects the actual
     ``feature_table`` schema (column name + dtype, ordered). When provided it
@@ -122,7 +151,7 @@ def compute_base_dataset_version(
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
     if isinstance(ds, dict):
-        for key in ALL_SAMPLING_KEYS | COVERAGE_ONLY_KEYS:
+        for key in ALL_SAMPLING_KEYS | COVERAGE_ONLY_KEYS | GATE_POLICY_KEYS:
             ds.pop(key, None)
     payload: dict = {"dataset": stripped, "schema": schema}
     if feature_table_fingerprint is not None:

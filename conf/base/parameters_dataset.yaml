@@ -84,6 +84,24 @@ dataset:
   test_snap_dates:
     - "2026-01-31"
 
+  # --- 數值特徵的儲存型別 ---
+  # 模型輸入的數值特徵欄統一收斂到這個型別。合法值 float32 / float64，預設 float32
+  # （不變量 A31 在 CLI 進入點秒級擋下打錯的值）。
+  # 為什麼宣告在 dataset 而不在 training：精度是「存下來的資料」的性質，不是讀取端的。
+  #   parquet 已經是 float32 時，在 training 端要一個 float64 的矩陣只是把尾數補零——
+  #   多吃一倍記憶體換到零資訊，而且會多出第二個宣告點讓兩邊可以靜默不一致。
+  # ⚠ 改此鍵會翻 base_dataset_version（它改變 parquet 的內容，preprocessor／val／test
+  #   與 train 系列整批重算）。
+  # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 base_dataset_version，即使值等同預設。
+  # numeric_feature_storage_type: float32
+
+  # 撐不過上面那個型別的欄怎麼處置：block（預設，擋下來）或 warn（記一行警告後放行，
+  # 等於刻意接受失真）。不變量 B8 的閘門 validate_numeric_precision 讀它。
+  # ⚠ 此鍵**不進**版本雜湊——它只決定失敗怎麼報，跑成功時產出的 parquet 逐位元相同
+  #   （core/versioning.py 的 GATE_POLICY_KEYS）。所以改它不會重算任何東西，這正是
+  #   它與上面那個鍵分成兩個鍵而不是一個的理由。
+  # numeric_precision_policy: block
+
   prepare_model_input:
     drop_columns:
       - "snap_date"

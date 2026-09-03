@@ -1899,18 +1899,18 @@ class TestOnlyTestMonthsFlag:
         assert pipe is not None, "pipeline never reached the Runner"
         assert [n.name for n in pipe.nodes] == list(ONLY_TEST_MONTHS_NODES)
 
-    def test_without_the_flag_the_runner_still_gets_all_fifteen(self, tmp_path):
+    def test_without_the_flag_the_runner_still_gets_all_sixteen(self, tmp_path):
         self._conf(tmp_path)
         _, pipe = self._run_dataset(tmp_path, [])
         assert pipe is not None
-        assert len(pipe.nodes) == 15
+        assert len(pipe.nodes) == 16
 
     def test_plan_line_counts_and_names_what_it_left_out(self, tmp_path):
         from recsys_tfb.__main__ import _format_only_test_months_plan
         from recsys_tfb.pipelines import get_pipeline
 
         lines = _format_only_test_months_plan(enable_calibration=True)
-        assert "5 of the dataset pipeline's 15 nodes" in lines[0]
+        assert "6 of the dataset pipeline's 16 nodes" in lines[0]
         assert "10 left out" in lines[0]
 
         # The names, compared against the pipelines themselves: a message that
@@ -1937,7 +1937,7 @@ class TestOnlyTestMonthsFlag:
         listed = [
             line for line in result.output.splitlines() if "[nodes] " in line
         ]
-        assert len(listed) == 1 + len(ONLY_TEST_MONTHS_NODES)  # header + 5
+        assert len(listed) == 1 + len(ONLY_TEST_MONTHS_NODES)  # header + 6
 
     def test_only_node_composes_and_counts_against_the_short_pipeline(self, tmp_path):
         self._conf(tmp_path)

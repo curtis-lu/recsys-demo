@@ -176,6 +176,31 @@ def warn_unknown_encodings(
             )
 
 
+def castable_numeric_feature_columns(
+    schema: T.StructType,
+    feature_cols: list[str],
+) -> list[str]:
+    """The feature columns ``cast_feature_floats_to_float32`` would convert.
+
+    Split out from the cast itself because a second caller needs the answer
+    *without* the conversion: the dataset pipeline's B8 precision gate
+    (``core/consistency.py``) checks exactly the columns the cast will narrow,
+    and reading the same selector is what makes that a structural fact instead
+    of two lists that have to be kept in step by hand. Widening the cast is
+    therefore one edit here, and the gate widens with it.
+
+    Takes a ``StructType`` rather than a DataFrame so the rule is testable
+    without a SparkSession. Returns frame order, not ``feature_cols`` order —
+    the cast rebuilds columns in the order the frame holds them.
+    """
+    feature_set = set(feature_cols)
+    return [
+        f.name for f in schema.fields
+        if f.name in feature_set
+        and isinstance(f.dataType, (T.DecimalType, T.DoubleType))
+    ]
+
+
 def cast_feature_floats_to_float32(
     df: DataFrame,
     feature_cols: list[str],
@@ -203,12 +228,7 @@ def cast_feature_floats_to_float32(
         (df, casted_cols) where ``casted_cols`` is the subset of
         ``feature_cols`` that were DecimalType or DoubleType.
     """
-    feature_set = set(feature_cols)
-    casted_feature_cols = [
-        f.name for f in df.schema.fields
-        if f.name in feature_set
-        and isinstance(f.dataType, (T.DecimalType, T.DoubleType))
-    ]
+    casted_feature_cols = castable_numeric_feature_columns(df.schema, feature_cols)
     for col in casted_feature_cols:
         df = df.withColumn(col, F.col(col).cast("float"))
     return df, casted_feature_cols

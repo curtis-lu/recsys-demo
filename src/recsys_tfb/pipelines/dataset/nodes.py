@@ -38,7 +38,10 @@ from recsys_tfb.core.consistency import (
     categorical_dtype_errors,
     item_coverage_errors,
     nonnumeric_feature_errors,
+    numeric_precision_errors,
     resolved_item_values,
+    resolved_numeric_storage,
+    spark_dtype_is_exact_integer,
     spark_dtype_is_numeric,
 )
 from recsys_tfb.core.logging import log_step
@@ -58,6 +61,7 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     split_categorical_sources,
     warn_missing_drop_columns,
 )
+from recsys_tfb.pipelines.dataset.steps.precision import landed_partition_files
 from recsys_tfb.pipelines.dataset.steps.model_input import (
     drop_groups_without_positives,
     join_features_missing_as_null,
@@ -84,8 +88,10 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     restrict_to_months,
     restrict_to_months_or_all,
 )
+from recsys_tfb.utils.parquet_stats import read_max_abs_stats
 from recsys_tfb.preprocessing import (
     cast_feature_floats_to_float32,
+    castable_numeric_feature_columns,
     encodable_categoricals,
     encode_categoricals,
     warn_unknown_encodings,
@@ -610,6 +616,116 @@ def apply_preprocessor_to_features(
         len(result.columns), len(encode_cols),
     )
     return result
+
+
+def validate_numeric_precision(
+    preprocessed_feature_table: DataFrame,
+    preprocessor_metadata: dict,
+    month_plan: SnapDatePlan,
+    parameters: dict,
+) -> None:
+    """Run the B8 precision invariant over the months this run just encoded.
+
+    Side-effect only: raises ``DataConsistencyError`` on violation under the
+    default policy, returns ``None`` when everything holds. The rule itself
+    lives with its predicate in ``core/consistency.py`` — this node gathers
+    facts and applies the configured policy to them.
+
+    **Why it sits between the write and the reads.** The values this gate is
+    about are narrowed by ``cast_feature_floats_to_float32`` inside
+    ``build_model_input``, which is downstream; ``preprocessed_feature_table``
+    itself keeps its source dtypes. So the gate reads a table that has already
+    landed — the runner saves a node's output before the next node loads it —
+    and still stops the run before a single narrowed value is stored. Reading
+    the landed table rather than ``feature_table`` is what lets it assume
+    parquet with statistics: this repo writes that table, while ``feature_table``
+    is the user's own and this framework does not dictate its format.
+
+    **Cost invariant (ADR-0006).** Facts come from parquet footers — a seek per
+    file, no rows read — so this node does not change the pipeline's cost
+    magnitude. An aggregation would have, which is why the shape of this gate is
+    a footer read and not a ``max(abs(...))``.
+
+    **Incremental with the node above it** (ADR-0002/ADR-0012): it reads the
+    months the same ``month_plan`` just encoded. A month that landed under an
+    earlier run is not re-read — the same coverage every other incremental
+    artifact has, and the reason adding an evaluation month checks that month.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    feature_columns = preprocessor_metadata["feature_columns"]
+    storage_type, policy = resolved_numeric_storage(parameters)
+    months = month_plan.to_process
+
+    # Decision — what this gate may complain about is exactly what the cast will
+    # convert, narrowed to the columns whose values are exact integers. The
+    # first half reads the cast's own selector, so widening the cast widens the
+    # gate in the same edit; the second half is the bound's domain — an already
+    # approximate column has no exact values to lose.
+    castable = castable_numeric_feature_columns(
+        preprocessed_feature_table.schema, feature_columns,
+    )
+    dtypes = dict(preprocessed_feature_table.dtypes)
+    checked = [c for c in castable if spark_dtype_is_exact_integer(dtypes[c])]
+
+    if not checked or not months:
+        logger.info(
+            "Numeric precision gate (%s): nothing to check "
+            "(castable=%d, exact-integer=%d, months=%d)",
+            storage_type, len(castable), len(checked), len(months),
+        )
+        return
+
+    # Decision — the facts are read from the partitions this run just wrote,
+    # not from the whole table: inputFiles() answers for the relation, so the
+    # run's own version and months are selected back out of the paths.
+    files = landed_partition_files(
+        preprocessed_feature_table.inputFiles(),
+        base_version=parameters["base_dataset_version"],
+        time_col=time_col,
+        months=months,
+    )
+
+    errors: list[str] = []
+    if not files:
+        # Not folded into the per-column "no statistics" message: the fix is
+        # different (the gate could not find the data at all, rather than found
+        # it and learned nothing), and reporting it once beats reporting it
+        # once per column.
+        errors.append(
+            f"B8: found no parquet files for the {len(months)} month(s) this "
+            f"run wrote under base_dataset_version="
+            f"{parameters['base_dataset_version']}, so the precision of "
+            f"{len(checked)} exact-integer feature column(s) could not be "
+            f"established. The gate reads footer statistics from the landed "
+            f"partitions; set dataset.numeric_precision_policy: warn to proceed "
+            f"without that check."
+        )
+    else:
+        max_abs = read_max_abs_stats(
+            preprocessed_feature_table.sparkSession, files, checked,
+        )
+        logger.info(
+            "Numeric precision gate (%s): %d column(s) over %d file(s) in "
+            "%d month(s)", storage_type, len(checked), len(files), len(months),
+        )
+        errors = numeric_precision_errors(max_abs, storage_type)
+
+    if not errors:
+        return
+
+    message = (
+        f"Numeric precision check failed for "
+        f"dataset.numeric_feature_storage_type={storage_type} "
+        f"({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
+    )
+    # Decision — the policy key is what turns a finding into a stop. `block`
+    # is the default because the failure it describes is silent everywhere
+    # else; `warn` exists so an operator who has read the finding can accept
+    # the loss without editing the gate out.
+    if policy == "block":
+        raise DataConsistencyError(message)
+    logger.warning("%s", message)
 
 
 def build_model_input(
