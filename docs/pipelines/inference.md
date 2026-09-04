@@ -338,7 +338,17 @@ for 每個 (snap_date, entity_bucket):        ← 一次 toPandas()，只讀這�
 
 item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。切 X 的是 `io/extract.py` 的 `pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
 
-**續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。log 與 manifest 都報出 processed／skipped／rebuilt／empty 四份清單——**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/steps/chunk_plans.py`），所以它的測試在毫秒級。
+**續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/steps/chunk_plans.py`），所以它的測試在毫秒級。
+
+「說出來」分三個層次，**不要把它們當同一件事**（#195）：
+
+| 在哪 | 有什麼 | 誰讀 |
+|---|---|---|
+| log 的 `[chunks] predict:` 一行 | processed／skipped／rebuilt／surplus 的**計數** | 跑的當下的人 |
+| `score_manifest`（節點的第一個 output） | 五份逐 chunk 清單 ＋ `expected_partitions`／`written_partitions` | `rank_predictions` 與 `validate_predictions`；**memory-only，跑完就沒了** |
+| `chunk_report.json`（節點的第二個 output，見 §6.3） | 同樣的逐 chunk 清單，落在磁碟上，**帶 `run_id`** | 事後回來問「那一次到底跳過了哪些」的人 |
+
+同一份資料寫兩次而不是把 `score_manifest` 直接落地，理由在 §7.4 最後一條。
 
 **空桶，以及「不該是空的空桶」。** 母體比桶數還小時會有桶完全沒有 entity，而 `insertInto` 對空 frame 不會建立分區。這是正常狀態，不是錯誤：manifest 把它們記在 `chunks_empty`，並且從「應該存在的分區」裡扣掉，所以 §6.1 的 `partition_completeness` 不會對小母體誤報。
 
@@ -423,7 +433,8 @@ unranked_predictions
 | `unranked_predictions` | Hive managed table | `model_version / snap_date, item, entity_bucket` | 可重用的未排名分數；`entity_bucket` 讓每個 chunk 的 save 落在自己的分區 |
 | `ranked_staging` | Hive managed table | `model_version / snap_date, item` | 發布前結果與失敗排查 |
 | `ranked_predictions` | Hive managed table | `model_version / snap_date, item` | 正式 production 排序結果 |
-| `manifest.json` | driver-local JSON | `data/inference/<model_version>/<first_snap_date>/` | 記錄模型、dataset IDs、參數、run ID 與 git commit |
+| `manifest.json` | driver-local JSON | `data/inference/<model_version>/<first_snap_date>/` | 記錄模型、dataset IDs、參數、run ID 與 git commit；另含 `scoring_chunks` 摘要（計數 ＋ 每月一列，見下一列） |
+| `chunk_report.json` | driver-local JSON | 同上 | 這一次評分的**逐 chunk 清單**：processed／skipped／rebuilt／empty／surplus ＋ `expected_partitions`／`written_partitions`，以及寫它的 `run_id`。零下游消費者，存在的理由是事後回答「跳過的是哪些」。體積隨格點線性成長（本機實測 80 chunk ＝ 15 KB，推到 12 月 × 20 桶 × 22 item ≈ 5,280 chunk 約 1 MB 等級），所以只有摘要進 `manifest.json` |
 | `parameters_inference.json` | driver-local JSON | 同上 | 保存本次 inference 設定 |
 | `latest` | symlink | `data/inference/latest` | 指向最近成功完成的 inference run 目錄 |
 
@@ -444,7 +455,7 @@ Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際�
 7. 各 item 的 rows 數與 entity 母體一致。
 8. 抽樣檢視排序結果，確認 eligibility、法遵與基本業務常識。
 9. 檢視 `build_inference_population_features` 的 feature coverage log：每個 snap_date 的缺特徵成員數是否在預期範圍；異常偏高代表 feature ETL 與母體不對齊。
-10. 檢視 `[chunks] predict:` log 的 processed／skipped／rebuilt／surplus 四個數字。全新的一個月應該是 processed ＝ item 數 × 有資料的桶數、其餘為 0；surplus 非 0 代表有舊桶的分區留在表上（通常是 `entity_buckets` 被改過）。
+10. 檢視 `[chunks] predict:` log 的 processed／skipped／rebuilt／surplus 四個數字。全新的一個月應該是 processed ＝ item 數 × 有資料的桶數、其餘為 0；surplus 非 0 代表有舊桶的分區留在表上（通常是 `entity_buckets` 被改過）。**事後才回來看的話 log 未必還在**——`manifest.json` 的 `scoring_chunks.by_snap_date` 有同樣的數字按月拆開，`chunk_report.json` 有逐 chunk 清單。
 11. `ranked_predictions` 的分區目錄**不該**出現 `entity_bucket=`。出現就代表機制欄漏進了對外契約。
 
 範例查詢：
@@ -581,6 +592,9 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 - `--only-node rank_predictions` 不會越過 validation gate，不能視為已發布。
 - `--only-node publish_predictions` 仍會自動補跑 validation，不會繞過發布檢查。
 - 切片成功後 manifest 會記錄 `resumed_from` 或 `only_node`，但 skipped artifacts 的來源參數仍需由操作者確認。
+- **`score_manifest` 刻意不進 `catalog.yaml`，落地的是它的副本 `chunk_report.json`**（#195）。把 `score_manifest` 本身改成落地 dataset，上面第三條就會反轉：`--from-node rank_predictions` 會從磁碟載回**上一次**的 manifest 而不再補跑評分節點，而 `validate_predictions` 是**取值**用它（`expected_partitions`／`written_partitions`），於是驗證會拿另一次 run 的數字去對這一次的表。副本沒有這個問題，因為沒有任何 node 讀它。代價是同一份清單在記憶體與磁碟各有一份，這是刻意付的。
+- 這份副本由評分節點自己產出，**不是**另開一個節點：另開的節點會是 `rank_predictions` 的兄弟而不是祖先，於是 `--from-node rank_predictions` 會把它切掉——而那正好是評分節點被補跑、清單最值得留下來的那種 run。
+- **`chunk_report.json` 帶 `run_id`，`manifest.json` 只在兩者相符時才引用它。** 版本目錄 `data/inference/<model_version>/<snap_date>/` 是同一個模型同一個月的每一次 run 共用的，而 `--only-node build_inference_population_features`（§8 的既有操作）不會經過評分節點——上一次的 `chunk_report.json` 就還躺在那裡。沒有這道比對的話，這一次的 `manifest.json` 會引用上一次的跳過清單，正好是本功能要消滅的那種混淆。不相符時 CLI 印一行 warning 並略過，檔案本身保留不動（它正確描述的是上一次那個 run）。
 
 ## 8. 常見錯誤與排查
 

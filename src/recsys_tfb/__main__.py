@@ -675,6 +675,57 @@ def _dir_artifacts(d: Path) -> list[str]:
     return sorted(f.name for f in d.iterdir() if f.is_file()) if d.is_dir() else []
 
 
+#: Written by the catalog entry ``score_chunk_report``; the filename is part of
+#: the contract between that entry and :func:`_chunk_report_extra`.
+CHUNK_REPORT_NAME = "chunk_report.json"
+
+
+def _chunk_report_extra(version_dir: Path, run_id: str) -> Optional[dict]:
+    """Fold *this* run's chunk summary into manifest.json (issue #195).
+
+    Summary only. The per-chunk lists stay in ``chunk_report.json`` next door:
+    a production grid is roughly 12 months x 20 buckets x 22 items, so inlining
+    them would add ~1 MB of rows to a provenance file whose whole value is that
+    a person opens it. What goes in is the part a count *cannot* be recovered
+    from later — how many chunks each month skipped or redid — plus the
+    filename that answers "which ones".
+
+    Two ways to get ``None``, and both are ordinary rather than errors:
+
+    * the file is absent — a slice that never reached
+      ``predict_and_write_scores`` made no scoring decisions, and an empty
+      summary would read as "it decided to do nothing";
+    * the file is **another run's**. The version directory is reused by every
+      run of this model and month, so ``--only-node
+      build_inference_population_features`` (a documented operation that skips
+      the scoring node) finds the previous run's report still sitting there.
+      Quoting it would put an earlier run's skip list in this run's provenance
+      — the exact confusion this feature exists to remove — so it is refused
+      out loud instead.
+    """
+    report = version_dir / CHUNK_REPORT_NAME
+    if not report.exists():
+        return None
+    with open(report) as f:
+        data = json.load(f)
+    if data.get("run_id") != run_id:
+        logger.warning(
+            "%s was written by run_id=%s, not this run (%s); its chunk summary "
+            "is left out of manifest.json. This run did not reach "
+            "predict_and_write_scores — the file still describes the earlier "
+            "run correctly.",
+            report, data.get("run_id"), run_id,
+        )
+        return None
+    return {
+        "scoring_chunks": {
+            "counts": data["counts"],
+            "by_snap_date": data["by_snap_date"],
+            "report": CHUNK_REPORT_NAME,
+        }
+    }
+
+
 def _sample_weight_extra(version_dir: Path) -> Optional[dict]:
     """Read sample_weight_report.json (if present) into manifest extra_metadata."""
     report = version_dir / "sample_weight_report.json"
@@ -1470,6 +1521,10 @@ def inference(
         "model_version": mv,
         "snap_date": snap_date,
         "source_model_version": model_version,
+        # Stamped onto score_chunk_report so the file can say which run wrote
+        # it. Needed because its directory is reused by every run of this model
+        # and month (see _chunk_report_extra).
+        "run_id": run_context.run_id,
         # Read by predict_and_write_scores: a month named here has all its
         # scoring chunks re-scored even though their partitions exist.
         REBUILD_SNAP_DATES_KEY: rebuild,
@@ -1509,7 +1564,16 @@ def inference(
         version_dir=version_dir,
         metadata_kwargs=metadata_kwargs,
         run_id=run_context.run_id,
-        extra_metadata=_slice_extra(from_node, only_node),
+        extra_metadata={
+            **(_slice_extra(from_node, only_node) or {}),
+            # A pipeline that decides to do less work has to record what it
+            # decided not to do. Read back off disk rather than out of the
+            # catalog: `score_manifest` is an auto-created MemoryDataset and
+            # the Runner releases it after its last consumer, so by the time
+            # this line runs it is already gone (core/runner.py). The file the
+            # `score_chunk_report` entry just wrote is what survives.
+            **(_chunk_report_extra(version_dir, run_context.run_id) or {}),
+        } or None,
         symlink_target=data_dir / "inference" / "latest",
         params_name="parameters_inference",
         params_dict=params_inference,

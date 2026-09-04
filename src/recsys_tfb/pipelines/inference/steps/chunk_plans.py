@@ -196,3 +196,60 @@ def as_rows(chunks) -> list[list]:
     produce the same manifest, and a set's iteration order is not that.
     """
     return sorted(list(chunk) for chunk in chunks)
+
+
+#: The five things a run can decide about a chunk, and the key each list of
+#: them carries in the report. Ordered as the decision is made: score it, leave
+#: it alone, redo it on request, find nobody in it — plus the partitions the
+#: grid no longer covers at all.
+CHUNK_KINDS = ("processed", "skipped", "rebuilt", "empty", "surplus")
+
+
+def build_chunk_report(manifest: dict, surplus: Iterable, run_id) -> dict:
+    """The scoring manifest as something that outlives the process.
+
+    ``score_manifest`` already carries every list this returns, but it is a
+    memory-only catalog entry on purpose: landing it would let a
+    ``--from-node rank_predictions`` slice load a *previous* run's manifest
+    instead of re-running the scoring node, and ``validate_predictions`` reads
+    values out of it (``docs/pipelines/inference.md`` section 7.4). So the
+    record is a separate artifact rather than a persisted twin — same lists,
+    different job: this one is read by people after the fact, never by a node.
+
+    Three things are added on the way out. ``surplus`` is one: the plan
+    computes it and only ever ``logger.warning``s it, yet it names partitions
+    that keep contributing rows to the published ranking until someone drops
+    them by hand. ``by_snap_date`` is the second, and it covers **every
+    configured month** including the ones no list mentions — without that row,
+    "this month was entirely skipped" and "this month was not in the run" read
+    identically.
+
+    ``run_id`` is the third, and it is what makes the file safe to read back.
+    It lands in ``data/inference/<model_version>/<snap_date>/``, a directory
+    every run of that model and month reuses, and a slice that never reaches
+    the scoring node leaves the previous run's copy sitting there untouched.
+    The stamp is how ``__main__._chunk_report_extra`` refuses to quote it as
+    this run's.
+    """
+    rows = {
+        "processed": manifest["chunks_processed"],
+        "skipped": manifest["chunks_skipped"],
+        "rebuilt": manifest["chunks_rebuilt"],
+        "empty": manifest["chunks_empty"],
+        "surplus": as_rows(surplus),
+    }
+    return {
+        **manifest,
+        "run_id": run_id,
+        "chunks_surplus": rows["surplus"],
+        "counts": {kind: len(rows[kind]) for kind in CHUNK_KINDS},
+        # A chunk row is ``[snap_date, entity_bucket, item]`` (:func:`as_rows`),
+        # so element 0 is the month.
+        "by_snap_date": {
+            month: {
+                kind: sum(1 for row in rows[kind] if row[0] == month)
+                for kind in CHUNK_KINDS
+            }
+            for month in sorted(set(manifest["snap_dates"]))
+        },
+    }

@@ -130,8 +130,13 @@ RESUME_CONTRACTS = {
         # partition already exists, so it lists the metastore once and writes
         # nothing. Training's twin of this, predict_manifest feeding
         # compute_test_mAP_spark, was landed in issue #233 because its predict
-        # node is *not* cheap to resume; the inference half is issue #195 and
-        # still open, so the two are deliberately different today.
+        # node is *not* cheap to resume; the two stay deliberately different.
+        # Issue #195 asked the adjacent question — where the skip list goes
+        # after the process exits — and was answered WITHOUT landing this
+        # entry: the scoring node emits a second output, score_chunk_report,
+        # which no node reads. So this contract is unchanged on purpose, and
+        # landing score_manifest is still the thing not to do
+        # (docs/pipelines/inference.md section 7.4).
         "rank_predictions": {"predict_and_write_scores"},
         # The resume point the landed intermediate table buys (ADR-0010's
         # "consequences"): scoring reads a persisted feature table, so nothing

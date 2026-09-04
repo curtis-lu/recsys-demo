@@ -34,7 +34,17 @@ def create_pipeline() -> Pipeline:
                 # must stay `unranked_predictions` -- and a new optional input
                 # must NOT be appended after it.
                 writes=["unranked_predictions"],
-                outputs="score_manifest",
+                # Two outputs, and the asymmetry between them is deliberate.
+                # `score_manifest` stays out of conf/base/catalog.yaml so it
+                # auto-creates as a MemoryDataset: landing it would make a
+                # `--from-node rank_predictions` slice load the *previous*
+                # run's copy instead of re-running this node, and
+                # validate_predictions reads values out of it
+                # (docs/pipelines/inference.md section 7.4).
+                # `score_chunk_report` carries the same lists for a person to
+                # open afterwards and no node reads it, so it can land without
+                # any of that (issue #195).
+                outputs=["score_manifest", "score_chunk_report"],
             ),
             Node(
                 rank_predictions,

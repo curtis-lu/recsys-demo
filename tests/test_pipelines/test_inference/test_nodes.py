@@ -596,11 +596,32 @@ class TestEntityBuckets:
 
 
 class TestPredictAndWriteScores:
+    def test_returns_the_manifest_and_the_report_that_lands(
+        self, population_features, preprocessor, parameters
+    ):
+        """Two outputs, and only the second one reaches disk.
+
+        The first goes to ``rank_predictions``/``validate_predictions`` and is
+        memory-only by design (section 7.4 of docs/pipelines/inference.md); the
+        second is the copy a person can open after the run. Asserting they are
+        distinct objects is the point — a single dict handed to both would make
+        the catalog write the very entry that must not land.
+        """
+        table = FakeScoreTable()
+        manifest, report = predict_and_write_scores(
+            ConstantModel(), population_features, preprocessor, parameters,
+            unranked_predictions=table,
+        )
+        assert manifest is not report
+        assert "counts" not in manifest
+        assert report["counts"]["processed"] == len(manifest["chunks_processed"])
+        assert set(report["by_snap_date"]) == set(manifest["snap_dates"])
+
     def test_returns_a_manifest_not_a_frame(
         self, population_features, preprocessor, parameters
     ):
         table = FakeScoreTable()
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -689,7 +710,7 @@ class TestPredictAndWriteScores:
         self, population_features, preprocessor, parameters
     ):
         table = FakeScoreTable()
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -828,7 +849,7 @@ class TestPredictAndWriteScores:
         )
         table = FakeScoreTable()
 
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), landed, _population_preprocessor(), params,
             unranked_predictions=table,
         )
@@ -1030,7 +1051,7 @@ class TestScoredChunksThroughToValidation:
         self, spark, model, population_features, preprocessor, parameters
     ):
         table = FakeScoreTable()
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             model, population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -1135,7 +1156,7 @@ class TestPredictResume:
         table = FakeScoreTable(
             existing=[ScoringChunk("2024-03-31", 0, "fund_stock")]
         )
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -1154,7 +1175,7 @@ class TestPredictResume:
         table = FakeScoreTable(
             existing=[ScoringChunk("2024-03-31", 0, "fund_stock")]
         )
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -1168,7 +1189,7 @@ class TestPredictResume:
             ScoringChunk("2024-03-31", 0, item)
             for item in parameters["inference"]["products"]
         ])
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -1188,7 +1209,7 @@ class TestPredictResume:
         parameters[REBUILD_SNAP_DATES_KEY] = ["2024-03-31"]
         table = FakeScoreTable(existing=existing)
 
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
@@ -1230,7 +1251,7 @@ class TestPredictResume:
         table = FakeScoreTable(
             existing=[ScoringChunk("2024-03-31", 7, "fund_stock")]
         )
-        manifest = predict_and_write_scores(
+        manifest, _ = predict_and_write_scores(
             ConstantModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )

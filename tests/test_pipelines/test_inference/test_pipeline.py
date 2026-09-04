@@ -1,5 +1,7 @@
 """Tests for inference pipeline definition."""
 
+from pathlib import Path
+
 from recsys_tfb.pipelines.inference import create_pipeline
 
 
@@ -22,9 +24,41 @@ class TestInferencePipeline:
         pipeline = create_pipeline()
         expected = {
             "inference_population_features", "score_manifest",
+            "score_chunk_report",
             "ranked_staging", "validated_predictions", "ranked_predictions",
         }
         assert pipeline.outputs == expected
+
+    def test_the_chunk_record_lands_and_the_manifest_does_not(self):
+        """Two outputs on one node, and the split between them is the design.
+
+        ``score_manifest`` must stay absent from ``conf/base/catalog.yaml`` so
+        it keeps auto-creating as a MemoryDataset: a landed one would let
+        ``--from-node rank_predictions`` load a previous run's copy rather than
+        re-running the scoring node, and ``validate_predictions`` reads its
+        ``expected_partitions`` / ``written_partitions`` by value
+        (docs/pipelines/inference.md section 7.4). ``score_chunk_report``
+        carries the same lists with no consumer, so landing it is free of that
+        (issue #195).
+        """
+        import yaml
+
+        catalog = yaml.safe_load(
+            (Path(__file__).resolve().parents[3] / "conf/base/catalog.yaml")
+            .read_text()
+        )
+        assert "score_manifest" not in catalog
+        assert catalog["score_chunk_report"]["type"] == "JSONDataset"
+
+        pipeline = create_pipeline()
+        by_name = {node.name: node for node in pipeline.nodes}
+        assert by_name["predict_and_write_scores"].outputs == [
+            "score_manifest", "score_chunk_report",
+        ]
+        # No node reads it: that absence is what keeps slicing untouched.
+        assert not any(
+            "score_chunk_report" in node.inputs for node in pipeline.nodes
+        )
 
     def test_node_names(self):
         pipeline = create_pipeline()
@@ -77,13 +111,16 @@ class TestInferencePipeline:
         """The side effect is on the pipeline definition, not inside the body.
 
         Registered in R1 of docs/agents/architecture-constraints.md. The data
-        reaches Hive through this declaration; the node's output is a manifest.
+        reaches Hive through this declaration; the node's own outputs are
+        bookkeeping (asserted in
+        :meth:`test_the_chunk_record_lands_and_the_manifest_does_not`), never
+        the scores.
         """
         pipeline = create_pipeline()
         by_name = {node.name: node for node in pipeline.nodes}
         scoring = by_name["predict_and_write_scores"]
         assert scoring.writes == ["unranked_predictions"]
-        assert scoring.outputs == ["score_manifest"]
+        assert "unranked_predictions" not in scoring.outputs
 
     def test_the_write_target_is_bound_last_and_by_name(self):
         """The Runner binds write targets by keyword, inputs positionally.

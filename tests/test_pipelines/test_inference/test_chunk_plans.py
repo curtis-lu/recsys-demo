@@ -233,3 +233,102 @@ class TestModulePurity:
 
     def test_no_project_import(self):
         assert "recsys_tfb" not in {r.lstrip(".") for r in self._imported_roots()}
+
+
+class TestBuildChunkReport:
+    """The on-disk record of what this run scored, skipped and redid.
+
+    ``score_manifest`` holds those lists but is memory-only on purpose
+    (``docs/pipelines/inference.md`` section 7.4), so after the process exits
+    only the log's *counts* survive. This report is the copy that lands, and
+    these tests pin the two things a count cannot answer: which chunks, and
+    which month they were in.
+    """
+
+    MANIFEST = {
+        "snap_dates": ["2025-11-30", "2025-12-31"],
+        "items": ITEMS,
+        "entity_buckets": 2,
+        "model_version": "v1",
+        "n_rows_written": 40,
+        "chunks_processed": [["2025-12-31", 0, "fund_stock"]],
+        "chunks_skipped": [
+            ["2025-11-30", 0, "fund_stock"],
+            ["2025-11-30", 1, "exchange_usd"],
+        ],
+        "chunks_rebuilt": [["2025-12-31", 0, "fund_stock"]],
+        "chunks_empty": [["2025-12-31", 1, "exchange_usd"]],
+        "expected_partitions": [],
+        "written_partitions": [],
+    }
+
+    def _report(self, surplus=(), run_id="run-1"):
+        return chunk_plans.build_chunk_report(self.MANIFEST, surplus, run_id)
+
+    def test_the_report_names_the_run_that_wrote_it(self):
+        """Which is what lets a reader tell it apart from the run before.
+
+        The file sits in ``data/inference/<model_version>/<snap_date>/``, a
+        directory every run of that model and month reuses. Without the stamp,
+        a report left by an earlier run is indistinguishable from this one's.
+        """
+        assert self._report(run_id="run-7")["run_id"] == "run-7"
+
+    def test_every_manifest_key_survives(self):
+        report = self._report()
+        for key, value in self.MANIFEST.items():
+            assert report[key] == value
+
+    def test_counts_are_the_list_lengths(self):
+        assert self._report()["counts"] == {
+            "processed": 1, "skipped": 2, "rebuilt": 1, "empty": 1, "surplus": 0,
+        }
+
+    def test_surplus_lands_instead_of_only_being_warned_about(self):
+        """``plan.surplus`` reaches a ``logger.warning`` and nothing else.
+
+        Partitions outside this run's grid keep contributing rows to the
+        published ranking until someone drops them by hand, so "which ones"
+        has to outlive the log.
+        """
+        stray = [ScoringChunk("2025-12-31", 9, "fund_stock")]
+        report = self._report(surplus=stray)
+        assert report["chunks_surplus"] == [["2025-12-31", 9, "fund_stock"]]
+        assert report["counts"]["surplus"] == 1
+
+    def test_by_snap_date_splits_the_chunks_by_month(self):
+        assert self._report()["by_snap_date"]["2025-11-30"] == {
+            "processed": 0, "skipped": 2, "rebuilt": 0, "empty": 0, "surplus": 0,
+        }
+        assert self._report()["by_snap_date"]["2025-12-31"] == {
+            "processed": 1, "skipped": 0, "rebuilt": 1, "empty": 1, "surplus": 0,
+        }
+
+    def test_a_month_that_did_nothing_still_gets_a_row(self):
+        """A configured month absent from every list is the interesting case.
+
+        Dropping it would make "this month was entirely skipped" and "this
+        month was never in the run" look identical in the report, which is the
+        confusion the whole file exists to remove.
+        """
+        manifest = {
+            **self.MANIFEST,
+            "snap_dates": ["2025-10-31"] + self.MANIFEST["snap_dates"],
+        }
+        report = chunk_plans.build_chunk_report(manifest, (), "run-1")
+        assert report["by_snap_date"]["2025-10-31"] == {
+            "processed": 0, "skipped": 0, "rebuilt": 0, "empty": 0, "surplus": 0,
+        }
+
+    def test_adding_to_the_report_does_not_reach_the_manifest(self):
+        """The two travel out of the same node and must not be one dict.
+
+        Only the top level is copied — the chunk lists are shared, which is
+        fine because neither side mutates them — so what this pins is that the
+        report's own additions (``counts``, ``by_snap_date``, ``run_id``) stay
+        out of the manifest ``validate_predictions`` reads.
+        """
+        report = self._report()
+        report["counts"]["processed"] = 999
+        assert "counts" not in self.MANIFEST
+        assert "run_id" not in self.MANIFEST
