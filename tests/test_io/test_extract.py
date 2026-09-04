@@ -792,6 +792,41 @@ class TestWeightKeyDecoding:
         # rows 1 and 2 carry no category at all -> 1.0, not 2.0 / 3.0.
         np.testing.assert_array_equal(w, np.array([2.0, 1.0, 1.0]))
 
+    # (column, expected weights) for {"g": ["M", "F"]} and {"M": 5.0, "F": 7.0}.
+    # The dtypes a code column has actually been seen in, plus the numeric
+    # values that name no category. Int64 + pd.NA is the one that used to
+    # raise rather than fall back: a nullable dtype refuses to become a
+    # float64 numpy array while it still holds pd.NA.
+    DTYPE_CASES = {
+        "nullable_int_with_na": (
+            pd.Series(pd.array([0, None, 1], dtype="Int64")), [5.0, 1.0, 7.0]),
+        "nullable_float_with_na": (
+            pd.Series(pd.array([0.0, None, 1.0], dtype="Float32")), [5.0, 1.0, 7.0]),
+        "object_strings": (
+            pd.Series(np.array(["0", "x", "1"], dtype=object)), [5.0, 1.0, 7.0]),
+        "category_dtype": (
+            pd.Series([0, 1, 0]).astype("category"), [5.0, 7.0, 5.0]),
+        "bool": (pd.Series([True, False, True]), [7.0, 5.0, 7.0]),
+        "all_nan": (
+            pd.Series(np.array([np.nan] * 3, dtype=np.float32)), [1.0, 1.0, 1.0]),
+        "infinities": (
+            pd.Series(np.array([np.inf, -np.inf, 0.0])), [1.0, 1.0, 5.0]),
+        "beyond_int64": (
+            pd.Series(np.array([1e30, 0.0, 1.0])), [1.0, 5.0, 7.0]),
+    }
+
+    @pytest.mark.parametrize("case", sorted(DTYPE_CASES))
+    def test_code_column_dtypes_decode_or_degrade_but_never_raise(self, case):
+        """Weighting is a graceful path — it must never be the thing that stops
+        a training run. Every dtype a code column has been seen in either
+        decodes or falls back to 1.0."""
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        col, expected = self.DTYPE_CASES[case]
+        w = _compute_row_weights(
+            pd.DataFrame({"g": col}), ["g"], {"M": 5.0, "F": 7.0}, {"g": ["M", "F"]})
+        np.testing.assert_array_equal(w, np.array(expected))
+
     def test_decoded_float_column_takes_the_dedup_fast_path(self):
         """The efficiency claim behind decoding, pinned. A float column is
         refused the fast path on its own (0.0 / -0.0 group together but

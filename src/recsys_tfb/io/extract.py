@@ -154,7 +154,15 @@ def decode_weight_keys(
     decoded = frame.copy()
     undecodable = np.zeros(len(frame), dtype=bool)
     for col, categories in decode_map.items():
-        raw = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=np.float64)
+        # ``.astype("float64")`` before ``to_numpy``: a nullable dtype holding
+        # ``pd.NA`` (Int64 is reachable here — see ``dropna=False`` in
+        # :func:`_weight_keys_and_codes`) refuses to become a float64 numpy
+        # array directly, and the coerce alone does not widen it.
+        raw = (
+            pd.to_numeric(frame[col], errors="coerce")
+            .astype("float64")
+            .to_numpy(dtype=np.float64)
+        )
         # Clip before the int cast: casting inf or 1e30 to int64 is undefined,
         # and a clipped value fails the `safe == idx` identity below anyway.
         safe = np.clip(np.where(np.isfinite(raw), raw, -1.0), -1.0, float(len(categories)))
