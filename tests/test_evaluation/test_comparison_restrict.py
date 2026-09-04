@@ -133,8 +133,11 @@ def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
     comes out ``BroadcastHashJoin`` is being forced, and one that falls back to
     ``SortMergeJoin`` is being chosen.
 
-    Entity = millions of rows in production, so it must be chosen.
-    Item = 22 products (ADR-0010), so forcing it is correct and must stay.
+    The item universe is bounded by config (invariant A3 declares it in
+    ``schema.categorical_values``), so forcing its broadcast is correct and
+    must stay. The entity universe is discovered from the data and has no
+    such bound, so its strategy must be chosen, not forced. See
+    ``evaluation/comparison/alignment.py`` for the full rule.
     """
     old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
@@ -153,4 +156,4 @@ def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
 
     assert item_joins, f"no item join in plan: {joins}"
     assert all("BroadcastHashJoin" in ln for ln in item_joins), \
-        f"item join lost its broadcast hint (22 products — it should keep it): {item_joins}"
+        f"item join lost its broadcast hint (bounded universe — keep it): {item_joins}"
