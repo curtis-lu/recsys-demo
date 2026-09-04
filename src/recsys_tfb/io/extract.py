@@ -141,11 +141,18 @@ def decode_weight_keys(
     mark for a value its fit never saw), a NaN, or an out-of-range, infinite or
     non-integral number.
 
-    Such a row is *flagged*, not decoded to a stand-in string, and the caller
-    pins it to weight 1.0 by position. A stand-in would be a collision waiting
-    to happen: a vocabulary may contain a category literally named ``"-1"`` or
-    ``"nan"``, and then an unknown row and a real one would build the same key
-    and take the same weight.
+    Such a row is *flagged*, not decoded to a stand-in string. A stand-in would
+    be a collision waiting to happen: a vocabulary may contain a category
+    literally named ``"-1"`` or ``"nan"``, and then an unknown row and a real
+    one would build the same key and take the same weight.
+
+    Acting on the flag is the caller's job, and only the two that decide a
+    weight do: :func:`_compute_row_weights` pins those rows to 1.0 by position,
+    and ``steps/sample_weights.py::distinct_weight_keys`` drops them from the
+    set it reports as present. :func:`_sample_data_keys` deliberately does not
+    — its output is a log line, and an undecodable cell showing as ``None``
+    there is the reader's cue that the parquet holds a code no vocabulary
+    covers.
 
     The frame is copied only when there is something to decode.
     """
@@ -188,14 +195,20 @@ def nameable_weight_entries(
 
     Returns ``(nameable, unknown_values)``, where ``unknown_values`` maps a
     weight-key column to the sorted configured values its vocabulary lacks.
+
+    Every returned key is ``str(key)``, matching the string
+    :func:`composite_key_series` builds on the data side. YAML is why: an
+    unquoted ``sample_weights: {1: 5.0}`` on an int weight key (``label``, a
+    year, a flag) parses to the *int* ``1``, and ``Series.map`` on a
+    string-keyed Series would miss it — silently, at weight 1.0, which is the
+    failure this whole path exists to avoid.
     """
-    if not decode_map:
-        return dict(sample_weights), {}
     known = {col: set(map(str, cats)) for col, cats in decode_map.items()}
     nameable: dict = {}
     unknown: dict[str, set] = {}
     for key, weight in sample_weights.items():
-        parts = str(key).split("|")
+        key = str(key)
+        parts = key.split("|")
         if len(parts) != len(weight_keys):
             # A9b reports arity at the config gate; here it simply never
             # matches, so keep it and let the zero-match diagnostic speak.
@@ -209,6 +222,24 @@ def nameable_weight_entries(
         if not bad:
             nameable[key] = weight
     return nameable, {c: sorted(v) for c, v in unknown.items()}
+
+
+def decoded_key_series(
+    frame: pd.DataFrame, weight_keys: list, decode_map: dict,
+) -> tuple[pd.Series, np.ndarray]:
+    """Decode, then build one composite key per row of ``frame``.
+
+    Every key the weighting and the diagnostics compare comes through here, so
+    "decode first, then join" is stated once rather than five times. Which rows
+    of ``frame`` it is handed is what differs between callers — the whole frame,
+    its distinct combinations, or one row per group.
+
+    Public because ``pipelines/training/steps/sample_weights.py`` builds the
+    same keys off the train parquet, and a report that derived them its own way
+    could vouch for a match the weighting never made.
+    """
+    decoded, undecodable = decode_weight_keys(frame, decode_map)
+    return composite_key_series(decoded, weight_keys), undecodable
 
 
 def _key_column_is_string_faithful(col: pd.Series) -> bool:
@@ -258,8 +289,10 @@ def _weight_key_frame(
     to one category — ``0.0`` and ``-0.0`` are one group and both index 0, and
     every undecodable value is pinned to 1.0 by position rather than by a
     string. That is what makes the dedup path available to the ``float32``
-    codes #283 produces; refusing it costs one built string per row, measured
-    9-20x on 1M-10M rows (2026-09-05, macOS arm64, pandas 1.5.3).
+    codes #283 produces; refusing it costs one built string per row. Measured
+    2026-09-05 on macOS arm64, 8 CPU / 16 GB, pandas 1.5.3 / numpy 1.25.0:
+    one key over 10,000,000 rows 1.898s -> 0.198s (9.6x), three keys
+    9.048s -> 0.441s (20.5x).
     """
     small = _narrow_frame(pdf, weight_keys)
     if not all(
@@ -279,8 +312,8 @@ def _distinct_weight_keys(
     :func:`_weight_keys_and_codes` for the caller that does not need the
     per-row codes.
     """
-    decoded, _ = decode_weight_keys(small.drop_duplicates(), decode_map)
-    return composite_key_series(decoded, weight_keys)
+    keys, _ = decoded_key_series(small.drop_duplicates(), weight_keys, decode_map)
+    return keys
 
 
 def _weight_keys_and_codes(
@@ -321,12 +354,15 @@ def _weight_keys_and_codes(
     """
     grouped = small.groupby(weight_keys, sort=False, dropna=False)
     codes = grouped.ngroup().to_numpy(dtype=np.int64)
-    uniq, undecodable = decode_weight_keys(grouped.head(1), decode_map)
-    return composite_key_series(uniq, weight_keys), codes, undecodable
+    keys, undecodable = decoded_key_series(grouped.head(1), weight_keys, decode_map)
+    return keys, codes, undecodable
 
 
 def _sample_data_keys(
-    pdf: pd.DataFrame, weight_keys: list, decode_map: dict = None, limit: int = 5,
+    pdf: pd.DataFrame,
+    weight_keys: list,
+    decode_map: dict | None = None,
+    limit: int = 5,
 ) -> list:
     """First ``limit`` distinct data keys, for the zero-match diagnostic.
 
@@ -348,8 +384,8 @@ def _sample_data_keys(
     decode_map = decode_map or {}
     small = _weight_key_frame(pdf, weight_keys, decode_map)
     if small is None:
-        decoded, _ = decode_weight_keys(_narrow_frame(pdf, weight_keys), decode_map)
-        keys = composite_key_series(decoded, weight_keys)
+        keys, _ = decoded_key_series(
+            _narrow_frame(pdf, weight_keys), weight_keys, decode_map)
     else:
         keys = _distinct_weight_keys(small, weight_keys, decode_map)
     return keys.drop_duplicates().head(limit).tolist()
@@ -359,7 +395,7 @@ def _compute_row_weights(
     pdf: pd.DataFrame,
     weight_keys: list,
     sample_weights: dict,
-    decode_map: dict = None,
+    decode_map: dict | None = None,
 ) -> np.ndarray:
     """Per-row LightGBM sample weight from a composite-key weight table.
 
@@ -382,9 +418,8 @@ def _compute_row_weights(
     decode_map = decode_map or {}
     small = _weight_key_frame(pdf, weight_keys, decode_map)
     if small is None:
-        decoded, undecodable = decode_weight_keys(
-            _narrow_frame(pdf, weight_keys), decode_map)
-        keys = composite_key_series(decoded, weight_keys)
+        keys, undecodable = decoded_key_series(
+            _narrow_frame(pdf, weight_keys), weight_keys, decode_map)
         w = keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
         w[undecodable] = 1.0
         return w

@@ -23,11 +23,7 @@ from typing import Optional
 
 import pyarrow.dataset as pads
 
-from recsys_tfb.io.extract import (
-    composite_key_series,
-    decode_weight_keys,
-    nameable_weight_entries,
-)
+from recsys_tfb.io.extract import decoded_key_series, nameable_weight_entries
 
 
 def distinct_weight_keys(
@@ -49,8 +45,7 @@ def distinct_weight_keys(
     if any(k not in ds.schema.names for k in weight_keys):
         return None
     pdf = ds.to_table(columns=list(weight_keys)).to_pandas().drop_duplicates()
-    decoded, undecodable = decode_weight_keys(pdf, decode_map)
-    keys = composite_key_series(decoded, weight_keys)
+    keys, undecodable = decoded_key_series(pdf, weight_keys, decode_map)
     return set(keys[~undecodable].tolist())
 
 

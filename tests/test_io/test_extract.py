@@ -601,6 +601,19 @@ class TestNameableWeightEntries:
         t, unk = nameable_weight_entries({"mass|x|y": 2.0}, keys, self._dm(keys))
         assert t == {"mass|x|y": 2.0} and unk == {}
 
+    @pytest.mark.parametrize(
+        "raw_key, expected",
+        [(1, "1"), (202401, "202401"), (True, "True"), (2.5, "2.5")],
+    )
+    def test_non_string_config_keys_are_stringified(self, raw_key, expected):
+        """YAML hands back the parsed scalar, not the text. An unquoted
+        ``sample_weights: {1: 5.0}`` on an int weight key arrives as the int
+        ``1``, and the data side is always strings — so the key has to be
+        stringified here or ``Series.map`` misses it at weight 1.0."""
+        keys = ["label"]
+        t, unk = nameable_weight_entries({raw_key: 5.0}, keys, self._dm(keys))
+        assert t == {expected: 5.0} and unk == {}
+
     def test_partial_bad_composite_dropped_correctly(self):
         # First component unknown, second is identity — the whole key goes.
         keys = ["cust_segment_typ_2a", "prod_name"]
@@ -670,6 +683,20 @@ class TestRowWeightsDecodeAware:
         # all keys unknown -> the unknown-value warning is the full diagnosis;
         # the redundant 0-match warning must NOT also fire.
         assert not any("matched 0 of" in m for m in warns)
+
+    def test_non_string_yaml_key_still_matches(self):
+        """End-to-end guard for the same thing: an unquoted ``1:`` in the YAML
+        arrives as the int ``1`` and must still apply to the rows whose label
+        is 1. (``true:`` is a different matter — YAML parses it to the bool, and
+        ``str(True)`` is ``"True"``, which names no value of an int column. That
+        was equally true before this change, and the zero-match WARNING is what
+        reports it.)"""
+        from recsys_tfb.io.extract import _row_weights_from_pdf
+
+        pdf = pd.DataFrame({"label": [1, 0, 1, 0], "prod_name": list("abab")})
+        params = self._params({1: 5.0}, ["label"])
+        w = _row_weights_from_pdf(pdf, params, self._prep())
+        np.testing.assert_array_equal(w, np.array([5.0, 1.0, 5.0, 1.0]))
 
     def test_zero_match_warning_reports_decoded_data_keys(self, caplog):
         """The WARNING is the only runtime signal here, so both lists it prints
