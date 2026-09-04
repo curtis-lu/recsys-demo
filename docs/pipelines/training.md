@@ -41,7 +41,7 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 3. **Calibration 兩端設定一致**：若 `training.calibration.enabled: true`，dataset 必須先以 `enable_calibration: true` 建立 calibration variant 與 `calibration_model_input`。
 4. **item 保留為模型特徵**：`schema.item` 必須存在於 preprocessor 的 `feature_columns`，也不可被 `training.feature_selection.exclude` 排除。
 5. **Sample weight 欄位可用**：`sample_weight_keys` 中非 identity、label 或 categorical feature 的欄位，必須由 dataset 的 `carry_columns` 帶入 train model input。
-6. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。
+6. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
 7. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
 
 CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸）。另外兩項也在起 Spark 前由 training 指令擋下：`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。
@@ -680,6 +680,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
 - **`prepare_lgb_train_inputs` 的建矩陣步驟是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
+- **HPO 期間的 val 矩陣不佔 driver 記憶體，改佔 driver disk**（#285）：`data/_scratch` 底下要有 `val 列數 × 特徵欄數 × itemsize` 的空間，空間不足會在建立前 raise。見 §9.2。
 - HPO study 不支援同一 `search_id` 由多個 training processes 同時寫入；應避免並行啟動相同搜尋。
 - HPO resume 可延續 completed trials，但重新建立的 TPE sampler 狀態不保證與完全不中斷的單次執行 bitwise identical。
 - `random_seed` 會影響模型與 HPO，但目前不納入 `model_version` 或 `search_id`。
@@ -737,6 +738,53 @@ batch 由 `STREAM_BATCH_BYTES`（64 MiB）除以欄寬決定列數，不是寫�
 
 上表的數字是 2026-07 生產事故的實測與外推，**其推導與未證實之處**見
 [2026-07 調查紀錄](../notes/2026-07-11-training-oom-investigation.md)。
+
+### 9.2 HPO 期間的 val 矩陣：改佔 disk，不佔記憶體（#285）
+
+`tune_hyperparameters` 是**唯一**抱著一份矩陣跨越整個搜尋的節點——其他讀矩陣的地方（`.bin`
+準備、refit、校準）都是一次 fit 就放掉。生產規模上 val 矩陣是 **37～89 GiB**，而 driver 只有
+128 GiB，所以 HPO 的常駐記憶體會直接被 val 的列數決定。
+
+**做法**：val 矩陣從 `np.empty` 改成映射一個檔案（`src/recsys_tfb/io/disk_matrix.py`），每個
+trial 的 predict 逐 row batch 走過它（`steps/hpo_scoring.py` 的 `_predict_in_row_batches`，
+batch 由 `PREDICT_BATCH_BYTES` = 64 MiB 除以欄寬決定列數）。矩陣的內容逐位元不變，`TrialScorer`
+對外語意也不變——它拿到的仍然是「可以 index 的矩陣」。
+
+**實測**（2026-09-04，macOS 15、arm64、**16 GiB RAM**、APFS；1,000 個 `float32` 特徵欄，
+每列都被 predict 讀過；peak RSS ＝ `ru_maxrss` 高水位）：
+
+```
+      rows     matrix   fill s  predict s  peak RSS
+   250,000     0.9 GiB      0.9        0.0   1.18 GiB
+ 1,000,000     3.7 GiB      5.6        0.4   3.92 GiB
+ 4,000,000    14.9 GiB     32.3       42.1   4.93 GiB
+ 6,500,000    24.2 GiB     54.7       74.8   4.93 GiB
+```
+
+**要看的是最後兩列**：列數再翻 1.6 倍、矩陣從 14.9 GiB 長到 24.2 GiB，峰值一動也不動。
+前兩列的上升是 page cache 在還有空間時就留著頁面——那正是「塞得下時行為幾乎等於 RAM」。
+最後一列的矩陣**比這台機器的實體記憶體還大**，仍然跑完：同樣形狀若配在 heap 上，需要的是
+24.2 GiB 的 anonymous memory，機器上只有 16 GiB。
+
+⚠ **脫鉤的是矩陣，不是「HPO 從此與列數無關」。** 每列仍有幾個常駐陣列——`y_val`、`groups_val`、
+（`macro_per_item_map` 時的）`items_val`，以及每個 trial 的預測值——它們都還是線性的，
+而且本來就是。差別在係數：一列的矩陣是 `欄數 × itemsize`（1,000 欄 float32 ＝ 4,000 B），
+那幾個陣列加起來是**幾十 bytes** 的量級。所以是兩位數到三位數倍的縮減，不是變成常數。
+
+**沒有「塞得下就放 RAM」的分支，這是刻意的。** 那條分支只有在資料大到會出事時才會被執行，
+平常沒人測得到，正是最容易帶著 bug 上線的形狀。一律映射時，塞得下的情況由 OS page cache
+接手（上表前兩列），塞不下的情況回收頁面而不是 OOM（後兩列）——同一條路徑優雅退化。
+
+**要付的代價是 driver disk**：`data/_scratch` 所在的檔案系統要放得下整份矩陣。
+**空間不足會靜默把矩陣寫壞、不會報錯**，所以建立之前先檢查可用空間、不足就 raise（訊息含
+需求量、可用量、落點）。那個失效模式的完整實測見
+[`../operations/known-pitfalls.md`](../operations/known-pitfalls.md) §21——它是本節這些設計的理由，
+不是額外的保險。
+
+**暫存檔在映射完成的當下就被 unlink**：POSIX 讓 mapping 繼續持有 inode，所以陣列照用，而檔名
+已經不在了。清理責任因此掛在陣列的生命週期上，不掛在誰記得寫 `finally`——程序被 kill、丟例外、
+機器斷電，都不可能在 `data/` 底下留下一個 89 GiB 的孤兒檔。代價是跑到一半沒辦法去翻那個檔案；
+它裝的是重讀一次 parquet 就能完全重現的東西，沒什麼好翻的。
 
 ## 10. 相關文件
 

@@ -59,11 +59,13 @@ class TestTrialScorer:
         class FakeAdapter:
             def __init__(self, tag):
                 self.booster = type("B", (), {"best_iteration": 10 + tag})()
+                self.predict_calls: list = []
 
             def train(self, **kw):
                 pass
 
             def predict(self, X):
+                self.predict_calls.append(len(X))
                 return np.zeros(len(X))
 
         class FakeHandle:
@@ -130,3 +132,95 @@ class TestTrialScorer:
         assert scorer.best["score"] == pytest.approx(0.95)
         assert scorer.best["params"] == {"n": "from-checkpoint"}
         assert scorer.best["iteration"] == 7
+
+
+class TestPredictInRowBatches:
+    """The val matrix is mapped from disk (#285), so predict must not ask for
+    all of it at once — the mapping's whole point is that only the rows in
+    flight are resident.
+
+    LightGBM scores each row through the trees independently, so batching is
+    an arithmetic no-op. That is a claim, not an assumption, which is why the
+    first test compares bytes rather than approximate values.
+    """
+
+    class _RowAdapter:
+        """Predicts a deterministic function of each row, and records the
+        shape of every call so the batching itself is observable."""
+
+        def __init__(self):
+            self.call_rows: list = []
+
+        def predict(self, X):
+            self.call_rows.append(len(X))
+            return X.sum(axis=1) * 3.0 - 1.0
+
+    def _X(self, n_rows: int, n_cols: int = 4) -> np.ndarray:
+        rng = np.random.default_rng(0)
+        return rng.random((n_rows, n_cols)).astype(np.float32)
+
+    def test_bit_identical_to_predicting_the_whole_matrix(self):
+        X = self._X(97)
+        whole = self._RowAdapter().predict(X)
+
+        adapter = self._RowAdapter()
+        batched = hpo_scoring._predict_in_row_batches(adapter, X, budget=48)
+
+        assert np.array_equal(batched, whole)
+        assert batched.dtype == whole.dtype
+
+    def test_it_really_splits_into_batches(self):
+        """Without this, the parity test above passes on a single call."""
+        adapter = self._RowAdapter()
+        # 4 columns x 4 B = 16 B/row -> 3 rows per batch
+        hpo_scoring._predict_in_row_batches(adapter, self._X(97), budget=48)
+
+        assert adapter.call_rows[:3] == [3, 3, 3]
+        assert sum(adapter.call_rows) == 97
+        assert max(adapter.call_rows) == 3
+
+    def test_a_generous_budget_is_one_call(self):
+        adapter = self._RowAdapter()
+        hpo_scoring._predict_in_row_batches(adapter, self._X(97), budget=1 << 20)
+
+        assert adapter.call_rows == [97]
+
+    def test_a_memmap_is_handed_on_as_a_plain_array(self, tmp_path):
+        """The adapter is a model library's, not ours; it should never have to
+        know the matrix came from a mapping."""
+        from recsys_tfb.io import disk_matrix
+
+        seen: list = []
+
+        class TypeSpy:
+            def predict(self, X):
+                seen.append(type(X))
+                return np.zeros(len(X))
+
+        X = disk_matrix.open_disk_matrix(
+            (10, 4), np.dtype(np.float32), "unit", root=tmp_path)
+        X[:] = 1.0
+        hpo_scoring._predict_in_row_batches(TypeSpy(), X, budget=48)
+
+        assert seen and all(t is np.ndarray for t in seen)
+
+    def test_empty_val_still_returns_an_empty_prediction(self):
+        adapter = self._RowAdapter()
+        out = hpo_scoring._predict_in_row_batches(adapter, self._X(0), budget=48)
+
+        assert len(out) == 0
+
+
+class TestTrialScorerPredictsInBatches:
+    def test_a_trial_never_predicts_the_whole_matrix_at_once(self, monkeypatch):
+        """The scorer's public behaviour is unchanged (#285 keeps its
+        semantics); what changes is that the matrix is walked, not handed over
+        whole. A scored trial with one predict call would mean the mapping is
+        fully resident for the length of the search."""
+        scorer, adapters = TestTrialScorer()._scorer(monkeypatch, [0.5])
+        monkeypatch.setattr(hpo_scoring, "PREDICT_BATCH_BYTES", 16)
+
+        scorer(types.SimpleNamespace(number=0))
+
+        # X_val is 4 rows x 2 float64 columns = 16 B/row -> 1 row per batch
+        assert adapters[0].predict_calls == [1, 1, 1, 1]

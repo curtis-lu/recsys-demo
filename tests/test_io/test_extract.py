@@ -1413,3 +1413,101 @@ class TestHivePartitionedCacheRoot:
             )
 
         assert rows(part) == rows(flat)
+
+# ---------------------------------------------------------------------------
+# Disk-backed matrix (#285) — the same bytes, mapped from a file
+#
+# HPO holds the val matrix for the whole search (37-89 GiB in production), so
+# it reads with ``on_disk=True``. These pin that the flag changes *where the
+# bytes live* and nothing else: same values, same dtype, same batching.
+#
+# The scratch root is redirected the same way ``STREAM_BATCH_BYTES`` is — by
+# patching the module attribute the allocator reads at call time — so the API
+# does not grow a parameter that only tests would ever pass.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scratch(tmp_path: Path, monkeypatch) -> Path:
+    from recsys_tfb.io import disk_matrix
+
+    root = tmp_path / "scratch"
+    monkeypatch.setattr(disk_matrix, "SCRATCH_ROOT", root)
+    return root
+
+
+class TestOnDiskMatrix:
+    def test_bit_identical_to_the_in_memory_read(
+        self, tmp_path: Path, scratch: Path
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        df = _wide_df(n_rows=53)
+        handle = _make_handle(tmp_path, df)
+        in_memory, y_m, g_m = extract_Xy_with_groups(
+            handle, _wide_meta(), _WIDE_PARAMS)
+        on_disk, y_d, g_d = extract_Xy_with_groups(
+            handle, _wide_meta(), _WIDE_PARAMS, on_disk=True)
+
+        assert on_disk.dtype == in_memory.dtype
+        assert np.array_equal(on_disk, in_memory)
+        assert on_disk.tobytes() == in_memory.tobytes()
+        np.testing.assert_array_equal(y_d, y_m)
+        np.testing.assert_array_equal(g_d, g_m)
+
+    def test_the_matrix_is_mapped_not_heap_allocated(
+        self, tmp_path: Path, scratch: Path
+    ) -> None:
+        """Without this, every other assertion here passes on a plain array."""
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        X, _, _ = extract_Xy_with_groups(
+            _make_handle(tmp_path, _wide_df(n_rows=9)), _wide_meta(),
+            _WIDE_PARAMS, on_disk=True)
+
+        assert isinstance(X, np.memmap)
+
+    def test_still_bit_identical_across_many_batches(
+        self, tmp_path: Path, scratch: Path, monkeypatch
+    ) -> None:
+        """Writing a batch at the wrong row offset is the failure a mapped
+        matrix can have that a single-batch read cannot show."""
+        import recsys_tfb.io.extract as extract_mod
+
+        df = _wide_df(n_rows=101)
+        handle = _make_handle(tmp_path, df)
+        one_shot, _, _ = extract_mod.extract_Xy_with_groups(
+            handle, _wide_meta(), _WIDE_PARAMS)
+
+        monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 100)
+        calls = _spy_on_reads(monkeypatch)
+        many, _, _ = extract_mod.extract_Xy_with_groups(
+            handle, _wide_meta(), _WIDE_PARAMS, on_disk=True)
+
+        assert calls[0]["n_batches"] > 30
+        assert many.tobytes() == one_shot.tobytes()
+
+    def test_off_by_default_so_no_caller_spills_by_accident(
+        self, tmp_path: Path, scratch: Path
+    ) -> None:
+        """Only HPO holds a matrix across many fits; the ``.bin`` prep, the
+        refit and the calibration read each hold theirs for one."""
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        X, _, _ = extract_Xy_with_groups(
+            _make_handle(tmp_path, _wide_df(n_rows=9)), _wide_meta(), _WIDE_PARAMS)
+
+        assert not isinstance(X, np.memmap)
+        assert not scratch.exists()
+
+    def test_no_scratch_file_survives_the_read(
+        self, tmp_path: Path, scratch: Path
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        X, _, _ = extract_Xy_with_groups(
+            _make_handle(tmp_path, _wide_df(n_rows=9)), _wide_meta(),
+            _WIDE_PARAMS, on_disk=True)
+
+        assert list(scratch.rglob("*")) == []
+        assert X.shape == (9, 7)

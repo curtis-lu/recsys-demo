@@ -33,11 +33,20 @@ from recsys_tfb.evaluation.metrics import (
     compute_macro_per_item_map,
     compute_mean_ap,
 )
+from recsys_tfb.io.extract import stream_batch_rows
 from recsys_tfb.models.base import get_adapter
 from recsys_tfb.pipelines.training.steps.hpo_resume import write_checkpoint
 from recsys_tfb.pipelines.training.steps.search_space import build_trial_params
 
 logger = logging.getLogger(__name__)
+
+#: Bytes of val features one predict call may be handed. A *byte* budget, and
+#: the same shape of decision as ``STREAM_BATCH_BYTES`` on the read side, so
+#: the row count follows the matrix's width instead of being guessed for one
+#: of them. ``X_val`` is mapped from disk (see ``io/disk_matrix.py``): handing
+#: the adapter the whole array would fault every page of a 37-89 GiB matrix in
+#: at once, which is the thing mapping it was supposed to avoid.
+PREDICT_BATCH_BYTES: int = 64 * 1024**2
 
 
 def _hpo_score(
@@ -66,6 +75,44 @@ def _hpo_score(
     )
 
 
+def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray:
+    """Score ``X`` a slice of rows at a time, into one pre-allocated output.
+
+    **Bit-identical to ``adapter.predict(X)``.** A GBDT walks each row down
+    the trees on its own, so no row's score depends on which other rows share
+    its call — batching is an arithmetic no-op here, and the tests compare
+    with ``np.array_equal`` rather than a tolerance to say so. That is a
+    property of this model family, not of prediction in general: it would not
+    hold for anything that normalises across the batch.
+
+    Each slice of a mapped ``X`` is handed on as a plain ``ndarray`` view, so
+    the adapter never sees a ``np.memmap`` and no copy of the rows is made
+    before the model reads them.
+
+    ``budget=None`` reads :data:`PREDICT_BATCH_BYTES` **at call time** rather
+    than binding it as a default argument, so a test that lowers the module
+    attribute actually gets smaller batches — the same trap ``stream_batch_rows``
+    documents, where a frozen default made a multi-batch test silently run
+    over a single batch.
+    """
+    n_rows = len(X)
+    step = stream_batch_rows(
+        X.shape[1], X.dtype.itemsize,
+        budget=PREDICT_BATCH_BYTES if budget is None else budget,
+    )
+    out = None
+    for start in range(0, n_rows, step):
+        part = adapter.predict(np.asarray(X[start:start + step]))
+        if out is None:
+            out = np.empty((n_rows,) + part.shape[1:], dtype=part.dtype)
+        out[start:start + len(part)] = part
+    if out is None:
+        # No rows at all: still ask the adapter, so an empty val set returns
+        # the shape and dtype it would have returned before this function.
+        return adapter.predict(np.asarray(X))
+    return out
+
+
 class TrialScorer:
     """Train one candidate, score it on val, and keep the search's winner.
 
@@ -84,6 +131,13 @@ class TrialScorer:
     ``X_val`` / ``y_val`` decide the reported score — two different sets on
     purpose, so the number a trial is judged by is not the number its
     early stopping optimised against.
+
+    ``X_val`` is whatever the caller handed over: anything that indexes and
+    slices like a 2-D array. ``tune_hyperparameters`` passes a matrix mapped
+    from disk (``io/disk_matrix.py``), which is why every trial walks it
+    through :func:`_predict_in_row_batches` rather than handing the whole thing
+    to the adapter — the scorer's semantics are unchanged either way, and the
+    fakes in its tests are plain arrays.
     """
 
     def __init__(
@@ -178,7 +232,7 @@ class TrialScorer:
             )
 
         with log_step(logger, "predict"):
-            y_pred = adapter.predict(self.X_val)
+            y_pred = _predict_in_row_batches(adapter, self.X_val)
 
         with log_step(logger, "score"):
             score = _hpo_score(
