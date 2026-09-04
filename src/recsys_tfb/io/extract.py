@@ -19,6 +19,7 @@ from pandas.api.types import infer_dtype
 
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.io import disk_matrix
 from recsys_tfb.io.handles import ParquetHandle, open_parquet_dataset
 
 logger = logging.getLogger(__name__)
@@ -615,12 +616,27 @@ def _stream_matrix(
     parameters: dict,
     aux_columns: list,
     log_prefix: str,
+    on_disk_label: str | None = None,
 ) -> tuple:
     """Read the parquet into a pre-allocated matrix, one pyarrow batch at a time.
 
     Returns ``(X, aux)`` — the feature matrix, and a pandas frame holding only
     ``aux_columns`` (label, group columns, item, weight keys), row-aligned with
     it.
+
+    ``on_disk_label`` maps the matrix from a scratch file instead of
+    allocating it on the heap (:mod:`recsys_tfb.io.disk_matrix`). It changes
+    where the bytes live and nothing else — same dtype, same batching,
+    byte-identical contents, zero rows included. It is a caller's declaration
+    ("I am going to hold this for a long time"), never a size test: a branch
+    that only fires on data large enough to hurt is a branch no test ever
+    reaches.
+
+    It carries a *name* rather than a flag because that name is what an
+    operator reads when the disk is too small to hold the matrix. This
+    function's own ``log_prefix`` is the wrong thing to put there — it says
+    ``extract_Xy_with_groups``, which names the reader, not the matrix, and
+    every caller would report the same string.
 
     **Why not read the frame and slice it.** The obvious spelling materialises
     the feature data three times over: the frame pandas builds from the parquet,
@@ -688,13 +704,18 @@ def _stream_matrix(
     position = {c: i for i, c in enumerate(read_cols)}
 
     n_rows = ds.count_rows()
-    X = np.empty((n_rows, len(feature_cols)), dtype=dtype)
+    shape = (n_rows, len(feature_cols))
+    X = (
+        np.empty(shape, dtype=dtype)
+        if on_disk_label is None
+        else disk_matrix.open_disk_matrix(shape, dtype, on_disk_label)
+    )
     batch_rows = stream_batch_rows(len(read_cols), dtype.itemsize)
     logger.info(
         "%s: streaming read n_rows=%d n_read_columns=%d (of %d in file) "
-        "dtype=%s batch_rows=%d matrix_mib=%.1f",
+        "dtype=%s batch_rows=%d matrix_mib=%.1f on_disk=%s",
         log_prefix, n_rows, len(read_cols), len(available), dtype.name,
-        batch_rows, X.nbytes / 1024**2,
+        batch_rows, X.nbytes / 1024**2, on_disk_label or False,
     )
 
     aux_schema = pa.schema([ds.schema.field(c) for c in aux_cols])
@@ -838,6 +859,7 @@ def extract_Xy_with_groups(
     *,
     with_weights: bool = False,
     with_items: bool = False,
+    on_disk_label: str | None = None,
 ) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
 
@@ -849,6 +871,15 @@ def extract_Xy_with_groups(
     integer codes the matrix holds for the same column. That is the contract the
     inference side reads: it writes those names into a partition column, so
     handing back codes would silently rename every partition.
+
+    ``on_disk_label`` returns X mapped from a scratch file rather than held
+    on the heap, under that name — byte-identical either way, see
+    :func:`_stream_matrix`. Only ``tune_hyperparameters`` asks for it: it is
+    the one caller that holds a matrix across every fit of the search, so its
+    resident memory otherwise grows with the val row count. The ``.bin`` prep,
+    the refit and the calibration read each hold theirs for a single fit and
+    are left alone, which is also why :func:`extract_Xy` has no such
+    parameter — none of its callers would pass it.
     """
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
@@ -876,7 +907,7 @@ def extract_Xy_with_groups(
 
     X, aux = _stream_matrix(
         handle, preprocessor_metadata, parameters, aux_cols,
-        "extract_Xy_with_groups",
+        "extract_Xy_with_groups", on_disk_label=on_disk_label,
     )
     y = aux[label_col].values
     groups = _group_ids(aux, group_cols)

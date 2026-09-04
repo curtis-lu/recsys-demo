@@ -591,15 +591,27 @@ def tune_hyperparameters(
 
     # val_model_input is already pre-filtered to positive groups by the dataset
     # pipeline (filter_val_model_input node) — no in-pandas re-filter here.
+    #
+    # Decision — the val matrix is mapped from disk, not held
+    # on the heap. This is the one caller that keeps a matrix for the whole
+    # search rather than for one fit, and in production it is 37-89 GiB on a
+    # 128 GiB driver; mapped, the search's resident memory stops tracking the
+    # val row count and the pages the current predict batch is not touching
+    # are the OS's to reclaim. Unconditional on purpose — a "small enough for
+    # RAM" branch would only ever run at the sizes nobody tests. The file is
+    # unlinked as soon as it is mapped, so cleanup needs nothing from this
+    # node; see `io/disk_matrix.py`, including why a full disk here would
+    # otherwise corrupt the matrix in silence.
     with log_step(logger, "extract_features"):
         if hpo_objective == "macro_per_item_map":
             X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
                 val_parquet_handle, preprocessor_metadata, parameters,
-                with_items=True,
+                with_items=True, on_disk_label="hpo_val_matrix",
             )
         else:
             X_v, y_v, groups_v = extract_Xy_with_groups(
                 val_parquet_handle, preprocessor_metadata, parameters,
+                on_disk_label="hpo_val_matrix",
             )
             items_v = None
 

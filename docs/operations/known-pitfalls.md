@@ -376,3 +376,41 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **改寫時要付的兩筆代價**：（1）`withColumn` 是**就地取代**，欄序與「沒被指名的欄」本來免費，改成 `select` 之後必須自己把 `df.columns` 整份列進投影。（2）`select` 會對**每一個**欄名重新做名稱解析，包含原本連碰都沒碰的過路欄——而 `F.col("a.b")` 會被讀成「struct a 的欄位 b」。所以投影一律用反引號 ``F.col(f"`{col}`")``；少了它，一個名字含 `.` 的過路欄會 raise `Column 'a.b' does not exist. Did you mean one of the following? [a.b, ...]`（訊息會把它自己列在候選裡，這就是認出這個坑的徵兆）。反引號對正常欄名無副作用（實測）。
 - **驗證方式（不要寫計時測試）**：斷言 **analyzed plan 的 `Project` 節點數不隨欄數成長**——`df._jdf.queryExecution().analyzed().numberedTreeString()`，數含 `Project` 的行。**並且比照 §19，用另一個測試證明被取代的寫法確實會讓這個數字長大**（就地組一個 `withColumn` 迴圈、斷言它是 N 個 Project）——否則「數字是 1」哪天變成恆真也沒人會發現。範例 `tests/test_preprocessing.py::TestCastBuildsOneProjectionNotOnePerColumn`（兩個測試就是這一對）。計時斷言在 CI 上會隨機器負載誤紅，而常誤紅的測試最後一定被加 skip，比沒有更糟。
 - **這條驗證方式唯一會假綠的地方**：**必須讀 `analyzed()`，不能讀 `optimized()`**。optimizer 的 `CollapseProject` 會把疊起來的 Projection 折回一層，折完之後兩種寫法看起來一模一樣。實測 8 個轉型欄：`withColumn` 迴圈的 analyzed 是 8 個 Project、optimized 是 1 個；單次 `select` 兩者都是 1 個。斷言在 optimized plan 上會恆真——而恆真的斷言正是我們想擋的那個回歸溜回來的路。
+
+## 21. memmap 遇磁碟不足會**靜默算錯**，不會報錯（2026-09-04）
+
+`np.memmap` 建的是 **sparse file**：宣告多大就多大，但一個 block 都還沒真的配出去。所以「磁碟裝不下」不會在建立時發生，而是在**寫入時**發生——而 mmap 的寫入是記憶體寫入，寫失敗沒有回傳值可以檢查，`flush()` 也不保證把 `msync` 的錯誤交還給你。程式從頭到尾自認成功。
+
+- **症狀（第一分鐘認出它）**：**沒有症狀**，這正是它危險的地方。唯一的線索是「數字都在合理範圍，但結論莫名其妙」——HPO 拿一份 81% 是零的 val 矩陣評分，會算出看起來正常的 mAP、選出「最佳」超參數，沒有任何一個 sanity check 會紅。要主動去看才發現：**卸載再掛回**（清掉 page cache）之後讀回來，內容跟寫進去的不一樣。
+
+- **實測**（2026-09-04，macOS 15，20 MB 磁碟映像，寫 95.4 MiB 的 `float32` memmap，內容為亂數以避開檔案系統壓縮）：
+
+  ```
+  ① 建立 95.4 MiB memmap（磁碟只有 19 MiB）→ 成功，零錯誤；du 顯示檔案只佔 12 KiB
+  ② 逐塊寫入（20 塊），每塊 flush()      → 20 塊全部「成功」，零例外
+  ③ 程式結束                             → 退出碼 0
+  ④ 卸載再掛回後讀回                     → 20 塊有 17 塊內容不符，整份 81% 是零
+  ```
+
+- **⚠ 會不會靜默，取決於檔案系統支不支援 sparse file。** 同一段程式在 **HFS+** 的映像上跑，`np.memmap(mode="w+")` 在**建立當下**就 `OSError: [Errno 28] No space left on device`（numpy 用 seek-to-end + 寫一個位元組來定尺寸，HFS+ 不做 sparse 就必須當場配滿）。也就是說：**唯一大聲失敗的是那個沒人用的檔案系統**。APFS、ext4、XFS——所有生產與開發環境實際會用到的——都做 sparse file，都走靜默損毀那條路。所以「我在本機測過沒事」完全不能作為證據。
+
+  <details><summary>怎麼自己重跑這個實驗（repo 裡沒有腳本，是一次性手動量測）</summary>
+
+  ```bash
+  # 換 APFS ↔ "Case-sensitive HFS+" 就能看到兩種行為
+  hdiutil create -size 20m -fs APFS -volname MEMMAPFULL -ov /tmp/small.dmg
+  hdiutil attach /tmp/small.dmg -mountpoint /tmp/memmapfull
+  # 寫入：np.memmap("/tmp/memmapfull/m.dat", np.float32, "w+", (25000, 1000))
+  #       逐塊塞 rng.random(...)（亂數，避開檔案系統壓縮），每塊 flush()
+  # 關鍵一步：卸載再掛回，否則讀到的是 page cache，看起來一切正常
+  hdiutil detach /tmp/memmapfull && hdiutil attach /tmp/small.dmg -mountpoint /tmp/memmapfull
+  # 讀回：逐塊比對 md5（用同一個 seed 重算期望值，別把期望值寫在同一顆滿掉的磁碟上）
+  ```
+
+  **第三行的「卸載再掛回」不是收尾動作，是整個實驗的關鍵**——不清 page cache 的話，讀回來的是還沒落盤的那份記憶體副本，四個步驟會全部「通過」，於是這個坑看起來不存在。
+
+  </details>
+
+- **規則**：**建立 memmap 之前先檢查可用空間**，不足就 raise（`src/recsys_tfb/io/disk_matrix.py` 的 `require_free_space`；需求量已知＝`列數 × 欄數 × itemsize`）。訊息要含**需求量、可用量、檔案落點**——落點是必要的，因為矩陣落在專案根目錄底下，那常常不是操作者正在盯的那顆磁碟。有 `os.posix_fallocate` 的平台再加一道（它真的把 block 配出來，不夠會當場 `ENOSPC`），但**那是加分不是主力**：**macOS 沒有這個 API**，而 macOS 就是本 repo 的開發機，所以事前檢查是每一次本機執行實際走的那條路。兩條路都丟 `OSError`／`ENOSPC`，呼叫端只要處理一種。
+
+- **驗證方式：不要測「磁碟真的滿了」。** 上面第 ①–③ 步已經證明那個情境**在程式內偵測不到**——測試會綠，而綠的原因正是 bug 本身。要測的是**閘門會擋**：宣告一個大於可用空間的形狀，斷言它 raise、且**目錄裡沒有留下任何檔案**。這個測試的變異檢查有個容易看走眼的地方：拿掉閘門之後它必須紅在「**DID NOT RAISE**」，不是紅在 numpy 的 `OverflowError`——形狀開太大（例如 `2**40 × 2**20`）會先炸在型別轉換，那是紅對了答案、錯了理由，換一個磁碟裝不下但 numpy 映得出來的形狀（例如 512 GiB）才真的踩到 sparse file 那條路。範例：`tests/test_io/test_disk_matrix.py::TestOpenDiskMatrix::test_refuses_before_creating_anything`。
