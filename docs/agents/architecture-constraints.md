@@ -273,6 +273,8 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 - **間接寫入。** 寫檔掃描只看得到**直接呼叫**（`open`／`mkdir`／`log_artifacts`…）。經由專案 helper 的寫入它看不到——`tune_hyperparameters` 正是這種，靠人工登記在 R4。
 
   **另一個掃不到的寫入，刻意不進 R4**：`pipelines/training/steps/local_cache.py` 的 `populate_cache_from_hive`，經 `utils/hdfs.copy_hdfs_to_local` 把 Hive 分區複製到 driver 本機。不登記的理由是 R4 收的是「**診斷副產物**」，而一份 Hive 表的本機複本不是診斷副產物（使用者 2026-08-30 裁決，ADR-0014 閘門 G2）。記在這一段，是因為「掃描看不到它」這件事仍然為真——它只是該被記在這裡，而不是被塞進一張語意不合的表。
+
+  **第三個掃不到的寫入，同樣刻意不進 R4**（2026-09-04，#285）：`tune_hyperparameters` 的 val 矩陣經 `io/disk_matrix.py` 的 `open_disk_matrix` 在 `data/_scratch` 建檔。理由同上——它不是診斷副產物；而且它比前一個更不像產物：**檔案在映射完成的當下就被 unlink**，跑完什麼都不留，連「要不要清」都不成立。它算寫入是因為需要那塊磁碟空間（生產 37～89 GiB），而那正是操作者需要知道的事——所以它記在 `docs/pipelines/training.md` §2 的執行前準備與 §9.2，不是記在一張講產物的表上。
 - **`steps/` 底下的程式碼。** (c) 與 (d) 只讀 `pipelines/**/nodes*.py`（`test_architecture_constraints.py:172`、`:190` 的 `rglob("nodes*.py")`）。所以搬進 `steps/` 的程式碼不在稽核範圍內——`pipelines/dataset/steps/` 自 #176 起、`pipelines/inference/steps/` 自 #197 起（約 500 行）都是。
 
   **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。#197 當下實查過 `pipelines/inference/steps/` 零命中。要不要把 glob 放寬到 `pipelines/**/*.py` 是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）。

@@ -6,6 +6,10 @@ mostly zeros (``docs/operations/known-pitfalls.md`` §21). Nothing in the
 process notices, so the only defence is refusing to allocate. These tests pin
 the refusal, and pin that the happy path really is disk-backed rather than a
 plain array that happens to work.
+
+Every test redirects the scratch root by patching the module attribute, the
+same way ``test_extract.py`` lowers ``STREAM_BATCH_BYTES``. Without the
+fixture these would spill into the worktree's real ``data/_scratch``.
 """
 
 import errno
@@ -16,6 +20,13 @@ import numpy as np
 import pytest
 
 from recsys_tfb.io import disk_matrix
+
+
+@pytest.fixture
+def scratch(tmp_path: Path, monkeypatch) -> Path:
+    root = tmp_path / "scratch"
+    monkeypatch.setattr(disk_matrix, "SCRATCH_ROOT", root)
+    return root
 
 
 class TestRequireFreeSpace:
@@ -46,48 +57,56 @@ class TestRequireFreeSpace:
 
 
 class TestOpenDiskMatrix:
-    def test_shape_dtype_and_contents_round_trip(self, tmp_path: Path) -> None:
-        X = disk_matrix.open_disk_matrix(
-            (7, 3), np.dtype(np.float32), "unit", root=tmp_path
-        )
+    def test_shape_dtype_and_contents_round_trip(self, scratch: Path) -> None:
+        X = disk_matrix.open_disk_matrix((7, 3), np.dtype(np.float32), "unit")
         X[:] = np.arange(21, dtype=np.float32).reshape(7, 3)
 
         assert X.shape == (7, 3)
         assert X.dtype == np.float32
         np.testing.assert_array_equal(X[3], np.array([9, 10, 11], np.float32))
 
-    def test_it_is_actually_disk_backed(self, tmp_path: Path) -> None:
+    def test_it_is_actually_disk_backed(self, scratch: Path) -> None:
         """A plain ``np.empty`` would satisfy every other test in this class.
 
         The point of the module is that the pages can be evicted, which only
         a mapping of a real file gives.
         """
-        X = disk_matrix.open_disk_matrix(
-            (4, 2), np.dtype(np.float64), "unit", root=tmp_path
-        )
+        X = disk_matrix.open_disk_matrix((4, 2), np.dtype(np.float64), "unit")
+
         assert isinstance(X, np.memmap)
 
-    def test_no_file_is_left_behind(self, tmp_path: Path) -> None:
+    def test_no_file_is_left_behind(self, scratch: Path) -> None:
         """Cleanup is the kernel's, tied to the array's lifetime.
 
         The file is unlinked the moment it is mapped, so there is no crash
         path and no later run that can leave a 89 GiB orphan under ``data/``.
         """
-        X = disk_matrix.open_disk_matrix(
-            (4, 2), np.dtype(np.float32), "unit", root=tmp_path
-        )
+        X = disk_matrix.open_disk_matrix((4, 2), np.dtype(np.float32), "unit")
         X[:] = 1.0
 
-        assert list(tmp_path.rglob("*.dat")) == []
+        assert list(scratch.rglob("*")) == []
         # still usable after the name is gone — the mapping holds the inode
         assert X.sum() == 8.0
 
-    def test_creates_the_root_directory(self, tmp_path: Path) -> None:
-        root = tmp_path / "does" / "not" / "exist"
-        disk_matrix.open_disk_matrix((2, 2), np.dtype(np.float32), "unit", root=root)
-        assert root.is_dir()
+    def test_creates_the_scratch_root(self, scratch: Path) -> None:
+        assert not scratch.exists()
+        disk_matrix.open_disk_matrix((2, 2), np.dtype(np.float32), "unit")
+        assert scratch.is_dir()
 
-    def test_refuses_before_creating_anything(self, tmp_path: Path) -> None:
+    def test_zero_rows_is_a_matrix_not_a_crash(self, scratch: Path) -> None:
+        """``mmap`` refuses an empty file, so this is the one size at which a
+        mapped matrix could diverge from ``np.empty`` — and it would diverge
+        by raising, in a val set that used to score fine (empty, but fine).
+        One padding byte keeps it on the same path as every other size.
+        """
+        X = disk_matrix.open_disk_matrix((0, 7), np.dtype(np.float32), "unit")
+
+        assert X.shape == (0, 7)
+        assert X.dtype == np.float32
+        assert isinstance(X, np.memmap)
+        assert len(X) == 0
+
+    def test_refuses_before_creating_anything(self, scratch: Path) -> None:
         """The gate runs first, so a refusal costs no disk at all.
 
         512 GiB: a shape numpy maps quite happily. That is the point — drop
@@ -95,13 +114,18 @@ class TestOpenDiskMatrix:
         file and no disk is claimed until something writes to it. The only
         thing standing between that and a silently zero-filled matrix is the
         refusal, so this must fail by not raising, not by overflowing.
+
+        ``not scratch.exists()`` rather than "the directory is empty": an
+        empty ``rglob`` is also what a *missing* directory returns, so the
+        weaker assertion passes whether the gate runs before ``mkdir`` or
+        after it, and the ordering is the thing being pinned.
         """
         with pytest.raises(OSError) as excinfo:
             disk_matrix.open_disk_matrix(
-                (1 << 28, 1 << 8), np.dtype(np.float64), "val_matrix", root=tmp_path
+                (1 << 28, 1 << 8), np.dtype(np.float64), "val_matrix"
             )
         assert excinfo.value.errno == errno.ENOSPC
-        assert list(tmp_path.rglob("*")) == []
+        assert not scratch.exists()
 
 
 class TestPreallocation:
@@ -113,7 +137,7 @@ class TestPreallocation:
     """
 
     def test_fallocate_is_used_when_the_platform_has_it(
-        self, tmp_path: Path, monkeypatch
+        self, scratch: Path, monkeypatch
     ) -> None:
         seen: list = []
 
@@ -121,14 +145,12 @@ class TestPreallocation:
             seen.append((offset, length))
 
         monkeypatch.setattr(os, "posix_fallocate", spy, raising=False)
-        disk_matrix.open_disk_matrix(
-            (10, 4), np.dtype(np.float32), "unit", root=tmp_path
-        )
+        disk_matrix.open_disk_matrix((10, 4), np.dtype(np.float32), "unit")
 
         assert seen == [(0, 160)]
 
     def test_fallocate_enospc_surfaces_as_the_same_error(
-        self, tmp_path: Path, monkeypatch
+        self, scratch: Path, monkeypatch
     ) -> None:
         """Both routes raise ``OSError``/``ENOSPC``, so callers need one branch."""
         def boom(fd, offset, length):
@@ -136,16 +158,15 @@ class TestPreallocation:
 
         monkeypatch.setattr(os, "posix_fallocate", boom, raising=False)
         with pytest.raises(OSError) as excinfo:
-            disk_matrix.open_disk_matrix(
-                (10, 4), np.dtype(np.float32), "unit", root=tmp_path
-            )
+            disk_matrix.open_disk_matrix((10, 4), np.dtype(np.float32), "unit")
+
         assert excinfo.value.errno == errno.ENOSPC
 
-    def test_same_matrix_without_fallocate(self, tmp_path: Path, monkeypatch) -> None:
+    def test_same_matrix_without_fallocate(
+        self, scratch: Path, monkeypatch
+    ) -> None:
         monkeypatch.delattr(os, "posix_fallocate", raising=False)
-        X = disk_matrix.open_disk_matrix(
-            (10, 4), np.dtype(np.float32), "unit", root=tmp_path
-        )
+        X = disk_matrix.open_disk_matrix((10, 4), np.dtype(np.float32), "unit")
         X[:] = 3.0
 
         assert X.shape == (10, 4) and X.dtype == np.float32

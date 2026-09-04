@@ -394,6 +394,23 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 - **⚠ 會不會靜默，取決於檔案系統支不支援 sparse file。** 同一段程式在 **HFS+** 的映像上跑，`np.memmap(mode="w+")` 在**建立當下**就 `OSError: [Errno 28] No space left on device`（numpy 用 seek-to-end + 寫一個位元組來定尺寸，HFS+ 不做 sparse 就必須當場配滿）。也就是說：**唯一大聲失敗的是那個沒人用的檔案系統**。APFS、ext4、XFS——所有生產與開發環境實際會用到的——都做 sparse file，都走靜默損毀那條路。所以「我在本機測過沒事」完全不能作為證據。
 
+  <details><summary>怎麼自己重跑這個實驗（repo 裡沒有腳本，是一次性手動量測）</summary>
+
+  ```bash
+  # 換 APFS ↔ "Case-sensitive HFS+" 就能看到兩種行為
+  hdiutil create -size 20m -fs APFS -volname MEMMAPFULL -ov /tmp/small.dmg
+  hdiutil attach /tmp/small.dmg -mountpoint /tmp/memmapfull
+  # 寫入：np.memmap("/tmp/memmapfull/m.dat", np.float32, "w+", (25000, 1000))
+  #       逐塊塞 rng.random(...)（亂數，避開檔案系統壓縮），每塊 flush()
+  # 關鍵一步：卸載再掛回，否則讀到的是 page cache，看起來一切正常
+  hdiutil detach /tmp/memmapfull && hdiutil attach /tmp/small.dmg -mountpoint /tmp/memmapfull
+  # 讀回：逐塊比對 md5（用同一個 seed 重算期望值，別把期望值寫在同一顆滿掉的磁碟上）
+  ```
+
+  **第三行的「卸載再掛回」不是收尾動作，是整個實驗的關鍵**——不清 page cache 的話，讀回來的是還沒落盤的那份記憶體副本，四個步驟會全部「通過」，於是這個坑看起來不存在。
+
+  </details>
+
 - **規則**：**建立 memmap 之前先檢查可用空間**，不足就 raise（`src/recsys_tfb/io/disk_matrix.py` 的 `require_free_space`；需求量已知＝`列數 × 欄數 × itemsize`）。訊息要含**需求量、可用量、檔案落點**——落點是必要的，因為矩陣落在專案根目錄底下，那常常不是操作者正在盯的那顆磁碟。有 `os.posix_fallocate` 的平台再加一道（它真的把 block 配出來，不夠會當場 `ENOSPC`），但**那是加分不是主力**：**macOS 沒有這個 API**，而 macOS 就是本 repo 的開發機，所以事前檢查是每一次本機執行實際走的那條路。兩條路都丟 `OSError`／`ENOSPC`，呼叫端只要處理一種。
 
 - **驗證方式：不要測「磁碟真的滿了」。** 上面第 ①–③ 步已經證明那個情境**在程式內偵測不到**——測試會綠，而綠的原因正是 bug 本身。要測的是**閘門會擋**：宣告一個大於可用空間的形狀，斷言它 raise、且**目錄裡沒有留下任何檔案**。這個測試的變異檢查有個容易看走眼的地方：拿掉閘門之後它必須紅在「**DID NOT RAISE**」，不是紅在 numpy 的 `OverflowError`——形狀開太大（例如 `2**40 × 2**20`）會先炸在型別轉換，那是紅對了答案、錯了理由，換一個磁碟裝不下但 numpy 映得出來的形狀（例如 512 GiB）才真的踩到 sparse file 那條路。範例：`tests/test_io/test_disk_matrix.py::TestOpenDiskMatrix::test_refuses_before_creating_anything`。

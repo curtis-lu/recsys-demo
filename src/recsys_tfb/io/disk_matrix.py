@@ -74,8 +74,21 @@ def require_free_space(directory: Path, n_bytes: int, label: str) -> None:
     The message names the requirement, what is actually there, and *which*
     directory — the matrix lands under the project root, which on a dev box is
     routinely not the volume the operator is watching.
+
+    ``directory`` need not exist yet. Free space is read from its nearest
+    existing ancestor, which is the same filesystem, so the gate can run
+    *before* anything is created — including the scratch directory itself. Ask
+    ``shutil.disk_usage`` about a missing path and it raises ``FileNotFoundError``,
+    which is what would otherwise force a ``mkdir`` ahead of the check and
+    leave an empty directory behind on every refusal.
     """
-    free = shutil.disk_usage(directory).free
+    probe = directory
+    while not probe.exists():
+        parent = probe.parent
+        if parent == probe:  # reached the filesystem root without finding one
+            break
+        probe = parent
+    free = shutil.disk_usage(probe).free
     if free >= n_bytes:
         return
     raise OSError(
@@ -98,20 +111,34 @@ def _preallocate(fh, n_bytes: int) -> None:
     the one every local run takes. ``truncate`` only sets the size (the file
     stays sparse), which is why :func:`require_free_space` is the guard and
     ``posix_fallocate`` is the bonus, not the other way round.
+
+    Never sizes the file at zero: ``mmap`` refuses an empty file, so a matrix
+    with no rows would raise where ``np.empty`` returns a valid ``(0, n)``
+    array. One padding byte keeps the zero-row case on the same mapped path as
+    every other size rather than earning a branch of its own.
     """
+    size = max(n_bytes, 1)
     if hasattr(os, "posix_fallocate"):
-        os.posix_fallocate(fh.fileno(), 0, n_bytes)
+        os.posix_fallocate(fh.fileno(), 0, size)
     else:
-        fh.truncate(n_bytes)
+        fh.truncate(size)
 
 
 def open_disk_matrix(
-    shape: tuple, dtype: np.dtype, label: str, root: Path | None = None,
+    shape: tuple[int, int], dtype: np.dtype, label: str,
 ) -> np.memmap:
     """A zero-filled, writable matrix of ``shape`` mapped from a scratch file.
 
-    Drop-in for ``np.empty(shape, dtype)``: the result indexes and slices like
-    any 2-D array, which is the whole contract its consumers rely on.
+    Drop-in for ``np.empty(shape, dtype)``, zero rows included: the result
+    indexes and slices like any 2-D array, which is the whole contract its
+    consumers rely on.
+
+    ``label`` names the matrix in the log line and in the refusal message, and
+    is also the scratch file's name prefix — so give it something that reads
+    as an owner, not a sentence. Tests point the whole module at a temporary
+    directory by patching :data:`SCRATCH_ROOT`, the same way they lower
+    ``STREAM_BATCH_BYTES``; there is deliberately no ``root=`` parameter that
+    only tests would ever pass.
 
     **The file is unlinked as soon as it is mapped.** POSIX keeps the inode
     alive for the mapping, so the array stays fully usable while the name is
@@ -126,11 +153,14 @@ def open_disk_matrix(
     cannot hold the matrix — see :func:`require_free_space` for why silence
     here is worse than failure.
     """
-    root = SCRATCH_ROOT if root is None else Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-
+    root = SCRATCH_ROOT
     n_bytes = int(np.prod(shape)) * dtype.itemsize
+
+    # The gate runs before the directory exists, not after: a refusal must
+    # cost nothing, and creating the scratch root first would leave one behind
+    # on every run that could not fit.
     require_free_space(root, n_bytes, label)
+    root.mkdir(parents=True, exist_ok=True)
 
     fd, name = tempfile.mkstemp(dir=str(root), prefix=f"{label}-", suffix=".dat")
     try:

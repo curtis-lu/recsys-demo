@@ -1418,8 +1418,10 @@ class TestHivePartitionedCacheRoot:
 # Disk-backed matrix (#285) — the same bytes, mapped from a file
 #
 # HPO holds the val matrix for the whole search (37-89 GiB in production), so
-# it reads with ``on_disk=True``. These pin that the flag changes *where the
-# bytes live* and nothing else: same values, same dtype, same batching.
+# it reads with ``on_disk_label=...``. These pin that the parameter changes
+# *where the bytes live* and nothing else: same values, same dtype, same
+# batching. The label is what an operator reads if the disk is too small, so
+# production passes ``"hpo_val_matrix"``; these pass ``"unit"``.
 #
 # The scratch root is redirected the same way ``STREAM_BATCH_BYTES`` is — by
 # patching the module attribute the allocator reads at call time — so the API
@@ -1447,7 +1449,7 @@ class TestOnDiskMatrix:
         in_memory, y_m, g_m = extract_Xy_with_groups(
             handle, _wide_meta(), _WIDE_PARAMS)
         on_disk, y_d, g_d = extract_Xy_with_groups(
-            handle, _wide_meta(), _WIDE_PARAMS, on_disk=True)
+            handle, _wide_meta(), _WIDE_PARAMS, on_disk_label="unit")
 
         assert on_disk.dtype == in_memory.dtype
         assert np.array_equal(on_disk, in_memory)
@@ -1463,7 +1465,7 @@ class TestOnDiskMatrix:
 
         X, _, _ = extract_Xy_with_groups(
             _make_handle(tmp_path, _wide_df(n_rows=9)), _wide_meta(),
-            _WIDE_PARAMS, on_disk=True)
+            _WIDE_PARAMS, on_disk_label="unit")
 
         assert isinstance(X, np.memmap)
 
@@ -1482,7 +1484,7 @@ class TestOnDiskMatrix:
         monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 100)
         calls = _spy_on_reads(monkeypatch)
         many, _, _ = extract_mod.extract_Xy_with_groups(
-            handle, _wide_meta(), _WIDE_PARAMS, on_disk=True)
+            handle, _wide_meta(), _WIDE_PARAMS, on_disk_label="unit")
 
         assert calls[0]["n_batches"] > 30
         assert many.tobytes() == one_shot.tobytes()
@@ -1507,7 +1509,7 @@ class TestOnDiskMatrix:
 
         X, _, _ = extract_Xy_with_groups(
             _make_handle(tmp_path, _wide_df(n_rows=9)), _wide_meta(),
-            _WIDE_PARAMS, on_disk=True)
+            _WIDE_PARAMS, on_disk_label="unit")
 
         assert list(scratch.rglob("*")) == []
         assert X.shape == (9, 7)

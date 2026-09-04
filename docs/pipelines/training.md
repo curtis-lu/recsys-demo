@@ -766,6 +766,13 @@ batch 由 `PREDICT_BATCH_BYTES` = 64 MiB 除以欄寬決定列數）。矩陣的
 最後一列的矩陣**比這台機器的實體記憶體還大**，仍然跑完：同樣形狀若配在 heap 上，需要的是
 24.2 GiB 的 anonymous memory，機器上只有 16 GiB。
 
+⚠ **這張表是一次性的手動量測，不是回歸測試守著的數字。** 沒有任何測試會在它失效時轉紅——
+會轉紅的是「predict 確實分批」與「矩陣確實是 mapping」那兩個結構性斷言
+（`tests/test_pipelines/test_training/test_hpo_scoring.py`、`tests/test_io/test_disk_matrix.py`）。
+計時／記憶體斷言在 CI 上會隨負載誤紅，而常誤紅的測試最後一定被加 skip（同 known-pitfalls §20 的理由）。
+**所以要引用就自己重跑一次**，也別把它當成「memmap 一般而言多快」的通則——它只描述上面那台機器
+那一天的那個形狀（教訓見 known-pitfalls §4）。
+
 ⚠ **脫鉤的是矩陣，不是「HPO 從此與列數無關」。** 每列仍有幾個常駐陣列——`y_val`、`groups_val`、
 （`macro_per_item_map` 時的）`items_val`，以及每個 trial 的預測值——它們都還是線性的，
 而且本來就是。差別在係數：一列的矩陣是 `欄數 × itemsize`（1,000 欄 float32 ＝ 4,000 B），
