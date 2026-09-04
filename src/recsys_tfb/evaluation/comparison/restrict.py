@@ -41,11 +41,18 @@ def restrict_to_common(
     common_entities, common_items = common_universe(a, b, entity_cols, item_col)
 
     spark = a.sparkSession
-    entity_df = spark.createDataFrame(list(common_entities), entity_cols)
     item_df = spark.createDataFrame([(i,) for i in common_items], [item_col])
 
     def _restrict_and_rank(df: SparkDataFrame) -> SparkDataFrame:
-        df = df.join(F.broadcast(entity_df), on=entity_cols, how="inner")
+        # No ``F.broadcast`` on the entity side. That hint does not advise
+        # Spark, it overrides ``spark.sql.autoBroadcastJoinThreshold`` — so on
+        # an entity universe too large to broadcast it still forces the driver
+        # to assemble the whole table and ship a copy to every executor. Let
+        # Spark pick from the real size. ``left_semi`` restricts without adding
+        # columns, so ``df``'s schema is untouched. The item join keeps its
+        # hint: that universe is bounded by config. See
+        # ``alignment.common_universe`` for the full rule.
+        df = df.join(common_entities, on=entity_cols, how="left_semi")
         df = df.join(F.broadcast(item_df), on=item_col, how="inner")
         if rank_col in df.columns:
             df = df.drop(rank_col)

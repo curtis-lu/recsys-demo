@@ -117,3 +117,43 @@ def test_a_preserves_existing_label(a_df, b_df, label_table):
     a_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in a_c.collect()}
     # A's c1,p1 label was 1 in source fixture — preserved (not re-joined)
     assert a_labels[("c1", "p1")] == 1
+
+
+def _join_lines(df) -> list[str]:
+    plan = df._jdf.queryExecution().executedPlan().toString()
+    return [ln.strip() for ln in plan.splitlines() if "Join" in ln]
+
+
+def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
+    """Spark picks the entity join strategy; the item join is still forced (#275).
+
+    ``F.broadcast()`` is not a hint Spark may decline — it overrides
+    ``spark.sql.autoBroadcastJoinThreshold`` outright. So switching the
+    threshold off (-1) separates the two cases in one plan: a join that still
+    comes out ``BroadcastHashJoin`` is being forced, and one that falls back to
+    ``SortMergeJoin`` is being chosen.
+
+    The item universe is bounded by config (invariant A3 declares it in
+    ``schema.categorical_values``), so forcing its broadcast is correct and
+    must stay. The entity universe is discovered from the data and has no
+    such bound, so its strategy must be chosen, not forced. See
+    ``evaluation/comparison/alignment.py`` for the full rule.
+    """
+    old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    try:
+        a_common, _ = restrict_to_common(a_df, b_df, label_table, _params())
+        joins = _join_lines(a_common)
+    finally:
+        spark.conf.set("spark.sql.autoBroadcastJoinThreshold", old)
+
+    entity_joins = [ln for ln in joins if "LeftSemi" in ln]
+    item_joins = [ln for ln in joins if "prod_name" in ln and "Inner" in ln]
+
+    assert entity_joins, f"no entity join in plan: {joins}"
+    assert not any("BroadcastHashJoin" in ln for ln in entity_joins), \
+        f"entity join is still forced to broadcast: {entity_joins}"
+
+    assert item_joins, f"no item join in plan: {joins}"
+    assert all("BroadcastHashJoin" in ln for ln in item_joins), \
+        f"item join lost its broadcast hint (bounded universe — keep it): {item_joins}"
