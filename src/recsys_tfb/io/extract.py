@@ -637,8 +637,23 @@ def _stream_matrix(
 
     On 150,000 rows x 1,000 float32 feature columns (measured 2026-09-04 on
     macOS arm64, 8 CPU / 16 GB, pyarrow 14.0.1 / pandas 1.5.3 / numpy 1.25.0;
-    median of 5, same process): the replaced path takes 3.472s and this takes
-    0.467s (7.4x), and ``md5`` over the matrix bytes is identical.
+    median of 5, same process), ``md5`` over the matrix bytes identical either
+    way:
+
+      one flat file                    3.472s -> 0.467s   (7.4x)
+      hive-partitioned directory       1.533s -> 0.450s   (3.4x)
+
+    **Quote the second row.** The training cache is the partitioned tree
+    (``populate_cache_from_hive``); the flat file is a test fixture's shape and
+    nothing else. The replaced path is the half that differs — ``pq.read_table``
+    is more than twice as fast over the partitioned layout — while this one
+    costs the same either way, which is what a pre-allocated matrix filled batch
+    by batch should look like.
+
+    Neither row is the reason the change exists. The reason is that at
+    24,000,000 x 1,000 the replaced path needs an allocation the driver cannot
+    serve at all, and no speed measured at 150,000 rows says anything about
+    that.
 
     Deferred identity categoricals are encoded **per batch** into their matrix
     column. The whole-frame spelling assigned integer codes back into a wide

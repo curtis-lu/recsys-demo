@@ -694,6 +694,12 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 **預先配置**宣告型別的矩陣，再用 pyarrow 逐 batch 填進各自的列區間
 （`src/recsys_tfb/io/extract.py` 的 `_stream_matrix`）。峰值＝矩陣本身 ＋ 一個 batch，
 batch 由 `STREAM_BATCH_BYTES`（64 MiB）除以欄寬決定列數，不是寫死列數。
+本機實測（150,000 列 × 1,000 個 float32 特徵欄，2026-09-04，macOS arm64
+8 CPU / 16 GB，pyarrow 14.0.1，五次取中位）：**hive 分區目錄 1.533s → 0.450s（3.4x）**；
+單一平檔是 3.472s → 0.467s（7.4x），但那是測試 fixture 的形狀，**生產的 cache 是分區目錄，
+要引就引 3.4x 那個**。⚠ 這兩個數字都不是這次改動的理由——理由是 24,000,000 × 1,000 時舊路徑
+要的那塊記憶體 driver 根本配不出來，而 150,000 列上的快慢對此一句話都沒說。
+
 **這一步已經沒有 `slice_features` 與 `to_numpy` 兩個子步驟**——沒有 frame 要切，
 也沒有矩陣要攤；log 裡剩下的 `read_parquet` 就是整個建矩陣過程。
 
