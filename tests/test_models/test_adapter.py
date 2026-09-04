@@ -7,6 +7,26 @@ from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
 
+
+def _write_model_input(df, path, **kwargs):
+    """Write a fixture frame the way ``build_model_input`` writes a real one.
+
+    Since #283 every numeric feature column is cast to
+    ``dataset.numeric_feature_storage_type`` (default float32), so a fixture
+    that leaves them float64 is not a shape the training read can ever meet —
+    invariant B9 rejects it before reading a row. Casting here rather than in
+    each frame literal keeps the fixtures readable and keeps "what a
+    model_input looks like" in one place.
+    """
+    import pandas as pd
+
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_float_dtype(out[col]):
+            out[col] = out[col].astype("float32")
+    out.to_parquet(path, **kwargs)
+
+
 @pytest.fixture
 def tiny_data():
     rng = np.random.RandomState(42)
@@ -174,8 +194,8 @@ def test_lightgbm_prepare_train_inputs_writes_bins(tmp_path):
     )
     train_dir = tmp_path / "train.parquet"
     dev_dir = tmp_path / "dev.parquet"
-    df_tr.to_parquet(train_dir, engine="pyarrow")
-    df_dev.to_parquet(dev_dir, engine="pyarrow")
+    _write_model_input(df_tr, train_dir, engine="pyarrow")
+    _write_model_input(df_dev, dev_dir, engine="pyarrow")
 
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
@@ -220,8 +240,8 @@ def test_lightgbm_prepare_train_inputs_cache_hit(tmp_path, monkeypatch):
     df_dev = df_tr.copy()
     train_dir = tmp_path / "tr.parquet"
     dev_dir = tmp_path / "dev.parquet"
-    df_tr.to_parquet(train_dir)
-    df_dev.to_parquet(dev_dir)
+    _write_model_input(df_tr, train_dir)
+    _write_model_input(df_dev, dev_dir)
 
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
@@ -272,8 +292,8 @@ def test_lightgbm_prepare_train_inputs_partial_cache_rebuild(tmp_path):
     )
     train_dir = tmp_path / "tr.parquet"
     dev_dir = tmp_path / "dev.parquet"
-    df.to_parquet(train_dir)
-    df.to_parquet(dev_dir)
+    _write_model_input(df, train_dir)
+    _write_model_input(df, dev_dir)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -418,8 +438,8 @@ def test_lightgbm_prepare_passes_categorical_feature(tmp_path, monkeypatch):
     )
     train_dir = tmp_path / "tr.parquet"
     dev_dir = tmp_path / "dev.parquet"
-    df.to_parquet(train_dir)
-    df.to_parquet(dev_dir)
+    _write_model_input(df, train_dir)
+    _write_model_input(df, dev_dir)
 
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],  # prod_name index = 1
@@ -500,7 +520,7 @@ def test_prepare_train_inputs_binary_family_subpath(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -525,7 +545,7 @@ def test_prepare_train_inputs_ranking_sets_group(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -560,7 +580,7 @@ def test_prepare_train_inputs_both_families_coexist(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -618,7 +638,7 @@ def test_prepare_train_inputs_binary_bin_carries_feature_names(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -641,7 +661,7 @@ def test_prepare_train_inputs_ranking_bin_carries_feature_names(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     prep_meta = {
         "feature_columns": ["feat_a", "prod_name"],
         "categorical_columns": ["prod_name"],
@@ -691,7 +711,7 @@ def test_feature_selection_isolates_bin_from_full_feature_cache(tmp_path):
 
     df_tr, df_dev = _ranking_frames()
     tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-    df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
     cache = tmp_path / "variant"
 
     # full-feature run (no selection) -> canonical path
@@ -742,7 +762,7 @@ class TestPrepareTrainInputsWeight:
         from recsys_tfb.io.handles import ParquetHandle
         df_tr, df_dev = _weight_frames()
         tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-        df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
         cache = tmp_path / "variant"
         LightGBMAdapter().prepare_train_inputs(
             ParquetHandle(str(tr)), ParquetHandle(str(dv)),
@@ -758,7 +778,7 @@ class TestPrepareTrainInputsWeight:
         from recsys_tfb.io.handles import ParquetHandle
         df_tr, df_dev = _weight_frames()
         tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-        df_tr.to_parquet(tr); df_dev.to_parquet(dv)
+        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
         cache = tmp_path / "variant"
         LightGBMAdapter().prepare_train_inputs(
             ParquetHandle(str(tr)), ParquetHandle(str(dv)),

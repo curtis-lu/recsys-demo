@@ -679,7 +679,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
-- **`prepare_lgb_train_inputs` 的 `to_numpy` 是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
+- **`prepare_lgb_train_inputs` 的建矩陣步驟是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
 - HPO study 不支援同一 `search_id` 由多個 training processes 同時寫入；應避免並行啟動相同搜尋。
 - HPO resume 可延續 completed trials，但重新建立的 TPE sampler 狀態不保證與完全不中斷的單次執行 bitwise identical。
 - `random_seed` 會影響模型與 HPO，但目前不納入 `model_version` 或 `search_id`。
@@ -688,31 +688,52 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - calibration 只能改善 score 的機率解讀，不保證提升排序指標；對 LTR score 的機率化也需以獨立資料與業務用途驗證。
 - training 成功不代表模型已核准上線。仍需檢查 test 指標、per-item 表現、診斷與業務限制，再人工 promotion。
 
-### 9.1 `to_numpy` 這一步的峰值與兩個觀測陷阱
+### 9.1 建矩陣這一步的峰值，以及兩個觀測陷阱
 
-**陷阱一：`nbytes` 會低報，觀測性在這裡是瞎的。** `src/recsys_tfb/io/extract.py:321` 的
-`log_data_volume(logger, "extract_Xy.X", X)` 問的是 numpy「這張矩陣多大」，而 numpy 對 `object` 矩陣
-**只算指標、不算指向的物件**。實測中 object 與 float64 兩種矩陣回報的數字完全一樣（皆 0.49 GiB @ 100k 列），
-真實記憶體卻差 4.3 倍——生產規模上它會把 95.9 GiB 報成 22.4 GiB。**不要用這行 log 判斷記憶體是否安全。**
+**現況（#284 起）：矩陣不再是「攤平一個 frame」攤出來的。** `extract_Xy` 先取列數、
+**預先配置**宣告型別的矩陣，再用 pyarrow 逐 batch 填進各自的列區間
+（`src/recsys_tfb/io/extract.py` 的 `_stream_matrix`）。峰值＝矩陣本身 ＋ 一個 batch，
+batch 由 `STREAM_BATCH_BYTES`（64 MiB）除以欄寬決定列數，不是寫死列數。
+本機實測（150,000 列 × 1,000 個 float32 特徵欄，2026-09-04，macOS arm64
+8 CPU / 16 GB，pyarrow 14.0.1，五次取中位）：**hive 分區目錄 1.533s → 0.450s（3.4x）**；
+單一平檔是 3.472s → 0.467s（7.4x），但那是測試 fixture 的形狀，**生產的 cache 是分區目錄，
+要引就引 3.4x 那個**。⚠ 這兩個數字都不是這次改動的理由——理由是 24,000,000 × 1,000 時舊路徑
+要的那塊記憶體 driver 根本配不出來，而 150,000 列上的快慢對此一句話都沒說。
+
+**這一步已經沒有 `slice_features` 與 `to_numpy` 兩個子步驟**——沒有 frame 要切，
+也沒有矩陣要攤；log 裡剩下的 `read_parquet` 就是整個建矩陣過程。
+
+下面兩個陷阱仍然要知道，因為 **`pdf_to_X`**（inference 逐 chunk、training 逐 partition
+的 test 評估走它）走的仍是「切 frame 再 `.values`」那條路。
+
+**陷阱一：`nbytes` 會低報，觀測性在這裡是瞎的。** `log_data_volume(logger, "extract_Xy.X", X)`
+問的是 numpy「這張矩陣多大」，而 numpy 對 `object` 矩陣**只算指標、不算指向的物件**。
+實測中 object 與 float64 兩種矩陣回報的數字完全一樣（皆 0.49 GiB @ 100k 列），真實記憶體卻差
+4.3 倍——生產規模上它會把 95.9 GiB 報成 22.4 GiB。**不要用這行 log 判斷記憶體是否安全。**
+（`extract_Xy` 這條路徑上 object 矩陣已不可能出現：B9 要求特徵欄逐欄等於宣告的儲存型別，
+矩陣的 dtype 由那個宣告配置，跟欄位型別組合無關。走 `pdf_to_X` 的路徑沒有這個保護。）
 
 **陷阱二：非數值欄不只是慢和肥，它根本不合法。** LightGBM 拿到 object 矩陣後會嘗試
 `np.asarray(mat, dtype=np.float32)`（`lightgbm/basic.py:192` 的 `_np2d_to_np1d`），碰到真的是字串的格子直接
 `ValueError: could not convert string to float`。**記憶體不足只是先發生的症狀**，病根是非數值欄進了特徵集
 （由 dataset 的 B6 閘擋，見 [`dataset.md` §8.1](dataset.md)）。
 
-**修掉非數值欄是必要條件，不是充分條件。** 2026-07 那次事故的實測：移除文字欄後需求仍是 **54.7 GiB**，
-而從 log 框出的機器上限落在 **48.3 GiB 與致死點之間**——很可能還是會死。若仍不足，後續選項（成本由低到高）：
+**下表是 2026-07 事故當時的選項評估，留作推導紀錄——最後兩列已經是現況。**
+那次的實測：移除文字欄後需求仍是 **54.7 GiB**，而從 log 框出的機器上限落在
+**48.3 GiB 與致死點之間**。
 
-| 做法 | `to_numpy` 時的峰值 | 代價 |
+| 做法 | 建矩陣時的峰值 | 現況 |
 |---|---|---|
-| 現況（有非數值欄） | ~142 GiB | — |
-| 移除非數值欄 | ~54.7 GiB | 改 config、重建 dataset |
-| ＋ 提早釋放 `pdf`、拿掉多餘的 `.copy()` | ~38.7 GiB | 改 `extract_Xy` 的取值順序（`extract.py:258` 的 `.copy()` 是多餘的：pandas 1.5.3 的 `pdf[feature_cols]` 已回傳獨立副本） |
-| ＋ 矩陣改用 4 bytes 格子（`to_numpy(dtype=np.float32)`） | ~27.5 GiB | ⚠ int64 欄若有值 > 2²⁴ 會失真，套用前必須驗值域 |
-| 讓 LightGBM 直接讀 Arrow，不經過 pandas／numpy | ~18.5 GiB | 需要 `cffi`（**不是** pyarrow 或 lightgbm 的相依套件，生產環境未必有） |
-| 一次只讀一小段、邊讀邊餵（`lightgbm.Sequence`） | ~4 GiB | 需自寫約 25 行的 `ParquetSequence`；只需要 numpy |
+| 當時的現況（有非數值欄） | ~142 GiB | 由 B6 擋掉（2026-07-11） |
+| 移除非數值欄 | ~54.7 GiB | 同上 |
+| ＋ 提早釋放 `pdf`、拿掉多餘的 `.copy()` | ~38.7 GiB | **已無此物**：#284 之後沒有 `pdf`，也沒有那個 `.copy()` |
+| ＋ 矩陣改用 4 bytes 格子 | ~27.5 GiB | **已做**：儲存型別由 `dataset.numeric_feature_storage_type` 宣告（預設 float32），dataset 端就收斂完（#283），training 端只是照著配置——⚠ 當時標註的「int64 欄若有值 > 2²⁴ 會失真」由 B8 閘門負責，見 `dataset.md` |
+| 讓 LightGBM 直接讀 Arrow，不經過 pandas／numpy | ~18.5 GiB | 未做：需要 `cffi`（**不是** pyarrow 或 lightgbm 的相依套件，生產環境未必有） |
+| 一次只讀一小段、邊讀邊餵 | ~4 GiB | **已做（等價）**：#284 的逐 batch 填入拿到同樣的結構，且不需要 `lightgbm.Sequence`——矩陣仍是一次配置好的 numpy 陣列，LightGBM 那側不用改 |
 
 最後一列的 `~4 GiB` 裡有 2.8 GiB 是 LightGBM 分箱後的資料集本身（要存下來的 `train.bin`），那是跑不掉的下限。
+**#284 之後 driver 上仍然同時存在整張矩陣**（LightGBM 的 `Dataset` 建構要它），所以那個 `~4 GiB`
+指的是「讀取過程不再額外複製」，不是「矩陣本身也不用進記憶體」。
 
 上表的數字是 2026-07 生產事故的實測與外推，**其推導與未證實之處**見
 [2026-07 調查紀錄](../notes/2026-07-11-training-oom-investigation.md)。

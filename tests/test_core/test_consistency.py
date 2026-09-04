@@ -1126,6 +1126,49 @@ class TestNonnumericFeatureErrors:
         assert "aaa" in errs[0] and "zzz" in errs[1]
 
 
+# --- B9: model_input feature columns are all the declared storage type ---
+
+from recsys_tfb.core.consistency import feature_storage_type_errors
+
+
+class TestFeatureStorageTypeErrors:
+    def test_homogeneous_declared_type_is_ok(self):
+        assert feature_storage_type_errors(
+            {"a": "float32", "b": "float32"}, "float32") == []
+
+    def test_empty_is_ok(self):
+        assert feature_storage_type_errors({}, "float32") == []
+
+    def test_one_wider_column_is_flagged(self):
+        errs = feature_storage_type_errors(
+            {"a": "float32", "b": "int64"}, "float32")
+        assert len(errs) == 1
+        assert "'b'" in errs[0] and "int64" in errs[0] and "float32" in errs[0]
+
+    def test_homogeneous_but_undeclared_type_is_flagged(self):
+        # Nothing collides and nothing is lost — no value-level gate can see
+        # this one. It just costs twice the memory the declaration promised.
+        errs = feature_storage_type_errors(
+            {"a": "float64", "b": "float64"}, "float32")
+        assert len(errs) == 2
+
+    def test_declared_float64_admits_float64(self):
+        assert feature_storage_type_errors(
+            {"a": "float64"}, "float64") == []
+
+    def test_multiple_offenders_sorted_by_column(self):
+        errs = feature_storage_type_errors(
+            {"zzz": "int64", "aaa": "int32", "ok": "float32"}, "float32")
+        assert len(errs) == 2
+        assert "aaa" in errs[0] and "zzz" in errs[1]
+
+    def test_remedy_is_a_rebuild_not_a_config_edit(self):
+        # The config is not wrong when B9 fires — the parquet is stale. Telling
+        # the reader to widen the declaration would make the message wrong.
+        errs = feature_storage_type_errors({"a": "float64"}, "float32")
+        assert "Rebuild the dataset" in errs[0]
+
+
 # --- B7: a carry column that also lives in feature_table must be dropped ---
 
 from recsys_tfb.core.consistency import carry_column_collision_errors

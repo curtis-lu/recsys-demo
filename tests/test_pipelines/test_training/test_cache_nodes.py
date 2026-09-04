@@ -397,6 +397,7 @@ class TestRejectsNonSparkInput:
 
 class TestPrepareLgbTrainInputs:
     def test_prepare_node_returns_two_lgb_handles(self, tmp_path):
+        import numpy as np
         import pandas as pd
         from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
         from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
@@ -406,7 +407,8 @@ class TestPrepareLgbTrainInputs:
                 "cust_id": ["c1", "c2", "c3", "c4"],
                 "snap_date": pd.to_datetime(["2025-01-31"] * 4),
                 "prod_name": ["fund", "ccard", "fund", "ccard"],
-                "feat_a": [1.0, 2.0, 3.0, 4.0],
+                # float32 like build_model_input writes it (#283 / B9)
+                "feat_a": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
                 "label": [0, 1, 0, 1],
             }
         )

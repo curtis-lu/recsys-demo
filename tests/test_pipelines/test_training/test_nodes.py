@@ -129,7 +129,16 @@ def synthetic_model_inputs(tmp_path):
                     "in_amt_sum_l1m": rng.uniform(0, 50),
                     "out_amt_sum_l1m": rng.uniform(0, 30),
                 })
-        return pd.DataFrame(rows)
+        frame = pd.DataFrame(rows)
+        # build_model_input casts every numeric feature column to the declared
+        # storage type (#283), so a model_input fixture that stays float64 is a
+        # shape the training read never meets — B9 rejects it. Cast the frame
+        # itself, not just the parquet, so the copy the tests compare metrics
+        # against holds the same values the model was trained on.
+        for col in frame.columns:
+            if pd.api.types.is_float_dtype(frame[col]):
+                frame[col] = frame[col].astype("float32")
+        return frame
 
     train_df = make_model_input("2024-01-31", 30)      # 120 rows
     train_dev_df = make_model_input("2024-02-29", 10)   # 40 rows
