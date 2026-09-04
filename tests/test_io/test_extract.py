@@ -464,7 +464,7 @@ class TestRowWeightsObservability:
         warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("matched 0 of 4 rows" in m for m in warns)
         # the diagnostic surfaces the real data keys so a mismatch is obvious
-        assert any("sample data keys (encoded)=" in m for m in warns)
+        assert any("sample data keys=" in m for m in warns)
 
 
 from recsys_tfb.io.handles import ParquetHandle
@@ -557,55 +557,74 @@ class TestExtractWithWeights:
         np.testing.assert_array_equal(w, np.array([1.0, 1.0, 4.0, 1.0]))
 
 
-from recsys_tfb.io.extract import translate_weight_table
+from recsys_tfb.io.extract import nameable_weight_entries, weight_key_decode_map
 
 
-class TestTranslateWeightTable:
-    # category_mappings: code = list index. seg "mass"->0, "hnw"->1, "aff"->2.
+class TestNameableWeightEntries:
+    """The lookup happens in the config's own vocabulary, so an entry only has
+    to *name* a real category. This split reports the ones that do not."""
+
+    # code = list index; the decode map holds the feature categorical only.
     CM = {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}
     ID = ["snap_date", "cust_id", "prod_name"]
 
-    def test_feature_component_translated_to_code(self):
-        t, unk = translate_weight_table(
-            {"hnw": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
-        assert t == {"1": 2.0} and unk == {}
+    def _dm(self, keys):
+        return weight_key_decode_map(keys, self.CM, self.ID)
 
-    def test_identity_component_passthrough(self):
-        t, unk = translate_weight_table(
-            {"ccard_ins": 3.0}, ["prod_name"], self.CM, self.ID)
+    def test_known_feature_value_is_nameable(self):
+        keys = ["cust_segment_typ_2a"]
+        t, unk = nameable_weight_entries({"hnw": 2.0}, keys, self._dm(keys))
+        assert t == {"hnw": 2.0} and unk == {}
+
+    def test_identity_component_is_never_checked(self):
+        """``prod_name`` is stored raw, so its values are not drawn from a
+        vocabulary this function can check — anything passes."""
+        keys = ["prod_name"]
+        t, unk = nameable_weight_entries({"ccard_ins": 3.0}, keys, self._dm(keys))
         assert t == {"ccard_ins": 3.0} and unk == {}
 
     def test_mixed_composite_feature_plus_identity(self):
-        t, unk = translate_weight_table(
-            {"mass|ccard_ins": 2.0}, ["cust_segment_typ_2a", "prod_name"],
-            self.CM, self.ID)
-        assert t == {"0|ccard_ins": 2.0} and unk == {}
+        keys = ["cust_segment_typ_2a", "prod_name"]
+        t, unk = nameable_weight_entries(
+            {"mass|ccard_ins": 2.0}, keys, self._dm(keys))
+        assert t == {"mass|ccard_ins": 2.0} and unk == {}
 
     def test_unknown_feature_value_dropped_and_recorded(self):
-        t, unk = translate_weight_table(
-            {"afflunet": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
+        keys = ["cust_segment_typ_2a"]
+        t, unk = nameable_weight_entries({"afflunet": 2.0}, keys, self._dm(keys))
         assert t == {} and unk == {"cust_segment_typ_2a": ["afflunet"]}
 
     def test_arity_mismatch_passthrough(self):
-        t, unk = translate_weight_table(
-            {"mass|x|y": 2.0}, ["cust_segment_typ_2a"], self.CM, self.ID)
+        """A9b reports arity at the config gate; here the entry is kept so the
+        zero-match diagnostic is what speaks, not a second arity message."""
+        keys = ["cust_segment_typ_2a"]
+        t, unk = nameable_weight_entries({"mass|x|y": 2.0}, keys, self._dm(keys))
         assert t == {"mass|x|y": 2.0} and unk == {}
 
     def test_partial_bad_composite_dropped_correctly(self):
-        # First component unknown, second is identity — key must be dropped
-        # entirely (no partial code leaks into the translated table).
-        t, unk = translate_weight_table(
-            {"bad_seg|ccard_ins": 2.0, "mass|fund": 3.0},
-            ["cust_segment_typ_2a", "prod_name"], self.CM, self.ID)
-        assert t == {"0|fund": 3.0}
+        # First component unknown, second is identity — the whole key goes.
+        keys = ["cust_segment_typ_2a", "prod_name"]
+        t, unk = nameable_weight_entries(
+            {"bad_seg|ccard_ins": 2.0, "mass|fund": 3.0}, keys, self._dm(keys))
+        assert t == {"mass|fund": 3.0}
         assert unk == {"cust_segment_typ_2a": ["bad_seg"]}
 
 
-class TestRowWeightsEncodeAware:
-    # cust_segment_typ_2a is an encoded feature: pdf stores int codes.
-    def _pdf(self):
+class TestRowWeightsDecodeAware:
+    """End-to-end through ``_row_weights_from_pdf``: config in category names,
+    parquet in codes.
+
+    The dtype is parametrized because it is what #297 turned on. This fixture
+    used to hold plain ``int`` codes — the pre-#283 shape — so it stayed green
+    the whole time the real ``float32`` parquet matched nothing.
+    """
+
+    DTYPES = [np.int64, np.float32, np.float64]
+
+    def _pdf(self, dtype):
         return pd.DataFrame({
-            "cust_segment_typ_2a": [0, 1, 0, 2],  # codes for mass/hnw/mass/aff
+            # codes for mass/hnw/mass/aff
+            "cust_segment_typ_2a": np.array([0, 1, 0, 2], dtype=dtype),
             "prod_name": ["a", "a", "b", "a"],
             "label": [1, 0, 1, 0],
         })
@@ -621,17 +640,19 @@ class TestRowWeightsEncodeAware:
         # identity cats stay raw; feature cat carries a code mapping.
         return {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}}
 
-    def test_feature_key_translated_and_applied(self):
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_feature_key_decoded_and_applied(self, dtype):
         from recsys_tfb.io.extract import _row_weights_from_pdf
         w = _row_weights_from_pdf(
-            self._pdf(), self._params({"hnw": 5.0}, ["cust_segment_typ_2a"]),
+            self._pdf(dtype), self._params({"hnw": 5.0}, ["cust_segment_typ_2a"]),
             self._prep())
         np.testing.assert_array_equal(w, np.array([1.0, 5.0, 1.0, 1.0]))
 
-    def test_composite_feature_plus_identity(self):
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_composite_feature_plus_identity(self, dtype):
         from recsys_tfb.io.extract import _row_weights_from_pdf
         w = _row_weights_from_pdf(
-            self._pdf(),
+            self._pdf(dtype),
             self._params({"mass|a": 2.0}, ["cust_segment_typ_2a", "prod_name"]),
             self._prep())
         np.testing.assert_array_equal(w, np.array([2.0, 1.0, 1.0, 1.0]))
@@ -640,7 +661,7 @@ class TestRowWeightsEncodeAware:
         from recsys_tfb.io.extract import _row_weights_from_pdf
         with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
             w = _row_weights_from_pdf(
-                self._pdf(),
+                self._pdf(np.float32),
                 self._params({"afflunet": 2.0}, ["cust_segment_typ_2a"]),
                 self._prep())
         np.testing.assert_array_equal(w, np.ones(4))
@@ -650,6 +671,211 @@ class TestRowWeightsEncodeAware:
         # the redundant 0-match warning must NOT also fire.
         assert not any("matched 0 of" in m for m in warns)
 
+    def test_zero_match_warning_reports_decoded_data_keys(self, caplog):
+        """The WARNING is the only runtime signal here, so both lists it prints
+        have to be in one vocabulary. Printing the stored codes (``['0.0']``)
+        against the configured names is what made #297 hard to read."""
+        from recsys_tfb.io.extract import _row_weights_from_pdf
+        params = self._params({"hnw|zzz": 2.0},
+                              ["cust_segment_typ_2a", "prod_name"])
+        with caplog.at_level(logging.WARNING, logger="recsys_tfb.io.extract"):
+            w = _row_weights_from_pdf(self._pdf(np.float32), params, self._prep())
+        np.testing.assert_array_equal(w, np.ones(4))
+        msg = next(r.getMessage() for r in caplog.records
+                   if "matched 0 of" in r.getMessage())
+        assert "mass|a" in msg and "hnw|a" in msg
+        assert "0.0" not in msg
+
+
+# ---------------------------------------------------------------------------
+# #297 — a categorical *feature* weight key is stored as a numeric code, and
+# since #283 that code is a float. The lookup decodes it back.
+# ---------------------------------------------------------------------------
+
+
+def _decode_parity_oracle(pdf, weight_keys, sample_weights, decode_map):
+    """Whole-frame decode-then-key, kept as the parity oracle for the dedup path.
+
+    Deliberately the slow, obvious spelling: decode every row, build one string
+    per row, look it up. What the implementation must match.
+    """
+    frame = pd.DataFrame({c: pdf[c] for c in weight_keys})
+    undecodable = np.zeros(len(frame), dtype=bool)
+    for col, categories in decode_map.items():
+        out = []
+        for v in frame[col].tolist():
+            try:
+                i = int(v)
+                ok = (v == i) and 0 <= i < len(categories)
+            except (TypeError, ValueError):
+                ok = False
+            out.append(categories[i] if ok else None)
+        undecodable |= np.array([v is None for v in out], dtype=bool)
+        frame[col] = out
+    keys = frame[weight_keys[0]].astype(str)
+    for k in weight_keys[1:]:
+        keys = keys.str.cat(frame[k].astype(str), sep="|")
+    w = keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
+    w[undecodable] = 1.0
+    return w
+
+
+class TestWeightKeyDecoding:
+    """The weight lookup runs in *human-readable* space, not encoded space.
+
+    ``gender`` is a declared categorical feature: ``encode_categoricals`` turns
+    ``"M"`` into code ``0``, and ``cast_numeric_features_to_storage_type``
+    (#283) then stores that code as ``float32``. Building the lookup key
+    straight off the column yields ``"0.0"``, which no configured key can name.
+    Decoding the code back to ``"M"`` is what makes the config's own vocabulary
+    the one both sides speak.
+    """
+
+    MAPPINGS = {"gender": ["M", "F"]}
+
+    def _pdf(self, dtype):
+        return pd.DataFrame({
+            "gender": np.array([0, 0, 1, 1], dtype=dtype),
+            "prod_name": ["a", "b", "a", "b"],
+        })
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32, np.int64])
+    def test_coded_feature_key_matches_regardless_of_storage_dtype(self, dtype):
+        """#297: float32 is the post-#283 shape; the int cases are pre-#283
+        datasets, which must keep working from the same code path."""
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        w = _compute_row_weights(
+            self._pdf(dtype), ["gender"], {"M": 5.0}, self.MAPPINGS)
+        np.testing.assert_array_equal(w, np.array([5.0, 5.0, 1.0, 1.0]))
+
+    def test_composite_of_decoded_feature_and_raw_identity(self):
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        w = _compute_row_weights(
+            self._pdf(np.float32), ["gender", "prod_name"],
+            {"M|b": 3.0}, self.MAPPINGS)
+        np.testing.assert_array_equal(w, np.array([1.0, 3.0, 1.0, 1.0]))
+
+    def test_identity_column_is_not_decoded(self):
+        """``prod_name`` is an identity categorical: model_input stores the raw
+        name, so it must be absent from the decode map and pass through."""
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        w = _compute_row_weights(
+            self._pdf(np.float32), ["prod_name"], {"a": 4.0}, {})
+        np.testing.assert_array_equal(w, np.array([4.0, 1.0, 4.0, 1.0]))
+
+    @pytest.mark.parametrize("bad", [-1.0, 2.0, np.nan, 0.5])
+    def test_undecodable_code_is_pinned_to_one(self, bad):
+        """``UNKNOWN_CATEGORY_CODE`` (-1), an out-of-range code, a NaN and a
+        non-integral value all name no category, so no configured weight can
+        apply to that row."""
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        pdf = pd.DataFrame({"gender": np.array([0.0, bad], dtype=np.float32)})
+        w = _compute_row_weights(pdf, ["gender"], {"M": 5.0, "F": 7.0}, self.MAPPINGS)
+        np.testing.assert_array_equal(w, np.array([5.0, 1.0]))
+
+    def test_undecodable_row_cannot_collide_with_a_literal_category_name(self):
+        """The sentinel-free reason this is safe: an undecodable row is pinned
+        to 1.0 by position, never by a stand-in string a real category could
+        also spell. A vocabulary containing ``"-1"`` and ``"nan"`` is the case
+        that would break a sentinel."""
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        mappings = {"g": ["-1", "nan", "None"]}
+        pdf = pd.DataFrame({"g": np.array([0.0, -1.0, np.nan], dtype=np.float32)})
+        w = _compute_row_weights(
+            pdf, ["g"], {"-1": 2.0, "nan": 3.0, "None": 4.0}, mappings)
+        # row 0 decodes to the category literally named "-1" -> 2.0.
+        # rows 1 and 2 carry no category at all -> 1.0, not 2.0 / 3.0.
+        np.testing.assert_array_equal(w, np.array([2.0, 1.0, 1.0]))
+
+    def test_decoded_float_column_takes_the_dedup_fast_path(self):
+        """The efficiency claim behind decoding, pinned. A float column is
+        refused the fast path on its own (0.0 / -0.0 group together but
+        stringify apart); once it is decoded, equal codes decode to equal
+        strings, so the guard must admit it. Measured 9-20x on 1M-10M rows —
+        without this the lookup builds one string per row."""
+        from recsys_tfb.io.extract import _weight_key_frame
+
+        pdf = pd.DataFrame({"gender": np.array([0.0, 1.0], dtype=np.float32)})
+        assert _weight_key_frame(pdf, ["gender"], {}) is None
+        assert _weight_key_frame(pdf, ["gender"], self.MAPPINGS) is not None
+
+
+_WEIGHT_DECODE_PARITY_CASES = {
+    "float32_codes": (
+        pd.DataFrame({"g": np.array([0, 1, 0, 1], dtype=np.float32)}),
+        ["g"], {"M": 2.0, "F": 0.5}, {"g": ["M", "F"]},
+    ),
+    "unknown_code_mixed_in": (
+        pd.DataFrame({"g": np.array([0, -1, 1, -1], dtype=np.float32)}),
+        ["g"], {"M": 2.0, "F": 0.5}, {"g": ["M", "F"]},
+    ),
+    "decoded_plus_raw_identity": (
+        pd.DataFrame({"g": np.array([0, 1, 0], dtype=np.float32),
+                      "p": ["a", "a", "b"]}),
+        ["g", "p"], {"M|a": 3.0, "F|a": 0.25}, {"g": ["M", "F"]},
+    ),
+    # the decoded column is fine, the *other* one is not string-faithful, so
+    # the frame as a whole must still fall back to the per-row build.
+    "decoded_plus_unfaithful_float": (
+        pd.DataFrame({"g": np.array([0, 1, 0, 1], dtype=np.float32),
+                      "x": np.array([0.0, -0.0, 1.0, 1.0])}),
+        ["g", "x"], {"M|0.0": 3.0, "F|-0.0": 9.0}, {"g": ["M", "F"]},
+    ),
+    "all_codes_unknown": (
+        pd.DataFrame({"g": np.array([-1, -1], dtype=np.float32)}),
+        ["g"], {"M": 2.0}, {"g": ["M", "F"]},
+    ),
+    "empty_frame": (
+        pd.DataFrame({"g": pd.Series([], dtype=np.float32)}),
+        ["g"], {"M": 2.0}, {"g": ["M", "F"]},
+    ),
+    "empty_vocabulary": (
+        pd.DataFrame({"g": np.array([-1, -1], dtype=np.float32)}),
+        ["g"], {"M": 2.0}, {"g": []},
+    ),
+}
+
+
+class TestWeightKeyDecodingParity:
+    @pytest.mark.parametrize("case", sorted(_WEIGHT_DECODE_PARITY_CASES))
+    def test_matches_whole_frame_decode(self, case):
+        from recsys_tfb.io.extract import _compute_row_weights
+
+        pdf, keys, table, decode_map = _WEIGHT_DECODE_PARITY_CASES[case]
+        got = _compute_row_weights(pdf, keys, table, decode_map)
+        want = _decode_parity_oracle(pdf, keys, table, decode_map)
+        np.testing.assert_array_equal(got, want)
+        assert got.dtype == np.float64
+
+
+class TestWeightKeyDecodeMap:
+    """Which weight-key columns are codes: declared categorical *and* not
+    identity. Identity categoricals are stored raw (deferred encoding), so
+    decoding one would corrupt a key that already matches."""
+
+    CM = {"gender": ["M", "F"], "prod_name": ["a", "b"]}
+    ID = ["snap_date", "cust_id", "prod_name"]
+
+    def test_feature_categorical_is_decoded(self):
+        from recsys_tfb.io.extract import weight_key_decode_map
+
+        assert weight_key_decode_map(["gender"], self.CM, self.ID) == {
+            "gender": ["M", "F"]}
+
+    def test_identity_categorical_is_not_decoded(self):
+        from recsys_tfb.io.extract import weight_key_decode_map
+
+        assert weight_key_decode_map(["prod_name"], self.CM, self.ID) == {}
+
+    def test_non_categorical_column_is_not_decoded(self):
+        from recsys_tfb.io.extract import weight_key_decode_map
+
+        assert weight_key_decode_map(["cust_segment_typ"], self.CM, self.ID) == {}
 
 # ---------------------------------------------------------------------------
 # B6 training-read backstop — fail fast on un-encoded non-numeric feature cols
@@ -904,7 +1130,7 @@ class TestWeightKeyFastPathGuard:
     def test_taken_for_faithful_columns(self, col):
         from recsys_tfb.io.extract import _weight_key_frame
 
-        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"]) is not None
+        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"], {}) is not None
 
     @pytest.mark.parametrize(
         "col",
@@ -918,13 +1144,13 @@ class TestWeightKeyFastPathGuard:
     def test_declined_for_unfaithful_columns(self, col):
         from recsys_tfb.io.extract import _weight_key_frame
 
-        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"]) is None
+        assert _weight_key_frame(pd.DataFrame({"k": col}), ["k"], {}) is None
 
     def test_declines_when_any_key_column_is_unfaithful(self):
         from recsys_tfb.io.extract import _weight_key_frame
 
         pdf = pd.DataFrame({"ok": ["a", "b"], "bad": [1.0, 2.0]})
-        assert _weight_key_frame(pdf, ["ok", "bad"]) is None
+        assert _weight_key_frame(pdf, ["ok", "bad"], {}) is None
 
 
 class TestZeroMatchDiagnosticKeys:

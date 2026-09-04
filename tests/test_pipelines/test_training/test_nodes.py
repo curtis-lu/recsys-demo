@@ -1057,16 +1057,19 @@ def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     """A configured weight whose key never appears in train is the finding.
 
     Nothing else in the pipeline notices: `aff` is a real category in the
-    encoding, so the translation succeeds and the weight is simply never looked
-    up. Only this report says so.
+    encoding, so the key is nameable and the weight is simply never looked up.
+    Only this report says so.
     """
+    import numpy as np
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
 
-    # train parquet: feature seg stored as int codes (0=mass,1=hnw), prod raw.
+    # train parquet in the shape build_model_input actually writes since #283:
+    # the feature categorical's code is a float (0.0=mass, 1.0=hnw), prod raw.
+    # An int fixture here is what let #297 ship green.
     pdf = pd.DataFrame({
-        "cust_segment_typ_2a": [0, 1, 0],
+        "cust_segment_typ_2a": np.array([0, 1, 0], dtype=np.float32),
         "prod_name": ["a", "a", "b"],
         "label": [1, 0, 1],
     })
@@ -1090,13 +1093,14 @@ def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
 
 
 def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
+    import numpy as np
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
 
     p = tmp_path / "train.parquet"
-    pd.DataFrame({"cust_segment_typ_2a": [0, 1], "prod_name": ["a", "a"],
-                  "label": [1, 0]}).to_parquet(p)
+    pd.DataFrame({"cust_segment_typ_2a": np.array([0, 1], dtype=np.float32),
+                  "prod_name": ["a", "a"], "label": [1, 0]}).to_parquet(p)
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
               "item": "prod_name", "label": "label"}},
               "training": {"sample_weight_keys": ["cust_segment_typ_2a"],

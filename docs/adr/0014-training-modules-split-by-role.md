@@ -576,6 +576,16 @@ cust_id_col = entity_cols[0]
   `models/feature_view.py`、`pipelines/inference/steps/feature_view.py`），改名不一併處理
   就會留下 4 處指向不存在識別字的假引用。#199 的範圍要按 9 個模組估，不是 5 個。
 
+### 修訂（2026-09-05，修 #297 時）
+
+**上表第二列的 `translate_weight_table` 已不存在。**
+
+權重比對的方向反過來了：原本把 config 表翻成 code 空間，現在改成把資料側的 code 解回類別值，
+所以那個函式被 `weight_key_decode_map` ／ `decode_weight_keys` ／ `nameable_weight_entries`
+取代。改名那次的結論（去底線、消費者在 `steps/sample_weights.py`）仍然成立，只是套用在新名字上。
+理由見 #297：code 的**儲存型別**會變（#283 把它從 int 變成 float32），在 code 空間比對的 key
+就跟著失配；類別值不會變，所以比對放在類別值那一側。
+
 ### 修訂（2026-08-31，實作 #199 時）
 
 **上表第三列已落地，閘門 G4 解除。**
