@@ -631,3 +631,69 @@ def test_the_manifest_survives_the_catalog_round_trip(tmp_path):
     # The lists are the point, but a manifest that lost the rest of itself in
     # the round trip is still a broken manifest.
     assert reloaded == manifest
+
+
+def test_data_volume_names_are_fixed_and_identity_travels_as_fields(tmp_path, caplog):
+    """``volume["name"]`` must be a constant, not one name per (month, item).
+
+    Same defect as the ``log_step`` event name #225 fixed two lines above these
+    calls: a name built from the data gives the log aggregator
+    ``n_months * n_items`` distinct buckets, none of which can be summed or
+    compared across runs. The identity travels in ``**fields``, which
+    ``log_data_volume`` merges into the ``volume`` dict.
+    """
+    import logging
+
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    parquet_path = _make_test_parquet(tmp_path)
+    handle = ParquetHandle(path=str(parquet_path))
+
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model.__class__.__name__ = "LightGBMAdapter"
+
+    with caplog.at_level(logging.INFO, logger="recsys_tfb.pipelines.training.nodes"):
+        predict_and_write_test_predictions(
+            model=model,
+            test_parquet_handle=handle,
+            preprocessor_metadata=_make_prep_meta(),
+            parameters=_make_parameters(),
+            training_eval_predictions=_write_ds(),
+        )
+
+    volumes = [
+        r.volume for r in caplog.records
+        if getattr(r, "event", None) == "data_volume"
+    ]
+    assert volumes, "predict emitted no data_volume records at all"
+
+    names = {v["name"] for v in volumes}
+    assert not [n for n in names if "[" in n], (
+        "data_volume names must be fixed strings, not one per (month, item); "
+        f"got {sorted(names)}"
+    )
+    assert {"predict.part_table", "predict.part_pdf"} <= names
+
+    # The identity that used to be baked into the name is still recorded — as
+    # fields, keyed on the schema roles (`time_value`, `item_name`), not on
+    # this repo's demo column names (`snap_date`, `prod_name`).
+    per_partition = [
+        v for v in volumes
+        if v["name"] in ("predict.part_table", "predict.part_pdf")
+    ]
+    identities = {
+        (v["name"], v.get("time_value"), v.get("item_name"))
+        for v in per_partition
+    }
+    assert identities == {
+        (name, snap, prod)
+        for name in ("predict.part_table", "predict.part_pdf")
+        for snap, prod in [
+            ("2025-01-31", "prod_A"), ("2025-01-31", "prod_B"),
+            ("2025-02-28", "prod_A"), ("2025-02-28", "prod_B"),
+        ]
+    }

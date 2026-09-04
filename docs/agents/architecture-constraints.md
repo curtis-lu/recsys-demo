@@ -155,7 +155,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 |---|---|---|
 | `core/consistency.py` | 2036 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
 | `core/versioning.py` | 425 | 三層 hash 版本 ID |
-| `core/logging.py` | 359 | `RunContext` 與結構化日誌 |
+| `core/logging.py` | 373 | `RunContext` 與結構化日誌 |
 | `core/schema.py` | 232 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 

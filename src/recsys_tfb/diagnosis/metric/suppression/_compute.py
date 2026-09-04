@@ -386,7 +386,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # （見 test_allocated_gap_sums_to_the_row_level_ap_gap 的 docstring）。
     total_row_ap_gap_allocated = 0.0
 
-    with log_step(logger, f"suppression.enumerate_pairs（{n} 列）"):
+    with log_step(logger, "suppression.enumerate_pairs", n_rows=n):
         for qi in range(len(boundaries) - 1):
             s, e = boundaries[qi], boundaries[qi + 1]
             local_len = e - s
@@ -480,7 +480,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     total_allocated_gap = float(pairs_df["gap"].sum()) if len(pairs_df) else 0.0
 
     if len(pairs_df) > 0:
-        with log_step(logger, f"suppression.aggregate_pairs（{len(pairs_df)} 對）"):
+        with log_step(logger, "suppression.aggregate_pairs",
+                      n_pairs=len(pairs_df)):
             pair_agg = pairs_df.groupby(["pos_item", "sup_item"], sort=False).agg(
                 allocated_ap_gap=("gap", "sum"),
                 affected_positive_rows=("pos_row", "nunique"),

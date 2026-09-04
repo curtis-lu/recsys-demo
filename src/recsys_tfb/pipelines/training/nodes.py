@@ -1032,24 +1032,29 @@ def predict_and_write_test_predictions(
 
         # A step name built from the data gives the log aggregator one name
         # per (month, item) pair; the values travel as structured fields
-        # instead, and the console message still carries them. The field is
-        # keyed on the schema role (`item_name`), not on the local variable,
-        # which still carries this repo's default column name.
+        # instead, and the console message still carries them. Both fields are
+        # keyed on the schema *role*, not on the local variables, which still
+        # carry this repo's default column names (`snap_date`, `prod_name`).
         with log_step(
             logger, "predict_partition",
-            snap_date=snap_date, item_name=prod_name,
+            time_value=snap_date, item_name=prod_name,
         ):
             part_table = ds.to_table(
                 filter=(pads.field(time_col) == snap_date)
                 & (pads.field(item_col) == prod_name)
             )
+            # Same reasoning as the step name above, one key over: a
+            # `volume.name` built from the data is `n_months * n_items`
+            # buckets. `log_data_volume` merges `**fields` into the `volume`
+            # dict, so the identity survives without splitting the name.
             log_data_volume(
-                logger, f"predict.part_table[{snap_date}/{prod_name}]", part_table
+                logger, "predict.part_table", part_table,
+                time_value=snap_date, item_name=prod_name,
             )
             part_pdf = part_table.to_pandas()
             log_data_volume(
-                logger, f"predict.part_pdf[{snap_date}/{prod_name}]",
-                part_pdf, deep=True,
+                logger, "predict.part_pdf", part_pdf, deep=True,
+                time_value=snap_date, item_name=prod_name,
             )
 
             snap_dates_seen.add(snap_date)

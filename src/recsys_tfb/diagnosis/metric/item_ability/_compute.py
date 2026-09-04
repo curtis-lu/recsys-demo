@@ -371,7 +371,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # 公司規模下這段會安靜跑很久，看起來像卡住，所以逐項印進度，不是只包一個
     # log_step——只包外層的話，使用者看到的仍是「開始」與「結束」之間一段
     # 長時間沒有任何輸出。
-    with log_step(logger, f"item_ability.per_item_auc（{n_items_total} 項）"):
+    with log_step(logger, "item_ability.per_item_auc", n_items=n_items_total):
         for idx, item in enumerate(unique_items, start=1):
             mask = items == item
             yy = y[mask]

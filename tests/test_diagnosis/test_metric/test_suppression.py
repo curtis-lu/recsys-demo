@@ -360,3 +360,24 @@ def test_scales_to_a_realistic_pair_count():
     elapsed = time.monotonic() - t0
     assert out["n_misordered_pairs"] > 100_000, "fixture 沒有製造出足夠的成對數"
     assert elapsed < 30.0, f"耗時 {elapsed:.1f}s"
+
+
+def test_step_names_are_fixed_and_the_scale_is_a_field(caplog):
+    """兩個耗時區塊的事件名不帶規模數字，數字走 ``**fields``。
+
+    理由與 ``item_ability`` 同一條：``log_step`` 會把欄位接在 console 訊息尾巴，
+    所以就地可讀性沒有損失，而聚合端拿回固定的桶。
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        compute((_two_query_sample(), {"n_queries": 2}), _params())
+
+    started = {r.step: r for r in caplog.records
+               if getattr(r, "event", None) == "step_started"}
+    assert "suppression.enumerate_pairs" in started, f"實際有 {sorted(started)}"
+    assert "suppression.aggregate_pairs" in started, f"實際有 {sorted(started)}"
+    assert getattr(started["suppression.enumerate_pairs"], "n_rows", None) == 4
+    assert getattr(started["suppression.aggregate_pairs"], "n_pairs", None) == 2
+    assert "n_rows=4" in started["suppression.enumerate_pairs"].getMessage()
+    assert "n_pairs=2" in started["suppression.aggregate_pairs"].getMessage()
