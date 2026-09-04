@@ -344,11 +344,13 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 | 在哪 | 有什麼 | 誰讀 |
 |---|---|---|
-| log 的 `[chunks] predict:` 一行 | processed／skipped／rebuilt／surplus 的**計數** | 跑的當下的人 |
-| `score_manifest`（節點的第一個 output） | 五份逐 chunk 清單 ＋ `expected_partitions`／`written_partitions` | `rank_predictions` 與 `validate_predictions`；**memory-only，跑完就沒了** |
-| `chunk_report.json`（節點的第二個 output，見 §6.3） | 同樣的逐 chunk 清單，落在磁碟上，**帶 `run_id`** | 事後回來問「那一次到底跳過了哪些」的人 |
+| log 的 `[chunks] predict:` 一行 | processed／skipped／rebuilt／surplus 的**計數**（不含清單，理由見 `docs/agents/deliberate-non-goals.md`） | 跑的當下的人 |
+| `score_manifest`（節點的第一個 output） | **四份**逐 chunk 清單（processed／skipped／rebuilt／empty）＋ `expected_partitions`／`written_partitions` | `rank_predictions` 與 `validate_predictions`；**memory-only，跑完就沒了** |
+| `chunk_report.json`（節點的第二個 output，見 §6.3） | 上面那四份 ＋ **第五份 `chunks_surplus`**（原本只到一行 warning）＋ 摘要 ＋ 寫它的 `run_id`，落在磁碟上 | 事後回來問「那一次到底跳過了哪些」的人 |
 
 同一份資料寫兩次而不是把 `score_manifest` 直接落地，理由在 §7.4 最後一條。
+
+**摘要的計數不是五個互斥桶。** `grid`＝`processed` ＋ `skipped` ＋ `empty`（每個 chunk 恰好落在其中一格）；`of_which_rebuilt` 是**其中**被 `--rebuild-dates` 強制重做的那些，不是第四格，key 名字就是為了擋住「五個數字加起來」這個誤讀；`surplus` 在格點之外。
 
 **空桶，以及「不該是空的空桶」。** 母體比桶數還小時會有桶完全沒有 entity，而 `insertInto` 對空 frame 不會建立分區。這是正常狀態，不是錯誤：manifest 把它們記在 `chunks_empty`，並且從「應該存在的分區」裡扣掉，所以 §6.1 的 `partition_completeness` 不會對小母體誤報。
 
@@ -434,7 +436,7 @@ unranked_predictions
 | `ranked_staging` | Hive managed table | `model_version / snap_date, item` | 發布前結果與失敗排查 |
 | `ranked_predictions` | Hive managed table | `model_version / snap_date, item` | 正式 production 排序結果 |
 | `manifest.json` | driver-local JSON | `data/inference/<model_version>/<first_snap_date>/` | 記錄模型、dataset IDs、參數、run ID 與 git commit；另含 `scoring_chunks` 摘要（計數 ＋ 每月一列，見下一列） |
-| `chunk_report.json` | driver-local JSON | 同上 | 這一次評分的**逐 chunk 清單**：processed／skipped／rebuilt／empty／surplus ＋ `expected_partitions`／`written_partitions`，以及寫它的 `run_id`。零下游消費者，存在的理由是事後回答「跳過的是哪些」。體積隨格點線性成長（本機實測 80 chunk ＝ 15 KB，推到 12 月 × 20 桶 × 22 item ≈ 5,280 chunk 約 1 MB 等級），所以只有摘要進 `manifest.json` |
+| `chunk_report.json` | driver-local JSON | 同上 | 這一次評分的**逐 chunk 清單**：processed／skipped／rebuilt／empty／surplus ＋ `expected_partitions`／`written_partitions`，加上摘要（`counts`、`by_snap_date`——欄位語意見 §5.3 末）與寫它的 `run_id`。零下游消費者，存在的理由是事後回答「跳過的是哪些」。體積隨格點線性成長（本機實測 80 chunk ＝ 15 KB，推到 12 月 × 20 桶 × 22 item ≈ 5,280 chunk 約 1 MB 等級），所以只有摘要進 `manifest.json` |
 | `parameters_inference.json` | driver-local JSON | 同上 | 保存本次 inference 設定 |
 | `latest` | symlink | `data/inference/latest` | 指向最近成功完成的 inference run 目錄 |
 

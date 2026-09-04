@@ -48,6 +48,11 @@ def inference_population(feature_table):
 @pytest.fixture
 def parameters():
     return {
+        # Supplied by the CLI through runtime_params, same route as
+        # model_version. predict_and_write_scores subscripts it (not .get), so
+        # a fixture without it fails loudly instead of stamping None on the
+        # chunk report.
+        "run_id": "20250101_000000_test",
         "inference": {
             "snap_dates": ["2024-03-31"],
             "products": ["exchange_fx", "fund_stock", "fund_bond"],
@@ -487,6 +492,9 @@ class TestBuildInferencePopulationFeatures:
 
 def _population_params(entity_buckets: int = 1) -> dict:
     return {
+        # As in the `parameters` fixture: supplied by the CLI, and subscripted
+        # rather than `.get`-ed by predict_and_write_scores.
+        "run_id": "20250101_000000_test",
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             "score": "score", "rank": "rank",

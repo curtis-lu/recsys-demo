@@ -279,10 +279,36 @@ class TestBuildChunkReport:
         for key, value in self.MANIFEST.items():
             assert report[key] == value
 
-    def test_counts_are_the_list_lengths(self):
+    def test_counts_say_how_they_add_up(self):
+        """``grid`` is the sum of the three disjoint lists, and only those.
+
+        The MANIFEST above has the trap built in: its one rebuilt chunk is the
+        same chunk as its one processed chunk, because ``rebuilt`` is a subset
+        of what the run set out to do, not a fourth bucket
+        (:class:`ScoringChunkPlan`). A reader who adds all five numbers gets 5
+        for a 3-chunk grid, which is why the key is ``of_which_rebuilt``.
+        """
         assert self._report()["counts"] == {
-            "processed": 1, "skipped": 2, "rebuilt": 1, "empty": 1, "surplus": 0,
+            "grid": 4,  # 1 processed + 2 skipped + 1 empty
+            "processed": 1, "skipped": 2, "empty": 1,
+            "of_which_rebuilt": 1,
+            "surplus": 0,
         }
+
+    def test_the_rebuilt_chunk_is_not_counted_twice_in_the_grid(self):
+        """The mistake this shape exists to prevent, pinned on its own.
+
+        ``chunks_rebuilt`` here holds a chunk that is also in
+        ``chunks_processed``. Counting it as its own bucket would make the grid
+        5 for a run that touched 4 chunks — and an inflated grid reads as
+        "partitions are missing".
+        """
+        report = self._report()
+        assert self.MANIFEST["chunks_rebuilt"][0] in self.MANIFEST["chunks_processed"]
+        counts = report["counts"]
+        assert counts["grid"] == (
+            counts["processed"] + counts["skipped"] + counts["empty"]
+        )
 
     def test_surplus_lands_instead_of_only_being_warned_about(self):
         """``plan.surplus`` reaches a ``logger.warning`` and nothing else.
@@ -298,10 +324,12 @@ class TestBuildChunkReport:
 
     def test_by_snap_date_splits_the_chunks_by_month(self):
         assert self._report()["by_snap_date"]["2025-11-30"] == {
-            "processed": 0, "skipped": 2, "rebuilt": 0, "empty": 0, "surplus": 0,
+            "grid": 2, "processed": 0, "skipped": 2, "empty": 0,
+            "of_which_rebuilt": 0, "surplus": 0,
         }
         assert self._report()["by_snap_date"]["2025-12-31"] == {
-            "processed": 1, "skipped": 0, "rebuilt": 1, "empty": 1, "surplus": 0,
+            "grid": 2, "processed": 1, "skipped": 0, "empty": 1,
+            "of_which_rebuilt": 1, "surplus": 0,
         }
 
     def test_a_month_that_did_nothing_still_gets_a_row(self):
@@ -317,18 +345,22 @@ class TestBuildChunkReport:
         }
         report = chunk_plans.build_chunk_report(manifest, (), "run-1")
         assert report["by_snap_date"]["2025-10-31"] == {
-            "processed": 0, "skipped": 0, "rebuilt": 0, "empty": 0, "surplus": 0,
+            "grid": 0, "processed": 0, "skipped": 0, "empty": 0,
+            "of_which_rebuilt": 0, "surplus": 0,
         }
 
     def test_adding_to_the_report_does_not_reach_the_manifest(self):
         """The two travel out of the same node and must not be one dict.
 
         Only the top level is copied — the chunk lists are shared, which is
-        fine because neither side mutates them — so what this pins is that the
-        report's own additions (``counts``, ``by_snap_date``, ``run_id``) stay
-        out of the manifest ``validate_predictions`` reads.
+        fine because neither side mutates them — so what this pins is that
+        writing to the report leaves ``score_manifest`` alone. Returning the
+        same object twice would make the catalog land the entry that must not
+        land.
         """
         report = self._report()
-        report["counts"]["processed"] = 999
-        assert "counts" not in self.MANIFEST
-        assert "run_id" not in self.MANIFEST
+        report["a_key_only_the_report_has"] = 1
+        assert "a_key_only_the_report_has" not in self.MANIFEST
+        for added in ("counts", "by_snap_date", "run_id", "chunks_surplus"):
+            assert added in report
+            assert added not in self.MANIFEST

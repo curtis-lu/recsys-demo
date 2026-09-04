@@ -198,14 +198,48 @@ def as_rows(chunks) -> list[list]:
     return sorted(list(chunk) for chunk in chunks)
 
 
-#: The five things a run can decide about a chunk, and the key each list of
-#: them carries in the report. Ordered as the decision is made: score it, leave
-#: it alone, redo it on request, find nobody in it — plus the partitions the
-#: grid no longer covers at all.
+#: The five lists a run produces, keyed as :func:`build_chunk_report` carries
+#: them. Ordered as the decision is made: score it, leave it alone, redo it on
+#: request, find nobody in it — plus the partitions the grid no longer covers.
+#:
+#: **These are not five disjoint buckets**, which is why :func:`_tally` does
+#: not simply expose them: ``rebuilt`` is a subset of what the run set out to
+#: process (see :class:`ScoringChunkPlan`), so it overlaps ``processed`` and
+#: ``empty``, and ``surplus`` sits outside the configured grid entirely.
 CHUNK_KINDS = ("processed", "skipped", "rebuilt", "empty", "surplus")
 
 
-def build_chunk_report(manifest: dict, surplus: Iterable, run_id) -> dict:
+def _tally(rows: dict, month=None) -> dict:
+    """Count the lists in a shape whose keys say how they add up.
+
+    ``processed``, ``skipped`` and ``empty`` partition the configured grid —
+    every chunk lands in exactly one — so ``grid`` is their sum and a reader
+    can check it. ``rebuilt`` is spelled ``of_which_rebuilt`` because it is a
+    *subset* of the first and third: reading these as five buckets and adding
+    them up overshoots the grid by however many chunks ``--rebuild-dates``
+    forced (a real run measured processed=80 with of_which_rebuilt=80). The key
+    name is the only place that warning can live — JSON carries no comments,
+    and this file exists to be opened months later by someone who has not read
+    this module.
+
+    ``month`` restricts the count to one ``snap_date``; ``None`` counts all.
+    """
+    def n(kind):
+        return sum(
+            1 for row in rows[kind] if month is None or row[0] == month
+        )
+
+    return {
+        "grid": n("processed") + n("skipped") + n("empty"),
+        "processed": n("processed"),
+        "skipped": n("skipped"),
+        "empty": n("empty"),
+        "of_which_rebuilt": n("rebuilt"),
+        "surplus": n("surplus"),
+    }
+
+
+def build_chunk_report(manifest: dict, surplus: Iterable, run_id: str) -> dict:
     """The scoring manifest as something that outlives the process.
 
     ``score_manifest`` already carries every list this returns, but it is a
@@ -242,14 +276,11 @@ def build_chunk_report(manifest: dict, surplus: Iterable, run_id) -> dict:
         **manifest,
         "run_id": run_id,
         "chunks_surplus": rows["surplus"],
-        "counts": {kind: len(rows[kind]) for kind in CHUNK_KINDS},
+        "counts": _tally(rows),
         # A chunk row is ``[snap_date, entity_bucket, item]`` (:func:`as_rows`),
         # so element 0 is the month.
         "by_snap_date": {
-            month: {
-                kind: sum(1 for row in rows[kind] if row[0] == month)
-                for kind in CHUNK_KINDS
-            }
+            month: _tally(rows, month)
             for month in sorted(set(manifest["snap_dates"]))
         },
     }

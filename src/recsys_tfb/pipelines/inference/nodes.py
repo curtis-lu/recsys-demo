@@ -516,7 +516,10 @@ def predict_and_write_scores(
     # would skip it — and that slice re-runs *this* node (section 7.4), which
     # is exactly a run whose skip list is worth keeping.
     return manifest, build_chunk_report(
-        manifest, plan.surplus, parameters.get("run_id"),
+        # Subscript, not `.get`: a missing run_id would stamp None, and
+        # `_chunk_report_extra` would then quietly leave the summary out of
+        # manifest.json on every run. A plumbing break should be loud.
+        manifest, plan.surplus, parameters["run_id"],
     )
 
 

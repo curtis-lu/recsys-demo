@@ -510,9 +510,11 @@ ranked_predictions:
 # 沒有任何 node 讀它。
 #
 # 體積隨 chunk 數線性成長：生產 12 月 × 20 桶 × 22 item ≈ 5,280 chunk，六份清單
-# 加起來約 1 MB 等級。manifest.json 只收摘要（計數 ＋ 每月一列），逐 chunk 清單
-# 只在這個檔裡——__main__.py 的 _chunk_report_extra 讀本檔的摘要欄位放進
-# manifest 的 extra_metadata，所以檔名與位置是契約的一部分。
+# 加起來約 1 MB 等級（本機實測 80 chunk ＝ 15 KB）。manifest.json 只收摘要
+# （`counts` ＋ `by_snap_date`），逐 chunk 清單只在這個檔裡——__main__.py 的
+# _chunk_report_extra 讀本檔的摘要欄位放進 manifest 的 extra_metadata，所以
+# **檔名與位置是契約的一部分**，由 tests/test_cli.py 的
+# test_chunk_report_catalog_path_matches_where_the_cli_reads_it 釘住。
 score_chunk_report:
   type: JSONDataset
   filepath: data/inference/${model_version}/${snap_date}/chunk_report.json

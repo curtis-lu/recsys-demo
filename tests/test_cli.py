@@ -426,11 +426,11 @@ class TestCLI:
             inference_dir.mkdir(parents=True, exist_ok=True)
             (inference_dir / "chunk_report.json").write_text(json.dumps({
                 "run_id": added["parameters"].load()["run_id"],
-                "counts": {"processed": 0, "skipped": 6, "rebuilt": 0,
-                           "empty": 0, "surplus": 0},
+                "counts": {"grid": 6, "processed": 0, "skipped": 6,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
                 "by_snap_date": {"2024-03-31": {
-                    "processed": 0, "skipped": 6, "rebuilt": 0,
-                    "empty": 0, "surplus": 0}},
+                    "grid": 6, "processed": 0, "skipped": 6,
+                    "empty": 0, "of_which_rebuilt": 0, "surplus": 0}},
                 "chunks_skipped": [["2024-03-31", 0, "p1"]],
             }))
 
@@ -616,13 +616,13 @@ def _chunk_report_file(vdir, **overrides):
         "chunks_surplus": [],
         "expected_partitions": [["2025-11-30", 0, "fund_stock"]],
         "written_partitions": [["2025-11-30", 0, "fund_stock"]],
-        "counts": {"processed": 1, "skipped": 1, "rebuilt": 0,
-                   "empty": 0, "surplus": 0},
+        "counts": {"grid": 2, "processed": 1, "skipped": 1,
+                   "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
         "by_snap_date": {
-            "2025-11-30": {"processed": 0, "skipped": 1, "rebuilt": 0,
-                           "empty": 0, "surplus": 0},
-            "2025-12-31": {"processed": 1, "skipped": 0, "rebuilt": 0,
-                           "empty": 0, "surplus": 0},
+            "2025-11-30": {"grid": 1, "processed": 0, "skipped": 1,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
+            "2025-12-31": {"grid": 1, "processed": 1, "skipped": 0,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
         },
     }
     report.update(overrides)
@@ -655,6 +655,32 @@ def test_chunk_report_extra_folds_the_summary_into_the_manifest(tmp_path):
                 "chunks_empty", "chunks_surplus", "expected_partitions",
                 "written_partitions"):
         assert key not in extra["scoring_chunks"]
+
+
+def test_chunk_report_catalog_path_matches_where_the_cli_reads_it():
+    """The catalog writes the file; the CLI reads it back by path. Pin the seam.
+
+    ``conf/base/catalog.yaml`` and ``__main__`` each state that the filename
+    and location are part of the contract, but nothing enforced it: moving the
+    entry into a ``diagnostics/`` subdirectory, or renaming the file, leaves
+    every other test green while ``_chunk_report_extra`` silently returns
+    ``None`` and the summary vanishes from manifest.json.
+
+    The two template segments are the same ones the inference command builds
+    ``version_dir`` from (``data_dir / "inference" / mv / snap_date``), and
+    ``test_inference_uses_actual_model_hash`` pins that they resolve to that
+    model hash and that date.
+    """
+    from recsys_tfb.__main__ import CHUNK_REPORT_NAME
+
+    repo_root = Path(__file__).resolve().parents[1]
+    catalog = yaml.safe_load((repo_root / "conf/base/catalog.yaml").read_text())
+    filepath = Path(catalog["score_chunk_report"]["filepath"])
+
+    assert filepath.name == CHUNK_REPORT_NAME
+    assert filepath.parent.parts == (
+        "data", "inference", "${model_version}", "${snap_date}",
+    )
 
 
 def test_chunk_report_extra_absent_returns_none(tmp_path):
