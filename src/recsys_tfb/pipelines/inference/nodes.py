@@ -350,7 +350,14 @@ def predict_and_write_scores(
         plan.to_process, key=lambda chunk: (chunk.snap_date, chunk.entity_bucket)
     ):
         chunk_items = [chunk.item for chunk in group]
-        with log_step(logger, f"read_bucket_{snap_date}_{bucket}"):
+        # ADR-0014 predicted this caller when it fixed the event name in the
+        # shared layer: a name built from the data is one bucket per
+        # (month, entity bucket), so nothing can be summed across a run. The
+        # values travel as fields and still print on the console line.
+        with log_step(
+            logger, "read_bucket",
+            time_value=snap_date, entity_bucket=str(bucket),
+        ):
             # The one Spark action per bucket. Both partition columns are
             # pinned, so this prunes to a single partition directory rather
             # than scanning the table — and the source feature table is not
@@ -402,7 +409,11 @@ def predict_and_write_scores(
             continue
 
         for item in chunk_items:
-            with log_step(logger, f"score_{snap_date}_{bucket}_{item}"):
+            with log_step(
+                logger, "score_item",
+                time_value=snap_date, entity_bucket=str(bucket),
+                item_name=item,
+            ):
                 # In place, on the frame already in the driver: this is the
                 # reuse the loop order buys. The value written is the raw item
                 # name — pdf_to_X applies the integer code to its own copy, so

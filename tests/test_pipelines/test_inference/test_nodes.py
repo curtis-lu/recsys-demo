@@ -1408,3 +1408,67 @@ class TestRestrictToSnapDates:
         pdf = pd.DataFrame({"cust_id": ["C001"], "score": [0.5]})
         with pytest.raises(ValueError, match="snap_date"):
             restrict_to_snap_dates(spark.createDataFrame(pdf), parameters)
+
+
+class TestScoringStepNamesAreFixed:
+    """ADR-0014 named this loop as the shared layer's second consumer.
+
+    An event name built from the data gives the log aggregator
+    ``n_months * n_buckets * n_items`` distinct step names, so nothing can be
+    summed or compared across runs. The name stays fixed; the identity travels
+    in ``log_step(**fields)``.
+    """
+
+    def _steps(self, caplog):
+        return [
+            (r.step, {k: getattr(r, k, None)
+                      for k in ("time_value", "entity_bucket", "item_name")})
+            for r in caplog.records
+            if getattr(r, "event", None) == "step_started"
+        ]
+
+    def test_step_names_carry_no_identity(
+        self, population_features, preprocessor, parameters, caplog
+    ):
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.inference.nodes"
+        ):
+            predict_and_write_scores(
+                ConstantModel(), population_features, preprocessor, parameters,
+                unranked_predictions=FakeScoreTable(),
+            )
+
+        names = {step for step, _ in self._steps(caplog)}
+        assert names, "the scoring loop emitted no step_started events"
+        snap = parameters["inference"]["snap_dates"][0]
+        offenders = [
+            n for n in names
+            if snap in n or any(p in n for p in parameters["inference"]["products"])
+        ]
+        assert not offenders, (
+            f"these step names are built from the data: {sorted(offenders)}"
+        )
+        assert {"read_bucket", "score_item"} <= names
+
+    def test_identity_travels_as_fields(
+        self, population_features, preprocessor, parameters, caplog
+    ):
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.pipelines.inference.nodes"
+        ):
+            predict_and_write_scores(
+                ConstantModel(), population_features, preprocessor, parameters,
+                unranked_predictions=FakeScoreTable(),
+            )
+
+        steps = self._steps(caplog)
+        snap = parameters["inference"]["snap_dates"][0]
+
+        reads = [f for name, f in steps if name == "read_bucket"]
+        assert reads == [{"time_value": snap, "entity_bucket": "0", "item_name": None}]
+
+        scores = [f for name, f in steps if name == "score_item"]
+        assert {(f["time_value"], f["entity_bucket"], f["item_name"]) for f in scores} == {
+            (snap, "0", item)
+            for item in parameters["inference"]["products"]
+        }

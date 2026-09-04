@@ -717,6 +717,31 @@ def test_expensive_blocks_are_wrapped_in_log_step(caplog):
              if r.__dict__.get("event") == "step_completed"}
     for expected in ("config_shift.macro_map_baseline_and_corrected",
                      "config_shift.per_item_replacement"):
-        assert any(s and s.startswith(expected) for s in steps), (
-            f"缺 log_step：{expected}；實際有 {steps}"
-        )
+        # 等值比對而非 startswith：規模數字改走 **fields 之後，事件名就是完整
+        # 的桶名，後綴回流會讓聚合端再度爆開而 startswith 看不出來。
+        assert expected in steps, f"缺 log_step：{expected}；實際有 {steps}"
+
+
+def test_step_names_are_fixed_and_the_scale_is_a_field(caplog):
+    """事件名不帶重抽次數／item 數，那兩個規模走 ``**fields``。
+
+    ``log_step`` 把欄位接在 console 訊息尾巴，所以就地可讀性沒有損失；換到的是
+    聚合端拿回固定的桶。順帶清掉事件名裡的中文（程式碼識別字一律英文）。
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        compute((_sample(), {"n_queries": 40}), PARAMS)
+
+    started = {r.step: r for r in caplog.records
+               if getattr(r, "event", None) == "step_started"}
+    boot = started.get("config_shift.paired_bootstrap")
+    assert boot is not None, f"缺固定名 config_shift.paired_bootstrap；有 {sorted(started)}"
+    # 期望值取自 PARAMS 與 fixture，不從記錄回推——拿被測程式自己的輸出當期望
+    # 值會自我一致、恆真（見 test-false-green 形態 7）。_sample() 固定兩個 item。
+    assert getattr(boot, "n_boot", None) == 20
+    assert "n_boot=20" in boot.getMessage()
+
+    per_item = started["config_shift.per_item_replacement"]
+    assert getattr(per_item, "n_items", None) == 2
+    assert "n_items=2" in per_item.getMessage()

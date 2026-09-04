@@ -227,3 +227,27 @@ def _sample():
                 "inclusion_weight": 1.0,
             })
     return pd.DataFrame(rows)
+
+
+def test_per_item_step_name_is_fixed_and_the_scale_is_a_field(caplog):
+    """規模走欄位、名字保持固定。
+
+    ``（22 項）`` 這種後綴讓 log 聚合端每種 item 數各拿到一個桶，卻換不到任何
+    可讀性——``log_step`` 本來就把 ``**fields`` 接在 console 訊息後面，所以
+    數字照樣印得出來。順帶把事件名裡的中文清掉（程式碼識別字一律英文）。
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+
+    started = [r for r in caplog.records
+               if getattr(r, "event", None) == "step_started"]
+    per_item = [r for r in started if r.step == "item_ability.per_item_auc"]
+    assert len(per_item) == 1, (
+        f"缺固定名 item_ability.per_item_auc；實際有 {[r.step for r in started]}"
+    )
+    assert getattr(per_item[0], "n_items", None) == 2
+    assert "n_items=2" in per_item[0].getMessage(), (
+        "console 訊息仍要看得到規模，否則這次改動是拿可讀性換聚合"
+    )

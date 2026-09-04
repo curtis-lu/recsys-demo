@@ -705,8 +705,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         # 把「paired_bootstrap_delta 回的是反向差、取負後上下界要對調」這步
         # 收在 _common.py 一處，理由見該函式 docstring。
         with log_step(
-            logger,
-            f"config_shift.paired_bootstrap（{ci_info['n_boot']} 次重抽）",
+            logger, "config_shift.paired_bootstrap", n_boot=ci_info["n_boot"],
         ):
             out["delta_ci_low"], out["delta_ci_high"] = ci_for_corrected_minus_baseline(
                 frame, mp, offs,
@@ -723,7 +722,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # 這圈是整個模組最貴的一段（item 數 × 一次全樣本 mAP，佔 2+N 次裡的 N 次）。
     # 進度逐項印而不是只包一個 log_step：只包外層的話，使用者看到的仍是
     # 「開始」與「結束」之間一段長時間沒有任何輸出，跟卡住分不出來。
-    with log_step(logger, f"config_shift.per_item_replacement（{n_items_total} 項）"):
+    with log_step(logger, "config_shift.per_item_replacement",
+                  n_items=n_items_total):
         for idx, item in enumerate(unique_items, start=1):
             mask = items == item
             z_one = z.copy()
