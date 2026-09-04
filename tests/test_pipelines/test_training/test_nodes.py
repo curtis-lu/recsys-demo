@@ -1092,6 +1092,34 @@ def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     assert diag["unmatched_keys"] == ["aff"]  # no row has segment 'aff'
 
 
+def test_persist_sample_weight_report_does_not_credit_an_undecodable_row(tmp_path):
+    """A row whose code names no category must not make a key look present.
+
+    The vocabulary here literally contains ``"None"`` — which is what an
+    undecodable cell stringifies to. If the present-set kept those rows, the
+    configured ``None`` entry would be reported as matched while
+    ``io/extract.py`` pins that very row to weight 1.0: the report would vouch
+    for a weight that did nothing, the one failure it exists to catch.
+    """
+    import numpy as np
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+
+    p = tmp_path / "train.parquet"
+    # code 0 -> "mass"; code -1 -> UNKNOWN_CATEGORY_CODE, no category at all.
+    pd.DataFrame({"cust_segment_typ_2a": np.array([0, -1], dtype=np.float32),
+                  "prod_name": ["a", "a"], "label": [1, 0]}).to_parquet(p)
+    params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+              "item": "prod_name", "label": "label"}},
+              "training": {"sample_weight_keys": ["cust_segment_typ_2a"],
+                           "sample_weights": {"mass": 2.0, "None": 3.0}}}
+    prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "None"]}}
+
+    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
+    assert diag["unmatched_keys"] == ["None"]
+
+
 def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
     import numpy as np
     import pandas as pd
