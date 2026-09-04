@@ -624,6 +624,10 @@ class TestPredictAndWriteScores:
         assert "counts" not in manifest
         assert report["counts"]["processed"] == len(manifest["chunks_processed"])
         assert set(report["by_snap_date"]) == set(manifest["snap_dates"])
+        # The stamp comes from `parameters`, which is how the CLI supplies it.
+        # Without this the node could stamp None and `_chunk_report_extra`
+        # would drop the summary out of every manifest.json, silently.
+        assert report["run_id"] == parameters["run_id"]
 
     def test_returns_a_manifest_not_a_frame(
         self, population_features, preprocessor, parameters
