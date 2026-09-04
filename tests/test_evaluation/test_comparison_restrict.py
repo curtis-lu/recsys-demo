@@ -148,8 +148,7 @@ def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
     item_joins = [ln for ln in joins if "prod_name" in ln and "Inner" in ln]
 
     assert entity_joins, f"no entity join in plan: {joins}"
-    assert not any(ln.startswith("+- BroadcastHashJoin") or "BroadcastHashJoin" in ln
-                   for ln in entity_joins), \
+    assert not any("BroadcastHashJoin" in ln for ln in entity_joins), \
         f"entity join is still forced to broadcast: {entity_joins}"
 
     assert item_joins, f"no item join in plan: {joins}"

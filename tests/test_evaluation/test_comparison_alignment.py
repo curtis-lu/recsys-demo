@@ -141,3 +141,22 @@ def test_empty_item_intersection_raises(spark):
     b = spark.createDataFrame([("c1", "p9")], ["cust_id", "prod_name"])
     with pytest.raises(DataConsistencyError, match="common_items"):
         common_universe(a, b, ["cust_id"], "prod_name")
+
+
+def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
+    """A null-keyed shared entity is not a usable common entity.
+
+    ``intersect`` counts ``NULL == NULL`` as a match, so it would let this
+    universe through the B3 gate — and the equi-join in ``restrict_to_common``
+    would then drop the row, leaving both sides empty with no error raised
+    anywhere. The gate uses the same join semantics as the restriction it
+    guards, so the two cannot disagree and this fails loud.
+    """
+    a = spark.createDataFrame(
+        [("c1", "p1"), (None, "p1")], "cust_id string, prod_name string"
+    )
+    b = spark.createDataFrame(
+        [("c9", "p1"), (None, "p1")], "cust_id string, prod_name string"
+    )
+    with pytest.raises(DataConsistencyError, match="common_entities"):
+        common_universe(a, b, ["cust_id"], "prod_name")
