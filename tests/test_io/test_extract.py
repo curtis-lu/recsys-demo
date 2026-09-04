@@ -1325,3 +1325,91 @@ class TestExtractXyB9Backstop:
             _make_handle(tmp_path, _wide_df()), _wide_meta(), _WIDE_PARAMS
         )
         assert X.shape == (37, 7)
+
+
+# ---------------------------------------------------------------------------
+# The training cache is a hive-partitioned DIRECTORY, not one flat file
+#
+# ``populate_cache_from_hive`` writes ``<root>/snap_date=.../prod_name=.../*.parquet``
+# (its docstring says so), so ``schema.time`` and ``schema.item`` live in
+# directory names, not in the files. Every other fixture in this module writes
+# one flat file via ``df.to_parquet(path)`` — which is why a reader that opens
+# the root without hive partitioning passes the whole suite and then cannot find
+# ``prod_name`` in production.
+# ---------------------------------------------------------------------------
+
+
+def _make_partitioned_handle(tmp_path: Path, df: pd.DataFrame, parts: list):
+    from recsys_tfb.io.handles import ParquetHandle
+
+    root = tmp_path / "cache_root"
+    df.to_parquet(root, partition_cols=parts)
+    return ParquetHandle(path=str(root))
+
+
+class TestHivePartitionedCacheRoot:
+    """snap_date / prod_name come back even though they are directory names."""
+
+    def _df(self):
+        return pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 6,
+            "prod_name": ["fund", "ccard", "savings"] * 2,
+            "cust_id": ["c1", "c1", "c1", "c2", "c2", "c2"],
+            "f0": np.arange(6, dtype=np.float32),
+            "f1": np.arange(6, dtype=np.float32) * 2,
+            "label": [1, 0, 0, 0, 1, 0],
+        })
+
+    def _meta(self):
+        return {
+            "feature_columns": ["f0", "f1", "prod_name"],
+            "categorical_columns": ["prod_name"],
+            "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
+        }
+
+    def test_group_and_item_columns_survive_the_partitioning(
+        self, tmp_path: Path
+    ) -> None:
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        handle = _make_partitioned_handle(
+            tmp_path, self._df(), ["snap_date", "prod_name"])
+
+        X, y, groups, items = extract_Xy_with_groups(
+            handle, self._meta(), _WIDE_PARAMS, with_items=True,
+        )
+
+        assert X.shape == (6, 3)
+        assert X.dtype == np.dtype("float32")
+        # two customers, one month -> two query groups
+        assert len(set(groups.tolist())) == 2
+        # the item column is a directory name, and still comes back as a name
+        assert sorted(set(items)) == ["ccard", "fund", "savings"]
+        # ...and its matrix column is the code, not the string
+        assert set(X[:, 2].tolist()) == {0.0, 1.0, 2.0}
+
+    def test_matches_the_flat_file_read_of_the_same_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Partitioning is a storage layout, not a change of content.
+
+        Row *order* differs (a partitioned read comes back grouped by partition),
+        so this compares the rows as a set of (feature row, label, item) tuples.
+        """
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+
+        df = self._df()
+        flat_dir = tmp_path / "flat"
+        flat_dir.mkdir()
+        flat = _make_handle(flat_dir, df)
+        part = _make_partitioned_handle(
+            tmp_path, df, ["snap_date", "prod_name"])
+
+        def rows(handle):
+            X, y, g, items = extract_Xy_with_groups(
+                handle, self._meta(), _WIDE_PARAMS, with_items=True)
+            return sorted(
+                (tuple(X[i]), int(y[i]), str(items[i])) for i in range(len(y))
+            )
+
+        assert rows(part) == rows(flat)

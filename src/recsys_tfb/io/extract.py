@@ -19,7 +19,7 @@ from pandas.api.types import infer_dtype
 
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.io.handles import ParquetHandle
+from recsys_tfb.io.handles import ParquetHandle, open_parquet_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -382,9 +382,7 @@ def _log_parquet_metadata(handle: ParquetHandle) -> None:
     """
     path = getattr(handle, "path", "<unknown>")
     try:
-        import pyarrow.dataset as pads
-
-        ds = pads.dataset(path, format="parquet")
+        ds = open_parquet_dataset(path)
         n_rows = ds.count_rows()
         n_cols = len(ds.schema)
         total_bytes = 0
@@ -419,27 +417,27 @@ def _assert_feature_dtypes_numeric(
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> None:
-    """B6 training-read backstop — raise before the expensive pandas read if any
-    model feature column is a non-numeric parquet type that will NOT be encoded
-    downstream (would OOM at ``pdf_to_X`` ``to_numpy``, then fail LightGBM's
-    float cast).
+    """B6 training-read backstop — raise before the read if any model feature
+    column is a non-numeric parquet type that will NOT be encoded downstream.
+
+    Since #284 this path no longer flattens a frame, so the harm it prevents is
+    not "an object matrix gets built and OOMs" but "the matrix cannot be built
+    at all": :func:`_stream_matrix` allocates a numeric array and writes each
+    batch into it, and a string column has nothing to write there. The
+    object-dtype OOM the invariant is named for is still reachable through
+    :func:`pdf_to_X`, which inference and the chunked test evaluation use.
 
     Reads parquet schema only (pyarrow metadata, no data). Deferred identity
-    categoricals (e.g. ``prod_name``, encoded later in ``pdf_to_X``) are exempt.
+    categoricals (e.g. ``prod_name``, encoded per batch during the read) are
+    exempt.
     """
-    import pyarrow.dataset as pads
     import pyarrow.types as pat
 
-    from recsys_tfb.core.consistency import (
-        DataConsistencyError,
-        nonnumeric_feature_errors,
-    )
+    from recsys_tfb.core.consistency import nonnumeric_feature_errors
 
-    feature_cols = preprocessor_metadata["feature_columns"]
+    field_type = _feature_field_types(handle, preprocessor_metadata)
     deferred = _deferred_categoricals(preprocessor_metadata, parameters)
-
-    schema = pads.dataset(handle.path, format="parquet").schema
-    field_type = {name: schema.field(name).type for name in schema.names}
+    feature_cols = preprocessor_metadata["feature_columns"]
 
     def _kind(t) -> str:
         if (
@@ -454,15 +452,12 @@ def _assert_feature_dtypes_numeric(
     feature_kinds = {
         c: _kind(field_type[c]) for c in feature_cols if c in field_type
     }
-    errors = nonnumeric_feature_errors(feature_kinds, deferred)
-    if errors:
-        raise DataConsistencyError(
-            "train_model_input feature columns include un-encoded non-numeric "
-            "type(s) — this OOMs at to_numpy and fails LightGBM's float cast ("
-            + str(len(errors))
-            + " issue(s)):\n- "
-            + "\n- ".join(errors)
-        )
+    _raise_if(
+        nonnumeric_feature_errors(feature_kinds, deferred),
+        "train_model_input feature columns include un-encoded non-numeric "
+        "type(s) — an object-dtype matrix the driver cannot hold, then a "
+        "LightGBM float-cast error",
+    )
 
 
 #: Bytes one streamed record batch may occupy, before it is folded into the
@@ -476,20 +471,32 @@ STREAM_BATCH_BYTES: int = 64 * 1024**2
 
 
 def stream_batch_rows(
-    n_columns: int, itemsize: int, budget: int = STREAM_BATCH_BYTES,
+    n_columns: int, itemsize: int, budget: int | None = None,
 ) -> int:
     """Rows per streamed batch, from a byte budget and the frame's width.
 
     Always at least one row, so a frame too wide to fit even a single row in the
     budget still makes progress instead of dividing to zero.
+
+    ``budget=None`` reads :data:`STREAM_BATCH_BYTES` **at call time**. Spelling
+    the default as the module attribute instead would bind it once at import,
+    and a caller that changed the attribute would silently keep the old budget
+    — which is exactly how the multi-batch test in ``tests/test_io`` spent its
+    first life passing over a single batch.
+
+    ``n_columns`` is priced at ``itemsize`` per column, which is the feature
+    columns' width. The handful of aux columns (label, group, item) are not that
+    width — a string item column is wider — so a real batch runs a little over
+    budget. Left alone: features outnumber aux by two or three orders of
+    magnitude in the shape this exists for.
     """
     per_row = max(1, n_columns * itemsize)
-    return max(1, budget // per_row)
+    return max(1, (STREAM_BATCH_BYTES if budget is None else budget) // per_row)
 
 
 def _deferred_categoricals(
     preprocessor_metadata: dict, parameters: dict,
-) -> set:
+) -> set[str]:
     """Declared categoricals that model_input stores raw, encoded at read time.
 
     An identity column is kept as its human-readable value in model_input (the
@@ -501,6 +508,38 @@ def _deferred_categoricals(
     return {
         c for c in preprocessor_metadata["categorical_columns"] if c in identity
     }
+
+
+def _feature_field_types(
+    handle: ParquetHandle, preprocessor_metadata: dict,
+) -> dict:
+    """Each parquet field's arrow type, read from the schema alone — no data.
+
+    Shared by both training-read backstops (B6 and B9) so "which columns exist,
+    and as what" is answered once and the same way. Goes through
+    :func:`open_parquet_dataset`, which is what makes hive partition columns
+    visible: the training cache stores ``schema.time`` and ``schema.item`` as
+    directory names (``<root>/snap_date=.../prod_name=.../*.parquet``, see
+    ``populate_cache_from_hive`` in ``pipelines/training/steps/local_cache.py``),
+    and a plain ``pyarrow.dataset(path, format="parquet")`` does not discover
+    them — it returns a schema missing exactly the group and item columns.
+    """
+    schema = open_parquet_dataset(handle.path).schema
+    return {name: schema.field(name).type for name in schema.names}
+
+
+def _raise_if(errors: list, headline: str) -> None:
+    """Raise one collect-all ``DataConsistencyError``, or return quietly.
+
+    Both backstops report every offending column at once rather than the first,
+    so an operator fixing a stale parquet learns the whole story in one run.
+    """
+    from recsys_tfb.core.consistency import DataConsistencyError
+
+    if errors:
+        raise DataConsistencyError(
+            f"{headline} ({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
+        )
 
 
 def _arrow_storage_name(arrow_type) -> str:
@@ -520,12 +559,12 @@ def _arrow_storage_name(arrow_type) -> str:
     return str(arrow_type)
 
 
-def _assert_feature_storage_type(
+def matrix_dtype_checked_against_parquet(
     handle: ParquetHandle,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> np.dtype:
-    """B9 training-read backstop; returns the dtype to allocate the matrix as.
+    """The dtype to allocate the matrix as — and the B9 backstop that earns it.
 
     Reads the parquet **schema only** (pyarrow metadata, no data), like the B6
     backstop above — the whole point is to fail before a read that cannot fit in
@@ -540,35 +579,27 @@ def _assert_feature_storage_type(
     agree, the returned dtype is both.
     """
     from recsys_tfb.core.consistency import (
-        DataConsistencyError,
         feature_storage_type_errors,
         resolved_numeric_storage,
     )
 
-    import pyarrow.dataset as pads
-
     declared, _ = resolved_numeric_storage(parameters)
     deferred = _deferred_categoricals(preprocessor_metadata, parameters)
-    feature_cols = preprocessor_metadata["feature_columns"]
-
-    schema = pads.dataset(handle.path, format="parquet").schema
-    field_type = {name: schema.field(name).type for name in schema.names}
+    field_type = _feature_field_types(handle, preprocessor_metadata)
     feature_types = {
         c: _arrow_storage_name(field_type[c])
-        for c in feature_cols
+        for c in preprocessor_metadata["feature_columns"]
         if c in field_type and c not in deferred
     }
-    errors = feature_storage_type_errors(feature_types, declared)
-    if errors:
-        raise DataConsistencyError(
-            "train_model_input feature columns are not stored as the declared "
-            "numeric storage type (" + str(len(errors)) + " issue(s)):\n- "
-            + "\n- ".join(errors)
-        )
+    _raise_if(
+        feature_storage_type_errors(feature_types, declared),
+        "train_model_input feature columns are not stored as the declared "
+        "numeric storage type",
+    )
     return np.dtype(declared)
 
 
-def _weight_key_columns(parameters: dict) -> list:
+def _weight_key_columns(parameters: dict) -> list[str]:
     """The configured sample-weight key columns, defaulting to ``schema.item``.
 
     One definition so the streaming read knows which columns to keep and
@@ -622,10 +653,10 @@ def _stream_matrix(
     category_mappings = preprocessor_metadata["category_mappings"]
     deferred = _deferred_categoricals(preprocessor_metadata, parameters)
 
-    dtype = _assert_feature_storage_type(
+    dtype = matrix_dtype_checked_against_parquet(
         handle, preprocessor_metadata, parameters)
 
-    ds = pads.dataset(handle.path, format="parquet")
+    ds = open_parquet_dataset(handle.path)
     available = set(ds.schema.names)
     # Absent columns are dropped rather than requested: a configured weight-key
     # column that the parquet does not carry is the graceful all-ones case
@@ -643,11 +674,7 @@ def _stream_matrix(
 
     n_rows = ds.count_rows()
     X = np.empty((n_rows, len(feature_cols)), dtype=dtype)
-    # Passed explicitly rather than left to the default: a default argument
-    # binds STREAM_BATCH_BYTES once at import, so a test (or an operator)
-    # that changes the module attribute would silently keep the old budget.
-    batch_rows = stream_batch_rows(
-        len(read_cols), dtype.itemsize, STREAM_BATCH_BYTES)
+    batch_rows = stream_batch_rows(len(read_cols), dtype.itemsize)
     logger.info(
         "%s: streaming read n_rows=%d n_read_columns=%d (of %d in file) "
         "dtype=%s batch_rows=%d matrix_mib=%.1f",
