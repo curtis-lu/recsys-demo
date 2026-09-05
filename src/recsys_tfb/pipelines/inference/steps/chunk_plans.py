@@ -196,3 +196,91 @@ def as_rows(chunks) -> list[list]:
     produce the same manifest, and a set's iteration order is not that.
     """
     return sorted(list(chunk) for chunk in chunks)
+
+
+#: The five lists a run produces, keyed as :func:`build_chunk_report` carries
+#: them. Ordered as the decision is made: score it, leave it alone, redo it on
+#: request, find nobody in it — plus the partitions the grid no longer covers.
+#:
+#: **These are not five disjoint buckets**, which is why :func:`_tally` does
+#: not simply expose them: ``rebuilt`` is a subset of what the run set out to
+#: process (see :class:`ScoringChunkPlan`), so it overlaps ``processed`` and
+#: ``empty``, and ``surplus`` sits outside the configured grid entirely.
+CHUNK_KINDS = ("processed", "skipped", "rebuilt", "empty", "surplus")
+
+
+def _tally(rows: dict, month=None) -> dict:
+    """Count the lists in a shape whose keys say how they add up.
+
+    ``processed``, ``skipped`` and ``empty`` partition the configured grid —
+    every chunk lands in exactly one — so ``grid`` is their sum and a reader
+    can check it. ``rebuilt`` is spelled ``of_which_rebuilt`` because it is a
+    *subset* of the first and third: reading these as five buckets and adding
+    them up overshoots the grid by however many chunks ``--rebuild-dates``
+    forced (a real run measured processed=80 with of_which_rebuilt=80). The key
+    name is the only place that warning can live — JSON carries no comments,
+    and this file exists to be opened months later by someone who has not read
+    this module.
+
+    ``month`` restricts the count to one ``snap_date``; ``None`` counts all.
+    """
+    def n(kind):
+        return sum(
+            1 for row in rows[kind] if month is None or row[0] == month
+        )
+
+    return {
+        "grid": n("processed") + n("skipped") + n("empty"),
+        "processed": n("processed"),
+        "skipped": n("skipped"),
+        "empty": n("empty"),
+        "of_which_rebuilt": n("rebuilt"),
+        "surplus": n("surplus"),
+    }
+
+
+def build_chunk_report(manifest: dict, surplus: Iterable, run_id: str) -> dict:
+    """The scoring manifest as something that outlives the process.
+
+    ``score_manifest`` already carries every list this returns, but it is a
+    memory-only catalog entry on purpose: landing it would let a
+    ``--from-node rank_predictions`` slice load a *previous* run's manifest
+    instead of re-running the scoring node, and ``validate_predictions`` reads
+    values out of it (``docs/pipelines/inference.md`` section 7.4). So the
+    record is a separate artifact rather than a persisted twin — same lists,
+    different job: this one is read by people after the fact, never by a node.
+
+    Three things are added on the way out. ``surplus`` is one: the plan
+    computes it and only ever ``logger.warning``s it, yet it names partitions
+    that keep contributing rows to the published ranking until someone drops
+    them by hand. ``by_snap_date`` is the second, and it covers **every
+    configured month** including the ones no list mentions — without that row,
+    "this month was entirely skipped" and "this month was not in the run" read
+    identically.
+
+    ``run_id`` is the third, and it is what makes the file safe to read back.
+    It lands in ``data/inference/<model_version>/<snap_date>/``, a directory
+    every run of that model and month reuses, and a slice that never reaches
+    the scoring node leaves the previous run's copy sitting there untouched.
+    The stamp is how ``__main__._chunk_report_extra`` refuses to quote it as
+    this run's.
+    """
+    rows = {
+        "processed": manifest["chunks_processed"],
+        "skipped": manifest["chunks_skipped"],
+        "rebuilt": manifest["chunks_rebuilt"],
+        "empty": manifest["chunks_empty"],
+        "surplus": as_rows(surplus),
+    }
+    return {
+        **manifest,
+        "run_id": run_id,
+        "chunks_surplus": rows["surplus"],
+        "counts": _tally(rows),
+        # A chunk row is ``[snap_date, entity_bucket, item]`` (:func:`as_rows`),
+        # so element 0 is the month.
+        "by_snap_date": {
+            month: _tally(rows, month)
+            for month in sorted(set(manifest["snap_dates"]))
+        },
+    }

@@ -34,7 +34,11 @@ def create_pipeline() -> Pipeline:
                 # must stay `unranked_predictions` -- and a new optional input
                 # must NOT be appended after it.
                 writes=["unranked_predictions"],
-                outputs="score_manifest",
+                # Two outputs, and the asymmetry is the design: the first has
+                # no catalog entry and must not get one, the second does.
+                # docs/pipelines/inference.md section 7.4 is where that is
+                # argued; predict_and_write_scores' docstring summarises it.
+                outputs=["score_manifest", "score_chunk_report"],
             ),
             Node(
                 rank_predictions,

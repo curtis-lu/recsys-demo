@@ -233,3 +233,134 @@ class TestModulePurity:
 
     def test_no_project_import(self):
         assert "recsys_tfb" not in {r.lstrip(".") for r in self._imported_roots()}
+
+
+class TestBuildChunkReport:
+    """The on-disk record of what this run scored, skipped and redid.
+
+    ``score_manifest`` holds those lists but is memory-only on purpose
+    (``docs/pipelines/inference.md`` section 7.4), so after the process exits
+    only the log's *counts* survive. This report is the copy that lands, and
+    these tests pin the two things a count cannot answer: which chunks, and
+    which month they were in.
+    """
+
+    MANIFEST = {
+        "snap_dates": ["2025-11-30", "2025-12-31"],
+        "items": ITEMS,
+        "entity_buckets": 2,
+        "model_version": "v1",
+        "n_rows_written": 40,
+        "chunks_processed": [["2025-12-31", 0, "fund_stock"]],
+        "chunks_skipped": [
+            ["2025-11-30", 0, "fund_stock"],
+            ["2025-11-30", 1, "exchange_usd"],
+        ],
+        "chunks_rebuilt": [["2025-12-31", 0, "fund_stock"]],
+        "chunks_empty": [["2025-12-31", 1, "exchange_usd"]],
+        "expected_partitions": [],
+        "written_partitions": [],
+    }
+
+    def _report(self, surplus=(), run_id="run-1"):
+        return chunk_plans.build_chunk_report(self.MANIFEST, surplus, run_id)
+
+    def test_the_report_names_the_run_that_wrote_it(self):
+        """Which is what lets a reader tell it apart from the run before.
+
+        The file sits in ``data/inference/<model_version>/<snap_date>/``, a
+        directory every run of that model and month reuses. Without the stamp,
+        a report left by an earlier run is indistinguishable from this one's.
+        """
+        assert self._report(run_id="run-7")["run_id"] == "run-7"
+
+    def test_every_manifest_key_survives(self):
+        report = self._report()
+        for key, value in self.MANIFEST.items():
+            assert report[key] == value
+
+    def test_counts_say_how_they_add_up(self):
+        """``grid`` is the sum of the three disjoint lists, and only those.
+
+        The MANIFEST above has the trap built in: its one rebuilt chunk is the
+        same chunk as its one processed chunk, because ``rebuilt`` is a subset
+        of what the run set out to do, not a fourth bucket
+        (:class:`ScoringChunkPlan`). A reader who adds all five numbers gets 5
+        for a 3-chunk grid, which is why the key is ``of_which_rebuilt``.
+        """
+        assert self._report()["counts"] == {
+            "grid": 4,  # 1 processed + 2 skipped + 1 empty
+            "processed": 1, "skipped": 2, "empty": 1,
+            "of_which_rebuilt": 1,
+            "surplus": 0,
+        }
+
+    def test_the_rebuilt_chunk_is_not_counted_twice_in_the_grid(self):
+        """The mistake this shape exists to prevent, pinned on its own.
+
+        ``chunks_rebuilt`` here holds a chunk that is also in
+        ``chunks_processed``. Counting it as its own bucket would make the grid
+        5 for a run that touched 4 chunks — and an inflated grid reads as
+        "partitions are missing".
+        """
+        report = self._report()
+        assert self.MANIFEST["chunks_rebuilt"][0] in self.MANIFEST["chunks_processed"]
+        counts = report["counts"]
+        assert counts["grid"] == (
+            counts["processed"] + counts["skipped"] + counts["empty"]
+        )
+
+    def test_surplus_lands_instead_of_only_being_warned_about(self):
+        """``plan.surplus`` reaches a ``logger.warning`` and nothing else.
+
+        Partitions outside this run's grid keep contributing rows to the
+        published ranking until someone drops them by hand, so "which ones"
+        has to outlive the log.
+        """
+        stray = [ScoringChunk("2025-12-31", 9, "fund_stock")]
+        report = self._report(surplus=stray)
+        assert report["chunks_surplus"] == [["2025-12-31", 9, "fund_stock"]]
+        assert report["counts"]["surplus"] == 1
+
+    def test_by_snap_date_splits_the_chunks_by_month(self):
+        assert self._report()["by_snap_date"]["2025-11-30"] == {
+            "grid": 2, "processed": 0, "skipped": 2, "empty": 0,
+            "of_which_rebuilt": 0, "surplus": 0,
+        }
+        assert self._report()["by_snap_date"]["2025-12-31"] == {
+            "grid": 2, "processed": 1, "skipped": 0, "empty": 1,
+            "of_which_rebuilt": 1, "surplus": 0,
+        }
+
+    def test_a_month_that_did_nothing_still_gets_a_row(self):
+        """A configured month absent from every list is the interesting case.
+
+        Dropping it would make "this month was entirely skipped" and "this
+        month was never in the run" look identical in the report, which is the
+        confusion the whole file exists to remove.
+        """
+        manifest = {
+            **self.MANIFEST,
+            "snap_dates": ["2025-10-31"] + self.MANIFEST["snap_dates"],
+        }
+        report = chunk_plans.build_chunk_report(manifest, (), "run-1")
+        assert report["by_snap_date"]["2025-10-31"] == {
+            "grid": 0, "processed": 0, "skipped": 0, "empty": 0,
+            "of_which_rebuilt": 0, "surplus": 0,
+        }
+
+    def test_adding_to_the_report_does_not_reach_the_manifest(self):
+        """The two travel out of the same node and must not be one dict.
+
+        Only the top level is copied — the chunk lists are shared, which is
+        fine because neither side mutates them — so what this pins is that
+        writing to the report leaves ``score_manifest`` alone. Returning the
+        same object twice would make the catalog land the entry that must not
+        land.
+        """
+        report = self._report()
+        report["a_key_only_the_report_has"] = 1
+        assert "a_key_only_the_report_has" not in self.MANIFEST
+        for added in ("counts", "by_snap_date", "run_id", "chunks_surplus"):
+            assert added in report
+            assert added not in self.MANIFEST

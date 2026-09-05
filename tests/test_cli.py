@@ -391,6 +391,70 @@ class TestCLI:
         finally:
             os.chdir(old_cwd)
 
+    def test_inference_manifest_quotes_this_runs_chunk_report(self, tmp_path):
+        """The wiring between the catalog entry and manifest.json, end to end.
+
+        Three links, none of which the ``_chunk_report_extra`` unit tests can
+        see: ``run_id`` reaches the node through ``parameters`` (so the report
+        can stamp itself), the report lands in the version directory the CLI
+        reads back, and the inference command actually folds the summary in.
+        Cutting any one of them leaves a manifest that answers "which chunks
+        did this run skip" with silence — the state issue #195 was opened
+        about.
+        """
+        _scoreable_inference_conf(tmp_path)
+
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps({
+            "version": "a1b2c3d4",
+            "base_dataset_version": "deadbeef",
+            "train_variant_id": "cafef00d",
+        }))
+        (models_dir / "best").symlink_to(version_dir.resolve())
+
+        inference_dir = tmp_path / "data" / "inference" / "a1b2c3d4" / "20240331"
+        added = {}
+
+        def _fake_run(*_args, **_kwargs):
+            """Stand in for the scoring node's catalog write.
+
+            The run_id comes from the ``parameters`` the CLI handed the
+            catalog, which is the only way the real node gets it either.
+            """
+            inference_dir.mkdir(parents=True, exist_ok=True)
+            (inference_dir / "chunk_report.json").write_text(json.dumps({
+                "run_id": added["parameters"].load()["run_id"],
+                "counts": {"grid": 6, "processed": 0, "skipped": 6,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
+                "by_snap_date": {"2024-03-31": {
+                    "grid": 6, "processed": 0, "skipped": 6,
+                    "empty": 0, "of_which_rebuilt": 0, "surplus": 0}},
+                "chunks_skipped": [["2024-03-31", 0, "p1"]],
+            }))
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls:
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = lambda name, ds: added.__setitem__(name, ds)
+                with patch("recsys_tfb.__main__.Runner") as mock_runner_cls:
+                    mock_runner_cls.return_value.run.side_effect = _fake_run
+                    runner.invoke(app, ["inference"])
+        finally:
+            os.chdir(old_cwd)
+
+        manifest = json.loads((inference_dir / "manifest.json").read_text())
+        assert manifest["scoring_chunks"]["counts"]["skipped"] == 6
+        assert manifest["scoring_chunks"]["report"] == "chunk_report.json"
+        # The stamp has to match, or the guard would have dropped the summary.
+        report = json.loads((inference_dir / "chunk_report.json").read_text())
+        assert report["run_id"] == manifest["run_id"]
+        # The lists stay in their own file.
+        assert "chunks_skipped" not in manifest["scoring_chunks"]
+
     def test_training_pipeline_fails_without_inputs(self, tmp_path):
         _setup_conf(tmp_path)
 
@@ -538,6 +602,114 @@ def test_sample_weight_extra_reads_report(tmp_path):
 def test_sample_weight_extra_absent_returns_none(tmp_path):
     from recsys_tfb.__main__ import _sample_weight_extra
     assert _sample_weight_extra(tmp_path) is None
+
+
+def _chunk_report_file(vdir, **overrides):
+    report = {
+        "run_id": "run-1",
+        "snap_dates": ["2025-11-30", "2025-12-31"],
+        "model_version": "mv",
+        "chunks_processed": [["2025-12-31", 0, "fund_stock"]],
+        "chunks_skipped": [["2025-11-30", 0, "fund_stock"]],
+        "chunks_rebuilt": [],
+        "chunks_empty": [],
+        "chunks_surplus": [],
+        "expected_partitions": [["2025-11-30", 0, "fund_stock"]],
+        "written_partitions": [["2025-11-30", 0, "fund_stock"]],
+        "counts": {"grid": 2, "processed": 1, "skipped": 1,
+                   "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
+        "by_snap_date": {
+            "2025-11-30": {"grid": 1, "processed": 0, "skipped": 1,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
+            "2025-12-31": {"grid": 1, "processed": 1, "skipped": 0,
+                           "empty": 0, "of_which_rebuilt": 0, "surplus": 0},
+        },
+    }
+    report.update(overrides)
+    vdir.mkdir(parents=True, exist_ok=True)
+    (vdir / "chunk_report.json").write_text(json.dumps(report))
+    return report
+
+
+def test_chunk_report_extra_folds_the_summary_into_the_manifest(tmp_path):
+    """manifest.json gets the counts; the per-chunk lists stay in their own file.
+
+    Both halves matter. Without the summary a reader of manifest.json cannot
+    tell a run that skipped everything from one that scored everything
+    (issue #195). With the lists inlined, a production run's manifest.json —
+    12 months x 20 buckets x 22 items — grows by a megabyte of chunk rows and
+    stops being a file anyone opens.
+    """
+    from recsys_tfb.__main__ import _chunk_report_extra
+
+    vdir = tmp_path / "inference" / "mv" / "20251231"
+    _chunk_report_file(vdir, run_id="run-1")
+    extra = _chunk_report_extra(vdir, "run-1")
+
+    assert extra["scoring_chunks"]["counts"]["skipped"] == 1
+    assert extra["scoring_chunks"]["by_snap_date"]["2025-11-30"]["skipped"] == 1
+    # The pointer is what makes the summary actionable: it names where the
+    # answer to "which ones" lives.
+    assert extra["scoring_chunks"]["report"] == "chunk_report.json"
+    for key in ("chunks_processed", "chunks_skipped", "chunks_rebuilt",
+                "chunks_empty", "chunks_surplus", "expected_partitions",
+                "written_partitions"):
+        assert key not in extra["scoring_chunks"]
+
+
+def test_chunk_report_catalog_path_matches_where_the_cli_reads_it():
+    """The catalog writes the file; the CLI reads it back by path. Pin the seam.
+
+    ``conf/base/catalog.yaml`` and ``__main__`` each state that the filename
+    and location are part of the contract, but nothing enforced it: moving the
+    entry into a ``diagnostics/`` subdirectory, or renaming the file, leaves
+    every other test green while ``_chunk_report_extra`` silently returns
+    ``None`` and the summary vanishes from manifest.json.
+
+    The two template segments are the same ones the inference command builds
+    ``version_dir`` from (``data_dir / "inference" / mv / snap_date``), and
+    ``test_inference_uses_actual_model_hash`` pins that they resolve to that
+    model hash and that date.
+    """
+    from recsys_tfb.__main__ import CHUNK_REPORT_NAME
+
+    repo_root = Path(__file__).resolve().parents[1]
+    catalog = yaml.safe_load((repo_root / "conf/base/catalog.yaml").read_text())
+    filepath = Path(catalog["score_chunk_report"]["filepath"])
+
+    assert filepath.name == CHUNK_REPORT_NAME
+    assert filepath.parent.parts == (
+        "data", "inference", "${model_version}", "${snap_date}",
+    )
+
+
+def test_chunk_report_extra_absent_returns_none(tmp_path):
+    """A sliced run that never reached the scoring node writes no report.
+
+    Returning ``None`` rather than an empty summary keeps "this run made no
+    scoring decisions" distinguishable from "it decided to do nothing".
+    """
+    from recsys_tfb.__main__ import _chunk_report_extra
+    assert _chunk_report_extra(tmp_path, "run-1") is None
+
+
+def test_chunk_report_extra_refuses_an_earlier_runs_report(tmp_path, caplog):
+    """The version directory is reused by every run of that model and month.
+
+    ``--only-node build_inference_population_features`` is a documented
+    operation (docs/pipelines/inference.md section 8) and it never reaches the
+    scoring node — yet the CLI still writes manifest.json afterwards. Folding
+    in whatever ``chunk_report.json`` happens to be lying there would put a
+    *previous* run's skip list in *this* run's provenance, which is the exact
+    confusion issue #195 was opened about.
+    """
+    from recsys_tfb.__main__ import _chunk_report_extra
+
+    vdir = tmp_path / "inference" / "mv" / "20251231"
+    _chunk_report_file(vdir, run_id="the-run-before")
+    with caplog.at_level(logging.WARNING):
+        assert _chunk_report_extra(vdir, "this-run") is None
+    assert "the-run-before" in caplog.text
 
 
 def test_write_manifest_stub_writes_running(tmp_path):

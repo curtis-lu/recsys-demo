@@ -42,6 +42,7 @@ from recsys_tfb.models.feature_view import model_feature_view
 from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     ScoringChunk,
     as_rows,
+    build_chunk_report,
     plan_scoring_chunks,
 )
 from recsys_tfb.pipelines.inference.steps.feature_view import (
@@ -231,7 +232,7 @@ def predict_and_write_scores(
     preprocessor: dict,
     parameters: dict,
     unranked_predictions,  # HiveTableDataset, supplied via Node(writes=...)
-) -> dict:
+) -> tuple[dict, dict]:
     """Score chunk by chunk, writing one partition per chunk as it goes.
 
     **Outer loop entity bucket, inner loop item.** One bucket's features cross
@@ -268,10 +269,23 @@ def predict_and_write_scores(
       present.
 
     Returns:
-        manifest dict. It is the DAG edge — the data itself travels through the
+        ``(score_manifest, score_chunk_report)``.
+
+        The manifest is the DAG edge — the data itself travels through the
         catalog write, so the downstream nodes read it back from Hive. It also
         carries the partition bookkeeping ``validate_predictions`` needs to
-        answer "is every chunk present" without scanning anything.
+        answer "is every chunk present" without scanning anything. It stays
+        memory-only: landing it would let a ``--from-node rank_predictions``
+        slice load a previous run's copy instead of re-running this node, and
+        the numbers validation compares would then come from another run
+        (``docs/pipelines/inference.md`` section 7.4).
+
+        The report is the same bookkeeping in a form that outlives the process
+        (issue #195). Nothing consumes it; it exists because after the run the
+        log answers only "40 chunks were skipped" and the question people
+        actually ask is *which* forty. Sent to the catalog as
+        ``score_chunk_report`` — a diagnostic byproduct, same arrangement as
+        ``sample_weight_report`` and ``numeric_precision_report``.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -496,7 +510,17 @@ def predict_and_write_scores(
         len(processed), len(plan.skipped), len(plan.rebuilt), len(empty),
         n_rows_written, manifest["model_version"],
     )
-    return manifest
+    # Built here rather than in a node of its own so that it lands whenever
+    # scoring decisions are made. A separate node would be a sibling of
+    # `rank_predictions`, not an ancestor, so `--from-node rank_predictions`
+    # would skip it — and that slice re-runs *this* node (section 7.4), which
+    # is exactly a run whose skip list is worth keeping.
+    return manifest, build_chunk_report(
+        # Subscript, not `.get`: a missing run_id would stamp None, and
+        # `_chunk_report_extra` would then quietly leave the summary out of
+        # manifest.json on every run. A plumbing break should be loud.
+        manifest, plan.surplus, parameters["run_id"],
+    )
 
 
 def rank_predictions(
