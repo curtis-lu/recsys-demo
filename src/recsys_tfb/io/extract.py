@@ -97,55 +97,149 @@ def composite_key_series(pdf: pd.DataFrame, weight_keys: list) -> pd.Series:
     return keys
 
 
-def translate_weight_table(
-    sample_weights: dict,
-    weight_keys: list,
-    category_mappings: dict,
-    identity_columns: list,
-) -> tuple[dict, dict]:
-    """Translate config sample_weights keys into the parquet's encoded space.
+def weight_key_decode_map(
+    weight_keys: list, category_mappings: dict, identity_columns: list,
+) -> dict[str, list]:
+    """The weight-key columns that hold category *codes*, with their vocabularies.
 
-    A component whose column is an *encoded feature* (in ``category_mappings``
-    and NOT an identity column — identity cats are stored raw in model_input) is
-    mapped from its human-readable value to ``str(index)`` in
-    ``category_mappings[col]`` (matching ``encode_categoricals``). Identity /
-    label / carry / numeric components pass through unchanged. A key with any
-    unknown feature value is dropped (cannot match) and recorded.
+    A declared categorical that is **not** an identity column is encoded by
+    ``preprocessing.encode_categoricals`` into its index in
+    ``category_mappings[col]``, so model_input stores a number where the config
+    names a category. Identity categoricals are the exception: their encoding is
+    deferred to the driver and model_input keeps the raw value (see
+    ``preprocessing.encodable_categoricals``), so decoding one would corrupt a
+    key that already matches.
 
-    Returns ``(translated, unknown_values)``; ``unknown_values`` maps a weight-key
-    column to the sorted config values absent from its mapping.
+    Everything else — the label, carry columns, plain numerics — is stored as
+    written and is absent from the map.
     """
     identity = set(identity_columns)
-    code_of: dict[str, dict[str, str]] = {}
-    for col in weight_keys:
-        if col in category_mappings and col not in identity:
-            code_of[col] = {
-                str(cat): str(i) for i, cat in enumerate(category_mappings[col])
-            }
+    return {
+        col: category_mappings[col]
+        for col in weight_keys
+        if col in category_mappings and col not in identity
+    }
 
-    translated: dict[str, float] = {}
-    unknown: dict[str, list[str]] = {}
+
+def decode_weight_keys(
+    frame: pd.DataFrame, decode_map: dict,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Category codes back to category values; flag the rows that have none.
+
+    Why decode the *data* rather than translate the config table into code
+    space: the code's storage type is an implementation detail that has already
+    changed under this lookup once. #283 widened
+    ``cast_numeric_features_to_storage_type`` to every numeric feature, and an
+    encoded categorical *is* a feature column, so its code became ``float32``;
+    a key built straight off the column went from ``"0"`` to ``"0.0"`` and
+    matched nothing (#297). Decoding restores the value the config was written
+    against, which is the only representation neither side can change.
+
+    Returns ``(decoded, undecodable)``. ``undecodable`` is a boolean array over
+    the frame's rows: True when a column's value is not a valid index into its
+    vocabulary — ``preprocessing.UNKNOWN_CATEGORY_CODE`` (-1, the encoder's
+    mark for a value its fit never saw), a NaN, or an out-of-range, infinite or
+    non-integral number.
+
+    Such a row is *flagged*, not decoded to a stand-in string. A stand-in would
+    be a collision waiting to happen: a vocabulary may contain a category
+    literally named ``"-1"`` or ``"nan"``, and then an unknown row and a real
+    one would build the same key and take the same weight.
+
+    Acting on the flag is the caller's job, and only the two that decide a
+    weight do: :func:`_compute_row_weights` pins those rows to 1.0 by position,
+    and ``steps/sample_weights.py::distinct_weight_keys`` drops them from the
+    set it reports as present. :func:`_sample_data_keys` deliberately does not
+    — its output is a log line, and an undecodable cell showing as ``None``
+    there is the reader's cue that the parquet holds a code no vocabulary
+    covers.
+
+    The frame is copied only when there is something to decode.
+    """
+    if not decode_map:
+        return frame, np.zeros(len(frame), dtype=bool)
+    decoded = frame.copy()
+    undecodable = np.zeros(len(frame), dtype=bool)
+    for col, categories in decode_map.items():
+        # ``.astype("float64")`` before ``to_numpy``: a nullable dtype holding
+        # ``pd.NA`` (Int64 is reachable here — see ``dropna=False`` in
+        # :func:`_weight_keys_and_codes`) refuses to become a float64 numpy
+        # array directly, and the coerce alone does not widen it.
+        raw = (
+            pd.to_numeric(frame[col], errors="coerce")
+            .astype("float64")
+            .to_numpy(dtype=np.float64)
+        )
+        # Clip before the int cast: casting inf or 1e30 to int64 is undefined,
+        # and a clipped value fails the `safe == idx` identity below anyway.
+        safe = np.clip(np.where(np.isfinite(raw), raw, -1.0), -1.0, float(len(categories)))
+        idx = safe.astype(np.int64)
+        ok = (safe == idx) & (idx >= 0) & (idx < len(categories))
+        undecodable |= ~ok
+        out = np.empty(len(frame), dtype=object)
+        if len(categories):
+            out[ok] = np.asarray(categories, dtype=object)[idx[ok]]
+        decoded[col] = out
+    return decoded, undecodable
+
+
+def nameable_weight_entries(
+    sample_weights: dict, weight_keys: list, decode_map: dict,
+) -> tuple[dict, dict]:
+    """Split the configured table into entries a row could name, and the rest.
+
+    A component of a decoded column can only ever be one of that column's
+    categories, so an entry naming anything else — a typo, or a value the
+    encoder's fit never saw — cannot match a single row. Reporting it is the
+    point; the weights would be identical either way.
+
+    Returns ``(nameable, unknown_values)``, where ``unknown_values`` maps a
+    weight-key column to the sorted configured values its vocabulary lacks.
+
+    Every returned key is ``str(key)``, matching the string
+    :func:`composite_key_series` builds on the data side. YAML is why: an
+    unquoted ``sample_weights: {1: 5.0}`` on an int weight key (``label``, a
+    year, a flag) parses to the *int* ``1``, and ``Series.map`` on a
+    string-keyed Series would miss it — silently, at weight 1.0, which is the
+    failure this whole path exists to avoid.
+    """
+    known = {col: set(map(str, cats)) for col, cats in decode_map.items()}
+    nameable: dict = {}
+    unknown: dict[str, set] = {}
     for key, weight in sample_weights.items():
-        parts = str(key).split("|")
+        key = str(key)
+        parts = key.split("|")
         if len(parts) != len(weight_keys):
-            # arity is enforced by A9b at the config gate; keep as-is defensively.
-            translated[str(key)] = weight
+            # A9b reports arity at the config gate; here it simply never
+            # matches, so keep it and let the zero-match diagnostic speak.
+            nameable[key] = weight
             continue
-        out_parts: list[str] = []
         bad = False
         for part, col in zip(parts, weight_keys):
-            if col in code_of:
-                code = code_of[col].get(part)
-                if code is None:
-                    unknown.setdefault(col, []).append(part)
-                    bad = True
-                else:
-                    out_parts.append(code)
-            else:
-                out_parts.append(part)
+            if col in known and part not in known[col]:
+                unknown.setdefault(col, set()).add(part)
+                bad = True
         if not bad:
-            translated["|".join(out_parts)] = weight
-    return translated, {c: sorted(set(v)) for c, v in unknown.items()}
+            nameable[key] = weight
+    return nameable, {c: sorted(v) for c, v in unknown.items()}
+
+
+def decoded_key_series(
+    frame: pd.DataFrame, weight_keys: list, decode_map: dict,
+) -> tuple[pd.Series, np.ndarray]:
+    """Decode, then build one composite key per row of ``frame``.
+
+    Every key the weighting and the diagnostics compare comes through here, so
+    "decode first, then join" is stated once rather than five times. Which rows
+    of ``frame`` it is handed is what differs between callers — the whole frame,
+    its distinct combinations, or one row per group.
+
+    Public because ``pipelines/training/steps/sample_weights.py`` builds the
+    same keys off the train parquet, and a report that derived them its own way
+    could vouch for a match the weighting never made.
+    """
+    decoded, undecodable = decode_weight_keys(frame, decode_map)
+    return composite_key_series(decoded, weight_keys), undecodable
 
 
 def _key_column_is_string_faithful(col: pd.Series) -> bool:
@@ -179,34 +273,54 @@ def _key_column_is_string_faithful(col: pd.Series) -> bool:
     return False
 
 
-def _weight_key_frame(pdf: pd.DataFrame, weight_keys: list) -> pd.DataFrame | None:
+def _weight_key_frame(
+    pdf: pd.DataFrame, weight_keys: list, decode_map: dict,
+) -> pd.DataFrame | None:
     """The weight-key columns as their own frame, or ``None`` to decline.
 
     ``None`` means resolving the weights per distinct key combination would not
     be provably exact for these columns (see
     :func:`_key_column_is_string_faithful`), so the caller must build the key
     per row instead.
+
+    A column in ``decode_map`` is admitted whatever its dtype, because
+    :func:`decode_weight_keys` runs between the grouping and the string build:
+    the key is then a function of the *decoded* value, and equal codes decode
+    to one category — ``0.0`` and ``-0.0`` are one group and both index 0, and
+    every undecodable value is pinned to 1.0 by position rather than by a
+    string. That is what makes the dedup path available to the ``float32``
+    codes #283 produces; refusing it costs one built string per row. Measured
+    2026-09-05 on macOS arm64, 8 CPU / 16 GB, pandas 1.5.3 / numpy 1.25.0:
+    one key over 10,000,000 rows 1.898s -> 0.198s (9.6x), three keys
+    9.048s -> 0.441s (20.5x).
     """
     small = _narrow_frame(pdf, weight_keys)
-    if not all(_key_column_is_string_faithful(small[k]) for k in weight_keys):
+    if not all(
+        k in decode_map or _key_column_is_string_faithful(small[k])
+        for k in weight_keys
+    ):
         return None
     return small
 
 
-def _distinct_weight_keys(small: pd.DataFrame, weight_keys: list) -> pd.Series:
+def _distinct_weight_keys(
+    small: pd.DataFrame, weight_keys: list, decode_map: dict,
+) -> pd.Series:
     """One composite key per distinct combination, in first-appearance order.
 
     ``drop_duplicates`` keeps first occurrences, so this is the cheap half of
     :func:`_weight_keys_and_codes` for the caller that does not need the
     per-row codes.
     """
-    return composite_key_series(small.drop_duplicates(), weight_keys)
+    keys, _ = decoded_key_series(small.drop_duplicates(), weight_keys, decode_map)
+    return keys
 
 
 def _weight_keys_and_codes(
-    small: pd.DataFrame, weight_keys: list,
-) -> tuple[pd.Series, np.ndarray]:
-    """As :func:`_distinct_weight_keys`, plus each row's index into it.
+    small: pd.DataFrame, weight_keys: list, decode_map: dict,
+) -> tuple[pd.Series, np.ndarray, np.ndarray]:
+    """As :func:`_distinct_weight_keys`, plus each row's index into it and the
+    combinations that carry no category at all.
 
     The point: a weight table is keyed on a handful of distinct combinations,
     so building one ``'|'``-joined string per *row* does N times the work of
@@ -214,6 +328,10 @@ def _weight_keys_and_codes(
     ``GroupBy``, and the key strings are built by the existing
     :func:`composite_key_series` on the few dozen surviving rows — the same
     function the whole-frame build used, unchanged.
+
+    Decoding runs *here*, on those few dozen rows, not on the frame: that is
+    what makes reversing the encoding affordable (see :func:`decode_weight_keys`
+    for why the data side is the one to move).
 
     On 10,000,000 rows x 3 weight keys (measured 2026-09-03 on macOS arm64, 8 CPU / 16 GB, pandas 1.5.3 /
     numpy 1.25.0), the
@@ -236,10 +354,16 @@ def _weight_keys_and_codes(
     """
     grouped = small.groupby(weight_keys, sort=False, dropna=False)
     codes = grouped.ngroup().to_numpy(dtype=np.int64)
-    return composite_key_series(grouped.head(1), weight_keys), codes
+    keys, undecodable = decoded_key_series(grouped.head(1), weight_keys, decode_map)
+    return keys, codes, undecodable
 
 
-def _sample_data_keys(pdf: pd.DataFrame, weight_keys: list, limit: int = 5) -> list:
+def _sample_data_keys(
+    pdf: pd.DataFrame,
+    weight_keys: list,
+    decode_map: dict | None = None,
+    limit: int = 5,
+) -> list:
     """First ``limit`` distinct data keys, for the zero-match diagnostic.
 
     Same keys the whole-frame build produced, from the same
@@ -248,16 +372,22 @@ def _sample_data_keys(pdf: pd.DataFrame, weight_keys: list, limit: int = 5) -> l
     combination rather than one per row, and skips the per-row codes the
     diagnostic has no use for.
 
+    Decoded, so the WARNING names the categories the config was written in
+    (``['M', 'F']``) rather than the codes it was stored as (``['0.0', '1.0']``)
+    — the reader has to compare the two lists, and that only works when both
+    are in the same vocabulary.
+
     The trailing ``drop_duplicates`` matters when a key *value* itself contains
     ``'|'``: two distinct value combinations can join to one string, and the
     replaced code deduped on the string.
     """
-    small = _weight_key_frame(pdf, weight_keys)
-    keys = (
-        composite_key_series(pdf, weight_keys)
-        if small is None
-        else _distinct_weight_keys(small, weight_keys)
-    )
+    decode_map = decode_map or {}
+    small = _weight_key_frame(pdf, weight_keys, decode_map)
+    if small is None:
+        keys, _ = decoded_key_series(
+            _narrow_frame(pdf, weight_keys), weight_keys, decode_map)
+    else:
+        keys = _distinct_weight_keys(small, weight_keys, decode_map)
     return keys.drop_duplicates().head(limit).tolist()
 
 
@@ -265,6 +395,7 @@ def _compute_row_weights(
     pdf: pd.DataFrame,
     weight_keys: list,
     sample_weights: dict,
+    decode_map: dict | None = None,
 ) -> np.ndarray:
     """Per-row LightGBM sample weight from a composite-key weight table.
 
@@ -274,17 +405,28 @@ def _compute_row_weights(
     Rows whose key is absent from ``sample_weights`` get weight 1.0
     (sparse-emit: only adjusted groups are written to the table).
 
+    ``decode_map`` (from :func:`weight_key_decode_map`) names the key columns
+    stored as category codes; they are decoded back to category values before
+    the key is built, so the table stays written in the config's own
+    vocabulary. A row whose code names no category is pinned to 1.0.
+
     Resolved per *distinct* key combination and scattered back to rows when
     that is exact (see :func:`_weight_key_frame`), else per row.
     """
     if not sample_weights or not weight_keys:
         return np.ones(len(pdf), dtype=np.float64)
-    small = _weight_key_frame(pdf, weight_keys)
+    decode_map = decode_map or {}
+    small = _weight_key_frame(pdf, weight_keys, decode_map)
     if small is None:
-        keys = composite_key_series(pdf, weight_keys)
-        return keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
-    uniq_keys, codes = _weight_keys_and_codes(small, weight_keys)
+        keys, undecodable = decoded_key_series(
+            _narrow_frame(pdf, weight_keys), weight_keys, decode_map)
+        w = keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
+        w[undecodable] = 1.0
+        return w
+    uniq_keys, codes, undecodable = _weight_keys_and_codes(
+        small, weight_keys, decode_map)
     lookup = uniq_keys.map(sample_weights).fillna(1.0).to_numpy(dtype=np.float64)
+    lookup[undecodable] = 1.0
     return lookup[codes]
 
 
@@ -298,13 +440,14 @@ def _row_weights_from_pdf(
     already blocks unavailable columns at CLI entry). Computed from the
     *given* pdf so it stays aligned to the caller's filtering/ordering.
 
-    Encode-aware: weight-key columns that are *encoded features* (present in
+    Decode-aware: weight-key columns that are *encoded features* (present in
     ``preprocessor_metadata["category_mappings"]`` and NOT identity columns)
-    are stored as int codes in the parquet.  The config table is translated
-    via ``translate_weight_table`` before matching, so callers can write
-    human-readable values (e.g. ``"hnw"``) in the YAML and still get correct
-    per-row weights.  Keys with unknown category values are dropped (cannot
-    match any row) and a WARNING is emitted.
+    are stored as numeric codes in the parquet. Those columns are decoded back
+    to their category values before the key is built (see
+    :func:`decode_weight_keys`), so callers write human-readable values (e.g.
+    ``"hnw"``) in the YAML and the lookup happens in that same vocabulary.
+    Entries naming a category the encoder never saw cannot match any row and
+    are reported with a WARNING.
 
     Emits one observability line per call (train + train_dev each log once) so a
     run's log alone answers "did sample_weight take effect?":
@@ -338,25 +481,25 @@ def _row_weights_from_pdf(
 
     category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
     identity_cols = get_schema(parameters)["identity_columns"]
-    translated, unknown = translate_weight_table(
-        sw, weight_keys, category_mappings, identity_cols)
+    decode_map = weight_key_decode_map(weight_keys, category_mappings, identity_cols)
+    nameable, unknown = nameable_weight_entries(sw, weight_keys, decode_map)
     if unknown:
         logger.warning(
             "sample_weight: unknown category value(s) %s — those entries cannot "
             "match any row (left at weight 1.0).", unknown,
         )
-        # If every key was dropped as unknown, the unknown-value warning above
+        # If every entry named something the vocabulary lacks, the warning above
         # is the full diagnosis — skip the redundant 0-match warning below.
-        if not translated:
+        if not nameable:
             return np.ones(n_rows, dtype=np.float64)
 
-    w = _compute_row_weights(pdf, weight_keys, translated)
+    w = _compute_row_weights(pdf, weight_keys, nameable, decode_map)
     n_adjusted = int((w != 1.0).sum())
     if n_adjusted == 0:
-        sample_data_keys = _sample_data_keys(pdf, weight_keys)
+        sample_data_keys = _sample_data_keys(pdf, weight_keys, decode_map)
         logger.warning(
             "sample_weight matched 0 of %d rows — weight_keys=%s; sample "
-            "configured keys (human-readable)=%s; sample data keys (encoded)=%s",
+            "configured keys=%s; sample data keys=%s (both decoded)",
             n_rows, weight_keys, sorted(map(str, sw))[:5], sample_data_keys,
         )
     else:

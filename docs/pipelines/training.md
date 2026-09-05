@@ -170,7 +170,7 @@ training:
 上例是手填的覆寫；要從實際樣本量**推導**這張表（雙因子地板 `v` ＋ 注意力 `A`，並一併處理 ratio 面下採），用 `scripts/sampling_overrides_editor.py`。概念框架、公式、`w_pos`/`w_neg` 與 key 組法、邊界情況見 [`../operations/user-guides/sampling-overrides-editor.md`](../operations/user-guides/sampling-overrides-editor.md)。
 
 權重只套用於 train 與 train-dev，不套用於 val、calibration、test 或 evaluation。
-類別欄位可在設定中使用人類可讀值，runtime 會依 preprocessor 的 category mappings 轉為實際 encoding 後比對；identity、label 與 carry columns 則保留原始值語意。
+類別欄位可在設定中使用人類可讀值：model_input 存的是 category code，runtime 會先依 preprocessor 的 category mappings **把資料側的 code 解回類別值**再比對，所以設定與資料在同一套詞彙裡；identity、label 與 carry columns 本來就是原始值，不經過這一步。資料側若出現 fit 沒看過的值（code `-1`），該列不屬於任何類別，權重固定 `1.0`。
 
 CLI 會檢查：
 
