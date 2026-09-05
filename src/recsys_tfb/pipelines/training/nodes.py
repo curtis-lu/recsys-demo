@@ -65,7 +65,12 @@ from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
 from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
-from recsys_tfb.io.extract import extract_Xy, extract_Xy_with_groups, pdf_to_X
+from recsys_tfb.io.extract import (
+    extract_Xy,
+    extract_Xy_with_groups,
+    pdf_to_X,
+    weight_key_decode_map,
+)
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
 from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
@@ -143,7 +148,13 @@ def persist_sample_weight_report(
     if not sw:
         return diag
 
-    present = sample_weights.distinct_weight_keys(train_parquet_handle, weight_keys)
+    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
+    identity_cols = get_schema(parameters)["identity_columns"]
+    decode_map = weight_key_decode_map(
+        weight_keys, category_mappings, identity_cols)
+
+    present = sample_weights.distinct_weight_keys(
+        train_parquet_handle, weight_keys, decode_map)
 
     # Decision — what counts as unmatched, i.e. a weight that did nothing. Two
     # ways in: the train parquet carries no column for the key at all, which
@@ -153,13 +164,11 @@ def persist_sample_weight_report(
     if present is None:
         unmatched = [str(key) for key in sw]
     else:
-        category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
-        identity_cols = get_schema(parameters)["identity_columns"]
         unmatched = []
         for key in sw:
-            encoded = sample_weights.encoded_key(
-                key, sw[key], weight_keys, category_mappings, identity_cols)
-            if encoded is None or encoded not in present:
+            nameable = sample_weights.nameable_key(
+                key, sw[key], weight_keys, decode_map)
+            if nameable is None or nameable not in present:
                 unmatched.append(str(key))
     diag["unmatched_keys"] = sorted(unmatched)
 

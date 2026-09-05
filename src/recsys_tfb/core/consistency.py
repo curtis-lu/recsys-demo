@@ -47,9 +47,9 @@ Layer 1 — config-static (implemented here; aggregated by
 * A9 — ``training.sample_weights`` integrity (keys are '|'-joined
   ``training.sample_weight_keys`` values), split into:
     - A9a — a ``sample_weight_keys`` column ∉ identity ∪ {label} ∪
-      ``dataset.carry_columns`` (cross-file: the column would be absent from
-      or int-encoded in the train model_input parquet, so the weight silently
-      no-ops). Predicate: ``weight_key_columns_unavailable``.
+      ``dataset.carry_columns`` ∪ declared categorical columns (cross-file:
+      the column would be absent from the train model_input parquet, so the
+      weight silently no-ops). Predicate: ``weight_key_columns_unavailable``.
     - A9b — a ``sample_weights`` key whose '|'-segment count ≠
       ``len(sample_weight_keys)`` (silently never matches). Predicate:
       ``weight_key_arity_mismatch``.
@@ -760,9 +760,10 @@ def weight_key_columns_unavailable(parameters: dict) -> list[str]:
     The train/train_dev model_input parquet physically contains only identity
     columns, the label, dataset.carry_columns, and *encoded* features. A weight
     key must therefore be one of identity ∪ {label} ∪ carry_columns ∪ declared
-    categorical columns — the raw-valued columns (encode-aware lookup translates
-    declared categorical columns at runtime). Anything else is either physically
-    absent (weight silently no-ops at 1.0) or int-encoded (key never matches).
+    categorical columns: the first three are stored raw, and a declared
+    categorical is stored as a code the lookup decodes back at runtime
+    (``io/extract.py::decode_weight_keys``). Anything else is physically absent
+    from the parquet, so its weight silently no-ops at 1.0.
     This is a cross-file dependency: sample_weight_keys lives in
     parameters_training.yaml but carry_columns lives in parameters_dataset.yaml.
     Returns sorted offending columns; empty means OK.
