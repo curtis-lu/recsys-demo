@@ -51,6 +51,7 @@
 | `kedro_design_philosophy.md`（repo 根目錄）留著不刪 | 使用者 2026-08-19 裁決：保留，當作**給人自行參考**的舊文件，靠檔頭既有的 DEPRECATED banner 標示它不是現行依據。#158 原本把「刪掉它」列為待辦，該條已改為裁決不做 | 別刪它，也別刪唯一指向它的 `docs/notes/2026-08-03-day1-doc-triage.md`（那是逐條比對的記錄）。看到「一份 403 行、開頭明說不要照著做的文件躺在根目錄」而想清掉之前，先看這一列——2026-08-19 就有人走到開 PR 才被攔下來 |
 | 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
 | training cache 路徑的 token（`pipelines/training/steps/local_cache.py` 的 `_CACHE_PATH_LAYOUT`）留成裸字串，不換成會自己渲染的 tagged 物件 | 使用者 2026-08-31 裁決：先不動。審查（PR #132）判它 Primitive Obsession ＋ Repeated Switches，理由是「一個 token 的種類拆在兩處——成員判定（`_CACHE_LITERAL_TOKENS` 與 sentinel 常數）與渲染（`resolve_cache_path` 的 if/elif）——加第四種要同時改兩邊，而沒有東西把兩邊綁在一起」。**但該審查「忘一邊會靜默出錯」的判斷已被實測推翻**：一定會 raise（未登記的 token → `KeyError`；名字撞到值為 dict 的 `parameters` 鍵 → `TypeError`）。靜默寫錯路徑要撞到值為**字串**的頂層鍵，而那種鍵只有一個。所以這是可讀性問題（訊息指錯人），不是安全問題 | 別因為「不夠漂亮」就改。要動之前先確認第四種 token 真的出現了——第三種是最近才加進來的第一個，「加第四種會痛」目前仍是推測而非已發生的痛 |
+| `conf/base/parameters.yaml` 的 spark 區塊不放 shuffle 分區的死值 | #304 的決定（2026-09-07）：`spark.sql.adaptive.advisoryPartitionSizeInBytes` 的 `16m` 只進 `conf/spark-local`。分區該切多大由 executor 數／每 executor 核數／記憶體決定，而本機是 `local[*]` 單一 JVM、公司是多 executor 叢集；沒有公司叢集的 access，寫進 `conf/base` 的任何數字都是猜的，**而給錯的死值比不給更糟**——那正是同一張票改掉的舊註解的形狀（舊註解叫人「目標每分區 ~128–256MB」往上加，實測方向剛好相反） | 看到 `conf/base` 的 spark 區塊「一大段調參註解、卻沒有任何 shuffle 相關的值」而想補一個合理預設 → 這是刻意的。要給值必須先在目標環境實測，該段註解裡就有三步診斷法；也別把本機的 `16m` 搬過去。實測見 `docs/notes/2026-09-06-dataset-pipeline-profiling.md` §5 |
 
 ## 二、延後中，且延後條件明確
 
