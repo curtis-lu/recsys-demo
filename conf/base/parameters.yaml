@@ -22,11 +22,30 @@ spark:
   #
   # --- 大規模（~10M entity）記憶體調參 ---
   # dataset pipeline 的 peak memory 取決於「單一 shuffle partition 大小」與 join
-  # shuffle 量，而非框出幾個月（pipeline 已依 snap_date 物理分區，詳見
-  # docs/pipelines/dataset.md §規模與記憶體）。主要旋鈕：
-  #   shuffle.partitions 目標每分區 ~128–256MB → partitions ≈ shuffle_input_bytes / 128MB
-  #   AQE（Spark 3.3 預設 on）勿關
-  # dev/測試資料小用預設即可；生產取消下面兩行註解並依實測量調整：
+  # shuffle 量，而非框出幾個月（pipeline 已依 snap_date 物理分區）。
+  #
+  # AQE（Spark 3.3 預設 on，勿關）下有兩個旋鈕，哪一個生效取決於分區是「被 AQE 併
+  # 太大」還是「一開始就太大」——AQE 只合併過小的分區，不會拆過大的（見
+  # docs/handbooks/spark-tuning/04-spark-config.md §4.2）：
+  #   被 AQE 併太大   → 生效的是 spark.sql.adaptive.advisoryPartitionSizeInBytes
+  #                     （合併的目標大小，Spark 預設 64MB），把它往下調
+  #   起始分區本身太大 → advisory 幫不上（它不拆），才是調大
+  #                     spark.sql.shuffle.partitions 的場合
+  # 本段舊版只寫了後者，還寫「目標每分區 ~128–256MB」往上加。那個方向在本 repo 有
+  # 實測反例：local[*] 8 核、20 萬客戶那輪，advisory 走預設 64MB 就把
+  # build_train_model_input 最重的 shuffle 併成 9 個分區、SortMergeJoin spill 2.29GB，
+  # 把 advisory 調小才歸零（docs/notes/2026-09-06-dataset-pipeline-profiling.md §5）。
+  #
+  # 本檔不給這兩個鍵的死值：分區該多大由 executor 數／每 executor 核數／記憶體決定，
+  # 換環境就不成立。生產請照這個順序量：
+  #   1. Spark UI 看那個 stage 有沒有 spill（memory/disk spill 欄位）→ 有就是分區太大
+  #   2. 看該 stage 的 task 數與 shuffle read → 每個 task 實際扛多少位元組；跟 advisory
+  #      比大小，就知道該動上面兩個鍵的哪一個
+  #   3. 驗收看「相關 node 各自的 save 耗時 ＋ spill」，不要只看 pipeline 牆鐘總時間
+  #      （那是 docs/agents/pipeline-performance-work.md〈常見的壞尺〉點名的第一條）。
+  #      分區變多會讓本來沒 spill 的 node 略慢，代價要一起看
+  # dev/測試資料小用預設即可；生產先照上面量完，再決定下面兩行要不要取消註解、填多少
+  # ——400 只是格式範例，不是建議值：
   # spark.sql.shuffle.partitions: 400
   # spark.sql.adaptive.enabled: true
 
