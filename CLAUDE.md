@@ -25,6 +25,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋10 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，13 條裡**只有 2 條有部分機械檢查**——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其〈已登記的例外〉，要加一筆先問使用者） |
 | 重整一整條 pipeline（不是改單一 node）：排順序、切 PR、選驗證手段、收尾清掃 | `docs/agents/pipeline-refactor-process.md`（**流程**判準，上一列那份是形狀判準。dataset／inference 兩輪 18 個 PR 歸納，每條附得出證據的 PR 或 commit） |
+| 優化任何一條 pipeline 的效能（量測、提假設、下結論） | `docs/agents/pipeline-performance-work.md`（**先於** `docs/handbooks/spark-tuning/`——那套教你怎麼調 Spark，這份擋的是「還沒確定那件事該不該做就開始讓它變快」。9 條推理紀律，一條機械檢查都沒有；2026-09-06 dataset 實測的六個假設裡四個被否決，這份是那四個的一般化） |
 | worktree / venv 任何操作 | `docs/operations/dev-setup/worktree-venv-setup.md` ＋ 下方 pre-flight |
 | 本機跑 Spark pipeline | `docs/operations/dev-setup/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
 | pipeline 部分執行（模式 vs 切片、加月份的 auto-included、接續前提） | `docs/operations/user-guides/pipeline-slicing.md`；旗標本身的用法在該 pipeline 文件 §4 |
