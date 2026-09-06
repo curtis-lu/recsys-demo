@@ -104,3 +104,7 @@ GitHub Issues（`curtis-lu/recsys-demo`），用 `gh` CLI 操作。見 `docs/age
 ### Domain docs
 
 Single-context，**刻意不設 `CONTEXT.md`**——詞彙定義一律在程式碼旁的 docstring（`core/versioning.py`＝版本 ID、`core/consistency.py`＝不變量代號），`docs/` 只做白話解釋。見 `docs/agents/domain.md`。
+
+## Viz content
+
+Use ASCII to visualize content when explaining concepts.
