@@ -7,7 +7,7 @@ from recsys_tfb.core.group_utils import (
     RANKING_OBJECTIVES,
     default_metric_for_objective,
     is_ranking_objective,
-    objective_family,
+    objective_cache_key,
     to_contiguous_groups,
 )
 
@@ -24,11 +24,30 @@ class TestObjectiveClassification:
     def test_is_ranking_false(self, obj):
         assert is_ranking_objective(obj) is False
 
-    def test_objective_family(self):
-        assert objective_family("lambdarank") == "ranking"
-        assert objective_family("rank_xendcg") == "ranking"
-        assert objective_family("binary") == "binary"
-        assert objective_family(None) == "binary"
+    def test_objective_cache_key_separates_the_two_ranking_objectives(self):
+        """lambdarank and rank_xendcg must NOT share a cache key.
+
+        They build the same .bin today; the split lands ahead of the
+        follow-up that gives lambdarank a different training matrix, so the
+        model_version-blind cache never gets a window in which it can serve
+        the wrong .bin. Full rationale in ``objective_cache_key``.
+        """
+        assert objective_cache_key("lambdarank") == "lambdarank"
+        assert objective_cache_key("rank_xendcg") == "rank_xendcg"
+        assert objective_cache_key("lambdarank") != objective_cache_key(
+            "rank_xendcg"
+        )
+
+    def test_objective_cache_key_non_ranking_share_one_key(self):
+        """Non-ranking objectives deliberately collide onto "binary".
+
+        They build a byte-identical .bin (same X/y/weight, no group vector)
+        with no divergence planned, so sharing is safe — and it keeps every
+        existing ``lgb/binary/`` cache dir valid with no migration.
+        """
+        assert objective_cache_key("binary") == "binary"
+        assert objective_cache_key(None) == "binary"
+        assert objective_cache_key("regression") == "binary"
 
 
 class TestDefaultMetricForObjective:

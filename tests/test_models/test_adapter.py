@@ -513,7 +513,7 @@ def _ranking_frames():
     return df_tr, df_dev
 
 
-def test_prepare_train_inputs_binary_family_subpath(tmp_path):
+def test_prepare_train_inputs_binary_objective_subpath(tmp_path):
     import lightgbm as lgb
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
@@ -531,8 +531,11 @@ def test_prepare_train_inputs_binary_family_subpath(tmp_path):
         ParquetHandle(str(tr)), ParquetHandle(str(dv)),
         prep_meta, _ranking_parameters("binary"), str(cache),
     )
+    # Unchanged from before the per-objective split: a binary objective still
+    # lands in lgb/binary/, so existing caches stay valid.
     assert (cache / "lgb" / "binary" / "_SUCCESS").exists()
-    assert not (cache / "lgb" / "ranking").exists()
+    assert not (cache / "lgb" / "lambdarank").exists()
+    assert not (cache / "lgb" / "rank_xendcg").exists()
     ds = lgb.Dataset(str(cache / "lgb" / "binary" / "train.bin")).construct()
     assert ds.get_group() is None  # binary path: no group set
 
@@ -556,9 +559,9 @@ def test_prepare_train_inputs_ranking_sets_group(tmp_path):
         ParquetHandle(str(tr)), ParquetHandle(str(dv)),
         prep_meta, _ranking_parameters("lambdarank"), str(cache),
     )
-    assert (cache / "lgb" / "ranking" / "_SUCCESS").exists()
-    assert "ranking" in train_h.bin_path and train_h.role == "train"
-    assert "ranking" in dev_h.bin_path and dev_h.role == "train_dev"
+    assert (cache / "lgb" / "lambdarank" / "_SUCCESS").exists()
+    assert "lambdarank" in train_h.bin_path and train_h.role == "train"
+    assert "lambdarank" in dev_h.bin_path and dev_h.role == "train_dev"
 
     ds_tr = lgb.Dataset(train_h.bin_path).construct()
     g_tr = ds_tr.get_group()
@@ -572,9 +575,49 @@ def test_prepare_train_inputs_ranking_sets_group(tmp_path):
     assert int(np.sum(g_dv)) == 4
 
 
-def test_prepare_train_inputs_both_families_coexist(tmp_path):
-    """Switching objective rebuilds in its own sub-path; never reuses the
-    other family's binary."""
+def test_prepare_train_inputs_three_objectives_coexist(tmp_path):
+    """All three objectives keep their own dir under one cache root.
+
+    lambdarank and rank_xendcg used to share a single "ranking" dir; their
+    .bin are identical today, so this pins the isolation ahead of the
+    follow-up that makes their training matrices differ.
+    """
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+    prep_meta = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    cache = tmp_path / "variant"
+    a = LightGBMAdapter()
+    for obj in ("binary", "lambdarank", "rank_xendcg"):
+        a.prepare_train_inputs(ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+                               prep_meta, _ranking_parameters(obj), str(cache))
+        assert (cache / "lgb" / obj / "_SUCCESS").exists()
+        assert (cache / "lgb" / obj / "train.bin").exists()
+    assert not (cache / "lgb" / "ranking").exists()
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [("lambdarank", "rank_xendcg"), ("rank_xendcg", "lambdarank")],
+)
+def test_ranking_objective_switch_never_hits_the_other_bin(
+    tmp_path, caplog, first, second
+):
+    """Either switch order: the second objective BUILDS, it does not hit.
+
+    Both orders matter — a key that folds the two onto one segment is
+    order-blind, so testing one direction only would still pass under half
+    the regression.
+    """
+    import logging
+
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
@@ -589,11 +632,27 @@ def test_prepare_train_inputs_both_families_coexist(tmp_path):
     cache = tmp_path / "variant"
     a = LightGBMAdapter()
     a.prepare_train_inputs(ParquetHandle(str(tr)), ParquetHandle(str(dv)),
-                           prep_meta, _ranking_parameters("binary"), str(cache))
-    a.prepare_train_inputs(ParquetHandle(str(tr)), ParquetHandle(str(dv)),
-                           prep_meta, _ranking_parameters("lambdarank"), str(cache))
-    assert (cache / "lgb" / "binary" / "_SUCCESS").exists()
-    assert (cache / "lgb" / "ranking" / "_SUCCESS").exists()
+                           prep_meta, _ranking_parameters(first), str(cache))
+
+    # The evidence is the absence of the cache-hit log line, so it is coupled
+    # to the exact wording of `logger.info("lgb binary cache hit at %s", ...)`
+    # in LightGBMAdapter.prepare_train_inputs — reword that log and this
+    # assertion goes vacuously green. Keep the two in sync. (The stronger
+    # check — the two .bin differing in row count — only becomes available
+    # once lambdarank starts dropping zero-positive groups.)
+    caplog.clear()
+    with caplog.at_level(
+        logging.INFO, logger="recsys_tfb.models.lightgbm_adapter"
+    ):
+        train_h, dev_h = a.prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            prep_meta, _ranking_parameters(second), str(cache),
+        )
+    assert "cache hit" not in caplog.text
+    assert second in train_h.bin_path
+    assert second in dev_h.bin_path
+    assert (cache / "lgb" / first / "_SUCCESS").exists()
+    assert (cache / "lgb" / second / "_SUCCESS").exists()
 
 
 def _weight_frames():
@@ -680,7 +739,7 @@ def test_prepare_train_inputs_ranking_bin_carries_feature_names(tmp_path):
 
 def test_feature_selection_subpath_empty_when_no_selection():
     """No selection -> empty sub-segment, so the lgb cache path stays
-    `lgb/<family>/` byte-identical to pre-feature-selection behavior."""
+    `lgb/<objective>/` byte-identical to pre-feature-selection behavior."""
     from recsys_tfb.models.lightgbm_adapter import _feature_selection_subpath
 
     assert _feature_selection_subpath({"training": {}}, ["a", "b"]) == ""
@@ -748,6 +807,35 @@ def test_feature_selection_isolates_bin_from_full_feature_cache(tmp_path):
         "prod_name"]
 
 
+def test_feature_selection_subpath_nests_under_each_objective(tmp_path):
+    """The two cache dimensions compose: the same feature subset under two
+    ranking objectives gets two distinct dirs, neither overwriting the other."""
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _ranking_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+    cache = tmp_path / "variant"
+    subset_meta = {
+        "feature_columns": ["prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    paths = {}
+    for obj in ("lambdarank", "rank_xendcg"):
+        params = _ranking_parameters(obj)
+        params["training"]["feature_selection"] = {"exclude": ["feat_a"]}
+        train_h, _ = LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            subset_meta, params, str(cache),
+        )
+        p = train_h.bin_path.replace("\\", "/")
+        assert f"/lgb/{obj}/fs_" in p
+        paths[obj] = p
+    assert paths["lambdarank"] != paths["rank_xendcg"]
+
+
 class TestPrepareTrainInputsWeight:
     def _prep(self):
         return {
@@ -783,7 +871,9 @@ class TestPrepareTrainInputsWeight:
         LightGBMAdapter().prepare_train_inputs(
             ParquetHandle(str(tr)), ParquetHandle(str(dv)),
             self._prep(), _weight_params("lambdarank"), str(cache))
-        ds = lgb.Dataset(str(cache / "lgb" / "ranking" / "train.bin")).construct()
+        ds = lgb.Dataset(
+            str(cache / "lgb" / "lambdarank" / "train.bin")
+        ).construct()
         w = ds.get_weight()
         assert w is not None
         assert sorted(set(np.round(w, 3))) == [1.0, 3.0]

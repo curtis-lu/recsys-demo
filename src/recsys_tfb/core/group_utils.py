@@ -23,13 +23,34 @@ def is_ranking_objective(objective: str | None) -> bool:
     return objective in RANKING_OBJECTIVES
 
 
-def objective_family(objective: str | None) -> str:
-    """Coarse family used to key the on-disk lgb-binary cache sub-path.
+def objective_cache_key(objective: str | None) -> str:
+    """Sub-path segment isolating one objective's on-disk lgb binary.
 
-    ``"ranking"`` for any RANKING_OBJECTIVES value (so lambdarank and
-    rank_xendcg share one group-bearing binary), else ``"binary"``.
+    Every ranking objective gets its **own** segment: ``lgb/lambdarank/``,
+    ``lgb/rank_xendcg/``, ``lgb/binary/``.
+
+    As of this commit lambdarank and rank_xendcg build a **byte-identical**
+    .bin, so splitting them buys nothing yet — that is deliberate, and it is
+    why the split lands first. The follow-up to #313 makes lambdarank drop
+    zero-positive query groups (their lambdarank gradient contribution is
+    exactly zero; rank_xendcg genuinely learns from them), and from that
+    commit on the two objectives need different rows. The lgb cache is not
+    keyed by ``model_version``, so a segment still shared at that moment
+    would silently serve a .bin built for the other objective's rows. The
+    segment therefore splits *before* the rows do and the collision is never
+    live.
+
+    Non-ranking objectives all map to ``"binary"``. That collision is
+    deliberate: they build a byte-identical .bin (same X/y/weight, no group
+    vector) with no divergence planned, and it keeps existing
+    ``lgb/binary/`` dirs valid with no migration.
+
+    Returned values are drawn from RANKING_OBJECTIVES plus the literal
+    ``"binary"``, never arbitrary config text, so the segment is path-safe.
     """
-    return "ranking" if is_ranking_objective(objective) else "binary"
+    if is_ranking_objective(objective):
+        return objective
+    return "binary"
 
 
 def default_metric_for_objective(

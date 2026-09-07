@@ -29,11 +29,11 @@ def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> 
     """Cache sub-segment isolating a training-stage feature subset's .bin.
 
     Returns "" when ``training.feature_selection`` is inactive, so the lgb cache
-    path stays ``lgb/<family>/`` (byte-identical to pre-feature-selection runs;
-    no migration). When active, returns ``fs_<hash8>`` keyed by the *surviving*
-    ``feature_columns`` — different subsets get different ``.bin`` files under
-    the same base/train_variant/family dir, which would otherwise collide and
-    silently reuse a stale full-feature binary.
+    path stays ``lgb/<objective>/`` (byte-identical to pre-feature-selection
+    runs; no migration). When active, returns ``fs_<hash8>`` keyed by the
+    *surviving* ``feature_columns`` — different subsets get different ``.bin``
+    files under the same base/train_variant/objective dir, which would
+    otherwise collide and silently reuse a stale full-feature binary.
     """
     from recsys_tfb.models.feature_selection import feature_selection_exclude
 
@@ -157,8 +157,9 @@ class LightGBMAdapter(ModelAdapter):
         """Materialize lgb.Dataset binaries for train + train_dev.
 
         Skip-if-exists: returns handles without rebuilding when
-        cache_dir/lgb/<family>/_SUCCESS already exists, where <family> is the
-        objective family ("binary" or "ranking"). On miss, builds train first
+        cache_dir/lgb/<objective>/_SUCCESS already exists, where <objective>
+        is ``objective_cache_key`` ("lambdarank", "rank_xendcg" or "binary"
+        for anything non-ranking). On miss, builds train first
         (with binning), saves binary, then builds train_dev with
         reference=train so dev binning aligns to train. For a ranking
         objective each Dataset also carries the per-query group.
@@ -171,7 +172,7 @@ class LightGBMAdapter(ModelAdapter):
 
         from recsys_tfb.core.group_utils import (
             is_ranking_objective,
-            objective_family,
+            objective_cache_key,
             to_contiguous_groups,
         )
 
@@ -180,16 +181,17 @@ class LightGBMAdapter(ModelAdapter):
             .get("algorithm_params", {})
             .get("objective")
         )
-        family = objective_family(objective)
+        objective_key = objective_cache_key(objective)
         ranking = is_ranking_objective(objective)
 
-        # Objective-family sub-path: the lgb-binary cache is NOT keyed by
-        # model_version, so a group-bearing ranking binary must never be
-        # reused for a binary objective (or vice versa). lambdarank and
-        # rank_xendcg share the "ranking" family (identical group layout).
-        lgb_dir = Path(cache_dir) / "lgb" / family
+        # Per-objective sub-path: the lgb-binary cache is NOT keyed by
+        # model_version, so a binary built under one objective must never be
+        # served for another. Why each ranking objective gets its own segment
+        # even though their .bin are identical today: see the rationale in
+        # group_utils.objective_cache_key.
+        lgb_dir = Path(cache_dir) / "lgb" / objective_key
         # Training-stage feature selection: the binned .bin reflects the subset
-        # feature set, but the cache dir is keyed by base/train_variant/family
+        # feature set, but the cache dir is keyed by base/train_variant/objective
         # only — NOT by selection. Add a feature-hash sub-segment so a subset
         # binary never collides with (or silently reuses) the full-feature one
         # under the same train_variant. Empty when no selection -> unchanged.
