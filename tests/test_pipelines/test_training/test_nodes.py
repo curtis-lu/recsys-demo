@@ -1190,12 +1190,12 @@ def _lgb_handle_with_report(tmp_path, report):
     """An LgbDatasetHandle whose cache dir carries (or lacks) a filter report."""
     import json
 
-    from recsys_tfb.io.handles import GROUP_FILTER_REPORT_NAME, LgbDatasetHandle
+    from recsys_tfb.io.handles import GROUP_FILTER_COUNTS_NAME, LgbDatasetHandle
 
     lgb_dir = tmp_path / "lgb" / "lambdarank"
     lgb_dir.mkdir(parents=True)
     if report is not None:
-        (lgb_dir / GROUP_FILTER_REPORT_NAME).write_text(json.dumps(report))
+        (lgb_dir / GROUP_FILTER_COUNTS_NAME).write_text(json.dumps(report))
     return LgbDatasetHandle(bin_path=str(lgb_dir / "train.bin"), role="train")
 
 
@@ -1381,3 +1381,62 @@ def test_refit_on_full_matches_the_matrix_hpo_trained_on(
             train_h, dev_h, None, {}, 1, prep, _refit_params(objective),
         )
     assert f"Refitted on full train+train_dev (n={expected_rows}," in caplog.text
+
+
+def test_calibration_keeps_every_row_under_lambdarank(tmp_path, caplog):
+    """The calibration split is NOT filtered, under any objective.
+
+    Calibration fits on the whole score distribution; dropping the
+    all-negative query groups shifts the baseline it calibrates against. This
+    is the only place that says so with a test — the reason otherwise lives
+    in comments, and "add calibration to the filter list" is exactly the
+    tidy-looking change nobody would notice.
+    """
+    import logging
+
+    import numpy as np
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.base import ModelAdapter
+    from recsys_tfb.pipelines.training.nodes import calibrate_model
+
+    class _ConstantScores(ModelAdapter):
+        """Scores that vary with the feature, so a sigmoid fit has something to fit."""
+
+        def train(self, *a, **k): ...
+        def predict(self, X): return X[:, 0].astype(float)
+        def save(self, filepath): ...
+        def load(self, filepath): ...
+        def feature_importance(self, kind="split"): return {}
+        def log_to_mlflow(self): ...
+        def prepare_train_inputs(self, *a, **k): ...
+
+    # 3 query groups of 2; c3 is all-negative — the shape lambdarank drops
+    # from train / train_dev.
+    df = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["fund", "ccard"] * 3,
+        "feat_a": np.array([1, 2, 3, 4, 5, 6], dtype="float32"),
+        "label": [1, 0, 0, 1, 0, 0],
+    })
+    path = tmp_path / "cal.parquet"
+    df.to_parquet(path)
+
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label"}},
+        "training": {"algorithm_params": {"objective": "lambdarank"},
+                     "calibration": {"method": "sigmoid"}},
+    }
+    prep = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+
+    with caplog.at_level(logging.INFO,
+                         logger="recsys_tfb.pipelines.training.nodes"):
+        calibrate_model(_ConstantScores(), ParquetHandle(str(path)), prep, params)
+    # All 6 rows, including c3's two. 4 would mean the filter reached here.
+    assert "n_samples=6" in caplog.text

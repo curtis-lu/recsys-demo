@@ -846,7 +846,7 @@ class TestZeroPositiveGroupFilter:
         # train_dev: 1 of 3 groups and 2 of 6 rows dropped, 2 groups left.
         assert "1/3 groups" in text and "2/6 rows" in text
 
-    def test_report_sidecar_survives_a_cache_hit(self, tmp_path):
+    def test_counts_sidecar_survives_a_cache_hit(self, tmp_path):
         """The numbers outlive the build, so a cache-hit run still reports them.
 
         The filter runs while the ``.bin`` is built. A second run hits the
@@ -858,7 +858,7 @@ class TestZeroPositiveGroupFilter:
         from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
         cache, (train_h, _) = _prepare_zero_positive(tmp_path, "lambdarank")
-        built = train_h.group_filter_report()
+        built = train_h.group_filter_counts()
         assert built["objective"] == "lambdarank"
         assert built["train"] == {
             "groups_total": 4, "groups_kept": 2, "groups_dropped": 2,
@@ -875,7 +875,7 @@ class TestZeroPositiveGroupFilter:
             ParquetHandle(str(tmp_path / "dv.parquet")),
             _ranking_prep_meta(), _ranking_parameters("lambdarank"), str(cache),
         )
-        assert hit_h.group_filter_report() == built
+        assert hit_h.group_filter_counts() == built
 
     @pytest.mark.parametrize("objective", ["rank_xendcg", "binary"])
     def test_no_sidecar_when_nothing_is_filtered(self, tmp_path, objective):
@@ -885,8 +885,59 @@ class TestZeroPositiveGroupFilter:
         non-ranking artifact set for no gain; absence *is* the answer.
         """
         cache, (train_h, _) = _prepare_zero_positive(tmp_path, objective)
-        assert train_h.group_filter_report() is None
-        assert not (cache / "lgb" / objective / "group_filter.json").exists()
+        assert train_h.group_filter_counts() is None
+        assert not (cache / "lgb" / objective / "group_filter_counts.json").exists()
+
+    def test_a_bin_built_before_the_filter_existed_is_rebuilt_not_served(
+        self, tmp_path, caplog
+    ):
+        """A pre-#315 lambdarank cache holds every row. Serving it is wrong.
+
+        #314 already gave lambdarank its own segment, so a .bin built between
+        the two lands at exactly the path this run wants, with `_SUCCESS` set
+        and every row still in it. Nothing else catches it: the lgb cache is
+        not keyed by model_version, and `finalize_model`'s refit branch
+        re-reads the parquet and *does* filter — so a hit here puts the search
+        and the final model on different matrices under one set of
+        hyperparameters.
+
+        Staged the way it really arises: build under rank_xendcg (which keeps
+        every row, exactly as lambdarank did before this change) and move the
+        directory onto lambdarank's segment.
+        """
+        import logging
+        import shutil
+
+        from recsys_tfb.io.handles import ParquetHandle
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        df_tr, df_dev = _zero_positive_frames()
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+        cache = tmp_path / "variant"
+        LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            _ranking_prep_meta(), _ranking_parameters("rank_xendcg"),
+            str(cache),
+        )
+        shutil.move(str(cache / "lgb" / "rank_xendcg"),
+                    str(cache / "lgb" / "lambdarank"))
+        assert (cache / "lgb" / "lambdarank" / "_SUCCESS").exists()
+
+        caplog.clear()
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.models.lightgbm_adapter"
+        ):
+            train_h, _ = LightGBMAdapter().prepare_train_inputs(
+                ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+                _ranking_prep_meta(), _ranking_parameters("lambdarank"),
+                str(cache),
+            )
+        assert "cache hit" not in caplog.text
+        assert "predates the zero-positive group filter" in caplog.text
+        # Rebuilt, so the rows are the filtered ones and the counts are there.
+        assert _bin_groups(train_h.bin_path).num_data() == 4
+        assert train_h.group_filter_counts()["train"]["rows_dropped"] == 4
 
 
 def _weight_frames():

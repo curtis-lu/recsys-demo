@@ -56,9 +56,9 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.group_utils import (
     default_metric_for_objective,
-    drops_zero_positive_groups,
-    groups_with_positives_mask,
+    drop_zero_positive_groups,
     is_ranking_objective,
+    objective_drops_zero_positive_groups,
     to_contiguous_groups,
 )
 from recsys_tfb.core.logging import log_data_volume, log_step
@@ -132,7 +132,7 @@ def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
     Under ``objective: lambdarank`` the training matrix is not the train /
     train_dev tables: groups with no positive are left out, because their
     lambdarank gradient contribution is exactly zero (see
-    ``core.group_utils.drops_zero_positive_groups``). Row counts therefore
+    ``core.group_utils.objective_drops_zero_positive_groups``). Row counts
     stop matching the tables, and this is what says why -- comparing two MLflow
     runs on training-set size otherwise gives no way to tell a filter from a
     dataset change.
@@ -157,7 +157,7 @@ def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
         .get("algorithm_params", {})
         .get("objective")
     )
-    report = train_lgb_handle.group_filter_report()
+    report = train_lgb_handle.group_filter_counts()
     if report is None:
         return {"enabled": False, "objective": objective}
 
@@ -886,7 +886,7 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        if drops_zero_positive_groups(objective):
+        if objective_drops_zero_positive_groups(objective):
             # Decision — the refit trains on the rows the search trained on.
             # HPO reads the cached .bin, which prepare_train_inputs already
             # stripped of zero-positive query groups; this branch re-reads the
@@ -895,17 +895,16 @@ def finalize_model(
             # search's hyperparameters. Applied per split, before stacking, for
             # the same reason it is applied per split there: the two are one
             # rule, and a reader comparing them should not have to check.
-            keep_tr = groups_with_positives_mask(y_tr, gid_tr)
-            keep_dv = groups_with_positives_mask(y_dv, gid_dv)
+            (y_tr, gid_tr, X_tr, w_tr), counts_tr = drop_zero_positive_groups(
+                y_tr, gid_tr, X_tr, w_tr)
+            (y_dv, gid_dv, X_dv, w_dv), counts_dv = drop_zero_positive_groups(
+                y_dv, gid_dv, X_dv, w_dv)
             logger.info(
                 "refit zero-positive filter: train %d -> %d rows, "
                 "train_dev %d -> %d rows",
-                len(y_tr), int(keep_tr.sum()), len(y_dv), int(keep_dv.sum()),
+                counts_tr["rows_total"], counts_tr["rows_kept"],
+                counts_dv["rows_total"], counts_dv["rows_kept"],
             )
-            X_tr, y_tr, gid_tr, w_tr = (
-                X_tr[keep_tr], y_tr[keep_tr], gid_tr[keep_tr], w_tr[keep_tr])
-            X_dv, y_dv, gid_dv, w_dv = (
-                X_dv[keep_dv], y_dv[keep_dv], gid_dv[keep_dv], w_dv[keep_dv])
         X_full, y_full, w_full = refit.stack_splits(
             (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
         # Decision — train / train_dev are customer-disjoint by sampling

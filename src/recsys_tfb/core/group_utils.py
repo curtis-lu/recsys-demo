@@ -31,10 +31,17 @@ def objective_cache_key(objective: str | None) -> str:
 
     The two ranking objectives no longer build the same rows: lambdarank
     drops zero-positive query groups and rank_xendcg keeps them (see
-    :func:`drops_zero_positive_groups`). The lgb cache is not keyed by
-    ``model_version``, so a shared segment would silently serve a .bin built
-    for the other objective's rows. The segment split landed one commit ahead
-    of the row split (#314 before #315) so that collision was never live.
+    :func:`objective_drops_zero_positive_groups`). The lgb cache is not keyed
+    by ``model_version``, so a shared segment would silently serve a .bin
+    built for the other objective's rows. The segment split landed one commit
+    ahead of the row split (#314 before #315), so that collision was never
+    live.
+
+    The segment does **not** separate a .bin built before the row split from
+    one built after — same objective, same path, different rows. That one is
+    caught in ``LightGBMAdapter.prepare_train_inputs`` instead, by the
+    presence of the counts sidecar, because it is a property of when the
+    directory was written rather than of the objective naming it.
 
     Non-ranking objectives all map to ``"binary"``. That collision is
     deliberate: they build a byte-identical .bin (same X/y/weight, no group
@@ -49,7 +56,7 @@ def objective_cache_key(objective: str | None) -> str:
     return "binary"
 
 
-def drops_zero_positive_groups(objective: str | None) -> bool:
+def objective_drops_zero_positive_groups(objective: str | None) -> bool:
     """True iff ``objective`` trains only on query groups holding a positive.
 
     ``lambdarank`` and only ``lambdarank``. A query group whose labels are all
@@ -68,28 +75,22 @@ def drops_zero_positive_groups(objective: str | None) -> bool:
     add a state ("filter on, objective rank_xendcg") that has no correct
     meaning. What the filter did is answered by the log and the manifest, not
     by config.
+
+    Named for its argument because the sibling that does the work is one
+    letter away: this one answers *whether* an objective filters,
+    :func:`drop_zero_positive_groups` performs it.
     """
     return objective == "lambdarank"
 
 
-def groups_with_positives_mask(
+def _groups_with_positives_mask(
     y: np.ndarray, group_ids: np.ndarray
 ) -> np.ndarray:
     """Row mask: True where the row's query group holds at least one positive.
 
-    ``y`` and ``group_ids`` are the per-row label and query-group id arrays
-    from ``recsys_tfb.io.extract.extract_Xy_with_groups``, aligned 1:1.
-    Group ids need not be sorted or contiguous, and groups may differ in size.
-
-    Returns a bool array of the same length, to be applied to **every** per-row
-    array together — X, y, group ids and weights — so they stay aligned. It is
-    a row mask rather than a group list precisely so no caller has to
-    re-derive which rows a dropped group owned.
-
-    Any label > 0 counts as a positive, so a graded-relevance ``label_gain``
-    setup keeps working; only an all-zero group is dropped.
-
-    Empty input returns an empty bool array (no group, nothing to keep).
+    Private because every caller wants the rows, not the mask —
+    :func:`drop_zero_positive_groups` is the one place that applies it, which
+    is what keeps the aligned arrays from being sliced by two different masks.
     """
     y = np.asarray(y)
     group_ids = np.asarray(group_ids)
@@ -110,6 +111,49 @@ def groups_with_positives_mask(
     _, inverse = np.unique(group_ids, return_inverse=True)
     positives_per_group = np.bincount(inverse, weights=(y > 0).astype(np.float64))
     return positives_per_group[inverse] > 0
+
+
+def drop_zero_positive_groups(
+    y: np.ndarray, group_ids: np.ndarray, *aligned: np.ndarray
+) -> tuple[tuple[np.ndarray, ...], dict]:
+    """Rows of query groups holding a positive, plus what was dropped.
+
+    ``y`` and ``group_ids`` are the per-row label and query-group id arrays
+    from ``recsys_tfb.io.extract.extract_Xy_with_groups``; ``aligned`` is
+    every other per-row array that has to travel with them (the feature
+    matrix, the sample weights). Group ids need not be sorted or contiguous,
+    and groups may differ in size.
+
+    Returns ``((y, group_ids, *aligned), counts)`` — the arrays in the order
+    they were given, and a dict of ``groups_total`` / ``groups_kept`` /
+    ``groups_dropped`` / ``rows_total`` / ``rows_kept`` / ``rows_dropped``.
+
+    One function rather than an exported mask, and varargs rather than a fixed
+    signature, for the same reason: every array is sliced by the *same* mask
+    in one place. A weight vector sliced by a second mask — or left unsliced —
+    re-assigns every weight to another row, and nothing downstream raises.
+
+    The counts come back rather than being logged here so this stays a pure
+    numpy function (this module is shared with a future XGBoost adapter);
+    both call sites log them in their own words, and the .bin cache persists
+    them.
+
+    Any label > 0 counts as a positive, so a graded-relevance ``label_gain``
+    setup keeps working; only an all-zero group is dropped. Empty input comes
+    back empty with all counts zero.
+    """
+    mask = _groups_with_positives_mask(y, group_ids)
+    group_ids = np.asarray(group_ids)
+    counts = {
+        "groups_total": int(np.unique(group_ids).size),
+        "groups_kept": int(np.unique(group_ids[mask]).size),
+        "rows_total": int(mask.size),
+        "rows_kept": int(mask.sum()),
+    }
+    counts["groups_dropped"] = counts["groups_total"] - counts["groups_kept"]
+    counts["rows_dropped"] = counts["rows_total"] - counts["rows_kept"]
+    kept = tuple(np.asarray(a)[mask] for a in (y, group_ids, *aligned))
+    return kept, counts
 
 
 def default_metric_for_objective(

@@ -128,8 +128,14 @@ def open_parquet_dataset(paths: Union[str, list[str]]):
 #: Sidecar written next to the .bin by
 #: ``LightGBMAdapter.prepare_train_inputs`` when the objective drops
 #: zero-positive query groups. The filename is the contract between that
-#: writer and :meth:`LgbDatasetHandle.group_filter_report`.
-GROUP_FILTER_REPORT_NAME = "group_filter.json"
+#: writer and :meth:`LgbDatasetHandle.group_filter_counts`, and it is also
+#: what marks a .bin as built *under* that rule — a cached directory without
+#: it predates the rule and its rows were never filtered.
+#:
+#: Deliberately not named ``group_filter_report.json``: that is the separate
+#: catalog artifact in the model version dir. Two JSON files one word apart,
+#: both plain dicts, would swap silently.
+GROUP_FILTER_COUNTS_NAME = "group_filter_counts.json"
 
 
 @dataclass(frozen=True)
@@ -143,28 +149,30 @@ class LgbDatasetHandle:
     bin_path: str
     role: Literal["train", "train_dev"]
 
-    def group_filter_report(self) -> dict | None:
+    def group_filter_counts(self) -> dict | None:
         """How many query groups this binary's build dropped, or ``None``.
 
-        ``None`` means the objective that wrote this directory filters
-        nothing -- everything but lambdarank. The sidecar is written only
-        when rows were actually removed, so its absence is the answer and
-        not a missing file.
+        ``None`` means this .bin was **not** built under the zero-positive
+        filter. Two different situations, and the caller has to tell them
+        apart: the objective does not filter (everything but lambdarank), or
+        the directory was written before the rule existed and holds every row.
+        ``prepare_train_inputs`` resolves the second by rebuilding, so by the
+        time a handle reaches a consumer ``None`` means the first.
 
         Read back from disk rather than recomputed: a run that hits the .bin
         cache reads no parquet at all, and still has to be able to say what
         the matrix it trains on is made of.
 
-        One ``prepare_train_inputs`` call writes one report covering both
+        One ``prepare_train_inputs`` call writes one file covering both
         splits, so the train and train_dev handles return the same thing.
         """
         import json
         from pathlib import Path
 
-        report = Path(self.bin_path).parent / GROUP_FILTER_REPORT_NAME
-        if not report.exists():
+        counts = Path(self.bin_path).parent / GROUP_FILTER_COUNTS_NAME
+        if not counts.exists():
             return None
-        with open(report) as f:
+        with open(counts) as f:
             return json.load(f)
 
     def load(

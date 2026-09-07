@@ -6,8 +6,8 @@ import pytest
 from recsys_tfb.core.group_utils import (
     RANKING_OBJECTIVES,
     default_metric_for_objective,
-    drops_zero_positive_groups,
-    groups_with_positives_mask,
+    drop_zero_positive_groups,
+    objective_drops_zero_positive_groups,
     is_ranking_objective,
     objective_cache_key,
     to_contiguous_groups,
@@ -111,38 +111,44 @@ class TestToContiguousGroups:
             to_contiguous_groups(bad)
 
 
-class TestDropsZeroPositiveGroups:
+class TestObjectiveDropsZeroPositiveGroups:
     """Which objectives drop zero-positive query groups — derived, not configured."""
 
     def test_only_lambdarank_drops(self):
-        assert drops_zero_positive_groups("lambdarank") is True
+        assert objective_drops_zero_positive_groups("lambdarank") is True
 
     @pytest.mark.parametrize("obj", ["rank_xendcg", "binary", "regression", None, ""])
     def test_everything_else_keeps_every_row(self, obj):
-        assert drops_zero_positive_groups(obj) is False
+        assert objective_drops_zero_positive_groups(obj) is False
 
 
-class TestGroupsWithPositivesMask:
+class TestDropZeroPositiveGroups:
     def test_empty_input(self):
-        mask = groups_with_positives_mask(
+        (y, ids), counts = drop_zero_positive_groups(
             np.array([], dtype=np.int64), np.array([], dtype=np.int64)
         )
-        assert mask.shape == (0,)
-        assert mask.dtype == bool
+        assert y.shape == (0,) and ids.shape == (0,)
+        assert counts == {
+            "groups_total": 0, "groups_kept": 0, "groups_dropped": 0,
+            "rows_total": 0, "rows_kept": 0, "rows_dropped": 0,
+        }
 
     def test_every_group_has_a_positive_keeps_all(self):
         y = np.array([1, 0, 0, 1])
         ids = np.array([7, 7, 9, 9])
-        np.testing.assert_array_equal(
-            groups_with_positives_mask(y, ids), np.array([True] * 4)
-        )
+        (y_out, ids_out), counts = drop_zero_positive_groups(y, ids)
+        np.testing.assert_array_equal(y_out, y)
+        np.testing.assert_array_equal(ids_out, ids)
+        assert counts["groups_dropped"] == 0 and counts["rows_dropped"] == 0
+        assert counts["groups_kept"] == 2 and counts["rows_kept"] == 4
 
     def test_no_group_has_a_positive_keeps_none(self):
         y = np.array([0, 0, 0, 0])
         ids = np.array([7, 7, 9, 9])
-        np.testing.assert_array_equal(
-            groups_with_positives_mask(y, ids), np.array([False] * 4)
-        )
+        (y_out, ids_out), counts = drop_zero_positive_groups(y, ids)
+        assert y_out.shape == (0,) and ids_out.shape == (0,)
+        assert counts["groups_kept"] == 0 and counts["rows_kept"] == 0
+        assert counts["groups_dropped"] == 2 and counts["rows_dropped"] == 4
 
     def test_uneven_group_sizes_and_interleaved_ids(self):
         # group 2: rows 0,3,5 (has a positive); group 0: rows 1,4 (none);
@@ -150,42 +156,46 @@ class TestGroupsWithPositivesMask:
         # contiguous, and the groups have three different sizes.
         y = np.array([0, 0, 1, 1, 0, 0])
         ids = np.array([2, 0, 1, 2, 0, 2])
-        np.testing.assert_array_equal(
-            groups_with_positives_mask(y, ids),
-            np.array([True, False, True, True, False, True]),
-        )
+        (y_out, ids_out), counts = drop_zero_positive_groups(y, ids)
+        np.testing.assert_array_equal(ids_out, np.array([2, 1, 2, 2]))
+        np.testing.assert_array_equal(y_out, np.array([0, 1, 1, 0]))
+        assert counts == {
+            "groups_total": 3, "groups_kept": 2, "groups_dropped": 1,
+            "rows_total": 6, "rows_kept": 4, "rows_dropped": 2,
+        }
 
-    def test_mask_selects_rows_that_stay_aligned(self):
-        # The mask is applied to X / y / ids / weights together; misapplying it
-        # to one of them is the failure this pins.
+    def test_every_aligned_array_is_cut_by_the_same_mask(self):
+        # The whole point of the varargs form: X / weights / anything else
+        # per-row come back describing the rows that stayed. Slicing one of
+        # them by a different mask re-assigns every value, silently.
         y = np.array([0, 0, 1, 0])
         ids = np.array([1, 0, 1, 0])
         X = np.array([[10], [20], [30], [40]], dtype=float)
         w = np.array([0.5, 1.5, 2.5, 3.5])
-        mask = groups_with_positives_mask(y, ids)
-        np.testing.assert_array_equal(mask, np.array([True, False, True, False]))
-        np.testing.assert_array_equal(X[mask].ravel(), np.array([10, 30]))
-        np.testing.assert_array_equal(y[mask], np.array([0, 1]))
-        np.testing.assert_array_equal(ids[mask], np.array([1, 1]))
-        np.testing.assert_array_equal(w[mask], np.array([0.5, 2.5]))
+        (y_out, ids_out, X_out, w_out), counts = drop_zero_positive_groups(
+            y, ids, X, w)
+        np.testing.assert_array_equal(y_out, np.array([0, 1]))
+        np.testing.assert_array_equal(ids_out, np.array([1, 1]))
+        np.testing.assert_array_equal(X_out.ravel(), np.array([10, 30]))
+        np.testing.assert_array_equal(w_out, np.array([0.5, 2.5]))
+        assert counts["rows_kept"] == 2
 
     def test_graded_labels_count_as_positive(self):
         # Nothing here assumes a binary label: any label > 0 is a positive, so
         # a graded-relevance label_gain setup keeps working.
         y = np.array([0, 2, 0, 0])
         ids = np.array([5, 5, 6, 6])
-        np.testing.assert_array_equal(
-            groups_with_positives_mask(y, ids),
-            np.array([True, True, False, False]),
-        )
+        (y_out, ids_out), counts = drop_zero_positive_groups(y, ids)
+        np.testing.assert_array_equal(ids_out, np.array([5, 5]))
+        assert counts["groups_kept"] == 1
 
     def test_rejects_length_mismatch(self):
         with pytest.raises(ValueError, match="same length"):
-            groups_with_positives_mask(np.array([1, 0]), np.array([1, 1, 2]))
+            drop_zero_positive_groups(np.array([1, 0]), np.array([1, 1, 2]))
 
     def test_rejects_non_1d_input(self):
         bad = np.array([[0, 1], [1, 0]], dtype=np.int64)
         with pytest.raises(ValueError, match="1-D"):
-            groups_with_positives_mask(np.array([1, 0, 0, 1]), bad)
+            drop_zero_positive_groups(np.array([1, 0, 0, 1]), bad)
         with pytest.raises(ValueError, match="1-D"):
-            groups_with_positives_mask(bad, np.array([1, 1, 2, 2]))
+            drop_zero_positive_groups(bad, np.array([1, 1, 2, 2]))
