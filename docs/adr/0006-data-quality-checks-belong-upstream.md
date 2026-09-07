@@ -142,11 +142,68 @@ dataset 閘門的成本量級，這條 ADR 的決定原封不動。
 > 界＝`2^(floor(log2(step)) + 尾數位元)`。推導與實測數字在 `core/consistency.py` 的模組 docstring。
 > **這一段記在 ADR-0006 是因為它改變了閘門的作用範圍**，不是因為它改變了零掃描的結論——取值方式未變。
 
+## 修訂（2026-09-07，issue #306）：footer 先例從 per-column 統計擴到列數，零掃描結論不變
+
+B8 逼問過一次「零掃描是不是硬界線」，答案是「是，改讀 footer 的 per-column min／max」。
+#306 的 B10（`*_model_input` 的列數必須等於它的 `*_keys`）問的是同一個問題的下一格：
+**列數也是資料的事實，而且它正是「掃描」這個詞最直觀的對象。**
+
+**仍然是硬界線。B10 沒有做聚合，它把 footer 的 `block.getRowCount()` 加起來。**
+
+| | B8 | B10 |
+|---|---|---|
+| 事實從哪來 | footer 的 per-column min／max | footer 的 `getRowCount()` |
+| 成本 | 每個檔一次 seek | 每個檔一次 seek |
+| 與列數的關係 | 無 | 無 |
+
+`getRowCount()` **不是新增的讀取**：`utils/parquet_stats.read_max_abs_stats` 早就在讀它
+（用來判斷「全 null」那一格），B10 只是把它加總而不是丟掉。所以這次擴充連新的 JVM
+呼叫面都沒有增加，仍走 Spark JVM 的 Hadoop `FileSystem`（生產禁止新增套件）。
+守住這條的是測試而不是慣例：`TestB10CostInvariant` 用 AST 讀該路徑上的四個函式，
+斷言它們不呼叫 `count`／`groupBy`／`collect` 等任何讀列的方法（**用 AST 不用 grep**——
+grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命中）。
+
+原票把代價寫成「兩個 `count`」並因此擔心撞到成本不變量。那個前提是錯的，換成 footer
+之後這條 ADR 的決定原封不動。
+
+三個實作上的選擇跟著這個結論走：
+
+1. **閘門是 build 節點之後的獨立 node**，理由與 B8 的第 1 點同構：node 自己不寫表，
+   是 Runner 在 node return 之後 `catalog.save`，所以要有 footer 可讀就必須等表落地。
+   放進 `build_model_input` 內部做後置條件，就只能對還沒落地的 frame 呼叫 `count()`
+   ——正是本 ADR 要拒絕的成本升級。落地後讀 footer 一樣擋在訓練之前。
+   它產出 `model_input_grain_report`，所以不是零輸出 side-effect node，不在 A7／R3
+   的登記裡，也不會被切片靜默跳過（架構 F5）。
+2. **只讀本 repo 自己寫的表**（`external: false` 的 `HiveTableDataset`，格式由
+   `STORED AS PARQUET` 保證）。使用者自備的 `feature_table` 不在檢查範圍——與 B8
+   選擇讀 `preprocessed_feature_table` 是同一個理由，也與本 ADR「不規定來源表儲存
+   格式」的立場一致。
+3. **五個 split 只擋得住三個，這是限制不是疏漏。** train／train_dev／calibration 直接
+   落地自 `build_model_input`。val／test 不行：val 那邊列數會等於 `val_keys` 的是
+   `val_model_input_unfiltered`；test 那邊是 `test_model_input_unfiltered`，而它對得上的
+   **不是** `test_keys` 而是「`test_keys` 裡屬於本次月份的那個子集」——`test_keys` 是含
+   全部月份的常駐表，`build_test_model_input` 會先用 `month_plan` 重新縮範圍才往下送。
+   兩者共通的是：這兩個名字**在任何環境的 catalog 裡都沒有條目**
+   （`grep -rn "unfiltered" conf/` 零命中），所以是 `core/catalog.py` 自動生成的
+   `MemoryDataset`——惰性 frame，從不落地，沒有 footer。**把 test 的配對記成 `test_keys`
+   會留下一個恆假的比對**，正是本票警告過「比沒有閘門更糟」的那種。
+   真正落地的是 `filter_groups_with_positives` 的輸出，它的列數**本來就該比較小**。
+   考慮過用單向界線 `列數(filtered) <= 列數(keys)` 補位，**否決**：本 repo 的
+   `sample_pool` 是 entity × item 的稠密展開、`label_table` 稀疏，所以零正例的 group
+   佔多數、filter 會砍掉一大片，這條界線能一路撐過 2 倍放大而不報警——一個恆真的閘門
+   比沒有閘門更糟。**殘留風險明寫在這裡以免被當成 bug 重新發現**：只出現在 val/test
+   月份分區的重複鍵不會被這道閘門看見。
+
+> 這一段記在 ADR-0006 是因為它擴大了 footer 這條路的適用範圍（從 per-column 統計到
+> 列數），**不是因為它改變了零掃描的結論**——取值方式沒變。
+
 ## 這條 ADR 沒有解決的事
 
 - 框架允許使用者自備 `feature_table`（不經本 repo 的 `source_etl`）。那種部署下上游 PK
-  檢查不存在，`feature_table` 的唯一性再度無人保證。若日後真的出現這種部署，再考慮
-  Layer-2 補位。
+  檢查不存在，`feature_table` 的唯一性再度無人保證。**#306 的 B10 補了下游的位、沒補
+  上游的洞**：它不檢查 `feature_table` 本身，而是比對三個 split 的 model_input 與 keys
+  列數，所以重複鍵造成的放大會被擋下來，但歸因（是哪張表、哪一列）仍要自己往回查，
+  且只涵蓋 train／train_dev／calibration 的月份（見上方 2026-09-07 修訂）。
 - 非 cross-join 的 `sample_pool` 部署會讓 group 完整性失去結構保證。同上，出現再說。
 - 補上 `max_duplicate_key_ratio` 之後，`feature_table` 的重複鍵會在 ETL 階段 raise。
   這個檢查在寫下本 ADR 時從未在生產跑過，**首次啟用可能揭露既有的資料問題**，不該在沒有人

@@ -2846,3 +2846,76 @@ class TestDatasetSourceQualityChecksA32:
                 if stage.endswith("_etl")
                 for t in (block.get("tables") or [])
             ), name
+
+
+# --- B10: model_input row count must equal its keys table's ------------------
+
+from recsys_tfb.core.consistency import SplitRowCounts, model_input_grain_errors
+
+
+class TestModelInputGrainErrorsB10:
+    """The rule itself: keys rows in, model_input rows out, one per split.
+
+    Pure — the caller gathers the two numbers. Handing it a dict is what lets
+    "what the rule is" be tested apart from "how a row count is obtained
+    without scanning", which is ``read_row_count``'s problem and has its own
+    tests in ``test_utils/test_parquet_stats.py``.
+    """
+
+    def test_equal_counts_pass(self):
+        assert model_input_grain_errors(
+            {"train": SplitRowCounts(1000, 1000)}) == []
+
+    def test_both_empty_passes(self):
+        # train_dev_ratio: 0 is a supported setting (split_train_keys only
+        # guards a *non-zero* ratio that produced nothing), so an empty split
+        # on both sides is a real state, not a gap in the check.
+        assert model_input_grain_errors(
+            {"train_dev": SplitRowCounts(0, 0)}) == []
+
+    def test_more_model_input_rows_than_keys_is_the_fan_out_it_exists_for(self):
+        errors = model_input_grain_errors({"train": SplitRowCounts(1000, 2000)})
+        assert len(errors) == 1
+        assert "B10" in errors[0]
+        assert "train" in errors[0]
+        assert "1,000" in errors[0] and "2,000" in errors[0]
+        # The multiplier is what names the cause: 2x says "one duplicate key in
+        # a right table", not "a few stray rows".
+        assert "2.0000x" in errors[0]
+
+    def test_fewer_model_input_rows_than_keys_is_also_an_error(self):
+        # The joins are LEFT joins, so rows can only be gained, never lost.
+        # Fewer means something other than the fan-out this gate models —
+        # reporting it as a pass would hide it.
+        errors = model_input_grain_errors({"train": SplitRowCounts(1000, 999)})
+        assert len(errors) == 1
+        assert "B10" in errors[0]
+
+    def test_keys_empty_but_model_input_not_is_an_error(self):
+        # Division by zero must not be how this reports; a ratio has no meaning
+        # here and the message has to stand without one.
+        errors = model_input_grain_errors({"train": SplitRowCounts(0, 5)})
+        assert len(errors) == 1
+        assert "B10" in errors[0]
+
+    def test_collects_every_split_sorted(self):
+        errors = model_input_grain_errors({
+            "train": SplitRowCounts(10, 20),
+            "calibration": SplitRowCounts(10, 30),
+            "train_dev": SplitRowCounts(5, 5),
+        })
+        assert len(errors) == 2
+        assert "calibration" in errors[0]
+        assert "train" in errors[1]
+
+    def test_needs_no_spark(self):
+        import inspect
+        sig = inspect.signature(model_input_grain_errors)
+        assert list(sig.parameters) == ["by_split"]
+
+    def test_a_small_fan_out_still_shows_a_ratio_that_is_not_one(self):
+        # ``:.4g`` would render this as "1x" — agreement, in the message of an
+        # error about disagreement.
+        errors = model_input_grain_errors(
+            {"train": SplitRowCounts(1_000_000, 1_000_200)})
+        assert "1.0002x" in errors[0]

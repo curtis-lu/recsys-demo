@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,59 @@ def group_by_partition(
         if value is not None:
             grouped[value].append(path)
     return dict(grouped)
+
+
+def filter_by_partitions(
+    paths: Iterable[str], partition_filter: Mapping[str, str]
+) -> list[str]:
+    """``paths`` narrowed to those whose Hive partition values match every pair.
+
+    Why a caller needs this at all: ``DataFrame.inputFiles()`` answers for the
+    whole relation, not for the ``partition_filter`` the catalog put in the
+    ``WHERE`` when it loaded the table. A gate that skipped this step would read
+    every dataset version's and every variant's files and report on rows this
+    run never wrote.
+
+    A path that does not carry one of the keys is dropped rather than kept:
+    ``partition_value`` returns ``None`` for it, which is not the declared
+    value, and counting a file whose partition cannot be established would be
+    the silent half of the same mistake. Returns sorted paths so two runs over
+    the same partitions read the same way.
+    """
+    return sorted(
+        p for p in paths
+        if all(partition_value(p, k) == v for k, v in partition_filter.items())
+    )
+
+
+def read_row_count(spark, paths: Sequence[str]) -> int:
+    """Total rows over ``paths``, summed from footers.
+
+    Every parquet row group's footer records how many rows it holds — the same
+    ``getRowCount()`` :func:`read_max_abs_stats` already reads to interpret a
+    column chunk's min/max. So a row count costs one seek per file and is
+    independent of how many rows the file holds, which is what keeps a caller
+    inside the dataset gates' cost invariant (ADR-0006) where ``df.count()``
+    would not be.
+
+    No "statistics missing" case exists here, unlike the per-column read: the
+    row count is structural in the format rather than optional statistics, so
+    every footer has one. An empty ``paths`` is 0 — a caller that needs to tell
+    "no rows" from "no files found" must check the paths itself, because from
+    here the two are the same number.
+    """
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    hadoop_path = jvm.org.apache.hadoop.fs.Path
+    no_filter = jvm.org.apache.parquet.format.converter.ParquetMetadataConverter.NO_FILTER
+    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader
+
+    total = 0
+    for path in paths:
+        footer = reader.readFooter(hadoop_conf, hadoop_path(path), no_filter)
+        for block in footer.getBlocks():
+            total += block.getRowCount()
+    return total
 
 
 def _stat_max_abs(statistics, row_count: int) -> float | None:

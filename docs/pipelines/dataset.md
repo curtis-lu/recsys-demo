@@ -341,6 +341,7 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
+| 粒度閘 | `validate_model_input_grain` | train／train_dev（開啟時另加 calibration）的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
 model input 的組裝規則：
 
@@ -354,6 +355,10 @@ model input 的組裝規則：
 兩個 join 都是 left，而且**列數恆等於 keys 的列數**——keys 的 grain 就是 model input
 的 grain。這一點是後續所有列數斷言的地基，改成 inner join 會靜默改變列數，也會讓 mAP
 的候選集跟著變。
+
+這個恆等式**只有在右表的 join 鍵唯一時才成立**，而那是上游契約、不是這裡保證的事。
+`validate_model_input_grain`（不變量 B10）就是實際去核對它的地方，涵蓋
+train／train_dev／calibration 三個 split。
 
 | join miss | 產生什麼 | 為什麼這是預期行為 |
 |---|---|---|
@@ -555,7 +560,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - dataset 的主要 Hive 產物具有版本 partitions，可降低設定改變後誤讀舊資料的風險；來源資料值回補與 seed 變更仍需人工判斷。
 - `validate_data_consistency` 沒有輸出，若它位於切片起點之前便不會自動重跑。source tables 或 item 資料有變時應執行 full run。
 - `validate_numeric_precision` 有輸出（`numeric_precision_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。
-- `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。
+- `validate_model_input_grain` 同樣有輸出（`model_input_grain_report`），行為與上一條一致：不會被當成側效應 node 跳過，但也沒有下游會把它拉回來。
+- `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。**這也是 B10 擋不到 val／test 的原因**：不落地就沒有 footer。
 - 切片執行會在 manifest 記錄 `resumed_from` 或 `only_node`，供後續追溯。
 - 開跑前 CLI 會對 base、train variant、calibration variant 各先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用，**不**更新 `latest` symlink，也不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並更新 `latest`；`--dry-run` / `--list-nodes` 不寫 stub。
 

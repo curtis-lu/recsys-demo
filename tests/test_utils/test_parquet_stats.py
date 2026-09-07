@@ -10,9 +10,11 @@ hand-built fixture would only prove the parser matches the fixture.
 import pytest
 
 from recsys_tfb.utils.parquet_stats import (
+    filter_by_partitions,
     group_by_partition,
     partition_value,
     read_max_abs_stats,
+    read_row_count,
 )
 
 
@@ -121,3 +123,51 @@ class TestReadMaxAbsStats:
         both = files + sorted(glob.glob(second + "/*.parquet"))
         assert read_max_abs_stats(spark, both, ["big_int"]) == {
             "big_int": float(2 ** 40)}
+
+
+class TestFilterByPartitions:
+    _PATHS = [
+        "/wh/t/base_dataset_version=v1/train_variant_id=t1/snap_date=2026-01-31/a.parquet",
+        "/wh/t/base_dataset_version=v1/train_variant_id=t2/snap_date=2026-01-31/b.parquet",
+        "/wh/t/base_dataset_version=v2/train_variant_id=t1/snap_date=2026-01-31/c.parquet",
+    ]
+
+    def test_every_pair_must_match(self):
+        kept = filter_by_partitions(
+            self._PATHS,
+            {"base_dataset_version": "v1", "train_variant_id": "t1"},
+        )
+        assert kept == [self._PATHS[0]]
+
+    def test_a_path_missing_the_key_is_dropped(self):
+        # partition_value returns None, which equals no declared value, so the
+        # path is excluded rather than silently counted under the filter.
+        assert filter_by_partitions(
+            ["/wh/t/a.parquet"], {"base_dataset_version": "v1"}) == []
+
+    def test_an_empty_filter_keeps_everything(self):
+        assert filter_by_partitions(self._PATHS, {}) == sorted(self._PATHS)
+
+
+@pytest.mark.spark
+class TestReadRowCount:
+    def test_sums_rows_across_files_without_reading_them(self, spark, tmp_path):
+        import glob
+
+        out = str(tmp_path / "rows")
+        spark.range(0, 250).repartition(3).write.parquet(out)
+        files = sorted(glob.glob(out + "/*.parquet"))
+        assert len(files) == 3
+        assert read_row_count(spark, files) == 250
+
+    def test_a_subset_of_files_counts_only_those(self, spark, tmp_path):
+        import glob
+
+        out = str(tmp_path / "part")
+        spark.range(0, 100).coalesce(1).write.parquet(out + "/p=1")
+        spark.range(0, 7).coalesce(1).write.parquet(out + "/p=2")
+        only_p2 = sorted(glob.glob(out + "/p=2/*.parquet"))
+        assert read_row_count(spark, only_p2) == 7
+
+    def test_no_files_is_zero_rows(self, spark):
+        assert read_row_count(spark, []) == 0
