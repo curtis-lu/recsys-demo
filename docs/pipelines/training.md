@@ -151,7 +151,9 @@ HPO、最終訓練、calibration 與 test scoring 都使用同一份 feature vie
 這是模型層的特徵實驗，因此修改後只會更新 `model_version`，不需要重建 dataset。`schema.item` 不可被排除；其他 exclude 名稱也應先確認存在於該 dataset 的 `feature_columns`。
 目前不存在的欄位名稱會被忽略，但仍會進入版本 hash，因此可能產生內容相同、ID 不同的 model version。
 
-LightGBM binary cache 會依 objective family 與保留後的 feature list 隔離，避免同一個 train variant 誤用其他 objective 或其他特徵子集建立的 `.bin`。
+LightGBM binary cache 會依 `objective` 與保留後的 feature list 隔離，避免同一個 train variant 誤用其他 objective 或其他特徵子集建立的 `.bin`。三個 objective（`lambdarank` / `rank_xendcg` / `binary`）各自一個子目錄；其餘非 ranking objective 共用 `binary`（它們建出的 `.bin` 內容相同）。
+
+此隔離在 2026-09-07 之前是較粗的 objective family（兩個 ranking objective 共用 `lgb/ranking/`）。若你在那之前跑過 ranking objective，舊的 `<cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/lgb/ranking/` 會變成沒有人再讀的孤兒目錄，可直接刪除；`binary` 的路徑未變，不需處理。
 
 ### 3.5 Sample weights
 
@@ -301,7 +303,7 @@ SHAP 診斷主要回答三個問題：
 案例圖用來看「某位客戶在某象限被排高／排低，具體靠哪些特徵」，與 `per_quadrant.json` 的
 「平均驅動特徵」互補。SHAP 值在 log-odds（margin）尺上；正值把分數推高、負值拉低。
 
-local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 會再依 objective family 與 feature selection 子集隔離。
+local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 會再依 `objective` 與 feature selection 子集隔離。
 
 `mlflow.strict: false` 時，MLflow 無法連線或 logging 失敗只會記 warning，不會讓已完成的 training 失敗；設為 `true` 時則會直接中止，適合要求 experiment tracking 必須成功的環境。
 

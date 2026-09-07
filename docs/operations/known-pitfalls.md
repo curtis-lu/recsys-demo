@@ -338,7 +338,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 17. 改了 `sample_weights` 卻毫無效果：lgb `.bin` cache 不因權重失效
 
 - **症狀（第一分鐘認出它）**：調整 `training.sample_weights` / `sample_weight_keys` 後重跑 training，evaluation 指標**幾乎不變**。log 裡看得到 `lgb binary cache hit`，卻**看不到** `_row_weights_from_pdf`（`src/recsys_tfb/io/extract.py:109`）那行 `sample_weight ACTIVE/INACTIVE` 訊息。
-- **根因**：`.bin` cache 的 key 是 `base_dataset_version / train_variant_id / objective family`，**不含 `model_version`**；而 `sample_weights` 只 bust `model_version`。於是改權重之後 `.bin` 仍然 cache hit，舊權重（常是全 1.0）被重用。權重傳輸機制本身是對的（`_row_weights_from_pdf` → `extract_Xy(with_weights=True)` → `lgb.Dataset(weight=...)`），但**只在建 `.bin` 時跑一次**，cache hit 時整段 extract 被跳過。
+- **根因**：`.bin` cache 的 key 是 `base_dataset_version / train_variant_id / objective`（2026-09-07 前這一段是較粗的 objective family），**不含 `model_version`**；而 `sample_weights` 只 bust `model_version`。於是改權重之後 `.bin` 仍然 cache hit，舊權重（常是全 1.0）被重用。權重傳輸機制本身是對的（`_row_weights_from_pdf` → `extract_Xy(with_weights=True)` → `lgb.Dataset(weight=...)`），但**只在建 `.bin` 時跑一次**，cache hit 時整段 extract 被跳過。
 - **規則**：改權重後重跑前先 `rm -rf <cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/lgb`。**parquet 不用刪**——權重不在 parquet 裡，是 extract 時即時算的。
 - **先分辨是不是這個坑**：`sample_weight ACTIVE` 有出現卻仍無效，那是別的原因（config 沒讀到、或 key 值對不上，例如整數編碼的欄位配字串 key）；`unmatched_keys` 會列在 `sample_weight_report.json`。只有「沒有這行 log ＋ cache hit」才是本坑。多槽 cache 的正式修法**刻意還沒做**，見 [deliberate-non-goals.md](../agents/deliberate-non-goals.md)。
 
