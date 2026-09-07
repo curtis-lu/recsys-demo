@@ -23,7 +23,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.utils.hashing import HASH_BUCKETS, ratio_to_threshold, spark_bucket
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+    from pyspark.sql import Column, DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,54 @@ def log_sampled_keys(
     logger.info(
         "Sampled keys (ratio=%.2f, group_keys=%s, overrides=%s, site=%s)",
         sample_ratio, group_keys, sample_ratio_overrides, site,
+    )
+
+
+def any_column_is_null(cols: list[str]) -> "Column":
+    """Row-wise predicate: at least one of ``cols`` is NULL on this row.
+
+    Handed back as a Column instead of being applied to a frame so one caller
+    can use it and its negation. A keep-filter and a drop-filter written as two
+    separate expressions can drift into overlapping or into leaving a gap, and
+    neither shows up as an error -- the rows just appear twice or vanish.
+
+    ``isNull()`` never evaluates to NULL itself, so ``~`` on this is an exact
+    complement, not the three-valued logic that would apply to a comparison.
+    """
+    predicate = F.lit(False)
+    for col in cols:
+        predicate = predicate | F.col(col).isNull()
+    return predicate
+
+
+def log_dropped_null_split_unit(dropped: "DataFrame", cols: list[str]) -> None:
+    """Report rows dropped for a NULL split unit: how many, and in which column.
+
+    One Spark action for the whole report: the row total and every per-column
+    NULL count come out of a single ``agg``. The caller is expected to guard
+    this behind an ``isEmpty``, so a clean input pays for no job at all and a
+    dirty one pays for exactly one.
+
+    Per-column counts rather than a bare total, because a split unit can be
+    several columns: a total leaves the reader auditing all of them, and the
+    zeros are what say the rest are clean.
+    """
+    counts = dropped.agg(
+        F.count(F.lit(1)).alias("_dropped"),
+        *[
+            F.count(F.when(F.col(c).isNull(), F.lit(1))).alias(f"_null_{c}")
+            for c in cols
+        ],
+    ).first()
+    per_column = ", ".join(f"{c}={counts[f'_null_{c}']}" for c in cols)
+    logger.warning(
+        "Dropped %d row(s) whose split unit is NULL (NULL by column: %s). "
+        "Such a row belongs to no entity: it joins to neither features nor "
+        "labels, so it would reach training as an all-NULL row. The train / "
+        "train-dev split has always dropped these; this reports them. The "
+        "check that owns them is upstream -- source_etl's "
+        "primary_key_not_null (ADR-0006).",
+        counts["_dropped"], per_column,
     )
 
 
