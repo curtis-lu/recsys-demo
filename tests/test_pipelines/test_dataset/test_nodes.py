@@ -1,5 +1,9 @@
 """Tests for the dataset pipeline's node functions, Layer-2 gate included."""
 
+import logging
+import operator
+from functools import reduce
+
 import pandas as pd
 import pytest
 from pyspark.sql import functions as F
@@ -422,6 +426,140 @@ class TestSplitTrainKeysEmptyTrainDev:
         msg = str(ei.value)
         assert "sample_ratio" in msg
         assert "puts every entity on the train side" not in msg
+
+
+def _warning_messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+class TestSplitTrainKeysNullSplitUnit:
+    """A row whose split unit is NULL is dropped -- and said out loud.
+
+    Dropping is the behaviour that was already there. The split used to be an
+    ``inner join`` back onto a distinct entity list, and NULL never equals
+    NULL, so those rows fell out. The row-wise rewrite would have *kept* them
+    (``concat_ws`` skips NULLs, so a bucket is still computable), which would
+    have smuggled a semantic change in on the back of a performance one.
+
+    So the drop stays and the silence goes: the row counts do not move, and the
+    failure this repo keeps getting burnt by -- a row vanishing with nobody
+    saying so -- is what this class pins. Such a row is worthless downstream
+    anyway; it joins to neither features nor labels and would ride into
+    training as a full row of NULLs.
+
+    The reaction is a warning, not a raise. ADR-0006 puts data-quality checks
+    upstream in ``source_etl`` (``primary_key_not_null`` is exactly this
+    check), so raising here would audit the same thing twice, and would turn a
+    user-supplied source table with a handful of NULL keys from "runs" into
+    "will not run".
+    """
+
+    def _keys(self, spark, entity_values):
+        """Keys with one row per entity value; ``None`` means a NULL split unit."""
+        rows = [
+            (
+                pd.Timestamp(_SNAP_DATES[0]).to_pydatetime(),
+                value,
+                _PRODUCTS[i % len(_PRODUCTS)],
+            )
+            for i, value in enumerate(entity_values)
+        ]
+        return spark.createDataFrame(
+            rows, "snap_date timestamp, cust_id string, prod_name string")
+
+    @staticmethod
+    def _missing(split_cols):
+        """The test's own statement of "some split column is NULL".
+
+        Written out here rather than imported from the node, so the test still
+        disagrees with an implementation that redefines what missing means.
+        """
+        return reduce(operator.or_, (F.col(c).isNull() for c in split_cols))
+
+    def test_null_split_unit_rows_reach_neither_side(self, spark, parameters, caplog):
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
+        split_cols = get_entity_grouping(params, "train_split_keys")
+        keys = self._keys(spark, list(_ENTITIES) + [None, None])
+
+        with caplog.at_level(logging.WARNING):
+            train, train_dev = split_train_keys(keys, params)
+
+        assert train.count() + train_dev.count() == len(_ENTITIES)
+        assert train.filter(self._missing(split_cols)).count() == 0
+        assert train_dev.filter(self._missing(split_cols)).count() == 0
+
+    def test_the_drop_is_reported_with_a_row_count(self, spark, parameters, caplog):
+        """The number is the point: "some rows were dropped" is not actionable.
+
+        Two NULL rows out of 26 is a dirty source table; 26 out of 26 is a
+        broken upstream join. Only the count tells them apart, and neither is
+        visible from the train/train-dev row counts alone.
+        """
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
+        keys = self._keys(spark, list(_ENTITIES) + [None, None])
+
+        with caplog.at_level(logging.WARNING):
+            split_train_keys(keys, params)
+
+        assert any("2 row" in m for m in _warning_messages(caplog))
+
+    def test_clean_input_warns_about_nothing(self, spark, parameters, caplog):
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
+        keys = self._keys(spark, list(_ENTITIES))
+
+        with caplog.at_level(logging.WARNING):
+            split_train_keys(keys, params)
+
+        assert _warning_messages(caplog) == []
+
+    def test_an_all_null_input_is_not_blamed_on_the_sampling_config(
+        self, spark, parameters, caplog
+    ):
+        """"No keys at all" has two causes, and they are fixed in two places.
+
+        Rows that never arrived is a sampling / partition-filter problem. Rows
+        that arrived and were all dropped for a NULL split unit is a source
+        table problem. Under the old ``inner join`` the NULLs survived as one
+        distinct entity, so this state was unreachable; row-wise it is one
+        broken upstream column away, and the message that was written for the
+        first cause names three settings that are all fine in the second.
+        """
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ValueError, match="no sampled keys at all") as ei:
+                split_train_keys(self._keys(spark, [None, None, None]), parameters)
+
+        msg = str(ei.value)
+        assert "NULL split unit" in msg
+        assert "sample_ratio" not in msg
+
+    def test_clean_input_pays_no_counting_action(
+        self, spark, parameters, caplog, monkeypatch
+    ):
+        """The short-circuit, asserted as an action budget rather than a message.
+
+        ``test_clean_input_warns_about_nothing`` also passes if the node counts
+        the NULL rows on every run and then keeps quiet about a count of zero.
+        That is a Spark job per split on every clean dataset -- the cost this
+        node's docstring is explicit about not paying. The reporting step is
+        where the count lives, so refusing to let it run at all is the same
+        assertion, one layer lower.
+        """
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "reported NULL split units on an input that has none")
+
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.dataset.nodes.warn_dropped_null_split_unit", _boom)
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
+        keys = self._keys(spark, list(_ENTITIES))
+
+        train, train_dev = split_train_keys(keys, params)
+
+        assert train.count() + train_dev.count() == len(_ENTITIES)
 
 
 class TestSelectValKeys:
@@ -2427,6 +2565,37 @@ class TestSplitTrainKeysTwoColumnEntity:
 
         assert _branches_split_across(train_pairs, dev_pairs) == set()
         assert train_pairs and dev_pairs
+
+
+    def test_the_null_report_names_which_column_is_null(
+        self, spark, two_column_entity_params, caplog
+    ):
+        """A row count alone is not actionable when the entity has two columns.
+
+        Here ``branch_id`` is clean and ``cust_id`` is not. "2 rows dropped"
+        would leave the user auditing both source columns; a per-column count
+        points at the one upstream table to fix -- and the zero beside the
+        clean column is what says the other one is not also suspect.
+        """
+        params = _two_column_params(two_column_entity_params)
+        pool = _two_column_pool(spark, _SNAP_DATES[:1])
+        null_cust = spark.createDataFrame(
+            [
+                (pd.Timestamp(_SNAP_DATES[0]).to_pydatetime(),
+                 branch, None, _PRODUCTS[0], 0)
+                for branch in _BRANCHES
+            ],
+            pool.schema,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            train, train_dev = split_train_keys(pool.unionByName(null_cust), params)
+
+        warnings = _warning_messages(caplog)
+        assert len(warnings) == 1
+        assert "cust_id=2" in warnings[0]
+        assert "branch_id=0" in warnings[0]
+        assert _entity_pairs(train) | _entity_pairs(train_dev) == _entity_pairs(pool)
 
 
 class TestSelectValKeysTwoColumnEntity:

@@ -76,12 +76,14 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     collect_dataset_snap_dates,
 )
 from recsys_tfb.pipelines.dataset.steps.sampling import (
+    any_column_is_null,
     draw_can_drop_rows,
     keep_entities_drawn_under_ratio,
     keep_rows_drawn_under_ratio,
     key_output_columns,
     log_sampled_keys,
     sampling_columns,
+    warn_dropped_null_split_unit,
     with_effective_sample_ratio,
 )
 from recsys_tfb.pipelines.dataset.steps.scoping import (
@@ -295,14 +297,35 @@ def split_train_keys(
     """Split sampled keys into train and train-dev by entity ratio.
 
     All rows of a given entity are assigned to the same split, so no entity
-    straddles the boundary. Which columns constitute "a given entity" here is
-    the user's to declare (``dataset.train_split_keys``, defaulting to the whole
-    ``schema.entity``): a leakage unit coarser than the query group is a real
-    situation — several accounts of one customer must not land on opposite
-    sides — and the framework has no way to know it from the data.
+    straddles the boundary. That holds by construction here: the side a row
+    lands on is a pure function of its own split columns, so two rows of one
+    entity cannot disagree. It used to be assembled instead — distinct the
+    entities, bucket them, join each side back — which produced the same answer
+    through three shuffles and made "no straddle" a property of the join keys
+    rather than of the expression. See
+    docs/notes/2026-09-06-dataset-pipeline-profiling.md §6.1 for the measurement
+    (6.7s → 3.6s on 16M keys, four Exchanges → none).
 
-    Logging still triggers no action; the empty-dev guard below does — one
-    ``isEmpty`` always, plus one ``count`` on the failing path only.
+    Which columns constitute "a given entity" here is the user's to declare
+    (``dataset.train_split_keys``, defaulting to the whole ``schema.entity``): a
+    leakage unit coarser than the query group is a real situation — several
+    accounts of one customer must not land on opposite sides — and the framework
+    has no way to know it from the data.
+
+    Two guards stay in the node, because both read data that only exists at run
+    time. Rule 11 of docs/agents/pipeline-node-design.md asks which kind each
+    one is, since they send the reader to different people: the NULL split unit
+    is a **pre-check** (the input arrived broken; the fix is upstream), the
+    empty train-dev split is a **post-condition** (this node's own ratio and
+    sample produced a useless result).
+
+    Logging still triggers no action. Each guard costs one ``isEmpty``, plus one
+    aggregate on its own failing path only — and note which way ``isEmpty``
+    short-circuits: it stops at the first matching row, so a *dirty* input
+    answers immediately while a clean one has to read ``split_cols`` across the
+    whole frame to prove there is nothing there. That is a narrow scan with no
+    shuffle, and it is cheaper than the unconditional second pass a plain
+    ``count`` would cost on every run.
     """
     # Decision — the split unit: what the user declared, else the whole entity.
     split_cols = get_entity_grouping(parameters, "train_split_keys")
@@ -310,20 +333,30 @@ def split_train_keys(
     train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
     seed = parameters.get("random_seed", 42)
 
-    # Deterministic per-entity bucket; threshold is computed once so the two
-    # filters are guaranteed to be a complete and disjoint partition regardless
-    # of how many actions Spark runs against this plan.
-    entity_df = sample_keys.select(*split_cols).distinct()
-    entity_df = entity_df.withColumn(
-        "_bucket", spark_bucket(entity_df, split_cols, seed, site="split_train_dev"),
-    )
+    # Decision — a row whose split unit is NULL is dropped, out loud.
+    # It belongs to no entity, so it joins to neither features nor labels and
+    # would reach training as an all-NULL row. Dropping is what the old
+    # distinct-and-join did for free (NULL never equals NULL); a row-wise bucket
+    # would happily keep it, since concat_ws skips NULLs. Warn rather than
+    # raise: ADR-0006 puts data-quality checks upstream in source_etl, whose
+    # primary_key_not_null owns exactly this, and raising here would stop a
+    # user's slightly dirty source table from running at all.
+    missing_split_unit = any_column_is_null(split_cols)
+    dropped = sample_keys.filter(missing_split_unit)
+    dropped_any = not dropped.isEmpty()
+    if dropped_any:
+        warn_dropped_null_split_unit(dropped, split_cols)
+    keys = sample_keys.filter(~missing_split_unit)
+
+    # Decision — which side a row lands on: the bucket of its own split unit.
+    # The threshold is computed once and the two filters negate each other on
+    # it, so they are a complete and disjoint partition regardless of how many
+    # actions Spark runs against this plan.
     threshold = ratio_to_threshold(train_dev_ratio)
+    bucket = spark_bucket(keys, split_cols, seed, site="split_train_dev")
 
-    dev_entities = entity_df.filter(F.col("_bucket") < F.lit(threshold)).select(*split_cols)
-    train_entities = entity_df.filter(F.col("_bucket") >= F.lit(threshold)).select(*split_cols)
-
-    train_keys = sample_keys.join(train_entities, on=split_cols, how="inner")
-    train_dev_keys = sample_keys.join(dev_entities, on=split_cols, how="inner")
+    train_keys = keys.filter(bucket >= F.lit(threshold))
+    train_dev_keys = keys.filter(bucket < F.lit(threshold))
 
     # An empty train_dev is invisible downstream: it is the early-stopping
     # validation set for every HPO trial (training/nodes.py passes
@@ -332,19 +365,31 @@ def split_train_keys(
     # no error, no warning, just worse models and a longer search. Costs one
     # Spark action; see ADR-0005 for the fallback if that ever matters at scale.
     # `!= 0`, not `> 0`: a negative ratio makes ratio_to_threshold return a
-    # negative threshold, so `_bucket < threshold` is empty and
-    # `_bucket >= threshold` takes everything — the same silent state, reached
+    # negative threshold, so `bucket < threshold` is empty and
+    # `bucket >= threshold` takes everything — the same silent state, reached
     # by one stray minus sign. Only an exact 0 means "no dev split wanted".
     if train_dev_ratio != 0 and train_dev_keys.isEmpty():
-        n_entities = entity_df.count()
+        n_entities = keys.select(*split_cols).distinct().count()
         split_unit = ", ".join(split_cols)
         if n_entities == 0:
+            # Two ways to get here, and they are fixed in different places, so
+            # the message must not name the wrong one. Rows can never have
+            # arrived (a sampling or partition-filter problem), or they can
+            # have arrived and all been dropped for a NULL split unit (a source
+            # table problem). The old wording only knew the first.
+            cause = (
+                "Every row was dropped for a NULL split unit — see the warning "
+                "above — so the split itself received nothing. Fix the source "
+                "table's key columns."
+                if dropped_any else
+                "The cause is upstream of the split — check "
+                "dataset.sample_ratio, dataset.train_snap_dates, and any "
+                "partition filter applied when sample_keys was read back."
+            )
             raise ValueError(
                 f"split_train_keys received no sampled keys at all "
                 f"(train_dev_ratio={train_dev_ratio}), so train and train-dev "
-                f"are both empty. The cause is upstream of the split — check "
-                f"dataset.sample_ratio, dataset.train_snap_dates, and any "
-                f"partition filter applied when sample_keys was read back."
+                f"are both empty. {cause}"
             )
         raise ValueError(
             f"split_train_keys produced an empty train-dev split: "
