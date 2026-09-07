@@ -735,6 +735,21 @@ def _sample_weight_extra(version_dir: Path) -> Optional[dict]:
         return {"sample_weight": json.load(f)}
 
 
+def _group_filter_extra(version_dir: Path) -> Optional[dict]:
+    """Read group_filter_report.json (if present) into manifest extra_metadata.
+
+    Under lambdarank the training matrix holds fewer rows than the train /
+    train_dev tables do (zero-positive query groups are dropped). Recording
+    the counts here is what lets two runs be compared on training-set size
+    without re-deriving where the difference came from.
+    """
+    report = version_dir / "group_filter_report.json"
+    if not report.exists():
+        return None
+    with open(report) as f:
+        return {"group_filter": json.load(f)}
+
+
 def _run_etl(
     stage: str,
     env: str,
@@ -1383,6 +1398,7 @@ def training(
         metadata_kwargs["calibration_variant_id"] = cal_v
 
     extra = _sample_weight_extra(version_dir) or {}
+    extra.update(_group_filter_extra(version_dir) or {})
     slice_extra = _slice_extra(from_node, only_node)
     if slice_extra:
         extra.update(slice_extra)

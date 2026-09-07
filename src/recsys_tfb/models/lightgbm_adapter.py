@@ -1,5 +1,6 @@
 """LightGBM implementation of ModelAdapter."""
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -8,7 +9,11 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 
-from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
+from recsys_tfb.io.handles import (
+    GROUP_FILTER_COUNTS_NAME,
+    LgbDatasetHandle,
+    ParquetHandle,
+)
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
 # extract_Xy is imported lazily inside prepare_train_inputs (see method body).
@@ -43,6 +48,17 @@ def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> 
 
     digest = hashlib.sha256("\n".join(feature_columns).encode()).hexdigest()[:8]
     return f"fs_{digest}"
+
+
+def _log_group_filter(split: str, counts: dict) -> None:
+    """One line per split saying what the zero-positive filter removed."""
+    logger.info(
+        "lambdarank zero-positive filter [%s]: dropped %d/%d groups "
+        "(%d/%d rows); %d groups / %d rows remain",
+        split, counts["groups_dropped"], counts["groups_total"],
+        counts["rows_dropped"], counts["rows_total"],
+        counts["groups_kept"], counts["rows_kept"],
+    )
 
 
 class LightGBMAdapter(ModelAdapter):
@@ -163,6 +179,15 @@ class LightGBMAdapter(ModelAdapter):
         (with binning), saves binary, then builds train_dev with
         reference=train so dev binning aligns to train. For a ranking
         objective each Dataset also carries the per-query group.
+
+        Under ``objective: lambdarank`` both splits are also stripped of query
+        groups holding no positive, and the counts are written next to the
+        .bin as ``group_filter_counts.json`` so a later cache hit can still
+        report them (:meth:`LgbDatasetHandle.group_filter_counts`). That file
+        doubles as the marker that a cached .bin was built under the rule: a
+        directory without it is rebuilt rather than served. Which objectives
+        filter, and why it is derived rather than configured:
+        ``core.group_utils.objective_drops_zero_positive_groups``.
         """
         # Lazy import: see module-top comment about circular-import chain.
         # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
@@ -171,8 +196,10 @@ class LightGBMAdapter(ModelAdapter):
         from recsys_tfb.core.logging import log_data_volume
 
         from recsys_tfb.core.group_utils import (
+            drop_zero_positive_groups,
             is_ranking_objective,
             objective_cache_key,
+            objective_drops_zero_positive_groups,
             to_contiguous_groups,
         )
 
@@ -183,6 +210,15 @@ class LightGBMAdapter(ModelAdapter):
         )
         objective_key = objective_cache_key(objective)
         ranking = is_ranking_objective(objective)
+        # train and train_dev take the SAME rule. train_dev is only the
+        # early-stopping valid set today, but `final_model_strategy:
+        # refit_on_full` concats it into the training matrix -- one rule is
+        # correct under both strategies. The calibration set is deliberately
+        # not filtered: calibration reads the whole score distribution.
+        filter_zero_positive = objective_drops_zero_positive_groups(objective)
+        filter_counts: dict = (
+            {"objective": objective} if filter_zero_positive else {}
+        )
 
         # Per-objective sub-path: the lgb-binary cache is NOT keyed by
         # model_version, so a binary built under one objective must never be
@@ -204,7 +240,29 @@ class LightGBMAdapter(ModelAdapter):
         train_bin = lgb_dir / "train.bin"
         dev_bin = lgb_dir / "train_dev.bin"
 
-        if success.exists():
+        stale = (
+            success.exists()
+            and filter_zero_positive
+            and not (lgb_dir / GROUP_FILTER_COUNTS_NAME).exists()
+        )
+        if stale:
+            # A .bin from before the zero-positive filter existed (#315).
+            # #314 already gave lambdarank its own segment, so this sits at
+            # exactly the path today's run wants, carrying every row. Nothing
+            # else would catch it: the lgb cache is not keyed by
+            # model_version, and the one place the row count is reported reads
+            # this very directory. Serving it would put HPO on the full matrix
+            # while finalize_model's refit branch — which re-reads the parquet
+            # — trains on the filtered one, under one set of hyperparameters
+            # and with nothing raised. Rebuild instead.
+            logger.warning(
+                "lgb binary at %s predates the zero-positive group filter "
+                "(no %s); it holds every row, which is not what "
+                "objective=%s trains on. Rebuilding.",
+                lgb_dir, GROUP_FILTER_COUNTS_NAME, objective,
+            )
+
+        if success.exists() and not stale:
             logger.info("lgb binary cache hit at %s", lgb_dir)
             log_data_volume(logger, "prepare.train.bin", str(train_bin))
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
@@ -253,6 +311,11 @@ class LightGBMAdapter(ModelAdapter):
                 train_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
+            if filter_zero_positive:
+                (y_tr, gid_tr, X_tr, w_tr), counts = drop_zero_positive_groups(
+                    y_tr, gid_tr, X_tr, w_tr)
+                filter_counts["train"] = counts
+                _log_group_filter("train", counts)
             perm_tr, grp_tr = to_contiguous_groups(gid_tr)
             ds_train = lgb.Dataset(
                 X_tr[perm_tr],
@@ -273,6 +336,11 @@ class LightGBMAdapter(ModelAdapter):
                 train_dev_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
+            if filter_zero_positive:
+                (y_dev, gid_dev, X_dev, w_dev), counts = (
+                    drop_zero_positive_groups(y_dev, gid_dev, X_dev, w_dev))
+                filter_counts["train_dev"] = counts
+                _log_group_filter("train_dev", counts)
             perm_dev, grp_dev = to_contiguous_groups(gid_dev)
             ds_dev = lgb.Dataset(
                 X_dev[perm_dev],
@@ -331,6 +399,13 @@ class LightGBMAdapter(ModelAdapter):
             ds_dev.save_binary(str(dev_bin))
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
             del X_dev, y_dev, w_dev, ds_train, ds_dev
+
+        if filter_counts:
+            # Next to the .bin, and written before _SUCCESS: a rebuild that
+            # died partway leaves no marker, so no later run can read these
+            # counts as a description of a binary that was never finished.
+            with open(lgb_dir / GROUP_FILTER_COUNTS_NAME, "w") as f:
+                json.dump(filter_counts, f, indent=2)
 
         success.touch()
         logger.info(

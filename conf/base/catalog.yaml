@@ -280,6 +280,15 @@ sample_weight_report:
   type: JSONDataset
   filepath: data/models/${model_version}/sample_weight_report.json
 
+# 同上：零下游消費者，條目在這裡是為了讓它撈得出來看。lambdarank 會把零正例
+# 的 query group 丟出訓練矩陣，於是列數不再等於 train / train_dev 表的列數——
+# 這份說的就是差在哪。檔名與位置同樣是契約的一部分：__main__.py 的
+# _group_filter_extra 讀 <version dir>/group_filter_report.json 放進 manifest
+# 的 extra_metadata，而 artifacts 清單只列版本目錄第一層。
+group_filter_report:
+  type: JSONDataset
+  filepath: data/models/${model_version}/group_filter_report.json
+
 feature_statistics:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/feature_statistics.json
