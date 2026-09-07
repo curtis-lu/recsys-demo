@@ -6,6 +6,8 @@ import pytest
 from recsys_tfb.core.group_utils import (
     RANKING_OBJECTIVES,
     default_metric_for_objective,
+    drops_zero_positive_groups,
+    groups_with_positives_mask,
     is_ranking_objective,
     objective_cache_key,
     to_contiguous_groups,
@@ -107,3 +109,83 @@ class TestToContiguousGroups:
         bad = np.array([[0, 1], [1, 0]], dtype=np.int64)
         with pytest.raises(ValueError, match="1-D"):
             to_contiguous_groups(bad)
+
+
+class TestDropsZeroPositiveGroups:
+    """Which objectives drop zero-positive query groups — derived, not configured."""
+
+    def test_only_lambdarank_drops(self):
+        assert drops_zero_positive_groups("lambdarank") is True
+
+    @pytest.mark.parametrize("obj", ["rank_xendcg", "binary", "regression", None, ""])
+    def test_everything_else_keeps_every_row(self, obj):
+        assert drops_zero_positive_groups(obj) is False
+
+
+class TestGroupsWithPositivesMask:
+    def test_empty_input(self):
+        mask = groups_with_positives_mask(
+            np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        )
+        assert mask.shape == (0,)
+        assert mask.dtype == bool
+
+    def test_every_group_has_a_positive_keeps_all(self):
+        y = np.array([1, 0, 0, 1])
+        ids = np.array([7, 7, 9, 9])
+        np.testing.assert_array_equal(
+            groups_with_positives_mask(y, ids), np.array([True] * 4)
+        )
+
+    def test_no_group_has_a_positive_keeps_none(self):
+        y = np.array([0, 0, 0, 0])
+        ids = np.array([7, 7, 9, 9])
+        np.testing.assert_array_equal(
+            groups_with_positives_mask(y, ids), np.array([False] * 4)
+        )
+
+    def test_uneven_group_sizes_and_interleaved_ids(self):
+        # group 2: rows 0,3,5 (has a positive); group 0: rows 1,4 (none);
+        # group 1: row 2 (has a positive). Ids are neither sorted nor
+        # contiguous, and the groups have three different sizes.
+        y = np.array([0, 0, 1, 1, 0, 0])
+        ids = np.array([2, 0, 1, 2, 0, 2])
+        np.testing.assert_array_equal(
+            groups_with_positives_mask(y, ids),
+            np.array([True, False, True, True, False, True]),
+        )
+
+    def test_mask_selects_rows_that_stay_aligned(self):
+        # The mask is applied to X / y / ids / weights together; misapplying it
+        # to one of them is the failure this pins.
+        y = np.array([0, 0, 1, 0])
+        ids = np.array([1, 0, 1, 0])
+        X = np.array([[10], [20], [30], [40]], dtype=float)
+        w = np.array([0.5, 1.5, 2.5, 3.5])
+        mask = groups_with_positives_mask(y, ids)
+        np.testing.assert_array_equal(mask, np.array([True, False, True, False]))
+        np.testing.assert_array_equal(X[mask].ravel(), np.array([10, 30]))
+        np.testing.assert_array_equal(y[mask], np.array([0, 1]))
+        np.testing.assert_array_equal(ids[mask], np.array([1, 1]))
+        np.testing.assert_array_equal(w[mask], np.array([0.5, 2.5]))
+
+    def test_graded_labels_count_as_positive(self):
+        # Nothing here assumes a binary label: any label > 0 is a positive, so
+        # a graded-relevance label_gain setup keeps working.
+        y = np.array([0, 2, 0, 0])
+        ids = np.array([5, 5, 6, 6])
+        np.testing.assert_array_equal(
+            groups_with_positives_mask(y, ids),
+            np.array([True, True, False, False]),
+        )
+
+    def test_rejects_length_mismatch(self):
+        with pytest.raises(ValueError, match="same length"):
+            groups_with_positives_mask(np.array([1, 0]), np.array([1, 1, 2]))
+
+    def test_rejects_non_1d_input(self):
+        bad = np.array([[0, 1], [1, 0]], dtype=np.int64)
+        with pytest.raises(ValueError, match="1-D"):
+            groups_with_positives_mask(np.array([1, 0, 0, 1]), bad)
+        with pytest.raises(ValueError, match="1-D"):
+            groups_with_positives_mask(bad, np.array([1, 1, 2, 2]))

@@ -29,16 +29,12 @@ def objective_cache_key(objective: str | None) -> str:
     Every ranking objective gets its **own** segment: ``lgb/lambdarank/``,
     ``lgb/rank_xendcg/``, ``lgb/binary/``.
 
-    As of this commit lambdarank and rank_xendcg build a **byte-identical**
-    .bin, so splitting them buys nothing yet — that is deliberate, and it is
-    why the split lands first. The follow-up to #313 makes lambdarank drop
-    zero-positive query groups (their lambdarank gradient contribution is
-    exactly zero; rank_xendcg genuinely learns from them), and from that
-    commit on the two objectives need different rows. The lgb cache is not
-    keyed by ``model_version``, so a segment still shared at that moment
-    would silently serve a .bin built for the other objective's rows. The
-    segment therefore splits *before* the rows do and the collision is never
-    live.
+    The two ranking objectives no longer build the same rows: lambdarank
+    drops zero-positive query groups and rank_xendcg keeps them (see
+    :func:`drops_zero_positive_groups`). The lgb cache is not keyed by
+    ``model_version``, so a shared segment would silently serve a .bin built
+    for the other objective's rows. The segment split landed one commit ahead
+    of the row split (#314 before #315) so that collision was never live.
 
     Non-ranking objectives all map to ``"binary"``. That collision is
     deliberate: they build a byte-identical .bin (same X/y/weight, no group
@@ -51,6 +47,69 @@ def objective_cache_key(objective: str | None) -> str:
     if is_ranking_objective(objective):
         return objective
     return "binary"
+
+
+def drops_zero_positive_groups(objective: str | None) -> bool:
+    """True iff ``objective`` trains only on query groups holding a positive.
+
+    ``lambdarank`` and only ``lambdarank``. A query group whose labels are all
+    zero yields no pair of differing labels, so its gradient contribution is
+    *exactly* zero — measured on LightGBM 4.6.0 with an all-zero-label group
+    over 50 rounds: 1 tree, 0 splits, zero variance in the predictions. Those
+    rows cost training time and teach nothing.
+
+    ``rank_xendcg`` genuinely learns from them and must keep every row. Its
+    target distribution ``q_i = (2^y_i - g_i) / sum_j (2^y_j - g_j)`` draws a
+    fresh random ``g`` each round, so an all-zero-label group becomes a
+    *random* ranking to fit rather than a flat one — the same data grew 50
+    trees, all with splits, prediction std 0.045.
+
+    Derived from ``objective``, deliberately **not** a config key: a key would
+    add a state ("filter on, objective rank_xendcg") that has no correct
+    meaning. What the filter did is answered by the log and the manifest, not
+    by config.
+    """
+    return objective == "lambdarank"
+
+
+def groups_with_positives_mask(
+    y: np.ndarray, group_ids: np.ndarray
+) -> np.ndarray:
+    """Row mask: True where the row's query group holds at least one positive.
+
+    ``y`` and ``group_ids`` are the per-row label and query-group id arrays
+    from ``recsys_tfb.io.extract.extract_Xy_with_groups``, aligned 1:1.
+    Group ids need not be sorted or contiguous, and groups may differ in size.
+
+    Returns a bool array of the same length, to be applied to **every** per-row
+    array together — X, y, group ids and weights — so they stay aligned. It is
+    a row mask rather than a group list precisely so no caller has to
+    re-derive which rows a dropped group owned.
+
+    Any label > 0 counts as a positive, so a graded-relevance ``label_gain``
+    setup keeps working; only an all-zero group is dropped.
+
+    Empty input returns an empty bool array (no group, nothing to keep).
+    """
+    y = np.asarray(y)
+    group_ids = np.asarray(group_ids)
+    if y.ndim != 1 or group_ids.ndim != 1:
+        raise ValueError(
+            f"y and group_ids must be 1-D (one per row), got shapes "
+            f"{y.shape} and {group_ids.shape}"
+        )
+    if y.shape[0] != group_ids.shape[0]:
+        raise ValueError(
+            f"y and group_ids must have the same length (one per row), got "
+            f"{y.shape[0]} and {group_ids.shape[0]}"
+        )
+    if y.shape[0] == 0:
+        return np.empty(0, dtype=bool)
+    # inverse gives each row the dense index of its group, so one bincount
+    # counts positives per group without sorting or grouping the rows.
+    _, inverse = np.unique(group_ids, return_inverse=True)
+    positives_per_group = np.bincount(inverse, weights=(y > 0).astype(np.float64))
+    return positives_per_group[inverse] > 0
 
 
 def default_metric_for_objective(

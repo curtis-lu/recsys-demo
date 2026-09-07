@@ -655,6 +655,240 @@ def test_ranking_objective_switch_never_hits_the_other_bin(
     assert (cache / "lgb" / second / "_SUCCESS").exists()
 
 
+def _zero_positive_frames():
+    """Ranking fixture in which some query groups hold no positive at all.
+
+    train: 4 customers x 2 products on one snap_date -> 4 groups / 8 rows,
+    of which c3 and c4 are all-negative.
+    train_dev: 3 customers x 2 products -> 3 groups / 6 rows, of which d3 is
+    all-negative. The two splits drop a *different* number of groups so a
+    filter wired to only one of them cannot pass by coincidence.
+    """
+    import pandas as pd
+    df_tr = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3", "c4", "c4"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 8),
+        "prod_name": ["fund", "ccard"] * 4,
+        "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "label": [1, 0, 0, 1, 0, 0, 0, 0],
+    })
+    df_dev = pd.DataFrame({
+        "cust_id": ["d1", "d1", "d2", "d2", "d3", "d3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["fund", "ccard"] * 3,
+        "feat_a": [1.5, 2.5, 3.5, 4.5, 5.5, 6.5],
+        "label": [0, 1, 1, 0, 0, 0],
+    })
+    return df_tr, df_dev
+
+
+def _ranking_prep_meta():
+    return {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+
+
+def _prepare_zero_positive(tmp_path, objective, cache_name="variant"):
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    df_tr, df_dev = _zero_positive_frames()
+    tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+    _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+    cache = tmp_path / cache_name
+    handles = LightGBMAdapter().prepare_train_inputs(
+        ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+        _ranking_prep_meta(), _ranking_parameters(objective), str(cache),
+    )
+    return cache, handles
+
+
+def _bin_groups(path, reference=None):
+    import lightgbm as lgb
+    return lgb.Dataset(str(path), reference=reference).construct()
+
+
+class TestZeroPositiveGroupFilter:
+    """lambdarank trains only on query groups holding a positive; nothing else does.
+
+    The assertions read the built ``.bin`` back — the group vector and the row
+    count it covers — rather than any intermediate the adapter computed, so a
+    filter that ran but never reached the Dataset would still fail them.
+    """
+
+    def test_lambdarank_drops_the_all_negative_groups(self, tmp_path):
+        import numpy as np
+        cache, (train_h, dev_h) = _prepare_zero_positive(tmp_path, "lambdarank")
+
+        ds_tr = _bin_groups(train_h.bin_path)
+        g_tr = ds_tr.get_group()
+        # 4 groups / 8 rows in, c3 and c4 all-negative -> 2 groups / 4 rows.
+        np.testing.assert_array_equal(np.sort(g_tr), np.array([2, 2]))
+        assert int(np.sum(g_tr)) == 4
+        assert ds_tr.num_data() == 4
+
+        ds_dv = _bin_groups(dev_h.bin_path, reference=ds_tr)
+        g_dv = ds_dv.get_group()
+        # 3 groups / 6 rows in, d3 all-negative -> 2 groups / 4 rows.
+        np.testing.assert_array_equal(np.sort(g_dv), np.array([2, 2]))
+        assert int(np.sum(g_dv)) == 4
+        assert ds_dv.num_data() == 4
+
+        # Every surviving row's label vector still has a positive per group.
+        assert int(np.sum(ds_tr.get_label())) == 2
+        assert int(np.sum(ds_dv.get_label())) == 2
+
+    def test_rank_xendcg_keeps_every_group(self, tmp_path):
+        import numpy as np
+        cache, (train_h, dev_h) = _prepare_zero_positive(tmp_path, "rank_xendcg")
+
+        ds_tr = _bin_groups(train_h.bin_path)
+        np.testing.assert_array_equal(
+            np.sort(ds_tr.get_group()), np.array([2, 2, 2, 2])
+        )
+        assert ds_tr.num_data() == 8
+
+        ds_dv = _bin_groups(dev_h.bin_path, reference=ds_tr)
+        np.testing.assert_array_equal(
+            np.sort(ds_dv.get_group()), np.array([2, 2, 2])
+        )
+        assert ds_dv.num_data() == 6
+
+    def test_binary_keeps_every_row_and_sets_no_group(self, tmp_path):
+        """Regression guard: the non-ranking path is untouched by all of this."""
+        cache, (train_h, dev_h) = _prepare_zero_positive(tmp_path, "binary")
+
+        ds_tr = _bin_groups(train_h.bin_path)
+        assert ds_tr.get_group() is None
+        assert ds_tr.num_data() == 8
+        ds_dv = _bin_groups(dev_h.bin_path, reference=ds_tr)
+        assert ds_dv.get_group() is None
+        assert ds_dv.num_data() == 6
+
+    def test_lambdarank_bin_holds_strictly_fewer_rows_than_rank_xendcg(
+        self, tmp_path
+    ):
+        """The cache split is real, not just two directory names.
+
+        Three objectives under one cache root, same input. Row counts differing
+        is what proves the second objective built its own ``.bin`` instead of
+        being served the first one's — "all three dirs exist" would pass on the
+        directory rename alone.
+        """
+        from recsys_tfb.io.handles import ParquetHandle
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        df_tr, df_dev = _zero_positive_frames()
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+        cache = tmp_path / "variant"
+        adapter = LightGBMAdapter()
+        rows = {}
+        for obj in ("lambdarank", "rank_xendcg", "binary"):
+            train_h, _ = adapter.prepare_train_inputs(
+                ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+                _ranking_prep_meta(), _ranking_parameters(obj), str(cache),
+            )
+            rows[obj] = _bin_groups(train_h.bin_path).num_data()
+        assert rows["lambdarank"] < rows["rank_xendcg"]
+        assert rows["rank_xendcg"] == rows["binary"] == 8
+
+    def test_weights_follow_the_surviving_rows(self, tmp_path):
+        """Weights are filtered with their rows, not left behind to misalign.
+
+        c3/c4 are the dropped groups and carry the ``3.0`` weight on their
+        ``ccard`` row, so a weight vector sliced by a different mask (or not at
+        all) shows up as the wrong multiset here.
+        """
+        import numpy as np
+        from recsys_tfb.io.handles import ParquetHandle
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        df_tr, df_dev = _zero_positive_frames()
+        # Weight only the rows of groups that survive (c1/c2's "fund" row) and
+        # of groups that do not (c3/c4's "fund" row) -- same weight, different
+        # fate, so the surviving multiset pins which rows were kept.
+        df_tr["cust_segment_typ"] = ["keep", "keep", "keep", "keep",
+                                     "drop", "drop", "drop", "drop"]
+        df_dev["cust_segment_typ"] = ["keep", "keep", "keep", "keep",
+                                      "drop", "drop"]
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
+        params = _ranking_parameters("lambdarank")
+        params["training"]["sample_weights"] = {"keep|fund": 5.0,
+                                                "drop|fund": 7.0}
+        params["training"]["sample_weight_keys"] = ["cust_segment_typ",
+                                                    "prod_name"]
+        cache = tmp_path / "variant"
+        train_h, dev_h = LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
+            _ranking_prep_meta(), params, str(cache),
+        )
+        w_tr = _bin_groups(train_h.bin_path).get_weight()
+        # 4 surviving rows: c1/c2's fund row weighted 5.0, their ccard row 1.0.
+        # 7.0 appears nowhere -- every row carrying it was in a dropped group.
+        assert sorted(np.round(w_tr, 3).tolist()) == [1.0, 1.0, 5.0, 5.0]
+
+    def test_filter_counts_reach_the_log(self, tmp_path, caplog):
+        """What was dropped is visible without opening the ``.bin``."""
+        import logging
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.models.lightgbm_adapter"
+        ):
+            _prepare_zero_positive(tmp_path, "lambdarank")
+        text = caplog.text
+        assert "zero-positive" in text
+        # train: 2 of 4 groups and 4 of 8 rows dropped, 2 groups left.
+        assert "train" in text
+        assert "2/4 groups" in text and "4/8 rows" in text
+        # train_dev: 1 of 3 groups and 2 of 6 rows dropped, 2 groups left.
+        assert "1/3 groups" in text and "2/6 rows" in text
+
+    def test_report_sidecar_survives_a_cache_hit(self, tmp_path):
+        """The numbers outlive the build, so a cache-hit run still reports them.
+
+        The filter runs while the ``.bin`` is built. A second run hits the
+        cache and extracts nothing, but its manifest still has to describe the
+        matrix it trains on -- so the counts are persisted next to the binary
+        and read back through the handle.
+        """
+        from recsys_tfb.io.handles import ParquetHandle
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        cache, (train_h, _) = _prepare_zero_positive(tmp_path, "lambdarank")
+        built = train_h.group_filter_report()
+        assert built["objective"] == "lambdarank"
+        assert built["train"] == {
+            "groups_total": 4, "groups_kept": 2, "groups_dropped": 2,
+            "rows_total": 8, "rows_kept": 4, "rows_dropped": 4,
+        }
+        assert built["train_dev"] == {
+            "groups_total": 3, "groups_kept": 2, "groups_dropped": 1,
+            "rows_total": 6, "rows_kept": 4, "rows_dropped": 2,
+        }
+
+        df_tr, df_dev = _zero_positive_frames()
+        hit_h, _ = LightGBMAdapter().prepare_train_inputs(
+            ParquetHandle(str(tmp_path / "tr.parquet")),
+            ParquetHandle(str(tmp_path / "dv.parquet")),
+            _ranking_prep_meta(), _ranking_parameters("lambdarank"), str(cache),
+        )
+        assert hit_h.group_filter_report() == built
+
+    @pytest.mark.parametrize("objective", ["rank_xendcg", "binary"])
+    def test_no_sidecar_when_nothing_is_filtered(self, tmp_path, objective):
+        """An unfiltered objective leaves its cache dir exactly as it was.
+
+        Writing an empty report into ``lgb/binary/`` would be a change to the
+        non-ranking artifact set for no gain; absence *is* the answer.
+        """
+        cache, (train_h, _) = _prepare_zero_positive(tmp_path, objective)
+        assert train_h.group_filter_report() is None
+        assert not (cache / "lgb" / objective / "group_filter.json").exists()
+
+
 def _weight_frames():
     import pandas as pd
     df_tr = pd.DataFrame({

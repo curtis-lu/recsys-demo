@@ -604,6 +604,30 @@ def test_sample_weight_extra_absent_returns_none(tmp_path):
     assert _sample_weight_extra(tmp_path) is None
 
 
+def test_group_filter_extra_reads_report(tmp_path):
+    """The lambdarank row counts land in the manifest, under their own key.
+
+    Two runs of the same model_version differ in training-set size only for a
+    reason; this is the reason, recorded next to the parameters that caused it.
+    """
+    import json
+    from recsys_tfb.__main__ import _group_filter_extra
+    vdir = tmp_path / "models" / "mv"
+    vdir.mkdir(parents=True)
+    report = {
+        "enabled": True, "objective": "lambdarank", "thin_splits": [],
+        "train": {"groups_total": 10, "groups_kept": 6, "groups_dropped": 4,
+                  "rows_total": 40, "rows_kept": 24, "rows_dropped": 16},
+    }
+    (vdir / "group_filter_report.json").write_text(json.dumps(report))
+    assert _group_filter_extra(vdir) == {"group_filter": report}
+
+
+def test_group_filter_extra_absent_returns_none(tmp_path):
+    from recsys_tfb.__main__ import _group_filter_extra
+    assert _group_filter_extra(tmp_path) is None
+
+
 def _chunk_report_file(vdir, **overrides):
     report = {
         "run_id": "run-1",

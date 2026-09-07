@@ -125,6 +125,13 @@ def open_parquet_dataset(paths: Union[str, list[str]]):
     return children[0] if len(children) == 1 else pads.dataset(children)
 
 
+#: Sidecar written next to the .bin by
+#: ``LightGBMAdapter.prepare_train_inputs`` when the objective drops
+#: zero-positive query groups. The filename is the contract between that
+#: writer and :meth:`LgbDatasetHandle.group_filter_report`.
+GROUP_FILTER_REPORT_NAME = "group_filter.json"
+
+
 @dataclass(frozen=True)
 class LgbDatasetHandle:
     """Reference to a saved ``lgb.Dataset`` binary on disk.
@@ -135,6 +142,30 @@ class LgbDatasetHandle:
 
     bin_path: str
     role: Literal["train", "train_dev"]
+
+    def group_filter_report(self) -> dict | None:
+        """How many query groups this binary's build dropped, or ``None``.
+
+        ``None`` means the objective that wrote this directory filters
+        nothing -- everything but lambdarank. The sidecar is written only
+        when rows were actually removed, so its absence is the answer and
+        not a missing file.
+
+        Read back from disk rather than recomputed: a run that hits the .bin
+        cache reads no parquet at all, and still has to be able to say what
+        the matrix it trains on is made of.
+
+        One ``prepare_train_inputs`` call writes one report covering both
+        splits, so the train and train_dev handles return the same thing.
+        """
+        import json
+        from pathlib import Path
+
+        report = Path(self.bin_path).parent / GROUP_FILTER_REPORT_NAME
+        if not report.exists():
+            return None
+        with open(report) as f:
+            return json.load(f)
 
     def load(
         self,

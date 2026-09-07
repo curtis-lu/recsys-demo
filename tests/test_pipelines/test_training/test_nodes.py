@@ -1184,3 +1184,200 @@ def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
     )
 
 
+
+
+def _lgb_handle_with_report(tmp_path, report):
+    """An LgbDatasetHandle whose cache dir carries (or lacks) a filter report."""
+    import json
+
+    from recsys_tfb.io.handles import GROUP_FILTER_REPORT_NAME, LgbDatasetHandle
+
+    lgb_dir = tmp_path / "lgb" / "lambdarank"
+    lgb_dir.mkdir(parents=True)
+    if report is not None:
+        (lgb_dir / GROUP_FILTER_REPORT_NAME).write_text(json.dumps(report))
+    return LgbDatasetHandle(bin_path=str(lgb_dir / "train.bin"), role="train")
+
+
+def _split_counts(groups_kept, groups_total, rows_kept, rows_total):
+    return {
+        "groups_total": groups_total, "groups_kept": groups_kept,
+        "groups_dropped": groups_total - groups_kept,
+        "rows_total": rows_total, "rows_kept": rows_kept,
+        "rows_dropped": rows_total - rows_kept,
+    }
+
+
+def test_persist_group_filter_report_passes_the_counts_through(tmp_path):
+    """The counts reach the manifest even on a run that rebuilt nothing.
+
+    The node reads them off the cache dir rather than recomputing, so a
+    cache-hit run — which reads no parquet at all — still describes the
+    matrix it trains on.
+    """
+    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+
+    handle = _lgb_handle_with_report(tmp_path, {
+        "objective": "lambdarank",
+        "train": _split_counts(5800, 10000, 23200, 40000),
+        "train_dev": _split_counts(2600, 5000, 10400, 20000),
+    })
+    params = {"training": {"algorithm_params": {"objective": "lambdarank"}}}
+
+    diag = persist_group_filter_report(handle, params)
+    assert diag["enabled"] is True
+    assert diag["objective"] == "lambdarank"
+    assert diag["train"]["groups_dropped"] == 4200
+    assert diag["train"]["rows_dropped"] == 16800
+    assert diag["train_dev"]["groups_kept"] == 2600
+
+
+@pytest.mark.parametrize("objective", ["rank_xendcg", "binary"])
+def test_persist_group_filter_report_says_so_when_nothing_is_filtered(
+    tmp_path, objective
+):
+    """An unfiltered objective still gets a report, saying it filtered nothing.
+
+    Silence would read the same as "the report failed to run"; the manifest
+    has to distinguish "kept every row on purpose" from "no idea".
+    """
+    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+
+    handle = _lgb_handle_with_report(tmp_path, None)
+    params = {"training": {"algorithm_params": {"objective": objective}}}
+
+    diag = persist_group_filter_report(handle, params)
+    assert diag == {"enabled": False, "objective": objective}
+
+
+def test_persist_group_filter_report_warns_when_too_few_groups_remain(
+    tmp_path, caplog
+):
+    """A train_dev thinned to a few hundred groups is visible, not silent.
+
+    Early stopping reads a per-group mean off this split; how few groups is
+    too few has no derived answer, so the node's job is to put the number in
+    front of a person rather than to decide for them.
+    """
+    import logging
+
+    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+
+    handle = _lgb_handle_with_report(tmp_path, {
+        "objective": "lambdarank",
+        "train": _split_counts(58000, 100000, 232000, 400000),
+        "train_dev": _split_counts(492, 925, 1968, 3700),
+    })
+    params = {"training": {"algorithm_params": {"objective": "lambdarank"}}}
+
+    with caplog.at_level(logging.WARNING,
+                         logger="recsys_tfb.pipelines.training.nodes"):
+        diag = persist_group_filter_report(handle, params)
+    assert diag["thin_splits"] == ["train_dev"]
+    assert "492" in caplog.text
+    assert "train_dev" in caplog.text
+    # train kept 58,000 groups -- nowhere near the floor, so it is not named.
+    assert diag["train"]["groups_kept"] == 58000
+
+
+def test_persist_group_filter_report_stays_quiet_when_both_splits_are_thick(
+    tmp_path, caplog
+):
+    import logging
+
+    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+
+    handle = _lgb_handle_with_report(tmp_path, {
+        "objective": "lambdarank",
+        "train": _split_counts(58000, 100000, 232000, 400000),
+        "train_dev": _split_counts(26000, 50000, 104000, 200000),
+    })
+    params = {"training": {"algorithm_params": {"objective": "lambdarank"}}}
+
+    with caplog.at_level(logging.WARNING,
+                         logger="recsys_tfb.pipelines.training.nodes"):
+        diag = persist_group_filter_report(handle, params)
+    assert diag["thin_splits"] == []
+    assert caplog.text == ""
+
+
+def _lambdarank_refit_frames(tmp_path):
+    """train / train_dev parquets holding all-negative query groups.
+
+    train: c1/c2 have a positive, c3 does not -> 3 groups / 6 rows, 4 kept.
+    train_dev: d1 has a positive, d2 does not -> 2 groups / 4 rows, 2 kept.
+    """
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+
+    def write(df, path):
+        out = df.copy()
+        for col in out.columns:
+            if pd.api.types.is_float_dtype(out[col]):
+                out[col] = out[col].astype("float32")
+        out.to_parquet(path)
+        return ParquetHandle(str(path))
+
+    df_tr = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["fund", "ccard"] * 3,
+        "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "label": [1, 0, 0, 1, 0, 0],
+    })
+    df_dev = pd.DataFrame({
+        "cust_id": ["d1", "d1", "d2", "d2"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+        "prod_name": ["fund", "ccard"] * 2,
+        "feat_a": [1.5, 2.5, 3.5, 4.5],
+        "label": [0, 1, 0, 0],
+    })
+    return (write(df_tr, tmp_path / "tr.parquet"),
+            write(df_dev, tmp_path / "dv.parquet"))
+
+
+def _refit_params(objective):
+    return {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name", "label": "label"}},
+        "random_seed": 42,
+        "training": {
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": objective},
+            "final_model_strategy": "refit_on_full",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "objective,expected_rows", [("lambdarank", 6), ("rank_xendcg", 10)]
+)
+def test_refit_on_full_matches_the_matrix_hpo_trained_on(
+    tmp_path, caplog, objective, expected_rows
+):
+    """The refit drops the same groups the cached .bin did — or keeps them.
+
+    `refit_on_full` re-reads the parquet instead of the .bin, so it is the one
+    place the filter can silently not happen: HPO would search on the filtered
+    matrix and the final model would be fit on the full one, reported under the
+    search's hyperparameters with nothing raised.
+
+    Read off the node's own "Refitted on full ..." line, the row count it
+    already reports for the stacked matrix it trained — 4 + 2 kept rows under
+    lambdarank, all 6 + 4 under rank_xendcg.
+    """
+    import logging
+
+    from recsys_tfb.pipelines.training.nodes import finalize_model
+
+    train_h, dev_h = _lambdarank_refit_frames(tmp_path)
+    prep = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    with caplog.at_level(logging.INFO):
+        finalize_model(
+            train_h, dev_h, None, {}, 1, prep, _refit_params(objective),
+        )
+    assert f"Refitted on full train+train_dev (n={expected_rows}," in caplog.text

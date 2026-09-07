@@ -13,13 +13,13 @@ class TestTrainingPipeline:
     def test_pipeline_node_count(self):
         pipeline = create_pipeline()
         # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
-        # + persist_sample_weight_report + tune
+        # + persist_group_filter_report + persist_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
         # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 19
+        assert len(pipeline.nodes) == 20
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -61,7 +61,7 @@ class TestTrainingPipeline:
             "train_lgb_handle", "train_dev_lgb_handle",
             "feature_statistics", "feature_importance", "gain_ledger", "shap_diagnostics",
             "shap_population", "case_rows", "quadrant_profiles", "cases_manifest",
-            "sample_weight_report",
+            "sample_weight_report", "group_filter_report",
         }
         assert pipeline.outputs == expected
 
@@ -218,14 +218,15 @@ class TestTrainingPipeline:
 
     def test_calibration_pipeline_node_count(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # select_features + 5 cache nodes + prepare_lgb + persist_sample_weight_report
+        # select_features + 5 cache nodes + prepare_lgb
+        # + persist_group_filter_report + persist_sample_weight_report
         # + tune + finalize + calibrate
         # + predict_and_write + compute_test_mAP_spark
         # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
         # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 21
+        assert len(pipeline.nodes) == 22
 
     def test_calibration_pipeline_has_calibrate_node(self):
         pipeline = create_pipeline(enable_calibration=True)

@@ -1,5 +1,6 @@
 """LightGBM implementation of ModelAdapter."""
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -8,7 +9,11 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 
-from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
+from recsys_tfb.io.handles import (
+    GROUP_FILTER_REPORT_NAME,
+    LgbDatasetHandle,
+    ParquetHandle,
+)
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
 # extract_Xy is imported lazily inside prepare_train_inputs (see method body).
@@ -43,6 +48,42 @@ def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> 
 
     digest = hashlib.sha256("\n".join(feature_columns).encode()).hexdigest()[:8]
     return f"fs_{digest}"
+
+
+def _drop_zero_positive_groups(split: str, X, y, group_ids, weights):
+    """Keep only the query groups holding a positive; return the counts too.
+
+    Applied to every per-row array at once, from one mask, so X / y / group
+    ids / weights cannot drift out of alignment -- a weight vector sliced by a
+    different mask would silently re-assign every weight to another row.
+
+    Why the caller runs this only under lambdarank, and why the decision is
+    derived from the objective rather than configured, is in
+    ``core.group_utils.drops_zero_positive_groups``.
+
+    The counts are returned rather than only logged: they are what the
+    manifest reports, and a run that hits the .bin cache can no longer
+    recompute them.
+    """
+    from recsys_tfb.core.group_utils import groups_with_positives_mask
+
+    mask = groups_with_positives_mask(y, group_ids)
+    stats = {
+        "groups_total": int(np.unique(group_ids).size),
+        "groups_kept": int(np.unique(group_ids[mask]).size),
+        "rows_total": int(mask.size),
+        "rows_kept": int(mask.sum()),
+    }
+    stats["groups_dropped"] = stats["groups_total"] - stats["groups_kept"]
+    stats["rows_dropped"] = stats["rows_total"] - stats["rows_kept"]
+    logger.info(
+        "lambdarank zero-positive filter [%s]: dropped %d/%d groups "
+        "(%d/%d rows); %d groups / %d rows remain",
+        split, stats["groups_dropped"], stats["groups_total"],
+        stats["rows_dropped"], stats["rows_total"],
+        stats["groups_kept"], stats["rows_kept"],
+    )
+    return X[mask], y[mask], group_ids[mask], weights[mask], stats
 
 
 class LightGBMAdapter(ModelAdapter):
@@ -163,6 +204,13 @@ class LightGBMAdapter(ModelAdapter):
         (with binning), saves binary, then builds train_dev with
         reference=train so dev binning aligns to train. For a ranking
         objective each Dataset also carries the per-query group.
+
+        Under ``objective: lambdarank`` both splits are also stripped of query
+        groups holding no positive, and the counts are written next to the
+        .bin as ``group_filter.json`` so a later cache hit can still report
+        them (:meth:`LgbDatasetHandle.group_filter_report`). Which objectives
+        filter, and why it is derived rather than configured:
+        ``core.group_utils.drops_zero_positive_groups``.
         """
         # Lazy import: see module-top comment about circular-import chain.
         # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
@@ -171,6 +219,7 @@ class LightGBMAdapter(ModelAdapter):
         from recsys_tfb.core.logging import log_data_volume
 
         from recsys_tfb.core.group_utils import (
+            drops_zero_positive_groups,
             is_ranking_objective,
             objective_cache_key,
             to_contiguous_groups,
@@ -183,6 +232,15 @@ class LightGBMAdapter(ModelAdapter):
         )
         objective_key = objective_cache_key(objective)
         ranking = is_ranking_objective(objective)
+        # train and train_dev take the SAME rule. train_dev is only the
+        # early-stopping valid set today, but `final_model_strategy:
+        # refit_on_full` concats it into the training matrix -- one rule is
+        # correct under both strategies. The calibration set is deliberately
+        # not filtered: calibration reads the whole score distribution.
+        filter_zero_positive = drops_zero_positive_groups(objective)
+        filter_report: dict = (
+            {"objective": objective} if filter_zero_positive else {}
+        )
 
         # Per-objective sub-path: the lgb-binary cache is NOT keyed by
         # model_version, so a binary built under one objective must never be
@@ -253,6 +311,10 @@ class LightGBMAdapter(ModelAdapter):
                 train_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
+            if filter_zero_positive:
+                X_tr, y_tr, gid_tr, w_tr, filter_report["train"] = (
+                    _drop_zero_positive_groups("train", X_tr, y_tr, gid_tr, w_tr)
+                )
             perm_tr, grp_tr = to_contiguous_groups(gid_tr)
             ds_train = lgb.Dataset(
                 X_tr[perm_tr],
@@ -273,6 +335,11 @@ class LightGBMAdapter(ModelAdapter):
                 train_dev_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
+            if filter_zero_positive:
+                X_dev, y_dev, gid_dev, w_dev, filter_report["train_dev"] = (
+                    _drop_zero_positive_groups(
+                        "train_dev", X_dev, y_dev, gid_dev, w_dev)
+                )
             perm_dev, grp_dev = to_contiguous_groups(gid_dev)
             ds_dev = lgb.Dataset(
                 X_dev[perm_dev],
@@ -331,6 +398,13 @@ class LightGBMAdapter(ModelAdapter):
             ds_dev.save_binary(str(dev_bin))
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
             del X_dev, y_dev, w_dev, ds_train, ds_dev
+
+        if filter_report:
+            # Next to the .bin, and written before _SUCCESS: a rebuild that
+            # died partway leaves no marker, so no later run can read these
+            # counts as a description of a binary that was never finished.
+            with open(lgb_dir / GROUP_FILTER_REPORT_NAME, "w") as f:
+                json.dump(filter_report, f, indent=2)
 
         success.touch()
         logger.info(

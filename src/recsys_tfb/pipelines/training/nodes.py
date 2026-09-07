@@ -56,6 +56,8 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.group_utils import (
     default_metric_for_objective,
+    drops_zero_positive_groups,
+    groups_with_positives_mask,
     is_ranking_objective,
     to_contiguous_groups,
 )
@@ -112,6 +114,82 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+#: Query-group floor below which a split is called out in the log. A rule of
+#: thumb, not a derived bound -- early stopping reads a per-group mean off
+#: train_dev, and there is no threshold at which that mean stops being
+#: meaningful, only a range where it gets noisy. Chosen so the local synthetic
+#: train_dev (492 groups once filtered) trips it: production entity
+#: populations are millions, so a production run that trips it is reporting
+#: something wrong upstream rather than a thin fixture.
+THIN_QUERY_GROUPS = 1000
+
+
+def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
+    """Report how many zero-positive query groups training dropped.
+
+    Under ``objective: lambdarank`` the training matrix is not the train /
+    train_dev tables: groups with no positive are left out, because their
+    lambdarank gradient contribution is exactly zero (see
+    ``core.group_utils.drops_zero_positive_groups``). Row counts therefore
+    stop matching the tables, and this is what says why -- comparing two MLflow
+    runs on training-set size otherwise gives no way to tell a filter from a
+    dataset change.
+
+    Reads the counts through the handle rather than recomputing them: the
+    filter runs while the .bin is built, and a run that hits that cache never
+    reads a parquet row. Always runs, so the report reflects every run
+    including the cache-hit ones.
+
+    ``enabled: False`` for every other objective. That is a finding too --
+    an absent report reads the same as a report that failed to run, and
+    ``rank_xendcg`` keeping every row is a deliberate difference from
+    lambdarank, not an omission.
+
+    The node does not write the file: ``group_filter_report`` is a catalog
+    entry pointing at ``data/models/<model_version>/group_filter_report.json``,
+    which is what keeps it in the manifest's artifacts list *and* in
+    ``extra_metadata.group_filter``.
+    """
+    objective = (
+        (parameters.get("training") or {})
+        .get("algorithm_params", {})
+        .get("objective")
+    )
+    report = train_lgb_handle.group_filter_report()
+    if report is None:
+        return {"enabled": False, "objective": objective}
+
+    diag = {"enabled": True, **report}
+    # Decision -- which splits are too thin to read a per-group metric off.
+    # Named rather than raised: how few groups is too few has no derived
+    # answer (see THIN_QUERY_GROUPS), so the call belongs to the person
+    # reading the log, and stopping the run on a guess would be worse.
+    diag["thin_splits"] = sorted(
+        split for split in ("train", "train_dev")
+        if split in report and report[split]["groups_kept"] < THIN_QUERY_GROUPS
+    )
+    for split in ("train", "train_dev"):
+        if split in report:
+            counts = report[split]
+            logger.info(
+                "zero-positive group filter [%s]: %d of %d groups kept "
+                "(%d of %d rows); objective=%s",
+                split, counts["groups_kept"], counts["groups_total"],
+                counts["rows_kept"], counts["rows_total"], report["objective"],
+            )
+    for split in diag["thin_splits"]:
+        logger.warning(
+            "Only %d query groups left in %s after dropping zero-positive "
+            "groups (from %d). Below ~%d groups a per-group metric read off "
+            "this split is noisy — early stopping on it may be picking noise. "
+            "Check the split is as large as you expect before trusting the "
+            "result.",
+            report[split]["groups_kept"], split,
+            report[split]["groups_total"], THIN_QUERY_GROUPS,
+        )
+    return diag
 
 
 def persist_sample_weight_report(
@@ -808,6 +886,26 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
+        if drops_zero_positive_groups(objective):
+            # Decision — the refit trains on the rows the search trained on.
+            # HPO reads the cached .bin, which prepare_train_inputs already
+            # stripped of zero-positive query groups; this branch re-reads the
+            # parquet, so without the same rule the final model would be fit on
+            # a matrix the search never saw and still be reported under the
+            # search's hyperparameters. Applied per split, before stacking, for
+            # the same reason it is applied per split there: the two are one
+            # rule, and a reader comparing them should not have to check.
+            keep_tr = groups_with_positives_mask(y_tr, gid_tr)
+            keep_dv = groups_with_positives_mask(y_dv, gid_dv)
+            logger.info(
+                "refit zero-positive filter: train %d -> %d rows, "
+                "train_dev %d -> %d rows",
+                len(y_tr), int(keep_tr.sum()), len(y_dv), int(keep_dv.sum()),
+            )
+            X_tr, y_tr, gid_tr, w_tr = (
+                X_tr[keep_tr], y_tr[keep_tr], gid_tr[keep_tr], w_tr[keep_tr])
+            X_dv, y_dv, gid_dv, w_dv = (
+                X_dv[keep_dv], y_dv[keep_dv], gid_dv[keep_dv], w_dv[keep_dv])
         X_full, y_full, w_full = refit.stack_splits(
             (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
         # Decision — train / train_dev are customer-disjoint by sampling
