@@ -51,7 +51,7 @@ def log_sampled_keys(
     )
 
 
-def any_column_is_null(cols: list[str]) -> "Column":
+def any_column_is_null(cols: list[str]) -> Column:
     """Row-wise predicate: at least one of ``cols`` is NULL on this row.
 
     Handed back as a Column instead of being applied to a frame so one caller
@@ -68,13 +68,17 @@ def any_column_is_null(cols: list[str]) -> "Column":
     return predicate
 
 
-def log_dropped_null_split_unit(dropped: "DataFrame", cols: list[str]) -> None:
+def warn_dropped_null_split_unit(dropped: DataFrame, cols: list[str]) -> None:
     """Report rows dropped for a NULL split unit: how many, and in which column.
+
+    ``warn_``, not ``require_``: this reports, it does not raise (rule 12 of
+    docs/agents/pipeline-node-design.md). Whose job it is to raise is settled
+    in ADR-0006 — upstream, in ``source_etl``.
 
     One Spark action for the whole report: the row total and every per-column
     NULL count come out of a single ``agg``. The caller is expected to guard
-    this behind an ``isEmpty``, so a clean input pays for no job at all and a
-    dirty one pays for exactly one.
+    this behind an ``isEmpty``, so this second pass over the frame is paid only
+    when there is something to say.
 
     Per-column counts rather than a bare total, because a split unit can be
     several columns: a total leaves the reader auditing all of them, and the

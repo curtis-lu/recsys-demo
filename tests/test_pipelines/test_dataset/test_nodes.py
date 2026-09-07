@@ -1,6 +1,8 @@
 """Tests for the dataset pipeline's node functions, Layer-2 gate included."""
 
 import logging
+import operator
+from functools import reduce
 
 import pandas as pd
 import pytest
@@ -426,6 +428,10 @@ class TestSplitTrainKeysEmptyTrainDev:
         assert "puts every entity on the train side" not in msg
 
 
+def _warning_messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
 class TestSplitTrainKeysNullSplitUnit:
     """A row whose split unit is NULL is dropped -- and said out loud.
 
@@ -468,14 +474,7 @@ class TestSplitTrainKeysNullSplitUnit:
         Written out here rather than imported from the node, so the test still
         disagrees with an implementation that redefines what missing means.
         """
-        expr = F.col(split_cols[0]).isNull()
-        for col in split_cols[1:]:
-            expr = expr | F.col(col).isNull()
-        return expr
-
-    @staticmethod
-    def _warnings(caplog):
-        return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        return reduce(operator.or_, (F.col(c).isNull() for c in split_cols))
 
     def test_null_split_unit_rows_reach_neither_side(self, spark, parameters, caplog):
         params = {**parameters,
@@ -504,7 +503,7 @@ class TestSplitTrainKeysNullSplitUnit:
         with caplog.at_level(logging.WARNING):
             split_train_keys(keys, params)
 
-        assert any("2 row" in m for m in self._warnings(caplog))
+        assert any("2 row" in m for m in _warning_messages(caplog))
 
     def test_clean_input_warns_about_nothing(self, spark, parameters, caplog):
         params = {**parameters,
@@ -514,7 +513,27 @@ class TestSplitTrainKeysNullSplitUnit:
         with caplog.at_level(logging.WARNING):
             split_train_keys(keys, params)
 
-        assert self._warnings(caplog) == []
+        assert _warning_messages(caplog) == []
+
+    def test_an_all_null_input_is_not_blamed_on_the_sampling_config(
+        self, spark, parameters, caplog
+    ):
+        """"No keys at all" has two causes, and they are fixed in two places.
+
+        Rows that never arrived is a sampling / partition-filter problem. Rows
+        that arrived and were all dropped for a NULL split unit is a source
+        table problem. Under the old ``inner join`` the NULLs survived as one
+        distinct entity, so this state was unreachable; row-wise it is one
+        broken upstream column away, and the message that was written for the
+        first cause names three settings that are all fine in the second.
+        """
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ValueError, match="no sampled keys at all") as ei:
+                split_train_keys(self._keys(spark, [None, None, None]), parameters)
+
+        msg = str(ei.value)
+        assert "NULL split unit" in msg
+        assert "sample_ratio" not in msg
 
     def test_clean_input_pays_no_counting_action(
         self, spark, parameters, caplog, monkeypatch
@@ -533,7 +552,7 @@ class TestSplitTrainKeysNullSplitUnit:
                 "reported NULL split units on an input that has none")
 
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.dataset.nodes.log_dropped_null_split_unit", _boom)
+            "recsys_tfb.pipelines.dataset.nodes.warn_dropped_null_split_unit", _boom)
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
         keys = self._keys(spark, list(_ENTITIES))
@@ -2572,8 +2591,7 @@ class TestSplitTrainKeysTwoColumnEntity:
         with caplog.at_level(logging.WARNING):
             train, train_dev = split_train_keys(pool.unionByName(null_cust), params)
 
-        warnings = [r.getMessage() for r in caplog.records
-                    if r.levelno == logging.WARNING]
+        warnings = _warning_messages(caplog)
         assert len(warnings) == 1
         assert "cust_id=2" in warnings[0]
         assert "branch_id=0" in warnings[0]

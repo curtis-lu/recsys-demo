@@ -81,9 +81,9 @@ from recsys_tfb.pipelines.dataset.steps.sampling import (
     keep_entities_drawn_under_ratio,
     keep_rows_drawn_under_ratio,
     key_output_columns,
-    log_dropped_null_split_unit,
     log_sampled_keys,
     sampling_columns,
+    warn_dropped_null_split_unit,
     with_effective_sample_ratio,
 )
 from recsys_tfb.pipelines.dataset.steps.scoping import (
@@ -312,9 +312,20 @@ def split_train_keys(
     accounts of one customer must not land on opposite sides — and the framework
     has no way to know it from the data.
 
-    Logging still triggers no action. Two guards do — the NULL split unit and
-    the empty dev split — each one ``isEmpty`` always, plus one aggregate on its
-    own failing path only.
+    Two guards stay in the node, because both read data that only exists at run
+    time. Rule 11 of docs/agents/pipeline-node-design.md asks which kind each
+    one is, since they send the reader to different people: the NULL split unit
+    is a **pre-check** (the input arrived broken; the fix is upstream), the
+    empty train-dev split is a **post-condition** (this node's own ratio and
+    sample produced a useless result).
+
+    Logging still triggers no action. Each guard costs one ``isEmpty``, plus one
+    aggregate on its own failing path only — and note which way ``isEmpty``
+    short-circuits: it stops at the first matching row, so a *dirty* input
+    answers immediately while a clean one has to read ``split_cols`` across the
+    whole frame to prove there is nothing there. That is a narrow scan with no
+    shuffle, and it is cheaper than the unconditional second pass a plain
+    ``count`` would cost on every run.
     """
     # Decision — the split unit: what the user declared, else the whole entity.
     split_cols = get_entity_grouping(parameters, "train_split_keys")
@@ -332,8 +343,9 @@ def split_train_keys(
     # user's slightly dirty source table from running at all.
     missing_split_unit = any_column_is_null(split_cols)
     dropped = sample_keys.filter(missing_split_unit)
-    if not dropped.isEmpty():
-        log_dropped_null_split_unit(dropped, split_cols)
+    dropped_any = not dropped.isEmpty()
+    if dropped_any:
+        warn_dropped_null_split_unit(dropped, split_cols)
     keys = sample_keys.filter(~missing_split_unit)
 
     # Decision — which side a row lands on: the bucket of its own split unit.
@@ -360,12 +372,24 @@ def split_train_keys(
         n_entities = keys.select(*split_cols).distinct().count()
         split_unit = ", ".join(split_cols)
         if n_entities == 0:
+            # Two ways to get here, and they are fixed in different places, so
+            # the message must not name the wrong one. Rows can never have
+            # arrived (a sampling or partition-filter problem), or they can
+            # have arrived and all been dropped for a NULL split unit (a source
+            # table problem). The old wording only knew the first.
+            cause = (
+                "Every row was dropped for a NULL split unit — see the warning "
+                "above — so the split itself received nothing. Fix the source "
+                "table's key columns."
+                if dropped_any else
+                "The cause is upstream of the split — check "
+                "dataset.sample_ratio, dataset.train_snap_dates, and any "
+                "partition filter applied when sample_keys was read back."
+            )
             raise ValueError(
                 f"split_train_keys received no sampled keys at all "
                 f"(train_dev_ratio={train_dev_ratio}), so train and train-dev "
-                f"are both empty. The cause is upstream of the split — check "
-                f"dataset.sample_ratio, dataset.train_snap_dates, and any "
-                f"partition filter applied when sample_keys was read back."
+                f"are both empty. {cause}"
             )
         raise ValueError(
             f"split_train_keys produced an empty train-dev split: "
