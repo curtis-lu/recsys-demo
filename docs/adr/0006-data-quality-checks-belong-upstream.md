@@ -179,10 +179,14 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
    選擇讀 `preprocessed_feature_table` 是同一個理由，也與本 ADR「不規定來源表儲存
    格式」的立場一致。
 3. **五個 split 只擋得住三個，這是限制不是疏漏。** train／train_dev／calibration 直接
-   落地自 `build_model_input`。val／test 不行：列數會等於 keys 的是
-   `val_model_input_unfiltered` / `test_model_input_unfiltered`，而這兩個名字**在任何
-   環境的 catalog 裡都沒有條目**（`grep -rn "unfiltered" conf/` 零命中），所以是
-   `core/catalog.py` 自動生成的 `MemoryDataset`——惰性 frame，從不落地，沒有 footer。
+   落地自 `build_model_input`。val／test 不行：val 那邊列數會等於 `val_keys` 的是
+   `val_model_input_unfiltered`；test 那邊是 `test_model_input_unfiltered`，而它對得上的
+   **不是** `test_keys` 而是「`test_keys` 裡屬於本次月份的那個子集」——`test_keys` 是含
+   全部月份的常駐表，`build_test_model_input` 會先用 `month_plan` 重新縮範圍才往下送。
+   兩者共通的是：這兩個名字**在任何環境的 catalog 裡都沒有條目**
+   （`grep -rn "unfiltered" conf/` 零命中），所以是 `core/catalog.py` 自動生成的
+   `MemoryDataset`——惰性 frame，從不落地，沒有 footer。**把 test 的配對記成 `test_keys`
+   會留下一個恆假的比對**，正是本票警告過「比沒有閘門更糟」的那種。
    真正落地的是 `filter_groups_with_positives` 的輸出，它的列數**本來就該比較小**。
    考慮過用單向界線 `列數(filtered) <= 列數(keys)` 補位，**否決**：本 repo 的
    `sample_pool` 是 entity × item 的稠密展開、`label_table` 稀疏，所以零正例的 group

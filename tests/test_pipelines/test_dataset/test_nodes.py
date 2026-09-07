@@ -3235,6 +3235,13 @@ class TestValidateModelInputGrain:
         )
         assert sorted(report["not_checked"]) == ["test", "val"]
         assert "unfiltered" in report["not_checked"]["val"]
+        # test carries a second reason val does not: build_test_model_input
+        # re-scopes test_keys to this run's months before building, so even a
+        # landed unfiltered frame would match that subset rather than the whole
+        # persistent test_keys table. Recording the pairing as if it were
+        # test_keys is what would make a future gate always-false.
+        assert "months" in report["not_checked"]["test"]
+        assert "months" not in report["not_checked"]["val"]
 
 
 class TestB10CostInvariant:
@@ -3281,7 +3288,7 @@ class TestB10CostInvariant:
 
         for module, names in (
             (_nodes.__file__,
-             ["validate_model_input_grain", "_landed_split_rows"]),
+             ["validate_model_input_grain", "_footer_rows"]),
             (_stats.__file__, ["read_row_count", "filter_by_partitions"]),
         ):
             for name, calls in self._calls_in(module, names).items():
@@ -3297,5 +3304,5 @@ class TestB10CostInvariant:
         from recsys_tfb.pipelines.dataset import nodes as _nodes
 
         calls = self._calls_in(
-            _nodes.__file__, ["_landed_split_rows"])["_landed_split_rows"]
+            _nodes.__file__, ["_footer_rows"])["_footer_rows"]
         assert "inputFiles" in calls

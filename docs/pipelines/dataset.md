@@ -341,7 +341,7 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
-| 粒度閘 | `validate_model_input_grain` | train／train_dev（開啟時另加 calibration）的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
+| 粒度閘 | `validate_model_input_grain` | train／train_dev（開啟時另加 calibration）的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
 model input 的組裝規則：
 

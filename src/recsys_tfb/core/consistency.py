@@ -431,11 +431,16 @@ implemented and wired):
 
   **Three of the five splits are covered, and that is a limit, not an
   oversight.** train / train_dev / calibration land straight out of
-  ``build_model_input``. val and test do not: the frames whose row count equals
-  their keys' are ``val_model_input_unfiltered`` /
-  ``test_model_input_unfiltered``, which have no catalog entry in any
-  environment and so are ``MemoryDataset``s — lazy Spark frames that never
-  reach disk and have no footer. The tables that do land are the
+  ``build_model_input``. val and test do not. For val the frame whose row count
+  equals ``val_keys``' is ``val_model_input_unfiltered``; for test it is
+  ``test_model_input_unfiltered``, which matches **not** ``test_keys`` but only
+  this run's months of it — ``build_test_model_input`` re-scopes those keys to
+  its ``month_plan`` before delegating, because ``test_keys`` is a persistent
+  table holding every month. Either way neither frame has a catalog entry in any
+  environment, so both are ``MemoryDataset``s — lazy Spark frames that never
+  reach disk and have no footer. Stating test's pair as ``test_keys`` would
+  record a comparison that is always-false, which this ticket's own issue warns
+  is worse than no gate at all. The tables that do land are the
   ``filter_groups_with_positives`` outputs, whose row count is *supposed* to be
   smaller. A one-sided ``<=`` against those was considered and rejected: this
   repo's ``sample_pool`` is a dense entity x item expansion while

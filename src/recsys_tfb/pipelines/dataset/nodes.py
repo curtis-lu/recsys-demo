@@ -931,45 +931,32 @@ def build_model_input(
     return result
 
 
-#: Why val / test carry no row-count gate. Held as one string because the report
-#: states it once per split and the two reasons are identical — a second copy
-#: would be the one that goes stale.
+#: Why val / test carry no row-count gate. One template because the first half
+#: is the same sentence for both; ``extra`` carries what is true of only one of
+#: them, so the shared half still has a single source.
 _NOT_CHECKED_REASON = (
     "{split}_model_input is the filter_groups_with_positives output, so its "
     "row count is deliberately below its keys'; the frame that would match, "
     "{split}_model_input_unfiltered, has no catalog entry and so never lands "
-    "as parquet — there is no footer to read."
+    "as parquet — there is no footer to read.{extra}"
 )
 
 
-def _landed_split_rows(
+def _footer_rows(
     df: DataFrame,
     partition_filter: dict,
-    label: str,
-) -> tuple[int, int]:
-    """``(rows, file_count)`` for the partitions ``partition_filter`` names.
+) -> tuple[int, int, int]:
+    """``(rows, matched files, files the table has)`` — footer arithmetic only.
 
-    Raises when the table has files but none of them match. That case is the
-    reason this returns through a guard rather than a plain sum: an unmatched
-    filter yields zero rows on both sides of B10's comparison, every comparison
-    then passes, and the gate reports success having looked at nothing. A table
-    with no files at all is a different fact — a genuinely empty split, which
-    ``dataset.train_dev_ratio: 0`` produces on purpose — so it returns 0 rather
-    than raising.
+    Pure mechanism: it counts, it does not judge. Whether a table that has files
+    but matched none of them is an error or a zero is a decision, and it lives in
+    the node body where a reader of the node can see it (rule 4 of
+    ``docs/agents/pipeline-node-design.md``); returning the two file counts
+    separately is what leaves that decision available to make.
     """
     all_paths = df.inputFiles()
     files = filter_by_partitions(all_paths, partition_filter)
-    if all_paths and not files:
-        spec = ", ".join(f"{k}={v}" for k, v in partition_filter.items())
-        raise DataConsistencyError(
-            f"B10: {label} has {len(all_paths)} parquet file(s) but none under "
-            f"{spec}, so this run's row count cannot be established. Both sides "
-            f"of the comparison would read 0 and the gate would pass without "
-            f"checking anything. Either the version/variant in parameters no "
-            f"longer matches what is on disk, or the table was written by a "
-            f"different catalog entry than the one this node reads."
-        )
-    return read_row_count(df.sparkSession, files), len(files)
+    return read_row_count(df.sparkSession, files), len(files), len(all_paths)
 
 
 def validate_model_input_grain(
@@ -985,8 +972,10 @@ def validate_model_input_grain(
 
     Returns the report (catalog entry ``model_input_grain_report``); raises
     ``DataConsistencyError`` on a mismatch. The rule itself lives with its
-    predicates in ``core/consistency.py`` — this node pairs the tables, gathers
-    the counts, and hands them over.
+    predicate in ``core/consistency.py`` — this node pairs the tables, gathers
+    the counts, and hands them over. Its module docstring's B10 section is the
+    canonical statement of what the invariant covers and what it does not; this
+    docstring says how the pairing is made and why the counts are cheap.
 
     **What it catches.** ``build_model_input``'s own comment names the failure
     it fears — "a silently N-times-too-large dataset" — and guards only one of
@@ -999,7 +988,7 @@ def validate_model_input_grain(
     source tables its own ``source_etl`` never wrote (ADR-0006's own "not
     solved" list opens with exactly that deployment).
 
-    **The pairing, and why each side is the one it is.**
+    **The pairing.**
 
     ::
 
@@ -1020,19 +1009,11 @@ def validate_model_input_grain(
     its two arguments default to None: the pipeline names them in this node's
     input list only in that branch, and the Runner binds inputs positionally.
 
-    **val and test are absent, and that is a limit rather than an oversight.**
-    Their builds are followed by ``filter_groups_with_positives``, so the frame
-    whose row count equals its keys' is ``val_model_input_unfiltered`` /
-    ``test_model_input_unfiltered``. Neither has a catalog entry in any
-    environment, so both are ``MemoryDataset``s — lazy frames that never reach
-    disk and have no footer to read. The tables that do land are the filtered
-    ones, whose row count is *supposed* to be smaller; a one-sided ``<=``
-    against them was considered and rejected, because ``sample_pool`` is a dense
-    entity x item expansion against a sparse ``label_table``, so most groups
-    carry no positive, the filter drops a large fraction, and the bound would
-    hold straight through a 2x fan-out. Residual risk: a duplicate key confined
-    to a month only val/test cover goes unseen. See the B10 section of
-    ``core/consistency.py``'s module docstring.
+    **val and test are absent by necessity.** Neither has a landed frame at its
+    keys' grain to compare against, and for test the missing frame would not be
+    ``test_keys``-shaped anyway. The full argument, including the one-sided
+    bound that was considered and rejected and the residual risk this leaves,
+    is in the B10 section of ``core/consistency.py``'s module docstring.
 
     **Why it is a node after the builds rather than a post-condition inside
     one.** Getting a row count inside ``build_model_input`` means ``count()`` on
@@ -1074,22 +1055,43 @@ def validate_model_input_grain(
 
     by_split: dict[str, SplitRowCounts] = {}
     splits: dict[str, dict] = {}
+    errors: list[str] = []
     for split, keys, model_input, scope in pairs:
-        keys_rows, keys_files = _landed_split_rows(
-            keys, scope, f"{split}_keys")
-        input_rows, input_files = _landed_split_rows(
-            model_input, scope, f"{split}_model_input")
-        by_split[split] = SplitRowCounts(keys_rows, input_rows)
+        counted: dict[str, int] = {}
+        for side, df in (("keys", keys), ("model_input", model_input)):
+            rows, matched, present = _footer_rows(df, scope)
+            # Pre-check (this node's own inputs) — a scope that matches none of
+            # a table's files makes both sides of the comparison read 0, every
+            # comparison below trivially true, and the gate would report
+            # success having looked at nothing. So it is reported rather than
+            # counted as zero rows. A table with no files AT ALL is a
+            # different fact and passes: that is a genuinely empty split,
+            # which `dataset.train_dev_ratio: 0` produces on purpose.
+            if present and not matched:
+                spec = ", ".join(f"{k}={v}" for k, v in scope.items())
+                errors.append(
+                    f"B10: {split}_{side} has {present} parquet file(s) but "
+                    f"none under {spec}, so this run's row count could not be "
+                    f"established and the comparison for {split} would have "
+                    f"passed on two zeroes. Either the version/variant in "
+                    f"parameters no longer matches what is on disk, or the "
+                    f"table was written by a different catalog entry than the "
+                    f"one this node reads."
+                )
+            counted[side] = rows
+            counted[f"{side}_files"] = matched
+        by_split[split] = SplitRowCounts(counted["keys"], counted["model_input"])
         splits[split] = {
-            "keys_rows": keys_rows,
-            "keys_files": keys_files,
-            "model_input_rows": input_rows,
-            "model_input_files": input_files,
+            "keys_rows": counted["keys"],
+            "keys_files": counted["keys_files"],
+            "model_input_rows": counted["model_input"],
+            "model_input_files": counted["model_input_files"],
         }
         logger.info(
             "Model input grain gate: %s keys=%d row(s) in %d file(s), "
             "model_input=%d row(s) in %d file(s)",
-            split, keys_rows, keys_files, input_rows, input_files,
+            split, counted["keys"], counted["keys_files"],
+            counted["model_input"], counted["model_input_files"],
         )
 
     report = {
@@ -1109,15 +1111,28 @@ def validate_model_input_grain(
         # the report to ask "was my dataset checked" must not have to infer from
         # two absent keys that two splits were deliberately left out.
         "not_checked": {
-            "val": _NOT_CHECKED_REASON.format(split="val"),
-            "test": _NOT_CHECKED_REASON.format(split="test"),
+            "val": _NOT_CHECKED_REASON.format(
+                split="val", extra=""),
+            "test": _NOT_CHECKED_REASON.format(
+                split="test",
+                extra=(
+                    " test is doubly out of reach: build_test_model_input "
+                    "re-scopes test_keys to this run's months first, so even a "
+                    "landed unfiltered frame would match only that subset, not "
+                    "the whole persistent test_keys table."
+                ),
+            ),
         },
     }
 
-    errors = model_input_grain_errors(by_split)
+    # Collect-all, one raise: the measurement failures above and the grain
+    # mismatches below are both "this gate has something to say about a split",
+    # and an operator fixing one wants to see the other in the same pass. Same
+    # shape B8 uses.
+    errors += model_input_grain_errors(by_split)
     if errors:
         raise DataConsistencyError(
-            f"Model input grain check failed ({len(errors)} split(s)):\n- "
+            f"Model input grain check failed ({len(errors)} issue(s)):\n- "
             + "\n- ".join(errors)
         )
     return report
