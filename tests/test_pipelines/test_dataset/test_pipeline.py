@@ -19,16 +19,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 class TestDatasetPipeline:
     def test_pipeline_without_calibration(self):
         pipeline = create_pipeline()
-        # 2 validate (Layer-2 data gate + B8 precision gate) + 4 key-selection
-        # + 1 fit + 1 apply_features + 4 build_model_input
-        # + 2 filter (val/test) = 14
-        assert len(pipeline.nodes) == 14
+        # 3 validate (Layer-2 data gate + B8 precision gate + B10 grain gate)
+        # + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input
+        # + 2 filter (val/test) = 15
+        assert len(pipeline.nodes) == 15
 
     def test_pipeline_with_calibration(self):
         pipeline = create_pipeline(enable_calibration=True)
-        # 14 base + 1 select_calibration_keys + 1 build_calibration_model_input = 16
+        # 15 base + 1 select_calibration_keys + 1 build_calibration_model_input = 17
         # (calibration is NOT filtered — keep all rows)
-        assert len(pipeline.nodes) == 16
+        assert len(pipeline.nodes) == 17
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
@@ -47,6 +47,7 @@ class TestDatasetPipeline:
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
             "preprocessed_feature_table", "numeric_precision_report",
+            "model_input_grain_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
         }
         assert pipeline.outputs == expected
@@ -60,6 +61,7 @@ class TestDatasetPipeline:
             "val_model_input", "test_model_input",
             "preprocessor", "category_mappings",
             "preprocessed_feature_table", "numeric_precision_report",
+            "model_input_grain_report",
             "sample_keys", "train_keys", "train_dev_keys",
             "calibration_keys", "val_keys", "test_keys",
         }
@@ -90,7 +92,7 @@ class TestDatasetPipeline:
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 14
+        assert len(pipeline.nodes) == 15
 
     def test_filter_nodes_only_for_val_and_test(self):
         """train / train_dev / calibration go straight to *_model_input;
@@ -165,6 +167,7 @@ class TestNodeNameToFunctionBinding:
         "build_test_model_input": nodes.build_test_model_input,
         "filter_val_model_input": nodes.filter_groups_with_positives,
         "filter_test_model_input": nodes.filter_groups_with_positives,
+        "validate_model_input_grain": nodes.validate_model_input_grain,
     }
     CALIBRATION_BINDINGS = {
         "select_calibration_keys": nodes.select_calibration_keys,
@@ -338,13 +341,13 @@ class TestOnlyTestMonthsMode:
         assert [n.name for n in pipeline.nodes] == self.EXPECTED
 
     def test_default_shape_is_unchanged_by_the_new_parameter(self):
-        # Not covered by TestDatasetPipeline's 14/16: those call create_pipeline
+        # Not covered by TestDatasetPipeline's 15/17: those call create_pipeline
         # without the new kwarg, so they would still pass if False were not the
         # default. Spell the default out.
-        assert len(create_pipeline(only_test_months=False).nodes) == 14
+        assert len(create_pipeline(only_test_months=False).nodes) == 15
         assert len(
             create_pipeline(enable_calibration=True, only_test_months=False).nodes
-        ) == 16
+        ) == 17
 
     def test_the_list_matches_the_dag_derived_test_chain(self):
         """Drift guard: the list == what the DAG says the test chain is.
@@ -396,3 +399,65 @@ class TestOnlyTestMonthsMode:
         )
         with pytest.raises(ValueError, match="select_test_keys_renamed"):
             create_pipeline(only_test_months=True)
+
+
+class TestGrainGateWiring:
+    """B10's node, and the one thing its shape costs.
+
+    ``validate_model_input_grain`` is declared twice — once per calibration
+    branch — because a dynamically built ``inputs=`` would drop it out of the
+    AST audit that A1/A5/A6 run on (``test_static_coverage_floor``). The price
+    of that choice is a duplicated list, so the duplication gets a guard.
+    """
+
+    def _grain_node(self, pipeline):
+        (node,) = [
+            n for n in pipeline.nodes if n.name == "validate_model_input_grain"
+        ]
+        return node
+
+    def test_the_calibration_input_list_is_the_base_list_plus_two(self):
+        base = self._grain_node(create_pipeline()).inputs
+        with_cal = self._grain_node(
+            create_pipeline(enable_calibration=True)).inputs
+        assert with_cal == [
+            *base, "calibration_keys", "calibration_model_input"]
+
+    def test_the_pairing_is_keys_then_its_own_model_input(self):
+        # Getting a pair crossed (train_keys against train_dev_model_input) is
+        # the failure the ticket named: the gate would be always-false rather
+        # than absent. The order is load-bearing because the Runner binds
+        # inputs positionally onto the node function's parameters.
+        node = self._grain_node(create_pipeline(enable_calibration=True))
+        assert node.inputs == [
+            "train_keys", "train_model_input",
+            "train_dev_keys", "train_dev_model_input",
+            "parameters",
+            "calibration_keys", "calibration_model_input",
+        ]
+        import inspect
+
+        from recsys_tfb.pipelines.dataset import nodes
+
+        params = list(
+            inspect.signature(nodes.validate_model_input_grain).parameters)
+        assert params == node.inputs
+
+    def test_it_runs_after_every_build_node(self):
+        pipeline = create_pipeline(enable_calibration=True)
+        names = [n.name for n in pipeline.nodes]
+        gate = names.index("validate_model_input_grain")
+        for build in [n for n in names if n.startswith("build_")]:
+            assert names.index(build) < gate, build
+
+    def test_it_is_not_a_zero_output_node(self):
+        # A7/R3: a zero-output node is silently skipped by slicing (F5) and
+        # needs a registered exception. This one carries a report instead.
+        assert self._grain_node(create_pipeline()).outputs == [
+            "model_input_grain_report"]
+
+    def test_only_test_months_leaves_it_out(self):
+        # It gates train / train_dev / calibration, none of which that mode
+        # builds. Keeping it would make the mode fail on missing inputs.
+        names = [n.name for n in create_pipeline(only_test_months=True).nodes]
+        assert "validate_model_input_grain" not in names

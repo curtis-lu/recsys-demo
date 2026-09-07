@@ -39,6 +39,8 @@ from recsys_tfb.core.consistency import (
     item_coverage_errors,
     nonnumeric_feature_errors,
     ColumnPrecision,
+    SplitRowCounts,
+    model_input_grain_errors,
     numeric_precision_errors,
     numeric_precision_rows,
     resolved_item_values,
@@ -92,7 +94,11 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     restrict_to_months,
     restrict_to_months_or_all,
 )
-from recsys_tfb.utils.parquet_stats import read_max_abs_stats
+from recsys_tfb.utils.parquet_stats import (
+    filter_by_partitions,
+    read_max_abs_stats,
+    read_row_count,
+)
 from recsys_tfb.preprocessing import (
     cast_numeric_features_to_storage_type,
     castable_numeric_feature_columns,
@@ -923,6 +929,198 @@ def build_model_input(
     if casted:
         logger.debug("build_model_input: casted columns = %s", casted)
     return result
+
+
+#: Why val / test carry no row-count gate. Held as one string because the report
+#: states it once per split and the two reasons are identical — a second copy
+#: would be the one that goes stale.
+_NOT_CHECKED_REASON = (
+    "{split}_model_input is the filter_groups_with_positives output, so its "
+    "row count is deliberately below its keys'; the frame that would match, "
+    "{split}_model_input_unfiltered, has no catalog entry and so never lands "
+    "as parquet — there is no footer to read."
+)
+
+
+def _landed_split_rows(
+    df: DataFrame,
+    partition_filter: dict,
+    label: str,
+) -> tuple[int, int]:
+    """``(rows, file_count)`` for the partitions ``partition_filter`` names.
+
+    Raises when the table has files but none of them match. That case is the
+    reason this returns through a guard rather than a plain sum: an unmatched
+    filter yields zero rows on both sides of B10's comparison, every comparison
+    then passes, and the gate reports success having looked at nothing. A table
+    with no files at all is a different fact — a genuinely empty split, which
+    ``dataset.train_dev_ratio: 0`` produces on purpose — so it returns 0 rather
+    than raising.
+    """
+    all_paths = df.inputFiles()
+    files = filter_by_partitions(all_paths, partition_filter)
+    if all_paths and not files:
+        spec = ", ".join(f"{k}={v}" for k, v in partition_filter.items())
+        raise DataConsistencyError(
+            f"B10: {label} has {len(all_paths)} parquet file(s) but none under "
+            f"{spec}, so this run's row count cannot be established. Both sides "
+            f"of the comparison would read 0 and the gate would pass without "
+            f"checking anything. Either the version/variant in parameters no "
+            f"longer matches what is on disk, or the table was written by a "
+            f"different catalog entry than the one this node reads."
+        )
+    return read_row_count(df.sparkSession, files), len(files)
+
+
+def validate_model_input_grain(
+    train_keys: DataFrame,
+    train_model_input: DataFrame,
+    train_dev_keys: DataFrame,
+    train_dev_model_input: DataFrame,
+    parameters: dict,
+    calibration_keys: DataFrame | None = None,
+    calibration_model_input: DataFrame | None = None,
+) -> dict:
+    """Pin each model_input's row count to its keys table's (B10).
+
+    Returns the report (catalog entry ``model_input_grain_report``); raises
+    ``DataConsistencyError`` on a mismatch. The rule itself lives with its
+    predicates in ``core/consistency.py`` — this node pairs the tables, gathers
+    the counts, and hands them over.
+
+    **What it catches.** ``build_model_input``'s own comment names the failure
+    it fears — "a silently N-times-too-large dataset" — and guards only one of
+    its two causes: ``require_columns_present`` stops a join key that lost the
+    item column. The other cause, a right table (``label_table`` or
+    ``preprocessed_feature_table``) holding a join key twice, had nothing
+    watching it. The upstream ``max_duplicate_key_ratio`` contract does not
+    close it either: A32 passes when ``primary_key`` and ``quality_checks`` are
+    both absent, ``0.5`` is a legal ratio, and this framework lets a user supply
+    source tables its own ``source_etl`` never wrote (ADR-0006's own "not
+    solved" list opens with exactly that deployment).
+
+    **The pairing, and why each side is the one it is.**
+
+    ::
+
+        train_keys        -> build_train_model_input        -> train_model_input
+        train_dev_keys    -> build_train_dev_model_input    -> train_dev_model_input
+        calibration_keys  -> build_calibration_model_input  -> calibration_model_input
+
+    Each row is a build node with nothing between its two ends, which is what
+    makes equality the right comparison. The one thing worth checking rather
+    than assuming: ``split_train_keys`` runs *before* the builds, not after, so
+    ``train_keys`` and ``train_dev_keys`` are each already the exact input of
+    their own build node. Crossing a pair (``train_keys`` against
+    ``train_dev_model_input``) would make the gate always-false rather than
+    merely absent, so ``test_the_pairing_is_keys_then_its_own_model_input``
+    pins the argument order against the pipeline's input list.
+
+    ``calibration_keys`` only exists when ``--calibration`` is on, which is why
+    its two arguments default to None: the pipeline names them in this node's
+    input list only in that branch, and the Runner binds inputs positionally.
+
+    **val and test are absent, and that is a limit rather than an oversight.**
+    Their builds are followed by ``filter_groups_with_positives``, so the frame
+    whose row count equals its keys' is ``val_model_input_unfiltered`` /
+    ``test_model_input_unfiltered``. Neither has a catalog entry in any
+    environment, so both are ``MemoryDataset``s — lazy frames that never reach
+    disk and have no footer to read. The tables that do land are the filtered
+    ones, whose row count is *supposed* to be smaller; a one-sided ``<=``
+    against them was considered and rejected, because ``sample_pool`` is a dense
+    entity x item expansion against a sparse ``label_table``, so most groups
+    carry no positive, the filter drops a large fraction, and the bound would
+    hold straight through a 2x fan-out. Residual risk: a duplicate key confined
+    to a month only val/test cover goes unseen. See the B10 section of
+    ``core/consistency.py``'s module docstring.
+
+    **Why it is a node after the builds rather than a post-condition inside
+    one.** Getting a row count inside ``build_model_input`` means ``count()`` on
+    an unlanded frame — a full scan, the cost escalation ADR-0006 exists to
+    refuse. Once the table has landed, the same fact is a seek per file. Landing
+    is the Runner's doing (it saves a node's output before the next node loads
+    it), so the gate has to be its own node; B8 sits where it does for the same
+    reason. It still stops the run before anything trains on the bad table.
+
+    **Why it reports rather than only gating.** A pass/fail answer cannot say
+    how many rows each split actually holds, which is the number an operator
+    wants when a downstream memory estimate is wrong. Known limit, shared with
+    B8: on a raise the report never reaches the catalog, because the node does
+    not return. The counts are logged before the raise for that reason.
+    """
+    base_version = parameters["base_dataset_version"]
+    train_scope = {
+        "base_dataset_version": base_version,
+        "train_variant_id": parameters["train_variant_id"],
+    }
+
+    # Decision — which pairs this gate can speak for, and under which partition
+    # scope each side's files are counted. The scope is not decoration: these
+    # tables accumulate versions and variants side by side under one Hive table,
+    # and `inputFiles()` answers for the whole relation rather than for the
+    # partition_filter the catalog loaded them with.
+    pairs = [
+        ("train", train_keys, train_model_input, train_scope),
+        ("train_dev", train_dev_keys, train_dev_model_input, train_scope),
+    ]
+    if calibration_model_input is not None:
+        pairs.append((
+            "calibration", calibration_keys, calibration_model_input,
+            {
+                "base_dataset_version": base_version,
+                "calibration_variant_id": parameters["calibration_variant_id"],
+            },
+        ))
+
+    by_split: dict[str, SplitRowCounts] = {}
+    splits: dict[str, dict] = {}
+    for split, keys, model_input, scope in pairs:
+        keys_rows, keys_files = _landed_split_rows(
+            keys, scope, f"{split}_keys")
+        input_rows, input_files = _landed_split_rows(
+            model_input, scope, f"{split}_model_input")
+        by_split[split] = SplitRowCounts(keys_rows, input_rows)
+        splits[split] = {
+            "keys_rows": keys_rows,
+            "keys_files": keys_files,
+            "model_input_rows": input_rows,
+            "model_input_files": input_files,
+        }
+        logger.info(
+            "Model input grain gate: %s keys=%d row(s) in %d file(s), "
+            "model_input=%d row(s) in %d file(s)",
+            split, keys_rows, keys_files, input_rows, input_files,
+        )
+
+    report = {
+        # The version and variant this report describes. The catalog keys its
+        # file on base_dataset_version alone (as numeric_precision_report does),
+        # so two runs of different train variants overwrite one file; carrying
+        # the variant inside is what stops a reader attributing one variant's
+        # counts to another.
+        "base_dataset_version": base_version,
+        "train_variant_id": parameters["train_variant_id"],
+        "calibration_variant_id": (
+            parameters["calibration_variant_id"]
+            if calibration_model_input is not None else None
+        ),
+        "splits": splits,
+        # Named in the artifact, not only in this docstring: a reader who pulls
+        # the report to ask "was my dataset checked" must not have to infer from
+        # two absent keys that two splits were deliberately left out.
+        "not_checked": {
+            "val": _NOT_CHECKED_REASON.format(split="val"),
+            "test": _NOT_CHECKED_REASON.format(split="test"),
+        },
+    }
+
+    errors = model_input_grain_errors(by_split)
+    if errors:
+        raise DataConsistencyError(
+            f"Model input grain check failed ({len(errors)} split(s)):\n- "
+            + "\n- ".join(errors)
+        )
+    return report
 
 
 def filter_groups_with_positives(

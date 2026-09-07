@@ -3037,3 +3037,265 @@ class TestValidateNumericPrecisionCoversTheWidenedCast:
         assert row["column"] == "is_active"
         assert row["dtype"] == "boolean"
         assert row["verdict"] == "ok"
+
+
+# --- B10 model_input grain gate ----------------------------------------------
+# The gate counts rows out of parquet footers, so these tests land real
+# partitioned parquet and hand the node the frames read back from it. The
+# headline cases run the real ``build_model_input`` against a right table whose
+# keys were deliberately duplicated: a hand-built pair of row counts would test
+# ``model_input_grain_errors`` again (it has its own tests in
+# test_core/test_consistency.py) and would prove nothing about whether this gate
+# actually catches the fan-out it was written for. ---
+
+from recsys_tfb.pipelines.dataset.nodes import validate_model_input_grain
+
+_TRAIN_VARIANT = "tv000001"
+_CAL_VARIANT = "cv000001"
+
+
+def _grain_params(parameters) -> dict:
+    return {
+        **parameters,
+        "base_dataset_version": _BASE_VERSION,
+        "train_variant_id": _TRAIN_VARIANT,
+        "calibration_variant_id": _CAL_VARIANT,
+    }
+
+
+def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
+          variant=_TRAIN_VARIANT, base=_BASE_VERSION):
+    """Write ``df`` the way the catalog does and read it back.
+
+    Partitioned by the two columns the gate's path filter reads and no more:
+    ``snap_date`` is a partition column in the real catalog too, but the gate
+    never looks at it (train / train_dev / calibration carry no month plan —
+    they rebuild in full), so adding it here would only make the fixture longer.
+    The partition_filter columns are dropped on read because
+    ``HiveTableDataset.load`` drops them; the gate reads paths, not columns, so
+    this is fidelity rather than a dependency.
+    """
+    root = str(tmp_path / name)
+    (df.withColumn("base_dataset_version", F.lit(base))
+       .withColumn(variant_col, F.lit(variant))
+       .write.partitionBy("base_dataset_version", variant_col).parquet(root))
+    return spark.read.parquet(root).drop("base_dataset_version", variant_col)
+
+
+class TestValidateModelInputGrain:
+    def _built(self, spark, feature_table, label_table, sample_pool, parameters,
+               *, labels=None, features=None):
+        """(keys, model_input) through the real assembly."""
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
+        keys = select_train_keys(sample_pool, params)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
+        model_input = build_model_input(
+            keys,
+            features if features is not None else pft,
+            labels if labels is not None else label_table,
+            preprocessor,
+            parameters,
+        )
+        return keys, model_input
+
+    def test_the_clean_path_does_not_raise(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters)
+        landed_keys = _land(spark, tmp_path, keys, "k")
+        landed_mi = _land(spark, tmp_path, model_input, "mi")
+
+        report = validate_model_input_grain(
+            landed_keys, landed_mi, landed_keys, landed_mi,
+            _grain_params(parameters),
+        )
+        # ...and it counted something. A gate that found no files would also
+        # "not raise", which is the shape this assertion exists to exclude.
+        assert report["splits"]["train"]["keys_rows"] > 0
+        assert (report["splits"]["train"]["keys_rows"]
+                == report["splits"]["train"]["model_input_rows"])
+
+    def test_a_duplicated_label_row_makes_the_gate_raise(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        # Cause B of the failure the node comment names: the label join's right
+        # table holds the same key twice, so every matching key comes back
+        # twice. require_columns_present cannot see this — the columns are all
+        # there, there are simply too many rows.
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters,
+            labels=label_table.union(label_table),
+        )
+        landed_keys = _land(spark, tmp_path, keys, "k")
+        landed_mi = _land(spark, tmp_path, model_input, "mi")
+        clean_keys, clean_mi = self._built(
+            spark, feature_table, label_table, sample_pool, parameters)
+
+        with pytest.raises(DataConsistencyError) as exc:
+            validate_model_input_grain(
+                landed_keys, landed_mi,
+                _land(spark, tmp_path, clean_keys, "dk"),
+                _land(spark, tmp_path, clean_mi, "dmi"),
+                _grain_params(parameters),
+            )
+        message = str(exc.value)
+        assert "B10" in message
+        assert "train" in message
+        # Per split: train_dev was assembled from the clean label table, so it
+        # must not be named. A gate that reported every split whenever one was
+        # wrong would send the operator to the wrong table.
+        assert "train_dev" not in message
+
+    def test_a_duplicated_feature_row_makes_the_gate_raise(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        # The same cause on the other right table. Both joins are LEFT joins on
+        # a key the gate cannot verify is unique, so both need to be covered.
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters,
+            features=pft.union(pft),
+        )
+        landed_keys = _land(spark, tmp_path, keys, "k")
+        landed_mi = _land(spark, tmp_path, model_input, "mi")
+
+        with pytest.raises(DataConsistencyError) as exc:
+            validate_model_input_grain(
+                landed_keys, landed_mi, landed_keys, landed_mi,
+                _grain_params(parameters),
+            )
+        assert "B10" in str(exc.value)
+
+    def test_a_partition_filter_matching_no_file_raises_rather_than_passing(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        # The vacuous-pass shape: if the version/variant filter selects nothing
+        # out of a table that does have files, both counts are 0 and every
+        # comparison is trivially true. That must be an error, not a green gate.
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters)
+        landed_keys = _land(spark, tmp_path, keys, "k", variant="OTHER")
+        landed_mi = _land(spark, tmp_path, model_input, "mi", variant="OTHER")
+
+        with pytest.raises(DataConsistencyError) as exc:
+            validate_model_input_grain(
+                landed_keys, landed_mi, landed_keys, landed_mi,
+                _grain_params(parameters),
+            )
+        assert "train_variant_id" in str(exc.value)
+
+    def test_calibration_is_checked_only_when_it_is_wired(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters)
+        landed_keys = _land(spark, tmp_path, keys, "k")
+        landed_mi = _land(spark, tmp_path, model_input, "mi")
+
+        without = validate_model_input_grain(
+            landed_keys, landed_mi, landed_keys, landed_mi,
+            _grain_params(parameters),
+        )
+        assert sorted(without["splits"]) == ["train", "train_dev"]
+
+        with_cal = validate_model_input_grain(
+            landed_keys, landed_mi, landed_keys, landed_mi,
+            _grain_params(parameters),
+            _land(spark, tmp_path, keys, "ck",
+                  variant_col="calibration_variant_id", variant=_CAL_VARIANT),
+            _land(spark, tmp_path, model_input, "cmi",
+                  variant_col="calibration_variant_id", variant=_CAL_VARIANT),
+        )
+        assert sorted(with_cal["splits"]) == [
+            "calibration", "train", "train_dev"]
+
+    def test_the_report_says_which_splits_are_out_of_scope_and_why(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+    ):
+        # val / test are not gateable: their unfiltered frames are the only ones
+        # whose row count equals their keys', and those are MemoryDatasets that
+        # never land, so there is no footer to read. The report says so rather
+        # than leaving a reader to infer that two splits were forgotten.
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters)
+        landed_keys = _land(spark, tmp_path, keys, "k")
+        landed_mi = _land(spark, tmp_path, model_input, "mi")
+
+        report = validate_model_input_grain(
+            landed_keys, landed_mi, landed_keys, landed_mi,
+            _grain_params(parameters),
+        )
+        assert sorted(report["not_checked"]) == ["test", "val"]
+        assert "unfiltered" in report["not_checked"]["val"]
+
+
+class TestB10CostInvariant:
+    """The gate's whole justification: it establishes a row count without scanning.
+
+    ADR-0006's line is that a Layer-2 gate's cost is set by metadata, not by the
+    number of rows. ``count()`` looks like the obvious way to implement B10 and
+    would cross that line silently — nothing would fail, the gate would still be
+    correct, and the dataset pipeline would just get slower for every future run.
+    So the claim is pinned here rather than left in a docstring.
+
+    Reading the AST rather than grepping the file: a grep matches the words
+    ``df.count()`` in the very docstring that explains why it is not used.
+    """
+
+    _SCANNING = {
+        "count", "groupBy", "groupby", "agg", "collect", "distinct",
+        "isEmpty", "toPandas", "take", "head", "first", "rdd",
+    }
+
+    def _calls_in(self, module_path, func_names):
+        import ast
+        from pathlib import Path
+
+        src = Path(module_path).read_text()
+        tree = ast.parse(src)
+        found = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name in func_names:
+                found[fn.name] = {
+                    c.func.attr for c in ast.walk(fn)
+                    if isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Attribute)
+                }
+        assert sorted(found) == sorted(func_names), (
+            f"{module_path}: expected {func_names}, found {sorted(found)} — "
+            f"a function was renamed and this guard stopped looking at it."
+        )
+        return found
+
+    def test_the_gate_calls_nothing_that_reads_rows(self):
+        from recsys_tfb.pipelines.dataset import nodes as _nodes
+        from recsys_tfb.utils import parquet_stats as _stats
+
+        for module, names in (
+            (_nodes.__file__,
+             ["validate_model_input_grain", "_landed_split_rows"]),
+            (_stats.__file__, ["read_row_count", "filter_by_partitions"]),
+        ):
+            for name, calls in self._calls_in(module, names).items():
+                assert not (calls & self._SCANNING), (
+                    f"{name} calls {sorted(calls & self._SCANNING)}, which "
+                    f"reads rows. B10's facts must come from parquet footers "
+                    f"(ADR-0006)."
+                )
+
+    def test_the_only_frame_method_the_gate_uses_is_inputFiles(self):
+        # The positive half: a guard that only forbids things passes just as
+        # well when the function stops touching the frame at all.
+        from recsys_tfb.pipelines.dataset import nodes as _nodes
+
+        calls = self._calls_in(
+            _nodes.__file__, ["_landed_split_rows"])["_landed_split_rows"]
+        assert "inputFiles" in calls

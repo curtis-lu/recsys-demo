@@ -65,7 +65,7 @@ def create_pipeline(
     """Build the dataset pipeline.
 
     Modes:
-      * default — the full DAG (13 nodes, or 15 with calibration).
+      * default — the full DAG (15 nodes, or 17 with calibration).
       * ``--only-test-months`` — the data gate plus the test chain, for a run
         that only adds ``test_snap_dates`` months. See
         :data:`ONLY_TEST_MONTHS_NODES`.
@@ -86,6 +86,7 @@ def create_pipeline(
         select_val_keys,
         split_train_keys,
         validate_data_consistency,
+        validate_model_input_grain,
         validate_numeric_precision,
     )
 
@@ -247,6 +248,62 @@ def create_pipeline(
                 name="build_calibration_model_input",
             ),
         ])
+
+    # --- B10 grain gate: every model_input this run landed must hold exactly
+    #     as many rows as the keys table it was built from. Declared after the
+    #     calibration branch because its input list is what changes with it:
+    #     the calibration pair is appended only when those two tables exist,
+    #     and `validate_model_input_grain` takes them as trailing optional
+    #     arguments for that reason (the Runner binds inputs positionally).
+    #
+    #     Its position in this list carries no ordering weight — it depends on
+    #     every build node's output, so Kahn can only reach it last. What the
+    #     dependency buys is that the tables have LANDED: the Runner saves a
+    #     node's output before the next node loads it, so this gate reads
+    #     parquet footers rather than paying a count() on an unlanded frame
+    #     (ADR-0006's cost invariant, the same reason B8 is its own node).
+    #
+    #     It produces `model_input_grain_report` rather than being a zero-output
+    #     side-effect node, so it is NOT in A7's registry and is not silently
+    #     skipped by slicing (F5) — the same choice #281 made for B8, and for
+    #     the same two reasons.
+    #
+    #     val / test are absent by necessity, not oversight: see the node's
+    #     docstring.
+    #
+    #     The input list is spelled out twice rather than built by appending,
+    #     and that is deliberate: `test_static_coverage_floor` skips any node
+    #     whose `inputs=` is not a list of literals, and a skipped node is one
+    #     A1 (catalog-only dataflow) and A5/A6 stop reading. The cost is five
+    #     repeated strings, guarded by
+    #     `test_the_calibration_input_list_is_the_base_list_plus_two`. ---
+    if enable_calibration:
+        nodes.append(
+            Node(
+                validate_model_input_grain,
+                inputs=[
+                    "train_keys", "train_model_input",
+                    "train_dev_keys", "train_dev_model_input",
+                    "parameters",
+                    "calibration_keys", "calibration_model_input",
+                ],
+                outputs="model_input_grain_report",
+                name="validate_model_input_grain",
+            )
+        )
+    else:
+        nodes.append(
+            Node(
+                validate_model_input_grain,
+                inputs=[
+                    "train_keys", "train_model_input",
+                    "train_dev_keys", "train_dev_model_input",
+                    "parameters",
+                ],
+                outputs="model_input_grain_report",
+                name="validate_model_input_grain",
+            )
+        )
 
     # After the calibration branch, so the mode is decided against the full
     # node list however it was built. Neither calibration node is on the test

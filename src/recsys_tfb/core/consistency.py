@@ -296,8 +296,8 @@ because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
 to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the filesystem).
 
-Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 implemented and
-wired):
+Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
+implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -407,6 +407,42 @@ wired):
   either can only mean the cast was skipped. B9 rejects both — not by tightening
   B6's classifier, but by asking a different question (is it the declared type?)
   whose honest remedy is the dataset rebuild B6 could not prescribe.
+
+* B10 — a ``*_model_input`` table holds a different number of rows than the
+  ``*_keys`` table it was built from. ``build_model_input`` LEFT joins the keys
+  to ``label_table`` and to ``preprocessed_feature_table`` at the keys' own
+  grain, so the counts can only diverge when a right table holds a join key
+  more than once — the "silently N-times-too-large dataset" that node's own
+  comment names as the failure it fears. ``require_columns_present`` there
+  covers only the other cause (a join key missing the item column); nothing
+  covered this one, and the upstream ``max_duplicate_key_ratio`` contract does
+  not close it (A32 passes when ``primary_key`` and ``quality_checks`` are both
+  absent, and the framework lets a user supply source tables this repo's
+  ``source_etl`` never wrote). Predicate: ``model_input_grain_errors`` (pure —
+  it takes a split → ``SplitRowCounts`` mapping). Wired in
+  ``validate_model_input_grain`` (``pipelines/dataset/nodes.py``), which runs
+  after the ``build_*_model_input`` nodes have landed their tables.
+
+  **Facts come from parquet footer row counts, not from ``count()``** — the
+  same cost invariant B8 works under (ADR-0006 and its amendments): a footer
+  read costs one seek per file and is independent of how many rows the file
+  holds. ``block.getRowCount()`` is the quantity B8's reader was already
+  reading to interpret its min/max statistics; B10 only sums it.
+
+  **Three of the five splits are covered, and that is a limit, not an
+  oversight.** train / train_dev / calibration land straight out of
+  ``build_model_input``. val and test do not: the frames whose row count equals
+  their keys' are ``val_model_input_unfiltered`` /
+  ``test_model_input_unfiltered``, which have no catalog entry in any
+  environment and so are ``MemoryDataset``s — lazy Spark frames that never
+  reach disk and have no footer. The tables that do land are the
+  ``filter_groups_with_positives`` outputs, whose row count is *supposed* to be
+  smaller. A one-sided ``<=`` against those was considered and rejected: this
+  repo's ``sample_pool`` is a dense entity x item expansion while
+  ``label_table`` is sparse, so most groups carry no positive and the filter
+  drops a large fraction — the bound would hold through a 2x fan-out and read
+  as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
+  a duplicate key confined to a month that only val/test cover goes unseen.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -1895,6 +1931,80 @@ def feature_storage_type_errors(
             f"Rebuild the dataset (the cast in build_model_input is what "
             f"converges the types); do not widen the declaration to match a "
             f"stale parquet."
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# B10 — a model_input must hold exactly as many rows as its keys table
+# ---------------------------------------------------------------------------
+
+
+class SplitRowCounts(NamedTuple):
+    """What B10 needs to know about one split: how many rows went in and out.
+
+    ``keys_rows`` is the split's keys table; ``model_input_rows`` is the table
+    ``build_model_input`` produced from it. One type rather than two parallel
+    mappings, for the same reason as :class:`ColumnPrecision`: the pair always
+    travels together and a caller that got them out of step would compare one
+    split's input against another's output silently.
+    """
+
+    keys_rows: int
+    model_input_rows: int
+
+
+def model_input_grain_errors(
+    by_split: Mapping[str, SplitRowCounts],
+) -> list[str]:
+    """B10 invariant — the single definition.
+
+    Pure — no Spark, no parquet, no filesystem. How the two numbers are
+    obtained without scanning the data is the caller's problem
+    (``utils.parquet_stats.read_row_count``), and keeping it out of here is what
+    lets the rule be tested by handing it a dict.
+
+    **Equality, not a bound.** ``build_model_input`` joins keys to labels and to
+    features with LEFT joins on the keys' own grain, so a key that matches
+    nothing keeps its row and a key that matches once keeps its row: the output
+    has exactly the input's rows unless a right table holds a join key twice.
+    That makes ``!=`` the whole rule, and it makes both directions worth
+    reporting — more rows is the N-times-too-large dataset the node comment
+    names, fewer rows means something other than that fan-out happened and a
+    gate that stayed silent about it would be claiming a guarantee it did not
+    check.
+
+    The multiplier is in the message because it names the cause: 2.0 says "one
+    duplicated key in a right table", 1.0002 says "a handful", and the two send
+    an operator to different queries. It is omitted when there are no keys to
+    divide by — a ratio against zero has no meaning and the message has to
+    stand without one.
+
+    Collect-all and sorted by split: two runs of the same config read the same
+    way, and one investigation covers every offending split.
+    """
+    errors: list[str] = []
+    for split in sorted(by_split):
+        keys_rows, model_input_rows = by_split[split]
+        if keys_rows == model_input_rows:
+            continue
+        # Fixed decimals rather than significant figures: ``:.4g`` renders
+        # a 1.0002x fan-out as "1x", which reads as agreement.
+        ratio = (
+            f" ({model_input_rows / keys_rows:,.4f}x)" if keys_rows else ""
+        )
+        errors.append(
+            f"B10: {split}_model_input holds {model_input_rows:,} row(s) but "
+            f"{split}_keys holds {keys_rows:,}{ratio}. build_model_input LEFT "
+            f"joins the keys to label_table and to preprocessed_feature_table "
+            f"on the keys' own grain, so the two counts can only differ if a "
+            f"right table holds one of those join keys more than once — the "
+            f"silently N-times-too-large dataset that node's comment names. "
+            f"Check the duplicate-key contract on label_table and on "
+            f"feature_table (source_etl quality_checks: "
+            f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "
+            f"are absent), and do not de-duplicate downstream: which of the "
+            f"duplicate rows is the right one is not knowable here."
         )
     return errors
 
