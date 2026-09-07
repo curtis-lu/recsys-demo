@@ -1147,8 +1147,15 @@ def filter_groups_with_positives(
     Decision — a query group with no positive is dropped rather than scored.
     Applied to val / test only: mAP is undefined over such a group and
     metrics_spark filters them again anyway, so keeping them only inflates the
-    Hive table and wastes predict time. train / train_dev / calibration are NOT
-    filtered — their losses use every row.
+    Hive table and wastes predict time.
+
+    train / train_dev / calibration are NOT filtered here, and it is no longer
+    because "their losses use every row" — that holds for ``binary`` and for
+    ``rank_xendcg``, but not for ``lambdarank``, whose gradient contribution
+    over an all-negative group is exactly zero. train / train_dev get those
+    groups dropped at training time instead, per objective; calibration keeps
+    them under every objective. See the comment above the val / test nodes in
+    ``pipeline.py`` for why the split is drawn there rather than here.
     """
     schema = get_schema(parameters)
     group_cols = [schema["time"]] + schema["entity"]

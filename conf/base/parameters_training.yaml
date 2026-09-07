@@ -44,6 +44,50 @@ training:
     # early stopping。ranking objective 配非 ranking metric 在 CLI 入口會被擋
     # 下（consistency A7）。不論訓練 objective 為何，evaluation 永遠是
     # per-customer mAP。
+    #
+    # 換 objective 之前先讀懂這三件事。**下面每一個數字都量在本機合成資料上，
+    # 不代表生產；幅度不可跨環境搬，只有方向與同號性可引用。** 實測、腳本與
+    # 這些數字的來源標記：docs/notes/2026-09-07-ltr-objective-support.md。
+    #
+    # (a) 兩個 LTR objective 對「整組沒有正例的 query group」的處理**相反**。
+    #     lambdarank 在這種 group 上梯度貢獻精確為零（實測 LightGBM 4.6.0：
+    #     1 棵樹、0 個 split、預測零變異），所以建 train / train_dev 的 lgb
+    #     binary 時會把它們丟掉；rank_xendcg 會學（目標分布在 label 全 0 時是
+    #     隨機榜單，實測 50 棵樹全都有 split），所以一列不丟；binary 也一列不
+    #     丟。這由 objective 推導，**沒有對應的 config 鍵**——真實來源是
+    #     core/group_utils.py 的 objective_drops_zero_positive_groups。
+    #     濾了幾個 group、幾列，寫進 log 與 group_filter_report.json
+    #     （manifest 的 extra_metadata.group_filter）。
+    #
+    # (b) rank_xendcg 的 ndcg 讀數會**虛高**，而且在有權重時可能**超過 1**。
+    #     LightGBM 把零正例 group 記為滿分而不是 0。權重全為 1 時讀數是
+    #       NDCG_未濾 = f × 1.0 + (1 − f) × NDCG_已濾      （f = 零正例 group 佔比）
+    #     實測（合成資料，f = 0.30）等式收在 3.33e-16。**看到 0.99 不代表模型
+    #     強**，代表 f 很高。
+    #
+    #     **權重不是 1 時，零正例 group 的貢獻是 1/w̄（w̄ = 該 group 的平均列
+    #     權重），不是 1.0**——LightGBM 用未加權的 1.0 當分子、query 權重和當
+    #     分母。實測：整份權重 0.5 → 讀數 2.0；0.2632 → 3.80。這正好會踩到：
+    #     early stopping 的 valid set 是 train_dev，它的 .bin 帶 per-row
+    #     weight；而下方 sample_weights 的雙因子公式給冷門 item 的負例
+    #     w_neg = A·v（v < 1），零正例 group 整組都是負例列 → w̄ < 1 → 讀數往上
+    #     跑。本機 sample_weights 是 {}（權重全 1），**生產有值**。
+    #
+    #     early stopping 不受影響：不論加不加權，未濾的讀數都是已濾讀數的一個
+    #     正斜率仿射轉換，對 iteration 取 argmax 不變（實測三條曲線 argmax 相同）。
+    #     **但這條保證依賴 early stopping 的 min_delta = 0**（現行取 LightGBM
+    #     預設，adapter 沒有傳這個參數）；日後若有人設 min_delta > 0，壓縮係數
+    #     會改變門檻的實際嚴格度。
+    #
+    # (c) 切 objective 會 bump model_version（objective 在被 hash 的 training:
+    #     區塊內），而且模型**不會**與濾之前逐位元相同。梯度貢獻為零是精確的，
+    #     但 min_data_in_leaf 用列數計數、分箱邊界隨資料分布改變，兩個間接效應
+    #     都會讓模型不同（都是 LightGBM 既有行為，不是 bug）。所以切換後不應
+    #     期待分數與濾之前一致。
+    #
+    # 下方 sample_weights 的雙因子公式預設 pointwise loss，在 LTR 下只有方向
+    # 成立、校準目標 t 沒有對應物——適用範圍見
+    # docs/operations/user-guides/sampling-overrides-editor.md §3.6。
     # --------------------------------------------------------------------
   calibration:
     enabled: true              # bool；★ 要把 score 當機率時才開
