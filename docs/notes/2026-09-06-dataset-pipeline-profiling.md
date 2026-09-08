@@ -78,7 +78,7 @@ per-item 獨立模型，而那條路的代價（正／負遷移翻轉、葉預�
 ### 2.3 有沒有「對排序沒貢獻」的列可以砍掉？沒有
 
 排序損失若是 lambdarank，零正例的 query group 產生不出任何 pair，梯度貢獻精確為零，
-是可以砍的。但本專案的 `conf/base/parameters_training.yaml:27` 是：
+是可以砍的。但本專案的 `conf/base/parameters_training.yaml` 的 `objective` 是：
 
 ```yaml
 objective: binary          # pointwise
@@ -86,16 +86,36 @@ objective: binary          # pointwise
 
 **pointwise 二元分類用到每一列**，包含零正例群裡的全負例。`pipeline.py` 裡
 `filter_groups_with_positives` 只套用在 val／test（那兩者被 mAP／NDCG 評估，
-零正例群本來就被排除）而不套用在 train 的註解——
+零正例群本來就被排除）而不套用在 train——對現行設定是正確的。
 
-> train / train_dev / calibration are NOT filtered: their losses use every row
-
-——對現行設定是正確的。
-
-> 若哪天把 `objective` 改成 `lambdarank`／`rank_xendcg`（config 第 39 行已備妥註解），
+> **原文（2026-09-06）**：若哪天把 `objective` 改成 `lambdarank`／`rank_xendcg`，
 > 這句話就不再成立，train 側的零正例群會變成純浪費。**這是一條「改 A 會讓 B 的宣稱
 > 失效」的耦合，值得在切換 objective 時一併檢查。** 我沒有量現行資料裡零正例群佔多少，
 > 因為在 `objective: binary` 下這個數字不影響任何決策。
+
+#### 2.3.1 更正（2026-09-07）：上面那句對 `rank_xendcg` 是錯的
+
+**耦合的存在是對的，但它只涵蓋兩個 LTR objective 中的一個。**
+
+- `lambdarank` — 原文正確。零正例群產生不出 label 相異的 pair，梯度貢獻精確為零。
+- `rank_xendcg` — **原文錯了，它會學。** 目標分布是
+  `q_i = (2^{y_i} − γ_i) / Σ_j (2^{y_j} − γ_j)`，`γ` 每輪重抽；`y` 全為 0 時
+  `q_i = (1 − γ_i) / Σ_j (1 − γ_j)` 是一張**隨機榜單**、不是零。實測（LightGBM 4.6.0，
+  label 全 0 的 group、訓 50 輪）：`lambdarank` 長出 1 棵樹、0 個 split、預測零變異；
+  `rank_xendcg` 長出 50 棵樹、50 個都有 split、預測有實質變異。
+  **對 `rank_xendcg` 砍零正例群一定是錯的**，等於少學掉那些列。
+
+**不把原文刪掉**——它是本輪推導的起點，也是「兩個 objective 名字像就假設行為一樣」這個
+錯誤的實例。留著下一個人才知道這裡曾經怎麼想、以及為什麼翻掉。
+
+同時失效的還有原文引述的那句註解（`train / train_dev / calibration are NOT filtered:
+their losses use every row`）。**它在 repo 裡不只一處**：#315（`ff46ad6`）改寫了
+`pipelines/dataset/pipeline.py` 的 node 上方註解，但 `pipelines/dataset/nodes.py` 的
+`filter_groups_with_positives` docstring 一直到 2026-09-07 這輪才一併更正——在那之前，
+讀 docstring 的人會拿到與 pipeline 註解相反的結論。兩處現在都是分 objective 的版本。
+
+實測、被推翻的三條宣稱、以及「濾了什麼」現在寫在哪：
+[`2026-09-07-ltr-objective-support.md`](2026-09-07-ltr-objective-support.md)。
 
 ### 2.4 結論
 
@@ -385,6 +405,10 @@ false        20.9 / 21.8 / 21.4 / 21.3    中位數 21.4   最小 20.9
 ### 7.3 「零正例的 query group 對排序沒貢獻，可以從 train 砍掉」→ 對現行設定不成立
 
 見 §2.3。這在 `objective: lambdarank` 下成立，在現行的 `objective: binary` 下不成立。
+
+> **更正（2026-09-07）**：本節只點名了 `lambdarank`，沒有明說 `rank_xendcg`——但它
+> 指向的 §2.3 把兩者當成同一件事。**`rank_xendcg` 這條也不成立**：它會從零正例群學到
+> 東西，所以砍掉它們是錯的，不是「條件不足」而是方向相反。見 §2.3.1。
 
 ---
 

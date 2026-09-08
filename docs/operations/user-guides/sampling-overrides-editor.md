@@ -192,6 +192,81 @@ A_COLD = (300/300)^0.5 = 1.000     A_HOT = (300/6000)^0.5 = 0.224
 - **eff pos_rate（有效正樣本率，後）**：每列應 ≈ `t`（地板生效）。
 - **地板 logit（後）**：每列應**相同**＝`log(t/(1−t))`（截距懲罰被消掉）。
 
+### 3.6 LTR 下的適用範圍（`objective` 不是 `binary` 時先讀這節）
+
+**§3 的整套雙因子推導預設 pointwise loss。** 切到 `lambdarank` 或 `rank_xendcg` 之後，
+它不是整套失效，但也不是整套成立——三個成分的下場不同。先看結論表，機制在後面：
+
+| 公式成分 | pointwise（`binary`） | LTR（`lambdarank` / `rank_xendcg`） |
+|---|---|---|
+| `v` 的**方向**（降負例權重 → 該 item 上升） | 成立 | **仍成立**，但走的是另一條路（見下） |
+| `v` 的**校準**（有效正樣本率恰為目標 `t`） | 成立 | **無意義**——LTR 分數不對應機率，`t` 沒有對象 |
+| `A`（拉平各 item 的 loss 佔比） | 成立 | **仍然生效，沒有被吸收**（見下方更正） |
+
+**為什麼校準那一半會掉**：`v = n_pos(1−t)/(t·n_neg)` 存在的理由，是對抗 `log(p/(1−p))` 的
+**截距**懲罰（§3.1）。lambdarank 的 loss 只看 query group **內**的分數差，根本沒有那個截距，
+所以「把有效正樣本率墊到 `t`」在 LTR 下沒有對應的東西可以墊。方向仍然成立，是因為降低某個
+item 負例的權重，等於降低「把它往下推」的那些 pair 的力道——不同的機制，同一個方向。
+
+> **更正（2026-09-07）**：本節初稿寫「`A` 與 lambdarank 自身的 per-query
+> `inverse_max_dcg` 正規化部分重疊」。**那是把兩個不同的軸當成同一個**：
+> `inverse_max_dcg` 拉平的是**每個 query**，`A = (m_min/m)^α` 拉平的是**每個 item**；
+> 每個 query 都含全部候選 item，per-query 正規化對 item 之間的 loss 佔比沒有作用。
+> 實測（合成資料，600 群 × 8 候選，只套 `A`）：`lambdarank` maxdiff **4.91**、
+> `binary` **0.46**——`A` 在 lambdarank 下不但沒被吸收，幅度還大一個數量級。
+
+**§3.5 的兩個綠/藍診斷欄在 LTR 下不要當驗收標準**：「eff pos_rate ≈ `t`」與「地板 logit
+相同」都是在講機率尺度上的東西。它們仍然是「你按下去的旋鈕有多大」的合理讀數，但不再是
+「模型會怎麼排」的預測。
+
+#### 一個反直覺的實測結果：把權重調高，分數可能**下降**
+
+**把某個 item 的所有列權重「一律調高」，那個 item 的平均分數會下降、平均名次會變後面。**
+
+原因很簡單：per-row weight 放大的是**該列 label 的方向**。冷門 item 的列絕大多數是負例，
+所以一律放大 = 放大「把它往下推」的力。這也是為什麼 §3 的公式**不是**一律調高——它是
+`w_pos = A`、`w_neg = A·v`，冷門 item 的 `v < 1` 只把負例壓下去。
+
+實測（合成資料：400 個 query group × 8 個候選，item 3 是冷門 item、正樣本率 5.0%，
+`t = 1/6` 推出 `v = 0.2632`，各訓 60 輪。名次越小＝越前面）：
+
+| objective | 權重設定 | item 3 平均分數 | item 3 平均名次 |
+|---|---|---|---|
+| `lambdarank` | baseline（全 1.0） | −1.8333 | 4.763 |
+| `lambdarank` | 一律 ×3 | −2.3360 | **5.112（更後面）** |
+| `lambdarank` | 雙因子：只把負例降到 `v` | −1.2704 | **4.567（更前面）** |
+| `rank_xendcg` | baseline | −0.0679 | 4.700 |
+| `rank_xendcg` | 一律 ×3 | −0.1714 | 5.213 |
+| `rank_xendcg` | 雙因子：只把負例降到 `v` | +0.0396 | 4.420 |
+| `binary` | baseline | +0.0860 | 4.758 |
+| `binary` | 一律 ×3 | +0.0746 | 5.070 |
+| `binary` | 雙因子：只把負例降到 `v` | +0.1115 | 4.555 |
+
+> **數值來自合成資料，不代表生產。幅度不可跨環境搬，可引用的只有方向與同號性**：
+> 一律調高 → 三個 objective 皆下降；雙因子 → 三個 objective 皆上升。
+> 腳本全文與環境見 [`../../notes/2026-09-07-ltr-objective-support.md`](../../notes/2026-09-07-ltr-objective-support.md) §8。
+
+**這不是 LTR 專屬的效應**——`binary` 也一樣。但 LTR 還多一層：LightGBM 對 ranking objective
+是先按 pair 算完 `λ`、彙總到列，**才**逐列乘 weight，所以一對「正例 `i` ／負例 `j`」會產生
+`+λ_ij·w_i` 與 `−λ_ij·w_j`；`w_i ≠ w_j` 時這一對的推力不對稱。LTR 文獻的標準做法是
+**query-level** 權重而非 row-level，正是為了避開這件事——本框架的 `sample_weights` 是
+row-level。
+
+#### 加了權重之後，`rank_xendcg` 的 `ndcg` 讀數可能大於 1
+
+這不是壞掉。LightGBM 把零正例 query group 記為滿分，而**加權時那一組的貢獻是 `1/w̄`**
+（`w̄` ＝該組的平均列權重）。冷門 item 的負例被 `v < 1` 降權之後，零正例 group（整組都是
+負例列）的 `w̄ < 1`，讀數就會被推過 1。early stopping 不受影響。
+機制與實測見 [`../../notes/2026-09-07-ltr-objective-support.md`](../../notes/2026-09-07-ltr-objective-support.md) §3.1。
+
+#### 還沒有人補的洞
+
+- **LTR 版的地板公式沒有人推導過。** 本節能回答「pointwise 的依據在 LTR 下不成立」，
+  **回答不了「那 LTR 下該怎麼調」**。目前只能靠方向 ＋ 實際跑一輪比 mAP。
+- **`scripts/sampling_overrides_editor.py` 不知道 `objective` 是什麼**（全檔沒有 `objective`
+  字樣），匯出值一律照 pointwise 推導。**這是刻意不擋的**——框架不會因為你切了 objective
+  就拒絕既有的 `sample_weights`，因為生產有值，硬擋會在切換的當下打爆生產。
+
 ---
 
 ## 4. 邊界情況
@@ -291,3 +366,4 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py profile <db
 - [`../pipelines/training.md`](../../pipelines/training.md) §3.5 — `sample_weights` 設定、一致性檢查、`unmatched_keys` 報告
 - [`../pipelines/dataset.md`](../../pipelines/dataset.md) — `sample_ratio_overrides` 在 dataset 抽樣的落點
 - [`local-spark-setup.md`](../dev-setup/local-spark-setup.md) — 本機跑 `profile` 的 Spark 環境
+- [`2026-09-07-ltr-objective-support.md`](../../notes/2026-09-07-ltr-objective-support.md) — §3.6 那些數字的實測紀錄與重跑腳本

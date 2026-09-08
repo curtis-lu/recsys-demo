@@ -214,16 +214,24 @@ def create_pipeline(
         # zero-positive groups anyway, so retaining them just wastes Hive
         # storage and downstream predict / extract memory.
         #
-        # train / train_dev / calibration tables are NOT filtered here, and the
-        # reason is no longer "their losses use every row" — under
-        # `objective: lambdarank` those losses do not. train / train_dev get
-        # the same groups dropped at training time instead, from the objective
-        # (`models/lightgbm_adapter.py`), because these tables are shared
-        # across model_versions and binding them to one objective would force
-        # a dataset rebuild on every objective switch. calibration stays whole
-        # under every objective: calibration reads the full score
-        # distribution, and dropping the all-negative groups would shift its
-        # baseline. ---
+        # train / train_dev / calibration tables are NOT filtered here, and
+        # the reason is no longer "their losses use every row" — that holds
+        # for `binary` (pointwise, every row) and for `rank_xendcg` (its
+        # target distribution over an all-zero group is a random ranking, so
+        # it genuinely learns from those rows), but NOT for `lambdarank`,
+        # whose gradient contribution over such a group is exactly zero.
+        #
+        # So the drop is per-objective, and it happens at training time
+        # instead: `core.group_utils.objective_drops_zero_positive_groups`
+        # decides, `models/lightgbm_adapter.py` applies it to train /
+        # train_dev while building the lgb binary. It is not done here
+        # because these tables are shared across model_versions, and binding
+        # them to one objective would force a dataset rebuild on every
+        # objective switch.
+        #
+        # calibration stays whole under every objective: calibration reads
+        # the full score distribution, and dropping the all-negative groups
+        # would shift its baseline. ---
         Node(
             filter_groups_with_positives,
             inputs=["val_model_input_unfiltered", "parameters"],
