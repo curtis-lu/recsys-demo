@@ -1,0 +1,183 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "-apple-system, 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei', sans-serif", "fontSize": "13px", "lineColor": "#8a97a0", "textColor": "#1f2328", "clusterBkg": "#fbfcfd", "clusterBorder": "#d0d7de", "edgeLabelBackground": "#ffffff"}, "flowchart": {"curve": "basis", "nodeSpacing": 30, "rankSpacing": 46, "htmlLabels": true, "padding": 8}} }%%
+%% ===========================================================================
+%% evaluation pipeline node graph
+%% 唯一真實來源：src/recsys_tfb/pipelines/evaluation/pipeline.py::create_pipeline
+%% node 函式在 nodes_spark.py 與 comparison_nodes.py，計算在 evaluation/ 套件
+%% 姊妹圖：dataset-pipeline.mmd、training-pipeline.mmd、inference-pipeline.mmd
+%%（同一套圖例，多出／少掉的形狀見下）
+
+%% 圖例
+%%   [( 圓柱 )]    來源表（catalog 的 read_only Hive table）
+%%   [/ 斜角 /]    直接被造成「資料列」的 config 值。過濾條件類的
+%%                 （evaluation.snap_date、k_values）不畫。
+%%   [[ 雙框 ]]    別的 pipeline 落地的版本化 artifact（不是表，是檔案）
+%%   [ 方框 ]      node，框內是 node name（可直接餵給 --from-node / --only-node）
+%%   ([ 實線膠囊 ]) 落地的 catalog 條目（Hive table / JSON 檔）
+%%   ([ 虛線膠囊 ]) MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
+%%   虛線邊         非資料流：只宣告 happens-before 的拓樸相依
+%%   本圖沒有 {{ 六角 }} 閘，也沒有 > 旗標 ]——evaluation 不擋任何東西，
+%%   唯一的 fail-loud 在 --compare-only 的第一個 node（B4，見下）。
+
+%% 這張圖最違反直覺的一件事：實線膠囊與虛線膠囊的分布跟直覺相反
+%%   四份診斷 JSON、metric_ci、report_aggregates **有** catalog entry（會落地）；
+%%   而 evaluation_metrics、baseline_metrics、evaluation_diagnosis_pages
+%%   **沒有**。後果：切片的停止條件是 can_load（＝檔案在不在），所以
+%%   `--only-node generate_report` 會沿著虛線那三條一路把
+%%   prepare_eval_data / compute_metrics / compute_baseline_metrics
+%%   全部拉回來重跑全量 Spark，而實線那幾份直接讀舊檔。
+%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來是為了「便宜重繪」
+%%   而做的投資，這條 catalog 的缺口把它抵銷掉了。
+%%   ⚠ 連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key，
+%%   不含 config 指紋——改了 parameters_evaluation.yaml 再 --only-node 重繪，
+%%   會得到新舊兩套設定混在一起的報表，且退出碼 0。
+
+%% 為什麼 render_diagnosis_pages 的 inputs 是虛線
+%%   它宣告了四份診斷產物當 inputs，但函式簽章是 (parameters, *_dag_deps)，
+%%   **刻意不讀值**——結果按檔名 diagnosis/<name>.json 讀。列出它們買到兩件事：
+%%   (1) 執行順序：拓樸排序只看 node.inputs，不宣告的話這個 node in-degree 是 0，
+%%       會被排在診斷之前，讀到上一次的舊 JSON 而且照樣「成功」。
+%%   (2) 切片擴張：JSON 已落地時 --only-node 不重算（便宜重繪就是要這樣），
+%%       全新 model_version 時才自動往上補算。
+
+%% 為什麼診斷抽樣只抽一次
+%%   draw_diagnosis_sample_node 的產出被 compute_metric_ci 與各項診斷共用。
+%%   各自重抽（同 seed）結果會相同，但那是 N 次全量掃描；更重要的是
+%%   「同一份樣本」本身是正確性性質——CI 與診斷講的必須是同一批 query。
+
+%% 四項診斷為什麼長得一模一樣
+%%   它們由 registry（diagnosis.metric.contract.DIAGNOSES）導出，node 函式
+%%   由 make_diagnosis_node 生成。加第五項＝新增一個子套件 ＋ registry 補一行，
+%%   report_builder 零改動。model_capacity 是唯一宣告自己 INPUTS 的那個
+%%   （吃 gain_ledger ＋ item_ability，不吃共用抽樣）。
+
+flowchart TB
+
+  %% ------------------------ 來源 ------------------------
+  subgraph SRC[" 預測來源（二選一）＋ ground truth ＋ 分群 "]
+    direction LR
+    src_ranked[("ranked_predictions<br/><small>預設模式 ・ inference 發布的正式排序</small>")]
+    src_teval[("training_eval_predictions<br/><small>--post-training ・ 沿用 training 當時的 test label</small>")]
+    src_label[("label_table<br/><small>ground truth ・ 缺 row 即視為負例</small>")]
+    src_seg[("segment_sources[*].table<br/><small>預設 ml_recsys.sample_pool ・ left join 補分群欄</small>")]
+  end
+
+  art_gain[["gain_ledger<br/><small>training 落地 ・ optional，可缺席</small>"]]
+  cfg_cat[/"evaluation.product_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
+
+  %% ---------------------- 主鏈：整理 ----------------------
+  n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ left join 補 label<br/>post-training 依 score 重算 rank ・ join segment 欄</small>"]
+  d_eval(["eval_predictions<br/><small>一列 ＝ 一個 (time, entity, item) 候選<br/>5 個消費者・未 cache</small>"])
+
+  %% ---------------------- 指標流 ----------------------
+  n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ dataset_overview ＋（可選）category</small>"]
+  d_metrics(["evaluation_metrics"])
+  n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數</small>"]
+  d_baseline(["baseline_metrics"])
+  n_agg["compute_report_aggregates<br/><small>主報表診斷區的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
+  d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
+
+  %% ---------------------- 診斷流 ----------------------
+  n_sample["draw_diagnosis_sample_node<br/><small>單位＝有正例的 query ・ 只抽一次，下游共用</small>"]
+  d_sample(["diagnosis_sample"])
+  n_ci["compute_metric_ci<br/><small>per-item AP 與 macro 的 cluster bootstrap（cluster ＝ entity）</small>"]
+  d_ci(["evaluation_metric_ci<br/><small>JSON</small>"])
+  n_cs["diagnose_config_shift"]
+  d_cs(["evaluation_config_shift<br/><small>JSON</small>"])
+  n_ia["diagnose_item_ability"]
+  d_ia(["evaluation_item_ability<br/><small>JSON</small>"])
+  n_mc["diagnose_model_capacity"]
+  d_mc(["evaluation_model_capacity<br/><small>JSON</small>"])
+  n_sup["diagnose_suppression"]
+  d_sup(["evaluation_suppression<br/><small>JSON</small>"])
+  n_pages["render_diagnosis_pages<br/><small>按檔名讀 diagnosis/&lt;name&gt;.json ・ 停用的那項就沒有那一頁</small>"]
+  d_pages(["evaluation_diagnosis_pages"])
+
+  %% ---------------------- 匯流與落地 ----------------------
+  n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
+  o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
+  n_persist["persist_eval_predictions<br/><small>函式是 identity；寫入＝catalog save</small>"]
+  o_enriched(["enriched_eval_predictions　★Hive<br/><small>model_version / snap_date ・ 供 --compare-only 重用</small>"])
+
+  %% ---------------------- 比較模式（追加） ----------------------
+  subgraph CMP[" --compare &lt;key&gt; 追加這三個 node（--compare-only 則只跑這三個 ＋ 一個驗證 node） "]
+    n_validate["validate_enriched_eval_predictions_present<br/><small>僅 --compare-only ・ B4：該 snap_date 無 row 就 fail loud</small>"]
+    n_loadb["load_compare_predictions<br/><small>依 compare_sources 載入 Model B ・ 欄位與 item mapping</small>"]
+    d_braw(["compare_predictions_raw"])
+    n_restrict["restrict_to_common<br/><small>取共同 entity 與 item ・ 雙方重新排名<br/>B 沒帶 label 才從 label_table 補</small>"]
+    d_common(["eval_predictions_common<br/>compare_predictions_common<br/>compare_coverage_partial"])
+    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_all_metrics，再組 HTML（算與畫同一個 node）</small>"]
+    o_creport(["evaluation_comparison_report　★ report_comparison.html"])
+  end
+
+  %% ---------------------------- 邊 ------------------------------
+  src_ranked --> n_prep
+  src_teval --> n_prep
+  src_label --> n_prep
+  src_seg -- "dropDuplicates(key_columns) 後 left join" --> n_prep
+  n_prep --> d_eval
+
+  d_eval --> n_metrics
+  cfg_cat --> n_metrics
+  n_metrics --> d_metrics
+  d_eval --> n_baseline
+  src_label -- "近 lookback_months 的歷史窗<br/>（查無資料時靜默退回全表）" --> n_baseline
+  n_baseline --> d_baseline
+  d_eval --> n_agg
+  n_agg --> d_agg
+
+  d_eval --> n_sample
+  n_sample --> d_sample
+  d_sample --> n_ci
+  n_ci --> d_ci
+  d_sample --> n_cs
+  n_cs --> d_cs
+  d_sample --> n_ia
+  n_ia --> d_ia
+  d_sample --> n_sup
+  n_sup --> d_sup
+  art_gain --> n_mc
+  d_ia -- "同一次執行的 item_ability 結果" --> n_mc
+  n_mc --> d_mc
+
+  d_cs -. "只宣告 happens-before<br/>值不被讀，實際按檔名讀" .-> n_pages
+  d_ia -. " " .-> n_pages
+  d_mc -. " " .-> n_pages
+  d_sup -. " " .-> n_pages
+  n_pages --> d_pages
+
+  d_metrics --> n_report
+  d_baseline --> n_report
+  d_ci --> n_report
+  d_agg --> n_report
+  d_pages --> n_report
+  n_report --> o_report
+
+  d_eval --> n_persist
+  n_persist --> o_enriched
+
+  d_eval --> n_restrict
+  o_enriched -- "--compare-only：catalog 依 model_version 讀回" --> n_validate
+  n_validate --> n_restrict
+  n_loadb --> d_braw
+  d_braw --> n_restrict
+  src_label --> n_restrict
+  n_restrict --> d_common
+  d_common --> n_creport
+  n_creport --> o_creport
+
+  %% ---------------------------- 樣式 -------------------------------
+  classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b
+  classDef cfg fill:#e5dbff,stroke:#7048e8,stroke-width:1.5px,color:#3b2a7a
+  classDef art fill:#c3fae8,stroke:#0ca678,stroke-width:1.5px,color:#0b4f3f
+  classDef nd fill:#ffffff,stroke:#57606a,stroke-width:1.5px,color:#1f2328
+  classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
+  classDef mem fill:#ffffff,stroke:#adb5bd,stroke-width:1px,stroke-dasharray:5 3,color:#6a737d
+  classDef out fill:#b2f2bb,stroke:#2f9e44,stroke-width:1.5px,color:#14532d
+
+  class src_ranked,src_teval,src_label,src_seg src
+  class cfg_cat cfg
+  class art_gain art
+  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_report,n_persist,n_validate,n_loadb,n_restrict,n_creport nd
+  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg data
+  class d_eval,d_metrics,d_baseline,d_sample,d_pages,d_braw,d_common mem
+  class o_report,o_enriched,o_creport out
