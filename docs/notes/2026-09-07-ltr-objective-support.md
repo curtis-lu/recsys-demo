@@ -516,4 +516,5 @@ for name, (Xe, ye, ge, we) in sets.items():
 - [`2026-09-06-dataset-pipeline-profiling.md`](2026-09-06-dataset-pipeline-profiling.md) §2.3 — 被本輪更正的那段
 - [`2026-09-07-training-pipeline-profiling.md`](2026-09-07-training-pipeline-profiling.md) — 「98% 的時間在 `lgb.train`」的出處
 - [`../operations/user-guides/sampling-overrides-editor.md`](../operations/user-guides/sampling-overrides-editor.md) §3.6 — weight 面在 LTR 下的適用範圍
+- [`2026-09-08-lambdarank-weight-scale-anomaly.md`](2026-09-08-lambdarank-weight-scale-anomaly.md) — **未結案**：權重整體縮放會改變 lambdarank 的模型，代數說不該如此
 - `conf/base/parameters_training.yaml` 的 LTR 說明區塊 — 操作面的摘要
