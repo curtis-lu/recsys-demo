@@ -751,6 +751,15 @@ def tune_hyperparameters(
     scorer = TrialScorer(
         train_lgb_handle=train_lgb_handle,
         train_dev_lgb_handle=train_dev_lgb_handle,
+        # Resolved here, once, against the rows each .bin actually holds. The
+        # binaries carry no weights — their cache path says nothing about
+        # `training.sample_weights`, so a baked vector would outlive the config
+        # that produced it (#318) — and the resolution is the same for every
+        # trial, so it does not belong inside the search loop.
+        train_weights=train_lgb_handle.sample_weights(
+            parameters, preprocessor_metadata),
+        train_dev_weights=train_dev_lgb_handle.sample_weights(
+            parameters, preprocessor_metadata),
         X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
         algorithm=algorithm,
         algorithm_params=algorithm_params,

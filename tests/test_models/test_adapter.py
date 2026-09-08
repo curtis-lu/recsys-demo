@@ -826,7 +826,10 @@ class TestZeroPositiveGroupFilter:
             ParquetHandle(str(tr)), ParquetHandle(str(dv)),
             _ranking_prep_meta(), params, str(cache),
         )
-        w_tr = _bin_groups(train_h.bin_path).get_weight()
+        # Read off the handle, not the .bin: since #318 the binary carries no
+        # weights and the key columns beside it are what the filter had to
+        # keep aligned. Same question, same failure mode.
+        w_tr = train_h.sample_weights(params, _ranking_prep_meta())
         # 4 surviving rows: c1/c2's fund row weighted 5.0, their ccard row 1.0.
         # 7.0 appears nowhere -- every row carrying it was in a dropped group.
         assert sorted(np.round(w_tr, 3).tolist()) == [1.0, 1.0, 5.0, 5.0]
@@ -961,14 +964,67 @@ def _weight_frames():
     return df_tr, df_dev
 
 
-def _weight_params(objective):
+def _interleaved_weight_frames():
+    """Query groups whose rows are *not* contiguous in the parquet.
+
+    ``_weight_frames`` writes each customer's two rows side by side, so
+    ``to_contiguous_groups`` returns the identity permutation and a sidecar
+    left unpermuted would still look right. Here the three customers are
+    interleaved, so the permutation genuinely reorders rows and a
+    weight-to-row misalignment shows up as different numbers rather than as
+    nothing at all.
+
+    Rows are (cust, prod): c1/a c2/a c3/a c1/b c2/b c3/b. Group ids by first
+    appearance are [0,1,2,0,1,2], so the permutation is [0,3,1,4,2,5] and the
+    binary's rows are c1/a c1/b c2/a c2/b c3/a c3/b — prod_name alternating
+    a,b,a,b,a,b where the parquet had a,a,a,b,b,b.
+    """
+    import pandas as pd
+    df_tr = pd.DataFrame({
+        "cust_id": ["c1", "c2", "c3", "c1", "c2", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["a", "a", "a", "b", "b", "b"],
+        "cust_segment_typ": ["mass"] * 6,
+        "feat_a": [1.0, 3.0, 5.0, 2.0, 4.0, 6.0],
+        # Per customer exactly one positive, so every group survives the
+        # zero-positive filter and this fixture isolates the permutation.
+        "label": [1, 0, 1, 0, 1, 0],
+    })
+    df_dev = pd.DataFrame({
+        "cust_id": ["c4", "c5", "c4", "c5"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 4),
+        "prod_name": ["a", "a", "b", "b"],
+        "cust_segment_typ": ["mass"] * 4,
+        "feat_a": [1.5, 3.5, 2.5, 4.5],
+        "label": [0, 1, 1, 0],
+    })
+    return df_tr, df_dev
+
+
+def _weight_params(objective, sample_weights=None, weight_keys=None):
+    """Parameters whose ``sample_weights`` table can actually match a row.
+
+    ``sample_weight_keys`` has to be spelled out: it defaults to
+    ``[schema.item]`` alone, and a two-part config key like ``"mass|a"`` then
+    matches nothing — every row stays at weight 1.0, LightGBM stores no weight
+    vector at all, and a test asserting on weights fails for a reason that has
+    nothing to do with what it is testing. That is exactly how the two tests
+    this file used to carry were red on main (known-pitfalls.md §5).
+    """
     return {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"],
             "item": "prod_name", "label": "label"}},
         "training": {
             "algorithm_params": {"objective": objective},
-            "sample_weights": {"mass|a": 3.0}},
+            "sample_weight_keys": (
+                ["cust_segment_typ", "prod_name"] if weight_keys is None
+                else weight_keys
+            ),
+            "sample_weights": (
+                {"mass|a": 3.0} if sample_weights is None else sample_weights
+            ),
+        },
     }
 
 
@@ -1122,6 +1178,16 @@ def test_feature_selection_subpath_nests_under_each_objective(tmp_path):
 
 
 class TestPrepareTrainInputsWeight:
+    """Where sample weights live, and what keeps them answering today's config.
+
+    They used to be baked into the ``.bin``. The cache path is
+    base/train_variant/objective and mentions ``training.sample_weights``
+    nowhere, so a changed weight table hit the same directory and trained on
+    the previous run's weights with nothing raised (#318). What the binary
+    carries now is nothing; what sits beside it is the *key columns*, and each
+    run resolves its own table against them.
+    """
+
     def _prep(self):
         return {
             "feature_columns": ["feat_a", "prod_name"],
@@ -1129,36 +1195,205 @@ class TestPrepareTrainInputsWeight:
             "category_mappings": {"prod_name": ["a", "b"]},
         }
 
-    def test_binary_branch_bakes_weight_into_binary(self, tmp_path):
-        import lightgbm as lgb
-        import numpy as np
+    def _build(self, tmp_path, objective, params=None, frames=None):
+        """Build the cache once; return (train_handle, dev_handle, lgb_dir)."""
         from recsys_tfb.io.handles import ParquetHandle
-        df_tr, df_dev = _weight_frames()
+        df_tr, df_dev = frames or _weight_frames()
         tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
         _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
         cache = tmp_path / "variant"
-        LightGBMAdapter().prepare_train_inputs(
+        handles = LightGBMAdapter().prepare_train_inputs(
             ParquetHandle(str(tr)), ParquetHandle(str(dv)),
-            self._prep(), _weight_params("binary"), str(cache))
-        ds = lgb.Dataset(str(cache / "lgb" / "binary" / "train.bin")).construct()
-        w = ds.get_weight()
-        assert w is not None
-        assert sorted(set(np.round(w, 3))) == [1.0, 3.0]
+            self._prep(), params or _weight_params(objective), str(cache))
+        return handles[0], handles[1], cache / "lgb" / objective
 
-    def test_ranking_branch_bakes_weight_aligned_with_perm(self, tmp_path):
+    @pytest.mark.parametrize(
+        "objective", ["binary", "lambdarank", "rank_xendcg"])
+    def test_bin_carries_no_weight(self, tmp_path, objective):
+        """The whole point: nothing weight-shaped is frozen into the binary.
+
+        ``get_weight()`` is ``None`` for an unweighted Dataset, so this is the
+        direct read of "the .bin cannot carry a stale weight table".
+        """
+        import lightgbm as lgb
+        self._build(tmp_path, objective)
+        for name in ("train.bin", "train_dev.bin"):
+            ds = lgb.Dataset(
+                str(tmp_path / "variant" / "lgb" / objective / name)
+            ).construct()
+            assert ds.get_weight() is None
+
+    @pytest.mark.parametrize(
+        "objective", ["binary", "lambdarank", "rank_xendcg"])
+    def test_resolved_weights_match_the_configured_table(
+        self, tmp_path, objective
+    ):
+        """Same numbers the old baked-in vector held, resolved on read."""
+        import numpy as np
+        train_h, dev_h, _ = self._build(tmp_path, objective)
+        params = _weight_params(objective)
+        for handle, n_rows in ((train_h, 6), (dev_h, 4)):
+            w = handle.sample_weights(params, self._prep())
+            assert len(w) == n_rows
+            assert sorted(set(np.round(w, 3))) == [1.0, 3.0]
+
+    def test_sidecar_rows_follow_the_binary_permutation(self, tmp_path):
+        """Weights must be in the *binary's* row order, not the parquet's.
+
+        The fixture interleaves query groups, so the ranking branch permutes
+        rows into contiguous blocks: prod_name goes from a,a,a,b,b,b in the
+        parquet to a,b,a,b,a,b in the binary, and the weights with it. A
+        sidecar written before the permutation would give [3,3,3,1,1,1] —
+        every weight on the wrong row, and no error anywhere.
+        """
         import lightgbm as lgb
         import numpy as np
-        from recsys_tfb.io.handles import ParquetHandle
-        df_tr, df_dev = _weight_frames()
-        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
-        _write_model_input(df_tr, tr); _write_model_input(df_dev, dv)
-        cache = tmp_path / "variant"
+        train_h, _, lgb_dir = self._build(
+            tmp_path, "lambdarank", frames=_interleaved_weight_frames())
+
+        ds = lgb.Dataset(str(lgb_dir / "train.bin")).construct()
+        # Labels prove the permutation actually happened: the parquet's
+        # 1,0,1,0,1,0 becomes 1,0,0,1,1,0 once grouped by customer.
+        assert list(ds.get_label()) == [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
+
+        w = train_h.sample_weights(_weight_params("lambdarank"), self._prep())
+        assert list(np.round(w, 3)) == [3.0, 1.0, 3.0, 1.0, 3.0, 1.0]
+
+    def test_sidecar_rows_follow_the_zero_positive_filter(self, tmp_path):
+        """Dropped query groups take their weight-key rows with them.
+
+        lambdarank strips groups holding no positive (#315). The sidecar is
+        cut by the same mask in the same place; a sidecar left at full length
+        would silently shift every weight by however many rows were dropped
+        ahead of it.
+        """
+        import numpy as np
+        import pandas as pd
+        # c1 has no positive at all -> its two rows are dropped; the surviving
+        # rows are c2/a c2/b c3/a c3/b -> weights 3,1,3,1.
+        df_tr = pd.DataFrame({
+            "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+            "prod_name": ["a", "b"] * 3,
+            "cust_segment_typ": ["mass"] * 6,
+            "feat_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "label": [0, 0, 1, 0, 0, 1],
+        })
+        _, df_dev = _weight_frames()
+        train_h, _, _ = self._build(
+            tmp_path, "lambdarank", frames=(df_tr, df_dev))
+
+        assert train_h.group_filter_counts()["train"]["rows_dropped"] == 2
+        w = train_h.sample_weights(_weight_params("lambdarank"), self._prep())
+        assert list(np.round(w, 3)) == [3.0, 1.0, 3.0, 1.0]
+
+    def test_empty_sample_weights_resolves_to_all_ones(self, tmp_path):
+        """No table configured is the pre-existing behaviour, unchanged."""
+        import numpy as np
+        params = _weight_params("binary", sample_weights={})
+        train_h, _, _ = self._build(tmp_path, "binary", params=params)
+        w = train_h.sample_weights(params, self._prep())
+        assert np.array_equal(w, np.ones(6))
+
+    @pytest.mark.parametrize(
+        "objective", ["binary", "lambdarank", "rank_xendcg"])
+    def test_changed_weight_table_reuses_the_binary(self, tmp_path, objective):
+        """A new weight table costs a resolve, not a rebinning.
+
+        The bug this replaces was the same cache hit answering with stale
+        weights. Keeping the hit *and* getting fresh weights is the whole
+        reason the keys are cached rather than the vector — so both halves are
+        asserted here: same file, different numbers.
+        """
+        import numpy as np
+        train_h, _, lgb_dir = self._build(tmp_path, objective)
+        before = (lgb_dir / "train.bin").stat().st_mtime_ns
+
+        heavier = _weight_params(objective, sample_weights={"mass|a": 7.0})
+        train_h2, _, _ = self._build(tmp_path, objective, params=heavier)
+
+        assert (lgb_dir / "train.bin").stat().st_mtime_ns == before
+        w = train_h2.sample_weights(heavier, self._prep())
+        assert sorted(set(np.round(w, 3))) == [1.0, 7.0]
+
+    def test_missing_sidecar_forces_rebuild(self, tmp_path):
+        """A pre-#318 cache dir has weights inside the .bin and no way to say so.
+
+        Serving it trains on whichever weights that run was configured with.
+        The sidecar's absence is the only evidence available, so it is what
+        triggers the rebuild.
+        """
+        from pathlib import Path
+        from recsys_tfb.io.handles import ParquetHandle, weight_keys_sidecar
+        train_h, _, lgb_dir = self._build(tmp_path, "binary")
+        Path(weight_keys_sidecar(str(lgb_dir / "train.bin"))).unlink()
+        before = (lgb_dir / "train.bin").stat().st_mtime_ns
+
         LightGBMAdapter().prepare_train_inputs(
-            ParquetHandle(str(tr)), ParquetHandle(str(dv)),
-            self._prep(), _weight_params("lambdarank"), str(cache))
-        ds = lgb.Dataset(
-            str(cache / "lgb" / "lambdarank" / "train.bin")
-        ).construct()
-        w = ds.get_weight()
-        assert w is not None
-        assert sorted(set(np.round(w, 3))) == [1.0, 3.0]
+            ParquetHandle(str(tmp_path / "tr.parquet")),
+            ParquetHandle(str(tmp_path / "dv.parquet")),
+            self._prep(), _weight_params("binary"), str(tmp_path / "variant"))
+
+        assert (lgb_dir / "train.bin").stat().st_mtime_ns != before
+        assert Path(weight_keys_sidecar(str(lgb_dir / "train.bin"))).exists()
+
+    def test_changed_weight_keys_forces_rebuild(self, tmp_path):
+        """Different key *columns* cannot be answered from the cached ones.
+
+        The resolver's "weight-key column absent" backstop returns all-ones
+        gracefully, which here would mean a whole search trained unweighted
+        and reported under a model_version that says otherwise.
+        """
+        import numpy as np
+        train_h, _, lgb_dir = self._build(tmp_path, "binary")
+        before = (lgb_dir / "train.bin").stat().st_mtime_ns
+
+        by_item = _weight_params(
+            "binary", sample_weights={"a": 5.0}, weight_keys=["prod_name"])
+        train_h2, _, _ = self._build(tmp_path, "binary", params=by_item)
+
+        assert (lgb_dir / "train.bin").stat().st_mtime_ns != before
+        w = train_h2.sample_weights(by_item, self._prep())
+        assert sorted(set(np.round(w, 3))) == [1.0, 5.0]
+
+    @pytest.mark.parametrize(
+        "objective", ["binary", "lambdarank", "rank_xendcg"])
+    def test_weight_keys_absent_from_model_input_stay_all_ones(
+        self, tmp_path, objective
+    ):
+        """A weight-key column the parquet does not have degrades gracefully.
+
+        This is a real config: production ``feature_table`` carries
+        ``cust_segment_typ`` and the synthetic one does not, and A9a validates
+        the config's *declarations*, not the parquet. Before the weights moved
+        out of the .bin this path returned all-ones with an INACTIVE log line,
+        and it still has to.
+
+        The trap it guards is that the sidecar then has **no columns**, and a
+        column-less parquet cannot carry a row count — pyarrow writes
+        ``num_rows=0``. A length-zero weight vector is not merely wrong, it is
+        *invisible*: ``set_weight`` maps any all-ones array to ``None`` and a
+        length-zero array is vacuously all-ones, so LightGBM's own length check
+        never runs and the search trains unweighted.
+        """
+        import numpy as np
+        absent = _weight_params(
+            objective, sample_weights={"vip": 9.0}, weight_keys=["no_such_col"])
+        train_h, dev_h, _ = self._build(tmp_path, objective, params=absent)
+        for handle, n_rows in ((train_h, 6), (dev_h, 4)):
+            w = handle.sample_weights(absent, self._prep())
+            assert np.array_equal(w, np.ones(n_rows))
+
+    def test_sample_weights_without_a_sidecar_raises(self, tmp_path):
+        """Never all-ones by accident.
+
+        A handle whose sidecar is gone cannot be re-weighted, and all-ones is
+        a plausible-looking answer that would train the whole search before
+        anyone noticed.
+        """
+        from pathlib import Path
+        from recsys_tfb.io.handles import weight_keys_sidecar
+        train_h, _, lgb_dir = self._build(tmp_path, "binary")
+        Path(weight_keys_sidecar(str(lgb_dir / "train.bin"))).unlink()
+        with pytest.raises(FileNotFoundError, match="sample-weight key sidecar"):
+            train_h.sample_weights(_weight_params("binary"), self._prep())

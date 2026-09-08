@@ -11,8 +11,11 @@ import numpy as np
 
 from recsys_tfb.io.handles import (
     GROUP_FILTER_COUNTS_NAME,
+    WEIGHT_KEYS_META,
+    WEIGHT_ROWS_META,
     LgbDatasetHandle,
     ParquetHandle,
+    weight_keys_sidecar,
 )
 from recsys_tfb.models.base import ADAPTER_REGISTRY, ModelAdapter
 
@@ -48,6 +51,77 @@ def _feature_selection_subpath(parameters: dict, feature_columns: list[str]) -> 
 
     digest = hashlib.sha256("\n".join(feature_columns).encode()).hexdigest()[:8]
     return f"fs_{digest}"
+
+
+def _write_weight_keys(frame, bin_path: Path, weight_keys: list[str]) -> None:
+    """Persist one split's sample-weight key columns beside its ``.bin``.
+
+    In the binary's own row order, so a later run resolves *its*
+    ``training.sample_weights`` against exactly the rows that binary holds —
+    the zero-positive filter and the group permutation are already baked into
+    the order handed in here, and nothing re-derives them on the read side.
+
+    Written even when no weight table is configured and even when the frame
+    has no columns at all: presence is what tells ``prepare_train_inputs``
+    that a cached directory was built by a version that keeps weights *out*
+    of the ``.bin``. A build that skipped the file whenever weights happened
+    to be inactive would make the marker mean "no weights were configured
+    that time", which is unknowable later and would send every unweighted
+    cache through a needless rebuild.
+
+    The row count is recorded separately from the data because a frame with
+    no columns — every configured key column missing from this model_input —
+    writes as ``num_rows=0`` and reads back empty. See
+    :data:`~recsys_tfb.io.handles.WEIGHT_ROWS_META` for what that costs.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    table = table.replace_schema_metadata({
+        **(table.schema.metadata or {}),
+        WEIGHT_KEYS_META: json.dumps(list(weight_keys)).encode(),
+        WEIGHT_ROWS_META: json.dumps(len(frame)).encode(),
+    })
+    pq.write_table(table, weight_keys_sidecar(str(bin_path)))
+
+
+def _weight_keys_cache_gap(lgb_dir: Path, parameters: dict) -> str | None:
+    """Why this cached directory cannot answer today's weight config, or ``None``.
+
+    Two ways a hit would be wrong, and neither raises on its own:
+
+    - **No sidecar.** The directory was written before weights moved out of
+      the ``.bin`` (#318), so its binaries carry whichever weights that run
+      was configured with. They cannot be re-weighted and there is nothing
+      on disk to say what they hold.
+    - **Different key columns.** ``training.sample_weight_keys`` changed, so
+      the cached columns do not spell today's lookup key. The resolver's
+      "weight-key column absent" backstop would quietly return all-ones —
+      a whole search trained unweighted, reported as if weighted.
+
+    A changed weight *table* is not a gap: same keys, new values, resolved
+    fresh on every read. That is the entire point of caching the keys.
+    """
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.io.extract import weight_key_columns
+
+    wanted = list(weight_key_columns(parameters))
+    for name in ("train.bin", "train_dev.bin"):
+        sidecar = Path(weight_keys_sidecar(str(lgb_dir / name)))
+        if not sidecar.exists():
+            return f"no weight-key sidecar for {name}"
+        meta = (pq.read_schema(sidecar).metadata or {}).get(WEIGHT_KEYS_META)
+        if meta is None:
+            return f"{name} sidecar records no weight-key list"
+        built_for = json.loads(meta)
+        if built_for != wanted:
+            return (
+                f"{name} sidecar was built for weight keys {built_for}, "
+                f"config asks for {wanted}"
+            )
+    return None
 
 
 def _log_group_filter(split: str, counts: dict) -> None:
@@ -188,6 +262,17 @@ class LightGBMAdapter(ModelAdapter):
         directory without it is rebuilt rather than served. Which objectives
         filter, and why it is derived rather than configured:
         ``core.group_utils.objective_drops_zero_positive_groups``.
+
+        **The .bin carries no sample weights.** ``training.sample_weights``
+        feeds ``model_version`` and nothing in this cache path, so a weight
+        vector inside the binary would be served unchanged to a run configured
+        with different weights (#318). Written beside each .bin instead is a
+        ``*.weight_keys.parquet`` sidecar holding that binary's rows' weight-key
+        columns, in the binary's own row order; the trial loop resolves today's
+        table against it and ``set_weight``s the result
+        (:meth:`LgbDatasetHandle.sample_weights`). A cached directory whose
+        sidecar is missing, or was built for different
+        ``training.sample_weight_keys``, is rebuilt rather than served.
         """
         # Lazy import: see module-top comment about circular-import chain.
         # core/__init__ pulls core.catalog -> io.model_adapter_dataset, which
@@ -240,27 +325,47 @@ class LightGBMAdapter(ModelAdapter):
         train_bin = lgb_dir / "train.bin"
         dev_bin = lgb_dir / "train_dev.bin"
 
-        stale = (
-            success.exists()
-            and filter_zero_positive
-            and not (lgb_dir / GROUP_FILTER_COUNTS_NAME).exists()
-        )
-        if stale:
+        # Two ways a binary can sit at exactly the path today's run wants and
+        # still be the wrong thing to serve. Both are silent if served, and
+        # neither is visible from the path — the lgb cache is keyed by
+        # base/train_variant/objective and not by model_version, so nothing
+        # else in the run would notice.
+        stale = False
+        if success.exists() and filter_zero_positive and not (
+            lgb_dir / GROUP_FILTER_COUNTS_NAME
+        ).exists():
             # A .bin from before the zero-positive filter existed (#315).
             # #314 already gave lambdarank its own segment, so this sits at
             # exactly the path today's run wants, carrying every row. Nothing
-            # else would catch it: the lgb cache is not keyed by
-            # model_version, and the one place the row count is reported reads
-            # this very directory. Serving it would put HPO on the full matrix
-            # while finalize_model's refit branch — which re-reads the parquet
-            # — trains on the filtered one, under one set of hyperparameters
-            # and with nothing raised. Rebuild instead.
+            # else would catch it: the one place the row count is reported
+            # reads this very directory. Serving it would put HPO on the full
+            # matrix while finalize_model's refit branch — which re-reads the
+            # parquet — trains on the filtered one, under one set of
+            # hyperparameters and with nothing raised. Rebuild instead.
             logger.warning(
                 "lgb binary at %s predates the zero-positive group filter "
                 "(no %s); it holds every row, which is not what "
                 "objective=%s trains on. Rebuilding.",
                 lgb_dir, GROUP_FILTER_COUNTS_NAME, objective,
             )
+            stale = True
+
+        weight_gap = (
+            _weight_keys_cache_gap(lgb_dir, parameters)
+            if success.exists() else None
+        )
+        if weight_gap:
+            # The rows are fine; what is missing is the material to re-weight
+            # them, and every weight-shaped alternative is silent. Serving a
+            # pre-#318 binary trains on whatever weights *that* run was
+            # configured with; falling back to all-ones trains unweighted.
+            # Either way it is reported under today's model_version, which is
+            # keyed by sample_weights and so claims the opposite.
+            logger.warning(
+                "lgb binary at %s cannot serve this run's sample weights (%s); "
+                "rebuilding.", lgb_dir, weight_gap,
+            )
+            stale = True
 
         if success.exists() and not stale:
             logger.info("lgb binary cache hit at %s", lgb_dir)
@@ -291,6 +396,17 @@ class LightGBMAdapter(ModelAdapter):
         # independent.
         feat_names = list(preprocessor_metadata["feature_columns"])
 
+        # Lazy import: see module-top comment about circular-import chain.
+        from recsys_tfb.io.extract import weight_key_columns
+
+        # Sample weights are deliberately NOT baked into the .bin: the cache
+        # path does not mention training.sample_weights, so a baked vector
+        # would be served to a later run configured with different weights and
+        # nothing would say so (#318). What goes beside the binary is the key
+        # columns the weights are resolved *from*; the trial loop resolves its
+        # own table against them (steps/hpo_scoring.py).
+        weight_keys = weight_key_columns(parameters)
+
         # feature_pre_filter=False at construct time: features with
         # <min_data_in_leaf samples per bin are NOT silently dropped from the
         # binned dataset. The pre-cache training path (numpy → lgb.Dataset built
@@ -307,20 +423,29 @@ class LightGBMAdapter(ModelAdapter):
             # raw arrays, then dev with reference=train. save_binary persists
             # the group into the .bin so the trial/early-stopping loader gets
             # it back for free.
-            X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
+            #
+            # `row_tr` rides through the filter as one more aligned array so
+            # the surviving rows' *original* positions come back, and the
+            # sidecar can be cut to the binary's rows by taking them — one
+            # mask and one permutation, the same two the matrix went through.
+            # A second derivation of "which rows survived, in what order"
+            # would re-assign every weight to another row with nothing raised,
+            # which is the failure drop_zero_positive_groups' varargs
+            # signature exists to prevent.
+            X_tr, y_tr, gid_tr, wk_tr = extract_Xy_with_groups(
                 train_handle, preprocessor_metadata, parameters,
-                with_weights=True,
+                with_weight_keys=True,
             )
+            row_tr = np.arange(len(y_tr))
             if filter_zero_positive:
-                (y_tr, gid_tr, X_tr, w_tr), counts = drop_zero_positive_groups(
-                    y_tr, gid_tr, X_tr, w_tr)
+                (y_tr, gid_tr, X_tr, row_tr), counts = drop_zero_positive_groups(
+                    y_tr, gid_tr, X_tr, row_tr)
                 filter_counts["train"] = counts
                 _log_group_filter("train", counts)
             perm_tr, grp_tr = to_contiguous_groups(gid_tr)
             ds_train = lgb.Dataset(
                 X_tr[perm_tr],
                 label=y_tr[perm_tr],
-                weight=w_tr[perm_tr],
                 group=grp_tr,
                 feature_name=feat_names,
                 categorical_feature=cat_idx,
@@ -329,23 +454,24 @@ class LightGBMAdapter(ModelAdapter):
             ).construct()
             log_data_volume(logger, "prepare.ds_train", ds_train)
             ds_train.save_binary(str(train_bin))
+            _write_weight_keys(wk_tr.take(row_tr[perm_tr]), train_bin, weight_keys)
             log_data_volume(logger, "prepare.train.bin", str(train_bin))
-            del X_tr, y_tr, gid_tr, perm_tr, w_tr
+            del X_tr, y_tr, gid_tr, perm_tr, row_tr, wk_tr
 
-            X_dev, y_dev, gid_dev, w_dev = extract_Xy_with_groups(
+            X_dev, y_dev, gid_dev, wk_dev = extract_Xy_with_groups(
                 train_dev_handle, preprocessor_metadata, parameters,
-                with_weights=True,
+                with_weight_keys=True,
             )
+            row_dev = np.arange(len(y_dev))
             if filter_zero_positive:
-                (y_dev, gid_dev, X_dev, w_dev), counts = (
-                    drop_zero_positive_groups(y_dev, gid_dev, X_dev, w_dev))
+                (y_dev, gid_dev, X_dev, row_dev), counts = (
+                    drop_zero_positive_groups(y_dev, gid_dev, X_dev, row_dev))
                 filter_counts["train_dev"] = counts
                 _log_group_filter("train_dev", counts)
             perm_dev, grp_dev = to_contiguous_groups(gid_dev)
             ds_dev = lgb.Dataset(
                 X_dev[perm_dev],
                 label=y_dev[perm_dev],
-                weight=w_dev[perm_dev],
                 group=grp_dev,
                 reference=ds_train,
                 feature_name=feat_names,
@@ -355,22 +481,22 @@ class LightGBMAdapter(ModelAdapter):
             ).construct()
             log_data_volume(logger, "prepare.ds_dev", ds_dev)
             ds_dev.save_binary(str(dev_bin))
+            _write_weight_keys(wk_dev.take(row_dev[perm_dev]), dev_bin, weight_keys)
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
-            del X_dev, y_dev, gid_dev, perm_dev, w_dev, ds_train, ds_dev
+            del X_dev, y_dev, gid_dev, perm_dev, row_dev, wk_dev, ds_train, ds_dev
         else:
             # Lazy import: see module-top comment about circular-import chain.
             from recsys_tfb.io.extract import extract_Xy
 
             # Extract → build → save train, then free raw arrays before dev is
             # read. Keeps ds_train alive (it's small) for dev's reference.
-            X_tr, y_tr, w_tr = extract_Xy(
+            X_tr, y_tr, wk_tr = extract_Xy(
                 train_handle, preprocessor_metadata, parameters,
-                with_weights=True,
+                with_weight_keys=True,
             )
             ds_train = lgb.Dataset(
                 X_tr,
                 label=y_tr,
-                weight=w_tr,
                 feature_name=feat_names,
                 categorical_feature=cat_idx,
                 params=construct_params,
@@ -378,17 +504,19 @@ class LightGBMAdapter(ModelAdapter):
             ).construct()
             log_data_volume(logger, "prepare.ds_train", ds_train)
             ds_train.save_binary(str(train_bin))
+            # No filter and no permutation on this branch, so the rows are
+            # already the binary's rows in the binary's order.
+            _write_weight_keys(wk_tr, train_bin, weight_keys)
             log_data_volume(logger, "prepare.train.bin", str(train_bin))
-            del X_tr, y_tr, w_tr
+            del X_tr, y_tr, wk_tr
 
-            X_dev, y_dev, w_dev = extract_Xy(
+            X_dev, y_dev, wk_dev = extract_Xy(
                 train_dev_handle, preprocessor_metadata, parameters,
-                with_weights=True,
+                with_weight_keys=True,
             )
             ds_dev = lgb.Dataset(
                 X_dev,
                 label=y_dev,
-                weight=w_dev,
                 reference=ds_train,
                 feature_name=feat_names,
                 categorical_feature=cat_idx,
@@ -397,8 +525,9 @@ class LightGBMAdapter(ModelAdapter):
             ).construct()
             log_data_volume(logger, "prepare.ds_dev", ds_dev)
             ds_dev.save_binary(str(dev_bin))
+            _write_weight_keys(wk_dev, dev_bin, weight_keys)
             log_data_volume(logger, "prepare.train_dev.bin", str(dev_bin))
-            del X_dev, y_dev, w_dev, ds_train, ds_dev
+            del X_dev, y_dev, wk_dev, ds_train, ds_dev
 
         if filter_counts:
             # Next to the .bin, and written before _SUCCESS: a rebuild that

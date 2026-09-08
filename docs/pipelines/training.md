@@ -182,6 +182,8 @@ CLI 會檢查：
 
 training 另會產生 `sample_weight_report.json`，列出實際 train 資料中完全沒有命中的 `unmatched_keys`。即使設定通過靜態檢查，拼錯客群值、資料期間沒有該組合或 encoding 不一致仍可能出現在此報告。
 
+**改權重不需要清任何快取。** 權重不存在 LightGBM 的 `.bin` 裡——`.bin` 只裝分箱後的特徵，權重與分箱無關。`prepare_train_inputs` 會在每個 `.bin` 旁寫一份 `train.weight_keys.parquet`（那份 binary 的列的 weight key 欄位，順序與 binary 相同），HPO 每個 trial 載入 `.bin` 之後用**當下的設定**現算權重再套上去。所以改 `sample_weights` 的值只花一次查表，分箱照樣重用；改 `sample_weight_keys`（＝換 key 欄位）則會讓 `.bin` 重建，log 會印出理由。2026-09-09 之前不是這樣，舊行為與症狀見 [`known-pitfalls.md` §17](../operations/known-pitfalls.md)。
+
 ### 3.6 機率校準
 
 ```yaml

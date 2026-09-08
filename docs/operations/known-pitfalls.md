@@ -73,7 +73,9 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 ## 5. main 上既有的測試問題（不是你造成的，勿浪費時間歸因給自己的改動）
 
-- `TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。
+- ~~`TestPrepareTrainInputsWeight` 兩個測試在 main 本來就 failing（非快取 footgun、非 two-stage 造成），待獨立修。~~ **2026-09-09 已修（#318）。** 壞的是 fixture 不是斷言：`_weight_params` 給了 `sample_weights: {"mass|a": 3.0}` 卻沒給 `sample_weight_keys`，於是 key 只由 `schema.item` 一欄組成、config 那個兩段式 key 永遠不中，全部列停在 1.0，而 LightGBM 對全 1.0 的權重根本不存向量——`get_weight()` 回 `None`，兩個測試就掛在 `assert w is not None`。
+
+  **這兩個測試寫的時候是綠的**（`0d2c35d`，2026-05-19：當時 key 是寫死的 `"<segment>|<product>"`，`"mass|a"` 剛好對上），是 `dd2d59b`（2026-05-30，composite-key 泛化）把 key 欄位變成可設定、預設 `[schema.item]` 之後才轉紅，而 fixture 沒跟著動。**形態＝「fixture 凍在舊的世界」**（`test-false-green` skill 第 8 種），只是這裡凍住的是 config 形狀而不是資料 dtype——與 §17 是同一個「字面 key 對不上」的失效模式，一個在生產、一個在測試。修法連同 #318 一起：fixture 補上 `sample_weight_keys`，斷言改讀 handle 而非 `.bin`（權重已不在 `.bin` 裡）。
 - ~~**全量的既有 fail 就是上面那兩個，沒有別的。**~~ **2026-08-31 一度變成 8 個，2026-09-01 修回 3 個**，見下面那條。當時（2026-08-25）的實測：
 
   ```
@@ -335,12 +337,15 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **補救**（若已經 merge 錯版本）：原分支通常還在且尖端仍是新 sha，此時它相對新 main 剛好只剩沒進去的那些 commit ——**直接從同一條分支開新 PR 即可，不需要 cherry-pick**。先用 `git show origin/main:<檔案>` 確認 main 的實際內容，不要憑 PR 頁面判斷。
 - **驗證方式**：`gh api repos/<owner>/<repo>/pulls/<n> --jq '.head.sha, .changed_files'` 對照 `git rev-parse HEAD` 與 `git diff --stat origin/main..HEAD`。三者一致才是真的同步。
 
-## 17. 改了 `sample_weights` 卻毫無效果：lgb `.bin` cache 不因權重失效
+## 17. ~~改了 `sample_weights` 卻毫無效果：lgb `.bin` cache 不因權重失效~~（2026-09-09 已修，#318）
 
-- **症狀（第一分鐘認出它）**：調整 `training.sample_weights` / `sample_weight_keys` 後重跑 training，evaluation 指標**幾乎不變**。log 裡看得到 `lgb binary cache hit`，卻**看不到** `_row_weights_from_pdf`（`src/recsys_tfb/io/extract.py:109`）那行 `sample_weight ACTIVE/INACTIVE` 訊息。
-- **根因**：`.bin` cache 的 key 是 `base_dataset_version / train_variant_id / objective`（2026-09-07 前這一段是較粗的 objective family），**不含 `model_version`**；而 `sample_weights` 只 bust `model_version`。於是改權重之後 `.bin` 仍然 cache hit，舊權重（常是全 1.0）被重用。權重傳輸機制本身是對的（`_row_weights_from_pdf` → `extract_Xy(with_weights=True)` → `lgb.Dataset(weight=...)`），但**只在建 `.bin` 時跑一次**，cache hit 時整段 extract 被跳過。
-- **規則**：改權重後重跑前先 `rm -rf <cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/lgb`。**parquet 不用刪**——權重不在 parquet 裡，是 extract 時即時算的。
-- **先分辨是不是這個坑**：`sample_weight ACTIVE` 有出現卻仍無效，那是別的原因（config 沒讀到、或 key 值對不上，例如整數編碼的欄位配字串 key）；`unmatched_keys` 會列在 `sample_weight_report.json`。只有「沒有這行 log ＋ cache hit」才是本坑。多槽 cache 的正式修法**刻意還沒做**，見 [deliberate-non-goals.md](../agents/deliberate-non-goals.md)。
+**這個坑已經不存在了，`rm -rf …/lgb` 這個動作也不再需要。** 條目留著是因為它的舊規則在 `docs/notes/` 與多份 plan 裡被轉引過，看到那些引用的人得查得到它已經作廢。
+
+- **原本的症狀**：調整 `training.sample_weights` / `sample_weight_keys` 後重跑 training，evaluation 指標**幾乎不變**；log 有 `lgb binary cache hit`，卻沒有 `sample_weight ACTIVE/INACTIVE` 那行。
+- **原本的根因**：`.bin` cache 的 key 是 `base_dataset_version / train_variant_id / objective`（2026-09-07 前這一段是較粗的 objective family），**不含 `model_version`**；而 `sample_weights` 只 bust `model_version`。權重是在建 `.bin` 時傳給 `lgb.Dataset(weight=...)` 並被 `save_binary` 一起烤進去的，所以 cache hit 就等於沿用舊權重。
+- **現在怎麼運作**：`.bin` **不再帶權重**（`lgb.Dataset(bin).get_weight()` 是 `None`）。`prepare_train_inputs` 改為在每個 `.bin` 旁寫一份 `train.weight_keys.parquet` sidecar，內容是那份 binary 的列的**權重 key 欄位**、順序與 binary 相同；HPO 每個 trial 載入 `.bin` 之後用當下的 config 現算權重再 `set_weight`。改權重因此**不必重建 `.bin`**——分箱照樣重用，只有查表重算。
+- **還會強制重建的兩種情況**（都會在 log 印出理由）：sidecar 不存在（＝pre-#318 的舊 cache，裡面的權重是烤死的、無法重新加權），或 sidecar 當初建立時的 `sample_weight_keys` 與現在的 config 不同。
+- **仍然有效的那一半**：`sample_weight ACTIVE` 有出現卻仍無效，那是別的原因（config 沒讀到、或 key 值對不上，例如整數編碼的欄位配字串 key）；`unmatched_keys` 會列在 `sample_weight_report.json`。這條路徑沒有改變。
 
 ## 18. 報表的 AP@k 分母是 R，不是 min(k, R)——所以 `map@1` 恆等於 `recall@1`
 

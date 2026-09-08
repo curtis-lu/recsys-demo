@@ -463,7 +463,7 @@ def _row_weights_from_pdf(
     """
     training = parameters.get("training", {}) or {}
     sw = training.get("sample_weights") or {}
-    weight_keys = _weight_key_columns(parameters)
+    weight_keys = weight_key_columns(parameters)
     n_rows = len(pdf)
 
     missing = [k for k in weight_keys if k not in pdf.columns]
@@ -743,7 +743,7 @@ def matrix_dtype_checked_against_parquet(
     return np.dtype(declared)
 
 
-def _weight_key_columns(parameters: dict) -> list[str]:
+def weight_key_columns(parameters: dict) -> list[str]:
     """The configured sample-weight key columns, defaulting to ``schema.item``.
 
     One definition so the streaming read knows which columns to keep and
@@ -751,6 +751,66 @@ def _weight_key_columns(parameters: dict) -> list[str]:
     """
     training = parameters.get("training", {}) or {}
     return training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
+
+
+def _reject_both_weight_flags(with_weights: bool, with_weight_keys: bool) -> None:
+    """Both weight flags at once is a caller that has not decided. Raise.
+
+    Returning both would be harmless arithmetic and exactly the wrong shape to
+    offer: the vector is only correct for the config that resolved it, and the
+    keys exist so a *later* config can resolve its own. A caller that takes
+    both has one of them stale the moment it is written to disk, and nothing
+    downstream can tell which.
+    """
+    if with_weights and with_weight_keys:
+        raise ValueError(
+            "with_weights and with_weight_keys are mutually exclusive: ask for "
+            "the resolved vector (training now) or the key columns it is "
+            "resolved from (caching rows for a later run), not both"
+        )
+
+
+def weight_keys_for_cache(pdf: "pd.DataFrame", parameters: dict) -> "pd.DataFrame":
+    """The configured weight-key columns of ``pdf``, as their own frame.
+
+    What :func:`_row_weights_from_pdf` reads and nothing else, so it is also
+    the whole of what has to be cached for a later run to resolve *its*
+    ``training.sample_weights`` against these rows. Columns the parquet does
+    not carry are simply absent — the resolver's own "weight-key column absent"
+    backstop already covers that, and inventing an empty column here would
+    turn a legible INACTIVE log line into a silent all-ones match.
+
+    **The index is carried deliberately.** When *every* configured key column
+    is absent the result has no columns, and its only remaining content is its
+    length — which is what the backstop needs to return an all-ones vector of
+    the right size. ``_narrow_frame`` on an empty column list would build a
+    ``(0, 0)`` frame and lose it.
+
+    Named for what it is *for*, not for what it holds, to keep it apart from
+    the private :func:`_weight_key_frame` above — same module, similar
+    contents, unrelated question (that one declines with ``None`` when the
+    dedup path would not be provably exact).
+    """
+    keys = [k for k in weight_key_columns(parameters) if k in pdf.columns]
+    if not keys:
+        return pd.DataFrame(index=pdf.index)
+    return _narrow_frame(pdf, keys)
+
+
+def resolve_sample_weights(
+    pdf: "pd.DataFrame", parameters: dict, preprocessor_metadata: dict,
+) -> np.ndarray:
+    """Per-row weights for rows described by ``pdf``'s weight-key columns.
+
+    The public read side of the weight-key frame :func:`weight_keys_for_cache`
+    produces: hand back a frame those columns were cached into and this
+    resolves today's ``training.sample_weights`` against it. Deliberately the
+    same function the extract path uses (``_row_weights_from_pdf``) rather
+    than a second implementation — a drift between "the weights training used"
+    and "the weights the report describes" is the failure ``steps/
+    sample_weights.py`` already documents from the other side.
+    """
+    return _row_weights_from_pdf(pdf, parameters, preprocessor_metadata)
 
 
 def _stream_matrix(
@@ -948,11 +1008,22 @@ def extract_Xy(
     parameters: dict,
     *,
     with_weights: bool = False,
+    with_weight_keys: bool = False,
 ) -> tuple:
     """Read the parquet at ``handle.path`` and return (X, y) as numpy arrays.
 
     Categorical identity columns (e.g. prod_name) are int-coded via the
     preprocessor's ``category_mappings``.
+
+    ``with_weights`` returns the resolved per-row weight vector;
+    ``with_weight_keys`` returns instead the *columns that vector is resolved
+    from*, as a DataFrame aligned 1:1 with the rows of X. The two are not
+    interchangeable and the choice says where the weight decision happens: a
+    caller that trains right now wants the vector, while a caller that is
+    **caching rows for a later run** wants the keys, because the vector would
+    freeze today's ``training.sample_weights`` into an artifact whose path
+    does not mention them (#318). Asking for both is a caller that has not
+    decided which it is, and raises.
 
     The read is streamed into a pre-allocated matrix — see :func:`_stream_matrix`
     for why, and for what the ``read_parquet`` sub-step now covers. Two INFO
@@ -960,6 +1031,7 @@ def extract_Xy(
     matrix's own dtype / batch size / footprint, so a driver that dies on the
     allocation still says in the log what it was trying to allocate.
     """
+    _reject_both_weight_flags(with_weights, with_weight_keys)
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
     label_col = schema["label"]
@@ -977,8 +1049,8 @@ def extract_Xy(
     _assert_feature_dtypes_numeric(handle, preprocessor_metadata, parameters)
 
     aux_cols = [label_col]
-    if with_weights:
-        aux_cols += _weight_key_columns(parameters)
+    if with_weights or with_weight_keys:
+        aux_cols += weight_key_columns(parameters)
 
     X, aux = _stream_matrix(
         handle, preprocessor_metadata, parameters, aux_cols, "extract_Xy",
@@ -992,6 +1064,8 @@ def extract_Xy(
         w = _row_weights_from_pdf(aux, parameters, preprocessor_metadata)
         log_data_volume(logger, "extract_Xy.w", w)
         return X, y, w
+    if with_weight_keys:
+        return X, y, weight_keys_for_cache(aux, parameters)
     return X, y
 
 
@@ -1001,6 +1075,7 @@ def extract_Xy_with_groups(
     parameters: dict,
     *,
     with_weights: bool = False,
+    with_weight_keys: bool = False,
     with_items: bool = False,
     on_disk_label: str | None = None,
 ) -> tuple:
@@ -1023,7 +1098,11 @@ def extract_Xy_with_groups(
     the refit and the calibration read each hold theirs for a single fit and
     are left alone, which is also why :func:`extract_Xy` has no such
     parameter — none of its callers would pass it.
+
+    ``with_weights`` vs ``with_weight_keys``: see :func:`extract_Xy`. Same two
+    meanings, same mutual exclusion.
     """
+    _reject_both_weight_flags(with_weights, with_weight_keys)
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
     label_col = schema["label"]
@@ -1043,8 +1122,8 @@ def extract_Xy_with_groups(
     _assert_feature_dtypes_numeric(handle, preprocessor_metadata, parameters)
 
     aux_cols = [label_col] + group_cols
-    if with_weights:
-        aux_cols += _weight_key_columns(parameters)
+    if with_weights or with_weight_keys:
+        aux_cols += weight_key_columns(parameters)
     if with_items:
         aux_cols.append(item_col)
 
@@ -1068,6 +1147,8 @@ def extract_Xy_with_groups(
         w = _row_weights_from_pdf(aux, parameters, preprocessor_metadata)
         log_data_volume(logger, "extract_Xy_with_groups.w", w)
         result.append(w)
+    if with_weight_keys:
+        result.append(weight_keys_for_cache(aux, parameters))
     if with_items:
         items = aux[item_col].to_numpy()
         log_data_volume(logger, "extract_Xy_with_groups.items", items)

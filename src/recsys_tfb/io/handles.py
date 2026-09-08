@@ -137,6 +137,55 @@ def open_parquet_dataset(paths: Union[str, list[str]]):
 #: both plain dicts, would swap silently.
 GROUP_FILTER_COUNTS_NAME = "group_filter_counts.json"
 
+#: Sidecar written beside each ``.bin`` by
+#: ``LightGBMAdapter.prepare_train_inputs``, holding that binary's rows'
+#: **sample-weight key columns** in the binary's own row order —
+#: ``train.bin`` -> ``train.weight_keys.parquet``.
+#:
+#: Why the keys and not the weights: ``training.sample_weights`` feeds
+#: ``model_version`` and nothing in the lgb cache path, so a weight vector
+#: written in here would be served unchanged to a later run configured with
+#: different weights, and no layer would say so (#318). The keys are what the
+#: weights are *resolved from*, so they are the same for every weight table
+#: and a run always resolves its own.
+#:
+#: Its absence is what marks a ``.bin`` as predating this split — those
+#: binaries carry weights baked in and cannot be re-weighted, so
+#: ``prepare_train_inputs`` rebuilds rather than serves them.
+WEIGHT_KEYS_SUFFIX = ".weight_keys.parquet"
+
+#: Parquet schema-metadata key under which a sidecar records the
+#: ``training.sample_weight_keys`` its build was *asked* for. Not inferable
+#: from the sidecar's columns: a configured key column the model_input does
+#: not carry is absent from both, and comparing columns alone would then read
+#: as a config change and rebuild the .bin on every single run.
+WEIGHT_KEYS_META = b"recsys_tfb.weight_keys"
+
+#: Parquet schema-metadata key under which a sidecar records how many rows it
+#: describes. Redundant with the frame's own length **except in the one case
+#: that matters**: when none of the configured key columns exist in the
+#: model_input, the frame has no columns, and a column-less table cannot carry
+#: a row count through parquet — pyarrow writes ``num_rows=0`` and reads back
+#: an empty frame. Without this the resolver would hand out a length-0 weight
+#: vector for an N-row binary, which ``set_weight`` discards in silence
+#: (any all-ones array becomes ``None``, and a length-0 array is vacuously
+#: all-ones), training the whole search unweighted.
+WEIGHT_ROWS_META = b"recsys_tfb.weight_key_rows"
+
+
+def weight_keys_sidecar(bin_path: str) -> str:
+    """The weight-key sidecar belonging to ``bin_path``.
+
+    One definition shared by the writer (``LightGBMAdapter.prepare_train_inputs``)
+    and the reader (:meth:`LgbDatasetHandle.sample_weights`): a sidecar written
+    under one spelling and looked up under another is missing, and "missing"
+    means "rebuild the cache" — an expensive silence rather than an error.
+    """
+    from pathlib import Path
+
+    p = Path(bin_path)
+    return str(p.with_name(p.stem + WEIGHT_KEYS_SUFFIX))
+
 
 @dataclass(frozen=True)
 class LgbDatasetHandle:
@@ -174,6 +223,74 @@ class LgbDatasetHandle:
             return None
         with open(counts) as f:
             return json.load(f)
+
+    @property
+    def weight_keys_path(self) -> str:
+        """Path of this binary's weight-key sidecar (:func:`weight_keys_sidecar`).
+
+        Derived from ``bin_path`` rather than stored, so the two cannot be
+        handed around separately and drift.
+        """
+        return weight_keys_sidecar(self.bin_path)
+
+    def sample_weights(
+        self, parameters: dict, preprocessor_metadata: dict
+    ) -> "np.ndarray":  # type: ignore[name-defined]
+        """Today's ``training.sample_weights``, resolved against this binary's rows.
+
+        Aligned 1:1 with the rows of the ``.bin``, so the caller can
+        ``set_weight`` it onto the loaded Dataset. Weights live here rather
+        than inside the binary because the lgb cache path does not mention
+        them: baked in, a stale binary would silently train under the previous
+        run's weights (#318).
+
+        Alignment is by construction, not by re-derivation: the sidecar holds
+        the surviving rows in the order they were written, so the same
+        zero-positive filter and the same group permutation are already
+        applied. Nothing here re-reads the model_input parquet. The *length*
+        is still checked independently against the binary itself before the
+        vector is used — see ``steps/hpo_scoring.py`` — because the one way
+        this can go wrong produces a vector LightGBM discards without a word.
+
+        Raises if the sidecar is missing. ``prepare_train_inputs`` rebuilds a
+        cache directory without one, so a handle that reaches a consumer has
+        it; reaching this line without one means a binary was moved or handed
+        over outside that path, and all-ones would be a wrong answer that
+        trains a whole search before anyone notices.
+        """
+        import json
+        from pathlib import Path
+
+        import pandas as pd
+        import pyarrow.parquet as pq
+
+        from recsys_tfb.io.extract import resolve_sample_weights
+
+        path = Path(self.weight_keys_path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no sample-weight key sidecar beside {self.bin_path} "
+                f"(expected {path}); the .bin cannot be re-weighted. Clear the "
+                "lgb cache directory so it is rebuilt."
+            )
+        table = pq.read_table(path)
+        pdf = table.to_pandas()
+        if pdf.shape[1] == 0:
+            # None of the configured key columns exist in this model_input, so
+            # the sidecar has no columns and parquet lost its row count on the
+            # way in. Restore it from the metadata: the resolver's "weight-key
+            # column absent" backstop then logs INACTIVE and returns all-ones
+            # of the right length, which is what this config did before the
+            # weights moved out of the .bin.
+            meta = (table.schema.metadata or {}).get(WEIGHT_ROWS_META)
+            if meta is None:
+                raise ValueError(
+                    f"weight-key sidecar {path} has no columns and no row "
+                    f"count; it cannot say how many rows {self.bin_path} "
+                    "holds. Clear the lgb cache directory so it is rebuilt."
+                )
+            pdf = pd.DataFrame(index=pd.RangeIndex(int(json.loads(meta))))
+        return resolve_sample_weights(pdf, parameters, preprocessor_metadata)
 
     def load(
         self,

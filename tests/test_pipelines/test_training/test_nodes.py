@@ -907,7 +907,20 @@ def test_tune_defaults_ranking_metric(monkeypatch):
             class D:
                 def construct(self_inner):
                     return self_inner
+
+                def set_weight(self_inner, w):
+                    pass
+
+                def num_data(self_inner):
+                    # Length of the vector sample_weights() below returns:
+                    # the scorer checks the two against each other.
+                    return 2
             return D()
+
+        def sample_weights(self, parameters, preprocessor_metadata):
+            # Since #318 the .bin carries no weights and the node resolves
+            # them off the handle before building the scorer.
+            return np.ones(2)
 
     parameters = {
         # FakeAdapter has no .save(); checkpointing (default True) would call it.
