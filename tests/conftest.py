@@ -102,3 +102,39 @@ def two_column_entity_params():
             "categorical_values": {"prod_name": ["p1", "p2", "p3"]},
         },
     }
+
+
+@pytest.fixture
+def renamed_schema_params():
+    """Parameters whose three user-owned roles are renamed away from the example.
+
+    This repo is a general ranking framework; ``snap_date`` / ``cust_id`` /
+    ``prod_name`` are one example instantiation of it (commercial-bank product
+    recommendation). Code that hardcodes those spellings still passes every
+    test written on the example, so the only way to find such code is to run it
+    on a schema that shares no name with it — hence three names that appear
+    nowhere else in ``src/``.
+
+    Distinct from :func:`two_column_entity_params`, which renames nothing and
+    exists to prove multi-column ``entity`` works; both are kept because a test
+    that wants one usually does not want the other's variable.
+
+    ``tests/test_core/test_schema.py::TestRenamedSchemaFixture`` is the meta
+    test that keeps this fixture honest — nesting the column names one level up
+    is silently ignored by :func:`~recsys_tfb.core.schema.get_schema`, and a
+    test built on such a dict runs example-named data against example-named
+    code and passes no matter what the code does.
+    """
+    return {
+        "schema": {
+            "columns": {
+                "time": "as_of_month",
+                "entity": ["store_id"],
+                "item": "sku",
+                "label": "label",
+                "score": "score",
+                "rank": "rank",
+            },
+            "categorical_values": {"sku": ["sku_a", "sku_b", "sku_c"]},
+        },
+    }

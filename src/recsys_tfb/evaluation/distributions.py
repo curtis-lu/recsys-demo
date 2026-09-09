@@ -3,6 +3,13 @@
 All plotting functions consume the small pre-aggregated frames produced by
 ``evaluation.diagnostics_spark`` (bin counts, boxplot stats, rank matrices), so
 the rendered figures embed only aggregated values — never raw per-row arrays.
+
+``item_col`` is required rather than defaulted. It names a column of the
+caller's frame, so a default is a guess about the caller's data, and the guess
+that used to sit here was the example deployment's spelling — a caller who got
+it wrong got a ``KeyError`` naming their own column instead of the default that
+went looking for it. ``label_col`` keeps its default: that column is produced
+by this framework (#326).
 """
 
 import pandas as pd
@@ -14,8 +21,8 @@ _COUNT_TICKFORMAT = ","
 
 def plot_score_histogram(
     hist_counts: pd.DataFrame,
+    item_col: str,
     title_prefix: str = "",
-    item_col: str = "prod_name",
 ) -> go.Figure:
     """Overlay histogram (one ``go.Bar`` trace per item) from shared-bin counts.
 
@@ -62,8 +69,8 @@ def _add_box(fig: go.Figure, name: str, stats: pd.DataFrame, **kwargs) -> None:
 
 def plot_score_boxplot_by_label(
     box_stats_by_label: pd.DataFrame,
+    item_col: str,
     title_prefix: str = "",
-    item_col: str = "prod_name",
     label_col: str = "label",
 ) -> go.Figure:
     """Grouped boxplot split by positive/negative label, from pre-computed

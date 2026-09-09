@@ -137,6 +137,38 @@ def test_core_concept_formula_normalizes_by_R_not_min():
     assert "map@1" in body and "recall@1" in body
 
 
+def test_core_concept_section_prints_the_readers_own_column_names(
+    renamed_schema_params,
+):
+    """報表這一段是給人看的定義，印的必須是讀者自己的欄名。
+
+    這一段以前自備一份角色預設表；那份預設表跟 ``core/schema`` 的分岔起來不
+    會報錯，只會讓同一份報表裡這一段印示例欄名、其他各區印真實欄名（#326）。
+    """
+    s = rb.build_core_concept_section(renamed_schema_params)
+    body = s.description + s.formula + " ".join(s.bullets)
+    for name in ("as_of_month", "store_id", "sku"):
+        assert name in body
+    # 反面：示例欄名一個都不該出現，否則就是又抄了一份預設表。
+    for example in ("snap_date", "cust_id", "prod_name"):
+        assert example not in body
+
+
+def test_core_concept_section_falls_back_only_through_get_schema():
+    """沒宣告角色時走的是 ``core/schema`` 的內建預設，不是本模組自己的一份。
+
+    這條與上一條合起來才擋得住「複製一份預設表」——只驗改名版的話，一份剛好
+    抄對的預設表照樣全綠。
+    """
+    s = rb.build_core_concept_section({})
+    body = s.description + " ".join(s.bullets)
+    from recsys_tfb.core.schema import get_schema
+
+    schema = get_schema({})
+    assert schema["time"] in body
+    assert schema["item"] in body
+
+
 def test_dataset_overview_section_tables():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     assert len(s.tables) == 4   # totals / by_snap_date / by_item / by_segment

@@ -10,6 +10,45 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
+from recsys_tfb.pipelines.training.steps.local_cache import CACHE_SOURCE_TABLES
+
+
+def _catalog_partitions() -> dict[str, dict[str, list[str]]]:
+    """The partition layout the real ``conf/base/catalog.yaml`` declares.
+
+    Derived by running the production derivation over the production catalog,
+    not transcribed. Transcribing is what this change removed from ``src/``
+    (``_CACHE_OUTER_PARTITIONS``, a hand copy of the catalog's
+    ``partition_filter`` keys with nothing keeping the two in step) — growing
+    the same mirror back on the test side would put the drift right back, just
+    somewhere nothing would look for it.
+
+    Reading the catalog raw, without the CLI's ``${...}`` substitution: only
+    the partition *names* are wanted here, and every value in this dict is a
+    key or a column name, never a substituted value.
+    """
+    import yaml
+
+    # parents[3] is the tree this test file was shipped with, not the CWD:
+    # a worktree must read its own catalog, never main's.
+    catalog_path = (
+        Path(__file__).resolve().parents[3] / "conf" / "base" / "catalog.yaml"
+    )
+    with open(catalog_path) as f:
+        catalog = yaml.safe_load(f)
+    params: dict = {}
+    inject_cache_source_tables(params, catalog)
+    partitions = params.get("_cache_partitions", {})
+    # Guard rather than let a silently empty mapping make every cache test
+    # pass for the wrong reason: with no injection at all the nodes refuse
+    # outright, and that refusal is a different test.
+    assert set(partitions) == set(CACHE_SOURCE_TABLES), (
+        "conf/base/catalog.yaml no longer declares every cache as a "
+        f"HiveTableDataset: got {sorted(partitions)}"
+    )
+    return partitions
+
 
 def _params_with_cache_root(cache_root: Path) -> dict:
     return {
@@ -18,6 +57,7 @@ def _params_with_cache_root(cache_root: Path) -> dict:
         "base_dataset_version": "deadbeef",
         "train_variant_id": "v1",
         "calibration_variant_id": "c1",
+        "_cache_partitions": _catalog_partitions(),
     }
 
 
@@ -441,3 +481,129 @@ class TestPrepareLgbTrainInputs:
         assert isinstance(dev_h, LgbDatasetHandle)
         assert train_h.role == "train"
         assert dev_h.role == "train_dev"
+
+
+class TestPartitionNamesComeFromTheCatalog:
+    """The glob's directory levels are whatever ``catalog.yaml`` declared.
+
+    This repo is a configurable ranking framework: ``schema.columns.time`` is
+    the user's column, and the Hive partition that carries it is named in
+    ``catalog.yaml``. Before #326 the cache globbed the example spelling
+    verbatim, so a user who renamed either one got a ``FileNotFoundError``
+    naming a path that looked plausible — four Spark-cold-start minutes in.
+
+    These tests rename the partitions to names that appear nowhere in ``src/``
+    and assert the renamed names come out the other end. A literal put back
+    into ``populate_cache_from_hive`` turns them red on the glob assertion.
+    """
+
+    @staticmethod
+    def _recording_globs(monkeypatch, globs: list) -> None:
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.training.steps.local_cache."
+            "get_hive_table_location",
+            lambda *a, **kw: "hdfs:/warehouse/tbl",
+        )
+
+        def _copy(spark, src_glob, dst, glob):
+            globs.append(src_glob)
+            Path(dst).mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.training.steps.local_cache.copy_hdfs_to_local",
+            _copy,
+        )
+
+    def test_renamed_time_partition_is_what_gets_globbed(
+        self, tmp_path, monkeypatch
+    ):
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["_cache_partitions"]["train_model_input"] = {
+            "filter_keys": ["base_dataset_version", "train_variant_id"],
+            "cols": ["as_of_month"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_train_model_input(_spark_df(), params)
+
+        assert globs == [
+            "hdfs:/warehouse/tbl/base_dataset_version=deadbeef/"
+            "train_variant_id=v1/as_of_month=*"
+        ]
+
+    def test_renamed_filter_keys_are_what_gets_globbed(
+        self, tmp_path, monkeypatch
+    ):
+        """The outer levels come from the same place, not from a local mirror.
+
+        ``_CACHE_OUTER_PARTITIONS`` used to hand-copy every entry's
+        ``partition_filter`` keys with nothing keeping the two in step.
+        """
+        from recsys_tfb.pipelines.training.nodes import cache_val_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["scenario_id"] = "s7"
+        params["_cache_partitions"]["val_model_input"] = {
+            "filter_keys": ["scenario_id"],
+            "cols": ["as_of_month"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_val_model_input(_spark_df(), params)
+
+        assert globs == ["hdfs:/warehouse/tbl/scenario_id=s7/as_of_month=*"]
+
+    def test_single_month_copy_narrows_on_the_renamed_time_partition(
+        self, tmp_path, monkeypatch
+    ):
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        params = _params_with_test_dates(tmp_path, ["2024-03-31"])
+        params["_cache_partitions"]["test_model_input"] = {
+            "filter_keys": ["base_dataset_version"],
+            "cols": ["as_of_month", "sku"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_test_model_input(_spark_df(), params)
+
+        # Only the first partition level is narrowed; ``sku`` below it comes
+        # along as part of the subtree.
+        assert globs == [
+            "hdfs:/warehouse/tbl/base_dataset_version=deadbeef/"
+            "as_of_month=2024-03-31"
+        ]
+
+    def test_missing_injection_names_the_key_that_is_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """No fallback: a guessed partition name fails as a path that matched
+        nothing, which names neither the guess nor where to fix it."""
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        del params["_cache_partitions"]
+        _stub_hdfs(monkeypatch)
+
+        with pytest.raises(ValueError, match="_cache_partitions"):
+            cache_train_model_input(_spark_df(), params)
+
+    def test_an_entry_declaring_no_partition_cols_says_so_separately(
+        self, tmp_path, monkeypatch
+    ):
+        """Two ways to have no layout, two things to go fix — the catalog entry
+        is missing, or it is there and declares no partition_cols."""
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["_cache_partitions"]["train_model_input"] = {
+            "filter_keys": ["base_dataset_version"], "cols": []}
+        _stub_hdfs(monkeypatch)
+
+        with pytest.raises(ValueError, match="declares no partition_cols"):
+            cache_train_model_input(_spark_df(), params)
