@@ -27,7 +27,10 @@ class TestResolvedItemValues:
     def _params(self, **over):
         p = {
             "schema": {
-                "columns": {"item": "prod_name"},
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "prod_name",
+                },
                 "categorical_values": {"prod_name": ["b", "a", "c"]},
             },
             "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]}},
@@ -41,7 +44,10 @@ class TestResolvedItemValues:
     def test_respects_custom_item_name(self):
         p = {
             "schema": {
-                "columns": {"item": "channel_name"},
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "channel_name",
+                },
                 "categorical_values": {"channel_name": ["sms", "app"]},
             },
             "dataset": {"prepare_model_input": {"categorical_columns": ["channel_name"]}},
@@ -86,7 +92,10 @@ from recsys_tfb.core.consistency import (
 def _base(over=None):
     p = {
         "schema": {
-            "columns": {"item": "prod_name"},
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"],
+                "item": "prod_name",
+            },
             "categorical_values": {"prod_name": ["a", "b"]},
         },
         "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]}},
@@ -618,7 +627,12 @@ class TestDiagnosisMetricParamsA15:
             diag["item_ability"] = item_ability
         if diag:
             ev["diagnosis"] = diag
-        return {"evaluation": ev}
+        # validate_config_consistency resolves the schema, and since #328 the
+        # three user-owned roles have no built-in answer. Carried by every
+        # _params here so the predicate-level and aggregator-level call styles
+        # stay interchangeable.
+        return {"evaluation": ev, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}}}
 
     def test_absent_blocks_are_clean(self):
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
@@ -731,7 +745,8 @@ class TestReservedSegmentColumnsA15:
     """
 
     def _params(self, seg_cols):
-        return {"evaluation": {"segment_columns": seg_cols}}
+        return {"evaluation": {"segment_columns": seg_cols}, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
 
     def test_reserved_names_rejected(self):
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
@@ -819,9 +834,12 @@ class TestEnabledMustBeBool:
             ConfigConsistencyError,
             validate_config_consistency,
         )
-        p = {"evaluation": {"diagnosis": {
-            "config_shift": {"enabled": "false"}
-        }}}
+        p = {
+            "evaluation": {"diagnosis": {"config_shift": {"enabled": "false"}}},
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"],
+                "item": "prod_name"}},
+        }
         # match 挑 "config_shift.enabled"：這個 repo 踩過「match pattern 被別條
         # predicate 的訊息滿足」的假綠。沒有第二條 predicate 會對這份 config
         # 吐出這個字串，所以拔掉本檢查這條測試一定紅。
@@ -851,7 +869,8 @@ class TestSuppressionParamsA19:
         diag = {}
         if suppression is not None:
             diag["suppression"] = suppression
-        return {"evaluation": {"diagnosis": diag}}
+        return {"evaluation": {"diagnosis": diag}, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
 
     def test_absent_and_valid_defaults_clean(self):
         from recsys_tfb.core.consistency import suppression_param_errors
@@ -929,7 +948,8 @@ class TestTrainingDiagnosticsParamsA20:
             diag["shap"] = shap_cfg
         if gain_ledger_enabled is not None:
             diag["gain_ledger"] = {"enabled": gain_ledger_enabled}
-        return {"diagnostics": diag}
+        return {"diagnostics": diag, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
 
     def test_bad_background_domain_rejected(self):
         from recsys_tfb.core.consistency import training_diagnostics_param_errors
@@ -1770,7 +1790,8 @@ from recsys_tfb.core.consistency import (
 
 class TestTrainingHpoFinalizeParamsA25:
     def _params(self, **training) -> dict:
-        return {"training": training}
+        return {"training": training, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
 
     def test_absent_keys_are_clean(self):
         # Both keys default in the node bodies (mean_ap / hpo_best), so a
@@ -1852,7 +1873,8 @@ from recsys_tfb.core.consistency import duplicate_test_month_errors
 
 
 def _test_months(*dates) -> dict:
-    return {"dataset": {"test_snap_dates": list(dates)}}
+    return {"dataset": {"test_snap_dates": list(dates)}, "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
 
 
 class TestTestSnapDatesSpellingA26:
@@ -2122,7 +2144,8 @@ from recsys_tfb.core.consistency import entity_columns_declared_errors
 
 
 def _entity_params(*entity) -> dict:
-    return {"schema": {"columns": {"entity": list(entity)}}}
+    return {"schema": {"columns": {
+        "time": "snap_date", "entity": list(entity), "item": "prod_name"}}}
 
 
 class TestEntityColumnsDeclaredA28:
@@ -2164,12 +2187,13 @@ class TestEntityColumnsDeclaredA28:
             _entity_params("cust_id", "acct_id"), None, "some_auto_table",
         ) == []
 
-    def test_the_default_single_entity_schema_passes_the_real_declaration(self):
+    def test_the_single_entity_schema_passes_the_real_declaration(self):
         # The discriminating case: without it every test above is also passed
         # by a predicate that rejects everything. This is the shape
-        # conf/base/catalog.yaml actually ships.
+        # conf/base/catalog.yaml actually ships. Spelled out rather than left
+        # to a default -- since #328 there is no default to leave it to.
         assert entity_columns_declared_errors(
-            {},
+            _entity_params("cust_id"),
             ["cust_id", "score", "score_uncalibrated", "label",
              "model_version", "snap_date", "prod_name"],
             "training_eval_predictions",
@@ -2195,14 +2219,22 @@ from recsys_tfb.core.consistency import entity_grouping_key_errors
 class TestEntityGroupingKeysA29:
     def _params(self, entity=None, **dataset) -> dict:
         return {
-            "schema": {"columns": {"entity": entity or ["branch_id", "cust_id"]}},
+            "schema": {"columns": {
+                "time": "snap_date",
+                "entity": entity or ["branch_id", "cust_id"],
+                "item": "prod_name",
+            }},
             "dataset": dataset,
         }
 
     def test_absent_keys_are_clean(self):
         # Neither key declared is the state every existing config is in, and
-        # the one this whole feature promises not to disturb.
-        assert entity_grouping_key_errors({}) == []
+        # the one this whole feature promises not to disturb. Both spellings
+        # of "absent": no ``dataset`` block at all, and an empty one.
+        assert entity_grouping_key_errors(
+            {"schema": {"columns": {
+                "time": "snap_date", "entity": ["branch_id", "cust_id"],
+                "item": "prod_name"}}}) == []
         assert entity_grouping_key_errors(self._params()) == []
 
     def test_full_entity_and_proper_subsets_are_accepted(self):
@@ -2438,7 +2470,8 @@ class TestNumericStorageParamsA31:
 
     def test_wired_into_validate_config_consistency(self):
         params = {
-            "schema": {"columns": {"item": "prod_name"}},
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},
             "dataset": {"numeric_feature_storage_type": "float16"},
         }
         with pytest.raises(ConfigConsistencyError) as exc:
@@ -2826,7 +2859,8 @@ class TestDatasetSourceQualityChecksA32:
 
     def test_wired_into_validate_config_consistency(self):
         params = self._params(sample_pool={"quality_checks": {}})
-        params["schema"] = {"columns": {"item": "prod_name"}}
+        params["schema"] = {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}}
         with pytest.raises(ConfigConsistencyError) as exc:
             validate_config_consistency(params)
         assert "A32" in str(exc.value)

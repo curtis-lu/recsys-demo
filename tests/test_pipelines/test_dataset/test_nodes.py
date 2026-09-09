@@ -227,6 +227,9 @@ def parameters():
     return {
         "random_seed": 42,
         "schema": {
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            },
             "categorical_values": {
                 "prod_name": list(_PRODUCTS),
             },
@@ -1160,7 +1163,13 @@ class TestApplyPreprocessorUnknownWarning:
             "drop_columns": [],
         }
         parameters = {
-            "schema": {"categorical_values": {"prod_name": ["exchange_fx"]}},
+            "schema": {
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "prod_name",
+                },
+                "categorical_values": {"prod_name": ["exchange_fx"]},
+            },
             "dataset": {
                 "train_snap_dates": ["2024-01-31"],
                 "calibration_snap_dates": [],
@@ -1904,7 +1913,13 @@ class TestUnknownEncodingRateIsAssertable:
             "drop_columns": [],
         }
         params = {
-            "schema": {"categorical_values": {"prod_name": [_PRODUCTS[0]]}},
+            "schema": {
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "prod_name",
+                },
+                "categorical_values": {"prod_name": [_PRODUCTS[0]]},
+            },
             "dataset": {
                 "train_snap_dates": [_SNAP_DATES[0]],
                 "calibration_snap_dates": [], "val_snap_dates": [], "test_snap_dates": [],

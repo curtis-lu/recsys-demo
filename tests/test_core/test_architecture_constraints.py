@@ -1144,14 +1144,16 @@ class TestS4NoFirstEntityColumn:
 SCHEMA_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
 
 #: Column roles. ``get_schema`` reads these from ``schema.columns``; written one
-#: level up they are silently ignored. Mirrors ``core/schema.py::_DEFAULTS``.
+#: level up they are not read at all. Mirrors ``core/schema.py::_ROLE_KEYS``
+#: -- the full role list, which since #328 is a strict superset of
+#: ``_DEFAULTS`` (``time`` / ``entity`` / ``item`` have no default).
 SCHEMA_ROLE_KEYS = frozenset(
     {"time", "entity", "item", "label", "score", "rank"}
 )
 
 #: ``get_schema`` *derives* this as ``[time] + entity + [item]``. It is not a
 #: settable key at any depth: under ``schema`` it misses the ``columns`` lookup,
-#: and under ``schema.columns`` the ``if k in _DEFAULTS`` filter drops it.
+#: and under ``schema.columns`` the ``if k in _ROLE_KEYS`` filter drops it.
 DERIVED_SCHEMA_KEY = "identity_columns"
 
 
@@ -1231,18 +1233,25 @@ class TestS5SchemaColumnsLayer:
 
     ``get_schema`` (core/schema.py) reads ``parameters["schema"]["columns"]``.
     A declaration written one level up -- ``{"schema": {"entity": [...]}}`` --
-    is not merged, not warned about, and not an error: the whole block is
-    ignored and every caller gets ``_DEFAULTS`` back. 24 sites in ``tests/``
-    were written that way (#274), and none of them was testing anything wrong,
-    because each happened to spell out the defaults. That is what makes it a
-    *copy source* rather than a bug: the next person to need a two-column
-    entity copies one, watches the second column vanish, and their test goes
-    green against code that does not handle it. Not hypothetical -- #263 hit
-    exactly this in ``test_comparison_restrict.py``.
+    is not merged and not warned about: the whole block is ignored. Up to #328
+    it was not an error either, and every caller got ``_DEFAULTS`` back. 24
+    sites in ``tests/`` were written that way (#274), and none of them was
+    testing anything wrong, because each happened to spell out the defaults.
+    That is what makes it a *copy source* rather than a bug: the next person to
+    need a two-column entity copies one, watches the second column vanish, and
+    their test goes green against code that does not handle it. Not
+    hypothetical -- #263 hit exactly this in ``test_comparison_restrict.py``.
+
+    #328 removed the defaults for ``time`` / ``entity`` / ``item``, so
+    mis-nesting one of those three now raises rather than passing quietly.
+    This constraint still earns its place for the rest: ``label`` / ``score``
+    / ``rank`` keep their defaults and are still dropped in silence, and a
+    scan names the file and line, which an exception raised deep in a fixture
+    does not.
 
     The second rule exists because rule 1 alone blesses a half-fix. Wrapping
     ``identity_columns`` into ``columns`` satisfies "roles live under columns"
-    while ``get_schema``'s ``if k in _DEFAULTS`` filter still drops it -- and
+    while ``get_schema``'s ``if k in _ROLE_KEYS`` filter still drops it -- and
     ``tests/test_pipelines/test_evaluation/test_nodes_spark.py`` had already
     landed in that shape 8 times before this constraint existed.
 
@@ -1280,6 +1289,25 @@ class TestS5SchemaColumnsLayer:
         for label, root in SCHEMA_SCAN_ROOTS.items():
             found = sum(1 for _ in root.rglob("*.py"))
             assert found > 50, f"{label} -> {root} holds {found} .py files"
+
+    def test_the_role_list_still_mirrors_core_schema(self):
+        """A hand-copied list drifts the moment a seventh role is added.
+
+        The scan only reports a mis-nested key it knows is a role, so a role
+        added to ``core/schema`` and not to this frozenset is a hole nothing
+        else here would notice -- the suite stays green and the constraint
+        just stops covering that role. #328 is the near miss: it changed
+        which dict in ``core/schema`` holds the role list, and only the prose
+        said so.
+        """
+        from recsys_tfb.core.schema import _ROLE_KEYS
+
+        assert SCHEMA_ROLE_KEYS == frozenset(_ROLE_KEYS), (
+            "S5's role list drifted from core/schema.py::_ROLE_KEYS. Mirror "
+            "the new list here (and check whether the new role belongs in "
+            "_REQUIRED_ROLES too). See S5 in "
+            "docs/agents/architecture-constraints.md."
+        )
 
     def test_the_scan_sees_every_spelling(self, tmp_path):
         """Without this, the check above is decoration.
@@ -1434,11 +1462,6 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     # the user's.
     ("src/recsys_tfb/pipelines/source_etl/audit.py", "<module>"),
     ("src/recsys_tfb/pipelines/source_etl/audit.py", "write_record"),
-    # TEMPORARY -- `get_schema`'s built-in defaults for time / entity / item.
-    # #326 made the three roles required at CLI entry but deliberately left the
-    # defaults in place (304 tests lean on them); #328 removes both the defaults
-    # and this line.
-    ("src/recsys_tfb/core/schema.py", "<module>"),
 })
 
 

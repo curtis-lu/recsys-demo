@@ -267,7 +267,9 @@ def test_empty_sample_returns_stub_without_raising():
 # --------------------------------------------------------------------------
 
 PARAMS_ITEM_LEVEL_CONTEXT = {
-    "schema": {},
+    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                           "item": "prod_name", "label": "label",
+                           "score": "score"}},
     "dataset": {
         "sample_group_keys": ["prod_tier", "label"],
         "sample_ratio": 1.0,
@@ -459,7 +461,9 @@ def test_divergence_between_two_spread_views_is_reported_numerically():
 # --------------------------------------------------------------------------
 
 PARAMS_INT_CONTEXT = {
-    "schema": {},
+    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                           "item": "prod_name", "label": "label",
+                           "score": "score"}},
     "dataset": {
         "sample_group_keys": ["seg", "prod_name", "label"],
         "sample_ratio": 1.0,
@@ -517,7 +521,9 @@ def test_dtype_mismatch_zero_hit_override_is_reported_not_silent():
 # --------------------------------------------------------------------------
 
 PARAMS_NULL_CONTEXT = {
-    "schema": {},
+    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                           "item": "prod_name", "label": "label",
+                           "score": "score"}},
     "dataset": {
         "sample_group_keys": ["prod_tier", "label"],
         "sample_ratio": 1.0,
@@ -580,7 +586,7 @@ def test_declared_items_missing_from_sample_are_reported():
     報表上「少一列」與「這個 item 沒有偏移」長得一模一樣，而讀者會把沉默讀成
     沒問題——跟零命中的 override key 是同一種病。
     """
-    params = {**PARAMS, "schema": {"categorical_values": {
+    params = {**PARAMS, "schema": {**PARAMS["schema"], "categorical_values": {
         "prod_name": ["ccard_ins", "fund_bond", "never_sampled"]}}}
     out = compute((_sample(), {}), params)
 

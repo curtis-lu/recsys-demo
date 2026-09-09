@@ -367,6 +367,10 @@ class TestTrainingPipelineE2E:
         parameters = {
             "random_seed": 42,
             "schema": {
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "prod_name",
+                },
                 "categorical_values": {
                     "prod_name": sorted(products),
                 },

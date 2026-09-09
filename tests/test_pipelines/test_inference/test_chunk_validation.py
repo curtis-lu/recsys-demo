@@ -18,7 +18,19 @@ from recsys_tfb.pipelines.inference.steps.validation import (
     validate_scored_chunk,
 )
 
-SCHEMA = get_schema({})
+#: The example deployment's spellings, declared rather than defaulted: since
+#: #328 ``get_schema`` has no built-in answer for time / entity / item, and the
+#: frames below are written with these names.
+PARAMS = {
+    "schema": {
+        "columns": {
+            "time": "snap_date",
+            "entity": ["cust_id"],
+            "item": "prod_name",
+        }
+    }
+}
+SCHEMA = get_schema(PARAMS)
 PRODUCTS = ["exchange_fx", "fund_stock", "fund_bond"]
 SNAP_DATE = "2024-03-31"
 

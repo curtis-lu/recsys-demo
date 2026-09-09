@@ -155,17 +155,19 @@ def test_core_concept_section_prints_the_readers_own_column_names(
         assert example not in body
 
 
-def test_core_concept_section_falls_back_only_through_get_schema():
-    """沒宣告角色時走的是 ``core/schema`` 的內建預設，不是本模組自己的一份。
+def test_core_concept_section_reads_the_example_schema_through_get_schema():
+    """宣告的就是示例欄名時，這一段也必須經 ``core/schema`` 取，不自備一份。
 
     這條與上一條合起來才擋得住「複製一份預設表」——只驗改名版的話，一份剛好
-    抄對的預設表照樣全綠。
+    抄對的預設表照樣全綠。#328 之後角色沒有內建預設，所以示例欄名這一半也要
+    明寫出來，不能靠 ``{}`` 掉進預設。
     """
-    s = rb.build_core_concept_section({})
+    params = _params()
+    s = rb.build_core_concept_section(params)
     body = s.description + " ".join(s.bullets)
     from recsys_tfb.core.schema import get_schema
 
-    schema = get_schema({})
+    schema = get_schema(params)
     assert schema["time"] in body
     assert schema["item"] in body
 
@@ -998,7 +1000,11 @@ _CI_FIXTURE = {
 
 
 def _params_min():
-    return {"evaluation": {"report": {"display": {"primary_map_k": [2]}}}}
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},
+        "evaluation": {"report": {"display": {"primary_map_k": [2]}}},
+    }
 
 
 def test_assemble_report_passes_metric_ci_through():

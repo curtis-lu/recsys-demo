@@ -274,7 +274,9 @@ def _tiny_real_booster():
 def test_compute_gain_ledger_real_booster_contract():
     adapter = _tiny_real_booster()
     preprocessor = {"category_mappings": {"prod_code": ["A", "B", "C", "D"]}}
-    parameters = {"schema": {"columns": {"item": "prod_code"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"],
+        "item": "prod_code"}}}
     result = gain_ledger.compute_gain_ledger(adapter, preprocessor, parameters)
     assert result["enabled"] is True
     assert result["fallback"] is False
@@ -287,7 +289,9 @@ def test_compute_gain_ledger_real_booster_contract():
 def test_compute_gain_ledger_missing_category_mappings_falls_back():
     adapter = _tiny_real_booster()
     preprocessor = {"category_mappings": {}}
-    parameters = {"schema": {"columns": {"item": "prod_code"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"],
+        "item": "prod_code"}}}
     result = gain_ledger.compute_gain_ledger(adapter, preprocessor, parameters)
     assert result["fallback"] is True
     assert result["per_item"] is None

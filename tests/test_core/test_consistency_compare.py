@@ -11,8 +11,18 @@ from recsys_tfb.core.consistency import (
 )
 
 
+#: The example deployment's three user-owned roles. Declared, not defaulted:
+#: since #328 ``get_schema`` has no built-in answer for them.
+_EXAMPLE_COLUMNS = {
+    "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+}
+
+
 def _base_params() -> dict:
-    return {"evaluation": {"compare_sources": {}}}
+    return {
+        "schema": {"columns": dict(_EXAMPLE_COLUMNS)},
+        "evaluation": {"compare_sources": {}},
+    }
 
 
 class TestA11_WellFormed:
@@ -159,8 +169,14 @@ class TestA11_SchemaRoles:
 
     @staticmethod
     def _params(columns: dict) -> dict:
+        """The example roles with this test's overrides layered on top.
+
+        Merged rather than substituted so a test naming only the role it cares
+        about still hands ``get_schema`` a complete declaration -- which it has
+        required since #328.
+        """
         return {
-            "schema": {"columns": columns},
+            "schema": {"columns": {**_EXAMPLE_COLUMNS, **columns}},
             "evaluation": {"compare_sources": {}},
         }
 
@@ -193,7 +209,7 @@ class TestA11_SchemaRoles:
         schema = get_schema(p)
         assert _required_external_columns(p) == set(schema["identity_columns"]) | {schema["score"]}
 
-    def test_required_set_defaults_unchanged(self):
+    def test_required_set_for_the_example_schema(self):
         assert _required_external_columns(_base_params()) == {
             "snap_date", "cust_id", "prod_name", "score",
         }

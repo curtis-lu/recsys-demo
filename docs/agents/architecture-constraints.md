@@ -487,15 +487,25 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 ## S5. `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns`
 
-`get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、不會有警告、也不算錯誤**——它被整塊忽略，每個呼叫端拿到的都是 `_DEFAULTS`：
+`get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、也不會有警告**——它被整塊忽略。#328 之前連錯都不算，每個呼叫端拿到的都是 `_DEFAULTS`；#328 把 `time`／`entity`／`item` 的內建預設拿掉之後，這三個角色少宣告會 **raise**，剩下三個仍然安靜掉進預設：
 
 ```python
 {"schema": {"entity": ["branch_id", "cust_id"], "item": "sku"}}
-# get_schema -> {'entity': ['cust_id'], 'item': 'prod_name', ...}   ← 你寫的被丟掉
+# get_schema -> ValueError: Missing schema.columns in parameters.yaml: time, entity, item
+#               （#328 之前：安靜回 {'entity': ['cust_id'], 'item': 'prod_name', ...}）
 
-{"schema": {"columns": {"entity": ["branch_id", "cust_id"], "item": "sku"}}}
-# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', ...}
+{"schema": {"columns": {"time": "dt", "entity": ["branch_id", "cust_id"],
+                        "item": "sku"},
+            "score": "pred"}}
+# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', 'score': 'score', ...}
+#               ↑ score 寫錯層，安靜被丟掉、回預設 'score'——這半邊沒有變
+
+{"schema": {"columns": {"time": "dt", "entity": ["branch_id", "cust_id"],
+                        "item": "sku", "score": "pred"}}}
+# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', 'score': 'pred', ...}
 ```
+
+**這條在 #328 之後仍然要留著**，理由有二：（1）`label`／`score`／`rank` 是框架自己產的欄、預設保留，寫錯層照樣無聲無息；（2）掃描報得出**檔名與行號**，而 raise 只會在某個 fixture 深處炸開，訊息裡沒有那份 dict 寫在哪。
 
 這條**不是**預防性守衛。開票時（#274）`tests/` 有 **24 個定義點**是前一種寫法，而且**沒有一個因此測錯東西**——每一處寫下的值剛好都等於預設值。這正是它危險的地方：它不是 bug，是**照抄來源**。下一個要寫多欄 entity 測試的人隨手抄一處，第二欄無聲消失，測試對著不支援多欄的程式碼全綠。#263 一開工就撞到 `test_comparison_restrict.py::_params()` 正是這個形狀。
 
@@ -506,11 +516,11 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
 | 2 | 任何深度都不得宣告 `identity_columns` | 它是 `get_schema` **推導**出來的（`[time] + entity + [item]`），不是設定鍵 |
 
-**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _DEFAULTS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
+**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_DEFAULTS`），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_ROLE_KEYS`——六個角色的完整清單；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
 
 ```
 tests/params.py:3: schema.entity -- a role belongs under schema.columns
@@ -533,6 +543,8 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
   PARAMS = {"schema": SCHEMA}
   ```
   認的是 `{"schema": {...}}` 這個字面形狀。這個取捨是刻意的：**它同時是「不要誤報已解析 schema」的那道界線**——`get_schema` 的回傳值合法地帶著 `identity_columns`，`tests/test_core/test_versioning.py::_sample_schema` 就是那個形狀，必須維持合法。放寬到「任何含角色名的 dict」會把它一起打死。
+
+  **這個盲區有實例，不是理論**：`tests/test_diagnosis/test_metric/test_suppression_render.py` 的 `_SCHEMA` 就是這個形狀（`{"schema": _SCHEMA}`，角色名少一層 `columns`），S5 上線後仍然看不見它，而它靠「寫下的值剛好等於內建預設」全綠了一整段時間——直到 #328 把 `time`／`entity`／`item` 的預設拿掉才炸出來。**擋住它的不是這條掃描，是「沒有預設可以掉」**。
 - **這條不保證呼叫端傳對東西。** 修 #274 時實測到：`test_config_shift.py` 與 `test_suppression.py` 共 5 個呼叫點把 `PARAMS["schema"]`（設定區塊）當成**已解析的 schema** 直接傳進 `build_offset_frame`／`cross_purchase_stats`——那只有在設定寫錯層、形狀剛好長得像已解析 schema 的時候才行得通。包上 `columns` 之後它們立刻 `KeyError`，已改走 `get_schema(...)`。**S5 抓不到這種「兩種形狀被混為一談」的呼叫**，它只管宣告端。
 
 ---
@@ -569,9 +581,9 @@ src/recsys_tfb/evaluation/statistics.py:8 in compute_product_statistics(): 'prod
 
 `test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住。
 
-**例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-15-筆)。
+**例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-14-筆)。
 
-### ⚠ 這張登記表開局就有 15 筆，那是規則在運作、不是規則被稀釋
+### ⚠ 這張登記表有 14 筆，那是規則在運作、不是規則被稀釋
 
 S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠是錯的」。S6 擋的是一種**拼法**，而有三類拼法是合法的：
 
@@ -579,7 +591,8 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 |---|---|---|
 | `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 11 |
 | `core/logging` 的觀測欄白名單、`source_etl` 稽核表的欄名 | 那是**它們自己的**欄位，只是拼法相同 | 3 |
-| `core/schema` 的內建預設 | 暫時的，跟著「測試側 params 清理」那張票一起消失 | 1 |
+
+開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以現在剩下的 14 筆全部是上表那兩類——沒有一筆是暫時的了。
 
 所以這張表同時是另一件事的完整帳目：**框架目前還借用了多少示例字彙**。要翻案 time 語彙的保留決定（ADR-0017 決定一），這個數字就是起點。
 
@@ -689,9 +702,9 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 > 這張是**過濾器**——登記過的 `(模組, 函式)` 會被跳過，所以登記一筆會讓那個函式裡**所有**取第一欄的地方一起靜音。**登記的粒度是函式，不是行。** 要登記就把該函式為什麼整個豁免寫清楚。
 
 
-## R6. `src/` 的字面示例欄名（S6 的例外）── 15 筆
+## R6. `src/` 的字面示例欄名（S6 的例外）── 14 筆
 
-**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表開局就有 15 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
+**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表有 14 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
 
 **一、`evaluation.snap_date` 這個設定鍵的讀取（11 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。
 
@@ -717,11 +730,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `pipelines/source_etl/audit.py` | `<module>` | `source_etl` 稽核表自己的 schema 定義 |
 | `pipelines/source_etl/audit.py` | `write_record` | 寫進同一張稽核表的同一欄 |
 
-**三、暫時的（1 筆）**
-
-| 位置 | 函式 | 什麼時候消失 |
-|---|---|---|
-| `core/schema.py` | `<module>` | `get_schema` 對 `time` / `entity` / `item` 的內建預設。#326 把三個角色改成 CLI 入口必填、但刻意留著預設（304 個測試靠它）；**#328 會同時拿掉預設與這一筆登記**（ADR-0017 決定三） |
+**三、暫時的（0 筆）** —— 開局有 1 筆：`core/schema.py` 的 `<module>`，`get_schema` 對 `time`／`entity`／`item` 的內建預設。#326 把三個角色改成 CLI 入口必填、但刻意留著預設（304 個測試靠它）。**#328 已把預設與這一筆登記一起拿掉**，`core/schema.py` 現在一個字面示例欄名都沒有。這一類留在這裡當紀錄：登記表曾經收過一筆有到期日的例外，而它真的到期了。
 
 要加一筆：先在這張表寫下位置、函式與理由，**取得使用者同意之後**，再把 `(模組路徑, 函式名)` 加進 `tests/test_core/test_architecture_constraints.py` 的 `LITERAL_COLUMN_EXCEPTIONS`。
 
