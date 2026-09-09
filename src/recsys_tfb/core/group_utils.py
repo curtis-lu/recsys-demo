@@ -121,8 +121,10 @@ def drop_zero_positive_groups(
     ``y`` and ``group_ids`` are the per-row label and query-group id arrays
     from ``recsys_tfb.io.extract.extract_Xy_with_groups``; ``aligned`` is
     every other per-row array that has to travel with them (the feature
-    matrix, the sample weights). Group ids need not be sorted or contiguous,
-    and groups may differ in size.
+    matrix; the sample weights, where the caller resolved them up front; or a
+    plain ``np.arange`` row index, which is how a caller recovers *which*
+    rows survived without deriving the mask a second time). Group ids need
+    not be sorted or contiguous, and groups may differ in size.
 
     Returns ``((y, group_ids, *aligned), counts)`` — the arrays in the order
     they were given, and a dict of ``groups_total`` / ``groups_kept`` /
