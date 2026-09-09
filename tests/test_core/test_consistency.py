@@ -632,7 +632,7 @@ class TestDiagnosisMetricParamsA15:
         # _params here so the predicate-level and aggregator-level call styles
         # stay interchangeable.
         return {"evaluation": ev, "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}}}
 
     def test_absent_blocks_are_clean(self):
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors

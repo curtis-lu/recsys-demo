@@ -53,7 +53,7 @@ _SCALAR_KEYS = ("time", "item", "label", "score", "rank")
 _REQUIRED_ROLES = ("time", "entity", "item")
 
 
-def _missing_roles_message(missing: list) -> str:
+def _missing_roles_message(missing: list[str]) -> str:
     """The one message both gates raise, so their wording cannot drift."""
     return (
         "Missing schema.columns in parameters.yaml: "

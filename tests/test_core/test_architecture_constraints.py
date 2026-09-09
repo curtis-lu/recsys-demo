@@ -1290,6 +1290,25 @@ class TestS5SchemaColumnsLayer:
             found = sum(1 for _ in root.rglob("*.py"))
             assert found > 50, f"{label} -> {root} holds {found} .py files"
 
+    def test_the_role_list_still_mirrors_core_schema(self):
+        """A hand-copied list drifts the moment a seventh role is added.
+
+        The scan only reports a mis-nested key it knows is a role, so a role
+        added to ``core/schema`` and not to this frozenset is a hole nothing
+        else here would notice -- the suite stays green and the constraint
+        just stops covering that role. #328 is the near miss: it changed
+        which dict in ``core/schema`` holds the role list, and only the prose
+        said so.
+        """
+        from recsys_tfb.core.schema import _ROLE_KEYS
+
+        assert SCHEMA_ROLE_KEYS == frozenset(_ROLE_KEYS), (
+            "S5's role list drifted from core/schema.py::_ROLE_KEYS. Mirror "
+            "the new list here (and check whether the new role belongs in "
+            "_REQUIRED_ROLES too). See S5 in "
+            "docs/agents/architecture-constraints.md."
+        )
+
     def test_the_scan_sees_every_spelling(self, tmp_path):
         """Without this, the check above is decoration.
 

@@ -541,6 +541,8 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
   PARAMS = {"schema": SCHEMA}
   ```
   認的是 `{"schema": {...}}` 這個字面形狀。這個取捨是刻意的：**它同時是「不要誤報已解析 schema」的那道界線**——`get_schema` 的回傳值合法地帶著 `identity_columns`，`tests/test_core/test_versioning.py::_sample_schema` 就是那個形狀，必須維持合法。放寬到「任何含角色名的 dict」會把它一起打死。
+
+  **這個盲區有實例，不是理論**：`tests/test_diagnosis/test_metric/test_suppression_render.py` 的 `_SCHEMA` 就是這個形狀（`{"schema": _SCHEMA}`，角色名少一層 `columns`），S5 上線後仍然看不見它，而它靠「寫下的值剛好等於內建預設」全綠了一整段時間——直到 #328 把 `time`／`entity`／`item` 的預設拿掉才炸出來。**擋住它的不是這條掃描，是「沒有預設可以掉」**。
 - **這條不保證呼叫端傳對東西。** 修 #274 時實測到：`test_config_shift.py` 與 `test_suppression.py` 共 5 個呼叫點把 `PARAMS["schema"]`（設定區塊）當成**已解析的 schema** 直接傳進 `build_offset_frame`／`cross_purchase_stats`——那只有在設定寫錯層、形狀剛好長得像已解析 schema 的時候才行得通。包上 `columns` 之後它們立刻 `KeyError`，已改走 `get_schema(...)`。**S5 抓不到這種「兩種形狀被混為一談」的呼叫**，它只管宣告端。
 
 ---
