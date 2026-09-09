@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -15,6 +16,9 @@ from recsys_tfb.__main__ import app
 from recsys_tfb.core.catalog import DataCatalog
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
+from recsys_tfb.pipelines.training.cache_sources import (
+    inject_cache_source_tables,
+)
 
 runner = CliRunner()
 
@@ -123,6 +127,32 @@ def _setup_conf(tmp_path, params_dataset=None, params_training=None, params_infe
     }
     with open(base_dir / "catalog.yaml", "w") as f:
         yaml.dump(catalog, f)
+
+    # Every command validates schema.columns at the entry point, and time /
+    # entity / item have to be declared there — this framework will not guess
+    # which columns of the user's own tables carry those roles (#326). Written
+    # once here rather than into each caller's params file, using the example
+    # spellings the rest of this file's assertions are written against.
+    #
+    # Only the roles the caller did NOT declare are written, and that is not
+    # tidiness: ``ConfigLoader.get_parameters`` merges the ``parameters*.yaml``
+    # stems in ``set`` order, so when two of them declare the same key, which
+    # one wins varies between processes. Leaving a role out here keeps every
+    # role declared exactly once, so there is nothing to resolve.
+    declared_roles = set()
+    for given in (params_dataset, params_training, params_inference):
+        columns = ((given or {}).get("schema") or {}).get("columns") or {}
+        declared_roles |= set(columns)
+    base_columns = {
+        role: value
+        for role, value in (
+            ("time", "snap_date"), ("entity", ["cust_id"]), ("item", "prod_name"),
+        )
+        if role not in declared_roles
+    }
+    if base_columns:
+        with open(base_dir / "parameters.yaml", "w") as f:
+            yaml.dump({"schema": {"columns": base_columns}}, f)
 
     if params_dataset:
         with open(base_dir / "parameters_dataset.yaml", "w") as f:
@@ -467,6 +497,83 @@ class TestCLI:
             assert result.exit_code == 1
         finally:
             os.chdir(old_cwd)
+
+
+class TestInjectCacheSourceTables:
+    """Unit tests for the helper ``__main__`` calls before building the catalog.
+
+    Everything the training cache needs to find its bytes is declared in
+    ``catalog.yaml`` — which Hive table, and how that table is partitioned on
+    disk. This helper is the only place that reads it, so a user who renames
+    their time column in ``catalog.yaml`` changes nothing else (#326).
+    """
+
+    @staticmethod
+    def _entry(table, partition_filter=None, partition_cols=None, **over):
+        entry = {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": table,
+            "partition_filter": partition_filter or {},
+            "partition_cols": partition_cols or [],
+        }
+        entry.update(over)
+        return entry
+
+    def test_table_names_come_from_the_catalog(self):
+        params = {}
+        inject_cache_source_tables(params, {
+            "train_model_input": self._entry(
+                "recsys_prod_train_model_input",
+                partition_cols=[{"name": "snap_date", "type": "STRING"}]),
+        })
+        assert params["_cache_source_tables"] == {
+            "train_model_input": "recsys_prod_train_model_input"}
+
+    def test_partition_levels_come_from_the_catalog_in_declaration_order(self):
+        """``PARTITIONED BY (partition_filter keys…, partition_cols…)`` — the
+        two lists concatenated are the on-disk directory nesting."""
+        params = {}
+        inject_cache_source_tables(params, {
+            "train_model_input": self._entry(
+                "t",
+                partition_filter={
+                    "base_dataset_version": "abc", "train_variant_id": "v1"},
+                partition_cols=[
+                    {"name": "as_of_month", "type": "STRING"},
+                    {"name": "sku", "type": "STRING"},
+                ]),
+        })
+        assert params["_cache_partitions"]["train_model_input"] == {
+            "filter_keys": ["base_dataset_version", "train_variant_id"],
+            "cols": ["as_of_month", "sku"],
+        }
+
+    def test_an_entry_with_no_partitions_still_reports_empty_lists(self):
+        """Distinguishable from "no entry at all" — the cache node needs to say
+        which of the two happened when it refuses to compose a glob."""
+        params = {}
+        inject_cache_source_tables(params, {"val_model_input": self._entry("t")})
+        assert params["_cache_partitions"]["val_model_input"] == {
+            "filter_keys": [], "cols": []}
+
+    def test_non_hive_entries_are_skipped(self):
+        params = {}
+        inject_cache_source_tables(params, {
+            "train_model_input": {
+                "type": "ParquetDataset", "filepath": "x.parquet"},
+        })
+        assert "_cache_source_tables" not in params
+        assert "_cache_partitions" not in params
+
+    def test_names_that_are_not_caches_are_ignored(self):
+        params = {}
+        inject_cache_source_tables(params, {
+            "feature_table": self._entry(
+                "feature_table",
+                partition_cols=[{"name": "snap_date", "type": "STRING"}]),
+        })
+        assert "_cache_source_tables" not in params
 
 
 class TestEvaluationCLIFlags:
@@ -1658,7 +1765,7 @@ class TestCollectExistingSnapDates:
         catalog.add("preprocessed_feature_table", SimpleNamespace())
 
         with caplog.at_level(logging.WARNING):
-            out = _collect_existing_snap_dates(catalog)
+            out = _collect_existing_snap_dates(catalog, time_col="snap_date")
 
         # Exact, not "not in": an absent key and a `[]` value are the same
         # answer to build_month_plans but not the same behaviour here, and
@@ -2354,6 +2461,72 @@ class TestEntityColumnsDeclaredA28:
             ) as mock_spark:
                 runner.invoke(app, ["training"])
             # It got past A28 and reached the cold start it is allowed to reach.
+            mock_spark.assert_called()
+        finally:
+            os.chdir(old_cwd)
+
+
+class TestSchemaRolesRequiredAtTheEntryPoint:
+    """A forgotten ``schema.columns`` role stops the run in seconds, not minutes.
+
+    The alternative failure is the expensive one: without the check the
+    framework substitutes the example deployment's column names, and a run that
+    ranks the wrong column finishes normally and reports numbers.
+
+    Placement is the point (#326). ``get_schema`` could refuse instead, and a
+    real run would be blocked just as hard — but only once Spark had started,
+    which is a two-to-four-minute cold start per attempt.
+    """
+
+    @staticmethod
+    def _conf_without(tmp_path, role):
+        _setup_conf(tmp_path, params_dataset={"dataset": {"sample_ratio": 0.1}})
+        # Overwrite rather than pass a partial block through _setup_conf: that
+        # helper fills in whatever the caller left out, which is what keeps the
+        # other ~50 tests here from each declaring a schema. Here the omission
+        # *is* the test.
+        columns = {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+        del columns[role]
+        params_path = tmp_path / "conf" / "base" / "parameters.yaml"
+        with open(params_path, "w") as f:
+            yaml.dump({"schema": {"columns": columns}}, f)
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+    @pytest.mark.parametrize("role", ["time", "entity", "item"])
+    def test_a_missing_role_exits_before_spark_starts(self, tmp_path, role):
+        self._conf_without(tmp_path, role)
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, ["training"])
+            assert result.exit_code == 1
+            # The load-bearing assertion: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command.
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old_cwd)
+
+    def test_declaring_all_three_reaches_the_cold_start(self, tmp_path):
+        """The discriminating half: without it the tests above are also passed
+        by a check that rejects every training config outright."""
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {"sample_ratio": 0.1}},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                runner.invoke(app, ["training"])
             mock_spark.assert_called()
         finally:
             os.chdir(old_cwd)

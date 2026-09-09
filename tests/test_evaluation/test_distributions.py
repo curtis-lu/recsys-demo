@@ -18,10 +18,15 @@ from recsys_tfb.evaluation.distributions import (
 
 
 class TestPlotScoreHistogram:
+    # The item column is named for a deployment that is not the example one:
+    # ``item_col`` is a required argument (#326), and a frame still spelled
+    # ``prod_name`` would let a reinstated default pass these tests.
+    ITEM_COL = "sku"
+
     def _hist(self):
         return pd.DataFrame(
             {
-                "prod_name": ["A", "A", "B"],
+                self.ITEM_COL: ["A", "A", "B"],
                 "bin_center": [0.25, 0.75, 0.25],
                 "count": [2, 3, 5],
                 "bin_width": [0.5, 0.5, 0.5],
@@ -29,28 +34,30 @@ class TestPlotScoreHistogram:
         )
 
     def test_one_bar_trace_per_item(self):
-        fig = plot_score_histogram(self._hist())
+        fig = plot_score_histogram(self._hist(), item_col=self.ITEM_COL)
         assert isinstance(fig, go.Figure)
         assert all(isinstance(t, go.Bar) for t in fig.data)
         assert {t.name for t in fig.data} == {"A", "B"}
 
     def test_bar_data_is_bounded_to_bins(self):
-        fig = plot_score_histogram(self._hist())
+        fig = plot_score_histogram(self._hist(), item_col=self.ITEM_COL)
         a = next(t for t in fig.data if t.name == "A")
         # A has two bins -> two bars (not row count)
         assert list(a.x) == [0.25, 0.75]
         assert list(a.y) == [2, 3]
 
     def test_count_axis_avoids_scientific_notation(self):
-        fig = plot_score_histogram(self._hist())
+        fig = plot_score_histogram(self._hist(), item_col=self.ITEM_COL)
         assert fig.layout.yaxis.tickformat is not None
 
 
 class TestPlotScoreBoxplotByLabel:
+    ITEM_COL = "sku"
+
     def _stats(self):
         return pd.DataFrame(
             {
-                "prod_name": ["A", "A", "B", "B"],
+                self.ITEM_COL: ["A", "A", "B", "B"],
                 "label": [1, 0, 1, 0],
                 "q1": [1.0, 1.0, 2.0, 2.0],
                 "median": [2.0, 2.0, 3.0, 3.0],
@@ -61,11 +68,11 @@ class TestPlotScoreBoxplotByLabel:
         )
 
     def test_positive_and_negative_traces(self):
-        fig = plot_score_boxplot_by_label(self._stats())
+        fig = plot_score_boxplot_by_label(self._stats(), item_col=self.ITEM_COL)
         assert {t.name for t in fig.data} == {"Positive", "Negative"}
 
     def test_no_raw_points(self):
-        fig = plot_score_boxplot_by_label(self._stats())
+        fig = plot_score_boxplot_by_label(self._stats(), item_col=self.ITEM_COL)
         for t in fig.data:
             assert t.y is None
             assert len(t.q1) == 2  # one box per item, bounded

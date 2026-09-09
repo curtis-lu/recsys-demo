@@ -11,6 +11,30 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# What ``inject_cache_source_tables`` derives from ``conf/base/catalog.yaml``
+# for each cache entry: the ``partition_filter`` keys, then the
+# ``partition_cols`` names. Written out here rather than imported because these
+# tests do not go through ``__main__`` and therefore get no injection — this
+# stands in for it. Keep in step with the catalog by hand; the production path
+# never reads this.
+_CATALOG_PARTITIONS: dict[str, dict[str, list[str]]] = {
+    "val_model_input": {
+        "filter_keys": ["base_dataset_version"], "cols": ["snap_date"]},
+    "test_model_input": {
+        "filter_keys": ["base_dataset_version"],
+        "cols": ["snap_date", "prod_name"]},
+    "train_model_input": {
+        "filter_keys": ["base_dataset_version", "train_variant_id"],
+        "cols": ["snap_date"]},
+    "train_dev_model_input": {
+        "filter_keys": ["base_dataset_version", "train_variant_id"],
+        "cols": ["snap_date"]},
+    "calibration_model_input": {
+        "filter_keys": ["base_dataset_version", "calibration_variant_id"],
+        "cols": ["snap_date"]},
+}
+
+
 def _params_with_cache_root(cache_root: Path) -> dict:
     return {
         "hive": {"db": "ml_recsys"},
@@ -18,6 +42,10 @@ def _params_with_cache_root(cache_root: Path) -> dict:
         "base_dataset_version": "deadbeef",
         "train_variant_id": "v1",
         "calibration_variant_id": "c1",
+        "_cache_partitions": {
+            k: {"filter_keys": list(v["filter_keys"]), "cols": list(v["cols"])}
+            for k, v in _CATALOG_PARTITIONS.items()
+        },
     }
 
 
@@ -441,3 +469,114 @@ class TestPrepareLgbTrainInputs:
         assert isinstance(dev_h, LgbDatasetHandle)
         assert train_h.role == "train"
         assert dev_h.role == "train_dev"
+
+
+class TestPartitionNamesComeFromTheCatalog:
+    """The glob's directory levels are whatever ``catalog.yaml`` declared.
+
+    This repo is a configurable ranking framework: ``schema.columns.time`` is
+    the user's column, and the Hive partition that carries it is named in
+    ``catalog.yaml``. Before #326 the cache globbed the example spelling
+    verbatim, so a user who renamed either one got a ``FileNotFoundError``
+    naming a path that looked plausible — four Spark-cold-start minutes in.
+
+    These tests rename the partitions to names that appear nowhere in ``src/``
+    and assert the renamed names come out the other end. A literal put back
+    into ``populate_cache_from_hive`` turns them red on the glob assertion.
+    """
+
+    @staticmethod
+    def _recording_globs(monkeypatch, globs: list) -> None:
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.training.steps.local_cache."
+            "get_hive_table_location",
+            lambda *a, **kw: "hdfs:/warehouse/tbl",
+        )
+
+        def _copy(spark, src_glob, dst, glob):
+            globs.append(src_glob)
+            Path(dst).mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.training.steps.local_cache.copy_hdfs_to_local",
+            _copy,
+        )
+
+    def test_renamed_time_partition_is_what_gets_globbed(
+        self, tmp_path, monkeypatch
+    ):
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["_cache_partitions"]["train_model_input"] = {
+            "filter_keys": ["base_dataset_version", "train_variant_id"],
+            "cols": ["as_of_month"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_train_model_input(_spark_df(), params)
+
+        assert globs == [
+            "hdfs:/warehouse/tbl/base_dataset_version=deadbeef/"
+            "train_variant_id=v1/as_of_month=*"
+        ]
+
+    def test_renamed_filter_keys_are_what_gets_globbed(
+        self, tmp_path, monkeypatch
+    ):
+        """The outer levels come from the same place, not from a local mirror.
+
+        ``_CACHE_OUTER_PARTITIONS`` used to hand-copy every entry's
+        ``partition_filter`` keys with nothing keeping the two in step.
+        """
+        from recsys_tfb.pipelines.training.nodes import cache_val_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["scenario_id"] = "s7"
+        params["_cache_partitions"]["val_model_input"] = {
+            "filter_keys": ["scenario_id"],
+            "cols": ["as_of_month"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_val_model_input(_spark_df(), params)
+
+        assert globs == ["hdfs:/warehouse/tbl/scenario_id=s7/as_of_month=*"]
+
+    def test_single_month_copy_narrows_on_the_renamed_time_partition(
+        self, tmp_path, monkeypatch
+    ):
+        from recsys_tfb.pipelines.training.nodes import cache_test_model_input
+
+        params = _params_with_test_dates(tmp_path, ["2024-03-31"])
+        params["_cache_partitions"]["test_model_input"] = {
+            "filter_keys": ["base_dataset_version"],
+            "cols": ["as_of_month", "sku"],
+        }
+        globs: list[str] = []
+        self._recording_globs(monkeypatch, globs)
+
+        cache_test_model_input(_spark_df(), params)
+
+        # Only the first partition level is narrowed; ``sku`` below it comes
+        # along as part of the subtree.
+        assert globs == [
+            "hdfs:/warehouse/tbl/base_dataset_version=deadbeef/"
+            "as_of_month=2024-03-31"
+        ]
+
+    def test_missing_injection_names_the_key_that_is_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """No fallback: a guessed partition name fails as a path that matched
+        nothing, which names neither the guess nor where to fix it."""
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        del params["_cache_partitions"]
+        _stub_hdfs(monkeypatch)
+
+        with pytest.raises(KeyError, match="_cache_partitions"):
+            cache_train_model_input(_spark_df(), params)

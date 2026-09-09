@@ -12,6 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 
 
@@ -179,14 +180,19 @@ def build_core_concept_section(parameters: dict) -> ReportSection:
 
     presentation §一.2：定義 ＋ 用一個具體數字走一遍 ＋「下面每區＝它加總到
     什麼粒度」的地圖。不各區重複這條定義（會漂移）。
+
+    角色名一律走 ``core.schema.get_schema``，不在這裡自備一份預設表。這一段
+    印的是讀者自己的欄名，第二份預設表只會在某一天跟 ``core/schema`` 的那份
+    分岔——而分岔的樣子是報表印著「``prod_name``」、其餘各區印著使用者真正的
+    欄名，兩邊都不報錯（#326）。``get_schema`` 也負責把 ``entity`` 正規化成
+    list，所以這裡不必再判斷型別。
     """
-    cols = ((parameters.get("schema", {}) or {}).get("columns", {}) or {})
-    time_col = cols.get("time", "snap_date")
-    entity = cols.get("entity", ["cust_id"])
-    entity_str = "×".join(entity) if isinstance(entity, list) else str(entity)
-    item_col = cols.get("item", "prod_name")
-    score_col = cols.get("score", "score")
-    label_col = cols.get("label", "label")
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    entity_str = "×".join(schema["entity"])
+    item_col = schema["item"]
+    score_col = schema["score"]
+    label_col = schema["label"]
 
     description = (
         f"一個 query＝一組（{time_col} × {entity_str}）。query 內的候選 "

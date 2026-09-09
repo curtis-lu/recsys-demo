@@ -78,17 +78,6 @@ CACHE_SOURCE_TABLES: dict[str, str] = {
     "calibration_model_input": "calibration_model_input",
 }
 
-# Outer (string) Hive partitions encoding the variant boundaries.
-# Mirrors catalog.yaml's `partition_filter` keys; copy these as the
-# subtree root, then `snap_date=*` is the inner glob pattern.
-_CACHE_OUTER_PARTITIONS: dict[str, tuple[str, ...]] = {
-    "val_model_input": ("base_dataset_version",),
-    "test_model_input": ("base_dataset_version",),
-    "train_model_input": ("base_dataset_version", "train_variant_id"),
-    "train_dev_model_input": ("base_dataset_version", "train_variant_id"),
-    "calibration_model_input": ("base_dataset_version", "calibration_variant_id"),
-}
-
 
 def require_spark_input(df, dataset_name: str) -> None:
     """Reject anything but a Spark DataFrame before a cache path is composed.
@@ -265,18 +254,19 @@ def populate_cache_from_hive(
 ) -> None:
     """Copy the relevant Hive partition subtree to driver-local fs.
 
-    Local layout after copy:
-        <local_dst>/snap_date=.../prod_name=.../*.parquet
+    Local layout after copy: one directory level per partition column the source
+    table declares, in declaration order — e.g. with the example config,
+    ``<local_dst>/snap_date=.../prod_name=.../*.parquet``.
 
-    ``snap_date`` narrows the copy to a single month (test caching), and is the
-    partition value *verbatim* — the ``YYYY-MM-DD`` spelling Hive wrote, not the
-    ``YYYYMMDD`` directory form the cache path uses. A month the source table
-    does not hold makes the glob match nothing, and ``copy_hdfs_to_local`` raises
-    FileNotFoundError — that is how "configured a month but never ran dataset"
-    surfaces, so no separate coverage check exists. That path leaves an empty
-    destination directory behind (the copier mkdirs before globbing); it carries
-    no ``_SUCCESS``, so the partial-cache branch of every cache node clears and
-    rebuilds it on the next run.
+    ``snap_date`` narrows the copy to a single month (test caching),
+    and is the partition value *verbatim* — the ``YYYY-MM-DD`` spelling Hive
+    wrote, not the ``YYYYMMDD`` directory form the cache path uses. A month the
+    source table does not hold makes the glob match nothing, and
+    ``copy_hdfs_to_local`` raises FileNotFoundError — that is how "configured a
+    month but never ran dataset" surfaces, so no separate coverage check exists.
+    That path leaves an empty destination directory behind (the copier mkdirs
+    before globbing); it carries no ``_SUCCESS``, so the partial-cache branch of
+    every cache node clears and rebuilds it on the next run.
 
     Source-table resolution:
       1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
@@ -285,15 +275,44 @@ def populate_cache_from_hive(
          names (e.g. 'recsys_prod_train_model_input').
       2. CACHE_SOURCE_TABLES[dataset_name] — fallback used by unit tests that
          don't go through __main__.py and therefore have no auto-injection.
+
+    Partition names have **no** fallback, and that asymmetry is deliberate. A
+    table name guessed wrong fails loudly at ``get_hive_table_location``; a
+    partition name guessed wrong composes a glob that matches nothing, and the
+    FileNotFoundError that follows names a path rather than the guess that built
+    it. So the directory levels are read only from
+    ``parameters['_cache_partitions']`` — derived from ``catalog.yaml`` by
+    :func:`~recsys_tfb.pipelines.training.cache_sources.inject_cache_source_tables`,
+    which is the only place that knows what the user called their time column.
+    A caller without the injection gets a message naming the missing key
+    (#326; before it, this function globbed the example time column's name
+    verbatim, so a user who renamed ``schema.columns.time`` hit
+    FileNotFoundError four minutes into a run).
     """
     db = parameters["hive"]["db"]
     source_tables = parameters.get("_cache_source_tables", {})
     table = source_tables.get(dataset_name, CACHE_SOURCE_TABLES[dataset_name])
+    partitions = (parameters.get("_cache_partitions") or {}).get(dataset_name)
+    if not partitions or not partitions.get("cols"):
+        raise KeyError(
+            f"no partition layout for cache {dataset_name!r}: "
+            "parameters['_cache_partitions'] is injected from catalog.yaml by "
+            "inject_cache_source_tables, and the catalog entry must be a "
+            "HiveTableDataset declaring partition_cols. Without it there is no "
+            "way to know what this table's time partition column is called."
+        )
     location = get_hive_table_location(spark, db, table)
     outer = "/".join(
-        f"{tok}={parameters[tok]}"
-        for tok in _CACHE_OUTER_PARTITIONS[dataset_name]
+        f"{key}={parameters[key]}" for key in partitions["filter_keys"]
     )
-    inner = "snap_date=*" if snap_date is None else f"snap_date={snap_date}"
-    src_glob = f"{location.rstrip('/')}/{outer}/{inner}"
+    # The first partition_cols entry is the outermost directory level below the
+    # filter keys (HiveTableDataset emits PARTITIONED BY (filter keys…, cols…)),
+    # and it is the time column — the level a single-month copy narrows on.
+    # Levels below it are copied wholesale as part of the subtree.
+    time_col = partitions["cols"][0]
+    inner = (
+        f"{time_col}=*" if snap_date is None else f"{time_col}={snap_date}"
+    )
+    prefix = f"{location.rstrip('/')}/"
+    src_glob = f"{prefix}{outer}/{inner}" if outer else f"{prefix}{inner}"
     copy_hdfs_to_local(spark, src_glob, local_dst, glob=True)

@@ -314,7 +314,7 @@ def _slice_extra(from_node, only_node):
 
 
 def _collect_existing_snap_dates(
-    catalog: DataCatalog, time_col: str = "snap_date"
+    catalog: DataCatalog, time_col: str
 ) -> dict[str, list[str]]:
     """Ask the catalog which months each incrementally-built dataset already has.
 
@@ -334,9 +334,11 @@ def _collect_existing_snap_dates(
     that rebuilds (wasteful) rather than skips (silently stale), which is the
     direction this decision must fail in.
 
-    ``time_col`` comes from ``schema.time`` rather than being hardcoded: the
-    partition column is whatever the pipeline writes as its time column, and
-    this repo is a configurable ranking framework, not a snap_date-only one.
+    ``time_col`` comes from ``schema.time`` and has no default: the partition
+    column is whatever the pipeline writes as its time column, and this repo is
+    a configurable ranking framework. A default here would be a spelling that
+    is right for the example deployment and silently wrong for any other, and
+    every caller already passes the resolved value (#326).
     """
     existing: dict[str, list[str]] = {}
     for name in INCREMENTAL_DATASETS:

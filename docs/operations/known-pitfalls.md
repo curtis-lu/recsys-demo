@@ -82,7 +82,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   ========== 3 failed, 2557 passed, 2462 warnings in 273.16s (0:04:33) ===========
   ```
 
-  三個 fail ＝ `TestPrepareTrainInputsWeight` 兩項 ＋ 下面那項 `test_serialisation_round_trip_…`。
+  三個 fail ＝ `TestPrepareTrainInputsWeight` 兩項 ＋ 下面那項 `test_serialisation_round_trip_…`（**該項已於 2026-09-09 刪除**，見下）。
 
   **2026-08-31 的實測（main @ 49e5a8e，同一 worktree 的同一份 `data/`）是 8 個**：
 
@@ -113,7 +113,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算——那份沒有本機 warehouse 狀態，warehouse 相關的失效模式整類都不會出現，會讓人誤以為是自己改出來的。
 - ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
 
-- 【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing（單獨跑也紅、2 秒內確定性失敗，非組合跑互擾）。證據：於 `a79d1ab`（= 當時的 origin/main）開乾淨 worktree 單獨跑，同樣紅。**2026-08-25 覆核仍紅**，現行失敗原因是 `ImportError: cannot import name 'build_diagnostics_figures' from 'recsys_tfb.evaluation.report_builder'`——測試引用的函式已不存在，不是斷言不合。待獨立修。
+- ~~【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing。~~ **2026-09-09 已刪除該測試**（#326）。它比對的是一次重構前後的圖，重構的另一半（`build_diagnostics_figures`）早已被刪，函式不存在了，所以它從那時起就只是在 import 失敗——沒有任何行為還被它守著。刪掉之後**全量的既有 fail 是 2 個**（`TestPrepareTrainInputsWeight` 兩項）。
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 

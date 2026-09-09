@@ -188,3 +188,54 @@ class TestGetEntityGrouping:
         # config, from code A29 never inspects.
         with pytest.raises(ValueError, match="not an entity-grouping key"):
             get_entity_grouping(self._PARAMS, "train_split_key")
+
+
+class TestRenamedSchemaFixture:
+    """Meta test for the shared ``renamed_schema_params`` fixture.
+
+    A test that claims to prove "renaming works" is only meaningful if the
+    parameters it runs on really carry the renamed columns. This class is what
+    makes that a checked fact instead of an assumption.
+    """
+
+    def test_get_schema_returns_the_renamed_names(self, renamed_schema_params):
+        schema = get_schema(renamed_schema_params)
+        assert schema["time"] == "as_of_month"
+        assert schema["entity"] == ["store_id"]
+        assert schema["item"] == "sku"
+
+    def test_identity_columns_carry_the_renamed_names(self, renamed_schema_params):
+        schema = get_schema(renamed_schema_params)
+        assert schema["identity_columns"] == ["as_of_month", "store_id", "sku"]
+
+    def test_no_example_column_name_survives(self, renamed_schema_params):
+        """The point of the fixture: nothing it resolves to may collide with
+        the example deployment's spellings, or code that hardcodes one of them
+        keeps passing."""
+        schema = get_schema(renamed_schema_params)
+        resolved = {schema["time"], schema["item"], *schema["entity"]}
+        assert resolved.isdisjoint({"snap_date", "cust_id", "prod_name"})
+
+    def test_categorical_values_are_keyed_by_the_renamed_item(
+        self, renamed_schema_params
+    ):
+        """A category list keyed by the old item name is invisible to every
+        consumer, and invariant A3 would then reject the config for a reason
+        that has nothing to do with what the test was about."""
+        schema = get_schema(renamed_schema_params)
+        assert set(schema["categorical_values"]) == {schema["item"]}
+
+    def test_mis_nested_shape_is_silently_ignored(self, renamed_schema_params):
+        """Pins the trap the fixture exists to avoid.
+
+        Moving the column names one level up — straight under ``schema``,
+        skipping ``columns`` — makes ``get_schema`` ignore the whole block and
+        hand back the built-in example names. No error, no warning: a test
+        copied onto such a dict never exercises a renamed column at all.
+        """
+        columns = renamed_schema_params["schema"]["columns"]
+        mis_nested = {"schema": dict(columns)}
+        schema = get_schema(mis_nested)
+        assert schema["time"] == "snap_date"
+        assert schema["entity"] == ["cust_id"]
+        assert schema["item"] == "prod_name"

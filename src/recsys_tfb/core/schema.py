@@ -20,6 +20,26 @@ _DEFAULTS = {
 _SCALAR_KEYS = ("time", "item", "label", "score", "rank")
 
 
+#: Roles the user has to declare, because they name columns that already exist
+#: in the user's own tables. The framework has no basis for guessing them: a
+#: default here is a silent assumption that the deployment is the example one
+#: (bank product recommendation), and a wrong guess produces a run that
+#: finishes and computes the wrong thing rather than one that fails.
+#:
+#: ``label`` / ``score`` / ``rank`` are deliberately NOT here — those columns
+#: are produced by this framework, so it is entitled to name them, and making
+#: users declare three names they never chose buys nothing.
+#:
+#: Enforced by :func:`validate_schema_config` at the CLI entry, not by
+#: :func:`get_schema`. Real runs are blocked just as hard either way (every
+#: command validates before a Spark session exists, so the message arrives in
+#: seconds rather than after a cold start), while ``get_schema`` stays usable
+#: as a programmatic fallback for tests. Removing these three from
+#: :data:`_DEFAULTS` is the separate follow-up (#328); until then the built-in
+#: defaults still answer for callers that never went through the CLI.
+_REQUIRED_ROLES = ("time", "entity", "item")
+
+
 def get_schema(parameters: dict) -> dict:
     """Return column schema from parameters with defaults.
 
@@ -86,14 +106,15 @@ def validate_schema_config(parameters: dict) -> None:
     - ``identity_columns`` ([time] + entity + [item]) must not contain
       duplicates.
     - ``categorical_values`` must be a mapping of non-empty str -> list.
+    - ``time``, ``entity`` and ``item`` must be declared (:data:`_REQUIRED_ROLES`).
     - The item column (``schema.item``) — when declared in
       ``dataset.prepare_model_input.categorical_columns`` — must have a
       non-empty entry in ``schema.categorical_values``. This invariant (A3)
       is delegated to :func:`recsys_tfb.core.consistency.resolved_item_values`
       so config-time and runtime guards share one definition; see that
       function for the precise rule.
-    - Missing keys are allowed (they fall back to :data:`_DEFAULTS` in
-      :func:`get_schema`).
+    - The other keys (``label``, ``score``, ``rank``) may be omitted; they
+      fall back to :data:`_DEFAULTS` in :func:`get_schema`.
 
     Args:
         parameters: The full parameters dict.
@@ -107,6 +128,25 @@ def validate_schema_config(parameters: dict) -> None:
         raise ValueError(
             "Invalid schema.columns in parameters.yaml: expected mapping, got "
             f"{type(raw_columns).__name__}"
+        )
+
+    # Required roles — see _REQUIRED_ROLES for why these three and not the
+    # other three. Reported together rather than one per run: a user who
+    # declared none of them should not have to re-run three times to find out.
+    missing = [role for role in _REQUIRED_ROLES if role not in raw_columns]
+    if missing:
+        raise ValueError(
+            "Missing schema.columns in parameters.yaml: "
+            f"{', '.join(missing)}. These name columns in your own tables, so "
+            "this framework cannot guess them. Declare each one under "
+            "'schema:' -> 'columns:' in conf/base/parameters.yaml, e.g.\n"
+            "  schema:\n"
+            "    columns:\n"
+            "      time: <the column one ranking request is scoped to>\n"
+            "      entity: [<the column(s) naming who is being ranked for>]\n"
+            "      item: <the column naming what is being ranked>\n"
+            "('label', 'score' and 'rank' are produced by this framework and "
+            "keep their defaults.)"
         )
 
     # Scalar string keys

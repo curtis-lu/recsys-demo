@@ -296,7 +296,7 @@ cust_id_col = entity_cols[0]
 | 位置 | 處置 |
 |---|---|
 | `core/consistency.py:1151` 的 `_REQUIRED_COLUMNS = {"cust_id", "snap_date", "prod_name", "score"}` | 動到 A11、跨 evaluation，**開了 issue #220**，不在本次範圍 |
-| `evaluation/statistics.py:9,40` 的 `entity_col: str = "cust_id"` 預設值 | `src/` 裡零呼叫端（只有測試在用），不在活路徑上，不處理 |
+| `evaluation/statistics.py:9,40` 的 `entity_col: str = "cust_id"` 預設值 | ~~`src/` 裡零呼叫端（只有測試在用），不在活路徑上，不處理~~ **2026-09-09 翻案（#326）：整個 `evaluation/statistics.py` 連同 `evaluation/calibration.py` 刪除。** 「不在活路徑上」是不修它的理由，不是留著它的理由——留著的代價是每一輪稽核都要重新掃出它、每個讀到它的人都要重新查它是不是還活著。已知代價：per-item／per-segment 的「每 entity 平均正例數」與「有正例的 entity 數」沒有等價替代品，刪掉即不再產出；日後若要，應以 Spark 版重寫進報表層。 |
 
 ## 決定 6：7 個 diagnosis node 留在原地，加一段導航 docstring
 
