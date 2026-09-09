@@ -155,7 +155,7 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
 
     # Manifest reports the right shape
     assert set(manifest["snap_dates"]) == {"2025-01-31", "2025-02-28"}
-    assert set(manifest["prods"]) == {"prod_A", "prod_B"}
+    assert set(manifest["items"]) == {"prod_A", "prod_B"}
     assert manifest["model_version"] == "v_test_001"
     assert manifest["n_rows_written"] == len(all_written)
 

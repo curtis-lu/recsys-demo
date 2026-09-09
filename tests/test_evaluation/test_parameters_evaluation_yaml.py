@@ -14,11 +14,11 @@ def test_k_values_is_superset():
     assert _load()["k_values"] == [1, 2, 3, 4, 5, "all"]
 
 
-def test_product_categories_block():
-    pc = _load()["product_categories"]
-    assert pc["enabled"] is True
-    assert pc["unmapped"] == "singleton"
-    assert pc["mapping"]["fund"] == ["fund_stock", "fund_bond", "fund_mix"]
+def test_item_categories_block():
+    cat_cfg = _load()["item_categories"]
+    assert cat_cfg["enabled"] is True
+    assert cat_cfg["unmapped"] == "singleton"
+    assert cat_cfg["mapping"]["fund"] == ["fund_stock", "fund_bond", "fund_mix"]
 
 
 def test_report_display_and_sections():

@@ -122,11 +122,11 @@ segment source 可指向任何 keyed Hive table，不限 `sample_pool`。實務�
 
 監控模式指向 `inference_population` 可讓切群定義對齊**實際被評分的客戶**，避免用 training 母體切 inference 結果造成分群定義分歧。`inference_population` 的 grain 為 `(time, entity)`、一 key 一列，`dropDuplicates` 為 no-op、不會 fan-out，只要它帶有分群欄即可直接作為 segment source——evaluation 端只動 `segment_sources` config（程式不變，見 [`inference.md`](inference.md) §3.5）。
 
-### 3.3 產品大類
+### 3.3 item 大類
 
 ```yaml
 evaluation:
-  product_categories:
+  item_categories:
     enabled: true
     unmapped: singleton
     mapping:
@@ -499,7 +499,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 想評估一個尚未產出預測的新月份（`dataset.test_snap_dates` 尚未列入） | 先補資料再評估：dataset → training 的 predict 切片 → 本 pipeline 標準 full run | `model_version` 不變（`test_snap_dates` 不進版本 hash），因此**不重訓**；新舊月份報表並存於同一模型身分之下。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | `k_values` | 標準 full run | 需要重新計算所有 metrics |
 | `segment_columns`／`segment_sources` | 標準 full run | 需要重新 join 並更新 enriched schema/data |
-| `product_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
+| `item_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
 | `baseline.lookback_months` | 標準 full run | 需要重新讀歷史 labels 與計算 baseline |
 | 標準 report `sections`／`display`／`diagnostics`（只影響報表怎麼呈現，不影響任何診斷怎麼算） | 標準 full run 或從 `generate_report` 接續 | `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 是記憶體產物，接續仍會補跑對應 node（見 4.6 節） |
 | `evaluation.diagnosis.*`（任一項診斷的 `enabled` 或計算參數，如 `config_shift`／`sample`——這是診斷唯一的使用者開關） | 標準 full run | 該項診斷的 JSON 已落地磁碟；`--from-node generate_report` 的自動擴張只看「存在與否」不看新鮮度，只改開關會讀到舊設定算出的舊結果 |

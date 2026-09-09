@@ -100,7 +100,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
   <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（需 <code>segment_sources</code> 提供欄；否則該段不出現，見 README §4）</td></tr>
   <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="../pipelines/evaluation.md">evaluation.md</a>）</td></tr>
 </table>
-<p class="sub">可選：<code>product_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>
+<p class="sub">可選：<code>item_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>
 
 <h2>6. 常見疑問</h2>
 <table>

@@ -501,7 +501,7 @@ class TestTrainingPipelineE2E:
         # Provide stub predict_manifest and evaluation_results so log_experiment has inputs.
         # catalog.add overwrites any existing registration.
         catalog.add("predict_manifest", MemoryDataset({
-            "snap_dates": [], "prods": [], "model_version": "test", "n_rows_written": 0
+            "snap_dates": [], "items": [], "model_version": "test", "n_rows_written": 0
         }))
         stub_eval = {
             "overall_map": 0.5,

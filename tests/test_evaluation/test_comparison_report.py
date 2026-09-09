@@ -19,7 +19,7 @@ def _metrics(map_at_1: float = 0.5, hit_rate_at_3: float = 0.7) -> dict:
         },
         "macro_avg": {"by_item": {"hit_rate@1": 0.6, "hit_rate@3": 0.75,
                                   "map_attr@3": 0.45, "ndcg_attr@3": 0.5}},
-        "dataset_overview": {"totals": {"n_products": 2}},
+        "dataset_overview": {"totals": {"n_items": 2}},
     }
 
 
@@ -38,7 +38,7 @@ def _params() -> dict:
                     "guardrail_recall_k": [1, 3],
                 },
             },
-            "product_categories": {"enabled": False},
+            "item_categories": {"enabled": False},
         },
     }
 
@@ -104,12 +104,12 @@ def test_category_section_present_when_enabled_and_present():
                               "map_attr@1": 0.4, "map_attr@3": 0.5,
                               "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
-        "dataset_overview": {"totals": {"n_products": 1}},
+        "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
-    p["evaluation"]["product_categories"]["enabled"] = True
+    p["evaluation"]["item_categories"]["enabled"] = True
     comp = _comparison(m_a, m_b)
     out = assemble_comparison_report(m_a, m_b, comp, _coverage(), p)
     assert "大類" in out
@@ -136,7 +136,7 @@ def test_overall_section_hides_ndcg():
 
 def test_category_overall_section_hides_ndcg():
     """大類 overall 表是第二個 key-agnostic 洩漏點（與 _build_overall_section
-    不同函式）。fixture 必須讓 product_categories.enabled=True 且 metrics 帶
+    不同函式）。fixture 必須讓 item_categories.enabled=True 且 metrics 帶
     category.overall 含 ndcg，否則該段落回 None → 假綠。"""
     from recsys_tfb.evaluation.comparison.report import _build_category_section
     m_a, m_b = _metrics(0.6), _metrics(0.4)
@@ -146,12 +146,12 @@ def test_category_overall_section_hides_ndcg():
                               "map_attr@1": 0.4, "map_attr@3": 0.5,
                               "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
-        "dataset_overview": {"totals": {"n_products": 1}},
+        "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
-    p["evaluation"]["product_categories"]["enabled"] = True
+    p["evaluation"]["item_categories"]["enabled"] = True
     sec = _build_category_section(m_a, m_b, p)
     assert sec is not None, "段落回 None 就什麼都沒測到（假綠）"
     overall = sec.tables[sec.table_titles.index("大類 overall")]
