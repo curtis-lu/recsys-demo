@@ -62,6 +62,9 @@ def _quick_train_adapter(lgb_handles, training_parameters):
 def training_parameters():
     return {
         "random_seed": 42,
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        }},
         "training": {
             "algorithm": "lightgbm",
             "algorithm_params": {
@@ -170,7 +173,10 @@ def lgb_handles(synthetic_model_inputs, preprocessor_metadata, training_paramete
         "cache": {"root": str(tmp_path / "cache")},
         "base_dataset_version": "v1",
         "train_variant_id": "tv1",
-        "schema": {"columns": {"label": "label"}},
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label",
+        }},
     }
     train_lgb_h, train_dev_lgb_h = prepare_lgb_train_inputs(
         train_h, train_dev_h, preprocessor_metadata, params

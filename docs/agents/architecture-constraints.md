@@ -485,15 +485,25 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 ## S5. `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns`
 
-`get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、不會有警告、也不算錯誤**——它被整塊忽略，每個呼叫端拿到的都是 `_DEFAULTS`：
+`get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、也不會有警告**——它被整塊忽略。#328 之前連錯都不算，每個呼叫端拿到的都是 `_DEFAULTS`；#328 把 `time`／`entity`／`item` 的內建預設拿掉之後，這三個角色少宣告會 **raise**，剩下三個仍然安靜掉進預設：
 
 ```python
 {"schema": {"entity": ["branch_id", "cust_id"], "item": "sku"}}
-# get_schema -> {'entity': ['cust_id'], 'item': 'prod_name', ...}   ← 你寫的被丟掉
+# get_schema -> ValueError: Missing schema.columns in parameters.yaml: time, entity, item
+#               （#328 之前：安靜回 {'entity': ['cust_id'], 'item': 'prod_name', ...}）
 
-{"schema": {"columns": {"entity": ["branch_id", "cust_id"], "item": "sku"}}}
-# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', ...}
+{"schema": {"columns": {"time": "dt", "entity": ["branch_id", "cust_id"],
+                        "item": "sku"},
+            "score": "pred"}}
+# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', 'score': 'score', ...}
+#               ↑ score 寫錯層，安靜被丟掉、回預設 'score'——這半邊沒有變
+
+{"schema": {"columns": {"time": "dt", "entity": ["branch_id", "cust_id"],
+                        "item": "sku", "score": "pred"}}}
+# get_schema -> {'entity': ['branch_id', 'cust_id'], 'item': 'sku', 'score': 'pred', ...}
 ```
+
+**這條在 #328 之後仍然要留著**，理由有二：（1）`label`／`score`／`rank` 是框架自己產的欄、預設保留，寫錯層照樣無聲無息；（2）掃描報得出**檔名與行號**，而 raise 只會在某個 fixture 深處炸開，訊息裡沒有那份 dict 寫在哪。
 
 這條**不是**預防性守衛。開票時（#274）`tests/` 有 **24 個定義點**是前一種寫法，而且**沒有一個因此測錯東西**——每一處寫下的值剛好都等於預設值。這正是它危險的地方：它不是 bug，是**照抄來源**。下一個要寫多欄 entity 測試的人隨手抄一處，第二欄無聲消失，測試對著不支援多欄的程式碼全綠。#263 一開工就撞到 `test_comparison_restrict.py::_params()` 正是這個形狀。
 
@@ -504,11 +514,11 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
 | 2 | 任何深度都不得宣告 `identity_columns` | 它是 `get_schema` **推導**出來的（`[time] + entity + [item]`），不是設定鍵 |
 
-**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _DEFAULTS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
+**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_DEFAULTS`），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_ROLE_KEYS`——六個角色的完整清單；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
 
 ```
 tests/params.py:3: schema.entity -- a role belongs under schema.columns

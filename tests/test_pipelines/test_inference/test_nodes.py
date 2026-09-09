@@ -53,6 +53,9 @@ def parameters():
         # a fixture without it fails loudly instead of stamping None on the
         # chunk report.
         "run_id": "20250101_000000_test",
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        }},
         "inference": {
             "snap_dates": ["2024-03-31"],
             "products": ["exchange_fx", "fund_stock", "fund_bond"],

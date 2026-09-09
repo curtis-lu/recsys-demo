@@ -466,7 +466,10 @@ class TestPrepareLgbTrainInputs:
             "cache": {"root": str(tmp_path / "cache")},
             "base_dataset_version": "v1",
             "train_variant_id": "tv1",
-            "schema": {"columns": {"label": "label"}},
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"],
+                "item": "prod_name", "label": "label",
+            }},
             "training": {"algorithm": "lightgbm"},
         }
 

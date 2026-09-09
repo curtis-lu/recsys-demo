@@ -1,16 +1,28 @@
 """Centralized column schema for all pipelines.
 
-Provides get_schema() to retrieve column names from parameters with defaults
-that are fully backward-compatible with the existing hard-coded values.
+Provides get_schema() to retrieve column names from parameters. The three
+roles that name columns in the user's own tables (time / entity / item) have
+no defaults and must be declared; the three this framework produces itself
+(label / score / rank) do.
 """
 
 import copy
 
 
+#: Every role :func:`get_schema` resolves, in the order
+#: :func:`get_schema_for_hash` emits them.
+#:
+#: Kept separate from :data:`_DEFAULTS` since #328: three of these roles have
+#: no default any more, so a dict of defaults can no longer double as the list
+#: of settable keys. Using ``_DEFAULTS`` for the merge filter would silently
+#: drop a user's declared ``time`` / ``entity`` / ``item``; using it for the
+#: hash key list would change ``base_dataset_version`` for every existing user.
+_ROLE_KEYS = ("time", "entity", "item", "label", "score", "rank")
+
+
+#: Defaults for the roles this framework produces. The other three are
+#: deliberately absent -- see :data:`_REQUIRED_ROLES`.
 _DEFAULTS = {
-    "time": "snap_date",
-    "entity": ["cust_id"],
-    "item": "prod_name",
     "label": "label",
     "score": "score",
     "rank": "rank",
@@ -30,21 +42,40 @@ _SCALAR_KEYS = ("time", "item", "label", "score", "rank")
 #: are produced by this framework, so it is entitled to name them, and making
 #: users declare three names they never chose buys nothing.
 #:
-#: Enforced by :func:`validate_schema_config` at the CLI entry, not by
-#: :func:`get_schema`. Real runs are blocked just as hard either way (every
-#: command validates before a Spark session exists, so the message arrives in
-#: seconds rather than after a cold start), while ``get_schema`` stays usable
-#: as a programmatic fallback for tests. Removing these three from
-#: :data:`_DEFAULTS` is the separate follow-up (#328); until then the built-in
-#: defaults still answer for callers that never went through the CLI.
+#: Enforced twice, on purpose (#328). :func:`validate_schema_config` runs at
+#: the CLI entry and collects every omission into one message before a Spark
+#: session exists, so a real run fails in seconds rather than after a cold
+#: start. :func:`get_schema` then refuses again for anything that never went
+#: through the CLI -- which in practice means tests. Leaving only the CLI gate
+#: would let an undeclared test config keep resolving to the example
+#: deployment's column names and stay green against code that cannot handle
+#: any other spelling (#274).
 _REQUIRED_ROLES = ("time", "entity", "item")
 
 
-def get_schema(parameters: dict) -> dict:
-    """Return column schema from parameters with defaults.
+def _missing_roles_message(missing: list) -> str:
+    """The one message both gates raise, so their wording cannot drift."""
+    return (
+        "Missing schema.columns in parameters.yaml: "
+        f"{', '.join(missing)}. These name columns in your own tables, so "
+        "this framework cannot guess them. Declare each one under "
+        "'schema:' -> 'columns:' in conf/base/parameters.yaml, e.g.\n"
+        "  schema:\n"
+        "    columns:\n"
+        "      time: <the column one ranking request is scoped to>\n"
+        "      entity: [<the column(s) naming who is being ranked for>]\n"
+        "      item: <the column naming what is being ranked>\n"
+        "('label', 'score' and 'rank' are produced by this framework and "
+        "keep their defaults.)"
+    )
 
-    Reads ``parameters["schema"]["columns"]`` when present; falls back to
-    hard-coded defaults that match the current codebase conventions.
+
+def get_schema(parameters: dict) -> dict:
+    """Return column schema from parameters.
+
+    Reads ``parameters["schema"]["columns"]``. The three roles in
+    :data:`_REQUIRED_ROLES` must be declared there; ``label`` / ``score`` /
+    ``rank`` fall back to :data:`_DEFAULTS`.
 
     The ``entity`` field is always normalised to a list.  An automatically
     derived ``identity_columns`` field is appended as ``[time] + entity + [item]``.
@@ -60,12 +91,19 @@ def get_schema(parameters: dict) -> dict:
     Returns:
         A new dict with keys: time, entity, item, label, score, rank,
         identity_columns, categorical_values.
+
+    Raises:
+        ValueError: If any of :data:`_REQUIRED_ROLES` is not declared.
     """
     schema_section = parameters.get("schema", {}) or {}
     columns = schema_section.get("columns", {}) or {}
 
     schema = copy.deepcopy(_DEFAULTS)
-    schema.update({k: v for k, v in columns.items() if k in _DEFAULTS})
+    schema.update({k: v for k, v in columns.items() if k in _ROLE_KEYS})
+
+    missing = [role for role in _REQUIRED_ROLES if role not in schema]
+    if missing:
+        raise ValueError(_missing_roles_message(missing))
 
     # Normalise entity to list
     if isinstance(schema["entity"], str):
@@ -92,7 +130,7 @@ def get_schema_for_hash(parameters: dict) -> dict:
     the base dataset version.
     """
     schema = get_schema(parameters)
-    keys = list(_DEFAULTS) + ["categorical_values"]
+    keys = list(_ROLE_KEYS) + ["categorical_values"]
     return {k: schema[k] for k in keys}
 
 
@@ -116,6 +154,10 @@ def validate_schema_config(parameters: dict) -> None:
     - The other keys (``label``, ``score``, ``rank``) may be omitted; they
       fall back to :data:`_DEFAULTS` in :func:`get_schema`.
 
+    Runs at the CLI entry so every omission is reported at once. It is the
+    fast, complete gate, not the only one: :func:`get_schema` refuses the same
+    three roles for callers that never went through the CLI.
+
     Args:
         parameters: The full parameters dict.
 
@@ -135,19 +177,7 @@ def validate_schema_config(parameters: dict) -> None:
     # declared none of them should not have to re-run three times to find out.
     missing = [role for role in _REQUIRED_ROLES if role not in raw_columns]
     if missing:
-        raise ValueError(
-            "Missing schema.columns in parameters.yaml: "
-            f"{', '.join(missing)}. These name columns in your own tables, so "
-            "this framework cannot guess them. Declare each one under "
-            "'schema:' -> 'columns:' in conf/base/parameters.yaml, e.g.\n"
-            "  schema:\n"
-            "    columns:\n"
-            "      time: <the column one ranking request is scoped to>\n"
-            "      entity: [<the column(s) naming who is being ranked for>]\n"
-            "      item: <the column naming what is being ranked>\n"
-            "('label', 'score' and 'rank' are produced by this framework and "
-            "keep their defaults.)"
-        )
+        raise ValueError(_missing_roles_message(missing))
 
     # Scalar string keys
     for key in _SCALAR_KEYS:
@@ -232,8 +262,8 @@ def validate_schema_config(parameters: dict) -> None:
 #: ``dataset`` keys that declare the unit a per-entity operation groups on.
 #: Both default to the full ``schema.entity``; both are validated by invariant
 #: A29 (:func:`recsys_tfb.core.consistency.entity_grouping_key_errors`).
-#: Deliberately NOT part of ``_DEFAULTS``: everything in that dict flows into
-#: :func:`get_schema_for_hash`, so adding a key there would move
+#: Deliberately NOT part of :data:`_ROLE_KEYS`: every key in that tuple flows
+#: into :func:`get_schema_for_hash`, so adding one there would move
 #: ``base_dataset_version`` for every existing user who has not asked for any
 #: of this. See docs/adr/0016-split-unit-declared-by-two-keys.md.
 ENTITY_GROUPING_KEYS: tuple[str, ...] = ("train_split_keys", "val_sample_keys")

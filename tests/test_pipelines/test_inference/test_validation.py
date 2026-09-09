@@ -27,6 +27,9 @@ pytestmark = pytest.mark.spark
 @pytest.fixture
 def parameters():
     return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        }},
         "inference": {
             "snap_dates": ["2024-03-31"],
             "products": ["exchange_fx", "fund_stock", "fund_bond"],
@@ -340,6 +343,9 @@ class TestScoreVariesWithinGroup:
         partition count had on small populations.
         """
         parameters = {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            }},
             "inference": {
                 "snap_dates": ["2024-03-31"],
                 "products": ["exchange_fx"],

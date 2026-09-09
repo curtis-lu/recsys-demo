@@ -920,13 +920,16 @@ class TestSplitUnitKeysVersionRouting:
     def test_neither_key_reaches_the_schema_hash_payload(self):
         """The one structural move that would break zero migration for everyone.
 
-        ADR-0016 rejects putting these keys in ``core.schema._DEFAULTS``: that
-        dict flows wholesale into ``get_schema_for_hash``, so a key added there
-        joins ``base_dataset_version`` for every user, including the ones who
-        never declared it. The tempting cleanup ("they describe the entity, so
-        they belong in schema") is exactly the move this forbids.
+        ADR-0016 rejects putting these keys among ``core.schema``'s role keys:
+        ``_ROLE_KEYS`` flows wholesale into ``get_schema_for_hash``, so a key
+        added there joins ``base_dataset_version`` for every user, including
+        the ones who never declared it. The tempting cleanup ("they describe
+        the entity, so they belong in schema") is exactly the move this
+        forbids. (Before #328 that dict was ``_DEFAULTS``; the split moved the
+        hash payload onto ``_ROLE_KEYS`` without changing what it contains.)
         """
-        payload = get_schema_for_hash({"schema": {"columns": {"entity": ["cust_id"]}}})
+        payload = get_schema_for_hash({"schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}}})
         for key in ENTITY_GROUPING_KEYS:
             assert key not in payload
 

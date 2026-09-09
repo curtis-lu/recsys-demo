@@ -44,9 +44,11 @@ dataset pipeline 有兩個「以 entity 為單位」的操作：
 
 ## 為什麼不放進 `schema` 區塊
 
-概念上這兩個鍵是在描述 entity 的粒度，放 `schema:` 比較乾淨。但 `core/schema.py` 的 `_DEFAULTS` 整份會進入 `get_schema_for_hash` 的雜湊輸入，也就是進入 `base_dataset_version`。實測：往 `_DEFAULTS` 加一個鍵，同一組參數的 `base_dataset_version` 就會變 —— **所有既有 dataset 產物與模型立即失效**，而使用者根本還沒用到多欄 entity。
+概念上這兩個鍵是在描述 entity 的粒度，放 `schema:` 比較乾淨。但 `core/schema.py` 的角色鍵整份會進入 `get_schema_for_hash` 的雜湊輸入，也就是進入 `base_dataset_version`。實測：往角色鍵加一個，同一組參數的 `base_dataset_version` 就會變 —— **所有既有 dataset 產物與模型立即失效**，而使用者根本還沒用到多欄 entity。
 
-所以兩個鍵住 `dataset:`，命名對齊既有的 `dataset.sample_group_keys`（同樣是欄名清單）。`get_entity_grouping` 放在 `core/schema.py` 但**不在** `_DEFAULTS` 裡，就是這個取捨的落點。
+> 2026-09-09（#328）補記：這份雜湊輸入原本就是 `_DEFAULTS` 這個 dict。#328 把 `time`／`entity`／`item` 的預設拿掉之後，角色鍵清單搬到 `_ROLE_KEYS`，雜湊輸入跟著改讀它——**內容一個不多一個不少，`base_dataset_version` 不變**（實測同一組參數前後都是 `5f1d57bc`）。本裁決不受影響，只是要盯的識別字從 `_DEFAULTS` 換成 `_ROLE_KEYS`。
+
+所以兩個鍵住 `dataset:`，命名對齊既有的 `dataset.sample_group_keys`（同樣是欄名清單）。`get_entity_grouping` 放在 `core/schema.py` 但**不在**角色鍵（`_ROLE_KEYS`）裡，就是這個取捨的落點。
 
 ## 為什麼預設是完整 entity，不是第一欄
 

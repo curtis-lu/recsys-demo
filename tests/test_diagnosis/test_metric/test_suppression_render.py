@@ -44,9 +44,15 @@ _COMPLETENESS_TITLE = "本次執行的完整性檢查"
 
 _N_AXIS_MAX = 44  # floor(sqrt(MAX_FIGURE_POINTS)) == floor(sqrt(2000))
 
+#: Nested under ``columns`` because that is the only layer ``get_schema``
+#: reads. It used to sit one level up and still worked -- by falling through
+#: to built-in defaults that happened to spell the same names (#274). Since
+#: #328 time / entity / item have no defaults, so the mis-nesting raises.
 _SCHEMA = {
-    "time": "snap_date", "entity": ["cust_id"],
-    "item": "prod_name", "label": "label", "score": "score",
+    "columns": {
+        "time": "snap_date", "entity": ["cust_id"],
+        "item": "prod_name", "label": "label", "score": "score",
+    },
 }
 
 

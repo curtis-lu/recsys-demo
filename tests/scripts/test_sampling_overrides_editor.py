@@ -195,7 +195,8 @@ class TestResolveKeys:
 def _params(weight_keys=("prod_name", "label"),
             group_keys=("cust_segment_typ", "prod_name", "label")):
     return {
-        "schema": {"columns": {"item": "prod_name"},
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name"},
                    "categorical_values": {"prod_name": ["a", "b"]}},
         "dataset": {"prepare_model_input": {"categorical_columns": ["prod_name"]},
                     "sample_group_keys": list(group_keys)},
@@ -916,9 +917,11 @@ class TestAggregateSurfaces:
 class TestToYamlCli:
     def _write_params(self, tmp_path):
         params = tmp_path / "p.yaml"
-        # schema.columns only needs 'item' here; label/time default in get_schema.
+        # time / entity / item have no defaults since #328, so all three are
+        # declared; label keeps its default in get_schema.
         params.write_text(
-            "schema:\n  columns:\n    item: prod_name\n"
+            "schema:\n  columns:\n    time: snap_date\n"
+            "    entity: [cust_id]\n    item: prod_name\n"
             "  categorical_values:\n    prod_name: [a, b]\n"
             "dataset:\n  prepare_model_input:\n"
             "    categorical_columns: [prod_name]\n"
