@@ -40,22 +40,23 @@ from typing import NamedTuple
 
 import typer
 
+from recsys_tfb.evaluation.report_builder import (
+    OVERVIEW_CELL_GROUPS as CELL_GROUPS,
+    RENAMED_OVERVIEW_KEYS as RENAMES,
+)
+
 app = typer.Typer(add_completion=False)
 
-#: ``old key -> new key``. Every rename this script performs, and the only ones.
-#: Deliberately absent: anything spelled ``snap_date``. The time vocabulary is
-#: kept (ADR-0017), so ``by_snap_date`` / ``n_snap_dates`` must survive
-#: untouched — a migration that "tidies" them corrupts the file for the reader.
-RENAMES = {
-    "n_products": "n_items",
-    "n_customers": "n_entities",
-    "avg_positives_per_customer": "avg_positives_per_entity",
-}
-
-#: Sub-dicts of ``dataset_overview`` whose *values* are per-key cells carrying
-#: renameable keys. ``totals`` is handled separately: it is one cell, not a map
-#: of them.
-CELL_GROUPS = ("by_snap_date", "by_item", "by_segment")
+#: ``RENAMES`` (``old key -> new key``) and ``CELL_GROUPS`` are **imported, not
+#: restated**. The reader that refuses an un-migrated file
+#: (``report_builder._dataset_overview``) reads the same two, so the migrator
+#: cannot come to disagree with the detector about which keys are old — the one
+#: drift that would leave a file refused by the reader and reported "already
+#: migrated" by this script.
+#:
+#: Deliberately absent from ``RENAMES``: anything spelled ``snap_date``. The
+#: time vocabulary is kept (ADR-0017), so ``by_snap_date`` / ``n_snap_dates``
+#: must survive untouched — a migration that "tidies" them corrupts the file.
 
 #: Default filename this script looks for when handed a directory.
 RESULTS_FILENAME = "evaluation_results.json"
@@ -168,11 +169,15 @@ def plan_file(path: Path) -> Plan:
     return Plan(path=path, renames=renames, conflicts=conflicts)
 
 
+def write_payload(path: Path, payload: dict) -> None:
+    """Write ``payload`` back over ``path``."""
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+
 def apply_file(path: Path) -> None:
-    """Rewrite ``path`` in place with the migrated payload."""
-    payload = json.loads(path.read_text())
-    migrated, _, _ = migrate_payload(payload)
-    path.write_text(json.dumps(migrated, indent=2, ensure_ascii=False) + "\n")
+    """Read, migrate and rewrite ``path`` in place."""
+    migrated, _, _ = migrate_payload(json.loads(path.read_text()))
+    write_payload(path, migrated)
 
 
 @app.command()
@@ -202,20 +207,24 @@ def main(
     n_changed = 0
     n_conflicted = 0
     for path in files:
-        plan = plan_file(path)
-        if plan.conflicts:
+        # One read and one migration per file: the payload that gets written is
+        # the same object the plan was printed from, so what the operator saw in
+        # the dry run is what --apply writes.
+        payload = json.loads(path.read_text())
+        migrated, renames, conflicts = migrate_payload(payload)
+        if conflicts:
             n_conflicted += 1
-            for conflict in plan.conflicts:
+            for conflict in conflicts:
                 typer.echo(f"CONFLICT {path}: {conflict}")
             continue
-        if not plan.renames:
+        if not renames:
             typer.echo(f"OK       {path} (already migrated)")
             continue
         n_changed += 1
-        for where, old, new in plan.renames:
+        for where, old, new in renames:
             typer.echo(f"{verb}   {path}: {where}.{old} -> {new}")
         if apply:
-            apply_file(path)
+            write_payload(path, migrated)
 
     typer.echo(
         f"--- {len(files)} file(s): {n_changed} to migrate, "

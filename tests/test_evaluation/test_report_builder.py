@@ -935,7 +935,7 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
-    'all' resolves to n_products (=2 in fixture) for lookup."""
+    'all' resolves to n_items (=2 in fixture) for lookup."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -946,7 +946,7 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
         "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
         "map_attr@all M", "map_attr@all B", "map_attr@all Δ",
     ]
-    # n_prod=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
+    # n_items=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
     assert tbl.loc["A", "map_attr@all M"] == 0.55
     assert tbl.loc["A", "map_attr@all B"] == 0.45
 

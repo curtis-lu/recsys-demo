@@ -101,6 +101,13 @@ conf 載入，而任何 conf 都得先過 CLI 入口。差別只在測試側要�
   報表其餘內容調整仍凍結（`docs/agents/deliberate-non-goals.md`）。
 - **`evaluation_results.json` 以外的落地產物鍵。** 本輪只處理該檔的 `dataset_overview`。
 - **`docs/` 底下歷史 plan / spec 對舊鍵名的引用。** 那些是歷史紀錄，不回頭改。
+- **沒被這輪動到的模組裡的內部識別字。** `pipelines/inference/`（`n_products`
+  區域變數與參數）與 `pipelines/training/nodes.py::compute_test_mAP_spark`
+  （`n_prods`）仍在用示例詞。**它們不是字串字面值，所以 S6 也擋不到**——那條擋
+  的是「框架替使用者決定了欄名」，一個算「有幾個相異 item」的區域變數沒有這個
+  效果。這一輪只在**已經因為改鍵名而動到的模組內部**把識別字一起對齊
+  （`evaluation/metrics_spark.py`、`evaluation/report_builder.py`、
+  `evaluation/comparison/report.py`），避免同一個檔裡同一個量有兩種拼法。
 
 ## 舊檔怎麼辦
 

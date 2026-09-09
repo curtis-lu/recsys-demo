@@ -149,9 +149,9 @@ def _build_per_item_section(
     disp = (
         (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
     ).get("display", {}) or {}
-    n_prod = _n_items(metrics_a)
-    rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_prod)
-    attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
+    n_items = _n_items(metrics_a)
+    rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_items)
+    attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
 
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
@@ -163,7 +163,7 @@ def _build_per_item_section(
     ):
         tbl = _per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
-            ks, n_prod, metric_key, col_fmt,
+            ks, n_items, metric_key, col_fmt,
             macro_a=macro_a, macro_b=macro_b,
         )
         tables.append(tbl)

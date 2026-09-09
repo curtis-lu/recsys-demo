@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from recsys_tfb.evaluation import report_builder as rb
 from recsys_tfb.evaluation.report_builder import _dataset_overview
 from scripts.migrate_evaluation_results_keys import (
     RENAMES,
@@ -79,6 +80,16 @@ def test_every_renameable_key_moves_at_both_levels():
     # 6 renames per level (3 in totals, 1 in each of the 3 cell groups), and
     # both levels are migrated -- a missed `category` bundle halves this.
     assert len(renames) == 12
+
+
+def test_the_migrator_and_the_reader_share_one_rename_map():
+    """Not equality — *identity*. Two equal copies drift; one object cannot.
+
+    The failure this pins is asymmetric and silent: a key added to the reader's
+    map but not the migrator's leaves a file that the reader refuses and this
+    script reports as "already migrated", with no way forward.
+    """
+    assert RENAMES is rb.RENAMED_OVERVIEW_KEYS
 
 
 def test_the_time_vocabulary_survives_untouched():

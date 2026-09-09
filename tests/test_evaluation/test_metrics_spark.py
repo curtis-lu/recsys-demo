@@ -85,20 +85,20 @@ def _make_parameters(k_values=(3,), segment_columns=(), metric=None):
 
 
 def test_resolve_k_values_basic():
-    assert ms._resolve_k_values([5, 10], n_products=20) == [5, 10]
+    assert ms._resolve_k_values([5, 10], n_items=20) == [5, 10]
 
 
-def test_resolve_k_values_all_resolves_to_n_products():
-    assert ms._resolve_k_values([5, "all"], n_products=8) == [5, 8]
+def test_resolve_k_values_all_resolves_to_n_items():
+    assert ms._resolve_k_values([5, "all"], n_items=8) == [5, 8]
 
 
 def test_resolve_k_values_case_insensitive():
-    assert ms._resolve_k_values(["ALL"], n_products=4) == [4]
+    assert ms._resolve_k_values(["ALL"], n_items=4) == [4]
 
 
 def test_resolve_k_values_dedup_and_sort():
     # 'all' resolves to 5, deduped with literal 5; final sorted.
-    assert ms._resolve_k_values([5, "all", 3, 5], n_products=5) == [3, 5]
+    assert ms._resolve_k_values([5, "all", 3, 5], n_items=5) == [3, 5]
 
 
 # ===========================================================================
@@ -309,9 +309,9 @@ def test_aggregate_overall_known_values(spark):
     assert 0 < overall["ndcg@3"] <= 1.0
 
 
-def test_aggregate_overall_recall_at_k_equals_n_products_is_one(spark):
-    """At K = n_products, every query has all positives ranked in top-K → recall == 1.0."""
-    enriched = _enriched(spark, k_values=[3])  # n_products=3 in fixture
+def test_aggregate_overall_recall_at_k_equals_n_items_is_one(spark):
+    """At K = n_items, every query has all positives ranked in top-K → recall == 1.0."""
+    enriched = _enriched(spark, k_values=[3])  # n_items=3 in fixture
     per_query = ms.compute_per_query_metrics(
         enriched, ["snap_date", "cust_id"], "label", [3]
     )
@@ -319,10 +319,10 @@ def test_aggregate_overall_recall_at_k_equals_n_products_is_one(spark):
     assert abs(overall["recall@3"] - 1.0) < 1e-12
 
 
-def test_aggregate_overall_precision_at_k_equals_n_products_is_base_rate(spark):
-    """At K = n_products, per-query precision degenerates to total_rel / n_products.
+def test_aggregate_overall_precision_at_k_equals_n_items_is_base_rate(spark):
+    """At K = n_items, per-query precision degenerates to total_rel / n_items.
 
-    Fixture: C0 total_rel=2, C1 total_rel=1; n_products=3 (A/B/C).
+    Fixture: C0 total_rel=2, C1 total_rel=1; n_items=3 (A/B/C).
         per-query precision@3 = (2/3 + 1/3) / 2 = 0.5  (== base rate of positives)
     """
     enriched = _enriched(spark, k_values=[3])
@@ -330,7 +330,7 @@ def test_aggregate_overall_precision_at_k_equals_n_products_is_base_rate(spark):
         enriched, ["snap_date", "cust_id"], "label", [3]
     )
     overall = ms.aggregate_overall(per_query, [3])
-    # base rate of positives = total positives / (n_queries * n_products) = 3 / 6 = 0.5
+    # base rate of positives = total positives / (n_queries * n_items) = 3 / 6 = 0.5
     assert abs(overall["precision@3"] - 0.5) < 1e-12
 
 
@@ -627,8 +627,8 @@ def test_compute_all_metrics_segment_column_auto_detection_picks_first_present(s
     assert set(result["per_segment"].keys()) == {"mass", "affluent"}
 
 
-def test_compute_all_metrics_precision_at_n_products_is_base_rate(spark):
-    """K=n_products fixture: 3 products, 6 rows, 3 positives → base rate = 0.5.
+def test_compute_all_metrics_precision_at_n_items_is_base_rate(spark):
+    """K=n_items fixture: 3 products, 6 rows, 3 positives → base rate = 0.5.
        overall.precision@3 must equal 0.5 (degenerate K=all case).
     """
     df = _make_eval_predictions(spark, with_segment=False)
@@ -640,7 +640,7 @@ def test_macro_per_item_map_numpy_matches_spark(spark):
     """compute_macro_per_item_map (numpy, HPO) == compute_all_metrics
     macro_avg.by_item.map_attr@all (Spark) on identical data.
 
-    k_values=(3,) and 3 products => k=3 == n_products == 'all'.
+    k_values=(3,) and 3 products => k=3 == n_items == 'all'.
     Scores are distinct so lexsort tie-order vs Spark row_number is moot.
     """
     import numpy as np

@@ -40,9 +40,9 @@ Naming convention (intentional, NOT pandas-mirroring):
     * ``mean_pos`` (per_item) is the mean rank position over P-positive rows.
 
 Degenerate cases (documented, not pruned):
-    At ``K >= n_products`` every row has ``top_k@K == 1`` →
+    At ``K >= n_items`` every row has ``top_k@K == 1`` →
         ``precision@K`` collapses to the per-query base rate
-                       ``total_rel / n_products``.  Mean across queries gives
+                       ``total_rel / n_items``.  Mean across queries gives
                        segment / overall base rate. Useful as a sanity check
                        for label density but NOT a ranking metric.
         ``recall@K``   collapses to ``1.0`` for every query (all positives
@@ -77,23 +77,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _resolve_k_values(raw: Iterable, n_products: int) -> list[int]:
+def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
     """Resolve mixed int / 'all' k_values to a sorted unique int list.
 
-    'all' (case-insensitive) resolves to ``n_products``. Duplicates after
+    'all' (case-insensitive) resolves to ``n_items``. Duplicates after
     resolution are collapsed.
     """
     out: set[int] = set()
     for k in raw:
         if isinstance(k, str) and k.lower() == "all":
-            out.add(n_products)
+            out.add(n_items)
         else:
             out.add(int(k))
     return sorted(out)
 
 
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
-    """Resolve {prod_name: category}. None when categories disabled.
+    """Resolve {item value: category}. None when categories disabled.
 
     Fail-loud (ValueError) if a mapped product is not in
     ``schema.categorical_values[item_col]``. Products absent from every
@@ -101,8 +101,8 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     ``unmapped == 'singleton'`` (the only supported mode).
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    pc = eval_params.get("item_categories", {}) or {}
-    if not pc.get("enabled"):
+    cat_cfg = eval_params.get("item_categories", {}) or {}
+    if not cat_cfg.get("enabled"):
         return None
 
     schema = get_schema(parameters)
@@ -111,23 +111,23 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     known_set = set(known)
 
     mapping: dict[str, str] = {}
-    for category, prods in (pc.get("mapping", {}) or {}).items():
-        for prod in prods:
-            if prod not in known_set:
+    for category, items in (cat_cfg.get("mapping", {}) or {}).items():
+        for item in items:
+            if item not in known_set:
                 raise ValueError(
                     f"item_categories.mapping references unknown item "
-                    f"'{prod}' (not in schema.categorical_values['{item_col}'])"
+                    f"'{item}' (not in schema.categorical_values['{item_col}'])"
                 )
-            mapping[prod] = category
+            mapping[item] = category
 
-    unmapped = pc.get("unmapped", "singleton")
+    unmapped = cat_cfg.get("unmapped", "singleton")
     if unmapped != "singleton":
         raise ValueError(
             f"item_categories.unmapped='{unmapped}' unsupported; "
             f"only 'singleton' is implemented"
         )
-    for prod in known:
-        mapping.setdefault(prod, prod)
+    for item in known:
+        mapping.setdefault(item, item)
     return mapping
 
 
@@ -385,7 +385,7 @@ def compute_per_query_metrics(
         recall@K     = sum(label * top_k@K) / total_rel
 
     See module docstring for the degenerate behaviour of precision@K and
-    recall@K when K >= n_products.
+    recall@K when K >= n_items.
     """
     carry_cols = list(carry_cols or [])
 
@@ -429,7 +429,7 @@ def aggregate_overall(
 
     Returns flat dict ``{map@K, ndcg@K, precision@K, recall@K}`` for each K.
     Caller is responsible for interpreting precision@K / recall@K when
-    K >= n_products (see module docstring).
+    K >= n_items (see module docstring).
     """
     metric_cols = _per_query_metric_cols(k_values)
     row = per_query.agg(*[F.mean(c).alias(c) for c in metric_cols]).collect()[0]
@@ -640,8 +640,8 @@ def _compute_core(
         "shrinkage_k": float(metric_cfg.get("shrinkage_k", 0) or 0.0),
     }
 
-    n_products = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_products)
+    n_items = eval_predictions.select(item_col).distinct().count()
+    k_values = _resolve_k_values(k_values_raw, n_items)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
@@ -761,8 +761,8 @@ def compute_overall_per_item(
 
     eval_params = parameters.get("evaluation", {}) or {}
     k_values_raw = eval_params.get("k_values", [5, "all"])
-    n_products = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_products)
+    n_items = eval_predictions.select(item_col).distinct().count()
+    k_values = _resolve_k_values(k_values_raw, n_items)
 
     df = rank_within_query(eval_predictions, group_cols, score_col)
     df = add_query_total_rel(df, group_cols, label_col)
@@ -824,7 +824,7 @@ def compute_all_metrics(
     ``item_categories.enabled``.
 
     ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
-    three ``n_products`` / ``n_customers`` / ``avg_positives_per_customer``
+    three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
     keys were renamed (see the block below). A file written before that is
     refused by ``evaluation/report_builder._dataset_overview`` and migrated by
     ``scripts/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings

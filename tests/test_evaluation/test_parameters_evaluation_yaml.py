@@ -15,10 +15,10 @@ def test_k_values_is_superset():
 
 
 def test_item_categories_block():
-    pc = _load()["item_categories"]
-    assert pc["enabled"] is True
-    assert pc["unmapped"] == "singleton"
-    assert pc["mapping"]["fund"] == ["fund_stock", "fund_bond", "fund_mix"]
+    cat_cfg = _load()["item_categories"]
+    assert cat_cfg["enabled"] is True
+    assert cat_cfg["unmapped"] == "singleton"
+    assert cat_cfg["mapping"]["fund"] == ["fund_stock", "fund_bond", "fund_mix"]
 
 
 def test_report_display_and_sections():

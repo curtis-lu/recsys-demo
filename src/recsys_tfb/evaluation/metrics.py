@@ -241,7 +241,7 @@ def compute_macro_per_item_map(
     beyond ``k``). Per item we average that contribution over the item's
     positive rows (row-equal-weight); items are then combined via
     :func:`macro_from_per_item`. ``k=None`` means no truncation — full mAP,
-    equivalent to ``k = n_products``.
+    equivalent to ``k = n_items``.
 
     ``weight_alpha`` / ``min_positives`` / ``shrinkage_k`` default to
     ``0``/``0``/``0``, which reproduces the original plain equal-weight
