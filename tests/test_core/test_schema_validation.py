@@ -58,7 +58,9 @@ class TestRequiredRoles:
 
     @pytest.mark.parametrize("role", ["label", "score", "rank"])
     def test_a_framework_produced_role_may_be_omitted(self, role):
-        validate_schema_config({"schema": {"columns": _columns()}})
+        columns = dict(_columns(), label="y", score="s", rank="r")
+        del columns[role]
+        validate_schema_config({"schema": {"columns": columns}})
 
 
 class TestValidateSchemaConfig:

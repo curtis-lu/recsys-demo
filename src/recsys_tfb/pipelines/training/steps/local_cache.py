@@ -288,18 +288,43 @@ def populate_cache_from_hive(
     (#326; before it, this function globbed the example time column's name
     verbatim, so a user who renamed ``schema.columns.time`` hit
     FileNotFoundError four minutes into a run).
+
+    The missing-layout ``raise`` is a **pre-check** on ``parameters``
+    (``pipeline-node-design.md`` rule 11): it says the run was wired without the
+    injection, so the person to look for is whoever wired it, not this copy.
+
+    ⚠ **One unguarded assumption, stated here because nothing checks it.** A
+    single-month copy narrows on ``partition_cols[0]``, i.e. this function takes
+    the *first* declared partition column to be the time column. Declare
+    ``partition_cols`` in the other order and the month value is globbed against
+    the wrong level, which matches nothing — an error, but one naming a path
+    rather than the declaration order that caused it. Checking it would mean
+    comparing ``catalog.yaml`` against ``schema.columns.time``, and ADR/#323
+    decided **not** to add that invariant: the two are aligned by the user, and
+    every other way of getting them out of step already raises on write. The
+    whole-table copy is unaffected — it globs one level without caring which.
     """
     db = parameters["hive"]["db"]
     source_tables = parameters.get("_cache_source_tables", {})
     table = source_tables.get(dataset_name, CACHE_SOURCE_TABLES[dataset_name])
+    # Pre-check on `parameters` — see the docstring. ValueError, like every
+    # other pre-check in this module: __main__ already funnels ValueError into
+    # one "config" exit, and KeyError's repr would fold the message into a
+    # single quoted line.
     partitions = (parameters.get("_cache_partitions") or {}).get(dataset_name)
-    if not partitions or not partitions.get("cols"):
-        raise KeyError(
-            f"no partition layout for cache {dataset_name!r}: "
-            "parameters['_cache_partitions'] is injected from catalog.yaml by "
-            "inject_cache_source_tables, and the catalog entry must be a "
-            "HiveTableDataset declaring partition_cols. Without it there is no "
-            "way to know what this table's time partition column is called."
+    if partitions is None:
+        raise ValueError(
+            f"no partition layout for cache {dataset_name!r} in "
+            "parameters['_cache_partitions']. It is injected from catalog.yaml "
+            "by inject_cache_source_tables, which skips any entry that is not a "
+            "HiveTableDataset — check that catalog.yaml declares "
+            f"{dataset_name!r} as one, and that this run went through the CLI."
+        )
+    if not partitions.get("cols"):
+        raise ValueError(
+            f"the catalog entry for cache {dataset_name!r} declares no "
+            "partition_cols, so there is no time partition to glob on. Add "
+            "partition_cols to it in catalog.yaml, outermost first."
         )
     location = get_hive_table_location(spark, db, table)
     outer = "/".join(

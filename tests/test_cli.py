@@ -550,8 +550,14 @@ class TestInjectCacheSourceTables:
         }
 
     def test_an_entry_with_no_partitions_still_reports_empty_lists(self):
-        """Distinguishable from "no entry at all" — the cache node needs to say
-        which of the two happened when it refuses to compose a glob."""
+        """An empty layout, not an absent one.
+
+        The two are different things to go and fix, and
+        ``populate_cache_from_hive`` reports them separately — a missing entry
+        sends you to the catalog's ``type:``, an entry with no
+        ``partition_cols`` sends you to its partition declaration. It can only
+        tell them apart if this derivation keeps them apart.
+        """
         params = {}
         inject_cache_source_tables(params, {"val_model_input": self._entry("t")})
         assert params["_cache_partitions"]["val_model_input"] == {

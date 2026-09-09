@@ -10,29 +10,44 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
+from recsys_tfb.pipelines.training.steps.local_cache import CACHE_SOURCE_TABLES
 
-# What ``inject_cache_source_tables`` derives from ``conf/base/catalog.yaml``
-# for each cache entry: the ``partition_filter`` keys, then the
-# ``partition_cols`` names. Written out here rather than imported because these
-# tests do not go through ``__main__`` and therefore get no injection — this
-# stands in for it. Keep in step with the catalog by hand; the production path
-# never reads this.
-_CATALOG_PARTITIONS: dict[str, dict[str, list[str]]] = {
-    "val_model_input": {
-        "filter_keys": ["base_dataset_version"], "cols": ["snap_date"]},
-    "test_model_input": {
-        "filter_keys": ["base_dataset_version"],
-        "cols": ["snap_date", "prod_name"]},
-    "train_model_input": {
-        "filter_keys": ["base_dataset_version", "train_variant_id"],
-        "cols": ["snap_date"]},
-    "train_dev_model_input": {
-        "filter_keys": ["base_dataset_version", "train_variant_id"],
-        "cols": ["snap_date"]},
-    "calibration_model_input": {
-        "filter_keys": ["base_dataset_version", "calibration_variant_id"],
-        "cols": ["snap_date"]},
-}
+
+def _catalog_partitions() -> dict[str, dict[str, list[str]]]:
+    """The partition layout the real ``conf/base/catalog.yaml`` declares.
+
+    Derived by running the production derivation over the production catalog,
+    not transcribed. Transcribing is what this change removed from ``src/``
+    (``_CACHE_OUTER_PARTITIONS``, a hand copy of the catalog's
+    ``partition_filter`` keys with nothing keeping the two in step) — growing
+    the same mirror back on the test side would put the drift right back, just
+    somewhere nothing would look for it.
+
+    Reading the catalog raw, without the CLI's ``${...}`` substitution: only
+    the partition *names* are wanted here, and every value in this dict is a
+    key or a column name, never a substituted value.
+    """
+    import yaml
+
+    # parents[3] is the tree this test file was shipped with, not the CWD:
+    # a worktree must read its own catalog, never main's.
+    catalog_path = (
+        Path(__file__).resolve().parents[3] / "conf" / "base" / "catalog.yaml"
+    )
+    with open(catalog_path) as f:
+        catalog = yaml.safe_load(f)
+    params: dict = {}
+    inject_cache_source_tables(params, catalog)
+    partitions = params.get("_cache_partitions", {})
+    # Guard rather than let a silently empty mapping make every cache test
+    # pass for the wrong reason: with no injection at all the nodes refuse
+    # outright, and that refusal is a different test.
+    assert set(partitions) == set(CACHE_SOURCE_TABLES), (
+        "conf/base/catalog.yaml no longer declares every cache as a "
+        f"HiveTableDataset: got {sorted(partitions)}"
+    )
+    return partitions
 
 
 def _params_with_cache_root(cache_root: Path) -> dict:
@@ -42,10 +57,7 @@ def _params_with_cache_root(cache_root: Path) -> dict:
         "base_dataset_version": "deadbeef",
         "train_variant_id": "v1",
         "calibration_variant_id": "c1",
-        "_cache_partitions": {
-            k: {"filter_keys": list(v["filter_keys"]), "cols": list(v["cols"])}
-            for k, v in _CATALOG_PARTITIONS.items()
-        },
+        "_cache_partitions": _catalog_partitions(),
     }
 
 
@@ -578,5 +590,20 @@ class TestPartitionNamesComeFromTheCatalog:
         del params["_cache_partitions"]
         _stub_hdfs(monkeypatch)
 
-        with pytest.raises(KeyError, match="_cache_partitions"):
+        with pytest.raises(ValueError, match="_cache_partitions"):
+            cache_train_model_input(_spark_df(), params)
+
+    def test_an_entry_declaring_no_partition_cols_says_so_separately(
+        self, tmp_path, monkeypatch
+    ):
+        """Two ways to have no layout, two things to go fix — the catalog entry
+        is missing, or it is there and declares no partition_cols."""
+        from recsys_tfb.pipelines.training.nodes import cache_train_model_input
+
+        params = _params_with_cache_root(tmp_path)
+        params["_cache_partitions"]["train_model_input"] = {
+            "filter_keys": ["base_dataset_version"], "cols": []}
+        _stub_hdfs(monkeypatch)
+
+        with pytest.raises(ValueError, match="declares no partition_cols"):
             cache_train_model_input(_spark_df(), params)
