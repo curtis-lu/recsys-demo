@@ -907,7 +907,20 @@ def test_tune_defaults_ranking_metric(monkeypatch):
             class D:
                 def construct(self_inner):
                     return self_inner
+
+                def set_weight(self_inner, w):
+                    pass
+
+                def num_data(self_inner):
+                    # Length of the vector sample_weights() below returns:
+                    # the scorer checks the two against each other.
+                    return 2
             return D()
+
+        def sample_weights(self, parameters, preprocessor_metadata):
+            # Since #318 the .bin carries no weights and the node resolves
+            # them off the handle before building the scorer.
+            return np.ones(2)
 
     parameters = {
         # FakeAdapter has no .save(); checkpointing (default True) would call it.
@@ -1015,6 +1028,79 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     # to agree: steps/refit.py, steps/hpo_scoring.py and
     # models/lightgbm_adapter.py (the one that bins the .bin).
     assert captured["construct_params"] == {"feature_pre_filter": False}
+
+
+def test_finalize_refit_carries_sample_weights_for_both_splits(monkeypatch):
+    """The refit trains on the same weights the search did.
+
+    This path never had the #318 bug — it re-reads the parquet with
+    ``with_weights=True``, so its weights were always this run's. It had no
+    test either, and it is the one place where train's and train-dev's weight
+    vectors are *concatenated*: get that order wrong, or drop one side, and
+    the final model is fit under weights the search never used while being
+    published under the search's hyperparameters and a model_version keyed by
+    the weights it ignored.
+
+    Weights are distinct per split (2.0 / 5.0) rather than a single value, so
+    a stack that lost or reordered a side shows up as the wrong vector rather
+    than as the right length of the wrong thing.
+    """
+    import numpy as np
+    import lightgbm as lgb
+    from recsys_tfb.pipelines.training import nodes
+
+    captured = {}
+
+    def fake_extract_groups(handle, meta, params, **kw):
+        if getattr(handle, "tag", "") == "dev":
+            X = np.ones((2, 2)); y = np.array([1, 0])
+            g = np.array([0, 0], dtype=np.int64); w = np.full(2, 5.0)
+        else:
+            X = np.zeros((4, 2)); y = np.array([1, 0, 0, 1])
+            g = np.array([0, 0, 1, 1], dtype=np.int64); w = np.full(4, 2.0)
+        if kw.get("with_weights"):
+            return X, y, g, w
+        return X, y, g
+
+    monkeypatch.setattr(nodes, "extract_Xy_with_groups", fake_extract_groups)
+
+    real_dataset = lgb.Dataset
+
+    def spy_dataset(*a, **kw):
+        captured["weight"] = np.asarray(kw.get("weight"))
+        return real_dataset(*a, **kw)
+
+    monkeypatch.setattr(lgb, "Dataset", spy_dataset)
+
+    class FakeAdapter:
+        def train(self, **kw):
+            pass
+
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
+
+    class H:
+        def __init__(self, tag=""):
+            self.tag = tag
+
+    parameters = {
+        "training": {
+            "final_model_strategy": "refit_on_full",
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": "lambdarank"},
+            "sample_weight_keys": ["prod_name"],
+            "sample_weights": {"a": 2.0},
+        },
+        "random_seed": 42,
+    }
+    prep_meta = {"feature_columns": ["a", "b"], "categorical_columns": []}
+    nodes.finalize_model(
+        H("train"), H("dev"), object(), {"num_leaves": 4}, 3,
+        prep_meta, parameters,
+    )
+    # train-then-dev, the same order stack_splits puts the rows in.
+    np.testing.assert_array_equal(
+        captured["weight"], np.array([2.0, 2.0, 2.0, 2.0, 5.0, 5.0]),
+    )
 
 
 class TestTuneHyperparametersObjective:

@@ -61,7 +61,6 @@
 |---|---|
 | catalog deep-merge 對 type-discriminated entry 的 bug（env 覆蓋 `type` 後 base 的 stale key 會傳給新 constructor → `TypeError`） | 等 pandas backend 棄用時一起做大重構。現行 workaround＝`conf/base/catalog.yaml` 放完整定義。若只想修 deep-merge：`ConfigLoader._load` 對 `stem == "catalog"` 改 first-level replace，其餘 stem 維持 deep-merge |
 | 非數值特徵欄閘（B6）的後兩階段 | 需**生產事實**：Phase 1＝依 backstop 列出的真實兇手欄名逐欄判斷 declare/drop，然後重建 dataset（bump `base_dataset_version`）；Phase 2＝記憶體結構解。設計在 `docs/superpowers/specs/2026-07-11-nonnumeric-feature-gate-design.md` §7 |
-| `sample_weight` 的多槽 `.bin` cache | 等公司 production log 確認症狀真的是「舊 `.bin` 被重用」，而非 config 沒讀到／key 值不符。機制見 `docs/operations/known-pitfalls.md` |
 | evaluation 的 `eval_predictions` 快取／早落地／SparkListener 觀測 | 使用者定案「**先觀測、量出熱點再決定優化**」。等公司環境量測數據出來且使用者決定後才開下一個 PR |
 | evaluation／baseline metrics 的 skip-if-exists 快取 | 等實測證明 dev-loop 真的太慢。要做時**兩者必須一起**做、同生命週期失效，否則 delta 不一致 |
 | 資料閘 B2（leakage）／B3（零正樣本）、Layer-3 單一來源（`conf/base/products.yaml`＋source_etl pre-flight） | 獨立 plan，尚未排程 |

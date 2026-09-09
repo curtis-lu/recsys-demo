@@ -113,6 +113,32 @@ def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray
     return out
 
 
+def _check_weight_length(dataset, weights: np.ndarray, split: str) -> None:
+    """Raise unless ``weights`` has one entry per row of the built ``dataset``.
+
+    LightGBM will not do this for us in the one case that matters. Its own
+    length check lives in ``set_field``, and ``set_weight`` never gets there
+    for an all-ones vector — it maps any array satisfying ``np.all(weight ==
+    1)`` to ``None``, which a **length-zero** array satisfies vacuously. So a
+    weight vector that came out empty is discarded in silence and the search
+    trains unweighted, under a ``model_version`` keyed by the very
+    ``sample_weights`` it ignored. A non-uniform vector of the wrong length
+    does raise inside LightGBM; this covers the half that does not.
+
+    Checked against ``dataset.num_data()`` rather than against anything the
+    sidecar records, because the sidecar is where a wrong length would come
+    from — a self-consistent count cannot catch it.
+    """
+    n_rows = dataset.num_data()
+    if len(weights) != n_rows:
+        raise ValueError(
+            f"sample weights for {split} have {len(weights)} entries but the "
+            f"binary holds {n_rows} rows; the weight-key sidecar does not "
+            "describe this .bin. Clear the lgb cache directory so it is "
+            "rebuilt."
+        )
+
+
 class TrialScorer:
     """Train one candidate, score it on val, and keep the search's winner.
 
@@ -126,6 +152,13 @@ class TrialScorer:
     ``study_dir=None`` means "do not checkpoint". It is the same condition as
     ``hpo_checkpointing: false``: without a study directory there is nowhere to
     refresh, and a crash simply costs the whole search.
+
+    ``train_weights`` / ``train_dev_weights`` are this run's resolved
+    ``training.sample_weights``, aligned to the rows of the corresponding
+    ``.bin`` and applied to every trial's Dataset. They are handed in already
+    resolved — once per search rather than once per trial — because they do
+    not vary with the hyperparameters, and because the caller is the one
+    holding the ``parameters`` they come from.
 
     ``train_dev`` is the early-stopping val set for every trial while
     ``X_val`` / ``y_val`` decide the reported score — two different sets on
@@ -145,6 +178,8 @@ class TrialScorer:
         *,
         train_lgb_handle,
         train_dev_lgb_handle,
+        train_weights: np.ndarray,
+        train_dev_weights: np.ndarray,
         X_val,
         y_val: np.ndarray,
         groups_val: np.ndarray,
@@ -162,6 +197,8 @@ class TrialScorer:
     ) -> None:
         self.train_lgb_handle = train_lgb_handle
         self.train_dev_lgb_handle = train_dev_lgb_handle
+        self.train_weights = train_weights
+        self.train_dev_weights = train_dev_weights
         self.X_val = X_val
         self.y_val = y_val
         self.groups_val = groups_val
@@ -217,10 +254,23 @@ class TrialScorer:
         adapter = get_adapter(self.algorithm)
         construct_params = {"feature_pre_filter": False}
         with log_step(logger, "prepare_datasets"):
-            ds_train = self.train_lgb_handle.load(params=construct_params).construct()
+            # Weights are set here rather than read back out of the .bin: the
+            # binary is cached under a path that says nothing about
+            # `training.sample_weights`, so it deliberately carries none and
+            # this run's own vector is applied on top (#318). Both splits get
+            # it — train_dev is the early-stopping valid set, and an unweighted
+            # stopping signal would pick a different iteration for a weighted
+            # fit.
+            ds_train = self.train_lgb_handle.load(params=construct_params)
+            ds_train.set_weight(self.train_weights)
+            ds_train = ds_train.construct()
+            _check_weight_length(ds_train, self.train_weights, "train")
             ds_dev = self.train_dev_lgb_handle.load(
                 reference=ds_train, params=construct_params
-            ).construct()
+            )
+            ds_dev.set_weight(self.train_dev_weights)
+            ds_dev = ds_dev.construct()
+            _check_weight_length(ds_dev, self.train_dev_weights, "train_dev")
         log_data_volume(logger, "tune.ds_train", ds_train)
         log_data_volume(logger, "tune.ds_dev", ds_dev)
 

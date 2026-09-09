@@ -68,9 +68,24 @@ class TestTrialScorer:
                 self.predict_calls.append(len(X))
                 return np.zeros(len(X))
 
+        weighted: list = []
+
+        class FakeDataset:
+            def construct(self):
+                return self
+
+            def set_weight(self, w):
+                weighted.append(w)
+
+            def num_data(self):
+                # Matches the length of the weight vectors handed to the
+                # scorer below, so the length guard passes by default and a
+                # test that wants it to fire changes the weights, not this.
+                return 2
+
         class FakeHandle:
             def load(self, reference=None, params=None):
-                return type("D", (), {"construct": lambda self_inner: self_inner})()
+                return FakeDataset()
 
         def fake_get_adapter(algorithm):
             adapters.append(FakeAdapter(len(adapters)))
@@ -92,6 +107,8 @@ class TestTrialScorer:
 
         scorer = hpo_scoring.TrialScorer(
             train_lgb_handle=FakeHandle(), train_dev_lgb_handle=FakeHandle(),
+            train_weights=np.array([1.0, 3.0]),
+            train_dev_weights=np.array([2.0, 4.0]),
             X_val=np.zeros((4, 2)), y_val=np.array([1, 0, 1, 0]),
             groups_val=np.array([0, 0, 1, 1], dtype=np.int64), items_val=None,
             algorithm="lightgbm", algorithm_params={}, search_space=[],
@@ -99,6 +116,7 @@ class TestTrialScorer:
             early_stopping_rounds=2, n_trials=len(scores),
             search_id="unit", study_dir=None,  # None = do not checkpoint
         )
+        scorer._weighted = weighted
         return scorer, adapters
 
     def test_winner_is_the_highest_scoring_trial_not_the_last(self, monkeypatch):
@@ -114,6 +132,40 @@ class TestTrialScorer:
         assert scorer.best["params"] == {"n": 1}
         assert scorer.best["model"] is adapters[1]
         assert scorer.best["iteration"] == 11
+
+    def test_every_trial_weights_both_datasets(self, monkeypatch):
+        """Both splits get this run's weights, on every trial.
+
+        The ``.bin`` carries none since #318, so a trial that skipped this
+        would train unweighted — silently, under a model_version keyed by the
+        very ``sample_weights`` it ignored. train_dev matters as much as
+        train: it is the early-stopping valid set, and an unweighted stopping
+        signal picks a different iteration for a weighted fit.
+        """
+        scorer, _ = self._scorer(monkeypatch, [0.1, 0.2])
+
+        for i in range(2):
+            scorer(types.SimpleNamespace(number=i))
+
+        assert [w.tolist() for w in scorer._weighted] == [
+            [1.0, 3.0], [2.0, 4.0], [1.0, 3.0], [2.0, 4.0],
+        ]
+
+    def test_a_wrong_length_weight_vector_stops_the_trial(self, monkeypatch):
+        """The guard LightGBM does not provide.
+
+        ``set_weight`` maps any all-ones array to ``None`` before its length is
+        ever checked, and a length-zero array is vacuously all-ones — so the
+        one shape a broken sidecar produces is exactly the one LightGBM
+        accepts in silence. Without this the search would run to completion
+        unweighted and publish under a model_version keyed by the weights it
+        dropped.
+        """
+        scorer, _ = self._scorer(monkeypatch, [0.1])
+        scorer.train_weights = np.array([])  # what a column-less sidecar gave
+
+        with pytest.raises(ValueError, match="but the binary holds"):
+            scorer(types.SimpleNamespace(number=0))
 
     def test_adopted_checkpoint_survives_a_worse_trial(self, monkeypatch):
         """What `adopt_checkpoint` is for: a resumed search must not let its
@@ -224,6 +276,137 @@ class TestTrialScorerPredictsInBatches:
 
         # X_val is 4 rows x 2 float64 columns = 16 B/row -> 1 row per batch
         assert adapters[0].predict_calls == [1, 1, 1, 1]
+
+
+class TestWeightsReachTheTrainedModel:
+    """The bug #318 fixes, asserted where it actually bit: the trained model.
+
+    ``training.sample_weights`` feeds ``model_version`` and nothing in the
+    lgb-binary cache path, so before this a second run with a different weight
+    table hit the same ``.bin`` — weights baked in — and trained on the first
+    run's weights. Every layer stayed quiet: the cache reported a hit, the
+    booster trained, and the result was published under a model_version that
+    named weights it had never seen.
+
+    Real LightGBM and the real ``TrialScorer`` on purpose. The fakes above
+    pin that ``set_weight`` is *called*; nothing but a fit can say the call
+    changes the model, and "the call happens but does nothing" is exactly the
+    shape a mock cannot rule out.
+    """
+
+    OBJECTIVES = ["binary", "lambdarank", "rank_xendcg"]
+
+    def _parameters(self, objective, sample_weights):
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"],
+                "item": "prod_name", "label": "label"}},
+            "training": {
+                "algorithm_params": {"objective": objective, "verbosity": -1},
+                "sample_weight_keys": ["prod_name"],
+                "sample_weights": sample_weights,
+            },
+        }
+
+    def _model_input(self, tmp_path):
+        """One parquet pair a ranking objective can actually learn from.
+
+        60 query groups of 4 items, one positive each. Small enough to fit in
+        under a second, big enough that LightGBM grows real splits — with a
+        handful of rows it grows none, every prediction is the same constant,
+        and a test comparing two models passes whatever the weights did.
+        """
+        import pandas as pd
+        from recsys_tfb.io.handles import ParquetHandle
+
+        rng = np.random.default_rng(11)
+        prods = ["a", "b", "c", "d"]
+
+        def frame(n_cust, tag):
+            rows = n_cust * len(prods)
+            feat = rng.normal(size=rows)
+            pos = rng.integers(0, len(prods), n_cust)
+            label = np.zeros(rows, dtype=int)
+            label[np.arange(n_cust) * len(prods) + pos] = 1
+            pdf = pd.DataFrame({
+                "cust_id": np.repeat([f"{tag}{i}" for i in range(n_cust)],
+                                     len(prods)),
+                "snap_date": pd.to_datetime(["2025-01-31"] * rows),
+                "prod_name": prods * n_cust,
+                "feat_a": feat + label * 0.8,
+                "label": label,
+            })
+            pdf["feat_a"] = pdf["feat_a"].astype("float32")
+            return pdf
+
+        tr = tmp_path / "tr.parquet"; dv = tmp_path / "dv.parquet"
+        frame(60, "c").to_parquet(tr)
+        frame(20, "d").to_parquet(dv)
+        return ParquetHandle(str(tr)), ParquetHandle(str(dv))
+
+    def _predictions(self, monkeypatch, tmp_path, objective, sample_weights):
+        """One trial's model, trained the way the pipeline trains it."""
+        from recsys_tfb.io.extract import extract_Xy_with_groups
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        prep = {
+            "feature_columns": ["feat_a", "prod_name"],
+            "categorical_columns": ["prod_name"],
+            "category_mappings": {"prod_name": ["a", "b", "c", "d"]},
+        }
+        train_h, dev_h = self._model_input(tmp_path)
+        params = self._parameters(objective, sample_weights)
+        # Same cache directory across both calls: that is the condition the
+        # bug needed, and reusing it here is what makes this a regression
+        # test rather than two unrelated fits.
+        lgb_train, lgb_dev = LightGBMAdapter().prepare_train_inputs(
+            train_h, dev_h, prep, params, str(tmp_path / "variant"))
+
+        X_v, y_v, g_v = extract_Xy_with_groups(dev_h, prep, params)
+        # Fixed hyper-parameters for both runs, so any difference in the
+        # models is the weights and nothing else.
+        monkeypatch.setattr(
+            hpo_scoring, "build_trial_params", lambda trial, space: {})
+        scorer = hpo_scoring.TrialScorer(
+            train_lgb_handle=lgb_train, train_dev_lgb_handle=lgb_dev,
+            train_weights=lgb_train.sample_weights(params, prep),
+            train_dev_weights=lgb_dev.sample_weights(params, prep),
+            X_val=X_v, y_val=y_v, groups_val=g_v, items_val=None,
+            algorithm="lightgbm",
+            algorithm_params=dict(params["training"]["algorithm_params"]),
+            search_space=[], hpo_objective="mean_ap", seed=42,
+            num_iterations=30, early_stopping_rounds=0, n_trials=1,
+            search_id="weights", study_dir=None,
+        )
+        scorer(types.SimpleNamespace(number=0))
+        return scorer.best["model"].predict(np.asarray(X_v))
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_a_new_weight_table_trains_a_different_model(
+        self, monkeypatch, tmp_path, objective
+    ):
+        plain = self._predictions(
+            monkeypatch, tmp_path, objective, {"a": 1.0})
+        heavy = self._predictions(
+            monkeypatch, tmp_path, objective, {"a": 20.0})
+        assert not np.allclose(plain, heavy), (
+            "the second run reproduced the first run's model — weights did "
+            "not reach training"
+        )
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_the_same_weight_table_trains_the_same_model(
+        self, monkeypatch, tmp_path, objective
+    ):
+        """The other half: rebuilding must not be a source of drift.
+
+        Without this the test above passes for a model that differs run to
+        run for any reason at all, and would keep passing if weights stopped
+        mattering entirely.
+        """
+        once = self._predictions(monkeypatch, tmp_path, objective, {"a": 4.0})
+        twice = self._predictions(monkeypatch, tmp_path, objective, {"a": 4.0})
+        assert np.array_equal(once, twice)
 
 
 class TestBatchedPredictAgainstRealLightGBM:
