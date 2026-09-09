@@ -1462,11 +1462,6 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     # the user's.
     ("src/recsys_tfb/pipelines/source_etl/audit.py", "<module>"),
     ("src/recsys_tfb/pipelines/source_etl/audit.py", "write_record"),
-    # TEMPORARY -- `get_schema`'s built-in defaults for time / entity / item.
-    # #326 made the three roles required at CLI entry but deliberately left the
-    # defaults in place (304 tests lean on them); #328 removes both the defaults
-    # and this line.
-    ("src/recsys_tfb/core/schema.py", "<module>"),
 })
 
 
