@@ -2848,6 +2848,77 @@ class TestDatasetSourceQualityChecksA32:
             ), name
 
 
+# --- A33: migration-period check for the #327 config key rename --------------
+
+from recsys_tfb.core.consistency import (
+    LEGACY_EVALUATION_KEYS,
+    legacy_evaluation_key_errors,
+)
+
+
+class TestLegacyEvaluationKeysA33:
+    """A33 — a conf still spelling ``evaluation.product_categories``.
+
+    ⚠ **This whole class leaves with the check.** A33 is a migration tool, not
+    an invariant: once the company environment's conf is confirmed updated, the
+    predicate, its wiring and these tests are deleted together. See A33 in
+    ``core/consistency.py``'s module docstring for the retirement condition.
+    """
+
+    def test_the_old_spelling_is_reported_with_the_new_name(self):
+        errors = legacy_evaluation_key_errors(
+            {"evaluation": {"product_categories": {"enabled": True}}}
+        )
+        assert len(errors) == 1
+        assert "item_categories" in errors[0]
+
+    def test_the_new_spelling_is_clean(self):
+        assert legacy_evaluation_key_errors(
+            {"evaluation": {"item_categories": {"enabled": True}}}
+        ) == []
+
+    def test_a_config_without_the_key_at_all_is_clean(self):
+        assert legacy_evaluation_key_errors({}) == []
+        assert legacy_evaluation_key_errors({"evaluation": {}}) == []
+
+    def test_presence_is_what_counts_not_the_value(self):
+        """A conf that spells the old name has not been migrated, whatever is
+        under it — including a disabled block or an explicit null."""
+        for value in ({"enabled": False}, None, {}):
+            assert legacy_evaluation_key_errors(
+                {"evaluation": {"product_categories": value}}
+            ), value
+
+    def test_wired_into_validate_config_consistency(self):
+        params = {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            }},
+            "evaluation": {"product_categories": {"enabled": True}},
+        }
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(params)
+        assert "A33" in str(exc.value)
+
+    def test_the_real_conf_uses_the_new_spelling(self):
+        from recsys_tfb.core.config import ConfigLoader
+
+        parameters = ConfigLoader("conf", env="local").get_parameters()
+        assert legacy_evaluation_key_errors(parameters) == []
+        # ...and the block it guards is actually there, so this is not passing
+        # by looking at nothing.
+        assert "item_categories" in parameters["evaluation"]
+
+    def test_the_rename_table_covers_exactly_the_one_key(self):
+        """Scope pin: #327 renamed one config key, not a family of them.
+
+        The time vocabulary is kept on purpose (ADR-0017); an entry spelled
+        ``snap_date`` appearing here would mean somebody read the rename wider
+        than it is.
+        """
+        assert LEGACY_EVALUATION_KEYS == {"product_categories": "item_categories"}
+
+
 # --- B10: model_input row count must equal its keys table's ------------------
 
 from recsys_tfb.core.consistency import SplitRowCounts, model_input_grain_errors

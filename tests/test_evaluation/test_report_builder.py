@@ -1,6 +1,7 @@
 """Pure-dict tests for report_builder section functions (no Spark)."""
 
 import pandas as pd
+import pytest
 
 from recsys_tfb.evaluation import report_builder as rb
 
@@ -32,22 +33,22 @@ def _metrics():
                            "ndcg_attr@1": 0.25, "ndcg_attr@3": 0.3,
                            "ndcg_attr@2": 0.28}},
         "dataset_overview": {
-            "totals": {"n_rows": 100, "n_customers": 10, "n_products": 2,
+            "totals": {"n_rows": 100, "n_entities": 10, "n_items": 2,
                        "n_snap_dates": 1, "n_positives": 20,
                        "positive_rate": 0.2,
-                       "avg_positives_per_customer": 2.0},
+                       "avg_positives_per_entity": 2.0},
             "by_snap_date": {"20240331": {"n_rows": 100, "n_positives": 20,
-                                          "n_customers": 10,
+                                          "n_entities": 10,
                                           "positive_rate": 0.2}},
             "by_item": {"A": {"n_rows": 50, "n_positives": 12,
-                              "n_customers": 10, "positive_rate": 0.24},
+                              "n_entities": 10, "positive_rate": 0.24},
                         "B": {"n_rows": 50, "n_positives": 8,
-                              "n_customers": 10, "positive_rate": 0.16}},
+                              "n_entities": 10, "positive_rate": 0.16}},
             "by_segment": {
-                "X": {"n_rows": 60, "n_positives": 14, "n_customers": 6,
+                "X": {"n_rows": 60, "n_positives": 14, "n_entities": 6,
                       "positive_rate": 14 / 60, "n_queries": 6,
                       "query_share": 0.6},
-                "Y": {"n_rows": 40, "n_positives": 6, "n_customers": 4,
+                "Y": {"n_rows": 40, "n_positives": 6, "n_entities": 4,
                       "positive_rate": 6 / 40, "n_queries": 4,
                       "query_share": 0.4}}},
         "macro_avg": {
@@ -243,7 +244,7 @@ def test_metrics_section_two_family_blocks_consistent():
         "per_item": {"fund": {"hit_rate@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.3, "map_attr@1": 0.5,
                                   "mean_pos": 2.0}},
-        "dataset_overview": {"totals": {"n_products": 2}},
+        "dataset_overview": {"totals": {"n_items": 2}},
     }
     s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
     tt = s.table_titles
@@ -328,7 +329,7 @@ def test_metrics_section_category_present_when_key():
         "overall": {"map@1": 0.4, "map@2": 0.45},
         "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
-        "dataset_overview": {"totals": {"n_products": 2}},
+        "dataset_overview": {"totals": {"n_items": 2}},
     }
     s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
     assert any("大類" in tt for tt in s.table_titles)
@@ -430,6 +431,110 @@ def test_completeness_section_no_verdict_vocabulary():
         assert bad not in text
 
 
+class TestRenamedSchemaLabels:
+    """報表的欄名標籤印使用者自己的欄名，不是示例部署的業務詞（#327）。
+
+    用 ``renamed_schema_params``（三個角色全部改名）而不是本檔的 ``_params()``
+    ——後者宣告的正是示例欄名，寫死中文業務詞的程式碼在它底下永遠是綠的，
+    這正是這個 fixture 存在的理由。
+
+    斷言的是「印出來的字對不對」這個外部可觀察行為，不是「有沒有呼叫
+    ``get_schema``」——後者會在下一次搬動時變成噪音。
+    """
+
+    def _renamed(self, renamed_schema_params):
+        params = dict(renamed_schema_params)
+        params["evaluation"] = _params()["evaluation"]
+        return params
+
+    def test_completeness_facts_label_names_the_users_item_column(
+        self, renamed_schema_params
+    ):
+        s = rb.build_completeness_section(
+            _metrics(), self._renamed(renamed_schema_params), metric_ci=_metric_ci()
+        )
+        text = " ".join(t.to_string() for t in s.tables)
+        assert "sku 數 n_items" in text
+        assert "產品數" not in text
+
+    def test_overview_scale_label_names_the_users_entity_columns(
+        self, renamed_schema_params
+    ):
+        s = rb.build_overview_section(
+            _metrics(), self._renamed(renamed_schema_params), metric_ci=_metric_ci()
+        )
+        text = " ".join(t.to_string() for t in s.tables)
+        assert "每 store_id 平均正例數 avg_positives_per_entity" in text
+        assert "每客戶平均正例數" not in text
+
+    def test_a_multi_column_entity_is_joined_not_truncated(
+        self, two_column_entity_params
+    ):
+        """entity 是清單，標籤要印完整的清單。
+
+        取第一欄在單欄設定下與正解等價（S4 擋的正是這個讀法），所以這條必須用
+        兩欄的 fixture 才問得出來。
+        """
+        params = dict(two_column_entity_params)
+        params["evaluation"] = _params()["evaluation"]
+        s = rb.build_overview_section(
+            _metrics(), params, metric_ci=_metric_ci()
+        )
+        text = " ".join(t.to_string() for t in s.tables)
+        entity = "×".join(two_column_entity_params["schema"]["columns"]["entity"])
+        assert "×" in entity, "fixture 不再是多欄 entity，這條測試已失去意義"
+        assert f"每 {entity} 平均正例數" in text
+
+
+class TestLegacyDatasetOverviewRefused:
+    """讀到 #327 之前的 evaluation_results.json 要 raise，不做靜默 fallback。"""
+
+    def _legacy(self, **overrides):
+        metrics = _metrics()
+        overview = metrics["dataset_overview"]
+        overview["totals"].pop("n_items")
+        overview["totals"]["n_products"] = 2
+        overview.update(overrides)
+        return metrics
+
+    def test_a_legacy_totals_key_raises_and_names_the_script(self):
+        with pytest.raises(ValueError) as exc:
+            rb._dataset_overview(self._legacy())
+        message = str(exc.value)
+        assert "n_products" in message
+        assert rb.MIGRATION_SCRIPT in message
+
+    def test_a_legacy_key_hiding_in_a_cell_is_found_too(self):
+        """totals 可能已被手動改對，而 by_* 的 cell 沒有。
+
+        只看 totals 的檢查會放行那種半遷移的檔案，而它的 by_item 表會印出一欄
+        ``n_customers``——舊詞彙，零錯誤訊息。
+        """
+        metrics = _metrics()
+        metrics["dataset_overview"]["by_item"]["A"]["n_customers"] = 10
+        with pytest.raises(ValueError, match="n_customers"):
+            rb._dataset_overview(metrics)
+
+    def test_the_section_builders_refuse_the_same_file(self):
+        """護欄擋在存取器上，所以每個讀取端都跟著擋——含比較報表那一條。"""
+        from recsys_tfb.evaluation.comparison import report as cmp_report
+
+        legacy = self._legacy()
+        for call in (
+            lambda: rb.build_overview_section(legacy, _params()),
+            lambda: rb.build_dataset_overview_section(legacy, _params()),
+            lambda: rb.build_completeness_section(legacy, _params()),
+            lambda: cmp_report._n_items(legacy),
+        ):
+            with pytest.raises(ValueError, match="predates the #327 key rename"):
+                call()
+
+    def test_a_bundle_with_no_dataset_overview_is_left_alone(self):
+        """baseline 的 slim bundle 本來就沒有 dataset_overview，不得被誤擋。"""
+        assert rb._dataset_overview({"overall": {"map@1": 0.5}}) == {}
+        assert rb._n_items({"overall": {"map@1": 0.5}}) == 0
+
+
 class TestVisibleMetricKeys:
     def test_drops_ndcg_keys(self):
         keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]
@@ -528,7 +633,7 @@ def test_assemble_metadata_has_model_version_and_generated_at():
 def test_dataset_overview_adds_by_category_when_present():
     m = _metrics()
     m["category"] = {"dataset_overview": {"by_item": {
-        "fund": {"n_rows": 10, "n_positives": 3, "n_customers": 5,
+        "fund": {"n_rows": 10, "n_positives": 3, "n_entities": 5,
                  "positive_rate": 0.3}}}}
     s = rb.build_dataset_overview_section(m, _params())
     idx = next(i for i, tt in enumerate(s.table_titles)
@@ -591,7 +696,7 @@ def _metrics_with_seg_cat():
     }
     m["category"] = {
         "overall": {"map@1": 0.55, "map@3": 0.6, "map@2": 0.58},
-        "dataset_overview": {"totals": {"n_products": 3}},
+        "dataset_overview": {"totals": {"n_items": 3}},
     }
     return m
 
@@ -830,7 +935,7 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
-    'all' resolves to n_products (=2 in fixture) for lookup."""
+    'all' resolves to n_items (=2 in fixture) for lookup."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -841,7 +946,7 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
         "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
         "map_attr@all M", "map_attr@all B", "map_attr@all Δ",
     ]
-    # n_prod=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
+    # n_items=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
     assert tbl.loc["A", "map_attr@all M"] == 0.55
     assert tbl.loc["A", "map_attr@all B"] == 0.45
 
@@ -875,7 +980,7 @@ def _metrics_min():
         "observation_items": [],
         "n_queries": 3,
         "n_excluded_queries": 0,
-        "dataset_overview": {"totals": {"n_products": 2}},
+        "dataset_overview": {"totals": {"n_items": 2}},
     }
 
 

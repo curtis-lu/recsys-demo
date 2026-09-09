@@ -13,6 +13,7 @@
 | 動 `pipelines/dataset/` 的 node | 上一列 ＋ S1、S2 |
 | 寫任何讀 `schema.entity` 的程式碼（分組、切分、抽樣、算母體） | S4 |
 | 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
+| 在 `src/` 裡寫下任何具體欄名（字串、預設參數、log 欄位） | S6 ＋ [ADR-0017](../adr/0017-framework-vocabulary-boundary.md) |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -28,7 +29,7 @@
 ## ⚠ 兩套 A 系列不是同一套編號
 
 - **本檔的 A1–A7** ＝ 結構約束（node 與 catalog 該長什麼樣，AST 稽核，測試期抓）
-- **`core/consistency.py` 的 A1–A29** ＝ 設定不變量 predicate（config 值彼此矛不矛盾，執行期 raise）
+- **`core/consistency.py` 的 A1–A33** ＝ 設定不變量 predicate（config 值彼此矛不矛盾，執行期 raise）
 
 兩邊的 **A5、A7 已經在撞車**，意思完全不同。**本 repo 不重編號**——重編號會讓既有文件與 commit message 的引用全部指錯（理由同 A16/A17/A18 退休不回填，見 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) 第四節）。
 
@@ -40,9 +41,9 @@
 
 ---
 
-## 12 條約束一覽
+## 13 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**32 個測試，2.13–2.35 秒**（2026-09-03 分兩批各連跑三次；S5 加進來之後——它跟 S4 掃同樣的 299 個檔案，各自解析一次）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**39 個測試，2.86–3.23 秒**（2026-09-09 共 9 次量測，橫跨 `load average 2.5–4.1`；S6 加進來之後——它只掃 `src/` 的 142 個檔，但那是本檔第三次各自完整解析同一批檔案）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -58,6 +59,7 @@
 | [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
 | [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | `src/recsys_tfb/` ＋ `tests/` | `scripts/` 不在範圍內（**現有一處，已裁決不修**）；解包等其他取法；值一離開綁定它的語句就看不到（含同模組的 helper 參數） |
 | [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告-identity_columns) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns` | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
+| [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -535,11 +537,71 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 
 ---
 
+## S6. `src/` 不得出現示例部署的字面欄名
+
+這個 repo 是通用的排序框架，欄名由使用者在 `schema.columns` 宣告。`snap_date` / `cust_id` / `prod_name` 是**示例部署**（商業銀行產品推薦）的三個欄名——框架自己的程式碼把其中任何一個寫死，等於替使用者決定了他的資料長什麼樣。
+
+這條**不是**預防性守衛。同一個錯已經人工清過七輪（#220、#224、#240、#249、#262、#265、#326），每一輪都是有人重讀整棵樹。典型的失敗形態全都是**安靜**的：
+
+| 實例 | 症狀 |
+|---|---|
+| `evaluation/report_builder.py::build_core_concept_section` 自備一份角色預設表 | 它跟 `core/schema` 的那份一旦分岔，報表的核心概念段印 `prod_name`、其餘各區印使用者真正的欄名，兩邊都不報錯（#326 修掉） |
+| `evaluation/statistics.py` 的 `entity_col: str = "cust_id"` | 呼叫端不傳就默默算錯人的東西；而它的 `entity_col` 還是單數字串，違反「`schema.entity` 是 list」這個框架承諾（#326 連模組一起刪） |
+| `evaluation/distributions.py` 兩個繪圖函式的 `item_col="prod_name"` | 同上（#326 改成必填參數） |
+
+⚠ **這條抓不到 #326 裡唯一真的會爆的那一處。** `training/steps/local_cache.py` 寫的是 `"snap_date=*"`（Hive 分區**目錄名**的 glob），不等於 `"snap_date"`——見下面〈這個檢查看不到〉。誠實地說：S6 買到的是「別再把使用者的欄名寫進框架」，不是「所有寫死都會被抓到」。
+
+**檢查**：AST 掃描 `src/recsys_tfb/` 底下所有 `.py`（`rglob`），找每一個**與那三個名字完全相等**的字串字面值。掃描範圍是 `LITERAL_COLUMN_SCAN_ROOTS`，名字清單是 `EXAMPLE_COLUMN_NAMES`，掃描器是 `_literal_column_offenders`。
+
+**完全相等，不是包含**，這是這條規則活得下去的關鍵：`"by_snap_date"`、`"test_snap_dates"`、`f"snap_date={v}"` 三者都合法、也都含那串字。改成子字串比對會讓登記表膨脹到沒人讀，而沒人讀的登記表擋不住東西。
+
+**該怎麼寫**：欄名一律走 `core/schema.get_schema`，現成範例是 `evaluation/report_builder.py::build_core_concept_section`（它印的每一個欄名都是使用者的）。
+
+**只掃 `src/`，`tests/` 與 `scripts/` 刻意在外**——這跟 S4／S5 的取捨相反，理由也不同：S4／S5 擋的是「這段程式碼把設定讀成什麼」，而**測試正是重災區**；S6 擋的是「框架有沒有替使用者決定欄名」，而一個 fixture 本來就得寫下某個具體欄名，寫示例那組是誠實的選擇。把 `tests/` 擴進來只會生出幾百筆例外。
+
+**失敗訊息會指出位置**——檔案（含 `src/recsys_tfb/` 前綴的 repo 相對路徑）、行號、所在函式（巢狀時取最內層的 def）、以及那個字面值：
+
+```
+src/recsys_tfb/evaluation/statistics.py:8 in compute_product_statistics(): 'prod_name'
+```
+
+（這是**真的**跑出來的：把 `src/` 換成 #326 修好之前的那一版（`9b50d71`）再掃一次，30 處全部被點名，含上表三處與 `report_builder.py:184/185/187` 的核心概念預設表。）
+
+`test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住。
+
+**例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-15-筆)。
+
+### ⚠ 這張登記表開局就有 15 筆，那是規則在運作、不是規則被稀釋
+
+S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠是錯的」。S6 擋的是一種**拼法**，而有三類拼法是合法的：
+
+| 類別 | 為什麼合法 | 筆數 |
+|---|---|---|
+| `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 11 |
+| `core/logging` 的觀測欄白名單、`source_etl` 稽核表的欄名 | 那是**它們自己的**欄位，只是拼法相同 | 3 |
+| `core/schema` 的內建預設 | 暫時的，跟著「測試側 params 清理」那張票一起消失 | 1 |
+
+所以這張表同時是另一件事的完整帳目：**框架目前還借用了多少示例字彙**。要翻案 time 語彙的保留決定（ADR-0017 決定一），這個數字就是起點。
+
+`test_every_registered_exception_matches_a_real_site` 守著它的誠實性——登記一筆對不上任何實際站點的項目就轉紅。沒有這條，登記表只會單向膨脹：站點清乾淨了、那一行留著，而它會預先赦免下一個掉進同一個函式的真違例。
+
+### 這個檢查看不到
+
+- **註解。** 註解不是 AST 節點，掃描器從頭到尾看不到它們。
+- **f-string 片段與任何子字串。** `f"snap_date={v}"` 的片段是 `"snap_date="`，不等於 `"snap_date"`（見上面「完全相等」那段——這是刻意的取捨，不是缺陷）。
+- **⚠ 分區目錄名的 glob。** `"snap_date=*"` 與 `f"snap_date={v}"` 都不等於 `"snap_date"`，所以 **#326 那個唯一真的會爆的違例，這條抓不到**（`local_cache.py::populate_cache_from_hive`）。這是「完全相等」那個取捨的直接代價，而且它落在**最貴的**那一邊——寫死分區目錄名是會 `FileNotFoundError` 的那種，不是安靜印錯的那種。要擋它得另外釘住「分區欄名一律由 catalog 注入」，而那是 #326 的修法本身，目前沒有機械檢查。
+- **拼接出來的欄名**：`"snap" + "_date"`、`"_".join(["snap", "date"])`、`getattr` 取名。要刻意才寫得出來。
+- **不在那三個名字裡的其他示例欄名**：`cust_segment_typ`、`prod_type`、`aum_*` 之類。清單是 `EXAMPLE_COLUMN_NAMES`，擴充它會逼出新的例外登記，代價要先算過。
+- **`conf/` 的 YAML 不在範圍內**（同 S5）。掃的是 Python 字面值。
+- **`tests/` 與 `scripts/` 不在範圍內**，見上，這是裁決不是遺漏。
+
+---
+
 # 節三 · 例外登記
 
 **清單內的既有案例合法。要新增任何一筆，必須先取得使用者同意——不得自行擴充。**
 
-登記表怎麼比對：R1／R3／R4 比的是 **Counter**（目錄 ＋ 名字），所以「多一個同名站點」會被抓到；但**不釘行號**，所以站點上方的一般編輯不會誤報。**R5 不是 Counter 而是過濾器**，登記粒度是函式而非站點——差別見該條。
+登記表怎麼比對：R1／R3／R4 比的是 **Counter**（目錄 ＋ 名字），所以「多一個同名站點」會被抓到；但**不釘行號**，所以站點上方的一般編輯不會誤報。**R5 與 R6 不是 Counter 而是過濾器**，登記粒度是函式而非站點——差別見該兩條。**R2 與 R7 兩張表沒有任何機械檢查**（前者不在 A2 掃描範圍、後者根本沒有對應約束），純粹靠人盯著。
 
 ## R1. `Node(writes=[...])`（A1 的例外一）── 2 筆
 
@@ -625,6 +687,67 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 > ⚠ **這張表的比對方式跟 R1／R3／R4 不一樣。**
 > 那三張比的是 **Counter**——登記表列的是「現況有幾筆」，多一個同名站點就會被抓到。
 > 這張是**過濾器**——登記過的 `(模組, 函式)` 會被跳過，所以登記一筆會讓那個函式裡**所有**取第一欄的地方一起靜音。**登記的粒度是函式，不是行。** 要登記就把該函式為什麼整個豁免寫清楚。
+
+
+## R6. `src/` 的字面示例欄名（S6 的例外）── 15 筆
+
+**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表開局就有 15 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
+
+**一、`evaluation.snap_date` 這個設定鍵的讀取（11 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。
+
+| 位置 | 函式 | 那個字面值在做什麼 |
+|---|---|---|
+| `__main__.py` | `dataset` | run context 的 `snap_date` 觀測欄（該指令沒有月份概念，填 `_NONE_PLACEHOLDER`） |
+| `__main__.py` | `training` | 同上 |
+| `__main__.py` | `inference` | run context 的 `snap_date` 觀測欄 |
+| `__main__.py` | `evaluation` | 讀 `evaluation.snap_date` 設定鍵 ＋ 兩處 run context／log extra |
+| `core/consistency.py` | `post_training_snap_date_errors` | A22 讀 `evaluation.snap_date` |
+| `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
+| `evaluation/comparison/sources.py` | `load_compare_predictions` | 同上 |
+| `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
+| `pipelines/evaluation/comparison_nodes.py` | `validate_enriched_eval_predictions_present` | 同上 |
+| `pipelines/evaluation/nodes_spark.py` | `prepare_eval_data` | 同上 |
+| `pipelines/evaluation/nodes_spark.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
+
+**二、「那是它自己的欄位」（3 筆）**
+
+| 位置 | 函式 | 為什麼合法 |
+|---|---|---|
+| `core/logging.py` | `<module>` | 觀測欄白名單。那是**log 欄位**的名字，不是 DataFrame 欄名；該模組的註解已自承「本 repo 的 `schema.time` 剛好也叫這個」 |
+| `pipelines/source_etl/audit.py` | `<module>` | `source_etl` 稽核表自己的 schema 定義 |
+| `pipelines/source_etl/audit.py` | `write_record` | 寫進同一張稽核表的同一欄 |
+
+**三、暫時的（1 筆）**
+
+| 位置 | 函式 | 什麼時候消失 |
+|---|---|---|
+| `core/schema.py` | `<module>` | `get_schema` 對 `time` / `entity` / `item` 的內建預設。#326 把三個角色改成 CLI 入口必填、但刻意留著預設（304 個測試靠它）；**#328 會同時拿掉預設與這一筆登記**（ADR-0017 決定三） |
+
+要加一筆：先在這張表寫下位置、函式與理由，**取得使用者同意之後**，再把 `(模組路徑, 函式名)` 加進 `tests/test_core/test_architecture_constraints.py` 的 `LITERAL_COLUMN_EXCEPTIONS`。
+
+> ⚠ **比對方式同 R5（過濾器），不是 R1／R3／R4 的 Counter。** 登記粒度是**函式**——登記一筆會讓那個函式裡**所有**字面示例欄名一起靜音。
+> 另外多一道 R1–R5 都沒有的守衛：`test_every_registered_exception_matches_a_real_site` 會在某一筆對不上任何實際站點時轉紅。少了它，這張表只會單向膨脹，而一筆過期的登記會**預先赦免**下一個掉進同一個函式的真違例。
+
+## R7. `schema.columns.time` 與 catalog `partition_cols` 的對齊（**沒有任何機械檢查**，非豁免）── 1 筆
+
+比照 [R2](#r2-框架層可變全域狀態不在-a2-掃描範圍內非豁免-5-筆)：這不是某條約束的例外，而是**沒有任何約束擋得住**的一件事，登記在這裡是為了讓它有一個查得到的位置。
+
+| 事項 | 操作要求 |
+|---|---|
+| 改 `schema.columns.time` | **必須同步改 catalog 的 `partition_cols`，且既有 Hive 表必須先 DROP 再重建** |
+
+**不加一致性不變量是刻意的**（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定二）。把四種情境攤開，只有一種是靜默的：
+
+| 情境 | 會怎樣 |
+|---|---|
+| 只改 `schema.columns.time` | 寫入時 catalog 宣告的分區欄不在 DataFrame 裡 → 大聲 raise |
+| 只改 catalog 的 `partition_cols` | 同上，方向相反 → 大聲 raise |
+| 兩邊都改，表是新的 | 用新欄名建表，正確 |
+| **兩邊都改對了，但 Hive 表已經存在** | **靜默不生效**：`CREATE TABLE IF NOT EXISTS` 不改既有表的 schema，而 `insertInto` 是**位置對應**不是名稱對應——資料照樣寫進去、分區目錄名還是舊的、零錯誤訊息 |
+
+而最後那一種比的是 **conf 對 metastore**，一個吃 `parameters` 的配置層不變量看不到 metastore，本來就擋不到它。加一條擋不到目標情境的不變量，只會讓下一個人以為這件事已經有人守著。
+
+要推翻這個決定需要**新證據**：出現一個不必主動改設定也會踩到的實例。
 
 ---
 

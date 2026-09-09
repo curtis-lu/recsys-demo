@@ -45,10 +45,10 @@ def _metrics():
         "per_item": {"A": {"hit_rate@1": 0.5, "mean_pos": 1.5}},
         "per_segment": {},
         "dataset_overview": {
-            "totals": {"n_rows": 4, "n_customers": 2, "n_products": 2,
+            "totals": {"n_rows": 4, "n_entities": 2, "n_items": 2,
                        "n_snap_dates": 1, "n_positives": 2,
                        "positive_rate": 0.5,
-                       "avg_positives_per_customer": 1.0},
+                       "avg_positives_per_entity": 1.0},
             "by_snap_date": {}, "by_item": {}},
         "n_queries": 2, "n_excluded_queries": 0,
     }

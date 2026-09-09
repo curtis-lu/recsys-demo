@@ -351,7 +351,7 @@ def compute_baseline_metrics(
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     # per_segment / category slices for the report's by-segment / 大類 vs
     # baseline comparison. Gated by the same config that turns them on for the
-    # model (segment_columns present / product_categories maps items), so the
+    # model (segment_columns present / item_categories maps items), so the
     # baseline pays for a slice only when the model already computed its match.
     metrics = compute_overall_per_item(
         baseline_frame,
