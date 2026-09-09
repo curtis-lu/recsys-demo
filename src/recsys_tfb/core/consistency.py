@@ -290,6 +290,23 @@ Layer 1 — config-static (implemented here; aggregated by
   three complies; it exists for the day one stops. Deliberate residual: deleting
   ``primary_key`` too escapes the gate, which is a visible retirement of the key
   rather than the silent shape above.
+* A33 — **MIGRATION-PERIOD CHECK, DELETE ME.** ``evaluation.product_categories``
+  was renamed to ``evaluation.item_categories`` (#327): the framework does not
+  speak the example deployment's business vocabulary. The rename is hard — no
+  dual keys — so a conf that still spells the old name loses the whole category
+  evaluation in silence: ``metrics_spark._build_category_mapping`` reads the new
+  name, gets ``{}``, returns ``None``, and every category section vanishes from
+  the report while the run succeeds. This predicate turns that into a message
+  naming the new key. Predicate: ``legacy_evaluation_key_errors``. Aggregated by
+  ``validate_config_consistency`` so an operator learns at the next CLI entry,
+  whichever command they run.
+
+  **Retirement condition (this is a tool, not a guard):** delete the predicate,
+  its wiring, its tests and this legend entry once the user confirms the company
+  environment's own ``conf/`` has been updated. A permanent check here would be a
+  compatibility layer for a key this repo no longer has, and the next reader
+  would have to work out which of the two names is real. Leave the code slot
+  ``A33`` retired-not-renumbered afterwards, per A16/A17/A18.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -1371,6 +1388,50 @@ def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
     return errors
 
 
+#: A33 (migration-period). ``old key -> new key`` under ``evaluation``.
+#: Delete this constant with the predicate below; see A33 in the module
+#: docstring for the retirement condition.
+LEGACY_EVALUATION_KEYS = {"product_categories": "item_categories"}
+
+
+def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
+    """A33 — a conf still spelling a pre-#327 ``evaluation`` key.
+
+    ⚠ **This is a migration tool with a delete-by condition, not an
+    invariant.** It exists so the one config rename in #327 costs an operator a
+    startup rather than a silently missing report section, and it comes out
+    again once the company environment's ``conf/`` is confirmed updated. The
+    condition is written out in A33 of the module docstring; do not promote this
+    to a permanent compatibility layer, and do not accept both spellings.
+
+    The failure it replaces is silent all the way down.
+    ``metrics_spark._build_category_mapping`` reads
+    ``evaluation.item_categories``; against an old conf that lookup returns
+    ``{}``, ``enabled`` is falsy, the function returns ``None``, and
+    ``compute_all_metrics`` simply never adds the ``category`` bundle. The run
+    succeeds, the report renders, and the category tables are gone — the shape
+    an operator cannot tell from "this month had no categories to show".
+
+    Only the key's *presence* is checked, whatever it holds: a conf that spells
+    the old name has not been migrated regardless of what is under it. The
+    values themselves (``mapping``'s category names and item lists) are the
+    user's own business vocabulary and are deliberately untouched by #327.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    return [
+        f"A33: evaluation.{old!r} was renamed to evaluation.{new!r} (#327) — "
+        f"the framework no longer spells its own config keys in the example "
+        f"deployment's business vocabulary. There is no dual-key fallback: "
+        f"left as-is, the category evaluation is skipped and every category "
+        f"table disappears from the report without an error. Rename the key in "
+        f"your conf; the values under it are yours and do not change."
+        for old, new in LEGACY_EVALUATION_KEYS.items()
+        if old in eval_params
+    ]
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -1480,6 +1541,10 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(numeric_storage_param_errors(parameters))
 
     errors.extend(dataset_source_quality_check_errors(parameters))
+
+    # A33 is a migration-period check; it leaves with the migration (see
+    # A33 in the module docstring).
+    errors.extend(legacy_evaluation_key_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

@@ -70,12 +70,67 @@ def _section_on(parameters: dict, name: str) -> bool:
     return bool(sections.get(name, True))
 
 
-def _n_products(metrics: dict) -> int:
-    return int(
-        metrics.get("dataset_overview", {})
-        .get("totals", {})
-        .get("n_products", 0)
-    )
+#: ``evaluation_results.json`` keys renamed by #327, ``old -> new``. The
+#: framework stopped spelling its own landed keys in the example deployment's
+#: business vocabulary; ``by_item`` next to ``n_products`` was one dict with two
+#: naming schemes. ``by_snap_date`` / ``n_snap_dates`` are deliberately NOT in
+#: here — the time vocabulary is kept on purpose (ADR-0017).
+_RENAMED_OVERVIEW_KEYS = {
+    "n_products": "n_items",
+    "n_customers": "n_entities",
+    "avg_positives_per_customer": "avg_positives_per_entity",
+}
+
+#: Repo-relative path named in the refusal message below. A reader who hits it
+#: needs the fix, not just the diagnosis.
+MIGRATION_SCRIPT = "scripts/migrate_evaluation_results_keys.py"
+
+
+def _dataset_overview(metrics: dict) -> dict:
+    """``metrics["dataset_overview"]``, refusing a pre-#327 payload.
+
+    Every read of the overview — this module's and
+    ``evaluation/comparison/report.py``'s — goes through here, so the old shape
+    is detected once instead of at each ``.get`` that would otherwise shrug and
+    return its default.
+
+    **Why refuse rather than fall back.** The old key names are gone, not
+    deprecated: a dual read would be a permanent compatibility layer for a
+    spelling this repo no longer produces, and the next reader would have to
+    work out which of the two is real. The failure a fallback would be hiding is
+    the one worth failing on: ``_n_items`` returning ``0`` makes
+    ``_resolve_display_k`` resolve ``"all"`` to ``map@0``, every metric lookup
+    misses, and a cross-version comparison renders as a full table of blanks
+    that reads like "the model scored nothing" rather than "this file is old".
+
+    An overview with *neither* spelling is left alone — a slim metrics bundle
+    legitimately carries no ``dataset_overview`` at all, and the baseline
+    bundles are exactly that shape.
+    """
+    overview = metrics.get("dataset_overview", {}) or {}
+    cells = [overview.get("totals", {}) or {}]
+    for group in ("by_snap_date", "by_item", "by_segment"):
+        cells.extend(
+            cell for cell in (overview.get(group, {}) or {}).values()
+            if isinstance(cell, dict)
+        )
+    found = sorted({
+        old for cell in cells for old in _RENAMED_OVERVIEW_KEYS if old in cell
+    })
+    if found:
+        renames = ", ".join(f"{old} -> {_RENAMED_OVERVIEW_KEYS[old]}" for old in found)
+        raise ValueError(
+            f"evaluation_results.json predates the #327 key rename: "
+            f"dataset_overview still carries {found}. Migrate the file in "
+            f"place with `PYTHONPATH=src .venv/bin/python {MIGRATION_SCRIPT} "
+            f"<path-or-dir> --apply` ({renames}), then re-run. Reading it as-is "
+            f"would report 0 items and render a report of blanks."
+        )
+    return overview
+
+
+def _n_items(metrics: dict) -> int:
+    return int((_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 
 
 def build_overview_section(
@@ -89,7 +144,7 @@ def build_overview_section(
     """
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
+    n_prod = _n_items(metrics)
     ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
 
     tables: list[pd.DataFrame] = []
@@ -125,14 +180,18 @@ def build_overview_section(
     titles.append("overall mAP@k（per-query 等權，另一種加權）")
 
     # 規模／分母（非好壞，明標與關鍵數分開）
-    totals = metrics.get("dataset_overview", {}).get("totals", {}) or {}
+    # 「每 X 平均正例數」的 X 印使用者自己的 entity 欄，不寫死「客戶」——entity
+    # 是門市時，「每客戶平均」要讀者在腦中翻譯一次才看得懂這個數字在數什麼
+    # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
+    totals = _dataset_overview(metrics).get("totals", {}) or {}
+    entity_str = "×".join(get_schema(parameters)["entity"])
     scale = {
         "有正例 query 數 n_queries": metrics.get("n_queries"),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
-        "每客戶平均正例數 avg_positives_per_customer":
-            totals.get("avg_positives_per_customer"),
+        f"每 {entity_str} 平均正例數 avg_positives_per_entity":
+            totals.get("avg_positives_per_entity"),
     }
     t_scale = pd.DataFrame([scale]).T
     t_scale.columns = ["value"]
@@ -234,7 +293,7 @@ def build_dataset_overview_section(
 ) -> ReportSection | None:
     if not _section_on(parameters, "dataset_overview"):
         return None
-    ov = metrics.get("dataset_overview", {})
+    ov = _dataset_overview(metrics)
     totals_d = ov.get("totals", {}) or {}
     totals = pd.DataFrame([totals_d]).T
     totals.columns = ["value"]
@@ -278,7 +337,7 @@ def build_dataset_overview_section(
         collapsed.append(False)
     cat = metrics.get("category")
     if cat:
-        cat_by_item = (cat.get("dataset_overview", {}) or {}).get("by_item", {})
+        cat_by_item = _dataset_overview(cat).get("by_item", {})
         if cat_by_item:
             tables.append(pd.DataFrame(cat_by_item).T)
             titles.append("by 大類（大類粒度，不與整體相加）")
@@ -456,7 +515,7 @@ def build_metrics_section(
     # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    n_prod = _n_products(metrics)
+    n_prod = _n_items(metrics)
     ks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_prod)  # 全表統一 k
 
     tables: list[pd.DataFrame] = []
@@ -495,9 +554,7 @@ def build_metrics_section(
     cat = metrics.get("category")
     cks = None
     if cat:
-        n_cat = int(
-            cat.get("dataset_overview", {}).get("totals", {}).get("n_products", 0)
-        )
+        n_cat = _n_items(cat)
         cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
         _add(_families_by_k_table(cat.get("overall", {}), cks, n_cat),
              "A · per-query｜大類 overall（列＝map/precision/recall）", True)
@@ -656,7 +713,7 @@ def build_baseline_section(
         metrics, baseline_metrics, "Model", "Baseline"
     )
     disp = _report_cfg(parameters).get("display", {}) or {}
-    n_prod = _n_products(metrics)
+    n_prod = _n_items(metrics)
     rec_ks = _resolve_display_k(
         disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_prod
     )
@@ -777,10 +834,7 @@ def build_baseline_section(
     cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
     cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
     if cat_a and cat_b:
-        n_cat = int(
-            (metrics.get("category") or {}).get("dataset_overview", {})
-            .get("totals", {}).get("n_products", 0)
-        ) or n_prod
+        n_cat = _n_items(metrics.get("category") or {}) or n_prod
         cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
         data = {}
         for who, src in (("Model", cat_a), ("Baseline", cat_b)):
@@ -809,7 +863,7 @@ def build_baseline_section(
             "（recall／map_attr 兩張，k＝[1,3,5,all] 控寬）、per-segment 與大類"
             "overall（只比主指標 mAP，各一張，reference 段控寬）。per-segment／大類"
             "僅在 model 與 baseline 兩側都有該切片時出現（key 由同一 active segment／"
-            "product_categories 對齊）。"
+            "item_categories 對齊）。"
         ),
         tables=tables,
         table_titles=titles,
@@ -1019,17 +1073,20 @@ def build_completeness_section(
     presentation §一.4：交代邊界。只陳述事實，不評級。
     """
     eval_p = parameters.get("evaluation", {}) or {}
-    totals = (metrics.get("dataset_overview", {}) or {}).get("totals", {}) or {}
+    totals = _dataset_overview(metrics).get("totals", {}) or {}
     metric_p = eval_p.get("metric", {}) or {}
     sample_meta = (metric_ci or {}).get("sample", {}) or {}
 
     mk = metric_p.get("k")
+    # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
+    # build_overview_section 的 entity 標籤）。
+    item_col = get_schema(parameters)["item"]
     facts = {
         "k_values": eval_p.get("k_values"),
         "有正例 query 數 n_queries": metrics.get("n_queries"),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
-        "產品數 n_products": totals.get("n_products"),
+        f"{item_col} 數 n_items": totals.get("n_items"),
         "metric.weight_alpha（item 加權指數 α；0＝item 等權）":
             metric_p.get("weight_alpha"),
         "metric.k（AP 截斷 k；無＝不截斷、算全長）":

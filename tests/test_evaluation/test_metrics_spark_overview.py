@@ -27,19 +27,19 @@ def test_dataset_overview_totals(spark):
     ov = ms.compute_dataset_overview(_df(spark), _params())
     t = ov["totals"]
     assert t["n_rows"] == 5
-    assert t["n_customers"] == 2
-    assert t["n_products"] == 2
+    assert t["n_entities"] == 2
+    assert t["n_items"] == 2
     assert t["n_snap_dates"] == 2
     assert t["n_positives"] == 3
     assert t["positive_rate"] == pytest.approx(3 / 5)
-    assert t["avg_positives_per_customer"] == pytest.approx(1.5)
+    assert t["avg_positives_per_entity"] == pytest.approx(1.5)
 
 
 def test_dataset_overview_by_snap_and_item(spark):
     ov = ms.compute_dataset_overview(_df(spark), _params())
     assert ov["by_snap_date"]["20240331"]["n_rows"] == 4
     assert ov["by_snap_date"]["20240331"]["n_positives"] == 2
-    assert ov["by_item"]["A"]["n_customers"] == 2
+    assert ov["by_item"]["A"]["n_entities"] == 2
     assert ov["by_item"]["A"]["n_positives"] == 2
 
 

@@ -101,7 +101,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     ``unmapped == 'singleton'`` (the only supported mode).
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    pc = eval_params.get("product_categories", {}) or {}
+    pc = eval_params.get("item_categories", {}) or {}
     if not pc.get("enabled"):
         return None
 
@@ -115,7 +115,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
         for prod in prods:
             if prod not in known_set:
                 raise ValueError(
-                    f"product_categories.mapping references unknown product "
+                    f"item_categories.mapping references unknown item "
                     f"'{prod}' (not in schema.categorical_values['{item_col}'])"
                 )
             mapping[prod] = category
@@ -123,7 +123,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     unmapped = pc.get("unmapped", "singleton")
     if unmapped != "singleton":
         raise ValueError(
-            f"product_categories.unmapped='{unmapped}' unsupported; "
+            f"item_categories.unmapped='{unmapped}' unsupported; "
             f"only 'singleton' is implemented"
         )
     for prod in known:
@@ -202,14 +202,14 @@ def compute_dataset_overview(
     group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
     n_rows = eval_predictions.count()
-    n_customers = eval_predictions.select(*entity_cols).distinct().count()
-    n_products = eval_predictions.select(item_col).distinct().count()
+    n_entities = eval_predictions.select(*entity_cols).distinct().count()
+    n_items = eval_predictions.select(item_col).distinct().count()
     n_snap_dates = eval_predictions.select(time_col).distinct().count()
     n_positives = int(
         eval_predictions.agg(F.sum(F.col(label_col))).collect()[0][0] or 0
     )
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
-    avg_pos_per_customer = (n_positives / n_customers) if n_customers else 0.0
+    avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
 
     # active segment 欄：segment_columns 裡第一個真的在資料中的（對齊 per_segment
     # 的 active_seg_col），by_segment 的 key 才會跟 per_segment 一致。
@@ -227,7 +227,7 @@ def compute_dataset_overview(
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),
-            F.countDistinct(*entity_cols).alias("n_customers"),
+            F.countDistinct(*entity_cols).alias("n_entities"),
         ]
         if with_queries:
             aggs.append(F.countDistinct(*group_cols).alias("n_queries"))
@@ -240,7 +240,7 @@ def compute_dataset_overview(
             cell = {
                 "n_rows": nr,
                 "n_positives": npos,
-                "n_customers": int(r["n_customers"]),
+                "n_entities": int(r["n_entities"]),
                 "positive_rate": (npos / nr) if nr else 0.0,
             }
             if with_queries:
@@ -253,12 +253,12 @@ def compute_dataset_overview(
     result = {
         "totals": {
             "n_rows": n_rows,
-            "n_customers": n_customers,
-            "n_products": n_products,
+            "n_entities": n_entities,
+            "n_items": n_items,
             "n_snap_dates": n_snap_dates,
             "n_positives": n_positives,
             "positive_rate": positive_rate,
-            "avg_positives_per_customer": avg_pos_per_customer,
+            "avg_positives_per_entity": avg_pos_per_entity,
         },
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
@@ -745,7 +745,7 @@ def compute_overall_per_item(
         entry is present in the data.
       - ``with_category``: also emit ``category`` (a nested slim bundle on the
         category-collapsed frame — one extra collapse pass), only when
-        ``product_categories`` maps the items. Nested bundle never re-nests.
+        ``item_categories`` maps the items. Nested bundle never re-nests.
 
     Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
     ``category`` when requested and available); overall/per_item empty when no
@@ -818,10 +818,17 @@ def compute_all_metrics(
     Optional: any column listed in ``parameters['evaluation']['segment_columns']``
     will be used for per-segment slicing if present.
 
-    Backward compatible: every pre-existing top-level key is unchanged;
-    ``dataset_overview`` is always added; ``category`` (same shape as the
-    top level, plus its own ``dataset_overview``, never re-nested) is added
-    only when ``product_categories.enabled``.
+    Every pre-existing top-level key is unchanged; ``dataset_overview`` is
+    always added; ``category`` (same shape as the top level, plus its own
+    ``dataset_overview``, never re-nested) is added only when
+    ``item_categories.enabled``.
+
+    ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
+    three ``n_products`` / ``n_customers`` / ``avg_positives_per_customer``
+    keys were renamed (see the block below). A file written before that is
+    refused by ``evaluation/report_builder._dataset_overview`` and migrated by
+    ``scripts/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings
+    are kept deliberately (ADR-0017).
 
     Returns::
 
@@ -839,15 +846,15 @@ def compute_all_metrics(
           "n_queries":          int  (total distinct queries before filtering),
           "n_excluded_queries": int  (queries with zero positives → dropped),
           "dataset_overview": {
-              "totals":       {n_rows, n_customers, n_products, n_snap_dates,
+              "totals":       {n_rows, n_entities, n_items, n_snap_dates,
                                n_positives, positive_rate,
-                               avg_positives_per_customer},
-              "by_snap_date": {snap: {n_rows, n_positives, n_customers,
+                               avg_positives_per_entity},
+              "by_snap_date": {snap: {n_rows, n_positives, n_entities,
                                       positive_rate}},
-              "by_item":      {item: {n_rows, n_positives, n_customers,
+              "by_item":      {item: {n_rows, n_positives, n_entities,
                                       positive_rate}},
           },
-          "category":  (only when product_categories.enabled)
+          "category":  (only when item_categories.enabled)
               same shape as the top level (overall / per_item / per_segment /
               per_item_segment / macro_avg / n_queries / n_excluded_queries)
               PLUS its own "dataset_overview"; never contains "category".

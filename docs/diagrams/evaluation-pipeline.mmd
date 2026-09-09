@@ -62,7 +62,7 @@ flowchart TB
   end
 
   art_gain[["gain_ledger<br/><small>training 落地 ・ optional，可缺席</small>"]]
-  cfg_cat[/"evaluation.product_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
+  cfg_cat[/"evaluation.item_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
 
   %% ---------------------- 主鏈：整理 ----------------------
   n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ left join 補 label<br/>post-training 依 score 重算 rank ・ join segment 欄</small>"]

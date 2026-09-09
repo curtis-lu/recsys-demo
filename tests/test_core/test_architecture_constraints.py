@@ -1,7 +1,7 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7, S1-S5) or exception
-registry (R1-R5) in that document. When a test fails, the fix is either to
+Each test corresponds to one numbered constraint (A1-A7, S1-S6) or exception
+registry (R1-R6) in that document. When a test fails, the fix is either to
 change the code back, or to update the document AND get the exception
 registered -- never to loosen the test quietly.
 
@@ -1391,6 +1391,272 @@ class TestS5SchemaColumnsLayer:
         )
         found = _schema_layer_offenders(tmp_path)
         assert found == [], f"a correct schema declaration was flagged: {found}"
+
+
+#: Trees S6 scans, ``label -> root``. ``src/`` only, and that is the whole
+#: point of the rule: the framework may not spell the example deployment's
+#: column names, while ``tests/`` and ``scripts/`` legitimately must -- a
+#: fixture has to write *some* concrete column name down, and the example one
+#: is the honest choice. Widening this to ``tests/`` would produce a registry
+#: of several hundred entries that nobody would read (contrast S4/S5, where a
+#: test spelling the wrong thing is itself the false green).
+LITERAL_COLUMN_SCAN_ROOTS = {"src/recsys_tfb": SRC}
+
+#: The example deployment's column names. ``schema.columns`` in
+#: ``conf/base/parameters.yaml`` declares these three today; the framework's own
+#: code must reach them through ``core/schema.get_schema`` instead.
+EXAMPLE_COLUMN_NAMES = frozenset({"snap_date", "cust_id", "prod_name"})
+
+# (repo-relative module path, enclosing function) pairs allowed to spell an
+# example column name. Unlike S4's registry this one does NOT start empty --
+# see TestS6NoLiteralExampleColumnNames for why, and R6 in
+# docs/agents/architecture-constraints.md for the per-entry reasons. Adding one
+# needs the user's sign-off.
+LITERAL_COLUMN_EXCEPTIONS = frozenset({
+    # `evaluation.snap_date` config-key reads and the run-context log field of
+    # the same name. The time vocabulary is kept deliberately (ADR-0017).
+    ("src/recsys_tfb/__main__.py", "dataset"),
+    ("src/recsys_tfb/__main__.py", "evaluation"),
+    ("src/recsys_tfb/__main__.py", "inference"),
+    ("src/recsys_tfb/__main__.py", "training"),
+    ("src/recsys_tfb/core/consistency.py", "post_training_snap_date_errors"),
+    ("src/recsys_tfb/evaluation/comparison/report.py", "assemble_comparison_report"),
+    ("src/recsys_tfb/evaluation/comparison/sources.py", "load_compare_predictions"),
+    ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
+    ("src/recsys_tfb/pipelines/evaluation/comparison_nodes.py",
+     "validate_enriched_eval_predictions_present"),
+    ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "_diagnosis_pages_dir"),
+    ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "prepare_eval_data"),
+    # Observability field whitelist -- a log field named after the time role,
+    # not a DataFrame column.
+    ("src/recsys_tfb/core/logging.py", "<module>"),
+    # `source_etl`'s own audit table: these are that table's column names, not
+    # the user's.
+    ("src/recsys_tfb/pipelines/source_etl/audit.py", "<module>"),
+    ("src/recsys_tfb/pipelines/source_etl/audit.py", "write_record"),
+    # TEMPORARY -- `get_schema`'s built-in defaults for time / entity / item.
+    # #326 made the three roles required at CLI entry but deliberately left the
+    # defaults in place (304 tests lean on them); #328 removes both the defaults
+    # and this line.
+    ("src/recsys_tfb/core/schema.py", "<module>"),
+})
+
+
+class LiteralColumnSite(NamedTuple):
+    """One spelling of an example column name, located."""
+
+    module: str
+    func: str
+    lineno: int
+    value: str
+
+
+def _literal_column_sites(root, label=""):
+    """Every string literal in ``root`` exactly equal to an example column name.
+
+    **Exact equality, not containment**, and that is the load-bearing choice:
+    ``"by_snap_date"``, ``"test_snap_dates"`` and ``"snap_date="`` are all
+    legitimate and all contain the banned text. Substring matching would put
+    every one of them in the registry and the registry would stop being
+    readable, which is how a rule like this dies.
+
+    An f-string is a ``JoinedStr`` whose pieces are fragments (``"snap_date="``,
+    not ``"snap_date"``), so interpolation falls outside on the same principle.
+    """
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        owner = _innermost_function_by_line(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant):
+                continue
+            if not isinstance(node.value, str) or node.value not in EXAMPLE_COLUMN_NAMES:
+                continue
+            rel = str(path.relative_to(root))
+            sites.append(LiteralColumnSite(
+                module=f"{label}/{rel}" if label else rel,
+                func=owner.get(node.lineno, "<module>"),
+                lineno=node.lineno,
+                value=node.value,
+            ))
+    return sites
+
+
+def _literal_column_offenders(root, exceptions=None, label=""):
+    """``path:line in func(): 'name'`` for every unregistered spelling."""
+    exceptions = LITERAL_COLUMN_EXCEPTIONS if exceptions is None else exceptions
+    out = []
+    for site in _literal_column_sites(root, label=label):
+        if (site.module, site.func) in exceptions:
+            continue
+        where = site.func if site.func == "<module>" else f"{site.func}()"
+        out.append(f"{site.module}:{site.lineno} in {where}: {site.value!r}")
+    return out
+
+
+class TestS6NoLiteralExampleColumnNames:
+    """S6: ``src/`` may not spell the example deployment's column names.
+
+    This repo is a generic ranking framework; ``snap_date`` / ``cust_id`` /
+    ``prod_name`` are one deployment's columns, declared in
+    ``schema.columns``. A module that writes one down has quietly decided what
+    the user's data looks like, and the symptom in a renamed deployment ranges
+    from a crash (``local_cache``'s literal ``snap_date=``, #326) to a report
+    printing a column the reader does not have.
+
+    It is not a preventive guard. Six manual sweeps have already removed these
+    (#220, #224, #240, #249, #262, #265) and a seventh was #326; each one was a
+    human re-reading the whole tree. This is what makes the eighth occurrence
+    fail at test time instead.
+
+    **Why the registry does NOT start at zero, unlike S4's.** S4 forbids a
+    reading of ``schema.entity`` that is always wrong, so zero exceptions is
+    the correct state and ``test_the_registry_is_empty`` pins it. S6 forbids a
+    *spelling*, and three families of spelling are legitimate:
+
+    1. ``evaluation.snap_date`` and friends are **config keys**, not DataFrame
+       columns. The time vocabulary is kept on purpose (ADR-0017): the user
+       judged that almost every deployment's time column really is a snap date,
+       while the entity is not always a customer. Renaming those keys would
+       break every conf for no gain.
+    2. ``core/logging``'s observability whitelist and ``source_etl``'s audit
+       table name **their own** fields, which happen to share the spelling.
+    3. ``core/schema``'s built-in defaults, which are on their way out (see the
+       registry's own comment).
+
+    So a non-empty registry here is the rule working, not the rule being
+    diluted -- and the list doubles as the full ledger of how much example
+    vocabulary the framework still borrows, which is the number to look at if
+    anyone wants to reopen the time-vocabulary decision.
+    """
+
+    def test_no_module_spells_an_example_column_name(self):
+        offenders = [
+            line
+            for label, root in LITERAL_COLUMN_SCAN_ROOTS.items()
+            for line in _literal_column_offenders(root, label=label)
+        ]
+        assert offenders == [], (
+            "src/ spelled an example deployment's column name (S6): "
+            f"{offenders}. Column names come from the user's config -- read "
+            "them through core/schema.get_schema (see "
+            "evaluation/report_builder.py::build_core_concept_section). "
+            "Exceptions are registered in R6 of "
+            "docs/agents/architecture-constraints.md and need sign-off."
+        )
+
+    def test_every_registered_exception_matches_a_real_site(self):
+        """The registry is a ledger, so a line that matches nothing is a lie.
+
+        Without this, the registry only ever grows: a site gets cleaned up or
+        renamed, its line stays behind, and the count stops meaning "how much
+        example vocabulary the framework still borrows". Worse, a stale line
+        pre-authorises the next violation that lands in that function.
+        """
+        real = {
+            (site.module, site.func)
+            for label, root in LITERAL_COLUMN_SCAN_ROOTS.items()
+            for site in _literal_column_sites(root, label=label)
+        }
+        stale = sorted(set(LITERAL_COLUMN_EXCEPTIONS) - real)
+        assert stale == [], (
+            "S6's exception registry lists site(s) that no longer spell an "
+            f"example column name: {stale}. Delete them from "
+            "LITERAL_COLUMN_EXCEPTIONS and from R6 of "
+            "docs/agents/architecture-constraints.md -- a registry entry that "
+            "matches nothing silences the next real violation in that function."
+        )
+
+    def test_the_scan_root_is_real_and_pinned(self):
+        """A fence pointed at nothing reports nothing.
+
+        Same false green S4/S5 pin. Note S6's root set is deliberately narrower
+        than theirs -- see LITERAL_COLUMN_SCAN_ROOTS -- so this must pin its own
+        value rather than borrowing either of them.
+        """
+        assert set(LITERAL_COLUMN_SCAN_ROOTS) == {"src/recsys_tfb"}, (
+            "S6's scan root changed. tests/ and scripts/ are out of scope on "
+            "purpose: a fixture has to write a concrete column name down. See "
+            "S6 in docs/agents/architecture-constraints.md."
+        )
+        for label, root in LITERAL_COLUMN_SCAN_ROOTS.items():
+            assert list(root.rglob("*.py")), f"S6 root {label} holds no modules"
+
+    def test_the_scan_sees_every_spelling(self, tmp_path):
+        """Four places a column name gets written down, all four caught.
+
+        =========================  =====================================
+        case                       what it needs from the scan
+        =========================  =====================================
+        ``TIME = ...``             module-level constant
+        ``df.select(...)``         a call argument
+        ``params.get(...)``        a dict lookup
+        ``df.groupBy([...])``      nested inside a list literal
+        =========================  =====================================
+
+        All four are ``ast.Constant`` nodes, which is why one ``ast.walk``
+        covers them; the point of listing them is that the *report order* below
+        is source order, so a scan that only looked at, say, call arguments
+        would fail here rather than silently cover less.
+        """
+        (tmp_path / "caught.py").write_text(
+            'TIME = "snap_date"\n'
+            'def a(df):\n'
+            '    return df.select("cust_id")\n'
+            'def b(params):\n'
+            '    return params.get("prod_name")\n'
+            'def c(df):\n'
+            '    return df.groupBy(["snap_date", "x"])\n'
+        )
+        found = _literal_column_offenders(tmp_path, exceptions=frozenset())
+        assert [f.split(": ")[-1] for f in found] == [
+            "'snap_date'", "'cust_id'", "'prod_name'", "'snap_date'"
+        ], found
+
+    def test_the_scan_leaves_legitimate_spellings_alone(self, tmp_path):
+        """Containment is not a violation, and neither is an f-string piece."""
+        (tmp_path / "clean.py").write_text(
+            'KEYS = ["test_snap_dates", "by_snap_date", "n_snap_dates"]\n'
+            'def a(v):\n'
+            '    return f"snap_date={v}"\n'
+            'def b(schema):\n'
+            '    return schema["time"]\n'
+            'def c():\n'
+            '    """A docstring mentioning snap_date and cust_id in prose."""\n'
+        )
+        found = _literal_column_offenders(tmp_path, exceptions=frozenset())
+        assert found == [], f"a legitimate spelling was flagged: {found}"
+
+    def test_the_report_names_a_location_not_just_a_count(self, tmp_path):
+        """Turning red without saying where leaves the next person searching."""
+        (tmp_path / "one.py").write_text(
+            'def node(df):\n'
+            '    return df.filter("cust_id")\n'
+        )
+        assert _literal_column_offenders(tmp_path, exceptions=frozenset()) == [
+            "one.py:2 in node(): 'cust_id'"
+        ]
+        assert _literal_column_offenders(
+            tmp_path, exceptions=frozenset(), label="src/recsys_tfb",
+        ) == ["src/recsys_tfb/one.py:2 in node(): 'cust_id'"]
+
+    def test_a_registered_exception_silences_exactly_one_site(self, tmp_path):
+        """An unwired filter looks exactly like today's green.
+
+        Two offending files, one registered: the other must still be reported.
+        """
+        (tmp_path / "one.py").write_text(
+            'def allowed():\n'
+            '    return "snap_date"\n'
+        )
+        (tmp_path / "two.py").write_text(
+            'def other():\n'
+            '    return "cust_id"\n'
+        )
+        found = _literal_column_offenders(
+            tmp_path, exceptions=frozenset({("one.py", "allowed")}),
+        )
+        assert found == ["two.py:2 in other(): 'cust_id'"]
 
 
 class TestR2FrameworkGlobalsRegistry:

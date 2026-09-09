@@ -14,8 +14,8 @@ def test_k_values_is_superset():
     assert _load()["k_values"] == [1, 2, 3, 4, 5, "all"]
 
 
-def test_product_categories_block():
-    pc = _load()["product_categories"]
+def test_item_categories_block():
+    pc = _load()["item_categories"]
     assert pc["enabled"] is True
     assert pc["unmapped"] == "singleton"
     assert pc["mapping"]["fund"] == ["fund_stock", "fund_bond", "fund_mix"]

@@ -76,7 +76,7 @@ def _params_seg_cat():
     p["schema"]["categorical_values"] = {
         "prod_name": ["fund_stock", "fund_bond", "exchange_fx"]}
     p["evaluation"]["segment_columns"] = ["cust_segment_typ"]
-    p["evaluation"]["product_categories"] = {
+    p["evaluation"]["item_categories"] = {
         "enabled": True, "unmapped": "singleton",
         "mapping": {"fund": ["fund_stock", "fund_bond"]}}
     return p

@@ -15,7 +15,7 @@ def _params(categories=True):
         },
         "evaluation": {
             "k_values": [1, "all"],
-            "product_categories": {
+            "item_categories": {
                 "enabled": categories, "unmapped": "singleton",
                 "mapping": {"fund": ["fund_stock", "fund_bond"]}},
         },

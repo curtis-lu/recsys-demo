@@ -12,7 +12,7 @@ from recsys_tfb.evaluation.report_builder import (
     _per_item_metric_compare_table,
     _resolve_display_k,
     _k_to_lookup,
-    _n_products,
+    _n_items,
     _visible_metric_keys,
     build_glossary_section,
 )
@@ -149,7 +149,7 @@ def _build_per_item_section(
     disp = (
         (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
     ).get("display", {}) or {}
-    n_prod = _n_products(metrics_a)
+    n_prod = _n_items(metrics_a)
     rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_prod)
     attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_prod)
 
@@ -180,7 +180,7 @@ def _build_category_section(
     metrics_a: dict, metrics_b: dict, parameters: dict
 ) -> ReportSection | None:
     eval_params = parameters.get("evaluation", {}) or {}
-    if not (eval_params.get("product_categories", {}) or {}).get("enabled"):
+    if not (eval_params.get("item_categories", {}) or {}).get("enabled"):
         return None
     cat_a = metrics_a.get("category")
     cat_b = metrics_b.get("category")
@@ -195,9 +195,7 @@ def _build_category_section(
     per_item_b = cat_b.get("per_item", {}) or {}
     per_item_delta = comparison_cat.get("per_item_delta", {}) or {}
     disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
-    n_cat = int(
-        (cat_a.get("dataset_overview", {}) or {}).get("totals", {}).get("n_products", 0)
-    )
+    n_cat = _n_items(cat_a)
     rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_cat)
     attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
     macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
