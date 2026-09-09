@@ -115,7 +115,15 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   - **建 baseline 要在同一個 worktree 的同一份 `data/` 上跑**。用 `git archive` 拉一份到別處跑不算——那份沒有本機 warehouse 狀態，warehouse 相關的失效模式整類都不會出現，會讓人誤以為是自己改出來的。
 - ~~【2026-07-08】`test_pipelines/test_inference/test_pipeline.py::TestInferencePipeline::test_pipeline_inputs`（PR#85 加了 `inference_population` input，exact-set 斷言未同步）~~ **已修**（2026-08-09，#185 一併補上，證據：該檔案 `pipeline.inputs` 斷言含五個名字、`tests/test_pipelines/test_inference` 全綠）。
 
-- ~~【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing。~~ **2026-09-09 已刪除該測試**（#326）。它比對的是一次重構前後的圖，重構的另一半（`build_diagnostics_figures`）早已被刪，函式不存在了，所以它從那時起就只是在 import 失敗——沒有任何行為還被它守著。刪掉之後**全量的既有 fail 是 2 個**（`TestPrepareTrainInputsWeight` 兩項）。
+- ~~【2026-07-31】`test_evaluation/test_diagnostics_spark.py::test_serialisation_round_trip_leaves_every_figure_identical` 在 main 本來就 failing。~~ **2026-09-09 已刪除該測試**（#326）。它比對的是一次重構前後的圖，重構的另一半（`build_diagnostics_figures`）早已被刪，函式不存在了，所以它從那時起就只是在 import 失敗——沒有任何行為還被它守著。刪掉之後、且 #318 於同日修掉 `TestPrepareTrainInputsWeight` 之後，**全量已經沒有既有 fail 了**：
+
+  ```
+  # feat/schema-decouple merge origin/main(9b50d71)，同一 worktree 的同一份 data/，2026-09-09
+  $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest tests/ -q
+  =============== 3199 passed, 2536 warnings in 266.25s (0:04:26) ================
+  ```
+
+  **本節從此是空的**——這不代表以後不會再有，代表下一個看到紅的人「先建 baseline」的結果應該是全綠，紅的就是自己改出來的。再出現既有 fail 時把它加回這裡。
 
 改動前先在 main/基準點跑一次相關測試建立 baseline，才能區分「本來就壞」與「被我改壞」。
 
