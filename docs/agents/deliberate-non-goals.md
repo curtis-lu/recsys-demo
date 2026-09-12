@@ -1,96 +1,212 @@
 # 刻意不做的事（給 AI agent 的地雷圖）
 
-這份檔案只收一種東西：**「看起來該修、但刻意不修」的決定，以及它背後的理由。**
+這裡只收一種東西：**「看起來該修、但刻意不修」的決定，和它背後的理由。**
 
-為什麼需要它：這類決定在程式碼裡看不見。一個 agent 讀到「這個 config 鍵缺了會 `KeyError`，太嚴格了」，
-會很自然地想把它改寬鬆——除非有人告訴它那是使用者拍板的。**被延後的事幾乎都有原因**
-（依賴未定、等公司環境資料、等使用者決策），「順手做掉」反而添亂。
+為什麼需要它：這種決定在程式碼裡看不見。agent 讀到「這個設定缺了會直接爆掉，也太嚴格了吧」，很自然就想改寬鬆——除非有人告訴它那是使用者拍板的。**被延後的事幾乎都有原因**，「順手做掉」通常是添亂。
 
-## 怎麼用這份檔案
-
-- **動到某一區之前掃一眼該區**。命中條目 → 那件事要先問，不要自己做。
-- **條目失效就刪**。使用者改變主意、或延後條件達成後，這條就沒有存在意義了。
-
-### 寫進來之前的唯一檢查
-
-**問一句：「這句話會不會因為別的地方改了、而變成假的？」會 → 不准寫進來。**
-
-這份檔案沒有任何測試或 hook 守著。唯一的防線就是這一問。
-
-| 不准寫 | 改成 |
-|---|---|
-| 「PR 未開」「#140 仍 OPEN」「票尚未開」 | 查 `gh`；這裡連提都不提 |
-| 「規劃記錄在 `~/projects/foo`」 | 只寫裁決本身；路徑會死 |
-| 「`bar.py:151`」 | 只寫檔名＋要搜什麼字串 |
-| 「這些模組已退場：A、B、C」 | 指向 code 旁的 docstring；名單一定會漂 |
-| 「等公司資料出來再做」（放在本檔） | 開一張 issue，這裡不留 |
-
-**2026-08-25 的證據**：一次體檢抓到 5 條爛掉的條目，5 條全部沒通過上面這一問——
-`~/projects/shaprx` 已刪、`:151/:169` 行號早漂到 `:172/:190`、「PR 未開」的 PR #90
-兩個月前就 merged、「`quadrant`／`pair_ledger`／`cross_purchase` 已退場」而三個都活著、
-#63 早已 CLOSED。**規則當時就寫在這一節，照樣被違反 5 次**——所以它現在寫成可以逐格對照的表，
-不是一句原則。
-
-**離 code 越近的越不會爛。** 同一件事若能寫在函式的 docstring 裡，就寫在那裡，
-這份檔案只留一行路由。（實例：診斷域退場那條，`src/recsys_tfb/diagnosis/__init__.py`
-的 docstring 版本是對的，複製到這裡的版本是錯的。）
+- **怎麼用**：動到某個區域之前，掃一眼標題。命中了就**先問使用者**，不要自己動手。
+- **每條都有「什麼時候可以刪」**：條件到了就刪掉那一條，不要留著。
+- **這裡不收「該做但還沒做」的事**——那種開 issue，用 `gh` 查。
 
 ---
 
-## 一、使用者已裁決，不要「修好」它
+## 一、使用者拍板過的，別再「修好」它
 
-| 事項 | 裁決 | 別做什麼 |
-|---|---|---|
-| `dataset.train_snap_dates` 必填 | 使用者 2026-08-04 明示。缺鍵會在 CLI 建月份計畫時就 `KeyError`（Spark 還沒開工），不是等到 `apply_preprocessor_to_features` 才爆 | 看到「CLI 對缺鍵太嚴格」想改成 `.get()` 寬鬆版 → 這是刻意的 |
-| training 側 `overall_map` 跨月合併 | 它是跨所有累積 test 月份的加權合併值，而 `model_version` 身分裡已沒有 test 月份 → 同一個鍵的數字會隨月份累積而變。使用者傾向逐 `snap_date` 區隔，但**決定先 grill 不先做** | 別自己開一輪、更別直接實作。它與「SHAP／象限診斷搬到 evaluation」是同一個接縫問題，要併進同一輪 grill → spec。過渡用的「A 軌」（涵蓋月份＋各月 n_queries 進 `evaluation_results`、promote 排名時 WARN）也刻意還沒做 |
-| 診斷框架 `score_shift` | 使用者 2026-07-22 明示暫緩，改先清掉舊的 score-offset 程式碼 | 規劃檔與 `scripts/per_item_score_shift_*.py` spike 腳本刻意保留當日後評估依據，不要當成死碼清掉 |
-| 評估報表「每-query 正例數分佈」 | 使用者明示跳過 | — |
-| 報表呈現層的其餘調整 | 使用者：「報表內容先不調整，等有明確反饋再一起改」。**2026-09-09（#327）部分解凍**：使用者明示要改報表**表格的欄名標籤**（「產品數」「每客戶平均正例數」→ 從 `schema` 取使用者真實欄名組出來），那就是這條凍結在等的「明確反饋」。**只有欄名標籤這一部分解凍，其餘全部仍凍結** | 別因為讀者 subagent 提了意見就動——那正是這條備註要防的東西。**仍凍結的具體項目**：`build_glossary_section` 的詞彙表 prose（「某產品為正解時…」「客戶該買它…」）、`build_metrics_section` 與 `build_baseline_section` 的說明文字（「K=產品數時 precision…」）、`build_overview_section` 的 CI 註腳（「cluster＝客戶」）、各段 `description`。#327 刻意只動 `build_overview_section` 與 `build_completeness_section` 兩張表的**欄名標籤鍵** |
-| `_format_slice_plan` 的「將(重)訓」標註（Tier 0） | 刻意撤回：`model` 是 training-only dataset，泛用標註只會在 training 觸發，而那裡已經有 WARN，故冗餘 | 勿重提實作 |
-| `calibration_snap_dates: []` 不比照 A23 擋掉 | 空清單時 `select_calibration_keys` 整池照收（`restrict_to_months_or_all`），校準集會收進 train 與 test 月份、該 test 月的評估變成 in-sample，而 A24 對空集合永遠成立、不出聲。與 A23 擋掉的 `train_snap_dates: []` 是同一個洞。使用者 2026-08-19 決定不擴，理由是 calibration 未來要移除 | 別順手把 calibration 加進 `train_snap_dates_errors`。也別記到 `--only-test-months` 頭上——旗標跳過那個 node，反而是比較安全的一邊，全量跑才會真的撞。calibration 移除後這條就可以刪 |
-| `kedro_design_philosophy.md`（repo 根目錄）留著不刪 | 使用者 2026-08-19 裁決：保留，當作**給人自行參考**的舊文件，靠檔頭既有的 DEPRECATED banner 標示它不是現行依據。#158 原本把「刪掉它」列為待辦，該條已改為裁決不做 | 別刪它，也別刪唯一指向它的 `docs/notes/2026-08-03-day1-doc-triage.md`（那是逐條比對的記錄）。看到「一份 403 行、開頭明說不要照著做的文件躺在根目錄」而想清掉之前，先看這一列——2026-08-19 就有人走到開 PR 才被攔下來 |
-| 架構約束的例外登記（R1–R4） | 加一筆必須先問使用者 | 別為了讓自己的新程式碼合規而擴充登記，或新增一條規則 |
-| training cache 路徑的 token（`pipelines/training/steps/local_cache.py` 的 `_CACHE_PATH_LAYOUT`）留成裸字串，不換成會自己渲染的 tagged 物件 | 使用者 2026-08-31 裁決：先不動。審查（PR #132）判它 Primitive Obsession ＋ Repeated Switches，理由是「一個 token 的種類拆在兩處——成員判定（`_CACHE_LITERAL_TOKENS` 與 sentinel 常數）與渲染（`resolve_cache_path` 的 if/elif）——加第四種要同時改兩邊，而沒有東西把兩邊綁在一起」。**但該審查「忘一邊會靜默出錯」的判斷已被實測推翻**：一定會 raise（未登記的 token → `KeyError`；名字撞到值為 dict 的 `parameters` 鍵 → `TypeError`）。靜默寫錯路徑要撞到值為**字串**的頂層鍵，而那種鍵只有一個。所以這是可讀性問題（訊息指錯人），不是安全問題 | 別因為「不夠漂亮」就改。要動之前先確認第四種 token 真的出現了——第三種是最近才加進來的第一個，「加第四種會痛」目前仍是推測而非已發生的痛 |
-| `conf/base/parameters.yaml` 的 spark 區塊不放 shuffle 分區的死值 | #304 的決定（2026-09-07）：`spark.sql.adaptive.advisoryPartitionSizeInBytes` 的 `16m` 只進 `conf/spark-local`。分區該切多大由 executor 數／每 executor 核數／記憶體決定，而本機是 `local[*]` 單一 JVM、公司是多 executor 叢集；沒有公司叢集的 access，寫進 `conf/base` 的任何數字都是猜的，**而給錯的死值比不給更糟**——那正是同一張票改掉的舊註解的形狀（舊註解叫人「目標每分區 ~128–256MB」往上加，實測方向剛好相反） | 看到 `conf/base` 的 spark 區塊「一大段調參註解、卻沒有任何 shuffle 相關的值」而想補一個合理預設 → 這是刻意的。要給值必須先在目標環境實測，該段註解裡就有三步診斷法；也別把本機的 `16m` 搬過去。實測見 `docs/notes/2026-09-06-dataset-pipeline-profiling.md` §5 |
+### 別把 `dataset.train_snap_dates` 改成「缺鍵也能跑」（`.get()` 那種寬鬆寫法）
 
-## 二、延後中，且延後條件明確
+**為什麼**：使用者 2026-08-04 拍板它必填。缺了就在 CLI 一開始擋下來，Spark 都還沒開工——比跑到一半才爆好。覺得「這裡對缺鍵太嚴格」是正常反應，但那是刻意的。
+**什麼時候可以刪**：使用者改變主意。
 
-動這些之前先確認「條件達成了沒」——沒達成就還是別做。
+### 別自己改 training 的 `overall_map` 跨月合併，也別自己開一輪討論
 
-| 事項 | 在等什麼 |
+**為什麼**：這個數字是「所有累積測試月份」的加權合併，而模型版本的身分裡已經沒有測試月份了——所以同一個鍵的數字會隨月份累積而變。使用者知道，也傾向改成逐月分開，但決定先討論清楚再做。它跟「SHAP／象限診斷搬到 evaluation」是同一個接縫，要併進同一輪討論。
+**也別做這個過渡方案**：把「涵蓋了哪些月份」和各月 `n_queries` 寫進 `evaluation_results`、promote 排名時發 WARN。它看起來像無害的小改善，但它就是被禁的那一個。
+**什麼時候可以刪**：那一輪討論開完、有結論之後。
+
+### 別把 `scripts/per_item_score_shift_*.py` 和它的規劃檔當死碼清掉
+
+**為什麼**：`score_shift` 診斷使用者 2026-07-22 說暫緩。那些腳本是刻意留著，當日後評估的依據。
+**什麼時候可以刪**：使用者決定 `score_shift` 要做，或永久放棄。
+
+### 別調報表的呈現——除了欄名標籤那一部分
+
+**為什麼**：使用者說「報表內容先不調整，等有明確反饋再一起改」。別因為讀者 subagent 提了意見就動——那正是這條要防的東西。
+**2026-09-09（#327）部分解凍**：使用者明示要改的是報表**表格的欄名標籤**（「產品數」「每客戶平均正例數」→ 改成從 `schema` 取使用者的真實欄名組出來）。那就是這條在等的「明確反饋」，**而且只有這一部分解凍**。
+**仍然凍結的**：`build_glossary_section` 的詞彙表文字、`build_metrics_section` 與 `build_baseline_section` 的說明文字、`build_overview_section` 的 CI 註腳、各段的 `description`。#327 只動了 `build_overview_section` 與 `build_completeness_section` 兩張表的欄名標籤鍵。
+**什麼時候可以刪**：使用者給出涵蓋其餘部分的「明確反饋」、開始那一輪調整時。
+
+### 別在 `[plan]` 那幾行裡加「這個會（重）訓」的標註
+
+**這在講什麼**：跑 pipeline 帶切片旗標時，CLI 會印一段 `[plan] ...`，告訴你哪些節點要跑、哪些跳過（`src/recsys_tfb/__main__.py` 的 `_format_slice_plan`）。曾經有人想在裡面加一個泛用標註，把「這次會重新訓練模型」標出來。做了，又撤回。
+**為什麼撤回**：只有 training 會產出模型，所以這個標註只會在 training 觸發。而 training 那邊**已經有一段更大聲的 `[retrain]` WARN 在講同一件事**（同檔的 `_format_retrain_advisory`）。加了就是同一件事講兩次。
+**什麼時候可以刪**：出現第二條也會訓練模型的 pipeline 時。
+
+### 別順手把 `calibration_snap_dates` 的空清單也加進 `train_snap_dates_errors` 去擋
+
+**為什麼**：它確實跟已經被擋掉的 `train_snap_dates: []` 是同一個洞——空清單會讓校準集把訓練月和測試月全收進來，那個月的評估等於在偷看答案，而現有檢查對空集合永遠成立、不會出聲。使用者 2026-08-19 決定不擴，理由是 calibration 未來要整個移除。
+**什麼時候可以刪**：calibration 移掉之後。
+
+### 別把上面那個洞算到 `--only-test-months` 頭上
+
+**為什麼**：那個旗標反而跳過了危險的節點；全量跑才會真的撞。
+**什麼時候可以刪**：跟上一條一起。
+
+### 別為了讓自己新寫的程式碼合規，就去架構約束的例外登記加一筆
+
+**為什麼**：加一筆必須先問使用者。新增一條讓自己合規的規則也一樣。
+**什麼時候可以刪**：永久——這是規則，不是待辦。
+
+### 別把 training cache 的路徑 token 改成「會自己說自己是哪一種」的物件
+
+**這在講什麼**：training 會把資料在本機存一份 parquet 快取，路徑長這樣：
+
+```
+<root>/<base_dataset_version>/train_variants/<train_variant_id>/train_model_input.parquet
+```
+
+組路徑的方式是一張表（`pipelines/training/steps/local_cache.py` 的 `_CACHE_PATH_LAYOUT`）列出每個資料集要哪幾段，`resolve_cache_path` 再一段一段翻譯。目前有三種段：固定的目錄名、測試月份、要去 config 查值的鍵。
+
+**審查說什麼**：「這一段是哪一種」寫在兩個地方（一個集合 ＋ 一串 if/elif），加第四種要同時改兩邊，而沒有東西綁著它們。
+**為什麼還是不改**：使用者 2026-08-31 決定先不動。審查最重的那句是「漏改一邊會**安靜地**寫錯路徑」，**實測把它推翻了大半**——漏改幾乎都會當場拋錯（沒登記的段名 → `KeyError`；段名撞到值是 dict 的設定鍵 → `TypeError`）。真的會安靜寫錯，只有在段名剛好撞到「值是字串」的頂層設定鍵時，而那種鍵目前只有一個。所以這是「錯誤訊息指錯人」的可讀性問題，不是安全問題。
+**什麼時候可以刪**：第四種段真的出現、而且加它的時候真的痛了。目前「加第四種會痛」還只是猜測。
+
+### 別把「改了 `conf/` 的預設值」當成問題解決了
+
+**這在講什麼**：`conf/` 裡的值只是**範例**，不是答案。調一個 Spark 參數（例如 shuffle 分區大小 `spark.sql.adaptive.advisoryPartitionSizeInBytes`）讓本機跑得比較快，**不等於那個效能問題解決了**——本機是 `local[*]` 單一 JVM，公司是多 executor 叢集，同一個值在兩邊的最佳解不一樣，甚至方向相反。適用在這台電腦，不代表適用在別台。
+**踩過的坑**：舊註解叫人「目標每分區 ~128–256MB」往上加，2026-09-06 實測方向剛好相反（#304）。**給錯的死值比不給更糟**。
+**所以**：本機量到的值放 `conf/spark-local`，別當成通用答案搬進 `conf/base`；也別因為本機變快了就把票關掉。真正要解決的問題還在。量測方法見 `docs/notes/2026-09-06-dataset-pipeline-profiling.md` §5。
+**什麼時候可以刪**：永久——這是「範例設定不是答案」的通則。
+
+## 二、延後中：先確認「在等的東西」到了沒
+
+### 別修 catalog 設定「換了 type 就炸掉」這個 bug
+
+**這在講什麼**：設定檔是 `conf/base/` 疊上 `conf/<env>/`，疊法是**逐層合併**（`core/config.py` 的 `_deep_merge`）。catalog 裡每個條目有一個 `type:`，寫它是哪一種 dataset 類別。如果某個 env 檔只改 `type:`，逐層合併會把 base 剩下的鍵原封不動留著——**但那些鍵是舊類別的建構參數**，傳給新類別就 `TypeError`。
+**現在怎麼繞過**：`conf/base/catalog.yaml` 直接寫完整定義，不靠 env 疊。
+**在等什麼**：pandas backend 棄用時一起大重構。真要單獨修：`_load` 遇到 catalog 這個檔改成整層替換，其他檔維持逐層合併。
+**什麼時候可以刪**：pandas backend 棄用、重構做完。
+
+### 別做資料閘 B2（leakage）／B3（零正樣本）、Layer-3 單一來源
+
+（Layer-3 單一來源 ＝ `conf/base/products.yaml` ＋ source_etl pre-flight）
+
+**在等什麼**：排程。這是獨立的一份 plan。
+**什麼時候可以刪**：那份 plan 排進去、做完。
+
+### 別補 feature_table「改既有欄的算法」的漂移防護
+
+**這個洞是什麼**：現在的指紋（`compute_feature_table_fingerprint`）只看欄名和型別，改了值不會翻版本。物理減欄、型別變更、回填歷史分區也一樣沒防護。
+**在等什麼**：上游掛一個顯式的 `feature_build_version`，折進版本計算。
+**什麼時候可以刪**：上游掛上去之後。
+
+## 三、這些是刻意的取捨，不是 bug
+
+### `etl_audit_log` 被 kill（`SIGTERM`／`SIGKILL`）時會丟掉整批 audit 紀錄
+
+**但它是刻意的**：紀錄在寫出前只活在記憶體裡。這是「不要產生一堆小碎檔」換來的，不是 regression。要救的話，terminal 和 `logs/<pipeline>_<run_id>.jsonl` 還有逐筆紀錄。
+**什麼時候可以刪**：改成逐筆持久化的時候。
+
+### `inference_population` 的唯一性沒有寫進 `consistency.py`
+
+**但它是刻意的**：它靠 source_etl 的 `primary_key` ＋ `quality_checks`。這正是「當初 source_etl 沒保證 feature_table 可以當母體」那個缺口的修法。
+**所以別做**：把這條唯一性補進 `consistency.py`。CLAUDE.md 要求新的一致性不變量都要進那個模組，**這一條是刻意的例外**。
+**什麼時候可以刪**：source_etl 那層的保證被拿掉時。
+
+### per-item 指標沒有 precision
+
+**但它是刻意的**：precision 是「一個 query」層級的量，算不到單一 item 頭上。不是漏掉。
+**什麼時候可以刪**：永久——這是定義問題，不會變。
+
+### 講診斷項目時一律不寫數字（寫「各診斷／N」，不寫「五項」）
+
+**但它是刻意的**：這樣增刪診斷時，不會留下「五項」對上四個的矛盾。
+**什麼時候可以刪**：永久。
+
+### `diagnostics` 設定放在最外層，不在 `training:` 裡面
+
+**但它是刻意的**：模型版本只雜湊 `training:` 區塊（`compute_model_version`）。放進去會讓「調一下診斷」也翻掉模型版本。`tests/test_core/test_versioning.py` 守著這件事。
+**什麼時候可以刪**：模型版本的計算方式改掉時。
+
+### `hpo_checkpointing`、`release_during_hpo` 這些旋鈕也放最外層
+
+**但它是刻意的**：同上——放進 `training:` 會一直翻模型版本。
+**什麼時候可以刪**：同上。
+
+### HPO 搜尋診斷寫在 `tune_hyperparameters` 的尾巴，不是獨立的 DAG node
+
+**但它是刻意的**：這樣它對續跑合約（`RESUME_CONTRACTS`）是隱形的，`--from-node finalize_model` 跳過 HPO 的行為才不會變。
+**什麼時候可以刪**：續跑合約改掉時。
+
+### 診斷域整層退場過兩個模組（`triage`、早期那個用門檻切象限的 `quadrant`）
+
+**但它是刻意的**：理由是「不得產生判定、不得用門檻把連續量切成類別」。
+**這裡刻意不列現存模組的名單**：列了就會被讀成「這些是死碼」，2026-08-25 真的發生過，被誤判的三個模組全都是活的。權威版本在 `src/recsys_tfb/diagnosis/__init__.py` 的模組 docstring。
+**什麼時候可以刪**：永久——這是設計原則。
+
+### inference 的 `entity_bucket` 沒有把「讀的桶數」和「寫的桶數」分開
+
+**但它是刻意的**：技術上可行，也留著當逃生口。但它會讓「一個 chunk」變成兩個不同的東西，規格和續跑判準都得跟著分裂。目前預設 10 桶落在健康範圍（5–20）的中間，不需要這個自由度。論證在 ADR-0010。
+**什麼時候可以刪**：預設桶數掉出健康範圍、真的需要這個自由度時。
+
+### 文件上 inference 的 driver 記憶體峰值是下界，不是實測
+
+**但它是刻意的**：也不是估計值。別拿它當「已經量過了」用。真正的峰值取決於生產 feature_table 有幾欄、chunk 多大。為什麼只能算到下界，寫在 `docs/pipelines/inference.md` §9。
+**什麼時候可以刪**：有人在生產環境真的量過。
+
+### `[chunks] predict:` 那行 log 只報數量，不列出是哪些 chunk
+
+**這在講什麼**：inference 把工作切成一格一格的 chunk 跑。跑完會印一行像這樣（`pipelines/inference/nodes.py`）：
+
+```
+[chunks] predict: to_process=12 skipped=40 rebuilt=3 surplus=0
+```
+
+你看得到「幾個」，看不到「是哪幾個」。
+
+**為什麼看起來像缺口**：票（#188／#189）的驗收條件原話是「log 與 manifest 都有三份清單」，實作只讓落地的 manifest 帶清單。**這個落差是刻意的，不是漏做。**
+**為什麼刻意**：生產大約 5,280 個 chunk，清單塞進一行 log 會生出一筆好幾 MB 的紀錄。看 log 的人是「跑的當下的人」，他要的是「跳了幾個」；想知道「是哪幾個」的人在事後，去翻版本目錄裡的 `chunk_report.json`。
+**要改成 log 也帶清單，先問使用者**——那等於推翻這個取捨。
+**什麼時候可以刪**：使用者推翻它。
+
+## 四、還沒有答案，而且卡著別人
+
+### HPO 之後 SparkContext 是被誰停掉的，還不知道
+
+**現況**：復原機制已經修好（偵測到死掉就先清乾淨再重建）。
+**卡在哪**：要查根因需要叢集端的證據，而使用者只拿得到應用層的 stdout／stderr。
+**下次失敗時**：看 `src/recsys_tfb/utils/spark.py` 的模組註解（搜 `spark_context_dead`）。那段還解釋了為什麼在預設設定下，這個事件本身就排除了「閒置被回收」這個可能。**去讀那段，別憑這裡的摘要。**
+**另一件沒驗證的事**：重建等於在 YARN 上重新提交一個新 application，公司環境若對此有稽核限制，設計要調整。
+**什麼時候可以刪**：拿到叢集端證據、根因確認。
+
+### 架構稽核用檔名（`nodes*.py`）猜「這個模組裡有沒有 node」，兩個方向都會猜錯
+
+**現況**：issue #163，狀態查 `gh`。稽核本身在 `tests/test_core/test_architecture_constraints.py`，搜 `rglob("nodes*.py")`。dataset 那一帶後來改由另一條規則守住，所以 #163 是被**繞開**而不是解決。對 dataset 以外仍然失準（例：`pipelines/evaluation/comparison_nodes.py` 不符 `nodes*` 這個前綴）。
+**別做**：靠改檔名迴避，或新增一條讓自己合規的規則。
+**什麼時候可以刪**：使用者裁決之後。
+
+---
+
+## 要往這裡加東西的話
+
+加之前先問一句：
+
+> **「這句話會不會因為別的地方改了，就變成假的？」會 → 不准寫進來。**
+
+這份檔案沒有測試、也沒有 hook 守著。這一問是唯一的防線。
+
+| 不准寫 | 改成 |
 |---|---|
-| catalog deep-merge 對 type-discriminated entry 的 bug（env 覆蓋 `type` 後 base 的 stale key 會傳給新 constructor → `TypeError`） | 等 pandas backend 棄用時一起做大重構。現行 workaround＝`conf/base/catalog.yaml` 放完整定義。若只想修 deep-merge：`ConfigLoader._load` 對 `stem == "catalog"` 改 first-level replace，其餘 stem 維持 deep-merge |
-| 非數值特徵欄閘（B6）的後兩階段 | 需**生產事實**：Phase 1＝依 backstop 列出的真實兇手欄名逐欄判斷 declare/drop，然後重建 dataset（bump `base_dataset_version`）；Phase 2＝記憶體結構解。設計在 `docs/superpowers/specs/2026-07-11-nonnumeric-feature-gate-design.md` §7 |
-| evaluation 的 `eval_predictions` 快取／早落地／SparkListener 觀測 | 使用者定案「**先觀測、量出熱點再決定優化**」。等公司環境量測數據出來且使用者決定後才開下一個 PR |
-| evaluation／baseline metrics 的 skip-if-exists 快取 | 等實測證明 dev-loop 真的太慢。要做時**兩者必須一起**做、同生命週期失效，否則 delta 不一致 |
-| 資料閘 B2（leakage）／B3（零正樣本）、Layer-3 單一來源（`conf/base/products.yaml`＋source_etl pre-flight） | 獨立 plan，尚未排程 |
-| feature_table「改既有欄邏輯」的漂移防護 | `compute_feature_table_fingerprint` 是 schema-only（只看 name+dtype），改值不會 bump 版本。後續方案＝上游掛顯式 `feature_build_version` tag 折進 `compute_base_dataset_version`。物理減欄、型別變更、歷史分區回填亦同 |
-| 外部 segment 表（如 `holding_combo`）的 source_etl | 要做再規劃；預設 config 留作註解範例 |
-| sampling editor 的 (t, α) 參數化與進 HPO search space | 目前編輯器只產**靜態** YAML |
-| 訓練診斷 P3（Optuna 診斷＋train/train-dev 學習曲線） | 依賴 `hpo_checkpointing`；術語一律 train/train-dev，不是 train/val |
-| `--only-test-months` 撞上 train／calibration variant 漂移時，沒有任何一層會擋 | 路徑：同一次編輯既加 `test_snap_dates` 月份、又改了 `conf/base/parameters_dataset.yaml` 裡某個抽樣鍵的**值**（例如 `sample_ratio`；哪些鍵算數以 `core/versioning.py` 的 `TRAIN_SAMPLING_KEYS`／`CALIBRATION_SAMPLING_KEYS` 為準，別憑本列背清單）→ 只翻 variant id、不翻 `base_dataset_version`（那兩組鍵連同 `COVERAGE_ONLY_KEYS` 都被剝掉再雜湊）→ 旗標留下的節點集（`pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES`）不含任何 train／calibration 的 build node，新 variant 底下什麼都沒寫 → `core/runner.py` 開跑前的輸入檢查對已註冊的 catalog 條目**因短路永不求值**，而 `HiveTableDataset.exists()` 走的 `_table_exists` 是 `SHOW TABLES` 表級判定、不看 `partition_filter` → training 的 `load()` 帶 `WHERE … train_variant_id=…` 對不存在的 variant **安靜回 0 列**（再往下 LightGBM 拿到 0 列會怎樣**未實測**；這裡確定的是到 `load()` 為止沒有一層出聲）。<br>**在等使用者裁決要不要補攔截、補在哪一層。** 決定維持不補的理由寫在 ADR-0012 的〈這個論證的已知反例〉：它要使用者**主動**宣告縮小範圍才踩得到，與產物層 skip-if-exists「什麼都不做就失效」不同級。**條件達成的樣子**＝出現一個不需要主動宣告也會踩到的實例，或使用者明說要擋。<br>在那之前**別自己加檢查**，也**別把 `scripts/rebuild_eval_month.sh` 改回跑完整 dataset**——它原本附帶「順手重建 train／val／calibration」的自癒，移除是同一個決定的一部分（ADR-0012〈後果〉第一條），不是退化 |
+| 「PR 未開」「#140 仍 OPEN」「票還沒開」 | 查 `gh`；這裡連提都不提 |
+| 「規劃記錄在 `~/projects/foo`」 | 只寫裁決本身；路徑會死 |
+| 「`bar.py:151`」 | 只寫檔名＋要搜什麼字串 |
+| 「這些模組已退場：A、B、C」 | 指向 code 旁的 docstring；名單一定會漂 |
+| 把「等某某東西出來再做」當成一個**待辦**寫在這裡 | 待辦開一張 issue；這裡只寫「為什麼現在不做」 |
 
-## 三、已完成工作留下的、程式碼讀不出來的取捨
+**票號當名字用可以**（「#304 的決定」✓、「PR #132 的審查」✓）；**宣稱票的狀態不行**（「#304 仍 OPEN」✗）。不 cache 就不會過期。
 
-| 事實 | 為什麼要知道 |
-|---|---|
-| `etl_audit_log` 在 `SIGTERM`/`SIGKILL` 下會遺失**整批** audit（紀錄在 flush 前只活在記憶體 buffer） | 這是「用無小碎檔換掉逐筆持久化」的刻意取捨，**不是 regression**。terminal 與 `logs/<pipeline>_<run_id>.jsonl` 仍有逐筆紀錄可當 fallback |
-| inference 的缺特徵母體成員標記刻意**只留 log**，不下推到任何表 | 使用者先說下推、後反轉為不下推。#188 之後連那個 in-memory 欄位也不存在了——它原本活在被合併掉的 `scoring_dataset` 上，而 `inference_population_features` 存的是「特徵全集扣掉 item」，多一個布林旗標會破壞那個定義。留下的是 `build_inference_population_features` 每月一行的缺特徵成員數 log |
-| `inference_population` 的 grain 唯一性靠 source_etl 的 `primary_key`＋`quality_checks`，**刻意不動 `consistency.py`** | 這正是「當初 source_etl 沒保證 feature_table 當母體」那個缺口的修法 |
-| per-item 指標**沒有 precision** | precision 是 per-query 量，無法歸因到單一 item。刻意的，不是漏掉 |
-| 診斷家族計數一律 count-free（寫「各診斷／N」不寫「五項」） | 避免增刪診斷時留下 5-vs-4 的矛盾 |
-| `diagnostics` config 必須是 top-level（與 `mlflow`/`cache` 同層），不可進 `training:` | `compute_model_version` 只雜湊 `training:` block；放進去會讓診斷旋鈕 bust model_version。`tests/test_core/test_versioning.py` 守著 |
-| HPO 搜尋診斷寫在 `tune_hyperparameters` **尾端**、不是新 DAG node | 這樣對 `RESUME_CONTRACTS` 隱形，`--from-node finalize_model` 跳過 HPO 的行為不變 |
-| `hpo_checkpointing`、`release_during_hpo` 等旋鈕放頂層 config | 放進 `training:` 會 churn model_version |
-| 診斷域退場過整層的模組（`triage`、早期的門檻式 `quadrant`），理由是「不得產生判定、不得用門檻把連續量切成類別」 | 這條的權威來源＝`src/recsys_tfb/diagnosis/__init__.py` 模組 docstring，**去讀那份、不要憑本列**。這裡刻意不列名單：現存的 `compute_quadrant_profiles`／`pair_ledger`／`cross_purchase` 都是活的，列名單只會再一次被讀成「這些是死碼」（2026-08-25 就發生過） |
-| inference 的 `entity_bucket` 分區欄**刻意不做「讀的桶數與寫的桶數分開」**（讀 40 桶控 driver、每 4 桶存一次維持分區檔大小） | 技術上可行且保留為逃生口，但它讓「一個 chunk」變成兩個不同的東西，spec 與續跑判準都要跟著分裂。目前預設 10 桶落在健康窗口（5–20）中間，不需要這個自由度。論證見 ADR-0010「考慮過但否決的選項」 |
-| inference 的 driver 峰值**只有下界推算，沒有實測** | `pdf_to_X` 的 `X_df.values` 共同 dtype 由所有欄決定，所以文件上的數字是下界不是估計值。**2026-09-04（#283）更新：翻倍那條路已經堵住**——`cast_numeric_features_to_storage_type` 現在把**所有**數值特徵欄（含整數族與 boolean）轉成宣告的儲存型別，特徵側的共同 dtype 因此是宣告值本身（預設 float32），不再被單一 int64 欄拉成 float64。仍是下界的理由變成別的：**延後編碼的 identity 類別欄（如 `prod_name`）在 `pdf_to_X` 才變成 `Categorical.codes`**，不在 Spark 側 cast 的範圍內；實測 float32 ＋ int8／int16 codes 仍是 float32，但 codes 一旦成長到 int32（類別數 >32767）共同型別就會回到 float64。實際峰值仍取決於生產 `feature_table` 的欄數與 chunk 大小 |
-| inference 的 `[chunks] predict:` log **刻意只報計數，不報逐 chunk 清單** | #188／#189 的 AC 原話是「log 與 manifest 都有三份清單」，實作只讓落地的那一份帶清單。理由是量級：生產格點約 5,280 個 chunk，把清單塞進一行 log 會產出一筆數 MB 的 JSONL 事件，而 log 的讀者是「跑的當下的人」，他要的是「跳了幾個」。「是哪些」的讀者在事後，他打得開版本目錄裡的 `chunk_report.json`（`docs/pipelines/inference.md` §5.3 的三層表）。**要改成 log 也帶清單，先問使用者**——那等於推翻這個取捨 |
-| 診斷報表的鐵則：**只呈現資料，判斷留給讀者** | 給數字、對照點與範圍說明，把角度攤開讓讀者自己選。哪些用字會越線、以及整份報表怎麼編排，見 [`diagnosis-report-presentation.md`](diagnosis-report-presentation.md) |
+**這幾條不是憑空訂的。** 2026-08-25 一次體檢抓到 5 條爛掉的條目，5 條全部踩在上面這張表上：引用的路徑早就刪了、行號早就漂了、說「PR 未開」的 PR 兩個月前就 merge 了、說「已退場」的三個模組全都活著、說還卡著的票早就關了。**規則當時就寫在這一節，照樣被違反 5 次**——所以現在寫成可以逐格對照的表。
 
-## 四、還沒有結論、卡住其他事的
+兩個補充：
 
-- **HPO 後 SparkContext 被誰停掉（Layer 1）** 仍未證實。復原機制已修（偵測到死亡先清 Python 端單例再重建），但根因要叢集端證據，使用者只拿得到應用層 stdout/stderr。**下次失敗時怎麼判讀 `spark_context_dead` 事件，寫在 `src/recsys_tfb/utils/spark.py` 的模組註解**（含為什麼預設設定下該事件本身就排除了閒置回收）——不要憑本條摘要，去讀那段。另一個未驗證的取捨：重建＝在 YARN 上重新提交新 application，公司環境若對此有稽核限制，設計需調整。
-- **A1 稽核用 `nodes*.py` glob 當「模組含不含 node」的代理**（`tests/test_core/test_architecture_constraints.py`，搜 `rglob("nodes*.py")`），兩個方向都失準。**issue #163**（狀態查 `gh`）。
-  - 原本觸發這條的 `data_gate.py` 已在 #169 消失（它的 node 併進 `pipelines/dataset/nodes.py`），dataset 一帶改由 S1 守（要求每個 `Node(...)` 的第一參數必須 `def` 在 `nodes.py`），**#163 的 Q1 因此被繞開而非解決**——回報已留言在 #163。
-  - **glob 對 dataset 以外仍然失準**（例：`pipelines/evaluation/comparison_nodes.py` 不符 `nodes*` 前綴）。等使用者裁決；**不得靠改檔名迴避，也不得新增一條讓自己合規的規則**。
+- **會漂的東西（名單、行號、狀態）離 code 越近越不會爛。** 那種東西寫在函式的 docstring 裡，這份檔案只說「去讀哪一份」。
+- **但「為什麼不做」要在這裡講完整**，不要叫讀的人再去翻另一份文件——那只是把負擔搬走，不是拿掉。
