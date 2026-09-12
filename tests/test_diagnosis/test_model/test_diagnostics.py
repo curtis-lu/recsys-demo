@@ -221,7 +221,8 @@ def test_compute_feature_statistics_sampling(tmp_path):
 def shap_setup(tmp_path, monkeypatch):
     """小 test parquet（含 item/label/兩數值特徵，一個稀有 item）+ fitted adapter。
 
-    省略 schema → get_schema 預設 item=prod_name, label=label，對上欄名。
+    schema 明寫 item=prod_name, label=label，對上欄名——#328 之後這三個角色
+    沒有內建預設，省略會 raise。
     item 'rare' 僅 2 列（觸發 take-all / low_coverage）。
     """
     monkeypatch.chdir(tmp_path)  # diagnostics_dir 會寫到 ./data/...
@@ -244,6 +245,10 @@ def shap_setup(tmp_path, monkeypatch):
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [], "category_mappings": {}}
     parameters = {
         "model_version": "testmv",
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label",
+        }},
         "diagnostics": {"shap": {"enabled": True, "top_k": 2,
                                  "min_rows_per_item": 30, "sample_rows": 150,
                                  "max_budget": 4000000}},
@@ -520,6 +525,9 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
                     "categorical_columns": [], "category_mappings": {}}
     for metric in ("jaccard_topk", "spearman"):
         parameters = {"model_version": f"mv4_{metric}",
+                      "schema": {"columns": {
+                          "time": "snap_date", "entity": ["cust_id"],
+                          "item": "prod_name", "label": "label"}},
                       "diagnostics": {"shap": {"enabled": True, "top_k": 4,
                                                "min_rows_per_item": 10, "sample_rows": 240,
                                                "max_budget": 4000000,
@@ -616,7 +624,9 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
                     "categorical_columns": ["prod_name"],
                     "category_mappings": {"prod_name": ["A", "B"]}}
     parameters = {"model_version": "mvpart",
-                  "schema": {"columns": {"item": "prod_name",
+                  "schema": {"columns": {"time": "snap_date",
+                                         "entity": ["cust_id"],
+                                         "item": "prod_name",
                                          "label": "label"}},
                   "diagnostics": {"shap": {"enabled": True, "top_k": 3,
                                            "min_rows_per_item": 10, "sample_rows": 120,
@@ -650,6 +660,9 @@ def test_positive_profile_covered_by_targeted_sampling(tmp_path, monkeypatch):
     preprocessor = {"feature_columns": ["f0", "f1"], "categorical_columns": [],
                     "category_mappings": {}}
     parameters = {"model_version": "mvpos",
+                  "schema": {"columns": {
+                      "time": "snap_date", "entity": ["cust_id"],
+                      "item": "prod_name", "label": "label"}},
                   "diagnostics": {"shap": {"enabled": True, "top_k": 2,
                                            "min_rows_per_item": 30, "sample_rows": 300,
                                            "max_budget": 4000000,
@@ -708,6 +721,9 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
                     "category_mappings": {}}
     per_item = 40
     parameters = {"model_version": "mvx",
+                  "schema": {"columns": {
+                      "time": "snap_date", "entity": ["cust_id"],
+                      "item": "prod_name", "label": "label"}},
                   "diagnostics": {"shap": {"enabled": True, "top_k": 2,
                                            "min_rows_per_item": 30, "sample_rows": 300,
                                            "max_budget": 4000000, "profile_positive": True,

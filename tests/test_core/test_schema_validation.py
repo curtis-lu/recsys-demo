@@ -199,7 +199,7 @@ class TestSchemaValidationDelegatesA3:
 
 class TestGetSchemaForHash:
     def test_returns_canonical_keys_with_categorical_values(self):
-        schema = get_schema_for_hash({})
+        schema = get_schema_for_hash({"schema": {"columns": _columns()}})
         assert set(schema.keys()) == {
             "time", "entity", "item", "label", "score", "rank",
             "categorical_values",
@@ -207,14 +207,27 @@ class TestGetSchemaForHash:
         assert "identity_columns" not in schema
 
     def test_reflects_overrides(self):
-        schema = get_schema_for_hash(
-            {"schema": {"columns": {"time": "month_end", "entity": "customer_id"}}}
-        )
+        schema = get_schema_for_hash({"schema": {"columns": _columns(
+            time="month_end", entity="customer_id")}})
         assert schema["time"] == "month_end"
         assert schema["entity"] == ["customer_id"]
 
     def test_includes_categorical_values(self):
-        schema = get_schema_for_hash(
-            {"schema": {"categorical_values": {"prod_name": ["a", "b"]}}}
-        )
+        schema = get_schema_for_hash({"schema": {
+            "columns": _columns(),
+            "categorical_values": {"prod_name": ["a", "b"]},
+        }})
         assert schema["categorical_values"] == {"prod_name": ["a", "b"]}
+
+    def test_the_payload_keys_are_the_role_keys_not_the_defaults(self):
+        """Since #328 the two are different dicts, and the hash follows roles.
+
+        ``_DEFAULTS`` lost three entries; if the payload were still built from
+        it, ``base_dataset_version`` would move for every existing user. Pinned
+        by name because that is exactly the drift a later cleanup would cause.
+        """
+        from recsys_tfb.core.schema import _DEFAULTS, _ROLE_KEYS
+
+        schema = get_schema_for_hash({"schema": {"columns": _columns()}})
+        assert set(schema) == set(_ROLE_KEYS) | {"categorical_values"}
+        assert set(_DEFAULTS) < set(_ROLE_KEYS)

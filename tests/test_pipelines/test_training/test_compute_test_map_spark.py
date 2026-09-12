@@ -53,7 +53,7 @@ def test_compute_mAP_spark_no_calibration_returns_flat_dict(spark):
          "score": 0.8, "score_uncalibrated": 0.8, "label": 1},
     ]
     df = _make_df(spark, rows)
-    manifest = {"snap_dates": ["2025-01-31"], "prods": ["prod_A", "prod_B"],
+    manifest = {"snap_dates": ["2025-01-31"], "items": ["prod_A", "prod_B"],
                 "model_version": "v_test", "n_rows_written": 4}
 
     result = compute_test_mAP_spark(df, manifest, _make_parameters())
@@ -82,7 +82,7 @@ def test_compute_mAP_spark_with_calibration_emits_uncalibrated_subdict(spark):
          "score": 0.1, "score_uncalibrated": 0.9, "label": 0},
     ]
     df = _make_df(spark, rows)
-    manifest = {"snap_dates": ["2025-01-31"], "prods": ["prod_A", "prod_B"],
+    manifest = {"snap_dates": ["2025-01-31"], "items": ["prod_A", "prod_B"],
                 "model_version": "v_test", "n_rows_written": 2}
 
     result = compute_test_mAP_spark(df, manifest, _make_parameters())

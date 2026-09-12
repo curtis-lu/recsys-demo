@@ -78,12 +78,13 @@ def two_column_entity_params():
     """Parameters whose ``schema.entity`` really resolves to two columns.
 
     Shared source of truth for every multi-column-entity test, because the
-    nesting is easy to get wrong and the mistake is silent:
-    :func:`recsys_tfb.core.schema.get_schema` reads ``schema`` → ``columns``,
-    so a dict that puts the column names directly under ``schema`` is ignored
-    wholesale and ``entity`` falls back to the one-column built-in default.
-    A test written on such a dict runs single-entity data against
-    single-entity code and passes no matter what.
+    nesting is easy to get wrong: :func:`recsys_tfb.core.schema.get_schema`
+    reads ``schema`` → ``columns``, so a dict that puts the column names
+    directly under ``schema`` is ignored wholesale. Until #328 ``entity`` then
+    fell back to the one-column built-in default and the mistake was silent —
+    a test written on such a dict ran single-entity data against single-entity
+    code and passed no matter what. The three user-owned roles have no default
+    now, so the same mis-nesting raises.
 
     ``tests/test_core/test_schema.py::TestTwoColumnEntityFixture`` is the meta
     test that keeps this fixture honest — it asserts ``get_schema`` really
@@ -120,10 +121,10 @@ def renamed_schema_params():
     that wants one usually does not want the other's variable.
 
     ``tests/test_core/test_schema.py::TestRenamedSchemaFixture`` is the meta
-    test that keeps this fixture honest — nesting the column names one level up
-    is silently ignored by :func:`~recsys_tfb.core.schema.get_schema`, and a
-    test built on such a dict runs example-named data against example-named
-    code and passes no matter what the code does.
+    test that keeps this fixture honest — it asserts the fixture really
+    resolves to the renamed names, and pins that nesting the column names one
+    level up (which up to #328 silently handed back the example names) now
+    raises.
     """
     return {
         "schema": {

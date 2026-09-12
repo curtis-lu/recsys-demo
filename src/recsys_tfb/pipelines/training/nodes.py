@@ -1149,7 +1149,7 @@ def predict_and_write_test_predictions(
     ]
 
     snap_dates_seen: set[str] = set()
-    prods_seen: set[str] = set()
+    items_seen: set[str] = set()
     n_rows_written = 0
     is_calibrated = isinstance(model, CalibratedModelAdapter)
 
@@ -1185,7 +1185,7 @@ def predict_and_write_test_predictions(
             )
 
             snap_dates_seen.add(snap_date)
-            prods_seen.add(prod_name)
+            items_seen.add(prod_name)
 
             X = pdf_to_X(part_pdf, preprocessor_metadata, parameters)
             y_score = model.predict(X)
@@ -1212,7 +1212,7 @@ def predict_and_write_test_predictions(
 
     manifest = {
         "snap_dates": sorted(snap_dates_seen),
-        "prods": sorted(prods_seen),
+        "items": sorted(items_seen),
         "model_version": model_version,
         "n_rows_written": n_rows_written,
         # What this run decided about every configured month, not just the ones
@@ -1224,9 +1224,9 @@ def predict_and_write_test_predictions(
     }
     logger.info(
         "predict_and_write_test_predictions: done — "
-        "snap_dates=%d prods=%d n_rows_written=%d model_version=%s "
+        "snap_dates=%d items=%d n_rows_written=%d model_version=%s "
         "months_processed=%d months_skipped=%d months_rebuilt=%d",
-        len(manifest["snap_dates"]), len(manifest["prods"]),
+        len(manifest["snap_dates"]), len(manifest["items"]),
         manifest["n_rows_written"], manifest["model_version"],
         len(plan.to_process), len(plan.skipped), len(plan.rebuilt),
     )

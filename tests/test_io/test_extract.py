@@ -35,7 +35,8 @@ def test_extract_xy_returns_numpy_arrays(tmp_path: Path) -> None:
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
     }
-    parameters = {"schema": {"columns": {"label": "label"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name", "label": "label"}}}
 
     X, y = extract_Xy(handle, prep_meta, parameters)
 
@@ -59,7 +60,8 @@ def _make_prep_meta_with_cat():
 
 
 def _make_parameters_with_cat():
-    return {"schema": {"columns": {"label": "label"}}}
+    return {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name", "label": "label"}}}
 
 
 def _make_df_with_cat():
@@ -167,7 +169,8 @@ def test_extract_xy_skips_encode_step_when_no_deferred_cats(
         "categorical_columns": [],
         "category_mappings": {},
     }
-    parameters = {"schema": {"columns": {"label": "label"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name", "label": "label"}}}
 
     with caplog.at_level(logging.INFO, logger="recsys_tfb.io.extract"):
         extract_Xy(handle, prep_meta, parameters)
@@ -251,13 +254,22 @@ def _make_grouped_prep_meta():
     }
 
 
+#: The names the grouped fixture's frame is written with. Declared rather than
+#: defaulted: since #328 ``get_schema`` has no built-in answer for these three.
+_GROUPED_PARAMS = {
+    "schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label"}}
+}
+
+
 def test_extract_xy_with_groups_returns_groups(tmp_path: Path) -> None:
     from recsys_tfb.io.extract import extract_Xy_with_groups
 
     handle = _make_handle(tmp_path, _make_grouped_df())
 
     X, y, groups = extract_Xy_with_groups(
-        handle, _make_grouped_prep_meta(), {}
+        handle, _make_grouped_prep_meta(), _GROUPED_PARAMS
     )
 
     assert X.shape == (6, 2)
@@ -278,7 +290,7 @@ def test_extract_xy_with_groups_with_items_returns_item_ids(tmp_path: Path) -> N
     handle = _make_handle(tmp_path, _make_grouped_df())
 
     X, y, groups, items = extract_Xy_with_groups(
-        handle, _make_grouped_prep_meta(), {}, with_items=True
+        handle, _make_grouped_prep_meta(), _GROUPED_PARAMS, with_items=True
     )
 
     assert X.shape == (6, 2)
@@ -332,7 +344,8 @@ def test_pdf_to_X_returns_numpy_with_categoricals_encoded() -> None:
         "categorical_columns": ["prod_name"],
         "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
     }
-    parameters = {"schema": {"columns": {"label": "label"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name", "label": "label"}}}
 
     X = pdf_to_X(pdf, prep_meta, parameters)
 
@@ -361,7 +374,8 @@ def test_pdf_to_X_skips_encode_when_no_deferred_cats() -> None:
         "categorical_columns": [],
         "category_mappings": {},
     }
-    parameters = {"schema": {"columns": {"label": "label"}}}
+    parameters = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name", "label": "label"}}}
 
     X = pdf_to_X(pdf, prep_meta, parameters)
 
@@ -973,7 +987,9 @@ def _b6_meta(with_string: bool) -> dict:
 
 
 _B6_PARAMS = {
-    "schema": {"columns": {"label": "label"}}
+    "schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label"}}
 }
 
 

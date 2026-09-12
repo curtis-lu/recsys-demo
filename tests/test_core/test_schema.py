@@ -11,32 +11,64 @@ from recsys_tfb.core.schema import (
 )
 
 
-class TestGetSchemaDefaults:
-    def test_defaults_when_no_schema_section(self):
-        result = get_schema({})
-        assert result["time"] == "snap_date"
-        assert result["entity"] == ["cust_id"]
-        assert result["item"] == "prod_name"
+def _params(**over) -> dict:
+    """The example deployment's three required roles, with overrides.
+
+    Every role in ``over`` replaces its counterpart; passing ``None`` drops
+    one, for the tests that are about the missing-role rule itself. Spelled
+    out rather than left to a default because since #328 ``get_schema`` has no
+    default for ``time`` / ``entity`` / ``item`` -- see
+    :data:`recsys_tfb.core.schema._REQUIRED_ROLES`.
+    """
+    columns = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+    columns.update(over)
+    return {"schema": {"columns": {k: v for k, v in columns.items() if v is not None}}}
+
+
+class TestRequiredRolesHaveNoDefault:
+    """``get_schema`` refuses the three roles that name the user's own columns.
+
+    ``validate_schema_config`` refuses them too, at the CLI entry, and that is
+    what a real run hits first. This class covers the second gate: the one
+    that catches a *test* whose parameters never went through the CLI. Without
+    it such a test would resolve to the example deployment's spellings and pass
+    against code that handles no others (#274, #328).
+    """
+
+    def test_no_schema_section_raises(self):
+        with pytest.raises(ValueError, match="Missing schema.columns"):
+            get_schema({})
+
+    @pytest.mark.parametrize("role", ["time", "entity", "item"])
+    def test_a_single_missing_role_is_named(self, role):
+        with pytest.raises(ValueError, match=rf"Missing schema\.columns.*{role}"):
+            get_schema(_params(**{role: None}))
+
+    def test_every_missing_role_is_reported_at_once(self):
+        with pytest.raises(ValueError) as exc:
+            get_schema({"schema": {"columns": {"label": "y"}}})
+        assert "time, entity, item" in str(exc.value)
+
+    def test_the_framework_produced_roles_still_default(self):
+        result = get_schema(_params())
         assert result["label"] == "label"
         assert result["score"] == "score"
         assert result["rank"] == "rank"
 
-    def test_defaults_identity_columns(self):
-        result = get_schema({})
+    def test_identity_columns_from_a_complete_declaration(self):
+        result = get_schema(_params())
         assert result["identity_columns"] == ["snap_date", "cust_id", "prod_name"]
 
 
 class TestGetSchemaPartialOverride:
     def test_override_time_only(self):
-        params = {"schema": {"columns": {"time": "month_end"}}}
-        result = get_schema(params)
+        result = get_schema(_params(time="month_end"))
         assert result["time"] == "month_end"
         assert result["entity"] == ["cust_id"]
         assert result["item"] == "prod_name"
 
     def test_override_item_only(self):
-        params = {"schema": {"columns": {"item": "product_code"}}}
-        result = get_schema(params)
+        result = get_schema(_params(item="product_code"))
         assert result["item"] == "product_code"
         assert result["time"] == "snap_date"
 
@@ -66,30 +98,21 @@ class TestGetSchemaFullOverride:
 
 class TestEntityNormalization:
     def test_entity_string_to_list(self):
-        params = {"schema": {"columns": {"entity": "cust_id"}}}
-        result = get_schema(params)
+        result = get_schema(_params(entity="cust_id"))
         assert result["entity"] == ["cust_id"]
 
     def test_entity_list_unchanged(self):
-        params = {"schema": {"columns": {"entity": ["branch_id", "cust_id"]}}}
-        result = get_schema(params)
+        result = get_schema(_params(entity=["branch_id", "cust_id"]))
         assert result["entity"] == ["branch_id", "cust_id"]
 
 
 class TestIdentityColumnsDerivation:
-    def test_default_identity(self):
-        result = get_schema({})
+    def test_single_entity_identity(self):
+        result = get_schema(_params())
         assert result["identity_columns"] == ["snap_date", "cust_id", "prod_name"]
 
     def test_multi_entity_identity(self):
-        params = {
-            "schema": {
-                "columns": {
-                    "entity": ["branch_id", "cust_id"],
-                }
-            }
-        }
-        result = get_schema(params)
+        result = get_schema(_params(entity=["branch_id", "cust_id"]))
         assert result["identity_columns"] == [
             "snap_date", "branch_id", "cust_id", "prod_name"
         ]
@@ -97,35 +120,31 @@ class TestIdentityColumnsDerivation:
 
 class TestPureFunction:
     def test_input_not_mutated(self):
-        params = {"schema": {"columns": {"time": "month_end"}}}
+        params = _params(time="month_end")
         original = copy.deepcopy(params)
         get_schema(params)
         assert params == original
 
     def test_repeated_calls_same_result(self):
-        params = {"schema": {"columns": {"entity": "cust_id"}}}
-        r1 = get_schema(params)
-        r2 = get_schema(params)
-        assert r1 == r2
+        params = _params(entity="cust_id")
+        assert get_schema(params) == get_schema(params)
 
 
 class TestCategoricalValues:
     def test_default_empty_when_absent(self):
-        result = get_schema({})
+        result = get_schema(_params())
         assert result["categorical_values"] == {}
 
     def test_returned_from_schema_section(self):
-        params = {
-            "schema": {
-                "categorical_values": {"prod_name": ["a", "b", "c"]},
-            }
-        }
+        params = _params()
+        params["schema"]["categorical_values"] = {"prod_name": ["a", "b", "c"]}
         result = get_schema(params)
         assert result["categorical_values"] == {"prod_name": ["a", "b", "c"]}
 
     def test_deep_copied(self):
         values = ["a", "b"]
-        params = {"schema": {"categorical_values": {"prod_name": values}}}
+        params = _params()
+        params["schema"]["categorical_values"] = {"prod_name": values}
         result = get_schema(params)
         result["categorical_values"]["prod_name"].append("c")
         assert values == ["a", "b"]
@@ -151,22 +170,24 @@ class TestTwoColumnEntityFixture:
             "snap_date", "branch_id", "cust_id", "prod_name",
         ]
 
-    def test_mis_nested_shape_is_silently_ignored(self, two_column_entity_params):
-        """Pins the trap the fixture exists to avoid.
+    def test_mis_nested_shape_raises(self, two_column_entity_params):
+        """Pins the trap the fixture exists to avoid — and that it is now loud.
 
         Moving the column names one level up — straight under ``schema``,
-        skipping ``columns`` — makes ``get_schema`` ignore the whole block and
-        return the one-column default. No error, no warning. Copying such a
-        dict into a multi-entity test yields a green test that never exercised
-        a second entity column.
+        skipping ``columns`` — makes ``get_schema`` ignore the whole block.
+        Before #328 it then returned the one-column built-in default: no error,
+        no warning, and a test copied onto such a dict ran single-entity data
+        against single-entity code and passed no matter what. With the default
+        gone, the same mis-nesting raises instead.
         """
         columns = two_column_entity_params["schema"]["columns"]
         mis_nested = {"schema": dict(columns)}
-        assert get_schema(mis_nested)["entity"] == ["cust_id"]
+        with pytest.raises(ValueError, match="Missing schema.columns"):
+            get_schema(mis_nested)
 
 
 class TestGetEntityGrouping:
-    _PARAMS = {"schema": {"columns": {"entity": ["branch_id", "cust_id"]}}}
+    _PARAMS = _params(entity=["branch_id", "cust_id"])
 
     def test_undeclared_falls_back_to_the_whole_entity(self):
         for key in ENTITY_GROUPING_KEYS:
@@ -225,17 +246,18 @@ class TestRenamedSchemaFixture:
         schema = get_schema(renamed_schema_params)
         assert set(schema["categorical_values"]) == {schema["item"]}
 
-    def test_mis_nested_shape_is_silently_ignored(self, renamed_schema_params):
-        """Pins the trap the fixture exists to avoid.
+    def test_mis_nested_shape_raises(self, renamed_schema_params):
+        """Pins the trap the fixture exists to avoid — and that it is now loud.
 
         Moving the column names one level up — straight under ``schema``,
-        skipping ``columns`` — makes ``get_schema`` ignore the whole block and
-        hand back the built-in example names. No error, no warning: a test
-        copied onto such a dict never exercises a renamed column at all.
+        skipping ``columns`` — makes ``get_schema`` ignore the whole block.
+        Before #328 it then handed back the built-in example names, so a test
+        copied onto such a dict never exercised a renamed column at all and
+        still passed. With the defaults gone, the mis-nesting raises, and the
+        message names the three roles it could not find.
         """
         columns = renamed_schema_params["schema"]["columns"]
         mis_nested = {"schema": dict(columns)}
-        schema = get_schema(mis_nested)
-        assert schema["time"] == "snap_date"
-        assert schema["entity"] == ["cust_id"]
-        assert schema["item"] == "prod_name"
+        with pytest.raises(ValueError) as exc:
+            get_schema(mis_nested)
+        assert "time, entity, item" in str(exc.value)
