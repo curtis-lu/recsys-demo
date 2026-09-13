@@ -67,14 +67,14 @@ evaluation:
 | 設定 | 說明 |
 |---|---|
 | `snap_date` | 本次只評估的時間切點，必須使用 `YYYY-MM-DD` |
-| `k_values` | 所有 metric 要實際計算的 K 值 superset |
+| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。實際算的網格是 `k_values` 再加上 `evaluation.metric.k`（非 null 時）——`metric.k` 是主指標 per-item macro 點估與 CI 的截斷深度，跟 `k_values` 是兩個獨立的軸，不必自己列進來 |
 | `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數 |
 
 pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。日期沒有任何資料時會列出該模型實際存在的日期後中止，不會退回整張表計算。
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。
+`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。
 
 主要指標包括：
 
@@ -461,7 +461,7 @@ evaluation metrics 目前不會另存成 JSON；聚合結果直接用於產生 H
 3. dataset overview 的 entities、items、rows 與 positives 符合該批次預期。
 4. 主要 `map@K`、`ndcg@K` 與 `recall@K` 使用的 K 符合實際展示空間。
 5. per-item 與 per-segment 沒有被整體平均掩蓋的明顯退化。
-6. popularity baseline 的歷史期間有資料，log 沒有 leakage fallback warning。
+6. popularity baseline 段有出現（lookback 視窗查無歷史時整條會 raise，不會帶著用答案排名的 baseline 跑完），段落說明寫的 lookback 月數與 `evaluation.baseline.lookback_months` 一致。
 7. diagnostics 的 score/rank 分布沒有異常集中、缺產品或不合理 calibration。
 8. `enriched_eval_predictions` 的本次 model/date partition 有資料且 key 沒有非預期重複。
 

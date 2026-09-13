@@ -160,16 +160,13 @@ def _macro_item_coverage(per_item: dict, parameters: dict) -> int:
 
     bug 5 (ADR-0020): ``per_item`` already excludes items with zero
     positives this period (they never had a row to aggregate), and
-    ``evaluation.metric.min_positives`` (default 0 when unset/None) can
-    exclude further ones. Both are silent — the macro's denominator drifts
-    month to month with no visible cause. This is disclosure, not a
-    definition change: it counts the same set ``macro_average`` uses, it
-    does not alter what the Macro row's values are.
+    ``evaluation.metric.min_positives`` (read through ``metric_params``, the
+    one reader of that block) can exclude further ones. Both are silent — the
+    macro's denominator drifts month to month with no visible cause. This is
+    disclosure, not a definition change: it counts the same set
+    ``macro_average`` uses, it does not alter what the Macro row's values are.
     """
-    min_positives = (
-        ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
-        .get("min_positives") or 0
-    )
+    min_positives = metric_params(parameters)["min_positives"]
     return sum(
         1 for m in per_item.values()
         if (m or {}).get("n_pos", 0) >= min_positives
