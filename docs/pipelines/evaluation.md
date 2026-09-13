@@ -283,6 +283,9 @@ evaluation:
 
 比較報表沒有統計顯著性檢定；Delta 只表示共同範圍上的指標差值 `A - B`。
 
+- **Δ 只在兩側都有值時才算**（bug 4，ADR-0020）。某側沒有這個值——例如某個 item 在 B 側沒有正例——那格留空，不當 0。某側 overall 整個是空的（全部 query 零正例）時 Δ 欄整欄空，表格標題寫明是哪一側。
+- **coverage 的 common query group 數是裁切後兩側都還在的 group**（bug 14，ADR-0020），也就是後續指標實際用到的母體。entity 欄為 NULL 的列在裁切時就被丟掉，不計入；舊版會把兩側的 NULL entity 當成同一個而算進去，所以有 NULL key 的資料上這個數字會變小。
+
 ## 4. 使用方式
 
 ### 4.1 CLI 選項
@@ -440,7 +443,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 階段 | node | 處理內容 | 主要輸出 |
 |---|---|---|---|
 | 載入 Model B | `load_compare_predictions` | 依 compare source 載入、篩日期、轉欄位與 item mapping | `compare_predictions_raw` |
-| 對齊母體 | `restrict_to_common` | 取共同 entities 與 items、雙方重新排名、必要時補 Model B label | `eval_predictions_common`、`compare_predictions_common`、coverage |
+| 對齊母體 | `restrict_to_common` | 取共同 entities 與 items、雙方重新排名、Model B 一律從目前的 `label_table` 補 label | `eval_predictions_common`、`compare_predictions_common`、coverage |
 | 比較報表 | `generate_comparison_report` | 兩側重新計算 metrics 並產生 A/B/Delta；只有 Model A 照 `evaluation_segment_columns` 分群，Model B 是另一張預測表、沒有分群欄 | `evaluation_comparison_report` |
 
 ### 5.3 `--compare-only` 模式
@@ -454,8 +457,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 
 這條路沒有 `prepare_eval_data`，`generate_comparison_report` 讀的 `evaluation_segment_columns` 是寫 enriched partition 那次標準 run 落地的那份。那份檔不在（例如 partition 是這個機制之前寫的）就讀不到而失敗，先重跑一次標準 evaluation。
 
-比較時，若 Model B 本身已有 label，例如來源為 `enriched_eval_predictions` 或含 label 的 `training_eval_predictions`，框架會沿用該 label；若沒有 label，才從目前的 `label_table` left join 並將缺值補為 0。
-比較兩側必須確保使用相同 ground truth 定義與資料成熟度。
+比較時，Model B 一律從目前的 `label_table` left join label、缺值補 0。來源自帶的 label（`enriched_eval_predictions` 與 `training_eval_predictions` 都有）先丟掉、不沿用：那份 label 是 B 落地當時的 `label_table`，沿用的話，之後的回補會混進每一個 Δ，看起來像模型差異（bug 7，ADR-0020）。
 
 ## 6. 產物與驗收
 
@@ -624,8 +626,8 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 目前 per-segment metrics 只使用 `evaluation_segment_columns` 的 `joined` 第一欄，不會在單次 run 中分別計算多個 segment dimensions。
 - segment 對母體表的覆蓋率沒有門檻：對不到的 query 只成為 `(unmatched)` 群並印出佔比，不會因為佔比高而失敗。
 - comparison 目前以 `schema.entity` 的第一個欄位作為 customer 交集；複合 entity schema 需確認比較語意。
-- comparison 先取 entity 集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 entity/item 集合相同，評估母體仍可能不完全一致。
-- Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。
+- comparison 先取 entity 集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 entity/item 集合相同，評估母體仍可能不完全一致。報表 coverage 段的 common query group 數只算裁切後兩側都還在的 group，這種情況下它會小於某一側實際評分的 group 數。
+- Model B 的 label 一律以目前 `label_table` 重接；`--compare-only` 的 Model A 則沿用寫 enriched partition 那次標準 run 補的 label。`label_table` 在那之後回補過，先重跑標準 evaluation 再比，否則兩側的答案不是同一份。
 - score 相同時按 item 升冪決定名次（與 inference 同一條規則，`utils/ranking.py`）。名次因此可重現，但同分本身仍代表模型分不出高下。
 - zero-positive query groups 會排除於排序指標，因此報表不代表完整 inference entity 母體。
 - popularity baseline 在 lookback 空窗時會 raise（bug 1），不再 fallback 至完整 label table 產生 leakage；只有 `evaluation.report.sections.baseline: false` 才會整段跳過不算。

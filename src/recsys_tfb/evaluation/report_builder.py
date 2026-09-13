@@ -643,10 +643,9 @@ def _per_item_metric_compare_table(
             if m_d is not None:
                 d = m_d.get(key)
             else:
-                if a is None and b is None:
-                    d = None
-                else:
-                    d = (a or 0.0) - (b or 0.0)
+                # Both sides or no Δ (ADR-0020 bug 4): reading a missing side
+                # as 0.0 printed the other side's value as the Δ.
+                d = a - b if a is not None and b is not None else None
             row[f"{base} M"] = a
             row[f"{base} B"] = b
             row[f"{base} Δ"] = d

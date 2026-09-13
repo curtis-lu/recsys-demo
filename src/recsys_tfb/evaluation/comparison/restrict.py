@@ -2,14 +2,21 @@
 
 A side: already carries ``label`` (added upstream by ``prepare_eval_data``);
    restrict keeps the existing label column unchanged.
-B side: has no ``label``; restrict does a LEFT JOIN on ``label_table`` and
-   fills missing with 0 — mirroring ``prepare_eval_data``'s convention so
-   "both sides are scored against the same ground truth".
+B side: always gets its label from this run's ``label_table`` — a LEFT JOIN
+   with missing filled as 0, mirroring ``prepare_eval_data``'s convention — so
+   both sides are scored against the same ground truth. A label column B
+   brings with it is dropped first (ADR-0020 bug 7): ``enriched_eval_predictions``
+   and ``training_eval_predictions`` both land with one, frozen at whatever
+   ``label_table`` said when B was persisted. Keeping it would let a label
+   backfill show up in every Δ as if it were a model difference.
 
 Re-ranks both sides within the query group — ``[time] + entity``, every
 column of ``schema.entity`` — because the candidate set just shrank. That is
 the same grouping ``compute_test_mAP_spark`` ranks by, so the metrics the
 comparison report shows are the metrics the main line computes.
+
+Also returns the ``CommonUniverse`` it restricted by. Coverage reads its item
+sets from there rather than collecting them a second time (ADR-0020 bug 14).
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.comparison.alignment import common_universe
+from recsys_tfb.evaluation.comparison.alignment import CommonUniverse, common_universe
 from recsys_tfb.evaluation.metrics_spark import rank_within_query
 
 
@@ -27,7 +34,7 @@ def restrict_to_common(
     b: SparkDataFrame,
     label_table: SparkDataFrame,
     parameters: dict,
-) -> tuple[SparkDataFrame, SparkDataFrame]:
+) -> tuple[SparkDataFrame, SparkDataFrame, CommonUniverse]:
     schema = get_schema(parameters)
     entity_cols = schema["entity"]
     item_col = schema["item"]
@@ -38,7 +45,8 @@ def restrict_to_common(
     identity_cols = schema["identity_columns"]
     query_group_cols = [time_col, *entity_cols]
 
-    common_entities, common_items = common_universe(a, b, entity_cols, item_col)
+    universe = common_universe(a, b, entity_cols, item_col)
+    common_entities, common_items = universe.common_entities, universe.common_items
 
     spark = a.sparkSession
     item_df = spark.createDataFrame([(i,) for i in common_items], [item_col])
@@ -62,11 +70,12 @@ def restrict_to_common(
     a_common = _restrict_and_rank(a)
     b_common = _restrict_and_rank(b)
 
-    if label_col not in b_common.columns:
-        labels = (
-            label_table.select(*identity_cols, label_col)
-            .join(F.broadcast(item_df), on=item_col, how="inner")
-        )
-        b_common = b_common.join(labels, on=identity_cols, how="left").fillna({label_col: 0})
+    if label_col in b_common.columns:
+        b_common = b_common.drop(label_col)
+    labels = (
+        label_table.select(*identity_cols, label_col)
+        .join(F.broadcast(item_df), on=item_col, how="inner")
+    )
+    b_common = b_common.join(labels, on=identity_cols, how="left").fillna({label_col: 0})
 
-    return a_common, b_common
+    return a_common, b_common, universe

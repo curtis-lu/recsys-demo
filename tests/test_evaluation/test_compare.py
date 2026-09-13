@@ -121,6 +121,40 @@ def test_build_comparison_keeps_overall_and_per_item_only():
     assert "macro_avg_delta" not in c
 
 
+def test_delta_only_where_both_sides_have_the_key():
+    """bug 4 (ADR-0020): a key one side lacks gets no Δ at all.
+
+    It used to read the missing side as 0.0, so an item with a positive on A
+    only printed Δ = A's absolute value — a number no reader can tell from a
+    real difference against a control group of 0.
+    """
+    a = {
+        "overall": {"map@5": 0.5},
+        "per_item": {
+            "p1": {"hit_rate@5": 0.4, "map_attr@5": 0.3},
+            "p2": {"hit_rate@5": 0.42},
+        },
+    }
+    b = {
+        "overall": {"map@5": 0.3},
+        "per_item": {"p1": {"hit_rate@5": 0.1}},
+    }
+    c = build_comparison_result(a, b)
+    assert "p2" not in c["per_item_delta"]           # item on A only
+    assert "map_attr@5" not in c["per_item_delta"]["p1"]  # key on A only
+    assert c["per_item_delta"]["p1"]["hit_rate@5"] == pytest.approx(0.3)
+    assert c["overall_delta"]["map@5"] == pytest.approx(0.2)
+
+
+def test_empty_overall_side_yields_no_overall_delta():
+    """bug 4 (ADR-0020): every query on B had zero positives → ``overall`` is
+    ``{}`` → no Δ, instead of Δ equal to A's absolute values."""
+    a = {"overall": {"map@5": 0.5, "recall@5": 0.8}, "per_item": {}}
+    b = {"overall": {}, "per_item": {}}
+    assert build_comparison_result(a, b)["overall_delta"] == {}
+    assert build_comparison_result(b, a)["overall_delta"] == {}
+
+
 def test_plot_comparison_score_distributions_removed():
     import recsys_tfb.evaluation.compare as cmp
     assert not hasattr(cmp, "plot_comparison_score_distributions")

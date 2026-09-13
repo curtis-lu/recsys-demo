@@ -27,9 +27,25 @@ is what makes it general.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from pyspark.sql import DataFrame as SparkDataFrame
 
 from recsys_tfb.core.consistency import DataConsistencyError
+
+
+class CommonUniverse(NamedTuple):
+    """What ``common_universe`` found.
+
+    ``a_items`` / ``b_items`` are the two collects ``common_items`` was built
+    from. They ride along so coverage reports the same sets instead of
+    collecting them again (ADR-0020 bug 14).
+    """
+
+    common_entities: SparkDataFrame
+    common_items: set
+    a_items: set
+    b_items: set
 
 
 def common_universe(
@@ -37,8 +53,8 @@ def common_universe(
     b: SparkDataFrame,
     entity_cols: list[str],
     item_col: str,
-) -> tuple[SparkDataFrame, set]:
-    """Return ``(common_entities, common_items)``.
+) -> CommonUniverse:
+    """Return ``CommonUniverse(common_entities, common_items, a_items, b_items)``.
 
     ``common_entities`` is a **lazy** DataFrame with exactly ``entity_cols``,
     one row per shared entity — an entity is the combination of **every**
@@ -54,7 +70,9 @@ def common_universe(
     that trade.
 
     ``common_items`` is a Python set — see the module docstring for why this
-    side may come back to the driver and the entity side may not.
+    side may come back to the driver and the entity side may not. ``a_items``
+    and ``b_items`` are each side's full item set, the inputs of that
+    intersection.
 
     Raises ``DataConsistencyError`` (B3) when either intersection is empty —
     caller will surface this as ``fail loud``.
@@ -92,4 +110,4 @@ def common_universe(
             "Check prod_mapping config."
         )
 
-    return common_entities, common_items
+    return CommonUniverse(common_entities, common_items, a_items, b_items)

@@ -58,9 +58,9 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
 # (cust_id, snap_date, prod_name, score, model_version) projection used by
 # restrict_to_common. ``enriched_eval_predictions`` additionally carries
 # label / rank / segment columns; ``restrict_to_common`` is schema-agnostic
-# (re-ranks after the universe shrink, skips the label LEFT JOIN when
-# already present). Kept here so the loader can fail-loud even if A11
-# validation was bypassed (e.g. in tests).
+# (re-ranks after the universe shrink, and drops any carried label to re-join
+# this run's ``label_table`` — ADR-0020 bug 7). Kept here so the loader can
+# fail-loud even if A11 validation was bypassed (e.g. in tests).
 MODEL_VERSION_SOURCES = (
     "enriched_eval_predictions",
     "ranked_predictions",

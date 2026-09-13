@@ -39,40 +39,44 @@ def restrict_to_common(
     """Pipeline shim: call the pure restrict function + capture coverage dict.
 
     Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
-    carries full-universe sizes + dropped item lists so the report can
-    show what was filtered. Computed here because ``_restrict`` itself loses
-    access to the originals after returning.
+    carries full-universe sizes, the common sizes and dropped item lists so
+    the report can show what was filtered.
 
     Population size is counted in **query groups** — distinct ``[time] +
     entity`` combinations, every column of ``schema.entity`` — because that is
     the unit mAP divides by. Reporting it in any other unit puts two different
     scales side by side in one table with nothing telling the reader they
     differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
+
+    The common count is taken from what the restriction kept, not re-derived
+    from the raw frames (ADR-0020 bug 14). It used to ``intersect`` the raw
+    query groups, which matches ``NULL == NULL``, while the restriction's
+    equi-join drops null keys — so it counted groups no metric ever saw.
     """
     schema = get_schema(parameters)
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
     time_col = schema["time"]
-    query_group_cols = [time_col, *entity_cols]
+    query_group_cols = [time_col, *schema["entity"]]
 
-    a_items_full = {r[0] for r in eval_predictions.select(item_col).distinct().collect()}
-    b_items_full = {r[0] for r in compare_predictions_raw.select(item_col).distinct().collect()}
-
-    a_groups = eval_predictions.select(*query_group_cols).distinct()
-    b_groups = compare_predictions_raw.select(*query_group_cols).distinct()
-    a_groups_full = a_groups.count()
-    b_groups_full = b_groups.count()
-    groups_common = a_groups.intersect(b_groups).count()
-
-    # The item intersection falls out of the two sets already collected — no
-    # extra Spark work, and the same value ``_restrict`` derives internally.
-    # Post-restrict counts may be smaller than these intersection sizes when
-    # A/B don't fully cover the cross product.
-    common_items = a_items_full & b_items_full
-
-    a_common, b_common = _restrict(
+    a_common, b_common, universe = _restrict(
         eval_predictions, compare_predictions_raw, label_table, parameters
     )
+
+    a_groups_full = eval_predictions.select(*query_group_cols).distinct().count()
+    b_groups_full = compare_predictions_raw.select(*query_group_cols).distinct().count()
+    # Groups both restricted frames still hold. The left-semi join is the
+    # restriction's own join; on symmetric candidate sets this equals either
+    # side's kept group count, and when one side scored a common entity only on
+    # items the other lacks, that group is in one side's metrics but not in
+    # "common".
+    groups_common = (
+        a_common.select(*query_group_cols).distinct()
+        .join(
+            b_common.select(*query_group_cols).distinct(),
+            on=query_group_cols, how="left_semi",
+        )
+        .count()
+    )
+    common_items = universe.common_items
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
     coverage_partial = {
@@ -84,11 +88,11 @@ def restrict_to_common(
         "n_query_group_A_full": a_groups_full,
         "n_query_group_B_full": b_groups_full,
         "n_query_group_common": groups_common,
-        "n_item_A_full": len(a_items_full),
-        "n_item_B_full": len(b_items_full),
+        "n_item_A_full": len(universe.a_items),
+        "n_item_B_full": len(universe.b_items),
         "n_item_common": len(common_items),
-        "dropped_items_A": sorted(a_items_full - common_items),
-        "dropped_items_B": sorted(b_items_full - common_items),
+        "dropped_items_A": sorted(universe.a_items - common_items),
+        "dropped_items_B": sorted(universe.b_items - common_items),
     }
     return a_common, b_common, coverage_partial
 
