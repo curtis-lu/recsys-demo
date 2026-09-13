@@ -257,6 +257,34 @@ def test_category_section_discloses_macro_item_coverage():
         assert "M 1／B 1／全部 1）" in title
 
 
+def test_category_overall_title_names_the_empty_side():
+    """bug 4 (ADR-0020): the category overall table gets the same empty-side
+    line as the fine-grained overall table. B's category overall is ``{}``
+    (every query zero positives at category grain), so its Δ column is blank
+    and the title says which side has nothing to compare."""
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_a = {
+        "overall": {"map@1": 0.5},
+        "per_item": {"fund": {"hit_rate@1": 0.6, "map_attr@1": 0.4}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "dataset_overview": {"totals": {"n_items": 1}},
+    }
+    m_a["category"] = cat_a
+    m_b["category"] = {**cat_a, "overall": {}}
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None, "section returned None — nothing was checked"
+    title = next(t for t in sec.table_titles if t.startswith("大類 overall"))
+    assert "Compare 側無可比的 query（全部零正例）" in title
+    assert "Model 側" not in title
+    tbl = sec.tables[sec.table_titles.index(title)]
+    assert len(tbl.index) > 0, "no rows — the Δ column check would pass vacuously"
+    assert tbl["Δ"].isna().all()
+
+
 def _overall_up_to_k5() -> dict:
     return {
         f"{fam}@{k}": round(0.1 * k, 2)
