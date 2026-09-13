@@ -405,6 +405,8 @@ def _validate(pdf: pd.DataFrame, parameters: dict, schema: dict) -> list[str]:
         )
     if len(pdf) and not pdf[SCORE_COL].notna().any():
         # 欄位在、值全空＝讀不到，理由同 item_ability 的守衛（空抽樣不算）。
+        # 三個模組各寫一份、不抽進 _common：跟上面「沒有這一欄」的守衛同形，
+        # 那一個本來就是各模組各寫、訊息各帶自己的模組名。
         raise ValueError(
             f"config_shift 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
             "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"

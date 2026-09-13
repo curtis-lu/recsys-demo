@@ -45,16 +45,19 @@ class TestEvaluationPipelineDefault:
 
 
 class TestRegistryDiagnosesFollowTheMode:
-    """registry 診斷只在 ``--post-training`` 組出來（ADR-0018 決定 5）。
+    """Registry diagnoses are wired in ``--post-training`` only (ADR-0018
+    decision 5).
 
-    那幾項診斷要 ``score_uncalibrated``，監控模式的預測來源不保證有它；組進來
-    的話預設模式跑到第一個診斷就炸，生產也一樣。監控模式的
-    ``evaluation_diagnosis_pages`` 改由零讀取的 ``no_diagnosis_pages`` 供空清單
-    ——不是 ``render_diagnosis_pages``：它按檔名讀磁碟，同一個
-    ``(model_version, snap_date)`` 先跑過 post-training 就會撿到那批頁面。
+    They need ``score_uncalibrated``, which the monitoring source does not
+    guarantee; wired in, the default mode crashed at the first diagnosis, in
+    production too. Monitoring mode's ``evaluation_diagnosis_pages`` comes from
+    the zero-read ``no_diagnosis_pages`` instead, not from
+    ``render_diagnosis_pages``: that one reads the disk by file name and would
+    pick up the pages an earlier post-training run of the same
+    ``(model_version, snap_date)`` left behind.
 
-    ``--compare`` 的三個 node 加在模式判斷之外，所以兩種模式各自帶著比較也要
-    各自對應。
+    The three ``--compare`` nodes are added outside the mode switch, so each
+    mode with a comparison must still match its own shape.
     """
 
     MODES = {
@@ -105,6 +108,39 @@ class TestRegistryDiagnosesFollowTheMode:
                 if "evaluation_diagnosis_pages" in n.outputs
             ]
             assert len(producers) == 1, f"[{label}] {producers}"
+
+    def test_monitoring_draws_no_sample_for_diagnoses_it_does_not_wire(self):
+        """With the metric CI off, monitoring mode has no consumer of the
+        diagnosis sample left, so it must not draw one; post-training still
+        does, for its registry diagnoses.
+
+        The draw is a driver-side ``toPandas`` of up to
+        ``diagnosis.sample.max_queries`` queries. Drawing it for nobody raises
+        nothing and only shows up as a slower run. The registry diagnoses'
+        ``enabled`` flags default to true in both modes, so the config cannot
+        tell the modes apart; the pipeline has to.
+        """
+        from unittest.mock import patch
+
+        import pandas as pd
+
+        params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        outcome = {}
+        for label in ("monitoring", "post-training"):
+            node = next(
+                n for n in create_pipeline(**self.MODES[label]).nodes
+                if n.name == "draw_diagnosis_sample_node"
+            )
+            with patch(
+                "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+                return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
+            ) as spy:
+                result = node.func(None, params)
+            outcome[label] = {"draws": spy.call_count, "sample": result is not None}
+        assert outcome == {
+            "monitoring": {"draws": 0, "sample": False},
+            "post-training": {"draws": 1, "sample": True},
+        }
 
     def test_monitoring_stub_reads_nothing_and_returns_no_pages(self):
         node = next(

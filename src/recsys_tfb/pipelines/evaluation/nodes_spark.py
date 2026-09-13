@@ -33,6 +33,9 @@ def _ci_consumer_enabled(parameters: dict) -> bool:
 def _registry_diagnosis_enabled(parameters: dict) -> bool:
     """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
+    只在 ``--post-training`` 被問：監控模式不組 registry 診斷，那裡的抽樣閘門
+    不看這個函式（見 ``make_draw_diagnosis_sample_node``）。
+
     與 ``_ci_consumer_enabled`` 分開的理由：既有的 ci（非 registry 消費者）
     與 registry 診斷的生命週期不同。合在一起
     的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
@@ -165,6 +168,9 @@ def prepare_eval_data(
     # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
     # month join, so it counts exactly the rows about to be joined. The
     # message carries counts only, never key values (they are entity ids).
+    # Cost: one Spark action per run, a groupBy over one month of label rows
+    # (a shuffle of that month) ending in a count; only the count reaches the
+    # driver, whatever the table size.
     n_duplicated_keys = (
         labels.groupBy(*identity_cols)
         .agg(F.count(F.lit(1)).alias("_n_label_rows"))
@@ -265,42 +271,72 @@ def prepare_eval_data(
     return eval_predictions
 
 
-def draw_diagnosis_sample_node(
-    eval_predictions: SparkDataFrame,
-    parameters: dict,
-) -> Optional[tuple]:
-    """Draw the shared driver-side diagnosis sample ONCE per run.
+def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
+    """Build the node that draws the shared driver-side diagnosis sample.
 
-    ``compute_metric_ci`` plus every registry diagnosis
-    (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
-    consume this single sample instead of each re-drawing it (same seed ->
-    identical content; N Spark scans collapse to 1). Sharing one sample is
-    also a correctness property, not just a speed one: numbers computed on
-    different populations must not be read side by side. Returns ``None``
-    only when *every* consumer is disabled.
+    Which consumers exist is a property of the pipeline's mode, not of the
+    config: ``--post-training`` wires ``compute_metric_ci`` plus every registry
+    diagnosis, monitoring mode only ``compute_metric_ci`` (ADR-0018 decision 5).
+    The registry diagnoses' ``enabled`` flags default to true in both modes, so
+    a gate reading only the config would, in monitoring mode with the CI
+    switched off, draw a sample nobody reads: a driver-side ``toPandas`` of up
+    to ``diagnosis.sample.max_queries`` queries, no error, only a slower run.
+    ``create_pipeline`` passes the mode in instead.
+
+    Both modes get the node name ``draw_diagnosis_sample_node``, so
+    ``--from-node`` and the docs name one node whichever mode is running.
     """
-    ci_on = _ci_consumer_enabled(parameters)
-    registry_on = _registry_diagnosis_enabled(parameters)
-    if not (ci_on or registry_on):
-        logger.info(
-            "diagnosis sample: all consumers (ci + registry diagnoses) "
-            "disabled — skipping sample draw"
-        )
-        return None
+    def draw_diagnosis_sample_node(
+        eval_predictions: SparkDataFrame,
+        parameters: dict,
+    ) -> Optional[tuple]:
+        """Draw the shared driver-side diagnosis sample ONCE per run.
 
-    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
-    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
-    # deep=False keeps this a free observation: rows/cols are exact and the
-    # bytes figure is a shallow estimate. deep=True would scan every string
-    # cell (O(n_cells)) on the already-materialised sample — accurate but not
-    # "free", which is the constraint for this always-on instrumentation.
-    log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
-    logger.info(
-        "diagnosis sample drawn once (ci_enabled=%s, registry diagnoses "
-        "enabled=%s): %d queries sampled",
-        ci_on, registry_on, sample_meta["n_queries_sampled"],
-    )
-    return sample_pdf, sample_meta
+        ``compute_metric_ci`` plus, in ``--post-training``, every registry
+        diagnosis (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
+        consume this single sample instead of each re-drawing it (same seed ->
+        identical content; N Spark scans collapse to 1). Sharing one sample is
+        also a correctness property, not just a speed one: numbers computed on
+        different populations must not be read side by side. Returns ``None``
+        only when *every* wired consumer is disabled.
+        """
+        ci_on = _ci_consumer_enabled(parameters)
+        registry_on = (
+            registry_diagnoses_wired and _registry_diagnosis_enabled(parameters)
+        )
+        if not (ci_on or registry_on):
+            logger.info(
+                "diagnosis sample: every wired consumer (ci%s) disabled — "
+                "skipping sample draw",
+                " + registry diagnoses" if registry_diagnoses_wired else "",
+            )
+            return None
+
+        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+        sample_pdf, sample_meta = draw_diagnosis_sample(
+            eval_predictions, parameters
+        )
+        # deep=False keeps this a free observation: rows/cols are exact and the
+        # bytes figure is a shallow estimate. deep=True would scan every string
+        # cell (O(n_cells)) on the already-materialised sample — accurate but
+        # not "free", which is the constraint for this always-on instrumentation.
+        log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
+        logger.info(
+            "diagnosis sample drawn once (ci_enabled=%s, registry diagnoses "
+            "enabled=%s): %d queries sampled",
+            ci_on, registry_on, sample_meta["n_queries_sampled"],
+        )
+        return sample_pdf, sample_meta
+
+    return draw_diagnosis_sample_node
+
+
+#: The ``--post-training`` shape, every registry diagnosis wired. Kept as a
+#: module-level name for callers that exercise the node outside
+#: ``create_pipeline``.
+draw_diagnosis_sample_node = make_draw_diagnosis_sample_node(
+    registry_diagnoses_wired=True
+)
 
 
 def compute_metrics(
@@ -602,22 +638,27 @@ def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
 
 
 def no_diagnosis_pages(parameters: dict) -> list[str]:
-    """監控模式的 ``evaluation_diagnosis_pages``：永遠是空清單，什麼都不讀。
+    """Monitoring mode's ``evaluation_diagnosis_pages``: always empty, reads nothing.
 
-    監控模式不組 registry 診斷（ADR-0018 決定 5），但 ``generate_report`` 仍要
-    第六個輸入。三條路裡只有這條不出錯：
+    Monitoring mode wires no registry diagnosis (ADR-0018 decision 5), yet
+    ``generate_report`` still takes a sixth input. Of the three ways to supply
+    it, this is the one that cannot go wrong:
 
-    * **不接**：``core/runner.py`` 是位置綁定，少一個輸入 Runner 開跑前就
-      raise「requires input … not produced by any prior node」。
-    * **給 ``generate_report`` 的 ``diagnosis_pages`` 一個預設值**：尾端預設值
-      會吞掉 arity 錯誤，六個必填正是 ``known-pitfalls.md`` §12 那次修出來的。
-    * **沿用 ``render_diagnosis_pages``、只給它 ``parameters``**：它按檔名從磁碟
-      讀，回空清單的條件是「目錄裡沒有 JSON」而不是「這次沒算」。同一個
-      ``(model_version, snap_date)`` 先跑過 ``--post-training``，監控報表就會
-      長出指向那批診斷頁的入口，退出碼 0。
+    * **Not wiring it**: ``core/runner.py`` binds inputs by position, so the
+      Runner raises "requires input … not produced by any prior node" before
+      anything runs.
+    * **A default for ``generate_report``'s ``diagnosis_pages``**: a trailing
+      default swallows arity errors, and its six required parameters are what
+      ``known-pitfalls.md`` §12 fixed.
+    * **Reusing ``render_diagnosis_pages`` with only ``parameters``**: it reads
+      the pages directory by file name, so it returns empty when that directory
+      holds no JSON, not when this run computed nothing. After an earlier
+      ``--post-training`` run of the same ``(model_version, snap_date)`` the
+      monitoring report would link to that run's pages, with exit code 0.
 
-    這個 node 不讀磁碟、不讀 ``parameters`` 的值，所以拓撲排序把它排在哪裡
-    都無所謂。
+    ``parameters`` is taken (unread) because ADR-0018 fixes this signature. It
+    reads neither the disk nor that value, which is also why its place in the
+    topological order does not matter.
     """
     return []
 

@@ -526,7 +526,7 @@ C000010   0.83    1.92                1      （示意）</div>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A / entity_bucket=3（partition）
 cust_id   score   score_uncalibrated
-C000010   0.83    1.62   （示意）</div>
+C000010   0.83    0.71   （示意）</div>
   <p class="sub"><code>entity_bucket</code> 是機制欄不是契約欄：評分必須在 driver（禁 UDF），所以按 entity 雜湊切塊；
   而 <code>insertInto</code> ＋ dynamic overwrite 會把 frame 裡出現的分區整個替換，所以塊的邊界必須等於分區的邊界，
   否則後一個桶的寫入會刪掉前一個桶的列且零錯誤訊息。<code>rank_predictions</code> 讀完就丟，
@@ -549,7 +549,7 @@ C000010   0.83    1.62   （示意）</div>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
 cust_id   score   score_uncalibrated   rank
-C000010   0.83    1.62                 1      （示意）</div>
+C000010   0.83    0.71                 1      （示意）</div>
 </div>
 
 <!-- ===================== evaluation ===================== -->

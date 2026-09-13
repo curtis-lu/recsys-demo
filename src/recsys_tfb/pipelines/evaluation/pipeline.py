@@ -32,9 +32,9 @@ def create_pipeline(
         compute_metric_ci,
         compute_metrics,
         compute_report_aggregates,
-        draw_diagnosis_sample_node,
         generate_report,
         make_diagnosis_node,
+        make_draw_diagnosis_sample_node,
         no_diagnosis_pages,
         prepare_eval_data,
         render_diagnosis_pages,
@@ -87,11 +87,15 @@ def create_pipeline(
             inputs=[predictions_input, "label_table", "parameters"],
             outputs="eval_predictions",
         ),
-        # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and
-        # the registry diagnoses read this shared in-memory output instead of
-        # each re-drawing it (same seed -> identical content).
+        # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and,
+        # in --post-training, the registry diagnoses read this shared
+        # in-memory output instead of each re-drawing it (same seed ->
+        # identical content). The node is told the mode so that monitoring
+        # mode, which wires no registry diagnosis, never draws for them.
         Node(
-            draw_diagnosis_sample_node,
+            make_draw_diagnosis_sample_node(
+                registry_diagnoses_wired=post_training
+            ),
             inputs=["eval_predictions", "parameters"],
             outputs="diagnosis_sample",
         ),
@@ -149,10 +153,11 @@ def create_pipeline(
             ),
         ]
     else:
-        # 監控模式不組 registry 診斷（ADR-0018 決定 5）：它們要
-        # score_uncalibrated，預設模式的預測來源不保證有。模式決定形狀
-        # （ADR-0013），不是 config 開關。generate_report 仍要第六個輸入，
-        # 由這個零讀取的 stub 供空清單——理由見它的 docstring。
+        # Monitoring mode wires no registry diagnosis (ADR-0018 decision 5):
+        # they need score_uncalibrated, which this mode's prediction source
+        # does not guarantee. The mode decides the shape (ADR-0013), not a
+        # config switch. generate_report still needs its sixth input, so the
+        # zero-read stub supplies an empty list; why a stub, see its docstring.
         nodes.append(
             Node(
                 no_diagnosis_pages,

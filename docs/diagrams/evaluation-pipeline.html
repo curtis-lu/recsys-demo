@@ -165,7 +165,7 @@
     <tr><td>compute_baseline_metrics</td><td>同名</td><td>eval_predictions, label_table</td><td>baseline_metrics</td></tr>
     <tr><td>compute_report_aggregates</td><td>同名</td><td>eval_predictions</td><td>evaluation_report_aggregates</td></tr>
     <tr class="stage"><td colspan="4">診斷流（抽樣 → CI；四項診斷 → 分頁只在 <code>--post-training</code>）</td></tr>
-    <tr><td>draw_diagnosis_sample_node</td><td>同名</td><td>eval_predictions</td><td>diagnosis_sample</td></tr>
+    <tr><td>draw_diagnosis_sample_node</td><td>make_draw_diagnosis_sample_node(模式)<br><small>監控模式只為 CI 抽，CI 關掉就不抽</small></td><td>eval_predictions</td><td>diagnosis_sample</td></tr>
     <tr><td>compute_metric_ci</td><td>同名</td><td>diagnosis_sample</td><td>evaluation_metric_ci</td></tr>
     <tr><td>diagnose_config_shift<br><small>僅 <code>--post-training</code>（以下四項同）</small></td><td>make_diagnosis_node("config_shift")</td><td>diagnosis_sample</td><td>evaluation_config_shift</td></tr>
     <tr><td>diagnose_item_ability</td><td>make_diagnosis_node("item_ability")</td><td>diagnosis_sample</td><td>evaluation_item_ability</td></tr>

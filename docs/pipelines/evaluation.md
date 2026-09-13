@@ -395,7 +395,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
-| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`） | `diagnosis_sample` |
+| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
 | 模型指標 | `compute_metrics` | enriched rows | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics | `evaluation_metrics` |
 | Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標 | `baseline_metrics` |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | enriched rows、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
@@ -548,7 +548,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date` | 日期錯誤、模式用錯、對應 partition 未產生 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
-| `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑 |
+| `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
 | 監控模式的報表沒有診斷入口 | 設計如此：registry 診斷只在 `--post-training` 組出來 | 要診斷改跑 `--post-training`（見 4.3 節） |
 | `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |

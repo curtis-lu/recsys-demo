@@ -129,8 +129,25 @@ _ENRICH_PARAMS = {
 }
 
 
+def _catalog_declared_type(entry: str, column: str) -> str:
+    """The type ``conf/base/catalog.yaml`` declares, read rather than restated.
+
+    The casts in ``prepare_eval_data`` copy these declarations. Reading them
+    here is what turns a catalog edit that the cast does not follow into a red
+    test instead of a type conflict on the next real run.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[3]
+    catalog = yaml.safe_load((root / "conf" / "base" / "catalog.yaml").read_text())
+    declared = {c["name"]: c["type"] for c in catalog[entry]["columns"]}
+    return declared[column].lower()
+
+
 def _post_training_predictions(spark):
-    """``training_eval_predictions`` 的形狀：帶 label、不帶 rank（catalog 宣告型別）。"""
+    """``training_eval_predictions``' shape: carries label, no rank (declared types)."""
     return spark.createDataFrame(
         [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
          ("c1", "2025-01-31", "B", 0.1, 0.2, 0)],
@@ -140,7 +157,7 @@ def _post_training_predictions(spark):
 
 
 def _monitoring_predictions(spark):
-    """``ranked_predictions`` 的形狀：帶 rank（BIGINT）、不帶 label。"""
+    """``ranked_predictions``' shape: carries rank (BIGINT), no label."""
     return spark.createDataFrame(
         [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
          ("c1", "2025-01-31", "B", 0.1, 0.2, 2)],
@@ -150,7 +167,7 @@ def _monitoring_predictions(spark):
 
 
 def _labels(spark, label_type="INT"):
-    """``label_table`` 是使用者自訂的表，label 的整數寬度不由框架決定。"""
+    """``label_table`` is user-defined; the framework does not fix its label's width."""
     return spark.createDataFrame(
         [("c1", "2025-01-31", "A", 1)],
         f"cust_id STRING, snap_date STRING, prod_name STRING, label {label_type}",
@@ -158,18 +175,18 @@ def _labels(spark, label_type="INT"):
 
 
 def test_prepare_eval_data_injected_rank_is_bigint(spark):
-    """bug 15：post-training 補出來的 rank 跟 ``ranked_predictions`` 宣告的
-    BIGINT 同型。``row_number()`` 給的是 INT，而兩種模式寫同一張
-    ``enriched_eval_predictions``——型別不同的那一次寫入會被擋下（見下一條）。
+    """Bug 15: the rank post-training fills in has the type ``ranked_predictions``
+    declares. ``row_number()`` yields INT, and both modes write the same
+    ``enriched_eval_predictions``, so a mismatch fails whichever write comes
+    second (next test).
     """
-    from pyspark.sql.types import LongType
-
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
     result = prepare_eval_data(
         _post_training_predictions(spark), _labels(spark), _ENRICH_PARAMS,
     )
-    assert isinstance(result.schema["rank"].dataType, LongType)
+    assert result.schema["rank"].dataType.simpleString() == \
+        _catalog_declared_type("ranked_predictions", "rank")
 
 
 @pytest.mark.parametrize("label_type", ["INT", "BIGINT"])
@@ -180,25 +197,26 @@ def test_prepare_eval_data_injected_rank_is_bigint(spark):
 def test_both_modes_write_the_same_enriched_table_in_either_order(
     spark, first, label_type,
 ):
-    """同一個 model_version 換模式寫同一張 enriched 表，第二次不炸（bug 15）。
+    """The same model_version written by both modes, in either order (bug 15).
 
-    表是 ``columns: "auto"``：schema 由第一次寫入推得，``_evolve_schema`` 對
-    同名不同型直接 raise（「Schema evolution never casts」）。兩種模式來源不同
-    的欄有兩個，型別都必須一樣：
+    The table is ``columns: "auto"``: its schema comes from the first write,
+    and ``_evolve_schema`` raises on a same-name type mismatch ("Schema
+    evolution never casts"). Two columns come from different sources per mode,
+    and both must end up the same type:
 
-    * ``rank``：一種模式補出來（``row_number`` 是 INT），另一種讀上游（BIGINT）。
-    * ``label``：post-training 讀 ``training_eval_predictions``（宣告 INT），
-      監控模式讀 ``label_table``——使用者自訂的表，示例環境的合成資料是
-      BIGINT。所以 ``label_type`` 兩種都跑：只測 INT 的話這條撞型別看不到
-      （本機實跑監控模式才撞出來）。
+    * ``rank``: filled in by one mode (``row_number`` is INT), read from
+      upstream by the other (BIGINT).
+    * ``label``: ``training_eval_predictions`` (declared INT) in post-training,
+      the user-defined ``label_table`` in monitoring, BIGINT in the example's
+      synthetic data. Hence both ``label_type`` values: with INT only, this
+      conflict stays invisible (it first showed up on a real monitoring run).
 
-    跑在獨立的 test DB，理由同 ``test_persist_and_catalog_load_roundtrip``
-    （``known-pitfalls.md`` §14：共用 warehouse 的真表曾被測試洗掉）。
+    Runs in its own test DB, for the reason ``test_persist_and_catalog_load_roundtrip``
+    does (``known-pitfalls.md`` §14: a test once wiped the shared warehouse's
+    real table).
     """
     import shutil
     from pathlib import Path
-
-    from pyspark.sql.types import IntegerType, LongType
 
     from recsys_tfb.io.hive_table_dataset import HiveTableDataset
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
@@ -236,8 +254,10 @@ def test_both_modes_write_the_same_enriched_table_in_either_order(
         ds.save(enriched[second]())
 
         out = ds.load()
-        assert isinstance(out.schema["rank"].dataType, LongType)
-        assert isinstance(out.schema["label"].dataType, IntegerType)
+        assert out.schema["rank"].dataType.simpleString() == \
+            _catalog_declared_type("ranked_predictions", "rank")
+        assert out.schema["label"].dataType.simpleString() == \
+            _catalog_declared_type("training_eval_predictions", "label")
         assert out.count() == 2
     finally:
         _clean()
@@ -248,13 +268,17 @@ def test_both_modes_write_the_same_enriched_table_in_either_order(
     ids=["post-training", "monitoring"],
 )
 def test_prepare_eval_data_raises_on_duplicated_label_keys(spark, predictions):
-    """bug 10：``label_table`` 同一個 key 有兩列就擋，訊息帶重複的 key 數。
+    """Bug 10: a label_table key held by more than one row raises, naming the
+    number of duplicated keys.
 
-    下面的 LEFT JOIN 會把該候選複製成多列：query 的候選集膨脹、rank 全錯，
-    列數與指標都不報錯。不用 ``dropDuplicates``——那是隨便挑一個答案。
+    The LEFT JOIN would copy that candidate once per label row: the query's
+    candidate set grows, its ranks shift, and no count or metric complains.
+    Not ``dropDuplicates``: that picks one of the answers arbitrarily.
 
-    fixture 的形狀各有用意：B 重複三列（數的是 key，不是多出來的列）；別的
-    月份也有重複（只檢查這次評估的月份）。兩者任一數錯，數字就不是 2。
+    The fixture's shape is deliberate. B is held by three rows (the count is of
+    keys, not of surplus rows), and another month has a duplicate too (only the
+    evaluated month is checked). Miscounting either way gives a number other
+    than 2.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 

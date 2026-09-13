@@ -1,13 +1,20 @@
 """Within-query rank: score descending, ties broken by item ascending.
 
-One rule for both places that rank candidates: inference's ``rank_predictions``
-(the published ``rank``) and evaluation's ``metrics_spark.rank_within_query``
-(``--post-training`` and the comparison mode re-rank, because their source has
-no rank or their candidate set just shrank). Each of them used to spell it out as
-``row_number()`` by score descending, which leaves ties undefined:
-``row_number`` numbers tied rows in whatever order they reach the window, so the
-same rows could be ranked differently on every run and by each pipeline, and
-nothing raises (ADR-0020 bug 11).
+One rule for the two Spark places that rank candidates: inference's
+``rank_predictions`` (the published ``rank``) and evaluation's
+``metrics_spark.rank_within_query``, which every metric pass ranks with in both
+modes, and which ``prepare_eval_data`` and the comparison mode use to fill in or
+redo ``rank``. Each of them used to spell it out as ``row_number()`` by score
+descending, which leaves ties undefined: ``row_number`` numbers tied rows in
+whatever order they reach the window, so the same rows could be ranked
+differently on every run and by each pipeline, and nothing raises (ADR-0020
+bug 11).
+
+**What it does not cover.** Training's quadrant assignment
+(``diagnosis/model/population_spark.py``) already spells the same order inline;
+it ranks for a training diagnosis, not a published or evaluated rank. The
+driver-side numpy path (``evaluation/metrics.py``, run on the diagnosis sample)
+breaks ties by input order instead. Neither is bound to this function.
 
 **Why the item.** Time and entity are the window's partition, so the item is the
 one column left that tells two tied rows of a query apart — ``(time, entity,
