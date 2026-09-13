@@ -98,6 +98,29 @@ def test_overview_scale_and_severity_separated():
     assert "加權" in joined
 
 
+def test_overview_scale_table_labels_n_queries_as_the_full_total():
+    """bug 3 (ADR-0020): n_queries is compute_dataset_overview's "all query
+    groups before filtering" count, but the scale table used to label it
+    "有正例 query 數" (queries WITH a positive) — self-contradictory next to
+    "排除 query 數" on the very same table (you can't simultaneously have a
+    million positive queries and exclude 950k of them). The label must say
+    "all queries", and the actually-missing number (queries with a positive
+    = n_queries - n_excluded_queries) must be printed somewhere."""
+    m = _metrics()
+    m["n_queries"] = 1_000_000
+    m["n_excluded_queries"] = 950_000
+    s = rb.build_overview_section(m, _params(), metric_ci=_metric_ci())
+    scale = next(t for t in s.tables if "n_excluded_queries" in " ".join(
+        str(i) for i in t.index))
+    idx = [str(i) for i in scale.index]
+    assert "全部 query 數 n_queries" in idx
+    assert not any("有正例 query 數" in i for i in idx)
+    assert "有正例的 query 數" in idx
+    row = dict(zip(idx, scale["value"]))
+    assert row["全部 query 數 n_queries"] == 1_000_000
+    assert row["有正例的 query 數"] == 50_000  # n_queries - n_excluded_queries
+
+
 def test_overview_no_verdict_vocabulary():
     s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
     text = (s.description + " ".join(s.table_titles)
@@ -423,6 +446,23 @@ def test_completeness_section_lists_run_facts():
     assert "k" in joined.lower()               # k_values / metric.k 交代
     assert "query" in joined.lower()           # 規模
     assert "抽樣" in joined or "未抽樣" in joined  # sampling_description 流入
+
+
+def test_completeness_facts_label_n_queries_as_the_full_total():
+    """bug 3 (ADR-0020): same fix as build_overview_section, mirrored here.
+    Only the two n_queries-related labels change — metric_p reading
+    (build_completeness_section:1092/1097) is out of scope for this bug."""
+    m = _metrics()
+    m["n_queries"] = 1_000_000
+    m["n_excluded_queries"] = 950_000
+    s = rb.build_completeness_section(m, _params(), metric_ci=_metric_ci())
+    idx = [str(i) for i in s.tables[0].index]
+    assert "全部 query 數 n_queries" in idx
+    assert not any("有正例 query 數" in i for i in idx)
+    assert "有正例的 query 數" in idx
+    row = dict(zip(idx, s.tables[0]["value"]))
+    assert row["全部 query 數 n_queries"] == 1_000_000
+    assert row["有正例的 query 數"] == 50_000
 
 
 def test_completeness_section_no_verdict_vocabulary():

@@ -193,8 +193,16 @@ def build_overview_section(
     # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
     totals = _dataset_overview(metrics).get("totals", {}) or {}
     entity_str = "×".join(get_schema(parameters)["entity"])
+    # bug 3 (ADR-0020)：n_queries 是 compute_dataset_overview 的「全部 query
+    # 數（filter 前）」，舊標籤寫成「有正例 query 數」——跟下面的「排除 query
+    # 數」互相矛盾（不可能同時有百萬個有正例的 query、又排除其中 95 萬個）。
+    # 標籤改對，並多印一列報表原本沒有任何地方給出的真值：有正例的 query 數
+    # ＝ n_queries − n_excluded_queries。
     scale = {
-        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "全部 query 數 n_queries": metrics.get("n_queries"),
+        "有正例的 query 數": _od(
+            metrics.get("n_queries"), metrics.get("n_excluded_queries")
+        ),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
@@ -1097,9 +1105,14 @@ def build_completeness_section(
     # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
     # build_overview_section 的 entity 標籤）。
     item_col = get_schema(parameters)["item"]
+    # bug 3 (ADR-0020)：同 build_overview_section 的標籤修正——只動這兩列，
+    # metric_p 的讀取（下面 mk／weight_alpha 等）不在這條 bug 的範圍內。
     facts = {
         "k_values": eval_p.get("k_values"),
-        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "全部 query 數 n_queries": metrics.get("n_queries"),
+        "有正例的 query 數": _od(
+            metrics.get("n_queries"), metrics.get("n_excluded_queries")
+        ),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),
