@@ -799,8 +799,12 @@ def _describe_node_input(value) -> str:
             "the diagnoses would still leave metric CI / report aggregates "
             "unfingerprinted, costing extra Spark rounds"
         )
-    return ("a dict with no 'diagnosis' key (possibly a JSON written before "
-            "diagnosis results carried their name)")
+    # Fingerprint but no name: name and fingerprint arrived together, so this
+    # is not an old JSON but another fingerprinted artifact (metric CI, report
+    # aggregates) wired into a diagnosis slot.
+    return ("a dict with a 'config_fingerprint' but no 'diagnosis' key: a "
+            "fingerprinted artifact that is not a registry diagnosis result, "
+            "wired into this slot")
 
 
 def no_diagnosis_pages(parameters: dict) -> list[str]:

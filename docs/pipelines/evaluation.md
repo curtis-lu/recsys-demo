@@ -544,7 +544,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 
-指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：`prepare_eval_data` 的指紋列出 `post_training`，不合就 raise。它擋不住上面說的 partition 覆寫——那是**兩次各自完整**的執行之間的事，指紋比對的是設定，不是 `enriched_eval_predictions` 內容本身，覆寫風險仍在，仍需照上面幾條手動判斷。
+指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：每份落地產物的指紋都含 `post_training`，不合就 raise，並指示從 `prepare_eval_data` 重跑（它本身不寫指紋，只是重跑起點）。它擋不住上面說的 partition 覆寫——那是**兩次各自完整**的執行之間的事，指紋比對的是設定，不是 `enriched_eval_predictions` 內容本身，覆寫風險仍在，仍需照上面幾條手動判斷。
 
 ### 7.4 部分重跑的安全邊界
 

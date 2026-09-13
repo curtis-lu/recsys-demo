@@ -28,8 +28,8 @@ re-drawing yields a report with a section silently missing.
 One row of :data:`COMPUTED_KEYS`, ``post_training``, is not a YAML config
 setting at all: it is the ``--post-training`` / monitoring run mode, injected
 into ``parameters`` at the top level by the CLI exactly like ``model_version``
-and ``snap_date`` are (never nested under ``evaluation``). It earns a row for
-the same reason those two are recognisable identity, not fingerprinted: it
+and ``snap_date`` are (never nested under ``evaluation``). Unlike those two,
+which are already in every artifact's path, the mode is not in the path, yet it
 changes which predictions table ``prepare_eval_data`` reads, so two runs of
 the same ``(model_version, snap_date)`` in different modes must not have their
 artifacts read interchangeably. Node-level unit tests that build ``parameters``
