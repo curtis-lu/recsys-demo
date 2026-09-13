@@ -336,11 +336,20 @@ def _node_outputs(params, sample=None):
     return outputs
 
 
+@pytest.mark.parametrize("first, second", [
+    # config_shift declares EXTRA_CONFIG_KEYS and item_ability does not, so
+    # their fingerprints differ and the freshness check would also object.
+    ("config_shift", "item_ability"),
+    # Neither declares extra keys: identical fingerprints, so the name check
+    # is the only thing between this swap and pages drawn under wrong titles.
+    ("item_ability", "suppression"),
+])
 def test_render_refuses_diagnosis_results_in_the_wrong_order(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, first, second,
 ):
     """Both results are dicts and the count is right: only a content check
     catches this (known-pitfalls.md §12)."""
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         render_diagnosis_pages,
     )
@@ -348,9 +357,10 @@ def test_render_refuses_diagnosis_results_in_the_wrong_order(
     monkeypatch.chdir(tmp_path)
     params = _render_params()
     results = _node_outputs(params)
-    results[0], results[1] = results[1], results[0]
+    i, j = DIAGNOSES.index(first), DIAGNOSES.index(second)
+    results[i], results[j] = results[j], results[i]
     with pytest.raises(TypeError,
-                       match=r"should be the result of 'config_shift'"):
+                       match=rf"should be the result of '{first}'"):
         render_diagnosis_pages(params, *results)
 
 
