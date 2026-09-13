@@ -68,6 +68,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import macro_from_per_item
+from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
@@ -274,14 +275,17 @@ def compute_dataset_overview(
 
 
 def rank_within_query(
-    df: SparkDataFrame, group_cols: list[str], score_col: str
+    df: SparkDataFrame, group_cols: list[str], score_col: str, item_col: str
 ) -> SparkDataFrame:
     """Assign ``pos``: 1-based rank within each ``group_cols`` group, by ``score`` desc.
 
-    Tie-breaking among equal scores is undefined (Spark's row_number choice).
+    Ties go by ``item_col`` ascending — the rule inference publishes ``rank``
+    with (``utils.ranking.rank_by_score_then_item``), so re-ranking here gives
+    the same rows the same positions.
     """
-    w = Window.partitionBy(*group_cols).orderBy(F.col(score_col).desc())
-    return df.withColumn("pos", F.row_number().over(w))
+    return df.withColumn(
+        "pos", rank_by_score_then_item(group_cols, score_col, item_col)
+    )
 
 
 def add_query_total_rel(
@@ -645,7 +649,7 @@ def _compute_core(
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
-    df = rank_within_query(eval_predictions, group_cols, score_col)
+    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
     df = add_query_total_rel(df, group_cols, label_col)
 
     df_with_pos = df.filter(F.col("total_rel") > 0)
@@ -764,7 +768,7 @@ def compute_overall_per_item(
     n_items = eval_predictions.select(item_col).distinct().count()
     k_values = _resolve_k_values(k_values_raw, n_items)
 
-    df = rank_within_query(eval_predictions, group_cols, score_col)
+    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
     df = add_query_total_rel(df, group_cols, label_col)
     df_with_pos = df.filter(F.col("total_rel") > 0)
     if df_with_pos.limit(1).count() == 0:

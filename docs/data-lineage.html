@@ -522,10 +522,11 @@ C000010   0.83    1.92                1      （示意）</div>
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>校準前的原始分數；沒套用校準時等於 score</td></tr>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A / entity_bucket=3（partition）
-cust_id   score
-C000010   0.83   （示意）</div>
+cust_id   score   score_uncalibrated
+C000010   0.83    0.71   （示意）</div>
   <p class="sub"><code>entity_bucket</code> 是機制欄不是契約欄：評分必須在 driver（禁 UDF），所以按 entity 雜湊切塊；
   而 <code>insertInto</code> ＋ dynamic overwrite 會把 frame 裡出現的分區整個替換，所以塊的邊界必須等於分區的邊界，
   否則後一個桶的寫入會刪掉前一個桶的列且零錯誤訊息。<code>rank_predictions</code> 讀完就丟，
@@ -543,11 +544,12 @@ C000010   0.83   （示意）</div>
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td><span class="role">score</span></td></tr>
-    <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次）</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>校準前的原始分數；沒套用校準時等於 score</td></tr>
+    <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次；同分按 item 升冪）</td></tr>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
-cust_id   score   rank
-C000010   0.83    1      （示意）</div>
+cust_id   score   score_uncalibrated   rank
+C000010   0.83    0.71                 1      （示意）</div>
 </div>
 
 <!-- ===================== evaluation ===================== -->

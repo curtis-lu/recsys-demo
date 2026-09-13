@@ -188,6 +188,21 @@ def test_requires_uncalibrated_score():
         compute((sample, {"n_queries": 40}), _params())
 
 
+@pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
+def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+    """欄位在、值全空，跟沒有這一欄一樣要 raise（ADR-0018 決定 5 的守衛補強）。
+
+    兩種模式寫同一張 enriched 表時，另一模式沒有的欄讀回來是全 NULL。只看
+    「欄位在不在」的守衛會放行，接著在 NULL 上取 logit——一堆 NaN，沒有錯誤。
+    ``nan``／``None`` 兩種都測：Spark 的全 NULL double 欄經 ``toPandas`` 回來是
+    哪一種，取決於有沒有走 Arrow。
+    """
+    sample = _sample()
+    sample["score_uncalibrated"] = null
+    with pytest.raises(ValueError, match="全是空值"):
+        compute((sample, {"n_queries": 40}), _params())
+
+
 def test_disabled_returns_stub_with_same_key_set():
     """三條 return 路徑（停用／空樣本／完整）key set 必須相同——
     照抄 config_shift 的契約（見 config_shift/_compute.py::compute docstring）。

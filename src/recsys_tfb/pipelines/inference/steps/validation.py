@@ -292,7 +292,7 @@ def score_varies_within_group_failure(summary) -> dict | None:
     The data-layer half of a backstop that ``require_item_is_a_feature`` only
     holds up at the config layer. If the item value fed to the model degenerates
     to a constant, an entity's items all score identically and the ranking is
-    whatever order ``row_number`` happened to pick — while every shape check
+    the tie rule's item-name order, nothing the model decided — while every shape check
     stays green: the group is complete, the ranks are 1..N, and the lag check's
     ``>`` is false on a tie (ADR-0011 §1, example two).
 

@@ -49,6 +49,7 @@ evaluation 另有三種執行模式：
 8. **比較來源已準備**：使用 `--compare`／`--compare-only` 前，先確認 `compare_sources` key、來源表、model version、item mapping 與日期 coverage。
 
 監控模式會以預測 rows 為母體，依 `time + entity + item` left join `label_table`；沒有 label row 的候選會補成 `label = 0`。
+`label_table` 在這三欄上必須唯一（兩種模式都檢查，只看評估的那個月）：有重複 key 時 `prepare_eval_data` 直接失敗並印出重複的 key 數，不會替你挑一列。
 這適用於「label table 只保存正例」的 sparse table，但前提是缺 row 的業務語意確實代表負例，而不是 ground truth 尚未成熟。
 
 post-training 模式會保留 `training_eval_predictions` 已保存的 label，不以後來更新的 `label_table` 覆寫，讓 evaluation 結果與 training 當時的 test 指標保持一致。
@@ -314,6 +315,8 @@ python -m recsys_tfb evaluation --env production
 
 此模式讀取 inference 正式發布的 `ranked_predictions`，再依目前 `label_table` 補入 ground truth。應在該 `snap_date` 的 label 觀察窗成熟後執行。
 
+此模式（含加上 `--compare`）**不含 registry 診斷**：不組 `diagnose_*` 各項與 `render_diagnosis_pages`，報表也沒有診斷入口。要看診斷請用 `--post-training`。理由見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 5。指標信賴區間（`compute_metric_ci`）與報表診斷區（`compute_report_aggregates`）兩種模式都有。
+
 ### 4.4 標準評估加模型比較
 
 ```bash
@@ -331,6 +334,8 @@ python -m recsys_tfb evaluation \
 
 Model A 的來源由 `--post-training` 決定；Model B 的來源由 `compare_sources.<key>.source` 決定。
 比較兩個 training test 結果時，Model B 通常也應設為 `training_eval_predictions`；比較兩個正式推論結果時則使用 `ranked_predictions` 或已完成 evaluation 的 enriched data。
+
+`--compare` 不改變有沒有 registry 診斷：帶 `--post-training` 才有；監控模式加 `--compare` 一樣沒有（見 4.3 節）。
 
 ### 4.5 只產生比較報表
 
@@ -371,9 +376,11 @@ python -m recsys_tfb evaluation \
 - `prepare_eval_data`（`eval_predictions` 沒地方讀，得重算）
 - `compute_metrics`
 - `compute_baseline_metrics`
-- `render_diagnosis_pages`（它的輸出是「這次執行寫出的頁面路徑清單」，語意上不該落地重用；但它讀的診斷 JSON 已落地，不會連 `diagnose_config_shift` 一起被拉回來重跑）
+- 產出 `evaluation_diagnosis_pages` 的那個 node，依模式不同：
+  - `--post-training`：`render_diagnosis_pages`（它的輸出是「這次執行寫出的頁面路徑清單」，語意上不該落地重用；但它讀的診斷 JSON 已落地，不會連 `diagnose_config_shift` 一起被拉回來重跑）
+  - 監控模式：`no_diagnosis_pages`（不讀任何東西、回空清單，重跑零成本）
 
-這組清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS[("evaluation", ())]["generate_report"]`，之後改動這幾個 node 的形狀，該測試會紅燈提醒同步文件。
+兩種模式各一組清單，釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS[("evaluation", ())]`（監控）與 `RESUME_CONTRACTS[("evaluation", (("post_training", True),))]` 的 `"generate_report"`，之後改動這幾個 node 的形狀，該測試會紅燈提醒同步文件。
 
 因此 evaluation 沒有便宜的「只重新渲染標準報表」接續點。需要只重做模型比較時，應使用持久化 `enriched_eval_predictions` 的 `--compare-only`。
 
@@ -383,24 +390,27 @@ python -m recsys_tfb evaluation \
 
 ### 5.1 標準模式
 
-Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與診斷渲染拆成獨立 node；default 模式現在是 13 個 node（不含比較模式追加的 3 個），順序即 `--list-nodes` 印出的拓撲序：
+Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與診斷渲染拆成獨立 node。兩種模式的 node 不同：registry 診斷與 `render_diagnosis_pages` 只在 `--post-training` 組出來，監控模式改組 `no_diagnosis_pages`（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 5）。下表是兩者的聯集，只屬於一種模式的列有標明；實際順序以帶同樣旗標的 `--list-nodes` 印出的拓撲序為準：
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
-| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`） | `diagnosis_sample` |
+| 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
+| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
 | 模型指標 | `compute_metrics` | enriched rows | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics | `evaluation_metrics` |
 | Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標 | `baseline_metrics` |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | enriched rows、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
 | 持久化 | `persist_eval_predictions` | enriched rows | 透過 catalog 寫入 Hive | `enriched_eval_predictions` |
 | 指標信賴區間 | `compute_metric_ci` | `diagnosis_sample`、parameters | per-item AP 與 macro 的 cluster bootstrap CI（cluster＝`cust_id`） | `evaluation_metric_ci` |
-| 診斷（registry，現行 4 項） | `diagnose_config_shift`（其餘 3 項同形狀，由 `make_diagnosis_node` 產生） | `diagnosis_sample`、parameters | 讀 `evaluation.diagnosis.<name>.enabled`（使用者唯一的開關，見該鍵旁的註解與 `diagnosis.metric.contract` docstring）；停用時寫 `{"enabled": false}` stub | `evaluation_<name>` |
-| 診斷頁面組裝 | `render_diagnosis_pages` | parameters（診斷 JSON 只當 DAG 依賴，實際按檔名讀，見 4.6 節） | 把已落地的診斷 JSON 組成獨立分頁 HTML；哪項停用就少哪一頁 | `evaluation_diagnosis_pages` |
+| 診斷（registry，現行 4 項；僅 `--post-training`） | `diagnose_config_shift`（其餘 3 項同形狀，由 `make_diagnosis_node` 產生） | `diagnosis_sample`、parameters | 讀 `evaluation.diagnosis.<name>.enabled`（使用者唯一的開關，見該鍵旁的註解與 `diagnosis.metric.contract` docstring）；停用時寫 `{"enabled": false}` stub | `evaluation_<name>` |
+| 診斷頁面組裝（僅 `--post-training`） | `render_diagnosis_pages` | parameters（診斷 JSON 只當 DAG 依賴，實際按檔名讀，見 4.6 節） | 把已落地的診斷 JSON 組成獨立分頁 HTML；哪項停用就少哪一頁 | `evaluation_diagnosis_pages` |
+| 空的診斷頁清單（僅監控模式） | `no_diagnosis_pages` | parameters（值不讀） | 回空清單、不讀磁碟。`generate_report` 是位置綁定，第六個輸入必須有人產出；不沿用 `render_diagnosis_pages`，因為它按檔名讀，會撿到同一個 model_version 與 snap_date 先前 `--post-training` 留下的頁面 | `evaluation_diagnosis_pages` |
 | 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates`、`evaluation_diagnosis_pages`（6 個必填參數，皆無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action | `evaluation_report` |
 
 `diagnose_*` 這幾列由 registry（`diagnosis.metric.contract.DIAGNOSES`）導出：現行 4 項（`config_shift`／`item_ability`／`model_capacity`／`suppression`）各是一個同形狀的 `diagnose_<name>` node（由 `make_diagnosis_node` 產生）；新增或移除診斷時 registry 與此表一起變。
 
 `training_eval_predictions` 不保存 rank，因此 post-training 模式會依 score 在每個 query group 內重算。監控模式的 `ranked_predictions` 已有 rank，`prepare_eval_data` 會保留發布結果中的 rank；metric computation 本身仍會依 score 重新建立內部 position。
+
+重算與 inference 用同一條規則：score 降冪，同分按 item 升冪（`utils/ranking.py`），所以同一批列在兩邊拿到相同名次。補出來的 rank 轉成與 `ranked_predictions` 相同的 BIGINT，`label` 一律轉成與 `training_eval_predictions` 相同的 INT：兩種模式寫同一張 `enriched_eval_predictions`，而這張表的 schema 由第一次寫入決定、之後不轉型，型別不同的那次寫入會直接失敗。
 
 ### 5.2 `--compare` 模式
 
@@ -523,7 +533,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 ### 7.4 部分重跑的安全邊界
 
 - `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。
-- `generate_report` 的直接輸入已不含 `eval_predictions`（rows）；但 `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 仍是 memory-only，因此從該 node 接續仍會補跑 `prepare_eval_data`／`compute_metrics`／`compute_baseline_metrics`／`render_diagnosis_pages`（見 4.6 節；四份已落地的診斷 JSON 不在此列，不會重算——這正是上一條「`exists()` 不驗新鮮度」在這裡的具體後果：改了 `evaluation.diagnosis.*` 而只做這個接續，不會生效）。
+- `generate_report` 的直接輸入已不含 `eval_predictions`（rows）；但 `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 仍是 memory-only，因此從該 node 接續仍會補跑 `prepare_eval_data`／`compute_metrics`／`compute_baseline_metrics`／`render_diagnosis_pages`（監控模式是 `no_diagnosis_pages`）（見 4.6 節；四份已落地的診斷 JSON 不在此列，不會重算——這正是上一條「`exists()` 不驗新鮮度」在這裡的具體後果：改了 `evaluation.diagnosis.*` 而只做這個接續，不會生效）。
 - `enriched_eval_predictions` 是唯一為 comparison recovery 持久化的 row-level 中間產物；`--compare-only` 會先驗證指定 model/date partition 非空。
 - `--compare-only` 不會更新 enriched partition，也不會重新產生標準 report。
 - 位於 slicing 起點之前的資料讀取或驗證可能被跳過；來源資料變更時應 full run。
@@ -537,6 +547,9 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | 找不到 `best` | 尚未 promotion，卻省略 `--model-version` | 對候選模型明確傳入版本，或先完成人工 promotion |
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date` | 日期錯誤、模式用錯、對應 partition 未產生 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
+| `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
+| `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
+| 監控模式的報表沒有診斷入口 | 設計如此：registry 診斷只在 `--post-training` 組出來 | 要診斷改跑 `--post-training`（見 4.3 節） |
 | `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
@@ -565,7 +578,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 - comparison 目前以 `schema.entity` 的第一個欄位作為 customer 交集；複合 entity schema 需確認比較語意。
 - comparison 先取 entity 集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 entity/item 集合相同，評估母體仍可能不完全一致。
 - Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。
-- score 相同時的排名 tie-break 沒有額外穩定鍵，Spark `row_number` 對同分 rows 的相對次序未定義。
+- score 相同時按 item 升冪決定名次（與 inference 同一條規則，`utils/ranking.py`）。名次因此可重現，但同分本身仍代表模型分不出高下。
 - zero-positive query groups 會排除於排序指標，因此報表不代表完整 inference entity 母體。
 - popularity baseline 在 lookback 空窗時會 fallback 至完整 label table，可能產生 leakage。
 - product category 同 item 重複映射目前不會報錯，後出現的 category 會覆蓋前者。

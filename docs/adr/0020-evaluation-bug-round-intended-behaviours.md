@@ -196,6 +196,10 @@ date: 2026-09-13
 
 **決定**：ADR-0018〈驗收〉——`prepare_eval_data` 補出來的 `rank` cast 成與 `ranked_predictions` 宣告一致的型別（BIGINT）。
 
+**實作時補的一條（2026-09-13，#341）**：兩種模式來源不同的欄不只 `rank`，還有 `label`——post-training 讀 `training_eval_predictions`（宣告 INT），監控模式讀使用者自訂的 `label_table`（示例環境的合成資料是 BIGINT）。本機先跑 post-training 再跑監控，`persist_eval_predictions` 撞 `label: DataFrame=bigint vs table=int`，跟 `rank` 同一個形態。所以 `prepare_eval_data` 也把 `label` cast 成 INT，理由同上一句：跟唯一宣告過 `label` 型別、而且會進 evaluation 的表（`training_eval_predictions`）一致。選 INT 不選 BIGINT：post-training 那側不變；label 在這個框架是整數相關度，INT 裝得下。
+
+**一次性的代價（審查指出，原文沒寫）**：`_evolve_schema` 對同名不同型直接 raise。所以本改動之前寫過的 `enriched_eval_predictions`——`--post-training` 寫的 `rank` 是 INT、監控模式寫的 `label` 沿用 `label_table` 的型別——升級後第一次寫入就撞型別，**同一模式重跑也會**，不是只有換模式。解法是 DROP 這張表、再重跑需要的月份。這張表跨所有 model_version 與月份，DROP 之後到重跑之前，`--compare-only` 讀不到任何 Model A。不寫遷移 script，因為表的內容全部可由重跑 evaluation 重建。
+
 ### 設計 H（併入本輪）：`evaluation.metric` 有多份讀取程式碼，`metric.k` 只有 CI 那邊讀
 
 **現象**：`metric.k` 設成非 null 時，metric CI 會截斷在 k、主指標的點估不會，而概覽段的註腳宣稱兩者相同。讀 `evaluation.metric` 的程式碼：`src/` 四個讀取點（`metrics_spark.py`、`diagnosis/metric/uncertainty.py`、`diagnosis/metric/_common.py`、`report_builder.py`）**形狀各異**——有的讀 `k` 有的不讀、缺鍵時的 fallback 不同；`scripts/` 五份 `metric_params()` 彼此逐字相同、但跟 `_common.py` 那份在 `or 0.0` 的 fallback 上語意不同。

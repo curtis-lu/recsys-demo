@@ -68,6 +68,21 @@ class TestUnrankedPredictionsRename:
         ]
 
 
+class TestRawScoreIsDeclaredOnEveryInferenceOutput:
+    """三張推論表都要宣告 ``score_uncalibrated``（ADR-0018 決定 5）。
+
+    ``HiveTableDataset.save`` 結尾的 ``df.select(*declared)`` 會**靜默丟掉**
+    未宣告的欄：漏宣告任何一張，原始分數就在那一站消失，下游讀不到、也沒有
+    錯誤訊息。所以三張逐一斷言，不是只看最後那張 production 表。
+    """
+
+    def test_every_inference_output_declares_the_raw_score_as_double(self):
+        d = _load_catalog()
+        for name in INFERENCE_OUTPUT_TABLES:
+            declared = {c["name"]: c["type"] for c in d[name]["columns"]}
+            assert declared.get("score_uncalibrated") == "DOUBLE", name
+
+
 class TestInferenceTablesPartitionByModelVersionFilter:
     """`model_version` 是 partition_filter，不是 partition_col（ADR-0010 §5）。
 

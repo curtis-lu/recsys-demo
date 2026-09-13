@@ -264,6 +264,14 @@ def _validate(pdf: pd.DataFrame, schema: dict) -> None:
             f"logit({SCORE_COL}) 空間上算的，校準後的分數是另一個空間的量，"
             "用它算出來的 AUC 不是同一件事的估計值。"
         )
+    if len(pdf) and not pdf[SCORE_COL].notna().any():
+        # 欄位在、值全空＝讀不到。兩種模式寫同一張 enriched 表時，另一模式
+        # 沒有的欄讀回來是全 NULL；照算會在 NULL 上取 logit，只得到 NaN。
+        # 空抽樣不算：零列沒有值可讀，由 compute 走空樣本的 stub。
+        raise ValueError(
+            f"item_ability 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+        )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
     missing = [c for c in required if c not in pdf.columns]

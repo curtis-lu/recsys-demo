@@ -322,6 +322,15 @@ def test_cross_purchase_is_restricted_to_the_shared_axis():
         assert r["item_j"] in axis and r["item_k"] in axis
 
 
+@pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
+def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+    """欄位在、值全空也要 raise——理由見 test_item_ability 的同名測試。"""
+    sample = _two_query_sample()
+    sample["score_uncalibrated"] = null
+    with pytest.raises(ValueError, match="全是空值"):
+        compute((sample, {"n_queries": 2}), _params())
+
+
 def test_empty_sample_returns_stub_without_raising():
     """良性退化輸入：沒有任何正例列。不得 raise，也不得回一個
     看起來像『算過了而且是零』的結果——n_positive_rows 必須是 0。"""

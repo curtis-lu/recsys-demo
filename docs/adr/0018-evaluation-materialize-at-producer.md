@@ -104,7 +104,7 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 後果落在需要「欄位存在」當守衛的地方。各 registry 診斷（`diagnosis/metric/*/_compute.py`）的守衛是 `if SCORE_COL not in pdf.columns: raise`——欄位存在但全 NULL 就不會 raise，接著在 NULL 上算 logit，得到一堆 NaN 而不是錯誤。所以：
 
 - **決定 5 的第 1 件（監控模式不組 registry 診斷 node）是決定 1 的前置條件**，順序上不准落在它後面。
-- **守衛本身也要補強**：改成「欄位存在**且**在抽樣裡不是全 NULL」（抽樣已經是 driver 端的 pandas frame，`pdf[SCORE_COL].notna().any()` 零成本）。理由跟原守衛一樣：靜默算錯比炸掉糟。
+- **守衛本身也要補強**：改成「欄位存在**且**在抽樣裡不是全 NULL」（抽樣已經是 driver 端的 pandas frame，`pdf[SCORE_COL].notna().any()` 零成本）。理由跟原守衛一樣：靜默算錯比炸掉糟。（2026-09-13 實作註：零列的空抽樣不算「全 NULL」——沒有值可讀，各診斷照原本走空樣本的 stub；照字面實作會讓既有的空樣本測試轉紅。）
 - `draw_diagnosis_sample`（`diagnosis/metric/sample.py`）「`score_uncalibrated` 存在就帶進抽樣」的邏輯在監控模式下會帶進一欄 NULL；抽樣的其他讀者（metric CI）不讀它，無害，但要在該處寫一行為什麼。
 - 同型的「欄位存在就用」還有一處：`compute_dataset_overview` 與 per-segment 聚合挑 `active_seg_col` 的方式是「`evaluation.segment_columns` 裡第一個出現在 frame 欄位裡的」。（2026-09-13 更正：本段原本寫「config 側被 A10 擋住，不需要守衛」，那是在 segment 來源還寫死 `sample_pool` 時成立的。[ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 6 讓 segment 跟著各模式的母體表走，監控母體可能沒有某個 segment 欄，於是 post-training 那次 join 進來的欄在監控模式的 frame 裡會是全 NULL——「這次有哪些 segment 欄可用」因此改由母體表的 metadata 決定，消費者不再看 frame 的欄位。修法在 ADR-0020。）
 - `docs/pipelines/evaluation.md` §7.3「post-training 與 monitoring 共用同一個分區」那段要加上「而且共用同一個 schema，另一模式的欄位讀回來是 NULL」。要不要分成兩張表，見〈沒有解決的事〉。
@@ -216,7 +216,7 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 
    **連帶**：`--compare`（`create_pipeline(post_training=False, compare_source=…)`）的三個 compare node 是在 `post_training` 判斷之外加的，所以監控模式的 `--compare` 也不跑 registry 診斷。`docs/pipelines/evaluation.md` §4.3、§4.4 要寫明「監控模式（含 `--compare`）不含 registry 診斷，要診斷用 `--post-training`」。
 
-2. **inference 也寫 `score_uncalibrated`。** `predict_and_write_scores`（`inference/nodes.py`）多寫一欄原始 booster 輸出（校準關閉時等於 `score`，跟 training 的寫法一致）；`unranked_predictions`、`ranked_staging`、`ranked_predictions` 三個 catalog 條目的 `columns` 各加一欄——`HiveTableDataset.save` 結尾的 `df.select(*declared)` 會**靜默丟掉**未宣告的欄（`io/hive_table_dataset.py` 的 `declared_columns` docstring），漏一個條目那一欄就不見、沒有錯誤。不變量 A28 幫不上忙：它只管 `schema.entity` 各欄、只接在 training 指令上。inference 尚未部署，不需要遷移。
+2. **inference 也寫 `score_uncalibrated`。** `predict_and_write_scores`（`inference/nodes.py`）多寫一欄原始 booster 輸出（校準關閉時等於 `score`，跟 training 的寫法一致）；`unranked_predictions`、`ranked_staging`、`ranked_predictions` 三個 catalog 條目的 `columns` 各加一欄——`HiveTableDataset.save` 結尾的 `df.select(*declared)` 會**靜默丟掉**未宣告的欄（`io/hive_table_dataset.py` 的 `declared_columns` docstring），漏一個條目那一欄就不見、沒有錯誤。不變量 A28 幫不上忙：它只管 `schema.entity` 各欄、只接在 training 指令上。inference 尚未部署，不需要遷移。（2026-09-13 實作註：值跟 training 一致，機制沒有照抄。training 對同一批列呼叫 `predict` 與 `predict_uncalibrated` 各一次，booster 跑兩遍；inference 每個 chunk 只跑一遍 booster、把校準套在那份原始分數上，為此 `CalibratedModelAdapter` 多一個公開的 `calibrate`。）
 
 為什麼第 2 件還要做，既然第 1 件之後監控模式不跑診斷了：原始分數是模型的事實，丟掉之後任何事後分析都拿不回來；多一欄 DOUBLE 的成本跟它未來的用途（例如 `--compare` 外部來源要對齊分數空間）比起來可以忽略。
 

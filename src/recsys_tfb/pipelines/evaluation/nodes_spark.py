@@ -33,6 +33,9 @@ def _ci_consumer_enabled(parameters: dict) -> bool:
 def _registry_diagnosis_enabled(parameters: dict) -> bool:
     """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
+    只在 ``--post-training`` 被問：監控模式不組 registry 診斷，那裡的抽樣閘門
+    不看這個函式（見 ``make_draw_diagnosis_sample_node``）。
+
     與 ``_ci_consumer_enabled`` 分開的理由：既有的 ci（非 registry 消費者）
     與 registry 診斷的生命週期不同。合在一起
     的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
@@ -81,6 +84,10 @@ def prepare_eval_data(
     For external segment sources, delegates to
     ``segments.join_segment_sources`` (storage backend isolated behind its
     source seam).
+
+    Pre-check (input): ``label_table`` has no duplicated identity key in the
+    evaluated month; raises with the number of duplicated keys (why it raises
+    rather than deduplicating is written at the check).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -150,6 +157,36 @@ def prepare_eval_data(
     pred_snap_dates = ranked_predictions.select(time_col).distinct()
     labels = labels.join(pred_snap_dates, on=time_col, how="inner")
 
+    # Pre-check (input): label_table holds at most one row per identity key in
+    # the evaluated month. The LEFT JOIN below copies a prediction row once per
+    # matching label row, so a duplicated key silently inflates that query's
+    # candidate set and shifts every rank in it; no count or metric raises.
+    # Not dropDuplicates: that picks one answer arbitrarily and makes the row
+    # counts line up, which hides the problem better than leaving it (bug 10).
+    # Not core/consistency.py: a user-defined source table's quality is not a
+    # framework invariant — the same boundary as inference_population's
+    # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
+    # month join, so it counts exactly the rows about to be joined. The
+    # message carries counts only, never key values (they are entity ids).
+    # Cost: one Spark action per run, a groupBy over one month of label rows
+    # (a shuffle of that month) ending in a count; only the count reaches the
+    # driver, whatever the table size.
+    n_duplicated_keys = (
+        labels.groupBy(*identity_cols)
+        .agg(F.count(F.lit(1)).alias("_n_label_rows"))
+        .filter(F.col("_n_label_rows") > 1)
+        .count()
+    )
+    if n_duplicated_keys:
+        raise ValueError(
+            f"{n_duplicated_keys} duplicated label_table key(s) on "
+            f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
+            f"row would copy its prediction row in the join with the "
+            f"predictions, inflating that query's candidates and shifting its "
+            f"ranks. Deduplicate label_table upstream; evaluation does not "
+            f"pick one of the rows for you."
+        )
+
     # In --post-training mode the predictions source is training_eval_predictions,
     # which already stores `label` alongside `score` (written by the training
     # `predict` node). The merge join below keys on identity_cols only, so a
@@ -180,7 +217,15 @@ def prepare_eval_data(
     # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
     if label_col in eval_predictions.columns:
-        eval_predictions = eval_predictions.fillna({label_col: 0})
+        # INT, the type training_eval_predictions declares for `label`. The
+        # two modes take the label from different tables — that one in
+        # --post-training, the user-defined label_table in monitoring (the
+        # example's synthetic one is BIGINT) — and both write the same
+        # enriched_eval_predictions, whose schema never casts. Same failure as
+        # `rank` below (bug 15); it surfaced on the first real monitoring run.
+        eval_predictions = eval_predictions.fillna({label_col: 0}).withColumn(
+            label_col, F.col(label_col).cast("int")
+        )
 
     # Downstream report rendering selects schema["rank"] from eval_predictions.
     # When the predictions source is
@@ -194,10 +239,20 @@ def prepare_eval_data(
         score_col = schema["score"]
         entity_cols = schema["entity"]
         query_cols = [time_col] + entity_cols
-        # rank_within_query adds a "pos" 1-based rank within each
-        # (snap_date, cust_id), ordered by score desc.
-        eval_predictions = rank_within_query(eval_predictions, query_cols, score_col)
-        eval_predictions = eval_predictions.withColumnRenamed("pos", rank_col)
+        # rank_within_query adds a "pos" 1-based rank within each query
+        # group, by score desc with ties by item asc — the rule inference
+        # publishes `rank` with, so both modes rank the same rows alike.
+        eval_predictions = rank_within_query(
+            eval_predictions, query_cols, score_col, schema["item"]
+        )
+        # BIGINT, the type ranked_predictions declares for `rank`. Both modes
+        # write the same enriched_eval_predictions (columns: "auto"), whose
+        # schema is fixed by the first write and never cast afterwards, so
+        # row_number()'s INT here against the monitoring side's BIGINT is a
+        # type conflict on whichever run comes second (bug 15).
+        eval_predictions = eval_predictions.withColumn(
+            rank_col, F.col("pos").cast("bigint")
+        ).drop("pos")
         logger.info(
             "prepare_eval_data: injected '%s' column via rank_within_query "
             "(predictions source did not provide it)",
@@ -216,42 +271,72 @@ def prepare_eval_data(
     return eval_predictions
 
 
-def draw_diagnosis_sample_node(
-    eval_predictions: SparkDataFrame,
-    parameters: dict,
-) -> Optional[tuple]:
-    """Draw the shared driver-side diagnosis sample ONCE per run.
+def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
+    """Build the node that draws the shared driver-side diagnosis sample.
 
-    ``compute_metric_ci`` plus every registry diagnosis
-    (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
-    consume this single sample instead of each re-drawing it (same seed ->
-    identical content; N Spark scans collapse to 1). Sharing one sample is
-    also a correctness property, not just a speed one: numbers computed on
-    different populations must not be read side by side. Returns ``None``
-    only when *every* consumer is disabled.
+    Which consumers exist is a property of the pipeline's mode, not of the
+    config: ``--post-training`` wires ``compute_metric_ci`` plus every registry
+    diagnosis, monitoring mode only ``compute_metric_ci`` (ADR-0018 decision 5).
+    The registry diagnoses' ``enabled`` flags default to true in both modes, so
+    a gate reading only the config would, in monitoring mode with the CI
+    switched off, draw a sample nobody reads: a driver-side ``toPandas`` of up
+    to ``diagnosis.sample.max_queries`` queries, no error, only a slower run.
+    ``create_pipeline`` passes the mode in instead.
+
+    Both modes get the node name ``draw_diagnosis_sample_node``, so
+    ``--from-node`` and the docs name one node whichever mode is running.
     """
-    ci_on = _ci_consumer_enabled(parameters)
-    registry_on = _registry_diagnosis_enabled(parameters)
-    if not (ci_on or registry_on):
-        logger.info(
-            "diagnosis sample: all consumers (ci + registry diagnoses) "
-            "disabled — skipping sample draw"
-        )
-        return None
+    def draw_diagnosis_sample_node(
+        eval_predictions: SparkDataFrame,
+        parameters: dict,
+    ) -> Optional[tuple]:
+        """Draw the shared driver-side diagnosis sample ONCE per run.
 
-    from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
-    sample_pdf, sample_meta = draw_diagnosis_sample(eval_predictions, parameters)
-    # deep=False keeps this a free observation: rows/cols are exact and the
-    # bytes figure is a shallow estimate. deep=True would scan every string
-    # cell (O(n_cells)) on the already-materialised sample — accurate but not
-    # "free", which is the constraint for this always-on instrumentation.
-    log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
-    logger.info(
-        "diagnosis sample drawn once (ci_enabled=%s, registry diagnoses "
-        "enabled=%s): %d queries sampled",
-        ci_on, registry_on, sample_meta["n_queries_sampled"],
-    )
-    return sample_pdf, sample_meta
+        ``compute_metric_ci`` plus, in ``--post-training``, every registry
+        diagnosis (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
+        consume this single sample instead of each re-drawing it (same seed ->
+        identical content; N Spark scans collapse to 1). Sharing one sample is
+        also a correctness property, not just a speed one: numbers computed on
+        different populations must not be read side by side. Returns ``None``
+        only when *every* wired consumer is disabled.
+        """
+        ci_on = _ci_consumer_enabled(parameters)
+        registry_on = (
+            registry_diagnoses_wired and _registry_diagnosis_enabled(parameters)
+        )
+        if not (ci_on or registry_on):
+            logger.info(
+                "diagnosis sample: every wired consumer (ci%s) disabled — "
+                "skipping sample draw",
+                " + registry diagnoses" if registry_diagnoses_wired else "",
+            )
+            return None
+
+        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+        sample_pdf, sample_meta = draw_diagnosis_sample(
+            eval_predictions, parameters
+        )
+        # deep=False keeps this a free observation: rows/cols are exact and the
+        # bytes figure is a shallow estimate. deep=True would scan every string
+        # cell (O(n_cells)) on the already-materialised sample — accurate but
+        # not "free", which is the constraint for this always-on instrumentation.
+        log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
+        logger.info(
+            "diagnosis sample drawn once (ci_enabled=%s, registry diagnoses "
+            "enabled=%s): %d queries sampled",
+            ci_on, registry_on, sample_meta["n_queries_sampled"],
+        )
+        return sample_pdf, sample_meta
+
+    return draw_diagnosis_sample_node
+
+
+#: The ``--post-training`` shape, every registry diagnosis wired. Kept as a
+#: module-level name for callers that exercise the node outside
+#: ``create_pipeline``.
+draw_diagnosis_sample_node = make_draw_diagnosis_sample_node(
+    registry_diagnoses_wired=True
+)
 
 
 def compute_metrics(
@@ -550,6 +635,32 @@ def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
         out_dir, len(pages), len(results),
     )
     return [str(p) for p in pages]
+
+
+def no_diagnosis_pages(parameters: dict) -> list[str]:
+    """Monitoring mode's ``evaluation_diagnosis_pages``: always empty, reads nothing.
+
+    Monitoring mode wires no registry diagnosis (ADR-0018 decision 5), yet
+    ``generate_report`` still takes a sixth input. Of the three ways to supply
+    it, this is the one that cannot go wrong:
+
+    * **Not wiring it**: ``core/runner.py`` binds inputs by position, so the
+      Runner raises "requires input … not produced by any prior node" before
+      anything runs.
+    * **A default for ``generate_report``'s ``diagnosis_pages``**: a trailing
+      default swallows arity errors, and its six required parameters are what
+      ``known-pitfalls.md`` §12 fixed.
+    * **Reusing ``render_diagnosis_pages`` with only ``parameters``**: it reads
+      the pages directory by file name, so it returns empty when that directory
+      holds no JSON, not when this run computed nothing. After an earlier
+      ``--post-training`` run of the same ``(model_version, snap_date)`` the
+      monitoring report would link to that run's pages, with exit code 0.
+
+    ``parameters`` is taken (unread) because ADR-0018 fixes this signature. It
+    reads neither the disk nor that value, which is also why its place in the
+    topological order does not matter.
+    """
+    return []
 
 
 def compute_report_aggregates(

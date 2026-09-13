@@ -23,8 +23,9 @@
 | `time` | 本次批次評分的時間切點 |
 | `entity` | 接受排序的對象，可由一個或多個欄位組成 |
 | `item` | 該對象的候選項目 |
-| `score` | 模型輸出分數 |
-| `rank` | 同一 `(time, entity)` query group 內依 score 由高到低排列的名次 |
+| `score` | 模型輸出分數（依 §3.4 決定是否校準） |
+| `score_uncalibrated` | 校準前的原始分數；沒套用校準時與 `score` 相等。給事後分析與需要原始分數的診斷用，發布閘不檢查它 |
+| `rank` | 同一 `(time, entity)` query group 內依 score 由高到低排列的名次；score 相同時按 item 升冪（evaluation 重排用同一條規則） |
 | `model_version` | 產生本筆結果的模型版本 |
 
 inference 預設不使用最新訓練完成的模型，而是解析 `data/models/best` 指向的版本。training 只產生候選模型；使用者完成上線前 evaluation 與人工審核後，需透過 `scripts/promote_model.py` 將核准版本設為 `best`。
@@ -137,6 +138,8 @@ inference:
 
 `use_calibration: true` 不會替未校準模型臨時建立 calibrator。模型是否包含 calibration 由 training 產物的 `model_meta.json` 與 `calibrator.pkl` 決定。
 
+不論此設定為何，三張推論表都另寫一欄 `score_uncalibrated`＝上表「base model 的原始分數」；上表後兩列的情況下它與 `score` 相等。原始分數一旦丟掉就拿不回來，而 evaluation 的部分診斷只在校準前的分數空間上成立。base model 每個 chunk 只算一次，校準是套在那份原始分數上。
+
 若下游只使用組內排序，校準通常不是必要條件；若下游會把 score 解讀為申請機率、點擊機率或期望收益，則應在 training 使用獨立 calibration split。
 
 不論此設定為何，現有 publication gate 都要求 score 位於 `[0, 1]`。部分 ranking objective 的 raw score 不符合此限制，可能需要啟用 calibration 或調整 validation contract。
@@ -165,7 +168,7 @@ spark:
   # spark.sql.shuffle.partitions: 400
 ```
 
-目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score` 與 `rank` 明確宣告 schema。
+目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score`、`score_uncalibrated` 與 `rank` 明確宣告 schema。
 若修改 schema 角色的實際欄名，也必須同步修改 catalog 欄位與 partition 設定。
 
 ### 3.6 推論母體（`inference_population`）
@@ -281,7 +284,7 @@ python -m recsys_tfb inference \
 |---|---|---|---|---|
 | 母體 × 特徵 | `build_inference_population_features` | `inference_population`、`feature_table`、`preprocessor`、parameters | 篩日期取母體 `(time, entity)`、left-join 接回 feature columns、分 entity 桶、套用訓練時的 categorical mappings，並把所有數值特徵欄轉成 `dataset.numeric_feature_storage_type` 宣告的型別（與 training 側同一個鍵、同一個 helper）。**不含 item 展開；identity 類別欄不在此編碼** | `inference_population_features`（Hive） |
 | 逐 chunk 評分 | `predict_and_write_scores` | `model`、`inference_population_features`、`preprocessor`、parameters | 外層迴圈桶、內層迴圈 item；一桶的特徵讀進 driver 一次，內層就地覆寫 item 那一欄重複使用。每個 `(桶, item)` 算完先跑塊層 sanity checks（§6.1），通過才寫成**恰好一個分區**。分區已存在的 chunk 跳過 | `score_manifest`（記憶體）；資料經 `writes=` 落地到 `unranked_predictions` |
-| 組內排名 | `rank_predictions` | `unranked_predictions`、`score_manifest` | 先 `restrict_to_snap_dates` 裁掉歷史月份（模型版本由 catalog 的 `partition_filter` 擋掉），丟掉 `entity_bucket`，再依 `(time, entity)` 內 score 降冪產生 rank | `ranked_staging` |
+| 組內排名 | `rank_predictions` | `unranked_predictions`、`score_manifest` | 先 `restrict_to_snap_dates` 裁掉歷史月份（模型版本由 catalog 的 `partition_filter` 擋掉），丟掉 `entity_bucket`，再依 `(time, entity)` 內 score 降冪、同分按 item 升冪產生 rank（`utils/ranking.py`，evaluation 重排用同一個函式） | `ranked_staging` |
 | 發布驗證 | `validate_predictions` | staging、`score_manifest` | 執行整批層 sanity checks（塊層在評分時已逐 chunk 跑過），任一失敗即拋出 `ValidationError` | `validated_predictions` |
 | 正式發布 | `publish_predictions` | validated rows | 將已驗證結果交由 catalog 寫入 production table | `ranked_predictions` |
 
@@ -637,7 +640,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。
 - **跨 chunk 的一致性沒有機制保證。** 一次 run 裡不同 chunk 用的是同一個模型與同一張中間表，但如果中間表在 run 進行中被另一個 process 改寫，前後 chunk 會基於不同的特徵。這個情況今天沒有任何檢查會紅。
-- score 相同時沒有額外 tie-break key，Spark `row_number` 對同分 items 的相對名次不保證穩定。
+- score 相同時按 item 升冪決定名次（`utils/ranking.py`）。這只讓名次可重現、讓 inference 與 evaluation 對同一批列給出相同名次；同分本身仍代表模型分不出高下，item 名的先後不是模型的判斷。
 - completeness check 驗證每組候選數量，不會獨立比對每組的實際 item set；目前依賴內層 item 迴圈與 duplicate check 共同維持候選正確性。
 - `partition_completeness` 驗的是分區的**存在**，不是分區的**內容**。一個內容錯誤但分區齊全的表照樣通過（那是其他五條檢查的職責）。
 - 續跑的「跳過」判準是分區存在，不是分區新鮮。上游回補之後必須用 `--rebuild-dates` 明說。

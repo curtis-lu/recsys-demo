@@ -87,6 +87,7 @@ from recsys_tfb.preprocessing import (
     encode_categoricals,
     warn_unknown_encodings,
 )
+from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
@@ -338,12 +339,19 @@ def predict_and_write_scores(
         len(plan.surplus), len(set(snap_dates)), n_buckets, len(items),
     )
 
-    # Decision — which scores get written when calibration is switched off: the
-    # raw booster output, and only when a calibrator is actually wrapped. An
-    # uncalibrated adapter has nothing to bypass.
+    # Decision — which score is published: the calibrated one only when a
+    # calibrator is actually wrapped and the config asks for it. An uncalibrated
+    # adapter has nothing to apply.
+    #
+    # Decision — the raw booster output is written beside it either way, as
+    # `score_uncalibrated` (equal to `score` whenever no calibration is applied).
+    # It is a fact about the model that nothing downstream can recover once it
+    # is dropped, and the diagnoses that work in log-odds space read it
+    # (ADR-0018 decision 5). The booster runs once per chunk: the calibrator is
+    # applied to that raw array rather than predicting a second time.
     use_calibration = parameters.get("inference", {}).get("use_calibration", True)
-    use_uncalibrated = not use_calibration and isinstance(model, CalibratedModelAdapter)
-    if use_uncalibrated:
+    wraps_calibrator = isinstance(model, CalibratedModelAdapter)
+    if wraps_calibrator and not use_calibration:
         logger.info("Calibration disabled by config, using uncalibrated scores")
 
     # Decision — which empty buckets are legitimate: the ones with no partition
@@ -434,9 +442,14 @@ def predict_and_write_scores(
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
                 X = pdf_to_X(bucket_pdf, model_view, parameters)
-                scores = (
-                    model.predict_uncalibrated(X) if use_uncalibrated
+                raw_scores = (
+                    model.predict_uncalibrated(X) if wraps_calibrator
                     else model.predict(X)
+                )
+                scores = (
+                    model.calibrate(raw_scores)
+                    if wraps_calibrator and use_calibration
+                    else raw_scores
                 )
                 out_pdf = pd.DataFrame({
                     **{
@@ -444,6 +457,7 @@ def predict_and_write_scores(
                         for col in entity_cols
                     },
                     score_col: scores,
+                    "score_uncalibrated": raw_scores,
                     time_col: snap_date,
                     item_col: item,
                     ENTITY_BUCKET_COL: str(bucket),
@@ -568,13 +582,15 @@ def rank_predictions(
     ranked = ranked.drop(ENTITY_BUCKET_COL)
 
     # Decision — what the rank means: position within the query group by
-    # descending score, ties broken arbitrarily. Spelled inline rather than
-    # behind a helper name because the tie behaviour is the part a reader has to
-    # see — `row_number` numbers tied rows 1, 2, 3 in whatever order the
-    # shuffle produced, which is what `score_varies_within_group` exists to
-    # notice when it becomes the whole table.
-    w = Window.partitionBy(*group_cols).orderBy(F.desc(score_col))
-    ranked = ranked.withColumn(rank_col, F.row_number().over(w))
+    # descending score, ties by item ascending. It is the rule evaluation
+    # re-ranks with too, so the same rows get the same rank in both pipelines
+    # (ADR-0020 bug 11); ties used to go to whatever order the shuffle
+    # delivered, differently on every run. A group that ties throughout is
+    # ranked by item name alone — nothing the model chose, which is what
+    # `score_varies_within_group` exists to notice when it becomes the table.
+    ranked = ranked.withColumn(
+        rank_col, rank_by_score_then_item(group_cols, score_col, schema["item"])
+    )
 
     logger.info("Ranked predictions by %s", group_cols)
     return ranked

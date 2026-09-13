@@ -25,8 +25,6 @@ class TestEvaluationPipelineDefault:
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
-            "evaluation_config_shift", "evaluation_item_ability",
-            "evaluation_model_capacity", "evaluation_suppression",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
         }
@@ -36,18 +34,121 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "draw_diagnosis_sample_node",
+            "prepare_eval_data", "no_diagnosis_pages",
+            "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
             "compute_report_aggregates",
             "persist_eval_predictions",
             "compute_metric_ci",
-            "diagnose_config_shift",
-            "diagnose_item_ability",
-            "diagnose_suppression",
-            "diagnose_model_capacity",
-            "render_diagnosis_pages",
             "generate_report",
         ]
+
+
+class TestRegistryDiagnosesFollowTheMode:
+    """Registry diagnoses are wired in ``--post-training`` only (ADR-0018
+    decision 5).
+
+    They need ``score_uncalibrated``, which the monitoring source does not
+    guarantee; wired in, the default mode crashed at the first diagnosis, in
+    production too. Monitoring mode's ``evaluation_diagnosis_pages`` comes from
+    the zero-read ``no_diagnosis_pages`` instead, not from
+    ``render_diagnosis_pages``: that one reads the disk by file name and would
+    pick up the pages an earlier post-training run of the same
+    ``(model_version, snap_date)`` left behind.
+
+    The three ``--compare`` nodes are added outside the mode switch, so each
+    mode with a comparison must still match its own shape.
+    """
+
+    MODES = {
+        "monitoring": {},
+        "monitoring --compare": {
+            "compare_source": {"kind": "hive", "model_version": "v1"},
+        },
+        "post-training": {"post_training": True},
+        "post-training --compare": {
+            "post_training": True,
+            "compare_source": {"kind": "hive", "model_version": "v1"},
+        },
+    }
+
+    @staticmethod
+    def _names(**kwargs):
+        return [n.name for n in create_pipeline(**kwargs).nodes]
+
+    def test_monitoring_modes_wire_no_registry_diagnosis(self):
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+        for label in ("monitoring", "monitoring --compare"):
+            names = self._names(**self.MODES[label])
+            leaked = [
+                n for n in names
+                if n in {f"diagnose_{d}" for d in DIAGNOSES}
+                or n == "render_diagnosis_pages"
+            ]
+            assert leaked == [], f"[{label}] {leaked}"
+            assert "no_diagnosis_pages" in names, label
+
+    def test_post_training_modes_wire_every_registry_diagnosis(self):
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+        for label in ("post-training", "post-training --compare"):
+            names = self._names(**self.MODES[label])
+            for d in DIAGNOSES:
+                assert f"diagnose_{d}" in names, f"[{label}] diagnose_{d}"
+            assert "render_diagnosis_pages" in names, label
+            assert "no_diagnosis_pages" not in names, label
+
+    def test_exactly_one_producer_of_the_diagnosis_pages_in_every_mode(self):
+        """``generate_report`` 位置綁定、六個必填輸入：每種模式都得有人產出它的
+        第六個輸入，而且只能有一個。"""
+        for label, kwargs in self.MODES.items():
+            producers = [
+                n.name for n in create_pipeline(**kwargs).nodes
+                if "evaluation_diagnosis_pages" in n.outputs
+            ]
+            assert len(producers) == 1, f"[{label}] {producers}"
+
+    def test_monitoring_draws_no_sample_for_diagnoses_it_does_not_wire(self):
+        """With the metric CI off, monitoring mode has no consumer of the
+        diagnosis sample left, so it must not draw one; post-training still
+        does, for its registry diagnoses.
+
+        The draw is a driver-side ``toPandas`` of up to
+        ``diagnosis.sample.max_queries`` queries. Drawing it for nobody raises
+        nothing and only shows up as a slower run. The registry diagnoses'
+        ``enabled`` flags default to true in both modes, so the config cannot
+        tell the modes apart; the pipeline has to.
+        """
+        from unittest.mock import patch
+
+        import pandas as pd
+
+        params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        outcome = {}
+        for label in ("monitoring", "post-training"):
+            node = next(
+                n for n in create_pipeline(**self.MODES[label]).nodes
+                if n.name == "draw_diagnosis_sample_node"
+            )
+            with patch(
+                "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+                return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
+            ) as spy:
+                result = node.func(None, params)
+            outcome[label] = {"draws": spy.call_count, "sample": result is not None}
+        assert outcome == {
+            "monitoring": {"draws": 0, "sample": False},
+            "post-training": {"draws": 1, "sample": True},
+        }
+
+    def test_monitoring_stub_reads_nothing_and_returns_no_pages(self):
+        node = next(
+            n for n in create_pipeline().nodes if n.name == "no_diagnosis_pages"
+        )
+        assert node.inputs == ["parameters"]
+        assert node.outputs == ["evaluation_diagnosis_pages"]
+        assert node.func({"evaluation": {}}) == []
 
 
 class TestEvaluationPipelinePostTraining:
@@ -75,7 +176,7 @@ class TestEvaluationPipelinePostTraining:
         assert "training_eval_predictions" in pipeline.inputs
         assert "ranked_predictions" not in pipeline.inputs
 
-    def test_pipeline_outputs_same_as_default(self):
+    def test_pipeline_outputs_add_the_registry_diagnoses(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
             "eval_predictions", "diagnosis_sample", "evaluation_metrics",
@@ -90,22 +191,22 @@ class TestEvaluationPipelinePostTraining:
 
 
 class TestEvaluationPipelineCompareMode:
-    """compare_source set — 16 nodes total, both reports produced."""
+    """compare_source set (monitoring) — 3 compare nodes appended, both reports
+    produced. Which diagnoses ride along is pinned per mode in
+    ``TestRegistryDiagnosesFollowTheMode``."""
 
     def test_full_node_name_order(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "load_compare_predictions",
+            "prepare_eval_data", "no_diagnosis_pages",
+            "load_compare_predictions",
             "draw_diagnosis_sample_node", "compute_metrics",
             "compute_baseline_metrics", "compute_report_aggregates",
             "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
-            "diagnose_config_shift", "diagnose_item_ability",
-            "diagnose_suppression",
             "generate_comparison_report",
-            "diagnose_model_capacity",
-            "render_diagnosis_pages", "generate_report",
+            "generate_report",
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
@@ -168,7 +269,13 @@ class TestGenerateReportNodeWiring:
     """
 
     def test_inputs_positionally_match_signature(self):
-        pipeline = create_pipeline()
+        for kwargs in ({}, {"post_training": True}):
+            self._check_inputs_positionally_match_signature(
+                create_pipeline(**kwargs)
+            )
+
+    @staticmethod
+    def _check_inputs_positionally_match_signature(pipeline):
         node = next(n for n in pipeline.nodes if n.name == "generate_report")
         params = inspect.signature(node.func).parameters
 
@@ -208,7 +315,7 @@ class TestGenerateReportNodeWiring:
         """
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(post_training=True)
         node = next(n for n in pipeline.nodes if n.name == "generate_report")
         leaked = [
             i for i in node.inputs
@@ -226,12 +333,15 @@ class TestRenderDiagnosisPagesNodeWiring:
     這個 node 的 ``*_dag_deps`` **刻意不讀值**——結果按檔名讀（見
     ``diagnosis.metric.results.load_results``）。inputs 存在的理由有兩個，
     測試分別對應：執行順序（主要）與切片擴張（次要）。
+
+    只有 ``--post-training`` 組出這個 node（監控模式見
+    ``TestRegistryDiagnosesFollowTheMode``），所以這裡都建 post-training 的 DAG。
     """
 
     def test_every_registry_diagnosis_is_wired_as_a_dependency(self):
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(post_training=True)
         node = next(
             n for n in pipeline.nodes if n.name == "render_diagnosis_pages"
         )
@@ -249,7 +359,7 @@ class TestRenderDiagnosisPagesNodeWiring:
         """
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
-        names = [n.name for n in create_pipeline().nodes]
+        names = [n.name for n in create_pipeline(post_training=True).nodes]
         me = names.index("render_diagnosis_pages")
         for diag in DIAGNOSES:
             assert names.index(f"diagnose_{diag}") < me, (
@@ -265,7 +375,7 @@ class TestRenderDiagnosisPagesNodeWiring:
         已落地時 ``can_load`` 為 True，切片刻意不重算，那正是 ``--only-node``
         想要的便宜重繪。
         """
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(post_training=True)
         sliced, _plan = pipeline.slice_only(
             "render_diagnosis_pages", lambda name: False
         )
@@ -358,7 +468,7 @@ class TestConfigShiftNodeWiring:
     """
 
     def test_config_shift_node_wired_after_diagnosis_sample(self):
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(post_training=True)
         names = [n.name for n in pipeline.nodes]
         assert "diagnose_config_shift" in names
         assert (
@@ -367,14 +477,14 @@ class TestConfigShiftNodeWiring:
         )
 
     def test_config_shift_inputs_and_outputs(self):
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(post_training=True)
         node = next(
             n for n in pipeline.nodes if n.name == "diagnose_config_shift"
         )
         assert node.inputs == ["diagnosis_sample", "parameters"]
         assert node.outputs == ["evaluation_config_shift"]
 
-    def test_config_shift_wired_in_post_training_mode_too(self):
-        """--post-training 走的是同一組診斷節點，只有預測來源不同。"""
-        pipeline = create_pipeline(post_training=True)
-        assert "evaluation_config_shift" in pipeline.outputs
+    def test_config_shift_not_wired_in_monitoring_mode(self):
+        """它要 score_uncalibrated；監控模式不組（ADR-0018 決定 5）。"""
+        pipeline = create_pipeline()
+        assert "evaluation_config_shift" not in pipeline.outputs

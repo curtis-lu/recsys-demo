@@ -120,6 +120,182 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     assert list(c1_rows.sort_values("rank")["rank"]) == [1, 2]
 
 
+_ENRICH_PARAMS = {
+    "schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank"}},
+    "model_version": "v1",
+    "evaluation": {"snap_date": "2025-01-31"},
+}
+
+
+def _catalog_declared_type(entry: str, column: str) -> str:
+    """The type ``conf/base/catalog.yaml`` declares, read rather than restated.
+
+    The casts in ``prepare_eval_data`` copy these declarations. Reading them
+    here is what turns a catalog edit that the cast does not follow into a red
+    test instead of a type conflict on the next real run.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[3]
+    catalog = yaml.safe_load((root / "conf" / "base" / "catalog.yaml").read_text())
+    declared = {c["name"]: c["type"] for c in catalog[entry]["columns"]}
+    return declared[column].lower()
+
+
+def _post_training_predictions(spark):
+    """``training_eval_predictions``' shape: carries label, no rank (declared types)."""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
+         ("c1", "2025-01-31", "B", 0.1, 0.2, 0)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, score DOUBLE, "
+        "score_uncalibrated DOUBLE, label INT",
+    )
+
+
+def _monitoring_predictions(spark):
+    """``ranked_predictions``' shape: carries rank (BIGINT), no label."""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
+         ("c1", "2025-01-31", "B", 0.1, 0.2, 2)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, score DOUBLE, "
+        "score_uncalibrated DOUBLE, rank BIGINT",
+    )
+
+
+def _labels(spark, label_type="INT"):
+    """``label_table`` is user-defined; the framework does not fix its label's width."""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 1)],
+        f"cust_id STRING, snap_date STRING, prod_name STRING, label {label_type}",
+    )
+
+
+def test_prepare_eval_data_injected_rank_is_bigint(spark):
+    """Bug 15: the rank post-training fills in has the type ``ranked_predictions``
+    declares. ``row_number()`` yields INT, and both modes write the same
+    ``enriched_eval_predictions``, so a mismatch fails whichever write comes
+    second (next test).
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    result = prepare_eval_data(
+        _post_training_predictions(spark), _labels(spark), _ENRICH_PARAMS,
+    )
+    assert result.schema["rank"].dataType.simpleString() == \
+        _catalog_declared_type("ranked_predictions", "rank")
+
+
+@pytest.mark.parametrize("label_type", ["INT", "BIGINT"])
+@pytest.mark.parametrize(
+    "first", ["post_training", "monitoring"],
+    ids=["post-training-then-monitoring", "monitoring-then-post-training"],
+)
+def test_both_modes_write_the_same_enriched_table_in_either_order(
+    spark, first, label_type,
+):
+    """The same model_version written by both modes, in either order (bug 15).
+
+    The table is ``columns: "auto"``: its schema comes from the first write,
+    and ``_evolve_schema`` raises on a same-name type mismatch ("Schema
+    evolution never casts"). Two columns come from different sources per mode,
+    and both must end up the same type:
+
+    * ``rank``: filled in by one mode (``row_number`` is INT), read from
+      upstream by the other (BIGINT).
+    * ``label``: ``training_eval_predictions`` (declared INT) in post-training,
+      the user-defined ``label_table`` in monitoring, BIGINT in the example's
+      synthetic data. Hence both ``label_type`` values: with INT only, this
+      conflict stays invisible (it first showed up on a real monitoring run).
+
+    Runs in its own test DB, for the reason ``test_persist_and_catalog_load_roundtrip``
+    does (``known-pitfalls.md`` §14: a test once wiped the shared warehouse's
+    real table).
+    """
+    import shutil
+    from pathlib import Path
+
+    from recsys_tfb.io.hive_table_dataset import HiveTableDataset
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    db, table = "test_rank_type_across_modes", "enriched_eval_predictions"
+
+    def _clean():
+        spark.sql(f"DROP TABLE IF EXISTS {db}.{table}")
+        raw = spark.conf.get("spark.sql.warehouse.dir", "spark-warehouse")
+        table_dir = Path(raw[len("file:"):] if raw.startswith("file:") else raw)
+        table_dir = table_dir / f"{db}.db" / table
+        if table_dir.exists():
+            shutil.rmtree(table_dir)
+
+    enriched = {
+        "post_training": lambda: prepare_eval_data(
+            _post_training_predictions(spark), _labels(spark, label_type),
+            _ENRICH_PARAMS),
+        "monitoring": lambda: prepare_eval_data(
+            _monitoring_predictions(spark), _labels(spark, label_type),
+            _ENRICH_PARAMS),
+    }
+    second = "monitoring" if first == "post_training" else "post_training"
+
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {db}")
+    _clean()
+    try:
+        ds = HiveTableDataset(
+            database=db, table=table, columns="auto",
+            partition_filter={"model_version": "MV_X"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ds.save(enriched[first]())
+        ds.save(enriched[second]())
+
+        out = ds.load()
+        assert out.schema["rank"].dataType.simpleString() == \
+            _catalog_declared_type("ranked_predictions", "rank")
+        assert out.schema["label"].dataType.simpleString() == \
+            _catalog_declared_type("training_eval_predictions", "label")
+        assert out.count() == 2
+    finally:
+        _clean()
+
+
+@pytest.mark.parametrize(
+    "predictions", [_post_training_predictions, _monitoring_predictions],
+    ids=["post-training", "monitoring"],
+)
+def test_prepare_eval_data_raises_on_duplicated_label_keys(spark, predictions):
+    """Bug 10: a label_table key held by more than one row raises, naming the
+    number of duplicated keys.
+
+    The LEFT JOIN would copy that candidate once per label row: the query's
+    candidate set grows, its ranks shift, and no count or metric complains.
+    Not ``dropDuplicates``: that picks one of the answers arbitrarily.
+
+    The fixture's shape is deliberate. B is held by three rows (the count is of
+    keys, not of surplus rows), and another month has a duplicate too (only the
+    evaluated month is checked). Miscounting either way gives a number other
+    than 2.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    labels = spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 1),
+         ("c1", "2025-01-31", "A", 1),
+         ("c1", "2025-01-31", "B", 0),
+         ("c1", "2025-01-31", "B", 0),
+         ("c1", "2025-01-31", "B", 1),
+         ("c1", "2024-12-31", "A", 1),
+         ("c1", "2024-12-31", "A", 1)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, label INT",
+    )
+    with pytest.raises(ValueError, match="2 duplicated label_table key"):
+        prepare_eval_data(predictions(spark), labels, _ENRICH_PARAMS)
+
+
 def test_prepare_eval_data_preserves_existing_rank_column(spark):
     """When the predictions input already has a `rank` column (non-post-training
     mode sourced from ranked_predictions), prepare_eval_data must NOT re-rank

@@ -56,7 +56,7 @@ def restrict_to_common(
         df = df.join(F.broadcast(item_df), on=item_col, how="inner")
         if rank_col in df.columns:
             df = df.drop(rank_col)
-        df = rank_within_query(df, query_group_cols, score_col)
+        df = rank_within_query(df, query_group_cols, score_col, item_col)
         return df.withColumnRenamed("pos", rank_col)
 
     a_common = _restrict_and_rank(a)

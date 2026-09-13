@@ -88,6 +88,15 @@ def test_uses_uncalibrated_score_and_fails_loud_without_it():
         compute((sample, {"n_queries": 40}), PARAMS)
 
 
+@pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
+def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+    """欄位在、值全空也要 raise——理由見 test_item_ability 的同名測試。"""
+    sample = _sample()
+    sample["score_uncalibrated"] = null
+    with pytest.raises(ValueError, match="全是空值"):
+        compute((sample, {"n_queries": 40}), PARAMS)
+
+
 PARAMS_COUPLED = {
     **PARAMS,
     "dataset": {**PARAMS["dataset"],
