@@ -78,8 +78,9 @@ import pandas as pd
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
-    diag_cfg, metric_params, per_item_ap, query_key, to_logit,
+    diag_cfg, per_item_ap, query_key, to_logit,
 )
+from recsys_tfb.evaluation.metrics import metric_params
 
 logger = logging.getLogger(__name__)
 

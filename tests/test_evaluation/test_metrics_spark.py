@@ -432,7 +432,7 @@ def test_aggregate_per_item_hit_rate_below_one_when_pos_above_k(spark):
 
 
 def test_aggregate_per_item_multi_column_key(spark):
-    """dim_cols=[item, seg] → key joined with '_'. Only label=1 rows kept.
+    """dim_cols=[item, seg] → two-level {item: {seg: metrics}}. Only label=1 rows kept.
         label=1 rows: (A, mass), (B, affluent), (C, mass).
     """
     enriched = _enriched(spark, k_values=[3]).withColumn(
@@ -440,7 +440,18 @@ def test_aggregate_per_item_multi_column_key(spark):
         F.when(F.col("cust_id") == "C0", F.lit("mass")).otherwise(F.lit("affluent")),
     )
     per_ips = ms.aggregate_per_item(enriched, ["prod_name", "seg"], "label", [3])
-    assert set(per_ips.keys()) == {"A_mass", "B_affluent", "C_mass"}
+    assert {item: set(by_seg) for item, by_seg in per_ips.items()} == {
+        "A": {"mass"}, "B": {"affluent"}, "C": {"mass"},
+    }
+    assert per_ips["A"]["mass"]["n_pos"] == 1
+
+
+def test_aggregate_per_item_rejects_three_dim_cols(spark):
+    enriched = _enriched(spark, k_values=[3])
+    with pytest.raises(ValueError, match="1 or 2 dim_cols"):
+        ms.aggregate_per_item(
+            enriched, ["prod_name", "cust_id", "snap_date"], "label", [3]
+        )
 
 
 def test_aggregate_per_item_filters_label_zero_rows(spark):
@@ -565,7 +576,9 @@ def test_compute_all_metrics_with_segment_column(spark):
     params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
     result = ms.compute_all_metrics(df, params)
     assert set(result["per_segment"].keys()) == {"mass", "affluent"}
-    assert set(result["per_item_segment"].keys()) == {"A_mass", "B_affluent", "C_mass"}
+    assert {
+        item: set(by_seg) for item, by_seg in result["per_item_segment"].items()
+    } == {"A": {"mass"}, "B": {"affluent"}, "C": {"mass"}}
     assert "by_segment" in result["macro_avg"]
     assert "by_item_segment" in result["macro_avg"]
 
@@ -752,3 +765,138 @@ def test_param_macro_numpy_matches_spark(spark):
         weight_alpha=1.0, min_positives=0, shrinkage_k=2.0,
     )
     assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)
+
+
+# ===========================================================================
+# metric.k — truncation depth of the headline per-item family, an axis
+# independent of k_values (ADR-0020 design H)
+# ===========================================================================
+
+
+def _metric_k_pdf():
+    """3 items x 3 queries, no ties within a query. metric.k=2 < n_items=3,
+    so the truncation actually bites.
+
+    C0: A .9(1) B .5(0) C .1(1) -> A rank 1 adds 1; C rank 3 adds 2/3 (k=2 -> 0)
+    C1: B .8(1) C .6(0) A .3(0) -> B rank 1 adds 1
+    C2: C .7(0) A .6(1) B .2(1) -> A rank 2 adds 1/2; B rank 3 adds 2/3 (k=2 -> 0)
+
+    Truncated at 2: A=.75, B=.5, C=0 -> macro 5/12; untruncated macro=.75.
+    """
+    import pandas as pd
+
+    rows = [
+        ("20240331", "C0", "A", 0.9, 1),
+        ("20240331", "C0", "B", 0.5, 0),
+        ("20240331", "C0", "C", 0.1, 1),
+        ("20240331", "C1", "A", 0.3, 0),
+        ("20240331", "C1", "B", 0.8, 1),
+        ("20240331", "C1", "C", 0.6, 0),
+        ("20240331", "C2", "A", 0.6, 1),
+        ("20240331", "C2", "B", 0.2, 1),
+        ("20240331", "C2", "C", 0.7, 0),
+    ]
+    return pd.DataFrame(
+        rows, columns=["snap_date", "cust_id", "prod_name", "score", "label"]
+    )
+
+
+def _metric_k_params():
+    params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
+    params["evaluation"]["diagnosis"] = {"ci": {"n_boot": 20}}
+    return params
+
+
+def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
+    """metric.k is not in k_values, yet the main path still emits
+    map_attr@{metric.k}, and it equals the CI point estimate on the same
+    data — they only match when both are truncated the same way.
+    """
+    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+
+    pdf = _metric_k_pdf()
+    params = _metric_k_params()
+    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    main = result["macro_avg"]["by_item"]["map_attr@2"]
+    assert main == pytest.approx(5 / 12)
+
+    ci = bootstrap_per_item_ci(pdf, params)
+    assert ci["macro"]["ap"] == pytest.approx(main)
+
+
+def test_metric_k_grid_shared_by_slim_path(spark):
+    """The baseline's slim path uses the same K grids as the main path
+    (metric.k included on the per-item side), so the two sides line up."""
+    pdf = _metric_k_pdf()
+    params = _metric_k_params()
+    slim = ms.compute_overall_per_item(spark.createDataFrame(pdf), params)
+    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    assert "map_attr@2" in slim["per_item"]["A"]
+    assert slim["per_item"] == full["per_item"]
+    assert slim["overall"] == full["overall"]
+
+
+def test_metric_k_reaches_only_the_per_item_family(spark):
+    """``metric.k`` truncates the per-item macro family only; ``k_values``
+    alone is the @K grid of the per-query families (ADR-0020 design H).
+
+    ``k_values=[1, "all"]`` (all -> 3 items) with ``metric.k=2``: a leak would
+    silently add ``map@2`` / ``precision@2`` / ``recall@2`` / ``ndcg@2`` to
+    ``overall`` / ``per_segment``, and the comparison report prints every
+    ``overall`` key as a row, so nobody-configured rows would appear.
+    """
+    pdf = _metric_k_pdf()
+    pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
+    params = _make_parameters(
+        k_values=[1, "all"], segment_columns=["seg"], metric={"k": 2}
+    )
+    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+
+    assert [k for k in full["overall"] if k.endswith("@2")] == []
+    assert {"map@1", "map@3"} <= set(full["overall"])
+    for seg, cell in full["per_segment"].items():
+        assert [k for k in cell if k.endswith("@2")] == [], seg
+    assert [k for k in full["macro_avg"]["by_segment"] if k.endswith("@2")] == []
+
+    assert "map_attr@2" in full["per_item"]["A"]
+    assert full["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(5 / 12)
+    assert "map_attr@2" in full["per_item_segment"]["A"]["s1"]
+    assert "map_attr@2" in full["macro_avg"]["by_item_segment"]
+
+    slim = ms.compute_overall_per_item(
+        spark.createDataFrame(pdf), params, with_segment=True
+    )
+    assert slim["overall"] == full["overall"]
+    assert slim["per_segment"] == full["per_segment"]
+    assert slim["per_item"] == full["per_item"]
+
+
+# ===========================================================================
+# per_item_segment — two-level dict, no more "_"-joined keys (ADR-0020 bug 12)
+# ===========================================================================
+
+
+def test_per_item_segment_is_two_level_and_collision_free(spark):
+    """(item="a", seg="b_c") and (item="a_b", seg="c") both used to join to
+    "a_b_c", and the later write overwrote the earlier one.
+
+    C0 (seg b_c): a .9(1)  a_b .1(0) -> cell (a, b_c)   map_attr@2 = 1
+    C1 (seg c)  : a .9(0)  a_b .1(1) -> cell (a_b, c)   map_attr@2 = 1/2
+    by_item_segment weights cells equally -> (1 + 1/2) / 2 = 0.75.
+    """
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "a", 0.9, 1, "b_c"),
+            ("20240331", "C0", "a_b", 0.1, 0, "b_c"),
+            ("20240331", "C1", "a", 0.9, 0, "c"),
+            ("20240331", "C1", "a_b", 0.1, 1, "c"),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "seg"],
+    )
+    result = ms.compute_all_metrics(
+        df, _make_parameters(k_values=[2], segment_columns=["seg"])
+    )
+    pis = result["per_item_segment"]
+    assert pis["a"]["b_c"]["map_attr@2"] == pytest.approx(1.0)
+    assert pis["a_b"]["c"]["map_attr@2"] == pytest.approx(0.5)
+    assert result["macro_avg"]["by_item_segment"]["map_attr@2"] == pytest.approx(0.75)

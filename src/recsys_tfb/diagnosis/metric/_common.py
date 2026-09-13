@@ -29,17 +29,6 @@ def diag_cfg(parameters: dict) -> dict:
             .get("diagnosis", {}) or {})
 
 
-def metric_params(parameters: dict) -> dict:
-    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
-    k = m.get("k")
-    return {
-        "k": int(k) if k is not None else None,
-        "weight_alpha": float(m.get("weight_alpha", 0.0)),
-        "min_positives": int(m.get("min_positives", 0)),
-        "shrinkage_k": float(m.get("shrinkage_k", 0.0)),
-    }
-
-
 def to_logit(scores: np.ndarray) -> tuple[np.ndarray, list[str]]:
     s = np.asarray(scores, dtype=np.float64)
     if len(s) and (s.min() < 0.0 or s.max() > 1.0):

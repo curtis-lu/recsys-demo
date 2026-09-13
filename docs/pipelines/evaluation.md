@@ -67,14 +67,14 @@ evaluation:
 | 設定 | 說明 |
 |---|---|
 | `snap_date` | 本次只評估的時間切點，必須使用 `YYYY-MM-DD` |
-| `k_values` | 所有 metric 要實際計算的 K 值 superset |
+| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro 點估與 CI 的截斷深度。它非 null 時，per-item 那一族（map_attr、hit_rate）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
 | `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數 |
 
 pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。日期沒有任何資料時會列出該模型實際存在的日期後中止，不會退回整張表計算。
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。
+`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則：K 大於該粒度 item 數的鍵不印。
 
 主要指標包括：
 
@@ -159,7 +159,9 @@ baseline 對每個評估日期 `S`，統計 `label_table` 在 `[S - lookback_mon
 
 baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overall 與 per-item 指標，再於報表呈現 Model、Baseline 與差異。
 
-若指定回看期間完全沒有 label rows，目前實作會記錄 warning 並退回使用完整 `label_table`。此 fallback 可能包含評估日之後的資料而造成 leakage；看到該 warning 時不應直接採信 baseline，應先補齊歷史資料或修正 lookback。
+若指定回看期間完全沒有 label rows，會直接 raise（bug 1, ADR-0020）——不再退回完整 `label_table`。舊行為的退回會把評估日之後的資料算進 baseline，讓 popularity 用答案排名，報表卻照印「以過去 N 個月的歷史購買計數重排」；使用者裁定 baseline 是重要資訊，沒算出來要 raise，不做靜默 fallback。錯誤訊息含視窗範圍與 `label_table` 實際有的月份；解法是補齊 `label_table` 歷史、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` 直接不算這段。
+
+視窗不是全空、只是沒涵蓋滿 `lookback_months` 時（例：設 12 個月，`label_table` 在視窗內只有 2 個月），不會 raise，但報表會揭露：baseline 段那句寫成「以過去 12 個月的歷史購買計數重排（label_table 在這個視窗內實際只涵蓋 2 個月）」，「平均每月」除以實際涵蓋的月數，不是除以 12。
 
 將 `report.sections.baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
 
@@ -461,7 +463,7 @@ evaluation metrics 目前不會另存成 JSON；聚合結果直接用於產生 H
 3. dataset overview 的 entities、items、rows 與 positives 符合該批次預期。
 4. 主要 `map@K`、`ndcg@K` 與 `recall@K` 使用的 K 符合實際展示空間。
 5. per-item 與 per-segment 沒有被整體平均掩蓋的明顯退化。
-6. popularity baseline 的歷史期間有資料，log 沒有 leakage fallback warning。
+6. popularity baseline 段有出現（lookback 視窗查無歷史時整條會 raise，不會帶著用答案排名的 baseline 跑完），段落說明寫的 lookback 月數與 `evaluation.baseline.lookback_months` 一致。
 7. diagnostics 的 score/rank 分布沒有異常集中、缺產品或不合理 calibration。
 8. `enriched_eval_predictions` 的本次 model/date partition 有資料且 key 沒有非預期重複。
 
@@ -576,7 +578,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | per-segment section 沒出現 | `per_segment` section 關閉，或目標欄位不是第一個 active segment | 檢查 `report.sections.per_segment`、enriched schema 與 `segment_columns` 順序 |
 | product category unknown product | mapping 引用了未宣告 item | 對齊 `schema.categorical_values[item]` |
 | category 結果不符合預期 | item 重複映射或 max-child 語意不適合業務 | 確認每個 item 只屬於一類，重新檢視 category 定義 |
-| baseline warning `falling back to full label_table` | lookback window 沒有歷史資料 | 補歷史 labels 或調整期間；不要直接採信可能 leakage 的 baseline |
+| baseline raise `No label_table history in [...) ... label_table has months: [...]` | lookback window 沒有歷史資料（bug 1，不再是 warning + fallback） | 補歷史 labels、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` |
 | `--compare` key 不存在 | CLI key 不在 `compare_sources` | 檢查 YAML key 與錯誤訊息列出的 available keys |
 | compare source 沒有該日期資料 | Model B source、model version 或日期不一致 | 查來源 table 的 model/date partitions |
 | external item unmapped | `prod_mapping` 未涵蓋外部 item | 補 mapping；確認可接受時才使用 `unmapped_policy: drop` |
@@ -598,7 +600,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。
 - score 相同時按 item 升冪決定名次（與 inference 同一條規則，`utils/ranking.py`）。名次因此可重現，但同分本身仍代表模型分不出高下。
 - zero-positive query groups 會排除於排序指標，因此報表不代表完整 inference entity 母體。
-- popularity baseline 在 lookback 空窗時會 fallback 至完整 label table，可能產生 leakage。
+- popularity baseline 在 lookback 空窗時會 raise（bug 1），不再 fallback 至完整 label table 產生 leakage；只有 `evaluation.report.sections.baseline: false` 才會整段跳過不算。
 - product category 同 item 重複映射目前不會報錯，後出現的 category 會覆蓋前者。
 - 比較報表呈現指標差異但沒有 bootstrap、confidence interval 或顯著性檢定。
 - evaluation metrics 沒有獨立 JSON／table sink，無法直接形成長期監控時序。

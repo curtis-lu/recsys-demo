@@ -572,3 +572,72 @@ class TestWeightedMap:
             empty, np.array([]), empty, np.array([], dtype=np.float64),
             weights=np.array([], dtype=np.float64),
         ) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# metric_params — the shared reader of `evaluation.metric` (ADR-0020 design H)
+# ---------------------------------------------------------------------------
+
+
+class TestMetricParams:
+    """Imports live inside each test, so the rest of this file still collected
+    while the shared helper did not exist yet."""
+
+    DEFAULTS = {
+        "k": None, "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0,
+    }
+
+    def test_missing_block_falls_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        assert metric_params({}) == self.DEFAULTS
+        assert metric_params({"evaluation": None}) == self.DEFAULTS
+        assert metric_params({"evaluation": {"metric": None}}) == self.DEFAULTS
+
+    def test_missing_keys_fall_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        assert metric_params({"evaluation": {"metric": {}}}) == self.DEFAULTS
+
+    def test_none_values_fall_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        cfg = {"k": None, "weight_alpha": None, "min_positives": None,
+               "shrinkage_k": None}
+        assert metric_params({"evaluation": {"metric": cfg}}) == self.DEFAULTS
+
+    def test_values_are_type_normalised(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        cfg = {"k": 3, "weight_alpha": 1, "min_positives": 2, "shrinkage_k": 5}
+        out = metric_params({"evaluation": {"metric": cfg}})
+        assert out == {"k": 3, "weight_alpha": 1.0, "min_positives": 2,
+                       "shrinkage_k": 5.0}
+        assert type(out["k"]) is int
+        assert type(out["weight_alpha"]) is float
+        assert type(out["min_positives"]) is int
+        assert type(out["shrinkage_k"]) is float
+
+
+def test_metric_params_is_defined_exactly_once():
+    """Exactly one `def metric_params` across src/ and scripts/ (design H).
+
+    Copies drifting apart is what design H removes: fixing only the report
+    note while leaving several readers would let the fallback semantics fork
+    again. Both directories are asserted to exist first, so a wrong path that
+    scans zero files cannot pass as "only one left".
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    pattern = re.compile(r"^\s*def metric_params\(", re.MULTILINE)
+    hits: list[str] = []
+    for sub in ("src", "scripts"):
+        base = root / sub
+        assert base.is_dir(), base
+        for path in sorted(base.rglob("*.py")):
+            n = len(pattern.findall(path.read_text(encoding="utf-8")))
+            hits.extend([path.relative_to(root).as_posix()] * n)
+    assert len(hits) == 1, hits
+    assert hits == ["src/recsys_tfb/evaluation/metrics.py"]

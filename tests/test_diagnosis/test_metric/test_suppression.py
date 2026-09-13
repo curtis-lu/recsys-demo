@@ -154,7 +154,8 @@ def _reference_pair_ledger(sample: pd.DataFrame, params: dict) -> dict:
     對照向量化版本 ``compute`` 的正確性。刻意不重用 ``_compute.py`` 的任何
     聚合邏輯——共用了就測不出兩者是否一致。
     """
-    from recsys_tfb.diagnosis.metric._common import metric_params, query_key, to_logit
+    from recsys_tfb.diagnosis.metric._common import query_key, to_logit
+    from recsys_tfb.evaluation.metrics import metric_params
 
     schema = get_schema(params)
     query_cols = [schema["time"], *schema["entity"]]

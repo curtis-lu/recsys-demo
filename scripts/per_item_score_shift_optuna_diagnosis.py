@@ -38,6 +38,7 @@ from recsys_tfb.diagnosis.metric._common import to_logit
 from recsys_tfb.evaluation.metrics import (
     compute_macro_per_item_map,
     macro_from_per_item,
+    metric_params,
     positive_row_contributions,
 )
 
@@ -199,16 +200,6 @@ def validate_and_prepare(pdf: pd.DataFrame, schema: dict) -> tuple[pd.DataFrame,
     out[schema["label"]] = out[schema["label"]].astype(int)
     out[schema["item"]] = out[schema["item"]].astype(str)
     return out, notes
-
-
-def metric_params(parameters: dict) -> dict:
-    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
-    return {
-        "k": None if m.get("k") is None else int(m["k"]),
-        "weight_alpha": float(m.get("weight_alpha", 0.0) or 0.0),
-        "min_positives": int(m.get("min_positives", 0) or 0),
-        "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
-    }
 
 
 def split_by_entity(

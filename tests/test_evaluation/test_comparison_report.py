@@ -115,6 +115,135 @@ def test_category_section_present_when_enabled_and_present():
     assert "大類" in out
 
 
+def test_category_section_columns_clamp_to_category_count():
+    """bug 8 (ADR-0020): 3 categories, primary_map_k=[1,3,5,"all"] -> the
+    大類 per-item map_attr@k table must not show @5 (5 > n_cat=3)."""
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_metrics = {
+        "overall": {"map@1": 0.4},
+        "per_item": {
+            "fund": {"hit_rate@1": 0.5, "map_attr@1": 0.4, "map_attr@3": 0.5,
+                     "map_attr@5": 0.5, "mean_pos": 1.0},
+            "exchange": {"hit_rate@1": 0.4, "map_attr@1": 0.3, "map_attr@3": 0.4,
+                        "map_attr@5": 0.4, "mean_pos": 1.5},
+            "ccard": {"hit_rate@1": 0.3, "map_attr@1": 0.2, "map_attr@3": 0.3,
+                     "map_attr@5": 0.3, "mean_pos": 2.0},
+        },
+        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "map_attr@3": 0.4}},
+        "dataset_overview": {"totals": {"n_items": 3}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    p["evaluation"]["report"]["display"]["primary_map_k"] = [1, 3, 5, "all"]
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None
+    tbl = sec.tables[sec.table_titles.index(
+        next(t for t in sec.table_titles if t.startswith(
+            "大類 per-item map_attr@k (M/B/Δ)"
+        ))
+    )]
+    cols = [str(c) for c in tbl.columns]
+    assert not any(c.startswith("map_attr@5") for c in cols)
+    assert any(c.startswith("map_attr@3") for c in cols)
+
+
+def test_per_item_section_discloses_macro_item_coverage():
+    """bug 5 (ADR-0020): comparison report's per-item M/B/Δ titles state each
+    side's macro item coverage, same as the main report."""
+    from recsys_tfb.evaluation.comparison.report import _build_per_item_section
+
+    m_a, m_b = _metrics(), _metrics()
+    comp = _comparison(m_a, m_b)
+    sec = _build_per_item_section(m_a, m_b, comp, _params())
+    assert sec is not None
+    for title in sec.table_titles:
+        assert "參與 macro 的 item 數" in title
+        assert "M 2／B 2／全部 2）" in title  # both sides: p1,p2 in per_item, n_items=2
+
+
+def test_category_section_discloses_macro_item_coverage():
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_metrics = {
+        "overall": {"map@1": 0.5, "map@3": 0.55},
+        "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+                              "map_attr@1": 0.4, "map_attr@3": 0.5,
+                              "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "dataset_overview": {"totals": {"n_items": 1}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None
+    per_item_titles = [t for t in sec.table_titles if t != "大類 overall"]
+    assert per_item_titles
+    for title in per_item_titles:
+        assert "M 1／B 1／全部 1）" in title
+
+
+def _overall_up_to_k5() -> dict:
+    return {
+        f"{fam}@{k}": round(0.1 * k, 2)
+        for fam in ("map", "precision", "recall") for k in (1, 2, 3, 4, 5)
+    }
+
+
+def test_category_overall_table_drops_keys_with_k_above_category_count():
+    """bug 8 (ADR-0020): the category overall table lists every computed key,
+    so with 3 categories it printed precision@4 / @5 etc. — K beyond the item
+    count, where precision's denominator is K itself. K <= 3 stays."""
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_metrics = {
+        "overall": _overall_up_to_k5(),
+        "per_item": {
+            c: {"hit_rate@1": 0.5, "map_attr@1": 0.4}
+            for c in ("fund", "exchange", "ccard")
+        },
+        "macro_avg": {"by_item": {"hit_rate@1": 0.5}},
+        "dataset_overview": {"totals": {"n_items": 3}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None
+    overall = sec.tables[sec.table_titles.index("大類 overall")]
+    idx = [str(i) for i in overall.index]
+    assert "precision@4" not in idx
+    assert [i for i in idx if i.endswith(("@4", "@5"))] == []
+    assert {"map@3", "precision@3", "recall@3"} <= set(idx)
+
+
+def test_overall_table_drops_keys_with_k_above_item_count():
+    """The fine-grained overall table gets the same filter against its own
+    n_items: 8 items keep every key up to @5; 3 items drop @4 / @5."""
+    from recsys_tfb.evaluation.comparison.report import _build_overall_section
+
+    full = _overall_up_to_k5()
+    for n_items, expected in (
+        (8, sorted(full)),
+        (3, sorted(k for k in full if not k.endswith(("@4", "@5")))),
+    ):
+        m_a, m_b = _metrics(0.6), _metrics(0.4)
+        for m in (m_a, m_b):
+            m["overall"] = dict(full)
+            m["dataset_overview"]["totals"]["n_items"] = n_items
+        sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+        idx = [str(i) for i in sec.tables[0].index]
+        assert sorted(idx) == expected, n_items
+
+
 def test_glossary_section_present():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
@@ -127,8 +256,11 @@ def test_overall_section_hides_ndcg():
     程式碼裡沒有 "ndcg" 字樣也會渲染出來。fixture 帶 ndcg@3，必須被濾掉。"""
     from recsys_tfb.evaluation.comparison.report import _build_overall_section
     m_a, m_b = _metrics(0.6), _metrics(0.4)
+    # 3 items keeps @3 under the bug 8 key filter, so ndcg@3 can only be
+    # removed by the ndcg filter this test is about.
+    m_a["dataset_overview"]["totals"]["n_items"] = 3
     comp = _comparison(m_a, m_b)
-    sec = _build_overall_section(comp)
+    sec = _build_overall_section(m_a, comp)
     idx = [str(i) for i in sec.tables[0].index]
     assert "map@3" in idx, "非 ndcg 的列不該被誤濾"
     assert not [i for i in idx if i.startswith("ndcg")]
@@ -146,7 +278,9 @@ def test_category_overall_section_hides_ndcg():
                               "map_attr@1": 0.4, "map_attr@3": 0.5,
                               "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
-        "dataset_overview": {"totals": {"n_items": 1}},
+        # 3 categories keeps @3 under the bug 8 key filter, so ndcg@3 can
+        # only be removed by the ndcg filter this test is about.
+        "dataset_overview": {"totals": {"n_items": 3}},
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics

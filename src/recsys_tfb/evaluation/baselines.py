@@ -17,6 +17,22 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
+def resolve_lookback_months(parameters: dict) -> int:
+    """``evaluation.baseline.lookback_months``, defaulting to 12.
+
+    The single place both the node (``compute_baseline_metrics``) and the
+    report (``build_baseline_section``) read this from — before this helper
+    existed the two had drifted to two different defaults (node: 12, report:
+    ``None``), so a run using the implicit default silently printed no
+    lookback sentence at all while the node had in fact used 12 months
+    (bug 1, ADR-0020).
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    return int(
+        (eval_params.get("baseline", {}) or {}).get("lookback_months", 12)
+    )
+
+
 def _lookback_window(
     label_table: SparkDataFrame,
     snap_date: str,
@@ -25,10 +41,20 @@ def _lookback_window(
 ) -> SparkDataFrame:
     """``label_table`` rows in ``[snap_date - lookback_months, snap_date)``.
 
-    ``ts`` is the caller's date-typed time expression. When the window is
-    empty, fall back to the full table (with a warning — the baseline may then
-    have leakage). Shared by the total and monthly count paths so their
-    windowing (and fallback) stays identical.
+    ``ts`` is the caller's date-typed time expression. Shared by the total and
+    monthly count paths so their windowing stays identical.
+
+    Pre-check (input): the window must be non-empty. It used to fall back to
+    the full ``label_table`` when empty — which includes the evaluation
+    month's own answers, so the popularity baseline would then rank by the
+    ground truth it is supposed to be compared against, while the report
+    kept printing an unqualified "reranked by N months of history" sentence
+    (bug 1). The user ruled baseline is load-bearing information: raise
+    rather than degrade to that silently-leaky stub. Only
+    ``evaluation.report.sections.baseline: false`` skips this computation
+    entirely (``compute_baseline_metrics`` returns before calling in here).
+    Not a ``core/consistency.py`` gate: this is the baseline's own scoring
+    window, not the B2 feature-leakage invariant.
     """
     upper = pd.Timestamp(snap_date)
     lower = upper - pd.DateOffset(months=lookback_months)
@@ -36,12 +62,22 @@ def _lookback_window(
         (ts >= F.lit(str(lower.date()))) & (ts < F.lit(str(upper.date())))
     )
     if window.limit(1).count() == 0:
-        logger.warning(
-            "No historical data in [%s, %s) for snap_date=%s; falling "
-            "back to full label_table — baseline may have leakage.",
-            lower.date(), upper.date(), snap_date,
+        available = sorted({
+            str(r[0])
+            for r in label_table.select(
+                F.date_format(ts, "yyyy-MM")
+            ).distinct().collect()
+        })
+        raise ValueError(
+            f"No label_table history in [{lower.date()}, {upper.date()}) "
+            f"for evaluation.snap_date={snap_date!r} (lookback_months="
+            f"{lookback_months}). label_table has months: {available}. "
+            "The baseline cannot be scored without pre-snap_date history — "
+            "backfill label_table further back, lower "
+            "evaluation.baseline.lookback_months, or set "
+            "evaluation.report.sections.baseline: false to skip the "
+            "baseline section entirely."
         )
-        window = label_table
     return window
 
 
@@ -55,8 +91,9 @@ def compute_purchase_counts(
 
     For each ``S`` in ``snap_dates``, count ``sum(label)`` grouped by item
     over ``label_table`` rows whose time falls in
-    ``[S - lookback_months, S)``. When a window is empty, fall back to the
-    full table (with a warning — the baseline may then have leakage).
+    ``[S - lookback_months, S)``. Raises if a window is empty — see
+    ``_lookback_window``'s pre-check (bug 1, ADR-0020): it no longer falls
+    back to the full table.
 
     Returns a DataFrame with columns ``(time_col, item_col, score_col)``
     where ``score_col`` holds the count and ``time_col`` is the string ``S``.
@@ -98,8 +135,9 @@ def compute_monthly_purchase_counts(
 ) -> SparkDataFrame:
     """Per ``(calendar-month, prod_name)`` purchase count within the windows.
 
-    Same windowing (and empty-fallback) as ``compute_purchase_counts``, but
-    instead of collapsing each ``[S - lookback_months, S)`` window into one
+    Same windowing (and empty-window raise, bug 1) as
+    ``compute_purchase_counts``, but instead of collapsing each
+    ``[S - lookback_months, S)`` window into one
     number it breaks the count down by the label row's calendar month
     (``yyyy-MM``). Drives the report's monthly popularity trend.
 

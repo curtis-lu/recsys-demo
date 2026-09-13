@@ -67,7 +67,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import macro_from_per_item
+from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,40 @@ def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
         else:
             out.add(int(k))
     return sorted(out)
+
+
+def _resolve_k_grids(
+    parameters: dict, n_items: int
+) -> tuple[list[int], list[int]]:
+    """``(query_ks, item_ks)``: the per-query and the per-item K grids.
+
+    Two independent axes (ADR-0020 design H). ``evaluation.k_values`` is the
+    K grid of the ``@K`` families. ``evaluation.metric.k`` is the truncation
+    depth of the headline per-item macro only — point estimate and CI alike —
+    and need not be listed in ``k_values``. So:
+
+    * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
+      ``aggregate_overall`` / ``aggregate_per_segment``.
+    * ``item_ks`` = ``k_values`` ∪ {``metric.k``}: ``add_row_contributions``
+      and ``aggregate_per_item`` (per_item and per_item_segment), which is
+      what guarantees ``macro_avg["by_item"][f"map_attr@{metric.k}"]``.
+
+    Putting ``metric.k`` into the per-query grid is wrong without being an
+    error: ``overall`` / ``per_segment`` silently gain ``map@k`` /
+    ``precision@k`` / ``recall@k`` / ``ndcg@k`` that nobody listed, and the
+    comparison report prints every ``overall`` key as a row. ``item_ks`` is a
+    superset of ``query_ks``, so the per-query layer only reads a subset of
+    the enriched columns. ``metric.k=None`` makes the two grids equal.
+
+    ``_compute_core`` and ``compute_overall_per_item`` (the baseline's slim
+    path) both resolve through this one function, so the two sides line up.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), n_items)
+    metric_k = metric_params(parameters)["k"]
+    if metric_k is None:
+        return query_ks, query_ks
+    return query_ks, sorted(set(query_ks) | {metric_k})
 
 
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
@@ -476,13 +510,22 @@ def aggregate_per_item(
     dim_cols: list[str],
     label_col: str,
     k_values: list[int],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict]:
     """Row-equal-weight mean of per-row contributions over label=1 rows.
 
-    ``dim_cols`` can be ``[item_col]`` for per_item or
-    ``[item_col, seg_col]`` for per_item_segment.
+    ``dim_cols`` is ``[item_col]`` for per_item or ``[item_col, seg_col]``
+    for per_item_segment; the output nests one level per column:
 
-    Output per dim key (str-joined with '_' when multi-column):
+        [item_col]          → {item: {metrics…, n_pos}}
+        [item_col, seg_col] → {item: {segment: {metrics…, n_pos}}}
+
+    Two levels rather than a joined string key (ADR-0020 bug 12):
+    ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
+    seg="c")`` into the same key and the later row silently overwrote the
+    earlier one. Any other column count raises ``ValueError``. Dim values
+    are stringified.
+
+    Metrics per cell:
 
         hit_rate@K   = mean(top_k@K) over P-positive rows
                        = P(rank(P) <= K | P is positive)
@@ -503,6 +546,10 @@ def aggregate_per_item(
     (the K denominator is a per-query concept). Use ``hit_rate@K`` for
     the item-level recall analogue.
     """
+    if len(dim_cols) not in (1, 2):
+        raise ValueError(
+            f"aggregate_per_item supports 1 or 2 dim_cols, got {dim_cols!r}"
+        )
     rel = enriched.filter(F.col(label_col) == 1)
 
     aggs = [
@@ -520,15 +567,15 @@ def aggregate_per_item(
     rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
 
     metric_cols = _per_item_metric_cols(k_values)
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, dict] = {}
     for r in rows:
-        if len(dim_cols) == 1:
-            raw_key = r[dim_cols[0]]
-            key = raw_key if isinstance(raw_key, str) else str(raw_key)
+        cell: dict = {c: float(r[c]) for c in metric_cols}
+        cell["n_pos"] = int(r["n_pos"])
+        keys = [str(r[c]) for c in dim_cols]
+        if len(keys) == 1:
+            out[keys[0]] = cell
         else:
-            key = "_".join(str(r[c]) for c in dim_cols)
-        out[key] = {c: float(r[c]) for c in metric_cols}
-        out[key]["n_pos"] = int(r["n_pos"])
+            out.setdefault(keys[0], {})[keys[1]] = cell
     return out
 
 
@@ -635,17 +682,16 @@ def _compute_core(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    k_values_raw = eval_params.get("k_values", [5, "all"])
     segment_columns = eval_params.get("segment_columns", []) or []
-    metric_cfg = eval_params.get("metric", {}) or {}
-    metric_params = {
-        "weight_alpha": float(metric_cfg.get("weight_alpha", 0.0) or 0.0),
-        "min_positives": int(metric_cfg.get("min_positives", 0) or 0),
-        "shrinkage_k": float(metric_cfg.get("shrinkage_k", 0) or 0.0),
+    # macro_average does not take k: metric.k reaches the macro through the
+    # per-item K grid (_resolve_k_grids), so by_item's map_attr@{metric.k} is
+    # the headline point estimate truncated at k.
+    macro_params = {
+        name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
     n_items = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_items)
+    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
@@ -664,7 +710,7 @@ def _compute_core(
             "n_excluded_queries": n_excluded_queries,
         }
 
-    enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
+    enriched = add_row_contributions(df_with_pos, group_cols, label_col, item_ks)
     enriched = enriched.cache()
     try:
         # ---- Detect active segment column ----
@@ -677,40 +723,48 @@ def _compute_core(
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=carry
+            enriched, group_cols, label_col, query_ks, carry_cols=carry
         ).cache()
         try:
             # ---- Layer 3: aggregations ----
-            overall = aggregate_overall(per_query, k_values)
+            overall = aggregate_overall(per_query, query_ks)
             per_item = aggregate_per_item(
-                enriched, [item_col], label_col, k_values
+                enriched, [item_col], label_col, item_ks
             )
 
             per_segment: dict = {}
             per_item_segment: dict = {}
             if active_seg_col:
                 per_segment = aggregate_per_segment(
-                    per_query, active_seg_col, k_values
+                    per_query, active_seg_col, query_ks
                 )
                 per_item_segment = aggregate_per_item(
-                    enriched, [item_col, active_seg_col], label_col, k_values
+                    enriched, [item_col, active_seg_col], label_col, item_ks
                 )
 
-            macro_avg: dict = {"by_item": macro_average(per_item, **metric_params)}
+            macro_avg: dict = {"by_item": macro_average(per_item, **macro_params)}
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
-                # (item, segment) cell 亦受 min_positives 過濾（cell 的
-                # n_pos < 門檻即移出 by_item_segment macro）；觀察名單只在
-                # item 粒度回報，cell 層級不另列。
+                # per_item_segment is two-level {item: {segment: cell}}:
+                # flatten to every (item, segment) cell, then macro with one
+                # vote per cell. Cells are also subject to min_positives (a
+                # cell with n_pos below the threshold leaves the
+                # by_item_segment macro); observation_items is reported at
+                # item grain only, cells are not listed.
+                cells = {
+                    (item, seg): cell
+                    for item, by_seg in per_item_segment.items()
+                    for seg, cell in by_seg.items()
+                }
                 macro_avg["by_item_segment"] = macro_average(
-                    per_item_segment, **metric_params
+                    cells, **macro_params
                 )
 
             observation_items = sorted(
                 it for it, m in per_item.items()
-                if m.get("n_pos", 0) < metric_params["min_positives"]
-            ) if metric_params["min_positives"] > 0 else []
+                if m.get("n_pos", 0) < macro_params["min_positives"]
+            ) if macro_params["min_positives"] > 0 else []
 
             return {
                 "overall": overall,
@@ -764,9 +818,10 @@ def compute_overall_per_item(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    k_values_raw = eval_params.get("k_values", [5, "all"])
     n_items = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_items)
+    # Same grids as _compute_core (metric.k on the per-item side only), so
+    # baseline and model keys line up.
+    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
 
     df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
     df = add_query_total_rel(df, group_cols, label_col)
@@ -776,7 +831,7 @@ def compute_overall_per_item(
         return {"overall": {}, "per_item": {}}
 
     enriched = add_row_contributions(
-        df_with_pos, group_cols, label_col, k_values
+        df_with_pos, group_cols, label_col, item_ks
     ).cache()
     try:
         # Detect active segment column the same way as _compute_core (first
@@ -790,17 +845,17 @@ def compute_overall_per_item(
                     break
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=carry
+            enriched, group_cols, label_col, query_ks, carry_cols=carry
         )
         result = {
-            "overall": aggregate_overall(per_query, k_values),
+            "overall": aggregate_overall(per_query, query_ks),
             "per_item": aggregate_per_item(
-                enriched, [item_col], label_col, k_values
+                enriched, [item_col], label_col, item_ks
             ),
         }
         if active_seg_col:
             result["per_segment"] = aggregate_per_segment(
-                per_query, active_seg_col, k_values
+                per_query, active_seg_col, query_ks
             )
     finally:
         enriched.unpersist()
@@ -840,7 +895,7 @@ def compute_all_metrics(
           "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
           "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
           "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "per_item_segment": {item: {segment: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, n_pos}}},
           "macro_avg": {
               "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
               "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},

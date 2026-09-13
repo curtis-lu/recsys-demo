@@ -82,7 +82,9 @@ evaluation:
   # shrinkage_k=0 ＝ 不收縮。作用順序：min_positives 先排除 → shrinkage 向
   # pooled（n_pos 加權）平均收縮 → weight_alpha 加權（w_j ∝ n_pos^α）。
   # 只作用於 item 粒度（by_item / by_item_segment）；by_segment 維持等權。
-  # k = 診斷側（CI）計算 AP 的截斷 k；null ＝ 不截斷（full mAP）。
+  # k = 主指標家族（per-item macro 的點估與 CI）計算 AP 的截斷 k；null ＝ 不截斷
+  # （full mAP）。跟 k_values 是兩個獨立的軸：不必列在 k_values 裡，主線會自己補算
+  # map_attr@k。
   metric:
     weight_alpha: 0.0
     k: null

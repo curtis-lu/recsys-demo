@@ -58,15 +58,45 @@ def test_purchase_counts_lookback_limits_window(spark):
     assert by_prod["B"] == 0
 
 
-def test_purchase_counts_fallback_when_no_history(spark):
+def test_purchase_counts_raises_when_window_empty(spark):
+    """bug 1 (ADR-0020): an empty lookback window used to silently fall back
+    to the full label_table (which includes the eval month's own answers —
+    the baseline would then rank by the ground truth). The user ruled
+    baseline is load-bearing: raise instead of degrading to a leaky stub."""
+    import pandas as pd
+    import pytest
+
     from recsys_tfb.evaluation.baselines import compute_purchase_counts
 
-    # snap_date before all history -> empty window -> fallback to full table.
-    counts = compute_purchase_counts(
-        _label_table(spark), ["2024-01-01"], 12, _parameters()
-    )
-    by_prod = {r["prod_name"]: r["score"] for r in counts.collect()}
-    assert by_prod["A"] == 3  # full table
+    # label_table holds only the eval month itself (2026-01-31) -> the
+    # [2025-01-31, 2026-01-31) window is empty.
+    label_table = spark.createDataFrame(pd.DataFrame({
+        "snap_date": ["2026-01-31"] * 2,
+        "cust_id": ["h0", "h1"],
+        "prod_name": ["A", "A"],
+        "label": [1, 1],
+    }))
+    with pytest.raises(ValueError) as exc:
+        compute_purchase_counts(label_table, ["2026-01-31"], 12, _parameters())
+    message = str(exc.value)
+    assert "2025-01-31" in message
+    assert "2026-01-31" in message
+    # The months list itself: a bare "2026-01" is always satisfied by the
+    # window bound "2026-01-31" above, whatever the list says.
+    assert "label_table has months: ['2026-01']" in message
+
+
+def test_purchase_counts_no_longer_falls_back_when_no_history(spark):
+    """Same scenario as the old fallback test, restated as a raise (bug 1)."""
+    import pytest
+
+    from recsys_tfb.evaluation.baselines import compute_purchase_counts
+
+    # snap_date before all history -> empty window -> now raises, no fallback.
+    with pytest.raises(ValueError):
+        compute_purchase_counts(
+            _label_table(spark), ["2024-01-01"], 12, _parameters()
+        )
 
 
 def test_build_baseline_frame_replaces_score_and_drops_model_cols(spark):
