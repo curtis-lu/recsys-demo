@@ -95,16 +95,18 @@ __all__ = [
 #:
 #: The node is **the earlier, in topological order, of the key's first reader
 #: and the first node that writes a fingerprinted artifact**
-#: (``compute_baseline_metrics``), not simply the first reader. Every
-#: fingerprinted artifact hashes every row here, so a change makes all of them
-#: stale, and ``--from-node`` must re-run all of their producers. The
-#: ``report.diagnostics`` rows are where the two differ: first read by
-#: ``compute_report_aggregates``, which sorts after ``compute_baseline_metrics``
-#: in both modes. Today the slice pulls the baseline back anyway
-#: (``baseline_metrics`` is memory-only); once #339 lands it on disk, a
-#: ``--from-node compute_report_aggregates`` would leave the baseline's old
-#: fingerprint in place and the next report would raise with the same advice,
-#: a loop with no exit.
+#: (``compute_metrics``), not simply the first reader. Every fingerprinted
+#: artifact hashes every row here, so a change makes all of them stale, and
+#: ``--from-node`` must re-run all of their producers. The ``baseline`` and
+#: ``report.*`` rows are where the two differ: first read by
+#: ``compute_baseline_metrics`` / ``compute_report_aggregates``, which both
+#: sort after ``compute_metrics`` in both modes. Since ``evaluation_metrics``
+#: and ``baseline_metrics`` land on disk (ADR-0018 decision 2), a slice no
+#: longer pulls their producers back on its own, so advising the first reader
+#: would leave ``metrics.json``'s old fingerprint in place and the next report
+#: would raise with the same advice, a loop with no exit. The price is one
+#: extra ``compute_metrics`` when only a baseline or report-aggregate setting
+#: changed.
 #:
 #: ``tests/test_pipelines/test_evaluation/test_pipeline.py::
 #: TestFingerprintRerunNodes`` pins it in both modes: a row whose node sorts
@@ -140,12 +142,13 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.k_values", "compute_metrics"),
     ("evaluation.item_categories", "compute_metrics"),
     ("evaluation.metric", "compute_metrics"),
-    ("evaluation.baseline", "compute_baseline_metrics"),
-    ("evaluation.report.sections.baseline", "compute_baseline_metrics"),
-    # First read by compute_report_aggregates; listed at the baseline, the
-    # first fingerprinted producer, for the reason in the comment above.
-    ("evaluation.report.diagnostics", "compute_baseline_metrics"),
-    ("evaluation.report.sections.diagnostics", "compute_baseline_metrics"),
+    # First read by compute_baseline_metrics / compute_report_aggregates;
+    # listed at compute_metrics, the first fingerprinted producer, for the
+    # reason in the comment above.
+    ("evaluation.baseline", "compute_metrics"),
+    ("evaluation.report.sections.baseline", "compute_metrics"),
+    ("evaluation.report.diagnostics", "compute_metrics"),
+    ("evaluation.report.sections.diagnostics", "compute_metrics"),
 )
 
 _KEY_ORDER = {path: i for i, (path, _) in enumerate(COMPUTED_KEYS)}

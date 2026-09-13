@@ -311,6 +311,17 @@ Layer 1 — config-static (implemented here; aggregated by
   compatibility layer for a key this repo no longer has, and the next reader
   would have to work out which of the two names is real. Leave the code slot
   ``A33`` retired-not-renumbered afterwards, per A16/A17/A18.
+* A34 — ``evaluation.report.sections`` declares exactly the switches the
+  report reads: its key set equals ``EVALUATION_REPORT_SECTIONS``, the constant
+  ``evaluation/report_builder._section_on`` checks every name against. Both
+  directions (ADR-0019 decision 6): a declared key nothing reads is a switch
+  that does nothing (four shipped that way until #351), and a name the report
+  reads that no conf declares is a section on by default with no line to turn
+  it off (``diagnosis_links``). Containment in one direction passes one of the
+  two. The constant lives in ``core/`` because ``core/`` must not import the
+  report layer. An absent or null ``sections`` block is not checked (a visible
+  opt-out to every default); a present block is checked in full. Predicate:
+  ``report_section_key_errors``. Aggregated by ``validate_config_consistency``.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -1471,6 +1482,79 @@ def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
     ]
 
 
+#: The ``evaluation.report.sections`` switches the report reads: one name per
+#: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
+#: which refuses any name not listed here (A34). ``report_builder`` imports this
+#: constant, not the other way round: ``core/`` has no import-time dependency on
+#: the layers above it, and ``report_builder`` drags pandas and plotly in.
+EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
+    "dataset_overview",
+    "primary_map",
+    "diagnostics",
+    "baseline",
+    "diagnosis_links",
+})
+
+
+def report_section_key_errors(parameters: dict) -> list[str]:
+    """A34 — ``evaluation.report.sections`` declares exactly
+    :data:`EVALUATION_REPORT_SECTIONS`.
+
+    Equality, checked in both directions, because each direction alone let a
+    real drift through (ADR-0019 decision 6):
+
+    * declared but not read: ``guardrail_recall``, ``per_item_attr``,
+      ``category`` and ``per_segment`` were declared and set to ``true`` for
+      months while nothing asked about them — switching one off changed
+      nothing, and the troubleshooting table told users to do exactly that;
+    * read but not declared: ``diagnosis_links`` was asked about by the report
+      but absent from the conf, so it was on by default with no line to turn
+      it off.
+
+    A check that fires only when the report asks for a name (the pre-check in
+    ``_section_on``) never sees the first shape, which is why this runs on the
+    conf itself.
+
+    An absent or null ``sections`` block is not checked. Deleting the whole
+    block is a visible opt-out to every default, not a key that drifted
+    quietly; a block that is present is checked in full.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    report = eval_params.get("report", {}) or {}
+    if not isinstance(report, Mapping):
+        return []
+    sections = report.get("sections")
+    if sections is None:
+        return []
+    if not isinstance(sections, Mapping):
+        return [
+            f"A34: evaluation.report.sections={sections!r} must be a mapping "
+            f"of switch name to bool, one key per switch the report reads: "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}."
+        ]
+    declared = set(sections)
+    errors = []
+    unread = declared - EVALUATION_REPORT_SECTIONS
+    if unread:
+        errors.append(
+            f"A34: evaluation.report.sections declares {sorted(unread)}, which "
+            f"the report never reads — setting it changes nothing. Delete the "
+            f"key(s). The switches the report reads are "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}."
+        )
+    undeclared = EVALUATION_REPORT_SECTIONS - declared
+    if undeclared:
+        errors.append(
+            f"A34: evaluation.report.sections does not declare "
+            f"{sorted(undeclared)}, which the report reads — the section is on "
+            f"by default and this conf has no line to turn it off. Declare it "
+            f"(true keeps the current behaviour)."
+        )
+    return errors
+
+
 def validate_config_consistency(parameters: dict) -> None:
     """Layer-1 config-static gate. Collects ALL failures, raises once.
 
@@ -1571,6 +1655,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(numeric_storage_param_errors(parameters))
 
     errors.extend(dataset_source_quality_check_errors(parameters))
+
+    errors.extend(report_section_key_errors(parameters))
 
     # A33 is a migration-period check; it leaves with the migration (see
     # A33 in the module docstring).

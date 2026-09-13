@@ -71,10 +71,16 @@ def _metrics():
     }
 
 
+def _landed_metrics(params):
+    """``_metrics()`` as ``compute_metrics`` lands it under ``params``: with
+    the fingerprint ``generate_report`` checks (ADR-0018 decision 2)."""
+    return {**_metrics(), "config_fingerprint": fingerprint(params)}
+
+
 def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
-    html = generate_report(_metrics(), params,
+    html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
                             aggregates, None)
     assert html.startswith("<!DOCTYPE html>")
@@ -88,7 +94,7 @@ def test_generate_report_with_diagnostics(spark):
     params = _params(True)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
     assert aggregates["config_fingerprint"] == fingerprint(params)
-    html = generate_report(_metrics(), params,
+    html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
                             aggregates, None)
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
@@ -133,12 +139,12 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
     large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
     small = generate_report(
-        _metrics(), params, _unread_stub(params), _unread_stub(params),
-        small_aggregates, None,
+        _landed_metrics(params), params, _unread_stub(params),
+        _unread_stub(params), small_aggregates, None,
     )
     large = generate_report(
-        _metrics(), params, _unread_stub(params), _unread_stub(params),
-        large_aggregates, None,
+        _landed_metrics(params), params, _unread_stub(params),
+        _unread_stub(params), large_aggregates, None,
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -612,11 +618,49 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
     now["evaluation"]["report"]["sections"]["baseline"] = True
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_metrics(), now, baseline, metric_ci, aggregates, None)
+        generate_report(_landed_metrics(computed_with), now, baseline,
+                        metric_ci, aggregates, None)
 
     msg = str(exc.value)
     assert "evaluation.report.sections.baseline" in msg
-    assert "--from-node compute_baseline_metrics" in msg
+    # compute_metrics, not compute_baseline_metrics: metrics.json carries the
+    # same fingerprint and sorts first, so re-running from the baseline would
+    # leave it stale and this raise would repeat (COMPUTED_KEYS).
+    assert "--from-node compute_metrics" in msg
+
+
+def test_generate_report_refuses_metrics_computed_with_other_settings():
+    """``evaluation_metrics`` lands as ``metrics.json`` (ADR-0018 decision 2),
+    so a redraw after a computed key changed must refuse it by name, not draw
+    old metrics under the new settings."""
+    computed_with = _params_computed_without_baseline()
+    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["metric"] = {"min_positives": 5}
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(_landed_metrics(computed_with), now, baseline,
+                        metric_ci, aggregates, None)
+
+    msg = str(exc.value)
+    assert "evaluation_metrics (written by compute_metrics)" in msg
+    assert "--from-node compute_metrics" in msg
+
+
+def test_generate_report_refuses_metrics_without_a_fingerprint():
+    """Every other input is current; only the metrics predate fingerprints.
+    The single stale artifact names its own producer."""
+    params = _params_computed_without_baseline()
+    baseline, metric_ci, aggregates = _landed_inputs(params)
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(_metrics(), params, baseline, metric_ci, aggregates,
+                        None)
+
+    msg = str(exc.value)
+    assert ("evaluation_metrics (written by compute_metrics) has no "
+            "config_fingerprint") in msg
+    assert "--from-node compute_metrics" in msg
 
 
 def test_generate_report_redraws_when_only_drawn_settings_changed():
@@ -628,7 +672,8 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
     now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
     now["evaluation"]["report"]["sections"]["primary_map"] = False
 
-    html = generate_report(_metrics(), now, baseline, metric_ci, aggregates,
+    html = generate_report(_landed_metrics(computed_with), now, baseline,
+                           metric_ci, aggregates,
                            None)
 
     assert html.startswith("<!DOCTYPE html>")

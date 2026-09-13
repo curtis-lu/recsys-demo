@@ -159,7 +159,7 @@ evaluation 可用於訓練完成後的 test set 評估，也可在模型上線�
 
 - **兩種評估情境**：`--post-training` 讀取 training pipeline 產生的 `training_eval_predictions`，用於模型上線前的 test set 評估；預設模式讀取 inference 發布的 `ranked_predictions`，用於模型上線後的定期監控。
   監控情境須等該期 label 觀察窗結束並補齊 ground truth 後執行。
-- **以排序指標為核心**：不論模型使用 pointwise 或 learning-to-rank objective，評估都以 query group 內的相對排序為準，依 `k_values` 計算 mAP、NDCG、precision 與 recall 等 @K 指標，而非逐筆分類準確率。
+- **以排序指標為核心**：不論模型使用 pointwise 或 learning-to-rank objective，評估都以 query group 內的相對排序為準，依 `k_values` 計算 mAP、precision 與 recall 等 @K 指標，而非逐筆分類準確率。
   沒有任何正例的 query group 會從指標計算中排除，並在報表中記錄排除數量。
 - **多層次指標拆解**：除整體指標外，也會計算 per-item attribution、macro average 及資料集概況，協助辨識整體表現是否由少數熱門 item 主導，而非只看單一平均值。
 - **分群評估**：`segment_columns` 列出的欄從該模式的母體表 join 進評估資料（segment 在外部表時可用 `segment_sources` 覆寫），觀察不同族群的排序品質。母體表沒有某欄時不中止，只在 log 與報表註明；覆寫表不存在或缺欄時 fail-fast；母體表對不到值的 query 自成 `(unmatched)` 群，列出但不進 macro 平均。
@@ -204,7 +204,7 @@ evaluation 可用於訓練完成後的 test set 評估，也可在模型上線�
 | `label` | 快照日後 7 天內是否點擊或進入該功能，0 或 1 |
 | 模型輸出 | 每位客戶對各功能的 `score`，以及組內的 `rank` |
 | 下游動作 | 取 Top N 決定首頁模組順序 |
-| 主要指標 | mAP、NDCG 或 Recall@K，依頁面實際可展示的名額選擇 K |
+| 主要指標 | mAP 或 Recall@K，依頁面實際可展示的名額選擇 K |
 
 `label` 代表模型真正會優化的行為。若使用「點擊」作為 label，模型學到的是互動傾向，不等同於申購意願、客戶適合度或預期收益；這些目標需要不同的 label、樣本權重或額外業務規則。
 
@@ -295,7 +295,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 > 目前 inference 的 `validate_predictions` 會檢查 `score` 是否介於 0 與 1；若使用未校準的 ranking objective，需確認模型輸出符合此契約，或同步調整驗證規則。
 
-在 `conf/base/parameters_evaluation.yaml` 設定符合頁面展示空間的 `k_values`。例如首頁只顯示 3 個功能，就應特別關注 mAP@3、NDCG@3 與 Recall@3，並設定重要客群的 `segment_columns`，避免整體指標掩蓋特定客群的退化。
+在 `conf/base/parameters_evaluation.yaml` 設定符合頁面展示空間的 `k_values`。例如首頁只顯示 3 個功能，就應特別關注 mAP@3 與 Recall@3，並設定重要客群的 `segment_columns`，避免整體指標掩蓋特定客群的退化。
 
 ### 執行第一個端到端版本
 
@@ -459,7 +459,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 查看某條 pipeline 的 node 流程圖 | [`dataset-pipeline.html`](docs/diagrams/dataset-pipeline.html)、[`training-pipeline.html`](docs/diagrams/training-pipeline.html)、[`inference-pipeline.html`](docs/diagrams/inference-pipeline.html) |
 | 深入某一條 pipeline | [`source_etl.md`](docs/pipelines/source_etl.md)、[`dataset.md`](docs/pipelines/dataset.md)、[`training.md`](docs/pipelines/training.md)、[`inference.md`](docs/pipelines/inference.md)、[`evaluation.md`](docs/pipelines/evaluation.md) |
 | 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
-| 理解 mAP、NDCG、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
+| 理解 mAP、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
 | 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md) |
 | 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
 | 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、[`training.md` §4.7／§7.3（HPO 中斷接續）](docs/pipelines/training.md) |

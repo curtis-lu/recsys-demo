@@ -8,17 +8,15 @@ def _metrics(map_at_1: float = 0.5, hit_rate_at_3: float = 0.7) -> dict:
     """Minimal metrics dict (compute_all_metrics shape)."""
     return {
         "n_queries": 100, "n_excluded_queries": 0,
-        "overall": {"map@1": map_at_1, "map@3": 0.6, "ndcg@3": 0.65, "recall@3": 0.55},
+        "overall": {"map@1": map_at_1, "map@3": 0.6, "recall@3": 0.55},
         "per_item": {
             "p1": {"hit_rate@1": hit_rate_at_3, "hit_rate@3": 0.8,
-                   "map_attr@1": 0.4, "map_attr@3": 0.5,
-                   "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.55, "mean_pos": 1.5},
+                   "map_attr@1": 0.4, "map_attr@3": 0.5, "mean_pos": 1.5},
             "p2": {"hit_rate@1": 0.5, "hit_rate@3": 0.7,
-                   "map_attr@1": 0.3, "map_attr@3": 0.4,
-                   "ndcg_attr@1": 0.35, "ndcg_attr@3": 0.45, "mean_pos": 2.0},
+                   "map_attr@1": 0.3, "map_attr@3": 0.4, "mean_pos": 2.0},
         },
         "macro_avg": {"by_item": {"hit_rate@1": 0.6, "hit_rate@3": 0.75,
-                                  "map_attr@3": 0.45, "ndcg_attr@3": 0.5}},
+                                  "map_attr@3": 0.45}},
         "dataset_overview": {"totals": {"n_items": 2}},
     }
 
@@ -169,8 +167,7 @@ def test_category_section_present_when_enabled_and_present():
     cat_metrics = {
         "overall": {"map@1": 0.5, "map@3": 0.55},
         "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
-                              "map_attr@1": 0.4, "map_attr@3": 0.5,
-                              "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
+                              "map_attr@1": 0.4, "map_attr@3": 0.5}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
@@ -240,8 +237,7 @@ def test_category_section_discloses_macro_item_coverage():
     cat_metrics = {
         "overall": {"map@1": 0.5, "map@3": 0.55},
         "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
-                              "map_attr@1": 0.4, "map_attr@3": 0.5,
-                              "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
+                              "map_attr@1": 0.4, "map_attr@3": 0.5}},
         "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
@@ -347,52 +343,3 @@ def test_glossary_section_present():
     assert "詞彙" in out or "Glossary" in out
 
 
-def test_overall_section_hides_ndcg():
-    """_build_overall_section 用 set union 把 metrics key 攤成列（key-agnostic），
-    程式碼裡沒有 "ndcg" 字樣也會渲染出來。fixture 帶 ndcg@3，必須被濾掉。"""
-    from recsys_tfb.evaluation.comparison.report import _build_overall_section
-    m_a, m_b = _metrics(0.6), _metrics(0.4)
-    # 3 items keeps @3 under the bug 8 key filter, so ndcg@3 can only be
-    # removed by the ndcg filter this test is about.
-    m_a["dataset_overview"]["totals"]["n_items"] = 3
-    comp = _comparison(m_a, m_b)
-    sec = _build_overall_section(m_a, comp)
-    idx = [str(i) for i in sec.tables[0].index]
-    assert "map@3" in idx, "非 ndcg 的列不該被誤濾"
-    assert not [i for i in idx if i.startswith("ndcg")]
-
-
-def test_category_overall_section_hides_ndcg():
-    """大類 overall 表是第二個 key-agnostic 洩漏點（與 _build_overall_section
-    不同函式）。fixture 必須讓 item_categories.enabled=True 且 metrics 帶
-    category.overall 含 ndcg，否則該段落回 None → 假綠。"""
-    from recsys_tfb.evaluation.comparison.report import _build_category_section
-    m_a, m_b = _metrics(0.6), _metrics(0.4)
-    cat_metrics = {
-        "overall": {"map@1": 0.7, "map@3": 0.75, "ndcg@3": 0.8, "recall@3": 0.6},
-        "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
-                              "map_attr@1": 0.4, "map_attr@3": 0.5,
-                              "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
-        # 3 categories keeps @3 under the bug 8 key filter, so ndcg@3 can
-        # only be removed by the ndcg filter this test is about.
-        "dataset_overview": {"totals": {"n_items": 3}},
-    }
-    m_a["category"] = cat_metrics
-    m_b["category"] = cat_metrics
-    p = _params()
-    p["evaluation"]["item_categories"]["enabled"] = True
-    sec = _build_category_section(m_a, m_b, p)
-    assert sec is not None, "段落回 None 就什麼都沒測到（假綠）"
-    overall = sec.tables[sec.table_titles.index("大類 overall")]
-    idx = [str(i) for i in overall.index]
-    assert "map@3" in idx, "非 ndcg 的列不該被誤濾"
-    assert not [i for i in idx if i.startswith("ndcg")]
-
-
-def test_comparison_html_has_no_ndcg():
-    """端到端：report_comparison.html 整份不得出現 ndcg（含 glossary）。"""
-    m_a, m_b = _metrics(0.6), _metrics(0.4)
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
-    assert "ndcg" not in out.lower()

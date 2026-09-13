@@ -12,6 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
 from recsys_tfb.evaluation.metrics import metric_params
@@ -105,31 +106,25 @@ def _metrics_section_ks(n_items: int) -> list:
 
 _MACRO_LABEL = "Macro 平均"
 
-# metrics_spark 仍會算出 ndcg@k / ndcg_attr@k，但兩份報表都刻意不呈現它們。
-# 下面幾張表把 metrics dict 的 key 直接攤成欄／列（key-agnostic），所以
-# 「不呈現」必須在這裡濾——光是原始碼裡不寫 "ndcg" 字樣擋不住。
-_HIDDEN_METRIC_PREFIXES = ("ndcg",)
-
-
-def _visible_metric_keys(keys) -> list:
-    """濾掉刻意不呈現的 metric key，保留原順序。
-
-    契約以**顯示鍵的命名**為準（prefix 比對），不是以「屬於哪個指標家族」
-    為準——目前擋掉的是 ``ndcg@k``／``ndcg_attr@k``。若日後 metrics_spark
-    把同族但不以 ``ndcg`` 起頭的鍵（例如 ``dcg@k``）曝到攤平表格，需在
-    ``_HIDDEN_METRIC_PREFIXES`` 補上，否則會繞過這層過濾。
-    """
-    return [
-        k for k in keys
-        if not str(k).startswith(_HIDDEN_METRIC_PREFIXES)
-    ]
-
 
 def _report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
 
 
 def _section_on(parameters: dict, name: str) -> bool:
+    """Whether report section ``name`` is switched on (default: on).
+
+    Pre-check: ``name`` is in ``EVALUATION_REPORT_SECTIONS``, the set A34 keeps
+    equal to what the conf declares. A name outside it would read a key no conf
+    declares and quietly default to on, the way ``diagnosis_links`` did.
+    """
+    if name not in EVALUATION_REPORT_SECTIONS:
+        raise ValueError(
+            f"_section_on: {name!r} is not in "
+            f"core.consistency.EVALUATION_REPORT_SECTIONS "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}. Add it there and declare "
+            f"it under evaluation.report.sections (A34)."
+        )
     sections = _report_cfg(parameters).get("sections", {}) or {}
     return bool(sections.get(name, True))
 
@@ -685,7 +680,6 @@ def _families_by_k_table(overall: dict, ks: list, n_items: int) -> pd.DataFrame:
     """單一 per-query aggregate → rows=[map, precision, recall]、cols=@k。
 
     給「單一彙總」用（overall、大類 overall）：只有一個實體，故用指標家族當列。
-    explicit family（map/precision/recall）→ 天然不含 ndcg。
     """
     rows = {}
     for fam in ("map", "precision", "recall"):
@@ -1025,7 +1019,7 @@ def build_baseline_section(
         _add(mdf, "popularity 月度趨勢", True)
 
     # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
-    #     cols=@k（superset），明細收合。explicit family → 天然不含 ndcg。
+    #     cols=@k（superset），明細收合。
     overall_a = comp["result_a"].get("overall", {}) or {}
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]

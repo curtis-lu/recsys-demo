@@ -38,7 +38,7 @@ date: 2026-09-13
 | 類別 | 鍵 | 變了要做什麼 |
 |---|---|---|
 | **算的**（改變 Spark 計算、抽樣，或決定要不要算） | `evaluation.snap_date`、`k_values`、`segment_columns`、`segment_sources`、`item_categories.*`、`baseline.*`、`metric.*`、`diagnosis.*`、`report.diagnostics.*`、**`report.sections.baseline`**、**`report.sections.diagnostics`** | 照錯誤訊息點名的 `--from-node` 重跑（對照表在 `evaluation/config_fingerprint.py` 的 `COMPUTED_KEYS`；不一定是產出那份 JSON 的 node） |
-| **畫的**（只改報表長相） | `report.sections.*` 的其餘鍵、`report.display.*` | `--only-node generate_report`。2026-09-13 更正：原寫「幾秒」；指標與 baseline 還沒落地成 JSON，這一步仍會自動補跑上游 Spark node，要等 ADR-0018 決定 2 落地才是幾秒（見 `evaluation.md` §7.4） |
+| **畫的**（只改報表長相） | `report.sections.*` 的其餘鍵、`report.display.*` | `--only-node generate_report`。2026-09-13 更正：原寫「幾秒」。當時指標與 baseline 還沒落地成 JSON，這一步仍會自動補跑上游 Spark node。ADR-0018 決定 2 在 #351 落地之後，這一步不重算任何指標，補跑集合只剩一個不跑 Spark 計算的 node（見 `evaluation.md` §4.6）；CLI 啟動仍會初始化 Spark session，所以不是字面上的幾秒 |
 
 `report.sections` 裡那兩個鍵歸「算的」，因為它們**決定要不要算**：`baseline: false` 讓 `compute_baseline_metrics` 直接回 stub、`diagnostics: false` 讓 `compute_report_aggregates` 回 stub（bug 1 的決定也依賴前者）。把它們當「畫的」，改了只重繪就會得到缺段報表——正是本決定要消滅的形態。
 

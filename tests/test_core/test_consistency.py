@@ -2931,6 +2931,77 @@ class TestDatasetSourceQualityChecksA32:
             ), name
 
 
+# --- A34: evaluation.report.sections declares exactly what the report reads --
+
+from recsys_tfb.core import consistency as _consistency_module
+from recsys_tfb.core.consistency import (
+    EVALUATION_REPORT_SECTIONS,
+    report_section_key_errors,
+)
+
+
+def _sections_params(sections):
+    return {"evaluation": {"report": {"sections": sections}}}
+
+
+class TestReportSectionKeysA34:
+    """A34 — ``evaluation.report.sections`` declares exactly the switches the
+    report reads (``EVALUATION_REPORT_SECTIONS``), checked in both directions.
+
+    One direction alone lets a drift through: "declared ⊆ read" passed
+    ``diagnosis_links`` (read, never declared, so impossible to switch off),
+    and "read ⊆ declared" passed the four switches nothing read.
+    """
+
+    def test_the_shipped_conf_declares_exactly_the_read_sections(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        conf = Path(__file__).resolve().parents[2] / "conf"
+        params = ConfigLoader(str(conf), env="local").get_parameters()
+        assert report_section_key_errors(params) == []
+
+    def test_a_declared_switch_nothing_reads_is_reported(self):
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections["per_segment"] = True
+        errors = report_section_key_errors(_sections_params(sections))
+        assert len(errors) == 1
+        assert "'per_segment'" in errors[0]
+
+    def test_a_read_switch_left_undeclared_is_reported(self, monkeypatch):
+        """The shape of adding a ``_section_on("new_section")`` call and its
+        name to the constant without declaring it in the YAML."""
+        declared = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        monkeypatch.setattr(
+            _consistency_module, "EVALUATION_REPORT_SECTIONS",
+            EVALUATION_REPORT_SECTIONS | {"new_section"},
+        )
+        errors = report_section_key_errors(_sections_params(declared))
+        assert len(errors) == 1
+        assert "'new_section'" in errors[0]
+
+    def test_an_absent_block_is_not_checked(self):
+        assert report_section_key_errors({}) == []
+        assert report_section_key_errors({"evaluation": {"report": {}}}) == []
+        assert report_section_key_errors(_sections_params(None)) == []
+
+    def test_a_block_that_is_not_a_mapping_is_reported(self):
+        errors = report_section_key_errors(_sections_params(["baseline"]))
+        assert len(errors) == 1
+        assert errors[0].startswith("A34: evaluation.report.sections")
+
+    def test_wired_into_validate_config_consistency(self):
+        p = _base({"inference": {"products": ["a", "b"]}})
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections["guardrail_recall"] = True
+        p.setdefault("evaluation", {}).setdefault("report", {})[
+            "sections"] = sections
+        with pytest.raises(ConfigConsistencyError,
+                           match=r"A34: evaluation\.report\.sections"):
+            validate_config_consistency(p)
+
+
 # --- A33: migration-period check for the #327 config key rename --------------
 
 from recsys_tfb.core.consistency import (

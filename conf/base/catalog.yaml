@@ -327,6 +327,19 @@ evaluation_segment_columns:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/segment_columns.json
 
+# --- Evaluation pipeline — 指標（ADR-0018 決定 2）---
+# compute_metrics／compute_baseline_metrics 的輸出落地：重繪主報表不必重算指標，也留下
+# 機器可讀的指標歷史。兩份都帶 config_fingerprint，generate_report 讀回時比對，設定變了
+# 就擋下；report.sections.baseline: false 時 baseline_metrics 是 {"enabled": false} stub
+# （一樣帶指紋）。
+evaluation_metrics:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/metrics.json
+
+baseline_metrics:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/baseline_metrics.json
+
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
 evaluation_metric_ci:
   type: JSONDataset
@@ -350,7 +363,11 @@ evaluation_suppression:
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/suppression.json
 
 # 主報表診斷區的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
-# 落地的理由不只是快取：generate_report 因此變成純函式，主報表可以離線重繪。
+# 落地的理由不只是快取：generate_report 因此是純函式。它的六個輸入裡四份是落地 JSON
+# （本條、evaluation_metrics、baseline_metrics、evaluation_metric_ci）、一份是
+# parameters，診斷頁清單由不跑 Spark 的 node 補（監控 no_diagnosis_pages、
+# --post-training render_diagnosis_pages），所以 --only-node generate_report 不重算任何
+# 指標就能重繪主報表（ADR-0018 決定 2；補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
 evaluation_report_aggregates:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report_aggregates.json

@@ -189,6 +189,8 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 
 單獨刪鍵不夠的理由：症狀掃掉了，下次再長出來沒人擋。
 
+**實作註（2026-09-13，#351）**：不變量代號是 **A34**，predicate 是 `core/consistency.py::report_section_key_errors`，接在 `validate_config_consistency`；`_section_on` 的前置檢查 raise `ValueError`。本份沒寫到的一個邊界這樣定：`evaluation.report.sections` 整塊不在（或是 `null`）時不檢查。整塊刪掉是明顯的「全部用預設」，不是某個鍵悄悄漂走；有寫這一塊，就逐鍵雙向比對。
+
 ## 決定 7：稽核 G 升格為 bug，本份只登記機制去重
 
 `restrict_to_common`（`comparison_nodes.py`）自己做兩次 item collect ＋ 兩次 count ＋ 一次 intersect count，而 `comparison/alignment.py::common_universe` 內部**再 collect 一次**同樣的 item 集合。複核發現更重的事：兩處對「共同母體」的**定義不同**——node 用 `[time]+entity` 做 `intersect()`，`alignment.py` 用 `entity` 做 `left_semi`，而 `alignment.py` 自己的註解逐字說明為什麼 `intersect` 是錯的（NULL 的語意）。印進 `report_comparison.html` coverage 段的數字，跟實際被保留的母體不是同一個量。

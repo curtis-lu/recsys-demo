@@ -5,30 +5,35 @@ Layered structure (each layer has a single responsibility):
     Layer 1: row-level enrichment              (Spark DF → Spark DF, +columns)
         rank_within_query              (Window: pos)
         add_query_total_rel            (Window: total_rel)
-        add_row_contributions          (cum_rel, prec_at_pos, dcg_term,
-                                        top_k@K, ap_contrib@K, ndcg_contrib@K)
+        add_row_contributions          (cum_rel, prec_at_pos,
+                                        top_k@K, ap_contrib@K)
 
     Layer 2: per-query metrics                 (Spark DF → Spark DF)
         compute_per_query_metrics      one row per query;
                                        columns: group_cols, total_rel,
-                                                map@K, ndcg@K,
-                                                precision@K, recall@K
+                                                map@K, precision@K, recall@K
 
     Layer 3: aggregations                      (Spark DF → Python dict)
         aggregate_overall              query-equal-weight mean of per-query
         aggregate_per_segment          query-equal-weight mean within segment
         aggregate_per_item             row-equal-weight mean over P-positive
                                        rows; emits hit_rate@K / map_attr@K /
-                                       ndcg_attr@K / mean_pos
+                                       mean_pos
 
     Layer 4: orchestrator
         compute_all_metrics            wires everything; reads parameters
 
+NDCG is not computed (ADR-0018 decision 4): no report or artifact read it, and
+training scores its test set through ``compute_all_metrics`` too, so every
+``ndcg@K`` was paid for and then dropped. LightGBM's own ``ndcg`` early-stopping
+metric (``training.algorithm_params.metric``) is a different thing and is not
+affected.
+
 Naming convention (intentional, NOT pandas-mirroring):
-    * ``@K`` keys (map@K, ndcg@K, precision@K, recall@K) live in
+    * ``@K`` keys (map@K, precision@K, recall@K) live in
       ``overall`` / ``per_segment`` — they are *per-query metrics aggregated
       across queries*. K names the per-query truncation point.
-    * ``_attr@K`` keys (map_attr@K, ndcg_attr@K) live in ``per_item`` —
+    * ``_attr@K`` keys (map_attr@K) live in ``per_item`` —
       they are *per-row attribution contributions averaged across all rows
       where the item appears as a positive*. The "attribution" suffix marks
       them as fragments of per-query metrics, not per-query metrics
@@ -112,7 +117,7 @@ def _resolve_k_grids(
 
     Putting ``metric.k`` into the per-query grid is wrong without being an
     error: ``overall`` / ``per_segment`` silently gain ``map@k`` /
-    ``precision@k`` / ``recall@k`` / ``ndcg@k`` that nobody listed, and the
+    ``precision@k`` / ``recall@k`` that nobody listed, and the
     comparison report prints every ``overall`` key as a row. ``item_ks`` is a
     superset of ``query_ks``, so the per-query layer only reads a subset of
     the enriched columns. ``metric.k=None`` makes the two grids equal.
@@ -367,18 +372,11 @@ def add_row_contributions(
     Always added:
         cum_rel       cumulative positives up to & including this position
         prec_at_pos   cum_rel / pos
-        dcg_term      label / log2(pos + 1)
 
     Per K:
         top_k@K       1.0 if pos <= K else 0.0
         ap_contrib@K  prec_at_pos * label * top_k@K
                       (sum over a query's label=1 rows = numerator of AP@K)
-        ndcg_contrib@K
-                      (dcg_term * top_k@K) / iDCG@K
-                      iDCG@K = sum_{i=1..min(total_rel, K)} 1 / log2(i + 1)
-                      computed inline with Spark's aggregate(sequence(...));
-                      no UDF, no collect-and-broadcast.
-                      Sum over a query's rows = nDCG@K for that query.
     """
     w_cum = (
         Window.partitionBy(*group_cols)
@@ -387,9 +385,6 @@ def add_row_contributions(
     )
     df = df.withColumn("cum_rel", F.sum(F.col(label_col)).over(w_cum))
     df = df.withColumn("prec_at_pos", F.col("cum_rel") / F.col("pos"))
-    df = df.withColumn(
-        "dcg_term", F.col(label_col) / F.log2(F.col("pos") + F.lit(1))
-    )
 
     for k in k_values:
         df = df.withColumn(
@@ -399,18 +394,6 @@ def add_row_contributions(
             f"ap_contrib@{k}",
             F.col("prec_at_pos") * F.col(label_col) * F.col(f"top_k@{k}"),
         )
-        idcg_at_k = F.aggregate(
-            F.sequence(F.lit(1), F.least(F.col("total_rel"), F.lit(k))),
-            F.lit(0.0),
-            lambda acc, i: acc + F.lit(1.0) / F.log2(i.cast("double") + F.lit(1.0)),
-        )
-        df = df.withColumn(
-            f"ndcg_contrib@{k}",
-            F.when(
-                idcg_at_k > 0,
-                F.col("dcg_term") * F.col(f"top_k@{k}") / idcg_at_k,
-            ).otherwise(F.lit(0.0)),
-        )
     return df
 
 
@@ -419,7 +402,7 @@ def add_row_contributions(
 # ---------------------------------------------------------------------------
 
 
-_PER_QUERY_KINDS = ("map", "ndcg", "precision", "recall")
+_PER_QUERY_KINDS = ("map", "precision", "recall")
 
 
 def _per_query_metric_cols(k_values: list[int]) -> list[str]:
@@ -438,13 +421,12 @@ def compute_per_query_metrics(
 
     Output columns:
         group_cols, total_rel,
-        map@K, ndcg@K, precision@K, recall@K for each K,
+        map@K, precision@K, recall@K for each K,
         plus any column in ``carry_cols`` (taken via F.first within the query —
         valid for per-customer attributes constant within a query, e.g. segment).
 
     Per-query formulas:
         map@K        = sum(ap_contrib@K)             / total_rel
-        ndcg@K       = sum(ndcg_contrib@K)            -- already iDCG-normalized
         precision@K  = sum(label * top_k@K) / K
         recall@K     = sum(label * top_k@K) / total_rel
 
@@ -460,7 +442,6 @@ def compute_per_query_metrics(
         sums.extend(
             [
                 F.sum(f"ap_contrib@{k}").alias(f"_ap_sum_{k}"),
-                F.sum(f"ndcg_contrib@{k}").alias(f"_ndcg_sum_{k}"),
                 F.sum(F.col(label_col) * F.col(f"top_k@{k}")).alias(f"_hits_{k}"),
             ]
         )
@@ -471,10 +452,9 @@ def compute_per_query_metrics(
         per_query = (
             per_query
             .withColumn(f"map@{k}", F.col(f"_ap_sum_{k}") / F.col("total_rel"))
-            .withColumn(f"ndcg@{k}", F.col(f"_ndcg_sum_{k}"))
             .withColumn(f"precision@{k}", F.col(f"_hits_{k}") / F.lit(k))
             .withColumn(f"recall@{k}", F.col(f"_hits_{k}") / F.col("total_rel"))
-            .drop(f"_ap_sum_{k}", f"_ndcg_sum_{k}", f"_hits_{k}")
+            .drop(f"_ap_sum_{k}", f"_hits_{k}")
         )
 
     keep = list(group_cols) + ["total_rel"] + carry_cols + _per_query_metric_cols(k_values)
@@ -491,7 +471,7 @@ def aggregate_overall(
 ) -> dict[str, float]:
     """Equal-query weight mean of per-query metrics.
 
-    Returns flat dict ``{map@K, ndcg@K, precision@K, recall@K}`` for each K.
+    Returns flat dict ``{map@K, precision@K, recall@K}`` for each K.
     Caller is responsible for interpreting precision@K / recall@K when
     K >= n_items (see module docstring).
     """
@@ -506,7 +486,7 @@ def aggregate_per_segment(
     """Equal-query weight mean of per-query metrics, grouped by ``seg_col``.
 
     ``per_query`` must carry ``seg_col`` (pass it via ``carry_cols`` when
-    building per_query). Returns ``{seg_value: {map@K, ndcg@K, precision@K,
+    building per_query). Returns ``{seg_value: {map@K, precision@K,
     recall@K}}``; the seg_value is stringified when not already a string.
     """
     metric_cols = _per_query_metric_cols(k_values)
@@ -525,7 +505,7 @@ def _per_item_metric_cols(k_values: list[int]) -> list[str]:
     """Metric column names emitted by aggregate_per_item (per K + mean_pos)."""
     cols = ["mean_pos"]
     for k in k_values:
-        cols.extend([f"hit_rate@{k}", f"map_attr@{k}", f"ndcg_attr@{k}"])
+        cols.extend([f"hit_rate@{k}", f"map_attr@{k}"])
     return cols
 
 
@@ -558,9 +538,6 @@ def aggregate_per_item(
                        (per-row AP@K contribution averaged across all
                         queries where P is positive; carries cumulative-
                         precision weighting)
-        ndcg_attr@K  = mean(ndcg_contrib@K) over P-positive rows
-                       (per-row nDCG@K contribution; log-discount weighted,
-                        normalized by query-level iDCG@K)
         mean_pos     = mean(pos) over P-positive rows
                        (average ranked position of P when it is the truth)
         n_pos        = count of P-positive rows (weight source for macro_average)
@@ -585,7 +562,6 @@ def aggregate_per_item(
             [
                 F.mean(f"top_k@{k}").alias(f"hit_rate@{k}"),
                 F.mean(f"ap_contrib@{k}").alias(f"map_attr@{k}"),
-                F.mean(f"ndcg_contrib@{k}").alias(f"ndcg_attr@{k}"),
             ]
         )
     rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
@@ -921,14 +897,14 @@ def compute_all_metrics(
     Returns::
 
         {
-          "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
-          "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
-          "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "per_item_segment": {item: {segment: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, n_pos}}},
+          "overall":          {map@K, precision@K, recall@K, ...},
+          "per_segment":      {seg_value: {map@K, precision@K, recall@K, ...}},
+          "per_item":         {item: {hit_rate@K, map_attr@K, mean_pos, ...}},
+          "per_item_segment": {item: {segment: {hit_rate@K, map_attr@K, mean_pos, n_pos}}},
           "macro_avg": {
-              "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
-              "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
-              "by_item_segment": {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},
+              "by_segment":      {map@K, precision@K, recall@K, ...},
+              "by_item":         {hit_rate@K, map_attr@K, mean_pos, ...},
+              "by_item_segment": {hit_rate@K, map_attr@K, mean_pos, ...},
           },
           "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
           "n_queries":          int  (total distinct queries before filtering),
@@ -949,7 +925,7 @@ def compute_all_metrics(
         }
 
     Queries with zero positives are excluded from the metric computation
-    (AP and nDCG are undefined when total_rel = 0).
+    (AP is undefined when total_rel = 0).
     """
     result = _compute_core(eval_predictions, parameters, segment_columns)
     result["dataset_overview"] = compute_dataset_overview(

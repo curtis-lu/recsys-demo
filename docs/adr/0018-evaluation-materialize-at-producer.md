@@ -151,6 +151,11 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 
 **必須跟 bug 2 綁在一起**：診斷 JSON 的路徑只用 `${model_version}` 與 `${snap_date}` 當 key，不含任何 config 指紋，所以改了 `evaluation.metric.*` 再切片重繪會得到新舊混合的報表、退出碼 0（稽核 bug 2，複核實跑重現）。落地兩份新 JSON 等於把這個形態多鋪到兩個產物上。所以順序是：bug 那一輪先決定 bug 2 怎麼修（指紋、或切片時 fail loud、或別的），新條目照同一套規則落地。**本決定不替 bug 2 選修法。**
 
+**實作更正（2026-09-13，#351）**：
+
+- 票面說 `compute_metrics` 的 `config_fingerprint` 在 Phase 0 已經帶上，實際沒有，只有 `compute_baseline_metrics` 帶了。本張補上；不補的話落地的 `metrics.json` 沒有指紋可比。
+- 落地之後，`compute_metrics` 成為拓撲序上第一個寫帶指紋產物的 node。指紋對每份產物都 hash 全部「算的」鍵（ADR-0020 決定 2），所以 `evaluation/config_fingerprint.py` 的 `COMPUTED_KEYS` 裡原本指向 `compute_baseline_metrics` 的四列（`evaluation.baseline`、`report.sections.baseline`、`report.diagnostics`、`report.sections.diagnostics`）改指 `compute_metrics`。不改的話，照錯誤訊息 `--from-node compute_baseline_metrics` 重跑會留下舊指紋的 `metrics.json`，下一次重繪用同一句建議再擋一次，走不出去。代價：只改 baseline 或報表聚合的設定時，接續會多算一次指標。`tests/test_pipelines/test_evaluation/test_pipeline.py::TestFingerprintRerunNodes` 釘住。
+
 ---
 
 ## 決定 3：`compute_dataset_overview` 的固定 job 數收斂到 ≤ 20
@@ -256,15 +261,22 @@ Phase 0   bug 修正（notes 裡的清單，另開一場討論逐條定行為）
             必含：bug 13（本份決定 5 的兩件事——模式清單、inference 多一欄）
                   bug 15（rank 在 ranked_predictions 是 BIGINT、prepare_eval_data 補的是 INT，
                           同一張表換模式寫會被 _evolve_schema 的 type conflict 擋下；見〈驗收〉）
-Phase 1   本份其餘決定，建議的落地順序：
-            決定 2（metrics JSON）  ← 先做，之後每張 PR 的驗證變成 diff 兩個 JSON
-            決定 1（物化 ＋ month_plans ＋ AST 護欄）← 決定 5 第 1 件已在 Phase 0 落地
-            決定 3 ＋ 決定 4（job 收斂、NDCG 停算）
-            ADR-0019 決定 6（report.sections 刪死鍵 ＋ 雙向不變量）——它改 conf/，所以在這裡而不在 Phase 2
+Phase 1   本份其餘決定，實際切成三張票：
+            P1-1 #351  決定 2（metrics JSON）＋ 決定 4（NDCG 停算）
+                       ＋ ADR-0019 決定 6（report.sections 刪死鍵 ＋ 雙向不變量）
+            P1-2 #352  決定 1（物化 ＋ month_plans ＋ AST 護欄）← 決定 5 第 1 件已在 Phase 0 落地
+            P1-3 #353  決定 3（job 收斂）
 Phase 2   ADR-0019 的結構搬移，一張票
 ```
 
 PR 怎麼切交給 `/to-spec`、`/to-ticket`，**偏粗不偏細**：切點只看「這一半有沒有比測試綠更強的證據」（flow 規則 4），不看行數。
+
+**2026-09-13 更正（#351）**：本段第一版建議的順序是「決定 2 → 決定 1 → 決定 3＋決定 4 → ADR-0019 決定 6」。實際切法改了兩處——決定 4 從決定 3 那張搬出來、ADR-0019 決定 6 從最後搬到最前——理由如下：
+
+- **P1-1 三件放一張**：三件的「行為沒變」是同一種證據——測試，加上主報表與比較報表的 HTML 跟 main 比、差異只剩 main 自己跑兩次的 noise floor（flow 規則 9）。三件都不需要 Spark 量測台架，放一起不會讓哪一件的證據變弱（flow 規則 4）。ADR-0019 決定 6 改的是 `conf/`，本來就不能進 Phase 2 的純結構票，沒有理由等到 Phase 1 最後。
+- **P1-1 排第一**：P1-2 的驗收〈所有 JSON 產物一致〉要把指標 JSON 算進去，那份 JSON 得先在 main 上存在。
+- **P1-2 在 P1-3 之前**：決定 3 的 job 數基線要在決定 1 落地之後量（決定 3 驗收第 2 條），P1-2 重建的量測台架 P1-3 直接沿用。
+- **決定 3 單獨一張、不再帶決定 4**：它的證據（event log 數 job、受控實驗護住牆鐘）只有它需要。NDCG 停算的證據是 HTML 不變，跟它綁在一起只會讓 NDCG 等台架。
 
 ---
 

@@ -22,7 +22,6 @@ def _make_result_dict(seed: int) -> dict:
 
     overall = {
         "map@3": float(rng.rand()),
-        "ndcg@3": float(rng.rand()),
         "precision@3": float(rng.rand()),
         "recall@3": float(rng.rand()),
     }
@@ -30,7 +29,6 @@ def _make_result_dict(seed: int) -> dict:
         it: {
             "hit_rate@3": float(rng.rand()),
             "map_attr@3": float(rng.rand()),
-            "ndcg_attr@3": float(rng.rand()),
             "mean_pos": float(rng.rand() * 3 + 1),
         }
         for it in items
@@ -38,7 +36,6 @@ def _make_result_dict(seed: int) -> dict:
     per_segment = {
         s: {
             "map@3": float(rng.rand()),
-            "ndcg@3": float(rng.rand()),
             "precision@3": float(rng.rand()),
             "recall@3": float(rng.rand()),
         }
@@ -49,7 +46,6 @@ def _make_result_dict(seed: int) -> dict:
             s: {
                 "hit_rate@3": float(rng.rand()),
                 "map_attr@3": float(rng.rand()),
-                "ndcg_attr@3": float(rng.rand()),
                 "mean_pos": float(rng.rand() * 3 + 1),
             }
             for s in segments

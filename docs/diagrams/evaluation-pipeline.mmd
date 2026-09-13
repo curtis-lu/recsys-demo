@@ -23,15 +23,20 @@
 %%     restrict_to_common         共同 entity 或 item 為空（B3，在 common_universe 裡）
 %%   唯一獨立成 node 的檢查是 --compare-only 的第一個 node（B4，見下）。
 
-%% 這張圖最違反直覺的一件事：實線膠囊與虛線膠囊的分布跟直覺相反
-%%   四份診斷 JSON、metric_ci、report_aggregates **有** catalog entry（會落地）；
-%%   而 evaluation_metrics、baseline_metrics、evaluation_diagnosis_pages
-%%   **沒有**。後果：切片的停止條件是 can_load（＝檔案在不在），所以
-%%   `--only-node generate_report` 會沿著虛線那三條一路把
+%% #351 起 evaluation_metrics、baseline_metrics 落地成 JSONDataset
+%%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
+%%   baseline_metrics.json，皆含 config_fingerprint；report.sections.baseline: false
+%%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟四份診斷
+%%   JSON、metric_ci、report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
+%%   仍是虛線膠囊（MemoryDataset，沒有 catalog entry）的只剩 evaluation_diagnosis_pages。
+%%   後果：切片的停止條件是 can_load（＝檔案在不在），所以 `--only-node generate_report`
+%%   現在只會自動補跑一個不碰 Spark 的 node——監控模式是 no_diagnosis_pages，
+%%   --post-training 是 render_diagnosis_pages（它的四個診斷輸入本身已落地，
+%%   can_load 直接讀舊檔，不會重跑診斷）；不會再沿線把
 %%   prepare_eval_data / compute_metrics / compute_baseline_metrics
-%%   全部拉回來重跑全量 Spark，而實線那幾份直接讀舊檔。
-%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來是為了「便宜重繪」
-%%   而做的投資，這條 catalog 的缺口把它抵銷掉了。
+%%   拉回來重跑全量 Spark。
+%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來就是為了「便宜重繪」
+%%   而做的投資，#351 之前這條 catalog 缺口把它抵銷掉，補上後才真的便宜。
 %%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
 %%   改了算的設定再 --only-node 重繪，render_diagnosis_pages／generate_report
@@ -85,9 +90,9 @@ flowchart TB
 
   %% ---------------------- 指標流 ----------------------
   n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ dataset_overview ＋（可選）category</small>"]
-  d_metrics(["evaluation_metrics"])
+  d_metrics(["evaluation_metrics<br/><small>JSON</small>"])
   n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數</small>"]
-  d_baseline(["baseline_metrics"])
+  d_baseline(["baseline_metrics<br/><small>JSON</small>"])
   n_agg["compute_report_aggregates<br/><small>主報表診斷區的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
@@ -203,6 +208,6 @@ flowchart TB
   class cfg_cat cfg
   class art_gain art
   class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_persist,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg data
-  class d_eval,d_metrics,d_baseline,d_sample,d_pages,d_braw,d_common mem
+  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline data
+  class d_eval,d_sample,d_pages,d_braw,d_common mem
   class o_report,o_enriched,o_creport out

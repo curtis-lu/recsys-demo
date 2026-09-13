@@ -93,7 +93,7 @@
   <span class="lg"><span class="sw round" style="background:var(--out-bg);border-color:var(--out-bd)"></span>別的 pipeline／別的模式會吃的產物</span>
 </div>
 <div class="legend" style="margin-top:8px">
-  <span class="lg"><span class="tag">虛線邊</span>本圖只有 <code>render_diagnosis_pages</code> 的四條入邊是虛線，那是 #342 之前的畫法（值不讀、按檔名讀磁碟）；#342 起它們是資料流。這張預渲染圖只更新了文字，線型沒有重新產生，以 <code>evaluation-pipeline.mmd</code> 為準。#344 新增的 <code>evaluation_segment_columns</code>（<code>prepare_eval_data</code> 的第二個 output，餵給分群的 node）與它的五條邊同樣只畫在 <code>.mmd</code> 裡；本圖只更新了分群來源的文字。#345 起 <code>restrict_to_common</code> 不再讀 <code>label_table</code>（B 側抄 A 側的 label），圖上 <code>label_table</code> 到它的那條入邊同樣只在 <code>.mmd</code> 拿掉。</span>
+  <span class="lg"><span class="tag">虛線邊</span>本圖只有 <code>render_diagnosis_pages</code> 的四條入邊是虛線，那是 #342 之前的畫法（值不讀、按檔名讀磁碟）；#342 起它們是資料流。這張預渲染圖只更新了文字，線型沒有重新產生，以 <code>evaluation-pipeline.mmd</code> 為準。#344 新增的 <code>evaluation_segment_columns</code>（<code>prepare_eval_data</code> 的第二個 output，餵給分群的 node）與它的五條邊同樣只畫在 <code>.mmd</code> 裡；本圖只更新了分群來源的文字。#345 起 <code>restrict_to_common</code> 不再讀 <code>label_table</code>（B 側抄 A 側的 label），圖上 <code>label_table</code> 到它的那條入邊同樣只在 <code>.mmd</code> 拿掉。#351 起 <code>evaluation_metrics</code>、<code>baseline_metrics</code> 落地成 catalog 條目，膠囊應改畫實線；這張預渲染 SVG 同樣沒有重新產生，圖上這兩個節點目前仍是虛線（MemoryDataset 樣式），文字已更新、形狀以 <code>.mmd</code> 為準。</span>
 </div>
 <p class="sub" style="margin-top:6px">本圖<b>沒有</b>姊妹圖那兩種形狀：沒有六角形的閘、也沒有失敗路徑終點。evaluation 的檢查都寫在 node 裡、標為前置檢查，不是獨立的閘 node：<code>prepare_eval_data</code>（<code>label_table</code> 重複 key，bug 10）、<code>compute_baseline_metrics</code>（lookback 視窗沒有歷史，bug 1）、<code>generate_report</code>／<code>render_diagnosis_pages</code>／吃別項診斷結果的診斷 node（設定指紋不合，bug 2；<code>render_diagnosis_pages</code> 另擋診斷結果接錯，bug 9）、<code>restrict_to_common</code>（共同 entity 或 item 為空，B3）。
 唯一獨立成 node 的檢查是 <code>--compare-only</code> 的第一個 node（B4：指定 <code>snap_date</code> 沒有 row 就中止）。</p>
@@ -110,13 +110,18 @@
     與 <code>render_diagnosis_pages</code>，報表沒有診斷入口（ADR-0018 決定 5）。<code>generate_report</code> 是位置綁定、六個必填輸入，
     所以監控模式由 <code>no_diagnosis_pages</code> 供一份空清單：它什麼都不讀。不沿用 <code>render_diagnosis_pages</code> 是因為那個
     要求每項 registry 診斷各一份帶名字的結果，監控模式一份都沒算。</li>
-  <li><b>實線膠囊與虛線膠囊的分布跟直覺相反，而這決定了重繪要花多少錢。</b>
-    四份診斷 JSON、<code>evaluation_metric_ci</code>、<code>evaluation_report_aggregates</code> <b>有</b> catalog entry（會落地）；
-    而 <code>evaluation_metrics</code>、<code>baseline_metrics</code>、<code>evaluation_diagnosis_pages</code> <b>沒有</b>。
-    切片的停止條件是 <code>can_load</code>（＝檔案在不在），所以 <code>--only-node generate_report</code>
-    會沿著虛線那幾條一路把 <code>prepare_eval_data</code>、<code>compute_metrics</code>、<code>compute_baseline_metrics</code>
-    全部拉回來重跑全量 Spark，而實線那幾份直接讀舊檔。
-    <code>generate_report</code> 做成純函式本來就是為了「便宜重繪」的投資，這個缺口把它抵銷掉了。</li>
+  <li><b>#351 起 <code>evaluation_metrics</code>、<code>baseline_metrics</code> 落地成 catalog 條目，這決定了重繪要花多少錢。</b>
+    四份診斷 JSON、<code>evaluation_metric_ci</code>、<code>evaluation_report_aggregates</code>、<code>evaluation_metrics</code>、
+    <code>baseline_metrics</code> <b>有</b> catalog entry（<code>evaluation_metrics</code> / <code>baseline_metrics</code> 是
+    <code>JSONDataset</code>，落地到 <code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/</code>，皆含
+    <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是
+    <code>{"enabled": false, "config_fingerprint": ...}</code> stub）；仍<b>沒有</b> catalog entry 的只剩
+    <code>evaluation_diagnosis_pages</code>。切片的停止條件是 <code>can_load</code>（＝檔案在不在），所以
+    <code>--only-node generate_report</code> 現在只會自動補跑一個不碰 Spark 的 node——監控模式是
+    <code>no_diagnosis_pages</code>，<code>--post-training</code> 是 <code>render_diagnosis_pages</code>（它的四個診斷輸入
+    本身已落地，<code>can_load</code> 直接讀舊檔，不會重跑診斷）；不會再沿線把 <code>prepare_eval_data</code>、
+    <code>compute_metrics</code>、<code>compute_baseline_metrics</code> 拉回來重跑全量 Spark。
+    <code>generate_report</code> 做成純函式本來就是為了「便宜重繪」的投資，#351 之前這個缺口把它抵銷掉，補上後才真的便宜。</li>
   <li><b>那些落地的 JSON，路徑只用 <code>(model_version, snap_date)</code> 當 key；設定指紋寫在檔內（#342）。</b>
     每份落地 JSON 帶 <code>config_fingerprint</code>，只涵蓋「算的」設定。改了算的設定再 <code>--only-node generate_report</code>，
     <code>render_diagnosis_pages</code>／<code>generate_report</code> 會在畫之前 raise，訊息指出哪個鍵變了、該 <code>--from-node</code> 哪個 node；

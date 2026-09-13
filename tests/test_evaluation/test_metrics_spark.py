@@ -13,7 +13,6 @@ There is intentionally NO pandas-parity test — the redesigned Spark module
 is the sole source of truth for these metrics.
 """
 
-import math
 
 import pytest
 from pyspark.sql import functions as F
@@ -176,9 +175,6 @@ def test_add_row_contributions_basic_columns(spark):
     assert rows[0]["prec_at_pos"] == 1.0
     assert rows[1]["prec_at_pos"] == 0.5
     assert abs(rows[2]["prec_at_pos"] - 2 / 3) < 1e-12
-    assert rows[0]["dcg_term"] == 1.0           # 1/log2(2) = 1
-    assert rows[1]["dcg_term"] == 0.0           # label=0
-    assert rows[2]["dcg_term"] == 0.5           # 1/log2(4) = 0.5
     assert all(r["top_k@3"] == 1.0 for r in rows)
     assert rows[0]["ap_contrib@3"] == 1.0
     assert rows[1]["ap_contrib@3"] == 0.0
@@ -201,39 +197,22 @@ def test_add_row_contributions_top_k_cutoff(spark):
     assert rows[2]["ap_contrib@2"] == 0.0   # hit at pos 3 cut off by K=2
 
 
-def test_add_row_contributions_ndcg_perfect_ranking_sums_to_one(spark):
-    """Two positives at pos 1,2; K=3, total_rel=2 → sum of ndcg_contrib@3 = 1.0."""
+def test_add_row_contributions_adds_exactly_the_ap_family_columns(spark):
+    """NDCG is not computed (ADR-0018 decision 4): no ``dcg_term``, no
+    ``ndcg_contrib@K``. The expected set is written out from that decision,
+    not read back from the function."""
     df = spark.createDataFrame(
-        [
-            ("d", "C0", "A", 0.9, 1, 1, 2),
-            ("d", "C0", "B", 0.5, 1, 2, 2),
-            ("d", "C0", "C", 0.1, 0, 3, 2),
-        ],
+        [("d", "C0", "A", 0.9, 1, 1, 1)],
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
     )
-    rows = ms.add_row_contributions(
-        df, ["snap_date", "cust_id"], "label", k_values=[3]
-    ).orderBy("pos").collect()
-    idcg3 = 1.0 / math.log2(2) + 1.0 / math.log2(3)
-    assert abs(rows[0]["ndcg_contrib@3"] - (1.0 / math.log2(2)) / idcg3) < 1e-9
-    assert abs(rows[1]["ndcg_contrib@3"] - (1.0 / math.log2(3)) / idcg3) < 1e-9
-    assert rows[2]["ndcg_contrib@3"] == 0.0
-    assert abs(sum(r["ndcg_contrib@3"] for r in rows) - 1.0) < 1e-9
-
-
-def test_add_row_contributions_ndcg_outside_top_k_zero(spark):
-    df = spark.createDataFrame(
-        [
-            ("d", "C0", "A", 0.9, 0, 1, 1),
-            ("d", "C0", "B", 0.5, 1, 2, 1),
-        ],
-        schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
+    out = ms.add_row_contributions(
+        df, ["snap_date", "cust_id"], "label", k_values=[1, 3]
     )
-    rows = ms.add_row_contributions(
-        df, ["snap_date", "cust_id"], "label", k_values=[1]
-    ).orderBy("pos").collect()
-    assert rows[0]["ndcg_contrib@1"] == 0.0  # label=0
-    assert rows[1]["ndcg_contrib@1"] == 0.0  # cut off by K=1
+    added = set(out.columns) - set(df.columns)
+    assert added == {
+        "cum_rel", "prec_at_pos",
+        "top_k@1", "ap_contrib@1", "top_k@3", "ap_contrib@3",
+    }
 
 
 # ===========================================================================
@@ -246,9 +225,10 @@ def test_compute_per_query_metrics_shape(spark):
     per_query = ms.compute_per_query_metrics(
         enriched, ["snap_date", "cust_id"], "label", [3]
     )
-    cols = set(per_query.columns)
-    assert {"snap_date", "cust_id", "total_rel"} <= cols
-    assert {"map@3", "ndcg@3", "precision@3", "recall@3"} <= cols
+    assert set(per_query.columns) == {
+        "snap_date", "cust_id", "total_rel",
+        "map@3", "precision@3", "recall@3",
+    }
     # One row per (snap_date, cust_id) — 2 customers in the fixture.
     assert per_query.count() == 2
 
@@ -306,11 +286,10 @@ def test_aggregate_overall_known_values(spark):
         enriched, ["snap_date", "cust_id"], "label", [3]
     )
     overall = ms.aggregate_overall(per_query, [3])
-    assert set(overall.keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}
+    assert set(overall.keys()) == {"map@3", "precision@3", "recall@3"}
     assert abs(overall["map@3"] - 11 / 12) < 1e-9
     assert abs(overall["precision@3"] - 0.5) < 1e-9
     assert abs(overall["recall@3"] - 1.0) < 1e-9
-    assert 0 < overall["ndcg@3"] <= 1.0
 
 
 def test_aggregate_overall_recall_at_k_equals_n_items_is_one(spark):
@@ -359,7 +338,7 @@ def test_aggregate_per_segment_equal_customer_weight(spark):
     assert abs(per_seg["mass"]["map@3"] - 5 / 6) < 1e-9
     assert abs(per_seg["affluent"]["map@3"] - 1.0) < 1e-9
     for seg in per_seg:
-        assert set(per_seg[seg].keys()) == {"map@3", "ndcg@3", "precision@3", "recall@3"}
+        assert set(per_seg[seg].keys()) == {"map@3", "precision@3", "recall@3"}
 
 
 def test_aggregate_per_segment_non_string_keys_stringified(spark):
@@ -381,12 +360,12 @@ def test_aggregate_per_segment_non_string_keys_stringified(spark):
 
 
 def test_aggregate_per_item_emits_attribution_keys_not_precision_recall(spark):
-    """per_item emits hit_rate / map_attr / ndcg_attr / mean_pos — NOT precision / recall."""
+    """per_item emits hit_rate / map_attr / mean_pos — NOT precision / recall."""
     enriched = _enriched(spark, k_values=[3])
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
     assert set(per_item.keys()) == {"A", "B", "C"}
     for prod, m in per_item.items():
-        assert set(m.keys()) == {"mean_pos", "n_pos", "hit_rate@3", "map_attr@3", "ndcg_attr@3"}
+        assert set(m.keys()) == {"mean_pos", "n_pos", "hit_rate@3", "map_attr@3"}
         assert "precision@3" not in m
         assert "recall@3" not in m
 
@@ -950,7 +929,7 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     alone is the @K grid of the per-query families (ADR-0020 design H).
 
     ``k_values=[1, "all"]`` (all -> 3 items) with ``metric.k=2``: a leak would
-    silently add ``map@2`` / ``precision@2`` / ``recall@2`` / ``ndcg@2`` to
+    silently add ``map@2`` / ``precision@2`` / ``recall@2`` to
     ``overall`` / ``per_segment``, and the comparison report prints every
     ``overall`` key as a row, so nobody-configured rows would appear.
     """
