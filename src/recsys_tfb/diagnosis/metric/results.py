@@ -1,8 +1,11 @@
 """診斷的落地產物：按檔名讀回來。
 
-pipeline 內的 ``render_diagnosis_pages`` 與離線工具
-``scripts/render_diagnosis.py`` 共用這一份 loader —— 兩條路徑對「診斷結果叫
-什麼、放在哪」不可能產生分歧。
+呼叫端是離線工具 ``scripts/render_diagnosis.py``。pipeline 內的
+``render_diagnosis_pages`` 自 #342 起不再用它：那個 node 畫的是自己的 inputs
+（catalog 讀回的診斷結果），按檔名讀會把這次沒算的舊 JSON 也畫進去
+（ADR-0020 bug 9）。兩條路徑對「診斷結果叫什麼、放在哪」仍是同一個答案：
+這裡讀的檔名就是 catalog 的 ``filepath``，由
+``test_every_registry_diagnosis_has_a_catalog_entry`` 守著。
 
 **本模組刻意不 import pyspark，也不 import 任何會把 pyspark 拉進來的東西。**
 離線重繪的全部價值在於「不需要 Spark、兩秒跑完」，import 鏈上多一個 pyspark

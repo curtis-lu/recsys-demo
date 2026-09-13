@@ -594,6 +594,68 @@ class TestEvaluationCLIFlags:
         assert result.exit_code == 0
         assert "--post-training" in result.output
 
+    def test_post_training_reaches_runtime_params(self, monkeypatch, tmp_path):
+        """(#342 F7) The mode flag must reach ``parameters`` (via
+        ``runtime_params`` -> ``substitution_params`` -> the catalog's
+        ``parameters`` MemoryDataset), not only ``pipeline_kwargs`` (which
+        only picks which nodes are wired). Without this,
+        ``config_fingerprint.COMPUTED_KEYS``'s ``post_training`` row always
+        reads absent, and a mode switch between two runs of the same
+        (model_version, snap_date) is invisible to the fingerprint check.
+
+        Everything upstream of ``_execute_pipeline`` (config loading, Spark
+        session, model manifest reading) is stubbed out here: the point of
+        this test is only what lands in ``runtime_params``, not those other
+        steps, which have their own coverage elsewhere.
+        """
+        import recsys_tfb.__main__ as main_mod
+        import recsys_tfb.utils.spark as spark_mod
+        from recsys_tfb.__main__ import evaluation
+
+        params_stub = {
+            "dataset": {"test_snap_dates": ["2026-01-31"]},
+            "evaluation": {"snap_date": "2026-01-31"},
+        }
+
+        class _ConfigStub:
+            def get_parameters_by_name(self, name):
+                if name == "parameters_evaluation":
+                    return {"evaluation": {"snap_date": "2026-01-31"}}
+                return {}
+
+        captured = {}
+
+        def _fake_execute_pipeline(
+            pipeline_name, pipeline_kwargs, runtime_params, config, params,
+            env, **kwargs,
+        ):
+            captured["runtime_params"] = dict(runtime_params)
+            return False  # short-circuit before any post-run manifest work
+
+        monkeypatch.setattr(
+            main_mod, "_load_config_and_setup",
+            lambda pipeline, env: (_ConfigStub(), params_stub, None))
+        monkeypatch.setattr(main_mod, "_find_data_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            main_mod, "resolve_model_version", lambda models_dir, mv: "mv_test")
+        monkeypatch.setattr(
+            main_mod, "_dataset_versions_from_model_manifest",
+            lambda models_dir, data_dir: ("basev", "trainv", None))
+        monkeypatch.setattr(
+            main_mod, "_execute_pipeline", _fake_execute_pipeline)
+        monkeypatch.setattr(
+            spark_mod, "get_or_create_spark_session", lambda *a, **k: None)
+
+        for flag in (True, False):
+            captured.clear()
+            evaluation(
+                env="local", model_version=None, post_training=flag,
+                compare=None, compare_only=None, from_node=None,
+                only_node=None, dry_run=False, list_nodes=False,
+            )
+            assert "post_training" in captured["runtime_params"], captured
+            assert captured["runtime_params"]["post_training"] == flag
+
 
 def _setup_etl_conf(tmp_path, source_checks=None):
     """conf/base + parameters_feature_etl.yaml（最小可跑 _run_etl）。"""

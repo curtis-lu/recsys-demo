@@ -14,7 +14,6 @@
 %%   [ 方框 ]      node，框內是 node name（可直接餵給 --from-node / --only-node）
 %%   ([ 實線膠囊 ]) 落地的 catalog 條目（Hive table / JSON 檔）
 %%   ([ 虛線膠囊 ]) MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
-%%   虛線邊         非資料流：只宣告 happens-before 的拓樸相依
 %%   本圖沒有 {{ 六角 }} 閘，也沒有 > 旗標 ]——evaluation 不擋任何東西，
 %%   唯一的 fail-loud 在 --compare-only 的第一個 node（B4，見下）。
 
@@ -27,23 +26,25 @@
 %%   全部拉回來重跑全量 Spark，而實線那幾份直接讀舊檔。
 %%   generate_report 是純函式（6 個必填輸入、無 varargs）本來是為了「便宜重繪」
 %%   而做的投資，這條 catalog 的缺口把它抵銷掉了。
-%%   ⚠ 連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key，
-%%   不含 config 指紋——改了 parameters_evaluation.yaml 再 --only-node 重繪，
-%%   會得到新舊兩套設定混在一起的報表，且退出碼 0。
+%%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
+%%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
+%%   改了算的設定再 --only-node 重繪，render_diagnosis_pages／generate_report
+%%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.display.* 等）
+%%   照常重繪。分類見 docs/pipelines/evaluation.md §7.2。
 
 %% 兩種模式的形狀不同（ADR-0018 決定 5）
 %%   registry 診斷與 render_diagnosis_pages 只在 --post-training 組出來；
 %%   監控模式（預設，含 --compare）改組 no_diagnosis_pages：零讀取、回空清單，
 %%   只為了讓 generate_report 的第六個位置輸入有人產出。它不能沿用
-%%   render_diagnosis_pages——那個按檔名讀磁碟，會撿到同一個
-%%   (model_version, snap_date) 先前 post-training 留下的頁面。
+%%   render_diagnosis_pages——那個要求每項 registry 診斷各一份帶名字的結果，
+%%   監控模式一份都沒算。
 
-%% 為什麼 render_diagnosis_pages 的 inputs 是虛線
-%%   它宣告了四份診斷產物當 inputs，但函式簽章是 (parameters, *_dag_deps)，
-%%   **刻意不讀值**——結果按檔名 diagnosis/<name>.json 讀。列出它們買到兩件事：
-%%   (1) 執行順序：拓樸排序只看 node.inputs，不宣告的話這個 node in-degree 是 0，
-%%       會被排在診斷之前，讀到上一次的舊 JSON 而且照樣「成功」。
-%%   (2) 切片擴張：JSON 已落地時 --only-node 不重算（便宜重繪就是要這樣），
+%% render_diagnosis_pages 的四條入邊是資料流（#342 起；之前是虛線：值不讀、按檔名讀磁碟）
+%%   函式簽章是 (parameters, *diagnosis_results)，畫的就是這四份結果。畫之前檢查
+%%   第 i 個結果帶著 DIAGNOSES[i] 的名字、設定指紋與目前的「算的」設定一致，不合就 raise。
+%%   同一組 inputs 另外買到兩件事：
+%%   (1) 執行順序：拓樸排序只看 node.inputs，排在所有診斷之後才拿得到這次的結果。
+%%   (2) 切片擴張：JSON 已落地時 --only-node 不重算（讀回後比對指紋），
 %%       全新 model_version 時才自動往上補算。
 
 %% 為什麼診斷抽樣只抽一次
@@ -97,7 +98,7 @@ flowchart TB
     d_mc(["evaluation_model_capacity<br/><small>JSON</small>"])
     n_sup["diagnose_suppression"]
     d_sup(["evaluation_suppression<br/><small>JSON</small>"])
-    n_pages["render_diagnosis_pages<br/><small>按檔名讀 diagnosis/&lt;name&gt;.json ・ 停用的那項就沒有那一頁</small>"]
+    n_pages["render_diagnosis_pages<br/><small>畫這次的診斷結果 ・ 先比對名字與設定指紋 ・ 停用的那項就沒有那一頁</small>"]
   end
   subgraph MON[" 僅監控模式（預設，含 --compare） "]
     n_nopages["no_diagnosis_pages<br/><small>零讀取 ・ 回空清單：只為了 generate_report 的第六個位置輸入</small>"]
@@ -151,10 +152,10 @@ flowchart TB
   d_ia -- "同一次執行的 item_ability 結果" --> n_mc
   n_mc --> d_mc
 
-  d_cs -. "只宣告 happens-before<br/>值不被讀，實際按檔名讀" .-> n_pages
-  d_ia -. " " .-> n_pages
-  d_mc -. " " .-> n_pages
-  d_sup -. " " .-> n_pages
+  d_cs -- "依 DIAGNOSES 順序<br/>讀值並比對指紋" --> n_pages
+  d_ia --> n_pages
+  d_mc --> n_pages
+  d_sup --> n_pages
   n_pages --> d_pages
   n_nopages --> d_pages
 

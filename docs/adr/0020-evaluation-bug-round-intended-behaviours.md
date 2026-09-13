@@ -37,19 +37,20 @@ date: 2026-09-13
 
 | 類別 | 鍵 | 變了要做什麼 |
 |---|---|---|
-| **算的**（改變 Spark 計算、抽樣，或決定要不要算） | `evaluation.snap_date`、`k_values`、`segment_columns`、`segment_sources`、`item_categories.*`、`baseline.*`、`metric.*`、`diagnosis.*`、`report.diagnostics.*`、**`report.sections.baseline`**、**`report.sections.diagnostics`** | 從產出那份 JSON 的 node 重跑 |
+| **算的**（改變 Spark 計算、抽樣，或決定要不要算） | `evaluation.snap_date`、`k_values`、`segment_columns`、`segment_sources`、`item_categories.*`、`baseline.*`、`metric.*`、`diagnosis.*`、`report.diagnostics.*`、**`report.sections.baseline`**、**`report.sections.diagnostics`** | 照錯誤訊息點名的 `--from-node` 重跑（對照表在 `evaluation/config_fingerprint.py` 的 `COMPUTED_KEYS`；不一定是產出那份 JSON 的 node） |
 | **畫的**（只改報表長相） | `report.sections.*` 的其餘鍵、`report.display.*` | `--only-node generate_report`，幾秒 |
 
 `report.sections` 裡那兩個鍵歸「算的」，因為它們**決定要不要算**：`baseline: false` 讓 `compute_baseline_metrics` 直接回 stub、`diagnostics: false` 讓 `compute_report_aggregates` 回 stub（bug 1 的決定也依賴前者）。把它們當「畫的」，改了只重繪就會得到缺段報表——正是本決定要消滅的形態。
 
 機制：
 
-1. **「算的」是一份封閉列舉，不是「`evaluation` 子樹扣掉畫的」。** 理由兩個：`evaluation.compare` 是 CLI 在執行期注入 `evaluation` 子樹的（`__main__.py`），雜湊整棵子樹會讓 `--compare` 與不帶 `--compare` 的兩次執行指紋不同、全面假陽性；反過來，有些計算依賴 `evaluation` 以外的鍵——`config_shift` 診斷讀 `dataset.sample_group_keys`、`dataset.sample_ratio_overrides`、`training.sample_weight_keys`、`training.sample_weights`。所以列舉住在一個地方（暫定 `evaluation/config_fingerprint.py`，純 Python），各 registry 診斷在自己的 contract 宣告額外依賴的鍵（形狀比照 `diagnosis/metric/contract.py` 現有的 `INPUTS` 宣告），該診斷 JSON 的指紋＝共用列舉 ＋ 它自己宣告的鍵。
+1. **「算的」是一份封閉列舉，不是「`evaluation` 子樹扣掉畫的」。** 理由兩個：`evaluation.compare` 是 CLI 在執行期注入 `evaluation` 子樹的（`__main__.py`），雜湊整棵子樹會讓 `--compare` 與不帶 `--compare` 的兩次執行指紋不同、全面假陽性；反過來，有些計算依賴 `evaluation` 以外的鍵——`config_shift` 診斷讀 `dataset.sample_group_keys`、`dataset.sample_ratio`、`dataset.sample_ratio_overrides`、`training.sample_weight_keys`、`training.sample_weights`。所以列舉住在一個地方（暫定 `evaluation/config_fingerprint.py`，純 Python），各 registry 診斷在自己的 contract 宣告額外依賴的鍵（形狀比照 `diagnosis/metric/contract.py` 現有的 `INPUTS` 宣告），該診斷 JSON 的指紋＝共用列舉 ＋ 它自己宣告的鍵。每個「算的」鍵變了該從哪個 node 重跑，對照表住在 `evaluation/config_fingerprint.py` 的 `COMPUTED_KEYS`。
 2. 每份落地的 evaluation JSON（指標、baseline、metric CI、report aggregates、各診斷、`evaluation_segment_columns`）帶一個 `config_fingerprint` 鍵：列舉鍵的值排序後序列化再 hash。`snap_date` 已在路徑裡但仍納入。**關掉時的 stub 也帶**——ADR-0018 決定 2 已把 `baseline_metrics` 關閉時的回傳從 `None` 改成 `{"enabled": false}`，就是為了讓它裝得下指紋；沒有指紋的 `null` 會讓下面第 3 點與〈三〉的驗收都跑不過。
    依賴方向：`evaluation/config_fingerprint.py` **不 import `diagnosis/`**；各診斷的額外鍵由它們自己的 contract 宣告，組合發生在 `pipelines/evaluation/` 的 node（`make_diagnosis_node` 寫指紋時、`render_diagnosis_pages` 比對時），跟 `pipeline.py` 現在用 `inputs_for(contract)` 取 node inputs 是同一個方向。
 3. 讀 JSON 的 node（`generate_report`、`render_diagnosis_pages`）逐份比對指紋與現在的設定；不合就 raise，訊息點名**哪個鍵變了、該從哪個 node 重跑**（例：「`metric.min_positives` 已變，請 `--from-node compute_metrics`」）。標為前置檢查。
 4. 「先多算一些」現況已成立，本份只把它寫成規則：`k_values` 是全集、`display.primary_map_k` 只挑要印的；分群對 `segment_columns` 全算、報表挑要印的；大類與細粒度都算。**不准把「畫的」鍵偷渡進計算層**——例如為了省時間只算 `display.primary_map_k` 那幾個 K。
 5. 分類表進 `docs/pipelines/evaluation.md` §7「設定與重跑矩陣」，取代現在那張。
+6. **後續更新（flow 規則 2）**：同輪 code review（F7）發現 `--post-training`／監控模式的切換也屬於「算的」——`prepare_eval_data` 依它讀不同的預測表（`training_eval_predictions` vs `ranked_predictions`），但它是 CLI 注入的 run mode，不是 `evaluation.*` 底下的使用者設定，原始封閉列舉沒收它，導致同一 `(model_version, snap_date)` 兩種模式互跑時指紋一致、放行混母體的報表。已補進 `COMPUTED_KEYS` 第一列（`post_training` → `prepare_eval_data`）。
 
 **為什麼不是雜湊進路徑**（`data/evaluation/<mv>/<snap>/<雜湊>/…`）：舊檔自然失效是它唯一的好處；代價是每改一次設定多一棵目錄樹，`--compare-only`、`scripts/render_diagnosis.py`、manifest 的 artifacts 清單全部要學會挑目錄。指紋在檔內，路徑不動，讀者只多一個 raise。
 

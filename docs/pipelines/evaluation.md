@@ -377,10 +377,12 @@ python -m recsys_tfb evaluation \
 - `compute_metrics`
 - `compute_baseline_metrics`
 - 產出 `evaluation_diagnosis_pages` 的那個 node，依模式不同：
-  - `--post-training`：`render_diagnosis_pages`（它的輸出是「這次執行寫出的頁面路徑清單」，語意上不該落地重用；但它讀的診斷 JSON 已落地，不會連 `diagnose_config_shift` 一起被拉回來重跑）
+  - `--post-training`：`render_diagnosis_pages`（它的輸出是「這次執行寫出的頁面路徑清單」，語意上不該落地重用；它畫的診斷結果從已落地的 JSON 讀回，不會連 `diagnose_config_shift` 一起被拉回來重跑）
   - 監控模式：`no_diagnosis_pages`（不讀任何東西、回空清單，重跑零成本）
 
 兩種模式各一組清單，釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS[("evaluation", ())]`（監控）與 `RESUME_CONTRACTS[("evaluation", (("post_training", True),))]` 的 `"generate_report"`，之後改動這幾個 node 的形狀，該測試會紅燈提醒同步文件。
+
+接續時直接讀回的落地 JSON（`evaluation_metric_ci`、`evaluation_report_aggregates`、各項診斷 JSON）若是在不同的「算的」設定下算出來的，`render_diagnosis_pages` 與 `generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。只改了「畫的」設定則照常重繪。兩類設定的分法見 7.2 節。
 
 因此 evaluation 沒有便宜的「只重新渲染標準報表」接續點。需要只重做模型比較時，應使用持久化 `enriched_eval_predictions` 的 `--compare-only`。
 
@@ -397,14 +399,14 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
 | 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
 | 模型指標 | `compute_metrics` | enriched rows | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics | `evaluation_metrics` |
-| Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標 | `baseline_metrics` |
+| Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics` |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | enriched rows、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
 | 持久化 | `persist_eval_predictions` | enriched rows | 透過 catalog 寫入 Hive | `enriched_eval_predictions` |
 | 指標信賴區間 | `compute_metric_ci` | `diagnosis_sample`、parameters | per-item AP 與 macro 的 cluster bootstrap CI（cluster＝`cust_id`） | `evaluation_metric_ci` |
-| 診斷（registry，現行 4 項；僅 `--post-training`） | `diagnose_config_shift`（其餘 3 項同形狀，由 `make_diagnosis_node` 產生） | `diagnosis_sample`、parameters | 讀 `evaluation.diagnosis.<name>.enabled`（使用者唯一的開關，見該鍵旁的註解與 `diagnosis.metric.contract` docstring）；停用時寫 `{"enabled": false}` stub | `evaluation_<name>` |
-| 診斷頁面組裝（僅 `--post-training`） | `render_diagnosis_pages` | parameters（診斷 JSON 只當 DAG 依賴，實際按檔名讀，見 4.6 節） | 把已落地的診斷 JSON 組成獨立分頁 HTML；哪項停用就少哪一頁 | `evaluation_diagnosis_pages` |
-| 空的診斷頁清單（僅監控模式） | `no_diagnosis_pages` | parameters（值不讀） | 回空清單、不讀磁碟。`generate_report` 是位置綁定，第六個輸入必須有人產出；不沿用 `render_diagnosis_pages`，因為它按檔名讀，會撿到同一個 model_version 與 snap_date 先前 `--post-training` 留下的頁面 | `evaluation_diagnosis_pages` |
-| 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates`、`evaluation_diagnosis_pages`（6 個必填參數，皆無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action | `evaluation_report` |
+| 診斷（registry，現行 4 項；僅 `--post-training`） | `diagnose_config_shift`（其餘 3 項同形狀，由 `make_diagnosis_node` 產生） | `diagnosis_sample`、parameters | 讀 `evaluation.diagnosis.<name>.enabled`（使用者唯一的開關，見該鍵旁的註解與 `diagnosis.metric.contract` docstring）；停用時寫 `{"enabled": false}` stub。輸出（含 stub）另帶 `"diagnosis": <name>` 與設定指紋 `config_fingerprint` | `evaluation_<name>` |
+| 診斷頁面組裝（僅 `--post-training`） | `render_diagnosis_pages` | parameters、各項 `evaluation_<name>`（依 `DIAGNOSES` 順序） | 把這次的診斷結果組成獨立分頁 HTML；哪項停用就少哪一頁。畫之前檢查第 i 個結果帶著第 i 項診斷的名字、指紋與目前的「算的」設定一致，不合就 raise（見 7.2 節） | `evaluation_diagnosis_pages` |
+| 空的診斷頁清單（僅監控模式） | `no_diagnosis_pages` | parameters（值不讀） | 回空清單、不讀磁碟。`generate_report` 是位置綁定，第六個輸入必須有人產出；不沿用 `render_diagnosis_pages`，因為它要求每項 registry 診斷各一份帶名字的結果，而監控模式一份都沒算 | `evaluation_diagnosis_pages` |
+| 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates`、`evaluation_diagnosis_pages`（6 個必填參數，皆無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action。畫之前比對 `baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates` 的設定指紋，不合就 raise | `evaluation_report` |
 
 `diagnose_*` 這幾列由 registry（`diagnosis.metric.contract.DIAGNOSES`）導出：現行 4 項（`config_shift`／`item_ability`／`model_capacity`／`suppression`）各是一個同形狀的 `diagnose_<name>` node（由 `make_diagnosis_node` 產生）；新增或移除診斷時 registry 與此表一起變。
 
@@ -489,7 +491,7 @@ GROUP BY snap_date;
 
 ### 7.1 Evaluation 沒有獨立版本 ID
 
-evaluation 不會根據 `parameters_evaluation.yaml` 計算 hash，也沒有 `evaluation_version`。產物身分只由以下兩項決定：
+evaluation 沒有 `evaluation_version`，產物的路徑只由以下兩項決定：
 
 ```text
 model_version
@@ -501,18 +503,30 @@ report path 會將 ISO 日期移除 `-`，例如 `2026-01-31` 寫入 `data/evalu
 同一個 model version 與日期下修改 K、segments、categories、baseline、report sections 或 compare source，都會覆寫相同報表路徑；標準／`--compare` 模式也會覆寫相同 enriched partition。
 manifest 會保存最後一次執行的 evaluation parameters、git commit、run ID、`post_training` 與 slicing metadata。
 
+設定的指紋不進路徑，寫在每份落地 JSON 裡（`config_fingerprint` 鍵，只涵蓋下一節的「算的」設定）。它不區分產物身分、不保留舊版本，只用來讓讀這些 JSON 的 node 在設定已經變了時 raise，而不是把舊設定算的結果畫進報表。不放進路徑的理由見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 決定二。
+
 ### 7.2 設定與重跑矩陣
+
+evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能不能用」（[ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 決定二）：
+
+| 類別 | 鍵 | 變了要做什麼 | 做錯會怎樣 |
+|---|---|---|---|
+| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`diagnosis.*`、`k_values`、`item_categories.*`、`metric.*`、`baseline.*`、`report.sections.baseline`、`report.sections.diagnostics`、`report.diagnostics.*`。`config_shift` 診斷另外依賴 `dataset.sample_group_keys`、`dataset.sample_ratio`、`dataset.sample_ratio_overrides`、`training.sample_weight_keys`、`training.sample_weights`，這幾個只算進它自己那份 JSON 的指紋 | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/evaluation/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_metrics`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`render_diagnosis_pages`／`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
+| **算的**：切換執行模式（`--post-training` ↔ 監控） | 不是 `evaluation.*` 底下的使用者設定，是 CLI 注入 `parameters` 頂層的 run mode（同 `model_version`／`snap_date`），對照表裡的鍵名是 `post_training` | 照錯誤訊息從 `prepare_eval_data` 重跑（`--from-node prepare_eval_data`），或標準 full run | 同一 `(model_version, snap_date)` 先跑過一種模式、再切另一種模式做 `--only-node generate_report`：`prepare_eval_data` 讀的預測表不同（`training_eval_predictions` vs `ranked_predictions`），不擋的話兩種母體的數字會混進同一份報表 |
+| **畫的**：只改報表長相 | `evaluation.report.sections` 的其餘鍵（`dataset_overview`、`primary_map`、`guardrail_recall`、`per_item_attr`、`category`、`per_segment`）、`evaluation.report.display.*` | `--only-node generate_report` | 不會出錯；做 full run 也可以，只是多花時間 |
+
+`report.sections.baseline` 與 `report.sections.diagnostics` 雖然在 `sections` 底下，卻是「算的」：設成 `false` 時 `compute_baseline_metrics`／`compute_report_aggregates` 直接不算、只寫 stub。把它們從 `false` 翻回 `true` 只重繪，報表會缺那一段，所以指紋把它們算進去。
+
+判斷依據是 JSON 裡的指紋，不是檔案在不在：
+
+- 在指紋機制之前寫的 JSON 沒有 `config_fingerprint`，第一次接續會被擋下（訊息寫 `has no config_fingerprint`），照訊息重跑一次即可。
+- 指紋只看設定，不看資料。`label_table` 回補、預測重發布這類資料變更，要照下表自己決定重跑。
+
+與上表設定無關、但同樣要決定怎麼重跑的情況：
 
 | 修改內容 | 建議執行方式 | 原因 |
 |---|---|---|
-| `snap_date` | 標準 full run | 使用新的報表目錄與 Hive partition |
 | 想評估一個尚未產出預測的新月份（`dataset.test_snap_dates` 尚未列入） | 先補資料再評估：dataset → training 的 predict 切片 → 本 pipeline 標準 full run | `model_version` 不變（`test_snap_dates` 不進版本 hash），因此**不重訓**；新舊月份報表並存於同一模型身分之下。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
-| `k_values` | 標準 full run | 需要重新計算所有 metrics |
-| `segment_columns`／`segment_sources` | 標準 full run | 需要重新 join 並更新 enriched schema/data |
-| `item_categories` | 標準 full run | 標準與比較 metrics 都需重新 collapse |
-| `baseline.lookback_months` | 標準 full run | 需要重新讀歷史 labels 與計算 baseline |
-| 標準 report `sections`／`display`／`diagnostics`（只影響報表怎麼呈現，不影響任何診斷怎麼算） | 標準 full run 或從 `generate_report` 接續 | `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 是記憶體產物，接續仍會補跑對應 node（見 4.6 節） |
-| `evaluation.diagnosis.*`（任一項診斷的 `enabled` 或計算參數，如 `config_shift`／`sample`——這是診斷唯一的使用者開關） | 標準 full run | 該項診斷的 JSON 已落地磁碟；`--from-node generate_report` 的自動擴張只看「存在與否」不看新鮮度，只改開關會讀到舊設定算出的舊結果 |
 | `compare_sources` 或比較對象 | `--compare-only` | Model A enriched data 未變時可直接重做比較 |
 | 比較報表使用的 K／category 設定 | `--compare-only` | 會在 common rows 上重新計算雙方 metrics |
 | Model A 預測來源由 training 改為 monitoring，或反向切換 | 標準 full run | 必須重新建立 enriched Model A partition |
@@ -530,10 +544,12 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 
+指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：每份落地產物的指紋都含 `post_training`，不合就 raise，並指示從 `prepare_eval_data` 重跑（它本身不寫指紋，只是重跑起點）。它擋不住上面說的 partition 覆寫——那是**兩次各自完整**的執行之間的事，指紋比對的是設定，不是 `enriched_eval_predictions` 內容本身，覆寫風險仍在，仍需照上面幾條手動判斷。
+
 ### 7.4 部分重跑的安全邊界
 
-- `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。
-- `generate_report` 的直接輸入已不含 `eval_predictions`（rows）；但 `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 仍是 memory-only，因此從該 node 接續仍會補跑 `prepare_eval_data`／`compute_metrics`／`compute_baseline_metrics`／`render_diagnosis_pages`（監控模式是 `no_diagnosis_pages`）（見 4.6 節；四份已落地的診斷 JSON 不在此列，不會重算——這正是上一條「`exists()` 不驗新鮮度」在這裡的具體後果：改了 `evaluation.diagnosis.*` 而只做這個接續，不會生效）。
+- `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。設定這一半由指紋補上：落地 JSON 帶 `config_fingerprint`，讀到與目前「算的」設定不合的 JSON 會 raise（見 7.2 節）。label snapshot 與預測資料沒有指紋，資料變了仍要自己決定重跑。
+- `generate_report` 的直接輸入已不含 `eval_predictions`（rows）；但 `evaluation_metrics`／`baseline_metrics`／`evaluation_diagnosis_pages` 仍是 memory-only，因此從該 node 接續仍會補跑 `prepare_eval_data`／`compute_metrics`／`compute_baseline_metrics`／`render_diagnosis_pages`（監控模式是 `no_diagnosis_pages`）（見 4.6 節）。四份已落地的診斷 JSON 不在此列、不會重算；改了 `evaluation.diagnosis.*` 而只做這個接續，會在 `render_diagnosis_pages` 被指紋擋下並提示 `--from-node draw_diagnosis_sample_node`，不會悄悄沿用舊結果。
 - `enriched_eval_predictions` 是唯一為 comparison recovery 持久化的 row-level 中間產物；`--compare-only` 會先驗證指定 model/date partition 非空。
 - `--compare-only` 不會更新 enriched partition，也不會重新產生標準 report。
 - 位於 slicing 起點之前的資料讀取或驗證可能被跳過；來源資料變更時應 full run。
@@ -550,6 +566,8 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
 | `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
 | 監控模式的報表沒有診斷入口 | 設計如此：registry 診斷只在 `--post-training` 組出來 | 要診斷改跑 `--post-training`（見 4.3 節） |
+| `Evaluation artifacts on disk do not match the current computed settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是指紋機制之前寫的（訊息寫 `has no config_fingerprint`） | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類 |
+| `render_diagnosis_pages: diagnosis input N should be the result of '...'` | `pipeline.py` 裡這個 node 的 inputs 順序與 `DIAGNOSES` 不一致；或讀回的診斷 JSON 是結果帶名字之前寫的（訊息寫 `no 'diagnosis' key`） | 前者修 `pipeline.py`；後者 `--from-node` 該項診斷的 node 重算 |
 | `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
@@ -572,7 +590,7 @@ manifest 會保存最後一次執行的 evaluation parameters、git commit、run
 
 ## 9. 限制與注意事項
 
-- evaluation 沒有獨立版本 hash；同 model/date 的設定變更會覆寫既有報表與 enriched data。
+- evaluation 沒有獨立版本 hash；同 model/date 的設定變更會覆寫既有報表與 enriched data。落地 JSON 內的設定指紋只用來擋「接續時讀到舊設定的結果」，不保留舊版本。
 - post-training 與 monitoring 共用同一 enriched partition 與報表路徑，無法同時保留兩種情境。
 - 目前 per-segment metrics 只使用 `segment_columns` 中第一個存在的欄位，不會在單次 run 中分別計算多個 segment dimensions。
 - comparison 目前以 `schema.entity` 的第一個欄位作為 customer 交集；複合 entity schema 需確認比較語意。
