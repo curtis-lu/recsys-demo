@@ -117,7 +117,7 @@ flowchart TB
     n_validate["validate_enriched_eval_predictions_present<br/><small>僅 --compare-only ・ B4：該 snap_date 無 row 就 fail loud</small>"]
     n_loadb["load_compare_predictions<br/><small>依 compare_sources 載入 Model B ・ 欄位與 item mapping</small>"]
     d_braw(["compare_predictions_raw"])
-    n_restrict["restrict_to_common<br/><small>取共同 entity 與 item ・ 雙方重新排名<br/>B 沒帶 label 才從 label_table 補</small>"]
+    n_restrict["restrict_to_common<br/><small>取共同 entity 與 item ・ 雙方重新排名<br/>B 一律抄 A 的 label</small>"]
     d_common(["eval_predictions_common<br/>compare_predictions_common<br/>compare_coverage_partial"])
     n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_all_metrics，再組 HTML（算與畫同一個 node）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])
@@ -180,7 +180,6 @@ flowchart TB
   n_validate --> n_restrict
   n_loadb --> d_braw
   d_braw --> n_restrict
-  src_label --> n_restrict
   n_restrict --> d_common
   d_common --> n_creport
   n_creport --> o_creport

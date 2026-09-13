@@ -89,6 +89,74 @@ def test_overall_metrics_have_delta():
     assert "0.2" in out or "+0.2" in out
 
 
+def test_per_item_row_missing_on_one_side_has_blank_delta():
+    """bug 4 (ADR-0020): an item only A has a positive for keeps its M cells
+    and gets no Δ — not Δ = A's value."""
+    import pandas as pd
+    from recsys_tfb.evaluation.comparison.report import _build_per_item_section
+
+    m_a, m_b = _metrics(), _metrics()
+    del m_b["per_item"]["p2"]
+    comp = _comparison(m_a, m_b)
+    sec = _build_per_item_section(m_a, m_b, comp, _params())
+    assert sec is not None
+    recall = sec.tables[0]
+    assert recall.loc["p2", "recall@1 M"] == pytest.approx(0.5)
+    assert pd.isna(recall.loc["p2", "recall@1 B"])
+    assert pd.isna(recall.loc["p2", "recall@1 Δ"])
+    # both sides have p1 → Δ unchanged (0.7 − 0.7)
+    assert recall.loc["p1", "recall@1 Δ"] == pytest.approx(0.0)
+
+
+def test_macro_row_delta_blank_when_one_side_lacks_the_key():
+    """bug 4 (ADR-0020), second copy of the same fallback: the Macro row's Δ
+    is computed in the table builder, not in build_comparison_result, and it
+    read a missing side as 0.0 too."""
+    import pandas as pd
+    from recsys_tfb.evaluation.comparison.report import _build_per_item_section
+
+    def _macro_recall_at_1(m_b):
+        m_a = _metrics()
+        sec = _build_per_item_section(m_a, m_b, _comparison(m_a, m_b), _params())
+        recall = sec.tables[0]  # 2 items → only recall@1 survives the K clamp
+        return recall.loc[recall.index[0]]
+
+    m_b = _metrics()
+    m_b["macro_avg"]["by_item"]["hit_rate@1"] = 0.5
+    both = _macro_recall_at_1(m_b)
+    assert both["recall@1 Δ"] == pytest.approx(0.1)  # both sides → A − B
+
+    del m_b["macro_avg"]["by_item"]["hit_rate@1"]
+    one = _macro_recall_at_1(m_b)
+    assert one["recall@1 M"] == pytest.approx(0.6)
+    assert pd.isna(one["recall@1 Δ"])
+
+
+def test_empty_overall_side_blanks_delta_column_and_says_why():
+    """bug 4 (ADR-0020): every query on B had zero positives → B's overall is
+    ``{}``. The Δ column is empty and a line above the table names the side."""
+    import pandas as pd
+    from recsys_tfb.evaluation.comparison.report import _build_overall_section
+
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    m_b["overall"] = {}
+    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    tbl = sec.tables[0]
+    assert len(tbl.index) > 0, "no rows — the Δ column check would pass vacuously"
+    assert tbl["Δ"].isna().all()
+    assert "ExtX 側無可比的 query（全部零正例）" in sec.table_titles[0]
+    assert "Model 側" not in sec.table_titles[0]
+
+
+def test_overall_title_has_no_empty_side_note_when_both_sides_have_metrics():
+    from recsys_tfb.evaluation.comparison.report import _build_overall_section
+
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    assert "無可比的 query" not in sec.table_titles[0]
+    assert sec.tables[0].loc["map@1", "Δ"] == pytest.approx(0.2)
+
+
 def test_category_section_absent_when_disabled():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)

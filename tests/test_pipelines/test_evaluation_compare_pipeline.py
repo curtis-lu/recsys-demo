@@ -264,20 +264,8 @@ def two_col_b(spark):
     )
 
 
-@pytest.fixture
-def two_col_labels(spark):
-    rows = []
-    for date in ("2026-01-31", "2026-02-28"):
-        for branch, cust in (("b1", "c1"), ("b1", "c2"), ("b2", "c1")):
-            rows.append((date, branch, cust, "p1", 1))
-            rows.append((date, branch, cust, "p2", 0))
-    return spark.createDataFrame(
-        rows, ["snap_date", "branch_id", "cust_id", "prod_name", "label"]
-    )
-
-
 def test_two_column_entity_ranking_and_coverage(
-    two_col_a, two_col_b, two_col_labels, two_column_entity_params
+    two_col_a, two_col_b, two_column_entity_params
 ):
     """One call, two behaviours: the re-ranking unit and the coverage unit.
 
@@ -289,7 +277,7 @@ def test_two_column_entity_ranking_and_coverage(
     from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
 
     a_common, _b_common, coverage = restrict_to_common(
-        two_col_a, two_col_b, two_col_labels, two_column_entity_params
+        two_col_a, two_col_b, two_column_entity_params
     )
 
     # --- behaviour 1: re-ranking groups by time × EVERY entity column --------
@@ -324,3 +312,110 @@ def test_two_column_entity_ranking_and_coverage(
     assert coverage["n_item_common"] == 2
     assert coverage["dropped_items_A"] == []
     assert coverage["dropped_items_B"] == ["p3"]
+
+
+# Spark DDL schemas for the null-key / asymmetric fixtures below. Explicit
+# types are needed because a None in an entity column cannot be inferred.
+_QUERY_GROUP_DDL = "snap_date string, branch_id string, cust_id string"
+_PREDS_DDL = f"{_QUERY_GROUP_DDL}, prod_name string, score double"
+_LABELED_PREDS_DDL = f"{_PREDS_DDL}, label int"
+
+
+def test_coverage_common_counts_what_restriction_kept_not_a_null_matching_intersect(
+    spark, two_column_entity_params
+):
+    """bug 14 (ADR-0020): ``n_query_group_common`` is the query groups the
+    restricted frames still hold.
+
+    Both sides score entity (b1, NULL). ``intersect`` treats NULL == NULL as a
+    match, so the old count took those groups as common; the restriction's
+    equi-join drops null keys, so no metric ever saw them. Expected: 2 dates ×
+    the 2 non-null shared entities.
+    """
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+
+    entities = (("b1", "c1"), ("b1", "c2"), ("b1", None))
+    a_rows, b_rows = [], []
+    for date in ("2026-01-31", "2026-02-28"):
+        for branch, cust in entities:
+            for item, score, label in (("p1", 0.9, 1), ("p2", 0.1, 0)):
+                a_rows.append((date, branch, cust, item, score, label))
+                b_rows.append((date, branch, cust, item, score))
+    a = spark.createDataFrame(a_rows, _LABELED_PREDS_DDL)
+    b = spark.createDataFrame(b_rows, _PREDS_DDL)
+
+    a_common, b_common, coverage = restrict_to_common(
+        a, b, two_column_entity_params
+    )
+
+    qg = ["snap_date", "branch_id", "cust_id"]
+    assert a_common.select(*qg).distinct().count() == 4
+    assert b_common.select(*qg).distinct().count() == 4
+    assert coverage["n_query_group_common"] == 4
+    # The full counts are each side's own frame, null-keyed entity included.
+    assert coverage["n_query_group_A_full"] == 6
+    assert coverage["n_query_group_B_full"] == 6
+
+
+def test_coverage_common_excludes_a_group_only_one_side_kept(
+    spark, two_column_entity_params
+):
+    """``n_query_group_common`` means "still there on both sides".
+
+    Entity (b1, c2) is shared, but B scored it only on p3, which A lacks. The
+    item restriction empties that group on B while A keeps it on p1 — so it is
+    in A's metrics and not in B's, and not common.
+    """
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+
+    date = "2026-01-31"
+    a = spark.createDataFrame(
+        [(date, "b1", "c1", "p1", 0.9, 1), (date, "b1", "c1", "p2", 0.1, 0),
+         (date, "b1", "c2", "p1", 0.8, 1)],
+        _LABELED_PREDS_DDL,
+    )
+    b = spark.createDataFrame(
+        [(date, "b1", "c1", "p1", 0.6), (date, "b1", "c1", "p2", 0.5),
+         (date, "b1", "c2", "p3", 0.4)],
+        _PREDS_DDL,
+    )
+
+    a_common, b_common, coverage = restrict_to_common(
+        a, b, two_column_entity_params
+    )
+
+    qg = ["snap_date", "branch_id", "cust_id"]
+    assert a_common.select(*qg).distinct().count() == 2
+    assert b_common.select(*qg).distinct().count() == 1
+    assert coverage["n_query_group_common"] == 1
+
+
+def test_restrict_node_collects_each_sides_items_once(
+    two_col_a, two_col_b, two_column_entity_params, monkeypatch
+):
+    """bug 14 (ADR-0020): the item sets reach the driver once per side.
+
+    ``common_universe`` already collects them to build the item universe; the
+    node used to collect the same two sets again for coverage. Counting
+    ``DataFrame.collect`` calls catches a re-collect hidden in a helper too,
+    which a source scan of the node body would miss.
+    """
+    from pyspark.sql import DataFrame
+
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+
+    collected = []
+    real_collect = DataFrame.collect
+
+    def _spy(self):
+        collected.append(list(self.columns))
+        return real_collect(self)
+
+    monkeypatch.setattr(DataFrame, "collect", _spy)
+    _a, _b, coverage = restrict_to_common(
+        two_col_a, two_col_b, two_column_entity_params
+    )
+    monkeypatch.undo()
+
+    assert collected == [["prod_name"], ["prod_name"]]
+    assert coverage["dropped_items_B"] == ["p3"]  # item sets still reach coverage

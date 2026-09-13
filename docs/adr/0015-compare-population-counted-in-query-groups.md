@@ -48,6 +48,15 @@ date: 2026-09-01
 - **版本 ID 一個都不翻。** `core/versioning.py` 只雜湊設定的「值」，不雜湊程式碼；本次改動沒有動 `conf/` 一個字。
 - **`n_item` 系列的數字不變**，只有鍵名與顯示名改了。
 
+**第二次跳值（2026-09-13，[ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 14）。** `n_query_group_common` 改成數「裁切後兩側都還在的 query group」。單位不變，仍是 query group；變的是算法。舊算法拿兩側**原始** frame 的 query group 做 `intersect`，而 `intersect` 把 `NULL == NULL` 當成相等；裁切用的 equi-join 卻會丟掉 NULL key。所以舊數字把沒有任何指標看過的 group 也算了進去。
+
+同一批資料重跑，這個數字在兩種情況會變小：
+
+- entity 欄有 NULL。
+- 某個共同 entity 在一側只剩對方沒有的 item，那一側裁切後這個 group 就空了。
+
+`n_query_group_A_full`／`_B_full` 與 `n_item` 系列不變，也一樣不需要重跑 pipeline、不翻版本 ID。
+
 ## 順帶修掉的：排名分組
 
 同一次改動把 `evaluation/comparison/restrict.py::restrict_to_common` 的重排分組從 `[time, entity[0]]` 改成 `[time] + entity`。裁到共同範圍後候選集變小，兩邊都要重排；分組若只取第一欄，同一個第一欄底下的多個 entity 會被併成**一個** query 一起排名，算出來的 mAP 與 `compute_test_mAP_spark` 算的不是同一個量。
@@ -63,5 +72,5 @@ date: 2026-09-01
 ## 後果
 
 - 讀舊報表與新報表的同一個欄位會看到不同數字，且欄名也換了；本 ADR 是那個落差的唯一解釋處。
-- `n_query_group_common` 用的是「A 的 query group 集合 ∩ B 的」。裁切本身只依 entity 與 item 交集（不依 time），所以在兩邊 `time` 範圍不同的情況下，這個數字會小於實際被評分的 group 數。compare 模式目前只跑單一 `evaluation.snap_date`，兩者等價；未來若 compare 擴到多月份，這裡要重新想。
+- `n_query_group_common` 是「裁切後兩側都還在的 query group」（2026-09-13 起，見上面〈第二次跳值〉；原本是兩側原始 query group 集合的 `intersect`）。裁切本身只依 entity 與 item 交集（不依 time），所以兩邊 `time` 範圍不同時，各側保留的月份不同，common 只數兩側都有的那些，會小於某一側實際被評分的 group 數。compare 模式目前只跑單一 `evaluation.snap_date`，兩者等價；未來若 compare 擴到多月份，這裡要重新想。
 - 這份 coverage dict 是 `restrict_to_common` → `generate_comparison_report` 之間的內部介面，沒有外部消費者，所以改鍵名不需要相容期。

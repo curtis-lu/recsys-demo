@@ -303,7 +303,9 @@ class TestEvaluationPipelineCompareOnly:
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline(compare_only=True)
-        assert "label_table" in pipeline.inputs
+        # B copies A's label (ADR-0020 bug 7), so the short path never reads
+        # label_table; an input here would be loaded for nothing.
+        assert "label_table" not in pipeline.inputs
         assert "parameters" in pipeline.inputs
 
 

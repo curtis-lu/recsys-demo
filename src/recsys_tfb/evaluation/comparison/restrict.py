@@ -1,15 +1,32 @@
 """Restrict A/B compare predictions to the common (entity × item) universe.
 
-A side: already carries ``label`` (added upstream by ``prepare_eval_data``);
-   restrict keeps the existing label column unchanged.
-B side: has no ``label``; restrict does a LEFT JOIN on ``label_table`` and
-   fills missing with 0 — mirroring ``prepare_eval_data``'s convention so
-   "both sides are scored against the same ground truth".
+A side: already carries ``label`` (added upstream by ``prepare_eval_data``, or
+   persisted with ``enriched_eval_predictions`` under ``--compare-only``);
+   restrict keeps it unchanged.
+B side: takes A's label, joined on the identity columns, so both sides are
+   scored against the same ground truth in every run mode (ADR-0020 bug 7).
+   A label column B brings with it is dropped first: ``enriched_eval_predictions``
+   and ``training_eval_predictions`` both land with one, frozen at whatever
+   ``label_table`` said when B was persisted.
+
+   Why A's label and not a fresh ``label_table`` join: A's label is not always
+   the current ``label_table`` either. ``--post-training`` keeps the label
+   stored with the training predictions on purpose, and ``--compare-only``
+   reads the one persisted by the standard run. Re-joining ``label_table`` for
+   B alone gives the two sides different answers in both of those modes;
+   re-joining it for both makes the comparison disagree with the main report
+   of the same run. Copying A's makes "same answer" hold by construction. The
+   cost: a B row whose (entity, item) A did not score has no answer to copy
+   and counts as 0 — which only happens when the two sides' candidate sets
+   are asymmetric.
 
 Re-ranks both sides within the query group — ``[time] + entity``, every
 column of ``schema.entity`` — because the candidate set just shrank. That is
 the same grouping ``compute_test_mAP_spark`` ranks by, so the metrics the
 comparison report shows are the metrics the main line computes.
+
+Also returns the ``CommonUniverse`` it restricted by. Coverage reads its item
+sets from there rather than collecting them a second time (ADR-0020 bug 14).
 """
 
 from __future__ import annotations
@@ -18,16 +35,15 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.comparison.alignment import common_universe
+from recsys_tfb.evaluation.comparison.alignment import CommonUniverse, common_universe
 from recsys_tfb.evaluation.metrics_spark import rank_within_query
 
 
 def restrict_to_common(
     a: SparkDataFrame,
     b: SparkDataFrame,
-    label_table: SparkDataFrame,
     parameters: dict,
-) -> tuple[SparkDataFrame, SparkDataFrame]:
+) -> tuple[SparkDataFrame, SparkDataFrame, CommonUniverse]:
     schema = get_schema(parameters)
     entity_cols = schema["entity"]
     item_col = schema["item"]
@@ -38,7 +54,8 @@ def restrict_to_common(
     identity_cols = schema["identity_columns"]
     query_group_cols = [time_col, *entity_cols]
 
-    common_entities, common_items = common_universe(a, b, entity_cols, item_col)
+    universe = common_universe(a, b, entity_cols, item_col)
+    common_entities, common_items = universe.common_entities, universe.common_items
 
     spark = a.sparkSession
     item_df = spark.createDataFrame([(i,) for i in common_items], [item_col])
@@ -62,11 +79,11 @@ def restrict_to_common(
     a_common = _restrict_and_rank(a)
     b_common = _restrict_and_rank(b)
 
-    if label_col not in b_common.columns:
-        labels = (
-            label_table.select(*identity_cols, label_col)
-            .join(F.broadcast(item_df), on=item_col, how="inner")
-        )
-        b_common = b_common.join(labels, on=identity_cols, how="left").fillna({label_col: 0})
+    if label_col in b_common.columns:
+        b_common = b_common.drop(label_col)
+    # Raw ``a``, not ``a_common``: b_common is already restricted, so the join
+    # only picks shared keys, and A's re-ranking need not run a second time.
+    a_labels = a.select(*identity_cols, label_col)
+    b_common = b_common.join(a_labels, on=identity_cols, how="left").fillna({label_col: 0})
 
-    return a_common, b_common
+    return a_common, b_common, universe

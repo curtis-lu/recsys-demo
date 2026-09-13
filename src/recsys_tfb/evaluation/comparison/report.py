@@ -107,8 +107,10 @@ def _build_coverage_section(
             "n_query_group ＝「一個時間 × 一個 entity」的相異組合數，也就是排名的單位；"
             "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
             "n_item ＝相異 item 數。後續章節皆在 common universe 上重排重算。"
-            "common 欄是兩邊的交集大小：某個 query group 若在裁切後一個共同 item 都不剩，"
-            "它仍計入這個交集，但不會出現在後續任何指標裡。"
+            "common 欄的 n_query_group 是裁切後兩側都還在的 query group 數"
+            "（entity 欄為 NULL 的列在裁切時就被丟掉，不計入）。兩側候選對稱時，它就是兩側指標用到的母體；"
+            "某個 group 在一側只剩對方沒有的 item 時，它只進得了另一側的指標，不算 common。"
+            "n_item 是兩側裁切前 item 集合的交集。"
         ),
         tables=[meta, coverage, dropped],
         table_titles=["雙方 metadata", "coverage", "被 drop 的 items"],
@@ -139,10 +141,34 @@ def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
     )
     return ReportSection(
         title="overall metrics (M/B/Δ)",
-        description="per-query 指標在 common (entity × item) universe 上重算。Δ = A − B。",
+        description=(
+            "per-query 指標在 common (entity × item) universe 上重算。Δ = A − B，"
+            "只在兩側都有值時才算，否則留空。"
+        ),
         tables=[tbl],
-        table_titles=["overall"],
+        table_titles=[
+            f"overall{_empty_overall_note(overall_a, overall_b, label_a, label_b)}"
+        ],
     )
+
+
+def _empty_overall_note(
+    overall_a: dict, overall_b: dict, label_a: str, label_b: str
+) -> str:
+    """Title suffix naming each side whose ``overall`` is empty (ADR-0020 bug 4).
+
+    ``overall`` is empty when every query on that side had zero positives, so
+    no row has a Δ and the whole Δ column is blank. Without this line the
+    reader sees an empty column and nothing saying why.
+    """
+    empty = [
+        label for label, overall in ((label_a, overall_a), (label_b, overall_b))
+        if not overall
+    ]
+    if not empty:
+        return ""
+    sides = "、".join(f"{label} 側無可比的 query（全部零正例）" for label in empty)
+    return f" — {sides}，Δ 欄留空"
 
 
 def _build_per_item_section(
@@ -225,14 +251,17 @@ def _build_category_section(
         ),
         n_cat,
     )
+    side_a, side_b = "Model", "Compare"
     overall_tbl = pd.DataFrame(
-        {"Model": [overall_a.get(k) for k in keys],
-         "Compare": [overall_b.get(k) for k in keys],
+        {side_a: [overall_a.get(k) for k in keys],
+         side_b: [overall_b.get(k) for k in keys],
          "Δ": [overall_d.get(k) for k in keys]},
         index=keys,
     )
     tables.append(overall_tbl)
-    titles.append("大類 overall")
+    titles.append(
+        f"大類 overall{_empty_overall_note(overall_a, overall_b, side_a, side_b)}"
+    )
     # bug 5 (ADR-0020): same disclosure as the fine-grained per-item section.
     item_cov = macro_coverage_suffix_mb(
         per_item_a, per_item_b, n_cat, parameters, macro_a, macro_b

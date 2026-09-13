@@ -630,7 +630,8 @@ def _per_item_metric_compare_table(
     Δ for item rows is read from ``per_item_delta`` (already computed
     upstream by build_comparison_result); Δ for the Macro row is computed
     here as ``macro_a − macro_b`` since macro values aren't part of the
-    per-item delta dict.
+    per-item delta dict. Either way a Δ exists only where both sides have the
+    value; otherwise the cell is blank (ADR-0020 bug 4).
     """
     def _row(m_a: dict, m_b: dict, m_d: dict | None) -> dict:
         row: dict = {}
@@ -643,10 +644,9 @@ def _per_item_metric_compare_table(
             if m_d is not None:
                 d = m_d.get(key)
             else:
-                if a is None and b is None:
-                    d = None
-                else:
-                    d = (a or 0.0) - (b or 0.0)
+                # Both sides or no Δ (ADR-0020 bug 4): reading a missing side
+                # as 0.0 printed the other side's value as the Δ.
+                d = a - b if a is not None and b is not None else None
             row[f"{base} M"] = a
             row[f"{base} B"] = b
             row[f"{base} Δ"] = d

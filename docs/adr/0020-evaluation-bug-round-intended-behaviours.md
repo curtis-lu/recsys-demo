@@ -94,6 +94,12 @@ date: 2026-09-13
 
 **碰到什麼**：per-item 那種缺 key 的觸發前提是 bug 7（兩側母體不同），修 7 之後這條主要剩 overall 整側空的情況——仍要修，因為那個情況跟 7 無關。
 
+**實作時補的兩條（2026-09-13，#345）**：
+
+- 同一個「缺值當 0」在 `report_builder.py::_per_item_metric_compare_table` 還有一份：Macro 列的 Δ 不經 `build_comparison_result`，是表格自己算的（稽核複核〈動它之前要知道的事〉點過）。一起改成兩側都有才算。
+- 「表格上方加一行」落在該表的標題：`overall — <側名> 側無可比的 query（全部零正例），Δ 欄留空`。比照 bug 5 揭露 macro item 數的做法——標題就是緊貼表格上方的那一行。比較報表的大類 overall 表是同一種攤鍵的表，一併套用。
+- 〈碰到什麼〉的因果寫窄了：兩側 key 分岔不只來自 bug 7。兩側用同一份 label、但候選不對稱（某側對某個 entity 只評了部分 item）時，一側會少掉正例，per-item 的 key 一樣分岔；overall 只空一側也需要 label 或候選其中之一不對稱。修法不受影響——它不看分岔的原因。
+
 ### bug 5：當月零正例的 item 從 macro 平均的分母消失
 
 **決定**：**揭露，不改定義**。`macro` 那幾張表的表頭或第一列印「參與 macro 的 item 數 N／全部 M」；分母仍是「有正例的 item 數」。
@@ -142,6 +148,18 @@ date: 2026-09-13
 **決定**：`restrict_to_common` 對 B 側**一律丟掉自帶的 label、重新 join 現在的 `label_table`**。`evaluation/comparison/restrict.py` 的 docstring「both sides are scored against the same ground truth」因此變成真的。
 
 **為什麼不是記錄來源就好**：「同一份答案」是比較報表存在的前提。多一次 join 的代價，在 ADR-0018 物化之後是讀一張表。
+
+**實作時改的（2026-09-13，#345，使用者裁定）**：上面「重新 join 現在的 `label_table`」的前提是「A 側用現在的」，這只在監控模式成立。fresh-context 規格審查指出：
+
+- `--post-training` 的 A 刻意沿用 `training_eval_predictions` 存的 label（`pipelines/evaluation/nodes_spark.py` 的 `prepare_eval_data`）。
+- `--compare-only` 的 A 沿用 enriched partition 存的 label。
+
+照原決定只換 B，這兩種模式下兩側反而是兩份答案。
+
+所以改成 **B 一律抄 A 的 label**：依 identity 欄 left join，缺值補 0。原決定的目的「同一份答案」，在三種模式下都由建構保證。連帶的後果：`restrict_to_common` 不再讀 `label_table`，node 少一個輸入，也不需要 bug 10 那道重複 key 檢查。
+
+- **考慮過的另一邊**：兩側都重接現在的 `label_table`。否決，因為 `--post-training` 同一次 run 的比較報表與主報表，A 的數字會對不上；B 那個 join 還要補重複 key 檢查。
+- **代價**：B 有、A 沒評過的 `(entity, item)` 沒有答案可抄，算 0。只在兩側候選不對稱時發生。
 
 ### bug 8：大類只有 3 類，報表照印 @4、@5
 
@@ -199,6 +217,8 @@ date: 2026-09-13
 
 **碰到什麼**：`report_comparison.html` 的 coverage 數字會跳（有 NULL 鍵、或兩側月份不同時）。ADR-0015 已經記過一次「數字會跳是預期的」，本份是第二次，理由寫在同一段旁邊。
 
+**實作時補的一條（2026-09-13，#345）**：「從裁切後的 frame 數」——裁切後有 A、B 兩個 frame，本份沒寫數哪一個。兩者的 query group 集合在候選不對稱時會不同：某個共同 entity 在 B 側只被評了 A 沒有的 item，item 裁切後 B 側這個 group 是空的，A 側還在。實作取**兩側裁切後都還在**的 group（A 側裁切結果的 query group 對 B 側的做 `left_semi`）。理由：欄名叫 common，而且跟 bug 4「Δ 只在兩側都有時才算」同一個精神；只數 A 側，會把只進 A 指標的 group 算成共同。候選對稱時，數 A 側、數 B 側、數兩側交集三者相等。代價**沒有量過**：這個計數會把兩側裁切的 lineage 各重算一次再 shuffle join，應該比舊的 `intersect`（只掃原始 frame）貴；生產 entity 是百萬級，要在 ADR-0018 物化那一輪一起量。
+
 ### bug 15：同一個 model_version 換模式寫同一張表，`rank` INT vs BIGINT 撞 `_evolve_schema`
 
 **決定**：ADR-0018〈驗收〉——`prepare_eval_data` 補出來的 `rank` cast 成與 `ranked_predictions` 宣告一致的型別（BIGINT）。
@@ -237,6 +257,8 @@ date: 2026-09-13
 | 「母體表有沒有這欄」做成 A 系列不變量（bug 6） | A 系列在 Spark 起來前跑、只看 config、看不到模式 |
 | segment 覆蓋率門檻（bug 6） | 門檻是規格真空 |
 | 只記錄 label 來源不重 join（bug 7） | 違反比較報表的前提 |
+| 只有 B 重接現在的 `label_table`（bug 7 原決定，#345 改掉） | `--post-training`／`--compare-only` 的 A 不是現在的 label，兩側反而不同 |
+| 兩側都重接現在的 `label_table`（bug 7） | `--post-training` 同一次 run 的比較報表與主報表對不上 |
 | precision 分母 min(K, n)（bug 8） | 改定義 |
 | `render_diagnosis_pages` 只加個數檢查（bug 9） | `parameters` 跟診斷結果都是 dict，個數對得上照樣接錯 |
 | `dropDuplicates` label_table（bug 10） | 靜默挑一個答案 |

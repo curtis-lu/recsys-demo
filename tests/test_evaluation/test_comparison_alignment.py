@@ -41,12 +41,15 @@ def df_b(spark):
 
 
 def test_intersection_entities_and_items(df_a, df_b):
-    entities, items = common_universe(df_a, df_b, ["cust_id"], "prod_name")
+    universe = common_universe(df_a, df_b, ["cust_id"], "prod_name")
     # The entity DataFrame carries one row per entity, one column per
     # schema.entity column — so callers always join on the whole entity.
-    assert entities.columns == ["cust_id"]
-    assert _entity_tuples(entities) == {("c2",), ("c3",)}
-    assert items == {"p1", "p2", "p3"}
+    assert universe.common_entities.columns == ["cust_id"]
+    assert _entity_tuples(universe.common_entities) == {("c2",), ("c3",)}
+    assert universe.common_items == {"p1", "p2", "p3"}
+    # Each side's full item set rides along for coverage (ADR-0020 bug 14).
+    assert universe.a_items == {"p1", "p2", "p3"}
+    assert universe.b_items == {"p1", "p2", "p3"}
 
 
 def test_intersection_uses_every_entity_column(spark):
@@ -64,10 +67,10 @@ def test_intersection_uses_every_entity_column(spark):
         [("b1", "c2", "p1"), ("b2", "c1", "p1")],
         ["branch_id", "cust_id", "prod_name"],
     )
-    entities, items = common_universe(a, b, ["branch_id", "cust_id"], "prod_name")
-    assert entities.columns == ["branch_id", "cust_id"]
-    assert _entity_tuples(entities) == {("b1", "c2")}
-    assert items == {"p1"}
+    universe = common_universe(a, b, ["branch_id", "cust_id"], "prod_name")
+    assert universe.common_entities.columns == ["branch_id", "cust_id"]
+    assert _entity_tuples(universe.common_entities) == {("b1", "c2")}
+    assert universe.common_items == {"p1"}
 
 
 def test_entity_side_never_returns_to_driver(df_a, df_b, monkeypatch):
@@ -91,11 +94,11 @@ def test_entity_side_never_returns_to_driver(df_a, df_b, monkeypatch):
 
     monkeypatch.setattr(SparkDataFrame, "collect", spy)
 
-    entities, items = common_universe(df_a, df_b, ["cust_id"], "prod_name")
+    universe = common_universe(df_a, df_b, ["cust_id"], "prod_name")
 
-    assert isinstance(entities, SparkDataFrame)
+    assert isinstance(universe.common_entities, SparkDataFrame)
     assert collected_columns == [["prod_name"], ["prod_name"]]
-    assert items == {"p1", "p2", "p3"}
+    assert universe.common_items == {"p1", "p2", "p3"}
 
 
 def test_empty_check_does_not_count_on_the_happy_path(df_a, df_b, monkeypatch):

@@ -37,20 +37,24 @@ def build_comparison_result(
 
 
 def _compute_delta(metrics_a: dict, metrics_b: dict) -> dict:
-    """Compute metric-level delta (A - B)."""
-    all_keys = set(list(metrics_a.keys()) + list(metrics_b.keys()))
+    """Compute metric-level delta (A - B), only for keys both sides have.
+
+    A key missing on one side gets no delta entry, so the report leaves that
+    cell blank (ADR-0020 bug 4). Reading the missing side as 0.0 printed A's
+    absolute value as a Δ, and a 0 there reads as "the control scored 0" —
+    no footnote can undo that reading.
+    """
     return {
-        k: metrics_a.get(k, 0.0) - metrics_b.get(k, 0.0)
-        for k in sorted(all_keys)
+        k: metrics_a[k] - metrics_b[k]
+        for k in sorted(set(metrics_a) & set(metrics_b))
     }
 
 
 def _compute_nested_delta(nested_a: dict, nested_b: dict) -> dict:
-    """Compute delta for each sub-key in a nested metrics dict."""
-    all_keys = set(list(nested_a.keys()) + list(nested_b.keys()))
+    """Compute delta for each sub-key present on both sides (see _compute_delta)."""
     return {
-        k: _compute_delta(nested_a.get(k, {}), nested_b.get(k, {}))
-        for k in sorted(all_keys)
+        k: _compute_delta(nested_a[k], nested_b[k])
+        for k in sorted(set(nested_a) & set(nested_b))
     }
 
 
