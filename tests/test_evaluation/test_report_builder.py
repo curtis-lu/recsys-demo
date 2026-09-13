@@ -425,13 +425,47 @@ def test_metrics_section_per_item_macro_titles_disclose_item_coverage():
     rec_title = next(t for t in s.table_titles
                      if "per-item 歸因" in t and "recall@k" in t
                      and "大類" not in t)
-    assert "2" in map_title and "全部 3" in map_title
-    assert "2" in rec_title and "全部 3" in rec_title
+    assert "（參與 macro 的 item 數 2／全部 3）" in map_title
+    assert "（參與 macro 的 item 數 2／全部 3）" in rec_title
     # Macro row's own values are unchanged by the disclosure (still the
     # same equal-weight average of the 2 items actually in per_item).
     by_title = dict(zip(s.table_titles, s.tables))
     macro_row = by_title[map_title].loc[rb._MACRO_LABEL]
     assert macro_row["@1"] == m["macro_avg"]["by_item"]["map_attr@1"]
+
+
+def test_metrics_section_item_coverage_counts_only_items_meeting_min_positives():
+    """bug 5: evaluation.metric.min_positives drops items from the macro as
+    silently as zero positives do, so N counts per_item entries with
+    n_pos >= min_positives, not every per_item key. A (n_pos 100) is in,
+    B (n_pos 10 < 50) is out, and the grain has 3 items."""
+    m = _metrics()
+    m["per_item"]["A"]["n_pos"] = 100
+    m["per_item"]["B"]["n_pos"] = 10
+    m["dataset_overview"]["totals"]["n_items"] = 3
+    p = _params()
+    p["evaluation"]["metric"] = {"min_positives": 50}
+    s = rb.build_metrics_section(m, p, metric_ci=_metric_ci())
+    map_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "map_attr@k" in t
+                     and "大類" not in t)
+    assert "（參與 macro 的 item 數 1／全部 3）" in map_title
+
+
+def test_macro_coverage_suffixes_follow_each_tables_macro_row_condition():
+    """The single-sided suffix appears only for a truthy macro (the Macro row
+    test of _per_item_metric_table); the M/B one only when both macros are
+    not None (the test of _per_item_metric_compare_table, where {} counts)."""
+    per_item = {"A": {"n_pos": 1}}
+    p = _params()
+    assert rb.macro_coverage_suffix(per_item, 2, p, {}) == ""
+    assert rb.macro_coverage_suffix(per_item, 2, p, {"map_attr@1": 0.1}) == (
+        "（參與 macro 的 item 數 1／全部 2）"
+    )
+    assert rb.macro_coverage_suffix_mb(per_item, per_item, 2, p, {}, None) == ""
+    assert rb.macro_coverage_suffix_mb(per_item, per_item, 2, p, {}, {}) == (
+        "（參與 macro 的 item 數 M 1／B 1／全部 2）"
+    )
 
 
 def test_metrics_section_has_macro_rows():
@@ -1099,9 +1133,10 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
 
 
 def test_baseline_section_overall_tables_use_k_superset_columns():
-    """overall family 表以 k superset [1,2,3,4,5,all] 放欄位（explicit family，
-    不再吃任意 metric key），但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items
-    的欄——fixture n_items=2，故 @3/@4/@5 都不該出現，只留 [1,2,all]。"""
+    """The overall family tables put the k superset [1,2,3,4,5,all] in columns
+    (explicit family, no longer any metric key), but bug 8 (ADR-0020) clamps
+    display columns with K > n_items — the fixture has n_items=2, so
+    @3/@4/@5 must not appear, leaving [1,2,all]."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
     s = rb.build_baseline_section(m, base, _params())
@@ -1112,7 +1147,7 @@ def test_baseline_section_overall_tables_use_k_superset_columns():
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
-    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。
+    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg is not shown).
 
     Titles are matched by prefix, not exact equality: bug 5 (ADR-0020)
     appends a "參與 macro 的 item 數 ..." coverage suffix to these titles
@@ -1141,9 +1176,10 @@ def _title_starting_with(titles: list[str], prefix: str) -> str:
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
-    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]，
-    但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items——fixture n_items=2，
-    故 K=3 被濾掉，只留 [1, all]（@all 仍解析為 @2）。"""
+    """The recall / map_attr per-item M/B/Δ tables share k columns =
+    primary_map_k=[1,3,all], but bug 8 (ADR-0020) clamps display columns with
+    K > n_items — the fixture has n_items=2, so K=3 is dropped, leaving
+    [1, all] (@all still resolves to @2)."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())

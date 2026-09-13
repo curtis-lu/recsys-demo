@@ -13,6 +13,7 @@ from datetime import datetime
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.baselines import resolve_lookback_months
 from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 
@@ -178,9 +179,9 @@ def _macro_item_coverage(per_item: dict, parameters: dict) -> int:
     bug 5 (ADR-0020): ``per_item`` already excludes items with zero
     positives this period (they never had a row to aggregate), and
     ``evaluation.metric.min_positives`` (read through ``metric_params``, the
-    one reader of that block) can exclude further ones. Both are silent — the
-    macro's denominator drifts month to month with no visible cause. This is
-    disclosure, not a definition change: it counts the same set
+    shared reader of that block) can exclude further ones. Both are silent —
+    the macro's denominator drifts month to month with no visible cause. This
+    is disclosure, not a definition change: it counts the same set
     ``macro_average`` uses, it does not alter what the Macro row's values are.
     """
     min_positives = metric_params(parameters)["min_positives"]
@@ -190,20 +191,51 @@ def _macro_item_coverage(per_item: dict, parameters: dict) -> int:
     )
 
 
-def _macro_coverage_suffix(n: int, m: int) -> str:
-    """Title suffix for a single-sided per-item macro table (bug 5)."""
-    return f"（參與 macro 的 item 數 {n}／全部 {m}）"
+def macro_coverage_suffix(
+    per_item: dict, n_items: int, parameters: dict, macro: dict | None
+) -> str:
+    """Title suffix disclosing a single-sided per-item macro's coverage (bug 5).
+
+    Returns ``""`` unless ``macro`` is truthy — the same test
+    ``_per_item_metric_table`` uses (``if macro_metrics:``) to prepend the
+    Macro row. The suffix describes that row's denominator, so it has to
+    appear exactly when the row does. ``macro_coverage_suffix_mb`` tests
+    ``is not None`` instead, matching its own table; using one helper on the
+    other's table puts the suffix on a table without a Macro row (or drops it
+    from one that has it) for an empty-dict macro, and nothing raises.
+    """
+    if not macro:
+        return ""
+    n = _macro_item_coverage(per_item, parameters)
+    return f"（參與 macro 的 item 數 {n}／全部 {n_items}）"
 
 
-def _macro_coverage_suffix_mb(n_a: int, n_b: int, m: int) -> str:
-    """Title suffix for an M/B/Δ-interleaved per-item macro table (bug 5).
+def macro_coverage_suffix_mb(
+    per_item_a: dict,
+    per_item_b: dict,
+    n_items: int,
+    parameters: dict,
+    macro_a: dict | None,
+    macro_b: dict | None,
+) -> str:
+    """Title suffix disclosing both sides' macro coverage on an M/B/Δ table (bug 5).
+
+    Returns ``""`` unless both ``macro_a`` and ``macro_b`` are not ``None`` —
+    the same condition ``_per_item_metric_compare_table`` uses to add the
+    Macro row (an empty dict counts as present there, and so here).
 
     Generic "M"/"B" labels (not "Model"/"Baseline") so the same helper reads
     correctly whether the two sides are Model/Baseline (main report) or two
     compared model versions (comparison report) — matching the tables'
-    existing "(M/B/Δ)" column convention.
+    existing "(M/B/Δ)" column convention. Both reports build these titles
+    through this one function, so the condition and the wording cannot drift
+    between copies.
     """
-    return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {m}）"
+    if macro_a is None or macro_b is None:
+        return ""
+    n_a = _macro_item_coverage(per_item_a, parameters)
+    n_b = _macro_item_coverage(per_item_b, parameters)
+    return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {n_items}）"
 
 
 def build_overview_section(
@@ -277,11 +309,12 @@ def build_overview_section(
     # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
     totals = _dataset_overview(metrics).get("totals", {}) or {}
     entity_str = "×".join(get_schema(parameters)["entity"])
-    # bug 3 (ADR-0020)：n_queries 是 compute_dataset_overview 的「全部 query
-    # 數（filter 前）」，舊標籤寫成「有正例 query 數」——跟下面的「排除 query
-    # 數」互相矛盾（不可能同時有百萬個有正例的 query、又排除其中 95 萬個）。
-    # 標籤改對，並多印一列報表原本沒有任何地方給出的真值：有正例的 query 數
-    # ＝ n_queries − n_excluded_queries。
+    # bug 3 (ADR-0020): n_queries is compute_dataset_overview's count of all
+    # queries before filtering, but the old label called it "queries with a
+    # positive" — contradicting the excluded-queries row right below (a
+    # million queries with a positive cannot coexist with 950k excluded).
+    # Fix the label, and add the row the report never gave anywhere:
+    # queries with a positive = n_queries - n_excluded_queries.
     scale = {
         "全部 query 數 n_queries": metrics.get("n_queries"),
         "有正例的 query 數": _od(
@@ -674,14 +707,11 @@ def build_metrics_section(
         for col, field in (("CI 2.5%", "ci_low"), ("CI 97.5%", "ci_high"),
                            ("n_pos（CI 用）", "n_pos")):
             b_map[col] = [_ci_val(idx, field) for idx in b_map.index]
-    # bug 5 (ADR-0020)：macro 分母是「有正例的 item 數」，零正例 item 從
-    # per_item 靜默消失；title 揭露參與 macro 的 item 數／全部 item 數，只在
-    # 有 Macro 列時才印（macro_item 為空表示這張表沒有 Macro 列）。
-    item_cov = (
-        _macro_coverage_suffix(
-            _macro_item_coverage(per_item, parameters), n_items
-        ) if macro_item else ""
-    )
+    # bug 5 (ADR-0020): the macro denominator is "items with a positive this
+    # period" (and n_pos >= metric.min_positives); a zero-positive item drops
+    # out of per_item silently. The title discloses N of M, only on a table
+    # that has a Macro row.
+    item_cov = macro_coverage_suffix(per_item, n_items, parameters, macro_item)
     _add(b_map, f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）{item_cov}",
          True)
     _add(_per_item_recall_table(per_item, ks, n_items, macro_metrics=macro_item),
@@ -689,10 +719,8 @@ def build_metrics_section(
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
         cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
-        cat_item_cov = (
-            _macro_coverage_suffix(
-                _macro_item_coverage(cat_pi, parameters), n_cat
-            ) if cat_macro_item else ""
+        cat_item_cov = macro_coverage_suffix(
+            cat_pi, n_cat, parameters, cat_macro_item
         )
         _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
                                     "@{k}", macro_metrics=cat_macro_item),
@@ -856,13 +884,10 @@ def build_baseline_section(
     )
     # overall 三表用 k superset（使用者指定，k 放欄位）
     k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
-    # Same helper the node (compute_baseline_metrics) reads — lazy import,
-    # same style as `compare` above (bug 1, ADR-0020): before this helper
-    # existed this line read .get("lookback_months") with no default, so an
-    # unset key printed nothing here while the node had in fact used 12.
-    from recsys_tfb.evaluation.baselines import (
-        lookback_months as resolve_lookback_months,
-    )
+    # Same helper the node (compute_baseline_metrics) reads (bug 1,
+    # ADR-0020): before it existed this line read .get("lookback_months")
+    # with no default, so an unset key printed nothing here while the node
+    # had in fact used 12.
     lookback = resolve_lookback_months(parameters)
 
     tables: list[pd.DataFrame] = []
@@ -929,15 +954,10 @@ def build_baseline_section(
     macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
     if per_item_b:
-        # bug 5 (ADR-0020)：兩側各自的 macro 分母都可能悄悄縮水，Model／
-        # Baseline 分開揭露；只在兩側都有 Macro 列時才印（macro_a/macro_b
-        # 皆非 None，同 _per_item_metric_compare_table 判斷 Macro 列的條件）。
-        item_cov = (
-            _macro_coverage_suffix_mb(
-                _macro_item_coverage(per_item_a, parameters),
-                _macro_item_coverage(per_item_b, parameters),
-                n_items,
-            ) if macro_a is not None and macro_b is not None else ""
+        # bug 5 (ADR-0020): either side's macro denominator can shrink
+        # silently, so Model and Baseline are disclosed separately.
+        item_cov = macro_coverage_suffix_mb(
+            per_item_a, per_item_b, n_items, parameters, macro_a, macro_b
         )
         # 兩張 per-item M/B/Δ 用同一組 k（attr_ks＝primary_map_k），彼此一致；
         # 為控寬用縮減集，與衡量指標 per-item 的完整 [1..5,all] 不同（描述封邊）。
@@ -1229,8 +1249,8 @@ def build_completeness_section(
     # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
     # build_overview_section 的 entity 標籤）。
     item_col = get_schema(parameters)["item"]
-    # bug 3 (ADR-0020)：同 build_overview_section 的標籤修正——只動這兩列，
-    # metric_p 的讀取（下面 mk／weight_alpha 等）不在這條 bug 的範圍內。
+    # bug 3 (ADR-0020): the same n_queries label fix as
+    # build_overview_section.
     facts = {
         "k_values": eval_p.get("k_values"),
         "全部 query 數 n_queries": metrics.get("n_queries"),

@@ -9,14 +9,13 @@ import pandas as pd
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
-    _macro_coverage_suffix_mb,
-    _macro_item_coverage,
     _per_item_metric_compare_table,
     _resolve_display_k,
     _k_to_lookup,
     _n_items,
     _visible_metric_keys,
     build_glossary_section,
+    macro_coverage_suffix_mb,
 )
 
 
@@ -157,15 +156,9 @@ def _build_per_item_section(
 
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
-    # bug 5 (ADR-0020): disclose each side's macro item coverage — only when
-    # both sides actually get a Macro row (same condition
-    # _per_item_metric_compare_table uses to add one).
-    item_cov = (
-        _macro_coverage_suffix_mb(
-            _macro_item_coverage(per_item_a, parameters),
-            _macro_item_coverage(per_item_b, parameters),
-            n_items,
-        ) if macro_a is not None and macro_b is not None else ""
+    # bug 5 (ADR-0020): disclose each side's macro item coverage.
+    item_cov = macro_coverage_suffix_mb(
+        per_item_a, per_item_b, n_items, parameters, macro_a, macro_b
     )
 
     tables, titles = [], []
@@ -229,12 +222,8 @@ def _build_category_section(
     tables.append(overall_tbl)
     titles.append("大類 overall")
     # bug 5 (ADR-0020): same disclosure as the fine-grained per-item section.
-    item_cov = (
-        _macro_coverage_suffix_mb(
-            _macro_item_coverage(per_item_a, parameters),
-            _macro_item_coverage(per_item_b, parameters),
-            n_cat,
-        ) if macro_a is not None and macro_b is not None else ""
+    item_cov = macro_coverage_suffix_mb(
+        per_item_a, per_item_b, n_cat, parameters, macro_a, macro_b
     )
     for metric_key, col_fmt, ks, title in (
         ("hit_rate", "recall@{k}", rec_ks, "大類 per-item recall@k (M/B/Δ)"),

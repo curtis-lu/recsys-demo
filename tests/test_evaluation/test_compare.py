@@ -45,14 +45,16 @@ def _make_result_dict(seed: int) -> dict:
         for s in segments
     }
     per_item_segment = {
-        f"{it}_{s}": {
-            "hit_rate@3": float(rng.rand()),
-            "map_attr@3": float(rng.rand()),
-            "ndcg_attr@3": float(rng.rand()),
-            "mean_pos": float(rng.rand() * 3 + 1),
+        it: {
+            s: {
+                "hit_rate@3": float(rng.rand()),
+                "map_attr@3": float(rng.rand()),
+                "ndcg_attr@3": float(rng.rand()),
+                "mean_pos": float(rng.rand() * 3 + 1),
+            }
+            for s in segments
         }
         for it in items
-        for s in segments
     }
     macro_avg = {
         "by_item": {
@@ -64,7 +66,11 @@ def _make_result_dict(seed: int) -> dict:
         },
         "by_item_segment": {
             "hit_rate@3": float(
-                np.mean([v["hit_rate@3"] for v in per_item_segment.values()])
+                np.mean([
+                    cell["hit_rate@3"]
+                    for by_seg in per_item_segment.values()
+                    for cell in by_seg.values()
+                ])
             ),
         },
     }

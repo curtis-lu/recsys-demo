@@ -17,7 +17,7 @@ from recsys_tfb.core.schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-def lookback_months(parameters: dict) -> int:
+def resolve_lookback_months(parameters: dict) -> int:
     """``evaluation.baseline.lookback_months``, defaulting to 12.
 
     The single place both the node (``compute_baseline_metrics``) and the

@@ -1,4 +1,4 @@
-"""Ranking primitives on numpy arrays, plus the single reader of ``evaluation.metric``.
+"""Ranking primitives on numpy arrays, plus the shared reader of ``evaluation.metric``.
 
 This is a pure-numpy leaf module: its imports are ``logging`` / ``typing`` /
 ``numpy`` only. Do not add a project import — ``diagnosis.metric.*``,
@@ -13,9 +13,11 @@ What lives here:
 * The per-item macro primitives (``positive_row_contributions`` /
   ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO,
   ``metrics_spark.macro_average`` and the diagnosis bootstrap.
-* :func:`metric_params` — the only code that reads ``evaluation.metric``
-  (ADR-0020 design H), so the fallback semantics cannot drift between
-  copies.
+* :func:`metric_params` — the only reader of ``evaluation.metric`` that the
+  metrics, diagnosis and report code uses (ADR-0020 design H), so the
+  fallback semantics cannot drift between copies. A15 in
+  ``core/consistency.py`` reads the same block separately, only to validate
+  value domains.
 
 The dict-shaped per-segment / per-item / overall metrics of the evaluation
 pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
@@ -32,9 +34,12 @@ logger = logging.getLogger(__name__)
 def metric_params(parameters: dict) -> dict:
     """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
 
-    The single reader of that block (ADR-0020 design H): the Spark main
-    metrics, the metric CI, the diagnosis family, the report and the
-    ``scripts/`` diagnoses all call this instead of keeping their own copy.
+    The one reader of that block that the metrics / diagnosis / report code
+    uses (ADR-0020 design H): the Spark main metrics, the metric CI, the
+    diagnosis family, the report and the ``scripts/`` diagnoses all call this
+    instead of keeping their own copy. A15
+    (``core.consistency.diagnosis_metric_param_errors``) reads the same block
+    separately, only to validate value domains; it resolves no fallbacks.
 
     Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
     an explicit ``None`` value all resolve to ``k=None`` (no truncation),
