@@ -174,9 +174,18 @@ def build_overview_section(
         titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）")
         n_boot = metric_ci.get("n_boot")
         sd = sample_meta.get("sampling_description", "")
+        # 點估與 CI 的截斷由 metric.k 決定（ADR-0020 設計 H），不寫死 @all。
+        mk = metric_params(parameters)["k"]
+        trunc_note = (
+            "點估 AP 與 CI 都不截斷（metric.k 未設），與衡量指標的全量 macro "
+            "map_attr@all 同一定義。"
+            if mk is None else
+            f"點估 AP 與 CI 都截斷在 {mk}（metric.k），與衡量指標的全量 macro "
+            f"map_attr@{mk} 同一定義。"
+        )
         ci_note = (
             f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
-            f"重抽得到；{sd}點估 AP 與衡量指標的全量 macro map_attr@all 相同。"
+            f"重抽得到；{sd}{trunc_note}"
         )
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
@@ -596,6 +605,13 @@ def build_metrics_section(
                                     macro_metrics=cat_macro_item),
              "B · 大類 per-item 歸因｜recall@k（列＝大類）", True)
 
+    # CI 點估對應哪一欄由 metric.k 決定（ADR-0020 設計 H），不寫死 @all。
+    mk = metric_params(parameters)["k"]
+    ci_point_note = (
+        "CI 上下界的點估與該列 map_attr@all 同一定義，不截斷（metric.k 未設）"
+        if mk is None else
+        f"CI 上下界的點估與該列 map_attr@{mk} 同一定義，截斷在 {mk}（metric.k）"
+    )
     return ReportSection(
         title="衡量指標",
         description=(
@@ -607,7 +623,7 @@ def build_metrics_section(
             "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
             "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
             "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
-            "mAP（item 等權，含 bootstrap CI；CI 上下界的點估＝該列 map_attr@all）；"
+            f"mAP（item 等權，含 bootstrap CI；{ci_point_note}）；"
             "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
             "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
             "退化為 base rate、recall 恆為 1。CI 僅算到 item 層（大類 per-item 無 "
