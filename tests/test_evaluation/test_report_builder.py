@@ -104,39 +104,66 @@ def _params_with_metric_k(k):
     return p
 
 
-def test_overview_ci_note_follows_metric_k():
-    """設計 H：CI 註腳從 metric.k 組出來，不再寫死「與 map_attr@all 相同」。
+def _metrics_with_n_items(n):
+    m = _metrics()
+    m["dataset_overview"]["totals"]["n_items"] = n
+    return m
 
-    metric.k 非 null 時點估與 CI 都截斷在 k，對應的全量量是 map_attr@k。
+
+def test_overview_ci_note_follows_metric_k():
+    """Design H: the CI note is built from metric.k instead of hard-coding
+    "same as map_attr@all".
+
+    With metric.k set, point estimate and CI are both truncated at k and the
+    matching full-population column is map_attr@k. n_items=5 keeps @3 among
+    the metrics section's displayed columns.
     """
     s3 = rb.build_overview_section(
-        _metrics(), _params_with_metric_k(3), metric_ci=_metric_ci()
+        _metrics_with_n_items(5), _params_with_metric_k(3), metric_ci=_metric_ci()
     )
     assert "截斷在 3" in s3.description
     assert "map_attr@3" in s3.description
     assert "map_attr@all 相同" not in s3.description
 
     s_null = rb.build_overview_section(
-        _metrics(), _params_with_metric_k(None), metric_ci=_metric_ci()
+        _metrics_with_n_items(5), _params_with_metric_k(None), metric_ci=_metric_ci()
     )
     assert "不截斷" in s_null.description
     assert "map_attr@all" in s_null.description
 
 
 def test_metrics_section_ci_point_note_follows_metric_k():
-    """設計 H：衡量指標段 description 講 CI 點估對應哪一欄，也要依 metric.k。"""
+    """Design H: the metrics section's note on which column the CI point
+    estimate matches also follows metric.k."""
     s3 = rb.build_metrics_section(
-        _metrics(), _params_with_metric_k(3), metric_ci=_metric_ci()
+        _metrics_with_n_items(5), _params_with_metric_k(3), metric_ci=_metric_ci()
     )
     assert "截斷在 3" in s3.description
     assert "map_attr@3" in s3.description
     assert "map_attr@all" not in s3.description
 
     s_null = rb.build_metrics_section(
-        _metrics(), _params_with_metric_k(None), metric_ci=_metric_ci()
+        _metrics_with_n_items(5), _params_with_metric_k(None), metric_ci=_metric_ci()
     )
     assert "不截斷" in s_null.description
     assert "map_attr@all" in s_null.description
+
+
+@pytest.mark.parametrize("n_items, k", [(5, 7), (2, 3)])
+def test_ci_notes_do_not_name_a_column_the_metrics_section_hides(n_items, k):
+    """Design H x bug 8: a metric.k outside the metrics section's displayed
+    K columns ([1..5, all] clamped to n_items) must not be pointed at as
+    map_attr@k — that column is not on the page. The notes still state the
+    truncation, and say the tables have no @k column."""
+    m = _metrics_with_n_items(n_items)
+    p = _params_with_metric_k(k)
+    for section in (
+        rb.build_overview_section(m, p, metric_ci=_metric_ci()),
+        rb.build_metrics_section(m, p, metric_ci=_metric_ci()),
+    ):
+        assert f"map_attr@{k}" not in section.description
+        assert f"截斷在 {k}" in section.description
+        assert f"不顯示 @{k} 欄" in section.description
 
 
 def test_overview_scale_table_labels_n_queries_as_the_full_total():

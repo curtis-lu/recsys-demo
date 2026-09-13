@@ -53,6 +53,23 @@ def _k_to_lookup(k, n_items: int) -> int | str:
     return k
 
 
+#: K columns of every metrics-section table, before the bug 8 clamp.
+_METRICS_SECTION_K = (1, 2, 3, 4, 5, "all")
+
+
+def _metrics_section_ks(n_items: int) -> list:
+    """The K columns the metrics section's tables actually show at this grain.
+
+    One derivation for those tables and for the two CI notes that point into
+    them (``build_overview_section``'s and ``build_metrics_section``'s). A
+    note naming ``map_attr@{metric.k}`` is only true while that column
+    survives the ``_resolve_display_k`` clamp; with a second copy of the list
+    the note could keep naming a column the table dropped, and nothing would
+    raise — the reader just gets pointed at a column that is not there.
+    """
+    return _resolve_display_k(list(_METRICS_SECTION_K), n_items)
+
+
 _MACRO_LABEL = "Macro 平均"
 
 # metrics_spark 仍會算出 ndcg@k / ndcg_attr@k，但兩份報表都刻意不呈現它們。
@@ -221,15 +238,25 @@ def build_overview_section(
         titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）")
         n_boot = metric_ci.get("n_boot")
         sd = sample_meta.get("sampling_description", "")
-        # 點估與 CI 的截斷由 metric.k 決定（ADR-0020 設計 H），不寫死 @all。
+        # Truncation of point estimate and CI follows metric.k (ADR-0020
+        # design H) instead of a hard-coded @all. Name the matching column
+        # only when the metrics section actually shows it.
         mk = metric_params(parameters)["k"]
-        trunc_note = (
-            "點估 AP 與 CI 都不截斷（metric.k 未設），與衡量指標的全量 macro "
-            "map_attr@all 同一定義。"
-            if mk is None else
-            f"點估 AP 與 CI 都截斷在 {mk}（metric.k），與衡量指標的全量 macro "
-            f"map_attr@{mk} 同一定義。"
-        )
+        if mk is None:
+            trunc_note = (
+                "點估 AP 與 CI 都不截斷（metric.k 未設），與衡量指標的全量 macro "
+                "map_attr@all 同一定義。"
+            )
+        elif mk in _metrics_section_ks(n_items):
+            trunc_note = (
+                f"點估 AP 與 CI 都截斷在 {mk}（metric.k），與衡量指標的全量 macro "
+                f"map_attr@{mk} 同一定義。"
+            )
+        else:
+            trunc_note = (
+                f"點估 AP 與 CI 都截斷在 {mk}（metric.k）；衡量指標各表不顯示 "
+                f"@{mk} 欄。"
+            )
         ci_note = (
             f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
             f"重抽得到；{sd}{trunc_note}"
@@ -589,7 +616,7 @@ def build_metrics_section(
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     n_items = _n_items(metrics)
-    ks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)  # 全表統一 k
+    ks = _metrics_section_ks(n_items)  # one K list for every table
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -628,7 +655,7 @@ def build_metrics_section(
     cks = None
     if cat:
         n_cat = _n_items(cat)
-        cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        cks = _metrics_section_ks(n_cat)
         _add(_families_by_k_table(cat.get("overall", {}), cks, n_cat),
              "A · per-query｜大類 overall（列＝map/precision/recall）", True)
 
@@ -674,13 +701,22 @@ def build_metrics_section(
                                     macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜recall@k（列＝大類）{cat_item_cov}", True)
 
-    # CI 點估對應哪一欄由 metric.k 決定（ADR-0020 設計 H），不寫死 @all。
+    # Which column the CI point estimate matches follows metric.k (ADR-0020
+    # design H) instead of a hard-coded @all; a column is named only when
+    # this section's tables (ks) actually show it.
     mk = metric_params(parameters)["k"]
-    ci_point_note = (
-        "CI 上下界的點估與該列 map_attr@all 同一定義，不截斷（metric.k 未設）"
-        if mk is None else
-        f"CI 上下界的點估與該列 map_attr@{mk} 同一定義，截斷在 {mk}（metric.k）"
-    )
+    if mk is None:
+        ci_point_note = (
+            "CI 上下界的點估與該列 map_attr@all 同一定義，不截斷（metric.k 未設）"
+        )
+    elif mk in ks:
+        ci_point_note = (
+            f"CI 上下界的點估與該列 map_attr@{mk} 同一定義，截斷在 {mk}（metric.k）"
+        )
+    else:
+        ci_point_note = (
+            f"CI 上下界的點估截斷在 {mk}（metric.k），本段各表不顯示 @{mk} 欄"
+        )
     return ReportSection(
         title="衡量指標",
         description=(
