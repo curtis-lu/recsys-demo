@@ -116,7 +116,7 @@ CLI 進入點跑、在 Spark session 存在之前、一次收集全部缺項，�
 - **catalog ↔ schema 一致性不變量**（決定二）。
 - **time 語彙的任何改名**（決定一）。
 - **報表 prose 與詞彙表裡的業務詞。** 只有**表格欄名標籤**解凍改成從 schema 取；
-  報表其餘內容調整仍凍結（`docs/agents/deliberate-non-goals.md`）。
+  報表其餘內容調整當時仍凍結。（2026-09-13 更正：該凍結已依 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) 解除，`deliberate-non-goals.md` 那一條已刪；這一點的「刻意沒做」仍成立，只是理由變成「不在那一輪範圍」。）
 - **`evaluation_results.json` 以外的落地產物鍵。** 本輪只處理該檔的 `dataset_overview`。
 - **`docs/` 底下歷史 plan / spec 對舊鍵名的引用。** 那些是歷史紀錄，不回頭改。
 - **沒被這輪動到的模組裡的內部識別字。** `pipelines/inference/`（`n_products`

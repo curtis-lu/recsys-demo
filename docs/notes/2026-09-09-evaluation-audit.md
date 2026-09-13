@@ -27,6 +27,8 @@
 
 **「撞哪條凍結」指的是** `docs/agents/deliberate-non-goals.md` 裡刻意不做的事（底下簡稱 `deliberate-non-goals.md`）。底下一律用該檔的小節標題原文稱呼，不用行號——那份檔會改，行號會漂，標題可以直接拿去 grep。同目錄另外兩份會被引用到的是 `docs/agents/pipeline-node-design.md`（node 的內容判準，底下簡稱 `pipeline-node-design.md`）與 `docs/agents/pipeline-refactor-process.md`（整條 pipeline 的重整流程判準，底下簡稱 `pipeline-refactor-process.md`）。
 
+**2026-09-13 更新**：該檔的「別調報表的呈現——除了欄名標籤那一部分」一條已依 ADR-0020 刪除（使用者明示 evaluation 重構期間報表可改）。底下各條寫「撞報表呈現凍結」「要改得先問使用者」的地方，現在**不再構成障礙**，只保留當作「這條會動到報表」的提示；各條的修法由 ADR-0020 定。
+
 **兩份複核報告、重現腳本（`repro_bug2.py` 等）與腳本的輸出檔（`repro_5_6_12.out`）都不在 repo 裡**，也不在任何 GitHub issue 裡；它們寫在複核當時的暫存目錄，沒有提交。這份檔是那些內容目前唯一留在 repo 裡的形式。底下出現的那些檔名只標示每條複核的涵蓋範圍與需不需要 Spark，不是可以開的路徑。
 
 ---
