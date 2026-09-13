@@ -751,6 +751,25 @@ class TestResolveDisplayKClampsToItemCount:
         assert rb._resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
+class TestDropMetricKeysAboveItemCount:
+    """bug 8 (ADR-0020) for key-agnostic tables: the same K > n_items rule as
+    _resolve_display_k, applied to metric keys instead of a display list."""
+
+    def test_drops_only_integer_k_above_the_count(self):
+        keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]
+        assert rb.drop_metric_keys_above_item_count(keys, 3) == [
+            "map@3", "mean_pos", "map@all",
+        ]
+
+    def test_keeps_k_equal_to_the_count(self):
+        assert rb.drop_metric_keys_above_item_count(["precision@3"], 3) == [
+            "precision@3"
+        ]
+
+    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
+        assert rb.drop_metric_keys_above_item_count(["map@5"], 0) == ["map@5"]
+
+
 class TestVisibleMetricKeys:
     def test_drops_ndcg_keys(self):
         keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]
@@ -1035,6 +1054,43 @@ def test_baseline_popularity_avg_per_month_when_lookback():
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert "平均每月" in pop.columns
     assert pop.loc["B", "平均每月"] == 20.0     # 240 / 12
+
+
+def test_baseline_discloses_a_partially_covered_lookback_window():
+    """bug 1 (ADR-0020): the empty-window raise only fires when the window
+    has no label rows at all. label_table covering 2 of the 12 lookback
+    months used to print the plain 12-month sentence and divide the
+    per-month average by 12 — 6x too low. monthly_counts holds only months
+    with label rows inside the window, so its distinct months are the
+    coverage."""
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 24, "B": 6},
+        "monthly_counts": {
+            "A": {"2025-11": 12, "2025-12": 12},
+            "B": {"2025-12": 6},
+        },
+    }
+    s = rb.build_baseline_section(m, base, _params_lookback())
+    assert "實際只涵蓋 2 個月" in s.description
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert pop.loc["A", "平均每月"] == 12.0     # 24 / 2 covered months
+
+
+def test_baseline_fully_covered_lookback_window_keeps_the_plain_sentence():
+    months = [f"2025-{mo:02d}" for mo in range(1, 13)]
+    m = _metrics()
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 24},
+        "monthly_counts": {"A": {mo: 2 for mo in months}},
+    }
+    s = rb.build_baseline_section(m, base, _params_lookback())
+    assert "popularity 以過去 12 個月的歷史購買計數重排。" in s.description
+    assert "實際只涵蓋" not in s.description
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert pop.loc["A", "平均每月"] == 2.0      # 24 / 12
 
 
 def test_baseline_section_renders_popularity_table():

@@ -42,9 +42,40 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
             out.append("all")
         else:
             out.append(int(k))
-    if n_items <= 0:
-        return out
-    return [k for k in out if k == "all" or k <= n_items]
+    return [k for k in out if not _k_exceeds_item_count(k, n_items)]
+
+
+def _k_exceeds_item_count(k: int | str, n_items: int) -> bool:
+    """True for an int K above ``n_items`` — the one bug 8 rule (ADR-0020).
+
+    Shared by the display-list filter (``_resolve_display_k``) and the
+    metric-key filter (``drop_metric_keys_above_item_count``), so the two
+    cannot disagree about which columns and rows a grain drops. ``"all"``
+    never exceeds, and ``n_items <= 0`` (item count unknown) filters nothing.
+    """
+    if n_items <= 0 or k == "all":
+        return False
+    return int(k) > n_items
+
+
+def drop_metric_keys_above_item_count(keys, n_items: int) -> list:
+    """``keys`` minus those whose ``@K`` suffix is an int K above ``n_items`` (bug 8).
+
+    For tables that print every computed metric key as a row (the comparison
+    report's overall and category-overall tables), where there is no display
+    K list to filter. Same rule and reason as ``_resolve_display_k``: past
+    the item count precision@K keeps falling only because its denominator is
+    K, so those rows are meaningless rather than wrong — nothing flags them.
+    K == n_items stays, keys without an ``@<int>`` suffix stay, order is
+    kept, and ``n_items <= 0`` keeps every key.
+    """
+    out = []
+    for key in keys:
+        _, sep, suffix = str(key).rpartition("@")
+        if sep and suffix.isdigit() and _k_exceeds_item_count(int(suffix), n_items):
+            continue
+        out.append(key)
+    return out
 
 
 def _k_to_lookup(k, n_items: int) -> int | str:
@@ -899,6 +930,19 @@ def build_baseline_section(
         titles.append(title)
         collapsed.append(is_collapsed)
 
+    # bug 1 (ADR-0020), partial window: _lookback_window raises only when the
+    # window has no label rows at all, so a label_table covering 2 of 12
+    # lookback months passes. It used to print the plain 12-month sentence
+    # and divide the per-month average by 12, understating it 6x with no
+    # error. monthly_counts holds only months with label rows inside the
+    # window, so its distinct months are the coverage; without it (older
+    # results) the configured lookback stays both text and divisor.
+    monthly = (baseline_metrics or {}).get("monthly_counts") or {}
+    months = sorted({mo for per in monthly.values() for mo in per})
+    covered = len(months)
+    window_partial = 0 < covered < lookback
+    per_month_divisor = covered if window_partial else lookback
+
     # [1] popularity 排名組成（總計 count + 平均每月）；各月明細/趨勢＝Phase 2。
     pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
     if pcounts:
@@ -906,9 +950,9 @@ def build_baseline_section(
             pcounts.items(), key=lambda kv: kv[1], reverse=True
         )
         pop_cols = {"count": [v for _, v in sorted_items]}
-        if lookback:
+        if per_month_divisor:
             pop_cols["平均每月"] = [
-                round(v / lookback, 1) for _, v in sorted_items
+                round(v / per_month_divisor, 1) for _, v in sorted_items
             ]
         pop_cols["rank"] = list(range(1, len(sorted_items) + 1))
         _add(
@@ -918,9 +962,7 @@ def build_baseline_section(
 
     # [1b] 月度趨勢：rows=item（總計降序，與 [1] 同序）、cols=月份升序＋合計。
     #      各 item 的「合計」＝該列月份和，逐 item 對齊 [1] 的 count。
-    monthly = (baseline_metrics or {}).get("monthly_counts") or {}
     if monthly:
-        months = sorted({mo for per in monthly.values() for mo in per})
         item_order = sorted(
             monthly, key=lambda it: sum(monthly[it].values()), reverse=True
         )
@@ -1016,10 +1058,15 @@ def build_baseline_section(
         }
         _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)
 
-    # Always printed now (bug 1): lookback is resolved via the shared helper
-    # above and is never unset, so there is no longer a "config didn't say"
-    # case to suppress this sentence for.
-    lookback_note = f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
+    # Always printed (bug 1): lookback is resolved via the shared helper above
+    # and is never unset. A partially covered window also states how many
+    # months it actually had (see window_partial above).
+    lookback_note = (
+        f"popularity 以過去 {lookback} 個月的歷史購買計數重排"
+        f"（label_table 在這個視窗內實際只涵蓋 {covered} 個月）。"
+        if window_partial else
+        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
+    )
     return ReportSection(
         title="baseline — popularity 對照",
         description=(

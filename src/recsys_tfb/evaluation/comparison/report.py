@@ -15,6 +15,7 @@ from recsys_tfb.evaluation.report_builder import (
     _n_items,
     _visible_metric_keys,
     build_glossary_section,
+    drop_metric_keys_above_item_count,
     macro_coverage_suffix_mb,
 )
 
@@ -29,7 +30,7 @@ def assemble_comparison_report(
     """Compose the 4-section + glossary HTML."""
     sections = [
         _build_coverage_section(comparison, coverage_info, parameters),
-        _build_overall_section(comparison),
+        _build_overall_section(metrics_a, comparison),
         _build_per_item_section(metrics_a, metrics_b, comparison, parameters),
         _build_category_section(metrics_a, metrics_b, parameters),
         build_glossary_section(parameters),
@@ -114,13 +115,19 @@ def _build_coverage_section(
     )
 
 
-def _build_overall_section(comparison: dict) -> ReportSection:
+def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
     label_a, label_b = comparison["label_a"], comparison["label_b"]
     overall_a = comparison["result_a"].get("overall", {}) or {}
     overall_b = comparison["result_b"].get("overall", {}) or {}
     overall_d = comparison["overall_delta"]
-    keys = _visible_metric_keys(
-        sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    # bug 8 (ADR-0020): this table prints every computed key, so rows with an
+    # @K above the item count are dropped here (same n_items as the per-item
+    # section below).
+    keys = drop_metric_keys_above_item_count(
+        _visible_metric_keys(
+            sorted(set(overall_a) | set(overall_b) | set(overall_d))
+        ),
+        _n_items(metrics_a),
     )
     tbl = pd.DataFrame(
         {
@@ -210,8 +217,13 @@ def _build_category_section(
     overall_a = cat_a.get("overall", {}) or {}
     overall_b = cat_b.get("overall", {}) or {}
     overall_d = comparison_cat["overall_delta"]
-    keys = _visible_metric_keys(
-        sorted(set(overall_a) | set(overall_b) | set(overall_d))
+    # bug 8 (ADR-0020): same key filter as _build_overall_section, against
+    # the category count — 3 categories must not print precision@4 / @5.
+    keys = drop_metric_keys_above_item_count(
+        _visible_metric_keys(
+            sorted(set(overall_a) | set(overall_b) | set(overall_d))
+        ),
+        n_cat,
     )
     overall_tbl = pd.DataFrame(
         {"Model": [overall_a.get(k) for k in keys],
