@@ -56,10 +56,14 @@ Layer 1 — config-static (implemented here; aggregated by
     - A9c — a ``sample_weights`` key whose product component (when
       ``schema.item`` is a weight key) ∉ ``resolved_item_values`` (mirrors A5).
       Predicate: ``weight_unknown_items``.
-* A10 — an ``evaluation.segment_columns`` entry has no ``evaluation.
-  segment_sources`` entry providing it (matching ``segment_column``); the
-  per-segment report section would silently never render. Predicate:
-  ``segment_columns_without_source``.
+* A10 — an ``evaluation.segment_sources.<column>`` override for a column in
+  ``evaluation.segment_columns`` is incomplete (``table``, ``key_columns``,
+  ``segment_column`` all required) or delivers a ``segment_column`` other than
+  ``<column>``. A column without an override is not an error: it comes from
+  the run mode's population table, and whether that table has the column is
+  read from the metastore at run time by ``prepare_eval_data`` (ADR-0020
+  bug 6), which this layer cannot see. Predicate:
+  ``segment_source_override_errors``.
 * A11 — every ``evaluation.compare_sources[*]`` is well-formed:
   ``kind`` ∈ {model_version, external_hive}; ``label`` required; ranked
   by-kind required fields (``model_version`` for model_version, optional
@@ -885,20 +889,44 @@ def weight_unknown_items(parameters: dict) -> list[str]:
     return sorted(bad)
 
 
-def segment_columns_without_source(parameters: dict) -> list[str]:
-    """evaluation.segment_columns entries with no providing segment_source (A10).
+_SEGMENT_OVERRIDE_FIELDS = ("table", "key_columns", "segment_column")
 
-    Every column in ``evaluation.segment_columns`` must be delivered by some
-    ``evaluation.segment_sources`` entry's ``segment_column``. Otherwise the
-    metric layer silently produces no per_segment results and the report
-    drops the per-segment section without warning. Returns sorted offending
-    columns; empty list means OK.
+
+def segment_source_override_errors(parameters: dict) -> list[str]:
+    """Malformed ``evaluation.segment_sources`` overrides (A10).
+
+    Only a column in ``evaluation.segment_columns`` that has an override is
+    checked. Without one, the column comes from the run mode's population
+    table; this layer runs before Spark and does not know the mode, so it
+    cannot tell whether that table has the column. A misspelt column name
+    therefore passes here and shows up at run time as "population table has
+    no column" in the log WARN and the report, both naming the column.
+
+    An override is found by the column's name, so its ``segment_column`` must
+    be that name; anything else would join a column nothing groups by.
     """
     ev = parameters.get("evaluation", {}) or {}
-    seg_cols = ev.get("segment_columns", []) or []
-    sources = (ev.get("segment_sources", {}) or {}).values()
-    provided = {(cfg or {}).get("segment_column") for cfg in sources}
-    return sorted(c for c in seg_cols if c not in provided)
+    overrides = ev.get("segment_sources", {}) or {}
+    errors = []
+    for col in ev.get("segment_columns", []) or []:
+        if col not in overrides:
+            continue
+        cfg = overrides[col] or {}
+        missing = [f for f in _SEGMENT_OVERRIDE_FIELDS if not cfg.get(f)]
+        if missing:
+            errors.append(
+                f"evaluation.segment_sources.{col} is missing {missing}. An "
+                f"override must give all of {list(_SEGMENT_OVERRIDE_FIELDS)}; "
+                f"remove the entry to take {col!r} from the run mode's "
+                f"population table instead."
+            )
+        elif cfg["segment_column"] != col:
+            errors.append(
+                f"evaluation.segment_sources.{col} has segment_column="
+                f"{cfg['segment_column']!r}; it must be {col!r}, the column "
+                f"this override delivers."
+            )
+    return errors
 
 
 def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
@@ -1517,16 +1545,7 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(compare_source_well_formed_errors(parameters))
 
-    seg_no_src = segment_columns_without_source(parameters)
-    if seg_no_src:
-        errors.append(
-            f"evaluation.segment_columns entries {seg_no_src} have no "
-            f"evaluation.segment_sources entry providing them (no "
-            f"segment_source has a matching segment_column). The per-segment "
-            f"report section would silently never render. Add a "
-            f"segment_sources entry for each, or remove them from "
-            f"segment_columns."
-        )
+    errors.extend(segment_source_override_errors(parameters))
 
     errors.extend(diagnosis_metric_param_errors(parameters))
 

@@ -5,6 +5,28 @@ from unittest.mock import MagicMock
 import pytest
 
 
+#: What prepare_eval_data lands when no segment column is configured, for
+#: nodes whose tests are not about segments.
+_NO_SEGMENTS = {"joined": [], "sources": {}, "missing": {},
+                "config_fingerprint": {"sha256": "", "values": {}}}
+
+
+def _prepare_eval_data(predictions, labels, parameters):
+    """``prepare_eval_data`` as monitoring wires it, frame only.
+
+    For tests of the prediction/label join. They configure no segment column,
+    so the population is read for nothing but its (empty) column list.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        make_prepare_eval_data_node,
+    )
+
+    population = MagicMock(name="population_sdf", columns=[])
+    frame, _segments = make_prepare_eval_data_node("inference_population")(
+        predictions, labels, population, parameters)
+    return frame
+
+
 class TestPrepareEvalDataModelVersionFilter:
     """prepare_eval_data filters predictions to parameters['model_version']."""
 
@@ -26,7 +48,6 @@ class TestPrepareEvalDataModelVersionFilter:
         }
 
     def test_filter_applied_with_model_version(self, spark, parameters):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
         predictions = MagicMock(name="predictions_sdf")
         predictions.columns = ["model_version"]
@@ -39,7 +60,7 @@ class TestPrepareEvalDataModelVersionFilter:
         filtered.select.return_value.distinct.return_value = MagicMock()
 
         try:
-            prepare_eval_data(predictions, labels, parameters)
+            _prepare_eval_data(predictions, labels, parameters)
         except Exception:
             pass  # we only care that .filter was called
 
@@ -51,7 +72,6 @@ class TestPrepareEvalDataModelVersionFilter:
         assert "20260511_153000" in filter_repr
 
     def test_raises_when_model_version_missing(self, parameters):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
         params_no_mv = dict(parameters)
         del params_no_mv["model_version"]
@@ -60,7 +80,7 @@ class TestPrepareEvalDataModelVersionFilter:
         labels = MagicMock(name="label_sdf")
 
         with pytest.raises(RuntimeError, match="model_version"):
-            prepare_eval_data(predictions, labels, params_no_mv)
+            _prepare_eval_data(predictions, labels, params_no_mv)
 
 
 def test_prepare_eval_data_injects_rank_when_missing(spark):
@@ -74,7 +94,6 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     constant column on load. prepare_eval_data must still produce a
     non-ambiguous result.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     predictions_pdf = pd.DataFrame({
@@ -108,7 +127,7 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
         "evaluation": {"snap_date": "2025-01-31"},
     }
 
-    result = prepare_eval_data(predictions, labels, parameters)
+    result = _prepare_eval_data(predictions, labels, parameters)
     cols = set(result.columns)
     assert "rank" in cols
 
@@ -180,9 +199,8 @@ def test_prepare_eval_data_injected_rank_is_bigint(spark):
     ``enriched_eval_predictions``, so a mismatch fails whichever write comes
     second (next test).
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
-    result = prepare_eval_data(
+    result = _prepare_eval_data(
         _post_training_predictions(spark), _labels(spark), _ENRICH_PARAMS,
     )
     assert result.schema["rank"].dataType.simpleString() == \
@@ -219,7 +237,6 @@ def test_both_modes_write_the_same_enriched_table_in_either_order(
     from pathlib import Path
 
     from recsys_tfb.io.hive_table_dataset import HiveTableDataset
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
     db, table = "test_rank_type_across_modes", "enriched_eval_predictions"
 
@@ -232,10 +249,10 @@ def test_both_modes_write_the_same_enriched_table_in_either_order(
             shutil.rmtree(table_dir)
 
     enriched = {
-        "post_training": lambda: prepare_eval_data(
+        "post_training": lambda: _prepare_eval_data(
             _post_training_predictions(spark), _labels(spark, label_type),
             _ENRICH_PARAMS),
-        "monitoring": lambda: prepare_eval_data(
+        "monitoring": lambda: _prepare_eval_data(
             _monitoring_predictions(spark), _labels(spark, label_type),
             _ENRICH_PARAMS),
     }
@@ -280,7 +297,6 @@ def test_prepare_eval_data_raises_on_duplicated_label_keys(spark, predictions):
     evaluated month is checked). Miscounting either way gives a number other
     than 2.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
 
     labels = spark.createDataFrame(
         [("c1", "2025-01-31", "A", 1),
@@ -293,7 +309,7 @@ def test_prepare_eval_data_raises_on_duplicated_label_keys(spark, predictions):
         "cust_id STRING, snap_date STRING, prod_name STRING, label INT",
     )
     with pytest.raises(ValueError, match="2 duplicated label_table key"):
-        prepare_eval_data(predictions(spark), labels, _ENRICH_PARAMS)
+        _prepare_eval_data(predictions(spark), labels, _ENRICH_PARAMS)
 
 
 def test_prepare_eval_data_preserves_existing_rank_column(spark):
@@ -301,7 +317,6 @@ def test_prepare_eval_data_preserves_existing_rank_column(spark):
     mode sourced from ranked_predictions), prepare_eval_data must NOT re-rank
     or overwrite — the upstream rank is authoritative.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     predictions_pdf = pd.DataFrame({
@@ -336,7 +351,7 @@ def test_prepare_eval_data_preserves_existing_rank_column(spark):
         "evaluation": {"snap_date": "2025-01-31"},
     }
 
-    result = prepare_eval_data(predictions, labels, parameters).toPandas()
+    result = _prepare_eval_data(predictions, labels, parameters).toPandas()
     # rank values are preserved as-is, NOT recomputed from score
     a_row = result[result["prod_name"] == "A"].iloc[0]
     b_row = result[result["prod_name"] == "B"].iloc[0]
@@ -351,7 +366,6 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
     reference 'label' is ambiguous. prepare_eval_data must drop the label_table
     side's `label` and keep the predictions' own label.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     # Post-training predictions: carry `label` (training_eval_predictions schema).
@@ -389,7 +403,7 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
         "evaluation": {"snap_date": "2025-01-31"},
     }
 
-    result = prepare_eval_data(predictions, labels, parameters)
+    result = _prepare_eval_data(predictions, labels, parameters)
 
     # Exactly one `label` column survives -> no ambiguous reference.
     assert result.columns.count("label") == 1
@@ -400,57 +414,163 @@ def test_prepare_eval_data_dedupes_label_when_predictions_carry_it(spark):
     assert by_prod["B"] == 0
 
 
-def test_prepare_eval_data_joins_segment_sources(spark):
-    """segment_sources Hive tables are left-joined onto eval_predictions (after
-    the predictions x labels join), enriching it with the segment column
-    without changing its row count."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
-    import pandas as pd
+class TestSegmentsFollowThePopulation:
+    """ADR-0020 bug 6: a segment column comes from the run mode's population
+    table (``sample_pool`` for --post-training, ``inference_population`` for
+    monitoring), keyed by (time, entity), unless ``segment_sources`` overrides
+    it. What was actually joined lands as ``evaluation_segment_columns``, the
+    node's second output, so consumers never infer it from frame columns."""
 
-    predictions = spark.createDataFrame(pd.DataFrame({
-        "cust_id": ["c1", "c1"],
-        "snap_date": ["2025-01-31"] * 2,
-        "prod_name": ["A", "B"],
-        "score": [0.9, 0.1],
-        "rank": [1, 2],
-        "model_version": ["v1"] * 2,
-    }))
-    labels = spark.createDataFrame(pd.DataFrame({
-        "cust_id": ["c1", "c1"],
-        "snap_date": ["2025-01-31"] * 2,
-        "prod_name": ["A", "B"],
-        "label": [1, 0],
-    }))
-    # sample_pool-like source: finer-grained (one row per product).
-    spark.createDataFrame(pd.DataFrame({
-        "cust_id": ["c1", "c1"],
-        "snap_date": ["2025-01-31"] * 2,
-        "cust_segment_typ": ["mass", "mass"],
-        "prod_name": ["A", "B"],
-    })).createOrReplaceTempView("seg_pool")
+    @staticmethod
+    def _parameters(**evaluation):
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank"}},
+            "model_version": "v1",
+            "evaluation": {"snap_date": "2025-01-31",
+                           "segment_columns": ["cust_segment_typ"],
+                           **evaluation},
+        }
 
-    parameters = {
-        "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank"}},
-        "model_version": "v1",
-        "evaluation": {
-            "snap_date": "2025-01-31",
-            "segment_sources": {"cust_segment_typ": {
-                "table": "seg_pool",
-                "key_columns": ["cust_id", "snap_date"],
-                "segment_column": "cust_segment_typ"}},
-        },
-    }
-    result = prepare_eval_data(predictions, labels, parameters).toPandas()
-    assert len(result) == 2  # no fan-out from the finer-grained source
-    assert set(result["cust_segment_typ"]) == {"mass"}
+    @staticmethod
+    def _inputs(spark):
+        import pandas as pd
+        predictions = spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["c1", "c1", "c2", "c2"],
+            "snap_date": ["2025-01-31"] * 4,
+            "prod_name": ["A", "B", "A", "B"],
+            "score": [0.9, 0.1, 0.2, 0.8],
+            "rank": [1, 2, 2, 1],
+            "model_version": ["v1"] * 4,
+        }))
+        labels = spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["c1", "c1", "c2", "c2"],
+            "snap_date": ["2025-01-31"] * 4,
+            "prod_name": ["A", "B", "A", "B"],
+            "label": [1, 0, 0, 1],
+        }))
+        return predictions, labels
+
+    @staticmethod
+    def _segments_by_customer(frame):
+        return {r["cust_id"]: r["cust_segment_typ"]
+                for r in frame.select("cust_id", "cust_segment_typ")
+                .distinct().collect()}
+
+    def test_monitoring_takes_segments_from_inference_population(self, spark):
+        """c2 is not in the population: its segment is NULL, which the metric
+        layer reports as the unmatched group."""
+        import pandas as pd
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            make_prepare_eval_data_node,
+        )
+
+        predictions, labels = self._inputs(spark)
+        population = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"], "cust_id": ["c1"],
+            "cust_segment_typ": ["from_population"],
+        }))
+        params = self._parameters()
+        frame, segments = make_prepare_eval_data_node("inference_population")(
+            predictions, labels, population, params)
+
+        assert frame.count() == 4
+        assert self._segments_by_customer(frame) == {
+            "c1": "from_population", "c2": None}
+        assert segments == {
+            "joined": ["cust_segment_typ"],
+            "sources": {"cust_segment_typ": "inference_population"},
+            "missing": {},
+            "config_fingerprint": fingerprint(params),
+        }
+
+    def test_post_training_sample_pool_is_finer_grained_without_fanout(self, spark):
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            make_prepare_eval_data_node,
+        )
+
+        predictions, labels = self._inputs(spark)
+        # sample_pool holds one row per (time, entity, item).
+        population = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 4,
+            "cust_id": ["c1", "c1", "c2", "c2"],
+            "prod_name": ["A", "B", "A", "B"],
+            "cust_segment_typ": ["mass", "mass", "hnw", "hnw"],
+        }))
+        frame, segments = make_prepare_eval_data_node("sample_pool")(
+            predictions, labels, population, self._parameters())
+
+        assert frame.count() == 4
+        assert self._segments_by_customer(frame) == {"c1": "mass", "c2": "hnw"}
+        assert segments["sources"] == {"cust_segment_typ": "sample_pool"}
+
+    def test_an_override_table_wins_over_the_population(self, spark):
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            make_prepare_eval_data_node,
+        )
+
+        predictions, labels = self._inputs(spark)
+        population = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 2, "cust_id": ["c1", "c2"],
+            "cust_segment_typ": ["from_population"] * 2,
+        }))
+        spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["c1", "c2"], "snap_date": ["2025-01-31"] * 2,
+            "cust_segment_typ": ["from_override"] * 2,
+        })).createOrReplaceTempView("ext_segment_override")
+        params = self._parameters(segment_sources={"cust_segment_typ": {
+            "table": "ext_segment_override",
+            "key_columns": ["cust_id", "snap_date"],
+            "segment_column": "cust_segment_typ"}})
+
+        frame, segments = make_prepare_eval_data_node("inference_population")(
+            predictions, labels, population, params)
+
+        assert self._segments_by_customer(frame) == {
+            "c1": "from_override", "c2": "from_override"}
+        assert segments["joined"] == ["cust_segment_typ"]
+        assert segments["sources"] == {
+            "cust_segment_typ": "ext_segment_override"}
+
+    def test_a_population_without_the_column_skips_it_and_warns(
+        self, spark, caplog
+    ):
+        """Not a raise: a monitoring population is a user-defined table, and
+        one missing segment column must not stop the monthly report. The
+        warning names the table and the column so a typo is recognisable."""
+        import logging
+        import pandas as pd
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            make_prepare_eval_data_node,
+        )
+
+        predictions, labels = self._inputs(spark)
+        population = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 2, "cust_id": ["c1", "c2"],
+        }))
+        with caplog.at_level(logging.WARNING):
+            frame, segments = make_prepare_eval_data_node(
+                "inference_population"
+            )(predictions, labels, population, self._parameters())
+
+        assert "cust_segment_typ" not in frame.columns
+        assert segments["joined"] == []
+        assert segments["sources"] == {}
+        assert segments["missing"] == {
+            "cust_segment_typ": "inference_population"}
+        warnings = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING]
+        assert any("inference_population" in m and "cust_segment_typ" in m
+                   for m in warnings), warnings
 
 
 def test_prepare_eval_data_filters_to_configured_snap_date(spark):
     """prepare_eval_data keeps only rows at evaluation.snap_date, dropping the
     other snapshots that share the same model_version in the table."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     predictions_pdf = pd.DataFrame({
@@ -477,7 +597,7 @@ def test_prepare_eval_data_filters_to_configured_snap_date(spark):
         "evaluation": {"snap_date": "2025-01-31"},
     }
 
-    result = prepare_eval_data(predictions, labels, parameters).toPandas()
+    result = _prepare_eval_data(predictions, labels, parameters).toPandas()
     assert set(result["snap_date"]) == {"2025-01-31"}
     assert len(result) == 2
 
@@ -485,7 +605,6 @@ def test_prepare_eval_data_filters_to_configured_snap_date(spark):
 def test_prepare_eval_data_raises_when_snap_date_absent(spark):
     """When evaluation.snap_date matches no predictions row, prepare_eval_data
     raises ValueError and the message names the snap_dates actually present."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     predictions_pdf = pd.DataFrame({
@@ -513,13 +632,12 @@ def test_prepare_eval_data_raises_when_snap_date_absent(spark):
     }
 
     with pytest.raises(ValueError, match="2025-01-31"):
-        prepare_eval_data(predictions, labels, parameters)
+        _prepare_eval_data(predictions, labels, parameters)
 
 
 def test_prepare_eval_data_raises_when_snap_date_unset(spark):
     """When evaluation.snap_date is not configured, prepare_eval_data raises
     ValueError rather than silently evaluating the whole table."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     predictions_pdf = pd.DataFrame({
@@ -541,7 +659,7 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
     }
 
     with pytest.raises(ValueError, match="snap_date not configured"):
-        prepare_eval_data(predictions, labels, parameters)
+        _prepare_eval_data(predictions, labels, parameters)
 
 
 def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
@@ -556,7 +674,6 @@ def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
     -> 1 row. INNER would drop 5; LEFT must keep all 6 with label=0 for
     the unmatched ones.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
     import pandas as pd
 
     # Monitoring mode shape: predictions carry rank, no label.
@@ -588,7 +705,7 @@ def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
         "evaluation": {"snap_date": "2025-01-31"},
     }
 
-    result = prepare_eval_data(predictions, labels, parameters)
+    result = _prepare_eval_data(predictions, labels, parameters)
     result_pdf = result.select(
         "cust_id", "prod_name", "label"
     ).toPandas().sort_values(["cust_id", "prod_name"]).reset_index(drop=True)
@@ -672,6 +789,7 @@ class TestComputeBaselineMetrics:
         result = compute_baseline_metrics(
             self._eval_predictions(spark),
             self._label_table(spark),
+            _NO_SEGMENTS,
             self._parameters(),
         )
         from recsys_tfb.evaluation.config_fingerprint import fingerprint
@@ -703,7 +821,7 @@ class TestComputeBaselineMetrics:
         )
 
         params = self._parameters(baseline_section=False)
-        result = compute_baseline_metrics(None, None, params)
+        result = compute_baseline_metrics(None, None, _NO_SEGMENTS, params)
         assert result == {
             "enabled": False, "config_fingerprint": fingerprint(params),
         }
@@ -763,7 +881,7 @@ def test_compute_metric_ci_end_to_end_small(spark):
         },
     }
     # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
-    sample = draw_diagnosis_sample_node(df, params)
+    sample = draw_diagnosis_sample_node(df, _NO_SEGMENTS, params)
     out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
@@ -785,6 +903,102 @@ def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
     # ValueError (not AttributeError on None) if the shared sample is None.
     with _pytest.raises(ValueError, match="compute_metric_ci"):
         compute_metric_ci(None, params)
+
+
+class TestConsumersSegmentByTheLandedList:
+    """Every node that groups by segment reads ``evaluation_segment_columns``
+    (ADR-0020 bug 6). The frame here also carries ``stale_seg``, all NULL, as
+    a column the other run mode joined into the shared enriched table would
+    be; it is listed first in config, so a consumer that picks "configured and
+    present in the frame" segments by it and grows a fake "(unmatched)" group.
+    """
+
+    _SEGMENTS = {
+        "joined": ["cust_segment_typ"],
+        "sources": {"cust_segment_typ": "sample_pool"},
+        "missing": {"holding_combo": "sample_pool"},
+        "config_fingerprint": {"sha256": "x", "values": {}},
+    }
+
+    @staticmethod
+    def _parameters():
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank"}},
+            "evaluation": {
+                "k_values": [1, 2, 3],
+                "segment_columns": ["stale_seg", "cust_segment_typ",
+                                    "holding_combo"],
+                "baseline": {"lookback_months": 12},
+                "diagnosis": {"sample": {
+                    "max_queries": 10, "min_pos_queries_per_item": 1,
+                    "seed": 42}},
+            },
+        }
+
+    @staticmethod
+    def _frame(spark):
+        from pyspark.sql import functions as F
+
+        return TestComputeBaselineMetrics._eval_predictions(spark).withColumn(
+            "cust_segment_typ",
+            F.when(F.col("cust_id") == "c1", "mass").otherwise("hnw"),
+        ).withColumn("stale_seg", F.lit(None).cast("string"))
+
+    def test_compute_metrics(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+
+        result = compute_metrics(
+            self._frame(spark), self._SEGMENTS, self._parameters())
+        assert set(result["per_segment"]) == {"mass", "hnw"}
+        assert set(result["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
+        # What the report says about segments travels with the metrics.
+        assert result["segments"] == {
+            k: self._SEGMENTS[k] for k in ("joined", "sources", "missing")}
+
+    def test_compute_baseline_metrics(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            compute_baseline_metrics,
+        )
+
+        result = compute_baseline_metrics(
+            self._frame(spark), TestComputeBaselineMetrics._label_table(spark),
+            self._SEGMENTS, self._parameters())
+        assert set(result["per_segment"]) == {"mass", "hnw"}
+
+    def test_draw_diagnosis_sample_node(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            draw_diagnosis_sample_node,
+        )
+
+        sample_pdf, _meta = draw_diagnosis_sample_node(
+            self._frame(spark), self._SEGMENTS, self._parameters())
+        assert "cust_segment_typ" in sample_pdf.columns
+        assert "stale_seg" not in sample_pdf.columns
+
+    def test_generate_comparison_report(self, monkeypatch):
+        """Only the model side has segment columns; the compared side is a
+        prediction table of its own. No rendered section shows segments, so
+        the observable is what each side is asked to segment by."""
+        from recsys_tfb.pipelines.evaluation import comparison_nodes
+
+        asked = []
+
+        def fake_metrics(df, parameters, *, segment_columns=()):
+            asked.append((df, list(segment_columns)))
+            return {}
+
+        monkeypatch.setattr(comparison_nodes, "compute_all_metrics", fake_metrics)
+        monkeypatch.setattr(comparison_nodes, "build_comparison_result",
+                            lambda *a, **k: {})
+        monkeypatch.setattr(comparison_nodes, "assemble_comparison_report",
+                            lambda *a, **k: "<html/>")
+        comparison_nodes.generate_comparison_report(
+            "model_side", "compared_side", {}, self._SEGMENTS,
+            self._parameters())
+        assert asked == [("model_side", ["cust_segment_typ"]),
+                         ("compared_side", [])]
 
 
 class TestCiConsumerEnabled:
@@ -841,9 +1055,7 @@ class TestDrawDiagnosisSampleNode:
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
         ) as spy:
-            result = nodes_spark.draw_diagnosis_sample_node(
-                self._eval_predictions(spark), params
-            )
+            result = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
         assert result is None
         assert spy.call_count == 0
 
@@ -859,10 +1071,10 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy:
-            nodes_spark.draw_diagnosis_sample_node(None, params)
+            nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
         # exact args, not just count: guards against a regression forwarding a
         # limited/mutated eval_predictions or a copied params.
-        spy.assert_called_once_with(None, params)
+        spy.assert_called_once_with(None, params, segment_columns=[])
 
     def test_node_output_equals_direct_draw(self, spark):
         # Faithfulness / behaviour-preservation: the node is a pass-through of
@@ -873,9 +1085,7 @@ class TestDrawDiagnosisSampleNode:
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark), params
         )
-        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(
-            self._eval_predictions(spark), params
-        )
+        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
         assert node_meta == direct_meta
         assert (
             node_pdf.sort_values(list(node_pdf.columns))
@@ -903,20 +1113,18 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
         ):
-            sample = nodes_spark.draw_diagnosis_sample_node(None, params)
+            sample = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
             nodes_spark.compute_metric_ci(sample, params)
         # exactly one draw, with the node's own inputs — the consumer must NOT
         # re-draw (it consumes the shared sample).
-        spy.assert_called_once_with(None, params)
+        spy.assert_called_once_with(None, params, segment_columns=[])
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
         import logging
         from recsys_tfb.pipelines.evaluation import nodes_spark
         params = self._params()  # all enabled
         with caplog.at_level(logging.INFO):
-            nodes_spark.draw_diagnosis_sample_node(
-                self._eval_predictions(spark), params
-            )
+            nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
         vols = [
             r.volume for r in caplog.records
             if getattr(r, "event", None) == "data_volume"
@@ -1012,12 +1220,12 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
     ) as spy:
-        result = nodes_spark.draw_diagnosis_sample_node(None, params)
+        result = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
     assert result is not None, (
         "sample gate ignored the registry diagnoses — config_shift is enabled "
         "but no sample was drawn"
     )
-    spy.assert_called_once_with(None, params)
+    spy.assert_called_once_with(None, params, segment_columns=[])
 
 
 def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
@@ -1064,7 +1272,7 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
     with caplog.at_level(logging.INFO), patch(
         "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
     ) as spy:
-        result = nodes_spark.draw_diagnosis_sample_node(None, params)
+        result = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
 
     assert result is None
     assert spy.call_count == 0

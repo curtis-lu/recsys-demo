@@ -64,7 +64,9 @@ def test_inference_and_evaluation_rank_the_same_tied_data_identically(spark):
     """Inference publishes ``rank``; evaluation re-ranks when the source has none
     (``--post-training``) and after the comparison mode shrinks the candidate
     set. Both must land on the same ranks for the same rows."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        make_prepare_eval_data_node,
+    )
     from recsys_tfb.pipelines.inference.nodes import rank_predictions
 
     rows = pd.DataFrame(TIED_ROWS, columns=["cust_id", "prod_name", "score"])
@@ -80,15 +82,19 @@ def test_inference_and_evaluation_rank_the_same_tied_data_identically(spark):
         {"schema": schema_block, "inference": {"snap_dates": [SNAP]}},
     ).toPandas()
 
-    evaluation_ranked = prepare_eval_data(
+    evaluation_frame, _segments = make_prepare_eval_data_node(
+        "inference_population"
+    )(
         spark.createDataFrame(rows),
         spark.createDataFrame(
             [("C001", SNAP, "fund_bond", 1)],
             "cust_id STRING, snap_date STRING, prod_name STRING, label INT",
         ),
+        spark.createDataFrame([], "snap_date STRING, cust_id STRING"),
         {"schema": schema_block, "model_version": "v1",
          "evaluation": {"snap_date": SNAP}},
-    ).toPandas()
+    )
+    evaluation_ranked = evaluation_frame.toPandas()
 
     assert _ranks(inference_ranked, "rank") == EXPECTED
     assert _ranks(evaluation_ranked, "rank") == EXPECTED

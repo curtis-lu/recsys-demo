@@ -597,7 +597,7 @@ def _landed_inputs(params):
         compute_metric_ci,
     )
 
-    return (compute_baseline_metrics(None, None, params),
+    return (compute_baseline_metrics(None, None, None, params),
             compute_metric_ci(None, params),
             compute_report_aggregates(None, params))
 

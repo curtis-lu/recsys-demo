@@ -11,25 +11,24 @@ evaluation:
   # 解析成該粒度的 distinct item 數。
   k_values: [1, 2, 3, 4, 5, "all"]
 
-  # Per-segment metrics 切片用的 segment column。每個 column 都必須在下方
-  # segment_sources 有對應 entry（config-consistency invariant A10）。
+  # Per-segment metrics 切片用的 segment column。欄從該執行模式的母體表取：
+  # --post-training＝sample_pool、監控＝inference_population，以 (time, entity)
+  # join。母體表沒有這欄時不中止，只在 log 與報表註明（ADR-0020 bug 6）；
+  # 示例的 inference_population 沒有 cust_segment_typ，監控模式會走這條路。
   segment_columns:
     - cust_segment_typ
 
-  # 外部 segment 資料來源 ── 會以 key_columns 做 left join 進 eval_predictions
-  # 的 Hive table。每個 entry 包含 `table`（Hive-qualified）、`key_columns`、
-  # `segment_column`。設定了但讀不到的 source 會 fail loud。
-  segment_sources:
-    cust_segment_typ:
-      table: ml_recsys.sample_pool
-      key_columns: [cust_id, snap_date]
-      segment_column: cust_segment_typ
-    # 外部 Hive table 範例（保持註解狀態 ── 預設沒有這張表；若 enable
-    # 卻沒有真實 table，evaluation 會 fail loud）：
-    # holding_combo:
-    #   table: ml_recsys.holding_combo
-    #   key_columns: [cust_id, snap_date]
-    #   segment_column: holding_combo
+  # 可選的覆寫：segment 在另一張外部 Hive table 時才設，鍵＝segment_columns 裡的
+  # 欄名。每個覆寫要有 `table`（Hive-qualified）、`key_columns`、`segment_column`
+  # （必須等於鍵），缺一個 CLI 入口就擋（A10）；設定了但讀不到的表會 fail loud。
+  segment_sources: {}
+  # 外部 Hive table 範例（保持註解狀態 ── 預設沒有這張表；若 enable
+  # 卻沒有真實 table，evaluation 會 fail loud）：
+  # segment_sources:
+  #   holding_combo:
+  #     table: ml_recsys.holding_combo
+  #     key_columns: [cust_id, snap_date]
+  #     segment_column: holding_combo
 
   # 產品大類的 parallel evaluation。enable 後，fine-grained eval_predictions
   # 會被 collapse 到 category 粒度（category score = max child score == best

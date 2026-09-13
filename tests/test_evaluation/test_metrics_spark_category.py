@@ -62,7 +62,9 @@ def test_collapse_to_categories_grain(spark):
     p = _params()
     p["schema"]["categorical_values"]["prod_name"] = [
         "fund_stock", "fund_bond", "fund_mix", "exchange_fx", "lonely"]
-    collapsed = ms.collapse_to_categories(_raw(spark), p)
+    collapsed = ms.collapse_to_categories(
+        _raw(spark), p, segment_columns=["cust_segment_typ"]
+    )
     rows = {r["prod_name"]: r for r in collapsed.collect()}
     # category column reuses item_col name so downstream stays uniform
     assert set(rows) == {"fund", "exchange_fx"}

@@ -136,12 +136,21 @@ def _guard_reserved_columns(keep_cols: list[str], seg_cols: list[str]) -> None:
 def draw_diagnosis_sample(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    *,
+    segment_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """兩趟診斷抽樣。回傳 (sample_pdf, metadata)。
 
+    ``segment_columns``：pipeline 傳 ``prepare_eval_data`` 這次實際 join 的欄
+    （``evaluation_segment_columns``）。frame 的欄位不能當依據——
+    ``enriched_eval_predictions`` 兩種模式共用，另一模式 join 過的欄在這次的
+    列上是全 NULL（ADR-0020 bug 6）。``None`` 留給離線 ``scripts/*_diagnosis.py``：
+    它們沒有那份清單，也拿 ``evaluation.segment_columns`` 夾帶自己要的脈絡欄，
+    所以退回舊行為（配置且存在於 frame 的欄）。
+
     sample_pdf 欄位：query cols（time + entity）、item、label、score、
-    （存在時）score_uncalibrated＋配置的 ``evaluation.segment_columns``
-    （存在者，供 by_segment 分組用；未配置或欄不存在則靜默略過），外加
+    （存在時）score_uncalibrated＋上述 segment 欄
+    （存在者，供 by_segment 分組用；不存在則靜默略過），外加
     ``stratum``（``take_all`` / ``hash_ratio``）與 ``inclusion_weight``
     （納入機率的倒數，query 級：同一 query 的所有候選列同權重）。
     metadata 見模組 docstring（特別注意 ``sample_ratio == 0.0`` 的語意）。
@@ -167,8 +176,11 @@ def draw_diagnosis_sample(
     floor = int(cfg.get("min_pos_queries_per_item", 50))
     seed = int(cfg.get("seed", 42))
 
-    seg_cols = list((parameters.get("evaluation", {}) or {})
-                    .get("segment_columns", []) or [])
+    if segment_columns is not None:
+        seg_cols = list(segment_columns)
+    else:
+        seg_cols = list((parameters.get("evaluation", {}) or {})
+                        .get("segment_columns", []) or [])
     keep_cols = list(dict.fromkeys(
         c
         for c in [*query_cols, item_col, label_col, score_col,

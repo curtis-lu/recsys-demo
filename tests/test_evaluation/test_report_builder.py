@@ -286,6 +286,49 @@ def test_dataset_section_per_segment_real_numbers():
     assert "正例佔比" not in cols
 
 
+def test_dataset_section_shows_the_unmatched_group_with_its_query_count():
+    """ADR-0020 bug 6: queries whose segment the population table could not
+    supply are one visible row, with how many queries and what share, and
+    the section says they are left out of every macro average."""
+    m = _metrics()
+    m["dataset_overview"]["by_segment"]["(unmatched)"] = {
+        "n_rows": 20, "n_positives": 2, "n_entities": 2,
+        "positive_rate": 0.1, "n_queries": 2, "query_share": 2 / 12}
+    m["segments"] = {"joined": ["cust_segment_typ"],
+                     "sources": {"cust_segment_typ": "sample_pool"},
+                     "missing": {}}
+    s = rb.build_dataset_overview_section(m, _params())
+    seg = next(t for t, tt in zip(s.tables, s.table_titles)
+               if "per-segment" in tt)
+    assert seg.loc["(unmatched)", "query 數"] == 2
+    assert seg.loc["X", "query 數"] == 6
+    assert seg.loc["(unmatched)", "query 數佔比"] == pytest.approx(2 / 12)
+    notes = " ".join(s.bullets)
+    assert "(unmatched)" in notes and "不進 macro" in notes
+    assert "cust_segment_typ 取自 sample_pool" in notes
+
+
+def test_dataset_section_names_the_table_that_lacks_a_segment_column():
+    """The population table has no such column: nothing per-segment is
+    computed for it, and the report says which table and which column, so a
+    misspelt column name is recognisable. Other tables still render."""
+    m = _metrics()
+    del m["dataset_overview"]["by_segment"]
+    m["segments"] = {"joined": [], "sources": {},
+                     "missing": {"cust_segment_typ": "inference_population"}}
+    s = rb.build_dataset_overview_section(m, _params())
+    assert "inference_population 無欄 cust_segment_typ" in " ".join(s.bullets)
+    assert [tt for tt in s.table_titles if "per-segment" in tt] == []
+    assert len(s.tables) == 3          # totals / by_snap_date / by_item
+
+
+def test_dataset_section_has_no_segment_notes_without_segments_info():
+    """Metrics written before evaluation_segment_columns existed (and the
+    comparison report's metrics) carry no ``segments`` block."""
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    assert "(unmatched)" not in " ".join(s.bullets)
+
+
 def test_dataset_section_per_segment_has_candidate_col():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     idx = next(i for i, tt in enumerate(s.table_titles) if "per-segment" in tt)

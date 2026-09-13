@@ -16,6 +16,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
 from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
+from recsys_tfb.evaluation.segments import UNMATCHED_SEGMENT
 
 
 def _resolve_display_k(raw_k: list, n_items: int) -> list:
@@ -485,15 +486,18 @@ def build_dataset_overview_section(
     # 第 3 欄用「query 數佔比」（該 segment 佔多少 query，反映 segment 大小）——
     # segment 分的是 query、per-item 分的是正例，兩者不同軸，故不與 per-item 的
     # 「正例佔比」互換。by_segment 由 compute_dataset_overview 依 active_seg_col
-    # 聚合；缺席（舊 artifact 或無 segment 欄）則不呈現此表。
+    # 聚合；缺席（舊 artifact 或無 segment 欄）則不呈現此表。對不到值的
+    # (unmatched) 排最後：它不是一個 segment，列出來是為了交代它有多少 query。
     by_seg = ov.get("by_segment", {}) or {}
     if by_seg:
         seg_rows = {}
-        for seg, d in sorted(by_seg.items()):
+        for seg, d in sorted(by_seg.items(),
+                             key=lambda kv: (kv[0] == UNMATCHED_SEGMENT, kv[0])):
             seg_rows[seg] = {
                 "正例數": d.get("n_positives"),
                 "候選列數": d.get("n_rows"),
                 "正樣本率(÷此segment候選列)": d.get("positive_rate"),
+                "query 數": d.get("n_queries"),
                 "query 數佔比": d.get("query_share"),
             }
         tables.append(pd.DataFrame(seg_rows).T)
@@ -518,13 +522,45 @@ def build_dataset_overview_section(
             "量級不同。「by 大類」是大類粒度（每客戶每大類一列、label＝該大類任一"
             "子產品為正例、大類分數＝子產品最佳分數），故其正例數 ≤ item 粒度合計、"
             "不與整體 n_positives 相加。per-segment 正例組成：正例數、候選列數、"
-            "正樣本率、query 數佔比（該 segment 佔多少 query）。每-query 正例數"
-            "分佈為後續階段。"
+            "正樣本率、query 數與 query 數佔比（該 segment 佔多少 query）。每-query "
+            "正例數分佈為後續階段。"
         ),
         tables=tables,
         table_titles=titles,
         collapsed_tables=collapsed,
+        bullets=_segment_notes(metrics.get("segments"), by_seg),
     )
+
+
+def _segment_notes(segments: dict | None, by_segment: dict) -> list[str]:
+    """讀分群表前要知道的事：欄取自哪張表、哪張表缺欄、(unmatched) 怎麼算。
+
+    ``segments`` 是 ``compute_metrics`` 從 ``evaluation_segment_columns`` 帶來的
+    ``joined``／``sources``／``missing``（ADR-0020 bug 6）。缺欄時分群表根本不
+    出現，這裡是唯一交代「為什麼沒有」的地方，所以表名與欄名都要印——設定
+    打錯欄名也會落到這裡。沒有 ``segments`` 的 metrics（這個機制之前寫的、
+    比較報表算的）不寫。
+    """
+    if not segments:
+        return []
+    notes = []
+    joined = segments.get("joined") or []
+    sources = segments.get("sources") or {}
+    if joined:
+        notes.append(
+            "分群欄："
+            + "、".join(f"{c} 取自 {sources.get(c, '?')}" for c in joined)
+            + f"；per-segment 表以 {joined[0]} 分群。"
+        )
+    for col, table in (segments.get("missing") or {}).items():
+        notes.append(f"母體表 {table} 無欄 {col}：這一欄本次不算 per-segment。")
+    if UNMATCHED_SEGMENT in by_segment:
+        notes.append(
+            f"{UNMATCHED_SEGMENT}＝母體表有這一欄、但這些 query 在上面沒有值。"
+            "表上列出它的 query 數與佔比，但它不進 macro 平均（per-segment "
+            "指標表的 Macro 列不含它）。"
+        )
+    return notes
 
 
 def _per_item_metric_table(

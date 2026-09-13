@@ -526,27 +526,63 @@ class TestSearchSpaceErrors:
         assert any("number" in e for e in errs)
 
 
-def test_segment_columns_without_source_flags_uncovered():
-    from recsys_tfb.core.consistency import segment_columns_without_source
-    params = {"evaluation": {
-        "segment_columns": ["cust_segment_typ"],
-        "segment_sources": {"hc": {"segment_column": "holding_combo"}},
-    }}
-    assert segment_columns_without_source(params) == ["cust_segment_typ"]
+class TestSegmentSourceOverrideErrors:
+    """A10 after ADR-0020 bug 6: a segment column without an override comes
+    from the run mode's population table, so only an override that exists
+    has a shape to check."""
 
+    _COMPLETE = {"table": "ext.holding_combo",
+                 "key_columns": ["cust_id", "snap_date"],
+                 "segment_column": "holding_combo"}
 
-def test_segment_columns_without_source_ok_when_covered():
-    from recsys_tfb.core.consistency import segment_columns_without_source
-    params = {"evaluation": {
-        "segment_columns": ["cust_segment_typ"],
-        "segment_sources": {"cs": {"segment_column": "cust_segment_typ"}},
-    }}
-    assert segment_columns_without_source(params) == []
+    @staticmethod
+    def _params(segment_columns, segment_sources=None):
+        ev = {"segment_columns": segment_columns}
+        if segment_sources is not None:
+            ev["segment_sources"] = segment_sources
+        return {"evaluation": ev}
 
+    def test_a_column_without_override_is_not_an_error(self):
+        from recsys_tfb.core.consistency import segment_source_override_errors
+        assert segment_source_override_errors(
+            self._params(["cust_segment_typ"])) == []
 
-def test_segment_columns_without_source_empty_when_no_segment_columns():
-    from recsys_tfb.core.consistency import segment_columns_without_source
-    assert segment_columns_without_source({"evaluation": {}}) == []
+    def test_a_complete_override_passes(self):
+        from recsys_tfb.core.consistency import segment_source_override_errors
+        assert segment_source_override_errors(self._params(
+            ["holding_combo"], {"holding_combo": dict(self._COMPLETE)})) == []
+
+    @pytest.mark.parametrize("dropped", ["table", "key_columns", "segment_column"])
+    def test_an_override_missing_a_field_is_named(self, dropped):
+        from recsys_tfb.core.consistency import segment_source_override_errors
+        override = {k: v for k, v in self._COMPLETE.items() if k != dropped}
+        errs = segment_source_override_errors(self._params(
+            ["holding_combo"], {"holding_combo": override}))
+        assert len(errs) == 1
+        assert "evaluation.segment_sources.holding_combo" in errs[0]
+        assert repr(dropped) in errs[0]
+
+    def test_an_override_delivering_another_column_is_an_error(self):
+        """The override is looked up by the column name; one whose
+        segment_column differs would join a column nothing groups by."""
+        from recsys_tfb.core.consistency import segment_source_override_errors
+        override = dict(self._COMPLETE, segment_column="holding_combo_code")
+        errs = segment_source_override_errors(self._params(
+            ["holding_combo"], {"holding_combo": override}))
+        assert len(errs) == 1
+        assert "'holding_combo_code'" in errs[0]
+
+    def test_cli_entry_blocks_an_incomplete_override(self):
+        p = _base()
+        p["evaluation"] = {
+            "segment_columns": ["holding_combo"],
+            "segment_sources": {"holding_combo": {
+                "table": "ext.holding_combo",
+                "segment_column": "holding_combo"}},
+        }
+        with pytest.raises(ConfigConsistencyError,
+                           match=r"segment_sources\.holding_combo.*'key_columns'"):
+            validate_config_consistency(p)
 
 
 from recsys_tfb.core.consistency import categorical_dtype_errors
