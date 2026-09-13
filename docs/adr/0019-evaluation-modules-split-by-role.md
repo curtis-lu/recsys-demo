@@ -195,6 +195,13 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 
 **「數字對不上」那一半是 bug 14，進 bug 那一輪定行為。** 本份只登記機制那一半：`common_universe` 把它已經算出來的 `a_items`／`b_items` 一起回傳，node 不再自己 collect。定義要不要統一、統一成哪個，由 bug 那輪決定；在那之前至少把「兩處語意不同」寫進 node 註解。
 
+**2026-09-13 更正（#345 已做完兩半）**：
+
+- 機制去重：`common_universe` 回傳 `CommonUniverse`（`common_entities`、`common_items`、`a_items`、`b_items`），node 不再自己 collect。
+- 定義統一：coverage 的 common 改數「裁切後兩側都還在的 query group」，不再用原始 frame 的 `intersect`（見 ADR-0020 bug 14 的實作註記）。
+
+結構搬移那一輪不用再做這一條。
+
 ## 決定 8（附帶清掃）：`report/__init__.py` 的 docstring 改成真的
 
 它說「目前唯一的消費者是 `evaluation/report.py`，`diagnosis/` 與 `report_builder.py` 都沒有 import 本套件」。實際 `report_builder.py` import `Page` 與 `write_pages`，各 registry 診斷全部 import `ScopeNote` 與 `figures`。同檔寫的「目標狀態」早就達成了。稽核 B、C 的推論都建立在「誰依賴 `report/`」這個判斷上，而最明顯的來源寫錯——這是 node 規則 6 反面的文件版。跟搬移同一張 PR 改；它不在原始需求裡，是搬移時順手對齊真實識別字。
