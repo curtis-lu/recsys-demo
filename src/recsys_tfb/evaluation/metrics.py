@@ -1,13 +1,24 @@
-"""Single-query ranking metrics on numpy arrays.
+"""Ranking primitives on numpy arrays, plus the single reader of ``evaluation.metric``.
 
-Scope is intentionally narrow: only the primitives needed by
-``tune_hyperparameters`` (HPO loop in training pipeline) live here. The
-full evaluation pipeline (dict-shaped per-segment / per-item / overall
-metrics) runs on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
+This is a pure-numpy leaf module: its imports are ``logging`` / ``typing`` /
+``numpy`` only. Do not add a project import — ``diagnosis.metric.*``,
+``evaluation.metrics_spark``, ``evaluation.report_builder`` and several
+``scripts/`` import from here, so a project import risks a cycle.
 
-HPO scores each trial by running prediction on the val set inside a single
-driver, producing numpy arrays. Going through Spark for one scalar per
-trial would be massive overhead, so we keep these numpy primitives.
+What lives here:
+
+* Per-query AP primitives for ``tune_hyperparameters`` (HPO loop in the
+  training pipeline). HPO scores each trial on driver-side numpy arrays;
+  going through Spark for one scalar per trial would be massive overhead.
+* The per-item macro primitives (``positive_row_contributions`` /
+  ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO,
+  ``metrics_spark.macro_average`` and the diagnosis bootstrap.
+* :func:`metric_params` — the only code that reads ``evaluation.metric``
+  (ADR-0020 design H), so the fallback semantics cannot drift between
+  copies.
+
+The dict-shaped per-segment / per-item / overall metrics of the evaluation
+pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
 """
 
 import logging
@@ -16,6 +27,34 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def metric_params(parameters: dict) -> dict:
+    """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
+
+    The single reader of that block (ADR-0020 design H): the Spark main
+    metrics, the metric CI, the diagnosis family, the report and the
+    ``scripts/`` diagnoses all call this instead of keeping their own copy.
+
+    Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
+    an explicit ``None`` value all resolve to ``k=None`` (no truncation),
+    ``weight_alpha=0.0``, ``min_positives=0``, ``shrinkage_k=0.0`` — the plain
+    equal-weight, untruncated macro. Value domains are validated by A15
+    (``core.consistency.diagnosis_metric_param_errors``), not here.
+
+    ``k`` and ``evaluation.k_values`` are independent axes. ``k_values`` is
+    the K grid of the ``@K`` families. ``k`` is the truncation depth of the
+    headline per-item macro family — point estimate and CI alike.
+    ``macro_from_per_item`` and ``metrics_spark.macro_average`` do not accept
+    ``k``; callers split it off.
+    """
+    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
+    return {
+        "k": None if m.get("k") is None else int(m["k"]),
+        "weight_alpha": float(m.get("weight_alpha", 0.0) or 0.0),
+        "min_positives": int(m.get("min_positives", 0) or 0),
+        "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
+    }
 
 
 def compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:

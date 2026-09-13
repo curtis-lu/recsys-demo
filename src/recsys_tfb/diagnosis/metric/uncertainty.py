@@ -21,6 +21,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import (
     align_positive_row_weights,
     macro_from_per_item,
+    metric_params,
     positive_row_contributions,
 )
 
@@ -39,13 +40,11 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     score_col = schema["score"]
 
     eval_params = parameters.get("evaluation", {}) or {}
-    metric_cfg = eval_params.get("metric", {}) or {}
-    k = metric_cfg.get("k", None)
-    metric_params = {
-        "weight_alpha": float(metric_cfg.get("weight_alpha", 0.0) or 0.0),
-        "min_positives": int(metric_cfg.get("min_positives", 0) or 0),
-        "shrinkage_k": float(metric_cfg.get("shrinkage_k", 0) or 0.0),
-    }
+    mp = metric_params(parameters)
+    k = mp["k"]
+    # macro_from_per_item 不收 k；JSON 的 "metric_params" 也維持不含 k 的形狀
+    # （k 另外放在頂層 "k"）。
+    macro_params = {name: v for name, v in mp.items() if name != "k"}
     diag_cfg = eval_params.get("diagnosis", {}) or {}
     n_boot = int((diag_cfg.get("ci", {}) or {}).get("n_boot", 200))
     seed = int((diag_cfg.get("sample", {}) or {}).get("seed", 42))
@@ -68,7 +67,7 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     if len(contrib) == 0:
         return {
             "enabled": True, "k": k, "n_boot": n_boot, "seed": seed,
-            "metric_params": metric_params,
+            "metric_params": macro_params,
             "per_item": {}, "macro": None,
         }
 
@@ -82,7 +81,7 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     sums = np.bincount(item_inv, weights=contrib, minlength=n_items)
     counts = np.bincount(item_inv, minlength=n_items).astype(np.float64)
     point = sums / counts
-    macro_point = macro_from_per_item(point, counts, **metric_params)
+    macro_point = macro_from_per_item(point, counts, **macro_params)
 
     # ---- bootstrap：重抽 cluster、帶乘數重新聚合 ----
     rng = np.random.RandomState(seed)
@@ -98,7 +97,7 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
         vals = np.divide(s, c, out=np.full(n_items, np.nan), where=present)
         boot_items[b] = vals
         m = macro_from_per_item(
-            vals[present], c[present], **metric_params
+            vals[present], c[present], **macro_params
         )
         if m is not None:
             boot_macro[b] = m
@@ -124,7 +123,7 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
         }
     return {
         "enabled": True, "k": k, "n_boot": n_boot, "seed": seed,
-        "metric_params": metric_params,
+        "metric_params": macro_params,
         "per_item": per_item, "macro": macro,
     }
 

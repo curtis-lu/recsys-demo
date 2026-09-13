@@ -13,6 +13,7 @@ from datetime import datetime
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 
 
@@ -1086,10 +1087,10 @@ def build_completeness_section(
     """
     eval_p = parameters.get("evaluation", {}) or {}
     totals = _dataset_overview(metrics).get("totals", {}) or {}
-    metric_p = eval_p.get("metric", {}) or {}
+    metric_p = metric_params(parameters)
     sample_meta = (metric_ci or {}).get("sample", {}) or {}
 
-    mk = metric_p.get("k")
+    mk = metric_p["k"]
     # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
     # build_overview_section 的 entity 標籤）。
     item_col = get_schema(parameters)["item"]

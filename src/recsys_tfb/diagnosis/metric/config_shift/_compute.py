@@ -83,10 +83,10 @@ import pandas as pd
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
-    ci_for_corrected_minus_baseline, diag_cfg, metric_params, query_key,
-    sample_arrays, to_logit,
+    ci_for_corrected_minus_baseline, diag_cfg, query_key, sample_arrays,
+    to_logit,
 )
-from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+from recsys_tfb.evaluation.metrics import compute_macro_per_item_map, metric_params
 
 logger = logging.getLogger(__name__)
 

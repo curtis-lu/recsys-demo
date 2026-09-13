@@ -67,7 +67,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import macro_from_per_item
+from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
@@ -637,11 +637,9 @@ def _compute_core(
     eval_params = parameters.get("evaluation", {}) or {}
     k_values_raw = eval_params.get("k_values", [5, "all"])
     segment_columns = eval_params.get("segment_columns", []) or []
-    metric_cfg = eval_params.get("metric", {}) or {}
-    metric_params = {
-        "weight_alpha": float(metric_cfg.get("weight_alpha", 0.0) or 0.0),
-        "min_positives": int(metric_cfg.get("min_positives", 0) or 0),
-        "shrinkage_k": float(metric_cfg.get("shrinkage_k", 0) or 0.0),
+    # macro_average 不收 k。
+    macro_params = {
+        name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
     n_items = eval_predictions.select(item_col).distinct().count()
@@ -696,7 +694,7 @@ def _compute_core(
                     enriched, [item_col, active_seg_col], label_col, k_values
                 )
 
-            macro_avg: dict = {"by_item": macro_average(per_item, **metric_params)}
+            macro_avg: dict = {"by_item": macro_average(per_item, **macro_params)}
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
@@ -704,13 +702,13 @@ def _compute_core(
                 # n_pos < 門檻即移出 by_item_segment macro）；觀察名單只在
                 # item 粒度回報，cell 層級不另列。
                 macro_avg["by_item_segment"] = macro_average(
-                    per_item_segment, **metric_params
+                    per_item_segment, **macro_params
                 )
 
             observation_items = sorted(
                 it for it, m in per_item.items()
-                if m.get("n_pos", 0) < metric_params["min_positives"]
-            ) if metric_params["min_positives"] > 0 else []
+                if m.get("n_pos", 0) < macro_params["min_positives"]
+            ) if macro_params["min_positives"] > 0 else []
 
             return {
                 "overall": overall,

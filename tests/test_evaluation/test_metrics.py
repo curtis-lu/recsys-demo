@@ -572,3 +572,70 @@ class TestWeightedMap:
             empty, np.array([]), empty, np.array([], dtype=np.float64),
             weights=np.array([], dtype=np.float64),
         ) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# metric_params — `evaluation.metric` 的唯一讀取點（ADR-0020 設計 H）
+# ---------------------------------------------------------------------------
+
+
+class TestMetricParams:
+    """import 放在各測試裡：共用版還不存在時，本檔其餘測試照樣收得到。"""
+
+    DEFAULTS = {
+        "k": None, "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0,
+    }
+
+    def test_missing_block_falls_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        assert metric_params({}) == self.DEFAULTS
+        assert metric_params({"evaluation": None}) == self.DEFAULTS
+        assert metric_params({"evaluation": {"metric": None}}) == self.DEFAULTS
+
+    def test_missing_keys_fall_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        assert metric_params({"evaluation": {"metric": {}}}) == self.DEFAULTS
+
+    def test_none_values_fall_back(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        cfg = {"k": None, "weight_alpha": None, "min_positives": None,
+               "shrinkage_k": None}
+        assert metric_params({"evaluation": {"metric": cfg}}) == self.DEFAULTS
+
+    def test_values_are_type_normalised(self):
+        from recsys_tfb.evaluation.metrics import metric_params
+
+        cfg = {"k": 3, "weight_alpha": 1, "min_positives": 2, "shrinkage_k": 5}
+        out = metric_params({"evaluation": {"metric": cfg}})
+        assert out == {"k": 3, "weight_alpha": 1.0, "min_positives": 2,
+                       "shrinkage_k": 5.0}
+        assert type(out["k"]) is int
+        assert type(out["weight_alpha"]) is float
+        assert type(out["min_positives"]) is int
+        assert type(out["shrinkage_k"]) is float
+
+
+def test_metric_params_is_defined_exactly_once():
+    """src/ 與 scripts/ 裡 `def metric_params` 只能有一份（設計 H）。
+
+    多份複製品各自漂移正是設計 H 要消掉的東西：只改報表註腳、不收讀取點，
+    fallback 語意照樣會分岔。先斷言兩個目錄存在，免得路徑錯了掃到零個檔案
+    還誤判成「只剩一份」。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    pattern = re.compile(r"^\s*def metric_params\(", re.MULTILINE)
+    hits: list[str] = []
+    for sub in ("src", "scripts"):
+        base = root / sub
+        assert base.is_dir(), base
+        for path in sorted(base.rglob("*.py")):
+            n = len(pattern.findall(path.read_text(encoding="utf-8")))
+            hits.extend([path.relative_to(root).as_posix()] * n)
+    assert len(hits) == 1, hits
+    assert hits == ["src/recsys_tfb/evaluation/metrics.py"]
