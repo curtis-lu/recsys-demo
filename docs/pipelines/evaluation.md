@@ -67,14 +67,14 @@ evaluation:
 | 設定 | 說明 |
 |---|---|
 | `snap_date` | 本次只評估的時間切點，必須使用 `YYYY-MM-DD` |
-| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。實際算的網格是 `k_values` 再加上 `evaluation.metric.k`（非 null 時）——`metric.k` 是主指標 per-item macro 點估與 CI 的截斷深度，跟 `k_values` 是兩個獨立的軸，不必自己列進來 |
+| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro 點估與 CI 的截斷深度。它非 null 時，per-item 那一族（map_attr、hit_rate）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
 | `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數 |
 
 pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。日期沒有任何資料時會列出該模型實際存在的日期後中止，不會退回整張表計算。
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。
+`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則：K 大於該粒度 item 數的鍵不印。
 
 主要指標包括：
 
@@ -160,6 +160,8 @@ baseline 對每個評估日期 `S`，統計 `label_table` 在 `[S - lookback_mon
 baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overall 與 per-item 指標，再於報表呈現 Model、Baseline 與差異。
 
 若指定回看期間完全沒有 label rows，會直接 raise（bug 1, ADR-0020）——不再退回完整 `label_table`。舊行為的退回會把評估日之後的資料算進 baseline，讓 popularity 用答案排名，報表卻照印「以過去 N 個月的歷史購買計數重排」；使用者裁定 baseline 是重要資訊，沒算出來要 raise，不做靜默 fallback。錯誤訊息含視窗範圍與 `label_table` 實際有的月份；解法是補齊 `label_table` 歷史、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` 直接不算這段。
+
+視窗不是全空、只是沒涵蓋滿 `lookback_months` 時（例：設 12 個月，`label_table` 在視窗內只有 2 個月），不會 raise，但報表會揭露：baseline 段那句寫成「以過去 12 個月的歷史購買計數重排（label_table 在這個視窗內實際只涵蓋 2 個月）」，「平均每月」除以實際涵蓋的月數，不是除以 12。
 
 將 `report.sections.baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
 
