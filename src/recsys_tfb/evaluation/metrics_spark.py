@@ -93,6 +93,28 @@ def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
     return sorted(out)
 
 
+def _resolve_k_grid(parameters: dict, n_items: int) -> list[int]:
+    """The K grid actually computed: ``evaluation.k_values`` ∪ {``evaluation.metric.k``}.
+
+    Two independent axes (ADR-0020 design H): ``k_values`` is the K grid of
+    the ``@K`` families; ``metric.k`` is the truncation depth of the headline
+    per-item macro — point estimate and CI alike — and need not be listed in
+    ``k_values``. Adding it here guarantees
+    ``macro_avg["by_item"][f"map_attr@{metric.k}"]`` exists.
+
+    ``_compute_core`` and ``compute_overall_per_item`` (the baseline's slim
+    path) both resolve their grid through this one function, so the two
+    sides line up. ``metric.k=None`` leaves the grid exactly as
+    ``_resolve_k_values(k_values)``.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    raw = list(eval_params.get("k_values", [5, "all"]))
+    metric_k = metric_params(parameters)["k"]
+    if metric_k is not None:
+        raw.append(metric_k)
+    return _resolve_k_values(raw, n_items)
+
+
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     """Resolve {item value: category}. None when categories disabled.
 
@@ -635,15 +657,15 @@ def _compute_core(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    k_values_raw = eval_params.get("k_values", [5, "all"])
     segment_columns = eval_params.get("segment_columns", []) or []
-    # macro_average 不收 k。
+    # macro_average 不收 k：metric.k 由 _resolve_k_grid 放進 K 網格，
+    # by_item 的 map_attr@{metric.k} 就是截斷在 k 的主指標點估。
     macro_params = {
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
     n_items = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_items)
+    k_values = _resolve_k_grid(parameters, n_items)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
@@ -762,9 +784,9 @@ def compute_overall_per_item(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    k_values_raw = eval_params.get("k_values", [5, "all"])
     n_items = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_values(k_values_raw, n_items)
+    # 與 _compute_core 同一個網格（含 metric.k），baseline 與模型的 key 才對得齊。
+    k_values = _resolve_k_grid(parameters, n_items)
 
     df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
     df = add_query_total_rel(df, group_cols, label_col)

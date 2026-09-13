@@ -752,3 +752,68 @@ def test_param_macro_numpy_matches_spark(spark):
         weight_alpha=1.0, min_positives=0, shrinkage_k=2.0,
     )
     assert numpy_macro == pytest.approx(spark_macro, rel=1e-12)
+
+
+# ===========================================================================
+# metric.k — 主指標家族的截斷深度，與 k_values 是兩個獨立的軸（ADR-0020 設計 H）
+# ===========================================================================
+
+
+def _metric_k_pdf():
+    """3 item × 3 query、query 內無同分。metric.k=2 < n_items=3，截斷真的生效。
+
+    C0: A .9(1) B .5(0) C .1(1) → A 名次 1 貢獻 1；C 名次 3 貢獻 2/3（k=2 → 0）
+    C1: B .8(1) C .6(0) A .3(0) → B 名次 1 貢獻 1
+    C2: C .7(0) A .6(1) B .2(1) → A 名次 2 貢獻 1/2；B 名次 3 貢獻 2/3（k=2 → 0）
+
+    截斷在 2：A=.75、B=.5、C=0 → macro 5/12；不截斷時 macro=.75。
+    """
+    import pandas as pd
+
+    rows = [
+        ("20240331", "C0", "A", 0.9, 1),
+        ("20240331", "C0", "B", 0.5, 0),
+        ("20240331", "C0", "C", 0.1, 1),
+        ("20240331", "C1", "A", 0.3, 0),
+        ("20240331", "C1", "B", 0.8, 1),
+        ("20240331", "C1", "C", 0.6, 0),
+        ("20240331", "C2", "A", 0.6, 1),
+        ("20240331", "C2", "B", 0.2, 1),
+        ("20240331", "C2", "C", 0.7, 0),
+    ]
+    return pd.DataFrame(
+        rows, columns=["snap_date", "cust_id", "prod_name", "score", "label"]
+    )
+
+
+def _metric_k_params():
+    params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
+    params["evaluation"]["diagnosis"] = {"ci": {"n_boot": 20}}
+    return params
+
+
+def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
+    """metric.k 不在 k_values 裡，主線照樣產出 map_attr@{metric.k}，
+    且與 CI 的點估在同一份資料上相等——兩者同截斷才會相等。
+    """
+    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+
+    pdf = _metric_k_pdf()
+    params = _metric_k_params()
+    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    main = result["macro_avg"]["by_item"]["map_attr@2"]
+    assert main == pytest.approx(5 / 12)
+
+    ci = bootstrap_per_item_ci(pdf, params)
+    assert ci["macro"]["ap"] == pytest.approx(main)
+
+
+def test_metric_k_grid_shared_by_slim_path(spark):
+    """baseline 走的 slim 路徑與主線用同一個 K 網格（含 metric.k），兩側才對得齊。"""
+    pdf = _metric_k_pdf()
+    params = _metric_k_params()
+    slim = ms.compute_overall_per_item(spark.createDataFrame(pdf), params)
+    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    assert "map_attr@2" in slim["per_item"]["A"]
+    assert slim["per_item"] == full["per_item"]
+    assert slim["overall"] == full["overall"]
