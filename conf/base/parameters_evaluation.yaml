@@ -48,6 +48,12 @@ evaluation:
     lookback_months: 12
 
   # Report 產生選項
+  # 這一區的鍵分兩類（ADR-0020 決定二；完整對照表在
+  # src/recsys_tfb/evaluation/config_fingerprint.py 的 COMPUTED_KEYS）：
+  #   「算的」：sections.baseline、sections.diagnostics、diagnostics.*。它們決定要不要算、
+  #     怎麼算，會進落地 JSON 的設定指紋。改了要從產出那份 JSON 的 node 重跑；只做
+  #     --only-node generate_report 會被擋下，錯誤訊息會寫出變了哪個鍵、該 --from-node 哪個 node。
+  #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
   report:
     sections:
       dataset_overview: true
@@ -56,13 +62,13 @@ evaluation:
       per_item_attr: true
       category: true             # 同時受 item_categories.enabled 控制
       per_segment: true
-      diagnostics: true
-      baseline: true
-    display:
+      diagnostics: true          # 算的：false 時 compute_report_aggregates 只寫 stub
+      baseline: true             # 算的：false 時 compute_baseline_metrics 只寫 stub
+    display:                     # 畫的
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
       recall_colorscale: {low: 0.0, high: 1.0}
-    diagnostics:
+    diagnostics:                 # 算的
       include_distributions: true
       include_calibration: true
       n_calibration_bins: 10
