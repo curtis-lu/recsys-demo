@@ -286,6 +286,84 @@ def test_dataset_section_per_segment_real_numbers():
     assert "正例佔比" not in cols
 
 
+def test_dataset_section_shows_the_unmatched_group_with_its_query_count():
+    """ADR-0020 bug 6: queries whose segment the population table could not
+    supply are one visible row, with how many queries and what share, and
+    the section says they are left out of every macro average."""
+    m = _metrics()
+    m["dataset_overview"]["by_segment"]["(unmatched)"] = {
+        "n_rows": 20, "n_positives": 2, "n_entities": 2,
+        "positive_rate": 0.1, "n_queries": 2, "query_share": 2 / 12}
+    m["segments"] = {"joined": ["cust_segment_typ"],
+                     "sources": {"cust_segment_typ": "sample_pool"},
+                     "missing": {}}
+    s = rb.build_dataset_overview_section(m, _params())
+    seg = next(t for t, tt in zip(s.tables, s.table_titles)
+               if "per-segment" in tt)
+    assert seg.loc["(unmatched)", "query 數"] == 2
+    assert seg.loc["X", "query 數"] == 6
+    assert seg.loc["(unmatched)", "query 數佔比"] == pytest.approx(2 / 12)
+    notes = " ".join(s.bullets)
+    assert "(unmatched)" in notes and "不進 macro" in notes
+    assert "cust_segment_typ 取自 sample_pool" in notes
+
+
+def test_dataset_section_names_the_table_that_lacks_a_segment_column():
+    """The population table has no such column: nothing per-segment is
+    computed for it, and the report says which table and which column, so a
+    misspelt column name is recognisable. Other tables still render."""
+    m = _metrics()
+    del m["dataset_overview"]["by_segment"]
+    m["segments"] = {"joined": [], "sources": {},
+                     "missing": {"cust_segment_typ": "inference_population"}}
+    s = rb.build_dataset_overview_section(m, _params())
+    assert "inference_population 無欄 cust_segment_typ" in " ".join(s.bullets)
+    assert [tt for tt in s.table_titles if "per-segment" in tt] == []
+    assert len(s.tables) == 3          # totals / by_snap_date / by_item
+
+
+def test_dataset_section_has_no_segment_notes_without_segments_info():
+    """Metrics written before evaluation_segment_columns existed (and the
+    comparison report's metrics) carry no ``segments`` block."""
+    s = rb.build_dataset_overview_section(_metrics(), _params())
+    assert "(unmatched)" not in " ".join(s.bullets)
+
+
+def test_metrics_section_puts_unmatched_last_and_says_it_is_not_in_macro():
+    """The unmatched group is defined where its row appears (presentation
+    rule: definitions next to the number), and sits after the real segments
+    in the per-segment tables."""
+    m = _metrics()
+    m["per_segment"] = {
+        "(unmatched)": {"map@1": 0.1, "precision@1": 0.1, "recall@1": 0.1},
+        "X": {"map@1": 0.6, "precision@1": 0.5, "recall@1": 0.3},
+    }
+    m["macro_avg"]["by_segment"] = {
+        "map@1": 0.6, "precision@1": 0.5, "recall@1": 0.3}
+    s = rb.build_metrics_section(m, _params())
+    table, title = next((t, tt) for t, tt in zip(s.tables, s.table_titles)
+                        if "per-segment map@k" in tt)
+    assert list(table.index)[-1] == "(unmatched)"
+    assert "(unmatched) 不含在 Macro" in title
+
+    del m["per_segment"]["(unmatched)"]
+    s = rb.build_metrics_section(m, _params())
+    assert not [tt for tt in s.table_titles if "(unmatched)" in tt]
+
+
+def test_baseline_per_segment_table_puts_unmatched_last():
+    m = _metrics_with_seg_cat()
+    b = _baseline_with_seg_cat()
+    m["per_segment"]["(unmatched)"] = {"map@1": 0.1, "map@2": 0.1, "map@3": 0.1}
+    b["per_segment"]["(unmatched)"] = {"map@1": 0.05, "map@2": 0.05,
+                                       "map@3": 0.05}
+    s = rb.build_baseline_section(m, b, _params())
+    table = next(t for t, tt in zip(s.tables, s.table_titles)
+                 if "per-segment mAP@k" in tt)
+    assert list(table.index)[-3:] == [
+        "(unmatched) · Model", "(unmatched) · Baseline", "(unmatched) · Δ"]
+
+
 def test_dataset_section_per_segment_has_candidate_col():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     idx = next(i for i, tt in enumerate(s.table_titles) if "per-segment" in tt)

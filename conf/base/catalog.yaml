@@ -318,6 +318,15 @@ gain_ledger:
   # （見 diagnosis/metric/model_capacity/_compute.py 的三種拿不到資料路徑）。
   optional: true
 
+# prepare_eval_data 的第二個 output：這次實際 join 進來的 segment 欄（joined）、
+# 各欄取自哪張表（sources）、母體表沒有而跳過的欄（missing）。分群的消費者讀它，
+# 不看 frame 欄位——enriched_eval_predictions 兩種模式共用，另一模式 join 過的欄
+# 在這次的列上是全 NULL（ADR-0020 bug 6）。--compare-only 沒有 prepare_eval_data，
+# 靠這份檔知道 enriched 分區當時 join 了哪些欄，所以它必須落地。
+evaluation_segment_columns:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/segment_columns.json
+
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
 evaluation_metric_ci:
   type: JSONDataset

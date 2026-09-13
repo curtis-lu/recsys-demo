@@ -100,11 +100,12 @@ def test_with_segment_adds_per_segment_matching_full(spark):
         compute_overall_per_item,
     )
     p = _params_seg_cat()
-    slim = compute_overall_per_item(_eval_seg_cat(spark), p, with_segment=True)
+    segs = ["cust_segment_typ"]
+    slim = compute_overall_per_item(_eval_seg_cat(spark), p, segment_columns=segs)
     assert "per_segment" in slim
     assert set(slim["per_segment"]) == {"mass", "hnw"}
     # Same building blocks as the model path → values identical to full metrics.
-    full = compute_all_metrics(_eval_seg_cat(spark), p)
+    full = compute_all_metrics(_eval_seg_cat(spark), p, segment_columns=segs)
     assert slim["per_segment"] == full["per_segment"]
 
 
@@ -121,13 +122,13 @@ def test_with_category_adds_category_overall_matching_full(spark):
     assert slim["category"]["overall"] == full["category"]["overall"]
 
 
-def test_with_segment_silently_skips_when_no_seg_col(spark):
+def test_no_segment_columns_means_no_per_segment(spark):
+    """Configured but not joined this run: the baseline follows the list it
+    is handed, like the model's metrics."""
     from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
     p = _parameters()
-    p["evaluation"]["segment_columns"] = ["cust_segment_typ"]  # absent from df
-    result = compute_overall_per_item(
-        _eval_predictions(spark), p, with_segment=True
-    )
+    p["evaluation"]["segment_columns"] = ["cust_segment_typ"]
+    result = compute_overall_per_item(_eval_predictions(spark), p)
     assert "per_segment" not in result
 
 

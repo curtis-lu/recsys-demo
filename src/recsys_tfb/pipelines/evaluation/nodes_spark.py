@@ -14,6 +14,10 @@ from recsys_tfb.evaluation.config_fingerprint import (
     require_computed_with_current_config,
 )
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
+from recsys_tfb.evaluation.segments import (
+    join_segment_columns,
+    join_segment_sources,
+)
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
@@ -79,201 +83,259 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     )
 
 
-def prepare_eval_data(
-    ranked_predictions: SparkDataFrame,
-    label_table: SparkDataFrame,
-    parameters: dict,
-) -> SparkDataFrame:
-    """Join ranked predictions with labels using Spark.
+def make_prepare_eval_data_node(population_name: str):
+    """Build ``prepare_eval_data`` for one run mode's population table.
 
-    For external segment sources, delegates to
-    ``segments.join_segment_sources`` (storage backend isolated behind its
-    source seam).
-
-    Pre-check (input): ``label_table`` has no duplicated identity key in the
-    evaluated month; raises with the number of duplicated keys (why it raises
-    rather than deduplicating is written at the check).
+    ``population_name`` is the catalog entry ``create_pipeline`` wires as the
+    node's third input: ``sample_pool`` for ``--post-training`` (the test set
+    is drawn from it), ``inference_population`` for monitoring (it is what was
+    scored). The node receives only a DataFrame, so the name comes in here for
+    the warning, the report and ``evaluation_segment_columns``. The mode
+    decides it (ADR-0013), as with ``make_draw_diagnosis_sample_node``.
     """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    identity_cols = schema["identity_columns"]
-    label_col = schema["label"]
+    def prepare_eval_data(
+        ranked_predictions: SparkDataFrame,
+        label_table: SparkDataFrame,
+        population: SparkDataFrame,
+        parameters: dict,
+    ) -> tuple[SparkDataFrame, dict]:
+        """Join ranked predictions with labels and segment columns using Spark.
 
-    eval_params = parameters.get("evaluation", {})
+        Returns ``(eval_predictions, segments)``. ``segments`` lands as
+        ``evaluation_segment_columns``: ``joined`` (the segment columns
+        actually joined, in ``evaluation.segment_columns`` order), ``sources``
+        (joined column -> table it came from), ``missing`` (column -> the
+        population table that lacks it) and ``config_fingerprint``.
 
-    labels = label_table
+        Pre-check (input): ``label_table`` has no duplicated identity key in
+        the evaluated month; raises with the number of duplicated keys (why
+        it raises rather than deduplicating is written at the check).
+        """
+        schema = get_schema(parameters)
+        time_col = schema["time"]
+        identity_cols = schema["identity_columns"]
+        label_col = schema["label"]
 
-    # Filter predictions to the resolved model_version (resolved upstream by
-    # __main__.py via core.versioning.resolve_model_version).
-    model_version = parameters.get("model_version")
-    if model_version is None:
-        raise RuntimeError(
-            "parameters['model_version'] missing. CLI should resolve via "
-            "core.versioning.resolve_model_version before pipeline run."
-        )
-    if "model_version" in ranked_predictions.columns:
-        logger.info("Filtering predictions to model_version=%s", model_version)
-        ranked_predictions = ranked_predictions.filter(
-            F.col("model_version") == model_version
-        )
-    else:
-        # HiveTableDataset drops partition_filter columns after applying the
-        # WHERE clause. Both of this node's sources declare model_version as a
-        # static partition_filter — training_eval_predictions always did,
-        # ranked_predictions since #187 — so a CLI-loaded DataFrame is already
-        # pruned even though the constant column is no longer present. The
-        # branch above survives for callers that hand this node a frame they
-        # built themselves (tests, --compare paths reading via spark.table).
-        logger.info(
-            "Predictions input has no model_version column; assuming catalog "
-            "partition_filter already selected model_version=%s",
-            model_version,
-        )
+        eval_params = parameters.get("evaluation", {})
 
-    # Filter predictions to the configured evaluation snap_date. evaluation.
-    # snap_date is an ISO date string (YYYY-MM-DD); the snap_date partition
-    # column on ranked_predictions / training_eval_predictions is STRING, so
-    # .cast("string") is a no-op here and stays correct if it is ever DATE.
-    # Applies to both pipeline modes (this node serves monitoring and
-    # --post-training). Fails loud — never silently evaluates the whole table.
-    snap_date = str(eval_params.get("snap_date") or "").strip()
-    if not snap_date:
-        raise ValueError(
-            "evaluation.snap_date not configured. Set evaluation.snap_date "
-            "(ISO YYYY-MM-DD) in conf/base/parameters_evaluation.yaml."
-        )
-    logger.info("Filtering predictions to snap_date=%s", snap_date)
-    predictions_at_snap = ranked_predictions.filter(
-        F.col(time_col).cast("string") == snap_date
-    )
-    if predictions_at_snap.isEmpty():
-        available = sorted(
-            str(r[time_col])
-            for r in ranked_predictions.select(time_col).distinct().collect()
-        )
-        raise ValueError(
-            f"No predictions found for evaluation.snap_date={snap_date!r} "
-            f"(model_version={model_version}). snap_dates present in "
-            f"predictions: {available}"
-        )
-    ranked_predictions = predictions_at_snap
+        labels = label_table
 
-    # Filter labels to snap_dates in predictions
-    pred_snap_dates = ranked_predictions.select(time_col).distinct()
-    labels = labels.join(pred_snap_dates, on=time_col, how="inner")
+        # Filter predictions to the resolved model_version (resolved upstream by
+        # __main__.py via core.versioning.resolve_model_version).
+        model_version = parameters.get("model_version")
+        if model_version is None:
+            raise RuntimeError(
+                "parameters['model_version'] missing. CLI should resolve via "
+                "core.versioning.resolve_model_version before pipeline run."
+            )
+        if "model_version" in ranked_predictions.columns:
+            logger.info("Filtering predictions to model_version=%s", model_version)
+            ranked_predictions = ranked_predictions.filter(
+                F.col("model_version") == model_version
+            )
+        else:
+            # HiveTableDataset drops partition_filter columns after applying the
+            # WHERE clause. Both of this node's sources declare model_version as a
+            # static partition_filter — training_eval_predictions always did,
+            # ranked_predictions since #187 — so a CLI-loaded DataFrame is already
+            # pruned even though the constant column is no longer present. The
+            # branch above survives for callers that hand this node a frame they
+            # built themselves (tests, --compare paths reading via spark.table).
+            logger.info(
+                "Predictions input has no model_version column; assuming catalog "
+                "partition_filter already selected model_version=%s",
+                model_version,
+            )
 
-    # Pre-check (input): label_table holds at most one row per identity key in
-    # the evaluated month. The LEFT JOIN below copies a prediction row once per
-    # matching label row, so a duplicated key silently inflates that query's
-    # candidate set and shifts every rank in it; no count or metric raises.
-    # Not dropDuplicates: that picks one answer arbitrarily and makes the row
-    # counts line up, which hides the problem better than leaving it (bug 10).
-    # Not core/consistency.py: a user-defined source table's quality is not a
-    # framework invariant — the same boundary as inference_population's
-    # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
-    # month join, so it counts exactly the rows about to be joined. The
-    # message carries counts only, never key values (they are entity ids).
-    # Cost: one Spark action per run, a groupBy over one month of label rows
-    # (a shuffle of that month) ending in a count; only the count reaches the
-    # driver, whatever the table size.
-    n_duplicated_keys = (
-        labels.groupBy(*identity_cols)
-        .agg(F.count(F.lit(1)).alias("_n_label_rows"))
-        .filter(F.col("_n_label_rows") > 1)
-        .count()
-    )
-    if n_duplicated_keys:
-        raise ValueError(
-            f"{n_duplicated_keys} duplicated label_table key(s) on "
-            f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
-            f"row would copy its prediction row in the join with the "
-            f"predictions, inflating that query's candidates and shifting its "
-            f"ranks. Deduplicate label_table upstream; evaluation does not "
-            f"pick one of the rows for you."
+        # Filter predictions to the configured evaluation snap_date. evaluation.
+        # snap_date is an ISO date string (YYYY-MM-DD); the snap_date partition
+        # column on ranked_predictions / training_eval_predictions is STRING, so
+        # .cast("string") is a no-op here and stays correct if it is ever DATE.
+        # Applies to both pipeline modes (this node serves monitoring and
+        # --post-training). Fails loud — never silently evaluates the whole table.
+        snap_date = str(eval_params.get("snap_date") or "").strip()
+        if not snap_date:
+            raise ValueError(
+                "evaluation.snap_date not configured. Set evaluation.snap_date "
+                "(ISO YYYY-MM-DD) in conf/base/parameters_evaluation.yaml."
+            )
+        logger.info("Filtering predictions to snap_date=%s", snap_date)
+        predictions_at_snap = ranked_predictions.filter(
+            F.col(time_col).cast("string") == snap_date
         )
+        if predictions_at_snap.isEmpty():
+            available = sorted(
+                str(r[time_col])
+                for r in ranked_predictions.select(time_col).distinct().collect()
+            )
+            raise ValueError(
+                f"No predictions found for evaluation.snap_date={snap_date!r} "
+                f"(model_version={model_version}). snap_dates present in "
+                f"predictions: {available}"
+            )
+        ranked_predictions = predictions_at_snap
 
-    # In --post-training mode the predictions source is training_eval_predictions,
-    # which already stores `label` alongside `score` (written by the training
-    # `predict` node). The merge join below keys on identity_cols only, so a
-    # `label` on the label_table side would survive as a second `label` column
-    # -> AnalysisException: reference 'label' is ambiguous. Drop it from the
-    # label_table side: the predictions table's own label is exactly what the
-    # model's test mAP was scored against, keeping post-training metrics
-    # consistent with the training pipeline. The label_table join is still
-    # required for segment columns. Monitoring mode (ranked_predictions) has no
-    # `label`, so the condition is False there and behaviour is unchanged.
-    if label_col in ranked_predictions.columns and label_col in labels.columns:
-        labels = labels.drop(label_col)
-        logger.info(
-            "prepare_eval_data: predictions already carry '%s'; dropped it "
-            "from the label_table side to avoid an ambiguous join column",
-            label_col,
+        # Filter labels to snap_dates in predictions
+        pred_snap_dates = ranked_predictions.select(time_col).distinct()
+        labels = labels.join(pred_snap_dates, on=time_col, how="inner")
+
+        # Pre-check (input): label_table holds at most one row per identity key in
+        # the evaluated month. The LEFT JOIN below copies a prediction row once per
+        # matching label row, so a duplicated key silently inflates that query's
+        # candidate set and shifts every rank in it; no count or metric raises.
+        # Not dropDuplicates: that picks one answer arbitrarily and makes the row
+        # counts line up, which hides the problem better than leaving it (bug 10).
+        # Not core/consistency.py: a user-defined source table's quality is not a
+        # framework invariant — the same boundary as inference_population's
+        # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
+        # month join, so it counts exactly the rows about to be joined. The
+        # message carries counts only, never key values (they are entity ids).
+        # Cost: one Spark action per run, a groupBy over one month of label rows
+        # (a shuffle of that month) ending in a count; only the count reaches the
+        # driver, whatever the table size.
+        n_duplicated_keys = (
+            labels.groupBy(*identity_cols)
+            .agg(F.count(F.lit(1)).alias("_n_label_rows"))
+            .filter(F.col("_n_label_rows") > 1)
+            .count()
         )
+        if n_duplicated_keys:
+            raise ValueError(
+                f"{n_duplicated_keys} duplicated label_table key(s) on "
+                f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
+                f"row would copy its prediction row in the join with the "
+                f"predictions, inflating that query's candidates and shifting its "
+                f"ranks. Deduplicate label_table upstream; evaluation does not "
+                f"pick one of the rows for you."
+            )
 
-    # LEFT JOIN — preserve every prediction row so per-customer ranking is over
-    # the model's full candidate set (in dev: cust × 8 prod) regardless of
-    # whether label_table covers that (cust, prod) pair. label_table's
-    # per-group cust_pool semantics (conf/sql/etl/label/label_{ccard,exchange,
-    # fund}.sql; cust must have ≥1 apply event in the group to appear) means
-    # an INNER JOIN here would silently shrink each customer's rank set to
-    # their per-group sub-products, collapsing baseline / mAP metrics to a
-    # per-group framing the business model never asked for. Missing labels are
-    # filled with 0 ("not bought"), matching the existing build_model_input
-    # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
-    eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
-    if label_col in eval_predictions.columns:
-        # INT, the type training_eval_predictions declares for `label`. The
-        # two modes take the label from different tables — that one in
-        # --post-training, the user-defined label_table in monitoring (the
-        # example's synthetic one is BIGINT) — and both write the same
-        # enriched_eval_predictions, whose schema never casts. Same failure as
-        # `rank` below (bug 15); it surfaced on the first real monitoring run.
-        eval_predictions = eval_predictions.fillna({label_col: 0}).withColumn(
-            label_col, F.col(label_col).cast("int")
-        )
+        # In --post-training mode the predictions source is training_eval_predictions,
+        # which already stores `label` alongside `score` (written by the training
+        # `predict` node). The merge join below keys on identity_cols only, so a
+        # `label` on the label_table side would survive as a second `label` column
+        # -> AnalysisException: reference 'label' is ambiguous. Drop it from the
+        # label_table side: the predictions table's own label is exactly what the
+        # model's test mAP was scored against, keeping post-training metrics
+        # consistent with the training pipeline. The label_table join is still
+        # required for segment columns. Monitoring mode (ranked_predictions) has no
+        # `label`, so the condition is False there and behaviour is unchanged.
+        if label_col in ranked_predictions.columns and label_col in labels.columns:
+            labels = labels.drop(label_col)
+            logger.info(
+                "prepare_eval_data: predictions already carry '%s'; dropped it "
+                "from the label_table side to avoid an ambiguous join column",
+                label_col,
+            )
 
-    # Downstream report rendering selects schema["rank"] from eval_predictions.
-    # When the predictions source is
-    # training_eval_predictions (--post-training mode), `rank` is absent because
-    # the table no longer stores it (Spark mAP recomputes rank internally via
-    # rank_within_query). Add it here when missing so downstream stays uniform;
-    # when present (ranked_predictions source), trust the upstream value.
-    rank_col = schema["rank"]
-    if rank_col not in eval_predictions.columns:
-        from recsys_tfb.evaluation.metrics_spark import rank_within_query
-        score_col = schema["score"]
-        entity_cols = schema["entity"]
-        query_cols = [time_col] + entity_cols
-        # rank_within_query adds a "pos" 1-based rank within each query
-        # group, by score desc with ties by item asc — the rule inference
-        # publishes `rank` with, so both modes rank the same rows alike.
-        eval_predictions = rank_within_query(
-            eval_predictions, query_cols, score_col, schema["item"]
-        )
-        # BIGINT, the type ranked_predictions declares for `rank`. Both modes
-        # write the same enriched_eval_predictions (columns: "auto"), whose
-        # schema is fixed by the first write and never cast afterwards, so
-        # row_number()'s INT here against the monitoring side's BIGINT is a
-        # type conflict on whichever run comes second (bug 15).
-        eval_predictions = eval_predictions.withColumn(
-            rank_col, F.col("pos").cast("bigint")
-        ).drop("pos")
-        logger.info(
-            "prepare_eval_data: injected '%s' column via rank_within_query "
-            "(predictions source did not provide it)",
-            rank_col,
-        )
+        # LEFT JOIN — preserve every prediction row so per-customer ranking is over
+        # the model's full candidate set (in dev: cust × 8 prod) regardless of
+        # whether label_table covers that (cust, prod) pair. label_table's
+        # per-group cust_pool semantics (conf/sql/etl/label/label_{ccard,exchange,
+        # fund}.sql; cust must have ≥1 apply event in the group to appear) means
+        # an INNER JOIN here would silently shrink each customer's rank set to
+        # their per-group sub-products, collapsing baseline / mAP metrics to a
+        # per-group framing the business model never asked for. Missing labels are
+        # filled with 0 ("not bought"), matching the existing build_model_input
+        # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
+        eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
+        if label_col in eval_predictions.columns:
+            # INT, the type training_eval_predictions declares for `label`. The
+            # two modes take the label from different tables — that one in
+            # --post-training, the user-defined label_table in monitoring (the
+            # example's synthetic one is BIGINT) — and both write the same
+            # enriched_eval_predictions, whose schema never casts. Same failure as
+            # `rank` below (bug 15); it surfaced on the first real monitoring run.
+            eval_predictions = eval_predictions.fillna({label_col: 0}).withColumn(
+                label_col, F.col(label_col).cast("int")
+            )
 
-    # Join segment sources onto the final eval table (Hive-table sources;
-    # source seam inside segments). Done here — not on label_table — so the
-    # label side stays minimal and segment columns are a pure enrichment.
-    segment_sources = eval_params.get("segment_sources", {})
-    if segment_sources:
-        from recsys_tfb.evaluation.segments import join_segment_sources
-        eval_predictions = join_segment_sources(eval_predictions, segment_sources)
+        # Downstream report rendering selects schema["rank"] from eval_predictions.
+        # When the predictions source is
+        # training_eval_predictions (--post-training mode), `rank` is absent because
+        # the table no longer stores it (Spark mAP recomputes rank internally via
+        # rank_within_query). Add it here when missing so downstream stays uniform;
+        # when present (ranked_predictions source), trust the upstream value.
+        rank_col = schema["rank"]
+        if rank_col not in eval_predictions.columns:
+            from recsys_tfb.evaluation.metrics_spark import rank_within_query
+            score_col = schema["score"]
+            entity_cols = schema["entity"]
+            query_cols = [time_col] + entity_cols
+            # rank_within_query adds a "pos" 1-based rank within each query
+            # group, by score desc with ties by item asc — the rule inference
+            # publishes `rank` with, so both modes rank the same rows alike.
+            eval_predictions = rank_within_query(
+                eval_predictions, query_cols, score_col, schema["item"]
+            )
+            # BIGINT, the type ranked_predictions declares for `rank`. Both modes
+            # write the same enriched_eval_predictions (columns: "auto"), whose
+            # schema is fixed by the first write and never cast afterwards, so
+            # row_number()'s INT here against the monitoring side's BIGINT is a
+            # type conflict on whichever run comes second (bug 15).
+            eval_predictions = eval_predictions.withColumn(
+                rank_col, F.col("pos").cast("bigint")
+            ).drop("pos")
+            logger.info(
+                "prepare_eval_data: injected '%s' column via rank_within_query "
+                "(predictions source did not provide it)",
+                rank_col,
+            )
 
-    logger.info("Eval data prepared via Spark join")
-    return eval_predictions
+        # Decision — where each segment column comes from (ADR-0020 bug 6):
+        # its evaluation.segment_sources override when one is configured,
+        # otherwise this run mode's population table, the table the evaluated
+        # rows were drawn from, keyed by (time, entity). Joined onto the final
+        # eval table, not label_table, so the label side stays minimal.
+        segment_columns = list(eval_params.get("segment_columns", []) or [])
+        configured = eval_params.get("segment_sources", {}) or {}
+        overrides = {c: configured[c] for c in segment_columns if c in configured}
+        # Decision — a column the population table lacks is skipped, not
+        # raised: a monitoring population is a user-defined table, and one
+        # missing segment column must not stop the monthly report. A typo in
+        # segment_columns lands here too (A10 runs before Spark and cannot see
+        # the table), which is why the warning and the report name both the
+        # table and the column. Reading .columns touches the metastore only.
+        population_columns = set(population.columns)
+        missing = {c: population_name for c in segment_columns
+                   if c not in overrides and c not in population_columns}
+        for col, table in missing.items():
+            logger.warning(
+                "segment column %r: population table %r has no such column "
+                "(it has %s); per-segment metrics skip it this run",
+                col, table, sorted(population_columns),
+            )
+        from_population = [c for c in segment_columns
+                           if c not in overrides and c not in missing]
+        if from_population:
+            eval_predictions = join_segment_columns(
+                eval_predictions, population, [time_col, *schema["entity"]],
+                from_population, source_name=population_name,
+            )
+        if overrides:
+            eval_predictions = join_segment_sources(eval_predictions, overrides)
+
+        # Landed so every consumer groups by what was joined here, never by
+        # the frame's columns: enriched_eval_predictions is shared by both run
+        # modes, so a column the other mode joined sits in the frame all NULL.
+        # The fingerprint is written but no reader checks it. In a standard
+        # run every consumer gets this dict from the same run (eval_predictions
+        # is memory-only, so any slice reaching a consumer re-runs this node);
+        # --compare-only reads it next to the enriched partition it describes,
+        # and --post-training is inert on that path, so a check there would
+        # refuse every partition a post-training run wrote.
+        joined = [c for c in segment_columns if c not in missing]
+        segments = {
+            "joined": joined,
+            "sources": {c: overrides[c]["table"] if c in overrides
+                        else population_name for c in joined},
+            "missing": missing,
+            "config_fingerprint": fingerprint(parameters),
+        }
+
+        logger.info("Eval data prepared via Spark join")
+        return eval_predictions, segments
+
+    return prepare_eval_data
 
 
 def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
@@ -293,6 +355,7 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
     """
     def draw_diagnosis_sample_node(
         eval_predictions: SparkDataFrame,
+        segment_columns: dict,
         parameters: dict,
     ) -> Optional[tuple]:
         """Draw the shared driver-side diagnosis sample ONCE per run.
@@ -304,6 +367,10 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         also a correctness property, not just a speed one: numbers computed on
         different populations must not be read side by side. Returns ``None``
         only when *every* wired consumer is disabled.
+
+        The sample carries the segment columns ``prepare_eval_data`` joined
+        (``segment_columns["joined"]``), not the configured ones found in the
+        frame (ADR-0020 bug 6).
         """
         ci_on = _ci_consumer_enabled(parameters)
         registry_on = (
@@ -319,7 +386,8 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
 
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         sample_pdf, sample_meta = draw_diagnosis_sample(
-            eval_predictions, parameters
+            eval_predictions, parameters,
+            segment_columns=segment_columns["joined"],
         )
         # deep=False keeps this a free observation: rows/cols are exact and the
         # bytes figure is a shallow estimate. deep=True would scan every string
@@ -346,16 +414,28 @@ draw_diagnosis_sample_node = make_draw_diagnosis_sample_node(
 
 def compute_metrics(
     eval_predictions: SparkDataFrame,
+    segment_columns: dict,
     parameters: dict,
 ) -> dict:
     """Compute ranking metrics using the Spark-native pipeline.
 
     Thin wrapper over `evaluation.metrics_spark.compute_all_metrics`. All
     row-level work stays in Spark; only small aggregated dicts are collected.
+
+    Segments by what ``prepare_eval_data`` joined (``segment_columns``, the
+    landed ``evaluation_segment_columns``), and copies its ``joined`` /
+    ``sources`` / ``missing`` into the result as ``segments``: the report says
+    which table each column came from and which one lacked a column.
     """
     from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
 
-    result = compute_all_metrics(eval_predictions, parameters)
+    result = compute_all_metrics(
+        eval_predictions, parameters,
+        segment_columns=segment_columns["joined"],
+    )
+    result["segments"] = {
+        k: segment_columns[k] for k in ("joined", "sources", "missing")
+    }
     logger.info(
         "Spark metrics computed: n_queries=%d, n_excluded=%d",
         result["n_queries"],
@@ -367,6 +447,7 @@ def compute_metrics(
 def compute_baseline_metrics(
     eval_predictions: SparkDataFrame,
     label_table: SparkDataFrame,
+    segment_columns: dict,
     parameters: dict,
 ) -> dict:
     """Popularity-baseline metrics, aligned row-for-row with eval_predictions.
@@ -450,13 +531,13 @@ def compute_baseline_metrics(
         )
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     # per_segment / category slices for the report's by-segment / 大類 vs
-    # baseline comparison. Gated by the same config that turns them on for the
-    # model (segment_columns present / item_categories maps items), so the
-    # baseline pays for a slice only when the model already computed its match.
+    # baseline comparison. Gated by what turns them on for the model (the
+    # segment columns prepare_eval_data joined / item_categories maps items),
+    # so the baseline pays for a slice only when the model computed its match.
     metrics = compute_overall_per_item(
         baseline_frame,
         parameters,
-        with_segment=bool(eval_params.get("segment_columns")),
+        segment_columns=segment_columns["joined"],
         with_category=True,
     )
     metrics["purchase_counts"] = purchase_counts

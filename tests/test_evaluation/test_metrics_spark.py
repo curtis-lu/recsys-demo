@@ -573,8 +573,10 @@ def test_compute_all_metrics_no_segment_column(spark):
 
 def test_compute_all_metrics_with_segment_column(spark):
     df = _make_eval_predictions(spark, with_segment=True)
-    params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
-    result = ms.compute_all_metrics(df, params)
+    params = _make_parameters(k_values=[3])
+    result = ms.compute_all_metrics(
+        df, params, segment_columns=["cust_segment_typ"]
+    )
     assert set(result["per_segment"].keys()) == {"mass", "affluent"}
     assert {
         item: set(by_seg) for item, by_seg in result["per_item_segment"].items()
@@ -631,17 +633,124 @@ def test_compute_all_metrics_all_queries_excluded(spark):
     assert result["n_excluded_queries"] == 2
 
 
-def test_compute_all_metrics_segment_column_auto_detection_picks_first_present(spark):
-    """When multiple segment columns are configured but only one is in the df,
-    that one is picked.
+def test_unmatched_segment_is_named_counted_and_kept_out_of_macro(spark):
+    """A query whose segment is NULL (the population table has the column but
+    no value for that key) is its own "(unmatched)" group: shown, counted, but
+    not averaged into any macro (ADR-0020 bug 6). Before, it was a group
+    called "None" weighted like a real one.
+
+    C0 mass AP@3 = 5/6, C1 affluent AP@3 = 1.0, C2 unmatched: B positive at
+    rank 2 -> AP@3 = 1/2. Macro over matched segments = (5/6 + 1) / 2 = 11/12;
+    with C2 in it would be 7/9. Per-item-segment map_attr@3 (per-row P@rank):
+    A_mass 1, C_mass 2/3, B_affluent 1, B_unmatched 1/2 -> matched macro 8/9.
     """
-    df = _make_eval_predictions(spark, with_segment=True)
-    # cust_segment_typ present; xxx_missing not in df → cust_segment_typ wins.
-    params = _make_parameters(
-        k_values=[3], segment_columns=["xxx_missing", "cust_segment_typ"]
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, "mass"),
+            ("20240331", "C0", "B", 0.5, 0, "mass"),
+            ("20240331", "C0", "C", 0.1, 1, "mass"),
+            ("20240331", "C1", "A", 0.3, 0, "affluent"),
+            ("20240331", "C1", "B", 0.8, 1, "affluent"),
+            ("20240331", "C1", "C", 0.6, 0, "affluent"),
+            ("20240331", "C2", "A", 0.9, 0, None),
+            ("20240331", "C2", "B", 0.5, 1, None),
+            ("20240331", "C2", "C", 0.1, 0, None),
+        ],
+        schema="snap_date string, cust_id string, prod_name string, "
+               "score double, label int, cust_segment_typ string",
     )
-    result = ms.compute_all_metrics(df, params)
-    assert set(result["per_segment"].keys()) == {"mass", "affluent"}
+    params = _make_parameters(k_values=[3])
+    result = ms.compute_all_metrics(
+        df, params, segment_columns=["cust_segment_typ"]
+    )
+
+    assert set(result["per_segment"]) == {"mass", "affluent", "(unmatched)"}
+    assert result["per_segment"]["(unmatched)"]["map@3"] == pytest.approx(0.5)
+    assert result["macro_avg"]["by_segment"]["map@3"] == pytest.approx(11 / 12)
+    assert result["macro_avg"]["by_item_segment"]["map_attr@3"] == \
+        pytest.approx(8 / 9)
+
+    by_seg = result["dataset_overview"]["by_segment"]
+    assert by_seg["(unmatched)"]["n_queries"] == 1
+    assert by_seg["(unmatched)"]["query_share"] == pytest.approx(1 / 3)
+
+
+def test_a_real_segment_ending_like_the_unmatched_name_stays_in_the_macro(spark):
+    """Unmatched cells leave the macro by their segment name, not by any
+    string pattern: a real segment value that merely ends in "_(unmatched)"
+    is a segment. (Before bug 12 nested per_item_segment, its keys were
+    "<item>_<segment>" strings and a suffix match was the tempting shortcut.)
+
+    C0 mass: A_mass 1, C_mass 2/3; C1 "vip_(unmatched)": B cell 1, so the
+    by_item_segment macro is 8/9. A suffix match drops the vip cell: 5/6.
+    """
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, "mass"),
+            ("20240331", "C0", "B", 0.5, 0, "mass"),
+            ("20240331", "C0", "C", 0.1, 1, "mass"),
+            ("20240331", "C1", "A", 0.3, 0, "vip_(unmatched)"),
+            ("20240331", "C1", "B", 0.8, 1, "vip_(unmatched)"),
+            ("20240331", "C1", "C", 0.6, 0, "vip_(unmatched)"),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label",
+                "cust_segment_typ"],
+    )
+    result = ms.compute_all_metrics(
+        df, _make_parameters(k_values=[3]),
+        segment_columns=["cust_segment_typ"],
+    )
+    assert result["macro_avg"]["by_item_segment"]["map_attr@3"] == \
+        pytest.approx(8 / 9)
+
+
+def _with_stale_all_null_segment(spark):
+    """The segment fixture plus a column another run mode joined in once: the
+    enriched table is shared by both modes, so its schema is the union and
+    this run's rows carry the other mode's column as all NULL."""
+    return _make_eval_predictions(spark, with_segment=True).withColumn(
+        "stale_seg", F.lit(None).cast("string")
+    )
+
+
+def test_segments_come_from_the_passed_list_not_the_frame(spark):
+    """The metric layer segments by the columns it is handed (the landed
+    evaluation_segment_columns), never by "configured and present in the
+    frame". Otherwise the all-NULL stale column, listed first in config and
+    present in the frame, is picked and grows a fake "(unmatched)" group.
+    """
+    df = _with_stale_all_null_segment(spark)
+    params = _make_parameters(
+        k_values=[3], segment_columns=["stale_seg", "cust_segment_typ"]
+    )
+    params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
+    params["evaluation"]["item_categories"] = {
+        "enabled": True, "unmapped": "singleton", "mapping": {"AB": ["A", "B"]}}
+
+    full = ms.compute_all_metrics(df, params, segment_columns=["cust_segment_typ"])
+    assert set(full["per_segment"]) == {"mass", "affluent"}
+    assert set(full["dataset_overview"]["by_segment"]) == {"mass", "affluent"}
+    assert set(full["category"]["per_segment"]) == {"mass", "affluent"}
+
+    slim = ms.compute_overall_per_item(
+        df, params, segment_columns=["cust_segment_typ"]
+    )
+    assert set(slim["per_segment"]) == {"mass", "affluent"}
+
+    none = ms.compute_all_metrics(df, params, segment_columns=[])
+    assert none["per_segment"] == {}
+    assert "by_segment" not in none["dataset_overview"]
+
+
+def test_a_passed_segment_column_missing_from_the_frame_raises(spark):
+    """The list and the frame come from the same producer; disagreeing means
+    the wiring is wrong, and silently dropping the column would hide it."""
+    df = _make_eval_predictions(spark, with_segment=False)
+    with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
+        ms.compute_all_metrics(
+            df, _make_parameters(k_values=[3]),
+            segment_columns=["cust_segment_typ"],
+        )
 
 
 def test_compute_all_metrics_precision_at_n_items_is_base_rate(spark):
@@ -847,10 +956,10 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     """
     pdf = _metric_k_pdf()
     pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
-    params = _make_parameters(
-        k_values=[1, "all"], segment_columns=["seg"], metric={"k": 2}
+    params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
+    full = ms.compute_all_metrics(
+        spark.createDataFrame(pdf), params, segment_columns=["seg"]
     )
-    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
 
     assert [k for k in full["overall"] if k.endswith("@2")] == []
     assert {"map@1", "map@3"} <= set(full["overall"])
@@ -864,7 +973,7 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     assert "map_attr@2" in full["macro_avg"]["by_item_segment"]
 
     slim = ms.compute_overall_per_item(
-        spark.createDataFrame(pdf), params, with_segment=True
+        spark.createDataFrame(pdf), params, segment_columns=["seg"]
     )
     assert slim["overall"] == full["overall"]
     assert slim["per_segment"] == full["per_segment"]
@@ -894,7 +1003,7 @@ def test_per_item_segment_is_two_level_and_collision_free(spark):
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "seg"],
     )
     result = ms.compute_all_metrics(
-        df, _make_parameters(k_values=[2], segment_columns=["seg"])
+        df, _make_parameters(k_values=[2]), segment_columns=["seg"]
     )
     pis = result["per_item_segment"]
     assert pis["a"]["b_c"]["map_attr@2"] == pytest.approx(1.0)

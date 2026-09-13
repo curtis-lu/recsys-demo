@@ -59,7 +59,7 @@ collected to the driver.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -68,6 +68,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
+from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
@@ -166,14 +167,40 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     return mapping
 
 
+def _require_segment_columns_in_frame(
+    df: SparkDataFrame, segment_columns: Sequence[str]
+) -> None:
+    """Pre-check (input): every passed segment column is in the frame.
+
+    ``segment_columns`` is what ``prepare_eval_data`` actually joined this run
+    (the landed ``evaluation_segment_columns``), not the configured list, and
+    it alone decides what is segmented by. The frame's columns prove nothing:
+    ``enriched_eval_predictions`` is shared by both run modes, so a column the
+    other mode joined sits in this run's rows all NULL, and picking it grows a
+    fake unmatched group (ADR-0020 bug 6). A passed column the frame lacks
+    means the list and the frame come from different runs: a wiring error
+    that skipping the column would hide.
+    """
+    missing = [c for c in segment_columns if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"segment columns {missing} are not in the frame (it has "
+            f"{df.columns}). They were passed as joined by prepare_eval_data "
+            f"(evaluation_segment_columns), so the frame and that list come "
+            f"from different runs."
+        )
+
+
 def collapse_to_categories(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    *,
+    segment_columns: Sequence[str] = (),
 ) -> SparkDataFrame:
     """Collapse fine-grained predictions to category grain (no UDF).
 
     For each (time, entity..., category): score = max(child score),
-    label = max(child label), segment columns via F.first. The category
+    label = max(child label), ``segment_columns`` via F.first. The category
     column is emitted under the schema item_col name so the collapsed DF
     is shape-compatible with compute_all_metrics. ``max(score)`` re-ranking
     is equivalent to taking the best child rank (pos is score-desc derived).
@@ -190,11 +217,7 @@ def collapse_to_categories(
     score_col = schema["score"]
     group_cols = [time_col] + entity_cols
 
-    eval_params = parameters.get("evaluation", {}) or {}
-    segment_columns = [
-        c for c in (eval_params.get("segment_columns", []) or [])
-        if c in eval_predictions.columns
-    ]
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
 
     spark = eval_predictions.sparkSession
     map_rows = [(p, c) for p, c in mapping.items()]
@@ -221,19 +244,21 @@ def compute_dataset_overview(
     eval_predictions: SparkDataFrame,
     parameters: dict,
     item_col_override: str | None = None,
+    *,
+    segment_columns: Sequence[str] = (),
 ) -> dict:
     """Dataset profiling for the report §1. Pure Spark agg, small collect.
 
     ``item_col_override`` lets the caller profile the collapsed
     category-grain DF (item column still named after schema item_col, but
-    semantics = category).
+    semantics = category). ``by_segment`` groups by the first of
+    ``segment_columns`` (see ``_require_segment_columns_in_frame``).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
     entity_cols = schema["entity"]
     item_col = item_col_override or schema["item"]
     label_col = schema["label"]
-    eval_params = parameters.get("evaluation", {}) or {}
     group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
     n_rows = eval_predictions.count()
@@ -246,19 +271,15 @@ def compute_dataset_overview(
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
     avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
 
-    # active segment 欄：segment_columns 裡第一個真的在資料中的（對齊 per_segment
-    # 的 active_seg_col），by_segment 的 key 才會跟 per_segment 一致。
-    active_seg_col = next(
-        (c for c in (eval_params.get("segment_columns", []) or [])
-         if c in eval_predictions.columns),
-        None,
-    )
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
+    active_seg_col = segment_columns[0] if segment_columns else None
     total_queries = (
         eval_predictions.select(*group_cols).distinct().count()
         if active_seg_col else 0
     )
 
-    def _group(col: str, with_queries: bool = False) -> dict:
+    def _group(col: str, with_queries: bool = False, to_key=None) -> dict:
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),
@@ -269,7 +290,10 @@ def compute_dataset_overview(
         rows = eval_predictions.groupBy(col).agg(*aggs).collect()
         out = {}
         for r in rows:
-            key = r[col] if isinstance(r[col], str) else str(r[col])
+            if to_key is not None:
+                key = to_key(r[col])
+            else:
+                key = r[col] if isinstance(r[col], str) else str(r[col])
             nr = int(r["n_rows"])
             npos = int(r["n_positives"] or 0)
             cell = {
@@ -299,7 +323,9 @@ def compute_dataset_overview(
         "by_item": _group(item_col),
     }
     if active_seg_col:
-        result["by_segment"] = _group(active_seg_col, with_queries=True)
+        result["by_segment"] = _group(
+            active_seg_col, with_queries=True, to_key=segment_key
+        )
     return result
 
 
@@ -491,9 +517,7 @@ def aggregate_per_segment(
     )
     out: dict[str, dict[str, float]] = {}
     for r in rows:
-        raw_key = r[seg_col]
-        key = raw_key if isinstance(raw_key, str) else str(raw_key)
-        out[key] = {c: float(r[c]) for c in metric_cols}
+        out[segment_key(r[seg_col])] = {c: float(r[c]) for c in metric_cols}
     return out
 
 
@@ -575,7 +599,9 @@ def aggregate_per_item(
         if len(keys) == 1:
             out[keys[0]] = cell
         else:
-            out.setdefault(keys[0], {})[keys[1]] = cell
+            # The second dim is the segment (the one two-column caller passes
+            # [item, segment]); NULL there is the unmatched group.
+            out.setdefault(keys[0], {})[segment_key(r[dim_cols[1]])] = cell
     return out
 
 
@@ -666,6 +692,7 @@ _EMPTY_RESULT = {
 def _compute_core(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    segment_columns: Sequence[str],
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
@@ -682,7 +709,9 @@ def _compute_core(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    segment_columns = eval_params.get("segment_columns", []) or []
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    # One segment dimension per run: the first joined column.
+    active_seg_col = segment_columns[0] if segment_columns else None
     # macro_average does not take k: metric.k reaches the macro through the
     # per-item K grid (_resolve_k_grids), so by_item's map_attr@{metric.k} is
     # the headline point estimate truncated at k.
@@ -713,13 +742,6 @@ def _compute_core(
     enriched = add_row_contributions(df_with_pos, group_cols, label_col, item_ks)
     enriched = enriched.cache()
     try:
-        # ---- Detect active segment column ----
-        active_seg_col: str | None = None
-        for seg in segment_columns:
-            if seg in enriched.columns:
-                active_seg_col = seg
-                break
-
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
@@ -743,19 +765,26 @@ def _compute_core(
                 )
 
             macro_avg: dict = {"by_item": macro_average(per_item, **macro_params)}
+            # The unmatched group stays in per_segment / per_item_segment (the
+            # report shows and counts it) but in no macro: it is not a segment.
             if per_segment:
-                macro_avg["by_segment"] = macro_average(per_segment)
+                macro_avg["by_segment"] = macro_average({
+                    seg: m for seg, m in per_segment.items()
+                    if seg != UNMATCHED_SEGMENT
+                })
             if per_item_segment:
                 # per_item_segment is two-level {item: {segment: cell}}:
-                # flatten to every (item, segment) cell, then macro with one
-                # vote per cell. Cells are also subject to min_positives (a
-                # cell with n_pos below the threshold leaves the
-                # by_item_segment macro); observation_items is reported at
-                # item grain only, cells are not listed.
+                # flatten to every (item, segment) cell except the unmatched
+                # ones, then macro with one vote per cell. Cells are also
+                # subject to min_positives (a cell with n_pos below the
+                # threshold leaves the by_item_segment macro);
+                # observation_items is reported at item grain only, cells are
+                # not listed.
                 cells = {
                     (item, seg): cell
                     for item, by_seg in per_item_segment.items()
                     for seg, cell in by_seg.items()
+                    if seg != UNMATCHED_SEGMENT
                 }
                 macro_avg["by_item_segment"] = macro_average(
                     cells, **macro_params
@@ -786,7 +815,7 @@ def compute_overall_per_item(
     eval_predictions: SparkDataFrame,
     parameters: dict,
     *,
-    with_segment: bool = False,
+    segment_columns: Sequence[str] = (),
     with_category: bool = False,
 ) -> dict:
     """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
@@ -795,12 +824,12 @@ def compute_overall_per_item(
     skips per-item-segment, macro_avg, and dataset_overview. Used by the
     popularity baseline, whose report section consumes these keys.
 
-    Flags (each costed against the model's matching pass, so the baseline
+    Slices (each costed against the model's matching pass, so the baseline
     comparison stays symmetric only when the model already computed them):
-      - ``with_segment``: also emit ``per_segment`` (overall metrics per active
-        segment value), reusing the cached ``enriched`` — no extra full pass,
-        just one extra groupBy. Silently skipped when no ``segment_columns``
-        entry is present in the data.
+      - ``segment_columns``: when non-empty, also emit ``per_segment`` (overall
+        metrics per value of the first one, the same column ``_compute_core``
+        uses), reusing the cached ``enriched`` — no extra full pass, just one
+        extra groupBy.
       - ``with_category``: also emit ``category`` (a nested slim bundle on the
         category-collapsed frame — one extra collapse pass), only when
         ``item_categories`` maps the items. Nested bundle never re-nests.
@@ -818,6 +847,8 @@ def compute_overall_per_item(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    active_seg_col = segment_columns[0] if segment_columns else None
     n_items = eval_predictions.select(item_col).distinct().count()
     # Same grids as _compute_core (metric.k on the per-item side only), so
     # baseline and model keys line up.
@@ -834,15 +865,6 @@ def compute_overall_per_item(
         df_with_pos, group_cols, label_col, item_ks
     ).cache()
     try:
-        # Detect active segment column the same way as _compute_core (first
-        # segment_columns entry that survives into enriched), so baseline
-        # per_segment keys line up with the model's.
-        active_seg_col: str | None = None
-        if with_segment:
-            for seg in (eval_params.get("segment_columns", []) or []):
-                if seg in enriched.columns:
-                    active_seg_col = seg
-                    break
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, query_ks, carry_cols=carry
@@ -869,13 +891,20 @@ def compute_overall_per_item(
 def compute_all_metrics(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    *,
+    segment_columns: Sequence[str] = (),
 ) -> dict:
     """Full bundle: fine-grained core + dataset_overview + optional category.
 
     Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
-    (column names resolved from parameters['schema']).
-    Optional: any column listed in ``parameters['evaluation']['segment_columns']``
-    will be used for per-segment slicing if present.
+    (column names resolved from parameters['schema']), plus every column in
+    ``segment_columns``. Per-segment slices group by the first of those; pass
+    what ``prepare_eval_data`` joined (``evaluation_segment_columns``), never
+    ``evaluation.segment_columns`` filtered by the frame's columns (see
+    ``_require_segment_columns_in_frame``). Empty means no per-segment slice. A NULL
+    segment value is the ``segments.UNMATCHED_SEGMENT`` group: present in
+    ``per_segment``, ``per_item_segment`` and ``dataset_overview.by_segment``,
+    absent from every macro.
 
     Every pre-existing top-level key is unchanged; ``dataset_overview`` is
     always added; ``category`` (same shape as the top level, plus its own
@@ -922,16 +951,18 @@ def compute_all_metrics(
     Queries with zero positives are excluded from the metric computation
     (AP and nDCG are undefined when total_rel = 0).
     """
-    result = _compute_core(eval_predictions, parameters)
+    result = _compute_core(eval_predictions, parameters, segment_columns)
     result["dataset_overview"] = compute_dataset_overview(
-        eval_predictions, parameters
+        eval_predictions, parameters, segment_columns=segment_columns
     )
 
     if _build_category_mapping(parameters) is not None:
-        collapsed = collapse_to_categories(eval_predictions, parameters)
-        cat = _compute_core(collapsed, parameters)
+        collapsed = collapse_to_categories(
+            eval_predictions, parameters, segment_columns=segment_columns
+        )
+        cat = _compute_core(collapsed, parameters, segment_columns)
         cat["dataset_overview"] = compute_dataset_overview(
-            collapsed, parameters
+            collapsed, parameters, segment_columns=segment_columns
         )
         result["category"] = cat
 

@@ -153,7 +153,7 @@ evaluation 可用於訓練完成後的 test set 評估，也可在模型上線�
 |---|---|---|
 | 模型預測 | `training_eval_predictions`（`--post-training`）或 `ranked_predictions`（預設） | 分別用於上線前 test set 評估與上線後監控 |
 | Ground truth | `label_table`；post-training 模式沿用 `training_eval_predictions` 已保存的 test label | 判定每個 `(time, entity, item)` 是否為正例 |
-| 分群欄位 | `segment_sources` 指定的 Hive table（監控模式建議指向 `inference_population`、post-training 指向 `sample_pool`） | 補入客群等欄位，計算 per-segment 指標 |
+| 分群欄位 | 該模式的母體表（`--post-training`＝`sample_pool`、預設＝`inference_population`），或 `segment_sources` 覆寫指定的 Hive table | 補入客群等欄位，計算 per-segment 指標 |
 | Popularity baseline | `label_table` 的歷史觀察窗 | 依 item 歷史正例數建立熱門度基準排序 |
 | 比較來源 | 其他 `model_version` 的預測或 `compare_sources` 指定的外部 Hive table | 產生模型間或跨系統比較報表 |
 
@@ -162,7 +162,7 @@ evaluation 可用於訓練完成後的 test set 評估，也可在模型上線�
 - **以排序指標為核心**：不論模型使用 pointwise 或 learning-to-rank objective，評估都以 query group 內的相對排序為準，依 `k_values` 計算 mAP、NDCG、precision 與 recall 等 @K 指標，而非逐筆分類準確率。
   沒有任何正例的 query group 會從指標計算中排除，並在報表中記錄排除數量。
 - **多層次指標拆解**：除整體指標外，也會計算 per-item attribution、macro average 及資料集概況，協助辨識整體表現是否由少數熱門 item 主導，而非只看單一平均值。
-- **分群評估**：可透過 `segment_columns` 與 `segment_sources` 將客群或其他外部分群欄位連接至評估資料，觀察不同族群的排序品質；來源表不存在、必要欄位缺失或設定未提供對應來源時會 fail-fast。
+- **分群評估**：`segment_columns` 列出的欄從該模式的母體表 join 進評估資料（segment 在外部表時可用 `segment_sources` 覆寫），觀察不同族群的排序品質。母體表沒有某欄時不中止，只在 log 與報表註明；覆寫表不存在或缺欄時 fail-fast；母體表對不到值的 query 自成 `(unmatched)` 群，列出但不進 macro 平均。
 - **item 大類評估**：可設定 `item_categories`，將細項 item 彙整為大類後平行計算同一套指標，同時保留細項與大類兩種視角。
 - **Popularity baseline**：依 `baseline.lookback_months` 統計歷史 item 熱門度，建立不使用個人特徵的基準排序，並在報表中呈現模型、baseline 與差異，判斷模型是否真正優於單純推薦熱門項目。
 - **模型與外部結果比較**：可透過 `compare_sources` 比較另一個 `model_version` 或外部 Hive 預測表。

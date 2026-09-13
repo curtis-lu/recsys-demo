@@ -66,15 +66,16 @@ flowchart TB
     src_ranked[("ranked_predictions<br/><small>預設模式 ・ inference 發布的正式排序</small>")]
     src_teval[("training_eval_predictions<br/><small>--post-training ・ 沿用 training 當時的 test label</small>")]
     src_label[("label_table<br/><small>ground truth ・ 缺 row 即視為負例</small>")]
-    src_seg[("segment_sources[*].table<br/><small>預設 ml_recsys.sample_pool ・ left join 補分群欄</small>")]
+    src_seg[("sample_pool ／ inference_population<br/><small>該模式的母體表（post-training ／ 監控）・ 以 (time, entity) 補分群欄<br/>segment_sources.&lt;欄&gt;.table 可覆寫</small>")]
   end
 
   art_gain[["gain_ledger<br/><small>training 落地 ・ optional，可缺席</small>"]]
   cfg_cat[/"evaluation.item_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
 
   %% ---------------------- 主鏈：整理 ----------------------
-  n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄</small>"]
+  n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄（母體表缺欄只 WARN）</small>"]
   d_eval(["eval_predictions<br/><small>一列 ＝ 一個 (time, entity, item) 候選<br/>5 個消費者・未 cache</small>"])
+  d_segcols(["evaluation_segment_columns<br/><small>JSON ・ joined ／ sources ／ missing<br/>分群的 node 照 joined 分群、不看 frame 欄位</small>"])
 
   %% ---------------------- 指標流 ----------------------
   n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ dataset_overview ＋（可選）category</small>"]
@@ -118,7 +119,7 @@ flowchart TB
     d_braw(["compare_predictions_raw"])
     n_restrict["restrict_to_common<br/><small>取共同 entity 與 item ・ 雙方重新排名<br/>B 沒帶 label 才從 label_table 補</small>"]
     d_common(["eval_predictions_common<br/>compare_predictions_common<br/>compare_coverage_partial"])
-    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_all_metrics，再組 HTML（算與畫同一個 node）</small>"]
+    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_all_metrics，再組 HTML（算與畫同一個 node）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])
   end
 
@@ -126,8 +127,13 @@ flowchart TB
   src_ranked --> n_prep
   src_teval --> n_prep
   src_label --> n_prep
-  src_seg -- "dropDuplicates(key_columns) 後 left join" --> n_prep
+  src_seg -- "先讀欄位清單（只碰 metastore）<br/>dropDuplicates(key) 後 left join" --> n_prep
   n_prep --> d_eval
+  n_prep --> d_segcols
+  d_segcols --> n_metrics
+  d_segcols --> n_baseline
+  d_segcols --> n_sample
+  d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
 
   d_eval --> n_metrics
   cfg_cat --> n_metrics

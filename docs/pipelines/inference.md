@@ -190,7 +190,7 @@ inference_population_etl:
 
 - **grain**：每個 `(time, entity)` 一列；唯一性由 source ETL 的 `primary_key` + `quality_checks` 在產出階段保證，因此 `build_inference_population_features` 不需再 `dropDuplicates`。
 - **業務邏輯**：哪些 entity 進入母體（在世、未流失、符合行銷資格…）寫在 `inference_population.sql`，由使用者自定義。
-- **分群屬性欄**：母體列上可順帶帶 entity-grained 分群欄，供 evaluation 的 `segment_sources` 指向（見 [`evaluation.md`](evaluation.md)）。
+- **分群屬性欄**：母體列上可順帶帶 entity-grained 分群欄，監控模式的 evaluation 直接從這張表取 `segment_columns` 的欄；表上沒有的欄只在 evaluation 的 log 與報表註明、不中止（見 [`evaluation.md`](evaluation.md) §3.2）。
 
 `inference_population` 在 `conf/base/catalog.yaml` 以 `HiveTableDataset`、`read_only: true` 宣告，比照 `sample_pool`。
 

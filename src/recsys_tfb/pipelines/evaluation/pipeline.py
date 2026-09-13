@@ -25,7 +25,10 @@ def create_pipeline(
         standalone and comparison reports produced.
       * --compare-only X — short pipeline that catalog-auto-loads the
         previously-persisted ``enriched_eval_predictions``, validates the
-        partition (B4), and only produces report_comparison.html.
+        partition (B4), and only produces report_comparison.html. It also
+        loads ``evaluation_segment_columns``, landed by the run that wrote that
+        partition, since there is no ``prepare_eval_data`` here to say which
+        segment columns the partition's rows were joined with.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         compute_baseline_metrics,
@@ -35,8 +38,8 @@ def create_pipeline(
         generate_report,
         make_diagnosis_node,
         make_draw_diagnosis_sample_node,
+        make_prepare_eval_data_node,
         no_diagnosis_pages,
-        prepare_eval_data,
         render_diagnosis_pages,
     )
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
@@ -73,7 +76,8 @@ def create_pipeline(
             Node(
                 generate_comparison_report,
                 inputs=["eval_predictions_common", "compare_predictions_common",
-                        "compare_coverage_partial", "parameters"],
+                        "compare_coverage_partial", "evaluation_segment_columns",
+                        "parameters"],
                 outputs="evaluation_comparison_report",
             ),
         ])
@@ -81,11 +85,16 @@ def create_pipeline(
     predictions_input = (
         "training_eval_predictions" if post_training else "ranked_predictions"
     )
+    # Segment columns come from the table the evaluated rows were drawn from
+    # (ADR-0020 bug 6): the test set is drawn from sample_pool, monitoring
+    # scores inference_population.
+    population_input = "sample_pool" if post_training else "inference_population"
     nodes = [
         Node(
-            prepare_eval_data,
-            inputs=[predictions_input, "label_table", "parameters"],
-            outputs="eval_predictions",
+            make_prepare_eval_data_node(population_input),
+            inputs=[predictions_input, "label_table", population_input,
+                    "parameters"],
+            outputs=["eval_predictions", "evaluation_segment_columns"],
         ),
         # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and,
         # in --post-training, the registry diagnoses read this shared
@@ -96,17 +105,20 @@ def create_pipeline(
             make_draw_diagnosis_sample_node(
                 registry_diagnoses_wired=post_training
             ),
-            inputs=["eval_predictions", "parameters"],
+            inputs=["eval_predictions", "evaluation_segment_columns",
+                    "parameters"],
             outputs="diagnosis_sample",
         ),
         Node(
             compute_metrics,
-            inputs=["eval_predictions", "parameters"],
+            inputs=["eval_predictions", "evaluation_segment_columns",
+                    "parameters"],
             outputs="evaluation_metrics",
         ),
         Node(
             compute_baseline_metrics,
-            inputs=["eval_predictions", "label_table", "parameters"],
+            inputs=["eval_predictions", "label_table",
+                    "evaluation_segment_columns", "parameters"],
             outputs="baseline_metrics",
         ),
         Node(
@@ -202,7 +214,8 @@ def create_pipeline(
             Node(
                 generate_comparison_report,
                 inputs=["eval_predictions_common", "compare_predictions_common",
-                        "compare_coverage_partial", "parameters"],
+                        "compare_coverage_partial", "evaluation_segment_columns",
+                        "parameters"],
                 outputs="evaluation_comparison_report",
             ),
         ]

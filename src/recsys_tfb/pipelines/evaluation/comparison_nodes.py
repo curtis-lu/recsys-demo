@@ -97,11 +97,24 @@ def generate_comparison_report(
     eval_predictions_common: SparkDataFrame,
     compare_predictions_common: SparkDataFrame,
     coverage_partial: dict,
+    segment_columns: dict,
     parameters: dict,
 ) -> str:
-    """Run compute_all_metrics on both sides + assemble HTML."""
-    metrics_a = compute_all_metrics(eval_predictions_common, parameters)
-    metrics_b = compute_all_metrics(compare_predictions_common, parameters)
+    """Run compute_all_metrics on both sides + assemble HTML.
+
+    Only this run's side segments, by what ``prepare_eval_data`` joined
+    (``segment_columns``; under ``--compare-only`` the copy landed next to the
+    enriched partition). Its frame can hold a column the other run mode joined,
+    all NULL, so the frame's columns are not asked (ADR-0020 bug 6). The
+    compared side is another prediction table with no segment columns.
+    """
+    metrics_a = compute_all_metrics(
+        eval_predictions_common, parameters,
+        segment_columns=segment_columns["joined"],
+    )
+    metrics_b = compute_all_metrics(
+        compare_predictions_common, parameters, segment_columns=[]
+    )
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
     label_a = "Model"

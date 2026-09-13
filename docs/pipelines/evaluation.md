@@ -9,7 +9,7 @@
 |---|---|
 | 主要用途 | 模型上線前 test 評估、上線後成效監控，以及模型／外部結果比較 |
 | 執行指令 | `python -m recsys_tfb evaluation` |
-| 主要輸入 | `training_eval_predictions` 或 `ranked_predictions`、`label_table`、可選的 segment 與 compare sources |
+| 主要輸入 | `training_eval_predictions` 或 `ranked_predictions`、`label_table`、該模式的母體表（`sample_pool` 或 `inference_population`，分群用）、可選的 segment 覆寫與 compare sources |
 | 主要輸出 | `report.html`、可選的 `report_comparison.html`、`enriched_eval_predictions` |
 | 設定檔 | `conf/base/parameters_evaluation.yaml` |
 | I/O 設定 | `conf/base/catalog.yaml` |
@@ -45,7 +45,7 @@ evaluation 另有三種執行模式：
 4. **預測 partition 已存在**：post-training 模式需要對應 `training_eval_predictions`；監控模式需要 inference 已成功發布對應的 `ranked_predictions`。
 5. **Ground truth 已成熟**：上線後監控必須等 label 觀察窗結束並完成資料回補。過早執行會將尚未發生或尚未入庫的正例視為負例。
 6. **評估日期正確**：`evaluation.snap_date` 必須與預測表中的日期格式和值一致，並使用 ISO `YYYY-MM-DD`。
-7. **分群來源可讀取**：每個 `segment_columns` 都必須有對應的 `segment_sources`，且 Hive table、join keys 與 segment 欄位均存在。
+7. **分群欄在母體表上**：`segment_columns` 的欄取自該模式的母體表（`--post-training`＝`sample_pool`、監控＝`inference_population`）。母體表沒有某欄時不中止，只在 log 與報表註明；要從別張表取，就用 `segment_sources` 覆寫，覆寫表讀不到或缺欄會立即中止（見 3.2 節）。
 8. **比較來源已準備**：使用 `--compare`／`--compare-only` 前，先確認 `compare_sources` key、來源表、model version、item mapping 與日期 coverage。
 
 監控模式會以預測 rows 為母體，依 `time + entity + item` left join `label_table`；沒有 label row 的候選會補成 `label = 0`。
@@ -94,34 +94,51 @@ overall 指標先在每個 query group 計算，再對 query 等權平均；per-
 evaluation:
   segment_columns:
     - cust_segment_typ
-
-  segment_sources:
-    cust_segment_typ:
-      table: ml_recsys.sample_pool
-      key_columns: [cust_id, snap_date]
-      segment_column: cust_segment_typ
 ```
 
-每個 segment source 會：
+`segment_columns` 只列欄名。欄從哪張表來，由執行模式決定——segment 跟著**被評估的母體**走（[ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) bug 6）：
 
-1. 讀取指定 Hive table。
-2. 選取 `key_columns + segment_column`。
-3. 依 `key_columns` 去重，避免 source 比評估資料更細時造成 join fan-out。
-4. left join 至 `eval_predictions`。
+| 評估情境 | 預測來源 | segment 取自 | 為什麼 |
+|---|---|---|---|
+| 監控模式 | `ranked_predictions` | `inference_population` | 被評分的就是它 |
+| post-training 模式 | `training_eval_predictions` | `sample_pool` | 測試集從它抽出 |
 
-若輸入資料原本已有同名 segment column，框架會先移除，並以 `segment_sources` 指定的資料為準。來源表不存在或缺少必要欄位時會立即中止。
+兩者都以 `(time, entity)` 當 key：母體表先依 key 去重（`sample_pool` 一個 entity 有多列 item），再 left join 到 `eval_predictions`，不會 fan-out。輸入原本已有同名欄（例如 `label_table` 帶進來的）會先移除，以母體表為準。
 
-`segment_columns` 中每一欄都必須由某個 source 的 `segment_column` 提供，否則 CLI 設定一致性檢查會阻擋。
-目前 metric pipeline 只會使用清單中第一個實際存在的 segment column 計算 per-segment 與 per-item-segment 指標；若要評估多種分群，應分次調整第一個欄位並執行 evaluation。
+**哪些欄 join 得進來，落地成一份檔。** `prepare_eval_data` 只讀母體表的欄位清單（metastore，不掃資料），把結果寫成 `segment_columns.json`（catalog 條目 `evaluation_segment_columns`，`prepare_eval_data` 的第二個 output）：
 
-segment source 可指向任何 keyed Hive table，不限 `sample_pool`。實務上建議**分群來源跟著該評估情境的母體走**：
+| 鍵 | 內容 |
+|---|---|
+| `joined` | 這次實際 join 進來的欄，照 `segment_columns` 的順序 |
+| `sources` | 每個 joined 欄取自哪張表（母體表寫 catalog 條目名，覆寫表寫設定的 `table`） |
+| `missing` | 母體表沒有、因此跳過的欄 → 那張表 |
+| `config_fingerprint` | 算它時的「算的」設定（見 7.2 節）；寫進去供事後查看，沒有 node 比對它 |
 
-| 評估情境 | 預測來源 | 建議 segment source |
-|---|---|---|
-| 監控模式 | `ranked_predictions`（inference 輸出） | `inference_population`（inference 評分母體） |
-| post-training 模式 | `training_eval_predictions` | `sample_pool`（training 母體） |
+分群的 node（`compute_metrics`、`compute_baseline_metrics`、`draw_diagnosis_sample_node`、`generate_comparison_report`）照 `joined` 分群，**不看 frame 的欄位**：`enriched_eval_predictions` 兩種模式共用一張表，另一模式 join 過的欄在這次的列上是全 NULL，照欄位挑會把它挑進來。`--compare-only` 沒有 `prepare_eval_data`，靠寫 enriched partition 那次落地的這份檔知道當時 join 了哪些欄。
 
-監控模式指向 `inference_population` 可讓切群定義對齊**實際被評分的客戶**，避免用 training 母體切 inference 結果造成分群定義分歧。`inference_population` 的 grain 為 `(time, entity)`、一 key 一列，`dropDuplicates` 為 no-op、不會 fan-out，只要它帶有分群欄即可直接作為 segment source——evaluation 端只動 `segment_sources` config（程式不變，見 [`inference.md`](inference.md) §3.5）。
+**對不到與缺欄是兩件事：**
+
+- 母體表**有**這欄、某些 query 在上面沒有值（或覆寫表對不到那個 key）：這群叫 `(unmatched)`，出現在分群表、印 query 數與佔比，但**不進任何 macro 平均**——一個假客群不該等權拉動平均。真實 segment 值剛好叫 `(unmatched)` 時直接失敗，不會被併進去。
+- 母體表**沒有**這欄：這欄本次不算 per-segment，log 印 WARN、報表「基本統計」段印「`<表>` 無欄 `<欄>`」，pipeline 照常跑完。`segment_columns` 的欄名打錯也走這條路（一致性檢查在 Spark 起來前跑，看不到母體表），靠訊息裡的欄名分辨。那句註記只印在「基本統計」段；關掉該段（`report.sections.dataset_overview: false`）時，看 log 的 WARN 或 `segment_columns.json` 的 `missing`。表名：母體表記的是 catalog 條目名（`sample_pool`／`inference_population`），覆寫表記設定的 `table`。
+
+示例環境的 `conf/sql/etl/inference_population/inference_population.sql` 只有 `(snap_date, cust_id)`，所以示例的監控模式會走「缺欄」這條路。要在示例裡看到分群，是那支 SQL 要多帶分群欄，框架不用改。
+
+**覆寫：segment 在另一張表時**
+
+```yaml
+evaluation:
+  segment_columns:
+    - holding_combo
+  segment_sources:
+    holding_combo:                       # 鍵＝segment_columns 裡的欄名
+      table: ml_recsys.holding_combo     # Hive-qualified
+      key_columns: [cust_id, snap_date]
+      segment_column: holding_combo      # 必須等於上面的鍵
+```
+
+有覆寫的欄改讀那張表（依 `key_columns` 去重後 left join），不看母體表。三個欄位缺一個、或 `segment_column` 與鍵不同，CLI 入口的一致性檢查（A10）直接擋下；覆寫表讀不到或缺欄，執行時立即中止——覆寫是明確的設定，跟「母體表剛好沒有這欄」不同。覆寫用欄名查，所以 `segment_sources` 的鍵必須是 `segment_columns` 裡的欄名：鍵不在清單裡的條目（例如舊寫法把鍵取成別名、靠 `segment_column` 對應）A10 同樣擋下——不擋的話它會通過檢查、從不被 join，那一欄悄悄改從母體表取。
+
+目前 metric pipeline 只用 `joined` 的第一欄計算 per-segment 與 per-item-segment 指標；若要評估多種分群，應分次調整欄位順序並執行 evaluation。
 
 ### 3.3 item 大類
 
@@ -398,10 +415,10 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 整理資料 | `prepare_eval_data` | 預測、`label_table`、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、連接 segments | `eval_predictions` |
-| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
-| 模型指標 | `compute_metrics` | enriched rows | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics | `evaluation_metrics` |
-| Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels | 建立 popularity scores 並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics` |
+| 整理資料 | `prepare_eval_data` | 預測、`label_table`、該模式的母體表（`sample_pool`／`inference_population`）、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、從母體表或覆寫表連接 segments（見 3.2 節） | `eval_predictions`、`evaluation_segment_columns` |
+| 抽取診斷樣本 | `draw_diagnosis_sample_node` | `eval_predictions`、`evaluation_segment_columns`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
+| 模型指標 | `compute_metrics` | enriched rows、`evaluation_segment_columns` | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics；照 `joined` 分群，並把 `joined`／`sources`／`missing` 帶給報表 | `evaluation_metrics` |
+| Baseline | `compute_baseline_metrics` | enriched rows、歷史 labels、`evaluation_segment_columns` | 建立 popularity scores 並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics` |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | enriched rows、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
 | 持久化 | `persist_eval_predictions` | enriched rows | 透過 catalog 寫入 Hive | `enriched_eval_predictions` |
 | 指標信賴區間 | `compute_metric_ci` | `diagnosis_sample`、parameters | per-item AP 與 macro 的 cluster bootstrap CI（cluster＝`cust_id`） | `evaluation_metric_ci` |
@@ -424,7 +441,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 |---|---|---|---|
 | 載入 Model B | `load_compare_predictions` | 依 compare source 載入、篩日期、轉欄位與 item mapping | `compare_predictions_raw` |
 | 對齊母體 | `restrict_to_common` | 取共同 entities 與 items、雙方重新排名、必要時補 Model B label | `eval_predictions_common`、`compare_predictions_common`、coverage |
-| 比較報表 | `generate_comparison_report` | 兩側重新計算 metrics 並產生 A/B/Delta | `evaluation_comparison_report` |
+| 比較報表 | `generate_comparison_report` | 兩側重新計算 metrics 並產生 A/B/Delta；只有 Model A 照 `evaluation_segment_columns` 分群，Model B 是另一張預測表、沒有分群欄 | `evaluation_comparison_report` |
 
 ### 5.3 `--compare-only` 模式
 
@@ -434,6 +451,8 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 載入 Model B | `load_compare_predictions` | 載入設定的 comparison source |
 | 對齊母體 | `restrict_to_common` | 取共同範圍並重新排名 |
 | 比較報表 | `generate_comparison_report` | 產生 `report_comparison.html` |
+
+這條路沒有 `prepare_eval_data`，`generate_comparison_report` 讀的 `evaluation_segment_columns` 是寫 enriched partition 那次標準 run 落地的那份。那份檔不在（例如 partition 是這個機制之前寫的）就讀不到而失敗，先重跑一次標準 evaluation。
 
 比較時，若 Model B 本身已有 label，例如來源為 `enriched_eval_predictions` 或含 label 的 `training_eval_predictions`，框架會沿用該 label；若沒有 label，才從目前的 `label_table` left join 並將缺值補為 0。
 比較兩側必須確保使用相同 ground truth 定義與資料成熟度。
@@ -447,6 +466,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | `report.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report.html` | 標準、`--compare` |
 | `report_comparison.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report_comparison.html` | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
+| `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
 | `enriched_eval_predictions` | Hive，以 `model_version` 與 `snap_date` partition | 標準、`--compare` |
 | `latest` alias | `data/evaluation/latest` | 指向最近完成的 evaluation 目錄 |
 
@@ -543,6 +563,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 因此：
 
 - 不要假設 enriched partition 同時保存 training test 與 production monitoring 兩種母體。
+- 兩種模式也共用同一個 schema（聯集）：另一模式 join 過的 segment 欄，在這次寫入的列上是 NULL。分群一律照 `evaluation_segment_columns`，不受這些欄影響（見 3.2 節）。
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 
@@ -573,9 +594,15 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | `(A22) evaluation.snap_date=... is not a test month`，還沒起 Spark | 帶了 `--post-training`，但該月不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
-| segment source table 無法讀取 | table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |
-| segment source missing columns | `key_columns` 或 `segment_column` 拼錯 | 比對來源 schema；每個 source 必須提供全部欄位 |
-| per-segment section 沒出現 | `per_segment` section 關閉，或目標欄位不是第一個 active segment | 檢查 `report.sections.per_segment`、enriched schema 與 `segment_columns` 順序 |
+| `evaluation.segment_sources.<欄> is missing [...]`／`has segment_column=...`，還沒起 Spark（A10） | 覆寫缺 `table`、`key_columns` 或 `segment_column`，或 `segment_column` 不等於鍵 | 補齊；或刪掉這個覆寫，改從母體表取 |
+| `evaluation.segment_sources.<鍵> is not in evaluation.segment_columns`，還沒起 Spark（A10） | 覆寫的鍵不是 `segment_columns` 裡的欄名（常見於舊寫法：鍵取別名、靠 `segment_column` 對應） | 把鍵改成它提供的欄名，並確認該欄列在 `segment_columns`；不需要的話刪掉這個條目 |
+| segment source table 無法讀取 | 覆寫的 table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |
+| segment source missing columns | 覆寫的 `key_columns` 或 `segment_column` 拼錯 | 比對覆寫表 schema；覆寫必須提供全部欄位 |
+| log `population table '...' has no such column`；報表寫「`<表>` 無欄 `<欄>`」 | 該模式的母體表沒有這欄，或 `segment_columns` 欄名打錯 | 核對欄名；確實要分群就讓母體表帶這欄，或用 `segment_sources` 覆寫指到有這欄的表 |
+| 分群表出現 `(unmatched)` | 母體表（或覆寫表）對某些 `(time, entity)` 沒有值 | 看它的 query 數與佔比判斷影響；它不進 macro 平均 |
+| `segment value '(unmatched)' is the name evaluation reserves` | 真實的 segment 值就叫 `(unmatched)` | 上游改名 |
+| per-segment 的表沒出現 | `segment_columns.json` 的 `joined` 是空的（母體表缺欄），或該報表段落關閉 | 看報表「基本統計」段的缺欄註記與 `segment_columns.json` |
+| `--compare-only` 讀不到 `segment_columns.json` | enriched partition 是這個機制之前寫的 | 重跑一次標準 evaluation |
 | product category unknown product | mapping 引用了未宣告 item | 對齊 `schema.categorical_values[item]` |
 | category 結果不符合預期 | item 重複映射或 max-child 語意不適合業務 | 確認每個 item 只屬於一類，重新檢視 category 定義 |
 | baseline raise `No label_table history in [...) ... label_table has months: [...]` | lookback window 沒有歷史資料（bug 1，不再是 warning + fallback） | 補歷史 labels、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` |
@@ -594,7 +621,8 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 - evaluation 沒有獨立版本 hash；同 model/date 的設定變更會覆寫既有報表與 enriched data。落地 JSON 內的設定指紋只用來擋「接續時讀到舊設定的結果」，不保留舊版本。
 - post-training 與 monitoring 共用同一 enriched partition 與報表路徑，無法同時保留兩種情境。
-- 目前 per-segment metrics 只使用 `segment_columns` 中第一個存在的欄位，不會在單次 run 中分別計算多個 segment dimensions。
+- 目前 per-segment metrics 只使用 `evaluation_segment_columns` 的 `joined` 第一欄，不會在單次 run 中分別計算多個 segment dimensions。
+- segment 對母體表的覆蓋率沒有門檻：對不到的 query 只成為 `(unmatched)` 群並印出佔比，不會因為佔比高而失敗。
 - comparison 目前以 `schema.entity` 的第一個欄位作為 customer 交集；複合 entity schema 需確認比較語意。
 - comparison 先取 entity 集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 entity/item 集合相同，評估母體仍可能不完全一致。
 - Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。

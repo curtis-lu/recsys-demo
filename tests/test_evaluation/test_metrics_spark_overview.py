@@ -64,7 +64,9 @@ def _params_seg():
 
 
 def test_dataset_overview_by_segment(spark):
-    ov = ms.compute_dataset_overview(_df_seg(spark), _params_seg())
+    ov = ms.compute_dataset_overview(
+        _df_seg(spark), _params_seg(), segment_columns=["seg"]
+    )
     bs = ov["by_segment"]
     # query＝(snap_date,cust_id) distinct：X={(0331,c1),(0229,c1)}=2、Y={(0331,c2)}=1、總=3
     assert bs["X"]["n_positives"] == 2          # 0331 c1 A、0229 c1 A

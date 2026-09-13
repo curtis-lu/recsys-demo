@@ -22,7 +22,8 @@ class TestEvaluationPipelineDefault:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
-            "eval_predictions", "diagnosis_sample", "evaluation_metrics",
+            "eval_predictions", "evaluation_segment_columns",
+            "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_diagnosis_pages",
@@ -135,7 +136,7 @@ class TestRegistryDiagnosesFollowTheMode:
                 "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
                 return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
             ) as spy:
-                result = node.func(None, params)
+                result = node.func(None, {"joined": []}, params)
             outcome[label] = {"draws": spy.call_count, "sample": result is not None}
         assert outcome == {
             "monitoring": {"draws": 0, "sample": False},
@@ -239,7 +240,8 @@ class TestEvaluationPipelinePostTraining:
     def test_pipeline_outputs_add_the_registry_diagnoses(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
-            "eval_predictions", "diagnosis_sample", "evaluation_metrics",
+            "eval_predictions", "evaluation_segment_columns",
+            "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_config_shift", "evaluation_item_ability",
@@ -303,6 +305,66 @@ class TestEvaluationPipelineCompareOnly:
         pipeline = create_pipeline(compare_only=True)
         assert "label_table" in pipeline.inputs
         assert "parameters" in pipeline.inputs
+
+
+class TestSegmentColumnsWiring:
+    """ADR-0020 bug 6: segments follow the run mode's population, and what
+    was joined lands as ``evaluation_segment_columns`` for every node that
+    groups by segment. Node inputs bind by position, so the list's position
+    is checked against the parameter named ``segment_columns``."""
+
+    _COMPARE = {"kind": "model_version", "model_version": "v0", "label": "v0"}
+
+    @staticmethod
+    def _node(pipeline, name):
+        return next(n for n in pipeline.nodes if n.name == name)
+
+    def test_prepare_eval_data_reads_its_mode_population_and_lands_the_list(self):
+        for kwargs, predictions, population, other in (
+            ({}, "ranked_predictions", "inference_population", "sample_pool"),
+            ({"post_training": True}, "training_eval_predictions",
+             "sample_pool", "inference_population"),
+        ):
+            pipeline = create_pipeline(**kwargs)
+            node = self._node(pipeline, "prepare_eval_data")
+            assert node.inputs == [
+                predictions, "label_table", population, "parameters"], kwargs
+            assert node.outputs == [
+                "eval_predictions", "evaluation_segment_columns"], kwargs
+            assert other not in pipeline.inputs, kwargs
+
+    def test_every_segmenting_node_reads_the_list_at_the_right_position(self):
+        cases = [
+            (kwargs, name)
+            for kwargs in ({}, {"post_training": True})
+            for name in ("compute_metrics", "compute_baseline_metrics",
+                         "draw_diagnosis_sample_node")
+        ] + [
+            ({"compare_source": self._COMPARE}, "generate_comparison_report"),
+            ({"compare_source": self._COMPARE, "compare_only": True},
+             "generate_comparison_report"),
+        ]
+        for kwargs, name in cases:
+            node = self._node(create_pipeline(**kwargs), name)
+            params = list(inspect.signature(node.func).parameters)
+            assert "evaluation_segment_columns" in node.inputs, (kwargs, name)
+            assert node.inputs.index("evaluation_segment_columns") == \
+                params.index("segment_columns"), (kwargs, name, node.inputs)
+
+    def test_the_list_has_a_catalog_entry_next_to_the_run_outputs(self):
+        """Without an entry the catalog makes it a MemoryDataset: nothing
+        lands, and --compare-only has nothing to read."""
+        from pathlib import Path
+
+        import yaml
+
+        catalog = yaml.safe_load(
+            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+        assert catalog["evaluation_segment_columns"] == {
+            "type": "JSONDataset",
+            "filepath": "data/evaluation/${model_version}/${snap_date}/"
+                        "segment_columns.json",
+        }
 
 
 class TestGenerateReportNodeWiring:
@@ -501,8 +563,10 @@ class TestGenerateComparisonReportNodeWiring:
             for position, (catalog_key, param_name) in enumerate(
                 zip(node.inputs, param_names)
             ):
-                stripped = catalog_key[len("compare_"):] \
-                    if catalog_key.startswith("compare_") else catalog_key
+                stripped = catalog_key
+                for prefix in ("compare_", "evaluation_"):
+                    if stripped.startswith(prefix):
+                        stripped = stripped[len(prefix):]
                 assert catalog_key == param_name or stripped == param_name, (
                     f"[{label}] position {position}: catalog key "
                     f"{catalog_key!r} would positionally bind to parameter "
