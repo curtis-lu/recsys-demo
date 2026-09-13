@@ -590,6 +590,30 @@ def test_section_on_refuses_a_name_outside_the_declared_set():
         rb._section_on(_params(), "per_segment")
 
 
+def test_every_listed_section_is_read_by_the_report():
+    """The third side of A34 (ADR-0019 decision 6). A34 keeps the YAML equal to
+    ``EVALUATION_REPORT_SECTIONS`` and ``_section_on`` keeps the report's names
+    inside it, but neither notices a name left in the constant after its
+    ``_section_on`` call is deleted: a dead switch again, everything green.
+    The names here come from the call sites in the source, not from the
+    constant."""
+    import ast
+    import inspect
+
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+    read = set()
+    for node in ast.walk(ast.parse(inspect.getsource(rb))):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_section_on"):
+            name = node.args[1]
+            assert isinstance(name, ast.Constant) and isinstance(
+                name.value, str
+            ), f"_section_on call at line {node.lineno} has no literal name"
+            read.add(name.value)
+    assert read == EVALUATION_REPORT_SECTIONS
+
+
 # ---- Task 6: per-item 細部拆解 ----
 
 def _report_aggregates():

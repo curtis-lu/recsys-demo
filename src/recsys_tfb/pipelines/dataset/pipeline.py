@@ -210,7 +210,7 @@ def create_pipeline(
             name="build_test_model_input",
         ),
         # --- Drop (time, *entity) groups with no positives. Applied to val/test
-        # only — these are evaluated by ranking metrics (mAP/NDCG) that exclude
+        # only — these are evaluated by mAP, which excludes
         # zero-positive groups anyway, so retaining them just wastes Hive
         # storage and downstream predict / extract memory.
         #

@@ -2981,25 +2981,45 @@ class TestReportSectionKeysA34:
         assert len(errors) == 1
         assert "'new_section'" in errors[0]
 
-    def test_an_absent_block_is_not_checked(self):
+    def test_a_block_declaring_no_switch_is_not_checked(self):
         assert report_section_key_errors({}) == []
         assert report_section_key_errors({"evaluation": {"report": {}}}) == []
         assert report_section_key_errors(_sections_params(None)) == []
+        assert report_section_key_errors(_sections_params({})) == []
+
+    def test_a_block_declaring_some_switches_is_checked_in_full(self):
+        errors = report_section_key_errors(
+            _sections_params({"baseline": True}))
+        assert len(errors) == 1
+        assert "does not declare" in errors[0]
+        assert "'diagnosis_links'" in errors[0]
+
+    def test_a_non_string_key_is_reported_not_crashed_on(self):
+        """YAML loads an unquoted ``on:`` key as ``True``. Sorting it against
+        the str keys must not raise TypeError instead of reporting it."""
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections[True] = True
+        sections["per_segment"] = True
+        errors = report_section_key_errors(_sections_params(sections))
+        assert len(errors) == 1
+        assert "True" in errors[0] and "'per_segment'" in errors[0]
 
     def test_a_block_that_is_not_a_mapping_is_reported(self):
         errors = report_section_key_errors(_sections_params(["baseline"]))
         assert len(errors) == 1
         assert errors[0].startswith("A34: evaluation.report.sections")
 
-    def test_wired_into_validate_config_consistency(self):
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Only evaluation reads these keys (A24's reason, issue #158): a conf
+        still carrying a dead switch must not stop dataset, training or
+        inference, which all pass through that gate. The evaluation command
+        raises it instead (``test_consistency_cli_wiring.py``)."""
         p = _base({"inference": {"products": ["a", "b"]}})
         sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
         sections["guardrail_recall"] = True
-        p.setdefault("evaluation", {}).setdefault("report", {})[
-            "sections"] = sections
-        with pytest.raises(ConfigConsistencyError,
-                           match=r"A34: evaluation\.report\.sections"):
-            validate_config_consistency(p)
+        p["evaluation"] = {"report": {"sections": sections}}
+        assert report_section_key_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
 
 
 # --- A33: migration-period check for the #327 config key rename --------------

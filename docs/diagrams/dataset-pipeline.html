@@ -119,7 +119,7 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
   <li><b>編碼只做一次。</b><code>apply_preprocessor_to_features</code> 產出的
     <code>preprocessed_feature_table</code> 被四個 split 共用，不是每個 split 各編一次。</li>
   <li><b>只有 val / test 會過濾。</b><code>filter_*_model_input</code> 移除整組沒有正例的 query group，
-    因為 mAP / NDCG 本來就會排除它們，留著只是浪費儲存與下游記憶體；
+    因為 evaluation 的 mAP 本來就會排除它們，留著只是浪費儲存與下游記憶體；
     train / train-dev 的 loss 每一列都會用到，所以不濾。</li>
   <li><b>四個 node 是增量的</b>（圖上標「增量」）：
     <code>select_test_keys</code>、<code>apply_preprocessor_to_features</code>、
@@ -150,7 +150,7 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
   <li><b>圖上十四個產出裡只有兩個不落地</b>（開 calibration 是十六個，圖上不畫）。<code>val_model_input_unfiltered</code> 與
     <code>test_model_input_unfiltered</code> 不在 <code>catalog.yaml</code> 裡，是
     <code>MemoryDataset</code>（圖上虛線膠囊）；只有 filter 過的版本落 Hive。
-    零正例 query group 本來就會被 mAP / NDCG 排除，兩份都存等於白付儲存。</li>
+    零正例 query group 本來就會被 evaluation 的 mAP 排除，兩份都存等於白付儲存。</li>
   <li><b>閘在最前面。</b><code>validate_data_consistency</code> 是 Layer-2 資料閘
     （<b>B1</b> item coverage、<b>B5</b> categorical dtype、<b>B6</b> 非數值特徵欄、
     <b>B7</b> carry/feature 撞名），只做檢查不產出資料，收集完問題一次中止，

@@ -56,7 +56,7 @@ evaluation:
   #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
   # sections 的鍵必須剛好是報表讀的這五個：多寫一個（沒人讀、設了沒用）或少寫一個
-  # （讀了卻關不掉），CLI 入口都會擋（A34，清單在 core/consistency.py 的
+  # （讀了卻關不掉），evaluation 指令一進來就擋（A34，清單在 core/consistency.py 的
   # EVALUATION_REPORT_SECTIONS）。
   report:
     sections:

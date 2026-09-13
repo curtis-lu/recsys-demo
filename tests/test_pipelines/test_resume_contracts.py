@@ -148,21 +148,23 @@ RESUME_CONTRACTS = {
     # zero-read no_diagnosis_pages stub — memory-only, and free to re-run.
     ("evaluation", ()): {
         # Redrawing the report re-runs no Spark node (ADR-0018 decision 2):
-        # five of generate_report's six inputs are landed JSON, the sixth is
-        # the zero-read stub. Before evaluation_metrics and baseline_metrics
-        # had catalog entries this set also held prepare_eval_data,
-        # compute_metrics and compute_baseline_metrics — a "redraw" re-joined
-        # the predictions and recomputed every metric.
+        # generate_report reads four landed JSONs plus parameters, and its
+        # pages list comes from the zero-read stub. Before evaluation_metrics
+        # and baseline_metrics had catalog entries this set also held
+        # prepare_eval_data, compute_metrics and compute_baseline_metrics — a
+        # "redraw" re-joined the predictions and recomputed every metric.
         #
-        # Why the cheaper contract is accepted: what the redraw now reads back
-        # from disk is checked, not trusted. generate_report refuses any
-        # landed input whose config_fingerprint disagrees with the current
-        # computed settings (ADR-0020 decision 2), so a redraw cannot mix old
-        # metrics into a report drawn under new settings. What the fingerprint
-        # does not cover — the predictions or label_table changing underneath
-        # the same settings — was never covered by re-running either: the
-        # slice started at generate_report, so the caller had already chosen
-        # to reuse this run's data.
+        # Why the cheaper contract is accepted. What the redraw reads back from
+        # disk is checked, not trusted: generate_report refuses any landed
+        # input whose config_fingerprint disagrees with the current computed
+        # settings (ADR-0020 decision 2), so it cannot draw old metrics under
+        # new settings. What the fingerprint does not see is data. After a
+        # label_table backfill the old contract did recompute the metrics and
+        # the baseline, but still reused the landed metric CI and report
+        # aggregates, so that report already mixed two data states; the new
+        # one reuses all four, so every number comes from one run. Picking up
+        # new data takes --from-node prepare_eval_data or a full run
+        # (docs/pipelines/evaluation.md section 7.4 says so).
         #
         # Un-land evaluation_metrics or baseline_metrics and this turns red.
         "generate_report": {"no_diagnosis_pages"},
