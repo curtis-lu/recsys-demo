@@ -388,31 +388,32 @@ def _evaluation_month_plans(catalog, *, snap_date, time_col: str) -> dict:
                                               existing=existing)}
 
 
-def _compare_only_segment_columns_error(catalog, catalog_config, *, model_version):
-    """The message when ``--compare-only`` has no ``evaluation_segment_columns``, else None.
+def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
+    """What ``--compare-only`` reads from an earlier standard run and cannot find.
 
     That mode has no ``prepare_eval_data``: it reads this month's
     ``enriched_eval_predictions`` partition and the ``segment_columns.json`` the
     same standard run landed with it. The two are written together but can be
-    deleted apart (a cleaned ``data/`` directory, a dropped table), and each gets
-    a message naming what is missing and what to run. The partition is checked
-    by the B4 gate node, since only its rows can say it is there; the JSON is
-    checked here, before any node runs. Unchecked it surfaced as a
-    ``FileNotFoundError`` carrying only a path, at the last node, after both
-    comparison frames had been counted.
+    deleted apart (a cleaned ``data/`` directory, a dropped table), so each
+    missing one gets its own line. ``plan`` is the month plan for the table
+    (:func:`_evaluation_month_plans`), or None when no month is configured.
+
+    Checked before any node runs, not left to the B4 gate node alone: slicing
+    skips a zero-output node, so under ``--compare-only --from-node
+    load_compare_predictions`` the gate never runs, and a missing partition
+    came back as an empty model side with exit code 0. A missing JSON used to
+    surface as a ``FileNotFoundError`` carrying only a path, at the last node.
+    Metadata only: a partition listing and a file check. The gate still
+    refuses a partition that is listed but holds no rows.
     """
+    errors = []
+    if plan is not None and plan.to_process:
+        months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
+        errors.append(f"enriched_eval_predictions has no partition for {months}")
     name = "evaluation_segment_columns"
-    if catalog.exists(name):
-        return None
-    return (
-        f"--compare-only reads {name} "
-        f"({catalog_config[name]['filepath']}), which the standard evaluation "
-        "run lands together with the enriched_eval_predictions partition of the "
-        "same model_version and evaluation.snap_date, and it is not there. Run "
-        f"`python -m recsys_tfb evaluation --model-version {model_version}` "
-        "first (add --post-training to compare the post-training population), "
-        "then --compare-only."
-    )
+    if not catalog.exists(name):
+        errors.append(f"{name} is missing: {catalog_config[name]['filepath']}")
+    return errors
 
 
 def _fmt_months(dates) -> str:
@@ -1793,19 +1794,29 @@ def evaluation(
     _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
     listing_catalog = DataCatalog(listing_catalog_config)
     month_plans = None
-    if compare_only:
-        error = None if (dry_run or list_nodes) else \
-            _compare_only_segment_columns_error(
-                listing_catalog, listing_catalog_config, model_version=mv)
-        if error:
-            logger.error(error)
-            raise typer.Exit(code=1)
-    elif eval_config.get("snap_date"):
-        # Without a configured month prepare_eval_data raises its own message.
+    if eval_config.get("snap_date"):
+        # Without a configured month the nodes raise their own message.
         month_plans = _evaluation_month_plans(
-            listing_catalog, snap_date=str(eval_config["snap_date"]),
+            listing_catalog, snap_date=str(eval_config["snap_date"]).strip(),
             time_col=get_schema(params)["time"],
         )
+    if compare_only:
+        errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
+            (month_plans or {}).get("enriched_eval_predictions"),
+            listing_catalog, listing_catalog_config,
+        )
+        if errors:
+            logger.error(
+                "--compare-only reads what a standard evaluation run of the "
+                "same model_version and evaluation.snap_date wrote, and it is "
+                "not all there:\n  - " + "\n  - ".join(errors) + "\n"
+                f"Run `python -m recsys_tfb evaluation --model-version {mv}` "
+                "first (add --post-training to compare the post-training "
+                "population), then --compare-only."
+            )
+            raise typer.Exit(code=1)
+        # No prepare_eval_data in this mode for a plan to pull back.
+        month_plans = None
 
     executed = _execute_pipeline(
         "evaluation", pipeline_kwargs, runtime_params, config, params, env,

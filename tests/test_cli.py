@@ -1919,16 +1919,17 @@ class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
         assert "prepare_eval_data" not in plan.auto_included
 
 
-class TestCompareOnlyNamesAMissingSegmentColumnsFile:
+class TestCompareOnlyNamesWhatIsMissing:
     """#352: ``--compare-only`` reads the partition and the
-    ``segment_columns.json`` one standard run landed together. A missing JSON
-    stops the command before any node, naming the file and the run to do
-    first; the missing partition is the B4 gate's (test_evaluation_compare_
-    pipeline.py)."""
+    ``segment_columns.json`` one standard run landed together. Either one
+    missing stops the command before any node, one line per missing input plus
+    the run to do first. Before any node, because slicing skips the zero-output
+    B4 gate: with ``--from-node`` the gate never runs."""
 
     _ARGV = ["evaluation", "--model-version", _EVAL_MV, "--compare-only", "self"]
 
-    def _invoke(self, tmp_path, segment_columns_json):
+    def _invoke(self, tmp_path, segment_columns_json, landed=("2026-01-31",),
+                extra_argv=()):
         emitted = []
 
         class _Capture(logging.Handler):
@@ -1941,7 +1942,8 @@ class TestCompareOnlyNamesAMissingSegmentColumnsFile:
         recorder.propagate = False
         execute = MagicMock(return_value=False)
         result, _ = _run_evaluation_command(
-            tmp_path, self._ARGV, segment_columns_json=segment_columns_json,
+            tmp_path, [*self._ARGV, *extra_argv], landed=landed,
+            segment_columns_json=segment_columns_json,
             extra_patches=(
                 patch("recsys_tfb.__main__.logger", recorder),
                 patch("recsys_tfb.__main__._execute_pipeline", execute),
@@ -1957,8 +1959,21 @@ class TestCompareOnlyNamesAMissingSegmentColumnsFile:
                 in log), log
         assert f"python -m recsys_tfb evaluation --model-version {_EVAL_MV}" \
             in log, log
+        # Only what is missing is named: the partition is there.
+        assert "has no partition" not in log, log
 
-    def test_control_a_present_file_reaches_the_pipeline(self, tmp_path):
+    def test_a_missing_partition_stops_a_slice_that_skips_the_gate(self, tmp_path):
+        """The foreign version's 2026-01-31 is listed and must not count."""
+        result, execute, log = self._invoke(
+            tmp_path, segment_columns_json=True, landed=("2025-12-31",),
+            extra_argv=("--from-node", "load_compare_predictions"))
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert "enriched_eval_predictions has no partition for 2026-01-31" \
+            in log, log
+        assert "segment_columns.json" not in log, log
+
+    def test_control_both_present_reach_the_pipeline(self, tmp_path):
         result, execute, _log = self._invoke(tmp_path, segment_columns_json=True)
         assert result.exit_code == 0, result.output
         execute.assert_called_once()

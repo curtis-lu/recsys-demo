@@ -392,13 +392,15 @@ class TestSegmentColumnsWiring:
 
 def _readers_that_skip_the_month_restriction(pipeline):
     """Names of nodes wired to ``enriched_eval_predictions`` whose body has no
-    ``restrict_to_eval_snap_date(<that input's parameter>, ...)`` call.
+    used ``restrict_to_eval_snap_date(<that input's parameter>, ...)`` call.
 
     The body comes from the node's function object (``inspect.getsource``),
     not from a module path: node modules get renamed and split (ADR-0019), and
     a factory-built node's body is its inner function. The call must take the
     parameter the table binds to (inputs bind by position), so restricting
-    some other frame does not count.
+    some other frame does not count, and its result must be used: a bare call
+    statement throws the restricted frame away. It checks that the call is
+    there, not that it comes before every other use of the frame.
     """
     missing = []
     for node in pipeline.nodes:
@@ -407,8 +409,11 @@ def _readers_that_skip_the_month_restriction(pipeline):
         params = list(inspect.signature(node.func).parameters)
         bound_to = params[node.inputs.index("enriched_eval_predictions")]
         body = ast.parse(textwrap.dedent(inspect.getsource(node.func)))
+        discarded = {id(stmt.value) for stmt in ast.walk(body)
+                     if isinstance(stmt, ast.Expr)}
         restricts = any(
             isinstance(call, ast.Call)
+            and id(call) not in discarded
             and getattr(call.func, "id", getattr(call.func, "attr", None))
             == "restrict_to_eval_snap_date"
             and call.args
@@ -432,6 +437,15 @@ def _restricts_the_wrong_frame(other, enriched_eval_predictions, parameters):
 
     other = restrict_to_eval_snap_date(other, parameters)
     return enriched_eval_predictions.count() + other.count()
+
+
+def _discards_the_restriction(enriched_eval_predictions, parameters):
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        restrict_to_eval_snap_date,
+    )
+
+    restrict_to_eval_snap_date(enriched_eval_predictions, parameters)
+    return enriched_eval_predictions.count()
 
 
 class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
@@ -470,9 +484,13 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
                  inputs=["other_frame", "enriched_eval_predictions",
                          "parameters"],
                  outputs="n_mixed"),
+            Node(_discards_the_restriction,
+                 inputs=["enriched_eval_predictions", "parameters"],
+                 outputs="n_discarded"),
         ])
         assert sorted(_readers_that_skip_the_month_restriction(pipeline)) == [
-            "_forgets_the_month", "_restricts_the_wrong_frame",
+            "_discards_the_restriction", "_forgets_the_month",
+            "_restricts_the_wrong_frame",
         ]
 
 

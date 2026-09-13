@@ -194,9 +194,8 @@ class LoadedArtifact(NamedTuple):
     produced_by: str
     extra_keys: Sequence[str] = ()
     #: ``None`` compares the whole fingerprint. A tuple of paths compares only
-    #: those values (``extra_keys`` included only if listed): for an artifact
-    #: that a change to the other rows cannot make stale, see
-    #: :data:`PARTITION_CONTENT_KEYS`.
+    #: those values: for an artifact that a change to the other rows cannot
+    #: make stale, see :data:`PARTITION_CONTENT_KEYS`.
     compared_keys: Optional[Sequence[str]] = None
 
 

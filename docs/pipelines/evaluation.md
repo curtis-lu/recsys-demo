@@ -456,8 +456,8 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 
 這條路沒有 `prepare_eval_data`，它讀的兩樣東西都是寫 enriched partition 的那次標準 run 一起寫的：這個月的 partition，以及 `evaluation_segment_columns`（`segment_columns.json`，`generate_comparison_report` 用它決定分群）。兩者會被分開刪掉（清掉 `data/`、DROP 表），缺哪個都會被擋下、說出缺的是哪個：
 
-- **`segment_columns.json` 不在**：CLI 在任何 node 執行前就停下，訊息寫出檔案路徑與該先跑的 `python -m recsys_tfb evaluation --model-version …`。
-- **partition 不在或那個月沒有列**：`validate_enriched_eval_predictions_present` 擋下（B4），訊息寫出表名、月份與 model_version。
+- **partition 不在、或 `segment_columns.json` 不在**：CLI 在任何 node 執行前就停下，每缺一樣列一行（表名與月份、檔案路徑），最後寫出該先跑的 `python -m recsys_tfb evaluation --model-version …`。這一步只看 partition 清單與檔案在不在，不讀資料。放在 CLI、不只靠下面的閘門，是因為切片會跳過沒有輸出的 node：`--compare-only` 加上 `--from-node` 時閘門不會跑。
+- **partition 列得出來但那個月沒有列**：`validate_enriched_eval_predictions_present` 擋下（B4），訊息寫出表名、月份與 model_version。
 
 兩種都是先重跑一次同 model_version、同月份的標準 evaluation。
 
@@ -575,7 +575,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 因此：
 
 - 不要假設 enriched partition 同時保存 training test 與 production monitoring 兩種母體。
-- 兩種模式也共用同一個 schema（聯集）：另一模式寫過的欄，在這次寫入的列上是 NULL。例如先跑 `--post-training` 再跑監控，監控讀回來的列帶著 `score_uncalibrated` 與 post-training join 過的 segment 欄，值全是 NULL。每個讀表的 node 都會拿到這些欄，但不受影響：分群一律照 `evaluation_segment_columns`，不看 frame 有哪些欄（見 3.2 節）；需要 `score_uncalibrated` 的 registry 診斷只在 `--post-training` 組出來，監控模式唯一讀抽樣的 `compute_metric_ci` 不讀它。
+- 兩種模式也共用同一個 schema（聯集）：另一模式寫過的欄，在這次寫入的列上是 NULL。例如先跑 `--post-training`（segment 欄從 `sample_pool` join 進來）再跑監控、而 `inference_population` 沒有那一欄，監控讀回來的列就帶著那個 segment 欄、值全是 NULL。每個讀表的 node 都會拿到這些欄，但不受影響：分群一律照 `evaluation_segment_columns`，不看 frame 有哪些欄（見 3.2 節）。`score_uncalibrated` 兩種模式都有寫（inference 也寫這一欄），只有 inference 開始寫它之前留下的分區才會是 NULL；需要它的 registry 診斷只在 `--post-training` 組出來，監控模式唯一讀抽樣的 `compute_metric_ci` 不讀它。
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 

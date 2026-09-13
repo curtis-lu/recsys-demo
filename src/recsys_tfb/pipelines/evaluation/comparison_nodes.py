@@ -57,7 +57,10 @@ def restrict_to_common(
 
     ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
     every month this ``model_version`` was evaluated on; the node keeps the
-    evaluated month before anything else (ADR-0018 decision 1).
+    evaluated month before anything else (ADR-0018 decision 1). It does not
+    check the partition's ``segment_columns.json`` fingerprint: under
+    ``--compare`` the same run's segmenting readers do, and ``--compare-only``
+    is left unchecked on purpose (ADR-0020 bug 6, #352 correction).
     """
     # Decision — compare the evaluated month only: the table holds every month
     # this model_version was evaluated on.
@@ -160,9 +163,11 @@ def validate_enriched_eval_predictions_present(
     ``DataConsistencyError`` saying what to run first.
 
     Slicing never pulls a zero-output node back in (R3 in
-    ``docs/agents/architecture-constraints.md``). Accepted here: the mode
-    lists it explicitly and ``--compare-only`` has no resume point, the same
-    shape ADR-0013 registered for ``validate_data_consistency``.
+    ``docs/agents/architecture-constraints.md``), so ``--compare-only
+    --from-node load_compare_predictions`` skips it. That does not open a
+    missing-partition hole: the CLI checks the partition listing before any
+    node runs (``__main__.py::_compare_only_input_errors``). What only this
+    gate sees is a partition that is listed but holds no rows.
 
     Used only in ``--compare-only`` mode. In the other modes
     ``prepare_eval_data`` writes the partition earlier in the same run, so B4

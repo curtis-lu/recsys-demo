@@ -1014,6 +1014,11 @@ def compute_report_aggregates(
 
     Both the stub and the full result carry ``config_fingerprint``: the JSON
     lands, and ``generate_report`` refuses one computed under other settings.
+
+    Reads ``enriched_eval_predictions`` but does not check the partition's
+    ``segment_columns.json`` fingerprint: it takes no segment input. A slice
+    that runs only this node on a stale partition is a hole ADR-0020 bug 6
+    (#352 correction) accepts.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}

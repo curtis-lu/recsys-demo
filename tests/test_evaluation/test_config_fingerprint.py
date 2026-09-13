@@ -399,7 +399,7 @@ def _partition_artifact(params):
                           compared_keys=PARTITION_CONTENT_KEYS)
 
 
-def test_partition_content_keys_are_the_settings_prepare_eval_data_reads():
+def test_partition_content_keys_match_the_signed_off_list():
     assert set(PARTITION_CONTENT_KEYS) == SPEC_PARTITION_CONTENT_KEYS
 
 

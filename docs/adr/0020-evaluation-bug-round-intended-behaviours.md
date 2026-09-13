@@ -134,7 +134,7 @@ date: 2026-09-13
   - **為什麼不是全部都比**：改 `k_values` 會讓它不合，訊息叫你從 `compute_metrics` 重跑，那不會重寫這份 JSON，下一次一樣被擋，出不去。
   - **為什麼不是把 `COMPUTED_KEYS` 全部改指 `prepare_eval_data`**（被否決的另一案）：迴圈解了，但任何設定變動都要重做 join，物化換來的便宜接續就沒了。
   - **不比的地方**：`--compare-only` 照舊不比（理由同上一段：`--post-training` 在那條路上是啞的）；`generate_comparison_report` 不比。
-  - **接受的漏洞**：`compute_report_aggregates` 與 `restrict_to_common` 讀表但不讀這份 JSON。一次只跑一個 node 的切片可以繞過三個比對者：例如先在舊 partition 上 `--only-node compute_report_aggregates`，再只重跑 `prepare_eval_data` 與 `compute_metrics`，報表會混用兩個 partition 算出的數字；`--compare` 模式的 `--only-node generate_comparison_report` 會在舊 partition 上重做比較。兩者跟 `docs/pipelines/evaluation.md` §7.4「`exists()` 只驗存在」同一類。
+  - **接受的漏洞**：`compute_report_aggregates` 與 `restrict_to_common` 讀表但不讀這份 JSON。一次只跑一個 node 的切片可以繞過三個比對者：例如先在舊 partition 上 `--only-node compute_report_aggregates`，再只重跑 `prepare_eval_data` 與 `compute_metrics`，報表會混用兩個 partition 算出的數字；`--compare` 模式的 `--only-node generate_comparison_report` 會在舊 partition 上重做比較。兩者跟 `docs/pipelines/evaluation.md` §7.4「`exists()` 只驗存在」同一類。還有一個機率很低的：Runner 先存分區、再存這份 JSON，兩次存檔之間中斷時，分區已是新設定、JSON 還是舊設定；這時把設定改回舊值再 `--from-node compute_metrics`，指紋比對通過，分群照舊清單讀新分區。反過來先存 JSON 會更糟（不改回設定就放行），所以順序不動。
   - **這份 JSON 缺席**：標準／`--compare` 模式的切片會把 `prepare_eval_data` 拉回來（`JSONDataset.exists()`）；`--compare-only` 在 CLI 入口擋下，訊息寫出檔案路徑與該先跑的指令。
 
   為什麼落地成 JSON 而不是各消費者自己查母體表（本份第二版的寫法，審查指出走不通）：`--compare-only` 那條路沒有 `prepare_eval_data`、`--post-training` 旗標在那條路上是啞的，消費者根本不知道該查哪張母體表；而它讀回來的 enriched 分區裡 segment 欄是 persist 當時 join 的，跟同時寫下的 JSON 一致。落地之後它也符合 node 規則 1（撈得出來看：出事時直接開那份檔）。這個機制目前住在 `evaluation/segments.py`（`join_segment_sources` 所在），ADR-0019 方案 α 落地後才搬進 `pipelines/evaluation/steps/`。
