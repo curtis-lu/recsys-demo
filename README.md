@@ -146,7 +146,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 
 ### evaluation pipeline
 
-將指定 `snap_date` 的模型預測與 ground truth 整理成 `eval_predictions`，以 `(time, entity)` 為 query group 計算排序指標，並產出可互動檢視的 HTML 報表。
+將指定 `snap_date` 的模型預測與 ground truth 連接後寫入 `enriched_eval_predictions`，以 `(time, entity)` 為 query group 計算排序指標，並產出可互動檢視的 HTML 報表。
 evaluation 可用於訓練完成後的 test set 評估，也可在模型上線、label 觀察窗結束後，定期監控 inference 已發布的排序結果。
 
 | 資料角色 | 來源 | 用途 |

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from pyspark.sql import DataFrame as SparkDataFrame
-from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
@@ -19,6 +18,10 @@ from recsys_tfb.evaluation.comparison.restrict import restrict_to_common as _res
 from recsys_tfb.evaluation.comparison.sources import load_compare_predictions as _load_compare
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+    eval_snap_date,
+    restrict_to_eval_snap_date,
+)
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
@@ -51,7 +54,18 @@ def restrict_to_common(
     from the raw frames (ADR-0020 bug 14). It used to ``intersect`` the raw
     query groups, which matches ``NULL == NULL``, while the restriction's
     equi-join drops null keys — so it counted groups no metric ever saw.
+
+    ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
+    every month this ``model_version`` was evaluated on; the node keeps the
+    evaluated month before anything else (ADR-0018 decision 1). It does not
+    check the partition's ``segment_columns.json`` fingerprint: under
+    ``--compare`` the same run's segmenting readers do, and ``--compare-only``
+    is left unchecked on purpose (ADR-0020 bug 6, #352 correction).
     """
+    # Decision — compare the evaluated month only: the table holds every month
+    # this model_version was evaluated on.
+    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+
     schema = get_schema(parameters)
     time_col = schema["time"]
     query_group_cols = [time_col, *schema["entity"]]
@@ -134,49 +148,39 @@ def generate_comparison_report(
     )
 
 
-def persist_eval_predictions(eval_predictions: SparkDataFrame) -> SparkDataFrame:
-    """Pass-through node that routes the in-memory eval_predictions to the
-    framework-auto-save edge for catalog entry ``enriched_eval_predictions``
-    (HiveTableDataset). All write-side machinery — dynamic-partition
-    overwrite, ``model_version`` partition column injection, CREATE TABLE
-    IF NOT EXISTS, ``${hive.db}`` qualification — lives in the catalog
-    layer. This function exists solely as the named DAG edge.
-    """
-    return eval_predictions
-
-
 def validate_enriched_eval_predictions_present(
     enriched_eval_predictions: SparkDataFrame,
     parameters: dict,
-) -> SparkDataFrame:
-    """B4 invariant — fail loud if no partition exists for the current
-    (snap_date, model_version) in ``enriched_eval_predictions``.
+) -> None:
+    """B4 invariant — fail loud if ``enriched_eval_predictions`` holds no rows
+    for the evaluated month under this ``model_version``.
 
-    Pattern: small validator node, pass-through (echoes
-    ``validate_predictions`` in inference pipeline). Catalog auto-loads the
-    table filtered by ``model_version`` via ``partition_filter`` (which
-    drops the column on the way out). This node filters by snap_date and
-    asserts at least one row remains; otherwise raises
-    ``DataConsistencyError`` with an actionable message.
+    A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
+    table and keeps the evaluated month itself, like every other reader
+    (ADR-0018 decision 1). The catalog has already pruned the table to this
+    ``model_version`` via ``partition_filter``; this node keeps the evaluated
+    month and asserts a row remains, otherwise raises
+    ``DataConsistencyError`` saying what to run first.
 
-    Used only in ``--compare-only`` mode. In default / ``--compare`` modes
-    the same partition is freshly written by ``persist_eval_predictions``
-    earlier in the same pipeline, so B4 cannot fire.
+    Slicing never pulls a zero-output node back in (R3 in
+    ``docs/agents/architecture-constraints.md``), so ``--compare-only
+    --from-node load_compare_predictions`` skips it. That does not open a
+    missing-partition hole: the CLI checks the partition listing before any
+    node runs (``__main__.py::_compare_only_input_errors``). What only this
+    gate sees is a partition that is listed but holds no rows.
+
+    Used only in ``--compare-only`` mode. In the other modes
+    ``prepare_eval_data`` writes the partition earlier in the same run, so B4
+    cannot fire.
     """
-    schema = get_schema(parameters)
-    eval_params = parameters.get("evaluation", {}) or {}
-    snap_date = str(eval_params.get("snap_date") or "").strip()
     mv = parameters.get("model_version", "unknown")
     hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
 
-    df = enriched_eval_predictions.filter(
-        F.col(schema["time"]).cast("string") == snap_date
-    )
-    if df.isEmpty():
+    if restrict_to_eval_snap_date(enriched_eval_predictions, parameters).isEmpty():
         raise DataConsistencyError(
             f"(B4) {hive_db}.enriched_eval_predictions has no partition "
-            f"for snap_date={snap_date!r} model_version={mv!r}. "
+            f"for evaluation.snap_date={eval_snap_date(parameters)!r} "
+            f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "
             "--compare) first to populate the partition."
         )
-    return df

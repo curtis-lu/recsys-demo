@@ -168,6 +168,14 @@ RESUME_CONTRACTS = {
         #
         # Un-land evaluation_metrics or baseline_metrics and this turns red.
         "generate_report": {"no_diagnosis_pages"},
+        # The resume point ADR-0018 decision 1 buys: prepare_eval_data writes
+        # enriched_eval_predictions, so resuming at the metrics reads the table
+        # instead of re-joining the predictions. Before that the set also held
+        # prepare_eval_data. What is left is memory-only and cheap: the
+        # zero-read stub, and the diagnosis sample compute_metric_ci reads.
+        # This stub catalog answers "the table exists"; the evaluated month
+        # missing from it is the CLI's month plan's business (test_cli.py).
+        "compute_metrics": {"draw_diagnosis_sample_node", "no_diagnosis_pages"},
     },
     ("evaluation", (("post_training", True),)): {
         # Same landing and reasoning as above. render_diagnosis_pages stays
@@ -178,6 +186,8 @@ RESUME_CONTRACTS = {
         # is correct and outside this contract: contracts describe the
         # "previous full run succeeded" scenario.
         "generate_report": {"render_diagnosis_pages"},
+        # Same unlock as the monitoring entry: the table is read, not re-joined.
+        "compute_metrics": {"draw_diagnosis_sample_node"},
     },
 }
 

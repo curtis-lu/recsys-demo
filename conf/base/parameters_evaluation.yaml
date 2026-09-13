@@ -30,7 +30,7 @@ evaluation:
   #     key_columns: [cust_id, snap_date]
   #     segment_column: holding_combo
 
-  # 產品大類的 parallel evaluation。enable 後，fine-grained eval_predictions
+  # 產品大類的 parallel evaluation。enable 後，fine-grained 的評估列
   # 會被 collapse 到 category 粒度（category score = max child score == best
   # child rank；category label = max child label），然後對「同一套」metric
   # pipeline 跑第二輪；結果 nest 在 "category" key 之下。

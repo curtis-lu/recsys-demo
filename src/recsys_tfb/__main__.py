@@ -53,6 +53,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     build_month_plans,
     landed_months,
     month_plan_input,
+    plan_incremental_snap_dates,
 )
 from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
@@ -133,9 +134,10 @@ def _make_can_load(catalog, month_plans=None):
 
     ``month_plans`` is ``{dataset name: SnapDatePlan}`` for the artifacts that
     have months — a per-pipeline override in the shape of ``retrain_advice`` /
-    ``rebuild_advice``, injected by the one command that has any. Absent (every
-    other pipeline, and every dataset with no plan) the answer is ``exists``
-    alone.
+    ``rebuild_advice``, injected by the commands that have any: ``dataset`` for
+    its incremental artifacts, ``evaluation`` for ``enriched_eval_predictions``
+    (ADR-0018 decision 1). Absent (every other pipeline, and every dataset with
+    no plan) the answer is ``exists`` alone.
 
     The plans are the ones the nodes themselves receive, so the slice and the
     nodes cannot disagree about which months this run covers. The subtraction
@@ -356,6 +358,64 @@ def _collect_existing_snap_dates(
     return existing
 
 
+def _evaluation_month_plans(catalog, *, snap_date, time_col: str) -> dict:
+    """``{"enriched_eval_predictions": SnapDatePlan}`` for the evaluated month.
+
+    ``prepare_eval_data`` writes that table and every later node reads it back
+    (ADR-0018 decision 1). The table exists from the first evaluation of a
+    ``model_version`` onwards, so a slice asking only ``exists()`` would let
+    ``--from-node compute_metrics`` start on a month never written — the
+    ADR-0012 trap. With the plan, ``can_load`` asks for the month's partition:
+    missing pulls ``prepare_eval_data`` back into the slice, landed does not.
+
+    ``catalog`` must be resolved with this run's ``model_version``: the entry's
+    ``partition_filter`` is what scopes the listing to it. Metadata-only. A
+    dataset that cannot list partitions makes the month look missing, so the
+    join is redone rather than a month read that may not be there.
+    """
+    name = "enriched_eval_predictions"
+    lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
+    if lister is None:
+        logger.warning(
+            "[months] %s cannot list its partitions; a slice will re-run "
+            "prepare_eval_data rather than assume the evaluated month landed.",
+            name,
+        )
+        existing = []
+    else:
+        existing = landed_months(lister(), time_col=time_col, dataset_name=name)
+    return {name: plan_incremental_snap_dates(configured=[snap_date],
+                                              existing=existing)}
+
+
+def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
+    """What ``--compare-only`` reads from an earlier standard run and cannot find.
+
+    That mode has no ``prepare_eval_data``: it reads this month's
+    ``enriched_eval_predictions`` partition and the ``segment_columns.json`` the
+    same standard run landed with it. The two are written together but can be
+    deleted apart (a cleaned ``data/`` directory, a dropped table), so each
+    missing one gets its own line. ``plan`` is the month plan for the table
+    (:func:`_evaluation_month_plans`), or None when no month is configured.
+
+    Checked before any node runs, not left to the B4 gate node alone: slicing
+    skips a zero-output node, so under ``--compare-only --from-node
+    load_compare_predictions`` the gate never runs, and a missing partition
+    came back as an empty model side with exit code 0. A missing JSON used to
+    surface as a ``FileNotFoundError`` carrying only a path, at the last node.
+    Metadata only: a partition listing and a file check. The gate still
+    refuses a partition that is listed but holds no rows.
+    """
+    errors = []
+    if plan is not None and plan.to_process:
+        months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
+        errors.append(f"enriched_eval_predictions has no partition for {months}")
+    name = "evaluation_segment_columns"
+    if not catalog.exists(name):
+        errors.append(f"{name} is missing: {catalog_config[name]['filepath']}")
+    return errors
+
+
 def _fmt_months(dates) -> str:
     return ",".join(str(d) for d in dates) or "-"
 
@@ -558,9 +618,11 @@ def _execute_pipeline(
     by the artifact they scope rather than by their catalog name, for
     :func:`_make_can_load`. Two parameters for one set of plans because the two
     consumers ask different questions of them: a node asks "which months do I
-    process", the slice asks "is this artifact complete for this run". Only the
-    dataset command has incremental artifacts, so for every other pipeline this
-    is ``None`` and slicing behaves exactly as it did before.
+    process", the slice asks "is this artifact complete for this run". The
+    dataset command passes its incremental artifacts' plans, and evaluation a
+    plan for ``enriched_eval_predictions`` alone (slice-only: its nodes read the
+    month from ``parameters``); for every other pipeline this is ``None`` and
+    slicing asks ``exists()`` only.
     """
     try:
         pipe = get_pipeline(pipeline_name, **pipeline_kwargs)
@@ -1614,7 +1676,7 @@ def evaluation(
     ),
     compare_only: Optional[str] = typer.Option(
         None, "--compare-only",
-        help="Like --compare, but skip prepare/compute/baseline/report and read eval_predictions from Hive (only produces report_comparison.html)",
+        help="Like --compare, but skip prepare/compute/baseline/report and read enriched_eval_predictions from Hive (only produces report_comparison.html)",
     ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
@@ -1725,10 +1787,44 @@ def evaluation(
         "compare_source": compare_source_dict,
         "compare_only": bool(compare_only),
     }
+
+    # Asked of a catalog resolved after runtime_params holds model_version:
+    # enriched_eval_predictions' partition_filter scopes the listing to it,
+    # and an unresolved template would list nothing (every month missing).
+    _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
+    listing_catalog = DataCatalog(listing_catalog_config)
+    month_plans = None
+    if eval_config.get("snap_date"):
+        # Without a configured month the nodes raise their own message.
+        month_plans = _evaluation_month_plans(
+            listing_catalog, snap_date=str(eval_config["snap_date"]).strip(),
+            time_col=get_schema(params)["time"],
+        )
+    if compare_only:
+        errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
+            (month_plans or {}).get("enriched_eval_predictions"),
+            listing_catalog, listing_catalog_config,
+        )
+        if errors:
+            logger.error(
+                "--compare-only reads what a standard evaluation run of the "
+                "same model_version and evaluation.snap_date wrote, and it is "
+                "not all there:\n  - " + "\n  - ".join(errors) + "\n"
+                f"Run `python -m recsys_tfb evaluation --model-version {mv}` "
+                "first (add --post-training to compare the post-training "
+                "population), then --compare-only."
+            )
+            raise typer.Exit(code=1)
+        # No prepare_eval_data in this mode for a plan to pull back.
+        month_plans = None
+
     executed = _execute_pipeline(
         "evaluation", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
+        # A month question, not an exists() question, for the table every node
+        # after prepare_eval_data reads (ADR-0018 decision 1, ADR-0012).
+        month_plans=month_plans,
     )
     if not executed:
         return

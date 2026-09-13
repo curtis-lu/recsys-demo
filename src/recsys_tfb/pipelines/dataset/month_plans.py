@@ -69,8 +69,9 @@ def plan_incremental_snap_dates(
     A configured month is processed when it has not landed yet, or when it was
     explicitly named in ``rebuild``; otherwise it is skipped. This is the single
     place the "which months does this run actually touch" diff is defined; its
-    one caller is :func:`build_month_plans` below, which applies it once per
-    incremental artifact. See ADR-0002.
+    callers are :func:`build_month_plans` below, which applies it once per
+    incremental artifact, and the evaluation command's plan for
+    ``enriched_eval_predictions`` (ADR-0018 decision 1). See ADR-0002.
 
     Pure by design: the caller supplies ``existing`` (a zero-scan metastore
     partition listing), so the whole decision is testable without Spark.

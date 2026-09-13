@@ -15,6 +15,7 @@ import pytest
 
 from recsys_tfb.evaluation.config_fingerprint import (
     COMPUTED_KEYS,
+    PARTITION_CONTENT_KEYS,
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
@@ -376,6 +377,63 @@ def test_rule_2_one_artifact_with_only_its_own_key_changed():
     assert "dataset.sample_ratio_overrides.x|1: 0.5 -> 0.25" in msg
     assert "--from-node diagnose_config_shift" in msg
     assert "evaluation_item_ability" not in msg
+
+
+# ------------------------------------ what the enriched partition was made with
+
+
+#: The settings ``prepare_eval_data`` reads, as issue #352 and its sign-off list
+#: them (ADR-0020 bug 6). Written out, not derived from ``COMPUTED_KEYS``.
+SPEC_PARTITION_CONTENT_KEYS = {
+    "post_training",
+    "evaluation.snap_date",
+    "evaluation.segment_columns",
+    "evaluation.segment_sources",
+}
+
+
+def _partition_artifact(params):
+    return LoadedArtifact(catalog_name="evaluation_segment_columns",
+                          payload=_payload(params),
+                          produced_by="prepare_eval_data",
+                          compared_keys=PARTITION_CONTENT_KEYS)
+
+
+def test_partition_content_keys_match_the_signed_off_list():
+    assert set(PARTITION_CONTENT_KEYS) == SPEC_PARTITION_CONTENT_KEYS
+
+
+@pytest.mark.parametrize("path", sorted(SPEC_PARTITION_CONTENT_KEYS))
+def test_a_partition_setting_change_advises_re_running_the_join(path):
+    old = _params()
+    with pytest.raises(ValueError) as exc:
+        require_computed_with_current_config(
+            [_partition_artifact(old)], _changed(old, path))
+    msg = str(exc.value)
+    assert f"      {path}" in msg
+    assert "--from-node prepare_eval_data" in msg
+
+
+@pytest.mark.parametrize(
+    "path", sorted(SPEC_COMPUTED_PATHS - SPEC_PARTITION_CONTENT_KEYS))
+def test_no_other_computed_setting_makes_the_partition_stale(path):
+    """The loop this comparison is narrowed for: such a change is advised as
+    ``--from-node`` a node after ``prepare_eval_data``, which does not rewrite
+    the partition, so a partition that went stale on it would stay stale."""
+    old = _params()
+    require_computed_with_current_config(
+        [_partition_artifact(old)], _changed(old, path))
+
+
+def test_narrowed_comparison_still_refuses_an_unfingerprinted_json():
+    with pytest.raises(ValueError, match="has no config_fingerprint"):
+        require_computed_with_current_config(
+            [LoadedArtifact(catalog_name="evaluation_segment_columns",
+                            payload={"joined": []},
+                            produced_by="prepare_eval_data",
+                            compared_keys=PARTITION_CONTENT_KEYS)],
+            _params(),
+        )
 
 
 def test_rule_2_one_artifact_without_fingerprint():

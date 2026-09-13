@@ -137,7 +137,7 @@ def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
 @pytest.fixture
 def enriched_eval_predictions_view(spark):
     """Mirrors the `enriched_eval_predictions` Hive table schema written by
-    `persist_eval_predictions`: same identity + score + model_version, plus
+    `prepare_eval_data`: same identity + score + model_version, plus
     the enrichment columns (label / rank). restrict_to_common is
     schema-agnostic, so extra columns here are intentionally exercised.
     """

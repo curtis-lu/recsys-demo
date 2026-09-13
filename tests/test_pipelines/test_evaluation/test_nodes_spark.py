@@ -5,10 +5,24 @@ from unittest.mock import MagicMock
 import pytest
 
 
-#: What prepare_eval_data lands when no segment column is configured, for
-#: nodes whose tests are not about segments.
-_NO_SEGMENTS = {"joined": [], "sources": {}, "missing": {},
-                "config_fingerprint": {"sha256": "", "values": {}}}
+def _no_segments(parameters):
+    """What prepare_eval_data lands when no segment column is configured, for
+    nodes whose tests are not about segments.
+
+    Fingerprinted with the ``parameters`` the node is called with, as a run's
+    own JSON is: the readers of ``enriched_eval_predictions`` refuse a
+    partition prepared under other settings.
+    """
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
+    return {"joined": [], "sources": {}, "missing": {},
+            "config_fingerprint": fingerprint(parameters)}
+
+
+def _kept_month_of(df, parameters):
+    """Stand-in for ``restrict_to_eval_snap_date`` in tests that pass no frame:
+    marks what the node forwarded as the restricted one."""
+    return ("kept month of", df)
 
 
 def _prepare_eval_data(predictions, labels, parameters):
@@ -750,6 +764,7 @@ class TestComputeBaselineMetrics:
                 },
             },
             "evaluation": {
+                "snap_date": "2025-01-31",
                 "k_values": [1, 2, 3],
                 "baseline": {"lookback_months": 12},
                 "report": {"sections": {"baseline": baseline_section}},
@@ -789,7 +804,7 @@ class TestComputeBaselineMetrics:
         result = compute_baseline_metrics(
             self._eval_predictions(spark),
             self._label_table(spark),
-            _NO_SEGMENTS,
+            _no_segments(self._parameters()),
             self._parameters(),
         )
         from recsys_tfb.evaluation.config_fingerprint import fingerprint
@@ -821,7 +836,7 @@ class TestComputeBaselineMetrics:
         )
 
         params = self._parameters(baseline_section=False)
-        result = compute_baseline_metrics(None, None, _NO_SEGMENTS, params)
+        result = compute_baseline_metrics(None, None, _no_segments(params), params)
         assert result == {
             "enabled": False, "config_fingerprint": fingerprint(params),
         }
@@ -871,6 +886,7 @@ def test_compute_metric_ci_end_to_end_small(spark):
                                "item": "prod_name", "label": "label",
                                "score": "score", "rank": "rank"}},
         "evaluation": {
+            "snap_date": "20240331",
             "metric": {"weight_alpha": 0.0, "k": None,
                        "min_positives": 0, "shrinkage_k": 0},
             "diagnosis": {
@@ -881,7 +897,7 @@ def test_compute_metric_ci_end_to_end_small(spark):
         },
     }
     # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
-    sample = draw_diagnosis_sample_node(df, _NO_SEGMENTS, params)
+    sample = draw_diagnosis_sample_node(df, _no_segments(params), params)
     out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
@@ -913,12 +929,16 @@ class TestConsumersSegmentByTheLandedList:
     present in the frame" segments by it and grows a fake "(unmatched)" group.
     """
 
-    _SEGMENTS = {
-        "joined": ["cust_segment_typ"],
-        "sources": {"cust_segment_typ": "sample_pool"},
-        "missing": {"holding_combo": "sample_pool"},
-        "config_fingerprint": {"sha256": "x", "values": {}},
-    }
+    @classmethod
+    def _segments(cls):
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
+        return {
+            "joined": ["cust_segment_typ"],
+            "sources": {"cust_segment_typ": "sample_pool"},
+            "missing": {"holding_combo": "sample_pool"},
+            "config_fingerprint": fingerprint(cls._parameters()),
+        }
 
     @staticmethod
     def _parameters():
@@ -927,6 +947,7 @@ class TestConsumersSegmentByTheLandedList:
                 "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
                 "label": "label", "score": "score", "rank": "rank"}},
             "evaluation": {
+                "snap_date": "2025-01-31",
                 "k_values": [1, 2, 3],
                 "segment_columns": ["stale_seg", "cust_segment_typ",
                                     "holding_combo"],
@@ -950,12 +971,12 @@ class TestConsumersSegmentByTheLandedList:
         from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
 
         result = compute_metrics(
-            self._frame(spark), self._SEGMENTS, self._parameters())
+            self._frame(spark), self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
         assert set(result["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
         # What the report says about segments travels with the metrics.
         assert result["segments"] == {
-            k: self._SEGMENTS[k] for k in ("joined", "sources", "missing")}
+            k: self._segments()[k] for k in ("joined", "sources", "missing")}
         # It lands as metrics.json, so it records the computed settings it
         # was made with and generate_report can refuse a stale one
         # (ADR-0018 decision 2, ADR-0020 decision 2).
@@ -970,7 +991,7 @@ class TestConsumersSegmentByTheLandedList:
 
         result = compute_baseline_metrics(
             self._frame(spark), TestComputeBaselineMetrics._label_table(spark),
-            self._SEGMENTS, self._parameters())
+            self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
     def test_draw_diagnosis_sample_node(self, spark):
@@ -979,7 +1000,7 @@ class TestConsumersSegmentByTheLandedList:
         )
 
         sample_pdf, _meta = draw_diagnosis_sample_node(
-            self._frame(spark), self._SEGMENTS, self._parameters())
+            self._frame(spark), self._segments(), self._parameters())
         assert "cust_segment_typ" in sample_pdf.columns
         assert "stale_seg" not in sample_pdf.columns
 
@@ -1001,10 +1022,147 @@ class TestConsumersSegmentByTheLandedList:
         monkeypatch.setattr(comparison_nodes, "assemble_comparison_report",
                             lambda *a, **k: "<html/>")
         comparison_nodes.generate_comparison_report(
-            "model_side", "compared_side", {}, self._SEGMENTS,
+            "model_side", "compared_side", {}, self._segments(),
             self._parameters())
         assert asked == [("model_side", ["cust_segment_typ"]),
                          ("compared_side", [])]
+
+
+class TestEnrichedReadersKeepTheEvaluatedMonth:
+    """ADR-0018 decision 1: ``enriched_eval_predictions`` holds every month a
+    ``model_version`` was evaluated on, so each node reading it keeps the
+    evaluated month.
+
+    The frame here carries a second month with flipped labels and scores, the
+    way the table accumulates months. Each node's result on it must equal its
+    result on the evaluated month alone; a node that keeps both months differs.
+    """
+
+    @staticmethod
+    def _parameters(snap_date="2025-01-31"):
+        params = TestComputeBaselineMetrics._parameters()
+        params["evaluation"]["snap_date"] = snap_date
+        params["evaluation"]["diagnosis"] = {"sample": {
+            "max_queries": 10, "min_pos_queries_per_item": 1, "seed": 42}}
+        return params
+
+    @staticmethod
+    def _one_month(spark):
+        return TestComputeBaselineMetrics._eval_predictions(spark)
+
+    @classmethod
+    def _two_months(cls, spark):
+        from pyspark.sql import functions as F
+
+        one = cls._one_month(spark)
+        other = (one.withColumn("snap_date", F.lit("2025-02-28"))
+                 .withColumn("label", 1 - F.col("label"))
+                 .withColumn("score", 1 - F.col("score")))
+        return one.unionByName(other)
+
+    def test_compute_metrics(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+
+        params = self._parameters()
+        both = compute_metrics(self._two_months(spark), _no_segments(params),
+                               params)
+        alone = compute_metrics(self._one_month(spark), _no_segments(params),
+                                params)
+        assert both["dataset_overview"]["totals"]["n_snap_dates"] == 1
+        assert both == alone
+
+    def test_compute_baseline_metrics(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters()
+        labels = TestComputeBaselineMetrics._label_table(spark)
+        both = compute_baseline_metrics(
+            self._two_months(spark), labels, _no_segments(params), params)
+        alone = compute_baseline_metrics(
+            self._one_month(spark), labels, _no_segments(params), params)
+        assert both == alone
+
+    def test_compute_report_aggregates(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            compute_report_aggregates,
+        )
+
+        params = self._parameters()
+        both = compute_report_aggregates(self._two_months(spark), params)
+        alone = compute_report_aggregates(self._one_month(spark), params)
+        assert both == alone
+
+    def test_draw_diagnosis_sample_node(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+            draw_diagnosis_sample_node,
+        )
+
+        params = self._parameters()
+        sample_pdf, meta = draw_diagnosis_sample_node(
+            self._two_months(spark), _no_segments(params), params)
+        assert set(sample_pdf["snap_date"]) == {"2025-01-31"}
+        assert meta["n_queries_sampled"] == 2
+
+    def test_compute_metrics_refuses_a_month_with_no_rows(self, spark):
+        """Postcondition: the evaluated month's partition is empty or was never
+        written, and reading the table raised nothing."""
+        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+
+        params = self._parameters(snap_date="2025-03-31")
+        with pytest.raises(
+            ValueError,
+            match=r"compute_metrics postcondition: 0 evaluated months",
+        ):
+            compute_metrics(self._two_months(spark), _no_segments(params),
+                            params)
+
+
+class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
+    """The partition is read back from Hive, so a slice starting after
+    ``prepare_eval_data`` does not re-join it. Its landed
+    ``evaluation_segment_columns`` fingerprint says which settings it was
+    joined under; the segmenting readers compare it on
+    ``PARTITION_CONTENT_KEYS`` before reading (the #352 sign-off, ADR-0020
+    bug 6).
+    """
+
+    _READERS = ("compute_metrics", "compute_baseline_metrics",
+                "draw_diagnosis_sample_node")
+
+    @staticmethod
+    def _call(name, frame, labels, segments, params):
+        from recsys_tfb.pipelines.evaluation import nodes_spark
+
+        if name == "compute_baseline_metrics":
+            return nodes_spark.compute_baseline_metrics(
+                frame, labels, segments, params)
+        return getattr(nodes_spark, name)(frame, segments, params)
+
+    @pytest.mark.parametrize("name", _READERS)
+    def test_a_changed_segment_setting_names_the_join_to_re_run(self, name):
+        """Raised before the frame is touched, so no frame is passed."""
+        prepared_under = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
+        now = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
+        now["evaluation"]["segment_columns"] = ["cust_segment_typ"]
+        with pytest.raises(ValueError) as exc:
+            self._call(name, None, None, _no_segments(prepared_under), now)
+        msg = str(exc.value)
+        assert "evaluation.segment_columns" in msg
+        assert "--from-node prepare_eval_data" in msg
+
+    @pytest.mark.parametrize("name", _READERS)
+    def test_a_changed_metric_setting_does_not_stop_the_reader(self, spark, name):
+        prepared_under = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
+        now = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
+        now["evaluation"]["k_values"] = [1, 2]
+        result = self._call(
+            name,
+            TestEnrichedReadersKeepTheEvaluatedMonth._one_month(spark),
+            TestComputeBaselineMetrics._label_table(spark),
+            _no_segments(prepared_under), now)
+        assert result is not None
 
 
 class TestCiConsumerEnabled:
@@ -1030,7 +1188,7 @@ class TestDrawDiagnosisSampleNode:
                 "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
                 "label": "label", "score": "score", "rank": "rank",
             }},
-            "evaluation": {"diagnosis": {"sample": {
+            "evaluation": {"snap_date": "20240331", "diagnosis": {"sample": {
                 "max_queries": 10, "min_pos_queries_per_item": 2, "seed": 42,
             }}},
         }
@@ -1061,7 +1219,7 @@ class TestDrawDiagnosisSampleNode:
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
         ) as spy:
-            result = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
+            result = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert result is None
         assert spy.call_count == 0
 
@@ -1076,11 +1234,14 @@ class TestDrawDiagnosisSampleNode:
         with patch(
             "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-        ) as spy:
-            nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
-        # exact args, not just count: guards against a regression forwarding a
-        # limited/mutated eval_predictions or a copied params.
-        spy.assert_called_once_with(None, params, segment_columns=[])
+        ) as spy, patch.object(
+            nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
+        ):
+            nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
+        # exact args, not just count: the draw gets the month-restricted table
+        # (ADR-0018 decision 1), not the table itself, and params uncopied.
+        spy.assert_called_once_with(
+            ("kept month of", None), params, segment_columns=[])
 
     def test_node_output_equals_direct_draw(self, spark):
         # Faithfulness / behaviour-preservation: the node is a pass-through of
@@ -1091,7 +1252,7 @@ class TestDrawDiagnosisSampleNode:
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark), params
         )
-        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
+        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert node_meta == direct_meta
         assert (
             node_pdf.sort_values(list(node_pdf.columns))
@@ -1118,19 +1279,22 @@ class TestDrawDiagnosisSampleNode:
         ) as spy, patch(
             "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
+        ), patch.object(
+            nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
         ):
-            sample = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
+            sample = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
             nodes_spark.compute_metric_ci(sample, params)
         # exactly one draw, with the node's own inputs — the consumer must NOT
         # re-draw (it consumes the shared sample).
-        spy.assert_called_once_with(None, params, segment_columns=[])
+        spy.assert_called_once_with(
+            ("kept month of", None), params, segment_columns=[])
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
         import logging
         from recsys_tfb.pipelines.evaluation import nodes_spark
         params = self._params()  # all enabled
         with caplog.at_level(logging.INFO):
-            nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _NO_SEGMENTS, params)
+            nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         vols = [
             r.volume for r in caplog.records
             if getattr(r, "event", None) == "data_volume"
@@ -1225,13 +1389,16 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
     with patch(
         "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-    ) as spy:
-        result = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
+    ) as spy, patch.object(
+        nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
+    ):
+        result = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
     assert result is not None, (
         "sample gate ignored the registry diagnoses — config_shift is enabled "
         "but no sample was drawn"
     )
-    spy.assert_called_once_with(None, params, segment_columns=[])
+    spy.assert_called_once_with(
+        ("kept month of", None), params, segment_columns=[])
 
 
 def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
@@ -1278,7 +1445,7 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
     with caplog.at_level(logging.INFO), patch(
         "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
     ) as spy:
-        result = nodes_spark.draw_diagnosis_sample_node(None, _NO_SEGMENTS, params)
+        result = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
 
     assert result is None
     assert spy.call_count == 0

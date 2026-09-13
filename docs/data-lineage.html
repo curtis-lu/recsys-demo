@@ -215,7 +215,7 @@ recsys_tfb 是<b>通用排序框架</b>，商業銀行產品推薦只是本 repo
   <text x="612" y="772" font-size="10" fill="#495057" font-weight="bold">情境 1（--post-training）讀 training_eval_predictions</text>
   <text x="612" y="788" font-size="10" fill="#495057" font-weight="bold">情境 2（預設）讀 ranked_predictions</text>
   <text x="612" y="812" font-size="10" fill="#495057">prepare_eval_data ⋈ label_table → 指標 + 報表；</text>
-  <text x="612" y="827" font-size="10" fill="#495057">persist_eval_predictions → enriched_eval_predictions</text>
+  <text x="612" y="827" font-size="10" fill="#495057">prepare_eval_data 直接落地 enriched_eval_predictions</text>
   <text x="612" y="848" font-size="10" fill="#495057">--compare-only 直接讀回 enriched_eval_predictions</text>
 </svg>
 
@@ -560,13 +560,13 @@ C000010   0.83    0.71                 1      （示意）</div>
   <div class="meta"><b>產生</b>：evaluation · generate_report（吃 evaluation_metrics + baseline_metrics + evaluation_metric_ci + evaluation_report_aggregates + evaluation_diagnosis_pages）　|
   <b>下游</b>：—（終端產物，給人看）　|
   <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report.html</code></div>
-  <p class="sub">eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions；情境 2 = ranked_predictions）⋈ label_table 而來。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是 <code>{"enabled": false, "config_fingerprint": ...}</code> stub。</p>
+  <p class="sub">enriched_eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions；情境 2 = ranked_predictions）⋈ label_table 而來，join 只算一次、直接落地（ADR-0018 決定 1）。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是 <code>{"enabled": false, "config_fingerprint": ...}</code> stub。</p>
 </div>
 
 <div class="card" id="enriched_eval_predictions">
   <h4>enriched_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：evaluation · persist_eval_predictions（把 label join + rank + segment enrichment 後的 eval_predictions 寫回 Hive）　|
-  <b>下游</b>：evaluation（<code>--compare-only</code> 由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
+  <div class="meta"><b>產生</b>：evaluation · prepare_eval_data（label join + rank + segment enrichment 後直接寫回 Hive，這個 model_version 本月的 partition；dynamic partition overwrite）　|
+  <b>下游</b>：evaluation（compute_metrics／compute_baseline_metrics／compute_report_aggregates／draw_diagnosis_sample_node／restrict_to_common 各自讀表、以 restrict_to_eval_snap_date 篩回本次評估月份；<code>--compare-only</code> 沒有 prepare_eval_data，由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
   <b>partition</b>：snap_date（外加 model_version）；columns: auto（schema 從 DataFrame 推得）</div>
   <p class="sub">兩種模式共用此表，schema 是聯集：另一模式 join 過的 segment 欄，在這次寫入的列上是 NULL。所以分群一律照同時落地的 <code>evaluation_segment_columns</code>（<code>segment_columns.json</code>），不看表上有哪些欄（見 evaluation.md §3.2）。</p>
 </div>
@@ -580,7 +580,7 @@ C000010   0.83    0.71                 1      （示意）</div>
 </div>
 
 <p class="sub" style="margin-top:30px;color:#9198a1">
-未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：score_manifest · validated_predictions · eval_predictions ·
+未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：score_manifest · validated_predictions ·
 *_parquet_handle · *_lgb_handle ·
 *_model_input_unfiltered。這些只在單次 DAG 內銜接，不持久化。
 </p>

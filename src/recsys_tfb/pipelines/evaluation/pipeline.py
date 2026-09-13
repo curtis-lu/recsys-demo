@@ -15,20 +15,23 @@ def create_pipeline(
     """Build the evaluation pipeline.
 
     Modes:
-      * default (no flags) — monitoring: metrics/report nodes +
-        persist_eval_predictions (auto-saved via catalog to
-        ``enriched_eval_predictions`` HiveTableDataset). No registry diagnosis:
-        ``no_diagnosis_pages`` supplies ``generate_report``'s pages input.
+      * default (no flags) — monitoring: ``prepare_eval_data`` writes this
+        month's partition of the ``enriched_eval_predictions`` Hive table, so
+        the join is computed once, and every metrics/report node reads the
+        table back, keeping the evaluated month (ADR-0018 decision 1). No
+        registry diagnosis: ``no_diagnosis_pages`` supplies
+        ``generate_report``'s pages input.
       * --post-training — same chain read from ``training_eval_predictions``,
         plus every registry diagnosis and ``render_diagnosis_pages``.
       * --compare X — adds 3 compare nodes to either of the above; both
         standalone and comparison reports produced.
-      * --compare-only X — short pipeline that catalog-auto-loads the
-        previously-persisted ``enriched_eval_predictions``, validates the
-        partition (B4), and only produces report_comparison.html. It also
-        loads ``evaluation_segment_columns``, landed by the run that wrote that
-        partition, since there is no ``prepare_eval_data`` here to say which
-        segment columns the partition's rows were joined with.
+      * --compare-only X — short pipeline that reads the
+        ``enriched_eval_predictions`` an earlier run wrote, gates on the
+        evaluated month being there (B4, zero-output), and only produces
+        report_comparison.html. It also loads ``evaluation_segment_columns``,
+        landed by the run that wrote that partition, since there is no
+        ``prepare_eval_data`` here to say which segment columns the
+        partition's rows were joined with.
     """
     from recsys_tfb.pipelines.evaluation.nodes_spark import (
         compute_baseline_metrics,
@@ -45,21 +48,20 @@ def create_pipeline(
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
         generate_comparison_report,
         load_compare_predictions,
-        persist_eval_predictions,
         restrict_to_common,
         validate_enriched_eval_predictions_present,
     )
 
     if compare_only:
         # CLI A12 ensures compare_source is not None when compare_only is True.
-        # First node consumes "enriched_eval_predictions" — catalog auto-loads
-        # via HiveTableDataset.load() with WHERE model_version=${model_version},
-        # then validator filters to current snap_date and raises B4 if empty.
+        # The catalog loads "enriched_eval_predictions" with WHERE
+        # model_version=${model_version}; the gate raises B4 when the evaluated
+        # month has no rows and passes nothing on, so restrict_to_common reads
+        # the table and keeps the month itself, like every reader.
         return Pipeline([
             Node(
                 validate_enriched_eval_predictions_present,
                 inputs=["enriched_eval_predictions", "parameters"],
-                outputs="eval_predictions",
             ),
             Node(
                 load_compare_predictions,
@@ -68,7 +70,7 @@ def create_pipeline(
             ),
             Node(
                 restrict_to_common,
-                inputs=["eval_predictions", "compare_predictions_raw",
+                inputs=["enriched_eval_predictions", "compare_predictions_raw",
                         "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
@@ -89,12 +91,17 @@ def create_pipeline(
     # (ADR-0020 bug 6): the test set is drawn from sample_pool, monitoring
     # scores inference_population.
     population_input = "sample_pool" if post_training else "inference_population"
+    # Every node below that reads enriched_eval_predictions reads the Hive
+    # table back (every month this model_version was evaluated on) and keeps
+    # the evaluated month first; test_pipeline.py fails one that does not.
     nodes = [
+        # The join is computed here once and lands as this month's partition;
+        # dynamic partition overwrite replaces that partition only.
         Node(
             make_prepare_eval_data_node(population_input),
             inputs=[predictions_input, "label_table", population_input,
                     "parameters"],
-            outputs=["eval_predictions", "evaluation_segment_columns"],
+            outputs=["enriched_eval_predictions", "evaluation_segment_columns"],
         ),
         # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and,
         # in --post-training, the registry diagnoses read this shared
@@ -105,25 +112,25 @@ def create_pipeline(
             make_draw_diagnosis_sample_node(
                 registry_diagnoses_wired=post_training
             ),
-            inputs=["eval_predictions", "evaluation_segment_columns",
+            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
                     "parameters"],
             outputs="diagnosis_sample",
         ),
         Node(
             compute_metrics,
-            inputs=["eval_predictions", "evaluation_segment_columns",
+            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
                     "parameters"],
             outputs="evaluation_metrics",
         ),
         Node(
             compute_baseline_metrics,
-            inputs=["eval_predictions", "label_table",
+            inputs=["enriched_eval_predictions", "label_table",
                     "evaluation_segment_columns", "parameters"],
             outputs="baseline_metrics",
         ),
         Node(
             compute_report_aggregates,
-            inputs=["eval_predictions", "parameters"],
+            inputs=["enriched_eval_predictions", "parameters"],
             outputs="evaluation_report_aggregates",
         ),
         Node(
@@ -188,14 +195,6 @@ def create_pipeline(
                     "evaluation_diagnosis_pages"],
             outputs="evaluation_report",
         ),
-        # persist returns the same DF as-is; framework auto-saves via catalog
-        # entry "enriched_eval_predictions" (HiveTableDataset). Catalog
-        # injects model_version partition column + dynamic-partition overwrite.
-        Node(
-            persist_eval_predictions,
-            inputs=["eval_predictions"],
-            outputs="enriched_eval_predictions",
-        ),
     ]
     if compare_source is not None:
         nodes += [
@@ -206,7 +205,7 @@ def create_pipeline(
             ),
             Node(
                 restrict_to_common,
-                inputs=["eval_predictions", "compare_predictions_raw",
+                inputs=["enriched_eval_predictions", "compare_predictions_raw",
                         "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],

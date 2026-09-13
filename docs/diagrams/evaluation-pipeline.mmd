@@ -43,6 +43,18 @@
 %%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.display.* 等）
 %%   照常重繪。分類見 docs/pipelines/evaluation.md §7.2。
 
+%% #352 起（ADR-0018 決定 1）prepare_eval_data 的 join 結果直接落地為
+%%   enriched_eval_predictions（既有 Hive 表：partition_filter model_version、
+%%   partition_cols snap_date），不再先產出一份未落地的 join 結果、
+%%   再由獨立的 persist node 寫表——那個 persist node 已刪除，DAG 上不再有
+%%   它的名字。join 只算這一次；compute_metrics／
+%%   compute_baseline_metrics／compute_report_aggregates／
+%%   draw_diagnosis_sample_node／restrict_to_common 全部從 enriched_eval_predictions
+%%   讀表，讀到的是這個 model_version 評估過的所有月份，各自用
+%%   restrict_to_eval_snap_date 篩回本次評估月份。--compare-only 沒有
+%%   prepare_eval_data，一樣直接讀這張表；validate_enriched_eval_predictions_present
+%%   維持零輸出檢查（B4：該月無資料就擋）。
+
 %% 兩種模式的形狀不同（ADR-0018 決定 5）
 %%   registry 診斷與 render_diagnosis_pages 只在 --post-training 組出來；
 %%   監控模式（預設，含 --compare）改組 no_diagnosis_pages：零讀取、回空清單，
@@ -85,7 +97,7 @@ flowchart TB
 
   %% ---------------------- 主鏈：整理 ----------------------
   n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄（母體表缺欄只 WARN）</small>"]
-  d_eval(["eval_predictions<br/><small>一列 ＝ 一個 (time, entity, item) 候選<br/>5 個消費者・未 cache</small>"])
+  o_enriched(["enriched_eval_predictions　★Hive<br/><small>join 在此算一次、以本月 partition 落地（dynamic overwrite）・ 一列 ＝ 一個 (time, entity, item) 候選<br/>存有這個 model_version 評估過的所有月份 ・ 每個讀者各自 restrict_to_eval_snap_date 篩回本次評估月份</small>"])
   d_segcols(["evaluation_segment_columns<br/><small>JSON ・ joined ／ sources ／ missing<br/>分群的 node 照 joined 分群、不看 frame 欄位</small>"])
 
   %% ---------------------- 指標流 ----------------------
@@ -117,11 +129,9 @@ flowchart TB
   end
   d_pages(["evaluation_diagnosis_pages<br/><small>兩種模式各由一個 node 產出</small>"])
 
-  %% ---------------------- 匯流與落地 ----------------------
+  %% ---------------------- 匯流 ----------------------
   n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
   o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
-  n_persist["persist_eval_predictions<br/><small>函式是 identity；寫入＝catalog save</small>"]
-  o_enriched(["enriched_eval_predictions　★Hive<br/><small>model_version / snap_date ・ 供 --compare-only 重用</small>"])
 
   %% ---------------------- 比較模式（追加） ----------------------
   subgraph CMP[" --compare &lt;key&gt; 追加這三個 node（--compare-only 則只跑這三個 ＋ 一個驗證 node） "]
@@ -139,23 +149,23 @@ flowchart TB
   src_teval --> n_prep
   src_label --> n_prep
   src_seg -- "先讀欄位清單（只碰 metastore）<br/>dropDuplicates(key) 後 left join" --> n_prep
-  n_prep --> d_eval
+  n_prep --> o_enriched
   n_prep --> d_segcols
   d_segcols --> n_metrics
   d_segcols --> n_baseline
   d_segcols --> n_sample
   d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
 
-  d_eval --> n_metrics
+  o_enriched --> n_metrics
   cfg_cat --> n_metrics
   n_metrics --> d_metrics
-  d_eval --> n_baseline
+  o_enriched --> n_baseline
   src_label -- "近 lookback_months 的歷史窗<br/>（查無資料時 raise，bug 1）" --> n_baseline
   n_baseline --> d_baseline
-  d_eval --> n_agg
+  o_enriched --> n_agg
   n_agg --> d_agg
 
-  d_eval --> n_sample
+  o_enriched --> n_sample
   n_sample --> d_sample
   d_sample --> n_ci
   n_ci --> d_ci
@@ -183,10 +193,7 @@ flowchart TB
   d_pages --> n_report
   n_report --> o_report
 
-  d_eval --> n_persist
-  n_persist --> o_enriched
-
-  d_eval --> n_restrict
+  o_enriched --> n_restrict
   o_enriched -- "--compare-only：catalog 依 model_version 讀回" --> n_validate
   n_validate --> n_restrict
   n_loadb --> d_braw
@@ -207,7 +214,7 @@ flowchart TB
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
   class art_gain art
-  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_persist,n_validate,n_loadb,n_restrict,n_creport nd
+  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
   class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline data
-  class d_eval,d_sample,d_pages,d_braw,d_common mem
+  class d_sample,d_pages,d_braw,d_common mem
   class o_report,o_enriched,o_creport out

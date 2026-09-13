@@ -125,9 +125,23 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 
 使用者逐個 `snap_date` 跑，過去跑過的月份要能重新產出。這在改動前後都成立：表以 `snap_date` 分區、寫入走 `spark.sql.sources.partitionOverwriteMode=dynamic`，重跑某個月只覆寫 `(model_version, 那個月)` 那一格。**表名、分區佈局都不變，所以不需要遷移 script。**
 
+（2026-09-14 更正，#352：這句對**表的內容**成立，實跑確認重跑一個月、另一個月的分區 digest 不變。對**讀這張表算出來的抽樣類 JSON** 不完全成立：CI、診斷範例依賴列的物理順序，換 Spark 平行度或換讀取來源就可能不同，見本決定〈實作更正〉。這是 main 上既有的性質。）
+
 ### `--compare-only` 的 B4 檢查改成零輸出的閘門
 
 現在 `validate_enriched_eval_predictions_present` 讀表、篩月、非空才放行、**輸出**篩過的 frame 給 `restrict_to_common`。改成：它只做「非空才放行」，零輸出，名字不改；`restrict_to_common` 跟其他消費者一樣自己篩。零輸出的閘門 node 是 [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md) 登記過的形狀（`validate_data_consistency`），由模式清單點名進來、切片永遠拉不回來——對 `--compare-only` 這條沒有切片用例的短 pipeline，這是可接受的。
+
+### 實作更正（2026-09-14，#352）
+
+- **S6 登記的是 `eval_snap_date`，不是 `restrict_to_eval_snap_date`。** `steps/snap_date_scope.py` 有兩個函式：`eval_snap_date(parameters)` 讀設定鍵，`restrict_to_eval_snap_date` 呼叫它。B4 閘門的錯誤訊息要印月份，改成跟 `eval_snap_date` 拿，所以 `validate_enriched_eval_predictions_present` 那筆登記一併刪掉，登記表總數不變。`prepare_eval_data` 自己的讀取與登記不動。使用者 2026-09-14 簽核。
+- **AST 測試從 node 的函式物件取原始碼（`inspect.getsource(node.func)`），不是從 `pipeline.py` 的 import 反查模組。** 目的相同（不寫死檔名），但 `draw_diagnosis_sample_node` 是 factory 造出來的內層函式，照 import 反查找到的是 factory。測試另外要求呼叫的第一個引數是綁到這張表的那個參數名（位置綁定），對別的 frame 呼叫不算數。
+- **「第一步」的解讀**：`compute_baseline_metrics`、`compute_report_aggregates`、`draw_diagnosis_sample_node` 在設定關閉時直接回 stub、不碰 frame，篩月份放在那之後，是「第一件對 frame 做的事」。
+- **讀表的分群 node 另外比對 `segment_columns.json` 的指紋**（只比四個鍵）。定案與理由寫在 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 6 的 #352 更正。
+- **`month_plans` 只在標準／`--compare` 模式傳。** `--compare-only` 沒有 `prepare_eval_data` 可以拉回來，不傳；`evaluation.snap_date` 沒設定時也不傳，讓 `prepare_eval_data` 報它原本的錯。
+- **`--compare-only` 的兩樣輸入在 CLI 入口先查**（`__main__.py::_compare_only_input_errors`）：這個月的分區在不在（分區清單）、`segment_columns.json` 在不在（檔案），缺哪樣列哪樣，再寫出該先跑的指令。本份原文沒有這一條，是票面〈`segment_columns.json` 與分區同生同滅〉的實作。分區也在 CLI 查、不只靠 B4 閘門，是因為上面那段「零輸出的閘門切片永遠拉不回來」有一個本份沒想到的後果：`--compare-only --from-node load_compare_predictions` 會跳過閘門，分區不在時照樣產出 A 側全空的比較報表、退出碼 0（main 上閘門有輸出，同一個切片會把它拉回來）。閘門留下來擋「分區列得出來但沒有列」。
+- **「所有 JSON 產物跟 main 比只落在 noise floor」這條驗收，物化之後做不到，改用佈局 noise floor。** `metric_ci.json` 的 CI、`suppression.json`／`item_ability.json` 挑出的範例、`report_aggregates.json` 的清單順序與近似分位數，都依賴列的物理順序：bootstrap 用 `pd.factorize` 依列出現順序給 cluster 編號再抽號碼，`nlargest` 同值取先出現的，`percentile_approx` 與浮點加總順序也跟分區有關。main 自己跑兩次一樣，只是因為兩次的 Spark 計畫相同；物化換掉了列序，逐字比一定有差。改用的證據（`data/verification/layout/layout_noise_floor.md`，worktree 內、不進版控）：main 程式碼只把 `spark.master` 換成 `local[2]`，就出現同一批差異路徑；branch 對 main 的差異路徑扣掉這批，只剩小數第 16 位；抽樣結果排序後逐列相同，同一份樣本換列序 CI 就變、排序後又一樣。分區逐列 digest、`metrics.json`、`baseline_metrics.json`、`segment_columns.json` 與 main 逐字相同。列序依賴是 main 上既有的，不是本決定造成的。
+- **監控模式的 `score_uncalibrated` 不是 NULL。** 上面〈同一張表、兩種模式〉寫「監控模式讀 `ranked_predictions`，帶 `rank`、不帶 `score_uncalibrated`」，決定 5 第 2 件之後已不成立：inference 也寫這一欄，實跑監控分區這欄 0 個 NULL。實跑裡全 NULL 的是 post-training 那次從 `sample_pool` join 進來、而 `inference_population` 沒有的 segment 欄。`draw_diagnosis_sample` 那行註解照實寫成「通常有值，舊分區才可能全 NULL，兩種都無害」。
+- `RESUME_CONTRACTS` 兩種模式各加一筆 `compute_metrics`：只補跑 `draw_diagnosis_sample_node`（監控另加 `no_diagnosis_pages`），`prepare_eval_data` 不在裡面。
 
 ---
 
