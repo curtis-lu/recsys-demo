@@ -115,6 +115,42 @@ def test_category_section_present_when_enabled_and_present():
     assert "大類" in out
 
 
+def test_category_section_columns_clamp_to_category_count():
+    """bug 8 (ADR-0020): 3 categories, primary_map_k=[1,3,5,"all"] -> the
+    大類 per-item map_attr@k table must not show @5 (5 > n_cat=3)."""
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_metrics = {
+        "overall": {"map@1": 0.4},
+        "per_item": {
+            "fund": {"hit_rate@1": 0.5, "map_attr@1": 0.4, "map_attr@3": 0.5,
+                     "map_attr@5": 0.5, "mean_pos": 1.0},
+            "exchange": {"hit_rate@1": 0.4, "map_attr@1": 0.3, "map_attr@3": 0.4,
+                        "map_attr@5": 0.4, "mean_pos": 1.5},
+            "ccard": {"hit_rate@1": 0.3, "map_attr@1": 0.2, "map_attr@3": 0.3,
+                     "map_attr@5": 0.3, "mean_pos": 2.0},
+        },
+        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "map_attr@3": 0.4}},
+        "dataset_overview": {"totals": {"n_items": 3}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    p["evaluation"]["report"]["display"]["primary_map_k"] = [1, 3, 5, "all"]
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None
+    tbl = sec.tables[sec.table_titles.index(
+        next(t for t in sec.table_titles if t.startswith(
+            "大類 per-item map_attr@k (M/B/Δ)"
+        ))
+    )]
+    cols = [str(c) for c in tbl.columns]
+    assert not any(c.startswith("map_attr@5") for c in cols)
+    assert any(c.startswith("map_attr@3") for c in cols)
+
+
 def test_per_item_section_discloses_macro_item_coverage():
     """bug 5 (ADR-0020): comparison report's per-item M/B/Δ titles state each
     side's macro item coverage, same as the main report."""

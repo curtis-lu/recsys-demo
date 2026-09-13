@@ -387,6 +387,26 @@ def test_metrics_section_category_present_when_key():
     assert any("大類" in tt for tt in s.table_titles)
 
 
+def test_metrics_section_category_columns_clamp_to_category_count():
+    """bug 8 (ADR-0020): only 3 categories -> the 大類 overall family table
+    (which uses the literal [1,2,3,4,5,"all"] superset) must not show @4/@5;
+    fine-grained tables (n_items=2 in this fixture) are unaffected."""
+    m = _metrics()
+    m["category"] = {
+        "overall": {"map@1": 0.4, "map@2": 0.45, "map@3": 0.5},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0},
+                     "exchange": {"hit_rate@1": 0.4, "mean_pos": 1.5},
+                     "ccard": {"hit_rate@1": 0.5, "mean_pos": 1.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "mean_pos": 1.5}},
+        "dataset_overview": {"totals": {"n_items": 3}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    cat_overall = next(t for t, tt in zip(s.tables, s.table_titles)
+                       if "大類 overall" in tt)
+    cols = [str(c) for c in cat_overall.columns]
+    assert cols == ["@1", "@2", "@3", "@all"]
+
+
 def test_metrics_section_none_when_off():
     p = _params()
     p["evaluation"]["report"]["sections"] = {"primary_map": False}
@@ -602,6 +622,31 @@ class TestLegacyDatasetOverviewRefused:
         """baseline 的 slim bundle 本來就沒有 dataset_overview，不得被誤擋。"""
         assert rb._dataset_overview({"overall": {"map@1": 0.5}}) == {}
         assert rb._n_items({"overall": {"map@1": 0.5}}) == 0
+
+
+class TestResolveDisplayKClampsToItemCount:
+    """bug 8 (ADR-0020): the display K list used to be an unclamped
+    superset — with only 3 categories, the report still printed @4/@5,
+    whose precision denominator is just K (not min(K, n_items)), so those
+    columns decline purely because the denominator grew, not because the
+    model did anything different. Fix is a filter over the given list
+    (never regenerates it — a caller list without "all" doesn't gain one),
+    keeping "all" always."""
+
+    def test_drops_k_above_n_items_keeps_all(self):
+        assert rb._resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
+
+    def test_keeps_everything_when_n_items_covers_it(self):
+        assert rb._resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
+
+    def test_does_not_add_all_when_caller_list_lacks_it(self):
+        assert rb._resolve_display_k([1, 3, 5], 3) == [1, 3]
+
+    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
+        """n_items<=0 means overview data is missing (e.g. baseline's slim
+        per_item bundle) — filtering would collapse every table down to
+        just "@all"."""
+        assert rb._resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
 class TestVisibleMetricKeys:
@@ -987,13 +1032,15 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
 
 def test_baseline_section_overall_tables_use_k_superset_columns():
     """overall family 表以 k superset [1,2,3,4,5,all] 放欄位（explicit family，
-    不再吃任意 metric key）。"""
+    不再吃任意 metric key），但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items
+    的欄——fixture n_items=2，故 @3/@4/@5 都不該出現，只留 [1,2,all]。"""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
     s = rb.build_baseline_section(m, base, _params())
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     cols = [str(c) for c in s.tables[idx].columns]
-    assert "@1" in cols and "@5" in cols and "@all" in cols
+    assert "@1" in cols and "@2" in cols and "@all" in cols
+    assert "@5" not in cols  # bug 8: n_items=2 clamps out K > n_items
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
@@ -1026,8 +1073,9 @@ def _title_starting_with(titles: list[str], prefix: str) -> str:
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
-    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]
-    （Task：baseline per-item 兩表統一 k 集）。"""
+    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]，
+    但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items——fixture n_items=2，
+    故 K=3 被濾掉，只留 [1, all]（@all 仍解析為 @2）。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -1035,7 +1083,6 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "recall@1 M", "recall@1 B", "recall@1 Δ",
-        "recall@3 M", "recall@3 B", "recall@3 Δ",
         "recall@all M", "recall@all B", "recall@all Δ",
     ]
     # Macro row first.
@@ -1055,7 +1102,8 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
-    'all' resolves to n_items (=2 in fixture) for lookup."""
+    'all' resolves to n_items (=2 in fixture) for lookup. bug 8 (ADR-0020)
+    clamps K=3 out (3 > n_items=2), leaving [1, all]."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
@@ -1063,7 +1111,6 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "map_attr@1 M", "map_attr@1 B", "map_attr@1 Δ",
-        "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
         "map_attr@all M", "map_attr@all B", "map_attr@all Δ",
     ]
     # n_items=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.

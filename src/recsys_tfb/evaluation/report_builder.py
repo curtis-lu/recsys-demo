@@ -22,6 +22,17 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
     Returns labels as strings/ints that are used both as dict keys and for
     metric lookups. 'all' resolves to n_items for metric lookup but is
     kept as the label 'all' for display.
+
+    Filters out any int K > n_items (bug 8, ADR-0020): with e.g. 3 product
+    categories, precision@K's denominator is K itself (not min(K, n_items)),
+    so @4/@5 declined purely because the denominator grew, not because the
+    model did anything different — those columns aren't wrong, they're
+    meaningless. This is a filter over the given list, not a regenerated
+    one: a caller list without "all" does not gain one, and "all" is always
+    kept. When ``n_items <= 0`` (overview data is missing — e.g. baseline's
+    slim per_item bundle has no dataset_overview) skip the filter entirely,
+    since filtering an unknown item count would collapse every table down
+    to just "@all".
     """
     out = []
     for k in raw_k:
@@ -29,7 +40,9 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
             out.append("all")
         else:
             out.append(int(k))
-    return out
+    if n_items <= 0:
+        return out
+    return [k for k in out if k == "all" or k <= n_items]
 
 
 def _k_to_lookup(k, n_items: int) -> int | str:
