@@ -746,11 +746,12 @@ def _compute_core(
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
-                # per_item_segment 是兩層 {item: {segment: cell}}：攤平成所有
-                # (item, segment) cell 再做 macro，每個 cell 一票。cell 亦受
-                # min_positives 過濾（cell 的 n_pos < 門檻即移出
-                # by_item_segment macro）；觀察名單只在 item 粒度回報，cell
-                # 層級不另列。
+                # per_item_segment is two-level {item: {segment: cell}}:
+                # flatten to every (item, segment) cell, then macro with one
+                # vote per cell. Cells are also subject to min_positives (a
+                # cell with n_pos below the threshold leaves the
+                # by_item_segment macro); observation_items is reported at
+                # item grain only, cells are not listed.
                 cells = {
                     (item, seg): cell
                     for item, by_seg in per_item_segment.items()

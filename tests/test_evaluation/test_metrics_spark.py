@@ -768,18 +768,20 @@ def test_param_macro_numpy_matches_spark(spark):
 
 
 # ===========================================================================
-# metric.k — 主指標家族的截斷深度，與 k_values 是兩個獨立的軸（ADR-0020 設計 H）
+# metric.k — truncation depth of the headline per-item family, an axis
+# independent of k_values (ADR-0020 design H)
 # ===========================================================================
 
 
 def _metric_k_pdf():
-    """3 item × 3 query、query 內無同分。metric.k=2 < n_items=3，截斷真的生效。
+    """3 items x 3 queries, no ties within a query. metric.k=2 < n_items=3,
+    so the truncation actually bites.
 
-    C0: A .9(1) B .5(0) C .1(1) → A 名次 1 貢獻 1；C 名次 3 貢獻 2/3（k=2 → 0）
-    C1: B .8(1) C .6(0) A .3(0) → B 名次 1 貢獻 1
-    C2: C .7(0) A .6(1) B .2(1) → A 名次 2 貢獻 1/2；B 名次 3 貢獻 2/3（k=2 → 0）
+    C0: A .9(1) B .5(0) C .1(1) -> A rank 1 adds 1; C rank 3 adds 2/3 (k=2 -> 0)
+    C1: B .8(1) C .6(0) A .3(0) -> B rank 1 adds 1
+    C2: C .7(0) A .6(1) B .2(1) -> A rank 2 adds 1/2; B rank 3 adds 2/3 (k=2 -> 0)
 
-    截斷在 2：A=.75、B=.5、C=0 → macro 5/12；不截斷時 macro=.75。
+    Truncated at 2: A=.75, B=.5, C=0 -> macro 5/12; untruncated macro=.75.
     """
     import pandas as pd
 
@@ -806,8 +808,9 @@ def _metric_k_params():
 
 
 def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
-    """metric.k 不在 k_values 裡，主線照樣產出 map_attr@{metric.k}，
-    且與 CI 的點估在同一份資料上相等——兩者同截斷才會相等。
+    """metric.k is not in k_values, yet the main path still emits
+    map_attr@{metric.k}, and it equals the CI point estimate on the same
+    data — they only match when both are truncated the same way.
     """
     from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 
@@ -822,7 +825,8 @@ def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
 
 
 def test_metric_k_grid_shared_by_slim_path(spark):
-    """baseline 走的 slim 路徑與主線用同一個 K 網格（含 metric.k），兩側才對得齊。"""
+    """The baseline's slim path uses the same K grids as the main path
+    (metric.k included on the per-item side), so the two sides line up."""
     pdf = _metric_k_pdf()
     params = _metric_k_params()
     slim = ms.compute_overall_per_item(spark.createDataFrame(pdf), params)
@@ -868,16 +872,17 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
 
 
 # ===========================================================================
-# per_item_segment — 兩層 dict，不再用 "_" 串接 key（ADR-0020 bug 12）
+# per_item_segment — two-level dict, no more "_"-joined keys (ADR-0020 bug 12)
 # ===========================================================================
 
 
 def test_per_item_segment_is_two_level_and_collision_free(spark):
-    """(item="a", seg="b_c") 與 (item="a_b", seg="c") 舊版都串成 "a_b_c"，後寫覆蓋先寫。
+    """(item="a", seg="b_c") and (item="a_b", seg="c") both used to join to
+    "a_b_c", and the later write overwrote the earlier one.
 
-    C0（seg b_c）: a .9(1)  a_b .1(0) → cell (a, b_c)   map_attr@2 = 1
-    C1（seg c）  : a .9(0)  a_b .1(1) → cell (a_b, c)   map_attr@2 = 1/2
-    by_item_segment 對 cell 等權 → (1 + 1/2) / 2 = 0.75。
+    C0 (seg b_c): a .9(1)  a_b .1(0) -> cell (a, b_c)   map_attr@2 = 1
+    C1 (seg c)  : a .9(0)  a_b .1(1) -> cell (a_b, c)   map_attr@2 = 1/2
+    by_item_segment weights cells equally -> (1 + 1/2) / 2 = 0.75.
     """
     df = spark.createDataFrame(
         [

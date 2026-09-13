@@ -575,12 +575,13 @@ class TestWeightedMap:
 
 
 # ---------------------------------------------------------------------------
-# metric_params — `evaluation.metric` 的唯一讀取點（ADR-0020 設計 H）
+# metric_params — the shared reader of `evaluation.metric` (ADR-0020 design H)
 # ---------------------------------------------------------------------------
 
 
 class TestMetricParams:
-    """import 放在各測試裡：共用版還不存在時，本檔其餘測試照樣收得到。"""
+    """Imports live inside each test, so the rest of this file still collected
+    while the shared helper did not exist yet."""
 
     DEFAULTS = {
         "k": None, "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0,
@@ -619,11 +620,12 @@ class TestMetricParams:
 
 
 def test_metric_params_is_defined_exactly_once():
-    """src/ 與 scripts/ 裡 `def metric_params` 只能有一份（設計 H）。
+    """Exactly one `def metric_params` across src/ and scripts/ (design H).
 
-    多份複製品各自漂移正是設計 H 要消掉的東西：只改報表註腳、不收讀取點，
-    fallback 語意照樣會分岔。先斷言兩個目錄存在，免得路徑錯了掃到零個檔案
-    還誤判成「只剩一份」。
+    Copies drifting apart is what design H removes: fixing only the report
+    note while leaving several readers would let the fallback semantics fork
+    again. Both directories are asserted to exist first, so a wrong path that
+    scans zero files cannot pass as "only one left".
     """
     import re
     from pathlib import Path

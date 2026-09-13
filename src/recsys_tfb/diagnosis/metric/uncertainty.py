@@ -42,8 +42,8 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     eval_params = parameters.get("evaluation", {}) or {}
     mp = metric_params(parameters)
     k = mp["k"]
-    # macro_from_per_item 不收 k；JSON 的 "metric_params" 也維持不含 k 的形狀
-    # （k 另外放在頂層 "k"）。
+    # macro_from_per_item does not take k; the JSON's "metric_params" keeps
+    # its k-free shape too (k is stored separately, at the top-level "k").
     macro_params = {name: v for name, v in mp.items() if name != "k"}
     diag_cfg = eval_params.get("diagnosis", {}) or {}
     n_boot = int((diag_cfg.get("ci", {}) or {}).get("n_boot", 200))
