@@ -93,26 +93,38 @@ def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
     return sorted(out)
 
 
-def _resolve_k_grid(parameters: dict, n_items: int) -> list[int]:
-    """The K grid actually computed: ``evaluation.k_values`` ∪ {``evaluation.metric.k``}.
+def _resolve_k_grids(
+    parameters: dict, n_items: int
+) -> tuple[list[int], list[int]]:
+    """``(query_ks, item_ks)``: the per-query and the per-item K grids.
 
-    Two independent axes (ADR-0020 design H): ``k_values`` is the K grid of
-    the ``@K`` families; ``metric.k`` is the truncation depth of the headline
-    per-item macro — point estimate and CI alike — and need not be listed in
-    ``k_values``. Adding it here guarantees
-    ``macro_avg["by_item"][f"map_attr@{metric.k}"]`` exists.
+    Two independent axes (ADR-0020 design H). ``evaluation.k_values`` is the
+    K grid of the ``@K`` families. ``evaluation.metric.k`` is the truncation
+    depth of the headline per-item macro only — point estimate and CI alike —
+    and need not be listed in ``k_values``. So:
+
+    * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
+      ``aggregate_overall`` / ``aggregate_per_segment``.
+    * ``item_ks`` = ``k_values`` ∪ {``metric.k``}: ``add_row_contributions``
+      and ``aggregate_per_item`` (per_item and per_item_segment), which is
+      what guarantees ``macro_avg["by_item"][f"map_attr@{metric.k}"]``.
+
+    Putting ``metric.k`` into the per-query grid is wrong without being an
+    error: ``overall`` / ``per_segment`` silently gain ``map@k`` /
+    ``precision@k`` / ``recall@k`` / ``ndcg@k`` that nobody listed, and the
+    comparison report prints every ``overall`` key as a row. ``item_ks`` is a
+    superset of ``query_ks``, so the per-query layer only reads a subset of
+    the enriched columns. ``metric.k=None`` makes the two grids equal.
 
     ``_compute_core`` and ``compute_overall_per_item`` (the baseline's slim
-    path) both resolve their grid through this one function, so the two
-    sides line up. ``metric.k=None`` leaves the grid exactly as
-    ``_resolve_k_values(k_values)``.
+    path) both resolve through this one function, so the two sides line up.
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    raw = list(eval_params.get("k_values", [5, "all"]))
+    query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), n_items)
     metric_k = metric_params(parameters)["k"]
-    if metric_k is not None:
-        raw.append(metric_k)
-    return _resolve_k_values(raw, n_items)
+    if metric_k is None:
+        return query_ks, query_ks
+    return query_ks, sorted(set(query_ks) | {metric_k})
 
 
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
@@ -671,14 +683,15 @@ def _compute_core(
 
     eval_params = parameters.get("evaluation", {}) or {}
     segment_columns = eval_params.get("segment_columns", []) or []
-    # macro_average 不收 k：metric.k 由 _resolve_k_grid 放進 K 網格，
-    # by_item 的 map_attr@{metric.k} 就是截斷在 k 的主指標點估。
+    # macro_average does not take k: metric.k reaches the macro through the
+    # per-item K grid (_resolve_k_grids), so by_item's map_attr@{metric.k} is
+    # the headline point estimate truncated at k.
     macro_params = {
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
     n_items = eval_predictions.select(item_col).distinct().count()
-    k_values = _resolve_k_grid(parameters, n_items)
+    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
@@ -697,7 +710,7 @@ def _compute_core(
             "n_excluded_queries": n_excluded_queries,
         }
 
-    enriched = add_row_contributions(df_with_pos, group_cols, label_col, k_values)
+    enriched = add_row_contributions(df_with_pos, group_cols, label_col, item_ks)
     enriched = enriched.cache()
     try:
         # ---- Detect active segment column ----
@@ -710,23 +723,23 @@ def _compute_core(
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=carry
+            enriched, group_cols, label_col, query_ks, carry_cols=carry
         ).cache()
         try:
             # ---- Layer 3: aggregations ----
-            overall = aggregate_overall(per_query, k_values)
+            overall = aggregate_overall(per_query, query_ks)
             per_item = aggregate_per_item(
-                enriched, [item_col], label_col, k_values
+                enriched, [item_col], label_col, item_ks
             )
 
             per_segment: dict = {}
             per_item_segment: dict = {}
             if active_seg_col:
                 per_segment = aggregate_per_segment(
-                    per_query, active_seg_col, k_values
+                    per_query, active_seg_col, query_ks
                 )
                 per_item_segment = aggregate_per_item(
-                    enriched, [item_col, active_seg_col], label_col, k_values
+                    enriched, [item_col, active_seg_col], label_col, item_ks
                 )
 
             macro_avg: dict = {"by_item": macro_average(per_item, **macro_params)}
@@ -805,8 +818,9 @@ def compute_overall_per_item(
 
     eval_params = parameters.get("evaluation", {}) or {}
     n_items = eval_predictions.select(item_col).distinct().count()
-    # 與 _compute_core 同一個網格（含 metric.k），baseline 與模型的 key 才對得齊。
-    k_values = _resolve_k_grid(parameters, n_items)
+    # Same grids as _compute_core (metric.k on the per-item side only), so
+    # baseline and model keys line up.
+    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
 
     df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
     df = add_query_total_rel(df, group_cols, label_col)
@@ -816,7 +830,7 @@ def compute_overall_per_item(
         return {"overall": {}, "per_item": {}}
 
     enriched = add_row_contributions(
-        df_with_pos, group_cols, label_col, k_values
+        df_with_pos, group_cols, label_col, item_ks
     ).cache()
     try:
         # Detect active segment column the same way as _compute_core (first
@@ -830,17 +844,17 @@ def compute_overall_per_item(
                     break
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, k_values, carry_cols=carry
+            enriched, group_cols, label_col, query_ks, carry_cols=carry
         )
         result = {
-            "overall": aggregate_overall(per_query, k_values),
+            "overall": aggregate_overall(per_query, query_ks),
             "per_item": aggregate_per_item(
-                enriched, [item_col], label_col, k_values
+                enriched, [item_col], label_col, item_ks
             ),
         }
         if active_seg_col:
             result["per_segment"] = aggregate_per_segment(
-                per_query, active_seg_col, k_values
+                per_query, active_seg_col, query_ks
             )
     finally:
         enriched.unpersist()

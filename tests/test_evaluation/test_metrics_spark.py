@@ -832,6 +832,41 @@ def test_metric_k_grid_shared_by_slim_path(spark):
     assert slim["overall"] == full["overall"]
 
 
+def test_metric_k_reaches_only_the_per_item_family(spark):
+    """``metric.k`` truncates the per-item macro family only; ``k_values``
+    alone is the @K grid of the per-query families (ADR-0020 design H).
+
+    ``k_values=[1, "all"]`` (all -> 3 items) with ``metric.k=2``: a leak would
+    silently add ``map@2`` / ``precision@2`` / ``recall@2`` / ``ndcg@2`` to
+    ``overall`` / ``per_segment``, and the comparison report prints every
+    ``overall`` key as a row, so nobody-configured rows would appear.
+    """
+    pdf = _metric_k_pdf()
+    pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
+    params = _make_parameters(
+        k_values=[1, "all"], segment_columns=["seg"], metric={"k": 2}
+    )
+    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+
+    assert [k for k in full["overall"] if k.endswith("@2")] == []
+    assert {"map@1", "map@3"} <= set(full["overall"])
+    for seg, cell in full["per_segment"].items():
+        assert [k for k in cell if k.endswith("@2")] == [], seg
+    assert [k for k in full["macro_avg"]["by_segment"] if k.endswith("@2")] == []
+
+    assert "map_attr@2" in full["per_item"]["A"]
+    assert full["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(5 / 12)
+    assert "map_attr@2" in full["per_item_segment"]["A"]["s1"]
+    assert "map_attr@2" in full["macro_avg"]["by_item_segment"]
+
+    slim = ms.compute_overall_per_item(
+        spark.createDataFrame(pdf), params, with_segment=True
+    )
+    assert slim["overall"] == full["overall"]
+    assert slim["per_segment"] == full["per_segment"]
+    assert slim["per_item"] == full["per_item"]
+
+
 # ===========================================================================
 # per_item_segment — 兩層 dict，不再用 "_" 串接 key（ADR-0020 bug 12）
 # ===========================================================================
