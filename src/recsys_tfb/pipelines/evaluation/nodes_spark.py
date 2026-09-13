@@ -396,6 +396,9 @@ def compute_baseline_metrics(
         compute_monthly_purchase_counts,
         compute_purchase_counts,
     )
+    from recsys_tfb.evaluation.baselines import (
+        lookback_months as resolve_lookback_months,
+    )
     from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
 
     eval_params = parameters.get("evaluation", {}) or {}
@@ -410,9 +413,11 @@ def compute_baseline_metrics(
     time_col = schema["time"]
     item_col = schema["item"]
     score_col = schema["score"]
-    lookback_months = (eval_params.get("baseline", {}) or {}).get(
-        "lookback_months", 12
-    )
+    # Single source of the default (bug 1, ADR-0020): before this helper
+    # existed, this node defaulted to 12 while build_baseline_section
+    # defaulted to None (printing nothing), so a run relying on the implicit
+    # default silently disagreed with itself about what it had used.
+    lookback_months = resolve_lookback_months(parameters)
 
     snap_dates = [
         str(r[time_col])

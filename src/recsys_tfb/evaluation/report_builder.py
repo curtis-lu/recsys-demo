@@ -23,6 +23,17 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
     Returns labels as strings/ints that are used both as dict keys and for
     metric lookups. 'all' resolves to n_items for metric lookup but is
     kept as the label 'all' for display.
+
+    Filters out any int K > n_items (bug 8, ADR-0020): with e.g. 3 product
+    categories, precision@K's denominator is K itself (not min(K, n_items)),
+    so @4/@5 declined purely because the denominator grew, not because the
+    model did anything different — those columns aren't wrong, they're
+    meaningless. This is a filter over the given list, not a regenerated
+    one: a caller list without "all" does not gain one, and "all" is always
+    kept. When ``n_items <= 0`` (overview data is missing — e.g. baseline's
+    slim per_item bundle has no dataset_overview) skip the filter entirely,
+    since filtering an unknown item count would collapse every table down
+    to just "@all".
     """
     out = []
     for k in raw_k:
@@ -30,7 +41,9 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
             out.append("all")
         else:
             out.append(int(k))
-    return out
+    if n_items <= 0:
+        return out
+    return [k for k in out if k == "all" or k <= n_items]
 
 
 def _k_to_lookup(k, n_items: int) -> int | str:
@@ -142,6 +155,43 @@ def _n_items(metrics: dict) -> int:
     return int((_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 
 
+def _macro_item_coverage(per_item: dict, parameters: dict) -> int:
+    """Items in ``per_item`` that actually enter a per-item macro average.
+
+    bug 5 (ADR-0020): ``per_item`` already excludes items with zero
+    positives this period (they never had a row to aggregate), and
+    ``evaluation.metric.min_positives`` (default 0 when unset/None) can
+    exclude further ones. Both are silent — the macro's denominator drifts
+    month to month with no visible cause. This is disclosure, not a
+    definition change: it counts the same set ``macro_average`` uses, it
+    does not alter what the Macro row's values are.
+    """
+    min_positives = (
+        ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
+        .get("min_positives") or 0
+    )
+    return sum(
+        1 for m in per_item.values()
+        if (m or {}).get("n_pos", 0) >= min_positives
+    )
+
+
+def _macro_coverage_suffix(n: int, m: int) -> str:
+    """Title suffix for a single-sided per-item macro table (bug 5)."""
+    return f"（參與 macro 的 item 數 {n}／全部 {m}）"
+
+
+def _macro_coverage_suffix_mb(n_a: int, n_b: int, m: int) -> str:
+    """Title suffix for an M/B/Δ-interleaved per-item macro table (bug 5).
+
+    Generic "M"/"B" labels (not "Model"/"Baseline") so the same helper reads
+    correctly whether the two sides are Model/Baseline (main report) or two
+    compared model versions (comparison report) — matching the tables'
+    existing "(M/B/Δ)" column convention.
+    """
+    return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {m}）"
+
+
 def build_overview_section(
     metrics: dict, parameters: dict, metric_ci: dict | None = None
 ) -> ReportSection:
@@ -203,8 +253,16 @@ def build_overview_section(
     # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
     totals = _dataset_overview(metrics).get("totals", {}) or {}
     entity_str = "×".join(get_schema(parameters)["entity"])
+    # bug 3 (ADR-0020)：n_queries 是 compute_dataset_overview 的「全部 query
+    # 數（filter 前）」，舊標籤寫成「有正例 query 數」——跟下面的「排除 query
+    # 數」互相矛盾（不可能同時有百萬個有正例的 query、又排除其中 95 萬個）。
+    # 標籤改對，並多印一列報表原本沒有任何地方給出的真值：有正例的 query 數
+    # ＝ n_queries − n_excluded_queries。
     scale = {
-        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "全部 query 數 n_queries": metrics.get("n_queries"),
+        "有正例的 query 數": _od(
+            metrics.get("n_queries"), metrics.get("n_excluded_queries")
+        ),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
@@ -592,18 +650,32 @@ def build_metrics_section(
         for col, field in (("CI 2.5%", "ci_low"), ("CI 97.5%", "ci_high"),
                            ("n_pos（CI 用）", "n_pos")):
             b_map[col] = [_ci_val(idx, field) for idx in b_map.index]
-    _add(b_map, "B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）", True)
+    # bug 5 (ADR-0020)：macro 分母是「有正例的 item 數」，零正例 item 從
+    # per_item 靜默消失；title 揭露參與 macro 的 item 數／全部 item 數，只在
+    # 有 Macro 列時才印（macro_item 為空表示這張表沒有 Macro 列）。
+    item_cov = (
+        _macro_coverage_suffix(
+            _macro_item_coverage(per_item, parameters), n_items
+        ) if macro_item else ""
+    )
+    _add(b_map, f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）{item_cov}",
+         True)
     _add(_per_item_recall_table(per_item, ks, n_items, macro_metrics=macro_item),
-         "B · per-item 歸因｜recall@k（列＝item）", True)
+         f"B · per-item 歸因｜recall@k（列＝item）{item_cov}", True)
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
         cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
+        cat_item_cov = (
+            _macro_coverage_suffix(
+                _macro_item_coverage(cat_pi, parameters), n_cat
+            ) if cat_macro_item else ""
+        )
         _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
                                     "@{k}", macro_metrics=cat_macro_item),
-             "B · 大類 per-item 歸因｜map_attr@k（列＝大類）", True)
+             f"B · 大類 per-item 歸因｜map_attr@k（列＝大類）{cat_item_cov}", True)
         _add(_per_item_recall_table(cat_pi, cks, n_cat,
                                     macro_metrics=cat_macro_item),
-             "B · 大類 per-item 歸因｜recall@k（列＝大類）", True)
+             f"B · 大類 per-item 歸因｜recall@k（列＝大類）{cat_item_cov}", True)
 
     # CI 點估對應哪一欄由 metric.k 決定（ADR-0020 設計 H），不寫死 @all。
     mk = metric_params(parameters)["k"]
@@ -751,10 +823,14 @@ def build_baseline_section(
     )
     # overall 三表用 k superset（使用者指定，k 放欄位）
     k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
-    lookback = (
-        ((parameters.get("evaluation", {}) or {}).get("baseline", {}) or {})
-        .get("lookback_months")
+    # Same helper the node (compute_baseline_metrics) reads — lazy import,
+    # same style as `compare` above (bug 1, ADR-0020): before this helper
+    # existed this line read .get("lookback_months") with no default, so an
+    # unset key printed nothing here while the node had in fact used 12.
+    from recsys_tfb.evaluation.baselines import (
+        lookback_months as resolve_lookback_months,
     )
+    lookback = resolve_lookback_months(parameters)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -820,6 +896,16 @@ def build_baseline_section(
     macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
     if per_item_b:
+        # bug 5 (ADR-0020)：兩側各自的 macro 分母都可能悄悄縮水，Model／
+        # Baseline 分開揭露；只在兩側都有 Macro 列時才印（macro_a/macro_b
+        # 皆非 None，同 _per_item_metric_compare_table 判斷 Macro 列的條件）。
+        item_cov = (
+            _macro_coverage_suffix_mb(
+                _macro_item_coverage(per_item_a, parameters),
+                _macro_item_coverage(per_item_b, parameters),
+                n_items,
+            ) if macro_a is not None and macro_b is not None else ""
+        )
         # 兩張 per-item M/B/Δ 用同一組 k（attr_ks＝primary_map_k），彼此一致；
         # 為控寬用縮減集，與衡量指標 per-item 的完整 [1..5,all] 不同（描述封邊）。
         for metric_key, col_fmt, ks, title in (
@@ -833,7 +919,7 @@ def build_baseline_section(
                     ks, n_items, metric_key, col_fmt,
                     macro_a=macro_a, macro_b=macro_b,
                 ),
-                title, True,
+                f"{title}{item_cov}", True,
             )
 
     # [4] per-segment mAP@k M/B/Δ — 只比主指標 mAP（控寬，reference 段）；rows＝
@@ -877,10 +963,10 @@ def build_baseline_section(
         }
         _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)
 
-    lookback_note = (
-        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
-        if lookback else ""
-    )
+    # Always printed now (bug 1): lookback is resolved via the shared helper
+    # above and is never unset, so there is no longer a "config didn't say"
+    # case to suppress this sentence for.
+    lookback_note = f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
     return ReportSection(
         title="baseline — popularity 對照",
         description=(
@@ -1110,9 +1196,14 @@ def build_completeness_section(
     # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
     # build_overview_section 的 entity 標籤）。
     item_col = get_schema(parameters)["item"]
+    # bug 3 (ADR-0020)：同 build_overview_section 的標籤修正——只動這兩列，
+    # metric_p 的讀取（下面 mk／weight_alpha 等）不在這條 bug 的範圍內。
     facts = {
         "k_values": eval_p.get("k_values"),
-        "有正例 query 數 n_queries": metrics.get("n_queries"),
+        "全部 query 數 n_queries": metrics.get("n_queries"),
+        "有正例的 query 數": _od(
+            metrics.get("n_queries"), metrics.get("n_excluded_queries")
+        ),
         "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),

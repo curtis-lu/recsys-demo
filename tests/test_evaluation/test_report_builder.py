@@ -139,6 +139,29 @@ def test_metrics_section_ci_point_note_follows_metric_k():
     assert "map_attr@all" in s_null.description
 
 
+def test_overview_scale_table_labels_n_queries_as_the_full_total():
+    """bug 3 (ADR-0020): n_queries is compute_dataset_overview's "all query
+    groups before filtering" count, but the scale table used to label it
+    "有正例 query 數" (queries WITH a positive) — self-contradictory next to
+    "排除 query 數" on the very same table (you can't simultaneously have a
+    million positive queries and exclude 950k of them). The label must say
+    "all queries", and the actually-missing number (queries with a positive
+    = n_queries - n_excluded_queries) must be printed somewhere."""
+    m = _metrics()
+    m["n_queries"] = 1_000_000
+    m["n_excluded_queries"] = 950_000
+    s = rb.build_overview_section(m, _params(), metric_ci=_metric_ci())
+    scale = next(t for t in s.tables if "n_excluded_queries" in " ".join(
+        str(i) for i in t.index))
+    idx = [str(i) for i in scale.index]
+    assert "全部 query 數 n_queries" in idx
+    assert not any("有正例 query 數" in i for i in idx)
+    assert "有正例的 query 數" in idx
+    row = dict(zip(idx, scale["value"]))
+    assert row["全部 query 數 n_queries"] == 1_000_000
+    assert row["有正例的 query 數"] == 50_000  # n_queries - n_excluded_queries
+
+
 def test_overview_no_verdict_vocabulary():
     s = rb.build_overview_section(_metrics(), _params(), metric_ci=_metric_ci())
     text = (s.description + " ".join(s.table_titles)
@@ -357,6 +380,33 @@ def test_metrics_section_detail_tables_collapsed():
     assert not s.collapsed_tables[0]    # overall 頂線可見
 
 
+def test_metrics_section_per_item_macro_titles_disclose_item_coverage():
+    """bug 5 (ADR-0020): per-item macro averages only average items that
+    have at least one positive this period — a zero-positive item silently
+    vanishes from the denominator (per_item), so the macro shifts across
+    months for a reason the report never states. Fix is disclosure, not a
+    definition change: the table title states N (items actually averaged)
+    out of M (the grain's total item count); the Macro row's own values are
+    untouched.
+    """
+    m = _metrics()  # per_item has exactly {"A", "B"} — 2 items
+    m["dataset_overview"]["totals"]["n_items"] = 3  # a 3rd item had 0 positives
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    map_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "map_attr@k" in t
+                     and "大類" not in t)
+    rec_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "recall@k" in t
+                     and "大類" not in t)
+    assert "2" in map_title and "全部 3" in map_title
+    assert "2" in rec_title and "全部 3" in rec_title
+    # Macro row's own values are unchanged by the disclosure (still the
+    # same equal-weight average of the 2 items actually in per_item).
+    by_title = dict(zip(s.table_titles, s.tables))
+    macro_row = by_title[map_title].loc[rb._MACRO_LABEL]
+    assert macro_row["@1"] == m["macro_avg"]["by_item"]["map_attr@1"]
+
+
 def test_metrics_section_has_macro_rows():
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
     # 以標題定位 per-item map_attr 表（欄名裸 @k，不能再靠欄名找）
@@ -376,6 +426,26 @@ def test_metrics_section_category_present_when_key():
     }
     s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
     assert any("大類" in tt for tt in s.table_titles)
+
+
+def test_metrics_section_category_columns_clamp_to_category_count():
+    """bug 8 (ADR-0020): only 3 categories -> the 大類 overall family table
+    (which uses the literal [1,2,3,4,5,"all"] superset) must not show @4/@5;
+    fine-grained tables (n_items=2 in this fixture) are unaffected."""
+    m = _metrics()
+    m["category"] = {
+        "overall": {"map@1": 0.4, "map@2": 0.45, "map@3": 0.5},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0},
+                     "exchange": {"hit_rate@1": 0.4, "mean_pos": 1.5},
+                     "ccard": {"hit_rate@1": 0.5, "mean_pos": 1.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "mean_pos": 1.5}},
+        "dataset_overview": {"totals": {"n_items": 3}},
+    }
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    cat_overall = next(t for t, tt in zip(s.tables, s.table_titles)
+                       if "大類 overall" in tt)
+    cols = [str(c) for c in cat_overall.columns]
+    assert cols == ["@1", "@2", "@3", "@all"]
 
 
 def test_metrics_section_none_when_off():
@@ -464,6 +534,23 @@ def test_completeness_section_lists_run_facts():
     assert "k" in joined.lower()               # k_values / metric.k 交代
     assert "query" in joined.lower()           # 規模
     assert "抽樣" in joined or "未抽樣" in joined  # sampling_description 流入
+
+
+def test_completeness_facts_label_n_queries_as_the_full_total():
+    """bug 3 (ADR-0020): same fix as build_overview_section, mirrored here.
+    Only the two n_queries-related labels change — metric_p reading
+    (build_completeness_section:1092/1097) is out of scope for this bug."""
+    m = _metrics()
+    m["n_queries"] = 1_000_000
+    m["n_excluded_queries"] = 950_000
+    s = rb.build_completeness_section(m, _params(), metric_ci=_metric_ci())
+    idx = [str(i) for i in s.tables[0].index]
+    assert "全部 query 數 n_queries" in idx
+    assert not any("有正例 query 數" in i for i in idx)
+    assert "有正例的 query 數" in idx
+    row = dict(zip(idx, s.tables[0]["value"]))
+    assert row["全部 query 數 n_queries"] == 1_000_000
+    assert row["有正例的 query 數"] == 50_000
 
 
 def test_completeness_section_no_verdict_vocabulary():
@@ -576,6 +663,31 @@ class TestLegacyDatasetOverviewRefused:
         """baseline 的 slim bundle 本來就沒有 dataset_overview，不得被誤擋。"""
         assert rb._dataset_overview({"overall": {"map@1": 0.5}}) == {}
         assert rb._n_items({"overall": {"map@1": 0.5}}) == 0
+
+
+class TestResolveDisplayKClampsToItemCount:
+    """bug 8 (ADR-0020): the display K list used to be an unclamped
+    superset — with only 3 categories, the report still printed @4/@5,
+    whose precision denominator is just K (not min(K, n_items)), so those
+    columns decline purely because the denominator grew, not because the
+    model did anything different. Fix is a filter over the given list
+    (never regenerates it — a caller list without "all" doesn't gain one),
+    keeping "all" always."""
+
+    def test_drops_k_above_n_items_keeps_all(self):
+        assert rb._resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
+
+    def test_keeps_everything_when_n_items_covers_it(self):
+        assert rb._resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
+
+    def test_does_not_add_all_when_caller_list_lacks_it(self):
+        assert rb._resolve_display_k([1, 3, 5], 3) == [1, 3]
+
+    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
+        """n_items<=0 means overview data is missing (e.g. baseline's slim
+        per_item bundle) — filtering would collapse every table down to
+        just "@all"."""
+        assert rb._resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
 class TestVisibleMetricKeys:
@@ -816,6 +928,26 @@ def test_baseline_shows_lookback_window():
     assert "12" in s.description
 
 
+def test_baseline_lookback_sentence_prints_the_nodes_actual_default():
+    """bug 1 (ADR-0020): the node (compute_baseline_metrics) defaults
+    lookback_months to 12 when evaluation.baseline.lookback_months is unset;
+    the report used to default to None instead and print no lookback
+    sentence at all for that same run — two different beliefs about what was
+    actually computed. Both must now read the same shared default (12)."""
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()  # no evaluation.baseline key
+    )
+    assert "過去 12 個月" in s.description
+
+
+def test_baseline_lookback_sentence_reflects_a_configured_value():
+    """Guardrail: an explicit lookback_months still prints its own value."""
+    p = _params_lookback()
+    p["evaluation"]["baseline"]["lookback_months"] = 6
+    s = rb.build_baseline_section(_metrics(), _baseline_metrics_full(), p)
+    assert "過去 6 個月" in s.description
+
+
 def test_baseline_overall_three_tables_k_as_columns():
     s = rb.build_baseline_section(
         _metrics(), _baseline_metrics_full(), _params()
@@ -845,7 +977,13 @@ def test_baseline_popularity_avg_per_month_when_lookback():
 
 
 def test_baseline_section_renders_popularity_table():
-    """purchase_counts -> popularity composition table prepended."""
+    """purchase_counts -> popularity composition table prepended.
+
+    ``平均每月`` is now always present (bug 1, ADR-0020): lookback_months
+    resolves via the shared helper's default (12) even when
+    evaluation.baseline is unset, so there is no longer an "unknown
+    lookback" case that omits this column.
+    """
     m = _metrics()
     base = {
         "overall": {"map@1": 0.4},
@@ -858,7 +996,7 @@ def test_baseline_section_renders_popularity_table():
     idx = s.table_titles.index("popularity 排名組成")
     tbl = s.tables[idx]
     # Sorted desc by count, with rank starting at 1.
-    assert list(tbl.columns) == ["count", "rank"]
+    assert list(tbl.columns) == ["count", "平均每月", "rank"]
     assert list(tbl.index) == ["B", "A", "C"]
     assert list(tbl["count"]) == [200, 50, 10]
     assert list(tbl["rank"]) == [1, 2, 3]
@@ -935,43 +1073,57 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
 
 def test_baseline_section_overall_tables_use_k_superset_columns():
     """overall family 表以 k superset [1,2,3,4,5,all] 放欄位（explicit family，
-    不再吃任意 metric key）。"""
+    不再吃任意 metric key），但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items
+    的欄——fixture n_items=2，故 @3/@4/@5 都不該出現，只留 [1,2,all]。"""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
     s = rb.build_baseline_section(m, base, _params())
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     cols = [str(c) for c in s.tables[idx].columns]
-    assert "@1" in cols and "@5" in cols and "@all" in cols
+    assert "@1" in cols and "@2" in cols and "@all" in cols
+    assert "@5" not in cols  # bug 8: n_items=2 clamps out K > n_items
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
-    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。"""
+    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。
+
+    Titles are matched by prefix, not exact equality: bug 5 (ADR-0020)
+    appends a "參與 macro 的 item 數 ..." coverage suffix to these titles
+    when both sides have a Macro row (as they do here)."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
     # Old delta-only title must be gone.
-    assert "per-item recall@k delta" not in s.table_titles
-    # Two new titles present.
-    for title in (
+    assert not any(t.startswith("per-item recall@k delta") for t in s.table_titles)
+    # Two new titles present, each carrying the bug-5 coverage suffix.
+    for prefix in (
         "per-item recall@k (M/B/Δ)",
         "per-item map_attr@k (M/B/Δ)",
     ):
-        assert title in s.table_titles
-    assert "per-item ndcg_attr@k (M/B/Δ)" not in s.table_titles
+        matches = [t for t in s.table_titles if t.startswith(prefix)]
+        assert len(matches) == 1, prefix
+        assert "參與 macro 的 item 數" in matches[0]
+    assert not any(
+        t.startswith("per-item ndcg_attr@k (M/B/Δ)") for t in s.table_titles
+    )
+
+
+def _title_starting_with(titles: list[str], prefix: str) -> str:
+    return next(t for t in titles if t.startswith(prefix))
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
-    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]
-    （Task：baseline per-item 兩表統一 k 集）。"""
+    """recall / map_attr 兩張 per-item M/B/Δ 表 k 欄一致＝primary_map_k=[1,3,all]，
+    但 bug 8 (ADR-0020) 對顯示側 clamp 掉 K > n_items——fixture n_items=2，
+    故 K=3 被濾掉，只留 [1, all]（@all 仍解析為 @2）。"""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("per-item recall@k (M/B/Δ)")
-    tbl = s.tables[idx]
+    title = _title_starting_with(s.table_titles, "per-item recall@k (M/B/Δ)")
+    tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "recall@1 M", "recall@1 B", "recall@1 Δ",
-        "recall@3 M", "recall@3 B", "recall@3 Δ",
         "recall@all M", "recall@all B", "recall@all Δ",
     ]
     # Macro row first.
@@ -984,19 +1136,22 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     assert abs(
         tbl.loc["Macro 平均", "recall@1 Δ"] - (0.15 - 0.115)
     ) < 1e-9
+    # bug 5: title discloses both sides' macro item coverage (fixture: A/B on
+    # both sides, no n_pos in either -> default min_positives=0 counts both).
+    assert "M 2／B 2／全部 2" in title
 
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
-    'all' resolves to n_items (=2 in fixture) for lookup."""
+    'all' resolves to n_items (=2 in fixture) for lookup. bug 8 (ADR-0020)
+    clamps K=3 out (3 > n_items=2), leaving [1, all]."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("per-item map_attr@k (M/B/Δ)")
-    tbl = s.tables[idx]
+    title = _title_starting_with(s.table_titles, "per-item map_attr@k (M/B/Δ)")
+    tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "map_attr@1 M", "map_attr@1 B", "map_attr@1 Δ",
-        "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
         "map_attr@all M", "map_attr@all B", "map_attr@all Δ",
     ]
     # n_items=2 means @all → lookup @2. Model A map_attr@2=0.55, Base=0.45.
