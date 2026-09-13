@@ -1,14 +1,24 @@
 """Restrict A/B compare predictions to the common (entity × item) universe.
 
-A side: already carries ``label`` (added upstream by ``prepare_eval_data``);
-   restrict keeps the existing label column unchanged.
-B side: always gets its label from this run's ``label_table`` — a LEFT JOIN
-   with missing filled as 0, mirroring ``prepare_eval_data``'s convention — so
-   both sides are scored against the same ground truth. A label column B
-   brings with it is dropped first (ADR-0020 bug 7): ``enriched_eval_predictions``
+A side: already carries ``label`` (added upstream by ``prepare_eval_data``, or
+   persisted with ``enriched_eval_predictions`` under ``--compare-only``);
+   restrict keeps it unchanged.
+B side: takes A's label, joined on the identity columns, so both sides are
+   scored against the same ground truth in every run mode (ADR-0020 bug 7).
+   A label column B brings with it is dropped first: ``enriched_eval_predictions``
    and ``training_eval_predictions`` both land with one, frozen at whatever
-   ``label_table`` said when B was persisted. Keeping it would let a label
-   backfill show up in every Δ as if it were a model difference.
+   ``label_table`` said when B was persisted.
+
+   Why A's label and not a fresh ``label_table`` join: A's label is not always
+   the current ``label_table`` either. ``--post-training`` keeps the label
+   stored with the training predictions on purpose, and ``--compare-only``
+   reads the one persisted by the standard run. Re-joining ``label_table`` for
+   B alone gives the two sides different answers in both of those modes;
+   re-joining it for both makes the comparison disagree with the main report
+   of the same run. Copying A's makes "same answer" hold by construction. The
+   cost: a B row whose (entity, item) A did not score has no answer to copy
+   and counts as 0 — which only happens when the two sides' candidate sets
+   are asymmetric.
 
 Re-ranks both sides within the query group — ``[time] + entity``, every
 column of ``schema.entity`` — because the candidate set just shrank. That is
@@ -32,7 +42,6 @@ from recsys_tfb.evaluation.metrics_spark import rank_within_query
 def restrict_to_common(
     a: SparkDataFrame,
     b: SparkDataFrame,
-    label_table: SparkDataFrame,
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, CommonUniverse]:
     schema = get_schema(parameters)
@@ -72,10 +81,9 @@ def restrict_to_common(
 
     if label_col in b_common.columns:
         b_common = b_common.drop(label_col)
-    labels = (
-        label_table.select(*identity_cols, label_col)
-        .join(F.broadcast(item_df), on=item_col, how="inner")
-    )
-    b_common = b_common.join(labels, on=identity_cols, how="left").fillna({label_col: 0})
+    # Raw ``a``, not ``a_common``: b_common is already restricted, so the join
+    # only picks shared keys, and A's re-ranking need not run a second time.
+    a_labels = a.select(*identity_cols, label_col)
+    b_common = b_common.join(a_labels, on=identity_cols, how="left").fillna({label_col: 0})
 
     return a_common, b_common, universe

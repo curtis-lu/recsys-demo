@@ -56,22 +56,8 @@ def b_df(spark):
     )
 
 
-@pytest.fixture
-def label_table(spark):
-    return spark.createDataFrame(
-        [
-            ("c1", "2026-01-31", "p1", 1),
-            ("c1", "2026-01-31", "p2", 0),
-            ("c1", "2026-01-31", "p3", 0),
-            ("c2", "2026-01-31", "p1", 0),
-            ("c2", "2026-01-31", "p3", 1),
-        ],
-        ["cust_id", "snap_date", "prod_name", "label"],
-    )
-
-
-def test_restricts_to_common_entities_and_items(a_df, b_df, label_table):
-    a_c, b_c, _ = restrict_to_common(a_df, b_df, label_table, _params())
+def test_restricts_to_common_entities_and_items(a_df, b_df):
+    a_c, b_c, _ = restrict_to_common(a_df, b_df, _params())
     a_rows = sorted((r["cust_id"], r["prod_name"]) for r in a_c.collect())
     b_rows = sorted((r["cust_id"], r["prod_name"]) for r in b_c.collect())
     # common cust = {c1, c2}; common prod = {p1, p2, p3}
@@ -83,63 +69,59 @@ def test_restricts_to_common_entities_and_items(a_df, b_df, label_table):
     assert b_rows == expected
 
 
-def test_rank_recomputed_within_common(a_df, b_df, label_table):
-    a_c, b_c, _ = restrict_to_common(a_df, b_df, label_table, _params())
+def test_rank_recomputed_within_common(a_df, b_df):
+    a_c, b_c, _ = restrict_to_common(a_df, b_df, _params())
     # B for c1 in common prods: scores p1=0.6, p2=0.8, p3=0.5 → ranks 2, 1, 3
     b_c1 = {r["prod_name"]: r["rank"] for r in b_c.filter("cust_id='c1'").collect()}
     assert b_c1 == {"p2": 1, "p1": 2, "p3": 3}
 
 
-def test_b_gets_label_via_left_join(a_df, b_df, label_table):
-    a_c, b_c, _ = restrict_to_common(a_df, b_df, label_table, _params())
-    assert "label" in b_c.columns
-    b_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in b_c.collect()}
-    assert b_labels[("c1", "p1")] == 1
-    assert b_labels[("c2", "p3")] == 1
-    assert b_labels[("c1", "p2")] == 0
-
-
-def test_b_missing_label_fillna_zero(a_df, b_df):
-    spark = a_df.sparkSession
-    sparse_labels = spark.createDataFrame(
-        [("c1", "2026-01-31", "p1", 1)],
-        ["cust_id", "snap_date", "prod_name", "label"],
-    )
-    _, b_c, _ = restrict_to_common(a_df, b_df, sparse_labels, _params())
-    b_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in b_c.collect()}
-    # p2/p3 not in sparse_labels — must fill 0
-    assert b_labels[("c1", "p2")] == 0
-    assert b_labels[("c1", "p3")] == 0
-
-
-def test_b_carried_label_is_replaced_by_label_table(a_df, b_df, label_table):
-    """bug 7 (ADR-0020): B scores against this run's ``label_table`` even when
-    it brings its own label.
+def test_b_label_follows_a_not_its_own_copy(a_df, b_df):
+    """bug 7 (ADR-0020): B is scored against A's answer, whatever it brings.
 
     Two of the three model_version sources (``enriched_eval_predictions``, the
-    default, and ``training_eval_predictions``) land with a label column. That
-    label is whatever ``label_table`` said when B was persisted; A is labelled
-    from ``label_table`` as it is now. Keeping B's copy lets a label backfill
-    leak into every Δ. The stale fixture marks every row positive, which
-    disagrees with ``label_table`` on (c1,p2), (c1,p3) and (c2,p1).
+    default, and ``training_eval_predictions``) land with a label column,
+    frozen at whatever ``label_table`` said when B was persisted. The stale
+    fixture marks every B row positive, and A is moved to 1 on (c1, p2): the
+    only way B shows exactly the labels below is by copying A. A bare B must
+    come out identical.
     """
     from pyspark.sql import functions as F
 
     stale_b = b_df.withColumn("label", F.lit(1))
+    a_moved = a_df.withColumn(
+        "label",
+        F.when((F.col("cust_id") == "c1") & (F.col("prod_name") == "p2"), 1)
+        .otherwise(F.col("label")),
+    )
 
-    _, b_from_stale, _ = restrict_to_common(a_df, stale_b, label_table, _params())
-    _, b_from_bare, _ = restrict_to_common(a_df, b_df, label_table, _params())
+    _, b_from_stale, _ = restrict_to_common(a_moved, stale_b, _params())
+    _, b_from_bare, _ = restrict_to_common(a_moved, b_df, _params())
 
     def _rows(df):
         return sorted(tuple(r[c] for c in sorted(df.columns)) for r in df.collect())
 
     assert sorted(b_from_stale.columns) == sorted(b_from_bare.columns)
-    assert _rows(b_from_bare), "no rows survived restriction — nothing was compared"
     assert _rows(b_from_stale) == _rows(b_from_bare)
+    labels = {
+        (r["cust_id"], r["prod_name"]): r["label"] for r in b_from_stale.collect()
+    }
+    assert labels == {
+        ("c1", "p1"): 1, ("c1", "p2"): 1, ("c1", "p3"): 0,
+        ("c2", "p1"): 0, ("c2", "p3"): 1,
+    }
 
 
-def test_a_preserves_existing_label(a_df, b_df, label_table):
-    a_c, _, _ = restrict_to_common(a_df, b_df, label_table, _params())
+def test_b_row_a_did_not_score_counts_as_zero(a_df, b_df):
+    """(c1, p3) survives restriction — c1 and p3 each appear on both sides —
+    but A never scored that pair, so B has no answer to copy there."""
+    _, b_c, _ = restrict_to_common(a_df, b_df, _params())
+    b_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in b_c.collect()}
+    assert b_labels[("c1", "p3")] == 0
+
+
+def test_a_preserves_existing_label(a_df, b_df):
+    a_c, _, _ = restrict_to_common(a_df, b_df, _params())
     a_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in a_c.collect()}
     # A's c1,p1 label was 1 in source fixture — preserved (not re-joined)
     assert a_labels[("c1", "p1")] == 1
@@ -150,7 +132,7 @@ def _join_lines(df) -> list[str]:
     return [ln.strip() for ln in plan.splitlines() if "Join" in ln]
 
 
-def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
+def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, spark):
     """Spark picks the entity join strategy; the item join is still forced (#275).
 
     ``F.broadcast()`` is not a hint Spark may decline — it overrides
@@ -168,7 +150,7 @@ def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, label_table, spark):
     old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
     try:
-        a_common, _, _ = restrict_to_common(a_df, b_df, label_table, _params())
+        a_common, _, _ = restrict_to_common(a_df, b_df, _params())
         joins = _join_lines(a_common)
     finally:
         spark.conf.set("spark.sql.autoBroadcastJoinThreshold", old)

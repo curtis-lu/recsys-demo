@@ -107,9 +107,10 @@ def _build_coverage_section(
             "n_query_group ＝「一個時間 × 一個 entity」的相異組合數，也就是排名的單位；"
             "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
             "n_item ＝相異 item 數。後續章節皆在 common universe 上重排重算。"
-            "common 欄的 n_query_group 是裁切後兩側都還在的 query group 數，"
-            "也就是後續指標實際用到的母體（entity 欄為 NULL 的列在裁切時就被丟掉，不計入）；"
-            "n_item 是兩側 item 集合的交集。"
+            "common 欄的 n_query_group 是裁切後兩側都還在的 query group 數"
+            "（entity 欄為 NULL 的列在裁切時就被丟掉，不計入）。兩側候選對稱時，它就是兩側指標用到的母體；"
+            "某個 group 在一側只剩對方沒有的 item 時，它只進得了另一側的指標，不算 common。"
+            "n_item 是兩側裁切前 item 集合的交集。"
         ),
         tables=[meta, coverage, dropped],
         table_titles=["雙方 metadata", "coverage", "被 drop 的 items"],
@@ -250,15 +251,16 @@ def _build_category_section(
         ),
         n_cat,
     )
+    side_a, side_b = "Model", "Compare"
     overall_tbl = pd.DataFrame(
-        {"Model": [overall_a.get(k) for k in keys],
-         "Compare": [overall_b.get(k) for k in keys],
+        {side_a: [overall_a.get(k) for k in keys],
+         side_b: [overall_b.get(k) for k in keys],
          "Δ": [overall_d.get(k) for k in keys]},
         index=keys,
     )
     tables.append(overall_tbl)
     titles.append(
-        f"大類 overall{_empty_overall_note(overall_a, overall_b, 'Model', 'Compare')}"
+        f"大類 overall{_empty_overall_note(overall_a, overall_b, side_a, side_b)}"
     )
     # bug 5 (ADR-0020): same disclosure as the fine-grained per-item section.
     item_cov = macro_coverage_suffix_mb(

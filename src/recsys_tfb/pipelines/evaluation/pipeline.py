@@ -69,7 +69,7 @@ def create_pipeline(
             Node(
                 restrict_to_common,
                 inputs=["eval_predictions", "compare_predictions_raw",
-                        "label_table", "parameters"],
+                        "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),
@@ -207,7 +207,7 @@ def create_pipeline(
             Node(
                 restrict_to_common,
                 inputs=["eval_predictions", "compare_predictions_raw",
-                        "label_table", "parameters"],
+                        "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),

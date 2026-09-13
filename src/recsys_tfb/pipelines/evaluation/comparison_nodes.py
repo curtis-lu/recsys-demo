@@ -33,7 +33,6 @@ def load_compare_predictions(parameters: dict) -> SparkDataFrame:
 def restrict_to_common(
     eval_predictions: SparkDataFrame,
     compare_predictions_raw: SparkDataFrame,
-    label_table: SparkDataFrame,
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
     """Pipeline shim: call the pure restrict function + capture coverage dict.
@@ -57,17 +56,22 @@ def restrict_to_common(
     time_col = schema["time"]
     query_group_cols = [time_col, *schema["entity"]]
 
+    # Decision — B is scored against A's labels: not the label B landed with,
+    # and not a fresh label_table join, since A's own label is not the current
+    # label_table under --post-training / --compare-only. One answer for both
+    # sides in every mode (ADR-0020 bug 7; the full why is in
+    # evaluation/comparison/restrict.py).
     a_common, b_common, universe = _restrict(
-        eval_predictions, compare_predictions_raw, label_table, parameters
+        eval_predictions, compare_predictions_raw, parameters
     )
 
     a_groups_full = eval_predictions.select(*query_group_cols).distinct().count()
     b_groups_full = compare_predictions_raw.select(*query_group_cols).distinct().count()
-    # Groups both restricted frames still hold. The left-semi join is the
-    # restriction's own join; on symmetric candidate sets this equals either
-    # side's kept group count, and when one side scored a common entity only on
-    # items the other lacks, that group is in one side's metrics but not in
-    # "common".
+    # Groups both restricted frames still hold. A left-semi equi-join, so null
+    # keys never match — the same null rule as the restriction's own joins. On
+    # symmetric candidate sets this equals either side's kept group count; when
+    # one side scored a common entity only on items the other lacks, that group
+    # is in one side's metrics but not in "common".
     groups_common = (
         a_common.select(*query_group_cols).distinct()
         .join(
