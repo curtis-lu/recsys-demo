@@ -498,13 +498,22 @@ def aggregate_per_item(
     dim_cols: list[str],
     label_col: str,
     k_values: list[int],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict]:
     """Row-equal-weight mean of per-row contributions over label=1 rows.
 
-    ``dim_cols`` can be ``[item_col]`` for per_item or
-    ``[item_col, seg_col]`` for per_item_segment.
+    ``dim_cols`` is ``[item_col]`` for per_item or ``[item_col, seg_col]``
+    for per_item_segment; the output nests one level per column:
 
-    Output per dim key (str-joined with '_' when multi-column):
+        [item_col]          → {item: {metrics…, n_pos}}
+        [item_col, seg_col] → {item: {segment: {metrics…, n_pos}}}
+
+    Two levels rather than a joined string key (ADR-0020 bug 12):
+    ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
+    seg="c")`` into the same key and the later row silently overwrote the
+    earlier one. Any other column count raises ``ValueError``. Dim values
+    are stringified.
+
+    Metrics per cell:
 
         hit_rate@K   = mean(top_k@K) over P-positive rows
                        = P(rank(P) <= K | P is positive)
@@ -525,6 +534,10 @@ def aggregate_per_item(
     (the K denominator is a per-query concept). Use ``hit_rate@K`` for
     the item-level recall analogue.
     """
+    if len(dim_cols) not in (1, 2):
+        raise ValueError(
+            f"aggregate_per_item supports 1 or 2 dim_cols, got {dim_cols!r}"
+        )
     rel = enriched.filter(F.col(label_col) == 1)
 
     aggs = [
@@ -542,15 +555,15 @@ def aggregate_per_item(
     rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
 
     metric_cols = _per_item_metric_cols(k_values)
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, dict] = {}
     for r in rows:
-        if len(dim_cols) == 1:
-            raw_key = r[dim_cols[0]]
-            key = raw_key if isinstance(raw_key, str) else str(raw_key)
+        cell: dict = {c: float(r[c]) for c in metric_cols}
+        cell["n_pos"] = int(r["n_pos"])
+        keys = [str(r[c]) for c in dim_cols]
+        if len(keys) == 1:
+            out[keys[0]] = cell
         else:
-            key = "_".join(str(r[c]) for c in dim_cols)
-        out[key] = {c: float(r[c]) for c in metric_cols}
-        out[key]["n_pos"] = int(r["n_pos"])
+            out.setdefault(keys[0], {})[keys[1]] = cell
     return out
 
 
@@ -720,11 +733,18 @@ def _compute_core(
             if per_segment:
                 macro_avg["by_segment"] = macro_average(per_segment)
             if per_item_segment:
-                # (item, segment) cell 亦受 min_positives 過濾（cell 的
-                # n_pos < 門檻即移出 by_item_segment macro）；觀察名單只在
-                # item 粒度回報，cell 層級不另列。
+                # per_item_segment 是兩層 {item: {segment: cell}}：攤平成所有
+                # (item, segment) cell 再做 macro，每個 cell 一票。cell 亦受
+                # min_positives 過濾（cell 的 n_pos < 門檻即移出
+                # by_item_segment macro）；觀察名單只在 item 粒度回報，cell
+                # 層級不另列。
+                cells = {
+                    (item, seg): cell
+                    for item, by_seg in per_item_segment.items()
+                    for seg, cell in by_seg.items()
+                }
                 macro_avg["by_item_segment"] = macro_average(
-                    per_item_segment, **macro_params
+                    cells, **macro_params
                 )
 
             observation_items = sorted(
@@ -860,7 +880,7 @@ def compute_all_metrics(
           "overall":          {map@K, ndcg@K, precision@K, recall@K, ...},
           "per_segment":      {seg_value: {map@K, ndcg@K, precision@K, recall@K, ...}},
           "per_item":         {item: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
-          "per_item_segment": {item_seg: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...}},
+          "per_item_segment": {item: {segment: {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, n_pos}}},
           "macro_avg": {
               "by_segment":      {map@K, ndcg@K, precision@K, recall@K, ...},
               "by_item":         {hit_rate@K, map_attr@K, ndcg_attr@K, mean_pos, ...},

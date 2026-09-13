@@ -432,7 +432,7 @@ def test_aggregate_per_item_hit_rate_below_one_when_pos_above_k(spark):
 
 
 def test_aggregate_per_item_multi_column_key(spark):
-    """dim_cols=[item, seg] → key joined with '_'. Only label=1 rows kept.
+    """dim_cols=[item, seg] → two-level {item: {seg: metrics}}. Only label=1 rows kept.
         label=1 rows: (A, mass), (B, affluent), (C, mass).
     """
     enriched = _enriched(spark, k_values=[3]).withColumn(
@@ -440,7 +440,18 @@ def test_aggregate_per_item_multi_column_key(spark):
         F.when(F.col("cust_id") == "C0", F.lit("mass")).otherwise(F.lit("affluent")),
     )
     per_ips = ms.aggregate_per_item(enriched, ["prod_name", "seg"], "label", [3])
-    assert set(per_ips.keys()) == {"A_mass", "B_affluent", "C_mass"}
+    assert {item: set(by_seg) for item, by_seg in per_ips.items()} == {
+        "A": {"mass"}, "B": {"affluent"}, "C": {"mass"},
+    }
+    assert per_ips["A"]["mass"]["n_pos"] == 1
+
+
+def test_aggregate_per_item_rejects_three_dim_cols(spark):
+    enriched = _enriched(spark, k_values=[3])
+    with pytest.raises(ValueError, match="1 or 2 dim_cols"):
+        ms.aggregate_per_item(
+            enriched, ["prod_name", "cust_id", "snap_date"], "label", [3]
+        )
 
 
 def test_aggregate_per_item_filters_label_zero_rows(spark):
@@ -565,7 +576,9 @@ def test_compute_all_metrics_with_segment_column(spark):
     params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
     result = ms.compute_all_metrics(df, params)
     assert set(result["per_segment"].keys()) == {"mass", "affluent"}
-    assert set(result["per_item_segment"].keys()) == {"A_mass", "B_affluent", "C_mass"}
+    assert {
+        item: set(by_seg) for item, by_seg in result["per_item_segment"].items()
+    } == {"A": {"mass"}, "B": {"affluent"}, "C": {"mass"}}
     assert "by_segment" in result["macro_avg"]
     assert "by_item_segment" in result["macro_avg"]
 
@@ -817,3 +830,33 @@ def test_metric_k_grid_shared_by_slim_path(spark):
     assert "map_attr@2" in slim["per_item"]["A"]
     assert slim["per_item"] == full["per_item"]
     assert slim["overall"] == full["overall"]
+
+
+# ===========================================================================
+# per_item_segment — 兩層 dict，不再用 "_" 串接 key（ADR-0020 bug 12）
+# ===========================================================================
+
+
+def test_per_item_segment_is_two_level_and_collision_free(spark):
+    """(item="a", seg="b_c") 與 (item="a_b", seg="c") 舊版都串成 "a_b_c"，後寫覆蓋先寫。
+
+    C0（seg b_c）: a .9(1)  a_b .1(0) → cell (a, b_c)   map_attr@2 = 1
+    C1（seg c）  : a .9(0)  a_b .1(1) → cell (a_b, c)   map_attr@2 = 1/2
+    by_item_segment 對 cell 等權 → (1 + 1/2) / 2 = 0.75。
+    """
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "a", 0.9, 1, "b_c"),
+            ("20240331", "C0", "a_b", 0.1, 0, "b_c"),
+            ("20240331", "C1", "a", 0.9, 0, "c"),
+            ("20240331", "C1", "a_b", 0.1, 1, "c"),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "seg"],
+    )
+    result = ms.compute_all_metrics(
+        df, _make_parameters(k_values=[2], segment_columns=["seg"])
+    )
+    pis = result["per_item_segment"]
+    assert pis["a"]["b_c"]["map_attr@2"] == pytest.approx(1.0)
+    assert pis["a_b"]["c"]["map_attr@2"] == pytest.approx(0.5)
+    assert result["macro_avg"]["by_item_segment"]["map_attr@2"] == pytest.approx(0.75)
