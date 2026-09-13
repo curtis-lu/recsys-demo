@@ -9,6 +9,8 @@ import pandas as pd
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
+    _macro_coverage_suffix_mb,
+    _macro_item_coverage,
     _per_item_metric_compare_table,
     _resolve_display_k,
     _k_to_lookup,
@@ -155,6 +157,16 @@ def _build_per_item_section(
 
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
+    # bug 5 (ADR-0020): disclose each side's macro item coverage — only when
+    # both sides actually get a Macro row (same condition
+    # _per_item_metric_compare_table uses to add one).
+    item_cov = (
+        _macro_coverage_suffix_mb(
+            _macro_item_coverage(per_item_a, parameters),
+            _macro_item_coverage(per_item_b, parameters),
+            n_items,
+        ) if macro_a is not None and macro_b is not None else ""
+    )
 
     tables, titles = [], []
     for metric_key, col_fmt, ks, title in (
@@ -167,7 +179,7 @@ def _build_per_item_section(
             macro_a=macro_a, macro_b=macro_b,
         )
         tables.append(tbl)
-        titles.append(title)
+        titles.append(f"{title}{item_cov}")
     return ReportSection(
         title="per-item M/B/Δ",
         description="細產品粒度的 recall / map_attr,頂列 Macro 平均。",
@@ -216,6 +228,14 @@ def _build_category_section(
     )
     tables.append(overall_tbl)
     titles.append("大類 overall")
+    # bug 5 (ADR-0020): same disclosure as the fine-grained per-item section.
+    item_cov = (
+        _macro_coverage_suffix_mb(
+            _macro_item_coverage(per_item_a, parameters),
+            _macro_item_coverage(per_item_b, parameters),
+            n_cat,
+        ) if macro_a is not None and macro_b is not None else ""
+    )
     for metric_key, col_fmt, ks, title in (
         ("hit_rate", "recall@{k}", rec_ks, "大類 per-item recall@k (M/B/Δ)"),
         ("map_attr", "map_attr@{k}", attr_ks, "大類 per-item map_attr@k (M/B/Δ)"),
@@ -226,7 +246,7 @@ def _build_category_section(
             macro_a=macro_a, macro_b=macro_b,
         )
         tables.append(tbl)
-        titles.append(title)
+        titles.append(f"{title}{item_cov}")
     return ReportSection(
         title="大類 Category M/B/Δ",
         description="大類粒度 overall + per-category recall/map_attr。只列雙方共通的大類。",

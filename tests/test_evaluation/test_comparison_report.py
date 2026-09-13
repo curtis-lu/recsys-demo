@@ -115,6 +115,44 @@ def test_category_section_present_when_enabled_and_present():
     assert "大類" in out
 
 
+def test_per_item_section_discloses_macro_item_coverage():
+    """bug 5 (ADR-0020): comparison report's per-item M/B/Δ titles state each
+    side's macro item coverage, same as the main report."""
+    from recsys_tfb.evaluation.comparison.report import _build_per_item_section
+
+    m_a, m_b = _metrics(), _metrics()
+    comp = _comparison(m_a, m_b)
+    sec = _build_per_item_section(m_a, m_b, comp, _params())
+    assert sec is not None
+    for title in sec.table_titles:
+        assert "參與 macro 的 item 數" in title
+        assert "M 2／B 2／全部 2" in title  # both sides: p1,p2 in per_item, n_items=2
+
+
+def test_category_section_discloses_macro_item_coverage():
+    from recsys_tfb.evaluation.comparison.report import _build_category_section
+
+    m_a, m_b = _metrics(), _metrics()
+    cat_metrics = {
+        "overall": {"map@1": 0.5, "map@3": 0.55},
+        "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+                              "map_attr@1": 0.4, "map_attr@3": 0.5,
+                              "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "dataset_overview": {"totals": {"n_items": 1}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"]["enabled"] = True
+    sec = _build_category_section(m_a, m_b, p)
+    assert sec is not None
+    per_item_titles = [t for t in sec.table_titles if t != "大類 overall"]
+    assert per_item_titles
+    for title in per_item_titles:
+        assert "M 1／B 1／全部 1" in title
+
+
 def test_glossary_section_present():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)

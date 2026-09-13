@@ -339,6 +339,33 @@ def test_metrics_section_detail_tables_collapsed():
     assert not s.collapsed_tables[0]    # overall 頂線可見
 
 
+def test_metrics_section_per_item_macro_titles_disclose_item_coverage():
+    """bug 5 (ADR-0020): per-item macro averages only average items that
+    have at least one positive this period — a zero-positive item silently
+    vanishes from the denominator (per_item), so the macro shifts across
+    months for a reason the report never states. Fix is disclosure, not a
+    definition change: the table title states N (items actually averaged)
+    out of M (the grain's total item count); the Macro row's own values are
+    untouched.
+    """
+    m = _metrics()  # per_item has exactly {"A", "B"} — 2 items
+    m["dataset_overview"]["totals"]["n_items"] = 3  # a 3rd item had 0 positives
+    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
+    map_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "map_attr@k" in t
+                     and "大類" not in t)
+    rec_title = next(t for t in s.table_titles
+                     if "per-item 歸因" in t and "recall@k" in t
+                     and "大類" not in t)
+    assert "2" in map_title and "全部 3" in map_title
+    assert "2" in rec_title and "全部 3" in rec_title
+    # Macro row's own values are unchanged by the disclosure (still the
+    # same equal-weight average of the 2 items actually in per_item).
+    by_title = dict(zip(s.table_titles, s.tables))
+    macro_row = by_title[map_title].loc[rb._MACRO_LABEL]
+    assert macro_row["@1"] == m["macro_avg"]["by_item"]["map_attr@1"]
+
+
 def test_metrics_section_has_macro_rows():
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
     # 以標題定位 per-item map_attr 表（欄名裸 @k，不能再靠欄名找）
@@ -970,20 +997,32 @@ def test_baseline_section_overall_tables_use_k_superset_columns():
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
-    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。"""
+    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg 不呈現)。
+
+    Titles are matched by prefix, not exact equality: bug 5 (ADR-0020)
+    appends a "參與 macro 的 item 數 ..." coverage suffix to these titles
+    when both sides have a Macro row (as they do here)."""
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
     assert s is not None
     # Old delta-only title must be gone.
-    assert "per-item recall@k delta" not in s.table_titles
-    # Two new titles present.
-    for title in (
+    assert not any(t.startswith("per-item recall@k delta") for t in s.table_titles)
+    # Two new titles present, each carrying the bug-5 coverage suffix.
+    for prefix in (
         "per-item recall@k (M/B/Δ)",
         "per-item map_attr@k (M/B/Δ)",
     ):
-        assert title in s.table_titles
-    assert "per-item ndcg_attr@k (M/B/Δ)" not in s.table_titles
+        matches = [t for t in s.table_titles if t.startswith(prefix)]
+        assert len(matches) == 1, prefix
+        assert "參與 macro 的 item 數" in matches[0]
+    assert not any(
+        t.startswith("per-item ndcg_attr@k (M/B/Δ)") for t in s.table_titles
+    )
+
+
+def _title_starting_with(titles: list[str], prefix: str) -> str:
+    return next(t for t in titles if t.startswith(prefix))
 
 
 def test_baseline_section_per_item_recall_table_three_cols_per_k():
@@ -992,8 +1031,8 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("per-item recall@k (M/B/Δ)")
-    tbl = s.tables[idx]
+    title = _title_starting_with(s.table_titles, "per-item recall@k (M/B/Δ)")
+    tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "recall@1 M", "recall@1 B", "recall@1 Δ",
         "recall@3 M", "recall@3 B", "recall@3 Δ",
@@ -1009,6 +1048,9 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     assert abs(
         tbl.loc["Macro 平均", "recall@1 Δ"] - (0.15 - 0.115)
     ) < 1e-9
+    # bug 5: title discloses both sides' macro item coverage (fixture: A/B on
+    # both sides, no n_pos in either -> default min_positives=0 counts both).
+    assert "M 2／B 2／全部 2" in title
 
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
@@ -1017,8 +1059,8 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     m = _metrics()
     base = _baseline_metrics_full()
     s = rb.build_baseline_section(m, base, _params())
-    idx = s.table_titles.index("per-item map_attr@k (M/B/Δ)")
-    tbl = s.tables[idx]
+    title = _title_starting_with(s.table_titles, "per-item map_attr@k (M/B/Δ)")
+    tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "map_attr@1 M", "map_attr@1 B", "map_attr@1 Δ",
         "map_attr@3 M", "map_attr@3 B", "map_attr@3 Δ",
