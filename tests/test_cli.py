@@ -613,6 +613,8 @@ class TestEvaluationCLIFlags:
         from recsys_tfb.__main__ import evaluation
 
         params_stub = {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},
             "dataset": {"test_snap_dates": ["2026-01-31"]},
             "evaluation": {"snap_date": "2026-01-31"},
         }
@@ -621,6 +623,12 @@ class TestEvaluationCLIFlags:
             def get_parameters_by_name(self, name):
                 if name == "parameters_evaluation":
                     return {"evaluation": {"snap_date": "2026-01-31"}}
+                return {}
+
+            def get_catalog_config(self, runtime_params):
+                # The month plan's partition listing (ADR-0018 decision 1)
+                # finds no enriched_eval_predictions entry here and treats the
+                # month as missing; this test only reads runtime_params.
                 return {}
 
         captured = {}
@@ -1724,7 +1732,7 @@ def _execute_pipeline_call_sites() -> dict[str, set[str]]:
     return sites
 
 
-class TestOnlyTheDatasetCommandIsMonthAware:
+class TestOnlyTheMonthAwareCommandsPassPlans:
     """#202's "其他三個 pipeline 的行為完全不變", pinned at the call sites.
 
     ``_make_can_load`` defaulting to ``month_plans=None`` is not the guarantee —
@@ -1733,9 +1741,13 @@ class TestOnlyTheDatasetCommandIsMonthAware:
     declared, and every other test in this file stays green when you do
     (verified: injecting a plan into the ``training`` call site changes nothing
     else). So assert the call sites themselves.
+
+    Two commands own months: ``dataset``, and since ADR-0018 decision 1
+    ``evaluation`` for ``enriched_eval_predictions`` (see
+    ``TestAnEvaluationMonthNotWrittenPullsTheJoinBack``).
     """
 
-    def test_month_plans_is_passed_by_the_dataset_command_alone(self):
+    def test_month_plans_are_passed_by_dataset_and_evaluation_alone(self):
         sites = _execute_pipeline_call_sites()
 
         # Guard the walk before trusting its answer: a rename that made the
@@ -1743,7 +1755,215 @@ class TestOnlyTheDatasetCommandIsMonthAware:
         assert set(sites) == {"dataset", "training", "inference", "evaluation"}
         assert {
             name for name, kwargs in sites.items() if "month_plans" in kwargs
-        } == {"dataset"}
+        } == {"dataset", "evaluation"}
+
+
+_EVAL_MV = "mv0000aa"
+
+#: The two catalog entries the evaluation command asks before any node runs,
+#: copied from the real file so their templates are the ones under test.
+_REAL_CATALOG = yaml.safe_load(
+    (Path(__file__).resolve().parents[1] / "conf" / "base" / "catalog.yaml")
+    .read_text()
+)
+
+
+def _run_evaluation_command(
+    tmp_path, argv, *, landed=(), segment_columns_json=True, extra_patches=(),
+):
+    """Invoke the evaluation command with its month-plan and --compare-only
+    inputs real: ``enriched_eval_predictions`` and ``evaluation_segment_columns``
+    copied from ``conf/base/catalog.yaml`` (database made literal).
+
+    ``landed`` months are listed under this run's model_version; one month under
+    :data:`_FOREIGN_VERSION` is always listed too and must never count, so the
+    entry's ``${model_version}`` partition filter is exercised, not assumed.
+
+    Returns ``(result, captured)``: the CLI result and the slice plan, if one
+    was built.
+    """
+    _setup_conf(tmp_path)
+    base = tmp_path / "conf" / "base"
+    catalog = yaml.safe_load((base / "catalog.yaml").read_text())
+    for name in ("enriched_eval_predictions", "evaluation_segment_columns"):
+        catalog[name] = dict(_REAL_CATALOG[name])
+    catalog["enriched_eval_predictions"]["database"] = "ml_recsys"
+    (base / "catalog.yaml").write_text(yaml.dump(catalog))
+    (base / "parameters_evaluation.yaml").write_text(yaml.dump({"evaluation": {
+        "snap_date": "2026-01-31",
+        "compare_sources": {"self": {
+            "kind": "model_version", "label": "self",
+            "model_version": _EVAL_MV, "source": "ranked_predictions"}},
+    }}))
+    (tmp_path / "data" / "models" / _EVAL_MV).mkdir(parents=True)
+    if segment_columns_json:
+        landed_json = (tmp_path / "data" / "evaluation" / _EVAL_MV / "20260131"
+                       / "segment_columns.json")
+        landed_json.parent.mkdir(parents=True)
+        landed_json.write_text("{}")
+
+    spark = MagicMock()
+    spark.sql.side_effect = lambda _query: _partition_rows(
+        [f"model_version={_EVAL_MV}/snap_date={d}" for d in landed]
+        + [f"model_version={_FOREIGN_VERSION}/snap_date=2026-01-31"]
+    )
+    captured = {}
+    real = _format_slice_plan
+
+    def spy(plan, total):
+        captured["plan"] = plan
+        return real(plan, total)
+
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        with patch(
+            "recsys_tfb.utils.spark.get_or_create_spark_session",
+            return_value=spark,
+        ), patch(
+            "recsys_tfb.__main__._dataset_versions_from_model_manifest",
+            return_value=("basev000", "trainv00", None),
+        ), patch("recsys_tfb.__main__._format_slice_plan", spy):
+            for p in extra_patches:
+                p.start()
+            try:
+                result = runner.invoke(app, argv)
+            finally:
+                for p in extra_patches:
+                    p.stop()
+    finally:
+        os.chdir(old_cwd)
+    return result, captured
+
+
+class TestEvaluationMonthPlan:
+    """The plan the evaluation command builds for ``enriched_eval_predictions``."""
+
+    @staticmethod
+    def _catalog(dataset):
+        catalog = DataCatalog()
+        catalog.add("enriched_eval_predictions", dataset)
+        return catalog
+
+    @staticmethod
+    def _listing(specs):
+        dataset = MagicMock()
+        dataset.existing_partition_values.return_value = specs
+        return dataset
+
+    def test_a_landed_month_is_not_pending(self):
+        from recsys_tfb.__main__ import _evaluation_month_plans
+
+        plans = _evaluation_month_plans(
+            self._catalog(self._listing(
+                [{"as_of": "2025-12-31"}, {"as_of": "2026-01-31"}])),
+            snap_date="2026-01-31", time_col="as_of",
+        )
+        assert plans["enriched_eval_predictions"].to_process == []
+
+    def test_a_month_never_written_is_pending(self):
+        from recsys_tfb.__main__ import _evaluation_month_plans
+
+        plans = _evaluation_month_plans(
+            self._catalog(self._listing([{"as_of": "2025-12-31"}])),
+            snap_date="2026-01-31", time_col="as_of",
+        )
+        assert plans["enriched_eval_predictions"].to_process == [
+            pd.Timestamp("2026-01-31")]
+
+    def test_a_table_that_cannot_list_counts_the_month_as_pending(self, caplog):
+        from recsys_tfb.__main__ import _evaluation_month_plans
+
+        with caplog.at_level(logging.WARNING):
+            plans = _evaluation_month_plans(
+                self._catalog(SimpleNamespace()),
+                snap_date="2026-01-31", time_col="snap_date",
+            )
+        assert plans["enriched_eval_predictions"].to_process == [
+            pd.Timestamp("2026-01-31")]
+        assert "enriched_eval_predictions" in caplog.text
+
+
+class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
+    """ADR-0018 decision 1: ``--from-node compute_metrics`` reads the table, and
+    the table exists from the first evaluation onwards, so only a month plan can
+    tell the slice that this month was never written.
+
+    Driven through the command (``--dry-run``), so dropping ``month_plans`` from
+    its ``_execute_pipeline`` call turns the first test red, not only the
+    call-site test above.
+    """
+
+    _ARGV = ["evaluation", "--model-version", _EVAL_MV,
+             "--from-node", "compute_metrics", "--dry-run"]
+
+    def _plan(self, tmp_path, landed):
+        exists = patch.object(
+            DataCatalog, "exists",
+            lambda self, name: name in _PERSISTED | {"parameters"})
+        result, captured = _run_evaluation_command(
+            tmp_path, self._ARGV, landed=landed, extra_patches=(exists,))
+        assert result.exit_code == 0, result.output
+        return captured["plan"]
+
+    def test_a_month_not_written_pulls_prepare_eval_data_back(self, tmp_path):
+        # The foreign version's 2026-01-31 is listed too and must not count.
+        plan = self._plan(tmp_path, landed=("2025-12-31",))
+        assert "enriched_eval_predictions" in plan.auto_included.get(
+            "prepare_eval_data", ()), dict(plan.auto_included)
+
+    def test_a_landed_month_is_read_not_rejoined(self, tmp_path):
+        plan = self._plan(tmp_path, landed=("2025-12-31", "2026-01-31"))
+        # Non-empty first: a slice that pulled nothing would pass the second.
+        assert plan.auto_included, "the slice pulled nothing back at all"
+        assert "prepare_eval_data" not in plan.auto_included
+
+
+class TestCompareOnlyNamesAMissingSegmentColumnsFile:
+    """#352: ``--compare-only`` reads the partition and the
+    ``segment_columns.json`` one standard run landed together. A missing JSON
+    stops the command before any node, naming the file and the run to do
+    first; the missing partition is the B4 gate's (test_evaluation_compare_
+    pipeline.py)."""
+
+    _ARGV = ["evaluation", "--model-version", _EVAL_MV, "--compare-only", "self"]
+
+    def _invoke(self, tmp_path, segment_columns_json):
+        emitted = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                emitted.append(record.getMessage())
+
+        recorder = logging.getLogger("test_compare_only_inputs")
+        recorder.handlers = [_Capture()]
+        recorder.setLevel(logging.DEBUG)
+        recorder.propagate = False
+        execute = MagicMock(return_value=False)
+        result, _ = _run_evaluation_command(
+            tmp_path, self._ARGV, segment_columns_json=segment_columns_json,
+            extra_patches=(
+                patch("recsys_tfb.__main__.logger", recorder),
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+            ),
+        )
+        return result, execute, "\n".join(emitted)
+
+    def test_a_missing_file_stops_the_command_naming_it_and_the_run(self, tmp_path):
+        result, execute, log = self._invoke(tmp_path, segment_columns_json=False)
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert (f"data/evaluation/{_EVAL_MV}/20260131/segment_columns.json"
+                in log), log
+        assert f"python -m recsys_tfb evaluation --model-version {_EVAL_MV}" \
+            in log, log
+
+    def test_control_a_present_file_reaches_the_pipeline(self, tmp_path):
+        result, execute, _log = self._invoke(tmp_path, segment_columns_json=True)
+        assert result.exit_code == 0, result.output
+        execute.assert_called_once()
+        # compare-only has no prepare_eval_data to pull back: no plan.
+        assert execute.call_args.kwargs["month_plans"] is None
 
 
 class TestThePartitionListingIsVersionScoped:

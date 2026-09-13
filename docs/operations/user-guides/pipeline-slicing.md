@@ -24,7 +24,7 @@
 
 **選哪一個**：想加一個評估月份 → 用模式（見 [adding-an-eval-month.md](adding-an-eval-month.md) 步驟 2），它把資料閘明確列在清單裡；想從某個 node 手動接續 → 用切片，但要知道零輸出的資料閘一定被跳過。**被跳過的名單走 `logger.warning`**（`[plan] skipped side-effect nodes ...`），因為那代表「這一輪沒有檢查資料層不變量」——多數接續是上一輪中途掛掉、來源表沒變，重驗純浪費；會出事的是隔幾天才接續、來源表已經變了。
 
-## 自動擴張補跑：dataset 為什麼多一道判準
+## 自動擴張補跑：dataset 與 evaluation 為什麼多一道判準
 
 一般判準是 `catalog.exists()`：被跳過 node 的輸出若已落地就直接讀，否則遞迴把生產者拉回必跑集合，最壞退化成 full run（各 pipeline 文件的 §4 都有寫）。
 
@@ -39,7 +39,9 @@ auto-included 會列出三個——`build_test_model_input`（一般判準：中
 `select_test_keys` 與 `apply_preprocessor_to_features`。
 `fit_preprocessor_metadata` 不在其中（`preprocessor` 是落地的 JSON，沒有月份）。
 
-其餘三個 pipeline 沒有增量產物，判準仍是 `exists()` 一個。
+**evaluation 有一個同類的產物**：`enriched_eval_predictions`（[ADR-0018](../../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。`prepare_eval_data` 把評估月份寫成這張表的一個 partition，之後的 node 讀表；表從第一次評估之後就一直在，所以 CLI 一樣改問「`evaluation.snap_date` 這個月的 partition 在不在」。不在，`--from-node compute_metrics` 會把 `prepare_eval_data` 拉回來；在，就直接讀表、不重做 join。它沒有 `--rebuild-dates`：`label_table` 回補或預測重發布之後，要 `--from-node prepare_eval_data` 或 full run（見 [`evaluation.md` §7.4](../../pipelines/evaluation.md)）。`--compare-only` 不帶這份計畫，那條路沒有 `prepare_eval_data` 可以拉回來。
+
+training 與 inference 沒有增量產物，判準仍是 `exists()` 一個。
 
 ## 接續前提：版本擋得住什麼、擋不住什麼
 

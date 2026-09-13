@@ -1,6 +1,8 @@
 """Tests for evaluation pipeline definition."""
 
+import ast
 import inspect
+import textwrap
 
 from recsys_tfb.pipelines.evaluation import create_pipeline
 
@@ -22,7 +24,7 @@ class TestEvaluationPipelineDefault:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
-            "eval_predictions", "evaluation_segment_columns",
+            "evaluation_segment_columns",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
@@ -39,7 +41,6 @@ class TestEvaluationPipelineDefault:
             "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
             "compute_report_aggregates",
-            "persist_eval_predictions",
             "compute_metric_ci",
             "generate_report",
         ]
@@ -125,18 +126,27 @@ class TestRegistryDiagnosesFollowTheMode:
 
         import pandas as pd
 
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
         params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        segments = {"joined": [], "config_fingerprint": fingerprint(params)}
         outcome = {}
         for label in ("monitoring", "post-training"):
             node = next(
                 n for n in create_pipeline(**self.MODES[label]).nodes
                 if n.name == "draw_diagnosis_sample_node"
             )
+            # No frame here, so the month restriction is a pass-through; what
+            # is counted is the draw.
             with patch(
                 "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
                 return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-            ) as spy:
-                result = node.func(None, {"joined": []}, params)
+            ) as spy, patch(
+                "recsys_tfb.pipelines.evaluation.nodes_spark."
+                "restrict_to_eval_snap_date",
+                lambda df, parameters: df,
+            ):
+                result = node.func(None, segments, params)
             outcome[label] = {"draws": spy.call_count, "sample": result is not None}
         assert outcome == {
             "monitoring": {"draws": 0, "sample": False},
@@ -162,6 +172,12 @@ class TestFingerprintRerunNodes:
     behind and the next report raises again (or, worse, one checked by nobody
     stays stale). The producer lists are written out here, not derived from
     the pipeline, so a new producer has to be added on purpose.
+
+    ``prepare_eval_data`` is left out on purpose. Its
+    ``evaluation_segment_columns`` is compared on ``PARTITION_CONTENT_KEYS``
+    only, the rows already re-run from ``prepare_eval_data``, so no row's
+    advice can leave it stale (``tests/test_evaluation/
+    test_config_fingerprint.py`` pins both directions).
     """
 
     FINGERPRINTED_PRODUCERS = {
@@ -222,7 +238,6 @@ class TestEvaluationPipelinePostTraining:
             "prepare_eval_data", "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
             "compute_report_aggregates",
-            "persist_eval_predictions",
             "compute_metric_ci",
             "diagnose_config_shift",
             "diagnose_item_ability",
@@ -240,7 +255,7 @@ class TestEvaluationPipelinePostTraining:
     def test_pipeline_outputs_add_the_registry_diagnoses(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
-            "eval_predictions", "evaluation_segment_columns",
+            "evaluation_segment_columns",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
@@ -265,7 +280,6 @@ class TestEvaluationPipelineCompareMode:
             "load_compare_predictions",
             "draw_diagnosis_sample_node", "compute_metrics",
             "compute_baseline_metrics", "compute_report_aggregates",
-            "persist_eval_predictions",
             "restrict_to_common", "compute_metric_ci",
             "generate_comparison_report",
             "generate_report",
@@ -308,6 +322,13 @@ class TestEvaluationPipelineCompareOnly:
         assert "label_table" not in pipeline.inputs
         assert "parameters" in pipeline.inputs
 
+    def test_the_gate_passes_nothing_on_and_the_restriction_reads_the_table(self):
+        """ADR-0018 decision 1: the B4 gate is zero-output, and
+        ``restrict_to_common`` reads ``enriched_eval_predictions`` itself."""
+        nodes = {n.name: n for n in create_pipeline(compare_only=True).nodes}
+        assert nodes["validate_enriched_eval_predictions_present"].outputs == []
+        assert nodes["restrict_to_common"].inputs[0] == "enriched_eval_predictions"
+
 
 class TestSegmentColumnsWiring:
     """ADR-0020 bug 6: segments follow the run mode's population, and what
@@ -332,7 +353,7 @@ class TestSegmentColumnsWiring:
             assert node.inputs == [
                 predictions, "label_table", population, "parameters"], kwargs
             assert node.outputs == [
-                "eval_predictions", "evaluation_segment_columns"], kwargs
+                "enriched_eval_predictions", "evaluation_segment_columns"], kwargs
             assert other not in pipeline.inputs, kwargs
 
     def test_every_segmenting_node_reads_the_list_at_the_right_position(self):
@@ -367,6 +388,92 @@ class TestSegmentColumnsWiring:
             "filepath": "data/evaluation/${model_version}/${snap_date}/"
                         "segment_columns.json",
         }
+
+
+def _readers_that_skip_the_month_restriction(pipeline):
+    """Names of nodes wired to ``enriched_eval_predictions`` whose body has no
+    ``restrict_to_eval_snap_date(<that input's parameter>, ...)`` call.
+
+    The body comes from the node's function object (``inspect.getsource``),
+    not from a module path: node modules get renamed and split (ADR-0019), and
+    a factory-built node's body is its inner function. The call must take the
+    parameter the table binds to (inputs bind by position), so restricting
+    some other frame does not count.
+    """
+    missing = []
+    for node in pipeline.nodes:
+        if "enriched_eval_predictions" not in node.inputs:
+            continue
+        params = list(inspect.signature(node.func).parameters)
+        bound_to = params[node.inputs.index("enriched_eval_predictions")]
+        body = ast.parse(textwrap.dedent(inspect.getsource(node.func)))
+        restricts = any(
+            isinstance(call, ast.Call)
+            and getattr(call.func, "id", getattr(call.func, "attr", None))
+            == "restrict_to_eval_snap_date"
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == bound_to
+            for call in ast.walk(body)
+        )
+        if not restricts:
+            missing.append(node.name)
+    return missing
+
+
+def _forgets_the_month(enriched_eval_predictions, parameters):
+    return enriched_eval_predictions.count()
+
+
+def _restricts_the_wrong_frame(other, enriched_eval_predictions, parameters):
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        restrict_to_eval_snap_date,
+    )
+
+    other = restrict_to_eval_snap_date(other, parameters)
+    return enriched_eval_predictions.count() + other.count()
+
+
+class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
+    """ADR-0018 decision 1: ``enriched_eval_predictions`` holds every month a
+    ``model_version`` was evaluated on, so each node reading it keeps the
+    evaluated month first. Forgetting raises nothing and computes over all
+    months; this is the guard against the next reader that forgets.
+    """
+
+    MODES = {
+        **TestRegistryDiagnosesFollowTheMode.MODES,
+        "compare-only": {
+            "compare_only": True,
+            "compare_source": {"kind": "hive", "model_version": "v1"},
+        },
+    }
+
+    def test_every_reader_in_every_mode_restricts_the_table(self):
+        for label, kwargs in self.MODES.items():
+            pipeline = create_pipeline(**kwargs)
+            readers = [n.name for n in pipeline.nodes
+                       if "enriched_eval_predictions" in n.inputs]
+            # Guard the scan before trusting its empty answer.
+            assert readers, f"[{label}] no node reads the table"
+            assert _readers_that_skip_the_month_restriction(pipeline) == [], label
+
+    def test_a_new_reader_that_forgets_is_named(self):
+        from recsys_tfb.core.node import Node
+        from recsys_tfb.core.pipeline import Pipeline
+
+        pipeline = Pipeline([
+            Node(_forgets_the_month,
+                 inputs=["enriched_eval_predictions", "parameters"],
+                 outputs="n_all_months"),
+            Node(_restricts_the_wrong_frame,
+                 inputs=["other_frame", "enriched_eval_predictions",
+                         "parameters"],
+                 outputs="n_mixed"),
+        ])
+        assert sorted(_readers_that_skip_the_month_restriction(pipeline)) == [
+            "_forgets_the_month", "_restricts_the_wrong_frame",
+        ]
 
 
 class TestGenerateReportNodeWiring:
@@ -591,7 +698,7 @@ class TestConfigShiftNodeWiring:
     只驗接線，不驗計算——計算層的測試在 tests/test_diagnosis/。這裡要釘的是
     「它真的吃到共用的 diagnosis_sample」：各診斷共用同一份樣本是一致性
     保證（不同母體的數字並排解讀會錯），一旦哪天有人把 inputs 改成
-    eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
+    enriched_eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
     """
 
     def test_config_shift_node_wired_after_diagnosis_sample(self):

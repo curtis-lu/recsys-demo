@@ -718,9 +718,9 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
 | `evaluation/comparison/sources.py` | `load_compare_predictions` | 同上 |
 | `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
-| `pipelines/evaluation/comparison_nodes.py` | `validate_enriched_eval_predictions_present` | 同上 |
 | `pipelines/evaluation/nodes_spark.py` | `prepare_eval_data` | 同上 |
 | `pipelines/evaluation/nodes_spark.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
+| `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_date` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_eval_snap_date` 從這裡拿評估月份（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變 |
 
 **二、「那是它自己的欄位」（3 筆）**
 

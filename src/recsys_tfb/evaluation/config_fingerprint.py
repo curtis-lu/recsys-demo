@@ -82,10 +82,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Iterable, NamedTuple, Sequence
+from typing import Any, Iterable, NamedTuple, Optional, Sequence
 
 __all__ = [
-    "COMPUTED_KEYS", "LoadedArtifact", "fingerprint",
+    "COMPUTED_KEYS", "LoadedArtifact", "PARTITION_CONTENT_KEYS", "fingerprint",
     "require_computed_with_current_config",
 ]
 
@@ -112,6 +112,14 @@ __all__ = [
 #: TestFingerprintRerunNodes`` pins it in both modes: a row whose node sorts
 #: after a fingerprinted producer turns that test red.
 #:
+#: ``prepare_eval_data`` also writes a fingerprinted artifact
+#: (``evaluation_segment_columns``, landed with the ``enriched_eval_predictions``
+#: partition), yet the rule above does not move every row to it. That artifact
+#: is compared on :data:`PARTITION_CONTENT_KEYS` only, the rows already pointing
+#: at ``prepare_eval_data``, so a change to any other row never makes it stale
+#: and ``--from-node compute_metrics`` stays enough for those (see that
+#: constant for why this is not the same loop).
+#:
 #: The first row, ``post_training``, is not a user config key: it is the
 #: ``--post-training`` / monitoring run mode, a CLI flag injected into
 #: ``parameters`` at the top level the same way ``model_version`` and
@@ -132,10 +140,8 @@ __all__ = [
 COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("post_training", "prepare_eval_data"),
     ("evaluation.snap_date", "prepare_eval_data"),
-    # Read first today by draw_diagnosis_sample_node (diagnosis/metric/
-    # sample.py). Listed at prepare_eval_data anyway: eval_predictions is
-    # memory-only, so a re-run from either node re-runs prepare_eval_data, and
-    # ADR-0020 bug 6 moves the segment-column resolution into it.
+    # prepare_eval_data resolves which segment columns to join and from where
+    # (ADR-0020 bug 6), and the joined columns are stored in the partition.
     ("evaluation.segment_columns", "prepare_eval_data"),
     ("evaluation.segment_sources", "prepare_eval_data"),
     ("evaluation.diagnosis", "draw_diagnosis_sample_node"),
@@ -149,6 +155,24 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.report.sections.baseline", "compute_metrics"),
     ("evaluation.report.diagnostics", "compute_metrics"),
     ("evaluation.report.sections.diagnostics", "compute_metrics"),
+)
+
+#: The computed settings that decide what ``prepare_eval_data`` writes: the
+#: ``enriched_eval_predictions`` partition and the ``evaluation_segment_columns``
+#: JSON landed with it. They are the :data:`COMPUTED_KEYS` rows re-run from
+#: ``prepare_eval_data``.
+#:
+#: Why that artifact is compared on these rows only (ADR-0020 bug 6, the #352
+#: correction): the partition is read back from Hive, so a slice starting after
+#: ``prepare_eval_data`` does not rewrite it. Compared on every row, changing
+#: ``evaluation.k_values`` would make it stale, the advice would be
+#: ``--from-node compute_metrics`` (that row's node), the re-run would leave it
+#: as it was, and the next run would raise the same way: a loop with no exit.
+#: Moving every row to ``prepare_eval_data`` instead would end the loop by
+#: re-joining the predictions on any setting change. Neither is needed: no
+#: other row changes what ``prepare_eval_data`` computes.
+PARTITION_CONTENT_KEYS: tuple[str, ...] = tuple(
+    path for path, node in COMPUTED_KEYS if node == "prepare_eval_data"
 )
 
 _KEY_ORDER = {path: i for i, (path, _) in enumerate(COMPUTED_KEYS)}
@@ -169,6 +193,11 @@ class LoadedArtifact(NamedTuple):
     payload: Any
     produced_by: str
     extra_keys: Sequence[str] = ()
+    #: ``None`` compares the whole fingerprint. A tuple of paths compares only
+    #: those values (``extra_keys`` included only if listed): for an artifact
+    #: that a change to the other rows cannot make stale, see
+    #: :data:`PARTITION_CONTENT_KEYS`.
+    compared_keys: Optional[Sequence[str]] = None
 
 
 def _tag_non_str_keys(value: Any) -> Any:
@@ -275,10 +304,18 @@ def require_computed_with_current_config(
             )
             stale_producers.append(artifact.produced_by)
             continue
-        if stored["sha256"] == current["sha256"]:
-            continue
-
-        old_values, new_values = stored["values"], current["values"]
+        if artifact.compared_keys is None:
+            if stored["sha256"] == current["sha256"]:
+                continue
+            old_values, new_values = stored["values"], current["values"]
+        else:
+            # The stored sha256 covers every row, so only values can be
+            # compared on a subset.
+            keys = set(artifact.compared_keys)
+            old_values = {p: v for p, v in stored["values"].items() if p in keys}
+            new_values = {p: v for p, v in current["values"].items() if p in keys}
+            if _canonical(old_values) == _canonical(new_values):
+                continue
         paths = [*new_values, *(p for p in old_values if p not in new_values)]
         # _KEY_ORDER only covers COMPUTED_KEYS; an extra key (not in it) ties
         # at len(_KEY_ORDER) and keeps its relative position via sort

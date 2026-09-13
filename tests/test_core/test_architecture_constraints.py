@@ -137,7 +137,8 @@ def test_static_coverage_floor():
     judgeable = sum(1 for _ in _judgeable_nodes())
     # 63/59: evaluation's monitoring-mode `no_diagnosis_pages` Node (#341)
     # added one literal, statically judgeable call; the dynamic four are unchanged.
-    assert (total, judgeable) == (63, 59), (
+    # 62/58: #352 deleted `persist_eval_predictions`, one literal call.
+    assert (total, judgeable) == (62, 58), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -324,6 +325,7 @@ class TestA7ZeroOutputNodesRegistered:
 
         assert found == Counter({
             ("dataset", "validate_data_consistency"): 1,
+            ("evaluation", "validate_enriched_eval_predictions_present"): 1,
             ("training", "log_experiment"): 1,
         }), (
             "zero-output side-effect nodes changed. Registered in R3 of "
@@ -1453,10 +1455,12 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/evaluation/comparison/report.py", "assemble_comparison_report"),
     ("src/recsys_tfb/evaluation/comparison/sources.py", "load_compare_predictions"),
     ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
-    ("src/recsys_tfb/pipelines/evaluation/comparison_nodes.py",
-     "validate_enriched_eval_predictions_present"),
     ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "_diagnosis_pages_dir"),
     ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "prepare_eval_data"),
+    # The one read every reader of enriched_eval_predictions goes through
+    # (ADR-0018 decision 1); signed off in #352.
+    ("src/recsys_tfb/pipelines/evaluation/steps/snap_date_scope.py",
+     "eval_snap_date"),
     # Observability field whitelist -- a log field named after the time role,
     # not a DataFrame column.
     ("src/recsys_tfb/core/logging.py", "<module>"),

@@ -322,7 +322,10 @@ gain_ledger:
 # 各欄取自哪張表（sources）、母體表沒有而跳過的欄（missing）。分群的消費者讀它，
 # 不看 frame 欄位——enriched_eval_predictions 兩種模式共用，另一模式 join 過的欄
 # 在這次的列上是全 NULL（ADR-0020 bug 6）。--compare-only 沒有 prepare_eval_data，
-# 靠這份檔知道 enriched 分區當時 join 了哪些欄，所以它必須落地。
+# 靠這份檔知道 enriched 分區當時 join 了哪些欄，所以它必須落地。它的
+# config_fingerprint 也代表同一次寫的 partition：讀表的 node 比對其中決定 partition
+# 內容的四個鍵（config_fingerprint.PARTITION_CONTENT_KEYS）；--compare-only 缺這份
+# 檔時 CLI 在任何 node 之前就擋下。
 evaluation_segment_columns:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/segment_columns.json
@@ -407,11 +410,13 @@ training_eval_predictions:
     - {name: snap_date, type: STRING}
     - {name: prod_name, type: STRING}
 
-# --- Evaluation pipeline — 快取後可直接用於 report 的 eval_predictions ---
-# 由 evaluation/comparison_nodes.py::persist_eval_predictions 寫入
-# （prepare_eval_data 產出、做完 label join、rank 與 segment enrichment 後的
-# in-memory eval_predictions）。--compare-only 模式由 catalog auto-load 讀回，
-# 並由 validate_enriched_eval_predictions_present（B4 validator）檢查。
+# --- Evaluation pipeline — 評估列（prepare_eval_data 的輸出，ADR-0018 決定 1）---
+# prepare_eval_data 做完 label join、rank 與 segment enrichment 後直接寫進這張表
+# （每個 snap_date 一個 partition，dynamic overwrite 只換這一格），join 只算這一次。
+# 同一次 run 的其他 node 與之後的 --compare-only 都讀回這張表；表裡是這個
+# model_version 評估過的所有月份，每個讀者先篩到 evaluation.snap_date
+# （pipelines/evaluation/steps/snap_date_scope.py）。--compare-only 另由
+# validate_enriched_eval_predictions_present（B4）檢查這個月有資料。
 # columns: "auto" ── schema 從 DataFrame 推得；segment_sources 設定在兩次 run
 # 之間改變時，HiveTableDataset 會自動 append-only 演化（ALTER TABLE ADD
 # COLUMNS／缺欄補 NULL），不需先 drop table。

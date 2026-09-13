@@ -9,10 +9,15 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
 
 
-def test_default_pipeline_has_persist_node():
+def test_default_pipeline_writes_the_enriched_table_from_prepare_eval_data():
+    """ADR-0018 decision 1: the producer writes the table itself; the old
+    pass-through node at the end of the DAG is gone."""
     pipeline = create_pipeline(post_training=False)
+    writers = [n.name for n in pipeline.nodes
+               if "enriched_eval_predictions" in n.outputs]
+    assert writers == ["prepare_eval_data"]
     node_names = [n.func.__name__ for n in pipeline.nodes]
-    assert "persist_eval_predictions" in node_names
+    assert "persist_eval_predictions" not in node_names
     assert "load_compare_predictions" not in node_names
 
 
@@ -23,9 +28,8 @@ def test_compare_mode_adds_three_extra_nodes():
     assert "load_compare_predictions" in node_names
     assert "restrict_to_common" in node_names
     assert "generate_comparison_report" in node_names
-    # And the four existing + persist still present
+    # And the standard chain is still there, table written by its producer.
     assert "prepare_eval_data" in node_names
-    assert "persist_eval_predictions" in node_names
 
 
 def test_compare_only_mode_skips_compute_nodes():
@@ -57,20 +61,6 @@ def _warehouse_table_dir(spark, db: str, table: str):
         raw = raw[len("file:"):]
     # Remove any extra leading slashes that would produce //<path> on macOS.
     return Path(raw) / f"{db}.db" / table
-
-
-def test_persist_eval_predictions_returns_input_df(spark):
-    """persist_eval_predictions is an identity pass-through: catalog auto-save
-    handles the actual Hive write. Function returns the same DataFrame object
-    passed in (referential identity, not just equality).
-    """
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
-        persist_eval_predictions,
-    )
-
-    df = spark.createDataFrame([(1, 2)], ["a", "b"])
-    out = persist_eval_predictions(df)
-    assert out is df
 
 
 def _base_params_for_validator():
@@ -127,7 +117,9 @@ def test_b4_validator_raises_when_snap_date_filter_yields_empty(spark):
 
 
 def test_b4_validator_passes_when_partition_present(spark):
-    """DataFrame has matching snap_date row → validator returns the filtered DF."""
+    """The evaluated month has a row → the gate returns, passing nothing on
+    (zero-output since ADR-0018 decision 1; restrict_to_common restricts the
+    table itself)."""
     from recsys_tfb.pipelines.evaluation.comparison_nodes import (
         validate_enriched_eval_predictions_present,
     )
@@ -135,21 +127,19 @@ def test_b4_validator_passes_when_partition_present(spark):
     df = spark.createDataFrame(
         [
             ("c1", "2026-01-31", "p1", 0.9, 1, 1),
-            ("c2", "2025-12-31", "p1", 0.5, 1, 0),  # different snap_date, filtered out
+            ("c2", "2025-12-31", "p1", 0.5, 1, 0),  # another evaluated month
         ],
         ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
     )
-    out = validate_enriched_eval_predictions_present(
+    assert validate_enriched_eval_predictions_present(
         df, _base_params_for_validator()
-    )
-    rows = [(r["cust_id"], r["snap_date"]) for r in out.collect()]
-    assert rows == [("c1", "2026-01-31")]
+    ) is None
 
 
-def test_persist_and_catalog_load_roundtrip(spark):
-    """End-to-end: persist returns DF as-is; HiveTableDataset saves to local
-    warehouse with partition_filter(model_version) + partition_cols(snap_date);
-    load reads back and drops model_version.
+def test_enriched_table_catalog_roundtrip(spark):
+    """End-to-end: HiveTableDataset saves what ``prepare_eval_data`` returns
+    to the local warehouse with partition_filter(model_version) +
+    partition_cols(snap_date); load reads back and drops model_version.
 
     Isolation: runs against a DEDICATED test database, never the production
     ``ml_recsys.enriched_eval_predictions``. The shared local warehouse holds
@@ -161,9 +151,6 @@ def test_persist_and_catalog_load_roundtrip(spark):
     """
     import shutil
     from recsys_tfb.io.hive_table_dataset import HiveTableDataset
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
-        persist_eval_predictions,
-    )
 
     test_db = "test_persist_roundtrip"        # isolated: never ml_recsys
     test_table = "enriched_eval_predictions"
@@ -192,10 +179,9 @@ def test_persist_and_catalog_load_roundtrip(spark):
             ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
         )
 
-        # Framework auto-save flow: node returns DF, runner saves via catalog
-        returned = persist_eval_predictions(df_in)
-        assert returned is df_in  # identity guarantee re-verified
-        ds.save(returned)
+        # Framework auto-save flow: the node returns the frame, the runner
+        # saves it through the catalog entry.
+        ds.save(df_in)
 
         # Framework auto-load flow: catalog filters by partition_filter, drops mv
         out = ds.load()
@@ -221,6 +207,47 @@ def test_persist_and_catalog_load_roundtrip(spark):
 # deliberately reuses ``cust_id`` across branches and ``branch_id`` across
 # customers, so "first column only", "entity tuple" and "query group" are three
 # different numbers.
+#
+# Those numbers need two months on side A, and the node keeps only the
+# evaluated month of A (ADR-0018 decision 1). The entity tests therefore turn
+# the month restriction off (``month_restriction_off``);
+# ``test_side_a_is_restricted_to_the_evaluated_month`` covers it on its own.
+
+
+@pytest.fixture
+def month_restriction_off(monkeypatch):
+    from recsys_tfb.pipelines.evaluation import comparison_nodes
+
+    monkeypatch.setattr(comparison_nodes, "restrict_to_eval_snap_date",
+                        lambda df, parameters: df)
+
+
+def test_side_a_is_restricted_to_the_evaluated_month(
+    spark, two_column_entity_params
+):
+    """Side A is the whole table for this model_version, every month it was
+    evaluated on; B comes from its own source, already one month. Coverage
+    counts A after the restriction: one month × 3 entities, not two months."""
+    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+
+    params = {**two_column_entity_params,
+              "evaluation": {"snap_date": "2026-01-31"}}
+    a_rows, b_rows = [], []
+    for date in ("2026-01-31", "2026-02-28"):
+        for branch, cust in (("b1", "c1"), ("b1", "c2"), ("b2", "c1")):
+            a_rows.append((date, branch, cust, "p1", 0.9, 1))
+            a_rows.append((date, branch, cust, "p2", 0.1, 0))
+    for branch, cust in (("b1", "c1"), ("b1", "c2"), ("b2", "c1")):
+        for item, score in (("p1", 0.6), ("p2", 0.5)):
+            b_rows.append(("2026-01-31", branch, cust, item, score))
+    a = spark.createDataFrame(a_rows, _LABELED_PREDS_DDL)
+    b = spark.createDataFrame(b_rows, _PREDS_DDL)
+
+    a_common, _b_common, coverage = restrict_to_common(a, b, params)
+
+    assert {r["snap_date"] for r in a_common.collect()} == {"2026-01-31"}
+    assert coverage["n_query_group_A_full"] == 3
+    assert coverage["n_query_group_common"] == 3
 
 
 @pytest.fixture
@@ -265,7 +292,7 @@ def two_col_b(spark):
 
 
 def test_two_column_entity_ranking_and_coverage(
-    two_col_a, two_col_b, two_column_entity_params
+    two_col_a, two_col_b, two_column_entity_params, month_restriction_off
 ):
     """One call, two behaviours: the re-ranking unit and the coverage unit.
 
@@ -322,7 +349,7 @@ _LABELED_PREDS_DDL = f"{_PREDS_DDL}, label int"
 
 
 def test_coverage_common_counts_what_restriction_kept_not_a_null_matching_intersect(
-    spark, two_column_entity_params
+    spark, two_column_entity_params, month_restriction_off
 ):
     """bug 14 (ADR-0020): ``n_query_group_common`` is the query groups the
     restricted frames still hold.
@@ -358,7 +385,7 @@ def test_coverage_common_counts_what_restriction_kept_not_a_null_matching_inters
 
 
 def test_coverage_common_excludes_a_group_only_one_side_kept(
-    spark, two_column_entity_params
+    spark, two_column_entity_params, month_restriction_off
 ):
     """``n_query_group_common`` means "still there on both sides".
 
@@ -391,7 +418,8 @@ def test_coverage_common_excludes_a_group_only_one_side_kept(
 
 
 def test_restrict_node_collects_each_sides_items_once(
-    two_col_a, two_col_b, two_column_entity_params, monkeypatch
+    two_col_a, two_col_b, two_column_entity_params, monkeypatch,
+    month_restriction_off,
 ):
     """bug 14 (ADR-0020): the item sets reach the driver once per side.
 

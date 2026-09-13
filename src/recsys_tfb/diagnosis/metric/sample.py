@@ -181,6 +181,12 @@ def draw_diagnosis_sample(
     else:
         seg_cols = list((parameters.get("evaluation", {}) or {})
                         .get("segment_columns", []) or [])
+    # score_uncalibrated rides along whenever the frame has the column. Read
+    # back from enriched_eval_predictions in monitoring mode it can be a column
+    # a --post-training run added to the shared table, all NULL: harmless, as
+    # that mode's only sample reader (compute_metric_ci) never reads it, and the
+    # registry diagnoses that do are wired in --post-training only (ADR-0018
+    # decisions 1 and 5).
     keep_cols = list(dict.fromkeys(
         c
         for c in [*query_cols, item_col, label_col, score_col,

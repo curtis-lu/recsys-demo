@@ -9,6 +9,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.config_fingerprint import (
+    PARTITION_CONTENT_KEYS,
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
@@ -22,8 +23,38 @@ from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
 )
+from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+    eval_snap_date,
+    restrict_to_eval_snap_date,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _require_prepared_with_current_config(
+    segment_columns: dict, parameters: dict
+) -> None:
+    """Pre-check (inputs): the ``enriched_eval_predictions`` partition about to
+    be read was written under today's
+    :data:`~recsys_tfb.evaluation.config_fingerprint.PARTITION_CONTENT_KEYS`.
+
+    ``prepare_eval_data`` lands ``evaluation_segment_columns`` together with the
+    partition, so that JSON's fingerprint stands for both. Unchecked,
+    ``--from-node compute_metrics`` after a change to ``segment_columns`` reads
+    the partition joined under the old list and writes ``metrics.json`` under
+    the new fingerprint, which ``generate_report`` then accepts, exit code 0.
+    Only those rows are compared; why, see ``PARTITION_CONTENT_KEYS``.
+    """
+    require_computed_with_current_config(
+        [LoadedArtifact(
+            catalog_name="evaluation_segment_columns (landed with the "
+                         "enriched_eval_predictions partition)",
+            payload=segment_columns,
+            produced_by="prepare_eval_data",
+            compared_keys=PARTITION_CONTENT_KEYS,
+        )],
+        parameters,
+    )
 
 
 def _ci_consumer_enabled(parameters: dict) -> bool:
@@ -101,7 +132,10 @@ def make_prepare_eval_data_node(population_name: str):
     ) -> tuple[SparkDataFrame, dict]:
         """Join ranked predictions with labels and segment columns using Spark.
 
-        Returns ``(eval_predictions, segments)``. ``segments`` lands as
+        Returns ``(eval_predictions, segments)``. The frame lands as this
+        month's ``enriched_eval_predictions`` partition, where the join is
+        computed once and every reader reads it back (ADR-0018 decision 1).
+        ``segments`` lands as
         ``evaluation_segment_columns``: ``joined`` (the segment columns
         actually joined, in ``evaluation.segment_columns`` order), ``sources``
         (joined column -> table it came from), ``missing`` (column -> the
@@ -317,12 +351,13 @@ def make_prepare_eval_data_node(population_name: str):
         # Landed so every consumer groups by what was joined here, never by
         # the frame's columns: enriched_eval_predictions is shared by both run
         # modes, so a column the other mode joined sits in the frame all NULL.
-        # The fingerprint is written but no reader checks it. In a standard
-        # run every consumer gets this dict from the same run (eval_predictions
-        # is memory-only, so any slice reaching a consumer re-runs this node);
-        # --compare-only reads it next to the enriched partition it describes,
-        # and --post-training is inert on that path, so a check there would
-        # refuse every partition a post-training run wrote.
+        # Its fingerprint also stands for the partition written with it: the
+        # segmenting readers check it before reading the table
+        # (_require_prepared_with_current_config), because a slice starting
+        # after this node reads the landed partition instead of re-joining.
+        # --compare-only does not check it: --post-training is inert on that
+        # path, so a check there would refuse every partition a post-training
+        # run wrote.
         joined = [c for c in segment_columns if c not in missing]
         segments = {
             "joined": joined,
@@ -371,6 +406,9 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         The sample carries the segment columns ``prepare_eval_data`` joined
         (``segment_columns["joined"]``), not the configured ones found in the
         frame (ADR-0020 bug 6).
+
+        Pre-check (inputs): the partition was prepared under today's settings
+        (``_require_prepared_with_current_config``).
         """
         ci_on = _ci_consumer_enabled(parameters)
         registry_on = (
@@ -383,6 +421,11 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
                 " + registry diagnoses" if registry_diagnoses_wired else "",
             )
             return None
+
+        _require_prepared_with_current_config(segment_columns, parameters)
+        # Decision — sample the evaluated month only: the table holds every
+        # month this model_version was evaluated on.
+        eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
 
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         sample_pdf, sample_meta = draw_diagnosis_sample(
@@ -430,13 +473,37 @@ def compute_metrics(
     The result lands as ``evaluation_metrics`` (``metrics.json``, ADR-0018
     decision 2) and carries ``config_fingerprint``, which ``generate_report``
     checks before drawing from it.
+
+    Pre-check (inputs): the partition was prepared under today's settings
+    (``_require_prepared_with_current_config``).
+
+    Postcondition: exactly one month was evaluated. The restriction leaves at
+    most one, so what this refuses is zero, an empty or never-written
+    partition for the month; reading a Hive table raises nothing for either.
+    It does not catch a reader that forgot to restrict (that reader is another
+    node); the AST test in ``test_pipeline.py`` does.
     """
     from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+    _require_prepared_with_current_config(segment_columns, parameters)
+    # Decision — evaluate one month: the table holds every month this
+    # model_version was evaluated on.
+    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
 
     result = compute_all_metrics(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
     )
+    n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
+    if n_snap_dates != 1:
+        raise ValueError(
+            f"compute_metrics postcondition: {n_snap_dates} evaluated months "
+            f"in enriched_eval_predictions for evaluation.snap_date="
+            f"{eval_snap_date(parameters)!r} "
+            f"(model_version={parameters.get('model_version')!r}), expected "
+            "exactly 1. That month's partition is empty or was never "
+            "written; re-run with --from-node prepare_eval_data."
+        )
     result["segments"] = {
         k: segment_columns[k] for k in ("joined", "sources", "missing")
     }
@@ -476,6 +543,9 @@ def compute_baseline_metrics(
       - config_fingerprint: the computed settings it was made with
             (``evaluation.config_fingerprint``), checked by
             ``generate_report``.
+
+    Pre-check (inputs), past the stub: the partition was prepared under
+    today's settings (``_require_prepared_with_current_config``).
     """
     from recsys_tfb.evaluation.baselines import (
         build_baseline_frame,
@@ -492,6 +562,12 @@ def compute_baseline_metrics(
             "Baseline report section disabled — skipping baseline metrics"
         )
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
+
+    _require_prepared_with_current_config(segment_columns, parameters)
+    # Decision — score the evaluated month only: the table holds every month
+    # this model_version was evaluated on, and the lookback window below is
+    # anchored on the months found in the frame.
+    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -946,6 +1022,10 @@ def compute_report_aggregates(
     if not sections_cfg.get("diagnostics", True):
         logger.info("report diagnostics section disabled — writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
+
+    # Decision — aggregate the evaluated month only: the table holds every
+    # month this model_version was evaluated on.
+    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
 
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]

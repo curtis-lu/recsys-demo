@@ -129,6 +129,16 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 
 現在 `validate_enriched_eval_predictions_present` 讀表、篩月、非空才放行、**輸出**篩過的 frame 給 `restrict_to_common`。改成：它只做「非空才放行」，零輸出，名字不改；`restrict_to_common` 跟其他消費者一樣自己篩。零輸出的閘門 node 是 [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md) 登記過的形狀（`validate_data_consistency`），由模式清單點名進來、切片永遠拉不回來——對 `--compare-only` 這條沒有切片用例的短 pipeline，這是可接受的。
 
+### 實作更正（2026-09-14，#352）
+
+- **S6 登記的是 `eval_snap_date`，不是 `restrict_to_eval_snap_date`。** `steps/snap_date_scope.py` 有兩個函式：`eval_snap_date(parameters)` 讀設定鍵，`restrict_to_eval_snap_date` 呼叫它。B4 閘門的錯誤訊息要印月份，改成跟 `eval_snap_date` 拿，所以 `validate_enriched_eval_predictions_present` 那筆登記一併刪掉，登記表總數不變。`prepare_eval_data` 自己的讀取與登記不動。使用者 2026-09-14 簽核。
+- **AST 測試從 node 的函式物件取原始碼（`inspect.getsource(node.func)`），不是從 `pipeline.py` 的 import 反查模組。** 目的相同（不寫死檔名），但 `draw_diagnosis_sample_node` 是 factory 造出來的內層函式，照 import 反查找到的是 factory。測試另外要求呼叫的第一個引數是綁到這張表的那個參數名（位置綁定），對別的 frame 呼叫不算數。
+- **「第一步」的解讀**：`compute_baseline_metrics`、`compute_report_aggregates`、`draw_diagnosis_sample_node` 在設定關閉時直接回 stub、不碰 frame，篩月份放在那之後，是「第一件對 frame 做的事」。
+- **讀表的分群 node 另外比對 `segment_columns.json` 的指紋**（只比四個鍵）。定案與理由寫在 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 6 的 #352 更正。
+- **`month_plans` 只在標準／`--compare` 模式傳。** `--compare-only` 沒有 `prepare_eval_data` 可以拉回來，不傳；`evaluation.snap_date` 沒設定時也不傳，讓 `prepare_eval_data` 報它原本的錯。
+- **`--compare-only` 缺 `segment_columns.json` 時在 CLI 入口擋下**（`__main__.py::_compare_only_segment_columns_error`），訊息寫出檔案路徑與該先跑的指令；partition 缺席仍由 B4 閘門擋。本份原文沒有這一條，是票面〈`segment_columns.json` 與分區同生同滅〉的實作。
+- `RESUME_CONTRACTS` 兩種模式各加一筆 `compute_metrics`：只補跑 `draw_diagnosis_sample_node`（監控另加 `no_diagnosis_pages`），`prepare_eval_data` 不在裡面。
+
 ---
 
 ## 決定 2：`evaluation_metrics` 與 `baseline_metrics` 落地成 JSON，接續合約跟著改寫
